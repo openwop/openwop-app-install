@@ -32,6 +32,12 @@ const CLASSIFICATION: ReadonlyArray<readonly [string, ToolCapabilityDescriptor]>
   ['core.openwop.a2a', { safetyTier: 'write', egress: 'host-mediated' }],
   // External tool servers — conservatively a write that may egress off-host.
   ['core.openwop.mcp', { safetyTier: 'write', egress: 'host-mediated' }],
+  // ADR 0834 D7 — the FIRST agent tool id in this table. Every row above is a NODE id no
+  // agent tool can carry, so the safe-mode egress CLASS gate guarded an empty population
+  // on every agent lane and its witness could not fail. This tool POSTs model-supplied
+  // records to a peer host. The classes equal the treat-as-risky fallback it already got,
+  // so no tenant rule loses coverage (under `skip` it now gains it).
+  ['openwop:destination-sync.run', { safetyTier: 'write', egress: 'host-mediated' }],
 ];
 
 /** Resolve a tool name to its capability descriptor, or null when unclassified. */

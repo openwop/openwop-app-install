@@ -30,7 +30,7 @@ import {
   SeparationOfDutiesError,
 } from './communityService.js';
 
-export const KICKTODO_COMMUNITY_PREFIX = '/v1/host/openwop-app/kicktodo/community';
+export const KICKTODO_COMMUNITY_PREFIX = '/host/openwop-app/kicktodo/community';
 
 type Handler = (req: Request, res: Response) => Promise<void>;
 

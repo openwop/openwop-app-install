@@ -17,6 +17,7 @@ export const KICKTODO_PROPOSALS_TOOL_ID = 'openwop:kicktodo.proposals';
 export function registerKicktodoAccountabilityAgentTools(): void {
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: KICKTODO_CIRCLES_TOOL_ID,
       description:
@@ -45,6 +46,7 @@ export function registerKicktodoAccountabilityAgentTools(): void {
   // a human principal. Read-only.
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: KICKTODO_PROPOSALS_TOOL_ID,
       description:

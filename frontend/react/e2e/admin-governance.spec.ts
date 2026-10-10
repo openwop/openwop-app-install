@@ -25,6 +25,11 @@ test.describe('admin shell governance matrix', () => {
       { path: '/workforces/e2e-missing/migrate', current: 1 },
       { path: '/cms/p/e2e-org/e2e-page', current: 1 },
     ];
+    // The per-route wait below is 60 s, inside the DEFAULT 30 s test budget. That
+    // made the per-route allowance unreachable: one cold Vite compile of a lazy
+    // admin chunk consumed the whole test. It went red on the ADR 0863 Linux pilot's slower
+    // cores (ADR 0863). Budget the test for the waits it declares.
+    test.setTimeout(routes.length * 60_000 + 30_000);
     for (const route of routes) {
       await page.goto(route.path);
       await expect(page.locator('.admin-shell')).toBeVisible({ timeout: 60_000 });

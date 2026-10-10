@@ -3,8 +3,8 @@
 Fast single-shot text classifier. Caller supplies labels + multi-label flag; agent picks the best-fit label(s) with confidence + rationale.
 
 | Pack name | `core.openwop.agents.classifier` |
-| Version | `1.0.0` |
-| Engine | OpenWOP `>=1.1.0 <2.0.0` |
+| Version | `1.0.1` |
+| Engine | OpenWOP `>=1.1.0 <3.0.0` |
 | Runtime | `language: remote` |
 | Agents | 1 |
 | Required host capabilities | `aiProviders` |

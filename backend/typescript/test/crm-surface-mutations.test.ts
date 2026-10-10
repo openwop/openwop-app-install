@@ -7,6 +7,12 @@
  * surface re-verifies before every mutation, mirroring `routes.ts`), tombstone
  * refusal, ADR 0162 deterministic-id idempotency, and the moveDealStage
  * won/lost verb derivation the org route also applies.
+ *
+ * SABOTAGE (wave-4 grade-tests probes, each red): drop the tenant or the
+ * tombstone half of `loadOwnedContact`; drop the same-tenant short-circuit in
+ * `createContact`; stop deriving `won` from a "Won" stage name; stamp a Gmail
+ * activity with sync time; let a lost convert claim keep its own company; make
+ * `completeTask` a no-op.
  */
 
 import http from 'node:http';
@@ -16,7 +22,7 @@ import { buildHostSurfaceBundle } from '../src/host/inMemorySurfaces.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { createContact, tombstoneContact, __resetCrmStore } from '../src/features/crm/contactsService.js';
-import { getOrCreateDefaultPipeline, listCompanies, listActivities, __resetCrmEntities } from '../src/features/crm/crmEntitiesService.js';
+import { getOrCreateDefaultPipeline, getTask, listCompanies, listActivities, __resetCrmEntities } from '../src/features/crm/crmEntitiesService.js';
 import { convertContact, __resetConvertClaims } from '../src/features/crm/convertService.js';
 
 let server: http.Server;
@@ -95,9 +101,14 @@ describe('ctx.features.crm mutation surface', () => {
     expect(task.task.taskId.startsWith('task:')).toBe(true);
     const done = (await surface.completeTask!({ orgId, taskId: task.task.taskId })) as { task: { status: string } };
     expect(done.task.status).toBe('done');
+    // Persisted, not just echoed back by the verb.
+    expect((await getTask(tenantId, orgId, task.task.taskId))?.status).toBe('done');
     const activity = (await surface.logActivity!({ orgId, kind: 'note', body: 'Left a voicemail' })) as { activity: { activityId: string; kind: string } };
     expect(activity.activity.activityId.startsWith('act:')).toBe(true);
     expect(activity.activity.kind).toBe('note');
+    // "appends" — the row is in the org's timeline.
+    const timeline = await listActivities(tenantId, orgId);
+    expect(timeline.find((a) => a.activityId === activity.activity.activityId)).toMatchObject({ kind: 'note', body: 'Left a voicemail' });
   });
 
   it('logGmailActivity back-dates to the email time, persists threadId, and refuses a phantom contact (ADR 0252 §1/§6)', async () => {

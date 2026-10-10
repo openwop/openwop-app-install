@@ -1,6 +1,6 @@
 # ADR 0567 — CRM activity-based-selling loop: per-deal next task, rotting markers, stage totals
 
-Status: Proposed
+Status: implemented by ADR 0837 D8 (2026-10-06, feature loop 2026-10 row 23)
 Date: 2026-08-14
 Feature: crm (extends ADR 0008 + the console R2 pass — no new toggle)
 Origin: UX_UPGRADE-crm-console R2 deferrals CRM-R2-3/4/10, named there as
@@ -79,6 +79,15 @@ Host work only — projection fields on host-extension routes. No RFC.
 
 | Phase | Scope | Status |
 |---|---|---|
-| 1 | server rollup (`nextTask` on deals list/board/detail) + tests | not started |
-| 2 | board markers + stage totals (sums shape) + a11y + i18n ×4 | not started |
-| 3 | the inline schedule-next offer | not started |
+| 1 | server rollup (`nextTask` on deals list/board/detail) + tests | done — ADR 0837 D8 (`features/crm/nextTask.ts`, `test/adr0837-crm-next-task.test.ts`) |
+| 2 | board markers + stage totals (sums shape) + a11y + i18n ×4 | markers done (ADR 0837 D8, `NextActivity.tsx`); stage totals PRE-EXISTED (see correction) |
+| 3 | the inline schedule-next offer | done — ADR 0837 D8 (`DealDetailPage.tsx` `DealTasksSection`) |
+
+> **CORRECTED 2026-10-06 (ADR 0837).** Three premises in this ADR did not hold:
+> - **§3, stage totals, already shipped.** They are the board column footer's
+>   currency-grouped sums (`DealsTab.tsx` `columnFooter`, `dealMoney.ts`), so
+>   nothing was built for §3.
+> - **`Task.dueAt` does not exist.** The field is `dueDate`, a free string of up
+>   to 40 characters. The rollup counts it as dated only when it starts with
+>   `YYYY-MM-DD`.
+> - **The marker reads "Overdue", not "rotting".** The plain word is clearer.

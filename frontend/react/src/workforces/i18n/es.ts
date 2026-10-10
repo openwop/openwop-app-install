@@ -72,6 +72,7 @@ export const messages = {
   proveFirstMid: ', primero tiene que demostrar su valía',
   proveFirstOverride: '— una persona aún interviene en',
   proveFirstOverrideTail: 'de las ejecuciones',
+  viewerReadOnly: 'Puede ver esta fuerza laboral. Cambiar su migración o su transición requiere acceso de edición a este espacio de trabajo; pídalo a un administrador.',
   showcaseReadOnly:
     'Datos de muestra: aquí los controles de autonomía son de solo lectura. Ejecute su propia plantilla digital para gestionarla.',
   advanceTo: 'Avanzar a {{label}} →',

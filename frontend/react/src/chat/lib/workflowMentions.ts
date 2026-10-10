@@ -30,6 +30,7 @@
 
 import i18n from '../../i18n/index.js';
 import { listSavedWorkflows } from '../../builder/persistence/localStore.js';
+import { workflowToolName } from '../../builder/persistence/workflowId.js';
 import { listWorkflowSummaries } from '../../workflows/workflowsClient.js';
 import { demoModeCached } from '../../client/demoMode.js';
 
@@ -83,9 +84,49 @@ export async function refreshWorkflowMentionCache(): Promise<void> {
   try {
     const rows = await listWorkflowSummaries();
     backendWorkflowCache = rows.map((r) => ({ id: r.workflowId, name: r.name, nodeCount: r.nodeCount, ...(r.transient ? { transient: true } : {}) }));
+    lastLoadFailed = false;
   } catch {
-    /* leave the cache untouched — backend down ⇒ demo + localStorage only */
+    // Keep the cache (stale-but-usable beats empty) — but RECORD the failure, so
+    // the picker can say "couldn't load" instead of "no match" (ADR 0764 D4 /
+    // CHATWF-4: the two used to render identically).
+    lastLoadFailed = true;
   }
+}
+
+let lastLoadFailed = false;
+
+/** True when the most recent workflow-list fetch failed (the picker is showing
+ *  cached / demo / local entries only). */
+export function workflowMentionLoadFailed(): boolean {
+  return lastLoadFailed;
+}
+
+/** True when the last successful ownership-index fetch listed `workflowId` —
+ *  i.e. the server, not just this browser, knows the workflow. */
+export function backendListsWorkflow(workflowId: string): boolean {
+  return backendWorkflowCache.some((w) => w.id === workflowId);
+}
+
+/** The step count the ownership index reported for `workflowId`, when it lists it. */
+export function backendNodeCount(workflowId: string): number | undefined {
+  const n = backendWorkflowCache.find((w) => w.id === workflowId)?.nodeCount;
+  return typeof n === 'number' && n > 0 ? n : undefined;
+}
+
+/**
+ * True when `workflowId` is a workflow the caller OWNS — one the server's
+ * ownership index lists, or a draft saved in this browser.
+ *
+ * This replaces three `workflowId.startsWith('wf_')` tests. A workflow id is
+ * OPAQUE: only a blank workflow minted in this browser is spelled `wf_…`; a
+ * seeded starter is `wf.seed.…`, a template copy `wf.<chain>.<id>`, a fork
+ * `wf.fork.…`. Reading the spelling treated every server-minted workflow as
+ * "not a builder workflow", so those runs lost their step count, their step
+ * names and the "Open in builder" link (seen live 2026-10-01).
+ */
+export function isOwnedWorkflow(workflowId: string): boolean {
+  if (!workflowId) return false;
+  return backendListsWorkflow(workflowId) || listSavedWorkflows().some((w) => w.id === workflowId);
 }
 
 export function listWorkflowMentions(): WorkflowMentionEntry[] {
@@ -110,7 +151,7 @@ export function listWorkflowMentions(): WorkflowMentionEntry[] {
       displayName,
       slug,
       description,
-      toolName: sanitizeToolName(workflowId),
+      toolName: workflowToolName(workflowId),
       workflowId,
       ...(draft ? { draft: true } : {}),
     });
@@ -179,15 +220,19 @@ export function detectMention(text: string): MentionMatch | null {
  *  (built-in commands take precedence so a workflow can never shadow
  *  `/clear`), then this; otherwise the message routes through the
  *  normal LLM send. */
-export function detectWorkflowSlashMention(text: string): MentionMatch | null {
+export function detectWorkflowSlashMention(text: string): (MentionMatch & { agentSlug: string | null }) | null {
   const stripped = text.trim();
-  const match = /^\/([a-z0-9][a-z0-9-]*)(?:\s+(.*))?$/i.exec(stripped);
+  // ADR 0764 D4 (CHATWF-2) — accept the SAME optional `@agent ` hand-off prefix
+  // `detectSlashTrigger` opens the picker on and the picker preserves on apply.
+  // Before, the picker built `@devon /summarize x` and this matched only `^/`, so
+  // the turn went to the model as plain text and the picked workflow never ran.
+  const match = /^(?:@([a-z0-9][a-z0-9-]*)\s+)?\/([a-z0-9][a-z0-9-]*)(?:\s+(.*))?$/i.exec(stripped);
   if (!match) return null;
-  const slug = match[1]?.toLowerCase() ?? '';
+  const slug = match[2]?.toLowerCase() ?? '';
   const entry = listWorkflowMentions().find((e) => e.slug === slug);
   if (!entry) return null;
-  const trailingRaw = (match[2] ?? '').trim();
-  return { entry, trailing: trailingRaw.length > 0 ? trailingRaw : null };
+  const trailingRaw = (match[3] ?? '').trim();
+  return { entry, trailing: trailingRaw.length > 0 ? trailingRaw : null, agentSlug: match[1]?.toLowerCase() ?? null };
 }
 
 /** Where the `/` command+workflow picker should trigger, given the raw composer
@@ -216,15 +261,19 @@ export function detectBareMention(text: string): WorkflowMentionEntry | null {
   return m && m.trailing === null ? m.entry : null;
 }
 
-/** Case-insensitive substring filter on `displayName`. Returns input
- *  order so the sample sources stay pinned to the top. */
+/** Case-insensitive substring filter on `displayName` OR `slug`. Returns
+ *  input order so the sample sources stay pinned to the top.
+ *
+ *  ADR 0770 D8 — the picker SHOWS the slug in every row, but only the display
+ *  name was matched, so typing what you could see (`daily-r` for "Daily
+ *  report") emptied the list. */
 export function filterMentions(
   entries: ReadonlyArray<WorkflowMentionEntry>,
   query: string,
 ): WorkflowMentionEntry[] {
   const q = query.trim().toLowerCase();
   if (!q) return [...entries];
-  return entries.filter((e) => e.displayName.toLowerCase().includes(q));
+  return entries.filter((e) => e.displayName.toLowerCase().includes(q) || e.slug.includes(q));
 }
 
 function slugify(name: string): string {
@@ -235,8 +284,3 @@ function slugify(name: string): string {
   return s || 'workflow';
 }
 
-function sanitizeToolName(id: string): string {
-  // Mirrors availableTools.sanitizeToolName so the slug-inserted
-  // mention text aligns with the tool name passed to the LLM.
-  return `wf_${id.replace(/[^a-zA-Z0-9_-]/g, '_')}`.slice(0, 64);
-}

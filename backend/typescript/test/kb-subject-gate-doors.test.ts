@@ -30,6 +30,10 @@
  *     (`kb-lifecycle-silent-lanes.test.ts` carries the runner leg — it needs the
  *     fetch mocks that file already sets up).
  * Sabotage: resolve any one door `PREAUTHORIZED_CALLER` again ⇒ its leg is red.
+ *
+ * SABOTAGE-WITNESSED (/grade-tests wave 6): every door above, the eraser listing, the
+ * dispatch call site + mechanism, the profile-PUT 400 arm and its keep-the-binding
+ * merge, and the memory-writable reader were each broken once and went red.
  */
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -43,7 +47,6 @@ import { eraseSubject } from '../src/host/subjectErasure.js';
 import { getAgentProfile, upsertAgentProfile } from '../src/host/agentProfileService.js';
 import { createRosterEntry } from '../src/host/rosterService.js';
 import { buildAgentKnowledgeSurface } from '../src/features/agent-knowledge/surface.js';
-import type { BundleScope } from '../src/host/inMemorySurfaces.js';
 import { addProjectMember, createProject, setProjectVisibility, projectSubject } from '../src/features/projects/projectsService.js';
 import { createCollection, eraseSubjectKb, getCollection, getDocument, ingestDocument, listCollections } from '../src/features/kb/kbService.js';
 import { bindCollection as bindToAgent, getAgentKnowledge, retrieveForAgent } from '../src/features/agent-knowledge/service.js';
@@ -55,10 +58,13 @@ let BASE = '';
 let server: http.Server;
 let n = 0;
 
-interface Res<T = Record<string, any>> { status: number; body: T }
+/** The response fields this file reads — typed, so no read is an untyped `any`. */
+interface ApiError { requiredScope?: string; field?: string }
+interface ApiBody { user?: { userId: string }; orgId?: string; collections?: unknown[]; details?: ApiError; error?: { details?: ApiError } }
+interface Res<T = ApiBody | undefined> { status: number; body: T }
 function client() {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res<any>> => {
+  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
@@ -68,7 +74,7 @@ function client() {
     const single = res.headers.get('set-cookie');
     const setCookies: string[] = typeof h.getSetCookie === 'function' ? h.getSetCookie() : single ? [single] : [];
     for (const sc of setCookies) { const m = /(__session=[^;]+)/.exec(sc); if (m) cookie = m[1]!; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    return { status: res.status, body: res.status === 204 ? undefined : ((await res.json().catch(() => undefined)) as ApiBody | undefined) };
   };
   return { post: (p: string, b?: unknown) => call('POST', p, b), put: (p: string, b?: unknown) => call('PUT', p, b) };
 }
@@ -94,21 +100,21 @@ afterAll(async () => {
 async function boundFixture(): Promise<{ tenantId: string; orgId: string; collectionId: string; member: string; intruder: string; projectId: string; ownerClient: Client; intruderClient: Client }> {
   const owner = client();
   const tenantId = `org:kb-doors-${Date.now()}-${n++}`;
-  const login = await owner.post('/v1/host/openwop-app/test/login', { email: `member-${n++}@acme.test`, tenantId });
+  const login = await owner.post('/host/openwop-app/test/login', { email: `member-${n++}@acme.test`, tenantId });
   expect(login.status, JSON.stringify(login.body)).toBe(201);
-  const member = login.body.user.userId as string;
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const member = login.body?.user?.userId as string;
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
-  const orgId = org.body.orgId as string;
+  const orgId = org.body?.orgId as string;
   const other = client();
-  const login2 = await other.post('/v1/host/openwop-app/test/login', { email: `intruder-${n++}@acme.test`, tenantId });
+  const login2 = await other.post('/host/openwop-app/test/login', { email: `intruder-${n++}@acme.test`, tenantId });
   expect(login2.status).toBe(201);
-  const intruder = login2.body.user.userId as string;
+  const intruder = login2.body?.user?.userId as string;
   // A VIEWER, deliberately: ADR 0054 D5 makes WRITE org-scoped authority ("membership
   // never grants write" — and `workspace:write` in the org READS every project in it,
   // private ones included). Only READ has the membership dimension the gate enforces,
   // so the principal KBC-1 refuses is an org reader who is not a project member.
-  const add = await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'Intruder', subject: intruder, roles: ['viewer'] });
+  const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'Intruder', subject: intruder, roles: ['viewer'] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
 
   const project = await createProject(tenantId, orgId, { name: 'Private project' });
@@ -161,14 +167,14 @@ describe('BLOCKER 2 — the doors that turn a user-supplied collectionId into a 
   it('agent-knowledge: the intruder cannot bind a bound corpus (404); the member can; the HTTP reads re-resolve the READER', async () => {
     const { tenantId, collectionId, member, intruder } = await boundFixture();
     const agentId = `agent-doors-${n++}`;
-    await upsertAgentProfile(tenantId, agentId, { roleKey: 'kb-agent', autonomy: { level: 'review', specLevel: 'recommend' }, capabilities: ['knowledge'] } as never);
+    await upsertAgentProfile(tenantId, agentId, { roleKey: 'kb-agent', autonomy: { level: 'review', specLevel: 'recommend' }, capabilities: ['knowledge'] });
 
-    await expect(bindToAgent(tenantId, agentId, collectionId, { subject: intruder }), 'the bind door must not ask less than the read door').rejects.toMatchObject({ httpStatus: 404 });
+    await expect(bindToAgent(tenantId, agentId, collectionId, { subject: intruder }, 'preauthorized'), 'the bind door must not ask less than the read door').rejects.toMatchObject({ httpStatus: 404 });
     const afterRefusal = await getAgentKnowledge(tenantId, agentId, PREAUTHORIZED_CALLER);
     expect(afterRefusal.collections, 'a refused bind must leave NO grant behind').toEqual([]);
 
     // Positive control — the refusal is membership-based, not "binding is broken".
-    await bindToAgent(tenantId, agentId, collectionId, { subject: member });
+    await bindToAgent(tenantId, agentId, collectionId, { subject: member }, 'preauthorized');
     const memberView = await getAgentKnowledge(tenantId, agentId, { subject: member });
     expect(memberView.collections.flatMap((c) => c.documents.map((d) => d.title))).toEqual(['Secret roadmap']);
     const memberRetrieve = await retrieveForAgent(tenantId, agentId, 'acme merger codename', { subject: member });
@@ -277,32 +283,44 @@ describe('BLOCKER 2 — the doors that turn a user-supplied collectionId into a 
 
 describe('ADR 0643 R4 review — the SEVENTH bind door and the two missed reads', () => {
   it('Blocker 1: PUT /agents/:id/profile with knowledge.collectionIds is REFUSED (400); the run/chat lane then serves nothing; a PUT without it keeps the curator\'s binding', async () => {
-    const { tenantId, collectionId, member, intruder, intruderClient, ownerClient } = await boundFixture();
+    const { tenantId, collectionId, member, intruderClient, ownerClient } = await boundFixture();
     const roster = await createRosterEntry({ tenantId, persona: 'Door probe', agentRef: { agentId: 'agent:door-probe' }, roleKey: 'kb-agent' });
     const agentId = roster.rosterId;
-    await upsertAgentProfile(tenantId, agentId, { roleKey: 'kb-agent', autonomy: { level: 'review', specLevel: 'recommend' }, capabilities: ['knowledge'] } as never);
+    await upsertAgentProfile(tenantId, agentId, { roleKey: 'kb-agent', autonomy: { level: 'review', specLevel: 'recommend' }, capabilities: ['knowledge'] });
     // The intruder is a tenant member (an org VIEWER) — exactly what `requireOwnedAgent`
     // alone admitted. The write would have bypassed `bindCollection`'s principal check
     // AND `BINDING_CAP`, and the run lane reads the binding pre-authorized.
-    const put = await intruderClient.put(`/v1/host/openwop-app/agents/${encodeURIComponent(agentId)}/profile`, { ...PROFILE_BODY, knowledge: { collectionIds: [collectionId] } });
-    expect(put.status, JSON.stringify(put.body)).toBe(400);
-    expect(put.body?.details?.field ?? put.body?.error?.details?.field).toBe('knowledge.collectionIds');
+    const put = await intruderClient.put(`/host/openwop-app/agents/${encodeURIComponent(agentId)}/profile`, { ...PROFILE_BODY, knowledge: { collectionIds: [collectionId] } });
+    // ADR 0775 D1 — the profile PUT now requires `workspace:write` FIRST, so this
+    // org VIEWER is refused (403) before the ADR 0643 collectionIds check (400)
+    // is reached. Either refusal closes the door; what this test pins is below:
+    // no grant lands and the use lanes serve nothing.
+    expect(put.status, JSON.stringify(put.body)).toBe(403);
+    expect(put.body?.details?.requiredScope ?? put.body?.error?.details?.requiredScope).toBe('workspace:write');
     expect((await getAgentProfile(tenantId, agentId))?.knowledge?.collectionIds ?? [], 'no grant landed').toEqual([]);
     // The use lanes that a laundered binding would have fed: nothing.
     const run = await retrieveForAgent(tenantId, agentId, 'acme merger codename');
     expect(run.chunks).toEqual([]);
-    const surface = buildAgentKnowledgeSurface({ tenantId, runId: 'run:door-probe' } as BundleScope);
+    const surface = buildAgentKnowledgeSurface({ tenantId, runId: 'run:door-probe' });
     const out = await surface.retrieve!({ agentId, query: 'acme merger codename' }) as { hasResults: boolean };
     expect(out.hasResults).toBe(false);
 
+    // ADR 0643 R4 — the 400 arm itself. The intruder above is stopped at ADR 0775's 403
+    // first, so this leg uses a caller who HOLDS workspace:write: even an authorized
+    // profile writer may not set `knowledge.collectionIds` here (bindings go through the
+    // curator, which authorizes each collection).
+    const own = await ownerClient.put(`/host/openwop-app/agents/${encodeURIComponent(agentId)}/profile`, { ...PROFILE_BODY, knowledge: { collectionIds: [collectionId] } });
+    expect(own.status, JSON.stringify(own.body)).toBe(400);
+    expect(own.body?.details?.field ?? own.body?.error?.details?.field).toBe('knowledge.collectionIds');
+    expect((await getAgentProfile(tenantId, agentId))?.knowledge?.collectionIds ?? [], 'the refused writer landed no grant').toEqual([]);
+
     // Corollary — the curator's binding SURVIVES an ordinary profile save that carries
     // `knowledge` without `collectionIds` (that save used to wipe the array).
-    await bindToAgent(tenantId, agentId, collectionId, { subject: member });
-    const save = await ownerClient.put(`/v1/host/openwop-app/agents/${encodeURIComponent(agentId)}/profile`, { ...PROFILE_BODY, knowledge: { memoryWritable: true } });
+    await bindToAgent(tenantId, agentId, collectionId, { subject: member }, 'preauthorized');
+    const save = await ownerClient.put(`/host/openwop-app/agents/${encodeURIComponent(agentId)}/profile`, { ...PROFILE_BODY, knowledge: { memoryWritable: true } });
     expect(save.status, JSON.stringify(save.body)).toBe(200);
     expect((await getAgentProfile(tenantId, agentId))?.knowledge?.collectionIds).toEqual([collectionId]);
     expect((await getAgentProfile(tenantId, agentId))?.knowledge?.memoryWritable).toBe(true);
-    void intruder;
   });
 
   it('Blocker 2: PUT …/memory-writable and POST …/notes re-resolve the READER — a writer in org A who is a viewer in org B sees none of org B\'s private titles', async () => {
@@ -312,21 +330,21 @@ describe('ADR 0643 R4 review — the SEVENTH bind door and the two missed reads'
     // they are a viewer. This two-org shape is also what exposed the routes' local
     // `requireTenantScope` as a FIRST-MATCH rather than a union (fixed in the same fold):
     // the leg was ~50% 403 before, deterministically 200 now.
-    const orgA = await ownerClient.post('/v1/host/openwop-app/orgs', { name: 'Other Org' });
+    const orgA = await ownerClient.post('/host/openwop-app/orgs', { name: 'Other Org' });
     expect(orgA.status, JSON.stringify(orgA.body)).toBe(201);
-    const addA = await ownerClient.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgA.body.orgId as string)}/members`, { displayName: 'Intruder', subject: intruder, roles: ['editor'] });
+    const addA = await ownerClient.post(`/host/openwop-app/orgs/${encodeURIComponent(orgA.body?.orgId as string)}/members`, { displayName: 'Intruder', subject: intruder, roles: ['editor'] });
     expect(addA.status, JSON.stringify(addA.body)).toBe(201);
     const roster = await createRosterEntry({ tenantId, persona: 'Read probe', agentRef: { agentId: 'agent:read-probe' }, roleKey: 'kb-agent' });
     const agentId = roster.rosterId;
-    await upsertAgentProfile(tenantId, agentId, { roleKey: 'kb-agent', autonomy: { level: 'review', specLevel: 'recommend' }, capabilities: ['knowledge'] } as never);
-    await bindToAgent(tenantId, agentId, collectionId, { subject: member });
+    await upsertAgentProfile(tenantId, agentId, { roleKey: 'kb-agent', autonomy: { level: 'review', specLevel: 'recommend' }, capabilities: ['knowledge'] });
+    await bindToAgent(tenantId, agentId, collectionId, { subject: member }, 'preauthorized');
     expect((await getAgentKnowledge(tenantId, agentId, { subject: member })).collections.flatMap((c) => c.documents.map((d) => d.title)), 'non-vacuity: the member sees the title').toEqual(['Secret roadmap']);
 
-    const mw = await intruderClient.put(`/v1/host/openwop-app/agents/${encodeURIComponent(agentId)}/knowledge/memory-writable`, { writable: true });
+    const mw = await intruderClient.put(`/host/openwop-app/agents/${encodeURIComponent(agentId)}/knowledge/memory-writable`, { writable: true });
     expect(mw.status, JSON.stringify(mw.body)).toBe(200);
     expect(JSON.stringify(mw.body), 'the response body must not carry a corpus the caller cannot read').not.toContain('Secret roadmap');
-    expect(mw.body.collections).toEqual([]);
-    const note = await intruderClient.post(`/v1/host/openwop-app/agents/${encodeURIComponent(agentId)}/knowledge/notes`, { content: 'probe note' });
+    expect(mw.body?.collections).toEqual([]);
+    const note = await intruderClient.post(`/host/openwop-app/agents/${encodeURIComponent(agentId)}/knowledge/notes`, { content: 'probe note' });
     // A 403 from the agent-policy gate is acceptable (the note lane is policy-gated); a
     // 201 must not leak. Either way the body carries no private title.
     expect([201, 403]).toContain(note.status);
@@ -352,8 +370,8 @@ describe('ADR 0664 D6 — the agent-dispatch lane re-resolves the reader', () =>
     const { tenantId, collectionId, member, intruder } = await boundFixture();
     const roster = await createRosterEntry({ tenantId, persona: 'Dispatch probe', agentRef: { agentId: 'agent:dispatch-probe' }, roleKey: 'kb-agent' });
     const agentId = roster.rosterId;
-    await upsertAgentProfile(tenantId, agentId, { roleKey: 'kb-agent', autonomy: { level: 'review', specLevel: 'recommend' }, capabilities: ['knowledge'] } as never);
-    await bindToAgent(tenantId, agentId, collectionId, { subject: member });
+    await upsertAgentProfile(tenantId, agentId, { roleKey: 'kb-agent', autonomy: { level: 'review', specLevel: 'recommend' }, capabilities: ['knowledge'] });
+    await bindToAgent(tenantId, agentId, collectionId, { subject: member }, 'preauthorized');
 
     const { resolveAgentKnowledgeRetrieve } = await import('../src/host/agentKnowledgeComposition.js');
     const { createAgentMemoryPort } = await import('../src/host/agentMemoryAdapter.js');

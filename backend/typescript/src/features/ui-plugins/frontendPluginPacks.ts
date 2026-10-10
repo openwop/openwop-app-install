@@ -43,6 +43,8 @@ import {
   uiPluginsCapability,
   type HostUiPluginMethod,
 } from '../../host/uiPluginRpc.js';
+import { VENDOR_ROOT } from '../../middleware/protocolVersion.js';
+import { operatorTrustedPacks } from './operatorTrustedPacks.js';
 
 const log = createLogger('feature.ui-plugins.packs');
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -86,6 +88,19 @@ export interface ServedPlugin {
   hostApi: HostUiPluginMethod[];
   /** Host-relative path the FE loader GETs the entry bytes from. */
   entryPath: string;
+  /** ADR 0840 (RFC 0238 §B) — the frame document the SPA mounts by `src`. The FE
+   *  never builds a plugin path itself; it reads this. */
+  framePath: string;
+  /** ADR 0840 (RFC 0238 §C) — the per-plugin `ui-plugin/1` dispatch. */
+  rpcPath: string;
+  /** The plugin's declared `connectSrc` (RFC 0238 §B.4: the frame's only egress). */
+  connectSrc: string[];
+}
+
+/** ADR 0840 — the two RFC 0238 paths for one plugin (unversioned, as the manifest spells them). */
+export function uiPluginOperationPaths(packName: string, pluginId: string): { framePath: string; rpcPath: string } {
+  const base = `/host/ui-plugins/${encodeURIComponent(packName)}/${encodeURIComponent(pluginId)}`;
+  return { framePath: `${base}/frame`, rpcPath: `${base}/rpc` };
 }
 
 // ── schema validator (lazy singleton, mirrors workflowChainPackLoader) ──
@@ -109,13 +124,47 @@ export function hostIsolation(): typeof UI_PLUGIN_ISOLATION {
 const HOST_SURFACES = new Set(uiPluginsCapability().surfaces);
 const HOST_HOST_API = new Set(uiPluginsCapability().hostApi);
 
+/** Project one manifest's plugins to what the host serves (the degradation filter). */
+function projectServed(manifest: FrontendPluginManifest): ServedPlugin[] {
+  const served: ServedPlugin[] = [];
+  for (const p of manifest.uiPlugins) {
+    // Degradation (RFC 0117 §Degradation): a surface the host doesn't advertise,
+    // or a hostApi method it doesn't recognize, is filtered — installable-but-inert,
+    // never an error. hostApi is intersected to the host set = the closed allowlist.
+    if (!HOST_SURFACES.has(p.surface)) continue;
+    const hostApi = p.hostApi.filter((m) => HOST_HOST_API.has(m));
+    served.push({
+      packName: manifest.name,
+      packVersion: manifest.version,
+      pluginId: p.pluginId,
+      surface: p.surface,
+      hostApi,
+      // RFC 0130: the canvas-preview binding key — without it on the wire the
+      // FE discovery→mount match can never fire (code-review C1).
+      ...(Array.isArray(p.canvasTypes) && p.canvasTypes.length ? { canvasTypes: p.canvasTypes } : {}),
+      entryPath: `${VENDOR_ROOT}/ui-plugin/packs/${encodeURIComponent(manifest.name)}/plugins/${encodeURIComponent(p.pluginId)}/entry`,
+      ...uiPluginOperationPaths(manifest.name, p.pluginId),
+      connectSrc: Array.isArray(p.connectSrc) ? [...p.connectSrc] : [],
+    });
+  }
+  return served;
+}
+
+/** ADR 0840 D5 — operator-trusted packs not shadowed by a vendored pack of the same name. */
+function trustedOperatorPacks(vendoredNames: ReadonlySet<string>) {
+  return operatorTrustedPacks((m) => validator()(m) === true).filter((p) => !vendoredNames.has(p.manifest.name));
+}
+
 /** Scan + validate every vendored `kind:"frontend-plugin"` pack and project each
  *  plugin to the host-honored `ServedPlugin` shape. Packs that fail schema
  *  validation are skipped with a WARN (never crash the boot / the endpoint). */
 export function listFrontendPluginPacks(): ServedPlugin[] {
-  if (!existsSync(PACKS_DIR)) return [];
   const validate = validator();
   const served: ServedPlugin[] = [];
+  if (!existsSync(PACKS_DIR)) {
+    for (const op of trustedOperatorPacks(new Set())) served.push(...projectServed(op.manifest));
+    return served;
+  }
 
   for (const dirent of readdirSync(PACKS_DIR, { withFileTypes: true })) {
     if (!dirent.isDirectory()) continue;
@@ -138,26 +187,17 @@ export function listFrontendPluginPacks(): ServedPlugin[] {
       continue;
     }
 
-    for (const p of manifest.uiPlugins) {
-      // Degradation (RFC 0117 §Degradation): a surface the host doesn't advertise,
-      // or a hostApi method it doesn't recognize, is filtered — installable-but-inert,
-      // never an error. hostApi is intersected to the host set = the closed allowlist.
-      if (!HOST_SURFACES.has(p.surface)) continue;
-      const hostApi = p.hostApi.filter((m) => HOST_HOST_API.has(m));
-      served.push({
-        packName: manifest.name,
-        packVersion: manifest.version,
-        pluginId: p.pluginId,
-        surface: p.surface,
-        hostApi,
-        // RFC 0130: the canvas-preview binding key — without it on the wire the
-        // FE discovery→mount match can never fire (code-review C1).
-        ...(Array.isArray(p.canvasTypes) && p.canvasTypes.length ? { canvasTypes: p.canvasTypes } : {}),
-        entryPath: `/v1/host/openwop-app/ui-plugin/packs/${encodeURIComponent(manifest.name)}/plugins/${encodeURIComponent(p.pluginId)}/entry`,
-      });
-    }
+    served.push(...projectServed(manifest));
   }
+  // ADR 0840 D5 — plus packs the operator explicitly trusted (off unless configured).
+  const vendored = new Set(served.map((s) => s.packName));
+  for (const op of trustedOperatorPacks(vendored)) served.push(...projectServed(op.manifest));
   return served;
+}
+
+/** ADR 0840 D5 — the tenant an operator-trusted pack was installed for, or null. */
+export function operatorTrustTenant(packName: string): string | null {
+  return operatorTrustedPacks((m) => validator()(m) === true).find((p) => p.manifest.name === packName)?.tenant ?? null;
 }
 
 export interface PluginEntry {
@@ -253,6 +293,14 @@ export function resolveTrustCandidate(packName: string, pluginId: string, served
 export function getPluginEntry(packName: string, pluginId: string): PluginEntry | null {
   const served = listFrontendPluginPacks().find((s) => s.packName === packName && s.pluginId === pluginId);
   if (!served) return null;
+
+  // ADR 0840 D5 — an operator-trusted pack serves the exact bytes it was verified on.
+  const vendoredDir = resolvePackDirByManifestName(packName);
+  if (!vendoredDir) {
+    const op = operatorTrustedPacks((m) => validator()(m) === true).find((p) => p.manifest.name === packName);
+    const bytes = op?.entries.get(pluginId);
+    return bytes ? { bytes, contentType: 'text/html; charset=utf-8' } : null;
+  }
 
   // Locate the pack by its manifest `name`, NOT by assuming the on-disk directory is
   // named after it. `listFrontendPluginPacks` scans by DIRECTORY name but serves each pack

@@ -20,7 +20,10 @@
  * (feature.documents.nodes). Bytes are durable in `documents:version.content`.
  */
 
+import { resolveCanvasTypeAccess } from '../../host/canvasTypeOwnership.js';
+import type { ToggleSubject } from '../../host/featureToggles/types.js';
 import { randomUUID } from 'node:crypto';
+import { insertOwnedOrConflict } from '../../host/ownedInsert.js';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { OpenwopError } from '../../types.js';
 import { resolveSubjectOrg } from '../../host/subjectOrgScope.js';
@@ -35,7 +38,8 @@ import { createAsset } from '../media/mediaService.js';
 import { assertNoRetentionHold } from '../../host/retentionHold.js';
 import { createLogger } from '../../observability/logger.js';
 import { isRegisteredArtifactType } from '../../host/artifactTypes.js';
-import { getCanvasForTenant } from '../../host/canvasSurface.js';
+import { getCanvasForCaller } from '../../host/canvasSurface.js';
+import { resolveSubjectAccess, levelSatisfies } from '../../host/subjectAccess.js';
 
 const log = createLogger('features.documents');
 
@@ -77,6 +81,9 @@ export interface Provenance {
   nodeId?: string;
   templateId?: string;
   templateVersion?: number;
+  /** ADR 0853 D2 — where a recorded decision was made (a message, an approval,
+   *  a meeting, a drift finding), so the record links back to it. */
+  source?: { kind: string; ref: string; link?: string };
 }
 
 export interface DocumentRecord {
@@ -91,6 +98,12 @@ export interface DocumentRecord {
   status: DocStatus;
   /** Deterministic id of the current (latest) version, or undefined before any. */
   currentVersionId?: string;
+  /** ADR 0838 D2 — the version an approver published. The public share serves
+   *  THIS version, never `currentVersionId`, so a version written after approval
+   *  stays private until someone with `host:members:manage` approves again.
+   *  Set when status moves to approved/final; cleared when it leaves them.
+   *  Absent on rows approved before ADR 0838 (see `publicVersionIdOf`). */
+  approvedVersionId?: string;
   templateId?: string;
   /** ADR 0350 Phase 3 — set once this markdown doc has been promoted to a rich
    *  `canvas.document`. Makes promotion one-way + idempotent (re-promote opens
@@ -176,6 +189,45 @@ const MAX = {
 } as const;
 
 const docs = new DurableCollection<DocumentRecord>('documents:doc', (d) => d.documentId);
+
+/** ADR 0838 A2 — test seam: runs between a document writer's read and its swap,
+ *  so a witness can interleave a second writer deterministically (the in-memory
+ *  store serialises `Promise.all`, which proves nothing). */
+let beforeDocSwapHook: ((documentId: string) => Promise<void>) | undefined;
+export function __setBeforeDocSwapHook(hook: ((documentId: string) => Promise<void>) | undefined): void {
+  beforeDocSwapHook = hook;
+}
+
+/**
+ * ADR 0838 A2 — the ONE way to change an existing `documents:doc` row. A
+ * compare-and-swap retry loop over the FRESH row: `fn` sees the stored row and
+ * returns the next one (or `null` to leave it). Every writer after the insert
+ * goes through here — PATCH, the version pointer, the canvas-ref cascade and
+ * the subject eraser — so none can land a stale row over another's change.
+ * `fn` may throw to refuse; it is re-run on every retry, so it must be pure
+ * over its input. Tenant/org scoping is the caller's (it has the row).
+ */
+export async function mutateDocument(
+  documentId: string,
+  fn: (fresh: DocumentRecord) => DocumentRecord | null | Promise<DocumentRecord | null>,
+): Promise<DocumentRecord | null> {
+  for (let attempt = 0; attempt < 16; attempt++) {
+    const fresh = await docs.get(documentId);
+    if (!fresh) return null;
+    const next = await fn(fresh);
+    if (!next) return fresh;
+    if (beforeDocSwapHook) await beforeDocSwapHook(documentId);
+    if (await docs.compareAndSwap(fresh, next)) return next;
+  }
+  throw new OpenwopError('conflict', 'Could not update the document (too many concurrent writes).', 409, { documentId });
+}
+
+/** Test seam — write a document row verbatim (e.g. a LEGACY approved row with
+ *  no `approvedVersionId`). */
+export async function _putDocumentForTest(d: DocumentRecord): Promise<void> {
+  await docs.put(d);
+}
+
 const versions = new DurableCollection<DocumentVersion>('documents:version', (v) => v.versionId);
 
 /** Test seam — write a version row in a LEGACY shape (e.g. a pre-WF-DOC-4 row
@@ -281,22 +333,31 @@ export async function listDocumentsForTenant(tenantId: string): Promise<Document
   return (await docs.list()).filter((d) => d.tenantId === tenantId);
 }
 
+/** ADR 0839 D2 — the documents `owner` OWNS in this tenant (exact `ownerSubject`),
+ *  for the owner's delete cascade. Tenant-filtered before the owner match. */
+export async function listDocumentsOwnedBy(tenantId: string, owner: Subject): Promise<DocumentRecord[]> {
+  return (await listDocumentsForTenant(tenantId)).filter((d) => d.ownerSubject !== undefined && sameOwner(d.ownerSubject, owner));
+}
+
 /**
  * ADR 0350 Phase 3 follow-up (DOCS-1) — a deleted `canvas.document` must not
  * leave `promotedCanvasId` dangling on its source markdown doc. Called from the
  * feature's `onCanvasDeleted` hook (fired AFTER the canvas row is gone); clears
  * the field on every referencing doc in the tenant (set-once ⇒ at most one, but
- * sweep-all is the safe shape). Direct `docs.put` — this is a lifecycle cascade,
- * not a caller PATCH (updateDocument's set-once/ownership rules don't apply to
- * unsetting a now-dead reference). The full-collection scan matches the store's
+ * sweep-all is the safe shape). A lifecycle cascade, not a caller PATCH
+ * (updateDocument's set-once/ownership rules don't apply to unsetting a
+ * now-dead reference) — but still a CAS through `mutateDocument` (ADR 0838 A2). The full-collection scan matches the store's
  * existing access pattern (listDocuments) and canvas deletes are rare.
  */
 export async function clearPromotedCanvasRefs(tenantId: string, canvasId: string): Promise<number> {
   const referencing = (await docs.list()).filter((d) => d.tenantId === tenantId && d.promotedCanvasId === canvasId);
   for (const d of referencing) {
-    const next: DocumentRecord = { ...d, updatedAt: new Date().toISOString() };
-    delete next.promotedCanvasId;
-    await docs.put(next);
+    await mutateDocument(d.documentId, (fresh) => {
+      if (fresh.tenantId !== tenantId || fresh.promotedCanvasId !== canvasId) return null;
+      const next: DocumentRecord = { ...fresh, updatedAt: new Date().toISOString() };
+      delete next.promotedCanvasId;
+      return next;
+    });
   }
   return referencing.length;
 }
@@ -320,71 +381,117 @@ export async function createDocument(input: {
   ownerSubject?: unknown; templateId?: string; provenance: Provenance; createdBy: string; documentId?: string;
 }): Promise<DocumentRecord> {
   // Idempotent on a caller-supplied deterministic id (mirrors cmsService.createPage's
-  // pageId short-circuit) so a replay/fork of a publish node reuses the same container
+  // pageId short-circuit) so a replay (resume/crash-replay of the SAME run) of a publish node reuses the same container
   // instead of duplicating it. ABOVE the cap check so a replay never spuriously trips
   // "cap reached" while re-publishing an existing document.
-  if (input.documentId) {
-    const prior = await getDocument(input.tenantId, input.orgId, input.documentId);
-    if (prior) return prior;
-  }
-  const total = (await docs.list()).filter((d) => d.tenantId === input.tenantId && d.orgId === input.orgId).length;
-  if (total >= MAX.docsPerOrg) throw new OpenwopError('validation_error', `Document cap reached (${MAX.docsPerOrg}).`, 400, {});
-  const owner = await resolveOwnerSubject(input.ownerSubject, input.tenantId, input.orgId);
-  const now = new Date().toISOString();
-  const doc: DocumentRecord = {
-    documentId: input.documentId ?? `doc:${randomUUID()}`,
-    tenantId: input.tenantId,
-    orgId: input.orgId,
-    ...(owner ? { ownerSubject: owner } : {}),
-    kind: asKind(input.kind),
-    format: input.format === undefined ? 'markdown' : asFormat(input.format),
-    title: boundString(input.title, 'title', MAX.title),
-    status: 'draft',
-    ...(input.templateId ? { templateId: input.templateId } : {}),
-    provenance: input.provenance,
-    createdBy: input.createdBy,
-    updatedBy: input.createdBy,
-    createdAt: now,
-    updatedAt: now,
-  };
-  await docs.put(doc);
-  return doc;
+  //
+  // ADR 0838 D1 — but ONLY a row this (tenant, org) owns. `documents:doc` is keyed
+  // by id alone, so a row held by another tenant or org used to read as "absent"
+  // here and the blind put below replaced it: the victim's document moved into
+  // the caller's tenant. Live through the demo seeder's shared ids.
+  // ADR 0848 D1 — the shared rule (`host/ownedInsert.ts`), lifted out of this file so
+  // the email stores could not keep their own private (and missing) copy. `build` holds
+  // the cap and validation, so an owned replay converges ABOVE them, exactly as before.
+  const documentId = input.documentId ?? `doc:${randomUUID()}`;
+  const { row } = await insertOwnedOrConflict(docs, documentId, (d) => d.tenantId === input.tenantId && d.orgId === input.orgId, async () => {
+    const total = (await docs.list()).filter((d) => d.tenantId === input.tenantId && d.orgId === input.orgId).length;
+    if (total >= MAX.docsPerOrg) throw new OpenwopError('validation_error', `Document cap reached (${MAX.docsPerOrg}).`, 400, {});
+    const owner = await resolveOwnerSubject(input.ownerSubject, input.tenantId, input.orgId);
+    const now = new Date().toISOString();
+    const doc: DocumentRecord = {
+      documentId,
+      tenantId: input.tenantId,
+      orgId: input.orgId,
+      ...(owner ? { ownerSubject: owner } : {}),
+      kind: asKind(input.kind),
+      format: input.format === undefined ? 'markdown' : asFormat(input.format),
+      title: boundString(input.title, 'title', MAX.title),
+      status: 'draft',
+      ...(input.templateId ? { templateId: input.templateId } : {}),
+      provenance: input.provenance,
+      createdBy: input.createdBy,
+      updatedBy: input.createdBy,
+      createdAt: now,
+      updatedAt: now,
+    };
+    return doc;
+  });
+  return row;
 }
+
 
 export async function updateDocument(
   tenantId: string, orgId: string, documentId: string, actor: string,
-  patch: { title?: unknown; status?: unknown; ownerSubject?: unknown; promotedCanvasId?: unknown },
+  patch: { title?: unknown; status?: unknown; ownerSubject?: unknown; promotedCanvasId?: unknown; approvedVersionId?: unknown },
 ): Promise<DocumentRecord | null> {
   const existing = await getDocument(tenantId, orgId, documentId);
   if (!existing) return null;
-  const next: DocumentRecord = { ...existing, updatedBy: actor, updatedAt: new Date().toISOString() };
-  if (patch.title !== undefined) next.title = boundString(patch.title, 'title', MAX.title);
+  // Validate the inputs that need I/O ONCE, outside the CAS loop.
+  const title = patch.title !== undefined ? boundString(patch.title, 'title', MAX.title) : undefined;
+  const owner = patch.ownerSubject !== undefined && patch.ownerSubject !== null
+    ? await resolveOwnerSubject(patch.ownerSubject, tenantId, orgId)
+    : undefined;
+  let target: DocStatus | undefined;
   if (patch.status !== undefined) {
     if (typeof patch.status !== 'string' || !(DOC_STATUSES as readonly string[]).includes(patch.status)) {
       throw new OpenwopError('validation_error', `\`status\` MUST be one of: ${DOC_STATUSES.join(', ')}.`, 400, { field: 'status' });
     }
-    const target = patch.status as DocStatus;
-    if (!STATUS_TRANSITIONS[existing.status].includes(target)) {
-      throw new OpenwopError('conflict', `Invalid status transition: ${existing.status} → ${target}.`, 409, { from: existing.status, to: target });
+    target = patch.status as DocStatus;
+  }
+  // ADR 0838 A1 — approve what you SAW: the client names the version on screen.
+  let approvedVersionId: string | undefined;
+  if (patch.approvedVersionId !== undefined) {
+    if (!target || !(SHAREABLE_STATUSES as readonly string[]).includes(target)) {
+      throw new OpenwopError('validation_error', '`approvedVersionId` is only valid when approving (status approved or final).', 400, { field: 'approvedVersionId' });
     }
-    next.status = target;
-  }
-  if (patch.ownerSubject !== undefined) {
-    const owner = patch.ownerSubject === null ? undefined : await resolveOwnerSubject(patch.ownerSubject, tenantId, orgId);
-    if (owner) next.ownerSubject = owner; else delete next.ownerSubject;
-  }
-  if (patch.promotedCanvasId !== undefined) {
-    // Set once (ADR 0350 Phase 3). Idempotent: a repeat with the SAME id is a
-    // no-op; a DIFFERENT id after one is set is rejected (a doc promotes to ONE
-    // canvas — no silent re-point that would strand the first).
-    const id = boundString(patch.promotedCanvasId, 'promotedCanvasId', MAX.title);
-    if (existing.promotedCanvasId && existing.promotedCanvasId !== id) {
-      throw new OpenwopError('conflict', 'Document is already promoted to a rich document.', 409, { promotedCanvasId: existing.promotedCanvasId });
+    const vid = boundString(patch.approvedVersionId, 'approvedVersionId', MAX.title);
+    if (!(await getVersion(tenantId, orgId, documentId, vid))) {
+      throw new OpenwopError('validation_error', '`approvedVersionId` is not a version of this document.', 400, { field: 'approvedVersionId' });
     }
-    next.promotedCanvasId = id;
+    approvedVersionId = vid;
   }
-  await docs.put(next);
-  return next;
+  let promotedCanvasId: string | undefined;
+  if (patch.promotedCanvasId !== undefined) promotedCanvasId = boundString(patch.promotedCanvasId, 'promotedCanvasId', MAX.title);
+
+  // ADR 0838 A2 — a CAS over the fresh row: the transition check and the pin are
+  // evaluated against the row that is swapped, so a version saved while this
+  // request ran is never rolled back or pinned unseen.
+  return mutateDocument(documentId, (fresh) => {
+    if (fresh.tenantId !== tenantId || fresh.orgId !== orgId) throw new OpenwopError('not_found', 'Document not found.', 404, { documentId });
+    const next: DocumentRecord = { ...fresh, updatedBy: actor, updatedAt: new Date().toISOString() };
+    if (title !== undefined) next.title = title;
+    if (target) {
+      if (!STATUS_TRANSITIONS[fresh.status].includes(target)) {
+        throw new OpenwopError('conflict', `Invalid status transition: ${fresh.status} → ${target}.`, 409, { from: fresh.status, to: target });
+      }
+      next.status = target;
+      if ((SHAREABLE_STATUSES as readonly string[]).includes(target)) {
+        // ADR 0838 D2 — approving pins the text that publishes.
+        // No version named: a document that is ALREADY published keeps its pin
+        // (approved → final must not publish text nobody approved); a first
+        // approval pins the current version (API clients from before ADR 0838).
+        const alreadyPublished = (SHAREABLE_STATUSES as readonly string[]).includes(fresh.status) ? fresh.approvedVersionId : undefined;
+        const pin = approvedVersionId ?? alreadyPublished ?? fresh.currentVersionId;
+        if (!pin) throw new OpenwopError('conflict', 'A document needs content before it can be approved.', 409, { reason: 'no_content' });
+        next.approvedVersionId = pin;
+      } else {
+        delete next.approvedVersionId;
+      }
+    }
+    if (patch.ownerSubject !== undefined) {
+      if (owner) next.ownerSubject = owner; else delete next.ownerSubject;
+    }
+    if (promotedCanvasId !== undefined) {
+      // Set once (ADR 0350 Phase 3). Idempotent: a repeat with the SAME id is a
+      // no-op; a DIFFERENT id after one is set is rejected (a doc promotes to ONE
+      // canvas — no silent re-point that would strand the first).
+      if (fresh.promotedCanvasId && fresh.promotedCanvasId !== promotedCanvasId) {
+        throw new OpenwopError('conflict', 'Document is already promoted to a rich document.', 409, { promotedCanvasId: fresh.promotedCanvasId });
+      }
+      next.promotedCanvasId = promotedCanvasId;
+    }
+    return next;
+  });
 }
 
 export async function deleteDocument(tenantId: string, orgId: string, documentId: string): Promise<boolean> {
@@ -472,7 +579,7 @@ export async function getVersion(tenantId: string, orgId: string, documentId: st
  */
 export async function addVersion(
   tenantId: string, orgId: string, documentId: string,
-  input: { content: unknown; renderedMediaToken?: string; producedBy: Provenance['producedBy']; idempotencyKey?: string },
+  input: { content: unknown; renderedMediaToken?: string; producedBy: Provenance['producedBy']; idempotencyKey?: string; baseVersionId?: string },
 ): Promise<DocumentVersion> {
   const doc = await getDocument(tenantId, orgId, documentId);
   if (!doc) throw new OpenwopError('not_found', 'Document not found.', 404, { documentId });
@@ -486,8 +593,26 @@ export async function addVersion(
   }
   if (existing.length >= MAX.versionsPerDoc) throw new OpenwopError('validation_error', `Version cap reached (${MAX.versionsPerDoc}).`, 400, {});
 
+  // ADR 0838 D5 — a CHECKED edit: the caller names the version it read. It must
+  // be the current one, and the new version takes the very next number with NO
+  // retry, so a concurrent save makes this one fail instead of landing on top of
+  // text the caller never saw (the slot is insert-only-if-absent).
+  let checkedNum: number | undefined;
+  if (input.baseVersionId !== undefined) {
+    const base = boundString(input.baseVersionId, 'baseVersionId', MAX.title);
+    // The base must be the NEWEST version that exists, not merely the pointer:
+    // a version row is inserted before the pointer moves, so a crash (or a lost
+    // pointer race from before ADR 0838) can leave the pointer one behind. A
+    // check against the lagging pointer would refuse every checked save forever
+    // (grade-code H2). Heal the pointer forward so a reload shows the real latest.
+    const newest = existing[0];
+    if (newest && newest.versionId !== doc.currentVersionId) await advancePointer(tenantId, orgId, documentId, newest);
+    if (!newest || newest.versionId !== base) throw staleBase(documentId, newest?.versionId ?? doc.currentVersionId);
+    checkedNum = newest.version + 1;
+  }
+
   // Monotonic next version with CAS retry against concurrent writers.
-  let nextNum = (existing[0]?.version ?? 0) + 1;
+  let nextNum = checkedNum ?? (existing[0]?.version ?? 0) + 1;
   for (let attempt = 0; attempt < 8; attempt++) {
     const versionId = `${documentId}:${nextNum}`;
     const version: DocumentVersion = {
@@ -503,13 +628,58 @@ export async function addVersion(
       createdAt: new Date().toISOString(),
     };
     const inserted = await versions.compareAndSwap(null, version); // insert-only-if-absent
-    if (!inserted) { nextNum += 1; continue; } // someone took this id; advance + retry
-    // Point the document at the new current version (derived pointer).
-    const fresh = await docs.get(documentId);
-    if (fresh) await docs.put({ ...fresh, currentVersionId: versionId, updatedAt: version.createdAt, updatedBy: input.producedBy.id });
+    if (!inserted) {
+      if (checkedNum !== undefined) throw staleBase(documentId, (await docs.get(documentId))?.currentVersionId);
+      nextNum += 1; continue; // someone took this id; advance + retry
+    }
+    // Point the document at the new current version (derived pointer). ADR 0838
+    // A2: a CAS over the fresh row that only moves FORWARD, so a slower writer of
+    // a lower version can never pull the pointer back, and a concurrent PATCH's
+    // fields survive.
+    await advancePointer(tenantId, orgId, documentId, version);
     return version;
   }
   throw new OpenwopError('conflict', 'Could not allocate a version id (too many concurrent writes).', 409, { documentId });
+}
+
+/** ADR 0838 A2 — move the current-version pointer FORWARD to `version` (never
+ *  back), merged into the fresh row. A slower writer of a lower version cannot
+ *  pull it back, and a concurrent PATCH's fields survive. */
+async function advancePointer(tenantId: string, orgId: string, documentId: string, version: Pick<DocumentVersion, 'versionId' | 'version' | 'createdAt' | 'producedBy'>): Promise<void> {
+  await mutateDocument(documentId, async (fresh) => {
+    if (fresh.tenantId !== tenantId || fresh.orgId !== orgId) return null;
+    const currentNum = fresh.currentVersionId ? (await getVersion(tenantId, orgId, documentId, fresh.currentVersionId))?.version ?? 0 : 0;
+    if (currentNum >= version.version) return null;
+    const next: DocumentRecord = { ...fresh, currentVersionId: version.versionId, updatedAt: version.createdAt, updatedBy: version.producedBy.id };
+    // ADR 0838 D2 — a row approved BEFORE the pin existed publishes its current
+    // version. Pin that version now, in the same swap that moves past it, so the
+    // text that was public stays public and this new one does not.
+    if ((SHAREABLE_STATUSES as readonly string[]).includes(fresh.status) && !fresh.approvedVersionId && fresh.currentVersionId) {
+      next.approvedVersionId = fresh.currentVersionId;
+    }
+    return next;
+  });
+}
+
+function staleBase(documentId: string, currentVersionId: string | undefined): OpenwopError {
+  return new OpenwopError('conflict', 'This document has a newer version than the one the edit was based on. Read it again, then re-apply the edit.', 409, {
+    reason: 'stale_base', documentId, ...(currentVersionId ? { currentVersionId } : {}),
+  });
+}
+
+/**
+ * ADR 0838 D3 — THE document read predicate. A document carrying a project/user
+ * `ownerSubject` is membership-scoped (ADR 0610 D3′): the org gate is not
+ * enough. Ask the ONE `subjectAccess` seam whether `subject` may READ the owner.
+ * `null` there ⇒ not membership-scoped (no resolver for that kind) ⇒ the org gate
+ * stands. Every exit that hands out a document's content calls this: the HTTP
+ * doors, the chat tools, the run surface, the artifact projection and the share
+ * mint. `subject` undefined ⇒ refused when the document is membership-scoped.
+ */
+export async function canReadDocument(tenantId: string, doc: Pick<DocumentRecord, 'ownerSubject'>, subject: string | undefined): Promise<boolean> {
+  if (!doc.ownerSubject) return true;
+  const level = await resolveSubjectAccess(tenantId, doc.ownerSubject, subject);
+  return level === null || levelSatisfies(level, 'read');
 }
 
 // ─── templates (bind the prompt machinery; own the output contract) ──────────
@@ -681,7 +851,9 @@ export async function assemble(tenantId: string, orgId: string, templateId: stri
 export async function publicDocumentView(tenantId: string, orgId: string, documentId: string): Promise<Record<string, unknown> | null> {
   const doc = await getDocument(tenantId, orgId, documentId);
   if (!doc || !(SHAREABLE_STATUSES as readonly string[]).includes(doc.status)) return null;
-  const current = doc.currentVersionId ? await getVersion(tenantId, orgId, documentId, doc.currentVersionId) : null;
+  // ADR 0838 D2 — the APPROVED version, never whatever was written since.
+  const publishedId = publicVersionIdOf(doc);
+  const current = publishedId ? await getVersion(tenantId, orgId, documentId, publishedId) : null;
   // DOCTPL-2 — public attribution. The content shown IS the current version,
   // so its producer wins; the document's provenance is the fallback. KIND
   // only — internal agent/user/run ids never reach the public surface. An
@@ -696,10 +868,19 @@ export async function publicDocumentView(tenantId: string, orgId: string, docume
     format: doc.format,
     status: doc.status,
     content: current?.content ?? '',
+    ...(current ? { version: current.version } : {}),
     ...(current?.renderedMediaToken ? { renderedMediaToken: current.renderedMediaToken } : {}),
     ...(producer?.kind ? { producedByKind: producer.kind } : {}),
     updatedAt: doc.updatedAt,
   };
+}
+
+/** ADR 0838 D2 — the version a shareable document publishes: its pin, or (for a
+ *  row approved before the pin existed, which `addVersion` pins on its next
+ *  write) its current version. `undefined` when it publishes nothing. */
+export function publicVersionIdOf(doc: Pick<DocumentRecord, 'status' | 'approvedVersionId' | 'currentVersionId'>): string | undefined {
+  if (!(SHAREABLE_STATUSES as readonly string[]).includes(doc.status)) return undefined;
+  return doc.approvedVersionId ?? doc.currentVersionId;
 }
 
 export type RenderFormat = 'pdf' | 'slides' | 'sheet' | 'docx' | 'epub' | 'odt' | 'latex';
@@ -845,9 +1026,23 @@ function canvasContentToMarkdown(state: unknown): string {
  * a new version. A `kind:'project'` canvas owner carries through when it resolves to
  * this org. Reads the canvas via the host seam (feature→host import is allowed).
  */
-export async function materializeCanvasToDocument(tenantId: string, orgId: string, canvasId: string, actor: string): Promise<{ documentId: string; versionId: string; created: boolean }> {
-  const canvas = await getCanvasForTenant(tenantId, canvasId);
+export async function materializeCanvasToDocument(tenantId: string, orgId: string, canvasId: string, actor: string, access?: ToggleSubject): Promise<{ documentId: string; versionId: string; created: boolean }> {
+  // The shared predicate: only a caller who may READ the canvas may copy its
+  // content into an org document (uniform 404 on refusal).
+  const canvas = await getCanvasForCaller(tenantId, canvasId, { subject: actor });
   if (!canvas) throw new OpenwopError('not_found', 'Canvas not found.', 404, { canvasId });
+  // ADR 0820 G5 — copying a canvas into a Document is a READ of that canvas, so
+  // it needs the canvas TYPE's feature (toggle + plan), not only `documents`:
+  // otherwise a documents-only plan materializes any slides/cad/app-builder
+  // canvas. Toggle off is the uniform 404 the type's own routes give; a plan
+  // refusal is the route lane's 403.
+  const typeAccess = await resolveCanvasTypeAccess(canvas.canvasTypeId, access ?? { tenantId, userId: actor });
+  if (!typeAccess.allowed) {
+    if (typeAccess.blockedBy === 'plan') {
+      throw new OpenwopError('forbidden', 'Your plan does not include this canvas type.', 403, { feature: typeAccess.toggleId, reason: 'plan' });
+    }
+    throw new OpenwopError('not_found', 'Canvas not found.', 404, { canvasId });
+  }
   const content = canvasContentToMarkdown(canvas.state);
   const idempotencyKey = `canvas:${canvasId}:${canvas.version}`;
   const key = `${tenantId}:${orgId}:${canvasId}`;

@@ -17,7 +17,7 @@ import { join, dirname } from 'node:path';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(here, '../../..');
-const AGENTS_PACK = join(REPO_ROOT, 'packs/feature.kicktodo.agents');
+const AGENTS_PACK = join(REPO_ROOT, 'packs/vendor.openwop-app.kicktodo.agents');
 const NODES_PACK = join(REPO_ROOT, 'packs/feature.kicktodo.nodes');
 const AI_PACK = join(REPO_ROOT, 'packs/core.openwop.ai');
 
@@ -85,11 +85,11 @@ describe('touched pack manifests (ADR 0458 P2)', () => {
     // Version moved forward with ADR 0459 P1 (1.6.0 — replan-composer) and ADR 0463
     // (1.7.0 — the plan-revision `clarification` arm); the P2 invariant this test
     // guards is the sim agents' schema, pinned exactly below.
-    expect(pack.version).toBe('1.9.0');
+    expect(pack.version).toBe('1.9.1');
     const simIds = [
-      'feature.kicktodo.agents.sim-newcomer',
-      'feature.kicktodo.agents.sim-time-poor',
-      'feature.kicktodo.agents.sim-skeptic',
+      'vendor.openwop-app.kicktodo.agents.sim-newcomer',
+      'vendor.openwop-app.kicktodo.agents.sim-time-poor',
+      'vendor.openwop-app.kicktodo.agents.sim-skeptic',
     ];
     for (const id of simIds) {
       const agent = pack.agents.find((a: { agentId: string }) => a.agentId === id);
@@ -104,7 +104,7 @@ describe('touched pack manifests (ADR 0458 P2)', () => {
     // session-reminder; 1.20.0 grade-fix enrich-plan-revision), ADR 0463 (1.21.0
     // replan-clarify), and the NP-KT-1 parity sweep (1.22.0, 17 surface wrappers);
     // the P2 invariant here is that the four factory nodes still exist.
-    expect(pack.version).toBe('1.30.0');
+    expect(pack.version).toBe('1.30.3');
     for (const typeId of [
       'feature.kicktodo.nodes.lesson-media-persist',
       'feature.kicktodo.nodes.checkpoint-plan',

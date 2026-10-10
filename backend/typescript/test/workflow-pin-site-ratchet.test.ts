@@ -137,7 +137,9 @@ const SRC_ROOT = join(__dirname, '..', 'src');
 const REGISTRY_MODULE = 'host/workflowsRegistry.ts';
 
 /** The registrar names as IMPORTED. Aliases are resolved per file (see `callNamesFor`). */
-const REGISTRAR_NAMES = ['registerWorkflow', 'registerWorkflowDurable'] as const;
+// ADR 0770 D5 added `registerWorkflowIfUnchanged` (the compare-and-swap save).
+// A registrar missing from this list is a registration site the scan cannot see.
+const REGISTRAR_NAMES = ['registerWorkflow', 'registerWorkflowDurable', 'registerWorkflowIfUnchanged'] as const;
 
 function walk(dir: string): string[] {
   const out: string[] = [];
@@ -546,10 +548,11 @@ function scanRegistrationSites(): { sites: Map<string, Site>; valueRefs: string[
  * what this gate classifies on.
  */
 const SANCTIONED_ORIGINS = new Map<string, string>([
-  ['routes/workflows.ts', 'Request body (POST/PUT /workflows) and `expandChain` (from-chain, incl. co-registered sub-chains). Every lane pairs with `recordOwnership` — including the ALIASED `registerWorkflow as reRegisterWorkflow` promote lane, which only became visible to this scan in R2.'],
+  ['routes/workflows.ts', 'Request body (POST/PUT /workflows) and `expandChain` (from-chain, incl. co-registered sub-chains). Every lane pairs with `recordOwnership`. ADR 0770 D2/D5 moved every lane to the awaited `registerWorkflowDurable` / the compare-and-swap `registerWorkflowIfUnchanged` (the aliased `reRegisterWorkflow` promote lane is gone), and co-registered sub-chain children now commit through `commitSubChainChild`.'],
   ['host/workflowComposeTool.ts', 'The agent-composition pipeline (model-authored draft → validate → persist), `registerWorkflowDurable` + `recordOwnership`.'],
   ['host/seedWorkflows.ts', '`expandChain(chain, { deferred: true })` over loaded chain packs; each seeded id is `recordOwnership`-ed to the tenant.'],
   ['host/demoWalkthroughsSeed.ts', 'Re-registers definitions already produced by the seeder lane and records ownership (the archive/unarchive lifecycle flip).'],
+  ['host/sharedWorkflowFork.ts', 'ADR 0789 — a tenant\'s edit of a SHARED (seeded) definition, i.e. a request body already validated by routes/workflows.ts, re-registered under a fresh tenant-owned `wf.fork.*` id and paired with `recordOwnership` (forkedFrom). Never an in-tree literal, never the shared id.'],
   ['host/workflowAuthorSeed.ts', 'WFAWF-6 (ADR 0596 R2) — the AI-author showcase seed, same owned-in-tree-def lane as demoWalkthroughsSeed: registers the shared def (ids unchanged for replay) and records per-tenant ownership so each showcase lists in that tenant\'s builder gallery. Was quarantined; drained by pairing with `recordOwnership`.'],
   ['host/collab/workflowCollabResource.ts', 'The RFC 0056 collab resource applies a peer-authored definition off the wire (`{ ...candidate }`, candidate = the parsed Y snapshot), then `recordOwnership`.'],
   ['features/strategy/cadence.ts', '`expandChain` product of the strategy cadence chain (`{ ...expanded, workflowId }`) + `recordOwnership` (the reference shape for a per-tenant runtime instance).'],
@@ -626,7 +629,7 @@ const PIN_SITE_CEILING = 2;
  * scanner cannot follow. Exact-match: a new one is red until it states its supplier.
  */
 const INDIRECT_REGISTRATION_SEAMS = new Map<string, string>([
-  ['host/workflowChainPackLoader.ts', '`SubChainDeps.register: (def: WorkflowDefinition) => void` (RFC 0133 sub-chain co-registration). The ONLY supplier today is `routes/workflows.ts:830`, whose closure calls the real `registerWorkflow` and whose enclosing from-chain handler records ownership for every co-registered child — so the lane is sanctioned. It is ledgered because the scanner sees `deps.register(...)`, not `registerWorkflow(...)`: a second supplier that skipped ownership would be invisible here.'],
+  ['host/workflowChainPackLoader.ts', '`SubChainDeps.register: (def: WorkflowDefinition) => void` (RFC 0133 sub-chain co-registration). The ONLY supplier today is the from-chain handler in `routes/workflows.ts`, whose closure STAGES each child (ADR 0770 D3) and commits it through `commitSubChainChild` — `registerWorkflowDurable` + `recordOwnership` — so the lane is sanctioned. It is ledgered because the scanner sees `deps.register(...)`, not `registerWorkflow(...)`: a second supplier that skipped ownership would be invisible here.'],
 ]);
 
 /**
@@ -670,14 +673,20 @@ describe('WF-KB-2 — registerWorkflow call sites are classified by definition O
     // count went down" is satisfiable by draining a different site.
     expect(sites.has('features/assistant/loops.ts'), 'WF-COS-1 — drained, must not regress').toBe(false);
     expect(sites.has('features/assistant/actionExecution.ts'), 'WF-COS-1 — drained, must not regress').toBe(false);
-    // …and the ALIAS lane really is resolved on live code, not just in a probe:
-    // `routes/workflows.ts` imports `registerWorkflow as reRegisterWorkflow` and
-    // calls it at the promote lane. Before R2 that call was in NO site's call list.
-    expect(sites.get('routes/workflows.ts')!.aliases).toContain('reRegisterWorkflow');
-    expect(
-      sites.get('routes/workflows.ts')!.calls.some((c) => c.name === 'reRegisterWorkflow'),
-      'the aliased registration must appear as a call site',
-    ).toBe(true);
+    // …and the ALIAS lane is resolved by the SAME classifier the scan runs. This
+    // anchored on live code — `routes/workflows.ts`' `registerWorkflow as
+    // reRegisterWorkflow` promote lane — until ADR 0770 D2 drained it to an
+    // awaited `registerWorkflowDurable`, leaving no live alias. Per the note above,
+    // the anchor becomes a FIXTURE driven through `classifyRegistrationSource`, so
+    // the property survives the drain that removed its only live instance.
+    const aliased = classifyRegistrationSource(stripComments(
+      "import { registerWorkflow as reRegisterWorkflow } from '../host/workflowsRegistry.js';\n"
+      + 'async function promote(def) { reRegisterWorkflow(def); await recordOwnership(t, def.workflowId, {}); }',
+    ));
+    expect(aliased.aliases).toContain('reRegisterWorkflow');
+    expect(aliased.calls.some((c) => c.name === 'reRegisterWorkflow'), 'the aliased registration must appear as a call site').toBe(true);
+    // …and the CAS registrar is a counted call site on live code.
+    expect(sites.get('routes/workflows.ts')!.calls.some((c) => c.name === 'registerWorkflowIfUnchanged'), 'the ADR 0770 CAS save is scanned').toBe(true);
   });
 
   it('the ORIGIN resolver actually discriminates (sabotage probe, one assertion each)', () => {

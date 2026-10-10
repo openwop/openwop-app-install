@@ -1,6 +1,7 @@
 {
   "name": "feature.orgs.nodes",
-  "version": "1.0.0",
+  "version": "1.0.1",
+  "kind": "node",
   "description": "Org invitations node pack (ADR 0622 D2) \u2014 invite someone into THIS workspace (or a named org in it) over the ctx.features.orgs surface, list its pending/declined invitations, revoke one. Every node is gated on the run's acting user holding host:members:manage in the target org \u2014 the same predicate the /orgs/:orgId/invites routes use; a system run (schedule, webhook, host-event-started) fails closed. Delivery brokers the ACTING USER's email connection and needs OPENWOP_PUBLIC_BASE_URL for the accept link. Ids-only inputs and outputs \u2014 never the token. The onboarding step people-hr.onboarding's `invite-host` composes.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
@@ -12,7 +13,7 @@
     "membership"
   ],
   "engines": {
-    "openwop": ">=1.0.0 <2.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "nodes": [
     {

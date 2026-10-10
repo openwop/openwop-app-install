@@ -51,12 +51,12 @@ function client(): Client {
 
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
 async function signup(c: Client): Promise<{ userId: string }> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail('pm') });
+  const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail('pm') });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
 
-const MEM = '/v1/host/openwop-app/profiles/me/memory';
+const MEM = '/host/openwop-app/profiles/me/memory';
 
 describe('profile-memory — always-on (graduated off its toggle)', () => {
   it('serves a signed-in caller with no toggle enabled, but rejects anonymous (fail-closed)', async () => {
@@ -118,16 +118,16 @@ describe('profile-memory — per-user isolation (CTI-1)', () => {
 });
 
 describe('agent memory browser — notes list + delete (ADR 0041)', () => {
-  const k = (rosterId: string, suffix = ''): string => `/v1/host/openwop-app/agents/${encodeURIComponent(rosterId)}/knowledge${suffix}`;
+  const k = (rosterId: string, suffix = ''): string => `/host/openwop-app/agents/${encodeURIComponent(rosterId)}/knowledge${suffix}`;
   it('lists and deletes an agent curated note', async () => {
     const owner = client();
     await signup(owner);
-    const r = await owner.post('/v1/host/openwop-app/roster', { persona: 'Researcher', agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
+    const r = await owner.post('/host/openwop-app/roster', { persona: 'Researcher', agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
     expect(r.status, JSON.stringify(r.body)).toBe(201);
     const rosterId = r.body.rosterId;
     // An org membership grants the caller workspace:write tenant-wide (the same
     // setup the agent-knowledge route harness uses).
-    expect((await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' })).status).toBe(201);
+    expect((await owner.post('/host/openwop-app/orgs', { name: 'Acme' })).status).toBe(201);
 
     // Notes need memoryWritable on. Then add → list → delete.
     expect((await owner.put(k(rosterId, '/memory-writable'), { writable: true })).status).toBe(200);

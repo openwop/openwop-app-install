@@ -740,11 +740,57 @@ export function listProviders(): ProviderManifest[] {
   return [...registry.values()].sort((a, b) => a.label.localeCompare(b.label));
 }
 
+/** ADR 0809 — which connection pack registered each provider id (absent ⇒ a
+ *  built-in). The owner is what the qualified form `<packName>#<id>` names. */
+const packOwner = new Map<string, string>();
+
+/**
+ * `connection-packs.md` §"The qualified form" (RFC 0177 §D.1): a connector MAY
+ * name a provider as `<packName>#<id>`, which resolves ONLY to that pack's
+ * definition — never to a built-in or another pack's, even of the same id.
+ */
 export function getProvider(id: string): ProviderManifest | null {
+  const hash = id.indexOf('#');
+  if (hash > 0) {
+    const pack = id.slice(0, hash);
+    const bare = id.slice(hash + 1);
+    return packOwner.get(bare) === pack ? (registry.get(bare) ?? null) : null;
+  }
   return registry.get(id) ?? null;
 }
 
-/** Register/override a manifest (the Marketplace install hook, ADR 0022). */
-export function registerProvider(manifest: ProviderManifest): void {
+/** The pack that registered `id`, or null for a built-in / unknown id. */
+export function providerPackOwner(id: string): string | null {
+  return packOwner.get(id) ?? null;
+}
+
+/**
+ * RFC 0233 §B.5 — the pack registrations this process refused under
+ * `connection-packs.md` §Provider identity. Recorded by BOTH install paths
+ * (`connectionPackLoader.ts`) where they already build the error row, so the
+ * read cannot disagree with what was logged. In memory and per process: the
+ * outcome is a function of the installed pack set, and §B.7 lets a host
+ * recompute it at every start. Deduplicated, because a re-attempted install of
+ * the same pack is the same refusal, not a second one.
+ */
+export interface ProviderRefusal {
+  packName: string;
+  providerId: string;
+  code: 'connection_provider_conflict' | 'connection_provider_unresolved';
+  /** For a conflict: the holder's pack name, or `builtin`. */
+  heldBy?: string;
+}
+const refusals = new Map<string, ProviderRefusal>();
+export function recordProviderRefusal(r: ProviderRefusal): void {
+  refusals.set(`${r.packName}\u0000${r.providerId}\u0000${r.code}`, r);
+}
+export function providerRefusals(): ProviderRefusal[] {
+  return [...refusals.values()];
+}
+
+/** Register/override a manifest (the Marketplace install hook, ADR 0022).
+ *  `packName` records the owner for the qualified form (ADR 0809). */
+export function registerProvider(manifest: ProviderManifest, opts: { packName?: string } = {}): void {
   registry.set(manifest.id, manifest);
+  if (opts.packName) packOwner.set(manifest.id, opts.packName);
 }

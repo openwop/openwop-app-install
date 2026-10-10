@@ -51,6 +51,7 @@ export const messages = {
   // ADR 0569 — únicos diarios (sin cookies)
   figureVisitors: 'Únicos diarios',
   visitorsDisclosure: 'Los únicos diarios no usan cookies: un hash de visitante con sal que rota cada día UTC, por lo que no existe identidad entre días y una cifra de varios días es la suma de los únicos de cada día. El conteo comenzó el {{since}}.',
+  consentFilterNote: 'La gestión del consentimiento está activada: solo se cuenta a un visitante si su consentimiento de analítica lo permite, así que estas cifras excluyen a quienes lo rechazaron.',
   figurePageviews: 'Páginas vistas',
   figureConversions: 'Conversiones',
 
@@ -115,4 +116,8 @@ export const messages = {
   navColRoute: 'Ruta',
   navColSource: 'Origen',
   navColCount: 'Recuento',
+  // ADR 0768 D5 — the Pocket assistant; its agent reads only orgs the caller can read.
+  pocketTitle: 'Asistente de análisis',
+  pocketScope: 'analíticas de las organizaciones que puedes ver',
+  pocketHint: 'Pregunta qué cambió; p. ej., "¿por qué bajaron las conversiones la semana pasada?"',
 } as const;

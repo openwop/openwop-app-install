@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.agent-orchestration/1.0.0/swarm.config.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.agent-orchestration/1.0.3/swarm.config.json",
   "title": "AgentSwarmConfig",
   "type": "object",
   "required": ["agents", "strategy"],

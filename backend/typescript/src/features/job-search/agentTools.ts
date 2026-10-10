@@ -26,7 +26,7 @@
  * an authority object, which is the whole reason those objects exist.
  */
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
-import { resolveFeatureToggle } from '../../host/agentToolKit.js';
+import { resolveFeatureToggle, resolveReadOrgScope } from '../../host/agentToolKit.js';
 import { JOB_SEARCH_TOGGLE } from './service.js';
 import { listListings } from './boards/listing.js';
 import { listApplications } from './domain/applications.js';
@@ -47,6 +47,7 @@ export function registerJobSearchAgentTools(): void {
     // screening is a filter and fencing is the boundary; treating this as
     // trusted because "we stored it" would confuse provenance with safety.
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: JOB_SEARCH_LISTINGS_TOOL_ID,
       description:
@@ -92,6 +93,8 @@ export function registerJobSearchAgentTools(): void {
     // UNTRUSTED for the same reason: a deal title is built from a posting's
     // title and company, so board-authored text rides through the CRM record.
     contentTrust: 'untrusted',
+    // ADR 0784: read. the first call's lazy pipeline bootstrap is an empty container, not a user-visible change.
+    effect: 'read',
     def: {
       name: JOB_SEARCH_APPLICATIONS_TOOL_ID,
       description:
@@ -108,14 +111,13 @@ export function registerJobSearchAgentTools(): void {
       },
     },
     async run(input, scope) {
-      if (!(await resolveFeatureToggle(JOB_SEARCH_TOGGLE, scope))) {
-        return toolError('feature_disabled', 'Job search is not enabled for this workspace.');
-      }
-      if (!scope.actingUserId) return { content: JSON.stringify({ applications: [] }) };
-
-      const orgId = typeof input.orgId === 'string' ? input.orgId : '';
-      if (!orgId) return { content: JSON.stringify({ applications: [] }) };
-      const rows = await listApplications(scope.tenantId, orgId);
+      // JOBS-SCOPE-1 — the SAME org gate the HTTP route applies
+      // (`authorizeOrgScope(…, 'workspace:read')`, routes.ts), via its tool-lane
+      // twin. A tool SHARES its route's access predicate (CLAUDE.md).
+      const gate = await resolveReadOrgScope(scope, { featureId: JOB_SEARCH_TOGGLE, featureLabel: 'Job search' }, typeof input.orgId === 'string' && input.orgId ? input.orgId : undefined);
+      if (gate.kind === 'error') return gate.result;
+      if (gate.kind === 'empty') return { content: JSON.stringify({ applications: [], note: gate.note }) };
+      const rows = await listApplications(scope.tenantId, gate.orgId);
       return {
         content: JSON.stringify({
           applications: rows.map(({ deal }) => ({

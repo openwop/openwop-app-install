@@ -116,7 +116,6 @@ export const messages = {
   colorHexPlaceholder: "#rrggbb ou une couleur CSS",
   colorPickFromScreen: "Choisir une couleur \u00e0 l\u2019\u00e9cran",
 
-  cmdkLocked: 'Verrouillé — déverrouillez-le dans la boutique de fonctionnalités',
 
   // FORM-UX-2 (ADR 0584) — la protection IN-APP contre la perte de modifications.
   unsavedLeaveTitle: 'Quitter sans enregistrer ?',

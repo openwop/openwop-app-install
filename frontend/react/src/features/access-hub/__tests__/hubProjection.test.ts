@@ -92,17 +92,25 @@ describe('Access Hub manifest wiring (the real FEATURES)', () => {
   const hub = visibleHubRoutes(FEATURES, () => true, true, 'access', ACCESS_GROUPS);
   const ids = hub.map(tabIdOf);
 
+  it('ADR 0788 MCPUX-1 — a MEMBER (non-admin) reaches the AI clients tab; the admin-only tabs stay hidden', () => {
+    const memberIds = visibleHubRoutes(FEATURES, () => true, false, 'access', ACCESS_GROUPS).map(tabIdOf);
+    expect(memberIds).toContain('mcp');
+    // ADR 0800 D2 — the API keys tab is self-service for the same reason.
+    expect(memberIds).toContain('api-keys');
+    expect(memberIds).not.toContain('keys');
+  });
+
   it('tags exactly the Credentials + Identity surfaces as hub tabs', () => {
     // Users/People is intentionally NOT a hub tab — it keeps its own /users
     // surface (ADR 0144 §correction).
     expect(new Set(ids)).toEqual(
-      new Set(['keys', 'connections', 'voice', 'endpoints', 'orgs', 'capability-firewall']),
+      new Set(['keys', 'connections', 'voice', 'endpoints', 'mcp', 'api-keys', 'orgs', 'capability-firewall']),
     );
   });
 
   it('groups them correctly', () => {
     const groupOf = (id: string) => hub.find((r) => tabIdOf(r) === id)!.hubTab.group;
-    for (const id of ['keys', 'connections', 'voice', 'endpoints']) expect(groupOf(id)).toBe('credentials');
+    for (const id of ['keys', 'connections', 'voice', 'endpoints', 'mcp', 'api-keys']) expect(groupOf(id)).toBe('credentials');
     for (const id of ['orgs', 'capability-firewall']) expect(groupOf(id)).toBe('identity');
   });
 

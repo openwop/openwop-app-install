@@ -85,6 +85,11 @@ beforeAll(async () => {
     } as NodeModule);
   }
   loadWorkflowChainPacks({ roots: defaultWorkflowChainPackRoots() });
+  // ADR 0832 — the seam's org floor checks the run's person against the org the
+  // chain names, so `org-apply` is a real org of this tenant owned by that person
+  // (it used to be a bare id with no org row, which the floor answers not_found).
+  const { createOrg } = await import('../src/host/accessControlService.js');
+  await createOrg({ tenantId: T, createdBy: 'test', name: 'Apply', orgId: 'org-apply', ownerSubject: 'user:apply-e2e' });
 });
 
 beforeEach(async () => {

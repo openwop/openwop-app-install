@@ -25,7 +25,7 @@ const log = createLogger('slides.io');
 
 export function registerSlidesEditorRoutes(deps: RouteDeps): void {
   registerCanvasEditorRoutes(deps, {
-    basePath: '/v1/host/openwop-app/slides',
+    basePath: '/host/openwop-app/slides',
     feature: SLIDES_FEATURE,
     canvasTypeId: 'canvas.slides',
     // ADR 0359 Phase 5 — collab-capable (both toggles enforced at the socket).

@@ -147,7 +147,13 @@ export async function checkIn(ctx) {
     ...(optStr(i.mode) === 'sync' ? { mode: 'sync' } : {}),
     ...(ctx.runId ? { actor: `run:${ctx.runId}` } : {}),
   });
-  return { status: 'success', outputs: { checkIn: out.checkIn ?? null } };
+  // A check-in that was not recorded is a typed failure, never success-with-null:
+  // the host refuses a strategy the run's starter cannot read (agent) or write (sync).
+  if (!out || !out.checkIn) {
+    const reason = (out && out.reason) || 'not_recorded';
+    return { status: 'error', error: { code: reason === 'forbidden' ? 'forbidden' : 'not_found', message: `check-in was not recorded (${reason}).` } };
+  }
+  return { status: 'success', outputs: { checkIn: out.checkIn } };
 }
 
 export async function listCheckIns(ctx) {

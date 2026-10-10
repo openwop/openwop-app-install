@@ -150,7 +150,7 @@ describe('composerSeed live lane (ADR 0565)', () => {
 
   it('a mounted ChatInput consumes a live seed into its textarea (and the stage stays empty)', () => {
     render(<ChatInput onSend={vi.fn()} />);
-    const ta = screen.getByRole('textbox') as HTMLTextAreaElement;
+    const ta = screen.getByRole('combobox') as HTMLTextAreaElement; // ADR 0770 — the composer is an ARIA combobox
     act(() => { seedLiveComposer('> quoted span\n\nselShorterInstruction'); });
     expect(ta.value).toBe('> quoted span\n\nselShorterInstruction');
     expect(takeStagedComposerDraft()).toBeNull();
@@ -158,7 +158,7 @@ describe('composerSeed live lane (ADR 0565)', () => {
 
   it('a live seed APPENDS below in-progress text instead of clobbering it', () => {
     render(<ChatInput onSend={vi.fn()} />);
-    const ta = screen.getByRole('textbox') as HTMLTextAreaElement;
+    const ta = screen.getByRole('combobox') as HTMLTextAreaElement; // ADR 0770 — the composer is an ARIA combobox
     fireEvent.change(ta, { target: { value: 'my own thought' } });
     act(() => { seedLiveComposer('> quoted\n\nselLongerInstruction'); });
     expect(ta.value).toBe('my own thought\n\n> quoted\n\nselLongerInstruction');

@@ -17,6 +17,7 @@ import http from 'node:http';
 import type { Express } from 'express';
 import { createApp } from '../src/index.js';
 import type { Storage } from '../src/storage/storage.js';
+import { bareRunId } from './support/bareRunId.js';
 
 let server: http.Server;
 let app: Express;
@@ -45,7 +46,7 @@ describe('ADR 0551 P1 — POST /v1/runs writes a durable dispatch intent', () =>
   beforeAll(async () => {
     // A gate node keeps the run non-terminal, so the assertions below observe
     // the intent rather than racing a run that finished first.
-    const created = await api('/v1/host/openwop-app/workflows', {
+    const created = await api('/host/openwop-app/workflows', {
       method: 'POST',
       body: JSON.stringify({ workflowId, nodes: [{ nodeId: 'gate', typeId: 'core.conversationGate', config: { prompt: 'hold' } }], edges: [] }),
     });
@@ -53,7 +54,7 @@ describe('ADR 0551 P1 — POST /v1/runs writes a durable dispatch intent', () =>
   });
 
   it('has committed the outbox row by the time the 201 is observable', async () => {
-    const create = await api<{ runId: string }>('/v1/runs', {
+    const create = await api<{ runId: string }>('/runs', {
       method: 'POST',
       body: JSON.stringify({ workflowId, inputs: {}, tenantId: '_anon' }),
     });
@@ -63,33 +64,33 @@ describe('ADR 0551 P1 — POST /v1/runs writes a durable dispatch intent', () =>
     // of writing the intent inside the run insert is that "201 received" and
     // "intent durable" are the same instant; a poll here would hide a
     // fire-and-forget enqueue passing for a transactional one.
-    const row = await storage().getDispatchOutbox(create.body.runId);
+    const row = await storage().getDispatchOutbox(bareRunId(create.body.runId));
     expect(row).not.toBeNull();
-    expect(row).toMatchObject({ runId: create.body.runId, workflowId, status: 'pending', attempts: 0 });
+    expect(row).toMatchObject({ runId: bareRunId(create.body.runId), workflowId, status: 'pending', attempts: 0 });
     // Unclaimed and not yet due: the in-process hint gets its window first.
     expect(row?.claimedBy).toBeNull();
     expect(row!.nextAttemptAt).toBeGreaterThan(Date.now());
   });
 
   it('records exactly one intent per run', async () => {
-    const a = await api<{ runId: string }>('/v1/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs: {}, tenantId: '_anon' }) });
-    const b = await api<{ runId: string }>('/v1/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs: {}, tenantId: '_anon' }) });
+    const a = await api<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs: {}, tenantId: '_anon' }) });
+    const b = await api<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs: {}, tenantId: '_anon' }) });
     expect(a.body.runId).not.toBe(b.body.runId);
-    expect((await storage().getDispatchOutbox(a.body.runId))?.runId).toBe(a.body.runId);
-    expect((await storage().getDispatchOutbox(b.body.runId))?.runId).toBe(b.body.runId);
+    expect((await storage().getDispatchOutbox(bareRunId(a.body.runId)))?.runId).toBe(bareRunId(a.body.runId));
+    expect((await storage().getDispatchOutbox(bareRunId(b.body.runId)))?.runId).toBe(bareRunId(b.body.runId));
   });
 
   it('an Idempotency-Key replay does not mint a second intent', async () => {
     const key = `outbox-replay-${Date.now()}`;
     const body = JSON.stringify({ workflowId, inputs: {}, tenantId: '_anon' });
-    const first = await api<{ runId: string }>('/v1/runs', { method: 'POST', headers: { 'idempotency-key': key }, body });
-    const replay = await api<{ runId: string }>('/v1/runs', { method: 'POST', headers: { 'idempotency-key': key }, body });
+    const first = await api<{ runId: string }>('/runs', { method: 'POST', headers: { 'idempotency-key': key }, body });
+    const replay = await api<{ runId: string }>('/runs', { method: 'POST', headers: { 'idempotency-key': key }, body });
 
     // The ADR 0549 ledger replays the cached 201 without creating a run, so
     // there is no second run to carry a second intent. Asserted because the
     // outbox now rides the run insert: if a retry ever created a run, it would
     // silently create a second dispatch too.
     expect(replay.body.runId).toBe(first.body.runId);
-    expect((await storage().getDispatchOutbox(first.body.runId))?.attempts).toBe(0);
+    expect((await storage().getDispatchOutbox(bareRunId(first.body.runId)))?.attempts).toBe(0);
   });
 });

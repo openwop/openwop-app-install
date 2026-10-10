@@ -29,6 +29,23 @@ export type TimeBucket = (typeof TIME_BUCKETS)[number];
  *  surface's user-type gate stays intact; BI reads system rows via the service
  *  layer behind its own org-scoped gate; ADR 0417 correction note). */
 export const KERNEL_METRIC_TYPES = ['crm.deal', 'commerce.product', 'crm.company', 'cms.page', 'servicedesk.ticket'] as const;
+export type KernelMetricType = (typeof KERNEL_METRIC_TYPES)[number];
+
+/** ADR 0846 D2 — the row-level read filter each kernel type's rows pass through
+ *  before a metric aggregates them, so a metric never sums rows the owning
+ *  feature's own list would hide from the same viewer. Exhaustive by type: adding
+ *  a type to the allowlist without deciding its filter is a compile error.
+ *  - `crm-visibility` — the CRM record-visibility seam (territories, ADR 0272 P4).
+ *  - `org-only` — the owning feature's list read is org-scoped with no row ACL
+ *    (service-desk `listTickets`, the CMS page list, the commerce product list).
+ *  A row ACL added to one of those later MUST change its entry here. */
+export const KERNEL_METRIC_ROW_FILTER: { readonly [T in KernelMetricType]: 'crm-visibility' | 'org-only' } = {
+  'crm.deal': 'crm-visibility',
+  'crm.company': 'crm-visibility',
+  'commerce.product': 'org-only',
+  'cms.page': 'org-only',
+  'servicedesk.ticket': 'org-only',
+};
 
 export interface MetricDef {
   metricId: string;
@@ -80,5 +97,8 @@ export interface RunMetricResult {
   points: MetricSeriesPoint[];
   groupedBy?: string;
   bucket?: TimeBucket;
+  /** Rows this caller may read in the requested org (before the metric's own filters). */
   totalRows: number;
+  /** ADR 0846 — the fetch hit the per-run row ceiling, so the aggregate is partial. */
+  truncated?: boolean;
 }

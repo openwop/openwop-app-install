@@ -1,11 +1,12 @@
 {
   "name": "feature.comments.nodes",
-  "version": "1.1.0",
+  "version": "1.1.1",
+  "kind": "node",
   "description": "Comments feature node pack — read/post/resolve nodes over the ctx.features.comments surface. list reads a resource thread; post adds an (agent-authored) comment to a commentable resource; resolve marks a comment resolved. Tenant-guarded; the post emits a tenant-scoped notification through the existing seam.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "comments", "collaboration", "threads"],
-  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "engines": { "openwop": ">=1.0.0 <3.0.0" },
   "nodes": [
     {
       "typeId": "feature.comments.nodes.list",

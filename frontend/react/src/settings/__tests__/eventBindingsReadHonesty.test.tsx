@@ -21,10 +21,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
-const host = vi.hoisted(() => ({ listHostEventBindings: vi.fn() }));
+const host = vi.hoisted(() => ({ listHostEventBindings: vi.fn(), getHostEventCatalog: vi.fn() }));
 vi.mock('../../client/hostEventBindingsClient.js', async (importOriginal) => {
   const orig = await importOriginal<Record<string, unknown>>();
-  return { ...orig, listHostEventBindings: host.listHostEventBindings };
+  return { ...orig, listHostEventBindings: host.listHostEventBindings, getHostEventCatalog: host.getHostEventCatalog };
 });
 
 const wf = vi.hoisted(() => ({ listWorkflowSummaries: vi.fn() }));
@@ -42,6 +42,7 @@ function view(): void {
 beforeEach(() => {
   vi.clearAllMocks();
   host.listHostEventBindings.mockResolvedValue([]);
+  host.getHostEventCatalog.mockResolvedValue([]);
   wf.listWorkflowSummaries.mockResolvedValue([]);
 });
 afterEach(cleanup);

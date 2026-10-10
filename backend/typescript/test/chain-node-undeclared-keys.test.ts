@@ -22,9 +22,10 @@
  * test, so it fails and makes a human decide.
  */
 import { describe, expect, it } from 'vitest';
-import { readFileSync, existsSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { globSync } from 'node:fs';
+import { readPackManifest } from './helpers/readPackManifest.js';
 
 const REPO = join(import.meta.dirname, '..', '..', '..');
 
@@ -64,7 +65,7 @@ function loadSchemas(): Map<string, { config?: Schema; inputs?: Schema }> {
   for (const manifest of globSync(join(REPO, 'packs', '*', 'pack.json'))) {
     const base = dirname(manifest);
     let pack: { nodes?: { typeId?: string; id?: string; configSchemaRef?: string; inputSchemaRef?: string }[] };
-    try { pack = JSON.parse(readFileSync(manifest, 'utf8')); } catch { continue; }
+    try { pack = readPackManifest(manifest); } catch { continue; }
     for (const node of pack.nodes ?? []) {
       const typeId = node.typeId ?? node.id;
       if (!typeId) continue;
@@ -72,7 +73,7 @@ function loadSchemas(): Map<string, { config?: Schema; inputs?: Schema }> {
         if (!ref) return undefined;
         const p = join(base, ref);
         if (!existsSync(p)) return undefined;
-        try { return JSON.parse(readFileSync(p, 'utf8')) as Schema; } catch { return undefined; }
+        try { return readPackManifest<Schema>(p); } catch { return undefined; }
       };
       out.set(typeId, { config: read(node.configSchemaRef), inputs: read(node.inputSchemaRef) });
     }
@@ -88,9 +89,9 @@ function findViolations(): { violations: Violation[]; nodesChecked: number; clos
   let nodesChecked = 0;
   let closedWorldChecks = 0;
   for (const manifest of globSync(join(REPO, 'examples', 'workflow-chain-packs', '*', 'pack.json'))) {
-    const pack = JSON.parse(readFileSync(manifest, 'utf8')) as {
+    const pack = readPackManifest<{
       chains?: { chainId: string; dag?: { nodes?: { id: string; typeId: string; config?: Record<string, unknown>; inputs?: Record<string, unknown> }[] } }[];
-    };
+    }>(manifest);
     const packName = manifest.split('/').slice(-2)[0]!;
     for (const chain of pack.chains ?? []) {
       for (const node of chain.dag?.nodes ?? []) {
@@ -158,6 +159,8 @@ describe('the retarget of #2871 stays repaired', () => {
     'notebooks.ingest-youtube#ingest',
     'notebooks.mcp.add-source#write',
     'notebooks.transform#write',
+    // ADR 0785 P3 — the Claude Code add-todo tool genuinely takes a title (it IS the card title).
+    'claude-code.mcp.add-todo#backing',
   ]);
 
   it('no non-notify node carries either of the retarget\'s two keys', () => {
@@ -167,9 +170,9 @@ describe('the retarget of #2871 stays repaired', () => {
     // closed-world gate above sees only 15 of them.
     const strays: string[] = [];
     for (const manifest of globSync(join(REPO, 'examples', 'workflow-chain-packs', '*', 'pack.json'))) {
-      const pack = JSON.parse(readFileSync(manifest, 'utf8')) as {
+      const pack = readPackManifest<{
         chains?: { chainId: string; dag?: { nodes?: { id: string; typeId: string; config?: Record<string, unknown>; inputs?: Record<string, unknown> }[] } }[];
-      };
+      }>(manifest);
       for (const chain of pack.chains ?? []) {
         for (const node of chain.dag?.nodes ?? []) {
           if (node.typeId === NOTIFY) continue;
@@ -193,9 +196,9 @@ describe('the retarget of #2871 stays repaired', () => {
     const wrong: string[] = [];
     let checked = 0;
     for (const manifest of globSync(join(REPO, 'examples', 'workflow-chain-packs', '*', 'pack.json'))) {
-      const pack = JSON.parse(readFileSync(manifest, 'utf8')) as {
+      const pack = readPackManifest<{
         chains?: { chainId: string; label?: string; dag?: { nodes?: { id: string; typeId: string; inputs?: Record<string, unknown> }[] } }[];
-      };
+      }>(manifest);
       for (const chain of pack.chains ?? []) {
         for (const node of chain.dag?.nodes ?? []) {
           if (node.typeId !== NOTIFY) continue;

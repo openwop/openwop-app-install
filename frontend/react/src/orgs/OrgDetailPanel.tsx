@@ -20,6 +20,7 @@ import { Notice } from '../ui/Notice.js';
 import { StateCard } from '../ui/StateCard.js';
 import { BriefcaseIcon } from '../ui/icons/index.js';
 import { MembersPanel } from './MembersPanel.js';
+import { effectiveOwnerIds } from './orgsHelpers.js';
 import { GroupsPanel } from './GroupsPanel.js';
 import { TeamsPanel } from './TeamsPanel.js';
 import { RoleCatalogPanel } from './RoleCatalogPanel.js';
@@ -218,6 +219,7 @@ export function OrgDetailPanel(props: OrgDetailPanelProps): JSX.Element {
           <MembersPanel
             orgId={selectedOrg.orgId}
             members={members}
+            ownerIds={effectiveOwnerIds(members, groups)}
             memberName={memberName}
             setMemberName={setMemberName}
             memberEmail={memberEmail}

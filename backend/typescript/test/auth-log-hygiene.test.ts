@@ -7,7 +7,14 @@
  * A CROSS-FILE PIN, comments stripped (the `ratchet-gates-count-comments`
  * lesson): every `log.<level>({...})` argument object in the named files is
  * extracted and asserted to carry none of the forbidden keys. Non-vacuous: the
- * scan must find a real population of log calls in each file.
+ * scan must find a real population of log calls in each file, and the scanner
+ * is shown a forbidden payload in EACH quoting form ('…', "…", `…`) so a log
+ * call cannot escape it by spelling its event name differently.
+ *
+ * Sabotage that turns it red: `routes/authScim.ts`
+ * `log.info('scim_user_lifecycle', { userId: user.userId, active })` →
+ * `{ userName: scimUserNameOf(user), active }` (or the same with the event
+ * name double-quoted).
  */
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -25,7 +32,7 @@ function stripComments(src: string): string {
 /** Every `log.<level>(<name>, { … })` payload literal, balanced-brace extracted. */
 function logPayloads(src: string): string[] {
   const out: string[] = [];
-  const re = /\blog\.(info|warn|error|debug)\(\s*'[^']*'\s*,\s*\{/g;
+  const re = /\blog\.(info|warn|error|debug)\(\s*(?:'[^']*'|"[^"]*"|`[^`]*`)\s*,\s*\{/g;
   for (const m of src.matchAll(re)) {
     let i = m.index! + m[0].length - 1;
     let depth = 0;
@@ -50,8 +57,10 @@ describe('USERS-15 — auth seam logs carry ids/digests only', () => {
   }
 
   it('is non-vacuous — the scanner recognises a forbidden payload when shown one', () => {
-    const sample = "log.info('x', { userName, linked: true });";
-    expect(logPayloads(sample)[0]).toMatch(FORBIDDEN);
+    for (const q of ["'", '"', '`']) {
+      const sample = `log.info(${q}x${q}, { userName, linked: true });`;
+      expect(logPayloads(sample)[0], `quote ${q}`).toMatch(FORBIDDEN);
+    }
     expect(logPayloads("log.info('y', { userId: u.userId, tenantId });")[0]).not.toMatch(FORBIDDEN);
   });
 });

@@ -44,12 +44,12 @@ function client(): Client {
 
 let n = 0;
 async function signup(c: Client, tenantId: string): Promise<string> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `dlg-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await c.post('/host/openwop-app/test/login', { email: `dlg-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user.userId;
 }
 
-const DLG = '/v1/host/openwop-app/approval-delegations';
+const DLG = '/host/openwop-app/approval-delegations';
 
 describe('approval-delegation routes — authz through HTTP', () => {
   it('self-service create + list + owner-only revoke; forging fromSubject is forbidden', async () => {
@@ -108,24 +108,24 @@ describe('quorum gate + delegation — a delegate votes AS the principal (end-to
     const memberId = await signup(member, tenantId);
     const thirdId = await signup(third, tenantId);
     const workflowId = `dlgq.test.${n++}`;
-    await owner.post('/v1/host/openwop-app/workflows', {
+    await owner.post('/host/openwop-app/workflows', {
       workflowId,
       nodes: [{ nodeId: 'gate', typeId: 'core.approvalGate', config: { prompt: 'Approve', requiredApprovals: 2, actions: ['accept', 'reject'], approverRefs: [ownerId, memberId] } }],
       edges: [],
     });
-    const create = await owner.post('/v1/runs', { workflowId });
+    const create = await owner.post('/runs', { workflowId });
     expect(create.status).toBe(201);
     const runId = create.body.runId;
     for (let i = 0; i < 80; i++) {
       await new Promise((r) => setTimeout(r, 20));
-      const s = (await owner.get(`/v1/runs/${runId}`)).body.status as string;
+      const s = (await owner.get(`/runs/${runId}`)).body.status as string;
       if (s.startsWith('waiting')) break;
     }
     return { owner, member, third, ownerId, memberId, thirdId, runId };
   }
   const vote = (c: Client, runId: string, extra: Record<string, unknown> = {}) =>
-    c.post(`/v1/runs/${runId}/interrupts/gate`, { resumeValue: { action: 'accept', ...extra } });
-  const status = async (c: Client, runId: string) => (await c.get(`/v1/runs/${runId}`)).body.status as string;
+    c.post(`/runs/${runId}/interrupts/gate`, { resumeValue: { action: 'accept', ...extra } });
+  const status = async (c: Client, runId: string) => (await c.get(`/runs/${runId}`)).body.status as string;
 
   it('principal votes + their delegate votes → still 1 of 2 (no double-count); a distinct approver tips it', async () => {
     const { owner, member, third, memberId, thirdId, runId } = await suspendQuorumGate();

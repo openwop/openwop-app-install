@@ -12,7 +12,8 @@
 import type { Request, Response } from 'express';
 import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
-import { resolveEffectiveAccess, resolveTenantLevelScopes, type Scope, ACT_AS_HEADER } from '../../host/accessControlService.js';
+import { resolveEffectiveAccess, resolveTenantLevelScopes, type Scope } from '../../host/accessControlService.js';
+import { actingMemberId, narrowToCaller } from '../../host/actingAccess.js';
 import { requireFeatureEnabled, requireString, optionalString, tenantOf } from '../featureRoute.js';
 import { APP_VERSION } from '../../version.js';
 import {
@@ -38,7 +39,7 @@ import { listConfigDomains } from '../../host/configDomains.js';
 import { registerEnvironmentPromotionGate } from './promotionApproval.js';
 
 const TOGGLE = { toggleId: 'environments', label: 'Environments' };
-const BASE = '/v1/host/openwop-app/environments';
+const BASE = '/host/openwop-app/environments';
 
 const callerSubjectOf = (req: Request): string | undefined => req.userId ?? req.principal?.principalId;
 
@@ -47,7 +48,7 @@ async function requireEnvScope(req: Request, scope: Scope): Promise<{ subject: s
   const subject = callerSubjectOf(req);
   if (!subject) throw new OpenwopError('unauthenticated', 'Environments requires an authenticated principal.', 401, {});
   const tenantId = tenantOf(req);
-  const actingMember = req.header(ACT_AS_HEADER);
+  const actingMember = actingMemberId(req);
   // ADR 0731 — resolve the SESSION caller, and resolve them with the TENANT-LEVEL
   // resolver. This used to pass `{}` when there was no X-Act-As header, and with
   // neither `memberId` nor `subject` `resolveEffectiveAccess` returns
@@ -60,9 +61,12 @@ async function requireEnvScope(req: Request, scope: Scope): Promise<{ subject: s
   // docblock says so). `resolveTenantLevelScopes` = that union PLUS the ADR 0372
   // exit: a single-principal tenant (anon sandbox / personal) is its own owner;
   // a SHARED `ws:` workspace fails closed, which is the escalation being fixed.
-  const access = actingMember
-    ? await resolveEffectiveAccess(tenantId, { memberId: actingMember.trim() })
-    : await resolveTenantLevelScopes(tenantId, subject);
+  // ADR 0797 (CE-8) — and under act-as, the named member's access NARROWED to
+  // the caller's own (it was the named member's alone).
+  const own = await resolveTenantLevelScopes(tenantId, subject);
+  const access = actingMember !== undefined
+    ? narrowToCaller({ roles: [], scopes: own.scopes, basis: own.basis }, await resolveEffectiveAccess(tenantId, { memberId: actingMember }))
+    : own;
   if (!access.scopes.includes(scope)) {
     throw new OpenwopError('forbidden_scope', `Missing required scope: ${scope}`, 403, { requiredScope: scope });
   }

@@ -7,6 +7,14 @@
  *    vec cache (second hydrate = no re-embed), query embedded per search;
  *  - signature switch (local → provider) wipes + rebuilds the namespace;
  *  - dispatchEmbeddings request/response shapes (mocked fetch).
+ *
+ * Note on the "embeds once" claim (grade-tests wave 6): the second search is
+ * DOUBLE-guarded — the in-memory hydrate marker and the durable vec cache each
+ * suffice, so neither alone turns that case red. The CACHE is witnessed on its own
+ * by the stable-id-upsert and tenant-scoped cases (a re-hydrate after a write
+ * cannot be served by the marker). Other sabotages witnessed: no-embedder label,
+ * hydrate/query degrade, the shared in-flight hydrate, the tenant-prefixed purge,
+ * and each dispatchEmbeddings shape (sort, normalize, outputDimensionality, refusal).
  */
 import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
 import {
@@ -93,7 +101,8 @@ describe('ADR 0351 P1 — provider path via the seam', () => {
     expect(first.embedding).toEqual({ mode: 'provider', model: 'fake-embed-1' });
     expect(first.hits.length).toBeGreaterThan(0); // dense over provider vectors
     const chunksAfterFirst = counter.chunks;
-    expect(chunksAfterFirst).toBeGreaterThan(0);
+    // The local→provider switch REBUILDS the namespace: every chunk embedded under the provider.
+    expect(chunksAfterFirst).toBe(chunkText(longText).length);
     expect(counter.queries).toBe(1);
 
     // Second search: cache serves the chunk vectors — ONLY the query embeds.
@@ -165,11 +174,14 @@ describe('ADR 0351 P1 — provider path via the seam', () => {
     // Append a tail — only the trailing chunk(s) change; the leading chunks'
     // hashes still match the (preserved) cache, so they must NOT re-embed.
     const updated = `${longText} Appended: a new paragraph about robot maintenance schedules.`;
+    const before = batches.length;
     await upsertDocument(TENANT, ORG, col.collectionId, 'doc-u', 'u1', { title: 'Doc', text: updated });
     await searchDetailed(TENANT, ORG, col.collectionId, 'warehouse robots', 5);
-    const rehydrateBatch = batches[2]!; // [full hydrate, query, re-hydrate misses, query]
-    expect(rehydrateBatch).toBeGreaterThanOrEqual(1);
-    expect(rehydrateBatch).toBeLessThan(fullChunks); // NOT a full re-embed (cache preserved)
+    // After the upsert: exactly ONE re-hydrate chunk batch, then the search's own query embed.
+    const chunkBatches = batches.slice(before, -1);
+    expect(chunkBatches.length, `batches after the upsert: ${JSON.stringify(batches.slice(before))}`).toBe(1);
+    expect(chunkBatches[0]!).toBeGreaterThanOrEqual(1);
+    expect(chunkBatches[0]!).toBeLessThan(fullChunks); // NOT a full re-embed (cache preserved)
   });
 
   it('the chunk cache is tenant-scoped — one tenant\'s delete never purges another\'s rows (KB-CODE-4 / CS-DATA-6)', async () => {
@@ -221,13 +233,14 @@ describe('ADR 0351 P1 — provider path via the seam', () => {
 describe('ADR 0351 P1 — dispatchEmbeddings shapes (mocked fetch)', () => {
   it('openai: POST /v1/embeddings with dimensions; sorts by index; normalizes', async () => {
     const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
-    vi.stubGlobal('fetch', (async (url: string, init: { body: string }) => {
-      calls.push({ url, body: JSON.parse(init.body) });
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async (url, init) => {
+      const body: Record<string, unknown> = JSON.parse(String(init?.body));
+      calls.push({ url: String(url), body });
       return new Response(JSON.stringify({ data: [
         { index: 1, embedding: [0, 3] },
         { index: 0, embedding: [4, 0] },
       ] }), { status: 200 });
-    }) as unknown as typeof fetch);
+    }));
     try {
       const r = await dispatchEmbeddings({ provider: 'openai', model: 'text-embedding-3-small', apiKey: 'k', texts: ['a', 'b'], dimensions: 2 });
       expect(calls[0]!.url).toBe('https://api.openai.com/v1/embeddings');
@@ -238,10 +251,11 @@ describe('ADR 0351 P1 — dispatchEmbeddings shapes (mocked fetch)', () => {
 
   it('google: batchEmbedContents with outputDimensionality', async () => {
     const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
-    vi.stubGlobal('fetch', (async (url: string, init: { body: string }) => {
-      calls.push({ url, body: JSON.parse(init.body) });
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async (url, init) => {
+      const body: Record<string, unknown> = JSON.parse(String(init?.body));
+      calls.push({ url: String(url), body });
       return new Response(JSON.stringify({ embeddings: [{ values: [0, 2] }] }), { status: 200 });
-    }) as unknown as typeof fetch);
+    }));
     try {
       const r = await dispatchEmbeddings({ provider: 'google', model: 'gemini-embedding-001', apiKey: 'k', texts: ['x'], dimensions: 2 });
       expect(calls[0]!.url).toContain(':batchEmbedContents');

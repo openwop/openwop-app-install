@@ -82,8 +82,15 @@ describe('ADR 0550 P1 — quarantine hygiene', () => {
     // The step this quarantine exists to make possible. Without it the
     // quarantine is bookkeeping for a gate nobody runs — which is the exact
     // state ADR 0550 P0 found.
-    const ci = readFileSync(join(BACKEND, '..', '..', 'scripts', 'ci.sh'), 'utf8');
-    expect(ci).toMatch(/backend\/typescript" && npm run test:conformance/);
+    // ADR 0812 P3c: the major-1 lane that called `npm run test:conformance`
+    // directly is gone with major 1. The gate now runs the suite through the
+    // major-2 ratchet, so follow that chain: ci.sh runs the ratchet script, and
+    // the script runs the suite.
+    const scripts = join(BACKEND, '..', '..', 'scripts');
+    const ci = readFileSync(join(scripts, 'ci.sh'), 'utf8');
+    expect(ci).toMatch(/bash scripts\/check-conformance-major2\.sh/);
+    const lane = readFileSync(join(scripts, 'check-conformance-major2.sh'), 'utf8');
+    expect(lane).toMatch(/OPENWOP_TARGET_MAJOR=2 npm run test:conformance/);
   });
 
   it('the harness still honours the no-quarantine escape hatch', () => {

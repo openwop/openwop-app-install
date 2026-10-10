@@ -82,7 +82,7 @@ export const settingsFeature: BackendFeature = {
       'The consolidated /settings page: General (theme, motion, density), Accessibility depth (text size, focus '
       + 'indicator), personal AI Usage & Budget (a self-service daily BYOK token cap that can only lower the org '
       + 'backstop), Agent Escalation (per-user reasoning-directive strength), Privacy opt-outs, and Account '
-      + 'deep-links. Composition only — every capability keeps its owning feature. OFF by default.',
+      + 'deep-links. Composition only — every capability keeps its owning feature.',
     category: 'Platform',
     status: 'off',
     bucketUnit: 'tenant',

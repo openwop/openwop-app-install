@@ -57,9 +57,13 @@ function fixtures(): Array<{ file: string; doc: FixtureDoc }> {
  *  supposed to prevent — it was copied from the host rather than derived from
  *  the registration, so it agreed with the bug. The non-vacuity test below now
  *  derives the expected set from `bootstrap/nodes.ts` itself. */
+// ADR 0858 (2026-10-08): the storage probe is the one reserved id with its own
+// switch (it touches only the run tenant's own storage), so it is not a member.
 const needsConformanceNodes = (d: FixtureDoc): boolean =>
   (d.nodes ?? []).some(
-    (n) => (n.typeId ?? '').startsWith('core.conformance.') || (n.typeId ?? '').startsWith('conformance.'),
+    (n) =>
+      n.typeId !== 'core.conformance.storage-probe' &&
+      ((n.typeId ?? '').startsWith('core.conformance.') || (n.typeId ?? '').startsWith('conformance.')),
   );
 
 describe('conformance fixture advert — gated on the nodes actually being registered', () => {

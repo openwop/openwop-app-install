@@ -19,6 +19,7 @@ import { join, resolve } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
+import { toWireRunId } from '../src/host/v2Ids.js';
 import { SCOPES_SUPPORTED } from '../src/host/protocolAuthorization.js';
 import { issueApiKey } from '../src/features/developer-keys/apiKeyService.js';
 
@@ -67,6 +68,8 @@ function stripComments(src: string): string {
 let server: http.Server;
 let BASE = '';
 const TENANT = 'adr0745-scopes';
+/** A run that does not exist, spelled the way a major-2 path takes it: tenant-bound to the key's own tenant (ADR 0812 P3c-0). */
+const MISSING_RUN = encodeURIComponent(toWireRunId('no-such-run-00000000000000', TENANT));
 const saved: Record<string, string | undefined> = {};
 
 beforeAll(async () => {
@@ -91,7 +94,7 @@ async function key(scopes: string[] | undefined): Promise<string> {
 }
 
 const createRun = (token: string): Promise<Response> =>
-  fetch(`${BASE}/v1/runs`, {
+  fetch(`${BASE}/runs`, {
     method: 'POST',
     headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
     body: JSON.stringify({ workflowId: 'openwop-app.uppercase', inputs: {} }),
@@ -134,7 +137,7 @@ describe('a key that declares scopes is narrowed to them (default posture)', () 
 
 describe('resolving a run interrupt needs approvals:respond (ADR 0745 follow-up)', () => {
   const resolve = (token: string): Promise<Response> =>
-    fetch(`${BASE}/v1/runs/no-such-run/interrupts/gate`, {
+    fetch(`${BASE}/runs/${MISSING_RUN}/interrupts/gate`, {
       method: 'POST',
       headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
       body: JSON.stringify({ resumeValue: { action: 'accept' } }),
@@ -157,7 +160,7 @@ describe('resolving a run interrupt needs approvals:respond (ADR 0745 follow-up)
 
 describe('the scope challenge never rides a non-scope refusal', () => {
   it('an unknown run is 404 with no challenge (auth-challenge-no-oracle)', async () => {
-    const res = await fetch(`${BASE}/v1/runs/no-such-run`, { headers: { authorization: `Bearer ${await key(['runs:read'])}` } });
+    const res = await fetch(`${BASE}/runs/${MISSING_RUN}`, { headers: { authorization: `Bearer ${await key(['runs:read'])}` } });
     expect(res.status).toBe(404);
     expect(res.headers.get('www-authenticate')).toBeNull();
   });

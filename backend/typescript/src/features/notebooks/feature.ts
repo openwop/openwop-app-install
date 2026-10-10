@@ -7,7 +7,7 @@
  * Tenant-bucketed, OFF by default (a sample/optional product surface).
  *
  * The frontend EmbeddedChatPanel targets the notebooks Research Analyst manifest
- * agent (`feature.notebooks.agents.researcher`, ADR 0084 Phase 4) — the
+ * agent (`vendor.openwop-app.notebooks.agents.researcher`, ADR 0084 Phase 4) — the
  * notebooks-surface analog of the KB Researcher, tool-allowlisted to the
  * notebooks node pack (ask/search over ctx.features.notebooks). Phase-2
  * owner-subject auto-grounding is agent-agnostic, so grounding is preserved and
@@ -16,6 +16,8 @@
  */
 
 import type { BackendFeature } from '../types.js';
+import { notebooksBuiltinWorkflows } from './summarizeWorkflow.js';
+import { registerWorkflowsFeature } from '../../host/workflowFeatureGate.js';
 import { registerNotebooksRoutes } from './routes.js';
 import { registerNotebooksAgentTools } from './agentTools.js';
 import { buildNotebooksSurface } from './surface.js';
@@ -23,6 +25,9 @@ import { buildNotebooksSurface } from './surface.js';
 export const notebooksFeature: BackendFeature = {
   id: 'notebooks',
   registerRoutes: (deps) => {
+    // ADR 0820 §7 / G6 — this feature OWNS its chain-backed workflows (registered
+    // in `features/index.ts`): every launch resolves 'notebooks' (toggle + plan).
+    registerWorkflowsFeature(notebooksBuiltinWorkflows.map((w) => w.workflowId), 'notebooks');
     // CFP-1 — the Research Analyst's real chat tools (search / ask /
     // write-transformation), the ADR 0308 D2 feature-registered-builtin seam:
     // process-wide + inert until the researcher pack allowlists the ids; per-tenant
@@ -48,19 +53,19 @@ export const notebooksFeature: BackendFeature = {
     // READ-only node pack over ctx.features.notebooks (ADR 0084 Phase 3) — `ask`
     // (grounded retrieve + citations, context-level-filtered) + `search`. Write/AI
     // nodes are deferred to the Transformations phase.
-    { name: 'feature.notebooks.nodes', version: '1.1.0' },
+    { name: 'feature.notebooks.nodes', version: '1.1.1' },
     // The grounded "ask over the notebook" agent the FE chat targets — the
     // notebooks Research Analyst (ADR 0084 Phase 4), tool-allowlisted to the
-    // notebooks node pack above. The notebooks-surface analog of feature.kb.agents
+    // notebooks node pack above. The notebooks-surface analog of vendor.openwop-app.kb.agents
     // (distinct tooling); declaring its pack ensures it is present wherever
     // notebooks are enabled.
-    { name: 'feature.notebooks.agents', version: '1.0.1' },
+    { name: 'vendor.openwop-app.notebooks.agents', version: '1.0.2' },
     // ADR 0087 — the `notebooks.mcp.*` expose-tool workflows reference the
     // `core.openwop.mcp.expose-tool` node, so the core MCP pack must be present
     // (the static tools/list scan reads its config; a tools/call run executes it).
     { name: 'core.openwop.mcp', version: '1.1.3' },
     // ADR 0087 OQ-1 — the HITL-gated write workflows use `core.hitl.approval-request`
     // to suspend for a human decision before the write.
-    { name: 'core.openwop.hitl', version: '1.0.0' },
+    { name: 'core.openwop.hitl', version: '1.0.1' },
   ],
 };

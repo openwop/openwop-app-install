@@ -17,13 +17,15 @@ import { computeDerived } from '../src/features/campaign-connectors/csvImport.js
 import { recordEvent } from '../src/features/analytics/analyticsService.js';
 import { createBrief, setKernel, updateBrief } from '../src/features/campaign-brief/briefService.js';
 import { finalizeFromBrief } from '../src/features/campaign-orchestration/campaignService.js';
-import { createCampaign as createEmailCampaign } from '../src/features/email/emailService.js';
+import { createCampaign as createEmailCampaign, createTemplate as createEmailTemplate } from '../src/features/email/emailService.js';
 import { mintToken, recordClick, recordOpen } from '../src/features/email/engagementService.js';
 
 let server: http.Server;
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
+  // ADR 0848 D7a — a campaign send now REFUSES without a public link base (no unsubscribe link ⇒ no send).
+  process.env.OPENWOP_EMAIL_LINK_BASE_URL = 'https://app.example';
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => res()); });
@@ -257,6 +259,8 @@ describe('ADR 0246 — email→marketing-campaign provenance rollup', () => {
     await updateBrief(T, brief.id, { status: 'confirmed' }, 'test');
     const mc = await finalizeFromBrief(T, { ...brief, kernel: KERNEL, status: 'confirmed' as const, utm: { campaign: 'prov-roll' } }, 'test');
 
+    // ADR 0848 D1 — a campaign's template must exist in its (tenant, org) at the service.
+    for (const id of ['tmpl-a', 'tmpl-b']) await createEmailTemplate({ tenantId: T, orgId: RORG, name: id, subject: 's', body: 'b', createdBy: 'test', templateId: id });
     await createEmailCampaign({ tenantId: T, orgId: RORG, templateId: 'tmpl-a', createdBy: 'test', sourceBriefId: brief.id, campaignId: 'cmp-a' });
     await createEmailCampaign({ tenantId: T, orgId: RORG, templateId: 'tmpl-b', createdBy: 'test', sourceBriefId: brief.id, campaignId: 'cmp-b' });
     // ct-1 clicks BOTH campaigns (unique once across the brief); ct-2 clicks one.
@@ -399,3 +403,5 @@ describe('R2 CI-SP-5/7 — exponent-aware pacing + memo de-escalation', () => {
     expect(run3.alerted.some((a) => a.campaignId === campaign.id && a.band === 'over')).toBe(true);
   });
 });
+
+afterAll(() => { delete process.env.OPENWOP_EMAIL_LINK_BASE_URL; });

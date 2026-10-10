@@ -2,21 +2,29 @@
  * WF-CONS-3 — the consent gate's own witness.
  *
  * The ONE pre-existing witness (`consent-route.test.ts`, "check + record run
- * over a stub ctx.features.consent") drives both nodes with a COMPLETE, VALID
+ * over a stub ctx.features.consent") drove both nodes with a COMPLETE, VALID
  * argument set, through `inputs` only, on a hand-built ctx. So neither the
  * missing-subject lane nor the `config` channel was supplied by anything, and
- * the fabrication was invisible by construction.
+ * the fabrication was invisible by construction. (That smoke was removed in
+ * /grade-tests wave 9 as redundant with the CONTROL arms below — the same
+ * sabotage of the `record` node reds both.)
+ *
+ * Sabotage-witnessed (wave 9): the surface's subject/category/categories guards,
+ * the pack's config↔inputs merge (both directions) and the node's verdict/write
+ * each red their cases. CEILING: on the RECORD lane the surface's subject guard is
+ * double-guarded by `assertSubjectKey` in `mergeConsentCategories` (same message).
  *
  * This file drives both nodes through BOTH RFC 0013 Path-A channels and asserts
  * the gate fails TYPED rather than answering a manufactured verdict as
  * `status:'success'` — with CONTROL arms proving a genuinely-empty-but-VALID
  * input still answers `success`, so the fix cannot rot into "always refuse".
  */
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import http from 'node:http';
-import { createApp } from '../src/index.js';
+import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { openStorage } from '../src/storage/index.js';
+import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
-import { getToggleDefault } from '../src/host/featureToggles/registry.js';
+import { registerToggleDefault } from '../src/host/featureToggles/registry.js';
+import { consentFeature } from '../src/features/consent/feature.js';
 import {
   __resetConsentStore, getConsent, recordConsent, setPolicy,
 } from '../src/features/consent/consentService.js';
@@ -24,22 +32,24 @@ import { buildConsentSurface } from '../src/features/consent/surface.js';
 
 type NodeFn = (ctx: unknown) => Promise<{ status: string; outputs?: Record<string, unknown> }>;
 
-let server: http.Server;
 let nodes: Record<string, NodeFn>;
 
+// No createApp: nothing here is a route or wiring claim — the nodes are driven over
+// `buildConsentSurface` directly, which needs only persistence + the toggle (wave 9
+// cost fix; the boot cost ~10 s for no claim).
 beforeAll(async () => {
-  process.env.OPENWOP_STORAGE_DSN = 'memory://';
-  process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
-  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => res()); });
+  initHostExtPersistence(await openStorage('memory://'));
   // The gate is permissive when the `consent` toggle is off, so the fabrication
-  // is only reachable — and this file only meaningful — with the regime ON.
-  const d = getToggleDefault('consent');
-  if (d) await saveConfig({ ...d, status: 'on' }, 'test');
+  // is only reachable — and this file only meaningful — with the regime ON. The
+  // default is registered by hand (no boot), and a missing one FAILS rather than
+  // silently leaving the suite on the permissive path.
+  const d = consentFeature.toggleDefault;
+  expect(d, 'the consent toggle default must exist for this suite to mean anything').toBeTruthy();
+  registerToggleDefault(d!);
+  await saveConfig({ ...d!, status: 'on' }, 'test');
   const mod = await import('../../../packs/feature.consent.nodes/index.mjs');
   nodes = mod.nodes as Record<string, NodeFn>;
 });
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 /** The tenant whose policy makes the fabrication VISIBLE: with no record,
  *  `isAllowed` falls to `defaultMode === 'opt-out'` ⇒ `true`. */
@@ -153,7 +163,8 @@ describe('WF-CONS-3 — a param frozen into `config` reaches the node (Path A)',
       config: { subjectKey: 's-config-default', categories: { marketing: true } },
       inputs: { subjectKey: 's-runtime' },
     };
-    await record(ctx);
+    const r = await record(ctx);
+    expect(r.status).toBe('success');
     expect(await getConsent(T, 's-config-default')).toBeNull();
     expect((await getConsent(T, 's-runtime'))!.categories.marketing).toBe(true);
   });

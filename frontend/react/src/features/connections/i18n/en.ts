@@ -24,6 +24,21 @@ export const messages = {
   couldNotStart: 'Could not start {{label}}.',
   connectionHealthy: '{{name}} is healthy.',
   connectionNeedsReconnect: '{{name}} needs to reconnect.',
+  // ADR 0780 — write authority, row scope, reconnect, status labels
+  changedElsewhere: "This connection changed somewhere else. Refresh and try again.",
+  revoked: "{{name}} revoked.",
+  readOnlyNotice: "You can view this workspace's connections, but you don't have permission to connect new accounts here. You can still revoke your own.",
+  reconnect: "Reconnect",
+  reconnectLabel: "Reconnect {{name}}",
+  accountLine: "Account: {{account}}",
+  sharingWorkspace: "Workspace",
+  managedByAdmin: "Managed by an admin",
+  status_active: "Active",
+  'status_needs-reconsent': "Needs reconnecting",
+  status_expired: "Expired",
+  status_revoked: "Revoked",
+  providerNotAllowed: "This provider isn't allowed in this workspace — an admin sets the allowlist under Governance.",
+  noConnectionsBodyReadOnly: "Nothing is connected here yet. Ask a workspace admin or editor to connect an account.",
 
   // OAuth consent card
   connectWithConsent: 'Connect with consent',
@@ -80,6 +95,8 @@ export const messages = {
   callbackInvalidState: 'The consent session expired — please try again.',
   callbackMissingParams: 'The provider response was incomplete — please try again.',
   callbackExchangeFailed: 'Could not complete the token exchange. Please try again.',
+  callbackSubjectMismatch: "You're signed in as a different account from the one that started this connection. Sign in as that account and try again.",
+  callbackIssMismatch: "The provider's response could not be verified, so nothing was saved. Please try again.",
   callbackGenericError: 'Could not connect {{provider}}.',
 
   // Governance panel
@@ -206,6 +223,8 @@ export const messages = {
   vaultDeleteConfirm: 'Delete secret {{ref}}?',
   vaultDeleteReferencedTitle: 'This secret is in use',
   vaultDeleteReferencedBody: 'Live references: {{refs}}. Deleting it will break them.',
+  vaultDeleteUnverifiedTitle: "This secret’s uses couldn’t be checked",
+  vaultDeleteUnverifiedBody: "The server couldn’t check what uses this secret. Deleting it anyway may break something that still uses it.",
   vaultDeleteAnyway: 'Delete anyway',
   vaultAddRefLabel: 'Credential ref',
   vaultAddValueLabel: 'Value',
@@ -220,4 +239,18 @@ export const messages = {
   requireMfaTitle: 'Two-factor requirement',
   requireMfaLabel: 'Require two-factor authentication for this workspace',
   requireMfaHint: 'Members whose session did not verify a second factor are refused until they enroll (Settings → Security) and sign in again. SSO members satisfy this via their identity provider. API keys (machine credentials) are exempt — rotate them if that matters for your workspace.',
+  // ADR 0783 D1 — a connection as a workflow data source
+  dataSourceAction: "Data source",
+  dataSourceLabel: "Data source for {{name}}",
+  dataSourceLine: "Data source: {{url}}",
+  dataSourceTitle: "Data source — {{name}}",
+  dataSourceHint: "Workflows in this workspace can read from, and write to, this connection's API through the Data Integration REST and GraphQL nodes. Set the base URL they call: requests stay under it, on one of the provider's API hosts.",
+  dataSourceBaseUrl: "Base URL",
+  dataSourcePlaceholder: "https://example.service-now.com/api/now",
+  dataSourceSave: "Save",
+  dataSourceClear: "Stop using as a data source",
+  dataSourceSaved: "{{name}} is now a data source.",
+  dataSourceCleared: "{{name}} is no longer a data source.",
+  dataSourceInvalid: "That base URL is not allowed for this connection.",
+  dataSourceFailed: "Could not save the data source. Try again.",
 } as const;

@@ -17,12 +17,30 @@
  * The wrapper sits INSIDE `needsOrg`. Contacts is tenant-wide and has no
  * org-gated read at all, so on that tab there is nothing about organizations to
  * say — a card there would be a claim about a dependency the tab does not have.
+ *
+ * Sabotage-witnessed (wave-4 /grade-tests, w4g5-of-*): CrmPage dropping the
+ * `failedBody` clause, wrapping the Contacts tab in the org gate
+ * (`needsOrg = true`), wiring the card's retry to nothing, and
+ * `OrgSelectionState` skipping its zero-org branch each turn a case red. The
+ * Contacts case now proves the tab RENDERED (it passed on a blank page before)
+ * and its reads are stubbed (they were live fetches, ADR 0661).
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, act, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
-const { listOrgs, listCompanies } = vi.hoisted(() => ({ listOrgs: vi.fn(), listCompanies: vi.fn() }));
+type OrgApi = typeof import('../crmOrgClient.js');
+type CrmApi = typeof import('../crmClient.js');
+const { listOrgs, listCompanies } = vi.hoisted(() => ({
+  listOrgs: vi.fn<OrgApi['listOrgs']>(),
+  listCompanies: vi.fn<OrgApi['listCompanies']>(),
+}));
+const crm = vi.hoisted(() => ({
+  listContacts: vi.fn<CrmApi['listContacts']>(),
+  listSegments: vi.fn<CrmApi['listSegments']>(),
+  listContactFields: vi.fn<CrmApi['listContactFields']>(),
+}));
+vi.mock('../crmClient.js', async (orig) => ({ ...(await orig<CrmApi>()), ...crm }));
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 vi.mock('../crmOrgClient.js', async (orig) => ({
   ...(await orig<typeof import('../crmOrgClient.js')>()),
@@ -45,9 +63,12 @@ const mount = async (): Promise<void> => {
 
 afterEach(cleanup);
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   listOrgs.mockResolvedValue([ORG]);
   listCompanies.mockResolvedValue([]);
+  crm.listContacts.mockResolvedValue([]);
+  crm.listSegments.mockResolvedValue([]);
+  crm.listContactFields.mockResolvedValue([]);
 });
 
 describe('a failed org read is not "no organizations"', () => {
@@ -105,6 +126,10 @@ describe('a failed org read is not "no organizations"', () => {
     listOrgs.mockRejectedValue(new Error('503'));
     render(<MemoryRouter initialEntries={['/crm?tab=contacts']}><CrmPage /></MemoryRouter>);
     await act(async () => {});
+    // Positive control: the Contacts tab really rendered and read — without it
+    // both absences below hold on a page that rendered nothing at all.
+    expect(await screen.findByText('No contacts yet')).toBeTruthy();
+    expect(crm.listContacts).toHaveBeenCalled();
     expect(screen.queryByText('Could not load your organizations')).toBeNull();
     expect(screen.queryByText('No organizations')).toBeNull();
   });

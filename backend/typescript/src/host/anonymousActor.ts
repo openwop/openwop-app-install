@@ -42,6 +42,7 @@ import type { AiCallMessage, AiToolCallRequest, AiToolCallResult } from '../exec
 import { buildRunRecord } from './runDispatch.js';
 import { compileAgentTools, runChatToolLoop, type AgentEvent } from './agentDispatch.js';
 import { createScopedAgentToolProvider } from './agentToolProvider.js';
+import { buildLaneFirewall } from './laneFirewall.js';
 import { isDeniedWebhookHost } from './webhookEgressGuard.js';
 import { getApproval, resolveApproval, reopenApproval, eraseApprovalSubject, registerAnonSurfaceWriteApprovalHandler, type PendingApproval } from './approvalService.js';
 import { resolveEffectiveAccess } from './accessControlService.js';
@@ -193,7 +194,11 @@ export function anonRunOwner(
  *  ADR 0469: `anon-write-held`/`-capped` = the HITL hold path (A2/A3);
  *  `anon-write-auto-allowed`/`-auto-capped` = the Phase-D rate-limit-session-cap
  *  path (auto-executed inline under a per-session+per-day cap / denied over it). */
-export type AnonAuthorizationReason = 'anon-granted' | 'anon-not-granted' | 'anon-write-ungated' | 'anon-egress-denied' | 'anon-write-held' | 'anon-write-capped' | 'anon-write-auto-allowed' | 'anon-write-auto-capped';
+export type AnonAuthorizationReason = 'anon-granted' | 'anon-not-granted' | 'anon-write-ungated' | 'anon-egress-denied' | 'anon-write-held' | 'anon-write-capped' | 'anon-write-auto-allowed' | 'anon-write-auto-capped'
+  // ADR 0834 D1 — the capability firewall refused a GRANTED tool (`denied`: a tenant or
+  // platform deny; `held`: an ask the anonymous lane cannot answer — it has no ledger and
+  // no approver, so a held call is refused, never queued past a policy).
+  | 'anon-firewall-denied' | 'anon-firewall-held';
 
 /**
  * RFC 0132 §C — the decision for ONE anon tool call against a surface grant.
@@ -469,13 +474,26 @@ export async function runAnonReadTurn(params: AnonReadTurnParams): Promise<AnonR
 
   // §C.1 — a model-requested tool NOT in the grant is refused by the shared loop
   // (`agent.toolReturned{status:'forbidden'}`) and never dispatched; mirror that into
-  // an allowed:false `anon-not-granted` audit record. The loop sets no capability-
-  // scope/firewall gate, so a `forbidden` here can only mean "not in the grant".
+  // an allowed:false `anon-not-granted` audit record. ADR 0834 D1: the loop now also
+  // carries the capability firewall, which refuses GRANTED tools — those are audited
+  // through `onFirewallDecision` below with their own reason, so this mirror is
+  // restricted to names outside the grant (a firewall refusal is never mislabelled).
+  const grantedSet = new Set(granted);
   const onEvent = async (e: AgentEvent): Promise<void> => {
     if (e.type === 'agent.toolReturned' && (e as { status?: unknown }).status === 'forbidden') {
       const toolName = typeof (e as { toolName?: unknown }).toolName === 'string' ? String((e as { toolName?: unknown }).toolName) : 'unknown';
-      await decide(toolName, false, 'anon-not-granted');
+      if (!grantedSet.has(toolName)) await decide(toolName, false, 'anon-not-granted');
     }
+  };
+  // ADR 0834 D1 / S3 — the anonymous lane was the one tool-executing lane with NO
+  // firewall, so a tenant or platform `deny` never reached a widget visitor. Forced
+  // safe (no bypass), no approvals (no ledger, no approver): a held call is refused.
+  const { hook: firewall } = await buildLaneFirewall({ tenantId, lane: 'anon', resource: runId, dedupeKey: runId });
+  // The loop's sink is synchronous; the audit writes are collected and awaited after the
+  // loop so the run's record is complete before the turn settles.
+  const firewallAudits: Promise<void>[] = [];
+  const onFirewallDecision = (d: { toolName: string; decision: 'deny' | 'require-approval' }): void => {
+    firewallAudits.push(decide(d.toolName, false, d.decision === 'deny' ? 'anon-firewall-denied' : 'anon-firewall-held').catch(() => {}));
   };
 
   const messages: AiCallMessage[] = [{ role: 'user', content: params.fencedUserMessage }];
@@ -489,9 +507,12 @@ export async function runAnonReadTurn(params: AnonReadTurnParams): Promise<AnonR
       persona: agent.persona,
       ...(params.maxRounds ? { maxRounds: params.maxRounds } : {}),
       onEvent,
+      firewall,
+      onFirewallDecision,
     },
     { callAIWithTools: params.callAIWithTools, executeTool: wrappedExecuteTool },
   );
+  await Promise.all(firewallAudits);
 
   const doneAt = new Date().toISOString();
   try {
@@ -583,6 +604,14 @@ async function decideAnonSurfaceWrite(
     // Egress writes can't be revalidated here (no captured audience) — fail closed.
     if (tool.destination) {
       throw new OpenwopError('egress_blocked', 'This queued action cannot be re-authorized for network egress.', 403, { approvalId });
+    }
+    // ADR 0834 D1 — a deny that landed while the write sat in the queue (a tenant or
+    // platform rule) still binds: re-check before executing. An ask is answered by this
+    // very approval; only a `deny` refuses.
+    const { hook: firewall } = await buildLaneFirewall({ tenantId, lane: 'anon', resource: runId });
+    const verdict = firewall.evaluate([], tool.name);
+    if (verdict.decision === 'deny') {
+      throw new OpenwopError('forbidden', `The capability firewall now refuses this action${verdict.reason ? `: ${verdict.reason}` : '.'}`, 403, { approvalId, tool: tool.name });
     }
     // Tenant-scoped, actingUserId UNDEFINED (the no-secret floor) — the same posture
     // the held turn ran under. A secret/deliverable tool fails closed in the provider.

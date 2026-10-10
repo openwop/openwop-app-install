@@ -51,10 +51,25 @@ if is_running; then
   exit $?
 fi
 
-# Cold start: ensure Playwright browsers are available
-if ! node -e "require('playwright').chromium.name()" 2>/dev/null; then
-  echo "Installing Playwright Chromium..." >&2
-  npx playwright install chromium >&2
+# Cold start: ensure Playwright browsers are available — with the repo's PINNED
+# Playwright, never a bare `npx playwright install`.
+#
+# ~/Library/Caches/ms-playwright is shared by every worktree, session and project on
+# the machine, and an install GARBAGE-COLLECTS the builds it thinks are unused. From a
+# worktree with no root node_modules, `npx` resolved whatever Playwright was newest and
+# deleted builds other checkouts need: the frontend's pinned build on 2026-10-06 (every
+# e2e test in a merge train failed at launch), and another project's on 2026-10-08.
+# So: refuse without the pinned install, check the EXECUTABLE (`chromium.name()` is true
+# whether or not a browser is downloaded), and skip the GC when installing.
+PW_CLI="$PROJECT_ROOT/node_modules/playwright/cli.js"
+if [ ! -f "$PW_CLI" ]; then
+  echo "error: no pinned Playwright at $PW_CLI — run \`npm ci\` at the repo root first." >&2
+  echo "       (browse.sh never runs a bare \`npx playwright install\`: it prunes the shared browser cache.)" >&2
+  exit 1
+fi
+if ! (cd "$PROJECT_ROOT" && node -e "require('fs').accessSync(require('playwright').chromium.executablePath())") 2>/dev/null; then
+  echo "Installing Playwright Chromium (pinned $(node "$PW_CLI" --version))..." >&2
+  PLAYWRIGHT_SKIP_BROWSER_GC=1 node "$PW_CLI" install chromium >&2
 fi
 
 echo "Starting browser server..." >&2

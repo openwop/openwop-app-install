@@ -57,7 +57,7 @@ export const commentsFeature: BackendFeature = {
     // WF-CMNT-10 — bumped WITH the behavioural change. Node packs have no
     // version-aware precedence on the mount lane, so a fix at an unchanged
     // version is silently inert on a registry-installing host.
-    { name: 'feature.comments.nodes', version: '1.1.0' },
-    { name: 'feature.comments.agents', version: '1.0.1' }, // CFP-1 real chat tools
+    { name: 'feature.comments.nodes', version: '1.1.1' },
+    { name: 'vendor.openwop-app.comments.agents', version: '1.0.2' }, // CFP-1 real chat tools
   ],
 };

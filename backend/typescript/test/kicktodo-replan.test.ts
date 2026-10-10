@@ -60,7 +60,7 @@ afterAll(() => { __clearFeatureSurfaces(); });
 
 const packUrl = new URL('../../../packs/feature.kicktodo.nodes/index.mjs', import.meta.url).href;
 const chatUrl = new URL('../../../packs/vendor.myndhyve.chat/index.mjs', import.meta.url).href;
-const AGENTS_PACK = new URL('../../../packs/feature.kicktodo.agents', import.meta.url);
+const AGENTS_PACK = new URL('../../../packs/vendor.openwop-app.kicktodo.agents', import.meta.url);
 
 const storage = await openStorage('memory://');
 setEventLogBackend(storage);

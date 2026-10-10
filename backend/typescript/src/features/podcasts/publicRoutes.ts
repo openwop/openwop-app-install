@@ -24,11 +24,13 @@
  */
 
 import type { Request, Response } from 'express';
+import { assetServeHeaders } from '../../host/assetServeHeaders.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { createLogger } from '../../observability/logger.js';
 import { throttleLog } from '../../observability/logSampler.js';
 import { publicBaseUrl } from '../featureRoute.js';
-import { resolveOne } from '../../host/featureToggles/service.js';
+import { resolveToggle } from '../../host/featureToggles/service.js';
+import { ownerPublicRuntimeLapsed } from '../../host/publicLapse.js';
 import { getOrg } from '../../host/accessControlService.js';
 import { resolveMediaAsset } from '../../host/inMemorySurfaces.js';
 import {
@@ -52,8 +54,11 @@ const TOGGLE_ID = 'podcasts';
 async function resolvePublicOrg(orgId: string): Promise<{ tenantId: string } | null> {
   const org = await getOrg(orgId);
   if (!org) return null;
-  const assignment = await resolveOne(TOGGLE_ID, { tenantId: org.tenantId });
+  // ADR 0819 §1 opt-out — a PUBLIC lane (tenant from the resource): ADR 0419 never paywalls a shopper/visitor on the operator's plan.
+  const assignment = await resolveToggle(TOGGLE_ID, { tenantId: org.tenantId });
   if (!assignment || !assignment.enabled) return null;
+  // ADR 0820 §7 — the owner-lapse policy (off unless OPENWOP_BILLING_PUBLIC_LAPSE_GRACE_DAYS is set); the lane's own unavailable shape.
+  if (await ownerPublicRuntimeLapsed(TOGGLE_ID, org.tenantId)) return null;
   return { tenantId: org.tenantId };
 }
 
@@ -142,7 +147,7 @@ function parseRange(header: string | undefined, size: number): { start: number; 
 
 export function registerPublicPodcastRoutes(deps: RouteDeps): void {
   const { app } = deps;
-  const PUB = '/v1/host/openwop-app/public/:orgId/podcasts';
+  const PUB = '/host/openwop-app/public/:orgId/podcasts';
 
   // ── Show index (JSON) ──
   app.get(PUB, async (req, res, next) => {
@@ -226,7 +231,7 @@ export function registerPublicPodcastRoutes(deps: RouteDeps): void {
   const sendPrerender = (res: Response, isHead: boolean, html: string | null, languageCode: string): void => {
     if (html === null) { notFound(res); return; }
     res.setHeader('Content-Language', languageCode);
-    res.setHeader('Vary', 'Accept-Language, Accept-Encoding');
+    res.vary('Accept-Language, Accept-Encoding');
     res.setHeader('Cache-Control', `public, max-age=${prerenderTtlSeconds()}`);
     res.type('html');
     if (isHead) { res.end(); return; }
@@ -328,7 +333,10 @@ export function registerPublicPodcastRoutes(deps: RouteDeps): void {
       buffer = m.buffer; size = m.buffer.length; contentType = m.contentType;
     }
     res.setHeader('Accept-Ranges', 'bytes');
-    res.setHeader('Content-Type', contentType);
+    // ADR 0818 §1 — the second exit for stored bytes: an episode's audio token
+    // can name an asset stored with any type (the speech seam stores the
+    // provider's), so it gets the same headers as the token serve route.
+    for (const [k, v] of Object.entries(assetServeHeaders(contentType))) res.setHeader(k, v);
     res.setHeader('Cache-Control', 'public, max-age=3600');
 
     const range = parseRange(req.headers.range, size);
@@ -362,7 +370,7 @@ export function registerPublicPodcastRoutes(deps: RouteDeps): void {
     try { await audioHandler(req, res, true); } catch (err) { next(err); }
   });
 
-  log.info('public podcast routes registered (/v1/host/openwop-app/public/:orgId/podcasts/*)');
+  log.info('public podcast routes registered (/host/openwop-app/public/:orgId/podcasts/*)');
 }
 
 /** The opaque Media-asset token an episode's audio enclosure points at. */

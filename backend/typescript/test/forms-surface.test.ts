@@ -1,11 +1,21 @@
 /**
  * Forms extension surface (ADR 0014) — ctx.features.forms + feature.forms.nodes.
  * Service-level: the surface projects out internal columns and tenant/org-isolates;
- * the node pack runs read-only over a stub ctx.features.forms. (The REST + public
+ * the node pack runs read-only over the REAL surface (`buildFormsSurface`, not a
+ * stub — FRMWF-15 corrected the wording). (The REST + public
  * faces are covered by forms-route.test.ts.)
+ *
+ * Sabotage-witnessed (grade-tests w8, probes w8g1-su-*): leaking `tenantId` from either
+ * projection, a node that drops the surface's rows, accepting an unmapped binding
+ * field, not clearing a `null` binding, keeping an orphaned binding on a fields-only
+ * patch, `willFile` without a binding, a stringified checkbox title, and no form-title
+ * fallback each turn a case red. Double guard recorded: the cross-tenant
+ * `getSubmissions` read is refused by `getForm` AND by the per-tenant index in
+ * `listSubmissions` (removing either alone stays green — probe su-sub-guard).
  */
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { createApp } from '../src/index.js';
+import { openSqliteStorage } from '../src/storage/sqlite/index.js';
+import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { __resetFormsStore, createForm, updateForm, recordSubmission, type FormDef } from '../src/features/forms/formsService.js';
 import { buildFormsSurface } from '../src/features/forms/surface.js';
 
@@ -13,12 +23,8 @@ const mkForm = (tenantId: string, orgId: string): Promise<FormDef> =>
   createForm({ tenantId, orgId, title: 'Contact', fields: [{ key: 'name', label: 'Name', type: 'text', required: false }], createdBy: 'u1' });
 
 describe('Forms extension surface (ADR 0014 — ctx.features.forms + nodes)', () => {
-  beforeAll(async () => {
-    // boot createApp once to initialize host-ext persistence (the
-    // DurableCollection backend) — no listen needed for these service-level tests.
-    process.env.OPENWOP_STORAGE_DSN = 'memory://';
-    await createApp({ port: 18799, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  });
+  // Service-level: only host-ext persistence is needed (this used to boot createApp).
+  beforeAll(() => { initHostExtPersistence(openSqliteStorage(':memory:')); });
   beforeEach(async () => { await __resetFormsStore(); });
 
   it('listForms projects out internal columns + tenant-isolates', async () => {
@@ -43,7 +49,7 @@ describe('Forms extension surface (ADR 0014 — ctx.features.forms + nodes)', ()
     expect(other.submissions).toHaveLength(0);
   });
 
-  it('feature.forms.nodes run read-only over a stub ctx.features.forms', async () => {
+  it('feature.forms.nodes run read-only over the real ctx.features.forms surface', async () => {
     const a = await mkForm('t1', 'o1');
     await recordSubmission(a, { name: 'Lead' }, {});
     const mod = await import('../../../packs/feature.forms.nodes/index.mjs');

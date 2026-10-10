@@ -18,8 +18,13 @@ export async function deliverReservedWorkItem(
   deps: StartRunDeps,
   reservation: Extract<WorkItemExecutionClaim, { kind: 'started' }>,
   now: number = Date.now(),
+  /** ADR 0832 D3 — the person pressing Run (the manual route). The daemon passes
+   *  none and the item's `requestedBy` is used. Narrows only. */
+  causedBy?: string,
 ): Promise<string | null> {
+  const orgScopeSubject = causedBy ?? reservation.item.requestedBy;
   const runId = await startWorkflowRun(deps, {
+    ...(orgScopeSubject ? { orgScopeSubject } : {}),
     tenantId: reservation.item.tenantId,
     workflowId: reservation.item.workflowId!,
     runId: reservation.runId,

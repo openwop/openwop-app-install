@@ -23,11 +23,13 @@
  * markdown artifact. Gated on the `document-editor` toggle.
  */
 import { Button } from '../../ui/Button.js';
-import { useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { formatDateTime, formatNumber } from '../../i18n/format.js';
+import { formatNumber } from '../../i18n/format.js';
 import { Notice, StateCard, Skeleton, useUnsavedChangesWarning } from '../../ui/index.js';
+import { announce } from '../../ui/announce.js';
+import { getEffectiveAccess } from '../../client/accessClient.js';
 import { useConfirmDiscardUnsaved } from '../../ui/useUnsavedChangesWarning.js';
 import { Markdown } from '../../ui/Markdown.js';
 import { confirm } from '../../ui/confirm.js';
@@ -39,9 +41,22 @@ import { CREATABLE_CANVAS_TYPES } from '../../canvas/creatableTypes.js';
 import {
   getDocument, locateDocument, patchDocument, deleteDocument,
   listVersions, addVersion, renderDocument, promoteToHtml, type RenderExportFormat,
-  DOC_STATUSES,
+  DOC_STATUSES, DocumentsApiError,
   type DocumentRecord, type DocumentVersion, type DocStatus,
 } from './documentsClient.js';
+
+// ADR 0838 D6 — view / compare / restore, lazy so neither it nor the diff view
+// enters the entry chunk.
+const DocumentVersionHistory = lazy(() => import('./DocumentVersionHistory.js'));
+const SHAREABLE: readonly DocStatus[] = ['approved', 'final'];
+/** Mirror of the server's lifecycle (`documentsService.ts` STATUS_TRANSITIONS):
+ *  the select offers only moves the server accepts. */
+const STATUS_TRANSITIONS: Record<DocStatus, readonly DocStatus[]> = {
+  draft: ['draft', 'in-review', 'approved'],
+  'in-review': ['in-review', 'draft', 'approved'],
+  approved: ['approved', 'final', 'in-review', 'draft'],
+  final: ['final', 'approved', 'draft'],
+};
 
 type DocumentDetail = DocumentRecord & { currentVersion: DocumentVersion | null };
 type DocEditorView = 'write' | 'split' | 'preview';
@@ -75,6 +90,12 @@ export function DocumentDetailPage(): JSX.Element {
   const retryLoad = (): void => { setLoadFailed(null); setLoading(true); setReloadNonce((n) => n + 1); };
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  // What the caller may do here (the doors' own scopes): write = edit/save/
+  // restore/delete; approve = `host:members:manage`. Unknown until read, and
+  // a failed read leaves the controls on (the server still refuses).
+  const [canWrite, setCanWrite] = useState(true);
+  const [canApprove, setCanApprove] = useState(true);
+  const [saving, setSaving] = useState(false);
   const headingRef = useRef<HTMLHeadingElement>(null);
   // Write / Split / Preview (ADR 0350 Phase 2). Persisted so the choice sticks
   // across documents; defaults to Split (source + live preview side by side).
@@ -119,6 +140,15 @@ export function DocumentDetailPage(): JSX.Element {
     return () => { cancelled = true; };
   }, [access.enabled, documentId, orgParam, reloadNonce]);
 
+  useEffect(() => {
+    if (!orgId) return;
+    let cancelled = false;
+    void getEffectiveAccess({ orgId })
+      .then((a) => { if (!cancelled && Array.isArray(a?.scopes)) { setCanWrite(a.scopes.includes('workspace:write')); setCanApprove(a.scopes.includes('host:members:manage')); } })
+      .catch(() => { /* unknown: leave controls on; the server is the gate */ });
+    return () => { cancelled = true; };
+  }, [orgId]);
+
   // Move focus to the heading once the document loads, so keyboard/SR users land
   // on what just appeared (VOXUX-G1, carried over from the inline editor).
   const loadedTitle = doc?.title;
@@ -132,14 +162,46 @@ export function DocumentDetailPage(): JSX.Element {
   // silently discarded unsaved edits while the page's own `dirty` knew better.
   const confirmLeave = useConfirmDiscardUnsaved(dirty);
 
+  /** ADR 0838 D5 — a CHECKED save, based on the version this screen loaded. If
+   *  someone saved a newer one meanwhile the server refuses (`stale_base`) and the
+   *  user is told, instead of their save silently burying the other. */
+  async function commitVersion(content: string): Promise<boolean> {
+    if (!doc) return false;
+    try {
+      const v = await addVersion(orgId, doc.documentId, content, doc.currentVersionId);
+      setDoc((d) => (d ? { ...d, currentVersionId: v.versionId, currentVersion: v } : d));
+      setVersions(await listVersions(orgId, doc.documentId));
+      announce(t('versionSaved', { version: formatNumber(v.version) }));
+      return true;
+    } catch (e) {
+      setError(errorText(e));
+      return false;
+    }
+  }
+
+  function errorText(e: unknown): string {
+    if (e instanceof DocumentsApiError && e.reason === 'stale_base') return t('staleVersionError');
+    if (e instanceof DocumentsApiError && e.reason === 'no_content') return t('approveNeedsContent');
+    if (e instanceof DocumentsApiError && e.status === 403) return t('approveForbidden');
+    // A 400 carries the server's specific validation reason; anything else is
+    // a failure the user can only retry.
+    if (e instanceof DocumentsApiError && e.status === 400) return e.message;
+    return t('actionFailed');
+  }
+
   async function saveVersion(): Promise<void> {
     if (!doc) return;
+    setBusy(true); setSaving(true); setError('');
+    try {
+      if (await commitVersion(draft)) setSavedDraft(draft);
+    } finally { setBusy(false); setSaving(false); }
+  }
+
+  async function restoreVersion(v: DocumentVersion): Promise<void> {
     setBusy(true); setError('');
     try {
-      await addVersion(orgId, doc.documentId, draft);
-      setSavedDraft(draft);
-      setVersions(await listVersions(orgId, doc.documentId));
-    } catch (e) { setError(e instanceof Error ? e.message : t('actionFailed')); } finally { setBusy(false); }
+      if (await commitVersion(v.content)) { setDraft(v.content); setSavedDraft(v.content); }
+    } finally { setBusy(false); }
   }
 
   async function download(format: RenderExportFormat): Promise<void> {
@@ -151,13 +213,32 @@ export function DocumentDetailPage(): JSX.Element {
     } catch (e) { setError(e instanceof Error ? e.message : t('actionFailed')); } finally { setBusy(false); }
   }
 
-  async function setStatus(status: DocStatus): Promise<void> {
+  async function setStatus(status: DocStatus, opts: { approveLatest?: boolean } = {}): Promise<void> {
     if (!doc) return;
     setError('');
+    const approving = SHAREABLE.includes(status);
+    // ADR 0838 A1 — approve what you SEE. Unsaved text is not what would publish,
+    // so approving waits for a save; the saved version on screen is named
+    // explicitly, so a version someone else saves meanwhile is never published.
+    if (approving && dirty) { setError(t('approveSaveFirst')); return; }
     try {
-      const updated = await patchDocument(orgId, doc.documentId, { status });
-      setDoc({ ...doc, status: updated.status });
-    } catch (e) { setError(e instanceof Error ? e.message : t('actionFailed')); }
+      const updated = await patchDocument(orgId, doc.documentId, {
+        status,
+        // Moving between published statuses (approved ↔ final) keeps the version
+        // that is already published; only a first approval or "Approve latest"
+        // publishes the version on screen.
+        ...(approving && (opts.approveLatest || !SHAREABLE.includes(doc.status) || !doc.approvedVersionId)
+          ? (doc.currentVersionId ? { approvedVersionId: doc.currentVersionId } : {})
+          : approving && doc.approvedVersionId ? { approvedVersionId: doc.approvedVersionId } : {}),
+      });
+      const next: DocumentDetail = { ...doc, status: updated.status };
+      if (updated.approvedVersionId) next.approvedVersionId = updated.approvedVersionId; else delete next.approvedVersionId;
+      setDoc(next);
+    } catch (e) {
+      setError(e instanceof DocumentsApiError && e.status === 409 && !e.reason ? t('invalidTransition') : errorText(e));
+      return;
+    }
+    announce(t('statusChanged', { status: t(`status_${status}`) }));
   }
 
   // ADR 0350 Phase 3 — one-way, idempotent promotion to a rich `canvas.document`.
@@ -181,7 +262,7 @@ export function DocumentDetailPage(): JSX.Element {
       // showed a diverged draft: a silent content fork on top of the discard.
       // Save first, so what gets promoted is what the user is looking at.
       if (dirty) {
-        await addVersion(orgId, doc.documentId, draft);
+        if (!(await commitVersion(draft))) { setBusy(false); return; }
         setSavedDraft(draft);
       }
       const { html, title, promotedCanvasId } = await promoteToHtml(orgId, doc.documentId);
@@ -200,15 +281,21 @@ export function DocumentDetailPage(): JSX.Element {
   async function removeDoc(): Promise<void> {
     if (!doc) return;
     if (!(await confirm({ title: t('deleteDocumentConfirm', { name: doc.title }), body: t('deleteDocumentBody'), danger: true, confirmLabel: t('common:delete') }))) return;
-    setError('');
+    setError(''); setBusy(true);
     try {
       await deleteDocument(orgId, doc.documentId);
       // DOCTPL-1 — the row is gone; clear `dirty` before navigating so no
       // leave-guard (in-app or beforeunload) can fire over deleted content.
       setSavedDraft(draft);
       navigate('/documents');
-    } catch (e) { setError(e instanceof Error ? e.message : t('actionFailed')); }
+    } catch (e) { setError(errorText(e)); setBusy(false); }
   }
+
+  // ADR 0838 D2 — which version the share link serves (a legacy approved row
+  // with no pin publishes its current version, as the server does).
+  const publishedVersionId = doc && SHAREABLE.includes(doc.status) ? (doc.approvedVersionId ?? doc.currentVersionId) : undefined;
+  const publishedVersion = versions.find((v) => v.versionId === publishedVersionId);
+  const publishedBehind = !!doc && !!publishedVersionId && !!doc.currentVersionId && publishedVersionId !== doc.currentVersionId;
 
   const backLink = (
     // DOCTPL-1 — the charter/form-guard pattern: a plain click on the page's
@@ -232,7 +319,7 @@ export function DocumentDetailPage(): JSX.Element {
     <div className="u-p-4 u-grid u-gap-3 u-mx-auto u-w-full" style={{ maxWidth: viewMode === 'split' ? '1200px' : '900px' }}>
       <div className="action-bar">{backLink}</div>
 
-      {error ? <Notice variant="error">{error}</Notice> : null}
+      {error ? <Notice variant="error" announce={error}>{error}</Notice> : null}
 
       {loading ? (
         <div role="status"><span className="sr-only">{t('common:loading')}</span><Skeleton width="40%" /><Skeleton width="90%" /></div>
@@ -260,13 +347,15 @@ export function DocumentDetailPage(): JSX.Element {
               <Button variant="quiet" size="sm" aria-pressed={viewMode === 'split'} onClick={() => setViewMode('split')}><ColumnsIcon size={14} aria-hidden /> {t('viewSplit')}</Button>
               <Button variant="quiet" size="sm" aria-pressed={viewMode === 'preview'} onClick={() => setViewMode('preview')}><EyeIcon size={14} aria-hidden /> {t('viewPreview')}</Button>
             </div>
-            <select value={doc.status} onChange={(e) => void setStatus(e.target.value as DocStatus)} className="u-w-auto" aria-label={t('statusAriaLabel')}>
-              {DOC_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+            <select value={doc.status} disabled={!canWrite} onChange={(e) => void setStatus(e.target.value as DocStatus)} className="u-w-auto" aria-label={t('statusAriaLabel')}>
+              {DOC_STATUSES
+                .filter((s) => s === doc.status || (STATUS_TRANSITIONS[doc.status].includes(s) && (canApprove || !SHAREABLE.includes(s))))
+                .map((s) => <option key={s} value={s}>{t(`status_${s}`)}</option>)}
             </select>
           </div>
           <div className={`md-editor-body${viewMode === 'split' ? ' md-editor-body--split' : ''}`}>
             {viewMode !== 'preview' ? (
-              <textarea className="md-editor-textarea" value={draft} onChange={(e) => setDraft(e.target.value)} rows={20} placeholder={t('contentPlaceholder')} aria-label={t('contentAriaLabel')} />
+              <textarea className="md-editor-textarea" value={draft} readOnly={!canWrite} onChange={(e) => setDraft(e.target.value)} rows={20} placeholder={t('contentPlaceholder')} aria-label={t('contentAriaLabel')} />
             ) : null}
             {viewMode !== 'write' ? (
               <div className="md-editor-preview" role="region" aria-label={t('previewAria')} tabIndex={0}>
@@ -274,8 +363,9 @@ export function DocumentDetailPage(): JSX.Element {
               </div>
             ) : null}
           </div>
+          {!canWrite ? <Notice variant="info">{t('readOnlyNotice')}</Notice> : null}
           <div className="action-bar">
-            <Button variant="primary" disabled={busy} onClick={() => void saveVersion()}><SaveIcon /> {t('saveVersion')}</Button>
+            {canWrite ? <Button variant="primary" disabled={busy} onClick={() => void saveVersion()}><SaveIcon /> {saving ? t('saving') : t('saveVersion')}</Button> : null}
             {/* ADR 0400 — the export menu (PDF · Slides · CSV · DOCX · EPUB · ODT);
                 editable formats carry the fidelity hint (math/footnote softening). */}
             <Menu
@@ -297,10 +387,10 @@ export function DocumentDetailPage(): JSX.Element {
                 { id: 'latex', label: <>{t('downloadLatex')} <span className="muted">· {t('exportLatexTag')}</span></>, title: t('exportLatexHint'), onSelect: () => void download('latex') },
               ]}
             />
-            {richEditor.enabled && DOC_CANVAS && !doc.promotedCanvasId ? (
+            {canWrite && richEditor.enabled && DOC_CANVAS && !doc.promotedCanvasId ? (
               <Button variant="quiet" disabled={busy} title={t('promoteToRichHint')} onClick={() => void promoteToRich()}><SparklesIcon /> {t('promoteToRich')}</Button>
             ) : null}
-            <Button variant="quiet" aria-label={t('common:delete')} onClick={() => void removeDoc()}><TrashIcon /> {t('common:delete')}</Button>
+            {canWrite ? <Button variant="quiet" disabled={busy} onClick={() => void removeDoc()}><TrashIcon /> {t('common:delete')}</Button> : null}
           </div>
           {doc.promotedCanvasId && DOC_CANVAS ? (
             <Notice variant="info">
@@ -318,19 +408,27 @@ export function DocumentDetailPage(): JSX.Element {
               >{t('openRichDocument')} <ArrowUpRightIcon size={13} aria-hidden /></Link>
             </Notice>
           ) : null}
+          {publishedBehind ? (
+            // ADR 0838 D2 — the share link serves the APPROVED version; say so
+            // when the latest saved text is not what is published.
+            <Notice variant="info">
+              {t('publishedBehindNotice', { version: formatNumber(publishedVersion?.version ?? 0) })}{' '}
+              {canApprove ? <Button variant="secondary" size="sm" disabled={busy || dirty} onClick={() => void setStatus(doc.status, { approveLatest: true })}>{t('approveLatest')}</Button> : null}
+            </Notice>
+          ) : null}
           {versions.length > 0 ? (
-            <div className="u-grid u-gap-1">
-              <span className="u-label-sm">{t('versionHistory')}</span>
-              {versions.map((v) => (
-                <span key={v.versionId} className="u-label-sm u-flex u-items-center u-gap-1">
-                  {t('versionEntry', { version: formatNumber(v.version), date: formatDateTime(v.createdAt) })}
-                  {/* DOCTPL-2 — a human doc can carry agent-written revisions;
-                      the history is where that distinction lives. */}
-                  {v.producedBy?.kind === 'agent' ? <span className="chip chip--ai u-fs-11">{t('draftedByAgent')}</span>
-                    : v.producedBy?.kind === 'run' ? <span className="chip chip--ai u-fs-11">{t('generatedByWorkflow')}</span> : null}
-                </span>
-              ))}
-            </div>
+            <Suspense fallback={<Skeleton width="60%" />}>
+              <DocumentVersionHistory
+                documentId={doc.documentId}
+                versions={versions}
+                currentVersionId={doc.currentVersionId}
+                publishedVersionId={publishedVersionId}
+                dirty={dirty}
+                busy={busy}
+                canWrite={canWrite}
+                onRestore={restoreVersion}
+              />
+            </Suspense>
           ) : null}
         </div>
       )}

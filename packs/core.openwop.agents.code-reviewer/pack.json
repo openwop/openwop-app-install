@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.agents.code-reviewer",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Code review agent. Reviews diffs or files for correctness, style, security, and design. Diff-aware prompting; cites file:line in findings. Pure-agent pack.",
   "author": "OpenWOP Working Group",
   "license": "Apache-2.0",
@@ -14,11 +14,11 @@
     "pattern"
   ],
   "engines": {
-    "openwop": ">=1.1.0 <2.0.0"
+    "openwop": ">=1.1.0 <3.0.0"
   },
   "peerDependencies": {
     "aiProviders": "supported",
-    "host.agentRuntime": "supported"
+    "agentRuntime": "supported"
   },
   "agents": [
     {
@@ -48,5 +48,6 @@
   "runtime": {
     "language": "remote",
     "entry": "pack.json"
-  }
+  },
+  "kind": "node"
 }

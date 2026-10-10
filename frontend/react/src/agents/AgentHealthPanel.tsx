@@ -50,7 +50,17 @@ const VERDICT_ICON: Record<Tone, (props: { size?: number }) => JSX.Element> = {
 /** The one-glance answer AND the next step: alarms first (failures, then stale
  *  commitments), then attention (awaiting approval), then a plain healthy/idle
  *  read. `note` tells the admin what to do, not just what the state is. */
-function verdict(h: AssistantHealth, persona: string, t: TFunction<'agents'>): { tone: Tone; label: string; note: string } {
+function verdict(
+  h: AssistantHealth,
+  persona: string,
+  t: TFunction<'agents'>,
+  loopFailure: { label: string; note: string } | null,
+): { tone: Tone; label: string; note: string } {
+  // ADR 0862 (`COS2UX-12`) — a perception loop failing on every tick is an alarm, not
+  // "healthy": in production the calendar loop failed most of its runs while this read green.
+  if (loopFailure && h.loops.some((l) => l.enabled && l.lastRunStatus === 'failed')) {
+    return { tone: 'danger', ...loopFailure };
+  }
   if (h.actions.failed > 0) {
     return { tone: 'danger', label: t('healthVerdictFailed', { label: t('healthActionPlural', { count: h.actions.failed }) }), note: t('healthVerdictFailedNote') };
   }
@@ -146,8 +156,11 @@ export function AgentHealthPanel({ persona = 'this agent' }: { persona?: string 
  *  exercise every verdict/empty state without a backend or admin session. */
 export function AgentHealthView({ health, persona = 'this agent' }: { health: AssistantHealth; persona?: string }): JSX.Element {
   const { t } = useTranslation('agents');
+  // The loop-failure copy lives in the lazy `assistantAction` namespace — read without
+  // suspending; until it loads, the verdict falls through to the other rules.
+  const { t: ta, ready } = useTranslation('assistantAction', { useSuspense: false });
   const { actions: a, commitments: c } = health;
-  const v = verdict(health, persona, t);
+  const v = verdict(health, persona, t, ready ? { label: ta('healthLoopFailed'), note: ta('healthLoopFailedNote') } : null);
   const VerdictIcon = VERDICT_ICON[v.tone];
   const generated = new Date(health.generatedAt);
   const ratesPending =

@@ -11,6 +11,8 @@
  * secret values, only `credentialRef` placeholders.
  */
 
+import { SR1_MIN_SECRET_LENGTH } from './textRedaction.js';
+
 const ephemeralByRun = new Map<string, Record<string, string>>();
 
 export function setRunSecrets(runId: string, secrets: Record<string, string>): void {
@@ -151,6 +153,50 @@ function scrubCredentialShapes(s: string): string {
 }
 
 export function stripSecretsFromPersisted<T>(payload: T): T {
+  return stripSecretsFull(payload);
+}
+
+/**
+ * ADR 0779 D4 — Tier 1 ONLY: replace every occurrence of a secret some run
+ * resolved, and nothing else (no credential-shape pass). For persisted state a later node READS back as
+ * its input (the scheduler snapshot's `nodeOutputs`, read by interrupt and pause
+ * resume): the Tier-2 shape pass would rewrite a legitimately credential-shaped
+ * value (`Bearer …`, `gho_…`) a node after the gate consumes, whereas a run has
+ * no legitimate need to carry its own provider key in an output.
+ */
+export function stripKnownRunSecrets<T>(payload: T): T {
+  // SUBSTRING, not whole-string (grade-code BYOKCD-3): the realistic leak is a
+  // key embedded in a larger string (`401 … key sk-…`). The SR-1 rules
+  // (`textRedaction.ts`): split/join (no regex), longest value first, and the
+  // 8-character floor so a short value cannot shred ordinary text.
+  const known = new Map<string, string>();
+  for (const perRun of ephemeralByRun.values()) {
+    for (const [ref, val] of Object.entries(perRun)) {
+      if (val && val.length >= SR1_MIN_SECRET_LENGTH) known.set(val, ref);
+    }
+  }
+  if (known.size === 0) return payload;
+  const ordered = [...known.entries()].sort((a, b) => b[0].length - a[0].length);
+  function walk(value: unknown): unknown {
+    if (typeof value === 'string') {
+      let out = value;
+      for (const [val, ref] of ordered) {
+        if (out.includes(val)) out = out.split(val).join(`<<redacted:${ref}>>`);
+      }
+      return out;
+    }
+    if (Array.isArray(value)) return value.map(walk);
+    if (value && typeof value === 'object') {
+      const out: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[k] = walk(v);
+      return out;
+    }
+    return value;
+  }
+  return walk(payload) as T;
+}
+
+function stripSecretsFull<T>(payload: T): T {
   const allSecrets = new Map<string, string>();
   for (const [_runId, perRun] of ephemeralByRun) {
     for (const [ref, val] of Object.entries(perRun)) {

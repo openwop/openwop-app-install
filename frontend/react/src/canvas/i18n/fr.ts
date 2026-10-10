@@ -13,6 +13,8 @@ export const messages = {
   loading: 'Chargement de l’éditeur…',
   loadError: 'Impossible de charger ce canevas.',
   notAvailable: 'Ce canevas n’est pas disponible — il a peut-être été supprimé, appartient à un autre espace, ou sa fonctionnalité est désactivée.',
+  invalidArtifact: 'Ce design ne peut pas être ouvert dans l’éditeur : il utilise des composants ou des valeurs hors du catalogue. Demandez à l’assistant de le régénérer.',
+  invalidArtifactDetail: 'Ce qui a été refusé',
   noOrg: 'Aucun espace de travail disponible.',
   retry: 'Réessayer',
   liveConnecting: 'Démarrage de la session en direct…',

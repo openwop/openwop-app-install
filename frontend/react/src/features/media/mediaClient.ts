@@ -49,7 +49,7 @@ export interface MediaAsset {
 /** A document referencing an asset (ADR 0206 B4 — the "used by" graph). */
 export interface MediaUsageRef {
   assetId: string;
-  refKind: 'cms-page' | 'campaign' | 'creative-brief';
+  refKind: 'cms-page' | 'campaign' | 'creative-brief' | 'creative-render';
   refId: string;
   refLabel: string;
   lastSeenAt: string;

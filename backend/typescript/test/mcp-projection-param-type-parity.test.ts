@@ -42,12 +42,13 @@
  * passing unless the guard asserts the floor.
  */
 import { describe, expect, it } from 'vitest';
-import { readFileSync, existsSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { notebookMcpToolWorkflows } from '../src/features/notebooks/mcpToolsWorkflows.js';
 import { docsMcpToolWorkflows } from '../src/features/docs/mcpToolsWorkflows.js';
 import { ucpMcpToolWorkflows } from '../src/features/commerce/ucp/ucpMcpTools.js';
 import { appBuilderMcpControlWorkflows } from '../src/features/app-builder/mcpControlWorkflows.js';
+import { readPackManifest } from './helpers/readPackManifest.js';
 
 const REPO = join(import.meta.dirname, '..', '..', '..');
 const EXPOSE_TOOL = 'core.openwop.mcp.expose-tool';
@@ -84,7 +85,7 @@ function loadProjections(): Projection[] {
   for (const dir of readdirSync(root)) {
     const manifest = join(root, dir, 'pack.json');
     if (!existsSync(manifest)) continue;
-    const pack = JSON.parse(readFileSync(manifest, 'utf8')) as { chains?: Chain[] };
+    const pack = readPackManifest<{ chains?: Chain[] }>(manifest);
     for (const chain of pack.chains ?? []) {
       const expose = (chain.dag?.nodes ?? []).find((n) => n.typeId === EXPOSE_TOOL);
       const tool = expose?.config?.inputSchema;

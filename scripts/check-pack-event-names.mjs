@@ -66,14 +66,9 @@ const files = [...packFiles(join(ROOT, 'examples', 'workflow-chain-packs')), ...
  * `conformance-v2-known-red.txt`. Each carries the reason it is still here,
  * because a bare allowlist is a gate that tolerates what it never mentions.
  */
-const ADMITTED = new Map([
-  ['host.crm.contact.created',
-   'emitted from 25 files; the rename is its own change (ADR 0682 shape). The pack no longer HARDCODES it — this is the parameter default, so moving the emitter is a one-line follow-up here.'],
-  ['host.users.user.deactivated',
-   'emitted from 17 files via USER_DEACTIVATED_EVENT; same follow-up as above.'],
-  ['host.forms.submission.created',
-   'HANDED BACK to openwop-1 (crosstalk 180c). Renaming it leaves forms-intake-chain-execution 4/9 red with the chain firing, the run completing and nothing filed — five hypotheses falsified, cause not found. Do NOT rename without re-running that test.'],
-]);
+// ADR 0792 (NP-V2-10) — EMPTY: the three chain packs now carry the v2 spelling,
+// and the host matches either spelling at every binding/subscription door.
+const ADMITTED = new Map([]);
 
 const findings = [];
 const admittedSeen = new Set();

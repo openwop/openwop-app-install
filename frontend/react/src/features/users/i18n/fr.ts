@@ -117,6 +117,7 @@ export const messages = {
   deleteUserBody: 'Cette action efface définitivement le compte de {{name}} et tout ce qui y est enregistré : profil, mémoires, flux de travail, exécutions et identifiants stockés. Aucun retour en arrière possible.',
   selfLockoutRefused: 'Vous ne pouvez pas désactiver, déconnecter ni supprimer votre propre compte depuis cette page — demandez à un autre administrateur.',
   legalHoldRefused: 'Cet espace de travail est sous conservation légale : les données utilisateur ne peuvent pas être effacées. Levez la conservation, puis réessayez.',
+  ownerRequiredRefused: 'Seul un propriétaire de cet espace de travail peut désactiver, déconnecter ou supprimer un autre propriétaire. Demandez à un propriétaire de le faire.',
   addRequired: 'Saisissez un id de principal.',
   addInvalidPrincipal: 'Un id de principal est un seul jeton sans espaces, p. ex. oidc:sub-123.',
   addDuplicate: 'Un utilisateur avec cet id de principal existe déjà.',

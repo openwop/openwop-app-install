@@ -39,6 +39,7 @@ const RESOURCE_ENUM = [...RESOURCE_TYPES];
 export function registerCommentsAgentTools(): void {
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: COMMENTS_LIST_TOOL_ID,
       description:
@@ -76,6 +77,7 @@ export function registerCommentsAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: COMMENTS_POST_TOOL_ID,
       description:

@@ -54,9 +54,13 @@ describe('processStripeEvent', () => {
     expect((await processStripeEvent('t1', event)).status).toBe('duplicate');
   });
 
+  // ADR 0786 D1 — a REAL session payload: no `priceId`, no `line_items` (expand-only),
+  // `customer: null` in payment mode. The pre-0786 fixture invented `priceId` and a
+  // `customer`, so this test stayed green while live pack purchases were never credited.
   it('credits the prepaid token balance on a token-pack checkout (idempotent)', async () => {
     await __resetBilling();
-    const event = { id: 'evt_pack_1', type: 'checkout.session.completed', data: { object: { customer: 'cus_x', priceId: 'price_pack_100k' } } };
+    const cs = await createCheckoutSession('t2', 'price_pack_100k', null);
+    const event = { id: 'evt_pack_1', type: 'checkout.session.completed', data: { object: { id: cs.sessionId, object: 'checkout.session', customer: null, payment_status: 'paid', metadata: {} } } };
     expect((await processStripeEvent('t2', event)).status).toBe('applied');
     expect((await getBalance('t2')).totalAvailable).toBe(100000);
     // retry does not double-credit
@@ -68,12 +72,17 @@ describe('processStripeEvent', () => {
 describe('processStripeEvent — R-1 cutover hardening', () => {
   it('CONCURRENT dual-endpoint delivery credits a token pack exactly once (CAS)', async () => {
     await __resetBilling();
-    const event = { id: 'evt_race', type: 'checkout.session.completed', data: { object: { customer: 'cus_r', priceId: 'price_pack_100k' } } };
+    const cs = await createCheckoutSession('tr', 'price_pack_100k', null);
+    const event = { id: 'evt_race', type: 'checkout.session.completed', data: { object: { id: cs.sessionId, customer: null, payment_status: 'paid' } } };
     // Both cutover endpoints deliver the same event at once — a get+put guard would
-    // double-credit; the CAS claim lets exactly one win.
+    // double-credit; the CAS claim lets exactly one win. ADR 0786 D0: the loser is told
+    // `in_progress` (the route answers 409 so Stripe retries it), not `duplicate` —
+    // a 2xx there would lose the event if the winner died mid-apply.
     const [a, b] = await Promise.all([processStripeEvent('tr', event), processStripeEvent('tr', event)]);
-    expect([a.status, b.status].sort()).toEqual(['applied', 'duplicate']);
+    expect([a.status, b.status].sort()).toEqual(['applied', 'in_progress']);
     expect((await getBalance('tr')).totalAvailable).toBe(100000);
+    // Once the winner is done, a redelivery is a plain duplicate.
+    expect((await processStripeEvent('tr', event)).status).toBe('duplicate');
   });
 
   it('reads current_period_{start,end} from the subscription ITEM (2025-12-15.clover shape) + trial + default PM', async () => {
@@ -104,14 +113,18 @@ describe('processStripeEvent — R-1 cutover hardening', () => {
 
   it('records the latest invoice on invoice.created / .payment_failed (parity)', async () => {
     await __resetBilling();
-    expect((await processStripeEvent('ti', { id: 'evt_i1', type: 'invoice.created', data: { object: { id: 'in_1', customer: 'c' } } })).status).toBe('applied');
+    await processStripeEvent('ti', { id: 'evt_i0', type: 'customer.subscription.created', data: { object: { id: 'sub_ti', customer: 'c', status: 'active', items: { data: [{ price: { id: 'price_pro' } }] } } } });
+    // ADR 0786 D3 — the pinned clover version carries the subscription under `parent`.
+    const clover = (id: string) => ({ id, customer: 'c', parent: { type: 'subscription_details', subscription_details: { subscription: 'sub_ti', metadata: {} } } });
+    expect((await processStripeEvent('ti', { id: 'evt_i1', type: 'invoice.created', data: { object: clover('in_1') } })).status).toBe('applied');
     expect((await getSubscription('ti')).latestInvoiceId).toBe('in_1');
-    expect((await processStripeEvent('ti', { id: 'evt_i2', type: 'invoice.payment_failed', data: { object: { id: 'in_2', customer: 'c' } } })).status).toBe('applied');
+    expect((await processStripeEvent('ti', { id: 'evt_i2', type: 'invoice.payment_failed', data: { object: clover('in_2') } })).status).toBe('applied');
     expect((await getSubscription('ti')).latestInvoiceId).toBe('in_2');
   });
 
   it('payment_method.attached adopts the FIRST card, never clobbers an existing default; .detached clears', async () => {
     await __resetBilling();
+    await processStripeEvent('tp', { id: 'evt_pm0', type: 'customer.subscription.created', data: { object: { id: 'sub_tp', customer: 'c', status: 'active', items: { data: [{ price: { id: 'price_pro' } }] } } } });
     // First card → adopted as default.
     expect((await processStripeEvent('tp', { id: 'evt_pm1', type: 'payment_method.attached', data: { object: { id: 'pm_9', customer: 'c' } } })).status).toBe('applied');
     expect((await getSubscription('tp')).defaultPaymentMethodId).toBe('pm_9');

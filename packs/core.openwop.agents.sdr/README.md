@@ -3,8 +3,8 @@
 Sales Development Representative agent. Researches a prospect, drafts personalized outreach across email/LinkedIn/SMS, persists prospect history for follow-ups.
 
 | Pack name | `core.openwop.agents.sdr` |
-| Version | `1.0.0` |
-| Engine | OpenWOP `>=1.1.0 <2.0.0` |
+| Version | `1.0.1` |
+| Engine | OpenWOP `>=1.1.0 <3.0.0` |
 | Agents | 1 |
 | Required host capabilities | `aiProviders`, `host.agentRuntime`, `openwop.agents.memoryBackends ≥ longTerm` |
 | License | Apache-2.0 |

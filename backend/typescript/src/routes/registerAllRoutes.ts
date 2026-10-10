@@ -32,17 +32,18 @@ import { registerInterruptRoutes } from './interrupts.js';
 import { registerStreamRoutes } from './streams.js';
 import { registerWebhookRoutes } from './webhooks.js';
 import { registerHostEventRoutes } from './hostEvents.js';
+import { registerHostEventStreamRoutes } from './hostEventStream.js';
+import { registerHostEventTestTrigger } from './hostEventTestTrigger.js';
 import { registerEffectSeamRoutes } from './effectSeams.js';
 import { registerEventLogSeedSeam } from './eventLogSeedSeam.js';
 import { registerWebhookReceiveSeam } from './webhookReceiveSeam.js';
 import { registerFireEffectSeam } from './effectSeamFireSeam.js';
+import { registerHostEventEmitSeam } from './hostEventEmitSeam.js';
 import { registerDurabilitySeam } from './durabilitySeam.js';
 import { registerEffectTransportRetrySeam } from './effectTransportRetrySeam.js';
 import { registerPackRoutes } from './packs.js';
 import { registerPackTestRoutes } from './packs-test.js';
 import { registerByokRoutes } from './byok.js';
-import { registerUiPluginRoutes } from './uiPlugins.js';
-import { presentationEnabled } from '../host/hostProfile.js';
 import { registerDispatchFanOutRoutes } from './dispatchFanOut.js';
 import { registerChainDeferredExpandSeamRoutes } from './chainDeferredExpandSeam.js';
 import { registerWorkflowChainExpandSeamRoutes } from './workflowChainExpandSeam.js';
@@ -127,8 +128,12 @@ import { ensureSystemBrand } from '../host/systemBrand.js';
 import { ensureFeaturesPage } from '../host/featuresPage.js';
 import { ensureComparisonPage } from '../host/comparisonPage.js';
 import { ensureMarketingContentPages } from '../host/marketingContentPages.js';
+import { ensureSystemSiteSeo } from '../host/systemSiteSeo.js';
 import { ensureSystemSiteDocs } from '../host/systemSiteDocs.js';
+import { ensureSystemSiteBlog } from '../host/systemSiteBlog.js';
+import { registerSharedRootShell } from '../features/publishing/routes.js';
 import { registerBackendFeatures } from '../features/index.js';
+import { registerWidgetRoutes } from './widgets.js';
 
 const log = createLogger('routes.registerAll');
 
@@ -160,6 +165,10 @@ const ROUTE_MODULES: RouteModule[] = [
   // ADR 0208 — host-event bindings (record-change events → workflows) + the
   // dispatcher init (webhook fanout + shared run starter injected here).
   { name: 'hostEvents', register: ({ app, storage, hostSuite }) => registerHostEventRoutes(app, { storage, hostSuite }) },
+  // ADR 0825 P1 / RFC 0236 — the `/host/events` channel (flag-gated; falls through when off).
+  { name: 'hostEventStream', register: ({ app, storage }) => registerHostEventStreamRoutes(app, { storage }) },
+  // RFC 0241 §B (ADR 0825) — the production test trigger; 404 unless a host-test.* type is listed.
+  { name: 'hostEventTestTrigger', register: ({ app, storage }) => registerHostEventTestTrigger(app, { storage }) },
   // RFC 0173 §C.1 — the effect-seam manifest. Canonical production surface, not
   // a test seam: the `replay` capability facet pins this exact path.
   { name: 'effectSeams', register: ({ app }) => registerEffectSeamRoutes(app) },
@@ -171,6 +180,8 @@ const ROUTE_MODULES: RouteModule[] = [
   { name: 'webhookReceiveSeam', register: ({ app }) => registerWebhookReceiveSeam(app) },
   // RFC 0173 §C.2 — fire one manifest row into the real Layer-2 ledger.
   { name: 'fireEffectSeam', register: ({ app, storage, hostSuite }) => registerFireEffectSeam(app, { storage, hostSuite }) },
+  // RFC 0236 §G (ADR 0825) — produce one advertised host event through the production fan-out.
+  { name: 'hostEventEmitSeam', register: ({ app, storage }) => registerHostEventEmitSeam(app, { storage }) },
   // RFC 0158 (ADR 0739) — the kill/bound durability seam. Answers 404 unless the
   // seam gate is on AND `main()` was the entry point: it SIGKILLs this process.
   { name: 'durabilitySeam', register: ({ app, storage, hostSuite }) => registerDurabilitySeam(app, { storage, hostSuite }) },
@@ -186,7 +197,6 @@ const ROUTE_MODULES: RouteModule[] = [
   // when the host presents uiPlugins (discovery.ts advertises it from the same gate).
   // ADR 0168 — left UNMOUNTED in OPENWOP_PROFILE=headless so advertise and serve stay
   // co-gated (a headless deploy serves no iframe-render RPC it doesn't advertise).
-  { name: 'uiPlugins', register: ({ app }) => { if (presentationEnabled('uiPlugins')) registerUiPluginRoutes(app); } },
   // RFC 0118 — parallel sub-workflow fan-out. The dispatch/fanout witness seam; always
   // mounted because the host honestly advertises dispatch.fanOutSupported (discovery.ts).
   { name: 'dispatchFanOut', register: ({ app }) => registerDispatchFanOutRoutes(app) },
@@ -248,7 +258,7 @@ const ROUTE_MODULES: RouteModule[] = [
   // after it: an earlier mount would be an unguarded door onto the same handler.
   { name: 'mcpInvokeSeam', register: ({ app, storage }) => registerMcpInvokeSeamRoutes(app, { storage }) },
   { name: 'ucpRefMerchant', register: ({ app }) => registerUcpRefMerchantRoutes(app) }, // ADR 0260 — dev/demo reference UCP merchant (off by default)
-  { name: 'toolCatalog', register: ({ app, storage }) => registerToolCatalogRoutes(app, { storage }) },
+  { name: 'toolCatalog', register: ({ app, storage, hostSuite }) => registerToolCatalogRoutes(app, { storage, hostSuite }) },
   { name: 'admin', register: ({ app }) => registerAdminRoutes(app) },
   { name: 'adminVault', register: ({ app }) => registerAdminVaultRoutes(app) }, // ADR 0389 P2 — superadmin secrets-vault projection
   { name: 'breakGlass', register: ({ app }) => registerBreakGlassRoutes(app) }, // ADR 0389 P3 — default-OFF operator last resort
@@ -374,8 +384,9 @@ const ROUTE_MODULES: RouteModule[] = [
   // over roster members; descriptive only, confers no authority).
   { name: 'orgChart', register: ({ app }) => registerOrgChartRoutes(app) },
   { name: 'multiPartyConversationSeam', register: ({ app }) => registerMultiPartyConversationSeamRoutes(app) },
-  // Governed Workforce (EP0) — read-only entity + telemetry over the caller's
-  // runs. Vendor-neutral host extension; no spec/wire change.
+  // Governed Workforce (EP0) — the seeded entity + telemetry over the caller's
+  // runs, plus the tenant's own cutover status / migration journey (ADR 0775 D2).
+  // Vendor-neutral host extension; no spec/wire change.
   { name: 'workforces', register: ({ app, storage }) => registerWorkforceRoutes(app, { storage }) },
   // Organizations / teams / members + role-based access — sample host-extension
   // (non-normative). Roles map to RFC 0049 scopes; a SEPARATE layer from the
@@ -418,9 +429,13 @@ const ROUTE_MODULES: RouteModule[] = [
   // (subscription state machine + dedup/retry/dead-letter + the read surface).
   // The Kanban card→run firing routes through it.
   { name: 'triggerBridge', register: ({ app, storage, hostSuite }) => registerTriggerBridgeRoutes(app, { storage, hostSuite }) },
-  // NOTE: the Widgets reference domain moved to the BackendFeature contract
-  // (src/features/widgets.ts) — it is now composed via registerBackendFeatures()
-  // below, the first surface migrated to the feature-package seam (ADR §6).
+  // The Widgets reference domain (white-label PRD §4; HOST-EXTENSIONS.md) — an
+  // EXAMPLE slice, not a product feature. ADR 0820 §8.3: it was registered as a
+  // BackendFeature (`features/widgets.ts`), which put it in the product catalog's
+  // `core` tier and made every distribution "include" it. It is a route module
+  // again; `routes/widgets.ts` mounts nothing unless
+  // OPENWOP_EXAMPLE_WIDGETS_ENABLED=true.
+  { name: 'widgetsExample', register: ({ app }) => registerWidgetRoutes(app) },
   {
     // Inbound chat → workflow run bridge. Binds inbound messages to a workflow
     // (default deterministic `openwop-app.uppercase`; override via
@@ -461,6 +476,9 @@ const ROUTE_MODULES: RouteModule[] = [
  *  the core list so a separately-distributed feature is wired without editing
  *  the core ROUTE_MODULES. */
 export function registerAllRoutes(deps: RouteDeps): void {
+  // ADR 0812 P3b — FIRST: a browser navigation on a shared root gets the SPA shell
+  // before any protocol handler registered below can answer it with JSON.
+  registerSharedRootShell(deps.app);
   for (const m of ROUTE_MODULES) {
     m.register(deps);
   }
@@ -486,8 +504,14 @@ export function registerAllRoutes(deps: RouteDeps): void {
   // the public nav's "Pages" group has genuine destinations (adopts the unedited
   // placeholder drafts; a human CMS edit freezes them).
   void ensureMarketingContentPages().catch((err) => log.warn('marketing_content_pages_seed_failed', { error: String(err) }));
+  // ADR 0824 D2 — real titles/descriptions for those seeded pages (PageSeo via
+  // putSeo; never clobbers a person's edit). Awaits the page ensures itself.
+  void ensureSystemSiteSeo().catch((err) => log.warn('system_site_seo_seed_failed', { error: String(err) }));
   // ADR 0392 OQ-1 — the reference-docs corpus: real published docs-collection
   // pages on the system-site org (featuresPage sibling pattern; SEED_VERSION
   // refresh, never-clobber). Inert until the `docs` toggle is enabled.
   void ensureSystemSiteDocs().catch((err) => log.warn('system_site_docs_seed_failed', { error: String(err) }));
+  // ADR 0813 — the launch blog post, seeded as a DRAFT (never auto-published;
+  // an operator finishes its [TODO]s and publishes it from the CMS).
+  void ensureSystemSiteBlog().catch((err) => log.warn('system_site_blog_seed_failed', { error: String(err) }));
 }

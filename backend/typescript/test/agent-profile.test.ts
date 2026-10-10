@@ -2,8 +2,8 @@
  * Rich agent profile (ADR 0031) — host-extension routes + service.
  *
  * Surface under test (ADR 0031 §2):
- *   GET /v1/host/openwop-app/agents/:id/profile
- *   PUT /v1/host/openwop-app/agents/:id/profile
+ *   GET /host/openwop-app/agents/:id/profile
+ *   PUT /host/openwop-app/agents/:id/profile
  *
  * The HTTP boundary is where authz is observable, so the route tests cover:
  *   - GET/PUT happy path (incl. autonomy `level` DERIVED from `specLevel`)
@@ -91,7 +91,7 @@ async function newTenantClient(): Promise<Client> {
     if (res.status === 204) return { status: 204, body: undefined };
     return { status: res.status, body: (await res.json()) as T };
   };
-  const login = await call('POST', '/v1/host/openwop-app/test/login', { email: `profile-${n++}@x.test` });
+  const login = await call('POST', '/host/openwop-app/test/login', { email: `profile-${n++}@x.test` });
   expect(login.status).toBe(201);
   return call;
 }
@@ -104,7 +104,7 @@ function bodyOf<T>(res: RawResponse<T>): T {
 
 /** Create a standing roster member owned by `client`'s tenant; return its id. */
 async function makeAgent(client: Client, persona: string): Promise<string> {
-  const created = await client<{ rosterId: string }>('POST', '/v1/host/openwop-app/roster', {
+  const created = await client<{ rosterId: string }>('POST', '/host/openwop-app/roster', {
     persona,
     agentRef: { agentId: 'core.openwop.agents.brief-writer' },
   });
@@ -287,7 +287,7 @@ describe('agent profile routes — happy path', () => {
     // The body's autonomy is IGNORED — `roster.autonomyLevel` is the single source
     // of truth (owned by the Edit-details modal). The default 'auto' derives the
     // `autonomous-within-policy` spec level, regardless of the body's `draft-only`.
-    const put = await a<ProfileResp>('PUT', `/v1/host/openwop-app/agents/${id}/profile`, SAMPLE_BODY);
+    const put = await a<ProfileResp>('PUT', `/host/openwop-app/agents/${id}/profile`, SAMPLE_BODY);
     expect(put.status).toBe(200);
     const putBody = bodyOf(put);
     expect(putBody.profileId).toBe(id);
@@ -296,10 +296,10 @@ describe('agent profile routes — happy path', () => {
     expect(putBody.autonomy.specLevel).toBe('autonomous-within-policy');
 
     // Move the single source of truth → the profile follows it.
-    const patched = await a<{ rosterId: string }>('PATCH', `/v1/host/openwop-app/roster/${id}`, { autonomyLevel: 'review' });
+    const patched = await a<{ rosterId: string }>('PATCH', `/host/openwop-app/roster/${id}`, { autonomyLevel: 'review' });
     expect(patched.status).toBe(200);
 
-    const get = await a<ProfileResp>('GET', `/v1/host/openwop-app/agents/${id}/profile`);
+    const get = await a<ProfileResp>('GET', `/host/openwop-app/agents/${id}/profile`);
     expect(get.status).toBe(200);
     const getBody = bodyOf(get);
     expect(getBody.configParameters?.materialityThreshold).toBe(5000);
@@ -309,10 +309,10 @@ describe('agent profile routes — happy path', () => {
   it('PUT ignores the body autonomy.level — roster.autonomyLevel is authoritative; replace is idempotent', async () => {
     const a = await newTenantClient();
     const id = await makeAgent(a, 'Explicit Level');
-    const setLevel = await a<{ rosterId: string }>('PATCH', `/v1/host/openwop-app/roster/${id}`, { autonomyLevel: 'guided' });
+    const setLevel = await a<{ rosterId: string }>('PATCH', `/host/openwop-app/roster/${id}`, { autonomyLevel: 'guided' });
     expect(setLevel.status).toBe(200);
 
-    const first = await a<ProfileResp>('PUT', `/v1/host/openwop-app/agents/${id}/profile`, {
+    const first = await a<ProfileResp>('PUT', `/host/openwop-app/agents/${id}/profile`, {
       ...SAMPLE_BODY,
       autonomy: { specLevel: 'draft-only', level: 'auto' },
     });
@@ -321,7 +321,7 @@ describe('agent profile routes — happy path', () => {
     // The body asked for `auto`; the roster says `guided` → the SSoT wins (ADR 0101).
     expect(firstBody.autonomy.level).toBe('guided');
 
-    const second = await a<ProfileResp>('PUT', `/v1/host/openwop-app/agents/${id}/profile`, {
+    const second = await a<ProfileResp>('PUT', `/host/openwop-app/agents/${id}/profile`, {
       ...SAMPLE_BODY,
       roleKey: 'finance-close-v2',
     });
@@ -335,7 +335,7 @@ describe('agent profile routes — happy path', () => {
   it('GET 404s before any profile is written (no profile yet, but agent exists)', async () => {
     const a = await newTenantClient();
     const id = await makeAgent(a, 'No Profile Yet');
-    const get = await a('GET', `/v1/host/openwop-app/agents/${id}/profile`);
+    const get = await a('GET', `/host/openwop-app/agents/${id}/profile`);
     expect(get.status).toBe(404);
   });
 
@@ -343,10 +343,10 @@ describe('agent profile routes — happy path', () => {
     const a = await newTenantClient();
     const id = await makeAgent(a, 'Bad Body Twin');
     // Missing roleKey.
-    expect((await a('PUT', `/v1/host/openwop-app/agents/${id}/profile`, { autonomy: { specLevel: 'draft-only' } })).status).toBe(400);
+    expect((await a('PUT', `/host/openwop-app/agents/${id}/profile`, { autonomy: { specLevel: 'draft-only' } })).status).toBe(400);
     // Bad specLevel.
     expect(
-      (await a('PUT', `/v1/host/openwop-app/agents/${id}/profile`, { roleKey: 'x', autonomy: { specLevel: 'made-up' } })).status,
+      (await a('PUT', `/host/openwop-app/agents/${id}/profile`, { roleKey: 'x', autonomy: { specLevel: 'made-up' } })).status,
     ).toBe(400);
   });
 });
@@ -379,9 +379,9 @@ describe('agent profile routes — auth required', () => {
   });
 
   it('a request with no bearer (cookies disabled) is 401 for both GET and PUT', async () => {
-    const get = await fetch(`${AUTH_BASE}/v1/host/openwop-app/agents/host:anything-00000000/profile`);
+    const get = await fetch(`${AUTH_BASE}/host/openwop-app/agents/host:anything-00000000/profile`);
     expect(get.status).toBe(401);
-    const put = await fetch(`${AUTH_BASE}/v1/host/openwop-app/agents/host:anything-00000000/profile`, {
+    const put = await fetch(`${AUTH_BASE}/host/openwop-app/agents/host:anything-00000000/profile`, {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(SAMPLE_BODY),
@@ -395,34 +395,34 @@ describe('agent profile routes — tenant isolation + fail-closed', () => {
     const a = await newTenantClient();
     const b = await newTenantClient();
     const id = await makeAgent(a, 'A Owned Twin');
-    expect((await a('PUT', `/v1/host/openwop-app/agents/${id}/profile`, SAMPLE_BODY)).status).toBe(200);
+    expect((await a('PUT', `/host/openwop-app/agents/${id}/profile`, SAMPLE_BODY)).status).toBe(200);
 
     // B reads A's agent id → 404 (the agent isn't in B's roster).
-    expect((await b('GET', `/v1/host/openwop-app/agents/${id}/profile`)).status).toBe(404);
+    expect((await b('GET', `/host/openwop-app/agents/${id}/profile`)).status).toBe(404);
     // A can still read its own.
-    expect((await a('GET', `/v1/host/openwop-app/agents/${id}/profile`)).status).toBe(200);
+    expect((await a('GET', `/host/openwop-app/agents/${id}/profile`)).status).toBe(200);
   });
 
   it('tenant B cannot WRITE tenant A\'s profile (404, and A\'s profile is unchanged)', async () => {
     const a = await newTenantClient();
     const b = await newTenantClient();
     const id = await makeAgent(a, 'A Write Guard Twin');
-    expect((await a('PUT', `/v1/host/openwop-app/agents/${id}/profile`, SAMPLE_BODY)).status).toBe(200);
+    expect((await a('PUT', `/host/openwop-app/agents/${id}/profile`, SAMPLE_BODY)).status).toBe(200);
 
     // B's PUT against A's agent fails closed.
-    const bWrite = await b('PUT', `/v1/host/openwop-app/agents/${id}/profile`, { ...SAMPLE_BODY, roleKey: 'hijacked' });
+    const bWrite = await b('PUT', `/host/openwop-app/agents/${id}/profile`, { ...SAMPLE_BODY, roleKey: 'hijacked' });
     expect(bWrite.status).toBe(404);
 
     // A's profile is untouched.
-    const after = await a<{ roleKey: string }>('GET', `/v1/host/openwop-app/agents/${id}/profile`);
+    const after = await a<{ roleKey: string }>('GET', `/host/openwop-app/agents/${id}/profile`);
     expect(after.status).toBe(200);
     expect(bodyOf(after).roleKey).toBe('finance-close');
   });
 
   it('fails closed on an unknown agent id (404 for both GET and PUT)', async () => {
     const a = await newTenantClient();
-    expect((await a('GET', '/v1/host/openwop-app/agents/host:nope-00000000/profile')).status).toBe(404);
-    expect((await a('PUT', '/v1/host/openwop-app/agents/host:nope-00000000/profile', SAMPLE_BODY)).status).toBe(404);
+    expect((await a('GET', '/host/openwop-app/agents/host:nope-00000000/profile')).status).toBe(404);
+    expect((await a('PUT', '/host/openwop-app/agents/host:nope-00000000/profile', SAMPLE_BODY)).status).toBe(404);
   });
 });
 
@@ -446,28 +446,28 @@ describe('ADR 0373 — capability election routes', () => {
     const id = await makeAgent(a, 'Research Analyst');
 
     // Not elected yet.
-    const before = await a<{ capabilities?: string[] }>('GET', `/v1/host/openwop-app/agents/${id}/profile`);
+    const before = await a<{ capabilities?: string[] }>('GET', `/host/openwop-app/agents/${id}/profile`);
     expect(bodyOf(before).capabilities ?? []).not.toContain('deep-investigation');
 
-    const elected = await a<{ capabilities: string[] }>('PUT', `/v1/host/openwop-app/agents/${id}${DEEP}`);
+    const elected = await a<{ capabilities: string[] }>('PUT', `/host/openwop-app/agents/${id}${DEEP}`);
     expect(elected.status).toBe(200);
     expect(bodyOf(elected).capabilities).toContain('deep-investigation');
 
     // It is durable + readable through the profile the exchange seam reads.
-    const after = await a<{ capabilities: string[] }>('GET', `/v1/host/openwop-app/agents/${id}/profile`);
+    const after = await a<{ capabilities: string[] }>('GET', `/host/openwop-app/agents/${id}/profile`);
     expect(bodyOf(after).capabilities).toContain('deep-investigation');
 
     // Electing twice is idempotent (no duplicate entries).
-    await a('PUT', `/v1/host/openwop-app/agents/${id}${DEEP}`);
-    const twice = await a<{ capabilities: string[] }>('GET', `/v1/host/openwop-app/agents/${id}/profile`);
+    await a('PUT', `/host/openwop-app/agents/${id}${DEEP}`);
+    const twice = await a<{ capabilities: string[] }>('GET', `/host/openwop-app/agents/${id}/profile`);
     expect(bodyOf(twice).capabilities.filter((c) => c === 'deep-investigation')).toHaveLength(1);
 
     // REVOKE — a grant that cannot be revoked is a governance defect.
-    const revoked = await a<{ capabilities: string[] }>('DELETE', `/v1/host/openwop-app/agents/${id}${DEEP}`);
+    const revoked = await a<{ capabilities: string[] }>('DELETE', `/host/openwop-app/agents/${id}${DEEP}`);
     expect(revoked.status).toBe(200);
     expect(bodyOf(revoked).capabilities).not.toContain('deep-investigation');
     // Revoking again is a no-op, not an error.
-    expect((await a('DELETE', `/v1/host/openwop-app/agents/${id}${DEEP}`)).status).toBe(200);
+    expect((await a('DELETE', `/host/openwop-app/agents/${id}${DEEP}`)).status).toBe(200);
   });
 
   it('REFUSES a feature-owned capability — a tenant must not hand-activate assistant', async () => {
@@ -478,31 +478,31 @@ describe('ADR 0373 — capability election routes', () => {
     // it; without this test the allowlist is just a comment.
     const a = await newTenantClient();
     const id = await makeAgent(a, 'Not The Assistant');
-    const res = await a('PUT', `/v1/host/openwop-app/agents/${id}/capabilities/assistant`);
+    const res = await a('PUT', `/host/openwop-app/agents/${id}/capabilities/assistant`);
     expect(res.status, 'assistant is feature-owned, not tenant-electable').toBe(404);
-    const profile = await a<{ capabilities?: string[] }>('GET', `/v1/host/openwop-app/agents/${id}/profile`);
+    const profile = await a<{ capabilities?: string[] }>('GET', `/host/openwop-app/agents/${id}/profile`);
     expect(bodyOf(profile).capabilities ?? []).not.toContain('assistant');
   });
 
   it('404s an unknown capability name without confirming it exists', async () => {
     const a = await newTenantClient();
     const id = await makeAgent(a, 'Analyst');
-    expect((await a('PUT', `/v1/host/openwop-app/agents/${id}/capabilities/not-a-capability`)).status).toBe(404);
+    expect((await a('PUT', `/host/openwop-app/agents/${id}/capabilities/not-a-capability`)).status).toBe(404);
   });
 
   it('tenant isolation — tenant B cannot elect on tenant A\'s agent', async () => {
     const a = await newTenantClient();
     const b = await newTenantClient();
     const id = await makeAgent(a, 'A-owned Analyst');
-    expect((await b('PUT', `/v1/host/openwop-app/agents/${id}${DEEP}`)).status, 'cross-tenant elect must 404').toBe(404);
-    expect((await b('DELETE', `/v1/host/openwop-app/agents/${id}${DEEP}`)).status, 'cross-tenant revoke must 404').toBe(404);
+    expect((await b('PUT', `/host/openwop-app/agents/${id}${DEEP}`)).status, 'cross-tenant elect must 404').toBe(404);
+    expect((await b('DELETE', `/host/openwop-app/agents/${id}${DEEP}`)).status, 'cross-tenant revoke must 404').toBe(404);
     // A's agent is untouched.
-    const profile = await a<{ capabilities?: string[] }>('GET', `/v1/host/openwop-app/agents/${id}/profile`);
+    const profile = await a<{ capabilities?: string[] }>('GET', `/host/openwop-app/agents/${id}/profile`);
     expect(bodyOf(profile).capabilities ?? []).not.toContain('deep-investigation');
   });
 
   it('fails closed on an unknown agent id', async () => {
     const a = await newTenantClient();
-    expect((await a('PUT', `/v1/host/openwop-app/agents/host:nope-00000000${DEEP}`)).status).toBe(404);
+    expect((await a('PUT', `/host/openwop-app/agents/host:nope-00000000${DEEP}`)).status).toBe(404);
   });
 });

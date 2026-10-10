@@ -17,14 +17,25 @@
  *    by the tool loop) is the only target, fail-closed when absent;
  *  - deterministic jobId (content-hashed) so a provider retry re-puts the same
  *    row instead of double-scheduling (the GD-0308-1 pattern);
- *  - bounded: future-only, the scheduler's existing 30-day horizon, a per-user
+ *  - bounded: future-only, the scheduler's advertised horizon (MAX_FUTURE_HORIZON_DAYS), a per-user
  *    pending cap, task length capped.
  */
 import { createHash } from 'node:crypto';
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
-import { listJobsForSubject, registerJob, MAX_FUTURE_HORIZON_MS, ONE_SHOT_CRON } from '../../host/schedulingService.js';
+import { listJobsForSubject, registerJob, MAX_FUTURE_HORIZON_MS, MAX_FUTURE_HORIZON_DAYS, ONE_SHOT_CRON } from '../../host/schedulingService.js';
 import { parseCron, computeNextFire } from '../../host/cronSchedule.js';
 import { SCHEDULED_CHAT_TURN_WORKFLOW_ID } from './scheduledChatTurnWorkflow.js';
+import { SCHEDULED_AGENT_CHATS_TOGGLE } from './scheduledChatService.js';
+import { resolveOne } from '../../host/featureToggles/service.js';
+
+/** ADR 0820 §8.2 — the feature's ACCESS gate for both tools (toggle + plan, via
+ *  `resolveOne`), the same answer its HTTP routes give. Fail-closed: an
+ *  unresolvable read refuses. */
+async function featureRefused(scope: { tenantId: string; actingUserId?: string | undefined }): Promise<boolean> {
+  const a = await resolveOne(SCHEDULED_AGENT_CHATS_TOGGLE, { tenantId: scope.tenantId, ...(scope.actingUserId ? { userId: scope.actingUserId } : {}) }).catch(() => null);
+  return a?.enabled !== true;
+}
+const FEATURE_REFUSED_MESSAGE = 'Scheduled agent chats are not enabled for this workspace — tell the user, and do the work in this turn instead if it can be done now.';
 
 export const SCHEDULE_FOLLOWUP_TOOL_ID = 'openwop:tasks.schedule-followup';
 export const SCHEDULE_RECURRING_TOOL_ID = 'openwop:tasks.schedule-recurring';
@@ -58,6 +69,7 @@ function toolError(error: string, message: string): { content: string; isError: 
 export function registerScheduledFollowupTool(): void {
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: SCHEDULE_FOLLOWUP_TOOL_ID,
       description:
@@ -70,12 +82,13 @@ export function registerScheduledFollowupTool(): void {
         type: 'object',
         properties: {
           task: { type: 'string', description: 'Instructions to your future self — self-contained, specific, with any data you must carry forward.' },
-          runAtISO: { type: 'string', description: 'When to run, ISO-8601 with timezone (e.g. 2026-07-08T14:45:00Z). Must be in the future, within 30 days. Pick a time BEFORE any deadline the user named.' },
+          runAtISO: { type: 'string', description: `When to run, ISO-8601 with timezone (e.g. 2026-07-08T14:45:00Z). Must be in the future, within ${MAX_FUTURE_HORIZON_DAYS} days. Pick a time BEFORE any deadline the user named.` },
         },
         required: ['task', 'runAtISO'],
       },
     },
     async run(input, scope) {
+      if (await featureRefused(scope)) return toolError('feature_disabled', FEATURE_REFUSED_MESSAGE);
       const actingUserId = scope.actingUserId;
       if (!actingUserId) {
         return toolError('acting_user_required', 'Follow-ups can only be scheduled from a human-initiated turn.');
@@ -103,7 +116,7 @@ export function registerScheduledFollowupTool(): void {
       const now = Date.now();
       if (runAtMs < now + MIN_LEAD_MS) return toolError('validation_error', '`runAtISO` must be at least a minute in the future — do near-term work in this turn instead.');
       if (runAtMs - now > MAX_FUTURE_HORIZON_MS) {
-        return toolError('horizon_exceeded', 'Follow-ups can be scheduled at most 30 days out — tell the user and offer a nearer check-in.');
+        return toolError('horizon_exceeded', `Follow-ups can be scheduled at most ${MAX_FUTURE_HORIZON_DAYS} days out — tell the user and offer a nearer check-in.`);
       }
 
       // Accumulation guard: pending (un-fired) follow-ups for THIS user.
@@ -124,6 +137,7 @@ export function registerScheduledFollowupTool(): void {
         cronExpr: ONE_SHOT_CRON, // ADR 0309 D1 — explicit sentinel + firstFireAtMs = one-shot
         firstFireAtMs: runAtMs,
         workflowId: SCHEDULED_CHAT_TURN_WORKFLOW_ID,
+        featureId: SCHEDULED_AGENT_CHATS_TOGGLE, // ADR 0820 §8.2 — the daemon gates the fire
         ownerSubject: { kind: 'user', id: actingUserId }, // the human's Schedules tab lists + cancels it
         agentId,
         metadata: {
@@ -175,6 +189,7 @@ export function registerScheduledFollowupTool(): void {
 export function registerScheduledRecurringTool(): void {
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: SCHEDULE_RECURRING_TOOL_ID,
       description:
@@ -194,6 +209,7 @@ export function registerScheduledRecurringTool(): void {
       },
     },
     async run(input, scope) {
+      if (await featureRefused(scope)) return toolError('feature_disabled', FEATURE_REFUSED_MESSAGE);
       const actingUserId = scope.actingUserId;
       if (!actingUserId) {
         return toolError('acting_user_required', 'Recurring chats can only be scheduled from a human-initiated turn.');
@@ -227,7 +243,7 @@ export function registerScheduledRecurringTool(): void {
       const now = Date.now();
       const firstFire = computeNextFire(cronExpr, now, timezone);
       if (firstFire === null) {
-        return toolError('validation_error', '`cronExpr` has no fire time within the 30-day horizon — pick a real recurring cadence.');
+        return toolError('validation_error', `\`cronExpr\` has no fire time within the ${MAX_FUTURE_HORIZON_DAYS}-day horizon — pick a real recurring cadence.`);
       }
       // Walk the fire sequence across a >24h probe window and reject if ANY
       // adjacent pair is closer than the floor. Checking only the first pair is
@@ -262,6 +278,7 @@ export function registerScheduledRecurringTool(): void {
         cronExpr, // a recurring cadence — the daemon recomputes nextFireAt after each fire
         timezone,
         workflowId: SCHEDULED_CHAT_TURN_WORKFLOW_ID,
+        featureId: SCHEDULED_AGENT_CHATS_TOGGLE, // ADR 0820 §8.2 — the daemon gates the fire
         ownerSubject: { kind: 'user', id: actingUserId }, // the human's Schedules tab lists + pauses/cancels it
         agentId,
         metadata: {

@@ -367,8 +367,8 @@ describe('(A) challenge-factory runs to COMPLETION chain-backed (RFC 0133 + 0134
     expect(evidenceClaims.map((c) => c.claimId)).toEqual(['c-1']);
     expect(evidenceClaims[0].sources[0].url).toBe('https://example.org/watercolor-guide');
     expect(String(bag.planEvidenceBrief)).toContain('[c-1] Short daily studies of 20 minutes help beginners improve.');
-    expect(simTasks.get('feature.kicktodo.agents.sim-skeptic')).toContain('[c-1]');
-    expect(simTasks.get('feature.kicktodo.agents.sim-newcomer')).not.toContain('EVIDENCE');
+    expect(simTasks.get('vendor.openwop-app.kicktodo.agents.sim-skeptic')).toContain('[c-1]');
+    expect(simTasks.get('vendor.openwop-app.kicktodo.agents.sim-newcomer')).not.toContain('EVIDENCE');
 
     // SoD terminal: publication submitted, approval raised, NOTHING published in-run.
     const publication = await getPublication(T, candidate.id);

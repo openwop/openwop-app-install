@@ -40,6 +40,7 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
+import { v1Advertisement } from './support/v1Advertisement.js';
 
 let BASE = '';
 let server: http.Server;
@@ -62,8 +63,10 @@ const BACKEND_SRC = join(here, '../src');
  *  widening the advert to every type left this test GREEN, because it was checking
  *  a copy of the rule instead of the rule. Same defect as asserting a capability on
  *  a resolver's fallback arm — the check has to read what the host actually says. */
-async function advertisedStoreTypes(base: string): Promise<string[]> {
-  const doc = (await (await fetch(`${base}/.well-known/openwop`)).json()) as Record<string, unknown>;
+async function advertisedStoreTypes(_base: string): Promise<string[]> {
+  // ADR 0812 — the v2 root has no `artifactTypes` record yet; the v1 claim is read
+  // from its builder (`support/v1Advertisement.ts`), which answers in both modes.
+  const doc = await v1Advertisement();
   const at = (doc['artifactTypes'] ?? {}) as { types?: Record<string, { store?: boolean }> };
   return Object.entries(at.types ?? {}).filter(([, f]) => f?.store === true).map(([id]) => id);
 }

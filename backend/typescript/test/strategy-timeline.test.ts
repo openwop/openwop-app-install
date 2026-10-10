@@ -23,13 +23,13 @@ afterAll(async () => { await closeApp(); });
 
 const client = (): Client => makeClient(() => BASE);
 
-const S = '/v1/host/openwop-app/strategy';
-const PM = '/v1/host/openwop-app/priority-matrix';
+const S = '/host/openwop-app/strategy';
+const PM = '/host/openwop-app/priority-matrix';
 
 async function login(): Promise<{ c: ReturnType<typeof client>; orgId: string }> {
   const c = client();
-  expect((await c.post('/v1/host/openwop-app/test/login', { email: `tl-${Date.now()}-${n++}@acme.test`, tenantId: `org:tl-${Date.now()}-${n++}` })).status).toBe(201);
-  const orgId = (await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
+  expect((await c.post('/host/openwop-app/test/login', { email: `tl-${Date.now()}-${n++}@acme.test`, tenantId: `org:tl-${Date.now()}-${n++}` })).status).toBe(201);
+  const orgId = (await c.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
   return { c, orgId };
 }
 

@@ -7,6 +7,7 @@
  * + noindex, OG image from the Media Library) and, for published pages, the
  * PUBLIC URLs (page / sitemap / feed) the org's site is served at.
  */
+import { CmsApiError } from '../cms/cmsClient.js';
 import { Button } from '../../ui/Button.js';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
@@ -155,7 +156,8 @@ export function PublishingPage(): JSX.Element {
     if (!selected) return;
     setBusy(true);
     try { const next = await putSeo(orgId, selected.pageId, seo); setSeo(next); setSavedSeo(next); toast.success(t('seoSaved')); }
-    catch (e) { toast.error(e instanceof Error ? e.message : t('saveFailed')); }
+    // ADR 0836 D6 — the live-tier refusal gets its own copy, not the raw envelope text.
+    catch (e) { toast.error(e instanceof CmsApiError && e.details?.reason === 'live_tier' ? t('seoLiveTier') : e instanceof Error ? e.message : t('saveFailed')); }
     finally { setBusy(false); }
   }, [orgId, selected, seo, t]);
 

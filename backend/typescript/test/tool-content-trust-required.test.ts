@@ -27,7 +27,10 @@ const walk = (d: string): string[] =>
 /** Resolve `EXPORTED_CONST` → its tool-id string literal, wherever it is declared. */
 function idOfConst(constName: string): string | undefined {
   for (const f of walk(SRC).filter((x) => !x.includes('__tests__'))) {
-    const m = new RegExp(`${constName}\\s*=\\s*'([^']+)'`).exec(readFileSync(f, 'utf8'));
+    // `\b` anchors the NAME: unanchored, `PROPOSE_TOOL_ID` matched inside
+    // `TEAM_LEDGER_PROPOSE_TOOL_ID = …` whenever that file was walked first, and the
+    // trusted `workflows.propose` was reported as `team-ledger.propose`.
+    const m = new RegExp(`\\b${constName}\\s*=\\s*'([^']+)'`).exec(readFileSync(f, 'utf8'));
     if (m) return m[1];
   }
   return undefined;

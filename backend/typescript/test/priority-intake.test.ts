@@ -28,14 +28,14 @@ afterAll(async () => { await closeApp(); });
 
 const client = (): Client => makeClient(() => BASE);
 
-const PM = '/v1/host/openwop-app/priority-matrix';
-const S = '/v1/host/openwop-app/strategy';
+const PM = '/host/openwop-app/priority-matrix';
+const S = '/host/openwop-app/strategy';
 
 async function setup(): Promise<{ c: ReturnType<typeof client>; orgId: string; tenantId: string; listId: string; cardA: string; cardB: string }> {
   const tenantId = `org:intake-${Date.now()}-${n++}`;
   const c = client();
-  expect((await c.post('/v1/host/openwop-app/test/login', { email: `in-${Date.now()}-${n++}@acme.test`, tenantId })).status).toBe(201);
-  const orgId = (await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
+  expect((await c.post('/host/openwop-app/test/login', { email: `in-${Date.now()}-${n++}@acme.test`, tenantId })).status).toBe(201);
+  const orgId = (await c.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
   const listId = (await c.post(`${PM}/lists`, { orgId, name: 'Bets', presetId: 'weighted' })).body.id;
   await c.post(`${PM}/lists/${encodeURIComponent(listId)}/ideas`, { title: 'Expand to EU', description: 'The EU push' });
   await c.post(`${PM}/lists/${encodeURIComponent(listId)}/ideas`, { title: 'EU expansion (dupe)' });
@@ -107,7 +107,7 @@ describe('promotion (ADR 0232 §5)', () => {
     expect(r.body.projectId).toBeTruthy();
     const intake = await c.get(`${PM}/lists/${listId}/ideas/${cardA}/intake`);
     expect(intake.body.intake.promotedTo).toEqual({ kind: 'project', id: r.body.projectId });
-    const proj = await c.get(`/v1/host/openwop-app/projects/${r.body.projectId}`);
+    const proj = await c.get(`/host/openwop-app/projects/${r.body.projectId}`);
     expect(proj.status).toBe(200);
     expect(proj.body.name).toBe('Expand to EU');
   });
@@ -231,13 +231,13 @@ describe('PMX-2 — promote reports its move + the double-promote window leaves 
 
   it('two CONCURRENT promotes: exactly one 201, one 409, and exactly ONE project exists', async () => {
     const { c, orgId, listId, cardB } = await setup();
-    const before = (await c.get(`/v1/host/openwop-app/projects?orgId=${encodeURIComponent(orgId)}`)).body.projects.length;
+    const before = (await c.get(`/host/openwop-app/projects?orgId=${encodeURIComponent(orgId)}`)).body.projects.length;
     const [r1, r2] = await Promise.all([
       c.post(`${PM}/lists/${listId}/ideas/${cardB}/promote-to-project`),
       c.post(`${PM}/lists/${listId}/ideas/${cardB}/promote-to-project`),
     ]);
     expect([r1.status, r2.status].sort()).toEqual([201, 409]);
-    const after = (await c.get(`/v1/host/openwop-app/projects?orgId=${encodeURIComponent(orgId)}`)).body.projects.length;
+    const after = (await c.get(`/host/openwop-app/projects?orgId=${encodeURIComponent(orgId)}`)).body.projects.length;
     expect(after - before, 'the losing promote must compensate its minted project').toBe(1);
   });
 });
@@ -269,13 +269,13 @@ describe('F1/F2 — a lost promote stamp AFTER minting compensates the target (d
 
   it('PM route: the freshly-minted PROJECT is deleted, the 409 surfaces, the idea stays unstamped', async () => {
     const { c, orgId, listId, cardA } = await setup();
-    const before = (await c.get(`/v1/host/openwop-app/projects?orgId=${encodeURIComponent(orgId)}`)).body.projects.length;
+    const before = (await c.get(`/host/openwop-app/projects?orgId=${encodeURIComponent(orgId)}`)).body.projects.length;
     const { restore } = await failPromoteStamp();
     try {
       const r = await c.post(`${PM}/lists/${listId}/ideas/${cardA}/promote-to-project`);
       expect(r.status, JSON.stringify(r.body)).toBe(409);
     } finally { restore(); }
-    const after = (await c.get(`/v1/host/openwop-app/projects?orgId=${encodeURIComponent(orgId)}`)).body.projects.length;
+    const after = (await c.get(`/host/openwop-app/projects?orgId=${encodeURIComponent(orgId)}`)).body.projects.length;
     expect(after - before, 'the minted project must be compensated away').toBe(0);
     expect((await c.get(`${PM}/lists/${listId}/ideas/${cardA}/intake`)).body.intake?.promotedTo).toBeUndefined();
     // Recovery: with the fault gone the same promote succeeds.

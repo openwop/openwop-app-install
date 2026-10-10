@@ -34,7 +34,7 @@ const pub = (b: { dailyUsd: number; hardCap: boolean; updatedAt: string }): { da
   ({ dailyUsd: b.dailyUsd, hardCap: b.hardCap, updatedAt: b.updatedAt });
 
 export function registerWorkflowBudgetRoutes(app: Express): void {
-  const PATH = '/v1/host/openwop-app/workflows/:workflowId/budget';
+  const PATH = '/host/openwop-app/workflows/:workflowId/budget';
 
   app.get(PATH, async (req, res, next) => {
     try {

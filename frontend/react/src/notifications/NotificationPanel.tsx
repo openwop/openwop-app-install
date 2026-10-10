@@ -61,6 +61,7 @@ export function NotificationPanel(): JSX.Element | null {
   const preferencesOpen = useNotificationStore((s) => s.preferencesOpen);
   const openPreferences = useNotificationStore((s) => s.openPreferences);
   const pushStatus = useNotificationStore((s) => s.pushStatus);
+  const pushBusy = useNotificationStore((s) => s.pushBusy);
   const enablePush = useNotificationStore((s) => s.enablePush);
   const disablePush = useNotificationStore((s) => s.disablePush);
   const syncPushStatus = useNotificationStore((s) => s.syncPushStatus);
@@ -165,6 +166,7 @@ export function NotificationPanel(): JSX.Element | null {
           <DesktopPermissionRow
             label={t('pushAvailableLabel')}
             cta={t('pushAvailableCta')}
+            busy={pushBusy}
             onClick={() => void enablePush()}
           />
         )}
@@ -173,7 +175,26 @@ export function NotificationPanel(): JSX.Element | null {
             label={t('pushSubscribedLabel')}
             tone="muted"
             cta={t('pushDisableCta')}
+            busy={pushBusy}
             onClick={() => void disablePush()}
+          />
+        )}
+        {/* ADR 0816 — this browser's one push subscription belongs to another
+            account or workspace. "Use it here" re-binds it (the browser presents
+            the same keys, which the server accepts as proof of possession). */}
+        {desktopPermission === 'granted' && pushStatus === 'elsewhere' && (
+          <DesktopPermissionRow
+            label={t('pushElsewhereLabel')}
+            cta={t('pushElsewhereCta')}
+            busy={pushBusy}
+            onClick={() => void enablePush()}
+          />
+        )}
+        {/* A typed refusal is a state, not a retry: no CTA that cannot work. */}
+        {desktopPermission === 'granted' && (pushStatus === 'refused' || pushStatus === 'taken') && (
+          <DesktopPermissionRow
+            label={t(pushStatus === 'refused' ? 'pushRefusedLabel' : 'pushTakenLabel')}
+            tone="muted"
           />
         )}
 
@@ -320,7 +341,7 @@ function NotificationRow({
               onClick={onClose}
               className="inline-link u-fs-12"
             >
-              {t(actionLabelKeyFor(notification.type))} →
+              {t(actionLabelKeyFor(notification.type, notification.actionUrl))} →
             </Link>
           </div>
         )}
@@ -358,11 +379,15 @@ interface DesktopPermissionRowProps {
   cta?: string;
   onClick?: () => void;
   tone?: 'default' | 'muted';
+  /** An enable/disable is in flight — the CTA is disabled so a double click cannot subscribe twice. */
+  busy?: boolean;
 }
 
-function DesktopPermissionRow({ label, cta, onClick, tone = 'default' }: DesktopPermissionRowProps): JSX.Element {
+function DesktopPermissionRow({ label, cta, onClick, tone = 'default', busy = false }: DesktopPermissionRowProps): JSX.Element {
   return (
-    <div className="notifpanel-perm-row" data-tone={tone}>
+    // role="status": a push state change (on / off / bound elsewhere / refused)
+    // replaces this row, and is announced (ADR 0816 NTFUX-9).
+    <div className="notifpanel-perm-row" data-tone={tone} role="status">
       <span className="notifpanel-perm-label">
         {label}
       </span>
@@ -370,6 +395,8 @@ function DesktopPermissionRow({ label, cta, onClick, tone = 'default' }: Desktop
         <Button
           variant="secondary" className="u-fs-12 u-nowrap"
           onClick={onClick}
+          disabled={busy}
+          aria-busy={busy || undefined}
         >
           {cta}
         </Button>

@@ -13,7 +13,7 @@
  * yet projected — `capabilities.toolCatalog.sources` advertises exactly `['mcp']`,
  * so the advertisement stays honest.
  *
- * Authorization: same gate as `tools/list` (mcpServerRegistry.listToolsForPrincipal)
+ * Authorization: same gate as `tools/list` (mcpServerRegistry.listToolsForCaller, ADR 0788)
  * — a tool the principal can't invoke (anonymous, or `notebooks` toggle off) MUST
  * NOT appear, and `GET /v1/tools/{toolId}` 404s an unknown OR unauthorized id (the
  * RFC 0074 non-disclosure pattern). Unauthenticated ⇒ 401.
@@ -23,11 +23,12 @@
  */
 
 import type { Express } from 'express';
-import { v1 } from '../middleware/protocolVersion.js';
 import type { Storage } from '../storage/storage.js';
 import { OpenwopError } from '../types.js';
 import { requireProtocolScope } from '../host/protocolAuthorization.js';
-import { isToolAllowed, listToolsForPrincipal, requiredScopeForTool, type ExposedToolManifest } from '../host/mcpServerRegistry.js';
+import { listToolsForCaller, requiredScopeForTool, type ExposedToolManifest } from '../host/mcpServerRegistry.js';
+import { mcpCallerFor } from '../host/mcpCaller.js';
+import type { HostAdapterSuite } from '../host/index.js';
 import { toCompactDescriptor, type FullToolDescriptor } from '../host/compactToolDescriptor.js';
 import { createLogger } from '../observability/logger.js';
 
@@ -35,6 +36,7 @@ const log = createLogger('routes.toolCatalog');
 
 interface Deps {
   storage: Storage;
+  hostSuite: HostAdapterSuite;
 }
 
 /** Project an MCP tool manifest → a normative RFC 0078 ToolDescriptor. The notebook
@@ -49,7 +51,12 @@ interface Deps {
  *  A parity test has to read the ADVERT, and the advert is what this function
  *  emits; the route body is a `res.json` around it. */
 export function toDescriptor(m: ExposedToolManifest): Record<string, unknown> {
-  const safetyTier = m.mcpSafetyTier === 'write' ? 'write' : 'read';
+  // ADR 0788 D1 (architect B3) — a WORKSPACE tool runs an arbitrary tenant
+  // workflow (AI calls, HTTP, writes), so its facts are derived conservatively:
+  // a write, host-owned egress, and not replay-idempotent. Advertising the notebook
+  // tools' `none` / `idempotent` for it would describe a graph nobody reviewed.
+  const workspace = m.source === 'workspace';
+  const safetyTier = workspace || m.mcpSafetyTier === 'write' ? 'write' : 'read';
   // ADR 0601 — the advertised scope comes from the SAME function `isToolAllowed`
   // enforces (`requiredScopeForTool`), not from a second derivation here. This
   // line used to compute `workspace:write` independently while the gate checked
@@ -62,10 +69,12 @@ export function toDescriptor(m: ExposedToolManifest): Record<string, unknown> {
     source: 'mcp',
     title: m.name,
     safetyTier,
-    auth: { scopes: required ? [required] : [], credentialRef: true },
-    egress: 'none',
+    // A workspace tool is a LAUNCH: `requireWorkflowWrite` + the `runs:create`
+    // key narrowing (host/mcpCaller.ts) — both advertised, both enforced.
+    auth: { scopes: workspace ? ['workspace:write', 'runs:create'] : required ? [required] : [], credentialRef: true },
+    egress: workspace ? 'host-owned' : 'none',
     approval: m.mcpApproval === 'always' ? 'always' : m.mcpApproval === 'conditional' ? 'conditional' : 'never',
-    replayPolicy: 'idempotent',
+    replayPolicy: workspace ? 'non-deterministic' : 'idempotent',
     inputSchema: m.inputSchema,
   };
   if (m.description !== undefined) d.description = m.description;
@@ -85,10 +94,10 @@ function wantsCompact(req: { query: Record<string, unknown> }): boolean {
   return req.query.view === 'compact';
 }
 
-export function registerToolCatalogRoutes(app: Express, _deps: Deps): void {
+export function registerToolCatalogRoutes(app: Express, deps: Deps): void {
   // GET /v1/tools — the catalog the authenticated principal may see (authorization-
   // scoped). Optional ?source=<source> filter.
-  app.get(v1('/tools'), async (req, res, next) => {
+  app.get('/tools', async (req, res, next) => {
     try {
       if (!catalogEnabled()) throw new OpenwopError('not_found', 'Tool catalog not advertised.', 404, {});
       const principal = req.principal;
@@ -100,7 +109,15 @@ export function registerToolCatalogRoutes(app: Express, _deps: Deps): void {
         res.json([]);
         return;
       }
-      const manifests = await listToolsForPrincipal(principal);
+      // RFC 0204 §D.13 / tool-catalog.md §The catalog — an unchanged catalog SHOULD
+      // read identically, sorted by toolId. The registry yields host projections in
+      // registration order, then whichever workspace workflows expose a tool at read
+      // time, so the order drifted with workspace state (#4339). `toolId` is
+      // `mcp:<name>`, so sorting by name is sorting by toolId; code-unit order, not
+      // localeCompare, so it never depends on the host's locale.
+      const manifests = (await listToolsForCaller(await mcpCallerFor(req, principal, deps.hostSuite.workflowCatalog)))
+        .slice()
+        .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
       // RFC 0112 — compact projection over the SAME authorization-scoped set, so
       // the compact toolId set == the standard view's by construction (RFC 0074).
       // Enveloped `{ tools: CompactToolDescriptor[] }` (vs the standard bare array).
@@ -117,7 +134,7 @@ export function registerToolCatalogRoutes(app: Express, _deps: Deps): void {
 
   // GET /v1/tools/{toolId} — one descriptor, or 404 for unknown OR unauthorized
   // (non-disclosing). toolId form is `mcp:<tool-name>`.
-  app.get(v1('/tools/:toolId'), async (req, res, next) => {
+  app.get('/tools/:toolId', async (req, res, next) => {
     try {
       if (!catalogEnabled()) throw new OpenwopError('not_found', 'Tool catalog not advertised.', 404, {});
       const principal = req.principal;
@@ -126,9 +143,10 @@ export function registerToolCatalogRoutes(app: Express, _deps: Deps): void {
       const toolId = req.params.toolId;
       // Resolve against the principal's AUTHORIZED set so an unauthorized id is
       // indistinguishable from an unknown one (RFC 0074 non-disclosure).
-      const manifests = await listToolsForPrincipal(principal);
+      // ADR 0788 D1 — the caller-scoped list IS the gate (list/call parity).
+      const manifests = await listToolsForCaller(await mcpCallerFor(req, principal, deps.hostSuite.workflowCatalog));
       const match = manifests.find((m) => `mcp:${m.name}` === toolId);
-      if (!match || !(await isToolAllowed(match, principal))) {
+      if (!match) {
         throw new OpenwopError('not_found', 'Tool not found.', 404, { toolId });
       }
       // RFC 0112 — single compact descriptor (bare, not enveloped). Same authz

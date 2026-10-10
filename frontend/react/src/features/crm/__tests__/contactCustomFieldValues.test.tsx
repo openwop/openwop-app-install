@@ -7,18 +7,25 @@
  * contact create form carries the tenant's fields, and an existing contact's
  * values are reachable through a modal. A definitions editor alone would have
  * left agent-written values permanently unreachable to the person they describe.
+ *
+ * Sabotage that turns it red (wave-4 /grade-tests probes, 5/5 witnessed): the
+ * create call dropping `customFields`; the edit sending an empty map; the
+ * "Fields" action shown with no defs; the control's `required` attribute
+ * dropped; the failed-defs chip rendering nothing.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, waitFor, fireEvent, within } from '@testing-library/react';
+import { act, render, screen, cleanup, waitFor, fireEvent, within } from '@testing-library/react';
+// Type-only (erased at runtime, so it does not race `vi.mock`).
+import type * as CrmClient from '../crmClient.js';
 import { MemoryRouter } from 'react-router-dom';
 
 const api = vi.hoisted(() => ({
-  listContacts: vi.fn(),
-  listSegments: vi.fn(),
-  listSegmentMembers: vi.fn(),
-  listContactFields: vi.fn(),
-  createContact: vi.fn(),
-  updateContactFields: vi.fn(),
+  listContacts: vi.fn<typeof CrmClient.listContacts>(),
+  listSegments: vi.fn<typeof CrmClient.listSegments>(),
+  listSegmentMembers: vi.fn<typeof CrmClient.listSegmentMembers>(),
+  listContactFields: vi.fn<typeof CrmClient.listContactFields>(),
+  createContact: vi.fn<typeof CrmClient.createContact>(),
+  updateContactFields: vi.fn<typeof CrmClient.updateContactFields>(),
 }));
 vi.mock('../crmClient.js', async (orig) => {
   const actual = await orig<Record<string, unknown>>();
@@ -26,20 +33,20 @@ vi.mock('../crmClient.js', async (orig) => {
 });
 
 import { ContactsTab } from '../ContactsTab.js';
-import type { ContactFieldDef } from '../crmClient.js';
+import type { Contact, ContactFieldDef } from '../crmClient.js';
 
 const DEFS: ContactFieldDef[] = [
   { defId: 'f1', key: 'tier', label: 'Tier', type: 'enum', required: false, options: ['Bronze', 'Gold'], createdAt: '2026-01-01T00:00:00Z' },
   { defId: 'f2', key: 'seats', label: 'Seats', type: 'number', required: true, createdAt: '2026-01-01T00:00:00Z' },
 ];
-const ADA = {
-  contactId: 'c1', tenantId: 't1', name: 'Ada Lovelace', stage: 'lead' as const,
+const ADA: Contact = {
+  contactId: 'c1', tenantId: 't1', name: 'Ada Lovelace', stage: 'lead',
   customFields: { tier: 'Gold', seats: 12 },
   createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
 };
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   api.listContacts.mockResolvedValue([ADA]);
   api.listSegments.mockResolvedValue([]);
   api.listSegmentMembers.mockResolvedValue([]);
@@ -75,7 +82,13 @@ describe('CRM-UX-7 — custom-field values on the contact form', () => {
     expect((screen.getByLabelText('Tier') as HTMLSelectElement).required).toBe(false);
     fireEvent.change(screen.getByPlaceholderText('Jane Doe'), { target: { value: 'Grace Hopper' } });
     fireEvent.click(screen.getByRole('button', { name: 'Add contact' }));
-    await waitFor(() => expect(seats.required).toBe(true));
+    // Drain instead of the old `waitFor(seats.required)` (already true, so it
+    // waited for nothing): a submit that DID go through reaches `createContact`
+    // only after a few microtasks. DOUBLE GUARD, recorded: jsdom's constraint
+    // validation AND the JS `missingRequired` guard both stop this submit, so no
+    // single sabotage reddens the `not.toHaveBeenCalled` leg — `seats.required`
+    // above is the witnessed leg (probe w4g4-ccfv-required-attr).
+    await act(async () => { for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r)); });
     expect(api.createContact).not.toHaveBeenCalled();
   });
 

@@ -4,8 +4,9 @@
  * The persisted CONFIG shape (`ConversationCapabilityScope`) is core-owned (it is a
  * typed field on `ConversationMeta`); this module owns the RESOLVED EFFECTIVE shape
  * + the resolver/stamp logic. The effective set is what the live tool loop enforces
- * (Phase 2) and what is stamped per-run in `run.metadata.capabilityScope` and read
- * verbatim on `:fork` (the ADR 0031 replay invariant).
+ * (Phase 2) and what is stamped per-run in `run.metadata.capabilityScope` as provenance.
+ * (ADR 0834 D7: the stamp is NOT read on `:fork` — the scope re-resolves live every turn;
+ * see `capabilityScopeStamp.ts`.)
  *
  * @see docs/adr/0132-per-conversation-capability-scope.md
  */

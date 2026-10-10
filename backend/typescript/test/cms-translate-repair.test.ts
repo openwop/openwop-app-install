@@ -86,13 +86,13 @@ let n = 0;
 async function ownerOrg(): Promise<{ owner: Client; orgId: string; tenantId: string }> {
   const tenantId = `org:xlr-${Date.now()}-${n++}`;
   const owner = client();
-  const r = await owner.post('/v1/host/openwop-app/test/login', { email: `xlr-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await owner.post('/host/openwop-app/test/login', { email: `xlr-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status).toBe(201);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status).toBe(201);
   return { owner, orgId: org.body.orgId, tenantId };
 }
-const u = (orgId: string, s = ''): string => `/v1/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${s}`;
+const u = (orgId: string, s = ''): string => `/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${s}`;
 
 describe('POST /translate-section — typed failure + one bounded repair', () => {
   it('garbage twice → 502 translation_invalid after EXACTLY one repair (never 200 {overlay:{}})', async () => {
@@ -166,7 +166,7 @@ describe('ADR 0592 §9 (CMSL-5/CMSLU-14) — a degraded sweep is SURFACED, not s
     expect(sub.body.autoTranslated).toBeUndefined();
     expect(sub.body.autoTranslateDegraded).toEqual({ invalid: 1 });
     // …and the approval PROPOSAL (the reviewer's view).
-    const list = await owner.get('/v1/host/openwop-app/approvals?status=pending');
+    const list = await owner.get('/host/openwop-app/approvals?status=pending');
     const appr = (list.body.items as Array<{ pageId?: string; proposal: string }>).find((a) => a.pageId === created.body.pageId);
     expect(appr).toBeTruthy();
     expect(appr?.proposal).toMatch(/auto-translate incomplete/);
@@ -213,7 +213,7 @@ describe('ADR 0592 §9 correction — the double-conflict discard is DISCLOSED (
     // Drafts were produced then discarded — DISCLOSED, not a clean-looking submit.
     expect(sub.body.autoTranslated).toBeUndefined();
     expect(sub.body.autoTranslateDegraded).toEqual({ conflict: true });
-    const list = await owner.get('/v1/host/openwop-app/approvals?status=pending');
+    const list = await owner.get('/host/openwop-app/approvals?status=pending');
     const appr = (list.body.items as Array<{ pageId?: string; proposal: string }>).find((a) => a.pageId === created.body.pageId);
     expect(appr?.proposal).toMatch(/auto-translate incomplete/);
     expect(appr?.proposal).toMatch(/drafts were discarded/);

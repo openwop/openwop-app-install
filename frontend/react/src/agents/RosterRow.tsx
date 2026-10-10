@@ -55,7 +55,8 @@ export function RosterRow({ view, busy, onOpen, onCheckNow, onChat }: {
   view: AgentView;
   busy?: boolean;
   onOpen: (tab?: string) => void;
-  onCheckNow: () => void;
+  /** Absent for a viewer (ADR 0775 D1): the control is not rendered. */
+  onCheckNow?: (() => void) | undefined;
   onChat: () => void;
 }): JSX.Element {
   const { t } = useTranslation('agents');
@@ -94,9 +95,11 @@ export function RosterRow({ view, busy, onOpen, onCheckNow, onChat }: {
       </span>
 
       <div className="roster-actions action-bar">
-        <Button variant="secondary" size="sm" title={t('checkNowTitle')} aria-label={t('checkAgentNow', { persona: entry.persona })} disabled={busy || !entry.enabled} onClick={onCheckNow}>
-          <PlayIcon size={14} aria-hidden />
-        </Button>
+        {onCheckNow ? (
+          <Button variant="secondary" size="sm" title={t('checkNowTitle')} aria-label={t('checkAgentNow', { persona: entry.persona })} disabled={busy || !entry.enabled} onClick={onCheckNow}>
+            <PlayIcon size={14} aria-hidden />
+          </Button>
+        ) : null}
         <Button variant="secondary" size="sm" title={t('chatWithPersona', { persona: entry.persona })} aria-label={t('chatWithPersona', { persona: entry.persona })} onClick={onChat}>
           <MessageSquareIcon size={14} aria-hidden />
         </Button>

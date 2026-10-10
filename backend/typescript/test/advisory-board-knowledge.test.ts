@@ -48,24 +48,24 @@ function client(): Client {
 
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
 async function makeAdvisor(c: Client, persona: string): Promise<string> {
-  const r = await c.post('/v1/host/openwop-app/roster', { persona, agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
+  const r = await c.post('/host/openwop-app/roster', { persona, agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.rosterId;
 }
 async function ownerBoard(): Promise<{ owner: Client; tenantId: string; orgId: string; boardId: string; advisors: string[] }> {
   const owner = client();
   const tenantId = `org:abk-${Date.now()}-${n++}`;
-  const login = await owner.post('/v1/host/openwop-app/test/login', { email: uniqEmail('abk'), tenantId });
+  const login = await owner.post('/host/openwop-app/test/login', { email: uniqEmail('abk'), tenantId });
   expect(login.status, JSON.stringify(login.body)).toBe(201);
   const a = await makeAdvisor(owner, 'Ada Lovelace');
   const b = await makeAdvisor(owner, 'Alan Turing');
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
-  const board = await owner.post('/v1/host/openwop-app/advisors/boards', { orgId: org.body.orgId, name: 'Founders', advisors: [a, b], personaKind: 'historical' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
+  const board = await owner.post('/host/openwop-app/advisors/boards', { orgId: org.body.orgId, name: 'Founders', advisors: [a, b], personaKind: 'historical' });
   expect(board.status, JSON.stringify(board.body)).toBe(201);
   return { owner, tenantId, orgId: org.body.orgId, boardId: board.body.boardId, advisors: [a, b] };
 }
 
-const SK = (boardId: string): string => `/v1/host/openwop-app/advisors/boards/${encodeURIComponent(boardId)}/shared-knowledge`;
+const SK = (boardId: string): string => `/host/openwop-app/advisors/boards/${encodeURIComponent(boardId)}/shared-knowledge`;
 const find = (items: any[], kind: string): any => items.find((i) => i.kind === kind);
 
 describe('ADR 0100 P5 — board shared knowledge', () => {
@@ -95,8 +95,8 @@ describe('ADR 0100 P5 — board shared knowledge', () => {
 
   it('shares the org PROJECT KBs across all advisors, then unshares', async () => {
     const { owner, orgId, boardId } = await ownerBoard();
-    const proj = (await owner.post('/v1/host/openwop-app/projects', { orgId, name: 'Launch' })).body;
-    const col = (await owner.post(`/v1/host/openwop-app/projects/${encodeURIComponent(proj.id)}/knowledge/collections`, { orgId, name: 'Launch notes' })).body;
+    const proj = (await owner.post('/host/openwop-app/projects', { orgId, name: 'Launch' })).body;
+    const col = (await owner.post(`/host/openwop-app/projects/${encodeURIComponent(proj.id)}/knowledge/collections`, { orgId, name: 'Launch notes' })).body;
     expect(col.collectionId, JSON.stringify(col)).toBeTruthy();
 
     const shared = await owner.post(SK(boardId), { kind: 'project', shared: true });
@@ -112,9 +112,9 @@ describe('ADR 0100 P5 — board shared knowledge', () => {
 
   it('does NOT share a PRIVATE project KB — the visibility carve-out', async () => {
     const { owner, orgId, boardId } = await ownerBoard();
-    const proj = (await owner.post('/v1/host/openwop-app/projects', { orgId, name: 'Secret' })).body;
-    expect((await owner.patch(`/v1/host/openwop-app/projects/${encodeURIComponent(proj.id)}/visibility`, { visibility: 'private' })).status).toBe(200);
-    await owner.post(`/v1/host/openwop-app/projects/${encodeURIComponent(proj.id)}/knowledge/collections`, { orgId, name: 'Secret notes' });
+    const proj = (await owner.post('/host/openwop-app/projects', { orgId, name: 'Secret' })).body;
+    expect((await owner.patch(`/host/openwop-app/projects/${encodeURIComponent(proj.id)}/visibility`, { visibility: 'private' })).status).toBe(200);
+    await owner.post(`/host/openwop-app/projects/${encodeURIComponent(proj.id)}/knowledge/collections`, { orgId, name: 'Secret notes' });
 
     const r = await owner.post(SK(boardId), { kind: 'project', shared: true });
     const item = find(r.body.items, 'project');
@@ -126,13 +126,13 @@ describe('ADR 0100 P5 — board shared knowledge', () => {
     const { owner, boardId } = await ownerBoard();
     expect((await owner.post(SK(boardId), { kind: 'nonsense', shared: true })).status).toBe(400);
     const stranger = client();
-    await stranger.post('/v1/host/openwop-app/test/login', { email: uniqEmail('stranger'), tenantId: `org:other-${Date.now()}-${n++}` });
+    await stranger.post('/host/openwop-app/test/login', { email: uniqEmail('stranger'), tenantId: `org:other-${Date.now()}-${n++}` });
     expect([403, 404]).toContain((await stranger.post(SK(boardId), { kind: 'strategy', shared: true })).status);
   });
 });
 
 describe('ADR 0277 P2 — knowledge-composition reconciliation', () => {
-  const BOARD = (id: string): string => `/v1/host/openwop-app/advisors/boards/${encodeURIComponent(id)}`;
+  const BOARD = (id: string): string => `/host/openwop-app/advisors/boards/${encodeURIComponent(id)}`;
   const bound = async (tenantId: string, advisorId: string): Promise<string[]> =>
     (await getAgentProfile(tenantId, advisorId))?.knowledge?.collectionIds ?? [];
 
@@ -158,7 +158,7 @@ describe('ADR 0277 P2 — knowledge-composition reconciliation', () => {
     const { owner, tenantId, orgId, boardId, advisors: [a, b] } = await ownerBoard();
     await owner.post(SK(boardId), { kind: 'strategy', shared: true });
     // A second board in the same org also shares strategy with b.
-    const board2 = await owner.post('/v1/host/openwop-app/advisors/boards', { orgId, name: 'Council', advisors: [b], personaKind: 'historical' });
+    const board2 = await owner.post('/host/openwop-app/advisors/boards', { orgId, name: 'Council', advisors: [b], personaKind: 'historical' });
     await owner.post(SK(board2.body.boardId), { kind: 'strategy', shared: true });
     const withGrant = await bound(tenantId, b!);
     expect(withGrant.length).toBeGreaterThan(0);
@@ -176,7 +176,7 @@ describe('ADR 0277 P2 — knowledge-composition reconciliation', () => {
     // A pre-0277 board: cohort [b], bindings present, but NO stored sharedKbKinds
     // (created via the plain create route; its bindings came from the share above,
     // which for board2's purposes is indistinguishable from a legacy manual share).
-    const board2 = await owner.post('/v1/host/openwop-app/advisors/boards', { orgId, name: 'Legacy circle', advisors: [b], personaKind: 'historical' });
+    const board2 = await owner.post('/host/openwop-app/advisors/boards', { orgId, name: 'Legacy circle', advisors: [b], personaKind: 'historical' });
     expect(board2.status).toBe(201);
 
     // Removing b from board ONE: board TWO's DERIVED sharedness must protect b.
@@ -189,8 +189,8 @@ describe('ADR 0277 P2 — knowledge-composition reconciliation', () => {
     // Bind the advisor to the strategy KB (the Shared-knowledge grant)…
     await owner.post(SK(boardId), { kind: 'strategy', shared: true });
     // …and put a distinctive doc in a DIFFERENT org collection the advisor is NOT bound to.
-    const col = (await owner.post(`/v1/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections`, { name: 'Ops runbook' })).body;
-    const doc = await owner.post(`/v1/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections/${col.collectionId}/documents`, { title: 'Codeword', text: 'The operations codeword is ZEBRAWORD, used for the incident bridge.' });
+    const col = (await owner.post(`/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections`, { name: 'Ops runbook' })).body;
+    const doc = await owner.post(`/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections/${col.collectionId}/documents`, { title: 'Codeword', text: 'The operations codeword is ZEBRAWORD, used for the incident bridge.' });
     expect(doc.status, JSON.stringify(doc.body)).toBe(201);
 
     const query = { name: 'openwop:knowledge.search', input: { query: 'ZEBRAWORD incident codeword' } };
@@ -207,20 +207,20 @@ describe('ADR 0277 P2 — knowledge-composition reconciliation', () => {
     // A persona agent the registry can resolve, wrapped by roster advisor `a`
     // …simpler: bind an org KB with distinctive content straight to `a` and
     // compose with `a`'s id — the persona comes from a user-authored agent.
-    const created = await owner.post('/v1/host/openwop-app/agents', {
+    const created = await owner.post('/host/openwop-app/agents', {
       persona: 'Beacon Analyst', label: 'Beacon', modelClass: 'chat',
       systemPrompt: 'PERSONA-BEACON: you analyze operational readiness.',
     });
     expect([200, 201, 409]).toContain(created.status);
     const agentId = created.body?.agentId ?? created.body?.agent?.agentId;
     expect(typeof agentId, JSON.stringify(created.body)).toBe('string');
-    const roster = await owner.post('/v1/host/openwop-app/roster', { persona: 'Beacon Analyst Member', agentRef: { agentId } });
+    const roster = await owner.post('/host/openwop-app/roster', { persona: 'Beacon Analyst Member', agentRef: { agentId } });
     const rosterId = roster.body.rosterId as string;
     __clearAgentIdentityCache();
 
-    const col = (await owner.post(`/v1/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections`, { name: 'Signals' })).body;
-    await owner.post(`/v1/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections/${col.collectionId}/documents`, { title: 'Signal', text: 'The readiness signal threshold is GRIFFINWORD at level nine.' });
-    await bindCollection(tenantId, rosterId, col.collectionId, PREAUTHORIZED_CALLER); // ADR 0643 R3 Blocker 2 — the bind door takes the binder's principal; a plain org collection (no boundSubject) needs none, so the test seeds with the explicit bypass
+    const col = (await owner.post(`/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections`, { name: 'Signals' })).body;
+    await owner.post(`/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections/${col.collectionId}/documents`, { title: 'Signal', text: 'The readiness signal threshold is GRIFFINWORD at level nine.' });
+    await bindCollection(tenantId, rosterId, col.collectionId, PREAUTHORIZED_CALLER, 'preauthorized'); // ADR 0643 R3 Blocker 2 — the bind door takes the binder's principal; a plain org collection (no boundSubject) needs none, so the test seeds with the explicit bypass
 
     // BOTH id forms compose the bound KB into the interactive scaffold now.
     for (const id of [rosterId, agentId]) {

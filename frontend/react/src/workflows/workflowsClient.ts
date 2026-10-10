@@ -13,6 +13,9 @@ import { assertSynced, authedHeaders, config, fetchOpts } from '../client/config
 
 export interface WorkflowSummaryDTO {
   workflowId: string;
+  /** ADR 0794 — what the id is, stamped by the server. A client never reads an
+   *  id's spelling to decide this. */
+  kind: 'workflow' | 'walkthrough';
   name: string;
   nodeCount: number;
   createdAt: string;
@@ -96,6 +99,8 @@ export interface WorkflowRevisionRow {
   nodeCount: number;
   supersedes?: string;
   createdBy?: string;
+  /** ADR 0773 G-03g — the author's display name, when the host could resolve it. */
+  createdByName?: string;
   published: boolean;
   isHead: boolean;
 }
@@ -113,7 +118,17 @@ export async function listWorkflowRevisions(workflowId: string): Promise<Workflo
 /** ADR 0474 — restore a prior revision as the new head (append-only history;
  *  the response discloses removed nodes that runs had recorded, mirroring the
  *  builder-save contract). */
-export async function rollbackWorkflow(workflowId: string, revisionHash: string): Promise<{ removedReferencedNodeIds?: string[] }> {
+/** ADR 0789 — restoring a revision of a SHARED (seeded) workflow forks it: the
+ *  response then names the tenant's own copy (`workflowId`, `forkedFrom`), which
+ *  the caller must adopt exactly as the autosave does. */
+export interface RollbackOutcome {
+  removedReferencedNodeIds?: string[];
+  workflowId?: string;
+  forkedFrom?: string;
+  revision?: string;
+  repointFailed?: string[];
+}
+export async function rollbackWorkflow(workflowId: string, revisionHash: string): Promise<RollbackOutcome> {
   const res = await fetch(
     `${config.baseUrl}/host/openwop-app/workflows/${encodeURIComponent(workflowId)}/rollback`,
     fetchOpts({ method: 'POST', headers: authedHeaders({ 'content-type': 'application/json' }), body: JSON.stringify({ revisionHash }) }),
@@ -122,7 +137,7 @@ export async function rollbackWorkflow(workflowId: string, revisionHash: string)
     const body = (await res.json().catch(() => undefined)) as { details?: { reason?: string } } | undefined;
     throw new Error(body?.details?.reason ?? `rollback_${res.status}`);
   }
-  return (await res.json()) as { removedReferencedNodeIds?: string[] };
+  return (await res.json()) as RollbackOutcome;
 }
 
 /** ADR 0482 — a workflow's daily budget (null when unset). */

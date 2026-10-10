@@ -78,8 +78,9 @@ export function recordPayloadSample(type: string, payload: unknown, wire?: unkno
   if (seen.has(key)) return;
   seen.add(key);
   try {
-    // `tenant` (ADR 0726) lets the audit tell an `anon:` run — whose bound ids
-    // stay bare BY DECISION (ADR 0704) — from a projection that failed.
+    // `tenant` (ADR 0726) records which tenant's projection produced the wire
+    // sample. (It once excused `anon:` runs, whose ids stayed bare by ADR 0704;
+    // ADR 0760 binds them, so the audit no longer exempts any tenant.)
     appendFileSync(SAMPLE_FILE, `${JSON.stringify({ type, payload, wire: wire ?? payload, origin: originOf(), ...(tenant !== undefined ? { tenant } : {}) })}\n`);
   } catch {
     /* best-effort — never fail an append because the audit could not write */

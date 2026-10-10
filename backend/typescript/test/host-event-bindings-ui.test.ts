@@ -5,7 +5,7 @@
  *
  * `crm-events.test.ts` already covers POST/GET/DELETE CRUD + the CRM
  * emission/webhook/trigger wiring; this file adds ONLY the new
- * `PATCH /v1/host/openwop-app/host-events/bindings/:bindingId` route the
+ * `PATCH /host/openwop-app/host-events/bindings/:bindingId` route the
  * admin UI's enabled-toggle drives: happy path + cross-tenant 404 + the
  * validation 400 for a non-boolean body.
  */
@@ -71,12 +71,12 @@ let n = 0;
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
 async function signup(c: Client): Promise<{ userId: string; tenantId: string }> {
   const tenantId = `org:test-${Date.now()}-${n++}`;
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail('bindui'), tenantId });
+  const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail('bindui'), tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return { userId: r.body.user.userId, tenantId };
 }
 
-const BINDINGS = '/v1/host/openwop-app/host-events/bindings';
+const BINDINGS = '/host/openwop-app/host-events/bindings';
 
 describe('host-event bindings — PATCH :bindingId (admin-UI enabled toggle)', () => {
   it('flips enabled, stamps updatedAt, and rejects a non-boolean body', async () => {

@@ -27,7 +27,7 @@ import { actionError, StatusChip, OrderActions } from './commerceShared.js';
 import { scrollBehavior } from '../../ui/motion.js';
 import { KeyFigureBand } from '../../ui/KeyFigure.js';
 import { useFeatureAccess } from '../../featureToggles/FeatureAccessContext.js';
-import { EmbeddedChatPanel } from '../../chat/EmbeddedChatPanel.js';
+import { ChatPocket } from '../../chat/ChatPocket.js';
 import { useFormat } from '../../i18n/useFormat.js';
 import { copyToClipboard } from '../../ui/copyToClipboard.js';
 import {
@@ -42,8 +42,8 @@ import {
   type ProductFieldDef, type ProductFieldType,
 } from './commerceClient.js';
 
-type Tab = 'products' | 'orders' | 'quotes' | 'pricing' | 'reports' | 'assistant';
-const TABS: Tab[] = ['products', 'orders', 'quotes', 'pricing', 'reports', 'assistant'];
+type Tab = 'products' | 'orders' | 'quotes' | 'pricing' | 'reports';
+const TABS: Tab[] = ['products', 'orders', 'quotes', 'pricing', 'reports'];
 
 // Collection kit (§4.5 rule 13) — facet vocabularies reuse the existing
 // status_* chip keys (StatusChip), so labels can't drift from the chips.
@@ -61,6 +61,10 @@ export function CommercePage(): JSX.Element {
    *  null on failure; `?org=` is honoured when the read confirms it exists. */
   const { orgs, orgId, setOrgId, orgsFailed, retry: retryOrgs } =
     useOrgSelection<Org>(listOrgs, access.enabled, searchParams.get('org') ?? '');
+  // ADR 0768 P5 — the Store Assistant moved from its own tab into a Pocket that
+  // floats over EVERY tab (ask about the orders you are looking at). An old
+  // `?tab=assistant` link opens the pocket; useUrlTab falls back to products.
+  const [assistantDeepLinked] = useState(() => searchParams.get('tab') === 'assistant');
   const [tab, setTab] = useUrlTab<Tab>('tab', TABS, 'products');
 
   // Deep-link spine: the active store rides `?org=` so a commerce link lands on
@@ -117,8 +121,16 @@ export function CommercePage(): JSX.Element {
             {tab === 'quotes' ? <QuotesTab orgId={orgId} focusId={searchParams.get('quote') ?? undefined} /> : null}
             {tab === 'pricing' ? <PricingTab orgId={orgId} /> : null}
             {tab === 'reports' ? <ReportsTab orgId={orgId} /> : null}
-            {tab === 'assistant' ? <AssistantTab /> : null}
           </TabPanel>
+          <ChatPocket
+            agentId="vendor.openwop-app.commerce.agents.store-assistant"
+            title={t('assistantTitle')}
+            // Honest scope: the assistant is NOT bound to the selected store or tab —
+            // its read tools reach every store the caller can see.
+            contextLabel={t('assistantScope')}
+            defaultOpen={assistantDeepLinked}
+            renderEmptyState={() => <p className="chat-pocket__hint">{t('assistantHint')}</p>}
+          />
         </>
         )}
       </OrgSelectionState>
@@ -994,12 +1006,3 @@ function ReportsTab({ orgId }: { orgId: string }): JSX.Element {
   );
 }
 
-function AssistantTab(): JSX.Element {
-  const { t } = useTranslation('commerce');
-  return (
-    <div className="surface-card u-p-4 commerce-assistant-panel">
-      <div><strong>{t('assistantTitle')}</strong><p className="u-m-0 u-text-sm muted">{t('assistantHint')}</p></div>
-      <EmbeddedChatPanel agentId="feature.commerce.agents.store-assistant" />
-    </div>
-  );
-}

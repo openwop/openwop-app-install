@@ -15,11 +15,15 @@
 
 import type { Storage } from '../../storage/storage.js';
 import { createLogger } from '../../observability/logger.js';
+import { tenantFeatureCheck } from '../../host/tenantFeatureGate.js';
 import { crmSnapshotId, listDeals, listPipelines, upsertCrmSnapshot, type StageSnapshotEntry } from './crmEntitiesService.js';
 
 const log = createLogger('crm.snapshot');
 
 const POLL_INTERVAL_MS = 60 * 60 * 1000; // hourly
+
+/** ADR 0820 §7 / G10 — the toggle the snapshot daemon's work belongs to. */
+export const CRM_SNAPSHOT_FEATURE_ID = 'crm';
 
 /** ISO-8601 week label (`YYYY-Www`), UTC-based — a stable, deterministic slot
  *  key independent of server timezone. */
@@ -46,7 +50,12 @@ export async function processDueCrmSnapshots(
   const week = isoWeek(now);
   const at = new Date(now).toISOString();
   let written = 0;
+  // ADR 0820 §7 / G10 — only tenants that may use `crm` (toggle + plan). Checked
+  // BEFORE the week's claim, so a tenant whose access returns mid-week still
+  // gets that week's snapshot. A skip is silent and cheap (memoized per pass).
+  const mayUse = tenantFeatureCheck(CRM_SNAPSHOT_FEATURE_ID);
   for (const { tenantId, orgId } of await listCrmTenants()) {
+    if (!(await mayUse(tenantId))) continue;
     let claim: { claimed: boolean };
     try {
       claim = await deps.storage.claimOnce(`crm-snapshot:${tenantId}:${orgId}:${week}`, at);

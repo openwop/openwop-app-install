@@ -7,22 +7,37 @@
  * (own-row guards stop firing) and the restrictive answer for "may I manage
  * it?" (owner-only controls vanish). All three arms are asserted — pinning only
  * the unknown arm would stay green if this regressed to "always unknown".
+ *
+ * Fixtures are a complete, typed `Profile` (no laundering cast). Sabotage-witnessed
+ * (/grade-tests wave 3, `w3g3-id-*`): unknown→false, no-owner→unknown, an
+ * inverted compare, a lost known arm, a known arm carrying a different profile,
+ * an unknown arm carrying a userId or the wrong error, and a failure resolved as
+ * known each turn a named case red.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, waitFor, cleanup } from '@testing-library/react';
 
-const getMyProfile = vi.fn();
+import type { Profile } from '../profilesClient.js';
+
+const getMyProfile = vi.fn<() => Promise<Profile>>();
 vi.mock('../profilesClient.js', () => ({
-  getMyProfile: (...a: unknown[]) => getMyProfile(...a),
+  getMyProfile: () => getMyProfile(),
 }));
 
 import { isMine, useMyIdentity, type MyIdentity } from '../useMyIdentity.js';
+
+const PROFILE: Profile = {
+  userId: 'u1', tenantId: 't1', displayName: 'Sam',
+  skills: [], equipment: [], interests: [], workflows: [],
+  portfolioAssetTokens: [], pinnedAgentIds: [],
+  completeness: 0, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
+};
 
 beforeEach(() => { getMyProfile.mockReset(); });
 afterEach(cleanup);
 
 describe('isMine — unknown is not false', () => {
-  const known: MyIdentity = { status: 'known', userId: 'u1', profile: {} as never };
+  const known: MyIdentity = { status: 'known', userId: 'u1', profile: PROFILE };
 
   it('true for your own row', () => {
     expect(isMine(known, 'u1')).toBe(true);
@@ -51,10 +66,11 @@ describe('isMine — unknown is not false', () => {
 
 describe('useMyIdentity', () => {
   it('resolves to known on a successful read', async () => {
-    getMyProfile.mockResolvedValue({ userId: 'u1', displayName: 'Sam' });
+    getMyProfile.mockResolvedValue(PROFILE);
     const { result } = renderHook(() => useMyIdentity());
     await waitFor(() => expect(result.current.status).not.toBe('loading'));
-    expect(result.current).toMatchObject({ status: 'known', userId: 'u1' });
+    // The known arm carries the profile that was READ (callers render from it).
+    expect(result.current).toEqual({ status: 'known', userId: 'u1', profile: PROFILE });
   });
 
   it('resolves to unknown — carrying NO userId — when the read throws', async () => {

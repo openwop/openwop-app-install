@@ -36,11 +36,11 @@ function client(): Client {
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), del: (p) => call('DELETE', p) };
 }
 async function signup(c: Client): Promise<void> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `lc-${Date.now()}-${n++}@acme.test` });
+  const r = await c.post('/host/openwop-app/test/login', { email: `lc-${Date.now()}-${n++}@acme.test` });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
 }
 
-const WF = '/v1/host/openwop-app/workflows';
+const WF = '/host/openwop-app/workflows';
 const wfDef = (workflowId: string, transient = false) => ({
   workflowId,
   nodes: [{ nodeId: 'a', typeId: 'core.noop' }],
@@ -48,11 +48,11 @@ const wfDef = (workflowId: string, transient = false) => ({
 });
 
 async function runToCompletion(c: Client, workflowId: string): Promise<void> {
-  const create = await c.post('/v1/runs', { workflowId, inputs: {} });
+  const create = await c.post('/runs', { workflowId, inputs: {} });
   expect(create.status, JSON.stringify(create.body)).toBe(201);
   const runId = create.body.runId as string;
   for (let i = 0; i < 60; i++) {
-    const r = await c.get(`/v1/runs/${runId}`);
+    const r = await c.get(`/runs/${runId}`);
     const status = r.body.status as string;
     if (status === 'completed') return;
     if (status === 'failed' || status === 'cancelled') throw new Error(`run ${status}: ${JSON.stringify(r.body)}`);

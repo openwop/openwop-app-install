@@ -29,12 +29,24 @@
  *     CSM's `health-set` came to be classified like a read.
  *   - Tenant isolation (CTI-1): the builder closes over `scope.tenantId`; surface
  *     methods take an explicit `orgId` and the feature SERVICE enforces the
- *     tenant+org key (a cross-tenant id simply isn't found). A run is
- *     tenant-trusted; per-subject RBAC is the deferred authority refinement.
+ *     tenant+org key (a cross-tenant id simply isn't found).
+ *   - Org membership (ADR 0832): CORRECTED. This bullet used to end "A run is
+ *     tenant-trusted; per-subject RBAC is the deferred authority refinement",
+ *     and 30 surfaces took that at its word: a run acting for a member of org A
+ *     read and wrote org B by naming it in `args.orgId`, while the HTTP door
+ *     for the same rows answered 403. `gate()` now applies a membership FLOOR to
+ *     every method of every surface (toggled and always-on) that receives an
+ *     `orgId`: the run's person must hold `workspace:read` in that org (or the
+ *     method's declared scope). A run with no person at all (a webhook, a
+ *     system job) is still tenant-trusted. The floor is membership, NOT write
+ *     authority, and it cannot see an org the method derives from a row id —
+ *     both are ADR 0832 residue.
  */
 
-import type { BundleScope, SurfaceFn } from './inMemorySurfaces.js';
+import type { BundleScope, SurfaceArgs, SurfaceFn } from './inMemorySurfaces.js';
 import { resolveOne } from './featureToggles/service.js';
+import { assertRunScopeOrg, assertTenantScope, type Scope } from './accessControlService.js';
+import { createLogger } from '../observability/logger.js';
 import { getToggleDefault } from './featureToggles/registry.js';
 import { OpenwopError } from '../types.js';
 
@@ -43,53 +55,178 @@ export type FeatureSurface = Record<string, SurfaceFn>;
 /** Builds a feature surface bound to one run's scope (tenant/run). */
 export type FeatureSurfaceBuilder = (scope: BundleScope) => FeatureSurface;
 
-const builders = new Map<string, FeatureSurfaceBuilder>();
+/** ADR 0832 — what a surface declares to the seam's org floor. Both fields
+ *  NARROW what the default floor would do or name an exception explicitly;
+ *  neither is inferred (an org with no row is never "allowed"). */
+export interface FeatureSurfaceOrgPolicy {
+  /** Ids that are tenant-level namespaces on THIS surface, not orgs: they have
+   *  no org row and no members, so the floor passes them by name. Only `kb`
+   *  declares any (`_team`, `_kickbot`); on every other surface they are an
+   *  unknown org like any other. */
+  tenantScopedOrgs?: ReadonlySet<string>;
+  /** Methods whose HTTP door needs more than membership, by method name. The
+   *  floor asks this scope instead of `workspace:read`. */
+  methodScopes?: Readonly<Record<string, Scope>>;
+  /** ADR 0837 D2 / A4 — methods that write TENANT-level state and take no
+   *  `orgId` (CRM contacts are the tenant-wide rolodex), so the org floor never
+   *  fires for them. For a listed method the seam asks `assertTenantScope` of
+   *  the run's person — the actor, else the causing member — with the run's
+   *  `personalTenant`: the predicate the HTTP door (`requireTenantScope`) and
+   *  the chat tools already share. No person ⇒ no check, as for the org floor. */
+  tenantMethodScopes?: Readonly<Record<string, Scope>>;
+}
+
+const builders = new Map<string, { build: FeatureSurfaceBuilder; policy: FeatureSurfaceOrgPolicy }>();
 
 /** Register (idempotently) a feature's surface builder. Called by the composer
  *  at boot from `FeatureModule.surface`. */
-export function registerFeatureSurface(id: string, build: FeatureSurfaceBuilder): void {
-  builders.set(id, build);
+export function registerFeatureSurface(id: string, build: FeatureSurfaceBuilder, policy: FeatureSurfaceOrgPolicy = {}): void {
+  builders.set(id, { build, policy });
 }
 
 /** Build every registered feature surface for one run scope (called per run by
- *  `buildHostSurfaceBundle`). Each surface is TOGGLE-GATED at the seam (below) —
- *  a node must not read a feature's data for a tenant that disabled it. */
+ *  `buildHostSurfaceBundle`). Each surface is gated at the seam (below): the
+ *  feature toggle, so a node cannot read a feature its tenant disabled, and the
+ *  org floor, so it cannot reach an org its person is not in. */
 export function buildFeatureSurfaces(scope: BundleScope): Record<string, FeatureSurface> {
   const out: Record<string, FeatureSurface> = {};
-  for (const [id, build] of builders) out[id] = gate(id, scope, build(scope));
+  const passed = new Set<string>(); // the org floor's memo, shared by every surface in the bundle
+  for (const [id, { build, policy }] of builders) out[id] = gate(id, scope, build(scope), policy, passed);
   return out;
 }
 
+const log = createLogger('host.featureSurfaces');
+
 /**
- * Wrap every surface method with the feature's toggle gate (ADR 0014 — the
- * enforcement counterpart to the Phase-4 capability advertisement). The surface
- * id IS the toggle id by convention; resolved per call against the RUN's tenant,
- * so a tenant with the feature OFF gets a uniform `host_capability_disabled`
- * refusal on EVERY method (not just the ones that happened to gate internally).
+ * Wrap every surface method with the seam's two gates.
  *
- * ALWAYS-ON exception (ADR 0027): a feature that graduated to always-on
- * substrate has NO registered toggle default (e.g. `cms`). Such a surface is
- * unconditionally available — there is no toggle to be OFF — so the gate is
- * skipped. (Without this, `resolveOne` returns null for a retired toggle and the
- * surface would be wrongly denied on every call.)
+ * TOGGLE (ADR 0014 — the enforcement counterpart to the Phase-4 capability
+ * advertisement). The surface id IS the toggle id by convention; resolved per
+ * call against the RUN's tenant, so a tenant with the feature OFF gets a uniform
+ * `host_capability_disabled` refusal on EVERY method (not just the ones that
+ * happened to gate internally). ALWAYS-ON exception (ADR 0027): a feature that
+ * graduated to always-on substrate has NO registered toggle default (e.g. `cms`),
+ * so there is no toggle to be OFF and this check is skipped. (Without it,
+ * `resolveOne` returns null for a retired toggle and every call is denied.)
+ *
+ * ORG FLOOR (ADR 0832 D1) — on EVERY surface, always-on included. This used to
+ * return an always-on surface unwrapped, which is how `cms` and `kb` stood
+ * outside any seam check at all. See {@link orgFloor}.
  */
-function gate(id: string, scope: BundleScope, surface: FeatureSurface): FeatureSurface {
-  const alwaysOn = !getToggleDefault(id);
-  if (alwaysOn) return surface;
+function gate(id: string, scope: BundleScope, surface: FeatureSurface, policy: FeatureSurfaceOrgPolicy, passed: Set<string>): FeatureSurface {
+  const toggled = !!getToggleDefault(id);
+  const floor = orgFloor(id, scope, policy, passed);
+  const tenantFloor = tenantScopeFloor(id, scope, policy, passed);
   const wrapped: FeatureSurface = {};
   for (const [method, fn] of Object.entries(surface)) {
-    wrapped[method] = async (args) => {
-      const assignment = await resolveOne(id, { tenantId: scope.tenantId });
-      if (!assignment || !assignment.enabled) {
-        throw Object.assign(
-          new Error(`feature '${id}' is not enabled for this tenant — ctx.features.${id} is unavailable`),
-          { code: 'host_capability_disabled', capability: `host.sample.${id}` },
-        );
+    wrapped[method] = async (raw) => {
+      if (toggled) {
+        // ADR 0819 §1 — `resolveOne` is the ACCESS resolver (toggle + plan), so a
+        // node is refused a sellable feature the tenant's plan does not include,
+        // exactly as the HTTP route is. The acting user rides along (TGWF-4) so a
+        // user-listed closed-beta member resolves here as on the route. NOT
+        // `orgScopeSubject` (ADR 0832 D3): the causing member is not the actor,
+        // and a closed-beta listing is a grant.
+        const assignment = await resolveOne(id, { tenantId: scope.tenantId, ...(scope.actingUserId ? { userId: scope.actingUserId } : {}) });
+        if (!assignment || !assignment.enabled) {
+          throw Object.assign(
+            new Error(`feature '${id}' is not enabled for this tenant — ctx.features.${id} is unavailable`),
+            { code: 'host_capability_disabled', capability: `host.sample.${id}` },
+          );
+        }
       }
+      // One read of the args: the floor and the method see the same `orgId`
+      // (an accessor could otherwise answer the floor with one org and the
+      // method with another).
+      const args: SurfaceArgs = { ...(raw ?? {}) };
+      await floor(method, args);
+      await tenantFloor(method);
       return fn(args);
     };
   }
   return wrapped;
+}
+
+/**
+ * ADR 0832 D1 — the org-membership floor for one bundle.
+ *
+ * When the run has a person (its acting user, else the member who caused an
+ * actorless run) and the method names an org, that person must pass
+ * `assertRunScopeOrg` for it: the same predicate as the KB and media surfaces
+ * and, through `assertOrgScope`, the HTTP doors. So an absent org is a uniform
+ * `not_found`, a missing scope is `forbidden_scope`, and the single-principal
+ * root shortcut (`user:`/`anon:`, and `default` in demo mode) behaves exactly as
+ * there. A causing member is answered by membership only (no personal-owner
+ * short-circuit; see `assertRunOrgScope`).
+ *
+ * - No person ⇒ no check: a webhook or system job stays tenant-trusted.
+ * - `orgId` absent — `undefined`, `null` or `''` — ⇒ no check: the call names no
+ *   org. All three mean "none" to the surfaces (`surfaceStr`/`optStr` coerce
+ *   them alike), and a chain launched with no trigger payload legitimately
+ *   passes `''` to a node whose own "not found" branch is the honest answer
+ *   (forms-intake WF-FORM-2). A method that then lists the WHOLE tenant is ADR
+ *   0832 residue S-A, pinned by `adr0830-kb-ratchets.test.ts`.
+ * - `orgId` present but not a string (an array, a number, an object) ⇒
+ *   `validation_error`: `campaign-intel` runs `String(args.orgId ?? '')`, so
+ *   `['B']` would reach the service as `'B'` without ever meeting the floor.
+ * - A declared tenant-scoped namespace passes by NAME on its own surface only.
+ *
+ * Passes are memoised per (scope, org) for the bundle, which the executor builds
+ * per node: each resolve scans the member stores, and a node that loops over one
+ * org should pay once. Only a pass is cached, so a transient storage error is
+ * retried rather than remembered. A membership removed while one node runs is
+ * therefore seen from the NEXT node on. Every refusal is logged, because this
+ * floor changes what existing scheduled, triggered and channel runs may do and
+ * an operator needs to see which ones it stops.
+ */
+function orgFloor(id: string, scope: BundleScope, policy: FeatureSurfaceOrgPolicy, passed: Set<string>): (method: string, args: SurfaceArgs) => Promise<void> {
+  const lane = scope.actingUserId ? 'actor' : scope.orgScopeSubject ? 'cause' : undefined;
+  return async (method, args) => {
+    const orgId = args.orgId;
+    if (!lane || orgId === undefined || orgId === null || orgId === '') return;
+    try {
+      if (typeof orgId !== 'string') {
+        throw new OpenwopError('validation_error', '`orgId` must be a string.', 400, { field: 'orgId' });
+      }
+      if (policy.tenantScopedOrgs?.has(orgId)) return;
+      const needed: Scope = policy.methodScopes?.[method] ?? 'workspace:read';
+      const key = `${needed}\u0000${orgId}`;
+      if (passed.has(key)) return;
+      await assertRunScopeOrg(scope, orgId, needed);
+      passed.add(key);
+    } catch (err) {
+      if (err instanceof OpenwopError) {
+        log.info('surface_org_floor_refused', { surface: id, method, lane, code: err.code, tenantId: scope.tenantId, ...(scope.runId ? { runId: scope.runId } : {}) });
+      }
+      throw err;
+    }
+  };
+}
+
+/**
+ * ADR 0837 D2 / A4 — the tenant-level twin of {@link orgFloor}, for the methods a
+ * surface lists in `tenantMethodScopes`. The run's person (actor, else causing
+ * member) must hold the scope in the TENANT, exactly as the HTTP door asks via
+ * `requireTenantScope`. Same memo, same refusal log, same "no person ⇒ no check".
+ */
+function tenantScopeFloor(id: string, scope: BundleScope, policy: FeatureSurfaceOrgPolicy, passed: Set<string>): (method: string) => Promise<void> {
+  const subject = scope.actingUserId ?? scope.orgScopeSubject;
+  const lane = scope.actingUserId ? 'actor' : scope.orgScopeSubject ? 'cause' : undefined;
+  return async (method) => {
+    const needed = policy.tenantMethodScopes?.[method];
+    if (!needed || !subject) return;
+    const key = `tenant:${needed}`;
+    if (passed.has(key)) return;
+    try {
+      await assertTenantScope(scope.tenantId, subject, needed, scope.personalTenant ? { personalTenant: scope.personalTenant } : {});
+      passed.add(key);
+    } catch (err) {
+      if (err instanceof OpenwopError) {
+        log.info('surface_tenant_floor_refused', { surface: id, method, lane, code: err.code, tenantId: scope.tenantId, ...(scope.runId ? { runId: scope.runId } : {}) });
+      }
+      throw err;
+    }
+  };
 }
 
 /** The ids of currently-registered feature surfaces (for capability discovery). */

@@ -13,6 +13,9 @@
  * registry note says so. The other three nodes run for real.
  */
 
+import { runOrgScopeSubject } from './accessControlService.js';
+import { hasWorkflowScope } from './workflowWriteAuthority.js';
+import { canvasTypeValidator, isPrivilegedCanvasType, resolveCanvasTypeAccess } from './canvasTypeOwnership.js';
 import { randomUUID } from 'node:crypto';
 import { insertRunWithStartContext } from './runInsert.js';
 import { createLogger } from '../observability/logger.js';
@@ -25,6 +28,7 @@ import type { RunRecord } from '../types.js';
 import { OpenwopError } from '../types.js';
 import { fireBeforeCanvasStateWrite, fireAfterCanvasStateWrite, fireCanvasDeleted } from './canvasLifecycle.js';
 import type { Subject } from './subject.js';
+import { subjectReadAllowed, type SubjectCaller } from './subjectAccess.js';
 import { registerSubjectEraser } from './subjectErasure.js';
 import { ERASED, subjectKeyForms } from './subjectErasureRedaction.js';
 
@@ -37,7 +41,8 @@ type Json = Record<string, unknown>;
  *  `setSubWorkflowDispatcher`. */
 interface CanvasInvokeDeps {
   storage: Storage;
-  getWorkflow: (workflowId: string) => Promise<{ definition: WorkflowDef } | null>;
+  /** Tenant-scoped (ADR 0823): a workflow another tenant owns resolves to null. */
+  getWorkflow: (tenantId: string, workflowId: string) => Promise<{ definition: WorkflowDef } | null>;
   executeRun: (storage: Storage, run: RunRecord, definition: unknown, options?: unknown) => Promise<unknown>;
 }
 // ADR 0474 — widened from the old `{ variables?: unknown }` segregation: the
@@ -92,7 +97,12 @@ const canvases = new DurableCollection<Canvas>(
   // browser/picker list (`listCanvasesForTenant`) reads it WITHOUT decoding the
   // full row incl. the potentially large `state` blob. The projection IS the
   // CanvasListRow shape.
-  (c) => ({ canvasId: c.canvasId, canvasTypeId: c.canvasTypeId, ...(c.name ? { name: c.name } : {}), ...(c.projectId ? { projectId: c.projectId } : {}), version: c.version, updatedAt: c.updatedAt }),
+  //
+  // `ownerSubject` is ALWAYS written (null when org-owned) so a caller-filtered
+  // list can decide membership from the marker. A marker WITHOUT the key predates
+  // it — `listCanvasesForCaller` treats that as UNKNOWN and reads the full row,
+  // never as "org-owned" (a stale marker must not become a leak).
+  (c) => ({ canvasId: c.canvasId, canvasTypeId: c.canvasTypeId, ...(c.name ? { name: c.name } : {}), ...(c.projectId ? { projectId: c.projectId } : {}), ownerSubject: c.ownerSubject ?? null, version: c.version, updatedAt: c.updatedAt }),
 );
 
 // ── version history (ADR 0305 Phase E — the CMS ADR 0206 PageVersion pattern) ──
@@ -202,6 +212,12 @@ export async function getCanvasVersion(tenantId: string, canvasId: string, versi
   return v && v.tenantId === tenantId && v.canvasId === canvasId ? v : null;
 }
 
+/** ADR 0865 B12 — the captured snapshot of one canvas version, if the history
+ *  still holds it (a binding reads its undo back before it writes). */
+export async function getCanvasVersionAt(tenantId: string, canvasId: string, version: number): Promise<CanvasVersion | null> {
+  return getCanvasVersion(tenantId, canvasId, versionRowId(tenantId, canvasId, version));
+}
+
 /** A type-schema validator (the same shape the save route holds as `cfg.validate`). */
 export interface CanvasStateValidator { (state: Record<string, unknown>): { errors: { path: string; message: string }[]; warnings: { path: string; message: string }[] } }
 
@@ -263,6 +279,38 @@ export async function getCanvasForTenant(tenantId: string, canvasId: string): Pr
   return { canvasId: c.canvasId, canvasTypeId: c.canvasTypeId, ...(c.name ? { name: c.name } : {}), ...(c.projectId ? { projectId: c.projectId } : {}), ...(c.ownerSubject ? { ownerSubject: c.ownerSubject } : {}), state: c.state, version: c.version, ...(c.metadata !== undefined ? { metadata: c.metadata } : {}) };
 }
 
+/**
+ * THE canvas read predicate (ADR 0610 D3′ / CPC-15): a project- or user-owned
+ * canvas is membership-scoped — the org gate is not sufficient. ONE definition,
+ * used by the editor HTTP route AND every agent tool, so the chat lane can never
+ * read what the HTTP door refuses (CLAUDE.md: a chat tool SHARES its route's
+ * access predicate). Before this existed, `cad`, `drawings`, `slides`,
+ * `campaign-studio` and `app-builder` agent tools loaded canvases by tenant
+ * alone, so any workspace member could have the agent read — or overwrite — a
+ * private project's canvas by id.
+ *
+ * Delegates to `subjectReadAllowed`, which REFUSES a caller with no subject (a
+ * system run has no membership; the resolver would otherwise answer "owner").
+ * An org-owned canvas (no `ownerSubject`) keeps the org gate as the whole rule.
+ */
+export async function canvasReadAllowed(
+  tenantId: string,
+  canvas: Pick<CanvasRecordView, 'ownerSubject'>,
+  caller: SubjectCaller,
+): Promise<boolean> {
+  if (!canvas.ownerSubject) return true;
+  return subjectReadAllowed(tenantId, canvas.ownerSubject, caller);
+}
+
+/** `getCanvasForTenant` + {@link canvasReadAllowed}: `null` for missing AND for
+ *  refused, so callers answer both with the same uniform not-found (no
+ *  existence leak). The caller-facing way to load a canvas. */
+export async function getCanvasForCaller(tenantId: string, canvasId: string, caller: SubjectCaller): Promise<CanvasRecordView | null> {
+  const canvas = await getCanvasForTenant(tenantId, canvasId);
+  if (!canvas) return null;
+  return (await canvasReadAllowed(tenantId, canvas, caller)) ? canvas : null;
+}
+
 /** Light tenant listing for pickers (ADR 0314 — the documents "From a canvas"
  *  picker; ADR 0316 — the canvases browser). Projects each canvas to identity
  *  rows (never `state`), newest first. Callers gate access; the result is
@@ -278,6 +326,50 @@ export async function listCanvasesForTenant(tenantId: string): Promise<CanvasLis
   const projections = await canvases.listForTenantProjected(tenantId);
   return projections
     .filter(isCanvasListRow)
+    .map((p): CanvasListRow => ({ canvasId: p.canvasId, canvasTypeId: p.canvasTypeId, ...(typeof p.name === 'string' ? { name: p.name } : {}), ...(typeof p.projectId === 'string' ? { projectId: p.projectId } : {}), version: p.version, updatedAt: p.updatedAt }))
+    .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : a.canvasId < b.canvasId ? -1 : 1));
+}
+
+/** ADR 0839 D2 — the canvases `owner` OWNS in this tenant (its `ownerSubject`, not a
+ *  mere `projectId` tag). Tenant-scoped through the index; a marker that predates the
+ *  `ownerSubject` key is UNKNOWN, so the full row decides (same rule as the caller list). */
+export async function listCanvasIdsOwnedBy(tenantId: string, owner: Subject): Promise<string[]> {
+  const same = (s: unknown): boolean => {
+    const o = s as Subject | null | undefined;
+    return !!o && o.kind === owner.kind && o.id === owner.id;
+  };
+  const out: string[] = [];
+  for (const p of (await canvases.listForTenantProjected(tenantId)).filter(isCanvasListRow)) {
+    if ('ownerSubject' in p) { if (same(p.ownerSubject)) out.push(p.canvasId); continue; }
+    const row = await canvases.get(p.canvasId);
+    if (row && row.tenantId === tenantId && same(row.ownerSubject)) out.push(p.canvasId);
+  }
+  return out;
+}
+
+/** {@link listCanvasesForTenant} filtered through THE canvas predicate for a
+ *  caller — the list a human (or an MCP principal) is shown. Membership is
+ *  resolved once per distinct owner. */
+export async function listCanvasesForCaller(tenantId: string, caller: SubjectCaller): Promise<CanvasListRow[]> {
+  const projections = (await canvases.listForTenantProjected(tenantId)).filter(isCanvasListRow);
+  const memo = new Map<string, Promise<boolean>>();
+  // Memoized per distinct owner, but ALWAYS through canvasReadAllowed — one
+  // predicate; a second copy here is exactly how lanes drift apart.
+  const allowed = (owner: Subject): Promise<boolean> => {
+    const k = `${owner.kind}:${owner.id}`;
+    let v = memo.get(k);
+    if (!v) { v = canvasReadAllowed(tenantId, { ownerSubject: owner }, caller); memo.set(k, v); }
+    return v;
+  };
+  const kept = await Promise.all(projections.map(async (p) => {
+    let owner: Subject | null;
+    if ('ownerSubject' in p) owner = (p.ownerSubject as Subject | null) ?? null;
+    else owner = (await canvases.get(p.canvasId))?.ownerSubject ?? null; // stale marker: never assume org-owned
+    if (owner && !(await allowed(owner))) return null;
+    return p;
+  }));
+  return kept
+    .filter((p): p is NonNullable<typeof p> => p !== null)
     .map((p): CanvasListRow => ({ canvasId: p.canvasId, canvasTypeId: p.canvasTypeId, ...(typeof p.name === 'string' ? { name: p.name } : {}), ...(typeof p.projectId === 'string' ? { projectId: p.projectId } : {}), version: p.version, updatedAt: p.updatedAt }))
     .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : a.canvasId < b.canvasId ? -1 : 1));
 }
@@ -314,17 +406,25 @@ export async function createCanvasForTenant(tenantId: string, args: {
 }
 
 /** Tenant-scoped, idempotent create-with-a-FIXED-id (no `canvas-<uuid>` generation).
- *  For host seams that address a canvas by a well-known stable id (e.g. the RFC 0117
- *  ui-plugin `conformance-canary` artifact) — returns the existing record if present, else
+ *  For host seams that address a canvas by a well-known stable id (e.g. the RFC 0238
+ *  ui-plugin fixture artifact) — returns the existing record if present, else
  *  creates it at version 1. Distinct from `createCanvasForTenant`, which mints a random id. */
 export async function ensureCanvasForTenant(
   tenantId: string, canvasId: string, args: { canvasTypeId: string; initialState?: Json },
 ): Promise<CanvasRecordView> {
-  const existing = await getCanvasForTenant(tenantId, canvasId);
-  if (existing) return existing;
+  const raw = await canvases.get(canvasId);
+  if (raw && raw.tenantId === tenantId) return (await getCanvasForTenant(tenantId, canvasId))!;
+  // Canvas ids are GLOBAL keys. A row another tenant owns is not "absent": a put
+  // would move it into this tenant. Refuse before writing anything (putIfAbsent
+  // writes this tenant's index marker first, which would list a phantom canvas).
+  if (raw) throw new OpenwopError('conflict', `canvas id '${canvasId}' is not available in this tenant`, 409);
   const now = new Date().toISOString();
   const canvas: Canvas = { canvasId, tenantId, canvasTypeId: args.canvasTypeId, state: args.initialState ?? {}, version: 1, createdAt: now, updatedAt: now };
-  await canvases.put(canvas);
+  if (!(await canvases.putIfAbsent(canvas))) {
+    const raced = await getCanvasForTenant(tenantId, canvasId);
+    if (raced) return raced;
+    throw new OpenwopError('conflict', `canvas id '${canvasId}' is not available in this tenant`, 409);
+  }
   return { canvasId, canvasTypeId: canvas.canvasTypeId, state: canvas.state, version: canvas.version };
 }
 
@@ -335,7 +435,7 @@ export async function ensureCanvasForTenant(
  *  canvas is absent or cross-tenant (no existence leak). */
 export async function updateCanvasForTenant(
   tenantId: string, canvasId: string, mutation: Json,
-  opts?: { expectedVersion?: number; merge?: 'shallow' | 'deep' | 'replace'; snapshot?: { capturedBy: string; force?: boolean }; source?: 'collab' },
+  opts?: { expectedVersion?: number; merge?: 'shallow' | 'deep' | 'replace'; snapshot?: { capturedBy: string; force?: boolean }; source?: 'collab'; validate?: boolean },
 ): Promise<{ canvasId: string; newVersion: number } | null> {
   // Grade pass 2026-07-07 (F1 + F5/DATA-2): the write is a compareAndSwap retry
   // loop (get→check→put allowed a cross-instance lost update), and a stale
@@ -348,12 +448,6 @@ export async function updateCanvasForTenant(
     if (opts?.expectedVersion !== undefined && opts.expectedVersion !== c.version) {
       throw new OpenwopError('canvas_version_conflict', `canvas ${canvasId} version conflict: expected ${opts.expectedVersion}, have ${c.version}`, 409, { currentVersion: c.version });
     }
-    // ADR 0359 Phase 6 — the EXTERNAL-write veto seam (may throw a typed 409:
-    // a live `canvas.document` room has no generic apply path). Collab's own
-    // derive writes bypass (`source: 'collab'`) — they ARE the CRDT authority.
-    if (attempt === 0 && opts?.source !== 'collab') {
-      await fireBeforeCanvasStateWrite({ tenantId, canvasId, canvasTypeId: c.canvasTypeId, state: (mutation ?? {}) as Record<string, unknown> });
-    }
     const merge = opts?.merge ?? 'replace';
     const m = (mutation ?? {}) as Json;
     const next: Canvas = {
@@ -362,6 +456,18 @@ export async function updateCanvasForTenant(
       version: c.version + 1,
       updatedAt: new Date().toISOString(),
     };
+    // ADR 0865 B19 — the type's registered catalog validator, on the RESULTING
+    // state (a merge can make a valid mutation into an invalid canvas). Opt-in:
+    // the editor PATCH validates before calling, the run lane asks for it here.
+    if (opts?.validate) assertCanvasStateValid(c.canvasTypeId, next.state);
+    // ADR 0359 Phase 6 — the EXTERNAL-write veto seam (may throw a typed 409:
+    // a live `canvas.document` room has no generic apply path). Collab's own
+    // derive writes bypass (`source: 'collab'`) — they ARE the CRDT authority.
+    // ADR 0865 B18 — it sees the resulting state, not a partial mutation (the
+    // editor sends a whole state with `replace`, so for it the two are equal).
+    if (attempt === 0 && opts?.source !== 'collab') {
+      await fireBeforeCanvasStateWrite({ tenantId, canvasId, canvasTypeId: c.canvasTypeId, state: next.state as Record<string, unknown> });
+    }
     if (!(await canvases.compareAndSwap(c, next))) {
       // Lost the race. With an expectedVersion the caller's basis is now stale
       // (the re-read above will 409 on the next pass); without one, retry.
@@ -559,6 +665,67 @@ function project(state: Json, fields: unknown): Json {
   return out;
 }
 
+/** ADR 0865 B19 — the type's registered catalog validator (the SAME function the
+ *  editor PATCH runs) over a whole state. Errors refuse with `validation_error`;
+ *  warnings pass, as in the editor. A type with no validator passes. */
+export function assertCanvasStateValid(canvasTypeId: string, state: Json): void {
+  const validate = canvasTypeValidator(canvasTypeId);
+  if (!validate) return;
+  const { errors } = validate(state as Record<string, unknown>);
+  if (errors.length) {
+    throw new OpenwopError('validation_error', `canvas state violates the component catalog: ${errors[0]!.message}`, 422, { errors: [...errors] });
+  }
+}
+
+const runCanvasRefusal = (code: string, message: string, extra: Record<string, unknown> = {}): Error =>
+  Object.assign(new Error(message), { code, ...extra });
+
+/**
+ * ADR 0865 B17 — THE run-lane canvas gate. `ctx.canvas` read/write/create and
+ * `ctx.dataIntegration.applyBinding` call it, and nothing in the run lane reaches
+ * a canvas around it. The editor's own gate takes a `Request`, so what is shared
+ * with it is every part that is not request-shaped, read from the one type
+ * registration `registerCanvasEditorRoutes` writes:
+ *
+ *   1. tenant (the caller loaded the row; a foreign row never reaches here);
+ *   2. the type's owning feature (toggle + plan), `host_capability_disabled`;
+ *   3. a PRIVILEGED type (its routes add an `authorize(req)` gate) is refused —
+ *      no run can satisfy a request predicate, so the lane fails closed;
+ *   4. the role floor: the run's person (actor, else causing member) holds
+ *      `workspace:read|write` in the tenant (ADR 0837's floor; no person ⇒ no
+ *      check, as for every feature surface), `forbidden_scope`. It is ADR
+ *      0822's `hasWorkflowScope`, the in-run twin of the HTTP door, so a
+ *      configured operator key's run is the tenant's own principal here too;
+ *   5. a subject-owned canvas needs a person who may read it
+ *      (`canvasReadAllowed`, shared with the editor + chat tools) — refused as
+ *      the SAME `canvas_not_found` a missing id answers.
+ */
+export async function assertCanvasRunAccess(
+  scope: BundleScope,
+  canvas: { canvasId: string; canvasTypeId: string; ownerSubject?: Subject },
+  need: 'read' | 'write',
+): Promise<void> {
+  const access = await resolveCanvasTypeAccess(canvas.canvasTypeId, { tenantId: scope.tenantId, ...(scope.actingUserId ? { userId: scope.actingUserId } : {}) });
+  if (!access.allowed) {
+    throw runCanvasRefusal('host_capability_disabled', `feature '${access.toggleId}' is not enabled for this tenant — ctx.canvas cannot use '${canvas.canvasTypeId}' canvases`,
+      { capability: 'host.canvas', canvasTypeId: canvas.canvasTypeId, feature: access.toggleId, blockedBy: access.blockedBy });
+  }
+  if (isPrivilegedCanvasType(canvas.canvasTypeId)) {
+    throw runCanvasRefusal('host_capability_disabled', `'${canvas.canvasTypeId}' canvases are privileged and cannot be used from a workflow run`,
+      { capability: 'host.canvas', canvasTypeId: canvas.canvasTypeId, blockedBy: 'privileged' });
+  }
+  const person = runOrgScopeSubject(scope);
+  if (person) {
+    const needed = need === 'write' ? 'workspace:write' : 'workspace:read';
+    if (!(await hasWorkflowScope({ tenantId: scope.tenantId, actingUserId: person, ...(scope.personalTenant ? { personalTenant: scope.personalTenant } : {}) }, needed))) {
+      throw new OpenwopError('forbidden_scope', `Missing required scope: ${needed}`, 403, { requiredScope: needed });
+    }
+  }
+  if (!(await canvasReadAllowed(scope.tenantId, canvas, { subject: person }))) {
+    throw runCanvasRefusal('canvas_not_found', `canvas ${canvas.canvasId} not found`);
+  }
+}
+
 export interface CanvasSurface {
   read(canvasId: string, opts?: { fields?: unknown; consistency?: unknown }): Promise<{ canvasId: string; state: Json; canvasTypeId: string; version: number }>;
   write(canvasId: string, mutation: Json, opts?: { expectedVersion?: number; merge?: 'shallow' | 'deep' | 'replace'; idempotencyKey?: string }): Promise<{ canvasId: string; newVersion: number }>;
@@ -581,34 +748,37 @@ export function createCanvasSurface(scope: BundleScope): CanvasSurface {
   return {
     async read(canvasId, opts) {
       const c = await load(canvasId);
+      // ADR 0865 B17 — the one run-lane gate (ADR 0820 G3's type gate is step 2).
+      await assertCanvasRunAccess(scope, c, 'read');
       return { canvasId, state: project(c.state, opts?.fields), canvasTypeId: c.canvasTypeId, version: c.version };
     },
 
     async write(canvasId, mutation, opts) {
+      // B17 — the gate runs before the idempotency cache, so a cached result is
+      // not a way around a refusal.
+      await assertCanvasRunAccess(scope, await load(canvasId), 'write');
       if (opts?.idempotencyKey) {
         const cached = await idemGet<{ canvasId: string; newVersion: number }>(idem(`w:${opts.idempotencyKey}`));
         if (cached) return cached;
       }
-      // Grade pass 2026-07-07 (F5): CAS retry — the run path keeps its plain-Error
-      // `code` contract (node executors read it), but the write itself must not
-      // lose a concurrent update.
-      for (let attempt = 0; attempt < 8; attempt++) {
-        const c = await load(canvasId);
-        if (opts?.expectedVersion !== undefined && opts.expectedVersion !== c.version) {
-          throw Object.assign(new Error(`canvas ${canvasId} version conflict: expected ${opts.expectedVersion}, have ${c.version}`), { code: 'canvas_version_conflict' });
-        }
-        const merge = opts?.merge ?? 'shallow';
-        const m = (mutation ?? {}) as Json;
-        const next = { ...c, state: merge === 'replace' ? { ...m } : merge === 'deep' ? deepMerge(c.state, m) : { ...c.state, ...m }, version: c.version + 1, updatedAt: new Date().toISOString() };
-        if (!(await canvases.compareAndSwap(c, next))) continue;
-        const out = { canvasId, newVersion: next.version };
-        if (opts?.idempotencyKey) return idemPut(idem(`w:${opts.idempotencyKey}`), out);
-        return out;
-      }
-      throw Object.assign(new Error(`canvas ${canvasId} write contention — retry`), { code: 'canvas_version_conflict' });
+      // ADR 0865 B18/B19 — the editor's write path: CAS retry, the live-room
+      // veto and the after-write fan-out, plus the type's validator on the
+      // resulting state. The run lane keeps its `shallow` default and takes no
+      // snapshot (runs create canvases; they don't iterate them).
+      const out = await updateCanvasForTenant(tenantId, canvasId, (mutation ?? {}) as Json, {
+        merge: opts?.merge ?? 'shallow',
+        ...(opts?.expectedVersion !== undefined ? { expectedVersion: opts.expectedVersion } : {}),
+        validate: true,
+      });
+      if (!out) throw Object.assign(new Error(`canvas ${canvasId} not found`), { code: 'canvas_not_found' });
+      if (opts?.idempotencyKey) return idemPut(idem(`w:${opts.idempotencyKey}`), out);
+      return out;
     },
 
     async create({ canvasTypeId, projectId, name, initialState, metadata, idempotencyKey }) {
+      // B17 on a canvas that does not exist yet: tenant-owned, so steps 2–4 apply.
+      await assertCanvasRunAccess(scope, { canvasId: '(new)', canvasTypeId }, 'write');
+      assertCanvasStateValid(canvasTypeId, ((initialState as Json) ?? {}));
       if (idempotencyKey) {
         const cached = await idemGet<{ canvasId: string; canvasTypeId: string; name?: string; projectId?: string; createdAt: string }>(idem(`c:${idempotencyKey}`));
         if (cached) return cached;
@@ -665,7 +835,7 @@ export function createCanvasSurface(scope: BundleScope): CanvasSurface {
         throw Object.assign(new Error(`canvas invoke cycle: '${workflowId}' already in ancestor chain`), { code: 'canvas_invoke_cycle_detected' });
       }
 
-      const wf = await getWorkflow(workflowId);
+      const wf = await getWorkflow(tenantId, workflowId);
       if (!wf) {
         throw Object.assign(new Error(`canvas invoke: workflow '${workflowId}' not found`), { code: 'canvas_invoke_workflow_not_found' });
       }
@@ -679,7 +849,9 @@ export function createCanvasSurface(scope: BundleScope): CanvasSurface {
         ...(scope.scopeId ? { scopeId: scope.scopeId } : {}),
         status: 'pending',
         inputs: (args as Json) ?? {},
-        metadata: { causationCanvasId: targetCanvasId },
+        // ADR 0832 D3 — the invoking run's person bounds the child's orgs (it
+        // narrows; the child still acts for nobody, as before).
+        metadata: { causationCanvasId: targetCanvasId, ...(runOrgScopeSubject(scope) ? { orgScopeSubject: runOrgScopeSubject(scope) } : {}) },
         configurable: {},
         ...(scope.runId ? { parentRunId: scope.runId } : {}),
         createdAt: now,

@@ -149,4 +149,7 @@ export const messages = {
   loadFailedTitle: "Impossible de charger les règles du pare-feu",
   decisionsFailedTitle: "Impossible de charger les décisions récentes",
   decisionsFailedBody: "C’est une lecture en échec, pas un historique vide : cela ne veut pas dire que le pare-feu n’a rien bloqué.",
+  modeEnforceConfirmTitle: 'Activer le refus par défaut ?',
+  modeEnforceConfirmBody: 'Toute action d’agent qu’aucune règle n’autorise sera bloquée (ou mise en attente d’approbation) dans cet espace de travail, sur tous les canaux : chat, exécutions, voix et widgets publics. Consultez d’abord les décisions récentes en mode observation.',
+  modeEnforceConfirm: 'Appliquer',
 };

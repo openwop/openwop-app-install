@@ -66,6 +66,7 @@ export interface ConnectorInvokeArgs {
      *  `connector_pinned_connection_unusable` so the caller can react (the CRM
      *  gmail sync marks itself `needs-reconsent`). */
     connectionId?: string;
+    signal?: AbortSignal;
   };
 }
 
@@ -76,6 +77,10 @@ export interface ConnectorInvokeResult {
   data?: unknown;
   /** A stable error code when `ok:false` (fail-closed reasons). */
   error?: string;
+  /** ADR 0783 D5 — the response's RFC 8288 `Link` header, for pagination. ONE
+   *  typed header, never a header bag: a bag would hand a pack `set-cookie` and
+   *  provider internals. */
+  link?: string;
 }
 
 /** Precise shape `createConnectorInvoker` returns — structurally assignable to the
@@ -155,6 +160,7 @@ export function createConnectorInvoker(deps: { storage: BrokeredEgressDeps['stor
         // `!== undefined`, not truthiness: an EMPTY pin is a refusal, never an un-pin
         // (the broker gates on `!== undefined` too — three layers, one rule).
         ...(args.request.connectionId !== undefined ? { connectionId: args.request.connectionId } : {}),
+        ...(args.request.signal ? { signal: args.request.signal } : {}),
       });
 
       // Fail closed — never a silent no-op, never a 500. Each is a stable code.
@@ -180,7 +186,8 @@ export function createConnectorInvoker(deps: { storage: BrokeredEgressDeps['stor
         log.warn('connector response body unreadable', { connectorId, error: err instanceof Error ? err.message : String(err) });
         data = undefined;
       }
-      return { ok: r.res.ok, status: r.res.status, data };
+      const link = r.res.headers.get('link');
+      return { ok: r.res.ok, status: r.res.status, data, ...(link ? { link } : {}) };
     },
   };
 }

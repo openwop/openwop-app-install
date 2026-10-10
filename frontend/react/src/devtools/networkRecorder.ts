@@ -188,8 +188,8 @@ function bodyToString(body: BodyInit | null | undefined): string | undefined {
  *  NEVER enter the recorder buffer or its sessionStorage mirror
  *  (threat-model-secret-leakage). Matched against the origin-relative path;
  *  the optional `/api/` prefix covers the Firebase Hosting rewrite, and the
- *  optional `v1/` covers the retiring twin alongside the canonical RFC 0181
- *  root. BOTH must match: this is a redaction ALLOWLIST, so a spelling it
+ *  optional `v1/` is kept although that twin is withdrawn (ADR 0812): this is a
+ *  redaction list, so an extra spelling costs nothing. BOTH must match: this is a redaction ALLOWLIST, so a spelling it
  *  fails to recognise is plaintext credential material entering the recorder
  *  buffer — the failure is silent and in the unsafe direction. The SPA moved to
  *  `/host/openwop-app/…` in one pass and these regexes did NOT move with it,
@@ -319,23 +319,29 @@ export function installNetworkRecorder(): void {
     // the `/v1/` prefix and were being captured. Constrain by ORIGIN
     // first: same-origin OR the configured backend baseUrl.
     const path = relativePath(url);
-    const isOpenwopOrigin = (() => {
+    // Which origin is it? The SPA's own origin serves pages AND (behind the
+    // Hosting `/api` rewrite) the backend; a backend on its OWN origin (dev, or
+    // an absolute `baseUrl`) serves nothing but the backend.
+    const origin = (() => {
       try {
         const u = new URL(url, window.location.origin);
-        if (u.origin === window.location.origin) return true;
+        if (u.origin === window.location.origin) return 'spa' as const;
         if (backendConfig.baseUrl) {
           try {
-            const b = new URL(backendConfig.baseUrl);
-            if (u.origin === b.origin) return true;
-          } catch { /* malformed baseUrl */ }
+            if (u.origin === new URL(backendConfig.baseUrl).origin) return 'backend' as const;
+          } catch { /* a relative or malformed baseUrl names no separate origin */ }
         }
-        return false;
+        return null;
       } catch {
-        return false;
+        return null;
       }
     })();
-    const isApiPath = path.startsWith('/v1/') || path.startsWith('/.well-known/openwop') || path.startsWith('/api/');
-    if (!isOpenwopOrigin || !isApiPath) {
+    // ADR 0812 — the backend is UNVERSIONED (`/runs`, `/host/openwop-app/…`); the
+    // old `/v1/` test matched nothing once v1 was withdrawn, so a backend on its
+    // own origin was silently never recorded. On the SPA's origin only the
+    // `/api` rewrite and discovery are backend traffic.
+    const isApiPath = origin === 'backend' || path.startsWith('/api/') || path.startsWith('/.well-known/openwop');
+    if (origin === null || !isApiPath) {
       return nativeFetch(input, init);
     }
 

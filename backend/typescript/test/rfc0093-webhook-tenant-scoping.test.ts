@@ -69,7 +69,7 @@ async function jsonFetch(
 const SAFE_URL = 'https://example.com/openwop-test/webhook-tenant';
 
 async function seam(tenantId: string, op: string, args: Record<string, unknown>) {
-  return jsonFetch('/v1/host/openwop-app/test/surface', {
+  return jsonFetch('/host/openwop-app/test/surface', {
     method: 'POST',
     body: JSON.stringify({ tenantId, surface: 'webhooks', op, args }),
   });
@@ -77,7 +77,7 @@ async function seam(tenantId: string, op: string, args: Record<string, unknown>)
 
 describe('rfc0093 §A.3 — registration-time membership gate', () => {
   it('registers under the caller tenant and returns webhookId + secretFingerprint', async () => {
-    const reg = await jsonFetch('/v1/webhooks', {
+    const reg = await jsonFetch('/webhooks', {
       method: 'POST',
       body: JSON.stringify({ url: SAFE_URL, events: ['run.completed'] }),
     });
@@ -88,17 +88,17 @@ describe('rfc0093 §A.3 — registration-time membership gate', () => {
     expect(reg.body.secretFingerprint).toMatch(/^[0-9a-f]{8}$/);
 
     // Own-tenant list sees it.
-    const list = await jsonFetch('/v1/webhooks');
+    const list = await jsonFetch('/webhooks');
     const ids = (list.body.subscriptions as Array<{ webhookId: string }>).map((s) => s.webhookId);
     expect(ids).toContain(reg.body.webhookId);
 
     // Cleanup.
-    const del = await jsonFetch(`/v1/webhooks/${reg.body.webhookId as string}`, { method: 'DELETE' });
+    const del = await jsonFetch(`/webhooks/${reg.body.webhookId as string}`, { method: 'DELETE' });
     expect(del.status).toBe(204);
   });
 
   it('refuses registration under a tenant the caller is not a member of (never 201)', async () => {
-    const reg = await jsonFetch('/v1/webhooks', {
+    const reg = await jsonFetch('/webhooks', {
       method: 'POST',
       body: JSON.stringify({
         url: SAFE_URL,
@@ -107,27 +107,27 @@ describe('rfc0093 §A.3 — registration-time membership gate', () => {
       }),
     });
     expect(reg.status).toBe(403);
-    expect(reg.body.error).toBe('forbidden_tenant');
+    expect(reg.body.error).toBe('openwop-app.forbidden_tenant');
   });
 
   it('a held subscription cannot be seen or unregistered through a foreign tenant scope', async () => {
-    const reg = await jsonFetch('/v1/webhooks', {
+    const reg = await jsonFetch('/webhooks', {
       method: 'POST',
       body: JSON.stringify({ url: SAFE_URL, events: ['run.completed'] }),
     });
     expect(reg.status).toBe(201);
     const webhookId = reg.body.webhookId as string;
     try {
-      const del = await jsonFetch(`/v1/webhooks/${webhookId}?tenantId=foreign-${Date.now()}`, {
+      const del = await jsonFetch(`/webhooks/${webhookId}?tenantId=foreign-${Date.now()}`, {
         method: 'DELETE',
       });
       expect(del.status).toBe(403); // not a member of that tenant — and never 204
       // Still held in the caller's own scope.
-      const list = await jsonFetch('/v1/webhooks');
+      const list = await jsonFetch('/webhooks');
       const ids = (list.body.subscriptions as Array<{ webhookId: string }>).map((s) => s.webhookId);
       expect(ids).toContain(webhookId);
     } finally {
-      await jsonFetch(`/v1/webhooks/${webhookId}`, { method: 'DELETE' });
+      await jsonFetch(`/webhooks/${webhookId}`, { method: 'DELETE' });
     }
   });
 });
@@ -183,6 +183,8 @@ describe('rfc0093 §A.3 — delivery fanout tenant isolation (negative)', () => 
       events: ['run.completed'],
       secret: 's',
       createdAt: now,
+      // ADR 0812 P3c-0 — major-2 subscriptions: a major-1 one is never delivered once v1 retires.
+      protocolMajor: 2,
     });
     await storage.insertWebhook(mkSub('sub-tenant-a', 'tenant-a'));
     await storage.insertWebhook(mkSub('sub-tenant-b', 'tenant-b'));

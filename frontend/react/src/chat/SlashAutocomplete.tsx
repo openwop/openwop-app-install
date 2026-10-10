@@ -31,6 +31,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { optionId, useReportActiveOption, type ComboboxWiring } from './lib/comboboxWiring.js';
 import { Trans, useTranslation } from 'react-i18next';
 import { filterCommands, resolveDescription, type CommandRegistration } from './registry/CommandRegistry.js';
 import {
@@ -38,6 +39,7 @@ import {
   filterMentions,
   listWorkflowMentions,
   refreshWorkflowMentionCache,
+  workflowMentionLoadFailed,
   type WorkflowMentionEntry,
 } from './lib/workflowMentions.js';
 
@@ -49,6 +51,8 @@ type SlashRow =
   | { kind: 'workflow'; wf: WorkflowMentionEntry };
 
 interface Props {
+  /** Combobox wiring to the composer textarea (grade-ux CHATUX-1). */
+  combobox?: ComboboxWiring;
   text: string;
   /** Called with the new textarea contents on selection. The caller
    *  is responsible for focus + cursor placement. */
@@ -58,7 +62,7 @@ interface Props {
   onDismiss: () => void;
 }
 
-export function SlashAutocomplete({ text, onPick, onDismiss }: Props): JSX.Element | null {
+export function SlashAutocomplete({ text, onPick, onDismiss, combobox }: Props): JSX.Element | null {
   const { t } = useTranslation('chat');
   const trimmed = text.trimStart();
   // Trigger on a `/` token at the trailing position, allowing an optional
@@ -109,6 +113,7 @@ export function SlashAutocomplete({ text, onPick, onDismiss }: Props): JSX.Eleme
   useEffect(() => {
     setSelectedIdx(0);
   }, [query]);
+  useReportActiveOption(combobox, shouldShow, rows.length, selectedIdx);
 
   useEffect(() => {
     if (!shouldShow) return undefined;
@@ -159,13 +164,20 @@ export function SlashAutocomplete({ text, onPick, onDismiss }: Props): JSX.Eleme
   const listRef = useRef<HTMLDivElement>(null);
   if (!shouldShow) return null;
 
+  // ADR 0764 D4 (CHATWF-4) — a failed workflow-list load is NOT "no match". The
+  // two rendered identically, so a 429/5xx read as "you have no such workflow".
+  const loadFailed = workflowMentionLoadFailed();
+
   if (rows.length === 0) {
     return (
       <div
         ref={listRef}
         className="slashac-empty"
+        role="status"
       >
-        <Trans i18nKey="noCommandsMatch" ns="chat" values={{ query: trimmed }} components={{ 1: <code />, 3: <code /> }} />
+        {loadFailed
+          ? t('workflowsLoadFailed')
+          : <Trans i18nKey="noCommandsMatch" ns="chat" values={{ query: trimmed }} components={{ 1: <code />, 3: <code /> }} />}
       </div>
     );
   }
@@ -174,13 +186,21 @@ export function SlashAutocomplete({ text, onPick, onDismiss }: Props): JSX.Eleme
     <div
       ref={listRef}
       role="listbox"
+      id={combobox?.listboxId}
       aria-label={t('slashCommandsAria')}
+      {...(loadFailed ? { 'aria-describedby': `${combobox?.listboxId ?? 'slashac'}-load-failed` } : {})}
       className="slashac-listbox"
     >
+      {loadFailed && (
+        // Not an option, so hidden from the listbox's children; the listbox's
+        // aria-describedby still reads it (a description may reference hidden text).
+        <div id={`${combobox?.listboxId ?? 'slashac'}-load-failed`} className="slashac-note" aria-hidden="true">{t('workflowsLoadFailed')}</div>
+      )}
       {commandMatches.length > 0 && <Subhead label={t('commandsSection')} />}
       {commandMatches.map((cmd, i) => (
         <CommandRow
           key={`cmd:${cmd.name}`}
+          id={optionId(combobox?.listboxId ?? 'slashac', i)}
           cmd={cmd}
           selected={i === selectedIdx}
           onClick={() => apply({ kind: 'command', cmd })}
@@ -195,6 +215,7 @@ export function SlashAutocomplete({ text, onPick, onDismiss }: Props): JSX.Eleme
         return (
           <WorkflowRow
             key={`wf:${wf.workflowId}`}
+            id={optionId(combobox?.listboxId ?? 'slashac', rowIdx)}
             wf={wf}
             selected={rowIdx === selectedIdx}
             onClick={() => apply({ kind: 'workflow', wf })}
@@ -202,6 +223,10 @@ export function SlashAutocomplete({ text, onPick, onDismiss }: Props): JSX.Eleme
           />
         );
       })}
+      {/* ADR 0768 D4 — the keys this picker ACTUALLY handles (the onKey handler
+          above: arrows wrap, Enter or Tab applies, Esc dismisses). aria-hidden like
+          the agent picker's tip: the combobox pattern already conveys navigation. */}
+      <div className="mentionac-tip" aria-hidden="true">{t('slashPickerKeys')}</div>
     </div>
   );
 }
@@ -218,11 +243,13 @@ function Subhead({ label }: { label: string }): JSX.Element {
 }
 
 function CommandRow({
+  id,
   cmd,
   selected,
   onClick,
   onHover,
 }: {
+  id: string;
   cmd: CommandRegistration;
   selected: boolean;
   onClick: () => void;
@@ -230,13 +257,15 @@ function CommandRow({
 }): JSX.Element {
   return (
     <div
+      id={id}
       role="option"
       aria-selected={selected}
       onClick={onClick}
+      // Focus stays in the composer (aria-activedescendant), so this rarely fires;
+      // it keeps the pointer handler paired with a keyboard one (jsx-a11y).
       onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } }}
       onMouseEnter={onHover}
       className="slashac-row"
-      style={{ background: selected ? 'var(--paper-2)' : 'transparent' }}
     >
       <div className="u-flex u-items-center u-gap-2">
         <code className="u-fw-600 u-fs-12">{cmd.name}</code>
@@ -248,11 +277,13 @@ function CommandRow({
 }
 
 function WorkflowRow({
+  id,
   wf,
   selected,
   onClick,
   onHover,
 }: {
+  id: string;
   wf: WorkflowMentionEntry;
   selected: boolean;
   onClick: () => void;
@@ -261,13 +292,15 @@ function WorkflowRow({
   const { t } = useTranslation('chat');
   return (
     <div
+      id={id}
       role="option"
       aria-selected={selected}
       onClick={onClick}
+      // Focus stays in the composer (aria-activedescendant), so this rarely fires;
+      // it keeps the pointer handler paired with a keyboard one (jsx-a11y).
       onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } }}
       onMouseEnter={onHover}
       className="slashac-row"
-      style={{ background: selected ? 'var(--paper-2)' : 'transparent' }}
     >
       <div className="u-flex u-items-center u-gap-2 u-wrap">
         <code className="u-fw-600 u-fs-12">/{wf.slug}</code>

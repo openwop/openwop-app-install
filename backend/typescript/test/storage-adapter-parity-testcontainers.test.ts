@@ -479,6 +479,18 @@ describe('Postgres parity (real DB): array-into-JSONB, the wider class', () => {
     expect(back?.resolvedValue).toEqual(['picked-a', 'picked-b']);
   });
 
+  it.skipIf(skipNoDocker)('an interrupt INSERTED already resolved is never open, and its CAS is lost', async () => {
+    // A replay fork's derived gate (executor/forkReplayResolutions.ts).
+    const s = storage!;
+    const run = mkRun('pg-insert-resolved');
+    await s.insertRun(run);
+    const rec = mkInterrupt(run.runId, 'n-derived');
+    await s.insertInterrupt({ ...rec, resolvedAt: baseTime, resolvedValue: { __derivedFromReplay: 'src', value: { action: 'accept' } } });
+    expect(await s.listOpenInterrupts(run.runId)).toEqual([]);
+    expect((await s.getInterrupt(rec.interruptId))?.resolvedValue).toEqual({ __derivedFromReplay: 'src', value: { action: 'accept' } });
+    expect(await s.resolveInterrupt(rec.interruptId, { action: 'reject' }, baseTime)).toBe(false);
+  });
+
   it.skipIf(skipNoDocker)('invocation_log.result accepts an ARRAY', async () => {
     const s = storage!;
     const key = { runId: 'pg-inv-array', nodeId: 'n1', attempt: 1, invocationId: 'p1' };
@@ -891,5 +903,49 @@ describe('Postgres parity (real DB): ADR 0740 run execution claim — the condit
     expect(results.filter((r) => r === 'held')).toHaveLength(19);
     const winner = results.findIndex((r) => r === 'claimed');
     expect((await s.getRun(run.runId))?.dispatchOwner, 'the recorded owner is not the contender that was told it won').toBe(`contender-${winner}`);
+  });
+});
+
+describe('Postgres parity (real DB): chat message order == append order (same-ms appends)', () => {
+  // The SQLite arm + the rationale are in `chat-message-append-order.test.ts`.
+  // Same createdAt on every append and DESCENDING ids, so id order is the
+  // exact reverse of append order; only the adapter's monotonic stamp can
+  // make these pass. The concurrent case is what the advisory xact lock is for.
+  const T = '2026-10-06T12:00:00.000Z';
+  async function mkSession(s: Storage, sessionId: string): Promise<void> {
+    await s.createChatSession({ sessionId, tenantId: 'tenant-a', title: 'order', createdAt: T, updatedAt: T, messageCount: 0 });
+  }
+
+  it.skipIf(skipNoDocker)('sequential same-ms appends list + page in append order', async () => {
+    const s = storage!;
+    await mkSession(s, 'pg-order-seq');
+    const appended: string[] = [];
+    for (let i = 1; i <= 12; i++) {
+      const content = `msg-${String(i).padStart(2, '0')}`;
+      await s.appendChatMessage({ messageId: `${String.fromCharCode(0x7a - i)}-pg-order-seq`, sessionId: 'pg-order-seq', role: 'user', content, meta: null, authorSubject: null, createdAt: T });
+      appended.push(content);
+    }
+    expect((await s.listChatSessionMessages('pg-order-seq')).map((m) => m.content)).toEqual(appended);
+    const seen: string[] = [];
+    let before: { createdAt: string; messageId: string } | undefined;
+    for (;;) {
+      const page = await s.listChatSessionMessages('pg-order-seq', { limit: 5, ...(before ? { before } : {}) });
+      if (page.length === 0) break;
+      seen.unshift(...page.map((m) => m.content));
+      before = { createdAt: page[0]!.createdAt, messageId: page[0]!.messageId };
+    }
+    expect(seen).toEqual(appended);
+  });
+
+  it.skipIf(skipNoDocker)('TWENTY concurrent same-ms appends get twenty DISTINCT stamps and an exact count', async () => {
+    const s = storage!;
+    await mkSession(s, 'pg-order-conc');
+    await Promise.all(Array.from({ length: 20 }, (_, i) => s.appendChatMessage({
+      messageId: `m-${i}-pg-order-conc`, sessionId: 'pg-order-conc', role: 'user', content: `c${i}`, meta: null, authorSubject: null, createdAt: T,
+    })));
+    const listed = await s.listChatSessionMessages('pg-order-conc');
+    expect(listed).toHaveLength(20);
+    expect(new Set(listed.map((m) => m.createdAt)).size).toBe(20);
+    expect(await s.countChatSessionMessages('pg-order-conc')).toBe(20);
   });
 });

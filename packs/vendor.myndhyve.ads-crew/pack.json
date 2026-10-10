@@ -1,18 +1,27 @@
 {
   "name": "vendor.myndhyve.ads-crew",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "MyndHyve Ads Studio creative-director crew. Wraps the 14 vendor.myndhyve.ads-* node typeIds (brief → variants → copy → image → video → validate → export → publish) into a single creative-director agent persona. Vendor showcase agent pack.",
   "author": "MyndHyve",
   "license": "Apache-2.0",
   "homepage": "https://openwop.dev/packs/vendor.myndhyve.ads-crew",
   "repository": "https://github.com/openwop/openwop",
-  "keywords": ["vendor", "myndhyve", "ads", "creative", "crew", "vertical", "showcase"],
-  "engines": { "openwop": ">=1.1.0 <2.0.0" },
+  "keywords": [
+    "vendor",
+    "myndhyve",
+    "ads",
+    "creative",
+    "crew",
+    "vertical",
+    "showcase"
+  ],
+  "engines": {
+    "openwop": ">=1.1.0 <3.0.0"
+  },
   "peerDependencies": {
     "aiProviders": "supported",
-    "aiProviders.imageGeneration": "supported",
-    "host.agentRuntime": "supported",
-    "openwop.agents.memoryBackends": ">=longTerm"
+    "agentRuntime": "supported",
+    "agents": ">=longTerm"
   },
   "agents": [
     {
@@ -23,13 +32,35 @@
       "modelClass": "reasoning",
       "systemPromptRef": "prompts/creative-director.md",
       "toolAllowlist": [],
-      "memoryShape": { "scratchpad": true, "conversation": true, "longTerm": true },
+      "memoryShape": {
+        "scratchpad": true,
+        "conversation": true,
+        "longTerm": true
+      },
       "handoff": {
         "taskSchemaRef": "schemas/creative-director.task.schema.json",
         "returnSchemaRef": "schemas/creative-director.return.schema.json"
       },
-      "confidence": { "defaultThreshold": 0.75 }
+      "confidence": {
+        "defaultThreshold": 0.75
+      }
     }
   ],
-  "runtime": { "language": "remote", "entry": "pack.json" }
+  "runtime": {
+    "language": "remote",
+    "entry": "pack.json"
+  },
+  "kind": "node",
+  "peerDependenciesMeta": {
+    "aiProviders": {
+      "facets": [
+        "imageGeneration"
+      ]
+    },
+    "agents": {
+      "facets": [
+        "memoryBackends"
+      ]
+    }
+  }
 }

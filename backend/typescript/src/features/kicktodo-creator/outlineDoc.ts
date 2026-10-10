@@ -28,7 +28,7 @@ import type { ComponentDef } from '../../host/canvasComponentCatalog.js';
 
 /** The single collab-capable canvas type + its host-ext root (ADR 0359/0310). */
 export const CHALLENGE_OUTLINE_CANVAS_TYPE = 'canvas.challenge-outline';
-export const CHALLENGE_OUTLINE_BASE_PATH = '/v1/host/openwop-app/challenge-outline';
+export const CHALLENGE_OUTLINE_BASE_PATH = '/host/openwop-app/challenge-outline';
 
 /** ADR 0359 Phase 6 — the doc↔Y shape: `frames[].days[].children[]`. Mirrors the
  *  FE `elements` trait (drift-pinned on both sides), the same nested-tree pattern

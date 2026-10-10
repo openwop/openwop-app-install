@@ -24,7 +24,8 @@
 import type { BackendFeature } from '../types.js';
 import { registerAssistantRoutes } from './routes.js';
 import { buildAssistantSurface } from './surface.js';
-import { registerAssistantLoopWorkflows } from './loops.js';
+import { onLoopRunTerminal, registerAssistantLoopWorkflows } from './loops.js';
+import { onAnyRunTerminal } from '../../executor/runLifecycle.js';
 import { registerAssistantActionApproval } from './actionApproval.js';
 import { registerAssistantActionExecutions } from './actionExecution.js';
 import { registerAssistantAgentTools } from './agentTools.js';
@@ -63,6 +64,11 @@ export const assistantFeature: BackendFeature = {
     // purgeTenantHostExt walk cannot reach them (they would orphan on account
     // deletion). Registered unconditionally, like the eraser above.
     registerTenantPurgeHook('assistant', purgeTenantAssistantIndexes);
+    // ADR 0862 — a loop refused by its connection AUTH_PAUSE_AFTER times in a row pauses
+    // itself and tells its owner once, instead of failing every tick (1,233 runs in prod).
+    onAnyRunTerminal('assistant-loop-auth-pause', (runId, status) => onLoopRunTerminal(runId, status).catch((err) => {
+      log.warn('assistant_loop_terminal_handler_failed', { runId, error: err instanceof Error ? err.message : String(err) });
+    }));
     // ADR 0029 — index commitment rows written before the secondary indexes
     // existed. Fire-and-forget so it never blocks boot, and — COS-4 — safe to be
     // fire-and-forget because the READ path no longer depends on it:
@@ -83,11 +89,12 @@ export const assistantFeature: BackendFeature = {
   // loop node-pack calls (reads + idempotent role:action writes).
   surface: { id: 'assistant', build: buildAssistantSurface },
   requiredPacks: [
-    // WF-COS-2/3 — bumped WITH the pack (1.3.0 -> 1.4.0). This pin is the
+    // ADR 0820 §8 item 4 — 2.0.0 removes the list-projects / get-project nodes
+    // (the assistant:project store is retired). WF-COS-2/3 — bumped WITH the pack (1.3.0 -> 1.4.0). This pin is the
     // registry install TARGET, so a bumped pack with an unbumped pin fetches the
     // OLD content and the `role:"side-effect"` flip would never reach the host.
-    { name: 'feature.assistant.nodes', version: '1.4.2' },
-    { name: 'feature.assistant.agents', version: '1.0.3' },
+    { name: 'feature.assistant.nodes', version: '2.0.1' },
+    { name: 'vendor.openwop-app.assistant.agents', version: '1.0.5' },
   ],
   // § Correction (2026-06-11) — graduated OFF the feature toggle. The Chief of
   // Staff is now a real roster agent (capability.ts) and its surfaces live on

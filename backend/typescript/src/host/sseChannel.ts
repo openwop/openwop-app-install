@@ -28,6 +28,7 @@
 import type { Request, Response } from 'express';
 import { OpenwopError } from '../types.js';
 import { createLogger } from '../observability/logger.js';
+import { clientIp } from './clientIp.js';
 
 const log = createLogger('host.sseChannel');
 
@@ -64,9 +65,6 @@ function maxStreams(): number {
   return Number.isFinite(v) && v >= 0 ? v : DEFAULT_MAX_STREAMS;
 }
 
-/** Cap key: the tenant when known (so one tenant can't starve others), else
- *  the source IP (mirrors middleware/rateLimit's X-Forwarded-For handling so
- *  tenant-less anon callers are still bounded). */
 /** Cap key, or `null` for callers EXEMPT from the cap.
  *
  *  Trusted operator principals (`tenants: ['*']` — API key / conformance /
@@ -77,14 +75,12 @@ function maxStreams(): number {
  *  conformance run opening >cap streams would 429 on legitimate traffic.
  *
  *  Everyone else is keyed by tenant (so one tenant can't starve others),
- *  falling back to source IP for tenant-less anon callers (mirrors
- *  middleware/rateLimit's X-Forwarded-For handling). */
+ *  falling back to the client address for tenant-less anon callers (the one
+ *  `host/clientIp` reading, ADR 0851). */
 function capKey(req: Request): string | null {
   if (req.principal?.tenants?.includes('*')) return null;
   if (req.tenantId) return `t:${req.tenantId}`;
-  const xff = req.header('x-forwarded-for');
-  const ip = xff ? (xff.split(',')[0] ?? xff).trim() : (req.socket.remoteAddress ?? 'unknown');
-  return `ip:${ip}`;
+  return `ip:${clientIp(req)}`;
 }
 
 export interface SseChannel {

@@ -4,7 +4,7 @@
  * (`ChatSidebar`, `EmbeddedConversation`, `TabSession`) and drifted. The CORE is:
  *
  *   1. built-in `/command`  (registered commands win over same-name workflows)
- *   2. `/<slug>` workflow mention
+ *   2. `/<slug>` workflow mention (optionally `@agent /<slug>` — a hand-off, ADR 0764)
  *   3. caller INTERCEPTORS (e.g. `@@` convene / board summon) — run BETWEEN workflow
  *      and the single `@` mention, so `@@board` is never read as `@board` and `/clear`
  *      is never shadowed
@@ -78,7 +78,20 @@ export async function runCoreSubmit(
     }
     // 2. `/<slug>` workflow mention.
     const slashMatch = detectWorkflowSlashMention(text);
-    if (slashMatch) { await ctx.runWorkflowMention(slashMatch.entry, slashMatch.trailing ?? undefined); return; }
+    if (slashMatch) {
+      // ADR 0764 D4 — `@agent /workflow …` is a hand-off: the named agent becomes
+      // the active one (so the follow-up routes to it) AND the workflow runs. An
+      // unknown `@slug` is ignored rather than blocking the run the user picked.
+      if (slashMatch.agentSlug) {
+        const agent = ctx.agentEntries.find((e) => e.slug === slashMatch.agentSlug);
+        if (agent) {
+          ctx.activeAgents.activateAgent(agent);
+          ctx.onAgentActivated?.(agent.agentId);
+        }
+      }
+      await ctx.runWorkflowMention(slashMatch.entry, slashMatch.trailing ?? undefined);
+      return;
+    }
   }
 
   // 3. caller interceptors (convene/board), between workflow and the single `@`.

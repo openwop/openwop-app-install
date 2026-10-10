@@ -11,13 +11,17 @@
  * users hit the cap.
  */
 
+import { applyEditOpsToGraph, type EditOp } from '../pair/suggestionModel.js';
 import { create } from 'zustand';
 import type { RunEventDoc } from '@openwop/openwop';
 import type { BuilderEdge, BuilderNode, SavedWorkflow } from '../schema/workflow.js';
 import { catalogEntry, defaultConfigFor } from '../palette/catalogRegistry.js';
-import { upsertSavedWorkflow } from '../persistence/localStore.js';
+import { upsertSavedWorkflow, deleteSavedWorkflow } from '../persistence/localStore.js';
 import { saveWorkflow as saveBackendWorkflow } from '../persistence/backendStore.js';
+import { serializeWorkflow } from '../schema/serialize.js';
+import { definitionMetadataFor } from '../persistence/definitionMetadata.js';
 import { SyncFailureError } from '../../client/config.js';
+import { toast } from '../../ui/toast.js';
 
 // ADR 0163 Phase 3 — write-through to the backend ownership index, DEBOUNCED so
 // canvas edits don't POST on every keystroke. localStorage stays the immediate
@@ -29,49 +33,236 @@ import { SyncFailureError } from '../../client/config.js';
 // different machine, as missing work. The write still cannot be made to
 // succeed offline — but it can stop LYING about it, which is the whole fix.
 let backendSyncTimer: ReturnType<typeof setTimeout> | undefined;
+/** ADR 0770 D6 — the workflow the pending debounced save belongs to, so a
+ *  switch/unload can FLUSH it instead of silently dropping the last 1.5s. */
+let pendingSync: SavedWorkflow | undefined;
 /** ADR 0474 (review M4) — a pending debounced autosave firing AFTER a
  *  restore/import reload would silently overwrite the just-loaded head with
- *  the pre-reload snapshot. `loadFromSaved` cancels it. */
+ *  the pre-reload snapshot. `loadFromSaved` cancels it for the SAME workflow. */
+/** ADR 0773 G-10d — while a live room is attached, the collab adapter registers
+ *  its graph flush here so a KEPT suggestion reaches the room immediately: one
+ *  keep = one room write (= one `Y.UndoManager` step), never merged into the
+ *  adapter's 300 ms debounce with whatever the person does next. */
+let activeCollabFlush: (() => void) | null = null;
+export function setActiveCollabFlush(fn: (() => void) | null): void { activeCollabFlush = fn; }
+
 export function cancelPendingBackendSync(): void {
   if (backendSyncTimer) { clearTimeout(backendSyncTimer); backendSyncTimer = undefined; }
+  pendingSync = undefined;
 }
+
+/**
+ * ADR 0770 D6 (`WBWF-12`) — send the pending debounced save NOW. Used when the
+ * builder switches to another workflow (the old code CANCELLED it, losing up to
+ * 1.5s of edits) and on `pagehide` (`keepalive`, so the request outlives the
+ * page; bodies are capped near 64 KB, so a very large definition still relies on
+ * the local cache — ADR 0770 open question 2). A no-op when nothing is pending.
+ */
+export function flushPendingBackendSync(opts: { keepalive?: boolean } = {}): void {
+  const wf = pendingSync;
+  if (!wf) return;
+  cancelPendingBackendSync();
+  void runBackendSync(wf, opts);
+}
+
 function scheduleBackendSync(wf: SavedWorkflow): void {
   // ADR 0481 §4 — while a collab room is live it is the head's ONLY writer
   // (REST saves return 409 workflow_room_live): the debounced autosave
   // short-circuits; leaving the session triggers the one catch-up sync.
   if (useBuilderStore.getState().collabLive) return;
   if (backendSyncTimer) clearTimeout(backendSyncTimer);
+  pendingSync = wf;
   backendSyncTimer = setTimeout(() => {
-    void (async () => {
-      try {
-        const outcome = await saveBackendWorkflow(wf);
-        // Grade-pass (UX): resolve ids to the LABELS the author saw on canvas.
-        // Node ids are `n_<8 hex>` — opaque tokens a user has never seen, for a
-        // node that is now deleted and so can't be looked up. `wf` is the
-        // pre-save snapshot, which still contains the removed node.
-        const labelById = new Map(wf.nodes.map((n) => [n.id, n.name]));
-        useBuilderStore.setState({
-          syncState: 'synced',
-          removedReferencedNodeIds: (outcome.removedReferencedNodeIds ?? []).map((id) => labelById.get(id) ?? id),
-        });
-      } catch (err) {
-        // A REFUSED write (offline is swallowed inside saveWorkflow and resolves).
-        // Never rethrow from a timer — that is an unhandled rejection, which is
-        // just a louder way to lose the signal.
-        useBuilderStore.setState({
-          syncState: 'failed',
-          // Grade-pass: the save did NOT land, so a "steps were removed"
-          // notice would contradict the failure banner directly above it.
-          removedReferencedNodeIds: [],
-          // Conditional spread, not an explicit `undefined` — the project runs
-          // `exactOptionalPropertyTypes`.
-          ...(err instanceof SyncFailureError
-            ? { syncFailureStatus: err.status, syncFailureReason: err.reason }
-            : {}),
-        });
-      }
-    })();
+    backendSyncTimer = undefined;
+    pendingSync = undefined;
+    void runBackendSync(wf);
   }, 1500);
+}
+
+/**
+ * grade-code WBCD-5 — the builder's definition writes run ONE AT A TIME. The
+ * autosave, the flush on switch, and the Run / debug lanes' registers each read
+ * the current `baseRevision` and POST with it; overlapping, the second carried
+ * the base the first had just moved, and the user's own save came back as a
+ * false "someone else saved" 409. Each write reads the base INSIDE its turn.
+ */
+let writeChain: Promise<unknown> = Promise.resolve();
+export function enqueueBuilderWrite<T>(fn: () => Promise<T>): Promise<T> {
+  const turn = writeChain.then(fn, fn);
+  writeChain = turn.catch(() => undefined);
+  return turn;
+}
+
+/**
+ * ADR 0789 — the canvas exactly as it was loaded (its wire serialization), so a
+ * save or Run of an UNTOUCHED workflow can say so (`X-OpenWOP-Canvas-Pristine`).
+ * The server needs it for shared (seeded) workflows: the serializer normalises
+ * defaults it cannot reproduce, so without the marker the first Run of an
+ * untouched seeded workflow would fork it.
+ */
+let pristineCanvas: { id: string; json: string } | undefined;
+function wireJsonOf(wf: SavedWorkflow): string | undefined {
+  try {
+    // Layout is not content (ADR 0770 D4 — `position` is stripped from both host
+    // hashes), so a drag alone never makes a seeded workflow fork.
+    const def = serializeWorkflow(wf);
+    const nodes = def.nodes.map(({ position: _position, ...rest }) => rest);
+    return JSON.stringify({ def: { ...def, nodes }, metadata: definitionMetadataFor(wf) });
+  } catch {
+    return undefined; // unserializable ⇒ never "pristine"
+  }
+}
+export function isCanvasPristine(wf: SavedWorkflow): boolean {
+  if (!pristineCanvas || pristineCanvas.id !== wf.id) return false;
+  const json = wireJsonOf(wf);
+  return json !== undefined && json === pristineCanvas.json;
+}
+
+/**
+ * ADR 0789 — the id the builder most recently adopted from a fork, so the route
+ * layer (`BuilderTab`) can follow it to `/builder/<fork>` WITHOUT reloading the
+ * canvas from the server (a reload would drop edits made since that save).
+ */
+let adoptedForkId: string | undefined;
+export function consumeAdoptedFork(workflowId: string): boolean {
+  if (adoptedForkId !== workflowId) return false;
+  adoptedForkId = undefined;
+  return true;
+}
+
+/**
+ * ADR 0789 — the server forked this canvas's shared (seeded) workflow onto the
+ * tenant's own id: every later save, run and debug session must use the FORK.
+ * The shared id is no longer this tenant's (a save under it would 404), so the
+ * store, the local cache and any pending debounced save all move to the new id.
+ * A no-op when the store has already left `from`.
+ */
+/**
+ * ADR 0789 — shared id → the fork it was adopted into. A write that was already
+ * QUEUED (serialized under the shared id) when the fork landed must send the
+ * fork's id: the tenant no longer owns the shared one, so posting it would 404
+ * and the edits it carries would never reach the server.
+ */
+const forkAliases = new Map<string, string>();
+export function resolveForkAlias(workflowId: string): string {
+  return forkAliases.get(workflowId) ?? workflowId;
+}
+
+export function adoptForkedWorkflow(from: string, to: string, revision?: string, repointFailed = false): void {
+  if (from !== to) forkAliases.set(from, to);
+  if (from === to || useBuilderStore.getState().workflowId !== from) return;
+  const hadPending = pendingSync?.id === from;
+  cancelPendingBackendSync();
+  deleteSavedWorkflow(from);
+  adoptedForkId = to;
+  useBuilderStore.setState({ workflowId: to, ...(revision ? { baseRevision: revision } : {}) });
+  // Re-write the local cache under the fork, and re-arm a save that was pending
+  // under the shared id so it lands on the fork instead of 404ing.
+  const s = useBuilderStore.getState();
+  if (hadPending) s.persist();
+  else upsertSavedWorkflow(s.snapshot());
+  toast.info(i18n.t('builder:forkedSharedWorkflow'));
+  // The fork landed, but a linked schedule/card/… could not be moved to it and
+  // still runs the original: say so rather than let it drift silently.
+  if (repointFailed) toast.warning(i18n.t('builder:forkRepointFailed'));
+}
+
+/**
+ * ADR 0789 — after a History-drawer restore: a restore of a SHARED (seeded)
+ * workflow forked it server-side, so adopt the fork (store, cache, URL) exactly as
+ * the autosave does. Returns the id the canvas must reload — the fork, never the
+ * shared original (which the tenant no longer owns; a walkthrough's is not even
+ * readable to it).
+ */
+export function adoptRestoreOutcome(
+  workflowId: string,
+  outcome: { workflowId?: string; forkedFrom?: string; revision?: string; repointFailed?: string[] },
+): string {
+  if (outcome.forkedFrom && outcome.workflowId && outcome.workflowId !== workflowId) {
+    adoptForkedWorkflow(workflowId, outcome.workflowId, outcome.revision, (outcome.repointFailed?.length ?? 0) > 0);
+    return outcome.workflowId;
+  }
+  return workflowId;
+}
+
+function runBackendSync(wf: SavedWorkflow, opts: { keepalive?: boolean; overwrite?: boolean } = {}): Promise<void> {
+  return enqueueBuilderWrite(() => runBackendSyncNow(wf, opts));
+}
+
+async function runBackendSyncNow(queued: SavedWorkflow, opts: { keepalive?: boolean; overwrite?: boolean }): Promise<void> {
+  // ADR 0789 — queued under a shared id that has since forked: send the fork.
+  const aliased = resolveForkAlias(queued.id);
+  const wf = aliased === queued.id ? queued : { ...queued, id: aliased };
+  // ADR 0770 D5 — save against the head this canvas was loaded from. A flush of
+  // a workflow the store has already LEFT carries its own id; the base is only
+  // meaningful for the workflow the store currently holds.
+  const state = useBuilderStore.getState();
+  const baseRevision = !opts.overwrite && state.workflowId === wf.id ? state.baseRevision : undefined;
+  try {
+    const outcome = await saveBackendWorkflow(wf, {
+      ...(baseRevision ? { baseRevision } : {}),
+      ...(isCanvasPristine(wf) ? { pristine: true } : {}),
+      ...(opts.keepalive ? { keepalive: true } : {}),
+    });
+    const storeId = useBuilderStore.getState().workflowId;
+    if (storeId !== wf.id && storeId !== queued.id) return; // a flush for a workflow we left
+    if (storeId === queued.id && wf.id !== queued.id) {
+      // Sent under an alias (the store still shows the shared id): adopt the fork.
+      adoptForkedWorkflow(queued.id, wf.id, outcome.revision, outcome.repointFailed === true);
+    } else if (outcome.forkedFrom && outcome.workflowId && outcome.workflowId !== wf.id) {
+      adoptForkedWorkflow(wf.id, outcome.workflowId, outcome.revision, outcome.repointFailed === true);
+    }
+    // Grade-pass (UX): resolve ids to the LABELS the author saw on canvas.
+    // Node ids are `n_<8 hex>` — opaque tokens a user has never seen, for a
+    // node that is now deleted and so can't be looked up. `wf` is the
+    // pre-save snapshot, which still contains the removed node.
+    const labelById = new Map(wf.nodes.map((n) => [n.id, n.name]));
+    useBuilderStore.setState({
+      syncState: 'synced',
+      removedReferencedNodeIds: (outcome.removedReferencedNodeIds ?? []).map((id) => labelById.get(id) ?? id),
+      // The persisted head is the next save's base (absent offline — keep ours).
+      ...(outcome.revision ? { baseRevision: outcome.revision } : {}),
+    });
+  } catch (err) {
+    const storeId = useBuilderStore.getState().workflowId;
+    if (storeId !== wf.id && storeId !== queued.id) {
+      // grade-code WBCD-6 — a flushed save for a workflow the user has LEFT
+      // failed; its banner is gone with it, so say so here instead of dropping it.
+      toast.error(i18n.t('builder:syncFlushFailed', { name: wf.name }));
+      return;
+    }
+    // A REFUSED write (offline is swallowed inside saveWorkflow and resolves).
+    // Never rethrow from a timer — that is an unhandled rejection, which is
+    // just a louder way to lose the signal.
+    useBuilderStore.setState({
+      syncState: 'failed',
+      // Grade-pass: the save did NOT land, so a "steps were removed"
+      // notice would contradict the failure banner directly above it.
+      removedReferencedNodeIds: [],
+      // Conditional spread, not an explicit `undefined` — the project runs
+      // `exactOptionalPropertyTypes`.
+      ...(err instanceof SyncFailureError
+        ? { syncFailureStatus: err.status, syncFailureReason: err.reason }
+        : {}),
+    });
+  }
+}
+
+/** ADR 0770 D5 — "Keep mine" on a `workflow_head_moved` conflict: resend the
+ *  canvas WITHOUT a precondition (a deliberate overwrite of the newer head) and
+ *  adopt the revision it produces. */
+export function overwriteWithCanvas(): void {
+  const s = useBuilderStore.getState();
+  if (!s.workflowId || s.syncState !== 'failed') return; // grade-ux WBUX-5: once only
+  cancelPendingBackendSync();
+  s.persist();
+  const wf = pendingSync;
+  cancelPendingBackendSync();
+  if (!wf) return;
+  // Leave the conflict state at once so the banner closes (and a second click
+  // cannot send a second overwrite); the result lands as synced or failed.
+  useBuilderStore.setState({ syncState: 'pending' });
+  void runBackendSync(wf, { overwrite: true });
 }
 import i18n from '../../i18n/index.js';
 import { isInterruptResolvedEvent } from '../../chat/lib/interruptResolvedEvent';
@@ -248,8 +439,15 @@ export interface BuilderState {
    *  from genuine refusals. Explicit `| undefined` so a reason-less failure
    *  CLEARS a stale one under `exactOptionalPropertyTypes`. */
   syncFailureReason?: string | undefined;
+  /** ADR 0770 D5 — the revision of the head this canvas was loaded from (or last
+   *  saved), sent as `If-Match` so a head that moved elsewhere is refused 409
+   *  instead of silently overwritten. `undefined` = no precondition (unknown
+   *  head, a brand-new workflow, or just after a collab room ended). */
+  baseRevision: string | undefined;
 
   loadFromSaved(wf: SavedWorkflow): void;
+  /** ADR 0770 D5 — adopt the head revision read at load (or returned by a rollback). */
+  setBaseRevision(revision: string | undefined): void;
   setName(name: string): void;
   setDefaultInputs(value: string): void;
   setInputSchema(value: string): void;
@@ -300,6 +498,9 @@ export interface BuilderState {
   addEdge(edge: Omit<BuilderEdge, 'id'>): void;
   updateEdge(id: string, patch: Partial<Omit<BuilderEdge, 'id' | 'source' | 'target' | 'sourcePort' | 'targetPort'>>): void;
   removeEdge(id: string): void;
+  /** ADR 0773 D5 — apply kept suggestion ops as ONE undo entry, through the
+   *  ordinary persist → CAS autosave. The AI has no other write path. */
+  applyEditOps(ops: readonly EditOp[]): boolean[];
   undo(): void;
   redo(): void;
   snapshot(): SavedWorkflow;
@@ -368,11 +569,20 @@ export const useBuilderStore = create<BuilderState>((set, get) => ({
   metadata: undefined,
   removedReferencedNodeIds: [],
   syncState: 'pending',
+  baseRevision: undefined,
 
   loadFromSaved(wf) {
-    cancelPendingBackendSync();
+    // ADR 0770 D6 — a pending save for ANOTHER workflow is flushed, not dropped
+    // (switching workflows inside the 1.5s debounce used to lose the edit). A
+    // pending save for THIS workflow is still cancelled: that is the ADR 0474
+    // restore/import reload, where it would overwrite the just-loaded head.
+    if (pendingSync && pendingSync.id !== wf.id) flushPendingBackendSync();
+    else cancelPendingBackendSync();
     set({
       workflowId: wf.id,
+      // The caller adopts the head's revision after the load (setBaseRevision).
+      baseRevision: undefined,
+      syncState: 'pending',
       name: wf.name,
       lifecycle: wf.lifecycle,
       metadata: wf.metadata,
@@ -399,6 +609,9 @@ export const useBuilderStore = create<BuilderState>((set, get) => ({
       // navigation, this only clears the marker mirror across loads.
       collabPeers: null,
     });
+    // ADR 0789 — remember the canvas as loaded (see `isCanvasPristine`).
+    const loadedJson = wireJsonOf(get().snapshot());
+    pristineCanvas = loadedJson !== undefined ? { id: wf.id, json: loadedJson } : undefined;
   },
 
   setName(name) {
@@ -655,6 +868,17 @@ export const useBuilderStore = create<BuilderState>((set, get) => ({
     get().persist();
   },
 
+  applyEditOps(ops) {
+    if (ops.length === 0) return [];
+    const next = applyEditOpsToGraph({ nodes: get().nodes, edges: get().edges }, ops);
+    if (!next.applied.some(Boolean)) return next.applied; // nothing landed: no undo entry, no save
+    pushHistory(set, get);
+    set({ nodes: next.nodes, edges: next.edges });
+    get().persist();
+    if (get().collabLive) activeCollabFlush?.();
+    return next.applied;
+  },
+
   removeEdge(id) {
     pushHistory(set, get);
     set({
@@ -817,7 +1041,14 @@ export const useBuilderStore = create<BuilderState>((set, get) => ({
   },
 
   setCollabLive(live) {
-    set({ collabLive: live });
+    // ADR 0770 D5 — while a room lived, ITS derive moved the head, so the base
+    // this canvas holds is stale by construction. Drop it when the room ends so
+    // the ADR 0481 catch-up sync is not refused as a conflict; its 201 re-arms it.
+    set(live ? { collabLive: true } : { collabLive: false, baseRevision: undefined });
+  },
+
+  setBaseRevision(revision) {
+    set({ baseRevision: revision });
   },
 
   setCollabPeers(peers) {

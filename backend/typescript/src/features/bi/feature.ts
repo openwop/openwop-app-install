@@ -12,7 +12,7 @@ import { buildBiSurface } from './surface.js';
 export const biFeature: BackendFeature = {
   id: 'bi',
   requiredPacks: [
-    { name: 'feature.bi.nodes', version: '1.0.0' },
+    { name: 'feature.bi.nodes', version: '1.0.1' },
   ],
   registerRoutes: (deps) => {
     registerBiRoutes(deps);
@@ -23,7 +23,7 @@ export const biFeature: BackendFeature = {
     id: 'bi',
     label: 'Business metrics (BI)',
     description:
-      'Governed semantic metrics over workspace business data (deals, products, companies, custom entities) — defined closed-world, runnable from chat, workflows, and the dashboard (ADR 0417).',
+      'Governed semantic metrics over workspace business data (deals, products, companies, custom entities) — defined closed-world, runnable from chat, workflows, and the dashboard.',
     category: 'Platform',
     status: 'off',
     bucketUnit: 'tenant',

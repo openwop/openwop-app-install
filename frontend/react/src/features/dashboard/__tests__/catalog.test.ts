@@ -18,6 +18,11 @@ import { ALL_DASHBOARD_TILES, defaultLayoutFrom } from '../allTiles.js';
  *  (verified against chrome/features.tsx + each feature's routes.tsx). A change
  *  here must follow a change to the PAGE's tier, never drift independently. */
 const TIER_BY_TILE: Record<string, 'workspace' | 'admin'> = {
+  // ADR 0844 — workspace-tier; the run-linking tiles drop their links for a
+  // non-admin rather than point at the admin-tier `/runs` pages. Issue 4511: Run
+  // health / Run activity summarise the WORKSPACE's runs, so they share the
+  // /runs pages' admin tier; Needs you reads a member's own runs.
+  ask: 'workspace', 'get-started': 'workspace', 'needs-you': 'workspace', 'run-health': 'admin', 'run-activity': 'admin',
   'active-runs': 'workspace', 'recent-conversations': 'workspace', todos: 'admin',
   'scheduled-agents': 'workspace', 'ai-briefing': 'workspace', 'recent-documents': 'workspace', 'kicktodo-today': 'workspace', 'kicktodo-progress': 'workspace',
   'crm-pipeline': 'admin', 'commerce-summary': 'admin', 'campaign-kpis': 'admin',
@@ -65,7 +70,11 @@ describe('dashboard catalog invariants', () => {
     // launchpad ships default-on (5–9-element guardrail). continue-working is
     // the ONE deliberate toggle-gated default (fail-closed absent when
     // `documents` is off; ~6 first-paint reads stay far under the rate budget).
-    const DEFAULT_ON = ['active-runs', 'approvals-inbox', 'continue-working', 'notifications', 'quick-create', 'recent-conversations', 'todos'];
+    // ADR 0844 (2026-10-06) re-cut the launchpad around a hierarchy: ask →
+    // get started → needs you → run health → activity. It REPLACES quick-create
+    // (by ask), approvals-inbox (folded into needs-you) and active-runs (by
+    // run-activity) — each still in the catalog, opt-in. Nine, the guardrail's top.
+    const DEFAULT_ON = ['ask', 'continue-working', 'get-started', 'needs-you', 'notifications', 'recent-conversations', 'run-activity', 'run-health', 'todos'];
     const on = ALL_DASHBOARD_TILES.filter((t) => t.defaultEnabled).map((t) => t.id).sort();
     expect(on).toEqual(DEFAULT_ON);
     for (const t of ALL_DASHBOARD_TILES) {

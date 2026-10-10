@@ -18,6 +18,7 @@ import { Link } from 'react-router-dom';
 import { useBuilderStore } from '../store/builderStore.js';
 import { catalogEntry } from '../palette/catalogRegistry.js';
 import { ConfigInput } from './ConfigInput.js';
+import { FillWithAi, SuggestionDiffCard } from '../pair/InspectorPair.js';
 import { EdgeInspector } from './EdgeInspector.js';
 import { NodeConnections } from './NodeConnections.js';
 import { NodeDebugSection } from './NodeDebugSection.js';
@@ -26,6 +27,7 @@ import { WorkflowInspector } from './WorkflowInspector.js';
 import { useHostAdvertisedModelCapabilities } from './inspectorHelpers.js';
 import { TextField, SelectField } from '../../ui/Field.js';
 import { CheckIcon } from '../../ui/icons/index.js';
+import { classifyHttpError } from '../../client/classifyHttpError.js';
 
 /**
  * A preset input value as a human should read it.
@@ -155,7 +157,7 @@ export function Inspector() {
               const providerId = ref.split('.').pop() ?? ref;
               void beginOAuth(providerId, window.location.pathname)
                 .then((url) => { window.location.href = url; })
-                .catch(() => toast.error(t('inspectorConnectError')));
+                .catch((err: unknown) => toast.error(classifyHttpError(err).kind === 'forbidden' ? t('common:error_forbidden') : t('inspectorConnectError')));
             }}
           >
             {t('inspectorConnectCta')}
@@ -222,6 +224,9 @@ export function Inspector() {
         )
       ) : null}
 
+      {/* ADR 0773 D5 — pending suggestion ops on THIS node, as tracked changes. */}
+      <SuggestionDiffCard nodeId={node.id} />
+
       <TextField
         label={t('fieldName')}
         value={node.name}
@@ -233,13 +238,16 @@ export function Inspector() {
           <div className="builder-inspector-divider" />
           <div className="builder-inspector-section-label">{t('configuration')}</div>
           {entry.configFields.map((f) => (
-            <ConfigInput
-              key={f.key}
-              nodeId={node.id}
-              config={node.config}
-              field={f}
-              allFields={entry.configFields}
-            />
+            <div key={f.key} className="pair-field">
+              <ConfigInput
+                nodeId={node.id}
+                config={node.config}
+                field={f}
+                allFields={entry.configFields}
+              />
+              {/* ADR 0773 D6 — per-field inline ask (self-gated on the toggle). */}
+              <FillWithAi nodeName={node.name} fieldLabel={f.label} />
+            </div>
           ))}
         </>
       )}

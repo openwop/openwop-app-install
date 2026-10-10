@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { GROUP_LABEL_KEYS, type NavGroup, type NavItem } from '../chrome/features.js';
 import { useFeatureBadge, useFeatureLocked } from '../featureToggles/FeatureAccessContext.js';
+import { useLockedNav } from '../featureToggles/lockedTargets.js';
 import { PageHeader } from '../ui/PageHeader.js';
 import { Button } from '../ui/Button.js';
 import { StateCard } from '../ui/StateCard.js';
@@ -13,7 +14,6 @@ import { useReviewList, useReviewStatusStore } from '../chat/reviews/reviewStatu
 import { getHealthSummary, OperationsRequestError } from '../client/operationsClient.js';
 import { ActivityIcon, AlertIcon, CheckIcon, ClockIcon, InboxIcon, LockIcon, SearchIcon } from '../ui/icons/index.js';
 
-const FEATURE_STORE = '/marketplace/bundles';
 
 type HealthState = 'idle' | 'loading' | 'ready' | 'degraded' | 'restricted' | 'unavailable';
 
@@ -23,7 +23,7 @@ export function AdminOverviewPage(): JSX.Element {
   const { t } = useTranslation('settings');
   const { t: tn } = useTranslation('nav');
   const badgeFor = useFeatureBadge();
-  const lockedFor = useFeatureLocked();
+  const lockedFor = useLockedNav(useFeatureLocked(), t('adminLockedHint'), 'admin-overview');
   const { admin } = useResolvedNav();
   const reviews = useReviewList();
   const reviewsLoading = useReviewStatusStore((state) => state.loading);
@@ -96,10 +96,10 @@ export function AdminOverviewPage(): JSX.Element {
     return (
       <Link
         key={item.to}
-        to={locked ? FEATURE_STORE : item.to}
+        to={locked ? locked.to : item.to}
         className={compact ? 'admin-home-recent-link' : 'admin-directory-link'}
-        title={locked ? t('adminLockedHint') : undefined}
-        onClick={() => setNavSource('hub')}
+        title={locked?.label}
+        onClick={() => { setNavSource('hub'); locked?.onClick(); }}
       >
         <span className="admin-directory-icon" aria-hidden><Icon size={18} /></span>
         <span className="admin-directory-meta">

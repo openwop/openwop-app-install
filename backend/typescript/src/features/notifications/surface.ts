@@ -25,6 +25,12 @@
  * notification on a run with no acting human REFUSES rather than quietly
  * broadcasting to the whole tenant.
  *
+ * > **CORRECTED (ADR 0816 D8):** the quoted docstring was false for user-created
+ * > schedules — the scheduler route stamps `actingUserId` and the daemon carries it
+ * > onto every fire, so `self` on a scheduled run addresses the schedule's
+ * > creator. The explicit-audience rule stands; only the premise was wrong. And in
+ * > a shared workspace `tenant` is now one row PER MEMBER (D1), not one shared row.
+ *
  * The three audiences map 1:1 onto the ADR 0050 targeting modes already in
  * `NotificationRecord`: `tenant` (broadcast, no recipient field), `self`
  * (`recipientUserId`, default-deny), `role:<name>` (`recipientRole`, default-deny).
@@ -39,6 +45,7 @@ import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import type { FeatureSurface } from '../../host/featureSurfaces.js';
 import type { NotificationPriority } from '../../types.js';
 import { getNotificationEmitter } from '../../notifications/emitter.js';
+import { isCurrentNotificationAudience } from '../../notifications/audience.js';
 import { createLogger } from '../../observability/logger.js';
 
 const log = createLogger('features.notifications.surface');
@@ -107,6 +114,13 @@ export function buildNotificationsSurface(scope: BundleScope): FeatureSurface {
           // webhook run has no acting human. Broadcasting to the tenant instead
           // would notify people the author never intended.
           return { emitted: false, audience, reason: 'no_acting_user_on_this_run' };
+        }
+        // ADR 0816 D8 — `self` on a scheduled run is the schedule's acting user
+        // (the daemon stamps `metadata.actingUserId`). In a shared workspace that
+        // person must still be a member: a removed member's still-scheduled run
+        // must not keep addressing them with the workspace's content.
+        if (!(await isCurrentNotificationAudience(scope.tenantId, userId))) {
+          return { emitted: false, audience, reason: 'acting_user_not_member' };
         }
         target = { recipientUserId: userId };
       } else if (audience.startsWith(ROLE_PREFIX)) {

@@ -18,6 +18,199 @@ Commits by the `/cut-app-release` skill; required upgrade stops are tracked in
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-10-09
+
+Two weeks since v0.2.0 (2026-09-27): 1,549 commits and **108 architecture decision
+records (ADRs 0759–0867)**, each in `docs/adr/`. The headline: **OpenWOP v1 is
+retired** — this host now speaks only the v2 protocol. `0.x` caveat applies: this
+MINOR bump carries breaking changes (listed under **Upgrading**), as SemVer §4
+permits before 1.0.
+
+#### Upgrading from 0.2.0
+
+- **Required stop:** no (`releases.json`). There is no intermediate version.
+- **Migrations (replay forward on boot, no manual step):** Postgres schema
+  **46 → 47**, SQLite **48 → 49** (one nullable `invocation_log.presented_key`
+  column, no backfill, no table rewrite), app migrations **21 → 22** (a no-op
+  marker; its cleanup runs in the background after the server listens and records
+  `app_bg_job:internal-seed-retract` = `done`).
+- **Rolling-safe:** the schema changes are additive, so a 0.2.0 process may share
+  the upgraded database during a rolling deploy. Take a backup first as usual.
+- **Breaking — OpenWOP v1 is removed (ADR 0669, ADR 0812).** Discovery advertises
+  only `protocolVersions ["2.0"]`; every `/v1/*` request (WebSocket upgrades
+  included) answers `410`, public read twins answer a bodiless `308` to their
+  unversioned address, and a `1.x` client is refused with `426`.
+  `OPENWOP_V1_RETIRED` no longer exists — there is no switch to serve v1 again.
+  Move every integration (SDKs, webhook subscribers, scripts, the CDP collection
+  snippet) to the unversioned v2 paths before upgrading. Stored run links and
+  asset addresses keep working.
+- **Breaking — chain packs must pin nodes exactly (ADR 0766).**
+  - **Operator-supplied chain packs** (`OPENWOP_WORKFLOW_CHAIN_PACKS_DIR`, or a
+    registry-installed chain pack) that reference nodes without an exact version now
+    fail to load. Run `( cd backend/typescript && npm run chains:pin -- --write )`
+    against your packs (or pin by hand as `typeId@x.y.z`), then bump each pack and
+    each changed chain one patch. Watch `checks.chainPacks.refused` on `/readiness`.
+  - Packs you publish to a registry for this host must be signed for the **v2
+    tree** (`ed25519-canonical-json`) with `engines` admitting `<3.0.0`.
+- **Trusted proxies (ADR 0851):** if a load balancer or CDN with a public address
+  (other than Google's front end) sits in front of the backend, set
+  `OPENWOP_TRUSTED_PROXY_CIDRS` to its ranges, or every user shares one rate-limit
+  bucket.
+- **SAML deployments (ADR 0815):** after the bootstrap org, only an `owner` of an
+  existing org in the shared SAML tenant can create orgs — grant `owner` before
+  upgrading if others need to.
+- **Public-site analytics consent (ADR 0860):** with no geo header configured every
+  visitor is asked before analytics counts; set `OPENWOP_GEO_COUNTRY_HEADER` behind
+  an edge that overwrites it to default "on" outside regulated regions.
+- **Scale-out hosts (ADR 0867):** a host running more than one instance (Cloud Run
+  and similar are detected; `OPENWOP_INSTANCE_TOPOLOGY` overrides) no longer
+  advertises a storage family backed by process memory, and logs
+  `storage_families_withheld_process_local`. Select a shared backend
+  (`OPENWOP_SURFACE_BACKEND=durable` on Postgres Storage, `OPENWOP_SURFACE_VECTOR=pgvector`,
+  `OPENWOP_SURFACE_BLOB=gcs|s3`); a selected engine must pass its boot check or the
+  process exits.
+- **Defaults that moved:** `builder-pair` is ON (the Create-with-AI drawer is gone);
+  the managed free tier is 150,000 tokens per member per day unless
+  `OPENWOP_MANAGED_DAILY_TOKEN_CAP` is set; major-2 host-event webhooks use the
+  `openwop-app.<feature>.<entity>-<verb>` spelling (RFC 0236 delivery stays behind
+  `OPENWOP_HOST_EVENTS_V2`, default off).
+- **After upgrading:** `GET /readiness` → `200`, its `version` reads `0.3.0`, and
+  `checks.chainPacks.refused` / `checks.registryPacks.failed` are empty.
+
+### Removed
+- **OpenWOP major 1 (ADR 0812 P3c).** The served-v1 shim, the `/v1` route
+  registrations' rewrite path, the v1 deprecation headers and the
+  `OPENWOP_V1_RETIRED` switch are gone; `/v1/*` answers `410` and the ADR 0806 public
+  twins `308`. The SPA reads discovery at major 2 only and no longer depends on
+  `@openwop/openwop-v1`.
+
+### Added
+
+- **Visitors choose analytics on the public site** (ADR 0860). The front page, docs and funnel pages now ask visitors in the EEA, the UK and California, and any visitor whose region is unknown, before counting anything, with "Accept analytics" and "Reject analytics" side by side. Everywhere else analytics is on by default, and a "Privacy choices" control in the footer turns it off. The choice is recorded on the existing public consent lane. **Upgrading:** with no geo header configured, every visitor's region is unknown, so everyone is asked — including on a tenant whose consent policy says opt-out. To default to "on" outside regulated regions, put an edge that overwrites a country header in front and set `OPENWOP_GEO_COUNTRY_HEADER` (see `.env.example`).
+- **The visitor key is stored only after consent** (ADR 0860). The public pages used to write `owp:vk` to the browser on every visit. The key is now written only when the visitor's choice (or their region's default) allows it, is removed when they refuse or withdraw, and is per site (`owp:vk:<orgId>`). The old key is deleted.
+- **Workspace settings say that feature usage is counted** (ADR 0860). The Privacy panel now states that the product counts which features members use, in aggregate.
+
+- **CMS prose blocks** (ADR 0813). A `richText` section now renders `### ` subheadings, `- ` and `1. ` lists, and `> ` quotes, in the app and in the crawler HTML. Plain paragraphs render as before, and there is still no raw-HTML path.
+- **Blog post settings in the CMS editor** (ADR 0813). Mark a page as a blog post, set its category, and set yourself as the byline. The page routes accept `authorId: "me"`, resolved to the caller.
+- **The launch blog post, as a draft** (ADR 0813). "10x Your Company = Your Team + AI Agents" is seeded on the system site with its two diagrams. It is never auto-published: finish its `[TODO]` markers and publish it from the CMS.
+- **A Media library for the public site** (ADR 0817). A super admin can upload and pick images for the "Front page (public site)" scope, in the CMS editor's image picker and on the Media Library page. Before, that scope had no library, so changing a public-site image needed a code change.
+- **Seeded updates after you edit** (ADR 0817). When the code that created a page has newer content but you have already edited or published the page, the update now appears in the page's History as a "Seeded update". Compare it, then Restore to use it. Your edits are never overwritten.
+- Pack node entries may declare `"x-ports": "single"` (ADR 0782): the builder keeps one input port whatever the input schema's `required` says, so a schema can state its real contract without re-routing saved edges. The 17 `feature.kicktodo.nodes` input schemas get their `required` fields back (pack 1.30.3). The agent-orchestration nodes group under AI in the palette (`vendor.myndhyve.agent-orchestration` 1.0.3).
+- `scripts/write-build-commit.mjs` stamps `build-meta/deployer.json` on the deploy path only (the checkout's directory name and a session slug: `OPENWOP_DEPLOY_SESSION`, else the agent's `CLAUDE_CODE_SESSION_ID`), so a production build can be traced to the session that made it. It ships in the source upload and the image, and is never served. The workflow-author model is told about single-port nodes, and `validate`/`persist` reject a `targetInput` edge into one.
+
+- `/readiness` `checks.registryPacks` (boot-time registry install: attempted,
+  installed, failed with a `code`, skipped with a reason, `bootAt`) and
+  `checks.chainPacks` (chain packs loaded / refused). `scripts/verify-deploy.sh`
+  fails a revision reporting either kind of failure; the named waivers are
+  `--allow-registry-failures` and `--allow-chain-pack-failures`.
+- A run whose definition pins a node version the host runs differently is
+  stamped `metadata.nodePinMismatches` and logged `run_node_pin_mismatch`.
+- A directly submitted workflow definition may pin nodes (`typeId@x.y.z`). The
+  pin is kept in `metadata.nodePins`; ranges are refused.
+- `scripts/check-registry-parity.sh` reports a **version collision**, a
+  `name@version` already published with different content.
+
+### Fixed
+
+- **A form submit could attach a stranger's browsing to an existing contact** (ADR 0860). A submission whose email matched an existing contact linked the submitter's session to that contact, so anyone who typed Bob's email could add their page views to Bob's lead score. A submission now links its session only to a contact it created. A match to an existing contact adds one "Submitted the form" note to that contact's timeline per form per day. A signed email-click link still re-identifies an existing contact.
+
+- **A new CMS section lost its selection a moment after it was added.** Its first save gives it a permanent id, and the editor now follows the section to it.
+- **Publish or Submit dropped unsaved edits in the CMS.** A workflow action ran on the last saved version and then replaced the editor with it, so edits made since the last Save were lost without a warning. The editor now saves first, and stops if the save fails.
+- **The CMS "Public" preview was blank in Chrome, and covered the editor.** A frame with no `src` finishes loading before React listens, so the preview never filled. Its hidden stage was also still shown on the Editor and Outline tabs, so the empty frame sat above the section editor. Both are fixed.
+- **Prompt templates revalidate to `304`.** `GET /prompts/{templateId}` compared `If-None-Match` with a bare string match, so a `W/`-weakened echo from a compressing front door, or a list, answered `200`. It now uses the shared matcher the discovery and run routes use, and the `304` carries the `ETag`.
+
+- **Blog posts are articles to crawlers** (ADR 0813). The prerendered post now has its title as `<h1>` and `Article` JSON-LD with `datePublished`. The public page read carries `kind` and `publishedAt` for posts.
+
+- **Host events are v2-conformant on the wire** (ADR 0792). A major-2 webhook subscriber now receives `openwop-app.<feature>.<entity>-<verb>` (for example `openwop-app.crm.contact-created`) in place of `host.<feature>.<entity>.<verb>`, in the body `type`, both event-type headers and the `hostext:` run marker. Major-1 subscribers are unchanged. A subscription or host-event binding may use either spelling. The run event `host.webhook.response` now reads on major 2 as `openwop-app.webhook-response` (it returned `500`).
+
+- **Upgrading no longer hangs at boot on the ADR 0789 seeded-workflow cleanup.**
+  App migration 22 retracted stale seeded-workflow listings inside startup, and
+  on a large install it outlasted the platform's startup probe, so the new
+  revision never became ready. Migration 22 is now a no-op marker. The cleanup
+  runs in the background once the server is listening, resumes where it stopped
+  after a restart, and records `app_bg_job:internal-seed-retract` = `done` when
+  it finishes. It also scans the scheduler once rather than once per row.
+
+- **Builder: on a node with several input or output ports, each connection handle now sits beside its own port label** (it drifted up to a row away, which could wire an edge into the wrong input field). Single-port nodes are unchanged.
+
+### Security
+
+- **Per-IP rate limits could be bypassed by sending `X-Forwarded-For`** (ADR 0851, #4516). The limiter keyed on the leftmost entry, which the client writes, so a new header value per request got a new budget. The client address is now read from the right, skipping known proxy hops, at every place the app uses it: rate limits, SSE stream caps, break-glass login, analytics visitor hashing, and the e-signature audit record, which had recorded the front end's address instead of the signer's. **Upgrading:** if a load balancer or CDN with a public address sits in front of the backend (other than Google's front end), set `OPENWOP_TRUSTED_PROXY_CIDRS` to its ranges, or all users will share one rate-limit bucket.
+
+- **Organizations: a sub-org is no longer a door to workspace authority, and removal takes down what the member delegated** (ADR 0815).
+  - In a shared workspace, workspace-wide authority now comes from the member's workspace (root) membership only. A role in a sub-org is authority inside that sub-org.
+  - Creating an org in a tenant shared by several people is owner-tier. Before this, any signed-in member could create a sub-org, become its owner, and manage the workspace.
+  - Owner rows are judged per person: a group-derived owner, or an owner reached through a duplicate row, counts as an owner.
+  - A member's identity can no longer be re-pointed in place.
+  - Removing or demoting an admin cancels the invites they sent. Leaving a workspace pauses the schedules that ran as that person; resuming one re-owns it.
+  - New host events: `host.orgs.member.added`, `host.orgs.member.roles-changed` and `host.orgs.member.removed`.
+
+  **Operator action (SAML deployments):** every SAML user signs into ONE shared tenant (`OPENWOP_SAML_TENANT`, default `default`). The first org created there is still the bootstrap. After that, a user can create orgs only if they are an `owner` of an existing org in that tenant. Grant it from Organizations → Members ("Transfer ownership" or the `owner` role), or add the user to a group that carries `owner`.
+
+  OIDC sign-in, the anonymous demo and personal workspaces are unaffected: each user has their own tenant there. No migration and no new env var.
+
+
+### Changed
+- **Pair Canvas is on by default** (ADR 0773 G-10e). The builder's AI pairing (ghost suggestions you keep or drop) replaces the Create-with-AI drawer, which is removed. Turn the `builder-pair` toggle off to hide AI pairing in the builder.
+- **The managed free tier's default daily allowance is 150,000 tokens per member** (was 50,000, smaller than one Pair Canvas first draft). It is the free portion spent before plan credits and paid balance (ADR 0821), so operators who sell AI credits may want it lower. An explicit `OPENWOP_MANAGED_DAILY_TOKEN_CAP` still wins. On a login-free public demo, also set `OPENWOP_MANAGED_GLOBAL_DAILY_TOKEN_CAP`.
+
+- **Edit sections right on the page** (ADR 0828). The CMS editor has Edit, Preview and Page tabs. On Edit, point at a section for its toolbar, click Edit to open it in place, drag its handle (or use the keyboard) to move it, and use "+" between sections to add one there. Page settings, History and experiments live on the Page tab. The side panels are gone.
+- **A calmer CMS header** (ADR 0828). Publish (or Approve, for a page in review) is the one primary button, last in the row; "Check accessibility" and the assistant links move under More, and the in-place editor shows one card instead of two.
+- **The CMS page editor is one screen** (ADR 0828). The section list, the live page and a settings panel sit side by side; selecting a section anywhere selects it everywhere. Drafts save themselves; a published page still saves only when you press Save. The Public, Outline and Editor views are gone.
+- **Edit a page's address, search description and social image in the CMS** (ADR 0828). They sit on the editor's Page tab and save with the page. A published page's old address keeps redirecting.
+- **Drag sections to reorder them, and undo** (ADR 0828). In the CMS section list, drag a section by its handle (or use the keyboard). Undo and Redo, or ⌘Z and ⇧⌘Z, step back and forward through your edits.
+- **A visual section picker in the CMS** (ADR 0828). "Add section" shows every section type with a sketch of its layout and a line on what it is for. Filter by category or search; your shared sections are there too.
+- **A checklist before you publish** (ADR 0828). Publish, Approve and Submit first show what still blocks the page (an empty title, a to-do left in the text), what is worth fixing (no author, description or social image, accessibility issues, untranslated sections) and what passed. "Show me" takes you to the spot.
+- **Take single sections from History** (ADR 0828). Compare shows a past version, or a seeded update, beside your draft section by section; "Use this version" copies just that section into your draft, and Undo takes it back.
+- **Rewrite a section with AI** (ADR 0828). On the CMS Section tab: Improve, Shorten, Expand, change the tone, fix spelling, or say what you want. You see the proposal beside the current text and apply it or discard it; links and images are never changed, and Undo takes it back.
+- **Workflow-chain packs must pin every node reference exactly** (ADR 0766,
+  RFC 0177 §E.1). The loader now REFUSES a chain whose node `typeId` (or
+  compensation `nodeTypeId`) carries no version or a range. Every in-tree chain
+  is pinned. `/readiness` reports refusals under `checks.chainPacks`.
+- **Pack manifests are v2** (ADR 0767): `kind`, `engines` admitting major 2, an
+  honest spec `category` with the palette group in `x-paletteCategory`, and node
+  inputs as real schema files. Palette groups are unchanged except 62 nodes that
+  previously fell to a default group.
+- The template pre-flight and "Use template" name a node that is installed at a
+  version other than the one the template pinned (`pinMismatches`), separately
+  from a node that is not installed.
+
+- **Schedules fire once, fenced in the job row, not a pruned claim** (ADR 0787).
+  After winning a slot, the daemon re-reads the job and advances it by
+  compare-and-swap, and only while the job is still enabled, still bound and
+  still due at that exact slot. Consequences:
+  - a pass that stalled past the claim prune fires nothing;
+  - so does a job disabled, deleted or erased mid-pass;
+  - each fire gets a deterministic run id per (tenant, job, slot), so a
+    re-fired slot collapses to one run.
+  Every job write is now a compare-and-swap, so a daemon write can no longer
+  resurrect a deleted job or undo a disable or an erasure.
+- **The scheduler door requires `workspace:write`** to create, edit, run or
+  delete a schedule in a shared workspace. Viewers get `403`.
+  - PATCH `metadata` merges, and can never set `actingUserId`.
+  - Changing a job's `workflowId` makes it act as the person who changed it.
+  - A feature-managed job cannot be retargeted there (`409`).
+  - An erased job cannot be re-enabled (`409`).
+- **Run now fires exactly what the schedule fires**: the job's inputs, its
+  credentials and actor, and its feature gate. It never moves the next
+  scheduled fire. When no run starts, the response carries `skipped: <reason>`.
+- **`capabilities.scheduling.maxFutureHorizon` is now `P366D`** (was `P30D`),
+  and the host honours it:
+  - yearly, quarterly and 31st-of-month cadences fire;
+  - an enabled schedule with an unparseable cron, an unknown time zone or no
+    fire inside the horizon is refused with `400` (it used to be stored and
+    never fire, or throw a `500`);
+  - a cadence with no further slot records `lastSkipReason: 'no-next-fire'`.
+- **Erasing a user also disables their schedules that carry their legacy
+  `oidc:` principal.** This applies only in the user's home tenant, only when the
+  principal comes from their own User row, and never when another User row there
+  claims the same principal.
+- **Schedules the old 30-day search stranded come back to life.** For example, a
+  monthly `0 9 3 * *` whose next fire had been deleted. The daemon recomputes
+  their next fire.
+- `/readiness` for KickTodo lists `schedulerFleet`: every instance running the
+  fenced daemon, with its Cloud Run revision and commit.
+
 ## [0.2.0] — 2026-09-27
 
 The first versioned release since the inaugural `v0.1.0` (2026-06-30): three months

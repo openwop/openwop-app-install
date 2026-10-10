@@ -67,7 +67,7 @@
 import { expect, type APIRequestContext } from '@playwright/test';
 
 /** Host-extension API root, proxied by the dev server to the backend. */
-export const API = '/api/v1/host/openwop-app';
+export const API = '/api/host/openwop-app';
 
 interface LoginResponse { user: { userId: string } }
 

@@ -68,7 +68,7 @@ interface Entry {
 }
 
 const listAgents = async (): Promise<{ agents: Entry[]; total: number }> =>
-  (await (await fetch(`${BASE}/v1/agents`, { headers: H })).json()) as { agents: Entry[]; total: number };
+  (await (await fetch(`${BASE}/agents`, { headers: H })).json()) as { agents: Entry[]; total: number };
 
 beforeAll(async () => {
   setEnv('OPENWOP_STORAGE_DSN', 'memory://');
@@ -148,8 +148,8 @@ describe('RFC 0080 §C — the degraded STAMP, on the tier that genuinely lacks 
     // future divergence — an alias "optimized" to its own projection would be a
     // silent satisfied-looking entry on a surface a real client uses.
     const paths = [
-      `/v1/agents/${encodeURIComponent(LONG_TERM_AGENT)}`,
-      `/v1/host/openwop-app/agents/${encodeURIComponent(LONG_TERM_AGENT)}`,
+      `/agents/${encodeURIComponent(LONG_TERM_AGENT)}`,
+      `/host/openwop-app/agents/${encodeURIComponent(LONG_TERM_AGENT)}`,
     ];
     for (const p of paths) {
       const one = (await (await fetch(`${BASE}${p}`, { headers: H })).json()) as Entry;
@@ -158,7 +158,7 @@ describe('RFC 0080 §C — the degraded STAMP, on the tier that genuinely lacks 
     }
     // ...and the LIST form of the alias, which goes through `userRecordToEntry`
     // for read-through rows as well.
-    const aliasList = (await (await fetch(`${BASE}/v1/host/openwop-app/agents`, { headers: H })).json()) as { agents: Entry[] };
+    const aliasList = (await (await fetch(`${BASE}/host/openwop-app/agents`, { headers: H })).json()) as { agents: Entry[] };
     const fromAlias = aliasList.agents.find((e) => e.agentId === LONG_TERM_AGENT);
     expect(fromAlias?.degradedMemoryDimensions).toEqual(['long-term-durability']);
   });
@@ -170,7 +170,7 @@ describe('RFC 0080 §C — the READ-THROUGH lane is projected too', () => {
     // the registry row — exactly the cold-instance state `listVisibleAgents`
     // read-through exists for. Without the projection in `userRecordToEntry`,
     // this agent would come back looking fully satisfied.
-    const created = await fetch(`${BASE}/v1/host/openwop-app/agents`, {
+    const created = await fetch(`${BASE}/host/openwop-app/agents`, {
       method: 'POST',
       headers: H,
       body: JSON.stringify({
@@ -227,7 +227,7 @@ describe('RFC 0080 §C — the iff-contract over the WHOLE inventory (the corpus
     const validate = ajv.compile(schema);
     const body = await listAgents();
     if (!validate(body)) {
-      throw new Error(`GET /v1/agents violated agent-inventory-response.schema.json: ${ajv.errorsText(validate.errors)}`);
+      throw new Error(`GET /agents violated agent-inventory-response.schema.json: ${ajv.errorsText(validate.errors)}`);
     }
     // Non-vacuity: `additionalProperties:false` on the entry means the schema
     // really is constraining what we send. Prove the validator rejects something.
@@ -236,18 +236,20 @@ describe('RFC 0080 §C — the iff-contract over the WHOLE inventory (the corpus
 });
 
 describe('RFC 0080 §A/§B — the advertisement the projection is bound to', () => {
-  it('/.well-known/openwop advertises memory.supported true with writable OMITTED', async () => {
-    const doc = (await (await fetch(`${BASE}/.well-known/openwop`, { headers: H })).json()) as {
-      capabilities: { memory?: Record<string, unknown>; agents?: { memoryBackends?: unknown } };
+  it('/.well-known/openwop advertises the memory family with writable OMITTED', async () => {
+    // ADR 0812 P3c-0 — v2 spelling: the record sits at the closed v2 root, and its
+    // PRESENCE is the claim (`capabilities.md` §2), replacing v1's `supported: true`.
+    const doc = (await (await fetch(`${BASE}/.well-known/openwop`, { headers: { ...H, 'OpenWOP-Version': '2' } })).json()) as {
+      memory?: Record<string, unknown>; agents?: { memoryBackends?: unknown };
     };
-    const mem = doc.capabilities.memory;
-    expect(mem?.supported).toBe(true);
+    const mem = doc.memory;
+    expect(mem?.status, 'the v2 memory family record is present').toBeTruthy();
     // Absent ⇒ writable (RFC 0080 UQ1). Setting it false would be untrue here AND
     // would withhold the derived `openwop-memory` profile.
     expect(Object.hasOwn(mem!, 'writable'), 'writable MUST be omitted, not false').toBe(false);
     // The tier under test has no durable memory, so the backend claim is absent —
     // which is precisely why the agents above are degraded. Advert and projection
     // are one derivation; this asserts they agree on the wire.
-    expect(doc.capabilities.agents?.memoryBackends).toBeUndefined();
+    expect(doc.agents?.memoryBackends).toBeUndefined();
   });
 });

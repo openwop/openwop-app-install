@@ -3,8 +3,8 @@
 Compresses raw audit logs into structured executive summaries. Highlights anomalies. Tracks pattern shifts over time.
 
 | Pack name | `core.openwop.agents.audit-summarizer` |
-| Version | `1.0.0` |
-| Engine | OpenWOP `>=1.1.0 <2.0.0` |
+| Version | `1.0.1` |
+| Engine | OpenWOP `>=1.1.0 <3.0.0` |
 | Agents | 1 |
 | Required host capabilities | `aiProviders`, `host.agentRuntime`, `openwop.agents.memoryBackends ≥ longTerm` |
 | License | Apache-2.0 |

@@ -1,6 +1,6 @@
 /**
  * RFC 0112 — Compact tool projection. Reference-host conformance for
- * `GET /v1/tools?view=compact` + `GET /v1/tools/{toolId}?view=compact` and the
+ * `GET /tools?view=compact` + `GET /tools/{toolId}?view=compact` and the
  * `toolCatalog.compactView` advert. Rides the same MCP-catalog harness as
  * notebooks-mcp.test.ts (the notebook tools are the projected `mcp` source).
  */
@@ -51,9 +51,9 @@ function client(): Client {
 /** Authenticated owner with an org (mirrors notebooks-mcp.test.ts ownerWithOrg). */
 async function owner(who: string): Promise<Client> {
   const c = client();
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `${who}-${Date.now()}-${n++}@acme.test` });
+  const r = await c.post('/host/openwop-app/test/login', { email: `${who}-${Date.now()}-${n++}@acme.test` });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   return c;
 }
 
@@ -61,17 +61,17 @@ const DROPPED = ['auth', 'egress', 'approval', 'replayPolicy', 'outputSchema', '
 
 describe('RFC 0112 — compactView advert', () => {
   it('advertises toolCatalog.compactView when enabled', async () => {
-    const c = client();
-    const disc = (await c.get('/.well-known/openwop')).body as { capabilities: { toolCatalog?: { compactView?: boolean; sources?: string[] } } };
-    expect(disc.capabilities.toolCatalog?.compactView).toBe(true);
-    expect(disc.capabilities.toolCatalog?.sources).toContain('mcp');
+    // ADR 0812 — the v2 root's `toolCatalog` family (ADR 0745 D3), at the document root.
+    const disc = await (await fetch(`${BASE}/.well-known/openwop`, { headers: { 'OpenWOP-Version': '2' } })).json() as { toolCatalog?: { compactView?: boolean; sources?: string[] } };
+    expect(disc.toolCatalog?.compactView).toBe(true);
+    expect(disc.toolCatalog?.sources).toContain('mcp');
   });
 });
 
-describe('RFC 0112 — GET /v1/tools?view=compact', () => {
+describe('RFC 0112 — GET /tools?view=compact', () => {
   it('returns { tools: CompactToolDescriptor[] } dropping non-compact fields; required fields present', async () => {
     const c = await owner('compact-list');
-    const res = await c.get('/v1/tools?view=compact');
+    const res = await c.get('/tools?view=compact');
     expect(res.status).toBe(200);
     expect(Array.isArray(res.body)).toBe(false);
     const tools = res.body.tools as Array<Record<string, unknown>>;
@@ -95,7 +95,7 @@ describe('RFC 0112 — GET /v1/tools?view=compact', () => {
     const schema = JSON.parse(readFileSync(join(process.cwd(), '..', '..', 'schemas', 'v2', 'compact-tool-descriptor.schema.json'), 'utf8')) as object;
     const validate = new Ajv2020({ allErrors: true, strict: false }).compile(schema);
     const c = await owner('cmp-schema');
-    const res = await c.get('/v1/tools?view=compact');
+    const res = await c.get('/tools?view=compact');
     expect(res.status).toBe(200);
     const tools = (res.body as { tools: Array<Record<string, unknown>> }).tools;
     const withSchema = tools.filter((d) => d.inputSchema !== undefined);
@@ -107,19 +107,19 @@ describe('RFC 0112 — GET /v1/tools?view=compact', () => {
 
   it('compact toolId set EQUALS the standard view for the same principal (RFC 0074)', async () => {
     const c = await owner('compact-parity');
-    const std = (await c.get('/v1/tools')).body as Array<{ toolId: string }>;
-    const cmp = (await c.get('/v1/tools?view=compact')).body.tools as Array<{ toolId: string }>;
+    const std = (await c.get('/tools')).body as Array<{ toolId: string }>;
+    const cmp = (await c.get('/tools?view=compact')).body.tools as Array<{ toolId: string }>;
     expect(new Set(cmp.map((d) => d.toolId))).toEqual(new Set(std.map((d) => d.toolId)));
   });
 
   it('serves a single compact descriptor by id (bare, not enveloped) and 404s unknown', async () => {
     const c = await owner('compact-byid');
-    const one = await c.get('/v1/tools/mcp:notebook-search?view=compact');
+    const one = await c.get('/tools/mcp:notebook-search?view=compact');
     expect(one.status).toBe(200);
     expect(one.body.toolId).toBe('mcp:notebook-search');
     expect(one.body.tools).toBeUndefined(); // bare, not enveloped
     for (const k of DROPPED) expect(one.body[k]).toBeUndefined();
-    const unknown = await c.get('/v1/tools/mcp:does-not-exist?view=compact');
+    const unknown = await c.get('/tools/mcp:does-not-exist?view=compact');
     expect(unknown.status).toBe(404);
   });
 });

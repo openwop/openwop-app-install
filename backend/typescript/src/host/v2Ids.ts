@@ -37,10 +37,16 @@ import { looksProjected, projectBoundId, unprojectBoundId } from './boundIdProje
 
 /** `ids.schema.json#/$defs/opaque` — a host-minted segment: no `@`, no `/`, no whitespace. */
 export const V2_OPAQUE_ID = /^[A-Za-z0-9._~-]{16,128}$/;
-/** `ids.schema.json#/$defs/tenantId`. */
-export const V2_TENANT_ID = /^[A-Za-z0-9._~-]{1,128}$/;
+/**
+ * `ids.schema.json#/$defs/tenantId` — and the tenant segment of every bound-id
+ * kind, which RFC 0184 (suite 2.2.0) widened to admit the `anon:` prefix.
+ * ADR 0760 (revisiting ADR 0704): this host binds anonymous runs, so the guard
+ * is the corpus segment exactly — `anon-tenant-bound-id-tripwire` derives it
+ * from the vendored schema and reds on any drift.
+ */
+export const V2_TENANT_ID = /^(anon:)?[A-Za-z0-9._~-]{1,128}$/;
 /** `ids.schema.json#/$defs/runId` — the tenant-bound composite. */
-export const V2_TENANT_BOUND_ID = /^[A-Za-z0-9._~-]{1,128}\/[A-Za-z0-9._~-]{16,128}$/;
+export const V2_TENANT_BOUND_ID = /^(anon:)?[A-Za-z0-9._~-]{1,128}\/[A-Za-z0-9._~-]{16,128}$/;
 /**
  * `spec/v2/core/idempotency.md` §"Layer 1" (RFC 0170 §D.3) — the key grammar.
  * 22 characters is 128 bits in base64url; a UUIDv4 in canonical form is 36.
@@ -58,29 +64,99 @@ export const V2_IDEMPOTENCY_KEY = /^[A-Za-z0-9._~-]{22,128}$/;
 export const toWireBoundId = toWireRunId;
 export const fromWireBoundId = fromWireRunId;
 /**
- * ADR 0726 — this host's tenant ids are NOT all inside the corpus grammar:
- * every personal workspace is `user:<sha256[:32]>` (`middleware/auth.ts`), and
- * `identity.md` §5 admits no `:`. The first version of `toWireRunId` returned
- * the id BARE for such a tenant — a silent fail-open that put every bound kind
- * on the major-2 wire unbound for every signed-in user's default workspace
- * (measured 2026-09-17: 50 of 128 wire violations). The wire form of the tenant
- * SEGMENT is now the RFC 0184 byte-escape of the storage form (`user~3A…`),
- * which IS inside the grammar (`~` is admitted), injective, and reversible;
- * `fromWireTenant` decodes it. Host-internal: §5 says `tenantId` is host-minted
- * and opaque, so the wire spelling being a projection of the storage spelling
- * is within the host's remit and claims nothing on the wire.
+ * ADR 0814 — the WIRE tenantId: a deterministic, injective, reversible map from
+ * this host's internal tenant key to a grammar-clean value.
+ *
+ * The keys this host mints are not all inside the corpus grammar:
+ * - personal: `user:<sha256[:32]>`
+ * - shared workspace: `ws:<uuid>`
+ * - test-login fixtures: `org:<slug>`
+ * - anonymous: `anon:<sid>`
+ *
+ * ADR 0726 made them wire-legal with RFC 0184's `~` byte-escape (`user~3A…`),
+ * and that MINTED `~` into every tenant-bound id and tenantId body field.
+ * `identity.md` §5: "a host MUST NOT mint a tenant-bound id containing `~`"
+ * (`~` is the PATH projection, applied once where an id leaves). The corpus
+ * steward confirmed (2026-10-04) that the wire tenantId need not equal the stored
+ * key: it is host-minted, and §5 constrains only its grammar and handling.
+ *
+ * The map is IDEMPOTENT. A value already clean passes through unchanged, so
+ * re-projecting a wire value (`projectV2RunIds` rewrites `tenant`/`tenantId`
+ * keys at any depth) cannot double-encode it. Injectivity therefore rests on one
+ * invariant enforced where keys are minted or configured
+ * (`wireTenantViolation`): no internal key starts with a reserved prefix
+ * (`u-`/`w-`/`o-`/`x-`), and none maps past 128 characters.
  */
+const WIRE_CLEAN = /^[A-Za-z0-9._-]{1,128}$/;
+const RESERVED_WIRE_PREFIX = /^[uwox]-/;
+const KEY_KINDS: ReadonlyArray<readonly [internal: string, wire: string]> = [
+  ['user:', 'u-'],
+  ['ws:', 'w-'],
+  ['org:', 'o-'],
+];
+
 export function toWireTenant(tenant: string): string {
-  // ADR 0704 — an `anon:` tenant is deliberately NOT bound (its runs stay bare
-  // on the wire; `anon-tenant-bound-id-tripwire` pins that decision). Leaving it
-  // unprojected keeps `toWireRunId`'s grammar gate refusing it exactly as before.
-  if (tenant.startsWith('anon:')) return tenant;
-  return V2_TENANT_ID.test(tenant) ? tenant : projectBoundId(tenant);
+  // ADR 0760 — `anon:<sid>` is inside the corpus grammar literally (RFC 0184
+  // admits the prefix). Its sid is base64url (`cookieSession.ts`), so it is
+  // clean. Only a sid outside the class would fall through to the rows below.
+  if (tenant.startsWith('anon:') && V2_TENANT_ID.test(tenant) && !tenant.includes('~')) return tenant;
+  if (WIRE_CLEAN.test(tenant)) return tenant;
+  for (const [internal, wire] of KEY_KINDS) {
+    if (tenant.startsWith(internal)) {
+      const mapped = wire + tenant.slice(internal.length);
+      if (WIRE_CLEAN.test(mapped)) return mapped;
+    }
+  }
+  const hex = `x-${Buffer.from(tenant, 'utf8').toString('hex')}`;
+  // Over 128 characters is unreachable for a key that passed `wireTenantViolation`.
+  // Returned unchanged, it fails the grammar in `toWireRunId`, which leaves the
+  // id unbound rather than inventing a spelling.
+  return WIRE_CLEAN.test(hex) ? hex : tenant;
 }
-/** Inverse of `toWireTenant`; a raw (unprojected) spelling passes through. */
+
+/**
+ * Inverse of `toWireTenant`, plus the spellings this host already minted
+ * (`identity.md` §5: "ids already minted MUST still resolve"):
+ * - **ADR 0726's escape** (`user~3A<hex>`) unescapes STRAIGHT to the internal
+ *   key, with no prefix dispatch afterwards, so `u~2Dabc` can never become
+ *   `user:abc`;
+ * - **a new-form value** (`u-`/`w-`/`o-`/`x-`) is decoded only when it is the
+ *   CANONICAL spelling of what it decodes to, so one tenant has one new-form
+ *   spelling (an uppercase `X-` or `x-<hex(user:h)>` is not an alias);
+ * - **anything else**, including the raw internal key (`user:<hex>`, which the
+ *   SPA binds with), passes through verbatim, as it did under ADR 0726.
+ */
 export function fromWireTenant(segment: string): string {
-  if (!looksProjected(segment)) return segment;
-  try { return unprojectBoundId(segment); } catch { return segment; }
+  if (looksProjected(segment)) {
+    try { return unprojectBoundId(segment); } catch { return segment; }
+  }
+  if (!RESERVED_WIRE_PREFIX.test(segment)) return segment;
+  let decoded: string | null = null;
+  for (const [internal, wire] of KEY_KINDS) {
+    if (segment.startsWith(wire)) { decoded = internal + segment.slice(wire.length); break; }
+  }
+  if (decoded === null && /^x-(?:[0-9a-f]{2})+$/.test(segment)) {
+    decoded = Buffer.from(segment.slice(2), 'hex').toString('utf8');
+  }
+  return decoded !== null && toWireTenant(decoded) === segment ? decoded : segment;
+}
+
+/**
+ * Why `key` cannot be an internal tenant key, or `null`. Checked where an
+ * operator CONFIGURES a tenant (`OPENWOP_API_KEYS`). The keys this host mints
+ * itself (`user:<hash>`, `ws:<uuid>`, `anon:<sid>`) satisfy it by construction,
+ * and `adr0814-wire-tenant.test.ts` pins that.
+ */
+export function wireTenantViolation(key: string): string | null {
+  if (key === '*') return null;
+  if (RESERVED_WIRE_PREFIX.test(key)) {
+    return `tenant '${key}' starts with a prefix reserved for the wire tenantId (u-/w-/o-/x-, ADR 0814)`;
+  }
+  const wire = toWireTenant(key);
+  if (!V2_TENANT_ID.test(wire) || (wire.includes('~'))) {
+    return `tenant '${key}' has no grammar-clean wire tenantId (over 128 characters once mapped, ADR 0814)`;
+  }
+  return null;
 }
 export function toWireRunId(runId: string, tenant: string): string {
   if (runId.includes('/')) return runId;

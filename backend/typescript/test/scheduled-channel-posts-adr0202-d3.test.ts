@@ -17,10 +17,11 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { getAgentRegistry } from '../src/executor/agentRegistry.js';
 import { getJob } from '../src/host/schedulingService.js';
+import { createOrg } from '../src/host/accessControlService.js';
 
-const CH = '/v1/host/openwop-app/channels';
-const schedCh = (id: string, suffix = ''): string => `/v1/host/openwop-app/scheduled-chats/channels/${encodeURIComponent(id)}/chats${suffix}`;
-const schedOrg = (orgId: string, suffix = ''): string => `/v1/host/openwop-app/scheduled-chats/orgs/${encodeURIComponent(orgId)}/chats${suffix}`;
+const CH = '/host/openwop-app/channels';
+const schedCh = (id: string, suffix = ''): string => `/host/openwop-app/scheduled-chats/channels/${encodeURIComponent(id)}/chats${suffix}`;
+const schedOrg = (orgId: string, suffix = ''): string => `/host/openwop-app/scheduled-chats/orgs/${encodeURIComponent(orgId)}/chats${suffix}`;
 
 let BASE: string;
 let server: http.Server;
@@ -55,7 +56,7 @@ type Client = ReturnType<typeof client>;
 const TENANT = `t-d3-${Date.now()}`;
 async function login(name: string): Promise<{ c: Client; userId: string }> {
   const c = client();
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `d3-${name}-${Date.now()}-${n++}@acme.test`, displayName: `${name} P`, tenantId: TENANT });
+  const r = await c.post('/host/openwop-app/test/login', { email: `d3-${name}-${Date.now()}-${n++}@acme.test`, displayName: `${name} P`, tenantId: TENANT });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return { c, userId: r.body.user.userId as string };
 }
@@ -157,8 +158,11 @@ describe('ADR 0202 D3 — channel-scoped scheduled posts', () => {
 
 describe('ADR 0202 D6 — org create-path hardening', () => {
   async function orgOwner(): Promise<{ c: Client; orgId: string }> {
-    const { c } = await login('orgowner');
-    const orgId = (await c.post('/v1/host/openwop-app/orgs', { name: 'Ops' })).body.orgId as string;
+    const { c, userId } = await login('orgowner');
+    // ADR 0815 D1a — creating an org inside a multi-member tenant is owner-tier
+    // over HTTP; this suite is about the schedule door, so the caller's org is
+    // minted directly with them as its owner (the shape `POST /orgs` produces).
+    const orgId = (await createOrg({ tenantId: TENANT, createdBy: userId, name: 'Ops', ownerSubject: userId })).orgId;
     return { c, orgId };
   }
 

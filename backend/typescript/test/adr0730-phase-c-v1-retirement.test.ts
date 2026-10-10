@@ -41,20 +41,15 @@ describe('ADR 0730 C.1 — debug-bundle has a host-extension twin', () => {
   });
 
   it('the TWIN path serves the bundle (not merely registered — this is the served response)', async () => {
-    const r = await get(`/v1/host/openwop-app/runs/${encodeURIComponent(runId)}/debug-bundle`);
+    const r = await get(`/host/openwop-app/runs/${encodeURIComponent(runId)}/debug-bundle`);
     expect(r.status, r.text.slice(0, 200)).toBe(200);
     expect(r.json.runId).toBe(runId);
     expect(Array.isArray(r.json.events), 'the bundle carries the event log').toBe(true);
     expect(r.json.metrics?.eventCount).toBeGreaterThan(0);
   });
 
-  it('the v1 path still serves it identically — the twin ADDS an address, it does not move one', async () => {
-    const twin = await get(`/v1/host/openwop-app/runs/${encodeURIComponent(runId)}/debug-bundle`);
-    const v1 = await get(`/v1/runs/${encodeURIComponent(runId)}/debug-bundle`);
-    expect(v1.status).toBe(200);
-    expect(v1.json.runId).toBe(twin.json.runId);
-    expect(v1.json.events.length).toBe(twin.json.events.length);
-  });
+  // ADR 0812 P3c-0: "the v1 path still serves it identically" was deleted with
+  // major 1 — `/v1/runs/{id}/debug-bundle` is the retired path space.
 
   it('the bare-root major-2 path also answers — the manifest is a FLOOR, not a ceiling — and the SPA still uses the twin on purpose', async () => {
     // MEASURED, and it corrected my own expectation: I first asserted 404 here.
@@ -63,7 +58,7 @@ describe('ADR 0730 C.1 — debug-bundle has a host-extension twin', () => {
     // forbids serving MORE, and this host's major-2 routing is a rewrite onto
     // the v1 handlers (`req.url = '/v1' + req.url`), so every v1 path answers at
     // the bare root. That is permitted, so this pins the real behaviour.
-    const r = await get(`/runs/${encodeURIComponent(runId)}/debug-bundle`, { 'OpenWOP-Version': '2' });
+    const r = await get(`/runs/${encodeURIComponent(`default/${runId}`)}/debug-bundle`, { 'OpenWOP-Version': '2' });
     expect(r.status).toBe(200);
     // Why the SPA uses the TWIN rather than this: the bare-root spelling is an
     // artifact of the v1 rewrite and dies with it. The `/host/openwop-app/…`
@@ -75,7 +70,7 @@ describe('ADR 0730 C.1 — debug-bundle has a host-extension twin', () => {
     // addresses, two honest spellings. This is what the SPA's bare-id fetch on
     // the twin relies on.
     expect(r.json.runId, 'major-2 protocol path ⇒ tenant-bound').toBe(`default/${runId}`);
-    const twin = await get(`/v1/host/openwop-app/runs/${encodeURIComponent(runId)}/debug-bundle`);
+    const twin = await get(`/host/openwop-app/runs/${encodeURIComponent(runId)}/debug-bundle`);
     expect(twin.json.runId, 'host-extension twin ⇒ bare').toBe(runId);
   });
 });
@@ -99,10 +94,8 @@ describe('ADR 0730 C.2 — hostSurfaces travels in the v2 extensions hatch', () 
     expect(Object.keys(r.json?.extensions ?? {}).every((k) => /^[a-z][a-z0-9]*(-[a-z0-9]+)*\.[a-z][a-z0-9]*(-[a-z0-9]+)*$/.test(k)), 'every extensions key matches the corpus pattern').toBe(true);
   });
 
-  it('the v1 read keeps serving `capabilities.hostSurfaces` — the v1 wire does not move mid-overlap', async () => {
-    const r = await get('/.well-known/openwop');
-    expect(Array.isArray(r.json?.capabilities?.hostSurfaces)).toBe(true);
-  });
+  // ADR 0812 P3c-0: the "v1 read keeps serving capabilities.hostSurfaces" leg
+  // was deleted with the v1 discovery document.
 });
 
 describe('ADR 0730 C.3a — the families the SPA reads are advertised on the v2 root', () => {
@@ -145,14 +138,16 @@ describe('ADR 0730 C.3a — the families the SPA reads are advertised on the v2 
   it('the per-provider subscription map rides an EXTENSION, because the corpus family types authModes as a flat vocabulary', async () => {
     const r = await get('/.well-known/openwop', { 'OpenWOP-Version': '2' });
     expect(Array.isArray(r.json?.aiProviders?.authModes), 'the family carries the vocabulary').toBe(true);
+    // host-services.md §aiProviders: a client MUST ignore an unknown mode, so a
+    // mode outside the named vocabulary is an advert no client can read.
+    const SPEC_MODES = ['apiKey', 'oauth-pkce', 'oauth-device', 'none', 'subscription'];
+    for (const m of r.json.aiProviders.authModes) expect(SPEC_MODES, `authModes '${m}'`).toContain(m);
+    expect(r.json.aiProviders.authModes).toContain('apiKey');
     const rec = r.json?.extensions?.['openwop-app.ai-providers'];
     expect(rec, 'the host-scoped record carries the per-provider detail').toBeDefined();
     expect(Array.isArray(rec.subscriptionProviders)).toBe(true);
   });
 
-  it('the v1 root is UNMOVED — the overlap contract is that v1 readers see no change', async () => {
-    const r = await get('/.well-known/openwop');
-    expect(Array.isArray(r.json?.auth?.profiles), 'v1 keeps profiles[]').toBe(true);
-    expect(r.json?.aiProviders?.authModes, 'v1 keeps the per-provider map').toBeDefined();
-  });
+  // ADR 0812 P3c-0: "the v1 root is UNMOVED" was deleted with the v1 discovery
+  // document; the v2-root legs above remain.
 });

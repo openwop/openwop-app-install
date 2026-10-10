@@ -285,7 +285,8 @@ console.error(
   + '\n  SERVES the vendored copy here — not registry-verified, outside what STRICT_REGISTRY'
   + '\n  promises — and the pin is inert (ADR 0713). For each: publish the version'
   + '\n  to packs.openwop.dev, then advance the pin with an incremental'
-  + '\n  `gcloud run services update --update-env-vars` (never --set-env-vars).',
+  + '\n  `scripts/update-env.sh KEY=VALUE` (a bare `services update` lands on a 0%-traffic'
+  + '\n  revision because traffic is pinned by name — CE-16; never --set-env-vars).',
 );
 if (newDrift.length === 0 && staleWaivers.length === 0) {
   console.error(`\n  KNOWN drift only (${unshipped.length} row(s) in scripts/pin-drift-known.json) — waivable with --allow-pin-drift.`);

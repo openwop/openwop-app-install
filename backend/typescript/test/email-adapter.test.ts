@@ -1,8 +1,17 @@
 /**
  * Email egress adapter via the Connections broker (ADR 0024 §4 Phase 3 / the
- * email-provider model). Proves ctx.email.send resolves the acting user's
- * api_key Connection, calls the provider's REST API (SendGrid) with the key,
- * maps the args, stamps provenance, and fail-closes gracefully.
+ * email-provider model; ADR 0193 Phase 1 idempotency ledger). Proves ctx.email.send
+ * resolves the acting user's api_key Connection, calls the provider's REST API
+ * (SendGrid / Postmark) with the key, maps the args, stamps provenance, dedups a
+ * replay on the idempotency key, and fail-closes gracefully.
+ *
+ * Sabotage-witnessed (w9 grade-tests): dropping the cc mapping, the SendGrid error
+ * detail, the provenance stamp, the unsupported-provider guard, the Postmark token
+ * header name, the ledger key (randomised / collapsed) or the
+ * OPENWOP_EMAIL_DEFAULT_PROVIDER read each turns a case here red.
+ * Double guard (recorded): skipping the `priorSend` read alone does NOT re-send — the
+ * `reserveSend` CAS re-reads the winner's accepted row — so the dedup is witnessed by
+ * breaking the KEY, not the read.
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -13,19 +22,21 @@ import type { Storage } from '../src/storage/storage.js';
 import { makeEmailAdapter } from '../src/host/emailAdapter.js';
 import { __resetConnectionsStore, createSecretConnection } from '../src/features/connections/connectionsService.js';
 
+let storage: Storage;
+beforeAll(async () => {
+  process.env.OPENWOP_STORAGE_DSN = 'memory://';
+  process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE = 'true';
+  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  storage = app.locals.storage;
+  await __resetConnectionsStore();
+});
+
 describe('Email egress adapter — SendGrid (ADR 0024 §4 Phase 3)', () => {
   let sg: http.Server;
-  let storage: Storage;
   let received: { auth?: string; body?: Record<string, unknown> };
   let status = 202;
 
   beforeAll(async () => {
-    process.env.OPENWOP_STORAGE_DSN = 'memory://';
-    process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE = 'true';
-    const app = await createApp({ port: 18946, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-    storage = app.locals.storage;
-    await __resetConnectionsStore();
-
     sg = http.createServer((req, res) => {
       let raw = '';
       req.on('data', (c) => (raw += c));
@@ -89,16 +100,9 @@ describe('Email egress adapter — SendGrid (ADR 0024 §4 Phase 3)', () => {
 
 describe('Email adapter — Postmark + idempotency ledger (ADR 0193 Phase 1)', () => {
   let pm: http.Server;
-  let storage: Storage;
   let calls: Array<{ token?: string; body: Record<string, unknown> }> = [];
 
   beforeAll(async () => {
-    process.env.OPENWOP_STORAGE_DSN = 'memory://';
-    process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE = 'true';
-    const app = await createApp({ port: 18947, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-    storage = app.locals.storage;
-    
-
     pm = http.createServer((req, res) => {
       let raw = '';
       req.on('data', (c) => (raw += c));
@@ -149,8 +153,10 @@ describe('Email adapter — Postmark + idempotency ledger (ADR 0193 Phase 1)', (
     process.env.OPENWOP_EMAIL_DEFAULT_PROVIDER = 'postmark';
     try {
       const out = await adapter().send({ from: 'a@x.com', to: 'b@y.com', subject: 'def', text: 't', idempotencyKey: 'k-default' });
-      expect(out.provider).toBe('postmark');
-      expect(out.sent).toBe(true);
+      expect(out).toEqual({ sent: true, provider: 'postmark', messageId: 'pm-msg-1' });
+      // The label alone is not the claim — the send must actually ride Postmark.
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.token).toBe('PM-TOKEN-1');
     } finally {
       delete process.env.OPENWOP_EMAIL_DEFAULT_PROVIDER;
     }

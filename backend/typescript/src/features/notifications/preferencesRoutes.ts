@@ -24,7 +24,8 @@ import type { NotificationPriority } from '../../types.js';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { OpenwopError } from '../../types.js';
 import { resolveCallerUser } from '../users/usersGuards.js';
-import { setNotificationMuteResolver } from '../../host/notificationPolicy.js';
+import { getUser } from '../users/usersService.js';
+import { setDevicePushSuppressionResolver, setNotificationMuteResolver } from '../../host/notificationPolicy.js';
 
 /** Well-known types the prefs UI surfaces; unknown emitted types fall back to
  *  defaults (not muted, desktop on). The canonical source is the
@@ -43,6 +44,9 @@ const KNOWN_TYPES = [
   // control: one toggle silences all agent-post pushes, so the opt-out isn't only
   // per-channel. Mirrored in the FE KNOWN_TYPES.
   'chat.channel_post',
+  // ADR 0859 D3 — the CMS editorial review notices, mutable like any other type.
+  'approval.content-review-requested',
+  'approval.content-review-decided',
 ] as const;
 
 const MAX = {
@@ -145,19 +149,47 @@ function isWithinQuietHours(qh: QuietHours, priority: NotificationPriority): boo
  *  the SAME prefs store the routes write, so a user's mute takes effect immediately.
  *  Honors globalMute + per-conversation mute (ADR 0192 D7) + per-type mute + quiet-hours
  *  (NOTIF-2, when a timezone is set). Idempotent. */
+/**
+ * The preferences that govern `userId` for a notice in `tenantId`. The routes key
+ * a signed-in person's prefs on their HOME tenant (`resolveCallerUser`), so a
+ * notice in a shared `ws:` workspace finds no `${ws}:${user}` row; it falls back to
+ * the person's home row (ADR 0816 D5 — without the fallback a member's mute had
+ * no effect in any shared workspace, on this lane or the channel-activity one).
+ */
+async function preferencesFor(tenantId: string, userId: string): Promise<NotificationPreferences | null> {
+  const direct = await prefs.get(`${tenantId}:${userId}`);
+  if (direct) return direct;
+  const user = await getUser(userId).catch(() => null);
+  if (!user || user.tenantId === tenantId) return null;
+  return prefs.get(`${user.tenantId}:${user.userId}`);
+}
+
 export function registerNotificationMutePolicy(): void {
   setNotificationMuteResolver(async (tenantId, userId, ctx) => {
-    const p = await prefs.get(`${tenantId}:${userId}`);
+    const p = await preferencesFor(tenantId, userId);
     if (!p) return false;
     if (p.globalMute) return true;
     if (ctx.conversationId && (p.mutedConversations ?? []).includes(ctx.conversationId)) return true;
     if (p.types.some((t) => t.type === ctx.type && t.muted)) return true;
     return isWithinQuietHours(p.quietHours, ctx.priority);
   });
+  // ADR 0816 D5 — the device-toast rule, identical to the in-tab toast's
+  // (`frontend/.../preferences.ts` shouldShowDesktop): everything the mute policy
+  // suppresses, plus a type whose `desktop` channel is off.
+  setDevicePushSuppressionResolver(async (tenantId, userId, ctx) => {
+    const p = await preferencesFor(tenantId, userId);
+    if (!p) return false;
+    if (p.globalMute) return true;
+    const t = p.types.find((x) => x.type === ctx.type);
+    if (t && (t.muted || !t.desktop)) return true;
+    // The in-tab toast lets ONLY `urgent` through quiet hours (the mute policy
+    // above also admits `high`); the device toast follows the toast rule.
+    return isWithinQuietHours(p.quietHours, ctx.priority === 'urgent' ? 'urgent' : 'normal');
+  });
 }
 
 export function registerNotificationPreferenceRoutes(app: Express): void {
-  const BASE = '/v1/host/openwop-app/notifications/preferences';
+  const BASE = '/host/openwop-app/notifications/preferences';
 
   app.get(BASE, async (req, res, next) => {
     try {

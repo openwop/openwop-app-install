@@ -84,6 +84,16 @@ describe('subjectLinkService (RFC 0159 §A)', () => {
       expect(await isLinkedSubjectDenied('tenant-b', 'shared-ext')).toBe(true);
     });
 
+    it("CE-15 — a scim:<userName> key never erases ANOTHER person's deny whose externalId equals that name", async () => {
+      // The leaver's opaque externalId happens to be the string `jsmith`; an unrelated
+      // SCIM user's userName is also `jsmith`. Erasing the second must not re-open
+      // SAML for the first.
+      await denyLinkedSubject('t', 'jsmith');
+      const report = await eraseSubjectLinkDeny('t', 'scim:jsmith');
+      expect(report.rowsTouched).toBe(0);
+      expect(await isLinkedSubjectDenied('t', 'jsmith')).toBe(true);
+    });
+
     it('a key from a different identity space matches nothing (harmless no-op)', async () => {
       await denyLinkedSubject('t', 'idp-op-8f3a');
       const report = await eraseSubjectLinkDeny('t', 'user:someone-else');

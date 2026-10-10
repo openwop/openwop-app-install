@@ -4,6 +4,13 @@
  * client collapsed every non-ok response to a bare `Error(message)`, so the
  * only way to say "full (max 12)" in the user's language was to sniff the
  * English prose. `status` / `code` / `details` ride on the error instead.
+ *
+ * `pinLimitOf` keys on BOTH the type and the status. The negative arms therefore
+ * carry a `maxPinned` they must still ignore (a non-409 with the field; a
+ * non-ProfilesApiError shaped exactly like a pin cap). Without it, deleting
+ * either guard changed nothing. Sabotage-witnessed (/grade-tests wave 3,
+ * `w3g3-pc-*`): dropping `code`/`details`/`status`, the ctx fallback message, the
+ * 409 gate or the `instanceof` gate each turns a named case red.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { ProfilesApiError, pinLimitOf, setAgentPinned, setChatAgentPinned } from '../profilesClient.js';
@@ -41,10 +48,12 @@ describe('ProfilesApiError — the typed failure', () => {
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(409, { error: 'conflict', message: 'x' })));
     expect(pinLimitOf(await setAgentPinned('r1', true).catch((e: unknown) => e))).toBeUndefined();
 
-    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(404, { error: 'not_found', message: 'Agent not found.', details: { rosterId: 'r1' } })));
+    // A non-409 is not a pin cap EVEN WHEN it carries the field — the status decides.
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(404, { error: 'not_found', message: 'Agent not found.', details: { rosterId: 'r1', maxPinned: 12 } })));
     const nf = await setAgentPinned('r1', true).catch((e: unknown) => e) as ProfilesApiError;
     expect(nf.status).toBe(404);
     expect(nf.code).toBe('not_found');
+    expect(nf.details?.maxPinned).toBe(12);
     expect(pinLimitOf(nf)).toBeUndefined();
 
     vi.stubGlobal('fetch', vi.fn(async () => new Response('<html>oops</html>', { status: 500 })));
@@ -55,5 +64,9 @@ describe('ProfilesApiError — the typed failure', () => {
     expect(server.message).toBe('setAgentPinned returned 500'); // the ctx fallback, unchanged
 
     expect(pinLimitOf(new Error('Pinned agents are full (max 12).'))).toBeUndefined(); // prose is not a contract
+    // Nor is SHAPE: another client's error carrying the same status + details is
+    // not this client's typed pin-cap failure.
+    const lookalike = Object.assign(new Error('Pinned agents are full (max 12).'), { status: 409, details: { maxPinned: 12 } });
+    expect(pinLimitOf(lookalike)).toBeUndefined();
   });
 });

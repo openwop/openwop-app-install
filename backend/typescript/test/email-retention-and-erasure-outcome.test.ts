@@ -3,8 +3,15 @@
  * REAL retention purgers, tenant-scoped) and EM-24 (`deleteSubjectSends` returns an
  * OUTCOME so one bad row cannot abort the fan-out and pin the address-bearing token
  * store behind it).
+ *
+ * Sabotage-witnessed (grade-tests w9): disabling either purger, or the `updatedAt < cutoff`
+ * test in `purgeRowsByAge`, reds EM-17; dropping the `contactId` filter reds the count
+ * case; rethrowing inside `deleteSubjectSends`' per-row catch reds the injected-failure case.
+ * HONEST CEILING: "other tenants stay" is double-guarded (the purgers read the tenant index
+ * AND `purgeRowsByAge` re-checks the row tenant; tenantB has no policy so is never swept),
+ * and EM-24's tY leg is likewise index + filter — no single-site sabotage reaches them.
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { processRetentionSweep } from '../src/host/retentionSweepDaemon.js';
 import { setGovernancePolicy } from '../src/host/governanceService.js';
 import { initHostExtPersistence, DurableCollection } from '../src/host/hostExtPersistence.js';
@@ -26,6 +33,7 @@ beforeEach(async () => {
   initHostExtPersistence(storage);
   await __resetEmailStore();
 });
+afterEach(() => { vi.restoreAllMocks(); });
 
 describe('EM-17 — the real purgers age the send log and the soft-bounce streak', () => {
   it('past-window rows go, fresh rows and other tenants stay', async () => {
@@ -48,7 +56,16 @@ describe('EM-24 — deleteSubjectSends returns an outcome, never throws mid-loop
     await sendLogs.put({ sendId: 's3', tenantId: 'tY', campaignId: 'c', contactId: 'subj', status: 'sent', ts: new Date().toISOString() });
     expect(await deleteSubjectSends('tX', 'subj')).toEqual({ removed: 1, failed: 0 });
     expect(await deleteSubjectSends('tX', 'subj')).toEqual({ removed: 0, failed: 0 });
-    expect(await deleteSubjectSends('tX', '')).toEqual({ removed: 0, failed: 0 });
     expect((await sendLogs.listForTenantIndexed('tY')).length).toBe(1);
+  });
+
+  it('a row whose delete fails is COUNTED, and the loop finishes the rest (resolves, never rejects)', async () => {
+    await sendLogs.put({ sendId: 'f1', tenantId: 'tX', campaignId: 'c', contactId: 'subj', status: 'sent', ts: new Date().toISOString() });
+    await sendLogs.put({ sendId: 'f2', tenantId: 'tX', campaignId: 'c', contactId: 'subj', status: 'sent', ts: new Date().toISOString() });
+    vi.spyOn(DurableCollection.prototype, 'delete').mockRejectedValueOnce(new Error('kv down'));
+    expect(await deleteSubjectSends('tX', 'subj')).toEqual({ removed: 1, failed: 1 });
+    vi.restoreAllMocks();
+    // exactly one of the two rows survived — the failed one; the other was still removed.
+    expect((await sendLogs.listForTenantIndexed('tX')).filter((r) => r.contactId === 'subj')).toHaveLength(1);
   });
 });

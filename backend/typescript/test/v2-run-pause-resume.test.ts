@@ -18,6 +18,9 @@ let server: http.Server; let base = '';
 /** Test lever: delay the executor's `status: 'paused'` write, the way production
  *  latency does, so the pause race is REPRODUCIBLE (in-process it never shows). */
 let pausedWriteDelayMs = 0;
+/** Same lever for the `run.resumed` append: prod latency made the `:resume` 202
+ *  land before it (the certification floor row read the log and missed it). */
+let resumedAppendDelayMs = 0;
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://'; process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true'; process.env.OPENWOP_TEST_SEAM_ENABLED = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
@@ -26,6 +29,12 @@ beforeAll(async () => {
   storage.updateRun = async (id, patch) => {
     if (patch?.status === 'paused' && pausedWriteDelayMs > 0) await new Promise((r) => setTimeout(r, pausedWriteDelayMs));
     return realUpdate(id, patch);
+  };
+  const events = app.locals.storage as { appendEvent: (e: { type?: string }) => Promise<unknown> };
+  const realAppend = events.appendEvent.bind(events);
+  events.appendEvent = async (e) => {
+    if (e?.type === 'run.resumed' && resumedAppendDelayMs > 0) await new Promise((r) => setTimeout(r, resumedAppendDelayMs));
+    return realAppend(e);
   };
   await new Promise<void>((resolve) => { server = app.listen(0, '127.0.0.1', resolve); });
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -157,6 +166,25 @@ describe('resume', () => {
   });
 });
 
+describe('resume — the 202 is true when answered', () => {
+  it('run.resumed is already in the log when :resume answers 202, even when the write is slow (prod floor row, rev 00780)', async () => {
+    resumedAppendDelayMs = 600;
+    try {
+      const id = await create('conformance-cancellable', { delayMs: 1500 });
+      await waitFor(id, (s) => s.status === 'running', 3000);
+      expect((await req('POST', `/runs/${enc(id)}:pause`, { drainPolicy: 'immediate' })).status).toBe(202);
+      await waitFor(id, (x) => x.status === 'paused', 4000);
+      const r = await req('POST', `/runs/${enc(id)}:resume`, { reason: 'go' });
+      expect(r.status, r.text.slice(0, 160)).toBe(202);
+      // Read IMMEDIATELY, with no wait, exactly as the conformance scenario does.
+      const types = (await events(id)).map((e) => e.type);
+      const p = types.indexOf('run.paused'); const q = types.indexOf('run.resumed');
+      expect(p >= 0 && q > p, `run.paused then run.resumed at 202 time — got ${types.join(', ')}`).toBe(true);
+      await waitFor(id, (x) => ['completed', 'failed'].includes(x.status), 8000);
+    } finally { resumedAppendDelayMs = 0; }
+  });
+});
+
 describe('replay/fork safety (ADR 0632 P4)', () => {
   it('a replay fork of a run that was paused + resumed completes: run.paused/run.resumed are inert in the fold', async () => {
     const id = await create('conformance-cancellable', { delayMs: 1200 });
@@ -200,84 +228,50 @@ describe('bulk-cancel entries under major 2 (bus finding cea0)', () => {
   });
 });
 
-describe('major 1 mount (rest-endpoints.md :pause/:resume): 409 code is `conflict` + details.runStatus', () => {
-  const V1 = { Authorization: 'Bearer dev-token', 'Content-Type': 'application/json' };
-  async function v1(method: string, path: string, body?: unknown): Promise<{ status: number; json: any }> {
-    const r = await fetch(`${base}${path}`, { method, headers: V1, body: body === undefined ? undefined : JSON.stringify(body) });
-    const text = await r.text(); let json: any; try { json = JSON.parse(text); } catch { json = undefined; }
-    return { status: r.status, json };
-  }
-  it(':pause on a terminal run and :resume on a running run → 409 conflict (v1 vocabulary; v2 keeps run_terminal/run_state_conflict)', async () => {
-    const c = await v1('POST', '/v1/runs', { workflowId: 'conformance-noop', inputs: {} });
-    expect(c.status).toBe(201);
-    const bare = c.json.runId as string;
-    const deadline = Date.now() + 5000;
-    while (Date.now() < deadline && (await v1('GET', `/v1/runs/${encodeURIComponent(bare)}`)).json?.status !== 'completed') await new Promise((r) => setTimeout(r, 50));
-    const p = await v1('POST', `/v1/runs/${encodeURIComponent(bare)}:pause`, {});
-    expect(p.status).toBe(409);
-    expect(p.json?.error).toBe('conflict');
-    expect(p.json?.details?.runStatus).toBe('completed');
-    const live = await v1('POST', '/v1/runs', { workflowId: 'conformance-cancellable', inputs: { delayMs: 20000 } });
-    const liveId = live.json.runId as string;
-    const d2 = Date.now() + 3000;
-    while (Date.now() < d2 && (await v1('GET', `/v1/runs/${encodeURIComponent(liveId)}`)).json?.status !== 'running') await new Promise((r) => setTimeout(r, 50));
-    const r = await v1('POST', `/v1/runs/${encodeURIComponent(liveId)}:resume`, {});
-    expect(r.status).toBe(409);
-    expect(r.json?.error).toBe('conflict');
-    expect(r.json?.details?.runStatus).toBe('running');
-    await v1('POST', `/v1/runs/${encodeURIComponent(liveId)}/cancel`, {});
-  });
-});
+// ADR 0812 P3c-0 — the "major 1 mount" describe (v1's `conflict` vocabulary on
+// :pause/:resume) was deleted with major 1; the v2 codes are pinned above.
 
-describe('v1 :pause idempotency (rest-endpoints.md:169, bus ruling d4e4)', () => {
-  const V1 = { Authorization: 'Bearer dev-token', 'Content-Type': 'application/json' };
-  async function v1(method: string, path: string, body?: unknown, extra: Record<string, string> = {}): Promise<{ status: number; json: any }> {
-    const r = await fetch(`${base}${path}`, { method, headers: { ...V1, ...extra }, body: body === undefined ? undefined : JSON.stringify(body) });
-    const text = await r.text(); let json: any; try { json = JSON.parse(text); } catch { json = undefined; }
-    return { status: r.status, json };
-  }
+// ADR 0812 P3c-0 — ported from the v1 mount: the same :pause idempotency rules,
+// now under major 2 (22+ char keys per the v2 Idempotency-Key grammar).
+describe(':pause idempotency (rest-endpoints.md:169, bus ruling d4e4)', () => {
   async function runningRun(): Promise<string> {
-    const c = await v1('POST', '/v1/runs', { workflowId: 'conformance-cancellable', inputs: { delayMs: 20000 } });
-    const id = c.json.runId as string; const d = Date.now() + 3000;
-    while (Date.now() < d && (await v1('GET', `/v1/runs/${encodeURIComponent(id)}`)).json?.status !== 'running') await new Promise((r) => setTimeout(r, 50));
+    const id = await create('conformance-cancellable', { delayMs: 20000 });
+    await waitFor(id, (s) => s.status === 'running', 3000);
     return id;
   }
   it('the same Idempotency-Key on both pauses → 202 twice with the cached response', async () => {
     const id = await runningRun();
-    const a = await v1('POST', `/v1/runs/${encodeURIComponent(id)}:pause`, { drainPolicy: 'immediate' }, { 'Idempotency-Key': 'pause-key-1' });
-    expect(a.status).toBe(202);
-    const d = Date.now() + 4000;
-    while (Date.now() < d && (await v1('GET', `/v1/runs/${encodeURIComponent(id)}`)).json?.status !== 'paused') await new Promise((r) => setTimeout(r, 50));
-    const b = await v1('POST', `/v1/runs/${encodeURIComponent(id)}:pause`, { drainPolicy: 'immediate' }, { 'Idempotency-Key': 'pause-key-1' });
-    expect(b.status).toBe(202);
+    const a = await req('POST', `/runs/${enc(id)}:pause`, { drainPolicy: 'immediate' }, { ...V2, 'Idempotency-Key': 'pause-key-1-0123456789abcdef' });
+    expect(a.status, a.text.slice(0, 160)).toBe(202);
+    await waitFor(id, (x) => x.status === 'paused', 4000);
+    const b = await req('POST', `/runs/${enc(id)}:pause`, { drainPolicy: 'immediate' }, { ...V2, 'Idempotency-Key': 'pause-key-1-0123456789abcdef' });
+    expect(b.status, b.text.slice(0, 160)).toBe(202);
     expect(b.json).toEqual(a.json);
-    const c = await v1('POST', `/v1/runs/${encodeURIComponent(id)}:pause`, {}, { 'Idempotency-Key': 'a-different-key' });
+    const c = await req('POST', `/runs/${enc(id)}:pause`, {}, { ...V2, 'Idempotency-Key': 'a-different-key-0123456789' });
     expect(c.status).toBe(409);
-    await v1('POST', `/v1/runs/${encodeURIComponent(id)}/cancel`, {});
+    await req('POST', `/runs/${enc(id)}:cancel`, {});
   });
-  it('a second pause WITHOUT the key → 409 conflict with details.runStatus=paused and the existing pausedAt', async () => {
+  it('a second pause WITHOUT the key → 409 run_state_conflict with details.runStatus=paused and the existing pausedAt', async () => {
     const id = await runningRun();
-    expect((await v1('POST', `/v1/runs/${encodeURIComponent(id)}:pause`, { drainPolicy: 'immediate' })).status).toBe(202);
-    const d = Date.now() + 4000;
-    while (Date.now() < d && (await v1('GET', `/v1/runs/${encodeURIComponent(id)}`)).json?.status !== 'paused') await new Promise((r) => setTimeout(r, 50));
-    const r = await v1('POST', `/v1/runs/${encodeURIComponent(id)}:pause`, {});
+    expect((await req('POST', `/runs/${enc(id)}:pause`, { drainPolicy: 'immediate' })).status).toBe(202);
+    await waitFor(id, (x) => x.status === 'paused', 4000);
+    const r = await req('POST', `/runs/${enc(id)}:pause`, {});
     expect(r.status).toBe(409);
-    expect(r.json?.error).toBe('conflict');
+    expect(r.json?.error).toBe('run_state_conflict');
     expect(r.json?.details?.runStatus).toBe('paused');
     expect(typeof r.json?.details?.pausedAt).toBe('string');
-    await v1('POST', `/v1/runs/${encodeURIComponent(id)}/cancel`, {});
+    await req('POST', `/runs/${enc(id)}:cancel`, {});
   });
 });
 
 describe('v2 create body is closed at the composition (runs.md §Run options; rc.54 v2-run-options-limits)', () => {
-  it('an unknown root key → 400 validation_error naming the key; v1 keeps its open bag', async () => {
+  it('an unknown root key → 400 validation_error naming the key', async () => {
     const r = await req('POST', '/runs', { workflowId: 'conformance-noop', conformanceUnknownRootKey: 1 });
     expect(r.status, r.text.slice(0, 160)).toBe(400);
     expect(r.json?.error).toBe('validation_error');
     expect(r.json?.details?.field).toBe('conformanceUnknownRootKey');
     const ok = await req('POST', '/runs', { workflowId: 'conformance-noop', inputs: {}, tags: ['a'], metadata: { k: 1 } });
     expect(ok.status, ok.text.slice(0, 160)).toBe(201);
-    const v1 = await fetch(`${base}/v1/runs`, { method: 'POST', headers: { Authorization: 'Bearer dev-token', 'Content-Type': 'application/json' }, body: JSON.stringify({ workflowId: 'conformance-noop', conformanceUnknownRootKey: 1 }) });
-    expect(v1.status).toBe(201);
+    // ADR 0812 P3c-0 — the v1 open-bag control leg was deleted with major 1.
   });
 });

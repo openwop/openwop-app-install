@@ -17,7 +17,7 @@
  * chambered. That is why the default could be changed cheaply, and it is the
  * honest framing: this fixes a latent grant, it does not close an active breach.
  *
- * ASSERTED AT THE WIRE, through `GET /v1/runs/:runId` — the real bypass path,
+ * ASSERTED AT THE WIRE, through `GET /runs/:runId` — the real bypass path,
  * not the parser's own arithmetic. A test that re-derived the tenant list and
  * compared it to itself would restate the premise instead of checking it.
  */
@@ -30,6 +30,7 @@ import { join } from 'node:path';
 import { createApp } from '../src/index.js';
 import { openStorage } from '../src/storage/index.js';
 import type { Storage } from '../src/storage/storage.js';
+import { toWireRunId } from '../src/host/v2Ids.js';
 
 let server: http.Server;
 let BASE: string;
@@ -38,9 +39,21 @@ let BASE: string;
  *  wildcard, so it could read every run below. */
 const KEYS = 'k-bare,k-a:tenant-a,k-b:tenant-b,k-op:*';
 const RUN_IN_A = 'run-owned-by-tenant-a';
+/**
+ * ADR 0812 — a v2 protocol path takes a tenant-BOUND id (a bare one is a 400),
+ * and `v2Identity` refuses a bound id whose tenant segment is not the caller's
+ * (`403 id_tenant_mismatch`) before the route runs. So every read below binds
+ * the id under the CALLER's tenant — the spelling a cross-tenant caller can
+ * always forge — which is what still reaches `loadReadableRun`, the bypass path
+ * this file guards. The middleware's own refusal is pinned separately below.
+ */
+const runPath = (callerTenant: string): string => `/runs/${encodeURIComponent(toWireRunId(RUN_IN_A, callerTenant))}`;
+const V2 = { 'OpenWOP-Version': '2' };
+/** The tenant each key below acts as: a bare key is `default`, a `:*` key keeps `default` as its request tenant. */
+const CALLER_TENANT: Record<string, string> = { 'k-bare': 'default', 'k-a': 'tenant-a', 'k-b': 'tenant-b', 'k-op': 'default', 'not-a-configured-key': 'default' };
 
 async function getRun(key: string): Promise<number> {
-  const res = await fetch(`${BASE}/v1/runs/${RUN_IN_A}`, { headers: { authorization: `Bearer ${key}` } });
+  const res = await fetch(`${BASE}${runPath(CALLER_TENANT[key] ?? 'default')}`, { headers: { ...V2, authorization: `Bearer ${key}` } });
   return res.status;
 }
 
@@ -100,18 +113,24 @@ describe('ADR 0561 — a bare API key is NOT a cross-tenant grant', () => {
   it('an unconfigured key authenticates nothing', async () => {
     expect(await getRun('not-a-configured-key')).not.toBe(200);
   });
+
+  it('v2: a bound id naming ANOTHER tenant is refused 403 id_tenant_mismatch before the route', async () => {
+    const res = await fetch(`${BASE}${runPath('tenant-a')}`, { headers: { ...V2, authorization: 'Bearer k-b' } });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error?: unknown }).error).toBe('id_tenant_mismatch');
+  });
 });
 
 describe('ADR 0561 — parsing edge cases resolve toward LESS authority', () => {
   /** Reboots the host with a different key config and reports what that key can
    *  reach. Each case is a config an operator could plausibly write. */
-  async function reach(keys: string, key: string): Promise<number> {
+  async function reach(keys: string, key: string, callerTenant: string): Promise<number> {
     process.env.OPENWOP_API_KEYS = keys;
     const app = await createApp({ port: 0, storageDsn: DSN, serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
     const s = app.listen(0, '127.0.0.1');
     await new Promise<void>((res) => s.once('listening', () => res()));
     const base = `http://127.0.0.1:${(s.address() as AddressInfo).port}`;
-    const res = await fetch(`${base}/v1/runs/${RUN_IN_A}`, { headers: { authorization: `Bearer ${key}` } });
+    const res = await fetch(`${base}${runPath(callerTenant)}`, { headers: { ...V2, authorization: `Bearer ${key}` } });
     await new Promise<void>((r) => s.close(() => r()));
     return res.status;
   }
@@ -119,16 +138,16 @@ describe('ADR 0561 — parsing edge cases resolve toward LESS authority', () => 
   it('a trailing colon is a typo, not a wildcard request', async () => {
     // `"k1:"` is the shape an operator produces by half-writing a scope. It
     // must not be read as "all tenants".
-    expect(await reach('k1:', 'k1')).toBe(404);
+    expect(await reach('k1:', 'k1', 'default')).toBe(404);
   });
 
   it('a key CONTAINING a colon still parses (split on the LAST one)', async () => {
-    expect(await reach('pre:fix:tenant-a', 'pre:fix')).toBe(200);
-    expect(await reach('pre:fix:tenant-b', 'pre:fix')).toBe(404);
+    expect(await reach('pre:fix:tenant-a', 'pre:fix', 'tenant-a')).toBe(200);
+    expect(await reach('pre:fix:tenant-b', 'pre:fix', 'tenant-b')).toBe(404);
   });
 
   it('whitespace around entries is tolerated', async () => {
-    expect(await reach(' k1 : tenant-a , k2 ', 'k1')).toBe(200);
+    expect(await reach(' k1 : tenant-a , k2 ', 'k1', 'tenant-a')).toBe(200);
   });
 });
 
@@ -142,7 +161,7 @@ describe('ADR 0561 — the built-in dev-token fallback is a DIFFERENT case', () 
     const s = app.listen(0, '127.0.0.1');
     await new Promise<void>((res) => s.once('listening', () => res()));
     const base = `http://127.0.0.1:${(s.address() as AddressInfo).port}`;
-    const res = await fetch(`${base}/v1/runs/${RUN_IN_A}`, { headers: { authorization: `Bearer ${key}` } });
+    const res = await fetch(`${base}${runPath('default')}`, { headers: { ...V2, authorization: `Bearer ${key}` } });
     await new Promise<void>((r) => s.close(() => r()));
     return res.status;
   }
@@ -166,7 +185,7 @@ describe('ADR 0561 — the built-in dev-token fallback is a DIFFERENT case', () 
     const s = app.listen(0, '127.0.0.1');
     await new Promise<void>((res) => s.once('listening', () => res()));
     const base = `http://127.0.0.1:${(s.address() as AddressInfo).port}`;
-    const res = await fetch(`${base}/v1/runs/${RUN_IN_A}`, { headers: { authorization: 'Bearer dev-token' } });
+    const res = await fetch(`${base}${runPath('default')}`, { headers: { ...V2, authorization: 'Bearer dev-token' } });
     await new Promise<void>((r) => s.close(() => r()));
     expect(res.status).toBe(404);
   });

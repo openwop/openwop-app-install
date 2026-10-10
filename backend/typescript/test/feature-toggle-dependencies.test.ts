@@ -112,7 +112,7 @@ describe('feature disable-lock (sqlite memory app)', () => {
   }
 
   const setStatus = (id: string, status: 'on' | 'off' | 'beta') =>
-    jsonFetch(`/v1/host/openwop-app/feature-toggles/admin/configs/${id}`, {
+    jsonFetch(`/host/openwop-app/feature-toggles/admin/configs/${id}`, {
       method: 'PUT',
       body: JSON.stringify({ status, bucketUnit: 'tenant', salt: id }),
     });
@@ -126,7 +126,7 @@ describe('feature disable-lock (sqlite memory app)', () => {
         blockedByDependents: string[];
         packs: { name: string; version: string; status: string }[];
       }[];
-    }>('/v1/host/openwop-app/feature-toggles/admin/features');
+    }>('/host/openwop-app/feature-toggles/admin/features');
     expect(status).toBe(200);
     const email = body.features.find((d) => d.id === 'email');
     expect(email?.dependsOn).toContain('crm');
@@ -139,7 +139,7 @@ describe('feature disable-lock (sqlite memory app)', () => {
     // Packs projection (ADR 0194 Phase 2): email pins its packs; presence is one of
     // the three tiers (env-dependent — the pack dir may or may not be populated).
     expect(email?.packs.map((p) => p.name)).toEqual(
-      expect.arrayContaining(['feature.email.nodes', 'feature.email.agents']),
+      expect.arrayContaining(['feature.email.nodes', 'vendor.openwop-app.email.agents']),
     );
     for (const p of email?.packs ?? []) {
       expect(['installed', 'mounted', 'missing']).toContain(p.status);
@@ -159,7 +159,7 @@ describe('feature disable-lock (sqlite memory app)', () => {
     // The projection reflects the live lock.
     const { body: graph } = await jsonFetch<{
       features: { id: string; blockedByDependents: string[] }[];
-    }>('/v1/host/openwop-app/feature-toggles/admin/features');
+    }>('/host/openwop-app/feature-toggles/admin/features');
     expect(graph.features.find((d) => d.id === 'crm')?.blockedByDependents).toContain('email');
   });
 
@@ -182,7 +182,7 @@ describe('feature disable-lock (sqlite memory app)', () => {
 
   // ── ADR 0194 Phase 5 — per-tenant coherence ──
   const putConfig = (id: string, body: Record<string, unknown>) =>
-    jsonFetch(`/v1/host/openwop-app/feature-toggles/admin/configs/${id}`, {
+    jsonFetch(`/host/openwop-app/feature-toggles/admin/configs/${id}`, {
       method: 'PUT',
       body: JSON.stringify({ bucketUnit: 'tenant', salt: id, ...body }),
     });
@@ -225,10 +225,15 @@ describe('feature disable-lock (sqlite memory app)', () => {
   // ── ADR 0194 Phase 5 — soft-dependency suggestions ──
   it('surfaces soft-dep recommendations in the console (analytics → consent)', async () => {
     await setStatus('consent', 'off'); // ensure the recommend target is off ⇒ actionable
-    await setStatus('documents', 'off'); // documents now defaults ON (2026-07-09) — set off so the soft-dep is actionable
+    // documents defaults ON (2026-07-09) — set it off so the soft-dep is actionable.
+    // Assert the write: an unchecked refusal here left documents ON and the test
+    // read an empty list. (team-intent-ledger, always on since 2026-10-07, no
+    // longer declares documents, so it cannot lock documents on.)
+    const docsOff = await setStatus('documents', 'off');
+    expect(docsOff.status, JSON.stringify(docsOff.body)).toBe(200);
     const { body } = await jsonFetch<{
       features: { id: string; recommends: string[]; recommendedOff: string[] }[];
-    }>('/v1/host/openwop-app/feature-toggles/admin/features');
+    }>('/host/openwop-app/feature-toggles/admin/features');
     const analytics = body.features.find((f) => f.id === 'analytics');
     expect(analytics?.recommends).toContain('consent');
     expect(analytics?.recommendedOff).toContain('consent');
@@ -243,5 +248,6 @@ describe('feature disable-lock (sqlite memory app)', () => {
     expect(orch?.recommends).toEqual(expect.arrayContaining(['campaign-brief', 'campaign-channels']));
     const intel = body.features.find((f) => f.id === 'campaign-intel');
     expect(intel?.recommends).toContain('campaign-connectors');
+    await setStatus('documents', 'on');
   });
 });

@@ -66,21 +66,21 @@ function client() {
   return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b) };
 }
 let n = 0;
-async function owner() { const c = client(); const r = await c.post('/v1/host/openwop-app/test/login', { email: `d-${Date.now()}-${n++}@a.test`, tenantId: `org:d-${Date.now()}-${n++}` }); expect(r.status).toBe(201); return c; }
+async function owner() { const c = client(); const r = await c.post('/host/openwop-app/test/login', { email: `d-${Date.now()}-${n++}@a.test`, tenantId: `org:d-${Date.now()}-${n++}` }); expect(r.status).toBe(201); return c; }
 const setToggle = async (id: string, s: 'on' | 'off') => { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status: s }, 'test'); };
 
 describe('CDP-D destination-sync routes', () => {
   it('creates a sync and dry-runs the field mapping without sending', async () => {
     await setToggle('destination-sync', 'on');
     const c = await owner();
-    const created = await c.post('/v1/host/openwop-app/destination-sync/syncs', {
+    const created = await c.post('/host/openwop-app/destination-sync/syncs', {
       name: 'to-esp', destinationKind: 'esp', sourceObject: 'contact', syncMode: 'cdc',
       fieldMap: [{ from: 'email', to: 'EMAIL' }, { from: 'stage', to: 'status' }],
     });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
     expect(created.body.syncMode).toBe('cdc');
 
-    const dry = await c.post(`/v1/host/openwop-app/destination-sync/syncs/${created.body.syncId}/dry-run`, { sample: { email: 'a@x.test', stage: 'customer', ignored: true } });
+    const dry = await c.post(`/host/openwop-app/destination-sync/syncs/${created.body.syncId}/dry-run`, { sample: { email: 'a@x.test', stage: 'customer', ignored: true } });
     expect(dry.status).toBe(200);
     expect(dry.body.mapped).toEqual({ EMAIL: 'a@x.test', status: 'customer' });
   });
@@ -88,18 +88,18 @@ describe('CDP-D destination-sync routes', () => {
   it('rejects a duplicate destination field in the map', async () => {
     await setToggle('destination-sync', 'on');
     const c = await owner();
-    const bad = await c.post('/v1/host/openwop-app/destination-sync/syncs', { name: 'dup', fieldMap: [{ from: 'a', to: 'X' }, { from: 'b', to: 'X' }] });
+    const bad = await c.post('/host/openwop-app/destination-sync/syncs', { name: 'dup', fieldMap: [{ from: 'a', to: 'X' }, { from: 'b', to: 'X' }] });
     expect(bad.status).toBe(400);
   });
 
   it('prepare does NOT advance; an explicit advance (post-egress) commits the watermark', async () => {
     await setToggle('destination-sync', 'on');
     const c = await owner();
-    const sync = (await c.post('/v1/host/openwop-app/destination-sync/syncs', {
+    const sync = (await c.post('/host/openwop-app/destination-sync/syncs', {
       name: 'cdc', syncMode: 'cdc', cursorField: 'updatedAt', fieldMap: [{ from: 'email', to: 'EMAIL' }],
     })).body;
     const recs = [{ email: 'a@x', updatedAt: '2026-01-01' }, { email: 'b@x', updatedAt: '2026-02-01' }];
-    const P = `/v1/host/openwop-app/destination-sync/syncs/${sync.syncId}`;
+    const P = `/host/openwop-app/destination-sync/syncs/${sync.syncId}`;
 
     const first = await c.post(`${P}/prepare`, { records: recs });
     expect(first.body.count).toBe(2);
@@ -125,6 +125,6 @@ describe('CDP-D destination-sync routes', () => {
   it('is toggle-gated (OFF ⇒ 404)', async () => {
     await setToggle('destination-sync', 'off');
     const c = await owner();
-    expect((await c.get('/v1/host/openwop-app/destination-sync/syncs')).status).toBe(404);
+    expect((await c.get('/host/openwop-app/destination-sync/syncs')).status).toBe(404);
   });
 });

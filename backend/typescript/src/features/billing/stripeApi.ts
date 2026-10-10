@@ -93,15 +93,31 @@ async function stripeRequest(
       { provider: 'stripe' },
     );
   }
-  const body = (await res.json().catch(() => ({}))) as { error?: { message?: string } } & Record<string, unknown>;
+  const body = (await res.json().catch(() => ({}))) as { error?: { message?: string; code?: string; param?: string } } & Record<string, unknown>;
   if (res.status === 401) {
     throw new OpenwopError('credential_unavailable', 'Stripe rejected the configured API key — rotate `billing:stripe-key`.', 502, { provider: 'stripe' });
   }
   if (!res.ok) {
     // Stripe's structured message only — never the key, never the raw request.
-    throw new OpenwopError('internal_error', `Stripe error: ${body.error?.message ?? `HTTP ${res.status}`}`, 502, { provider: 'stripe' });
+    // `stripeStatus` lets a caller tell a PERMANENT refusal (404 object gone, 400)
+    // from a transient one (5xx/429) — ADR 0786 D9. Never the key or the request.
+    throw new OpenwopError('internal_error', `Stripe error: ${body.error?.message ?? `HTTP ${res.status}`}`, 502, {
+      provider: 'stripe', stripeStatus: res.status,
+      ...(typeof body.error?.code === 'string' ? { stripeCode: body.error.code } : {}),
+      ...(typeof body.error?.param === 'string' ? { stripeParam: body.error.param } : {}),
+    });
   }
   return body;
+}
+
+/** ADR 0786 D9 — true when a Stripe read failed PERMANENTLY (the object does not
+ *  exist for this key, or the request is malformed): retrying cannot succeed, so a
+ *  webhook handler must ack-and-log rather than 500 until Stripe disables the
+ *  endpoint. Timeouts, 5xx, 429 and a rejected key (401) are NOT permanent. */
+export function isPermanentStripeReadError(err: unknown): boolean {
+  if (!(err instanceof OpenwopError)) return false;
+  const status = (err.details as { stripeStatus?: unknown } | undefined)?.stripeStatus;
+  return status === 404 || status === 400;
 }
 
 /** Create a REAL Stripe Checkout Session; returns Stripe's own id + hosted URL.
@@ -116,8 +132,13 @@ export async function createStripeCheckoutSession(
     mode: 'subscription' | 'payment';
     successUrl: string;
     cancelUrl: string;
+    /** ADR 0786 D7 — the tenant's ONE Stripe customer, so every purchase lands
+     *  on the customer the billing portal opens. */
+    customer?: string;
     metadata?: Record<string, string>;
     subscriptionMetadata?: Record<string, string>;
+    /** ADR 0820 §7 — a free trial on the created subscription (subscription mode only). */
+    trialPeriodDays?: number;
   },
 ): Promise<{ id: string; url: string }> {
   const params: Record<string, string> = {
@@ -126,16 +147,68 @@ export async function createStripeCheckoutSession(
     'line_items[0][quantity]': '1',
     success_url: input.successUrl,
     cancel_url: input.cancelUrl,
+    ...(input.customer ? { customer: input.customer } : {}),
   };
   for (const [k, v] of Object.entries(input.metadata ?? {})) params[`metadata[${k}]`] = v;
   if (input.mode === 'subscription') {
     for (const [k, v] of Object.entries(input.subscriptionMetadata ?? {})) params[`subscription_data[metadata][${k}]`] = v;
+    if (input.trialPeriodDays) params['subscription_data[trial_period_days]'] = String(input.trialPeriodDays);
   }
   const body = await stripeRequest(key, 'POST', '/v1/checkout/sessions', params);
   const id = typeof body.id === 'string' ? body.id : '';
   const url = typeof body.url === 'string' ? body.url : '';
   if (!id || !url) throw new OpenwopError('internal_error', 'Stripe returned a checkout session without id/url.', 502, { provider: 'stripe' });
   return { id, url };
+}
+
+/** ADR 0786 D1 — retrieve a Checkout Session for fulfilment: its payment status,
+ *  customer and metadata, and (with `expandLineItems`) the first line's price id.
+ *  Line items are expand-only; a webhook payload never carries them. */
+export async function getStripeCheckoutSession(
+  key: string,
+  sessionId: string,
+  opts: { expandLineItems?: boolean } = {},
+): Promise<{ id: string; paymentStatus: string; customer?: string; metadata: Record<string, string>; linePriceId?: string }> {
+  const query = opts.expandLineItems ? '?expand[]=line_items' : '';
+  const body = await stripeRequest(key, 'GET', `/v1/checkout/sessions/${encodeURIComponent(sessionId)}${query}`);
+  const metadata: Record<string, string> = {};
+  for (const [k, v] of Object.entries((body.metadata as Record<string, unknown> | undefined) ?? {})) if (typeof v === 'string') metadata[k] = v;
+  const line = ((body.line_items as { data?: unknown[] } | undefined)?.data?.[0] ?? {}) as { price?: { id?: unknown } };
+  return {
+    id: typeof body.id === 'string' ? body.id : sessionId,
+    paymentStatus: typeof body.payment_status === 'string' ? body.payment_status : 'unknown',
+    ...(typeof body.customer === 'string' && body.customer ? { customer: body.customer } : {}),
+    metadata,
+    ...(typeof line.price?.id === 'string' ? { linePriceId: line.price.id } : {}),
+  };
+}
+
+/** ADR 0786 D4 — retrieve a Subscription's CURRENT state. Stripe does not order
+ *  webhook events ("don't use `created` to determine event order … retrieve the
+ *  object"), so a subscription event applies what this returns, not its payload. */
+/** ADR 0786 / grade-code BILLCD-5 — Stripe refused the `customer` we passed because
+ *  it no longer exists for this key (deleted, or a test↔live key switch). */
+export function isMissingStripeCustomerError(err: unknown): boolean {
+  if (!(err instanceof OpenwopError)) return false;
+  const d = (err.details ?? {}) as { stripeCode?: unknown; stripeParam?: unknown };
+  return d.stripeCode === 'resource_missing' && d.stripeParam === 'customer';
+}
+
+export async function getStripeSubscription(key: string, subscriptionId: string): Promise<Record<string, unknown>> {
+  return stripeRequest(key, 'GET', `/v1/subscriptions/${encodeURIComponent(subscriptionId)}`);
+}
+
+/** ADR 0786 D7 — create the tenant's ONE billing customer. The idempotency key is
+ *  keyed on the tenant, so two concurrent first checkouts get the same customer
+ *  (within Stripe's 24h idempotency window; the plan row stores it after that). */
+export async function createStripeTenantCustomer(key: string, tenantId: string, replaces?: string): Promise<{ customerId: string }> {
+  // A replacement for a customer Stripe no longer knows gets its own idempotency
+  // key, or Stripe would hand back the SAME dead customer for 24h (BILLCD-5).
+  const idem = replaces ? `billing-customer:${tenantId}:replaces:${replaces}` : `billing-customer:${tenantId}`;
+  const body = await stripeRequest(key, 'POST', '/v1/customers', { 'metadata[tenantId]': tenantId }, idem);
+  const customerId = typeof body.id === 'string' ? body.id : '';
+  if (!customerId) throw new OpenwopError('internal_error', 'Stripe returned a customer without id.', 502, { provider: 'stripe' });
+  return { customerId };
 }
 
 /** Create a REAL Stripe Billing-Portal session for a stored customer. */

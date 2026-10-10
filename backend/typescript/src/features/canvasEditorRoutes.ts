@@ -36,13 +36,13 @@ import type { User } from './users/usersService.js';
 import { listCanvasComponents, catalogPromptSchema } from '../host/canvasComponentCatalog.js';
 import { kitsForCanvasType } from '../host/canvasContentPackLoader.js';
 import { mintPresentRemoteToken, presentOutlineFor } from '../host/presentRemote.js';
-import { createCanvasForTenant, getCanvasForTenant, updateCanvasForTenant, deleteCanvasForTenant, listCanvasVersions, getCanvasVersion, restoreCanvasVersion, type CanvasRecordView } from '../host/canvasSurface.js';
+import { canvasReadAllowed, createCanvasForTenant, getCanvasForTenant, updateCanvasForTenant, deleteCanvasForTenant, listCanvasVersions, getCanvasVersion, restoreCanvasVersion, type CanvasRecordView } from '../host/canvasSurface.js';
 import { seedCanvasFromArtifact } from '../host/canvasFromArtifact.js';
 import { registerCollabCanvasType } from '../host/collab/collabRegistry.js';
+import { registerCanvasTypeOwner } from '../host/canvasTypeOwnership.js';
 import type { CollabShape } from '../host/collab/collabStateMirror.js';
 import type { Doc as YDoc } from 'yjs';
 import { resolveSubjectOrg } from '../host/subjectOrgScope.js';
-import { resolveSubjectAccess, levelSatisfies } from '../host/subjectAccess.js';
 import { getUser } from './users/usersService.js';
 import { getRosterEntry } from '../host/rosterService.js';
 import { createLogger } from '../observability/logger.js';
@@ -70,6 +70,12 @@ export interface CanvasEditorRouteConfig {
   /** Closed-world doc validation: errors reject the write (422); warnings ride
    *  the save response (mid-edit cross-reference states). */
   validate?: (state: Record<string, unknown>) => CanvasValidation;
+  /** ADR 0835 D3 — the validator a run artifact meets before it becomes a
+   *  working copy. Opt-in per type, NOT `validate`: some types' artifact shape
+   *  is not their editor shape (a slides artifact is positional — the editor
+   *  assigns per-slide ids — so the save validator refuses every real one).
+   *  A type whose artifact IS its document (app-builder) passes `validate`. */
+  validateSeed?: (state: Record<string, unknown>) => CanvasValidation;
   /** Blank-document factory (ADR 0314): when present, registers
    *  `POST <base>/orgs/:orgId/canvases` — create a new canvas of this type
    *  without a run artifact (the Documents creation gallery). The blank runs
@@ -173,6 +179,15 @@ export function registerCanvasEditorRoutes(deps: RouteDeps, cfg: CanvasEditorRou
     if (cfg.authorize) await cfg.authorize(req);
     return result;
   };
+  // ADR 0820 G3/G5 — the owning toggle for EVERY type (collab or not), so the
+  // lanes that reach a canvas outside these routes (ctx.canvas, the ui-plugin
+  // RPC, documents/from-canvas) gate on the same feature these routes do.
+  // ADR 0865 B17/B19 — the run lane (`ctx.canvas`, `applyBinding`) runs the SAME
+  // validator, and refuses a type whose routes need a request-only `authorize`.
+  registerCanvasTypeOwner(cfg.canvasTypeId, cfg.feature.toggleId, {
+    ...(cfg.validate ? { validate: cfg.validate } : {}),
+    ...(cfg.authorize ? { privileged: true } : {}),
+  });
   if (cfg.collab) {
     registerCollabCanvasType({
       canvasTypeId: cfg.canvasTypeId,
@@ -203,10 +218,9 @@ export function registerCanvasEditorRoutes(deps: RouteDeps, cfg: CanvasEditorRou
     // minimum). A null result (org-owned / no membership resolver) ⇒ org gate
     // stands. Uniform 404 on refusal — no existence leak. Every read+write route
     // funnels through here, so the gate can't be forgotten on a new verb.
-    if (canvas.ownerSubject) {
-      const level = await resolveSubjectAccess(tenantId, canvas.ownerSubject, caller);
-      if (level !== null && !levelSatisfies(level, 'read')) throw notFound(canvasId);
-    }
+    // The shared predicate (host/canvasSurface.ts) — the agent tools use the
+    // same one, so the chat lane and this door cannot disagree.
+    if (!(await canvasReadAllowed(tenantId, canvas, { subject: caller }))) throw notFound(canvasId);
     return canvas;
   }
 
@@ -285,7 +299,15 @@ export function registerCanvasEditorRoutes(deps: RouteDeps, cfg: CanvasEditorRou
       }
       // Grade pass DATA-CV: an asserted owner must resolve in this tenant/org.
       await assertOwnerResolves(owner, tenantId, orgId);
-      const canvas = await seedCanvasFromArtifact(tenantId, artifactKey, owner ? { ownerSubject: owner } : undefined);
+      // ADR 0835 D3 — type-pinned to THIS door (an app-builder artifact posted
+      // to the slides route seeded an app-builder canvas past app-builder's
+      // gates), and through the type's seed validator: a run artifact is model
+      // output, never trusted state.
+      const canvas = await seedCanvasFromArtifact(tenantId, artifactKey, {
+        canvasTypeId: cfg.canvasTypeId,
+        ...(cfg.validateSeed ? { validate: cfg.validateSeed } : {}),
+        ...(owner ? { ownerSubject: owner } : {}),
+      });
       if (!canvas) throw notFound(artifactKey);
       res.status(201).json(canvas);
     } catch (err) { next(err); }

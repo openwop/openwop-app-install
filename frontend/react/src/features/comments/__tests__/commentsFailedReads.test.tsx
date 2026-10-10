@@ -18,6 +18,11 @@
  * Every describe carries BOTH arms — the failure renders the failure AND a real
  * empty answer still renders the real empty state — because a one-armed suite lets
  * the fix rot into "always show the error" while staying green.
+ *
+ * SABOTAGE (witnessed, /grade-tests wave 10): treating the failed read as empty reds
+ * the FAILURE cases; clearing the linked id on failure reds the SURVIVES case;
+ * mislabelling a real empty list reds the EMPTY case; dropping `!resourcesFailed`
+ * from `linkedMissing` reds the single-polite-slot case.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen } from '@testing-library/react';
@@ -108,7 +113,7 @@ describe('UX-CMT-2 — a failed resource read never claims the org is empty', ()
    * That sweep allows this page TWO `announce`d Notices, on the stated ground
    * that `resourcesFailed` and `linkedResourceMissing` are mutually exclusive
    * BY CONSTRUCTION — `linkedMissing`'s predicate carries `&& !resourcesFailed`
-   * (`CommentsPage.tsx:200-202`). `announce()` has a single polite slot, so if
+   * (`CommentsPage.tsx`, the `linkedMissing` predicate). `announce()` has a single polite slot, so if
    * both could render, the second would REPLACE the first and the page would
    * announce less, unpredictably.
    *
@@ -127,6 +132,11 @@ describe('UX-CMT-2 — a failed resource read never claims the org is empty', ()
     expect(await screen.findByText(/list may be incomplete/i)).toBeTruthy();
     // The missing-link disclosure must NOT: the list failed, so we do not know
     // whether the org has this resource, and claiming it does not is a lie.
-    expect(screen.queryByText(/no longer in this org|not in this org|resource.*missing/i)).toBeNull();
+    // The REAL `linkedResourceMissing` copy. This regex used to be
+    // `/no longer in this org|not in this org|resource.*missing/i`, which stopped
+    // matching anything when CMNT-UX-19 rewrote the sentence — so the tripwire went
+    // inert and stayed green with the guard deleted (MEASURED, /grade-tests wave 10).
+    // The panel is stubbed in this file, so nothing else renders this sentence.
+    expect(screen.queryByText(/isn’t available to you/i)).toBeNull();
   });
 });

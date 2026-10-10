@@ -60,6 +60,16 @@ export function isPersonalTenantId(tenantId: string | undefined): tenantId is st
   return tenantId !== undefined && (tenantId.startsWith('user:') || tenantId.startsWith('anon:'));
 }
 
+/** True iff `tenantId` is an ephemeral anonymous session's sandbox (`anon:<sid>`).
+ *  ADR 0786 D5 — the ONE host-level spelling of the rule commerce-connect's
+ *  `isFoldEligibleTenant` (ADR 0385 GEN-CC-1) and billing both enforce: an anon
+ *  sandbox is folded away on sign-in, so it can never be a paying customer or a
+ *  seller. Note `isPersonalTenantId` ACCEPTS it — a scope check that short-circuits
+ *  on the personal workspace lets anon through, so this is a separate check. */
+export function isAnonTenantId(tenantId: string | undefined): boolean {
+  return tenantId?.startsWith('anon:') ?? false;
+}
+
 /** True iff the active tenant IS the caller's own personal workspace — the
  *  implicit-owner condition. Never true for a shared `ws:` workspace, and (USERS-19)
  *  never true unless the personal tenant has a personal SHAPE — see

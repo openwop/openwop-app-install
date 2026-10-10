@@ -25,7 +25,7 @@
 
 import { createLogger } from '../../observability/logger.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
-import { createCollection, deleteDocument, getCollection, getDocument, upsertDocument } from '../kb/kbService.js';
+import { createCollection, deleteDocument, getCollection, getDocument, upsertDocument, KB_MAINTENANCE_CALLER } from '../kb/kbService.js';
 import { kbMutated, type KbEmitOptions } from '../kb/emit.js'; // ADR 0643 D3 — silent per-row sweep + ONE batch event
 import { type ShareableKbProvider } from '../../host/shareableKb.js';
 import { listCards } from '../../host/kanbanService.js';
@@ -189,7 +189,7 @@ export async function reindexListIdeas(tenantId: string, list: PriorityList, act
 export async function removeList(tenantId: string, orgId: string, listId: string, cardIds: string[]): Promise<void> {
   try {
     const collectionId = collectionIdFor(orgId);
-    if (!(await getCollection(tenantId, orgId, collectionId))) return;
+    if (!(await getCollection(tenantId, orgId, collectionId, KB_MAINTENANCE_CALLER))) return; // G8 — removal runs while the plan is lapsed
     await removeDoc(tenantId, orgId, listDocId(listId));
     for (const cardId of cardIds) await removeDoc(tenantId, orgId, ideaDocId(cardId));
   } catch (err) {
@@ -221,7 +221,9 @@ export async function backfillPriorityMatrixKb(tenantId: string, orgId: string):
 export async function ideaCardIds(boardId: string): Promise<string[]> {
   try {
     return (await listCards(boardId)).map((c) => c.id);
-  } catch {
+  } catch (err) {
+    // PM4CD-5 — an empty answer here leaves the list's KB idea docs behind; say so.
+    log.warn('pm_kb_card_ids_failed', { boardId, error: err instanceof Error ? err.message : String(err) });
     return [];
   }
 }
@@ -229,9 +231,10 @@ export async function ideaCardIds(boardId: string): Promise<string[]> {
 /** Idempotent single-doc remove (no-op when the collection/doc never existed). */
 async function removeDoc(tenantId: string, orgId: string, documentId: string, emit: KbEmitOptions = {}): Promise<void> {
   const collectionId = collectionIdFor(orgId);
-  const col = await getCollection(tenantId, orgId, collectionId);
+  // G8 — the MAINTENANCE caller: a removal must see the row while the plan is lapsed.
+  const col = await getCollection(tenantId, orgId, collectionId, KB_MAINTENANCE_CALLER);
   if (!col) return;
-  const doc = await getDocument(tenantId, orgId, collectionId, documentId);
+  const doc = await getDocument(tenantId, orgId, collectionId, documentId, KB_MAINTENANCE_CALLER);
   if (!doc) return;
-  await deleteDocument(tenantId, orgId, collectionId, documentId, undefined, emit);
+  await deleteDocument(tenantId, orgId, collectionId, documentId, KB_MAINTENANCE_CALLER, emit);
 }

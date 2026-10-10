@@ -29,7 +29,7 @@ afterAll(async () => { await new Promise<void>((res) => server.close(() => res()
 
 describe('the seeded corpus', () => {
   it('publishes every seeded page into the public /docs nav, group-ordered', async () => {
-    const res = await fetch(`${BASE}/v1/host/openwop-app/public/${SYSTEM_SITE_ORG}/docs`);
+    const res = await fetch(`${BASE}/host/openwop-app/public/${SYSTEM_SITE_ORG}/docs`);
     expect(res.status).toBe(200);
     const { docs } = (await res.json()) as { docs: Array<{ slug: string; order: string }> };
     const slugs = docs.map((d) => d.slug);
@@ -46,7 +46,7 @@ describe('the seeded corpus', () => {
       const headed = p.sections.filter((s) => typeof (s.data as { heading?: unknown }).heading === 'string');
       expect(headed.length, p.slug).toBeGreaterThanOrEqual(2);
     }
-    const served = await fetch(`${BASE}/v1/host/openwop-app/public/${SYSTEM_SITE_ORG}/pages/welcome`);
+    const served = await fetch(`${BASE}/host/openwop-app/public/${SYSTEM_SITE_ORG}/pages/welcome`);
     expect(served.status).toBe(200);
   });
 

@@ -1,8 +1,8 @@
 /**
  * ADR 0318 — heartbeat admin settings routes (superadmin only, host-extension).
  *
- *   GET  /v1/host/openwop-app/heartbeat/settings   → saved config + live effective state
- *   PUT  /v1/host/openwop-app/heartbeat/settings   → upsert (validated)
+ *   GET  /host/openwop-app/heartbeat/settings   → saved config + live effective state
+ *   PUT  /host/openwop-app/heartbeat/settings   → upsert (validated)
  *
  * Non-normative host-extension namespace — never touches the OpenWOP wire, so no
  * RFC. Gated by `requireSuperadmin` exactly like feature-toggles / navigation-settings.
@@ -13,7 +13,8 @@ import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { getView, saveConfig, validateConfig } from './service.js';
 
 const log = createLogger('features.heartbeatAdmin');
-const BASE = '/v1/host/openwop-app/heartbeat/settings';
+// ADR 0812 P3b — registered unversioned.
+const BASE = '/host/openwop-app/heartbeat/settings';
 
 export function registerHeartbeatAdminRoutes(deps: RouteDeps): void {
   const { app } = deps;

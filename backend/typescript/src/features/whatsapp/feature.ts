@@ -69,14 +69,14 @@ export const whatsappFeature: BackendFeature = {
       'WhatsApp business messaging through the official Business Solution Provider channel (Twilio BSP). '
       + 'Inbound customer messages start or resume workflows; outbound sends are compliance-gated — explicit '
       + 'per-number opt-in, the 24-hour customer-service window, pre-approved templates outside it, and '
-      + 'fork-stable send idempotency. OFF by default: enabling accepts Meta’s Business Solution Terms.',
+      + 'fork-stable send idempotency. Enabling accepts Meta’s Business Solution Terms.',
     category: 'Integrations',
     status: 'off',
     bucketUnit: 'tenant',
     salt: 'whatsapp',
   },
   requiredPacks: [
-    { name: 'feature.whatsapp.nodes', version: '1.0.0' }, // ADR 0394 P1 — the governed whatsapp.send node
-    { name: 'feature.whatsapp.agents', version: '1.0.0' }, // ADR 0394 P2 — the scoped customer-service persona (Meta primary-functionality ban)
+    { name: 'feature.whatsapp.nodes', version: '1.0.1' }, // ADR 0394 P1 — the governed whatsapp.send node
+    { name: 'vendor.openwop-app.whatsapp.agents', version: '1.0.1' }, // ADR 0394 P2 — the scoped customer-service persona (Meta primary-functionality ban)
   ],
 };

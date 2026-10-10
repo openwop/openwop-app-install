@@ -37,6 +37,8 @@
  */
 
 import type { NodeContext, NodeModule, NodeOutcome } from '../executor/types.js';
+import { handoffPromptBlock } from './handoff/handoffRecord.js';
+import { collectRunContextBlocks } from './runContextProviders.js';
 import { runAgentDispatchLive, AgentNotFoundError, type AgentEvent, type AgentKnowledgeRetrieve } from './agentDispatch.js';
 import { createLogger } from '../observability/logger.js';
 import { createAgentToolProvider, builtinAgentToolIds } from './agentToolProvider.js';
@@ -44,8 +46,7 @@ import { resolveAgentIdentity } from './agentIdentity.js';
 import { getBorrowedRecallResolver } from './twinRecallSurface.js';
 import { appendChatMessageLive } from './chatMessageBus.js';
 import { agentRef } from './conversationStore.js';
-import { buildFirewallHook, SENSITIVE_APPROVAL_TOOLS } from '../features/capability-firewall/firewallHook.js';
-import { getCapabilityRules, getUnknownToolPolicy, getFirewallMode, getDefaultDenyVerdict, getPlatformRules } from '../features/capability-firewall/ruleStore.js';
+import { buildLaneFirewall } from './laneFirewall.js';
 
 export const AGENT_RUNNER_TYPE_ID = 'local.openwop-app.agent-runner';
 
@@ -132,8 +133,8 @@ const agentRunnerNode: NodeModule = {
       ...(ctx.actingUserId ? { actingUserId: ctx.actingUserId } : {}),
     });
     // ADR 0150 — the RUN-LANE capability firewall. The chat lane gates the
-    // SENSITIVE tools (code-exec / file-write / off-host egress) behind an
-    // approval card (conversationToolLoop wires SENSITIVE_APPROVAL_TOOLS); a
+    // safe-mode baseline (code-exec / off-host egress / composed workflows) for a
+    // ledger approval (ADR 0834 D6 — there is no `interrupt.approval` card); a
     // workflow / scheduled / heartbeat dispatch enters through THIS node and had
     // NO firewall, so those actions ran ungated. Build the same hook here with
     // the tenant's rules + posture, ALWAYS in safe mode — there is no interactive
@@ -142,22 +143,10 @@ const agentRunnerNode: NodeModule = {
     // the tool loop as a pending approval and surfaced by dispatch as an ESCALATED
     // outcome (this node's `escalated` handling), so the SENSITIVE action never
     // executes without either an approval or an escalation a human sees.
-    const [fwRules, fwUnknownPolicy, fwMode, fwDefaultDenyVerdict, fwPlatformRules] = await Promise.all([
-      getCapabilityRules(ctx.tenantId),
-      getUnknownToolPolicy(ctx.tenantId),
-      getFirewallMode(ctx.tenantId),
-      getDefaultDenyVerdict(ctx.tenantId),
-      getPlatformRules(),
-    ]);
-    const firewall = buildFirewallHook({
-      rules: fwRules,
-      unknownToolPolicy: fwUnknownPolicy,
-      requireApprovalTools: SENSITIVE_APPROVAL_TOOLS,
-      gateHostMediatedEgress: true, // ADR 0610 D5 / PMC-1 — gate the host-mediated egress CLASS in safe mode
-      bypassApproval: false,
-      mode: fwMode,
-      defaultDenyVerdict: fwDefaultDenyVerdict,
-      platformRules: fwPlatformRules,
+    // ADR 0834 D1 — the ONE lane factory (rules, posture, platform floor, the declared
+    // safe-mode baseline, decision + shadow logging deduped per run).
+    const { hook: firewall } = await buildLaneFirewall({
+      tenantId: ctx.tenantId, lane: 'run', resource: ctx.runId, dedupeKey: ctx.runId,
     });
     // ADR 0044 Phase 2 — when this run's agent is a granted TWIN, compose its
     // OWNER's corpus into the dispatch (the SAME borrowed retriever the ad-hoc
@@ -228,6 +217,12 @@ const agentRunnerNode: NodeModule = {
         borrowedRetrieve = async (_query, onSourceError) => { onSourceError?.('kb'); return []; };
       }
     }
+    // ADR 0829 D5 — the note from whoever handed this run its work, fenced as
+    // untrusted.
+    const handoffNote = ctx.handoff ? handoffPromptBlock(ctx.handoff) : undefined;
+    // ADR 0831 P2 — context features attach to this run (e.g. the team ledger
+    // version it was stamped with), each block already fenced by its provider.
+    const contextBlocks = ctx.runId ? await collectRunContextBlocks({ tenantId: ctx.tenantId, runId: ctx.runId }) : [];
     try {
       const result = await runAgentDispatchLive(
         {
@@ -261,6 +256,9 @@ const agentRunnerNode: NodeModule = {
           // ADR 0102 — resolve this standing agent's tool permissions for the
           // per-tool gate (shadow-logged until enabled). Tenant-scoped (CTI-1).
           tenantId: ctx.tenantId,
+          // ADR 0775 D3 — the id this node was GIVEN: a `host:` roster id names
+          // the exact member whose permissions bind.
+          agentAddressedId: agentId,
           // BYOK/model resolution: honor the run's pinned provider/model/credential
           // (so a BYOK conversation's agent runs on the user's key); absent ⇒ the
           // managed tier (zero-BYOK turn), exactly like the dispatch route.
@@ -271,6 +269,8 @@ const agentRunnerNode: NodeModule = {
           // RCL-6 — the owner's name labels the fenced block (consented disclosure).
           ...(borrowedRetrieve ? { borrowedRetrieve } : {}),
           ...(borrowedOwnerName ? { borrowedOwnerName } : {}),
+          ...(handoffNote ? { handoffNote } : {}),
+          ...(contextBlocks.length > 0 ? { contextBlocks } : {}),
         },
       );
       // Surface the loop's RFC 0064 agent.* events onto THIS run's event log so a

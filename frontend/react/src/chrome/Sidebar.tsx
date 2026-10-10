@@ -34,7 +34,8 @@ export function Sidebar({ netOpen, onToggleNet }: { netOpen: boolean; onToggleNe
   const location = useLocation();
   const badgeFor = useFeatureBadge();
   const lockedFor = useFeatureLocked();
-  const STORE = '/marketplace/bundles'; // ADR 0419 — where a locked feature upsells
+  // ADR 0419 — where a locked feature upsells; the store opens the bundle that sells it.
+  const STORE = '/marketplace/bundles?feature=';
   // Gate B (ADR 0196): the network-inspector button is an engineering surface —
   // hidden entirely unless the `developer-tools` toggle resolves enabled.
   const devTools = useFeatureAccess('developer-tools');
@@ -109,7 +110,7 @@ export function Sidebar({ netOpen, onToggleNet }: { netOpen: boolean; onToggleNe
           return (
             <Link
               key={item.to}
-              to={locked ? STORE : item.to}
+              to={locked ? STORE + item.featureId : item.to}
               className={`app-mobile-nav__item${active && !locked ? ' is-active' : ''}`}
               onClick={() => setNavSource('sidebar')}
               {...(active && !locked ? { 'aria-current': 'page' as const } : {})}
@@ -223,7 +224,7 @@ export function Sidebar({ netOpen, onToggleNet }: { netOpen: boolean; onToggleNe
                   return (
                     <li key={item.to}>
                       <NavLink
-                        to={locked ? STORE : item.to}
+                        to={locked ? STORE + item.featureId : item.to}
                         onClick={() => setNavSource('sidebar')}
                         {...(!locked && item.end !== undefined ? { end: item.end } : {})}
                         className={`app-nav-link${active && !locked ? ' is-active' : ''}`}

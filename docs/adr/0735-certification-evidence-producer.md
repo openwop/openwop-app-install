@@ -1,6 +1,25 @@
 # ADR 0735 — The certification bundle is cut AFTER the deploy, by the suite CLI, against the deployed revision
 
-Status: Accepted — partially implemented (WHD-2 landed; WHD-18's out-of-image serving origin + `scripts/publish-evidence.sh` built 2026-09-21, NOT yet configured, deployed or run; decision 1's "stops producing a bundle" not done)
+Status: Accepted — implemented in origin mode (see the 2026-10-03 correction below; the status line that stood here through 2026-10-03 said the origin was "NOT yet configured, deployed or run", which had stopped being true)
+
+> **CORRECTED 2026-10-03 (V2 completion plan W5).** MEASURED on production
+> (`gcloud run services describe openwop-app-backend`): the service carries
+> `OPENWOP_CERT_BUNDLE_ORIGIN=gs://openwop-dev-certification-bundles/openwop-app-backend`,
+> and `scripts/publish-evidence.sh` is the routine post-deploy cut (both majors,
+> signed, uploaded per commit). Under D1 below, "set ⇒ the in-image bundle is
+> not served for either major". So **decision 1 holds in production by
+> configuration**: the pre-deploy in-process run is a regression gate whose
+> bundle is never served or committed as evidence.
+>
+> What decision 1 literally said — that the pre-deploy run "stops producing a
+> bundle" — is **deliberately NOT done**, and the reason was never written
+> down. With the origin UNSET (D1: "today's behaviour exactly"), the in-image
+> stamp is the only evidence a white-label operator without a bucket can
+> advertise. Deleting the producer would silently withdraw their RFC 0089 §D
+> pointer. So the producer stays, it is inert wherever an origin is configured,
+> and `deploy.sh`'s "the files exist" check remains the gate's liveness
+> assertion. Making unset-mode adopters cut post-deploy too is a white-label
+> product decision, not a correctness gap, and is left to the open questions.
 
 Supersedes nothing. Corrects the producer chosen in **ADR 0550 P4** (which built
 `conformance/certify.ts` to assemble the bundle in-process) in light of
@@ -471,6 +490,10 @@ suite run, the upload, the webhook cleanup, the served-digest poll) has never
 executed.
 
 ## Open questions
+
+- [ ] Should an adopter with NO evidence origin still get an in-image stamp
+      (today: yes — see the 2026-10-03 correction), or should `deploy.sh` stop
+      producing it and leave their pointer absent until they configure one?
 
 - [ ] Does the pre-deploy gate keep the `--certify` flag name? It no longer
       certifies; `--conformance-gate` describes it. Renaming touches

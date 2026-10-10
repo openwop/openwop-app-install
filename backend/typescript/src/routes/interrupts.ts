@@ -8,18 +8,19 @@
  * the suspended node's index + the resolved value as input.
  */
 
+import { notifyInterruptResolved } from '../host/interruptResolutionObservers.js';
 import { assertApprovalSurfaceTrusted } from '../host/a2uiSurfaceAdmission.js';
 import { timingSafeEqual } from 'node:crypto';
-import type { Express, Response } from 'express';
+import type { Express, Request, Response } from 'express';
 import { urlencoded } from 'express';
 import type { ResolveInterruptRequest } from '@openwop/openwop';
 import type { Storage } from '../storage/storage.js';
 import { credentialStatusFor } from '../features/connections/connectionsService.js';
 import { OpenwopError, type InterruptRecord } from '../types.js';
-import { getSuspendManager } from '../executor/suspendManager.js';
-import { getEventLog } from '../executor/eventLog.js';
-import { executeRun } from '../executor/executor.js';
+import { getEventLog, RunLogClosedError } from '../executor/eventLog.js';
+import { emitTerminalFailure, executeRun } from '../executor/executor.js';
 import { timeoutApprovalGateIfDue } from '../executor/approvalGateTimeout.js';
+import { normalizeApprovalAction, resumeActionSpelling } from '../executor/interruptActions.js';
 import { createLogger } from '../observability/logger.js';
 import { resolveRunDefinition } from '../host/resolveRunDefinition.js';
 import { createHostAdapterSuite, type HostAdapterSuite } from '../host/index.js';
@@ -27,17 +28,16 @@ import { handleConversationResolve } from '../host/conversationExchange.js';
 import { startWorkflowRun } from '../host/runStarter.js';
 import { AGENT_MENTION_WORKFLOW_ID, agentMentionConfigurable } from '../host/agentMentionWorkflows.js';
 import { appendDecision, tallyDecisions, clearDecisions, evaluateQuorumTally, readRejectionPolicy, type DecisionOutcome } from '../host/reviewDecisionLedger.js';
-import { resolveEffectiveAccess } from '../host/accessControlService.js';
-import { isEligibleApprover, consumeVoteIdentity } from '../host/approverResolution.js';
+import { listTenantMembers, resolveEffectiveAccess } from '../host/accessControlService.js';
+import { isEligibleApprover, consumeVoteIdentity, gateAclOf } from '../host/approverResolution.js';
 import { verifyVoterBinding } from '../host/interruptVoterBinding.js';
-import { stampRunCostOnTerminal } from '../observability/costEmitter.js';
-import { foldWorkflowSpendOnTerminal } from '../host/workflowBudgets.js';
 import { loadOwnedRun } from '../host/runAccess.js';
 import { holdsProtocolScope } from '../host/protocolAuthorization.js';
 import { resolveCallerUser } from '../features/users/usersGuards.js';
+import { callerHoldsTenantScope } from '../features/featureRoute.js';
 import { emitReviewUpdatedSignal } from '../notifications/notify.js';
 import { recordInterruptResolved } from '../observability/metricSeams.js';
-import { negotiatedMajor, v1 } from '../middleware/protocolVersion.js';
+import { VENDOR_ROOT } from '../middleware/protocolVersion.js';
 import { verifyInterruptToken } from '../host/interruptToken.js';
 
 const log = createLogger('routes.interrupts');
@@ -84,7 +84,7 @@ const TERMINAL_RUN_STATUSES: ReadonlySet<string> = new Set(['completed', 'failed
 async function loadInterruptByTokenChecked(
   storage: Storage,
   token: string,
-  opts: { allowResolved: boolean; major?: 1 | 2 },
+  opts: { allowResolved: boolean; verifyScheme?: boolean },
 ): Promise<InterruptRecord> {
   // `spec/v2/core/identity.md` §4 / `interrupt.md` §Tokens (RFC 0170 §E.1) —
   // under major 2 the SCHEME is checked before the store is touched: an `alg`
@@ -100,9 +100,10 @@ async function loadInterruptByTokenChecked(
   // this host actually issued — an opaque random row key with no MAC to verify,
   // so "unverifiable" and "unknown" are the same observation.
   //
-  // MAJOR 1 IS UNTOUCHED: under the v1 contract every token, prefixed or not,
-  // takes the store lookup it always took.
-  if (opts.major === 2) {
+  // `verifyScheme` is set by the PROTOCOL routes only. The vendor
+  // `interrupt-action` links (email/chat one-click, host dialect) take the store
+  // lookup they always took, prefixed token or not (ADR 0812 P3c).
+  if (opts.verifyScheme === true) {
     const verdict = verifyInterruptToken(token);
     if (verdict.form === 'invalid') {
       throw new OpenwopError('interrupt_token_invalid', verdict.reason, 401);
@@ -118,6 +119,14 @@ async function loadInterruptByTokenChecked(
     throw new OpenwopError('interrupt_already_resolved', 'approval gate timed out (auto-rejected; reason: timeout)', 409);
   }
   if (interrupt.resolvedAt) {
+    // ADR 0778 C12 — a gate closed BY a run cancel (the cascade marker) was
+    // never decided: it answers the terminal-run 409 it answered while the
+    // cancel still left it open, not `200 {resolved:true}`.
+    // The marker alone is caller-writable (a token holder can resolve a
+    // clarification with `{cancelled:true}`), so the run must agree.
+    if (isCancelCascade(interrupt) && (await storage.getRun(interrupt.runId))?.status === 'cancelled') {
+      throw new OpenwopError('interrupt_already_resolved', 'interrupt token invalidated — owning run is cancelled', 409, { runStatus: 'cancelled' });
+    }
     if (opts.allowResolved) return interrupt;
     throw new OpenwopError('interrupt_already_resolved', 'interrupt already resolved', 409);
   }
@@ -172,14 +181,14 @@ export function registerInterruptRoutes(app: Express, deps: Deps): void {
     // however many surfaces happened to be open.
     recordInterruptResolved(it, 'skipped', skippedAt);
     try {
-      await resolveAndResume(storage, hostSuite, it.interruptId, { action: 'skip' });
+      await resolveAndResume(storage, hostSuite, it.interruptId, { action: 'skip' }, { preclaimed: true });
     } catch {
       /* the claim already dropped it from open; a dispatch failure surfaces on the run */
     }
     return true;
   };
 
-  app.post(v1('/runs/:runId/interrupts/:nodeId'), async (req, res, next) => {
+  app.post('/runs/:runId/interrupts/:nodeId', async (req, res, next) => {
     try {
       // RFC 0049 (ADR 0006 Phase 3) — resolving a run's interrupt gates on
       // `approvals:respond` (`rest-endpoints.md` names it for exactly this route,
@@ -199,19 +208,18 @@ export function registerInterruptRoutes(app: Express, deps: Deps): void {
         // (`resolved_at IS NULL`), so the realistic second resolve — accept, the run
         // completes, resolve again — lands HERE, not at the terminal check below,
         // which only an unresolved interrupt on a terminal run reaches (a state
-        // this host never produces). Under major 2 a terminal owning run answers
+        // this host never produces). A terminal owning run answers
         // `409 interrupt_already_resolved` ("already resolved, or the run is
-        // cancelled or completed"); major 1 keeps its 404.
-        if (negotiatedMajor(req) === 2) {
-          const terminalRun = await storage.getRun(runId);
-          if (terminalRun && TERMINAL_RUN_STATUSES.has(terminalRun.status)) {
-            throw new OpenwopError(
-              'interrupt_already_resolved',
-              `no open interrupt — owning run is ${terminalRun.status}`,
-              409,
-              { runStatus: terminalRun.status },
-            );
-          }
+        // cancelled or completed"). That covers a run cancel, which CLOSES its
+        // own gates (ADR 0778 D3).
+        const terminalRun = await storage.getRun(runId);
+        if (terminalRun && TERMINAL_RUN_STATUSES.has(terminalRun.status)) {
+          throw new OpenwopError(
+            'interrupt_already_resolved',
+            `no open interrupt — owning run is ${terminalRun.status}`,
+            409,
+            { runStatus: terminalRun.status },
+          );
         }
         throw new OpenwopError('interrupt_not_found', 'no open interrupt for this node', 404);
       }
@@ -227,10 +235,8 @@ export function registerInterruptRoutes(app: Express, deps: Deps): void {
       // `interrupt.md` resolve table; RFC 0171 C4.6 "one code per state"). The
       // `interrupt_gone` 410 below is a host code with no v2 registry row — the
       // negotiator vendor-prefixed it, so a v2 client saw
-      // `openwop-app.interrupt_gone`, a code no v2 reader can act on. Major 1
-      // keeps the 410 it always answered (the v1 suite accepts both).
+      // `openwop-app.interrupt_gone`, a code no v2 reader can act on.
       if (
-        negotiatedMajor(req) === 2 &&
         currentRun &&
         TERMINAL_RUN_STATUSES.has(currentRun.status) &&
         !interrupt.resolvedAt
@@ -258,7 +264,11 @@ export function registerInterruptRoutes(app: Express, deps: Deps): void {
         // CS-BE-1 — resolve the AUTHENTICATED caller for the handler's
         // per-conversation visibility gate (fail-soft: an anonymous/unresolvable
         // caller passes undefined, and only unowned conversations then resolve).
+        // ADR 0839 D1 — a SUBJECT-owned conversation (a project room) is decided by
+        // the subject seam, which is handed `callerPrincipal` below when there is no
+        // canonical user, so an anonymous demo owner or an `owk_` key still resolves.
         const caller = await resolveCallerUser(req).catch(() => null);
+        const callerPrincipal = req.userId ?? req.principal?.principalId;
         const result = await handleConversationResolve(
           storage, interrupt, (req.body as { resumeValue?: unknown })?.resumeValue,
           (id, val) => resolveAndResume(storage, hostSuite, id, val),
@@ -267,6 +277,8 @@ export function registerInterruptRoutes(app: Express, deps: Deps): void {
           {
             policyResolver: hostSuite.providerPolicyResolver,
             ...(caller ? { callerUserId: caller.userId } : {}),
+            // ADR 0834 D3 — the run-stamp derivation, for the bypass authority check.
+            ...(callerPrincipal ? { callerPrincipal } : {}),
             // ADR 0089 Phase 4 (Option B) — dispatch a deep-investigation
             // @mentioned agent's tool loop as a SEPARATE persisted run via the
             // standard run path (the synthetic `openwop-app.agent-mention`
@@ -312,6 +324,7 @@ export function registerInterruptRoutes(app: Express, deps: Deps): void {
       }
       const body = req.body as ResolveInterruptRequest;
       validateResumeValue(interrupt, body?.resumeValue);
+      await requireInterruptDecider(req, storage, interrupt); // ADR 0778 D2
       // ADR 0070 — the vote identity is the authenticated USER session
       // (`req.userId`): we pin it (eligibility-enforced) and IGNORE the client
       // `voter` field (anti-spoofing). A bare API-key / bearer principal with NO
@@ -322,15 +335,8 @@ export function registerInterruptRoutes(app: Express, deps: Deps): void {
       // `session:`/`anon:` principal) is NEITHER — it fails closed on a quorum
       // gate (see `assertTokenQuorumVote`); the API-key path sets a `bearer:`
       // principal id (middleware/auth.ts).
-      const reviewerRef = req.userId;
-      const isCapabilityToken = !reviewerRef && (req.principal?.principalId?.startsWith('bearer:') ?? false);
-      await resolveAndResume(
-        storage,
-        hostSuite,
-        interrupt.interruptId,
-        body?.resumeValue,
-        reviewerRef ? { subjectRef: reviewerRef } : { capabilityToken: isCapabilityToken },
-      );
+      // ADR 0778 D6 — one derivation for both session lanes (`reviewerOf`).
+      await resolveAndResume(storage, hostSuite, interrupt.interruptId, body?.resumeValue, await reviewerOf(req));
       const run = await storage.getRun(runId);
       res.json({ runId, nodeId, status: run?.status ?? 'running' });
     } catch (err) {
@@ -338,12 +344,12 @@ export function registerInterruptRoutes(app: Express, deps: Deps): void {
     }
   });
 
-  app.post(v1('/interrupts/:token'), async (req, res, next) => {
+  app.post('/interrupts/:token', async (req, res, next) => {
     try {
       const { token } = req.params;
       // RFC 0093 §B lifecycle gate: 404 unknown / 409 resolved-or-run-terminal
       // / 410 expired — see loadInterruptByTokenChecked.
-      const interrupt = await loadInterruptByTokenChecked(storage, token, { allowResolved: false, major: negotiatedMajor(req) });
+      const interrupt = await loadInterruptByTokenChecked(storage, token, { allowResolved: false, verifyScheme: true });
       const body = req.body as { resumeValue?: unknown };
       // External-event interrupts validate correlation per
       // `interrupt-profiles.md §openwop-interrupt-external-event`:
@@ -401,7 +407,7 @@ ${bodyHtml}
       `<h1 style="font-size:1.1rem">${esc(copy.title)}</h1><p>${esc(copy.body)}</p><p><a href="/inbox">Review in the app</a></p>`));
     return true;
   };
-  app.get('/v1/host/openwop-app/interrupt-action', async (req, res, next) => {
+  app.get('/host/openwop-app/interrupt-action', async (req, res, next) => {
     try {
       const token = typeof req.query.token === 'string' ? req.query.token : '';
       const action = req.query.action === 'reject' ? 'reject' : 'approve';
@@ -415,14 +421,14 @@ ${bodyHtml}
       }
       // Validates + surfaces the honest lifecycle answer BEFORE rendering the
       // form (an expired link gets the 410 story in plain language, not a form).
-      const interrupt = await loadInterruptByTokenChecked(storage, token, { allowResolved: false, major: negotiatedMajor(req) });
+      const interrupt = await loadInterruptByTokenChecked(storage, token, { allowResolved: false });
       const data = (interrupt.data ?? {}) as { prompt?: unknown };
       const prompt = typeof data.prompt === 'string' ? data.prompt.slice(0, 300) : 'Please confirm your decision.';
       const heading = action === 'approve' ? 'Confirm approval' : 'Confirm rejection';
       res.status(200).type('html').send(confirmShell(heading,
         `<h1 style="font-size:1.1rem">${esc(heading)}</h1>
 <p>${esc(prompt)}</p>
-<form method="post" action="/v1/host/openwop-app/interrupt-action">
+<form method="post" action="${VENDOR_ROOT}/interrupt-action">
 <input type="hidden" name="token" value="${esc(token)}">
 <input type="hidden" name="action" value="${esc(action)}">
 <input type="hidden" name="voter" value="${esc(voter)}">
@@ -435,7 +441,7 @@ ${bodyHtml}
       if (!confirmFailurePage(res, err)) next(err);
     }
   });
-  app.post('/v1/host/openwop-app/interrupt-action', urlencoded({ extended: false }), async (req, res, next) => {
+  app.post('/host/openwop-app/interrupt-action', urlencoded({ extended: false }), async (req, res, next) => {
     try {
       const b = (req.body ?? {}) as Record<string, unknown>;
       const token = typeof b.token === 'string' ? b.token : '';
@@ -450,7 +456,7 @@ ${bodyHtml}
       if (voter && !verifyVoterBinding(token, voter, sig)) {
         throw new OpenwopError('not_found', 'Interrupt not found.', 404, {});
       }
-      const interrupt = await loadInterruptByTokenChecked(storage, token, { allowResolved: false, major: negotiatedMajor(req) });
+      const interrupt = await loadInterruptByTokenChecked(storage, token, { allowResolved: false });
       await resolveAndResume(storage, hostSuite, interrupt.interruptId, {
         action,
         ...(voter ? { voter, voterSig: sig } : {}),
@@ -471,7 +477,7 @@ ${bodyHtml}
   // every host that strips tokens from the public event log needs a
   // way for authed callers to list open interrupts with tokens. For
   // now it stays sample-scoped to avoid contract drift.
-  app.get('/v1/host/openwop-app/runs/:runId/interrupts', async (req, res, next) => {
+  app.get('/host/openwop-app/runs/:runId/interrupts', async (req, res, next) => {
     try {
       // Tenant-ownership gate (2026-07 vuln-scan — CRITICAL). This endpoint hands
       // out each open interrupt's RFC 0093 capability `token`, which authorizes the
@@ -486,7 +492,7 @@ ${bodyHtml}
       // is projected only to a holder of `approvals:respond` — the scope the
       // run-scoped resolve route requires. Before this a `runs:read` key read the
       // token here and resolved through `POST /v1/interrupts/{token}`.
-      const mayResolve = await holdsProtocolScope(req, 'approvals:respond');
+      const mayHoldToken = decideTokenProjector(req, run.tenantId, await holdsProtocolScope(req, 'approvals:respond'));
       const open = await storage.listOpenInterrupts(run.runId);
       // RFC 0093 §D lazy enforcement on the read path: an overdue approval
       // gate auto-rejects here and drops out of the "open" listing.
@@ -500,13 +506,14 @@ ${bodyHtml}
         if (await timeoutConnectionPromptIfDue(it)) continue;
         stillOpen.push(it);
       }
+      const withToken = await Promise.all(stillOpen.map((it) => mayHoldToken(it)));
       res.json({
         runId: run.runId,
-        interrupts: stillOpen.map((it) => ({
+        interrupts: stillOpen.map((it, i) => ({
           interruptId: it.interruptId,
           nodeId: it.nodeId,
           kind: it.kind,
-          ...(mayResolve ? { token: it.token } : {}),
+          ...(withToken[i] ? { token: it.token } : {}),
           data: it.data,
           resumeSchema: it.resumeSchema,
           createdAt: it.createdAt,
@@ -518,13 +525,13 @@ ${bodyHtml}
     }
   });
 
-  app.get(v1('/interrupts/:token'), async (req, res, next) => {
+  app.get('/interrupts/:token', async (req, res, next) => {
     try {
       // RFC 0093 §B.4 — a resolve-intent token authorizes inspect too, so the
       // same lifecycle gate applies (410 expired / 409 run-terminal). A
       // RESOLVED interrupt stays inspectable (`resolved: true`) — the
       // already-resolved 409 belongs to the resolve surface.
-      const interrupt = await loadInterruptByTokenChecked(storage, req.params.token, { allowResolved: true, major: negotiatedMajor(req) });
+      const interrupt = await loadInterruptByTokenChecked(storage, req.params.token, { allowResolved: true, verifyScheme: true });
       res.json({
         kind: interrupt.kind,
         key: interrupt.interruptId,
@@ -567,7 +574,11 @@ export function validateResumeValue(
   const action = (resumeValue && typeof resumeValue === 'object'
     ? (resumeValue as { action?: unknown }).action
     : undefined);
-  if (typeof action !== 'string' || !allowed.includes(action)) {
+  // loop row 3, P2 — interrupt.md §Events — `interrupt.requested` advertises the NORMALISED actions (a
+  // gate listing `approve` offers `accept` on the wire), so a client that posts
+  // the advertised spelling must be admitted. Only `approve` ≡ `accept`:
+  // `override` is a bypass, never admitted by equivalence (resumeActionSpelling).
+  if (typeof action !== 'string' || !allowed.map(resumeActionSpelling).includes(resumeActionSpelling(action))) {
     throw new OpenwopError(
       'validation_error',
       `resumeValue.action MUST be one of [${allowed.join(', ')}]; received ${JSON.stringify(action)}.`,
@@ -708,7 +719,7 @@ export function resolvedActionFields(kind: string, resumeValue: unknown): Record
   // also accepts the spellings `approve` (a vote) and `override` (the bypass
   // path, whose governance outcome is `decision: 'overridden'`); both APPLY
   // `accept`, so that is what the record says. Measured: 4 enum violations.
-  const action = raw === 'approve' || raw === 'override' ? 'accept' : raw;
+  const action = normalizeApprovalAction(raw);
   return {
     action,
     // Conditional, not unconditional: `validateResumeValue` has already
@@ -807,9 +818,13 @@ async function recordQuorumVote(
   // otherwise the legacy client `voter` (the signed-token path, where the token
   // is the capability) or an anon counter. NEVER trust `voter` over an
   // authenticated reviewer — eligibility was already enforced upstream.
-  const tally = await tallyDecisions(interruptId);
-  const fallbackVoter = typeof rv.voter === 'string' ? rv.voter : `anon-${tally.accepts.length + tally.rejects.length + 1}`;
-  const voter = voteIdentity?.countAs ?? reviewerRef ?? fallbackVoter;
+  // ADR 0778 D4(a) — never an invented identity. This used to fall back to
+  // `anon-${n}`, so one caller repeating a voterless vote met any quorum.
+  const namedVoter = typeof rv.voter === 'string' && rv.voter.trim() !== '' ? rv.voter : undefined;
+  const voter = voteIdentity?.countAs ?? reviewerRef ?? namedVoter;
+  if (!voter) {
+    throw new OpenwopError('validation_error', 'A quorum vote must identify its voter.', 400, { field: 'resumeValue.voter' });
+  }
   const actedBy = voteIdentity?.actedBy;
 
   // Override path (RFC 0093 §D.2 + interrupt-profiles.md §"Approval gate").
@@ -1015,11 +1030,15 @@ async function assertEligibleApprover(
  * No-op for a non-quorum interrupt (the clarification / single-approver / token
  * resume paths are unchanged).
  */
-function assertTokenQuorumVote(interrupt: InterruptRecord, resumeValue: unknown, isCapabilityToken: boolean): void {
-  const data = (interrupt.data ?? {}) as { requiredApprovals?: number; approverRefs?: unknown; approversList?: unknown };
+async function assertTokenQuorumVote(
+  interrupt: InterruptRecord,
+  resumeValue: unknown,
+  isCapabilityToken: boolean,
+  storage?: Pick<Storage, 'getRun'>,
+): Promise<{ countAs: string; actedBy?: string } | undefined> {
+  const data = (interrupt.data ?? {}) as { requiredApprovals?: number };
   const requiredApprovals = typeof data.requiredApprovals === 'number' && data.requiredApprovals > 1 ? data.requiredApprovals : 0;
-  const explicitAll = (Array.isArray(data.approverRefs) ? data.approverRefs : Array.isArray(data.approversList) ? data.approversList : [])
-    .filter((r): r is string => typeof r === 'string' && r.trim() !== '');
+  const acl = gateAclOf(interrupt.data);
   // ADR 0677 D1 part 1 — THIS lane carried the identical early return, and it is the lane
   // every token caller drives: the API-key/bearer path, the RFC 0093 signed-token route, the
   // email decide-by-token POST, MCP (`host/mcpSemantics.ts`) and inbound webhooks.
@@ -1027,35 +1046,222 @@ function assertTokenQuorumVote(interrupt: InterruptRecord, resumeValue: unknown,
   // `assertEligibleApprover` would leave the ACL unconsulted for every one of them — and the
   // RFC 0173 §B conformance fixture is resolved by a BEARER, so the MUST is only closed with
   // both lanes. An empty list still admits any voter (the quorum contract).
-  if (requiredApprovals === 0 && explicitAll.length === 0) return; // open, non-quorum
+  if (requiredApprovals === 0 && !acl.declared) return undefined; // open, non-quorum
   if (!isCapabilityToken) {
     throw new OpenwopError('forbidden', 'Voting on a quorum gate requires an authenticated approver or a valid interrupt token.', 403, { interruptId: interrupt.interruptId });
   }
-  const approverRefs = explicitAll;
-  if (approverRefs.length === 0) return; // open gate — any voter id is admissible
-  const rv = (resumeValue ?? {}) as { voter?: unknown; voterSig?: unknown };
-  const voter = typeof rv.voter === 'string' ? rv.voter : undefined;
-  if (!voter || !approverRefs.includes(voter)) {
+  const rv = (resumeValue ?? {}) as { voter?: unknown; voterSig?: unknown; actedFor?: unknown };
+  const voter = typeof rv.voter === 'string' && rv.voter.trim() !== '' ? rv.voter : undefined;
+  if (!acl.declared) {
+    // ADR 0778 D4(a) — an OPEN quorum gate counts distinct `voter`s (the
+    // `openwop-interrupt-quorum` contract). A vote naming none used to be
+    // recorded as `anon-${n}`, so repeating one POST met any quorum: the host
+    // invented the identities it then counted. It is refused instead.
+    if (!voter) {
+      throw new OpenwopError('validation_error', 'A quorum vote on this lane must name its `voter`.', 400, { field: 'resumeValue.voter' });
+    }
+    return undefined;
+  }
+  // ADR 0778 D4(b) — the FULL ACL, through the single resolver the session lane
+  // uses. This lane used to read only `approverRefs`/`approversList`, so a gate
+  // whose approvers were a GROUP or ROLE was open here: any `voter` string was
+  // admitted and no signature checked. Refused as 403 (not 400) when `voter` is
+  // absent, so `v2-approver-enforced` keeps its 403 (C8).
+  if (!voter) {
     throw new OpenwopError('forbidden', 'The `voter` is not an eligible approver for this gate.', 403, { interruptId: interrupt.interruptId });
   }
-  // Grade-code H1 (ADR 0478 correction) — the token is SHARED across every
-  // emailed approver, so `voter` membership alone let one recipient cast ALL
-  // listed approvers' votes. An explicit-list quorum vote on this lane must
-  // present the per-recipient HMAC binding the email carried; possession of
-  // the bare token no longer names arbitrary approvers.
-  // ADR 0677 D1 — the HMAC stays scoped to QUORUM gates, deliberately. Its stated rationale
-  // (above) is that a SHARED emailed token let one recipient cast ALL listed approvers'
-  // votes — a multi-approver concern. Widening it to single-approver gates would 403 any
-  // legitimately-emailed approver whose link predates a per-recipient signature, which is a
-  // availability regression dressed as hardening. The `voter ∈ approverRefs` check above is
-  // strictly stronger than today (no check at all) and is what RFC 0173 §B requires. Whether
-  // a single-approver shared token should ALSO carry the binding is filed as `ISWF-23`.
-  if (requiredApprovals === 0) return;
+  const run = storage ? await storage.getRun(interrupt.runId) : null;
+  // Fail closed without the run: its tenant and org are what the group/role
+  // refs resolve against, and a `'default'` guess would resolve them elsewhere.
+  if (storage && !run) {
+    throw new OpenwopError('forbidden', 'The `voter` is not an eligible approver for this gate.', 403, { interruptId: interrupt.interruptId });
+  }
+  const gateRefs = { approverRefs: acl.subjects, approverGroupRefs: acl.groupRefs, approverRoleRefs: acl.roleRefs };
+  const approverOrgId = (run?.metadata as Record<string, unknown> | undefined)?.approverOrgId;
+  const gateCtx = { tenantId: run?.tenantId ?? 'default', ...(typeof approverOrgId === 'string' ? { orgId: approverOrgId } : {}) };
+  const { eligible } = await isEligibleApprover(voter, gateRefs, gateCtx);
+  if (!eligible) {
+    throw new OpenwopError('forbidden', 'The `voter` is not an eligible approver for this gate.', 403, { interruptId: interrupt.interruptId });
+  }
+  // ADR 0677 D1 — the HMAC stays scoped to QUORUM gates, deliberately: a SHARED
+  // emailed token let one recipient cast ALL approvers' votes, a multi-approver
+  // concern. Whether a single-approver shared token should also carry the binding
+  // is filed as `ISWF-23`.
+  if (requiredApprovals === 0) return undefined;
+  // Grade-code H1 (ADR 0478 correction), widened by ADR 0778 D4(c) from explicit
+  // lists to EVERY declared ACL: the token is shared across every emailed
+  // approver, so membership alone let one recipient cast every listed — or every
+  // group member's — vote. Every emailed link carries its recipient's signature
+  // (`emailApprovalDelivery.ts`), so a real recipient is unaffected.
   const voterSig = typeof rv.voterSig === 'string' ? rv.voterSig : '';
   if (!verifyVoterBinding(interrupt.token, voter, voterSig)) {
     throw new OpenwopError('forbidden', 'This vote requires the signed per-approver link from your notification email.', 403, { interruptId: interrupt.interruptId });
   }
+  // ADR 0778 C6 — the ADR 0198 consumed identity, as on the session lane: a
+  // delegate voting by email counts as the principal they cover, so the pair can
+  // never count twice.
+  return consumeVoteIdentity(voter, gateRefs, gateCtx, typeof rv.actedFor === 'string' ? rv.actedFor : undefined);
 }
+
+/**
+ * ADR 0778 D1 (grade-code `APCD-2`) — what a LOST claim tells its caller. A
+ * branch that lost may only return quietly when the decision that WON is the
+ * same verdict it was trying to record; otherwise its caller would be told a
+ * result that did not happen (a tipping voter told "OK" while the timeout had
+ * already rejected the gate; a rejecter told "OK" while an accept released the
+ * downstream). The verdict is read back from what the winner stored.
+ */
+async function answerLostClaim(storage: Storage, interruptId: string, attempted: 'accepted' | 'rejected'): Promise<void> {
+  const stored = await storage.getInterrupt(interruptId);
+  const v = (stored?.resolvedValue ?? null) as { action?: unknown; reason?: unknown; cancelled?: unknown; cascadedFromParent?: unknown } | null;
+  const closedByCancel = !!v && (v.cancelled === true || typeof v.cascadedFromParent === 'string');
+  const storedRejected = !!v && (v.action === 'reject' || v.action === 'timeout' || v.reason === 'timeout' || v.reason === 'quorum-reject');
+  const sameVerdict = !closedByCancel && (attempted === 'rejected' ? storedRejected : !storedRejected);
+  if (sameVerdict) return;
+  throw new OpenwopError('interrupt_already_resolved', 'interrupt already resolved — a different decision won', 409);
+}
+
+/** ADR 0778 (grade-code `APCD-6`) — the terminal-run check before the claim is
+ *  a read; a cancel can close the run log between it and the append below. The
+ *  claim is already won then, so answer the truth (409, run terminal) rather
+ *  than the 500 the closed log throws. */
+async function appendResolution(event: Parameters<ReturnType<typeof getEventLog>['append']>[0]): Promise<void> {
+  try {
+    await getEventLog().append(event);
+  } catch (err) {
+    if (err instanceof RunLogClosedError) {
+      throw new OpenwopError('interrupt_already_resolved', 'interrupt invalidated — owning run ended while it was being decided', 409, { closedBy: err.closedBy });
+    }
+    throw err;
+  }
+}
+
+/**
+ * ADR 0778 C1 — the timer sweep's resume continuation. The sweep CLAIMS the row
+ * first (`executor/timerResume.ts`), so this resume is PRECLAIMED: without the
+ * flag, the accept path's own claim (D1) loses to the sweep's and every ADR 0267
+ * timed wait throws 409 with its interrupt consumed and its run never resumed.
+ * Lives here, not inline at boot, so the wiring itself is witnessable.
+ */
+export function timerResumeContinuation(storage: Storage, hostSuite: HostAdapterSuite): (interrupt: InterruptRecord) => Promise<void> {
+  return (interrupt) => resolveAndResume(storage, hostSuite, interrupt.interruptId, { elapsed: true, reason: 'timer' }, { preclaimed: true });
+}
+
+/** ADR 0778 D3 — was this interrupt closed by a run cancel rather than decided?
+ *  `host/runCancel.ts` stamps `{ cancelled: true }` on the run's own gates and
+ *  `{ cascadedFromParent }` on its children's. */
+export function isCancelCascade(interrupt: InterruptRecord): boolean {
+  const v = interrupt.resolvedValue as { cancelled?: unknown; cascadedFromParent?: unknown } | null | undefined;
+  return !!v && typeof v === 'object' && (v.cancelled === true || typeof v.cascadedFromParent === 'string');
+}
+
+/**
+ * ADR 0778 D6 — who a SESSION decide lane votes as, derived ONE way for both the
+ * node route and `/reviews` (they used to disagree: `req.userId` here,
+ * `req.userId ?? principalId` there, so one human was two ledger keys).
+ *  - a signed-in person (`auth.kind === 'subject'`): the CANONICAL user
+ *    (`resolveCallerUser`), so an unbound OIDC bearer and the cookie session are
+ *    one voter;
+ *  - a bound session without that: `req.userId`, as before;
+ *  - a `bearer:` env key: the RFC 0093 capability lane (body `voter`) — never a
+ *    subject, or `conformance-interrupt-quorum`'s three voters on one bearer
+ *    would dedup into one (C4);
+ *  - anything else (an anon cookie, an `apikey:`): no identity, so a quorum or
+ *    ACL gate fails closed — never the raw `session:<sid>` (C5).
+ */
+const reviewerMemo = new WeakMap<Request, Promise<{ subjectRef: string } | { capabilityToken: boolean }>>();
+export function reviewerOf(req: Request): Promise<{ subjectRef: string } | { capabilityToken: boolean }> {
+  // Once per request (grade-code `APCD-9`): `resolveCallerUser` can write (the
+  // canonical-user fold), and the inbox read calls this for `canDecide`.
+  let hit = reviewerMemo.get(req);
+  if (!hit) {
+    hit = deriveReviewer(req);
+    reviewerMemo.set(req, hit);
+  }
+  return hit;
+}
+
+async function deriveReviewer(req: Request): Promise<{ subjectRef: string } | { capabilityToken: boolean }> {
+  if (req.principal?.auth?.kind === 'subject') {
+    try {
+      return { subjectRef: (await resolveCallerUser(req)).userId };
+    } catch {
+      /* unresolvable subject — fall through to the bound session, if any */
+    }
+  }
+  if (req.userId) return { subjectRef: req.userId };
+  return { capabilityToken: req.principal?.principalId?.startsWith('bearer:') ?? false };
+}
+
+/**
+ * ADR 0778 D2 — the decide floor itself: `approvals:respond` held in `tenantId`,
+ * read the way kanban and the agent area read authority (`callerHoldsTenantScope`).
+ *
+ * RECONCILED WITH ADR 0755 D3 (caught by the row-6 gate). A credential — an
+ * `owk_` key — that EXPLICITLY declares `approvals:respond` is a responder by
+ * that declaration in a tenant with NO member rows, where membership is not the
+ * authority at all (the posture `adr0755-key-lane-scopes` pins, and the one
+ * `emailApprovalDelivery` already honours for memberless tenants). Once a tenant
+ * has members, the key is judged by its issuer's membership like everything
+ * else, so a Viewer's key cannot decide what the Viewer cannot. An undeclared
+ * (`*`) key never takes this arm.
+ */
+async function holdsDecideFloor(req: Request, tenantId: string): Promise<boolean> {
+  if (await callerHoldsTenantScope(req, tenantId, 'approvals:respond')) return true;
+  const auth = req.principal?.auth;
+  if (auth?.kind !== 'api-key' || !Array.isArray(auth.scopes) || !auth.scopes.includes('approvals:respond')) return false;
+  return (await listTenantMembers(tenantId)).length === 0;
+}
+
+/**
+ * ADR 0778 D2 (grade-code `APCD-1`) — may this caller be HANDED an approval
+ * gate's resume token? The token route checks nothing but the token, so handing
+ * it out is granting the decision: a Viewer who could not decide on either
+ * session lane read the token off the interrupt listing and approved through
+ * `POST /v1/interrupts/{token}`. `base` is the existing key/enforcement check
+ * (`holdsProtocolScope`); an APPROVAL row additionally needs the always-on floor.
+ * Non-approval kinds (chat, clarification) keep `base` — a Viewer answers those.
+ */
+export function decideTokenProjector(req: Request, tenantId: string, base: boolean): (interrupt: InterruptRecord) => Promise<boolean> {
+  let floor: Promise<boolean> | undefined;
+  return async (interrupt) => {
+    if (!base) return false;
+    if (interrupt.kind !== 'approval') return true;
+    floor ??= holdsDecideFloor(req, tenantId);
+    return floor;
+  };
+}
+
+/**
+ * ADR 0778 D2 — the always-on authority floor for deciding an OPEN approval
+ * gate on a session lane: `approvals:respond` (Editor and above), read the way
+ * kanban and the agent area read it (`callerHoldsTenantScope`: wildcard operator,
+ * own personal workspace, key declaration, then membership under either identity
+ * spelling). `requireProtocolScope` only consulted membership when
+ * `OPENWOP_AUTHORIZATION_ENFORCEMENT=true`, so a Viewer decided every open gate.
+ *  - scoped to `kind === 'approval'` (C3): the node route also carries chat,
+ *    clarification, walkthrough and credential interrupts a Viewer must answer;
+ *  - a gate that DECLARES an ACL is governed by its ACL (eligibility runs in
+ *    `resolveAndResume`), as on the approvals lane (`approvalDecision.ts`).
+ * Only ever refuses; the token lane is not a session lane and is untouched.
+ */
+export async function requireInterruptDecider(req: Request, storage: Storage, interrupt: InterruptRecord): Promise<void> {
+  if (interrupt.kind !== 'approval') return;
+  if (gateAclOf(interrupt.data).declared) return;
+  const run = await storage.getRun(interrupt.runId);
+  if (!run) return; // resolveAndResume answers the missing/terminal run
+  if (await holdsDecideFloor(req, run.tenantId)) return;
+  throw new OpenwopError('forbidden_scope', 'Missing required scope: approvals:respond', 403, { requiredScope: 'approvals:respond' });
+}
+
+/** ADR 0778 D5 — does this gate need a NAMED approver (a quorum, or a declared
+ *  ACL)? A lane with no approver identity (MCP `requestState`) must refuse such a
+ *  gate rather than consume it. */
+export function needsNamedApprover(interruptData: unknown): boolean {
+  const required = (interruptData as { requiredApprovals?: unknown } | null | undefined)?.requiredApprovals;
+  return (typeof required === 'number' && required > 1) || gateAclOf(interruptData).declared;
+}
+
 
 /** ADR 0677 D1 — test alias for the TOKEN eligibility lane. Exported because this is the
  *  lane the RFC 0173 §B conformance fixture drives (its resolver is the suite's bearer), and
@@ -1101,6 +1307,180 @@ export const __resolveAndResumeForTests = (
   resumeValue: unknown,
 ): Promise<void> => resolveAndResume(storage, hostSuite, interruptId, resumeValue, { capabilityToken: true });
 
+/** Is `nodeId` still `suspended` in a persisted scheduler snapshot? An
+ *  unparseable snapshot answers true so the executor's own fallback decides. */
+function gateStillSuspended(serialized: string, nodeId: string): boolean {
+  try {
+    const snap = JSON.parse(serialized) as { nodeState?: Array<[string, string]> };
+    const state = snap.nodeState?.find(([id]) => id === nodeId)?.[1];
+    return state === undefined || state === 'suspended';
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Dispatch the executor for a resolved gate — the ONE resume seam behind every
+ * resolution: accept, the single-approver and quorum rejects, and (through the
+ * router `index.ts` registers with `approvalGateTimeout`) the timeout sweep.
+ *
+ * With `rejection`, RFC 0223 (interrupt.md §Rejection): the gate node FAILS in
+ * the executor exactly as any node fails, and the scheduler routes it. The
+ * caller has already won the resolve CAS and appended `interrupt.resolved`.
+ */
+export async function dispatchGateResume(
+  storage: Storage,
+  hostSuite: HostAdapterSuite,
+  interrupt: InterruptRecord,
+  resumeValue: unknown,
+  rejection?: { code: string; message: string; operatorAct?: boolean },
+): Promise<void> {
+  // Synchronous validation (preserves the pre-existing 404 / 500
+  // behaviour on the HTTP response path). These reads aren't racy —
+  // they only check existence, not the snapshot. The *snapshot*
+  // read moves into the chained block below.
+  const run = await storage.getRun(interrupt.runId);
+  // ADR 0474 — resume against the run's PINNED revision when stamped (the
+  // head may have moved; a resumed run must continue on the def it started).
+  const resolvedDef = run ? await resolveRunDefinition(run, hostSuite.workflowCatalog) : null;
+  const nodeIndex = resolvedDef ? resolvedDef.definition.nodes.findIndex((n) => n.nodeId === interrupt.nodeId) : -1;
+  if (rejection && (!run || !resolvedDef || nodeIndex < 0)) {
+    // The interrupt is already consumed, so throwing here would strand the run
+    // waiting on a gate nothing can resolve. Nothing can be routed without the
+    // definition, so fail closed through the executor's own terminal helper,
+    // naming the gate.
+    if (run && !TERMINAL_RUN_STATUSES.has(run.status)) {
+      await emitTerminalFailure({
+        storage, runId: run.runId, nodeId: interrupt.nodeId, failedNodeId: interrupt.nodeId,
+        error: { code: rejection.code, message: rejection.message }, skipOnlineEvals: rejection.operatorAct === true,
+      });
+    }
+    return;
+  }
+  if (!run) throw new OpenwopError('run_not_found', `run ${interrupt.runId} missing during resume`, 404);
+  if (!resolvedDef) throw new OpenwopError('workflow_not_found', `workflow ${run.workflowId} not found`, 404);
+  const wf = { workflowId: run.workflowId, definition: resolvedDef.definition };
+  if (nodeIndex < 0) throw new OpenwopError('internal_error', `suspended node ${interrupt.nodeId} not in workflow`, 500);
+
+  // Per-run resume serialization. Concurrent resolves of *parallel*
+  // suspended interrupts (e.g. a fan-out workflow where 4 approval
+  // nodes all suspend on the same run, then the user approves all
+  // four in quick succession) used to race on the persisted
+  // `schedulerSnapshot`:
+  //
+  //   1. Each call read `run.schedulerSnapshot` at API time,
+  //      capturing the same stale snapshot in which *all four*
+  //      approvals are still suspended.
+  //   2. Each call scheduled its own `executeRun` via setImmediate.
+  //      The four executors ran concurrently — each one hydrated
+  //      from the captured stale snapshot, marked *only its own*
+  //      resumed node `completed`, drained, and persisted.
+  //   3. Each persist overwrote the previous one. Net effect: only
+  //      the *last* executor's view (one resume) survived in the
+  //      stored snapshot. The other three resumes emitted
+  //      `interrupt.resolved` but never reached `run.resumed`
+  //      / `node.completed` — silently dropped.
+  //
+  // Symptom in the event log: 4 × `interrupt.resolved`, but
+  // only 1-2 × `run.resumed` + `node.completed`. The user-facing
+  // chat shows the workflow stuck at "Running" forever.
+  //
+  // Fix: chain the snapshot read + executor dispatch behind any
+  // pending resume on the *same* runId so each resume hydrates from
+  // the freshest persisted snapshot. The HTTP response still
+  // returns immediately (we don't await `next` here) — only the
+  // background executor work serializes.
+  const prevChain = runResumeChains.get(interrupt.runId) ?? Promise.resolve();
+  const next: Promise<void> = prevChain.then(async () => {
+    // Re-read the run AFTER the previous resume's executor has
+    // fully settled and persisted its snapshot. This is what fixes
+    // the race — pre-chain, every concurrent resume read the same
+    // pre-any-resume snapshot.
+    const freshRun = await storage.getRun(interrupt.runId);
+    if (!freshRun) {
+      log.warn('resume skipped — run record vanished between resolve + execute', {
+        runId: interrupt.runId,
+      });
+      return;
+    }
+    // A resume that queued behind one which already settled this gate — a
+    // losing concurrent accept behind a routed rejection, or two accepts — has
+    // nothing left to do. The accept path cannot CAS its own resolve (callers
+    // such as the MCP retry pre-claim the interrupt, so the resolve here is a
+    // deliberate no-op second write); this is where exactly-once is enforced
+    // for the EXECUTION instead. Without it a losing accept would hydrate the
+    // snapshot the rejection just persisted and mark the failed gate completed.
+    if (TERMINAL_RUN_STATUSES.has(freshRun.status)) return;
+    if (typeof freshRun.schedulerSnapshot === 'string' && !gateStillSuspended(freshRun.schedulerSnapshot, interrupt.nodeId)) {
+      log.info('resume skipped — gate already settled by an earlier resume', { runId: interrupt.runId, nodeId: interrupt.nodeId });
+      return;
+    }
+    // Resume the DAG scheduler. If a serialized snapshot exists
+    // (post-DAG), hydrate it and mark the suspended node as
+    // completed with the resolved value. If not (legacy linear
+    // path), fall back to `resumeFromNodeIndex` which the executor
+    // handles via its implicit-linear chain logic.
+    const serializedSnapshot = freshRun.schedulerSnapshot;
+    // ctx.suspend/ctx.interrupt nodes tag the interrupt for re-invoke resume
+    // (the node re-runs to shape the resolution into its outputs); native
+    // return-and-resume nodes use the default mark-completed path.
+    const idata = (interrupt.data ?? {}) as { __resumeStyle?: unknown; __resumeKey?: unknown };
+    const reinvokeOpts = idata.__resumeStyle === 'reinvoke'
+      ? { resumeStyle: 'reinvoke' as const, ...(typeof idata.__resumeKey === 'string' ? { resumeKey: idata.__resumeKey } : {}) }
+      : {};
+    // RFC 0223 — a rejection FAILS the gate node inside the executor, so the
+    // scheduler's triggerRule logic routes it (resumeRejection overrides the
+    // resume style: a rejected gate is never re-invoked). On the legacy
+    // no-snapshot path the gate's own index is the resume target.
+    const rejectionOpts = rejection ? { resumeRejection: rejection, resumeNodeId: interrupt.nodeId } : {};
+    const legacyIndex = rejection ? nodeIndex : nodeIndex + 1;
+    const resumeOptions =
+      typeof serializedSnapshot === 'string'
+        ? (() => {
+            try {
+              return {
+                resumeSnapshot: JSON.parse(serializedSnapshot) as never,
+                resumeNodeId: interrupt.nodeId,
+                resumeValue,
+                ...reinvokeOpts,
+                ...rejectionOpts,
+                policyResolver: hostSuite.providerPolicyResolver,
+              };
+            } catch {
+              return {
+                resumeFromNodeIndex: legacyIndex,
+                resumeValue,
+                ...rejectionOpts,
+                policyResolver: hostSuite.providerPolicyResolver,
+              };
+            }
+          })()
+        : {
+            resumeFromNodeIndex: legacyIndex,
+            resumeValue,
+            ...rejectionOpts,
+            policyResolver: hostSuite.providerPolicyResolver,
+          };
+    // AWAIT here — the chain's whole purpose is that the next
+    // resume's snapshot read sees this executor's persist.
+    await executeRun(storage, freshRun, wf.definition, resumeOptions);
+  }).catch((err) => {
+    log.error('resume dispatch failed', {
+      runId: interrupt.runId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }).finally(() => {
+    // Only clear if we're still the tail — a subsequent resolve may
+    // have chained another resume onto us. Clearing then would
+    // strand the chain entry, and the next concurrent resolve
+    // would start a fresh unserialized chain that races with us.
+    if (runResumeChains.get(interrupt.runId) === next) {
+      runResumeChains.delete(interrupt.runId);
+    }
+  });
+  runResumeChains.set(interrupt.runId, next);
+}
+
 // Exported (ADR 0068) so the unified /reviews action surface resolves an
 // interrupt through the SAME quorum/resume/replay path as the interrupt routes —
 // the projection never re-implements resume.
@@ -1109,10 +1489,42 @@ export async function resolveAndResume(
   hostSuite: HostAdapterSuite,
   interruptId: string,
   resumeValue: unknown,
-  reviewer?: { subjectRef?: string; capabilityToken?: boolean },
+  reviewer?: {
+    subjectRef?: string;
+    capabilityToken?: boolean;
+    /** The caller already WON `storage.resolveInterrupt` for this interrupt (the
+     *  ENG-6 claim pattern — the MCP retry, the connection-prompt expiry). The
+     *  reject paths' own CAS would then lose and return, stranding the run with
+     *  its interrupt consumed and nothing resumed; this tells them the claim is
+     *  already theirs. */
+    preclaimed?: boolean;
+  },
 ): Promise<void> {
   const interrupt = await storage.getInterrupt(interruptId);
   if (!interrupt) throw new OpenwopError('interrupt_not_found', 'interrupt missing on resume', 404);
+  // ADR 0853 D5 — a PERSON's resolution, announced after the winning claim and
+  // its `interrupt.resolved` row (fail-soft; the resume never depends on it).
+  const announceResolved = (outcome: 'accepted' | 'rejected', value: unknown): Promise<void> => notifyInterruptResolved({
+    runId: interrupt.runId, interruptId, kind: interrupt.kind, outcome, data: interrupt.data, resumeValue: value,
+    ...(reviewer?.subjectRef ? { decidedBy: reviewer.subjectRef } : {}),
+  });
+  // ADR 0778 D3/D7 — refusals that must precede ANY claim, in the one choke point
+  // every lane shares (the node route checked some of these itself; `/reviews`,
+  // MCP and the rest did not). A preclaimed caller already consumed the row, so
+  // for it these would only strand the run: it skips them.
+  if (reviewer?.preclaimed !== true) {
+    if (interrupt.resolvedAt) throw new OpenwopError('interrupt_already_resolved', 'interrupt already resolved', 409);
+    const ownerRun = await storage.getRun(interrupt.runId);
+    if (ownerRun && TERMINAL_RUN_STATUSES.has(ownerRun.status)) {
+      throw new OpenwopError('interrupt_already_resolved', `interrupt invalidated — owning run is ${ownerRun.status}`, 409, { runStatus: ownerRun.status });
+    }
+    // RFC 0093 §D lazy enforcement: an overdue gate auto-rejects (fail closed)
+    // before this decision can land. `approvalGateTimeout.ts` promised every
+    // path checked; only the node route did.
+    if (await timeoutApprovalGateIfDue(storage, interrupt)) {
+      throw new OpenwopError('interrupt_already_resolved', 'approval gate timed out (auto-rejected; reason: timeout)', 409);
+    }
+  }
 
   // RFC 0209 §C.12 (ADR 0749) — trust is sticky across a surface's fold. An
   // `approval` bound to an A2UI surface that ANY untrusted envelope touched MUST
@@ -1126,6 +1538,20 @@ export async function resolveAndResume(
   // exercise. The fail-safe exits stay open — cancel the run, or let the gate's
   // own timeout auto-reject (that path writes the store directly, not via here).
   await assertApprovalSurfaceTrusted(interrupt);
+  // RFC 0223 (interrupt.md §Rejection) — `timeout` is a RECORD-ONLY action the
+  // host's own timer branch mints (approvalGateTimeout.ts writes the store
+  // directly, never through here). A client that could post it would disguise
+  // a decision as expiry, so it is refused on every human path — including a
+  // gate whose `actions` list happens to name it, and a gate with no list at
+  // all, which `validateResumeValue` otherwise leaves open.
+  if (interrupt.kind === 'approval' && (resumeValue as { action?: unknown } | null | undefined)?.action === 'timeout') {
+    throw new OpenwopError(
+      'validation_error',
+      "resumeValue.action 'timeout' is record-only: the host mints it when a gate expires and MUST NOT accept it on a resume (RFC 0223).",
+      400,
+      { field: 'resumeValue.action', received: 'timeout' },
+    );
+  }
   if (interrupt.kind === 'credential') {
     assertCredentialResumeShape(resumeValue);
     await assertCredentialAuthorizedResolves(storage, interrupt, resumeValue);
@@ -1172,7 +1598,7 @@ export async function resolveAndResume(
   // consumed identity, so a principal + delegate pair can never count twice.
   let voteIdentity: { countAs: string; actedBy?: string } | undefined;
   if (reviewerRef) voteIdentity = await assertEligibleApprover(storage, interrupt, reviewerRef, resumeValue);
-  else await assertTokenQuorumVote(interrupt, resumeValue, reviewer?.capabilityToken === true);
+  else voteIdentity = await assertTokenQuorumVote(interrupt, resumeValue, reviewer?.capabilityToken === true, storage);
 
   // Quorum-gate handling: accumulate votes (durable ledger) until threshold met.
   // Returns null when not a quorum gate (fall-through to normal resume).
@@ -1185,17 +1611,31 @@ export async function resolveAndResume(
   const quorumOutcome = quorumResult?.outcome ?? null;
   // RFC 0093 §D.2 — the override path (whether it bypassed quorum or counted
   // as one vote) MUST emit `approval.overridden { principal, reason }` AND
-  // write an audit-log entry.
-  if (quorumResult?.override) {
+  // write an audit-log entry (v1 `interrupt-profiles.md:95`).
+  //
+  // Stored in the CLOSED v1 shape, `{gateId, principal, reason}`, so it is valid
+  // on the v1 wire; the major-2 read rebuilds it into the v2 alias shape
+  // (`storage/approvalOverriddenProjection.ts`). It used to carry `interruptId`
+  // and `bypassedQuorum`, which the closed v1 def forbids: `gateId` IS the
+  // interrupt id, and `bypassedQuorum` lives in the audit entry below, where it
+  // always was — the audit ledger, not the wire, is the home for detail the
+  // protocol shape cannot express.
+  // ADR 0778 (grade-code `APCD-11`) — the override's event + SUCCESS audit row
+  // are written only once the override actually TOOK: when its vote is recorded
+  // and the gate stays open ('pending'), or when the accept path WINS the claim.
+  // They used to be written here, before the claim, so an override that lost to a
+  // reject or the timeout was still audited as a successful override. Payload
+  // unchanged (#4229: v1-valid `{gateId, principal, reason}`).
+  const recordOverride = async (): Promise<void> => {
+    if (!quorumResult?.override) return;
     await getEventLog().append({
       runId: interrupt.runId,
       nodeId: interrupt.nodeId,
       type: 'approval.overridden',
       payload: {
-        interruptId,
+        gateId: interruptId,
         principal: quorumResult.override.principal,
         reason: quorumResult.override.reason,
-        bypassedQuorum: quorumOutcome === 'accept-override',
       },
     });
     hostSuite.auditSink.record({
@@ -1206,12 +1646,14 @@ export async function resolveAndResume(
       payload: {
         runId: interrupt.runId,
         nodeId: interrupt.nodeId,
+        interruptId,
         reason: quorumResult.override.reason,
         bypassedQuorum: quorumOutcome === 'accept-override',
       },
     });
-  }
+  };
   if (quorumOutcome === 'pending') {
+    await recordOverride(); // the override counted as one vote and was recorded
     // Vote recorded but quorum not met. Emit a partial-vote event so
     // callers polling the event log can see the progress. The
     // interrupt stays open; the run stays in waiting-approval.
@@ -1231,41 +1673,44 @@ export async function resolveAndResume(
     return;
   }
   if (quorumOutcome === 'reject-quorum') {
-    await clearQuorumVotes(interruptId);
-    // Fail the gate. Mark interrupt resolved with the rejection,
-    // then mark the run failed. We don't resume execution.
     const rejectedAt = new Date().toISOString();
-    await storage.resolveInterrupt(interruptId, { action: 'reject', reason: 'quorum-reject' }, rejectedAt);
+    // Atomic CAS, mirroring the single-approver reject below: a concurrent
+    // resolve (the timeout sweep, a racing accept) that won owns the events and
+    // the run's terminal state.
+    const won = reviewer?.preclaimed === true
+      || await storage.resolveInterrupt(interruptId, { action: 'reject', reason: 'quorum-reject' }, rejectedAt);
+    if (!won) return answerLostClaim(storage, interruptId, 'rejected');
+    // ADR 0778 D1 — cleared only by the WINNER: a claim lost to the timeout
+    // used to destroy the vote record it never used.
+    await clearQuorumVotes(interruptId);
     // ADR 0556 P1 — a quorum rejection is a resolution: the gate waited, then
     // said no. Omitting it would make the age histogram describe only the
     // approvals, which is the flattering half.
     recordInterruptResolved(interrupt, 'rejected', rejectedAt);
-    await getEventLog().append({
+    // openwop#1692 — `action` is the v2 MUST (interrupt.md §ApprovalResume);
+    // `reason` is the RFC 0186 §A.2 cause.
+    await appendResolution({
       runId: interrupt.runId,
       nodeId: interrupt.nodeId,
-      type: 'run.failed',
-      payload: {
-        error: { code: 'approval_rejected', message: 'Quorum gate failed: rejected.' },
-      },
+      type: 'interrupt.resolved',
+      payload: { interruptId, kind: interrupt.kind, decision: 'rejected', action: 'reject', reason: 'quorum-reject' },
     });
-    await storage.updateRun(interrupt.runId, {
-      status: 'failed',
-      completedAt: new Date().toISOString(),
-      error: { code: 'approval_rejected', message: 'Quorum gate failed: rejected.' },
-    });
-    // ADR 0482 review H2 — a quorum-rejected run's spend is money ("all
-    // terminal spend counts"); stamp + fold like every terminal seam. Online
-    // evals stay EXCLUDED here (a reject is an operator act — the ADR 0480
-    // outcome doctrine), but money is not an outcome statistic.
-    void stampRunCostOnTerminal(storage, interrupt.runId)
-      .then((usd) => foldWorkflowSpendOnTerminal(storage, interrupt.runId, usd));
+    await announceResolved('rejected', { action: 'reject', reason: 'quorum-reject' });
     await signalReview('rejected'); // ADR 0074 — gate failed; surfaces clear the card
+    // RFC 0223 — the gate node fails IN THE EXECUTOR (node.failed,
+    // approval_rejected, retryable:false) and the scheduler routes it: an
+    // all_complete / any_failed edge continues the run, anything else skips,
+    // and only then does the run fail with `failedNodeId`. This path used to
+    // fail the run directly, so no edge out of a rejected gate could ever fire.
+    await dispatchGateResume(storage, hostSuite, interrupt, { action: 'reject', reason: 'quorum-reject' }, {
+      code: 'approval_rejected',
+      message: 'Quorum gate failed: rejected.',
+      operatorAct: true,
+    });
     return;
   }
-  if (quorumOutcome === 'accept-quorum-met' || quorumOutcome === 'accept-override') {
-    await clearQuorumVotes(interruptId);
-    // Fall through to the normal resume path below.
-  }
+  // 'accept-quorum-met' / 'accept-override' fall through to the accept path
+  // below, which claims and then clears the votes (ADR 0778 D1).
 
   // WF-DOC-2 / GEN-DOC-2 — the SINGLE-APPROVER reject path. Quorum gates fail
   // the run above ('reject-quorum') and the timeout sweep fails it too
@@ -1314,40 +1759,47 @@ export async function resolveAndResume(
     if (gateNode.typeId === 'core.approvalGate' && rejectAction === 'reject') {
       const rejectedAt = new Date().toISOString();
       // Atomic CAS — a concurrent resolve that wins leaves nothing to do here.
-      const won = await storage.resolveInterrupt(interruptId, resumeValue, rejectedAt);
-      if (!won) return;
+      const won = reviewer?.preclaimed === true || await storage.resolveInterrupt(interruptId, resumeValue, rejectedAt);
+      if (!won) return answerLostClaim(storage, interruptId, 'rejected');
       recordInterruptResolved(interrupt, 'rejected', rejectedAt);
-      // RFC 0093 §D.1 shape — the standard interrupt.resolved, outcome rejected.
-      await getEventLog().append({
+      await appendResolution({
         runId: interrupt.runId,
         nodeId: interrupt.nodeId,
         type: 'interrupt.resolved',
-        // ADR 0722 — `outcome` deleted: single-valued ('rejected'), redundant with
-        // RFC 0183's `decision`, undeclared on a closed def. Replay is safe —
-        // `replayDivergence.key` hashes type@nodeId, never the payload.
-        payload: { interruptId, kind: interrupt.kind, decision: 'rejected' },
+        // ADR 0722 — no `outcome` (undeclared on the closed def; `decision`
+        // carries it). openwop#1692 — `action` is a v2 MUST.
+        payload: { interruptId, kind: interrupt.kind, decision: 'rejected', action: 'reject' },
       });
-      await getEventLog().append({
-        runId: interrupt.runId,
-        nodeId: interrupt.nodeId,
-        type: 'run.failed',
-        payload: { error: { code: 'approval_rejected', message: 'Approval gate rejected.' } },
-      });
-      await storage.updateRun(interrupt.runId, {
-        status: 'failed',
-        completedAt: rejectedAt,
-        error: { code: 'approval_rejected', message: 'Approval gate rejected.' },
-      });
-      // ADR 0482 H2 — terminal spend counts on the reject path too.
-      void stampRunCostOnTerminal(storage, interrupt.runId)
-        .then((usd) => foldWorkflowSpendOnTerminal(storage, interrupt.runId, usd));
+      await announceResolved('rejected', resumeValue);
       await signalReview('rejected');
+      // RFC 0223 — routed through the scheduler; see the quorum path.
+      await dispatchGateResume(storage, hostSuite, interrupt, resumeValue, {
+        code: 'approval_rejected',
+        message: 'Approval gate rejected.',
+        operatorAct: true,
+      });
       return;
     }
   }
 
   const acceptedAt = new Date().toISOString();
-  await getSuspendManager().resolve(interruptId, resumeValue);
+  // ADR 0778 D1 (`APWF-1`) — the accept path CLAIMS, like both reject paths
+  // above. It used to call `getSuspendManager().resolve`, which discards the
+  // CAS result, then append `interrupt.resolved{accepted}` and dispatch the
+  // resume regardless. So an accept that lost to a reject or the timeout sweep
+  // still resumed the run, and when its resume was queued first the gate
+  // completed and its downstream fired under a stored REJECTION — fail-open.
+  const won = reviewer?.preclaimed === true || await storage.resolveInterrupt(interruptId, resumeValue, acceptedAt);
+  if (!won) {
+    // ADR 0778 C2 — a voter whose vote TIPPED the quorum, racing a peer's
+    // identical tip, is not told "already decided": the vote counted and the
+    // gate passed. But only when the winner really ACCEPTED (grade-code
+    // `APCD-2`): a tip that lost to the timeout's rejection is a 409.
+    if (quorumOutcome === 'accept-quorum-met' || quorumOutcome === 'accept-override') return answerLostClaim(storage, interruptId, 'accepted');
+    throw new OpenwopError('interrupt_already_resolved', 'interrupt already resolved', 409);
+  }
+  if (quorumOutcome !== null) await clearQuorumVotes(interruptId);
+  await recordOverride(); // APCD-11 — only after the claim is WON
   // ADR 0556 P1 — the accept path (quorum met, or an operator override).
   recordInterruptResolved(interrupt, 'accepted', acceptedAt);
   // ADR 0688 — the ACCEPT path emits the codemap type, same as the reject path
@@ -1362,7 +1814,7 @@ export async function resolveAndResume(
   // declares `decision`, not `outcome` (see ADR 0688 § The field that is not
   // there). Copying the sibling would have propagated an invalid payload to a
   // third site by citation.
-  await getEventLog().append({
+  await appendResolution({
     runId: interrupt.runId,
     nodeId: interrupt.nodeId,
     type: 'interrupt.resolved',
@@ -1377,116 +1829,8 @@ export async function resolveAndResume(
     // default would be inventing one.
     payload: { interruptId, kind: interrupt.kind, ...resolvedActionFields(interrupt.kind, resumeValue) },
   });
+  await announceResolved('accepted', resumeValue);
   await signalReview('resolved'); // ADR 0074 — review resolved; surfaces mark it done
 
-  // Synchronous validation (preserves the pre-existing 404 / 500
-  // behaviour on the HTTP response path). These reads aren't racy —
-  // they only check existence, not the snapshot. The *snapshot*
-  // read moves into the chained block below.
-  const run = await storage.getRun(interrupt.runId);
-  if (!run) throw new OpenwopError('run_not_found', `run ${interrupt.runId} missing during resume`, 404);
-  // ADR 0474 — resume against the run's PINNED revision when stamped (the
-  // head may have moved; a resumed run must continue on the def it started).
-  const resolvedDef = await resolveRunDefinition(run, hostSuite.workflowCatalog);
-  if (!resolvedDef) throw new OpenwopError('workflow_not_found', `workflow ${run.workflowId} not found`, 404);
-  const wf = { workflowId: run.workflowId, definition: resolvedDef.definition };
-  const nodeIndex = wf.definition.nodes.findIndex((n) => n.nodeId === interrupt.nodeId);
-  if (nodeIndex < 0) throw new OpenwopError('internal_error', `suspended node ${interrupt.nodeId} not in workflow`, 500);
-
-  // Per-run resume serialization. Concurrent resolves of *parallel*
-  // suspended interrupts (e.g. a fan-out workflow where 4 approval
-  // nodes all suspend on the same run, then the user approves all
-  // four in quick succession) used to race on the persisted
-  // `schedulerSnapshot`:
-  //
-  //   1. Each call read `run.schedulerSnapshot` at API time,
-  //      capturing the same stale snapshot in which *all four*
-  //      approvals are still suspended.
-  //   2. Each call scheduled its own `executeRun` via setImmediate.
-  //      The four executors ran concurrently — each one hydrated
-  //      from the captured stale snapshot, marked *only its own*
-  //      resumed node `completed`, drained, and persisted.
-  //   3. Each persist overwrote the previous one. Net effect: only
-  //      the *last* executor's view (one resume) survived in the
-  //      stored snapshot. The other three resumes emitted
-  //      `interrupt.resolved` but never reached `run.resumed`
-  //      / `node.completed` — silently dropped.
-  //
-  // Symptom in the event log: 4 × `interrupt.resolved`, but
-  // only 1-2 × `run.resumed` + `node.completed`. The user-facing
-  // chat shows the workflow stuck at "Running" forever.
-  //
-  // Fix: chain the snapshot read + executor dispatch behind any
-  // pending resume on the *same* runId so each resume hydrates from
-  // the freshest persisted snapshot. The HTTP response still
-  // returns immediately (we don't await `next` here) — only the
-  // background executor work serializes.
-  const prevChain = runResumeChains.get(interrupt.runId) ?? Promise.resolve();
-  const next: Promise<void> = prevChain.then(async () => {
-    // Re-read the run AFTER the previous resume's executor has
-    // fully settled and persisted its snapshot. This is what fixes
-    // the race — pre-chain, every concurrent resume read the same
-    // pre-any-resume snapshot.
-    const freshRun = await storage.getRun(interrupt.runId);
-    if (!freshRun) {
-      log.warn('resume skipped — run record vanished between resolve + execute', {
-        runId: interrupt.runId,
-      });
-      return;
-    }
-    // Resume the DAG scheduler. If a serialized snapshot exists
-    // (post-DAG), hydrate it and mark the suspended node as
-    // completed with the resolved value. If not (legacy linear
-    // path), fall back to `resumeFromNodeIndex` which the executor
-    // handles via its implicit-linear chain logic.
-    const serializedSnapshot = freshRun.schedulerSnapshot;
-    // ctx.suspend/ctx.interrupt nodes tag the interrupt for re-invoke resume
-    // (the node re-runs to shape the resolution into its outputs); native
-    // return-and-resume nodes use the default mark-completed path.
-    const idata = (interrupt.data ?? {}) as { __resumeStyle?: unknown; __resumeKey?: unknown };
-    const reinvokeOpts = idata.__resumeStyle === 'reinvoke'
-      ? { resumeStyle: 'reinvoke' as const, ...(typeof idata.__resumeKey === 'string' ? { resumeKey: idata.__resumeKey } : {}) }
-      : {};
-    const resumeOptions =
-      typeof serializedSnapshot === 'string'
-        ? (() => {
-            try {
-              return {
-                resumeSnapshot: JSON.parse(serializedSnapshot) as never,
-                resumeNodeId: interrupt.nodeId,
-                resumeValue,
-                ...reinvokeOpts,
-                policyResolver: hostSuite.providerPolicyResolver,
-              };
-            } catch {
-              return {
-                resumeFromNodeIndex: nodeIndex + 1,
-                resumeValue,
-                policyResolver: hostSuite.providerPolicyResolver,
-              };
-            }
-          })()
-        : {
-            resumeFromNodeIndex: nodeIndex + 1,
-            resumeValue,
-            policyResolver: hostSuite.providerPolicyResolver,
-          };
-    // AWAIT here — the chain's whole purpose is that the next
-    // resume's snapshot read sees this executor's persist.
-    await executeRun(storage, freshRun, wf.definition, resumeOptions);
-  }).catch((err) => {
-    log.error('resume dispatch failed', {
-      runId: interrupt.runId,
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }).finally(() => {
-    // Only clear if we're still the tail — a subsequent resolve may
-    // have chained another resume onto us. Clearing then would
-    // strand the chain entry, and the next concurrent resolve
-    // would start a fresh unserialized chain that races with us.
-    if (runResumeChains.get(interrupt.runId) === next) {
-      runResumeChains.delete(interrupt.runId);
-    }
-  });
-  runResumeChains.set(interrupt.runId, next);
+  await dispatchGateResume(storage, hostSuite, interrupt, resumeValue);
 }

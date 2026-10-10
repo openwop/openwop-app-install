@@ -38,7 +38,7 @@ function safeFileName(title: string): string {
 
 export function registerDocumentEditorRoutes(deps: RouteDeps): void {
   registerCanvasEditorRoutes(deps, {
-    basePath: '/v1/host/openwop-app/document-editor',
+    basePath: '/host/openwop-app/document-editor',
     feature: { toggleId: 'document-editor', label: 'Documents (rich text)' },
     canvasTypeId: 'canvas.document',
     // ADR 0359 D1 — collab-capable (the transport enforces realtime-collab AND

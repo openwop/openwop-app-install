@@ -17,6 +17,12 @@
  * Root placement (not the deprecated `capabilities` wrapper, not dotted) is RFC 0073's
  * document-root layout — the same path every other family took, and the one a consumer
  * actually reads.
+ *
+ * ADR 0812 P3c-0 — the field was a v1-DOCUMENT claim: the closed v2 capabilities root does
+ * not declare it (`scripts/check-wire-claims.mjs` reports it NOT_IN_V2), so the advert legs
+ * retired with major 1. Legs 1–3 now assert the DERIVATION (`contractProvenance()`, what the
+ * v1 root emitted) directly — the sabotage leg still proves it follows the stamp — and leg 1
+ * pins that the v2 root does not carry it.
  */
 import http from 'node:http';
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -38,7 +44,7 @@ const boot = async (): Promise<{ srv: http.Server; base: string }> => {
 };
 
 const advert = async (base: string): Promise<Record<string, unknown>> => {
-  const res = await fetch(`${base}/.well-known/openwop`);
+  const res = await fetch(`${base}/.well-known/openwop`, { headers: { 'OpenWOP-Version': '2' } });
   expect(res.status).toBe(200);
   return await res.json() as Record<string, unknown>;
 };
@@ -53,13 +59,14 @@ beforeAll(async () => {
 afterAll(async () => { await new Promise<void>((r) => server?.close(() => r())); });
 
 describe('RFC 0146 — contractProvenance', () => {
-  it('leg 1: the advert carries it at the ROOT and validates against the vendored declaration', async () => {
-    const doc = await advert(BASE);
-    expect(doc.contractProvenance).toBeTypeOf('object');
+  it('leg 1: the derivation validates against the declaration; the closed v2 root does not carry it', async () => {
+    __resetContractProvenance();
+    const provenance = contractProvenance();
+    expect(provenance).toBeTypeOf('object');
 
-    // Not under the deprecated wrapper, and not dotted — the two shapes RFC 0073 retired.
-    const wrapper = doc.capabilities as Record<string, unknown> | undefined;
-    expect(wrapper?.contractProvenance).toBeUndefined();
+    // The closed v2 root admits only declared families, and contractProvenance is not one.
+    const doc = await advert(BASE);
+    expect(doc.contractProvenance).toBeUndefined();
     expect(doc['host.contractProvenance']).toBeUndefined();
 
     // Compile the FAMILY's sub-schema, not the whole document: capabilities.schema.json
@@ -72,7 +79,7 @@ describe('RFC 0146 — contractProvenance', () => {
 
     const ajv = new Ajv2020({ strict: false, allErrors: true });
     const validate = ajv.compile(declared!);
-    if (!validate(doc.contractProvenance)) {
+    if (!validate(provenance)) {
       throw new Error(`contractProvenance failed its declaration: ${ajv.errorsText(validate.errors)}`);
     }
   });
@@ -80,8 +87,8 @@ describe('RFC 0146 — contractProvenance', () => {
   it('leg 2 (NON-VACUITY): the field is actually present, so the conformance leg is applicable', async () => {
     // The scenario soft-skips a silent host. Without this assertion a green conformance
     // run is compatible with the field never having been emitted once.
-    const doc = await advert(BASE);
-    const p = doc.contractProvenance as Record<string, unknown>;
+    __resetContractProvenance();
+    const p = contractProvenance() as unknown as Record<string, unknown>;
     expect(typeof p.suiteVersion).toBe('string');
     expect(typeof p.corpusCommit).toBe('string');
     expect((p.suiteVersion as string).length).toBeGreaterThan(0);
@@ -104,16 +111,13 @@ describe('RFC 0146 — contractProvenance', () => {
     const stampPath = corpusStampPath()!;
     const original = readFileSync(stampPath, 'utf8');
     const real = JSON.parse(original) as Record<string, string>;
-    let srv: http.Server | undefined;
     try {
       writeFileSync(stampPath, JSON.stringify({
         suiteVersion: '0.0.1-stale', corpusCommit: 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
       }, null, 2));
       __resetContractProvenance();
 
-      const b = await boot();
-      srv = b.srv;
-      const p = (await advert(b.base)).contractProvenance as Record<string, unknown>;
+      const p = contractProvenance() as unknown as Record<string, unknown>;
 
       // A constant would still report the real values here. Derivation reports the stale ones.
       expect(p.suiteVersion).toBe('0.0.1-stale');
@@ -122,7 +126,6 @@ describe('RFC 0146 — contractProvenance', () => {
     } finally {
       writeFileSync(stampPath, original);
       __resetContractProvenance();
-      if (srv) await new Promise<void>((r) => srv!.close(() => r()));
     }
   }, 60_000);
 

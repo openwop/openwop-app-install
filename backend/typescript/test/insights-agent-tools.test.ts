@@ -82,8 +82,8 @@ describe('ADR 0081 §3 — node-as-tool projection', () => {
  * next person to add a provenance field (or remove one) is told.
  */
 describe('PROBE-IS-11 — the Financial prompt does not promise provenance the node cannot emit', () => {
-  const promptPath = join(REPO_ROOT, 'packs', 'feature.insights-suite.agents', 'prompts', 'financial.md');
-  const packPath = join(REPO_ROOT, 'packs', 'feature.insights-suite.agents', 'pack.json');
+  const promptPath = join(REPO_ROOT, 'packs', 'vendor.openwop-app.insights-suite.agents', 'prompts', 'financial.md');
+  const packPath = join(REPO_ROOT, 'packs', 'vendor.openwop-app.insights-suite.agents', 'pack.json');
 
   it('the node emits exactly the output keys the prompt enumerates — no more, no fewer', async () => {
     const mod = await getNodeRegistry().resolve('feature.insights-suite.nodes.variance-compute');

@@ -42,12 +42,12 @@ describe('ADR 0470 P3 — honeypot on /widget/message', () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
     const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
     await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
-    const w = await provisionWidget('hp-t', 'hp-o', 'admin', { agentId: 'feature.code-exec.agents.default', allowedDomains: ['acme.com'] });
+    const w = await provisionWidget('hp-t', 'hp-o', 'admin', { agentId: 'vendor.openwop-app.code-exec.agents.default', allowedDomains: ['acme.com'] });
     token = w.token;
   });
   afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-  const postMsg = (body: unknown) => fetch(`${BASE}/v1/host/openwop-app/public/widget/message`, {
+  const postMsg = (body: unknown) => fetch(`${BASE}/host/openwop-app/public/widget/message`, {
     method: 'POST', headers: { 'content-type': 'application/json', origin: 'https://acme.com' }, body: JSON.stringify(body),
   });
 

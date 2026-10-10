@@ -13,7 +13,7 @@
  * data-access seam shared by CmsPage + SectionsEditor + CmsLanguageSettings).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, within, cleanup, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import type { ReactNode } from 'react';
 
@@ -61,6 +61,8 @@ vi.mock('../cmsClient.js', () => ({
   // ADR 0205 — locale governance
   listLocaleGrants: vi.fn(async () => []), putLocaleGrant: vi.fn(),
   setLocalePublish: vi.fn(),
+  getTranslationStatus: vi.fn(async () => ({ locales: [], sections: {}, counts: {} })),
+  confirmTranslationSource: vi.fn(),
 }));
 
 // The org-asset list now comes from the media feature's client (ADR 0206 B4).
@@ -80,6 +82,10 @@ vi.mock('../../sharing/sharingClient.js', () => ({
 // Front-page collapse (ADR 0027): the superadmin-gated site-config probe. The
 // default suite runs as a non-superadmin, so it REJECTS — the Front-page scope
 // stays hidden and the org-only behavior is unchanged.
+// The Page tab reads and writes the page's search and social record.
+vi.mock('../../publishing/publishingClient.js', () => ({ getSeo: vi.fn(async () => null), putSeo: vi.fn(async (_o: string, _p: string, seo: unknown) => seo) }));
+// ADR 0836 — the editor reads the caller's org access (admin tier): an admin here.
+vi.mock('../../../client/accessClient.js', async (orig) => ({ ...(await orig<Record<string, unknown>>()), getEffectiveAccess: vi.fn(async () => ({ roles: ['owner'], scopes: ['workspace:read', 'workspace:write', 'host:members:manage'], basis: 'member' })) }));
 vi.mock('../../site/siteConfigClient.js', () => ({
   getSiteConfig: vi.fn(async () => { throw new Error('forbidden'); }),
   putSiteConfig: vi.fn(),
@@ -140,8 +146,8 @@ describe('CmsPage (always-on, ADR 0027)', () => {
 
     // Detail header lands with the draft's version…
     await waitFor(() => expect(screen.getByText(/\/landing · v3/)).toBeTruthy());
-    // …the detail defaults to the Public preview, so switch to the Editor form…
-    fireEvent.click(screen.getByRole('button', { name: 'Editor' }));
+    // …page-level settings live on the settings panel's Page tab…
+    fireEvent.click(screen.getByRole('tab', { name: 'Page' }));
     // …the schedule control is offered for a draft (ADR 0204 C2)…
     expect(screen.getByLabelText(/publish at/i)).toBeTruthy(); // CMSUX-6 — visible label
     // …and the collapsed panels exist.
@@ -198,17 +204,17 @@ describe('CmsPage — deep link renders the page\'s sections', () => {
     // …and the preview must actually contain the section's content, not an
     // empty stage (the mocked PublicPreviewFrame renders children inline).
     await waitFor(() => expect(screen.getByTestId('public-preview')).toBeTruthy());
-    expect(screen.getByText('Hi')).toBeTruthy();
+    expect(within(screen.getByTestId('public-preview')).getByText('Hi')).toBeTruthy();
   });
 
-  it('the Outline view lists the sections too (the unwrapped renderer path)', async () => {
+  it('the Sections menu names the sections too (the resolved, not the raw, list)', async () => {
     access.value = { enabled: true, loading: false, variant: undefined };
     renderDeepLink();
     await waitFor(() => expect(screen.getByText(/\/landing · v3/)).toBeTruthy());
-    fireEvent.click(screen.getByRole('button', { name: 'Outline' }));
-    // Outline only renders when resolvedSections.length > 0 — so this asserts
-    // the sections survived the ref-resolution pass, not just that a box exists.
-    await waitFor(() => expect(screen.getAllByText('Hi').length).toBeGreaterThan(0));
+    // The menu reads the resolved sections, so this asserts they survived the
+    // ref-resolution pass, not just that a box exists.
+    fireEvent.click(screen.getByRole('button', { name: 'Jump to a section' }));
+    expect(await screen.findByRole('menuitem', { name: /Hi/ })).toBeTruthy();
   });
 });
 
@@ -223,8 +229,8 @@ describe('CmsPage — preview links: failed read vs genuinely none', () => {
     access.value = { enabled: true, loading: false, variant: undefined };
     renderDeepLink();
     await waitFor(() => expect(screen.getByText(/\/landing · v3/)).toBeTruthy());
-    // The detail defaults to the Public preview; the panels live in Editor.
-    fireEvent.click(screen.getByRole('button', { name: 'Editor' }));
+    // The panels live on the settings panel's Page tab.
+    fireEvent.click(screen.getByRole('tab', { name: 'Page' }));
     fireEvent.click(screen.getByText(/preview links/i)); // <details> lazy-loads on toggle
   };
 

@@ -62,7 +62,7 @@ interface WorkspaceSummary {
 
 export function registerWorkspaceTenancyRoutes(app: Express): void {
   // ── List the caller's workspaces ──
-  app.get('/v1/host/openwop-app/me/workspaces', async (req, res, next) => {
+  app.get('/host/openwop-app/me/workspaces', async (req, res, next) => {
     try {
       const subject = requireSubject(req);
       const personal = personalTenantOf(req);
@@ -116,7 +116,7 @@ export function registerWorkspaceTenancyRoutes(app: Express): void {
   });
 
   // ── Create a shared workspace (caller becomes its owner) ──
-  app.post('/v1/host/openwop-app/workspaces', async (req, res, next) => {
+  app.post('/host/openwop-app/workspaces', async (req, res, next) => {
     try {
       const subject = requireSubject(req);
       if (!isDurableCaller(req)) {
@@ -140,7 +140,7 @@ export function registerWorkspaceTenancyRoutes(app: Express): void {
   });
 
   // ── Switch the active workspace (re-bind the session, member-gated) ──
-  app.post('/v1/host/openwop-app/workspaces/:id/switch', async (req, res, next) => {
+  app.post('/host/openwop-app/workspaces/:id/switch', async (req, res, next) => {
     try {
       const subject = requireSubject(req);
       const personal = personalTenantOf(req);
@@ -196,11 +196,11 @@ export function registerWorkspaceTenancyRoutes(app: Express): void {
         }
         // ADR 0389 P1: carry the second-factor mark across the switch — a
         // re-issue that dropped it would silently demote an MFA session.
-        issueUserSession(res, { userId, tenantId: target, personalTenant: personal, mfa: req.mfaVerified, epoch: validatedEpoch });
+        issueUserSession(res, { userId, tenantId: target, personalTenant: personal, mfa: req.mfaVerified, epoch: validatedEpoch, source: req.cookieSession });
       } else {
         // The unbound lane carries the canonical row's epoch the middleware
         // validated (absent when no row was ever bound — nothing to revoke).
-        issueSubjectSession(res, { subject, tenantId: target, personalTenant: personal, mfa: req.mfaVerified, ...(validatedEpoch !== undefined ? { epoch: validatedEpoch } : {}) });
+        issueSubjectSession(res, { subject, tenantId: target, personalTenant: personal, mfa: req.mfaVerified, ...(validatedEpoch !== undefined ? { epoch: validatedEpoch } : {}), source: req.cookieSession });
       }
       res.json({ ok: true, active: target });
     } catch (err) {

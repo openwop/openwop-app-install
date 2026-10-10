@@ -23,14 +23,12 @@
  *     worker's tick, so gates with no traffic still resolve on time.
  */
 
+import { openInterruptsForSweep } from './openInterruptSweep.js';
 import type { Storage } from '../storage/storage.js';
 import type { InterruptRecord } from '../types.js';
 import { getEventLog } from './eventLog.js';
 import { createLogger } from '../observability/logger.js';
-import { scoreOnlineEvalsOnTerminal } from '../host/workflowEvalOnline.js';
-import { stampRunCostOnTerminal } from '../observability/costEmitter.js';
 import { recordInterruptResolved } from '../observability/metricSeams.js';
-import { foldWorkflowSpendOnTerminal } from '../host/workflowBudgets.js';
 
 const log = createLogger('approvalGateTimeout');
 
@@ -67,6 +65,23 @@ export function approvalGateDeadlineMs(interrupt: InterruptRecord): number | nul
 }
 
 /**
+ * RFC 0223 — how a timed-out gate's FAILURE reaches the scheduler. This module
+ * owns no workflow catalog, so the resume seam (`dispatchGateResume` in
+ * routes/interrupts.ts, the one every resolution uses) is late-bound at boot by
+ * `index.ts`, the precedent `setSubWorkflowDispatcher` set.
+ */
+export type RejectedGateRouter = (
+  interrupt: InterruptRecord,
+  rejection: { code: string; message: string },
+) => Promise<void>;
+
+let router: RejectedGateRouter | null = null;
+
+export function setRejectedGateRouter(r: RejectedGateRouter | null): void {
+  router = r;
+}
+
+/**
  * If `interrupt` is an UNRESOLVED approval gate past its deadline, resolve it
  * as rejected with reason `timeout` (fail closed) and fail the run the same
  * way a quorum majority-reject does. Returns true when the gate was timed
@@ -80,6 +95,19 @@ export async function timeoutApprovalGateIfDue(
   if (interrupt.resolvedAt) return false;
   const deadline = approvalGateDeadlineMs(interrupt);
   if (deadline === null || now < deadline) return false;
+  // Refuse BEFORE the CAS when nothing can route the failure: consuming the
+  // gate first would strand the run waiting on an interrupt nobody can resolve.
+  // The gate stays open (never auto-approved) and the next sweep retries. A
+  // direct-fail fallback here would be a second, unrouted reject path — the
+  // shape RFC 0223 exists to remove.
+  const route = router;
+  if (!route) {
+    log.error('approval gate due but no rejected-gate router is registered — gate left open', {
+      interruptId: interrupt.interruptId,
+      runId: interrupt.runId,
+    });
+    return false;
+  }
 
   const resolvedAt = new Date(now).toISOString();
   // Atomic compare-and-set: only the caller that flips resolved_at NULL→set
@@ -102,39 +130,30 @@ export async function timeoutApprovalGateIfDue(
       interruptId: interrupt.interruptId,
       kind: interrupt.kind,
       decision: 'rejected',
-      // `reason` stays: it is the CAUSE (gate expired vs quorum rejected) and
-      // has no seat yet — raised with the steward; the hatch carries it when
-      // RFC 0185 ships. Not deleted: that would be a silent drop (§C MUST NOT).
+      // openwop#1692 — `timeout` is the RECORD-ONLY action value (RFC 0183
+      // §A.1): minted by this timer branch, never accepted on a resume. No
+      // `resolvedBy` — nobody resolved it, and on a timeout row it must be the
+      // host's subject or absent.
+      action: 'timeout',
+      // `reason` is the CAUSE (gate expired vs quorum rejected), seated on the
+      // v2 def by RFC 0186 §A.2.
       reason: 'timeout',
     },
   });
 
-  // Fail the run (fail closed) — mirrors the reject-quorum path in
-  // routes/interrupts.ts. A run that already settled is left untouched
-  // (the gate is merely invalidated).
+  // RFC 0223 — fail the gate NODE through the scheduler (node.failed
+  // approval_rejected, retryable:false), so an all_complete / any_failed edge
+  // continues the run and only an unrouted failure fails it, naming the gate.
+  // A run that already settled is left untouched (the gate is merely
+  // invalidated): the dispatcher skips terminal runs. ADR 0480 (code-review
+  // M1) — unlike an operator reject, a timeout IS an outcome, so it is scored
+  // (no `operatorAct`); spend is stamped by the executor's terminal seam.
   const run = await storage.getRun(interrupt.runId);
   if (run && !TERMINAL_RUN_STATUSES.has(run.status)) {
-    await getEventLog().append({
-      runId: interrupt.runId,
-      nodeId: interrupt.nodeId,
-      type: 'run.failed',
-      payload: {
-        error: { code: 'approval_rejected', message: 'Approval gate timed out (auto-rejected; reason: timeout).' },
-      },
+    await route(interrupt, {
+      code: 'approval_rejected',
+      message: 'Approval gate timed out (auto-rejected; reason: timeout).',
     });
-    await storage.updateRun(interrupt.runId, {
-      status: 'failed',
-      completedAt: resolvedAt,
-      error: { code: 'approval_rejected', message: 'Approval gate timed out (auto-rejected; reason: timeout).' },
-    });
-    // ADR 0480 (code-review M1) — a gate-timeout auto-reject is a genuine
-    // production OUTCOME (unlike operator cancels): score online evals here
-    // like the executor terminal sites do. ADR 0482 review H2 — and its SPEND
-    // is money: stamp + fold like every terminal seam ("all terminal spend
-    // counts" must be true).
-    void scoreOnlineEvalsOnTerminal(storage, interrupt.runId);
-    void stampRunCostOnTerminal(storage, interrupt.runId)
-      .then((usd) => foldWorkflowSpendOnTerminal(storage, interrupt.runId, usd));
   }
   log.info('approval gate auto-rejected on timeout', {
     interruptId: interrupt.interruptId,
@@ -154,7 +173,7 @@ const SWEEP_BATCH = 200;
  * wedge the worker tick that hosts the sweep.
  */
 export async function sweepExpiredApprovalGates(storage: Storage, now: number = Date.now()): Promise<number> {
-  const open = await storage.listOpenInterruptsAll(SWEEP_BATCH);
+  const open = await openInterruptsForSweep(storage, 'approval-gate-timeout', SWEEP_BATCH);
   let timedOut = 0;
   for (const interrupt of open) {
     try {

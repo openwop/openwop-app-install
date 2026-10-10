@@ -1,29 +1,29 @@
 /**
  * core.email.send (ADR 0193 Phase 2) — provider-native send behind a MANDATORY
  * approval interrupt, driven directly with a fake ctx (the draft-node test
- * pattern). `createApp` wires the memory-storage singleton the shared
- * `email:sent` ledger needs.
+ * pattern). A memory storage is wired into host-ext persistence for the shared
+ * `email:sent` ledger (a DurableCollection) — no app boot, no listener.
  *
  * Pins the safety contract: sends ONLY after an interactive approve; reject /
  * headless never send (fail-closed); a replay/re-invoke dedups (no double
  * send); header injection is rejected; Gmail vs Graph endpoints.
+ *
+ * Sabotage-witnessed (grade-tests w9): ignoring the approve/reject decision, letting a
+ * non-interactive session reach `suspend`, skipping the `priorSend` dedup, dropping the
+ * CR/LF guard in `renderEmailRequest`, routing Gmail to the drafts URL, and
+ * `saveToSentItems:false` each red their case.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import http from 'node:http';
-import { createApp } from '../src/index.js';
+import { beforeAll, describe, expect, it } from 'vitest';
+import { openStorage } from '../src/storage/index.js';
+import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { ensureNodesRegistered } from '../src/bootstrap/nodes.js';
 import { getNodeRegistry } from '../src/executor/nodeRegistry.js';
 import type { NodeContext } from '../src/executor/types.js';
 
-let server: http.Server;
-
 beforeAll(async () => {
-  process.env.OPENWOP_STORAGE_DSN = 'memory://';
-  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((r) => { server = app.listen(0, '127.0.0.1', () => r()); });
+  initHostExtPersistence(await openStorage('memory://'));
   ensureNodesRegistered();
 });
-afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
 
 const node = () => { const n = getNodeRegistry().get('core.email.send'); expect(n).toBeTruthy(); return n!; };
 
@@ -37,7 +37,7 @@ function makeCtx(over: Partial<NodeContext> & { _calls?: InvokeCall[]; _decision
     suspend: async () => over._decision ?? { action: 'approve' },
     connectors: {
       invoke: async (id, request) => { calls.push({ id, url: request.url, body: String(request.body ?? '') }); return { ok: true, status: 200, data: { id: 'gmail-sent-1' } }; },
-    } as NodeContext['connectors'],
+    },
   };
   const { _calls, _decision, ...rest } = over;
   void _calls; void _decision;

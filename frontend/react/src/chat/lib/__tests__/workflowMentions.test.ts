@@ -20,7 +20,7 @@ vi.mock('../../../client/demoMode.js', () => ({ demoModeCached: () => demoModeCa
 vi.mock('../../../i18n/index.js', () => ({ default: { t: (k: string) => k } }));
 
 // Import AFTER the mocks are registered.
-const { listWorkflowMentions, refreshWorkflowMentionCache } = await import('../workflowMentions.js');
+const { listWorkflowMentions, refreshWorkflowMentionCache, workflowMentionLoadFailed, detectWorkflowSlashMention, filterMentions } = await import('../workflowMentions.js');
 
 beforeEach(() => {
   listWorkflowSummaries.mockReset();
@@ -64,5 +64,49 @@ describe('listWorkflowMentions — backend ownership index merge', () => {
     listWorkflowSummaries.mockRejectedValue(new Error('backend down'));
     await refreshWorkflowMentionCache();
     expect(listWorkflowMentions().map((e) => e.workflowId)).toEqual(['wf.a']); // prior cache survives
+  });
+
+  it('ADR 0764 (CHATWF-4) — a failed load is RECORDED, and a later success clears it', async () => {
+    listWorkflowSummaries.mockRejectedValue(new Error('429'));
+    await refreshWorkflowMentionCache();
+    expect(workflowMentionLoadFailed()).toBe(true);
+    listWorkflowSummaries.mockResolvedValue([]);
+    await refreshWorkflowMentionCache();
+    expect(workflowMentionLoadFailed()).toBe(false);
+  });
+});
+
+describe('detectWorkflowSlashMention — ADR 0764 (CHATWF-2)', () => {
+  beforeEach(async () => {
+    listWorkflowSummaries.mockResolvedValue([{ workflowId: 'wf.s', name: 'Summarize', nodeCount: 1, createdAt: '', updatedAt: '' }]);
+    await refreshWorkflowMentionCache();
+  });
+
+  it('matches a bare `/slug args` with no agent', () => {
+    const m = detectWorkflowSlashMention('/summarize the doc');
+    expect(m?.entry.workflowId).toBe('wf.s');
+    expect(m?.trailing).toBe('the doc');
+    expect(m?.agentSlug).toBeNull();
+  });
+
+  it('matches the `@agent /slug` hand-off the picker builds — the case that used to fall through to plain chat', () => {
+    const m = detectWorkflowSlashMention('@devon /summarize the doc');
+    expect(m?.entry.workflowId).toBe('wf.s');
+    expect(m?.trailing).toBe('the doc');
+    expect(m?.agentSlug).toBe('devon');
+  });
+
+  it('does not match a slash token mid-sentence', () => {
+    expect(detectWorkflowSlashMention('@devon please /summarize')).toBeNull();
+  });
+});
+
+describe('filterMentions — ADR 0770 D8', () => {
+  const entry = (displayName: string, slug: string) => ({ workflowId: `wf.${slug}`, displayName, slug }) as unknown as Parameters<typeof filterMentions>[0][number];
+  it('matches the slug the picker DISPLAYS, not only the display name', () => {
+    const rows = [entry('Daily report', 'daily-report'), entry('Weekly digest', 'weekly-digest')];
+    // `daily-r` appears nowhere in "Daily report" — it matched nothing before.
+    expect(filterMentions(rows, 'daily-r').map((e) => e.slug)).toEqual(['daily-report']);
+    expect(filterMentions(rows, 'weekly').map((e) => e.slug)).toEqual(['weekly-digest']);
   });
 });

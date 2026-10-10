@@ -1,7 +1,7 @@
 /**
  * CLI-friendly demo summary endpoint.
  *
- * Namespace: host-extension under `/v1/host/openwop-app/*`; this is not
+ * Namespace: host-extension under `/host/openwop-app/*`; this is not
  * part of the normative OpenWOP wire contract. It gives local tools a
  * stable, low-chatter way to understand the workflow-engine demo app
  * without scraping several unrelated endpoints.
@@ -14,13 +14,14 @@ import { getNodeRegistry } from '../executor/nodeRegistry.js';
 import { listLoadedConformanceFixtures } from '../host/index.js';
 import { getPromptsHostConfig } from '../host/promptHostConfig.js';
 import { listRegisteredWorkflows } from '../host/workflowsRegistry.js';
+import { advertisedPath, VENDOR_ROOT } from '../middleware/protocolVersion.js';
 
 interface Deps {
   config: AppConfig;
 }
 
 export function registerExampleDataSummaryRoutes(app: Express, deps: Deps): void {
-  app.get('/v1/host/openwop-app/example-data-summary', (_req, res) => {
+  app.get('/host/openwop-app/example-data-summary', (_req, res) => {
     res.json(buildExampleDataSummary(deps.config));
   });
 }
@@ -40,18 +41,21 @@ export function buildExampleDataSummary(config: AppConfig): Record<string, unkno
       serviceVersion: config.serviceVersion,
       storage: storageKind(config.storageDsn),
     },
-    endpoints: {
+    // ADR 0669: every address follows the cut (`advertisedPath`). A literal
+    // `/v1/...` here would be a link to a 410 once v1 retires. An operation with
+    // no v2 address (`/packs`) is omitted after the cut rather than advertised dead.
+    endpoints: withoutNulls({
       health: '/health',
       readiness: '/readiness',
       capabilities: '/.well-known/openwop',
-      openapi: '/v1/openapi.json',
-      nodeCatalog: '/v1/host/openwop-app/node-catalog',
-      exampleDataSummary: '/v1/host/openwop-app/example-data-summary',
-      workflows: '/v1/host/openwop-app/workflows',
-      runs: '/v1/runs',
-      packs: '/v1/packs',
-      prompts: '/v1/prompts',
-    },
+      openapi: advertisedPath('/openapi.json'),
+      nodeCatalog: advertisedPath(`${VENDOR_ROOT}/node-catalog`),
+      exampleDataSummary: advertisedPath(`${VENDOR_ROOT}/example-data-summary`),
+      workflows: advertisedPath(`${VENDOR_ROOT}/workflows`),
+      runs: advertisedPath('/runs'),
+      packs: advertisedPath('/packs'),
+      prompts: advertisedPath('/prompts'),
+    }),
     demo: {
       nodeCatalog: {
         total: nodes.length,
@@ -78,6 +82,10 @@ export function buildExampleDataSummary(config: AppConfig): Record<string, unkno
       fixtures,
     }),
   };
+}
+
+function withoutNulls(o: Record<string, string | null>): Record<string, string> {
+  return Object.fromEntries(Object.entries(o).filter((e): e is [string, string] => e[1] !== null));
 }
 
 function storageKind(dsn: string): string {

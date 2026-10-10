@@ -93,6 +93,58 @@ describe('ADR 0490 — the eager/lazy namespace split stays safe', () => {
     expect(offenders).toEqual([]);
   });
 
+  it('ADR 0819 — the lazy AREA catalog `featureToggles` is rendered only by its lazy panel', () => {
+    // It is deferred out of the eager chunk; any OTHER renderer (shell or
+    // feature) would paint raw keys until the admin panel happened to load it.
+    const users: string[] = [];
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir)) {
+        const p = join(dir, entry);
+        if (statSync(p).isDirectory()) { if (entry !== '__tests__' && entry !== 'i18n') walk(p); continue; }
+        if (!/\.tsx?$/.test(entry)) continue;
+        // Its own matcher: `namespacesIn` matches lowercase ids only, and this one is camelCase.
+        if (/useTranslation\('featureToggles'\)|['"]featureToggles:/.test(readFileSync(p, 'utf8'))) users.push(p.slice(SRC.length + 1));
+      }
+    };
+    walk(SRC);
+    expect(users).toEqual(['featureToggles/FeatureTogglePanel.tsx']);
+    const chrome = readFileSync(join(SRC, 'chrome', 'features.tsx'), 'utf8');
+    expect(chrome).toContain("lazy(() => import('../featureToggles/FeatureTogglePanel.js')");
+  });
+
+  it('ADR 0862 — the lazy AREA catalog `assistantAction` is used only where it is loaded first', () => {
+    // Deferred out of the eager chunk like `featureToggles`. Its renderer owns a Suspense
+    // boundary; every other user either renders that renderer (ReviewCard) or loads the
+    // namespace up front without suspending. Any other user would paint raw keys.
+    const users: string[] = [];
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir)) {
+        const p = join(dir, entry);
+        if (statSync(p).isDirectory()) { if (entry !== '__tests__' && entry !== 'i18n') walk(p); continue; }
+        if (!/\.tsx?$/.test(entry)) continue;
+        if (/useTranslation\((\[[^\]]*)?'assistantAction'|['"]assistantAction:/.test(readFileSync(p, 'utf8'))) users.push(p.slice(SRC.length + 1));
+      }
+    };
+    walk(SRC);
+    expect(users.sort()).toEqual([
+      'agents/AgentHealthPanel.tsx',
+      'agents/RecurringTasksPanel.tsx',
+      'agents/approvalsClient.ts',
+      'assistantAction/AssistantActionFields.tsx',
+      'chat/reviews/ReviewCard.tsx',
+      'notifications/ApprovalsInbox.tsx',
+      'notifications/NeedsYouInbox.tsx',
+    ]);
+    // Loaded WITHOUT suspending: listing it in the main hook blanked the whole inbox page
+    // while the chunk loaded.
+    for (const f of ['notifications/ApprovalsInbox.tsx', 'notifications/NeedsYouInbox.tsx', 'agents/RecurringTasksPanel.tsx', 'agents/AgentHealthPanel.tsx']) {
+      expect(readFileSync(join(SRC, f), 'utf8'), f).toMatch(/useTranslation\('assistantAction', \{ useSuspense: false \}\)/);
+    }
+    for (const f of ['notifications/ApprovalsInbox.tsx', 'notifications/NeedsYouInbox.tsx', 'chat/reviews/ReviewCard.tsx', 'agents/AgentDrawer.tsx']) {
+      expect(readFileSync(join(SRC, f), 'utf8'), f).toMatch(/lazy\(\(\) => import\('\.\.\/(\.\.\/)?assistantAction\/AssistantActionFields\.js'\)/);
+    }
+  });
+
   it('resources.ts and vite.config.ts name the SAME shell namespaces', () => {
     // Two hand-maintained lists: a mismatch puts a catalog in the lazy chunk
     // while the loader believes it is eager (or the reverse), which is exactly

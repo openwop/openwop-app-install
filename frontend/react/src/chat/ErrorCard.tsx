@@ -2,7 +2,7 @@
  * Structured error card for a failed assistant turn.
  *
  * Replaces the raw `<strong>code:</strong> message` line with a
- * red-bordered card carrying a friendly headline, the underlying code +
+ * neutral card carrying a friendly headline, the underlying code +
  * provider context (when known), and a primary suggested action.
  *
  * Two layers of classification:
@@ -21,6 +21,8 @@
  */
 
 import { Button } from '../ui/Button.js';
+import { AlertIcon } from '../ui/icons/index.js';
+import { SignInButton } from '../auth/SignInButton.js';
 import i18n from '../i18n/index.js';
 import { classifyChatError, type KnownError } from './lib/errorClassify.js';
 import type { ChatMessage } from './types.js';
@@ -42,6 +44,7 @@ interface Props {
 function actionFromBE(envelope: ErrorEnvelope): KnownError['action'] {
   if (envelope.action === 'reconfigure') return { kind: 'reconfigure-byok', label: i18n.t('chat:openByokSettings') };
   if (envelope.action === 'retry' || envelope.action === 'wait') return { kind: 'retry', label: i18n.t('common:retry') };
+  if (envelope.action === 'sign_in') return { kind: 'sign-in', label: i18n.t('auth:signIn', { defaultValue: 'Sign in' }) };
   // 'regenerate' / 'abort' have no FE button affordance in this card.
   return undefined;
 }
@@ -59,33 +62,42 @@ function classify(error: ErrorEnvelope): KnownError {
 
 export function ErrorCard({ error, onReconfigure, onRetry }: Props): JSX.Element {
   const k = classify(error);
+  // DESIGN.md §3 rule 3 / §4.6 — a neutral surface with the failure named by an
+  // icon + a danger-tinted TITLE, plain words below, the fix as a real button,
+  // and the wire code behind "Technical details" (kept for support, not shown
+  // as the message). One place: ConversationView no longer echoes this text in
+  // a second banner.
   return (
     <div role="alert" className="errcard-root">
-      <div className="u-fw-600 u-text-danger">{k.title}</div>
-      {k.detail && <div className="u-mt-1 u-ink">{k.detail}</div>}
-      <div className="muted u-mt-1-5 u-fs-11 u-o-70">
-        {error.code}
+      <div className="errcard-title">
+        <AlertIcon size={16} aria-hidden />
+        <span>{k.title}</span>
       </div>
-      {k.action && (
-        <div className="u-mt-2">
-          {k.action.kind === 'reconfigure-byok' && onReconfigure && (
-            <Button
-              variant="secondary" className="errcard-action-btn"
-              onClick={onReconfigure}
-            >
-              {k.action.label}
-            </Button>
-          )}
-          {k.action.kind === 'retry' && onRetry && (
-            <Button
-              variant="secondary" className="errcard-action-btn"
-              onClick={onRetry}
-            >
-              {k.action.label}
-            </Button>
-          )}
-        </div>
-      )}
+      {k.detail && <div className="errcard-detail">{k.detail}</div>}
+      <div className="errcard-foot">
+        {k.action?.kind === 'reconfigure-byok' && onReconfigure && (
+          <Button variant="secondary" size="sm" onClick={onReconfigure}>
+            {k.action.label}
+          </Button>
+        )}
+        {/* Signing in is the fix; a person's own key is the other way through,
+            so the key settings ride along when the surface can open them. */}
+        {k.action?.kind === 'sign-in' && <SignInButton />}
+        {k.action?.kind === 'sign-in' && onReconfigure && (
+          <Button variant="quiet" size="sm" onClick={onReconfigure}>
+            {i18n.t('chat:openByokSettings')}
+          </Button>
+        )}
+        {k.action?.kind === 'retry' && onRetry && (
+          <Button variant="secondary" size="sm" onClick={onRetry}>
+            {k.action.label}
+          </Button>
+        )}
+        <details className="errcard-tech">
+          <summary>{i18n.t('chat:errTechnicalDetails')}</summary>
+          <code>{error.code}</code>
+        </details>
+      </div>
     </div>
   );
 }

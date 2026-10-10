@@ -23,11 +23,11 @@
 import { OpenwopError } from '../types.js';
 import { createLogger } from '../observability/logger.js';
 import { resolveEffectiveAccess } from './accessControlService.js';
-import { resolveSubjectAccess, levelSatisfies } from './subjectAccess.js';
 import { isRegisteredArtifactType } from './artifactTypes.js';
 import { diffText, diffJson, type TextDiff, type JsonDiff } from './textDiff.js';
 import {
   getDocumentByIdForTenant,
+  canReadDocument,
   listVersions,
   getVersion,
   type DocumentRecord,
@@ -36,7 +36,7 @@ import {
 } from '../features/documents/documentsService.js';
 import { getAssetByIdForTenant, viewAsset, listAssetsForTenant, type MediaAsset } from '../features/media/mediaService.js';
 import { listDocumentsForTenant } from '../features/documents/documentsService.js';
-import { getRunArtifact, listRunArtifactsForTenant, type RunArtifactRecord } from './runArtifactStore.js';
+import { getRunArtifact, listRunArtifactsForTenant, type RunArtifactRecord, listRunArtifactsForRun } from './runArtifactStore.js';
 import type { Subject } from './subject.js';
 
 export type ArtifactSource = 'document' | 'media' | 'run-event';
@@ -254,10 +254,8 @@ async function authorizeDocument(tenantId: string, subject: string | undefined, 
   // org gate is not sufficient (the artifact lane is a SECOND door over the same
   // rows the documents feature guards). Consult the ONE subjectAccess seam. Null
   // ⇒ not membership-scoped ⇒ org gate stands. → null (404) on refusal.
-  if (doc.ownerSubject) {
-    const level = await resolveSubjectAccess(tenantId, doc.ownerSubject, subject);
-    if (level !== null && !levelSatisfies(level, 'read')) return null;
-  }
+  if (!(await canReadDocument(tenantId, doc, subject))) return null;
+
   return doc;
 }
 
@@ -291,6 +289,33 @@ export async function getArtifact(tenantId: string, subject: string | undefined,
   if (asset) return mediaToArtifact(asset);
   const run = await resolveRunArtifact(tenantId, subject, artifactId);
   return run ? runArtifactToArtifact(run) : null;
+}
+
+/**
+ * ADR 0768 follow-up P2 — the artifacts ONE run produced, for the chat's "open in
+ * the Workbench". A FILTER over what the Library already shows this caller, never
+ * a wider view: every row resolves through `getArtifact`, the SAME per-artifact
+ * gate as `GET /artifacts/:id` (org read for run-output rows; the document/media
+ * gates — incl. project membership — for linked rows). Rows the caller may not
+ * see are dropped silently (no existence leak). Each item carries `runNodeId` so
+ * the chat can match the node the user clicked. Scoped prefix read (no scan).
+ */
+export async function listArtifactsForRun(
+  tenantId: string,
+  subject: string | undefined,
+  runId: string,
+): Promise<Array<ArtifactProjection & { runNodeId: string }>> {
+  const rows = (await listRunArtifactsForRun(runId)).filter((r) => r.tenantId === tenantId && r.runId === runId);
+  const seen = new Set<string>();
+  const out: Array<ArtifactProjection & { runNodeId: string }> = [];
+  for (const row of rows.sort((a, b) => b.createdAt.localeCompare(a.createdAt))) {
+    const id = row.linkedArtifactId ?? `run-event:${row.artifactKey}`;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const artifact = await getArtifact(tenantId, subject, id);
+    if (artifact) out.push({ ...artifact, runNodeId: row.nodeId });
+  }
+  return out;
 }
 
 export async function listArtifactRevisions(tenantId: string, subject: string | undefined, artifactId: string): Promise<ArtifactRevisionProjection[] | null> {
@@ -374,11 +399,8 @@ export async function listArtifacts(tenantId: string, subject: string | undefine
   // (null ⇒ org gate stands). Media/run rows carry no project owner.
   const visibleDocs = (await Promise.all(docs.map(async (d) => {
     if (!canRead.get(d.orgId)) return null;
-    if (d.ownerSubject) {
-      const level = await resolveSubjectAccess(tenantId, d.ownerSubject, subject);
-      if (level !== null && !levelSatisfies(level, 'read')) return null;
-    }
-    return d;
+    // ADR 0838 D3 — THE document read predicate (was a second copy).
+    return (await canReadDocument(tenantId, d, subject)) ? d : null;
   }))).filter((d): d is NonNullable<typeof d> => d !== null);
   const projections: ArtifactProjection[] = [
     ...visibleDocs.map(documentToArtifact),

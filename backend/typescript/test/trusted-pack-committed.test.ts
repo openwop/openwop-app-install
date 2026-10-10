@@ -65,7 +65,7 @@ afterAll(async () => {
 
 describe('ADR 0367 P3 — committed partner pack through the full path', () => {
   it('the committed pack verifies as trusted against the committed keyring', async () => {
-    const list = await (await fetch(`${BASE}/v1/host/openwop-app/ui-plugin/packs`, { headers: H })).json() as {
+    const list = await (await fetch(`${BASE}/host/openwop-app/ui-plugin/packs`, { headers: H })).json() as {
       plugins: { packName: string; pluginId: string; tier?: string; trustedEntryPath?: string }[];
     };
     const pl = list.plugins.find((p) => p.packName === PACK_NAME && p.pluginId === PLUGIN_ID);
@@ -76,7 +76,7 @@ describe('ADR 0367 P3 — committed partner pack through the full path', () => {
 
   it('serves the committed, signed module bytes with the mount contract intact', async () => {
     const res = await fetch(
-      `${BASE}/v1/host/openwop-app/ui-plugin/trusted/${encodeURIComponent(PACK_NAME)}/plugins/${PLUGIN_ID}/entry.mjs`,
+      `${BASE}/host/openwop-app/ui-plugin/trusted/${encodeURIComponent(PACK_NAME)}/plugins/${PLUGIN_ID}/entry.mjs`,
       { headers: H },
     );
     expect(res.status).toBe(200);
@@ -87,7 +87,7 @@ describe('ADR 0367 P3 — committed partner pack through the full path', () => {
 
   it('the sandbox fallback entry still serves for the same pack (honest degradation)', async () => {
     const res = await fetch(
-      `${BASE}/v1/host/openwop-app/ui-plugin/packs/${encodeURIComponent(PACK_NAME)}/plugins/${PLUGIN_ID}/entry`,
+      `${BASE}/host/openwop-app/ui-plugin/packs/${encodeURIComponent(PACK_NAME)}/plugins/${PLUGIN_ID}/entry`,
       { headers: H },
     );
     expect(res.status).toBe(200);

@@ -14,8 +14,9 @@
  * `examples/node-pack-publishing/` and the postgres reference host.
  */
 
+import { legacyAgentId } from '../executor/agentIdAliases.js';
 import type { Express } from 'express';
-import { v1 } from '../middleware/protocolVersion.js';
+import { vendorPath } from '../middleware/protocolVersion.js';
 import type { Storage } from '../storage/storage.js';
 import { getNodeRegistry } from '../executor/nodeRegistry.js';
 import { getAgentRegistry, type ResolvedAgentManifest } from '../executor/agentRegistry.js';
@@ -70,7 +71,7 @@ function listPackInstalledAgents(): readonly ResolvedAgentManifest[] {
 export function registerPackRoutes(app: Express, _deps: Deps): void {
   // ── search (more-specific routes registered first so they win over
   //     the wildcard `:name` route below) ──
-  app.get(v1('/packs/-/search'), (req, res) => {
+  app.get(vendorPath('/packs/-/search'), (req, res) => {
     const q = String(req.query.q ?? '');
     const registry = getNodeRegistry();
     const matches = registry.listTypeIds().filter((id) => !q || id.includes(q));
@@ -84,7 +85,7 @@ export function registerPackRoutes(app: Express, _deps: Deps): void {
   // ── version-scoped routes (.json + .sig). MUST be registered BEFORE
   //     the bare `/v1/packs/:name` route so Express doesn't bind
   //     `:name = "<pkname>"` and miss the `.json` suffix. ──
-  app.get(/^\/v1\/packs\/([^/]+)\/-\/([^/]+)\.json$/, (req, _res, next) => {
+  app.get(/^\/host\/openwop-app\/packs\/([^/]+)\/-\/([^/]+)\.json$/, (req, _res, next) => {
     try {
       const params = req.params as Record<string, string>;
       const name = decodeURIComponent(params['0'] ?? '');
@@ -117,7 +118,7 @@ export function registerPackRoutes(app: Express, _deps: Deps): void {
     }
   });
 
-  app.get(/^\/v1\/packs\/([^/]+)\/-\/([^/]+)\.sig$/, (req, _res, next) => {
+  app.get(/^\/host\/openwop-app\/packs\/([^/]+)\/-\/([^/]+)\.sig$/, (req, _res, next) => {
     try {
       const params = req.params as Record<string, string>;
       const name = decodeURIComponent(params['0'] ?? '');
@@ -149,18 +150,35 @@ export function registerPackRoutes(app: Express, _deps: Deps): void {
   // pack-installed agent the export originated from its own manifest id.
   // Registered BEFORE the `/v1/packs/:name` wildcard so "export" is never
   // parsed as a (malformed) pack name.
-  app.get(v1('/packs/export'), (_req, res) => {
-    const manifests = listPackInstalledAgents().map((a) => ({
-      ...projectAgentManifest(a),
-      sourceManifestId: a.agentId,
-      packName: a.packName,
-      packVersion: a.packVersion,
-    }));
-    res.json({ manifests, total: manifests.length });
+  //
+  // EACH MANIFEST IS THE PURE PROJECTION. `agent-manifest.schema.json` is
+  // `additionalProperties: false`, and `sourceManifestId`/`packName`/`packVersion`
+  // used to be spread onto every manifest — so no exported manifest validated
+  // (suite 2.42.3+ `agentPackExport` asserts it). `sourceManifestId` is an
+  // AgentRef field (`agent-ref.schema.json`), witnessed on the RUN snapshot by
+  // `agentPackProvenance`, not on a manifest. The install provenance moves to a
+  // sibling `provenance[]` keyed by agentId: the export envelope is host-defined
+  // (no corpus contract), so nothing is lost and nothing is smuggled.
+  app.get(vendorPath('/packs/export'), (_req, res) => {
+    const agents = listPackInstalledAgents();
+    const manifests = agents.map((a) => projectAgentManifest(a));
+    const provenance = agents.map((a) => {
+      // ADR 0763 — the pre-rename spelling, so an importer holding old
+      // references (a run's sourceManifestId, a roster row) can map them.
+      const legacy = legacyAgentId(a.agentId);
+      return {
+        agentId: a.agentId,
+        sourceManifestId: a.agentId,
+        packName: a.packName,
+        packVersion: a.packVersion,
+        ...(legacy !== undefined ? { legacyAgentIds: [legacy] } : {}),
+      };
+    });
+    res.json({ manifests, total: manifests.length, provenance });
   });
 
   // ── catalog list (root) ──
-  app.get(v1('/packs'), (_req, res) => {
+  app.get(vendorPath('/packs'), (_req, res) => {
     const registry = getNodeRegistry();
     const typeIds = registry.listTypeIds();
     const packs = new Map<
@@ -198,7 +216,7 @@ export function registerPackRoutes(app: Express, _deps: Deps): void {
 
   // ── pack-name lookup. Registered LAST so the more-specific routes above
   //     get first crack at matching. ──
-  app.get(v1('/packs/:name'), (req, res, next) => {
+  app.get(vendorPath('/packs/:name'), (req, res, next) => {
     try {
       const name = req.params.name;
       // The `-` token is reserved for sub-routes (e.g., /v1/packs/-/search)

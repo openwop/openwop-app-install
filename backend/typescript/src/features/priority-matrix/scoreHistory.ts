@@ -47,12 +47,45 @@ export async function listIdeaScoreHistory(tenantId: string, listId: string, car
     .sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1));
 }
 
+/**
+ * ADR 0842 D2 — the trail as a member WITHOUT config authority may see it.
+ *
+ * ADR 0059 keeps a multi-voter ballot behind config authority (`GET …/votes`: the list
+ * creator or an org admin; "members see only aggregate + their own vote"). This trail
+ * stores the same ballot — `voterId`, `actor` and the voter's per-criterion `scores` —
+ * and was returned verbatim at `workspace:read`, so the secrecy held at one door and
+ * not at the row. The priority MOVEMENT (`priorPriority` → `newPriority`, when) is the
+ * aggregate the ranking already shows and stays; another voter's identity and ballot
+ * do not. Single-mode rows (no `voterId`) score the ONE shared row the list shows, so
+ * they are not ballots and are returned unchanged. Pure: applied at the route, the
+ * trail's only exit.
+ */
+export type VisibleScoreChange = Omit<IdeaScoreChange, 'voterId' | 'actor' | 'scores'> & Partial<Pick<IdeaScoreChange, 'voterId' | 'actor' | 'scores'>>;
+
+export function redactTrailFor(history: IdeaScoreChange[], viewer: string | undefined): VisibleScoreChange[] {
+  return history.map((h): VisibleScoreChange => {
+    if (h.voterId === undefined || (viewer !== undefined && h.voterId === viewer)) return h;
+    const { voterId: _v, actor: _a, scores: _s, ...rest } = h;
+    return rest;
+  });
+}
+
 export async function appendIdeaScoreChange(input: Omit<IdeaScoreChange, 'changeId' | 'createdAt'>): Promise<void> {
   const row: IdeaScoreChange = { ...input, changeId: `psc:${randomUUID()}`, createdAt: new Date().toISOString() };
   await changes.put(row);
   const existing = await listIdeaScoreHistory(input.tenantId, input.listId, input.cardId);
   const over = existing.length - SCORE_HISTORY_CAP_PER_IDEA;
   for (let i = 0; i < over; i++) await changes.delete(existing[i]!.changeId);
+}
+
+/** ADR 0842 D5 — an idea's trail goes with the idea (both delete doors call this). */
+export async function deleteScoreChangesForCard(tenantId: string, listId: string, cardId: string): Promise<number> {
+  let removed = 0;
+  for (const ch of await listIdeaScoreHistory(tenantId, listId, cardId)) {
+    await changes.delete(ch.changeId);
+    removed += 1;
+  }
+  return removed;
 }
 
 /** R2 PM2-M5 — see `erasure.ts`. */

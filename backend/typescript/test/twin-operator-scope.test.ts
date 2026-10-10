@@ -54,7 +54,7 @@ beforeAll(async () => {
   // A REAL agent in the operator's own tenant. Without it `requireOwnedAgent`
   // 404s BEFORE the scope gate and this whole file measures nothing — the
   // vacuity mode that a 'not 403' assertion is most prone to.
-  const r = await call('k-op', '/v1/host/openwop-app/roster', 'POST', { persona: 'Aide', agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
+  const r = await call('k-op', '/host/openwop-app/roster', 'POST', { persona: 'Aide', agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   rosterId = r.body.rosterId;
 });
@@ -66,19 +66,19 @@ afterAll(async () => {
 
 describe('TWIN-5 — the twin admin lane uses the canonical tenant-scope gate', () => {
   it('a WILDCARD operator principal can READ the twin link of a real agent (200, not 403)', async () => {
-    const res = await call('k-op', `/v1/host/openwop-app/agents/${encodeURIComponent(rosterId)}/twin`);
+    const res = await call('k-op', `/host/openwop-app/agents/${encodeURIComponent(rosterId)}/twin`);
     expect(res.status, JSON.stringify(res.body)).toBe(200);
     expect(res.body.link).toBe(null);
   });
 
   it('and can WRITE it — the scope the local copy could never grant an operator', async () => {
-    const res = await call('k-op', `/v1/host/openwop-app/agents/${encodeURIComponent(rosterId)}/twin`, 'PUT', { userId: 'user:some-person' });
+    const res = await call('k-op', `/host/openwop-app/agents/${encodeURIComponent(rosterId)}/twin`, 'PUT', { userId: 'user:some-person' });
     expect(res.status, JSON.stringify(res.body)).toBe(200);
     expect(res.body.link.userId).toBe('user:some-person');
   });
 
   it('the 404 path is still ordered FIRST, so the two assertions above are not measuring it', async () => {
-    const res = await call('k-op', '/v1/host/openwop-app/agents/no-such-agent/twin');
+    const res = await call('k-op', '/host/openwop-app/agents/no-such-agent/twin');
     expect(res.status).toBe(404);
   });
 });

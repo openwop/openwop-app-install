@@ -8,7 +8,7 @@
  *       RFC 0200 `insufficient_scope` challenge; each has a CONTROL key holding the
  *       scope that is not refused (without it a host refusing every key passes).
  *   D3  a `runs:read` key reads a waiting run but NOT its interrupt resume token —
- *       the token is the authority `POST /v1/interrupts/{token}` accepts, and it
+ *       the token is the authority `POST /interrupts/{token}` accepts, and it
  *       needs `approvals:respond`. Before this ADR the read-only key resolved the
  *       gate end to end (WIT-AUTH-1); the last leg drives exactly that path.
  *
@@ -23,8 +23,14 @@ import type { Storage } from '../src/storage/storage.js';
 import type { InterruptRecord, RunRecord } from '../src/types.js';
 import { issueApiKey } from '../src/features/developer-keys/apiKeyService.js';
 import { keyDeclarationPermits } from '../src/host/protocolAuthorization.js';
+import { bareRunId } from './support/bareRunId.js';
+import { toWireRunId } from '../src/host/v2Ids.js';
 
 const TENANT = 'adr0755-scopes';
+/** An id that names no row, spelled the way a major-2 path takes it: bound to the key's own tenant (ADR 0812 P3c-0). */
+const NO_SUCH = encodeURIComponent(`${TENANT}/no-such-00000000000000`);
+/** A seeded (bare-keyed) run, spelled for a major-2 path. */
+const wire = (runId: string): string => encodeURIComponent(toWireRunId(runId, TENANT));
 let server: http.Server;
 let storage: Storage;
 let BASE = '';
@@ -54,7 +60,7 @@ async function key(scopes: string[]): Promise<string> {
 function call(method: string, path: string, token: string, body?: unknown): Promise<Response> {
   return fetch(`${BASE}${path}`, {
     method,
-    headers: { authorization: `Bearer ${token}`, ...(body !== undefined ? { 'content-type': 'application/json' } : {}) },
+    headers: { authorization: `Bearer ${token}`, 'OpenWOP-Version': '2', ...(body !== undefined ? { 'content-type': 'application/json' } : {}) },
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
   });
 }
@@ -67,17 +73,17 @@ function challengeScope(res: Response): string[] {
 
 // [label, method, path, body, required scope]
 const GATES: Array<[string, string, string, unknown, string]> = [
-  ['webhook list', 'GET', '/v1/webhooks', undefined, 'webhooks:manage'],
-  ['webhook register', 'POST', '/v1/webhooks', { url: 'https://example.com/hook', events: ['run.completed'] }, 'webhooks:manage'],
-  ['webhook rotate', 'POST', '/v1/webhooks/no-such/rotate-secret', {}, 'webhooks:manage'],
-  ['webhook delete', 'DELETE', '/v1/webhooks/no-such', undefined, 'webhooks:manage'],
-  ['trigger-subscription list', 'GET', '/v1/trigger-subscriptions', undefined, 'webhooks:manage'],
-  ['trigger-subscription register', 'POST', '/v1/trigger-subscriptions', { source: 'webhook', workflowId: 'openwop-app.uppercase' }, 'webhooks:manage'],
-  ['trigger ingest', 'POST', '/v1/trigger-subscriptions/no-such/ingest', {}, 'runs:create'],
-  ['prompt list', 'GET', '/v1/prompts', undefined, 'prompts:read'],
-  ['prompt create', 'POST', '/v1/prompts', {}, 'prompts:write'],
-  ['annotation create', 'POST', '/v1/runs/no-such/annotations', { signal: { kind: 'flag' } }, 'runs:annotate'],
-  ['annotation list', 'GET', '/v1/runs/no-such/annotations', undefined, 'runs:read'],
+  ['webhook list', 'GET', '/webhooks', undefined, 'webhooks:manage'],
+  ['webhook register', 'POST', '/webhooks', { url: 'https://example.com/hook', events: ['run.completed'] }, 'webhooks:manage'],
+  ['webhook rotate', 'POST', `/webhooks/${NO_SUCH}/rotate-secret`, {}, 'webhooks:manage'],
+  ['webhook delete', 'DELETE', `/webhooks/${NO_SUCH}`, undefined, 'webhooks:manage'],
+  ['trigger-subscription list', 'GET', '/trigger-subscriptions', undefined, 'webhooks:manage'],
+  ['trigger-subscription register', 'POST', '/trigger-subscriptions', { source: 'webhook', workflowId: 'openwop-app.uppercase' }, 'webhooks:manage'],
+  ['trigger ingest', 'POST', `/trigger-subscriptions/${NO_SUCH}/ingest`, {}, 'runs:create'],
+  ['prompt list', 'GET', '/prompts', undefined, 'prompts:read'],
+  ['prompt create', 'POST', '/prompts', {}, 'prompts:write'],
+  ['annotation create', 'POST', `/runs/${NO_SUCH}/annotations`, { signal: { kind: 'flag' } }, 'runs:annotate'],
+  ['annotation list', 'GET', `/runs/${NO_SUCH}/annotations`, undefined, 'runs:read'],
 ];
 
 describe('ADR 0755 D1 — every advertised scope refuses a key that did not declare it', () => {
@@ -136,24 +142,26 @@ describe('ADR 0755 D3 — a runs:read key reads the gate but cannot get its resu
     return { run, interrupt };
   }
 
-  it('the run snapshot omits interruptToken + callbackUrl for runs:read, and carries them for approvals:respond', async () => {
+  it('the major-2 snapshot carries no interrupt handle for EITHER scope; the token travels only on the scope-checked host list', async () => {
+    // ADR 0812 P2b — v1's snapshot carried `interrupt.interruptToken`, redacted by
+    // scope. Major 2's RunSnapshot is closed and has no `interrupt` at all, so the
+    // snapshot can leak the handle to nobody; the redaction now lives on the host list.
     const { run, interrupt } = await waitingRun();
-    const read = await call('GET', `/v1/runs/${run.runId}`, await key(['runs:read']));
-    expect(read.status).toBe(200);
-    const snap = (await read.json()) as { interrupt?: Record<string, unknown> };
-    expect(snap.interrupt?.['nodeId'], 'the gate itself stays visible to a reader').toBe('gate');
-    expect(snap.interrupt?.['interruptToken']).toBeUndefined();
-    expect(snap.interrupt?.['callbackUrl']).toBeUndefined();
-    expect(JSON.stringify(snap)).not.toContain(interrupt.token);
-
-    const control = await call('GET', `/v1/runs/${run.runId}`, await key(['runs:read', 'approvals:respond']));
-    const cs = (await control.json()) as { interrupt?: Record<string, unknown> };
-    expect(cs.interrupt?.['interruptToken'], 'CONTROL: a responder still gets the handle').toBe(interrupt.token);
+    for (const scopes of [['runs:read'], ['runs:read', 'approvals:respond']]) {
+      const snap = await call('GET', `/runs/${wire(run.runId)}`, await key(scopes));
+      expect(snap.status).toBe(200);
+      const text = JSON.stringify(await snap.json());
+      expect(text, `${scopes.join('+')}: the snapshot must not carry the handle`).not.toContain(interrupt.token);
+    }
+    // CONTROL: a responder still gets the handle — from the host list, not the snapshot.
+    const list = await call('GET', `/host/openwop-app/runs/${bareRunId(run.runId)}/interrupts`, await key(['runs:read', 'approvals:respond']));
+    const body = (await list.json()) as { interrupts: Array<Record<string, unknown>> };
+    expect(body.interrupts[0]!['token'], 'CONTROL: a responder still gets the handle').toBe(interrupt.token);
   });
 
   it('the host-extension interrupt list omits `token` for runs:read, and carries it for approvals:respond', async () => {
     const { run, interrupt } = await waitingRun();
-    const path = `/v1/host/openwop-app/runs/${run.runId}/interrupts`;
+    const path = `/host/openwop-app/runs/${bareRunId(run.runId)}/interrupts`;
     const read = (await (await call('GET', path, await key(['runs:read']))).json()) as { interrupts: Array<Record<string, unknown>> };
     expect(read.interrupts).toHaveLength(1);
     expect(read.interrupts[0]!['token']).toBeUndefined();
@@ -164,9 +172,9 @@ describe('ADR 0755 D3 — a runs:read key reads the gate but cannot get its resu
   it('end to end: nothing a runs:read key can read lets it resolve the gate', async () => {
     const { run } = await waitingRun();
     const k = await key(['runs:read']);
-    const body = JSON.stringify(await (await call('GET', `/v1/runs/${run.runId}`, k)).json())
-      + JSON.stringify(await (await call('GET', `/v1/host/openwop-app/runs/${run.runId}/interrupts`, k)).json());
+    const body = JSON.stringify(await (await call('GET', `/runs/${wire(run.runId)}`, k)).json())
+      + JSON.stringify(await (await call('GET', `/host/openwop-app/runs/${bareRunId(run.runId)}/interrupts`, k)).json());
     expect(body).not.toMatch(/tok-adr0755-/);
-    expect(await storage.getInterruptByNode(run.runId, 'gate'), 'the gate is still open').toBeTruthy();
+    expect(await storage.getInterruptByNode(bareRunId(run.runId), 'gate'), 'the gate is still open').toBeTruthy();
   });
 });

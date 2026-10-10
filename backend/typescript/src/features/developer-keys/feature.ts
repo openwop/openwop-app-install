@@ -26,11 +26,21 @@
  */
 import type { BackendFeature } from '../types.js';
 import { registerDeveloperKeysRoutes } from './routes.js';
+import { registerCliLoginRoutes } from './cliLoginRoutes.js';
+import { registerSubjectEraser } from '../../host/subjectErasure.js';
+import { eraseDeveloperKeysForSubject } from './apiKeyService.js';
+
+let erasureWired = false;
 
 export const developerKeysFeature: BackendFeature = {
   id: 'developer-keys',
   registerRoutes: (deps) => {
+    if (!erasureWired) {
+      erasureWired = true;
+      registerSubjectEraser(eraseDeveloperKeysForSubject); // ADR 0795 D6
+    }
     registerDeveloperKeysRoutes(deps);
+    registerCliLoginRoutes(deps); // ADR 0799
   },
   // No toggleDefault — graduated off its toggle (§ Correction above).
 };

@@ -59,3 +59,38 @@ export async function requireCmsScope(req: Request, scope: Scope): Promise<CmsSc
   }
   return requireOrgScope(req, scope);
 }
+
+/**
+ * ADR 0836 D3 — does the caller hold `scope` here? A NON-throwing probe for a
+ * decision that is not a refusal (e.g. "does this edit keep the admin's
+ * scheduled publish, or cancel it?"). Only a scope refusal reads as `false`;
+ * anything else (an unknown org, a storage fault) still throws, so the probe can
+ * never turn an error into a quieter answer.
+ */
+export async function holdsCmsScope(req: Request, scope: Scope): Promise<boolean> {
+  try {
+    await requireCmsScope(req, scope);
+    return true;
+  } catch (err) {
+    if (err instanceof OpenwopError && (err.code === 'forbidden_scope' || err.code === 'forbidden')) return false;
+    throw err;
+  }
+}
+
+/**
+ * ADR 0836 D6 — the live-tier refusal. Same authority as
+ * `requireCmsScope(req, 'host:members:manage')`, but the 403 carries
+ * `details.reason: 'live_tier'` so the editor can say "this page is live or
+ * scheduled" — not the generic admin-required copy every other admin-tier action
+ * (publish, schedule, grants) shares.
+ */
+export async function requireLiveTier(req: Request): Promise<void> {
+  try {
+    await requireCmsScope(req, 'host:members:manage');
+  } catch (err) {
+    if (err instanceof OpenwopError && err.code === 'forbidden_scope') {
+      throw new OpenwopError(err.code, err.message, err.httpStatus, { ...(err.details ?? {}), reason: 'live_tier' });
+    }
+    throw err;
+  }
+}

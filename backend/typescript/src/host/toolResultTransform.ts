@@ -121,6 +121,10 @@ export const SCHEMA_READ_EXEMPT_TOOLS: readonly string[] = [
   // compaction toggle defaults off. Parity-asserted against the exported tool-id
   // constant in `features/workflow-author/__tests__/promptCatalogParity.test.ts`.
   'openwop:feature.workflow-author.nodes.draft',
+  // ADR 0773 — the Pair tab's canvas read: the definition the next suggestion is
+  // validated against. A compacted node list makes the model suggest against a
+  // canvas that is not the user's.
+  'openwop:feature.builder-pair.nodes.read-canvas',
   // ADR 0604 (TOCC-2) — the five misses the feature-32 assessment named, plus
   // the ones the DERIVED census found once `BUILTINS` was resolved through both
   // of its spreads. Each also declares `schemaCarrying: true` at its
@@ -144,6 +148,7 @@ export const SCHEMA_READ_EXEMPT_TOOLS: readonly string[] = [
   'openwop:bi.list-metrics',
   'openwop:campaign-channels.channels',
   'openwop:intent-ledger.get',
+  'openwop:team-ledger.get', // ADR 0831 — its outOfScope list must never be shortened
   'openwop:cms.get-draft-page',
   'openwop:interactive-artifacts.get',
 ];

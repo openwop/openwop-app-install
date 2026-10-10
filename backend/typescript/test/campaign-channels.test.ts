@@ -123,9 +123,9 @@ describe('campaign-channels — agent pack', () => {
     // CFP-1: the generator drives channel generation through two REAL registered
     // tools (catalog/readiness read + channel-workflow igniter), not phantom node
     // typeIds — the resolution tripwire is test/agent-allowlist-resolution.test.ts.
-    const loaded = loadAgentsFromManifest(join(REPO_ROOT, 'packs', 'feature.campaign-channels.agents'));
+    const loaded = loadAgentsFromManifest(join(REPO_ROOT, 'packs', 'vendor.openwop-app.campaign-channels.agents'));
     expect(loaded.length).toBe(1);
-    expect(loaded[0].agentId).toBe('feature.campaign-channels.agents.channel-generator');
+    expect(loaded[0].agentId).toBe('vendor.openwop-app.campaign-channels.agents.channel-generator');
     expect([...(loaded[0].toolAllowlist ?? [])].sort()).toEqual([
       'openwop:campaign-channels.channels',
       'openwop:campaign-channels.generate',

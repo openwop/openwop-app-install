@@ -4,6 +4,16 @@
  * the composer at boot, bound into the host bundle per run), that it reads the
  * REAL KB store, and that tenant isolation (CTI-1) holds — a collection in
  * another tenant is simply not found.
+ *
+ * Also carries `ctx.knowledge`'s REAL-backend leg (ADR 0014 Phase 0, the
+ * `setKnowledgeBackend` seam), moved here from the deleted `knowledge-backend.test.ts`
+ * to share this boot; its demo-corpus fallback leg was cut as covered by
+ * `knowledge-surface.test.ts` (same sabotage reds it — /grade-tests wave 6).
+ *
+ * SABOTAGE-WITNESSED (wave 6): emptying the surface's search results, forcing
+ * `hasResults: false` on retrieve, a tenant-blind collection lookup (both the keyed
+ * read and the row re-check), `setKnowledgeBackend(null)`, or ignoring a non-null
+ * backend result each reds its case.
  */
 
 import http from 'node:http';
@@ -49,6 +59,7 @@ describe('ctx.features.kb surface', () => {
     // Tenant-wide retrieve (the host.knowledge shape).
     const retrieved = await kb.retrieve!({ query: 'how do cats purr' });
     expect(retrieved.hasResults).toBe(true);
+    expect(JSON.stringify(retrieved.chunks)).toContain('purr'); // the ingested text, not an empty/demo answer
 
     // listCollections (read).
     const cols = (await kb.listCollections!({ orgId })).collections as Array<{ collectionId: string }>;
@@ -61,6 +72,29 @@ describe('ctx.features.kb surface', () => {
 
     // A different tenant's surface, using the (leaked) collectionId → not found.
     const intruder = kbSurface('other-tenant');
-    await expect(intruder.search!({ orgId: 'org-x', collectionId: col.collectionId, query: 'classified' })).rejects.toThrow();
+    await expect(intruder.search!({ orgId: 'org-x', collectionId: col.collectionId, query: 'classified' })).rejects.toThrow(/not found/i);
+  });
+});
+
+describe('host.knowledge — real KB backend (ADR 0014 Phase 0)', () => {
+  it('serves a tenant\'s ingested KB collection via ctx.knowledge', async () => {
+    const tenantId = 'kb-real-tenant';
+    const orgId = 'org-1';
+    const col = await createCollection(tenantId, orgId, 'actor', { name: 'Feline KB' });
+    await ingestDocument(tenantId, orgId, 'actor', col.collectionId, {
+      title: 'Cats',
+      text: 'Cats groom themselves with their tongue and purr when content. A kitten is a young cat.',
+    });
+
+    const res = await buildHostSurfaceBundle({ tenantId }).knowledge.retrieve({ query: 'how do cats groom and purr' }) as {
+      chunks: Array<{ content: string; documentTitle: string; collectionId: string }>;
+      hasResults: boolean;
+    };
+    expect(res.hasResults).toBe(true);
+    // REAL KB content: the title, text and collection of what was ingested (outside demo
+    // mode the no-backend fallback is EMPTY, so any chunk here came from the KB store).
+    expect(res.chunks[0]!.documentTitle).toBe('Cats');
+    expect(res.chunks[0]!.content).toContain('groom');
+    expect(res.chunks[0]!.collectionId).toBe(col.collectionId);
   });
 });

@@ -13,6 +13,7 @@ import { MemoryRouter } from 'react-router-dom';
 
 const getProject = vi.fn();
 const deleteProject = vi.fn();
+const getDeletePreview = vi.fn();
 const confirmMock = vi.fn();
 const toastSuccess = vi.fn();
 
@@ -20,6 +21,7 @@ vi.mock('../projectsClient.js', async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
   getProject: (id: string) => getProject(id),
   deleteProject: (id: string) => deleteProject(id),
+  getDeletePreview: (id: string) => getDeletePreview(id),
 }));
 vi.mock('../../../ui/confirm.js', () => ({ confirm: (o: unknown) => confirmMock(o) }));
 vi.mock('../../../ui/toast.js', () => ({ toast: { success: (m: string) => toastSuccess(m), error: vi.fn() } }));
@@ -33,7 +35,8 @@ const PROJECT = {
 const settle = async (): Promise<void> => { await act(async () => { await new Promise((r) => setTimeout(r, 0)); }); };
 
 beforeEach(() => {
-  for (const m of [getProject, deleteProject, confirmMock, toastSuccess]) m.mockReset();
+  for (const m of [getProject, deleteProject, getDeletePreview, confirmMock, toastSuccess]) m.mockReset();
+  getDeletePreview.mockResolvedValue({ canvases: 0, documents: 0, priorityLists: 0, teamLedger: 0 });
   getProject.mockResolvedValue(PROJECT);
   confirmMock.mockResolvedValue(true);
   deleteProject.mockResolvedValue({ deleted: true, memoryEntriesCleared: 4, schedulesCleared: 2, conversationsDeleted: 1 });
@@ -124,5 +127,68 @@ describe('PROJ-UX-5 — the receipt has a reader', () => {
     await clickDelete();
     expect(toastSuccess).not.toHaveBeenCalled();
     expect(await screen.findByText(/Failed to delete the project/i)).toBeTruthy();
+  });
+});
+
+describe('ADR 0839 D2 — the confirm and the receipt name what other features lose', () => {
+  it('names the non-zero dependents the server counted, and only those', async () => {
+    getDeletePreview.mockResolvedValue({ canvases: 2, documents: 1, priorityLists: 0, teamLedger: 3 });
+    await clickDelete();
+    const body = (confirmMock.mock.calls[0]?.[0] as { body?: string }).body ?? '';
+    expect(body).toMatch(/2 canvases/);
+    expect(body).toMatch(/1 document\b/);
+    expect(body).toMatch(/team ledger/);
+    expect(body).not.toMatch(/priority list/);
+  });
+
+  it('says nothing extra when there is nothing else to delete', async () => {
+    await clickDelete();
+    const body = (confirmMock.mock.calls[0]?.[0] as { body?: string }).body ?? '';
+    expect(body).not.toMatch(/other features/);
+    expect(body).not.toMatch(/could not count/);
+  });
+
+  it('a FAILED count is said as such — never rendered as "nothing else"', async () => {
+    getDeletePreview.mockRejectedValue(new Error('503'));
+    await clickDelete();
+    const body = (confirmMock.mock.calls[0]?.[0] as { body?: string }).body ?? '';
+    expect(body).toMatch(/could not count/i);
+  });
+
+  it('the success toast lists what was removed with the project', async () => {
+    deleteProject.mockResolvedValue({ deleted: true, memoryEntriesCleared: 0, schedulesCleared: 0, conversationsDeleted: 0, dependentsDeleted: { canvases: 1, priorityLists: 2 } });
+    await clickDelete();
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalled());
+    const msg = toastSuccess.mock.calls[0]?.[0] as string;
+    expect(msg).toMatch(/Also removed: 1 canvas and 2 priority lists/);
+  });
+});
+
+describe('grade-ux row 25 B1 — one delete at a time, and the button says which step it is on', () => {
+  it('a second click while the preview is pending does nothing; the button is busy and disabled', async () => {
+    let release: (v: unknown) => void = () => undefined;
+    getDeletePreview.mockReturnValue(new Promise((r) => { release = r; }));
+    render(<MemoryRouter initialEntries={['/projects/p1']}><ProjectDetailPage /></MemoryRouter>);
+    await settle();
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Atlas' })).toBeTruthy());
+    const btn = screen.getByRole('button', { name: /delete/i }) as HTMLButtonElement;
+    fireEvent.click(btn);
+    await settle();
+    const busy = screen.getByRole('button', { name: /checking/i }) as HTMLButtonElement;
+    expect(busy.disabled).toBe(true);
+    expect(busy.getAttribute('aria-busy')).toBe('true');
+    fireEvent.click(busy);
+    await settle();
+    expect(getDeletePreview).toHaveBeenCalledTimes(1);
+    release({});
+    await settle();
+    expect(confirmMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('a cancelled confirm re-enables the button', async () => {
+    confirmMock.mockResolvedValue(false);
+    await clickDelete();
+    expect(deleteProject).not.toHaveBeenCalled();
+    expect((screen.getByRole('button', { name: /^delete$/i }) as HTMLButtonElement).disabled).toBe(false);
   });
 });

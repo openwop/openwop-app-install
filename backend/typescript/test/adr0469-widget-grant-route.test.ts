@@ -42,7 +42,7 @@ function client(): Client {
 
 let n = 0;
 async function signup(c: Client, tenantId: string): Promise<{ userId: string }> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `wg-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await c.post('/host/openwop-app/test/login', { email: `wg-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
@@ -52,15 +52,15 @@ async function ownerWithMember(role: string): Promise<{ owner: Client; member: C
   await signup(owner, tenantId);
   const member = client();
   const memberUser = await signup(member, tenantId);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   const orgId = org.body.orgId as string;
-  const add = await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: [role] });
+  const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: [role] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
   return { owner, member, orgId };
 }
-const widgetsBase = (orgId: string): string => `/v1/host/openwop-app/chat-widget/orgs/${encodeURIComponent(orgId)}/widgets`;
-const catalogPath = (orgId: string): string => `/v1/host/openwop-app/chat-widget/orgs/${encodeURIComponent(orgId)}/tool-catalog`;
+const widgetsBase = (orgId: string): string => `/host/openwop-app/chat-widget/orgs/${encodeURIComponent(orgId)}/widgets`;
+const catalogPath = (orgId: string): string => `/host/openwop-app/chat-widget/orgs/${encodeURIComponent(orgId)}/tool-catalog`;
 
 describe('ADR 0469 Phase B — widget grant editor routes', () => {
   it('the tool-catalog read is workspace-scoped (a viewer can read it — NOT superadmin-only)', async () => {

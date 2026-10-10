@@ -38,6 +38,8 @@ export interface MembersPanelProps {
   onDeleteMember: (m: OrgMember) => void;
   onSaveRoles: (m: OrgMember) => void;
   can: (scope: string) => boolean;
+  /** ADR 0815 D2 — the members the server treats as owners (direct, group, twin). */
+  ownerIds?: ReadonlySet<string>;
   roleLabel: (id: string) => string;
   toggleStr: (set: Set<string>, id: string) => Set<string>;
 }
@@ -46,14 +48,24 @@ export function MembersPanel({
   orgId,
   members, memberName, setMemberName, memberEmail, setMemberEmail, memberRoles, setMemberRoles,
   assignableRoleIds, editingId, setEditingId, draftRoles, setDraftRoles, accessFor, access,
-  onCreateMember, onShowAccess, startEdit, onDeleteMember, onSaveRoles, can, roleLabel, toggleStr,
+  onCreateMember, onShowAccess, startEdit, onDeleteMember, onSaveRoles, can, ownerIds, roleLabel, toggleStr,
 }: MembersPanelProps): JSX.Element {
   const { t } = useTranslation('orgs');
+  // ADR 0815 D2 — an owner row is owner-tier: an admin may manage every member
+  // EXCEPT owners (the server answers 403 `owner_required`), so its controls are
+  // disabled with the reason stated, not offered and refused.
+  const ownerTier = can('host:org:manage');
+  const isOwner = (m: OrgMember): boolean => ownerIds?.has(m.memberId) ?? m.roles.includes('owner');
+  const canTouch = (m: OrgMember): boolean => can('host:members:manage') && (ownerTier || !isOwner(m));
+  const lockedTitle = (m: OrgMember): string | undefined =>
+    can('host:members:manage') && !canTouch(m) ? t('ownerRowLocked') : undefined;
+  const hasLockedOwner = !ownerTier && can('host:members:manage') && members.some(isOwner);
   return (
     <>
       <h3 className="u-fs-14 u-flex u-items-center u-gap-2">
         <UserIcon size={15} /> {t('membersHeading')}
       </h3>
+      {hasLockedOwner ? <p className="members-muted u-mb-2">{t('ownerRowsLockedNote')}</p> : null}
       {/* Email invitations (ADR 0004; AUTH-3): the enterprise on-ramp. Renders
           only when the `orgs` invitation feature is enabled + caller can manage
           members; the direct-add form below stays for service/local accounts. */}
@@ -91,10 +103,10 @@ export function MembersPanel({
                 <Button variant="secondary" onClick={() => void onShowAccess(m)}>
                   <ShieldIcon size={13} /> {t('accessButton')}
                 </Button>
-                <Button variant="secondary" disabled={!can('host:members:manage')} onClick={() => startEdit(m)} aria-label={t('editRolesAriaLabel', { name: m.displayName })}>
+                <Button variant="secondary" disabled={!canTouch(m)} title={lockedTitle(m)} onClick={() => startEdit(m)} aria-label={t('editRolesAriaLabel', { name: m.displayName })}>
                   <PencilIcon size={13} /> {t('rolesButton')}
                 </Button>
-                <Button variant="secondary" disabled={!can('host:members:manage')} onClick={() => void onDeleteMember(m)} aria-label={t('removeMemberAriaLabel', { name: m.displayName })}>
+                <Button variant="secondary" disabled={!canTouch(m)} title={lockedTitle(m)} onClick={() => void onDeleteMember(m)} aria-label={t('removeMemberAriaLabel', { name: m.displayName })}>
                   <TrashIcon size={13} />
                 </Button>
               </span>

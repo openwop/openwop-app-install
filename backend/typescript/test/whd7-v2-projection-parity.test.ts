@@ -163,11 +163,14 @@ describe('WHD-7 — the corpus helper is really the thing being compared against
     });
   });
 
-  it("this host's v1 document is a real workload for it — well over a hundred `supported` seats, none after", () => {
+  it("this host's v1 document is a real workload for it — close to a hundred `supported` seats, none after", () => {
     const { v1 } = buildBoth();
     // ADR 0670 measured 168. The floor is a vacuity guard, not a census: what
     // matters is that the comparison below is over a document that HAS seats.
-    expect(countSupportedSeats(v1)).toBeGreaterThan(100);
+    // 100 → 90 in ADR 0858 P3: MEASURED 99 once v1's `queueBus.stream:
+    // {supported:false}` went with the shared storage builder (v1 is retired on
+    // prod, ADR 0812, so its seat count only falls from here).
+    expect(countSupportedSeats(v1)).toBeGreaterThan(90);
     expect(countSupportedSeats(corpusStripSupported(v1))).toBe(0);
   });
 });

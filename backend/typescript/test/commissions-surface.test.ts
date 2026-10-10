@@ -1,5 +1,5 @@
 /**
- * Sales Commissions — Phase 4 (ctx.features.commissions surface + packs).
+ * Sales Commissions — Phase 4 (ctx.features['sales-commissions'] surface + packs).
  * Surface: governed writes (compute/approve) enforce the run owner's
  * host:commissions:manage; system run denied; statement reads are subject-scoped.
  * Packs: node + agent manifests validate; writes are side-effectful + kept out of
@@ -47,15 +47,15 @@ describe('commissions P4 — governed surface writes + subject-scoped reads', ()
   it('compute/approve require the run owner host:commissions:manage; system run denied; reads are subject-scoped', async () => {
     const tenantId = `org:commsurf-${Date.now()}-${n++}`;
     const owner = client();
-    const ownerId = (await owner.post('/v1/host/openwop-app/test/login', { email: `o-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId;
+    const ownerId = (await owner.post('/host/openwop-app/test/login', { email: `o-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId;
     const rep = client();
-    const repId = (await rep.post('/v1/host/openwop-app/test/login', { email: `r-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId;
-    const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
-    await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'R', subject: repId, roles: ['editor'] });
+    const repId = (await rep.post('/host/openwop-app/test/login', { email: `r-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId;
+    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
+    await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'R', subject: repId, roles: ['editor'] });
 
-    const B = `/v1/host/openwop-app/commissions/orgs/${encodeURIComponent(orgId)}`;
+    const B = `/host/openwop-app/commissions/orgs/${encodeURIComponent(orgId)}`;
     const planId = (await owner.post(`${B}/plans`, { name: 'P', currency: 'USD', assignment: { kind: 'rep', ref: repId }, effectiveFrom: '2026-01-01', rules: [{ basis: 'deal-won', type: 'fixed', rate: 100 }] })).body.planId;
-    await owner.post(`/v1/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}/deals`, { title: 'D', amount: 1000, owner: repId, closeDate: '2026-02-10', status: 'won' });
+    await owner.post(`/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}/deals`, { title: 'D', amount: 1000, owner: repId, closeDate: '2026-02-10', status: 'won' });
 
     const surfaceFor = (actingUserId?: string) => buildCommissionSurface({ tenantId, ...(actingUserId ? { actingUserId } : {}), runId: `run-${n++}` });
 
@@ -91,7 +91,7 @@ describe('commissions P4 — governed surface writes + subject-scoped reads', ()
 
 const REPO_ROOT = join(__dirname, '..', '..', '..');
 const NODES_DIR = join(REPO_ROOT, 'packs', 'feature.sales-commissions.nodes');
-const AGENTS_DIR = join(REPO_ROOT, 'packs', 'feature.sales-commissions.agents');
+const AGENTS_DIR = join(REPO_ROOT, 'packs', 'vendor.openwop-app.sales-commissions.agents');
 interface NodesManifest { name: string; version: string; nodes: Array<{ typeId: string; role: string; capabilities: string[] }>; runtime: { entry: string } }
 interface AgentsManifest { agents: Array<{ agentId: string; toolAllowlist: string[] }> }
 
@@ -99,8 +99,9 @@ describe('feature.sales-commissions.nodes pack', () => {
   const manifest = JSON.parse(readFileSync(join(NODES_DIR, 'pack.json'), 'utf8')) as NodesManifest;
   it('declares 2 read + 2 governed (side-effectful) write nodes', () => {
     expect(manifest.name).toBe('feature.sales-commissions.nodes');
-    // R2 review — bumped with the approve-statement behaviour change (it submits now).
-    expect(manifest.version).toBe('1.1.0');
+    // R2 review — bumped with the approve-statement behaviour change (it submits now);
+    // 1.2.0 with ADR 0820 G2 (binds ctx.features['sales-commissions'], the gated id).
+    expect(manifest.version).toBe('1.2.0');
     expect(manifest.nodes).toHaveLength(4);
     for (const node of manifest.nodes) expect(node.role, node.typeId).toBe('action');
     const writes = manifest.nodes.filter((node) => node.capabilities.includes('side-effectful')).map((node) => node.typeId).sort();
@@ -122,7 +123,7 @@ describe('feature.sales-commissions.nodes pack', () => {
     };
     // `ensure()` probes `listPlans`, and args come from `ctx.config`/`ctx.inputs`.
     const ctx = (surfaceOut: unknown) => ({
-      features: { commissions: { listPlans: async () => ({ plans: [] }), approveStatement: async () => surfaceOut } },
+      features: { 'sales-commissions': { listPlans: async () => ({ plans: [] }), approveStatement: async () => surfaceOut } },
       inputs: { orgId: 'org-1', statementId: 's1' },
     });
     const ok = await mod.approveStatement(ctx({ success: true, submittedForReview: true, review: { approvalId: 'appr:x', status: 'pending' } }));
@@ -134,7 +135,7 @@ describe('feature.sales-commissions.nodes pack', () => {
   });
 });
 
-describe('feature.sales-commissions.agents pack', () => {
+describe('vendor.openwop-app.sales-commissions.agents pack', () => {
   const manifest = JSON.parse(readFileSync(join(AGENTS_DIR, 'pack.json'), 'utf8')) as AgentsManifest;
   it('the advisory analyst is allowlisted to READS only — no governed write nodes', () => {
     const allow = manifest.agents[0].toolAllowlist;

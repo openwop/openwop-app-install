@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/core.openwop.skills-bridge/1.0.0/adapter.task.schema.json",
+  "$id": "https://packs.openwop.dev/core.openwop.skills-bridge/1.0.2/adapter.task.schema.json",
   "title": "SkillsAdapterTask",
   "type": "object",
   "required": ["skill", "input"],

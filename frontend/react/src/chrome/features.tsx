@@ -83,6 +83,8 @@ const PromptLibraryPage = lazy(() => import('../prompts/PromptLibraryPage.js').t
 const KeysPage = lazy(() => import('../byok/KeysPage.js').then((m) => ({ default: m.KeysPage })));
 const VoiceSettingsPage = lazy(() => import('../byok/VoiceSettingsPage.js').then((m) => ({ default: m.VoiceSettingsPage })));
 const CompatEndpointsPage = lazy(() => import('../byok/CompatEndpointsPage.js').then((m) => ({ default: m.CompatEndpointsPage })));
+const McpAccessPage = lazy(() => import('../mcp/McpAccessPage.js').then((m) => ({ default: m.McpAccessPage })));
+const ApiKeysPage = lazy(() => import('../features/developer-keys/ApiKeysPage.js').then((m) => ({ default: m.ApiKeysPage })));
 const MemoryInspectorPage = lazy(() => import('../memory/MemoryInspectorPage.js').then((m) => ({ default: m.MemoryInspectorPage })));
 const KanbanPage = lazy(() => import('../kanban/KanbanPage.js').then((m) => ({ default: m.KanbanPage })));
 const LibraryPage = lazy(() => import('../chat/artifacts/LibraryPage.js').then((m) => ({ default: m.LibraryPage })));
@@ -286,6 +288,16 @@ const CORE_FEATURES: FeatureRoute[] = [
   // entry): promoted out of the Keys page. Reachable directly for deep links.
   { path: '/access/voice', element: <VoiceSettingsPage />, tier: 'admin', archetype: 'admin', hubTab: { group: 'credentials', order: 2 } },
   { path: '/access/endpoints', element: <CompatEndpointsPage />, tier: 'admin', archetype: 'admin', hubTab: { group: 'credentials', order: 3 } },
+  // ADR 0788 D6 — connect an external AI client over MCP (endpoint, per-client keys,
+  // the per-tool switch). Replaces the read-only card that sat on /capabilities.
+  // tier 'workspace' (grade-ux MCPUX-1): a member mints their OWN client key here
+  // (developer keys are self-service) and sees the tools their client reaches.
+  // The server gates the admin half (the per-tool switch) on host:mcp:manage.
+  { path: '/access/mcp', element: <McpAccessPage />, tier: 'workspace', archetype: 'admin', hubTab: { group: 'credentials', order: 4 } },
+  // ADR 0800 D2 — API keys for the CLI, scripts and services: the key-management
+  // page ADR 0788 left unbuilt. tier 'workspace' for the same reason as the MCP
+  // tab: developer keys are self-service, a member mints their OWN.
+  { path: '/access/api-keys', element: <ApiKeysPage />, tier: 'workspace', archetype: 'admin', hubTab: { group: 'credentials', order: 5 } },
   {
     path: '/feature-toggles', element: <FeatureTogglePanel />, tier: 'admin', archetype: 'admin',
     nav: { group: 'Governance & security', label: 'Feature toggles', labelKey: 'featureTogglesLabel', icon: FlagIcon, hint: 'On / off / beta + multivariant traffic-splitting', hintKey: 'featureTogglesHint', superadminOnly: true },

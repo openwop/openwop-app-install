@@ -1,16 +1,31 @@
 /**
  * ADR 0122 Phase 5 — listResources now enumerates document/conversation/prompt
  * (the backend already resolves all 5 types). Asserts each type hits its owning
- * feature's list endpoint + maps to {id,label}.
+ * feature's list endpoint + maps to {id,label}. Plus the Phase 6 public resolve
+ * (R2 SR-2/SR-10 failure discrimination, no auth headers) and R2 review F1
+ * (only a 404 is "feature off"; any other failure THROWS).
+ *
+ * Sabotage-witnessed (w7 grade-tests): dropping the 404 branch reds the F1
+ * case; `410` → `411` reds the discrimination case; passing auth headers on
+ * the public resolve reds the no-auth case.
+ *
+ * Fakes are REAL `Response`s — no `as unknown as Response` laundering.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { listResources, resolveSharedPublic } from '../sharingClient.js';
 
+const res = (status: number, body: unknown = {}): Response =>
+  new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+
+const stubFetch = (impl: (url: string) => Promise<Response>): ReturnType<typeof vi.fn<typeof fetch>> => {
+  const spy = vi.fn<typeof fetch>((input) => impl(String(input)));
+  vi.stubGlobal('fetch', spy);
+  return spy;
+};
+
+/** Only the expected endpoint answers 200; anything else is an explicit 500. */
 function mockFetchOnce(url: RegExp, body: unknown): void {
-  vi.stubGlobal('fetch', vi.fn(async (u: string) => {
-    if (!url.test(String(u))) return { ok: false, json: async () => ({}) } as unknown as Response;
-    return { ok: true, json: async () => body } as unknown as Response;
-  }));
+  stubFetch(async (u) => (url.test(u) ? res(200, body) : res(500)));
 }
 
 afterEach(() => { vi.unstubAllGlobals(); });
@@ -28,36 +43,29 @@ describe('listResources — Phase 5 types', () => {
     mockFetchOnce(/\/chat\/sessions/, { sessions: [{ sessionId: 's1', title: 'Roadmap' }] });
     expect(await listResources('org1', 'conversation')).toEqual([{ id: 's1', label: 'Roadmap' }]);
   });
-  it('returns [] when the source feature is off (404 — its routes do not exist)', async () => {
-    // R2 review F1 narrowed the contract: only 404 is the documented
-    // "feature off" case; any other failure THROWS (see the F1 suite below).
-    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 404, json: async () => ({}) } as unknown as Response)));
-    expect(await listResources('org1', 'document')).toEqual([]);
-  });
 });
 
 describe('resolveSharedPublic — public viewer (ADR 0122 Phase 6)', () => {
   it('resolves the public resource on 200', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ resourceType: 'conversation', resource: { kind: 'conversation', title: 'T', markdown: '# hi' } }) } as unknown as Response)));
+    stubFetch(async () => res(200, { resourceType: 'conversation', resource: { kind: 'conversation', title: 'T', markdown: '# hi' } }));
     const out = await resolveSharedPublic('tok');
     expect(out.resourceType).toBe('conversation');
-    expect((out.resource as { markdown: string }).markdown).toBe('# hi');
+    expect(out.resource.markdown).toBe('# hi');
   });
 
   it('R2 SR-2/SR-10 — discriminates the failure: 404→gone, 410→expired, 5xx/network→unavailable', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 404, json: async () => ({}) } as unknown as Response)));
+    stubFetch(async () => res(404));
     await expect(resolveSharedPublic('tok')).rejects.toMatchObject({ kind: 'gone' });
-    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 410, json: async () => ({}) } as unknown as Response)));
+    stubFetch(async () => res(410));
     await expect(resolveSharedPublic('tok')).rejects.toMatchObject({ kind: 'expired' });
-    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 500, json: async () => ({}) } as unknown as Response)));
+    stubFetch(async () => res(500));
     await expect(resolveSharedPublic('tok')).rejects.toMatchObject({ kind: 'unavailable' });
-    vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('network down'); }));
+    stubFetch(async () => { throw new TypeError('network down'); });
     await expect(resolveSharedPublic('tok')).rejects.toMatchObject({ kind: 'unavailable' });
   });
 
   it('sends NO auth headers (the token is the credential)', async () => {
-    const spy = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ resourceType: 'conversation', resource: {} }) } as unknown as Response));
-    vi.stubGlobal('fetch', spy);
+    const spy = stubFetch(async () => res(200, { resourceType: 'conversation', resource: {} }));
     await resolveSharedPublic('tok');
     // plain fetch(url) — a single positional arg, no init/headers object
     expect(spy).toHaveBeenCalledTimes(1);
@@ -67,12 +75,12 @@ describe('resolveSharedPublic — public viewer (ADR 0122 Phase 6)', () => {
 
 describe('R2 review F1 — the picker read fails HONESTLY', () => {
   it('404 (feature off) resolves []; 500 THROWS so the page can say the read failed', async () => {
-    const { listResources } = await import('../sharingClient.js');
-    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 404, json: async () => ({}) } as unknown as Response)));
+    stubFetch(async () => res(404));
     await expect(listResources('o1', 'cms_page')).resolves.toEqual([]);
-    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 500, json: async () => ({}) } as unknown as Response)));
+    await expect(listResources('o1', 'document')).resolves.toEqual([]);
+    stubFetch(async () => res(500));
     await expect(listResources('o1', 'creative_brief')).rejects.toThrow(/500/);
-    vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('network down'); }));
+    stubFetch(async () => { throw new TypeError('network down'); });
     await expect(listResources('o1', 'document')).rejects.toThrow();
   });
 });

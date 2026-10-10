@@ -14,7 +14,7 @@ import { createApplyGrant, consumeSubmit } from '../src/host/applyGrant.js';
 import { enableTenantOverride } from '../src/host/featureToggles/service.js';
 import { __isSseExemptPathForTests } from '../src/middleware/rateLimit.js';
 
-const PUB = '/v1/host/openwop-app/public-attestations';
+const PUB = '/host/openwop-app/public-attestations';
 const TENANT = 'user:t-pubatt';
 
 let server: Server;
@@ -100,7 +100,7 @@ describe('ADR 0544 P3 — the public verification route', () => {
     // The `public-forms` ≠ `forms` rule. Nesting an anonymous route inside an
     // otherwise-authenticated namespace is how a public hole opens by accident.
     const { token } = await issue();
-    const nested = await fetch(`${BASE}/v1/host/openwop-app/job-search/public/attestations/${token}`);
+    const nested = await fetch(`${BASE}/host/openwop-app/job-search/public/attestations/${token}`);
     expect(nested.status, 'no anonymous route may live under /job-search').toBeGreaterThanOrEqual(400);
   });
 

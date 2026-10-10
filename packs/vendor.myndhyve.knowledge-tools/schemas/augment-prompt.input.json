@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.knowledge-tools/1.0.0/augment-prompt.input.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.knowledge-tools/1.0.3/augment-prompt.input.json",
   "title": "KnowledgeAugmentPromptInput",
   "type": "object",
   "required": ["userMessage"],

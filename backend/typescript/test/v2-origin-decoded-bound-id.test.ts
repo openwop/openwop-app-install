@@ -23,6 +23,20 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from '../src/index.js';
+import { preferredVersion } from '../src/middleware/protocolVersion.js';
+
+// ADR 0812 P3c-0 — while 1.x is served a bare id on a major-2 path is admitted
+// through the overlap; after the cut it is refused `400 validation_error`.
+// Either way it is read as a BARE id, never misparsed as `<tenant>/<opaque>`
+// (which would answer 403 id_tenant_mismatch / 404).
+const bareAdmitted = () => preferredVersion() !== '2.0';
+function expectReadAsBare(r: { status: number; json: any; text: string }, admitted: number): void {
+  if (bareAdmitted()) expect(r.status, r.text.slice(0, 120)).toBe(admitted);
+  else {
+    expect(r.status, r.text.slice(0, 120)).toBe(400);
+    expect(r.json?.error).toBe('validation_error');
+  }
+}
 
 let server: http.Server; let base = '';
 beforeAll(async () => {
@@ -73,13 +87,9 @@ describe('a decoded bound id (what a %2F-normalising proxy forwards) reaches the
     const bound = await createV2();
     const opaque = bound.split('/')[1];
     const r = await req('GET', `/runs/${opaque}/events/poll?afterSequence=0`, V2);
-    expect(r.status, r.text.slice(0, 120)).toBe(200);
+    expectReadAsBare(r, 200);
   });
-  it('5. major 1 is untouched: /v1/runs/<tenant>/<opaque> stays a 404', async () => {
-    const bound = await createV2();
-    const r = await req('GET', `/v1/runs/${bound}`);
-    expect(r.status).toBe(404);
-  });
+  // ADR 0812 P3c-0 — leg 5 (major 1 leaves /v1/runs/<tenant>/<opaque> a 404) was deleted with major 1.
 });
 
 // ── The other two bound-id kinds (MEASURED on production 2026-09-21) ──────────
@@ -118,6 +128,6 @@ describe('a decoded bound WEBHOOK id reaches the subscription (the %2F proxy, ot
     const bound = await createWebhookV2();
     const opaque = bound.split('/')[1];
     const r = await req('POST', `/webhooks/${opaque}/test`, V2, {});
-    expect(r.status, r.text.slice(0, 160)).toBe(202);
+    expectReadAsBare(r, 202);
   });
 });

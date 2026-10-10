@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.crm.nodes/1.11.0/get-contact.output.json",
+  "title": "CrmGetContactOutput",
+  "type": "object",
+  "required": [
+    "contact"
+  ],
+  "properties": {
+    "contact": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "The contact's display projection, or null when absent / merged away."
+    }
+  },
+  "additionalProperties": false
+}

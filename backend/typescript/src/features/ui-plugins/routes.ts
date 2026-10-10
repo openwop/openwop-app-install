@@ -9,29 +9,50 @@
  *          mechanism it applies can't drift from the advert — RFC 0119 non-drift).
  *   GET  /v1/host/openwop-app/ui-plugin/packs/:name/plugins/:pluginId/entry
  *        → the plugin's `entry` bytes (size-capped, traversal-safe), served under a
- *          deny-egress CSP header as defense-in-depth. The FE mounts these via
- *          iframe `srcdoc` (opaque origin) — the load-bearing isolation.
+ *          deny-egress CSP header as defense-in-depth. (ADR 0840: the FE now mounts
+ *          the per-plugin `frame` by iframe `src`; the header policy is load-bearing.)
  *   POST /v1/host/openwop-app/ui-plugin/demo-artifact
  *        → ensures a per-tenant demo canvas so the reference artifact-viewer plugin
  *          has a real target to `artifact.read` over ui-plugin/1 (tenant-scoped).
  *
- * The ui-plugin/1 RPC seam itself (`POST …/ui-plugin/rpc`) is owned by the core
- * `routes/uiPlugins.ts` module (always mounted) — this feature never re-registers it.
+ * The ui-plugin/1 dispatcher is owned by the core `routes/uiPlugins.ts` module; this
+ * feature serves it ONLY per plugin (RFC 0238 `…/host/ui-plugins/{pack}/{plugin}/rpc`).
+ * ADR 0840 D7 deleted the host-global vendor RPC route and its v1 conformance alias.
  */
 
 import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { tenantOf } from '../featureRoute.js';
-import { pluginIframeCsp, uiPluginsCapability } from '../../host/uiPluginRpc.js';
+import { markUiPluginOperationsServed, pluginFrameCsp, pluginIframeCsp, uiPluginsCapability } from '../../host/uiPluginRpc.js';
+import { presentationEnabled } from '../../host/hostProfile.js';
+import { requireProtocolScope } from '../../host/protocolAuthorization.js';
+import { dispatchForPlugin } from '../../routes/uiPlugins.js';
+import { ISOLATION_PROBE_HTML } from '../../host/uiPluginIsolationProbe.js';
+import type { Response } from 'express';
+import { createHash } from 'node:crypto';
+
+/** ADR 0840 — the ONE way this host sends a plugin frame document: the policy in
+ *  the header (RFC 0238 §B), never a meta tag. The isolation probe goes out the
+ *  same way, so the self-test exercises the delivery real plugins get. */
+function sendPluginFrame(res: Response, html: Buffer | string, connectSrc: readonly string[] = []): void {
+  res.set('Content-Security-Policy', pluginFrameCsp(connectSrc));
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('Cache-Control', 'no-store');
+  res.type('text/html; charset=utf-8').send(html);
+}
 import { ensureCanvasForTenant } from '../../host/canvasSurface.js';
-import { listFrontendPluginPacks, getPluginEntry, hostIsolation, resolveTrustCandidate } from './frontendPluginPacks.js';
+import { listFrontendPluginPacks, getPluginEntry, hostIsolation, resolveTrustCandidate, operatorTrustTenant } from './frontendPluginPacks.js';
+import { UI_PLUGIN_FIXTURE_ARTIFACT, UI_PLUGIN_FIXTURE_PACK } from './operatorTrustedPacks.js';
 import { verifyPinned, verifyDetachedPinned, loadPinnedKeyring } from '../../host/packSignature.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
 import { registerToggleDefault } from '../../host/featureToggles/registry.js';
 
-const BASE = '/v1/host/openwop-app/ui-plugin';
+const BASE = '/host/openwop-app/ui-plugin';
 /** The demo canvas the reference artifact-viewer reads (per-tenant, provisioned on demand). */
-const DEMO_ARTIFACT_ID = 'ui-plugin-demo';
+// Canvas ids are global keys, so the demo artifact's id is derived from the tenant:
+// one fixed id would make each tenant's call take the previous tenant's canvas.
+const demoArtifactId = (tenantId: string): string =>
+  `ui-plugin-demo-${createHash('sha256').update(tenantId).digest('hex').slice(0, 24)}`;
 const DEMO_CANVAS_TYPE = 'canvas.app-builder';
 
 export function registerUiPluginsFeatureRoutes(deps: RouteDeps): void {
@@ -43,7 +64,7 @@ export function registerUiPluginsFeatureRoutes(deps: RouteDeps): void {
   registerToggleDefault({
     id: 'trusted-plugins',
     label: 'Trusted plugins (signed, full access)',
-    description: 'Serve operator-pinned, Ed25519-signed plugin packs into the main frame with full UI integration (ADR 0367 tier 1). Signature + revocation re-verified at every serve. Off = every pack stays in the sandbox.',
+    description: 'Serve operator-pinned, Ed25519-signed plugin packs into the main frame with full UI integration. Signature + revocation re-verified at every serve. Off = every pack stays in the sandbox.',
     category: 'Developer',
     status: 'off',
     bucketUnit: 'tenant',
@@ -122,11 +143,63 @@ export function registerUiPluginsFeatureRoutes(deps: RouteDeps): void {
     } catch (err) { next(err); }
   });
 
+  // ── ADR 0840 (RFC 0238) — the normative observation path ──────────────────
+  // Registered under `/v1` because the negotiator rewrites every major-2 protocol
+  // request (and, per ADR 0840, every browser load of a document operation) onto it.
+  // A host without the facet, or a plugin it does not serve, answers 404 to both.
+  const servedPlugin = (packName: string, pluginId: string) =>
+    presentationEnabled('uiPlugins')
+      ? listFrontendPluginPacks().find((p) => p.packName === packName && p.pluginId === pluginId) ?? null
+      : null;
+
+  // §B — the document the plugin runs in, its isolation and egress in the header.
+  // The SPA mounts plugins only from here (`framePath` in the listing above).
+  app.get('/host/ui-plugins/:packName/:pluginId/frame', async (req, res, next) => {
+    try {
+      await requireProtocolScope(req, 'manifest:read');
+      const plugin = servedPlugin(req.params.packName as string, req.params.pluginId as string);
+      const entry = plugin ? getPluginEntry(plugin.packName, plugin.pluginId) : null;
+      if (!plugin || !entry) throw new OpenwopError('not_found', 'Unknown plugin.', 404, {});
+      sendPluginFrame(res, entry.bytes, plugin.connectSrc);
+    } catch (err) { next(err); }
+  });
+
+  // ADR 0493 / ADR 0840 — the isolation self-test's probe, delivered exactly as a
+  // plugin frame is (header policy, mounted by `src`). Vendor path: not a protocol op.
+  app.get(`${BASE}/isolation-probe`, (_req, res, next) => {
+    try {
+      if (!presentationEnabled('uiPlugins')) throw new OpenwopError('not_found', 'Not found.', 404, {});
+      sendPluginFrame(res, ISOLATION_PROBE_HTML);
+    } catch (err) { next(err); }
+  });
+
+  // §C — the plugin's ui-plugin/1 calls, allowlisted to ITS hostApi (manifest ∩ host).
+  app.post('/host/ui-plugins/:packName/:pluginId/rpc', async (req, res, next) => {
+    try {
+      await requireProtocolScope(req, 'artifacts:read');
+      const plugin = servedPlugin(req.params.packName as string, req.params.pluginId as string);
+      if (!plugin) throw new OpenwopError('not_found', 'Unknown plugin.', 404, {});
+      // ADR 0840 D6 (RFC 0238 §D.2) — the fixture's artifact, in the tenant the
+      // operator installed the fixture for: an owner-less app-builder canvas whose
+      // content references the BYOK canary WITHOUT resolving it. Idempotent; only
+      // for that pack and that tenant, so trust in the fixture writes nothing else.
+      const fixtureTenant = plugin.packName === UI_PLUGIN_FIXTURE_PACK && operatorTrustTenant(plugin.packName) === tenantOf(req);
+      if (fixtureTenant) {
+        await ensureCanvasForTenant(tenantOf(req), UI_PLUGIN_FIXTURE_ARTIFACT, {
+          canvasTypeId: DEMO_CANVAS_TYPE,
+          initialState: { title: 'RFC 0238 fixture artifact', credentialRef: '{{secrets.openwop-conformance-canary-secret}}' },
+        });
+      }
+      res.json(await dispatchForPlugin(req, new Set<string>(plugin.hostApi), fixtureTenant ? UI_PLUGIN_FIXTURE_ARTIFACT : undefined));
+    } catch (err) { next(err); }
+  });
+  markUiPluginOperationsServed();
+
   // A real artifact for the viewer to read over ui-plugin/1 (tenant-scoped, idempotent).
   app.post(`${BASE}/demo-artifact`, async (req, res, next) => {
     try {
       const tenantId = tenantOf(req);
-      const canvas = await ensureCanvasForTenant(tenantId, DEMO_ARTIFACT_ID, {
+      const canvas = await ensureCanvasForTenant(tenantId, demoArtifactId(tenantId), {
         canvasTypeId: DEMO_CANVAS_TYPE,
         initialState: {
           title: 'UI-plugin demo artifact',

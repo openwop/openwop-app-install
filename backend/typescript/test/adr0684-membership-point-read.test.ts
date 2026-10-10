@@ -9,10 +9,18 @@
  * it may answer "yes" and never "no". A missing index entry must fall through to
  * the authoritative paths, because the alternative is locking a real member out
  * of their own workspace, and that is the one direction this must not fail.
+ *
+ * Sabotage that turns it red (each witnessed by /grade-tests probe):
+ *  - the authoritative scan answers true                → stranger / REMOVED / REKEY / NON-workspace-root
+ *  - `deleteMember` keeps the index entry               → a REMOVED member resolves false
+ *  - `rekeyMemberSubject` keeps the old entry           → REKEY moves the entry
+ *  - an index MISS answers false (index authoritative)  → NO index entry still resolves true
+ *  - sub-org memberships indexed                        → NON-workspace-root membership is not indexed
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import {
   createOrg, createMember, deleteMember, isWorkspaceMember, listMembers, rekeyMemberSubject,
+  __dropMemberIndexForTest,
 } from '../src/host/accessControlService.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
@@ -26,7 +34,7 @@ async function workspace(id: string): Promise<string> {
 }
 
 describe('ADR 0684 phase 5 — membership point-read', () => {
-  it('a member resolves true (fast path) and a stranger false', async () => {
+  it('a member resolves true and a stranger false', async () => {
     const ws = await workspace('ws:p5a');
     await createMember({ orgId: ws, tenantId: ws, displayName: 'A', subject: 'user:p5a' });
     expect(await isWorkspaceMember('user:p5a', ws)).toBe(true);
@@ -60,9 +68,7 @@ describe('ADR 0684 phase 5 — membership point-read', () => {
     // would only widen the fast path.
     const ws = await workspace('ws:p5d');
     await createMember({ orgId: ws, tenantId: ws, displayName: 'D', subject: 'user:p5d' });
-    const { __dropMemberIndexForTest } = await import('../src/host/accessControlService.js') as unknown as
-      { __dropMemberIndexForTest?: (w: string, s: string) => Promise<void> };
-    if (__dropMemberIndexForTest) await __dropMemberIndexForTest(ws, 'user:p5d');
+    await __dropMemberIndexForTest(ws, 'user:p5d');
     expect(await isWorkspaceMember('user:p5d', ws)).toBe(true);
   });
 

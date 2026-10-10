@@ -15,7 +15,13 @@
  *    financial records surviving (`host/subjectErasureRedaction.ts`,
  *    `test/priv1-order-erasure.test.ts`). Nothing named what is KEPT.
  *
- * NON-VACUITY: each case is sabotage-probed — see the commit message.
+ * NON-VACUITY (/grade-tests w9 probes): dropping `legalHold != null` from Erase's
+ * `disabled`, hiding the hold Notice, dropping the confirm body, the receipt's
+ * retained-records clause, `variant="danger"`, branching the refusal on English
+ * text or on `status === 409` instead of `code === 'legal_hold'`, or toasting a
+ * generic message instead of the server's — each turns a case below red.
+ * CONS-UX-4 has an honest ceiling: jsdom has no cascade, so the class list is the
+ * only observable of the danger variant.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor, fireEvent, act } from '@testing-library/react';
@@ -30,8 +36,9 @@ vi.mock('../consentClient.js', async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
   listOrgs: vi.fn(async () => [{ orgId: 'org-1', name: 'Acme' }]),
   getPolicy: vi.fn(async () => ({ policy: { tenantId: 't', regulatedRegions: [], defaultMode: 'opt-in' }, legalHold })),
+  getAccess: vi.fn(async () => ({ canManage: true })), // ADR 0849 D1 — an admin by default
   listRecords: vi.fn(async () => []),
-  getSubject: vi.fn(async () => null),
+  getSubject: vi.fn(async () => ({ record: null, erased: false })),
   deleteSubject: vi.fn(async () => ({ ok: true, consentRecord: true, erasure: { total: 4, failed: 0, keysResolved: 2 } })),
 }));
 vi.mock('../../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: (m: string) => toastError(m), info: vi.fn(), warning: vi.fn() } }));
@@ -183,6 +190,19 @@ describe('review F10 — a hold placed MID-FLIGHT is recognised by code, not Eng
 
     await waitFor(() => expect(toastError).toHaveBeenCalled());
     expect(toastError.mock.calls.at(-1)?.[0]).not.toMatch(/under legal hold/i);
+    expect(screen.queryByText(/erasure refused/i)).toBeNull();
+
+    // …and a TYPED 409 that is not a hold (an unrelated conflict) is not one either:
+    // the branch keys on the code, not on the status.
+    cleanup();
+    toastError.mockClear();
+    const { ConsentApiError } = await import('../consentClient.js');
+    vi.mocked(client.deleteSubject).mockRejectedValueOnce(new ConsentApiError(409, 'conflict', 'Version conflict.', {}));
+    await mount();
+    fireEvent.change(screen.getByLabelText(/subject key/i), { target: { value: 'subj-42' } });
+    fireEvent.click(screen.getByRole('button', { name: /erase/i }));
+    await waitFor(() => expect(toastError).toHaveBeenCalled());
+    expect(toastError.mock.calls.at(-1)?.[0]).toBe('Version conflict.');
     expect(screen.queryByText(/erasure refused/i)).toBeNull();
   });
 

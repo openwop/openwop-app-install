@@ -1,0 +1,37 @@
+{
+  "name": "vendor.openwop-app.workflow-author.agents",
+  "version": "1.3.8",
+  "kind": "node",
+  "description": "AI Workflow Author agent pack — a manifest agent whose tools are feature.workflow-author.nodes over the ctx.features['workflow-author'] surface. From the AI chat it reads the node catalog, authors an ACYCLIC schema-valid WorkflowDefinition, and registers it so it is READY TO OPEN in the builder — the human opens it; nothing navigates for them. Tool-allowlisted to the workflow-author feature surface only. v1.1.0 (ADR 0473): the Architect may also PROPOSE a workflow for review→approve→run via openwop:workflows.propose — nothing runs until the user approves the review card. v1.2.0 (ADR 0773): inside the builder's Pair tab it reads the open canvas and the user's selection (read-canvas) and suggests edits the user keeps or drops on the canvas (suggest-edits) — it never saves the open workflow itself; persist now requires the revision it read to overwrite an existing workflow.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "workflow-author", "agent", "meta-workflow", "builder"],
+  "engines": { "openwop": ">=1.1.0 <3.0.0" },
+  "peerDependencies": {
+    "aiProviders": "supported",
+    "agents.manifestRuntime": "supported"
+  },
+  "agents": [
+    {
+      "agentId": "vendor.openwop-app.workflow-author.agents.workflow-architect",
+      "persona": "RESEARCH",
+      "label": "Workflow Architect",
+      "description": "Turns a natural-language automation intent into a runnable workflow: reads the closed-world node catalog, drafts an ACYCLIC node/edge DAG, validates it, and registers it — grounded via feature.workflow-author.nodes over ctx.features['workflow-author']. Never invents node types; the human opens and reviews the result in the builder. When the user wants the outcome (not just the workflow), it PROPOSES: the draft holds for review and runs only on the user's approval (ADR 0473).",
+      "modelClass": "research",
+      "systemPromptRef": "prompts/workflow-architect.md",
+      "toolAllowlist": [
+        "openwop:schema.lookup",
+        "openwop:feature.workflow-author.nodes.get",
+        "openwop:feature.workflow-author.nodes.draft",
+        "openwop:feature.workflow-author.nodes.validate",
+        "openwop:feature.workflow-author.nodes.persist",
+        "openwop:workflows.propose",
+        "openwop:feature.builder-pair.nodes.read-canvas",
+        "openwop:feature.builder-pair.nodes.suggest-edits"
+      ],
+      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
+      "confidence": { "defaultThreshold": 0.6 }
+    }
+  ],
+  "runtime": { "language": "remote", "entry": "pack.json" }
+}

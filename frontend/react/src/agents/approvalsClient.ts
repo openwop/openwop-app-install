@@ -38,6 +38,12 @@ export interface AssistantActionView {
   recipientDiff?: { before: string[]; after: string[] };
   derivedFromUntrusted?: boolean;
   editedAt?: string;
+  /** ADR 0862 D1 — the hash of exactly what this card shows. An approve or an edit MUST
+   *  echo it as `expectedContentHash`; the server refuses a stale or missing one. */
+  contentHash?: string;
+  /** ADR 0862 — the reader lacks the action's write authority, so the server sent a stub
+   *  (kind + status only): no draft, no fields, no hash, and no decision to offer. */
+  withheld?: boolean;
 }
 
 export interface PendingApproval {
@@ -46,7 +52,9 @@ export interface PendingApproval {
   persona: string;
   workflowId: string;
   /** Discriminator; absent ⇒ 'run-proposal' (back-compat). */
-  kind?: 'run-proposal' | 'assistant-action' | 'content-publish' | 'campaign-spend' | 'commerce-spend' | 'strategy-activation' | 'strategy-checkin' | 'pm-scenario-select';
+  kind?: 'run-proposal' | 'assistant-action' | 'content-publish' | 'campaign-spend' | 'commerce-spend' | 'strategy-activation' | 'strategy-checkin' | 'pm-scenario-select' | 'claude-code-permission';
+  /** ADR 0785 P4 — a permission prompt from the viewer's own Claude Code. */
+  claudeCodePermission?: { deviceId: string; deviceLabel: string; tool: string; summary: string; inputDigest: string };
   /** PMXU-2 (ADR 0590) — pm-scenario-select rows: the scenario the gate adopts
    *  as plan of record on claim / leaves un-adopted on reject. The backend has
    *  always sent this; the client type never declared it, so the reviewer saw
@@ -56,6 +64,9 @@ export interface PendingApproval {
    *  gate activates on claim / leaves draft on reject. */
   strategyId?: string;
   strategyTitle?: string;
+  /** ADR 0845 D2/D6 — exactly what this approval binds to (the digest covers it):
+   *  the protected content plus where the strategy lives. Absent on legacy rows. */
+  strategySnapshot?: StrategyActivationSnapshot;
   /** campaign-spend rows (campaign gap plan §5B B3): what the spend gate is holding. */
   spendKind?: 'publish' | 'budget' | 'audience' | 'order' | 'refund';
   platform?: string;
@@ -84,6 +95,9 @@ export interface PendingApproval {
    *  provenance a reviewer used to see was an English sentence rebuilt from one
    *  submit's sweep, which emptied itself on the first resubmit. */
   aiDraftedLocales?: string[];
+  /** ADR 0859 D5 (ADR 0594 D1) — sections that resolve LIVE at read time; the
+   *  reviewer must be told their approval does not freeze what those show. */
+  liveReferenceSections?: Array<{ sectionId: string; type: string }>;
   /** Embedded card metadata for assistant-action rows (null if the action
    *  vanished). Absent for run-proposals. */
   action?: AssistantActionView | null;
@@ -145,6 +159,14 @@ export function approvalErrorInfo(e: unknown): { key: string; options?: Record<s
   const reason = typeof e.details?.reason === 'string' ? e.details.reason : null;
   if (reason === 'stale_review') return { key: 'approvalStaleReview' };
   if (reason === 'unpinned_review') return { key: 'approvalUnpinnedReview' };
+  // ADR 0845 — a strategy activation whose content changed is CLOSED (not "already
+  // decided"), and the submitter may not approve their own when someone else can.
+  if (reason === 'content_changed') return { key: 'approvalStrategyChanged' };
+  // ADR 0862 — an assistant action changed after this card rendered (the server refused
+  // before consuming anything), or the card predates the hash entirely (an old tab).
+  if (reason === 'action_changed') return { key: 'assistantAction:actionChanged' };
+  if (reason === 'content_hash_required') return { key: 'assistantAction:cardOutOfDate' };
+  if (reason === 'separation-of-duties') return { key: 'approvalSelfApproval' };
   if (reason === 'review_closed') {
     return e.details?.subject === 'deleted'
       ? { key: 'approvalClosedPageDeleted' }
@@ -207,9 +229,12 @@ export async function listApprovalsByKind(
 export async function claimApproval(
   approvalId: string,
   note?: string,
+  /** ADR 0862 D1 — REQUIRED by the server for an assistant-action approve: the
+   *  `contentHash` of the card the approver is looking at. Ignored for other kinds. */
+  expectedContentHash?: string,
 ): Promise<{ runId?: string; actionId?: string; status?: string }> {
   const res = await fetch(`${base}/${encodeURIComponent(approvalId)}/claim`, fetchOpts({
-    method: 'POST', headers: jsonHeaders(), body: JSON.stringify(note ? { note } : {}),
+    method: 'POST', headers: jsonHeaders(), body: JSON.stringify({ ...(note ? { note } : {}), ...(expectedContentHash ? { expectedContentHash } : {}) }),
   }));
   if (!res.ok) await throwApiError(res, 'claimApproval');
   return (await res.json()) as { runId?: string; actionId?: string; status?: string };
@@ -218,11 +243,19 @@ export async function claimApproval(
 /** Edit a still-pending assistant-action draft (ADR 0023 §12 T4). The edit
  *  stamps `editedAt` and the action faces the approver again before any
  *  execution; kind/sources/taint are immutable server-side. */
-export async function editAssistantAction(actionId: string, patch: { draft: string }): Promise<void> {
+export async function editAssistantAction(
+  actionId: string,
+  patch: { draft: string },
+  /** ADR 0862 D2 — you edit the version you read; a stale hash is refused 409. */
+  expectedContentHash: string | undefined,
+): Promise<AssistantActionView> {
   const res = await fetch(`${assistantBase}/pending-actions/${encodeURIComponent(actionId)}`, fetchOpts({
-    method: 'PATCH', headers: jsonHeaders(), body: JSON.stringify(patch),
+    method: 'PATCH', headers: jsonHeaders(), body: JSON.stringify({ ...patch, ...(expectedContentHash ? { expectedContentHash } : {}) }),
   }));
   if (!res.ok) await throwApiError(res, 'editAssistantAction');
+  // The server answers with the projected CARD, including its NEW `contentHash`, so the
+  // editor's next approve binds to the bytes they just wrote.
+  return (await res.json()) as AssistantActionView;
 }
 
 /** Dismiss the proposal; the card is parked in the board's terminal column. */
@@ -231,4 +264,26 @@ export async function rejectApproval(approvalId: string, note?: string): Promise
     method: 'POST', headers: jsonHeaders(), body: JSON.stringify(note ? { note } : {}),
   }));
   if (!res.ok) await throwApiError(res, 'rejectApproval');
+}
+
+/** ADR 0845 D6 — the strategy content a `strategy-activation` approval binds to. */
+export interface StrategyActivationSnapshot {
+  orgId: string;
+  scope: string;
+  planningHorizon: string;
+  period?: { label: string; startDate?: string; endDate?: string };
+  accountableExecutive: string | null;
+  objectives: Array<{
+    id: string;
+    title: string;
+    weight?: number;
+    keyResults: Array<{
+      id: string;
+      title: string;
+      target?: string;
+      unit?: string;
+      weight?: number;
+      measure?: { kind: string; baseline?: number; target?: number; direction?: string; unit?: string; source?: { kind: string; orgId: string } };
+    }>;
+  }>;
 }

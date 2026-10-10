@@ -21,7 +21,11 @@ import { createLogger } from '../observability/logger.js';
 
 const log = createLogger('agentRunActivityIndex');
 
-const ATTRIBUTION_KEYS = ['heartbeat', 'schedule', 'kanban', 'approval'] as const;
+/** The host-written attribution blocks, in precedence order. Exported so run
+ *  creation can RESERVE them (`host/runDispatch.ts`): they are written only by
+ *  host code paths (scheduler, kanban trigger, heartbeat, approval), never by a
+ *  caller of the run-creation routes. */
+export const ATTRIBUTION_KEYS = ['heartbeat', 'schedule', 'kanban', 'approval'] as const;
 
 interface AttributedRun {
   runId: string;

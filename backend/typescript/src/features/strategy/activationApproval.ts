@@ -18,23 +18,61 @@
  * @see ../../../docs/adr/0230-planning-governance-wiring.md
  */
 
+import { createHash } from 'node:crypto';
 import { OpenwopError } from '../../types.js';
+import { canonicalJSON } from '../../host/jcs.js';
+import { canonicalDecider } from '../../host/delegatedSubject.js';
+import { createLogger } from '../../observability/logger.js';
 import {
   createStrategyActivationApproval,
   getApproval,
-  hasPendingApprovalForStrategy,
+  listApprovals,
   resolveApproval,
   reopenApproval,
   registerStrategyActivationApprovalHandler,
   type PendingApproval,
 } from '../../host/approvalService.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
-import { getOrg, resolveEffectiveAccess } from '../../host/accessControlService.js';
+import { getOrg, hasDistinctScopeHolder, resolveEffectiveAccess } from '../../host/accessControlService.js';
 import { getStrategy, updateStrategy } from './strategyService.js';
 import { strategyMutated } from './emit.js';
-import type { StrategyStatus } from './types.js';
+import type { Strategy, StrategyStatus } from './types.js';
 
 export const STRATEGY_GATE_TOGGLE_ID = 'strategy-approval-gate';
+
+const log = createLogger('features.strategy.activation');
+
+/**
+ * ADR 0845 D2 — what an activation approval BINDS to, and what the approver is SHOWN:
+ * the protected content plus where the strategy lives. `orgId`/`scope` are in it
+ * because the decide bar is "an approver in THIS org" — a relocation after queueing
+ * would otherwise be approved by the old org's admins (architect H1).
+ *
+ * Built from ONE object (the row the submission just wrote) and never truncated: the
+ * objectives are bounded by `STRATEGY_LIMITS`, so the card can show exactly what the
+ * digest covers — including each KR's `measure.source`, the field that authorizes
+ * confirmed sync writes (architect H2).
+ */
+export function strategyBindingOf(s: Strategy): Record<string, unknown> {
+  // JSON round-trip drops `undefined` so the canonical form is the stored form.
+  return JSON.parse(JSON.stringify({
+    orgId: s.orgId,
+    scope: s.scope,
+    objectives: s.objectives,
+    period: s.period,
+    planningHorizon: s.planningHorizon,
+    accountableExecutive: s.accountableExecutive ?? null,
+  })) as Record<string, unknown>;
+}
+
+export function bindingDigest(binding: Record<string, unknown>): string {
+  return createHash('sha256').update(canonicalJSON(binding)).digest('hex');
+}
+
+/** ADR 0845 D5 — the identity separation of duties compares. Lifted to
+ *  `host/delegatedSubject.ts` by ADR 0859 D4 (the CMS gate asks the same question);
+ *  re-exported so this feature's callers and tests keep one import. */
+export { canonicalDecider };
 
 /**
  * Resolve a strategy-activation approval: enforce org RBAC + IDOR, flip the
@@ -85,9 +123,51 @@ async function decideStrategyActivation(
   // compensation `catch` reopened it again on the way out, so the card came back pending:
   // the close was undone by the very handler that was supposed to make it stick. Reading
   // first means nothing has been consumed yet, so the close is a plain pending→rejected.
-  if (outcome === 'approved' && !(await getStrategy(tenantId, strategyId))) {
+  const current = outcome === 'approved' ? await getStrategy(tenantId, strategyId) : null;
+  if (outcome === 'approved' && !current) {
     await resolveApproval(approvalId, { status: 'rejected', note: 'The strategy no longer exists.', ...(decidedBy ? { decidedBy } : {}) });
     throw new OpenwopError('conflict', 'This strategy no longer exists, so the activation cannot be applied. The review has been closed.', 409, { strategyId });
+  }
+
+  if (outcome === 'approved' && current) {
+    // ADR 0845 D5 — separation of duties, BEFORE anything is consumed. The submitter
+    // may not clear their own gate while someone else in the org can. A sole approver
+    // is not locked out (the ADR 0732 rule: a one-admin workspace is the default
+    // state). Self-REJECT is not refused: rejecting your own submission withdraws it.
+    const recorded = approval.strategyRequestedBy;
+    if (recorded) {
+      // STR3CD-7 — a key whose delegation could not be resolved at queue time was
+      // recorded raw; canonicalize again now. Still unresolvable ⇒ unknown submitter,
+      // which fails closed like an unknown decider.
+      const requestedBy = await canonicalDecider(tenantId, recorded);
+      const decider = await canonicalDecider(tenantId, decidedBy);
+      if ((decider === null || requestedBy === null || decider === requestedBy)
+        && await hasDistinctScopeHolder(tenantId, 'host:members:manage', requestedBy ?? recorded, { orgId })) {
+        throw new OpenwopError('forbidden', 'You submitted this activation, so someone else in the organization has to approve it.', 403, {
+          reason: 'separation-of-duties',
+        });
+      }
+    } else {
+      log.warn('strategy_activation_unbound_requester', { tenantId, approvalId });
+    }
+    // ADR 0845 D2 — APPROVE WHAT YOU SEE, at the EXIT. The approval froze a digest of
+    // the content (and org/scope) the approver is shown. Any writer that changed it —
+    // whichever route, whether or not it remembered to withdraw the review — makes the
+    // approval refer to something that no longer exists. Close it with the reason; this
+    // runs before the CAS, so nothing has been consumed (the R2 ordering lesson below).
+    // No `decidedBy`: the approver did not choose this outcome.
+    if (approval.strategyContentDigest) {
+      if (bindingDigest(strategyBindingOf(current)) !== approval.strategyContentDigest) {
+        await resolveApproval(approvalId, {
+          status: 'rejected',
+          note: "The strategy's content or organization changed after it was submitted, so this review was closed. Re-submit it to activate.",
+        });
+        strategyMutated({ entity: 'strategy', verb: 'activation-withdrawn', tenantId, actor: decidedBy, strategyId, orgId, changed: ['binding'] });
+        throw new OpenwopError('conflict', "This strategy changed after it was submitted, so the activation cannot be applied. The review has been closed; it needs re-submitting.", 409, { strategyId, reason: 'content_changed' });
+      }
+    } else {
+      log.warn('strategy_activation_unbound_legacy', { tenantId, approvalId, strategyId });
+    }
   }
 
   const lock = await resolveApproval(approvalId, {
@@ -144,7 +224,20 @@ async function decideStrategyActivation(
         await reopenApproval(approvalId);
         throw new OpenwopError('conflict', `This strategy is no longer ${queuedFrom} (it is ${s.status}), so the activation cannot be applied. Re-submit it if you still want it active.`, 409, { strategyId, status: s.status, queuedFrom });
       }
-      await updateStrategy(tenantId, strategyId, { status: 'active' }, decidedBy);
+      // ADR 0845 D2/D4 — the flip is a compare-and-swap against the row just
+      // verified, with the binding re-checked on that exact row. A write landing
+      // between the pre-check and here makes the swap LOSE (409); the compensation
+      // `catch` below reopens the card (nothing was applied), and the approver's
+      // retry meets the pre-check, which closes it with the reason.
+      const digest = approval.strategyContentDigest;
+      await updateStrategy(tenantId, strategyId, { status: 'active' }, decidedBy, {
+        base: s,
+        precondition: (base) => {
+          if (digest && bindingDigest(strategyBindingOf(base)) !== digest) {
+            throw new OpenwopError('conflict', 'This strategy changed while the activation was being applied. Try again.', 409, { strategyId });
+          }
+        },
+      });
       strategyMutated({ entity: 'strategy', verb: 'activation-approved', tenantId, actor: decidedBy, strategyId, orgId });
     } catch (err) {
       await reopenApproval(approvalId);
@@ -170,24 +263,41 @@ export function registerStrategyActivationGate(): void {
  */
 export async function queueStrategyActivationIfGated(
   tenantId: string,
-  strategy: { id: string; orgId: string; title: string; status: StrategyStatus },
+  strategy: Strategy,
   actor: string,
 ): Promise<boolean> {
   const gate = await resolveOne(STRATEGY_GATE_TOGGLE_ID, { tenantId });
   if (!gate?.enabled) return false;
-  if (!(await hasPendingApprovalForStrategy(tenantId, strategy.id))) {
-    await createStrategyActivationApproval({
-      tenantId,
-      orgId: strategy.orgId,
-      strategyId: strategy.id,
-      strategyTitle: strategy.title,
-      // ADR 0597 §3 — the origin state, so the decide side can hold
-      // "approve what you see" for an origin that is not `draft`.
-      strategyFromStatus: strategy.status,
-      proposal: `Activate strategy "${strategy.title}"`,
-    });
-    strategyMutated({ entity: 'strategy', verb: 'activation-queued', tenantId, actor, strategyId: strategy.id, orgId: strategy.orgId });
+  // ADR 0845 D2 — the binding is built from the SAME object the submission wrote
+  // (the caller's `updated`), never a re-read, so card, digest and stored row agree.
+  const snapshot = strategyBindingOf(strategy);
+  const digest = bindingDigest(snapshot);
+  const pending = (await listApprovals(tenantId, 'pending'))
+    .filter((a) => a.kind === 'strategy-activation' && a.strategyId === strategy.id);
+  // A re-submit over a STALE card (queued against different content) replaces it,
+  // so a card is never stale at queue time; an identical one is left alone.
+  const current = pending.filter((a) => a.strategyContentDigest === digest);
+  if (current.length > 0) return true;
+  for (const a of pending) {
+    await resolveApproval(a.approvalId, { status: 'rejected', note: 'Replaced by a newer submission of this strategy.' });
   }
+  // ADR 0845 D5 — the CANONICAL submitter (a key's issuer). An unresolvable
+  // delegation records the raw subject; the decide side fails closed on it.
+  const requestedBy = (await canonicalDecider(tenantId, actor)) ?? actor;
+  await createStrategyActivationApproval({
+    tenantId,
+    orgId: strategy.orgId,
+    strategyId: strategy.id,
+    strategyTitle: strategy.title,
+    // ADR 0597 §3 — the origin state, so the decide side can hold
+    // "approve what you see" for an origin that is not `draft`.
+    strategyFromStatus: strategy.status,
+    strategySnapshot: snapshot,
+    strategyContentDigest: digest,
+    strategyRequestedBy: requestedBy,
+    proposal: `Activate strategy "${strategy.title}"`,
+  });
+  strategyMutated({ entity: 'strategy', verb: 'activation-queued', tenantId, actor, strategyId: strategy.id, orgId: strategy.orgId });
   return true;
 }
 
@@ -245,6 +355,27 @@ export function requiresActivationApproval(current: StrategyStatus, next: string
 export function protectedEditRequiresReapproval(current: StrategyStatus): boolean {
   const posture = STATUS_GATE_POSTURE[current];
   return posture.approved && !posture.terminal;
+}
+
+/**
+ * ADR 0845 D3 — the ONE protected-write rule every writer of `strategy:record` asks.
+ * Given the base row the write will compare-and-swap against and whether that write
+ * changes protected content, returns the status override (`draft`) when the strategy
+ * must go back for approval. The writers differ only in HOW they decide
+ * `protectedChanged` (PATCH: a protected key is present; restore/import: the value
+ * differs), never in the rule. A source ratchet pins every writer to it.
+ */
+export function gateProtectedWrite(input: { gateOn: boolean; base: Strategy; protectedChanged: boolean }): { status?: 'draft'; autoReverted: boolean } {
+  if (input.gateOn && input.protectedChanged && protectedEditRequiresReapproval(input.base.status)) {
+    return { status: 'draft', autoReverted: true };
+  }
+  return { autoReverted: false };
+}
+
+/** Did a write change any protected field's VALUE? (restore/import — ADR 0845 D3). */
+export function protectedValuesDiffer(a: Strategy, b: Strategy): boolean {
+  const pick = (s: Strategy) => canonicalJSON(JSON.parse(JSON.stringify(PROTECTED_FIELDS.map((f) => s[f] ?? null))));
+  return pick(a) !== pick(b);
 }
 
 export async function strategyGateEnabled(tenantId: string): Promise<boolean> {

@@ -8,6 +8,14 @@
  * re-resolution on fork could differ if the agent's ceiling changed since, silently
  * diverging the forked run.
  *
+ * > **CORRECTED 2026-10-06 (ADR 0834 D7) — the paragraph above describes a design
+ * > that was never wired.** `readCapabilityScopeStamp` below has NO caller: every turn,
+ * > including a `:fork`'s, re-resolves the scope LIVE (`host/conversationToolScope.ts`),
+ * > which is what makes a revocation hold on a fork ("tighter wins", ADR 0132 §replay
+ * > correction). The stamp is PROVENANCE for the inspector, never the enforcement
+ * > source. Recorded runs replay their recorded `agent.toolReturned` verdicts, so live
+ * > resolution does not move a replay.
+ *
  * Pure: returns the NEW metadata to persist, or null when nothing should change
  * (already stamped — the replay/fork guard — or no narrowing to record).
  *

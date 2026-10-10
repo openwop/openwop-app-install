@@ -55,31 +55,77 @@ const workforces = new DurableCollection<Workforce>('workforce', (w) => w.workfo
 
 const seedDefs = workforceSeed as unknown as Workforce[];
 
-export async function getWorkforce(workforceId: string): Promise<Workforce | null> {
-  return workforces.get(workforceId);
+/**
+ * ADR 0775 D2 — a tenant's cutover decision. The seeded `Workforce` above is
+ * GLOBAL authored demo data (reconciled from `seed-data/workforces.json`), so a
+ * status written onto it flipped the cutover for EVERY tenant (`ARWF-2`). The
+ * one field a tenant decides lives here instead, keyed `${tenantId}:${workforceId}`
+ * and tenant-indexed — the `migrationService` shape for the same entity family.
+ * Overlay rows carry a JSON `tenantId`, so tenant teardown purges them.
+ */
+interface WorkforceStatusOverlay {
+  tenantId: string;
+  workforceId: string;
+  status: WorkforceStatus;
+  updatedAt: string;
 }
 
-export async function listWorkforces(): Promise<Workforce[]> {
-  return workforces.list();
+const statusOverlays = new DurableCollection<WorkforceStatusOverlay>(
+  'workforce-status',
+  (o) => `${o.tenantId}:${o.workforceId}`,
+  undefined,
+  (o) => o.tenantId,
+);
+
+function withTenantStatus(wf: Workforce, overlay: WorkforceStatusOverlay | null | undefined): Workforce {
+  return overlay ? { ...wf, status: overlay.status } : wf;
+}
+
+/** One workforce as `tenantId` sees it: the seed with the tenant's own cutover status. */
+export async function getWorkforce(tenantId: string, workforceId: string): Promise<Workforce | null> {
+  const wf = await workforces.get(workforceId);
+  if (!wf) return null;
+  return withTenantStatus(wf, await statusOverlays.get(`${tenantId}:${workforceId}`));
+}
+
+/** Every workforce as `tenantId` sees it. */
+export async function listWorkforces(tenantId: string): Promise<Workforce[]> {
+  const [all, overlays] = await Promise.all([workforces.list(), statusOverlays.listForTenantIndexed(tenantId)]);
+  const byId = new Map(overlays.filter((o) => o.tenantId === tenantId).map((o) => [o.workforceId, o] as const));
+  return all.map((wf) => withTenantStatus(wf, byId.get(wf.workforceId)));
 }
 
 export async function putWorkforce(workforce: Workforce): Promise<void> {
   await workforces.put(workforce);
 }
 
-/** Update a workforce's cutover status (MG-6). Returns the updated entity, or
- *  null if it doesn't exist. The PRODUCTION gate (only promote once the agent
- *  has graduated to bounded-autonomous) is enforced at the route, which has the
- *  run history to evaluate graduation. */
+/** Update `tenantId`'s cutover status for a workforce (MG-6). Returns the
+ *  workforce as that tenant now sees it, or null if it doesn't exist. Writes
+ *  ONLY the tenant overlay — never the shared seed (ADR 0775 D2). The
+ *  PRODUCTION gate (only promote once the agent has graduated to
+ *  bounded-autonomous) is enforced at the route, which has the run history. */
 export async function setWorkforceStatus(
+  tenantId: string,
   workforceId: string,
   status: WorkforceStatus,
 ): Promise<Workforce | null> {
   const wf = await workforces.get(workforceId);
   if (!wf) return null;
-  const updated: Workforce = { ...wf, status };
-  await workforces.put(updated);
-  return updated;
+  const overlay: WorkforceStatusOverlay = { tenantId, workforceId, status, updatedAt: new Date().toISOString() };
+  await statusOverlays.put(overlay);
+  return withTenantStatus(wf, overlay);
+}
+
+/** ADR 0775 D2 (architect M4) — drop every cutover decision `tenantId` made, so
+ *  clearing the workforce demo data does not leave a tenant reading
+ *  `production` with no graduation evidence behind it. Returns the count. */
+export async function clearWorkforceStatuses(tenantId: string): Promise<number> {
+  let n = 0;
+  for (const o of await statusOverlays.listForTenantIndexed(tenantId)) {
+    if (o.tenantId !== tenantId) continue;
+    if (await statusOverlays.delete(`${o.tenantId}:${o.workforceId}`)) n++;
+  }
+  return n;
 }
 
 /**

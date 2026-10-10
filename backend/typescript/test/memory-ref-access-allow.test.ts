@@ -108,7 +108,7 @@ let n = 0;
 /** A real signed-in user in their OWN personal workspace, via the ADR 0026 seam. */
 async function signIn(): Promise<{ c: ReturnType<typeof client>; userId: string; tenantId: string }> {
   const c = client();
-  const login = await c.post<{ user: { userId: string } }>('/v1/host/openwop-app/test/login', {
+  const login = await c.post<{ user: { userId: string } }>('/host/openwop-app/test/login', {
     email: `f3c-${Date.now()}-${n++}@acme.test`,
   });
   expect(login.status, JSON.stringify(login.body)).toBe(201);
@@ -116,7 +116,7 @@ async function signIn(): Promise<{ c: ReturnType<typeof client>; userId: string;
   // gate's `user:` arm calls. Hardcoding either would assert the test's guess
   // about auth rather than the gate's behaviour, and would stay green against a
   // gate that had stopped resolving anything at all.
-  const me = await c.get<{ userId: string; tenantId: string }>('/v1/host/openwop-app/users/me');
+  const me = await c.get<{ userId: string; tenantId: string }>('/host/openwop-app/users/me');
   expect(me.status, JSON.stringify(me.body)).toBe(200);
   return { c, userId: me.body.userId, tenantId: me.body.tenantId };
 }
@@ -136,7 +136,7 @@ describe('F3(c) — the legitimate reads a signed-in human must still get', () =
     await writeMemoryEntry(tenantId, `user:${userId}`, { content: 'my own private fact', tags: [] });
 
     const res = await c.get<MemoryListBody>(
-      `/v1/host/openwop-app/memory?memoryRef=user:${encodeURIComponent(userId)}`,
+      `/host/openwop-app/memory?memoryRef=user:${encodeURIComponent(userId)}`,
     );
     expect(res.status, 'a person must still be able to read their OWN memory').toBe(200);
     expect(res.body.entries.map((e) => e.content)).toContain('my own private fact');
@@ -159,7 +159,7 @@ describe('F3(c) — the legitimate reads a signed-in human must still get', () =
     await writeMemoryEntry(tenantId, `agent:${entry.rosterId}`, { content: 'agent private fact', tags: [] });
 
     const res = await c.get<MemoryListBody>(
-      `/v1/host/openwop-app/memory?memoryRef=agent:${encodeURIComponent(entry.rosterId)}`,
+      `/host/openwop-app/memory?memoryRef=agent:${encodeURIComponent(entry.rosterId)}`,
     );
     expect(
       res.status,
@@ -177,7 +177,7 @@ describe('F3(c) — the legitimate reads a signed-in human must still get', () =
     const victim = 'f3c-victim-user';
     await writeMemoryEntry('default', `user:${victim}`, { content: 'victim private fact', tags: [] });
 
-    const res = await c.get<{ error?: string }>(`/v1/host/openwop-app/memory?memoryRef=user:${victim}`);
+    const res = await c.get<{ error?: string }>(`/host/openwop-app/memory?memoryRef=user:${victim}`);
     expect(res.status).toBe(404);
     expect(await listMemoryEntries('default', `user:${victim}`)).toHaveLength(1);
   });

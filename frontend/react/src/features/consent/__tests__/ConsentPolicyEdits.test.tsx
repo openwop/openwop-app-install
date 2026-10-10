@@ -10,9 +10,13 @@
  * empty state — on the surface an operator consults for GDPR accountability.
  * Now it renders a designed failure card with retry; a genuinely empty org
  * still gets the real empty state.
+ *
+ * Sabotage-witnessed (/grade-tests w9): dropping the dirty chip or the `!dirty` Save
+ * gate, ignoring / skipping / always-asking the discard confirm, a switch that never
+ * lands, `setRecords([])` on a failed read, or a dead Retry — each reds a case.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/react';
+import { render, screen, cleanup, waitFor, fireEvent, act } from '@testing-library/react';
 
 let confirmAnswer = true;
 const confirmFn = vi.fn(async () => confirmAnswer);
@@ -22,8 +26,9 @@ vi.mock('../consentClient.js', async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
   listOrgs: vi.fn(async () => [{ orgId: 'org-1', name: 'Acme' }, { orgId: 'org-2', name: 'Globex' }]),
   getPolicy: vi.fn(async () => ({ policy: { tenantId: 't', regulatedRegions: ['EU'], defaultMode: 'opt-in' }, legalHold: null })),
+  getAccess: vi.fn(async () => ({ canManage: true })), // ADR 0849 D1 — an admin by default
   listRecords: vi.fn(() => recordsImpl()),
-  getSubject: vi.fn(async () => null),
+  getSubject: vi.fn(async () => ({ record: null, erased: false })),
   deleteSubject: vi.fn(async () => ({ ok: true, consentRecord: true, erasure: { total: 0, failed: 0, keysResolved: 0 } })),
 }));
 vi.mock('../../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
@@ -59,6 +64,9 @@ describe('CONS-G3 — unsaved policy edits', () => {
     const picker = screen.getByLabelText(/workspace|organization/i) as HTMLSelectElement;
     fireEvent.change(picker, { target: { value: 'org-2' } });
     await waitFor(() => expect(confirmFn).toHaveBeenCalled());
+    // `confirm` is called synchronously, so the waitFor passes before its answer lands:
+    // flush the `false` (and any wrongful switch + org-2 reload) before asserting.
+    await act(async () => {}); await act(async () => {});
     expect(picker.value).toBe('org-1'); // stayed
     expect((screen.getByDisplayValue('EU, UK') as HTMLInputElement)).toBeTruthy(); // edits kept
   });
@@ -66,8 +74,11 @@ describe('CONS-G3 — unsaved policy edits', () => {
   it('a clean org switch never asks', async () => {
     render(<ConsentPage />);
     await waitFor(() => expect(regionsInput()).toBeTruthy());
-    fireEvent.change(screen.getByLabelText(/workspace|organization/i), { target: { value: 'org-2' } });
+    const picker = screen.getByLabelText(/workspace|organization/i) as HTMLSelectElement;
+    fireEvent.change(picker, { target: { value: 'org-2' } });
     expect(confirmFn).not.toHaveBeenCalled();
+    // …and the switch actually happens.
+    await waitFor(() => expect(picker.value).toBe('org-2'));
   });
 });
 
@@ -81,11 +92,8 @@ describe('CONS-G4 — records read honesty', () => {
     recordsImpl = async () => [];
     fireEvent.click(screen.getByRole('button', { name: /retry/i }));
     await screen.findAllByText(/no consent records yet/i);
-  });
-
-  it('a genuinely empty org still gets the real empty state', async () => {
-    render(<ConsentPage />);
-    await screen.findAllByText(/no consent records yet/i);
+    // A successful read leaves no failure card behind (the genuinely-empty claim; a
+    // separate case for it was redundant with this leg + orgsFailedGuard's control).
     expect(screen.queryAllByText(/couldn’t load consent records/i).length).toBe(0);
   });
 });

@@ -4,6 +4,7 @@
  */
 export const messages = {
   openTitle: 'Alcance de herramientas para esta conversación',
+  chipLabel: 'Acceso a herramientas',
   heading: 'Alcance de herramientas de la conversación',
   blurb: 'Controla qué herramientas del agente puede usar en esta conversación y cuáles requieren tu aprobación primero. Solo restringe: nunca concede herramientas más allá de los permisos del agente.',
   pendingHeading: 'Aprobaciones pendientes',
@@ -28,4 +29,16 @@ export const messages = {
   loadFailed: 'No se pudo cargar el alcance de herramientas.',
   decisionFailed: 'No se pudo registrar tu decisión.',
   saveFailed: 'No se pudo guardar el alcance de herramientas.',
+  pendingChip_one: '{{count}} acción espera aprobación',
+  pendingChip_other: '{{count}} acciones esperan aprobación',
+  pendingChipAria: 'Revisa las acciones del agente que esperan tu aprobación',
+  requestedWith: 'Solicitado con',
+  noArguments: 'Sin argumentos.',
+  grainNote: 'Aprobar permite esta herramienta durante el resto de la conversación, con los argumentos que el agente use después, no solo la solicitud mostrada aquí.',
+  notOwnerNote: 'Solo la persona propietaria de la conversación puede aprobarlas.',
+  approvalChanged: 'Esta solicitud cambió o ya se decidió. Revísala de nuevo.',
+  approvedContinueHint: 'Aprobado. Pide al agente que lo intente de nuevo.',
+  continue: 'Continuar',
+  continueMessage: 'Aprobado: adelante.',
+  scopeReadOnlyNote: 'Solo la persona propietaria de la conversación puede cambiar qué herramientas usa el agente aquí.',
 };

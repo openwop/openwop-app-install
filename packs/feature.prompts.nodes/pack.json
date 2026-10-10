@@ -1,6 +1,7 @@
 {
   "name": "feature.prompts.nodes",
-  "version": "1.1.0",
+  "version": "1.1.1",
+  "kind": "node",
   "description": "Prompts feature node pack \u2014 reads over ctx.features.prompts (ADR 0116 P4): list the prompt library, get one entry, and render an entry's template with variable bindings so a workflow can compose a governed prompt. Tenant+org-guarded. role:action (recorded).",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
@@ -11,7 +12,7 @@
     "templates"
   ],
   "engines": {
-    "openwop": ">=1.0.0 <2.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "nodes": [
     {

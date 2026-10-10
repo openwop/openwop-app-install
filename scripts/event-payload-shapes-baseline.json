@@ -9,7 +9,6 @@
   ],
   "measured": "2026-09-18",
   "shapes": {
-    "approval.overridden :: / must have required property 'X'": 1,
     "runOrchestrator.decided :: /F must NOT have additional properties": 13,
     "runOrchestrator.decided :: /F must have required property 'X'": 4,
     "runOrchestrator.decided :: /F must match exactly one schema in oneOf": 2,

@@ -9,6 +9,14 @@
  *   - the public preference center: GET renders prefilled checkboxes, POST
  *     writes specifics + the derived umbrella through consentService, all-off
  *     adds the `crm:suppression` overlay, unknown tokens 404, idempotent.
+ *
+ * Sabotage-witnessed (/grade-tests wave 9): resolving a channel from the umbrella
+ * alone (ignoring the specific) reds the matrix, the send and the journey cases;
+ * gating the campaign / journey on `marketing` instead of the channel reds those
+ * two; prefilling from the umbrella alone reds the GET case; dropping the all-off
+ * suppression overlay or the `preferences` kind check reds the all-off case;
+ * minting the unsubscribe row without its sibling, or linking with no sibling,
+ * reds the two EM-UX-2 cases.
  */
 
 import http from 'node:http';
@@ -29,6 +37,8 @@ let server: http.Server;
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
+  // ADR 0848 D7a — a campaign send now REFUSES without a public link base (no unsubscribe link ⇒ no send).
+  process.env.OPENWOP_EMAIL_LINK_BASE_URL = 'https://app.example';
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
@@ -149,6 +159,8 @@ describe('ADR 0227 — public preference center', () => {
     const saved = await postForm(token, 'email=on');
     expect(saved.status).toBe(200);
     expect(saved.text).toContain('saved');
+    expect(saved.text, 'the SAVED state, not the refused/partial alert').toContain('role="status"');
+    expect(saved.text).not.toContain('role="alert"');
     const rec = await getConsent(T, MINT.contactId);
     expect(rec?.categories).toMatchObject({ marketing: true, 'marketing.email': true, 'marketing.sms': false, 'marketing.push': false });
     expect(await isSuppressed(T, MINT.email)).toBe(false);
@@ -168,7 +180,10 @@ describe('ADR 0227 — public preference center', () => {
     expect(rec?.categories).toMatchObject({ marketing: false, 'marketing.email': false, 'marketing.sms': false, 'marketing.push': false });
     expect(await isSuppressed(T, MINT.email)).toBe(true);
     // Idempotent: a repeat POST is the same outcome, no error.
-    expect((await postForm(token, '')).status).toBe(200);
+    const again = await postForm(token, '');
+    expect(again.status).toBe(200);
+    expect((await getConsent(T, MINT.contactId))?.categories).toMatchObject({ marketing: false, 'marketing.email': false, 'marketing.sms': false, 'marketing.push': false });
+    expect(await isSuppressed(T, MINT.email)).toBe(true);
     // Unknown token: 404 on both verbs.
     //
     // EM-UX-2 — this assertion used to pin `content-type: text/plain` and, below
@@ -226,3 +241,5 @@ describe('ADR 0227 — public preference center', () => {
     expect(html).toContain('<form method="post"'); // the opt-out itself still works
   });
 });
+
+afterAll(() => { delete process.env.OPENWOP_EMAIL_LINK_BASE_URL; });

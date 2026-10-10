@@ -9,24 +9,39 @@
  * failure mode the caps exist to prevent.
  *
  * These assert the rendered DOM rather than the constant, because a constant that
- * is never passed to an input is exactly the bug this is pinning.
+ * is never passed to an input is exactly the bug this is pinning. (The constant
+ * parity itself is the backend's `form-cap-parity.test.ts`.)
+ *
+ * Sabotages that redden it (grade-tests wave 8): a `maxLength` on the title,
+ * the over-count copy, ANY of the four cap blockers (title, submit message,
+ * label, description), Save ignoring the blockers or always off, the key rule,
+ * the key-error region's role or its always-mounted empty text, and the 80%
+ * counter threshold in either direction.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import type { FormDef } from '../formsClient.js';
-
-const client = vi.hoisted(() => ({
-  listOrgs: vi.fn(), listForms: vi.fn(), getForm: vi.fn(), createForm: vi.fn(),
-  updateForm: vi.fn(), deleteForm: vi.fn(), setFormStatus: vi.fn(),
-  listIntakeLists: vi.fn(), listSubmissionsPage: vi.fn(), listSubmissions: vi.fn(),
-  listFormTemplates: vi.fn(), createFormFromTemplate: vi.fn(),
-  publicFormUrl: (id: string) => `https://example.test/public-forms/${id}`,
-  hostedFormUrl: (id: string) => `https://example.test/f/${id}`,
-  FIELD_TYPES: ['text', 'email', 'textarea', 'select', 'checkbox'] as const,
-}));
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
-vi.mock('../formsClient.js', () => client);
+
+/**
+ * The ONE typed formsClient double (grade-tests wave 8): the REAL module is
+ * spread in — so `FormsRequestError`, `FIELD_TYPES` and the URL helpers are the
+ * shipped ones, not hand-kept copies that had drifted (no `number` type, no
+ * `reason` on the error) — and every network function is replaced by a
+ * `vi.fn` typed against the real signature, so a fixture that contradicts the
+ * client type is a compile error rather than a silent green.
+ */
+type FC = typeof import('../formsClient.js');
+const client = vi.hoisted(() => ({
+  listOrgs: vi.fn<FC['listOrgs']>(), listForms: vi.fn<FC['listForms']>(), getForm: vi.fn<FC['getForm']>(),
+  createForm: vi.fn<FC['createForm']>(), updateForm: vi.fn<FC['updateForm']>(), deleteForm: vi.fn<FC['deleteForm']>(),
+  setFormStatus: vi.fn<FC['setFormStatus']>(), listIntakeLists: vi.fn<FC['listIntakeLists']>(),
+  listSubmissionsPage: vi.fn<FC['listSubmissionsPage']>(), listSubmissions: vi.fn<FC['listSubmissions']>(),
+  deleteSubmission: vi.fn<FC['deleteSubmission']>(), releaseSubmission: vi.fn<FC['releaseSubmission']>(),
+  listFormTemplates: vi.fn<FC['listFormTemplates']>(), createFormFromTemplate: vi.fn<FC['createFormFromTemplate']>(),
+}));
+vi.mock('../formsClient.js', async (orig) => ({ ...(await orig<FC>()), ...client }));
 vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
   useFeatureAccess: () => makeFeatureAccess({ enabled: true, loading: false }),
 }));
@@ -52,11 +67,11 @@ const renderDetail = () => render(
 );
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   client.listOrgs.mockResolvedValue([{ orgId: 'o1', name: 'Org One' }]);
   client.getForm.mockResolvedValue(form());
   client.listIntakeLists.mockResolvedValue([]);
-  client.listSubmissionsPage.mockResolvedValue({ submissions: [], nextCursor: null });
+  client.listSubmissionsPage.mockResolvedValue({ submissions: [], nextCursor: null, flaggedCount: 0, droppedCount: 0 });
   client.listSubmissions.mockResolvedValue([]);
 });
 
@@ -86,7 +101,22 @@ describe('ADR 0516 FT-UX-2 — the editor enforces the server caps', () => {
     client.getForm.mockResolvedValue(form({ title: 'x'.repeat(SERVER.title + 1) }));
     renderDetail();
     // A disabled control with no stated reason leaves the user hunting.
-    await waitFor(() => expect(screen.getByText(/Fix these before saving/i)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(/Fix these before saving: Title/i)).toBeTruthy());
+  });
+
+  // The header promises FOUR caps; only the title was ever exercised, so a
+  // dropped submit-message / label / description blocker stayed green (probes
+  // w8g3-fcm-submitmsg-cap, w8g3-fcm-label-desc-cap). Each over-cap value must
+  // disable Save AND be named in the blocker.
+  it.each([
+    { cap: 'submit message', over: { submitMessage: 'x'.repeat(SERVER.submitMessage + 1) }, named: /Fix these before saving: Submit message/i },
+    { cap: 'field label', over: { fields: [{ key: 'name', label: 'L'.repeat(SERVER.label + 1), type: 'text' as const, required: true }] }, named: /Fix these before saving: L{20}/ },
+    { cap: 'field description', over: { fields: [{ key: 'name', label: 'Name', description: 'd'.repeat(SERVER.description + 1), type: 'text' as const, required: true }] }, named: /Fix these before saving: Name/ },
+  ])('blocks the save on an over-cap $cap, and names it', async ({ over, named }) => {
+    client.getForm.mockResolvedValue(form(over));
+    renderDetail();
+    await waitFor(() => expect(screen.getByText(named)).toBeTruthy());
+    expect(screen.getByRole('button', { name: /save/i }).hasAttribute('disabled')).toBe(true);
   });
 
   it('leaves Save enabled when everything is within its cap', async () => {
@@ -107,6 +137,11 @@ describe('ADR 0516 FT-UX-2 — the editor enforces the server caps', () => {
     expect(region, 'the key-error region must exist even when the key is valid').toBeTruthy();
     expect(region!.textContent).toBe('');
     expect(region!.getAttribute('role')).toBe('status');
+    // …and the transition is a MUTATION of that same node, not a remount (a
+    // region that mounts with its content announces nothing).
+    fireEvent.change(screen.getAllByLabelText(/^field key/i)[0]!, { target: { value: 'First Name' } });
+    await waitFor(() => expect(region!.textContent).toMatch(/letters, numbers and underscores/i));
+    expect(document.querySelector('[id^="key-err-"]')).toBe(region);
   });
 
   it('blocks the save on an invalid field KEY — the server throws 400 on this one', async () => {
@@ -117,9 +152,6 @@ describe('ADR 0516 FT-UX-2 — the editor enforces the server caps', () => {
     await waitFor(() => expect(screen.getByText(/letters, numbers and underscores/i)).toBeTruthy());
     expect(screen.getByRole('button', { name: /save/i }).hasAttribute('disabled')).toBe(true);
   });
-
-
-
 
   it('shows no counter while a value is far from its cap', async () => {
     renderDetail();

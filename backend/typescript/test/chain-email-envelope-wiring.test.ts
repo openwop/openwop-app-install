@@ -18,9 +18,10 @@
  *     `additionalProperties:false`) — `from` is a CONFIG field, and declaring
  *     it as an input reads like it works.
  */
-import { readFileSync, readdirSync, existsSync } from 'node:fs';
+import { readdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { readPackManifest } from './helpers/readPackManifest.js';
 
 const ROOT = join(__dirname, '..', '..', '..');
 const PACK_DIRS = ['examples/workflow-chain-packs', 'packs'];
@@ -51,7 +52,7 @@ for (const dir of PACK_DIRS) {
     const file = join(abs, entry, 'pack.json');
     if (!existsSync(file)) continue;
     let parsed: { chains?: Chain[] };
-    try { parsed = JSON.parse(readFileSync(file, 'utf8')); } catch { continue; }
+    try { parsed = readPackManifest(file); } catch { continue; }
     for (const ch of parsed.chains ?? []) {
       for (const n of ch.dag?.nodes ?? []) {
         if (n.typeId !== TYPE_ID) continue;

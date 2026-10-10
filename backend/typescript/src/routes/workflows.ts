@@ -17,22 +17,20 @@
  * shared with the AI workflow-author feature (ADR 0072).
  */
 
-import type { Express, Request } from 'express';
-import { v1 } from '../middleware/protocolVersion.js';
-import { OpenwopError, type OpenwopErrorCode } from '../types.js';
-import {
-  deleteRegisteredWorkflow,
-  registerWorkflow,
-} from '../host/workflowsRegistry.js';
+import type { Express, Request, Response } from 'express';
+import { OpenwopError } from '../types.js';
+import { deleteRegisteredWorkflow } from '../host/workflowsRegistry.js';
 import { validateWorkflowDefinition, WORKFLOW_ID_PATTERN } from '../host/workflowDefinitionValidation.js';
 import type { HostAdapterSuite } from '../host/index.js';
 import { tenantOf } from '../host/requestSubject.js';
-import { recordOwnership, listOwned, getOwned, removeOwnership, uniqueOwnedName, isAuthoredByOtherTenant } from '../host/workflowOwnership.js';
+import { requireWorkflowWrite } from '../host/workflowWriteAuthority.js';
+import { recordOwnership, listOwned, getOwned, removeOwnership, uniqueOwnedName, isWorkflowForeignTo, PUBLIC_WORKFLOW_ID, isSharedWorkflowId } from '../host/workflowOwnership.js';
+import { forkSharedWorkflow, retryPendingRepoints, forkOfShared, CANVAS_PRISTINE_HEADER } from '../host/sharedWorkflowFork.js';
 import { hasJobForWorkflow } from '../host/schedulingService.js';
 import { lifecycleOf, withLifecycle } from '../host/workflowLifecycle.js';
 import { registerWorkflowComposeTool, registerWorkflowProposeTool, registerComposedWorkflowDecisionHandler } from '../host/workflowComposeTool.js';
 import { registerRunDiagnoseTool } from '../host/runDiagnoseTool.js';
-import { getRegisteredWorkflowAsync, registerWorkflow as reRegisterWorkflow } from '../host/workflowsRegistry.js';
+import { getRegisteredWorkflowAsync, registerWorkflowDurable, readRegisteredWorkflowFresh, registerWorkflowIfUnchanged } from '../host/workflowsRegistry.js';
 import { recordRevision, listRevisions, getRevision, revisionVisibleTo } from '../host/workflowRevisions.js';
 import { listEvalSets, listEvalResults } from '../host/workflowEvalSets.js';
 import { revisionHashOf } from '../host/definitionHash.js';
@@ -41,6 +39,7 @@ import { aggregateFleetStats } from '../host/workflowFleetStats.js';
 import { estimateWorkflowCost } from '../host/workflowCostEstimate.js';
 import { listBudgetsForTenant, listTodaySpendForTenant } from '../host/workflowBudgets.js';
 import type { Storage } from '../storage/storage.js';
+import { pinMismatches } from '../host/chainPinRule.js';
 import { getChain, listChains, expandChain, reloadWorkflowChainPacks, chainRequirements, coRegisterSubChains, findMissingRequiredConfig, findUnfilledExpansionParams, SubChainError } from '../host/workflowChainPackLoader.js';
 import { validateChainBackedSubChainBinds } from '../host/chainBackedWorkflows.js';
 import { workflowRoomLive } from '../host/collab/workflowCollabResource.js';
@@ -49,14 +48,14 @@ import { preserveDroppedFields, parseFieldContract, FIELD_CONTRACT_HEADER } from
 import { getProvider } from '../features/connections/providerRegistry.js';
 import { getToggleDefault } from '../host/featureToggles/registry.js';
 import { buildNodeCatalog, requiredConfigKeysFor } from '../host/nodeCatalogBuilder.js';
-import { installPackFromRegistry, resolveDefaultPackDir, isSafePackName } from '../packs/registryInstaller.js';
-import { isTombstoned } from '../host/packTombstones.js';
+import { assertInstallable, installFromConfiguredRegistry } from '../packs/installLane.js';
 import { requireSuperadmin } from '../host/superadmin.js';
 
 import type { WorkflowDefinition } from '../executor/types.js';
-import { randomUUID } from 'node:crypto';
+import { copyWorkflowId, isServerMintedWorkflowId, mintUnique, workflowKind } from '../host/workflowId.js';
 import { createLogger } from '../observability/logger.js';
 import { getChainBackedWorkflow } from '../host/chainBackedWorkflows.js';
+import { resolveCallerDisplayName } from '../host/chatContext.js';
 
 const log = createLogger('routes.workflows');
 
@@ -69,19 +68,6 @@ const log = createLogger('routes.workflows');
  * and runs are untouched (availability curation, not runtime deactivation).
  */
 
-/** Map a thrown install error to a canonical {@link OpenwopErrorCode} + status.
- *  The installer throws bare Errors with a stable `<reason> (...)` prefix;
- *  classify the operator-facing ones (not-found / verification) vs an
- *  upstream-registry failure. Reuses existing codes (no new wire code). */
-function installErrorStatus(message: string): { code: OpenwopErrorCode; status: number } {
-  if (/manifest_fetch_failed \(404|pack_not_found|tarball_fetch_failed \(404/.test(message)) {
-    return { code: 'not_found', status: 404 };
-  }
-  if (/integrity_mismatch|signature_invalid|signature_unverifiable|manifest_identity_mismatch/.test(message)) {
-    return { code: 'validation_error', status: 422 }; // pack failed Ed25519/SRI verification
-  }
-  return { code: 'internal_error', status: 502 }; // upstream registry / network
-}
 
 /**
  * Of `candidateNodeIds`, the ones a RUN of `workflowId` actually recorded an
@@ -101,6 +87,7 @@ function installErrorStatus(message: string): { code: OpenwopErrorCode; status: 
  */
 async function nodeIdsRecordedByRuns(
   storage: Storage,
+  tenantId: string,
   workflowId: string,
   candidateNodeIds: readonly string[],
 ): Promise<string[]> {
@@ -108,7 +95,9 @@ async function nodeIdsRecordedByRuns(
   const pending = new Set(candidateNodeIds);
   const found = new Set<string>();
   try {
-    const runs = (await storage.listRuns({ limit: 200 })).filter((r) => r.workflowId === workflowId).slice(0, RUN_SCAN_LIMIT);
+    // ADR 0770 D7 (`WBWF-11`) — filtered AT THE SOURCE. This read the 200 newest
+    // runs HOST-WIDE and filtered here, a silent false negative on a busy host.
+    const runs = await storage.listRuns({ tenantId, workflowId, limit: RUN_SCAN_LIMIT });
     for (const run of runs) {
       if (pending.size === 0) break;
       for (const ev of await storage.listEvents(run.runId)) {
@@ -137,7 +126,7 @@ async function nodeIdsRecordedByRuns(
  * overwrite one — see `isWriteProtected`, which keys on registration, not on
  * this prefix.
  */
-const PUBLIC_WORKFLOW_ID = /^(wf\.seed\.|tmpl\.|openwop-app\.)/;
+// `PUBLIC_WORKFLOW_ID` — single-sourced in host/workflowOwnership.ts (ADR 0788).
 
 /**
  * The M7 cross-tenant READ predicate for a workflow id (ADR 0440 P4). Returns
@@ -148,14 +137,17 @@ const PUBLIC_WORKFLOW_ID = /^(wf\.seed\.|tmpl\.|openwop-app\.)/;
  * 404 (not 403) is the correct refusal — a 403 would confirm the id exists and
  * belongs to someone, reinstating the existence oracle the M7 fix removed.
  *
- * Perf: the cheap `getOwned` point lookup gates the ownership scan, so an owner
- * never pays for `isAuthoredByOtherTenant` (an infrequent, un-owned read).
+ * Perf: the `getOwned` point lookup answers for an owner; a non-owner pays
+ * `isAuthoredByOtherTenant`, which reads only that workflow's ownership rows.
+ * (It was a full-table scan and NOT infrequent: every conformance fixture read
+ * is an un-owned read — EVID-1.)
  */
 export async function isForeignOwned(tenantId: string, principal: Request['principal'], workflowId: string): Promise<boolean> {
   if (principal?.tenants?.includes('*') === true) return false; // wildcard operator
   if (PUBLIC_WORKFLOW_ID.test(workflowId)) return false;         // shared template — public READ
-  if (await getOwned(tenantId, workflowId)) return false;        // the caller owns it (point lookup)
-  return isAuthoredByOtherTenant(tenantId, workflowId);          // only now: the scan
+  // ADR 0823 D1 — the same predicate the launch funnel asks, so a definition a
+  // tenant cannot read is one it cannot run (owned → point lookup; else by-workflow).
+  return isWorkflowForeignTo(tenantId, workflowId);
 }
 
 /**
@@ -181,6 +173,13 @@ export async function isForeignOwned(tenantId: string, principal: Request['princ
  * tenant that seeded a `wf.seed.*` copy OWNS it, so `getOwned` still lets it
  * self-overwrite.
  *
+ * §Correction (ADR 0789): "a tenant that seeded a `wf.seed.*` copy OWNS it, so
+ * `getOwned` still lets it self-overwrite" was the hole, not the exemption. The
+ * seeded tenant owns an OWNERSHIP ROW; the definition is one row every seeded
+ * tenant runs, so that self-overwrite rewrote everyone's workflow. A shared id is
+ * now never written through a tenant route: an owner's save forks (the POST
+ * handler), and a free shared-namespace id is refused (a pre-squat).
+ *
  * Residual (documented, low severity): two tenants racing the FIRST write of
  * the same never-registered id both pass, since neither is registered yet. The
  * storage layer has no CAS to close it; user-authored ids are random so a
@@ -188,7 +187,24 @@ export async function isForeignOwned(tenantId: string, principal: Request['princ
  */
 async function isWriteProtected(tenantId: string, principal: Request['principal'], workflowId: string): Promise<boolean> {
   if (principal?.tenants?.includes('*') === true) return false; // wildcard operator (host tooling)
+  // ADR 0789 — a SHARED id is never written through a tenant route. An owner
+  // passes here only to be FORKED by the caller (`forkSharedWorkflow`); a free
+  // shared-namespace id is refused outright — creating `wf.seed.<next-chain>`
+  // before the seeder does would make the squatter's steps the definition every
+  // later seeded tenant adopts (the seeder is register-if-missing).
+  // A tenant that already FORKED it (a concurrent first save, a second tab, a
+  // queued autosave) is let through too: its write lands on its own fork.
+  if (isSharedWorkflowId(workflowId)) {
+    if (await getOwned(tenantId, workflowId)) return false;
+    return !(await forkOfShared(tenantId, workflowId));
+  }
   if (await getOwned(tenantId, workflowId)) return false;        // self-overwrite / autosave
+  // ADR 0794 — a server-minted origin (`copy`, `fork`, `sub`, `cadence`) is never
+  // CREATED through a tenant route. `sub` and `cadence` ids are deterministic from
+  // the tenant id, so a free one could be registered by anyone who knows that id
+  // before its owner's first instantiation — the `wf.seed.*` pre-squat, one origin
+  // over. Owned ids returned above, so a tenant still saves its own copy or fork.
+  if (isServerMintedWorkflowId(workflowId)) return true;
   // ADR 0703 — BOTH host registries, not just the raw one. This asked only
   // `getRegisteredWorkflowAsync`, and chain-backed definitions live in
   // `chainBackedWorkflows`' OWN registry (`host/index.ts` catalog source A). So
@@ -209,6 +225,105 @@ async function isWriteProtected(tenantId: string, principal: Request['principal'
   return Boolean(await getRegisteredWorkflowAsync(workflowId));  // registered + not mine ⇒ refuse
 }
 
+/** ADR 0770 D5 — the revision hash out of `If-Match: "<hash>"` (quotes and a
+ *  weak `W/` prefix tolerated). `*` or absent ⇒ no precondition. */
+function parseIfMatch(header: string | string[] | undefined): string | undefined {
+  const raw = Array.isArray(header) ? header[0] : header;
+  if (!raw) return undefined;
+  const v = raw.trim().replace(/^W\//, '').replace(/^"|"$/g, '');
+  return v && v !== '*' ? v : undefined;
+}
+
+/** ADR 0770 D5 — the typed stale-write refusal. The current head's revision
+ *  rides the `ETag` header, NOT the envelope: error details are entropy-scrubbed
+ *  (`sanitizeDetails`), which redacts a 64-hex hash to `<redacted:high-entropy>`
+ *  — a field that would be present and always wrong. */
+function headMovedConflict(res: Response, workflowId: string, headRevision: string | undefined): OpenwopError {
+  if (headRevision) res.setHeader('ETag', `"${headRevision}"`);
+  return new OpenwopError(
+    'conflict',
+    'This workflow was saved from somewhere else since you opened it.',
+    409,
+    { workflowId, reason: 'workflow_head_moved' },
+  );
+}
+
+/**
+ * ADR 0770 D3 (`WBWF-1`) — commit ONE staged sub-chain child. The child id is
+ * deterministic per `(tenant, chain, version)` (RFC 0133 §1.3 convergence), so
+ * a repeat instantiation lands on a child the tenant may already have EDITED.
+ * The old commit was an unconditional overwrite: a fresh `params:{}` expansion
+ * replaced the user's edits and rename, un-archived it, ignored a live room,
+ * and changed what every earlier parent run replays against. Three outcomes:
+ *
+ *  - `created` — not owned here, or owned but the definition does not resolve
+ *    (a lost fire-and-forget write): register + first revision + ownership,
+ *    stamping `mintedRevision`.
+ *  - `refreshed` — owned, and the head is still exactly what the host minted
+ *    (`mintedRevision`), and no room is live: re-register the fresh expansion.
+ *    This keeps re-instantiation as the heal for a child an OLDER host minted —
+ *    expansion output changes under a fixed chain version. Lifecycle carries
+ *    over (`revisionHashOf` strips it, so an archived-but-pristine child stays
+ *    archived).
+ *  - `reused` — anything else (edited, a legacy child with no stamp, or a live
+ *    room): bound as-is, no write at all.
+ *
+ * No compensating delete on a later failure: a concurrent request may already
+ * have reused a child this request created (architect H3). The worst case is an
+ * owned, unreferenced child, as before.
+ */
+async function commitSubChainChild(
+  tenantId: string,
+  childDef: WorkflowDefinition,
+  childName: string,
+): Promise<'created' | 'refreshed' | 'reused'> {
+  const id = childDef.workflowId;
+  const owned = await getOwned(tenantId, id);
+  // grade-code WBCD-2 — decide AND write against one FRESH read, with an atomic
+  // swap: deciding from the per-instance cache and then writing blind let an
+  // edit made on another instance (or between the read and the write) be
+  // replaced by the refresh.
+  const fresh = await readRegisteredWorkflowFresh(id);
+  const head = owned ? fresh.def : null;
+  let toWrite = childDef;
+  let outcome: 'created' | 'refreshed' = 'created';
+  if (owned && head) {
+    const headRevision = revisionHashOf(head);
+    // grade-code WBCD-8 — a child minted before `mintedRevision` existed carries
+    // no stamp; it is provably pristine when its history is exactly the one
+    // revision the mint recorded and the head still is that revision.
+    const pristine = owned.mintedRevision !== undefined
+      ? headRevision === owned.mintedRevision
+      : await isSingleRevisionHead(id, tenantId, headRevision);
+    if (!pristine || (await workflowRoomLive(id))) return 'reused';
+    const lc = lifecycleOf(head);
+    toWrite = withLifecycle(childDef, { transient: lc.transient, archivedAt: lc.archivedAt, generatedBy: lc.generatedBy });
+    outcome = 'refreshed';
+  }
+  if (!(await registerWorkflowIfUnchanged(toWrite, fresh.raw))) return 'reused'; // it moved under us — keep theirs
+  await recordRevision(tenantId, toWrite);
+  const lc = lifecycleOf(toWrite);
+  // grade-data D-7 — a chain-version bump rightly mints a NEW child (the id keys
+  // on version), but it must not be a second workflow with the same name: a new
+  // child takes a unique name; a child already owned keeps the one it has.
+  const name = owned?.name ?? await uniqueOwnedName(tenantId, childName);
+  await recordOwnership(tenantId, id, {
+    name,
+    nodeCount: toWrite.nodes.length,
+    ...(lc.transient !== undefined ? { transient: lc.transient } : {}),
+    ...(lc.archivedAt !== undefined ? { archivedAt: lc.archivedAt } : {}),
+    mintedRevision: revisionHashOf(toWrite),
+  });
+  return outcome;
+}
+
+/** grade-code WBCD-8 — true when `workflowId`'s visible history is exactly one
+ *  revision and it is the current head (a legacy, never-edited mint). */
+async function isSingleRevisionHead(workflowId: string, tenantId: string, headRevision: string): Promise<boolean> {
+  const rows = (await listRevisions(workflowId)).filter((r) => revisionVisibleTo(tenantId, r));
+  return rows.length === 1 && rows[0]!.revisionHash === headRevision;
+}
+
 export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdapterSuite; storage: Storage }): void {
   // ADR 0369 §6 — the compose-and-run agent tool registers here because this
   // is where its run-starter deps live (core-level capability; ADR 0104
@@ -227,7 +342,7 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
   // workflows (list metadata), via the ownership index — NOT the global registry
   // (which would leak every tenant's workflows). The global by-id resolver stays
   // `GET /v1/workflows/{id}` below.
-  app.get('/v1/host/openwop-app/workflows', async (req, res, next) => {
+  app.get('/host/openwop-app/workflows', async (req, res, next) => {
     try {
       const owned = await listOwned(tenantOf(req));
       // ADR 0369: archived stays out of the default list. Transient DRAFTS
@@ -257,6 +372,8 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
         }
         return {
           workflowId: o.workflowId,
+          // ADR 0794 — what the id IS, so no client reads its spelling to find out.
+          kind: workflowKind(o.workflowId),
           name: o.name ?? o.workflowId,
           nodeCount: o.nodeCount,
           createdAt: o.createdAt,
@@ -295,7 +412,7 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
   // /v1/host/openwop-app/workflows) and conformance fixtures auto-loaded
   // from `conformance/fixtures/`. 404 on unknown ids per `rest-
   // endpoints.md §"Error envelope"`.
-  app.get(v1('/workflows/:workflowId'), async (req, res, next) => {
+  app.get('/workflows/:workflowId', async (req, res, next) => {
     try {
       const wf = await deps.hostSuite.workflowCatalog.getWorkflow(req.params.workflowId);
       if (!wf) {
@@ -326,8 +443,9 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
     }
   });
 
-  app.post('/v1/host/openwop-app/workflows', async (req, res, next) => {
+  app.post('/host/openwop-app/workflows', async (req, res, next) => {
     try {
+      await requireWorkflowWrite(req); // ADR 0770 D1
       const def = validateWorkflowDefinition(req.body);
       await assertNoDisabledPacks(def, tenantOf(req)); // ADR 0194 P3 (403 + disabledPacks)
 
@@ -350,6 +468,53 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
       // authority. Typed 409; clients in the room suspend their autosave.
       if (await workflowRoomLive(def.workflowId)) {
         throw new OpenwopError('conflict', 'This workflow is in a live collaboration session; it saves through the session until everyone leaves.', 409, { workflowId: def.workflowId, reason: 'workflow_room_live' });
+      }
+
+      // ADR 0789 — the caller OWNS a shared definition (the guard above refused
+      // every other case). Its one row is every seeded tenant's, so this save
+      // never reaches it: identical content is an idempotent no-op on the shared
+      // id (a Run that re-registers an untouched seeded workflow must not mint a
+      // copy), and changed content forks onto the caller's own id. The response
+      // carries the fork's id — every client lane adopts the RETURNED id.
+      if (isSharedWorkflowId(def.workflowId) && req.principal?.tenants?.includes('*') !== true) {
+        const shared = await getRegisteredWorkflowAsync(def.workflowId);
+        // The no-op is only for a caller that still OWNS the shared id; one that
+        // already forked it (a second tab, an old bookmark) is saving into its
+        // fork — so its `If-Match` is judged against the FORK's head: a canvas
+        // loaded from the shared original must not silently overwrite edits the
+        // fork has since gained (409 → the builder's Reload / Keep mine banner).
+        const stillShared = Boolean(await getOwned(tenantOf(req), def.workflowId));
+        const expected = parseIfMatch(req.headers['if-match']);
+        const priorForkId = stillShared ? undefined : await forkOfShared(tenantOf(req), def.workflowId);
+        const priorFork = priorForkId ? await getRegisteredWorkflowAsync(priorForkId) : null;
+        // The head this write replaces: the fork once there is one, else the shared row.
+        const head = priorForkId ? priorFork : shared;
+        if (expected !== undefined && head && revisionHashOf(head) !== expected) {
+          throw headMovedConflict(res, priorForkId ?? def.workflowId, revisionHashOf(head));
+        }
+        const contract = parseFieldContract(req.headers[FIELD_CONTRACT_HEADER]);
+        const merged = preserveDroppedFields(def, head ?? null, contract);
+        const pristine = req.headers[CANVAS_PRISTINE_HEADER] === '1';
+        if (shared && stillShared && (pristine || revisionHashOf(merged.definition) === revisionHashOf(shared))) {
+          const revision = revisionHashOf(shared);
+          res.setHeader('ETag', `"${revision}"`);
+          res.status(201).json({ workflowId: def.workflowId, nodeCount: shared.nodes.length, revision });
+          return;
+        }
+        const fork = await forkSharedWorkflow(tenantOf(req), merged.definition, {
+          ...(req.userId ? { createdBy: req.userId } : {}),
+          ...(contract ? { declaredFields: [...contract] } : {}),
+        });
+        res.setHeader('ETag', `"${fork.revision}"`);
+        res.status(201).json({
+          workflowId: fork.workflowId,
+          nodeCount: merged.definition.nodes.length,
+          revision: fork.revision,
+          forkedFrom: fork.forkedFrom,
+          ...(fork.repointFailed.length > 0 ? { repointFailed: fork.repointFailed } : {}),
+          ...(merged.preserved.length > 0 ? { preservedFields: merged.preserved } : {}),
+        });
+        return;
       }
 
       // ADR 0440 P2 — DISCLOSE, don't refuse. Runs re-resolve their definition
@@ -390,7 +555,17 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
       // guard. The real residual is narrower: the documented no-CAS race on the
       // FIRST write of a never-registered id.
       const ownsIt = Boolean(await getOwned(tenantOf(req), def.workflowId));
-      const previous = ownsIt ? await getRegisteredWorkflowAsync(def.workflowId) : null;
+      // ADR 0770 D5 — opt-in optimistic concurrency. With `If-Match` the head
+      // is read FRESH from storage (the per-instance cache never expires, so it
+      // would 409 a user's own save that landed on another instance) and the
+      // write below is an atomic compare-and-swap against exactly that read.
+      // Without the header: today's last-writer-wins, for every other lane.
+      const expectedRevision = parseIfMatch(req.headers['if-match']);
+      const fresh = expectedRevision !== undefined && ownsIt ? await readRegisteredWorkflowFresh(def.workflowId) : undefined;
+      const previous = !ownsIt ? null : fresh ? fresh.def : await getRegisteredWorkflowAsync(def.workflowId);
+      if (fresh?.def && revisionHashOf(fresh.def) !== expectedRevision) {
+        throw headMovedConflict(res, def.workflowId, revisionHashOf(fresh.def));
+      }
       const nextIds = new Set(def.nodes.map((n) => n.nodeId));
       const removedNodeIds = previous
         ? previous.nodes.map((n) => n.nodeId).filter((id) => !nextIds.has(id))
@@ -400,7 +575,7 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
       // recorded this step". Intersect the removed ids with the node ids the
       // run events actually recorded, so the field means what its name says.
       const removedReferencedNodeIds = removedNodeIds.length > 0
-        ? await nodeIdsRecordedByRuns(deps.storage, def.workflowId, removedNodeIds)
+        ? await nodeIdsRecordedByRuns(deps.storage, tenantOf(req), def.workflowId, removedNodeIds)
         : [];
 
       // ADR 0524 — restore fields the client dropped wholesale relative to the
@@ -416,7 +591,23 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
       const preservation = preserveDroppedFields(def, previous, declaredContract);
       const defToPersist = preservation.definition;
 
-      registerWorkflow(defToPersist);
+      // ADR 0770 D2 — answer only once the definition is durable.
+      if (fresh) {
+        // A lost swap is a conflict only if the CONTENT moved. The raw string
+        // also changes on a lifecycle verb (archive/promote re-register the head
+        // with `revisionHashOf` unchanged), which must not read as "someone else
+        // saved" (grade-code WBCD-9) — re-read and retry against the new raw.
+        let expectedRaw = fresh.raw;
+        for (let attempt = 0; ; attempt += 1) {
+          if (await registerWorkflowIfUnchanged(defToPersist, expectedRaw)) break;
+          const now = await readRegisteredWorkflowFresh(def.workflowId);
+          const nowRevision = now.def ? revisionHashOf(now.def) : undefined;
+          if (nowRevision !== expectedRevision || attempt >= 2) throw headMovedConflict(res, def.workflowId, nowRevision);
+          expectedRaw = now.raw;
+        }
+      } else {
+        await registerWorkflowDurable(defToPersist);
+      }
       // ADR 0474 — append the content revision beside ownership (history).
       // MUST be `defToPersist`: the revision store is content-addressed, so
       // recording the pre-merge `def` would hash content that was never the
@@ -439,9 +630,16 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
         ...(lc.transient !== undefined ? { transient: lc.transient } : {}),
         ...(lc.archivedAt !== undefined ? { archivedAt: lc.archivedAt } : {}),
       });
+      // ADR 0789 — a fork whose re-point hooks failed retries them on each save.
+      const repointFailed = await retryPendingRepoints(tenantOf(req), defToPersist.workflowId);
+      const revision = revisionHashOf(defToPersist);
+      res.setHeader('ETag', `"${revision}"`);
       res.status(201).json({
         workflowId: def.workflowId,
+        ...(repointFailed.length > 0 ? { repointFailed } : {}),
         nodeCount: def.nodes.length,
+        // ADR 0770 D5 — the head as PERSISTED (post-merge), the next `If-Match`.
+        revision,
         // Present ONLY when this save dropped nodes that a run had recorded, so
         // the builder can surface a non-blocking notice. Absent = nothing to say.
         ...(removedReferencedNodeIds.length > 0 ? { removedReferencedNodeIds } : {}),
@@ -454,17 +652,31 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
     }
   });
 
-  app.delete('/v1/host/openwop-app/workflows/:workflowId', async (req, res, next) => {
+  app.delete('/host/openwop-app/workflows/:workflowId', async (req, res, next) => {
     try {
       const id = req.params.workflowId;
       if (!WORKFLOW_ID_PATTERN.test(id)) {
         throw new OpenwopError('validation_error', 'Invalid workflowId.', 400, { workflowId: id });
       }
+      await requireWorkflowWrite(req); // ADR 0770 D1
       // ADR 0163 R2 (IDOR guard): only the owning tenant may delete; a foreign or
       // unknown id is an indistinguishable 404 (no existence leak).
       const owned = await getOwned(tenantOf(req), id);
       if (!owned) {
         throw new OpenwopError('not_found', 'workflow not found', 404, { workflowId: id });
+      }
+      // ADR 0789 — deleting a SHARED definition removes it from THIS tenant only.
+      // The row (and its revisions, which the deletion hooks would cascade by id
+      // for every tenant) belongs to every seeded tenant, and the runs the
+      // `hasRunForWorkflow` check below sees may be anyone's. The schedule guard
+      // still applies: a job of this tenant's firing against it must go first.
+      if (isSharedWorkflowId(id)) {
+        if (await hasJobForWorkflow(tenantOf(req), id)) {
+          throw new OpenwopError('conflict', 'A schedule fires against this workflow; delete the schedule (or archive the workflow) first.', 409, { workflowId: id, reason: 'workflow_scheduled' });
+        }
+        await removeOwnership(tenantOf(req), id);
+        res.json({ workflowId: id, removed: true });
+        return;
       }
       // ADR 0369 — runs re-resolve their definition by id at replay/`:fork`
       // (no per-run snapshot), so deleting a referenced definition orphans
@@ -506,6 +718,7 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
         if (!WORKFLOW_ID_PATTERN.test(id)) {
           throw new OpenwopError('validation_error', 'Invalid workflowId.', 400, { workflowId: id });
         }
+        await requireWorkflowWrite(req); // ADR 0770 D1
         const tenantId = tenantOf(req);
         const owned = await getOwned(tenantId, id);
         const def = owned ? await getRegisteredWorkflowAsync(id) : null;
@@ -516,7 +729,11 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
           throw new OpenwopError('conflict', 'This workflow is in a live collaboration session; lifecycle changes wait until everyone leaves.', 409, { workflowId: id, reason: 'workflow_room_live' });
         }
 
-        let patched = def;
+        // ADR 0789 — on a SHARED definition this tenant's lifecycle lives on its
+        // ownership row, never on the shared def: start from THAT view, or a
+        // promote would read the shared def's (unarchived) state and silently
+        // un-archive this tenant's copy.
+        let patched = isSharedWorkflowId(id) ? withLifecycle(def, { archivedAt: owned.archivedAt }) : def;
         if (verb === 'archive') {
           patched = withLifecycle(def, { archivedAt: new Date().toISOString() });
         } else if (verb === 'unarchive') {
@@ -541,7 +758,11 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
             throw new OpenwopError('conflict', 'Run the draft successfully once before saving it.', 409, { workflowId: id, reason: 'workflow_untested' });
           }
           {
-            const recent = await deps.storage.listRuns({ tenantId, status: 'completed', limit: 1000 });
+            // ADR 0770 D7 (`WBWF-10`) — filter by workflow AT THE SOURCE. This read
+            // the tenant's newest 1000 completed runs of ANY workflow and filtered
+            // here, so on a busy tenant a green review run older than the 1000th
+            // was invisible and promote refused `workflow_untested`.
+            const recent = await deps.storage.listRuns({ tenantId, workflowId: id, status: 'completed', limit: 200 });
             const production = recent.some((r) => {
               if (r.workflowId !== id) return false;
               const m = (r.metadata ?? {}) as Record<string, unknown>;
@@ -581,9 +802,16 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
           }
           // A transient draft graduates; an already-saved workflow keeps its
           // lifecycle untouched — this call is then a pure re-publish.
-          patched = lifecycleOf(def).transient ? withLifecycle(def, { transient: undefined }) : def;
+          // From `patched`, not `def` (ADR 0789): on a shared id `patched` already
+          // carries this tenant's archive state from its ownership row.
+          patched = lifecycleOf(patched).transient ? withLifecycle(patched, { transient: undefined }) : patched;
         }
-        reRegisterWorkflow(patched);
+        // ADR 0789 — a SHARED definition's lifecycle is every seeded tenant's.
+        // Archive/unarchive/promote on one is this tenant's view only: the
+        // ownership row (which the scoped list, the builder and the `/` picker
+        // render from) carries it, and the shared row is never re-registered.
+        const sharedDef = isSharedWorkflowId(id);
+        if (!sharedDef) await registerWorkflowDurable(patched); // ADR 0770 D2
         const lc = lifecycleOf(patched);
         const name = typeof patched.metadata?.name === 'string' ? patched.metadata.name : undefined;
         await recordOwnership(tenantId, id, {
@@ -599,14 +827,14 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
       } catch (err) { next(err); }
     })();
   };
-  app.post('/v1/host/openwop-app/workflows/:workflowId/archive', lifecycleVerb('archive'));
-  app.post('/v1/host/openwop-app/workflows/:workflowId/unarchive', lifecycleVerb('unarchive'));
-  app.post('/v1/host/openwop-app/workflows/:workflowId/promote', lifecycleVerb('promote'));
+  app.post('/host/openwop-app/workflows/:workflowId/archive', lifecycleVerb('archive'));
+  app.post('/host/openwop-app/workflows/:workflowId/unarchive', lifecycleVerb('unarchive'));
+  app.post('/host/openwop-app/workflows/:workflowId/promote', lifecycleVerb('promote'));
 
   // ADR 0476 §2 — fleet insights: ONE bounded aggregation over the caller's
   // tenant's run rows (no per-workflow N+1, no durable read-model). The
   // response DISCLOSES the window; the FE labels stats with it.
-  app.get('/v1/host/openwop-app/workflows/stats', async (req, res, next) => {
+  app.get('/host/openwop-app/workflows/stats', async (req, res, next) => {
     try {
       res.json(await aggregateFleetStats(deps.storage, tenantOf(req)));
     } catch (err) { next(err); }
@@ -615,7 +843,7 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
   // ADR 0476 §3 — pre-run cost estimate (owner-gated 404 posture): the
   // workflow's HISTORICAL run costs (terminal stamps in the stats window) +
   // a STATIC order-of-magnitude floor from the head's AI-node composition.
-  app.get('/v1/host/openwop-app/workflows/:workflowId/estimate', async (req, res, next) => {
+  app.get('/host/openwop-app/workflows/:workflowId/estimate', async (req, res, next) => {
     try {
       const id = req.params.workflowId ?? '';
       const owned = id ? await getOwned(tenantOf(req), id) : null;
@@ -625,9 +853,31 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
     } catch (err) { next(err); }
   });
 
+  // ADR 0770 D5 — the head's revision hash, read FRESH from storage (the
+  // revisions list's `isHead` is unreliable: `recordRevision` swallows its own
+  // failures, so a head can lack a row). The builder's `If-Match` base.
+  // Owner-gated, the same 404 posture as the revisions read.
+  // Registered at the canonical `/host/openwop-app/…` root (ADR 0652).
+  app.get('/host/openwop-app/workflows/:workflowId/head', async (req, res, next) => {
+    try {
+      const id = req.params.workflowId ?? '';
+      if (!WORKFLOW_ID_PATTERN.test(id)) throw new OpenwopError('validation_error', 'Invalid workflowId.', 400, { workflowId: id });
+      if (!(await getOwned(tenantOf(req), id))) throw new OpenwopError('not_found', 'workflow not found', 404, { workflowId: id });
+      const { def } = await readRegisteredWorkflowFresh(id);
+      if (!def) throw new OpenwopError('not_found', 'workflow not found', 404, { workflowId: id });
+      const revision = revisionHashOf(def);
+      res.setHeader('ETag', `"${revision}"`);
+      // grade-code WBCD-1 — the definition and its revision come from ONE fresh
+      // read. Loading the content from the cache-first by-id route and the base
+      // from here let a stale canvas carry a current base, which the save
+      // precondition then waved through.
+      res.json({ workflowId: id, revision, definition: def });
+    } catch (err) { next(err); }
+  });
+
   // ADR 0474 — revision history (owner-gated; the lifecycle-verb IDOR posture:
   // foreign/unknown ids are an indistinguishable 404).
-  app.get('/v1/host/openwop-app/workflows/:workflowId/revisions', async (req, res, next) => {
+  app.get('/host/openwop-app/workflows/:workflowId/revisions', async (req, res, next) => {
     try {
       const id = req.params.workflowId ?? '';
       if (!WORKFLOW_ID_PATTERN.test(id)) throw new OpenwopError('validation_error', 'Invalid workflowId.', 400, { workflowId: id });
@@ -656,6 +906,13 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
       const rows = (await listRevisions(id))
         .filter((r) => revisionVisibleTo(tenantId, r))
         .slice(0, 100);
+      // ADR 0773 G-03g — the author's DISPLAY name (tenant-scoped, fail-soft), so
+      // the builder can say WHO changed a value a suggestion now conflicts with
+      // instead of guessing. One lookup per distinct author, not per row.
+      const authorNames = new Map<string, string | null>();
+      for (const r of rows) {
+        if (r.createdBy && !authorNames.has(r.createdBy)) authorNames.set(r.createdBy, await resolveCallerDisplayName(tenantId, r.createdBy));
+      }
       res.json({
         items: rows.map((r) => ({
           revisionHash: r.revisionHash,
@@ -664,6 +921,7 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
           nodeCount: r.nodeCount,
           ...(r.supersedes !== undefined ? { supersedes: r.supersedes } : {}),
           ...(r.createdBy !== undefined ? { createdBy: r.createdBy } : {}),
+          ...(r.createdBy && authorNames.get(r.createdBy) ? { createdByName: authorNames.get(r.createdBy) } : {}),
           published: owned.publishedRevision === r.revisionHash,
           isHead: headHash === r.revisionHash,
         })),
@@ -674,7 +932,7 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
   // ADR 0474 — the run-detail revision chip's read: which revision did this
   // run pin, and has the head moved since? Owner-gated via the shared
   // loadOwnedRun seam (404 posture for foreign/unknown runs).
-  app.get('/v1/host/openwop-app/runs/:runId/revision', async (req, res, next) => {
+  app.get('/host/openwop-app/runs/:runId/revision', async (req, res, next) => {
     try {
       const run = await loadOwnedRun(req, deps.storage, req.params.runId ?? '', 'runs:read');
       const meta = (run.metadata ?? {}) as Record<string, unknown>;
@@ -712,7 +970,7 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
   // SAME validated write discipline as the builder save (validate + disabled-
   // pack choke + owner write-guard via getOwned + removed-node disclosure +
   // recordRevision — history is append-only; the restored row re-heads by seq).
-  app.post('/v1/host/openwop-app/workflows/:workflowId/rollback', async (req, res, next) => {
+  app.post('/host/openwop-app/workflows/:workflowId/rollback', async (req, res, next) => {
     try {
       const id = req.params.workflowId ?? '';
       if (!WORKFLOW_ID_PATTERN.test(id)) throw new OpenwopError('validation_error', 'Invalid workflowId.', 400, { workflowId: id });
@@ -720,6 +978,7 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
       if (typeof revisionHash !== 'string' || revisionHash.length === 0) {
         throw new OpenwopError('validation_error', 'revisionHash is required.', 400, {});
       }
+      await requireWorkflowWrite(req); // ADR 0770 D1
       const tenantId = tenantOf(req);
       const owned = await getOwned(tenantId, id);
       if (!owned) throw new OpenwopError('not_found', 'workflow not found', 404, { workflowId: id });
@@ -748,9 +1007,25 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
       });
       const removedNodeIds = current ? current.nodes.map((n) => n.nodeId).filter((nid) => !def.nodes.some((n) => n.nodeId === nid)) : [];
       const removedReferencedNodeIds = removedNodeIds.length > 0
-        ? await nodeIdsRecordedByRuns(deps.storage, id, removedNodeIds)
+        ? await nodeIdsRecordedByRuns(deps.storage, tenantId, id, removedNodeIds)
         : [];
-      registerWorkflow(def);
+      // ADR 0789 — restoring a revision of a SHARED definition is a tenant write
+      // like any save: it forks onto the caller's own id, never re-heads the
+      // row every other seeded tenant runs.
+      if (isSharedWorkflowId(id)) {
+        // Restoring content identical to the shared head is not an edit: no fork.
+        if (current && revisionHashOf(def) === revisionHashOf(current)) {
+          res.json({ workflowId: id, restoredRevision: revisionHash, revision: revisionHashOf(current) });
+          return;
+        }
+        const fork = await forkSharedWorkflow(tenantId, def, { ...(req.userId ? { createdBy: req.userId } : {}) });
+        res.json({
+          workflowId: fork.workflowId, forkedFrom: fork.forkedFrom, restoredRevision: revisionHash, revision: fork.revision,
+          ...(fork.repointFailed.length > 0 ? { repointFailed: fork.repointFailed } : {}),
+        });
+        return;
+      }
+      await registerWorkflowDurable(def); // ADR 0770 D2
       await recordRevision(tenantId, def, { ...(req.userId ? { createdBy: req.userId } : {}) });
       const name = typeof def.metadata?.name === 'string' ? def.metadata.name : undefined;
       const lc = lifecycleOf(def);
@@ -760,7 +1035,9 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
         ...(lc.transient !== undefined ? { transient: lc.transient } : {}),
         ...(lc.archivedAt !== undefined ? { archivedAt: lc.archivedAt } : {}),
       });
-      res.json({ workflowId: id, restoredRevision: revisionHash, ...(removedReferencedNodeIds.length > 0 ? { removedReferencedNodeIds } : {}) });
+      // ADR 0770 D5 — `revision` is the new head's hash: the builder adopts it as
+      // its `If-Match` base, so the user's OWN rollback never 409s their next save.
+      res.json({ workflowId: id, restoredRevision: revisionHash, revision: revisionHashOf(def), ...(removedReferencedNodeIds.length > 0 ? { removedReferencedNodeIds } : {}) });
     } catch (err) { next(err); }
   });
 
@@ -769,12 +1046,15 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
 
   // Discovery: the installed workflow-chain packs (RFC 0013), host-global like the
   // node-catalog (authed, but not tenant data). Feeds the builder template gallery.
-  app.get('/v1/host/openwop-app/workflow-chains', (_req, res, next) => {
+  app.get('/host/openwop-app/workflow-chains', (_req, res, next) => {
     try {
       // Day-1 UX P3 — per-chain requirements feed the template pre-flight
       // (uninstalled node types + named connection bindings). Host-global
       // derivation only; the caller's own connection status joins client-side.
-      const known = new Set(buildNodeCatalog().map((n) => n.typeId));
+      const catalog = buildNodeCatalog();
+      const known = new Set(catalog.map((n) => n.typeId));
+      // ADR 0766 D3 — a pin the installed version cannot honour is an install gap.
+      const installedNode = new Map(catalog.map((n) => [n.typeId, n] as const));
       // RFC 0135 — composition-only chains (internal: true, e.g. an RFC 0133 sub-chain
       // child) MUST be omitted from the default template listing. They stay loadable,
       // resolvable, composable, and from-chain-instantiable by id (presentational only).
@@ -791,6 +1071,7 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
           // Toggle-GATED features only: getToggleDefault returns null for
           // always-on surfaces (e.g. kb), which then drop out of requiredFeatures.
           (id) => { const def = getToggleDefault(id); return def ? { label: def.label ?? id } : null; },
+          (typeId) => installedNode.get(typeId),
         ),
         ...(category ? { category } : {}),
         ...(chain.capabilities ? { capabilities: chain.capabilities } : {}),
@@ -807,8 +1088,9 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
   // (R2; not the deterministic chainId:expansionId) → registers + records tenant
   // ownership. Unresolved node typeIds are returned as `warnings` (install/connect
   // prompts) — NOT a hard failure (ADR 0163 R6: invitation, not breakage).
-  app.post('/v1/host/openwop-app/workflows/from-chain', async (req, res, next) => {
+  app.post('/host/openwop-app/workflows/from-chain', async (req, res, next) => {
     try {
+      await requireWorkflowWrite(req); // ADR 0770 D1
       const body = (req.body ?? {}) as { chainId?: unknown; params?: unknown; deferred?: unknown };
       if (typeof body.chainId !== 'string') {
         throw new OpenwopError('validation_error', 'chainId is required.', 400, {});
@@ -836,13 +1118,15 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
       // conformance `chain.subchain.unsupported-refused` scenario is witnessable.
       let expanded;
       let coRegisteredChildIds: string[] = [];
+      // ADR 0770 D3 — STAGE, CHECK, then COMMIT. `coRegisterSubChains` keeps its
+      // deps interface, but `register`/`own` now only COLLECT: nothing is written
+      // until the parent and every child have expanded and passed the disabled-
+      // pack gate. Before, children were registered + owned first and the gate
+      // ran after (children never at all), so a refusal left owned orphans in
+      // `/builder` and the `/` picker.
+      const staged: Array<{ def: WorkflowDefinition; name: string }> = [];
       if (found.chain.subChains?.length) {
         try {
-          // Review M2 — children are owned AND revisioned: collect each child
-          // def at register time, append its first revision after the
-          // co-registration settles (a child without a revision row would have
-          // an empty History drawer and runs pinning unresolvable hashes).
-          const childDefs: WorkflowDefinition[] = [];
           // §Correction (grade-code MEDIUM-3 / grade-ux TPI-15 / grade-data DOC-1):
           // this comment used to claim the route ENFORCES required params and
           // refuses with `chain_missing_required_param`. It does NOT — that
@@ -852,11 +1136,15 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
           // below is a REPORT only. Left corrected rather than deleted so the
           // next reader knows the honesty gap is still open, not half-closed.
           const result = await coRegisterSubChains(found.chain, { params, deferred, tenantId: tenantOf(req), requiredConfigKeysFor }, {
-            register: (childDef) => { childDefs.push(childDef); registerWorkflow(childDef); },
-            own: async (wid, nm, nodeCount) => { await recordOwnership(tenantOf(req), wid, { name: nm, nodeCount }); },
+            register: (childDef) => {
+              if (!staged.some((st) => st.def.workflowId === childDef.workflowId)) staged.push({ def: childDef, name: childDef.workflowId });
+            },
+            own: async (wid, nm) => {
+              const st = staged.find((x) => x.def.workflowId === wid);
+              if (st) st.name = nm;
+            },
             supported: process.env.OPENWOP_CHAIN_SUBCHAINS !== '0',
           });
-          for (const childDef of childDefs) await recordRevision(tenantOf(req), childDef);
           expanded = result.definition;
           coRegisteredChildIds = result.registeredChildIds;
         } catch (err) {
@@ -882,8 +1170,7 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
         expanded = expandChain(found.chain, { params, deferred, requiredConfigKeysFor });
       }
       // R2 — a fresh owned instance id (the published chain id is not the instance id).
-      const slug = found.chain.chainId.replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, '');
-      const workflowId = `wf.${slug}.${randomUUID().slice(0, 8)}`;
+      const workflowId = await mintUnique(() => copyWorkflowId(found.chain.chainId), async (id) => Boolean(await getRegisteredWorkflowAsync(id)));
       // Preserve the template's name; on a collision with an existing owned
       // workflow append -2/-3/… (never the raw workflowId). Stamp the resolved
       // name on BOTH the definition (builder canvas) and the ownership record
@@ -892,8 +1179,17 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
         ? expanded.metadata.name : found.chain.label;
       const name = await uniqueOwnedName(tenantOf(req), baseName);
       const def = { ...expanded, workflowId, metadata: { ...expanded.metadata, name } };
-      await assertNoDisabledPacks(def, tenantOf(req)); // ADR 0194 P3 — same choke as POST /workflows
-      registerWorkflow(def);
+      // ADR 0194 P3 — the POST choke, now over the parent AND every child, and
+      // BEFORE anything is written (ADR 0770 D3, `WBWF-7`/`WBWF-8`).
+      for (const d of [...staged.map((st) => st.def), def]) await assertNoDisabledPacks(d, tenantOf(req));
+      // Children first (depth-first staging order), so the parent's rewritten
+      // `config.workflowId` always resolves.
+      const reusedChildIds: string[] = [];
+      for (const st of staged) {
+        const outcome = await commitSubChainChild(tenantOf(req), st.def, st.name);
+        if (outcome === 'reused') reusedChildIds.push(st.def.workflowId);
+      }
+      await registerWorkflowDurable(def); // ADR 0770 D2
       // ADR 0474 — the instantiation IS the first revision.
       await recordRevision(tenantOf(req), def, { ...(req.userId ? { createdBy: req.userId } : {}) });
       const lc2 = lifecycleOf(def);
@@ -903,7 +1199,14 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
         ...(lc2.archivedAt !== undefined ? { archivedAt: lc2.archivedAt } : {}),
       });
       // R6 — surface node types not installed on this host (best-effort heads-up).
-      const known = new Set(buildNodeCatalog().map((n) => n.typeId));
+      const catalog = buildNodeCatalog();
+      const known = new Set(catalog.map((n) => n.typeId));
+      const installedNode = new Map(catalog.map((n) => [n.typeId, n] as const));
+      // ADR 0766 D3 — installed, but not at the version the chain pinned. Kept
+      // out of `warnings` (grade-ux U-2): that list means "not installed", and
+      // the client renders it as such — a mismatch needs both versions named.
+      const pinGaps = pinMismatches(found.chain.nodePins, (typeId) => installedNode.get(typeId)?.version)
+        .map((m) => ({ ...m, label: installedNode.get(m.typeId)?.label ?? m.typeId }));
       const warnings = [...new Set(def.nodes.map((n) => n.typeId).filter((t) => !known.has(t)))];
       // §Correction (grade-ux TPI-3) — TELL THE CLIENT WHAT IS STILL MISSING.
       // The host already computed this and only `log.warn`ed it, so a template
@@ -925,7 +1228,10 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
         workflowId,
         nodeCount: def.nodes.length,
         ...(coRegisteredChildIds.length ? { subChainWorkflowIds: coRegisteredChildIds } : {}),
+        // ADR 0770 D3 — children this tenant had EDITED, bound as-is (not rebuilt).
+        ...(reusedChildIds.length ? { reusedSubChainWorkflowIds: reusedChildIds } : {}),
         ...(warnings.length ? { warnings } : {}),
+        ...(pinGaps.length ? { pinMismatches: pinGaps } : {}),
         ...(incompleteNodes.length ? { incompleteNodes } : {}),
         ...(unfilledParams.length ? { unfilledParams } : {}),
       });
@@ -944,38 +1250,18 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
   // feature-toggle/governance administration, NOT a per-tenant write. Scoped to
   // `kind:"workflow-chain"` packs (the loader kind-filters; node/agent runtime
   // install needs a catalog rebuild and stays deferred).
-  app.post('/v1/host/openwop-app/workflow-chain-packs/install', async (req, res, next) => {
+  app.post('/host/openwop-app/workflow-chain-packs/install', async (req, res, next) => {
     try {
       requireSuperadmin(req, 'Installing workflow packs');
       const body = (req.body ?? {}) as { name?: unknown; version?: unknown };
-      if (typeof body.name !== 'string' || typeof body.version !== 'string') {
-        throw new OpenwopError('validation_error', 'name and version are required.', 400, {});
-      }
-      // ADR 0660 D4 — this lane had NONE of the hardening its two siblings
-      // (`marketplace/routes.ts`, `agentPackRegistry.ts`) carry: no name guard, so
-      // the name reached `join(packDir, name)` and then
-      // `rmSync(destDir,{recursive,force})`; no tombstone check, so an operator
-      // could silently re-install a pack they had removed; and no registry
-      // override. Superadmin-gated, so an operator footgun and a tombstone bypass
-      // rather than a tenant-reachable hole — but the identical shape that has now
-      // appeared on a sibling lane in four consecutive features.
-      if (!isSafePackName(body.name)) {
-        throw new OpenwopError('validation_error', 'name must be a safe pack name.', 400, { field: 'name' });
-      }
-      if (isTombstoned(body.name)) {
-        throw new OpenwopError('conflict', `Pack ${body.name} was removed by an operator; restore it before installing.`, 409, { name: body.name });
-      }
+      // ADR 0660 D4 → ADR 0826 D4 — this lane once had none of its siblings'
+      // hardening; it now shares their ONE install lane (path-safe name, SemVer,
+      // tombstone, revoked version, configured registry + keys) and its error
+      // mapping, so no raw installer message — registry URL included — reaches
+      // the client (`MKT2-29`).
+      const target = assertInstallable({ name: body.name, version: body.version });
       const before = new Set(listChains().map((c) => c.chain.chainId));
-      let result: { installed: boolean; reason?: string };
-      try {
-        result = await installPackFromRegistry(
-          { name: body.name, version: body.version },
-          { packDir: resolveDefaultPackDir(), ...(process.env.OPENWOP_REGISTRY_URL ? { registry: process.env.OPENWOP_REGISTRY_URL } : {}) },
-        );
-      } catch (e) {
-        const { code, status } = installErrorStatus(String(e instanceof Error ? e.message : e));
-        throw new OpenwopError(code, String(e instanceof Error ? e.message : e), status, { name: body.name, version: body.version });
-      }
+      const result = await installFromConfiguredRegistry(target);
       // Hot-reload so a just-installed (or already-present) chain pack is listable
       // without restart; report the chainIds this install made newly available.
       const { errors } = reloadWorkflowChainPacks();

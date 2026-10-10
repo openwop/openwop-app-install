@@ -18,7 +18,10 @@
  * confident claim about bob after a transient toast; (c) the stale panel sits
  * above an Erase button enabled by the KEY FIELD, not by the lookup.
  *
- * Every case below is sabotage-probed — see the commit message.
+ * Every case below is sabotage-probed (/grade-tests w9): wiping the key on a partial
+ * erasure, NOT wiping it on a clean one, binding Retry to the field, `setReceipt(null)`
+ * in `load()`, dropping the subject label / the onChange invalidation / the `failed`
+ * state, or hiding the data-subject panel when the regime is off — each reds a case.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor, fireEvent, act } from '@testing-library/react';
@@ -34,6 +37,7 @@ vi.mock('../consentClient.js', async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
   listOrgs: vi.fn(async () => [{ orgId: 'org-1', name: 'Acme' }]),
   getPolicy: vi.fn(async () => ({ policy: { tenantId: 't', regulatedRegions: [], defaultMode: 'opt-in' }, legalHold: null })),
+  getAccess: vi.fn(async () => ({ canManage: true })), // ADR 0849 D1 — an admin by default
   listRecords: (...a: unknown[]) => listRecords(...a),
   getSubject: (...a: unknown[]) => getSubject(...a),
   deleteSubject: (...a: unknown[]) => deleteSubject(...a),
@@ -50,7 +54,7 @@ import { ConsentPage } from '../ConsentPage.js';
 const rec = (over: Partial<ConsentRecord> = {}): ConsentRecord => ({
   subjectKey: 'x', categories: { necessary: true, analytics: true, marketing: false },
   ts: '2026-08-01T00:00:00.000Z', source: 'public', ...over,
-} as ConsentRecord);
+});
 
 async function mount(): Promise<HTMLInputElement> {
   render(<ConsentPage />);
@@ -69,14 +73,14 @@ beforeEach(() => {
   listRecords.mockImplementation(async () => []);
   getSubject.mockImplementation(async () => {
     if (subjectResult instanceof Error) throw subjectResult;
-    return subjectResult.record;
+    return { record: subjectResult.record, erased: false };
   });
 });
 afterEach(cleanup);
 
 describe('CONS-UX-1 — the prescribed retry has an affordance', () => {
   it('a PARTIAL erasure keeps the subject key, so Erase stays usable', async () => {
-    eraseResult = { ok: false, consentRecord: true, erasure: { total: 4, failed: 2, keysResolved: 2, failedFeatures: ['eraseCrmSubject'] } } as SubjectErasureResult;
+    eraseResult = { ok: false, consentRecord: true, erasure: { total: 4, failed: 2, keysResolved: 2, failedFeatures: ['eraseCrmSubject'] } };
     const input = await mount();
     type(input, 'subj-42');
     click(/^erase$/i);
@@ -88,7 +92,7 @@ describe('CONS-UX-1 — the prescribed retry has an affordance', () => {
   });
 
   it('the partial receipt renders a Retry-erasure control bound to its own subject key', async () => {
-    eraseResult = { ok: false, consentRecord: true, erasure: { total: 4, failed: 1, keysResolved: 1, failedFeatures: ['eraseCrmSubject'] } } as SubjectErasureResult;
+    eraseResult = { ok: false, consentRecord: true, erasure: { total: 4, failed: 1, keysResolved: 1, failedFeatures: ['eraseCrmSubject'] } };
     const input = await mount();
     type(input, 'subj-42');
     click(/^erase$/i);
@@ -123,7 +127,7 @@ describe('CONS-UX-1 — the prescribed retry has an affordance', () => {
     // React batches and the last write wins. The sabotage probe came back green,
     // which is a finding about the TEST. It now drives the real records-list
     // Retry, which is the caller that actually reaches `load()` on its own.
-    eraseResult = { ok: false, consentRecord: true, erasure: { total: 4, failed: 1, keysResolved: 1, failedFeatures: ['x'] } } as SubjectErasureResult;
+    eraseResult = { ok: false, consentRecord: true, erasure: { total: 4, failed: 1, keysResolved: 1, failedFeatures: ['x'] } };
     listRecords.mockRejectedValue(new Error('records read down'));
     const input = await mount();
     type(input, 'subj-42');

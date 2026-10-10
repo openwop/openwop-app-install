@@ -1,11 +1,12 @@
 {
   "name": "feature.strategy.nodes",
-  "version": "1.3.0",
+  "version": "1.3.2",
+  "kind": "node",
   "description": "Strategy feature node pack — read nodes over the ctx.features.strategy surface (list, get, context, health, check-ins, stale KRs) + a create-board-memo write node that persists an agent-authored board memo as a Document (ctx.features.documents) + the measurement loop: check-in (STRUCTURALLY a proposal from a run — a human confirms in the app), list-check-ins, list-stale-krs (the cadence work list), and sync-metrics (confirmed writes ONLY for KRs whose measure.source a human configured; honest synced/skipped matrix). Strategy CRUD stays human-only.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "strategy", "okr", "portfolio", "board", "memo"],
-  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "engines": { "openwop": ">=1.0.0 <3.0.0" },
   "nodes": [
     {
       "typeId": "feature.strategy.nodes.list-strategies",

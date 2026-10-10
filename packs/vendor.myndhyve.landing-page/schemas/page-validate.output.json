@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.landing-page/1.0.0/page-validate.output.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.landing-page/1.0.2/page-validate.output.json",
   "title": "LandingPageValidateOutput",
   "type": "object",
   "required": ["validationReport", "isValid", "seoScore", "accessibilityScore", "performanceScore", "issues", "success"],

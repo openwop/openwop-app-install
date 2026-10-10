@@ -55,13 +55,13 @@ function rawGet(path: string, headers: Record<string, string> = {}): Promise<{ s
   });
 }
 
-const cms = (orgId: string, sfx = ''): string => `/v1/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${sfx}`;
+const cms = (orgId: string, sfx = ''): string => `/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${sfx}`;
 
 /** An org (bound to a custom host) with a published post + a `pricing` page. */
 async function boundSite(): Promise<{ orgId: string; host: string; postSlug: string }> {
   const owner = client();
-  await owner.post('/v1/host/openwop-app/test/login', { email: `cd-${Date.now()}-${n++}@acme.test` });
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Domain Co' });
+  await owner.post('/host/openwop-app/test/login', { email: `cd-${Date.now()}-${n++}@acme.test` });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Domain Co' });
   const orgId = org.body.orgId as string;
 
   const post = await owner.post(cms(orgId, '/pages'), {
@@ -114,7 +114,7 @@ describe('ADR 0391 — custom-domain blog + pricing mapping', () => {
 
   it('the blog-index prerender route is also reachable directly (platform origin)', async () => {
     const { orgId, postSlug } = await boundSite();
-    const res = await rawGet(`/v1/host/openwop-app/public/${encodeURIComponent(orgId)}/blog/prerender`);
+    const res = await rawGet(`/host/openwop-app/public/${encodeURIComponent(orgId)}/blog/prerender`);
     expect(res.status).toBe(200);
     expect(res.body).toContain('Launch Notes');
     expect(res.body).toContain(`/blog/${postSlug}`);

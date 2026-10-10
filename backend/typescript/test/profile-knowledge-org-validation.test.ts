@@ -1,7 +1,7 @@
 /**
  * RI-ORG-2 — the profile-knowledge routes take `orgId` from the REQUEST BODY, so the
  * org's existence in the caller's tenant is asserted explicitly before authority is
- * resolved (`features/profile-memory/knowledgeRoutes.ts:43`).
+ * resolved (`features/profile-memory/knowledgeRoutes.ts` `requireOrgScope`).
  *
  * Authorization alone already fenced this: the guard resolves via
  * `resolveEffectiveAccess`, which needs a member row matching `(tenantId, orgId)` — a
@@ -21,6 +21,15 @@
  * service-level test cannot invoke it — the first version of this file asserted
  * preconditions about `resolveEffectiveAccess`/`getOrg` instead and stayed GREEN when
  * the guard was deleted. Only the HTTP boundary observes it.
+ *
+ * Each refusal asserts the whole claim: a uniform `not_found` envelope AND no
+ * collection created/bound against the refused org (the dangling row is the harm).
+ *
+ * Sabotage that turns it red (w3g2-orgval-*):
+ *   - `if (!org)` (drop the tenant comparison)            → case 1 (201, row bound)
+ *   - `if (org && org.tenantId !== tenantId)` (drop `!org`) → case 2
+ *   - `org.tenantId === tenantId` (inverted comparison)    → case 3 (and case 1)
+ *   - the guard's 404 → 403                                → cases 1 and 2
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -29,6 +38,7 @@ import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { createOrg } from '../src/host/accessControlService.js';
+import { getSetCookies } from './headerCookies.js';
 
 let BASE: string;
 let server: http.Server;
@@ -53,7 +63,13 @@ afterAll(async () => {
   else process.env.OPENWOP_DEMO_MODE = PRIOR_DEMO;
 });
 
-interface Res<T = any> { status: number; body: T }
+interface Res { status: number; body: unknown }
+/** The host error envelope (`middleware/errorEnvelope.ts`). */
+interface ErrBody { error?: string; details?: { orgId?: string } }
+interface ColBody { collectionId: string; orgId: string; name: string }
+interface ViewBody { collections: Array<{ collectionId: string; orgId: string; name: string }> }
+interface OrgBody { orgId: string }
+
 function client() {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
@@ -62,18 +78,31 @@ function client() {
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
-    const h = res.headers as Headers & { getSetCookie?: () => string[] };
-    const single = res.headers.get('set-cookie');
-    for (const sc of (typeof h.getSetCookie === 'function' ? h.getSetCookie() : single ? [single] : [])) {
+    for (const sc of getSetCookies(res.headers)) {
       const m = /(__session=[^;]+)/.exec(sc); if (m) cookie = m[1];
     }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    const out: unknown = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    return { status: res.status, body: out };
   };
-  return { post: (p: string, b?: unknown) => call('POST', p, b) };
+  return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b) };
 }
 
-const COLLECTIONS = '/v1/host/openwop-app/profiles/me/knowledge/collections';
+const KNOWLEDGE = '/host/openwop-app/profiles/me/knowledge';
+const COLLECTIONS = `${KNOWLEDGE}/collections`;
 let n = 0;
+
+async function signedIn(): Promise<ReturnType<typeof client>> {
+  const c = client();
+  const login = await c.post('/host/openwop-app/test/login', { email: `ri2-${n++}@t.test` });
+  expect(login.status, JSON.stringify(login.body)).toBe(201);
+  return c;
+}
+
+async function boundCollections(c: ReturnType<typeof client>): Promise<ViewBody['collections']> {
+  const view = await c.get(KNOWLEDGE);
+  expect(view.status, JSON.stringify(view.body)).toBe(200);
+  return (view.body as ViewBody).collections;
+}
 
 describe('RI-ORG-2 — a body-supplied orgId must exist in the caller tenant', () => {
   it('an org in ANOTHER tenant is refused with 404, even under demo mode', async () => {
@@ -86,40 +115,44 @@ describe('RI-ORG-2 — a body-supplied orgId must exist in the caller tenant', (
       name: 'Elsewhere',
     });
 
-    const c = client();
-    await c.post('/v1/host/openwop-app/test/login', { email: `ri2-${Date.now()}-${n++}@t.test` });
-
+    const c = await signedIn();
     const res = await c.post(COLLECTIONS, { orgId: foreign.orgId, name: 'Smuggled' });
     // 404, not 403: a foreign org must be indistinguishable from an absent one.
     expect(
       res.status,
       `a foreign org must not be usable as a collection parent; got ${res.status} ${JSON.stringify(res.body)}`,
     ).toBe(404);
+    expect((res.body as ErrBody).error).toBe('not_found');
+    expect((res.body as ErrBody).details?.orgId).toBe(foreign.orgId);
+    // The harm is the dangling row: nothing was created or bound against it.
+    expect(await boundCollections(c)).toEqual([]);
   });
 
   it('a wholly made-up orgId is refused with 404', async () => {
-    const c = client();
-    await c.post('/v1/host/openwop-app/test/login', { email: `ri2-${Date.now()}-${n++}@t.test` });
-
-    const res = await c.post(COLLECTIONS, { orgId: `org-nonexistent-${n++}`, name: 'Ghost' });
+    const c = await signedIn();
+    const ghost = `org-nonexistent-${n++}`;
+    const res = await c.post(COLLECTIONS, { orgId: ghost, name: 'Ghost' });
     expect(res.status, JSON.stringify(res.body)).toBe(404);
+    expect((res.body as ErrBody).error).toBe('not_found');
+    expect((res.body as ErrBody).details?.orgId).toBe(ghost);
+    expect(await boundCollections(c)).toEqual([]);
   });
 
   it("an org in the caller's OWN tenant is NOT refused — the guard does not over-fence", async () => {
     // The regression direction. Without this, deleting the whole route would also
     // make the two refusals above pass.
-    const c = client();
-    const login = await c.post('/v1/host/openwop-app/test/login', { email: `ri2-${Date.now()}-${n++}@t.test` });
-    expect(login.status, JSON.stringify(login.body)).toBe(201);
-
-    const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Mine' });
+    const c = await signedIn();
+    const org = await c.post('/host/openwop-app/orgs', { name: 'Mine' });
     expect(org.status, JSON.stringify(org.body)).toBe(201);
-    const orgId = org.body.org?.orgId ?? org.body.orgId;
+    const { orgId } = org.body as OrgBody;
 
     const res = await c.post(COLLECTIONS, { orgId, name: 'Legit' });
     expect(
       res.status,
       `the caller's own org must remain usable; got ${res.status} ${JSON.stringify(res.body)}`,
-    ).not.toBe(404);
+    ).toBe(201);
+    const col = res.body as ColBody;
+    expect(col).toMatchObject({ orgId, name: 'Legit' });
+    expect((await boundCollections(c)).map((x) => x.collectionId)).toEqual([col.collectionId]);
   });
 });

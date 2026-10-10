@@ -55,13 +55,13 @@ function client(): Client {
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
 async function ownerWithOrg(who: string): Promise<{ c: Client; orgId: string }> {
   const c = client();
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail(who) });
+  const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail(who) });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   return { c, orgId: org.body.orgId };
 }
 
-const P = '/v1/host/openwop-app/podcasts';
+const P = '/host/openwop-app/podcasts';
 const oneSpeaker = [{ name: 'Ana', voiceId: 'female-1' }];
 
 describe('podcasts — registration + status projection', () => {
@@ -96,7 +96,7 @@ describe('podcasts — profiles + generation', () => {
     expect(fmt.body.profile.segmentCount).toBe(6);
 
     // A notebook to source from.
-    const nb = await c.post('/v1/host/openwop-app/notebooks', { orgId, name: 'Research' });
+    const nb = await c.post('/host/openwop-app/notebooks', { orgId, name: 'Research' });
     expect(nb.status).toBe(201);
 
     // Generate → 202 + a runId + queued status (the run does the work async).
@@ -131,7 +131,7 @@ describe('podcasts — profiles + generation', () => {
   it('rejects generating an episode over a notebook the caller cannot access (cross-org IDOR)', async () => {
     const a = await ownerWithOrg('pod-nb-a');
     const b = await ownerWithOrg('pod-nb-b');
-    const nb = await a.c.post('/v1/host/openwop-app/notebooks', { orgId: a.orgId, name: 'A research' });
+    const nb = await a.c.post('/host/openwop-app/notebooks', { orgId: a.orgId, name: 'A research' });
     expect(nb.status).toBe(201);
     const cast = await b.c.post(`${P}/speaker-profiles`, { orgId: b.orgId, name: 'B cast', speakers: oneSpeaker });
     const fmt = await b.c.post(`${P}/episode-profiles`, { orgId: b.orgId, name: 'B fmt', speakerProfileId: cast.body.profile.id });
@@ -142,7 +142,7 @@ describe('podcasts — profiles + generation', () => {
 });
 
 describe('podcasts — episode reads gate on notebook access (CPU-2)', () => {
-  const PROJ = '/v1/host/openwop-app/projects';
+  const PROJ = '/host/openwop-app/projects';
 
   // An owner + org pinned to an EXPLICIT tenant so co-org readers can share it
   // (org membership is tenant-scoped — the default per-session tenant would isolate
@@ -150,16 +150,16 @@ describe('podcasts — episode reads gate on notebook access (CPU-2)', () => {
   async function ownerInTenant(who: string): Promise<{ c: Client; orgId: string; tenantId: string }> {
     const tenantId = `org:cpu2-${Date.now()}-${n++}`;
     const c = client();
-    const r = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail(who), tenantId });
+    const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail(who), tenantId });
     expect(r.status, JSON.stringify(r.body)).toBe(201);
-    const orgId = (await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' })).body.orgId as string;
+    const orgId = (await c.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId as string;
     return { c, orgId, tenantId };
   }
 
   // A co-org VIEWER (workspace:read) in the SAME tenant, NOT a notebook member.
   async function coOrgReader(orgId: string, tenantId: string, who: string): Promise<{ c: Client; id: string }> {
     const c = client();
-    const id = (await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail(who), tenantId })).body.user.userId as string;
+    const id = (await c.post('/host/openwop-app/test/login', { email: uniqEmail(who), tenantId })).body.user.userId as string;
     await createMember({ tenantId, orgId, subject: id, displayName: who, roles: ['viewer'] });
     return { c, id };
   }
@@ -167,7 +167,7 @@ describe('podcasts — episode reads gate on notebook access (CPU-2)', () => {
   async function anEpisodeOverANotebook(owner: Client, orgId: string): Promise<{ notebookId: string; episodeId: string }> {
     const cast = await owner.post(`${P}/speaker-profiles`, { orgId, name: 'Cast', speakers: oneSpeaker });
     const fmt = await owner.post(`${P}/episode-profiles`, { orgId, name: 'Fmt', speakerProfileId: cast.body.profile.id });
-    const nb = await owner.post('/v1/host/openwop-app/notebooks', { orgId, name: 'Private research' });
+    const nb = await owner.post('/host/openwop-app/notebooks', { orgId, name: 'Private research' });
     expect(nb.status).toBe(201);
     const ep = await owner.post(`${P}/episodes`, { orgId, notebookId: nb.body.notebook.id, episodeProfileId: fmt.body.profile.id });
     expect(ep.status, JSON.stringify(ep.body)).toBe(202);

@@ -149,4 +149,7 @@ export const messages = {
   loadFailedTitle: "No se pudieron cargar las reglas del firewall",
   decisionsFailedTitle: "No se pudieron cargar las decisiones recientes",
   decisionsFailedBody: "Es una lectura fallida, no un historial vacío: no significa que el firewall no haya bloqueado nada.",
+  modeEnforceConfirmTitle: '¿Activar denegar por defecto?',
+  modeEnforceConfirmBody: 'Toda acción de un agente que ninguna regla permita quedará bloqueada (o pendiente de aprobación) en este espacio de trabajo, en todos los canales: chat, ejecuciones, voz y widgets públicos. Revisa antes las decisiones recientes en modo sombra.',
+  modeEnforceConfirm: 'Aplicar',
 };

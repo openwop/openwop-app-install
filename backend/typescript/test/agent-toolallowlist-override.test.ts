@@ -30,7 +30,7 @@ beforeEach(async () => { await __resetAgentToolAllowlistOverrides(); });
 
 // A PACK agentId (no `host:` prefix) — the case resolveAgentToolPermissions skips
 // and this override MUST cover (granting the Chief of Staff a tool).
-const PACK_AGENT = 'feature.assistant.agents.chief-of-staff';
+const PACK_AGENT = 'vendor.openwop-app.assistant.agents.chief-of-staff';
 
 describe('agentToolAllowlistService — override store (ADR 0104)', () => {
   it('absent override resolves to undefined (caller falls back to the manifest)', async () => {

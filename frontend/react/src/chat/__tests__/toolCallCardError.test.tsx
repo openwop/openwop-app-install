@@ -18,7 +18,7 @@
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { render, cleanup, screen, fireEvent } from '@testing-library/react';
-import { ToolCallCard, toolErrorMessage } from '../AgentEventCards.js';
+import { ToolCallCard, toolErrorMessage, toolErrorText } from '../AgentEventCards.js';
 import { messages as en } from '../i18n/en.js';
 import type { AgentToolCall } from '../hooks/useChatSession.js';
 
@@ -88,5 +88,26 @@ describe('tool-call error copy (TOCU-6 / review M9)', () => {
     renderOpened(call({ error: { code: 'forbidden', message: supplied } }));
     expect(screen.getByText(supplied)).toBeTruthy();
     expect(screen.queryByText(en.toolErr_forbidden)).toBeNull();
+  });
+
+  // ADR 0822 (grade-ux WFAU-21) — a feature tool's failure arrives as its JSON
+  // result envelope; the card must never show the blob.
+  const envelope = JSON.stringify({ error: 'forbidden_scope', message: 'You can view this workspace but not change its workflows.', requiredScope: 'workspace:write' });
+
+  it('forbidden_scope has its own localized sentence', () => {
+    expect(t('toolErr_forbidden_scope')).not.toMatch(/^MISSING:/);
+    expect(toolErrorMessage(t, 'forbidden_scope')).toBe(en.toolErr_forbidden_scope);
+  });
+
+  it('a JSON envelope with a TRANSLATED code shows the localized sentence, never the blob', () => {
+    renderOpened(call({ error: { code: 'forbidden_scope', message: envelope } }));
+    expect(screen.getByText(en.toolErr_forbidden_scope)).toBeTruthy();
+    expect(screen.queryByText(/requiredScope/)).toBeNull();
+  });
+
+  it('a JSON envelope with an untranslated code shows its message field, never the blob', () => {
+    const blob = JSON.stringify({ error: 'workflow_head_moved', message: 'It changed since you read it.' });
+    expect(toolErrorText(t, { code: 'conflict', message: blob })).toBe('It changed since you read it.');
+    expect(toolErrorText(t, { code: 'conflict', message: '{not json' })).toBe(en.toolErrGeneric);
   });
 });

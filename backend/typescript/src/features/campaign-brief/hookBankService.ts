@@ -123,6 +123,14 @@ export async function listHooks(tenantId: string, orgId: string, filter?: { stat
     .slice(0, limit);
 }
 
+/** ADR 0820 §7 — every hook of one org, UNCAPPED (the read-only data export;
+ *  `listHooks` caps at ${LIST_DEFAULT_LIMIT} for the UI and would truncate it). */
+export async function listAllHooks(tenantId: string, orgId: string): Promise<Hook[]> {
+  return (await hooks.listByPrefix(`${tenantId}::${orgId}::`))
+    .filter((h) => h.tenantId === tenantId)
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}
+
 export async function getHook(tenantId: string, orgId: string, hookId: string): Promise<Hook | null> {
   const h = await hooks.get(`${tenantId}::${orgId}::${hookId}`);
   return h && h.tenantId === tenantId ? h : null;

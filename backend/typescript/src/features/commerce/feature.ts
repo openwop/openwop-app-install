@@ -23,10 +23,13 @@ import { registerSubscriptionRecurrence, registerProductDeletionCleanup } from '
 import { onCrmRecordDeleted } from '../../host/crmRecordLifecycle.js';
 import { registerSubjectEraser } from '../../host/subjectErasure.js';
 import { deleteSavedPaymentMethodsForContact, anonymizeOrderShippingForContacts, deleteCartsForUser } from './commerceService.js';
+import { registerFeatureDataExporter } from '../../host/featureDataExport.js';
+import { exportCommerceData } from './dataExport.js';
 
 export const commerceFeature: BackendFeature = {
   id: 'commerce',
   registerRoutes: (deps) => {
+    registerFeatureDataExporter('commerce', exportCommerceData); // ADR 0820 §7 — read-only export, served after a plan lapse
     registerCommerceRoutes(deps);
     // ADR 0447 D3 — opening-balance backfill: frozen `balanceOwed` values become
     // deterministic ledger rows. Idempotent by row key (never a sentinel), so
@@ -104,7 +107,7 @@ export const commerceFeature: BackendFeature = {
       id: 'commerce-ucp-buyer',
       label: 'UCP buyer (agent purchasing)',
       description:
-        'Let this host\'s agents/workflows shop EXTERNAL UCP merchants: discover, search, cart, and — only after a human sign-off AND under the org spend cap (OPENWOP_UCP_BUYER_ORG_CAP_MINOR, fail-closed at zero) — place demo-mode AP2 purchases and track them. The host is the payer; the merchant stays Merchant of Record. OFF by default.',
+        'Let this host\'s agents/workflows shop EXTERNAL UCP merchants: discover, search, cart, and — only after a human sign-off AND under the org spend cap (OPENWOP_UCP_BUYER_ORG_CAP_MINOR, fail-closed at zero) — place demo-mode AP2 purchases and track them. The host is the payer; the merchant stays Merchant of Record.',
       category: 'Commerce',
       status: 'off',
       bucketUnit: 'tenant',
@@ -114,7 +117,7 @@ export const commerceFeature: BackendFeature = {
       id: 'commerce-ucp',
       label: 'Universal Commerce Protocol (UCP)',
       description:
-        'Expose the commerce catalog/cart/checkout/orders as a UCP-conformant Shopping surface so external AI agents can transact against this merchant (ucp.dev). Projects commerce (no new store); OAuth-2.0 client-credentials identity; the merchant stays Merchant of Record; AP2 payments are demo-mode. Third-party protocol — advertised at UCP’s own discovery, never on the OpenWOP wire. OFF by default.',
+        'Expose the commerce catalog/cart/checkout/orders as a UCP-conformant Shopping surface so external AI agents can transact against this merchant (ucp.dev). Projects commerce (no new store); OAuth-2.0 client-credentials identity; the merchant stays Merchant of Record; AP2 payments are demo-mode. Third-party protocol — advertised at UCP’s own discovery, never on the OpenWOP wire.',
       category: 'Commerce',
       status: 'off',
       bucketUnit: 'tenant',
@@ -124,16 +127,16 @@ export const commerceFeature: BackendFeature = {
   // ADR 0177 Phase 2 — `ctx.features.commerce` (products/orders reads + create-order).
   surface: { id: 'commerce', build: buildCommerceSurface },
   requiredPacks: [
-    { name: 'feature.commerce.nodes', version: '1.3.1' },
-    { name: 'feature.commerce.agents', version: '1.2.1' },
-    { name: 'feature.commerce.buyer.nodes', version: '1.1.2' },
-    { name: 'feature.commerce.buyer.agents', version: '1.0.3' },
+    { name: 'feature.commerce.nodes', version: '1.3.2' },
+    { name: 'vendor.openwop-app.commerce.agents', version: '1.2.2' },
+    { name: 'feature.commerce.buyer.nodes', version: '1.1.3' },
+    { name: 'vendor.openwop-app.commerce.buyer.agents', version: '1.0.4' },
   ],
   toggleDefault: {
     id: 'commerce',
     label: 'E-Commerce',
     description:
-      'Product catalog (physical/digital/service + variants) and orders with a fulfillment lifecycle. Product images & digital downloads ride Media tokens; the customer links to a CRM contact. Payment is demo-mode (records an external payment intent — no live capture yet). OFF by default.',
+      'Product catalog (physical/digital/service + variants) and orders with a fulfillment lifecycle. Product images & digital downloads ride Media tokens; the customer links to a CRM contact. Payment is demo-mode (records an external payment intent — no live capture yet).',
     category: 'Commerce',
     status: 'off',
     bucketUnit: 'tenant',

@@ -21,6 +21,8 @@
  * isn't announced — the deck owns that hiding, so this component needs no `active` flag.
  */
 
+import { collectSources, type ConversationSources } from '../workbench/sources.js';
+import { attachmentCaps } from '../lib/attachmentCaps.js';
 import { Button } from '../../ui/Button.js';
 import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -41,6 +43,7 @@ import { runCoreSubmit } from '../lib/chatSubmit.js';
 import { buildBoardInterceptor, buildProjectConveneInterceptor, runProjectConvene, type ConveneDeps } from '../conversations/convene.js';
 import { useBoardroomCadence } from '../conversations/useBoardroomCadence.js';
 import { registerDefaultCommands } from '../registry/defaultCommands.js';
+import { formatUsd, sessionCostUsd } from '../lib/cost.js';
 import { DEFAULT_ASSISTANT_ID } from '../activeAgents/constants.js';
 import { participantsToLineup } from '../conversations/participantLineup.js';
 import { useChannelMessageStream } from '../conversations/useChannelMessageStream.js';
@@ -52,6 +55,7 @@ import { MoreHorizontalIcon, SparklesIcon, UsersIcon } from '../../ui/icons/inde
 import type { BYOKActiveConfig } from '../../byok/lib/useBYOKConfig.js';
 import type { ConversationParticipant, ConversationType } from '../../client/chatSessionsClient.js';
 import type { ChatMessage } from '../types.js';
+import { useRecordDecision } from '../decisions/useRecordDecision.js';
 
 // ADR 0117 Phase 3 — the read-only side-by-side compare view; lazy (zero entry-budget),
 // mirrors ChatSidebar.
@@ -97,7 +101,7 @@ export interface TabSessionProps {
   onStreamingChange: (sessionId: string, isSending: boolean) => void;
   /** Fired when this tab's last FINALIZED inbound message or blocked state changes, so
    *  the deck can badge a background tab (ADR 0140 P5). */
-  onActivity: (sessionId: string, lastInboundId: string | null, blocked: boolean) => void;
+  onActivity: (sessionId: string, lastInboundId: string | null, blocked: boolean, running?: boolean) => void;
   /** Persist/forget an agent as a conversation participant (ADR 0140 G2) — threaded from
    *  the deck's single `useChatSessions()` so the per-tab lineup is reconstructible
    *  server-side. Best-effort (a fresh tab not yet in the backend 404s harmlessly). */
@@ -116,6 +120,8 @@ export interface TabSessionProps {
    *  to the deck, so the deck's shared Runs rail can bind to the ACTIVE tab (ADR 0140 P2).
    *  Mirrors `onActivity` — fired on change only; the deck no-ops on an unchanged array. */
   onWorkflowRuns?: (sessionId: string, runs: readonly ChatMessage[], cancel: (messageId: string) => Promise<void>) => void;
+  /** ADR 0768 B4 — this tab's sources for the deck's Workbench Sources tab. */
+  onSources?: (sessionId: string, sources: ConversationSources) => void;
   /** Open a conversation on the deck (open-or-focus a tab) — used by the per-conversation
    *  actions (branch / branch-from / import open their result). Supplied by TabChatDeck. */
   onOpenConversation: (sessionId: string) => void;
@@ -125,10 +131,12 @@ export interface TabSessionProps {
   /** Close THIS tab (ADR 0154 FU-1) — used when a channel is archived so the tab
    *  doesn't linger on a now-dead channel. Supplied by TabChatDeck (`handleClose`). */
   onRequestClose?: () => void;
+  /** ADR 0768 follow-up P2 — open a run's durable artifact in the deck's Workbench. */
+  onOpenArtifact?: (a: { artifactId: string }) => void;
 }
 
 function TabSessionImpl({
-  sessionId, config, byokStored, tenantId = 'demo', participants, conversationType, boardId, onSessionIdChange, onStreamingChange, onActivity, onAddParticipant, onRemoveParticipant, onAttachBoard, ownerSubject, scopeAgentId, onReconfigureBYOK, onWorkflowRuns, onOpenConversation, refreshConversations, onRequestClose,
+  sessionId, config, byokStored, tenantId = 'demo', participants, conversationType, boardId, onSessionIdChange, onStreamingChange, onActivity, onAddParticipant, onRemoveParticipant, onAttachBoard, ownerSubject, scopeAgentId, onReconfigureBYOK, onWorkflowRuns, onSources, onOpenConversation, refreshConversations, onRequestClose, onOpenArtifact,
 }: TabSessionProps): JSX.Element {
   const { t } = useTranslation('chat');
   const handleSessionIdChange = useCallback((newId: string) => onSessionIdChange(sessionId, newId), [onSessionIdChange, sessionId]);
@@ -160,6 +168,8 @@ function TabSessionImpl({
   );
   const cadence = useBoardroomCadence({ isSending, errored: error !== null, send, personaOf, emitSystem });
   const conveneProjectId = ownerSubject?.kind === 'project' ? ownerSubject.id : null;
+  // ADR 0853 D2 — "Record as decision" in a project's chat or a bound channel.
+  const recordDecision = useRecordDecision({ sessionId, projectIdHint: conveneProjectId, isChannel: conversationType === 'channel' });
   const sessionMessagesLenRef = useRef(0);
   sessionMessagesLenRef.current = session.messages.length;
   const conveneDeps: ConveneDeps = useMemo(() => ({
@@ -207,7 +217,7 @@ function TabSessionImpl({
   // Background-badge signal (ADR 0140 P5) — the pure `deriveActivity` keeps the
   // O(messages) scan off the per-token path (memoized on the two inputs).
   const activity = useMemo(() => deriveActivity(session.messages, isSending), [session.messages, isSending]);
-  useEffect(() => { onActivity(sessionId, activity.lastInboundId, activity.blocked); }, [activity.lastInboundId, activity.blocked, sessionId, onActivity]);
+  useEffect(() => { onActivity(sessionId, activity.lastInboundId, activity.blocked, activity.running); }, [activity.lastInboundId, activity.blocked, activity.running, sessionId, onActivity]);
 
   const onRegenerate = useCallback((id: string) => { void regenerate(id, config); }, [regenerate, config]);
 
@@ -216,8 +226,6 @@ function TabSessionImpl({
   // when `config.model` is stale (renamed by a catalog refresh) so the controls don't vanish.
   const activeModel = resolveActiveModel(config.provider, config.model);
   const supportsAudioInput = activeModel?.audioInput === true;
-  const supportsImageInput = activeModel?.capabilities?.includes('vision') === true;
-  const supportsPdfInput = supportsImageInput && (config.provider === 'anthropic' || config.provider === 'google');
   const supportsWebSearch = activeModel?.webSearch === true;
   const supportsTools = activeModel?.capabilities?.includes('tools') === true;
 
@@ -225,9 +233,17 @@ function TabSessionImpl({
   // scope) + the per-exchange model switcher, scoped to THIS tab's session. Identical to
   // the standalone ChatSidebar's controls (same hook). The deck tab has no ChatHeader, so
   // the model switcher folds into the same modifier group below.
-  const { composerModifiers, modelSwitcher, getSubmitExtras } = useComposerModifiers({
+  const approvalContinueRef = useRef<((text: string) => void) | null>(null);
+  const { composerModifiers, modelSwitcher, getSubmitExtras, selectedModel } = useComposerModifiers({
     sessionId, supportsWebSearch, supportsTools, activeProvider: config.provider,
+    // ADR 0834 D6 — re-read pending tool approvals after each turn; the approvals
+    // dialog's Continue sends through this surface's own submit (bound below).
+    // FW2-UX-1 — the hook re-reads when the turn SETTLES (both are needed for that).
+    messageCount: session.messages.length, isSending, continueRef: approvalContinueRef,
   });
+  // ADR 0768 D2 — judge attachments by the model that will ACTUALLY answer (the
+  // per-message override, else the default).
+  const { supportsImageInput, supportsPdfInput } = attachmentCaps(config.provider, config.model, selectedModel);
 
   // ADR 0140 parity — the SHARED per-conversation actions (branch · branch-from · import ·
   // export · share + compare state), identical to ChatSidebar (same hook). The deck opens a
@@ -319,6 +335,12 @@ function TabSessionImpl({
   useEffect(() => {
     onWorkflowRuns?.(sessionId, workflowRunMessages, cancelRunRef.current);
   }, [workflowRunMessages, sessionId, onWorkflowRuns]);
+  // Reported only when the LIST changes (the key), not on every streamed token.
+  const sources = useMemo(() => collectSources(session.messages), [session.messages]);
+  useEffect(() => {
+    onSources?.(sessionId, sources);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sources.key, sessionId, onSources]);
 
   // Shared CORE submit (ADR 0140 G1) + per-tab convene/board interceptors (G3):
   // command → /workflow → [project-convene, board-summon] → @agent → send. The shared
@@ -345,6 +367,7 @@ function TabSessionImpl({
       // reconstructible server-side (ADR 0140 G2), mirroring ChatSidebar.
       onAgentActivated: (agentId) => onAddParticipant?.(sessionId, `agent:${agentId}`),
     }, [conveneInterceptor, boardInterceptor]);
+  approvalContinueRef.current = (text: string) => { void onUserSubmit(text); };
   }, [send, cancel, reset, config, runWorkflowMention, agentEntries, activeAgents, emitSystem, getSubmitExtras, onAddParticipant, sessionId, conveneInterceptor, boardInterceptor, conversationType, loadSessionFromBackend, refreshConversations, tenantId]);
 
   return (
@@ -426,11 +449,26 @@ function TabSessionImpl({
           <span className="sr-only">{t('membersToggleAria', { count: memberCount })}</span>
         </button>
       )}
+      {/* ADR 0768 follow-up C6 — the phone subline: who answers, on which model,
+          what the conversation has cost. On a phone the composer's model chip is
+          below the fold of attention; this states the same facts under the tab
+          title. Hidden above the content breakpoint (CSS), where the composer
+          toolbar already shows them. */}
+      <TabSubline
+        agent={activeAgents.lineup.find((a) => a.agentId === (activeAgents.currentAgentId ?? DEFAULT_ASSISTANT_ID))?.persona}
+        // A model is named only once one is actually in force: an explicit
+        // per-exchange pick, or a stored provider. `config.model` alone is the
+        // DEFAULT of a provider the user has not chosen yet — the composer chip
+        // says "not chosen" in that state, and the subline must not contradict it.
+        model={selectedModel?.model ?? (byokStored ? config.model : undefined)}
+        costUsd={sessionCostUsd(session)}
+      />
       <div className="u-flex u-flex-1 u-minh-0">
       <div className="u-flex-1 u-minw-0 u-flex u-flex-col">
       <ConversationView
         messages={session.messages}
         tenantId={tenantId}
+        {...(onOpenArtifact ? { onOpenArtifact } : {})}
         draftKey={`openwop-app.chat.draft:${tenantId}:${sessionId}`}
         // Parity with the standalone (ChatSidebar) — an agent-scoped tab voices live
         // replies in THAT agent's per-agent voice (ADR 0138), not the host default.
@@ -477,12 +515,14 @@ function TabSessionImpl({
         onCancel={cancel}
         supportsAudioInput={supportsAudioInput}
         supportsImageInput={supportsImageInput}
+        agentEntries={agentEntries}
         supportsPdfInput={supportsPdfInput}
         composerModifiers={tabComposerModifiers}
         onResolveInterrupt={resolveInterrupt}
         onRegenerate={onRegenerate}
         onBranchFrom={(fromSeq) => { void onBranchFrom(fromSeq); }}
         {...(isMultiParty ? { messageActions: channelMessageActions } : { onFeedback: setFeedback })}
+        {...(isMultiParty && recordDecision.onRecord ? { onRecordDecision: recordDecision.onRecord } : {})}
         onReconfigureBYOK={onReconfigureBYOK}
         hasOlderMessages={hasOlderMessages}
         isLoadingEarlier={isLoadingEarlier}
@@ -506,6 +546,7 @@ function TabSessionImpl({
         )}
       />
       </div>
+      {recordDecision.dialog}
       {membersOpen && showRoster && (
         <Suspense fallback={null}>
           <MembersPane
@@ -536,3 +577,11 @@ function TabSessionImpl({
 /** Memoized so a deck re-render (tab list / streaming-set change) doesn't re-render
  *  every keep-alive sibling — only the tab whose props actually changed. */
 export const TabSession = memo(TabSessionImpl);
+
+/** The phone subline (ADR 0768 follow-up C6). States only what is known: a
+ *  segment with nothing to say is left out, never rendered as a placeholder. */
+export function TabSubline({ agent, model, costUsd }: { agent?: string | undefined; model?: string | undefined; costUsd: number }): JSX.Element | null {
+  const parts = [agent, model, costUsd > 0 ? formatUsd(costUsd) : undefined].filter((p): p is string => Boolean(p));
+  if (parts.length === 0) return null;
+  return <div className="tabsession-subline u-truncate">{parts.join(' · ')}</div>;
+}

@@ -46,7 +46,7 @@ function client(): Client {
 let n = 0;
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
 async function signup(c: Client, tenantId: string): Promise<{ userId: string }> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail('art'), tenantId });
+  const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail('art'), tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
@@ -57,9 +57,9 @@ async function seedArtifact(): Promise<{ owner: Client; tenantId: string; artifa
   const tenantId = `org:test-${Date.now()}-${n++}`;
   const owner = client();
   await signup(owner, tenantId);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   const orgId = org.body.orgId;
-  const D = (s = ''): string => `/v1/host/openwop-app/documents/orgs/${encodeURIComponent(orgId)}${s}`;
+  const D = (s = ''): string => `/host/openwop-app/documents/orgs/${encodeURIComponent(orgId)}${s}`;
   const doc = await owner.post(D('/documents'), { title: 'Acme SOW', kind: 'sow' });
   const id = doc.body.documentId;
   await owner.post(D(`/documents/${id}/versions`), { content: '# SOW\nalpha\nbeta' });
@@ -67,7 +67,7 @@ async function seedArtifact(): Promise<{ owner: Client; tenantId: string; artifa
   return { owner, tenantId, artifactId: `document:${id}`, v1: `${id}:1`, v2: `${id}:2` };
 }
 
-const A = (artifactId: string, suffix = ''): string => `/v1/host/openwop-app/artifacts/${encodeURIComponent(artifactId)}${suffix}`;
+const A = (artifactId: string, suffix = ''): string => `/host/openwop-app/artifacts/${encodeURIComponent(artifactId)}${suffix}`;
 
 describe('GET /artifacts/:artifactId — Documents-backed projection', () => {
   it('projects the document into a type-neutral artifact + revision timeline', async () => {
@@ -103,7 +103,7 @@ describe('GET /artifacts/media:… — Media-backed projection (ADR 0069 item 2)
     const tenantId = `org:test-${Date.now()}-${n++}`;
     const owner = client();
     await signup(owner, tenantId);
-    const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
+    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
     const asset = await createAsset({
       tenantId, orgId, name: 'diagram.png', contentType: 'image/png',
       sizeBytes: 1024, storageRef: 'local:diagram', serveToken: 'tok-diagram', uploadedBy: 'u1',
@@ -159,7 +159,7 @@ describe('GET /artifacts — authorization', () => {
 });
 
 describe('GET /artifacts — the Library collection (ADR 0083 review MED-2)', () => {
-  const LIB = '/v1/host/openwop-app/artifacts';
+  const LIB = '/host/openwop-app/artifacts';
 
   it('lists the caller’s artifacts and EXCLUDES a foreign tenant’s (no cross-tenant leak)', async () => {
     const a = await seedArtifact();
@@ -173,8 +173,8 @@ describe('GET /artifacts — the Library collection (ADR 0083 review MED-2)', ()
 
   it('returns artifacts newest-first', async () => {
     const { owner } = await seedArtifact();
-    const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme2' })).body.orgId;
-    const D = (s = ''): string => `/v1/host/openwop-app/documents/orgs/${encodeURIComponent(orgId)}${s}`;
+    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Acme2' })).body.orgId;
+    const D = (s = ''): string => `/host/openwop-app/documents/orgs/${encodeURIComponent(orgId)}${s}`;
     const doc2 = await owner.post(D('/documents'), { title: 'Newer SOW', kind: 'sow' });
     await owner.post(D(`/documents/${doc2.body.documentId}/versions`), { content: '# newer' });
     const list = await owner.get(LIB);

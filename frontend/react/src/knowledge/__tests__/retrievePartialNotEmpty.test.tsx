@@ -16,13 +16,19 @@
  * Both polarities on every arm: an absent "No matches" proves nothing on its own
  * (a panel that rendered nothing would satisfy it), so each failure arm is
  * paired with the success arm that keeps the honest empty state reachable.
+ *
+ * The thrown-retrieve case is held by a DOUBLE guard — the clear-first
+ * `setResult(null)` on submit and the one in `.catch` — so removing either
+ * alone stays green (wave-6 probe); removing both turns it red.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, act, fireEvent } from '@testing-library/react';
 
-import { SubjectKnowledgePanel, type SubjectKnowledgeClient } from '../SubjectKnowledgePanel.js';
+import { SubjectKnowledgePanel, type SubjectKnowledgeClient, type SubjectKnowledgeCopy } from '../SubjectKnowledgePanel.js';
 
-const copy = {
+type C = SubjectKnowledgeClient;
+
+const copy: SubjectKnowledgeCopy = {
   intro: 'intro',
   emptyBody: 'empty',
   searchTitle: 'Search this knowledge',
@@ -30,12 +36,12 @@ const copy = {
 };
 
 const makeClient = (retrieve: SubjectKnowledgeClient['retrieve']): SubjectKnowledgeClient => ({
-  getKnowledge: vi.fn().mockResolvedValue({ collections: [] }),
-  listOrgs: vi.fn().mockResolvedValue([{ orgId: 'o1', name: 'Alpha' }]),
-  createCollection: vi.fn(),
-  unbindCollection: vi.fn(),
-  ingestText: vi.fn(),
-  deleteDocument: vi.fn(),
+  getKnowledge: vi.fn<C['getKnowledge']>().mockResolvedValue({ collections: [] }),
+  listOrgs: vi.fn<C['listOrgs']>().mockResolvedValue([{ orgId: 'o1', name: 'Alpha' }]),
+  createCollection: vi.fn<C['createCollection']>(),
+  unbindCollection: vi.fn<C['unbindCollection']>(),
+  ingestText: vi.fn<C['ingestText']>(),
+  deleteDocument: vi.fn<C['deleteDocument']>(),
   retrieve,
 });
 
@@ -51,7 +57,7 @@ beforeEach(() => vi.resetAllMocks());
 
 describe('KB-UX-3 — a faulted source is reported, not rendered as "no matches"', () => {
   it('a KB fault: the panel says the answer is incomplete and NEVER "No matches"', async () => {
-    await mountAndSearch(makeClient(vi.fn().mockResolvedValue({ chunks: [], hasResults: false, failedSources: ['kb'] })));
+    await mountAndSearch(makeClient(vi.fn<C['retrieve']>().mockResolvedValue({ chunks: [], hasResults: false, failedSources: ['kb'] })));
 
     expect(screen.getByText(/could not be searched, so this answer is incomplete/i)).toBeTruthy();
     expect(screen.getByText(/Unsearched: documents/)).toBeTruthy();
@@ -59,14 +65,14 @@ describe('KB-UX-3 — a faulted source is reported, not rendered as "no matches"
   });
 
   it('a GENUINELY empty corpus still says "No matches" (the other polarity)', async () => {
-    await mountAndSearch(makeClient(vi.fn().mockResolvedValue({ chunks: [], hasResults: false, failedSources: [] })));
+    await mountAndSearch(makeClient(vi.fn<C['retrieve']>().mockResolvedValue({ chunks: [], hasResults: false, failedSources: [] })));
 
     expect(screen.getByText('No matches yet.')).toBeTruthy();
     expect(screen.queryByText(/could not be searched/i)).toBeNull();
   });
 
   it('a PARTIAL answer — some chunks AND a faulted source — shows both', async () => {
-    await mountAndSearch(makeClient(vi.fn().mockResolvedValue({
+    await mountAndSearch(makeClient(vi.fn<C['retrieve']>().mockResolvedValue({
       chunks: [{ content: 'a note that survived', kind: 'memory' }],
       hasResults: true,
       failedSources: ['kb'],
@@ -79,7 +85,7 @@ describe('KB-UX-3 — a faulted source is reported, not rendered as "no matches"
   });
 
   it('a thrown retrieve clears the previous answer instead of leaving it under the new query', async () => {
-    const retrieve = vi.fn()
+    const retrieve = vi.fn<C['retrieve']>()
       .mockResolvedValueOnce({ chunks: [{ content: 'first answer', kind: 'kb', title: 'Doc' }], hasResults: true })
       .mockRejectedValueOnce(new Error('retrieve_500'));
     const client = makeClient(retrieve);

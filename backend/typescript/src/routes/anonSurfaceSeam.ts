@@ -103,7 +103,7 @@ export function registerAnonSurfaceSeamRoutes(app: Express, deps: { storage: Sto
 
   // GET the RFC 0078 catalog scoped to the anon session — the EXPLICIT grant only,
   // fails EMPTY on an unknown surface (never the ADR 0315 baseline). Flag off ⇒ 404.
-  app.get('/v1/host/sample/anon-surface/tools', (req: Request, res: Response) => {
+  app.get('/host/sample/anon-surface/tools', (req: Request, res: Response) => {
     if (!anonymousActorEnabled()) {
       sendError(res, 404, 'not_found', 'The anonymous-actor surface is not enabled on this host.');
       return;
@@ -130,7 +130,7 @@ export function registerAnonSurfaceSeamRoutes(app: Express, deps: { storage: Sto
   // what the hardened gateway 404s to avoid). A missing tool on a KNOWN surface is a
   // genuine malformed request (400) — the caller already named a surface it can reach,
   // so there is no existence oracle to protect there.
-  app.post('/v1/host/sample/anon-surface/dispatch', async (req: Request, res: Response, next: NextFunction) => {
+  app.post('/host/sample/anon-surface/dispatch', async (req: Request, res: Response, next: NextFunction) => {
     try {
       if (!anonymousActorEnabled()) {
         sendError(res, 404, 'not_found', 'The anonymous-actor surface is not enabled on this host.');

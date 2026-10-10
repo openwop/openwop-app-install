@@ -1,7 +1,7 @@
 /**
  * RFC 0142 leg B — the emission witness, tested host-side.
  *
- * The published leg drives `POST /v1/host/sample/artifacttypes/runproduce` and
+ * The published leg drives `POST /host/sample/artifacttypes/runproduce` and
  * asserts the run emitted `artifact.created`. This asserts the same contract
  * in-repo so a regression is caught here rather than in someone else's suite,
  * and so the seam is not the only thing witnessing itself.
@@ -22,6 +22,8 @@
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { getEventLog } from '../src/executor/eventLog.js';
+import { bareRunId } from './support/bareRunId.js';
 
 const TOKEN = 'dev-token';
 let BASE = '';
@@ -52,7 +54,7 @@ const post = async (path: string, body: unknown) => {
 };
 
 const eventsOf = async (runId: string) => {
-  const res = await fetch(`${BASE}/v1/runs/${runId}/events/poll?fromSeq=0&limit=300`, {
+  const res = await fetch(`${BASE}/runs/${runId}/events/poll?fromSeq=0&limit=300`, {
     headers: { authorization: `Bearer ${TOKEN}` },
   });
   const json = (await res.json()) as { events?: Array<{ type: string; payload?: Record<string, unknown> }> };
@@ -61,7 +63,7 @@ const eventsOf = async (runId: string) => {
 
 describe('RFC 0142 leg B — runproduce starts a real run that emits artifact.created', () => {
   it('leg 1: a registered document type is produced by a REAL run, and the event carries it', async () => {
-    const { status, body } = await post('/v1/host/sample/artifacttypes/runproduce', { artifactTypeId: 'doc.one-pager' });
+    const { status, body } = await post('/host/sample/artifacttypes/runproduce', { artifactTypeId: 'doc.one-pager' });
     expect(status, `seam did not answer: ${JSON.stringify(body)}`).toBe(200);
     const runId = body['runId'] as string;
     expect(runId, 'the seam MUST return the runId it started').toBeTruthy();
@@ -78,19 +80,23 @@ describe('RFC 0142 leg B — runproduce starts a real run that emits artifact.cr
     // "an event was emitted" and witness nothing (RFC 0142 §Conformance requires
     // the leg to discriminate payload correctness, not mere presence).
     const p = created[0]?.payload ?? {};
-    expect(p['artifactTypeId'], 'the event must carry the requested type').toBe('doc.one-pager');
+    // ADR 0812 P2b — major 2 carries the seated `artifactType` (the `artifactTypeId`
+    // alias is renamed on the wire), and `valid` is a host field outside the closed v2
+    // `artifactCreated`, so it is read from the stored event.
+    expect(p['artifactType'], 'the event must carry the requested type').toBe('doc.one-pager');
     expect(p['registered'], 'a registered type MUST be marked registered').toBe(true);
-    expect(p['valid'], 'the payload must have passed schema validation before emit').toBe(true);
+    const stored = (await getEventLog().list(bareRunId(runId), { contract: 1 })).find((e) => e.type === 'artifact.created');
+    expect((stored?.payload as { valid?: unknown } | undefined)?.valid, 'the payload must have passed schema validation before emit').toBe(true);
   });
 
   it('leg 2: an UNREGISTERED type is refused rather than silently producing nothing', async () => {
-    const { status, body } = await post('/v1/host/sample/artifacttypes/runproduce', { artifactTypeId: 'vendor.nope.not-registered' });
+    const { status, body } = await post('/host/sample/artifacttypes/runproduce', { artifactTypeId: 'vendor.nope.not-registered' });
     expect(status, 'an unregistered id is a caller error, not a host failure to emit').toBe(400);
     expect(String(body['message'] ?? '')).toContain('not registered');
   });
 
   it('leg 3: a missing artifactTypeId is refused', async () => {
-    const { status } = await post('/v1/host/sample/artifacttypes/runproduce', {});
+    const { status } = await post('/host/sample/artifacttypes/runproduce', {});
     expect(status).toBe(400);
   });
 });

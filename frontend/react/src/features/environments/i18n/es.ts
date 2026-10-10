@@ -81,5 +81,5 @@ export const messages = {
   colActor: 'Por',
 
   confirmApplyTitle: '¿Aplicar esta instantánea a la configuración en vivo?',
-  confirmApplyBody: 'Esto SOBRESCRIBE la configuración en vivo del espacio con la instantánea {{hash}}. Los interruptores de funciones que no estén en la instantánea se limpian. Los punteros de publicación y las versiones publicadas de flujos de trabajo son de solo aplicación: las entradas ausentes de la instantánea conservan su valor en vivo actual (la deriva mostrará la diferencia).',
+  confirmApplyBody: 'Esto SOBRESCRIBE la configuración en vivo del espacio con la instantánea {{hash}}. Los punteros de publicación y las versiones publicadas de flujos de trabajo son de solo aplicación: las entradas ausentes de la instantánea conservan su valor en vivo actual (la deriva mostrará la diferencia). Los interruptores de funciones los gestiona el operador del host y no forman parte de las instantáneas.',
 } as const;

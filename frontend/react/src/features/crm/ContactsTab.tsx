@@ -31,6 +31,7 @@ import {
   listSegments,
   listContactFields,
   triageContact,
+  getCrmRunStatus,
   updateContactFields,
   type Contact,
   type ContactFieldDef,
@@ -43,7 +44,7 @@ import { crmActionError, focusFirst, looksLikeEmail } from './crmUiHelpers.js';
 
 /** The CRM segment-author copilot (ADR 0265 / CDP-C) — the ADR 0058/0073
  *  deep-link target ("no second chat system"). */
-const SEGMENT_AUTHOR_AGENT = 'feature.crm.agents.segment-author';
+const SEGMENT_AUTHOR_AGENT = 'vendor.openwop-app.crm.agents.segment-author';
 
 export function ContactsTab(): JSX.Element {
   const { t } = useTranslation('crm');
@@ -289,13 +290,55 @@ export function ContactsTab(): JSX.Element {
     } catch (err) { toast.error(crmActionError(err, 'deleteFailed')); }
   }, [load, t]);
 
+  // ADR 0837 CRM2UX-3 — a triage run scores the contact asynchronously, so the
+  // column follows each run it started: "Scoring…" while it runs, the recorded
+  // result when it completes, "Triage failed" (with the run link) when it does not.
+  const [pendingRuns, setPendingRuns] = useState<ReadonlySet<string>>(new Set());
+  const [failedRuns, setFailedRuns] = useState<ReadonlySet<string>>(new Set());
   const triage = useCallback(async (id: string) => {
     try {
       const r = await triageContact(id);
-      toast.success(t('triageStarted', { variant: r.variant ?? t('triageVariantDefault'), runId: r.runId.slice(0, 8) }));
+      toast.success(t('triageStarted'));
+      setPendingRuns((cur) => new Set(cur).add(r.runId));
       load(); // pick up the persisted lastTriage stamp
     } catch (err) { toast.error(crmActionError(err, 'triageFailed')); }
   }, [load, t]);
+  // N1 — one stable poller: the pending set is read through a ref (the interval is
+  // not rebuilt on every change), a run already being read is skipped, at most
+  // ONE reload per tick, and nothing fires after unmount.
+  const pendingRef = useRef(pendingRuns);
+  pendingRef.current = pendingRuns;
+  const polling = pendingRuns.size > 0;
+  useEffect(() => {
+    if (!polling) return;
+    let live = true;
+    let polls = 0;
+    const inFlight = new Set<string>();
+    const timer = setInterval(() => {
+      polls += 1;
+      const ids = [...pendingRef.current].filter((id) => !inFlight.has(id));
+      for (const id of ids) inFlight.add(id);
+      void Promise.all(ids.map((runId) => getCrmRunStatus(runId)
+        .then((run) => ({ runId, status: run.status }))
+        .catch((e: unknown) => { console.warn('[crm] triage run status read failed; the next poll retries:', e instanceof Error ? e.message : e); return null; })
+        .finally(() => inFlight.delete(runId))))
+        .then((results) => {
+          if (!live) return;
+          const settled = results.filter((r): r is { runId: string; status: string } => r !== null && ['completed', 'failed', 'cancelled'].includes(r.status));
+          if (settled.length === 0) return;
+          setPendingRuns((cur) => { const next = new Set(cur); for (const r of settled) next.delete(r.runId); return next; });
+          const bad = settled.filter((r) => r.status !== 'completed');
+          if (bad.length > 0) {
+            setFailedRuns((cur) => { const next = new Set(cur); for (const r of bad) next.add(r.runId); return next; });
+            toast.error(t('triageRunFailed'));
+          }
+          load();
+        });
+      // Bounded: after a minute the column stops claiming "Scoring…".
+      if (polls >= 30) setPendingRuns(new Set());
+    }, 2000);
+    return () => { live = false; clearInterval(timer); };
+  }, [polling, load, t]);
 
   // CC-SP-1 — email must also be settable AFTER create (an agent-created
   // contact without one could never gain an email through the UI; campaigns
@@ -441,7 +484,19 @@ export function ContactsTab(): JSX.Element {
     { key: 'stage', header: t('colStage'), render: (c) => <span className="chip">{t(`stage_${c.stage}`)}</span>, sortValue: (c) => c.stage },
     { key: 'lastTriage', header: t('colLastTriage'), render: (c) => c.lastTriage ? (
       <span className="action-bar">
-        <span className="chip">{c.lastTriage.variant ?? t('triageVariantDefault')}</span>
+        {/* ADR 0837 D7 — the recorded result once the run scored the contact;
+            until then, the variant it was started with (never a "running" claim). */}
+        {c.lastTriage.priority !== undefined && c.lastTriage.score !== undefined ? (
+          <span className={c.lastTriage.priority === 'high' ? 'chip chip--danger' : c.lastTriage.priority === 'low' ? 'chip chip--muted' : 'chip'}>
+            {t('triageResult', { priority: t(`triagePriority_${c.lastTriage.priority}`), score: c.lastTriage.score })}
+          </span>
+        ) : pendingRuns.has(c.lastTriage.runId) ? (
+          <span className="chip chip--muted">{t('triagePending')}</span>
+        ) : failedRuns.has(c.lastTriage.runId) ? (
+          <span className="chip chip--danger">{t('triageFailedChip')}</span>
+        ) : (
+          <span className="chip">{c.lastTriage.variant === 'basic' || c.lastTriage.variant === 'enriched' ? t(`triageVariant_${c.lastTriage.variant}`) : (c.lastTriage.variant ?? t('triageVariantDefault'))}</span>
+        )}
         <span className="muted u-fs-12">{formatRelativeTime(c.lastTriage.at)}</span>
         <Link to={`/runs/${encodeURIComponent(c.lastTriage.runId)}`} className="u-fs-12" aria-label={t('viewTriageRunLabel', { name: c.name })}>{t('viewRun')}</Link>
       </span>
@@ -458,7 +513,7 @@ export function ContactsTab(): JSX.Element {
         <Button variant="quiet" onClick={() => void remove(c.contactId, c.name)} aria-label={t('deleteRowLabel', { name: c.name })}>{t('common:delete')}</Button>
       </span>
     ) },
-  ], [triage, remove, renderScore, defs, t]);
+  ], [triage, remove, renderScore, defs, t, pendingRuns, failedRuns]);
 
   return (
     <div className="u-grid u-gap-4">

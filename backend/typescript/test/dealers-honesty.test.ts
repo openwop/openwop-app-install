@@ -49,26 +49,36 @@ function client(withCookie = true): Client {
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b), del: (p) => call('DELETE', p) };
 }
 let n = 0;
-const B = (orgId: string): string => `/v1/host/openwop-app/dealers/orgs/${encodeURIComponent(orgId)}`;
+const B = (orgId: string): string => `/host/openwop-app/dealers/orgs/${encodeURIComponent(orgId)}`;
 const setDealers = async (status: 'on' | 'off'): Promise<void> => { const d = getToggleDefault('dealers'); if (d) await saveConfig({ ...d, status }, 'test'); };
 
 async function setup(): Promise<{ owner: Client; orgId: string; dealerId: string; tenantId: string; token: string }> {
   const tenantId = `org:dlr2-${Date.now()}-${n++}`;
   const owner = client();
-  await owner.post('/v1/host/openwop-app/test/login', { email: `o-${Date.now()}-${n++}@acme.test`, tenantId });
-  const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
-  const companyId = (await owner.post(`/v1/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}/companies`, { name: 'Dealer Co' })).body.companyId;
+  await owner.post('/host/openwop-app/test/login', { email: `o-${Date.now()}-${n++}@acme.test`, tenantId });
+  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
+  const companyId = (await owner.post(`/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}/companies`, { name: 'Dealer Co' })).body.companyId;
   const dealerId = (await owner.post(`${B(orgId)}/dealers`, { name: 'North Dealer', companyId })).body.dealerId;
   await owner.post(`${B(orgId)}/dealers/${dealerId}/outlets`, { name: 'Store A', address: '1 Main St' });
   const token = (await owner.post(`${B(orgId)}/dealers/${dealerId}/portal-token`)).body.token;
   return { owner, orgId, dealerId, tenantId, token };
 }
 
+describe('ADR 0669 — an issued partner link survives the v1 cut', () => {
+  it('the link a portal-token mint hands out is the unversioned vendor path, and it serves anonymously', async () => {
+    const { owner, orgId, dealerId } = await setup();
+    const url = (await owner.post(`${B(orgId)}/dealers/${dealerId}/portal-token`)).body.url as string;
+    const path = new URL(url).pathname;
+    expect(path.startsWith('/v1'), `issued link ${path}: a /v1 link is a 410 after the cut`).toBe(false);
+    expect((await client(false).get(path)).status).toBe(200);
+  });
+});
+
 describe('DLR2-B1 — the toggle is the kill-switch, and the public routes ignored it', () => {
   it('an issued partner link stops serving, and stops accepting, when the feature is off', async () => {
     const { token } = await setup();
     const anon = client(false);
-    expect((await anon.get(`/v1/host/openwop-app/partner/${token}`)).status).toBe(200);
+    expect((await anon.get(`/host/openwop-app/partner/${token}`)).status).toBe(200);
 
     await setDealers('off');
     try {
@@ -76,15 +86,15 @@ describe('DLR2-B1 — the toggle is the kill-switch, and the public routes ignor
       // routes 404). True, before this: every issued link kept serving the dealer's
       // outlet names and STREET ADDRESSES to anyone holding it, and kept accepting new
       // deal registrations — durable rows, into a console that no longer exists.
-      expect((await anon.get(`/v1/host/openwop-app/partner/${token}`)).status).toBe(404);
-      const reg = await anon.post(`/v1/host/openwop-app/partner/${token}/register`, { dealTitle: 'Q4 fleet', companyName: 'Globex' });
+      expect((await anon.get(`/host/openwop-app/partner/${token}`)).status).toBe(404);
+      const reg = await anon.post(`/host/openwop-app/partner/${token}/register`, { dealTitle: 'Q4 fleet', companyName: 'Globex' });
       expect(reg.status).toBe(404);
     } finally {
       await setDealers('on');
     }
     // …and it works again when the operator turns it back on (the negative control:
     // this is a gate, not a break).
-    expect((await anon.get(`/v1/host/openwop-app/partner/${token}`)).status).toBe(200);
+    expect((await anon.get(`/host/openwop-app/partner/${token}`)).status).toBe(200);
   });
 });
 
@@ -97,7 +107,7 @@ describe('DLR2-B2 — a review card that never landed is not "awaiting review"',
     const anon = client(false);
     // The partner submit still succeeds — the reg row IS durable, and a public submit
     // must not 500 on a queue hiccup. That was always right; the SILENCE was not.
-    expect((await anon.post(`/v1/host/openwop-app/partner/${token}/register`, { dealTitle: 'Q4 fleet', companyName: 'Globex' })).status).toBe(201);
+    expect((await anon.post(`/host/openwop-app/partner/${token}/register`, { dealTitle: 'Q4 fleet', companyName: 'Globex' })).status).toBe(201);
     spy.mockRestore();
 
     // Read the row WITHOUT the admin route, because that route is also the repair:
@@ -119,10 +129,10 @@ describe('DLR2-B2 — a review card that never landed is not "awaiting review"',
     const approvals = await import('../src/host/approvalService.js');
     const spy = vi.spyOn(approvals, 'createDealerRegistrationApproval').mockRejectedValueOnce(new Error('db transient'));
     const anon = client(false);
-    await anon.post(`/v1/host/openwop-app/partner/${token}/register`, { dealTitle: 'Q4 fleet', companyName: 'Globex' });
+    await anon.post(`/host/openwop-app/partner/${token}/register`, { dealTitle: 'Q4 fleet', companyName: 'Globex' });
     spy.mockRestore();
 
-    await anon.get(`/v1/host/openwop-app/partner/${token}`);
+    await anon.get(`/host/openwop-app/partner/${token}`);
     const { listRegistrations } = await import('../src/features/dealers/entities/registration.js');
     expect((await listRegistrations(tenantId, orgId))[0]!.queueFailed).toBe(true);
     expect((await listApprovals(tenantId, 'pending')).filter((a) => a.kind === 'dealer-registration')).toHaveLength(0);
@@ -131,7 +141,7 @@ describe('DLR2-B2 — a review card that never landed is not "awaiting review"',
   it('a normal submit is queued and carries no failure flag (the negative control)', async () => {
     const { owner, orgId, token } = await setup();
     const anon = client(false);
-    await anon.post(`/v1/host/openwop-app/partner/${token}/register`, { dealTitle: 'Normal', companyName: 'Initech' });
+    await anon.post(`/host/openwop-app/partner/${token}/register`, { dealTitle: 'Normal', companyName: 'Initech' });
     const rows = (await owner.get(`${B(orgId)}/registrations`)).body.registrations;
     expect(rows[0].queueFailed).toBeUndefined();
   });
@@ -141,7 +151,7 @@ describe('DLR2-B3/B4 — a review card must never outlive the thing it decides',
   it('deleting a dealer closes its pending cards, instead of wedging them forever', async () => {
     const { owner, orgId, dealerId, tenantId, token } = await setup();
     const anon = client(false);
-    await anon.post(`/v1/host/openwop-app/partner/${token}/register`, { dealTitle: 'Fleet pilot', companyName: 'Globex' });
+    await anon.post(`/host/openwop-app/partner/${token}/register`, { dealTitle: 'Fleet pilot', companyName: 'Globex' });
     expect((await listApprovals(tenantId, 'pending')).filter((a) => a.kind === 'dealer-registration')).toHaveLength(1);
 
     expect((await owner.del(`${B(orgId)}/dealers/${dealerId}`)).status).toBe(200);
@@ -155,7 +165,7 @@ describe('DLR2-B3/B4 — a review card must never outlive the thing it decides',
   it('a decision taken outside the inbox closes its card too', async () => {
     const { owner, orgId, dealerId, tenantId, token } = await setup();
     const anon = client(false);
-    await anon.post(`/v1/host/openwop-app/partner/${token}/register`, { dealTitle: 'Sample order', companyName: 'Initech' });
+    await anon.post(`/host/openwop-app/partner/${token}/register`, { dealTitle: 'Sample order', companyName: 'Initech' });
     const regId = (await owner.get(`${B(orgId)}/registrations`)).body.registrations[0].regId;
 
     // The workflow surface and the demo seeder both decide this way. Leaving the card
@@ -174,7 +184,7 @@ describe('review fold-in — defects the independent pass found in the fix', () 
   it('B1: an APPROVED decision closes its card as approved, not as rejected', async () => {
     const { owner, orgId, tenantId, token } = await setup();
     const anon = client(false);
-    await anon.post(`/v1/host/openwop-app/partner/${token}/register`, { dealTitle: 'Fleet', companyName: 'Globex' });
+    await anon.post(`/host/openwop-app/partner/${token}/register`, { dealTitle: 'Fleet', companyName: 'Globex' });
     const regId = (await owner.get(`${B(orgId)}/registrations`)).body.registrations[0].regId;
 
     // The first version hard-coded `rejected` for BOTH directions, so this — the demo
@@ -203,7 +213,7 @@ describe('review fold-in — defects the independent pass found in the fix', () 
   it('B1: a REJECTED decision still closes as rejected (the negative control)', async () => {
     const { owner, orgId, tenantId, token } = await setup();
     const anon = client(false);
-    await anon.post(`/v1/host/openwop-app/partner/${token}/register`, { dealTitle: 'Sample', companyName: 'Initech' });
+    await anon.post(`/host/openwop-app/partner/${token}/register`, { dealTitle: 'Sample', companyName: 'Initech' });
     const regId = (await owner.get(`${B(orgId)}/registrations`)).body.registrations[0].regId;
     const { decideRegistration } = await import('../src/features/dealers/entities/registration.js');
     await decideRegistration(tenantId, orgId, regId, 'rejected', 'user:ops');
@@ -217,8 +227,8 @@ describe('review fold-in — defects the independent pass found in the fix', () 
     const anon = client(false);
     await setDealers('off');
     try {
-      const real = await anon.get(`/v1/host/openwop-app/partner/${token}`);
-      const bogus = await anon.get('/v1/host/openwop-app/partner/ptoken:definitely-not-a-token');
+      const real = await anon.get(`/host/openwop-app/partner/${token}`);
+      const bogus = await anon.get('/host/openwop-app/partner/ptoken:definitely-not-a-token');
       expect(real.status).toBe(404);
       expect(bogus.status).toBe(404);
       // Asserting both are 404 is what the first version did, and it cannot see the
@@ -234,7 +244,7 @@ describe('review fold-in — defects the independent pass found in the fix', () 
     const approvals = await import('../src/host/approvalService.js');
     const spy = vi.spyOn(approvals, 'createDealerRegistrationApproval').mockRejectedValueOnce(new Error('db transient'));
     const anon = client(false);
-    await anon.post(`/v1/host/openwop-app/partner/${token}/register`, { dealTitle: 'Fleet', companyName: 'Globex' });
+    await anon.post(`/host/openwop-app/partner/${token}/register`, { dealTitle: 'Fleet', companyName: 'Globex' });
     spy.mockRestore();
 
     await Promise.all([owner.get(`${B(orgId)}/registrations`), owner.get(`${B(orgId)}/registrations`)]);
@@ -252,7 +262,7 @@ describe('review fold-in — defects the independent pass found in the fix', () 
   it('I2: a pending row with NO card and no flag is repaired too', async () => {
     const { owner, orgId, tenantId, token } = await setup();
     const anon = client(false);
-    await anon.post(`/v1/host/openwop-app/partner/${token}/register`, { dealTitle: 'Fleet', companyName: 'Globex' });
+    await anon.post(`/host/openwop-app/partner/${token}/register`, { dealTitle: 'Fleet', companyName: 'Globex' });
     // The shape a part-way delete cascade leaves behind — and the shape of every row
     // whose queue write failed BEFORE `queueFailed` existed. The first repair keyed on
     // the flag, so it could not see either.
@@ -269,7 +279,7 @@ describe('review fold-in — defects the independent pass found in the fix', () 
     const { owner, orgId, dealerId } = await setup();
     const companyId = (await owner.get(`${B(orgId)}/dealers/${dealerId}`)).body.companyId;
     expect((await owner.post(`${B(orgId)}/dealers/${dealerId}`, undefined)).status).toBeGreaterThan(0); // no-op probe
-    await owner.del(`/v1/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}/companies/${encodeURIComponent(companyId)}`);
+    await owner.del(`/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}/companies/${encodeURIComponent(companyId)}`);
     // The company delete auto-suspends (ADR 0283), whose whole point is that a
     // dangling-company dealer must not read as active. Shipping the reversal without
     // this guard is a one-click route straight back into that state.
@@ -283,7 +293,7 @@ describe('DLR2-M3 — subject erasure reaches the dealers rows', () => {
   it('severs the person-link on a decided registration, and leaves the decision', async () => {
     const { owner, orgId, tenantId, token } = await setup();
     const anon = client(false);
-    await anon.post(`/v1/host/openwop-app/partner/${token}/register`, { dealTitle: 'Fleet', companyName: 'Globex' });
+    await anon.post(`/host/openwop-app/partner/${token}/register`, { dealTitle: 'Fleet', companyName: 'Globex' });
     const regId = (await owner.get(`${B(orgId)}/registrations`)).body.registrations[0].regId;
     const { decideRegistration } = await import('../src/features/dealers/entities/registration.js');
     await decideRegistration(tenantId, orgId, regId, 'approved', 'user:manager-a');
@@ -300,7 +310,7 @@ describe('DLR2-M3 — subject erasure reaches the dealers rows', () => {
   it('leaves another decider alone (the negative control)', async () => {
     const { owner, orgId, tenantId, token } = await setup();
     const anon = client(false);
-    await anon.post(`/v1/host/openwop-app/partner/${token}/register`, { dealTitle: 'Fleet', companyName: 'Globex' });
+    await anon.post(`/host/openwop-app/partner/${token}/register`, { dealTitle: 'Fleet', companyName: 'Globex' });
     const regId = (await owner.get(`${B(orgId)}/registrations`)).body.registrations[0].regId;
     const { decideRegistration } = await import('../src/features/dealers/entities/registration.js');
     await decideRegistration(tenantId, orgId, regId, 'approved', 'user:manager-b');
@@ -315,13 +325,13 @@ describe('R3 — the repair never writes for a viewer (the R2 deferral)', () => 
     const approvals = await import('../src/host/approvalService.js');
     const spy = vi.spyOn(approvals, 'createDealerRegistrationApproval').mockRejectedValueOnce(new Error('db transient'));
     const anon = client(false);
-    expect((await anon.post(`/v1/host/openwop-app/partner/${token}/register`, { dealTitle: 'Viewer case', companyName: 'Initech' })).status).toBe(201);
+    expect((await anon.post(`/host/openwop-app/partner/${token}/register`, { dealTitle: 'Viewer case', companyName: 'Initech' })).status).toBe(201);
     spy.mockRestore();
 
     // A same-tenant read-only viewer (the projects-route precedent).
     const viewer = client();
-    const vlogin = await viewer.post('/v1/host/openwop-app/test/login', { email: `v-${Date.now()}-${n++}@acme.test`, tenantId });
-    expect((await owner.post(`/v1/host/openwop-app/orgs/${orgId}/members`, { displayName: 'V', subject: vlogin.body.user.userId, roles: ['viewer'] })).status).toBe(201);
+    const vlogin = await viewer.post('/host/openwop-app/test/login', { email: `v-${Date.now()}-${n++}@acme.test`, tenantId });
+    expect((await owner.post(`/host/openwop-app/orgs/${orgId}/members`, { displayName: 'V', subject: vlogin.body.user.userId, roles: ['viewer'] })).status).toBe(201);
 
     const { listApprovals } = await import('../src/host/approvalService.js');
     // The viewer's GET returns the rows but performs NO repair.

@@ -26,14 +26,21 @@ export const cmsFeature: BackendFeature = {
   // ADR 0064 Phase 3 — `ctx.features.cms` read surface: workflow nodes fetch a
   // published page resolved for a target locale (the `feature.cms.nodes` pack
   // calls this; AI translation stays in the node, not the surface).
-  surface: { id: 'cms', build: buildCmsSurface },
+  // ADR 0836 D5 (`CMS2WF-2`) — the ADR 0832 org floor asks `workspace:read` for
+  // any method a policy does not name, so the three WRITERS ran at read tier
+  // while their routes require `workspace:write`. Name them.
+  surface: {
+    id: 'cms',
+    build: buildCmsSurface,
+    orgPolicy: { methodScopes: { createDraftPage: 'workspace:write', updateSectionDraft: 'workspace:write', submitPage: 'workspace:write' } },
+  },
   // ADR 0064 Phase 3 + ADR 0204 C6 — the node pack over ctx.features.cms (reads
   // + the governed draft/submit write verbs) and the localizer/content-editor
   // agents tool-allowlisted to those nodes. Declared here so featurePackRefs()
   // installs them at boot (Phase 0) and the eager agent loader registers them.
   requiredPacks: [
-    { name: 'feature.cms.nodes', version: '1.5.0' },
-    { name: 'feature.cms.agents', version: '1.1.1' },
+    { name: 'feature.cms.nodes', version: '1.5.1' },
+    { name: 'vendor.openwop-app.cms.agents', version: '1.1.2' },
   ],
   registerRoutes: (deps) => {
     // R3 (UX_UPGRADE-content known-open) — DSAR erasure; registered with the
@@ -74,7 +81,7 @@ export const cmsFeature: BackendFeature = {
     registerToggleDefault({
       id: 'cms-approval-gate',
       label: 'CMS editorial approval gate',
-      description: 'Gate CMS publishing on a human approval in the Approvals inbox (ADR 0066). Submitting for review always queues an approval; this toggle decides whether an admin may bypass it by publishing, scheduling, or editing live content directly.',
+      description: 'Gate CMS publishing on a human approval in the Approvals inbox. Submitting for review always queues an approval; this toggle decides whether an admin may bypass it by publishing, scheduling, or editing live content directly.',
       category: 'Content',
       status: 'off',
       bucketUnit: 'tenant',
@@ -98,7 +105,7 @@ export const cmsFeature: BackendFeature = {
       // authoring/admin routes, and no delivery path reads the toggle at all. An operator
       // who flipped this OFF expecting Spanish to stop being served would have been misled
       // by the copy they read at the moment of the decision.
-      description: 'Authoring for per-locale content overrides on CMS pages (ADR 0064) — the settings, the translator grants and the AI translate action. Delivery is NOT gated: pages that already carry authored overlays keep serving them under Accept-Language when this is OFF. To stop serving a locale, withhold it per page or remove its overlays.',
+      description: 'Authoring for per-locale content overrides on CMS pages — the settings, the translator grants and the AI translate action. Delivery is NOT gated: pages that already carry authored overlays keep serving them under Accept-Language when this is OFF. To stop serving a locale, withhold it per page or remove its overlays.',
       category: 'Content',
       status: 'off',
       bucketUnit: 'tenant',

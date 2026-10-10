@@ -1,11 +1,20 @@
 {
   "name": "feature.podcasts.nodes",
-  "version": "1.1.0",
-  "description": "Multi-speaker podcast generation pipeline — workflow nodes that compose existing seams into the `podcasts.generate` built-in workflow. `select-content` grounds on a notebook's sources via ctx.features.notebooks; `outline` and `transcript` draft the script with ctx.callAI and persist versioned Documents (ctx.features.documents); `synthesize` voices each dialogue turn via ctx.callSpeechSynthesizer into per-turn audio clips; `mix` assembles the ordered clip list onto the episode (ctx.features.podcasts.recordEpisodeResult). The only run input is episodeId — each node resolves the episode/episodeProfile/speakerProfile config authoritatively from ctx.features.podcasts. Replay posture (ADR 0679, corrected): `mix` and `synthesize` declare `side-effectful` and ARE replay-served. `outline`/`transcript` reach ctx.callAI, so they are held out of the served set by design (their model call is discharged by the invocation log) and their Documents are minted at a content-derived deterministic id instead. `role:\"action\"` on its own confers NO replay guarantee — the previous wording claimed it did, and named the synthesizer, which was the node least protected. Every node reports failure TYPED (never `status:'success'` with an empty payload) and writes the reason onto the episode's `error` field; the two model-calling nodes each carry exactly ONE bounded, error-fed repair (ADR 0603).",
+  "version": "1.1.1",
+  "description": "Multi-speaker podcast generation pipeline — workflow nodes that compose existing seams into the `podcasts.generate` built-in workflow. `select-content` grounds on a notebook's sources via ctx.features.notebooks; `outline` and `transcript` draft the script with ctx.callAI and persist versioned Documents (ctx.features.documents); `synthesize` voices each dialogue turn via ctx.callSpeechSynthesizer into per-turn audio clips; `mix` assembles the ordered clip list onto the episode (ctx.features.podcasts.recordEpisodeResult). The only run input is episodeId — each node resolves the episode/episodeProfile/speakerProfile config authoritatively from ctx.features.podcasts. Replay posture (ADR 0679, corrected): `mix` and `synthesize` declare `side-effectful` and ARE replay-served. `outline`/`transcript` reach ctx.callAI, so they are held out of the served set by design (their model call is discharged by the invocation log) and their Documents are minted at a content-derived deterministic id instead. `role:\"action\"` on…",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
-  "keywords": ["feature", "podcasts", "audio", "tts", "speech-synthesis", "notebooks"],
-  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "keywords": [
+    "feature",
+    "podcasts",
+    "audio",
+    "tts",
+    "speech-synthesis",
+    "notebooks"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0 <3.0.0"
+  },
   "nodes": [
     {
       "typeId": "feature.podcasts.nodes.select-content",
@@ -41,7 +50,9 @@
       "description": "Voices each dialogue turn via ctx.callSpeechSynthesizer (RFC 0105), one call per turn carrying that speaker's opaque voiceId. Inputs: { episodeId } + { turns } (edge). Output: { clips } — ordered [{speaker,voiceId,url,mimeType}] (each turn's bytes are already stored as a tenant-scoped Media asset by the synth host impl). When there were turns to voice and NO audio resulted, FAILS TYPED: `podcast_no_cast_voice` (the episode's speaker/cast profile is missing or has no voiceId) or `podcast_synthesis_returned_no_audio` (the synthesizer returned nothing). Failure codes also include `podcast_episode_not_found`.",
       "category": "integration",
       "role": "action",
-      "capabilities": ["side-effectful"]
+      "capabilities": [
+        "side-effectful"
+      ]
     },
     {
       "typeId": "feature.podcasts.nodes.mix",
@@ -50,8 +61,16 @@
       "description": "Assembles the ordered clip list onto the episode tracking record via ctx.features.podcasts.recordEpisodeResult (the Studio player plays the clips sequentially — the v1 mix; a single-file server-side mux is the deferred render option, ADR 0086 OQ-1). Inputs: { episodeId } + { clips } (edge). Output: { clipCount, audioMediaRef }. An EMPTY clip list FAILS TYPED with `podcast_mix_no_clips` and never writes — an empty write used to ERASE the episode's recorded clips while leaving the previous audioMediaRef in place (PODC-1). A list the episode store only PARTIALLY accepted (the per-clip validation drops any clip lacking a string url/voiceId) FAILS TYPED with `podcast_mix_clips_rejected` and publishes no audio — a mux must match what is stored, and the write's own report is what says so (clipsRecorded), never the length the node hoped to write. Every typed failure is also written to the episode's `error` field, which the Studio renders.",
       "category": "integration",
       "role": "action",
-      "capabilities": ["side-effectful"]
+      "capabilities": [
+        "side-effectful"
+      ]
     }
   ],
-  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+  "runtime": {
+    "language": "javascript",
+    "format": "esm",
+    "entry": "./index.mjs",
+    "minRuntimeVersion": "node>=20"
+  },
+  "kind": "node"
 }

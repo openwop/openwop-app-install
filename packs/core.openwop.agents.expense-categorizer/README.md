@@ -3,8 +3,8 @@
 Classifies expenses against a policy-defined chart of accounts. Flags policy violations.
 
 | Pack name | `core.openwop.agents.expense-categorizer` |
-| Version | `1.0.0` |
-| Engine | OpenWOP `>=1.1.0 <2.0.0` |
+| Version | `1.0.1` |
+| Engine | OpenWOP `>=1.1.0 <3.0.0` |
 | Agents | 1 |
 | Required host capabilities | `aiProviders` |
 | License | Apache-2.0 |

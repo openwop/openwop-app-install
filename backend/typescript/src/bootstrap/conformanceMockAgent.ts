@@ -45,6 +45,7 @@
  * @see schemas/core-conformance-mock-agent-config.schema.json
  */
 
+import { runOption } from '../host/runOptions.js';
 import { randomUUID } from 'node:crypto';
 import { getNodeRegistry } from '../executor/nodeRegistry.js';
 import { readDeployPosture } from '../host/deployPosture.js';
@@ -110,7 +111,7 @@ function resolveAgentId(ctx: NodeContext, config: MockAgentConfig): string {
 }
 
 function resolveEscalationThreshold(ctx: NodeContext): number {
-  const fromRun = ctx.configurable?.escalationThreshold;
+  const fromRun = runOption(ctx.configurable, 'escalationThreshold');
   if (typeof fromRun === 'number' && fromRun >= 0 && fromRun <= 1) return fromRun;
   return DEFAULT_ESCALATION_THRESHOLD;
 }
@@ -312,6 +313,21 @@ export const mockAgentNode: NodeModule = {
  * registration (bootstrap/nodes.ts) and the advertisement (routes/discovery.ts)
  * read, so they cannot drift.
  */
+/**
+ * The ONLY secret refs a conformance node may resolve: the host-provisioned
+ * canary, and the name the SR-1 redaction fixture asks for (which falls back to
+ * the canary). A conformance node that resolves a caller-chosen ref and returns
+ * anything derived from it — `conformance.secret.echo` returns SHA-256 + byte
+ * length — is an oracle over EVERY secret the run's tenant can resolve,
+ * including workspace keys a member without `host:byok:manage` cannot reveal.
+ * Pinning the refs keeps the suite's legs working and closes the oracle on any
+ * deployment that enables these nodes.
+ */
+export const CONFORMANCE_SECRET_REFS: ReadonlySet<string> = new Set([
+  'openwop-conformance-canary-secret',
+  'conformance-test-secret',
+]);
+
 export function conformanceNodesEnabled(): boolean {
   const flag = process.env.OPENWOP_ENABLE_CONFORMANCE_NODES;
   if (flag === 'true') return true;

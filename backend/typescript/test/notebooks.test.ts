@@ -58,13 +58,13 @@ function client(): Client {
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
 async function ownerWithOrg(who: string): Promise<{ c: Client; orgId: string }> {
   const c = client();
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail(who) });
+  const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail(who) });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   return { c, orgId: org.body.orgId };
 }
 
-const NB = '/v1/host/openwop-app/notebooks';
+const NB = '/host/openwop-app/notebooks';
 const FELINE = 'Feline companions: cats groom themselves with their tongue and purr when content. A cat sleeps for most of the day.';
 
 describe('notebooks — registration', () => {
@@ -91,7 +91,7 @@ describe('notebooks — full vertical slice (create → source → search → no
     expect(list.body.notebooks.some((nb: { id: string }) => nb.id === id)).toBe(true);
 
     // a plain project is NOT a notebook (facet filter) and is not reachable as one
-    const plain = await c.post('/v1/host/openwop-app/projects', { orgId, name: 'Plain project' });
+    const plain = await c.post('/host/openwop-app/projects', { orgId, name: 'Plain project' });
     expect(plain.status).toBe(201);
     expect((await c.get(NB)).body.notebooks.some((nb: { id: string }) => nb.id === plain.body.id)).toBe(false);
     expect((await c.get(`${NB}/${plain.body.id}`)).status).toBe(404);
@@ -142,7 +142,7 @@ describe('notebooks — validation + RBAC', () => {
 
     // An unscoped caller (no membership in orgId) cannot create.
     const anon = client();
-    await anon.post('/v1/host/openwop-app/test/login', { email: uniqEmail('nb-anon') });
+    await anon.post('/host/openwop-app/test/login', { email: uniqEmail('nb-anon') });
     expect((await anon.post(NB, { orgId, name: 'Nope' })).status).toBe(403);
   });
 });
@@ -168,14 +168,14 @@ describe('notebooks — same-tenant RBAC (read-only member ⇒ 403, not 404)', (
     // pass an explicit tenantId so the viewer is a co-tenant, not a stranger).
     const tenantId = `t-nb-rbac-${Date.now()}-${n++}`;
     const owner = client();
-    await owner.post('/v1/host/openwop-app/test/login', { email: uniqEmail('nb-rbac-owner'), tenantId });
-    const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
+    await owner.post('/host/openwop-app/test/login', { email: uniqEmail('nb-rbac-owner'), tenantId });
+    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
     const id = (await owner.post(NB, { orgId, name: 'Shared notebook' })).body.notebook.id as string;
 
     // A second co-tenant user, added to the org as a read-only `viewer` (workspace:read, no :write).
     const viewer = client();
-    const vu = await viewer.post('/v1/host/openwop-app/test/login', { email: uniqEmail('nb-viewer'), tenantId });
-    const add = await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'V', subject: vu.body.user.userId, roles: ['viewer'] });
+    const vu = await viewer.post('/host/openwop-app/test/login', { email: uniqEmail('nb-viewer'), tenantId });
+    const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'V', subject: vu.body.user.userId, roles: ['viewer'] });
     expect(add.status, JSON.stringify(add.body)).toBe(201);
 
     // READS succeed (the viewer has access — so a write denial must be 403, never a 404 leak).
@@ -250,7 +250,7 @@ describe('notebooks — audio upload body limit (MEDIA-2)', () => {
 describe('notebooks — Sources-on-any-project (ADR 0084 correction)', () => {
   it('POST /:id/ensure provisions sources on a plain project, which then resolves as a notebook', async () => {
     const { c, orgId } = await ownerWithOrg('nb-ensure');
-    const plain = await c.post('/v1/host/openwop-app/projects', { orgId, name: 'Regular project' });
+    const plain = await c.post('/host/openwop-app/projects', { orgId, name: 'Regular project' });
     expect(plain.status).toBe(201);
     const id = plain.body.id as string;
     // Before ensure: not a notebook (no bound collection).
@@ -271,7 +271,7 @@ describe('notebooks — Sources-on-any-project (ADR 0084 correction)', () => {
   it('ensure requires workspace:write in the project org (403 for a reader, 404 cross-tenant)', async () => {
     const a = await ownerWithOrg('nb-ensure-a');
     const b = await ownerWithOrg('nb-ensure-b');
-    const proj = await a.c.post('/v1/host/openwop-app/projects', { orgId: a.orgId, name: 'A proj' });
+    const proj = await a.c.post('/host/openwop-app/projects', { orgId: a.orgId, name: 'A proj' });
     // b (different tenant) cannot ensure a's project → uniform 404.
     expect((await b.c.post(`${NB}/${proj.body.id}/ensure`)).status).toBe(404);
   });

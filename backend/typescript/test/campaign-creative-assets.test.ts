@@ -140,7 +140,7 @@ describe('ctx.features.media.createAssetFromServeUrl (ADR 0229)', () => {
 
   it('rejects an unknown token, a bad url, and a disallowed MIME fail-closed', async () => {
     const surface = buildMediaSurface({ tenantId: 'tA' });
-    await expect(surface.createAssetFromServeUrl({ orgId: 'o1', url: '/v1/host/openwop-app/assets/does-not-exist' })).rejects.toMatchObject({ code: 'not_found' });
+    await expect(surface.createAssetFromServeUrl({ orgId: 'o1', url: '/host/openwop-app/assets/does-not-exist' })).rejects.toMatchObject({ code: 'not_found' });
     await expect(surface.createAssetFromServeUrl({ orgId: 'o1', url: 'http://evil.example/../../etc' })).rejects.toMatchObject({ code: 'validation_error' });
     const html = await storeMediaAsset('tA', { contentBase64: PNG_B64, contentType: 'text/html' });
     await expect(surface.createAssetFromServeUrl({ orgId: 'o1', url: html.url })).rejects.toMatchObject({ code: 'validation_error' });
@@ -165,7 +165,7 @@ describe('render-concepts node (ADR 0229 / D3)', () => {
       surface: {
         createAssetFromServeUrl: async (args: Record<string, unknown>) => {
           created.push(args);
-          return { assetId: `masset:${created.length}`, serveToken: `tok-${created.length}`, serveUrl: `/v1/host/openwop-app/assets/tok-${created.length}`, contentType: 'image/png', name: String(args.name ?? ''), sizeBytes: 3 };
+          return { assetId: `masset:${created.length}`, serveToken: `tok-${created.length}`, serveUrl: `/host/openwop-app/assets/tok-${created.length}`, contentType: 'image/png', name: String(args.name ?? ''), sizeBytes: 3 };
         },
       },
     };
@@ -209,7 +209,7 @@ describe('render-concepts node (ADR 0229 / D3)', () => {
     const out = await channelNodes[RENDER]({
       callImageGenerator: async (req: Record<string, unknown>) => {
         genCalls.push(req);
-        return { images: [{ url: `/v1/host/openwop-app/assets/scratch-${genCalls.length}`, mimeType: 'image/png', metadata: { model: 'gpt-image-1', provider: 'openai' } }] };
+        return { images: [{ url: `/host/openwop-app/assets/scratch-${genCalls.length}`, mimeType: 'image/png', metadata: { model: 'gpt-image-1', provider: 'openai' } }] };
       },
       features: { media: m.surface },
       inputs: { draft, orgId: 'o1', maxImages: 2 },
@@ -240,7 +240,7 @@ describe('render-concepts node (ADR 0229 / D3)', () => {
 
   it('clamps maxImages to 3 and defaults to 1', async () => {
     const m = mediaStub();
-    const gen = async () => ({ images: [{ url: '/v1/host/openwop-app/assets/s', mimeType: 'image/png' }] });
+    const gen = async () => ({ images: [{ url: '/host/openwop-app/assets/s', mimeType: 'image/png' }] });
     const one = await channelNodes[RENDER]({ callImageGenerator: gen, features: { media: m.surface }, inputs: { draft, orgId: 'o1' } });
     expect((one.outputs as Record<string, any>).count).toBe(1);
     const many = await channelNodes[RENDER]({ callImageGenerator: gen, features: { media: m.surface }, inputs: { draft, orgId: 'o1', maxImages: 99 } });
@@ -254,7 +254,7 @@ describe('render-concepts node (ADR 0229 / D3)', () => {
       callImageGenerator: async () => {
         calls += 1;
         if (calls > 1) throw Object.assign(new Error('Daily image-generation budget reached (50/50).'), { code: 'provider_rate_limited' });
-        return { images: [{ url: '/v1/host/openwop-app/assets/s1', mimeType: 'image/png' }] };
+        return { images: [{ url: '/host/openwop-app/assets/s1', mimeType: 'image/png' }] };
       },
       features: { media: m.surface },
       inputs: { draft, orgId: 'o1', maxImages: 3 },

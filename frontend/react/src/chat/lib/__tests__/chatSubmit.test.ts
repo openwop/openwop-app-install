@@ -50,6 +50,26 @@ describe('runCoreSubmit — precedence', () => {
     expect(c.send).not.toHaveBeenCalled();
   });
 
+  it('ADR 0764 — `@agent /workflow` activates the agent AND runs the workflow (never a plain send)', async () => {
+    detectWorkflowSlashMention.mockReturnValue({ entry: { id: 'wf' }, trailing: 'go', agentSlug: 'devon' });
+    const devon = { slug: 'devon', agentId: 'agent-devon' };
+    const onAgentActivated = vi.fn();
+    const c = ctx({ agentEntries: [devon] as never, onAgentActivated });
+    await runCoreSubmit('@devon /wf go', undefined, c);
+    expect(c.activeAgents.activateAgent).toHaveBeenCalledWith(devon);
+    expect(onAgentActivated).toHaveBeenCalledWith('agent-devon');
+    expect(c.runWorkflowMention).toHaveBeenCalledWith({ id: 'wf' }, 'go');
+    expect(c.send).not.toHaveBeenCalled();
+  });
+
+  it('ADR 0764 — an unknown `@slug` prefix still runs the picked workflow', async () => {
+    detectWorkflowSlashMention.mockReturnValue({ entry: { id: 'wf' }, trailing: null, agentSlug: 'nobody' });
+    const c = ctx();
+    await runCoreSubmit('@nobody /wf', undefined, c);
+    expect(c.activeAgents.activateAgent).not.toHaveBeenCalled();
+    expect(c.runWorkflowMention).toHaveBeenCalledWith({ id: 'wf' }, undefined);
+  });
+
   it('an interceptor that returns handled stops before @agent + send', async () => {
     const intercept: SubmitInterceptor = vi.fn(() => Promise.resolve({ kind: 'handled' as const }));
     const c = ctx();
@@ -75,6 +95,13 @@ describe('runCoreSubmit — precedence', () => {
     expect(c.activeAgents.activateAgent).toHaveBeenCalledWith({ agentId: 'rev' });
     expect(onAgentActivated).toHaveBeenCalledWith('rev');
     expect(c.send).toHaveBeenCalledWith('@rev hi', c.config, expect.objectContaining({ activeAgentId: 'rev' }));
+  });
+
+  it('ADR 0768 D1 premise — with attachments an @agent mention does NOT switch agents (AgentHandoffHint says so)', async () => {
+    detectAgentMention.mockReturnValue({ entry: { agentId: 'rev' } });
+    const c = ctx({ activeAgents: { activateAgent: vi.fn(() => 'rev'), currentAgentId: DEFAULT } });
+    await runCoreSubmit('@rev check this', [{ type: 'file', mimeType: 'application/pdf', name: 'a.pdf' }] as never, c);
+    expect(c.activeAgents.activateAgent).not.toHaveBeenCalled();
   });
 
   it('plain text sends with the current agent when one is selected, undefined for the default', async () => {

@@ -30,8 +30,8 @@ describe('demo summary route', () => {
     expect(body.app.name).toBe('workflow-engine');
     expect(body.app.serviceName).toBe('demo-summary-test');
     expect(body.app.storage).toBe('memory');
-    expect(body.endpoints.exampleDataSummary).toBe('/v1/host/openwop-app/example-data-summary');
-    expect(body.endpoints.nodeCatalog).toBe('/v1/host/openwop-app/node-catalog');
+    expect(body.endpoints.exampleDataSummary).toBe('/host/openwop-app/example-data-summary');
+    expect(body.endpoints.nodeCatalog).toBe('/host/openwop-app/node-catalog');
     expect(body.demo.nodeCatalog.total).toBeGreaterThan(0);
     expect(body.demo.nodeCatalog.runnable).toBe(body.demo.nodeCatalog.total);
     expect(body.demo.workflows.fixtures).toBeGreaterThan(0);

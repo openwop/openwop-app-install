@@ -19,7 +19,7 @@ import { buildProfilesSurface } from './surface.js';
 
 export const profilesFeature: BackendFeature = {
   id: 'profiles',
-  requiredPacks: [{ name: 'feature.profiles.nodes', version: '1.1.0' }], // NP-STALE-PROFILES-1 · ADR 0624 D1 (get honest: { userId } → { profile, found })
+  requiredPacks: [{ name: 'feature.profiles.nodes', version: '1.1.1' }], // NP-STALE-PROFILES-1 · ADR 0624 D1 (get honest: { userId } → { profile, found })
   registerRoutes: (deps) => registerProfilesRoutes(deps),
   // ADR 0014 — `ctx.features.profiles` descriptive read surface (listProfiles /
   // getProfile). Always-on/ungated (no toggleDefault) — the intended path.

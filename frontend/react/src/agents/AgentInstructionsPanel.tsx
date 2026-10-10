@@ -24,6 +24,7 @@ import { MarkdownEditor } from '../ui/MarkdownEditor.js';
 import { Markdown } from '../ui/Markdown.js';
 import { StructuredPromptEditor } from './StructuredPromptEditor.js';
 import { AgentGuardrailsPanel } from './AgentGuardrailsPanel.js';
+import { writeErrorMessage } from './agentWriteAccess.js';
 
 export function AgentInstructionsPanel({ entry, onChanged }: { entry: RosterEntry; onChanged: () => void }): JSX.Element {
   const { t } = useTranslation('agents');
@@ -53,7 +54,7 @@ export function AgentInstructionsPanel({ entry, onChanged }: { entry: RosterEntr
       setNotice(t('instrSaved'));
       onChanged();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(writeErrorMessage(err, t('common:error_forbidden')));
     } finally {
       setSaving(false);
     }
@@ -71,7 +72,7 @@ export function AgentInstructionsPanel({ entry, onChanged }: { entry: RosterEntr
       setSystemPrompt('');
       setNotice(t('instrUpdated'));
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(writeErrorMessage(err, t('common:error_forbidden')));
     } finally {
       setSaving(false);
     }

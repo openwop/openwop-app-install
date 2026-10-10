@@ -33,6 +33,7 @@ import { resolveDefaultPackDir } from '../packs/registryInstaller.js';
 import { isTombstoned } from './packTombstones.js';
 import { locateRepoDir } from './_repoPath.js';
 import { isParkedPackDirName } from '../bootstrap/mountLocalPacks.js';
+import { sanitizeWhen } from './formFieldConditions.js';
 // The ONE field catalog, imported rather than copied. A second list here would
 // be the exact drift Phase 2a removed when it unified the 40-vs-50 field cap;
 // `host/` importing from `features/` is the established pattern (49 other host
@@ -102,6 +103,9 @@ export interface FormTemplateField {
    *  `description` is the field that actually persists and renders (wired to
    *  `ui/Field`'s `help` → `aria-describedby`), so templates use the real one. */
   description?: string;
+  /** ADR 0808 — the field's conditional-visibility edge condition, carried
+   *  through untouched; `createForm`'s sanitizer validates it. */
+  when?: { type?: string; left?: string; right?: unknown };
 }
 
 export interface FormTemplate {
@@ -247,6 +251,17 @@ function validTemplate(raw: unknown, errors: string[]): raw is FormTemplate {
     if (f.required !== undefined && typeof f.required !== 'boolean') {
       errors.push(`${tpl.templateId}: field '${wid}' required must be a boolean (the service would read a non-boolean as false)`);
       return false;
+    }
+    // ADR 0808 — `when` is checked by the SAME function `createForm` uses, so a
+    // template this host cannot honour (an `expression`/`regex` operator, or a
+    // `left` that is not an earlier field) is refused here, by name.
+    if (wf.when !== undefined) {
+      try {
+        sanitizeWhen(wf.when, tpl.fields.indexOf(f), wid, new Set([...seen].filter((k) => k !== wid)));
+      } catch (err) {
+        errors.push(`${tpl.templateId}: field '${wid}' when: ${err instanceof Error ? err.message : String(err)}`);
+        return false;
+      }
     }
   }
   // ADR 0516 §Security — routing submissions into a CRM list is a decision about

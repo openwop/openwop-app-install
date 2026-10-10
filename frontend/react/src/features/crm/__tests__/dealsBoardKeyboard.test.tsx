@@ -13,6 +13,12 @@
  * jsdom has no layout, so the column and card rects are supplied through a
  * `getBoundingClientRect` stub keyed on the board's own markup
  * (`data-column-id` on `.kb-col`, `.kb-card` on the card).
+ *
+ * Sabotage-witnessed (wave-4 /grade-tests, w4g5-kb-*): KanbanBoardView's
+ * KeyboardSensor losing `columnSnapCoordinateGetter`, the getter moving at the
+ * last column instead of returning `undefined`, the getter not centring in the
+ * target column, `moveFromBoard`'s catch using the plain action error instead
+ * of `revertedErr`, and that catch not re-reading the board each turn a case red.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor, fireEvent, act } from '@testing-library/react';
@@ -20,11 +26,12 @@ import { MemoryRouter } from 'react-router-dom';
 import i18n from '../../../i18n/index.js';
 import { CrmRequestError } from '../crmRequestError.js';
 
+type OrgApi = typeof import('../crmOrgClient.js');
 const api = vi.hoisted(() => ({
-  listCompanies: vi.fn(),
-  listDeals: vi.fn(),
-  listPipelines: vi.fn(),
-  moveDeal: vi.fn(),
+  listCompanies: vi.fn<OrgApi['listCompanies']>(),
+  listDeals: vi.fn<OrgApi['listDeals']>(),
+  listPipelines: vi.fn<OrgApi['listPipelines']>(),
+  moveDeal: vi.fn<OrgApi['moveDeal']>(),
 }));
 vi.mock('../crmOrgClient.js', async (orig) => {
   const actual = await orig<Record<string, unknown>>();
@@ -37,7 +44,7 @@ vi.mock('../../../kanban/columnKeyboardCoordinates.js', async (orig) => {
   const actual = await orig<typeof import('../../../kanban/columnKeyboardCoordinates.js')>();
   return { ...actual, columnSnapCoordinateGetter: vi.fn(actual.columnSnapCoordinateGetter) };
 });
-const toastError = vi.hoisted(() => vi.fn());
+const toastError = vi.hoisted(() => vi.fn<(message: string) => void>());
 vi.mock('../../../ui/toast.js', async (orig) => {
   const actual = await orig<{ toast: Record<string, unknown> }>();
   return { ...actual, toast: { ...actual.toast, error: toastError } };
@@ -68,7 +75,7 @@ function rectFor(el: Element): DOMRect {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   window.localStorage.clear(); // the board⇄table view is persisted; default is the board
   api.listPipelines.mockResolvedValue([{
     pipelineId: 'p1', name: 'Sales',
@@ -123,7 +130,7 @@ describe('deals board — a failed move says it REVERTED, the table stage select
     render(<MemoryRouter><DealsTab orgId="org:1" /></MemoryRouter>);
     await keyboardMove(1);
     await waitFor(() => expect(toastError).toHaveBeenCalledTimes(1));
-    const msg = toastError.mock.calls[0]![0] as string;
+    const msg = toastError.mock.calls[0]![0];
     expect(msg).toBe(`${i18n.t('crm:httpConflict')} — ${i18n.t('crm:changeReverted')}`);
     expect(msg).not.toContain('returned 409');
     // …and the board re-reads so the optimistic move snaps back.

@@ -1,14 +1,21 @@
 /**
- * KB file upload + extraction — bytes → extracted text → ingested document.
+ * ADR 0108 (KB file upload + the untrusted fence) / ADR 0110 (capability-resolved
+ * media dispatch) / ADR 0111 (audio budget, output ceiling, deadline) — bytes →
+ * extracted text → ingested document.
  * Round-trips a real PDF (pdfkit writes it, `unpdf` extracts it) through
  * `ingestDocument({ contentBase64, contentType })`, plus the text/* path and the
  * unsupported-MIME 415. Proves the parsers work at runtime (not just typecheck).
+ *
+ * What breaks it (wave-6 /grade-tests sabotage, each red here): trusting a
+ * file-derived document, dropping the 32 MiB pre-decode cap, ignoring the OCR /
+ * transcription env gates, the STT budget pre-flight or its post-success record,
+ * the per-modality maxTokens/deadline, and the office content-sniff + parser 422s.
  */
 
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it, beforeAll, afterEach, vi } from 'vitest';
+import { describe, expect, it, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import PDFDocument from 'pdfkit';
 // Media → text resolves a headless dispatch (ADR 0110) — mock the resolver to return a
 // closure that yields a canned extraction (no real provider call) AND captures the dispatch
@@ -22,7 +29,7 @@ import { resolveHeadlessAi } from '../src/host/headlessAi.js';
 // Budget hooks mocked so the audio path is testable without governance/storage wiring.
 vi.mock('../src/aiProviders/mediaBudget.js', async () => {
   const actual = await vi.importActual<typeof import('../src/aiProviders/mediaBudget.js')>('../src/aiProviders/mediaBudget.js');
-  return { ...actual, checkMediaBudget: vi.fn(async () => ({ exceeded: false, cap: 0, used: 0 })), recordMediaUsage: vi.fn(async () => undefined) };
+  return { ...actual, checkMediaBudget: vi.fn(async () => ({ exceeded: false, cap: 0, used: 0, nextTotal: 0, kind: 'stt' as const, remaining: Number.POSITIVE_INFINITY })), recordMediaUsage: vi.fn(async () => undefined) };
 });
 import { checkMediaBudget, recordMediaUsage } from '../src/aiProviders/mediaBudget.js';
 import { openStorage } from '../src/storage/index.js';
@@ -47,6 +54,8 @@ function makePdf(text: string): Promise<Buffer> {
     doc.end();
   });
 }
+
+beforeEach(() => { cap.opts = null; }); // module state: each case sees only its own dispatch
 
 const TENANT = 'kbup-t';
 const ORG = 'kbup-org';
@@ -130,9 +139,17 @@ describe('KB file upload — extraction', () => {
   it('rejects a corrupt office file (right MIME, bad bytes) with 422 — that ingest fails, no crash', async () => {
     const col = await createCollection(TENANT, ORG, 'tester', { name: 'UploadsBad' });
     const PPTX = 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+    // Bytes that are not a ZIP at all: refused by the content sniff BEFORE the parser
+    // is imported (CVE-2026-16633 guard) — named by its reason, not just the status.
     await expect(ingestDocument(TENANT, ORG, 'tester', col.collectionId, {
       title: 'broken.pptx', contentBase64: Buffer.from([1, 2, 3, 4, 5]).toString('base64'), contentType: PPTX,
-    })).rejects.toMatchObject({ httpStatus: 422 });
+    })).rejects.toMatchObject({ httpStatus: 422, details: { reason: 'content_type_mismatch' } });
+    // ZIP magic followed by garbage: passes the sniff, so the PARSER fails — and that
+    // failure is the same clean 422, not a crash.
+    const zipJunk = Buffer.concat([Buffer.from([0x50, 0x4b, 0x03, 0x04]), Buffer.from('not really a zip archive')]);
+    await expect(ingestDocument(TENANT, ORG, 'tester', col.collectionId, {
+      title: 'broken2.pptx', contentBase64: zipJunk.toString('base64'), contentType: PPTX,
+    })).rejects.toMatchObject({ httpStatus: 422, message: expect.stringMatching(/corrupt or password-protected/) });
   });
 
   // ── image OCR (env-gated) ────────────────────────────────────────────────────
@@ -199,7 +216,7 @@ describe('KB file upload — extraction', () => {
 
     it('429s when the STT budget is exceeded (no provider call)', async () => {
       process.env.OPENWOP_KB_TRANSCRIBE_ENABLED = 'true';
-      vi.mocked(checkMediaBudget).mockResolvedValueOnce({ exceeded: true, cap: 1, used: 0 } as never);
+      vi.mocked(checkMediaBudget).mockResolvedValueOnce({ exceeded: true, cap: 1, used: 0, nextTotal: 9, kind: 'stt', remaining: 0 });
       const col = await createCollection(TENANT, ORG, 'tester', { name: 'SttBudget' });
       await expect(ingestDocument(TENANT, ORG, 'tester', col.collectionId, {
         title: 'big.mp3', contentBase64: Buffer.from('ID3AUDIO').toString('base64'), contentType: 'audio/mpeg',

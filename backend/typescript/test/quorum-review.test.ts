@@ -10,6 +10,9 @@ import type { AddressInfo } from 'node:net';
 import { getSetCookies } from './headerCookies.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
+import { bareRunId } from './support/bareRunId.js';
+import { projectBoundId } from '../src/host/boundIdProjection.js';
+import { toWireRunId } from '../src/host/v2Ids.js';
 
 let BASE: string;
 let server: http.Server;
@@ -37,16 +40,26 @@ function client(): Client {
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b) };
 }
 
+/** An anonymous SESSION, bootstrapped the way the SPA does it (the vendor
+ *  `/users/me` route still mints). ADR 0750 major-1 extension: a request with no
+ *  credential at all is refused 401 before the tenant/eligibility gates this
+ *  file witnesses, so the anon caller must hold a real session. */
+async function anonClient(): Promise<Client> {
+  const c = client();
+  await c.get('/host/openwop-app/users/me');
+  return c;
+}
+
 let n = 0;
 async function signup(c: Client, tenantId: string): Promise<string> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `q-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await c.post('/host/openwop-app/test/login', { email: `q-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user.userId;
 }
 async function pollWaiting(c: Client, runId: string): Promise<string> {
   for (let i = 0; i < 80; i++) {
     await new Promise((r) => setTimeout(r, 20));
-    const s = (await c.get(`/v1/runs/${runId}`)).body.status as string;
+    const s = (await c.get(`/runs/${runId}`)).body.status as string;
     if (s.startsWith('waiting') || ['completed', 'failed', 'cancelled'].includes(s)) return s;
   }
   return 'unknown';
@@ -61,22 +74,22 @@ async function suspendQuorumGate(approverIds: (o: string, m: string) => string[]
   const ownerId = await signup(owner, tenantId);
   const memberId = await signup(member, tenantId);
   const workflowId = `quorum.test.${n++}`;
-  await owner.post('/v1/host/openwop-app/workflows', {
+  await owner.post('/host/openwop-app/workflows', {
     workflowId,
     nodes: [{ nodeId: 'gate', typeId: 'core.approvalGate', config: { prompt: 'Approve release', requiredApprovals: 2, actions: ['accept', 'reject'], approverRefs: approverIds(ownerId, memberId) } }],
     edges: [],
   });
-  const create = await owner.post('/v1/runs', { workflowId });
+  const create = await owner.post('/runs', { workflowId });
   expect(create.status, JSON.stringify(create.body)).toBe(201);
   const runId = create.body.runId;
   expect((await pollWaiting(owner, runId)).startsWith('waiting')).toBe(true);
-  const ints = (await owner.get(`/v1/host/openwop-app/runs/${runId}/interrupts`)).body;
+  const ints = (await owner.get(`/host/openwop-app/runs/${bareRunId(runId)}/interrupts`)).body;
   const interruptId = ints.interrupts.find((i: { nodeId: string }) => i.nodeId === 'gate').interruptId;
   return { owner, member, ownerId, memberId, runId, nodeId: 'gate', interruptId };
 }
 
 const vote = (c: Client, runId: string, action: string, extra: Record<string, unknown> = {}) =>
-  c.post(`/v1/runs/${runId}/interrupts/gate`, { resumeValue: { action, ...extra } });
+  c.post(`/runs/${runId}/interrupts/gate`, { resumeValue: { action, ...extra } });
 
 describe('quorum gate — authenticated vote identity + eligibility', () => {
   it('enforces eligibility: an approver NOT in the gate list is forbidden (403)', async () => {
@@ -92,13 +105,13 @@ describe('quorum gate — authenticated vote identity + eligibility', () => {
     // Owner votes accept → pending (1 of 2); the /reviews projection shows progress.
     expect((await vote(owner, runId, 'accept')).status).toBe(200);
     expect((await pollWaiting(owner, runId)).startsWith('waiting')).toBe(true);
-    const review1 = await owner.get(`/v1/host/openwop-app/reviews/interrupt:${interruptId}`);
+    const review1 = await owner.get(`/host/openwop-app/reviews/interrupt:${interruptId}`);
     expect(review1.body.policy).toMatchObject({ requiredApprovals: 2, approvals: 1 });
 
     // Owner votes AGAIN (same reviewer) → durable dedup: still 1 of 2, still waiting.
     await vote(owner, runId, 'accept');
     expect((await pollWaiting(owner, runId)).startsWith('waiting')).toBe(true);
-    const review2 = await owner.get(`/v1/host/openwop-app/reviews/interrupt:${interruptId}`);
+    const review2 = await owner.get(`/host/openwop-app/reviews/interrupt:${interruptId}`);
     expect(review2.body.policy.approvals).toBe(1); // NOT 2 — the repeat vote didn't double-count
 
     // The member (the SECOND distinct eligible approver) votes → quorum met → resolves.
@@ -116,23 +129,50 @@ describe('quorum gate — anon / no-identity callers fail closed (ADR 0070 harde
   it('rejects an anonymous caller on an explicit-approverRefs quorum gate', async () => {
     const { ownerId, memberId, runId } = await suspendQuorumGate((o, m) => [o, m]);
     void ownerId; void memberId;
-    const anon = client(); // never logs in → auto-minted anon session in its OWN fresh tenant
+    const anon = await anonClient(); // never logs in → an anon session in its OWN fresh tenant
     const r = await vote(anon, runId, 'accept', { voter: 'forged-approver' });
     // Fails closed. As of the 2026-07 vuln-scan H1 fix, the node-resume route is
     // tenant-owner-gated (loadOwnedRun): a cross-tenant anon session is rejected at
     // the tenant layer (404 run_not_found, no existence oracle) BEFORE it can reach
     // the quorum-eligibility check — a stronger rejection than the prior 403. The
     // same-tenant quorum-eligibility 403 path is covered by the member tests below.
-    expect(r.status).toBe(404);
+    // ADR 0812 P2b — under major 2 the id is tenant-BOUND, so the refusal lands one
+    // layer earlier still: `identity.md` §5 `403 id_tenant_mismatch`, before any lookup.
+    expect(r.status).toBe(403);
+    expect((r.body as { error?: string }).error).toBe('id_tenant_mismatch');
+  });
+
+  it('ADR 0812 P2b — a foreign run id RE-BOUND to the caller\'s own tenant still meets the tenant gate (H1)', async () => {
+    // Under major 2 the §5 segment check refuses a foreign tenant segment first, which
+    // would leave the tenant gates behind it unexercised. The attack that reaches them
+    // binds the victim's opaque id to the ATTACKER's tenant: that passes the segment
+    // check, so a tenant gate behind it must answer — 404, no existence oracle.
+    // MEASURED: with `loadOwnedRun`'s tenant comparison disabled this still answers 404,
+    // so a second gate also holds. The leg witnesses the refusal, not which gate gives it.
+    const { owner, runId } = await suspendQuorumGate(() => []);
+    // POSITIVE CONTROL: the SAME construction from the owner's own tenant reaches the
+    // run (a vote is not a 404), so the 404 below is the tenant gate — not an id this
+    // test built wrong.
+    const mine = (await owner.get('/host/openwop-app/me/workspaces')).body as { active: string };
+    const ownerBound = projectBoundId(toWireRunId(bareRunId(runId), mine.active));
+    expect((await owner.get(`/runs/${ownerBound}`)).status, 'the construction must resolve for the owner').toBe(200);
+    const anon = await anonClient();
+    const { active } = (await anon.get('/host/openwop-app/me/workspaces')).body as { active: string };
+    const selfBound = projectBoundId(toWireRunId(bareRunId(runId), active));
+    const r = await vote(anon, selfBound, 'accept', { voter: 'a' });
+    expect(r.status, JSON.stringify(r.body)).toBe(404);
+    expect((r.body as { message?: string }).message, 'a route miss would pass this vacuously').not.toBe('No route matches this request.');
   });
 
   it('rejects an anonymous caller on an OPEN (empty-list) quorum gate', async () => {
     // An open gate admits any voter id ON THE CAPABILITY-TOKEN path, but an anon
     // cookie session is not a capability token — it still fails closed (tenant gate, H1).
     const { runId } = await suspendQuorumGate(() => []);
-    const anon = client();
+    const anon = await anonClient();
     const r = await vote(anon, runId, 'accept', { voter: 'a' });
-    expect(r.status).toBe(404);
+    // Major 2: the bound id's tenant is not the anon caller's (`identity.md` §5).
+    expect(r.status).toBe(403);
+    expect((r.body as { error?: string }).error).toBe('id_tenant_mismatch');
   });
 });
 

@@ -61,7 +61,7 @@ function rawGet(path: string): Promise<{ status: number; body: string; headers: 
   });
 }
 
-const cms = (orgId: string, sfx = ''): string => `/v1/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${sfx}`;
+const cms = (orgId: string, sfx = ''): string => `/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${sfx}`;
 
 /** Create a page of the given facets and (optionally) publish it. */
 async function makePage(owner: ReturnType<typeof client>, orgId: string, body: Record<string, unknown>, publish: boolean): Promise<{ pageId: string; slug: string }> {
@@ -75,8 +75,8 @@ async function makePage(owner: ReturnType<typeof client>, orgId: string, body: R
 /** An org seeded with two published posts, one plain published page, one draft post. */
 async function blogOrg(): Promise<{ orgId: string; pageTitle: string }> {
   const owner = client();
-  await owner.post('/v1/host/openwop-app/test/login', { email: `blog-${Date.now()}-${n++}@acme.test` });
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Blog Co' });
+  await owner.post('/host/openwop-app/test/login', { email: `blog-${Date.now()}-${n++}@acme.test` });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Blog Co' });
   const orgId = org.body.orgId as string;
 
   await makePage(owner, orgId, {
@@ -94,7 +94,7 @@ async function blogOrg(): Promise<{ orgId: string; pageTitle: string }> {
   return { orgId, pageTitle };
 }
 
-const blog = (orgId: string, qs = ''): string => `/v1/host/openwop-app/public/${encodeURIComponent(orgId)}/blog${qs}`;
+const blog = (orgId: string, qs = ''): string => `/host/openwop-app/public/${encodeURIComponent(orgId)}/blog${qs}`;
 
 describe('ADR 0391 — public blog list', () => {
   it('returns PUBLISHED POSTS only (excludes a draft post and an ordinary page)', async () => {
@@ -139,8 +139,8 @@ describe('ADR 0391 — public blog list', () => {
 describe('blog projection — readingMinutes + coverImageToken', () => {
   it('reading time is floored at 1 and GROWS with the published body', async () => {
     const owner = client();
-    await owner.post('/v1/host/openwop-app/test/login', { email: `blog-read-${Date.now()}-${n++}@acme.test` });
-    const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'Reading Co' })).body.orgId as string;
+    await owner.post('/host/openwop-app/test/login', { email: `blog-read-${Date.now()}-${n++}@acme.test` });
+    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Reading Co' })).body.orgId as string;
 
     // ~1000 words of prose → ≈4 min at 225 wpm; the short post floors at 1.
     const long = Array.from({ length: 1000 }, (_, i) => `word${i}`).join(' ');
@@ -178,8 +178,8 @@ describe('blog projection — readingMinutes + coverImageToken', () => {
 
   it('a NON-prose field (asset token, url, icon slug) never inflates the estimate', async () => {
     const owner = client();
-    await owner.post('/v1/host/openwop-app/test/login', { email: `blog-nonprose-${Date.now()}-${n++}@acme.test` });
-    const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'Non-prose Co' })).body.orgId as string;
+    await owner.post('/host/openwop-app/test/login', { email: `blog-nonprose-${Date.now()}-${n++}@acme.test` });
+    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Non-prose Co' })).body.orgId as string;
     const noise = Array.from({ length: 1000 }, (_, i) => `tok${i}`).join(' ');
     await makePage(owner, orgId, {
       title: 'Noisy Post', kind: 'post',
@@ -191,14 +191,14 @@ describe('blog projection — readingMinutes + coverImageToken', () => {
 
   it('projects the post’s OG image token as the card cover — and omits it when unset', async () => {
     const owner = client();
-    await owner.post('/v1/host/openwop-app/test/login', { email: `blog-cover-${Date.now()}-${n++}@acme.test` });
-    const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'Cover Co' })).body.orgId as string;
+    await owner.post('/host/openwop-app/test/login', { email: `blog-cover-${Date.now()}-${n++}@acme.test` });
+    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Cover Co' })).body.orgId as string;
     const org = await getOrg(orgId);
     const withCover = await makePage(owner, orgId, { title: 'Has Cover', kind: 'post', sections: [{ type: 'hero', data: { heading: 'Has Cover' } }] }, true);
     await makePage(owner, orgId, { title: 'No Cover', kind: 'post', sections: [{ type: 'hero', data: { heading: 'No Cover' } }] }, true);
 
     const { token: serveToken } = await storeMediaAsset(org!.tenantId, { contentBase64: Buffer.from('png').toString('base64'), contentType: 'image/png' });
-    const put = await owner.put(`/v1/host/openwop-app/publishing/orgs/${encodeURIComponent(orgId)}/pages/${withCover.pageId}/seo`, { ogImageToken: serveToken });
+    const put = await owner.put(`/host/openwop-app/publishing/orgs/${encodeURIComponent(orgId)}/pages/${withCover.pageId}/seo`, { ogImageToken: serveToken });
     expect(put.status, JSON.stringify(put.body)).toBe(200);
 
     const posts = (await client().get(blog(orgId))).body.posts as Array<{ title: string; coverImageToken?: string }>;
@@ -210,7 +210,7 @@ describe('blog projection — readingMinutes + coverImageToken', () => {
 describe('ADR 0391 — blog RSS (author-enriched, post-scoped)', () => {
   it('declares xmlns:dc + emits <dc:creator> and <category>, and excludes non-post pages', async () => {
     const { orgId, pageTitle } = await blogOrg();
-    const res = await rawGet(`/v1/host/openwop-app/public/${encodeURIComponent(orgId)}/blog/feed.xml`);
+    const res = await rawGet(`/host/openwop-app/public/${encodeURIComponent(orgId)}/blog/feed.xml`);
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toContain('rss');
     expect(res.body).toContain('xmlns:dc="http://purl.org/dc/elements/1.1/"');
@@ -225,8 +225,8 @@ describe('ADR 0391 — blog RSS (author-enriched, post-scoped)', () => {
 describe('ADR 0391 (BLOG-2) — editing a published post does NOT re-float it', () => {
   it('blog order + RSS pubDate track the PUBLISH instant, not updatedAt', async () => {
     const owner = client();
-    await owner.post('/v1/host/openwop-app/test/login', { email: `blog-refloat-${Date.now()}-${n++}@acme.test` });
-    const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Refloat Co' });
+    await owner.post('/host/openwop-app/test/login', { email: `blog-refloat-${Date.now()}-${n++}@acme.test` });
+    const org = await owner.post('/host/openwop-app/orgs', { name: 'Refloat Co' });
     const orgId = org.body.orgId as string;
 
     // First is published BEFORE Second → Second sorts newest-first.
@@ -245,7 +245,7 @@ describe('ADR 0391 (BLOG-2) — editing a published post does NOT re-float it', 
     // First did NOT re-float despite a newer updatedAt — publishedAt drives order.
     expect(titles).toEqual(['Second Post', 'First Post']);
 
-    const feed = await rawGet(`/v1/host/openwop-app/public/${encodeURIComponent(orgId)}/blog/feed.xml`);
+    const feed = await rawGet(`/host/openwop-app/public/${encodeURIComponent(orgId)}/blog/feed.xml`);
     expect(feed.body.indexOf('Second Post')).toBeLessThan(feed.body.indexOf('First Post'));
   });
 });
@@ -256,8 +256,8 @@ describe('R2-BLOG-3 — the blog projection honors Accept-Language', () => {
     const loc = getToggleDefault('cms-localization');
     if (loc) await saveConfig({ ...loc, status: 'on' }, 'test');
     const owner = client();
-    await owner.post('/v1/host/openwop-app/test/login', { email: `blog-l10n-${Date.now()}-${n++}@acme.test` });
-    const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'L10n Blog Co' });
+    await owner.post('/host/openwop-app/test/login', { email: `blog-l10n-${Date.now()}-${n++}@acme.test` });
+    const org = await owner.post('/host/openwop-app/orgs', { name: 'L10n Blog Co' });
     const orgId = org.body.orgId as string;
     expect((await owner.put(cms(orgId, '/language-settings'), { supportedLocales: ['pt-BR'] })).status).toBe(200);
     await makePage(owner, orgId, {
@@ -265,7 +265,7 @@ describe('R2-BLOG-3 — the blog projection honors Accept-Language', () => {
       sections: [{ type: 'richText', data: { text: 'The base excerpt' }, localizations: { 'pt-BR': { text: 'O resumo localizado' } } }],
     }, true);
 
-    const url = `${BASE}/v1/host/openwop-app/public/${encodeURIComponent(orgId)}/blog`;
+    const url = `${BASE}/host/openwop-app/public/${encodeURIComponent(orgId)}/blog`;
     const base = await (await fetch(url)).json() as { posts: Array<{ excerpt: string; title: string }> };
     expect(base.posts[0]!.excerpt).toBe('The base excerpt');
 
@@ -279,7 +279,7 @@ describe('R2-BLOG-3 — the blog projection honors Accept-Language', () => {
 
 describe('ADR 0391 — public pricing catalog', () => {
   it('returns the tier catalog with NO Stripe id, and is cacheable', async () => {
-    const res = await rawGet('/v1/host/openwop-app/public/pricing');
+    const res = await rawGet('/host/openwop-app/public/pricing');
     expect(res.status).toBe(200);
     expect(String(res.headers['cache-control'])).toContain('max-age=300');
     expect(res.body.toLowerCase()).not.toContain('stripe');
@@ -293,7 +293,7 @@ describe('ADR 0391 — public pricing catalog', () => {
   it('honors OPENWOP_BILLING_PLAN_DISPLAY (and ignores malformed tier entries)', async () => {
     process.env.OPENWOP_BILLING_PLAN_DISPLAY = JSON.stringify({ pro: { price: '$29', cadence: '/mo', highlighted: true }, team: 'not-an-object' });
     const client_ = client();
-    const r = await client_.get('/v1/host/openwop-app/public/pricing');
+    const r = await client_.get('/host/openwop-app/public/pricing');
     const tiers = r.body.tiers as Array<{ tier: string; display?: { price?: string; highlighted?: boolean } }>;
     const pro = tiers.find((t) => t.tier === 'pro')!;
     expect(pro.display?.price).toBe('$29');
@@ -309,7 +309,7 @@ describe('ADR 0391 — public pricing catalog', () => {
       pro: { price: '$29', cadence: '/mo', priceAnnual: '$290', cadenceAnnual: '/yr', annualNote: 'Two months free on yearly' },
       free: { price: '$0', cadence: '/mo', annualNote: 'x'.repeat(200) }, // over the 80-char bound
     });
-    const r = await client().get('/v1/host/openwop-app/public/pricing');
+    const r = await client().get('/host/openwop-app/public/pricing');
     const tiers = r.body.tiers as Array<{ tier: string; display?: { priceAnnual?: string; cadenceAnnual?: string; annualNote?: string } }>;
     const pro = tiers.find((t) => t.tier === 'pro')!;
     expect(pro.display?.priceAnnual).toBe('$290');
@@ -324,8 +324,8 @@ describe('ADR 0391 — public pricing catalog', () => {
 describe('ADR 0391 — pricing CMS section', () => {
   it('validates the pricing section and renders it via the prerender route', async () => {
     const owner = client();
-    await owner.post('/v1/host/openwop-app/test/login', { email: `price-${Date.now()}-${n++}@acme.test` });
-    const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Pricing Co' });
+    await owner.post('/host/openwop-app/test/login', { email: `price-${Date.now()}-${n++}@acme.test` });
+    const org = await owner.post('/host/openwop-app/orgs', { name: 'Pricing Co' });
     const orgId = org.body.orgId as string;
     const { slug } = await makePage(owner, orgId, {
       title: 'Pricing',
@@ -338,7 +338,7 @@ describe('ADR 0391 — pricing CMS section', () => {
     expect(section.data.tiers).toEqual(['free', 'pro']);
 
     // renders through the ONE server section renderer (semantic stub: heading + CTA)
-    const pre = await rawGet(`/v1/host/openwop-app/public/${encodeURIComponent(orgId)}/prerender/${encodeURIComponent(slug)}`);
+    const pre = await rawGet(`/host/openwop-app/public/${encodeURIComponent(orgId)}/prerender/${encodeURIComponent(slug)}`);
     expect(pre.status).toBe(200);
     expect(pre.body).toContain('<h2 id="plans">Plans</h2>'); // R2-D10 — headings carry stable anchor ids
     expect(pre.body).toContain('<a href="/pricing">Compare</a>');

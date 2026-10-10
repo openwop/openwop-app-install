@@ -14,11 +14,21 @@
  */
 import type { BackendFeature } from '../types.js';
 import { registerConversationToolsRoutes } from './routes.js';
+import { onConversationDeleted } from '../../host/conversationLifecycle.js';
+import { deleteToolApprovalsForConversation, registerConversationToolApprovalsErasure } from './approvalLedger.js';
 
 export const conversationToolsFeature: BackendFeature = {
   id: 'conversation-tools',
   // ADR 0132 Phase 4 — capability-scope + approval routes under the FEATURE
   // namespace (/v1/host/openwop-app/conversation-tools/sessions/:sessionId/*).
-  registerRoutes: (deps) => { registerConversationToolsRoutes(deps); },
+  registerRoutes: (deps) => {
+    registerConversationToolsRoutes(deps);
+    // ADR 0834 D6 — the ledger now holds a held call's arguments: a deleted
+    // conversation's rows go with it, and the approver's id answers a DSAR.
+    onConversationDeleted('conversation-tools', async ({ tenantId, conversationId }) => {
+      await deleteToolApprovalsForConversation(tenantId, conversationId);
+    });
+    registerConversationToolApprovalsErasure();
+  },
   // No toggleDefault → always-on (ADR 0010/0024 graduation; toggle removed, gates open).
 };

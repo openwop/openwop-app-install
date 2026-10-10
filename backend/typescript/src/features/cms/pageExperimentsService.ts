@@ -24,10 +24,11 @@ import { OpenwopError } from '../../types.js';
 import { cleanString } from '../../host/boundedStrings.js';
 import { assignWeightedVariant } from '../../host/variantAssignment.js';
 import { createLogger } from '../../observability/logger.js';
+import { featureAccessRefusal, type LaunchSubject } from '../../host/workflowFeatureGate.js';
 import { listEventsForExperiment } from '../analytics/analyticsService.js';
 import { registerExperimentStampResolver } from '../analytics/experimentStampResolver.js';
 import { isApprovalGateOn, liveEditGateActive, queueContentApproval } from './contentApproval.js';
-import { getPage, getVersion, restoreVersion, transitionPage, type Page } from './cmsService.js';
+import { assertNoPublishBlockers, recordPageUnpublishedByRestore, getPage, getVersion, restoreVersion, transitionPage, type Page } from './cmsService.js';
 
 const log = createLogger('feature.cms.experiments');
 
@@ -161,8 +162,18 @@ async function assertVariantSnapshotReviewed(
   tenantId: string,
   orgId: string,
   variantKey: string,
-  version: { versionId: string; version: number; origin?: 'publish' | 'submit' },
+  version: { versionId: string; version: number; origin?: 'publish' | 'submit' | 'seed' },
 ): Promise<void> {
+  // ADR 0817 — a seed offer was never the page's content, gate or no gate:
+  // a person adopts it with Restore, then publishes the page they reviewed.
+  if (version.origin === 'seed') {
+    throw new OpenwopError(
+      'conflict',
+      `Variant \`${variantKey}\` points at a seeded update the page never adopted. Restore it into the draft and publish first, or point the variant at a published version.`,
+      409,
+      { reason: 'seed_offer', key: variantKey, versionId: version.versionId },
+    );
+  }
   if (version.origin !== 'submit') return; // 'publish' ⇒ reviewed; undefined ⇒ unidentifiable, see above
   // ADR 0593 §C9 (review F3) — `liveEditGateActive`, NOT a fourth hand-written
   // composition of "is the gate in force". This called `isApprovalGateOn`
@@ -363,6 +374,9 @@ export async function startExperiment(tenantId: string, orgId: string, pageId: s
         throw new OpenwopError('conflict', `Variant \`${v.key}\` references a version that no longer exists.`, 409, { key: v.key, versionId: v.versionId });
       }
       await assertVariantSnapshotReviewed(tenantId, orgId, v.key, version);
+      // ADR 0836 D9 — START serves the variant to visitors, so it meets the
+      // publish blockers (a seed offer is a version row too, and may carry one).
+      assertNoPublishBlockers({ pageId, sections: version.snapshot.sections });
     }
     const next: PageExperiment = { ...exp, status: 'running', startedAt: nowIso(), updatedAt: nowIso() };
     delete next.stoppedAt;
@@ -448,24 +462,43 @@ export async function promoteExperiment(
     // DEAD CODE (the row was already resolved, so the CAS refused) and it
     // recorded the restore's generic note as the cause. Deleting it changed
     // nothing observable — which is exactly how its own test was vacuous.
-    page = await restoreVersion(
-      tenantId, orgId, pageId, variant.versionId, actor,
-      `Closed automatically — superseded by promoting experiment winner "${variant.key}".`,
-    );
-    if (!page) return null; // page deleted between read and restore
+    // ADR 0836 D9 — the blockers on the WINNER's content, before anything moves.
+    // Checked after the restore, a `[TODO …]` in the variant took the live page
+    // down to draft and then refused to republish it.
+    const winner = await getVersion(tenantId, orgId, pageId, variant.versionId);
+    if (winner) assertNoPublishBlockers({ pageId, sections: winner.snapshot.sections });
     // ADR 0593 (CMSA-4 / CMSAWF-2) — ONE gate predicate (`isApprovalGateOn`),
     // and the gated arm queues UNCONDITIONALLY. This was the last caller of
     // `queueContentApprovalIfGated`, and it re-read the toggle four lines after
     // reading it here: a flip in that window left the page `in_review` with NO
     // row on the inbox lane. Post-C1 doctrine is that a submit always queues.
-    if (await isApprovalGateOn(tenantId)) {
+    // (ADR 0836 D8 moved the ONE read above the restore: the ungated arm restores
+    // and republishes in one operation, so the restore must not announce an
+    // `unpublished` that would race the `published` into the docs KB.)
+    const gated = await isApprovalGateOn(tenantId);
+    page = await restoreVersion(
+      tenantId, orgId, pageId, variant.versionId, actor,
+      `Closed automatically — superseded by promoting experiment winner "${variant.key}".`,
+      { republishing: !gated },
+    );
+    if (!page) return null; // page deleted between read and restore
+    if (gated) {
       page = await transitionPage(tenantId, orgId, pageId, 'submit', actor);
       if (page) {
-        await queueContentApproval(tenantId, orgId, page, `Publish experiment winner "${variant.key}" of "${exp.name}" (page "${page.title}")`);
+        // ADR 0859 D3/D4 — the promoting admin is the submitter: they cannot approve
+        // their own promotion while another manager can.
+        await queueContentApproval(tenantId, orgId, page, `Publish experiment winner "${variant.key}" of "${exp.name}" (page "${page.title}")`, { submittedBy: actor, notify: true });
       }
       pendingApproval = true;
     } else {
-      page = await transitionPage(tenantId, orgId, pageId, 'publish', actor);
+      try {
+        page = await transitionPage(tenantId, orgId, pageId, 'publish', actor);
+      } catch (err) {
+        // ADR 0836 D8 — the restore above suppressed its `unpublished` because this
+        // publish was meant to follow. It did not: the page IS offline now, so say so.
+        if (page) recordPageUnpublishedByRestore(page);
+        throw err;
+      }
     }
   }
 
@@ -510,12 +543,38 @@ export interface ExperimentResults {
   unattributed: { legacy: number; dropped: number };
 }
 
+/** ADR 0820 §7 / G11 — the feature whose data the results read. */
+export const EXPERIMENT_RESULTS_SOURCE_FEATURE = 'analytics';
+
 /** Per-variant sessions/conversions/rate + significance vs the first variant —
  *  a READ-TIME projection over the stamped analytics events (never a second
  *  event store; the cross-feature read goes through the analytics service). */
-export async function experimentResults(tenantId: string, orgId: string, pageId: string, experimentId: string): Promise<ExperimentResults | null> {
+export async function experimentResults(
+  tenantId: string,
+  orgId: string,
+  pageId: string,
+  experimentId: string,
+  subject: LaunchSubject = {},
+): Promise<ExperimentResults | null> {
   const exp = await getExperiment(tenantId, orgId, pageId, experimentId);
   if (!exp) return null;
+  // ADR 0820 §7 / G11 — the RESULTS are a projection over the analytics event
+  // store (the crm bundle), so reading them needs `analytics` (toggle + plan).
+  // Running the experiment (assignment, stamping) stays core CMS; only the
+  // paid read refuses, typed, after the experiment's existence is settled.
+  const refusal = await featureAccessRefusal(EXPERIMENT_RESULTS_SOURCE_FEATURE, tenantId, subject);
+  if (refusal) {
+    throw new OpenwopError(
+      'forbidden',
+      refusal === 'plan'
+        ? 'Experiment results come from Analytics, which is not included in this workspace\'s plan.'
+        : refusal === 'unresolved'
+          ? 'Experiment results come from Analytics, which could not be checked right now. Try again shortly.'
+          : 'Experiment results come from Analytics, which is not enabled for this workspace.',
+      403,
+      { feature: EXPERIMENT_RESULTS_SOURCE_FEATURE, reason: refusal === 'plan' ? 'not_entitled' : refusal === 'unresolved' ? 'feature_unavailable' : 'feature_disabled' },
+    );
+  }
   const events = await listEventsForExperiment(tenantId, orgId, experimentId);
   const sessionsByVariant = new Map<string, Set<string>>();
   const conversionsByVariant = new Map<string, Set<string>>();

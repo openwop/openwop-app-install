@@ -12,8 +12,15 @@
  *
  * So every case here drives the real `checkMediaBudget` / `recordMediaUsage`
  * against real storage and asserts what a PARTICIPANT would observe.
+ *
+ * Each case gets FRESH storage and a PINNED day (the bucket is keyed by tenant,
+ * subject and UTC date), so the cases are order-independent and cannot straddle
+ * midnight. Breaks if the cap read or the charge stops routing through the
+ * per-subject bucket, `exceeded` stops tracking the cap, a personal tenant gets
+ * a per-subject bucket, the bucket stops being stable per subject, or an
+ * unattributed charge stops landing on the tenant row (probes w5g2-us-*).
  */
-import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import {
   checkMediaBudget, recordMediaUsage, configureMediaBudget, _resetMediaBudgetForTest,
 } from '../src/aiProviders/mediaBudget.js';
@@ -27,13 +34,18 @@ const A = 'user:aaaa1111';
 const B = 'user:bbbb2222';
 const CAP = { ttsChars: 1000, sttBytes: 1000 };  // the override keys, not the resolved ones
 
-beforeAll(async () => {
+const DAY = '2026-06-23';
+
+beforeEach(async () => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date(`${DAY}T12:00:00.000Z`));
   storage = await openStorage('memory://');
   initHostExtPersistence(storage);
-});
-beforeEach(() => {
   _resetMediaBudgetForTest();
   configureMediaBudget({ storage, resolveOverride: async () => CAP });
+});
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 describe('ADR 0693 phase 3 — a shared workspace does not pool TTS/STT', () => {
@@ -64,14 +76,9 @@ describe('ADR 0693 phase 3 — a shared workspace does not pool TTS/STT', () => 
   it('one subject accumulates across calls — the charge is not thrown away', async () => {
     // A bucket that changed per call would satisfy "A and B differ" while
     // metering nothing at all.
-    // A FRESH subject: storage persists across cases in this file and the
-    // bucket is keyed by (tenant, subject, UTC date), so reusing A here would
-    // measure the accumulated spend of every earlier case. Caught by the test
-    // itself reading 2150 instead of 250 — which is the accumulation working.
-    const C = 'user:cccc3333';
-    await recordMediaUsage(WS, 'tts', 100, C);
-    await recordMediaUsage(WS, 'tts', 150, C);
-    expect((await checkMediaBudget(WS, 'tts', 1, C)).used).toBe(250);
+    await recordMediaUsage(WS, 'tts', 100, A);
+    await recordMediaUsage(WS, 'tts', 150, A);
+    expect((await checkMediaBudget(WS, 'tts', 1, A)).used).toBe(250);
   });
 });
 
@@ -91,5 +98,7 @@ describe('ADR 0693 phase 3 — the cases that must NOT change', () => {
     const W2 = 'host-otherprog';
     await recordMediaUsage(W2, 'stt', 400);
     expect((await checkMediaBudget(W2, 'stt', 1)).used).toBe(400);
+    // …and it lands on the TENANT's own row, not some other no-subject bucket.
+    expect((await storage.getMediaUsage(W2, DAY)).sttBytes).toBe(400);
   });
 });

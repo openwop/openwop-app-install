@@ -23,18 +23,20 @@ import { isLinkedSubjectDenied, combinedSubjectLinkingActive } from '../host/aut
 import { evaluateSubjectLinkTrustRoot } from '../host/auth/scimProvisioningService.js';
 import { samlSettings, samlAuthorizeUrl, samlValidate, samlMetadata } from '../host/auth/samlSso.js';
 import type { Storage } from '../storage/storage.js';
+import { safeInAppPathOr } from '../host/safeRedirect.js';
 
 const log = createLogger('routes.authSamlSso');
 
-/** Only same-site relative paths — block open-redirect via RelayState. */
+/** Only same-site relative paths — block open-redirect via RelayState.
+ *  ADR 0833 D5: the shared predicate; this copy accepted `/\evil.com` (S5). */
 function safeReturnTo(v: unknown): string {
-  return typeof v === 'string' && v.startsWith('/') && !v.startsWith('//') ? v : '/';
+  return safeInAppPathOr(v, '/');
 }
 
 export function registerSamlSsoRoutes(app: Express, deps: { storage?: Storage } = {}): void {
   const storage = deps.storage;
   // SP-initiated: bounce the browser to the IdP with a relay-stated AuthnRequest.
-  app.get('/v1/host/openwop-app/auth/saml/sso/login', async (req, res, next) => {
+  app.get('/host/openwop-app/auth/saml/sso/login', async (req, res, next) => {
     try {
       const s = samlSettings();
       if (!s) throw new OpenwopError('not_found', 'SAML SSO is not configured on this host.', 404, {});
@@ -45,7 +47,7 @@ export function registerSamlSsoRoutes(app: Express, deps: { storage?: Storage } 
 
   // Assertion Consumer Service — the IdP's browser-driven form POST lands here.
   app.post(
-    '/v1/host/openwop-app/auth/saml/sso/acs',
+    '/host/openwop-app/auth/saml/sso/acs',
     express.urlencoded({ extended: false, limit: '256kb' }),
     async (req, res, next) => {
       try {
@@ -163,7 +165,7 @@ export function registerSamlSsoRoutes(app: Express, deps: { storage?: Storage } 
         // fail-closed resolution — a stale preference cannot resurrect access
         // that was revoked.
         const samlActive = await resolveActiveWorkspace(user.userId, s.tenantId, isWorkspaceMember);
-        issueUserSession(res, { userId: user.userId, tenantId: samlActive, personalTenant: s.tenantId, mfa: assumeMfa || mfaByContext, epoch: sessionEpochOf(user) });
+        issueUserSession(res, { userId: user.userId, tenantId: samlActive, personalTenant: s.tenantId, mfa: assumeMfa || mfaByContext, epoch: sessionEpochOf(user), freshAuth: true });
         log.info('saml_sso_login', { userId: user.userId, groups: identity.groups.length });
         res.redirect(safeReturnTo(body.RelayState));
       } catch (err) { next(err); }
@@ -171,7 +173,7 @@ export function registerSamlSsoRoutes(app: Express, deps: { storage?: Storage } 
   );
 
   // SP metadata — the company uploads this (or its URL) when creating the IdP app.
-  app.get('/v1/host/openwop-app/auth/saml/sso/metadata', (_req, res, next) => {
+  app.get('/host/openwop-app/auth/saml/sso/metadata', (_req, res, next) => {
     try {
       const s = samlSettings();
       if (!s) throw new OpenwopError('not_found', 'SAML SSO is not configured on this host.', 404, {});

@@ -33,6 +33,7 @@ import {
   listApprovals,
   getAssistantActionProjector,
   type ApprovalStatus,
+  type AssistantActionViewer,
 } from '../host/approvalService.js';
 
 interface Deps {
@@ -65,20 +66,37 @@ function expectedHashOf(req: Request): string | undefined {
   return typeof v === 'string' && v.trim().length > 0 ? v.trim() : undefined;
 }
 
+/** ADR 0862 D1 — the assistant-action card's `contentHash` the approver displayed
+ *  (approve-what-you-see; required for that kind, ignored by every other). */
+function expectedContentHashOf(req: Request): string | undefined {
+  const v = (req.body as { expectedContentHash?: unknown } | undefined)?.expectedContentHash;
+  return typeof v === 'string' && v.trim().length > 0 ? v.trim() : undefined;
+}
+
+/** ADR 0862 — the reader of an assistant-action card (see `AssistantActionViewer`). */
+function viewerOf(req: Request): AssistantActionViewer {
+  const subject = req.userId ?? req.principal?.principalId;
+  return {
+    ...(subject ? { subject } : {}),
+    isOperator: (req.principal?.tenants ?? []).includes('*'), // READ gate; the decide routes' spelling is source-counted by assistant-decide-authority.test.ts
+    isPersonalOwner: isOwnPersonalWorkspace(req),
+  };
+}
+
 export function registerApprovalRoutes(app: Express, deps: Deps): void {
   // ADR 0478 §1 — the approval SLA policy (tenant-level) + the sweep boot
   // (idempotent). The PUT below is ADMIN-gated (host:members:manage or
   // superadmin — the P5 review fold-in: rung 3 is a mass-reject primitive);
   // the GET stays member-readable.
   startApprovalSlaSweep();
-  app.get('/v1/host/openwop-app/approvals/sla-policy', async (req, res, next) => {
+  app.get('/host/openwop-app/approvals/sla-policy', async (req, res, next) => {
     try {
       const p = await getApprovalSlaPolicy(tenantOf(req));
       res.json(p ?? { tenantId: tenantOf(req), enabled: false });
     } catch (err) { next(err); }
   });
   // ADR 0478 §2 — the recipient's email-delivery opt-in (their own pref only).
-  app.get('/v1/host/openwop-app/approvals/email-pref', async (req, res, next) => {
+  app.get('/host/openwop-app/approvals/email-pref', async (req, res, next) => {
     try {
       const userId = req.userId ?? req.principal?.principalId;
       if (!userId) throw new OpenwopError('unauthenticated', 'Sign in to read your email preference.', 401, {});
@@ -86,7 +104,7 @@ export function registerApprovalRoutes(app: Express, deps: Deps): void {
       res.json(p ? { email: p.email, enabled: p.enabled } : { enabled: false });
     } catch (err) { next(err); }
   });
-  app.put('/v1/host/openwop-app/approvals/email-pref', async (req, res, next) => {
+  app.put('/host/openwop-app/approvals/email-pref', async (req, res, next) => {
     try {
       const userId = req.userId ?? req.principal?.principalId;
       if (!userId) throw new OpenwopError('unauthenticated', 'Sign in to change your email preference.', 401, {});
@@ -100,7 +118,7 @@ export function registerApprovalRoutes(app: Express, deps: Deps): void {
     } catch (err) { next(err); }
   });
 
-  app.put('/v1/host/openwop-app/approvals/sla-policy', async (req, res, next) => {
+  app.put('/host/openwop-app/approvals/sla-policy', async (req, res, next) => {
     try {
       const decider = req.userId ?? req.principal?.principalId;
       if (!decider) throw new OpenwopError('unauthenticated', 'Sign in to change the SLA policy.', 401, {});
@@ -149,7 +167,7 @@ export function registerApprovalRoutes(app: Express, deps: Deps): void {
     return rest;
   };
 
-  app.get('/v1/host/openwop-app/approvals', async (req, res, next) => {
+  app.get('/host/openwop-app/approvals', async (req, res, next) => {
     try {
       const raw = String(req.query.status ?? '');
       const status: ApprovalStatus | undefined =
@@ -206,7 +224,7 @@ export function registerApprovalRoutes(app: Express, deps: Deps): void {
       const enriched = projector
         ? await Promise.all(
             bounded.map(async (a) =>
-              a.actionId ? { ...a, action: await projector(tenantOf(req), a.actionId) } : a,
+              a.actionId ? { ...a, action: await projector(tenantOf(req), a.actionId, viewerOf(req)) } : a,
             ),
           )
         : bounded;
@@ -220,11 +238,11 @@ export function registerApprovalRoutes(app: Express, deps: Deps): void {
   // handlers, run-proposal start + kanban, CAS, audit) lives in the shared
   // approvalDecision module so the unified /reviews surface (ADR 0068) drives the
   // SAME path — this route is a thin caller.
-  app.post('/v1/host/openwop-app/approvals/:approvalId/claim', async (req, res, next) => {
+  app.post('/host/openwop-app/approvals/:approvalId/claim', async (req, res, next) => {
     try {
       const result = await claimApproval(
         deps,
-        { tenantId: tenantOf(req), decidedBy: req.userId ?? req.principal?.principalId, ...(noteOf(req) !== undefined ? { note: noteOf(req) } : {}), ...(actedForOf(req) !== undefined ? { actedFor: actedForOf(req) } : {}), ...(expectedHashOf(req) !== undefined ? { expectedDefinitionHash: expectedHashOf(req) } : {}), ...(isSuperadmin(req) ? { decidedBySuperadmin: true } : {}), ...(req.principal?.tenants?.includes('*') ? { decidedByWildcardOperator: true } : {}), ...(isOwnPersonalWorkspace(req) ? { decidedByPersonalOwner: true } : {}) },
+        { tenantId: tenantOf(req), decidedBy: req.userId ?? req.principal?.principalId, ...(noteOf(req) !== undefined ? { note: noteOf(req) } : {}), ...(actedForOf(req) !== undefined ? { actedFor: actedForOf(req) } : {}), ...(expectedHashOf(req) !== undefined ? { expectedDefinitionHash: expectedHashOf(req) } : {}), ...(expectedContentHashOf(req) !== undefined ? { expectedContentHash: expectedContentHashOf(req) } : {}), ...(isSuperadmin(req) ? { decidedBySuperadmin: true } : {}), ...(req.principal?.tenants?.includes('*') ? { decidedByWildcardOperator: true } : {}), ...(isOwnPersonalWorkspace(req) ? { decidedByPersonalOwner: true } : {}) },
         req.params.approvalId,
       );
       res.status(200).json({
@@ -245,11 +263,11 @@ export function registerApprovalRoutes(app: Express, deps: Deps): void {
   });
 
   // Reject — dismiss the proposal (shared decision path; see claim above).
-  app.post('/v1/host/openwop-app/approvals/:approvalId/reject', async (req, res, next) => {
+  app.post('/host/openwop-app/approvals/:approvalId/reject', async (req, res, next) => {
     try {
       const result = await rejectApproval(
         deps,
-        { tenantId: tenantOf(req), decidedBy: req.userId ?? req.principal?.principalId, ...(noteOf(req) !== undefined ? { note: noteOf(req) } : {}), ...(actedForOf(req) !== undefined ? { actedFor: actedForOf(req) } : {}), ...(expectedHashOf(req) !== undefined ? { expectedDefinitionHash: expectedHashOf(req) } : {}), ...(isSuperadmin(req) ? { decidedBySuperadmin: true } : {}), ...(req.principal?.tenants?.includes('*') ? { decidedByWildcardOperator: true } : {}), ...(isOwnPersonalWorkspace(req) ? { decidedByPersonalOwner: true } : {}) },
+        { tenantId: tenantOf(req), decidedBy: req.userId ?? req.principal?.principalId, ...(noteOf(req) !== undefined ? { note: noteOf(req) } : {}), ...(actedForOf(req) !== undefined ? { actedFor: actedForOf(req) } : {}), ...(expectedHashOf(req) !== undefined ? { expectedDefinitionHash: expectedHashOf(req) } : {}), ...(expectedContentHashOf(req) !== undefined ? { expectedContentHash: expectedContentHashOf(req) } : {}), ...(isSuperadmin(req) ? { decidedBySuperadmin: true } : {}), ...(req.principal?.tenants?.includes('*') ? { decidedByWildcardOperator: true } : {}), ...(isOwnPersonalWorkspace(req) ? { decidedByPersonalOwner: true } : {}) },
         req.params.approvalId,
       );
       res.status(200).json({

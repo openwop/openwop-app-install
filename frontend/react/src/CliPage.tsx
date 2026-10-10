@@ -360,7 +360,7 @@ openwop import estate.json --dry-run`}</CommandBlock>
               <Trans t={t} i18nKey="cliCardTriggersBody" components={{ 0: <strong />, 1: <strong /> }} />
             </p>
             <CommandBlock>{`openwop triggers register --source webhook \\
-  --workflow wf_intake --dedup --verification required`}</CommandBlock>
+  --workflow wf.copy.intake.1a2b3c4d --dedup --verification required`}</CommandBlock>
           </div>
           <div className="surface-card u-gap-2">
             <h3><Trans t={t} i18nKey="cliCardA2aTitle" components={{ 0: <Cmd /> }} /></h3>

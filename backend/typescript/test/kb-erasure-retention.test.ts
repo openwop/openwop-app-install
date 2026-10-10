@@ -68,7 +68,7 @@ describe('KB-3 — subject erasure reaches the document AND its derivatives', ()
       title: 'Profile', text: 'Leaver 9001 personal dossier, home reference LMN-3321.',
     }, { documentId: `profile:${SUBJECT}` });
 
-    const ns = collectionNamespace({ collectionId: col.collectionId, orgId: ORG } as never);
+    const ns = collectionNamespace({ collectionId: col.collectionId, orgId: ORG });
     const vector = buildHostSurfaceBundle({ tenantId }).db.vector;
     const seeded = await vector.query({ namespace: ns, vector: new Array(256).fill(0.01), topK: 50 });
     expect((seeded.matches as unknown[]).length, 'non-vacuity: the vectors must exist first').toBeGreaterThan(0);
@@ -113,8 +113,18 @@ describe('KB-3 — subject erasure reaches the document AND its derivatives', ()
   });
 
   it('a falsy tenant or subject is fail-closed (never a wildcard erase)', async () => {
+    // An EMPTY subject would match every row whose attribution is empty — so seed
+    // one, and prove the falsy-subject guard is what keeps it (a tenant with no data
+    // could not tell the guard from its absence).
+    const tenantId = `kberase-falsy-${Date.now()}`;
+    const col = await createCollection(tenantId, ORG, '', { name: 'Unattributed' });
+    const doc = await ingestDocument(tenantId, ORG, '', col.collectionId, { title: 'System note', text: 'Seeded by an unattributed import.' });
+    expect(await eraseSubjectKb(tenantId, '')).toEqual({ documentsDeleted: 0, attributionsAnonymized: 0 });
+    expect((await getDocument(tenantId, ORG, col.collectionId, doc.documentId))!.createdBy).toBe('');
+    // A falsy TENANT is guarded twice (this early return, and `listAllTenantCollections`
+    // re-checking `row.tenantId`), so it is an honest ceiling: no storage state can make
+    // the early return alone observable. Kept as the stated contract.
     expect(await eraseSubjectKb('', SUBJECT)).toEqual({ documentsDeleted: 0, attributionsAnonymized: 0 });
-    expect(await eraseSubjectKb('t', '')).toEqual({ documentsDeleted: 0, attributionsAnonymized: 0 });
   });
 
   it('KB-4 R2: erasure during the MIGRATION WINDOW reaches the pre-org namespace too', async () => {
@@ -224,6 +234,9 @@ describe('KB-3 — the retention purger reclaims DERIVED residue, never live kno
   });
 
   it('a falsy tenant is fail-closed (never a global purge)', async () => {
+    // Honest ceiling (wave-6 /grade-tests): the early return is backed by every scan's
+    // `row.tenantId === tenantId` re-check, and no real row carries an empty tenant, so
+    // removing it alone changes nothing observable. Kept as the stated contract.
     expect(await purgeOrphanKbDerivedRows('', cutoffIso)).toBe(0);
   });
 

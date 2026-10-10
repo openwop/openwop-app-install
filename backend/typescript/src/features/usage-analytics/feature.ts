@@ -14,7 +14,7 @@ export const usageAnalyticsFeature: BackendFeature = {
   toggleDefault: {
     id: 'usage-analytics',
     label: 'Usage analytics',
-    description: 'Admin per-model token-usage rollup (B8) — aggregates recorded provider usage. Read-only. Default OFF, per tenant.',
+    description: 'Admin per-model token-usage rollup (B8) — aggregates recorded provider usage. Read-only. Per tenant.',
     category: 'Platform',
     status: 'off',
     bucketUnit: 'tenant',

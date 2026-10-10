@@ -73,8 +73,8 @@ describe('recorder wiring — the timeline fills and the row closes at STREAM en
   });
 
   it('records events onto the entry and only then stamps finishedAt', async () => {
-    const res = await window.fetch('/v1/runs/r1/events', { headers: { accept: 'text/event-stream' } });
-    const entry = () => rec.listNetworkEntries().find((e) => e.path === '/v1/runs/r1/events')!;
+    const res = await window.fetch('/api/runs/r1/events', { headers: { accept: 'text/event-stream' } });
+    const entry = () => rec.listNetworkEntries().find((e) => e.path === '/api/runs/r1/events')!;
     expect(entry().kind).toBe('sse');
     expect(entry().status).toBe(200);
     expect(entry().finishedAt).toBeUndefined(); // headers arrived; the stream is still open
@@ -88,9 +88,9 @@ describe('recorder wiring — the timeline fills and the row closes at STREAM en
 
   it('at the event cap the row is TRUNCATED but stays open until the stream really ends', async () => {
     s = controllable();
-    const res = await window.fetch('/v1/runs/r2/events');
+    const res = await window.fetch('/api/runs/r2/events');
     const reading = res.text();
-    const entry = () => rec.listNetworkEntries().find((e) => e.path === '/v1/runs/r2/events')!;
+    const entry = () => rec.listNetworkEntries().find((e) => e.path === '/api/runs/r2/events')!;
     for (let i = 0; i < 105; i++) s.push(`data: ${i}\n\n`);
     await vi.waitFor(() => expect(entry().sseEventsTruncated).toBe(true));
     expect(entry().sseEvents).toHaveLength(100);
@@ -103,7 +103,7 @@ describe('recorder wiring — the timeline fills and the row closes at STREAM en
   it('the saved copy keeps the FIRST 20 events and says how many it dropped', async () => {
     await vi.waitFor(() => {
       const saved = JSON.parse(window.sessionStorage.getItem('openwop.networkRecorder.v1') ?? '[]') as Array<{ path: string; sseEvents?: Array<{ data: string }>; sseEventsDropped?: number }>;
-      const row = saved.find((e) => e.path === '/v1/runs/r2/events');
+      const row = saved.find((e) => e.path === '/api/runs/r2/events');
       expect(row?.sseEvents?.map((e) => e.data).slice(0, 2)).toEqual(['0', '1']);
       expect(row?.sseEvents).toHaveLength(20);
       expect(row?.sseEventsDropped).toBe(80);

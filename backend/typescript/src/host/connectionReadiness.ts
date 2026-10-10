@@ -22,7 +22,7 @@
  */
 
 import { getAgentProfile } from './agentProfileService.js';
-import { listConnections, resolveProviderForCapability, type ConnectionStatus } from '../features/connections/connectionsService.js';
+import { actingUserIds, listConnections, resolveProviderForCapability, type ConnectionStatus } from '../features/connections/connectionsService.js';
 
 /** A `requiredConnections` entry may be a concrete provider id OR a capability
  *  token `capability:<category>` (e.g. `capability:hr`) that is satisfied by ANY
@@ -81,7 +81,10 @@ export async function resolveConnectionReadiness(
   const required = profile?.requiredConnections ?? [];
   if (required.length === 0) return READY_EMPTY;
 
-  const connections = await listConnections(tenantId, actingUserId);
+  // ADR 0780 grade-code `CONNCD-5` — every spelling of the acting human, the same
+  // set the broker resolves with; a legacy-keyed row read as "unconfigured" here
+  // while dispatch used it.
+  const connections = await listConnections(tenantId, await actingUserIds(tenantId, actingUserId));
   // Most-ready status wins per provider: an active connection anywhere on the
   // visible axes satisfies the requirement.
   const bestStatusByProvider = new Map<string, ConnectionStatus>();

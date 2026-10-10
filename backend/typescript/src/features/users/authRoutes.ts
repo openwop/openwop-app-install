@@ -2,7 +2,7 @@
  * Auth routes (host-extension, best-effort).
  *
  * Surface under /v1/host/openwop-app/users/auth:
- *   POST /logout      drop the session cookie
+ *   POST /logout      sign this session family out (server-side, ADR 0833 D3)
  *   POST /oidc/bind   bind a Firebase OIDC identity to a durable User (Phase 4a)
  *
  * Email/password is **Firebase Authentication** (ADR 0026) — the host owns NO
@@ -17,7 +17,8 @@ import { autoJoinDefaultWorkspaces } from '../../host/workspaceJoinLedger.js';
 import { isWorkspaceMember } from '../../host/accessControlService.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { issueUserSession, clearSessionCookie } from '../../middleware/auth.js';
-import { upsertFromPrincipal, getUser, sessionEpochOf, bumpSessionEpoch, applyIdpEmail } from './usersService.js';
+import { upsertFromPrincipal, getUser, sessionEpochOf, bumpSessionEpoch, applyIdpEmail, resolveCanonicalUserReadOnly, revokeSessionFamily } from './usersService.js';
+import { COOKIE_TTL_SECONDS, familyOf } from '../../middleware/cookieSession.js';
 import { resolveCallerUser } from './usersGuards.js';
 import { rekeyMemberSubject } from '../../host/accessControlService.js';
 
@@ -31,11 +32,30 @@ export function registerUsersAuthRoutes(deps: RouteDeps): void {
   // caller must always be able to drop their session, and the cookie is the only
   // server-side state for an OIDC-bound session. Firebase OIDC sign-out
   // additionally happens client-side (the SPA calls `auth.signOut()`).
-  app.post('/v1/host/openwop-app/users/auth/logout', (_req, res) => {
-    // ADR 0621 — the ONE cookie-clear (shared with the middleware's per-request
-    // refusal), so the attribute set can never drift from the cookie it drops.
-    clearSessionCookie(res);
-    res.json({ loggedOut: true });
+  app.post('/host/openwop-app/users/auth/logout', async (req, res, next) => {
+    try {
+      // ADR 0833 D3 — end the session FAMILY on the server, not only in this
+      // browser: a copied cookie, or one from before a workspace switch, used to
+      // keep working after "Sign out". The family rides on the durable row the
+      // middleware already reads per request. Sessions with no durable row
+      // (anon, an unbound OIDC session that never bound, break-glass — whose
+      // 10-minute `noRefresh` window is its bound) are cleared only, as before.
+      const session = req.cookieSession;
+      if (session?.tier === 'user') {
+        let userId = session.userId;
+        if (!userId && session.subject && session.personalTenant) {
+          const hit = await resolveCanonicalUserReadOnly(session.personalTenant, session.subject);
+          if (hit && 'user' in hit) userId = hit.user.userId;
+        }
+        if (userId) await revokeSessionFamily(userId, familyOf(session), COOKIE_TTL_SECONDS);
+      }
+      // ADR 0621 — the ONE cookie-clear (shared with the middleware's per-request
+      // refusal), so the attribute set can never drift from the cookie it drops.
+      clearSessionCookie(res);
+      res.json({ loggedOut: true });
+    } catch (err) {
+      next(err);
+    }
   });
 
   // ADR 0003 Phase 4a — OIDC bind. The SPA calls this once after Firebase login
@@ -46,7 +66,7 @@ export function registerUsersAuthRoutes(deps: RouteDeps): void {
   // stable `user:<userId>` principal (the middleware reads it from the cookie — no
   // per-request store touch, ADR 0015 §0). Idempotent; opt-in (unbound OIDC
   // callers keep the backward-compatible `oidc:<sub>` principal).
-  app.post('/v1/host/openwop-app/users/auth/oidc/bind', async (req, res, next) => {
+  app.post('/host/openwop-app/users/auth/oidc/bind', async (req, res, next) => {
     try {
       const personalTenant = req.personalTenant; // `user:<sha256(iss:sub)>`
       if (!personalTenant?.startsWith('user:')) {
@@ -124,6 +144,8 @@ export function registerUsersAuthRoutes(deps: RouteDeps): void {
         mfa: req.mfaVerified,
         // ADR 0621 D2 — a login stamps the row's CURRENT epoch.
         epoch: sessionEpochOf(user),
+        // ADR 0833 D2/D3 — a bind is a fresh IdP authentication: new family, `authAt` = now.
+        freshAuth: true,
       });
       res.json({ user, bound: true, rekeyed });
     } catch (err) {
@@ -137,7 +159,7 @@ export function registerUsersAuthRoutes(deps: RouteDeps): void {
   // Enrollment itself is fully client↔Firebase (TotpMultiFactorGenerator); the
   // host only ever reads the resulting ID-token claim — no factor material,
   // no enrollment state, nothing to store or leak.
-  app.get('/v1/host/openwop-app/users/me/security', async (req, res, next) => {
+  app.get('/host/openwop-app/users/me/security', async (req, res, next) => {
     try {
       const user = await resolveCallerUser(req);
       if (user.status !== 'active') {
@@ -171,7 +193,7 @@ export function registerUsersAuthRoutes(deps: RouteDeps): void {
    * APPROXIMATES the spec's independent-channel requirement without fully
    * satisfying it — recorded as a known limitation in the ADR.
    */
-  app.post('/v1/host/openwop-app/users/me/security/factor-event', async (req, res, next) => {
+  app.post('/host/openwop-app/users/me/security/factor-event', async (req, res, next) => {
     try {
       const user = await resolveCallerUser(req);
       if (user.status !== 'active') {

@@ -29,11 +29,12 @@ import { requireFeatureEnabled, requireString } from '../featureRoute.js';
 import { getProject } from '../projects/projectsService.js';
 import { getList, listRankedIdeas, moveIdeaStatus, resolveIdeaCompletionLane } from '../priority-matrix/priorityMatrixService.js';
 import { assertNotPromoted, markPromoted } from '../priority-matrix/intake.js';
+import { listProjectReadable } from '../priority-matrix/listAccess.js';
 import {
   createStrategy, getStrategy, listStrategies, updateStrategy, archiveStrategy,
-  hardDeleteStrategy, replaceLinks, resolveStrategyContext, resolveStrategyHealth, parseLink,
+  hardDeleteStrategy, replaceLinks, appendStrategyLink, parseObjectivesForCompare, resolveStrategyContext, resolveStrategyHealth, parseLink,
   strategiesLinkingProject, strategiesLinkingPriorityList, strategiesLinkingPriorityIdea,
-  strategiesLinkingBoard, subjectHasOrgScope, subjectHasTenantScope, canSubjectReadStrategy, orgReadPredicate,
+  strategiesLinkingBoard, subjectHasOrgScope, subjectHasTenantScope, canSubjectReadStrategy, canSubjectWriteStrategy, orgReadPredicate,
   type StrategyListFilter,
 } from './strategyService.js';
 import {
@@ -55,7 +56,7 @@ import { resolveOne } from '../../host/featureToggles/service.js';
 import {
   queueStrategyActivationIfGated, strategyGateEnabled, registerStrategyActivationGate,
   PROTECTED_FIELDS, STRATEGY_GATE_TOGGLE_ID,
-  requiresActivationApproval, protectedEditRequiresReapproval,
+  requiresActivationApproval, gateProtectedWrite, protectedValuesDiffer,
 } from './activationApproval.js';
 import { registerToggleDefault } from '../../host/featureToggles/registry.js';
 
@@ -73,12 +74,10 @@ const hasOrgScope = (req: Request, orgId: string, scope: Scope): Promise<boolean
 const canReadStrategy = (req: Request, s: Strategy): Promise<boolean> =>
   canSubjectReadStrategy(tenantOf(req), actingUserOf(req), s);
 
-/** Can the caller WRITE this strategy? (write always in the owning org; user
- *  scope is creator-only.) */
-async function canWriteStrategy(req: Request, s: Strategy): Promise<boolean> {
-  if (s.scope === 'user') return actingUserOf(req) === s.createdBy;
-  return hasOrgScope(req, s.orgId, 'workspace:write');
-}
+/** Can the caller WRITE this strategy? ADR 0845 D1 — the ONE rule, shared with the
+ *  run surface (`strategyService.canSubjectWriteStrategy`). */
+const canWriteStrategy = (req: Request, s: Strategy): Promise<boolean> =>
+  canSubjectWriteStrategy(tenantOf(req), actingUserOf(req), s);
 
 /**
  * Load a strategy + gate. No-existence-leak: a caller who cannot READ it gets a
@@ -150,7 +149,8 @@ async function requireLinkTargetScope(req: Request, link: StrategyLink, scope: S
     }
   } else if (link.kind === 'priority-list' || link.kind === 'priority-idea') {
     const list = await getList(tenantOf(req), link.listId);
-    if (!list || !(await hasOrgScope(req, list.orgId, scope))) {
+    // ADR 0842 D10 — and the list's project, for a project-bound list (PM's own rule).
+    if (!list || !(await hasOrgScope(req, list.orgId, scope)) || !(await listProjectReadable(tenantOf(req), list, actingUserOf(req)))) {
       throw new OpenwopError('forbidden_scope', `Cannot use a priority list you cannot ${verb}.`, 403, { listId: link.listId, requiredScope: scope });
     }
   }
@@ -174,6 +174,40 @@ const requireLinkTargetReadable = (req: Request, link: StrategyLink): Promise<vo
  * The org must also EXIST IN THIS TENANT: `updateStrategy` accepted any string
  * as an `orgId`, which would mint a KB collection under a fabricated org id.
  */
+/**
+ * ADR 0845 D8 / STR3CD-6 — a KR's `measure.source.orgId` names the org whose CRM /
+ * commerce / analytics data FEEDS the KR, and the standing source is what lets the
+ * sync write CONFIRMED values. It was shape-checked only, so a writer in org A could
+ * point a KR at org B's data and the next sync copied B's totals into A's check-ins —
+ * a read of B the writer was never granted. Whoever introduces or CHANGES a source
+ * must be able to read the org it reads. Sources already on the same KR are not
+ * re-checked, so editing a KR someone else configured does not lock the editor out.
+ */
+async function requireMetricSourcesReadable(req: Request, base: Strategy | null, rawObjectives: unknown): Promise<void> {
+  if (!Array.isArray(rawObjectives)) return;
+  const existing = new Map<string, string>();
+  for (const o of base?.objectives ?? []) for (const k of o.keyResults) {
+    if (k.measure?.source) existing.set(k.id, `${k.measure.source.kind}::${k.measure.source.orgId}`);
+  }
+  const orgs = new Set<string>();
+  for (const o of rawObjectives) {
+    const krs = o && typeof o === 'object' ? (o as { keyResults?: unknown }).keyResults : undefined;
+    if (!Array.isArray(krs)) continue;
+    for (const k of krs) {
+      const kr = (k && typeof k === 'object' ? k : {}) as { id?: unknown; measure?: { source?: { kind?: unknown; orgId?: unknown } } };
+      const src = kr.measure?.source;
+      if (!src || typeof src.orgId !== 'string') continue;
+      if (typeof kr.id === 'string' && existing.get(kr.id) === `${String(src.kind)}::${src.orgId}`) continue;
+      orgs.add(src.orgId);
+    }
+  }
+  for (const orgId of orgs) {
+    if (!(await hasOrgScope(req, orgId, 'workspace:read'))) {
+      throw new OpenwopError('forbidden_scope', "A key result's metric source must be an organization you can read.", 403, { requiredScope: 'workspace:read', orgId });
+    }
+  }
+}
+
 async function requireOrgRelocationTarget(req: Request, targetOrgId: string): Promise<void> {
   const org = await getOrg(targetOrgId);
   if (!org || org.tenantId !== tenantOf(req) || !(await hasOrgScope(req, targetOrgId, 'workspace:write'))) {
@@ -241,7 +275,7 @@ async function withdrawActivationReview(
 
 export function registerStrategyRoutes(deps: RouteDeps): void {
   const { app } = deps;
-  const BASE = '/v1/host/openwop-app/strategy';
+  const BASE = '/host/openwop-app/strategy';
   registerShareableKb(strategyShareableKbProvider); // ADR 0100 D2 — board can share the Strategy KB
   // ADR 0230 §B3 — register the strategy-activation decision handler on the
   // core approvals hook (the inbox claim/reject path dispatches here for
@@ -259,7 +293,7 @@ export function registerStrategyRoutes(deps: RouteDeps): void {
   registerToggleDefault({
     id: STRATEGY_GATE_TOGGLE_ID,
     label: 'Strategy activation approval gate',
-    description: 'Gate strategy activation (draft → active) on a human approval surfaced in the Approvals inbox, with protected-field re-approval on active strategies (ADR 0230). OFF ⇒ status-only workflow.',
+    description: 'Gate strategy activation (draft → active) on a human approval surfaced in the Approvals inbox, with protected-field re-approval on active strategies. OFF ⇒ status-only workflow.',
     category: 'Leadership',
     status: 'off',
     bucketUnit: 'tenant',
@@ -325,10 +359,18 @@ export function registerStrategyRoutes(deps: RouteDeps): void {
       if (!(await hasOrgScope(req, orgId, 'workspace:write'))) {
         throw new OpenwopError('forbidden_scope', 'Missing required scope: workspace:write', 403, { requiredScope: 'workspace:write', orgId });
       }
+      await requireMetricSourcesReadable(req, null, body.objectives);
       const actor = actingUserOf(req) ?? 'unknown';
-      const created = await createStrategy(tenantOf(req), orgId, actor, body);
+      // ADR 0845 D3 / STR3WF-8 — creating a strategy straight into `active` is an
+      // activation, and with the gate ON it is gated like PATCH's mixed patch: the
+      // strategy is created as draft and the activation is submitted for approval.
+      // Before this, `POST {status:'active'}` produced a live strategy with no review.
+      const gateOn = await strategyGateEnabled(tenantOf(req));
+      const queueActivation = gateOn && body.status === 'active';
+      const created = await createStrategy(tenantOf(req), orgId, actor, queueActivation ? { ...body, status: 'draft' } : body);
       strategyMutated({ entity: 'strategy', verb: 'created', tenantId: tenantOf(req), actor, strategyId: created.id, orgId: created.orgId });
-      res.status(201).json(created);
+      const activationQueued = queueActivation && await queueStrategyActivationIfGated(tenantOf(req), created, actor);
+      res.status(201).json({ ...created, ...(activationQueued ? { activationPending: true } : {}) });
     } catch (err) { next(err); }
   });
 
@@ -461,7 +503,13 @@ export function registerStrategyRoutes(deps: RouteDeps): void {
       let queueActivation = false;
       let autoReverted = false;
       const gateOn = await strategyGateEnabled(tenantId);
-      const touchesProtected = PROTECTED_FIELDS.some((f) => body[f] !== undefined);
+      await requireMetricSourcesReadable(req, s, body.objectives);
+      // ADR 0845 D3 / STR3CD-3 — RELOCATING an approved strategy is a protected change:
+      // its approval came from the OLD org's approvers, so moving a live strategy into
+      // another org (where only `workspace:write` was asked) kept it live with no
+      // approval from anyone who governs the destination.
+      const relocates = typeof body.orgId === 'string' && body.orgId !== s.orgId;
+      const touchesProtected = PROTECTED_FIELDS.some((f) => body[f] !== undefined) || relocates;
       if (gateOn) {
         // ADR 0597 §3 — the gate is expressed over the STATE SET, in
         // `activationApproval.STATUS_GATE_POSTURE`, not over the transitions
@@ -482,15 +530,20 @@ export function registerStrategyRoutes(deps: RouteDeps): void {
           patch = { ...body };
           delete patch.status;
           queueActivation = true;
-        } else if (touchesProtected && protectedEditRequiresReapproval(s.status)) {
+        } else {
           // Protected-field re-approval (architect Q4) — visible auto-revert:
           // the response returns status:'draft'; audit + event carry the marker.
-          patch = { ...body, status: 'draft' };
-          autoReverted = true;
+          // ADR 0845 D3 — the ONE rule every writer asks (PATCH keeps PRESENCE
+          // semantics: a protected key in the body is the trigger).
+          const gate = gateProtectedWrite({ gateOn, base: s, protectedChanged: touchesProtected });
+          if (gate.status) { patch = { ...body, status: gate.status }; autoReverted = true; }
         }
       }
 
-      const updated = await updateStrategy(tenantId, s.id, patch, actor);
+      // ADR 0845 D4 — compare-and-swap against `s`, the row every decision above was
+      // made against. A write that landed in between makes this one 409 rather than
+      // landing on a row the gate never looked at.
+      const updated = await updateStrategy(tenantId, s.id, patch, actor, { base: s });
       // ADR 0597 §Correction 3 — the write the caller asked for is now VALID and
       // applied; only now is it honest to queue a review of it. `updated` rather
       // than `s`: the same PATCH may have changed the title (and, with a
@@ -517,8 +570,15 @@ export function registerStrategyRoutes(deps: RouteDeps): void {
       // approve. One rule for every origin, and it runs BEFORE the queue below
       // so `PATCH {status:'active', objectives:<swapped>}` against an already
       // pending review replaces that review rather than inheriting it.
-      const activationReviewClosed = touchesProtected
-        && await withdrawActivationReview(gateOn, tenantId, updated, actor, PROTECTED_FIELDS.filter((f) => body[f] !== undefined));
+      // ADR 0845 D2 — the binding also covers where the strategy lives, so a
+      // relocation or re-scope withdraws the review too (the decide exit refuses it
+      // regardless; this is what TELLS the owner now).
+      const bindingTouched = [
+        ...PROTECTED_FIELDS.filter((f) => body[f] !== undefined),
+        ...(['orgId', 'scope'] as const).filter((f) => body[f] !== undefined && body[f] !== s[f]),
+      ];
+      const activationReviewClosed = bindingTouched.length > 0
+        && await withdrawActivationReview(gateOn, tenantId, updated, actor, bindingTouched);
       const activationQueued = queueActivation
         ? await queueStrategyActivationIfGated(tenantId, updated, actor)
         : false;
@@ -541,7 +601,7 @@ export function registerStrategyRoutes(deps: RouteDeps): void {
       res.json({
         ...updated,
         ...(pending ? { activationPending: true } : {}),
-        ...(autoReverted ? { autoRevertedToDraft: true, autoRevertedFields: PROTECTED_FIELDS.filter((f) => body[f] !== undefined) } : {}),
+        ...(autoReverted ? { autoRevertedToDraft: true, autoRevertedFields: [...PROTECTED_FIELDS.filter((f) => body[f] !== undefined), ...(relocates ? ['orgId'] : [])] } : {}),
         // ADR 0597 §Correction 4 — never silent: the owner's submission was
         // withdrawn by their own edit, and the screen has to be able to say so.
         ...(activationReviewClosed ? { activationReviewClosed: true } : {}),
@@ -650,7 +710,8 @@ export function registerStrategyRoutes(deps: RouteDeps): void {
       const rev = Number.isFinite(n) ? await getStrategyRevision(tenantId, s.id, n) : null;
       if (!rev) throw new OpenwopError('not_found', 'Revision not found.', 404, { id: s.id, n: req.params.n });
       const snap = rev.snapshot;
-      const restored = await updateStrategy(tenantId, s.id, {
+      await requireMetricSourcesReadable(req, s, snap.objectives);
+      const restorePatch = {
         title: snap.title,
         summary: snap.summary ?? null,
         rationale: snap.rationale ?? null,
@@ -661,16 +722,30 @@ export function registerStrategyRoutes(deps: RouteDeps): void {
         confidence: snap.confidence ?? null,
         risk: snap.risk ?? null,
         accountableExecutive: snap.accountableExecutive ?? null,
-      }, actor);
+      };
+      // ADR 0845 D3 / STR3WF-3 — a restore is a protected write. It used to withdraw a
+      // pending review but never ask the auto-revert, so a draft-era revision restored
+      // onto an ACTIVE strategy went live unreviewed. VALUE semantics (a newly gated
+      // site): restoring a revision whose protected fields equal today's reverts nothing.
+      const gateOn = await strategyGateEnabled(tenantId);
+      const protectedChanged = protectedValuesDiffer(s, { ...s, ...snap, accountableExecutive: snap.accountableExecutive });
+      const gate = gateProtectedWrite({ gateOn, base: s, protectedChanged });
+      const restored = await updateStrategy(tenantId, s.id, gate.status ? { ...restorePatch, status: gate.status } : restorePatch, actor, { base: s });
       strategyMutated({ entity: 'revision', verb: 'restored', tenantId, actor, strategyId: s.id, orgId: restored.orgId, changed: [`revision:${n}`] });
       // ADR 0597 §Correction 4 — a restore rewrites EVERY protected field, so it
       // swaps the content under a pending review exactly as a PATCH does. Same
       // rule, same helper; found by walking `updateStrategy`'s callers rather
       // than the finding's one example.
-      const activationReviewClosed = await withdrawActivationReview(
-        await strategyGateEnabled(tenantId), tenantId, restored, actor, [...PROTECTED_FIELDS],
-      );
-      res.json({ ...restored, ...(activationReviewClosed ? { activationReviewClosed: true } : {}) });
+      const activationReviewClosed = protectedChanged
+        && await withdrawActivationReview(gateOn, tenantId, restored, actor, [...PROTECTED_FIELDS]);
+      if (gate.autoReverted) {
+        strategyMutated({ entity: 'strategy', verb: 'updated', tenantId, actor, strategyId: s.id, orgId: restored.orgId, changed: [`revision:${n}`], autoRevertedToDraft: true });
+      }
+      res.json({
+        ...restored,
+        ...(activationReviewClosed ? { activationReviewClosed: true } : {}),
+        ...(gate.autoReverted ? { autoRevertedToDraft: true, autoRevertedFields: [...PROTECTED_FIELDS] } : {}),
+      });
     } catch (err) { next(err); }
   });
 
@@ -752,11 +827,12 @@ export function registerStrategyRoutes(deps: RouteDeps): void {
         throw new OpenwopError('conflict', `This strategy already has the maximum ${STRATEGY_LIMITS.maxInitiatives} initiatives, so this idea cannot be promoted into it.`, 409, { max: STRATEGY_LIMITS.maxInitiatives });
       }
       const before = new Set(s.initiatives.map((i) => i.id));
+      // ADR 0845 D4 — both writes build from `s`, so both CAS against what they built from.
       const updated = await updateStrategy(tenantId, s.id, {
         initiatives: [...s.initiatives, { title: idea.card.title }],
-      }, actor);
+      }, actor, { base: s });
       const hasLink = s.links.some((l) => l.kind === 'priority-idea' && l.listId === listId && l.cardId === cardId);
-      const withLinks = hasLink ? updated : await replaceLinks(tenantId, s.id, [...s.links, link], actor);
+      const withLinks = hasLink ? updated : await replaceLinks(tenantId, s.id, [...s.links, link], actor, { base: updated });
       // …and resolve the initiative by the id that was actually MINTED, never by array
       // position — position is what made a sliced append point at someone else's row.
       const initiative = withLinks.initiatives.find((i) => !before.has(i.id));
@@ -773,10 +849,10 @@ export function registerStrategyRoutes(deps: RouteDeps): void {
         // consumed), the link, or the "promoted" claim: compensate both writes
         // (best-effort, the PM route's deleteProject shape), then rethrow.
         try {
-          await updateStrategy(tenantId, s.id, {
+          const compensated = await updateStrategy(tenantId, s.id, {
             initiatives: withLinks.initiatives.filter((i) => i.id !== initiative.id),
-          }, actor);
-          if (!hasLink) await replaceLinks(tenantId, s.id, s.links, actor);
+          }, actor, { base: withLinks });
+          if (!hasLink) await replaceLinks(tenantId, s.id, s.links, actor, { base: compensated });
         } catch { /* best-effort compensation */ }
         throw err;
       }
@@ -860,9 +936,29 @@ export function registerStrategyRoutes(deps: RouteDeps): void {
         }
       }
       if (imported < 0) imported = 0;
-      const updated = await updateStrategy(tenantOf(req), s.id, { objectives }, actingUserOf(req) ?? 'unknown');
-      strategyMutated({ entity: 'strategy', verb: 'objectives-imported', tenantId: tenantOf(req), actor: actingUserOf(req) ?? 'unknown', strategyId: s.id, orgId: s.orgId, changed: [`rows:${imported}`] });
-      res.json({ imported, skipped, strategy: updated });
+      // ADR 0845 D3 / STR3WF-2 — `objectives` is a PROTECTED field, and this route
+      // wrote it through neither half of the gate: a pending review stayed pending (the
+      // approver activated objectives nobody showed them) and an active strategy stayed
+      // active. VALUE semantics: an import that changed nothing (every row skipped)
+      // reverts and withdraws nothing. Compared AFTER the write's parse, which slices
+      // at the caps, so "changed" means changed as stored.
+      const tenantId = tenantOf(req);
+      const actor = actingUserOf(req) ?? 'unknown';
+      const gateOn = await strategyGateEnabled(tenantId);
+      const protectedChanged = protectedValuesDiffer(s, { ...s, objectives: parseObjectivesForCompare(objectives) });
+      const gate = gateProtectedWrite({ gateOn, base: s, protectedChanged });
+      const updated = await updateStrategy(tenantId, s.id, gate.status ? { objectives, status: gate.status } : { objectives }, actor, { base: s });
+      strategyMutated({
+        entity: 'strategy', verb: 'objectives-imported', tenantId, actor, strategyId: s.id, orgId: s.orgId, changed: [`rows:${imported}`],
+        ...(gate.autoReverted ? { autoRevertedToDraft: true } : {}),
+      });
+      const activationReviewClosed = protectedChanged
+        && await withdrawActivationReview(gateOn, tenantId, updated, actor, ['objectives']);
+      res.json({
+        imported, skipped, strategy: updated,
+        ...(gate.autoReverted ? { autoRevertedToDraft: true, autoRevertedFields: ['objectives'] } : {}),
+        ...(activationReviewClosed ? { activationReviewClosed: true } : {}),
+      });
     } catch (err) { next(err); }
   });
 
@@ -913,7 +1009,9 @@ export function registerStrategyRoutes(deps: RouteDeps): void {
         provenance: { producedBy: { kind: 'user', id: actor } }, createdBy: actor,
       });
       await addVersion(tenantId, s.orgId, doc.documentId, { content: markdown, producedBy: { kind: 'user', id: actor } });
-      const updated = await replaceLinks(tenantId, s.id, [...s.links, { kind: 'document', documentId: doc.documentId }], actor);
+      // ADR 0845 D4 — an APPEND computed from the current row, so it is safe to retry
+      // on a lost race (unlike a patch computed from `s`); the document already exists.
+      const updated = await appendStrategyLink(tenantId, s.id, { kind: 'document', documentId: doc.documentId }, actor);
       strategyMutated({ entity: 'strategy', verb: 'decision-recorded', tenantId, actor, strategyId: s.id, orgId: s.orgId, changed: [doc.documentId] });
       res.status(201).json({ documentId: doc.documentId, strategy: updated });
     } catch (err) { next(err); }
@@ -929,7 +1027,7 @@ export function registerStrategyRoutes(deps: RouteDeps): void {
       const links: StrategyLink[] = linksRaw.map(parseLink);
       for (const l of links) await requireLinkTargetReadable(req, l);
       const actor = actingUserOf(req) ?? 'unknown';
-      const updated = await replaceLinks(tenantOf(req), s.id, links, actor);
+      const updated = await replaceLinks(tenantOf(req), s.id, links, actor, { base: s });
       strategyMutated({ entity: 'links', verb: 'updated', tenantId: tenantOf(req), actor, strategyId: s.id, orgId: s.orgId });
       res.json(updated);
     } catch (err) { next(err); }

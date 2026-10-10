@@ -3,7 +3,8 @@ import { useId, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { resolveByRun } from '../client/interruptsClient.js';
 import { TextareaField } from '../ui/Field.js';
-import { useFocusTrap } from '../ui/useFocusTrap.js';
+import { decideErrorMessage } from './decideErrorMessage.js';
+import { Notice } from '../ui/index.js';
 
 interface Props {
   runId: string;
@@ -18,16 +19,19 @@ export function RefinementForm({ runId, nodeId, data, onResolved }: Props) {
   const seed = ((data as { current?: unknown })?.current) ?? '';
   const [draft, setDraft] = useState(typeof seed === 'string' ? seed : JSON.stringify(seed, null, 2));
   const [submitting, setSubmitting] = useState(false);
-  // HITL a11y (GAP-ANALYSIS E6, DESIGN §11): trap focus into the response form
-  // on render (the hook focuses the first focusable — the draft field — and
-  // cycles within the card), releasing only on submit / dismiss. The draft
-  // field stays label-associated.
+  // ADR 0778 (`APUX-6`, WCAG 2.1.2) — NO focus trap. This card renders INLINE
+  // (the run page, `/inbox`, one per action-needed row), not as a modal: a
+  // trap here held Tab inside whichever card mounted last, so a keyboard user
+  // could not reach the rest of the page. DESIGN.md §11 is corrected to trap
+  // only modal presentations.
   const headingId = useId();
   const draftRef = useRef<HTMLTextAreaElement>(null);
-  const trapRef = useFocusTrap<HTMLDivElement>(true);
+  const inFlight = useRef(false); // `APUX-10` — a same-tick double submit
   const [error, setError] = useState<string | null>(null);
 
   async function submit() {
+    if (inFlight.current) return;
+    inFlight.current = true;
     setSubmitting(true);
     setError(null);
     try {
@@ -40,18 +44,19 @@ export function RefinementForm({ runId, nodeId, data, onResolved }: Props) {
       await resolveByRun(runId, nodeId, { refinement: parsed });
       onResolved();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(decideErrorMessage(t, err)); // ADR 0778 (`APUX-5`)
+      inFlight.current = false;
     } finally {
       setSubmitting(false);
     }
   }
 
   return (
-    <div className="card" role="group" aria-labelledby={headingId} ref={trapRef}>
+    <div className="card" role="group" aria-labelledby={headingId}>
       <h2 id={headingId}>{t('refinementRequested')}</h2>
       <p className="muted">{t('refinementHelp')}</p>
       <TextareaField label={t('draftLabel')} ref={draftRef} rows={8} value={draft} onChange={(e) => setDraft(e.target.value)} spellCheck={false} />
-      {error && <div role="alert" className="alert error">{error}</div>}
+      {error && <Notice variant="error" announce={error}>{error}</Notice>}
       <div className="button-row">
         <Button variant="primary" onClick={submit} disabled={submitting}>
           {submitting ? t('submitting') : t('submitRefinement')}

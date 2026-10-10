@@ -6,9 +6,9 @@
  * + deterministic — same inputs → same outputs — so a run that uses them
  * replays identically.
  *
- * Nine role:"action" READ nodes expose the `ctx.features.crm` surface
- * (companies / deals / tasks / segments / bookings / sign status). Thirteen
- * role:"side-effect" WRITE nodes (ADR 0208 §2; classified ADR 0627 D1) expose
+ * Ten role:"action" READ nodes expose the `ctx.features.crm` surface
+ * (companies / deals / tasks / segments / bookings / sign status / one contact).
+ * Fifteen role:"side-effect" WRITE nodes (incl. ADR 0837's `record-triage`) (ADR 0208 §2; classified ADR 0627 D1) expose
  * the surface's governed mutation verbs (create/update/convert/move/complete/
  * log/persist/book/sign). Every surface-backed node reads the SAME merged args shape —
  * `{ ...ctx.config, ...ctx.inputs }` (the `core.openwop.ai`/`core.openwop.agents`
@@ -81,9 +81,14 @@ function score(contact, { enriched }) {
   return { score: total, priority };
 }
 
+/** v1.1.0 (ADR 0837 D7) — the variant arrives with the RUN (`crm-ops.triage`
+ *  declares `variant` as a deferred input, read from the run's inputs on replay
+ *  and `:fork`, never recomputed). Absent ⇒ `basic`, the 1.0.0 behaviour. Still
+ *  pure: same contact + same variant → same score. */
 export async function triage(ctx) {
   const contact = ctx.inputs?.contact ?? ctx.inputs ?? {};
-  return { status: 'success', outputs: { triage: { variant: 'basic', ...score(contact, { enriched: false }) } } };
+  const enriched = (ctx.inputs?.variant ?? ctx.config?.variant) === 'enriched';
+  return { status: 'success', outputs: { triage: { variant: enriched ? 'enriched' : 'basic', ...score(contact, { enriched }) } } };
 }
 
 export async function triageEnriched(ctx) {
@@ -177,6 +182,33 @@ export async function updateContactStage(ctx) {
   const crm = ensureCrm(ctx);
   const i = args(ctx);
   const out = await crm.updateContactStage({ contactId: str(i.contactId) || str(i.entityId), stage: str(i.stage) });
+  return { status: 'success', outputs: out };
+}
+
+/** ADR 0837 D7 — read one contact (tenant-guarded, a merged-away contact is
+ *  refused) so `crm-ops.triage` scores the contact as it is NOW. */
+export async function getContact(ctx) {
+  const crm = ensureCrm(ctx);
+  const i = args(ctx);
+  const out = await crm.getContact({ contactId: str(i.contactId) || str(i.entityId) });
+  return { status: 'success', outputs: { contact: out.contact ?? null } };
+}
+
+/** ADR 0837 D7 — record a triage result on the contact. Writes ONLY when the
+ *  contact's last-triage stamp names THIS run (the route stamps it at dispatch):
+ *  a newer click, or a `:fork` (a run id the route never stamped), is reported
+ *  `superseded` and changes nothing. role:"side-effect" — a replay fork serves
+ *  the recorded outcome. */
+export async function recordTriage(ctx) {
+  const crm = ensureCrm(ctx);
+  const i = args(ctx);
+  const t = i.triage && typeof i.triage === 'object' ? i.triage : i;
+  const out = await crm.recordContactTriage({
+    contactId: str(i.contactId) || str(i.entityId),
+    variant: str(t.variant),
+    score: typeof t.score === 'number' ? t.score : undefined,
+    priority: str(t.priority),
+  });
   return { status: 'success', outputs: out };
 }
 
@@ -656,6 +688,8 @@ export const nodes = {
   'feature.crm.nodes.persist-segment': persistSegment,
   'feature.crm.nodes.triage': triage,
   'feature.crm.nodes.triage-enriched': triageEnriched,
+  'feature.crm.nodes.get-contact': getContact,
+  'feature.crm.nodes.record-triage': recordTriage,
   'feature.crm.nodes.list-companies': listCompanies,
   'feature.crm.nodes.get-company': getCompany,
   'feature.crm.nodes.suppression-summary': suppressionSummary,

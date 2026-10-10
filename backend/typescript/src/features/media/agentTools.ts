@@ -23,6 +23,7 @@ function toolError(error: string, message: string): { content: string; isError: 
 export function registerMediaAgentTools(): void {
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: MEDIA_LIST_TOOL_ID,
       description:

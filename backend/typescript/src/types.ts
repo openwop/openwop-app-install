@@ -416,6 +416,8 @@ export type NotificationType =
   // ADR 0049 — a kanban card was assigned to a person (addressed notification,
   // delivered via the ADR 0050 `recipientUserId` channel).
   | 'task.assigned'
+  // ADR 0855 D2 — a drift finding sent back to the person who started the run.
+  | 'team-ledger.drift-sent-back'
   // ADR 0074 — a review (interrupt/approval) changed state. NOT an inbox
   // notification: emitted via the emitter's non-persisted `signal()` path as a
   // tenant-broadcast cache hint for the live review-status store. Never
@@ -673,6 +675,9 @@ export type OpenwopErrorCode =
   | 'forbidden_scope'
   | 'not_found'
   | 'workflow_not_found'
+  // ADR 0793 / RFC 0230 — the signed inbound-webhook ingest (host-extension route).
+  | 'signature_invalid'
+  | 'subscription_not_active'
   | 'run_not_found'
   | 'interrupt_not_found'
   | 'interrupt_already_resolved'
@@ -748,6 +753,10 @@ export type OpenwopErrorCode =
   // schema names this code explicitly; it is the general code, not a
   // compensation one.
   | 'capability_required'
+  // RFC 0239 §D — the two council-roster refusals (registered in the v2 error
+  // registry, so they pass `v2ErrorCode` unprefixed). See host/exchange/councilTurn.ts.
+  | 'conversation_speaker_not_participant'
+  | 'conversation_roster_exceeded'
   | 'credential_required'
   | 'credential_forbidden'
   // RFC 0121 §B.8 — a subscription-mode credential MUST bind at `user` scope;
@@ -850,6 +859,9 @@ export type OpenwopErrorCode =
   // ONE bounded error-fed repair (502): a typed failure, never success-with-
   // empty (the authoring-path invariant).
   | 'translation_invalid'
+  // ADR 0828 phase 3 — CMS AI section rewrite produced unusable model output
+  // after its one bounded repair (502), the translate rule applied to rewrite.
+  | 'rewrite_invalid'
   | 'unpublish_window_expired'
   // Webhook codes per spec/v1/webhooks.md
   | 'webhook_url_rejected'

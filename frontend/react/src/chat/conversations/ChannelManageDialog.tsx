@@ -19,13 +19,14 @@ import { useTranslation } from 'react-i18next';
 import { Modal } from '../../ui/Modal.js';
 import {
   getChannel, renameChannel, archiveChannel, addChannelMember, addChannelAgent, removeChannelMember, removeChannelAgent,
-  updateChannelDescription, leaveChannel, setChannelAgentPolicy,
+  updateChannelDescription, leaveChannel, setChannelAgentPolicy, setChannelProject,
   type ChannelDetail,
 } from '../../client/channelsClient.js';
 import { Avatar } from '../../ui/Avatar.js';
 import { MemberPicker, AgentPicker } from './MemberPickers.js';
 import { ChannelSchedulePanel } from './ChannelSchedulePanel.js';
 import { normalizeChannelName } from './channelName.js';
+import { listProjects, type Project } from '../../features/projects/projectsClient.js';
 
 interface Props {
   channelId: string;
@@ -51,6 +52,10 @@ export function ChannelManageDialog({ channelId, onClose, onChanged, onArchived,
   const [error, setError] = useState<string | null>(null);
   const [confirmingArchive, setConfirmingArchive] = useState(false);
   const [confirmingLeave, setConfirmingLeave] = useState(false);
+  // ADR 0852 D5 — the project this channel works on (owner picks from the
+  // org-visible projects they can edit; the server is authoritative).
+  const [projects, setProjects] = useState<Project[] | null>(null);
+  const [projectId, setProjectId] = useState('');
 
   const reload = useCallback(async (): Promise<void> => {
     setLoadFailed(false);
@@ -59,12 +64,18 @@ export function ChannelManageDialog({ channelId, onClose, onChanged, onArchived,
       setDetail(d);
       setName(d.channel?.name ?? '');
       setDescription(d.channel?.description ?? '');
+      setProjectId(d.channel?.boundProjectId ?? '');
     } catch {
       setLoadFailed(true);
     }
   }, [channelId]);
 
   useEffect(() => { void reload(); }, [reload]);
+  useEffect(() => {
+    let live = true;
+    listProjects().then((ps) => { if (live) setProjects(ps); }).catch(() => { if (live) setProjects([]); });
+    return () => { live = false; };
+  }, []);
 
   const isOwner = detail?.viewerIsOwner === true;
   const roster = detail?.roster ?? [];
@@ -195,6 +206,29 @@ export function ChannelManageDialog({ channelId, onClose, onChanged, onArchived,
           {detail?.channel?.description && <p className="muted u-fs-12 u-mb-2">{detail.channel.description}</p>}
         </>
       )}
+
+      {/* ADR 0852 D5 — the bound project (owner edits; everyone else reads). */}
+      {isOwner ? (
+        <>
+          <label className="field">
+            <span className="field-label">{t('channelProjectLabel')}</span>
+            <select value={projectId} onChange={(e) => setProjectId(e.target.value)} disabled={busy || projects === null}>
+              <option value="">{t('channelProjectNone')}</option>
+              {(projects ?? []).filter((p) => p.canWrite === true && (p.visibility ?? 'org') === 'org').map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+              {projectId && projects && !projects.some((p) => p.id === projectId) ? <option value={projectId}>{t('channelProjectUnavailable')}</option> : null}
+            </select>
+          </label>
+          <p className="muted u-fs-11 u-mt-0 u-mb-1">{t('channelProjectHint')}</p>
+          <div className="u-flex u-justify-end u-mb-2">
+            <Button variant="secondary" size="sm" disabled={busy || projectId === (detail?.channel?.boundProjectId ?? '')} onClick={() => void run(() => setChannelProject(channelId, projectId || null))}>{tc('save')}</Button>
+          </div>
+        </>
+      ) : detail?.channel?.boundProjectId ? (
+        <p className="u-fs-12 u-mb-2">
+          <span className="field-label">{t('channelProjectLabel')}: </span>
+          <span>{projects?.find((p) => p.id === detail.channel?.boundProjectId)?.name ?? t('channelProjectUnavailable')}</span>
+        </p>
+      ) : null}
 
       {/* Visibility — always read-only (fixed at creation; no mutate route). */}
       <p className="u-fs-12 u-mb-2">

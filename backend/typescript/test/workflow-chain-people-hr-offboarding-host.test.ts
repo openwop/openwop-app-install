@@ -55,15 +55,17 @@ describe('people-hr.offboarding 1.1.0 — structure (ADR 0617 D3)', () => {
   const entry = () => getChain(CHAIN)!;
 
   it('pack + chain versions bumped with the behavioural change', () => {
+    // Pack 1.5.0 → 1.5.1 and every chain one patch: ADR 0766 P3 pinned each node
+    // reference (content changed; behaviour did not).
     // Pack 1.4.0 → 1.5.0 templated the trigger binding (ADR 0683): the event
     // belongs to the installing host, not the pack.
     // Pack 1.3.0 → 1.4.0 carried the ADR 0622 D3 onboarding rewire; this
     // chain's own version stays at its ADR 0617 D3 bump.
-    expect(entry().packVersion).toBe('1.5.0');
-    expect(entry().chain.version).toBe('1.2.0');
+    expect(entry().packVersion).toBe('1.5.2');
+    expect(entry().chain.version).toBe('1.2.2');
   });
 
-  it('`trigger` is the SOLE root, a core.trigger.event on host.users.user.deactivated, feeding the three entry nodes on a named port', () => {
+  it('`trigger` is the SOLE root, a core.trigger.event on the user-deactivated host event, feeding the three entry nodes on a named port', () => {
     const { dag } = entry().chain;
     const trigger = dag.nodes.find((n) => n.id === 'trigger')!;
     expect(trigger.typeId).toBe('core.trigger.event');
@@ -75,8 +77,11 @@ describe('people-hr.offboarding 1.1.0 — structure (ADR 0617 D3)', () => {
     expect((trigger.config as { eventName?: string }).eventName).toBe('{{params.triggerEventName}}');
     const param = (entry().chain.parameters as { properties?: Record<string, { default?: unknown }> })
       .properties?.triggerEventName;
+    // ADR 0792 — the default is the v2 spelling; a binding on it (or on the
+    // in-process host.users.user.deactivated) routes the same emitted event, so
+    // an existing install keeps working either way.
     expect(param?.default, 'the default is what makes an existing install keep working')
-      .toBe('host.users.user.deactivated');
+      .toBe('openwop-app.users.user-deactivated');
     const edges = dag.edges ?? [];
     const roots = dag.nodes.filter((n) => !edges.some((e) => e.to.split('.')[0] === n.id)).map((n) => n.id);
     expect(roots).toEqual(['trigger']);
@@ -133,8 +138,8 @@ describe('people-hr.onboarding 1.1.0 — structure (ADR 0622 D3): invite-host be
   const entry = () => getChain(ONB)!;
 
   it('pack + chain versions bumped with the behavioural change', () => {
-    expect(entry().packVersion).toBe('1.5.0');
-    expect(entry().chain.version).toBe('1.1.0');
+    expect(entry().packVersion).toBe('1.5.2');
+    expect(entry().chain.version).toBe('1.1.1');
   });
 
   it('`invite-host` (feature.orgs.nodes.invite) has EXACTLY ONE inbound edge — approve {truthy approved} — and ONE outbound into track on its own port', () => {
@@ -187,26 +192,26 @@ describe('people-hr.offboarding 1.1.0 — a MANUAL run (no triggerData) reaches 
       for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
       return { status: res.status, body: await res.json().catch(() => undefined) };
     };
-    const login = await call('POST', '/v1/host/openwop-app/test/login', { email: `offb-host-${Date.now()}@acme.test`, tenantId: `org:offb-host-${Date.now()}` });
+    const login = await call('POST', '/host/openwop-app/test/login', { email: `offb-host-${Date.now()}@acme.test`, tenantId: `org:offb-host-${Date.now()}` });
     expect(login.status).toBe(201);
 
     const params = { employeeName: 'Jamie Offboard', ticketingBaseUrl: '', accessTicketKey: '', closeTransitionId: '', userId: '' };
     const expanded = expandChain(getChain(CHAIN)!.chain, { params });
     registerWorkflow(expanded);
-    const create = await call('POST', '/v1/runs', { workflowId: expanded.workflowId, inputs: params });
+    const create = await call('POST', '/runs', { workflowId: expanded.workflowId, inputs: params });
     expect(create.status, JSON.stringify(create.body)).toBe(201);
     const runId = create.body.runId as string;
 
     let snap: { status: string; error?: { code?: string } } = { status: 'pending' };
     for (let i = 0; i < 200; i++) {
-      snap = (await call('GET', `/v1/runs/${runId}`)).body;
+      snap = (await call('GET', `/runs/${runId}`)).body;
       if (['completed', 'failed', 'cancelled'].includes(snap.status)) break;
       await new Promise((r) => setTimeout(r, 25));
     }
     expect(snap.status).toBe('failed');
-    expect(snap.error?.code).toBe('CONFIG_INVALID');
+    expect(snap.error?.code).toBe('openwop-app.config_invalid');
 
-    const bundle = await call('GET', `/v1/runs/${runId}/debug-bundle`);
+    const bundle = await call('GET', `/runs/${runId}/debug-bundle`);
     expect(bundle.status, JSON.stringify(bundle.body)).toBe(200);
     const list = (bundle.body.events as Array<{ type: string; nodeId?: string }>) ?? [];
     const completed = list.filter((e) => e.type === 'node.completed').map((e) => e.nodeId ?? '');

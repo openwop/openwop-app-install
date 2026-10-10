@@ -17,8 +17,10 @@
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { surfaceStr as str, surfaceOptStr as optStr, type FeatureSurface } from '../../host/featureSurfaces.js';
 import { OpenwopError } from '../../types.js';
-import { getContentLanguageSettings, getLocaleGrant, getPage as getStoredPage, getPublishedBySlug, listPages, createPage, localizePage, sanitizeSectionOverlay, transitionPage, updatePage, type SectionType, SECTION_TYPES } from './cmsService.js';
+import { getContentLanguageSettings, getLocaleGrant, getPage as getStoredPage, getPublishedBySlug, listPages, createPage, localizePage, pageTranslationStatus, sanitizeSectionOverlay, transitionPage, updatePage, type SectionType, SECTION_TYPES } from './cmsService.js';
 import { queueContentApproval } from './contentApproval.js';
+import { resolveOne } from '../../host/featureToggles/service.js';
+import { runOrgScopeSubject } from '../../host/accessControlService.js';
 
 export function buildCmsSurface(scope: BundleScope): FeatureSurface {
   const tenantId = scope.tenantId;
@@ -55,6 +57,11 @@ export function buildCmsSurface(scope: BundleScope): FeatureSurface {
     getDraftPage: async (args) => {
       const page = await getStoredPage(tenantId, str(args.orgId), str(args.pageId));
       if (!page) return { page: null };
+      // ADR 0861 D6 — per-section translation status over the org's locales, so a
+      // localizer can target OUTDATED overlays (base text changed since), not only
+      // missing ones. Read-only; the published read (`getPage`) stays data-only.
+      const settings = await getContentLanguageSettings(tenantId, page.orgId);
+      const status = await pageTranslationStatus(page, settings.supportedLocales);
       return {
         page: {
           pageId: page.pageId,
@@ -66,6 +73,7 @@ export function buildCmsSurface(scope: BundleScope): FeatureSurface {
             sectionType: s.type,
             data: s.data,
             locales: Object.keys(s.localizations ?? {}),
+            ...(status.sections[s.sectionId] ? { translationStatus: status.sections[s.sectionId] } : {}),
           })),
         },
       };
@@ -96,6 +104,21 @@ export function buildCmsSurface(scope: BundleScope): FeatureSurface {
           throw new OpenwopError('forbidden_scope', `Your translator grant is limited to [${grant.locales.join(', ')}] locale overlays.`, 403, { grantedLocales: grant.locales });
         }
       }
+      // ADR 0836 D10 (`CMS2WF-5`) — a locale overlay written through a run is the
+      // tail of machine translation, which the route (`translate-section`) and the
+      // chat tool both refuse while `cms-localization` is OFF. The seam's own
+      // toggle gate skips always-on `cms`, so the check lives here, at the store.
+      if (locale) {
+        const loc = await resolveOne('cms-localization', { tenantId, ...(scope.actingUserId ? { userId: scope.actingUserId } : {}) });
+        if (!loc?.enabled) {
+          // The seam's own refusal shape (`host/featureSurfaces.ts` gate), so a
+          // node sees the same `host_capability_disabled` it gets for any OFF feature.
+          throw Object.assign(
+            new Error("feature 'cms-localization' is not enabled for this tenant — locale overlays cannot be written"),
+            { code: 'host_capability_disabled', capability: 'host.sample.cms-localization' },
+          );
+        }
+      }
       // ADR 0592 §1 (CMSL-1) — this verb is a read-modify-write over the FULL
       // sections array, so it is version-PINNED like an editor save: without
       // the pin, an overlay a human wrote inside the read→write window was
@@ -110,6 +133,12 @@ export function buildCmsSurface(scope: BundleScope): FeatureSurface {
         }
         const section = page.sections.find((s) => s.sectionId === sectionId);
         if (!section || !SECTION_TYPES.includes(section.type as SectionType)) return { updated: false, reason: 'section_not_found' };
+        // ADR 0836 D10 (`CMS2WF-4`) — a shared-section reference renders the
+        // SHARED content, so a write into its own `data` was kept by nothing and
+        // reported `updated:true`. Refuse with the protocol lane's typed 409.
+        if (section.ref) {
+          throw new OpenwopError('conflict', 'This section inherits a shared section; detach it in the editor before writing its content.', 409, { sectionId, sharedSectionId: section.ref.sharedSectionId });
+        }
         const raw = (typeof args.data === 'object' && args.data !== null ? args.data : {}) as Record<string, unknown>;
         const cleaned = sanitizeSectionOverlay(section.type, raw);
         if (Object.keys(cleaned).length === 0) return { updated: false, reason: 'empty' };
@@ -132,7 +161,16 @@ export function buildCmsSurface(scope: BundleScope): FeatureSurface {
         try {
           // Persist through the validated write path (validateSections enforces
           // locale ≠ base + re-sanitizes) — same as an editor save.
-          const saved = await updatePage(tenantId, orgId, pageId, { sections, baseLocale: settings.baseLocale }, scope.runId ?? 'workflow', { expectedVersion: page.version });
+          const saved = await updatePage(tenantId, orgId, pageId, { sections, baseLocale: settings.baseLocale }, scope.runId ?? 'workflow', {
+            expectedVersion: page.version,
+            // ADR 0836 D2 — draft-only, decided on the row the CAS swaps (a
+            // publish does not bump `version`, so the pin cannot see it).
+            authorize: async (current) => {
+              if (current.status !== 'draft') {
+                throw new OpenwopError('validation_error', `Only DRAFT pages are node-editable (status: \`${current.status}\`).`, 409, { status: current.status });
+              }
+            },
+          });
           return { updated: !!saved, ...(locale ? { locale } : {}) };
         } catch (err) {
           if (attempt === 0 && err instanceof OpenwopError && err.code === 'conflict') continue;
@@ -155,7 +193,17 @@ export function buildCmsSurface(scope: BundleScope): FeatureSurface {
       }
       const updated = await transitionPage(tenantId, orgId, pageId, 'submit', scope.runId ?? 'workflow');
       if (!updated) return { submitted: false, reason: 'not_found' };
-      await queueContentApproval(tenantId, orgId, updated, `Publish CMS page "${updated.title}" (submitted by a workflow)`);
+      // ADR 0859 D3/D4 — the run's ACTOR is the submitter (told of the decision). A
+      // member who merely CAUSED an actorless run is recorded apart, as a cause: it
+      // only NARROWS (separation of duties refuses on it), which is all
+      // `runOrgScopeSubject` permits — it is never a notice recipient (code grade
+      // CMSA2CD-1). Without it a manager could launder a self-approval through a run.
+      const cause = scope.actingUserId ? undefined : runOrgScopeSubject(scope);
+      await queueContentApproval(tenantId, orgId, updated, `Publish CMS page "${updated.title}" (submitted by a workflow)`, {
+        ...(scope.actingUserId ? { submittedBy: scope.actingUserId } : {}),
+        ...(cause ? { causedBy: cause } : {}),
+        notify: true,
+      });
       return { submitted: true, status: updated.status, pageId: updated.pageId };
     },
 

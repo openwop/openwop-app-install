@@ -18,10 +18,13 @@ import { registerDealerAgentTools } from './agentTools.js';
 import { registerDealerRegistrationGate } from './registrationApproval.js';
 import { registerSubjectEraser } from '../../host/subjectErasure.js';
 import { eraseSubjectDealers } from './entities/registration.js';
+import { registerFeatureDataExporter } from '../../host/featureDataExport.js';
+import { exportDealersData } from './dataExport.js';
 
 export const dealersFeature: BackendFeature = {
   id: 'dealers',
   registerRoutes: (deps) => {
+    registerFeatureDataExporter('dealers', exportDealersData); // ADR 0820 §7 — read-only export, served after a plan lapse
     registerDealerRoutes(deps);
     // ADR 0283 — suspend dealers whose CRM company is deleted (closes DEAL-DATA-2).
     // Safe regardless of toggle state (touches only this feature's own rows).
@@ -44,7 +47,7 @@ export const dealersFeature: BackendFeature = {
   toggleDefault: {
     id: 'dealers',
     label: 'Dealer Network',
-    description: 'Dealer-network + retail-outlet records over CRM companies, with a partner portal for deal registration. Dealers are territory-assignable (ADR 0272).',
+    description: 'Dealer-network + retail-outlet records over CRM companies, with a partner portal for deal registration. Dealers are territory-assignable.',
     category: 'Sales',
     status: 'off',
     bucketUnit: 'tenant',
@@ -53,7 +56,7 @@ export const dealersFeature: BackendFeature = {
   // Dealer-network + outlet records sit over CRM companies; works best with CRM on.
   recommends: ['crm'],
   requiredPacks: [
-    { name: 'feature.dealers.nodes', version: '1.0.0' },
-    { name: 'feature.dealers.agents', version: '1.0.2' },
+    { name: 'feature.dealers.nodes', version: '1.0.1' },
+    { name: 'vendor.openwop-app.dealers.agents', version: '1.0.3' },
   ],
 };

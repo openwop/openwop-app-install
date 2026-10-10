@@ -14,22 +14,28 @@
  * on its own.
  *
  * Both-polarity throughout, same rule as its two sibling files.
+ *
+ * Every export the page calls is mocked — `getDocument` included, which the
+ * reader cases used to send to the real network (ADR 0661 allowlist line,
+ * dropped 2026-10-09). The announcer is module state and is reset per case.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, waitFor, act, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
+type Kb = typeof import('../kbClient.js');
 const api = vi.hoisted(() => ({
-  listOrgs: vi.fn(),
-  listCollections: vi.fn(),
-  listDocuments: vi.fn(),
-  search: vi.fn(),
-  getReindexJob: vi.fn(),
-  deleteDocument: vi.fn(),
-  deleteCollection: vi.fn(),
-  ingestText: vi.fn(),
-  createCollection: vi.fn(),
-  setRetrievalMode: vi.fn(),
+  listOrgs: vi.fn<Kb['listOrgs']>(),
+  listCollections: vi.fn<Kb['listCollections']>(),
+  listDocuments: vi.fn<Kb['listDocuments']>(),
+  getDocument: vi.fn<Kb['getDocument']>(),
+  search: vi.fn<Kb['search']>(),
+  getReindexJob: vi.fn<Kb['getReindexJob']>(),
+  deleteDocument: vi.fn<Kb['deleteDocument']>(),
+  deleteCollection: vi.fn<Kb['deleteCollection']>(),
+  ingestText: vi.fn<Kb['ingestText']>(),
+  createCollection: vi.fn<Kb['createCollection']>(),
+  setRetrievalMode: vi.fn<Kb['setRetrievalMode']>(),
 }));
 vi.mock('../kbClient.js', async (importOriginal) => {
   const orig = await importOriginal<typeof import('../kbClient.js')>();
@@ -45,30 +51,46 @@ vi.mock('../../media/mediaClient.js', async (importOriginal) => {
 
 const toasts = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), info: vi.fn() }));
 vi.mock('../../../ui/toast.js', () => ({ toast: toasts }));
-const confirmMock = vi.hoisted(() => vi.fn(async () => true));
+const confirmMock = vi.hoisted(() => vi.fn<typeof import('../../../ui/confirm.js')['confirm']>());
 vi.mock('../../../ui/confirm.js', () => ({ confirm: confirmMock }));
 
+// KB2UX-1 — the page reads the caller's per-org authority. These suites test
+// what an OWNER sees; `orgAccess.test.tsx` covers the narrower callers.
+const accessApi = vi.hoisted(() => ({
+  getEffectiveAccess: vi.fn<typeof import('../../../client/accessClient.js')['getEffectiveAccess']>(),
+}));
+vi.mock('../../../client/accessClient.js', async (importOriginal) => {
+  const orig = await importOriginal<Record<string, unknown>>();
+  return { ...orig, ...accessApi };
+});
 import { KnowledgeBasePage } from '../KnowledgeBasePage.js';
 import { KbRequestError } from '../kbRequestError.js';
-import { currentAnnouncements } from '../../../ui/announce.js';
+import { announce, currentAnnouncements } from '../../../ui/announce.js';
+import type { KbCollection, KbDocument, Org, SearchHit } from '../kbClient.js';
+import type { EffectiveAccess } from '../../../client/accessClient.js';
 
-const ORG = { orgId: 'o1', name: 'Acme' };
-const COLLECTION = {
+const OWNER_ACCESS: EffectiveAccess = { roles: ['owner'], scopes: ['workspace:read', 'workspace:write', 'host:org:manage'], basis: 'member' };
+
+const ORG: Org = { orgId: 'o1', name: 'Acme' };
+const COLLECTION: KbCollection = {
   collectionId: 'c1', name: 'HR Policies', documentCount: 2, chunkCount: 6,
-  updatedAt: '2026-09-03T00:00:00.000Z', retrievalConfig: { mode: 'dense' as const },
+  updatedAt: '2026-09-03T00:00:00.000Z', retrievalConfig: { mode: 'dense' },
 };
-const TEXT_DOC = { documentId: 'd1', title: 'PTO Policy', source: { kind: 'text' }, chunkCount: 3, createdAt: '2026-09-03T00:00:00.000Z' };
-const URL_DOC = { documentId: 'd2', title: 'Vendor terms', source: { kind: 'url', url: 'https://vendor.example.com/terms' }, chunkCount: 2, createdAt: '2026-09-03T00:00:00.000Z' };
+const TEXT_DOC: KbDocument = { documentId: 'd1', title: 'PTO Policy', source: { kind: 'text' }, chunkCount: 3, createdAt: '2026-09-03T00:00:00.000Z' };
+const URL_DOC: KbDocument = { documentId: 'd2', title: 'Vendor terms', source: { kind: 'url', url: 'https://vendor.example.com/terms' }, chunkCount: 2, createdAt: '2026-09-03T00:00:00.000Z' };
 
 /** The 409 the reindex lock actually produces, prose and all. */
 const REINDEX_409 = () => new KbRequestError('A reindex is in progress for this collection; retry after it completes or cancel it.', 409);
 
 beforeEach(() => {
+  announce(''); // module-level slot: a previous case's string must not satisfy this one
   vi.resetAllMocks();
+  accessApi.getEffectiveAccess.mockResolvedValue(OWNER_ACCESS);
   window.history.replaceState({}, '', '/kb');
   api.listOrgs.mockResolvedValue([ORG]);
   api.listCollections.mockResolvedValue([COLLECTION]);
   api.listDocuments.mockResolvedValue([TEXT_DOC]);
+  api.getDocument.mockImplementation(async (_org, _col, id) => ({ ...(id === URL_DOC.documentId ? URL_DOC : TEXT_DOC), text: 'body text' }));
   api.getReindexJob.mockResolvedValue(null);
   confirmMock.mockResolvedValue(true);
 });
@@ -201,7 +223,6 @@ describe('KBX-12 — focus survives a delete', () => {
     await act(async () => { fireEvent.click(screen.getAllByRole('button', { name: /Delete document/ })[0]!); });
     await waitFor(() => expect(screen.getByText('No documents')).toBeTruthy());
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Documents' })));
-    expect(document.activeElement).not.toBe(document.body);
   });
 
   it('deleting a collection moves focus into the collections rail', async () => {
@@ -223,7 +244,7 @@ describe('KBX-12 — focus survives a delete', () => {
 
 describe('KBX-8 / KB-UX-9 — the search says what it is doing and what it found', () => {
   it('the in-flight frame names the query instead of emptying the region', async () => {
-    let resolve!: (v: unknown[]) => void;
+    let resolve!: (v: SearchHit[]) => void;
     api.search.mockReturnValue(new Promise((r) => { resolve = r; }));
     await view();
     fireEvent.change(screen.getByLabelText('Ask a question…'), { target: { value: 'pto' } });
@@ -244,6 +265,7 @@ describe('KBX-8 / KB-UX-9 — the search says what it is doing and what it found
       { chunkId: 'k2', documentId: 'd1', title: 'PTO Policy', chunkIndex: 1, text: 'carry-over', score: 0.7 },
     ]);
     await view();
+    expect(currentAnnouncements().polite).not.toContain('2 matching passages');
     fireEvent.change(screen.getByLabelText('Ask a question…'), { target: { value: 'pto' } });
     fireEvent.click(screen.getByRole('button', { name: /Search/ }));
     await screen.findByText('15 days of PTO');
@@ -253,6 +275,7 @@ describe('KBX-8 / KB-UX-9 — the search says what it is doing and what it found
   it('an empty search announces the no-matches outcome, not silence', async () => {
     api.search.mockResolvedValue([]);
     await view();
+    expect(currentAnnouncements().polite).not.toContain('No matches');
     fireEvent.change(screen.getByLabelText('Ask a question…'), { target: { value: 'pto' } });
     fireEvent.click(screen.getByRole('button', { name: /Search/ }));
     await screen.findByText('No matches — add documents, or try a different question.');
@@ -283,7 +306,7 @@ describe('KBX-9 — a slow search does not disable the ingest card', () => {
 
 describe('KBX-10 — a retrieval select holds the chosen value while it saves', () => {
   it('the picked option stays picked until the collection list confirms it', async () => {
-    let resolve!: (v: unknown) => void;
+    let resolve!: (v: KbCollection) => void;
     api.setRetrievalMode.mockReturnValue(new Promise((r) => { resolve = r; }));
     await view();
     const select = screen.getByDisplayValue('Standard (semantic)') as HTMLSelectElement;
@@ -294,8 +317,8 @@ describe('KBX-10 — a retrieval select holds the chosen value while it saves', 
     expect(select.value).toBe('hybrid');
     expect(select.disabled).toBe(true);
 
-    api.listCollections.mockResolvedValue([{ ...COLLECTION, retrievalConfig: { mode: 'hybrid' as const } }]);
-    await act(async () => { resolve({}); });
+    api.listCollections.mockResolvedValue([{ ...COLLECTION, retrievalConfig: { mode: 'hybrid' } }]);
+    await act(async () => { resolve({ ...COLLECTION, retrievalConfig: { mode: 'hybrid' } }); });
     await waitFor(() => expect(toasts.success).toHaveBeenCalledWith('Retrieval settings saved.'));
     expect((screen.getByDisplayValue('Hybrid (keyword + semantic)') as HTMLSelectElement).value).toBe('hybrid');
   });

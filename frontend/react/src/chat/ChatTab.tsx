@@ -23,6 +23,7 @@ import { useTranslation } from 'react-i18next';
 import { Notice } from '../ui/Notice.js';
 import { BYOKWizard } from '../byok/BYOKWizard.js';
 import { useBYOKConfig } from '../byok/lib/useBYOKConfig.js';
+import { SignInRequiredContext } from './SignInRequiredNotice.js';
 import { useFeatureAccess } from '../featureToggles/FeatureAccessContext.js';
 import { useAuth } from '../auth/useAuth.js';
 import { ChatSidebar } from './ChatSidebar.js';
@@ -49,7 +50,7 @@ export function ChatTab(): JSX.Element {
   const { t } = useTranslation('chat');
   // ADR 0711 — the operator-only refusal, held so the wizard can SAY which failure it was.
   const [byokError, setByokError] = useState<string | null>(null);
-  const { config, status, storedRefs, error, setConfig, refresh, stored: byokStored } = useBYOKConfig();
+  const { config, status, storedRefs, error, setConfig, refresh, stored: byokStored, signInRequired } = useBYOKConfig();
   const [forceWizard, setForceWizard] = useState(false);
   // ADR 0140 — when the multi-tab toggle is on, the chat body is the keep-alive deck
   // instead of the single-session sidebar. Default OFF → exactly today's surface.
@@ -158,22 +159,26 @@ export function ChatTab(): JSX.Element {
     // sidebar LIBRARY integration is P7; BYOK reconfigure is threaded through so a
     // credential error in any tab can still re-open the wizard.
     return (
-      <Suspense fallback={<div className="u-flex-1 u-minh-0" />}>
-        <TabChatDeck key={user?.uid ?? 'anon'} config={config!} byokStored={byokStored} onReconfigureBYOK={reconfigureBYOK} />
-      </Suspense>
+      <SignInRequiredContext.Provider value={signInRequired}>
+        <Suspense fallback={<div className="u-flex-1 u-minh-0" />}>
+          <TabChatDeck key={user?.uid ?? 'anon'} config={config!} byokStored={byokStored} onReconfigureBYOK={reconfigureBYOK} />
+        </Suspense>
+      </SignInRequiredContext.Provider>
     );
   }
 
   return (
-    <ChatSidebar
-      byokStored={byokStored}
-      config={config!}
-      tenantId={user?.uid ?? 'anon'}
-      onOpenSettings={() => setForceWizard(true)}
-      onRemoveKey={async () => {
-        await setConfig(null);
-        setForceWizard(false);
-      }}
-    />
+    <SignInRequiredContext.Provider value={signInRequired}>
+      <ChatSidebar
+        byokStored={byokStored}
+        config={config!}
+        tenantId={user?.uid ?? 'anon'}
+        onOpenSettings={() => setForceWizard(true)}
+        onRemoveKey={async () => {
+          await setConfig(null);
+          setForceWizard(false);
+        }}
+      />
+    </SignInRequiredContext.Provider>
   );
 }

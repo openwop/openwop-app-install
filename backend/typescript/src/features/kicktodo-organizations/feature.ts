@@ -15,13 +15,15 @@ export const kicktodoOrganizationsFeature: BackendFeature = {
     id: 'kicktodo-organizations',
     label: 'KickTodo Organizations',
     description:
-      'Org challenge libraries, org cohorts, branding, and k-anonymous (≥5) outcome reports (ADR 0428). Consent never inherited from org membership.',
+      'Org challenge libraries, org cohorts, branding, and k-anonymous (≥5) outcome reports. Consent never inherited from org membership.',
     category: 'KickTodo',
     status: 'off',
     bucketUnit: 'tenant',
     salt: 'kicktodo-organizations',
   },
   dependsOn: ['kicktodo-core', 'kicktodo-accountability'],
-  requiredPacks: [{ name: 'feature.kicktodo.nodes', version: '1.30.0' }],
-  surface: { id: 'kicktodo-organizations', build: buildKicktodoOrganizationsSurface }, // ADR 0428 P5
+  requiredPacks: [{ name: 'feature.kicktodo.nodes', version: '1.30.3' }],
+  // ADR 0428 P5. ADR 0832 — `report` is owner-only at its HTTP door
+  // (`host:org:manage`), so the seam's floor asks the same, not membership.
+  surface: { id: 'kicktodo-organizations', build: buildKicktodoOrganizationsSurface, orgPolicy: { methodScopes: { report: 'host:org:manage' } } },
 };

@@ -20,7 +20,8 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { loadWorkflow } from '../backendStore.js';
+import { loadWorkflow, loadWorkflowWithHead, LoadOfflineError, LoadRefusedError } from '../backendStore.js';
+import { upsertSavedWorkflow } from '../localStore.js';
 import { CanonicalParseError } from '../../schema/deserialize.js';
 
 const PACK_TYPE_ID = 'vendor.test.pack-node';
@@ -69,6 +70,7 @@ describe('loadWorkflow (backend-first, catalog-ordered)', () => {
       'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
+        if (url.endsWith('/head')) return jsonResponse({}, 404); // not owned: the by-id read (ADR 0770)
         if (url.includes('/node-catalog')) {
           // The race: the catalog resolves AFTER the definition would have.
           await new Promise((r) => setTimeout(r, 40));
@@ -91,6 +93,7 @@ describe('loadWorkflow (backend-first, catalog-ordered)', () => {
       'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
+        if (url.endsWith('/head')) return jsonResponse({}, 404); // not owned: the by-id read (ADR 0770)
         if (url.includes('/node-catalog')) return jsonResponse(CATALOG_BODY);
         if (url.includes('/workflows/')) return jsonResponse(defBody('vendor.unknown.not-installed'));
         return jsonResponse({}, 404);
@@ -105,6 +108,7 @@ describe('loadWorkflow (backend-first, catalog-ordered)', () => {
       'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
+        if (url.endsWith('/head')) return jsonResponse({}, 404); // not owned: the by-id read (ADR 0770)
         if (url.includes('/node-catalog')) return jsonResponse(CATALOG_BODY);
         if (url.includes('/host/openwop-app/workflows')) {
           return jsonResponse({ workflows: [{ workflowId: 'wf.test.4', name: 'Webhook → Slack', nodeCount: 1, createdAt: 'x', updatedAt: 'y' }] });
@@ -127,6 +131,7 @@ describe('loadWorkflow (backend-first, catalog-ordered)', () => {
       'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
+        if (url.endsWith('/head')) return jsonResponse({}, 404); // not owned: the by-id read (ADR 0770)
         if (url.includes('/node-catalog')) return jsonResponse(CATALOG_BODY);
         if (url.includes('/host/openwop-app/workflows')) return jsonResponse({}, 500);
         if (url.includes('/workflows/')) {
@@ -140,14 +145,42 @@ describe('loadWorkflow (backend-first, catalog-ordered)', () => {
     expect(wf?.name).toBe('wf.test.5');
   });
 
-  it('still degrades to null (local cache empty) when the backend is unreachable', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => {
-        throw new Error('network down');
-      }),
-    );
+  // grade-code WBCD-1 — an OWNED workflow's content and base come from ONE
+  // fresh read (`/head`), never content from the cache-first by-id route.
+  it('an owned workflow loads content + head revision from the one /head read', async () => {
+    const byId = vi.fn(async () => jsonResponse(defBody(PACK_TYPE_ID)));
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/head')) return jsonResponse({ revision: 'rev-fresh', definition: { ...defBody(PACK_TYPE_ID), metadata: { name: 'Fresh head' } } });
+      if (url.includes('/node-catalog')) return jsonResponse(CATALOG_BODY);
+      return byId();
+    }));
+    const out = await loadWorkflowWithHead('wf.test.1');
+    expect(out.headRevision).toBe('rev-fresh');
+    expect(out.workflow?.name).toBe('Fresh head');
+    expect(byId).not.toHaveBeenCalled();
+  });
 
-    await expect(loadWorkflow('wf.test.3')).resolves.toBeNull();
+  // ADR 0770 D6 (`WBWF-5`) — this case used to pin `resolves.toBeNull()`, and
+  // BuilderTab turned that null into a BLANK canvas under the real id, whose
+  // first autosave overwrote the workflow. `null` now means an AUTHORITATIVE
+  // not-found only; every other failure is a typed, non-null outcome.
+  it('offline with no local copy REJECTS (LoadOfflineError), never null', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('Failed to fetch'); }));
+    await expect(loadWorkflow('wf.test.3')).rejects.toBeInstanceOf(LoadOfflineError);
+  });
+
+  it('offline WITH a local copy returns that copy', async () => {
+    upsertSavedWorkflow({ id: 'wf.test.4', name: 'Local draft', version: '1.0.0', nodes: [], edges: [], defaultInputs: '{}', createdAt: '', updatedAt: '' });
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('Failed to fetch'); }));
+    await expect(loadWorkflow('wf.test.4')).resolves.toMatchObject({ id: 'wf.test.4', name: 'Local draft' });
+  });
+
+  it('a REFUSED read (5xx, or a non-transport error) rejects with LoadRefusedError, even with a local copy', async () => {
+    upsertSavedWorkflow({ id: 'wf.test.6', name: 'Stale local', version: '1.0.0', nodes: [], edges: [], defaultInputs: '{}', createdAt: '', updatedAt: '' });
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => (String(url).includes('/node-catalog') ? jsonResponse(CATALOG_BODY) : jsonResponse({ error: 'internal_error' }, 503))));
+    await expect(loadWorkflow('wf.test.6')).rejects.toBeInstanceOf(LoadRefusedError);
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('network down'); }));
+    await expect(loadWorkflow('wf.test.6')).rejects.toBeInstanceOf(LoadRefusedError);
   });
 });

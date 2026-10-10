@@ -74,9 +74,27 @@ export function onRunTerminal(runId: string, fn: Listener): void {
 // added to one and not the other.
 
 const aborters = new Map<string, AbortController>();
+/** Every controller armed for a run and not yet retired by its terminal — so
+ *  ONE terminal listener per run aborts them all, instead of one listener per
+ *  segment accumulating until terminal (grade-code L1). */
+const liveControllers = new Map<string, Set<AbortController>>();
 /** Bound: a run that dies without reaching terminal must not leak a controller
  *  for the process lifetime. Evict oldest-first, like the MCP result cache. */
 const MAX_ABORTERS = 2_000;
+
+/**
+ * ADR 0772 D1 — the abort REASON when a run's wall-clock deadline elapses. A
+ * type, not a message, so the executor can tell a deadline cut from a cancel, a
+ * pause or a node's own failure by asking the signal it handed the node.
+ */
+export class RunDeadlineError extends Error {
+  constructor() { super('run deadline elapsed'); this.name = 'RunDeadlineError'; }
+}
+
+/** True when `signal` was aborted because the run's deadline elapsed. */
+export function isDeadlineAbort(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true && signal.reason instanceof RunDeadlineError;
+}
 
 /**
  * The signal for `runId`, armed to fire when the run reaches ANY terminal state
@@ -90,30 +108,50 @@ const MAX_ABORTERS = 2_000;
  * cancellation from a timeout by consulting this signal first, so the typed
  * outcome is `mcp_cancelled` rather than a misreported `mcp_timeout`.
  *
- * Idempotent: repeated calls for one run return the same signal, so every node
- * of a run shares one cancellation fact.
+ * ADR 0772 D1.4 (`RRWF-2`) — PER SEGMENT. This used to return an existing
+ * controller unchanged, and a suspend is not terminal: the first segment's
+ * deadline timer survived the approval wait, fired, and every resumed execution
+ * was handed an already-aborted signal, so every signal-aware node after a long
+ * approval failed at once. `executeRunBody` arms on every entry, so an arm now
+ * installs a FRESH controller as the run's current signal. The previous one is
+ * neither aborted nor disarmed: it only ever reaches nodes of its own segment,
+ * which keep their own deadline. Terminal aborts every live controller of the
+ * run through ONE listener.
  */
 export function armRunAbort(runId: string, deadlineAtMs?: number): AbortSignal {
-  const existing = aborters.get(runId);
-  if (existing) return existing.signal;
+  // The previous segment's controller is REPLACED in the map but left alive, its
+  // own deadline timer included: on the unfenced resume path
+  // (`acquireExecutionClaim` → `resume-wait-elapsed`) the previous body can still
+  // have nodes in flight, and those must keep their deadline (grade-code M2).
+  // What must not happen — and did (`RRWF-2`) — is a NEW segment being handed
+  // that old, possibly already-aborted signal.
   const controller = new AbortController();
-  if (aborters.size >= MAX_ABORTERS) {
+  if (aborters.size >= MAX_ABORTERS && !aborters.has(runId)) {
     const oldest = aborters.keys().next();
     if (!oldest.done) aborters.delete(oldest.value);
   }
   aborters.set(runId, controller);
-  onRunTerminal(runId, () => {
-    aborters.delete(runId);
-    if (!controller.signal.aborted) controller.abort(new Error('run reached terminal'));
-  });
+  let live = liveControllers.get(runId);
+  if (!live) {
+    const set = new Set<AbortController>();
+    live = set;
+    liveControllers.set(runId, set);
+    onRunTerminal(runId, () => {
+      if (liveControllers.get(runId) === set) liveControllers.delete(runId);
+      aborters.delete(runId);
+      for (const c of set) if (!c.signal.aborted) c.abort(new Error('run reached terminal'));
+      set.clear();
+    });
+  }
+  live.add(controller);
   if (deadlineAtMs !== undefined) {
     const remaining = deadlineAtMs - Date.now();
     // A deadline already in the past aborts immediately rather than scheduling
     // a timer for a negative delay (which `setTimeout` would fire on the next
     // tick anyway, but only after the caller had already started work).
-    if (remaining <= 0) controller.abort(new Error('run deadline elapsed'));
+    if (remaining <= 0) controller.abort(new RunDeadlineError());
     else {
-      const timer = setTimeout(() => { if (!controller.signal.aborted) controller.abort(new Error('run deadline elapsed')); }, remaining);
+      const timer = setTimeout(() => { if (!controller.signal.aborted) controller.abort(new RunDeadlineError()); }, remaining);
       // Never hold the process open for a deadline nobody is waiting on.
       timer.unref?.();
     }
@@ -158,6 +196,11 @@ export function abortRunForPause(runId: string): boolean {
   const c = aborters.get(runId);
   if (!c) return false;
   aborters.delete(runId);
+  // Every live segment's controller, not only the map entry (grade-code M2): an
+  // overlapping previous segment's nodes must stop on an `immediate` pause too.
+  const live = liveControllers.get(runId);
+  liveControllers.delete(runId);
+  for (const x of live ?? [c]) if (!x.signal.aborted) x.abort(new Error('run paused'));
   if (!c.signal.aborted) c.abort(new Error('run paused'));
   const req = pauseRequests.get(runId);
   if (req) pauseRequests.set(runId, { ...req, abortedAt: new Date().toISOString() });
@@ -223,4 +266,5 @@ export function _resetRunLifecycle(): void {
   listeners.clear();
   globalListeners.clear();
   aborters.clear();
+  liveControllers.clear();
 }

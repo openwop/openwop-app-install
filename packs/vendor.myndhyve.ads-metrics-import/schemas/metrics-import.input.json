@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.ads-metrics-import/1.0.0/metrics-import.input.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.ads-metrics-import/1.0.2/metrics-import.input.json",
   "title": "AdsMetricsImportInput",
   "type": "object",
   "required": ["platformAdIds"],

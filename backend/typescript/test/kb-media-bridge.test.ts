@@ -4,7 +4,14 @@
  * Pins: extractable assets ingest as untrusted-fenced, stable-id (`media:<assetId>`)
  * documents; non-extractable assets are SKIPPED with a per-asset reason (typed, itemized —
  * never a silent drop); re-running is IDEMPOTENT (no duplicate docs / no count drift); and
- * the bridge is a one-directional kb→media read (media never learns about KB).
+ * an unknown media collection is a typed 404.
+ *
+ * (Not asserted here: that the bridge is a one-directional kb→media read is an import-graph
+ * property of `kbService`, not a runtime behaviour.)
+ *
+ * Sabotage witnesses (grade-tests wave 6): a non-stable doc id reds the idempotent case;
+ * dropping the skip push or the `source.kind !== 'text' ⇒ untrusted` rule reds the first;
+ * returning empty instead of the 404 reds the last.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { mkdtempSync } from 'node:fs';
@@ -64,6 +71,7 @@ describe('ingestMediaCollection (ADR 0398 P2)', () => {
     expect(col!.documentCount).toBe(2); // …NO duplicate docs / count drift (stable-id upsert)
     const docs = await listDocuments(tenantId, orgId, kb.collectionId);
     expect(docs).toHaveLength(2);
+    expect(docs.every((d) => d.documentId.startsWith('media:'))).toBe(true); // media:<assetId> ids
   });
 
   it('404s on an unknown media collection', async () => {

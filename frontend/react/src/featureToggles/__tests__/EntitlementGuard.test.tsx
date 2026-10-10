@@ -17,6 +17,8 @@ vi.mock('../FeatureAccessContext.js', () => ({
 }));
 
 import { EntitlementGuard } from '../EntitlementGuard.js';
+// ADR 0820 §7 — the lock page's export button read (its own tests: features/billing/__tests__/dataExport.test.tsx).
+vi.mock('../../features/billing/dataExportClient.js', () => ({ listExportableFeatures: vi.fn(async () => []), downloadFeatureExport: vi.fn() }));
 
 const view = () => render(
   <MemoryRouter><EntitlementGuard featureId="crm"><div>FEATURE CONTENT</div></EntitlementGuard></MemoryRouter>,

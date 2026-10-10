@@ -24,7 +24,6 @@
  */
 
 import type { Express } from 'express';
-import { v1 } from '../middleware/protocolVersion.js';
 import { seedMemoryEntry, compactMemory } from '../host/inMemorySurfaces.js';
 import { createLogger } from '../observability/logger.js';
 import { sendError } from '../middleware/errorEnvelope.js';
@@ -40,9 +39,9 @@ export function registerMemoryCompactionSeamRoutes(app: Express): void {
     log.info('memory-compaction seam disabled (set OPENWOP_TEST_TRIGGER_COMPACTION=true to enable)');
     return;
   }
-  log.warn('memory-compaction seam ENABLED — /v1/test/memory/{seed,compact} reachable. NEVER enable in production.');
+  log.warn('memory-compaction seam ENABLED — /test/memory/{seed,compact} reachable. NEVER enable in production.');
 
-  app.post(v1('/test/memory/seed'), async (req, res) => {
+  app.post('/test/memory/seed', async (req, res) => {
     const body = (req.body ?? {}) as { memoryRef?: unknown; entries?: unknown };
     if (typeof body.memoryRef !== 'string' || body.memoryRef.length === 0) {
       sendError(res, 400, 'invalid_argument', 'memoryRef required');
@@ -73,7 +72,7 @@ export function registerMemoryCompactionSeamRoutes(app: Express): void {
     res.status(201).json({ seeded });
   });
 
-  app.post(v1('/test/memory/compact'), async (req, res) => {
+  app.post('/test/memory/compact', async (req, res) => {
     const body = (req.body ?? {}) as { memoryRef?: unknown };
     if (typeof body.memoryRef !== 'string' || body.memoryRef.length === 0) {
       sendError(res, 400, 'invalid_argument', 'memoryRef required');

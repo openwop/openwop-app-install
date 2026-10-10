@@ -29,8 +29,12 @@ export function IdeaIntakePanel(props: {
   others: RankedIdea[];
   onClose: () => void;
   onChanged: () => void | Promise<void>;
+  /** PM4UX-1 (ADR 0842 D9) — a reader sees the intake, evidence and score history,
+   *  and is offered no control whose only outcome is a 403. */
+  readOnly?: boolean;
 }): JSX.Element {
   const { listId, idea, others, onClose, onChanged } = props;
+  const ro = props.readOnly === true;
   const { t } = useTranslation('priority-matrix');
   const [intake, setIntake] = useState<IdeaIntake | null>(null);
   const [evidence, setEvidence] = useState<IdeaEvidence[]>([]);
@@ -179,20 +183,22 @@ export function IdeaIntakePanel(props: {
         <section aria-label={t('intakeSectionLabel')} className="u-flex u-flex-col u-gap-2">
           <h4 className="u-m-0 u-fs-12 muted">{t('intakeSectionLabel')}</h4>
           <div className="u-flex u-gap-2 u-flex-wrap">
-            <TextField label={t('intakeRequester')} value={requester} onChange={(e) => setRequester(e.target.value)} className="u-flex-1" />
-            <SelectField label={t('intakeChannel')} value={channel} onChange={(e) => setChannel(e.target.value)}>
+            <TextField label={t('intakeRequester')} value={requester} readOnly={ro} onChange={(e) => setRequester(e.target.value)} className="u-flex-1" />
+            <SelectField label={t('intakeChannel')} value={channel} disabled={ro} onChange={(e) => setChannel(e.target.value)}>
               <option value="">{t('intakeChannelNone')}</option>
               {SOURCE_CHANNELS.map((c) => <option key={c} value={c}>{t(`channel_${c}`)}</option>)}
             </SelectField>
           </div>
           <div className="u-flex u-gap-2 u-flex-wrap">
-            <TextField label={t('intakeEstValue')} value={estValue} onChange={(e) => setEstValue(e.target.value)} inputMode="decimal" />
-            <TextField label={t('intakeEstUnit')} value={estUnit} onChange={(e) => setEstUnit(e.target.value)} />
+            <TextField label={t('intakeEstValue')} value={estValue} readOnly={ro} onChange={(e) => setEstValue(e.target.value)} inputMode="decimal" />
+            <TextField label={t('intakeEstUnit')} value={estUnit} readOnly={ro} onChange={(e) => setEstUnit(e.target.value)} />
           </div>
-          <TextareaField label={t('intakeNotes')} value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} />
-          <div className="action-bar">
-            <Button variant="primary" size="sm" disabled={busy} onClick={() => void saveIntake()}>{busy ? t('common:saving') : t('common:save')}</Button>
-          </div>
+          <TextareaField label={t('intakeNotes')} value={notes} readOnly={ro} onChange={(e) => setNotes(e.target.value)} rows={2} />
+          {ro ? null : (
+            <div className="action-bar">
+              <Button variant="primary" size="sm" disabled={busy} onClick={() => void saveIntake()}>{busy ? t('common:saving') : t('common:save')}</Button>
+            </div>
+          )}
         </section>
 
         <section aria-label={t('evidenceSectionLabel')} className="u-flex u-flex-col u-gap-2">
@@ -204,22 +210,22 @@ export function IdeaIntakePanel(props: {
                   <LinkIcon size={12} />
                   <span className="chip chip--muted u-fs-11">{t(`evidenceKind_${ev.kind}`)}</span>
                   <span className="u-fs-12 u-flex-1">{ev.label ?? ev.ref}</span>
-                  <Button variant="quiet" size="sm" aria-label={t('evidenceRemove')} onClick={() => { void removeIdeaEvidence(listId, idea.card.id, ev.evidenceId).then(refresh).catch((e) => setModalError(e instanceof Error ? e.message : t('evidenceRemoveFailed'))); }}><TrashIcon size={12} /></Button>
+                  {ro ? null : <Button variant="quiet" size="sm" aria-label={t('evidenceRemove')} onClick={() => { void removeIdeaEvidence(listId, idea.card.id, ev.evidenceId).then(refresh).catch((e) => setModalError(e instanceof Error ? e.message : t('evidenceRemoveFailed'))); }}><TrashIcon size={12} /></Button>}
                 </li>
               ))}
             </ul>
           )}
-          <div className="surface-form">
+          {ro ? null : <div className="surface-form">
             <SelectField label={t('evidenceKind')} value={evKind} onChange={(e) => setEvKind(e.target.value as (typeof EVIDENCE_KINDS)[number])}>
               {EVIDENCE_KINDS.map((k) => <option key={k} value={k}>{t(`evidenceKind_${k}`)}</option>)}
             </SelectField>
             <TextField label={t('evidenceRef')} value={evRef} onChange={(e) => setEvRef(e.target.value)} className="u-flex-1" />
             <TextField label={t('evidenceLabel')} value={evLabel} onChange={(e) => setEvLabel(e.target.value)} />
             <Button variant="quiet" size="sm" disabled={busy || !evRef.trim()} onClick={() => void addEvidence()}><PlusIcon size={13} /> {t('evidenceAdd')}</Button>
-          </div>
+          </div>}
         </section>
 
-        <section aria-label={t('actionsSectionLabel')} className="u-flex u-flex-col u-gap-2">
+        {ro ? null : <section aria-label={t('actionsSectionLabel')} className="u-flex u-flex-col u-gap-2">
           <h4 className="u-m-0 u-fs-12 muted">{t('actionsSectionLabel')}</h4>
           <div className="surface-form">
             <SelectField label={t('mergeSelect')} value={mergeFrom} onChange={(e) => setMergeFrom(e.target.value)} className="u-flex-1">
@@ -232,7 +238,7 @@ export function IdeaIntakePanel(props: {
           <div className="action-bar">
             <Button variant="primary" size="sm" disabled={busy || Boolean(intake?.promotedTo)} onClick={() => void doPromote()}>{t('promoteToProject')}</Button>
           </div>
-        </section>
+        </section>}
 
         <ScoreHistorySection listId={listId} cardId={idea.card.id} />
       </div>

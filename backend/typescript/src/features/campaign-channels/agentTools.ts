@@ -44,7 +44,7 @@ const log = createLogger('campaign-channels.generator-tools');
 export const CAMPAIGN_CHANNELS_LIST_TOOL_ID = 'openwop:campaign-channels.channels';
 export const CAMPAIGN_CHANNELS_GENERATE_TOOL_ID = 'openwop:campaign-channels.generate';
 
-const GENERATOR_AGENT_ID = 'feature.campaign-channels.agents.channel-generator';
+const GENERATOR_AGENT_ID = 'vendor.openwop-app.campaign-channels.agents.channel-generator';
 const TOGGLE_ID = 'campaign-channels';
 
 /** channel (underscore, the brief/kernel vocabulary) → child workflow id (hyphen,
@@ -72,7 +72,12 @@ async function channelsEnabled(tenantId: string, actingUserId: string | undefine
 
 /** The SAME predicate the campaign-brief routes enforce — `resolveEffectiveAccess`
  *  on the brief's org. */
-async function hasOrgScope(tenantId: string, subject: string | undefined, orgId: string, scope: Scope): Promise<boolean> {
+// `subject` is REQUIRED. `resolveEffectiveAccess` answers OWNER when no subject is
+// given ("the caller is the tenant's own principal"), so a helper that accepted
+// `undefined` would turn a missing acting user into full access. Every caller
+// already returns early without one; the type now makes a future caller that
+// forgets fail to compile (the KEY-19 shape, ADR 0797).
+async function hasOrgScope(tenantId: string, subject: string, orgId: string, scope: Scope): Promise<boolean> {
   const access = await resolveEffectiveAccess(tenantId, { subject, orgId });
   return access.scopes.includes(scope);
 }
@@ -177,6 +182,7 @@ export async function runChannelGenerateTool(deps: StartRunDeps, input: Record<s
 export function registerCampaignChannelsAgentTools(deps: StartRunDeps): void {
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     // ADR 0604 review H4 — the closed channel catalog. `channelCatalog()`'s own
     // comment states the property verbatim: "grounds the agent — never a
     // guessed channel id", and each entry carries the `workflowId` the
@@ -205,6 +211,7 @@ export function registerCampaignChannelsAgentTools(deps: StartRunDeps): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: CAMPAIGN_CHANNELS_GENERATE_TOOL_ID,
       description:

@@ -74,11 +74,11 @@ function client() {
 }
 async function shopOwner(): Promise<{ owner: ReturnType<typeof client>; orgId: string; tenantId: string }> {
   const owner = client();
-  const r = await owner.post('/v1/host/openwop-app/test/login', { email: `p3-${Date.now()}-${n++}@acme.test` });
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Shop' });
+  const r = await owner.post('/host/openwop-app/test/login', { email: `p3-${Date.now()}-${n++}@acme.test` });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Shop' });
   return { owner, orgId: org.body.orgId, tenantId: r.body.user?.tenantId ?? '' };
 }
-const c = (orgId: string, s = ''): string => `/v1/host/openwop-app/commerce/orgs/${encodeURIComponent(orgId)}${s}`;
+const c = (orgId: string, s = ''): string => `/host/openwop-app/commerce/orgs/${encodeURIComponent(orgId)}${s}`;
 
 describe('DEF-4 — product attributes', () => {
   it('round-trips bounded attributes through admin + public storefront; drops blanks/dupes', async () => {
@@ -96,18 +96,18 @@ describe('DEF-4 — product attributes', () => {
     expect(p.status).toBe(201);
     expect(p.body.attributes).toEqual([{ label: 'Material', value: 'Cotton' }, { label: 'Origin', value: 'Portugal' }]);
     // Public storefront exposes them.
-    const pub = await owner.get(`/v1/host/openwop-app/public-store/${encodeURIComponent(orgId)}/products`);
+    const pub = await owner.get(`/host/openwop-app/public-store/${encodeURIComponent(orgId)}/products`);
     const sp = (pub.body.products as any[]).find((x) => x.productId === p.body.productId);
     expect(sp.attributes).toEqual([{ label: 'Material', value: 'Cotton' }, { label: 'Origin', value: 'Portugal' }]);
   });
 });
 
 describe('DEF-8 — Deal-on-paid (opt-in)', () => {
-  const deals = (orgId: string): string => `/v1/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}/deals`;
+  const deals = (orgId: string): string => `/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}/deals`;
   it('opt-in ⇒ a paid order with a contact opens exactly one won Deal', async () => {
     const { owner, orgId, tenantId } = await shopOwner();
     await setGovernancePolicy(tenantId, { commerce: { dealOnPaid: true } }, 'test');
-    const contact = await owner.post('/v1/host/openwop-app/crm/contacts', { name: 'Buyer', email: `b-${n++}@x.test` });
+    const contact = await owner.post('/host/openwop-app/crm/contacts', { name: 'Buyer', email: `b-${n++}@x.test` });
     const p = await owner.post(c(orgId, '/products'), { type: 'digital', name: 'Guide', price: 40, currency: 'USD' });
     const o = await owner.post(c(orgId, '/orders'), { contactId: contact.body.contactId, lines: [{ productId: p.body.productId, quantity: 1 }] });
     await owner.post(c(orgId, `/orders/${encodeURIComponent(o.body.orderId)}/pay`), { paymentIntentId: 'demo:pi' });
@@ -119,7 +119,7 @@ describe('DEF-8 — Deal-on-paid (opt-in)', () => {
   });
   it('opt-out (default) ⇒ no Deal is created', async () => {
     const { owner, orgId } = await shopOwner();
-    const contact = await owner.post('/v1/host/openwop-app/crm/contacts', { name: 'Buyer2', email: `b2-${n++}@x.test` });
+    const contact = await owner.post('/host/openwop-app/crm/contacts', { name: 'Buyer2', email: `b2-${n++}@x.test` });
     const p = await owner.post(c(orgId, '/products'), { type: 'digital', name: 'Guide2', price: 15, currency: 'USD' });
     const o = await owner.post(c(orgId, '/orders'), { contactId: contact.body.contactId, lines: [{ productId: p.body.productId, quantity: 1 }] });
     await owner.post(c(orgId, `/orders/${encodeURIComponent(o.body.orderId)}/pay`), { paymentIntentId: 'demo:pi' });

@@ -5,11 +5,12 @@
  * BYOK `refs`; the key value never touches the FE, only the ref.
  */
 import { Button } from '../ui/Button.js';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { SelectField, TextField } from '../ui/Field.js';
+import { CheckboxField, SelectField, TextField } from '../ui/Field.js';
 import { Notice } from '../ui/index.js';
 import { getAiDefault, setAiDefault, clearAiDefault, type HeadlessAiDefault } from './lib/byokClient.js';
+import { byokErrorMessage, useByokWriteAccess } from './lib/byokWriteAccess.js';
 
 const PROVIDERS: ReadonlyArray<HeadlessAiDefault['provider']> = ['google', 'anthropic', 'openai'];
 
@@ -18,30 +19,44 @@ export function AiDefaultCard({ refs }: { refs: readonly string[] }): JSX.Elemen
   const [provider, setProvider] = useState<HeadlessAiDefault['provider']>('google');
   const [model, setModel] = useState('');
   const [credentialRef, setCredentialRef] = useState('');
+  // ADR 0821 D5 (architect #8) — who pays for background text calls is the
+  // tenant's decision: OFF unless an admin turns it on. Saved with the binding.
+  const [preferForText, setPreferForText] = useState(false);
   const [existing, setExisting] = useState<HeadlessAiDefault | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<{ variant: 'success' | 'error'; msg: string } | null>(null);
+  // ADR 0779 D7 — a failed READ used to be swallowed and render as "no default",
+  // which invites an admin to overwrite a binding that exists. Say it failed.
+  const [loadFailed, setLoadFailed] = useState(false);
+  const canManage = useByokWriteAccess();
 
-  useEffect(() => {
+  // The Retry keeps its Notice (and its focus) mounted until the read resolves
+  // (DESIGN §4.6: a user-initiated retry keeps focus on its button).
+  const [retrying, setRetrying] = useState(false);
+  const load = useCallback(() => {
+    setRetrying(true);
     void getAiDefault().then((d) => {
+      setLoadFailed(false);
       setExisting(d);
-      if (d) { setProvider(d.provider); setModel(d.model); setCredentialRef(d.credentialRef); }
-    }).catch(() => undefined);
+      if (d) { setProvider(d.provider); setModel(d.model); setCredentialRef(d.credentialRef); setPreferForText(d.preferForText === true); }
+    }).catch(() => setLoadFailed(true)).finally(() => setRetrying(false));
   }, []);
+  useEffect(() => { load(); }, [load]);
 
   const hasRefs = refs.length > 0;
-  const canSave = hasRefs && model.trim().length > 0 && credentialRef.length > 0 && !busy;
+  const canSave = canManage && !loadFailed && !retrying && hasRefs && model.trim().length > 0 && credentialRef.length > 0 && !busy;
   // Audio transcription only works on Google (Gemini); images work on any of the three.
   const audioWarn = provider !== 'google';
 
   async function save(): Promise<void> {
     setBusy(true); setNotice(null);
     try {
-      const saved = await setAiDefault({ provider, model: model.trim(), credentialRef });
+      const saved = await setAiDefault({ provider, model: model.trim(), credentialRef, preferForText });
+      setPreferForText(saved.preferForText === true);
       setExisting(saved);
       setNotice({ variant: 'success', msg: t('aiDefaultSaved') });
     } catch (err) {
-      setNotice({ variant: 'error', msg: err instanceof Error ? err.message : t('aiDefaultError') });
+      setNotice({ variant: 'error', msg: `${t('aiDefaultError')} ${byokErrorMessage(t, err)}` });
     } finally { setBusy(false); }
   }
 
@@ -49,10 +64,10 @@ export function AiDefaultCard({ refs }: { refs: readonly string[] }): JSX.Elemen
     setBusy(true); setNotice(null);
     try {
       await clearAiDefault();
-      setExisting(null); setModel(''); setCredentialRef('');
+      setExisting(null); setModel(''); setCredentialRef(''); setPreferForText(false);
       setNotice({ variant: 'success', msg: t('aiDefaultCleared') });
     } catch (err) {
-      setNotice({ variant: 'error', msg: err instanceof Error ? err.message : t('aiDefaultError') });
+      setNotice({ variant: 'error', msg: byokErrorMessage(t, err) });
     } finally { setBusy(false); }
   }
 
@@ -61,24 +76,42 @@ export function AiDefaultCard({ refs }: { refs: readonly string[] }): JSX.Elemen
       <h2 className="u-fs-16 u-m-0 u-mb-1">{t('aiDefaultTitle')}</h2>
       <p className="field-help u-mb-2">{t('aiDefaultIntro')}</p>
 
+      {loadFailed ? (
+        <Notice variant="warning" announce={t('aiDefaultLoadFailed')}>
+          {t('aiDefaultLoadFailed')}{' '}
+          <Button variant="quiet" onClick={load} disabled={retrying} aria-busy={retrying}>{t('common:retry')}</Button>
+        </Notice>
+      ) : null}
+      {!canManage ? <p className="muted u-m-0 u-mb-2">{t('aiDefaultReadOnly')}</p> : null}
       {!hasRefs ? (
         <Notice variant="info">{t('aiDefaultNoKeys')}</Notice>
       ) : (
         <>
-          <SelectField label={t('aiDefaultProvider')} help={t('aiDefaultProviderHelp')} value={provider} onChange={(e) => setProvider(e.target.value as HeadlessAiDefault['provider'])}>
+          <SelectField label={t('aiDefaultProvider')} disabled={!canManage} help={t('aiDefaultProviderHelp')} value={provider} onChange={(e) => setProvider(e.target.value as HeadlessAiDefault['provider'])}>
             {PROVIDERS.map((p) => <option key={p} value={p}>{t(`provider_${p}`)}</option>)}
           </SelectField>
           {audioWarn ? <Notice variant="warning">{t('aiDefaultAudioWarn')}</Notice> : null}
-          <TextField label={t('aiDefaultModel')} help={t('aiDefaultModelHelp')} value={model} onChange={(e) => setModel(e.target.value)} placeholder="gemini-3.1-flash-lite" />
-          <SelectField label={t('aiDefaultKey')} help={t('aiDefaultKeyHelp')} value={credentialRef} onChange={(e) => setCredentialRef(e.target.value)}>
+          <TextField label={t('aiDefaultModel')} disabled={!canManage} help={t('aiDefaultModelHelp')} value={model} onChange={(e) => setModel(e.target.value)} placeholder="gemini-3.1-flash-lite" />
+          <SelectField label={t('aiDefaultKey')} disabled={!canManage} help={t('aiDefaultKeyHelp')} value={credentialRef} onChange={(e) => setCredentialRef(e.target.value)}>
             <option value="">{t('aiDefaultKeyPlaceholder')}</option>
             {refs.map((r) => <option key={r} value={r}>{r}</option>)}
           </SelectField>
+          <CheckboxField
+            role="switch"
+            className="u-mt-2"
+            label={t('aiDefaultPreferText')}
+            help={t('aiDefaultPreferTextHelp')}
+            checked={preferForText}
+            disabled={!canManage}
+            onChange={(e) => setPreferForText(e.target.checked)}
+          />
 
-          <div className="u-flex u-gap-2 u-mt-2">
-            <Button variant="primary" disabled={!canSave} onClick={() => void save()}>{t('aiDefaultSave')}</Button>
-            {existing ? <Button variant="quiet" disabled={busy} onClick={() => void clear()}>{t('aiDefaultClear')}</Button> : null}
-          </div>
+          {canManage ? (
+            <div className="u-flex u-gap-2 u-mt-2">
+              <Button variant="primary" disabled={!canSave} onClick={() => void save()}>{t('aiDefaultSave')}</Button>
+              {existing ? <Button variant="quiet" disabled={busy} onClick={() => void clear()}>{t('aiDefaultClear')}</Button> : null}
+            </div>
+          ) : null}
         </>
       )}
       {/* The ACTION RESULT of Save/Clear, and the asymmetry is the point: `notice.variant`

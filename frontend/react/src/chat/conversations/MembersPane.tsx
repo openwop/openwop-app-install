@@ -23,6 +23,7 @@ import type { ChannelRosterEntry } from '../../client/channelsClient.js';
 import { XIcon } from '../../ui/icons/index.js';
 
 const ChannelRosterPanel = lazy(() => import('./ChannelRosterPanel.js').then((m) => ({ default: m.ChannelRosterPanel })));
+const ChannelLedgerPanel = lazy(() => import('./ChannelLedgerPanel.js').then((m) => ({ default: m.ChannelLedgerPanel })));
 const ChannelPresenceBar = lazy(() => import('./ChannelPresenceBar.js').then((m) => ({ default: m.ChannelPresenceBar })));
 
 interface Props {
@@ -81,6 +82,7 @@ export function MembersPane({
         {isChannel && channelRoster ? (
           <Suspense fallback={null}>
             <ChannelPresenceBar channelId={channelId} />
+            <ChannelLedgerPanel channelId={channelId} />
             <ChannelRosterPanel
               roster={channelRoster.roster}
               viewerIsOwner={channelRoster.viewerIsOwner}

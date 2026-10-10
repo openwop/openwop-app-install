@@ -61,8 +61,8 @@ import { CONFORMANCE_HTTP_EFFECT_TYPE_ID } from '../bootstrap/conformanceHttpEff
 
 const log = createLogger('durability-seam');
 
-export const DURABILITY_KILL_PATH = '/v1/host/durability/kill';
-export const DURABILITY_BOUND_PATH = '/v1/host/durability/bound';
+export const DURABILITY_KILL_PATH = '/host/durability/kill';
+export const DURABILITY_BOUND_PATH = '/host/durability/bound';
 
 /** The modes that end in a process death. */
 export const KILL_MODES = ['after-accept', 'during-execution'] as const;

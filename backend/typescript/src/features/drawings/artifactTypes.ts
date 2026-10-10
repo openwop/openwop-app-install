@@ -6,6 +6,7 @@
  * no raw markup). The "raster/vector" canvas of Phase 4; `cad` (WebGL) is separate.
  */
 import { registerArtifactType } from '../../host/artifactTypes.js';
+import { ASSET_SERVE_PATH_PATTERN } from '../../host/assetServePath.js';
 
 const POINT = { type: 'object', required: ['x', 'y'], properties: { x: { type: 'number' }, y: { type: 'number' } }, additionalProperties: false };
 // ADR 0333 grade pass CODE-D4 — a safe SVG paint grammar (no url()/var() that
@@ -72,7 +73,7 @@ export function drawingSchema(): Record<string, unknown> {
             // ADR 0401 follow-through — the `image` kind: a HOST media-asset
             // serve path only (external URLs = viewer beacons + break the
             // SVG-as-image PNG export). Mirrors validateDrawingDoc.
-            src: { type: 'string', maxLength: 600, pattern: '^/v1/host/openwop-app/assets/[A-Za-z0-9_-]{1,512}$' },
+            src: { type: 'string', maxLength: 600, pattern: ASSET_SERVE_PATH_PATTERN },
           },
           additionalProperties: false,
         },

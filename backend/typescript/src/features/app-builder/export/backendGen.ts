@@ -45,6 +45,9 @@ const FIELD_DRIZZLE: Record<string, { col: (name: string) => string; sql: string
   list: { col: (n) => `jsonb('${n}')`, sql: 'jsonb' },
 };
 
+/** Text safe inside a generated `//` comment: no line terminator survives. */
+const oneLine = (raw: string): string => raw.replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, ' ').slice(0, 120);
+
 const ident = (raw: unknown): string | null => {
   const s = String(raw ?? '');
   return /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(s) ? s : null;
@@ -60,7 +63,7 @@ function cleanModels(state: Record<string, unknown>): Array<{ id: string; fields
     for (const f of (m.fields ?? []).slice(0, MAX_FIELDS)) {
       const name = ident(f?.name);
       if (!name || name === 'id') continue;
-      const type = FIELD_DRIZZLE[String(f?.type)] ? String(f?.type) : 'string';
+      const type = Object.hasOwn(FIELD_DRIZZLE, String(f?.type)) ? String(f?.type) : 'string';
       fields.push({ name, type, required: f?.required === true });
     }
     out.push({ id, fields });
@@ -77,13 +80,16 @@ function cleanOps(state: Record<string, unknown>): Array<{ id: string; kind: str
     const input = [];
     for (const f of (op.input ?? []).slice(0, MAX_FIELDS)) {
       const name = ident(f?.name);
-      if (name) input.push({ name, type: FIELD_DRIZZLE[String(f?.type)] ? String(f?.type) : 'string', required: f?.required === true });
+      if (name) input.push({ name, type: Object.hasOwn(FIELD_DRIZZLE, String(f?.type)) ? String(f?.type) : 'string', required: f?.required === true });
     }
     out.push({
       id,
-      kind: KIND_METHOD[String(op?.kind)] ? String(op?.kind) : 'action',
+      kind: Object.hasOwn(KIND_METHOD, String(op?.kind)) ? String(op?.kind) : 'action',
       modelId: ident(op?.modelId),
-      name: typeof op?.name === 'string' ? op.name : id,
+      // ADR 0835 D2 — `name` lands in a `//` line comment in the generated
+      // server, and the validator allows a newline in it: a line terminator
+      // (JS has four) would end the comment and make the rest live code.
+      name: typeof op?.name === 'string' ? oneLine(op.name) : id,
       input,
       outputType: String(op?.output?.type ?? ''),
       outputFields: (op?.output?.fields ?? []).slice(0, MAX_FIELDS).flatMap((f) => {

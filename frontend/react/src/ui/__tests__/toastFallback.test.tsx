@@ -4,7 +4,7 @@
  * retries once and then renders the minimal in-entry fallback stack.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { render, cleanup, screen, within, fireEvent } from '@testing-library/react';
+import { render, cleanup, screen, within, fireEvent, waitFor } from '@testing-library/react';
 
 vi.mock('../ToasterView.js', () => { throw new Error('chunk load failed'); });
 
@@ -18,6 +18,7 @@ describe('Toaster — the view chunk fails to load', () => {
     const region = await screen.findByRole('region', { name: 'Notifications' }, { timeout: 5000 });
     expect(within(region).getByText('Still visible')).toBeTruthy();
     fireEvent.click(within(region).getByRole('button', { name: 'Dismiss' }));
-    expect(within(region).queryByText('Still visible')).toBeNull();
+    // The dismissal renders asynchronously; a synchronous read races it under load (#4176).
+    await waitFor(() => expect(within(region).queryByText('Still visible')).toBeNull(), { timeout: 5000 });
   }, 10_000);
 });

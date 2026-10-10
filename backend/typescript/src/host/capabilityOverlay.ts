@@ -75,6 +75,19 @@ export function resolveCapabilityFlag(name: string): boolean | undefined {
   return DEFAULTS[name];
 }
 
+/**
+ * ADR 0858 P3 slice 3 — THE one fact behind `subWorkflow.inputMapping` at
+ * major 2. `execution.md` §subWorkflow binds the advert and the register-time
+ * refusal together ("a host not advertising `subWorkflow.inputMapping` MUST
+ * refuse a non-empty `inputMapping` … with `validation_error`"), so both read
+ * THIS function: the v2 `subWorkflow` record (`routes/discovery.ts`) and the
+ * refusal (`workflowDefinitionValidation.ts`). The capability-toggle seam moves
+ * both at once; there is no second copy of the fact to drift.
+ */
+export function subWorkflowInputMappingHonoured(): boolean {
+  return resolveCapabilityFlag('subWorkflow.inputMapping') === true;
+}
+
 /** Set an overlay value. `undefined` removes the entry (restoring default). */
 export function setCapabilityOverlay(name: string, value: boolean | undefined): void {
   if (value === undefined) overlay.delete(name);

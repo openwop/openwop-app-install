@@ -34,18 +34,17 @@ afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); 
 
 const AUTH = { Authorization: 'Bearer dev-token', 'Content-Type': 'application/json' };
 
-async function subscribe(major: 1 | 2): Promise<string> {
-  // The path KEY follows the major (`versioning.md` §5): a `/v1/` key serves the
-  // 1.x contract and refuses `OpenWOP-Version: 2` with protocol_version_mismatch
-  // — measured on the first run of this test — so major 2 posts the bare key.
-  const res = await fetch(`${base}${major === 2 ? '/webhooks' : '/v1/webhooks'}`, {
+async function subscribe(): Promise<string> {
+  // ADR 0812 P3c-0 — major 2 only: the `OpenWOP-Version: 1.1` subscriber leg
+  // went with major 1 (the header is 406 on a host that retired it).
+  const res = await fetch(`${base}/webhooks`, {
     method: 'POST',
-    headers: { ...AUTH, 'OpenWOP-Version': major === 2 ? '2.0' : '1.1' },
+    headers: { ...AUTH, 'OpenWOP-Version': '2.0' },
     body: JSON.stringify({ url: 'https://receiver.example.test/hook', events: ['run.started'] }),
   });
   const body = await res.json() as { subscriptionId?: string; subscription?: { subscriptionId?: string } };
   const id = body.subscriptionId ?? body.subscription?.subscriptionId;
-  if (res.status !== 201 || !id) throw new Error(`subscribe(${major}) answered ${res.status}: ${JSON.stringify(body).slice(0, 200)}`);
+  if (res.status !== 201 || !id) throw new Error(`subscribe answered ${res.status}: ${JSON.stringify(body).slice(0, 200)}`);
   return id;
 }
 
@@ -76,7 +75,7 @@ async function deliveredPayload(storage: Storage, subscriptionId: string): Promi
 describe('ADR 0722 — the webhook fan-out is a projected major-2 egress channel', () => {
   it('a MAJOR-2 subscriber gets the closed v2 owner block, not the persisted v1 one', async () => {
     const storage = app.locals['storage'] as Storage;
-    const subId = await subscribe(2);
+    const subId = await subscribe();
     await startRunWithV1Owner(storage, 'run-adr0722-major2-000001');
     const body = await deliveredPayload(storage, subId);
     const event = (body['event'] ?? body) as { type?: string; payload?: { owner?: Record<string, unknown> } };
@@ -86,17 +85,8 @@ describe('ADR 0722 — the webhook fan-out is a projected major-2 egress channel
     expect('principal' in owner, 'the v1 principal must not reach a v2 subscriber').toBe(false);
   });
 
-  it('a MAJOR-1 subscriber still gets the v1 dialect untouched (the projection is contract-scoped)', async () => {
-    // Non-vacuity in the dangerous direction: a projection that ran for every
-    // subscriber would change the v1 wire during the overlap, which
-    // `versioning.md` §1.2 forbids.
-    const storage = app.locals['storage'] as Storage;
-    const subId = await subscribe(1);
-    await startRunWithV1Owner(storage, 'run-adr0722-major1-000001');
-    const body = await deliveredPayload(storage, subId);
-    const owner = ((body as { payload?: { owner?: Record<string, unknown> } }).payload?.owner) ?? {};
-    expect('principal' in owner, 'v1 keeps its principal').toBe(true);
-  });
+  // ADR 0812 P3c-0: the "MAJOR-1 subscriber still gets the v1 dialect" control
+  // leg was deleted with major 1 — there is no major-1 subscriber to keep apart.
 
   it('the major-2 delivery ENVELOPE validates against webhook-delivery.schema.json — the reader the body never had (Phase E)', async () => {
     // The corrected `v2-webhook-delivery-shape` scenario (corpus 2.3.2) is the
@@ -119,7 +109,7 @@ describe('ADR 0722 — the webhook fan-out is a projected major-2 egress channel
     const validate = ajv.compile({ $ref: 'https://openwop.dev/spec/v2/webhook-delivery.schema.json' });
 
     const storage = app.locals['storage'] as Storage;
-    const subId = await subscribe(2);
+    const subId = await subscribe();
     await startRunWithV1Owner(storage, 'run-adr0722-envelope-0000001');
     const body = await deliveredPayload(storage, subId);
     expect(validate(body), `delivery envelope: ${ajv.errorsText(validate.errors)}`).toBe(true);

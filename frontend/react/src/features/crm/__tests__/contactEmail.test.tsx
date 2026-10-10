@@ -6,34 +6,43 @@
  * consent, and Gmail sync — and the console could neither SHOW nor SET it.
  * An agent-set email was invisible; a human-created contact could never be
  * emailed. The exact round-1 CRM-G1 shape, on the CRM's most important field.
+ *
+ * Sabotage that turns it red (wave-4 /grade-tests probes, 4/4 witnessed): the
+ * list rendering the email without its mailto link; a blank email sent as
+ * `email: ''`; a cleared email PATCHed as `''` instead of `null`; leadSource
+ * dropped from the search predicate.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import type * as CrmClient from '../crmClient.js';
 import type { Contact } from '../crmClient.js';
 
-const listContacts = vi.fn();
-const createContact = vi.fn();
-const updateContactFields = vi.fn();
+const listContacts = vi.fn<typeof CrmClient.listContacts>();
+const createContact = vi.fn<typeof CrmClient.createContact>();
+const updateContactFields = vi.fn<typeof CrmClient.updateContactFields>();
 vi.mock('../crmClient.js', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
-  listContacts: (...a: unknown[]) => listContacts(...a),
-  createContact: (...a: unknown[]) => createContact(...a),
-  updateContactFields: (...a: unknown[]) => updateContactFields(...a),
-  listSegments: vi.fn(async () => []),
+  listContacts: (...a: Parameters<typeof CrmClient.listContacts>) => listContacts(...a),
+  createContact: (...a: Parameters<typeof CrmClient.createContact>) => createContact(...a),
+  updateContactFields: (...a: Parameters<typeof CrmClient.updateContactFields>) => updateContactFields(...a),
+  listSegments: vi.fn<typeof CrmClient.listSegments>(async () => []),
   // CRM-UX-7 — stubbed because this factory SPREADS the original: an unstubbed
   // export is a REAL fetch from a jsdom test.
-  listContactFields: vi.fn(async () => []),
+  listContactFields: vi.fn<typeof CrmClient.listContactFields>(async () => []),
 }));
 
 const { ContactsTab } = await import('../ContactsTab.js');
 
-const contact = (id: string, name: string, over: Partial<Contact> = {}): Contact =>
-  ({ contactId: id, name, stage: 'lead', ...over } as Contact);
+// A COMPLETE `Contact` — no cast: a field the type requires is a type error here.
+const contact = (id: string, name: string, over: Partial<Contact> = {}): Contact => ({
+  contactId: id, tenantId: 't1', name, stage: 'lead',
+  createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z', ...over,
+});
 
 const renderTab = () => render(<MemoryRouter><ContactsTab /></MemoryRouter>);
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => { vi.resetAllMocks(); });
 afterEach(cleanup);
 
 describe('CRM contacts — the email a human could not see or set (CC-SP-1)', () => {
@@ -55,13 +64,13 @@ describe('CRM contacts — the email a human could not see or set (CC-SP-1)', ()
     await waitFor(() => expect(createContact).toHaveBeenCalled());
     expect(createContact.mock.calls[0]![0]).toMatchObject({ name: 'New person', email: 'new@example.com' });
 
-    vi.clearAllMocks();
+    createContact.mockClear();
     listContacts.mockResolvedValue([]);
     createContact.mockResolvedValue(contact('c10', 'No mail'));
     fireEvent.change(screen.getByLabelText(/^name$/i), { target: { value: 'No mail' } });
     fireEvent.click(screen.getByRole('button', { name: /add contact/i }));
     await waitFor(() => expect(createContact).toHaveBeenCalled());
-    expect('email' in (createContact.mock.calls[0]![0] as Record<string, unknown>)).toBe(false);
+    expect('email' in createContact.mock.calls[0]![0]).toBe(false);
   });
 
   it('the modal edit PATCHes the email — a real email input, not window.prompt (review F5)', async () => {

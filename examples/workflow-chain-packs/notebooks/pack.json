@@ -1,18 +1,18 @@
 {
   "name": "core.openwop.workflows.notebooks",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "kind": "workflow-chain",
   "description": "Notebooks workflows (summarize, transform, ingest-audio, ingest-youtube), migrated from the deprecated builtins (ADR 0472 P4). chainIds keep the original ids so ignition + replay resolve unchanged; node outputRoles restored at registration.",
   "keywords": [
     "Notebooks"
   ],
   "engines": {
-    "openwop": ">=1.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "chains": [
     {
       "chainId": "notebooks.summarize",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "notebooks.summarize",
       "description": "Notebooks notebooks.summarize workflow.",
       "parameters": {
@@ -37,7 +37,7 @@
         "nodes": [
           {
             "id": "read",
-            "typeId": "feature.notebooks.nodes.read-source",
+            "typeId": "feature.notebooks.nodes.read-source@1.0.0",
             "inputs": {
               "notebookId": "{{params.notebookId}}",
               "sourceId": "{{params.sourceId}}"
@@ -45,7 +45,7 @@
           },
           {
             "id": "generate",
-            "typeId": "core.ai.chatCompletion",
+            "typeId": "core.ai.chatCompletion@1.0.0",
             "config": {
               "provider": "anthropic",
               "model": "claude-sonnet-4-6",
@@ -54,7 +54,7 @@
           },
           {
             "id": "store",
-            "typeId": "feature.notebooks.nodes.store-summary",
+            "typeId": "feature.notebooks.nodes.store-summary@1.1.0",
             "inputs": {
               "notebookId": "{{params.notebookId}}",
               "sourceId": "{{params.sourceId}}"
@@ -77,7 +77,7 @@
     },
     {
       "chainId": "notebooks.transform",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "notebooks.transform",
       "description": "Notebooks notebooks.transform workflow.",
       "parameters": {
@@ -127,7 +127,7 @@
         "nodes": [
           {
             "id": "read",
-            "typeId": "feature.notebooks.nodes.read-source",
+            "typeId": "feature.notebooks.nodes.read-source@1.0.0",
             "inputs": {
               "notebookId": "{{params.notebookId}}",
               "sourceId": "{{params.sourceId}}",
@@ -136,7 +136,7 @@
           },
           {
             "id": "generate",
-            "typeId": "core.ai.chatCompletion",
+            "typeId": "core.ai.chatCompletion@1.0.0",
             "config": {
               "provider": "anthropic",
               "model": "claude-sonnet-4-6"
@@ -144,7 +144,7 @@
           },
           {
             "id": "write",
-            "typeId": "feature.notebooks.nodes.write-transformation",
+            "typeId": "feature.notebooks.nodes.write-transformation@1.1.0",
             "inputs": {
               "orgId": "{{params.orgId}}",
               "title": "{{params.title}}",
@@ -170,7 +170,7 @@
     },
     {
       "chainId": "notebooks.ingest-audio",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "notebooks.ingest-audio",
       "description": "Notebooks notebooks.ingest-audio workflow.",
       "parameters": {
@@ -213,7 +213,7 @@
         "nodes": [
           {
             "id": "transcribe",
-            "typeId": "feature.notebooks.nodes.transcribe-source",
+            "typeId": "feature.notebooks.nodes.transcribe-source@1.0.0",
             "inputs": {
               "audioBase64": "{{params.audioBase64}}",
               "mimeType": "{{params.mimeType}}",
@@ -222,7 +222,7 @@
           },
           {
             "id": "ingest",
-            "typeId": "feature.notebooks.nodes.ingest-source",
+            "typeId": "feature.notebooks.nodes.ingest-source@1.1.0",
             "inputs": {
               "notebookId": "{{params.notebookId}}",
               "title": "{{params.title}}",
@@ -241,7 +241,7 @@
     },
     {
       "chainId": "notebooks.ingest-youtube",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "notebooks.ingest-youtube",
       "description": "Notebooks notebooks.ingest-youtube workflow.",
       "parameters": {
@@ -275,14 +275,14 @@
         "nodes": [
           {
             "id": "fetch",
-            "typeId": "feature.notebooks.nodes.fetch-youtube-source",
+            "typeId": "feature.notebooks.nodes.fetch-youtube-source@1.0.0",
             "inputs": {
               "url": "{{params.url}}"
             }
           },
           {
             "id": "ingest",
-            "typeId": "feature.notebooks.nodes.ingest-source",
+            "typeId": "feature.notebooks.nodes.ingest-source@1.1.0",
             "inputs": {
               "notebookId": "{{params.notebookId}}",
               "title": "{{params.title}}",

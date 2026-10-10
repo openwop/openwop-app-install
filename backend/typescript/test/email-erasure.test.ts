@@ -16,11 +16,15 @@
  * the claim under test. Each case seeds through the real write path, runs the
  * real host fan-out (`eraseSubject`, not the private handler), and then asserts
  * the data is gone.
+ *
+ * Sabotage-witnessed (w9 grade-tests): dropping the soft-bounce leg, the engagement
+ * leg, the address match, or the subject match (over-reach) each turn a case red.
+ * Recorded DOUBLE GUARD (honest ceiling): "leaves ANOTHER tenant's tokens alone"
+ * cannot fail on the eraser's `row.tenantId` re-check alone — the tenant-indexed read
+ * already excludes another tenant's rows. It stays as the cross-tenant witness.
  */
 
-import http from 'node:http';
-import type { AddressInfo } from 'node:net';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { eraseSubject } from '../src/host/subjectErasure.js';
 import {
@@ -28,16 +32,15 @@ import {
   resolvePreferencesToken, __clearEngagement,
 } from '../src/features/email/engagementService.js';
 
-let BASE: string;
-let server: http.Server;
+// Only the link prefix `instrumentBody` writes — no request is ever made, so no server.
+const BASE = 'https://app.example';
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
-  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  // The boot registers the real erasers (the fan-out under test).
+  await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
 });
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 beforeEach(async () => { await __clearEngagement(); });
 
 const T = 'user:email-erasure';
@@ -70,7 +73,7 @@ describe('EM-3 — erasure reaches email:engagement-token', () => {
     const unsub = /public-email\/u\/([^\s]+)/.exec(body)?.[1];
     expect(await resolveUnsubscribeToken(decodeURIComponent(unsub!))).not.toBeNull();
 
-    await eraseSubject(T, 'by-address@example.com');
+    expect((await eraseSubject(T, 'by-address@example.com')).failed).toBe(0);
     expect(await resolveUnsubscribeToken(decodeURIComponent(unsub!))).toBeNull();
   });
 

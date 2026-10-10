@@ -211,17 +211,17 @@ let n = 0;
 async function ownerOrgWithPolicyDoc(): Promise<{ tenantId: string; orgId: string; collectionId: string }> {
   const tenantId = `org:kbchain-${Date.now()}-${n++}`;
   const owner = client();
-  const r = await owner.post('/v1/host/openwop-app/test/login', { email: `kbchain-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await owner.post('/host/openwop-app/test/login', { email: `kbchain-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   const orgId = org.body.orgId as string;
 
-  const col = await owner.post(`/v1/host/openwop-app/kb/orgs/${orgId}/collections`, { name: 'HR Policies' });
+  const col = await owner.post(`/host/openwop-app/kb/orgs/${orgId}/collections`, { name: 'HR Policies' });
   expect(col.status, JSON.stringify(col.body)).toBe(201);
   const collectionId = col.body.collectionId as string;
 
-  const doc = await owner.post(`/v1/host/openwop-app/kb/orgs/${orgId}/collections/${collectionId}/documents`, {
+  const doc = await owner.post(`/host/openwop-app/kb/orgs/${orgId}/collections/${collectionId}/documents`, {
     title: 'PTO Policy',
     text: 'Employees accrue 15 days of paid time off per year. Unused PTO rolls over up to 5 days into the next calendar year.',
   });

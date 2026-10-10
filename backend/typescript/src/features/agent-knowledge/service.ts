@@ -247,7 +247,7 @@ export async function createBoundCollection(
   // A collection minted THIS instant carries no `boundSubject` (only the project /
   // notebook doors stamp one), and the route already checked org write — so there
   // is no membership to resolve; `PREAUTHORIZED_CALLER` is honest here.
-  await bindCollection(tenantId, agentId, col.collectionId, PREAUTHORIZED_CALLER);
+  await bindCollection(tenantId, agentId, col.collectionId, PREAUTHORIZED_CALLER, 'preauthorized');
   return { collectionId: col.collectionId, orgId, name: col.name, documentCount: col.documentCount, chunkCount: col.chunkCount };
 }
 
@@ -290,9 +290,31 @@ export async function createBoundCollection(
  * removal needs a membership-change seam the host does not expose today and is
  * filed against the ADR rather than half-built here.
  */
-export async function bindCollection(tenantId: string, agentId: string, collectionId: string, caller: SubjectCaller): Promise<void> {
+export async function bindCollection(
+  tenantId: string, agentId: string, collectionId: string, caller: SubjectCaller,
+  /** ADR 0830 D2 (S3) — the binder must be able to READ the collection's org.
+   *  The binding stores only the id and the use lane reads it pre-authorized, so
+   *  a bind the door does not check is a standing read grant for whoever chats
+   *  with the agent. The HTTP door passes the `/kb/orgs/:orgId` predicate here;
+   *  the advisory-board reconciler binds only collections it resolved itself and
+   *  says so with `'preauthorized'`. */
+  assertCollectionOrg: ((orgId: string) => Promise<void>) | 'preauthorized',
+): Promise<void> {
   const found = await findBoundCollection(tenantId, collectionId, caller);
   if (!found) throw new OpenwopError('not_found', 'Collection not found.', 404, { collectionId });
+  // REQUIRED, not optional: a future door that forgets the org check must fail to
+  // compile, not silently skip it. `'preauthorized'` is the spelled-out exception.
+  // A refusal is the SAME 404 an absent id gets (`KBCD-9`): a 403 here would tell the
+  // caller the collection exists in an org they cannot read.
+  if (assertCollectionOrg !== 'preauthorized') {
+    try { await assertCollectionOrg(found.orgId); }
+    catch (err) {
+      if (err instanceof OpenwopError && (err.code === 'forbidden_scope' || err.code === 'not_found')) {
+        throw new OpenwopError('not_found', 'Collection not found.', 404, { collectionId });
+      }
+      throw err;
+    }
+  }
   const profile = await getAgentProfile(tenantId, agentId);
   const current = profile?.knowledge?.collectionIds ?? [];
   if (current.includes(collectionId)) return;

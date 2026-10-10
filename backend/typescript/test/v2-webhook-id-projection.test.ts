@@ -88,16 +88,8 @@ describe('v2 webhook id projection (ADR 0629; versioning.md §5)', () => {
     expect(await deliveredRunId('sub-v2')).toBe(`${TENANT}/${RUN_ID}`);
   });
 
-  it('a subscription with NO recorded major keeps the BARE runId (absent ⇒ 1)', async () => {
-    await register('sub-legacy');
-    const event = { type: 'run.completed', runId: RUN_ID, eventId: 'e2', sequence: 2 } as unknown as EventRecord;
-    await __deliverToSubscribersForTests(storage, event);
-
-    // A subscriber that has only ever seen bare ids cannot correlate a
-    // projected one. Absent MUST mean 1.
-    expect(await deliveredRunId('sub-legacy')).toBe(RUN_ID);
-  });
-
+  // ADR 0812 P3c-0 — the "absent major ⇒ 1 keeps the BARE runId" leg was deleted with major 1
+  // (after the cut a major-1 subscriber is not delivered to at all — v2-webhook-delivery-envelope).
   it('protocolMajor survives the storage round-trip (a field that does not persist is not a field)', async () => {
     await register('sub-roundtrip', 2);
     expect((await storage.getWebhook('sub-roundtrip'))?.protocolMajor).toBe(2);
@@ -126,15 +118,7 @@ describe('v2 webhook event VOCABULARY (ADR 0647 correction, 2026-09-10 — schem
     expect(got.header).toBe(RENAMED_V2);
   });
 
-  it('a major-1 subscription keeps the v1 spelling in body and header', async () => {
-    await register('sub-v1-vocab', 1, [RENAMED_V1]);
-    const event = { type: RENAMED_V1, runId: RUN_ID, eventId: 'e-vocab-2', sequence: 6 } as unknown as EventRecord;
-    await __deliverToSubscribersForTests(storage, event);
-    const got = await deliveredEventType('sub-v1-vocab');
-    expect(got.body).toBe(RENAMED_V1);
-    expect(got.header).toBe(RENAMED_V1);
-  });
-
+  // ADR 0812 P3c-0 — the "major-1 subscription keeps the v1 spelling" leg was deleted with major 1.
   it('a major-2 subscription registered with the v1 spelling (bare through the overlap) still matches and still receives the v2 spelling', async () => {
     await register('sub-v2-v1spelling', 2, [RENAMED_V1]);
     const event = { type: RENAMED_V1, runId: RUN_ID, eventId: 'e-vocab-3', sequence: 7 } as unknown as EventRecord;

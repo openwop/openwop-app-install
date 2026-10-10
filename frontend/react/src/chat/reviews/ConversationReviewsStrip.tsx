@@ -12,8 +12,9 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { listReviews, decideReview, type ReviewRequest } from './reviewClient.js';
+import { listReviews, type ReviewRequest } from './reviewClient.js';
 import { ReviewCard } from './ReviewCard.js';
+import { useReviewStatusStore } from './reviewStatusStore.js';
 
 export function ConversationReviewsStrip({ conversationId, isSending }: {
   conversationId: string;
@@ -53,7 +54,9 @@ export function ConversationReviewsStrip({ conversationId, isSending }: {
             // 409 means the draft changed; the reloaded card carries the fresh
             // liveDefinitionHash + the edited notice, so the retry can succeed.
             try {
-              await decideReview(r.reviewId, action, body);
+              // ADR 0778 (`APUX-8`) — through the shared store (badge + every
+              // surface update, 409 judged by status, failures survive remount).
+              await useReviewStatusStore.getState().decide(r.reviewId, action, body);
             } finally {
               load();
             }

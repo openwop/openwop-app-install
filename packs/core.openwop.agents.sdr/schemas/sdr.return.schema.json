@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/core.openwop.agents.sdr/1.0.0/sdr.return.schema.json",
+  "$id": "https://packs.openwop.dev/core.openwop.agents.sdr/1.0.2/sdr.return.schema.json",
   "title": "SdrReturn",
   "type": "object",
   "required": [

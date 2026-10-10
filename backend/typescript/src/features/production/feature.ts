@@ -13,6 +13,8 @@
  */
 
 import type { BackendFeature } from '../types.js';
+import { productionBuiltinWorkflows } from './builtinWorkflows.js';
+import { registerWorkflowsFeature } from '../../host/workflowFeatureGate.js';
 import { registerProductionRoutes } from './routes.js';
 import { buildProductionSurface } from './surface.js';
 import { registerProductionArtifactType } from './artifactTypes.js';
@@ -21,6 +23,9 @@ import { registerProductionAgentTools } from './agentTools.js';
 export const productionFeature: BackendFeature = {
   id: 'production',
   registerRoutes: (deps) => {
+    // ADR 0820 §7 / G6 — this feature OWNS its chain-backed workflows (registered
+    // in `features/index.ts`): every launch resolves 'production' (toggle + plan).
+    registerWorkflowsFeature(productionBuiltinWorkflows.map((w) => w.workflowId), 'production');
     registerProductionRoutes(deps);
     // Install the `production.plan` artifact type so a generated plan validates and
     // its schema is served at /schemas/artifacts/production.plan.schema.json.
@@ -38,14 +43,14 @@ export const productionFeature: BackendFeature = {
     id: 'production',
     label: 'Production Intelligence',
     description:
-      'Vendor Directory (external contractors/agencies with capabilities, quality ratings, price ranges) + AI production planning — recommends a per-asset execution route (internal / contractor / agency / hybrid) with budget & timeline, ranking your team (Profiles) and vendors by channel fit. The Production Planner agent drives it from the AI chat or a workflow; plans render in the artifact workbench. OFF by default.',
+      'Vendor Directory (external contractors/agencies with capabilities, quality ratings, price ranges) + AI production planning — recommends a per-asset execution route (internal / contractor / agency / hybrid) with budget & timeline, ranking your team (Profiles) and vendors by channel fit. The Production Planner agent drives it from the AI chat or a workflow; plans render in the artifact workbench.',
     category: 'Studio',
     status: 'off',
     bucketUnit: 'tenant',
     salt: 'production',
   },
   requiredPacks: [
-    { name: 'feature.production.nodes', version: '1.1.1' },
-    { name: 'feature.production.agents', version: '1.0.1' },
+    { name: 'feature.production.nodes', version: '1.1.2' },
+    { name: 'vendor.openwop-app.production.agents', version: '1.0.2' },
   ],
 };

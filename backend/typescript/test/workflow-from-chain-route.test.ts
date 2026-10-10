@@ -24,7 +24,7 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-const url = (p: string) => `http://127.0.0.1:${PORT}/v1/host/openwop-app${p}`;
+const url = (p: string) => `http://127.0.0.1:${PORT}/host/openwop-app${p}`;
 
 async function cookie(): Promise<string> {
   const r = await fetch(url('/workflows'));
@@ -50,7 +50,7 @@ describe('workflow-chain templates (ADR 0163 Phase 2)', () => {
     });
     expect(r.status).toBe(201);
     const body = (await r.json()) as { workflowId: string; nodeCount: number; warnings?: string[] };
-    expect(body.workflowId).toMatch(/^wf\.market-intel-digest\.[0-9a-f]{8}$/);
+    expect(body.workflowId).toMatch(/^wf\.copy\.market-intel-digest\.[0-9a-f]{16}$/);
     expect(body.nodeCount).toBe(4);
     // the workflow now appears in the caller's tenant-scoped list (a real owned workflow)
     const list = (await (await fetch(url('/workflows'), { headers: { cookie: c } })).json()) as { workflows: { workflowId: string }[] };
@@ -73,7 +73,7 @@ describe('workflow-chain templates (ADR 0163 Phase 2)', () => {
     });
     expect(noParam.status).toBe(201);
     const { workflowId } = (await noParam.json()) as { workflowId: string };
-    const def = (await (await fetch(`http://127.0.0.1:${PORT}/v1/workflows/${workflowId}`, { headers: { cookie: c } })).json()) as { nodes: unknown[]; variables?: { name: string; required?: boolean }[] };
+    const def = (await (await fetch(`http://127.0.0.1:${PORT}/workflows/${workflowId}`, { headers: { cookie: c } })).json()) as { nodes: unknown[]; variables?: { name: string; required?: boolean }[] };
     expect(JSON.stringify(def.nodes)).not.toContain('{{inputs.topic}}');
     expect(JSON.stringify(def.nodes)).not.toContain('{{params.topic}}');
     const unknown = await fetch(url('/workflows/from-chain'), {
@@ -110,7 +110,7 @@ describe('workflow-chain templates (ADR 0163 Phase 2)', () => {
     expect(byId.get(id2)).toBe(`${label}-2`);     // collision → -2 (not the raw workflowId)
     // the DEFINITION name must match the list name so the builder canvas and the
     // dashboard never disagree (the -N suffix is stamped on the def too)
-    const def2 = (await (await fetch(`http://127.0.0.1:${PORT}/v1/workflows/${id2}`, { headers: { cookie: c } })).json()) as { metadata?: { name?: string } };
+    const def2 = (await (await fetch(`http://127.0.0.1:${PORT}/workflows/${id2}`, { headers: { cookie: c } })).json()) as { metadata?: { name?: string } };
     expect(def2.metadata?.name).toBe(`${label}-2`);
   });
 });
@@ -175,7 +175,7 @@ describe('from-chain: a blank copy still mints a RUNNABLE workflow', () => {
     });
     expect(created.status).toBe(201);
     const { workflowId } = (await created.json()) as { workflowId: string };
-    const got = await fetch(`http://127.0.0.1:${PORT}/v1/workflows/${workflowId}`, { headers: { cookie: c } });
+    const got = await fetch(`http://127.0.0.1:${PORT}/workflows/${workflowId}`, { headers: { cookie: c } });
     expect(got.ok).toBe(true);
     const def = (await got.json()) as { nodes?: Array<{ typeId: string; config?: Record<string, unknown> }> };
     const ai = (def.nodes ?? []).filter((n) => n.typeId === 'core.ai.chatCompletion');

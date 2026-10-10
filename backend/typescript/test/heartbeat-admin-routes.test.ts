@@ -13,7 +13,7 @@ import { createApp } from '../src/index.js';
 describe('heartbeat-admin settings routes (ADR 0318)', () => {
   let server: http.Server;
   let BASE: string;
-  const PATH = '/v1/host/openwop-app/heartbeat/settings';
+  const PATH = '/host/openwop-app/heartbeat/settings';
 
   beforeAll(async () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';

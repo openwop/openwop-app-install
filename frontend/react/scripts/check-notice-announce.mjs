@@ -70,6 +70,13 @@ const EXPECTED_SILENT = [
   // covered it. That disclosure now announces; this entry covers `accessFailed`
   // and nothing else.
   ['features/documents/DocumentsPage.tsx', 'failed-read', 'accessFailed', 'co-occurs with canvasesFailed, which already announces — the polite slot holds one string'],
+  // ADR 0825 — the same co-occurrence. `EventBindingsPage` reads the host-event
+  // catalog and the workflow list from independent calls on mount, so both can
+  // fail on one paint; `workflowsFailed` already announces, and it is the
+  // false-conclusion one ("no workflows"). A missing suggestion list on a
+  // free-text field is the lesser loss. `noticeSweepTranche` pins this page at
+  // one announcement for the same reason.
+  ['settings/EventBindingsPage.tsx', 'failed-read', 'catalogFailed', 'co-occurs with workflowsFailed, which already announces — the polite slot holds one string'],
 ];
 // Rule-1 (success) exemptions stay FILE-keyed — a page has at most one success
 // notice in practice. Rule-2 (failed-read) exemptions are keyed by file + the
@@ -556,7 +563,29 @@ const NEW_BASELINE = readGateBaseline(
   // 173 → 172 (2026-09-20): the Progress screen now renders its failed read as
   // an announcing StateCard with a working Retry action. The old silent error
   // Notice and its cohort row are gone, so the measured ceiling falls with it.
-  scanningRealTree ? 172 : 0,
+  //
+  // 172 → 164 (2026-09-28): ADR 0775 (feature loop 2026-10 row 5, grade-ux
+  // ARUX-3/-5) made three write-failure Notices announce — `agents/RosterPage`
+  // (`error`), `workforces/MigrationWizardPage` (`stageError`) and
+  // `workforces/WorkforceOverviewPage` (`cutoverError`) — and deleted their rows.
+  // Measured after the deletion: 164 unannounced, so the ceiling had also been
+  // carrying 5 of slack from earlier cleanups; it is locked at the measurement.
+  //
+  // 164 → 163 (2026-09-29): ADR 0779 (feature loop 2026-10 row 7) made the Keys
+  // page's `error` Notice announce and deleted its cohort row.
+  //
+  // 163 → 162 (2026-10-06): ADR 0820 §7 UI (feature store redesign) removed the
+  // store's silent catalog `error` Notice — a failed catalog read is the
+  // announcing `bundlesFailed` StateCard with Retry — and deleted its row.
+  //
+  // 162 → 161 (2026-10-06): ADR 0838 (feature loop 2026-10 row 24, grade-ux
+  // DOC2UX-1) made the document detail page's `error` Notice announce and
+  // deleted its cohort row.
+  //
+  // 161 → 154 (2026-10-06): ADR 0839 (feature loop 2026-10 row 25, grade-ux) made
+  // the seven projects `error` Notices announce (Chat ×2, Overview ×3, gallery ×1,
+  // Workflows ×1) and deleted their four cohort rows.
+  scanningRealTree ? 154 : 0,
 );
 /** (file, flag) -> the recorded ceiling. */
 const NEW_COHORT = new Map(LEGACY_SILENT_READ_SITES.map(([f, flag, n]) => [`${f}${SITE_SEP}${flag}`, n]));

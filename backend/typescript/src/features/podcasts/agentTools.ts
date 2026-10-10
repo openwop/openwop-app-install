@@ -45,7 +45,7 @@ const log = createLogger('podcasts.producer-tools');
 export const PODCASTS_LIST_TOOL_ID = 'openwop:podcasts.list';
 export const PODCASTS_PRODUCE_TOOL_ID = 'openwop:podcasts.produce';
 
-const PRODUCER_AGENT_ID = 'feature.podcasts.agents.producer';
+const PRODUCER_AGENT_ID = 'vendor.openwop-app.podcasts.agents.producer';
 
 type ToolResult = { content: string; isError?: boolean };
 
@@ -118,6 +118,7 @@ export function registerPodcastsAgentTools(deps: StartRunDeps): void {
   // ── READ: ground on the org's cast/format profiles, shows, and episodes. ────
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: PODCASTS_LIST_TOOL_ID,
       description:
@@ -157,6 +158,7 @@ export function registerPodcastsAgentTools(deps: StartRunDeps): void {
   // ── ACTION: ignite the real generation run for a notebook + episode profile. ─
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: PODCASTS_PRODUCE_TOOL_ID,
       description:

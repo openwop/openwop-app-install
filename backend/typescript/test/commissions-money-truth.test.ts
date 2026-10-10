@@ -56,15 +56,15 @@ let n = 0;
 async function scenario(): Promise<{ admin: Client; repId: string; orgId: string; tenantId: string }> {
   const tenantId = `org:com2-${Date.now()}-${n++}`;
   const admin = client();
-  await admin.post('/v1/host/openwop-app/test/login', { email: `a-${Date.now()}-${n++}@acme.test`, tenantId });
+  await admin.post('/host/openwop-app/test/login', { email: `a-${Date.now()}-${n++}@acme.test`, tenantId });
   const rep = client();
-  const repId = (await rep.post('/v1/host/openwop-app/test/login', { email: `r-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId;
-  const orgId = (await admin.post('/v1/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
-  await admin.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'rep', subject: repId, roles: ['editor'] });
+  const repId = (await rep.post('/host/openwop-app/test/login', { email: `r-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId;
+  const orgId = (await admin.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
+  await admin.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'rep', subject: repId, roles: ['editor'] });
   return { admin, repId, orgId, tenantId };
 }
-const cbase = (orgId: string): string => `/v1/host/openwop-app/commissions/orgs/${encodeURIComponent(orgId)}`;
-const crm = (orgId: string): string => `/v1/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}`;
+const cbase = (orgId: string): string => `/host/openwop-app/commissions/orgs/${encodeURIComponent(orgId)}`;
+const crm = (orgId: string): string => `/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}`;
 
 const wonDeal = async (admin: Client, orgId: string, title: string, amount: number, owner: string, closeDate: string, currency?: string): Promise<void> => {
   const d = await admin.post(`${crm(orgId)}/deals`, { title, amount, owner, closeDate, status: 'won', ...(currency ? { currency } : {}) });
@@ -197,7 +197,7 @@ describe('COM2-M6/M7 — the terminal transitions record what they did', () => {
   const approveViaReview = async (c: Client, orgId: string, statementId: string): Promise<Res> => {
     const submit = await c.post(`${cbase(orgId)}/statements/${encodeURIComponent(statementId)}/approve`);
     if (submit.status !== 202) return submit;
-    return c.post(`/v1/host/openwop-app/reviews/approval:${submit.body.review.approvalId}/actions/approve`);
+    return c.post(`/host/openwop-app/reviews/approval:${submit.body.review.approvalId}/actions/approve`);
   };
 
   it('mark-paid records WHO released the money, and when', async () => {
@@ -258,7 +258,7 @@ describe('COM2-B4 — the reviewer approves the total they were shown', () => {
 
     // The card still reads 50 USD. Approving it used to apply 45,050 — the reviewer
     // authorised a figure they never saw, and the audit trail recorded their approval.
-    const decide = await admin.post(`/v1/host/openwop-app/reviews/approval:${submit.body.review.approvalId}/actions/approve`);
+    const decide = await admin.post(`/host/openwop-app/reviews/approval:${submit.body.review.approvalId}/actions/approve`);
     expect(decide.status).toBe(409);
     expect((await admin.get(`${cbase(orgId)}/statements`)).body.statements[0].status).toBe('draft');
   });
@@ -269,12 +269,12 @@ describe('COM2-B4 — the reviewer approves the total they were shown', () => {
     await wonDeal(admin, orgId, 'W1', 1000, repId, '2026-02-10', 'USD');
     const st = (await admin.post(`${cbase(orgId)}/plans/${plan.planId}/statements/compute`, { subjectId: repId, period: '2026-Q1' })).body;
     const submit = await admin.post(`${cbase(orgId)}/statements/${encodeURIComponent(st.statementId)}/approve`);
-    expect((await admin.post(`/v1/host/openwop-app/reviews/approval:${submit.body.review.approvalId}/actions/approve`)).status).toBe(200);
+    expect((await admin.post(`/host/openwop-app/reviews/approval:${submit.body.review.approvalId}/actions/approve`)).status).toBe(200);
   });
 });
 
 describe('COM2-B2/B3 — the accelerator ratio', () => {
-  const tbase = (orgId: string): string => `/v1/host/openwop-app/territories/orgs/${encodeURIComponent(orgId)}`;
+  const tbase = (orgId: string): string => `/host/openwop-app/territories/orgs/${encodeURIComponent(orgId)}`;
 
   /**
    * A parent → child model where the deals route to the CHILD and the quota is authored
@@ -409,12 +409,12 @@ describe('review fold-in — defects the independent pass found in the fix', () 
     // card they found and never re-pinned it, so re-submitting handed back the SAME card
     // and approve 409'd again — the only escape was reject, which is structurally the
     // dead end COM2-M5 exists to close, one guard over.
-    expect((await admin.post(`/v1/host/openwop-app/reviews/approval:${first.body.review.approvalId}/actions/approve`)).status).toBe(409);
+    expect((await admin.post(`/host/openwop-app/reviews/approval:${first.body.review.approvalId}/actions/approve`)).status).toBe(409);
 
     const second = await admin.post(`${cbase(orgId)}/statements/${encodeURIComponent(st.statementId)}/approve`);
     expect(second.status).toBe(202);
     expect(second.body.review.approvalId).not.toBe(first.body.review.approvalId);   // a FRESH card
-    expect((await admin.post(`/v1/host/openwop-app/reviews/approval:${second.body.review.approvalId}/actions/approve`)).status).toBe(200);
+    expect((await admin.post(`/host/openwop-app/reviews/approval:${second.body.review.approvalId}/actions/approve`)).status).toBe(200);
     expect((await admin.get(`${cbase(orgId)}/statements`)).body.statements[0].status).toBe('approved');
   });
 
@@ -499,7 +499,7 @@ describe('R3 — the approval card reads like the table (the COM-G3 reintroducti
     const { admin, orgId, tenantId } = await scenario();
     // A second authenticated user who was never added as an org member.
     const ghost = client();
-    const ghostId = (await ghost.post('/v1/host/openwop-app/test/login', { email: `g-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId;
+    const ghostId = (await ghost.post('/host/openwop-app/test/login', { email: `g-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId;
     const plan = await mkPlan(admin, orgId, { assignment: { kind: 'rep', ref: ghostId } });
     await wonDeal(admin, orgId, 'Ghost deal', 10_000, ghostId, '2026-02-12', 'USD');
     const st = (await admin.post(`${cbase(orgId)}/plans/${plan.planId}/statements/compute`, { subjectId: ghostId, period: '2026-Q1' })).body;

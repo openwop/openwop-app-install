@@ -9,6 +9,11 @@ const listRoster = vi.fn();
 vi.mock('../../../features/advisory-board/advisoryBoardClient.js', () => ({ getBoardByHandle: (h: string) => getBoardByHandle(h), ensureBoardChat: (id: string) => ensureBoardChat(id) }));
 vi.mock('../../../features/projects/projectsClient.js', () => ({ getProject: (id: string) => getProject(id) }));
 vi.mock('../../../agents/rosterClient.js', () => ({ listRoster: (o?: unknown) => listRoster(o) }));
+// The agent INVENTORY — what convene asks when the picker's list does not hold an
+// advisor's exact id. Empty by default, so every pre-existing "does not resolve"
+// case still means what it meant: the server does not list that agent either.
+const listAgents = vi.fn();
+vi.mock('../../../client/agentsClient.js', () => ({ listAgents: () => listAgents() }));
 
 import { buildBoardInterceptor, buildProjectConveneInterceptor, type ConveneDeps } from '../convene.js';
 import type { CoreSubmitContext } from '../../lib/chatSubmit.js';
@@ -43,6 +48,7 @@ function deps(over: Partial<ConveneDeps> = {}): ConveneDeps {
 beforeEach(() => {
   getBoardByHandle.mockReset(); ensureBoardChat.mockReset();
   getProject.mockReset();
+  listAgents.mockReset().mockResolvedValue([]);
   listRoster.mockReset().mockResolvedValue([
     { rosterId: 'r-chair', agentRef: { agentId: 'chair' } },
     { rosterId: 'r-adv1', agentRef: { agentId: 'adv1' } },
@@ -151,6 +157,56 @@ describe('buildBoardInterceptor', () => {
     const out = await buildBoardInterceptor(d)('@@empty', undefined, ctx);
     expect(out).toEqual({ kind: 'handled' }); // never falls back to a selected agent
     expect(d.attachBoard).not.toHaveBeenCalled();
+  });
+});
+
+describe('advisors resolve against the inventory, not only the picker list', () => {
+  // Seen live 2026-10-02: "@@board-of-directors … none of its advisors are available
+  // as agents yet" on a board whose advisors all exist. The picker's list is a lossy
+  // view (it collapses same-looking agents onto one id, and it starts empty), and
+  // convene matched roster agent ids against it by ===.
+  const inventory = [
+    { agentId: 'chair', persona: 'Chair', label: 'Chair', description: 'd', modelClass: 'std', packName: 'p', packVersion: '1' },
+    { agentId: 'adv1', persona: 'Adv 1', label: 'Adv 1', description: 'd', modelClass: 'std', packName: 'p', packVersion: '1' },
+  ];
+  const board = { boardId: 'b1', moderatorRosterId: 'r-chair', advisors: ['r-adv1'], turnPolicy: { rounds: 1, order: 'declared', synthesize: false } };
+
+  it('convenes the whole council when the picker list is still EMPTY', async () => {
+    getBoardByHandle.mockResolvedValue(board);
+    listAgents.mockResolvedValue(inventory);
+    const d = deps({ agentEntries: [] });
+    const out = await buildBoardInterceptor(d)('@@myboard go', undefined, ctx);
+    expect(d.activeAgents.activateAgent).toHaveBeenCalledTimes(2);
+    expect(d.attachBoard).toHaveBeenCalledWith('sess-1', 'b1', ['agent:chair', 'agent:adv1']);
+    expect(d.emitSystem).not.toHaveBeenCalled();
+    expect(out).toEqual({ kind: 'route', activeAgentId: 'chair', boardSummoned: true });
+  });
+
+  it('convenes an advisor whose id the picker collapsed onto a look-alike', async () => {
+    getBoardByHandle.mockResolvedValue(board);
+    listAgents.mockResolvedValue(inventory);
+    // The picker kept a twin under a different id for "Adv 1".
+    const d = deps({ agentEntries: [
+      { agentId: 'chair', slug: 'chair', displayName: 'Chair', modelClass: 'std' },
+      { agentId: 'adv1-twin', slug: 'adv1', displayName: 'Adv 1', modelClass: 'std' },
+    ] as never });
+    await buildBoardInterceptor(d)('@@myboard go', undefined, ctx);
+    expect(d.attachBoard).toHaveBeenCalledWith('sess-1', 'b1', ['agent:chair', 'agent:adv1']);
+  });
+
+  it('does not ask the inventory when the picker already has every id', async () => {
+    getBoardByHandle.mockResolvedValue(board);
+    await buildBoardInterceptor(deps())('@@myboard go', undefined, ctx);
+    expect(listAgents).not.toHaveBeenCalled();
+  });
+
+  it('an advisor the SERVER does not list is still unresolved — and an inventory failure is not a crash', async () => {
+    getBoardByHandle.mockResolvedValue({ ...board, moderatorRosterId: undefined, advisors: ['r-adv1'] });
+    listAgents.mockRejectedValue(new Error('offline'));
+    const d = deps({ agentEntries: [] });
+    const out = await buildBoardInterceptor(d)('@@myboard go', undefined, ctx);
+    expect(d.emitSystem).toHaveBeenCalledWith('chat:conveneBoardNoAdvisors');
+    expect(out).toEqual({ kind: 'handled' });
   });
 });
 

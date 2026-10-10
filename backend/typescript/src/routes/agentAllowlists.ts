@@ -31,7 +31,7 @@ import {
   type AgentToolAllowlistOverride,
 } from '../host/agentToolAllowlistService.js';
 
-const BASE = '/v1/host/openwop-app/agent-allowlists/admin';
+const BASE = '/host/openwop-app/agent-allowlists/admin';
 const TOOL_ID = /^openwop:[A-Za-z0-9._:-]+$/;
 const ALLOWLIST_CAP = 64;
 const NOTE_MAX = 500;

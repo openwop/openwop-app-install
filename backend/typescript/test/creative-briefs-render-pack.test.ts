@@ -20,7 +20,7 @@ import { BUNDLED_FONTS_VERSION } from '../src/features/creative-briefs/render/fo
 
 const REPO_ROOT = join(__dirname, '..', '..', '..');
 const NODES_PACK = join(REPO_ROOT, 'packs', 'feature.creative-briefs.nodes', 'pack.json');
-const AGENTS_PACK = join(REPO_ROOT, 'packs', 'feature.campaign-channels.agents', 'pack.json');
+const AGENTS_PACK = join(REPO_ROOT, 'packs', 'vendor.openwop-app.campaign-channels.agents', 'pack.json');
 
 interface NodesManifest { name: string; version: string; nodes: Array<{ typeId: string; description: string }> }
 interface AgentsManifest { agents: Array<{ agentId: string; toolAllowlist: string[] }> }

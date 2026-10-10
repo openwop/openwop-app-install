@@ -1,6 +1,6 @@
 /**
  * ADR 0028 — admin governance (ADR 0023 §12 T7):
- *   - policy CRUD on /v1/host/openwop-app/governance/policy, superadmin-gated
+ *   - policy CRUD on /host/openwop-app/governance/policy, superadmin-gated
  *     (shared host/superadmin.ts gate — a signed-in NON-admin is 403);
  *   - the provider allowlist enforced with ONE predicate at BOTH seams:
  *     connect routes (403) and resolveConnectionCredential — the choke point
@@ -20,7 +20,7 @@ import { __clearToggleStore } from '../src/host/featureToggles/service.js';
 import { __resetConnectionsStore, resolveConnectionCredential } from '../src/features/connections/connectionsService.js';
 import { __resetGovernanceStore, setGovernancePolicy } from '../src/host/governanceService.js';
 import { __resetAssistantStore, getPendingAction } from '../src/features/assistant/assistantService.js';
-import { enqueueActionWithApproval, decideActionViaApproval } from '../src/features/assistant/actionApproval.js';
+import { enqueueActionWithApproval, decideActionViaApproval, contentHashOf } from '../src/features/assistant/actionApproval.js';
 import { __hostExtStorage } from '../src/host/hostExtPersistence.js';
 
 let BASE: string;
@@ -42,13 +42,10 @@ beforeAll(async () => {
   await new Promise<void>((res) => {
     server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
   });
-  // Connections is toggle-less (permanent admin surface, ADR 0024 § Correction);
-  // only the assistant feature still gates on a toggle.
-  const on = await jf('/v1/host/openwop-app/feature-toggles/admin/configs/assistant', {
-    method: 'PUT',
-    body: JSON.stringify({ status: 'on', bucketUnit: 'tenant', salt: 'assistant' }),
-  });
-  if (on.status !== 200) throw new Error('assistant toggle enable failed');
+  // Connections is toggle-less (permanent admin surface, ADR 0024 § Correction).
+  // `assistant` graduated off its toggle (no `toggleDefault`, ADR 0024 §
+  // Correction), so there is nothing to enable. This setup used to PUT one and
+  // wrote an orphan row that gated nothing; ADR 0819 makes that PUT a 404.
 });
 afterAll(async () => {
   delete process.env.OPENWOP_TEST_AUTH_ENABLED;
@@ -81,17 +78,17 @@ async function jf<T = unknown>(path: string, init: RequestInit = {}): Promise<{ 
 
 describe('policy administration', () => {
   it('superadmin can read defaults and upsert; validation rejects unknown kinds; a signed-in non-admin is 403', async () => {
-    const empty = await jf<{ policy: { tenantId: string }; defaults: Record<string, unknown> }>('/v1/host/openwop-app/governance/policy');
+    const empty = await jf<{ policy: { tenantId: string }; defaults: Record<string, unknown> }>('/host/openwop-app/governance/policy');
     expect(empty.status).toBe(200);
     expect(empty.body.defaults.actionPolicy).toBe('approval-required');
 
-    const bad = await jf('/v1/host/openwop-app/governance/policy', {
+    const bad = await jf('/host/openwop-app/governance/policy', {
       method: 'PUT',
       body: JSON.stringify({ actionPolicy: { 'rm.rf': 'disabled' } }),
     });
     expect(bad.status).toBe(400);
 
-    const put = await jf<{ policy: { providerAllowlist: string[] } }>('/v1/host/openwop-app/governance/policy', {
+    const put = await jf<{ policy: { providerAllowlist: string[] } }>('/host/openwop-app/governance/policy', {
       method: 'PUT',
       body: JSON.stringify({ providerAllowlist: ['google'], actionPolicy: { 'email.send': 'draft-only' } }),
     });
@@ -99,7 +96,7 @@ describe('policy administration', () => {
     expect(put.body.policy.providerAllowlist).toEqual(['google']);
 
     // A real signed-in user without superadmin standing: fail closed.
-    const login = await fetch(`${BASE}/v1/host/openwop-app/test/login`, {
+    const login = await fetch(`${BASE}/host/openwop-app/test/login`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ email: 'gov-nonadmin@example.com' }),
@@ -107,7 +104,7 @@ describe('policy administration', () => {
     expect(login.status).toBe(201);
     const cookie = sessionCookieOf(login);
     expect(cookie).toBeTruthy();
-    const denied = await fetch(`${BASE}/v1/host/openwop-app/governance/policy`, { headers: { cookie } });
+    const denied = await fetch(`${BASE}/host/openwop-app/governance/policy`, { headers: { cookie } });
     expect(denied.status).toBe(403);
 
     await __resetGovernanceStore(); // leave no policy behind for later suites
@@ -117,17 +114,17 @@ describe('policy administration', () => {
     // The sweep daemon enforces `confidentialPiiDays` / `internalDays`; before GOV-2 the
     // route dropped them, so they could never be set via the API. Assert they round-trip.
     const put = await jf<{ policy: { retention?: { confidentialPiiDays?: number; internalDays?: number } } }>(
-      '/v1/host/openwop-app/governance/policy',
+      '/host/openwop-app/governance/policy',
       { method: 'PUT', body: JSON.stringify({ retention: { confidentialPiiDays: 365, internalDays: 90 } }) },
     );
     expect(put.status).toBe(200);
     expect(put.body.policy.retention).toMatchObject({ confidentialPiiDays: 365, internalDays: 90 });
 
-    const got = await jf<{ policy: { retention?: { confidentialPiiDays?: number } } }>('/v1/host/openwop-app/governance/policy');
+    const got = await jf<{ policy: { retention?: { confidentialPiiDays?: number } } }>('/host/openwop-app/governance/policy');
     expect(got.body.policy.retention?.confidentialPiiDays).toBe(365);
 
     // A negative window would push the sweep's cutoff into the future and purge everything.
-    const bad = await jf('/v1/host/openwop-app/governance/policy', {
+    const bad = await jf('/host/openwop-app/governance/policy', {
       method: 'PUT',
       body: JSON.stringify({ retention: { confidentialPiiDays: -1 } }),
     });
@@ -151,7 +148,7 @@ describe('policy administration', () => {
     }, 'seed');
 
     type P = { policy: { retention?: Record<string, unknown>; providerAllowlist?: string[] }; warnings?: string[] };
-    const got = await jf<P>('/v1/host/openwop-app/governance/policy');
+    const got = await jf<P>('/host/openwop-app/governance/policy');
     expect(got.status).toBe(200);
     // The dead window is not advertised back — a control that does nothing must
     // not look like one that does.
@@ -161,7 +158,7 @@ describe('policy administration', () => {
 
     // …and a client that DOES echo the legacy field back (a script holding an
     // older GET) still gets its unrelated edit applied.
-    const put = await jf<P>('/v1/host/openwop-app/governance/policy', {
+    const put = await jf<P>('/host/openwop-app/governance/policy', {
       method: 'PUT',
       body: JSON.stringify({
         providerAllowlist: ['openai'],
@@ -180,25 +177,25 @@ describe('policy administration', () => {
   it('BRAND-CODE-6: the admin route persists the tenant-default brandCompliance policy (set → get), and rejects a bad blockPublish', async () => {
     await __resetGovernanceStore();
     type P = { policy: { brandCompliance?: { blockPublish?: string; blockThreshold?: number; defaultBrandId?: string } } };
-    const put = await jf<P>('/v1/host/openwop-app/governance/policy', {
+    const put = await jf<P>('/host/openwop-app/governance/policy', {
       method: 'PUT',
       body: JSON.stringify({ brandCompliance: { blockPublish: 'threshold', blockThreshold: 70, defaultBrandId: 'brand-1' } }),
     });
     expect(put.status, JSON.stringify(put.body)).toBe(200);
     expect(put.body.policy.brandCompliance).toMatchObject({ blockPublish: 'threshold', blockThreshold: 70, defaultBrandId: 'brand-1' });
 
-    const got = await jf<P>('/v1/host/openwop-app/governance/policy');
+    const got = await jf<P>('/host/openwop-app/governance/policy');
     expect(got.body.policy.brandCompliance).toMatchObject({ blockPublish: 'threshold', blockThreshold: 70, defaultBrandId: 'brand-1' });
 
     // An invalid blockPublish is rejected.
-    const bad = await jf('/v1/host/openwop-app/governance/policy', {
+    const bad = await jf('/host/openwop-app/governance/policy', {
       method: 'PUT',
       body: JSON.stringify({ brandCompliance: { blockPublish: 'nonsense' } }),
     });
     expect(bad.status).toBe(400);
 
     // `null` clears it.
-    const cleared = await jf<P>('/v1/host/openwop-app/governance/policy', {
+    const cleared = await jf<P>('/host/openwop-app/governance/policy', {
       method: 'PUT',
       body: JSON.stringify({ brandCompliance: null }),
     });
@@ -212,17 +209,17 @@ describe('policy administration', () => {
     await __resetGovernanceStore();
     type P = { policy: { brandCompliance?: { blockPublish?: string; defaultBrandId?: string } } };
     // Seed the tenant-default brand policy via the main policy PUT.
-    await jf('/v1/host/openwop-app/governance/policy', {
+    await jf('/host/openwop-app/governance/policy', {
       method: 'PUT',
       body: JSON.stringify({ brandCompliance: { blockPublish: 'critical', defaultBrandId: 'brand-1' } }),
     });
     // A media-budget PUT must not wipe it (its own read-modify-write path).
-    await jf('/v1/host/openwop-app/governance/media-budget', { method: 'PUT', body: JSON.stringify({ ttsChars: 12 }) });
-    const afterMedia = await jf<P>('/v1/host/openwop-app/governance/policy');
+    await jf('/host/openwop-app/governance/media-budget', { method: 'PUT', body: JSON.stringify({ ttsChars: 12 }) });
+    const afterMedia = await jf<P>('/host/openwop-app/governance/policy');
     expect(afterMedia.body.policy.brandCompliance).toMatchObject({ blockPublish: 'critical', defaultBrandId: 'brand-1' });
     // Nor a byok-chat-budget PUT.
-    await jf('/v1/host/openwop-app/governance/byok-chat-budget', { method: 'PUT', body: JSON.stringify({ dailyTokenCap: 1000 }) });
-    const afterByok = await jf<P>('/v1/host/openwop-app/governance/policy');
+    await jf('/host/openwop-app/governance/byok-chat-budget', { method: 'PUT', body: JSON.stringify({ dailyTokenCap: 1000 }) });
+    const afterByok = await jf<P>('/host/openwop-app/governance/policy');
     expect(afterByok.body.policy.brandCompliance).toMatchObject({ blockPublish: 'critical', defaultBrandId: 'brand-1' });
 
     await __resetGovernanceStore();
@@ -234,7 +231,7 @@ describe('media-budget readout (ADR 0106 Phase 3)', () => {
     process.env.OPENWOP_MEDIA_DAILY_TTS_CHARS = '100000';
     try {
       const r = await jf<{ date: string; budgets: { ttsChars: number; sttBytes: number }; usage: { ttsChars: number; sttBytes: number } }>(
-        '/v1/host/openwop-app/governance/media-budget',
+        '/host/openwop-app/governance/media-budget',
       );
       expect(r.status).toBe(200);
       expect(r.body.budgets.ttsChars).toBe(100000);
@@ -245,13 +242,13 @@ describe('media-budget readout (ADR 0106 Phase 3)', () => {
       delete process.env.OPENWOP_MEDIA_DAILY_TTS_CHARS;
     }
 
-    const login = await fetch(`${BASE}/v1/host/openwop-app/test/login`, {
+    const login = await fetch(`${BASE}/host/openwop-app/test/login`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ email: 'media-nonadmin@example.com' }),
     });
     const cookie = sessionCookieOf(login);
-    const denied = await fetch(`${BASE}/v1/host/openwop-app/governance/media-budget`, { headers: { cookie } });
+    const denied = await fetch(`${BASE}/host/openwop-app/governance/media-budget`, { headers: { cookie } });
     expect(denied.status).toBe(403);
   });
 });
@@ -261,12 +258,12 @@ describe('media-budget editable override (ADR 0106)', () => {
 
   it('superadmin sets a per-org override; GET reflects it as the effective cap', async () => {
     await __resetGovernanceStore();
-    const put = await jf<Budget>('/v1/host/openwop-app/governance/media-budget', {
+    const put = await jf<Budget>('/host/openwop-app/governance/media-budget', {
       method: 'PUT', body: JSON.stringify({ ttsChars: 4242, sttBytes: 0 }),
     });
     expect(put.status, JSON.stringify(put.body)).toBe(200);
     expect(put.body.override).toEqual({ ttsChars: 4242, sttBytes: 0 });
-    const get = await jf<Budget>('/v1/host/openwop-app/governance/media-budget');
+    const get = await jf<Budget>('/host/openwop-app/governance/media-budget');
     expect(get.body.budgets.ttsChars).toBe(4242); // effective = override
     expect(get.body.budgets.sttBytes).toBe(0);     // 0 = uncapped for this org
     expect(get.body.override).toEqual({ ttsChars: 4242, sttBytes: 0 });
@@ -275,13 +272,13 @@ describe('media-budget editable override (ADR 0106)', () => {
 
   it('ADR 0411 P2 — a video-generation override (videoJobs) roundtrips (previously unsettable: resolveBudget read the key with no route writer)', async () => {
     await __resetGovernanceStore();
-    const put = await jf<{ status: number; override: { videoJobs?: number } | null; budgets: { video: number } }>('/v1/host/openwop-app/governance/media-budget', {
+    const put = await jf<{ status: number; override: { videoJobs?: number } | null; budgets: { video: number } }>('/host/openwop-app/governance/media-budget', {
       method: 'PUT', body: JSON.stringify({ videoJobs: 25 }),
     });
     expect(put.status, JSON.stringify(put.body)).toBe(200);
     expect(put.body.override).toEqual({ videoJobs: 25 });
     expect(put.body.budgets.video).toBe(25); // effective = override
-    const get = await jf<{ budgets: { video: number }; override: { videoJobs?: number } | null }>('/v1/host/openwop-app/governance/media-budget');
+    const get = await jf<{ budgets: { video: number }; override: { videoJobs?: number } | null }>('/host/openwop-app/governance/media-budget');
     expect(get.body.budgets.video).toBe(25);
     expect(get.body.override?.videoJobs).toBe(25);
     await __resetGovernanceStore();
@@ -290,24 +287,24 @@ describe('media-budget editable override (ADR 0106)', () => {
   it('read-modify-write preserves OTHER policy fields (does not wipe the provider allowlist)', async () => {
     await __resetGovernanceStore();
     // set a provider allowlist via the policy route first
-    await jf('/v1/host/openwop-app/governance/policy', { method: 'PUT', body: JSON.stringify({ providerAllowlist: ['github'] }) });
+    await jf('/host/openwop-app/governance/policy', { method: 'PUT', body: JSON.stringify({ providerAllowlist: ['github'] }) });
     // then set the media budget — must NOT drop the allowlist
-    await jf('/v1/host/openwop-app/governance/media-budget', { method: 'PUT', body: JSON.stringify({ ttsChars: 10 }) });
-    const policy = await jf<{ policy: { providerAllowlist?: string[]; mediaBudget?: { ttsChars?: number } } }>('/v1/host/openwop-app/governance/policy');
+    await jf('/host/openwop-app/governance/media-budget', { method: 'PUT', body: JSON.stringify({ ttsChars: 10 }) });
+    const policy = await jf<{ policy: { providerAllowlist?: string[]; mediaBudget?: { ttsChars?: number } } }>('/host/openwop-app/governance/policy');
     expect(policy.body.policy.providerAllowlist).toEqual(['github']); // preserved
     expect(policy.body.policy.mediaBudget?.ttsChars).toBe(10);
     await __resetGovernanceStore();
   });
 
   it('rejects a negative budget (400) and a non-admin (403)', async () => {
-    const bad = await jf('/v1/host/openwop-app/governance/media-budget', { method: 'PUT', body: JSON.stringify({ ttsChars: -1 }) });
+    const bad = await jf('/host/openwop-app/governance/media-budget', { method: 'PUT', body: JSON.stringify({ ttsChars: -1 }) });
     expect(bad.status).toBe(400);
 
-    const login = await fetch(`${BASE}/v1/host/openwop-app/test/login`, {
+    const login = await fetch(`${BASE}/host/openwop-app/test/login`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'media-put-nonadmin@example.com' }),
     });
     const cookie = sessionCookieOf(login);
-    const denied = await fetch(`${BASE}/v1/host/openwop-app/governance/media-budget`, {
+    const denied = await fetch(`${BASE}/host/openwop-app/governance/media-budget`, {
       method: 'PUT', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ ttsChars: 5 }),
     });
     expect(denied.status).toBe(403);
@@ -323,14 +320,14 @@ describe('byok-chat-budget editable override (ADR 0178)', () => {
 
   it('superadmin sets a per-org override; GET reflects it as the effective cap + threshold', async () => {
     await __resetGovernanceStore();
-    const put = await jf<ByokBudget>('/v1/host/openwop-app/governance/byok-chat-budget', {
+    const put = await jf<ByokBudget>('/host/openwop-app/governance/byok-chat-budget', {
       method: 'PUT', body: JSON.stringify({ dailyTokenCap: 50000, softWarningPct: 75 }),
     });
     expect(put.status, JSON.stringify(put.body)).toBe(200);
     expect(put.body.override).toEqual({ dailyTokenCap: 50000, softWarningPct: 75 });
     expect(put.body.budget).toEqual({ dailyTokenCap: 50000, softWarningPct: 75 });
 
-    const get = await jf<ByokBudget & { date: string }>('/v1/host/openwop-app/governance/byok-chat-budget');
+    const get = await jf<ByokBudget & { date: string }>('/host/openwop-app/governance/byok-chat-budget');
     expect(get.body.budget.dailyTokenCap).toBe(50000); // effective = override
     expect(get.body.budget.softWarningPct).toBe(75);
     expect(get.body.override).toEqual({ dailyTokenCap: 50000, softWarningPct: 75 });
@@ -341,11 +338,11 @@ describe('byok-chat-budget editable override (ADR 0178)', () => {
     await __resetGovernanceStore();
     // seed retention first (the policy PUT), then mediaBudget (its PUT preserves
     // retention) — so both are present before the byok PUT runs.
-    await jf('/v1/host/openwop-app/governance/policy', { method: 'PUT', body: JSON.stringify({ retention: { internalDays: 30 } }) });
-    await jf('/v1/host/openwop-app/governance/media-budget', { method: 'PUT', body: JSON.stringify({ ttsChars: 321 }) });
+    await jf('/host/openwop-app/governance/policy', { method: 'PUT', body: JSON.stringify({ retention: { internalDays: 30 } }) });
+    await jf('/host/openwop-app/governance/media-budget', { method: 'PUT', body: JSON.stringify({ ttsChars: 321 }) });
     // set the byok budget — must NOT drop mediaBudget or retention
-    await jf('/v1/host/openwop-app/governance/byok-chat-budget', { method: 'PUT', body: JSON.stringify({ dailyTokenCap: 7 }) });
-    const policy = await jf<{ policy: { mediaBudget?: { ttsChars?: number }; retention?: { internalDays?: number }; byokChatBudget?: { dailyTokenCap?: number } } }>('/v1/host/openwop-app/governance/policy');
+    await jf('/host/openwop-app/governance/byok-chat-budget', { method: 'PUT', body: JSON.stringify({ dailyTokenCap: 7 }) });
+    const policy = await jf<{ policy: { mediaBudget?: { ttsChars?: number }; retention?: { internalDays?: number }; byokChatBudget?: { dailyTokenCap?: number } } }>('/host/openwop-app/governance/policy');
     expect(policy.body.policy.mediaBudget?.ttsChars).toBe(321);      // preserved
     expect(policy.body.policy.retention?.internalDays).toBe(30);      // preserved
     expect(policy.body.policy.byokChatBudget?.dailyTokenCap).toBe(7);
@@ -353,18 +350,18 @@ describe('byok-chat-budget editable override (ADR 0178)', () => {
   });
 
   it('rejects a non-integer/negative cap and an out-of-range pct (400) and a non-admin (403)', async () => {
-    const badCap = await jf('/v1/host/openwop-app/governance/byok-chat-budget', { method: 'PUT', body: JSON.stringify({ dailyTokenCap: -1 }) });
+    const badCap = await jf('/host/openwop-app/governance/byok-chat-budget', { method: 'PUT', body: JSON.stringify({ dailyTokenCap: -1 }) });
     expect(badCap.status).toBe(400);
-    const badFloat = await jf('/v1/host/openwop-app/governance/byok-chat-budget', { method: 'PUT', body: JSON.stringify({ dailyTokenCap: 1.5 }) });
+    const badFloat = await jf('/host/openwop-app/governance/byok-chat-budget', { method: 'PUT', body: JSON.stringify({ dailyTokenCap: 1.5 }) });
     expect(badFloat.status).toBe(400);
-    const badPct = await jf('/v1/host/openwop-app/governance/byok-chat-budget', { method: 'PUT', body: JSON.stringify({ softWarningPct: 150 }) });
+    const badPct = await jf('/host/openwop-app/governance/byok-chat-budget', { method: 'PUT', body: JSON.stringify({ softWarningPct: 150 }) });
     expect(badPct.status).toBe(400);
 
-    const login = await fetch(`${BASE}/v1/host/openwop-app/test/login`, {
+    const login = await fetch(`${BASE}/host/openwop-app/test/login`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'byok-put-nonadmin@example.com' }),
     });
     const cookie = sessionCookieOf(login);
-    const denied = await fetch(`${BASE}/v1/host/openwop-app/governance/byok-chat-budget`, {
+    const denied = await fetch(`${BASE}/host/openwop-app/governance/byok-chat-budget`, {
       method: 'PUT', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ dailyTokenCap: 5 }),
     });
     expect(denied.status).toBe(403);
@@ -375,7 +372,7 @@ describe('byok-chat-budget editable override (ADR 0178)', () => {
 describe('provider allowlist — one predicate, both seams', () => {
   it('connect route 403s a non-allowlisted provider; the resolver withholds an EXISTING one (fail closed)', async () => {
     // Create a servicenow workspace connection while no policy restricts.
-    const created = await jf<{ connectionId: string }>('/v1/host/openwop-app/connections', {
+    const created = await jf<{ connectionId: string }>('/host/openwop-app/connections', {
       method: 'POST',
       body: JSON.stringify({ provider: 'servicenow', kind: 'api_key', secret: 'sn-key-1234567', scope: 'workspace' }),
     });
@@ -384,7 +381,7 @@ describe('provider allowlist — one predicate, both seams', () => {
     await setGovernancePolicy(TENANT, { providerAllowlist: ['google'] }, 'test-admin');
 
     // Seam 1 — connect route refuses new non-allowlisted connections.
-    const refused = await jf('/v1/host/openwop-app/connections', {
+    const refused = await jf('/host/openwop-app/connections', {
       method: 'POST',
       body: JSON.stringify({ provider: 'zoom', kind: 'bearer', secret: 'z-token-1234567', scope: 'workspace' }),
     });
@@ -416,7 +413,7 @@ describe('per-kind action policy at the assistant seams', () => {
       payload: { event: { summary: 'Q3 review' } },
       draft: 'Invite: Q3 review',
     });
-    const decided = await decideActionViaApproval(TENANT, action.approvalId!, 'approved', { decidedByUserId: 'u-admin' });
+    const decided = await decideActionViaApproval(TENANT, action.approvalId!, 'approved', { expectedContentHash: contentHashOf(action), decidedByUserId: 'u-admin' });
     expect(decided?.changed).toBe(true);
     const row = await getPendingAction(TENANT, action.actionId);
     // COS-8: `draft-only` is a non-`approval-required` policy that suppresses the
@@ -433,7 +430,7 @@ describe('per-kind action policy at the assistant seams', () => {
   });
 
   it('the audit read view serves assistant rows to the admin', async () => {
-    const res = await jf<{ items: Array<{ action: string }> }>('/v1/host/openwop-app/governance/audit?actionPrefix=assistant.');
+    const res = await jf<{ items: Array<{ action: string }> }>('/host/openwop-app/governance/audit?actionPrefix=assistant.');
     expect(res.status).toBe(200);
     expect(Array.isArray(res.body.items)).toBe(true);
     expect(res.body.items.some((i) => i.action.startsWith('assistant.action.'))).toBe(true);
@@ -449,7 +446,7 @@ describe('per-kind action policy at the assistant seams', () => {
     });
 
     // Wildcard bearer admin: unfiltered.
-    const all = await jf<{ items: Array<{ payload?: { tenantId?: string } }> }>('/v1/host/openwop-app/governance/audit?actionPrefix=assistant.');
+    const all = await jf<{ items: Array<{ payload?: { tenantId?: string } }> }>('/host/openwop-app/governance/audit?actionPrefix=assistant.');
     expect(all.body.items.some((i) => i.payload?.tenantId === 'tenant-b')).toBe(true);
 
     // Tenant-scoped superadmin (OPENWOP_SUPERADMIN_TENANTS, the documented
@@ -464,7 +461,7 @@ describe('per-kind action policy at the assistant seams', () => {
     });
     process.env.OPENWOP_SUPERADMIN_TENANTS = ADMIN_TENANT;
     try {
-      const login = await fetch(`${BASE}/v1/host/openwop-app/test/login`, {
+      const login = await fetch(`${BASE}/host/openwop-app/test/login`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ email: 'gov-tenant-admin@example.com', tenantId: ADMIN_TENANT }),
@@ -472,7 +469,7 @@ describe('per-kind action policy at the assistant seams', () => {
       expect(login.status).toBe(201);
       const cookie = sessionCookieOf(login);
       expect(cookie).toBeTruthy();
-      const scoped = await fetch(`${BASE}/v1/host/openwop-app/governance/audit?actionPrefix=assistant.`, { headers: { cookie } });
+      const scoped = await fetch(`${BASE}/host/openwop-app/governance/audit?actionPrefix=assistant.`, { headers: { cookie } });
       expect(scoped.status).toBe(200);
       const body = (await scoped.json()) as { items: Array<{ payload?: { tenantId?: string } }> };
       expect(body.items.length).toBeGreaterThan(0);
@@ -486,7 +483,7 @@ describe('per-kind action policy at the assistant seams', () => {
 describe('scheduler job metadata trust boundary (confused-deputy fix)', () => {
   it('strips spoofed actingUserId + attribution keys and stamps the authenticated principal', async () => {
     const created = await jf<{ job: { jobId: string; metadata?: Record<string, unknown> } } & { jobId?: string; metadata?: Record<string, unknown> }>(
-      '/v1/host/openwop-app/scheduler/jobs',
+      '/host/openwop-app/scheduler/jobs',
       {
         method: 'POST',
         body: JSON.stringify({
@@ -514,12 +511,12 @@ describe('scheduler job metadata trust boundary (confused-deputy fix)', () => {
 
 describe('egress firewall rules (ADR 0187)', () => {
   it('superadmin reads default off, upserts allow/deny rules (normalized), and validates', async () => {
-    const empty = await jf<{ mode: string; hosts: string[] }>('/v1/host/openwop-app/governance/egress-rules');
+    const empty = await jf<{ mode: string; hosts: string[] }>('/host/openwop-app/governance/egress-rules');
     expect(empty.status).toBe(200);
     expect(empty.body.mode).toBe('off');
     expect(empty.body.hosts).toEqual([]);
 
-    const put = await jf<{ mode: string; hosts: string[] }>('/v1/host/openwop-app/governance/egress-rules', {
+    const put = await jf<{ mode: string; hosts: string[] }>('/host/openwop-app/governance/egress-rules', {
       method: 'PUT',
       body: JSON.stringify({ mode: 'allowlist', hosts: ['  API.Example.com ', 'example.com'] }),
     });
@@ -527,12 +524,12 @@ describe('egress firewall rules (ADR 0187)', () => {
     expect(put.body.mode).toBe('allowlist');
     expect(put.body.hosts).toEqual(['api.example.com', 'example.com']); // normalized + de-duped
 
-    const get = await jf<{ mode: string; hosts: string[] }>('/v1/host/openwop-app/governance/egress-rules');
+    const get = await jf<{ mode: string; hosts: string[] }>('/host/openwop-app/governance/egress-rules');
     expect(get.body.mode).toBe('allowlist');
 
-    const badMode = await jf('/v1/host/openwop-app/governance/egress-rules', { method: 'PUT', body: JSON.stringify({ mode: 'nope', hosts: [] }) });
+    const badMode = await jf('/host/openwop-app/governance/egress-rules', { method: 'PUT', body: JSON.stringify({ mode: 'nope', hosts: [] }) });
     expect(badMode.status).toBe(400);
-    const badHosts = await jf('/v1/host/openwop-app/governance/egress-rules', { method: 'PUT', body: JSON.stringify({ mode: 'off', hosts: 'x' }) });
+    const badHosts = await jf('/host/openwop-app/governance/egress-rules', { method: 'PUT', body: JSON.stringify({ mode: 'off', hosts: 'x' }) });
     expect(badHosts.status).toBe(400);
   });
 });

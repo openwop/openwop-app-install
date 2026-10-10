@@ -1,5 +1,7 @@
 /**
- * Models console (ADR 0145) — route + nav fragment.
+ * Models console (ADR 0145) — route + nav fragment, composed by the
+ * `model-router` feature (ADR 0820 §8.3: the empty `models` feature package was
+ * retired; the hub it shipped is model-router's console now).
  *
  * One admin destination (`/models`) consolidating the Routing + Leaderboard
  * surfaces into a tabbed console. The page PROJECTS its tabs from the FEATURES
@@ -19,11 +21,10 @@ import { lazy } from 'react';
 void import('./walkthroughActions.js').then((m) => m.registerModelsWalkthroughActions());
 import { ScaleIcon } from '../../ui/icons/index.js';
 import type { FeatureRoute } from '../../chrome/featureTypes.js';
-import type { FrontendFeature } from '../registry.js';
 
 const ModelsHubPage = lazy(() => import('./ModelsHubPage.js').then((m) => ({ default: m.ModelsHubPage })));
 
-const routes: FeatureRoute[] = [
+export const modelsHubRoutes: FeatureRoute[] = [
   {
     path: '/models',
     element: <ModelsHubPage />,
@@ -41,4 +42,3 @@ const routes: FeatureRoute[] = [
   },
 ];
 
-export const modelsFeature: FrontendFeature = { id: 'models', routes };

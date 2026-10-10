@@ -2,7 +2,6 @@ import { Suspense, lazy, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, Route, Routes, matchPath, useLocation } from 'react-router-dom';
 import { useNotificationStore } from './notifications/notificationStore.js';
-import { useReviewStatusStore } from './chat/reviews/reviewStatusStore.js';
 
 // Overlays are lazy-loaded and mounted only when actually opened, so the
 // devtools network panel, notification panel, and command palette (+ their
@@ -301,13 +300,20 @@ export function App() {
   // cards, inbox) reflects a decision made anywhere, on any client, in real time.
   // Reuses the already-connected notifications stream — no second connection.
   // Ref-counted, so surface-level connects share this one hydrate.
-  const connectReviewStatus = useReviewStatusStore((s) => s.connect);
-  const disconnectReviewStatus = useReviewStatusStore((s) => s.disconnect);
+  // Loaded on demand: the store and its client are ~23 kB of source that only
+  // a signed-in shell needs, so they stay off the entry chunk (bundle budget).
   useEffect(() => {
     if (!sessionBearing) return;
-    void connectReviewStatus();
-    return () => disconnectReviewStatus();
-  }, [sessionBearing, connectReviewStatus, disconnectReviewStatus]);
+    let live = true;
+    let disconnect: (() => void) | undefined;
+    void import('./chat/reviews/reviewStatusStore.js').then(({ useReviewStatusStore }) => {
+      if (!live) return;
+      const store = useReviewStatusStore.getState();
+      void store.connect();
+      disconnect = store.disconnect;
+    });
+    return () => { live = false; disconnect?.(); };
+  }, [sessionBearing]);
   const [netOpen, setNetOpen] = useState(false);
   const notifPanelOpen = useNotificationStore((s) => s.panelOpen);
 

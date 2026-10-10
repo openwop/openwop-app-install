@@ -60,13 +60,13 @@ function rawGet(path: string, headers: Record<string, string> = {}): Promise<{ s
   });
 }
 
-const P = '/v1/host/openwop-app/podcasts';
-const PUB = (orgId: string): string => `/v1/host/openwop-app/public/${encodeURIComponent(orgId)}/podcasts`;
+const P = '/host/openwop-app/podcasts';
+const PUB = (orgId: string): string => `/host/openwop-app/public/${encodeURIComponent(orgId)}/podcasts`;
 
 async function publishedShowWithEpisode(): Promise<{ orgId: string; showSlug: string; episodeSlug: string }> {
   const c = client();
-  await c.post('/v1/host/openwop-app/test/login', { email: `pre-${Date.now()}-${n++}@acme.test` });
-  const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme Media' });
+  await c.post('/host/openwop-app/test/login', { email: `pre-${Date.now()}-${n++}@acme.test` });
+  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme Media' });
   const orgId = org.body.orgId as string;
   const tenantId = (await getOrg(orgId))!.tenantId;
   const created = await c.post(`${P}/shows`, {

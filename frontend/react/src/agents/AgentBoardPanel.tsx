@@ -18,13 +18,15 @@ import {
   type KanbanBoard,
   type KanbanCard,
 } from '../kanban/kanbanClient.js';
-import { KanbanBoardView, type CardPatch, type NewCardInput } from '../kanban/KanbanBoardView.js';
+import { KanbanBoardView, type CardMovePosition, type CardPatch, type NewCardInput } from '../kanban/KanbanBoardView.js';
 import { Notice } from '../ui/Notice.js';
 import { AgentAvatar } from './AgentAvatar.js';
 import { AgentUpNextPanel } from './AgentUpNextPanel.js';
 import type { RoleTheme } from './roleTemplates.js';
 
-export function AgentBoardPanel({ boardId, persona, avatarUrl, roleTheme, workflows, refreshSignal, onChanged, intro }: { boardId: string; persona: string; avatarUrl?: string | undefined; roleTheme?: RoleTheme | undefined; workflows?: string[] | undefined; refreshSignal?: number | undefined; onChanged?: (() => void) | undefined; intro?: JSX.Element | undefined }): JSX.Element {
+/** `readOnly` (a project viewer): the board renders without create/edit/delete, and a
+ *  drag is not sent — every one of those writes needs edit access and would 403. */
+export function AgentBoardPanel({ boardId, persona, avatarUrl, roleTheme, workflows, refreshSignal, onChanged, intro, readOnly = false }: { boardId: string; persona: string; avatarUrl?: string | undefined; roleTheme?: RoleTheme | undefined; workflows?: string[] | undefined; refreshSignal?: number | undefined; onChanged?: (() => void) | undefined; intro?: JSX.Element | undefined; readOnly?: boolean | undefined }): JSX.Element {
   const { t } = useTranslation('agents');
   const [board, setBoard] = useState<KanbanBoard | null>(null);
   const [cards, setCards] = useState<KanbanCard[]>([]);
@@ -85,10 +87,16 @@ export function AgentBoardPanel({ boardId, persona, avatarUrl, roleTheme, workfl
     }
   };
 
-  const onMoveCard = async (cardId: string, toColumnId: string) => {
+  const onMoveCard = async (cardId: string, toColumnId: string, position?: CardMovePosition) => {
     setNotice(null);
     try {
-      const { triggeredRunId } = await patchCard(cardId, { columnId: toColumnId });
+      // ADR 0774 KSCD-6 — forward the drop's anchor, or an in-lane reorder
+      // PATCHes nothing and snaps back on the refresh below.
+      const { triggeredRunId } = await patchCard(cardId, {
+        columnId: toColumnId,
+        ...(position?.beforeCardId ? { beforeCardId: position.beforeCardId } : {}),
+        ...(position?.afterCardId ? { afterCardId: position.afterCardId } : {}),
+      });
       if (triggeredRunId) setNotice(t('boardStartedRunNotice'));
       await refresh();
       onChanged?.();
@@ -147,15 +155,18 @@ export function AgentBoardPanel({ boardId, persona, avatarUrl, roleTheme, workfl
       <div className="u-mb-2">
         <AgentUpNextPanel boardId={boardId} refreshSignal={refreshSignal} />
       </div>
+      {readOnly ? <Notice variant="info">{t('boardReadOnly')}</Notice> : null}
       <KanbanBoardView
         board={board}
         cards={cards}
         enableSources
         workflowOptions={workflows}
-        onMoveCard={(cardId, toColumnId) => void onMoveCard(cardId, toColumnId)}
-        onCreateCard={(columnId, input) => void onCreateCard(columnId, input)}
-        onDeleteCard={(cardId) => void onDeleteCard(cardId)}
-        onEditCard={(cardId, patch) => void onEditCard(cardId, patch)}
+        onMoveCard={(cardId, toColumnId, position) => { if (!readOnly) void onMoveCard(cardId, toColumnId, position); }}
+        {...(readOnly ? {} : {
+          onCreateCard: (columnId: string, input: NewCardInput) => void onCreateCard(columnId, input),
+          onDeleteCard: (cardId: string) => void onDeleteCard(cardId),
+          onEditCard: (cardId: string, patch: CardPatch) => void onEditCard(cardId, patch),
+        })}
       />
     </div>
   );

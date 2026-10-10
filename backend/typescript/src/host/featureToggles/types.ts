@@ -20,7 +20,7 @@ export interface VariantBinding {
   slot: string;
   ref: {
     kind: 'agent' | 'node' | 'prompt';
-    /** Pack-namespaced ref name, e.g. `feature.crm.agents/triage-v2`. */
+    /** Pack-namespaced ref name, e.g. `vendor.openwop-app.crm.agents/triage-v2`. */
     name: string;
     /** Pinned version so a run stamp stays deterministic (ADR §3.5). */
     version: string;
@@ -72,6 +72,11 @@ export interface ToggleConfig {
    *  "GA by flipping the compiled default" is a NO-OP while a row exists,
    *  and this makes that pin visible the moment it arms. */
   overriddenDefaultStatus?: FeatureToggleStatus;
+  /** ADR 0819 §3 — the incident kill switch. When set, the toggle resolves OFF
+   *  for every subject, ahead of per-tenant overrides and the beta cohort.
+   *  Kept apart from `status` so lifting it restores the configured state
+   *  exactly. An admin CHOICE: persisted, merged and audited like `status`. */
+  killed?: boolean;
 }
 
 /** The subject a toggle is resolved against — the authenticated caller. */
@@ -82,6 +87,10 @@ export interface ToggleSubject {
    *  tenantId for `user` bucketing when absent. */
   userId?: string;
   tier?: 'anon' | 'user';
+  /** ADR 0819 §1 — the caller is this host's listed operator acting in person
+   *  (`isListedSuperadmin(req)`), so the plan paywall does not apply to them in
+   *  any workspace. Set only by `toggleSubjectOf(req)`; a daemon never has it. */
+  planExempt?: boolean;
 }
 
 /** The resolved view of a toggle for one subject — what the FE/BE consume. */
@@ -94,4 +103,9 @@ export interface ResolvedAssignment {
   variant: string | null;
   /** Resolved bindings for the assigned variant (for run-stamping, ADR §3.5). */
   bindings?: VariantBinding[];
+  /** ADR 0819 §1 — why an on TOGGLE still resolved `enabled:false`: `plan`
+   *  = the tenant's plan does not include this sellable-bundle feature;
+   *  `unresolved` = the entitlement could not be read (fail-closed), which is a
+   *  fault, not a plan answer, and must not be reported as one. */
+  blockedBy?: 'plan' | 'unresolved';
 }

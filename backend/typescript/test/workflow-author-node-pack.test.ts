@@ -23,15 +23,24 @@ import { buildWorkflowAuthorSurface } from '../src/features/workflow-author/surf
 import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence, __resetHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { getRegisteredWorkflow } from '../src/host/workflowsRegistry.js';
+import { createMember, createOrg } from '../src/host/accessControlService.js';
 
 let pack: typeof import('../../../packs/feature.workflow-author.nodes/index.mjs');
 
 const TENANT = 'ws-pack';
 
+/** ADR 0822 D1 — every model write lane now carries the builder's
+ *  `workspace:write` authority, so the acting user here is an Editor. */
+async function grantEditor(tenantId: string, subject: string): Promise<void> {
+  await createOrg({ tenantId, orgId: tenantId, name: 'Root', createdBy: 'test' }).catch(() => undefined);
+  await createMember({ tenantId, orgId: tenantId, subject, displayName: subject, roles: ['editor'] });
+}
+
 beforeAll(async () => {
   ensureNodesRegistered();
   initHostExtPersistence(await openStorage('memory://'));
   pack = await import('../../../packs/feature.workflow-author.nodes/index.mjs');
+  await grantEditor(TENANT, 'u-1');
 });
 afterAll(() => __resetHostExtPersistence());
 

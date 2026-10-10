@@ -1,24 +1,24 @@
 {
   "name": "core.openwop.workflows.crm-ops",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "kind": "workflow-chain",
-  "description": "Governed CRM write-verb workflows (RFC 0013, ADR 0208 §2, ADR 0252). Where feature.crm.agents.sales-ops is read-mostly (plus two assistive writes), these chains carry the riskier CRM mutations — owner assignment off a new-lead event, stale-deal follow-up, and the scheduler-fired Gmail inbox sync — with a human in the loop where the ADR calls for one. All tenant-specific values are run parameters (replay-deterministic). Resolves on hosts that ship the feature.crm feature + node pack (the OpenWOP reference app).",
+  "description": "Governed CRM write-verb workflows (RFC 0013, ADR 0208 §2, ADR 0252). Where vendor.openwop-app.crm.agents.sales-ops is read-mostly (plus two assistive writes), these chains carry the riskier CRM mutations — owner assignment off a new-lead event, stale-deal follow-up, the scheduler-fired Gmail inbox sync, and contact triage (the CRM toggle variant's scoring, recorded on the contact — ADR 0837 D7) — with a human in the loop where the ADR calls for one. All tenant-specific values are run parameters (replay-deterministic). Resolves on hosts that ship the feature.crm feature + node pack (the OpenWOP reference app).",
   "author": "openwop",
   "license": "Apache-2.0",
-  "engines": { "openwop": ">=1.0.0" },
+  "engines": { "openwop": ">=1.0.0 <3.0.0" },
   "keywords": ["Sales"],
   "chains": [
     {
       "chainId": "crm-ops.route-new-lead",
-      "version": "1.1.0",
+      "version": "1.1.2",
       "label": "Route New Lead",
-      "description": "Bind this chain to the host.crm.contact.created event (Access & data → Host events → bindings) to auto-route every new lead: assign it to a configured owner, then drop a follow-up task on the sales team's board. No approval gate — reassigning an unowned new lead's owner is the low-risk end of the CRM write surface (ADR 0208 §2); creating/converting/deal-stage writes are NOT modeled here.",
+      "description": "Bind this chain to the openwop-app.crm.contact-created event (in-process name host.crm.contact.created; either spelling binds) (Access & data → Host events → bindings) to auto-route every new lead: assign it to a configured owner, then drop a follow-up task on the sales team's board. No approval gate — setting a NEW lead's owner is the low-risk end of the CRM write surface (ADR 0208 §2). It sets the owner unconditionally, replacing one the creating lane already set (CRMWF-7, corrected copy). Creating/converting/deal-stage writes are NOT modeled here.",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
         "required": ["ownerId", "orgId"],
         "properties": {
-          "triggerEventName": { "type": "string", "default": "host.crm.contact.created", "description": "The host event this chain ignites on. The event belongs to the INSTALLING HOST, not the pack (openwop-1, crosstalk 1892) — defaulted so an existing install keeps working." },
+          "triggerEventName": { "type": "string", "default": "openwop-app.crm.contact-created", "description": "The host event this chain ignites on. The event belongs to the INSTALLING HOST, not the pack (openwop-1, crosstalk 1892) — defaulted so an existing install keeps working." },
           "ownerId": { "type": "string", "description": "The opaque owning-subject id (RFC 0048) every new lead is assigned to." },
           "orgId": { "type": "string", "description": "The org the follow-up task is created in." },
           "taskTitle": { "type": "string", "default": "Follow up with new lead", "description": "Title of the follow-up task created for the newly-assigned owner." }
@@ -27,9 +27,9 @@
       "capabilities": ["side-effectful"],
       "dag": {
         "nodes": [
-          { "id": "trigger", "typeId": "core.trigger.event", "name": "New contact created", "position": { "x": 0, "y": 0 }, "config": { "eventName": "{{params.triggerEventName}}" }, "inputs": {} },
-          { "id": "assign-owner", "typeId": "feature.crm.nodes.update-contact-owner", "name": "Assign owner", "position": { "x": 320, "y": 0 }, "config": { "owner": "{{params.ownerId}}" }, "inputs": {} },
-          { "id": "follow-up", "typeId": "feature.crm.nodes.create-task", "name": "Create follow-up task", "position": { "x": 640, "y": 0 }, "config": { "orgId": "{{params.orgId}}", "title": "{{params.taskTitle}}" }, "inputs": {} }
+          { "id": "trigger", "typeId": "core.trigger.event@1.0.0", "name": "New contact created", "position": { "x": 0, "y": 0 }, "config": { "eventName": "{{params.triggerEventName}}" }, "inputs": {} },
+          { "id": "assign-owner", "typeId": "feature.crm.nodes.update-contact-owner@1.0.0", "name": "Assign owner", "position": { "x": 320, "y": 0 }, "config": { "owner": "{{params.ownerId}}" }, "inputs": {} },
+          { "id": "follow-up", "typeId": "feature.crm.nodes.create-task@1.0.0", "name": "Create follow-up task", "position": { "x": 640, "y": 0 }, "config": { "orgId": "{{params.orgId}}", "title": "{{params.taskTitle}}" }, "inputs": {} }
         ],
         "edges": [
           { "from": "trigger.payload", "to": "assign-owner" },
@@ -42,7 +42,7 @@
     },
     {
       "chainId": "crm-ops.deal-hygiene",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "label": "Deal Hygiene Sweep",
       "description": "Reads an org's open deals, then pauses at a human review gate — the reviewer is the one who picks/confirms which deals actually need a follow-up (this chain does not attempt to infer staleness itself; `staleDays` is passed through only as review context). On approval, creates one follow-up task. Pair with a weekly scheduled trigger.",
       "parameters": {
@@ -57,10 +57,10 @@
       "capabilities": ["side-effectful"],
       "dag": {
         "nodes": [
-          { "id": "open-deals", "typeId": "feature.crm.nodes.list-deals", "name": "Open deals", "position": { "x": 0, "y": 0 }, "config": { "orgId": "{{params.orgId}}" }, "inputs": {} },
-          { "id": "review", "typeId": "core.chat.approvalGate", "name": "Review for stale deals", "position": { "x": 320, "y": 0 }, "config": { "title": "Review open deals — flag any with no activity in ~{{params.staleDays}} days for follow-up", "artifactType": "crm.deals", "actions": ["approve", "reject"] }, "inputs": {} },
-          { "id": "gate-reject", "typeId": "core.flow.noop", "name": "Rejected — no follow-up task created", "position": { "x": 640, "y": 160 }, "config": {}, "inputs": {} },
-          { "id": "follow-up", "typeId": "feature.crm.nodes.create-task", "name": "Create follow-up task", "position": { "x": 640, "y": 0 }, "config": { "orgId": "{{params.orgId}}", "title": "Follow up on stale open deal(s)" }, "inputs": {} }
+          { "id": "open-deals", "typeId": "feature.crm.nodes.list-deals@1.0.0", "name": "Open deals", "position": { "x": 0, "y": 0 }, "config": { "orgId": "{{params.orgId}}" }, "inputs": {} },
+          { "id": "review", "typeId": "core.chat.approvalGate@1.1.0", "name": "Review for stale deals", "position": { "x": 320, "y": 0 }, "config": { "title": "Review open deals — flag any with no activity in ~{{params.staleDays}} days for follow-up", "artifactType": "crm.deals", "actions": ["approve", "reject"] }, "inputs": {} },
+          { "id": "gate-reject", "typeId": "core.flow.noop@1.0.0", "name": "Rejected — no follow-up task created", "position": { "x": 640, "y": 160 }, "config": {}, "inputs": {} },
+          { "id": "follow-up", "typeId": "feature.crm.nodes.create-task@1.0.0", "name": "Create follow-up task", "position": { "x": 640, "y": 0 }, "config": { "orgId": "{{params.orgId}}", "title": "Follow up on stale open deal(s)" }, "inputs": {} }
         ],
         "edges": [
           { "from": "open-deals.deals", "to": "review.artifact" },
@@ -74,7 +74,7 @@
     },
     {
       "chainId": "crm-ops.gmail-sync",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "Gmail Inbox Sync",
       "description": "The workflow a Gmail inbox sync opt-in (ADR 0252) fires on cadence — a single node that pulls the connected user's recent Gmail messages, matches From/To participants to EXISTING CRM contacts only (never creates), and appends metadata-only email activities (no subject/body/snippet/email) to their timelines. `gmailSyncId` identifies which opt-in row to sync; the CRM Gmail-sync opt-in flow supplies it automatically when it registers the per-user scheduler job — do not bind this chain manually to an event.",
       "parameters": {
@@ -88,12 +88,42 @@
       "capabilities": ["side-effectful"],
       "dag": {
         "nodes": [
-          { "id": "sync", "typeId": "feature.crm.nodes.gmail-sync", "name": "Sync Gmail inbox", "position": { "x": 0, "y": 0 }, "config": { "gmailSyncId": "{{params.gmailSyncId}}" }, "inputs": {} }
+          { "id": "sync", "typeId": "feature.crm.nodes.gmail-sync@1.1.0", "name": "Sync Gmail inbox", "position": { "x": 0, "y": 0 }, "config": { "gmailSyncId": "{{params.gmailSyncId}}" }, "inputs": {} }
         ]
       },
       "outputs": {
         "scanned": { "type": "number", "description": "Gmail messages scanned in this pass." },
         "matched": { "type": "number", "description": "Contacts matched and appended to in this pass." }
+      }
+    },
+    {
+      "chainId": "crm-ops.triage",
+      "version": "1.0.0",
+      "label": "Triage Contact",
+      "description": "Scores one contact and records the result on it: reads the contact, scores it with the variant the CRM toggle assigned (`basic` = stage only, `enriched` = stage plus a known-company bump), then stamps { variant, score, priority } on the contact. The contact list's Triage action starts this chain with both parameters (ADR 0837 D7); the record step writes only for the run the contact's last-triage stamp names, so a newer triage or a fork never overwrites. Launched by hand from the gallery, a copy scores and reports but records nothing (no stamp names its run).",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["contactId"],
+        "properties": {
+          "contactId": { "type": "string", "description": "The contact to triage (the tenant-wide rolodex id)." },
+          "variant": { "type": "string", "enum": ["basic", "enriched"], "default": "basic", "description": "The scoring variant. The Triage action derives it from the run's stamped toggle assignment; default basic." }
+        }
+      },
+      "capabilities": ["side-effectful"],
+      "dag": {
+        "nodes": [
+          { "id": "load", "typeId": "feature.crm.nodes.get-contact@1.0.0", "name": "Read contact", "position": { "x": 0, "y": 0 }, "config": {}, "inputs": { "contactId": "{{params.contactId}}" } },
+          { "id": "score", "typeId": "feature.crm.nodes.triage@1.1.0", "name": "Score", "position": { "x": 320, "y": 0 }, "config": {}, "inputs": { "variant": "{{params.variant}}" } },
+          { "id": "record", "typeId": "feature.crm.nodes.record-triage@1.0.0", "name": "Record on contact", "position": { "x": 640, "y": 0 }, "config": {}, "inputs": { "contactId": "{{params.contactId}}" } }
+        ],
+        "edges": [
+          { "from": "load.contact", "to": "score" },
+          { "from": "score.triage", "to": "record" }
+        ]
+      },
+      "outputs": {
+        "recorded": { "type": "boolean", "description": "Whether the result was recorded on the contact (false when a newer triage superseded this run)." }
       }
     }
   ]

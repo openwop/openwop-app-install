@@ -1,0 +1,10 @@
+/* ADR 0785 P2 — the Claude Code terminal tab. xterm owns everything inside
+   .cc-terminal; these rules only give it a sized, token-coloured frame. */
+.cc-terminal-tab { background: var(--paper); }
+.cc-terminal { flex: 1; min-height: 0; padding: var(--space-2); background: var(--paper); }
+.cc-terminal[hidden] { display: none; }
+.cc-terminal-pick { margin: var(--space-3); }
+
+/* Rail section (ADR 0785 D5 follow-on): the device online/offline hint on a session row. */
+.cc-rail-dot { display: inline-block; inline-size: 0.5rem; block-size: 0.5rem; border-radius: 50%; flex: none; background: var(--ink-3); }
+.cc-rail-dot[data-online="true"] { background: var(--color-success); }

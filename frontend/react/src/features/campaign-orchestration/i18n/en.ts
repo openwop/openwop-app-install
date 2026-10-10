@@ -95,4 +95,12 @@ export const messages = {
   dispatchDailyBudget: "Daily budget {{amount}} minor units (ad-account currency)",
   dispatchCreated: "Dispatched {{when}}",
   dispatchAccount: "Account {{account}}",
+  // ADR 0852 D6 — the campaign's team ledger
+  ledgerTitle: "Team ledger",
+  ledgerLoading: "Loading the team ledger…",
+  ledgerLoadFailed: "The team ledger could not be loaded. Nothing has changed.",
+  ledgerRetry: "Try again",
+  ledgerNoneBody: "This campaign has no team ledger yet. Setting one up gives the campaign a project for its shared record: what it is for, its scope, open questions and decisions.",
+  ledgerSetUp: "Set up the team ledger",
+  ledgerSetupFailed: "The team ledger could not be set up. Nothing was changed; try again.",
 } as const;

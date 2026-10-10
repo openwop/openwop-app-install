@@ -72,6 +72,8 @@ import { IdempotentCommitRejectedError, PAYLOAD_KEY_RE, RUN_FINAL_STATUSES, type
 import { applyMigrations } from './schema.js';
 import { createLogger } from '../../observability/logger.js';
 import { isForwardExecutionEvent, RunLogClosedError, TERMINAL_RUN_EVENT_TYPES } from '../runLogClosure.js';
+import { nextChatMessageCreatedAt } from '../chatMessageOrder.js';
+import { startPoolPressureProbe } from '../../observability/saturationProbe.js';
 
 const log = createLogger('storage.postgres');
 
@@ -394,6 +396,11 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
   // check when runs stall on `Connection terminated due to connection timeout`.
   log.info('pg_pool_configured', { poolMax });
 
+  // Record when callers QUEUE for a connection (EVID-3): a slow request on an
+  // idle host is waiting on this pool or on the event loop, and neither was
+  // logged. Quiet unless a caller actually waited.
+  const poolPressure = startPoolPressureProbe(pool, poolMax);
+
   // Run migrations once at boot. Single dedicated client; avoid
   // holding a pool slot for the duration of DDL.
   const migrationClient = await pool.connect();
@@ -541,6 +548,12 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
     async getRun(runId) {
       const { rows } = await pool.query<Row>(`SELECT * FROM runs WHERE run_id = $1`, [runId]);
       return rows[0] ? rowToRun(rows[0]) : null;
+    },
+
+    async getRunsByIds(runIds) {
+      if (runIds.length === 0) return [];
+      const { rows } = await pool.query<Row>(`SELECT * FROM runs WHERE run_id = ANY($1::text[])`, [[...new Set(runIds)]]);
+      return rows.map(rowToRun);
     },
 
     async updateRun(runId, rawPatch) {
@@ -833,8 +846,8 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
 
     async insertInterrupt(record) {
       await pool.query(
-        `INSERT INTO interrupts (interrupt_id, run_id, node_id, kind, token, data, resume_schema, created_at, expires_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        `INSERT INTO interrupts (interrupt_id, run_id, node_id, kind, token, data, resume_schema, created_at, expires_at, resolved_at, resolved_value)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
         [
           record.interruptId, record.runId, record.nodeId, record.kind, record.token,
           // Same JSONB marshalling trap as `insertWebhook` above, and confirmed
@@ -848,6 +861,9 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
           jsonbParam(record.resumeSchema),
           record.createdAt,
           record.expiresAt ?? null,
+          // Inserted already resolved: see the sqlite adapter (a replay fork's derived gate).
+          record.resolvedAt ?? null,
+          record.resolvedAt ? jsonbParam(record.resolvedValue ?? null) : null,
         ],
       );
     },
@@ -892,9 +908,39 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
       return rows.map(rowToInterrupt);
     },
 
-    async listOpenInterruptsAll(limit) {
+    async listOpenInterruptsForTenant(tenantId, limit) {
       const { rows } = await pool.query<Row>(
-        `SELECT * FROM interrupts WHERE resolved_at IS NULL ORDER BY created_at ASC LIMIT $1`,
+        // ADR 0778 D3 — a gate on a terminal run is not waiting on anyone. It
+        // used to stay listed (and actionable), and undeadlined dead gates
+        // crowded this window until a busy tenant stopped seeing new ones.
+        `SELECT i.* FROM interrupts i JOIN runs r ON r.run_id = i.run_id
+         WHERE r.tenant_id = $1 AND i.resolved_at IS NULL
+           AND r.status NOT IN ('completed', 'failed', 'cancelled')
+         ORDER BY i.created_at ASC, i.interrupt_id ASC LIMIT $2`,
+        [tenantId, limit],
+      );
+      return rows.map(rowToInterrupt);
+    },
+
+    async listOpenInterruptsAll(limit, opts) {
+      if (opts?.newestFirst) {
+        const { rows } = await pool.query<Row>(
+          `SELECT * FROM interrupts WHERE resolved_at IS NULL ORDER BY created_at DESC, interrupt_id DESC LIMIT $1`,
+          [limit],
+        );
+        return rows.map(rowToInterrupt);
+      }
+      if (opts?.after) {
+        const { rows } = await pool.query<Row>(
+          `SELECT * FROM interrupts WHERE resolved_at IS NULL
+             AND (created_at > $2::timestamptz OR (created_at = $2::timestamptz AND interrupt_id > $3))
+             ORDER BY created_at ASC, interrupt_id ASC LIMIT $1`,
+          [limit, opts.after.createdAt, opts.after.interruptId],
+        );
+        return rows.map(rowToInterrupt);
+      }
+      const { rows } = await pool.query<Row>(
+        `SELECT * FROM interrupts WHERE resolved_at IS NULL ORDER BY created_at ASC, interrupt_id ASC LIMIT $1`,
         [limit],
       );
       return rows.map(rowToInterrupt);
@@ -1547,14 +1593,17 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
       return rows[0]?.result ?? null;
     },
 
-    async putInvocation({ runId, nodeId, attempt, invocationId }, result) {
+    async putInvocation({ runId, nodeId, attempt, invocationId }, result, opts) {
+      // `presented_key` keeps the stored value when an update carries none —
+      // the same property the sqlite twin gets from its COALESCE.
       await pool.query(
-        `INSERT INTO invocation_log (run_id, node_id, attempt, invocation_id, result, created_at)
-         VALUES ($1,$2,$3,$4,$5,NOW())
+        `INSERT INTO invocation_log (run_id, node_id, attempt, invocation_id, result, created_at, presented_key)
+         VALUES ($1,$2,$3,$4,$5,NOW(),$6)
          ON CONFLICT (run_id, node_id, attempt, invocation_id) DO UPDATE SET
            result = EXCLUDED.result,
-           created_at = EXCLUDED.created_at`,
-        [runId, nodeId, attempt, invocationId, jsonbParam(result)],
+           created_at = EXCLUDED.created_at,
+           presented_key = COALESCE(EXCLUDED.presented_key, invocation_log.presented_key)`,
+        [runId, nodeId, attempt, invocationId, jsonbParam(result), opts?.presentedKey ?? null],
       );
     },
     async claimInvocation({ runId, nodeId, invocationId }, { nowMs, staleAfterMs }) {
@@ -1596,16 +1645,18 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
       // projected as a completed effect.
       const res = await pool.query(
         `SELECT node_id AS "nodeId", attempt, invocation_id AS "invocationId",
+                presented_key AS "presentedKey",
                 (result IS NOT NULL) AS completed, created_at AS at
            FROM invocation_log
           WHERE run_id = $1
           ORDER BY created_at, node_id, attempt`,
         [runId],
       );
-      return res.rows.map((r: { nodeId: string; attempt: number; invocationId: string; completed: boolean; at: unknown }) => ({
+      return res.rows.map((r: { nodeId: string; attempt: number; invocationId: string; presentedKey: string | null; completed: boolean; at: unknown }) => ({
         nodeId: r.nodeId,
         attempt: Number(r.attempt),
         invocationId: r.invocationId,
+        ...(r.presentedKey ? { presentedKey: r.presentedKey } : {}),
         completed: Boolean(r.completed),
         at: r.at instanceof Date ? r.at.toISOString() : String(r.at),
       }));
@@ -1780,6 +1831,14 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
         [runId, owner, leaseExpiresAt],
       );
       return (res.rowCount ?? 0) > 0;
+    },
+
+    async runLogClosedBy(runId) {
+      const { rows } = await pool.query<{ type: string }>(
+        `SELECT type FROM events WHERE run_id = $1 AND type = ANY($2) LIMIT 1`,
+        [runId, TERMINAL_RUN_EVENT_TYPES],
+      );
+      return rows[0]?.type ?? null;
     },
 
     async claimOrphanedRuns(workerId, nowMs, staleBeforeIso, leaseMs, limit) {
@@ -2203,6 +2262,18 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
       return rowCount ?? 0;
     },
 
+    async sumManagedUsageForTenant(tenantId, providerId, dateUtc, alsoLike) {
+      // ADR 0821 D2 — the tenant ceiling's read. SUM over the tenant's own row and
+      // its participants' buckets; BIGINT sums come back as strings, hence Number().
+      const { rows } = await pool.query<{ i: string | number; o: string | number }>(
+        `SELECT COALESCE(SUM(input_tokens), 0) AS i, COALESCE(SUM(output_tokens), 0) AS o
+           FROM managed_provider_usage
+          WHERE date = $1 AND provider_id = $2 AND (tenant_id = $3 OR tenant_id LIKE $4 ESCAPE $5)`,
+        [dateUtc, providerId, tenantId, alsoLike.pattern, alsoLike.escape],
+      );
+      return { inputTokens: Number(rows[0]?.i ?? 0), outputTokens: Number(rows[0]?.o ?? 0) };
+    },
+
     async getManagedUsage(tenantId, providerId, dateUtc) {
       const { rows } = await pool.query<{ input_tokens: number; output_tokens: number }>(
         `SELECT input_tokens, output_tokens FROM managed_provider_usage
@@ -2486,6 +2557,18 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
+        // Stamp strictly after the session's newest message so same-ms
+        // appends list in append order (`chatMessageOrder.ts`). The xact lock
+        // serialises appends to ONE session: without it two READ COMMITTED
+        // transactions read the same head and mint the same stamp. Key 2
+        // keeps it apart from the per-run lock (`hashtext(runId), 1`).
+        await client.query('SELECT pg_advisory_xact_lock(hashtext($1), 2)', [record.sessionId]);
+        const headRes = await client.query<{ head: Date | null }>(
+          'SELECT MAX(created_at) AS head FROM chat_messages WHERE session_id = $1',
+          [record.sessionId],
+        );
+        const head = headRes.rows[0]?.head ?? null;
+        const createdAt = nextChatMessageCreatedAt(record.createdAt, head ? head.toISOString() : null);
         await client.query(
           `INSERT INTO chat_messages (message_id, session_id, role, content, meta, author_subject, created_at)
            VALUES ($1, $2, $3, $4, $5, $6, $7)`,
@@ -2496,7 +2579,7 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
             record.content,
             record.meta,
             record.authorSubject,
-            record.createdAt,
+            createdAt,
           ],
         );
         await client.query(
@@ -2504,7 +2587,7 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
               SET message_count = message_count + 1,
                   updated_at = $1
             WHERE session_id = $2`,
-          [record.createdAt, record.sessionId],
+          [createdAt, record.sessionId],
         );
         await client.query('COMMIT');
       } catch (err) {
@@ -3178,6 +3261,25 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
       );
       return rows.map((r) => ({ key: r.k, value: r.v }));
     },
+    async kvListPage(keyPrefix, { after, limit }) {
+      // `~>~` / `~<~` are the text_pattern_ops (byte-order) operators, so this is
+      // an ordered range scan of `host_ext_kv_k_pattern` that stops at `limit`
+      // (ADR 0868; plan verified: Index Scan → Limit, rows read = page size).
+      const escaped = keyPrefix.replace(/[\\%_]/g, '\\$&');
+      const { rows } = await pool.query<{ k: string; v: string }>(
+        `SELECT k, v FROM host_ext_kv WHERE k LIKE $1 ESCAPE '\\' AND k ~>~ $2 ORDER BY k USING ~<~ LIMIT $3`,
+        [`${escaped}%`, after ?? '', Math.max(0, Math.floor(limit))],
+      );
+      return rows.map((r) => ({ key: r.k, value: r.v }));
+    },
+    async kvCount(keyPrefix) {
+      const escaped = keyPrefix.replace(/[\\%_]/g, '\\$&');
+      const { rows } = await pool.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM host_ext_kv WHERE k LIKE $1 ESCAPE '\\'`,
+        [`${escaped}%`],
+      );
+      return rows[0]?.n ?? 0;
+    },
     async kvListContaining(keyPrefix, needle) {
       const esc = (s: string): string => s.replace(/[\\%_]/g, '\\$&');
       const { rows } = await pool.query<{ k: string; v: string }>(
@@ -3252,6 +3354,7 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
         try { listenClient.release(); } catch { /* already gone */ }
         listenClient = null;
       }
+      poolPressure.stop();
       await pool.end();
     },
   };

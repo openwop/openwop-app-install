@@ -7,22 +7,24 @@
  */
 
 import { useCallback, useRef } from 'react';
+import { errorReasonOf } from '../../../client/classifyHttpError.js';
 import i18n from '../../../i18n/index.js';
 import { formatNumber } from '../../../i18n/format.js';
 import { toast } from '../../../ui/toast.js';
-import { cancelRun } from '../../../client/runsClient.js';
+import { cancelRun, pollEvents } from '../../../client/runsClient.js';
 import { subscribeToRun, type Subscription } from '../../../client/streamsClient.js';
 import { setConversationRun } from '../../../client/chatSessionsClient.js';
 import type { BYOKActiveConfig } from '../../../byok/lib/useBYOKConfig.js';
 import { chatSessionReducer } from '../../lib/chatSessionReducer.js';
 import { applyAutoTitle } from '../../lib/applyAutoTitle.js';
+import { backendNodeCount } from '../../lib/workflowMentions.js';
 import { openConversationSession, sendConversationTurn, fetchTurns, turnsToBubbles, seedRunState, streamDeltaFromEvent, exchangeSettleSignal, exchangeErrorPayload, toolActivityFromEvent, titledFromEvent, recallUsedFromEvent, contextDegradedFromEvent, CONVERSATION_GATE_NODE_ID, type ConversationBubble } from '../../conversationTransport.js';
 import type { ConversationTurn } from '../../conversationClient.js';
 import { WopError } from '@openwop/openwop';
 import type { ChatMessage, ContentPart, SendOptions } from '../../types.js';
 import { messageText } from '../../types.js';
 import type { ChatSessionCore } from './core.js';
-import { ASYNC_SETTLE_TIMEOUT_MS, applyToolActivity, conversationMessageId } from './lib.js';
+import { ASYNC_SETTLE_TIMEOUT_MS, STREAM_FALLBACK_POLL_MS, applyToolActivity, conversationMessageId } from './lib.js';
 
 export function useTurnTransport(
   core: ChatSessionCore,
@@ -91,6 +93,7 @@ export function useTurnTransport(
         // Canonical id: the wire turn id (`${runId}:gate:0:N:role`) sanitized to the
         // store's pattern — identical live, persisted, and on reopen (no id-flip).
         id: conversationMessageId(b.id), content: b.content, createdAt: new Date().toISOString(),
+        ...(b.replyMs !== undefined ? { replyMs: b.replyMs } : {}),
         ...(rawId ? { agentId: rawId } : {}),
         ...(row?.persona ? { agentPersona: row.persona } : {}),
         ...(row?.slug ? { agentSlug: row.slug } : {}),
@@ -110,7 +113,10 @@ export function useTurnTransport(
         const localized = b.runRef.workflowId
           ? i18n.t(`chat:workflowNames.${b.runRef.workflowId}`, { defaultValue: '' })
           : '';
-        const workflowRun = seedRunState(b.runRef, i18n.t('chat:workflowRunGeneric'), new Date().toISOString(), localized);
+        const seeded = seedRunState(b.runRef, i18n.t('chat:workflowRunGeneric'), new Date().toISOString(), localized);
+        // A run an agent tool ignited: the ownership index knows the step count
+        // when the workflow is one the caller owns; otherwise it stays unknown (0).
+        const workflowRun = { ...seeded, totalNodes: (b.runRef.workflowId ? backendNodeCount(b.runRef.workflowId) : undefined) ?? seeded.totalNodes };
         return { ...base, role: 'workflow_run' as const, content: workflowRun.workflowName, workflowRun };
       }
       const role = b.role as 'user' | 'assistant';
@@ -240,6 +246,9 @@ export function useTurnTransport(
     let streamSub: Subscription | null = null;
     // ADR 0079 §Phase 3 — fallback timer for the async settle-wait (cleared in finally).
     let settleTimer: ReturnType<typeof setTimeout> | undefined;
+    // The SSE→poll fallback's timer (cleared in finally; `stopped` ends the loop).
+    let pollTimer: ReturnType<typeof setTimeout> | undefined;
+    let stopped = false;
     try {
       // Reuse this session's open conversation run across reloads (the suspended
       // run survives restarts) so the agent keeps server-side context. Only open
@@ -303,7 +312,7 @@ export function useTurnTransport(
       // ceiling). Resolve `settled` when the agent's authoritative turn — or a
       // terminal error — lands on the stream; the post-ack branch awaits it.
       let resolveSettle: ((s: 'agent' | 'error') => void) | null = null;
-      const settled = new Promise<'agent' | 'error'>((res) => { resolveSettle = res; });
+      const settled = new Promise<'agent' | 'error'>((res) => { resolveSettle = (v) => { stopped = true; res(v); }; });
       // Holder (not a bare `let`) so control-flow analysis re-widens it after the
       // `await` below — a bare let assigned only inside the closure narrows to `null`.
       const asyncErr: { value: { code?: string; message?: string } | null } = { value: null };
@@ -335,7 +344,30 @@ export function useTurnTransport(
           if (signal === 'error') { asyncErr.value = exchangeErrorPayload(ev); resolveSettle?.('error'); }
           else if (signal === 'agent') resolveSettle?.('agent');
         },
-        onError: () => { /* best-effort streaming — the exchange still reconciles */ },
+        // The stream can fail outright — a 429 from the per-tenant SSE cap
+        // (`host/sseChannel.ts`), a dropped proxy. Live tokens are best-effort,
+        // but the SETTLE signal is not: without it an async exchange waited the
+        // full ASYNC_SETTLE_TIMEOUT_MS on "Thinking…" though the reply had landed
+        // (MEASURED prod 2026-10-09: every stream 429'd and the bubble hung).
+        // So poll the run's events and read them with the same settle rule.
+        onError: () => {
+          if (stopped || pollTimer !== undefined) return;
+          let cursor = startSeq;
+          const tick = async () => {
+            if (stopped) return;
+            try {
+              const page = await pollEvents(runId, cursor);
+              for (const ev of page.events) {
+                if (typeof ev.sequence === 'number' && ev.sequence > cursor) cursor = ev.sequence;
+                const signal = exchangeSettleSignal(ev, startSeq);
+                if (signal === 'error') { asyncErr.value = exchangeErrorPayload(ev); resolveSettle?.('error'); }
+                else if (signal === 'agent') resolveSettle?.('agent');
+              }
+            } catch { /* transient — the next tick retries; the settle timeout still bounds the wait */ }
+            if (!stopped) pollTimer = setTimeout(() => { void tick(); }, STREAM_FALLBACK_POLL_MS);
+          };
+          pollTimer = setTimeout(() => { void tick(); }, 0);
+        },
       });
       // Tail from the cursor: fetch only events past what we've folded, then merge.
       const { turns, lastSeq, notice } = await sendConversationTurn(
@@ -418,7 +450,9 @@ export function useTurnTransport(
       // NEXT send opens fresh. Gate on the actual wire CODE — not a message regex:
       // a credential_unavailable message literally contains "expired", which the
       // old regex misread as a dead run and needlessly tore down the conversation.
-      const DEAD_RUN_CODES = new Set(['interrupt_already_resolved', 'interrupt_gone', 'run_not_found']);
+      // `interrupt_not_found` joins them: the gate this conversation would resume
+      // is not there, so the bound run cannot take another turn either way.
+      const DEAD_RUN_CODES = new Set(['interrupt_already_resolved', 'interrupt_gone', 'interrupt_not_found', 'run_not_found']);
       const isDeadRun = code ? DEAD_RUN_CODES.has(code) : /resolved|gone|not.?found/i.test(message);
       if (isDeadRun) {
         conversationRef.current = null;
@@ -429,12 +463,15 @@ export function useTurnTransport(
       // Mirror the per-turn path's error UX: keep the user's message and append
       // an assistant error bubble (ErrorCard classifies the code, e.g. a BYOK
       // prompt), rather than leaving a dangling user turn with no reply.
+      const reason = errorReasonOf(err);
       const errBubble: ChatMessage = {
         id: crypto.randomUUID(),
         role: 'assistant',
         content: '',
         createdAt: new Date().toISOString(),
-        meta: { error: { code: code ?? 'conversation_exchange_failed', message } },
+        // The envelope's machine-readable cause (e.g. the free tier's daily
+        // allowance), so the card can say what happened instead of "went wrong".
+        meta: { error: { code: code ?? 'conversation_exchange_failed', message, ...(reason ? { reason } : {}) } },
       };
       // Drop the optimistic "thinking" bubble (the reply never landed) and append
       // the error bubble, keeping the user's message.
@@ -442,6 +479,8 @@ export function useTurnTransport(
     } finally {
       // Always tear down the delta stream + release the animation target.
       if (settleTimer !== undefined) clearTimeout(settleTimer);
+      stopped = true;
+      if (pollTimer !== undefined) clearTimeout(pollTimer);
       streamSub?.close();
       inFlightAssistantIdRef.current = null;
     }

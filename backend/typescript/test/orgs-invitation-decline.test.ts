@@ -14,6 +14,25 @@
  * a shared-workspace admin PATCHes a member's email → OK (`admin`, vouched);
  * a personal-tenant self-PATCH → 403 `email_unverified` (`self`);
  * SAML/IdP-refreshed (`upsertFromPrincipal` with an email) → OK (`idp`).
+ *
+ * The race is run in BOTH orderings: whichever of accept/decline wins, the
+ * other gets the uniform `invalid_invite` (ADR 0564 Decision 1 — "Accept on a
+ * declined invite → the uniform invalid answer"; the concurrent loser carries
+ * no `reason`, `invitationsService.ts` accept-claim comment).
+ *
+ * Sabotage that turns it red (grade-tests wave 2, probes `g2-dec-*`):
+ *   - invite-tenant toggle check / expiry check / decline's `assertEmailOwnership`
+ *     dropped → the gate chain;
+ *   - decline idempotent shortcut returning a fresh `declinedAt` → "decline flips the row";
+ *   - preview's or accept's `declined` refusal dropped → "decline flips the row" + "replay after decline";
+ *   - `isEmailVouched` ignoring provenance / the PATCH or POST lane mis-stamping
+ *     provenance / `upsertFromPrincipal` not re-asserting `idp` → the D7 cases;
+ *   - decline CAS replaced by a blind put → the race (accept-first ordering);
+ *     accept claim CAS skipped → the race (decline-first ordering);
+ *   - decline CAS-loser re-read dropped → "two CONCURRENT declines";
+ *   - `replace:false` ignored → "the mint primitive";
+ *   - eraser tenant filter dropped / hash-index pointer left behind / `createdByName`
+ *     kept / eraser unregistered / resolver tenant guard dropped → the D6 cases.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -39,8 +58,7 @@ import {
   previewInvitation,
   type OrgInvitation,
 } from '../src/features/orgs/invitationsService.js';
-import { eraseSubject, registeredSubjectEraserIds } from '../src/host/subjectErasure.js';
-import { EXPECTED_SUBJECT_ERASERS } from '../src/host/subjectEraserManifest.js';
+import { eraseSubject } from '../src/host/subjectErasure.js';
 
 // ─────────────────────────── ROUTE lane ───────────────────────────
 let BASE = '';
@@ -58,20 +76,20 @@ function client(): { get: (p: string) => Promise<Res>; post: (p: string, b?: unk
 let n = 0;
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
 async function signup(c: ReturnType<typeof client>, email: string, extra: Record<string, unknown> = {}): Promise<{ userId: string; email: string }> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email, ...extra });
+  const r = await c.post('/host/openwop-app/test/login', { email, ...extra });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
 async function ownerOrg(): Promise<{ owner: ReturnType<typeof client>; orgId: string; tenantId: string }> {
   const owner = client();
   await signup(owner, uniqEmail('owner'));
-  const org = (await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' })).body;
+  const org = (await owner.post('/host/openwop-app/orgs', { name: 'Acme' })).body;
   return { owner, orgId: org.orgId as string, tenantId: org.tenantId as string };
 }
-const invitesPath = (orgId: string) => `/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/invites`;
-const DECLINE = '/v1/host/openwop-app/orgs/invitations/decline';
-const ACCEPT = '/v1/host/openwop-app/orgs/invitations/accept';
-const preview = (token: string) => client().get(`/v1/host/openwop-app/orgs/invitations/preview?token=${encodeURIComponent(token)}`);
+const invitesPath = (orgId: string) => `/host/openwop-app/orgs/${encodeURIComponent(orgId)}/invites`;
+const DECLINE = '/host/openwop-app/orgs/invitations/decline';
+const ACCEPT = '/host/openwop-app/orgs/invitations/accept';
+const preview = (token: string) => client().get(`/host/openwop-app/orgs/invitations/preview?token=${encodeURIComponent(token)}`);
 
 describe('ADR 0564 P1 / ADR 0622 D4 — POST /orgs/invitations/decline over HTTP', () => {
   beforeAll(async () => {
@@ -122,8 +140,11 @@ describe('ADR 0564 P1 / ADR 0622 D4 — POST /orgs/invitations/decline over HTTP
       expect(await enableTenantOverride('orgs', tenantId, 'test')).toBe('enabled');
       expect((await bobC.post(DECLINE, { token: inv.body.token })).status).toBe(200); // bob's own tenant is still OFF
     } finally { await saveConfig({ ...def, status: 'on' }, 'test'); }
-    // Nothing above minted a member or burned the row.
-    expect((await owner.get(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`)).body.members.some((m: { email?: string }) => m.email === email)).toBe(false);
+    // Nothing above minted a member or burned the row: the row survives, carrying
+    // only the final (successful) decline.
+    expect((await owner.get(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`)).body.members.some((m: { email?: string }) => m.email === email)).toBe(false);
+    const rows = (await owner.get(invitesPath(orgId))).body.invites as Array<{ inviteId: string; status?: string }>;
+    expect(rows.map((i) => [i.inviteId, i.status])).toEqual([[inv.body.invite.inviteId, 'declined']]);
   });
 
   it('decline flips the row to declined (visible to the inviter with declinedAt), is idempotent (same 200), and preview + accept then answer reason=declined without burning the row', async () => {
@@ -152,7 +173,7 @@ describe('ADR 0564 P1 / ADR 0622 D4 — POST /orgs/invitations/decline over HTTP
     expect(a.status).toBe(400);
     expect(a.body.details).toMatchObject({ code: 'invalid_invite', reason: 'declined' });
     expect((await owner.get(invitesPath(orgId))).body.invites).toHaveLength(1);
-    expect((await owner.get(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`)).body.members.some((m: { email?: string }) => m.email === email)).toBe(false);
+    expect((await owner.get(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`)).body.members.some((m: { email?: string }) => m.email === email)).toBe(false);
   });
 
   describe('ADR 0622 D7 — the email-ownership PROVENANCE gate on accept AND decline', () => {
@@ -178,7 +199,7 @@ describe('ADR 0564 P1 / ADR 0622 D4 — POST /orgs/invitations/decline over HTTP
       const member = await signup(memberC, uniqEmail('ws-member-login'), { tenantId: WS, subject: `oidc:d7-member-${n++}` });
       const seeded = (await getUser(member.userId))!;
       // The admin vouches for the member's address (another user's row, no personal short-circuit in a ws: tenant).
-      const patched = await adminC.patch(`/v1/host/openwop-app/users/users/${encodeURIComponent(seeded.userId)}`, { email });
+      const patched = await adminC.patch(`/host/openwop-app/users/users/${encodeURIComponent(seeded.userId)}`, { email });
       expect(patched.status, JSON.stringify(patched.body)).toBe(200);
       expect(patched.body.emailProvenance).toBe('admin');
       // The member accepts the invite issued to that address from their session.
@@ -193,7 +214,7 @@ describe('ADR 0564 P1 / ADR 0622 D4 — POST /orgs/invitations/decline over HTTP
       // Mallory signs in under her own address, then renames herself to the invitee's.
       const malloryC = client();
       const mallory = await signup(malloryC, uniqEmail('mallory'));
-      const patched = await malloryC.patch(`/v1/host/openwop-app/users/users/${encodeURIComponent(mallory.userId)}`, { email });
+      const patched = await malloryC.patch(`/host/openwop-app/users/users/${encodeURIComponent(mallory.userId)}`, { email });
       expect(patched.status, JSON.stringify(patched.body)).toBe(200);
       expect(patched.body.emailProvenance).toBe('self');
       for (const path of [ACCEPT, DECLINE]) {
@@ -202,7 +223,7 @@ describe('ADR 0564 P1 / ADR 0622 D4 — POST /orgs/invitations/decline over HTTP
         expect(r.body.details).toMatchObject({ code: 'forbidden', reason: 'email_unverified' });
       }
       expect((await preview(inv.body.token)).status).toBe(200); // still live for the real recipient
-      expect((await owner.get(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`)).body.members.some((m: { subject?: string }) => m.subject === mallory.userId)).toBe(false);
+      expect((await owner.get(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`)).body.members.some((m: { subject?: string }) => m.subject === mallory.userId)).toBe(false);
     });
 
     it('review S1 — a PERSONAL-tenant owner POSTing a "saml" user with the victim\'s email gets a SELF row (provenance is the lane\'s, never the body\'s source) → accept 403 email_unverified', async () => {
@@ -213,7 +234,7 @@ describe('ADR 0564 P1 / ADR 0622 D4 — POST /orgs/invitations/decline over HTTP
       // POST is open to her there. She claims the row is SAML-provisioned.
       const malloryC = client();
       await signup(malloryC, uniqEmail('mallory-s1'));
-      const forged = await malloryC.post('/v1/host/openwop-app/users/users', { principalId: `saml:forged-${n++}`, source: 'saml', email });
+      const forged = await malloryC.post('/host/openwop-app/users/users', { principalId: `saml:forged-${n++}`, source: 'saml', email });
       expect(forged.status, JSON.stringify(forged.body)).toBe(201);
       expect(forged.body.source).toBe('saml'); // the claim is recorded as what it is…
       expect(forged.body.emailProvenance).toBe('self'); // …but the address is hers, unvouched.
@@ -258,24 +279,35 @@ describe('ADR 0622 D4 — the decline-vs-accept race and the replay posture (ser
   afterEach(() => { __resetHostExtPersistence(); });
 
   it('a concurrent accept + decline of ONE token yields EXACTLY ONE outcome — never a member AND a declined row, never a resurrected row', async () => {
-    const org = await createOrg({ tenantId: 't', createdBy: 'owner', name: 'Acme' });
-    const bob = await mkUser('t', 'bob@acme.test');
-    const { token, invite } = await createInvitation({ tenantId: 't', orgId: org.orgId, email: 'bob@acme.test', role: 'editor' });
-    const results = await Promise.allSettled([acceptInvitation(token, bob), declineInvitation(token, bob)]);
-    const wins = results.filter((r) => r.status === 'fulfilled');
-    expect(wins, 'exactly one of accept/decline wins').toHaveLength(1);
-    const rows = await listInvitations('t', org.orgId);
-    const member = (await listMembers('t', org.orgId)).some((m) => m.subject === bob.userId);
-    if (results[0]!.status === 'fulfilled') {
-      // Accept won: the row is GONE (claim-by-delete) — the decline's CAS must not have resurrected it.
-      expect(member).toBe(true);
-      expect(rows).toEqual([]);
-      expect(results[1]).toMatchObject({ status: 'rejected', reason: expect.objectContaining({ code: 'invalid_invite' }) });
-    } else {
-      // Decline won: the row is DECLINED and no membership was minted.
-      expect(member).toBe(false);
-      expect(rows.map((r) => [r.inviteId, r.status])).toEqual([[invite.inviteId, 'declined']]);
-      expect(results[0]).toMatchObject({ status: 'rejected', reason: expect.objectContaining({ code: 'invalid_invite', reason: 'declined' }) });
+    // Both orderings: with identical await depth the call started FIRST reaches
+    // its CAS first, so each ordering exercises the other winner. Asserting
+    // which side won is part of the claim — a branch that never runs is not coverage.
+    for (const declineFirst of [false, true]) {
+      const email = declineFirst ? 'bob-df@acme.test' : 'bob-af@acme.test';
+      const org = await createOrg({ tenantId: 't', createdBy: 'owner', name: `Acme ${email}` });
+      const bob = await mkUser('t', email);
+      const { token, invite } = await createInvitation({ tenantId: 't', orgId: org.orgId, email, role: 'editor' });
+      const [acceptR, declineR] = declineFirst
+        ? await Promise.allSettled([declineInvitation(token, bob), acceptInvitation(token, bob)]).then(([d, a]) => [a, d] as const)
+        : await Promise.allSettled([acceptInvitation(token, bob), declineInvitation(token, bob)]);
+      const label = declineFirst ? 'decline-first' : 'accept-first';
+      expect([acceptR, declineR].filter((r) => r.status === 'fulfilled'), `${label}: exactly one of accept/decline wins`).toHaveLength(1);
+      const rows = await listInvitations('t', org.orgId);
+      const member = (await listMembers('t', org.orgId)).some((m) => m.subject === bob.userId);
+      if (!declineFirst) {
+        // Accept won: the row is GONE (claim-by-delete) — the decline's CAS must not have resurrected it.
+        expect(acceptR.status, label).toBe('fulfilled');
+        expect(member, label).toBe(true);
+        expect(rows, label).toEqual([]);
+        expect(declineR, label).toMatchObject({ status: 'rejected', reason: expect.objectContaining({ code: 'invalid_invite' }) });
+      } else {
+        // Decline won: the row is DECLINED and no membership was minted; the
+        // accept loser gets the uniform invalid answer (ADR 0564 Decision 1).
+        expect(declineR.status, label).toBe('fulfilled');
+        expect(member, label).toBe(false);
+        expect(rows.map((r) => [r.inviteId, r.status]), label).toEqual([[invite.inviteId, 'declined']]);
+        expect(acceptR, label).toMatchObject({ status: 'rejected', reason: expect.objectContaining({ code: 'invalid_invite' }) });
+      }
     }
   });
 
@@ -331,19 +363,25 @@ describe('ADR 0622 D6 — `orgs:invite` SubjectEraser: both keys, reachable by u
   });
   afterEach(() => { __resetHostExtPersistence(); });
 
-  it('is registered under its manifest name (the three-layer gate sees it)', () => {
-    expect(EXPECTED_SUBJECT_ERASERS.has('eraseOrgInvitationsSubject')).toBe(true);
-    expect(registeredSubjectEraserIds()).toContain('eraseOrgInvitationsSubject');
-  });
+  // (The former "is registered under its manifest name" case was cut in grade-tests
+  // wave 2: dropping the registration turned REACHABILITY below red on the same
+  // probe, and `subject-eraser-manifest.test.ts` LAYER 1/2 own the manifest.)
 
-  it('the RECIPIENT key (email): rows for that address are deleted INDEX-FIRST (the token stops resolving); other rows and other tenants untouched; idempotent', async () => {
+  it('the RECIPIENT key (email): rows for that address are deleted WITH their hash-index pointer (the token stops resolving); other rows and other tenants untouched; idempotent', async () => {
+    const hashIdx = new DurableCollection<{ key: string; inviteId: string }>('orgs:invite-hashidx', (r) => r.key);
     const org = await createOrg({ tenantId: 't', createdBy: 'owner', name: 'Acme' });
     const foreignOrg = await createOrg({ tenantId: 'other', createdBy: 'owner', name: 'Other' });
     const mine = await createInvitation({ tenantId: 't', orgId: org.orgId, email: 'Gone@Acme.Test', role: 'viewer' });
     const keep = await createInvitation({ tenantId: 't', orgId: org.orgId, email: 'stay@acme.test', role: 'viewer' });
     const foreign = await createInvitation({ tenantId: 'other', orgId: foreignOrg.orgId, email: 'gone@acme.test', role: 'viewer' });
+    expect((await hashIdx.list()).map((r) => r.inviteId), 'precondition: the pointer exists before erasure').toContain(mine.invite.inviteId);
     expect(await eraseOrgInvitationsSubject('t', 'gone@acme.test')).toEqual({ rowsTouched: 1 });
     await expect(previewInvitation(mine.token)).rejects.toMatchObject({ code: 'invalid_invite' });
+    // The token stops resolving even with a dangling pointer (verify fails closed),
+    // so the pointer's deletion must be asserted on the index itself.
+    const pointers = (await hashIdx.list()).map((r) => r.inviteId);
+    expect(pointers, 'erasure left the hash-index pointer behind').not.toContain(mine.invite.inviteId);
+    expect(pointers).toEqual(expect.arrayContaining([keep.invite.inviteId, foreign.invite.inviteId]));
     expect((await listInvitations('t', org.orgId)).map((r) => r.inviteId)).toEqual([keep.invite.inviteId]);
     await expect(previewInvitation(foreign.token)).resolves.toMatchObject({ orgId: foreignOrg.orgId }); // tenant-scoped
     expect(await eraseOrgInvitationsSubject('t', 'gone@acme.test')).toEqual({ rowsTouched: 0 }); // idempotent

@@ -44,6 +44,14 @@
  * isolate per-tenant edits would be per-tenant minted ids, which is exactly the
  * from-chain route that strands pre-migration replay stamps (see ADR 0596 R2).
  *
+ * §Correction (ADR 0789): "acceptable for illustrative demo content" was wrong. The
+ * builder can add ANY node to the edited graph, so one tenant's edit put arbitrary
+ * steps into a definition every other seeded tenant runs with its OWN keys: an
+ * injection path, not cosmetic drift. The shared id is now never written through a
+ * tenant lane. A save forks onto the tenant's own id (`sharedWorkflowFork.ts`), which
+ * keeps the stable id's replay property. The "per-tenant ids" dismissed above were
+ * never the only option; copy-on-write is the one that pays only when a tenant edits.
+ *
  * @see docs/adr/0072-ai-workflow-authoring.md
  * @see docs/adr/0596-workflow-author-honesty-and-durable-writes.md (§ R2 — WFAWF-6)
  * @see src/host/demoWalkthroughsSeed.ts — the owned-in-tree-def seed pattern this mirrors
@@ -51,10 +59,11 @@
  */
 
 import type { WorkflowDefinition } from '../executor/types.js';
-import { registerWorkflow, getRegisteredWorkflow, deleteRegisteredWorkflow } from './workflowsRegistry.js';
-import { recordOwnership, getOwned, removeOwnership, isAuthoredByAnyTenant } from './workflowOwnership.js';
+import { registerWorkflow, getRegisteredWorkflow } from './workflowsRegistry.js';
+import { recordOwnership, getOwned, removeOwnership } from './workflowOwnership.js';
 import { lifecycleOf, withLifecycle } from './workflowLifecycle.js';
 import { createLogger } from '../observability/logger.js';
+import { forkedSharedIds } from './sharedWorkflowFork.js';
 
 const log = createLogger('host.workflowAuthorSeed');
 
@@ -141,7 +150,9 @@ export async function countWorkflowAuthorShowcase(tenantId: string): Promise<num
 export async function seedWorkflowAuthorShowcase(tenantId: string): Promise<{ created: number; details: Record<string, unknown> }> {
   let created = 0;
   const seeded: string[] = [];
+  const forked = await forkedSharedIds(tenantId); // ADR 0789 — see seedZeroConfigWorkflows
   for (const s of WORKFLOW_AUTHOR_SHOWCASE) {
+    if (forked.has(s.definition.workflowId)) continue;
     try {
       const id = s.definition.workflowId;
       const registered = getRegisteredWorkflow(id);
@@ -170,7 +181,9 @@ export async function clearWorkflowAuthorShowcase(tenantId: string): Promise<{ c
   for (const s of WORKFLOW_AUTHOR_SHOWCASE) {
     const id = s.definition.workflowId;
     if (await removeOwnership(tenantId, id)) cleared += 1;
-    if (!(await isAuthoredByAnyTenant(id))) deleteRegisteredWorkflow(id);
+    // ADR 0789 — never delete the SHARED row, even once nobody owns it: a tenant
+    // that forked (or was retracted) still has runs stamped with this id, and the
+    // registry's deletion cascade would take every tenant's revisions with it.
   }
   return { cleared, details: { workflows: WORKFLOW_AUTHOR_SHOWCASE.map((s) => s.definition.workflowId) } };
 }

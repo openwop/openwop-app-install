@@ -3,8 +3,8 @@
 Long-document summarizer using map-reduce. Splits input into chunks, summarizes each, then synthesizes a final summary. Handles documents that exceed any single LLM's context window.
 
 | Pack name | `core.openwop.agents.long-doc-summarizer` |
-| Version | `1.0.0` |
-| Engine | OpenWOP `>=1.1.0 <2.0.0` |
+| Version | `1.0.1` |
+| Engine | OpenWOP `>=1.1.0 <3.0.0` |
 | Runtime | `language: remote` |
 | Agents | 1 |
 | Required host capabilities | `aiProviders`, `host.agentRuntime` |

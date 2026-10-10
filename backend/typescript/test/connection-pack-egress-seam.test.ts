@@ -4,7 +4,7 @@
  * `connection-pack-apihosts.test.ts` behavioral egress-allow-list leg.
  *
  * The published `@openwop/openwop-conformance` (≥1.46.0) behavioral leg drives
- * `POST /v1/host/sample/connection-packs/{install,egress-check}` and, under
+ * `POST /host/sample/connection-packs/{install,egress-check}` and, under
  * `OPENWOP_REQUIRE_BEHAVIOR=true`, asserts a credential-bearing egress to an
  * `apiHosts` match is PERMITTED and a non-match FAILS CLOSED. But that leg
  * SOFT-SKIPS on a 404 (an unwired seam still "passes" vacuously), so we pin the
@@ -51,7 +51,7 @@ describe('RFC 0120 §10 — connection-packs/egress-check seam (enabled)', () =>
   };
 
   // Both the product (host-namespaced) and the spec-canonical (suite-driven) base paths.
-  for (const base of ['/v1/host/sample/connection-packs', '/v1/host/openwop-app/connection-packs']) {
+  for (const base of ['/host/sample/connection-packs', '/host/openwop-app/connection-packs']) {
     describe(`base ${base}`, () => {
       it('PERMITS an apiHosts match — the entry host and its subdomains (meta-ads ⇒ facebook.com)', async () => {
         // meta-ads auto-loads from the in-tree pack with apiHosts:["facebook.com"].
@@ -113,7 +113,7 @@ describe('RFC 0120 §10 — egress-check seam is 404 when seams are disabled (pr
   afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
   it('returns 404 (seam unmounted) for both base paths', async () => {
-    for (const base of ['/v1/host/sample/connection-packs', '/v1/host/openwop-app/connection-packs']) {
+    for (const base of ['/host/sample/connection-packs', '/host/openwop-app/connection-packs']) {
       const res = await fetch(`${BASE}${base}/egress-check`, { method: 'POST', headers: H, body: JSON.stringify({ provider: 'meta-ads', requestHost: 'facebook.com' }) });
       expect(res.status).toBe(404);
     }

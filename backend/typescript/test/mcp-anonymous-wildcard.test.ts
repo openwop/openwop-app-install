@@ -11,7 +11,7 @@
  * production-reachable."
  *
  * HOW REACHABLE WAS IT, precisely? Narrower than I first wrote, and measuring
- * it corrected my own test design. `/v1/host/openwop-app/mcp` is NOT in
+ * it corrected my own test design. `/host/openwop-app/mcp` is NOT in
  * `middleware/auth.ts`'s exempt list, so a plain unauthenticated request is
  * 401'd by the global middleware before `routes/mcp.ts` runs. The fallback
  * therefore needed a configuration where the middleware RUNS but attaches no

@@ -1,6 +1,7 @@
 {
   "name": "feature.brand.nodes",
-  "version": "1.2.0",
+  "version": "1.2.1",
+  "kind": "node",
   "description": "Brand & Guardrails feature node pack \u2014 read + enforce nodes over the ctx.features.brand surface shipped by the Brand feature package. Lets a workflow (or a chat agent via the agent pack) read the app's white-label identity, resolve a brand's voice into a prompt block, and score generated content for compliance (deterministic banned-phrase / formality / per-channel length blended with an LLM tone judgement).",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
@@ -13,7 +14,7 @@
     "marketing"
   ],
   "engines": {
-    "openwop": ">=1.0.0 <2.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "nodes": [
     {

@@ -25,14 +25,14 @@ export const docsFeature: BackendFeature = {
   // read through (never kbService directly).
   surface: { id: 'docs', build: buildDocsSurface },
   requiredPacks: [
-    { name: 'feature.docs.nodes', version: '1.0.0' },
+    { name: 'feature.docs.nodes', version: '1.0.1' },
     { name: 'core.openwop.mcp', version: '1.1.3' },
   ],
   toggleDefault: {
     id: 'docs',
     label: 'Product documentation',
     description:
-      'A public reference-docs surface: pages authored in the CMS docs collection, served at /docs, answerable by the AI chat (RAG), and reachable by external agents via MCP tools. Composes CMS, Publishing, KB, and the MCP server. OFF by default.',
+      'A public reference-docs surface: pages authored in the CMS docs collection, served at /docs, answerable by the AI chat (RAG), and reachable by external agents via MCP tools. Composes CMS, Publishing, KB, and the MCP server.',
     category: 'Content',
     status: 'off',
     bucketUnit: 'tenant',

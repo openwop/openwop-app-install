@@ -36,6 +36,7 @@ import { createLogger } from '../../observability/logger.js';
 import { findUserConnection, getConnection, reviveConnection, type Connection } from '../connections/connectionsService.js';
 import { registerJob, updateJob, deleteJob } from '../../host/schedulingService.js';
 import { personSubject } from '../../host/subject.js';
+import { registerWorkflowFeature } from '../../host/workflowFeatureGate.js';
 import { getChain, expandChain } from '../../host/workflowChainPackLoader.js';
 import { registerWorkflowDurable, getRegisteredWorkflowAsync } from '../../host/workflowsRegistry.js';
 import { recordRevision } from '../../host/workflowRevisions.js';
@@ -49,6 +50,16 @@ const log = createLogger('features.crm.gmailSync');
 
 /** The published chain the scheduler fires (`examples/workflow-chain-packs/crm-ops`). */
 const GMAIL_SYNC_CHAIN_ID = 'crm-ops.gmail-sync';
+/** The toggle id the Gmail sync job and its workflow belong to. */
+const CRM_FEATURE_ID = 'crm';
+
+/** ADR 0820 §7 / G6 — every per-sync workflow is expanded from this chain, so
+ *  declaring the CHAIN as crm-owned gates each tenant copy at the launch funnel
+ *  (`metadata.expandedFrom.chainId`), including syncs whose job was created
+ *  before it carried `featureId` (backfill-on-read, no migration). */
+export function registerGmailSyncWorkflowFeature(): void {
+  registerWorkflowFeature(GMAIL_SYNC_CHAIN_ID, CRM_FEATURE_ID);
+}
 
 export const GMAIL_SYNC_CADENCES = ['15m', 'hourly', 'daily'] as const;
 export type GmailSyncCadence = (typeof GMAIL_SYNC_CADENCES)[number];
@@ -282,6 +293,9 @@ export async function createGmailSync(input: CreateGmailSyncInput): Promise<Gmai
     // is carried too for observability even though the node itself reads it
     // off its frozen-in config (RFC 0013 Path A — see file header).
     metadata: { actingUserId: input.userId, gmailSyncId: syncId },
+    // ADR 0820 §7 / G6 — the scheduler resolves `crm` (toggle + plan) at every
+    // fire; a lapsed plan auto-pauses the job instead of failing each tick.
+    featureId: CRM_FEATURE_ID,
   });
   if (!res.ok) throw new OpenwopError('validation_error', res.error.message, 400, { code: res.error.code });
   const now = new Date().toISOString();
@@ -384,7 +398,7 @@ export async function pauseGmailSyncsForRevokedConnection(tenantId: string, conn
   // `needs-reconsent` rows flip too (review BLOCKER-2): a revoke of a dead
   // connection must read as "revoked — resume re-binds", not "re-consent THIS
   // (deleted) connection" forever.
-  for (const s of (await syncs.listByPrefix(`${tenantId}:`)).filter((x) => x.connectionId === connectionId && (x.status === 'active' || x.status === 'needs-reconsent'))) {
+  for (const s of (await syncs.listByPrefix(`${tenantId}:`)).filter((x) => x.tenantId === tenantId && x.connectionId === connectionId && (x.status === 'active' || x.status === 'needs-reconsent'))) {
     await markGmailSyncStatus(tenantId, s.syncId, 'paused', 'connection-revoked');
     paused += 1;
   }
@@ -422,7 +436,7 @@ export async function markGmailSyncStatus(
  */
 export async function markGmailSyncsNeedsReconsent(tenantId: string, connectionId: string): Promise<number> {
   let marked = 0;
-  for (const s of (await syncs.listByPrefix(`${tenantId}:`)).filter((x) => x.connectionId === connectionId && x.status === 'active')) {
+  for (const s of (await syncs.listByPrefix(`${tenantId}:`)).filter((x) => x.tenantId === tenantId && x.connectionId === connectionId && x.status === 'active')) {
     await markGmailSyncStatus(tenantId, s.syncId, 'needs-reconsent');
     marked += 1;
   }
@@ -437,7 +451,7 @@ export async function markGmailSyncsNeedsReconsent(tenantId: string, connectionI
  */
 export async function resumeGmailSyncsForReconsentedConnection(tenantId: string, connectionId: string): Promise<number> {
   let resumed = 0;
-  for (const s of (await syncs.listByPrefix(`${tenantId}:`)).filter((x) => x.connectionId === connectionId && x.status === 'needs-reconsent')) {
+  for (const s of (await syncs.listByPrefix(`${tenantId}:`)).filter((x) => x.tenantId === tenantId && x.connectionId === connectionId && x.status === 'needs-reconsent')) {
     try {
       await updateGmailSync(tenantId, s.syncId, { status: 'active' });
       resumed += 1;

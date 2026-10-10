@@ -30,6 +30,7 @@ const str = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');
 export function registerKicktodoCommunityAgentTools(): void {
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: KICKTODO_COMMUNITY_REVIEWS_TOOL_ID,
       description:

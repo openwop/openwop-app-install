@@ -122,6 +122,7 @@ export const messages = {
   // ADR 0621 D5 — motivo mostrado en el modal de inicio de sesión tras un cierre forzado
   sessionRefused_account_disabled: 'Un administrador desactivó tu cuenta, así que se cerró tu sesión. Contacta con el administrador de tu espacio de trabajo para recuperar el acceso.',
   sessionRefused_account_erased: 'Tu cuenta fue eliminada, así que se cerró tu sesión. Ya no se puede usar para iniciar sesión.',
-  sessionRefused_session_revoked: 'Se cerró tu sesión en todos los dispositivos. Inicia sesión de nuevo para continuar.',
+  sessionRefused_session_revoked: 'Se cerró tu sesión. Vuelve a iniciar sesión para continuar.',
+  sessionRefused_session_expired: 'Tu sesión ha finalizado, así que se cerró. Vuelve a iniciar sesión para continuar.',
   sessionRefused_self_revoked: 'Cerraste la sesión en todos los dispositivos, incluido este. Inicia sesión de nuevo para continuar.',
 } as const;

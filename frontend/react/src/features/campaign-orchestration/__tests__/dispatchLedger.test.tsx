@@ -11,6 +11,7 @@
  *    leaving an opaque platform id as the only fact about a live ad object.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+vi.mock('../CampaignLedgerSection.js', () => ({ CampaignLedgerSection: () => null })); // own tests: campaignLedgerSection.test.tsx
 import { render, screen, cleanup, fireEvent, act, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import type { AdDispatch, MarketingCampaign } from '../campaignStudioClient.js';

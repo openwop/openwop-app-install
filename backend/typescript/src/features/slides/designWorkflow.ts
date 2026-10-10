@@ -38,5 +38,5 @@ export function buildSlidesDesignDefinition(): WorkflowDefinition {
 
 /** Boot registration — chain-backed under the stable id, chain packs boot-load first. */
 export function registerSlidesDesignWorkflow(): void {
-  registerChainBackedWorkflow(SLIDES_DESIGN_WORKFLOW_ID, { postProcess: slidesPostProcess });
+  registerChainBackedWorkflow(SLIDES_DESIGN_WORKFLOW_ID, { postProcess: slidesPostProcess, featureId: 'slides' }); // ADR 0820 §7 / G6
 }

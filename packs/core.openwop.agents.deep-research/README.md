@@ -3,8 +3,8 @@
 Long-horizon research agent. Plans an investigation, decomposes into sub-questions, retrieves from RAG + web, evaluates source quality, produces a structured findings report. Mirrors LangGraph Deep Agents.
 
 | Pack name | `core.openwop.agents.deep-research` |
-| Version | `1.0.0` |
-| Engine | OpenWOP `>=1.1.0 <2.0.0` |
+| Version | `1.0.5` |
+| Engine | OpenWOP `>=1.1.0 <3.0.0` |
 | Runtime | `language: remote` |
 | Agents | 1 |
 | Required host capabilities | `aiProviders`, `host.agentRuntime`, `openwop.agents.memoryBackends ≥ longTerm` |

@@ -22,6 +22,7 @@ import {
 import { listDispatchRecords } from '../../host/adsAdapter.js';
 import { cleanString } from '../../host/boundedStrings.js';
 import type { CampaignStatus, MarketingCampaign } from './types.js';
+import { ensureCampaignProject, getCampaignProjectId } from './campaignProject.js';
 
 const TOGGLE_ID = 'campaign-orchestration';
 const LABEL = 'Campaign Studio';
@@ -50,7 +51,7 @@ async function loadCampaignScoped(req: Request, scope: Scope): Promise<Marketing
 
 export function registerCampaignStudioRoutes(deps: RouteDeps): void {
   const { app } = deps;
-  const BASE = '/v1/host/openwop-app/campaign-orchestration';
+  const BASE = '/host/openwop-app/campaign-orchestration';
 
   app.get(`${BASE}/campaigns`, async (req, res, next) => {
     try {
@@ -71,7 +72,19 @@ export function registerCampaignStudioRoutes(deps: RouteDeps): void {
   app.get(`${BASE}/campaigns/:campaignId`, async (req, res, next) => {
     try {
       await requireFeatureEnabled(req, TOGGLE_ID, LABEL);
-      res.json({ campaign: await loadCampaignScoped(req, 'workspace:read') });
+      const c = await loadCampaignScoped(req, 'workspace:read');
+      const projectId = await getCampaignProjectId(tenantOf(req), c.id); // ADR 0852 D1
+      res.json({ campaign: { ...c, ...(projectId ? { projectId } : {}) } });
+    } catch (err) { next(err); }
+  });
+
+  // ADR 0852 D1 — create-or-return the campaign's linked project (an existing
+  // campaign gets one lazily, on first open of its Ledger panel).
+  app.post(`${BASE}/campaigns/:campaignId/project`, async (req, res, next) => {
+    try {
+      await requireFeatureEnabled(req, TOGGLE_ID, LABEL);
+      const c = await loadCampaignScoped(req, 'workspace:write');
+      res.json({ projectId: await ensureCampaignProject(c, actingUserOf(req) ?? 'unknown') });
     } catch (err) { next(err); }
   });
 

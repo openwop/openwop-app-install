@@ -48,17 +48,17 @@ function client() {
 
 async function shop() {
   const owner = client();
-  const login = await owner.post('/v1/host/openwop-app/test/login', { email: `bump-${Date.now()}-${n++}@acme.test` });
+  const login = await owner.post('/host/openwop-app/test/login', { email: `bump-${Date.now()}-${n++}@acme.test` });
   const tenantId: string = login.body.user?.tenantId ?? '';
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Bump Shop' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Bump Shop' });
   const orgId: string = org.body.orgId;
-  const c = (suffix: string): string => `/v1/host/openwop-app/commerce/orgs/${encodeURIComponent(orgId)}${suffix}`;
+  const c = (suffix: string): string => `/host/openwop-app/commerce/orgs/${encodeURIComponent(orgId)}${suffix}`;
   const main = await owner.post(c('/products'), { type: 'digital', name: 'Course', price: 100, currency: 'USD' });
   const bump = await owner.post(c('/products'), { type: 'digital', name: 'Workbook', price: 20, currency: 'USD' });
   return { owner, tenantId, orgId, mainId: main.body.productId as string, bumpId: bump.body.productId as string, c };
 }
 
-const checkout = (orgId: string): string => `/v1/host/openwop-app/public-store/${encodeURIComponent(orgId)}/checkout`;
+const checkout = (orgId: string): string => `/host/openwop-app/public-store/${encodeURIComponent(orgId)}/checkout`;
 
 describe('ADR 0296 P1 — order bumps in the public checkout', () => {
   it('prices accepted bumps into the single order with route-derived origin + the funnel stamp', async () => {
@@ -98,7 +98,7 @@ describe('ADR 0296 P1 — order bumps in the public checkout', () => {
 
   it('promotions evaluate over the whole order — a bump pushes the cart over a threshold', async () => {
     const { owner, tenantId, orgId, mainId, bumpId } = await shop();
-    const promo = await owner.post(`/v1/host/openwop-app/promotions/orgs/${encodeURIComponent(orgId)}/promotions`, {
+    const promo = await owner.post(`/host/openwop-app/promotions/orgs/${encodeURIComponent(orgId)}/promotions`, {
       name: '10% over $110', type: 'cart_threshold', reward: { kind: 'percentage', value: 10 }, minSpend: 110,
     });
     expect(promo.status).toBe(201);

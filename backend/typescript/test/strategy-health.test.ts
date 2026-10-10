@@ -77,14 +77,14 @@ afterAll(async () => { await closeApp(); });
 const client = (): Client => makeClient(() => BASE);
 
 describe('GET /strategy/health (route)', () => {
-  const S = '/v1/host/openwop-app/strategy';
+  const S = '/host/openwop-app/strategy';
   it('rolls up a linked off-track project into the strategy health (RBAC-filtered)', async () => {
     const c = client();
-    const u = await c.post('/v1/host/openwop-app/test/login', { email: `h-${Date.now()}-${n++}@x.test`, tenantId: `org:h-${Date.now()}-${n++}` });
+    const u = await c.post('/host/openwop-app/test/login', { email: `h-${Date.now()}-${n++}@x.test`, tenantId: `org:h-${Date.now()}-${n++}` });
     expect(u.status).toBe(201);
-    const orgId = (await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
-    const proj = (await c.post('/v1/host/openwop-app/projects', { orgId, name: 'Apollo' })).body;
-    await c.patch(`/v1/host/openwop-app/projects/${proj.id}`, { charter: { health: 'off-track', milestones: [{ id: 'm1', title: 'ship', done: false }] } });
+    const orgId = (await c.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
+    const proj = (await c.post('/host/openwop-app/projects', { orgId, name: 'Apollo' })).body;
+    await c.patch(`/host/openwop-app/projects/${proj.id}`, { charter: { health: 'off-track', milestones: [{ id: 'm1', title: 'ship', done: false }] } });
     const s = (await c.post(S, { orgId, title: 'Win', scope: 'org', objectives: [{ title: 'Grow', keyResults: [] }] })).body;
     await c.put(`${S}/${s.id}/links`, { links: [{ kind: 'project', projectId: proj.id }] });
 
@@ -99,8 +99,8 @@ describe('GET /strategy/health (route)', () => {
 
   it('a manual healthOverride wins over the computed verdict; clearing it (null) reverts to Auto', async () => {
     const c = client();
-    await c.post('/v1/host/openwop-app/test/login', { email: `ho-${Date.now()}-${n++}@x.test`, tenantId: `org:ho-${Date.now()}-${n++}` });
-    const orgId = (await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
+    await c.post('/host/openwop-app/test/login', { email: `ho-${Date.now()}-${n++}@x.test`, tenantId: `org:ho-${Date.now()}-${n++}` });
+    const orgId = (await c.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
     // Objectives declared but nothing executable linked ⇒ computes off-track.
     const s = (await c.post(S, { orgId, title: 'Override me', scope: 'org', objectives: [{ title: 'Grow', keyResults: [] }] })).body;
     const computed = (await c.get(`${S}/health`)).body.strategies.find((x: any) => x.id === s.id);
@@ -121,7 +121,7 @@ describe('GET /strategy/health (route)', () => {
   it('404s when the strategy toggle is off', async () => {
     await enableToggle('strategy', 'off');
     const c = client();
-    await c.post('/v1/host/openwop-app/test/login', { email: `h2-${Date.now()}-${n++}@x.test` });
+    await c.post('/host/openwop-app/test/login', { email: `h2-${Date.now()}-${n++}@x.test` });
     expect((await c.get(`${S}/health`)).status).toBe(404);
     await enableToggle('strategy', 'on');
   });

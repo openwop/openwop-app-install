@@ -75,10 +75,10 @@ export function registerFormContentSeamRoutes(app: Express): void {
     log.info('form content seam disabled (set OPENWOP_TEST_SEAM_ENABLED=true to enable)');
     return;
   }
-  log.warn('form content seam ENABLED — /v1/host/sample/formcontent/instantiate is reachable. NEVER enable in production.');
+  log.warn('form content seam ENABLED — /host/sample/formcontent/instantiate is reachable. NEVER enable in production.');
 
   const guard = requireNonAnonymousPrincipal('the RFC 0137 form-content conformance seam');
-  app.post('/v1/host/sample/formcontent/instantiate', guard, async (req: Request, res: Response, next: NextFunction) => {
+  app.post('/host/sample/formcontent/instantiate', guard, async (req: Request, res: Response, next: NextFunction) => {
     try {
       ensureFixtures();
       const body = (req.body ?? {}) as Record<string, unknown>;

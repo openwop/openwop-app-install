@@ -3,8 +3,8 @@
  * 2026-05-28).
  *
  * Covers the validate / conflict / cross-tenant gates for
- *   POST   /v1/host/openwop-app/agents
- *   DELETE /v1/host/openwop-app/agents/{agentId}
+ *   POST   /host/openwop-app/agents
+ *   DELETE /host/openwop-app/agents/{agentId}
  *
  * Also exercises:
  *   - Idempotency-Key replay (#5) — same key + same body → cached
@@ -77,9 +77,9 @@ interface AgentEntry {
   packName: string;
 }
 
-describe('user-authored agents — POST /v1/host/openwop-app/agents', () => {
+describe('user-authored agents — POST /host/openwop-app/agents', () => {
   it('creates a valid agent and returns the projected record', async () => {
-    const r = await jsonFetch<AgentEntry>('/v1/host/openwop-app/agents', {
+    const r = await jsonFetch<AgentEntry>('/host/openwop-app/agents', {
       method: 'POST',
       body: JSON.stringify({
         persona: 'Test Reviewer',
@@ -101,7 +101,7 @@ describe('user-authored agents — POST /v1/host/openwop-app/agents', () => {
   });
 
   it('rejects missing persona (400)', async () => {
-    const r = await jsonFetch<{ message: string }>('/v1/host/openwop-app/agents', {
+    const r = await jsonFetch<{ message: string }>('/host/openwop-app/agents', {
       method: 'POST',
       body: JSON.stringify({
         modelClass: 'chat',
@@ -113,7 +113,7 @@ describe('user-authored agents — POST /v1/host/openwop-app/agents', () => {
   });
 
   it('rejects unknown modelClass (400)', async () => {
-    const r = await jsonFetch<{ message: string }>('/v1/host/openwop-app/agents', {
+    const r = await jsonFetch<{ message: string }>('/host/openwop-app/agents', {
       method: 'POST',
       body: JSON.stringify({
         persona: 'Bad',
@@ -126,7 +126,7 @@ describe('user-authored agents — POST /v1/host/openwop-app/agents', () => {
   });
 
   it('rejects out-of-range confidenceThreshold (400)', async () => {
-    const r = await jsonFetch<{ message: string }>('/v1/host/openwop-app/agents', {
+    const r = await jsonFetch<{ message: string }>('/host/openwop-app/agents', {
       method: 'POST',
       body: JSON.stringify({
         persona: 'Confident',
@@ -141,7 +141,7 @@ describe('user-authored agents — POST /v1/host/openwop-app/agents', () => {
 
   it('returns 409 on duplicate persona', async () => {
     // First create succeeds.
-    await jsonFetch('/v1/host/openwop-app/agents', {
+    await jsonFetch('/host/openwop-app/agents', {
       method: 'POST',
       body: JSON.stringify({
         persona: 'Dupe Test',
@@ -150,7 +150,7 @@ describe('user-authored agents — POST /v1/host/openwop-app/agents', () => {
       }),
     });
     // Second create with the same persona → 409.
-    const r2 = await jsonFetch<{ message: string }>('/v1/host/openwop-app/agents', {
+    const r2 = await jsonFetch<{ message: string }>('/host/openwop-app/agents', {
       method: 'POST',
       body: JSON.stringify({
         persona: 'Dupe Test',
@@ -168,13 +168,13 @@ describe('user-authored agents — POST /v1/host/openwop-app/agents', () => {
       modelClass: 'chat',
       systemPrompt: 'You are helpful.',
     });
-    const r1 = await jsonFetch<AgentEntry>('/v1/host/openwop-app/agents', {
+    const r1 = await jsonFetch<AgentEntry>('/host/openwop-app/agents', {
       method: 'POST',
       headers: { 'idempotency-key': 'idem-test-key-1' },
       body,
     });
     expect(r1.status).toBe(201);
-    const r2 = await jsonFetch<AgentEntry>('/v1/host/openwop-app/agents', {
+    const r2 = await jsonFetch<AgentEntry>('/host/openwop-app/agents', {
       method: 'POST',
       headers: { 'idempotency-key': 'idem-test-key-1' },
       body,
@@ -185,7 +185,7 @@ describe('user-authored agents — POST /v1/host/openwop-app/agents', () => {
   });
 
   it('Idempotency-Key with mismatched body returns 409', async () => {
-    await jsonFetch('/v1/host/openwop-app/agents', {
+    await jsonFetch('/host/openwop-app/agents', {
       method: 'POST',
       headers: { 'idempotency-key': 'idem-mismatch-key' },
       body: JSON.stringify({
@@ -194,7 +194,7 @@ describe('user-authored agents — POST /v1/host/openwop-app/agents', () => {
         systemPrompt: 'You are helpful.',
       }),
     });
-    const r2 = await jsonFetch<{ message: string }>('/v1/host/openwop-app/agents', {
+    const r2 = await jsonFetch<{ message: string }>('/host/openwop-app/agents', {
       method: 'POST',
       headers: { 'idempotency-key': 'idem-mismatch-key' },
       body: JSON.stringify({
@@ -208,9 +208,9 @@ describe('user-authored agents — POST /v1/host/openwop-app/agents', () => {
   });
 });
 
-describe('user-authored agents — DELETE /v1/host/openwop-app/agents/{agentId}', () => {
+describe('user-authored agents — DELETE /host/openwop-app/agents/{agentId}', () => {
   it('deletes a user-authored agent and returns 204', async () => {
-    const created = await jsonFetch<AgentEntry>('/v1/host/openwop-app/agents', {
+    const created = await jsonFetch<AgentEntry>('/host/openwop-app/agents', {
       method: 'POST',
       body: JSON.stringify({
         persona: 'Delete Me',
@@ -219,14 +219,14 @@ describe('user-authored agents — DELETE /v1/host/openwop-app/agents/{agentId}'
       }),
     });
     expect(created.status).toBe(201);
-    const del = await jsonFetch(`/v1/host/openwop-app/agents/${encodeURIComponent(created.body.agentId)}`, {
+    const del = await jsonFetch(`/host/openwop-app/agents/${encodeURIComponent(created.body.agentId)}`, {
       method: 'DELETE',
     });
     expect(del.status).toBe(204);
   });
 
   it('returns 404 for a non-existent agentId', async () => {
-    const del = await jsonFetch<{ message: string }>('/v1/host/openwop-app/agents/user.default.does-not-exist', { method: 'DELETE' });
+    const del = await jsonFetch<{ message: string }>('/host/openwop-app/agents/user.default.does-not-exist', { method: 'DELETE' });
     expect(del.status).toBe(404);
   });
 
@@ -235,7 +235,7 @@ describe('user-authored agents — DELETE /v1/host/openwop-app/agents/{agentId}'
     // `user_agents` — the DELETE route gates on the storage row, so
     // it 404s rather than mistakenly removing a pack agent.
     const del = await jsonFetch<{ message: string }>(
-      '/v1/host/openwop-app/agents/core.openwop.agents.code-reviewer.default',
+      '/host/openwop-app/agents/core.openwop.agents.code-reviewer.default',
       { method: 'DELETE' },
     );
     expect(del.status).toBe(404);
@@ -245,7 +245,7 @@ describe('user-authored agents — DELETE /v1/host/openwop-app/agents/{agentId}'
 describe('user-authored agents — cross-tenant isolation in GET /v1/agents', () => {
   it('user-authored agents projected through GET /v1/agents', async () => {
     // Create an agent (lands under the bearer-shared default tenant).
-    await jsonFetch('/v1/host/openwop-app/agents', {
+    await jsonFetch('/host/openwop-app/agents', {
       method: 'POST',
       body: JSON.stringify({
         persona: 'Inventory Probe',
@@ -255,7 +255,7 @@ describe('user-authored agents — cross-tenant isolation in GET /v1/agents', ()
     });
     // GET /v1/agents should include the user-authored row.
     const r = await jsonFetch<{ agents: Array<{ persona: string; packName: string }> }>(
-      '/v1/agents',
+      '/agents',
     );
     expect(r.status).toBe(200);
     const userAgent = r.body.agents.find((a) => a.persona === 'Inventory Probe');
@@ -264,7 +264,7 @@ describe('user-authored agents — cross-tenant isolation in GET /v1/agents', ()
   });
 
   it('does not expose user-authored agents across explicit tenant filters', async () => {
-    await jsonFetch('/v1/host/openwop-app/agents', {
+    await jsonFetch('/host/openwop-app/agents', {
       method: 'POST',
       body: JSON.stringify({
         persona: 'Tenant Scoped Probe',
@@ -273,11 +273,11 @@ describe('user-authored agents — cross-tenant isolation in GET /v1/agents', ()
       }),
     });
 
-    const other = await jsonFetch<{ agents: Array<{ persona: string }> }>('/v1/agents?tenantId=someone-else');
+    const other = await jsonFetch<{ agents: Array<{ persona: string }> }>('/agents?tenantId=someone-else');
     expect(other.status).toBe(200);
     expect(other.body.agents.some((a) => a.persona === 'Tenant Scoped Probe')).toBe(false);
 
-    const wildcard = await jsonFetch<{ agents: Array<{ persona: string }> }>('/v1/agents?tenantId=*');
+    const wildcard = await jsonFetch<{ agents: Array<{ persona: string }> }>('/agents?tenantId=*');
     expect(wildcard.status).toBe(200);
     expect(wildcard.body.agents.some((a) => a.persona === 'Tenant Scoped Probe')).toBe(true);
   });
@@ -289,7 +289,7 @@ describe('user-authored agents — cross-tenant isolation in GET /v1/agents', ()
 // tenant. The refusal uses the same 404 as "absent" so existence never leaks.
 describe('user-authored agents — cross-tenant dispatch gate (AGENTRT-2)', () => {
   it('refuses to dispatch another tenant\'s agent by id (404), but the owner can', async () => {
-    const created = await jsonFetch<AgentEntry>('/v1/host/openwop-app/agents', {
+    const created = await jsonFetch<AgentEntry>('/host/openwop-app/agents', {
       method: 'POST',
       body: JSON.stringify({
         persona: 'Dispatch Gate Probe',
@@ -304,7 +304,7 @@ describe('user-authored agents — cross-tenant dispatch gate (AGENTRT-2)', () =
     // A different explicit tenant must NOT be able to invoke it — 404, same
     // message as an absent agent (no cross-tenant existence leak).
     const crossTenant = await jsonFetch<{ error: string }>(
-      `/v1/host/openwop-app/agents/${agentId}/dispatch?tenantId=someone-else`,
+      `/host/openwop-app/agents/${agentId}/dispatch?tenantId=someone-else`,
       { method: 'POST', body: dispatchBody },
     );
     expect(crossTenant.status).toBe(404);
@@ -312,7 +312,7 @@ describe('user-authored agents — cross-tenant dispatch gate (AGENTRT-2)', () =
 
     // The owning tenant (bearer-shared default) CAN dispatch it.
     const owner = await jsonFetch<{ status: string }>(
-      `/v1/host/openwop-app/agents/${agentId}/dispatch`,
+      `/host/openwop-app/agents/${agentId}/dispatch`,
       { method: 'POST', body: dispatchBody },
     );
     expect(owner.status).toBe(200);

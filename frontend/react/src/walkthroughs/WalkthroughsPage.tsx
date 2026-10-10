@@ -115,7 +115,7 @@ export function WalkthroughsPage(): JSX.Element {
     if (!access.enabled) return;
     let live = true;
     listWorkflowSummaries()
-      .then((rows) => { if (live) { setMineFailed(false); setMine(rows.filter((w) => w.workflowId.startsWith('walkthrough.'))); } })
+      .then((rows) => { if (live) { setMineFailed(false); setMine(rows.filter((w) => w.kind === 'walkthrough')); } })
       .catch(() => {
         if (!live) return;
         setError(t('loadError'));

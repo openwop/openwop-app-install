@@ -1,5 +1,5 @@
 /**
- * `ctx.features.commissions` workflow surface (ADR 0280 P4 / ADR 0014).
+ * `ctx.features['sales-commissions']` workflow surface (ADR 0280 P4 / ADR 0014).
  *
  * READS (listPlans, listStatements) are open to any run scoped to the tenant, but
  * statement reads are SUBJECT-SCOPED to the run owner (`scope.actingUserId`) unless

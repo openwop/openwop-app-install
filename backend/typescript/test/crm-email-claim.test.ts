@@ -18,7 +18,11 @@
  *  - (review S1) let the email PATCH claim best-effort → "PATCH onto a held
  *    address" red; (review S2) drop the ident-index check in
  *    `claimPrimaryEmailOrThrow` → "legacy unclaimed row" + the merge-release
- *    case red.
+ *    case red;
+ *  - (w4) a tenant-blind claim key → "is tenant-scoped" red (each tenant's claim
+ *    is read back). The "legacy" and "grace window" cases address the claim row by
+ *    its raw storage key, so they also red on that sabotage — a fixture coupling,
+ *    not a second witness.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -57,9 +61,14 @@ describe('ADR 0627 D6 — createContact claims the primary email', () => {
   });
 
   it('is tenant-scoped: the same address in another tenant is a fresh row', async () => {
-    await createContact({ tenantId: T, name: 'Mine', email: 'shared@acme.test' });
+    const mine = await createContact({ tenantId: T, name: 'Mine', email: 'shared@acme.test' });
     const theirs = await createContact({ tenantId: 'tenant-other', name: 'Theirs', email: 'shared@acme.test' });
     expect(theirs.tenantId).toBe('tenant-other');
+    // Each tenant holds its OWN claim: a tenant-blind claim key let the second
+    // create silently take over the first tenant's claim (the foreign holder reads
+    // as stale) while the create itself still succeeded — w4 probe.
+    expect(await getContactKeyClaim(T, 'shared@acme.test')).toMatchObject({ contactId: mine.contactId });
+    expect(await getContactKeyClaim('tenant-other', 'shared@acme.test')).toMatchObject({ contactId: theirs.contactId });
   });
 
   it('no email ⇒ no claim: email-less contacts never collide', async () => {
@@ -211,10 +220,10 @@ describe('ADR 0627 D6 — the claim follows the PRIMARY holder (lifecycle decisi
     const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
     const storage = new Proxy(real, {
       get(t: Storage, p: string | symbol) {
-        const v = (t as unknown as Record<string | symbol, unknown>)[p];
+        const v: unknown = Reflect.get(t, p);
         if (typeof v !== 'function') return v;
-        if (p === 'kvSet') return async (...a: unknown[]) => { await delay(5); return (v as (...x: unknown[]) => unknown).apply(t, a); };
-        return (v as (...x: unknown[]) => unknown).bind(t);
+        if (p === 'kvSet') return async (...a: unknown[]) => { await delay(5); return Reflect.apply(v, t, a); };
+        return v.bind(t);
       },
     });
     initHostExtPersistence(storage);

@@ -652,7 +652,7 @@ export function KanbanPage(): JSX.Element {
               ? (owner.heartbeat.effectiveIntervalMs > 0 && owner.heartbeat.agentTurnFallback ? 'agent-turn' : 'off')
               : undefined}
             workflowOptions={workflowOptions}
-            onMoveCard={(cardId, toColumnId) => void onMoveCard(cardId, toColumnId)}
+            onMoveCard={(cardId, toColumnId, position) => void onMoveCard(cardId, toColumnId, position)}
             onCreateCard={(columnId, input) => void onCreateCard(columnId, input)}
             onEditCard={(cardId, patch) => void onEditCard(cardId, patch)}
             onDeleteCard={(cardId) => void onDeleteCard(cardId)}

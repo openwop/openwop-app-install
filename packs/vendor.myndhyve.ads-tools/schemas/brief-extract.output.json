@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.ads-tools/1.0.0/brief-extract.output.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.ads-tools/1.0.2/brief-extract.output.json",
   "title": "AdsBriefExtractOutput",
   "type": "object",
   "required": ["brief", "sellingPoints", "suggestedAngles", "success"],

@@ -28,9 +28,13 @@ const OWNERS = new Set(['host/kanbanService.ts', 'host/cardRunRecovery.ts']);
 
 /**
  * Sites that move a card into a Working lane. Matched on the CALL, so a new
- * consumer is caught even if it imports `moveCard` in some novel way.
+ * consumer is caught even if it imports `moveCard` in some novel way. ADR 0774
+ * D2 — the heartbeat now enters Working through the CAS claim
+ * (`claimCardForRun`), which is a pick site by definition, so it is matched too;
+ * and the approved-proposal dispatch now moves the card inside its one
+ * `applyBoardCommand` (`columnId: working.id`, grade-code KSCD-5).
  */
-const MOVE_TO_WORKING = /moveCard\([^)]*\bworking\b[^)]*\)/i;
+const MOVE_TO_WORKING = /moveCard\([^)]*\bworking\b[^)]*\)|claimCardForRun\(|columnId:\s*working\b/i;
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {

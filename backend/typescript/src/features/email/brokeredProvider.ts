@@ -97,6 +97,7 @@ export async function makeBrokeredCampaignProvider(deps: BrokeredProviderDeps): 
         provider: chosen,
         purpose: deps.purpose,
         ...(msg.idempotencyKey ? { idempotencyKey: msg.idempotencyKey } : {}),
+        ...(msg.listUnsubscribe ? { listUnsubscribe: msg.listUnsubscribe } : {}), // ADR 0848 D7
       });
       if (!out.sent) throw new Error(out.error ?? 'send_failed');
     },
@@ -123,7 +124,11 @@ export async function sendBrokeredTransactionalEmail(input: {
   try {
     const settings = await getEmailSettings(input.tenantId, input.orgId);
     const from = settings?.senderAddress;
-    if (!from) return false; // no verified sender configured — honest no-op
+    // ADR 0848 D4 — "configured", not "verified": the host does not verify sender
+    // ownership. sendgrid / postmark refuse an unverified sender at their API; the SMTP
+    // lane sends whatever its mailbox server accepts. Domain verification is a recorded
+    // follow-up (ADR 0848 open question 2), not a check this line performs.
+    if (!from) return false; // no sender configured — honest no-op
     let provider: string | undefined;
     for (const p of emailSendProviders()) {
       const resolved = await resolveConnectionCredential({

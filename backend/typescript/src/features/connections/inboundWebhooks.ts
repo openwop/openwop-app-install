@@ -20,13 +20,17 @@
  *     is unauthenticated.
  */
 
+import { inboundText, notifyInboundMessage } from '../../host/inboundMessageObservers.js';
 import { createHmac, timingSafeEqual, createPublicKey, verify as cryptoVerify } from 'node:crypto';
 import { OpenwopError } from '../../types.js';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
+import { onWorkflowForked } from '../../host/workflowsRegistry.js';
+import { casRepoint } from '../../host/forkRepoint.js';
 import { setSecret, resolveSecret, removeSecret } from '../../byok/secretResolver.js';
 import { registerCredentialRefConsumer } from '../../host/credentialRefRegistry.js';
 import { createLogger } from '../../observability/logger.js';
 import { startWorkflowRun } from '../../host/runStarter.js';
+import { isAuthoredByOtherTenant } from '../../host/workflowOwnership.js';
 import { deliver, registerSubscription, rekeySubscription, setSubscriptionState, makeDedupKey, hostDerivedSubscriptionId, type SubscriptionSource } from '../../host/triggerBridgeService.js';
 import { getConnection } from './connectionsService.js';
 import type { Storage } from '../../storage/storage.js';
@@ -39,6 +43,7 @@ import {
   type ChangeIngressInput,
   type StreamIngressInput,
 } from '../../host/triggerIngestionService.js';
+import { OWNED_REF_PREFIXES } from '../../byok/refNamespaces.js';
 
 /** Deps the inbound handler needs — the FULL host suite (resume needs more of it than a
  *  run-start does; a full `HostAdapterSuite` also satisfies `startWorkflowRun`'s Pick). */
@@ -98,13 +103,16 @@ export interface InboundConfig {
    *  connection's broker delivers (`stream` = broker message; `change` = CDC row). Fixed
    *  per connection (one topic/feed is one source); absent for the messaging providers. */
   streamSource?: 'stream' | 'change';
+  /** ADR 0853 D4 — the project this connection's `decision:` messages are
+   *  suggested to (set by someone with edit access to the project). */
+  projectId?: string;
   enabled: boolean;
   createdAt: string;
   updatedAt: string;
 }
 
 const store = new DurableCollection<InboundConfig>('connections:inbound', (c) => c.connectionId);
-const signingSecretRef = (connectionId: string): string => `connection-inbound:${connectionId}`;
+const signingSecretRef = (connectionId: string): string => `${OWNED_REF_PREFIXES.connectionInbound}${connectionId}`;
 /** The trigger-bridge subscription id for one connection's inbound stream. */
 // ADR 0726 — grammar-safe (was `host:connections:<connectionId>`, unbindable on the wire).
 const subscriptionIdFor = (connectionId: string): string => hostDerivedSubscriptionId('connections', connectionId).id;
@@ -169,6 +177,8 @@ export async function setInboundConfig(input: {
   /** RFC 0127 — the trigger source for a streaming/CDC ingress connection (default
    *  `stream`); ignored for the messaging providers (which always ride `webhook`). */
   streamSource?: 'stream' | 'change';
+  /** ADR 0853 D4 — validated by the route (write on the project). */
+  projectId?: string;
 }): Promise<InboundConfig> {
   const existing = await store.get(input.connectionId);
   const streamProvider = isStreamInbound(input.provider);
@@ -180,6 +190,7 @@ export async function setInboundConfig(input: {
     provider: input.provider,
     ...(input.workflowId ? { workflowId: input.workflowId } : {}),
     ...(streamProvider ? { streamSource } : {}),
+    ...(input.projectId ? { projectId: input.projectId } : {}),
     enabled: true,
     createdAt: existing?.createdAt ?? new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -682,15 +693,39 @@ export async function handleInboundEvent(
     subscriptionId: subscriptionIdFor(input.connectionId),
     dedupKey,
     fire: async (deliveryId) => {
+      // ADR 0853 D4 — a `decision:` message on a project-linked connection is
+      // announced (fail-soft) before the run it starts or resumes; nothing else
+      // inbound is read for this.
+      if (config.projectId) {
+        const text = inboundText(config.provider, normalizedEvent);
+        if (text && /^\s*decision:/i.test(text)) {
+          await notifyInboundMessage({ tenantId: config.tenantId, connectionId: input.connectionId, provider: config.provider, projectId: config.projectId, text, ref: eventId ?? deliveryId });
+        }
+      }
       // Phase 3 — conversational resume: if this connection has an active run that is
       // still open AND waiting on an interrupt, feed the message INTO it (resolve +
       // resume) rather than starting a new run. Inside the dedup wrapper, so a
       // redelivered message never double-resumes.
       const resume = await pickResumeInterrupt(deps.storage, input.connectionId);
       if (resume) {
+        // ADR 0778 (grade-code `APCD-5`) — no try/catch here, deliberately. The
+        // resolve path now answers 409 when a DIFFERENT message won this
+        // interrupt (a redelivery of the same one never gets here: the dedup
+        // wrapper stops it). Swallowing that 409 returned this run id as
+        // "delivered" and the message was dropped. Letting it propagate fails
+        // this attempt, and `deliver`'s retry calls `fire` again, which re-picks:
+        // the gate the run suspended on next, or — the run still busy — the same
+        // path any message arriving mid-run takes.
         await resolveAndResume(deps.storage, deps.hostSuite, resume.interruptId, { message: normalizedEvent ?? null, source: config.provider }, { capabilityToken: true });
         await sessions.put({ connectionId: input.connectionId, activeRunId: resume.runId, updatedAt: nowIso() });
         return resume.runId; // resumed the in-flight conversation
+      }
+      // ADR 0780 D5 — the workflow catalog is host-global, so a config saved before
+      // the PUT checked ownership could name ANOTHER workspace's workflow and run it
+      // here. Refused at dispatch too, as the not-found sentinel it already has.
+      if (config.workflowId && (await isAuthoredByOtherTenant(config.tenantId, config.workflowId))) {
+        log.warn('inbound workflow is owned by another workspace — not fired', { connectionId: input.connectionId });
+        return `nofire:${deliveryId}`;
       }
       let runId: string | null;
       try {
@@ -767,3 +802,15 @@ export async function __resetInboundStore(): Promise<void> {
   await store.__clear();
   await sessions.__clear();
 }
+
+// ADR 0789 — a verified inbound event this tenant routed to a SHARED workflow
+// starts the tenant's fork once edited. No tenant index here: a full scan of a
+// small operator-config collection, on the rare fork path only.
+onWorkflowForked('connections:inbound', async (tenantId, from, to) => {
+  let n = 0;
+  for (const c of await store.list()) {
+    if (c.tenantId !== tenantId || c.workflowId !== from) continue;
+    if (await casRepoint(store, c.connectionId, (r) => (r.workflowId === from && r.tenantId === tenantId ? { ...r, workflowId: to } : null))) n += 1;
+  }
+  return n;
+});

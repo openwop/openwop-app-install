@@ -34,6 +34,7 @@ import {
   managedProviderIdFromRef,
 } from '../src/providers/managedProvider.js';
 import type { Storage } from '../src/storage/storage.js';
+import { setManagedBalanceProvider } from '../src/host/managedBalanceHook.js';
 
 // Deterministic master key so encrypt/decrypt is stable across the run.
 const TEST_MASTER_KEY = 'a'.repeat(64);
@@ -513,5 +514,36 @@ describe('ManagedProviderError', () => {
     expect(err).toBeInstanceOf(Error);
     expect(err.code).toBe('sign_in_required');
     expect(err.message).toBe('sign in');
+  });
+});
+
+describe('ADR 0786 D6 — the PREPAID draw discounts cached reads; the cap bucket does not', () => {
+  it('draws (uncached + cached×weight + output) from the balance, records full weight against the cap', async () => {
+    process.env.MINIMAX_API_KEY = 'sk-d6';
+    await bootstrapManagedProvider();
+    // ADR 0821 D2 (G1) — the balance is now the LAST payer: a call inside the free
+    // daily allowance draws nothing. Spend the allowance first (cap is 100 in this
+    // file) so the whole call is past it and the draw shows D6's weighting exactly.
+    await storage.incrementManagedUsage('user:d6', 'openwop-free', new Date().toISOString().slice(0, 10), 100, 0);
+    const chunks = [
+      `data: ${JSON.stringify({ choices: [{ delta: { content: 'ok' } }] })}\n\n`,
+      `data: ${JSON.stringify({ choices: [{ finish_reason: 'stop' }], usage: { prompt_tokens: 1000, completion_tokens: 100, prompt_tokens_details: { cached_tokens: 800 } } })}\n\n`,
+      `data: [DONE]\n\n`,
+    ];
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) { const enc = new TextEncoder(); for (const c of chunks) controller.enqueue(enc.encode(c)); controller.close(); },
+    });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } }));
+    const draws: number[] = [];
+    setManagedBalanceProvider({ available: async () => 1_000_000, draw: async (_t, n) => { draws.push(n); return n; } });
+    try {
+      await dispatchManagedChat({ userFacingProvider: 'openwop-free', tenantId: 'user:d6', messages: [{ role: 'user', content: 'hi' }] });
+    } finally {
+      setManagedBalanceProvider(null);
+    }
+    // MiniMax: cached is a SUBSET of prompt tokens → (1000−800) + 800×0.2 + 100.
+    expect(draws).toEqual([200 + 160 + 100]);
+    const usage = await storage.getManagedUsage('user:d6', 'openwop-free', new Date().toISOString().slice(0, 10));
+    expect(usage.inputTokens + usage.outputTokens).toBe(100 + 1100); // the cap rail keeps full weight
   });
 });

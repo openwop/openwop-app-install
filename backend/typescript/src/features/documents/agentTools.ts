@@ -36,7 +36,7 @@ import { listOrgs, resolveEffectiveAccess } from '../../host/accessControlServic
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { OpenwopError } from '../../types.js';
 import { validateAgainstSchema } from '../../aiProviders/aiProvidersHost.js';
-import { createDocument, addVersion, getDocumentByIdForTenant, getVersion, listTemplates, getTemplate, assemble } from './documentsService.js';
+import { createDocument, addVersion, getDocumentByIdForTenant, getVersion, listTemplates, getTemplate, assemble, canReadDocument } from './documentsService.js';
 
 export const DOCUMENTS_DRAFT_TOOL_ID = 'openwop:documents.draft';
 export const EMAIL_DRAFT_TOOL_ID = 'openwop:email.draft';
@@ -44,6 +44,7 @@ export const DOCUMENTS_GET_TOOL_ID = 'openwop:documents.get';
 export const DOCUMENTS_LIST_TEMPLATES_TOOL_ID = 'openwop:documents.list-templates';
 export const DOCUMENTS_GET_TEMPLATE_TOOL_ID = 'openwop:documents.get-template';
 export const DOCUMENTS_GENERATE_FROM_TEMPLATE_TOOL_ID = 'openwop:documents.generate-from-template';
+export const DOCUMENTS_REVISE_TOOL_ID = 'openwop:documents.revise';
 
 /** Structured tool error (the agent loop surfaces `content` verbatim to the model). */
 function toolError(error: string, message: string): { content: string; isError: true } {
@@ -197,6 +198,7 @@ const oneLine = (v: string): string => v.replace(/\s+/g, ' ').trim();
 export function registerDocumentsAgentTools(): void {
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: DOCUMENTS_DRAFT_TOOL_ID,
       description:
@@ -232,6 +234,7 @@ export function registerDocumentsAgentTools(): void {
   // OQ-1 ownership rationale (an `email-draft` Document, not an email entity).
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: EMAIL_DRAFT_TOOL_ID,
       description:
@@ -281,11 +284,13 @@ export function registerDocumentsAgentTools(): void {
   // instead of blind re-authoring, and see which templates exist.
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: DOCUMENTS_GET_TOOL_ID,
       description:
-        'Read ONE workspace document by id: title, kind, and the full markdown body. Use it to review or revise '
-        + 'an existing document (including drafts you created) instead of re-authoring from memory. Read-only.',
+        'Read ONE workspace document by id: title, kind, status, the full markdown body, and `currentVersionId` — '
+        + 'the version to pass as `baseVersionId` to openwop:documents.revise. Use it before reviewing or revising an '
+        + 'existing document (including drafts you created) instead of re-authoring from memory. Read-only.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -313,6 +318,12 @@ export function registerDocumentsAgentTools(): void {
       if (!access.scopes.includes('workspace:read')) {
         return toolError('not_found', 'No such document in this workspace.');
       }
+      // ADR 0838 D3 (`DOCWF2-9`) — the SAME membership gate as the HTTP GET door.
+      // Without it an org viewer outside a private project read the project's
+      // document in full through the chat while the door 404'd it.
+      if (!(await canReadDocument(scope.tenantId, doc, actingUserId))) {
+        return toolError('not_found', 'No such document in this workspace.');
+      }
       // The body lives on the CURRENT VERSION, not the record (same read the
       // resolver seam performs).
       const current = doc.currentVersionId
@@ -326,6 +337,9 @@ export function registerDocumentsAgentTools(): void {
           orgId: doc.orgId,
           status: doc.status,
           content: current?.content ?? '',
+          // ADR 0838 D5 — what a revise must be based on; only this read returns it.
+          ...(current ? { currentVersionId: current.versionId, version: current.version } : {}),
+          ...(doc.approvedVersionId ? { publishedVersionId: doc.approvedVersionId } : {}),
           updatedAt: doc.updatedAt,
         }),
       };
@@ -334,6 +348,7 @@ export function registerDocumentsAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     // ADR 0604 (TOCC-2) — closed world: an elided enum/id list here makes the
     // model author against a catalog that is not this host's.
     schemaCarrying: true,
@@ -376,6 +391,7 @@ export function registerDocumentsAgentTools(): void {
   // the node/routes use; same read RBAC as the HTTP path.
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     // ADR 0604 (TOCC-2) — closed world: an elided enum/id list here makes the
     // model author against a catalog that is not this host's.
     schemaCarrying: true,
@@ -428,6 +444,7 @@ export function registerDocumentsAgentTools(): void {
   // documents owner with the template stamped, exactly as the node does.
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: DOCUMENTS_GENERATE_FROM_TEMPLATE_TOOL_ID,
       description:
@@ -550,6 +567,82 @@ export function registerDocumentsAgentTools(): void {
           note: 'Draft created from the template. Tell the user the exact title and that it is in the Documents area as a draft.',
         }),
       };
+    },
+  });
+
+  // ADR 0838 D5 (`DOCWF2-5`) — the one agent EDIT: a new version of an existing
+  // document, checked against the version the agent read. `baseVersionId` is
+  // returned only by `openwop:documents.get`, so reading first is structural,
+  // not a prompt rule. The service inserts the very next version number with
+  // no retry, so a concurrent save makes this fail (`stale_base`) instead of
+  // landing on text the model never saw; the error names the current version
+  // and the loop's one bounded repair re-reads.
+  registerFeatureAgentTool({
+    contentTrust: 'untrusted',
+    effect: 'write',
+    def: {
+      name: DOCUMENTS_REVISE_TOOL_ID,
+      description:
+        'Save a revised version of an EXISTING document. First call openwop:documents.get and pass its '
+        + '`currentVersionId` as `baseVersionId`, with the COMPLETE revised markdown as `content` (not a diff). '
+        + 'If someone saved a newer version since you read it, this returns `stale_base`: read the document again '
+        + 'and re-apply your change. Revising an approved document does not change what its share link shows '
+        + 'until someone re-approves it — tell the user that.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          documentId: { type: 'string', description: 'The document id.' },
+          baseVersionId: { type: 'string', description: 'The `currentVersionId` returned by openwop:documents.get.' },
+          content: { type: 'string', description: 'The full revised markdown body.' },
+        },
+        required: ['documentId', 'baseVersionId', 'content'],
+        additionalProperties: false,
+      },
+    },
+    async run(input, scope) {
+      const documentId = str(input.documentId);
+      const baseVersionId = str(input.baseVersionId);
+      const content = typeof input.content === 'string' ? input.content : '';
+      if (!documentId || !baseVersionId) return toolError('validation_error', '`documentId` and `baseVersionId` are required — read the document with openwop:documents.get first.');
+      if (!content.trim()) return toolError('validation_error', '`content` must be the full revised markdown body.');
+      const pre = await resolveDocumentsGetPreamble(scope, 'Revisions run on behalf of a signed-in user.');
+      if ('isError' in pre) return pre;
+      const { actingUserId } = pre;
+      const doc = await getDocumentByIdForTenant(scope.tenantId, documentId);
+      if (!doc) return toolError('not_found', 'No such document in this workspace.');
+      // Write tier in the document's org (the HTTP version door's scope) AND the
+      // read gate: this is a read-then-write tool, and its base came from a gated
+      // read. Every refusal is the get tool's uniform not_found.
+      const access = await resolveEffectiveAccess(scope.tenantId, { subject: actingUserId, orgId: doc.orgId });
+      if (!access.scopes.includes('workspace:write') || !(await canReadDocument(scope.tenantId, doc, actingUserId))) {
+        return toolError('not_found', 'No such document in this workspace.');
+      }
+      const producedBy = scope.agentProfileId ? { kind: 'agent' as const, id: scope.agentProfileId } : { kind: 'user' as const, id: actingUserId };
+      const idem = scope.runId
+        ? createHash('sha256').update([scope.runId, DOCUMENTS_REVISE_TOOL_ID, documentId, baseVersionId, content].join('\u0000')).digest('hex').slice(0, 32)
+        : undefined;
+      try {
+        const version = await addVersion(scope.tenantId, doc.orgId, documentId, {
+          content, producedBy, baseVersionId, ...(idem ? { idempotencyKey: idem } : {}),
+        });
+        const fresh = await getDocumentByIdForTenant(scope.tenantId, documentId);
+        const published = fresh?.approvedVersionId && fresh.approvedVersionId !== version.versionId ? fresh.approvedVersionId : undefined;
+        return {
+          content: JSON.stringify({
+            documentId, versionId: version.versionId, version: version.version, title: doc.title, status: fresh?.status ?? doc.status,
+            url: `/documents?org=${encodeURIComponent(doc.orgId)}&doc=${encodeURIComponent(documentId)}`,
+            note: published
+              ? `Saved as version ${version.version}. The document is approved: its share link still shows the approved version until someone re-approves. Tell the user both facts.`
+              : `Saved as version ${version.version}. Tell the user the document title and the new version number.`,
+          }),
+        };
+      } catch (err) {
+        if (err instanceof OpenwopError && err.details?.reason === 'stale_base') {
+          return { content: JSON.stringify({ error: 'stale_base', message: err.message, ...(typeof err.details.currentVersionId === 'string' ? { currentVersionId: err.details.currentVersionId } : {}) }), isError: true };
+        }
+        if (err instanceof OpenwopError && err.code === 'validation_error') return toolError('validation_error', err.message);
+        throw err;
+      }
     },
   });
 }

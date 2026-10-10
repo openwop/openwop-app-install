@@ -79,6 +79,10 @@ const ajv = new Ajv2020({ strict: false, allErrors: true });
 // (resolved against the payloads schema's `$id`); register it so the
 // `run.started` owner echo validates for real rather than failing to compile.
 ajv.addSchema(corpusSchema('subject.schema.json') as object);
+// loop row 3, P2 — interrupt.md §Events — `interrupt.requested` now reaches this run, and its def is a
+// `$ref` to the InterruptPayload schema; registered so it validates for real.
+ajv.addSchema(corpusSchema('credential-reference.schema.json') as object, 'credential-reference.schema.json');
+ajv.addSchema(corpusSchema('suspend-request.schema.json') as object);
 ajv.addSchema(SCHEMA, 'runEventPayloads');
 
 /** Validate one event, treating envelope-carried fields as satisfied. */

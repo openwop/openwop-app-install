@@ -6,7 +6,7 @@
  * the consent records. Erase cascades to downstream subject data (Analytics).
  */
 import { Button } from '../../ui/Button.js';
-import { useCallback, useEffect, useMemo, useState, useRef } from 'react';
+import { useCallback, useEffect, useId, useMemo, useState, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { confirm } from '../../ui/confirm.js';
 import { useFormat } from '../../i18n/useFormat.js';
@@ -18,12 +18,13 @@ import { useOrgSelection } from '../../ui/useOrgSelection.js';
 import { OrgSelectionState } from '../../ui/OrgSelectionState.js';
 import { Skeleton } from '../../ui/Skeleton.js';
 import { toast } from '../../ui/toast.js';
+import { announce as announceToScreenReader } from '../../ui/announce.js';
 import { useFeatureAccess } from '../../featureToggles/FeatureAccessContext.js';
 import { GlobeIcon, LockIcon, SaveIcon, ShieldIcon, TrashIcon, UnlockIcon } from '../../ui/icons/index.js';
 import {
   ConsentApiError, READMIT_ATTESTATION_MIN_CHARS,
-  deleteSubject, getPolicy, getSubject, listOrgs, listRecords, readmitSubject, setPolicy,
-  type ConsentPolicy, type ConsentRecord, type DefaultMode, type LegalHold, type Org, type SubjectErasureResult,
+  deleteSubject, getAccess, getPolicy, getSubject, listOrgs, listRecords, readmitSubject, setPolicy,
+  type ConsentChange, type ConsentPolicy, type ConsentRecord, type DefaultMode, type LegalHold, type Org, type SubjectErasureResult,
 } from './consentClient.js';
 import { ReadmitSubjectDialog } from './ReadmitSubjectDialog.js';
 
@@ -42,6 +43,124 @@ function CatChips({ c }: { c: ConsentRecord['categories'] }): JSX.Element {
       {channels.map((k) => <span key={k} className="chip chip--success">{t(`channel_${k.split('.')[1]}`)}</span>)}
       {!c.analytics && !anyMarketing ? <span className="chip chip--muted">{t('categoryNecessaryOnly')}</span> : null}
     </>
+  );
+}
+
+type Categories = ConsentRecord['categories'];
+type CategoryKey = Exclude<keyof Categories, 'necessary'>;
+/** WhatsApp is strict explicit opt-in (ADR 0394): it never follows the umbrella. */
+const STRICT_CHANNELS: ReadonlySet<string> = new Set(['marketing.whatsapp']);
+/** The EFFECTIVE grant — what `isAllowed` answers, not the stored literal: an absent
+ *  channel specific follows the `marketing` umbrella (CN2UX-3). */
+function effective(c: Categories, k: CategoryKey): boolean {
+  if (k === 'analytics' || k === 'marketing') return c[k] === true;
+  const v = c[k];
+  if (typeof v === 'boolean') return v;
+  return STRICT_CHANNELS.has(k) ? false : c.marketing === true;
+}
+/** The keys a history diffs over — DERIVED from the entries (CN2CD-11), so a new
+ *  channel the server adds is diffed without a code change here. */
+function historyKeys(history: readonly ConsentChange[]): CategoryKey[] {
+  const channels = new Set<string>();
+  for (const h of history) for (const k of Object.keys(h.categories)) if (k.startsWith('marketing.')) channels.add(k);
+  return ['analytics', 'marketing', ...([...channels].sort() as CategoryKey[])];
+}
+const SOURCE_KINDS = new Set(['public', 'form-optin', 'preference-center', 'email-unsubscribe', 'unsubscribe', 'crm-merge', 'workflow', 'whatsapp']);
+const HISTORY_PREVIEW = 5;
+
+/** CN2UX-7 — a capture source is a machine string (`form-optin:<formId>`): name the
+ *  KIND in words and keep the id as code, never the raw string as copy. */
+function SourceLine({ source }: { source: string }): JSX.Element {
+  const { t } = useTranslation('consent');
+  const cut = source.indexOf(':');
+  const kind = cut === -1 ? source : source.slice(0, cut);
+  const rawRest = cut === -1 ? '' : source.slice(cut + 1);
+  // N5 — `whatsapp:keyword:opt-in` names the kind twice; the words already say "keyword".
+  const rest = kind === 'whatsapp' ? rawRest.replace(/^keyword:/, '') : rawRest;
+  if (!SOURCE_KINDS.has(kind)) return <span className="muted u-fs-12 u-break-anywhere">{t('sourceLine', { source })}</span>;
+  return (
+    <span className="muted u-fs-12 u-break-anywhere" title={source}>
+      {t('sourceLine', { source: t(`source_${kind}`) })}{rest ? <> <code className="u-fs-11">{rest}</code></> : null}
+    </span>
+  );
+}
+
+/**
+ * ADR 0849 D3 / D6 — the subject's consent log (Art. 7(1): the controller must be able
+ * to DEMONSTRATE consent). Newest first. Each entry names when, through what, and what
+ * changed against the entry before it: the EFFECTIVE grants (CN2UX-3) and the region,
+ * basis and purposes when they moved (CN2UX-4). A pre-log state is labelled as such
+ * (CN2CD-2), a bounded-out stretch is shown as a gap the diff never crosses (CN2UX-5),
+ * and a row with no log says so — it never invents a trail.
+ */
+function ConsentHistory({ history, dropped }: { history: ConsentChange[] | undefined; dropped: number }): JSX.Element {
+  const { t } = useTranslation('consent');
+  const f = useFormat();
+  const [expanded, setExpanded] = useState(false);
+  const titleId = useId();
+  if (!history || history.length === 0) return <span className="muted u-fs-12">{t('historyNone')}</span>;
+  const keys = historyKeys(history);
+  const label = (k: CategoryKey): string => (k === 'analytics' ? t('categoryAnalytics') : k === 'marketing' ? t('categoryMarketing') : t(`channel_${k.split('.')[1]}`));
+  const gapBefore = dropped > 0 ? history.length - 1 : -1; // the pinned origin follows the gap
+  const shown = expanded ? history : history.slice(0, HISTORY_PREVIEW);
+  return (
+    <div className="u-grid u-gap-1">
+      <span className="u-label-sm" id={titleId}>{t('historyTitle', { count: history.length })}</span>
+      <ol className="u-grid u-gap-1 u-m-0 u-p-0 u-list-none" aria-labelledby={titleId}>
+        {shown.map((h, i) => {
+          // Never diff across the bounded-out gap: the entry above it shows its full state.
+          const older = i + 1 === gapBefore ? undefined : history[i + 1];
+          const flipped = older ? keys.filter((k) => effective(h.categories, k) !== effective(older.categories, k)) : [];
+          const regionMoved = !!older && (h.region ?? '') !== (older.region ?? '');
+          const basisMoved = !!older && (h.legalBasis ?? '') !== (older.legalBasis ?? '');
+          const purposesMoved = !!older && JSON.stringify(h.purposes ?? []) !== JSON.stringify(older.purposes ?? []);
+          // N2 — a REMOVAL is a change too, and an entry whose effect did not move still
+          // says so: a row never reads as just a date and a source.
+          const details = (
+            <>
+              {h.region && (!older || regionMoved) ? <span className="chip chip--muted">{h.region}</span> : null}
+              {regionMoved && !h.region ? <span className="muted u-fs-12">{t('historyRegionCleared')}</span> : null}
+              {h.legalBasis && (!older || basisMoved) ? <span className="chip chip--muted u-fs-11">{t('legalBasisLine', { basis: h.legalBasis })}</span> : null}
+              {basisMoved && !h.legalBasis ? <span className="muted u-fs-12">{t('historyBasisCleared')}</span> : null}
+              {h.purposes && h.purposes.length > 0 && (!older || purposesMoved) ? (
+                <span className="muted u-fs-12">{t('purposesLine', { purposes: h.purposes.join(', ') })}</span>
+              ) : null}
+              {purposesMoved && !(h.purposes && h.purposes.length > 0) ? <span className="muted u-fs-12">{t('historyPurposesCleared')}</span> : null}
+              {older && flipped.length === 0 && !regionMoved && !basisMoved && !purposesMoved ? <span className="muted u-fs-12">{t('historyNoEffectiveChange')}</span> : null}
+            </>
+          );
+          return (
+            <li key={`${h.ts}-${i}`}>
+              {i === gapBefore ? <span className="muted u-fs-12 u-block">{t('historyGap', { count: dropped })}</span> : null}
+              <div className="u-flex u-gap-2 u-items-center u-wrap">
+                <time className="u-label-sm" dateTime={h.ts}>{f.dateTime(h.ts)}</time>
+                <SourceLine source={h.source} />
+                {older ? (
+                  flipped.map((k) => (
+                    <span key={k} className={`chip ${effective(h.categories, k) ? 'chip--success' : 'chip--muted'}`}>
+                      {effective(h.categories, k) ? t('historyGranted', { category: label(k) }) : t('historyWithdrawn', { category: label(k) })}
+                    </span>
+                  ))
+                ) : (
+                  <>
+                    <span className="muted u-fs-12">{h.legacy ? t('historyLegacy') : i === history.length - 1 ? t('historyFirst') : t('historyState')}</span>
+                    <CatChips c={h.categories} />
+                  </>
+                )}
+                {details}
+              </div>
+            </li>
+          );
+        })}
+      </ol>
+      {history.length > HISTORY_PREVIEW ? (
+        <div>
+          <Button variant="quiet" size="sm" aria-expanded={expanded} onClick={() => setExpanded((v) => !v)}>
+            {expanded ? t('historyShowFewer') : t('historyShowAll', { count: history.length })}
+          </Button>
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -73,7 +192,17 @@ export function ConsentPage(): JSX.Element {
    * enabled by the KEY FIELD, not by the lookup — so what is on screen and what
    * will be erased were unrelated by construction.
    */
-  const [lookup, setLookup] = useState<{ key: string; result: ConsentRecord | 'none' | 'failed' } | null>(null);
+  // ADR 0849 D3 — `'erased'` is its own answer now: the lookup used to read an erased
+  // subject as "no record", the same as a key never seen.
+  const [lookup, setLookup] = useState<{ key: string; result: ConsentRecord | 'none' | 'failed' | 'erased'; erasedAt?: string } | null>(null);
+  // ADR 0849 D1/D6 — may this caller administer the consent regime (policy writes, the
+  // ledger, the per-subject lookup, erase, re-admit)? `null` = not known (loading, or the
+  // read failed): the controls render and the server's 403 decides — only a definite
+  // `false` hides them (architect B1: never take the DSAR console down on a guess).
+  const [canManage, setCanManage] = useState<boolean | null>(null);
+  // CN2UX-8 — the access answer is in flight: controls render DISABLED (never live then
+  // yanked away), so a member cannot start an edit they will not be allowed to save.
+  const [accessLoading, setAccessLoading] = useState(true);
   // NAMED for its one job. `setError` is called in exactly ONE place — the
   // getPolicy catch below — while save/lookup/erase all use `toast.error`. The
   // generic name invited the belief that this was a page-wide error channel;
@@ -124,17 +253,19 @@ export function ConsentPage(): JSX.Element {
   const [readmit, setReadmit] = useState<{ subjectKey: string } | null>(null);
   const [readmitBusy, setReadmitBusy] = useState(false);
   const [readmitError, setReadmitError] = useState<string | null>(null);
+  // CN2UX-2 / N1 — a re-admit started from the erased-lookup panel unmounts the button
+  // the dialog would return focus to; the outcome Notice takes it instead.
+  const readmitDoneRef = useRef<HTMLDivElement | null>(null);
   const [readmitOutcome, setReadmitOutcome] = useState<{ orgId: string; subjectKey: string; outcome: 'readmitted' | 'not_erased' } | null>(null);
+  useEffect(() => {
+    if (readmitOutcome?.outcome === 'readmitted') readmitDoneRef.current?.focus();
+  }, [readmitOutcome]);
   // §4.5 collection kit — gated search + a category facet (a real enum) and a
   // region facet built from the distinct values present. `region` is free-form
   // policy text (the regulated-regions input), so its VALUES stay raw.
   const [recordQuery, setRecordQuery] = useState('');
   const [recordCategory, setRecordCategory] = useState('');
   const [recordRegion, setRecordRegion] = useState('');
-
-  useEffect(() => {
-    if (!access.enabled) return;
-  }, [access.enabled]);
 
   // CONS-G4 — a failed records read must not render as "No consent records"
   // on the surface an operator consults for GDPR accountability. `null` +
@@ -144,15 +275,28 @@ export function ConsentPage(): JSX.Element {
   // R2 CN-SP-7 — sequence-stamped: a rapid org switch must never paint the
   // previous org's policy/records (or keep its erasure receipt) on screen.
   const loadSeq = useRef(0);
+  // CN2UX-8 — the access answer is reset only when the ORG changes. A re-load of the
+  // same org (after an erasure, a Retry) keeps the controls mounted, so the field, the
+  // Erase button and the operator's focus are not torn down mid-flow.
+  const accessOrg = useRef<string | null>(null);
   const load = useCallback((org: string) => {
     const seq = ++loadSeq.current;
     const fresh = (): boolean => seq === loadSeq.current;
     setPolicyError(null); setRecords(null); setLookup(null); setRecordsFailed(false); setLegalHold(null);
+    if (accessOrg.current !== org) { setCanManage(null); setAccessLoading(true); accessOrg.current = org; }
     // CONS-UX-1/-12 — deliberately NOT `setReceipt(null)`. The receipt is
     // org-scoped at render, so CN-SP-5 still holds, and a Retry on the records
     // list no longer destroys the erasure evidence.
     void getPolicy(org).then(({ policy: p, legalHold: h }) => { if (!fresh()) return; setPolicyState(p); setRegions(p.regulatedRegions.join(', ')); setMode(p.defaultMode); setLegalHold(h); }).catch((e) => { if (fresh()) setPolicyError(e instanceof Error ? e.message : t('loadPolicyFailed')); });
-    void listRecords(org).then((rs) => { if (fresh()) setRecords(rs); }).catch(() => { if (fresh()) setRecordsFailed(true); });
+    // ADR 0849 D1 — the ledger is admin-tier: ask first, and never fire a read a
+    // non-admin would see 403 into the "records failed" card (architect M4).
+    void getAccess(org).then((a) => a.canManage, () => null).then((can) => {
+      if (!fresh()) return;
+      setCanManage(can);
+      setAccessLoading(false);
+      if (can === false) return;
+      void listRecords(org).then((rs) => { if (fresh()) setRecords(rs); }).catch(() => { if (fresh()) setRecordsFailed(true); });
+    });
   }, [t]);
   useEffect(() => { if (orgId) load(orgId); }, [orgId, load]);
 
@@ -165,6 +309,13 @@ export function ConsentPage(): JSX.Element {
     if (dirty && !(await confirm({ title: t('discardEditsTitle'), body: t('discardEditsBody'), confirmLabel: t('discardEditsConfirm') }))) return;
     setOrgId(nextOrg);
   }, [dirty, orgId, setOrgId, t]);
+
+  /** CN2UX-10 — a 403 from an admin-tier door is the access answer, not a failure: the
+   *  page becomes the member view instead of a retry card or a raw toast. */
+  const refusedAsMember = useCallback((e: unknown): boolean => {
+    if (e instanceof ConsentApiError && e.status === 403) { setCanManage(false); return true; }
+    return false;
+  }, []);
 
   const savePolicy = useCallback(async () => {
     if (!orgId) return;
@@ -179,11 +330,11 @@ export function ConsentPage(): JSX.Element {
       setRegions(saved.regulatedRegions.join(', '));
       setMode(saved.defaultMode);
       toast.success(t('policySaved'));
-    } catch (e) { toast.error(e instanceof Error ? e.message : t('saveFailed')); }
+    } catch (e) { if (!refusedAsMember(e)) toast.error(e instanceof Error ? e.message : t('saveFailed')); }
     finally { setBusy(false); }
-  }, [orgId, regions, mode, t]);
+  }, [orgId, regions, mode, refusedAsMember, t]);
 
-  const doLookup = useCallback(async (override?: string) => {
+  const doLookup = useCallback(async (override?: string, opts: { silent?: boolean } = {}) => {
     const key = (override ?? lookupKey).trim();
     if (!orgId || !key) return;
     // CONS-UX-3 — the result is stamped with the key it describes, and a FAILED
@@ -191,9 +342,20 @@ export function ConsentPage(): JSX.Element {
     // left the previous subject's panel (or "No consent record for that
     // subject") standing under the new key: a false-empty plus a misattribution,
     // on the surface an operator uses to answer an Art. 15 request.
-    try { const r = await getSubject(orgId, key); setLookup({ key, result: r ?? 'none' }); }
-    catch (e) { setLookup({ key, result: 'failed' }); toast.error(e instanceof Error ? e.message : t('lookupFailed')); }
-  }, [orgId, lookupKey, t]);
+    try {
+      const r = await getSubject(orgId, key);
+      setLookup(r.erased ? { key, result: 'erased', ...(r.erasedAt ? { erasedAt: r.erasedAt } : {}) } : { key, result: r.record ?? 'none' });
+      // CN2UX-11 — a result that appears below the fold must be SPOKEN.
+      if (!opts.silent) announceToScreenReader(r.erased
+        ? t('lookupAnnounceErased', { subjectKey: key })
+        : r.record ? t('lookupAnnounceRecord', { subjectKey: key }) : t('lookupAnnounceNone', { subjectKey: key }));
+    }
+    catch (e) {
+      // CN2UX-11 — the failure card announces itself; a toast too was the DS-8 double.
+      if (refusedAsMember(e)) { setLookup(null); return; }
+      setLookup({ key, result: 'failed' });
+    }
+  }, [orgId, lookupKey, refusedAsMember, t]);
 
   const doErase = useCallback(async (override?: string) => {
     const key = (override ?? lookupKey).trim();
@@ -258,12 +420,12 @@ export function ConsentPage(): JSX.Element {
       // Notice itself, assertively — a failed action). No toast: same live
       // region, and the Notice outlives it.
       if (held) setHeldRefusal({ orgId, subjectKey: key });
-      else toast.error(msg || t('eraseFailed'));
+      else if (!refusedAsMember(e)) toast.error(msg || t('eraseFailed'));
       // Re-read so the Notice appears and the control locks for the next click.
       load(orgId);
     }
     finally { setErasing(false); }
-  }, [orgId, lookupKey, legalHold, erasing, load, t]);
+  }, [orgId, lookupKey, legalHold, erasing, load, refusedAsMember, t]);
 
   // ADR 0657 D7 — clear the erasure tombstone for a subject who asked to
   // return. Grants NO consent (the server writes a `governance_decision` and
@@ -278,6 +440,10 @@ export function ConsentPage(): JSX.Element {
       setReadmit(null);
       if (result.readmitted) {
         setReadmitOutcome({ orgId, subjectKey: key, outcome: 'readmitted' });
+        // CN2UX-2 — the erased panel for this key is now FALSE: re-read it, so the page
+        // never shows "Erased … until re-admitted" under "Re-admitted".
+        // Silent: the re-admit Notice is the one voice for this outcome.
+        if (lookup?.key === key) { setLookup(null); void doLookup(key, { silent: true }); }
       } else {
         // `not_erased` is information, not a failure: there was no tombstone to
         // clear. The InlineState below carries it; the toast speaks it (the
@@ -293,9 +459,9 @@ export function ConsentPage(): JSX.Element {
       else if (api?.code === 'validation_error') setReadmitError(t('readmitAttestationTooShort', { min: READMIT_ATTESTATION_MIN_CHARS }));
       else setReadmitError((e instanceof Error && e.message) || t('readmitFailed'));
     } finally { setReadmitBusy(false); }
-  }, [orgId, readmit, t]);
+  }, [orgId, readmit, lookup, doLookup, t]);
   const openReadmit = useCallback((subjectKey: string) => { setReadmitError(null); setReadmit({ subjectKey }); }, []);
-  const readmitControl = (subjectKey: string, hintKey: 'readmitHintAfterErasure' | 'readmitHintNoRecord'): JSX.Element => (
+  const readmitControl = (subjectKey: string, hintKey: 'readmitHintAfterErasure'): JSX.Element => (
     <>
       <span className="muted u-fs-12">{t(hintKey)}</span>
       <div className="action-bar">
@@ -366,6 +532,9 @@ export function ConsentPage(): JSX.Element {
       <OrgSelectionState orgs={orgs} orgsFailed={orgsFailed} retry={retryOrgs}
         emptyBody={t('orgsEmptyClause')} failedBody={t('orgsFailedClause')} icon={<GlobeIcon />}>
         <>
+          {/* ADR 0849 D6 + CN2UX-9 — ONE statement of what a member can and cannot do
+              here, instead of an "admins only" line in every card. */}
+          {canManage === false ? <Notice variant="info">{regimeEnabled ? t('memberViewNotice') : t('memberViewNoticeRegimeOff')}</Notice> : null}
           {/* CN-RACE-1 — the policy form renders ONLY once the policy is known.
               Before this gate, `mode` showed its invented `'opt-in'` initial
               state (:56) while `policy` was still null, so the page asserted a
@@ -433,28 +602,50 @@ export function ConsentPage(): JSX.Element {
               action={<Button variant="secondary" size="sm" onClick={() => { if (orgId) load(orgId); }}>{t('policyLoadRetry')}</Button>}
             />
           )) : (
+          canManage === false ? (
+          /* ADR 0849 D1/D6 + CN2UX-1 — the regime is tenant-wide, so changing it is an
+             admin act; a member READS which regime governs the sends they author. A
+             definition list, not disabled inputs: a disabled empty field shows its
+             placeholder ("EU, CA") exactly like a configured value. */
+          <div className="surface-card u-p-4">
+            <dl className="u-grid u-gap-2 u-m-0">
+              <div className="u-grid u-gap-1">
+                <dt className="u-label-sm">{t('regulatedRegionsReadLabel')}</dt>
+                <dd className="u-m-0">{policy.regulatedRegions.length > 0 ? policy.regulatedRegions.join(', ') : t('regulatedRegionsNone')}</dd>
+                <dd className="u-m-0 muted u-fs-12">{t('regulatedRegionsHint')}</dd>
+              </div>
+              <div className="u-grid u-gap-1">
+                <dt className="u-label-sm">{t('defaultModeLabel')}</dt>
+                <dd className="u-m-0">{policy.defaultMode === 'opt-out' ? t('defaultModeOptOutLabel') : t('defaultModeOptInLabel')}</dd>
+              </div>
+            </dl>
+          </div>
+          ) : (
           <div className="surface-card u-p-4 surface-form">
             <label className="u-grid u-gap-1">
               <span className="u-label-sm">{t('regulatedRegionsLabel')}</span>
-              <input value={regions} onChange={(e) => setRegions(e.target.value)} placeholder={t('regulatedRegionsPlaceholder')} />
+              <input value={regions} disabled={accessLoading} onChange={(e) => setRegions(e.target.value)} placeholder={t('regulatedRegionsPlaceholder')} />
               {/* R2 CN-SP-2 — this field is DECLARATIVE: no enforcement path
                   reads it (subjects carry no region to match). Saying so beats
                   letting an operator believe a region list fails anything
                   closed. Enforcement = the default mode + per-record consent. */}
-              <span className="muted u-fs-12">{t('regulatedRegionsNotEnforced')}</span>
+              <span className="muted u-fs-12">{t('regulatedRegionsHint')}</span>
             </label>
             <label className="u-grid u-gap-1 is-narrow">
               <span className="u-label-sm">{t('defaultModeLabel')}</span>
-              <select value={mode} onChange={(e) => setMode(e.target.value as DefaultMode)}>
+              <select value={mode} disabled={accessLoading} onChange={(e) => setMode(e.target.value as DefaultMode)}>
                 <option value="opt-in">{t('defaultModeOptInLabel')}</option>
                 <option value="opt-out">{t('defaultModeOptOutLabel')}</option>
               </select>
             </label>
             {dirty ? <span className="chip chip--warning">{t('unsavedChanges')}</span> : null}
-            <Button variant="primary" disabled={busy || !policy || !dirty} onClick={() => void savePolicy()} title={!dirty && policy ? t('nothingToSave') : undefined}><SaveIcon /> {t('savePolicy')}</Button>
+            <Button variant="primary" disabled={busy || !policy || !dirty || accessLoading} onClick={() => void savePolicy()} title={!dirty && policy ? t('nothingToSave') : undefined}><SaveIcon /> {t('savePolicy')}</Button>
           </div>
-          )}
+          ))}
 
+          {/* ADR 0849 D1/D6 — lookup, erase and re-admit are the admin tier; a member is
+              told so once, above (CN2UX-9), and offered no controls the server refuses. */}
+          {canManage === false ? null : (
           <div className="surface-card u-gap-2">
             <h2 className="u-fs-16 u-m-0 u-flex u-gap-1 u-items-center"><ShieldIcon /> {t('dataSubjectTitle')}</h2>
             {/* CONS-4 / CONS-UX-2 — the hold is a BLOCKING statement above the
@@ -467,7 +658,12 @@ export function ConsentPage(): JSX.Element {
                 {t('legalHoldBody', { reason: legalHold.reason, since: f.dateTime(legalHold.since) })}
               </Notice>
             ) : null}
-            <div className="surface-form">
+            {accessLoading ? (
+              /* CN2UX-8 — never render live controls that may be withdrawn a moment later. */
+              <div role="status"><span className="sr-only">{t('common:loading')}</span><Skeleton /><Skeleton width="30%" /></div>
+            ) : (
+            /* CN2UX-12 — a form, so Enter in the key field looks the subject up. */
+            <form className="surface-form" onSubmit={(e) => { e.preventDefault(); void doLookup(); }}>
               <label className="u-grid u-gap-1">
                 <span className="u-label-sm">{t('subjectKeyLabel')}</span>
                 <input
@@ -480,8 +676,9 @@ export function ConsentPage(): JSX.Element {
                 />
               </label>
               <div className="action-bar">
-                <Button variant="quiet" disabled={!lookupKey.trim()} onClick={() => void doLookup()}>{t('lookup')}</Button>
+                <Button type="submit" variant="quiet" disabled={!lookupKey.trim()}>{t('lookup')}</Button>
                 <Button
+                  type="button"
                   variant="danger"
                   disabled={!lookupKey.trim() || legalHold != null}
                   loading={erasing}
@@ -489,7 +686,8 @@ export function ConsentPage(): JSX.Element {
                   onClick={() => void doErase()}
                 ><TrashIcon /> {t('erase')}</Button>
               </div>
-            </div>
+            </form>
+            )}
             {/* CONS-UX-33 — the refused state outlives the request and the
                 policy re-read that follows it. */}
             {heldRefusal && heldRefusal.orgId === orgId ? (
@@ -567,21 +765,24 @@ export function ConsentPage(): JSX.Element {
                 ) : (
                   /* ADR 0657 D7 (CONS-UX-24) — a completed erasure (including a
                      zero-row one: the tombstone is written either way, D1)
-                     is where the operator learns the door back exists. The
-                     wire carries no "is tombstoned" bit on a lookup, so the
-                     control keys on the two facts this page CAN know: an
-                     erasure completed here this session, or a lookup found no
-                     record (below). */
-                  <div className="u-grid u-gap-1 u-mt-2">{readmitControl(receipt.subjectKey, 'readmitHintAfterErasure')}</div>
+                     is where the operator learns the door back exists. Since ADR
+                     0849 D3 a lookup also reports erasure, and offers the same door
+                     there. CN2UX-2 — once THIS subject is re-admitted, the offer is
+                     withdrawn: the receipt must not invite a re-admit that happened. */
+                  readmitOutcome?.outcome === 'readmitted' && readmitOutcome.orgId === orgId && readmitOutcome.subjectKey === receipt.subjectKey
+                    ? null
+                    : <div className="u-grid u-gap-1 u-mt-2">{readmitControl(receipt.subjectKey, 'readmitHintAfterErasure')}</div>
                 )}
               </Notice>
             ) : null}
             {/* ADR 0657 D7 — the re-admit outcome persists like the receipt does. */}
             {readmitOutcome && readmitOutcome.orgId === orgId ? (
               readmitOutcome.outcome === 'readmitted' ? (
-                <Notice variant="success" announce={t('readmitDone', { subjectKey: readmitOutcome.subjectKey })}>
-                  {t('readmitDone', { subjectKey: readmitOutcome.subjectKey })}
-                </Notice>
+                <div ref={readmitDoneRef} tabIndex={-1}>
+                  <Notice variant="success" announce={t('readmitDone', { subjectKey: readmitOutcome.subjectKey })}>
+                    {t('readmitDone', { subjectKey: readmitOutcome.subjectKey })}
+                  </Notice>
+                </div>
               ) : (
                 <InlineState kind="empty" message={t('readmitNotErased', { subjectKey: readmitOutcome.subjectKey })} />
               )
@@ -597,15 +798,20 @@ export function ConsentPage(): JSX.Element {
                 body={t('lookupFailedBody', { subjectKey: lookup.key })}
                 action={<Button variant="secondary" size="sm" onClick={() => void doLookup(lookup.key)}>{tCommon('retry')}</Button>}
               />
+            ) : lookup?.result === 'erased' ? (
+              /* ADR 0849 D3 — the lookup now KNOWS the subject was erased (the
+                 PII-free tombstone), so it says so with the date, and offers the
+                 attested door back here instead of on every "no record". */
+              <div className="surface-inset u-grid u-gap-1">
+                <span className="u-label-sm">{t('lookupResultFor', { subjectKey: lookup.key })}</span>
+                <div className="u-flex"><span className="chip chip--warning">{lookup.erasedAt ? t('lookupErasedOn', { date: f.dateTime(lookup.erasedAt) }) : t('lookupErased')}</span></div>
+                <span className="muted u-fs-12">{t('lookupErasedBody')}</span>
+                {readmitControl(lookup.key, 'readmitHintAfterErasure')}
+              </div>
             ) : lookup?.result === 'none' ? (
               <div className="surface-inset u-grid u-gap-1">
                 <span className="u-label-sm">{t('lookupResultFor', { subjectKey: lookup.key })}</span>
                 <span className="u-label-sm">{t('lookupNoRecord')}</span>
-                {/* ADR 0657 D7 (CONS-UX-24) — "no record" is what an ERASED
-                    subject looks like on this wire (the lookup cannot tell a
-                    never-seen key from a tombstoned one), so the door back is
-                    offered here; `not_erased` answers the other case honestly. */}
-                {readmitControl(lookup.key, 'readmitHintNoRecord')}
               </div>
             ) : lookup ? (
                 <div className="surface-inset u-grid u-gap-1">
@@ -619,17 +825,20 @@ export function ConsentPage(): JSX.Element {
                   <span className="u-label-sm">{f.dateTime(lookup.result.ts)}</span>
                   {/* R2 CN-SP-4 — provenance rode the wire unseen: HOW this
                       consent was captured is the accountability question. */}
-                  {lookup.result.source ? <span className="muted u-fs-12">{t('sourceLine', { source: lookup.result.source })}</span> : null}
+                  {lookup.result.source ? <SourceLine source={lookup.result.source} /> : null}
                   {lookup.result.legalBasis ? <span className="chip chip--muted u-fs-11">{t('legalBasisLine', { basis: lookup.result.legalBasis })}</span> : null}
                   {lookup.result.purposes && lookup.result.purposes.length > 0 ? <span className="muted u-fs-12">{t('purposesLine', { purposes: lookup.result.purposes.join(', ') })}</span> : null}
                   </div>
+                  <ConsentHistory history={lookup.result.history} dropped={lookup.result.historyDropped ?? 0} />
                 </div>
               ) : null}
           </div>
+          )}
 
           {/* CONS-5 — the records list is the consent REGIME's collection; it is
-              empty by construction when the regime is off. */}
-          {regimeEnabled ? (
+              empty by construction when the regime is off. ADR 0849 D1 — and it names
+              people, so it is the admin tier: a member gets no card at all (CN2UX-9). */}
+          {regimeEnabled && canManage !== false ? (
           <div className="surface-card u-gap-2">
             <h2 className="u-fs-16 u-m-0">{t('recordsTitle')}</h2>
             {records && records.length > 3 ? (
@@ -664,7 +873,7 @@ export function ConsentPage(): JSX.Element {
               <StateCard icon={<ShieldIcon />} title={t('recordsNoMatchTitle')} body={t('recordsNoMatchBody')} action={<Button variant="secondary" size="sm" onClick={clearRecordFilters}>{t('recordsClearFilters')}</Button>} />
             ) : visibleRecords.map((r) => (
               <div key={r.subjectKey} className="surface-inset u-flex u-gap-2 u-items-center u-wrap">
-                <code className="u-flex-1">{r.subjectKey}</code>
+                <code className="u-flex-1 u-break-anywhere">{r.subjectKey}</code>
                 <CatChips c={r.categories} />
                 {/* region is free-form policy text (regulated-regions input) — value stays raw */}
                 {r.region ? <span className="chip chip--muted">{r.region}</span> : null}

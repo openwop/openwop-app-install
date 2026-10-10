@@ -212,10 +212,16 @@ describe('ANL-UX-4 — "Counting began …" is DEPLOYMENT-scoped, not window-sco
     expect(wide.summary.uniqueVisitors).toBe(2);
   });
 
-  it('stays absent when the window has no visitor dimension at all', async () => {
+  it('stays absent when the visitor dimension is NOT ACTIVE for the tenant (unregistered/off toggle ⇒ unmeasured, never a 0)', async () => {
+    // CORRECTED (grade-tests w8): this case used to claim "no hashed row in the window ⇒
+    // the tile disappears" — the pre-ANL-UX-3-R2 contract. With the dimension ACTIVE the
+    // same seed now yields a MEASURED 0 (analytics-route.test.ts 'ANL-UX-3 R2 — a MEASURED
+    // ZERO is emitted as 0'). This file boots no app, so `analytics-visitor-identity` is
+    // unregistered ⇒ `resolveOne` → null ⇒ inactive: the absent result here is the TOGGLE
+    // GATE in `withVisitorDimension`, and this is its only witness.
     await seed(daysAgoIso(45), { visitorHash: 'h-old' });
     const narrow = await summarizeForReport(TENANT, ORG, 7);
-    expect(narrow.summary.uniqueVisitors, 'no hashed row in the window ⇒ the tile disappears').toBeUndefined();
+    expect(narrow.summary.uniqueVisitors, 'dimension inactive ⇒ no measurement, not a 0').toBeUndefined();
     expect(narrow.summary.uniqueVisitorsSince, 'and so must the disclosure — no orphaned date').toBeUndefined();
   });
 });

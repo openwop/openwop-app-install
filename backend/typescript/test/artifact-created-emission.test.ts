@@ -22,6 +22,8 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { WorkflowDefinition } from '../src/executor/types.js';
+import { getEventLog } from '../src/executor/eventLog.js';
+import { bareRunId } from './support/bareRunId.js';
 
 // Static imports hoist above beforeAll, and the provider registry reads
 // OPENWOP_COMPAT_PROVIDER_ENABLED at module load — so src modules are imported
@@ -60,6 +62,12 @@ beforeAll(async () => {
 
   // Templates created in-process: template CRUD is not what this probe tests,
   // and `doc.one-pager` is a host-native registered artifact type.
+  // ADR 0832 — the seam's org floor checks the run's person against the org the
+  // node names, as the HTTP doors do. So the templates' org is a real org of this
+  // tenant, and the run's actor — the operator env key, `bearer:<first 8>` (the
+  // principal `POST /v1/runs` stamps) — is its owner. It used to be a bare id.
+  const { createOrg } = await import('../src/host/accessControlService.js');
+  await createOrg({ tenantId: TENANT, createdBy: 'g8-probe', name: 'G8', orgId: ORG, ownerSubject: `bearer:${TOKEN.slice(0, 8)}` });
   const bound = await createTemplate({
     tenantId: TENANT, orgId: ORG, name: 'G8 bound', kind: 'doc', outputFormat: 'markdown',
     promptBody: 'Write a one-pager about {{topic}}.', artifactTypeId: 'doc.one-pager', createdBy: 'g8-probe',
@@ -107,8 +115,8 @@ function defFor(workflowId: string, templateId: string): WorkflowDefinition {
   } as unknown as WorkflowDefinition;
 }
 
-async function runToCompletion(workflowId: string): Promise<{ status: string; events: Array<{ type: string; payload?: Record<string, unknown> }> }> {
-  const create = await jsonFetch<{ runId: string }>('/v1/runs', {
+async function runToCompletion(workflowId: string): Promise<{ runId: string; status: string; events: Array<{ type: string; payload?: Record<string, unknown> }> }> {
+  const create = await jsonFetch<{ runId: string }>('/runs', {
     method: 'POST', body: JSON.stringify({ workflowId, tenantId: TENANT, inputs: {} }),
   });
   expect(create.status, `run create failed: ${JSON.stringify(create.body)}`).toBe(201);
@@ -116,17 +124,17 @@ async function runToCompletion(workflowId: string): Promise<{ status: string; ev
   let status = 'running';
   for (let i = 0; i < 60 && (status === 'running' || status === 'pending'); i++) {
     await new Promise((r) => setTimeout(r, 250));
-    const st = await jsonFetch<{ status: string }>(`/v1/runs/${runId}`);
+    const st = await jsonFetch<{ status: string }>(`/runs/${runId}`);
     status = st.body.status;
   }
-  const ev = await jsonFetch<{ events: Array<{ type: string; payload?: Record<string, unknown> }> }>(`/v1/runs/${runId}/events/poll?fromSeq=0&limit=200`);
-  return { status, events: ev.body.events ?? [] };
+  const ev = await jsonFetch<{ events: Array<{ type: string; payload?: Record<string, unknown> }> }>(`/runs/${runId}/events/poll?fromSeq=0&limit=200`);
+  return { runId, status, events: ev.body.events ?? [] };
 }
 
 describe('G8 — artifact.created emission from a real run', () => {
   it('a template BOUND to a registered artifact type emits artifact.created', async () => {
     registerWorkflow(defFor('g8.emission.bound', templateBoundId));
-    const { status, events } = await runToCompletion('g8.emission.bound');
+    const { runId, status, events } = await runToCompletion('g8.emission.bound');
     const failedPayload = events.find((e) => e.type === 'node.failed')?.payload;
     expect(status, `run did not complete; node.failed: ${JSON.stringify(failedPayload)}`).toBe('completed');
     const created = events.filter((e) => e.type === 'artifact.created');
@@ -146,9 +154,14 @@ describe('G8 — artifact.created emission from a real run', () => {
     const validate = new Ajv2020({ strict: false, allErrors: true }).compile((defs.$defs ?? {})['artifactCreated'] as object);
     expect(validate(p), `payload violates §artifactCreated: ${JSON.stringify(validate.errors ?? [])}`).toBe(true);
     expect(p.artifactType, 'the REQUIRED canonical field').toBe('doc.one-pager');
-    expect(p.artifactTypeId, 'deprecated alias, retained for internal readers').toBe('doc.one-pager');
+    // ADR 0812 P2b — the major-2 wire RENAMES the alias to `artifactType`
+    // (`storage/payloadKeyAliases.json`); the stored event keeps it for internal readers.
+    expect(p.artifactTypeId, 'major 2 carries only the seated name').toBeUndefined();
+    const stored = (await getEventLog().list(bareRunId(runId), { contract: 1 })).find((e) => e.type === 'artifact.created');
+    expect((stored?.payload as { artifactTypeId?: unknown } | undefined)?.artifactTypeId, 'deprecated alias, retained for internal readers').toBe('doc.one-pager');
     expect(p.registered, 'type is host-native and MUST be marked registered').toBe(true);
-    expect(p.valid, 'payload failed schema validation').toBe(true);
+    // `valid` is a host field outside the closed v2 `artifactCreated`, so it is read from storage too.
+    expect((stored?.payload as { valid?: unknown } | undefined)?.valid, 'payload failed schema validation').toBe(true);
   });
 
   it('an UNBOUND template completes WITHOUT the event — the binding causes the emission', async () => {

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/core.openwop.agents.research-crew/1.0.0/retriever.task.schema.json",
+  "$id": "https://packs.openwop.dev/core.openwop.agents.research-crew/1.0.1/retriever.task.schema.json",
   "title": "ResearchRetrieverTask",
   "type": "object",
   "required": ["subQuestion"],

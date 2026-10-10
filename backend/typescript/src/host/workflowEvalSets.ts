@@ -11,7 +11,8 @@
 import { DurableCollection } from './hostExtPersistence.js';
 import { stripSecretsFromPersisted } from '../byok/ephemeralRunSecrets.js';
 import { sanitizeFreeTextDeep } from '../byok/textRedaction.js';
-import { onWorkflowDeleted } from './workflowsRegistry.js';
+import { onWorkflowDeleted, onWorkflowForked } from './workflowsRegistry.js';
+import { moveKeyedRows } from './forkRepoint.js';
 import { registerSubjectEraser } from './subjectErasure.js';
 import { ERASED, subjectKeyForms } from './subjectErasureRedaction.js';
 import { OpenwopError } from '../types.js';
@@ -495,3 +496,11 @@ export async function eraseSubjectEvalRows(tenantId: string, subjectKey: string)
 export function registerEvalSetErasure(): void {
   registerSubjectEraser(eraseSubjectEvalRows);
 }
+
+// ADR 0789 — eval SETS are the tenant's test cases for "the workflow" and move to
+// its fork. RESULTS stay on the shared id: each is pinned to the revision it
+// graded, and the fork's head is a new revision the gate must grade afresh.
+onWorkflowForked('workflow:eval-set', async (tenantId, from, to) => {
+  const rows = (await sets.listByPrefix(setPrefix(tenantId, from))).filter((r) => r.workflowId === from && r.tenantId === tenantId);
+  return moveKeyedRows(sets, rows, (r) => r.key, (r) => ({ ...r, workflowId: to, key: setKey(tenantId, to, r.evalSetId) }));
+});

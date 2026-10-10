@@ -8,6 +8,7 @@
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 
 const getLayout = vi.fn();
 const putLayout = vi.fn();
@@ -41,7 +42,7 @@ afterEach(() => { cleanup(); vi.clearAllMocks(); });
 async function renderCustomizing() {
   getLayout.mockResolvedValue(null); // no saved layout ⇒ registry defaults
   putLayout.mockResolvedValue({});
-  const view = render(<DashboardPage />);
+  const view = render(<MemoryRouter><DashboardPage /></MemoryRouter>);
   await screen.findByRole('button', { name: /customize/i });
   fireEvent.click(screen.getByRole('button', { name: /customize/i }));
   return view;
@@ -76,7 +77,7 @@ describe('dashboard customize — every action announces (D-G2/D-G3)', () => {
 describe('dashboard customize — reset to defaults (D-G1)', () => {
   it('is offered ONLY while customizing', async () => {
     getLayout.mockResolvedValue(null);
-    render(<DashboardPage />);
+    render(<MemoryRouter><DashboardPage /></MemoryRouter>);
     await screen.findByRole('button', { name: /customize/i });
     expect(screen.queryByRole('button', { name: /reset to defaults/i })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: /customize/i }));

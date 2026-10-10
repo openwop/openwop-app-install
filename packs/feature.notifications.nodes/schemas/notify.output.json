@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/feature.notifications.nodes/1.0.0/notify.output.json",
+  "$id": "https://packs.openwop.dev/feature.notifications.nodes/1.0.1/notify.output.json",
   "title": "NotifyOutput",
   "description": "`emitted` is the honest verdict. When false, `reason` names why — the node this replaces reported success with `sent:false` underneath, so a run whose only outbound action failed completed green.",
   "type": "object",

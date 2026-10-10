@@ -60,7 +60,6 @@ describe('UX-BLD-2 — an unavailable cost estimate never reads as a price', () 
           canUndo={false}
           canRedo={false}
           running={false}
-          aiOpen={false}
           undo={vi.fn()}
           redo={vi.fn()}
           onExport={vi.fn()}
@@ -71,7 +70,6 @@ describe('UX-BLD-2 — an unavailable cost estimate never reads as a price', () 
           onNewWorkflow={vi.fn()}
           onValidate={vi.fn()}
           onRun={vi.fn()}
-          onCreateWithAi={vi.fn()}
           runEstimate={runEstimate}
           heatmapOn={false}
           onToggleHeatmap={vi.fn()}

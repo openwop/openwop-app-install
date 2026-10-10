@@ -12,8 +12,9 @@ import { config, setCurrentIdToken } from '../config.js';
  * the headers and the body the client actually sent — the same discipline the
  * backend applies to its own negotiator.
  *
- * It also pins the two surfaces that deliberately STAY on major 1 (discovery,
- * debug bundle) and the agent-management surface that moved from the
+ * It also pins the discovery read (major 2, through `capabilitiesV2Adapter`),
+ * the debug bundle's host-extension twin, and the agent-management surface
+ * that moved from the
  * `/v1/host/sample/*` seam address (404 in production) to the product one.
  */
 
@@ -120,41 +121,46 @@ describe('identity.md §5 on the request side', () => {
   });
 });
 
-describe('ADR 0730 C.3, CORRECTED — the discovery read STAYS on major 1', () => {
-  // C.3 moved this read to the v2 root and this block asserted that. It is
-  // reverted, and the assertions are inverted BACK rather than deleted, because
-  // this is where the claim is checked either way.
-  //
-  // WHY. The v2 root is a different, CLOSED document, and it is not yet a
-  // superset of what this SPA reads. MEASURED against the served v2 doc:
-  // `demoMode` moved to `extensions[openwop-app.host]`, `hostSurfaces` to
-  // `extensions[openwop-app.host-surfaces]`, and `aiProviders.input`,
-  // `memory.attribution` and `envelopes.tierOneSubsetCompliance` are ABSENT —
-  // the `memory` and `envelopes` families are not advertised at major 2 at all.
-  // Switching the read regressed five UI surfaces silently, because every
-  // consumer meets a failed read with a `catch` that renders nothing.
-  //
-  // The C.3a v2 ADVERTS are unaffected and stay: they are what a v2 client
-  // reads. Only the SPA's own read is back on major 1.
-  it('getCapabilities reads the major-1 document — asserted on the REQUEST, because the cache would hide it', async () => {
-    stub(() => json({ capabilities: { prompts: { supported: true } }, demoMode: true }));
+describe('discovery — read at major 2, restated in the v1 shape the consumers read', () => {
+  // HISTORY. C.3 moved this read to v2 with the consumers still reading v1
+  // paths and shipped five silent UI regressions; it was reverted and this
+  // block inverted to pin major 1. It is inverted forward again because the
+  // shape difference now has ONE owner (`capabilitiesV2Adapter.ts`), gated by
+  // the backend's `discovery-v2-adapter-parity.test.ts` against both served
+  // documents. The inversion is kept rather than deleted: this is where the
+  // claim is checked either way.
+  it('getCapabilities reads the major-2 document — asserted on the REQUEST, because the cache would hide it', async () => {
+    stub(() => json({ prompts: {}, extensions: { 'openwop-app.host': { demoMode: true } } }));
     const { getCapabilities, clearCapabilitiesCache } = await import('../runsClient.js');
     clearCapabilitiesCache();
     await getCapabilities();
     expect(new URL(last().url).pathname).toBe('/.well-known/openwop');
-    const v = headerOf(last().init, 'OpenWOP-Version');
-    expect(v === null || v.startsWith('1'), `the discovery read must not ask for major 2 (got ${String(v)})`).toBe(true);
+    expect(headerOf(last().init, 'OpenWOP-Version')).toBe('2.0');
   });
 
-  it('the v1-shaped fields the SPA actually reads survive the round trip', async () => {
+  it('the v1-shaped fields the SPA actually reads come out of a v2 document', async () => {
     // A regression here is the shape of the five silent failures: the read
     // succeeds, the field is undefined, and the feature renders nothing.
-    stub(() => json({ capabilities: { hostSurfaces: [{ name: 'host.cache', supported: true, implementation: 'in-memory' }] }, demoMode: true }));
+    stub(() => json({
+      extensions: {
+        'openwop-app.host': { demoMode: true },
+        'openwop-app.host-surfaces': { surfaces: [{ name: 'host.cache', supported: true, implementation: 'in-memory' }] },
+      },
+      prompts: { status: 'experimental', since: '2.0' },
+      auth: { lanes: [{ lane: 'saml' }, { lane: 'api-key' }] },
+    }));
     const { getCapabilities, clearCapabilitiesCache } = await import('../runsClient.js');
     clearCapabilitiesCache();
-    const caps = await getCapabilities() as { demoMode?: boolean; capabilities?: { hostSurfaces?: unknown[] } };
+    const caps = await getCapabilities() as {
+      demoMode?: boolean;
+      auth?: { profiles?: string[] };
+      capabilities?: { hostSurfaces?: unknown[]; prompts?: { supported?: boolean; status?: unknown } };
+    };
     expect(caps.demoMode, 'demoMode gates the BYOK try-it-free affordance').toBe(true);
     expect(caps.capabilities?.hostSurfaces, 'hostSurfaces gates the in-memory disclosure banner').toHaveLength(1);
+    expect(caps.capabilities?.prompts?.supported, 'a present v2 family is restated as supported').toBe(true);
+    expect(caps.capabilities?.prompts?.status, 'v2 family metadata is stripped').toBeUndefined();
+    expect(caps.auth?.profiles, 'a lane maps back to the profile it honours; api-key maps to none').toEqual(['openwop-auth-saml']);
   });
 
   it('getDebugBundle hits the HOST-EXTENSION twin — the address that survives v1 retirement', async () => {
@@ -222,12 +228,11 @@ describe('ADR 0730 C.4 — the last SPA reads that spoke v1 protocol', () => {
     const { clearPromptsSupportCache } = await import('../../prompts/promptsClient.js');
     clearCapabilitiesCache();
     clearPromptsSupportCache();
-    // TWO MAJORS ON PURPOSE, and it is not an oversight: the support GATE reads
-    // the major-1 discovery document (C.3 reverted — see the block above), while
-    // the prompts READ itself is a major-2 call on the unversioned path. So the
-    // stub answers discovery in the v1 shape and the list in the v2 one.
+    // The support GATE reads discovery (major 2, adapted), and the prompts READ
+    // is a major-2 call on the unversioned path. At major 2 a present `prompts`
+    // family IS the claim.
     stub((url) => (url.includes('/.well-known/openwop')
-      ? json({ capabilities: { prompts: { supported: true } } })
+      ? json({ prompts: {} })
       : json({ items: [{ templateId: 'p1', kind: 'system' }] })));
     const { listPrompts } = await import('../../prompts/promptsClient.js');
     await listPrompts({ kind: 'system' });
@@ -337,5 +342,70 @@ describe('SSE — one transport, major 2, this app\'s auth', () => {
     expect(u.searchParams.get('streamToken')).toBe('tok-1');
     expect(headerOf(stream.init, 'authorization')).toBeNull();
     expect(stream.init?.credentials).toBe('include');
+  });
+});
+
+describe('org chart — the RFC 0087 normative read at major 2, not the host alias', () => {
+  it('getOrgChart reads /agents/org-chart at major 2 and maps owner.tenantId', async () => {
+    stub(() => json({ owner: { tenantId: 't1' }, departments: [{ departmentId: 'd', name: 'D', parentDepartmentId: null, roles: [] }], members: [] }));
+    const { getOrgChart } = await import('../../agents/rosterClient.js');
+    const chart = await getOrgChart();
+    expect(new URL(last().url).pathname).toBe('/agents/org-chart');
+    expect(headerOf(last().init, 'OpenWOP-Version')).toBe('2.0');
+    expect(chart.tenantId).toBe('t1');
+    expect(chart.departments.map((d) => d.departmentId)).toEqual(['d']);
+  });
+
+  it('getDepartmentRollup reads /agents/org-chart/{id} at major 2, and a 404 still throws', async () => {
+    stub(() => json({ department: { departmentId: 'd a' }, members: [], responsibilities: ['x'] }));
+    const { getDepartmentRollup } = await import('../../agents/rosterClient.js');
+    const view = await getDepartmentRollup('d a');
+    expect(new URL(last().url).pathname).toBe('/agents/org-chart/d%20a');
+    expect(headerOf(last().init, 'OpenWOP-Version')).toBe('2.0');
+    expect(view.responsibilities).toEqual(['x']);
+    stub(() => json({ error: 'not_found' }, 404));
+    await expect(getDepartmentRollup('nope')).rejects.toThrow(/404/);
+  });
+});
+
+describe('run list — RFC 0182 GET /runs at major 2, walking the cursor', () => {
+  it('reads /runs at major 2, unbinds ids, and walks nextCursor until the limit is met', async () => {
+    let page = 0;
+    stub((url) => {
+      page += 1;
+      const u = new URL(url);
+      expect(u.pathname).toBe('/runs');
+      if (page === 1) {
+        expect(u.searchParams.get('limit')).toBe('100');
+        expect(u.searchParams.get('cursor')).toBeNull();
+        return json({ runs: Array.from({ length: 100 }, (_, i) => ({ runId: i === 0 ? BOUND : `r${i}`, workflowId: 'w', status: 'completed' })), nextCursor: 'c1' });
+      }
+      expect(u.searchParams.get('cursor')).toBe('c1');
+      expect(u.searchParams.get('limit')).toBe('20');
+      return json({ runs: Array.from({ length: 20 }, (_, i) => ({ runId: `s${i}`, workflowId: 'w', status: 'completed' })), nextCursor: 'c2' });
+    });
+    const { listMyRuns } = await import('../runsClient.js');
+    const runs = await listMyRuns({ limit: 120, workflowId: 'w' });
+    expect(page, 'stops once the limit is met, even with a cursor left').toBe(2);
+    expect(runs).toHaveLength(120);
+    expect(headerOf(last().init, 'OpenWOP-Version')).toBe('2.0');
+    expect(new URL(last().url).searchParams.get('workflowId')).toBe('w');
+    expect(runs[0]!.runId, 'bound ids come back bare, like every other major-2 result').toBe(BARE);
+  });
+
+  it('threads the AbortSignal (GAP-ANALYSIS E15) — the reason this is not the SDK call', async () => {
+    stub(() => json({ runs: [] }));
+    const { listMyRuns } = await import('../runsClient.js');
+    const ctl = new AbortController();
+    await listMyRuns({ limit: 5, signal: ctl.signal });
+    expect(last().init?.signal).toBe(ctl.signal);
+  });
+
+  it('listWorkflowRunCosts stays on the host route — costByNode is not a v2 snapshot field', async () => {
+    stub(() => json({ runs: [{ runId: 'r', workflowId: 'w', status: 'completed', costByNode: { a: 1 } }] }));
+    const { listWorkflowRunCosts } = await import('../runsClient.js');
+    const runs = await listWorkflowRunCosts('w');
+    expect(new URL(last().url).pathname).toBe('/host/openwop-app/runs');
+    expect(runs[0]!.costByNode).toEqual({ a: 1 });
   });
 });

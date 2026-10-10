@@ -49,19 +49,19 @@ async function loginTo(tenantId: string, who: string): Promise<Client> {
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
     return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
   };
-  const r = await call('POST', '/v1/host/openwop-app/test/login', { email: `${who}-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await call('POST', '/host/openwop-app/test/login', { email: `${who}-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return { cookie, userId: r.body.user.userId, get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b) };
 }
 
-const P = '/v1/host/openwop-app/projects';
+const P = '/host/openwop-app/projects';
 
 /** A project-owned `canvas.drawing` in a PRIVATE project, plus a same-tenant org member
  *  who is NOT a project member — the case org scope alone would wrongly admit. */
 async function privateProjectDrawing() {
   const tenantId = `org:drw-sa-${Date.now()}-${n++}`;
   const a = await loginTo(tenantId, 'owner');
-  const orgId = (await a.post('/v1/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
+  const orgId = (await a.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
   const projectId = (await a.post(P, { orgId, name: 'Secret' })).body.id;
   expect((await a.patch(`${P}/${projectId}/visibility`, { visibility: 'private' })).body.visibility).toBe('private');
   const canvas = await createCanvasForTenant(tenantId, {
@@ -74,7 +74,7 @@ async function privateProjectDrawing() {
   return { orgId, canvasId: canvas.canvasId, a, b };
 }
 
-const DRW = (orgId: string): string => `/v1/host/openwop-app/drawings/orgs/${encodeURIComponent(orgId)}`;
+const DRW = (orgId: string): string => `/host/openwop-app/drawings/orgs/${encodeURIComponent(orgId)}`;
 
 describe('DRC-1 — a private project\'s drawing is member-gated on the REST read', () => {
   it('the project member CAN read it (the gate must not over-refuse)', async () => {

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/feature.profiles.nodes/1.1.0/list.output.json",
+  "$id": "https://packs.openwop.dev/feature.profiles.nodes/1.1.1/list.output.json",
   "title": "ProfilesListOutput",
   "description": "The tenant's team roster \u2014 every profile in the run's tenant as a descriptive projection (tenant bookkeeping columns stripped; endorsements as `{ count, endorserUserIds }`). Descriptive only: a profile confers no authority and carries no ranking (ADR 0005).",
   "type": "object",

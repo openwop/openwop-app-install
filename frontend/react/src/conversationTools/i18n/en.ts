@@ -4,6 +4,7 @@
  */
 export const messages = {
   openTitle: 'Tool scope for this conversation',
+  chipLabel: 'Tool access',
   heading: 'Conversation tool scope',
   blurb: 'Control which of the agent’s tools it may use in this conversation, and which need your approval first. Narrowing only — this never grants tools beyond the agent’s permissions.',
   pendingHeading: 'Pending approvals',
@@ -28,4 +29,16 @@ export const messages = {
   loadFailed: 'Failed to load the tool scope.',
   decisionFailed: 'Failed to record your decision.',
   saveFailed: 'Failed to save the tool scope.',
+  pendingChip_one: '{{count}} action awaiting approval',
+  pendingChip_other: '{{count}} actions awaiting approval',
+  pendingChipAria: 'Review the agent actions awaiting your approval',
+  requestedWith: 'Requested with',
+  noArguments: 'No arguments.',
+  grainNote: 'Approving allows this tool for the rest of this conversation, with whatever arguments the agent uses next — not only the request shown here.',
+  notOwnerNote: 'Only the conversation owner can approve these.',
+  approvalChanged: 'This request changed or was already decided. Review it again.',
+  approvedContinueHint: 'Approved. Ask the agent to try again.',
+  continue: 'Continue',
+  continueMessage: 'Approved — go ahead.',
+  scopeReadOnlyNote: 'Only the conversation owner can change which tools the agent may use here.',
 };

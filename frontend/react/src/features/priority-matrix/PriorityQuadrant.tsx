@@ -40,7 +40,12 @@ export function PriorityQuadrant({ ideas, criteriaSet }: { ideas: RankedIdea[]; 
                 {quadrants[q].map((idea) => (
                   <li key={idea.card.id} className="pm-quad-idea">
                     <span className="muted u-fs-11">#{formatNumber(idea.rank)}</span>
-                    <span className="pm-quad-idea-title">{idea.card.title}</span>
+                    <span className="pm-quad-idea-title" title={idea.card.title}>{idea.card.title}</span>
+                    {/* PM4UX-2 — the List says "2 of 4 scored"; a placement made from a
+                        partial score must say so too, not read as settled. */}
+                    {idea.completeness && !idea.completeness.complete
+                      ? <span className="chip chip--muted u-fs-11">{t('priorityPartial', { scored: idea.completeness.scored, declared: idea.completeness.declared })}</span>
+                      : null}
                   </li>
                 ))}
               </ul>

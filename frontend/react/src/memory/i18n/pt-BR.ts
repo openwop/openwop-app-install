@@ -20,7 +20,7 @@ export const messages = {
   emptyTitle: 'Nenhuma memória ainda',
   emptyBodyDefault: 'Adicione fatos e preferências aqui; eles são recuperados quando relevantes.',
   externalUnverified: 'Externa · não verificada',
-  externalUnverifiedTitle: 'Importada de uma fonte externa — tratada como não confiável (ADR 0038 §C).',
+  externalUnverifiedTitle: 'Importada de uma fonte externa — tratada como não confiável.',
   autoLearned: 'Aprendida automaticamente',
   autoLearnedTitle: 'Seu assistente deduziu isto de uma conversa — não foi você quem digitou, portanto é tratada como não verificada.',
   learnedOn: 'Aprendida em {{date}}',

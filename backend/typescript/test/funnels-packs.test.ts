@@ -11,7 +11,6 @@
  *    and declares no side-effect capability (proposal-only).
  */
 import { describe, expect, it, beforeAll } from 'vitest';
-import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { nodes as funnelNodes } from '../../../packs/feature.funnels.nodes/index.mjs';
@@ -21,12 +20,13 @@ import { openStorage } from '../src/storage/index.js';
 import { buildFunnelsSurface } from '../src/features/funnels/surface.js';
 import { getFunnel, __resetFunnels } from '../src/features/funnels/funnelsService.js';
 import { createPage } from '../src/features/cms/cmsService.js';
+import { readPackManifest } from './helpers/readPackManifest.js';
 
 const REPO_ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..', '..');
 interface NodeManifest { name: string; nodes: { typeId: string; role: string }[] }
 interface AgentManifest { name: string; agents: { agentId: string; toolAllowlist: string[] }[] }
 interface ChainManifest { name: string; kind: string; chains: { chainId: string; capabilities: string[]; dag: { nodes: { typeId: string }[] } }[] }
-const read = <T>(rel: string): T => JSON.parse(readFileSync(join(REPO_ROOT, rel), 'utf8')) as T;
+const read = <T>(rel: string): T => readPackManifest<T>(join(REPO_ROOT, rel));
 
 const EXPECTED_NODE_IDS = [
   'feature.funnels.nodes.list',
@@ -82,17 +82,17 @@ describe('feature.funnels.nodes', () => {
   });
 });
 
-describe('feature.funnels.agents', () => {
+describe('vendor.openwop-app.funnels.agents', () => {
   it('loads via the manifest runtime with a funnels-only tool allowlist', async () => {
-    const m = read<AgentManifest>('packs/feature.funnels.agents/pack.json');
+    const m = read<AgentManifest>('packs/vendor.openwop-app.funnels.agents/pack.json');
     expect(m.agents).toHaveLength(1);
     const allow = m.agents[0].toolAllowlist;
     // CFP-1: the Funnel Architect now names the REAL registered `openwop:funnels.*`
     // agent tools (list/get/step-stats read + draft action), not the dead
     // `feature.funnels.nodes.*` node typeIds that no provider projected.
     expect(allow.every((t) => t.startsWith('openwop:funnels.'))).toBe(true);
-    const loaded = loadAgentsFromManifest(join(REPO_ROOT, 'packs', 'feature.funnels.agents'));
-    expect(loaded.map((a) => a.agentId)).toContain('feature.funnels.agents.funnel-architect');
+    const loaded = loadAgentsFromManifest(join(REPO_ROOT, 'packs', 'vendor.openwop-app.funnels.agents'));
+    expect(loaded.map((a) => a.agentId)).toContain('vendor.openwop-app.funnels.agents.funnel-architect');
   });
 });
 

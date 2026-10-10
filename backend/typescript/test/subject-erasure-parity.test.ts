@@ -14,8 +14,20 @@
  *   Surviving-but-anonymized is the property; surviving-with-the-email was the bug.
  *
  * Importing each service triggers its module-load eraser registration; seeding goes
- * through a DurableCollection over the same backend (comments) or the real API (profiles,
- * crm), then `deleteSubject` fans out through the real seam.
+ * through a DurableCollection over the same backend (comments — production-shaped
+ * `Comment` rows on the service's own tenant-indexed collection signature) or the real
+ * API (profiles, crm), then `deleteSubject` fans out through the real seam.
+ *
+ * Sabotage-witnessed (/grade-tests wave 9, `w9g4-pa-*`): the profile eraser's tenant
+ * check, the comments eraser's author match (and a parentId-aware variant of it), and
+ * the crm eraser's registration each turn their case red.
+ *
+ * DOUBLE GUARD, recorded: the blank-subjectKey case cannot be turned red by removing an
+ * eraser's `!subjectKey` guard (probe `w9g4-pa-blank-VACUOUS`) — no production-shaped
+ * row is keyed `''` in any store these erasers read, so the guard is unreachable here.
+ * It stays as a smoke that a blank DSAR neither throws nor deletes; the per-eraser
+ * guard is pinned directly by `crm-subject-erasure.test.ts` ("a blank tenant or
+ * subject erases nothing").
  */
 
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -24,11 +36,19 @@ import { initHostExtPersistence, DurableCollection } from '../src/host/hostExtPe
 import type { Storage } from '../src/storage/storage.js';
 import { deleteSubject } from '../src/features/consent/consentService.js';
 import { getOrCreateProfile, getProfile, __resetProfiles } from '../src/features/profiles/profilesService.js';
-import { __resetCommentsStore } from '../src/features/comments/commentsService.js';
+import { __resetCommentsStore, type Comment } from '../src/features/comments/commentsService.js';
 import { createContact, getContact, __resetCrmStore } from '../src/features/crm/contactsService.js';
 import { registerCrmErasure, ERASED_VALUE } from '../src/features/crm/erasure.js';
 
-const commentCol = () => new DurableCollection<{ commentId: string; tenantId: string; authorId: string; parentId?: string }>('comments:thread', (c) => c.commentId);
+// The service's own collection signature (id + tenant index), so the eraser's indexed
+// `listForTenantIndexed` read sees these rows exactly as it sees real ones.
+const commentCol = () => new DurableCollection<Comment>('comments:thread', (c) => c.commentId, undefined, (c) => c.tenantId);
+const comment = (commentId: string, tenantId: string, authorId: string, parentId?: string): Comment => ({
+  commentId, tenantId, orgId: 'org1', resourceType: 'cms_page', resourceId: 'page1',
+  ...(parentId ? { parentId } : {}),
+  body: `body of ${commentId}`, authorId, status: 'open',
+  createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+});
 
 let storage: Storage;
 beforeEach(async () => {
@@ -55,10 +75,10 @@ describe('subject-erasure parity (ADR 0081 P5 follow-up)', () => {
 
   it('comments: deleteSubject erases the subject’s comments; another author’s reply survives', async () => {
     const col = commentCol();
-    await col.put({ commentId: 'c1', tenantId: 'tA', authorId: 'subjX' });
-    await col.put({ commentId: 'c2', tenantId: 'tA', authorId: 'subjX' });
-    await col.put({ commentId: 'c3', tenantId: 'tA', authorId: 'subjY' }); // a reply by another author
-    await col.put({ commentId: 'c4', tenantId: 'tB', authorId: 'subjX' }); // other tenant
+    await col.put(comment('c1', 'tA', 'subjX'));
+    await col.put(comment('c2', 'tA', 'subjX'));
+    await col.put(comment('c3', 'tA', 'subjY')); // a reply by another author
+    await col.put(comment('c4', 'tB', 'subjX')); // other tenant
     await deleteSubject('tA', 'subjX');
     expect(await col.get('c1')).toBeNull();
     expect(await col.get('c2')).toBeNull();
@@ -68,8 +88,8 @@ describe('subject-erasure parity (ADR 0081 P5 follow-up)', () => {
 
   it('comments: a reply AUTHORED BY the subject is erased too (matched on authorId, parentId-agnostic)', async () => {
     const col = commentCol();
-    await col.put({ commentId: 'root', tenantId: 'tA', authorId: 'subjY' });
-    await col.put({ commentId: 'reply', tenantId: 'tA', authorId: 'subjX', parentId: 'root' }); // subject's reply
+    await col.put(comment('root', 'tA', 'subjY'));
+    await col.put(comment('reply', 'tA', 'subjX', 'root')); // subject's reply
     await deleteSubject('tA', 'subjX');
     expect(await col.get('reply')).toBeNull(); // erased regardless of being a reply
     expect(await col.get('root')).not.toBeNull(); // another author's root survives
@@ -77,9 +97,19 @@ describe('subject-erasure parity (ADR 0081 P5 follow-up)', () => {
 
   it('idempotent: re-running deleteSubject for the same subject is a clean no-op', async () => {
     await getOrCreateProfile('tA', 'subjX');
-    await commentCol().put({ commentId: 'c1', tenantId: 'tA', authorId: 'subjX' });
-    await deleteSubject('tA', 'subjX');
-    await deleteSubject('tA', 'subjX'); // second pass must not throw
+    await commentCol().put(comment('c1', 'tA', 'subjX'));
+    const first = await deleteSubject('tA', 'subjX');
+    expect(first.erasure.rowsTouched, 'the first pass really erased (the profile eraser reports)').toBeGreaterThan(0);
+    // "A clean no-op" is the claim: the second pass fails nothing and TOUCHES nothing —
+    // reported as `foundNothing`, not as a second successful erasure.
+    const second = await deleteSubject('tA', 'subjX');
+    // `failed` is NOT 0 here, and that is the environment, not the claim: this file
+    // registers only the erasers its imports load, so every ADR 0464 manifest eraser
+    // that never registered counts as failed ("<name> (never registered)") on BOTH
+    // passes. The claim is that the RE-RUN adds no failure of its own.
+    expect(second.erasure.failedFeatures).toEqual(first.erasure.failedFeatures);
+    expect(second.erasure.rowsTouched).toBe(0);
+    expect(second.erasure.foundNothing).toBe(true);
     expect(await getProfile('tA', 'subjX')).toBeNull();
     expect(await commentCol().get('c1')).toBeNull();
   });
@@ -97,6 +127,7 @@ describe('subject-erasure parity (ADR 0081 P5 follow-up)', () => {
     expect(after!.stage, 'business attributes of the relationship survive').toBe('lead');
   });
 
+  // Double guard — see the header: unreachable blank path, kept as a no-throw/no-delete smoke.
   it('fail-closed: a blank subjectKey deletes nothing', async () => {
     await getOrCreateProfile('tA', 'subjX');
     await deleteSubject('tA', '');

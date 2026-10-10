@@ -7,10 +7,16 @@
  *    never display as "necessary only".
  *  - CN-SP-5/6: the receipt clears on org switch, and failed systems are
  *    NAMED.
+ *
+ * Sabotage-witnessed (/grade-tests w9): not adopting the saved policy (state OR the
+ * regions the server normalised), rendering the form before the policy is known, an
+ * unannounced / un-retryable / skeleton-stranded failed load, dropping channel chips,
+ * an org-unscoped receipt, or an anonymous failure count — each reds a case.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import { announce } from '../../../ui/announce.js';
 import type { ConsentPolicy, ConsentRecord } from '../consentClient.js';
 
 const getPolicy = vi.fn();
@@ -23,6 +29,7 @@ import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatu
 vi.mock('../consentClient.js', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   getPolicy: (...a: unknown[]) => getPolicy(...a),
+  getAccess: vi.fn(async () => ({ canManage: true })), // ADR 0849 D1 — an admin by default
   setPolicy: (...a: unknown[]) => setPolicy(...a),
   listRecords: (...a: unknown[]) => listRecords(...a),
   deleteSubject: (...a: unknown[]) => deleteSubject(...a),
@@ -49,12 +56,16 @@ beforeEach(() => {
   vi.clearAllMocks();
   getPolicy.mockResolvedValue(policyEnvelope());
   listRecords.mockResolvedValue([]);
+  // GlobalLiveRegion reads the module store ON MOUNT: clear what earlier cases announced.
+  announce(''); announce('', { assertive: true });
 });
 afterEach(cleanup);
 
 describe('CN-SP-3 — save adopts the server response', () => {
   it('after a successful save the dirty chip clears', async () => {
-    setPolicy.mockResolvedValue(policy({ defaultMode: 'opt-out' }));
+    // The server's answer DIFFERS from the local edit (it normalised the regions), so
+    // adopting it is observable — an equal answer passed with `setRegions` removed.
+    setPolicy.mockResolvedValue(policy({ regulatedRegions: ['EU', 'UK'], defaultMode: 'opt-out' }));
     renderPage();
     const mode = await screen.findByLabelText(/default mode/i, { selector: 'select' });
     fireEvent.change(mode, { target: { value: 'opt-out' } });
@@ -62,6 +73,7 @@ describe('CN-SP-3 — save adopts the server response', () => {
     fireEvent.click(screen.getByRole('button', { name: /^save/i }));
     await waitFor(() => expect(setPolicy).toHaveBeenCalled());
     await waitFor(() => expect(screen.queryByText(/unsaved changes/i)).toBeNull());
+    expect(screen.getByDisplayValue('EU, UK')).toBeTruthy();
   });
 });
 
@@ -86,6 +98,11 @@ describe('CN-RACE-1 — an edit during load cannot be silently reverted', () => 
     // a null select would otherwise also be explained by nothing having
     // rendered at all.
     expect(await screen.findByText(/data subject/i)).toBeTruthy();
+    // Let the ACCESS answer land first: until it does, the data-subject panel shows its
+    // own `role="status"` skeleton (CN2UX-8), and `getByRole('status')` below found TWO
+    // under some orders (/grade-tests w9 shuffle seed 1 — pre-existing on origin/main).
+    // The policy read is still held, so the only status left is the policy card's.
+    await screen.findByLabelText(/subject key/i);
 
     // While the policy is in flight there is NO editable default-mode control —
     // the page does not assert a value it does not have.
@@ -183,20 +200,22 @@ describe('CN-RACE-1 — an edit during load cannot be silently reverted', () => 
 
 describe('CN-SP-4 — per-channel truth', () => {
   it('a whatsapp-true record renders the WhatsApp chip, never "necessary only"', async () => {
-    listRecords.mockResolvedValue([{
+    const rec: ConsentRecord = {
       subjectKey: 'user:w', ts: '2026-08-09T00:00:00Z', source: 'api',
       categories: { necessary: true, analytics: false, marketing: false, 'marketing.whatsapp': true },
-    } as ConsentRecord]);
+    };
+    listRecords.mockResolvedValue([rec]);
     renderPage();
     await screen.findByText('WhatsApp');
     expect(screen.queryByText(/necessary only/i)).toBeNull();
   });
 
   it('the true necessary-only record still says so (positive case)', async () => {
-    listRecords.mockResolvedValue([{
+    const rec: ConsentRecord = {
       subjectKey: 'user:n', ts: '2026-08-09T00:00:00Z', source: 'api',
       categories: { necessary: true, analytics: false, marketing: false },
-    } as ConsentRecord]);
+    };
+    listRecords.mockResolvedValue([rec]);
     renderPage();
     await screen.findByText(/necessary only/i);
   });
@@ -205,7 +224,7 @@ describe('CN-SP-4 — per-channel truth', () => {
 describe('CN-SP-5/6 — receipt lifecycle + named failures', () => {
   it('a partial erasure names the failed systems; the receipt clears on org switch', async () => {
     listRecords.mockResolvedValue([]);
-    getSubject.mockResolvedValue(null);
+    getSubject.mockResolvedValue({ record: null, erased: false });
     deleteSubject.mockResolvedValue({
       ok: false, consentRecord: true,
       erasure: { total: 5, failed: 2, keysResolved: 1, resolverFailures: 1, failedFeatures: ['eraseSubjectKanban', 'identity-link-resolution'] },

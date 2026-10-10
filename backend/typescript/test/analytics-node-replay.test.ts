@@ -20,6 +20,7 @@ import { describe, expect, it } from 'vitest';
 import { MANIFEST_SIDE_EFFECT_FLOOR, MANIFEST_FAST_PATH_SERVED } from '../src/executor/sideEffectFloor.generated.js';
 import { isSideEffectingNode } from '../src/executor/sideEffects.js';
 import { loadWorkflowChainPacks, getChain, expandChain, _resetChainRegistryForTest } from '../src/host/workflowChainPackLoader.js';
+import { analyticsFeature } from '../src/features/analytics/feature.js';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const M = JSON.parse(readFileSync(join(REPO, 'packs', 'feature.analytics.nodes', 'pack.json'), 'utf8')) as {
@@ -53,8 +54,10 @@ describe('ADR 0651 — the analytics nodes are reads, and stay classified as rea
   });
 
   it('leg 4: the feature pin equals the manifest version', () => {
-    const feature = readFileSync(join(REPO, 'backend', 'typescript', 'src', 'features', 'analytics', 'feature.ts'), 'utf8');
-    expect(feature).toContain(`{ name: 'feature.analytics.nodes', version: '${M.version}' }`);
+    // The VALUE the host loads, not a spelling in feature.ts (grade-tests w8).
+    const pin = analyticsFeature.requiredPacks?.find((p) => p.name === 'feature.analytics.nodes');
+    expect(pin, 'the feature must require its node pack').toBeTruthy();
+    expect(pin!.version).toBe(M.version);
   });
 
   it('leg 5 (ANLWF-9): expandChain of exec-ops.daily-briefing is BYTE-IDENTICAL across two builds', () => {

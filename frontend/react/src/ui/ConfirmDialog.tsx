@@ -11,7 +11,7 @@
  */
 
 import { Button } from '../ui/Button.js';
-import { useState, type ReactNode } from 'react';
+import { useId, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Modal } from './Modal.js';
 
@@ -60,11 +60,14 @@ export function ConfirmDialog({
   const { t } = useTranslation('common');
   const [typed, setTyped] = useState('');
   const armed = !typeToConfirm || typed.trim() === typeToConfirm;
+  const bodyId = useId();
   return (
-    <Modal label={title} onClose={() => { if (!busy) onCancel(); }} error={error} errorAnnounce={errorAnnounce}>
+    <Modal label={title} describedBy={body ? bodyId : undefined} onClose={() => { if (!busy) onCancel(); }} error={error} errorAnnounce={errorAnnounce}>
       <div className="u-grid u-gap-3">
         <h2 className="u-fs-16 u-m-0">{title}</h2>
-        {body ? <p className="u-fs-13 muted u-m-0">{body}</p> : null}
+        {/* A <div>, not a <p>: a body may carry its own paragraphs and lists
+            (ADR 0818's delete warning), and a <p> cannot contain either. */}
+        {body ? <div id={bodyId} className="u-fs-13 muted u-m-0">{body}</div> : null}
         {typeToConfirm ? (
           <label className="u-grid u-gap-1 u-fs-13">
             {t('typeToConfirmLabel', { value: typeToConfirm })}

@@ -273,10 +273,12 @@ export function ReportsTab({ orgId }: Props): JSX.Element {
 
           <div className="surface-card u-p-4 u-grid u-gap-3">
             <h2>{t('snapshotsTitle')}</h2>
-            {(report?.currencies?.length ?? 0) > 1 ? (
+            {!report?.snapshotsWithheld && (report?.currencies?.length ?? 0) > 1 ? (
               <p className="muted u-fs-12">{t('snapshotsMixedCurrencyCaveat', { currencies: (report?.currencies ?? []).join(', ') })}</p>
             ) : null}
-            {trend.rows.length < 2 ? (
+            {report?.snapshotsWithheld ? (
+              <p className="muted u-fs-12">{t('snapshotsWithheld')}</p>
+            ) : trend.rows.length < 2 ? (
               <p className="muted u-fs-12">{t('snapshotsEmpty')}</p>
             ) : (
               <div className="u-grid u-gap-2">

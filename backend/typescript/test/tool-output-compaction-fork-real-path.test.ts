@@ -36,6 +36,7 @@ import { readCompactionDecision } from '../src/executor/compaction.js';
 import { toolOutputCompactionFeature } from '../src/features/tool-output-compaction/feature.js';
 import { registerToggleDefault } from '../src/host/featureToggles/registry.js';
 import { saveConfig, __clearToggleStore } from '../src/host/featureToggles/service.js';
+import { bareRunId } from './support/bareRunId.js';
 
 describe('TOCWF-1 — `:fork` never re-resolves the compaction decision (real route)', () => {
   let server: http.Server;
@@ -92,7 +93,7 @@ describe('TOCWF-1 — `:fork` never re-resolves the compaction decision (real ro
 
   /** Create a run over the real route and return its id. */
   async function createRun(): Promise<string> {
-    const r = await api<{ runId: string }>('/v1/runs', {
+    const r = await api<{ runId: string }>('/runs', {
       method: 'POST',
       body: JSON.stringify({ workflowId, inputs: {} }),
     });
@@ -102,7 +103,7 @@ describe('TOCWF-1 — `:fork` never re-resolves the compaction decision (real ro
 
   /** Fork over the real route and return the fork's id. */
   async function forkRun(sourceRunId: string): Promise<string> {
-    const f = await api<{ runId: string }>(`/v1/runs/${sourceRunId}:fork`, {
+    const f = await api<{ runId: string }>(`/runs/${sourceRunId}:fork`, {
       method: 'POST',
       body: JSON.stringify({ fromSeq: 0, mode: 'replay' }),
     });
@@ -111,7 +112,7 @@ describe('TOCWF-1 — `:fork` never re-resolves the compaction decision (real ro
   }
 
   const decisionOf = async (runId: string): Promise<unknown> =>
-    readCompactionDecision((await storage.getRun(runId))?.metadata);
+    readCompactionDecision((await storage.getRun(bareRunId(runId)))?.metadata);
 
   it('a run born OFF stays uncompacted when forked after the toggle flips ON', async () => {
     await setToggle('off');
@@ -163,7 +164,7 @@ describe('TOCWF-1 — `:fork` never re-resolves the compaction decision (real ro
   /**
    * ADR 0604 review H1 — THE SECOND METADATA-COPYING RUN CREATOR.
    *
-   * `POST /v1/host/openwop-app/runs/redrive` copies `source.metadata` verbatim
+   * `POST /host/openwop-app/runs/redrive` copies `source.metadata` verbatim
    * (minus caller provenance) and, until this fix, inserted it WITHOUT
    * `derivedFromRun`. Because `compaction` is not a reserved key, that produced
    * the exact asymmetry §D1 names as the defect: a PRESENT decision survived
@@ -179,8 +180,8 @@ describe('TOCWF-1 — `:fork` never re-resolves the compaction decision (real ro
     // The route only redrives a terminal-failed run.
     await storage.updateRun(sourceRunId, { status: 'failed' });
     const r = await api<{ results?: Array<{ redriveRunId?: string; error?: string }> }>(
-      '/v1/host/openwop-app/runs/redrive',
-      { method: 'POST', body: JSON.stringify({ runIds: [sourceRunId] }) },
+      '/host/openwop-app/runs/redrive',
+      { method: 'POST', body: JSON.stringify({ runIds: [bareRunId(sourceRunId)] }) },
     );
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     const row = r.body.results?.[0];
@@ -222,8 +223,8 @@ describe('TOCWF-1 — `:fork` never re-resolves the compaction decision (real ro
     await setToggle('off');
     const src = await createRun();
     const rd = await redrive(src);
-    const meta = (await storage.getRun(rd))?.metadata as Record<string, unknown> | undefined;
-    expect(meta?.redriveOf).toBe(src); // the host-side provenance stamp survives
+    const meta = (await storage.getRun(bareRunId(rd)))?.metadata as Record<string, unknown> | undefined;
+    expect(meta?.redriveOf).toBe(bareRunId(src)); // the host-side provenance stamp survives
     expect(meta?.definitionRevision).toBeTruthy();
     expect(meta?.actingUserId).toBeTruthy(); // RE-stamped to the redriving caller
   });
@@ -241,7 +242,7 @@ describe('TOCWF-1 — `:fork` never re-resolves the compaction decision (real ro
    */
   it('a client cannot pin its own compaction decision through POST /v1/runs', async () => {
     await setToggle('off');
-    const forged = await api<{ runId: string }>('/v1/runs', {
+    const forged = await api<{ runId: string }>('/runs', {
       method: 'POST',
       body: JSON.stringify({
         workflowId,
@@ -253,13 +254,13 @@ describe('TOCWF-1 — `:fork` never re-resolves the compaction decision (real ro
     expect(await decisionOf(forged.body.runId)).toBeUndefined();
     // …and the strip is SURGICAL: unreserved client metadata still lands, so
     // this is not passing because metadata was dropped wholesale.
-    const meta = (await storage.getRun(forged.body.runId))?.metadata as Record<string, unknown> | undefined;
+    const meta = (await storage.getRun(bareRunId(forged.body.runId)))?.metadata as Record<string, unknown> | undefined;
     expect(meta?.note).toBe('kept');
   });
 
   it('a forged decision cannot survive even when the toggle is ON (the host value wins)', async () => {
     await setToggle('on');
-    const forged = await api<{ runId: string }>('/v1/runs', {
+    const forged = await api<{ runId: string }>('/runs', {
       method: 'POST',
       body: JSON.stringify({ workflowId, inputs: {}, metadata: { compaction: { mode: 'lossy', head: 0, tail: 0 } } }),
     });
@@ -275,9 +276,9 @@ describe('TOCWF-1 — `:fork` never re-resolves the compaction decision (real ro
     await setToggle('off');
     const src = await createRun();
     const fork = await forkRun(src);
-    const meta = (await storage.getRun(fork))?.metadata as Record<string, unknown> | undefined;
+    const meta = (await storage.getRun(bareRunId(fork)))?.metadata as Record<string, unknown> | undefined;
     expect(meta?.definitionRevision).toEqual(
-      ((await storage.getRun(src))?.metadata as Record<string, unknown> | undefined)?.definitionRevision,
+      ((await storage.getRun(bareRunId(src)))?.metadata as Record<string, unknown> | undefined)?.definitionRevision,
     );
     expect(meta?.actingUserId).toBeTruthy();
   });

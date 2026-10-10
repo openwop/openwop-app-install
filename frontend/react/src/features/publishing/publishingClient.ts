@@ -4,6 +4,7 @@
  * attach SEO + pick OG images) and surfaces the PUBLIC URLs.
  */
 import { authedHeaders, config, fetchOpts } from '../../client/config.js';
+import { CmsApiError } from '../cms/cmsClient.js';
 
 export interface Org { orgId: string; name: string }
 export type PageStatus = 'draft' | 'in_review' | 'published' | 'archived';
@@ -25,9 +26,19 @@ const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type'
 
 async function asJson<T>(res: Response, ctx: string): Promise<T> {
   if (!res.ok) {
+    // ADR 0836 D6 — keep the envelope's code + details (a typed CmsApiError,
+    // still an Error) so the CMS editor can say WHY an SEO save was refused
+    // (the live-tier 403) instead of echoing a bare message.
     let detail = '';
-    try { detail = ((await res.json()) as { message?: string })?.message ?? ''; } catch { /* non-JSON */ }
-    throw new Error(detail || `${ctx} returned ${res.status}`);
+    let code: string | null = null;
+    let details: Record<string, unknown> | undefined;
+    try {
+      const body = (await res.json()) as { error?: unknown; message?: unknown; details?: unknown };
+      if (typeof body?.message === 'string') detail = body.message;
+      if (typeof body?.error === 'string') code = body.error;
+      if (body?.details && typeof body.details === 'object') details = body.details as Record<string, unknown>;
+    } catch { /* non-JSON */ }
+    throw new CmsApiError(detail || `${ctx} returned ${res.status}`, code, res.status, details);
   }
   return (await res.json()) as T;
 }

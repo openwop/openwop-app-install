@@ -36,28 +36,26 @@
  * it here (tracked follow-up).
  */
 
-import { createAiProvidersAdapter, providerSupportsToolCalling, AiProviderError } from '../aiProviders/aiProvidersHost.js';
+import { createAiProvidersAdapter, providerSupportsToolCalling, AiProviderError, CREDENTIAL_PROVIDERS } from '../aiProviders/aiProvidersHost.js';
+import { explicitRefNamesOtherProvider } from '../aiProviders/credentialRefLadder.js';
 import { createScopedAgentToolProvider, builtinAgentToolIds } from './agentToolProvider.js';
 import { createTurnRunDispatchCollector, type TurnRunDispatch } from './turnRunDispatch.js';
-import { compileAgentTools, runChatToolLoop, type AgentEvent } from './agentDispatch.js';
-import { resolveAgentToolPermissions } from './agentProfileService.js';
+import { compileAgentTools, runChatToolLoop, type AgentEvent, managedLimitCode } from './agentDispatch.js';
+import { resolveAgentToolPermissionSet } from './agentProfileService.js';
 import { resolveAgentIdentity } from './agentIdentity.js';
 import { effectiveToolAllowlist, resolveAgentToolAllowlistOverride } from './agentToolAllowlistService.js';
 import { isManagedCredentialRef, managedProviderIdFromRef, dispatchManagedToolsRound } from '../providers/managedProvider.js';
+import { featureForToolName } from './managedCredits.js';
 import { compactToolSchema } from '../providers/toolSchemaCompaction.js';
 import { resolveConversationModelTarget, type ConversationModelTierInput } from '../features/model-router/applyRoute.js';
 import { contextEconomy } from './contextEconomy.js';
 import { resolveSecret } from '../byok/secretResolver.js';
-import { getConversationMeta, type ConversationCapabilityScope } from './conversationStore.js';
 import { createLogger } from '../observability/logger.js';
-import { resolveCapabilityScope, isNarrowing, applyApprovalDecisions, intersectScopes } from '../features/conversation-tools/scopeResolver.js';
-import { ledgerToScope, computeIntentLedgerStamp, readIntentLedgerStamp } from '../features/intent-ledger/ledgerProjection.js';
-import { getLedger, saveLedger } from '../features/intent-ledger/ledgerStore.js';
-import { computeCapabilityScopeStamp } from '../features/conversation-tools/capabilityScopeStamp.js';
-import { listToolApprovals, recordToolApprovalRequested } from '../features/conversation-tools/approvalLedger.js';
-import { buildFirewallHook, computeFirewallStamp, SENSITIVE_APPROVAL_TOOLS, type FirewallHook } from '../features/capability-firewall/firewallHook.js';
-import { getCapabilityRules, getUnknownToolPolicy, getFirewallMode, getDefaultDenyVerdict, getPlatformRules } from '../features/capability-firewall/ruleStore.js';
-import { recordGovernanceDecision } from './governanceDecisionLog.js';
+import { listToolApprovals, recordToolApprovalRequested, approvedToolSets } from '../features/conversation-tools/approvalLedger.js';
+import { computeFirewallStamp } from '../features/capability-firewall/firewallHook.js';
+import { buildLaneFirewall } from './laneFirewall.js';
+import { resolveConversationToolGate } from './conversationToolScope.js';
+import { toolAuthorityHolds } from './conversationVisibility.js';
 import type { ResolvedAgentManifest } from '../executor/agentRegistry.js';
 import { readCompactionDecision } from '../executor/compaction.js';
 import type { AiCallMessage, AiToolCallRequest, AiToolCallResult } from '../executor/types.js';
@@ -114,11 +112,17 @@ export interface AgentToolTurnParams {
   /** Per-exchange native web-search override (ADR 0101). Beats the run-input
    *  open-time default; honored on the BYOK path only. */
   webSearch?: boolean;
-  /** Per-exchange permission mode (ADR 0150). `safe` (default) gates the high-blast-radius
-   *  tools (`SENSITIVE_APPROVAL_TOOLS`) behind the firewall's `interrupt.approval` card;
-   *  `bypass` downgrades any `require-approval` to allow (the user pre-authorized this turn).
-   *  A hard `deny`, RBAC, budgets, and sandbox isolation still bind in either mode. */
+  /** Per-exchange permission mode (ADR 0150). `safe` (default) holds the high-blast-radius
+   *  tools (the safe-mode baseline — `laneFirewall.safeModeBaseline()`) for an approval in
+   *  the conversation's ledger, surfaced by the chat's pending-approval notice (ADR 0834 D6;
+   *  there is no `interrupt.approval` card for chat tool calls). `bypass` skips ONLY those
+   *  baseline asks, and ONLY when `callerPrincipal` is the run's acting principal (ADR 0834
+   *  D2/D3); a tenant/platform/enforce ask, a hard `deny`, RBAC, budgets and sandbox
+   *  isolation bind in either mode. */
   permissionMode?: 'safe' | 'bypass';
+  /** ADR 0834 D3 — the HTTP caller as `req.userId ?? principalId` (the derivation
+   *  `actingUserId` was stamped with). Absent ⇒ a `bypass` is not honoured. */
+  callerPrincipal?: string;
   /** ADR 0124 Phase 3 / CS-GB-1 — the per-exchange model switch, now honored on
    *  tool-loop turns exactly as on the single-completion path. */
   modelOverride?: { provider?: string; model?: string };
@@ -164,7 +168,8 @@ export function conversationToolTurnEligible(run: RunRecord, _agent: ResolvedAge
  * cadence fires advisor turns back-to-back, so a burst can trip a provider's
  * per-minute limit mid-board and kill the whole turn (the 2026-07-14
  * "Agent tool turn failed: Provider rate-limited" board failure). ONE retry
- * after a short backoff, ONLY for the typed `provider_rate_limited` failure —
+ * after a short backoff, ONLY for a rate limit or a transient 5xx
+ * (`isTransientProviderFailure`; the 5xx half added 2026-10-03) —
  * the retried call is the pure completion request; executed tools are never
  * re-run. Every other failure propagates unchanged. Backoff is env-tunable
  * via OPENWOP_PROVIDER_429_RETRY_MS (0 disables). Exported for tests.
@@ -177,9 +182,54 @@ export function conversationToolTurnEligible(run: RunRecord, _agent: ResolvedAge
  *  tier from the retry (grade-pass RESIL-2). Exported for dispatchTurn's
  *  single-completion seam and for tests. */
 export function isProviderRateLimited(err: unknown): boolean {
+  // The DAILY allowance is not a burst: a retry four seconds later meets the
+  // same wall, so it is excluded here and surfaced as what it is.
+  if (managedLimitCode(err)) return false;
   if (err instanceof AiProviderError) return err.code === 'provider_rate_limited';
   if (!(err instanceof Error)) return false;
   return /^[a-z][a-z0-9-]*_429:/i.test(err.message);
+}
+
+/** Upstream statuses that mean "overloaded right now", not "your request is
+ *  wrong". MEASURED 2026-10-03 (ADR 0773 G-10b, Gemini eval): Google answered
+ *  `gemini-3.8-flash` with 503 UNAVAILABLE "experiencing high demand" for
+ *  minutes at a time, and every chat turn that met one died on the first call
+ *  ("Agent tool turn failed: Provider 5xx.") with nothing in the log saying
+ *  which status or why. 501 and 505+ are permanent, so they are not here. */
+const TRANSIENT_5XX = new Set([500, 502, 503, 504]);
+
+/** A failure worth exactly ONE retry: an upstream rate limit (above), or a
+ *  transient 5xx. Same two shapes as the 429 check — the TYPED
+ *  `provider_unavailable` from aiProvidersHost (BYOK) and the RAW
+ *  `<provider>_<status>:` the managed dispatchers propagate. Retrying is safe
+ *  for the same reason the 429 retry is: the retried call is the model request
+ *  alone, and no tool has run for it. */
+export function isTransientProviderFailure(err: unknown): boolean {
+  if (isProviderRateLimited(err)) return true;
+  if (managedLimitCode(err)) return false;
+  if (err instanceof AiProviderError) {
+    return err.code === 'provider_unavailable' && TRANSIENT_5XX.has(Number(err.details.status));
+  }
+  if (!(err instanceof Error)) return false;
+  const m = /^[a-z][a-z0-9-]*_(\d{3}):/i.exec(err.message);
+  return !!m && TRANSIENT_5XX.has(Number(m[1]));
+}
+
+/** What a retry log line may say about the failure: code and status, plus at
+ *  most 200 chars of the provider's own message (its words, e.g. "high
+ *  demand" — never our request, which is not part of the error). */
+export function providerFailureFields(err: unknown): Record<string, unknown> {
+  if (err instanceof AiProviderError) {
+    const up = err.details.upstreamMessage;
+    return {
+      code: err.code,
+      ...(err.details.status !== undefined ? { status: err.details.status } : {}),
+      ...(typeof up === 'string' && up ? { upstreamMessage: up.slice(0, 200) } : {}),
+    };
+  }
+  const msg = err instanceof Error ? err.message : String(err);
+  const m = /^[a-z][a-z0-9-]*_(\d{3}):\s*([\s\S]*)$/i.exec(msg);
+  return m ? { status: Number(m[1]), upstreamMessage: m[2]!.slice(0, 200) } : { message: msg.slice(0, 200) };
 }
 
 /** The shared 429 backoff (OPENWOP_PROVIDER_429_RETRY_MS; 0 disables). */
@@ -198,10 +248,17 @@ export function withRateLimitRetry(
     try {
       return await call(r);
     } catch (err) {
-      if (!isProviderRateLimited(err)) throw err;
-      log.warn('provider_rate_limited_retrying_once', { backoffMs });
+      if (!isTransientProviderFailure(err)) throw err;
+      log.warn(isProviderRateLimited(err) ? 'provider_rate_limited_retrying_once' : 'provider_unavailable_retrying_once',
+        { backoffMs, ...providerFailureFields(err) });
       await new Promise((resolve) => setTimeout(resolve, backoffMs));
-      return call(r);
+      try {
+        return await call(r);
+      } catch (again) {
+        // The turn fails now; say why, or the next reader sees only "Provider 5xx."
+        log.warn('provider_retry_failed', providerFailureFields(again));
+        throw again;
+      }
     }
   };
 }
@@ -296,10 +353,22 @@ export async function runConversationAgentToolTurn(params: AgentToolTurnParams):
   // stamp (`routes/runs.ts` from `req.personalTenant`), so a req-less tenant
   // gate can grant the implicit owner of an `anon:`/`user:` sandbox.
   const personalTenant = (run.metadata as { personalTenant?: unknown } | undefined)?.personalTenant;
+  // ADR 0832 D3 — the member who caused an actorless turn (a channel post): it
+  // bounds which orgs the turn's knowledge reads reach, and grants nothing.
+  const orgScopeSubject = (run.metadata as { orgScopeSubject?: unknown } | undefined)?.orgScopeSubject;
   // ADR 0309 — the conversation the promise is made in rides the scope too, so
   // the schedule-followup tool's delivery destination is unforgeable (it takes
   // no conversation input; same threading rationale as actingUserId above).
   const chatSessionId = (run.metadata as { chatSessionId?: unknown } | undefined)?.chatSessionId;
+  // ADR 0132 — the per-conversation stores (capability scope on ConversationMeta,
+  // the tool-approval ledger, the ADR 0136 intent ledger) are keyed by the chat
+  // SESSION id, exactly as `exchange/authorizeResolve.ts` and the exchange's
+  // `composeChatContext` call key ConversationMeta; the run-derived gate id
+  // (`runId:nodeId:0`) is only the fallback for a run with no session stamp.
+  // Reading them by `params.conversationId` (the gate id) meant a scope, an
+  // approval or a ledger set from the chat UI (which writes by session id) never
+  // reached the loop for any chat-started run.
+  const conversationStateKey = typeof chatSessionId === 'string' && chatSessionId ? chatSessionId : params.conversationId;
   // A run a tool ignites this turn is recorded here and materialized by the
   // EXCHANGE (one turnIndex allocator; the response owner) — see
   // `host/turnRunDispatch.ts` for the collision + invisibility this replaces.
@@ -310,6 +379,7 @@ export async function runConversationAgentToolTurn(params: AgentToolTurnParams):
     tenantId: run.tenantId, runId, agentProfileId: identity.profileId,
     ...(typeof actingUserId === 'string' && actingUserId ? { actingUserId } : {}),
     ...(typeof personalTenant === 'string' && personalTenant ? { personalTenant } : {}),
+    ...(typeof orgScopeSubject === 'string' && orgScopeSubject ? { orgScopeSubject } : {}),
     ...(typeof chatSessionId === 'string' && chatSessionId ? { conversationId: chatSessionId } : {}),
     onRunDispatched: runDispatchCollector.sink,
   });
@@ -340,10 +410,17 @@ export async function runConversationAgentToolTurn(params: AgentToolTurnParams):
     const userFacingProvider = managedProviderIdFromRef(credentialRef);
     loopProvider = userFacingProvider;
     loopModel = userFacingProvider;
+    // ADR 0821 D4 — the first round of a turn is the chat itself (`chat`); a later
+    // round exists to process the PREVIOUS round's tool results, so it is
+    // attributed to the owning feature of the tool(s) it called (the first one
+    // with a known owner), else `chat`.
+    let roundFeature = 'chat';
     callAIWithTools = async (r) => {
+      const featureId = roundFeature;
       const round = await dispatchManagedToolsRound({
         userFacingProvider,
         tenantId: run.tenantId,
+        featureId,
         // ADR 0693 — the acting participant, so a shared workspace does not pool
         // one free-tier allowance across everyone in it. Read from run.metadata
         // (fork-safe, already resolved above), and absent is legal.
@@ -353,6 +430,7 @@ export async function runConversationAgentToolTurn(params: AgentToolTurnParams):
         // aiProviders/aiProvidersHost.ts (BYOK/workflow tools-round adapter).
         tools: r.tools.map((t) => ({ ...t, inputSchema: compactToolSchema(t.inputSchema, contextEconomy().toolDiet) })),
       });
+      roundFeature = round.toolUses.map((t) => featureForToolName(t.name)).find((f): f is string => f !== null) ?? 'chat';
       return {
         content: round.text,
         toolCalls: round.toolUses.map((t) => ({ id: t.id, name: t.name, input: t.input })),
@@ -373,6 +451,11 @@ export async function runConversationAgentToolTurn(params: AgentToolTurnParams):
     // BYOK-direct: resolve the tenant key (SR-1 — never enters an event/prompt).
     // Missing key ⇒ fall back so the single-completion path surfaces the canonical
     // `credential_unavailable` (no duplicated error vocabulary here).
+    // ADR 0779 D6 (grade-code BYOKCD-9) — a key named for ANOTHER vendor is not
+    // even read here: fall back, and the single-completion path refuses it with
+    // the one typed answer (`credential_unavailable`, reason
+    // `explicit_ref_wrong_provider`) before its own `resolveSecret`.
+    if (explicitRefNamesOtherProvider(provider, credentialRef, CREDENTIAL_PROVIDERS) !== null) return null;
     const apiKey = await resolveSecret(credentialRef, { tenantId: run.tenantId });
     if (!apiKey) return null;
     const adapter = createAiProvidersAdapter({
@@ -404,113 +487,58 @@ export async function runConversationAgentToolTurn(params: AgentToolTurnParams):
   // ADR 0102 — resolve the standing agent's tool permissions (undefined for a
   // pack/manifest agent ⇒ the gate stays ungated). The gate self-runs in shadow
   // mode (log-only) until the enforcement flag is on.
-  const toolPermissions = await resolveAgentToolPermissions(run.tenantId, agent.agentId);
+  // ADR 0775 D3 — a chat turn carries only the REGISTRY id (no roster id), so
+  // every roster member sharing it binds (tightest wins). The registry id alone
+  // never resolved a roster agent's permissions (`ARWF-4`); the identity
+  // resolved above is FIRST-WINS on a shared agentRef, so it is not used here.
+  const toolPermissions = await resolveAgentToolPermissionSet(run.tenantId, agent.agentId, agent.agentId);
 
-  // ADR 0132 — per-conversation capability scope (the fourth AND-term), ONLY when
-  // the `conversation-tools` toggle is ON for the tenant. Resolve the conversation's
-  // scope CONFIG against THIS turn's ceiling (the compiled tool ids) into the
-  // effective set the loop enforces. Read LIVE each turn (not a frozen stamp): the
-  // scope is deterministic + per-turn tool decisions are recorded (ADR 0089 §Q4), so
-  // live resolution is replay/fork-safe AND keeps the control honest + tighter-wins
-  // on :fork (ADR 0132 §replay correction). The run.metadata stamp is best-effort
-  // provenance for the inspector — NEVER the enforcement source.
-  // The conversation's resolved approval decisions (shared by the ADR 0132 scope fold
-  // and the ADR 0135 firewall's already-approved short-circuit).
-  const approvals = await listToolApprovals(run.tenantId, params.conversationId);
-  const approvedTools = new Set(approvals.filter((a) => a.status === 'approved').map((a) => a.toolName));
+  // ADR 0132 — per-conversation capability scope (the fourth AND-term). Resolved LIVE
+  // each turn through the ONE resolver voice shares (ADR 0834 D5,
+  // `conversationToolScope.ts`): config ∩ approved intent ledger, against THIS turn's
+  // ceiling, approval decisions folded. Live (not a stamp) keeps a revocation honest on
+  // `:fork` — tighter wins (ADR 0132 §replay correction). The run.metadata stamps are
+  // best-effort provenance for the inspector, NEVER the enforcement source.
+  // ADR 0834 D3 / FW2-CD-1 — the conversation's approvals are the OWNER's, given for the
+  // owner's own actions. A run acting as someone else in the same conversation (a fork
+  // re-stamps `actingUserId` to the forker but keeps `chatSessionId`) must not spend them,
+  // and its held calls must not land in the owner's ledger as asks the owner never saw
+  // coming. Folded only when the acting principal IS the owner.
+  const actingPrincipal = typeof actingUserId === 'string' ? actingUserId : undefined;
+  const approvals = await listToolApprovals(run.tenantId, conversationStateKey);
+  const gate = await resolveConversationToolGate({
+    tenantId: run.tenantId, conversationKey: conversationStateKey,
+    ceiling: tools.map((t) => t.def.name), approvals,
+    foldApprovalsOnlyFor: actingPrincipal ?? '',
+    run, ...(params.storage ? { storage: params.storage } : {}),
+  });
+  const capabilityScope = gate.scope;
+  const actsAsOwner = toolAuthorityHolds(actingPrincipal, gate.ownerUserId);
+  const { approvedTools, approvedBaselineTools } = actsAsOwner ? approvedToolSets(approvals) : { approvedTools: new Set<string>(), approvedBaselineTools: new Set<string>() };
 
-  let capabilityScope: { enabled: string[]; requireApproval: string[] } | undefined;
-  {
-    // ADR 0132 — conversation-tools is always-on (toggle removed); resolve the
-    // conversation's scope every turn. Absent config ⇒ isNarrowing false ⇒ no-op.
-    const ceiling = tools.map((t) => t.def.name);
-    let scopeConfig = (await getConversationMeta(run.tenantId, params.conversationId))?.capabilityScope;
-
-    // ADR 0136 — fold an APPROVED intent ledger into the scope (ledger ∩ chipset, never
-    // widens). Stamp the mission contract once (replay-safe). out_of_mandate (relative
-    // TTL elapsed off the stamped resolvedAt) ⇒ enabled:[] (the agent may talk, not act).
-    // Always-on (toggle removed) — a no-op unless the conversation has an approved ledger.
-    {
-      const ledger = await getLedger(run.tenantId, params.conversationId);
-      if (ledger?.status === 'approved') {
-        if (params.storage) {
-          const md = computeIntentLedgerStamp(run.metadata ?? {}, ledger, new Date().toISOString());
-          if (md) { try { await params.storage.updateRun(run.runId, { metadata: md }); run.metadata = md; } catch { /* best-effort */ } }
-        }
-        const anchor = readIntentLedgerStamp(run.metadata)?.resolvedAt;
-        const expired = ledger.expiresAtRelMs !== undefined && anchor !== undefined && (Date.now() - Date.parse(anchor)) > ledger.expiresAtRelMs;
-        if (expired) {
-          log.info('intent_ledger_out_of_mandate', { conversationId: params.conversationId, ledgerId: ledger.ledgerId });
-          try { await saveLedger({ ...ledger, status: 'expired' }); } catch { /* best-effort */ }
-        }
-        const ledgerScope: ConversationCapabilityScope = expired ? { mode: 'restricted', enabled: [] } : ledgerToScope(ledger);
-        scopeConfig = intersectScopes(scopeConfig, ledgerScope);
-      }
-    }
-
-    if (isNarrowing(ceiling, scopeConfig)) {
-      capabilityScope = applyApprovalDecisions(resolveCapabilityScope(ceiling, scopeConfig), approvals);
-      if (params.storage) {
-        const md = computeCapabilityScopeStamp(run.metadata ?? {}, capabilityScope, new Date().toISOString());
-        if (md) {
-          try { await params.storage.updateRun(run.runId, { metadata: md }); run.metadata = md; }
-          catch { /* best-effort provenance — never break the turn */ }
-        }
-      }
-    }
+  // ADR 0150 / ADR 0834 D3 — `bypass` is honoured only for the principal the tools ACT
+  // AS (`run.metadata.actingUserId`). A participant can read and post in a shared
+  // conversation, but their bypass would spend the owner's authority — so it runs `safe`
+  // (fail-safe, not refused: the message itself is legitimate).
+  const bypass = params.permissionMode === 'bypass' && toolAuthorityHolds(params.callerPrincipal, actingPrincipal);
+  if (params.permissionMode === 'bypass' && !bypass) {
+    log.info('permission_mode_bypass_refused', { conversationId: params.conversationId, caller: params.callerPrincipal ? 'other-principal' : 'none' });
   }
 
-  // ADR 0135 — Capability Firewall. Always-on (toggle removed) but RULE-LESS by default:
-  // skip building the hook entirely when the tenant has no rules, so an unconfigured
-  // tenant pays zero cost + sees zero behavior change. Already-approved tools short-circuit
-  // (no feature→feature import — host/ passes approvedTools). Best-effort rule-set stamp.
-  let firewall: FirewallHook | undefined;
-  const fwRules = await getCapabilityRules(run.tenantId); // tenant store, or [] (rule-less default)
-  // ADR 0397 — the tenant's enforcement posture (resolved live, like capabilityScope; the
-  // stamp below records it for provenance but does NOT drive evaluation — see the stamp note).
-  const fwMode = await getFirewallMode(run.tenantId);
-  const fwDefaultDenyVerdict = await getDefaultDenyVerdict(run.tenantId);
-  const fwPlatformRules = await getPlatformRules(); // ADR 0397 P5 — global floor (AND under tenant)
-  const denyMode = fwMode !== 'default-allow';
-  // ADR 0150 — in `safe` mode (default) we gate the SENSITIVE tools even when the tenant has no
-  // firewall rules (the permission-mode baseline that restores the code-exec gate). In `bypass`
-  // we still build the hook so any tenant `deny` rules apply, but require-approval is downgraded.
-  // ADR 0397 — a deny MODE (shadow/enforce) also always needs the hook, even rule-less and even
-  // under bypass (an enforce hard-deny is never bypassed). Skip only the true no-op:
-  // default-allow + rule-less + bypass.
-  const bypass = params.permissionMode === 'bypass';
-  if (fwRules.length > 0 || denyMode || fwPlatformRules.length > 0 || !bypass) {
-    const rules = fwRules;
-    const unknownToolPolicy = await getUnknownToolPolicy(run.tenantId);
-    firewall = buildFirewallHook({
-      rules, approvedTools, unknownToolPolicy,
-      requireApprovalTools: SENSITIVE_APPROVAL_TOOLS, // ADR 0150 — gated in `safe`, allowed in `bypass`
-      gateHostMediatedEgress: true, // ADR 0610 D5 / PMC-1 — gate the host-mediated egress CLASS in safe mode (bypass downgrades)
-      bypassApproval: bypass,
-      mode: fwMode,
-      defaultDenyVerdict: fwDefaultDenyVerdict,
-      platformRules: fwPlatformRules, // ADR 0397 P5 — the global floor
-      onUnclassified: (toolName) => log.debug('firewall_unclassified_tool', { toolName, unknownToolPolicy }),
-      // ADR 0397 shadow — record the computed would-block (call still proceeds).
-      onShadowWouldBlock: (toolName, wouldBe) => {
-        void recordGovernanceDecision({
-          tenantId: run.tenantId,
-          kind: 'firewall',
-          outcome: 'allow', // shadow APPLIED allow — the tool ran; this is a would-block record.
-          reason: 'shadow (log-only): would block under enforce',
-          resource: params.conversationId,
-          detail: { toolName, decision: wouldBe, shadow: true, wouldBlock: wouldBe },
-        });
-      },
-    });
-    // ADR 0397 — stamp the resolved posture for provenance. Written when there are rules, a
-    // deny mode, or a platform floor — so an enforce/platform-governed run is not
-    // misrepresented as ungoverned. Records the posture verbatim; it does not itself drive
-    // fork evaluation (evaluation re-resolves live, like capabilityScope).
-    if (params.storage && (rules.length > 0 || denyMode || fwPlatformRules.length > 0)) {
-      const md = computeFirewallStamp(run.metadata ?? {}, rules, new Date().toISOString(), { mode: fwMode, defaultDenyVerdict: fwDefaultDenyVerdict, platformRules: fwPlatformRules });
-      if (md) { try { await params.storage.updateRun(run.runId, { metadata: md }); run.metadata = md; } catch { /* best-effort */ } }
-    }
+  // ADR 0135 / ADR 0834 D1 — the capability firewall, built by the ONE lane factory and
+  // ALWAYS (the old skip — bypass + rule-less + default-allow — is how a lane could be
+  // firewall-less at all). The factory wires decision + shadow logging.
+  const { hook: firewall, posture: fw } = await buildLaneFirewall({
+    tenantId: run.tenantId, lane: 'chat', bypass,
+    approvedTools, approvedBaselineTools,
+    resource: params.conversationId, dedupeKey: runId,
+  });
+  // ADR 0397 — stamp the resolved posture for provenance. Written when there are rules, a
+  // deny mode, or a platform floor — so an enforce/platform-governed run is not
+  // misrepresented as ungoverned. It does not drive evaluation (re-resolved live).
+  if (params.storage && (fw.rules.length > 0 || fw.mode !== 'default-allow' || fw.platformRules.length > 0)) {
+    const md = computeFirewallStamp(run.metadata ?? {}, fw.rules, new Date().toISOString(), { mode: fw.mode, defaultDenyVerdict: fw.defaultDenyVerdict, platformRules: fw.platformRules });
+    if (md) { try { await params.storage.updateRun(run.runId, { metadata: md }); run.metadata = md; } catch { /* best-effort */ } }
   }
 
   // ADR 0604 (TOCC-1 / TOCWF-3) — the CHAT lane's compaction decision.
@@ -545,24 +573,7 @@ export async function runConversationAgentToolTurn(params: AgentToolTurnParams):
       ...(loopWebSearch ? { webSearch: true } : {}),
       ...(toolPermissions ? { toolPermissions } : {}),
       ...(capabilityScope ? { capabilityScope } : {}),
-      ...(firewall ? { firewall } : {}),
-      // ADR 0397 Phase 1 — decision observability: record firewall verdicts that
-      // narrowed a call to the unified governance decision log. Fire-and-forget
-      // (recordGovernanceDecision swallows its own errors) so the hot loop adds no
-      // await; the closure captures the tenant so agentDispatch stays feature-free.
-      ...(firewall ? { onFirewallDecision: (d: { toolName: string; decision: 'deny' | 'require-approval'; reason?: string; ruleId?: string }) => {
-        void recordGovernanceDecision({
-          tenantId: run.tenantId,
-          kind: 'firewall',
-          // Both verdicts blocked the call this turn (deny outright, or held pending
-          // approval) — neither let the tool proceed, so the coarse outcome is `deny`.
-          // `detail.decision` carries the true tri-state for the decisions view.
-          outcome: 'deny',
-          ...(d.reason ? { reason: d.reason } : {}),
-          resource: params.conversationId,
-          detail: { toolName: d.toolName, decision: d.decision, ...(d.ruleId ? { ruleId: d.ruleId } : {}) },
-        });
-      } } : {}),
+      firewall, // decisions are logged by the hook itself (ADR 0834 D1)
       ...(onEvent ? { onEvent } : {}),
     },
     { callAIWithTools, executeTool: toolProvider.executeTool },
@@ -571,14 +582,15 @@ export async function runConversationAgentToolTurn(params: AgentToolTurnParams):
   // access) degrades to the tenant's own selection instead of failing the turn.
   const { result: loop, modelUsed } = await runLoopWithBumpFallback(runOnce, loopModel, loopFallbackModel);
 
-  // ADR 0132 Phase 3 — record any tool call the agent deferred for approval so the
-  // conversation can surface an interrupt.approval card + the FE can list pending
-  // approvals (Phase 4 route). Idempotent + decision-preserving (never resets an
-  // already-resolved decision). Best-effort: a ledger write must not break the turn.
+  // ADR 0132 Phase 3 — record any tool call the agent deferred for approval, with the
+  // ask's origin and arguments, so the composer's conversation-tools control shows it
+  // (ADR 0834 D6 — there is no `interrupt.approval` card for chat tool calls). Only for
+  // the owner's own run (FW2-CD-1). Decision-preserving; best-effort — a ledger write
+  // must not break the turn.
   const runDispatches = runDispatchCollector.drain();
   const pendingApprovals = loop.pendingApprovals ?? [];
-  for (const p of pendingApprovals) {
-    try { await recordToolApprovalRequested(run.tenantId, params.conversationId, p.toolName); }
+  for (const p of actsAsOwner ? pendingApprovals : []) {
+    try { await recordToolApprovalRequested(run.tenantId, conversationStateKey, p.toolName, { ...(p.origin ? { origin: p.origin } : {}), input: p.input }); }
     catch { /* best-effort — the agent's reply already told the user it is pending */ }
   }
 

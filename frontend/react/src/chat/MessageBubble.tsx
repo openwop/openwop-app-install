@@ -22,15 +22,14 @@ import { MessageRenderer } from './MessageRenderer.js';
 import { ThoughtsDisclosure } from './ThoughtsDisclosure.js';
 import { ThinkingIndicator } from './ThinkingIndicator.js';
 import { useStreamCadence } from './hooks/useStreamCadence.js';
-import { ToolCallCard, HandoffIndicator, DecisionBadge, VerificationCard } from './AgentEventCards.js';
+import { TurnReceipt } from './TurnReceipt.js';
 import { EnvelopeEventsTimeline, hasEnvelopeEvents } from './EnvelopeEventsTimeline.js';
 import { EnvelopeInspector } from './EnvelopeInspector.js';
 import { useFeatureAccess } from '../featureToggles/FeatureAccessContext.js';
 import { ReasoningDisclosure } from './ReasoningDisclosure.js';
 import { ErrorCard } from './ErrorCard.js';
-import { formatUsd, turnCostUsd } from './lib/cost.js';
-import { formatNumber, formatTime } from '../i18n/format.js';
-import { CheckIcon, GlobeIcon, MicIcon, RotateCwIcon, SparklesIcon, ThumbsDownIcon, ThumbsUpIcon, FileTextIcon } from '../ui/icons/index.js';
+import { formatTime } from '../i18n/format.js';
+import { CheckIcon, MicIcon, RotateCwIcon, SparklesIcon, ThumbsDownIcon, ThumbsUpIcon, FileTextIcon } from '../ui/icons/index.js';
 import { voiceCtxBlockLabels } from './voiceCtxLabels.js';
 import { REACTION_EMOJI } from '../client/chatSessionsClient.js';
 import { Avatar } from '../ui/Avatar.js';
@@ -77,6 +76,12 @@ interface Props {
     onToggleReaction: (messageId: string, emoji: string, currentlyMine: boolean) => void;
     onEdit: (messageId: string, newText: string) => void;
     onDelete: (messageId: string) => void;
+    /** ADR 0768 D3 — "Ask for a source" on an AGENT's message: `handleFor` resolves
+     *  the author's @handle from the channel roster (null ⇒ not an agent member),
+     *  `ask` drafts the question into the composer. Stable, shared by every row. */
+    askSource?: { handleFor: (m: ChatMessage) => string | null; ask: (handle: string, quote: string) => void };
+    /** ADR 0853 D2 — "Record as decision" (project chats and bound channels with a ledger). */
+    onRecordDecision?: (m: ChatMessage) => void;
   };
 }
 
@@ -271,6 +276,21 @@ function ChannelMessageExtras({ message, actions }: {
             {emoji}
           </button>
         ))}
+        {(() => {
+          const handle = actions.askSource?.handleFor(message) ?? null;
+          if (!handle || !actions.askSource) return null;
+          const ask = actions.askSource.ask;
+          return (
+            <Button variant="quiet" size="sm" className="msgbubble-ask-source" onClick={() => ask(handle, messageText(message))}>
+              {t('askForSource')}
+            </Button>
+          );
+        })()}
+        {actions.onRecordDecision ? (
+          <Button variant="quiet" size="sm" onClick={() => actions.onRecordDecision?.(message)}>
+            {t('recordAsDecision')}
+          </Button>
+        ) : null}
         {actions.canModify && (
           <>
             <button
@@ -430,8 +450,11 @@ function MessageBubbleInner({ message, onRegenerate, onFeedback, onBranchFrom, b
           ? <MessageRenderer content={message.content} markdown={!isUser} rendering={isUser ? undefined : message.meta?.rendering} />
           : message.isStreaming && !message.thoughts
             ? <ThinkingIndicator durationVar={cadence} />
+            // A failed turn renders ONLY its ErrorCard (below): the card's title
+            // already says the reply did not arrive, so a second line pointing at
+            // it ("see error below") was a box saying look at the next box.
             : isError
-              ? <span className="u-o-70">{t('noResponseSeeError')}</span>
+              ? <span className="sr-only">{t('noResponseSeeError')}</span>
               : null}
         {message.isStreaming && hasContent(message.content) && (
           <span className="msgbubble-cursor" aria-hidden style={{ '--msg-caret-dur': cadence } as CSSProperties} />
@@ -494,44 +517,9 @@ function MessageBubbleInner({ message, onRegenerate, onFeedback, onBranchFrom, b
             {...(onReconfigureBYOK ? { onReconfigure: onReconfigureBYOK } : {})}
           />
         )}
-        {!isUser && message.agentEvents && (
-          <div className="u-mt-2">
-            {message.agentEvents.handoffs.map((h, i) => (
-              <HandoffIndicator key={`h-${i}-${h.at}`} handoff={h} />
-            ))}
-            {message.agentEvents.toolCalls.map((tc) => (
-              <ToolCallCard key={`tc-${tc.callId}`} call={tc} />
-            ))}
-            {message.agentEvents.decisions.map((d, i) => (
-              <DecisionBadge key={`d-${i}-${d.at}`} decision={d} />
-            ))}
-            {(message.agentEvents.verified ?? []).map((v, i) => (
-              <VerificationCard key={`v-${i}-${v.at}`} verified={v} />
-            ))}
-          </div>
-        )}
-        {!isUser && !message.isStreaming && message.meta && !message.meta.error && (
-          <div className="muted u-mt-1-5 u-fs-11 u-o-70">
-            {message.meta.provider && message.meta.model && (
-              <span>{message.meta.provider}/{message.meta.model}</span>
-            )}
-            {message.meta.inputTokens != null && (
-              <span>{t('tokensIn', { count: formatNumber(message.meta.inputTokens) })}</span>
-            )}
-            {message.meta.outputTokens != null && (
-              <span>{t('tokensOut', { count: formatNumber(message.meta.outputTokens) })}</span>
-            )}
-            {(() => {
-              const cost = turnCostUsd(message.meta);
-              return cost != null ? <span> · {formatUsd(cost)}</span> : null;
-            })()}
-            {message.meta.citations && message.meta.citations.length > 0 && (
-              <span className="u-iflex u-items-center u-gap-1 u-ml-1">
-                · <GlobeIcon size={11} /> {t('sources', { count: message.meta.citations.length })}
-              </span>
-            )}
-          </div>
-        )}
+        {/* ADR 0768 P1 — one honest receipt line (model · tools · hand-offs ·
+            cost · sources) that folds the agent-event cards + token counts. */}
+        {!isUser && <TurnReceipt message={message} />}
         {!isUser && !message.isStreaming && !isError && hasContent(message.content) && (onRegenerate || onFeedback || (onBranchFrom && branchSeq != null) || returnTarget) && (
           <MessageActions
             message={message}

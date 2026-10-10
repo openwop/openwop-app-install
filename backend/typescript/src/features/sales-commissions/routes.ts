@@ -54,7 +54,7 @@ const optStr = (v: unknown): string | undefined => (typeof v === 'string' && v.l
 
 export function registerCommissionRoutes(deps: RouteDeps): void {
   const { app } = deps;
-  const BASE = '/v1/host/openwop-app/commissions/orgs/:orgId';
+  const BASE = '/host/openwop-app/commissions/orgs/:orgId';
 
   // ── Plans ──
   app.get(`${BASE}/plans`, async (req, res, next) => {

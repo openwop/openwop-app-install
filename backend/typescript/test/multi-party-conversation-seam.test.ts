@@ -84,14 +84,14 @@ describe('RFC 0101 multi-party conversation seam', () => {
   }
 
   const open = (participants: { agentId: string }[], maxParticipants?: number) =>
-    post('/v1/host/sample/conversation/multi-party/open', {
+    post('/host/sample/conversation/multi-party/open', {
       conversationId: CONV,
       participants,
       ...(maxParticipants === undefined ? {} : { maxParticipants }),
     });
 
   const exchange = (turn: Record<string, unknown>, conversationId = CONV) =>
-    post('/v1/host/sample/conversation/multi-party/exchange', { conversationId, turn });
+    post('/host/sample/conversation/multi-party/exchange', { conversationId, turn });
 
   // The `sample` spelling is rewritten onto `openwop-app` when the test seam is
   // ENABLED (routes/testSeam.ts), which is the conformance boot's posture and
@@ -99,7 +99,7 @@ describe('RFC 0101 multi-party conversation seam', () => {
   // diverge precisely under the boot that matters: registering `sample` alone
   // passed here and 404'd the conformance leg. Both are asserted.
   it('serves BOTH the sample and openwop-app spellings of the seam', async () => {
-    for (const prefix of ['/v1/host/sample', '/v1/host/openwop-app']) {
+    for (const prefix of ['/host/sample', '/host/openwop-app']) {
       const opened = await post(`${prefix}/conversation/multi-party/open`, {
         conversationId: `${CONV}:${prefix}`,
         participants: ROSTER,
@@ -116,12 +116,8 @@ describe('RFC 0101 multi-party conversation seam', () => {
     }
   });
 
-  it('advertises the capability the seam witnesses', async () => {
-    const res = await fetch(`${BASE}/.well-known/openwop`, { headers: { authorization: 'Bearer dev-token' } });
-    const body = (await res.json()) as { multiPartyConversation?: { supported?: boolean; maxParticipants?: number } };
-    expect(body.multiPartyConversation?.supported).toBe(true);
-    expect(body.multiPartyConversation?.maxParticipants).toBe(MAX_MULTI_PARTY_PARTICIPANTS);
-  });
+  // ADR 0812 P3c-0 — the discovery-advert leg is deleted: `multiPartyConversation` exists only in
+  // the retired v1 document (the v2 root carries no such record); the seam legs below remain.
 
   it('opens a council and ACCEPTS a roster-valid attributed agent turn', async () => {
     const opened = await open(ROSTER);

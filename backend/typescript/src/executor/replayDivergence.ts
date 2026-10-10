@@ -51,6 +51,11 @@ export interface DivergenceResult {
   replayEventId?: string;
 }
 
+function requestKind(e: EventRecord): string {
+  const k = (e.payload as { kind?: unknown } | null | undefined)?.kind;
+  return typeof k === 'string' ? k : '';
+}
+
 function key(e: EventRecord): string {
   return `${e.type}@${e.nodeId ?? ''}`;
 }
@@ -64,7 +69,20 @@ export function compareObservableSequences(
   replay: readonly EventRecord[],
 ): DivergenceResult {
   const so = source.filter((e) => OBSERVABLE_TYPES.has(e.type));
-  const ro = replay.filter((e) => OBSERVABLE_TYPES.has(e.type));
+  // PRE-CHANGE-SOURCE COMPATIBILITY (loop row 3, P2 — interrupt.md §Events, openwop-app PR "interrupt.requested
+  // for every kind"). Until then this host recorded `interrupt.requested` for the
+  // `credential` kind ONLY, so a run recorded before the change carries no request
+  // for an approval / clarification / … suspension, and a replay of it that
+  // re-executes to that gate would emit one and report a FALSE divergence. So a
+  // replay's `interrupt.requested` of kind K is skipped ONLY when the source holds
+  // ZERO requests of kind K. A source that has any of kind K keeps the full
+  // comparison, so a real divergence (a missing, extra or moved request) is still
+  // caught for every run recorded after the change.
+  const sourceRequestKinds = new Set(
+    source.filter((e) => e.type === 'interrupt.requested').map((e) => requestKind(e)),
+  );
+  const ro = replay.filter((e) => OBSERVABLE_TYPES.has(e.type)
+    && !(e.type === 'interrupt.requested' && !sourceRequestKinds.has(requestKind(e))));
   const n = Math.max(so.length, ro.length);
   for (let i = 0; i < n; i++) {
     const s = so[i];

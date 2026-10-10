@@ -4,8 +4,21 @@
  *  - the budget checker (`checkMediaBudget`): off-by-default, under/over a cap,
  *    per-kind isolation, fail-open on no store;
  *  - `recordMediaUsage` no-ops when the kind is uncapped.
+ *
+ * Reds if: the upsert stops being additive; an uncapped kind is checked; the cap
+ * becomes `>=`; tts/stt caps cross; the base64 padding is ignored; an uncapped
+ * kind is recorded; the per-org override stops winning, or a resolver throw
+ * escapes; recordMediaUsage reads the env instead of the resolved budget.
+ *
+ * Ceiling (honest double guard): "fails OPEN when no store" cannot go red on one
+ * edit — dropping the `!storageRef` short-circuit falls into the try, where the
+ * null store throws and the catch maps it back to fail-open (probe
+ * w5g1-budget-fail-open-nostore stayed green). Both guards are deliberate.
+ *
+ * The clock is frozen (Date only) so the test's day bucket and the product's
+ * `todayUtc()` can never straddle UTC midnight.
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import {
   checkMediaBudget,
@@ -20,11 +33,13 @@ import type { Storage } from '../src/storage/storage.js';
 
 const TTS = 'OPENWOP_MEDIA_DAILY_TTS_CHARS';
 const STT = 'OPENWOP_MEDIA_DAILY_STT_BYTES';
-const today = new Date().toISOString().slice(0, 10);
+const today = '2026-06-15';
 
 let storage: Storage;
 
 beforeEach(async () => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date(`${today}T12:00:00.000Z`));
   storage = await openStorage('memory://');
   configureMediaBudget({ storage });
 });
@@ -32,6 +47,7 @@ afterEach(() => {
   delete process.env[TTS];
   delete process.env[STT];
   _resetMediaBudgetForTest();
+  vi.useRealTimers();
 });
 
 describe('storage media usage round-trip (ADR 0106)', () => {

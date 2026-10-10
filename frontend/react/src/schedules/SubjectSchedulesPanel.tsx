@@ -10,7 +10,7 @@
  * `ui/` cohesion: surface-card / chip / StateCard / Notice / ClockIcon; tokens only.
  */
 import { Button } from '../ui/Button.js';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { confirm } from '../ui/confirm.js';
 import { Link } from 'react-router-dom';
@@ -21,6 +21,9 @@ import { CADENCE_PRESETS } from '../agents/scheduleClient.js';
 import { workflowName } from '../agents/roleTemplates.js';
 import { useFormat } from '../i18n/useFormat.js';
 import i18n from '../i18n/index.js';
+import { writeErrorMessage } from '../lib/writeAccess.js';
+import { readErrorDetail } from '../client/errorEnvelope.js';
+import { featureStoreHref } from '../featureToggles/lockedTargets.js';
 
 /** Cadence preset key → schedules-catalog label key. Keeps the localized label
  *  lookup off the persisted CADENCE_PRESETS (whose `label` is the en fallback). */
@@ -52,8 +55,13 @@ export function cadenceLabel(cronExpr: string): string {
   const preset = CADENCE_PRESETS.find((p) => p.cronExpr === cronExpr);
   return preset ? cadenceKeyLabel(preset.key) : cronExpr;
 }
+/** The edit select's value for a stored cadence: its preset key, or `KEEP` for
+ *  anything the presets cannot express (a one-shot, an 08:00 chat-created cron).
+ *  This used to fall back to the FIRST preset, so saving an edit that touched
+ *  only the workflow silently rewrote the cadence to Hourly (`SCTUX-5`). */
+const KEEP_CADENCE = 'keep';
 function cadenceKey(cronExpr: string): string {
-  return CADENCE_PRESETS.find((p) => p.cronExpr === cronExpr)?.key ?? CADENCE_PRESETS[0]!.key;
+  return CADENCE_PRESETS.find((p) => p.cronExpr === cronExpr)?.key ?? KEEP_CADENCE;
 }
 
 /** The backend's one-shot sentinel (`ONE_SHOT_CRON`, ADR 0309) — a spent
@@ -82,17 +90,32 @@ export interface SubjectScheduleRow {
    *  cadence, ADR 0313 D3) or a spent one-shot. Surfaces omitting it (older
    *  backends) simply show no chip. */
   nextFireAt?: number;
+  /** ADR 0815 D4 — the server paused this job because the member it ran as was
+   *  removed from the workspace. Resuming it makes the resumer its owner, and
+   *  "Run now" is refused until then. ABSENT on every other paused job. */
+  pausedReason?: 'acting_member_removed';
+  /** ADR 0820 §7 — the plan no longer includes the owning feature, so the
+   *  server skips (never fails) each fire and resumes it by itself once access
+   *  returns. Computed per read. ABSENT otherwise. */
+  planLapsed?: { featureId: string };
 }
 
 /** GEN-PRJ-1 — reason code → catalog key (REUSES the assistant lane's copy).
  *  A `Record` so a new reason code on the wire is a compile-time prompt here;
  *  the runtime arm below covers the wire (an unknown code must neither
  *  fabricate a diagnosis nor go silent — the WF-COS-4 round-2 lesson). */
-const SKIP_REASON_KEY: Record<'budget' | 'workflow-unresolved' | 'dispatch-error', string> = {
+const SKIP_REASON_KEY: Record<'budget' | 'workflow-unresolved' | 'dispatch-error' | 'feature-disabled' | 'plan-lapsed' | 'actor-inactive', string> = {
   budget: 'agents:recurringSkipBudget',
   'workflow-unresolved': 'agents:recurringSkipUnresolved',
   'dispatch-error': 'agents:recurringSkipDispatch',
+  'feature-disabled': 'agents:recurringSkipFeatureDisabled',
+  'plan-lapsed': 'agents:recurringSkipPlanLapsed',
+  'actor-inactive': 'agents:recurringSkipActorInactive',
 };
+/** ADR 0787 D6 — the cadence has no FURTHER slot inside the horizon. Not a
+ *  "did not run" (that fire may well have run): it is rendered as its own chip,
+ *  never through the skipped-fire line. */
+const NO_NEXT_FIRE = 'no-next-fire';
 function skipReasonKey(reason: string | undefined): string {
   if (reason !== undefined && Object.prototype.hasOwnProperty.call(SKIP_REASON_KEY, reason)) {
     return SKIP_REASON_KEY[reason as keyof typeof SKIP_REASON_KEY];
@@ -107,10 +130,12 @@ function skipReasonKey(reason: string | undefined): string {
 export interface SubjectSchedulesClient {
   list: () => Promise<SubjectScheduleRow[]>;
   create: (input: { workflowId: string; cronExpr: string; timezone: string }) => Promise<void>;
-  update: (jobId: string, patch: { enabled?: boolean; cronExpr?: string; workflowId?: string; timezone?: string }) => Promise<void>;
+  /** `row` is the schedule as the panel last read it, so a wrapper can relabel
+   *  from the fields the patch did NOT change (the patch carries only changes). */
+  update: (jobId: string, patch: { enabled?: boolean; cronExpr?: string; workflowId?: string; timezone?: string }, row?: SubjectScheduleRow) => Promise<void>;
   remove: (jobId: string) => Promise<void>;
   /** Optional "Run now" — omit on surfaces with no manual trigger (projects). */
-  trigger?: (jobId: string) => Promise<{ runId?: string }>;
+  trigger?: (jobId: string) => Promise<{ runId?: string; skipped?: string }>;
 }
 
 export interface SubjectSchedulesCopy {
@@ -133,7 +158,14 @@ export function SubjectSchedulesPanel({ client, workflows, copy, readOnly = fals
   const [jobs, setJobs] = useState<SubjectScheduleRow[] | null>(null);
   const [jobsFailed, setJobsFailed] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<React.ReactNode>(null);
+  // A notice carries the text to ANNOUNCE separately: it mounts with its text
+  // already inside, and a live region that arrives complete announces nothing.
+  const [notice, setNotice] = useState<{ variant: 'success' | 'warning'; node: React.ReactNode; text: string } | null>(null);
+  // In-flight guard: a double click created two schedules or fired twice. The
+  // REF is the guard (two clicks in one frame both see the pre-render state);
+  // the state only drives `disabled`.
+  const inFlight = useRef(false);
+  const [busy, setBusy] = useState<string | null>(null);
   const [wfId, setWfId] = useState(workflows[0] ?? '');
   const [cadence, setCadence] = useState(CADENCE_PRESETS[0]!.key);
   const [editing, setEditing] = useState<string | null>(null);
@@ -143,17 +175,35 @@ export function SubjectSchedulesPanel({ client, workflows, copy, readOnly = fals
   const refresh = useCallback(async () => {
     setJobsFailed(false);
     try { setJobs(await client.list()); }
-    catch (err) { setJobs([]); setJobsFailed(true); setError(err instanceof Error ? err.message : String(err)); }
-  }, [client]);
+    catch (err) { setJobs([]); setJobsFailed(true); setError(writeErrorMessage(t, err)); }
+  }, [client, t]);
+
+  /** Run one write: clear stale messages, guard against a double submit, and
+   *  say what failed in words (a 403 is "no permission", a 400 is the server's
+   *  own sentence) — never the raw transport string. */
+  const act = async (key: string, work: () => Promise<void>): Promise<void> => {
+    if (inFlight.current) return;
+    inFlight.current = true;
+    setBusy(key);
+    setError(null);
+    setNotice(null);
+    try { await work(); }
+    catch (err) {
+      // ADR 0815 D6 — the pause refusal in our words, never the server's English.
+      const body = (err as { body?: unknown } | null)?.body;
+      if (readErrorDetail(body, 'reason') === 'acting_member_removed') {
+        setError(t(readErrorDetail(body, 'recreate') === true ? 'pausedRecreate' : 'pausedReownNeeded'));
+      } else setError(writeErrorMessage(t, err));
+    }
+    finally { inFlight.current = false; setBusy(null); }
+  };
 
   useEffect(() => { void refresh(); }, [refresh]);
 
   const onCreate = async (): Promise<void> => {
     if (!wfId) return;
-    setError(null);
     const preset = CADENCE_PRESETS.find((p) => p.key === cadence)!;
-    try { await client.create({ workflowId: wfId, cronExpr: preset.cronExpr, timezone: LOCAL_TZ }); await refresh(); }
-    catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+    await act('create', async () => { await client.create({ workflowId: wfId, cronExpr: preset.cronExpr, timezone: LOCAL_TZ }); await refresh(); });
   };
 
   const startEdit = (job: SubjectScheduleRow): void => {
@@ -163,40 +213,59 @@ export function SubjectSchedulesPanel({ client, workflows, copy, readOnly = fals
   };
 
   const onSaveEdit = async (job: SubjectScheduleRow): Promise<void> => {
-    const preset = CADENCE_PRESETS.find((p) => p.key === editCadence)!;
-    setError(null);
-    try { await client.update(job.jobId, { cronExpr: preset.cronExpr, workflowId: editWf, timezone: LOCAL_TZ }); setEditing(null); await refresh(); }
-    catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+    // Send ONLY what the edit changed (`SCTUX-5`): an untouched cadence stays the
+    // stored cron, and the stored time zone is never replaced by this browser's.
+    // A NEW preset reads in the schedule's own zone when it has one.
+    const patch: { cronExpr?: string; workflowId?: string; timezone?: string } = {};
+    if (editWf && editWf !== job.workflowId) patch.workflowId = editWf;
+    const preset = editCadence === KEEP_CADENCE ? undefined : CADENCE_PRESETS.find((p) => p.key === editCadence);
+    if (preset && preset.cronExpr !== job.cronExpr) {
+      patch.cronExpr = preset.cronExpr;
+      if (!job.timezone) patch.timezone = LOCAL_TZ;
+    }
+    if (Object.keys(patch).length === 0) { setEditing(null); return; }
+    await act(`edit:${job.jobId}`, async () => { await client.update(job.jobId, patch, job); setEditing(null); await refresh(); });
   };
 
   const onToggle = async (job: SubjectScheduleRow): Promise<void> => {
-    try { await client.update(job.jobId, { enabled: !job.enabled }); await refresh(); }
-    catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+    // ADR 0815 D4 — resuming a job paused because its member left RE-OWNS it;
+    // say so before it happens, never silently.
+    if (!job.enabled && job.pausedReason === 'acting_member_removed'
+        && !(await confirm({ title: t('resumeReownTitle'), body: t('resumeReownBody'), confirmLabel: t('resumeReownConfirm') }))) return;
+    await act(`toggle:${job.jobId}`, async () => { await client.update(job.jobId, { enabled: !job.enabled }, job); await refresh(); });
   };
 
   const onRunNow = async (job: SubjectScheduleRow): Promise<void> => {
-    if (!client.trigger) return;
-    setNotice(null);
-    try {
-      const res = await client.trigger(job.jobId);
-      setNotice(res.runId ? <>{t('firedWithRun')}<Link to={`/runs/${res.runId}`}>{t('viewRun')}</Link>.</> : t('firedNoWorkflow'));
+    const trigger = client.trigger;
+    if (!trigger) return;
+    await act(`run:${job.jobId}`, async () => {
+      const res = await trigger(job.jobId);
+      if (res.runId) {
+        setNotice({ variant: 'success', node: <>{t('firedWithRunLink')} <Link to={`/runs/${res.runId}`}>{t('viewRun')}</Link></>, text: t('firedWithRunLink') });
+      } else if (res.skipped) {
+        // ADR 0787 D5 — the server says WHY no run started; "no workflow bound"
+        // was the only thing this used to say, for every reason.
+        const text = t('runNowSkipped', { reason: t(skipReasonKey(res.skipped)) });
+        setNotice({ variant: 'warning', node: text, text });
+      } else {
+        setNotice({ variant: 'success', node: t('firedNoWorkflow'), text: t('firedNoWorkflow') });
+      }
       await refresh();
-    } catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+    });
   };
 
   const onDelete = async (job: SubjectScheduleRow): Promise<void> => {
     const label = job.workflowId ? workflowName(job.workflowId) : job.cronExpr;
     if (!(await confirm({ title: t('deleteConfirm', { label }), danger: true, confirmLabel: t('common:delete') }))) return;
-    try { await client.remove(job.jobId); await refresh(); }
-    catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+    await act(`delete:${job.jobId}`, async () => { await client.remove(job.jobId); await refresh(); });
   };
 
   const noWorkflows = workflows.length === 0;
 
   return (
     <div>
-      {error ? <Notice variant="error">{error}</Notice> : null}
-      {notice ? <Notice variant="success">{notice}</Notice> : null}
+      {error ? <Notice variant="error" announce={error}>{error}</Notice> : null}
+      {notice ? <Notice variant={notice.variant} announce={notice.text}>{notice.node}</Notice> : null}
 
       {jobs === null ? (
         <StateCard icon={<ClockIcon />} title={tc('loading')} loading />
@@ -215,14 +284,22 @@ export function SubjectSchedulesPanel({ client, workflows, copy, readOnly = fals
                 <div className="u-flex-1 u-minw-200">
                   <div className="u-fw-600 u-fs-14 u-flex u-items-center u-gap-1-5">
                     {job.workflowId ? workflowName(job.workflowId) : t('noWorkflow')}
-                    <span className={`chip ${job.enabled ? 'chip--success' : 'chip--muted'}`}>{job.enabled ? t('statusActive') : t('statusPaused')}</span>
+                    {job.planLapsed
+                      ? <span className="chip chip--warning"><AlertIcon size={11} aria-hidden /> {t('statusPlanLapsed')}</span>
+                      : <span className={`chip ${job.enabled ? 'chip--success' : 'chip--muted'}`}>{job.enabled ? t('statusActive') : t('statusPaused')}</span>}
+                    {!job.enabled && job.pausedReason === 'acting_member_removed'
+                      ? <span id={`paused-${job.jobId}`} className="chip chip--warning"><AlertIcon size={11} aria-hidden /> {t('pausedOwnerLeft')}</span>
+                      : null}
                     {/* ADR 0313 D3 — a silent schedule must SAY it's silent: an
                         enabled row with no computed next fire either spent its
                         one-shot (done) or its cadence didn't parse (inert). */}
                     {job.enabled && job.nextFireAt === undefined ? (
                       job.cronExpr === ONE_SHOT_CRON && job.lastRunAt
                         ? <span className="chip chip--muted">{t('oneShotDone')}</span>
-                        : <span className="chip chip--warning"><AlertIcon size={11} aria-hidden /> {t('wontFire')}</span>
+                        : job.lastSkipReason === NO_NEXT_FIRE
+                          // ADR 0787 D6 — it parsed; there is just no future time.
+                          ? <span className="chip chip--warning"><AlertIcon size={11} aria-hidden /> {t('cadenceExhausted')}</span>
+                          : <span className="chip chip--warning"><AlertIcon size={11} aria-hidden /> {t('wontFire')}</span>
                     ) : null}
                   </div>
                   <div className="muted u-fs-12">
@@ -230,6 +307,19 @@ export function SubjectSchedulesPanel({ client, workflows, copy, readOnly = fals
                       ? t('runsCadenceWithTz', { cadence: cadenceLabel(job.cronExpr), timezone: job.timezone })
                       : t('runsCadence', { cadence: cadenceLabel(job.cronExpr) })}
                   </div>
+                  {/* ADR 0820 §7 — the computed lapse pause: every fire is skipped
+                      (never failed) until the plan includes the feature again,
+                      and then it resumes by itself. */}
+                  {job.planLapsed ? (
+                    <div className="u-fs-12 u-text-warning">
+                      {t('planLapsedHint')} <Link to={featureStoreHref(job.planLapsed.featureId)}>{t('planLapsedLink')}</Link>
+                    </div>
+                  ) : null}
+                  {job.enabled && !job.planLapsed && job.nextFireAt !== undefined ? (
+                    <div className="muted u-fs-12" title={f.dateTime(new Date(job.nextFireAt).toISOString())}>
+                      {t('nextRun', { when: f.relativeTime(new Date(job.nextFireAt).toISOString()) })}
+                    </div>
+                  ) : null}
                   <div className="muted u-fs-12">
                     {job.lastRunAt
                       ? <>{t('lastRun', { when: f.relativeTime(job.lastRunAt) })}{job.lastRunId ? <> · <Link to={`/runs/${job.lastRunId}`}>{t('viewRun')}</Link></> : null}</>
@@ -239,7 +329,7 @@ export function SubjectSchedulesPanel({ client, workflows, copy, readOnly = fals
                       run. Without this line a typo'd workflow id read as a
                       healthy schedule forever ("Not run yet", nextFireAt
                       advancing) on all three consumers of this panel. */}
-                  {job.lastSkippedAt ? (
+                  {job.lastSkippedAt && job.lastSkipReason !== NO_NEXT_FIRE && !job.planLapsed ? (
                     <div className="u-fs-12 u-text-warning">
                       {t('agents:recurringSkipped', { when: f.relativeTime(job.lastSkippedAt), reason: t(skipReasonKey(job.lastSkipReason)) })}
                     </div>
@@ -248,9 +338,9 @@ export function SubjectSchedulesPanel({ client, workflows, copy, readOnly = fals
                 {readOnly ? null : (
                   <div className="action-bar u-gap-1">
                     <Button variant="secondary" size="sm" onClick={() => (editing === job.jobId ? setEditing(null) : startEdit(job))}>{editing === job.jobId ? t('common:cancel') : t('common:edit')}</Button>
-                    <Button variant="secondary" size="sm" onClick={() => void onToggle(job)}>{job.enabled ? t('pause') : t('resume')}</Button>
-                    {client.trigger ? <Button variant="secondary" size="sm" onClick={() => void onRunNow(job)}>{t('runNow')}</Button> : null}
-                    <Button variant="secondary" size="sm" onClick={() => void onDelete(job)}>{t('common:delete')}</Button>
+                    <Button variant="secondary" size="sm" disabled={busy !== null} onClick={() => void onToggle(job)}>{job.enabled ? t('pause') : t('resume')}</Button>
+                    {client.trigger ? <Button variant="secondary" size="sm" disabled={busy !== null || job.pausedReason === 'acting_member_removed'} title={job.pausedReason === 'acting_member_removed' ? t('pausedOwnerLeftRunNow') : undefined} aria-describedby={job.pausedReason === 'acting_member_removed' ? `paused-${job.jobId}` : undefined} onClick={() => void onRunNow(job)}>{t('runNow')}</Button> : null}
+                    <Button variant="secondary" size="sm" disabled={busy !== null} onClick={() => void onDelete(job)}>{t('common:delete')}</Button>
                   </div>
                 )}
               </div>
@@ -262,9 +352,10 @@ export function SubjectSchedulesPanel({ client, workflows, copy, readOnly = fals
                     {workflows.map((w) => <option key={w} value={w}>{workflowName(w)}</option>)}
                   </select>
                   <select value={editCadence} onChange={(e) => setEditCadence(e.target.value)} aria-label={t('cadenceLabel')}>
+                    {cadenceKey(job.cronExpr) === KEEP_CADENCE ? <option value={KEEP_CADENCE}>{t('keepCadence', { cadence: cadenceLabel(job.cronExpr) })}</option> : null}
                     {CADENCE_PRESETS.map((p) => <option key={p.key} value={p.key}>{cadenceKeyLabel(p.key)}</option>)}
                   </select>
-                  <Button variant="primary" size="sm" disabled={!editWf} onClick={() => void onSaveEdit(job)}>{t('saveChanges')}</Button>
+                  <Button variant="primary" size="sm" disabled={!editWf || busy !== null} onClick={() => void onSaveEdit(job)}>{t('saveChanges')}</Button>
                 </div>
               ) : null}
             </li>
@@ -282,7 +373,7 @@ export function SubjectSchedulesPanel({ client, workflows, copy, readOnly = fals
             <select value={cadence} onChange={(e) => setCadence(e.target.value)} aria-label={t('cadenceLabel')}>
               {CADENCE_PRESETS.map((p) => <option key={p.key} value={p.key}>{cadenceKeyLabel(p.key)}</option>)}
             </select>
-            <Button variant="primary" disabled={!wfId} onClick={() => void onCreate()}>{t('createButton')}</Button>
+            <Button variant="primary" disabled={!wfId || busy !== null} onClick={() => void onCreate()}>{t('createButton')}</Button>
           </div>
           <p className="muted u-fs-12 u-mb-0">{copy.helper}</p>
         </div>

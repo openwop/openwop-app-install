@@ -141,6 +141,9 @@ export default defineConfig(({ mode }) => {
             const brand = resolveBrandFromEnv(loadEnv(mode, __dirname, ''));
             return html
               .replaceAll('{{BRAND_TITLE}}', brand.documentTitle)
+              // An attribute value, so escape it (a fork's copy may hold quotes).
+              .replaceAll('{{BRAND_DESCRIPTION}}', brand.description
+                .replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;').replaceAll('>', '&gt;'))
               .replaceAll('{{BRAND_FAVICON}}', brand.faviconSrc)
               .replaceAll('{{BRAND_FONTS_HREF}}', brand.fontsHref)
               .replaceAll('{{BRAND_THEME_COLOR}}', brand.themeColor)
@@ -296,6 +299,10 @@ export default defineConfig(({ mode }) => {
               // (i18nNamespaceSplit.test.ts pins the two lists together).
               if (enFeature && !['comments', 'cad', 'campaign-studio'].includes(enFeature[1]!)) return undefined;
             }
+            // ADR 0819 — the LAZY AREA catalogs: `featureToggles` renders only in the
+            // lazily-imported admin panel; `assistantAction` (ADR 0862) only in its
+            // lazily-imported card-fields module (src/i18n/resources.ts says why).
+            if (/\/src\/(featureToggles|assistantAction)\/i18n\/en\.ts$/.test(n)) return undefined;
             if (/\/src\/i18n\//.test(n) || /\/i18n\/(en|[a-z]{2}(-[A-Z]{2})?)\.ts$/.test(n)) return 'i18n';
             return undefined;
           },

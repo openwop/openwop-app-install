@@ -15,7 +15,7 @@ import {
 } from './promotionsService.js';
 
 const FEATURE = { toggleId: 'promotions', label: 'Promotions' };
-const BASE = '/v1/host/openwop-app/promotions/orgs/:orgId';
+const BASE = '/host/openwop-app/promotions/orgs/:orgId';
 
 export function registerPromotionsRoutes(deps: RouteDeps): void {
   const { app } = deps;

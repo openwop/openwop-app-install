@@ -12,6 +12,9 @@ import { useTranslation } from 'react-i18next';
 import { useBuilderStore } from '../store/builderStore.js';
 import { pinNodeOutput, unpinNode, runFromNode, nodeDisplayNames } from '../debugSession.js';
 import { MissingPinsError } from '../../workflows/workflowDebugClient.js';
+import { SyncFailureError } from '../../client/config.js';
+import { HEAD_MOVED_REASON } from '../persistence/backendStore.js';
+import { runRefusalMessage } from '../builderShellHelpers.js';
 
 export function NodeDebugSection({ nodeId }: { nodeId: string }): JSX.Element {
   const { t } = useTranslation('builder');
@@ -28,6 +31,14 @@ export function NodeDebugSection({ nodeId }: { nodeId: string }): JSX.Element {
   function localizeError(err: unknown): string {
     if (err instanceof MissingPinsError) {
       return t('debugMissingPins', { nodes: nodeDisplayNames(err.missingPins).join(', ') });
+    }
+    // ADR 0770 — a refused canvas register (view-only, disabled pack, conflict).
+    if (err instanceof SyncFailureError) {
+      if (err.reason === HEAD_MOVED_REASON) {
+        useBuilderStore.setState({ syncState: 'failed', syncFailureStatus: err.status, syncFailureReason: err.reason });
+        return t('syncConflictTitle');
+      }
+      return runRefusalMessage(err, t);
     }
     const code = err instanceof Error ? err.message : String(err);
     if (/_404$/.test(code)) return t('debugErrSaveFirst');

@@ -92,14 +92,10 @@ export function InMemoryHostBanner() {
     let aborted = false;
     void (async () => {
       try {
-        // Routes through the SDK's `client.discovery.capabilities()` per
-        // `sdk/PARITY.md`. The SDK handles auth + cookie credentials
-        // uniformly with the rest of the SPA's client layer.
-        // ADR 0730 C.2 — read BOTH homes through the overlap. v1 nests this
-        // under `capabilities.hostSurfaces`; the v2 root is closed and carries
-        // it at `extensions['openwop-app.host-surfaces'].surfaces`. The v1 read
-        // is first because it is the shape this host still serves on the
-        // header-less default contract; when v1 retires, the first arm goes.
+        // ADR 0730 C.2 — v2 carries this at
+        // `extensions['openwop-app.host-surfaces'].surfaces`; the discovery
+        // adapter also restates it at `capabilities.hostSurfaces`. Either arm
+        // is the same list.
         const caps = (await getCapabilities()) as {
           capabilities?: { hostSurfaces?: HostSurfaceAd[] };
           extensions?: { 'openwop-app.host-surfaces'?: { surfaces?: HostSurfaceAd[] } };

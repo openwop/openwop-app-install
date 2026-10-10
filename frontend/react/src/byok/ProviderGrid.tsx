@@ -103,20 +103,6 @@ export function ProviderGrid({
           It rides `developer-tools` now — ADR 0196 Gate B is exactly "engineering
           surfaces", and this is one. */}
       <p className="byok-section-fineprint">{t('byokFineprintTrust')}</p>
-      {devTools.enabled && (
-        <p className="byok-section-fineprint byok-section-fineprint--operator">
-          {/* The seam matters: the sentence above is addressed to the person
-              pasting a credential, this one to whoever runs the host. Rendered
-              identically they read as one paragraph, so a user is invited to act
-              on instructions that are not theirs and that they cannot follow. */}
-          <span className="byok-section-fineprint__eyebrow">{t('byokFineprintOperatorEyebrow')}</span>
-          {t('byokFineprintBefore')}{' '}
-          <code className="providergrid-inline-code">OPENWOP_BYOK_EPHEMERAL=true</code>{' '}
-          {t('byokFineprintMid')}{' '}
-          <code className="providergrid-inline-code">src/byok/secretResolver.ts</code>{' '}
-          {t('byokFineprintAfter')}
-        </p>
-      )}
       <div
         className="byok-grid providergrid-grid"
         style={{
@@ -164,6 +150,23 @@ export function ProviderGrid({
             </div>
           </div>
         </div>
+      )}
+      {/* ADR 0768 follow-up C7 — the operator note sits AFTER the choice. It used
+          to stand between the heading and the provider tiles, so the first thing
+          on the gate was documentation for someone else. */}
+      {devTools.enabled && (
+        <p className="byok-section-fineprint byok-section-fineprint--operator">
+          {/* The seam matters: the trust sentence is addressed to the person
+              pasting a credential, this one to whoever runs the host. Rendered
+              identically they read as one paragraph, so a user is invited to act
+              on instructions that are not theirs and that they cannot follow. */}
+          <span className="byok-section-fineprint__eyebrow">{t('byokFineprintOperatorEyebrow')}</span>
+          {t('byokFineprintBefore')}{' '}
+          <code className="providergrid-inline-code">OPENWOP_BYOK_EPHEMERAL=true</code>{' '}
+          {t('byokFineprintMid')}{' '}
+          <code className="providergrid-inline-code">src/byok/secretResolver.ts</code>{' '}
+          {t('byokFineprintAfter')}
+        </p>
       )}
 
       {onCancel && (

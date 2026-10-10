@@ -44,7 +44,9 @@ export function ReminderDelivery(): JSX.Element | null {
     try {
       // Subscribe FIRST: `pushManager.subscribe()` must run inside the click's
       // user activation, which an awaited network call before it can spend.
-      if (pushStatus === 'available') await enablePush();
+      // ADR 0816 NTFUX-2 — a refused subscribe is a failure, not a consent: the
+      // reminders this consent promises would never reach the device.
+      if (pushStatus === 'available' && !(await enablePush())) { setActionFailed(true); return; }
       await grantConsent(REMINDER_CONSENT);
       await read();
     } catch {

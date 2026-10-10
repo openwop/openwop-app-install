@@ -4,7 +4,7 @@
  * Covers:
  *   1. The pure service (host/rosterService.ts): create/list/get/update/
  *      delete + tenant scoping + the host:<id> rosterId form.
- *   2. The REST routes (`/v1/host/openwop-app/roster/*`) + the §C
+ *   2. The REST routes (`/host/openwop-app/roster/*`) + the §C
  *      attribution path: a board bound to a roster member defaults its To
  *      Do column to the member's first portfolio workflow, and a card
  *      moved into it starts a run attributed to the member (persona +
@@ -119,9 +119,10 @@ describe('roster routes + board attribution (sqlite memory app)', () => {
     return { status: res.status, body: (await res.json()) as T };
   }
 
-  it('advertises agents.roster.supported in discovery', async () => {
-    const { body } = await jsonFetch<{ agents?: { roster?: { supported?: boolean } } }>('/.well-known/openwop');
-    expect(body.agents?.roster?.supported).toBe(true);
+  it('advertises agents.roster in discovery', async () => {
+    // ADR 0812 P3c-0 — v2 spelling: presence of the facet is the claim (no `supported` flag).
+    const { body } = await jsonFetch<{ agents?: { roster?: { installScope?: string } } }>('/.well-known/openwop', { headers: { 'OpenWOP-Version': '2' } });
+    expect(body.agents?.roster?.installScope).toBe('tenant');
   });
 
   it('binds a board to a roster member and attributes the triggered run', async () => {
@@ -129,7 +130,7 @@ describe('roster routes + board attribution (sqlite memory app)', () => {
     expect(typeof triggerWorkflowId).toBe('string');
 
     // Create "Sally" who owns that workflow.
-    const sally = await jsonFetch<{ rosterId: string; persona: string }>('/v1/host/openwop-app/roster', {
+    const sally = await jsonFetch<{ rosterId: string; persona: string }>('/host/openwop-app/roster', {
       method: 'POST',
       body: JSON.stringify({
         persona: 'Sally',
@@ -141,12 +142,12 @@ describe('roster routes + board attribution (sqlite memory app)', () => {
     expect(sally.body.rosterId.startsWith('host:')).toBe(true);
 
     // She shows up in the tenant roster.
-    const roster = await jsonFetch<{ roster: { rosterId: string }[] }>('/v1/host/openwop-app/roster');
+    const roster = await jsonFetch<{ roster: { rosterId: string }[] }>('/host/openwop-app/roster');
     expect(roster.body.roster.some((e) => e.rosterId === sally.body.rosterId)).toBe(true);
 
     // A board bound to Sally defaults its To Do column to her first workflow.
     const board = await jsonFetch<{ id: string; rosterId?: string; columns: { id: string; triggerWorkflowId?: string }[] }>(
-      '/v1/host/openwop-app/kanban/boards',
+      '/host/openwop-app/kanban/boards',
       { method: 'POST', body: JSON.stringify({ name: "Sally's board", rosterId: sally.body.rosterId }) },
     );
     expect(board.status).toBe(201);
@@ -154,14 +155,14 @@ describe('roster routes + board attribution (sqlite memory app)', () => {
     expect(board.body.columns.find((c) => c.id === 'todo')?.triggerWorkflowId).toBe(triggerWorkflowId);
 
     // Card in Doing → move to To Do → run starts, attributed to Sally.
-    const card = await jsonFetch<{ id: string }>(`/v1/host/openwop-app/kanban/boards/${board.body.id}/cards`, {
+    const card = await jsonFetch<{ id: string }>(`/host/openwop-app/kanban/boards/${board.body.id}/cards`, {
       method: 'POST',
       body: JSON.stringify({ title: 'Spring campaign', columnId: 'doing' }),
     });
     const moved = await jsonFetch<{
       triggeredRunId: string | null;
       attribution: { persona?: string; rosterId?: string; agentId?: string } | null;
-    }>(`/v1/host/openwop-app/kanban/cards/${card.body.id}`, {
+    }>(`/host/openwop-app/kanban/cards/${card.body.id}`, {
       method: 'PATCH',
       body: JSON.stringify({ columnId: 'todo' }),
     });
@@ -176,7 +177,7 @@ describe('roster routes + board attribution (sqlite memory app)', () => {
 
   it('hides advisor-subject members from the general roster, opt-in with ?includeAdvisors', async () => {
     // A normal agent lands in the caller's resolved tenant via the route.
-    const normal = await jsonFetch<{ rosterId: string; tenantId: string }>('/v1/host/openwop-app/roster', {
+    const normal = await jsonFetch<{ rosterId: string; tenantId: string }>('/host/openwop-app/roster', {
       method: 'POST',
       body: JSON.stringify({ persona: 'Nora', agentRef: { agentId: 'core.openwop.agents.brief-writer' } }),
     });
@@ -193,14 +194,14 @@ describe('roster routes + board attribution (sqlite memory app)', () => {
     });
 
     // Default list excludes the advisor, includes the normal agent.
-    const defaultList = await jsonFetch<{ roster: { rosterId: string }[] }>('/v1/host/openwop-app/roster');
+    const defaultList = await jsonFetch<{ roster: { rosterId: string }[] }>('/host/openwop-app/roster');
     const defaultIds = defaultList.body.roster.map((e) => e.rosterId);
     expect(defaultIds).toContain(normal.body.rosterId);
     expect(defaultIds).not.toContain(advisor.rosterId);
 
     // ?includeAdvisors=true opts the advisor back in (the board-of-advisors picker).
     const withAdvisors = await jsonFetch<{ roster: { rosterId: string }[] }>(
-      '/v1/host/openwop-app/roster?includeAdvisors=true',
+      '/host/openwop-app/roster?includeAdvisors=true',
     );
     const withIds = withAdvisors.body.roster.map((e) => e.rosterId);
     expect(withIds).toContain(normal.body.rosterId);
@@ -209,7 +210,7 @@ describe('roster routes + board attribution (sqlite memory app)', () => {
     // The list filter is presentation-only: a direct GET by id still resolves an
     // advisor (the Board of Advisors `@@`-convene resolves the council by id).
     const byId = await jsonFetch<{ rosterId: string; roleKey?: string }>(
-      `/v1/host/openwop-app/roster/${advisor.rosterId}`,
+      `/host/openwop-app/roster/${advisor.rosterId}`,
     );
     expect(byId.status).toBe(200);
     expect(byId.body.rosterId).toBe(advisor.rosterId);
@@ -217,7 +218,7 @@ describe('roster routes + board attribution (sqlite memory app)', () => {
   });
 
   it('rejects binding a board to an unknown roster member', async () => {
-    const res = await jsonFetch('/v1/host/openwop-app/kanban/boards', {
+    const res = await jsonFetch('/host/openwop-app/kanban/boards', {
       method: 'POST',
       body: JSON.stringify({ name: 'x', rosterId: 'host:nope-00000000' }),
     });
@@ -225,13 +226,13 @@ describe('roster routes + board attribution (sqlite memory app)', () => {
   });
 
   it('validates roster create + 404s a foreign entry', async () => {
-    expect((await jsonFetch('/v1/host/openwop-app/roster', { method: 'POST', body: JSON.stringify({}) })).status).toBe(400);
-    expect((await jsonFetch('/v1/host/openwop-app/roster/host:does-not-exist')).status).toBe(404);
+    expect((await jsonFetch('/host/openwop-app/roster', { method: 'POST', body: JSON.stringify({}) })).status).toBe(400);
+    expect((await jsonFetch('/host/openwop-app/roster/host:does-not-exist')).status).toBe(404);
   });
 
   it('validates avatarUrl and round-trips a valid data URI through PATCH→GET', async () => {
     const goodUri = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
-    const created = await jsonFetch<{ rosterId: string }>('/v1/host/openwop-app/roster', {
+    const created = await jsonFetch<{ rosterId: string }>('/host/openwop-app/roster', {
       method: 'POST',
       body: JSON.stringify({ persona: 'Pia', agentRef: { agentId: 'core.openwop.agents.brief-writer' } }),
     });
@@ -240,30 +241,30 @@ describe('roster routes + board attribution (sqlite memory app)', () => {
 
     // A non-data: URL (would invite SSRF / off-row bytes) is refused.
     expect(
-      (await jsonFetch(`/v1/host/openwop-app/roster/${id}`, { method: 'PATCH', body: JSON.stringify({ avatarUrl: 'https://evil.example/x.png' }) })).status,
+      (await jsonFetch(`/host/openwop-app/roster/${id}`, { method: 'PATCH', body: JSON.stringify({ avatarUrl: 'https://evil.example/x.png' }) })).status,
     ).toBe(400);
     // A non-image data URI is refused.
     expect(
-      (await jsonFetch(`/v1/host/openwop-app/roster/${id}`, { method: 'PATCH', body: JSON.stringify({ avatarUrl: 'data:text/html;base64,YQ==' }) })).status,
+      (await jsonFetch(`/host/openwop-app/roster/${id}`, { method: 'PATCH', body: JSON.stringify({ avatarUrl: 'data:text/html;base64,YQ==' }) })).status,
     ).toBe(400);
     // An oversized payload is refused (413-class validation, surfaced as 400).
     const huge = `data:image/png;base64,${'A'.repeat(700_001)}`;
     expect(
-      (await jsonFetch(`/v1/host/openwop-app/roster/${id}`, { method: 'PATCH', body: JSON.stringify({ avatarUrl: huge }) })).status,
+      (await jsonFetch(`/host/openwop-app/roster/${id}`, { method: 'PATCH', body: JSON.stringify({ avatarUrl: huge }) })).status,
     ).toBe(400);
 
     // A valid small data URI is accepted and round-trips on the next GET.
-    const ok = await jsonFetch(`/v1/host/openwop-app/roster/${id}`, { method: 'PATCH', body: JSON.stringify({ avatarUrl: goodUri }) });
+    const ok = await jsonFetch(`/host/openwop-app/roster/${id}`, { method: 'PATCH', body: JSON.stringify({ avatarUrl: goodUri }) });
     expect(ok.status).toBe(200);
-    expect((await jsonFetch<{ avatarUrl?: string }>(`/v1/host/openwop-app/roster/${id}`)).body.avatarUrl).toBe(goodUri);
+    expect((await jsonFetch<{ avatarUrl?: string }>(`/host/openwop-app/roster/${id}`)).body.avatarUrl).toBe(goodUri);
 
     // null clears it.
-    await jsonFetch(`/v1/host/openwop-app/roster/${id}`, { method: 'PATCH', body: JSON.stringify({ avatarUrl: null }) });
-    expect((await jsonFetch<{ avatarUrl?: string }>(`/v1/host/openwop-app/roster/${id}`)).body.avatarUrl).toBeUndefined();
+    await jsonFetch(`/host/openwop-app/roster/${id}`, { method: 'PATCH', body: JSON.stringify({ avatarUrl: null }) });
+    expect((await jsonFetch<{ avatarUrl?: string }>(`/host/openwop-app/roster/${id}`)).body.avatarUrl).toBeUndefined();
   });
 
   it('round-trips heartbeatIntervalMs + autonomyLevel through PATCH→GET and validates them', async () => {
-    const created = await jsonFetch<{ rosterId: string }>('/v1/host/openwop-app/roster', {
+    const created = await jsonFetch<{ rosterId: string }>('/host/openwop-app/roster', {
       method: 'POST',
       body: JSON.stringify({ persona: 'Hb', agentRef: { agentId: 'core.openwop.agents.brief-writer' } }),
     });
@@ -272,46 +273,46 @@ describe('roster routes + board attribution (sqlite memory app)', () => {
 
     // A negative cadence is rejected.
     expect(
-      (await jsonFetch(`/v1/host/openwop-app/roster/${id}`, { method: 'PATCH', body: JSON.stringify({ heartbeatIntervalMs: -2 }) })).status, // -1 is now the ADR 0313 OFF sentinel; other negatives still reject
+      (await jsonFetch(`/host/openwop-app/roster/${id}`, { method: 'PATCH', body: JSON.stringify({ heartbeatIntervalMs: -2 }) })).status, // -1 is now the ADR 0313 OFF sentinel; other negatives still reject
     ).toBe(400);
 
     // A positive cadence + autonomy level persist and round-trip on GET.
-    const ok = await jsonFetch(`/v1/host/openwop-app/roster/${id}`, {
+    const ok = await jsonFetch(`/host/openwop-app/roster/${id}`, {
       method: 'PATCH',
       body: JSON.stringify({ heartbeatIntervalMs: 900_000, autonomyLevel: 'review' }),
     });
     expect(ok.status).toBe(200);
-    const after = await jsonFetch<{ heartbeatIntervalMs?: number; autonomyLevel?: string }>(`/v1/host/openwop-app/roster/${id}`);
+    const after = await jsonFetch<{ heartbeatIntervalMs?: number; autonomyLevel?: string }>(`/host/openwop-app/roster/${id}`);
     expect(after.body.heartbeatIntervalMs).toBe(900_000);
     expect(after.body.autonomyLevel).toBe('review');
 
     // 0 disables the heartbeat (the field is cleared, not stored as 0).
-    await jsonFetch(`/v1/host/openwop-app/roster/${id}`, { method: 'PATCH', body: JSON.stringify({ heartbeatIntervalMs: 0 }) });
-    expect((await jsonFetch<{ heartbeatIntervalMs?: number }>(`/v1/host/openwop-app/roster/${id}`)).body.heartbeatIntervalMs).toBeUndefined();
+    await jsonFetch(`/host/openwop-app/roster/${id}`, { method: 'PATCH', body: JSON.stringify({ heartbeatIntervalMs: 0 }) });
+    expect((await jsonFetch<{ heartbeatIntervalMs?: number }>(`/host/openwop-app/roster/${id}`)).body.heartbeatIntervalMs).toBeUndefined();
   });
 
   it('decorates GET responses with the resolved heartbeat cadence (ADR 0313 D3)', async () => {
-    const created = await jsonFetch<{ rosterId: string; heartbeat?: { effectiveIntervalMs: number; agentTurnFallback: boolean } }>('/v1/host/openwop-app/roster', {
+    const created = await jsonFetch<{ rosterId: string; heartbeat?: { effectiveIntervalMs: number; agentTurnFallback: boolean } }>('/host/openwop-app/roster', {
       method: 'POST',
       body: JSON.stringify({ persona: 'HbChip', agentRef: { agentId: 'core.openwop.agents.brief-writer' } }),
     });
     const id = created.body.rosterId;
 
     // Unconfigured entry ⇒ the host default (10 min in this test env) surfaces read-time.
-    const fresh = await jsonFetch<{ heartbeatIntervalMs?: number; heartbeat?: { effectiveIntervalMs: number; agentTurnFallback: boolean } }>(`/v1/host/openwop-app/roster/${id}`);
+    const fresh = await jsonFetch<{ heartbeatIntervalMs?: number; heartbeat?: { effectiveIntervalMs: number; agentTurnFallback: boolean } }>(`/host/openwop-app/roster/${id}`);
     expect(fresh.body.heartbeatIntervalMs).toBeUndefined(); // decoration, never stored
     expect(fresh.body.heartbeat?.effectiveIntervalMs).toBe(600_000);
     expect(typeof fresh.body.heartbeat?.agentTurnFallback).toBe('boolean');
 
     // The -1 sentinel resolves to 0 (checks off) on the wire.
-    const off = await jsonFetch<{ heartbeat?: { effectiveIntervalMs: number } }>(`/v1/host/openwop-app/roster/${id}`, {
+    const off = await jsonFetch<{ heartbeat?: { effectiveIntervalMs: number } }>(`/host/openwop-app/roster/${id}`, {
       method: 'PATCH',
       body: JSON.stringify({ heartbeatIntervalMs: -1 }),
     });
     expect(off.body.heartbeat?.effectiveIntervalMs).toBe(0);
 
     // The list surface carries the same decoration.
-    const list = await jsonFetch<{ roster: Array<{ rosterId: string; heartbeat?: { effectiveIntervalMs: number } }> }>('/v1/host/openwop-app/roster');
+    const list = await jsonFetch<{ roster: Array<{ rosterId: string; heartbeat?: { effectiveIntervalMs: number } }> }>('/host/openwop-app/roster');
     const row = list.body.roster.find((r) => r.rosterId === id);
     expect(row?.heartbeat?.effectiveIntervalMs).toBe(0);
   });
@@ -319,7 +320,7 @@ describe('roster routes + board attribution (sqlite memory app)', () => {
   it('does NOT fire the trigger when the bound roster member is disabled (RFC 0086 §A)', async () => {
     const triggerWorkflowId = (await jsonFetch<{ fixtures?: string[] }>('/.well-known/openwop')).body.fixtures?.[0];
     // A disabled member.
-    const sam = await jsonFetch<{ rosterId: string }>('/v1/host/openwop-app/roster', {
+    const sam = await jsonFetch<{ rosterId: string }>('/host/openwop-app/roster', {
       method: 'POST',
       body: JSON.stringify({
         persona: 'Sam',
@@ -328,15 +329,15 @@ describe('roster routes + board attribution (sqlite memory app)', () => {
         enabled: false,
       }),
     });
-    const board = await jsonFetch<{ id: string }>('/v1/host/openwop-app/kanban/boards', {
+    const board = await jsonFetch<{ id: string }>('/host/openwop-app/kanban/boards', {
       method: 'POST',
       body: JSON.stringify({ name: "Sam's board", rosterId: sam.body.rosterId }),
     });
-    const card = await jsonFetch<{ id: string }>(`/v1/host/openwop-app/kanban/boards/${board.body.id}/cards`, {
+    const card = await jsonFetch<{ id: string }>(`/host/openwop-app/kanban/boards/${board.body.id}/cards`, {
       method: 'POST',
       body: JSON.stringify({ title: 'x', columnId: 'doing' }),
     });
-    const moved = await jsonFetch<{ triggeredRunId: string | null }>(`/v1/host/openwop-app/kanban/cards/${card.body.id}`, {
+    const moved = await jsonFetch<{ triggeredRunId: string | null }>(`/host/openwop-app/kanban/cards/${card.body.id}`, {
       method: 'PATCH',
       body: JSON.stringify({ columnId: 'todo' }),
     });

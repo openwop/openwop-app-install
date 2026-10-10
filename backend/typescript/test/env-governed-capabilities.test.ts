@@ -20,7 +20,7 @@ import http from 'node:http';
 import { createApp } from '../src/index.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 
-const PATH = '/v1/host/openwop-app/feature-toggles/admin/env-governed';
+const PATH = '/host/openwop-app/feature-toggles/admin/env-governed';
 const ADMIN = { authorization: 'Bearer dev-token' };
 
 interface Lever { id: string; envVar: string; enabled: boolean }

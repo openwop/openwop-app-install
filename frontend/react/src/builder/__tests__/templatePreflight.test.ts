@@ -49,6 +49,12 @@ describe('runsWithZeroConnections', () => {
     expect(runsWithZeroConnections({ ...base, requirements: { missingNodeTypeIds: [], connections: [{ ref: 'r', providerId: 'x', providerInstalled: true }] } })).toBe(false);
     expect(runsWithZeroConnections({ ...base, requirements: { missingNodeTypeIds: ['t'], connections: [] } })).toBe(false);
   });
+  it('false when a node is installed at a version other than the one pinned (ADR 0766 D3 / grade-ux U-1)', () => {
+    expect(runsWithZeroConnections({ ...base, requirements: {
+      missingNodeTypeIds: [], connections: [],
+      pinMismatches: [{ typeId: 't', label: 'T', pinned: '1.0.0', installed: '1.1.0' }],
+    } })).toBe(false);
+  });
 });
 
 // ADR 0191 Phase 2 — join host-derived required (toggle-gated) features against

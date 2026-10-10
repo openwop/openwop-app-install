@@ -28,6 +28,7 @@
  * session mint is once-per-session, which is why `allowReverseScan` exists as
  * an explicit opt-in rather than a default).
  */
+import { agentStorageId, resolveAgentIdSpelling } from '../executor/agentIdAliases.js';
 import { getRosterEntry, listRoster, type RosterEntry } from './rosterService.js';
 import { getAgentRegistry } from '../executor/agentRegistry.js';
 import { createLogger } from '../observability/logger.js';
@@ -58,8 +59,13 @@ function pruneReverseCache(now: number): void {
 
 async function reverseLookup(tenantId: string, agentId: string): Promise<RosterEntry | null> {
   const cached = reverseCache.get(tenantId);
+  // Grade-code ARCD-1 — keyed by the SPELLING-INDEPENDENT storage id. ADR 0763
+  // left roster rows unmigrated, so a member may store a legacy
+  // `feature.*.agents.*` id while dispatch resolves the canonical one; a raw key
+  // missed that member entirely (no profile, knowledge, memory or guardrails).
+  const key = agentStorageId(agentId);
   if (cached && Date.now() - cached.at < REVERSE_TTL_MS) {
-    return cached.byAgentId.get(agentId) ?? null;
+    return cached.byAgentId.get(key) ?? null;
   }
   try {
     const roster = await listRoster(tenantId);
@@ -71,14 +77,15 @@ async function reverseLookup(tenantId: string, agentId: string): Promise<RosterE
     // work snapshot reads `workflows`/`rosterId` only); caching it pinned
     // ~0.2-1.5MB per tenant.
     for (const e of roster) {
-      if (byAgentId.has(e.agentRef.agentId)) continue;
+      const k = agentStorageId(e.agentRef.agentId);
+      if (byAgentId.has(k)) continue;
       const { avatarUrl: _avatar, ...slim } = e;
-      byAgentId.set(e.agentRef.agentId, slim);
+      byAgentId.set(k, slim);
     }
     const now = Date.now();
     pruneReverseCache(now);
     reverseCache.set(tenantId, { at: now, byAgentId });
-    return byAgentId.get(agentId) ?? null;
+    return byAgentId.get(key) ?? null;
   } catch (err) {
     // CS-XC-4 — this swallow was SILENT: a persistent roster-store fault made
     // every reverse identity degrade invisibly (personas/tools quietly missing).
@@ -170,9 +177,14 @@ export async function resolveAgentIdentity(
   // Reverse: find the roster entry that instantiates this registry agent.
   // TTL-cached per tenant (ADR 0277 P2) so per-turn callers stay cheap; still
   // behind the explicit opt-in so id-only normalizations pay nothing.
+  // ADR 0763 — a legacy `feature.*.agents.*` id speaks as the renamed agent once
+  // one is registered (canonical-if-registered: inert before the rename). The
+  // profile / memory / override KEYS are spelling-independent (`agentStorageId`),
+  // so this changes which id is REPORTED, never which state is read.
+  const agentId = resolveAgentIdSpelling(id, (candidate) => getAgentRegistry().has(candidate));
   if (opts?.allowReverseScan) {
-    const entry = await reverseLookup(tenantId, id);
-    if (entry) return { agentId: id, rosterId: entry.rosterId, profileId: entry.rosterId, entry };
+    const entry = await reverseLookup(tenantId, agentId);
+    if (entry) return { agentId, rosterId: entry.rosterId, profileId: entry.rosterId, entry };
   }
-  return { agentId: id, profileId: id };
+  return { agentId, profileId: agentId };
 }

@@ -216,6 +216,7 @@ export function CanvasEditorPage<
   // toggle off), so the full-screen error must not offer a Retry that reloads
   // into the same 404.
   const [errorPermanent, setErrorPermanent] = useState(false);
+  const [errorDetail, setErrorDetail] = useState<string | null>(null);
   const [conflict, setConflict] = useState(false);
   const [renamingIdx, setRenamingIdx] = useState<number | null>(null);
   const [renameVal, setRenameVal] = useState('');
@@ -327,8 +328,14 @@ export function CanvasEditorPage<
         // failures so a disabled feature's deep-link reads intentional.
         if (live) {
           const status = (e as { status?: number }).status;
-          setErrorPermanent(status === 404);
-          setError(status === 404 ? t('notAvailable') : e instanceof Error ? e.message : t('loadError'));
+          // ADR 0835 D3 — a 422 is designed too: the run artifact fails the
+          // type's closed-world validator, and re-loading reaches the same 422,
+          // so it is permanent and says what to do (the server detail rides
+          // behind a disclosure; it names internal type ids).
+          const invalid = status === 422 && Boolean(fromArtifact);
+          setErrorPermanent(status === 404 || invalid);
+          setErrorDetail(invalid && e instanceof Error ? e.message : null);
+          setError(status === 404 ? t('notAvailable') : invalid ? t('invalidArtifact') : e instanceof Error ? e.message : t('loadError'));
         }
       } finally {
         if (live) setLoading(false);
@@ -1824,6 +1831,8 @@ export function CanvasEditorPage<
         <Notice variant="error">
           {error}
           {!errorPermanent && <> <Button variant="secondary" size="sm" onClick={() => window.location.reload()}>{t('retry')}</Button></>}
+          {errorDetail && <details className="u-mt-2"><summary>{t('invalidArtifactDetail')}</summary>{errorDetail}</details>}
+          {errorPermanent && fromArtifact && <> <Button variant="secondary" size="sm" onClick={() => navigate(-1)}>{t('back')}</Button></>}
         </Notice>
       </div>
     );

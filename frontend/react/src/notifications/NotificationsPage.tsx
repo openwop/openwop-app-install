@@ -10,7 +10,7 @@
  */
 
 import { Button } from '../ui/Button.js';
-import { useEffect, useMemo, useRef, useState, type Ref } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type Ref } from 'react';
 import { useTranslation } from 'react-i18next';
 import { confirm } from '../ui/confirm.js';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
@@ -101,7 +101,11 @@ export function NotificationsPage(): JSX.Element {
     if (!deepLink.notificationId && !deepLink.approvalId) return null;
     return notifications.find((n) => matchesInboxDeepLink(n, deepLink)) ?? null;
   }, [notifications, deepLink]);
-  const focusId = target?.notificationId ?? '';
+  // ADR 0862 — when the approval's own CARD took focus (it shows the fields and the
+  // decide buttons), the notification row must not steal it back.
+  const [approvalCardFocused, setApprovalCardFocused] = useState(false);
+  const onApprovalFocused = useCallback(() => setApprovalCardFocused(true), []);
+  const focusId = approvalCardFocused ? '' : target?.notificationId ?? '';
 
   // One-shot (per resolved target): if the target isn't visible under the
   // current tab, switch to the tab that shows it — else the deep-link would
@@ -273,7 +277,7 @@ export function NotificationsPage(): JSX.Element {
         <Notice variant="warning" announce={t('staleConnectionNotice')}>{t('staleConnectionNotice')}</Notice>
       ) : null}
 
-      <NeedsYouInbox onResolved={() => void refresh()} />
+      <NeedsYouInbox onResolved={() => void refresh()} focusApprovalId={deepLink.approvalId} onApprovalFocused={onApprovalFocused} />
 
       {!(error && notifications.length === 0) && <KeyFigureBand
         figures={figures}
@@ -463,7 +467,7 @@ function NotificationCard({
       {actionHref && !actionIsSelf ? (
         <div className="u-mb-2">
           <Link to={actionHref} className="inline-link u-fs-12">
-            {t(actionLabelKeyFor(notification.type))} →
+            {t(actionLabelKeyFor(notification.type, notification.actionUrl))} →
           </Link>
         </div>
       ) : notification.runId ? (
@@ -511,6 +515,10 @@ function InlineInterruptResolver({ runId, interruptId, onResolved }: ResolverPro
   const { t } = useTranslation('notifications');
   const [open, setOpen] = useState<OpenInterrupt | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // ADR 0778 (`APUX-14`) — `open` is null both while the fetch is pending and
+  // when nothing is open, so every row briefly claimed "resolved elsewhere"
+  // on load. Track the settle separately.
+  const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -525,6 +533,7 @@ function InlineInterruptResolver({ runId, interruptId, onResolved }: ResolverPro
           ? (list.find((i) => i.interruptId === interruptId) ?? list[0] ?? null)
           : (list[0] ?? null);
         setOpen(match);
+        setLoaded(true);
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : String(err));
       }
@@ -533,6 +542,7 @@ function InlineInterruptResolver({ runId, interruptId, onResolved }: ResolverPro
   }, [runId, interruptId]);
 
   if (error) return <Notice variant="error">{t('interruptLoadFailed')}</Notice>; // R2 IB-SP-8
+  if (!loaded) return <div className="muted u-fs-12" aria-busy="true">{t('common:loading')}</div>;
   if (!open) {
     return (
       <div className="muted u-fs-12">

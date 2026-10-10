@@ -1276,7 +1276,7 @@ export async function markAsPaid(
         let statusLink = '';
         try {
           const { createLink } = await import('../sharing/sharingService.js');
-          const link = await createLink(next.tenantId, next.orgId, 'system:commerce', { resourceType: 'commerce_order', resourceId: next.orderId, expiresInDays: 90 });
+          const link = await createLink(next.tenantId, next.orgId, 'system:commerce', { resourceType: 'commerce_order', resourceId: next.orderId, expiresInDays: 90 }, { lane: 'visitor', why: 'the buyer receipt link, minted on payment (ADR 0176 money truth)' });
           const base = (process.env.OPENWOP_PUBLIC_BASE_URL ?? '').replace(/\/+$/, '');
           if (base) statusLink = `\n\nTrack your order: ${base}/shared/${link.token}`;
         } catch { /* sharing unavailable — plain confirmation */ }

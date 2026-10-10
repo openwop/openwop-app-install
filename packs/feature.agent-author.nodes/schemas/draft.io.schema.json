@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/feature.agent-author.nodes/1.1.0/draft.io.schema.json",
+  "$id": "https://packs.openwop.dev/feature.agent-author.nodes/1.1.1/draft.io.schema.json",
   "title": "Agent Author Draft Object",
   "type": "object",
   "required": ["persona", "agentId"],

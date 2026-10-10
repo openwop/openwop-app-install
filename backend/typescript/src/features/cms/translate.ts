@@ -98,7 +98,7 @@ export async function translateSectionData(
   // ADR 0110 OQ-C: route through the single headless-provider resolver instead of a
   // hardcoded managed dispatch. For 'text' the managed provider always qualifies, so this is
   // behaviourally identical to before, plus a BYOK-default fallback if managed is unavailable.
-  const dispatch = await resolveHeadlessAi(tenantId, 'text');
+  const dispatch = await resolveHeadlessAi(tenantId, 'text', { featureId: 'cms' });
   if (!dispatch) throw new OpenwopError('internal_error', 'No text-capable AI provider is available for translation.', 503, {});
 
   // ADR 0592 §7 (CMSL-2/CMSLWF-4) — invalid model output is a TYPED failure

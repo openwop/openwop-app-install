@@ -62,14 +62,14 @@ function client(): Client {
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
 async function ownerWithOrg(who: string): Promise<{ c: Client; orgId: string; tenantId: string }> {
   const c = client();
-  const login = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail(who) });
+  const login = await c.post('/host/openwop-app/test/login', { email: uniqEmail(who) });
   expect(login.status, JSON.stringify(login.body)).toBe(201);
-  const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   // The login response carries the resolved tenant for the cookie session.
   return { c, orgId: org.body.orgId, tenantId: login.body.user.tenantId as string };
 }
 
-const NB = '/v1/host/openwop-app/notebooks';
+const NB = '/host/openwop-app/notebooks';
 
 describe('notebooks — grounded chat ensure (ADR 0084 Phase 2)', () => {
   it('POST /:id/chat returns a conversationId whose ownerSubject is project:<notebookId> (idempotent)', async () => {
@@ -87,8 +87,8 @@ describe('notebooks — grounded chat ensure (ADR 0084 Phase 2)', () => {
     expect(meta?.type).toBe('group');
     // The Notebook Research Analyst is in the room (the grounded analyst — a
     // conversation participant; ADR 0084 Phase 4 repointed off the KB Researcher).
-    expect((meta?.participants ?? []).some((p) => p.subjectRef === 'agent:feature.notebooks.agents.researcher')).toBe(true);
-    expect((meta?.participants ?? []).some((p) => p.subjectRef === 'agent:feature.kb.agents.researcher')).toBe(false);
+    expect((meta?.participants ?? []).some((p) => p.subjectRef === 'agent:vendor.openwop-app.notebooks.agents.researcher')).toBe(true);
+    expect((meta?.participants ?? []).some((p) => p.subjectRef === 'agent:vendor.openwop-app.kb.agents.researcher')).toBe(false);
 
     // Idempotent: re-opening returns the SAME deterministic conversation id.
     const reopen = await c.post(`${NB}/${id}/chat`);
@@ -110,7 +110,7 @@ describe('notebooks — grounded chat ensure (ADR 0084 Phase 2)', () => {
     // via `deleteConversationCompletely`; this door used to skip it, orphaning the
     // session + messages + meta under a deleted project — retained, unreachable
     // chat data with no delete path short of tenant teardown.
-    const CHAT = '/v1/host/openwop-app/chat/sessions';
+    const CHAT = '/host/openwop-app/chat/sessions';
     const { c, orgId, tenantId } = await ownerWithOrg('nbdel-owner');
     const id = (await c.post(NB, { orgId, name: 'Doomed notebook' })).body.notebook.id as string;
     const conversationId = (await c.post(`${NB}/${id}/chat`)).body.conversationId as string;
@@ -130,9 +130,9 @@ describe('notebooks — grounded chat ensure (ADR 0084 Phase 2)', () => {
   });
 });
 
-describe('feature.notebooks.agents.researcher — Research Analyst pack (ADR 0084 Phase 4)', () => {
+describe('vendor.openwop-app.notebooks.agents.researcher — Research Analyst pack (ADR 0084 Phase 4)', () => {
   it('is loaded into the agent registry at boot, scoped to RESEARCH/research', async () => {
-    const agent = await getAgentRegistry().resolve('feature.notebooks.agents.researcher');
+    const agent = await getAgentRegistry().resolve('vendor.openwop-app.notebooks.agents.researcher');
     expect(agent).not.toBeNull();
     expect(agent!.persona).toBe('RESEARCH');
     expect(agent!.modelClass).toBe('research');
@@ -142,7 +142,7 @@ describe('feature.notebooks.agents.researcher — Research Analyst pack (ADR 008
   });
 
   it('is tool-allowlisted to the notebooks feature chat tools only (CFP-1 — registered, resolvable ids)', async () => {
-    const agent = await getAgentRegistry().resolve('feature.notebooks.agents.researcher');
+    const agent = await getAgentRegistry().resolve('vendor.openwop-app.notebooks.agents.researcher');
     const allow = (agent!.toolAllowlist ?? []) as string[];
     // CFP-1: the allowlist now names the feature's REGISTERED chat tools
     // (registerFeatureAgentTool), not the raw node typeIds that resolved to nothing

@@ -33,15 +33,14 @@ afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
 });
 
-async function create(key: string, major: '1' | '2'): Promise<{ status: number; replay: string | null; runId: string }> {
-  const path = major === '2' ? '/runs' : '/v1/runs';
-  const res = await fetch(`${BASE}${path}`, {
+async function create(key: string): Promise<{ status: number; replay: string | null; runId: string }> {
+  const res = await fetch(`${BASE}/runs`, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
       authorization: 'Bearer dev-token',
       'idempotency-key': key,
-      ...(major === '2' ? { 'OpenWOP-Version': '2' } : {}),
+      'OpenWOP-Version': '2',
     },
     body: JSON.stringify(BODY),
   });
@@ -52,20 +51,13 @@ async function create(key: string, major: '1' | '2'): Promise<{ status: number; 
 describe('idempotent replay keeps the major-2 run-id projection', () => {
   it('under major 2 the replay returns the IDENTICAL tenant-bound runId, flagged as a replay', async () => {
     const key = `replay-v2-${Date.now()}`;
-    const first = await create(key, '2');
+    const first = await create(key);
     expect(first.status, JSON.stringify(first)).toBe(201);
     expect(first.runId, 'identity.md §5: a major-2 run id is tenant-bound').toContain('/');
-    const second = await create(key, '2');
+    const second = await create(key);
     expect(second.replay, 'the second response must be the cached replay').toBe('true');
     expect(second.runId, 'one key, one run — and one id SHAPE').toBe(first.runId);
   });
 
-  it('under major 1 the replay still returns the bare runId (unchanged)', async () => {
-    const key = `replay-v1-${Date.now()}`;
-    const first = await create(key, '1');
-    const second = await create(key, '1');
-    expect(second.replay).toBe('true');
-    expect(second.runId).toBe(first.runId);
-    expect(first.runId).not.toContain('/');
-  });
+  // ADR 0812 P3c-0 — the major-1 replay leg is deleted with v1; the major-2 leg above replaces it.
 });

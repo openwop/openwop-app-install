@@ -27,8 +27,17 @@ const LIST = join(FE, 'test-live-fetch-allowlist.txt');
 /** Only ever edit this DOWNWARD, EXCEPT when the guard discovers a file the census
  * could not see — the 87 came from one run and some calls are racy, so 87 was a
  * lower bound. 88 was the first such discovery (failedReadDecisions.test.tsx);
- * 85 after ADR 0661 phase 3 retired brandRound2, strategyR3, strategyR4. */
-const CEILING = 58;
+ * 85 after ADR 0661 phase 3 retired brandRound2, strategyR3, strategyR4.
+ * 56 after /grade-tests wave 3 mocked profilePageStates' addPortfolio.
+ * 54 after wave 4 mocked the CRM orgsFailedNotEmpty + secondaryReadHonesty reads.
+ * 53 after wave 6 mocked kb writeFeedback's getDocument (the reader cases).
+ * 52 after wave 7 mocked csm/orgsFailedInertForm's listCrmCompanies.
+ * 50 after wave 8 mocked getTrend in analytics eventsReadHonesty + orgsFailedGuard.
+ * 47 after wave 9: email campaignLogDeepLink + sendConfirm mock getProviderStatus;
+ * runs emailErasedHintLink refuses the discovery read (runDetailIntegrity precedent).
+ * 44 after wave 10 mocked marketplace failedReadStates, orgsFailedGuard and
+ *   purchaseReturn (listMyOrders / listOrgs / effective access). */
+const CEILING = 44;
 
 const fail = (msg) => {
   console.error(`✗ check-live-fetch-allowlist: ${msg}`);

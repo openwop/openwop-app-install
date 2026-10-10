@@ -29,12 +29,12 @@ async function call(method: string, path: string, body?: unknown) {
 
 describe('node.completed payload carries nodeId (nodeCompleted.required)', () => {
   it('a real run emits node.completed whose PAYLOAD has nodeId equal to the envelope nodeId', async () => {
-    const c = await call('POST', '/v1/runs', { workflowId: 'conformance-noop', inputs: {} });
+    const c = await call('POST', '/runs', { workflowId: 'conformance-noop', inputs: {} });
     expect(c.status).toBe(201);
     const runId = c.json.runId as string;
     let events: any[] = [];
     for (let i = 0; i < 40; i++) {
-      const p = await call('GET', `/v1/runs/${runId}/events/poll`);
+      const p = await call('GET', `/runs/${runId}/events/poll`);
       events = p.json?.events ?? [];
       if (events.some((e) => e.type === 'run.completed' || e.type === 'run.failed')) break;
       await new Promise((r) => setTimeout(r, 100));

@@ -6,6 +6,23 @@
 **Composes:** the capability-firewall (**ADR 0135** — already provides `require-approval` + `interrupt.approval` cards + the approval ledger), the conversation tool loop (`host/conversationToolLoop.ts`), the code-exec HITL (**ADR 0114** §Phase 3) + the code-exec **builtin agent tool** (ADR 0146 / #957), the interrupt primitive (RFC 0005 / `interrupt.md`), and the model-router first-exchange **run-metadata stamp** (ADR 0130) for replay-safety.
 **Source plan:** the recurring "should I restore the *Run code?* approval gate on the chat path?" open loop (code-exec saga, ADR 0146) — generalized, per the user's request, into a user-controlled permission mode rather than a code-exec-specific gate.
 
+> **CORRECTED 2026-10-06 (ADR 0834, feature loop round 2 row 20).** Measured on
+> `a767ee948`, four claims here were false or became unsafe:
+> 1. **"The existing `interrupt.approval` card."** No such card exists for chat tool calls;
+>    a held call was visible only in a gear-icon dialog with no pending indicator. ADR 0834
+>    D6 surfaces it on the composer control.
+> 2. **"`bypass` ⇒ `require-approval` → `allow`."** It also downgraded asks the user does not
+>    own — a tenant `require-approval` rule, an `enforce` default, the superadmin platform
+>    floor. ADR 0834 D2: bypass skips only the user's own safe-mode (`baseline`) asks.
+> 3. **"The setting is per-user."** Any participant who could post in a shared conversation
+>    could send `bypass`, and the tools then ran as the OWNER. ADR 0834 D3: bypass is
+>    honoured only for the run's acting principal; the composer offers it only to the owner.
+> 4. **"Rides the run log ⇒ deterministic on `:fork`."** Chat exchanges arrive over HTTP and
+>    are not replayed; recorded tool VERDICTS replay, and a fork's next turn takes the mode
+>    its new request sends.
+> And the "file-write" member of the sensitive set (`openwop:core.files.write`) was never a
+> registered agent tool; it is removed, and new asks are declared on the tool.
+
 ---
 
 ## Why this exists

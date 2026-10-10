@@ -1,6 +1,15 @@
 /**
- * Email bounce/complaint webhook ingestion (ADR 0241). Parser unit tests +
- * signature-verified service ingestion + the public receive route.
+ * Email bounce/complaint webhook ingestion (ADR 0241) + soft-bounce escalation
+ * (ADR 0249). Parser unit tests + signature-verified service ingestion + the public
+ * receive route.
+ *
+ * Sabotage-witnessed (w9 grade-tests): accepting any SendGrid signature, dropping the
+ * Postmark constant-time compare (the mismatch fixtures are SAME-LENGTH on purpose —
+ * a different-length secret is refused by the length short-circuit and never reaches
+ * `timingSafeEqual`), `>=` → `>` on the escalation threshold, dropping the
+ * success-resets-streak leg, dropping single-object Postmark tolerance, treating
+ * `deferred` as a hard bounce, and mapping an unknown webhook to anything but
+ * not_found each turn a case red.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -11,7 +20,7 @@ import {
   parseSendgridEvents, parsePostmarkEvents, verifyPostmarkBasic,
   setWebhookConfig, ingestBounceWebhook, __resetBounceWebhookStore,
 } from '../src/features/email/bounceWebhooks.js';
-import { isSuppressed, __clearSuppressions } from '../src/features/crm/suppressionService.js';
+import { isSuppressed, listSuppressions, __clearSuppressions } from '../src/features/crm/suppressionService.js';
 
 let BASE: string;
 let server: http.Server;
@@ -61,6 +70,8 @@ describe('ADR 0241 — Postmark Basic verification', () => {
   it('accepts the exact user:pass, rejects a mismatch / missing', () => {
     const b64 = Buffer.from('user:pass').toString('base64');
     expect(verifyPostmarkBasic({ expectedUserPass: 'user:pass', authorizationHeader: `Basic ${b64}` }).ok).toBe(true);
+    // SAME length as the secret, so the constant-time compare (not the length check) decides.
+    expect(verifyPostmarkBasic({ expectedUserPass: 'user:pass', authorizationHeader: `Basic ${Buffer.from('user:pasz').toString('base64')}` }).ok).toBe(false);
     expect(verifyPostmarkBasic({ expectedUserPass: 'user:pass', authorizationHeader: `Basic ${Buffer.from('user:wrong').toString('base64')}` }).ok).toBe(false);
     expect(verifyPostmarkBasic({ expectedUserPass: 'user:pass', authorizationHeader: undefined }).ok).toBe(false);
   });
@@ -98,7 +109,7 @@ describe('ADR 0241 — signed SendGrid ingestion (service)', () => {
 
   it('unknown webhookId → not_found', async () => {
     const r = await ingestBounceWebhook({ webhookId: 'ewh:nope', rawBody: '[]', body: [], headers: {}, now: Date.now() });
-    expect(r.status).toBe('not_found');
+    expect(r).toEqual({ status: 'not_found' });
   });
 
   it('replay is harmless — re-ingesting the same signed batch keeps one suppression', async () => {
@@ -108,8 +119,9 @@ describe('ADR 0241 — signed SendGrid ingestion (service)', () => {
     const headers = { sendgridSignature: signSendgrid(ts, rawBody), sendgridTimestamp: ts };
     await ingestBounceWebhook({ webhookId: cfg.webhookId, rawBody, body: JSON.parse(rawBody), headers, now: Date.now() });
     const second = await ingestBounceWebhook({ webhookId: cfg.webhookId, rawBody, body: JSON.parse(rawBody), headers, now: Date.now() });
-    expect(second.status).toBe('ok');
+    expect(second).toEqual({ status: 'ok', suppressed: 1, escalated: 0, failed: 0 });
     expect(await isSuppressed(T, 'dup@ex.com')).toBe(true);
+    expect((await listSuppressions(T)).filter((s) => s.email === 'dup@ex.com'), 'one row, not one per delivery').toHaveLength(1);
   });
 });
 
@@ -117,7 +129,7 @@ describe('ADR 0241 — public receive route', () => {
   it('a Postmark HardBounce with valid Basic auth suppresses; unknown webhook 404s; bad auth 401s', async () => {
     const userPass = 'pmuser:pmpass';
     const cfg = await setWebhookConfig({ tenantId: T, orgId: 'o1', provider: 'postmark', verificationSecret: userPass });
-    const url = `${BASE}/v1/host/openwop-app/public-email/events/${cfg.webhookId}`;
+    const url = `${BASE}/host/openwop-app/public-email/events/${cfg.webhookId}`;
     const basic = `Basic ${Buffer.from(userPass).toString('base64')}`;
 
     const ok = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', authorization: basic }, body: JSON.stringify({ RecordType: 'Bounce', Type: 'HardBounce', Email: 'route@ex.com' }) });
@@ -125,10 +137,13 @@ describe('ADR 0241 — public receive route', () => {
     expect(((await ok.json()) as { suppressed: number }).suppressed).toBe(1);
     expect(await isSuppressed(T, 'route@ex.com')).toBe(true);
 
-    const badAuth = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Basic bad' }, body: JSON.stringify({ RecordType: 'Bounce', Type: 'HardBounce', Email: 'x@ex.com' }) });
+    // Same-length wrong credential: the constant-time compare is what refuses it.
+    const wrong = `Basic ${Buffer.from('pmuser:pmpasz').toString('base64')}`;
+    const badAuth = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', authorization: wrong }, body: JSON.stringify({ RecordType: 'Bounce', Type: 'HardBounce', Email: 'x@ex.com' }) });
     expect(badAuth.status).toBe(401);
+    expect(await isSuppressed(T, 'x@ex.com'), 'a refused delivery suppresses nothing').toBe(false);
 
-    const unknown = await fetch(`${BASE}/v1/host/openwop-app/public-email/events/ewh:nope`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: basic }, body: '{}' });
+    const unknown = await fetch(`${BASE}/host/openwop-app/public-email/events/ewh:nope`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: basic }, body: '{}' });
     expect(unknown.status).toBe(404);
   });
 });
@@ -170,7 +185,7 @@ describe('ADR 0249 — soft-bounce escalation', () => {
     await send(cfg.webhookId, [{ email: 'reco@ex.com', event: 'delivered' }]);
     await send(cfg.webhookId, [soft('reco@ex.com')]);
     const reco = await send(cfg.webhookId, [soft('reco@ex.com')]);
-    expect(reco.status).toBe('ok');
+    expect(reco).toEqual({ status: 'ok', suppressed: 0, escalated: 0, failed: 0 });
     expect(await isSuppressed(T, 'reco@ex.com')).toBe(false);
 
     // A hard bounce suppresses immediately, regardless of any soft streak.

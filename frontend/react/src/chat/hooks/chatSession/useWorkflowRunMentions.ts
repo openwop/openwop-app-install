@@ -10,7 +10,7 @@
 import { useCallback, useEffect, useRef } from 'react';
 import i18n from '../../../i18n/index.js';
 import { cancelRun, createRun, getRun } from '../../../client/runsClient.js';
-import { errorReasonOf } from '../../../client/classifyHttpError.js';
+import { errorCodeOf, errorReasonOf } from '../../../client/classifyHttpError.js';
 import { subscribeToRun, type Subscription } from '../../../client/streamsClient.js';
 import { listOpenInterrupts } from '../../../client/interruptsClient.js';
 import { getSavedWorkflow } from '../../../builder/persistence/localStore.js';
@@ -21,11 +21,19 @@ import { getActiveConfig } from '../../../byok/lib/byokClient.js';
 // serializeWorkflow + registerWorkflow are lazy-imported at their one call site
 // (running a saved workflow) so builder/palette/catalogRegistry stays out of the
 // first-paint chat entry chunk.
-import type { WorkflowMentionEntry } from '../../lib/workflowMentions.js';
+import { humanizeVariableName } from '../../../ui/RunInputsForm.js';
+import { backendListsWorkflow, backendNodeCount, type WorkflowMentionEntry } from '../../lib/workflowMentions.js';
 import type { ChatMessage, ChatSession, WorkflowRunState } from '../../types.js';
 import { makeWorkflowRunHandlers, reconcileWorkflowRunFromLog, type WorkflowRunHandlerContext } from '../workflowRunSubscription.js';
 import type { ChatSessionCore } from './core.js';
 import { SAMPLE_DEFAULT_INPUTS } from './lib.js';
+import { takeStagedSlashInputs } from '../../lib/slashInputs.js';
+
+/** The server's own failure on a run snapshot, when it carries one. */
+function snapError(snap: unknown): { code: string; message: string } | null {
+  const e = (snap as { error?: { code?: unknown; message?: unknown } } | null)?.error;
+  return e && typeof e.code === 'string' && typeof e.message === 'string' ? { code: e.code, message: e.message } : null;
+}
 
 export function useWorkflowRunMentions(
   core: ChatSessionCore,
@@ -98,7 +106,12 @@ export function useWorkflowRunMentions(
                 workflowRun: {
                   ...mm.workflowRun,
                   status: next,
-                  ...(next === 'failed' ? { error: { code: 'reconciled', message: 'Run failed; details in /runs.' } } : {}),
+                  // ADR 0764 D4 — the server's own error when the snapshot carries
+                  // one, else a translated pointer; and never overwrite an error the
+                  // event-log rebuild already recorded (it is the more specific one).
+                  ...(next === 'failed' && !mm.workflowRun.error
+                    ? { error: snapError(snap) ?? { code: 'reconciled', message: i18n.t('chat:workflowRunFailedSeeRuns') } }
+                    : {}),
                 },
               } : mm),
             }));
@@ -226,7 +239,12 @@ export function useWorkflowRunMentions(
       const { terminal, polled } = await reconcileWorkflowRunFromLog(ctx);
       if (terminal) return; // reconcile finalized + closed the sub
       if (polled) healFailures = 0;
-      else if (++healFailures > MAX_HEAL_FAILURES) return;
+      else if (++healFailures > MAX_HEAL_FAILURES) {
+        // ADR 0764 D4 (CHATWF-6) — giving up used to be SILENT, leaving the bubble
+        // claiming "running" forever. Say that live updates stopped instead.
+        ctx.updateWorkflowRun(runMsgId, (prev) => ({ ...prev, streamLost: true }));
+        return;
+      }
       if (workflowSubsRef.current.get(runMsgId) !== deadSub) return;
       openSub();
     };
@@ -248,6 +266,8 @@ export function useWorkflowRunMentions(
       if (!runId) continue;
       if (wf.status === 'completed' || wf.status === 'failed' || wf.status === 'cancelled') continue;
       if (workflowSubsRef.current.has(m.id)) continue; // already live
+      // Re-attaching: a previous tab's "updates stopped" no longer applies.
+      if (wf.streamLost) updateWorkflowRun(m.id, (prev) => ({ ...prev, streamLost: false }));
       const ctx: WorkflowRunHandlerContext = {
         runId, runMsgId: m.id, setSession, persistMessage: persistOrUpdateMessage,
         sessionId: sess.id, sessionTitle: sess.title, updateWorkflowRun, closeWorkflowSub,
@@ -283,6 +303,9 @@ export function useWorkflowRunMentions(
     // the swap — acceptable historical artifact; the wire content is
     // opaque to the BE.
     const trimmedTrailing = trailing?.trim() ?? '';
+    // ADR 0768 B2 — typed inputs from the composer's inline form. Taken FIRST and
+    // synchronously: consumed once, whatever path this dispatch returns by.
+    const structured = takeStagedSlashInputs(entry.slug);
     const userMsg: ChatMessage = {
       id: crypto.randomUUID(),
       role: 'user',
@@ -292,13 +315,34 @@ export function useWorkflowRunMentions(
     const runMsgId = crypto.randomUUID();
     const startedAt = new Date().toISOString();
 
-    // Builder-saved workflows live in localStorage and need to be
-    // registered with the backend's in-memory catalog before /v1/runs
-    // resolves them. Hardcoded `sample.*` workflows are already in the
-    // catalog — skip registration and node-name population.
-    const isBuilderWorkflow = entry.workflowId.startsWith('wf_');
-    const saved = isBuilderWorkflow ? getSavedWorkflow(entry.workflowId) : undefined;
+    // Every workflow but the built-in demo sample is an OWNED definition the
+    // server (or this browser's draft cache) holds: read it for the step count,
+    // step names and default inputs. This used to test `startsWith('wf_')`,
+    // which is only how a blank workflow minted in THIS browser is spelled —
+    // seeded starters (`wf.seed.…`), template copies (`wf.<chain>.<id>`) and
+    // forks all failed it and ran with no step count or names. An id is opaque.
+    const isBuilderWorkflow = !(entry.workflowId in SAMPLE_DEFAULT_INPUTS);
+    let saved = isBuilderWorkflow ? getSavedWorkflow(entry.workflowId) : undefined;
+    // ADR 0764 D4 (CHATWF-1) — the BACKEND is the workflow SoT (ADR 0163);
+    // localStorage is a cache. A builder workflow the picker listed from the
+    // ownership index but that was saved on another device used to be refused
+    // here as "deleted". Read the server copy instead (for step names + default
+    // inputs); it is never re-registered — the server already holds it.
+    let serverOwned = false;
     if (isBuilderWorkflow && !saved) {
+      try {
+        const { loadWorkflow } = await import('../../../builder/persistence/backendStore.js');
+        const remote = await loadWorkflow(entry.workflowId);
+        if (remote) { saved = remote; serverOwned = true; }
+      } catch {
+        // The server HAS it but the builder cannot materialize it (unknown node
+        // types) — still runnable server-side; start it without step names.
+        serverOwned = true;
+      }
+    }
+    // Only a definitive miss is "deleted". A server copy we could not read for a
+    // transport reason is attempted, and `POST /v1/runs` answers honestly.
+    if (isBuilderWorkflow && !saved && !serverOwned && !backendListsWorkflow(entry.workflowId)) {
       // The mention pointed to a workflow that's no longer in localStorage.
       const msg: ChatMessage = {
         id: crypto.randomUUID(),
@@ -333,7 +377,8 @@ export function useWorkflowRunMentions(
     // map rather than re-deriving one; serialize.ts warns that these must not
     // drift, and a second copy of the rule is exactly how they drift.
     const nodeNames: Record<string, string> = {};
-    let totalNodes = 0;
+    // The index's count covers a definition the builder cannot materialize.
+    let totalNodes = backendNodeCount(entry.workflowId) ?? 0;
     let inputs: Record<string, unknown> = SAMPLE_DEFAULT_INPUTS[entry.workflowId] ?? {};
     if (saved) {
       totalNodes = saved.nodes.length;
@@ -393,7 +438,9 @@ export function useWorkflowRunMentions(
     }
     if (declared.length > 0) {
       const required = declared.filter((v) => v.required);
-      if (trimmedTrailing.length > 0 && required.length === 1) {
+      if (structured) inputs = { ...inputs, ...structured };
+      // Trailing text fills the single required input only when the form left it empty.
+      if (trimmedTrailing.length > 0 && required.length === 1 && !(structured && required[0]!.name in structured)) {
         // Use the variable's REAL declared name, not the invented `text`.
         inputs = { ...inputs, [required[0]!.name]: trimmedTrailing };
       }
@@ -407,8 +454,13 @@ export function useWorkflowRunMentions(
           role: 'system',
           content: i18n.t('chat:workflowNeedsInputs', {
             name: entry.displayName,
-            fields: unmet.map((v) => v.name).join(', '),
+            // The declared NAME is the chain's namespaced key
+            // (`lighthouse_lead_triage_a64874f5f94a_senderEmail`); the form that
+            // collects these already labels them for people. Same labeler, so the
+            // refusal names the fields the user will see when they fill them in.
+            fields: unmet.map((v) => humanizeVariableName(v.name)).join(', '),
             count: unmet.length,
+            slug: entry.slug,
           }),
           createdAt: new Date().toISOString(),
         };
@@ -493,7 +545,7 @@ export function useWorkflowRunMentions(
 
     let runId: string;
     try {
-      if (saved) {
+      if (saved && !serverOwned) {
         // Lazy-load the builder serializer here (only reached when a user runs a
         // saved /wf_… workflow): it statically pulls builder/palette/catalogRegistry,
         // which has no business in the first-paint chat entry chunk.
@@ -551,7 +603,9 @@ export function useWorkflowRunMentions(
       const reason = errorReasonOf(err);
       const msg = reason === 'workflow_budget_exhausted'
         ? i18n.t('common:errorBudgetExhausted')
-        : err instanceof Error ? err.message : String(err);
+        : errorCodeOf(err) === 'workflow_not_found'
+          ? i18n.t('chat:workflowDeleted', { name: entry.displayName })
+          : err instanceof Error ? err.message : String(err);
       let finalizedFailed: ChatMessage | null = null;
       setSession((s) => {
         const next = s.messages.map((m) => {
@@ -612,15 +666,14 @@ export function useWorkflowRunMentions(
       // Optimistic UI: nothing to do here — the bubble updates on the
       // event arriving.
     } catch (err) {
+      // ADR 0764 D4 (CHATWF-6) — a failed CANCEL is not a failed RUN. This used to
+      // stamp the run `failed` and close its subscription, so a run that was still
+      // executing read as dead and stopped updating. Report the request's failure;
+      // leave the run's status to the run.
       const m = err instanceof Error ? err.message : String(err);
-      updateWorkflowRun(messageId, (prev) => ({
-        ...prev,
-        status: 'failed',
-        error: { code: 'cancel_failed', message: m },
-      }));
-      closeWorkflowSub(messageId);
+      updateWorkflowRun(messageId, (prev) => ({ ...prev, cancelError: m }));
     }
-  }, [session.messages, updateWorkflowRun, closeWorkflowSub]);
+  }, [session.messages, updateWorkflowRun]);
 
   return { updateWorkflowRun, subscribeWorkflowRun, rehydrateWorkflowRuns, runWorkflowMention, cancelWorkflowRun };
 }

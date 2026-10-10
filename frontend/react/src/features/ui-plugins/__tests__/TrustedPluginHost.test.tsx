@@ -18,6 +18,8 @@ const base: ServedPlugin = {
   surface: 'artifact-viewer',
   hostApi: ['artifact.read'],
   entryPath: '/host/openwop-app/ui-plugin/packs/vendor.acme.demo/plugins/viewer/entry',
+  framePath: '/host/ui-plugins/vendor.acme.demo/viewer/frame',
+  rpcPath: '/host/ui-plugins/vendor.acme.demo/viewer/rpc',
 };
 
 describe('TrustedPluginHost (ADR 0367 P2)', () => {

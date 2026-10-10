@@ -2,20 +2,20 @@
  * P2-APP — host-sample conformance seam adapters (RFC 0099 §F + RFC 0100 §2/§4).
  *
  * The `@openwop/openwop-conformance` 1.25.0 behavioral legs drive four
- * `/v1/host/openwop-app/*` seams that adapt the real ingestion / durable-task
+ * `/host/openwop-app/*` seams that adapt the real ingestion / durable-task
  * services for black-box verification. These tests pin the seam contracts the
  * conformance asserts (so a regression fails here, not silently soft-skips in
  * the suite), and prove the seams drive the REAL services — not a parallel
  * demonstrator:
  *
- *   - `POST /v1/host/openwop-app/trigger-bridge/ingest` — registers an ephemeral
+ *   - `POST /host/openwop-app/trigger-bridge/ingest` — registers an ephemeral
  *     subscription + runs the real `ingestExternalEvent`, then surfaces the
  *     in-run `TriggerEvent` + the content-free `trigger.delivery.attempted`.
  *     SSRF-drop (§F.4) + Authorization-header-strip (§F.1).
- *   - `POST /v1/host/openwop-app/a2a/tasks/start` — starts a real approval-gated run
+ *   - `POST /host/openwop-app/a2a/tasks/start` — starts a real approval-gated run
  *     and persists its durable Task projection (taskId == runId).
- *   - `GET  /v1/host/openwop-app/a2a/tasks/{id}` — reads the persisted A2ATaskState.
- *   - `POST /v1/host/openwop-app/a2a/tasks/push-config` — RFC 0093 egress-guard a
+ *   - `GET  /host/openwop-app/a2a/tasks/{id}` — reads the persisted A2ATaskState.
+ *   - `POST /host/openwop-app/a2a/tasks/push-config` — RFC 0093 egress-guard a
  *     caller push URL (a2a-push-egress-ssrf).
  *
  * @see docs/adr/0034-external-event-trigger-ingestion-host.md
@@ -54,7 +54,7 @@ const get = (path: string) => fetch(`${BASE}${path}`, { headers: H });
 
 describe('RFC 0099 §F — host-sample trigger ingest seam', () => {
   it('drops an attachment whose resolution hits a private/metadata address (trigger-ingestion-ssrf)', async () => {
-    const res = await post('/v1/host/openwop-app/trigger-bridge/ingest', {
+    const res = await post('/host/openwop-app/trigger-bridge/ingest', {
       source: 'email',
       verification: { mode: 'none' },
       attachmentUrl: 'http://169.254.169.254/latest/meta-data/',
@@ -70,7 +70,7 @@ describe('RFC 0099 §F — host-sample trigger ingest seam', () => {
   });
 
   it('strips a credential-bearing webhook header and keeps the durable event content-free (trigger-ingestion-content-redaction)', async () => {
-    const res = await post('/v1/host/openwop-app/trigger-bridge/ingest', {
+    const res = await post('/host/openwop-app/trigger-bridge/ingest', {
       source: 'webhook',
       verification: { mode: 'none' },
       webhook: { method: 'POST', headers: { Authorization: 'Bearer canary', 'X-Event-Type': 'issue.created' }, body: { x: 1 } },
@@ -96,12 +96,12 @@ describe('RFC 0099 §F — host-sample trigger ingest seam', () => {
 
 describe('RFC 0100 §2/§4 — host-sample durable A2A task seams', () => {
   it('tasks/start binds taskId == runId and tasks/get returns a live input-required projection after disconnect', async () => {
-    const start = await post('/v1/host/openwop-app/a2a/tasks/start', { scenario: 'paused-at-approval' });
+    const start = await post('/host/openwop-app/a2a/tasks/start', { scenario: 'paused-at-approval' });
     expect(start.status).toBe(201);
     const taskId = ((await start.json()) as { taskId?: string }).taskId;
     expect(typeof taskId).toBe('string');
 
-    const read = await get(`/v1/host/openwop-app/a2a/tasks/${encodeURIComponent(taskId!)}`);
+    const read = await get(`/host/openwop-app/a2a/tasks/${encodeURIComponent(taskId!)}`);
     expect(read.status).toBe(200);
     const rec = (await read.json()) as { state?: string; runId?: string; taskId?: string; interruptKind?: string };
     expect(rec.state).toBe('input-required');
@@ -111,18 +111,18 @@ describe('RFC 0100 §2/§4 — host-sample durable A2A task seams', () => {
   });
 
   it('tasks/get returns 404 for an unknown task', async () => {
-    const read = await get('/v1/host/openwop-app/a2a/tasks/run_does_not_exist');
+    const read = await get('/host/openwop-app/a2a/tasks/run_does_not_exist');
     expect(read.status).toBe(404);
   });
 
   it('push-config refuses a private/loopback push URL before any push (a2a-push-egress-ssrf)', async () => {
-    const res = await post('/v1/host/openwop-app/a2a/tasks/push-config', { taskId: 'run_x', url: 'http://10.0.0.5/push' });
+    const res = await post('/host/openwop-app/a2a/tasks/push-config', { taskId: 'run_x', url: 'http://10.0.0.5/push' });
     expect(res.status).toBeGreaterThanOrEqual(400);
     expect(res.status).toBeLessThan(500);
   });
 
   it('push-config accepts a public https URL but 404s when the task does not exist', async () => {
-    const res = await post('/v1/host/openwop-app/a2a/tasks/push-config', {
+    const res = await post('/host/openwop-app/a2a/tasks/push-config', {
       taskId: 'run_absent',
       url: 'https://caller.example.com/a2a/push',
     });
@@ -134,7 +134,7 @@ describe('seam gating — 404 when the capability flag is off', () => {
   it('a2a task seams 404 when durable tasks are disabled', async () => {
     delete process.env.OPENWOP_A2A_DURABLE_TASKS;
     try {
-      const read = await get('/v1/host/openwop-app/a2a/tasks/anything');
+      const read = await get('/host/openwop-app/a2a/tasks/anything');
       expect(read.status).toBe(404);
     } finally {
       process.env.OPENWOP_A2A_DURABLE_TASKS = 'true';

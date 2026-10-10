@@ -163,5 +163,5 @@ describe('ADR 0734 — every test-only export in src/ has a reader', () => {
       .map(([key]) => key)
       .sort();
     expect(orphans).toEqual([]);
-  });
+  }, 60_000); // #4176: 15 s timed out under peer load; the assertion is unchanged
 });

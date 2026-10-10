@@ -28,7 +28,7 @@ async function enable(id: string, status: 'on' | 'off'): Promise<void> {
 }
 
 async function newSession(title: string): Promise<string> {
-  const r = await jsonFetch<{ sessionId: string }>('/v1/host/openwop-app/chat/sessions', {
+  const r = await jsonFetch<{ sessionId: string }>('/host/openwop-app/chat/sessions', {
     method: 'POST',
     body: JSON.stringify({ title }),
   });
@@ -36,7 +36,7 @@ async function newSession(title: string): Promise<string> {
 }
 
 async function appendMsg(sessionId: string, role: string, content: string): Promise<void> {
-  await jsonFetch(`/v1/host/openwop-app/chat/sessions/${sessionId}/messages`, {
+  await jsonFetch(`/host/openwop-app/chat/sessions/${sessionId}/messages`, {
     method: 'POST',
     body: JSON.stringify({ messageId: `${sessionId}-${Math.random().toString(36).slice(2)}`, role, content }),
   });
@@ -57,7 +57,7 @@ afterAll(async () => { await new Promise<void>((res) => server.close(() => res()
 
 describe('conversation-search route', () => {
   it('serves without a toggle (always-on)', async () => {
-    const r = await jsonFetch('/v1/host/openwop-app/chat/search?q=anything');
+    const r = await jsonFetch('/host/openwop-app/chat/search?q=anything');
     expect(r.status).toBe(200);
   });
 
@@ -69,7 +69,7 @@ describe('conversation-search route', () => {
     const s2 = await newSession('Vacation plans');
     await appendMsg(s2, 'user', 'where should we go on holiday');
 
-    const r = await jsonFetch<SearchResp>('/v1/host/openwop-app/chat/search?q=forecast');
+    const r = await jsonFetch<SearchResp>('/host/openwop-app/chat/search?q=forecast');
     expect(r.status).toBe(200);
     expect(r.body.hits.length).toBe(1);
     expect(r.body.hits[0]!.conversationId).toBe(s1);
@@ -83,23 +83,23 @@ describe('conversation-search route', () => {
     await appendMsg(s, 'user', 'narwhal question');
     await appendMsg(s, 'assistant', 'narwhal answer');
 
-    const title = await jsonFetch<SearchResp>('/v1/host/openwop-app/chat/search?q=budget');
+    const title = await jsonFetch<SearchResp>('/host/openwop-app/chat/search?q=budget');
     expect(title.body.hits.some((h) => h.conversationId === s && !h.messageId)).toBe(true);
 
-    const assistant = await jsonFetch<SearchResp>('/v1/host/openwop-app/chat/search?q=narwhal&role=assistant');
+    const assistant = await jsonFetch<SearchResp>('/host/openwop-app/chat/search?q=narwhal&role=assistant');
     const hit = assistant.body.hits.find((h) => h.conversationId === s);
     expect(hit?.role).toBe('assistant');
   });
 
   it('returns no hits for a term in no conversation', async () => {
     await enable('conversation-search', 'on');
-    const r = await jsonFetch<SearchResp>('/v1/host/openwop-app/chat/search?q=zzzznonexistentterm');
+    const r = await jsonFetch<SearchResp>('/host/openwop-app/chat/search?q=zzzznonexistentterm');
     expect(r.body.hits).toHaveLength(0);
   });
 
   it('accepts POST as well as GET', async () => {
     await enable('conversation-search', 'on');
-    const r = await jsonFetch<SearchResp>('/v1/host/openwop-app/chat/search', {
+    const r = await jsonFetch<SearchResp>('/host/openwop-app/chat/search', {
       method: 'POST', body: JSON.stringify({ q: 'forecast' }),
     });
     expect(r.status).toBe(200);

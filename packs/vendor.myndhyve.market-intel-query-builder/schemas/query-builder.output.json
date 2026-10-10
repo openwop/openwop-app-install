@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.market-intel-query-builder/1.0.0/query-builder.output.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.market-intel-query-builder/1.0.2/query-builder.output.json",
   "title": "MarketIntelQueryBuilderOutput",
   "type": "object",
   "required": ["queryGroups", "competitorQueries", "topicClusters", "summary", "warnings", "queryGroupCount", "success"],

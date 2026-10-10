@@ -22,31 +22,77 @@
  * @see src/host/triggerIngestionService.ts — RFC 0099 §F external-event leg
  */
 
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { v1 } from '../middleware/protocolVersion.js';
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { vendorPath } from '../middleware/protocolVersion.js';
 import type { Express, Request } from 'express';
 import { OpenwopError, type RunRecord } from '../types.js';
+import { unadvertisedError, type UnadvertisedGate } from '../host/unadvertised.js';
+
+/** ADR 0781 — external-event ingestion (RFC 0099 §F) is advertised only when wired. */
+const TRIGGER_INGESTION_OFF: UnadvertisedGate = {
+  family: 'triggerBridge', facet: 'ingestion',
+  message: 'External-event trigger ingestion is not enabled on this host.',
+};
 import type { Storage } from '../storage/storage.js';
 import type { HostAdapterSuite } from '../host/index.js';
 import { getEventLog } from '../executor/eventLog.js';
 import { executeRun } from '../executor/executor.js';
 import { insertRunWithStartContext } from '../host/runInsert.js';
-import { resolveLaunchWorkflow } from '../host/resolveLaunchDefinition.js';
+import { resolveLaunchWorkflow, resolveTenantWorkflow } from '../host/resolveLaunchDefinition.js';
 import { requireProtocolScope } from '../host/protocolAuthorization.js';
+import { signStandardWebhooks } from '../host/webhookSignature.js';
+import { fromWireRunId, toWireRunId } from '../host/v2Ids.js';
+import { looksProjected, unprojectBoundId } from '../host/boundIdProjection.js';
+import { createLogger } from '../observability/logger.js';
+
+const log = createLogger('routes.triggerIngestSigned');
+
+/** RFC 0230 §C — the Standard Webhooks timestamp tolerance, seconds. */
+const MAX_SKEW_S = 300;
+const WEBHOOK_ID = /^[A-Za-z0-9_-]{16,128}$/;
+
+/** RFC 0230 §C — does any `v1,<b64>` entry of `webhook-signature` match, and is
+ *  `webhook-timestamp` within the skew bound? Constant-time per entry. */
+export function verifyInboundStandardWebhooks(
+  secret: string, webhookId: string, timestamp: string | undefined, signatureHeader: string | undefined, rawBody: string, nowMs: number,
+): boolean {
+  if (!timestamp || !/^\d{1,12}$/.test(timestamp) || !signatureHeader) return false;
+  if (Math.abs(Math.floor(nowMs / 1000) - Number(timestamp)) > MAX_SKEW_S) return false;
+  let expected: Buffer;
+  try {
+    expected = Buffer.from(signStandardWebhooks(secret, webhookId, timestamp, rawBody));
+  } catch {
+    return false; // not a whsec_ secret — never verifies
+  }
+  return signatureHeader.split(' ').some((entry) => {
+    const got = Buffer.from(entry.trim());
+    return got.length === expected.length && timingSafeEqual(got, expected);
+  });
+}
 import {
+  bindDeadLetterAttemptEvent,
+  deleteSubscription,
   deliver,
   getSubscription,
+  listDeadLetters,
   listDeliveries,
+  makeDedupKey,
   listSubscriptions,
+  recordRefusedDelivery,
   registerSubscription,
   setSubscriptionState,
+  TRIGGER_DEAD_LETTER_MAX_PAGE_SIZE,
   type RetryPolicy,
   type SubscriptionSource,
   type VerificationMode,
 } from '../host/triggerBridgeService.js';
 import {
+  deleteIngestSecret,
+  inboundSigningEnabled,
   ingestExternalEvent,
+  SIGNED_INGEST_ROOT,
   isExternalIngestionSource,
+  loadIngestSecret,
   isAcceptedIngestionSource,
   storeIngestSecret,
   triggerIngestionEnabled,
@@ -68,7 +114,7 @@ interface Deps {
 }
 
 export function registerTriggerBridgeRoutes(app: Express, deps?: Deps): void {
-  app.get(v1('/trigger-subscriptions'), async (req, res, next) => {
+  app.get('/trigger-subscriptions', async (req, res, next) => {
     try {
       await requireProtocolScope(req, 'webhooks:manage'); // ADR 0755 D1 — rest-endpoints.md names webhooks:manage for this surface
       res.json({ subscriptions: await listSubscriptions(tenantOf(req)) });
@@ -77,7 +123,7 @@ export function registerTriggerBridgeRoutes(app: Express, deps?: Deps): void {
     }
   });
 
-  app.get(v1('/trigger-subscriptions/:subscriptionId'), async (req, res, next) => {
+  app.get('/trigger-subscriptions/:subscriptionId', async (req, res, next) => {
     try {
       await requireProtocolScope(req, 'webhooks:manage');
       const sub = await getSubscription(req.params.subscriptionId);
@@ -90,13 +136,45 @@ export function registerTriggerBridgeRoutes(app: Express, deps?: Deps): void {
     }
   });
 
+  // RFC 0232 §B / ADR 0805 — `listTriggerDeadLetters`: the subscription's
+  // dead-lettered deliveries, newest first, content-free (§C). Served whenever
+  // `triggerBridge.deadLetter` is advertised, which is always on this host.
+  // Tenant-bound exactly as the read above: another tenant's id and an id the
+  // host never minted answer the same 404.
+  app.get('/trigger-subscriptions/:subscriptionId/dead-letters', async (req, res, next) => {
+    try {
+      await requireProtocolScope(req, 'webhooks:manage');
+      const sub = await getSubscription(req.params.subscriptionId);
+      if (!sub || sub.tenantId !== tenantOf(req)) {
+        throw new OpenwopError('not_found', 'Trigger subscription not found.', 404, { subscriptionId: req.params.subscriptionId });
+      }
+      const limit = parseDeadLetterLimit(req.query.limit);
+      const after = req.query.cursor === undefined ? undefined : decodeDeadLetterCursor(req.query.cursor, sub.subscriptionId);
+      const page = await listDeadLetters(sub.subscriptionId, { limit, ...(after !== undefined ? { after } : {}) });
+      res.json({
+        deliveries: page.records.map((r) => ({
+          subscriptionId: r.subscriptionId,
+          attemptEventId: r.attemptEventId,
+          attempt: r.attempt,
+          ...(r.stateChange ? { stateChange: r.stateChange } : {}),
+          reason: r.reason,
+          deadLetteredAt: r.deadLetteredAt,
+          expiresAt: r.expiresAt,
+        })),
+        ...(page.nextAfter ? { nextCursor: encodeDeadLetterCursor(sub.subscriptionId, page.nextAfter) } : {}),
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   // RFC 0099 §F.2 — register an external-event subscription bound to a workflow.
   // Gated on the ingestion capability being wired (fail-closed); requires deps.
-  app.post(v1('/trigger-subscriptions'), async (req, res, next) => {
+  app.post('/trigger-subscriptions', async (req, res, next) => {
     try {
       await requireProtocolScope(req, 'webhooks:manage');
       if (!triggerIngestionEnabled() || !deps) {
-        throw new OpenwopError('host_capability_missing', 'External-event trigger ingestion is not enabled on this host.', 501);
+        throw unadvertisedError(req, TRIGGER_INGESTION_OFF);
       }
       const body = (req.body ?? {}) as Record<string, unknown>;
       const source = body.source;
@@ -108,22 +186,27 @@ export function registerTriggerBridgeRoutes(app: Express, deps?: Deps): void {
         throw new OpenwopError('validation_error', 'Field `workflowId` is required.', 400, { field: 'workflowId' });
       }
       // RFC 0049 scope check: a registration MUST NOT bind a workflow the caller
-      // cannot start. The host resolves the workflow under the caller's tenant.
-      const wf = await deps.hostSuite.workflowCatalog.getWorkflow(workflowId);
+      // cannot start. The host resolves the workflow under the caller's tenant —
+      // ADR 0823: it said so, and did not; another tenant's id now 404s too.
+      const tenantId = tenantOf(req);
+      const wf = await resolveTenantWorkflow(deps.hostSuite.workflowCatalog, tenantId, workflowId);
       if (!wf) {
         throw new OpenwopError('not_found', 'Workflow not found (cannot bind a subscription to a workflow the caller cannot start).', 404, { workflowId });
       }
 
       const verificationMode = resolveVerificationMode(body.verification);
-      const tenantId = tenantOf(req);
       const subscriptionId = `tgsub-${randomBytes(8).toString('hex')}`;
 
       // Webhook: mint a signing secret, return it ONCE, persist only the
       // fingerprint (re-reads never return the cleartext secret).
       let secretFingerprint: string | undefined;
       let secret: string | undefined;
+      // ADR 0793 / RFC 0230 — with inbound signing on, a webhook subscription gets
+      // a Standard Webhooks `whsec_` secret and the credential-less signed ingest
+      // URL; otherwise the legacy hex secret + the credentialed `/ingest` route.
+      const signed = source === 'webhook' && inboundSigningEnabled();
       if (source === 'webhook') {
-        secret = randomBytes(32).toString('hex');
+        secret = signed ? `whsec_${randomBytes(32).toString('base64')}` : randomBytes(32).toString('hex');
         secretFingerprint = createHash('sha256').update(secret).digest('hex').slice(0, 8);
       }
 
@@ -137,17 +220,44 @@ export function registerTriggerBridgeRoutes(app: Express, deps?: Deps): void {
         verificationMode,
         ...(secretFingerprint ? { secretFingerprint } : {}),
       });
-      if (source === 'webhook' && secret) storeIngestSecret(subscriptionId, secret);
+      if (source === 'webhook' && secret) {
+        await storeIngestSecret(subscriptionId, secret, { tenantId, scheme: signed ? 'standard-webhooks-1' : 'legacy-hex' });
+      }
 
-      const binding = buildBinding(source, subscriptionId, secret, secretFingerprint);
+      const binding = buildBinding(source, subscriptionId, secret, secretFingerprint, signed);
       res.status(201).json({ subscription: sub, binding });
     } catch (err) {
       next(err);
     }
   });
 
+  // Host extension (not a protocol operation — the corpus defines no trigger
+  // subscription delete): remove a subscription and its delivery rows,
+  // dead-letter records and sealed signing secret. On the VENDOR HOME so it
+  // survives the v1 retirement (a `/v1` write answers 410 once 1.x is retired;
+  // the canonical `/host/openwop-app/…` rewrites onto this twin). Same scope and
+  // tenant binding as the PATCH above. Exists so the certification cut can leave
+  // the conformance tenant as it found it: every cut registers subscriptions,
+  // and nothing could remove them (MEASURED 2026-10-04: ~278 accumulated).
+  app.delete(vendorPath('/trigger-subscriptions/:subscriptionId'), async (req, res, next) => {
+    try {
+      await requireProtocolScope(req, 'webhooks:manage');
+      const subscriptionId = resolveSubscriptionSegment(req.params.subscriptionId ?? '', tenantOf(req));
+      const sub = await getSubscription(subscriptionId);
+      if (!sub || sub.tenantId !== tenantOf(req)) {
+        throw new OpenwopError('not_found', 'Trigger subscription not found.', 404, { subscriptionId: req.params.subscriptionId });
+      }
+      await deleteSubscription(sub.subscriptionId);
+      await deleteIngestSecret(sub.subscriptionId);
+      log.info('trigger_subscription_deleted', { subscriptionId: sub.subscriptionId });
+      res.status(204).end();
+    } catch (err) {
+      next(err);
+    }
+  });
+
   // Operator pause/resume (§B). { state: 'paused' | 'active' }.
-  app.patch(v1('/trigger-subscriptions/:subscriptionId'), async (req, res, next) => {
+  app.patch('/trigger-subscriptions/:subscriptionId', async (req, res, next) => {
     try {
       await requireProtocolScope(req, 'webhooks:manage');
       const sub = await getSubscription(req.params.subscriptionId);
@@ -170,11 +280,11 @@ export function registerTriggerBridgeRoutes(app: Express, deps?: Deps): void {
   // normalized per-source ingress (the host's parser produces it). Content-free
   // on the wire OUT (the inbound content is redacted into ctx.triggerData; only
   // the runId / outcome are returned).
-  app.post(v1('/trigger-subscriptions/:subscriptionId/ingest'), async (req, res, next) => {
+  app.post('/trigger-subscriptions/:subscriptionId/ingest', async (req, res, next) => {
     try {
       await requireProtocolScope(req, 'runs:create'); // ADR 0755 D1 — an ingest STARTS a run
       if (!triggerIngestionEnabled() || !deps) {
-        throw new OpenwopError('host_capability_missing', 'External-event trigger ingestion is not enabled on this host.', 501);
+        throw unadvertisedError(req, TRIGGER_INGESTION_OFF);
       }
       const sub = await getSubscription(req.params.subscriptionId);
       if (!sub || sub.tenantId !== tenantOf(req)) {
@@ -193,6 +303,69 @@ export function registerTriggerBridgeRoutes(app: Express, deps?: Deps): void {
     }
   });
 
+  // ADR 0793 / RFC 0230 — the SIGNED inbound-webhook ingest. No OpenWOP
+  // credential: the Standard Webhooks signature over the raw body IS the
+  // credential (verified against the subscription's sealed `whsec_` secret), and
+  // the tenant comes from the stored subscription. Raw bytes are captured by the
+  // scoped parser in index.ts. §C.1: nothing a sender posts here changes the
+  // subscription's state — a refused post dead-letters only itself.
+  app.post(`${SIGNED_INGEST_ROOT}/:subscriptionId`, async (req, res, next) => {
+    try {
+      if (!inboundSigningEnabled() || !deps) throw new OpenwopError('not_found', 'Not found.', 404);
+      const sub = await getSubscription(req.params.subscriptionId);
+      const stored = sub ? await loadIngestSecret(sub.subscriptionId) : null;
+      // Unknown, non-webhook, or not opted in: one indistinguishable 404 (the
+      // subscription id is not an oracle for an unauthenticated caller).
+      if (!sub || sub.source !== 'webhook' || stored === null || stored.scheme !== 'standard-webhooks-1') {
+        throw new OpenwopError('not_found', 'Trigger subscription not found.', 404);
+      }
+      if (sub.state !== 'active') {
+        throw new OpenwopError('subscription_not_active', 'The trigger subscription is not active.', 409, { state: sub.state });
+      }
+      const rawBody = (req as Request & { rawBody?: Buffer }).rawBody?.toString('utf8') ?? '';
+      const webhookId = req.header('webhook-id') ?? '';
+      const idValid = WEBHOOK_ID.test(webhookId);
+      const verified = idValid && verifyInboundStandardWebhooks(
+        stored.secret, webhookId, req.header('webhook-timestamp'), req.header('webhook-signature'), rawBody, Date.now(),
+      );
+      const mode = sub.verificationMode ?? 'required';
+      if (mode === 'required' && !verified) {
+        // The dedup key is the same opaque hash a delivered event carries
+        // (`makeDedupKey(subscriptionId, webhook-id)`), never the header value:
+        // RFC 0232 §C.1 — a record carries no inbound header.
+        await recordRefusedDelivery(sub.subscriptionId, makeDedupKey(sub.subscriptionId, idValid ? webhookId : randomBytes(16).toString('hex')));
+        log.info('trigger_ingest_signature_invalid', { subscriptionId: sub.subscriptionId });
+        throw new OpenwopError('signature_invalid', 'The webhook signature did not verify.', 401);
+      }
+      if (!idValid) {
+        // best-effort / none still need an identity to dedup on (§C Identity).
+        throw new OpenwopError('validation_error', 'Header `webhook-id` MUST match ^[A-Za-z0-9_-]{16,128}$.', 400, { field: 'webhook-id' });
+      }
+      const result = await ingestExternalEvent(deps, sub.subscriptionId, {
+        source: 'webhook',
+        method: 'POST',
+        headers: req.headers as Record<string, unknown>,
+        rawBody,
+        externalDeliveryId: webhookId,
+        preVerified: verified,
+      });
+      if (result.outcome === 'delivered' && result.runId) {
+        res.status(202).json({ outcome: 'delivered', runId: toWireRunId(result.runId, sub.tenantId) });
+        return;
+      }
+      if (result.outcome === 'deduped' && result.runId) {
+        res.status(200).json({ outcome: 'duplicate', runId: toWireRunId(result.runId, sub.tenantId) });
+        return;
+      }
+      if (result.reason === 'body-too-large') throw new OpenwopError('validation_error', 'The inbound body exceeds maxBodyBytes.', 413);
+      if (result.reason === 'workflow-not-found') throw new OpenwopError('workflow_not_found', 'The subscription\'s workflow no longer resolves.', 422);
+      if (result.reason === 'signature-invalid') throw new OpenwopError('signature_invalid', 'The webhook signature did not verify.', 401);
+      throw new OpenwopError('subscription_not_active', 'The trigger subscription is not accepting deliveries.', 409);
+    } catch (err) {
+      next(err);
+    }
+  });
+
   // RFC 0099 §F — host-sample conformance seam. Drives the REAL §F leg end to
   // end (no parallel demonstrator, per the host's no-shadow-primitive rule):
   // register an ephemeral subscription bound to a deterministic demo workflow →
@@ -205,7 +378,7 @@ export function registerTriggerBridgeRoutes(app: Express, deps?: Deps): void {
   // is unwired (the conformance behavioral leg soft-skips on 404/403).
   // Registered on BOTH the reference-host route AND the `sample` conformance-seam path so
   // the suite hits it whichever it targets (RFC 0127 CDP-1b). `sample` is a thin alias.
-  app.post(['/v1/host/openwop-app/trigger-bridge/ingest', '/v1/host/sample/trigger-bridge/ingest'], async (req, res, next) => {
+  app.post(['/host/openwop-app/trigger-bridge/ingest', '/host/sample/trigger-bridge/ingest'], async (req, res, next) => {
     try {
       await requireProtocolScope(req, 'runs:create'); // ADR 0755 D1 — the seam registers + starts a run
       if (!triggerIngestionEnabled() || !deps) {
@@ -268,7 +441,7 @@ export function registerTriggerBridgeRoutes(app: Express, deps?: Deps): void {
   // inbound-webhook and kanban paths call. The seam controls only what a real
   // caller controls: the dedup key and whether the fire succeeds. It does NOT
   // reimplement dedup, retry, backoff or the state machine.
-  app.post(['/v1/host/openwop-app/trigger-bridge/deliver', '/v1/host/sample/trigger-bridge/deliver'], async (req, res, next) => {
+  app.post(['/host/openwop-app/trigger-bridge/deliver', '/host/sample/trigger-bridge/deliver'], async (req, res, next) => {
     try {
       await requireProtocolScope(req, 'runs:create');
       if (!deps) throw new OpenwopError('host_capability_missing', 'Trigger-bridge delivery is not wired on this host.', 404);
@@ -312,16 +485,19 @@ export function registerTriggerBridgeRoutes(app: Express, deps?: Deps): void {
         // seam. It is an addressable handle for a delivery that produced no
         // run, NOT a fabricated run: no run row is created.
         const carrierId = `dlv-run-${result.deliveryId || randomBytes(8).toString('hex')}`;
-        await getEventLog().append({
+        const attempted = await getEventLog().append({
           runId: carrierId,
           type: 'trigger.delivery.attempted',
           payload: { subscriptionId, dedupKey, attempt: result.attempts, outcome: 'dead-lettered' },
         });
+        // RFC 0232 §C.2 — the seam's event and the dead-letter record agree.
+        await bindDeadLetterAttemptEvent(subscriptionId, result.deliveryId, attempted.eventId);
         await getEventLog().append({
           runId: carrierId,
           type: 'trigger.subscription.state.changed',
           payload: {
             subscriptionId,
+            source,
             fromState: result.stateChange?.from ?? 'active',
             toState: result.stateChange?.to ?? 'dead-lettered',
             reason: result.stateChange?.reason ?? 'retry-exhausted',
@@ -510,8 +686,12 @@ function resolveRetryPolicy(v: unknown): Partial<RetryPolicy> | undefined {
 
 /** Build the source-specific `binding` (§F.2). The webhook signing secret + the
  *  ingest URL/address are returned ONCE here. */
-function buildBinding(source: string, subscriptionId: string, secret?: string, secretFingerprint?: string): Record<string, unknown> {
-  const ingestPath = `/v1/trigger-subscriptions/${subscriptionId}/ingest`;
+function buildBinding(source: string, subscriptionId: string, secret?: string, secretFingerprint?: string, signed = false): Record<string, unknown> {
+  const ingestPath = signed
+    ? `${SIGNED_INGEST_ROOT}/${subscriptionId}` // RFC 0230: credential-less, signature-authenticated
+    // ADR 0812 P3b — unversioned: a webhook sender POSTs here, and a retired host
+    // answers the old `/v1` spelling 410 (writes are not forwarded).
+    : `/trigger-subscriptions/${subscriptionId}/ingest`;
   if (source === 'webhook') {
     return { ingestUrl: ingestPath, ...(secret ? { signingSecret: secret } : {}), ...(secretFingerprint ? { secretFingerprint } : {}) };
   }
@@ -558,4 +738,56 @@ function coerceIngress(source: string, raw: unknown): IngressInput | null {
     };
   }
   return null;
+}
+
+/** RFC 0232 §B — `limit` is a positive integer, clamped to `maxPageSize`. */
+function parseDeadLetterLimit(raw: unknown): number {
+  if (raw === undefined) return TRIGGER_DEAD_LETTER_MAX_PAGE_SIZE;
+  const n = typeof raw === 'string' && /^[0-9]+$/.test(raw) ? Number(raw) : NaN;
+  if (!Number.isSafeInteger(n) || n < 1) {
+    throw new OpenwopError('validation_error', 'Query `limit` MUST be a positive integer.', 400, { field: 'limit' });
+  }
+  return Math.min(n, TRIGGER_DEAD_LETTER_MAX_PAGE_SIZE);
+}
+
+/** The cursor names the subscription it was minted for, so a cursor carried
+ *  to another subscription is refused rather than silently re-scoped (§B.3). */
+function encodeDeadLetterCursor(subscriptionId: string, after: string): string {
+  return Buffer.from(JSON.stringify({ s: subscriptionId, a: after }), 'utf8').toString('base64url');
+}
+
+function decodeDeadLetterCursor(raw: unknown, subscriptionId: string): string {
+  const bad = (): OpenwopError => new OpenwopError('validation_error', 'Query `cursor` is not a cursor for this subscription.', 400, { field: 'cursor' });
+  if (typeof raw !== 'string' || raw.length === 0 || raw.length > 2048) throw bad();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8'));
+  } catch {
+    throw bad();
+  }
+  const c = parsed as { s?: unknown; a?: unknown } | null;
+  if (!c || c.s !== subscriptionId || typeof c.a !== 'string' || !c.a.startsWith(`${subscriptionId}:`)) throw bad();
+  return c.a;
+}
+
+/**
+ * A vendor-home path is outside the v2 identity middleware's bound-id prefixes,
+ * so this route reads its segment itself, in every spelling `identity.md` §5
+ * names: the `~` projection, a decoded `tenant/id`, or a bare id. A bound id
+ * whose tenant is not the caller's is `403 id_tenant_mismatch`, as on the
+ * protocol paths; a malformed escape is `400`.
+ */
+function resolveSubscriptionSegment(raw: string, tenant: string): string {
+  let id = raw;
+  if (looksProjected(raw)) {
+    try {
+      id = unprojectBoundId(raw);
+    } catch {
+      throw new OpenwopError('validation_error', "A tenant-bound id's '~' escape MUST be followed by two hex digits.", 400);
+    }
+  }
+  if (!id.includes('/')) return id;
+  const resolved = fromWireRunId(id, tenant);
+  if (!resolved.ok) throw new OpenwopError('id_tenant_mismatch', "A tenant-bound id's tenant segment MUST be the caller's.", 403);
+  return resolved.runId;
 }

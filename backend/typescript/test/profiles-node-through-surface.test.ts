@@ -21,7 +21,17 @@
  *   - `list` → the roster, internal columns stripped, endorsements projected as
  *     `{ count, endorserUserIds }` (D7 — viewer-independent);
  *   - the manifest declares the schemas with ADR 0525 `$id`s at the manifest
- *     version and the feature pins that version.
+ *     version (the feature→pack version pin lives in
+ *     `required-packs-pin-parity.test.ts`; the `profiles` surface id in
+ *     `pack-surface-arg-parity.test.ts`'s anti-vacuity case).
+ *
+ * Sabotage that turns it red (grade-tests w3 probes, each witnessed):
+ *   - the pack sends `{ profileId }` again                       → the seeded-member case
+ *   - the surface stops refusing an empty id                     → the three refusal cases
+ *   - the node maps a refusal to success-with-null               → NO-userId + 1.0.0-key cases
+ *   - `found` forced true                                        → the unknown-id case
+ *   - internal columns not stripped / `endorsedByMe` on the surface → get + list cases
+ *   - `getProfile` drops its tenant check                        → the foreign-tenant case
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -31,7 +41,6 @@ import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence, __resetHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { OpenwopError } from '../src/types.js';
 import { buildProfilesSurface } from '../src/features/profiles/surface.js';
-import { profilesFeature } from '../src/features/profiles/feature.js';
 import {
   __resetProfiles,
   getOrCreateProfile,
@@ -145,7 +154,7 @@ describe('feature.profiles.nodes.list through the REAL surface', () => {
   });
 });
 
-describe('pack shape — schemas with ADR 0525 $ids at the manifest version; the feature pin', () => {
+describe('pack shape — schemas with ADR 0525 $ids at the manifest version', () => {
   it('get declares input+output refs, list declares an output ref; every ref resolves with the <pack>/<version>/<file> $id', () => {
     const get = manifest.nodes.find((n) => n.typeId === 'feature.profiles.nodes.get');
     const list = manifest.nodes.find((n) => n.typeId === 'feature.profiles.nodes.list');
@@ -169,11 +178,5 @@ describe('pack shape — schemas with ADR 0525 $ids at the manifest version; the
     expect(out.properties.found!.type).toBe('boolean');
     expect(out.properties.profile!.type).toEqual(['object', 'null']);
     expect(out.additionalProperties).toBe(false);
-  });
-
-  it('the profiles feature pins the pack at the manifest version (1.1.0) and registers the surface', () => {
-    expect(manifest.version).toBe('1.1.0');
-    expect(profilesFeature.requiredPacks).toEqual([{ name: 'feature.profiles.nodes', version: manifest.version }]);
-    expect(profilesFeature.surface?.id).toBe('profiles');
   });
 });

@@ -93,16 +93,16 @@ const enable = async (id: string, status: 'on' | 'off') => { const d = getToggle
 async function ownerWithMember(role: string): Promise<{ owner: ReturnType<typeof client>; member: ReturnType<typeof client>; orgId: string; tenantId: string }> {
   const tenantId = `org:test-${Date.now()}-${n++}`;
   const owner = client();
-  const or = await owner.post('/v1/host/openwop-app/test/login', { email: `ce-${Date.now()}-${n++}@acme.test`, tenantId });
+  const or = await owner.post('/host/openwop-app/test/login', { email: `ce-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(or.status, JSON.stringify(or.body)).toBe(201);
   const member = client();
-  const mr = await member.post('/v1/host/openwop-app/test/login', { email: `ce-${Date.now()}-${n++}@acme.test`, tenantId });
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const mr = await member.post('/host/openwop-app/test/login', { email: `ce-${Date.now()}-${n++}@acme.test`, tenantId });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   const orgId = org.body.orgId;
-  await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: mr.body.user.userId, roles: [role] });
+  await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: mr.body.user.userId, roles: [role] });
   return { owner, member, orgId, tenantId };
 }
-const ep = (orgId: string, canvasId: string) => `/v1/host/openwop-app/app-builder/orgs/${encodeURIComponent(orgId)}/canvases/${encodeURIComponent(canvasId)}/export`;
+const ep = (orgId: string, canvasId: string) => `/host/openwop-app/app-builder/orgs/${encodeURIComponent(orgId)}/canvases/${encodeURIComponent(canvasId)}/export`;
 
 async function seedCanvas(tenantId: string, canvasId: string): Promise<void> {
   await __putCanvasForTest({ canvasId, tenantId, canvasTypeId: 'canvas.app-builder', name: 'Demo', state: SAMPLE, version: 1 });

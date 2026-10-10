@@ -5,6 +5,7 @@
  * arrive via the approvals inbox (the P3 lane) — this page is the human's
  * direct surface.
  */
+import { ChatPocket } from '../../chat/ChatPocket.js';
 import { Button } from '../../ui/Button.js';
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -226,6 +227,14 @@ export function SupportPage(): JSX.Element {
           <p className="muted u-fs-11 u-mt-1">{t('replyComposerHint')}</p>
         </div>
       )}
+      {/* ADR 0768 D5 — the feature's assistant in a Pocket. Honest scope: the agent's
+          tools read every org the caller can read, not only the one on screen. */}
+      <ChatPocket
+        agentId="vendor.openwop-app.service-desk.agents.support"
+        title={t('pocketTitle')}
+        contextLabel={t('pocketScope')}
+        renderEmptyState={() => <p className="chat-pocket__hint">{t('pocketHint')}</p>}
+      />
     </section>
   );
 }

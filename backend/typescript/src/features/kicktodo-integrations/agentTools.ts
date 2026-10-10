@@ -30,6 +30,7 @@ export const KICKTODO_INTEGRATIONS_STATUS_TOOL_ID = 'openwop:kicktodo.integratio
 export function registerKicktodoIntegrationsAgentTools(): void {
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: KICKTODO_INTEGRATIONS_STATUS_TOOL_ID,
       description:

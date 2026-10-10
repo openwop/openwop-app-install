@@ -27,6 +27,17 @@
  *   - refusals: `syncGmailNow` on paused → 409 `validation_error` with the
  *     reason; on needs-reconsent → 422 `credential_unavailable`; the node
  *     refuses the same rows WITHOUT touching the connector.
+ *
+ * Sabotage-witnessed (grade-tests w4, 23 probes, each red): the broker's
+ * `!== undefined` pin gate loosened to truthiness or dropped, the pinned
+ * `active` / owner checks dropped, the invoker's distinct error code merged,
+ * the crm consumer's reconsent/resume legs removed, the revoke reason
+ * dropped, the job-disable in `markGmailSyncStatus` removed, the resume
+ * rebind/revive removed, and in the node: the min(newest, oldest-unsettled)
+ * landing, the unreached-after-cap hold, truncation, the hold budget, the
+ * capped self-pause, the refused-pin mark, the paused refusal, the pin on the
+ * list call; `syncGmailNow`'s runnable assert; the surface's run origin; the
+ * cap classification.
  */
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -70,7 +81,12 @@ import { getSetCookies } from './headerCookies.js';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '../../..');
 const PACK_DIR = join(REPO, 'packs/feature.crm.nodes');
-type NodeOut = { status: string; outputs?: Record<string, any>; error?: { code: string; message: string } };
+type NodeOut = { status: string; outputs?: Record<string, unknown>; error?: { code: string; message: string } };
+/** The HTTP bodies the two route-level cases read (login, org, sync, refusal, list, run). */
+interface HttpBody {
+  user: { userId: string }; orgId: string; sync: { syncId: string }; runId: string;
+  error: string; details: Record<string, unknown>; syncs: Array<Record<string, unknown>>;
+}
 type NodeFn = (ctx: Record<string, unknown>) => Promise<NodeOut>;
 
 const GMAIL_SCOPES = ['https://www.googleapis.com/auth/gmail.readonly'];
@@ -134,7 +150,7 @@ describe('broker — a pin is EXACT; the user→org→workspace fall-through is 
     expect(await resolveConnectionCredential({ tenantId: T, provider: 'google', actingUserId: 'user:u1', connectionId: dead.connectionId })).toBeNull();
   });
 
-  it('a pin to the actor\'s own ACTIVE row returns exactly that row; another user\'s row, a foreign provider, a workspace row, and an unknown id are refused', async () => {
+  it('a pin to the actor\'s own ACTIVE row returns exactly that row; another user\'s row, a foreign provider and an unknown id are refused; a workspace row is exact too (ADR 0783 D3)', async () => {
     const T = tenant();
     const mine = await liveGoogleConnection(T, 'user:u1');
     const theirs = await liveGoogleConnection(T, 'user:u2');
@@ -147,7 +163,9 @@ describe('broker — a pin is EXACT; the user→org→workspace fall-through is 
     expect(await pin(theirs.connectionId, 'user:u1'), 'another user\'s mailbox').toBeNull();
     expect(await pin(mine.connectionId, undefined), 'a system run cannot claim a user row').toBeNull();
     expect(await pin(mine.connectionId, 'user:u1', 'slack'), 'provider mismatch').toBeNull();
-    expect(await pin(ws.connectionId, 'user:u1'), 'a workspace row is not pin-addressable (ADR 0627 D5 names two shapes)').toBeNull();
+    // ADR 0783 D3 widened ADR 0627 D5: a workspace row is pin-addressable, EXACTLY
+    // (the unpinned lane already self-authorizes it for any run in the tenant).
+    expect((await pin(ws.connectionId, 'user:u1'))?.connection.connectionId, 'a workspace pin is that row').toBe(ws.connectionId);
     expect(await pin('conn:does-not-exist', 'user:u1')).toBeNull();
     // …and a pin never widens: with the pin refused, the unpinned lane would have
     // found `mine` — proving the refusal is the pin, not the tenant.
@@ -227,7 +245,7 @@ describe('cursor honesty + self-pause (ADR 0627 D5(b)/(c))', () => {
   it('cap hit mid-pass → cursor UNCHANGED, row paused/capped, job disabled, typed node failure', async () => {
     const T = tenant();
     const conn = await liveGoogleConnection(T, 'user:u1');
-    const contact = await createContact({ tenantId: T, name: 'Ada', email: 'ada@acme.test' });
+    await createContact({ tenantId: T, name: 'Ada', email: 'ada@acme.test' });
     const sync = await createGmailSync({ tenantId: T, orgId: ORG, userId: 'user:u1', connectionId: conn.connectionId, cadence: 'daily' });
     // The REAL surface for everything (the row read, the contact match, the
     // status write) — only the append is forced to the cap outcome, because
@@ -252,7 +270,6 @@ describe('cursor honesty + self-pause (ADR 0627 D5(b)/(c))', () => {
     expect(row.status).toBe('paused');
     expect(row.pausedReason).toBe('capped');
     expect((await getJob(sync.jobId))!.enabled).toBe(false);
-    expect(contact.contactId).toBeTruthy();
   });
 
   it('a refused pin at the connector → row needs-reconsent, job disabled, typed node failure', async () => {
@@ -275,7 +292,8 @@ describe('cursor honesty + self-pause (ADR 0627 D5(b)/(c))', () => {
     let dials = 0;
     const connectors = { invoke: async () => { dials += 1; return { ok: true, status: 200, data: { messages: [] } }; } };
     const runNode = () => gmailSyncNode({ runId: 'run-refuse', nodeId: 'sync', config: { gmailSyncId: sync.syncId }, inputs: {}, features: { crm: crmSurface(T, 'run-refuse') }, connectors });
-    const deps = { storage, hostSuite: { workflowCatalog: { getWorkflow: async () => null }, providerPolicyResolver: { resolveForRun: async () => [] } } } as unknown as Parameters<typeof syncGmailNow>[0];
+    // The REAL app deps: both refusals fire before the run starter is reached.
+    const deps: StartRunDeps = { storage, hostSuite };
 
     await markGmailSyncStatus(T, sync.syncId, 'paused', 'capped');
     let out = await runNode();
@@ -294,27 +312,27 @@ describe('cursor honesty + self-pause (ADR 0627 D5(b)/(c))', () => {
 
   it('HTTP: POST sync-now on a self-paused sync is a 409 carrying the reason (what the Gmail tab renders)', async () => {
     let cookie = '';
-    const call = async (method: string, path: string, body?: unknown): Promise<{ status: number; body: any }> => {
+    const call = async (method: string, path: string, body?: unknown): Promise<{ status: number; body: HttpBody }> => {
       const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
       for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-      return { status: res.status, body: await res.json().catch(() => undefined) };
+      return { status: res.status, body: (await res.json().catch(() => undefined)) as HttpBody };
     };
     const T = tenant();
-    const login = await call('POST', '/v1/host/openwop-app/test/login', { email: `pin-${Date.now()}@acme.test`, tenantId: T });
+    const login = await call('POST', '/host/openwop-app/test/login', { email: `pin-${Date.now()}@acme.test`, tenantId: T });
     expect(login.status, JSON.stringify(login.body)).toBe(201);
     const userId = login.body.user.userId as string;
-    const org = await call('POST', '/v1/host/openwop-app/orgs', { name: 'Acme' });
+    const org = await call('POST', '/host/openwop-app/orgs', { name: 'Acme' });
     expect(org.status).toBe(201);
     const conn = await liveGoogleConnection(T, userId);
-    const created = await call('POST', '/v1/host/openwop-app/crm/gmail-sync', { orgId: org.body.orgId, connectionId: conn.connectionId, cadence: 'hourly' });
+    const created = await call('POST', '/host/openwop-app/crm/gmail-sync', { orgId: org.body.orgId, connectionId: conn.connectionId, cadence: 'hourly' });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
     await markGmailSyncStatus(T, created.body.sync.syncId, 'paused', 'capped');
-    const refused = await call('POST', `/v1/host/openwop-app/crm/gmail-sync/${created.body.sync.syncId}/sync-now`);
+    const refused = await call('POST', `/host/openwop-app/crm/gmail-sync/${created.body.sync.syncId}/sync-now`);
     expect(refused.status, JSON.stringify(refused.body)).toBe(409);
     expect(refused.body.error).toBe('validation_error');
     expect(refused.body.details).toMatchObject({ status: 'paused', pausedReason: 'capped' });
     // The row the tab lists carries both fields.
-    const list = await call('GET', `/v1/host/openwop-app/crm/gmail-sync?orgId=${encodeURIComponent(org.body.orgId)}`);
+    const list = await call('GET', `/host/openwop-app/crm/gmail-sync?orgId=${encodeURIComponent(org.body.orgId)}`);
     expect(list.body.syncs[0]).toMatchObject({ status: 'paused', pausedReason: 'capped' });
   });
 });
@@ -511,10 +529,10 @@ describe('a dead pin has an exit (review BLOCKER-2) and re-consent IS the resume
 
 describe('scheduler-run → real executor → broker (review SHOULD-2): the run acts as the sync owner and the broker sees the sync pin', () => {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<{ status: number; body: any }> => {
+  const call = async (method: string, path: string, body?: unknown): Promise<{ status: number; body: HttpBody }> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    return { status: res.status, body: await res.json().catch(() => undefined) };
+    return { status: res.status, body: (await res.json().catch(() => undefined)) as HttpBody };
   };
   const settle = async (tenantId: string, runId: string): Promise<RunRecord | undefined> => {
     let run: RunRecord | undefined;
@@ -529,21 +547,21 @@ describe('scheduler-run → real executor → broker (review SHOULD-2): the run 
   it('a sync pinned to a connection the broker cannot refresh, with an active WORKSPACE google row present: the real run marks the sync needs-reconsent — the broker refused THE PIN under the owner, no fall-through', async () => {
     cookie = '';
     const T = tenant();
-    const login = await call('POST', '/v1/host/openwop-app/test/login', { email: `pin-run-${Date.now()}@acme.test`, tenantId: T });
+    const login = await call('POST', '/host/openwop-app/test/login', { email: `pin-run-${Date.now()}@acme.test`, tenantId: T });
     expect(login.status).toBe(201);
     const userId = login.body.user.userId as string;
-    const org = await call('POST', '/v1/host/openwop-app/orgs', { name: 'Acme' });
+    const org = await call('POST', '/host/openwop-app/orgs', { name: 'Acme' });
     // Active at pin time, dead at resolve time: expired, no refresh token.
     const dying = await upsertOAuthConnection({
       tenantId: T, provider: 'google', userId,
       tokens: { accessToken: 'stale', tokenType: 'Bearer', scopes: GMAIL_SCOPES, expiresAt: new Date(Date.now() - 60_000).toISOString() },
     });
     await createSecretConnection({ tenantId: T, provider: 'google', kind: 'api_key', secret: 'ws', scope: 'workspace' });
-    const created = await call('POST', '/v1/host/openwop-app/crm/gmail-sync', { orgId: org.body.orgId, connectionId: dying.connectionId, cadence: 'hourly' });
+    const created = await call('POST', '/host/openwop-app/crm/gmail-sync', { orgId: org.body.orgId, connectionId: dying.connectionId, cadence: 'hourly' });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
     const syncId = created.body.sync.syncId as string;
 
-    const now = await call('POST', `/v1/host/openwop-app/crm/gmail-sync/${syncId}/sync-now`);
+    const now = await call('POST', `/host/openwop-app/crm/gmail-sync/${syncId}/sync-now`);
     expect(now.status, JSON.stringify(now.body)).toBe(202);
     const run = await settle(T, now.body.runId as string);
     expect(run, 'the real run must reach a terminal state').toBeTruthy();
@@ -557,15 +575,15 @@ describe('scheduler-run → real executor → broker (review SHOULD-2): the run 
   it("a sync pinned to the owner's ACTIVE row: the real run passes the broker's pin gate (owner === actingUserId) and reaches the dial — the row is NOT marked needs-reconsent", async () => {
     cookie = '';
     const T = tenant();
-    const login = await call('POST', '/v1/host/openwop-app/test/login', { email: `pin-run2-${Date.now()}@acme.test`, tenantId: T });
+    const login = await call('POST', '/host/openwop-app/test/login', { email: `pin-run2-${Date.now()}@acme.test`, tenantId: T });
     expect(login.status).toBe(201);
     const userId = login.body.user.userId as string;
-    const org = await call('POST', '/v1/host/openwop-app/orgs', { name: 'Acme' });
+    const org = await call('POST', '/host/openwop-app/orgs', { name: 'Acme' });
     const live = await liveGoogleConnection(T, userId);
-    const created = await call('POST', '/v1/host/openwop-app/crm/gmail-sync', { orgId: org.body.orgId, connectionId: live.connectionId, cadence: 'hourly' });
+    const created = await call('POST', '/host/openwop-app/crm/gmail-sync', { orgId: org.body.orgId, connectionId: live.connectionId, cadence: 'hourly' });
     expect(created.status).toBe(201);
     const syncId = created.body.sync.syncId as string;
-    const now = await call('POST', `/v1/host/openwop-app/crm/gmail-sync/${syncId}/sync-now`);
+    const now = await call('POST', `/host/openwop-app/crm/gmail-sync/${syncId}/sync-now`);
     expect(now.status).toBe(202);
     const run = await settle(T, now.body.runId as string);
     expect(run).toBeTruthy();
@@ -682,7 +700,7 @@ describe('the hold is bounded over time (review SHOULD-3): an unsettled message 
     const crm = crmSurface(T, 'run-budget');
     const node = () => gmailSyncNode({ runId: 'run-budget', nodeId: 'sync', config: { gmailSyncId: sync.syncId }, inputs: {}, features: { crm }, connectors: broken });
     const lines: string[] = [];
-    const spy = vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown) => { lines.push(String(chunk)); return true; }) as never);
+    const spy = vi.spyOn(process.stdout, 'write').mockImplementation((chunk: string | Uint8Array): boolean => { lines.push(String(chunk)); return true; });
     try {
       for (let pass = 1; pass <= 5; pass += 1) {
         const out = await node();
@@ -729,11 +747,17 @@ describe('ADR 0617 D1a — the activity a sync run appends carries the RUN origi
     await createHostEventBinding({ tenantId: T, eventType: 'host.crm.activity.logged', workflowId: 'wf-other-listener', createdBy: 'test' });
 
     const stub = gmailStub([{ id: 'm-origin', internalDate: Date.now() - 1000 }]);
-    const crm = buildHostSurfaceBundle({ tenantId: T, runId: 'run:gmail-origin', workflowId: 'wf-gmail-self' } as Parameters<typeof buildHostSurfaceBundle>[0]).features.crm!;
+    const crm = buildHostSurfaceBundle({ tenantId: T, runId: 'run:gmail-origin', workflowId: 'wf-gmail-self' }).features.crm!;
     const out = await gmailSyncNode({ runId: 'run:gmail-origin', nodeId: 'sync', config: { gmailSyncId: sync.syncId }, inputs: {}, features: { crm }, connectors: stub.connectors });
     expect(out.status, JSON.stringify(out.error)).toBe('success');
     expect(out.outputs).toMatchObject({ matched: 1 });
-    for (let i = 0; i < 40 && delivered.filter((e) => e.type === 'host.crm.activity.logged' && e.tenantId === T).length === 0; i++) await new Promise((r) => setTimeout(r, 25));
+    // The webhook fanout is synchronous with the append, but the binding loop
+    // starts runs three awaits later (bindings read, feature gate, run budget):
+    // wait on the POSITIVE control, then assert the self-skip. Polling on
+    // `delivered` (already true) and then reading `startRunCalls` was a race.
+    await vi.waitFor(() => {
+      expect(startRunCalls.filter((r) => r.workflowId === 'wf-other-listener'), 'a different workflow bound to the same event DOES start (the skip is origin-based)').toHaveLength(1);
+    }, { timeout: 2000, interval: 10 });
 
     const evs = delivered.filter((e) => e.type === 'host.crm.activity.logged' && e.tenantId === T);
     expect(evs).toHaveLength(1);

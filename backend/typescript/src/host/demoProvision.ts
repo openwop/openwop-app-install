@@ -14,7 +14,8 @@
  * it never changes the global default for other tenants.
  */
 
-import { enableTenantOverride } from './featureToggles/service.js';
+import { enableTenantOverride, getStoredConfig, resolveOne } from './featureToggles/service.js';
+import { recordToggleChange } from './featureToggles/audit.js';
 
 /**
  * The feature toggles the 10-phase demo program's seeders gate on. Kept in sync
@@ -71,6 +72,12 @@ export interface DemoProvisionResult {
   enabled: string[];
   /** Toggles already enabled for this tenant (no change). */
   alreadyOn: string[];
+  /** Toggles under the kill switch (ADR 0819 §3): no override written, the
+   *  feature stays off for this tenant until the operator lifts the kill. */
+  killed: string[];
+  /** Enabled by the toggle, but the tenant's PLAN excludes them (ADR 0819 §1):
+   *  their seeders resolve them off and skip, so they will stay empty. */
+  planBlocked: string[];
   /** Ids in the demo set with no registered toggle (skipped). */
   unknown: string[];
 }
@@ -86,6 +93,8 @@ export async function provisionDemoFeatures(
 ): Promise<DemoProvisionResult> {
   const enabled: string[] = [];
   const alreadyOn: string[] = [];
+  const killed: string[] = [];
+  const planBlocked: string[] = [];
   const unknown: string[] = [];
 
   // `enableTenantOverride` is a compare-and-swap loop (SEED-RS-3): a naive
@@ -93,11 +102,18 @@ export async function provisionDemoFeatures(
   // the same shared toggle config concurrently. CAS makes each per-tenant
   // override land atomically without a lost write.
   for (const id of DEMO_FEATURE_TOGGLE_IDS) {
+    const before = await getStoredConfig(id);
     const result = await enableTenantOverride(id, tenantId, actor);
-    if (result === 'enabled') enabled.push(id);
-    else if (result === 'already-on') alreadyOn.push(id);
+    if (result === 'enabled') {
+      enabled.push(id);
+      // ADR 0819 §4 — a per-tenant enable is an operator flip like any other.
+      await recordToggleChange({ action: 'feature-toggle.tenant-enabled', id, principalId: actor, actingTenantId: tenantId, before, after: await getStoredConfig(id) });
+    } else if (result === 'already-on') alreadyOn.push(id);
+    else if (result === 'killed') killed.push(id);
     else unknown.push(id);
+    // Say so rather than report "enabled" for a feature every seeder will skip.
+    if ((result === 'enabled' || result === 'already-on') && (await resolveOne(id, { tenantId }))?.blockedBy === 'plan') planBlocked.push(id);
   }
 
-  return { enabled, alreadyOn, unknown };
+  return { enabled, alreadyOn, killed, planBlocked, unknown };
 }

@@ -25,8 +25,12 @@ export async function storeKey(credentialRef: string, value: string): Promise<{ 
   });
 }
 
-export async function deleteKey(credentialRef: string): Promise<void> {
-  await requestJson<unknown>(`${SECRETS_PATH}/${encodeURIComponent(credentialRef)}`, {
+/** `force` is the audited override (ADR 0711 C′): it deletes past live
+ *  references and past a system-owned namespace (ADR 0779 D2). A plain delete
+ *  that the server refuses throws an `ApiError` with status 409 — read it with
+ *  `deleteConflictOf`. */
+export async function deleteKey(credentialRef: string, opts: { force?: boolean } = {}): Promise<void> {
+  await requestJson<unknown>(`${SECRETS_PATH}/${encodeURIComponent(credentialRef)}${opts.force ? '?force=true' : ''}`, {
     method: 'DELETE',
     okStatuses: [404],
   });
@@ -53,6 +57,9 @@ export interface ActiveConfigEnvelope {
    *  Optional so an older server (which omits it) reads as "stored", the prior
    *  behaviour, rather than as a default. */
   stored?: boolean;
+  /** The reported default is the free tier and this host refuses it to signed-out
+   *  visitors. Lets the chat say so before the first send. Absent ⇒ false. */
+  signInRequired?: boolean;
 }
 
 /** ADR 0711 — a 403 on a BYOK write means the workspace reserves this to operators.
@@ -103,6 +110,9 @@ export interface HeadlessAiDefault {
   provider: 'anthropic' | 'openai' | 'google';
   model: string;
   credentialRef: string;
+  /** ADR 0821 D5 — the tenant's opt-in to run background TEXT calls on this key
+   *  instead of the workspace's managed AI allowance. Absent ⇒ off. */
+  preferForText?: boolean;
 }
 
 export async function getAiDefault(): Promise<HeadlessAiDefault | null> {

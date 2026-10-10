@@ -43,6 +43,10 @@ const langSettings = new DurableCollection<ContentLanguageSettings>(
 export async function getContentLanguageSettings(tenantId: string, orgId: string): Promise<ContentLanguageSettings> {
   const stored = await langSettings.get(`${tenantId}:${orgId}`);
   if (stored && stored.tenantId === tenantId && stored.orgId === orgId) return stored;
+  return skeletonSettings(tenantId, orgId);
+}
+
+function skeletonSettings(tenantId: string, orgId: string): ContentLanguageSettings {
   return {
     tenantId,
     orgId,
@@ -54,15 +58,30 @@ export async function getContentLanguageSettings(tenantId: string, orgId: string
   };
 }
 
+/** ADR 0861 D4 — the STORED row, or `null` when the org never configured
+ *  localization. A caller that gates a write on what it read passes this to
+ *  `updateContentLanguageSettings` as `expected`, so the write is a CAS against
+ *  exactly that row (`null` = insert-if-absent). */
+export async function getStoredContentLanguageSettings(tenantId: string, orgId: string): Promise<ContentLanguageSettings | null> {
+  const stored = await langSettings.get(`${tenantId}:${orgId}`);
+  return stored && stored.tenantId === tenantId && stored.orgId === orgId ? stored : null;
+}
+
 /** Update the org's content-locale settings, enforcing the §A invariant
- *  (`baseLocale ∉ supportedLocales`) and BCP-47 validity. */
+ *  (`baseLocale ∉ supportedLocales`) and BCP-47 validity.
+ *
+ *  ADR 0861 D4 (CMSL2WF-4) — with `opts.expected` the write is a compare-and-swap
+ *  against the row the caller's gates decided on, and a miss is a 409. Without it,
+ *  two admins raced last-write-wins: a write built from a stale read put back a
+ *  locale the other had just removed, and the widening gate never saw it. */
 export async function updateContentLanguageSettings(
   tenantId: string,
   orgId: string,
   patch: { baseLocale?: unknown; supportedLocales?: unknown; autoTranslateOnPublish?: unknown },
   updatedBy: string,
+  opts?: { expected: ContentLanguageSettings | null },
 ): Promise<ContentLanguageSettings> {
-  const cur = await getContentLanguageSettings(tenantId, orgId);
+  const cur = opts ? (opts.expected ?? skeletonSettings(tenantId, orgId)) : await getContentLanguageSettings(tenantId, orgId);
   let baseLocale = cur.baseLocale;
   if (patch.baseLocale !== undefined) {
     const b = String(patch.baseLocale);
@@ -96,7 +115,13 @@ export async function updateContentLanguageSettings(
     updatedAt: nowIso(),
     updatedBy,
   };
-  await langSettings.put(next);
+  if (opts) {
+    if (!(await langSettings.compareAndSwap(opts.expected, next))) {
+      throw new OpenwopError('conflict', 'The language settings changed while this change was being saved — reload and try again.', 409, { orgId });
+    }
+  } else {
+    await langSettings.put(next);
+  }
   // ADR 0204 C5 — audit the admin config write (payload.tenantId required).
   try {
     void hostExtStorage()
@@ -119,8 +144,15 @@ export async function eraseContentLanguageSettingsSubject(
   for (const s of await langSettings.list()) {
     if (s.tenantId !== tenantId) continue;
     if (typeof s.updatedBy === 'string' && subjectForms.has(s.updatedBy)) {
-      await langSettings.put({ ...s, updatedBy: sentinel });
-      touched += 1;
+      // ADR 0861 D4 (review H7) — a CAS against the listed row: a blind `put` of a
+      // stale row put back whatever an admin had changed since the list.
+      let row: ContentLanguageSettings | null = s;
+      for (let attempt = 0; row && attempt < 3; attempt += 1) {
+        if (!(typeof row.updatedBy === 'string' && subjectForms.has(row.updatedBy))) { row = null; break; }
+        if (await langSettings.compareAndSwap(row, { ...row, updatedBy: sentinel })) { touched += 1; row = null; break; }
+        row = await langSettings.get(`${s.tenantId}:${s.orgId}`);
+      }
+      if (row) throw new Error(`content-locales erasure: settings row ${s.tenantId}:${s.orgId} kept changing under the rewrite`);
     }
   }
   return touched;

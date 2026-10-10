@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.wop-refinement/1.0.0/feature-refine.output.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.wop-refinement/1.0.2/feature-refine.output.json",
   "title": "WopFeatureRefineOutput",
   "type": "object",
   "required": ["status", "mutations", "mutationCount", "telemetryEvent"],

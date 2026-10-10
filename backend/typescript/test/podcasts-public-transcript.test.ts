@@ -58,16 +58,16 @@ const rawGet = async (path: string): Promise<{ status: number; body: string }> =
   return { status: res.status, body: await res.text() };
 };
 
-const P = '/v1/host/openwop-app/podcasts';
-const PUB = (orgId: string): string => `/v1/host/openwop-app/public/${encodeURIComponent(orgId)}/podcasts`;
+const P = '/host/openwop-app/podcasts';
+const PUB = (orgId: string): string => `/host/openwop-app/public/${encodeURIComponent(orgId)}/podcasts`;
 
 const TRANSCRIPT = '**Host:** Welcome to the show.\n\n**Guest:** Glad to be here.';
 
 /** Publish a show + episode; attach a transcript Document when `transcript` is given. */
 async function publish(transcript: string | null): Promise<{ orgId: string; showSlug: string; episodeSlug: string; tenantId: string; episodeId: string }> {
   const c = client();
-  await c.post('/v1/host/openwop-app/test/login', { email: `pt-${Date.now()}-${n++}@acme.test` });
-  const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme Media' });
+  await c.post('/host/openwop-app/test/login', { email: `pt-${Date.now()}-${n++}@acme.test` });
+  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme Media' });
   const orgId = org.body.orgId as string;
   const tenantId = (await getOrg(orgId))!.tenantId;
   const created = await c.post(`${P}/shows`, {

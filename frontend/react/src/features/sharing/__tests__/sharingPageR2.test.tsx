@@ -11,12 +11,19 @@
  *    labeled instead of reading as mystery rows; long lists page.
  *  - SR-9: revoke announces its success (the only feedback was a row quietly
  *    vanishing).
+ *
+ * Sabotage-witnessed (w7 grade-tests): dropping the `'invalid'` early return
+ * reds SR-4; a links catch that stores `[]` reds SR-6; an empty SYSTEM_TYPES
+ * set reds SR-5 + F3.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, act, fireEvent, waitFor } from '@testing-library/react';
+import type * as C from '../sharingClient.js';
+import type { ShareLink } from '../sharingClient.js';
 
 const { listOrgs, listLinks, listResources, createLink, revokeLink } = vi.hoisted(() => ({
-  listOrgs: vi.fn(), listLinks: vi.fn(), listResources: vi.fn(), createLink: vi.fn(), revokeLink: vi.fn(),
+  listOrgs: vi.fn<typeof C.listOrgs>(), listLinks: vi.fn<typeof C.listLinks>(), listResources: vi.fn<typeof C.listResources>(),
+  createLink: vi.fn<typeof C.createLink>(), revokeLink: vi.fn<typeof C.revokeLink>(),
 }));
 vi.mock('../sharingClient.js', async (orig) => ({
   ...(await orig<typeof import('../sharingClient.js')>()),
@@ -24,7 +31,7 @@ vi.mock('../sharingClient.js', async (orig) => ({
 }));
 
 const { toastSuccess, toastError } = vi.hoisted(() => ({ toastSuccess: vi.fn(), toastError: vi.fn() }));
-vi.mock('../../../ui/toast.js', () => ({ toast: { success: toastSuccess, error: toastError } }));
+vi.mock('../../../ui/toast.js', () => ({ toast: { success: toastSuccess, error: toastError, warning: vi.fn(), info: vi.fn() } }));
 // SHARE-UX-3 — the mock must RESOLVE A RESULT, not `undefined`. The mint path
 // now branches on `res.ok` to decide whether it may claim a copy, so a bare
 // `vi.fn()` would send every mint down the catch and quietly make these
@@ -37,7 +44,7 @@ import { SharingPage } from '../SharingPage.js';
 
 const ORG = { orgId: 'o1', name: 'Acme' };
 const RESOURCE = { id: 'r1', label: 'Q3 deck' };
-const LINK = {
+const LINK: ShareLink = {
   tokenHash: 'hash-1', resourceType: 'cms_page', resourceId: 'p1', label: 'Preview',
   createdAt: '2026-08-01T09:00:00.000Z', revoked: false, viewCount: 3, maxViews: 5,
 };
@@ -49,7 +56,7 @@ const mount = async (): Promise<void> => {
 
 afterEach(cleanup);
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   listOrgs.mockResolvedValue([ORG]);
   listLinks.mockResolvedValue([LINK]);
   listResources.mockResolvedValue([RESOURCE]);
@@ -102,7 +109,7 @@ describe('SR-7 — view counts, cap and created date finally render', () => {
     await screen.findByText('Preview');
     expect(screen.getByText(/seen 3 times/i)).toBeTruthy();
     expect(screen.getByText(/view cap 5/i)).toBeTruthy();
-    expect(screen.getByText(/created/i)).toBeTruthy();
+    expect(screen.getByText(/^created /i)).toBeTruthy();
   });
 });
 

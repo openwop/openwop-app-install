@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.ads-publish-tiktok/1.0.0/publish-tiktok.config.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.ads-publish-tiktok/1.0.3/publish-tiktok.config.json",
   "title": "AdsPublishTiktokConfig",
   "type": "object",
   "properties": {},

@@ -17,8 +17,8 @@ export function registerUcpRefMerchantRoutes(app: Express): void {
     log.info('reference UCP merchant mount disabled (set OPENWOP_UCP_REF_MERCHANT_ENABLED=true — DEV/DEMO only)');
     return;
   }
-  log.warn('reference UCP merchant ENABLED — POST /v1/host/openwop-app/dev/ucp-merchant/mcp serves a DEMO merchant (no real payment). NEVER enable in a real deploy.');
-  app.post('/v1/host/openwop-app/dev/ucp-merchant/mcp', async (req, res) => {
+  log.warn('reference UCP merchant ENABLED — POST /host/openwop-app/dev/ucp-merchant/mcp serves a DEMO merchant (no real payment). NEVER enable in a real deploy.');
+  app.post('/host/openwop-app/dev/ucp-merchant/mcp', async (req, res) => {
     // Always HTTP 200 with a JSON-RPC envelope (errors ride `error`, per JSON-RPC) so the buyer's
     // mcpClient parses the envelope rather than an HTTP failure.
     const out = await handleUcpMerchantRpc(req.body);

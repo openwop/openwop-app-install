@@ -3,8 +3,8 @@
  */
 export const messages = {
   button: 'Tarefas',
-  openTitle: 'Painel de tarefas',
-  heading: 'Painel de tarefas',
+  openTitle: 'Painel de execuções',
+  heading: 'Painel de execuções',
   blurb: 'Suas execuções e o trabalho delegado a partir delas: pendente, em execução, bloqueado, delegado, concluído e com falha.',
   empty: 'Ainda não há tarefas. As execuções que você iniciar (e o trabalho delegado) aparecerão aqui.',
   close: 'Fechar',
@@ -16,5 +16,5 @@ export const messages = {
   bucket_failed: 'Com falha',
   delegatedBy: 'Delegado por {{by}}',
   blockedReason: 'Aguardando: {{reason}}',
-  loadFailed: 'Não foi possível carregar o painel de tarefas.',
+  loadFailed: 'Não foi possível carregar o painel de execuções.',
 };

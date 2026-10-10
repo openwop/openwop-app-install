@@ -15,6 +15,7 @@
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { bareRunId } from './support/bareRunId.js';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { NextFunction, Request, Response } from 'express';
@@ -37,7 +38,7 @@ import {
 const HOST_AUDIENCE = 'openwop-host';
 const HOST_ISSUER = 'urn:openwop:surface-host';
 const PEER_ISSUER = 'spiffe://example';
-const SEAM = '/v1/host/sample/test/workload-identity/resolve';
+const SEAM = '/host/sample/test/workload-identity/resolve';
 
 const IDENTITY = { scheme: 'spiffe', subject: 'spiffe://example/dispatcher', issuer: PEER_ISSUER };
 
@@ -80,10 +81,16 @@ afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
 });
 
+// ADR 0812 P3c-0 — the unversioned seam is a major-2 path, where a request with
+// NO credential is refused 401 before any handler (ADR 0750); the old `/v1`
+// spelling admitted it as an anonymous session. The seam's subject is the
+// identity in the BODY, so the caller presents the dev bearer.
+const SEAM_HEADERS = { 'content-type': 'application/json', authorization: 'Bearer dev-token' };
+
 async function seam(body: unknown): Promise<{ status: number; json: Record<string, unknown> }> {
   const res = await fetch(`${BASE}${SEAM}`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: SEAM_HEADERS,
     body: JSON.stringify(body),
   });
   return { status: res.status, json: (await res.json()) as Record<string, unknown> };
@@ -96,25 +103,25 @@ async function seam(body: unknown): Promise<{ status: number; json: Record<strin
 const reasonOf = errorCodeOf;
 
 describe('RFC 0154 §A — the advertisement is derived and honest', () => {
-  it('advertises `auth.workloadIdentity` with derived schemes, an explicit bearer fallback, and the enforced depth', async () => {
-    const res = await fetch(`${BASE}/.well-known/openwop`);
-    const doc = (await res.json()) as { capabilities?: { auth?: Record<string, unknown> } };
-    const wid = doc.capabilities?.auth?.workloadIdentity as {
-      supported: boolean;
-      schemes: string[];
-      senderConstraint: string[];
-      delegation: { supported: boolean; maxChainDepth: number };
-    };
-    expect(wid.supported).toBe(true);
+  // ADR 0812 P3c-0 — ported to the major-2 document, where the workload profile
+  // is one `auth.lanes[]` row per scheme. v1's `senderConstraint` /
+  // `delegation.maxChainDepth` facets have no v2 seat; the lane's bearer
+  // `minimumAssurance` and `delegation-expiry` rule are their v2 statements.
+  it('advertises a `workload` auth lane per derived scheme, bearer assurance, delegation-expiry', async () => {
+    const res = await fetch(`${BASE}/.well-known/openwop`, { headers: { 'OpenWOP-Version': '2' } });
+    const doc = (await res.json()) as { auth?: { lanes?: Array<{ lane: string; issuers: string[]; revocation?: string; minimumAssurance?: string }> } };
+    const lanes = (doc.auth?.lanes ?? []).filter((l) => l.lane === 'workload');
+    const schemes = lanes.flatMap((l) => l.issuers);
     // `spiffe` because a root issues it; `oauth-client` because the host's own
     // issuer does. `mtls-san` / `cloud-subject` are NOT claimed — this host
     // terminates no client certificates and performs no cloud attestation, and
     // a scheme cannot be advertised without a root behind it.
-    expect(wid.schemes).toEqual(['spiffe', 'oauth-client']);
-    expect(wid.schemes).not.toContain('mtls-san');
-    // §C: the empty array IS the explicit bearer-fallback advertisement.
-    expect(wid.senderConstraint).toEqual([]);
-    expect(wid.delegation).toEqual({ supported: true, maxChainDepth: 4 });
+    expect(schemes).toEqual(['spiffe', 'oauth-client']);
+    expect(schemes).not.toContain('mtls-san');
+    for (const l of lanes) {
+      expect(l.minimumAssurance).toBe('bearer');
+      expect(l.revocation).toBe('delegation-expiry');
+    }
   });
 });
 
@@ -323,11 +330,11 @@ describe('ADR 0556 P3 — the fork ROUTE narrows, end to end', () => {
     });
     const narrow = await mintWorkloadCredential({ subject: 'worker/narrow', tenantId: 'tenant-w', scopes: ['runs:read'] });
 
-    const created = await post('/v1/runs', { workflowId, inputs: {} }, wide);
+    const created = await post('/runs', { workflowId, inputs: {} }, wide);
     expect(created.status, JSON.stringify(created.json)).toBe(201);
     const sourceRunId = String(created.json.runId);
 
-    const source = await storage.getRun(sourceRunId);
+    const source = await storage.getRun(bareRunId(sourceRunId));
     // Vacuity guard: the source must actually have been stamped, or the
     // comparison below is between two absent things.
     const recordedScopes = readRecordedAuthority(source?.metadata)?.scopes;
@@ -337,9 +344,9 @@ describe('ADR 0556 P3 — the fork ROUTE narrows, end to end', () => {
       'artifacts:read',
     ]);
 
-    const fork = await post(`/v1/runs/${sourceRunId}:fork`, { fromSeq: 0, mode: 'replay' }, narrow);
+    const fork = await post(`/runs/${sourceRunId}:fork`, { fromSeq: 0, mode: 'replay' }, narrow);
     expect(fork.status, JSON.stringify(fork.json)).toBe(201);
-    const forked = await storage.getRun(String(fork.json.runId));
+    const forked = await storage.getRun(bareRunId(String(fork.json.runId)));
     expect(readRecordedAuthority(forked?.metadata)?.scopes).toEqual(['runs:read']);
   });
 });
@@ -375,13 +382,14 @@ describe('RFC 0154 §20 — the seam is gated, in both directions', () => {
   it('an unconfigured profile 404s the seam and advertises nothing', async () => {
     const res = await fetch(`${disabledBase}${SEAM}`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: SEAM_HEADERS,
       body: JSON.stringify({ identity: { ...IDENTITY, audience: HOST_AUDIENCE } }),
     });
     expect(res.status).toBe(404);
-    const doc = (await (await fetch(`${disabledBase}/.well-known/openwop`)).json()) as {
-      capabilities?: { auth?: Record<string, unknown> };
+    // ADR 0812 P3c-0 — the major-2 document: no `workload` lane.
+    const doc = (await (await fetch(`${disabledBase}/.well-known/openwop`, { headers: { 'OpenWOP-Version': '2' } })).json()) as {
+      auth?: { lanes?: Array<{ lane: string }> };
     };
-    expect(doc.capabilities?.auth?.workloadIdentity).toBeUndefined();
+    expect((doc.auth?.lanes ?? []).filter((l) => l.lane === 'workload')).toEqual([]);
   });
 });

@@ -34,6 +34,7 @@ import { join } from 'node:path';
 
 import { createApp } from '../src/index.js';
 import { PUBLIC_PATH_PREFIXES } from '../src/middleware/auth.js';
+import { v1Advertisement } from './support/v1Advertisement.js';
 import {
   CERTIFICATION_BUNDLE_PATH,
   CONFORMANCE_CLAIMS_PATH,
@@ -90,8 +91,10 @@ afterAll(async () => {
   rmSync(stampDir, { recursive: true, force: true });
 });
 
+// ADR 0812 — the pointer is a MAJOR-1 claim (the v2 root deliberately omits it, last
+// leg below), so it is read from the v1 builder, which answers in both modes.
 const discovery = async (): Promise<Record<string, never>> =>
-  (await (await fetch(`${base}/.well-known/openwop`)).json()) as Record<string, never>;
+  (await v1Advertisement()) as Record<string, never>;
 
 const pointer = (doc: Record<string, never>): unknown =>
   ((doc as { capabilities?: { conformance?: { certificationBundleUrl?: unknown } } }).capabilities ?? doc as never)
@@ -145,7 +148,7 @@ describe('ADR 0550 P4 — a STAMPED build advertises and serves exactly what it 
     // The prefix, not the two full paths: `isPublicPath` matches on prefix, and
     // asserting the prefix is what keeps a later sibling route from silently
     // inheriting or losing the bypass.
-    expect(PUBLIC_PATH_PREFIXES).toContain('/v1/host/openwop-app/conformance');
+    expect(PUBLIC_PATH_PREFIXES).toContain('/host/openwop-app/conformance');
     // Probed with NO Authorization header at all — the assertions above already
     // did this, but stating it as its own case means a regression that re-walls
     // the routes names itself rather than surfacing as an unrelated 401.

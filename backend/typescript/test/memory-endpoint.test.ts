@@ -1,7 +1,7 @@
 /**
  * Memory ledger read-side (RFC 0004 / app-ux §A3).
  *
- * Verifies the host-extension GET /v1/host/openwop-app/memory returns the
+ * Verifies the host-extension GET /host/openwop-app/memory returns the
  * run-summary the executor writes on completion, tenant-scoped from the
  * caller's principal (not the query) per CTI-1.
  */
@@ -10,6 +10,7 @@ import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
+import { bareRunId } from './support/bareRunId.js';
 
 let server: http.Server;
 let BASE: string;
@@ -62,7 +63,7 @@ interface MemoryListBody {
 
 describe('memory ledger read-side', () => {
   it('requires auth', async () => {
-    const res = await fetch(`${BASE}/v1/host/openwop-app/memory`);
+    const res = await fetch(`${BASE}/host/openwop-app/memory`);
     expect(res.status).toBe(401);
   });
 
@@ -70,7 +71,7 @@ describe('memory ledger read-side', () => {
     // Omit body.tenantId so the run resolves the same tenant the memory GET
     // does (`req.tenantId ?? 'default'`) — the api-key principal is wildcard,
     // so both land on 'default' and the ledger read sees the run's write.
-    const create = await jsonFetch<{ runId: string; status: string }>('/v1/runs', {
+    const create = await jsonFetch<{ runId: string; status: string }>('/runs', {
       method: 'POST',
       body: JSON.stringify({
         workflowId: 'openwop-app.uppercase',
@@ -83,45 +84,45 @@ describe('memory ledger read-side', () => {
     // Poll for terminal status (the run-summary is written on completion).
     for (let i = 0; i < 20; i++) {
       await new Promise((r) => setTimeout(r, 50));
-      const snap = await jsonFetch<{ status: string }>(`/v1/runs/${runId}`);
+      const snap = await jsonFetch<{ status: string }>(`/runs/${runId}`);
       if (['completed', 'failed', 'cancelled'].includes(snap.body.status)) break;
     }
 
-    const mem = await jsonFetch<MemoryListBody>('/v1/host/openwop-app/memory');
+    const mem = await jsonFetch<MemoryListBody>('/host/openwop-app/memory');
     expect(mem.status).toBe(200);
     expect(mem.body.memoryRef).toBe('tenant-memory');
-    const mine = mem.body.entries.filter((e) => e.tags.includes(`run-id:${runId}`));
+    const mine = mem.body.entries.filter((e) => e.tags.includes(`run-id:${bareRunId(runId)}`));
     expect(mine.length).toBe(1);
     expect(mine[0]!.tags).toContain('run-summary');
-    expect(mine[0]!.content).toContain(runId);
+    expect(mine[0]!.content).toContain(bareRunId(runId));
   });
 
   it('filters by tag', async () => {
-    const mem = await jsonFetch<MemoryListBody>('/v1/host/openwop-app/memory?tag=run-summary');
+    const mem = await jsonFetch<MemoryListBody>('/host/openwop-app/memory?tag=run-summary');
     expect(mem.status).toBe(200);
     for (const e of mem.body.entries) expect(e.tags).toContain('run-summary');
   });
 
   it('deletes a tenant-scoped entry (demo DELETE route)', async () => {
     // Grab an existing entry, delete it, and confirm it's gone.
-    const before = await jsonFetch<MemoryListBody>('/v1/host/openwop-app/memory');
+    const before = await jsonFetch<MemoryListBody>('/host/openwop-app/memory');
     expect(before.body.entries.length).toBeGreaterThan(0);
     const target = before.body.entries[0]!;
 
     const del = await jsonFetch<{ memoryRef: string; memoryId: string; removed: boolean }>(
-      `/v1/host/openwop-app/memory/${target.id}`,
+      `/host/openwop-app/memory/${target.id}`,
       { method: 'DELETE' },
     );
     expect(del.status).toBe(200);
     expect(del.body.removed).toBe(true);
     expect(del.body.memoryId).toBe(target.id);
 
-    const after = await jsonFetch<MemoryListBody>('/v1/host/openwop-app/memory');
+    const after = await jsonFetch<MemoryListBody>('/host/openwop-app/memory');
     expect(after.body.entries.find((e) => e.id === target.id)).toBeUndefined();
   });
 
   it('returns 404 deleting a missing entry', async () => {
-    const del = await jsonFetch<{ error: string }>('/v1/host/openwop-app/memory/mem_does_not_exist', {
+    const del = await jsonFetch<{ error: string }>('/host/openwop-app/memory/mem_does_not_exist', {
       method: 'DELETE',
     });
     expect(del.status).toBe(404);
@@ -129,7 +130,7 @@ describe('memory ledger read-side', () => {
   });
 
   it('requires auth to delete', async () => {
-    const res = await fetch(`${BASE}/v1/host/openwop-app/memory/whatever`, { method: 'DELETE' });
+    const res = await fetch(`${BASE}/host/openwop-app/memory/whatever`, { method: 'DELETE' });
     expect(res.status).toBe(401);
   });
 });
@@ -150,7 +151,7 @@ describe('memory ledger read-side', () => {
  */
 describe('AGMEM-1 — a foreign memoryRef is refused', () => {
   it('a foreign `user:` scope is 404, not a read of that person\'s memory', async () => {
-    const res = await jsonFetch<{ error?: string }>('/v1/host/openwop-app/memory?memoryRef=user:someone-else');
+    const res = await jsonFetch<{ error?: string }>('/host/openwop-app/memory?memoryRef=user:someone-else');
     expect(res.status).toBe(404);
   });
 
@@ -162,7 +163,7 @@ describe('AGMEM-1 — a foreign memoryRef is refused', () => {
     const { writeMemoryEntry, listMemoryEntries } = await import('../src/host/inMemorySurfaces.js');
     const row = await writeMemoryEntry('default', 'user:someone-else', { content: 'victim private fact', tags: [] });
 
-    const res = await jsonFetch<{ error?: string }>(`/v1/host/openwop-app/memory/${row.id}?memoryRef=user:someone-else`, {
+    const res = await jsonFetch<{ error?: string }>(`/host/openwop-app/memory/${row.id}?memoryRef=user:someone-else`, {
       method: 'DELETE',
     });
     expect(res.status).toBe(404);
@@ -170,12 +171,12 @@ describe('AGMEM-1 — a foreign memoryRef is refused', () => {
   });
 
   it('an `agent:` scope for a non-existent agent is 404 (no existence leak)', async () => {
-    const res = await jsonFetch<{ error?: string }>('/v1/host/openwop-app/memory?memoryRef=agent:no-such-agent');
+    const res = await jsonFetch<{ error?: string }>('/host/openwop-app/memory?memoryRef=agent:no-such-agent');
     expect(res.status).toBe(404);
   });
 
   it('an arbitrary non-demo namespace is refused', async () => {
-    const res = await jsonFetch<{ error?: string }>('/v1/host/openwop-app/memory?memoryRef=project:some-project');
+    const res = await jsonFetch<{ error?: string }>('/host/openwop-app/memory?memoryRef=project:some-project');
     expect(res.status).toBe(404);
   });
 
@@ -184,16 +185,16 @@ describe('AGMEM-1 — a foreign memoryRef is refused', () => {
     const { writeMemoryEntry } = await import('../src/host/inMemorySurfaces.js');
     const row = await writeMemoryEntry('default', 'user:someone-else-2', { content: 'victim private fact', tags: [] });
     const res = await jsonFetch<{ error?: string; entry?: { content: string } }>(
-      `/v1/host/openwop-app/memory/${row.id}?memoryRef=user:someone-else-2`,
+      `/host/openwop-app/memory/${row.id}?memoryRef=user:someone-else-2`,
     );
     expect(res.status).toBe(404);
     expect(res.body.entry).toBeUndefined();
   });
 
   it('ANTI-ROT: the tenant\'s OWN demo namespace still reads 200 — this is not "refuse everything"', async () => {
-    const explicit = await jsonFetch<MemoryListBody>('/v1/host/openwop-app/memory?memoryRef=tenant-memory');
+    const explicit = await jsonFetch<MemoryListBody>('/host/openwop-app/memory?memoryRef=tenant-memory');
     expect(explicit.status).toBe(200);
-    const defaulted = await jsonFetch<MemoryListBody>('/v1/host/openwop-app/memory');
+    const defaulted = await jsonFetch<MemoryListBody>('/host/openwop-app/memory');
     expect(defaulted.status).toBe(200);
   });
 });
@@ -232,7 +233,7 @@ describe('F3(c) — the legitimate `agent:` read a wildcard operator must still 
     await writeMemoryEntry('default', `agent:${entry.rosterId}`, { content: 'agent private fact', tags: [] });
 
     const res = await jsonFetch<MemoryListBody>(
-      `/v1/host/openwop-app/memory?memoryRef=agent:${encodeURIComponent(entry.rosterId)}`,
+      `/host/openwop-app/memory?memoryRef=agent:${encodeURIComponent(entry.rosterId)}`,
     );
     expect(res.status, 'a legitimate agent read must not 403 on a scope it can never obtain').toBe(200);
     expect(res.body.entries.map((e) => e.content)).toContain('agent private fact');

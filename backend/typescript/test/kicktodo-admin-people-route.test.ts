@@ -26,7 +26,7 @@ let wsTenant: string;
 let editorCookie: string;
 let adminCookie: string;
 
-const PEOPLE = '/v1/host/openwop-app/kicktodo/org-programs/admin/people';
+const PEOPLE = '/host/openwop-app/kicktodo/org-programs/admin/people';
 
 const craftCookie = (userId: string, activeTenant: string, personalTenant: string): string => {
   const now = Math.floor(Date.now() / 1000);

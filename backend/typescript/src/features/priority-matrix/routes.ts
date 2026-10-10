@@ -17,8 +17,8 @@
 import type { Request } from 'express';
 import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
-import { resolveEffectiveAccess, type Scope } from '../../host/accessControlService.js';
-import { resolveSubjectAccess, levelSatisfies } from '../../host/subjectAccess.js';
+import type { Scope } from '../../host/accessControlService.js';
+import { orgScopeGranted, listProjectReadable, hasListConfigAuthority } from './listAccess.js';
 import { requireFeatureEnabled, requireString } from '../featureRoute.js';
 import { resolveCallerUser } from '../users/usersGuards.js';
 import {
@@ -30,7 +30,7 @@ import {
 } from './priorityMatrixService.js';
 import { listPeers, addPeer, deletePeer, setPeerCredential, buildFederatedPortfolio } from './federationService.js';
 import { getIdeaIntake, listIdeaEvidence, upsertIdeaIntake, addIdeaEvidence, removeIdeaEvidence, mergeIdeaOverlays, markPromoted, assertNotPromoted } from './intake.js';
-import { listIdeaScoreHistory } from './scoreHistory.js';
+import { listIdeaScoreHistory, redactTrailFor } from './scoreHistory.js';
 import { addScenario, resolveScenarios, compareScenarios, selectScenario, getScenario } from './scenarios.js';
 import { findApprovalForScenario } from '../../host/approvalService.js';
 import { claimApproval, rejectApproval } from '../../host/approvalDecision.js';
@@ -47,16 +47,10 @@ const LABEL = 'Priority Matrix';
 const tenantOf = (req: Request): string => req.tenantId ?? 'default';
 const actingUserOf = (req: Request): string | undefined => req.userId ?? req.principal?.principalId;
 
-/**
- * PMX-14 (ADR 0590) — the ONE org-scope predicate, EXPORTED so the agent tools
- * import it instead of keeping a byte-parallel copy that can drift (the CRM
- * `orgScopeGranted` pattern — same host function is not enough; it must be the
- * same PREDICATE).
- */
-export async function orgScopeGranted(tenantId: string, subject: string | undefined, orgId: string, scope: Scope): Promise<boolean> {
-  const access = await resolveEffectiveAccess(tenantId, { subject, orgId });
-  return access.scopes.includes(scope);
-}
+/** PMX-14 (ADR 0590) → ADR 0842 D1 — the predicate now lives in `listAccess.ts`, the ONE
+ *  module every lane (routes, agent tools, the workflow surface) imports. Re-exported for
+ *  existing importers. */
+export { orgScopeGranted };
 
 /** Does the caller hold `scope` in `orgId`? (the tenant owner implicitly holds
  *  every scope in every org — same semantics as the projects feature.) */
@@ -70,23 +64,17 @@ async function requireOrgScopeFor(req: Request, orgId: string, scope: Scope): Pr
   }
 }
 
+/** ADR 0610 D3′ / CPC-14 — a project-bound list is membership-scoped; ADR 0842 D1 — the
+ *  rule is `listAccess.listProjectReadable`, shared with the agent tools and the surface. */
+async function projectReadable(req: Request, list: PriorityList): Promise<boolean> {
+  return listProjectReadable(tenantOf(req), list, actingUserOf(req));
+}
 
 /**
  * Load a list + gate on the caller's scope IN THE LIST'S ORG. No-existence-leak:
  * a caller without `workspace:read` in the list's org gets a uniform 404 (never
  * learns the id is valid, even tenant-internally). A WRITE op missing write → 403.
  */
-/** ADR 0610 D3′ / CPC-14 — a list bound to a project (`list.projectId`) is
- *  membership-scoped: the org gate is NOT sufficient (a private project's list must
- *  not read to a non-member org viewer). Consult the ONE `host/subjectAccess.ts`
- *  seam. Null ⇒ not membership-scoped (an org-scoped list) ⇒ the org gate stands.
- *  READ minimum (a write op's org-write holder resolves to 'write' ≥ 'read'). */
-async function projectReadable(req: Request, list: PriorityList): Promise<boolean> {
-  if (!list.projectId) return true;
-  const level = await resolveSubjectAccess(tenantOf(req), { kind: 'project', id: list.projectId }, actingUserOf(req));
-  return level === null || levelSatisfies(level, 'read');
-}
-
 async function loadListScoped(req: Request, scope: Scope): Promise<PriorityList> {
   const list = await getList(tenantOf(req), req.params.listId);
   if (!list || !(await hasOrgScope(req, list.orgId, 'workspace:read')) || !(await projectReadable(req, list))) {
@@ -99,9 +87,7 @@ async function loadListScoped(req: Request, scope: Scope): Promise<PriorityList>
 /** ADR 0058 §8 — the elevated bar for editing the scoring model / deleting a list:
  *  the list creator, or an org admin (`host:org:manage` in the list's org). */
 async function requireListConfigAuthority(req: Request, list: PriorityList): Promise<void> {
-  const actor = actingUserOf(req);
-  if (actor && list.createdBy === actor) return;
-  if (await hasOrgScope(req, list.orgId, 'host:org:manage')) return;
+  if (await hasListConfigAuthority(tenantOf(req), list, actingUserOf(req))) return;
   throw new OpenwopError('forbidden_scope', "Changing a list's criteria/weights (or deleting it) requires being the list owner or an org admin.", 403, { requiredScope: 'host:org:manage' });
 }
 
@@ -123,9 +109,32 @@ async function readableLists(req: Request, orgId?: string): Promise<PriorityList
   return out;
 }
 
+/**
+ * PM4UX-1 (ADR 0842 D9) — what THIS caller may do with a list, computed by the same
+ * predicates the doors enforce, so the page offers only controls that can succeed
+ * (DESIGN.md "403 ⇒ hidden — never surface an action that would fail"). A projection,
+ * never authority: every door still re-checks. Not persisted.
+ */
+async function withViewer(req: Request, list: PriorityList, memo?: Map<string, Promise<{ write: boolean; manage: boolean }>>): Promise<PriorityList & { viewer: { canWrite: boolean; canConfigure: boolean } }> {
+  // Both scopes are per-ORG, so an index read resolves each org once (a tenant with many
+  // lists in one org used to cost two access resolutions per list).
+  const key = list.orgId;
+  let org = memo?.get(key);
+  if (!org) {
+    org = Promise.all([hasOrgScope(req, list.orgId, 'workspace:write'), hasOrgScope(req, list.orgId, 'host:org:manage')])
+      .then(([write, manage]) => ({ write, manage }));
+    memo?.set(key, org);
+  }
+  const { write, manage } = await org;
+  const actor = actingUserOf(req);
+  // `canConfigure` is `hasListConfigAuthority` (creator OR org admin), spelled from the
+  // memoised org answer; `listAccess.ts` stays the rule's one home.
+  return { ...list, viewer: { canWrite: write, canConfigure: manage || (actor !== undefined && list.createdBy === actor) } };
+}
+
 export function registerPriorityMatrixRoutes(deps: RouteDeps): void {
   const { app } = deps;
-  const BASE = '/v1/host/openwop-app/priority-matrix';
+  const BASE = '/host/openwop-app/priority-matrix';
   registerShareableKb(priorityMatrixShareableKbProvider); // ADR 0100 D2
   // CHAT-FIRST-PORT-AUDIT D3 — register the agent-proposed scenario decide handler
   // on the core approvals hook (the inbox claim/reject path AND the page "Select"
@@ -155,7 +164,8 @@ export function registerPriorityMatrixRoutes(deps: RouteDeps): void {
   app.get(`${BASE}/lists`, async (req, res, next) => {
     try {
       await requireFeatureEnabled(req, TOGGLE_ID, LABEL);
-      res.json({ lists: await readableLists(req) });
+      const memo = new Map<string, Promise<{ write: boolean; manage: boolean }>>();
+      res.json({ lists: await Promise.all((await readableLists(req)).map((l) => withViewer(req, l, memo))) });
     } catch (err) { next(err); }
   });
 
@@ -242,7 +252,7 @@ export function registerPriorityMatrixRoutes(deps: RouteDeps): void {
   app.get(`${BASE}/lists/:listId`, async (req, res, next) => {
     try {
       await requireFeatureEnabled(req, TOGGLE_ID, LABEL);
-      res.json(await loadListScoped(req, 'workspace:read'));
+      res.json(await withViewer(req, await loadListScoped(req, 'workspace:read')));
     } catch (err) { next(err); }
   });
 
@@ -476,7 +486,10 @@ export function registerPriorityMatrixRoutes(deps: RouteDeps): void {
       await requireFeatureEnabled(req, TOGGLE_ID, LABEL);
       const list = await loadListScoped(req, 'workspace:read');
       const cardId = req.params.cardId ?? '';
-      const history = await listIdeaScoreHistory(tenantOf(req), list.id, cardId);
+      // ADR 0842 D2 — below config authority, other voters' identities + ballots are
+      // redacted (the same secrecy `GET …/votes` enforces); the movement stays.
+      const trail = await listIdeaScoreHistory(tenantOf(req), list.id, cardId);
+      const history = (await hasListConfigAuthority(tenantOf(req), list, actingUserOf(req))) ? trail : redactTrailFor(trail, actingUserOf(req));
       // The rank explanation: per-criterion weighted components over the idea's
       // CURRENT effective scores (single: the shared row; multi: the aggregate).
       const idea = (await listRankedIdeas(tenantOf(req), list.id)).find((r) => r.card.id === cardId);
@@ -593,7 +606,7 @@ export function registerPriorityMatrixRoutes(deps: RouteDeps): void {
       // R2 review — BEFORE minting anything: the 409 used to fire after `createProject`
       // had already written a project that linked to nothing.
       await assertNotPromoted(list.id, cardId);
-      const project = await createProject(tenantOf(req), list.orgId, { name: idea.card.title });
+      const project = await createProject(tenantOf(req), list.orgId, { name: idea.card.title }, actingUserOf(req)); // ADR 0839 D5
       try {
         await markPromoted({
           tenantId: tenantOf(req), orgId: list.orgId, listId: list.id, cardId,

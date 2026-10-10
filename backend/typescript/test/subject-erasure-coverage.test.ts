@@ -108,9 +108,26 @@ type Exemption = { reason: string; tenantTeardownClaim?: true };
  *  HONESTY assertion below requires an actual `tenantId` field to back (a purge keyed by
  *  tenantId can never reach a row that has none). */
 const REVIEWED_EXEMPT = new Map<string, Exemption>([
+  // ADR 0803 — one row, `{ id: 'all', token: <random uuid>, at }`: "the job set
+  // changed". No tenant, no subject, no job content.
+  ['scheduler:job-generation', { reason: 'ADR 0803 scheduler job-set change token — a single row holding a random uuid and a timestamp; no tenant, subject or job content' }],
+  // ADR 0788 D5 — the workspace's MCP exposure switch: tenantId, a sorted list of
+  // `source:workflowId:toolName` keys, updatedAt. WHO changed it is in the audit
+  // log, deliberately not on the row.
+  ['mcp-exposure', { reason: 'ADR 0788 D5 per-workspace MCP tool switch — tenantId + host-vocabulary entry keys (source:workflowId:toolName) + updatedAt; no subject/actor identifier (the actor is recorded only in the audit log). Purged on ADR 0284 tenant teardown.', tenantTeardownClaim: true }],
   // Named exemptions (ADR 0464 §4 rulings + the lead's audit).
   ['workflow:eval-online', { reason: 'ADR 0480 online-eval daily buckets — aggregate counts + OPAQUE run references (runId + failed assertion KINDS only; no output, no detail strings, no subject identifiers); purged on ADR 0284 tenant teardown', tenantTeardownClaim: true }],
   ['workflow:eval-online-judgecap', { reason: 'ADR 0480 per-tenant-day judge spend counter — a single integer per (tenant, day); no subject data; purged on ADR 0284 tenant teardown', tenantTeardownClaim: true }],
+  // ADR 0821 D4 — per-(tenant, UTC day, featureId) managed AI spend: token and
+  // unit counts only. Deliberately carries NO subject (the per-subject cap row is
+  // the ADR 0693 store, erased by `eraseSubjectManagedUsage`).
+  ['managed:feature-spend', { reason: 'ADR 0821 D4 per-(tenant, day, feature) managed AI spend — token/unit counts + featureId only, no subject identifier; purged on ADR 0284 tenant teardown (tenantOf)', tenantTeardownClaim: true }],
+  // ADR 0821 D2 — the per-(tenant, UTC month) plan-allowance draw counter.
+  ['managed:plan-allowance-month', { reason: 'ADR 0821 D2 per-(tenant, month) plan AI-credit allowance counter — a single integer per tenant-month, no subject identifier; purged on ADR 0284 tenant teardown (tenantOf)', tenantTeardownClaim: true }],
+  // ADR 0821 D6 — the per-(tenant, UTC month) plan run counter.
+  ['runs:plan-month-count', { reason: 'ADR 0821 D6 per-(tenant, month) workflow-run counter for the plan limit — a single integer per tenant-month, no subject identifier; purged on ADR 0284 tenant teardown (tenantOf)', tenantTeardownClaim: true }],
+  // Strategy §8 — paywall funnel counters, the ADR 0512 nav-counts posture.
+  ['paywall:funnel-counts', { reason: 'no-subject: strategy §8 paywall funnel counters — (UTC day, tenant, metric, featureId, bundleId, surface) → count; no user/session/URL identifier, nothing finer than a day; reclaimed by the 90-day kvAgeOut TTL, the internal retention purger, and ADR 0284 tenant teardown via the tenantId field', tenantTeardownClaim: true }],
   ['workflow:spend-day', { reason: 'ADR 0482 per-(tenant, workflow, day) spend counter — counts + alert flags only, no subject content; purged on ADR 0284 tenant teardown', tenantTeardownClaim: true }],
   // ADR 0738 P2 — core Kanban's executable projection stores only tenant-scoped
   // work identity, opaque source/workflow references, state and delivery facts.
@@ -128,6 +145,7 @@ const REVIEWED_EXEMPT = new Map<string, Exemption>([
   // — recording which seed version of the comparison page has been ensured at
   // boot. No subject field, no tenant scope, no user content.
   ['brand:asset-slot', { reason: 'ADR 0511 host-global brand-asset slot map — at most five { slot, token } rows binding each published-app-logo slot to its host:brand storage copy; host identity, no tenant scope, no subject data of any kind' }],
+  ['scheduler:daemon', { reason: 'ADR 0787 D7 host-global schedule-daemon fleet heartbeat — one { instanceId, revision, commit, startedAt, lastTickAt } row per server instance (hostname-pid, Cloud Run revision, build commit), pruned after an hour of silence; operational identity of PROCESSES, no tenant scope, no subject data of any kind' }],
   ['comparison-page-seed', { reason: 'ADR 0485 host-global seed-version marker — a single { id, version } row recording which comparison-page seed has been ensured at boot; no subject data of any kind' }],
   // ADR 0486 follow-up (#2549) shipped the About + Roadmap seeder with the same
   // omission the comparison page had, so this gate went red on main again. Same
@@ -176,6 +194,7 @@ const REVIEWED_EXEMPT = new Map<string, Exemption>([
   ['compat:endpoint', { reason: 'no-subject: compat endpoint config; credentialRef is a BYOK ref, not subject data' }],
   ['chat:exchange-idem', { reason: 'no-subject: exchange idempotency claims (pointers/status)' }],
   ['custom-domains:meta', { reason: 'no-subject: singleton meta/version row (__meta)' }],
+  ['public-lapse:observed', { reason: 'no-subject: ADR 0820 §7 owner-lapse grace clock — one row per (owner tenant, feature id) holding only the first time a public lane saw the owner refused by their plan; no actor or visitor identifier. Purged on ADR 0284 tenant teardown.', tenantTeardownClaim: true }],
   ['egress-rules', { reason: 'no-subject: network egress policy config' }],
   // EM-4c CORRECTION (2026-08-18) — the old reason read "no-subject: send-dedup
   // ledger (provider/messageId keys); no recipient PII stored", and the second
@@ -202,7 +221,7 @@ const REVIEWED_EXEMPT = new Map<string, Exemption>([
   // this stores no subject identifier at all). Row = (key, tenantId, channel,
   // provider, providerRef, createdAt). Early deletion would un-dedup a live send and
   // risk double-delivery to the very subject requesting erasure, so the TTL reclaims it.
-  ['egress:sent', { reason: 'ADR 0619 — bounded-lifetime SMS/push dispatch dedup (egressSentLedger), the sibling of email:sent: TTL-swept within OPENWOP_EGRESS_LEDGER_TTL_DAYS (default 30d) by sweepExpiredEgressSent; stores no name/address/body — the recipient phone/device-token is HASHED into the caller idempotencyKey, never persisted. Early deletion would un-dedup a live send generation and risk double-delivery to the very subject requesting erasure, so the TTL is the right reclaim.' }],
+  ['egress:sent', { reason: 'ADR 0619 — bounded-lifetime SMS/push dispatch dedup (egressSentLedger), the sibling of email:sent: TTL-swept within OPENWOP_EGRESS_LEDGER_TTL_DAYS (default 30d) by sweepExpiredEgressSent; stores no name/address/body — the recipient phone/device-token is HASHED into the caller idempotencyKey, never persisted. ADR 0783 D7 data-source writes record an HTTP status only, never a request or response body. ADR 0865 B4 A2A sends record the opaque task id the peer assigned as providerRef, never a message or a result. Early deletion would un-dedup a live send generation and risk double-delivery to the very subject requesting erasure, so the TTL is the right reclaim.' }],
   ['example:widget', { reason: 'no-subject: host/examples reference surface; demo widget rows' }],
   ['features-page-seed', { reason: 'no-subject: seed version marker' }],
   ['feature-toggle', { reason: 'no-subject: feature-toggle config; updatedBy operator attribution' }],
@@ -220,15 +239,20 @@ const REVIEWED_EXEMPT = new Map<string, Exemption>([
   // tenant-keyed purge to match on.
   ['pack-revocation', { reason: 'lawful/technical retention — an ADR 0555 pack revocation must SURVIVE erasure (deleting it would re-enable code believed compromised); host-global, no tenant scope, no subject content beyond revokedBy operator attribution' }],
   ['roster', { reason: 'no-subject: agent roster identity (rosterId/persona/agentRef) — excluded agent identity' }],
+  ['roster-version', { reason: 'no-subject: one host-wide row holding a random change token (EVID-5); no tenant, user or content' }],
   ['retention-hold', { reason: 'no-subject: operational retention-hold metadata (reason = why a run is held)' }],
   ['site-config', { reason: 'no-subject: global site config singleton; updatedBy operator attribution' }],
   ['system-site-seed', { reason: 'no-subject: seed version marker' }],
   ['systemsite:docs-seed', { reason: 'no-subject: seed version marker' }],
+  ['systemsite:blog-seed', { reason: 'no-subject: seed version marker' }],
   ['triggerbridge:sub', { reason: 'no-subject: webhook subscription config (source/secretFingerprint)' }],
   ['triggerbridge:delivery', { reason: 'no-subject: delivery-attempt records (outcome/runId)' }],
   ['triggerbridge:dedup', { reason: 'no-subject: delivery dedup keys' }],
+  ['triggerbridge:deadletter', { reason: 'no-subject: ADR 0805 / RFC 0232 dead-lettered delivery records — ids, an opaque dedup hash, a counter, closed enums and instants; content-free by construction (no body, header, signature or secret); aged out at 7 days' }],
+  ['triggerbridge:ingest-secret', { reason: 'no-subject: ADR 0793 — the SEALED inbound-webhook signing secret per subscription (KMS envelope when configured); a credential, not subject data, keyed by subscriptionId' }],
   ['workflow:ownership', { reason: 'no-subject: tenant↔workflow ownership (key `${tenantId}:${workflowId}`); the owner is the TENANT' }],
   ['workforce', { reason: 'no-subject: agent workforce config (agents = agent roster) — agent identity' }],
+  ['workforce-status', { reason: 'no-subject: a tenant\'s workforce cutover decision {tenantId, workforceId, status, updatedAt} — no person or agent id; purged with the tenant (ADR 0775 D2)' }],
   ['ads:dispatch', { reason: 'no-subject: ad-platform dispatch records (external campaign/ad ids)' }],
   ['ads:spend-approval', { reason: 'no-subject: spend-approval pointer (spendKey→approvalId)' }],
   ['agent-profile', { reason: 'agent profile/identity config — excluded agent identity; the ONE subject-bearing corner (twin.userId/linkedBy) is redacted by the agentProfileService eraser' }],

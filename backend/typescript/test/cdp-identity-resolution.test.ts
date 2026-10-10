@@ -64,7 +64,7 @@ function client(): Client {
 
 let n = 0;
 async function signup(c: Client, tenantId: string): Promise<void> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `cdp-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await c.post('/host/openwop-app/test/login', { email: `cdp-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
 }
 const setToggle = async (id: string, status: 'on' | 'off'): Promise<void> => {
@@ -72,7 +72,7 @@ const setToggle = async (id: string, status: 'on' | 'off'): Promise<void> => {
   if (def) await saveConfig({ ...def, status }, 'test');
 };
 const resolve = (c: Client, type: string, value: string) =>
-  c.get(`/v1/host/openwop-app/cdp/identity/resolve?type=${encodeURIComponent(type)}&value=${encodeURIComponent(value)}`);
+  c.get(`/host/openwop-app/cdp/identity/resolve?type=${encodeURIComponent(type)}&value=${encodeURIComponent(value)}`);
 
 async function owner(): Promise<Client> {
   const tenantId = `org:cdp-${Date.now()}-${n++}`;
@@ -86,7 +86,7 @@ describe('CDP-A identity resolution', () => {
     await setToggle('crm', 'on');
     await setToggle('cdp', 'on');
     const c = await owner();
-    const created = await c.post('/v1/host/openwop-app/crm/contacts', { name: 'Ada', email: 'Ada@Acme.TEST' });
+    const created = await c.post('/host/openwop-app/crm/contacts', { name: 'Ada', email: 'Ada@Acme.TEST' });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
     const id = created.body.contactId;
 
@@ -95,7 +95,7 @@ describe('CDP-A identity resolution', () => {
     expect(byEmail.body.contact.contactId).toBe(id);
     expect(byEmail.body.resolvedBy).toEqual({ type: 'email', value: 'ada@acme.test' });
 
-    const add = await c.post(`/v1/host/openwop-app/crm/contacts/${id}/identifiers`, { type: 'phone', value: '+1 (555) 123-4567' });
+    const add = await c.post(`/host/openwop-app/crm/contacts/${id}/identifiers`, { type: 'phone', value: '+1 (555) 123-4567' });
     expect(add.status, JSON.stringify(add.body)).toBe(201);
 
     const byPhone = await resolve(c, 'phone', '+15551234567');
@@ -107,11 +107,11 @@ describe('CDP-A identity resolution', () => {
     await setToggle('crm', 'on');
     await setToggle('cdp', 'on');
     const c = await owner();
-    const survivor = (await c.post('/v1/host/openwop-app/crm/contacts', { name: 'S', email: 'survivor@acme.test' })).body;
-    const source = (await c.post('/v1/host/openwop-app/crm/contacts', { name: 'D', email: 'source@acme.test' })).body;
-    await c.post(`/v1/host/openwop-app/crm/contacts/${source.contactId}/identifiers`, { type: 'loyalty', value: 'LOY-9' });
+    const survivor = (await c.post('/host/openwop-app/crm/contacts', { name: 'S', email: 'survivor@acme.test' })).body;
+    const source = (await c.post('/host/openwop-app/crm/contacts', { name: 'D', email: 'source@acme.test' })).body;
+    await c.post(`/host/openwop-app/crm/contacts/${source.contactId}/identifiers`, { type: 'loyalty', value: 'LOY-9' });
 
-    const merged = await c.post(`/v1/host/openwop-app/crm/contacts/${survivor.contactId}/merge`, { sourceContactId: source.contactId });
+    const merged = await c.post(`/host/openwop-app/crm/contacts/${survivor.contactId}/merge`, { sourceContactId: source.contactId });
     expect(merged.status, JSON.stringify(merged.body)).toBe(200);
 
     // the source's email now resolves to the SURVIVOR (tombstone followed)
@@ -128,10 +128,10 @@ describe('CDP-A identity resolution', () => {
     await setToggle('crm', 'on');
     await setToggle('cdp', 'on');
     const c = await owner();
-    const id = (await c.post('/v1/host/openwop-app/crm/contacts', { name: 'R', email: 'r@acme.test' })).body.contactId;
-    await c.post(`/v1/host/openwop-app/crm/contacts/${id}/identifiers`, { type: 'device', value: 'dev-1' });
+    const id = (await c.post('/host/openwop-app/crm/contacts', { name: 'R', email: 'r@acme.test' })).body.contactId;
+    await c.post(`/host/openwop-app/crm/contacts/${id}/identifiers`, { type: 'device', value: 'dev-1' });
     expect((await resolve(c, 'device', 'dev-1')).status).toBe(200);
-    const del = await c.del(`/v1/host/openwop-app/crm/contacts/${id}/identifiers?type=device&value=dev-1`);
+    const del = await c.del(`/host/openwop-app/crm/contacts/${id}/identifiers?type=device&value=dev-1`);
     expect(del.status, JSON.stringify(del.body)).toBe(200);
     expect((await resolve(c, 'device', 'dev-1')).status).toBe(404);
   });
@@ -140,7 +140,7 @@ describe('CDP-A identity resolution', () => {
     await setToggle('crm', 'on');
     await setToggle('cdp', 'on');
     const c = await owner();
-    await c.post('/v1/host/openwop-app/crm/contacts', { name: 'G', email: 'gate@acme.test' });
+    await c.post('/host/openwop-app/crm/contacts', { name: 'G', email: 'gate@acme.test' });
     expect((await resolve(c, 'email', 'gate@acme.test')).status).toBe(200);
     await setToggle('cdp', 'off');
     expect((await resolve(c, 'email', 'gate@acme.test')).status).toBe(404);
@@ -151,7 +151,7 @@ describe('CDP-A identity resolution', () => {
     await setToggle('crm', 'on');
     await setToggle('cdp', 'on');
     const a = await owner();
-    await a.post('/v1/host/openwop-app/crm/contacts', { name: 'Priv', email: 'priv@acme.test' });
+    await a.post('/host/openwop-app/crm/contacts', { name: 'Priv', email: 'priv@acme.test' });
     const b = await owner();
     expect((await resolve(b, 'email', 'priv@acme.test')).status).toBe(404);
   });
@@ -160,8 +160,8 @@ describe('CDP-A identity resolution', () => {
     await setToggle('crm', 'on');
     await setToggle('cdp', 'on');
     const c = await owner();
-    const id = (await c.post('/v1/host/openwop-app/crm/contacts', { name: 'X', email: 'x@acme.test' })).body.contactId;
-    const bad = await c.post(`/v1/host/openwop-app/crm/contacts/${id}/identifiers`, { type: 'passport', value: 'P1' });
+    const id = (await c.post('/host/openwop-app/crm/contacts', { name: 'X', email: 'x@acme.test' })).body.contactId;
+    const bad = await c.post(`/host/openwop-app/crm/contacts/${id}/identifiers`, { type: 'passport', value: 'P1' });
     expect(bad.status, JSON.stringify(bad.body)).toBe(400);
   });
 
@@ -171,7 +171,7 @@ describe('CDP-A identity resolution', () => {
     const tenantId = `org:cdp-${Date.now()}-${n++}`;
     const c = client();
     await signup(c, tenantId);
-    const id = (await c.post('/v1/host/openwop-app/crm/contacts', { name: 'Anon', email: 'anon@acme.test' })).body.contactId;
+    const id = (await c.post('/host/openwop-app/crm/contacts', { name: 'Anon', email: 'anon@acme.test' })).body.contactId;
     // an anonymous analytics session (cookie) is later linked to the known contact
     const sessionKey = `sess-${Date.now()}-${n}`;
     await linkSession(tenantId, sessionKey, id, 'email-click');

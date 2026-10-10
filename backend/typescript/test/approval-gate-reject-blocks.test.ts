@@ -43,9 +43,10 @@ import { createHostAdapterSuite } from '../src/host/index.js';
 import { ensureNodesRegistered } from '../src/bootstrap/nodes.js';
 import { executeRun } from '../src/executor/executor.js';
 import { registerWorkflow as registerHostWorkflow } from '../src/host/workflowsRegistry.js';
-import { __resolveAndResumeForTests, __awaitRunResumeChainForTests } from '../src/routes/interrupts.js';
+import { __resolveAndResumeForTests, __awaitRunResumeChainForTests, resolveAndResume } from '../src/routes/interrupts.js';
+import { assertRejectTail } from './support/interruptResolvedDef.js';
 import type { WorkflowDefinition } from '../src/executor/types.js';
-import type { RunRecord } from '../src/types.js';
+import type { EventRecord, RunRecord } from '../src/types.js';
 
 const storage = await openStorage('memory://');
 setEventLogBackend(storage);
@@ -74,7 +75,7 @@ beforeAll(() => {
   registerHostWorkflow(def);
 });
 
-async function runAndResolve(resumeValue: unknown): Promise<{ status: string; error?: unknown; states: Record<string, string> }> {
+async function runAndResolve(resumeValue: unknown): Promise<{ status: string; error?: unknown; states: Record<string, string>; events: EventRecord[] }> {
   const now = new Date().toISOString();
   const run: RunRecord = {
     runId: `run-probe3-${Math.random().toString(36).slice(2)}`, workflowId: WF_ID, tenantId: 'default',
@@ -95,7 +96,7 @@ async function runAndResolve(resumeValue: unknown): Promise<{ status: string; er
     if (e.type === 'node.failed' && e.nodeId) states[e.nodeId] = 'failed';
   }
   const final = (await storage.getRun(run.runId))!;
-  return { status: final.status, error: final.error, states };
+  return { status: final.status, error: final.error, states, events: [...events] };
 }
 
 describe('PROBE-DOC-3 — single-approver core.approvalGate honors reject', () => {
@@ -104,6 +105,31 @@ describe('PROBE-DOC-3 — single-approver core.approvalGate honors reject', () =
     expect(status).toBe('failed');
     expect((error as { code?: string } | undefined)?.code).toBe('approval_rejected');
     expect(states['notify'], 'the downstream effect fired on a REJECT — the gate did not gate').toBeUndefined();
+  });
+
+  it('openwop#1692 — the reject records action + decision, then node.failed, then run.failed naming the gate', async () => {
+    const { events } = await runAndResolve({ action: 'reject', comment: 'No.' });
+    const payload = assertRejectTail(events, 'gate');
+    expect(payload).toMatchObject({ kind: 'approval', decision: 'rejected', action: 'reject' });
+  });
+
+  it('RFC 0223 — a client-posted action:"timeout" is refused (record-only), and the gate stays OPEN', async () => {
+    const now = new Date().toISOString();
+    const run: RunRecord = {
+      runId: `run-probe3-${Math.random().toString(36).slice(2)}`, workflowId: WF_ID, tenantId: 'default',
+      status: 'pending', inputs: {}, metadata: {}, configurable: {}, createdAt: now, updatedAt: now,
+    };
+    await storage.insertRun(run);
+    const def = (await hostSuite.workflowCatalog.getWorkflow(WF_ID))!.definition;
+    expect((await executeRun(storage, run, def)).status).toBe('waiting-approval');
+    const [open] = await storage.listOpenInterrupts(run.runId);
+    // This gate declares no `actions` list, so `validateResumeValue` admits any
+    // action string: the refusal must come from the shared resolve choke point.
+    await expect(__resolveAndResumeForTests(storage, hostSuite, open!.interruptId, { action: 'timeout' }))
+      .rejects.toMatchObject({ code: 'validation_error', httpStatus: 400 });
+    expect((await storage.listOpenInterrupts(run.runId)).length, 'a refused timeout must not consume the gate').toBe(1);
+    expect((await storage.getRun(run.runId))!.status).toBe('waiting-approval');
+    expect((await storage.listEvents(run.runId)).some((e) => e.type === 'interrupt.resolved')).toBe(false);
   });
 
   it('polarity: an accept resumes and the downstream DOES run', async () => {
@@ -204,5 +230,48 @@ describe('review F1 — an unidentifiable gate node fails CLOSED (409, both verb
     await __awaitRunResumeChainForTests(runId);
     const final = (await storage.getRun(runId))!;
     expect(final.status).toBe('completed');
+  });
+});
+
+/**
+ * openwop#1692 — the QUORUM reject emitted NO `interrupt.resolved` at all, only
+ * `run.failed`: the log recorded a failure with no resolution of the gate that
+ * caused it. Driven through the real `resolveAndResume` with an authenticated
+ * reviewer (a quorum vote needs an identity to count).
+ */
+describe('openwop#1692 — quorum reject records interrupt.resolved → node.failed → run.failed', () => {
+  const WF3_ID = 'wf.quorum-reject-resolved';
+
+  it('a single reject on a 2-of-N gate vetoes it with action reject + reason quorum-reject', async () => {
+    registerHostWorkflow({
+      workflowId: WF3_ID,
+      name: 'quorum reject',
+      version: '1.0.0',
+      nodes: [
+        { nodeId: 'gate', typeId: 'core.approvalGate', config: { prompt: 'Approve?', requiredApprovals: 2 } },
+        { nodeId: 'notify', typeId: 'core.noop', config: {} },
+      ],
+      edges: [{ edgeId: 'e1', sourceNodeId: 'gate', targetNodeId: 'notify' }],
+    } as unknown as WorkflowDefinition);
+    const now = new Date().toISOString();
+    const run: RunRecord = {
+      runId: `run-quorum-${Math.random().toString(36).slice(2)}`, workflowId: WF3_ID, tenantId: 'default',
+      status: 'pending', inputs: {}, metadata: {}, configurable: {}, createdAt: now, updatedAt: now,
+    };
+    await storage.insertRun(run);
+    const def = (await hostSuite.workflowCatalog.getWorkflow(WF3_ID))!.definition;
+    expect((await executeRun(storage, run, def)).status).toBe('waiting-approval');
+    const [open] = await storage.listOpenInterrupts(run.runId);
+
+    await resolveAndResume(storage, hostSuite, open!.interruptId, { action: 'reject' }, { subjectRef: 'user:alice' });
+    await __awaitRunResumeChainForTests(run.runId);
+
+    const final = (await storage.getRun(run.runId))!;
+    expect(final.status).toBe('failed');
+    expect((final.error as { code?: string } | undefined)?.code).toBe('approval_rejected');
+    const events = await storage.listEvents(run.runId);
+    const payload = assertRejectTail(events, 'gate');
+    expect(payload).toMatchObject({ kind: 'approval', decision: 'rejected', action: 'reject', reason: 'quorum-reject' });
+    expect(events.some((e) => e.type === 'node.completed' && e.nodeId === 'notify')).toBe(false);
   });
 });

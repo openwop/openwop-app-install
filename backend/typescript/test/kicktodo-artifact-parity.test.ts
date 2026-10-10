@@ -67,12 +67,12 @@ describe('artifact schema ↔ producer parity', () => {
 });
 
 describe('prompt discipline (tool-first, no hand-copied schemas)', () => {
-  const pack = JSON.parse(readFileSync(join(REPO, 'packs/feature.kicktodo.agents/pack.json'), 'utf8')) as {
+  const pack = JSON.parse(readFileSync(join(REPO, 'packs/vendor.openwop-app.kicktodo.agents/pack.json'), 'utf8')) as {
     agents: Array<{ agentId: string; systemPromptRef: string; toolAllowlist: string[]; memoryShape?: { scratchpad: boolean; conversation: boolean; longTerm: boolean } }>;
   };
   it('no skill prompt names node typeIds or artifact type ids', () => {
     for (const a of pack.agents) {
-      const prompt = readFileSync(join(REPO, 'packs/feature.kicktodo.agents', a.systemPromptRef), 'utf8');
+      const prompt = readFileSync(join(REPO, 'packs/vendor.openwop-app.kicktodo.agents', a.systemPromptRef), 'utf8');
       expect(prompt).not.toMatch(/feature\.kicktodo\.nodes\./);
       expect(prompt).not.toMatch(/kicktodo\.progress-evidence|kicktodo\.completion-certificate/);
       expect(prompt).not.toMatch(/snapshotHash|challengeContentHash/); // schema fields stay out of prose
@@ -83,7 +83,7 @@ describe('prompt discipline (tool-first, no hand-copied schemas)', () => {
     // the Challenge Author talks a creator through a concept in the ONE chat, so
     // it carries CONVERSATION memory by design and is not a scratchpad-only
     // handoff skill. Every OTHER agent stays a handoff skill (scratchpad-only).
-    const CONVERSATIONAL = 'feature.kicktodo.agents.challenge-author';
+    const CONVERSATIONAL = 'vendor.openwop-app.kicktodo.agents.challenge-author';
     for (const a of pack.agents) {
       if (a.agentId === CONVERSATIONAL) {
         expect(a.memoryShape).toEqual({ scratchpad: true, conversation: true, longTerm: false });

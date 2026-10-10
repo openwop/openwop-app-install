@@ -82,12 +82,12 @@ function client() {
   return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b) };
 }
 
-const cms = (orgId: string, sfx = ''): string => `/v1/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${sfx}`;
+const cms = (orgId: string, sfx = ''): string => `/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${sfx}`;
 
 async function seedOrgWithPost(): Promise<{ orgId: string; owner: ReturnType<typeof client> }> {
   const owner = client();
-  await owner.post('/v1/host/openwop-app/test/login', { email: `cache-${Date.now()}-${n++}@acme.test` });
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Cache Co' });
+  await owner.post('/host/openwop-app/test/login', { email: `cache-${Date.now()}-${n++}@acme.test` });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Cache Co' });
   const orgId = org.body.orgId as string;
   await publishPost(owner, orgId, 'First Post');
   return { orgId, owner };
@@ -98,7 +98,7 @@ async function publishPost(owner: ReturnType<typeof client>, orgId: string, titl
   expect((await owner.post(cms(orgId, `/pages/${created.body.pageId}/publish`))).status).toBe(200);
 }
 const blogTitles = async (orgId: string): Promise<string[]> =>
-  ((await client().get(`/v1/host/openwop-app/public/${encodeURIComponent(orgId)}/blog`)).body.posts as Array<{ title: string }>).map((p) => p.title);
+  ((await client().get(`/host/openwop-app/public/${encodeURIComponent(orgId)}/blog`)).body.posts as Array<{ title: string }>).map((p) => p.title);
 
 describe('BLOG-1 — the /blog list memo', () => {
   it('serves a memoized result within the TTL (a later publish is hidden until the cache drops)', async () => {

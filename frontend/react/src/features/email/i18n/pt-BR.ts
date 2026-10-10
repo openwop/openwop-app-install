@@ -153,6 +153,9 @@ export const messages = {
   senderPlaceholder: 'news@suaempresa.com',
   senderSave: 'Salvar remetente',
   senderSaved: 'Endereço do remetente salvo.',
+  senderAdminOnly: 'Somente administradores do espaço de trabalho podem alterar o endereço do remetente.',
+  senderUnconfiguredAskAdmin: 'As campanhas ainda não podem ser enviadas — um administrador do espaço de trabalho precisa definir o endereço do remetente.',
+  testSendRateLimited: 'Muitos envios de teste — tente novamente em {{minutes}} min.',
   senderUnconfiguredNotice: 'As campanhas ainda não podem ser enviadas — defina abaixo o endereço de remetente verificado (e conecte o SendGrid em Conexões).',
 
   // Toasts / errors

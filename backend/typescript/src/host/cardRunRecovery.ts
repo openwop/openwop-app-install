@@ -42,9 +42,11 @@ import { onAnyRunTerminal, type RunTerminalStatus } from '../executor/runLifecyc
 import {
   getBoard,
   getCard,
-  moveCard,
-  updateCardFields,
   notifyBoardChanged,
+  recordCardRunStatus,
+  releaseCardClaim,
+  todoColumnOf,
+  workingColumnOf,
   type KanbanCard,
   type KanbanBoard,
 } from './kanbanService.js';
@@ -66,16 +68,32 @@ const RECONCILE_BATCH = 25;
  *  card picked through an approved proposal (ADR 0535 D5). */
 const CARD_METADATA_KEYS = ['heartbeat', 'approval'] as const;
 
+/** ADR 0774 D3 — the keys whose card gets a run STATUS stamp: the two loop
+ *  pick paths plus the human trigger-lane run (`metadata.kanban`, stamped by
+ *  `kanbanTriggerDelivery.ts`). Deliberately wider than `CARD_METADATA_KEYS`:
+ *  showing a human-triggered run's outcome is honest, but RESTORING that card
+ *  into the loop's To Do lane would hand a human's card to the agent. */
+const STATUS_METADATA_KEYS = ['heartbeat', 'approval', 'kanban'] as const;
+
+/** ADR 0774 D2 — a claimed card whose run row does not exist yet may simply be
+ *  mid-start on another instance (the claim CAS lands before
+ *  `startWorkflowRun` writes the row). Reconcile leaves it alone for this long
+ *  after the claim; a claim whose process died is then restored. Far above any
+ *  observed start latency. */
+export const PICK_CLAIM_GRACE_MS = 2 * 60_000;
 interface CardPointer {
   boardId: string;
   cardId: string;
 }
 
 /** Extract the card pointer a pick path stamped onto the run, if any. */
-export function cardPointerFromRunMetadata(metadata: unknown): CardPointer | null {
+export function cardPointerFromRunMetadata(
+  metadata: unknown,
+  keys: readonly string[] = CARD_METADATA_KEYS,
+): CardPointer | null {
   if (typeof metadata !== 'object' || metadata === null) return null;
   const bag = metadata as Record<string, unknown>;
-  for (const key of CARD_METADATA_KEYS) {
+  for (const key of keys) {
     const entry = bag[key];
     if (typeof entry !== 'object' || entry === null) continue;
     const { boardId, cardId } = entry as Record<string, unknown>;
@@ -86,17 +104,14 @@ export function cardPointerFromRunMetadata(metadata: unknown): CardPointer | nul
   return null;
 }
 
-/** A column the work loop treats as "in flight" (the lane a pick moves into). */
-function workingColumn(board: KanbanBoard): { id: string } | undefined {
-  return board.columns.find((c) => c.id === 'working' || c.name.toLowerCase() === 'working');
-}
+/** A column the work loop treats as "in flight" (the lane a pick moves into) —
+ *  resolved by lane KIND (ADR 0774 D1), so a default board's `doing` counts. */
+const workingColumn = workingColumnOf;
 
 /** The lane a restored card returns to — the same one the loop picks FROM, so
  *  restored work is genuinely back in the queue rather than parked somewhere
  *  the agent never looks. */
-function todoColumn(board: KanbanBoard): { id: string } | undefined {
-  return board.columns.find((c) => c.id === 'todo' || c.name.toLowerCase() === 'to do');
-}
+const todoColumn = todoColumnOf;
 
 /** A STABLE marker, not the prose. Matching on the sentence would break the
  *  moment the copy is reworded or localized — prior machine notes would stop
@@ -172,12 +187,26 @@ async function restoreCardForRun(
   const todo = todoColumn(board);
   if (!todo) return false;
 
-  // The returned trigger directive is DISCARDED on purpose — see the module
-  // header. Restoring must never re-dispatch the workflow that just died.
-  await moveCard(card.id, todo.id);
-
+  // ONE preconditioned CAS (grade-code KSCD-1): the checks above read a
+  // snapshot, and another pass may have restored and RE-CLAIMED this card
+  // since. The move, the note and the outcome land together, and only if the
+  // fresh card still points at this run in the working lane. The move's
+  // trigger directive is not acted on — see the module header: restoring must
+  // never re-dispatch the workflow that just died.
   const note = restoreNote(status, runId);
-  if (note) await updateCardFields(card.id, { blockerNote: composeBlockerNote(card.blockerNote, note) });
+  const moved = await releaseCardClaim({
+    cardId: card.id,
+    boardId: board.id,
+    tenantId: board.tenantId,
+    runId,
+    workingColumnId: working.id,
+    toColumnId: todo.id,
+    // The card is back in the queue carrying its run's outcome; the next pick
+    // stamps a fresh one.
+    lastRunStatus: status,
+    ...(note ? { blockerNote: composeBlockerNote(card.blockerNote, note) } : {}),
+  });
+  if (!moved) return false;
 
   notifyBoardChanged(board.id);
   log.info('restored stranded card to To Do', { cardId: card.id, boardId: board.id, runId, status });
@@ -194,15 +223,47 @@ async function restoreStrandedUnknown(card: KanbanCard, board: KanbanBoard): Pro
   const todo = todoColumn(board);
   if (!working || !todo || card.columnId !== working.id || !card.lastRunId) return false;
 
-  await moveCard(card.id, todo.id); // trigger directive discarded — see the module header
-  await updateCardFields(card.id, {
+  // One preconditioned CAS, as in `restoreCardForRun` (KSCD-1).
+  const moved = await releaseCardClaim({
+    cardId: card.id,
+    boardId: board.id,
+    tenantId: board.tenantId,
+    runId: card.lastRunId,
+    workingColumnId: working.id,
+    toColumnId: todo.id,
+    lastRunStatus: null,
     blockerNote: composeBlockerNote(card.blockerNote, unknownOutcomeNote(card.lastRunId)),
   });
+  if (!moved) return false;
   notifyBoardChanged(board.id);
   log.warn('restored card whose run row is gone (retention); outcome unknown', {
     cardId: card.id, boardId: board.id, runId: card.lastRunId,
   });
   return true;
+}
+
+/** Stamp a run's terminal status onto the card its metadata points at, if that
+ *  card is in the run's tenant and still points at the run. Best-effort: a
+ *  stamp failure must not stop the restore that follows. */
+async function stampRunStatus(
+  runTenantId: string,
+  metadata: unknown,
+  runId: string,
+  status: RunTerminalStatus,
+): Promise<void> {
+  const pointer = cardPointerFromRunMetadata(metadata, STATUS_METADATA_KEYS);
+  if (!pointer) return;
+  try {
+    const board = await getBoard(pointer.boardId);
+    // Same tenant gate as the restore below: a corrupted pointer must never
+    // write to another tenant's card.
+    if (!board || board.tenantId !== runTenantId) return;
+    const card = await getCard(pointer.cardId);
+    if (!card || card.boardId !== board.id) return;
+    if (await recordCardRunStatus(card.id, runId, status)) notifyBoardChanged(board.id);
+  } catch (err) {
+    log.warn('card run-status stamp failed', { runId, error: err instanceof Error ? err.message : String(err) });
+  }
 }
 
 /**
@@ -216,10 +277,15 @@ export async function recoverCardForTerminalRun(
   runId: string,
   status: RunTerminalStatus,
 ): Promise<boolean> {
-  if (status === 'completed') return false;
-
   const run = await storage.getRun(runId);
   if (!run) return false;
+
+  // ADR 0774 D3 — stamp the outcome onto the card FIRST, for every status and
+  // every card-bound run. This is what makes "finished" durable: once retention
+  // deletes the run row, the card still says `completed`, so reconcile will not
+  // mistake it for lost work and run it again (`KSTWF-3`).
+  await stampRunStatus(run.tenantId, run.metadata, runId, status);
+  if (status === 'completed') return false;
 
   const pointer = cardPointerFromRunMetadata(run.metadata);
   if (!pointer) return false; // not a work-loop run — nothing owns a card here
@@ -258,6 +324,7 @@ export async function reconcileStrandedCards(
   storage: Storage,
   board: KanbanBoard,
   cards: readonly KanbanCard[],
+  now: number = Date.now(),
 ): Promise<number> {
   const working = workingColumn(board);
   if (!working) return 0;
@@ -281,13 +348,27 @@ export async function reconcileStrandedCards(
       // never delete a live run, and a card waiting on a vanished one is
       // stranded forever.
       //
-      // Earlier this `continue`d, on the reasoning that restoring might re-run
-      // work that had actually completed. That trades a recoverable cost
-      // (redoing something) for an unrecoverable one (losing it silently), and
-      // it was the last permanent-strand path left in ADR 0535. Restore it —
-      // but say the outcome is unknown, which also sinks it in the ADR 0534
-      // ranking so it yields to healthy work.
+      // ADR 0774 D3 correction (A1) — but "terminal" includes COMPLETED, and a
+      // completed run's card stays in Working by design. Restoring every card
+      // whose row is gone re-ran finished work (`KSTWF-3`), and once D1 made a
+      // default board's `doing` lane the working lane it would also have swept
+      // up human cards and every legacy card. So only a card the LOOP put in
+      // flight is restored: its `lastRunStatus` is still `running` (the pick
+      // claim and the approval dispatch are the only writers), meaning no
+      // terminal stamp ever landed. And never inside the claim's grace window,
+      // when the row may simply not be written yet.
+      if (card.lastRunStatus !== 'running') continue;
+      if (now - Date.parse(card.updatedAt) < PICK_CLAIM_GRACE_MS) continue;
       if (await restoreStrandedUnknown(card, board)) restored += 1;
+      continue;
+    }
+    // ADR 0774 A1 — only a run the loop started for THIS card may move it.
+    const pointer = cardPointerFromRunMetadata(run.metadata);
+    if (!pointer || pointer.cardId !== card.id || pointer.boardId !== board.id) continue;
+    if (run.status === 'completed') {
+      // The terminal fan-out may have been missed (process died mid-emit).
+      // Stamp it now so the outcome outlives the row.
+      if (await recordCardRunStatus(card.id, card.lastRunId!, 'completed')) notifyBoardChanged(board.id);
       continue;
     }
     if (run.status !== 'failed' && run.status !== 'cancelled') continue;

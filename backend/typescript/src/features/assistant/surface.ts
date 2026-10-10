@@ -11,8 +11,6 @@ import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { surfaceStr as str, surfaceOptStr as optStr, type FeatureSurface } from '../../host/featureSurfaces.js';
 import { OpenwopError } from '../../types.js';
 import {
-  listProjects,
-  getProject,
   listCommitments,
   upsertCommitmentBySource,
   updateCommitment,
@@ -91,8 +89,6 @@ export function buildAssistantSurface(scope: BundleScope): FeatureSurface {
   const tenantId = scope.tenantId;
   return {
     // ── reads ──
-    listProjects: async () => ({ projects: (await listProjects(tenantId)).map(project) }),
-    getProject: async (args) => ({ project: projectOne(await getProject(tenantId, str(args.projectId))) }),
     listCommitments: async (args) => {
       const filter: { status?: CommitmentStatus; projectId?: string } = {};
       if (optStr(args.status)) filter.status = str(args.status) as CommitmentStatus;

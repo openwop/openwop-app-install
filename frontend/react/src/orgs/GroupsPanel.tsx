@@ -40,6 +40,11 @@ export function GroupsPanel({
   onCreateGroup, startEditGroup, onDeleteGroup, onSaveGroupMembers, nameOfMember, can, roleLabel, toggleStr,
 }: GroupsPanelProps): JSX.Element {
   const { t } = useTranslation('orgs');
+  // ADR 0815 D2 — a group that carries `owner` confers it, so editing or deleting
+  // it is owner-tier (the server answers 403 `owner_required` to an admin).
+  const canTouch = (g: Group): boolean => can('host:groups:manage') && (can('host:org:manage') || !g.roles.includes('owner'));
+  const lockedTitle = (g: Group): string | undefined =>
+    can('host:groups:manage') && !canTouch(g) ? t('ownerGroupLocked') : undefined;
   return (
     <>
       <h3 className="u-fs-14 u-mt-5 u-flex u-items-center u-gap-2">
@@ -48,6 +53,11 @@ export function GroupsPanel({
       <p className="groups-muted">
         {t('groupsIntro')}
       </p>
+      {/* ADR 0815 D6 — a disabled button leaves the tab order, so the reason is
+          visible text the buttons point at, not a tooltip alone. */}
+      {groups.some((g) => can('host:groups:manage') && !canTouch(g))
+        ? <p id="owner-groups-locked" className="groups-muted u-mb-2">{t('ownerGroupsLockedNote')}</p>
+        : null}
       <form onSubmit={onCreateGroup} className="action-bar u-wrap u-mb-2">
         <input value={groupName} onChange={(e) => setGroupName(e.target.value)} placeholder={t('newGroupPlaceholder')} aria-label={t('newGroupAriaLabel')} />
         <span className="action-bar u-gap-1-5">
@@ -70,10 +80,10 @@ export function GroupsPanel({
                 <LockIcon size={14} /> <strong>{g.name}</strong>
               </span>
               <span className="action-bar">
-                <Button variant="secondary" disabled={!can('host:groups:manage')} onClick={() => startEditGroup(g)} aria-label={t('editGroupMembersAriaLabel', { name: g.name })}>
+                <Button variant="secondary" disabled={!canTouch(g)} title={lockedTitle(g)} aria-describedby={lockedTitle(g) ? 'owner-groups-locked' : undefined} onClick={() => startEditGroup(g)} aria-label={t('editGroupMembersAriaLabel', { name: g.name })}>
                   <PencilIcon size={13} /> {t('membersButton')}
                 </Button>
-                <Button variant="secondary" disabled={!can('host:groups:manage')} onClick={() => void onDeleteGroup(g)} aria-label={t('deleteGroupAriaLabel', { name: g.name })}>
+                <Button variant="secondary" disabled={!canTouch(g)} title={lockedTitle(g)} aria-describedby={lockedTitle(g) ? 'owner-groups-locked' : undefined} onClick={() => void onDeleteGroup(g)} aria-label={t('deleteGroupAriaLabel', { name: g.name })}>
                   <TrashIcon size={13} />
                 </Button>
               </span>

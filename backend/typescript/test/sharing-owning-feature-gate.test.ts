@@ -29,8 +29,15 @@
  *    toggle DISAPPEARS. The likelier drift is one APPEARING for `cms`/`kb`/
  *    `prompts` (all three previously had one), which would leave those types
  *    ungated behind a `toggleId: null` whose comment says no toggle exists.
+ *
+ * Sabotage-witnessed (w7 /grade-tests): the gate removed from `resolveActiveLink`;
+ * the gate skipped on the two cap-exempt capability-proof lanes; the mint gate
+ * short-circuited; `countShareViewOrThrow`'s CAS replaced by a plain put (and its
+ * cap check removed); `resolveToggle` called without the LINK tenant; the
+ * `featureDisabled` flag dropped from `listLinks`; a resource type dropped from
+ * `RESOURCE_TYPES`; a resolver naming an unregistered toggle; `kb` declaring one.
  */
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -278,6 +285,27 @@ describe('SHARE-1 — a public link darkens when its OWNING feature is toggled o
 });
 
 describe('SHARE-1 — the structural guards', () => {
+  // Both drift guards read the FULL toggle registry, which only a real boot builds
+  // (some features register toggle defaults from `registerRoutes`). The boot lives
+  // HERE so each guard is meaningful run alone — the OTHER-direction guard used to
+  // rely on the previous case having booted, and in isolation passed vacuously
+  // (only `documents`/`commerce` registered ⇒ `getToggleDefault('kb')` null trivially).
+  const ENV_KEYS = ['OPENWOP_STORAGE_DSN', 'OPENWOP_SESSION_SECRET'] as const;
+  const savedEnv: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {};
+  beforeAll(async () => {
+    for (const k of ENV_KEYS) savedEnv[k] = process.env[k];
+    process.env.OPENWOP_STORAGE_DSN = 'memory://';
+    process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
+    const { createApp } = await import('../src/index.js');
+    await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  }, 60_000); // #4176: 15 s timed out under peer load
+  afterAll(() => {
+    for (const k of ENV_KEYS) {
+      if (savedEnv[k] === undefined) delete process.env[k];
+      else process.env[k] = savedEnv[k];
+    }
+  });
+
   it('every resource type declares a toggleId (no type can be added by omission)', () => {
     const declared = Object.keys(__resolverToggleIds()).sort();
     expect(declared).toEqual([...RESOURCE_TYPES].sort());
@@ -288,11 +316,7 @@ describe('SHARE-1 — the structural guards', () => {
     // default, and the gate is fail-closed — so if an owning feature graduates
     // to always-on, every link of that type would go permanently dark with no
     // error anywhere. This test is the tripwire for that graduation. It needs
-    // the full feature registry, so it boots the app.
-    const { createApp } = await import('../src/index.js');
-    process.env.OPENWOP_STORAGE_DSN = 'memory://';
-    process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
-    await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+    // the full feature registry — booted by this describe's `beforeAll`.
     const ids = __resolverToggleIds();
     const unregistered = Object.entries(ids)
       .filter(([, toggleId]) => toggleId !== null && getToggleDefault(toggleId) === null)
@@ -319,8 +343,8 @@ describe('SHARE-1 — the structural guards', () => {
     // graduated off it (ADR 0434), so re-introducing one is a normal product
     // decision — and it would leave those resource types silently ungated on the
     // public lane behind a `toggleId: null` whose source comment asserts no
-    // toggle exists. This test is the tripwire for that direction. (Runs after
-    // the guard above, which boots the full feature registry.)
+    // toggle exists. This test is the tripwire for that direction. (The full
+    // feature registry is booted by this describe's `beforeAll`.)
     for (const id of ['cms', 'kb', 'prompts']) {
       expect(
         getToggleDefault(id),

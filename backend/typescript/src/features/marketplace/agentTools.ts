@@ -18,6 +18,7 @@ import { resolveFeatureToggle } from '../../host/agentToolKit.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { listListings, type Listing } from './listingService.js';
 import { resolveListingPricing } from './listingPricingHook.js';
+import { disabledPacks } from './packEnablementService.js';
 
 export const MARKETPLACE_SEARCH_TOOL_ID = 'openwop:marketplace.search';
 
@@ -31,7 +32,7 @@ const str = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');
  */
 type Pricing = { lane: string; priceMajorUnits?: number; currency?: string; purchased?: boolean; purchasable?: boolean };
 
-function project(l: Listing, pricing?: Pricing): Record<string, unknown> {
+function project(l: Listing, pricing?: Pricing, disabled?: ReadonlySet<string>): Record<string, unknown> {
   return {
     packName: l.packName,
     version: l.version,
@@ -58,6 +59,11 @@ function project(l: Listing, pricing?: Pricing): Record<string, unknown> {
     // pack was projected to the recommender as an ordinary listing.
     ...(l.tombstoned ? { tombstoned: true } : {}),
     ...(l.requiredBy ? { requiredBy: l.requiredBy } : {}),
+    // ADR 0826 D6 — the real trust tier (a model can say "unverified"), and D7 —
+    // the workspace's own curation, MARKED rather than filtered: a silently
+    // narrowed projection is how `MKT2-26` lied to a model before.
+    trust: l.trust.tier,
+    ...(disabled?.has(l.packName) ? { disabledInWorkspace: true } : {}),
   };
 }
 
@@ -73,11 +79,14 @@ async function marketplaceEnabled(scope: BundleScope): Promise<boolean> {
 export function registerMarketplaceAgentTools(): void {
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: MARKETPLACE_SEARCH_TOOL_ID,
       description:
         'Search the installable pack catalog by name / keyword / capability. Returns each pack\'s packName, version, '
-        + 'title, description, category, installed status, `origin`, and `tombstoned`. Read `origin` before recommending anything, and NEVER recommend a pack marked `tombstoned` — an operator removed it: '
+        + 'title, description, category, installed status, `origin`, `tombstoned`, `trust` and `disabledInWorkspace`. NEVER recommend a pack marked `tombstoned` (an operator removed it), '
+        + 'a pack marked `disabledInWorkspace` (this workspace turned it off — say so instead), or a pack whose `trust` is `revoked`; '
+        + 'call a pack whose `trust` is `untrusted` UNVERIFIED. Read `origin` before recommending anything: '
         + '`registry` packs were installed from the pack registry and CAN be installed/reinstalled there; `local` packs are '
         + 'mounted from the host checkout and are already loaded and running, so `installed: false` on a `local` pack does NOT '
         + 'mean it is missing, and installing it is impossible (it was never published to the registry). '
@@ -114,10 +123,13 @@ export function registerMarketplaceAgentTools(): void {
       // provider's own disclosure that enrichment failed; passing it through
       // matters more here than in the UI, because a model told nothing at all
       // will state that a paid pack is free rather than that it does not know.
-      const { pricing, degraded } = await resolveListingPricing(hits.map((l) => l.packName), scope.tenantId);
+      const [{ pricing, degraded }, disabled] = await Promise.all([
+        resolveListingPricing(hits.map((l) => l.packName), scope.tenantId),
+        disabledPacks(scope.tenantId),
+      ]);
       return {
         content: JSON.stringify({
-          listings: hits.map((l) => project(l, pricing[l.packName])),
+          listings: hits.map((l) => project(l, pricing[l.packName], disabled)),
           ...(degraded
             ? { note: 'Pricing could not be read for this catalog, so a pack shown without a `pricing` field is NOT necessarily free. Do not describe any pack as free in this answer.' }
             : {}),

@@ -415,15 +415,17 @@ describe('RFC 0157 — the carry survives the real `POST /workflows/from-chain` 
           nodes: [
             {
               id: 'reserve',
-              typeId: 'core.openwop.flow.noop',
+              // ADR 0766 — every node-type reference pinned, compensation included;
+              // the stored definition below must come back with BARE ids.
+              typeId: 'core.openwop.flow.noop@1.0.0',
               compensation: {
-                nodeTypeId: 'core.openwop.flow.noop',
+                nodeTypeId: 'core.openwop.flow.noop@1.0.0',
                 inputMapping: { sku: '{{params.sku}}', ref: '${nodes.reserve.output.id}' },
                 requiresApproval: true,
                 waiveRequiresApproval: false,
               },
             },
-            { id: 'send', typeId: 'core.openwop.flow.noop', irreversibleEffect: true },
+            { id: 'send', typeId: 'core.openwop.flow.noop@1.0.0', irreversibleEffect: true },
           ],
           edges: [{ from: 'reserve', to: 'send' }],
         },
@@ -435,7 +437,7 @@ describe('RFC 0157 — the carry survives the real `POST /workflows/from-chain` 
   });
   afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-  const url = (p: string): string => `http://127.0.0.1:${PORT}/v1/host/openwop-app${p}`;
+  const url = (p: string): string => `http://127.0.0.1:${PORT}/host/openwop-app${p}`;
   const cookie = async (): Promise<string> =>
     (await fetch(url('/workflows'))).headers.get('set-cookie')!.split(';')[0]!;
 
@@ -452,7 +454,7 @@ describe('RFC 0157 — the carry survives the real `POST /workflows/from-chain` 
     // Read it back through the wire, not from an in-process object: this is the
     // artifact the executor and the unwind actually load.
     const def = (await (await fetch(
-      `http://127.0.0.1:${PORT}/v1/workflows/${workflowId}`,
+      `http://127.0.0.1:${PORT}/workflows/${workflowId}`,
       { headers: { cookie: c } },
     )).json()) as {
       nodes: Array<{ nodeId: string; compensation?: { nodeTypeId: string; inputMapping?: Record<string, unknown>; requiresApproval?: boolean; waiveRequiresApproval?: boolean }; irreversibleEffect?: boolean }>;

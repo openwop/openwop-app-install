@@ -26,6 +26,9 @@ async function loadAgenda(orgId: string | null): Promise<AgendaItem[]> {
     orgId ? listScheduledChats(orgId) : Promise.resolve([]),
     listAssignedToMe(),
   ]);
+  // One source failing (a toggled-off feature) contributes nothing; BOTH failing
+  // is a failed read, not "nothing coming up".
+  if (sched.status === 'rejected' && mine.status === 'rejected') throw mine.reason;
   const items: AgendaItem[] = [];
   if (sched.status === 'fulfilled') {
     for (const s of sched.value) {

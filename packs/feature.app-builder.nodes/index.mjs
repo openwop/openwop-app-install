@@ -732,6 +732,19 @@ export async function applyDesignRepair(ctx) {
   if (!payload || typeof payload !== 'object') throw fail('`artifact` (the approved candidate envelope) is required');
   if (!canvasId) throw fail('`canvasId` is required');
   if (!Number.isInteger(baseVersion) || baseVersion < 1) throw fail('`baseVersion` (the CAS basis) is required');
+  // ADR 0835 D5 — apply only what the review approved. The chain used to wire
+  // `review.approved`, a port the gate never emits, so this node had no way to
+  // know; a copy whose review edge was deleted in the builder wrote the
+  // candidate unreviewed. A correctness guard on an edited copy, not a security
+  // boundary (an editor can PATCH the canvas directly).
+  const approval = ctx.inputs?.approval;
+  const action = approval && typeof approval === 'object' ? approval.action : undefined;
+  if (!(approval === true || action === 'approve' || action === 'accept')) {
+    throw Object.assign(
+      new Error('this repair was not approved at the review gate — re-create the repair workflow from the gallery if this copy predates the approval wiring'),
+      { code: 'approval_required' },
+    );
+  }
   const applied = await surface.applyRepair({ canvasId, expectedVersion: baseVersion, app: payload });
   return { status: 'success', outputs: { applied: { canvasId: applied.canvasId, newVersion: applied.newVersion } } };
 }
@@ -758,7 +771,14 @@ export async function deployApp(ctx) {
     image: typeof i.image === 'string' ? i.image : '',
     exportHash: typeof i.exportHash === 'string' ? i.exportHash : '',
     envKeys: Array.isArray(i.envKeys) ? i.envKeys : [],
+    // ADR 0835 D1 — the review gate's decision; the host refuses without it.
+    approval: i.approval,
   });
+  // ADR 0835 — a deploy the provider refused is a typed failure, never a
+  // `success` carrying `{ status: 'failed' }` for a downstream node to miss.
+  if (out?.deployment?.status === 'failed') {
+    throw Object.assign(new Error(`deployment failed: ${out.deployment.error ?? 'provider error'}`), { code: 'deploy_failed' });
+  }
   return { status: 'success', outputs: out };
 }
 

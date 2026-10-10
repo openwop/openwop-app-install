@@ -12,8 +12,8 @@ import { CAMPAIGN_CHANNELS } from '../types.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const CARRIERS = [
-  '../../../../../../packs/feature.brand.agents/prompts/brand-steward.md',
-  '../../../../../../packs/feature.campaign-channels.agents/prompts/channel-generator.md',
+  '../../../../../../packs/vendor.openwop-app.brand.agents/prompts/brand-steward.md',
+  '../../../../../../packs/vendor.openwop-app.campaign-channels.agents/prompts/channel-generator.md',
 ];
 
 describe('campaign channel enum ↔ carrier prompts parity (XCH-CC-1)', () => {

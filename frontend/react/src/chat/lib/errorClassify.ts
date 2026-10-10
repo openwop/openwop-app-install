@@ -36,17 +36,44 @@ import i18n from '../../i18n/index.js';
 export interface KnownError {
   title: string;
   detail?: string;
-  action?: { kind: 'reconfigure-byok' | 'retry'; label: string };
+  action?: { kind: 'reconfigure-byok' | 'retry' | 'sign-in'; label: string };
 }
 
-/** Match `<provider>_<status>:` preamble like `anthropic_429: ...`. */
-const PROVIDER_STATUS_RE = /^([a-z][a-z0-9-]+)_(\d{3}):/;
+/** Match a `<provider>_<status>:` marker like `anthropic_429: ...`. Found
+ *  ANYWHERE in the message, not only at its start: the conversation lane wraps
+ *  it ("Conversation reply failed: openai_401: {…}"), and an anchored match let
+ *  that raw provider JSON through as the card's detail. */
+const PROVIDER_STATUS_RE = /(?:^|[\s:])([a-z][a-z0-9-]+)_(\d{3}):/;
 
 type ErrorAction = NonNullable<KnownError['action']>;
 const byokAction = (): ErrorAction => ({ kind: 'reconfigure-byok', label: i18n.t('chat:openByokSettings') });
 const retryAction = (): ErrorAction => ({ kind: 'retry', label: i18n.t('common:retry') });
 
+/** The free tier refuses anonymous callers when the host requires sign-in
+ *  (`OPENWOP_MANAGED_ANON_SIGNIN_REQUIRED`, on for app.openwop.dev). The run
+ *  route carries `sign_in_required` as the code; the conversation lane wraps it
+ *  as `internal_error` with the provider's sentence, so the sentence is the
+ *  fallback signal until the code survives that hop. */
+const SIGN_IN_REQUIRED_RE = /sign in to use the free tier/i;
+
 export function classifyChatError(error: { code: string; message: string; reason?: string }): KnownError {
+  if (error.code === 'sign_in_required' || error.reason === 'sign_in_required' || SIGN_IN_REQUIRED_RE.test(error.message)) {
+    return {
+      title: i18n.t('chat:errSignInTitle'),
+      detail: i18n.t('chat:errSignInDetail'),
+      action: { kind: 'sign-in', label: i18n.t('auth:signIn', { defaultValue: 'Sign in' }) },
+    };
+  }
+  // The free tier's DAILY allowance. It reaches the chat as a generic failure
+  // code with this reason; retrying cannot help until 00:00 UTC, so the card
+  // offers the one thing that does: the user's own key.
+  if (error.reason === 'daily_limit_reached') {
+    return {
+      title: i18n.t('chat:errDailyLimitTitle'),
+      detail: i18n.t('chat:errDailyLimitDetail'),
+      action: byokAction(),
+    };
+  }
   switch (error.code) {
     // ADR 0482 (ux-1) — a workflow dispatch rejected by the owner-set daily
     // budget. The wrapper (useWorkflowRunMentions) passes the machine-readable
@@ -67,6 +94,18 @@ export function classifyChatError(error: { code: string; message: string; reason
         // produced), so the card offers it instead of dead-ending.
         action: retryAction(),
       };
+    // A host policy refusal carries one wire code for every mode; a
+    // `required`-mode refusal names the missing key in `reason`
+    // (capabilities.md "Wire-format error"). Any other reason stays generic.
+    case 'provider_policy_denied':
+      if (error.reason !== 'byok_required' && error.reason !== 'byok_required_but_unresolved') {
+        return { title: i18n.t('chat:errSomethingWrongTitle'), detail: `${error.code}: ${error.message}` };
+      }
+      return {
+        title: i18n.t('chat:errApiKeyMissingTitle'),
+        detail: i18n.t('chat:errApiKeyMissingDetail'),
+        action: byokAction(),
+      };
     case 'credential_unavailable':
     case 'credential_required':
     case 'byok_required':
@@ -75,6 +114,19 @@ export function classifyChatError(error: { code: string; message: string; reason
         title: i18n.t('chat:errApiKeyMissingTitle'),
         detail: i18n.t('chat:errApiKeyMissingDetail'),
         action: byokAction(),
+      };
+    // The conversation run lost its gate (or it was already resolved, or the
+    // run is gone). The user's message is saved; the transport has already
+    // dropped the dead run, so sending again opens a fresh conversation. Say
+    // that in plain words — the wire code stays behind "Technical details".
+    case 'interrupt_not_found':
+    case 'interrupt_gone':
+    case 'interrupt_already_resolved':
+    case 'run_not_found':
+      return {
+        title: i18n.t('chat:errReplyLostTitle'),
+        detail: i18n.t('chat:errReplyLostDetail'),
+        action: { kind: 'retry', label: i18n.t('chat:errSendAgain') },
       };
     // Track-3 i18n — the conversation gate-open timeouts (conversationTransport).
     case 'conversation_start_timeout':
@@ -156,7 +208,7 @@ export function classifyChatError(error: { code: string; message: string; reason
       }
       return {
         title: i18n.t('chat:errRequestRejectedTitle'),
-        detail: i18n.t('chat:errRequestRejectedDetail', { provider, status, message: error.message.slice(error.message.indexOf(':') + 1).trim() }),
+        detail: i18n.t('chat:errRequestRejectedDetail', { provider, status, message: error.message.slice(m.index + m[0].length).trim() }),
       };
     }
     default:

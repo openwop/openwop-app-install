@@ -13,7 +13,7 @@
  * @see docs/adr/0022-marketplace.md
  */
 
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { resolveDefaultPackDir } from '../../packs/registryInstaller.js';
 import { isTombstoned } from '../../host/packTombstones.js';
@@ -24,6 +24,7 @@ import { OpenwopError } from '../../types.js';
 // module-eval time — ESM live bindings resolve it by then.
 import { BACKEND_FEATURES } from '../index.js';
 import { isParkedPackDirName } from '../../bootstrap/mountLocalPacks.js';
+import { classifyPackDir, type PackTrustTier } from '../../host/packTrust.js';
 
 const MARKER = '.openwop-installed.json';
 
@@ -39,12 +40,19 @@ export interface Listing {
   author?: string;
   /** Coarse category derived from the pack namespace (node / agent / feature). */
   category: string;
-  /** SHA-256 SRI from the install marker (verified at install time), when installed. */
+  /** SHA-256 SRI from the install marker — only while the install still verifies
+   *  (`trust.tier === 'operator-trusted'`). */
   integrity?: string;
-  /** Signing public-key ref from the install marker, when installed. */
+  /** Signing key id from the install marker — same condition as `integrity`. */
   publicKeyRef?: string;
-  /** True when a verified `.openwop-installed.json` marker is present. */
+  /** True when a registry install marker (`.openwop-installed.json`) is PRESENT.
+   *  Presence only — it says nothing about whether the install still verifies;
+   *  `trust` is the answer to that (ADR 0826 D6, `MKT2-27`). */
   installed: boolean;
+  /** ADR 0826 D6 — the pack's trust tier from `host/packTrust.classifyPackDir`,
+   *  the SOLE authority on whether its code may run. `integrity`/`publicKeyRef`
+   *  are present only when this is `operator-trusted` (a verified install). */
+  trust: { tier: PackTrustTier; reason: string };
   /**
    * MKT2-B2 — where the pack CAME FROM, which `installed` does not say.
    *
@@ -159,14 +167,7 @@ export function listListings(): Listing[] {
   if (!existsSync(packDir)) return [];
 
   // Which feature ids require which pack (name@version) — the uninstall guard.
-  const requiredBy = new Map<string, Set<string>>();
-  for (const feature of BACKEND_FEATURES) {
-    for (const ref of feature.requiredPacks ?? []) {
-      const key = `${ref.name}@${ref.version}`;
-      if (!requiredBy.has(key)) requiredBy.set(key, new Set());
-      requiredBy.get(key)!.add(feature.id);
-    }
-  }
+  const requiredBy = requiredByIndex();
 
   let entries: Array<{ name: string; symlinked: boolean }> = [];
   try {
@@ -191,43 +192,84 @@ export function listListings(): Listing[] {
 
   const out: Listing[] = [];
   for (const { name: dir, symlinked } of entries) {
-    const manifestPath = join(packDir, dir, 'pack.json');
-    if (!existsSync(manifestPath)) continue;
-    let manifest: PackManifest;
-    try {
-      manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as PackManifest;
-    } catch {
-      continue; // skip malformed pack.json rather than fail the whole list
-    }
-    if (!manifest.name || !manifest.version) continue;
-
-    const marker = readMarker(join(packDir, dir, MARKER));
-    const reqKey = `${manifest.name}@${manifest.version}`;
-    const requirers = requiredBy.get(reqKey);
-
-    const listing: Listing = {
-      packName: manifest.name,
-      version: manifest.version,
-      title: titleOf(manifest),
-      category: categoryOf(manifest),
-      installed: marker !== null,
-      origin: symlinked ? 'local' : 'registry',
-      ...(isTombstoned(manifest.name) ? { tombstoned: true } : {}),
-    };
-    if (manifest.description) listing.description = manifest.description;
-    if (manifest.author) listing.author = manifest.author;
-    if (marker?.integrity) listing.integrity = marker.integrity;
-    if (marker?.publicKeyRef) listing.publicKeyRef = marker.publicKeyRef;
-    if (requirers && requirers.size > 0) listing.requiredBy = [...requirers].sort();
-    out.push(listing);
+    const listing = buildListing(packDir, dir, symlinked, requiredBy);
+    if (listing) out.push(listing);
   }
 
   // Stable order: alphabetical by name (the page sorts/filters further client-side).
   return out.sort((a, b) => a.packName.localeCompare(b.packName));
 }
 
-/** A single listing by pack name (the reviews route validates the pack exists). */
+/** `name@version` → the feature ids whose `requiredPacks` pin it. */
+function requiredByIndex(): Map<string, Set<string>> {
+  const requiredBy = new Map<string, Set<string>>();
+  for (const feature of BACKEND_FEATURES) {
+    for (const ref of feature.requiredPacks ?? []) {
+      const key = `${ref.name}@${ref.version}`;
+      if (!requiredBy.has(key)) requiredBy.set(key, new Set());
+      requiredBy.get(key)!.add(feature.id);
+    }
+  }
+  return requiredBy;
+}
+
+/** One pack dir → its listing, or null when it holds no usable `pack.json`. */
+function buildListing(packDir: string, dir: string, symlinked: boolean, requiredBy: Map<string, Set<string>>): Listing | null {
+  const manifestPath = join(packDir, dir, 'pack.json');
+  if (!existsSync(manifestPath)) return null;
+  let manifest: PackManifest;
+  try {
+    manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as PackManifest;
+  } catch {
+    return null; // skip malformed pack.json rather than fail the whole list
+  }
+  if (!manifest.name || !manifest.version) return null;
+
+  const marker = readMarker(join(packDir, dir, MARKER));
+  const requirers = requiredBy.get(`${manifest.name}@${manifest.version}`);
+  // ADR 0826 D6 — ask the ONE trust authority (memoised per dir), never infer
+  // "verified" from a marker's presence (`MKT2-27`).
+  const verdict = classifyPackDir(join(packDir, dir));
+
+  const listing: Listing = {
+    packName: manifest.name,
+    version: manifest.version,
+    title: titleOf(manifest),
+    category: categoryOf(manifest),
+    installed: marker !== null,
+    trust: { tier: verdict.tier, reason: verdict.reason },
+    origin: symlinked ? 'local' : 'registry',
+    ...(isTombstoned(manifest.name) ? { tombstoned: true } : {}),
+  };
+  if (manifest.description) listing.description = manifest.description;
+  if (manifest.author) listing.author = manifest.author;
+  if (verdict.tier === 'operator-trusted') {
+    if (marker?.integrity) listing.integrity = marker.integrity;
+    if (marker?.publicKeyRef) listing.publicKeyRef = marker.publicKeyRef;
+  }
+  if (requirers && requirers.size > 0) listing.requiredBy = [...requirers].sort();
+  return listing;
+}
+
+/**
+ * A single listing by pack name (the reviews / enablement / remove routes use it
+ * as an existence gate). `MKT2-28` — it used to be `listListings().find()`, a full
+ * directory scan + N `JSON.parse` per call. Install and mount both name the dir
+ * after the pack, so read that one dir; fall back to the scan only when its
+ * manifest names a different pack (a hand-placed dir), so the answer is unchanged.
+ */
 export function getListing(packName: string): Listing | null {
+  const packDir = resolveDefaultPackDir();
+  if (isParkedPackDirName(packName)) return null;
+  const dirPath = join(packDir, packName);
+  let symlinked = false;
+  try {
+    symlinked = lstatSync(dirPath).isSymbolicLink();
+  } catch {
+    symlinked = false;
+  }
+  const direct = existsSync(dirPath) ? buildListing(packDir, packName, symlinked, requiredByIndex()) : null;
+  if (direct?.packName === packName) return direct;
   return listListings().find((l) => l.packName === packName) ?? null;
 }
 

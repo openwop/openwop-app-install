@@ -246,7 +246,7 @@ describe('RFC 0153 §E inbound — an RFC 0154 workload credential is audience-c
   });
 
   const post = async (headers: Record<string, string>): Promise<number> => {
-    const res = await fetch(`${base}/v1/host/openwop-app/mcp`, {
+    const res = await fetch(`${base}/host/openwop-app/mcp`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'mcp-protocol-version': MCP_CURRENT_VERSION, ...headers },
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: { _meta: { 'io.modelcontextprotocol/protocolVersion': MCP_CURRENT_VERSION, 'io.modelcontextprotocol/clientCapabilities': {} } } }),

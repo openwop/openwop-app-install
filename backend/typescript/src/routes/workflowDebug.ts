@@ -32,6 +32,9 @@ import { getRegisteredWorkflowAsync } from '../host/workflowsRegistry.js';
 import { loadOwnedRun } from '../host/runAccess.js';
 import { resolveRunDefinition } from '../host/resolveRunDefinition.js';
 import { insertRunWithStartContext } from '../host/runInsert.js';
+import { withRunLimit } from '../host/runLimitSeam.js';
+import { launchSubjectOf } from '../features/featureRoute.js';
+import { assertWorkflowFeatureLaunchable } from '../host/workflowFeatureGate.js';
 import { buildRunRecord, dispatchRunInBackground, failRunClosedOnDispatchError } from '../host/runDispatch.js';
 import { seedRunVariables, deferredConfigurableInputs } from '../host/variablesRuntime.js';
 import { executeRun, snapshotFromEventPrefix, type SerializedSnapshot } from '../executor/executor.js';
@@ -96,7 +99,7 @@ export function partitionForDebug(
 }
 
 export function registerWorkflowDebugRoutes(app: Express, deps: { storage: Storage; hostSuite: HostAdapterSuite }): void {
-  const BASE = '/v1/host/openwop-app/workflows/:workflowId';
+  const BASE = '/host/openwop-app/workflows/:workflowId';
 
   app.get(`${BASE}/pins`, async (req, res, next) => {
     try {
@@ -274,7 +277,10 @@ export function registerWorkflowDebugRoutes(app: Express, deps: { storage: Stora
       // mark a run as a debug run.
       run.metadata.launchResolved = 'head';
       run.metadata.debug = { fromNodeId, mode, pinnedNodes: [...predecessors].sort() };
-      await insertRunWithStartContext(deps.storage, run, { definition: def });
+      // ADR 0820 §7 / G6 — a debug run is a new run of a (tenant-owned) head:
+      // the owning-feature gate (typed 403) and the plan's run limit apply.
+      await assertWorkflowFeatureLaunchable(run.tenantId, workflowId, def, launchSubjectOf(req));
+      await withRunLimit(run.tenantId, () => insertRunWithStartContext(deps.storage, run, { definition: def }));
       seedRunVariables(run.runId, def.variables, deferredConfigurableInputs(def, run.configurable, inputs));
 
       // Self-describing synthetic prefix (the fork-copied-prefix semantics):
@@ -335,7 +341,7 @@ export function registerWorkflowDebugRoutes(app: Express, deps: { storage: Stora
   // "Fresh" means fresh IDENTITY, not fresh configuration: execution parameters
   // (inputs, configurable, the revision pin, and the ADR 0099 frozen compaction
   // decision) are INHERITED — see `derivedFromRun` below (ADR 0604 review H1).
-  app.post('/v1/host/openwop-app/runs/redrive', runQuotaMiddleware(), async (req, res, next) => {
+  app.post('/host/openwop-app/runs/redrive', runQuotaMiddleware(), async (req, res, next) => {
     try {
       const runIds = (req.body as { runIds?: unknown } | undefined)?.runIds;
       if (
@@ -352,7 +358,10 @@ export function registerWorkflowDebugRoutes(app: Express, deps: { storage: Stora
             results.push({ runId: sourceRunId, error: 'not_redrivable' });
             continue;
           }
-          const resolved = await resolveRunDefinition(source, deps.hostSuite.workflowCatalog);
+          // ADR 0823 D3 — a redrive MINTS a run, so it is re-authorized like a launch.
+          const resolved = await resolveRunDefinition(source, deps.hostSuite.workflowCatalog, {
+            relaunch: { operator: req.principal?.tenants?.includes('*') === true, subject: launchSubjectOf(req) },
+          });
           if (!resolved) {
             results.push({ runId: sourceRunId, error: 'workflow_not_found' });
             continue;
@@ -432,7 +441,7 @@ export function registerWorkflowDebugRoutes(app: Express, deps: { storage: Stora
           // another run's metadata (`routes/runs.ts` `:fork` is the first), and
           // `test/run-metadata-copy-sites.test.ts` is the ratchet over that
           // population.
-          await insertRunWithStartContext(deps.storage, run, { definition: resolved.definition, enqueueDispatch: true, derivedFromRun: true });
+          await withRunLimit(run.tenantId, () => insertRunWithStartContext(deps.storage, run, { definition: resolved.definition, enqueueDispatch: true, derivedFromRun: true }));
           seedRunVariables(
             run.runId,
             resolved.definition.variables,

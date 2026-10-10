@@ -24,10 +24,13 @@ import { buildTerritorySurface } from './surface.js';
 import { registerTerritoryAgentTools } from './agentTools.js';
 import { registerTerritoryTransitionGate } from './modelTransitionApproval.js';
 import { registerTerritoryErasure } from './erasure.js';
+import { registerFeatureDataExporter } from '../../host/featureDataExport.js';
+import { exportTerritoriesData } from './dataExport.js';
 
 export const territoriesFeature: BackendFeature = {
   id: 'territories',
   registerRoutes: (deps) => {
+    registerFeatureDataExporter('territories', exportTerritoriesData); // ADR 0820 §7 — read-only export, served after a plan lapse
     registerTerritoryRoutes(deps);
     // Register the CRM row-visibility resolver (ADR 0272 P4). Registered
     // unconditionally at boot (like routes); it self-gates on toggle STATE so a
@@ -68,7 +71,7 @@ export const territoriesFeature: BackendFeature = {
   // and hierarchy attach to CRM accounts (ADR 0194 disable-lock).
   dependsOn: ['crm'],
   requiredPacks: [
-    { name: 'feature.territories.nodes', version: '1.2.0' },
-    { name: 'feature.territories.agents', version: '1.0.2' },
+    { name: 'feature.territories.nodes', version: '1.2.1' },
+    { name: 'vendor.openwop-app.territories.agents', version: '1.0.3' },
   ],
 };

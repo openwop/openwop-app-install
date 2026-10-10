@@ -138,16 +138,16 @@ describe('ADR 0215 — sync route', () => {
 
   it('validates the platform, requires org write, and reports honestly on an empty ledger', async () => {
     const owner = client();
-    const login = await owner.post('/v1/host/openwop-app/test/login', { email: `cs-${Date.now()}@acme.test` });
+    const login = await owner.post('/host/openwop-app/test/login', { email: `cs-${Date.now()}@acme.test` });
     expect(login.status).toBe(201);
-    const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+    const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
     expect(org.status).toBe(201);
     const orgId = org.body.orgId as string;
 
-    const bad = await owner.post('/v1/host/openwop-app/campaign-connectors/sync', { orgId, platform: 'tiktok' });
+    const bad = await owner.post('/host/openwop-app/campaign-connectors/sync', { orgId, platform: 'tiktok' });
     expect(bad.status).toBe(400); // no live metrics reader
 
-    const ok = await owner.post('/v1/host/openwop-app/campaign-connectors/sync', { orgId, platform: 'meta' });
+    const ok = await owner.post('/host/openwop-app/campaign-connectors/sync', { orgId, platform: 'meta' });
     expect(ok.status).toBe(200);
     expect(ok.body.outcome).toBe('no_dispatches'); // empty ledger — honest
   });

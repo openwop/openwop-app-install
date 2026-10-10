@@ -165,7 +165,7 @@ export const messages = {
   kbLabel: 'Base de conhecimento',
   kbHint: 'Coleções de documentos e busca semântica (RAG)',
   marketplaceLabel: 'Marketplace',
-  marketplaceHint: 'Explore e instale pacotes de recursos assinados',
+  marketplaceHint: 'Loja, pacotes e distribuições',
   mediaLabel: 'Mídia',
   mediaHint: 'Biblioteca de ativos da organização',
   notificationsLabel: 'Caixa de entrada',
@@ -213,5 +213,7 @@ export const messages = {
   territoriesLabel: 'Territórios',
   territoriesHint: 'Regiões de vendas, hierarquia, cotas e atingimento',
   uiPluginsLabel: 'Plugins de UI',
-  uiPluginsHint: 'Pacotes de plugins front-end isolados (RFC 0117/0119)',
+  uiPluginsHint: 'Pacotes de plugins front-end isolados',
+  claudeCodeLabel: 'Claude Code',
+  claudeCodeHint: 'Seus dispositivos Claude Code pareados',
 } as const;

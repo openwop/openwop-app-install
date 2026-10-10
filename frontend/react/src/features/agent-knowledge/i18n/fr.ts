@@ -36,7 +36,7 @@ export const messages = {
   unbind: 'Dissocier',
   unbindConfirm: 'Dissocier "{{name}}" de cet agent ? La collection elle-même est conservée.',
   externalUnverified: 'Externe · non vérifié',
-  externalUnverifiedTitle: 'Importé depuis une source externe (par ex. Google Drive ou un déclencheur). Traité comme non fiable — cloisonné lorsque l’agent le lit, jamais suivi comme instructions (ADR 0038 §C).',
+  externalUnverifiedTitle: 'Importé depuis une source externe (par ex. Google Drive ou un déclencheur). Traité comme non fiable — cloisonné lorsque l’agent le lit, jamais suivi comme instructions.',
   chunkCount_one: '· {{count}} segment',
   chunkCount_other: '· {{count}} segments',
   removeDocumentLabel: 'Supprimer {{title}}',
@@ -75,7 +75,7 @@ export const messages = {
   retrieve: 'Récupérer',
   retrieveNoteChip: 'note',
   retrieveExternalChip: 'externe',
-  retrieveExternalTitle: 'Contenu externe non fiable — cloisonné lorsque l’agent le lit (ADR 0038 §C).',
+  retrieveExternalTitle: 'Contenu externe non fiable — cloisonné lorsque l’agent le lit.',
   retrieveNoMatches: 'Aucun résultat — ajoutez des documents ou des notes ci-dessus.',
 
   // Memory tab (ADR 0041)
@@ -90,5 +90,6 @@ export const messages = {
   retrievePartialSources: 'Non fouillé : {{sources}}',
   retrieveSource_kb: 'documents',
   retrieveSource_memory: 'notes',
-  errorAnnounce: 'Le panneau de connaissances de l’agent a signalé un problème — le détail est affiché à l’écran.',
+  // KB2UX-3 — ADR 0830 D4: a managed collection refuses writes from this panel.
+  managedReadOnly: 'Cette collection est synchronisée par une autre fonctionnalité : ses documents sont en lecture seule ici. Modifiez-les à leur source.',
 } as const;

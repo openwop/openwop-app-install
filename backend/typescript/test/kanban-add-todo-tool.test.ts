@@ -9,7 +9,7 @@ import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { createAgentToolProvider, builtinAgentToolIds, builtinToolNamespaces } from '../src/host/agentToolProvider.js';
-import { getBoard, subjectBoardId, listCards } from '../src/host/kanbanService.js';
+import { getBoard, subjectBoardId, listCards, moveCard } from '../src/host/kanbanService.js';
 import { createRosterEntry } from '../src/host/rosterService.js';
 import { TOOL_GROUNDED_COMMITMENTS } from '../src/host/chatContext.js';
 
@@ -81,6 +81,21 @@ describe('ADR 0311 P1 — openwop:kanban.add-todo', () => {
     expect(b.cardId).toBe(a.cardId);
     const board = await getBoard(subjectBoardId(TENANT, { kind: 'agent', id: entry.rosterId }));
     expect((await listCards(board!.id)).filter((c) => c.title === 'Same commitment')).toHaveLength(1);
+  });
+
+  it('ADR 0774 D7 — a deduped call says so, and reports the column the card is ACTUALLY in', async () => {
+    const entry = await createRosterEntry({ tenantId: TENANT, persona: 'Receipt Agent', agentRef: { agentId: 'user.default.receipt-todo' } });
+    const scope = { actingUserId: 'u-filer', agentProfileId: entry.rosterId };
+    const input = { title: 'Already worked on', detail: 'Moved on since.' };
+    const first = JSON.parse((await runTool(input, scope)).content) as { cardId: string; alreadyFiled: boolean; column: string };
+    expect(first).toMatchObject({ alreadyFiled: false, column: 'To Do' });
+    // The heartbeat (or a human) has since moved it on.
+    expect(await moveCard(first.cardId, 'done')).not.toBeNull();
+    const again = JSON.parse((await runTool(input, scope)).content) as { cardId: string; alreadyFiled: boolean; column: string; note: string };
+    expect(again.cardId).toBe(first.cardId);
+    // Before ADR 0774 this reported `column: 'To Do'` for a card sitting in Done.
+    expect(again).toMatchObject({ alreadyFiled: true, column: 'Done' });
+    expect(again.note).toMatch(/already filed/);
   });
 
   it('the P0 scaffold names the three grounding paths (ADR 0311 D1)', () => {

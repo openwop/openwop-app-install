@@ -61,8 +61,8 @@ function client(): Client {
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b), del: (p) => call('DELETE', p) };
 }
 
-const P = '/v1/host/openwop-app/projects';
-const S = '/v1/host/openwop-app/scheduler/jobs';
+const P = '/host/openwop-app/projects';
+const S = '/host/openwop-app/scheduler/jobs';
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
 const jobIds = (r: Res): string[] => (r.body.jobs as { jobId: string }[]).map((j) => j.jobId);
 
@@ -71,8 +71,8 @@ async function scenario(visibility: 'org' | 'private' = 'private') {
   await resetScheduling();
   const tenantId = `org:sched-${Date.now()}-${n++}`;
   const owner = client();
-  await owner.post('/v1/host/openwop-app/test/login', { email: uniqEmail('sched-owner'), tenantId });
-  const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'PrivCo' })).body.orgId;
+  await owner.post('/host/openwop-app/test/login', { email: uniqEmail('sched-owner'), tenantId });
+  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'PrivCo' })).body.orgId;
   const projectId = (await owner.post(P, { orgId, name: 'Secret' })).body.id;
   const created = await owner.post(`${P}/${projectId}/schedules`, { cronExpr: '0 9 * * *', workflowId: 'wf.demo' });
   expect(created.status, JSON.stringify(created.body)).toBe(201);
@@ -83,7 +83,7 @@ async function scenario(visibility: 'org' | 'private' = 'private') {
   }
   // A signed-in CO-TENANT with zero org scopes (never `createMember`'d).
   const stranger = client();
-  await stranger.post('/v1/host/openwop-app/test/login', { email: uniqEmail('sched-stranger'), tenantId });
+  await stranger.post('/host/openwop-app/test/login', { email: uniqEmail('sched-stranger'), tenantId });
   return { tenantId, orgId, projectId, jobId, owner, stranger };
 }
 
@@ -137,7 +137,7 @@ describe('scheduler door — a project-owned job is gated by the project, not by
   it('a project MEMBER with read-only authority may LIST but never mutate (the write-bypass arm)', async () => {
     const { tenantId, orgId, projectId, jobId, owner } = await scenario();
     const viewer = client();
-    const viewerId = (await viewer.post('/v1/host/openwop-app/test/login', { email: uniqEmail('sched-viewer'), tenantId })).body.user.userId;
+    const viewerId = (await viewer.post('/host/openwop-app/test/login', { email: uniqEmail('sched-viewer'), tenantId })).body.user.userId;
     await createMember({ tenantId, orgId, subject: viewerId, displayName: 'V', roles: ['viewer'] });
     expect((await owner.post(`${P}/${projectId}/members`, { ref: `user:${viewerId}`, role: 'observer' })).status).toBe(201);
 
@@ -146,9 +146,12 @@ describe('scheduler door — a project-owned job is gated by the project, not by
     expect(jobIds(await viewer.get(S))).toContain(jobId);
 
     // WRITE arm — membership NEVER grants write (ADR 0054 D5). All three refuse.
-    expect((await viewer.patch(`${S}/${jobId}`, { enabled: false })).status).toBe(404);
-    expect((await viewer.post(`${S}/${jobId}/trigger`)).status).toBe(404);
-    expect((await viewer.del(`${S}/${jobId}`)).status).toBe(404);
+    // ADR 0787 D3 — with 403, not 404: the job is READABLE to this caller (it is
+    // in their list two lines up), so a 404 was no oracle protection at all — it
+    // only made the two doors disagree. The project door answers 403 too.
+    expect((await viewer.patch(`${S}/${jobId}`, { enabled: false })).status).toBe(403);
+    expect((await viewer.post(`${S}/${jobId}/trigger`)).status).toBe(403);
+    expect((await viewer.del(`${S}/${jobId}`)).status).toBe(403);
     // And the project's own write door agrees (the two doors must not disagree).
     expect((await viewer.patch(`${P}/${projectId}/schedules/${jobId}`, { enabled: false })).status).toBe(403);
   });
@@ -161,14 +164,19 @@ describe('scheduler door — a project-owned job is gated by the project, not by
     expect((await owner.del(`${S}/${jobId}`)).status).toBe(200);
   });
 
-  it('a job with NO ownerSubject keeps the legacy tenant rule (the cure is not a blanket deny)', async () => {
-    const { tenantId, stranger } = await scenario();
+  it('a job with NO ownerSubject: any co-tenant READS it, only a workspace writer changes it (ADR 0787 D3)', async () => {
+    const { tenantId, stranger, owner } = await scenario();
     const res = await registerJob({ jobId: `job-plain-${n++}`, tenantId, cronExpr: '0 9 * * *' });
     expect(res.ok).toBe(true);
     const plainId = res.ok ? res.job.jobId : '';
-    // No `ownerSubject` ⇒ the seam returns null ⇒ the ADR 0025 tenant/personal
-    // rule applies unchanged, and any tenant member reaches it.
+    // No `ownerSubject` ⇒ the seam returns null ⇒ the tenant arm applies. It
+    // used to answer "any tenant member may do anything", which is `SCTWF-5`:
+    // an unscoped co-tenant could retarget, fire and delete the automation.
     expect(jobIds(await stranger.get(S))).toContain(plainId);
-    expect((await stranger.patch(`${S}/${plainId}`, { enabled: false })).status).toBe(200);
+    expect((await stranger.patch(`${S}/${plainId}`, { enabled: false })).status).toBe(403);
+    expect((await stranger.post(`${S}/${plainId}/trigger`)).status).toBe(403);
+    expect((await stranger.del(`${S}/${plainId}`)).status).toBe(403);
+    // …and the cure is not a brick: the workspace's writer still can.
+    expect((await owner.patch(`${S}/${plainId}`, { enabled: false })).status).toBe(200);
   });
 });

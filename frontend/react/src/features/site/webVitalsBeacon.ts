@@ -9,6 +9,7 @@
  */
 import { config } from '../../client/config.js';
 import { measureWebVitals, type VitalSample } from '../../platform/measureWebVitals.js';
+import { consentTokenFor, repairConsentTokenFrom } from './visitorConsent.js';
 
 function sendVital(orgId: string, sessionKey: string, sample: VitalSample): void {
   try {
@@ -19,8 +20,8 @@ function sendVital(orgId: string, sessionKey: string, sample: VitalSample): void
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       keepalive: true,
-      body: JSON.stringify({ type: 'event', name: 'web-vital', sessionKey, props: { metric: sample.metric, value } }),
-    }).catch(() => undefined);
+      body: JSON.stringify({ type: 'event', name: 'web-vital', sessionKey, ...(consentTokenFor(orgId) ? { consentToken: consentTokenFor(orgId) } : {}), props: { metric: sample.metric, value } }), // ADR 0860 D5
+    }).then((res) => repairConsentTokenFrom(orgId, res)).catch(() => undefined); // grade-code M4
   } catch { /* never break the page for measurement */ }
 }
 

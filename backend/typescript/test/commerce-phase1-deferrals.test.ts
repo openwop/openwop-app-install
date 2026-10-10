@@ -45,12 +45,12 @@ function client() {
 }
 async function shopOwner(): Promise<{ owner: ReturnType<typeof client>; orgId: string; tenantId: string }> {
   const owner = client();
-  const r = await owner.post('/v1/host/openwop-app/test/login', { email: `p1-${Date.now()}-${n++}@acme.test` });
+  const r = await owner.post('/host/openwop-app/test/login', { email: `p1-${Date.now()}-${n++}@acme.test` });
   const tenantId: string = r.body.user?.tenantId ?? '';
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Shop' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Shop' });
   return { owner, orgId: org.body.orgId, tenantId };
 }
-const c = (orgId: string, suffix = ''): string => `/v1/host/openwop-app/commerce/orgs/${encodeURIComponent(orgId)}${suffix}`;
+const c = (orgId: string, suffix = ''): string => `/host/openwop-app/commerce/orgs/${encodeURIComponent(orgId)}${suffix}`;
 
 async function paidOrder(owner: ReturnType<typeof client>, orgId: string, price = 100): Promise<string> {
   const p = await owner.post(c(orgId, '/products'), { type: 'digital', name: 'Guide', price, currency: 'USD' });

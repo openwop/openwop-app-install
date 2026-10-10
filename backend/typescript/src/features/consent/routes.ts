@@ -10,16 +10,17 @@
 import type { Request } from 'express';
 import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
-import { authorizeOrgScope, requireOrgScope, requireTenantScope, optionalString } from '../featureRoute.js';
-import { resolveOne } from '../../host/featureToggles/service.js';
+import { authorizeOrgScope, requireOrgScope, callerHoldsTenantScope, optionalString } from '../featureRoute.js';
+import { resolveToggle } from '../../host/featureToggles/service.js';
 import { getOrg } from '../../host/accessControlService.js';
 import { getRetentionHold, RetentionHoldError } from '../../host/retentionHold.js';
 import {
-  mergeConsentCategories, getConsent, listConsent, getPolicy, setPolicy, deleteSubject, readmitSubject,
+  mergeConsentCategories, getConsent, listConsent, getPolicy, setPolicy, deleteSubject, readmitSubject, getErasureStatus, visitorDefaultRegime,
   type DefaultMode,
 } from './consentService.js';
 import { mintPublicSubjectToken, verifyPublicSubjectToken } from './publicSubjectToken.js';
 import { requireCategories } from './surface.js';
+import { visitorRegionOf } from './visitorRegion.js';
 
 // ADR 0657 D4 (CNWF-5) — a per-org fixed-window budget on the public capture (the it.9
 // analytics-beacon shape): the per-IP limiter alone lets one visitor mint an unbounded
@@ -41,8 +42,8 @@ import {
 } from '../cdp/purposeVocabService.js';
 
 const FEATURE = { toggleId: 'consent', label: 'Consent' };
-const ORG = '/v1/host/openwop-app/consent/orgs/:orgId';
-const PUB = '/v1/host/openwop-app/public-consent';
+const ORG = '/host/openwop-app/consent/orgs/:orgId';
+const PUB = '/host/openwop-app/public-consent';
 
 type Scope = 'workspace:read' | 'workspace:write';
 
@@ -74,12 +75,34 @@ export function registerConsentRoutes(deps: RouteDeps): void {
    */
   const dsarAuthz = (req: Request, scope: Scope) => requireOrgScope(req, scope);
 
+  /**
+   * ADR 0849 D1 — the consent REGIME is tenant-wide (one policy, one vocabulary, one
+   * ledger across every org), so the org check alone let an editor of any org flip the
+   * whole tenant to `opt-out` and a viewer of any org read every subject's raw key. The
+   * regime writes, the ledger and the per-subject lookup are the admin tier — the SAME
+   * authority the DSAR erase door already requires (ADR 0657 D6), so the console has one
+   * gate, not two. Asked AFTER the org check (membership + toggle where it applies), so
+   * the uniform 404 for a non-member / OFF toggle is unchanged.
+   */
+  //
+  // grade-code CN2CD-5 — judged by `callerHoldsTenantScope` (ADR 0775 D1): BOTH identity
+  // spellings of a person (an unbound OIDC bearer and the canonical `user:` id), and an
+  // `owk_` key only within its own declared scopes. The erase + re-admit doors use the
+  // same predicate, so the console has ONE authority test, not two that disagree.
+  const REGIME_SCOPE = 'host:members:manage' as const;
+  const holdsRegimeAdmin = (req: Request, tenantId: string): Promise<boolean> => callerHoldsTenantScope(req, tenantId, REGIME_SCOPE);
+  const requireRegimeAdmin = async (req: Request, tenantId: string): Promise<void> => {
+    if (await holdsRegimeAdmin(req, tenantId)) return;
+    throw new OpenwopError('forbidden_scope', `Missing required scope: ${REGIME_SCOPE}`, 403, { requiredScope: REGIME_SCOPE });
+  };
+
   // org → tenant, gated on the org-tenant's `consent` toggle (uniform 404).
   const resolvePublicTenant = async (orgId: string): Promise<string> => {
     const notFound = (): never => { throw new OpenwopError('not_found', 'Not found.', 404, {}); };
     const org = await getOrg(orgId);
     if (!org) return notFound();
-    const a = await resolveOne(FEATURE.toggleId, { tenantId: org.tenantId });
+    // ADR 0819 §1 opt-out — a PUBLIC lane (tenant from the resource): ADR 0419 never paywalls a shopper/visitor on the operator's plan.
+    const a = await resolveToggle(FEATURE.toggleId, { tenantId: org.tenantId });
     if (!a || !a.enabled) return notFound();
     return org.tenantId;
   };
@@ -177,12 +200,26 @@ export function registerConsentRoutes(deps: RouteDeps): void {
         tenantId,
         subjectKey,
         categories, // D4 — validated BEFORE any token is minted
-        source: 'public',
+        source: `public:${req.params.orgId}`, // ADR 0849 (CN2CD-9) — the capture point, for the history's "from where"
         ...(region ? { region } : {}),
         ...(purposes ? { purposes } : {}),
       });
       const warn = purposes ? (await validatePurposes(tenantId, purposes)).unknown : [];
       res.status(201).json({ ok: true, subjectToken: token, categories: rec.categories, ...(warn.length ? { unknownPurposes: warn } : {}) });
+    } catch (err) { next(err); }
+  });
+
+  // ADR 0860 D4 — the visitor's regime for THIS request: the region-aware default
+  // a visitor with no record falls to. Only the regime is returned (no country, no
+  // header echo). `no-store`, because it depends on request headers a shared cache
+  // would not key on. Registered BEFORE the token read so `posture` is never parsed
+  // as a token.
+  app.get(`${PUB}/:orgId/posture`, async (req, res, next) => {
+    try {
+      const tenantId = await resolvePublicTenant(req.params.orgId);
+      const { mode } = visitorDefaultRegime(await getPolicy(tenantId), visitorRegionOf(req));
+      res.setHeader('Cache-Control', 'private, no-store');
+      res.json({ regime: mode });
     } catch (err) { next(err); }
   });
 
@@ -196,8 +233,11 @@ export function registerConsentRoutes(deps: RouteDeps): void {
       if (!subjectKey) throw new OpenwopError('not_found', 'Not found.', 404, {});
       const rec = await getConsent(tenantId, subjectKey);
       if (rec) { res.json({ recorded: true, categories: rec.categories, ...(rec.region ? { region: rec.region } : {}) }); return; }
-      const policy = await getPolicy(tenantId);
-      res.json({ recorded: false, defaultMode: policy?.defaultMode ?? 'opt-in', categories: { necessary: true, analytics: false, marketing: false } });
+      // ADR 0860 (architect M4) — the same regime the posture route and the beacon
+      // apply to this request, never the bare policy mode.
+      const { mode } = visitorDefaultRegime(await getPolicy(tenantId), visitorRegionOf(req));
+      res.setHeader('Cache-Control', 'private, no-store');
+      res.json({ recorded: false, defaultMode: mode, categories: { necessary: true, analytics: mode === 'opt-out', marketing: false } });
     } catch (err) { next(err); }
   });
 
@@ -219,9 +259,20 @@ export function registerConsentRoutes(deps: RouteDeps): void {
     } catch (err) { next(err); }
   });
 
+  // ADR 0849 D1 (architect B1) — what the console may offer this caller. On the
+  // un-toggle-gated DSAR lane: the policy GET 404s while the toggle is OFF (the default),
+  // and the erase/lookup panel must still know whether to render for an admin.
+  app.get(`${ORG}/access`, async (req, res, next) => {
+    try {
+      const { tenantId } = await dsarAuthz(req, 'workspace:read');
+      res.json({ canManage: await holdsRegimeAdmin(req, tenantId) });
+    } catch (err) { next(err); }
+  });
+
   app.put(`${ORG}/policy`, async (req, res, next) => {
     try {
       const { tenantId } = await authz(req, 'workspace:write');
+      await requireRegimeAdmin(req, tenantId); // ADR 0849 D1
       const body = (req.body ?? {}) as Record<string, unknown>;
       const input: { regulatedRegions?: string[]; defaultMode?: DefaultMode } = {};
       if (Array.isArray(body.regulatedRegions)) input.regulatedRegions = body.regulatedRegions.filter((r): r is string => typeof r === 'string');
@@ -231,22 +282,35 @@ export function registerConsentRoutes(deps: RouteDeps): void {
   });
 
   app.get(`${ORG}/records`, async (req, res, next) => {
-    try { const { tenantId } = await authz(req, 'workspace:read'); res.json({ records: await listConsent(tenantId) }); }
-    catch (err) { next(err); }
+    try {
+      const { tenantId } = await authz(req, 'workspace:read');
+      await requireRegimeAdmin(req, tenantId); // ADR 0849 D1 — raw subject keys, tenant-wide
+      res.json({ records: await listConsent(tenantId) });
+    } catch (err) { next(err); }
   });
 
   app.get(`${ORG}/subjects/:subjectKey`, async (req, res, next) => {
-    try { const { tenantId } = await dsarAuthz(req, 'workspace:read'); res.json({ record: await getConsent(tenantId, req.params.subjectKey) }); }
-    catch (err) { next(err); }
+    try {
+      const { tenantId } = await dsarAuthz(req, 'workspace:read');
+      await requireRegimeAdmin(req, tenantId); // ADR 0849 D1 — a per-person read sits with the erase door
+      // ADR 0849 D3 — the record carries its history (the Art. 7(1) proof), and the lookup
+      // reports ERASURE: `record: null` alone read the same as "never recorded". Erased
+      // wins (architect M6): a pre-barrier row beside a tombstone is reported erased.
+      const erased = await getErasureStatus(tenantId, req.params.subjectKey);
+      const record = await getConsent(tenantId, req.params.subjectKey);
+      res.json({ record: erased ? null : record, erased: erased !== null, ...(erased ? { erasedAt: erased.erasedAt } : {}) });
+    } catch (err) { next(err); }
   });
 
   app.delete(`${ORG}/subjects/:subjectKey`, async (req, res, next) => {
     try {
-      // ADR 0657 D6 — ONE authority for both doors onto `eraseSubject`: the scope the users
-      // erase door already requires (`users/routes.ts`). `workspace:write` used to suffice,
-      // so any editor could erase anyone in the workspace.
+      // ADR 0657 D6 — the SCOPE the users erase door also requires (`host:members:manage`;
+      // `workspace:write` used to suffice, so any editor could erase anyone). ADR 0849
+      // (CN2CD-5) judges it with `callerHoldsTenantScope` — both identity spellings, `owk_`
+      // narrowing — while `users/routes.ts` still uses `requireTenantScope`: same scope, a
+      // different predicate there (residue CN2WF-9, a users-feature change).
       const { tenantId } = await dsarAuthz(req, 'workspace:write');
-      await requireTenantScope(req, 'host:members:manage');
+      await requireRegimeAdmin(req, tenantId);
       // GDPR erasure: idempotent — purges the consent record + fans out to every
       // registered feature eraser (Analytics events, …). No 404; erasing a subject
       // with no consent record still purges downstream data.
@@ -284,7 +348,7 @@ export function registerConsentRoutes(deps: RouteDeps): void {
   app.post(`${ORG}/subjects/:subjectKey/readmit`, async (req, res, next) => {
     try {
       const { tenantId } = await dsarAuthz(req, 'workspace:write');
-      await requireTenantScope(req, 'host:members:manage');
+      await requireRegimeAdmin(req, tenantId);
       const body = (req.body ?? {}) as Record<string, unknown>;
       const result = await readmitSubject(tenantId, req.params.subjectKey, typeof body.attestation === 'string' ? body.attestation : '');
       res.status(200).json({ ok: true, subjectKey: req.params.subjectKey, ...result, ...(result.readmitted ? {} : { reason: 'not_erased' }) });
@@ -304,6 +368,7 @@ export function registerConsentRoutes(deps: RouteDeps): void {
   app.post(`${ORG}/purpose-vocab`, async (req, res, next) => {
     try {
       const { tenantId } = await authz(req, 'workspace:write');
+      await requireRegimeAdmin(req, tenantId); // ADR 0849 D1
       const body = (req.body ?? {}) as Record<string, unknown>;
       res.status(201).json({ purposes: await addPurposeCode(tenantId, body.code) });
     } catch (err) { next(err); }
@@ -312,6 +377,7 @@ export function registerConsentRoutes(deps: RouteDeps): void {
   app.delete(`${ORG}/purpose-vocab/:code`, async (req, res, next) => {
     try {
       const { tenantId } = await authz(req, 'workspace:write');
+      await requireRegimeAdmin(req, tenantId); // ADR 0849 D1
       res.json({ purposes: await removePurposeCode(tenantId, req.params.code) });
     } catch (err) { next(err); }
   });
@@ -319,6 +385,7 @@ export function registerConsentRoutes(deps: RouteDeps): void {
   app.put(`${ORG}/purpose-vocab/strict`, async (req, res, next) => {
     try {
       const { tenantId } = await authz(req, 'workspace:write');
+      await requireRegimeAdmin(req, tenantId); // ADR 0849 D1
       const body = (req.body ?? {}) as Record<string, unknown>;
       if (typeof body.strict !== 'boolean') {
         throw new OpenwopError('validation_error', 'Field `strict` is required and MUST be a boolean.', 400, { field: 'strict' });

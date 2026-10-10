@@ -9,7 +9,7 @@ import { corpusSchema } from './support/corpusSchema.js';
 
 /**
  * RFC 0086 (Accepted) / `agent-roster.md` §B — a host advertising
- * `agents.roster.supported` MUST serve `GET /v1/agents/roster`.
+ * `agents.roster.supported` MUST serve `GET /agents/roster`.
  *
  * THE DEFECT THIS PINS: discovery advertised the capability, but the route was
  * never registered — `/agents/roster` fell into `/agents/:agentId` and answered
@@ -22,7 +22,8 @@ let base: string;
 let savedKeys: string | undefined;
 const KEY_A = 'k-roster-a';
 const KEY_B = 'k-roster-b';
-const hdr = (key: string, major: 1 | 2 = 1) => ({ Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', 'OpenWOP-Version': String(major) });
+// ADR 0812 P3c-0 — major 2 only; the major-1 leg went with major 1.
+const hdr = (key: string) => ({ Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', 'OpenWOP-Version': '2' });
 
 beforeAll(async () => {
   savedKeys = process.env.OPENWOP_API_KEYS;
@@ -35,7 +36,7 @@ beforeAll(async () => {
 
   // Tenant A: one standing member (with a host-ext autonomy field that MUST NOT
   // leak) and one advisor-subject entry that MUST NOT appear.
-  const created = await fetch(`${base}/v1/host/openwop-app/roster`, {
+  const created = await fetch(`${base}/host/openwop-app/roster`, {
     method: 'POST', headers: hdr(KEY_A),
     body: JSON.stringify({ persona: 'Ops Lead', agentRef: { agentId: 'core.openwop.agent-examples.chat' }, workflows: ['conformance-noop'], autonomyLevel: 'review' }),
   });
@@ -49,19 +50,16 @@ afterAll(async () => {
   if (savedKeys === undefined) delete process.env.OPENWOP_API_KEYS; else process.env.OPENWOP_API_KEYS = savedKeys;
 });
 
-async function roster(key: string, major: 1 | 2 = 1) {
-  const path = major === 1 ? '/v1/agents/roster' : '/agents/roster';
-  const res = await fetch(`${base}${path}`, { headers: hdr(key, major) });
+async function roster(key: string) {
+  const res = await fetch(`${base}/agents/roster`, { headers: hdr(key) });
   return { status: res.status, body: await res.json() as { roster?: Array<Record<string, unknown>>; total?: number; error?: string } };
 }
 
-describe('GET /v1/agents/roster — the normative roster read (RFC 0086 §B)', () => {
-  it('is SERVED (not shadowed by /agents/:agentId) at both majors', async () => {
-    for (const major of [1, 2] as const) {
-      const r = await roster(KEY_A, major);
-      expect(r.status, `major ${major}: ${JSON.stringify(r.body)}`).toBe(200);
-      expect(r.body.error, 'must not be the :agentId "not installed" miss').toBeUndefined();
-    }
+describe('GET /agents/roster — the normative roster read (RFC 0086 §B)', () => {
+  it('is SERVED (not shadowed by /agents/:agentId)', async () => {
+    const r = await roster(KEY_A);
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    expect(r.body.error, 'must not be the :agentId "not installed" miss').toBeUndefined();
   });
 
   it('validates against the corpus agent-roster-response schema (closed-world entries)', async () => {
@@ -94,7 +92,7 @@ describe('GET /v1/agents/roster — the normative roster read (RFC 0086 §B)', (
   });
 
   it('/agents/:agentId still resolves real agents (the ordering fix did not break the id route)', async () => {
-    const res = await fetch(`${base}/v1/agents/core.openwop.agent-examples.chat`, { headers: hdr(KEY_A) });
+    const res = await fetch(`${base}/agents/core.openwop.agent-examples.chat`, { headers: hdr(KEY_A) });
     expect(res.status).toBe(200);
   });
 });

@@ -29,6 +29,8 @@ import { EVENT_SCHEMA_VERSION } from './eventEra.js';
 import { projectEnvelopeIds } from './envelopeIdProjection.js';
 import { carryVendorKeys } from './vendorKeyCarry.js';
 import { projectInterruptKind } from './interruptKindProjection.js';
+import { projectApprovalOverridden } from './approvalOverriddenProjection.js';
+import { projectV2ErrorObject } from '../middleware/protocolVersion.js';
 // A static import, NOT a sibling `readFileSync`: the backend ships as an esbuild
 // bundle (`scripts/build.mjs`, `bundle: true`), which inlines imported JSON and
 // copies nothing else. The first draft read the file beside `import.meta.url`
@@ -92,15 +94,28 @@ export function projectV2Payload(
   envelope: { runId: string; nodeId?: string },
   runTenant?: string,
 ): unknown {
-  const withIds = projectEnvelopeIds(type, payload, envelope);
+  // FIRST: `approval.overridden` is stored in its closed v1 shape and rebuilt
+  // here into the v2 alias shape (see approvalOverriddenProjection.ts).
+  const rebuilt = projectApprovalOverridden(type, payload, envelope, runTenant);
+  const withIds = projectEnvelopeIds(type, rebuilt, envelope);
   const aliased = applyPayloadKeyAliases(type, withIds);
   const echoed = type === 'run.started' ? projectV2OwnerEcho(aliased, runTenant) : aliased;
   // ADR 0725 — host-only interrupt kinds onto the corpus enum (a seat rename or
   // `custom` + the host spelling carried). Before the box so the carry merges.
   const kinded = projectInterruptKind(type, echoed);
+  // openwop#1698 — the failure's `error.code` is registered or a vendor code.
+  // Before the box so an enrichment key the closed def lacks is still carried.
+  const coded = type === 'run.failed' || type === 'node.failed' ? projectFailureCode(kinded) : kinded;
   // ADR 0725 D3 — LAST: seats first (ids, aliases, owner echo), then whatever a
   // closed+hatched def still leaves undeclared is carried under
   // `vendor.openwop-app` (RFC 0185 §C). Idempotent, so the fan-out's second
   // pass is a no-op.
-  return carryVendorKeys(type, kinded);
+  return carryVendorKeys(type, coded);
+}
+
+function projectFailureCode(payload: unknown): unknown {
+  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) return payload;
+  const p = payload as Record<string, unknown>;
+  const error = projectV2ErrorObject(p.error);
+  return error === p.error ? payload : { ...p, error };
 }

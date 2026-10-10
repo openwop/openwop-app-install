@@ -4,7 +4,7 @@
  * `spec/v1/host-sample-test-seams.md` §24 (catalogued 2026-08-16, openwop#1028)
  * recorded a divergence rather than a capability: the sample-workflow
  * registration seam — `POST /v1/host/sample/workflows`, which rewrites onto the
- * product route `POST /v1/host/openwop-app/workflows` — accepted edges spelled
+ * product route `POST /host/openwop-app/workflows` — accepted edges spelled
  * `{ edgeId, sourceNodeId, targetNodeId }`, while
  * `schemas/workflow-definition.schema.json` §WorkflowEdge declares `id`
  * (REQUIRED, `additionalProperties: false`). A client posting the canonical

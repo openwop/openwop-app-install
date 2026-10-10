@@ -17,6 +17,7 @@ const KINDS: ReadonlySet<string> = new Set(PROPOSAL_KINDS);
 export function registerProposalsAgentTools(): void {
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: PROPOSALS_LIST_TOOL_ID,
       description:

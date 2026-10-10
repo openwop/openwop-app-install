@@ -88,20 +88,20 @@ describe('RFC 0200 §B.1 in cookie mode — a bare major-2 protocol client', () 
   });
 });
 
-describe('major 1 behaves as main does (ADR 0750 scopes its rule to major 2)', () => {
-  it('a bare major-1 protocol call with no credential is minted an anonymous session and gets the resource answer', async () => {
-    // Pins TODAY's major-1 behaviour so a change to it is a decision, not a side effect.
-    // Outside RFC 0200's MUST (§A.5: v1 gains no new MUST) — ADR 0745 D1 residual.
-    const res = await fetch(`${BASE}/v1/runs/run-that-does-not-exist`);
-    expect(res.status).toBe(404);
-    expect(sessionCookie(res)).toMatch(/^__session=/);
+describe('major 1 refuses a credential-less protocol call too (ADR 0750 major-1 extension)', () => {
+  it('a bare major-1 protocol call with no credential is 401 with the envelope, and mints nothing', async () => {
+    // Before the extension this pinned a mint (the ADR 0745 D1 residual). The v1
+    // floor `openwop.floor.auth` (auth.md §3) measured it as a defect on production.
+    const res = await fetch(`${BASE}/runs/run-that-does-not-exist`);
+    expect(res.status).toBe(401);
+    expect(sessionCookie(res)).toBeFalsy();
   });
 });
 
 describe('the anonymous-first product posture survives (regression)', () => {
   it('a browser first visit gets a session, and the protocol surface honours it', async () => {
     // The SPA bootstraps on a host-extension route (ADR 0750 keeps that minting).
-    const boot = await fetch(`${BASE}/v1/host/openwop-app/workflows`, { headers: { 'sec-fetch-site': 'same-origin' } });
+    const boot = await fetch(`${BASE}/host/openwop-app/workflows`, { headers: { 'sec-fetch-site': 'same-origin' } });
     expect(boot.status).toBe(200);
     const cookie = sessionCookie(boot);
     expect(cookie).toMatch(/^__session=/);

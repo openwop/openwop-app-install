@@ -43,6 +43,10 @@ export const SCHEDULED_CHAT_CREDENTIAL_REF = 'managed:openwop-free';
 /** Register the turn-workflow once (idempotent — safe to call at every feature boot). */
 export function seedScheduledChatTurnWorkflow(): void {
   if (!getChainBackedWorkflow(SCHEDULED_CHAT_TURN_WORKFLOW_ID)) {
-    registerChainBackedWorkflow(SCHEDULED_CHAT_TURN_WORKFLOW_ID);
+    // ADR 0820 §7 / G6 — owned by `scheduled-agent-chats`. With no toggle registered
+    // for that id the funnel treats it as ungated (today's main); once the feature
+    // has a toggle (ADR 0820 §8.2), every launch resolves toggle + plan, which also
+    // covers jobs created before they carried a `featureId` (backfill-on-read).
+    registerChainBackedWorkflow(SCHEDULED_CHAT_TURN_WORKFLOW_ID, { featureId: 'scheduled-agent-chats' });
   }
 }

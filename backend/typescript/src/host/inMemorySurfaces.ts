@@ -55,6 +55,9 @@ import { createCanvasSurface, type CanvasSurface } from './canvasSurface.js';
 import { createWebResearchSurface, type WebResearchSurface } from './webResearchSurface.js';
 import { createLaunchStudioSurface, type LaunchStudioSurface } from './launchStudioSurface.js';
 import { registerVectorTenantPurger, registerVectorNamespacePurger } from './vector/vectorTenantPurge.js';
+import { assetServeUrl } from './assetServePath.js';
+import { VENDOR_ROOT } from '../middleware/protocolVersion.js';
+import type { NegotiationRecorder } from './negotiationDecided.js';
 
 const log = createLogger('host.inMemorySurfaces');
 
@@ -149,6 +152,10 @@ export type CacheSurface = {
 export type BlobSurface = {
   put: SurfaceFn;
   get: SurfaceFn;
+  /** storage.md §Operations — `delete(key) → deleted` (ADR 0858 P3 blob). */
+  delete: SurfaceFn;
+  /** storage.md §Operations — `list(prefix?, cursor?) → entries[key, sizeBytes], nextCursor?`. */
+  list: SurfaceFn;
   presign: SurfaceFn;
 };
 export type QueueSurface = {
@@ -248,10 +255,18 @@ export interface BundleScope {
    *  ancestor chain for the recursion/depth guard. Absent for surface-direct
    *  (non-run) callers. */
   runId?: string;
+  /** ADR 0858 P4 — writes `negotiation.decided` onto THIS run's event log
+   *  (`interop.md` §"The audit event"). The executor supplies it; absent for
+   *  surface-direct (runless) callers, whose negotiations have no run log. */
+  recordNegotiation?: NegotiationRecorder;
   /** The run owner's DURABLE principal (ADR 0024 §4 — the same value as
    *  `ctx.actingUserId`, stamped on `run.metadata.actingUserId` at creation
-   *  and re-stamped on `:fork`). Absent for system runs (schedule / inbound
-   *  webhook — no human), which is the correct fail-closed signal. Surfaces
+   *  and re-stamped on `:fork`). Absent for system runs with no human (an
+   *  inbound webhook, a feature-owned job that stamps no actor), which is the
+   *  correct fail-closed signal. A user-created SCHEDULE is not one of them:
+   *  the scheduler route stamps `actingUserId` from the authenticated creator and
+   *  `scheduleDaemon` carries it onto every fire (ADR 0816 D8 — this line used
+   *  to say "absent for schedule runs", which was false). Surfaces
    *  use it to apply MEMBER-scoped narrowing filters (e.g. the CMS translator
    *  locale grants, ADR 0205) to workflow writes exactly as the HTTP editor
    *  path does. */
@@ -260,16 +275,26 @@ export interface BundleScope {
    *  (`anon:<sid>` / `user:<hash>`), the value the auth middleware set as
    *  `req.personalTenant` on the creating request and `routes/runs.ts` stamped
    *  on `run.metadata.personalTenant` (host-authoritative, a reserved key —
-   *  never client-supplied). Threaded on the TOOL lane only — the chat tool
-   *  loop reads it off the run row, the voice bridge off the mint-time session,
-   *  redrive/debug runs stamp it from their request; the executor does NOT
-   *  thread it into in-run node scopes (review N2). A req-less tenant
+   *  never client-supplied). The chat tool loop reads it off the run row, the
+   *  voice bridge off the mint-time session, redrive/debug runs stamp it from
+   *  their request — and, since ADR 0822 D1, the executor threads the run row's
+   *  stamp into in-run surface scopes too (this used to say it did NOT, "review
+   *  N2"; the workflow author's in-run write gate needs the value its chat twin
+   *  reads, and re-deriving it from a user row is the second source ADR 0627 S2
+   *  forbade). A req-less tenant
    *  gate (`assertTenantScope`) uses it for the implicit-owner short-circuit
    *  the HTTP lane gets from `isOwnPersonalWorkspace(req)`; an anon session's
    *  principal (`session:<sid>`) has no user row, so this is the ONLY way the
    *  tool lane can know the caller owns the `anon:` sandbox it is acting in.
    *  Absent for system runs, API-key bearers, and surface-direct callers. */
   personalTenant?: string;
+  /** ADR 0832 D3 — the member who CAUSED a run that acts for nobody (a channel
+   *  post addressing an agent, a kanban Run, a trigger's author, a sub-workflow's
+   *  parent person), from the reserved `run.metadata.orgScopeSubject`. It only
+   *  NARROWS: membership floors (`runOrgScopeSubject`) read it, and nothing
+   *  that grants (credentials, twin recall, toggles, the chat-tool gates, the
+   *  KB subject filter) ever does. `actingUserId` wins when both are set. */
+  orgScopeSubject?: string;
   /** ADR 0617 D1a — the executing run's WORKFLOW id (`run.workflowId`), so a
    *  feature surface that emits a host event from inside a run can stamp
    *  `origin.workflowId` and the dispatcher can refuse to start a second run of
@@ -409,6 +434,22 @@ function inferColType(v: unknown): TableColType {
   if (typeof v === 'boolean') return 'boolean';
   return 'object';
 }
+/**
+ * ADR 0868 — the most rows one `tableStorage.query` page returns. An absent or
+ * larger `limit` is clamped to it and the caller pages on with `nextCursor`
+ * (RFC 0016 §B point 3), so no single call reads an unbounded table.
+ * `OPENWOP_TABLE_QUERY_MAX_LIMIT` overrides the default of 1000.
+ */
+export function tableQueryLimit(limit: unknown): number {
+  const configured = Number(process.env.OPENWOP_TABLE_QUERY_MAX_LIMIT);
+  const max = Number.isFinite(configured) && configured > 0 ? Math.floor(configured) : 1000;
+  return typeof limit === 'number' && limit > 0 ? Math.min(Math.floor(limit), max) : max;
+}
+
+/** Byte order of the UTF-8 string — the order the durable table pages in. */
+export const compareIdBytes = (a: string, b: string): number =>
+  Buffer.compare(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8'));
+
 function createTable(state: TenantMap<TableRow>, scope: BundleScope): TableSurface {
   // Tenant-bucket is a Map<rowId, row>. `args.table` namespaces by
   // table name via a prefix on the row id (since we only have one Map).
@@ -475,7 +516,7 @@ function createTable(state: TenantMap<TableRow>, scope: BundleScope): TableSurfa
       const afterId = typeof cursor === 'string' && cursor.length > 0
         ? Buffer.from(cursor, 'base64').toString('utf8')
         : '';
-      const lim = typeof limit === 'number' && limit > 0 ? limit : Number.MAX_SAFE_INTEGER;
+      const lim = tableQueryLimit(limit);
       // Collect all matching rows in deterministic order (sorted by id),
       // skipping anything ≤ afterId, capped at `lim`.
       const allMatching: TableRow[] = [];
@@ -490,18 +531,21 @@ function createTable(state: TenantMap<TableRow>, scope: BundleScope): TableSurfa
         }
         allMatching.push(row);
       }
-      allMatching.sort((a, b) => a.id.localeCompare(b.id));
+      // ADR 0868: byte order of the id, the order the durable table pages in.
+      // (Was `localeCompare` for the sort but `<=` for the cursor — two
+      // different orders, so a mixed-case table could skip or repeat rows.)
+      allMatching.sort((a, b) => compareIdBytes(String(a.id), String(b.id)));
       const rows: TableRow[] = [];
       for (const row of allMatching) {
-        if (afterId && row.id <= afterId) continue;
+        if (afterId && compareIdBytes(String(row.id), afterId) <= 0) continue;
         rows.push(row);
         if (rows.length >= lim) break;
       }
       const last = rows[rows.length - 1];
       // `nextCursor` is null when we've reached the end of the result set;
       // otherwise it encodes the last-returned id for resumption.
-      const consumedThroughId = last ? last.id : afterId;
-      const hasMore = allMatching.some((r) => r.id > consumedThroughId);
+      const consumedThroughId = last ? String(last.id) : afterId;
+      const hasMore = allMatching.some((r) => compareIdBytes(String(r.id), consumedThroughId) > 0);
       const nextCursor = hasMore && last ? Buffer.from(last.id, 'utf8').toString('base64') : null;
       return { rows, count: rows.length, nextCursor };
     },
@@ -573,7 +617,10 @@ export function resolvePresignToken(token: string, now: number = Date.now()):
  * adapter. A uniform guard is the property worth having; a marginally
  * over-counted tally is the price.
  *
- * READS ARE NOT GUARDED. `get`/`presign` do not mutate external state and are
+ * `delete` IS GUARDED, under the same kind (ADR 0858 P3 blob): it removes an
+ * object, which a replay must not repeat any more than it may repeat a `put`.
+ *
+ * READS ARE NOT GUARDED. `get`/`list`/`presign` do not mutate external state and are
  * safe to re-run on replay. (`presign` hands out a URL that may already have
  * been used, which is a compensation concern for ADR 0554 — it is not a write.)
  */
@@ -587,7 +634,20 @@ function guardBlobWrites(surface: BlobSurface): BlobSurface {
       assertEffectAllowed('blob-write', 'storage.blob.put');
       return surface.put(args);
     },
+    async delete(args) {
+      assertEffectAllowed('blob-write', 'storage.blob.delete');
+      return surface.delete(args);
+    },
   };
+}
+
+/** Default and ceiling for one blob `list` page. */
+export const BLOB_LIST_PAGE_MAX = 1000;
+
+/** Clamp a caller's `limit` to [1, BLOB_LIST_PAGE_MAX]; absent → the max. */
+export function blobListLimit(limit: unknown): number {
+  const n = Number(limit);
+  return Number.isInteger(n) && n > 0 ? Math.min(n, BLOB_LIST_PAGE_MAX) : BLOB_LIST_PAGE_MAX;
 }
 
 function createBlob(state: TenantMap<BlobEntry>, scope: BundleScope): BlobSurface {
@@ -595,12 +655,28 @@ function createBlob(state: TenantMap<BlobEntry>, scope: BundleScope): BlobSurfac
   return {
     async put({ key, contentBase64, contentType }) {
       bucket().set(String(key), { contentBase64: String(contentBase64), contentType: contentType as string | undefined });
-      return { ok: true, key };
+      return { ok: true, key, sizeBytes: Buffer.from(String(contentBase64), 'base64').byteLength };
     },
     async get({ key }) {
       const e = bucket().get(String(key));
       if (!e) return { found: false };
       return { found: true, contentBase64: e.contentBase64, contentType: e.contentType };
+    },
+    async delete({ key }) {
+      return { ok: true, deleted: bucket().delete(String(key)) };
+    },
+    // Keys in code-unit order; the cursor is the last key returned, so a page is
+    // stable under inserts and deletes behind it (opaque to the caller).
+    async list({ prefix, cursor, limit }) {
+      const p = typeof prefix === 'string' ? prefix : '';
+      const after = typeof cursor === 'string' && cursor ? Buffer.from(cursor, 'base64url').toString('utf8') : undefined;
+      const keys = [...bucket().keys()].filter((k) => k.startsWith(p) && (after === undefined || k > after)).sort();
+      const page = keys.slice(0, blobListLimit(limit));
+      const entries = page.map((k) => ({ key: k, sizeBytes: Buffer.from(bucket().get(k)!.contentBase64, 'base64').byteLength }));
+      return {
+        entries,
+        ...(keys.length > page.length ? { nextCursor: Buffer.from(page.at(-1)!, 'utf8').toString('base64url') } : {}),
+      };
     },
     async presign({ key, expiresInSeconds }) {
       const e = bucket().get(String(key));
@@ -615,7 +691,7 @@ function createBlob(state: TenantMap<BlobEntry>, scope: BundleScope): BlobSurfac
         contentType: e.contentType,
         expiresAtMs,
       });
-      const url = `/v1/host/openwop-app/blob/presigned/${encodeURIComponent(token)}`;
+      const url = `${VENDOR_ROOT}/blob/presigned/${encodeURIComponent(token)}`;
       return { url, expiresAtMs, token, expiresInSeconds: ttlSec };
     },
   };
@@ -1868,7 +1944,7 @@ export async function storeMediaAsset(
   const expiresAtMs = Date.now() + ttlMs;
   await _mediaAssets.put({ token, tenantId, contentBase64: input.contentBase64, contentType: input.contentType, bytes, expiresAtMs, storedAtMs: Date.now() });
   maybeSweepExpiredMediaAssets();
-  return { token, url: `/v1/host/openwop-app/assets/${token}`, bytes, expiresAt: new Date(expiresAtMs).toISOString() };
+  return { token, url: assetServeUrl(token), bytes, expiresAt: new Date(expiresAtMs).toISOString() };
 }
 
 /** Resolve a media-asset token. Returns null when unknown or expired (the

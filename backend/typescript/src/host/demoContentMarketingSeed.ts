@@ -13,6 +13,7 @@
  * surgical, marker-scoped clear. Engagement rows are written through the store
  * directly (the recorders stamp server-now — the only backdating path).
  */
+import { createHash } from 'node:crypto';
 import { createLogger } from '../observability/logger.js';
 import { DurableCollection } from './hostExtPersistence.js';
 import { resolveOne } from './featureToggles/service.js';
@@ -22,6 +23,7 @@ import { ensureBrand, listBrands, deleteBrand } from '../features/brand/brandSer
 import { createPage, listPages, deletePage, transitionPage, setScheduledPublish } from '../features/cms/cmsService.js';
 import { updateEntityType } from '../features/entities/entitiesService.js';
 import { createExperiment, listExperiments } from '../features/cms/pageExperimentsService.js';
+import { queueContentApproval } from '../features/cms/contentApproval.js';
 import { createForm, listForms, deleteForm, setFormStatus, recordSubmission } from '../features/forms/formsService.js';
 import { createTemplate, listTemplates, deleteTemplate, createCampaign, listCampaigns, deleteCampaign } from '../features/email/emailService.js';
 import { createPersona, listPersonas, deletePersona } from '../features/campaign-brief/personaService.js';
@@ -54,6 +56,11 @@ export async function countDemoContentMarketing(tenantId: string): Promise<numbe
 
 export async function seedDemoContentMarketing(tenantId: string): Promise<{ created: number; details?: Record<string, unknown> }> {
   const orgId = await orgIdFor(tenantId);
+  // ADR 0838 D1 — every seeded row whose id the seeder chooses is qualified by
+  // (tenant, org). The ids used to be identical in every tenant, and the stores
+  // are keyed by id alone, so each tenant that seeded took the previous tenant's
+  // rows (documents, email templates/campaigns, engagement).
+  const ns = createHash('sha256').update(`${tenantId}\u0000${orgId}`).digest('hex').slice(0, 10);
   const nowMs = Date.now();
   let created = 0;
   const skipped: string[] = [];
@@ -111,7 +118,14 @@ export async function seedDemoContentMarketing(tenantId: string): Promise<{ crea
     if (existingPages.has(pg.slug)) continue;
     const page = await createPage({ tenantId, orgId, title: pg.title, slug: pg.slug, createdBy: ACTOR, sections: pg.sections });
     if (pg.status === 'published') { await transitionPage(tenantId, orgId, page.pageId, 'publish', ACTOR); }
-    else if (pg.status === 'in_review') { await transitionPage(tenantId, orgId, page.pageId, 'submit', ACTOR); }
+    else if (pg.status === 'in_review') {
+      // ADR 0859 D7 (`CMSAWF-6`) — the demo's "awaiting review" page gets its review
+      // row, like every other submit; without it the inbox showed nothing until
+      // someone pressed the page's own approve. No submitter (the seed is not a
+      // person) and no notice (seeding must not page the demo org's managers).
+      const submitted = await transitionPage(tenantId, orgId, page.pageId, 'submit', ACTOR);
+      if (submitted) await queueContentApproval(tenantId, orgId, submitted, `Publish CMS page "${submitted.title}"`, { notify: false });
+    }
     else if (pg.status === 'scheduled') { await setScheduledPublish(tenantId, orgId, page.pageId, new Date(nowMs + 7 * 86400_000).toISOString(), ACTOR); }
     created += 1;
   }
@@ -174,7 +188,7 @@ export async function seedDemoContentMarketing(tenantId: string): Promise<{ crea
     const tplIdBySlug = new Map<string, string>();
     for (const t of TEMPLATES) {
       const found = existingTpls.get(t.name);
-      const tpl = found ?? await createTemplate({ tenantId, orgId, name: t.name, subject: t.subject, body: t.body, format: 'markdown', createdBy: ACTOR, templateId: `tpl:demo-cm-${t.slug}` });
+      const tpl = found ?? await createTemplate({ tenantId, orgId, name: t.name, subject: t.subject, body: t.body, format: 'markdown', createdBy: ACTOR, templateId: `tpl:demo-cm-${ns}-${t.slug}` });
       tplIdBySlug.set(t.slug, tpl.templateId);
       if (!found) created += 1;
     }
@@ -189,8 +203,8 @@ export async function seedDemoContentMarketing(tenantId: string): Promise<{ crea
     const existingCampaigns = new Set((await listCampaigns(tenantId, orgId)).filter((c) => c.createdBy === ACTOR).map((c) => c.campaignId));
     const contacts = (await listContacts(tenantId)).filter((c) => c.contactId.startsWith('crm:demo-crm-')).map((c) => c.contactId);
     for (const c of CAMPAIGNS) {
-      const campaignId = `cmp:demo-cm-${c.slug}`;
-      if (existingCampaigns.has(campaignId)) continue;
+      const campaignId = `cmp:demo-cm-${ns}-${c.slug}`;
+      if (existingCampaigns.has(campaignId) || existingCampaigns.has(`cmp:demo-cm-${c.slug}`)) continue;
       await createCampaign({ tenantId, orgId, templateId: tplIdBySlug.get(c.tpl)!, ...(c.segment ? { segmentId: demoCrmSegmentId(tenantId, c.segment) } : { stage: c.stage as 'lead' | 'customer' }), createdBy: ACTOR, campaignId });
       created += 1;
       // "Sent" campaigns get backdated engagement so open/click surfaces + CDP
@@ -199,7 +213,7 @@ export async function seedDemoContentMarketing(tenantId: string): Promise<{ crea
       if (c.sent && contacts.length) {
         for (let e = 0; e < 20; e += 1) {
           const kind = e % 3 === 0 ? 'clicked' : e % 5 === 0 ? 'unsubscribed' : 'opened';
-          await engagementStore.put({ id: `demo-cm-${c.slug}-${e}`, tenantId, campaignId, contactId: contacts[e % contacts.length]!, kind, at: new Date(nowMs - (e % 30) * 86400_000).toISOString() });
+          await engagementStore.put({ id: `demo-cm-${ns}-${c.slug}-${e}`, tenantId, campaignId, contactId: contacts[e % contacts.length]!, kind, at: new Date(nowMs - (e % 30) * 86400_000).toISOString() });
         }
       }
     }
@@ -260,8 +274,10 @@ export async function seedDemoContentMarketing(tenantId: string): Promise<{ crea
     ];
     const existingDocs = new Set((await listDocuments(tenantId, orgId)).filter((d) => d.createdBy === ACTOR).map((d) => d.documentId));
     for (const d of DOCS) {
-      const documentId = `doc:demo-cm-${d.slug}`;
-      if (existingDocs.has(documentId)) continue;
+      const documentId = `doc:demo-cm-${ns}-${d.slug}`;
+      // The pre-ADR 0838 id is accepted as "already seeded" so a tenant that
+      // still holds its legacy rows gets no duplicates.
+      if (existingDocs.has(documentId) || existingDocs.has(`doc:demo-cm-${d.slug}`)) continue;
       await createDocument({ tenantId, orgId, title: d.title, kind: d.kind, format: d.format, createdBy: ACTOR, documentId, provenance: { producedBy: { kind: 'user', id: ACTOR } } });
       await addVersion(tenantId, orgId, documentId, { content: `# ${d.title}\n\nDraft content for the ${d.kind}.`, producedBy: { kind: 'user', id: ACTOR } }).catch(() => undefined);
       created += 1;

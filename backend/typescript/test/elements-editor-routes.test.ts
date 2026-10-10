@@ -46,9 +46,9 @@ let n = 0;
 async function orgOwner(): Promise<{ c: ReturnType<typeof client>; orgId: string; tenantId: string }> {
   const tenantId = `org:test-el-ed-${Date.now()}-${n++}`;
   const c = client();
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `eled-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await c.post('/host/openwop-app/test/login', { email: `eled-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status).toBe(201);
-  const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status).toBe(201);
   return { c, orgId: org.body.orgId, tenantId };
 }
@@ -57,7 +57,7 @@ const CASES = [
   {
     id: 'drawings',
     toggle: 'drawings',
-    base: (orgId: string) => `/v1/host/openwop-app/drawings/orgs/${encodeURIComponent(orgId)}`,
+    base: (orgId: string) => `/host/openwop-app/drawings/orgs/${encodeURIComponent(orgId)}`,
     canvasTypeId: 'canvas.drawing',
     valid: { title: 'Scene', width: 400, height: 300, shapes: [{ kind: 'rect', x: 10, y: 10, width: 50, height: 40, fill: 'tomato' }] },
     invalid: { title: 'Scene', shapes: [{ kind: 'blob' }] },
@@ -66,7 +66,7 @@ const CASES = [
   {
     id: 'cad',
     toggle: 'cad',
-    base: (orgId: string) => `/v1/host/openwop-app/cad/orgs/${encodeURIComponent(orgId)}`,
+    base: (orgId: string) => `/host/openwop-app/cad/orgs/${encodeURIComponent(orgId)}`,
     canvasTypeId: 'canvas.cad',
     valid: { name: 'Bracket', units: 'mm', solids: [{ kind: 'box', x: 0, y: 0, z: 0, width: 40, height: 30, depth: 20 }] },
     invalid: { name: 'Bracket', solids: [{ kind: 'torus' }] },
@@ -75,7 +75,7 @@ const CASES = [
   {
     id: 'campaign-studio',
     toggle: 'campaign-studio',
-    base: (orgId: string) => `/v1/host/openwop-app/campaign-studio/orgs/${encodeURIComponent(orgId)}`,
+    base: (orgId: string) => `/host/openwop-app/campaign-studio/orgs/${encodeURIComponent(orgId)}`,
     canvasTypeId: 'canvas.campaign',
     valid: { name: 'Launch', objective: 'Grow', channels: [{ name: 'Newsletter', type: 'email', budget: 100 }], funnel: [{ stage: 'awareness', kpis: ['reach'] }], assets: [{ headline: 'Hi', cta: 'Go' }] },
     invalid: { name: 'Launch', channels: [{ name: 'X', type: 'carrier-pigeon' }] },

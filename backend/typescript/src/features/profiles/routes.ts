@@ -22,7 +22,7 @@ import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { resolveCallerUser } from '../users/usersGuards.js';
 import { callerSubject, personalTenantOf, isDurableCaller } from '../../host/requestSubject.js';
 import { projectAgentActivity } from '../../host/agentActivity.js';
-import { getUser, listUsers, type User } from '../users/usersService.js';
+import { getUser, isEmailVouched, listUsers, type User } from '../users/usersService.js';
 import { indexProfile, teamPortfolioShareableKbProvider } from './profilesKnowledgeService.js';
 import { registerShareableKb } from '../../host/shareableKb.js';
 import { getRosterEntry } from '../../host/rosterService.js';
@@ -132,10 +132,17 @@ function parseContact(body: Record<string, unknown>): ProfileContact | null | un
  * anymore (ADR 0026), every real account is federated (Firebase OIDC / SAML /
  * SCIM) — a non-federated `manual` account (admin-seeded) has no proof, so it is
  * reported unverified. Returns undefined when the user has no email at all.
+ *
+ * > CORRECTED 2026-10-05 (ADR 0833 D9): "federated ⇒ verified" was false — a
+ * > federated row's address can still be self-set. Decided by provenance now.
  */
 function resolveEmailVerified(user: User): boolean | undefined {
   if (!user.email) return undefined;
-  return user.source === 'saml' || user.source === 'scim' || user.source === 'oidc';
+  // ADR 0833 D9 — WHO asserted the address, not which lane created the row: a
+  // `source:'oidc'` user's address may be one they typed themselves (`'self'`),
+  // and this flag said "verified" for it. The same predicate the invitation
+  // gate uses, so the badge and the gate can no longer disagree.
+  return isEmailVouched(user);
 }
 
 export function registerProfilesRoutes(deps: RouteDeps): void {
@@ -151,7 +158,7 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
   // The personal tenant is single-principal + low-volume, so a scan is cheap;
   // the indexed path (agent_run_activity) is the future optimization if personal
   // tenants ever grow (agentActivity.ts). Durable-only.
-  app.get('/v1/host/openwop-app/profiles/me/activity', async (req, res, next) => {
+  app.get('/host/openwop-app/profiles/me/activity', async (req, res, next) => {
     try {
       const subject = callerSubject(req);
       const personal = personalTenantOf(req);
@@ -170,7 +177,7 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
   });
 
   // GET /me — the caller's own profile (lazily materialized).
-  app.get('/v1/host/openwop-app/profiles/me', async (req, res, next) => {
+  app.get('/host/openwop-app/profiles/me', async (req, res, next) => {
     try {
       const user = await resolveCallerUser(req);
       const profile = await getOrCreateProfile(user.tenantId, user.userId);
@@ -183,7 +190,7 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
 
   // PATCH /me — self-edit. Authority is intrinsic: a caller can only patch the
   // profile keyed on THEIR OWN resolved userId.
-  app.patch('/v1/host/openwop-app/profiles/me', async (req, res, next) => {
+  app.patch('/host/openwop-app/profiles/me', async (req, res, next) => {
     try {
       const user = await resolveCallerUser(req);
       const body = (req.body ?? {}) as Record<string, unknown>;
@@ -221,7 +228,7 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
 
   // GET / — tenant directory. Tenant is the caller's resolved tenant (the single
   // source of truth — same `user.tenantId` the write paths key on).
-  app.get('/v1/host/openwop-app/profiles', async (req, res, next) => {
+  app.get('/host/openwop-app/profiles', async (req, res, next) => {
     try {
       const user = await resolveCallerUser(req);
       const [profiles, users] = await Promise.all([listProfiles(user.tenantId), listUsers(user.tenantId)]);
@@ -264,7 +271,7 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
     return token;
   };
 
-  app.put('/v1/host/openwop-app/profiles/me/avatar', async (req, res, next) => {
+  app.put('/host/openwop-app/profiles/me/avatar', async (req, res, next) => {
     try {
       const user = await resolveCallerUser(req);
       const token = await requireImageToken(user.tenantId, (req.body as { token?: unknown })?.token);
@@ -274,7 +281,7 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
     }
   });
 
-  app.delete('/v1/host/openwop-app/profiles/me/avatar', async (req, res, next) => {
+  app.delete('/host/openwop-app/profiles/me/avatar', async (req, res, next) => {
     try {
       const user = await resolveCallerUser(req);
       res.json(viewOwnProfile(await clearAvatar(user.tenantId, user.userId)));
@@ -283,7 +290,7 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
     }
   });
 
-  app.post('/v1/host/openwop-app/profiles/me/portfolio', async (req, res, next) => {
+  app.post('/host/openwop-app/profiles/me/portfolio', async (req, res, next) => {
     try {
       const user = await resolveCallerUser(req);
       const token = await requireImageToken(user.tenantId, (req.body as { token?: unknown })?.token);
@@ -293,7 +300,7 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
     }
   });
 
-  app.delete('/v1/host/openwop-app/profiles/me/portfolio/:token', async (req, res, next) => {
+  app.delete('/host/openwop-app/profiles/me/portfolio/:token', async (req, res, next) => {
     try {
       const user = await resolveCallerUser(req);
       const updated = await removePortfolioToken(user.tenantId, user.userId, req.params.token);
@@ -307,7 +314,7 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
   // ── Phase 3: skills (self) + endorsements (peer) ──
   // PUT /me/skills — replace the caller's skill list. Endorsements on surviving
   // skill names are preserved by the service.
-  app.put('/v1/host/openwop-app/profiles/me/skills', async (req, res, next) => {
+  app.put('/host/openwop-app/profiles/me/skills', async (req, res, next) => {
     try {
       const user = await resolveCallerUser(req);
       const raw = (req.body as { skills?: unknown })?.skills;
@@ -337,7 +344,7 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
 
   // PUT /me/workflows — replace the caller's assigned-workflow portfolio (ADR
   // 0025). Self-only authority (keyed on the caller's resolved userId).
-  app.put('/v1/host/openwop-app/profiles/me/workflows', async (req, res, next) => {
+  app.put('/host/openwop-app/profiles/me/workflows', async (req, res, next) => {
     try {
       const user = await resolveCallerUser(req);
       const raw = (req.body as { workflows?: unknown })?.workflows;
@@ -374,10 +381,10 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
       next(err);
     }
   };
-  app.put('/v1/host/openwop-app/profiles/me/pinned-agents/:rosterId', pin('sidebar', true));
-  app.delete('/v1/host/openwop-app/profiles/me/pinned-agents/:rosterId', pin('sidebar', false));
-  app.put('/v1/host/openwop-app/profiles/me/pinned-chat-agents/:rosterId', pin('chat', true));
-  app.delete('/v1/host/openwop-app/profiles/me/pinned-chat-agents/:rosterId', pin('chat', false));
+  app.put('/host/openwop-app/profiles/me/pinned-agents/:rosterId', pin('sidebar', true));
+  app.delete('/host/openwop-app/profiles/me/pinned-agents/:rosterId', pin('sidebar', false));
+  app.put('/host/openwop-app/profiles/me/pinned-chat-agents/:rosterId', pin('chat', true));
+  app.delete('/host/openwop-app/profiles/me/pinned-chat-agents/:rosterId', pin('chat', false));
 
   // POST/DELETE /:userId/skills/:skill/endorse — endorse a PEER's skill.
   // Fail-closed: not your own profile; the target + skill must exist in your
@@ -419,11 +426,11 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
       next(err);
     }
   };
-  app.post('/v1/host/openwop-app/profiles/:userId/skills/:skill/endorse', endorse(true));
-  app.delete('/v1/host/openwop-app/profiles/:userId/skills/:skill/endorse', endorse(false));
+  app.post('/host/openwop-app/profiles/:userId/skills/:skill/endorse', endorse(true));
+  app.delete('/host/openwop-app/profiles/:userId/skills/:skill/endorse', endorse(false));
 
   // GET /:userId — one user's profile (team-visible, tenant-scoped to the caller).
-  app.get('/v1/host/openwop-app/profiles/:userId', async (req, res, next) => {
+  app.get('/host/openwop-app/profiles/:userId', async (req, res, next) => {
     try {
       const caller = await resolveCallerUser(req);
       const profile = await getProfile(caller.tenantId, req.params.userId);

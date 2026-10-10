@@ -4,7 +4,7 @@
  * Verifies (a) the 2 compute nodes (variance-compute / talent-score) math AND their
  * ADR 0599 fail-closed guards, (b) the talent-snapshot PII classification — of the RUN
  * OUTPUT; ADR 0082 deleted the read model this header used to name, (c) the 3 agents
- * load + list in GET /v1/agents under the feature.insights-suite.agents.* ids, and
+ * load + list in GET /v1/agents under the vendor.openwop-app.insights-suite.agents.* ids, and
  * (d) the config route fails closed when the toggle is OFF.
  */
 
@@ -251,21 +251,21 @@ describe('ADR 0078 §1 — agents + route gating', () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
     process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
     const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-    loadAgentsFromManifest(join(REPO_ROOT, 'packs', 'feature.insights-suite.agents'));
+    loadAgentsFromManifest(join(REPO_ROOT, 'packs', 'vendor.openwop-app.insights-suite.agents'));
     await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   });
   afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
   it('lists the 3 suite agents in GET /v1/agents with their tool allowlists', async () => {
-    const list = await (await fetch(`${BASE}/v1/agents`, { headers: H })).json() as { agents?: Array<{ agentId?: string; label?: string }> };
+    const list = await (await fetch(`${BASE}/agents`, { headers: H })).json() as { agents?: Array<{ agentId?: string; label?: string }> };
     const ids = (list.agents ?? []).map((a) => a.agentId);
-    expect(ids).toContain('feature.insights-suite.agents.financial');
-    expect(ids).toContain('feature.insights-suite.agents.communication');
-    expect(ids).toContain('feature.insights-suite.agents.talent');
+    expect(ids).toContain('vendor.openwop-app.insights-suite.agents.financial');
+    expect(ids).toContain('vendor.openwop-app.insights-suite.agents.communication');
+    expect(ids).toContain('vendor.openwop-app.insights-suite.agents.talent');
   });
 
   it('read routes fail closed when the toggle is OFF (default)', async () => {
-    const res = await fetch(`${BASE}/v1/host/openwop-app/insights-suite/config`, { headers: H });
+    const res = await fetch(`${BASE}/host/openwop-app/insights-suite/config`, { headers: H });
     expect(res.status).toBe(404); // requireFeatureEnabled — toggle off ⇒ not found
   });
 });

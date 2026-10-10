@@ -47,7 +47,7 @@ import { sendError } from '../middleware/errorEnvelope.js';
 const log = createLogger('routes.connection-pack-seam');
 
 /** The product (host-namespaced) + spec-canonical (suite-driven) base paths. */
-const SEAM_BASES = ['/v1/host/openwop-app/connection-packs', '/v1/host/sample/connection-packs'] as const;
+const SEAM_BASES = ['/host/openwop-app/connection-packs', '/host/sample/connection-packs'] as const;
 
 interface ConsentStep {
   groups: Array<{ key: string; access: 'read' | 'write' }>;

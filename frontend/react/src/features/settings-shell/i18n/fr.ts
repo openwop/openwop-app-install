@@ -52,6 +52,7 @@ export const messages = {
   privacy_analyticsOptOut: 'Refuser l’analytique produit',
   privacy_crashReportsOptOut: 'Refuser les rapports de plantage',
   privacy_recentFilesOptOut: 'Ne pas suivre mes fichiers récents',
+  privacyNavTelemetry: "Nous comptons, de façon agrégée, les fonctionnalités utilisées par les membres afin d’améliorer le produit.",
   privacySaved: 'Préférences de confidentialité enregistrées.',
   privacySaveFailed: 'Impossible d’enregistrer la préférence.',
   panelSecurity: 'Authentification à deux facteurs',

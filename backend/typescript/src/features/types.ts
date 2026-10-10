@@ -15,7 +15,7 @@
 
 import type { RouteDeps } from '../routes/registerAllRoutes.js';
 import type { ToggleConfig } from '../host/featureToggles/types.js';
-import type { FeatureSurfaceBuilder } from '../host/featureSurfaces.js';
+import type { FeatureSurfaceBuilder, FeatureSurfaceOrgPolicy } from '../host/featureSurfaces.js';
 
 /** A pack a feature requires, pinned for replay determinism (RFC 0076). */
 export interface PackRef {
@@ -34,6 +34,9 @@ export interface FeatureSurfaceDef {
   id: string;
   /** Builds the surface for one run scope. */
   build: FeatureSurfaceBuilder;
+  /** ADR 0832 — exceptions to the seam's org floor, stated by name (tenant-level
+   *  namespaces; methods whose HTTP door needs more than membership). */
+  orgPolicy?: FeatureSurfaceOrgPolicy;
 }
 
 /**

@@ -91,18 +91,18 @@ function client(): Client {
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), del: (p) => call('DELETE', p) };
 }
 
-const NB = '/v1/host/openwop-app/notebooks';
-const PROJ = '/v1/host/openwop-app/projects';
-const CHAT = '/v1/host/openwop-app/chat/sessions';
+const NB = '/host/openwop-app/notebooks';
+const PROJ = '/host/openwop-app/projects';
+const CHAT = '/host/openwop-app/chat/sessions';
 
 /** A notebook with a real group conversation carrying at least one message, so
  *  "the conversation survived" is a statement about real data and not an empty
  *  row. */
 async function notebookWithConversation(who: string): Promise<{ c: Client; id: string; conversationId: string }> {
   const c = client();
-  const login = await c.post('/v1/host/openwop-app/test/login', { email: `${who}-${Date.now()}-${n++}@acme.test` });
+  const login = await c.post('/host/openwop-app/test/login', { email: `${who}-${Date.now()}-${n++}@acme.test` });
   expect(login.status, JSON.stringify(login.body)).toBe(201);
-  const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   const orgId = org.body.orgId as string;
   const plain = await c.post(PROJ, { orgId, name: 'Raced project' });
   const id = plain.body.id as string;
@@ -157,8 +157,8 @@ describe('ADR 0601 § Corrections / MEDIUM-6 — the cascade runs even when the 
     expect((await c.get(`${CHAT}/${conversationId}`)).status).toBe(404);
 
     const c2 = client();
-    expect((await c2.post('/v1/host/openwop-app/test/login', { email: `nb-race-none-${Date.now()}-${n++}@acme.test` })).status).toBe(201);
-    const org = await c2.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+    expect((await c2.post('/host/openwop-app/test/login', { email: `nb-race-none-${Date.now()}-${n++}@acme.test` })).status).toBe(201);
+    const org = await c2.post('/host/openwop-app/orgs', { name: 'Acme' });
     const created = await c2.post(NB, { orgId: org.body.orgId, name: 'No chat here' });
     const noChat = await c2.del(`${NB}/${created.body.notebook.id}`);
     expect(noChat.body.deleted).toBe(true);

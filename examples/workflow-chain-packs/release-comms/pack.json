@@ -1,12 +1,12 @@
 {
   "name": "core.openwop.workflows.release-comms",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "kind": "workflow-chain",
   "description": "Release-comms chains (RFC 0013): ship-day communications — customer-facing release notes from a raw changelog, and an internal launch announcement. Every external/team send is human-gated. Replay-deterministic.",
   "author": "openwop",
   "license": "Apache-2.0",
   "engines": {
-    "openwop": ">=1.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "keywords": [
     "Release comms"
@@ -14,7 +14,7 @@
   "chains": [
     {
       "chainId": "release.notes-from-changelog",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "Changelog → Customer Release Notes",
       "description": "Turns a raw changelog into friendly, customer-facing release notes grouped by theme — reviewed by a human before it's treated as published copy.",
       "parameters": {
@@ -37,7 +37,7 @@
         "nodes": [
           {
             "id": "start",
-            "typeId": "core.trigger.event",
+            "typeId": "core.trigger.event@1.0.0",
             "name": "Release cut",
             "position": {
               "x": 0,
@@ -50,7 +50,7 @@
           },
           {
             "id": "notes",
-            "typeId": "core.ai.chatCompletion",
+            "typeId": "core.ai.chatCompletion@1.0.0",
             "name": "Write release notes",
             "position": {
               "x": 280,
@@ -65,7 +65,7 @@
           },
           {
             "id": "gate",
-            "typeId": "core.chat.approvalGate",
+            "typeId": "core.chat.approvalGate@1.1.0",
             "name": "Review release notes",
             "position": {
               "x": 560,
@@ -97,7 +97,7 @@
     },
     {
       "chainId": "release.internal-announce",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "label": "Release → Internal Launch Note",
       "description": "Drafts a crisp internal launch announcement (what shipped, who it's for, talking points) and posts it to the team channel after a human approves.",
       "parameters": {
@@ -123,7 +123,7 @@
         "nodes": [
           {
             "id": "start",
-            "typeId": "core.trigger.event",
+            "typeId": "core.trigger.event@1.0.0",
             "name": "Release ready",
             "position": {
               "x": 0,
@@ -136,7 +136,7 @@
           },
           {
             "id": "draft",
-            "typeId": "core.ai.chatCompletion",
+            "typeId": "core.ai.chatCompletion@1.0.0",
             "name": "Draft announcement",
             "position": {
               "x": 280,
@@ -151,7 +151,7 @@
           },
           {
             "id": "gate",
-            "typeId": "core.chat.approvalGate",
+            "typeId": "core.chat.approvalGate@1.1.0",
             "name": "Review announcement",
             "position": {
               "x": 560,
@@ -165,7 +165,7 @@
           },
           {
             "id": "gate-reject",
-            "typeId": "core.flow.noop",
+            "typeId": "core.flow.noop@1.0.0",
             "name": "Rejected — not posted",
             "position": {
               "x": 840,
@@ -176,7 +176,7 @@
           },
           {
             "id": "slack",
-            "typeId": "core.openwop.integration.slack-message",
+            "typeId": "core.openwop.integration.slack-message@1.0.0",
             "name": "Post to channel",
             "position": {
               "x": 840,

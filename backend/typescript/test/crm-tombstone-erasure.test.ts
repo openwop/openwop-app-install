@@ -18,11 +18,20 @@
  * host `eraseSubject` fan-out by userId on the booted app.
  *
  * SABOTAGE: skip the tombstone walk (`tombstones = []`) → "erase the survivor"
- * red; drop the ident resolution → "email-shaped key" + the by-userId case red;
- * re-add `updatedAt: now` to `tombstoneContact` → the clock case red; delete
- * every key-set claim regardless of holder (review S3) → "Z's claim" red.
+ * red; drop the ident resolution inside `eraseCrmSubject` → the two
+ * email-shaped-key cases red; re-add `updatedAt: now` to `tombstoneContact` →
+ * the clock case red; delete every key-set claim regardless of holder (review S3)
+ * → "Z's claim" red; treat an UNMERGED row as a tombstone → the unmerged case red.
+ *
+ * CORRECTED (wave-4 grade-tests, probe w4g3-te-ident-resolve): this header used to
+ * say dropping the ident resolution also turned the by-userId WIRING case red. It
+ * does not, and that is by design: the host fan-out ALSO resolves the user's email
+ * through the registered `resolveCrmSubjectKeys` resolver and hands the eraser the
+ * resolved contactId, so the WIRING case is guarded TWICE (the resolver + the
+ * eraser's own lookup). The eraser's lookup is witnessed by the two D4c
+ * email-key cases; WIRING witnesses the fan-out reaching CRM at all.
  */
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 import { eraseCrmSubject, ERASED_VALUE } from '../src/features/crm/erasure.js';
@@ -45,16 +54,17 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 afterEach(async () => {
+  vi.useRealTimers();
   await __resetCrmStore();
   await __resetUsersStore();
 });
 
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+let phoneN = 1000000; // deterministic, unique per person in the file
 
 async function person(name: string, email: string, tenantId = T): Promise<string> {
   const c = await createContact({
     tenantId, name, email, address: `${name} Street 1`, title: 'Buyer',
-    identifiers: [{ type: 'phone', value: `+1555${Math.floor(Math.random() * 1e7).toString().padStart(7, '0')}`, source: 'manual' }],
+    identifiers: [{ type: 'phone', value: `+1555${String(phoneN++).padStart(7, '0')}`, source: 'manual' }],
   });
   return c.contactId;
 }
@@ -70,15 +80,18 @@ function expectAnonymized(c: { name: string; email?: string; address?: string; t
 
 describe('ADR 0627 D4a — the tombstone clock', () => {
   it('a merge tombstone keeps its PRE-MERGE updatedAt (mergedAt carries the merge moment)', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime('2026-01-01T00:00:00.000Z');
     const survivor = await person('Keep', 'keep@acme.test');
     const source = await person('Dup', 'dup@acme.test');
     const before = (await getContact(source))!.updatedAt;
-    await sleep(5); // make "now" observably later than the pre-merge clock
+    expect(before).toBe('2026-01-01T00:00:00.000Z');
+    vi.setSystemTime('2026-01-01T00:00:01.000Z'); // the merge happens observably later
     await mergeContacts(T, survivor, source);
     const tomb = (await getContact(source))!;
     expect(tomb.mergedInto).toBe(survivor);
     expect(tomb.updatedAt, 'the purge clock is the pre-merge updatedAt').toBe(before);
-    expect(tomb.mergedAt! > before, 'mergedAt is the merge moment').toBe(true);
+    expect(tomb.mergedAt, 'mergedAt is the merge moment').toBe('2026-01-01T00:00:01.000Z');
   });
 });
 

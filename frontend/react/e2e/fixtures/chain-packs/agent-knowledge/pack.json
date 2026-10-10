@@ -27,7 +27,7 @@
         "nodes": [
           {
             "id": "ingest",
-            "typeId": "feature.agent-knowledge.nodes.ingest"
+            "typeId": "feature.agent-knowledge.nodes.ingest@1.2.0"
           }
         ]
       }

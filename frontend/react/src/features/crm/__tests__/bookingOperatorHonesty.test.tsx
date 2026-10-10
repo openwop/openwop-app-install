@@ -5,21 +5,27 @@
  *    to NO ONE — the operator's bookings table never rendered it.
  *  - CC-SP-11: a booking link was CREATE-ONLY. `updateBookingLink` accepted
  *    every field all along; the only affordance a typo'd link had was Delete.
+ *
+ * Sabotage that turns it red (wave-4 /grade-tests probes, 6/6 witnessed): the
+ * note cell rendering nothing; `description` dropped from the PATCH; an
+ * unchanged schedule or duration always sent; Cancel a no-op; the PATCH
+ * aimed at the wrong link id.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react';
-import type { BookingLink } from '../bookingClient.js';
+import type * as BookingClient from '../bookingClient.js';
+import type { Booking, BookingLink } from '../bookingClient.js';
 
-const listBookingLinks = vi.fn();
-const createBookingLink = vi.fn();
-const updateBookingLink = vi.fn();
-const listBookingsForLink = vi.fn();
+const listBookingLinks = vi.fn<typeof BookingClient.listBookingLinks>();
+const createBookingLink = vi.fn<typeof BookingClient.createBookingLink>();
+const updateBookingLink = vi.fn<typeof BookingClient.updateBookingLink>();
+const listBookingsForLink = vi.fn<typeof BookingClient.listBookingsForLink>();
 vi.mock('../bookingClient.js', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
-  listBookingLinks: (...a: unknown[]) => listBookingLinks(...a),
-  createBookingLink: (...a: unknown[]) => createBookingLink(...a),
-  updateBookingLink: (...a: unknown[]) => updateBookingLink(...a),
-  listBookingsForLink: (...a: unknown[]) => listBookingsForLink(...a),
+  listBookingLinks: (...a: Parameters<typeof BookingClient.listBookingLinks>) => listBookingLinks(...a),
+  createBookingLink: (...a: Parameters<typeof BookingClient.createBookingLink>) => createBookingLink(...a),
+  updateBookingLink: (...a: Parameters<typeof BookingClient.updateBookingLink>) => updateBookingLink(...a),
+  listBookingsForLink: (...a: Parameters<typeof BookingClient.listBookingsForLink>) => listBookingsForLink(...a),
 }));
 
 const { BookingTab } = await import('../BookingTab.js');
@@ -29,19 +35,20 @@ const link = (id: string, title: string, over: Partial<BookingLink> = {}): Booki
   timezone: 'UTC', weeklyHours: [{ day: 1, start: '09:00', end: '17:00' }], durations: [30],
   bufferBeforeMin: 0, bufferAfterMin: 0, minNoticeMin: 0, maxAdvanceDays: 30,
   createdAt: '', updatedAt: '', ...over,
-} as BookingLink);
+});
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => { vi.resetAllMocks(); });
 afterEach(cleanup);
 
 describe('CC-SP-4 — the visitor note reaches the operator', () => {
   it('renders inviteeNote in the bookings table', async () => {
     listBookingLinks.mockResolvedValue([link('l1', 'Intro call')]);
-    listBookingsForLink.mockResolvedValue([{
+    const booking: Booking = {
       bookingId: 'b1', bookingLinkId: 'l1', slotStartUtcMs: 1754700000000, durationMin: 30,
       status: 'confirmed', inviteeName: 'Ana', inviteeEmail: 'ana@x.io',
       inviteeNote: 'Please focus on the pricing question', createdAt: '',
-    }]);
+    };
+    listBookingsForLink.mockResolvedValue([booking]);
     render(<BookingTab orgId="org:1" />);
     fireEvent.click(await screen.findByRole('button', { name: /view bookings/i }));
     await screen.findByText('Please focus on the pricing question');
@@ -70,9 +77,13 @@ describe('CC-SP-11 — the edit affordance', () => {
     listBookingLinks.mockResolvedValue([link('l1', 'Intro call')]);
     render(<BookingTab orgId="org:1" />);
     fireEvent.click(await screen.findByRole('button', { name: /edit intro call/i }));
+    expect(screen.getByDisplayValue('Intro call')).toBeTruthy(); // prefilled (edit mode)
     fireEvent.click(screen.getByRole('button', { name: /cancel/i }));
     expect(updateBookingLink).not.toHaveBeenCalled();
     expect(screen.getByRole('button', { name: /create/i })).toBeTruthy();
+    // …and the form is CLEARED, not merely relabelled: the edited link's title
+    // is gone from the input.
+    expect(screen.queryByDisplayValue('Intro call')).toBeNull();
   });
 });
 
@@ -80,13 +91,14 @@ describe('CC-SP-11 (review F3/F4) — edit clears and preserves correctly', () =
   it('blanking the description on edit SENDS the empty string (clearing was a silent no-op)', async () => {
     const l = link('l1', 'Intro call', { description: 'Old desc' });
     listBookingLinks.mockResolvedValue([l]);
-    updateBookingLink.mockResolvedValue({ ...l, description: undefined });
+    const { description: _cleared, ...withoutDescription } = l;
+    updateBookingLink.mockResolvedValue(withoutDescription);
     render(<BookingTab orgId="org:1" />);
     fireEvent.click(await screen.findByRole('button', { name: /edit intro call/i }));
     fireEvent.change(screen.getByDisplayValue('Old desc'), { target: { value: '' } });
     fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
     await waitFor(() => expect(updateBookingLink).toHaveBeenCalled());
-    expect((updateBookingLink.mock.calls[0]![2] as Record<string, unknown>)['description']).toBe('');
+    expect(updateBookingLink.mock.calls[0]![2].description).toBe('');
   });
 
   it('an UNCHANGED schedule is omitted from the patch — an API-authored varied schedule survives a title edit', async () => {
@@ -101,12 +113,12 @@ describe('CC-SP-11 (review F3/F4) — edit clears and preserves correctly', () =
     fireEvent.change(screen.getByDisplayValue('Varied'), { target: { value: 'Renamed' } });
     fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
     await waitFor(() => expect(updateBookingLink).toHaveBeenCalled());
-    const patch = updateBookingLink.mock.calls[0]![2] as Record<string, unknown>;
+    const patch = updateBookingLink.mock.calls[0]![2];
     // The form COLLAPSES per-day hours/multi-durations; sending its flattened
     // shape would destroy the varied config on an unrelated rename.
     expect('weeklyHours' in patch).toBe(false);
     expect('durations' in patch).toBe(false);
-    expect(patch['title']).toBe('Renamed');
+    expect(patch.title).toBe('Renamed');
   });
 });
 

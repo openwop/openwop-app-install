@@ -11,7 +11,9 @@ import { surfaceStr as str, type FeatureSurface } from '../../host/featureSurfac
 import { listForms, getForm, listSubmissions, getSubmission } from './formsService.js';
 
 const FORM_INTERNAL = new Set(['tenantId', 'createdBy']);
-const SUB_INTERNAL = new Set(['tenantId', 'orgId']);
+// ADR 0850 — `releasedBy` is an operator id and `removing` an internal claim;
+// neither is a fact about the lead (grade-code FRM2CD-11).
+const SUB_INTERNAL = new Set(['tenantId', 'orgId', 'releasedBy', 'removing']);
 function project(o: object, drop: Set<string>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(o)) if (!drop.has(k)) out[k] = v;

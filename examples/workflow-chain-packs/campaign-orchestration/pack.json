@@ -1,18 +1,18 @@
 {
   "name": "core.openwop.workflows.campaign-orchestration",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "kind": "workflow-chain",
   "description": "Campaign Studio orchestration spine (ADR 0158/RFC 0118), parallel channel fan-out shape — migrated from the deprecated builtin (ADR 0472 P4). chainId keeps the original id; the 5 channel children resolve by id at runtime via core.dispatch.",
   "keywords": [
     "Campaign"
   ],
   "engines": {
-    "openwop": ">=1.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "chains": [
     {
       "chainId": "campaign-studio.campaign-orchestration",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "Campaign orchestration",
       "description": "Validate the brief → messaging kernel → approve → generate all five channels in parallel → consistency check → finalize.",
       "parameters": {
@@ -32,21 +32,21 @@
         "nodes": [
           {
             "id": "validate",
-            "typeId": "feature.campaign-brief.nodes.validate",
+            "typeId": "feature.campaign-brief.nodes.validate@1.0.0",
             "inputs": {
               "briefId": "{{params.briefId}}"
             }
           },
           {
             "id": "kernel",
-            "typeId": "feature.campaign-brief.nodes.generate-kernel",
+            "typeId": "feature.campaign-brief.nodes.generate-kernel@1.0.0",
             "inputs": {
               "briefId": "{{params.briefId}}"
             }
           },
           {
             "id": "kernel-approve",
-            "typeId": "core.approvalGate",
+            "typeId": "core.approvalGate@1.0.0",
             "config": {
               "prompt": "Review the messaging kernel — the foundation every channel echoes.",
               "title": "Approve the messaging kernel?"
@@ -54,7 +54,7 @@
           },
           {
             "id": "channel-supervisor",
-            "typeId": "core.orchestrator.supervisor",
+            "typeId": "core.orchestrator.supervisor@1.0.0",
             "config": {
               "mockDispatchPlan": [
                 {
@@ -76,7 +76,7 @@
           },
           {
             "id": "channel-dispatch",
-            "typeId": "core.dispatch",
+            "typeId": "core.dispatch@1.0.0",
             "config": {
               "workerDispatchModel": "child-run",
               "fanOutPolicy": "parallel",
@@ -91,21 +91,21 @@
           },
           {
             "id": "production-plan",
-            "typeId": "feature.production.nodes.plan-generate",
+            "typeId": "feature.production.nodes.plan-generate@1.0.0",
             "inputs": {
               "briefId": "{{params.briefId}}"
             }
           },
           {
             "id": "consistency",
-            "typeId": "feature.campaign-orchestration.nodes.consistency-check",
+            "typeId": "feature.campaign-orchestration.nodes.consistency-check@1.0.0",
             "inputs": {
               "briefId": "{{params.briefId}}"
             }
           },
           {
             "id": "finalize",
-            "typeId": "feature.campaign-orchestration.nodes.finalize",
+            "typeId": "feature.campaign-orchestration.nodes.finalize@1.0.0",
             "inputs": {
               "briefId": "{{params.briefId}}"
             }

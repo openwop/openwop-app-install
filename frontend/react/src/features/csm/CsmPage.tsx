@@ -143,7 +143,7 @@ function groupedArr(rows: Array<{ arr?: number | undefined; arrCurrency?: string
     .join(' + ');
 }
 
-const HEALTH_INSIGHTS_AGENT = 'feature.csm.agents.health-insights';
+const HEALTH_INSIGHTS_AGENT = 'vendor.openwop-app.csm.agents.health-insights';
 
 /** The seven PATCHable fields, and the six that had no editor at all (CSM-UX-5). */
 interface AccountDraft {

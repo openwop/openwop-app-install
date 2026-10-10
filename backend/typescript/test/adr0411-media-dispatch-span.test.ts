@@ -5,6 +5,16 @@
  * REAL adapter + a stubbed provider, that (a) the span is emitted with
  * provider/model + the OpenInference `LLM` kind, and (b) the ADR 0118 security
  * invariant holds on it — the prompt and the BYOK key NEVER reach a span attribute.
+ *
+ * Reds if: either media call site (image native, aiProvidersHost `dispatchImagesNative`;
+ * TTS, `dispatchFor`) stops wrapping the dispatch in `PROVIDER_DISPATCH_SPAN`, drops
+ * the `'LLM'` kind, or stops passing the requested model.
+ *
+ * Ceiling (honest double guard): the no-prompt/no-key assertions cannot be turned red
+ * by ONE edit — the call sites pass only `{provider, model}`, and `safeSpanAttributes`
+ * drops any non-allowlisted key anyway (probe w5g1-0411-leak-filter stayed green). The
+ * filter half is witnessed by `test/llm-spans.test.ts`; these assertions keep the
+ * call-site half.
  */
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import http from 'node:http';
@@ -15,8 +25,6 @@ import { createAiProvidersAdapter } from '../src/aiProviders/aiProvidersHost.js'
 import type { HostAdapterSuite } from '../src/host/index.js';
 
 const PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
-const realFetch = globalThis.fetch;
-const fetchMock = vi.fn();
 
 const exporter = new InMemorySpanExporter();
 const tracerProvider = new NodeTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] });
@@ -29,7 +37,6 @@ describe('ADR 0411 media dispatch → provider.dispatch span (grade-code VID-1)'
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
     delete process.env.OPENWOP_IMAGE_PROVIDER_ENABLED; // force the native BYOK path
     delete process.env.OPENWOP_IMAGE_PROVIDER_ENDPOINT;
-    globalThis.fetch = realFetch;
     // Register the in-memory exporter's provider BEFORE createApp — the global tracer
     // provider can only be set once, and createApp registers one during boot.
     tracerProvider.register();
@@ -42,16 +49,14 @@ describe('ADR 0411 media dispatch → provider.dispatch span (grade-code VID-1)'
     });
   });
   afterAll(async () => {
-    globalThis.fetch = realFetch;
     await new Promise<void>((res) => server.close(() => res()));
     trace.disable();
   });
-  afterEach(() => exporter.reset());
+  afterEach(() => { exporter.reset(); vi.restoreAllMocks(); });
 
   it('emits openwop.provider.dispatch (kind LLM) with provider/model, and NEVER the prompt or key', async () => {
-    fetchMock.mockReset();
-    fetchMock.mockResolvedValue({ ok: true, status: 200, json: () => Promise.resolve({ data: [{ b64_json: PNG_B64 }] }), text: () => Promise.resolve('') });
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response(JSON.stringify({ data: [{ b64_json: PNG_B64 }] }), { status: 200, headers: { 'content-type': 'application/json' } }));
 
     await adapter.callImageGenerator({ prompt: 'a SECRET blue circle prompt', provider: 'openai', credentialRef: 'my-openai', model: 'gpt-image-1', n: 1 });
 
@@ -68,13 +73,8 @@ describe('ADR 0411 media dispatch → provider.dispatch span (grade-code VID-1)'
 
   it('TTS (callSpeechSynthesizer) emits the dispatch span too (ENG-5), with no text/key leak', async () => {
     const audio = Buffer.from('opaque-audio-bytes');
-    fetchMock.mockReset();
-    fetchMock.mockResolvedValue({
-      ok: true, status: 200,
-      arrayBuffer: () => Promise.resolve(audio.buffer.slice(audio.byteOffset, audio.byteOffset + audio.byteLength)),
-      json: () => Promise.resolve({}), text: () => Promise.resolve(''),
-    });
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response(audio, { status: 200, headers: { 'content-type': 'audio/mpeg' } }));
 
     await adapter.callSpeechSynthesizer({ provider: 'openai', credentialRef: 'my-openai', model: 'tts-1', voiceId: 'alloy', text: 'SECRET words to synthesize' });
 

@@ -62,7 +62,7 @@ function parseBuild(raw: unknown): number | null {
 }
 
 export function registerClientSupportRoutes(app: Express): void {
-  app.get('/v1/host/openwop-app/client-support', (req, res) => {
+  app.get('/host/openwop-app/client-support', (req, res) => {
     const platform = parsePlatform(req.query.platform ?? req.header('x-openwop-client-platform'));
     const build = parseBuild(req.query.build ?? req.header('x-openwop-client-build'));
     const minBuild = minBuildFor(platform);

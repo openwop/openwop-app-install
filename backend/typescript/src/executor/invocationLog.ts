@@ -65,8 +65,8 @@ export function getInvocationLog() {
     async latest(key: InvocationIdentityKey): Promise<unknown> {
       return await b.getLatestInvocation(key);
     },
-    async put(key: InvocationRecordKey, result: unknown): Promise<void> {
-      await b.putInvocation(key, result);
+    async put(key: InvocationRecordKey, result: unknown, opts?: { presentedKey?: string }): Promise<void> {
+      await b.putInvocation(key, result, opts);
     },
   };
 }

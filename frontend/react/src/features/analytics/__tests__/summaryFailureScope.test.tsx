@@ -15,24 +15,32 @@
  *    fixture in all four existing test files passes `comparison: undefined`.
  *  - ANL-UX-5: the trend's right edge is permanently partial (today is still
  *    running) and nothing said so.
+ *
+ * Sabotage witnesses (grade-tests wave 8): dropping the trend/events sections
+ * from the summary-failure branch, widening that branch to an events failure,
+ * coercing an absent prior with `?? 0` OR deleting the `prior === undefined`
+ * guard, the `deltaNew`/`deltaFlat`/sign branches, the `partial` flag either
+ * way, `historyKnown` either way, or the first-event date each turn a case red.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import type { AnalyticsSummary, TrendPoint } from '../analyticsClient.js';
+import type { AnalyticsSummary } from '../analyticsClient.js';
+import type * as Client from '../analyticsClient.js';
+import { formatDate } from '../../../i18n/format.js';
 
-const getSummary = vi.fn();
-const getEvents = vi.fn(async (..._a: unknown[]) => [] as unknown[]);
-const getTrend = vi.fn(async (..._a: unknown[]): Promise<TrendPoint[]> => []);
-const getNavReport = vi.fn(async (..._a: unknown[]) => ({ rows: [], totalRecorded: 0 }));
+const getSummary = vi.fn<typeof Client.getSummary>();
+const getEvents = vi.fn<typeof Client.getEvents>();
+const getTrend = vi.fn<typeof Client.getTrend>();
+const getNavReport = vi.fn<typeof Client.getNavReport>();
 
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 vi.mock('../analyticsClient.js', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
-  getSummary: (...a: unknown[]) => getSummary(...a),
-  getEvents: (...a: unknown[]) => getEvents(...a),
-  getTrend: (...a: unknown[]) => getTrend(...a),
-  getNavReport: (...a: unknown[]) => getNavReport(...a),
+  getSummary: (...a: Parameters<typeof Client.getSummary>) => getSummary(...a),
+  getEvents: (...a: Parameters<typeof Client.getEvents>) => getEvents(...a),
+  getTrend: (...a: Parameters<typeof Client.getTrend>) => getTrend(...a),
+  getNavReport: () => getNavReport(),
   listOrgs: async () => [{ orgId: 'org:1', name: 'Acme' }],
 }));
 vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
@@ -44,13 +52,13 @@ const { AnalyticsPage } = await import('../AnalyticsPage.js');
 const summary = (extra?: Partial<AnalyticsSummary>): AnalyticsSummary => ({
   total: 12, sessions: 2, byType: { pageview: 12, event: 0, conversion: 0 },
   topPaths: [], utmSources: [], ...extra,
-} as unknown as AnalyticsSummary);
+});
 
 const renderPage = (): void => { render(<MemoryRouter><AnalyticsPage /></MemoryRouter>); };
 
 beforeEach(() => {
-  vi.clearAllMocks();
-  getNavReport.mockResolvedValue({ rows: [], totalRecorded: 0 });
+  vi.resetAllMocks();
+  getNavReport.mockResolvedValue({ weeks: [], rows: [] });
   getEvents.mockResolvedValue([]);
   getTrend.mockResolvedValue([]);
 });
@@ -81,7 +89,7 @@ describe('ANL-UX-1 — a failed summary read does not discard what DID load', ()
   });
 
   it('a failed EVENTS read beside a good summary still says so per-panel (the mirror case)', async () => {
-    getSummary.mockResolvedValue({ summary: summary(), comparison: undefined, firstEventAt: '2026-01-01T00:00:00.000Z' });
+    getSummary.mockResolvedValue({ summary: summary(), firstEventAt: '2026-01-01T00:00:00.000Z' });
     getEvents.mockRejectedValue(new Error('events_500'));
     renderPage();
     await screen.findByText(/recent events couldn.t be loaded/i);
@@ -103,9 +111,12 @@ describe('ANL-UX-3 — an ABSENT prior measurement renders no delta at all', () 
       firstEventAt: '2026-01-01T00:00:00.000Z',
     });
     renderPage();
-    await screen.findByText('Daily uniques');
-    // Pre-fix this printed "new vs prior 30 days" beside the uniques tile.
-    expect(screen.queryByText(/new vs prior 30 days/i)).toBeNull();
+    // Pre-fix this printed "new vs prior 30 days" beside the uniques tile. The
+    // claim is NO delta of any spelling (a dropped guard renders "NaN% vs …"),
+    // so assert on the whole tile, not one wrong sentence.
+    const tile = (await screen.findByText('Daily uniques')).closest('button');
+    expect(tile).not.toBeNull();
+    expect(tile?.textContent ?? '').not.toMatch(/prior/i);
     // The CONTROL: the figures whose prior IS measured still show their delta,
     // so "renders nothing" cannot be satisfied by a page that lost deltas
     // entirely.
@@ -146,7 +157,7 @@ describe('ANL-UX-3 — an ABSENT prior measurement renders no delta at all', () 
 
 describe('ANL-UX-5 — the trend discloses its partial right edge', () => {
   it('renders the in-progress note when the server marks today partial', async () => {
-    getSummary.mockResolvedValue({ summary: summary(), comparison: undefined, firstEventAt: '2026-01-01T00:00:00.000Z' });
+    getSummary.mockResolvedValue({ summary: summary(), firstEventAt: '2026-01-01T00:00:00.000Z' });
     getTrend.mockResolvedValue([
       { day: '2026-08-16', pageviews: 8, events: 0, conversions: 0, uniques: 0 },
       { day: '2026-08-17', pageviews: 2, events: 0, conversions: 0, uniques: 0, partial: true },
@@ -156,7 +167,7 @@ describe('ANL-UX-5 — the trend discloses its partial right edge', () => {
   });
 
   it('does NOT render it when no bucket is partial (so the note cannot become wallpaper)', async () => {
-    getSummary.mockResolvedValue({ summary: summary(), comparison: undefined, firstEventAt: '2026-01-01T00:00:00.000Z' });
+    getSummary.mockResolvedValue({ summary: summary(), firstEventAt: '2026-01-01T00:00:00.000Z' });
     getTrend.mockResolvedValue([
       { day: '2026-08-16', pageviews: 8, events: 0, conversions: 0, uniques: 0 },
       { day: '2026-08-17', pageviews: 9, events: 0, conversions: 0, uniques: 0 },
@@ -180,14 +191,14 @@ describe('ANL-UX-2 R2 — "never reported" is only claimed when the backend said
   const empty = (): AnalyticsSummary => summary({ total: 0, sessions: 0, byType: { pageview: 0, event: 0, conversion: 0 } });
 
   it('claims "No analytics yet" when the backend REPORTED that this org has no history', async () => {
-    getSummary.mockResolvedValue({ summary: empty(), comparison: undefined, lifetime: {} });
+    getSummary.mockResolvedValue({ summary: empty(), lifetime: {} });
     renderPage();
     expect(await screen.findByText(/no analytics yet/i)).toBeTruthy();
   });
 
   it('does NOT claim it when the backend did not send the signal at all', async () => {
     // The old-backend / stale-summary shape: no `lifetime`, no `firstEventAt`.
-    getSummary.mockResolvedValue({ summary: empty(), comparison: undefined });
+    getSummary.mockResolvedValue({ summary: empty() });
     renderPage();
     expect(await screen.findByText(/no events to show/i)).toBeTruthy();
     expect(
@@ -199,12 +210,13 @@ describe('ANL-UX-2 R2 — "never reported" is only claimed when the backend said
   it('still uses the reported first-event date when there IS history', async () => {
     getSummary.mockResolvedValue({
       summary: empty(),
-      comparison: undefined,
       firstEventAt: '2026-01-01T00:00:00.000Z',
       lifetime: { firstEventAt: '2026-01-01T00:00:00.000Z' },
     });
     renderPage();
-    // The windowed "quiet period" card, not either of the two above.
+    // The windowed "quiet period" card, not either of the two above…
     expect(await screen.findByText(/no events in the last 30 days/i)).toBeTruthy();
+    // …and it states the reported first-event date (the page's own formatter).
+    expect(screen.getByText(new RegExp(`first event was ${formatDate('2026-01-01T00:00:00.000Z')}`))).toBeTruthy();
   });
 });

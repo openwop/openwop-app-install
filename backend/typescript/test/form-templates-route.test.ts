@@ -90,13 +90,13 @@ function client() {
 let n = 0;
 async function signedInOrg(): Promise<{ c: ReturnType<typeof client>; orgId: string }> {
   const c = client();
-  const login = await c.post('/v1/host/openwop-app/test/login', { email: `ft-${Date.now()}-${n++}@t.test` });
+  const login = await c.post('/host/openwop-app/test/login', { email: `ft-${Date.now()}-${n++}@t.test` });
   expect(login.status, JSON.stringify(login.body)).toBe(201);
-  const org = await c.post('/v1/host/openwop-app/orgs', { name: `Org ${n++}` });
+  const org = await c.post('/host/openwop-app/orgs', { name: `Org ${n++}` });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return { c, orgId: org.body.org?.orgId ?? org.body.orgId };
 }
-const base = (orgId: string) => `/v1/host/openwop-app/forms/orgs/${encodeURIComponent(orgId)}`;
+const base = (orgId: string) => `/host/openwop-app/forms/orgs/${encodeURIComponent(orgId)}`;
 
 describe('ADR 0516 — form templates over HTTP', () => {
   it('lists installed templates', async () => {

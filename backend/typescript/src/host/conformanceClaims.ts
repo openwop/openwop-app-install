@@ -60,8 +60,8 @@ export const CLAIMS_STAMP = 'conformance-claims.json';
 export const BUNDLE_STAMP = 'certification-bundle.json';
 
 /** Public host-extension paths. Non-normative placement; the POINTER is the wire surface. */
-export const CERTIFICATION_BUNDLE_PATH = '/v1/host/openwop-app/conformance/certification-bundle';
-export const CONFORMANCE_CLAIMS_PATH = '/v1/host/openwop-app/conformance/claims';
+export const CERTIFICATION_BUNDLE_PATH = '/host/openwop-app/conformance/certification-bundle';
+export const CONFORMANCE_CLAIMS_PATH = '/host/openwop-app/conformance/claims';
 
 /**
  * WHD-18 — the MAJOR-2 bundle's address, served only in origin mode.
@@ -76,7 +76,6 @@ export const CONFORMANCE_CLAIMS_PATH = '/v1/host/openwop-app/conformance/claims'
  * the twin BEFORE auth, so both spellings reach the one public handler.
  */
 const MAJOR2_SUFFIX = '/conformance/certification-bundle/major-2';
-export const CERTIFICATION_BUNDLE_MAJOR2_PATH = `/v1${VENDOR_ROOT}${MAJOR2_SUFFIX}`;
 export const CERTIFICATION_BUNDLE_MAJOR2_VENDOR_PATH = `${VENDOR_ROOT}${MAJOR2_SUFFIX}`;
 
 // ── WHD-18 — where the SERVED evidence comes from ────────────────────────────

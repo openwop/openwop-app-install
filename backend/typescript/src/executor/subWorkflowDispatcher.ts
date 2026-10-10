@@ -30,10 +30,12 @@
 
 import { randomUUID } from 'node:crypto';
 import { insertRunWithStartContext } from '../host/runInsert.js';
+import { stripReservedRunMetadata } from '../host/runDispatch.js';
 import { scoreOnlineEvalsOnTerminal } from '../host/workflowEvalOnline.js';
 import { stampRunCostOnTerminal } from '../observability/costEmitter.js';
 import { foldWorkflowSpendOnTerminal } from '../host/workflowBudgets.js';
 import { resolveLaunchWorkflow } from '../host/resolveLaunchDefinition.js';
+import { WorkflowFeatureRefusedError } from '../host/workflowFeatureGate.js';
 import type { Storage } from '../storage/storage.js';
 import type { HostAdapterSuite } from '../host/index.js';
 import type { RunRecord } from '../types.js';
@@ -107,6 +109,10 @@ export interface SubWorkflowOpts {
    *  refs are names and are recorded on the child run record (replay-neutral).
    *  Never widened: only refs the PARENT already carries. */
   parentCredentialRefs?: readonly string[];
+  /** ADR 0829 D2 — metadata stamped on the child run record at creation (the
+   *  structured handoff record, under `openwop-handoff`). Written once with the
+   *  run, so replay and `:fork` read it back; never recomputed. */
+  childMetadata?: Record<string, unknown>;
 }
 
 /** Process-local parent-node linkage. RunRecord's persisted schema
@@ -208,9 +214,11 @@ export async function dispatchSubWorkflow(
   // ancestor depth independently. No insert-time race to guard.
   const ancestorWorkflowIds: string[] = [];
   let cursorRunId: string | undefined = opts.parentRunId;
+  let parentMetadata: Record<string, unknown> | undefined;
   while (cursorRunId && ancestorWorkflowIds.length < MAX_SUBWORKFLOW_DEPTH) {
     const ancestor = await storage.getRun(cursorRunId);
     if (!ancestor) break;
+    if (cursorRunId === opts.parentRunId) parentMetadata = ancestor.metadata as Record<string, unknown> | undefined;
     ancestorWorkflowIds.push(ancestor.workflowId);
     cursorRunId = ancestor.parentRunId;
   }
@@ -230,7 +238,17 @@ export async function dispatchSubWorkflow(
   // Look up the child workflow definition.
   // ADR 0474 P1b (review F1) — nested children are production launches too:
   // published-when-present, else the parent's edit lane leaks into production.
-  const wf = await resolveLaunchWorkflow(hostSuite.workflowCatalog, opts.parentTenantId, opts.childWorkflowId);
+  // ADR 0820 §7 / G6 — a child owned by a feature the tenant may not use is a
+  // typed dispatch failure (never a silent not-found).
+  let wf: Awaited<ReturnType<typeof resolveLaunchWorkflow>>;
+  try {
+    wf = await resolveLaunchWorkflow(hostSuite.workflowCatalog, opts.parentTenantId, opts.childWorkflowId);
+  } catch (err) {
+    if (err instanceof WorkflowFeatureRefusedError) {
+      throw new DispatchCreationError(`subWorkflow: ${err.message}`, 'subworkflow_feature_refused');
+    }
+    throw err;
+  }
   if (!wf) {
     throw new DispatchCreationError(
       `subWorkflow: child workflow '${opts.childWorkflowId}' not found in catalog`,
@@ -254,6 +272,16 @@ export async function dispatchSubWorkflow(
     for (const [k, v] of Object.entries(opts.perItemInputs)) childInputs[k] = v;
   }
 
+  // ADR 0832 D3 (review B1) — a child run carries no actor (it must not inherit
+  // the parent person's credentials or recall), which made every nested chain a
+  // system run that stepped around the seam's org floor. The parent's person
+  // rides along as the child's org-scope subject instead: it narrows, it never
+  // grants. The handoff metadata is stripped of reserved keys first, so it cannot
+  // name a subject when the parent has no person (grade `L3`).
+  const parentPerson = typeof parentMetadata?.actingUserId === 'string' && parentMetadata.actingUserId
+    ? parentMetadata.actingUserId
+    : typeof parentMetadata?.orgScopeSubject === 'string' && parentMetadata.orgScopeSubject ? parentMetadata.orgScopeSubject : undefined;
+
   // Spawn child run.
   const childRunId = randomUUID();
   const now = new Date().toISOString();
@@ -264,7 +292,7 @@ export async function dispatchSubWorkflow(
     scopeId: opts.parentScopeId,
     status: 'pending',
     inputs: childInputs,
-    metadata: {},
+    metadata: { ...stripReservedRunMetadata(opts.childMetadata), ...(parentPerson ? { orgScopeSubject: parentPerson } : {}) },
     configurable: opts.parentCredentialRefs && opts.parentCredentialRefs.length > 0
       ? { credentialRefs: [...opts.parentCredentialRefs] }
       : {},

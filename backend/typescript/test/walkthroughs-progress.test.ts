@@ -11,6 +11,7 @@ import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { seedDemoWalkthroughs } from '../src/host/demoWalkthroughsSeed.js';
 import { CAMPAIGN_STUDIO_WALKTHROUGH_ID } from '../src/features/walkthroughs/walkthroughIds.js';
+import { bareRunId } from './support/bareRunId.js';
 
 let BASE: string;
 let server: http.Server;
@@ -37,12 +38,12 @@ function client() {
   };
   return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b) };
 }
-const PROG = '/v1/host/openwop-app/walkthroughs/progress';
+const PROG = '/host/openwop-app/walkthroughs/progress';
 
 describe('guided-tour progress (ADR 0368 P5)', () => {
   it('upserts one row per tenant×tour, lists tenant-scoped, validates input', async () => {
     const a = client();
-    expect((await a.post('/v1/host/openwop-app/test/login', { email: `tp-${Date.now()}-${n++}@acme.test` })).status).toBe(201);
+    expect((await a.post('/host/openwop-app/test/login', { email: `tp-${Date.now()}-${n++}@acme.test` })).status).toBe(201);
 
     expect((await a.post(PROG, { walkthroughId: 't1', status: 'nope', runId: 'r1' })).status).toBe(400);
     expect((await a.post(PROG, { walkthroughId: 't1', status: 'started', runId: 'r1' })).status).toBe(200);
@@ -54,7 +55,7 @@ describe('guided-tour progress (ADR 0368 P5)', () => {
 
     // Tenant isolation: a second tenant sees nothing.
     const b = client();
-    expect((await b.post('/v1/host/openwop-app/test/login', { email: `tp-${Date.now()}-${n++}@acme.test` })).status).toBe(201);
+    expect((await b.post('/host/openwop-app/test/login', { email: `tp-${Date.now()}-${n++}@acme.test` })).status).toBe(201);
     expect(((await b.get(PROG)).body.progress as unknown[])).toHaveLength(0);
   });
 
@@ -62,8 +63,8 @@ describe('guided-tour progress (ADR 0368 P5)', () => {
     const tenantId = `org:prog-${Date.now()}-${n++}`;
     const alice = client();
     const bob = client();
-    expect((await alice.post('/v1/host/openwop-app/test/login', { email: `alice-${n}@acme.test`, tenantId })).status).toBe(201);
-    expect((await bob.post('/v1/host/openwop-app/test/login', { email: `bob-${n}@acme.test`, tenantId })).status).toBe(201);
+    expect((await alice.post('/host/openwop-app/test/login', { email: `alice-${n}@acme.test`, tenantId })).status).toBe(201);
+    expect((await bob.post('/host/openwop-app/test/login', { email: `bob-${n}@acme.test`, tenantId })).status).toBe(201);
 
     expect((await alice.post(PROG, { walkthroughId: 'w-hijack', status: 'started', runId: 'run-alice' })).status).toBe(200);
     // Bob (same tenant) must NOT see Alice's in-flight row — with the old
@@ -77,8 +78,8 @@ describe('guided-tour progress (ADR 0368 P5)', () => {
     const tenantId = `org:prog-legacy-${Date.now()}-${n++}`;
     const carol = client();
     const dave = client();
-    expect((await carol.post('/v1/host/openwop-app/test/login', { email: `carol-${n}@acme.test`, tenantId })).status).toBe(201);
-    expect((await dave.post('/v1/host/openwop-app/test/login', { email: `dave-${n}@acme.test`, tenantId })).status).toBe(201);
+    expect((await carol.post('/host/openwop-app/test/login', { email: `carol-${n}@acme.test`, tenantId })).status).toBe(201);
+    expect((await dave.post('/host/openwop-app/test/login', { email: `dave-${n}@acme.test`, tenantId })).status).toBe(201);
 
     // Seed a pre-P3 tenant-level row directly through the store (no userId).
     const { putWalkthroughProgress } = await import('../src/features/walkthroughs/progressStore.js');
@@ -100,9 +101,9 @@ describe('guided-tour progress (ADR 0368 P5)', () => {
   it('the funnel derives status counts + the stall step from real runs (ADR 0378 P3)', async () => {
     const tenantId = `org:funnel-${Date.now()}-${n++}`;
     const a = client();
-    expect((await a.post('/v1/host/openwop-app/test/login', { email: `funnel-${n}@acme.test`, tenantId })).status).toBe(201);
+    expect((await a.post('/host/openwop-app/test/login', { email: `funnel-${n}@acme.test`, tenantId })).status).toBe(201);
 
-    expect((await a.get('/v1/host/openwop-app/walkthroughs/funnel')).status).toBe(400); // walkthroughId required
+    expect((await a.get('/host/openwop-app/walkthroughs/funnel')).status).toBe(400); // walkthroughId required
 
     // ADR 0435 — the sample walkthrough is SEEDED demo data, not a builtin, so
     // the tenant must load it before it resolves as a runnable workflow. (The
@@ -112,21 +113,21 @@ describe('guided-tour progress (ADR 0368 P5)', () => {
     await seedDemoWalkthroughs(tenantId);
 
     // Two real runs of the seeded walkthrough — both suspend on step t1.
-    const r1 = await a.post('/v1/runs', { workflowId: WID, inputs: {} });
+    const r1 = await a.post('/runs', { workflowId: WID, inputs: {} });
     expect(r1.status, JSON.stringify(r1.body)).toBe(201);
-    const r2 = await a.post('/v1/runs', { workflowId: WID, inputs: {} });
+    const r2 = await a.post('/runs', { workflowId: WID, inputs: {} });
     expect(r2.status).toBe(201);
     // Cancel the second — an abandoned walkthrough.
     const run2 = (r2.body as { runId?: string }).runId ?? (r2.body as { run?: { runId: string } }).run?.runId;
     expect(run2).toBeTruthy();
-    await a.post(`/v1/runs/${run2}:cancel`, {});
+    await a.post(`/runs/${run2}:cancel`, {});
 
     // Grade-pass: a PRE-RENAME run (legacy builtin id — runs are immutable for
     // replay) must be counted in the NEW id's funnel via the legacy union.
-    const r3 = await a.post('/v1/runs', { workflowId: 'tour.campaign-studio.first-brief', inputs: {} });
+    const r3 = await a.post('/runs', { workflowId: 'tour.campaign-studio.first-brief', inputs: {} });
     expect(r3.status, JSON.stringify(r3.body)).toBe(201);
 
-    const f = await a.get(`/v1/host/openwop-app/walkthroughs/funnel?walkthroughId=${WID}`);
+    const f = await a.get(`/host/openwop-app/walkthroughs/funnel?walkthroughId=${WID}`);
     expect(f.status).toBe(200);
     expect(f.body).toMatchObject({ walkthroughId: WID, started: 3, completed: 0 }); // 2 new-id + 1 legacy-id
     const stalled = f.body.stalledByNode as Record<string, number>;
@@ -145,11 +146,11 @@ describe('guided-tour progress (ADR 0368 P5)', () => {
   it('the funnel buckets SKIPS separately from completions (WALK-A1)', async () => {
     const tenantId = `org:skipfunnel-${Date.now()}-${n++}`;
     const a = client();
-    expect((await a.post('/v1/host/openwop-app/test/login', { email: `skip-${n}@acme.test`, tenantId })).status).toBe(201);
+    expect((await a.post('/host/openwop-app/test/login', { email: `skip-${n}@acme.test`, tenantId })).status).toBe(201);
     const WID = CAMPAIGN_STUDIO_WALKTHROUGH_ID;
     await seedDemoWalkthroughs(tenantId);
 
-    const created = await a.post('/v1/runs', { workflowId: WID, inputs: {} });
+    const created = await a.post('/runs', { workflowId: WID, inputs: {} });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
     const runId = (created.body as { runId: string }).runId;
 
@@ -157,9 +158,9 @@ describe('guided-tour progress (ADR 0368 P5)', () => {
     let guard = 0;
     let checkpointNode: string | null = null;
     while (guard++ < 10) {
-      const snap = await a.get(`/v1/runs/${runId}`);
+      const snap = await a.get(`/runs/${runId}`);
       if (!String((snap.body as { status?: string }).status ?? '').startsWith('waiting')) break;
-      const ints = await a.get(`/v1/host/openwop-app/runs/${runId}/interrupts`);
+      const ints = await a.get(`/host/openwop-app/runs/${bareRunId(runId)}/interrupts`);
       const open = (ints.body.interrupts as Array<Record<string, unknown>>).filter((i) => !i.resolvedAt);
       if (open.length === 0) break;
       const node = open[0]!.nodeId as string;
@@ -167,16 +168,16 @@ describe('guided-tour progress (ADR 0368 P5)', () => {
       if (isCheckpoint) {
         // THE SKIP: resolve exactly as the player does for `already-satisfied`.
         checkpointNode = node;
-        await a.post(`/v1/runs/${runId}/interrupts/${node}`, {
+        await a.post(`/runs/${runId}/interrupts/${node}`, {
           resumeValue: { passed: true, skipped: true, because: 'You already created a brief.' },
         });
         break;
       }
-      await a.post(`/v1/runs/${runId}/interrupts/${node}`, { resumeValue: { acked: true } });
+      await a.post(`/runs/${runId}/interrupts/${node}`, { resumeValue: { acked: true } });
     }
     expect(checkpointNode, 'the seeded walkthrough should reach a checkpoint').toBeTruthy();
 
-    const f = await a.get(`/v1/host/openwop-app/walkthroughs/funnel?walkthroughId=${WID}`);
+    const f = await a.get(`/host/openwop-app/walkthroughs/funnel?walkthroughId=${WID}`);
     expect(f.status).toBe(200);
     expect(f.body.skipped, JSON.stringify(f.body)).toBe(1);
     expect((f.body.skippedByNode as Record<string, number>)[checkpointNode!]).toBe(1);
@@ -187,9 +188,9 @@ describe('guided-tour progress (ADR 0368 P5)', () => {
     // checkpoint-free walkthrough must add no per-run lookups at all.
     const tenantId = `org:noskip-${Date.now()}-${n++}`;
     const a = client();
-    expect((await a.post('/v1/host/openwop-app/test/login', { email: `noskip-${n}@acme.test`, tenantId })).status).toBe(201);
+    expect((await a.post('/host/openwop-app/test/login', { email: `noskip-${n}@acme.test`, tenantId })).status).toBe(201);
     await seedDemoWalkthroughs(tenantId);
-    const f = await a.get('/v1/host/openwop-app/walkthroughs/funnel?walkthroughId=walkthrough.agents.roster');
+    const f = await a.get('/host/openwop-app/walkthroughs/funnel?walkthroughId=walkthrough.agents.roster');
     expect(f.status).toBe(200);
     expect(f.body.skipped).toBe(0);
     expect(f.body.skippedByNode).toEqual({});

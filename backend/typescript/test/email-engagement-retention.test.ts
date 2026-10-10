@@ -4,6 +4,12 @@
  * recordUnsubscribe reads the unsubscribe token). `email:engagement` events: age
  * opened/clicked; KEEP unsubscribed (dedup marker + consent record). Both ride the
  * `confidential-pii` window. Drives the host seam via `purgeRetained`.
+ *
+ * Sabotage-witnessed (w9 grade-tests): widening either kind filter, dropping the
+ * classification guard, or dropping the strict cutoff each turn a case red.
+ * Recorded DOUBLE GUARD (honest ceiling): "never crosses tenants" cannot fail on the
+ * `rowTenant` check in `purgeRowsByAge` alone — the token purger reads tenant-INDEXED
+ * rows, which already exclude another tenant's. It stays as the witness of the combination.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -22,7 +28,10 @@ const OLD = new Date(now - 200 * DAY).toISOString();
 
 interface TokRow { token: string; tenantId: string; campaignId: string; contactId: string; kind: string; createdAt: string }
 interface EvtRow { id: string; tenantId: string; campaignId: string; contactId: string; kind: string; at: string }
-const tokCol = () => new DurableCollection<TokRow>('email:engagement-token', (t) => t.token);
+// Each fixture collection mirrors its production declaration (engagementService.ts): the
+// token store is tenant-INDEXED (so seeded rows carry the markers its purger reads, not
+// just what a backfill recovers); the event store is prefix-keyed with no index.
+const tokCol = () => new DurableCollection<TokRow>('email:engagement-token', (t) => t.token, undefined, (t) => t.tenantId);
 const evtCol = () => new DurableCollection<EvtRow>('email:engagement', (e) => `${e.tenantId}::${e.id}`);
 const tok = (token: string, kind: string, createdAt = OLD): TokRow => ({ token, tenantId: T, campaignId: 'c1', contactId: 'ct1', kind, createdAt });
 const evt = (id: string, kind: string, at = OLD): EvtRow => ({ id, tenantId: T, campaignId: 'c1', contactId: 'ct1', kind, at });
@@ -63,7 +72,8 @@ describe('MKT-2 — email engagement per-kind retention', () => {
 
   it('keeps a FRESH ageable row (not past the cutoff)', async () => {
     await tokCol().put(tok('t-fresh', 'click', new Date(now - 10 * DAY).toISOString()));
-    await purge();
+    const res = await purge();
+    expect(res.find((r) => r.feature === 'email:engagement-token')).toMatchObject({ deleted: 0, ok: true }); // the purger RAN
     expect(await tokCol().get('t-fresh')).not.toBeNull();
   });
 

@@ -14,7 +14,7 @@
 
 import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
-import { requireString } from '../featureRoute.js';
+import { launchSubjectOf, requireString } from '../featureRoute.js';
 import { requireCmsScope } from './cmsScope.js';
 import { getLocaleGrant } from './cmsService.js';
 import {
@@ -31,7 +31,7 @@ import {
 
 export function registerPageExperimentRoutes(deps: RouteDeps): void {
   const { app } = deps;
-  const BASE = '/v1/host/openwop-app/cms/orgs/:orgId/pages/:pageId/experiments';
+  const BASE = '/host/openwop-app/cms/orgs/:orgId/pages/:pageId/experiments';
 
   // ADR 0205 D1 — a translator grant is overlay-only; experiment writes steer
   // base content on the public surface, so grant-holders are 403 (mirrors the
@@ -141,7 +141,7 @@ export function registerPageExperimentRoutes(deps: RouteDeps): void {
   app.get(`${BASE}/:experimentId/results`, async (req, res, next) => {
     try {
       const { orgId, tenantId } = await requireCmsScope(req, 'workspace:read');
-      const results = await experimentResults(tenantId, orgId, req.params.pageId, req.params.experimentId);
+      const results = await experimentResults(tenantId, orgId, req.params.pageId, req.params.experimentId, launchSubjectOf(req));
       if (!results) notFound(req.params.experimentId);
       res.json(results);
     } catch (err) { next(err); }

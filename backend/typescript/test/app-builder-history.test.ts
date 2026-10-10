@@ -47,15 +47,15 @@ let n = 0;
 async function orgOwner(): Promise<{ c: ReturnType<typeof client>; orgId: string; tenantId: string }> {
   const tenantId = `org:test-ab-hist-${Date.now()}-${n++}`;
   const c = client();
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `abh-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await c.post('/host/openwop-app/test/login', { email: `abh-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status).toBe(201);
-  const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status).toBe(201);
   return { c, orgId: org.body.orgId, tenantId };
 }
 
 const state = (label: string) => ({ name: label, screens: [{ id: 'home', name: 'Home', components: [{ type: 'text', props: { text: label } }] }] });
-const AB = (orgId: string) => `/v1/host/openwop-app/app-builder/orgs/${encodeURIComponent(orgId)}`;
+const AB = (orgId: string) => `/host/openwop-app/app-builder/orgs/${encodeURIComponent(orgId)}`;
 
 describe('canvas version history (ADR 0305 Phase E)', () => {
   it('editor saves capture snapshots (throttled), restore is non-destructive and force-captured', async () => {
@@ -132,7 +132,7 @@ describe('canvas version history (ADR 0305 Phase E)', () => {
     if (sharingToggle) await saveConfig({ ...sharingToggle, status: 'on' }, 'test');
     const canvas = await createCanvasForTenant(tenantId, { canvasTypeId: 'canvas.app-builder', name: 'D', initialState: state('v1') });
     await snapshotCanvas({ tenantId, canvasId: canvas.canvasId, state: state('v1'), version: 1 }, 'u', { force: true });
-    const mint = await c.post(`/v1/host/openwop-app/sharing/orgs/${encodeURIComponent(orgId)}/links`, { resourceType: 'app_builder_canvas', resourceId: canvas.canvasId });
+    const mint = await c.post(`/host/openwop-app/sharing/orgs/${encodeURIComponent(orgId)}/links`, { resourceType: 'app_builder_canvas', resourceId: canvas.canvasId });
     expect(mint.status, JSON.stringify(mint.body)).toBe(201);
     const token = mint.body.token as string;
 
@@ -146,7 +146,7 @@ describe('canvas version history (ADR 0305 Phase E)', () => {
     expect((await c.get(`${AB(orgId)}/canvases/${canvas.canvasId}`)).status).toBe(404);
     expect((await listCanvasVersions(tenantId, canvas.canvasId)).length).toBe(0);
     const anon = client();
-    expect((await anon.get(`/v1/host/openwop-app/shared/${encodeURIComponent(token)}`)).status).toBe(404);
+    expect((await anon.get(`/host/openwop-app/shared/${encodeURIComponent(token)}`)).status).toBe(404);
   });
 
   it('snapshot dedup + cap: same-version capture is idempotent; history caps at 50', async () => {

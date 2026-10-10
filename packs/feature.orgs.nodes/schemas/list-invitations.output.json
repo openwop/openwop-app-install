@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/feature.orgs.nodes/1.0.0/list-invitations.output.json",
+  "$id": "https://packs.openwop.dev/feature.orgs.nodes/1.0.1/list-invitations.output.json",
   "title": "OrgsListInvitationsOutput",
   "description": "Ids-only rows: never the recipient email (PII a run does not need \u2014 a chain that needs the address holds it as its own parameter), never the token or its hash.",
   "type": "object",

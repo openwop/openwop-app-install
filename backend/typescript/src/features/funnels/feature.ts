@@ -15,10 +15,13 @@ import { registerFunnelsFormsSink } from './formsAttributionSink.js';
 import { registerFunnelsAgentTools } from './agentTools.js';
 import { buildFunnelsSurface } from './surface.js';
 import { startFunnelStatsSweep } from './funnelStats.js';
+import { registerFeatureDataExporter } from '../../host/featureDataExport.js';
+import { exportFunnelsData } from './dataExport.js';
 
 export const funnelsFeature: BackendFeature = {
   id: 'funnels',
   registerRoutes: (deps) => {
+    registerFeatureDataExporter('funnels', exportFunnelsData); // ADR 0820 §7 — read-only export, served after a plan lapse
     registerFunnelsRoutes(deps);
     registerFunnelsFormsSink(); // ADR 0332 §D3 — opt-in capture attribution (funnels → forms seam)
     // CFP-1 (CHAT-FIRST-PORT-AUDIT #1) — the Funnel Architect's real chat tools
@@ -31,15 +34,15 @@ export const funnelsFeature: BackendFeature = {
   toggleDefault: {
     id: 'funnels',
     label: 'Funnels',
-    description: 'Multi-step sales funnels composed from CMS pages (Funnel A / ADR 0294).',
+    description: 'Multi-step sales funnels composed from CMS pages.',
     category: 'Marketing',
     status: 'off',
     bucketUnit: 'tenant',
     salt: 'funnels',
   },
   requiredPacks: [
-    { name: 'feature.funnels.nodes', version: '1.0.0' },
-    { name: 'feature.funnels.agents', version: '1.0.1' },
+    { name: 'feature.funnels.nodes', version: '1.0.1' },
+    { name: 'vendor.openwop-app.funnels.agents', version: '1.0.2' },
   ],
   // Checkout/upsell steps ride commerce; step-event tracking is consent-gated
   // (imports `../consent`) — both advisory.

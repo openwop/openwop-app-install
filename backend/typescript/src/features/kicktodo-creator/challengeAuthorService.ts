@@ -4,7 +4,7 @@
  * The Challenge Author is ONE persistent named roster instance per workspace —
  * the agent a creator converses with in the ONE chat to ignite the Challenge
  * Factory. Composed entirely from existing owners (roster/profile); the agent
- * PERSONA + prompt + tool allowlist live in the `feature.kicktodo.agents` pack
+ * PERSONA + prompt + tool allowlist live in the `vendor.openwop-app.kicktodo.agents` pack
  * (resolved tenant-less via the agent registry), so — unlike KickBot — no
  * host-side user-agent record is created here.
  *
@@ -45,9 +45,9 @@ export const CHALLENGE_AUTHOR_DEFAULT_PERSONA = 'Challenge Author';
 export const CHALLENGE_AUTHOR_ROSTER_ID = 'host:challenge-author';
 
 /** The PACK agent persona the roster entry points at (resolved tenant-less via
- *  the agent registry — the `feature.kicktodo.agents` pack owns the prompt +
+ *  the agent registry — the `vendor.openwop-app.kicktodo.agents` pack owns the prompt +
  *  tool allowlist). FIXED by the ADR 0458 P1 prompt-parity test. */
-export const CHALLENGE_AUTHOR_AGENT_ID = 'feature.kicktodo.agents.challenge-author';
+export const CHALLENGE_AUTHOR_AGENT_ID = 'vendor.openwop-app.kicktodo.agents.challenge-author';
 
 export interface ChallengeAuthorInstance {
   rosterId: string;

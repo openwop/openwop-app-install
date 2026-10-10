@@ -177,6 +177,8 @@ export async function brokeredFetch(
      *  owned by the acting user / org-shared with `connections:use`. A pin that
      *  fails is `no_connection` — never the user→org→workspace fall-through. */
     connectionId?: string;
+    /** A host-local deadline, combined with the broker's own upper bound. */
+    signal?: AbortSignal;
   },
 ): Promise<BrokeredFetchOutcome> {
   // ADR 0531 — a replay never dials. Deliberately THROWS rather than returning a
@@ -252,10 +254,10 @@ export async function brokeredFetch(
       // `'manual'` returns the 3xx (caller reads Location, never follows with the token);
       // default `'error'` refuses to follow a token-bearing redirect at all.
       redirect: opts.redirect === 'manual' ? 'manual' : 'error',
-      signal: AbortSignal.timeout(TIMEOUT_MS),
+      signal: opts.signal ? AbortSignal.any([opts.signal, AbortSignal.timeout(TIMEOUT_MS)]) : AbortSignal.timeout(TIMEOUT_MS),
     });
     return { outcome: 'sent', res, provenance: resolved.provenance };
   } catch (err) {
-    return { outcome: 'request_failed', timedOut: err instanceof Error && err.name === 'TimeoutError' };
+    return { outcome: 'request_failed', timedOut: opts.signal?.aborted === true || (err instanceof Error && err.name === 'TimeoutError') };
   }
 }

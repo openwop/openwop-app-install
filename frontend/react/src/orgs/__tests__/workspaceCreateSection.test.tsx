@@ -12,11 +12,17 @@
  * action is PRESENT here, and a FAILED create SAYS SO (a silent failure would be
  * the failed-read-as-empty family in its write-path form — the user could not tell
  * "refused" from "nothing happened").
+ *
+ * Gap: WS-DISC (#2889). Sabotage that turns it red: skipping `onCreated()` after
+ * a successful create reds case 1; `setError(null)` in the catch reds case 2;
+ * dropping `!trimmed` from the handler guard reds case 3 (see its note);
+ * `disabled={busy}` (no blank-name check) reds case 4.
  */
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
+import type * as WorkspaceClient from '../../client/workspaceClient.js';
 
-const createAndEnterWorkspace = vi.fn();
+const createAndEnterWorkspace = vi.fn<typeof WorkspaceClient.createAndEnterWorkspace>();
 vi.mock('../../client/workspaceClient.js', () => ({
   createAndEnterWorkspace: (name: string) => createAndEnterWorkspace(name),
 }));
@@ -31,7 +37,7 @@ beforeEach(() => { cleanup(); createAndEnterWorkspace.mockReset(); });
 
 describe('WS-DISC — workspace creation is reachable from the orgs page', () => {
   it('creates through the SHARED create-and-enter unit, not a local re-implementation', async () => {
-    createAndEnterWorkspace.mockResolvedValue({ workspaceId: 'ws:new', name: 'Acme' });
+    createAndEnterWorkspace.mockResolvedValue({ workspaceId: 'ws:new', name: 'Acme', slug: 'acme', roles: ['owner'], kind: 'shared', active: true });
     const onCreated = vi.fn();
     render(<WorkspaceCreateSection onCreated={onCreated} />);
 

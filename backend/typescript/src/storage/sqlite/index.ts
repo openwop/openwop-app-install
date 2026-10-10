@@ -50,6 +50,7 @@ import { egressExtraJson, applyEgressExtra } from '../../messaging/types.js';
 import { IdempotentCommitRejectedError, PAYLOAD_KEY_RE, RUN_FINAL_STATUSES, type Storage } from '../storage.js';
 import { applyMigrations } from './schema.js';
 import { isForwardExecutionEvent, RunLogClosedError, TERMINAL_RUN_EVENT_TYPES } from '../runLogClosure.js';
+import { nextChatMessageCreatedAt } from '../chatMessageOrder.js';
 
 /** Every table with a `tenant_id` column, read from the live schema (memoized
  *  per Database). The single source of truth for tenant-scoped bulk ops
@@ -75,6 +76,23 @@ function tenantScopedTables(db: Database.Database): string[] {
 /** better-sqlite3's in-memory sentinel. A `Database` opened on it is private to
  *  that instance — two opens are two independent databases. */
 const SQLITE_MEMORY = ':memory:';
+
+/**
+ * ADR 0868 — the smallest string greater (in UTF-8 byte order) than every key
+ * that starts with `prefix`: the prefix with its last code point incremented.
+ * UTF-8 preserves code-point order, so this is an exact exclusive upper bound.
+ * `null` = unbounded (empty prefix, or every code point already at U+10FFFF).
+ */
+export function prefixUpperBound(prefix: string): string | null {
+  const cps = [...prefix];
+  while (cps.length > 0) {
+    const cp = cps.pop()!.codePointAt(0)!;
+    if (cp >= 0x10ffff) continue;
+    const next = cp + 1 === 0xd800 ? 0xe000 : cp + 1; // skip the surrogate block
+    return cps.join('') + String.fromCodePoint(next);
+  }
+  return null;
+}
 
 /**
  * Resolve a caller's argument to something `new Database(...)` should be handed
@@ -263,9 +281,9 @@ export function openSqliteStorage(dbPath: string): Storage {
 
   const insertInterruptStmt = db.prepare(`
     INSERT INTO interrupts (
-      interrupt_id, run_id, node_id, kind, token, data, resume_schema, created_at, expires_at
+      interrupt_id, run_id, node_id, kind, token, data, resume_schema, created_at, expires_at, resolved_at, resolved_value
     ) VALUES (
-      @interruptId, @runId, @nodeId, @kind, @token, @data, @resumeSchema, @createdAt, @expiresAt
+      @interruptId, @runId, @nodeId, @kind, @token, @data, @resumeSchema, @createdAt, @expiresAt, @resolvedAt, @resolvedValue
     )
   `);
 
@@ -280,8 +298,23 @@ export function openSqliteStorage(dbPath: string): Storage {
     UPDATE interrupts SET resolved_at = ?, resolved_value = ?
     WHERE interrupt_id = ? AND resolved_at IS NULL
   `);
+  const listOpenInterruptsForTenantStmt = db.prepare(`
+    SELECT i.* FROM interrupts i JOIN runs r ON r.run_id = i.run_id
+    WHERE r.tenant_id = ? AND i.resolved_at IS NULL
+      AND r.status NOT IN ('completed', 'failed', 'cancelled')
+    ORDER BY i.created_at ASC, i.interrupt_id ASC LIMIT ?
+  `);
   const listOpenInterruptsAllStmt = db.prepare(`
-    SELECT * FROM interrupts WHERE resolved_at IS NULL ORDER BY created_at ASC LIMIT ?
+    SELECT * FROM interrupts WHERE resolved_at IS NULL ORDER BY created_at ASC, interrupt_id ASC LIMIT ?
+  `);
+  // `created_at` is ISO-8601 TEXT here, so lexical order is chronological order.
+  const listOpenInterruptsAfterStmt = db.prepare(`
+    SELECT * FROM interrupts WHERE resolved_at IS NULL
+      AND (created_at > ? OR (created_at = ? AND interrupt_id > ?))
+      ORDER BY created_at ASC, interrupt_id ASC LIMIT ?
+  `);
+  const listOpenInterruptsNewestStmt = db.prepare(`
+    SELECT * FROM interrupts WHERE resolved_at IS NULL ORDER BY created_at DESC, interrupt_id DESC LIMIT ?
   `);
   const listOpenInterruptsStmt = db.prepare(`
     SELECT * FROM interrupts WHERE run_id = ? AND resolved_at IS NULL
@@ -631,6 +664,12 @@ export function openSqliteStorage(dbPath: string): Storage {
     ORDER BY created_at DESC, message_id DESC
     LIMIT ?
   `);
+  // The session's newest stamp, read inside the append transaction so a new
+  // message is stamped strictly after it (`chatMessageOrder.ts`). Served by
+  // the (session_id, created_at) index.
+  const chatMessageHeadStmt = db.prepare(`
+    SELECT MAX(created_at) AS head FROM chat_messages WHERE session_id = ?
+  `);
   const appendChatMessageStmt = db.prepare(`
     INSERT INTO chat_messages (message_id, session_id, role, content, meta, author_subject, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -696,9 +735,14 @@ export function openSqliteStorage(dbPath: string): Storage {
     WHERE run_id = @runId AND node_id = @nodeId AND invocation_id = @invocationId
   `);
 
+  // `presented_key` is COALESCEd with the stored value: INSERT OR REPLACE
+  // rewrites the whole row, so a later put that carries no key would otherwise
+  // erase the one an earlier put recorded for the same attempt.
   const putInvocationStmt = db.prepare(`
-    INSERT OR REPLACE INTO invocation_log (run_id, node_id, attempt, invocation_id, result, created_at)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT OR REPLACE INTO invocation_log (run_id, node_id, attempt, invocation_id, result, created_at, presented_key)
+    VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, (
+      SELECT presented_key FROM invocation_log
+       WHERE run_id = ? AND node_id = ? AND attempt = ? AND invocation_id = ?)))
   `);
 
   // ADR 0591 — the escape ledger. Note the verb: plain INSERT, never INSERT OR
@@ -715,6 +759,7 @@ export function openSqliteStorage(dbPath: string): Storage {
   // not reported as a completed effect.
   const listRunEffectsStmt = db.prepare(`
     SELECT node_id AS nodeId, attempt, invocation_id AS invocationId,
+           presented_key AS presentedKey,
            CASE WHEN result IS NOT NULL THEN 1 ELSE 0 END AS completed,
            created_at AS at
       FROM invocation_log
@@ -1229,6 +1274,18 @@ export function openSqliteStorage(dbPath: string): Storage {
       return row ? rowToRun(row) : null;
     },
 
+    async getRunsByIds(runIds) {
+      const ids = [...new Set(runIds)];
+      const out: RunRecord[] = [];
+      // Chunked under SQLite's bound-parameter limit; the inbox passes ≤ 500.
+      for (let i = 0; i < ids.length; i += 500) {
+        const chunk = ids.slice(i, i + 500);
+        const rows = db.prepare(`SELECT * FROM runs WHERE run_id IN (${chunk.map(() => '?').join(',')})`).all(...chunk);
+        for (const row of rows) out.push(rowToRun(row));
+      }
+      return out;
+    },
+
     async updateRun(runId, rawPatch) {
       const patch = withRemovalStamp(rawPatch);
       const existing = await this.getRun(runId);
@@ -1402,6 +1459,11 @@ export function openSqliteStorage(dbPath: string): Storage {
       return res.changes > 0;
     },
 
+    async runLogClosedBy(runId) {
+      const closed = terminalEventStmt.get(runId, ...TERMINAL_RUN_EVENT_TYPES) as { type: string } | undefined;
+      return closed?.type ?? null;
+    },
+
     async claimOrphanedRuns(workerId, nowMs, staleBeforeIso, leaseMs, limit) {
       return claimOrphanedRunsTxn(workerId, nowMs, staleBeforeIso, leaseMs, limit);
     },
@@ -1495,6 +1557,11 @@ export function openSqliteStorage(dbPath: string): Storage {
         data: JSON.stringify(record.data ?? null),
         resumeSchema: record.resumeSchema ? JSON.stringify(record.resumeSchema) : null,
         expiresAt: record.expiresAt ?? null,
+        // A row may be INSERTED already resolved (a replay fork's derived gate —
+        // executor/forkReplayResolutions.ts): it is never open, so no human can
+        // decide it and nothing surfaces it. Absent ⇒ an ordinary open row.
+        resolvedAt: record.resolvedAt ?? null,
+        resolvedValue: record.resolvedAt ? JSON.stringify(record.resolvedValue ?? null) : null,
       });
     },
 
@@ -1525,8 +1592,16 @@ export function openSqliteStorage(dbPath: string): Storage {
       return rows.map(rowToInterrupt);
     },
 
-    async listOpenInterruptsAll(limit) {
-      const rows = listOpenInterruptsAllStmt.all(limit);
+    async listOpenInterruptsForTenant(tenantId, limit) {
+      return listOpenInterruptsForTenantStmt.all(tenantId, limit).map(rowToInterrupt);
+    },
+
+    async listOpenInterruptsAll(limit, opts) {
+      const rows = opts?.newestFirst
+        ? listOpenInterruptsNewestStmt.all(limit)
+        : opts?.after
+          ? listOpenInterruptsAfterStmt.all(opts.after.createdAt, opts.after.createdAt, opts.after.interruptId, limit)
+          : listOpenInterruptsAllStmt.all(limit);
       return rows.map(rowToInterrupt);
     },
 
@@ -1836,7 +1911,7 @@ export function openSqliteStorage(dbPath: string): Storage {
       return row?.result ? JSON.parse(row.result) : null;
     },
 
-    async putInvocation({ runId, nodeId, attempt, invocationId }, result) {
+    async putInvocation({ runId, nodeId, attempt, invocationId }, result, opts) {
       putInvocationStmt.run(
         runId,
         nodeId,
@@ -1844,6 +1919,11 @@ export function openSqliteStorage(dbPath: string): Storage {
         invocationId,
         JSON.stringify(result ?? null),
         new Date().toISOString(),
+        opts?.presentedKey ?? null,
+        runId,
+        nodeId,
+        attempt,
+        invocationId,
       );
     },
     async claimInvocation({ runId, nodeId, invocationId }, { nowMs, staleAfterMs }) {
@@ -1866,10 +1946,11 @@ export function openSqliteStorage(dbPath: string): Storage {
 
     listRunEffects(runId: string) {
       const rows = listRunEffectsStmt.all(runId) as Array<{
-        nodeId: string; attempt: number; invocationId: string; completed: number; at: string;
+        nodeId: string; attempt: number; invocationId: string; presentedKey: string | null; completed: number; at: string;
       }>;
       return Promise.resolve(rows.map((r) => ({
         nodeId: r.nodeId, attempt: r.attempt, invocationId: r.invocationId,
+        ...(r.presentedKey ? { presentedKey: r.presentedKey } : {}),
         completed: r.completed === 1, at: r.at,
       })));
     },
@@ -2192,6 +2273,17 @@ export function openSqliteStorage(dbPath: string): Storage {
       return info.changes ?? 0;
     },
 
+    async sumManagedUsageForTenant(tenantId, providerId, dateUtc, alsoLike) {
+      // ADR 0821 D2 — prepared inline: only reached while the operator's tenant
+      // ceiling is configured, and only for multi-principal tenants.
+      const row = db.prepare(
+        `SELECT COALESCE(SUM(input_tokens), 0) AS i, COALESCE(SUM(output_tokens), 0) AS o
+           FROM managed_provider_usage
+          WHERE date = ? AND provider_id = ? AND (tenant_id = ? OR tenant_id LIKE ? ESCAPE ?)`,
+      ).get(dateUtc, providerId, tenantId, alsoLike.pattern, alsoLike.escape) as { i: number; o: number } | undefined;
+      return { inputTokens: Number(row?.i ?? 0), outputTokens: Number(row?.o ?? 0) };
+    },
+
     async getManagedUsage(tenantId, providerId, dateUtc) {
       const row = getManagedUsageStmt.get(tenantId, dateUtc, providerId) as
         | { input_tokens: number; output_tokens: number }
@@ -2387,7 +2479,11 @@ export function openSqliteStorage(dbPath: string): Storage {
       // route writes back) lost increments under concurrent appends.
       // better-sqlite3 transactions are synchronous — wrap into the
       // async signature with a thin Promise resolve.
+      // The stamp is made monotonic per session first, so same-millisecond
+      // appends list in append order rather than random-UUID order.
       db.transaction(() => {
+        const { head } = chatMessageHeadStmt.get(record.sessionId) as { head: string | null };
+        const createdAt = nextChatMessageCreatedAt(record.createdAt, head);
         appendChatMessageStmt.run(
           record.messageId,
           record.sessionId,
@@ -2395,9 +2491,9 @@ export function openSqliteStorage(dbPath: string): Storage {
           record.content,
           record.meta,
           record.authorSubject,
-          record.createdAt,
+          createdAt,
         );
-        bumpChatSessionStmt.run(record.createdAt, record.sessionId);
+        bumpChatSessionStmt.run(createdAt, record.sessionId);
       })();
     },
 
@@ -3019,6 +3115,27 @@ export function openSqliteStorage(dbPath: string): Storage {
         .prepare(`SELECT k, v FROM host_ext_kv WHERE k LIKE ? ESCAPE '\\' ORDER BY k`)
         .all(`${escaped}%`) as Array<{ k: string; v: string }>;
       return rows.map((r) => ({ key: r.k, value: r.v }));
+    },
+    async kvListPage(keyPrefix, { after, limit }) {
+      // ADR 0868 — a byte-order RANGE, not LIKE: SQLite LIKE is case-insensitive
+      // for ASCII (a superset), and a range is what the primary-key index serves
+      // in order, stopping at `limit`. BINARY collation compares UTF-8 bytes.
+      // Both bounds are compared by SQLite (bytes), never by JS (UTF-16 units).
+      const upper = prefixUpperBound(keyPrefix);
+      const lim = Math.max(0, Math.floor(limit));
+      const rows = (upper === null
+        ? db.prepare(`SELECT k, v FROM host_ext_kv WHERE k >= ? AND k > ? ORDER BY k LIMIT ?`).all(keyPrefix, after ?? '', lim)
+        : db.prepare(`SELECT k, v FROM host_ext_kv WHERE k >= ? AND k > ? AND k < ? ORDER BY k LIMIT ?`).all(keyPrefix, after ?? '', upper, lim)
+      ) as Array<{ k: string; v: string }>;
+      return rows.map((r) => ({ key: r.k, value: r.v }));
+    },
+    async kvCount(keyPrefix) {
+      const upper = prefixUpperBound(keyPrefix);
+      const row = (upper === null
+        ? db.prepare(`SELECT count(*) AS n FROM host_ext_kv WHERE k >= ?`).get(keyPrefix)
+        : db.prepare(`SELECT count(*) AS n FROM host_ext_kv WHERE k >= ? AND k < ?`).get(keyPrefix, upper)
+      ) as { n: number };
+      return row.n;
     },
     async kvListContaining(keyPrefix, needle) {
       // SQLite LIKE is case-INSENSITIVE for ASCII, which only WIDENS the superset —

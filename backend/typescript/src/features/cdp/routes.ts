@@ -30,21 +30,21 @@ import { listGovernanceDecisionsWithBound } from '../../host/governanceDecisionL
 import { listMergeEvents } from '../crm/crmMergeEventsService.js';
 import { collectEvent, collectEventBatch, listCollectedEvents } from './collectService.js';
 import { importCsv, type ImportOptions } from './csvImportService.js';
-import { resolveEffectiveAccess, ACT_AS_HEADER } from '../../host/accessControlService.js';
+import { actingAccess, callerTenantAccess } from '../../host/actingAccess.js';
 import { verifyChain, getAuditHead } from '../../host/auditChainService.js';
 
 const TOGGLE_ID = 'cdp';
 
 /** Admin gate (ADR 0301 / CDP-F) — audit-chain verification is a governance
- *  read reserved for tenant admins/owners. Resolves the acting member (or the
- *  tenant-owner principal when no act-as header is present, per the app's
- *  single-tenant-owner model) and requires an admin|owner role. */
+ *  read reserved for tenant admins/owners.
+ *
+ *  ADR 0797 (CE-8 / KEY-19): resolved from the CALLER. This used to pass `{}`
+ *  when no act-as header was sent, and `resolveEffectiveAccess` answers OWNER
+ *  for `{}` — so the role check passed for any authenticated caller (the shape
+ *  ADR 0731 fixed on entities and environments). Under act-as the named
+ *  member's roles are narrowed to the caller's own. */
 async function requireAdmin(req: Request): Promise<void> {
-  const actingMember = req.header(ACT_AS_HEADER);
-  const access = await resolveEffectiveAccess(
-    req.tenantId ?? 'default',
-    actingMember ? { memberId: actingMember.trim() } : {},
-  );
+  const access = await actingAccess(req, await callerTenantAccess(req));
   if (!(access.roles.includes('admin') || access.roles.includes('owner'))) {
     throw new OpenwopError('forbidden', 'Audit-chain verification requires an admin role.', 403, {});
   }
@@ -61,7 +61,7 @@ async function requireEnabled(req: Request): Promise<void> {
 }
 
 export function registerCdpRoutes({ app }: RouteDeps): void {
-  app.get('/v1/host/openwop-app/cdp/identity/resolve', async (req, res, next) => {
+  app.get('/host/openwop-app/cdp/identity/resolve', async (req, res, next) => {
     try {
       await requireEnabled(req);
       const type = requireString(req.query.type, 'type');
@@ -88,7 +88,7 @@ export function registerCdpRoutes({ app }: RouteDeps): void {
   });
 
   // Event schema registry (ADR 0269 / CDP-G) — versioned per-tenant event contracts.
-  app.get('/v1/host/openwop-app/cdp/event-schemas', async (req, res, next) => {
+  app.get('/host/openwop-app/cdp/event-schemas', async (req, res, next) => {
     try {
       await requireEnabled(req);
       res.json({ schemas: await listEventSchemas(tenantOf(req)) });
@@ -97,7 +97,7 @@ export function registerCdpRoutes({ app }: RouteDeps): void {
     }
   });
 
-  app.post('/v1/host/openwop-app/cdp/event-schemas', async (req, res, next) => {
+  app.post('/host/openwop-app/cdp/event-schemas', async (req, res, next) => {
     try {
       await requireEnabled(req);
       const body = (req.body ?? {}) as { eventType?: unknown; schema?: unknown };
@@ -108,7 +108,7 @@ export function registerCdpRoutes({ app }: RouteDeps): void {
     }
   });
 
-  app.post('/v1/host/openwop-app/cdp/event-schemas/:eventType/validate', async (req, res, next) => {
+  app.post('/host/openwop-app/cdp/event-schemas/:eventType/validate', async (req, res, next) => {
     try {
       await requireEnabled(req);
       const body = (req.body ?? {}) as { payload?: unknown };
@@ -120,7 +120,7 @@ export function registerCdpRoutes({ app }: RouteDeps): void {
   });
 
   // Event collection (ADR 0269 / CDP-G) — schema-validated ingest + PII tagging.
-  app.post('/v1/host/openwop-app/cdp/collect', async (req, res, next) => {
+  app.post('/host/openwop-app/cdp/collect', async (req, res, next) => {
     try {
       await requireEnabled(req);
       const b = (req.body ?? {}) as { eventType?: unknown; payload?: unknown; dedupeKey?: unknown };
@@ -135,7 +135,7 @@ export function registerCdpRoutes({ app }: RouteDeps): void {
 
   // Batch ingest (ADR 0269 batch-import follow-on) — the same schema-enforced collect
   // path, per row, capped + best-effort. 200 with a per-row summary (mixed accept/reject).
-  app.post('/v1/host/openwop-app/cdp/collect/batch', async (req, res, next) => {
+  app.post('/host/openwop-app/cdp/collect/batch', async (req, res, next) => {
     try {
       await requireEnabled(req);
       const b = (req.body ?? {}) as { events?: unknown };
@@ -149,7 +149,7 @@ export function registerCdpRoutes({ app }: RouteDeps): void {
   // collectEventBatch path (schema validation + PII tagging + per-row outcome reused,
   // never reimplemented). Whole-import 10k-row hard cap; parse errors → 400 fail-closed;
   // per-row failures surfaced without sinking the import. 200 with an aggregate summary.
-  app.post('/v1/host/openwop-app/cdp/collect/import', async (req, res, next) => {
+  app.post('/host/openwop-app/cdp/collect/import', async (req, res, next) => {
     try {
       await requireEnabled(req);
       const b = (req.body ?? {}) as { csv?: unknown; eventType?: unknown; eventTypeColumn?: unknown; dedupKeyField?: unknown };
@@ -164,7 +164,7 @@ export function registerCdpRoutes({ app }: RouteDeps): void {
     }
   });
 
-  app.get('/v1/host/openwop-app/cdp/collected-events', async (req, res, next) => {
+  app.get('/host/openwop-app/cdp/collected-events', async (req, res, next) => {
     try {
       await requireEnabled(req);
       const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 100));
@@ -178,7 +178,7 @@ export function registerCdpRoutes({ app }: RouteDeps): void {
   // COMPLETE history ADR 0264 has recorded all along (recordMergeEvent at
   // crmMergeService.ts:161). Disclosed bound, newest-first; unmerged events
   // stay listed (unmergedAt is the audit trail, not a deletion).
-  app.get('/v1/host/openwop-app/cdp/merge-events', async (req, res, next) => {
+  app.get('/host/openwop-app/cdp/merge-events', async (req, res, next) => {
     try {
       await requireEnabled(req);
       const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 100));
@@ -191,7 +191,7 @@ export function registerCdpRoutes({ app }: RouteDeps): void {
 
   // Unified governance decision log (ADR 0268 / CDP-F) — consent/purpose/firewall/
   // retention/masking decisions in one queryable stream, tenant-filtered.
-  app.get('/v1/host/openwop-app/cdp/governance-decisions', async (req, res, next) => {
+  app.get('/host/openwop-app/cdp/governance-decisions', async (req, res, next) => {
     try {
       await requireEnabled(req);
       const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 200));
@@ -207,7 +207,7 @@ export function registerCdpRoutes({ app }: RouteDeps): void {
   // Tamper-evident audit hash-chain verification (ADR 0301 / CDP-F) — admin-gated,
   // tenant-scoped: walks the tenant's consent/governance-decision chain and reports
   // whether it is intact (and, if not, the first broken seq).
-  app.get('/v1/host/openwop-app/cdp/audit-chain/verify', async (req, res, next) => {
+  app.get('/host/openwop-app/cdp/audit-chain/verify', async (req, res, next) => {
     try {
       await requireEnabled(req);
       await requireAdmin(req);

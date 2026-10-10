@@ -7,24 +7,38 @@
  *    time — never the false "beacon not installed" claim.
  *  - AN-SP-3: a stale response from the previous org/window never lands.
  *  - AN-R2-1: the trend chart renders for windowed views with data.
+ *
+ * Sabotage witnesses (grade-tests wave 8): forcing the summary-failure branch
+ * off, dropping the `days !== undefined` quiet-window branch, forcing
+ * `historyKnown` false, removing the summary read's `fresh()` guard, rendering
+ * no TrendChart, or faking a flat-line series on a failed trend read each turn
+ * a case here red; so does mounting the Pocket with another agent or scope.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
-import { render, screen, fireEvent, cleanup } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
-import type { AnalyticsSummary, TrendPoint } from '../analyticsClient.js';
 
-const getSummary = vi.fn();
-const getEvents = vi.fn(async (..._a: unknown[]) => [] as unknown[]);
-const getTrend = vi.fn(async (..._a: unknown[]): Promise<TrendPoint[]> => []);
-const getNavReport = vi.fn(async (..._a: unknown[]) => ({ rows: [], totalRecorded: 0 }));
+// ADR 0768 D5 — stub the Pocket so the page test reads WHICH agent and WHAT scope it mounts.
+vi.mock('../../../chat/ChatPocket.js', () => ({
+  ChatPocket: ({ agentId, contextLabel }: { agentId: string; contextLabel?: unknown }) => (
+    <div data-testid="pocket" data-agent={agentId}>{contextLabel as string}</div>
+  ),
+}));
+import { render, screen, fireEvent, cleanup, act } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
+import type { AnalyticsSummary } from '../analyticsClient.js';
+import type * as Client from '../analyticsClient.js';
+
+const getSummary = vi.fn<typeof Client.getSummary>();
+const getEvents = vi.fn<typeof Client.getEvents>();
+const getTrend = vi.fn<typeof Client.getTrend>();
+const getNavReport = vi.fn<typeof Client.getNavReport>();
 
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 vi.mock('../analyticsClient.js', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
-  getSummary: (...a: unknown[]) => getSummary(...a),
-  getEvents: (...a: unknown[]) => getEvents(...a),
-  getTrend: (...a: unknown[]) => getTrend(...a),
-  getNavReport: (...a: unknown[]) => getNavReport(...a),
+  getSummary: (...a: Parameters<typeof Client.getSummary>) => getSummary(...a),
+  getEvents: (...a: Parameters<typeof Client.getEvents>) => getEvents(...a),
+  getTrend: (...a: Parameters<typeof Client.getTrend>) => getTrend(...a),
+  getNavReport: () => getNavReport(),
   listOrgs: async () => [{ orgId: 'org:1', name: 'Acme' }],
 }));
 vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
@@ -36,15 +50,18 @@ const { AnalyticsPage } = await import('../AnalyticsPage.js');
 const summary = (total: number): AnalyticsSummary => ({
   total, sessions: 2, byType: { pageview: total, event: 0, conversion: 0 },
   topPaths: [], utmSources: [], vitals: [],
-} as unknown as AnalyticsSummary);
+});
 
 const renderPage = () => render(<MemoryRouter><AnalyticsPage /></MemoryRouter>);
 
 beforeEach(() => {
-  vi.clearAllMocks();
-  getNavReport.mockResolvedValue({ rows: [], totalRecorded: 0 });
+  vi.resetAllMocks();
+  getNavReport.mockResolvedValue({ weeks: [], rows: [] });
   getEvents.mockResolvedValue([]);
   getTrend.mockResolvedValue([]);
+  // A default summary for every case: the Pocket case sets none, and under
+  // clearAllMocks it used to borrow the previous case's — alone it threw.
+  getSummary.mockResolvedValue({ summary: summary(5) });
 });
 afterEach(cleanup);
 
@@ -65,7 +82,7 @@ describe('AN-SP-2 / ANL-UX-2 — the empty state is decided from a WIRE SIGNAL',
   // nothing else. `firstEventAt` is the signal that actually discriminates,
   // and these three cases are the three states `total === 0` collapsed into one.
   it('a quiet 30-day window on a tenant that HAS reported says so and offers all time', async () => {
-    getSummary.mockResolvedValue({ summary: summary(0), comparison: undefined, firstEventAt: '2026-01-05T10:00:00.000Z' });
+    getSummary.mockResolvedValue({ summary: summary(0), firstEventAt: '2026-01-05T10:00:00.000Z' });
     renderPage();
     await screen.findByText(/no events in the last 30 days/i);
     expect(screen.queryByText(/no analytics yet/i)).toBeNull();
@@ -79,7 +96,7 @@ describe('AN-SP-2 / ANL-UX-2 — the empty state is decided from a WIRE SIGNAL',
     // ANL-UX-2 R2 — `lifetime` is what makes the absence of `firstEventAt` a
     // STATEMENT rather than a gap; without it the page must not claim either
     // way (pinned in summaryFailureScope.test.tsx).
-    getSummary.mockResolvedValue({ summary: summary(0), comparison: undefined, lifetime: {} });
+    getSummary.mockResolvedValue({ summary: summary(0), lifetime: {} });
     renderPage();
     await screen.findByText(/no analytics yet/i);
     expect(screen.queryByText(/no events in the last 30 days/i)).toBeNull();
@@ -88,39 +105,37 @@ describe('AN-SP-2 / ANL-UX-2 — the empty state is decided from a WIRE SIGNAL',
   it('all-time zero with a REPORTING beacon is the web-vitals-only state, not "no analytics yet"', async () => {
     // `total` excludes web-vital telemetry, so a vitals-only site read as
     // never-installed on the all-time view. Now it says what is true.
-    getSummary.mockResolvedValue({ summary: summary(0), comparison: undefined, firstEventAt: '2026-01-05T10:00:00.000Z' });
+    getSummary.mockResolvedValue({ summary: summary(0), firstEventAt: '2026-01-05T10:00:00.000Z' });
     renderPage();
     fireEvent.click(await screen.findByRole('button', { name: /show all time/i }));
     await screen.findByText(/only performance telemetry so far/i);
     expect(screen.queryByText(/no analytics yet/i)).toBeNull();
   });
-
-  it('all-time zero with NO history keeps the true not-installed copy (positive case)', async () => {
-    getSummary.mockResolvedValue({ summary: summary(0), comparison: undefined, lifetime: {} });
-    renderPage();
-    await screen.findByText(/no analytics yet/i);
-  });
 });
 
 describe('AN-SP-3 — stale responses never land', () => {
   it('the previous window\'s late summary does not overwrite the new one', async () => {
-    let resolveFirst!: (v: unknown) => void;
+    let resolveFirst!: (v: Awaited<ReturnType<typeof Client.getSummary>>) => void;
     getSummary
-      .mockImplementationOnce(() => new Promise((r) => { resolveFirst = r; }))
-      .mockResolvedValue({ summary: summary(7), comparison: undefined });
+      .mockImplementationOnce(() => new Promise<Awaited<ReturnType<typeof Client.getSummary>>>((r) => { resolveFirst = r; }))
+      .mockResolvedValue({ summary: summary(7) });
     renderPage();
     // Switch the window while the first read hangs.
     const select = await screen.findByLabelText(/period|window/i);
     fireEvent.change(select, { target: { value: '7' } });
-    resolveFirst({ summary: summary(999), comparison: undefined }); // stale lands last
-    await new Promise((r) => setTimeout(r, 20));
+    await screen.findAllByText('7'); // the NEW window's summary landed
+    await act(async () => {
+      resolveFirst({ summary: summary(999) }); // stale lands last
+      for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+    });
     expect(screen.queryByText('999')).toBeNull();
+    expect(screen.getAllByText('7').length).toBeGreaterThan(0);
   });
 });
 
 describe('AN-R2-1 — the trend chart', () => {
   it('renders for a windowed view with data; hidden when the read fails', async () => {
-    getSummary.mockResolvedValue({ summary: summary(5), comparison: undefined });
+    getSummary.mockResolvedValue({ summary: summary(5) });
     getTrend.mockResolvedValue([
       { day: '2026-08-03', pageviews: 1, events: 0, conversions: 0, uniques: 0 },
       { day: '2026-08-04', pageviews: 4, events: 0, conversions: 0, uniques: 0 },
@@ -136,8 +151,18 @@ describe('AN-R2-1 — the trend chart', () => {
     // its figures; the earlier immediate queryByText passed on the first tick
     // (while everything was still loading) and proved nothing.
     await screen.findAllByText(/pageviews/i);
-    await new Promise((r) => setTimeout(r, 20)); // let the rejection settle
+    // ANL-UX-18 — the declared failed state is the signal the rejection landed.
+    await screen.findByText(/daily trend couldn.t be loaded/i);
     expect(screen.queryByText(/per utc day/i)).toBeNull();
     expect(document.querySelector('.an-trend')).toBeNull();
+  });
+});
+
+describe('ADR 0768 D5 — the feature assistant Pocket', () => {
+  it('mounts this feature\'s agent with an honest scope (orgs the caller can read)', async () => {
+    renderPage();
+    const pocket = await screen.findByTestId('pocket');
+    expect(pocket.getAttribute('data-agent')).toBe('vendor.openwop-app.analytics.agents.insights');
+    expect(pocket.textContent).toBe('analytics for organizations you can read');
   });
 });

@@ -23,7 +23,7 @@ import type { Storage } from '../src/storage/storage.js';
 import type { RunRecord } from '../src/types.js';
 
 const SUPER_TENANT = 'org:test-outbox-super';
-const OPS = '/v1/host/openwop-app/operations';
+const OPS = '/host/openwop-app/operations';
 
 let BASE: string;
 let server: http.Server;
@@ -63,7 +63,7 @@ function client() {
 let n = 0;
 async function login(tenantId: string) {
   const c = client();
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `outbox-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await c.post('/host/openwop-app/test/login', { email: `outbox-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return c;
 }

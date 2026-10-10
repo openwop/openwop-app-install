@@ -14,7 +14,7 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
-import { PROTOCOL_VERSION } from '../src/routes/discovery.js';
+import { preferredVersion } from '../src/middleware/protocolVersion.js';
 import { LEGACY_SUBJECT_ISSUER, opaquePrincipal, runOwner, subjectChainDepth, type RunSubject } from '../src/host/runOwner.js';
 
 const TOKEN = 'dev-token';
@@ -35,6 +35,7 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
 
+const V2 = { 'OpenWOP-Version': '2' };
 async function jf<T = unknown>(path: string, init: RequestInit = {}): Promise<{ status: number; body: T; headers: Headers }> {
   const res = await fetch(`${BASE}${path}`, { ...init, headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}`, ...((init.headers as Record<string, string>) ?? {}) } });
   const raw = res.status === 204 || res.status === 304 ? undefined : await res.json();
@@ -43,7 +44,7 @@ async function jf<T = unknown>(path: string, init: RequestInit = {}): Promise<{ 
 
 async function waitTerminal(runId: string): Promise<void> {
   for (let i = 0; i < 100; i++) {
-    const r = await jf<{ status: string }>(`/v1/runs/${runId}`);
+    const r = await jf<{ status: string }>(`/runs/${runId}`);
     if (['completed', 'failed', 'cancelled'].includes(r.body.status)) return;
     await new Promise((r) => setTimeout(r, 50));
   }
@@ -51,32 +52,35 @@ async function waitTerminal(runId: string): Promise<void> {
 
 describe('RFC 0165 §A — protocolVersions[] (ADR 0625)', () => {
   it('is a non-empty unique array of MAJOR.MINOR strings at the document ROOT that contains the scalar', async () => {
-    const doc = (await jf<{ protocolVersion: string; protocolVersions: unknown; capabilities?: Record<string, unknown> }>('/.well-known/openwop')).body;
-    expect(doc.protocolVersion).toBe(PROTOCOL_VERSION);
+    // ADR 0812 P3c-0 — read the v2 document; its scalar is the host's `preferredVersion`
+    // (`1.1` through the overlap, `2.0` once v1 retires), not a pinned `1.1`.
+    const doc = (await jf<{ protocolVersion: string; protocolVersions: unknown; capabilities?: Record<string, unknown> }>('/.well-known/openwop', { headers: V2 })).body;
+    expect(doc.protocolVersion).toBe(preferredVersion());
     expect(Array.isArray(doc.protocolVersions)).toBe(true);
     const arr = doc.protocolVersions as string[];
     expect(arr.length).toBeGreaterThan(0);
     for (const v of arr) expect(v).toMatch(GRAMMAR);
     expect(new Set(arr).size).toBe(arr.length);
     expect(arr).toContain(doc.protocolVersion);
-    // A root property, not a capability family: not mirrored into the wrapper.
-    expect(doc.capabilities && 'protocolVersions' in doc.capabilities).toBe(false);
+    // A root property, not a capability family: the closed v2 root has no wrapper to mirror into.
+    expect(doc.capabilities).toBeUndefined();
   });
 });
 
 describe('RFC 0165 §C.2 — discovery ETag / If-None-Match → 304 (ADR 0625)', () => {
   it('sends a strong ETag equal to Capabilities-Etag, answers 304 on a match and 200 on a mismatch', async () => {
-    const first = await fetch(`${BASE}/.well-known/openwop`);
+    const first = await fetch(`${BASE}/.well-known/openwop`, { headers: V2 });
     const etag = first.headers.get('etag');
     expect(etag).toMatch(/^"[0-9a-f]{16}"$/);
-    expect(first.headers.get('capabilities-etag')).toBe(etag);
-    const again = await fetch(`${BASE}/.well-known/openwop`, { headers: { 'if-none-match': etag! } });
+    // ADR 0812 P3c-0 — major 2 supersedes the v1 `Capabilities-Etag` with the standard ETag.
+    expect(first.headers.get('capabilities-etag')).toBeNull();
+    const again = await fetch(`${BASE}/.well-known/openwop`, { headers: { ...V2, 'if-none-match': etag! } });
     expect(again.status).toBe(304);
     expect(again.headers.get('etag')).toBe(etag);
     expect((await again.text()).length).toBe(0);
-    const weak = await fetch(`${BASE}/.well-known/openwop`, { headers: { 'if-none-match': `W/${etag}` } });
+    const weak = await fetch(`${BASE}/.well-known/openwop`, { headers: { ...V2, 'if-none-match': `W/${etag}` } });
     expect(weak.status).toBe(304);
-    const miss = await fetch(`${BASE}/.well-known/openwop`, { headers: { 'if-none-match': '"0000000000000000"' } });
+    const miss = await fetch(`${BASE}/.well-known/openwop`, { headers: { ...V2, 'if-none-match': '"0000000000000000"' } });
     expect(miss.status).toBe(200);
     expect(miss.headers.get('etag')).toBe(etag);
   });
@@ -84,19 +88,21 @@ describe('RFC 0165 §C.2 — discovery ETag / If-None-Match → 304 (ADR 0625)',
 
 describe('RFC 0165 §B — owner.subject on the snapshot, the run.started echo, and the fork (ADR 0625)', () => {
   it('a run created with the operator API key carries an api-key/workload subject whose subjectId IS owner.principal; run.started echoes it; the fork copies it verbatim', async () => {
-    const created = await jf<{ runId: string }>('/v1/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs: { text: 'x' } }) });
+    const created = await jf<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs: { text: 'x' } }) });
     expect([201, 202]).toContain(created.status);
     const runId = created.body.runId;
     await waitTerminal(runId);
 
-    const snap = (await jf<{ owner?: Owner }>(`/v1/runs/${runId}`)).body;
+    const snap = (await jf<{ owner?: Owner }>(`/runs/${runId}`)).body;
     const owner = snap.owner;
     expect(owner, 'an authenticated run MUST carry the owner block').toBeDefined();
-    expect(owner!.principal).toMatch(/^[0-9a-f]{16}$/);
+    // ADR 0812 P2b — the major-2 owner block is `{ tenant, subject }`: v2 carries no
+    // `principal`, so the opaque workload id is witnessed on `subject.subjectId` instead.
+    expect(owner!.principal, 'major 2 carries no principal on the owner block').toBeUndefined();
     expect(owner!.principalKind, 'a workload credential has no RFC 0132 principalKind').toBeUndefined();
     const subject = owner!.subject!;
     expect(subject.tenant).toBe(owner!.tenant);
-    expect(subject.subjectId).toBe(owner!.principal);
+    expect(subject.subjectId).toMatch(/^[0-9a-f]{16}$/);
     expect(subject.lane).toBe('api-key');
     expect(subject.kind).toBe('workload');
     expect(subject.issuer).toBe('urn:openwop-app:env-key');
@@ -111,29 +117,29 @@ describe('RFC 0165 §B — owner.subject on the snapshot, the run.started echo, 
     // An ABSENT cursor means "from the first event"; `run.started` IS sequence 0,
     // so `lastSequence=0` would exclude it (the cursor is exclusive). `lastSequence`
     // at run.started's own sequence excludes it (strictly-after semantics).
-    const viaCursor = (await jf<{ events: Array<{ type: string; sequence: number }> }>(`/v1/runs/${runId}/events/poll?timeout=1`)).body.events;
+    // Major 2 names the cursor `afterSequence` (`events.md` §Poll: `lastSequence` is not a parameter).
+    const viaCursor = (await jf<{ events: Array<{ type: string; sequence: number }> }>(`/runs/${runId}/events/poll?timeout=1`)).body.events;
     const startedViaCursor = viaCursor.find((e) => e.type === 'run.started');
     expect(startedViaCursor, 'an ABSENT cursor MUST include run.started (RFC 0171 §A.3: it is sequence 0, and the cursor is exclusive)').toBeDefined();
-    const after = (await jf<{ events: Array<{ type: string; sequence: number }> }>(`/v1/runs/${runId}/events/poll?lastSequence=${startedViaCursor!.sequence}&timeout=1`)).body.events;
+    const after = (await jf<{ events: Array<{ type: string; sequence: number }> }>(`/runs/${runId}/events/poll?afterSequence=${startedViaCursor!.sequence}&timeout=1`)).body.events;
     expect(after.some((e) => e.type === 'run.started')).toBe(false);
     expect(after.every((e) => e.sequence > startedViaCursor!.sequence)).toBe(true);
 
     // The run.started echo is the SAME block. No cursor: `run.started` is sequence 0
     // and the poll cursor is exclusive, so `fromSeq=0` would exclude the very event
     // this leg is about.
-    const events = (await jf<{ events?: Array<{ type: string; payload?: { owner?: Owner } }> } | Array<{ type: string; payload?: { owner?: Owner } }>>(`/v1/runs/${runId}/events/poll?limit=200`)).body;
+    const events = (await jf<{ events?: Array<{ type: string; payload?: { owner?: Owner } }> } | Array<{ type: string; payload?: { owner?: Owner } }>>(`/runs/${runId}/events/poll?limit=200`)).body;
     const list = Array.isArray(events) ? events : (events.events ?? []);
     const started = list.find((e) => e.type === 'run.started');
     expect(started, 'run.started MUST be in the log').toBeDefined();
     expect(started!.payload?.owner).toEqual(owner);
 
-    // §B.4 — the fork keeps tenant + subject (+ principal) from the SOURCE.
-    const fork = await jf<{ runId: string }>(`/v1/runs/${runId}:fork`, { method: 'POST', body: JSON.stringify({ fromSeq: 0, mode: 'replay' }) });
+    // §B.4 — the fork keeps tenant + subject from the SOURCE (v2 has no principal).
+    const fork = await jf<{ runId: string }>(`/runs/${runId}:fork`, { method: 'POST', body: JSON.stringify({ fromSeq: 0, mode: 'replay' }) });
     expect(fork.status).toBe(201);
     await waitTerminal(fork.body.runId);
-    const child = (await jf<{ owner?: Owner }>(`/v1/runs/${fork.body.runId}`)).body;
+    const child = (await jf<{ owner?: Owner }>(`/runs/${fork.body.runId}`)).body;
     expect(child.owner?.tenant).toBe(owner!.tenant);
-    expect(child.owner?.principal).toBe(owner!.principal);
     expect(child.owner?.subject).toEqual(subject);
   });
 });
@@ -171,10 +177,10 @@ describe('RFC 0165 §B.3 — legacy synthesis and consistency guards (host/runOw
   });
   it('a client-supplied metadata.owner is stripped at run creation (reserved key)', async () => {
     const forged = { principal: 'ffff', subject: { issuer: 'https://evil.example', subjectId: 'ffff', lane: 'saml', kind: 'user', keyClass: 'opaque-idp' } };
-    const created = await jf<{ runId: string }>('/v1/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs: { text: 'x' }, metadata: { owner: forged } }) });
+    const created = await jf<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs: { text: 'x' }, metadata: { owner: forged } }) });
     expect([201, 202]).toContain(created.status);
     await waitTerminal(created.body.runId);
-    const snap = (await jf<{ owner?: Owner }>(`/v1/runs/${created.body.runId}`)).body;
+    const snap = (await jf<{ owner?: Owner }>(`/runs/${created.body.runId}`)).body;
     expect(snap.owner?.principal).not.toBe('ffff');
     expect(snap.owner?.subject?.issuer).toBe('urn:openwop-app:env-key');
   });

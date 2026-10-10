@@ -36,7 +36,7 @@ beforeAll(async () => {
     const d = getToggleDefault(id);
     if (d) await saveConfig({ ...d, status: 'on' }, 'test');
   }
-  const login = await fetch(`${BASE}/v1/host/openwop-app/test/login`, {
+  const login = await fetch(`${BASE}/host/openwop-app/test/login`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ email: 'central@acme.test', tenantId: 't-central' }),
   });
@@ -73,18 +73,18 @@ describe('ADR 0419 Option D — central gate scoping', () => {
 
 describe('ADR 0419 Option D — the central gate BITES a feature with no per-feature code (webinars)', () => {
   it('403s a non-entitled authed tenant, then passes once the Marketing bundle is owned', async () => {
-    const orgId = (await (await authed('/v1/host/openwop-app/orgs', { method: 'POST', body: JSON.stringify({ name: 'Acme' }) })).json() as { orgId: string }).orgId;
+    const orgId = (await (await authed('/host/openwop-app/orgs', { method: 'POST', body: JSON.stringify({ name: 'Acme' }) })).json() as { orgId: string }).orgId;
     // webinars ∈ Marketing bundle, no per-feature entitlement code — gated centrally.
-    expect((await authed(`/v1/host/openwop-app/webinars/orgs/${orgId}/events`)).status).toBe(403);
+    expect((await authed(`/host/openwop-app/webinars/orgs/${orgId}/events`)).status).toBe(403);
     await processStripeEvent('t-central', subEvent('evt_c1', 'marketing'));
-    expect((await authed(`/v1/host/openwop-app/webinars/orgs/${orgId}/events`)).status).not.toBe(403);
+    expect((await authed(`/host/openwop-app/webinars/orgs/${orgId}/events`)).status).not.toBe(403);
   });
 });
 
 describe('ADR 0419 Option D — public routes are EXEMPT (ADR 0176 shopper rule)', () => {
   it('a public (unauthed, no principal) route is never 403d on the operator plan', async () => {
     // funnels public read — a bogus slug 404s; the point is it is NOT a 401/403 plan error.
-    const res = await fetch(`${BASE}/v1/host/openwop-app/public/some-org/funnels/nonexistent`);
+    const res = await fetch(`${BASE}/host/openwop-app/public/some-org/funnels/nonexistent`);
     expect(res.status).not.toBe(403);
     expect(res.status).not.toBe(401);
   });
@@ -98,7 +98,7 @@ describe('ADR 0446 D.1 — the per-choke entitlement call still gates after the 
   // i.e. the swap did NOT quietly turn the gate into a no-op.
   it('GET /crm/contacts 403s a non-entitled tenant, then passes once the CRM bundle is owned', async () => {
     expect(isSellableBundleFeature('crm')).toBe(true);
-    const path = '/v1/host/openwop-app/crm/contacts';
+    const path = '/host/openwop-app/crm/contacts';
     expect((await authed(path)).status).toBe(403);
     await processStripeEvent('t-central', subEvent('evt_crm1', 'crm'));
     expect((await authed(path)).status).not.toBe(403);
@@ -113,7 +113,7 @@ describe('ADR 0419 §Correction (2026-07-19) — the two features the original a
   // These cases pin that they now gate centrally.
   it('cdp 403s a non-entitled authed tenant, then passes once customer-data-platform is owned', async () => {
     expect(isSellableBundleFeature('cdp')).toBe(true);
-    const path = '/v1/host/openwop-app/cdp/identity/resolve?type=email&value=a@b.test';
+    const path = '/host/openwop-app/cdp/identity/resolve?type=email&value=a@b.test';
     expect((await authed(path)).status).toBe(403);
     await processStripeEvent('t-central', subEvent('evt_cdp1', 'customer-data-platform'));
     expect((await authed(path)).status).not.toBe(403);
@@ -121,7 +121,7 @@ describe('ADR 0419 §Correction (2026-07-19) — the two features the original a
 
   it('destination-sync 403s a non-entitled authed tenant, then passes once the bundle is owned', async () => {
     expect(isSellableBundleFeature('destination-sync')).toBe(true);
-    const path = '/v1/host/openwop-app/destination-sync/syncs';
+    const path = '/host/openwop-app/destination-sync/syncs';
     expect((await authed(path)).status).toBe(403);
     await processStripeEvent('t-central', subEvent('evt_ds1', 'customer-data-platform'));
     expect((await authed(path)).status).not.toBe(403);
@@ -136,10 +136,10 @@ describe('ADR 0419 §Correction (2026-07-19) — the two features the original a
       if (d) await saveConfig({ ...d, status: 'off' }, 'test');
     }
     try {
-      const r1 = await authed('/v1/host/openwop-app/cdp/identity/resolve?type=email&value=a@b.test');
+      const r1 = await authed('/host/openwop-app/cdp/identity/resolve?type=email&value=a@b.test');
       expect(r1.status).toBe(404);
       expect(JSON.stringify(await r1.json())).toContain('CDP is not enabled for this tenant.');
-      const r2 = await authed('/v1/host/openwop-app/destination-sync/syncs');
+      const r2 = await authed('/host/openwop-app/destination-sync/syncs');
       expect(r2.status).toBe(404);
       expect(JSON.stringify(await r2.json())).toContain('Destination Sync is not enabled for this tenant.');
     } finally {

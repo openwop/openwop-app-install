@@ -1,12 +1,20 @@
 /**
- * KT-PORT-7b — the ONE canonical merge-chain survivor resolver (`resolveContactSurvivor`),
- * consolidated into CRM (the merge owner) from the hand-rolled one-hop copies in
- * `findContactByEmail` + kicktodo `contactBridgeService`. Pins the multi-hop fix +
- * fail-closed edges, and that `findContactByEmail` never returns a tombstone.
+ * ADR 0263 / ADR 0449 (KT-PORT-7b) — the ONE canonical merge-chain survivor
+ * resolver (`resolveContactSurvivor`), consolidated into CRM (the merge owner)
+ * from the hand-rolled one-hop copies in `findContactByEmail` + kicktodo
+ * `contactBridgeService`. Pins the multi-hop fix + fail-closed edges, and that
+ * `findContactByEmail` never returns a tombstone.
+ *
+ * Sabotage-witnessed (w4 grade-tests): capping the walk at 2 hops reds the
+ * multi-hop case; dropping the tenant check reds fail-closed; replacing the
+ * follow in `findContactByEmail` with a bare `getContact` reds the third case.
+ * That third case pins the identity index at the ORIGINAL tombstone first — a
+ * merge's own `reindexContact` re-points the address straight at the survivor,
+ * so without the pin the follow was never exercised (w4 probe: vacuous).
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
-import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
+import { hostExtStorage, initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { createContact, resolveContactSurvivor, findContactByEmail, getContact } from '../src/features/crm/contactsService.js';
 import { mergeContacts } from '../src/features/crm/crmMergeService.js';
 
@@ -41,8 +49,14 @@ describe('resolveContactSurvivor (KT-PORT-7b)', () => {
     const c = await createContact({ tenantId: T, name: 'C', email: 'c2@s.test' });
     await mergeContacts(T, b.contactId, a.contactId);
     await mergeContacts(T, c.contactId, b.contactId);
+    // Pin the address's index row at the ORIGINAL tombstone A (the state a lagging
+    // or pre-merge index leaves) so the lookup must walk A → B → C itself.
+    const identKey = `hostext:cdp:contact-ident:${T}::email::chain@s.test`;
+    const row = JSON.parse((await hostExtStorage().kvGet(identKey))!) as { contactId: string };
+    await hostExtStorage().kvSet(identKey, JSON.stringify({ ...row, contactId: a.contactId }));
     const found = await findContactByEmail(T, 'chain@s.test');
     expect(found).not.toBeNull();
+    expect(found!.contactId).toBe(c.contactId); // the live end of the chain
     expect(found!.mergedInto).toBeUndefined(); // never a tombstone
     // and it IS the live survivor (getContact confirms it's not merged away)
     expect((await getContact(found!.contactId))?.mergedInto).toBeUndefined();

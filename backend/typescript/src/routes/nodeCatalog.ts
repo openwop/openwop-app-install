@@ -19,7 +19,7 @@ import { resolveDisabledPacks } from '../host/packVisibility.js';
 import { tenantOf } from '../host/requestSubject.js';
 
 export function registerNodeCatalogRoute(app: Express): void {
-  app.get('/v1/host/openwop-app/node-catalog', async (req, res, next) => {
+  app.get('/host/openwop-app/node-catalog', async (req, res, next) => {
     try {
       // ADR 0194 Phase 3 — per-tenant pack enablement: hide nodes from packs the
       // caller's workspace disabled (availability curation on the AUTHORING

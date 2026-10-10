@@ -16,6 +16,10 @@
  * Regression guard for the latent gating bug: the `/scim/v2/*` routes
  * self-authenticate with a constant-time SCIM-bearer compare, so they MUST bypass
  * the global session/bearer middleware (like the SAML ACS + /v1/interrupts/{token}).
+ *
+ * Sabotage that turns it red: delete `'/scim/v2',` from `PUBLIC_PATH_PREFIXES`
+ * (`middleware/auth.ts`) ⇒ the 201 cases 401; `if (a.length !== b.length ||
+ * !timingSafeEqual(a, b)) {` → `if (false) {` (`authScim.ts`) ⇒ the 401 cases 201.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import express, { type Express } from 'express';
@@ -31,6 +35,8 @@ import { __resetHostExtPersistence, initHostExtPersistence } from '../src/host/h
 import { __resetUsersStore, getUserByPrincipal } from '../src/features/users/usersService.js';
 
 const SCIM_BEARER = 'scim-secret-bearer-0123456789';
+const ENV_KEYS = ['OPENWOP_AUTH_ENFORCE_BEARER', 'OPENWOP_SCIM_BEARER', 'OPENWOP_SCIM_TENANT'] as const;
+const SAVED_ENV = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
 const dir = mkdtempSync(join(tmpdir(), 'owop-scim-routes-'));
 
 let server: http.Server;
@@ -67,15 +73,16 @@ beforeAll(async () => {
 afterAll(async () => {
   await new Promise<void>((r) => server.close(() => r()));
   rmSync(dir, { recursive: true, force: true });
-  delete process.env.OPENWOP_AUTH_ENFORCE_BEARER;
-  delete process.env.OPENWOP_SCIM_BEARER;
-  delete process.env.OPENWOP_SCIM_TENANT;
+  for (const k of ENV_KEYS) {
+    if (SAVED_ENV[k] === undefined) delete process.env[k];
+    else process.env[k] = SAVED_ENV[k];
+  }
 });
 
-beforeEach(() => {
+beforeEach(async () => {
   __resetHostExtPersistence();
   initHostExtPersistence(openSqliteStorage(join(dir, 'scim.db')));
-  void __resetUsersStore();
+  await __resetUsersStore();
 });
 
 describe('SCIM /scim/v2 routes — reachable under the hardened bearer-required posture', () => {
@@ -89,14 +96,15 @@ describe('SCIM /scim/v2 routes — reachable under the hardened bearer-required 
     expect((await getUserByPrincipal('scim', 'scim:joiner@acme.test'))!.userId).toBe(json.id);
   });
 
-  it('a wrong bearer is rejected by the route (401), not minted into an anon session', async () => {
-    const res = await post('/scim/v2/Users', 'not-the-scim-bearer', { userName: 'x@acme.test' });
+  it.each([
+    ['a wrong bearer', 'not-the-scim-bearer'],
+    ['no bearer', null],
+  ])('%s is rejected 401 unauthenticated by the route — not minted into an anon session, nothing provisioned', async (_label, bearer) => {
+    const res = await post('/scim/v2/Users', bearer, { userName: 'x@acme.test' });
     expect(res.status).toBe(401);
-  });
-
-  it('no bearer → 401', async () => {
-    const res = await post('/scim/v2/Users', null, { userName: 'x@acme.test' });
-    expect(res.status).toBe(401);
+    expect(((await res.json()) as { error?: string }).error).toBe('unauthenticated');
+    expect(res.headers.get('set-cookie') ?? '').not.toMatch(/__session=[^;]/);
+    expect(await getUserByPrincipal('scim', 'scim:x@acme.test')).toBeNull();
   });
 
   it('Groups membership sync is reachable with the bearer (201)', async () => {
@@ -108,6 +116,8 @@ describe('SCIM /scim/v2 routes — reachable under the hardened bearer-required 
     expect(res.status).toBe(201);
     const json = (await res.json()) as { members: Array<{ value: string }> };
     expect(json.members).toEqual([{ value: 'eng@acme.test' }]);
+    // The membership is PERSISTED on the principal, not just echoed.
+    expect((await getUserByPrincipal('scim', 'scim:eng@acme.test'))!.groups).toEqual(['Engineers']);
   });
 });
 
@@ -137,5 +147,6 @@ describe('SCIM /scim/v2 routes — 404 when OPENWOP_SCIM_BEARER is unset', () =>
       redirect: 'manual',
     });
     expect(res.status).toBe(404);
+    expect(((await res.json()) as { error?: string }).error).toBe('not_found');
   });
 });

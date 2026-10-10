@@ -9,11 +9,17 @@
  * host orchestrator — no feature→feature import) short-circuits to allow so a resolved
  * approval isn't re-deferred.
  *
+ * ADR 0834: every production lane builds this through `host/laneFirewall.ts` (the census
+ * test pins it as the only caller). Every `require-approval` carries an ORIGIN —
+ * `baseline` (the user's own safe-mode ask) or `policy` (a tenant rule, the enforce
+ * default, the platform floor) — and only a `baseline` ask yields to the user's bypass.
+ *
  * @see docs/adr/0135-capability-firewall.md
+ * @see docs/adr/0834-capability-firewall-exit-decision.md
  */
 import { evaluateComposition, classesOf } from './compositionEvaluator.js';
 import { resolveToolCapability } from './toolCapabilityResolver.js';
-import type { CapabilityRule, CapabilityVerdict, FirewallMode, ToolCapabilityDescriptor } from './types.js';
+import type { ApprovalOrigin, CapabilityRule, CapabilityVerdict, FirewallMode, ToolCapabilityDescriptor } from './types.js';
 
 const CAPABILITY_FIREWALL_KEY = 'capabilityFirewall';
 
@@ -71,7 +77,11 @@ export const RISKY_FALLBACK: ToolCapabilityDescriptor = { safetyTier: 'write', e
  *  restores the code-exec "Run code?" gate dropped on the builtin agent-tool path (#957). */
 export const SENSITIVE_APPROVAL_TOOLS: ReadonlySet<string> = new Set([
   'openwop:feature.code-exec.nodes.run', // run code
-  'openwop:core.files.write',            // write a host file
+  // ADR 0834 D4 — `openwop:core.files.write` was listed here and no agent tool ever
+  // registered it (`core.files.write` is a NODE id); a dead entry made the set read
+  // broader than it was. Removed; `safe-mode-baseline-census.test.ts` now requires every
+  // member to be a registered tool. New asks are DECLARED on the tool
+  // (`BuiltinTool.safeModeApproval`), not added here.
   'openwop:core.openwop.http.fetch',     // off-host egress
   // ADR 0442 Guide wave (Wave 2) — KickBot's one bounded write: logging the
   // participant's OWN check-in commits durable, NON-reversible domain state, so
@@ -82,20 +92,28 @@ export const SENSITIVE_APPROVAL_TOOLS: ReadonlySet<string> = new Set([
 
 export function buildFirewallHook(opts: {
   rules: readonly CapabilityRule[];
+  /** Tools a human with authority approved for this conversation (the conversation-tools
+   *  ledger) for an ask of `policy` origin. Satisfies an ask of EITHER origin. */
   approvedTools?: ReadonlySet<string>;
+  /** ADR 0834 D2 — approvals that only answered a `baseline` (safe-mode) ask: a ledger row
+   *  raised by the baseline, or voice's one-shot in-session card. They satisfy a `baseline`
+   *  ask only, never a tenant/platform/enforce `policy` ask. */
+  approvedBaselineTools?: ReadonlySet<string>;
   unknownToolPolicy?: 'skip' | 'treat-as-risky';
   onUnclassified?: (toolName: string) => void;
   /** ADR 0150 — tools that need approval in `safe` mode regardless of the (opt-in) firewall
    *  rules. A `deny` from the rules still wins; otherwise these become `require-approval`. */
   requireApprovalTools?: ReadonlySet<string>;
+  /** ADR 0834 D4 — the per-tool reason a `baseline` ask shows (a declared
+   *  `safeModeApproval.reason`), e.g. pointing a held `compose-and-run` at the reviewed
+   *  `workflows.propose` lane. Absent ⇒ the generic safe-mode reason. */
+  baselineReasons?: ReadonlyMap<string, string>;
   /** ADR 0610 D5 / PMC-1 — in `safe` mode, gate the host-mediated egress CLASS, not just a
    *  hard-coded name set: any tool whose RFC 0078 capability descriptor is `egress:'host-mediated'`
-   *  (email/slack/sms/a2a/mcp senders …) needs approval, even if it is not in `requireApprovalTools`.
-   *  A `deny` still wins; a `bypass`/approved downgrade still applies. Driven by the CLASS so a
-   *  NEW egress tool is gated the day it ships, without editing a name list. */
+   *  needs approval, even if it is not in `requireApprovalTools`. A `deny` still wins. */
   gateHostMediatedEgress?: boolean;
-  /** ADR 0150 — `bypass` permission mode: the user pre-authorized this turn, so any
-   *  `require-approval` is downgraded to `allow`. A hard `deny` is NEVER downgraded. */
+  /** ADR 0150 — `bypass` permission mode: the user pre-authorized this turn. ADR 0834 D2:
+   *  it downgrades a `baseline` ask only. A `policy` ask and a `deny` are NEVER downgraded. */
   bypassApproval?: boolean;
   /** ADR 0397 — the enforcement posture. `default-allow` (default) is today's behavior;
    *  `shadow` logs would-blocks but applies allow; `enforce` denies an unmatched action. */
@@ -103,27 +121,32 @@ export function buildFirewallHook(opts: {
   /** ADR 0397 — the posture for an UNMATCHED action under deny modes (default `deny`). */
   defaultDenyVerdict?: 'deny' | 'require-approval';
   /** ADR 0397 — shadow-mode sink: a would-block the firewall COMPUTED but did NOT apply
-   *  (the call proceeds). Recorded to the governance decision log for the migration review.
-   *  Deduped per-turn by tool name so a chatty run doesn't flood the log (OQ-1). */
+   *  (the call proceeds). Deduped by tool name in `shadowLogged` (OQ-1). */
   onShadowWouldBlock?: (toolName: string, wouldBe: 'deny' | 'require-approval') => void;
+  /** ADR 0834 D1 — the dedupe set for shadow would-blocks. A lane that builds a hook per
+   *  CALL (voice) passes one set per session so the decisions log is not flooded; absent ⇒
+   *  one set per hook (per turn). */
+  shadowLogged?: Set<string>;
+  /** ADR 0834 D1 — every verdict that narrowed a call (deny / require-approval), for the
+   *  governance decision log. Called by the hook itself, so every lane that evaluates logs. */
+  onDecision?: (toolName: string, verdict: CapabilityVerdict) => void;
   /** ADR 0397 Phase 5 — the superadmin platform-baseline rules. Evaluated alongside the
    *  tenant rules; the MORE restrictive verdict wins, so a platform deny cannot be weakened
    *  by a tenant allow-rule. Absent/empty ⇒ no floor. */
   platformRules?: readonly CapabilityRule[];
 }): FirewallHook {
   const fallback = opts.unknownToolPolicy === 'treat-as-risky' ? RISKY_FALLBACK : null;
-  // ADR 0724 D1 — safe posture IMPLIES the egress-class gate. ADR 0610 D5 added it as an
-  // opt-in flag and only 2 of 4 production callers passed it (the voice bridge and the direct
-  // dispatch route build a permanently-safe hook and never opted in). Deriving it from
+  // ADR 0724 D1 — safe posture IMPLIES the egress-class gate. Deriving it from
   // `requireApprovalTools` makes every lane equal BY CONSTRUCTION; `false` stays a legible
-  // opt-out; a hook with no safe posture (rules-only) is unchanged. Stated honestly: MEASURED
-  // at ADR 0724, NO registered agent tool classifies as host-mediated egress (all ids are
+  // opt-out; a hook with no safe posture (rules-only) is unchanged. MEASURED at ADR 0724 and
+  // again at ADR 0834: NO registered agent tool classifies as host-mediated egress (all ids are
   // `openwop:`-prefixed; the classifier's egress rows are node type ids), so this changes no
-  // verdict today — `test/safe-mode-egress-gate-implied.test.ts` §D0 pins that population.
+  // agent-lane verdict today — the safe-mode baseline that actually covers off-host agent tools
+  // is the declared `safeModeApproval` set (ADR 0834 D4, `safe-mode-baseline-census.test.ts`).
   const gateEgress = opts.gateHostMediatedEgress ?? (opts.requireApprovalTools !== undefined);
   const mode: FirewallMode = opts.mode ?? 'default-allow';
   const defaultDenyVerdict = opts.defaultDenyVerdict ?? 'deny';
-  const loggedShadow = new Set<string>(); // per-turn dedup for shadow would-blocks (OQ-1)
+  const loggedShadow = opts.shadowLogged ?? new Set<string>(); // dedup for shadow would-blocks (OQ-1)
   // Resolve a tool → descriptor. `forceRisky` (for the PLATFORM floor) applies the risky
   // fallback for an unclassified tool regardless of the tenant's `unknownToolPolicy`, so a
   // tenant's `skip` choice cannot drop the operator's global floor.
@@ -147,6 +170,28 @@ export function buildFirewallHook(opts: {
     }
     return { seenKeys, seenCounts };
   };
+  // ADR 0150 / 0610 D5 — is this tool held by the user's own safe-mode baseline? The egress
+  // CLASS is read on the RAW descriptor (resolveToolCapability), NOT `resolve()` — under
+  // `treat-as-risky` resolve() folds RISKY_FALLBACK (egress:'host-mediated') into EVERY
+  // unclassified tool, which would mass-defer benign reads ("read before you write").
+  const baselineHolds = (name: string): boolean =>
+    Boolean(opts.requireApprovalTools?.has(name)) || (gateEgress && resolveToolCapability(name)?.egress === 'host-mediated');
+  const baselineAsk = (name: string): CapabilityVerdict => ({
+    decision: 'require-approval', origin: 'baseline',
+    reason: opts.baselineReasons?.get(name) ?? 'This action needs your approval (safe mode).',
+  });
+  // ADR 0834 D2 — who may satisfy an ask. A `policy` ask is satisfied ONLY by an approval a
+  // human with authority gave for a policy ask (`approvedTools`); a `baseline` ask also by the
+  // user's own bypass or a baseline-only approval. A `deny` is never touched by this.
+  const satisfied = (name: string, origin: ApprovalOrigin | undefined): boolean => {
+    if (opts.approvedTools?.has(name)) return true;
+    if (origin === 'policy') return false;
+    return Boolean(opts.bypassApproval || opts.approvedBaselineTools?.has(name));
+  };
+  const finish = (name: string, v: CapabilityVerdict): CapabilityVerdict => {
+    if (v.decision !== 'allow') { try { opts.onDecision?.(name, v); } catch { /* observability never decides */ } }
+    return v;
+  };
   return {
     evaluate(seenToolNames, nextToolName) {
       // ADR 0397 Phase 5 — the PLATFORM FLOOR is a hard, mode-INDEPENDENT gate, evaluated
@@ -158,85 +203,72 @@ export function buildFirewallHook(opts: {
         try {
           const { seenKeys, seenCounts } = buildSeen(seenToolNames, true);
           const nextDescP = resolve(nextToolName, true) ?? RISKY_FALLBACK; // always classified for the floor
-          platformFloor = evaluateComposition(seenKeys, classesOf(nextDescP), opts.platformRules, seenCounts);
+          platformFloor = asPolicy(evaluateComposition(seenKeys, classesOf(nextDescP), opts.platformRules, seenCounts));
         } catch {
           platformFloor = { decision: 'deny', reason: 'firewall evaluation error (platform baseline)' };
         }
-        if (platformFloor.decision === 'deny') return platformFloor; // hard floor
+        if (platformFloor.decision === 'deny') return finish(nextToolName, platformFloor); // hard floor
       }
       try {
         const nextDesc = resolve(nextToolName);
         const { seenKeys, seenCounts } = buildSeen(seenToolNames, false);
         const nextKeys = nextDesc ? classesOf(nextDesc) : null;
-        // Tenant composition verdict + the deny-mode default posture.
+        // Tenant composition verdict + the deny-mode default posture — both `policy` origin.
         let verdict: CapabilityVerdict = nextKeys
-          ? evaluateComposition(seenKeys, nextKeys, opts.rules, seenCounts)
+          ? asPolicy(evaluateComposition(seenKeys, nextKeys, opts.rules, seenCounts))
           : { decision: 'allow' }; // unclassified + policy 'skip' (rules skipped; mode still applies)
         // ADR 0397 — deny-mode default posture. A composition that fell through (allow with
         // NO matched rule — nothing allow-listed this action) resolves to the mode's default.
         // An explicit `allow` rule (allow WITH a ruleId) carves an exception and is left
-        // untouched. Shadow records the would-block ONLY IF the call ultimately proceeds
-        // (see below) — so a platform floor that then blocks isn't logged as "ran".
+        // untouched. Shadow records the would-block ONLY IF the call ultimately proceeds.
         const fellThrough = verdict.decision === 'allow' && verdict.ruleId === undefined;
         let shadowWouldBlock: 'deny' | 'require-approval' | null = null;
         if (mode !== 'default-allow' && fellThrough) {
           if (mode === 'shadow') shadowWouldBlock = defaultDenyVerdict; // apply allow; maybe record later
-          else verdict = { decision: defaultDenyVerdict, reason: 'No rule allow-listed this action (default-deny).' }; // enforce
+          else verdict = asPolicy({ decision: defaultDenyVerdict, reason: 'No rule allow-listed this action (default-deny).' }); // enforce
         }
         // Platform baseline ANDs UNDER the tenant verdict (most-restrictive wins). A platform
         // deny already returned above; a platform require-approval combines here.
         verdict = mostRestrictive(platformFloor, verdict);
-        // ADR 0150 — permission-mode baseline: a sensitive tool needs approval in `safe` mode,
-        // even when the rules would allow it. `deny` still wins.
-        // ADR 0610 D5 / PMC-1 — gate the host-mediated egress CLASS too (not just the name
-        // set), so email/slack/sms/a2a/mcp sends — and any future egress tool — defer for
-        // approval in safe mode without a hand-kept list.
-        // Gate the egress CLASS on the RAW descriptor (resolveToolCapability), NOT the
-        // `resolve()` result — under `unknownToolPolicy:'treat-as-risky'` resolve() folds in
-        // RISKY_FALLBACK (egress:'host-mediated') for EVERY unclassified tool, which would
-        // mass-defer benign reads (documents.get / get-design — "read before you write").
-        // Only a genuinely-classified host-mediated egress tool is class-gated here.
-        const classGatedEgress = gateEgress && resolveToolCapability(nextToolName)?.egress === 'host-mediated';
-        if (verdict.decision !== 'deny' && (opts.requireApprovalTools?.has(nextToolName) || classGatedEgress)) {
-          verdict = { decision: 'require-approval', reason: 'This action needs your approval (safe mode).' };
-        }
-        // CGOV-4 + ADR 0150 bypass: downgrade a `require-approval` to allow when the user is in
-        // bypass mode OR already approved this tool — but MUST NOT bypass a hard `deny`.
-        if (verdict.decision === 'require-approval' && (opts.bypassApproval || opts.approvedTools?.has(nextToolName))) {
+        // ADR 0150 — the safe-mode baseline RAISES an allow to a `baseline` ask. ADR 0834 D2:
+        // it never REPLACES a policy verdict (the first draft of the overlay did, which made
+        // a tool that was both sensitive and policy-held skippable by bypass).
+        if (verdict.decision === 'allow' && baselineHolds(nextToolName)) verdict = baselineAsk(nextToolName);
+        if (verdict.decision === 'require-approval' && satisfied(nextToolName, verdict.origin)) {
           verdict = { decision: 'allow' };
         }
         // Shadow would-block is recorded ONLY when the call actually proceeds (final allow),
         // so the decisions log never claims a call ran that a platform floor (or anything
-        // else) blocked. Deduped per turn by tool name (OQ-1).
+        // else) blocked. Deduped by tool name (OQ-1).
         if (shadowWouldBlock && verdict.decision === 'allow' && !loggedShadow.has(nextToolName)) {
           loggedShadow.add(nextToolName);
           opts.onShadowWouldBlock?.(nextToolName, shadowWouldBlock);
         }
-        return verdict;
+        return finish(nextToolName, verdict);
       } catch {
         // ADR 0397 Phase 5 — fail-closed ON THE FIREWALL ITSELF, keyed on mode: in `enforce`
         // an evaluation error MUST deny; in `default-allow`/`shadow` it preserves today's
         // non-blocking behavior — BUT never weaker than the platform floor already computed,
         // and never weaker than the ADR 0150 sensitive-tool baseline (CFP Phase-2 review
-        // MEDIUM-1: an eval throw previously skipped requireApprovalTools entirely, letting a
-        // code-exec call through on an internal error).
+        // MEDIUM-1). ADR 0834 D2: the baseline part is `baseline` origin (bypass may skip
+        // it); the already-computed floor keeps `policy` and is not downgraded on this path.
         let errVerdict: CapabilityVerdict = mode === 'enforce'
           ? { decision: 'deny', reason: 'firewall evaluation error' }
           : { decision: 'allow' };
-        if (errVerdict.decision !== 'deny' && !(opts.bypassApproval || opts.approvedTools?.has(nextToolName))) {
-          // ADR 0610 D5 / PMC-1 — keep the egress-class gate fail-closed even on an eval error:
-          // resolve the class in its own guard (a classification throw ⇒ fall back to the name set).
-          let egressGated = false;
-          // RAW classification only (no RISKY_FALLBACK) — see the happy-path note above.
-          if (gateEgress) { try { egressGated = resolveToolCapability(nextToolName)?.egress === 'host-mediated'; } catch { egressGated = false; } }
-          if (opts.requireApprovalTools?.has(nextToolName) || egressGated) {
-            errVerdict = { decision: 'require-approval', reason: 'This action needs your approval (safe mode).' };
-          }
+        if (errVerdict.decision === 'allow') {
+          let held = false;
+          try { held = baselineHolds(nextToolName); } catch { held = Boolean(opts.requireApprovalTools?.has(nextToolName)); }
+          if (held && !satisfied(nextToolName, 'baseline')) errVerdict = baselineAsk(nextToolName);
         }
-        return mostRestrictive(platformFloor, errVerdict);
+        return finish(nextToolName, mostRestrictive(platformFloor, errVerdict));
       }
     },
   };
+}
+
+/** Tag a rule-derived `require-approval` as `policy` origin (ADR 0834 D2). */
+function asPolicy(v: CapabilityVerdict): CapabilityVerdict {
+  return v.decision === 'require-approval' ? { ...v, origin: 'policy' } : v;
 }
 
 /** Combine two verdicts most-restrictively (deny > require-approval > allow). Ties resolve

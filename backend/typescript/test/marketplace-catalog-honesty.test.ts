@@ -16,6 +16,10 @@
  * MKT2-B2: `installed` means "has a registry install marker". It was rendered
  * as "Not installed" for packs mounted from the checkout that the executor is
  * actively running, behind an Install button that cannot succeed for them.
+ *
+ * Sabotage witnesses (wave 10): folding the read failure to `[]`, throwing on an
+ * absent dir, swallowing `getListing`'s scan failure into null, disabling the
+ * direct per-pack read, hard-coding `origin` or `installed` — each turns its case red.
  */
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from 'node:fs';
@@ -106,7 +110,15 @@ describe('MKT2-B1 — an unreadable catalog is never rendered as an empty one', 
     // positive claim — for packs that exist, and the routes 404'd on it.
     expect(getListing('feature.example.nodes'), 'present when the catalog reads').toBeTruthy();
     failRead.code = 'EIO';
-    expect(() => getListing('feature.example.nodes'), 'must not answer "absent" from a failed read').toThrow();
+    // ADR 0826 (`MKT2-28`) — `getListing` now reads the pack's OWN dir first, so a
+    // failed CATALOG scan no longer decides a pack whose dir reads fine: that answer
+    // is a successful read, not a fold. The property under test is unchanged — a
+    // failed read never becomes "absent" — and it still bites wherever the answer
+    // DEPENDS on the scan (a name with no dir of its own).
+    // The pack's own dir reads fine, so this is a real answer — not "absent" and
+    // not a throw (wave 10: the old `'threw'` sentinel let a broken direct read pass).
+    expect(getListing('feature.example.nodes')?.packName, 'the direct read answers, independent of the failed scan').toBe('feature.example.nodes');
+    expect(() => getListing('feature.no-own-dir.nodes'), 'a scan-dependent answer still throws, never "absent"').toThrow();
   });
 });
 

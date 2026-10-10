@@ -11,3 +11,5 @@
 @import './global.css';
 @import './chrome/admin.css';
 @import './primitives/adr0510.css';
+@import './features/showcase.css';
+@import './features/claude-code.css';

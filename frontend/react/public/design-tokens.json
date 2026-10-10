@@ -1,0 +1,88 @@
+{
+  "$description": "OpenWOP video (film) identity tokens. Generated from the app design system — do not edit. Rules and specimens: /design-system (Video).",
+  "video": {
+    "canvas": {
+      "width": 1920,
+      "height": 1080,
+      "fps": 30,
+      "marginLeftPx": 160
+    },
+    "type": {
+      "headline": "serif",
+      "body": "sans",
+      "label": "mono",
+      "sizesPxAt1080p": {
+        "openingLine": 120,
+        "sceneTitle": 76,
+        "endCardLine": 160,
+        "bodyMin": 23,
+        "bodyMax": 36,
+        "monoLabelMin": 20,
+        "monoLabelMax": 26,
+        "readableFloor": 20
+      }
+    },
+    "story": {
+      "durationSecondsMin": 45,
+      "durationSecondsMax": 75,
+      "beats": [
+        "problem",
+        "stakes",
+        "turn",
+        "proof",
+        "payoff"
+      ]
+    },
+    "voice": {
+      "maxWordsPerSentence": 18,
+      "narrator": {
+        "provider": "ElevenLabs",
+        "model": "eleven_v4",
+        "voiceName": "Peter - British Narrator & Explainer",
+        "voiceId": "6Qg2hzCqEpqk0bR3ckiw"
+      }
+    },
+    "motion": {
+      "revealMsMin": 400,
+      "revealMsMax": 800,
+      "primaryMovementsAtOnce": 1
+    },
+    "sound": {
+      "narrationLufs": -16,
+      "ceilingDbtp": -1.5,
+      "effectsBelowVoiceDb": 12,
+      "effects": [
+        "tick",
+        "sweep",
+        "chime",
+        "refuse",
+        "wait",
+        "pop"
+      ],
+      "musicDefault": "none"
+    },
+    "accessibility": {
+      "minTextContrast": 4.5,
+      "captions": "required",
+      "autoplay": false
+    },
+    "color": {
+      "stage": "#1a1a17",
+      "stage-text": "#f4f1ea",
+      "stage-muted": "#a8a39a",
+      "stage-rule": "#4a4842",
+      "card": "#f4f1ea",
+      "card-text": "#1a1a17",
+      "card-muted": "#4a4842",
+      "card-faint": "#66624f",
+      "accent": "oklch(58% 0.13 40)",
+      "accent-on-stage": "oklch(72% 0.13 40)",
+      "accent-on-card": "oklch(46% 0.15 40)"
+    },
+    "fontFamily": {
+      "headline": "\"Instrument Serif\", \"Instrument Serif Fallback\", \"Times New Roman\", serif",
+      "body": "\"Geist\", \"Geist Fallback\", ui-sans-serif, system-ui, sans-serif",
+      "label": "\"Geist Mono\", ui-monospace, \"SF Mono\", Menlo, monospace"
+    }
+  }
+}

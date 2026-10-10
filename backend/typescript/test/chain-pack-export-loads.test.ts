@@ -39,7 +39,9 @@ const EXPORTED_MANIFEST = {
   description: 'Workflow-chain pack exported from the OpenWOP builder: "My Export". Declares 1 parameter(s) found in the graph. Rename the community.local.* placeholder before publishing.',
   author: 'openwop-app',
   license: 'Apache-2.0',
-  engines: { openwop: '^1.0.0' },
+  // ADR 0766 (NP-V2-8) — the exporter now writes the v2 engine range and pins
+  // every reference (RFC 0177 §E.1); an unpinned export is refused at register.
+  engines: { openwop: '>=1.0.0 <3.0.0' },
   chains: [
     {
       chainId: 'community.local.my-export',
@@ -55,8 +57,8 @@ const EXPORTED_MANIFEST = {
       },
       dag: {
         nodes: [
-          { id: 'draft', typeId: 'core.ai.chatCompletion', name: 'Draft', position: { x: 0, y: 0 }, config: { provider: 'anthropic', model: 'claude-sonnet-4-6' } },
-          { id: 'send', typeId: 'core.openwop.integration.email-send', name: 'Send', position: { x: 280, y: 0 }, config: { from: 'me@example.com' }, inputs: { to: '{{params.recipientEmail}}' } },
+          { id: 'draft', typeId: 'core.ai.chatCompletion@1.0.0', name: 'Draft', position: { x: 0, y: 0 }, config: { provider: 'anthropic', model: 'claude-sonnet-4-6' } },
+          { id: 'send', typeId: 'core.openwop.integration.email-send@1.0.0', name: 'Send', position: { x: 280, y: 0 }, config: { from: 'me@example.com' }, inputs: { to: '{{params.recipientEmail}}' } },
         ],
         edges: [{ from: 'draft', to: 'send' }],
       },
@@ -118,6 +120,26 @@ describe('a builder export loads as a chain pack', () => {
     const send = expanded.nodes.find((n) => n.typeId === 'core.openwop.integration.email-send')!;
     expect(JSON.stringify(send.inputs)).not.toContain('{{params.');
     expect(send.inputs).toMatchObject({ to: 'bound@example.com' });
+  });
+
+  it('ADR 0766 — the exporter\'s OLD unpinned shape is refused, so the pins above are load-bearing', () => {
+    const unpinned = JSON.parse(JSON.stringify(EXPORTED_MANIFEST)) as typeof EXPORTED_MANIFEST;
+    for (const n of unpinned.chains[0]!.dag.nodes) n.typeId = n.typeId.replace(/@.*$/, '');
+    const { errors } = installExport(unpinned);
+    expect(errors).toEqual([expect.objectContaining({ code: 'workflow_chain_unpinned' })]);
+  });
+
+  it('ADR 0766 — the LONGEST chainId the exporter can emit (16 + 112 = 128) still loads under the v2 schema', () => {
+    const longest = JSON.parse(JSON.stringify(EXPORTED_MANIFEST)) as typeof EXPORTED_MANIFEST;
+    const id = `community.local.${'x'.repeat(112)}`;
+    longest.name = id;
+    longest.chains[0]!.chainId = id;
+    expect(id.length).toBe(128);
+    expect(installExport(longest).errors).toEqual([]);
+    // …and one character more is refused — the bound is the schema's, not ours.
+    const over = JSON.parse(JSON.stringify(longest)) as typeof EXPORTED_MANIFEST;
+    over.chains[0]!.chainId = `${id}x`;
+    expect(installExport(over).errors).toEqual([expect.objectContaining({ code: 'workflow_chain_pack_manifest_invalid' })]);
   });
 
   it('FIXTURE GUARD: a manifest the loader SHOULD reject is rejected', () => {

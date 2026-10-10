@@ -3,7 +3,7 @@
  * host advertises `anonymousActor` (H43).
  *
  * MEASURED on prod 2026-08-17: an unauthenticated POST to
- * `/v1/host/openwop-app/mcp` answered 200. Not because auth was off — the
+ * `/host/openwop-app/mcp` answered 200. Not because auth was off — the
  * cookie posture MINTS an `anon:<sid>` principal for a credential-less caller
  * (ADR 0015) and marks it `req.anonymousPrincipal`, and the mount's boundary
  * (`principalFromReq`) only asked "is there a principal?". `auth.ts` says
@@ -41,7 +41,7 @@ beforeAll(async () => {
   delete process.env.OPENWOP_ANON_ACTOR_ENABLED;     // anonymousActor NOT advertised
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
-  const login = await fetch(`${BASE}/v1/host/openwop-app/test/login`, {
+  const login = await fetch(`${BASE}/host/openwop-app/test/login`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ email: `mcp-anon-${Date.now()}@acme.test` }),
   });
@@ -61,7 +61,7 @@ afterAll(async () => {
 
 describe('RFC 0153 §E — MCP mount vs anonymous principals (H43)', () => {
   it('a credential-less caller (anon cookie session minted for them) is REFUSED 401 with a flat envelope', async () => {
-    const r = await fetch(`${BASE}/v1/host/openwop-app/mcp`, { method: 'POST', headers: HDR, body: JSON.stringify(REQ) });
+    const r = await fetch(`${BASE}/host/openwop-app/mcp`, { method: 'POST', headers: HDR, body: JSON.stringify(REQ) });
     // Not 200: the auth middleware minted an anon principal, but that is not authentication.
     expect(r.status).toBe(401);
     const body = await r.json() as { error?: unknown; message?: unknown; details?: { reason?: unknown } };
@@ -75,7 +75,7 @@ describe('RFC 0153 §E — MCP mount vs anonymous principals (H43)', () => {
   it('when the host ADVERTISES anonymousActor (RFC 0132), the same anonymous caller is admitted — advert and behaviour agree', async () => {
     process.env.OPENWOP_ANON_ACTOR_ENABLED = 'true';
     try {
-      const r = await fetch(`${BASE}/v1/host/openwop-app/mcp`, { method: 'POST', headers: HDR, body: JSON.stringify(REQ) });
+      const r = await fetch(`${BASE}/host/openwop-app/mcp`, { method: 'POST', headers: HDR, body: JSON.stringify(REQ) });
       const body = await r.json() as { error?: unknown; details?: { reason?: unknown } };
       expect(body.details?.reason).not.toBe('anonymous_principal_refused');
       expect(r.status).toBe(200);
@@ -85,7 +85,7 @@ describe('RFC 0153 §E — MCP mount vs anonymous principals (H43)', () => {
   });
 
   it('a signed-in (cookie) principal reaches the mount — the boundary is anonymity, not cookies', async () => {
-    const r = await fetch(`${BASE}/v1/host/openwop-app/mcp`, { method: 'POST', headers: { ...HDR, cookie }, body: JSON.stringify(REQ) });
+    const r = await fetch(`${BASE}/host/openwop-app/mcp`, { method: 'POST', headers: { ...HDR, cookie }, body: JSON.stringify(REQ) });
     expect(r.status).toBe(200);
     const body = await r.json() as { result?: { resultType?: string } };
     expect(body.result?.resultType).toBe('complete');

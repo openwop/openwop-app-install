@@ -25,8 +25,10 @@ export async function authorizeConversationResolve(input: {
   runId: string;
   conversationId: string;
   callerUserId?: string | undefined;
+  /** ADR 0839 D1 — see `isVisibleToAsync`'s `principal`. */
+  callerPrincipal?: string | undefined;
 }): Promise<{ chatSessionId: string | undefined }> {
-  const { run, runId, conversationId, callerUserId } = input;
+  const { run, runId, conversationId, callerUserId, callerPrincipal } = input;
   // Fail closed on a terminal run (ADR 0067 §Security): a completed/failed/
   // cancelled run's gate is gone — neither an exchange nor a close may land.
   // (The token route maps stale tokens already; this guards the node route.)
@@ -47,7 +49,15 @@ export async function authorizeConversationResolve(input: {
     ? run.metadata['chatSessionId'] as string
     : undefined;
   const callerMeta = await getConversationMeta(run.tenantId, chatSessionId ?? conversationId).catch(() => null);
-  const callerMayResolve = await isVisibleToAsync(callerMeta, run.tenantId, callerUserId).catch(() => false);
+  // The owner rule compares against the key the chat session was STAMPED with:
+  // `chatSessions` stamps `ownerUserId` as `req.userId ?? principalId` and checks
+  // visibility with that same key, so this must too. The canonical
+  // `resolveCallerUser(...).userId` (`callerUserId`) is undefined for an anonymous
+  // visitor, so passing it alone denied the anon OWNER their own chat turn
+  // (`interrupt_not_found`, MEASURED on prod 2026-10-08: every anonymous chat
+  // message). `callerPrincipal` is the same derivation the stamp uses.
+  const callerKey = callerPrincipal ?? callerUserId;
+  const callerMayResolve = await isVisibleToAsync(callerMeta, run.tenantId, callerKey, callerPrincipal).catch(() => false);
   if (!callerMayResolve) {
     // Audit the deny (RTV-4 posture): a probe against another user's
     // conversation run should be visible in ops, not silent. Ids only — no

@@ -52,7 +52,7 @@ export const csmFeature: BackendFeature = {
     // unscopeable fan-in), agents 1.1.0 (the prompt states unscored ≠ low, that a
     // recorded measurement failure supersedes the number beside it, and that a
     // factor breakdown is only interpretable with its `healthMethod`).
-    { name: 'feature.csm.nodes', version: '1.4.0' },
-    { name: 'feature.csm.agents', version: '1.2.0' },
+    { name: 'feature.csm.nodes', version: '1.4.1' },
+    { name: 'vendor.openwop-app.csm.agents', version: '1.2.1' },
   ],
 };

@@ -16,6 +16,9 @@ import { resolveHeadlessAi } from '../../host/headlessAi.js';
 import { resolveMediaAsset } from '../../host/inMemorySurfaces.js';
 import { cleanString, cleanTagList, optionalCleanString } from '../../host/boundedStrings.js';
 import * as mediaStorage from './mediaStorage.js';
+import { createLogger } from '../../observability/logger.js';
+
+const log = createLogger('features.media');
 
 export interface MediaCollection {
   collectionId: string;
@@ -153,13 +156,82 @@ export const UNCATEGORIZED = 'none';
  * over-cap upload never orphans bytes. 409 (the same status the count cap used).
  */
 export async function assertOrgCapacity(tenantId: string, orgId: string, addBytes: number): Promise<void> {
-  const orgAssets = await assetsForOrg(tenantId, orgId); // DEBT-2 — bounded tenant read, not a cross-tenant scan
+  const tenantAssets = await listAssetsForTenant(tenantId); // DEBT-2 — bounded tenant read, not a cross-tenant scan
+  const orgAssets = tenantAssets.filter((a) => a.orgId === orgId);
   if (orgAssets.length >= MAX.perOrgAssets) {
     throw new OpenwopError('validation_error', `This org has the maximum ${MAX.perOrgAssets} assets.`, 409, { max: MAX.perOrgAssets });
   }
   const totalBytes = orgAssets.reduce((sum, a) => sum + a.sizeBytes, 0);
   if (totalBytes + addBytes > MAX.perOrgBytes) {
     throw new OpenwopError('validation_error', `This org has reached its media storage limit (${Math.round(MAX.perOrgBytes / (1024 * 1024))} MiB).`, 409, { maxBytes: MAX.perOrgBytes });
+  }
+  // ADR 0818 §3 — the per-org cap alone is not a quota: creating another org
+  // reset it, so a workspace's storage was unbounded. The workspace total is
+  // capped too (operator-tunable; read per call so tests and ops can move it).
+  const tenantMax = tenantMaxBytes();
+  const tenantBytes = tenantAssets.reduce((sum, a) => sum + a.sizeBytes, 0);
+  if (tenantBytes + addBytes > tenantMax) {
+    throw new OpenwopError('validation_error', `This workspace has reached its media storage limit (${Math.round(tenantMax / (1024 * 1024))} MiB).`, 409, { maxBytes: tenantMax, scope: 'workspace' });
+  }
+}
+
+/** ADR 0818 §3 — the workspace-wide media byte cap. Default 2 GiB. */
+function tenantMaxBytes(): number {
+  const raw = Number(process.env.OPENWOP_MEDIA_TENANT_MAX_BYTES);
+  return Number.isFinite(raw) && raw > 0 ? raw : 2 * 1024 * 1024 * 1024;
+}
+
+/** Longest a capacity-gated write waits for the one ahead of it, counted from
+ *  when that one STARTED its write. A write that HANGS must not wedge the
+ *  workspace's uploads on this instance; after this the next one proceeds. */
+let capacityWaitMs = 30_000;
+/** Test seam: shorten the bound. */
+export function __setCapacityWaitMs(ms: number): void { capacityWaitMs = ms; }
+
+interface CapacitySlot { started: Promise<void>; done: Promise<void> }
+const capacitySlots = new Map<string, CapacitySlot>();
+
+/**
+ * ADR 0818 §3 — check capacity and write as ONE step per workspace. The check
+ * reads committed rows, so two uploads that both checked before either wrote
+ * each saw room for itself and both landed (measured: six concurrent 1 KiB
+ * uploads against a 4 KiB cap, six 201s). Serializing check → write per tenant
+ * closes that within an instance; across Cloud Run instances the overshoot is
+ * bounded by instance count × one upload, not by request concurrency.
+ *
+ * Each writer waits for the one ahead to START, then for it to finish or for
+ * {@link capacityWaitMs} — the clock runs from the start of the write ahead,
+ * not from joining the queue, so ordinary slow writes still run one at a time
+ * (a queue-join clock let three of four 20 s writes overlap). A hung write
+ * delays only the writer behind it, by one bound.
+ */
+export async function withOrgCapacity<T>(tenantId: string, orgId: string, addBytes: number, write: () => Promise<T>): Promise<T> {
+  const ahead = capacitySlots.get(tenantId);
+  let markStarted!: () => void;
+  let markDone!: () => void;
+  const slot: CapacitySlot = {
+    started: new Promise<void>((resolve) => { markStarted = resolve; }),
+    done: new Promise<void>((resolve) => { markDone = resolve; }),
+  };
+  capacitySlots.set(tenantId, slot);
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    if (ahead) {
+      await ahead.started;
+      const timedOut = await Promise.race([
+        ahead.done.then(() => false),
+        new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(true), capacityWaitMs); }),
+      ]);
+      if (timedOut) log.warn('media_capacity_wait_timeout', { tenantId, waitMs: capacityWaitMs });
+    }
+    markStarted();
+    await assertOrgCapacity(tenantId, orgId, addBytes);
+    return await write();
+  } finally {
+    if (timer) clearTimeout(timer);
+    markStarted();
+    markDone();
+    if (capacitySlots.get(tenantId) === slot) capacitySlots.delete(tenantId);
   }
 }
 
@@ -870,7 +942,7 @@ export async function autotagAsset(tenantId: string, orgId: string, assetId: str
   }
   const entry = await resolveMediaAsset(a.serveToken);
   if (!entry) throw new OpenwopError('not_found', 'Asset bytes not found.', 404, { assetId });
-  const dispatch = await resolveHeadlessAi(tenantId, 'image');
+  const dispatch = await resolveHeadlessAi(tenantId, 'image', { featureId: 'media' });
   if (!dispatch) {
     throw new OpenwopError('validation_error', 'No vision-capable AI provider is available. Configure a default AI provider (with a vision-capable model) in BYOK settings.', 422, {});
   }
@@ -930,7 +1002,7 @@ export async function generateAltText(tenantId: string, orgId: string, assetId: 
   }
   const entry = await resolveMediaAsset(a.serveToken);
   if (!entry) throw new OpenwopError('not_found', 'Asset bytes not found.', 404, { assetId });
-  const dispatch = await resolveHeadlessAi(tenantId, 'image');
+  const dispatch = await resolveHeadlessAi(tenantId, 'image', { featureId: 'media' });
   if (!dispatch) {
     throw new OpenwopError('validation_error', 'No vision-capable AI provider is available. Configure a default AI provider (with a vision-capable model) in BYOK settings.', 422, {});
   }

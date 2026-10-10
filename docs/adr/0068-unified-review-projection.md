@@ -119,6 +119,10 @@ Mount the routes after `interrupts` and `approvals` in `registerAllRoutes.ts`. S
 - Should resolved reviews remain visible in the same endpoint by default, or require `status=resolved`?
 - How long should resolved projection rows be retained when their source is pruned?
 - Should the projection include full resume values, or only redacted summaries plus source links?
+  > **Answered for open interrupts (2026-10-08, ADR 0778 D10 correction):** neither.
+  > It carries the fields the answer FORM needs (`answerForm`) as a closed per-kind
+  > allowlist, so a typed review is answerable on the card. Raw `data` is never
+  > projected. Resume values after the fact are still not projected.
 
 ## Implementation record
 

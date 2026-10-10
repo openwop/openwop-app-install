@@ -17,6 +17,7 @@ import { useTranslation } from 'react-i18next';
 import { Modal } from '../ui/Modal.js';
 import { TextField, TextareaField, SelectField } from '../ui/Field.js';
 import { updateRosterEntry, type RosterEntry } from './rosterClient.js';
+import { writeErrorMessage } from './agentWriteAccess.js';
 
 /** Heartbeat cadence presets (ms). ADR 0313: 0 ⇒ host-default cadence (NOT
  *  off — the daemon runs it on the host default); -1 ⇒ explicit off. */
@@ -86,7 +87,7 @@ export function AgentDetailsEditor({
       });
       onSaved();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(writeErrorMessage(err, t('common:error_forbidden')));
       setSaving(false);
     }
   };

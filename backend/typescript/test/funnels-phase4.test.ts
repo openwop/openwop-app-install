@@ -48,17 +48,17 @@ function client() {
 
 async function marketer(): Promise<{ user: ReturnType<typeof client>; orgId: string }> {
   const user = client();
-  await user.post('/v1/host/openwop-app/test/login', { email: `fp4-${Date.now()}-${n++}@acme.test` });
-  const org = await user.post('/v1/host/openwop-app/orgs', { name: 'Funnel Co' });
+  await user.post('/host/openwop-app/test/login', { email: `fp4-${Date.now()}-${n++}@acme.test` });
+  const org = await user.post('/host/openwop-app/orgs', { name: 'Funnel Co' });
   return { user, orgId: org.body.orgId };
 }
 
-const authed = (orgId: string, suffix = ''): string => `/v1/host/openwop-app/funnels/orgs/${encodeURIComponent(orgId)}/funnels${suffix}`;
-const pub = (orgId: string, suffix = ''): string => `/v1/host/openwop-app/public/${encodeURIComponent(orgId)}/funnels${suffix}`;
+const authed = (orgId: string, suffix = ''): string => `/host/openwop-app/funnels/orgs/${encodeURIComponent(orgId)}/funnels${suffix}`;
+const pub = (orgId: string, suffix = ''): string => `/host/openwop-app/public/${encodeURIComponent(orgId)}/funnels${suffix}`;
 
 async function publishedPage(user: ReturnType<typeof client>, orgId: string, title: string): Promise<{ pageId: string; slug: string }> {
-  const created = await user.post(`/v1/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages`, { title });
-  await user.post(`/v1/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages/${created.body.pageId}/publish`);
+  const created = await user.post(`/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages`, { title });
+  await user.post(`/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages/${created.body.pageId}/publish`);
   return { pageId: created.body.pageId, slug: created.body.slug };
 }
 

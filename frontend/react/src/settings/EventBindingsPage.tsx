@@ -29,10 +29,11 @@ import {
   createHostEventBinding,
   setHostEventBindingEnabled,
   deleteHostEventBinding,
+  getHostEventCatalog,
   type HostEventBinding,
+  type HostEventCatalogEntry,
 } from '../client/hostEventBindingsClient.js';
 import { listWorkflowSummaries, type WorkflowSummaryDTO } from '../workflows/workflowsClient.js';
-import { KNOWN_HOST_EVENT_TYPES } from './hostEventCatalog.js';
 
 export function EventBindingsPage(): JSX.Element {
   const { t } = useTranslation('settings');
@@ -45,6 +46,11 @@ export function EventBindingsPage(): JSX.Element {
   const [workflowsFailed, setWorkflowsFailed] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [eventType, setEventType] = useState('');
+  // ADR 0825 — the event-type suggestions come from the backend catalog. A failed
+  // read is SAID, not shown as an empty list: free text still binds, but an empty
+  // datalist would read as "this host emits nothing".
+  const [catalog, setCatalog] = useState<HostEventCatalogEntry[]>([]);
+  const [catalogFailed, setCatalogFailed] = useState(false);
   const [workflowId, setWorkflowId] = useState('');
   const [creating, setCreating] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -86,6 +92,13 @@ export function EventBindingsPage(): JSX.Element {
     }
   }, []);
   useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => {
+    let live = true;
+    getHostEventCatalog()
+      .then((types) => { if (live) setCatalog(types); })
+      .catch(() => { if (live) setCatalogFailed(true); });
+    return () => { live = false; };
+  }, []);
 
   // Default the create form's workflow select to the first available option,
   // without clobbering a choice the operator already made.
@@ -198,6 +211,11 @@ export function EventBindingsPage(): JSX.Element {
           workflow id (the `?? id` fallback above, designed for ONE edge case)
           and the picker would claim the tenant has no workflows. */}
       {workflowsFailed ? <Notice variant="warning" announce={t('bindingsWorkflowsReadFailed')}>{t('bindingsWorkflowsReadFailed')}</Notice> : null}
+      {/* Visible, NOT announced: this read runs beside the workflow read and can
+          fail on the same paint, and the page gets one polite announcement
+          (noticeSweepTranche). The workflow failure is the false-conclusion one
+          ("no workflows"); a missing suggestion list on a free-text field is not. */}
+      {catalogFailed ? <Notice variant="warning">{t('bindingsCatalogReadFailed')}</Notice> : null}
 
       <div className="surface-card u-mb-3">
         <h2 className="u-fs-16 u-mt-0">{t('bindingsCreateHeading')}</h2>
@@ -212,7 +230,7 @@ export function EventBindingsPage(): JSX.Element {
             required
           />
           <datalist id="host-event-types">
-            {KNOWN_HOST_EVENT_TYPES.map((et) => <option key={et} value={et} />)}
+            {catalog.map((e) => <option key={e.emitted} value={e.emitted} label={e.type} />)}
           </datalist>
           <SelectField
             label={t('bindingsWorkflowLabel')}

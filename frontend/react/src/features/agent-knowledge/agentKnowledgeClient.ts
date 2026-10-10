@@ -50,12 +50,40 @@ const base = (agentId: string): string =>
   `${config.baseUrl}/host/openwop-app/agents/${encodeURIComponent(agentId)}/knowledge`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 
-async function asJson<T>(res: Response, ctx: string): Promise<T> {
-  if (!res.ok) {
-    let detail = '';
-    try { detail = ((await res.json()) as { message?: string })?.message ?? ''; } catch { /* non-JSON */ }
-    throw new Error(detail || `${ctx} returned ${res.status}`);
+/**
+ * KB2UX-3 — a failed call carries its HTTP STATUS (which `client/classifyHttpError`
+ * reads, so `loadErrorMessage` can say it in the user's language) and, when the
+ * server refused a write because the collection is MANAGED (ADR 0830 D4 —
+ * `details.managed`), which source owns it. The panel used to render
+ * `err.message` verbatim: the server's English sentence ("This collection is
+ * managed (synced from strategy); edit the source instead.") or, on the two
+ * no-content DELETEs, the literal `unbindCollection returned 403`. The message
+ * stays on the error for `console.warn` only.
+ */
+export class AgentKnowledgeRequestError extends Error {
+  readonly status: number;
+  readonly managed: string | undefined;
+  constructor(message: string, status: number, managed?: string) {
+    super(message);
+    this.name = 'AgentKnowledgeRequestError';
+    this.status = status;
+    this.managed = managed;
   }
+}
+
+async function requestError(res: Response, ctx: string): Promise<AgentKnowledgeRequestError> {
+  let detail = '';
+  let managed: string | undefined;
+  try {
+    const body = (await res.json()) as { message?: string; details?: { managed?: unknown } };
+    detail = body?.message ?? '';
+    if (typeof body?.details?.managed === 'string') managed = body.details.managed;
+  } catch { /* non-JSON */ }
+  return new AgentKnowledgeRequestError(detail || `${ctx} returned ${res.status}`, res.status, managed);
+}
+
+async function asJson<T>(res: Response, ctx: string): Promise<T> {
+  if (!res.ok) throw await requestError(res, ctx);
   return (await res.json()) as T;
 }
 
@@ -76,7 +104,7 @@ export async function bindCollection(agentId: string, collectionId: string): Pro
 
 export async function unbindCollection(agentId: string, collectionId: string): Promise<void> {
   const res = await fetch(`${base(agentId)}/bindings/${encodeURIComponent(collectionId)}`, fetchOpts({ method: 'DELETE', headers: authedHeaders() }));
-  if (!res.ok) throw new Error(`unbindCollection returned ${res.status}`);
+  if (!res.ok) throw await requestError(res, 'unbindCollection');
 }
 
 export async function ingestText(agentId: string, orgId: string, collectionId: string, title: string, text: string): Promise<unknown> {
@@ -94,7 +122,7 @@ export async function importFromConnection(agentId: string, orgId: string, colle
 
 export async function deleteDocument(agentId: string, orgId: string, collectionId: string, documentId: string): Promise<void> {
   const res = await fetch(`${base(agentId)}/collections/${encodeURIComponent(collectionId)}/documents/${encodeURIComponent(documentId)}`, fetchOpts({ method: 'DELETE', headers: jsonHeaders(), body: JSON.stringify({ orgId }) }));
-  if (!res.ok) throw new Error(`deleteDocument returned ${res.status}`);
+  if (!res.ok) throw await requestError(res, 'deleteDocument');
 }
 
 export async function setMemoryWritable(agentId: string, writable: boolean): Promise<AgentKnowledgeView> {

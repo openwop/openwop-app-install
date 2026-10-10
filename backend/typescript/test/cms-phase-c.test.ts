@@ -24,6 +24,7 @@ import { __hostExtStorage } from '../src/host/hostExtPersistence.js';
 import { processScheduledPublishes } from '../src/features/cms/publishSweep.js';
 import { buildCmsSurface } from '../src/features/cms/surface.js';
 import { hasPendingApprovalForPage } from '../src/host/approvalService.js';
+import { toWireTenant } from '../src/host/v2Ids.js';
 
 let BASE: string;
 let server: http.Server;
@@ -77,13 +78,13 @@ let n = 0;
 async function ownerOrg(): Promise<{ owner: Client; orgId: string; tenantId: string }> {
   const tenantId = `org:pc-${Date.now()}-${n++}`;
   const owner = client();
-  const r = await owner.post('/v1/host/openwop-app/test/login', { email: `pc-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await owner.post('/host/openwop-app/test/login', { email: `pc-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return { owner, orgId: org.body.orgId, tenantId };
 }
-const u = (orgId: string, suffix = ''): string => `/v1/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${suffix}`;
+const u = (orgId: string, suffix = ''): string => `/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${suffix}`;
 
 async function draftPage(owner: Client, orgId: string, title = 'Doc'): Promise<{ pageId: string; slug: string }> {
   const created = await owner.post(u(orgId, '/pages'), { title, sections: [{ type: 'hero', data: { heading: 'Hi' } }] });
@@ -100,18 +101,20 @@ const storage = () => {
 describe('C1 — lifecycle events → webhook pipeline', () => {
   it('publish fans out to a matching tenant-scoped subscription; a foreign tenant never matches', async () => {
     const { owner, orgId, tenantId } = await ownerOrg();
-    const sub = await owner.post('/v1/webhooks', { url: 'https://hooks.example.test/cms', events: ['host.cms.page.published'], tenantId });
+    const sub = await owner.post('/webhooks', { url: 'https://hooks.example.test/cms', events: ['host.cms.page.published'], tenantId });
     expect(sub.status, JSON.stringify(sub.body)).toBe(201);
 
     const { pageId } = await draftPage(owner, orgId);
     await owner.post(u(orgId, `/pages/${pageId}/publish`));
 
     const due = await storage().claimDueWebhookDeliveries(`t-${Date.now()}`, Date.now() + 1, 60_000, 50);
-    const mine = due.filter((d) => d.eventType === 'host.cms.page.published' && d.payload.includes(pageId));
+    const mine = due.filter((d) => d.eventType === 'openwop-app.cms.page-published' && d.payload.includes(pageId));
     expect(mine).toHaveLength(1);
-    const payload = JSON.parse(mine[0]!.payload) as { type: string; payload: Record<string, unknown> };
-    expect(payload.type).toBe('host.cms.page.published');
-    expect(payload.payload.tenantId).toBe(tenantId);
+    // A major-2 subscription: the body is `{ runId, event }`, the type is the v2 vendor
+    // name, and a tenantId field is the WIRE tenant (ADR 0814).
+    const payload = (JSON.parse(mine[0]!.payload) as { event: { type: string; payload: Record<string, unknown> } }).event;
+    expect(payload.type).toBe('openwop-app.cms.page-published');
+    expect(payload.payload.tenantId).toBe(toWireTenant(tenantId));
     expect(payload.payload.pageId).toBe(pageId);
 
     // A DIFFERENT tenant publishing does not hit this subscription.
@@ -259,7 +262,10 @@ describe('C6 — governed surface verbs', () => {
     const sectionId = draft.page.sections[0].sectionId as string;
     expect(draft.page.sections[0].data.heading).toBe('Hi');
 
-    // Overlay a locale onto the draft (sanitized like an editor save).
+    // Overlay a locale onto the draft (sanitized like an editor save). ADR 0836
+    // D10 — a run-written overlay needs `cms-localization` ON, as the route does.
+    const loc = getToggleDefault('cms-localization');
+    await saveConfig({ ...loc!, status: 'on' }, 'test');
     const upd = await surface.updateSectionDraft!({ orgId, pageId, sectionId, locale: 'pt-BR', data: { heading: 'Oi', url: 'javascript:alert(1)' } });
     expect(upd.updated).toBe(true);
     const viaRoute = await owner.get(u(orgId, `/pages/${pageId}`));

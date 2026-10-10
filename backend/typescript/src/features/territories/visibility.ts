@@ -22,7 +22,7 @@
  */
 
 import { resolveEffectiveAccess } from '../../host/accessControlService.js';
-import { resolveOne } from '../../host/featureToggles/service.js';
+import { resolveToggle } from '../../host/featureToggles/service.js';
 import { createLogger } from '../../observability/logger.js';
 import { setCrmVisibilityResolver, type CrmVisibilityQuery } from '../../host/crmRecordVisibility.js';
 
@@ -125,7 +125,8 @@ async function resolve(q: CrmVisibilityQuery): Promise<ReadonlySet<string>> {
   // Self-gate on toggle STATE (the resolver is registered unconditionally at
   // boot, like routes): territories OFF for this caller ⇒ NO scoping ⇒ allow-all,
   // so the CRM surface is byte-unchanged when the feature is disabled.
-  const toggle = await resolveOne('territories', { tenantId, userId: callerSubject });
+  // ADR 0819 §1 opt-out — OFF here LOOSENS a restriction, so a paywalled read would fail OPEN on a lapsed plan.
+  const toggle = await resolveToggle('territories', { tenantId, userId: callerSubject });
   if (!toggle || !toggle.enabled) return all;
 
   const access = await resolveEffectiveAccess(tenantId, { subject: callerSubject, orgId });

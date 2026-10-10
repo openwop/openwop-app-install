@@ -21,7 +21,7 @@ export const messages = {
   workspaceCreateFailed: 'No se pudo crear el espacio de trabajo.',
   newOrgPlaceholder: 'Nombre de la nueva organización',
   newOrgAriaLabel: 'Nombre de la nueva organización',
-  createOrgRequiresScope: 'Requiere host:org:manage',
+  createOrgRequiresScope: 'Solo los propietarios del espacio de trabajo pueden crear organizaciones',
   noOrgsTitle: 'Aún no hay organizaciones',
   noOrgsBody: 'Cree una para añadir equipos y miembros.',
   deleteOrgAriaLabel: 'Eliminar {{name}}',
@@ -32,7 +32,7 @@ export const messages = {
 
   // OrgDetailPanel — "View as" lens
   viewAsLabel: 'Ver como',
-  viewAsOwnerOption: 'Propietario (usted): acceso completo',
+  viewAsOwnerOption: 'Usted: su propio acceso',
   viewAsRoleGroupLabel: 'Previsualizar un rol (solo IU)',
   viewAsRoleOption: 'Como {{name}}',
   viewAsMemberGroupLabel: 'Ver como miembro (aplicado)',
@@ -206,4 +206,21 @@ export const messages = {
   // ADR 0622 D5 — el reenvío falló pero la invitación ANTERIOR sigue vigente
   inviteDeliveryFailedPriorValid: 'El envío del correo falló — una invitación anterior para esta dirección puede seguir vigente; no se modificó nada de ella. Inténtalo de nuevo en un momento.',
   inviteUndeliverablePriorValid: 'Esta invitación no se pudo entregar — esta organización no tiene remitente de correo o tu conexión de correo no está disponible. Una invitación anterior para esta dirección puede seguir vigente; no se modificó nada de ella. Configura un remitente en la página de Correo e inténtalo de nuevo.',
+  // ADR 0815 — owner-tier locks, typed refusals, and what removing a member does
+  confirmRemoveMemberBody: 'Sale del espacio de trabajo ahora. Sus claves de API dejan de funcionar, se cancelan las invitaciones pendientes que envió y se pausan las programaciones que se ejecutan en su nombre. Puede reanudar la mayoría de esas programaciones, y pasará a ser su propietario.',
+  removeMemberConfirm: 'Quitar miembro',
+  memberRemoved: 'Se quitó a {{name}}',
+  ownerRowLocked: 'Solo un propietario puede cambiar o quitar a un propietario',
+  ownerRowsLockedNote: 'Solo otro propietario puede cambiar o quitar a un propietario.',
+  ownerGroupLocked: 'Este grupo otorga acceso de propietario, así que solo un propietario puede cambiarlo',
+  errorOwnerTier: 'Solo un propietario puede hacer eso.',
+  errorLastOwner: 'Es el último propietario del espacio de trabajo. Primero haga propietario a otra persona y vuelva a intentarlo.',
+  errorIdentityLocked: 'La identidad de inicio de sesión de un miembro del espacio de trabajo no se puede cambiar directamente. Quítelo y envíe una nueva invitación.',
+  errorIdentityTaken: 'Esa identidad ya es miembro de esta organización.',
+  errorTransferToSelf: 'Elija a otro miembro a quien transferir la propiedad.',
+  confirmRemoveSubOrgMemberBody: 'Pierde el acceso a esta organización y se cancelan las invitaciones pendientes a ella que haya enviado. Su pertenencia al espacio de trabajo no cambia.',
+  confirmRemoveMemberBodyNeutral: 'Pierde el acceso a esta organización y se cancelan las invitaciones pendientes a ella que haya enviado. Si era su última pertenencia aquí, sus claves de API también dejan de funcionar y se pausan las programaciones que se ejecutan en su nombre.',
+  ownerGroupsLockedNote: 'Solo un propietario puede cambiar los grupos que otorgan acceso de propietario.',
+  errorCreateOrgOwnerRequired: 'Solo un propietario puede crear una organización aquí. Pida a un propietario de una organización existente que lo haga propietario y vuelva a intentarlo.',
+  errorForbiddenScope: 'No tiene permiso para hacer eso en esta organización. Pídaselo a un propietario o administrador del espacio de trabajo.',
 } as const;

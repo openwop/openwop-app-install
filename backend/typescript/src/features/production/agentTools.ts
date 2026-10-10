@@ -54,9 +54,9 @@ const log = createLogger('production.agent-tools');
 export const PRODUCTION_GET_VENDORS_TOOL_ID = 'openwop:production.get-vendors';
 export const PRODUCTION_PLAN_TOOL_ID = 'openwop:production.plan';
 
-/** The Production Planner's FIXED agentId (SSoT: `feature.production.agents`
+/** The Production Planner's FIXED agentId (SSoT: `vendor.openwop-app.production.agents`
  *  pack) — used only to attribute the inline `workflow_run` turn. */
-const PLANNER_AGENT_ID = 'feature.production.agents.production-planner';
+const PLANNER_AGENT_ID = 'vendor.openwop-app.production.agents.production-planner';
 
 type ToolResult = { content: string; isError?: boolean };
 
@@ -249,6 +249,7 @@ async function runPlanTool(deps: StartRunDeps, input: Record<string, unknown>, s
 export function registerProductionAgentTools(deps: StartRunDeps): void {
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: PRODUCTION_GET_VENDORS_TOOL_ID,
       description:
@@ -269,6 +270,7 @@ export function registerProductionAgentTools(deps: StartRunDeps): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: PRODUCTION_PLAN_TOOL_ID,
       description:

@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { setNavSource } from '../chrome/navSource.js';
 import { useFocusTrap } from './useFocusTrap.js';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { type IconCmp } from '../chrome/navItems.js';
 import { useResolvedNav } from '../chrome/navConfig/NavConfigProvider.js';
 import { useFeatureVisible, useFeatureBadge, useFeatureLocked } from '../featureToggles/FeatureAccessContext.js';
+import { useLockedNav } from '../featureToggles/lockedTargets.js';
 import { SearchIcon, PlayIcon, BotIcon, ScaleIcon, DatabaseIcon, LockIcon } from './icons/index.js';
-import { getContributedCommands, subscribeCommandSources } from './commandContributions.js';
+import { getContributedCommands, getQueryCommandSources, routeCommandsFor, subscribeCommandSources, subscribeQueryCommandSources } from './commandContributions.js';
 import { GROUP_LABEL_KEYS } from '../chrome/features.js';
 
 /**
@@ -78,6 +79,19 @@ export function CommandPalette({ openSignal }: { openSignal?: number } = {}): JS
   }, []);
 
   useEffect(() => { if (open) inputRef.current?.focus(); }, [open]);
+  // Escape closes from ANYWHERE while open, not only from the input. Focus
+  // reaches the input in the effect above, a frame after the dialog paints, so
+  // an Escape inside that gap (or with focus on an option) went nowhere and the
+  // palette stayed open. MEASURED: the e2e "Escape closes the palette" went red
+  // under load (dialog still open after 14 polls) and passed 3/3 alone.
+  useEffect(() => {
+    if (!open) return;
+    function onEsc(e: KeyboardEvent) {
+      if (e.key === 'Escape') { e.preventDefault(); close(); }
+    }
+    window.addEventListener('keydown', onEsc);
+    return () => window.removeEventListener('keydown', onEsc);
+  }, [open, close]);
   useEffect(() => { setActive(0); }, [query]);
   // When lazily mounted by the app shell, an incrementing openSignal carries
   // the activation that triggered the mount (the keystroke fired before this
@@ -89,7 +103,7 @@ export function CommandPalette({ openSignal }: { openSignal?: number } = {}): JS
   // rail hides (ADR §3.4).
   const isVisible = useFeatureVisible();
   const badgeFor = useFeatureBadge();
-  const lockedFor = useFeatureLocked();
+  const lockedFor = useLockedNav(useFeatureLocked(), t('chrome:navLocked'), 'palette');
   // The palette mirrors the LIVE, resolved menu (ADR 0139): items already
   // reflect the tenant+user layout overrides and are feature-gated, so a hidden
   // or disabled destination is never jump-to-able.
@@ -102,7 +116,11 @@ export function CommandPalette({ openSignal }: { openSignal?: number } = {}): JS
   // (ADR 0334 3b-3) — e.g. the document editor's "Insert chart / Import Word".
   // Re-subscribed via useSyncExternalStore so mount/unmount re-renders the list.
   const contributed = useSyncExternalStore(subscribeCommandSources, getContributedCommands, getContributedCommands);
+  // ADR 0785 P2 — route-aware contributions, evaluated against the page the palette opens over.
+  const { pathname } = useLocation();
+  const routeCommands = useMemo(() => routeCommandsFor(pathname), [pathname]);
   const commands = useMemo<Command[]>(() => [
+    ...routeCommands.map((c) => ({ id: c.id, label: c.label, hint: c.hint, group: c.group, icon: c.icon, to: c.to, ...(c.featureId ? { featureId: c.featureId } : {}) })),
     ...contributed.map((c) => ({ id: c.id, label: c.label, hint: c.hint, group: c.group, icon: c.icon, run: c.run })),
     ...[...workspace, ...admin].flatMap((g) => g.items.map((it) => ({
       id: `nav-${it.to}`,
@@ -115,19 +133,28 @@ export function CommandPalette({ openSignal }: { openSignal?: number } = {}): JS
     ...ACTIONS.filter((a) => !a.admin || canUseAdmin).map((a) => ({
       id: a.id, label: t(a.labelKey), hint: t(a.hintKey), group: t('cmdkActionsGroup'), icon: a.icon, to: a.to,
     })),
-  ], [t, tn, workspace, admin, contributed, canUseAdmin]);
+  ], [t, tn, workspace, admin, contributed, routeCommands, canUseAdmin]);
+  const querySources = useSyncExternalStore(subscribeQueryCommandSources, getQueryCommandSources, getQueryCommandSources);
   const results = useMemo(() => {
     const q = query.trim().toLowerCase();
     const visible = commands.filter((c) => isVisible(c.featureId));
     if (!q) return visible;
-    return visible.filter((c) => c.label.toLowerCase().includes(q) || c.hint.toLowerCase().includes(q) || c.group.toLowerCase().includes(q));
-  }, [query, isVisible, commands]);
+    const matched = visible.filter((c) => c.label.toLowerCase().includes(q) || c.hint.toLowerCase().includes(q) || c.group.toLowerCase().includes(q));
+    // ADR 0773 G-01d — free-text rows (e.g. "Ask the Architect: …") come LAST,
+    // so a typed command name still selects the command first.
+    const raw = query.trim();
+    const fromText: Command[] = raw.length >= 3
+      ? querySources.flatMap((src) => { try { const c = src(raw); return c ? [{ id: c.id, label: c.label, hint: c.hint, group: c.group, icon: c.icon, run: c.run }] : []; } catch { return []; } })
+      : [];
+    return [...matched, ...fromText];
+  }, [query, isVisible, commands, querySources]);
 
   const activate = useCallback((cmd: Command | undefined, keepOpen = false) => {
     if (!cmd) return;
     // ADR 0419 — a locked (paid-but-unbought) command upsells to the feature store
     // instead of running (its page/action would 403). False when billing off / entitled.
-    if (cmd.featureId && lockedFor(cmd.featureId)) { close(); nav('/marketplace/bundles'); return; }
+    const locked = lockedFor(cmd.featureId);
+    if (locked) { locked.onClick(); close(); nav(locked.to); return; }
     // An in-place action always closes first (its own UI — a modal/menu — takes
     // over), then runs. Navigation supports Shift+Enter "keep open" so an
     // operator can jump again without re-opening (DS-3).
@@ -137,7 +164,6 @@ export function CommandPalette({ openSignal }: { openSignal?: number } = {}): JS
   }, [close, nav, lockedFor]);
 
   function onInputKey(e: React.KeyboardEvent) {
-    if (e.key === 'Escape') { e.preventDefault(); close(); return; }
     if (e.key === 'ArrowDown') { e.preventDefault(); setActive((i) => Math.min(i + 1, results.length - 1)); return; }
     if (e.key === 'ArrowUp') { e.preventDefault(); setActive((i) => Math.max(i - 1, 0)); return; }
     if (e.key === 'Enter') { e.preventDefault(); activate(results[active], e.shiftKey); return; }
@@ -157,7 +183,7 @@ export function CommandPalette({ openSignal }: { openSignal?: number } = {}): JS
       {/* role="dialog" is a window/structure role the a11y plugin treats as
           non-interactive; the onClick only stops propagation to the backdrop
           so a click inside the panel doesn't close it (no keyboard analogue
-          is needed — Escape-to-close is handled on the input). */}
+          is needed — Escape-to-close is a window listener while open). */}
       {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions, jsx-a11y/click-events-have-key-events */}
       <div
         className="cmdk-panel"
@@ -209,7 +235,7 @@ export function CommandPalette({ openSignal }: { openSignal?: number } = {}): JS
                   >
                     <span className="cmdk-item-icon" aria-hidden><Icon size={15} /></span>
                     <span className="cmdk-item-label">{cmd.label}</span>
-                    {locked ? <span role="img" className="app-nav-lock" aria-label={t('cmdkLocked')}><LockIcon size={13} /></span>
+                    {locked ? <span role="img" className="app-nav-lock" aria-label={locked.label}><LockIcon size={13} /></span>
                       : badge ? <span className="nav-badge nav-badge--beta">{badge}</span> : null}
                     <span className="cmdk-item-group">{cmd.group}</span>
                   </button>

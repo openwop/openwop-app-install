@@ -129,7 +129,6 @@ export const messages = {
   scoreUnavailableTooltip: 'Aucun score de pertinence n’a été renvoyé pour ce passage',
   reindexCancelled: 'Réindexation annulée',
   reindexCancelFailed: 'La réindexation n’a pas pu être annulée.',
-  reindexFailedWithReason: 'Échec de la réindexation : {{reason}}',
   // ── KBX-4 — échecs d’écriture traduits depuis le statut HTTP ────────────
   httpBadRequest: 'Le serveur a refusé ces données. Vérifiez les valeurs et réessayez.',
   httpForbidden: 'Vous n’avez pas la permission de modifier cette collection.',
@@ -169,4 +168,9 @@ export const messages = {
   reindexCancelConfirm: 'Abandonner cette reconstruction ?',
   reindexCancelBody: 'L’index partiellement construit est supprimé et la collection conserve son modèle d’embedding actuel. Recommencer réencode chaque passage depuis le début.',
   reindexJobReadFailed: 'L’état de la reconstruction n’a pas pu être lu : ce qui s’affiche ici ne reflète peut-être pas une tâche réellement en cours.',
+  // KB2UX-1 — per-org authority (useKbOrgAccess).
+  accessChecking: 'Vérification de vos autorisations dans cette organisation…',
+  accessCheckFailed: 'Impossible de confirmer vos autorisations dans cette organisation : les commandes de modification sont donc masquées. Vous pouvez toujours rechercher et lire ; le serveur vérifie chaque modification de toute façon.',
+  readOnlyNotice: 'Vous pouvez rechercher et lire la base de connaissances de cette organisation. Ajouter, modifier ou supprimer du contenu nécessite un accès en modification ici — demandez-le à un administrateur de l’organisation.',
+  reindexOwnerOnly: 'Seul un propriétaire de l’organisation peut lancer, poursuivre ou abandonner une reconstruction.',
 } as const;

@@ -41,6 +41,7 @@ import type { HostAdapterSuite } from './index.js';
 import { executeRun, emitTerminalFailure, RUN_DISPATCH_LEASE_MS } from '../executor/executor.js';
 import { forkDispatchOptions } from '../executor/forkInterrupts.js';
 import { getInstanceId } from './instanceId.js';
+import { RunLogClosedError } from '../storage/runLogClosure.js';
 import { createLogger } from '../observability/logger.js';
 import { recordDispatchRecovery, recordOutboxBacklog } from '../observability/metricSeams.js';
 import { resolveRunDefinition } from './resolveRunDefinition.js';
@@ -125,6 +126,42 @@ export interface RunSweeperDeps {
   hostSuite: HostAdapterSuite;
 }
 
+const STATUS_FOR_TERMINAL_EVENT: Readonly<Record<string, 'completed' | 'failed' | 'cancelled'>> = {
+  'run.completed': 'completed', 'run.failed': 'failed', 'run.cancelled': 'cancelled',
+};
+
+/**
+ * The log is the record (the WHD-22 rule `host/runCancel.ts` already applies):
+ * a run whose log is closed but whose row still says `pending`/`running` gets
+ * the terminal status the log closed with, and nothing is appended.
+ *
+ * MEASURED on production 2026-10-02 (`EVID-3`): ten such runs, 2.5–9.6 days
+ * old, were claimed by EVERY sweep on EVERY instance. Each sweep tried to
+ * abandon them, was refused `run.failed` by the closed log, and logged
+ * `failed to abandon orphaned run` — after `emitTerminalFailure` had already
+ * appended another `run.dead_lettered`, which a closed log permits. So the row
+ * never became terminal and the log grew one dead-letter record per sweep.
+ */
+async function reconcileRowToClosedLog(storage: Storage, run: RunRecord, closedBy: string, now: number): Promise<void> {
+  const status = STATUS_FOR_TERMINAL_EVENT[closedBy] ?? 'failed';
+  try {
+    await storage.updateRun(run.runId, {
+      status,
+      completedAt: run.completedAt ?? new Date(now).toISOString(),
+      // The log holds the real terminal payload; the row only needs a truthful
+      // pointer when it carried no error of its own.
+      ...(status !== 'completed' && !run.error
+        ? { error: { code: status === 'cancelled' ? 'cancelled' : 'run_failed', message: `Run ended with ${closedBy}; the run record was reconciled from its event log.` } }
+        : {}),
+    });
+    log.warn('reconciled run record to its closed log', { runId: run.runId, was: run.status, closedBy, status });
+    // 'discharged': the intent needed no dispatch — the run had already ended.
+    recordDispatchRecovery('orphan', 'discharged');
+  } catch (err) {
+    log.warn('failed to reconcile run record to its closed log', { runId: run.runId, closedBy, error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
 /**
  * Claim and re-dispatch one batch of orphaned runs. Returns the number
  * re-dispatched (0 when none are orphaned). Exported for deterministic tests —
@@ -141,6 +178,15 @@ export async function sweepOrphanedRuns(
   const abandonBefore = now - MAX_REDISPATCH_AGE_MS;
   let redispatched = 0;
   for (const run of orphans) {
+    // A claimed "orphan" whose LOG already carries a terminal event is not
+    // orphaned: it ended, and only its row was left behind. Nothing forward may
+    // be appended to it (RFC 0194 §A), so neither lane below can ever finish it.
+    // Make the row follow the log and move on — BEFORE either lane writes.
+    const closedBy = await storage.runLogClosedBy?.(run.runId);
+    if (closedBy) {
+      await reconcileRowToClosedLog(storage, run, closedBy, now);
+      continue;
+    }
     // A run still orphaned this long after creation is presumed genuinely stuck;
     // fail it terminally rather than re-dispatch it on every sweep forever.
     if (Date.parse(run.createdAt) < abandonBefore) {
@@ -162,6 +208,13 @@ export async function sweepOrphanedRuns(
           },
         });
       } catch (err) {
+        // The log closed under us (or the store cannot answer `runLogClosedBy`):
+        // the run already ended, so the row follows the log instead of the
+        // abandon being retried — and refused — on every sweep.
+        if (err instanceof RunLogClosedError) {
+          await reconcileRowToClosedLog(storage, run, err.closedBy, now);
+          continue;
+        }
         // Best-effort: a failed terminal-emit must not crash the sweep. The run
         // keeps its (now fresh) lease and the next sweep re-attempts the abandon.
         log.warn('failed to abandon orphaned run', { runId: run.runId, error: err instanceof Error ? err.message : String(err) });

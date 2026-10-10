@@ -53,7 +53,7 @@ async function requireOrgScopeFor(req: Request, orgId: string, scope: Scope): Pr
 
 export function registerAdvisoryBoardRoutes(deps: RouteDeps): void {
   const { app, storage } = deps;
-  const BASE = '/v1/host/openwop-app/advisors';
+  const BASE = '/host/openwop-app/advisors';
 
   // ADR 0079 Phase 5 — register the board-context resolver into the core seam so
   // a boardroom snapshots its strategy context at `@@` summon (feature→core only).

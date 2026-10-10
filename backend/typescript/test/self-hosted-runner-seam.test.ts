@@ -27,8 +27,8 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-const REGISTER = '/v1/host/sample/runner/register';
-const DISPATCH = '/v1/host/sample/runner/dispatch';
+const REGISTER = '/host/sample/runner/register';
+const DISPATCH = '/host/sample/runner/dispatch';
 const post = (path: string, body: unknown) => fetch(`${BASE}${path}`, { method: 'POST', headers: H, body: JSON.stringify(body) });
 
 // H27 / S22 — INVERTED. This read `error.code` off the nested body §19 used to
@@ -101,13 +101,11 @@ describe('RFC 0122 — dispatch validation', () => {
 });
 
 describe('RFC 0122 — honest-off advertisement', () => {
-  it('discovery advertises selfHostedRunner {supported:false, dispatchKinds:["model"]}', async () => {
-    const doc = await (await fetch(`${BASE}/.well-known/openwop`, { headers: H })).json() as {
-      capabilities?: { selfHostedRunner?: { supported?: boolean; dispatchKinds?: string[] } };
-    };
-    const shr = doc.capabilities?.selfHostedRunner;
-    expect(shr).toBeDefined();
-    expect(shr?.supported).toBe(false);
-    for (const k of shr?.dispatchKinds ?? []) expect(['model', 'tool']).toContain(k);
+  // ADR 0812 P3c-0 — v2 spelling of honest-off: the v1 document said `{supported:false}`; on
+  // the closed v2 root presence IS the claim, so an unsupported family is ABSENT.
+  it('discovery does not claim selfHostedRunner (honest-off: no record on the v2 root)', async () => {
+    const doc = await (await fetch(`${BASE}/.well-known/openwop`, { headers: { ...H, 'OpenWOP-Version': '2' } })).json() as Record<string, unknown>;
+    expect(doc.protocolVersions, 'non-vacuity: this is the discovery document').toBeDefined();
+    expect(doc.selfHostedRunner).toBeUndefined();
   });
 });

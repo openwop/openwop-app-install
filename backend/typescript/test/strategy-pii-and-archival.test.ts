@@ -15,6 +15,8 @@ import { isPiiField, isKnownPiiFieldName, maskPiiDeep } from '../src/host/dataCl
 import {
   createStrategy, archiveStrategy, resolveStrategyEntriesByIds, __clearStrategies,
 } from '../src/features/strategy/strategyService.js';
+import { registerToggleDefault } from '../src/host/featureToggles/registry.js';
+import { strategyFeature } from '../src/features/strategy/feature.js';
 
 function capture(fn: () => Promise<void>): Promise<string> {
   const lines: string[] = [];
@@ -27,6 +29,9 @@ function capture(fn: () => Promise<void>): Promise<string> {
 
 beforeEach(async () => {
   initHostExtPersistence(openSqliteStorage(':memory:'));
+  // G7 (ADR 0820 §8.1) — the context resolve now reads `resolveOne('strategy')`; this
+  // unit harness boots no app, so register the feature's (default-on) toggle.
+  if (strategyFeature.toggleDefault) registerToggleDefault(strategyFeature.toggleDefault);
   await __clearStrategies();
 });
 

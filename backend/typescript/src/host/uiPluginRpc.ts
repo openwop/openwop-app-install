@@ -7,8 +7,8 @@
  * ONLY the methods in its closed `hostApi` allowlist (`HOST_UI_PLUGIN_API`) — anything
  * else is rejected, never executed. This module is the single source of truth for both:
  *   - what the host ADVERTISES at `/.well-known/openwop` (`uiPluginsCapability()`), and
- *   - what the witness seam `POST /v1/host/openwop-app/ui-plugin/rpc` actually SERVES
- *     (`createUiPluginDispatcher`),
+ *   - what the per-plugin RFC 0238 operation `POST /host/ui-plugins/{pack}/{plugin}/rpc`
+ *     actually SERVES (`createUiPluginDispatcher`, via `routes/uiPlugins.ts`),
  * so advertise/serve can never drift (the ADR 0085 honest-witness discipline).
  *
  * The `artifact.write` leg maps 1:1 onto the host's existing `host.canvas` optimistic-
@@ -73,6 +73,29 @@ export function pluginIframeCsp(): string {
     // NO connect-src / form-action / frame-src → deny all egress.
   ].join('; ');
 }
+
+/**
+ * ADR 0840 (RFC 0238 §B.3–§B.4) — the policy on the frame document, in the
+ * response header, where an HTTP observer can read it. The header's `sandbox`
+ * gives the document an opaque origin however it is embedded (`allow-scripts`,
+ * never `allow-same-origin`); `default-src 'none'` and a `connect-src` that admits
+ * exactly the plugin's declared `connectSrc` (none: no `connect-src` at all) are
+ * the egress boundary. One builder, read by the frame route and its tests.
+ */
+export function pluginFrameCsp(connectSrc: readonly string[] = []): string {
+  return [
+    `sandbox ${pluginSandboxTokens().join(' ')}`,
+    pluginIframeCsp(),
+    ...(connectSrc.length > 0 ? [`connect-src ${connectSrc.join(' ')}`] : []),
+  ].join('; ');
+}
+
+// ADR 0840 D4 — advertise `served` only when the operations are registered. The
+// feature that registers them marks it; discovery reads it. Same shape as the
+// other register-then-advertise seams, so advertise and serve cannot drift.
+let servedOperationsRegistered = false;
+export function markUiPluginOperationsServed(): void { servedOperationsRegistered = true; }
+export function uiPluginOperationsServed(): boolean { return servedOperationsRegistered; }
 
 /**
  * The iframe `sandbox` token set (`frontend-plugin-isolation`). `allow-scripts` lets the

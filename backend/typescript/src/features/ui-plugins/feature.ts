@@ -28,7 +28,7 @@ export const uiPluginsFeature: BackendFeature = {
   toggleDefault: {
     id: 'ui-plugins',
     label: 'UI Plugins',
-    description: 'Load signed, sandboxed front-end plugin packs (RFC 0117/0119) — cross-origin-iframe isolation, deny-egress, closed host-RPC allowlist.',
+    description: 'Load signed, sandboxed front-end plugin packs — cross-origin-iframe isolation, deny-egress, closed host-RPC allowlist.',
     category: 'Developer',
     status: 'off',
     bucketUnit: 'tenant',

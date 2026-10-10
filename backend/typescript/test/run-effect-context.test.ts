@@ -130,18 +130,18 @@ async function settle(runId: string): Promise<string> {
   let status = 'pending';
   for (let i = 0; i < 120; i++) {
     await new Promise((r) => setTimeout(r, 25));
-    status = (await api<{ status: string }>(`/v1/runs/${runId}`)).body.status;
+    status = (await api<{ status: string }>(`/runs/${runId}`)).body.status;
     if (['completed', 'failed', 'cancelled'].includes(status)) break;
   }
   return status;
 }
 
 async function runWorkflow(workflowId: string, typeId: string): Promise<string> {
-  await api('/v1/host/openwop-app/workflows', {
+  await api('/host/openwop-app/workflows', {
     method: 'POST',
     body: JSON.stringify({ workflowId, nodes: [{ nodeId: 'n1', typeId }], edges: [] }),
   });
-  const create = await api<{ runId: string }>('/v1/runs', {
+  const create = await api<{ runId: string }>('/runs', {
     method: 'POST',
     body: JSON.stringify({ workflowId, inputs: {}, tenantId: '_anon' }),
   });
@@ -199,7 +199,7 @@ describe('end-to-end: a replay fork cannot re-notify', () => {
     const runId = await runWorkflow('adr0531.notify', 'test.unclassified-notifier');
     expect(probesEmitted).toBe(1);
 
-    const fork = await api<{ runId: string }>(`/v1/runs/${runId}:fork`, {
+    const fork = await api<{ runId: string }>(`/runs/${runId}:fork`, {
       method: 'POST',
       body: JSON.stringify({ mode: 'replay' }),
     });
@@ -210,7 +210,7 @@ describe('end-to-end: a replay fork cannot re-notify', () => {
     // served) and hit the seam — which refused.
     expect(forkStatus).toBe('failed');
     const events = (await api<{ events?: Array<{ type?: string; payload?: { error?: { code?: string } } }> }>(
-      `/v1/runs/${fork.body.runId}/debug-bundle`,
+      `/runs/${fork.body.runId}/debug-bundle`,
     )).body.events ?? [];
     const failure = events.find((e) => e.type === 'node.failed');
     expect(failure?.payload?.error?.code).toBe('replay_source_missing');
@@ -291,7 +291,7 @@ describe('the guard is scoped to REPLAY mode, and that boundary is deliberate', 
     const runId = await runWorkflow('adr0531.branch', 'test.unclassified-notifier');
     const before = probesEmitted;
 
-    const fork = await api<{ runId: string }>(`/v1/runs/${runId}:fork`, {
+    const fork = await api<{ runId: string }>(`/runs/${runId}:fork`, {
       method: 'POST',
       body: JSON.stringify({ mode: 'branch', fromSeq: 1 }),
     });
@@ -308,7 +308,7 @@ describe('TRIPWIRE — the backstop reaches dynamically-imported (pack-shaped) n
     const runId = await runWorkflow('adr0531.packlike', 'test.packlike-notifier');
     expect(await settle(runId)).toBe('completed');
 
-    const fork = await api<{ runId: string }>(`/v1/runs/${runId}:fork`, {
+    const fork = await api<{ runId: string }>(`/runs/${runId}:fork`, {
       method: 'POST',
       body: JSON.stringify({ mode: 'replay' }),
     });

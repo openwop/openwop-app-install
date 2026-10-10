@@ -25,9 +25,11 @@ import { foldWorkflowSpendOnTerminal } from './workflowBudgets.js';
 import { getEventLog, RunLogClosedError } from '../executor/eventLog.js';
 import { notifyRunTerminal } from '../executor/runLifecycle.js';
 import { recordInterruptResolved } from '../observability/metricSeams.js';
+import { emitReviewUpdatedSignal } from '../notifications/notify.js';
 import { resolveDefinitionForRun, unwindTerminatedRun } from './compensationRuntime.js';
 import { compensationTriggerFor } from './compensationUnwind.js';
 import { createLogger } from '../observability/logger.js';
+import { clearRunSecrets } from '../byok/ephemeralRunSecrets.js';
 
 // The SDK's `TERMINAL_RUN_STATUSES` predicate, re-exported so a caller reading
 // this recipe does not have to know which of the two spellings this file uses.
@@ -80,6 +82,39 @@ export async function cancelRunAndCascade(
     return 'already-terminal';
   }
   notifyRunTerminal(run.runId, 'cancelled');
+  // ADR 0779 D5 — a cancelled run holds no provider plaintext on THIS instance.
+  // (Another instance's in-flight execution clears on its next refused append.)
+  clearRunSecrets(run.runId);
+
+  // ADR 0778 D3 (`APWF-3`) — close the cancelled run's OWN open gates. Only the
+  // children's were closed below, so a cancelled run's approval stayed in every
+  // inbox, actionable forever: deciding it consumed the interrupt and then 500'd
+  // on the closed run log, and undeadlined dead gates crowded the inbox window
+  // until a busy tenant stopped seeing new ones. The marker is what the token
+  // route reads to answer 409 rather than "resolved" (`isCancelCascade`).
+  //
+  // Contained per gate (grade-code `APCD-4`): the run is already `cancelled`, so
+  // a throw here would skip the compensation unwind and the child cascade below
+  // for good — a retry short-circuits as `already-terminal`. A gate left open by
+  // a failed write is still filtered from every inbox by the terminal-run rule.
+  for (const itr of await storage.listOpenInterrupts(run.runId).catch(() => [])) {
+    try {
+      if (!(await storage.resolveInterrupt(itr.interruptId, { cancelled: true, reason }, now))) continue;
+    } catch (err) {
+      log.warn('cancel_gate_close_failed', { runId: run.runId, interruptId: itr.interruptId, error: err instanceof Error ? err.message : String(err) });
+      continue;
+    }
+    recordInterruptResolved(itr, 'cascaded', now);
+    // C10 — tell open inboxes, as a decision does, so the card leaves now.
+    emitReviewUpdatedSignal({
+      tenantId: run.tenantId,
+      reviewId: `interrupt:${itr.interruptId}`,
+      status: 'cancelled',
+      runId: run.runId,
+      nodeId: itr.nodeId,
+      interruptId: itr.interruptId,
+    });
+  }
 
   // Cascade per `interrupt-profiles.md §openwop-interrupt-cascade-cancel`:
   // any non-terminal child runs (rows with parentRunId === this run)
@@ -114,7 +149,12 @@ export async function cancelRunAndCascade(
   await unwindCancelledRun(storage, run);
 
   const childRows = await storage.listRunsByParent(run.runId);
-  for (const child of childRows.filter((r) => !isTerminalRunStatus(r.status))) {
+  // ADR 0772 D3 (`RRWF-9`) — a FORK is not a child execution: it is a sibling
+  // history that `listRunsByParent` also returns (it carries `parentRunId`), and
+  // it may belong to another user. Cancelling a source used to cancel every
+  // in-flight fork of it as `parent-cancelled`. `compensationRuntime.ts` already
+  // excludes forks for the same reason.
+  for (const child of childRows.filter((r) => !r.forkMode && !isTerminalRunStatus(r.status))) {
     await storage.updateRun(child.runId, {
       status: 'cancelled',
       completedAt: now,
@@ -128,6 +168,7 @@ export async function cancelRunAndCascade(
       payload: { reason: 'parent-cancelled', parentRunId: run.runId },
     });
     notifyRunTerminal(child.runId, 'cancelled');
+    clearRunSecrets(child.runId); // ADR 0779 D5
     // §B `onParentCancel` — a child unwinds on a PARENT cancel only when its own
     // declaration asks for it. `unwindCancelledRun` consults the child's
     // definition, so a child declaring `onParentCancel: 'skip'` keeps its

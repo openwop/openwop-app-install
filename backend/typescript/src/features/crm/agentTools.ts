@@ -3,7 +3,7 @@
  * author personas' REAL grounding + governed writes over the CRM surface.
  *
  * Born of the CHAT-FIRST-PORT-AUDIT #1 finding (docs/chat-first-port/
- * d1-crm-csm.md): the `feature.crm.agents` pack allowlisted node typeIds
+ * d1-crm-csm.md): the `vendor.openwop-app.crm.agents` pack allowlisted node typeIds
  * (`openwop:feature.crm.nodes.{list-companies,get-company,list-deals,get-deal,
  * list-tasks,log-activity,create-task,list-segment-members,persist-segment}`)
  * that NO host registrant provided, so `compileAgentTools` silently dropped
@@ -46,7 +46,7 @@ import { assertTenantScope, type Scope } from '../../host/accessControlService.j
 import { checkTenantEntitlement } from '../../host/entitlementSeam.js';
 import { OpenwopError } from '../../types.js';
 import { buildCrmSurface } from './surface.js';
-import { ensureContact } from './contactsService.js';
+import { ensureContactWithOutcome } from './contactsService.js';
 import { orgScopeGranted } from './routes.js';
 
 const TOGGLE_ID = 'crm';
@@ -170,6 +170,7 @@ export function registerCrmAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: CRM_LIST_COMPANIES_TOOL_ID,
       description:
@@ -197,6 +198,7 @@ export function registerCrmAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: CRM_GET_COMPANY_TOOL_ID,
       description:
@@ -225,6 +227,7 @@ export function registerCrmAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: CRM_LIST_DEALS_TOOL_ID,
       description:
@@ -257,6 +260,7 @@ export function registerCrmAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: CRM_GET_DEAL_TOOL_ID,
       description:
@@ -285,6 +289,7 @@ export function registerCrmAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: CRM_LIST_TASKS_TOOL_ID,
       description:
@@ -317,6 +322,7 @@ export function registerCrmAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: CRM_LOG_ACTIVITY_TOOL_ID,
       description:
@@ -353,6 +359,7 @@ export function registerCrmAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: CRM_CREATE_TASK_TOOL_ID,
       description:
@@ -388,6 +395,7 @@ export function registerCrmAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: CRM_LEAD_CAPTURE_TOOL_ID,
       description:
@@ -428,11 +436,15 @@ export function registerCrmAgentTools(): void {
       try {
         // `actor` is the audit row's principal — the widget lane has no human, so
         // it is named as the lane (the `public:guest` / `system:<lane>` shape).
-        const contact = await ensureContact({ tenantId: scope.tenantId, email, ...(name ? { name } : {}), leadSource: 'anon-widget', actor: 'public:anon-widget' });
-        if (!contact) return toolError('validation_error', 'A valid email is required to capture a lead.', { field: 'email' });
-        // Result boundary: opaque `contactId` + success ONLY — NEVER echo the email or
-        // any PII back to the model/visitor (RFC 0048 / the anon no-PII-echo posture).
-        return { content: JSON.stringify({ success: true, contactId: contact.contactId, message: 'Lead captured — a team member will follow up.' }) };
+        const outcome = await ensureContactWithOutcome({ tenantId: scope.tenantId, email, ...(name ? { name } : {}), leadSource: 'anon-widget', actor: 'public:anon-widget' });
+        if (outcome.erasureUnreadable) return toolError('unavailable', 'The details could not be saved right now — ask the visitor to try again shortly.');
+        if (!outcome.contact && !outcome.erased) return toolError('validation_error', 'A valid email is required to capture a lead.', { field: 'email' });
+        // Result boundary: success ONLY — NEVER echo the email or any PII back to
+        // the model/visitor (RFC 0048 / the anon no-PII-echo posture). ADR 0837 D4:
+        // no `contactId` either, and the SAME answer whether the person was
+        // captured, already known, or erased (no contact is rebuilt for an erased
+        // subject) — any difference would make this an erasure oracle.
+        return { content: JSON.stringify({ success: true, message: 'Lead captured — a team member will follow up.' }) };
       } catch (err) { return surfaceError(err); }
     },
   });
@@ -442,6 +454,7 @@ export function registerCrmAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: CRM_LIST_SEGMENT_MEMBERS_TOOL_ID,
       description:
@@ -468,6 +481,7 @@ export function registerCrmAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: CRM_PERSIST_SEGMENT_TOOL_ID,
       description:

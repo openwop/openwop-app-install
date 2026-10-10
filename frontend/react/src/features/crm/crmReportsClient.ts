@@ -53,6 +53,9 @@ export interface PipelineReport {
   totals: ReportTotals;
   aging: AgingDeal[];
   snapshots: PipelineSnapshot[];
+  /** ADR 0846 D4 — the viewer is territory-scoped, so the org-wide snapshots were
+   *  withheld (and `snapshots` is empty). Render that, not "no history yet". */
+  snapshotsWithheld?: true;
   conversions: StageConversion[];
   /** Distinct deal currencies — >1 means blind totals mix units. */
   currencies?: string[];

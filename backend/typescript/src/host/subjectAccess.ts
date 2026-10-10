@@ -48,7 +48,15 @@ export function registerSubjectAccessResolver(kind: string, fn: SubjectAccessRes
 /** The caller's access level for `subject`, or `null` when not org/member-scoped. */
 export async function resolveSubjectAccess(tenantId: string, subject: Subject, callerSubject: string | undefined): Promise<AccessLevel | null> {
   const fn = resolvers.get(subject.kind);
-  return fn ? fn(tenantId, subject, callerSubject) : null;
+  if (!fn) return null;
+  // ADR 0839 D1 (`PRJ3WF-1`, was `CPC-6`) — the KBC-1 rule below (`subjectReadAllowed`),
+  // moved down to the seam every caller shares. An absent caller of a membership-scoped
+  // kind has no membership, so it is refused HERE rather than handed to a resolver that
+  // may read "no subject" as "the tenant owner" — which the project resolver did, so
+  // interrupts, voice, work-selection and conversation visibility each answered `'write'`
+  // on a private project for a caller they could not name. Unregistered kinds keep `null`.
+  if (callerSubject === undefined) return 'none';
+  return fn(tenantId, subject, callerSubject);
 }
 
 /** True when `have` satisfies the `need` (read is satisfied by write). */
@@ -91,6 +99,11 @@ export interface SubjectCaller {
   subject?: string;
   /** This lane already resolved the subject's access at its own door. */
   preAuthorized?: true;
+  /** ADR 0832 D3 — the member who caused an actorless run. Read ONLY by an org
+   *  MEMBERSHIP filter (`tenantRetrieve`'s, via `runOrgScopeSubject`), which can
+   *  only drop rows. Never by `filterReadable` or any subject-ownership check:
+   *  those GRANT on a match, and the causing member is not the run's actor. */
+  orgScopeSubject?: string;
 }
 
 /** The explicit, greppable bypass — see {@link SubjectCaller}. */

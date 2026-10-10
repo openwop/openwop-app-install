@@ -53,17 +53,21 @@ import {
 } from '../host/envelopeReliabilityEmit.js';
 import { dispatchSubRun, type SubRunResult } from '../subruns/subRunDispatcher.js';
 
-import { registerMockAgentNode, conformanceNodesEnabled } from './conformanceMockAgent.js';
+import { registerMockAgentNode, conformanceNodesEnabled, CONFORMANCE_SECRET_REFS } from './conformanceMockAgent.js';
 import { hasMemoryAction, runMemoryProbe } from './conformanceMemoryProbe.js';
 import { registerConformanceSideEffectNode } from './conformanceSideEffectNode.js';
+import { registerConformanceHoldNode } from './conformanceHoldNode.js';
 import { registerConformanceHttpEffectNode } from './conformanceHttpEffectNode.js';
+import { registerConformanceStorageProbeNode } from './conformanceStorageProbe.js';
 import { registerConformanceA2aInvokeNode } from './conformanceA2aInvokeNode.js';
 import { registerConformanceMcpInvokeNode } from './conformanceMcpInvokeNode.js';
 import { enterprisePosture } from '../host/deployPosture.js';
 import { diagnoseEmptyCompletion } from './emptyCompletionDiagnostic.js';
 import { storeMediaAsset, resolveMediaAsset, writeMemoryEntryRedacted, MEMORY_DEMO_REF } from '../host/inMemorySurfaces.js';
+import { ALLOWED_UPLOAD_MIME, isAllowedUploadMime } from '../host/allowedUploadMime.js';
 import agentRunnerNode from '../host/agentRunnerNode.js';
 import { DurableSearchUnavailableError } from '../host/webResearchSurface.js';
+import { assetTokenFromUrl } from '../host/assetServePath.js';
 
 /** ADR 0706 — the parent run's registered BYOK refs, handed to every child the
  *  parent spawns so `prepareRunSecrets` resolves the SAME secrets for the child.
@@ -156,6 +160,22 @@ const identityNode: NodeModule = {
  *  the supervisor in the DAG. Real (non-mock) supervisors would emit
  *  one decision per invocation; future spec work (RFC 0022 §"Unresolved
  *  questions" #6) will normate that contract. */
+/**
+ * THE ONE FACT (ADR 0858 P3): does this host's `core.orchestrator.supervisor`
+ * run a live model turn? `false` — the module below echoes a config plan and
+ * never reaches `ctx.callAI`.
+ *
+ * Two surfaces read it and there is no second copy:
+ *   - `host/index.ts` `listLoadedConformanceFixtures` withholds every fixture
+ *     in `FIXTURES_REQUIRING_LIVE_MODEL_SUPERVISOR` while it is false (the
+ *     catalog: "A host whose supervisor has no live model MUST NOT advertise
+ *     this fixture" — `conformance-context-budget-live`);
+ *   - `test/rfc0111-context-budget-non-advert.test.ts` leg 2 runs the supervisor
+ *     with a poisoned `callAI` and asserts it is reached IFF this is true — so a
+ *     supervisor that starts calling a model reds that leg until this is flipped.
+ */
+export const SUPERVISOR_CALLS_LIVE_MODEL: boolean = false;
+
 const orchestratorSupervisorNode: NodeModule = {
   typeId: 'core.orchestrator.supervisor',
   version: '1.0.0',
@@ -268,6 +288,39 @@ const dispatchNode: NodeModule = {
     const { getEventLog } = await import('../executor/eventLog.js');
     const eventLog = getEventLog();
 
+    // ADR 0829 — structured handoff record (always on). One record per (decided event, worker): it is
+    // built before the child is created and stamped on the child run record and,
+    // when the supervisor names the receiving agent, on an `agent.handoff` caused
+    // by that `runOrchestrator.decided` — so it rides the same once-per-decided-event
+    // discipline as the rest of this loop and is re-read, never recomputed, on replay.
+    const handoff = await import('../host/handoff/handoffRecord.js');
+    const stampHandoff = async (decision: Record<string, unknown>, workerId: string, decidedEventId: string): Promise<Record<string, unknown> | undefined> => {
+      const supplied = handoff.suppliedHandoff(supervisorPayload, workerId);
+      const record = (supplied ? handoff.normalizeHandoffRecord(supplied, 'agent') : null) ?? handoff.hostDispatchRecord(decision, workerId);
+      const toAgentId = handoff.namedTargetAgent(supplied);
+      // ADR 0831 P3 — announce the record (fail-soft; the ref is stable per decided event and worker).
+      await (await import('../host/handoff/handoffObservers.js')).notifyHandoffRecorded({
+        tenantId: ctx.tenantId,
+        record,
+        origin: { kind: 'run', runId: ctx.runId, ref: `dispatch:${decidedEventId}:${workerId}`, agentId: supervisorAgentId },
+      });
+      if (toAgentId !== undefined && toAgentId !== supervisorAgentId) {
+        await eventLog.append({
+          runId: ctx.runId,
+          nodeId: ctx.nodeId,
+          type: 'agent.handoff',
+          causationId: decidedEventId,
+          payload: {
+            fromAgentId: supervisorAgentId,
+            toAgentId,
+            reason: 'specialist routing',
+            [handoff.HANDOFF_KEY]: record,
+          },
+        });
+      }
+      return { [handoff.HANDOFF_KEY]: record };
+    };
+
     // RFC 0037 Phase 1 — emit `core.workflowChain.event` transition records
     // alongside the existing `node.dispatched` event when the host opts in
     // via `OPENWOP_MULTI_AGENT_EXECUTION_MODEL=true`. The flag must agree
@@ -375,6 +428,9 @@ const dispatchNode: NodeModule = {
               floor: confidenceFloor,
               originalDecision: decision,
             },
+            // ADR 0829 D2 — rides `node.suspended`, never the interrupt data
+            // (every per-kind `data` def is closed, no hatch).
+            handoff: handoff.confidenceFloorRecord(decision, confidenceNumber, confidenceFloor, workerIdHint ? handoff.suppliedHandoff(supervisorPayload, workerIdHint) : undefined),
           },
         };
       }
@@ -428,6 +484,11 @@ const dispatchNode: NodeModule = {
           payload: { fanOutPolicy: 'parallel', childCount: workers.length, maxConcurrency: effConc, joinMode },
         });
 
+        // ADR 0829 — stamp each worker's record in worker order BEFORE the wave, so the
+        // `agent.handoff` order on the log is deterministic, not child wall-clock.
+        const waveHandoffs: Array<Record<string, unknown> | undefined> = [];
+        for (const w of workers) waveHandoffs.push(await stampHandoff(decision, w, decidedRec.eventId));
+
         const out = await runParallelFanOut({
           nextWorkerIds: workers,
           config: { fanOutPolicy: 'parallel', ...(maxConcurrency !== undefined ? { maxConcurrency } : {}), joinPolicy: { mode: 'wait-all' } },
@@ -448,6 +509,7 @@ const dispatchNode: NodeModule = {
                 childWorkflowId,
                 ...(inputMapping ? { inputMapping } : {}),
                 ...(perItem && typeof perItem === 'object' && !Array.isArray(perItem) ? { perItemInputs: perItem } : {}),
+                ...(waveHandoffs[idx] ? { childMetadata: waveHandoffs[idx] } : {}),
                 onChildFailure: 'continue',
               });
               await eventLog.append({
@@ -537,6 +599,7 @@ const dispatchNode: NodeModule = {
           dispatchBeganId = beganRec.eventId;
         }
 
+        const childHandoff = await stampHandoff(decision, childWorkflowId, decidedRec.eventId); // ADR 0829
         try {
           const result = await dispatchSubWorkflow({
             parentRunId: ctx.runId,
@@ -545,6 +608,7 @@ const dispatchNode: NodeModule = {
             parentNodeId: ctx.nodeId,
             ...inheritedCredentialRefs(ctx),
             childWorkflowId,
+            ...(childHandoff ? { childMetadata: childHandoff } : {}),
             ...(inputMapping ? { inputMapping } : {}),
             ...(outputMapping ? { outputMapping } : {}),
             ...(seqPerItem && typeof seqPerItem === 'object' && !Array.isArray(seqPerItem) ? { perItemInputs: seqPerItem } : {}),
@@ -901,6 +965,8 @@ const approvalGateNode: NodeModule = {
       approverRoleRefs?: unknown;
       overrideScopes?: unknown;
       optionLabels?: unknown;
+      timeoutMs?: unknown;
+      timeoutSec?: unknown;
     };
     // Surface upstream node outputs to the approver. When two or more
     // input ports carry string content (the Triple-AI fan-in shape:
@@ -973,6 +1039,14 @@ const approvalGateNode: NodeModule = {
           ...(Array.isArray(cfg.approverGroupRefs) ? { approverGroupRefs: cfg.approverGroupRefs } : {}),
           ...(Array.isArray(cfg.approverRoleRefs) ? { approverRoleRefs: cfg.approverRoleRefs } : {}),
           ...(Array.isArray(cfg.overrideScopes) ? { overrideScopes: cfg.overrideScopes } : {}),
+          // RFC 0093 §D.1 / RFC 0223 — the gate's OWN deadline. `approvalGateDeadlineMs`
+          // reads it from `interrupt.data`, and this node never put it there, so a
+          // gate configured with `timeoutMs` never timed out. Only the operator-wide
+          // default could expire it. The existing timeout tests seeded interrupts with
+          // `data.timeoutMs` directly and so never exercised this node. Suite 2.43.1's
+          // timeout rows run the real node and caught it.
+          ...(typeof cfg.timeoutMs === 'number' && cfg.timeoutMs > 0 ? { timeoutMs: cfg.timeoutMs } : {}),
+          ...(typeof cfg.timeoutSec === 'number' && cfg.timeoutSec > 0 ? { timeoutSec: cfg.timeoutSec } : {}),
         },
       },
     };
@@ -1591,8 +1665,7 @@ function withUserText(original: ChatMessage['content'], text: string): ChatMessa
 
 /** Extract the capability token from a host media-asset serve URL, or null. */
 function tokenFromAssetUrl(url: string): string | null {
-  const m = /\/v1\/host\/openwop-app\/assets\/([^/?#]+)/.exec(url);
-  return m ? decodeURIComponent(m[1]!) : null;
+  return assetTokenFromUrl(url);
 }
 
 /** Resolve any URL-referenced image/file attachment to inline `dataBase64`
@@ -1916,6 +1989,8 @@ export const chatResponderNode: NodeModule = {
           managed = await dispatchManagedChat({
             userFacingProvider,
             tenantId: ctx.tenantId,
+            // ADR 0821 D4 — attributed from the run's starter block (chat runs → `chat`).
+            runId: ctx.runId,
             // ADR 0721 — without this the bucket is the pooled tenant (see
             // `managedUsageScope.ts`'s `!subject` branch). `ctx.actingUserId` is the
             // DURABLE human the run was created for, absent for genuine system runs.
@@ -2227,6 +2302,13 @@ const imageEmitNode: NodeModule = {
       ? inputs.mimeType
       : 'image/png';
     const alt = typeof inputs.alt === 'string' ? inputs.alt : 'Demo image (RFC 0055 media.image)';
+    // ADR 0818 — a `media.image` is an image, and the bytes are served from the
+    // app's own origin: a caller-chosen `text/html` here was a stored-XSS page.
+    // The serve route now refuses to render such a type anyway; this keeps the
+    // node from minting one at all.
+    if (!mimeType.startsWith('image/') || !isAllowedUploadMime(mimeType)) {
+      return { status: 'failure', error: { code: 'validation_error', message: `mimeType must be an image type the host serves (${[...ALLOWED_UPLOAD_MIME].filter((m) => m.startsWith('image/')).join(', ')}).` } };
+    }
 
     const stored = await storeMediaAsset(ctx.tenantId, { contentBase64, contentType: mimeType });
 
@@ -3490,6 +3572,11 @@ export function ensureNodesRegistered(): void {
   if (conformanceNodesEnabled()) {
     registerConformanceNodes(registry);
   }
+  // ADR 0858 (2026-10-08): the storage probe is NOT behind that switch. It calls
+  // only the run tenant's own storage, like any storage pack node, and has its own
+  // (`storageProbeEnabled()`, on by default), so production can project the
+  // storage families it probes.
+  registerConformanceStorageProbeNode();
   registry.register(delayNode);
   registry.register(failNode);
   registry.register(approvalGateNode);
@@ -3607,6 +3694,11 @@ function registerConformanceNodes(registry: ReturnType<typeof getNodeRegistry>):
       if (!secretId) {
         return { status: 'failure', error: { code: 'invalid_request', message: 'conformance.secret.echo requires config.secretId' } };
       }
+      // Only the conformance canary refs: a caller-chosen ref would make this a
+      // hash+length oracle over the tenant's real keys.
+      if (!CONFORMANCE_SECRET_REFS.has(secretId)) {
+        return { status: 'failure', error: { code: 'forbidden', message: 'conformance.secret.echo resolves only the conformance canary secret' } };
+      }
       const { resolveSecret } = await import('../byok/secretResolver.js');
       const value = await resolveSecret(secretId, { tenantId: ctx.tenantId });
       if (!value) {
@@ -3711,6 +3803,8 @@ function registerConformanceNodes(registry: ReturnType<typeof getNodeRegistry>):
   // RFC 0140 — the reserved side-effecting node the replay-suppression fixture
   // uses. Self-gates on `conformanceNodesEnabled()`.
   registerConformanceSideEffectNode();
+  // openwop#1769 — its PURE partner: the replay fixtures' wait, re-executed live.
+  registerConformanceHoldNode();
   registerConformanceHttpEffectNode();
   // RFC 0152 / openwop#1028 — the reserved A2A invoke bridge the
   // `conformance-a2a-task-roundtrip` fixture declares (both the 1.122.0

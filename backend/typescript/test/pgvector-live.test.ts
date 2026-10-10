@@ -13,7 +13,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import { Pool } from 'pg';
 import {
-  createPgVectorVector, createTableSql, type SqlRunner,
+  createPgVectorVector, createTableSql, verifyPgVectorDimension, type SqlRunner,
 } from '../src/host/vector/pgVectorVector.js';
 
 async function isDockerReachable(): Promise<boolean> {
@@ -66,6 +66,11 @@ afterAll(async () => {
 const vec = (tenantId: string) => createPgVectorVector({ tenantId }, { run, dim: DIM, table: TABLE });
 
 describe('pgvector live integration', () => {
+  it.skipIf(!dockerAvailable)('checks the real existing column width without altering or dropping tenant data', async () => {
+    await expect(verifyPgVectorDimension(run, TABLE, DIM)).resolves.toBeUndefined();
+    await expect(verifyPgVectorDimension(run, TABLE, DIM + 1)).rejects.toThrow(/migrate explicitly/i);
+    await expect(verifyPgVectorDimension(run, TABLE, DIM)).resolves.toBeUndefined();
+  });
   it.skipIf(!dockerAvailable)('upsert + real <=> nearest-neighbour query, ordered with cosine score', async () => {
     const v = vec('t1');
     await v.upsert({ namespace: 'n', items: [

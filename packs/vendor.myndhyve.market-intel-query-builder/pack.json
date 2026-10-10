@@ -1,14 +1,21 @@
 {
   "name": "vendor.myndhyve.market-intel-query-builder",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "MyndHyve market-intel.query-builder — generate intent-mapped search queries (4-8 query groups × 4 intent stages, 2-4 variations each, synonym maps, platform hints) + per-competitor query packs (comparison/switching/alternative) + topic clusters from ICP + product context. Pairs with ai-discovery: query-builder produces 'what to search for', ai-discovery produces 'where to search'. Eighth marketIntel pack of the Stage 5 cohort.",
   "author": "MyndHyve",
   "license": "Apache-2.0",
   "homepage": "https://myndhyve.ai/packs/market-intel-query-builder",
   "repository": "https://github.com/openwop/openwop",
-  "keywords": ["vendor", "myndhyve", "market-intel", "search-queries", "discovery", "voc"],
+  "keywords": [
+    "vendor",
+    "myndhyve",
+    "market-intel",
+    "search-queries",
+    "discovery",
+    "voc"
+  ],
   "engines": {
-    "openwop": ">=1.0.0 <2.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "peerDependencies": {
     "aiProviders": "supported"
@@ -27,10 +34,13 @@
       "description": "Single AI call. Inputs: icpContext + productContext (both required) + optional competitors / seedKeywords / geography / targetPlatforms / maxQueriesPerStage. Outputs: queryGroups (per intent stage with primaryQuery + variations + synonyms + signal strength + per-platform hints) + competitorQueries + topicClusters + summary (rebuilt from validated data — totalQueries counts primary+variations+competitor queries). Soft validation: missing primaryQuery → drop; invalid enums use safe defaults.",
       "category": "data",
       "role": "action",
-      "capabilities": ["side-effectful"],
+      "capabilities": [
+        "side-effectful"
+      ],
       "configSchemaRef": "schemas/query-builder.config.json",
       "inputSchemaRef": "schemas/query-builder.input.json",
       "outputSchemaRef": "schemas/query-builder.output.json"
     }
-  ]
+  ],
+  "kind": "node"
 }

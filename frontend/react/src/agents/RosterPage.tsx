@@ -40,9 +40,13 @@ import {
   type RosterEntry,
 } from './rosterClient.js';
 import { toast } from '../ui/toast.js';
+import { useAgentWriteAccess, writeErrorMessage } from './agentWriteAccess.js';
 
 export function RosterPage(): JSX.Element {
   const { t } = useTranslation('agents');
+  // ADR 0775 D1 (grade-ux ARUX-3) — hire / delete / autonomy / org-chart
+  // builds need `workspace:write`; a viewer is not offered them.
+  const canWrite = useAgentWriteAccess();
   const [roster, setRoster] = useState<RosterEntry[]>([]);
   const [chart, setChart] = useState<OrgChart | null>(null);
   const [rollups, setRollups] = useState<Record<string, ResponsibilityView>>({});
@@ -118,7 +122,7 @@ export function RosterPage(): JSX.Element {
       window.dispatchEvent(new Event('openwop:pinned-chat-agents-changed'));
       await refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(writeErrorMessage(err, t('common:error_forbidden')));
     }
   };
 
@@ -135,7 +139,7 @@ export function RosterPage(): JSX.Element {
           : t('rosterToggleAuto', { persona: r.persona }),
       );
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
+      toast.error(writeErrorMessage(err, t('common:error_forbidden')));
     }
   };
 
@@ -150,7 +154,7 @@ export function RosterPage(): JSX.Element {
       });
       await refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(writeErrorMessage(err, t('common:error_forbidden')));
     }
   };
 
@@ -207,15 +211,17 @@ export function RosterPage(): JSX.Element {
       render: (r) => (
         <div className="u-flex u-items-center u-gap-2 u-wrap">
           {autonomyBadge(r.autonomyLevel, t)}
-          <Button
-            variant="secondary" className="u-fs-12"
-            onClick={() => void onToggleAutonomy(r)}
-            title={autonomyOf(r) === 'review'
-              ? t('rosterSetAutoTitle')
-              : t('rosterSetReviewTitle')}
-          >
-            {autonomyOf(r) === 'review' ? t('rosterSetAuto') : t('rosterSetReview')}
-          </Button>
+          {canWrite ? (
+            <Button
+              variant="secondary" className="u-fs-12"
+              onClick={() => void onToggleAutonomy(r)}
+              title={autonomyOf(r) === 'review'
+                ? t('rosterSetAutoTitle')
+                : t('rosterSetReviewTitle')}
+            >
+              {autonomyOf(r) === 'review' ? t('rosterSetAuto') : t('rosterSetReview')}
+            </Button>
+          ) : null}
         </div>
       ),
     },
@@ -244,11 +250,13 @@ export function RosterPage(): JSX.Element {
           >
             <ShieldIcon size={13} aria-hidden /> {t('rosterProfile')}
           </Button>
-          <IconButton
-            label={t('rosterDeletePersona', { persona: r.persona })}
-            icon={<TrashIcon size={15} />}
-            onClick={() => setPendingDelete(r)}
-          />
+          {canWrite ? (
+            <IconButton
+              label={t('rosterDeletePersona', { persona: r.persona })}
+              icon={<TrashIcon size={15} />}
+              onClick={() => setPendingDelete(r)}
+            />
+          ) : null}
         </div>
       ),
     },
@@ -275,13 +283,13 @@ export function RosterPage(): JSX.Element {
         eyebrow={t('rosterEyebrow')}
         title={t('rosterTitle')}
         lede={<Trans t={t} i18nKey="rosterLede" components={{ 0: <strong /> }} />}
-        actions={
+        actions={canWrite ? (
           <Link to="/agents/new" className="btn btn-accent-solid u-flex u-items-center u-gap-2">
             <PlusIcon size={14} aria-hidden /> {t('rosterAddAgent')}
           </Link>
-        }
+        ) : undefined}
       />
-      {error ? <Notice variant="error">{error}</Notice> : null}
+      {error ? <Notice variant="error" announce={error}>{error}</Notice> : null}
 
       <h2 className="u-fs-16">{t('rosterHeading')}</h2>
 
@@ -316,22 +324,24 @@ export function RosterPage(): JSX.Element {
               wizard is the ONE create path and already writes the roster entry
               (AgentCreateWizard:createRosterEntry). This page stays the
               org-chart/governance view. */}
-          <div className="action-bar u-wrap u-items-center">
-            <Link to="/agents/new" className="btn btn-accent-solid u-flex u-items-center u-gap-2">
-              <PlusIcon size={14} aria-hidden /> {t('rosterHireViaWizard')}
-            </Link>
-          </div>
+          {canWrite ? (
+            <div className="action-bar u-wrap u-items-center">
+              <Link to="/agents/new" className="btn btn-accent-solid u-flex u-items-center u-gap-2">
+                <PlusIcon size={14} aria-hidden /> {t('rosterHireViaWizard')}
+              </Link>
+            </div>
+          ) : null}
 
           {roster.length === 0 ? (
             <StateCard
               icon={<BotIcon size={28} />}
               title={t('rosterEmptyTitle')}
-              body={t('rosterEmptyBody')}
-              action={
+              body={canWrite ? t('rosterEmptyBody') : t('rosterEmptyViewerBody')}
+              action={canWrite ? (
                 <Link to="/agents/new" className="btn btn-accent-solid u-flex u-items-center u-gap-2">
                   <PlusIcon size={14} aria-hidden /> {t('rosterAddFirst')}
                 </Link>
-              }
+              ) : undefined}
             />
           ) : (
             <>
@@ -366,9 +376,9 @@ export function RosterPage(): JSX.Element {
                     <RosterCard
                       key={r.rosterId}
                       entry={r}
-                      onToggleAutonomy={(x) => void onToggleAutonomy(x)}
+                      onToggleAutonomy={canWrite ? (x) => void onToggleAutonomy(x) : undefined}
                       onProfile={openProfile}
-                      onDeleteRequest={setPendingDelete}
+                      onDeleteRequest={canWrite ? setPendingDelete : undefined}
                     />
                   ))}
                 </div>
@@ -436,19 +446,21 @@ export function RosterPage(): JSX.Element {
           icon={<BuildingIcon size={28} />}
           title={t('rosterOrgEmptyTitle')}
           body={t('rosterOrgEmptyBody')}
-          action={
+          action={canWrite ? (
             <Button variant="accent-solid" className="u-flex u-items-center u-gap-2" onClick={() => void buildFlatChart()} disabled={roster.length === 0}>
               <ZapIcon size={14} aria-hidden /> {t('rosterGenerateChart')}
             </Button>
-          }
+          ) : undefined}
         />
       ) : (
         <>
-          <div className="action-bar">
-            <Button variant="secondary" className="u-flex u-items-center u-gap-2" onClick={() => void buildFlatChart()} disabled={roster.length === 0}>
-              <ZapIcon size={14} aria-hidden /> {t('rosterRebuildChart')}
-            </Button>
-          </div>
+          {canWrite ? (
+            <div className="action-bar">
+              <Button variant="secondary" className="u-flex u-items-center u-gap-2" onClick={() => void buildFlatChart()} disabled={roster.length === 0}>
+                <ZapIcon size={14} aria-hidden /> {t('rosterRebuildChart')}
+              </Button>
+            </div>
+          ) : null}
           <div className="page-stack">
             {chart.departments.map((d) => {
               const view = rollups[d.departmentId];

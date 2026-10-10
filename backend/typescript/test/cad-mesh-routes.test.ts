@@ -60,14 +60,14 @@ let n = 0;
 async function orgOwner() {
   const tenantId = `org:test-cadmesh-${Date.now()}-${n++}`;
   const c = client();
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `cadm-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await c.post('/host/openwop-app/test/login', { email: `cadm-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status).toBe(201);
-  const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status).toBe(201);
   return { c, orgId: String(org.body.orgId), tenantId };
 }
 
-const CAD = (orgId: string) => `/v1/host/openwop-app/cad/orgs/${encodeURIComponent(orgId)}`;
+const CAD = (orgId: string) => `/host/openwop-app/cad/orgs/${encodeURIComponent(orgId)}`;
 
 /** A 2-triangle canonical mesh, base64. */
 const MESH_B64 = Buffer.from(

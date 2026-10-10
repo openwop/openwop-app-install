@@ -29,8 +29,8 @@ import type { Account } from '../csmClient.js';
 const access = vi.hoisted(() => ({ value: { enabled: true, loading: false, variant: undefined as string | undefined } }));
 vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({ useFeatureAccess: () => access.value }));
 
-const listAccounts = vi.hoisted(() => vi.fn(async (): Promise<Account[]> => []));
-const updateAccount = vi.hoisted(() => vi.fn(async (..._a: unknown[]) => ({})));
+const listAccounts = vi.hoisted(() => vi.fn<typeof import('../csmClient.js').listAccounts>(async () => []));
+const updateAccount = vi.hoisted(() => vi.fn<typeof import('../csmClient.js').updateAccount>(async (accountId) => ({ accountId, tenantId: 't1', name: 'x', createdAt: '2026-08-01T00:00:00Z', updatedAt: '2026-08-01T00:00:00Z' })));
 const toastError = vi.hoisted(() => vi.fn());
 const toastSuccess = vi.hoisted(() => vi.fn());
 vi.mock('../../../ui/toast.js', () => ({ toast: { success: toastSuccess, error: toastError, info: vi.fn() } }));
@@ -56,13 +56,13 @@ import { CsmPage } from '../CsmPage.js';
 
 const acct = (over: Partial<Account> & { accountId: string; name: string }): Account => ({
   tenantId: 't1', createdAt: '2026-08-01T00:00:00Z', updatedAt: '2026-08-01T00:00:00Z', ...over,
-} as Account);
+});
 
 const renderPage = () => render(<MemoryRouter><CsmPage /></MemoryRouter>);
 
 beforeEach(() => {
   access.value = { enabled: true, loading: false, variant: undefined };
-  vi.clearAllMocks();
+  vi.resetAllMocks(); // vitest ≥3: restores each vi.fn's ORIGINAL implementation
   window.localStorage.clear();
 });
 afterEach(cleanup);
@@ -221,7 +221,7 @@ describe('CSM-UX-5 — the account editor', () => {
     fireEvent.change(within(panel).getByLabelText(/^health \(0/i), { target: { value: '' } });
     fireEvent.click(within(panel).getByRole('button', { name: /^save$/i }));
     await waitFor(() => expect(updateAccount).toHaveBeenCalled());
-    expect((updateAccount.mock.calls[0]![1] as { healthScore: unknown }).healthScore).toBeNull();
+    expect(updateAccount.mock.calls[0]![1].healthScore).toBeNull();
   });
 
   it('a failed save surfaces LOCALIZED copy, and the editor stays open', async () => {

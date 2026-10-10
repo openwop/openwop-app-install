@@ -20,8 +20,9 @@ import { OpenwopError } from '../types.js';
 import type { HostAdapterSuite } from './index.js';
 import type { Storage } from '../storage/storage.js';
 import { getRosterEntry } from './rosterService.js';
-import { getBoard, moveCard, setCardLastRun, notifyBoardChanged } from './kanbanService.js';
+import { applyBoardCommand, getBoard, moveCard, setCardLastRun, notifyBoardChanged, todoColumnOf, workingColumnOf } from './kanbanService.js';
 import { startWorkflowRun } from './runStarter.js';
+import { resolveTenantWorkflow } from './resolveLaunchDefinition.js';
 import { resolveEffectiveAccess } from './accessControlService.js';
 import { isEligibleApprover, consumeVoteIdentity } from './approverResolution.js';
 import { appendDecision, tallyDecisions, evaluateQuorumTally, readRejectionPolicy } from './reviewDecisionLedger.js';
@@ -92,6 +93,12 @@ export interface ApprovalDecisionCtx {
    *  refuses (409 `proposal_stale`) when it no longer matches the live
    *  definition. Ignored by every other kind. */
   expectedDefinitionHash?: string;
+  /** ADR 0862 D1 — the assistant-action card's `contentHash` the reviewer displayed when
+   *  they approved. A SIBLING of `expectedDefinitionHash`, not a reuse of it: the two hash
+   *  different objects, and one field meaning two things is how a check gets skipped. Read
+   *  from the HTTP body by both thin decide routes; REQUIRED for an assistant-action
+   *  approve (the handler refuses without it). Ignored by every other kind. */
+  expectedContentHash?: string;
 }
 
 export interface ApprovalDecisionResult {
@@ -292,7 +299,8 @@ type KindDisposition =
   | 'run-proposal'
   | 'campaign-spend'
   | 'assistant-action'
-  | 'compensation-action';
+  | 'compensation-action'
+  | 'claude-code-permission';
 
 /** The shared `{ approvalId, tenantId }` head every audit payload carries. */
 const baseAuditPayload = (a: PendingApproval): Record<string, unknown> => ({ approvalId: a.approvalId, tenantId: a.tenantId });
@@ -436,6 +444,10 @@ const KIND_DISPATCH = {
   // be audited — an audit line naming an ad budget for an authorization to
   // reverse a payment is worse than no line, because it is greppable and wrong.
   'compensation-action': 'compensation-action',
+  // ADR 0785 P4 — the decision IS the act: the waiting MCP tool reads the decided
+  // row. Its OWN disposition so the audit line names what was decided (the
+  // compensation-action lesson: a reused finalizer audits the wrong act).
+  'claude-code-permission': 'claude-code-permission',
 } satisfies Record<DecidableKind, KindDisposition>;
 
 /**
@@ -557,6 +569,16 @@ export async function claimApproval(
     return announceReview(tenantId, { approvalId: approval.approvalId, status: 'approved' });
   }
 
+  if (disposition === 'claude-code-permission') {
+    const lock = await resolveApproval(approval.approvalId, { status: 'approved', ...(decidedBy ? { decidedBy } : {}), ...(note !== undefined ? { note } : {}) });
+    if (!lock) throw new OpenwopError('not_found', 'Approval not found.', 404, { approvalId: approval.approvalId });
+    if (!lock.changed) throw new OpenwopError('conflict', `Approval already ${lock.approval.status}.`, 409, { status: lock.approval.status });
+    auditDecision(deps, ctx, 'claude-code.permission-allowed', `claude-code-permission:${approval.approvalId}`, {
+      approvalId: approval.approvalId, tenantId, deviceId: approval.claudeCodePermission?.deviceId, tool: approval.claudeCodePermission?.tool,
+    });
+    return announceReview(tenantId, { approvalId: approval.approvalId, status: 'approved' });
+  }
+
   // ADR 0023 §12 T4 — assistant-action: the claim marks the typed PendingAction.
   if (disposition === 'assistant-action') {
     const handler = getAssistantActionApprovalHandler();
@@ -564,6 +586,7 @@ export async function claimApproval(
     const decided = await handler(tenantId, approval.approvalId, 'approved', {
       ...(decidedBy ? { decidedByUserId: decidedBy } : {}),
       ...(note !== undefined ? { note } : {}),
+      ...(ctx.expectedContentHash !== undefined ? { expectedContentHash: ctx.expectedContentHash } : {}),
     });
     if (!decided) throw new OpenwopError('not_found', 'Approval not found.', 404, { approvalId: approval.approvalId });
     if (!decided.changed) throw new OpenwopError('conflict', `Approval already ${decided.approval.status}.`, 409, { status: decided.approval.status });
@@ -578,7 +601,8 @@ export async function claimApproval(
   }
   // Pre-resolve the proposed workflow BEFORE locking, so a vanished workflow
   // fails cleanly (422) instead of leaving an approved-but-unrun approval.
-  const wf = await deps.hostSuite.workflowCatalog.getWorkflow(approval.workflowId);
+  // ADR 0823 — tenant-scoped, matching the `startWorkflowRun` below that refuses it anyway.
+  const wf = await resolveTenantWorkflow(deps.hostSuite.workflowCatalog, tenantId, approval.workflowId);
   if (!wf) {
     throw new OpenwopError('workflow_not_found', 'Proposed workflow no longer resolves.', 422, { workflowId: approval.workflowId });
   }
@@ -624,11 +648,40 @@ export async function claimApproval(
   await attachRunId(approval.approvalId, runId);
 
   // Best-effort: move the picked card to Working (the run has started).
+  // ADR 0774 D1/D3 — the working lane is resolved by KIND (a default board's
+  // `doing`), and the card is stamped `running`: this dispatch and the
+  // heartbeat's pick claim are the only writers of that status, which is the
+  // proof reconcile needs before it may restore the card if the run row is
+  // later lost. Grade-code KSCD-5 — ONE CAS for the run id, the status and the
+  // move, conditioned on the card still being in To Do: a second, separate move
+  // left a window where an `auto` pass could claim the card and start it again,
+  // and yanked a card a human had since moved (D2: "the card stays where they
+  // put it"). If the human did move it, the run is still recorded, in place.
   if (approval.boardId && approval.cardId) {
-    await setCardLastRun(approval.cardId, runId);
     const board = await getBoard(approval.boardId);
-    const working = board?.columns.find((c) => c.id === 'working' || c.name.toLowerCase() === 'working');
-    if (working) await moveCard(approval.cardId, working.id);
+    const todo = board ? todoColumnOf(board) : undefined;
+    const working = board ? workingColumnOf(board) : undefined;
+    let moved = false;
+    if (board && todo && working) {
+      try {
+        await applyBoardCommand({
+          type: 'card.patch',
+          tenantId: board.tenantId,
+          boardId: board.id,
+          cardId: approval.cardId,
+          columnId: working.id,
+          patch: { lastRunId: runId, lastRunStatus: 'running' },
+          precondition: (fresh) => fresh.columnId === todo.id,
+        });
+        moved = true;
+      } catch (err) {
+        if ((err as { code?: unknown } | null)?.code !== 'kanban_card_precondition_failed') throw err;
+      }
+    }
+    // A run that finishes before this lands has its terminal stamp refused
+    // (the card did not point at it yet); reconcile then finds the row
+    // `completed` while the card sits in Working and stamps it.
+    if (!moved) await setCardLastRun(approval.cardId, runId, 'running');
     notifyBoardChanged(approval.boardId);
   }
 
@@ -688,6 +741,16 @@ export async function rejectApproval(
       runId: approval.compensationAction?.runId,
       nodeId: approval.compensationAction?.nodeId,
       compensationNodeTypeId: approval.compensationAction?.compensationNodeTypeId,
+    });
+    return announceReview(tenantId, { approvalId: approval.approvalId, status: 'rejected' });
+  }
+
+  if (disposition === 'claude-code-permission') {
+    const lock = await resolveApproval(approval.approvalId, { status: 'rejected', ...(decidedBy ? { decidedBy } : {}), ...(note !== undefined ? { note } : {}) });
+    if (!lock) throw new OpenwopError('not_found', 'Approval not found.', 404, { approvalId: approval.approvalId });
+    if (!lock.changed) throw new OpenwopError('conflict', `Approval already ${lock.approval.status}.`, 409, { status: lock.approval.status });
+    auditDecision(deps, ctx, 'claude-code.permission-denied', `claude-code-permission:${approval.approvalId}`, {
+      approvalId: approval.approvalId, tenantId, deviceId: approval.claudeCodePermission?.deviceId, tool: approval.claudeCodePermission?.tool,
     });
     return announceReview(tenantId, { approvalId: approval.approvalId, status: 'rejected' });
   }

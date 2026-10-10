@@ -41,21 +41,34 @@ import { InfoIcon, XIcon } from '../../ui/icons/index.js';
 import { useTranslation } from 'react-i18next';
 import { ZoomCluster } from '../../canvas/ZoomCluster.js';
 import { usePublishViewportHandle } from '../../canvas/viewportHandle.js';
+import { usePairStore } from '../pair/pairStore.js';
+import { ghostEdgeHandles, liveOpStatuses, projectGhosts } from '../pair/suggestionModel.js';
+import { GhostNode } from '../pair/GhostNode.js';
+import { FirstDraft } from '../pair/FirstDraft.js';
+import { SuggestionInstrument } from '../pair/SuggestionInstrument.js';
+import { PairEdge } from '../pair/PairEdge.js';
+import { SelectionToolbar } from '../pair/SelectionToolbar.js';
+import type { EditOp, WorkflowEditSuggestion } from '../pair/suggestionModel.js';
+import { prefersReducedMotion } from '../../ui/motion.js';
 
-const NODE_TYPES = { builder: BaseNode };
+const NODE_TYPES = { builder: BaseNode, ghost: GhostNode };
+const FIT_VIEW_OPTIONS = { maxZoom: 1 } as const;
+const EDGE_TYPES = { pair: PairEdge };
+/** ADR 0773 — ghost edges carry server-minted `sge_*` ids; never a real edge. */
+const isGhostEdgeId = (id: string): boolean => id.startsWith('sge_') || id.startsWith('peer');
 export const PALETTE_MIME = 'application/openwop-node-kind';
 // Copy/paste/duplicate moved to builder/nodeClipboard.ts (CV-2 — driven by
 // the shell's shortcut registry, not an ad-hoc keydown listener here).
 
-export function BuilderCanvas() {
+export function BuilderCanvas({ pairEnabled = false }: { pairEnabled?: boolean } = {}) {
   return (
     <ReactFlowProvider>
-      <BuilderCanvasInner />
+      <BuilderCanvasInner pairEnabled={pairEnabled} />
     </ReactFlowProvider>
   );
 }
 
-function BuilderCanvasInner() {
+function BuilderCanvasInner({ pairEnabled }: { pairEnabled: boolean }) {
   const { t } = useTranslation('builder');
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const { screenToFlowPosition } = useReactFlow();
@@ -63,6 +76,7 @@ function BuilderCanvasInner() {
   const builderNodes = useBuilderStore((s) => s.nodes);
   const builderEdges = useBuilderStore((s) => s.edges);
   const selectedNodeIds = useBuilderStore((s) => s.selectedNodeIds);
+  const selectedEdgeId = useBuilderStore((s) => s.selectedEdgeId);
   const overlay = useBuilderStore((s) => s.overlay);
   const debugSession = useBuilderStore((s) => s.debugSession);
   const failureHeat = useBuilderStore((s) => s.failureHeat);
@@ -76,6 +90,30 @@ function BuilderCanvasInner() {
   const setSelection = useBuilderStore((s) => s.setSelection);
   const selectedSet = useMemo(() => new Set(selectedNodeIds), [selectedNodeIds]);
 
+  // ADR 0773 D5 — the suggestion's ghost layer, projected against the LIVE graph.
+  const workflowId = useBuilderStore((s) => s.workflowId);
+  const suggestion = usePairStore((s) => s.suggestion);
+  const opState = usePairStore((s) => s.opState);
+  const focusedOp = usePairStore((s) => s.focusedOp);
+  const landing = usePairStore((s) => s.landing);
+  const roomSuggestions = usePairStore((s) => s.roomSuggestions);
+  const [hoveredEdgeId, setHoveredEdgeId] = useState<string | null>(null);
+  const ghosts = useMemo(() => {
+    if (!pairEnabled || !suggestion || suggestion.workflowId !== workflowId) return null;
+    const g = { nodes: builderNodes, edges: builderEdges };
+    return projectGhosts(suggestion, g, liveOpStatuses(suggestion, g, opState));
+  }, [pairEnabled, suggestion, workflowId, builderNodes, builderEdges, opState]);
+  // G-06b — a collaborator's SHARED suggestions, drawn read-only (their ghosts,
+  // their name; no keep/drop for anyone but the requester).
+  const peerGhosts = useMemo(() => {
+    if (!pairEnabled || roomSuggestions.length === 0) return [];
+    const g = { nodes: builderNodes, edges: builderEdges };
+    return roomSuggestions.filter((r) => r.workflowId === workflowId).map((r) => {
+      const asSuggestion = { id: r.id, workflowId: r.workflowId, ops: r.ghostOps, opState: r.opState } as unknown as WorkflowEditSuggestion;
+      return { name: r.requesterName, proj: projectGhosts(asSuggestion, g, liveOpStatuses(asSuggestion, g, r.opState)) };
+    });
+  }, [pairEnabled, roomSuggestions, workflowId, builderNodes, builderEdges]);
+
   // §7.3 / CV-3 residue — the shared ZoomCluster replaces xyflow <Controls>;
   // zoom math delegates to xyflow's own viewport (one owner per surface).
   const { zoom } = useViewport();
@@ -85,6 +123,36 @@ function BuilderCanvasInner() {
     zoomToPercent: (pct: number) => void rf.zoomTo(pct / 100),
   }), [rf]);
   usePublishViewportHandle(zoomHandle);
+
+  // P11 — where a change lives on the sheet: its node (an added step's ghost
+  // shares the op's node id), else the edge's target.
+  const anchorOf = useCallback((op: EditOp): string | undefined => {
+    if ('nodeId' in op) return op.nodeId;
+    if (op.kind === 'addEdge') return op.targetNodeId;
+    if ('edgeId' in op) return builderEdges.find((e) => e.id === op.edgeId)?.target;
+    return undefined;
+  }, [builderEdges]);
+  // P11 — J/K pans the sheet to the focused change (zoom unchanged).
+  useEffect(() => {
+    if (!pairEnabled || focusedOp === null || !suggestion) return;
+    const op = suggestion.ops[focusedOp]?.op;
+    const id = op ? anchorOf(op) : undefined;
+    const n = id ? rf.getNode(id) : undefined;
+    if (!n) return;
+    const w = n.measured?.width ?? 180;
+    const h = n.measured?.height ?? 80;
+    void rf.setCenter(n.position.x + w / 2, n.position.y + h / 2, { zoom: rf.getZoom(), duration: prefersReducedMotion() ? 0 : 200 });
+    // Deliberately keyed on the FOCUS only: re-centring on every graph edit
+    // would fight the person's own panning.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusedOp, pairEnabled]);
+  // P11 — "Fit to suggestion": every pending change in view, never past 1×.
+  const fitToSuggestion = useMemo(() => {
+    if (!pairEnabled || !suggestion || suggestion.workflowId !== workflowId) return undefined;
+    const ids = [...new Set(suggestion.ops.filter((_, i) => opState[i] === 'pending').map((o) => anchorOf(o.op)).filter((x): x is string => !!x))];
+    if (ids.length === 0) return undefined;
+    return { label: t('pairFitToSuggestion'), onSelect: () => void rf.fitView({ nodes: ids.map((id) => ({ id })), maxZoom: 1, padding: 0.3 }) };
+  }, [pairEnabled, suggestion, workflowId, opState, anchorOf, rf, t]);
 
   // §7.4 / CV-5 — keyboard-connect parity (the GraphSurface pattern on
   // xyflow): arm a source from the selected node's chrome; every node with a
@@ -230,6 +298,16 @@ function BuilderCanvasInner() {
           costUsd: failureHeatMode === 'cost' ? failureHeat?.[n.id] : undefined,
           // ADR 0481 D5 — live-session peers with this node selected.
           peers: peersByNode?.get(n.id),
+          // ADR 0773 — the numbered suggestion marks on an existing node, and
+          // whether a pending suggestion removes it.
+          suggestMarks: ghosts?.marksByNode.get(n.id),
+          suggestRemove: ghosts?.removedNodeIds.has(n.id) ?? false,
+          // ADR 0773 D6 — the near-selection toolbar (Ask / Explain / Diagnose)
+          // on the ONE selected node when pairing is on.
+          pairActions: pairEnabled && selectedNodeIds.length === 1 && selectedSet.has(n.id)
+            ? { runId: overlay?.nodeStatus[n.id] === 'failed' ? overlay.runId : undefined }
+            : undefined,
+          pairCitable: pairEnabled,
           // §7.4 / CV-5 — the keyboard-connect affordance state.
           connect: {
             armed: connectFrom != null,
@@ -241,10 +319,29 @@ function BuilderCanvasInner() {
         },
         selected: selectedSet.has(n.id),
         ...((d) => (d ? { width: d.width, height: d.height } : {}))(nodeDims[n.id]),
-      })),
-    [builderNodes, selectedSet, overlay, debugSession, failureHeat, failureHeatMode, peersByNode, nodeDims, connectFrom, compatiblePair, connectTo],
+      } as Node)).concat((ghosts?.ghostNodes ?? []).map((g) => ({
+        id: g.id,
+        type: 'ghost',
+        position: g.position,
+        data: { kind: g.kind, name: g.name, index: g.index, gateSensitive: g.gateSensitive, focused: focusedOp === g.index, dropped: g.dropped, landing: landing.includes(g.index) },
+        selectable: false,
+        draggable: false,
+        deletable: false,
+        connectable: false,
+      }))).concat(peerGhosts.flatMap((p, k) => p.proj.ghostNodes.filter((g) => !g.dropped).map((g) => ({
+        id: `peer${k}:${g.id}`,
+        type: 'ghost',
+        position: g.position,
+        data: { kind: g.kind, name: g.name, index: g.index, gateSensitive: g.gateSensitive, focused: false, peer: p.name ?? '' },
+        selectable: false,
+        draggable: false,
+        deletable: false,
+        connectable: false,
+      })))),
+    [builderNodes, selectedSet, overlay, debugSession, failureHeat, failureHeatMode, peersByNode, nodeDims, connectFrom, compatiblePair, connectTo, ghosts, focusedOp, pairEnabled, selectedNodeIds.length, landing, peerGhosts],
   );
 
+  const ghostNodeIds = useMemo(() => new Set((ghosts?.ghostNodes ?? []).map((n) => n.id)), [ghosts]);
   const rfEdges: Edge[] = useMemo(
     () =>
       builderEdges.map((e) => ({
@@ -256,8 +353,35 @@ function BuilderCanvasInner() {
         // Liveness: an edge whose target node is currently running carries the
         // marching-dash "data in flight" treatment (CSS .edge-running, §6).
         ...(overlay?.nodeStatus[e.target] === 'running' ? { className: 'edge-running' } : {}),
-      })),
-    [builderEdges, overlay],
+        ...(ghosts?.removedEdgeIds.has(e.id) ? { className: 'edge-suggest-remove' } : {}),
+        ...(ghosts?.changedEdgeIds.has(e.id) ? { className: 'edge-suggest-change', label: `${(ghosts.changedEdgeIds.get(e.id) ?? 0) + 1}` } : {}),
+        // G-02e — the "+" edge (midpoint insert) when pairing is on.
+        ...(pairEnabled ? { type: 'pair', data: { showPlus: hoveredEdgeId === e.id || selectedEdgeId === e.id, sourcePort: e.sourcePort, targetPort: e.targetPort } } : {}),
+      } as Edge)).concat((ghosts?.ghostEdges ?? []).map((g) => ({
+        id: g.id,
+        source: g.source,
+        target: g.target,
+        // A ghost card has ONE unnamed handle per side. Naming a port there
+        // points the edge at a handle that does not exist, and React Flow then
+        // draws nothing: the suggested connection was listed in the review and
+        // missing from the sheet (G-10a deployed-build check, 2026-10-01).
+        ...ghostEdgeHandles(g, ghostNodeIds),
+        className: `edge-suggested${focusedOp === g.index ? ' is-focused' : ''}`,
+        ...(g.label ? { label: g.label } : {}),
+        selectable: false,
+        deletable: false,
+        focusable: false,
+      }))).concat(peerGhosts.flatMap((p, k) => p.proj.ghostEdges.map((g) => ({
+        id: `peer${k}:${g.id}`,
+        source: g.source.startsWith('sg_') ? `peer${k}:${g.source}` : g.source,
+        target: g.target.startsWith('sg_') ? `peer${k}:${g.target}` : g.target,
+        ...ghostEdgeHandles(g, new Set(p.proj.ghostNodes.map((n) => n.id))),
+        className: 'edge-suggested edge-suggested--peer',
+        selectable: false,
+        deletable: false,
+        focusable: false,
+      })))),
+    [builderEdges, overlay, ghosts, ghostNodeIds, focusedOp, pairEnabled, hoveredEdgeId, selectedEdgeId, peerGhosts],
   );
 
   const onNodesChange = useCallback(
@@ -315,7 +439,7 @@ function BuilderCanvasInner() {
   const onEdgesChange = useCallback(
     (changes: EdgeChange[]) => {
       for (const change of changes) {
-        if (change.type === 'remove') {
+        if (change.type === 'remove' && !isGhostEdgeId(change.id)) {
           removeEdge(change.id);
         }
       }
@@ -326,9 +450,14 @@ function BuilderCanvasInner() {
   const selectEdge = useBuilderStore((s) => s.selectEdge);
   const onEdgeClick = useCallback(
     (_e: React.MouseEvent, edge: Edge) => {
+      if (isGhostEdgeId(edge.id)) {
+        const g = ghosts?.ghostEdges.find((x) => x.id === edge.id);
+        if (g) usePairStore.getState().focusOp(g.index);
+        return;
+      }
       selectEdge(edge.id);
     },
-    [selectEdge],
+    [selectEdge, ghosts],
   );
   const onPaneClick = useCallback(() => {
     setSelection([]);
@@ -426,10 +555,17 @@ function BuilderCanvasInner() {
           {t('canvasConnectHint')}
         </button>
       )}
+      {pairEnabled ? <SuggestionInstrument /> : null}
+      {pairEnabled && builderNodes.length === 0 && (ghosts?.ghostNodes.length ?? 0) === 0 ? <FirstDraft /> : null}
       <ReactFlow
         nodes={rfNodes}
         edges={rfEdges}
         nodeTypes={NODE_TYPES}
+        edgeTypes={EDGE_TYPES}
+        {...(pairEnabled ? {
+          onEdgeMouseEnter: (_e: React.MouseEvent, edge: Edge) => setHoveredEdgeId(edge.id),
+          onEdgeMouseLeave: () => setHoveredEdgeId(null),
+        } : {})}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onEdgeClick={onEdgeClick}
@@ -438,11 +574,15 @@ function BuilderCanvasInner() {
         onConnectEnd={onConnectEnd}
         isValidConnection={isValidConnection}
         fitView
+        // G-10a visual pass: a first fit onto ONE node (a template ghost) must not
+        // zoom to the 2x ceiling and blow the card up; cap the fit at 1x.
+        fitViewOptions={FIT_VIEW_OPTIONS}
         snapToGrid
         snapGrid={[20, 20]}
         proOptions={{ hideAttribution: true }}
       >
         <Background variant={BackgroundVariant.Dots} gap={20} size={1} />
+        {pairEnabled && selectedNodeIds.length > 1 ? <SelectionToolbar ids={selectedNodeIds} /> : null}
         <MiniMap
           pannable
           zoomable
@@ -463,6 +603,7 @@ function BuilderCanvasInner() {
         onFit={() => void rf.fitView()}
         zoomInDisabled={zoom >= 2}
         zoomOutDisabled={zoom <= 0.5}
+        extraFit={fitToSuggestion}
       />
       {/* §7.4 / CV-10 — the link-drag-search picker at the drop point. */}
       {dropPicker ? (

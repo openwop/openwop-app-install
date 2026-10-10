@@ -111,9 +111,9 @@ let n = 0;
 async function ownerOrg(): Promise<{ owner: Client; orgId: string; tenantId: string }> {
   const tenantId = `org:campsyncchain-${Date.now()}-${n++}`;
   const owner = client();
-  const r = await owner.post('/v1/host/openwop-app/test/login', { email: `campsyncchain-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await owner.post('/host/openwop-app/test/login', { email: `campsyncchain-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return { owner, orgId: org.body.orgId, tenantId };
 }
@@ -122,7 +122,7 @@ interface RunSnapshot { status: string; error?: { code: string; message: string 
 async function pollRun(owner: Client, runId: string): Promise<RunSnapshot> {
   let snap: RunSnapshot = { status: 'pending' };
   for (let i = 0; i < 80; i++) {
-    const r = await owner.get(`/v1/runs/${runId}`);
+    const r = await owner.get(`/runs/${runId}`);
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     snap = r.body as RunSnapshot;
     if (snap.status === 'completed' || snap.status === 'failed' || snap.status === 'cancelled' || snap.status.startsWith('waiting')) break;
@@ -133,7 +133,7 @@ async function pollRun(owner: Client, runId: string): Promise<RunSnapshot> {
 
 interface BundleEvent { type?: string; nodeId?: string; payload?: Record<string, unknown> }
 async function bundleEvents(owner: Client, runId: string): Promise<BundleEvent[]> {
-  const b = await owner.get(`/v1/runs/${runId}/debug-bundle`);
+  const b = await owner.get(`/runs/${runId}/debug-bundle`);
   expect(b.status, JSON.stringify(b.body)).toBe(200);
   return (b.body.events as BundleEvent[]) ?? [];
 }
@@ -153,7 +153,7 @@ describe('campaign-sync.daily-metrics — real executor, honest empty-ledger out
     const expanded = expandChain(found!.chain, { params });
     registerWorkflow(expanded);
 
-    const create = await owner.post('/v1/runs', { workflowId: expanded.workflowId, inputs: params });
+    const create = await owner.post('/runs', { workflowId: expanded.workflowId, inputs: params });
     expect(create.status, JSON.stringify(create.body)).toBe(201);
     const runId = create.body.runId as string;
 
@@ -176,7 +176,7 @@ describe('campaign-sync.pacing-check — real executor, real over-budget alert',
     const { owner, orgId, tenantId } = await ownerOrg();
 
     // Real campaign with a $100 budget.
-    const brief = await owner.post('/v1/host/openwop-app/campaign-brief/briefs', {
+    const brief = await owner.post('/host/openwop-app/campaign-brief/briefs', {
       orgId, name: 'Summer Sale', budget: { totalMinor: 10000, currency: 'USD' },
     });
     expect(brief.status, JSON.stringify(brief.body)).toBe(201);
@@ -186,7 +186,7 @@ describe('campaign-sync.pacing-check — real executor, real over-budget alert',
       headline: 'H', supportingStatement: 'S', proofPoints: ['p'], primaryCta: 'go', secondaryCta: 'see',
       tone: 'warm', channelTones: {}, sourceDocIds: [], generatedAt: '2026-07-01T00:00:00Z',
     });
-    const finalize = await owner.post('/v1/host/openwop-app/campaign-orchestration/finalize', { briefId });
+    const finalize = await owner.post('/host/openwop-app/campaign-orchestration/finalize', { briefId });
     expect(finalize.status, JSON.stringify(finalize.body)).toBe(201);
     const campaignId = finalize.body.campaign.id as string;
     const campaignName = finalize.body.campaign.name as string;
@@ -194,7 +194,7 @@ describe('campaign-sync.pacing-check — real executor, real over-budget alert',
     // Real performance data — $150 spend against the $100 plan (over budget).
     const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
     const csv = `date,campaign,spend,impressions,clicks,conversions,revenue\n${yesterday},${campaignName},150,1000,50,5,300`;
-    const imp = await owner.post('/v1/host/openwop-app/campaign-connectors/import', { orgId, csv, campaignId });
+    const imp = await owner.post('/host/openwop-app/campaign-connectors/import', { orgId, csv, campaignId });
     expect(imp.status, JSON.stringify(imp.body)).toBe(201);
     expect(imp.body.imported).toBe(1);
 
@@ -204,7 +204,7 @@ describe('campaign-sync.pacing-check — real executor, real over-budget alert',
     const expanded = expandChain(found!.chain, { params });
     registerWorkflow(expanded);
 
-    const create = await owner.post('/v1/runs', { workflowId: expanded.workflowId, inputs: params });
+    const create = await owner.post('/runs', { workflowId: expanded.workflowId, inputs: params });
     expect(create.status, JSON.stringify(create.body)).toBe(201);
     const runId = create.body.runId as string;
 

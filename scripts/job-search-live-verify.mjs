@@ -23,7 +23,7 @@ import { dirname, join } from 'node:path';
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const { chromium } = await import(join(root, 'frontend/react/node_modules/playwright-core/index.mjs'));
 
-const API = '/api/v1/host/openwop-app';
+const API = '/api/host/openwop-app'; // unversioned (ADR 0812)
 const BASE = process.env.BASE_URL ?? 'http://localhost:15185';
 const OUT = process.env.OUT ?? '/tmp/js-verify-shots';
 mkdirSync(OUT, { recursive: true });

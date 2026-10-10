@@ -22,6 +22,8 @@
  * forking this file need to thread these through.
  */
 
+import { seedLiveComposer } from './composerSeed.js';
+import type { AgentMentionEntry } from './lib/agentMentions.js';
 import { Button } from '../ui/Button.js';
 import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -140,6 +142,8 @@ function InterruptCardStack({
           <div
             key={interrupt.interruptId}
             className="msgfeed-card-indent"
+            // ADR 0768 P1 — the Needs-you tray's jump target.
+            data-interrupt-id={interrupt.interruptId}
             tabIndex={-1}
             ref={(el) => {
               if (el) cardRefs.current.set(interrupt.interruptId, el);
@@ -206,6 +210,8 @@ interface Props {
   /** ADR 0192 D8 — channel mode: `subjectRef → display` for attribution rows.
    *  Present ⇒ multi-party rendering (attribution + own-message alignment). */
   authorDirectory?: ReadonlyMap<string, { displayName: string; kind: 'user' | 'agent' | 'other' }>;
+  /** ADR 0768 D3 — the channel's agent members (the composer's @-mention entries). */
+  mentionEntries?: readonly AgentMentionEntry[];
   /** The caller's own subjectRef — with `authorDirectory`, decides alignment. */
   viewerSubjectRef?: string;
   /** ADR 0195 D5 — multi-party message affordances (react / edit / delete).
@@ -216,6 +222,9 @@ interface Props {
     onEdit: (messageId: string, newText: string) => void;
     onDelete: (messageId: string) => void;
   };
+  /** ADR 0853 D2 — "Record as decision" on any message (present when the
+   *  conversation's project has a team ledger). */
+  onRecordDecision?: (m: ChatMessage) => void;
   /** ADR 0202 D5 — the "New messages" divider renders BEFORE the message at this
    *  0-based index (the caller's first unread). Out-of-range ⇒ no divider. */
   unreadFromIndex?: number;
@@ -224,6 +233,10 @@ interface Props {
   onSummarize?: () => void;
   /** ADR 0202 D5 — disables the summarize button while a recap is in flight. */
   summarizeBusy?: boolean;
+  /** ADR 0768 follow-up P2 — open a run's DURABLE artifact in the Workbench. Only
+   *  surfaces that have a Workbench pass it; the preview offers the button only
+   *  once the run's artifact for that node is confirmed. */
+  onOpenArtifact?: (a: { artifactId: string }) => void;
 }
 
 export function MessageFeed({
@@ -241,11 +254,14 @@ export function MessageFeed({
   onLoadEarlier,
   commentsContext,
   authorDirectory,
+  mentionEntries,
   viewerSubjectRef,
   messageActions,
+  onRecordDecision,
   unreadFromIndex,
   onSummarize,
   summarizeBusy,
+  onOpenArtifact,
 }: Props): JSX.Element {
   const { t } = useTranslation('chat');
   const endRef = useRef<HTMLDivElement>(null);
@@ -255,10 +271,25 @@ export function MessageFeed({
   // fresh `channelActions` object per ROW per RENDER, defeating the memo for
   // the whole channel feed on every streaming delta. Two stable variants
   // (own = can modify, other = read-only) keep the prop referentially stable.
+  // ADR 0768 D3 — "Ask for a source" on an agent member's message: resolved from
+  // the SAME roster the composer's @-mentions use (agent subject = `agent:<id>`),
+  // and it only DRAFTS the question into the composer; the user sends it.
+  const askSource = useMemo(() => {
+    if (!mentionEntries || mentionEntries.length === 0) return undefined;
+    const byAgent = new Map(mentionEntries.map((e) => [e.agentId, e.slug]));
+    return {
+      handleFor: (m: ChatMessage) => (m.authorSubject?.startsWith('agent:') ? byAgent.get(m.authorSubject.slice('agent:'.length)) ?? null : null),
+      ask: (handle: string, text: string) => {
+        const quote = text.replace(/\s+/g, ' ').trim().slice(0, 120);
+        seedLiveComposer(t('askSourceDraft', { handle, quote }));
+      },
+    };
+  }, [mentionEntries, t]);
+  const record = onRecordDecision ? { onRecordDecision } : {};
   const channelActionsPair = useMemo(() => messageActions ? {
-    own: { canModify: true, onToggleReaction: messageActions.onToggleReaction, onEdit: messageActions.onEdit, onDelete: messageActions.onDelete },
-    other: { canModify: false, onToggleReaction: messageActions.onToggleReaction, onEdit: messageActions.onEdit, onDelete: messageActions.onDelete },
-  } : undefined, [messageActions]);
+    own: { canModify: true, onToggleReaction: messageActions.onToggleReaction, onEdit: messageActions.onEdit, onDelete: messageActions.onDelete, ...record },
+    other: { canModify: false, onToggleReaction: messageActions.onToggleReaction, onEdit: messageActions.onEdit, onDelete: messageActions.onDelete, ...(askSource ? { askSource } : {}), ...record },
+  } : undefined, [messageActions, askSource, onRecordDecision]); // eslint-disable-line react-hooks/exhaustive-deps
   // "Stick to bottom" = the user is at (or within a threshold of) the bottom, so
   // new content should auto-follow. The moment they scroll up, this goes false and
   // streaming tokens stop yanking them down — a "Jump to latest" pill appears
@@ -365,7 +396,27 @@ export function MessageFeed({
     nodeId: string;
     label: string;
     output: unknown;
+    runId: string | null;
   } | null>(null);
+  // ADR 0768 follow-up P2 — the durable artifact behind the previewed node, when
+  // there is one. Looked up only for a surface with a Workbench; the client is
+  // loaded on demand (it must not ride the feed's entry chunk). A failed lookup
+  // just leaves the transient preview — never a button to nowhere.
+  const [previewArtifactId, setPreviewArtifactId] = useState<string | null>(null);
+  useEffect(() => {
+    setPreviewArtifactId(null);
+    if (!preview?.runId || !onOpenArtifact) return undefined;
+    let live = true;
+    const { runId, nodeId } = preview;
+    void import('./artifacts/artifactClient.js')
+      .then((m) => m.listRunArtifacts(runId))
+      .then((items) => {
+        const hit = items.find((a) => a.runNodeId === nodeId);
+        if (live && hit) setPreviewArtifactId(hit.artifactId);
+      })
+      .catch(() => undefined);
+    return () => { live = false; };
+  }, [preview, onOpenArtifact]);
 
   // A11Y-6/A11Y-9 companion: the log announces ADDITIONS only (announcing
   // `text` re-reads every streamed token mutation — an AT flood). Streamed
@@ -529,8 +580,9 @@ export function MessageFeed({
               <WorkflowCompletionCard
                 run={m.workflowRun}
                 onPreviewArtifact={(nodeId, output, label) =>
-                  setPreview({ nodeId, output, label })
+                  setPreview({ nodeId, output, label, runId: m.workflowRun?.runId ?? null })
                 }
+                {...(onOpenArtifact ? { onOpenArtifact } : {})}
               />
             </div>
           )}
@@ -546,6 +598,10 @@ export function MessageFeed({
             label={preview.label}
             output={preview.output}
             onClose={() => setPreview(null)}
+            {...(previewArtifactId && onOpenArtifact ? {
+              artifactId: previewArtifactId,
+              onOpenWorkbench: (id: string) => { setPreview(null); onOpenArtifact({ artifactId: id }); },
+            } : {})}
           />
         </Suspense>
       ) : null}

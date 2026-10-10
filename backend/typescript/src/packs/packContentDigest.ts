@@ -51,7 +51,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { lstatSync, readdirSync, readFileSync, readlinkSync } from 'node:fs';
+import { lstatSync, readdirSync, readFileSync, readlinkSync, type Stats } from 'node:fs';
 import { join } from 'node:path';
 
 /** Never part of a pack's content digest. */
@@ -171,4 +171,112 @@ export function verifyContentHashes(
     if (actual !== expectedSha) return `content_modified:${relPath}`;
   }
   return null;
+}
+
+// ── ADR 0826 D2/D3 — the installed-pack shape + whole-tree marker check ──────
+
+/** The install marker's own file name. */
+export const INSTALL_MARKER_FILE = '.openwop-installed.json';
+
+/**
+ * The top-level files and subdirectories a registry install copies, and therefore
+ * the ONLY top-level entries an installed pack may hold (plus the marker). One list:
+ * the installer copies from it, and `verifyInstallMarker` judges a tree against it.
+ */
+export const INSTALLED_PACK_FILES: ReadonlySet<string> = new Set(['pack.json', 'index.mjs']);
+// `prompts` for RFC 0070 / RFC 0003 §C `systemPromptRef`; `keys` for the legacy
+// on-disk signature path (status only, never trust — `packSignature.verifySelfAttested`).
+export const INSTALLED_PACK_SUBDIRS: ReadonlySet<string> = new Set(['schemas', 'keys', 'prompts']);
+
+/** Never content, tolerated beside an installed pack (Finder litter on a dev box). */
+const TOLERATED_LITTER = new Set(['.DS_Store']);
+
+/**
+ * ADR 0826 D2 — refuse a staged pack tree that holds anything but directories and
+ * single-link regular files, across the entries an install would copy.
+ *
+ * A symlink is how a signed DATA-only pack read host files (`prompts/x.md → a
+ * host file` landed in an agent's systemPrompt); a hardlink is the same reach
+ * without the link bit; a fifo/device is never legitimate. Refusing the class is
+ * simpler to verify than containing it at every reader. Throws
+ * `pack_content_refused: <relpath> is a <kind>`.
+ */
+export function assertClosedWorldPackTree(packRoot: string): void {
+  const kindOf = (st: Stats): string | null => {
+    if (st.isSymbolicLink()) return 'symlink';
+    if (st.isDirectory()) return null;
+    if (st.isFile()) return st.nlink > 1 ? 'hardlink' : null;
+    return 'special file';
+  };
+  const walk = (absDir: string, rel: string): void => {
+    for (const name of readdirSync(absDir).sort()) {
+      const abs = join(absDir, name);
+      const relPath = `${rel}/${name}`;
+      const st = lstatSync(abs);
+      const bad = kindOf(st);
+      if (bad) throw new Error(`pack_content_refused: ${relPath} is a ${bad}`);
+      if (st.isDirectory()) walk(abs, relPath);
+    }
+  };
+  for (const name of readdirSync(packRoot).sort()) {
+    if (!INSTALLED_PACK_FILES.has(name) && !INSTALLED_PACK_SUBDIRS.has(name)) continue;
+    const abs = join(packRoot, name);
+    const st = lstatSync(abs);
+    const bad = kindOf(st);
+    if (bad) throw new Error(`pack_content_refused: ${name} is a ${bad}`);
+    if (INSTALLED_PACK_FILES.has(name) && !st.isFile()) throw new Error(`pack_content_refused: ${name} is not a file`);
+    if (INSTALLED_PACK_SUBDIRS.has(name)) {
+      if (!st.isDirectory()) throw new Error(`pack_content_refused: ${name} is not a directory`);
+      walk(abs, name);
+    }
+  }
+}
+
+/** The marker fields this check reads. */
+export interface InstallMarkerAttestation {
+  contentHashes?: unknown;
+  /** ADR 0826 D3 — `packContentDigest` of the whole installed tree. Absent on a
+   *  marker written before ADR 0826 (a "legacy" marker). */
+  contentDigest?: unknown;
+}
+
+/**
+ * ADR 0826 D3 — does an installed pack still hold exactly what its marker attests?
+ *
+ * The ONE implementation both `registryInstaller.verifyInstalledPack()` and
+ * `host/packTrust` call. Three checks, in order:
+ *   1. SHAPE — top-level entries ⊆ the install allowlist + the marker. Needed on top
+ *      of the digest because the digest EXCLUDES `node_modules`/`.git`: a planted
+ *      `node_modules/` beside `index.mjs` would otherwise change nothing (/architect A2).
+ *   2. `contentHashes` (pack.json + index.mjs) — every marker has them.
+ *   3. `contentDigest` (the whole tree, symlink-aware) — when the marker carries it.
+ *
+ * Returns `{ failure: null }` on success; `legacy: true` when the marker predates
+ * ADR 0826 and so only the two-file check (2) could run.
+ */
+export function verifyInstallMarker(
+  packDir: string,
+  marker: InstallMarkerAttestation,
+): { failure: string | null; legacy: boolean } {
+  const hashes = marker.contentHashes;
+  if (!hashes || typeof hashes !== 'object') return { failure: 'marker_missing_content_hashes', legacy: false };
+  let names: string[];
+  try {
+    names = readdirSync(packDir);
+  } catch {
+    return { failure: 'pack_dir_unreadable', legacy: false };
+  }
+  for (const name of names) {
+    if (name === INSTALL_MARKER_FILE || TOLERATED_LITTER.has(name)) continue;
+    if (!INSTALLED_PACK_FILES.has(name) && !INSTALLED_PACK_SUBDIRS.has(name)) {
+      return { failure: `unexpected_entry:${name}`, legacy: false };
+    }
+  }
+  const two = verifyContentHashes(packDir, hashes as Record<string, string>);
+  if (two) return { failure: two, legacy: false };
+  if (typeof marker.contentDigest !== 'string') return { failure: null, legacy: true };
+  return {
+    failure: packContentDigest(packDir) === marker.contentDigest ? null : 'content_digest_mismatch',
+    legacy: false,
+  };
 }

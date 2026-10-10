@@ -47,7 +47,7 @@ function provider(scope: { actingUserId?: string; runId?: string } = {}) {
 }
 
 describe('CFP-1 — strategy agent tools register + the pack rides exactly them', () => {
-  const packDir = new URL('../../../packs/feature.strategy.agents/', import.meta.url);
+  const packDir = new URL('../../../packs/vendor.openwop-app.strategy.agents/', import.meta.url);
   const manifest = JSON.parse(readFileSync(new URL('pack.json', packDir), 'utf8')) as { agents: { toolAllowlist: string[] }[] };
 
   it('all five tools register into the builtin surface', () => {

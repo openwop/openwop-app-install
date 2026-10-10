@@ -13,9 +13,10 @@
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { surfaceStr as str, type FeatureSurface } from '../../host/featureSurfaces.js';
 import { listListings, type Listing } from './listingService.js';
+import { disabledPacks } from './packEnablementService.js';
 
 /** Project a listing to the node-facing shape (display fields only). */
-function project(l: Listing): Record<string, unknown> {
+function project(l: Listing, disabled?: ReadonlySet<string>): Record<string, unknown> {
   return {
     packName: l.packName,
     version: l.version,
@@ -34,6 +35,11 @@ function project(l: Listing): Record<string, unknown> {
     // projection that silently narrows is how a model gets lied to.
     ...(l.tombstoned ? { tombstoned: true } : {}),
     ...(l.requiredBy ? { requiredBy: l.requiredBy } : {}),
+    // ADR 0826 D6 — the real trust tier (a model can say "unverified"), and D7 —
+    // the workspace's own curation, MARKED rather than filtered: a silently
+    // narrowed projection is how `MKT2-26` lied to a model before.
+    trust: l.trust.tier,
+    ...(disabled?.has(l.packName) ? { disabledInWorkspace: true } : {}),
   };
 }
 
@@ -43,17 +49,21 @@ function matches(l: Listing, q: string): boolean {
   return hay.includes(q.toLowerCase());
 }
 
-export function buildMarketplaceSurface(_scope: BundleScope): FeatureSurface {
+export function buildMarketplaceSurface(scope: BundleScope): FeatureSurface {
   // Listings are a HOST-GLOBAL projection (the installed pack set is process-global,
   // not per-tenant), so there is no tenant slice to enforce here — the data carries
   // no tenant identity. The toggle gate (featureSurfaces.ts) still applies per call.
   return {
-    listings: async () => ({ listings: listListings().map(project) }),
+    listings: async () => {
+      const disabled = await disabledPacks(scope.tenantId);
+      return { listings: listListings().map((l) => project(l, disabled)) };
+    },
     search: async (args) => {
       const q = str(args.query).trim();
       const all = listListings();
       const hits = q ? all.filter((l) => matches(l, q)) : all;
-      return { listings: hits.map(project) };
+      const disabled = await disabledPacks(scope.tenantId);
+      return { listings: hits.map((l) => project(l, disabled)) };
     },
   };
 }

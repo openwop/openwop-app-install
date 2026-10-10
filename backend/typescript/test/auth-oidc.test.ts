@@ -1,24 +1,33 @@
 /**
- * Coverage for Phase 3.1: OIDC bearer verification on the workflow-
- * engine auth middleware.
+ * OIDC bearer verification on the auth middleware, cookies DISABLED (the
+ * server-to-server posture: no cookie fallback, so every verifier outcome is
+ * answered on the wire). ADR 0003 / Phase 3.1 (the bearer lane), ADR 0015 (the
+ * issuer-scoped personal tenant), RFC 0200 §D (`audience_mismatch` is the
+ * top-level code for a verified-but-misaddressed token), ADR 0561 (an env API
+ * key is operator-scoped only when configured `<key>:*`).
  *
- * Three cases:
- *   1. Valid token → 200, principal tenants[0] is the `user:<hash>`
- *      derived from issuer+sub. Anon cookie path NOT triggered.
- *   2. Expired token → 401 with `details.reason: "expired"`.
- *   3. Wrong audience → 401 with `details.reason: "wrong_audience"`.
+ * Cases:
+ *   1. valid token → `oidc:<sub>` principal, tenant `user:<32 hex>`;
+ *   2. the tenant is `user:` + sha256(`<iss>:<sub>`)[0..32] — issuer-SCOPED, so the
+ *      same `sub` from two IdPs can never share a tenant (asserted against the
+ *      recomputed hash: a sub-only hash goes red here);
+ *   3. expired → 401 `unauthenticated`, `details.reason: expired`;
+ *   4. wrong audience → 401 `audience_mismatch`, `details.reason: wrong_audience`;
+ *   5. an allow-listed env API key still works alongside OIDC (`bearer:<8>`, `['*']`);
+ *   6. a non-JWT, non-allow-listed bearer → 401 with the "not recognized" message
+ *      (the bearer-branch refusal, distinguishable from the generic
+ *      missing-credential 401 further down the middleware).
  *
- * Also a regression case: API-key Bearer still works alongside OIDC
- * (the two paths coexist on the same Authorization header).
+ * Sabotage that turns it red: `auth.ts` `.update(`${claims.iss}:${claims.sub}`)`
+ * → `.update(`${claims.sub}`)` reds case 2.
  *
- * Uses an in-test synthetic OIDC issuer (~30 LOC of node:crypto) so
- * the test is hermetic — no live Firebase calls, no fixtures.
+ * Uses an in-test synthetic OIDC issuer (node:crypto) so the test is hermetic.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import express, { type Express } from 'express';
 import http from 'node:http';
-import { createSign, generateKeyPairSync, type KeyObject } from 'node:crypto';
+import { createHash, createSign, generateKeyPairSync, type KeyObject } from 'node:crypto';
 import { authMiddleware, _resetOidcVerifier } from '../src/middleware/auth.js';
 import { registerPersonalTenantSessionAuthority, registerSessionAuthority } from '../src/host/sessionAuthority.js';
 import { usersSessionAuthority } from '../src/features/users/feature.js';
@@ -137,22 +146,20 @@ describe('P3.1 OIDC bearer verification', () => {
     expect(body.tenantId).toBe(body.tenants[0]);
   });
 
-  it('issuer-scoped tenant id — same sub from different issuers gets different tenants', async () => {
-    // Same sub but the token came from issuer A. A second synthetic
-    // issuer would mint a token with iss=B that the verifier rejects
-    // (wrong_issuer). The tenant-id derivation logic — sha256(iss+":"+sub)
-    // — is what prevents cross-IdP collisions in production where the
-    // host may trust multiple issuers. We assert determinism here:
-    // re-minting under the same iss+sub gives the same tenantId.
-    const t1 = issuer.mint({ sub: 'firebase-uid-bob' });
-    const t2 = issuer.mint({ sub: 'firebase-uid-bob' });
-    const r1 = await call(t1);
-    const r2 = await call(t2);
+  it('issuer-scoped tenant id — the tenant is user:<sha256(iss:sub)[0..32]>, deterministic per (iss, sub)', async () => {
+    // The issuer is part of the hash input, so the same `sub` from a second IdP
+    // derives a different tenant. Asserting the exact recomputation is what makes
+    // this discriminating: a sub-only hash would still be deterministic.
+    const sub = 'firebase-uid-bob';
+    const expected = `user:${createHash('sha256').update(`${issuer.issuer}:${sub}`).digest('hex').slice(0, 32)}`;
+    const subOnly = `user:${createHash('sha256').update(sub).digest('hex').slice(0, 32)}`;
+    expect(expected).not.toBe(subOnly);
+    const r1 = await call(issuer.mint({ sub }));
+    const r2 = await call(issuer.mint({ sub }));
     expect(r1.status).toBe(200);
     expect(r2.status).toBe(200);
-    const b1 = (await r1.json()) as { tenantId: string };
-    const b2 = (await r2.json()) as { tenantId: string };
-    expect(b1.tenantId).toBe(b2.tenantId);
+    expect(((await r1.json()) as { tenantId: string }).tenantId).toBe(expected);
+    expect(((await r2.json()) as { tenantId: string }).tenantId).toBe(expected);
   });
 
   it('rejects expired token with reason=expired', async () => {
@@ -177,20 +184,29 @@ describe('P3.1 OIDC bearer verification', () => {
 
   it('API-key Bearer still works alongside OIDC', async () => {
     process.env.OPENWOP_API_KEYS = 'admin-test-key:*'; // ADR 0561 — this leg asserts the OPERATOR principal, which is now opt-in
-    const res = await call('admin-test-key');
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as { principalId: string; tenants: string[] };
-    expect(body.principalId).toBe('bearer:admin-te');
-    expect(body.tenants).toEqual(['*']);
-    delete process.env.OPENWOP_API_KEYS;
+    try {
+      const res = await call('admin-test-key');
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { principalId: string; tenants: string[] };
+      expect(body.principalId).toBe('bearer:admin-te');
+      expect(body.tenants).toEqual(['*']);
+    } finally {
+      delete process.env.OPENWOP_API_KEYS;
+    }
   });
 
-  it('non-JWT bearer with no allow-list hit returns 401', async () => {
+  it('non-JWT bearer with no allow-list hit returns 401 "not recognized"', async () => {
     process.env.OPENWOP_API_KEYS = ''; // empty allow-list, like prod
-    const res = await call('not-a-jwt-just-junk');
-    expect(res.status).toBe(401);
-    const body = (await res.json()) as { error: string };
-    expect(body.error).toBe('unauthenticated');
-    delete process.env.OPENWOP_API_KEYS;
+    try {
+      const res = await call('not-a-jwt-just-junk');
+      expect(res.status).toBe(401);
+      const body = (await res.json()) as { error: string; message: string };
+      expect(body.error).toBe('unauthenticated');
+      // The bearer branch's own refusal — NOT the generic missing-credential 401
+      // the cookie-disabled tail would also produce.
+      expect(body.message).toBe('Bearer token is not recognized by this host.');
+    } finally {
+      delete process.env.OPENWOP_API_KEYS;
+    }
   });
 });

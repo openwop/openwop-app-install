@@ -29,6 +29,11 @@
  * merge, whoever registered the handler and whatever collection it owns. A
  * whole-collection read is recognisable by SHAPE — `hostext:<name>:` with nothing
  * after it — so the rule needs no list to maintain and no list to forget.
+ *
+ * Sabotage-witnessed (grade-tests w4): the activities relink reverted to the
+ * bare `.list()`, the tasks relink reverted to `.list()` without its tenant
+ * filter, and the send-ledger relink reverted to `.list()` without its tenant
+ * filter each turn the matching case red.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -163,27 +168,32 @@ describe('CRM-11 — a contact merge reads only its own tenant', () => {
     const { getToggleDefault } = await import('../src/host/featureToggles/registry.js');
     const emailToggle = getToggleDefault('email');
     if (emailToggle) await saveConfig({ ...emailToggle, status: 'on' }, 'test');
-    const sendLogs = new DurableCollection<{ sendId: string; tenantId: string; campaignId: string; contactId: string; status: string; ts: string }>(
-      'email:sendlog', (s) => s.sendId, undefined, (s) => s.tenantId,
-    );
-    const survivor = await createContact({ tenantId: T, name: 'Survivor', stage: 'lead' });
-    const source = await createContact({ tenantId: T, name: 'Source', stage: 'lead' });
-    await sendLogs.put({ sendId: 'snd:mine', tenantId: T, campaignId: 'cmp1', contactId: source.contactId, status: 'sent', ts: '2026-01-01T00:00:00.000Z' });
-    await sendLogs.put({ sendId: 'snd:theirs', tenantId: OTHER, campaignId: 'cmp1', contactId: source.contactId, status: 'sent', ts: '2026-01-01T00:00:00.000Z' });
+    try {
+      const sendLogs = new DurableCollection<{ sendId: string; tenantId: string; campaignId: string; contactId: string; status: string; ts: string }>(
+        'email:sendlog', (s) => s.sendId, undefined, (s) => s.tenantId,
+      );
+      const survivor = await createContact({ tenantId: T, name: 'Survivor', stage: 'lead' });
+      const source = await createContact({ tenantId: T, name: 'Source', stage: 'lead' });
+      await sendLogs.put({ sendId: 'snd:mine', tenantId: T, campaignId: 'cmp1', contactId: source.contactId, status: 'sent', ts: '2026-01-01T00:00:00.000Z' });
+      await sendLogs.put({ sendId: 'snd:theirs', tenantId: OTHER, campaignId: 'cmp1', contactId: source.contactId, status: 'sent', ts: '2026-01-01T00:00:00.000Z' });
 
-    await warmTenantIndexes();
-    const prefixes = await recordListPrefixes(async () => {
-      await mergeContacts(T, survivor.contactId, source.contactId, 'test');
-    });
-    expect(
-      prefixes.filter((p) => p === 'hostext:email:sendlog:'),
-      'the send-ledger relink must not scan every tenant\'s ledger',
-    ).toEqual([]);
+      await warmTenantIndexes();
+      const prefixes = await recordListPrefixes(async () => {
+        await mergeContacts(T, survivor.contactId, source.contactId, 'test');
+      });
+      expect(
+        prefixes.filter((p) => p === 'hostext:email:sendlog:'),
+        'the send-ledger relink must not scan every tenant\'s ledger',
+      ).toEqual([]);
 
-    // Non-vacuity: the relink genuinely ran, and stopped at the tenant boundary.
-    expect((await listSends(T, 'cmp1')).map((s) => s.contactId), 'the survivor inherits the delivery record').toEqual([survivor.contactId]);
-    expect((await sendLogs.get('snd:theirs'))!.contactId, "another tenant's ledger row is untouched").toBe(source.contactId);
-    await __resetEmailStore();
+      // Non-vacuity: the relink genuinely ran, and stopped at the tenant boundary.
+      expect((await listSends(T, 'cmp1')).map((s) => s.contactId), 'the survivor inherits the delivery record').toEqual([survivor.contactId]);
+      expect((await sendLogs.get('snd:theirs'))!.contactId, "another tenant's ledger row is untouched").toBe(source.contactId);
+    } finally {
+      // Never leak the email feature (or its ledger) into the next case.
+      await __resetEmailStore();
+      if (emailToggle) await saveConfig({ ...emailToggle }, 'test');
+    }
   });
 
   it('still relinks correctly, and leaves another tenant\'s identically-named rows alone', async () => {

@@ -29,12 +29,12 @@ async function call(method: string, path: string, body?: unknown) {
 
 describe('run.completed payload uses the contract key `outputs` (runCompleted, closed)', () => {
   it('a real run emits run.completed with `outputs` and WITHOUT the legacy `output`', async () => {
-    const c = await call('POST', '/v1/runs', { workflowId: 'conformance-noop', inputs: {} });
+    const c = await call('POST', '/runs', { workflowId: 'conformance-noop', inputs: {} });
     expect(c.status).toBe(201);
     const runId = c.json.runId as string;
     let done: any;
     for (let i = 0; i < 40 && !done; i++) {
-      const p = await call('GET', `/v1/runs/${runId}/events/poll`);
+      const p = await call('GET', `/runs/${runId}/events/poll`);
       done = (p.json?.events ?? []).find((e: any) => e.type === 'run.completed');
       if (!done) await new Promise((r) => setTimeout(r, 100));
     }

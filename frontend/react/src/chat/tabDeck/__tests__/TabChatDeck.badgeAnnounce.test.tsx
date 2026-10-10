@@ -31,6 +31,8 @@ vi.mock('../../hooks/useChatSessions.js', () => ({
   }),
 }));
 vi.mock('../../../auth/useAuth.js', () => ({ useAuth: () => ({ user: null }) }));
+// ADR 0776 P2 — the rail's server read; not what this test is about.
+vi.mock('../../conversations/useRunningConversations.js', () => ({ useRunningConversations: () => new Set() }));
 // The deck mounts the shared reviews rail, which polls `/reviews?status=pending`.
 // Left real it is a LIVE FETCH from a unit test (ADR 0661) — the guard is right:
 // an unmocked call means the component takes a failure branch nobody asked for.

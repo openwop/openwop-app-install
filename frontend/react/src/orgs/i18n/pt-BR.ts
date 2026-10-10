@@ -21,7 +21,7 @@ export const messages = {
   workspaceCreateFailed: 'Não foi possível criar o espaço de trabalho.',
   newOrgPlaceholder: 'Nome da nova organização',
   newOrgAriaLabel: 'Nome da nova organização',
-  createOrgRequiresScope: 'Requer host:org:manage',
+  createOrgRequiresScope: 'Só os proprietários do espaço de trabalho podem criar organizações',
   noOrgsTitle: 'Nenhuma organização ainda',
   noOrgsBody: 'Crie uma para adicionar equipes e membros.',
   deleteOrgAriaLabel: 'Excluir {{name}}',
@@ -32,7 +32,7 @@ export const messages = {
 
   // OrgDetailPanel — "View as" lens
   viewAsLabel: 'Ver como',
-  viewAsOwnerOption: 'Proprietário (você) — acesso total',
+  viewAsOwnerOption: 'Você — seu próprio acesso',
   viewAsRoleGroupLabel: 'Pré-visualizar um papel (apenas UI)',
   viewAsRoleOption: 'Como {{name}}',
   viewAsMemberGroupLabel: 'Ver como membro (aplicado)',
@@ -206,4 +206,21 @@ export const messages = {
   // ADR 0622 D5 — o reenvio falhou, mas o convite ANTERIOR continua válido
   inviteDeliveryFailedPriorValid: 'O envio do e-mail falhou — um convite anterior para este endereço pode ainda estar válido; nada nele foi alterado. Tente novamente em instantes.',
   inviteUndeliverablePriorValid: 'Este convite não pôde ser entregue — esta organização não tem remetente de e-mail ou sua conexão de e-mail está indisponível. Um convite anterior para este endereço pode ainda estar válido; nada nele foi alterado. Configure um remetente na página de E-mail e tente novamente.',
+  // ADR 0815 — owner-tier locks, typed refusals, and what removing a member does
+  confirmRemoveMemberBody: 'A pessoa sai do espaço de trabalho agora. As chaves de API dela param de funcionar, os convites pendentes que ela enviou são cancelados e os agendamentos executados em nome dela são pausados. Você pode retomar a maioria desses agendamentos, e passará a ser o proprietário deles.',
+  removeMemberConfirm: 'Remover membro',
+  memberRemoved: '{{name}} foi removido',
+  ownerRowLocked: 'Só um proprietário pode alterar ou remover um proprietário',
+  ownerRowsLockedNote: 'Proprietários só podem ser alterados ou removidos por outro proprietário.',
+  ownerGroupLocked: 'Este grupo concede acesso de proprietário, então só um proprietário pode alterá-lo',
+  errorOwnerTier: 'Só um proprietário pode fazer isso.',
+  errorLastOwner: 'Este é o último proprietário do espaço de trabalho. Torne outra pessoa proprietária primeiro e tente de novo.',
+  errorIdentityLocked: 'A identidade de login de um membro do espaço de trabalho não pode ser alterada diretamente. Remova-o e envie um novo convite.',
+  errorIdentityTaken: 'Essa identidade já é membro desta organização.',
+  errorTransferToSelf: 'Escolha outro membro para quem transferir a propriedade.',
+  confirmRemoveSubOrgMemberBody: 'A pessoa perde o acesso a esta organização, e os convites pendentes que ela enviou para ela são cancelados. A participação dela no espaço de trabalho não muda.',
+  confirmRemoveMemberBodyNeutral: 'A pessoa perde o acesso a esta organização, e os convites pendentes que ela enviou para ela são cancelados. Se esta era a última participação dela aqui, as chaves de API dela também param de funcionar e os agendamentos executados em nome dela são pausados.',
+  ownerGroupsLockedNote: 'Grupos que concedem acesso de proprietário só podem ser alterados por um proprietário.',
+  errorCreateOrgOwnerRequired: 'Só um proprietário pode criar uma organização aqui. Peça a um proprietário de uma organização existente que torne você proprietário e tente de novo.',
+  errorForbiddenScope: 'Você não tem permissão para fazer isso nesta organização. Peça a um proprietário ou administrador do espaço de trabalho.',
 } as const;

@@ -47,11 +47,11 @@ function client(): Client {
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b), del: (p) => call('DELETE', p) };
 }
 
-const CB = (orgId: string, s = ''): string => `/v1/host/openwop-app/creative-briefs/orgs/${encodeURIComponent(orgId)}${s}`;
-const SHARE = (orgId: string): string => `/v1/host/openwop-app/sharing/orgs/${encodeURIComponent(orgId)}/links`;
+const CB = (orgId: string, s = ''): string => `/host/openwop-app/creative-briefs/orgs/${encodeURIComponent(orgId)}${s}`;
+const SHARE = (orgId: string): string => `/host/openwop-app/sharing/orgs/${encodeURIComponent(orgId)}/links`;
 
 async function signup(c: Client, tenantId: string): Promise<{ userId: string }> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `cbneg-${Date.now()}-${n++}@t.test`, tenantId });
+  const r = await c.post('/host/openwop-app/test/login', { email: `cbneg-${Date.now()}-${n++}@t.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
@@ -65,10 +65,10 @@ async function ownerWithEditor(): Promise<{ owner: Client; editor: Client; orgId
   await signup(owner, tenantId);
   const editor = client();
   const editorUser = await signup(editor, tenantId);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   const orgId = org.body.orgId as string;
-  const add = await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'E', subject: editorUser.userId, roles: ['editor'] });
+  const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'E', subject: editorUser.userId, roles: ['editor'] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
   return { owner, editor, orgId };
 }
@@ -106,12 +106,12 @@ describe('creative-briefs — CB-CODE-8 negative RBAC + share-purge + version ca
     const mint = await owner.post(SHARE(orgId), { resourceType: 'creative_brief', resourceId: id });
     expect(mint.status, JSON.stringify(mint.body)).toBe(201);
     const token = mint.body.token as string;
-    expect((await owner.get(`/v1/host/openwop-app/shared/${token}`)).status).toBe(200); // live before
+    expect((await owner.get(`/host/openwop-app/shared/${token}`)).status).toBe(200); // live before
 
     const edited = await owner.patch(CB(orgId, `/briefs/${id}`), { sceneDescription: 'Rewritten after approval' });
     expect(edited.status, JSON.stringify(edited.body)).toBe(200);
     expect(edited.body.status).toBe('draft'); // demoted
-    expect((await owner.get(`/v1/host/openwop-app/shared/${token}`)).status).toBe(404); // link purged — no drift
+    expect((await owner.get(`/host/openwop-app/shared/${token}`)).status).toBe(404); // link purged — no drift
   });
 
   it('version snapshots are capped at 50 per brief — oldest pruned, newest kept', async () => {

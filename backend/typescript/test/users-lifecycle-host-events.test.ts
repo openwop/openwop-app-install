@@ -16,9 +16,33 @@
  *   - no emit on the idempotent `createUser` return, on `{silent:true}`, or on
  *     a status write that changes nothing (the SCIM retry on an already-disabled
  *     row is the D5 compensation and must NOT start a second offboarding run);
- *   - the D1a guard: an emit carrying `origin.workflowId === binding.workflowId`
- *     starts NO run, while a different workflow still does — so the guard is
- *     proven to discriminate, not to blanket-suppress.
+ *   - the D1a chain-LINEAGE guard (review BLOCKER-1): a run of from-chain
+ *     instance B does not start instance A of the same REAL chain, nor a
+ *     builder copy that keeps the `expandedFrom` stamp, while an unrelated
+ *     workflow still starts — so the guard discriminates.
+ *
+ * Covered ELSEWHERE (cases cut from this file, each red under the same break):
+ *   - the plain `origin.workflowId` self-trigger skip and `setUserStatus`
+ *     threading `origin` → `users-surface-authz.test.ts` "deactivate: status →
+ *     disabled, epoch bumped, exactly one deactivated event…";
+ *   - the `erased` key set → `users-lifecycle-event-lanes.test.ts` lanes C + D
+ *     (pinned over the real erase route, not the emitter in isolation);
+ *   - a blanket PII-key sweep → implied by the exact `toEqual` payload pins below.
+ *
+ * Sabotage that turns it red (`src/features/users/usersService.ts` unless noted):
+ * `if (existing) return existing;` deleted (idempotent return emits);
+ * `if (!opts.silent) userProvisioned(` → `if (true) …`; the disable mutate's
+ * `changed = row.status !== status` → `changed = true` (repeat disable emits);
+ * the re-enable mutate deciding `changed` once instead of per CAS attempt
+ * (concurrent re-enables emit twice); `reason` derived from `source`;
+ * `scimProvisioningService.ts` re-hire skipping `clearLinkedSubjectDeny`;
+ * `hostEventDispatcher.ts` lineage check disabled.
+ *
+ * BARRIER. `emitHostEvent` calls `deliverWebhooks` in its first synchronous
+ * segment, so `delivered` is complete the moment the emitting call returns —
+ * no wait is needed for it. The binding loop (→ `startRun`) is a pure
+ * microtask chain over the memory storage, so `drain()` (one macrotask turn,
+ * repeated) settles it without a wall-clock sleep.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -46,10 +70,8 @@ import { deactivateUser, provisionUser, setScimActive } from '../src/host/auth/s
 import { __resetSubjectLinkStore, isLinkedSubjectDenied } from '../src/host/auth/subjectLinkService.js';
 import {
   USER_DEACTIVATED_EVENT,
-  USER_ERASED_EVENT,
   USER_PROVISIONED_EVENT,
   USER_REACTIVATED_EVENT,
-  userErased,
 } from '../src/features/users/emit.js';
 import type { WorkflowDefinition } from '../src/executor/types.js';
 import { defaultWorkflowChainPackRoots, expandChain, getChain, loadWorkflowChainPacks } from '../src/host/workflowChainPackLoader.js';
@@ -68,12 +90,10 @@ let delivered: HostEventEnvelope[];
 let startRunCalls: Array<{ tenantId: string; workflowId: string; metadata?: Record<string, unknown> }>;
 
 const T = 'users-events-t1';
-/** `emitHostEvent` is fire-and-forget (`void`), so give the microtask queue a
- *  tick before reading the captured envelopes. */
-const settle = () => new Promise((r) => setTimeout(r, 10));
+/** Settle the fire-and-forget binding loop: a few macrotask turns drain every
+ *  pending microtask (the memory-storage pipeline has no timers or I/O). */
+const drain = async (): Promise<void> => { for (let i = 0; i < 5; i++) await new Promise<void>((r) => setImmediate(r)); };
 const ofType = (type: string) => delivered.filter((e) => e.type === type);
-/** The PII-shaped keys the dispatcher would NOT strip — the emitter's rule. */
-const FORBIDDEN_KEY = /email|username|externalid|nameid|displayname|principalid/i;
 
 beforeEach(async () => {
   storage = await openStorage('memory://');
@@ -92,6 +112,7 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+  catalogDefs.clear();
   __resetHostEventDispatcher();
   __resetHostExtPersistence();
 });
@@ -99,7 +120,7 @@ afterEach(() => {
 describe('host.users.user.provisioned — ONE site (createUser), new row only', () => {
   it('emits exactly the ids-only key set on a NEW row; nothing on the idempotent return', async () => {
     const u = await createUser({ tenantId: T, principalId: 'oidc:new', source: 'oidc', email: 'leak@example.test', displayName: 'Leak' });
-    await settle();
+    await drain();
     const evs = ofType(USER_PROVISIONED_EVENT);
     expect(evs).toHaveLength(1);
     expect(Object.keys(evs[0]!.payload).sort()).toEqual(['source', 'tenantId', 'userId']);
@@ -109,7 +130,7 @@ describe('host.users.user.provisioned — ONE site (createUser), new row only', 
     expect('origin' in evs[0]!).toBe(false);
 
     await createUser({ tenantId: T, principalId: 'oidc:new', source: 'oidc' }); // idempotent return
-    await settle();
+    await drain();
     expect(ofType(USER_PROVISIONED_EVENT)).toHaveLength(1);
   });
 
@@ -117,19 +138,19 @@ describe('host.users.user.provisioned — ONE site (createUser), new row only', 
     await upsertFromPrincipal({ tenantId: T, principalId: 'saml:sso-first', source: 'saml' });
     await provisionUser({ tenantId: T, userName: 'scim.joiner', externalId: 'ext-j' });
     await resolveCanonicalUserForTenant({ homeTenant: 'user:canon1', principalId: 'oidc:canon', source: 'oidc' });
-    await settle();
+    await drain();
     const evs = ofType(USER_PROVISIONED_EVENT);
     expect(evs.map((e) => e.payload.source).sort()).toEqual(['oidc', 'saml', 'scim']);
     // A mover (re-provision) and a re-login are NOT new rows.
     await upsertFromPrincipal({ tenantId: T, principalId: 'saml:sso-first', source: 'saml', displayName: 'Renamed' });
     await provisionUser({ tenantId: T, userName: 'scim.joiner', displayName: 'Renamed' });
-    await settle();
+    await drain();
     expect(ofType(USER_PROVISIONED_EVENT)).toHaveLength(3);
   });
 
   it('`{ silent: true }` (the demo seed) emits nothing', async () => {
     await createUser({ tenantId: T, principalId: 'demo:p1', source: 'manual' }, { silent: true });
-    await settle();
+    await drain();
     expect(ofType(USER_PROVISIONED_EVENT)).toHaveLength(0);
   });
 });
@@ -138,7 +159,7 @@ describe('host.users.user.deactivated / reactivated — ONE site (setUserStatus)
   it('disable emits ONCE with {userId, tenantId, source, reason}; a repeat disable of an already-disabled row emits NOTHING', async () => {
     const u = await createUser({ tenantId: T, principalId: 'oidc:d1', source: 'oidc' });
     await setUserStatus(u.userId, 'disabled', { reason: 'admin' });
-    await settle();
+    await drain();
     let evs = ofType(USER_DEACTIVATED_EVENT);
     expect(evs).toHaveLength(1);
     expect(Object.keys(evs[0]!.payload).sort()).toEqual(['reason', 'source', 'tenantId', 'userId']);
@@ -146,7 +167,7 @@ describe('host.users.user.deactivated / reactivated — ONE site (setUserStatus)
 
     await setUserStatus(u.userId, 'disabled', { reason: 'admin' }); // no transition
     await setUserStatus(u.userId, 'disabled', { reason: 'scim' }); // the IdP retry shape
-    await settle();
+    await drain();
     evs = ofType(USER_DEACTIVATED_EVENT);
     expect(evs).toHaveLength(1);
     expect((await getUser(u.userId))!.status).toBe('disabled');
@@ -155,33 +176,38 @@ describe('host.users.user.deactivated / reactivated — ONE site (setUserStatus)
   it('reactivate emits ONCE; a repeat enable emits nothing; a status write on a missing row emits nothing', async () => {
     const u = await createUser({ tenantId: T, principalId: 'oidc:r1', source: 'password' });
     await setUserStatus(u.userId, 'active', { reason: 'admin' }); // already active — no transition
-    await settle();
+    await drain();
     expect(ofType(USER_REACTIVATED_EVENT)).toHaveLength(0);
     await setUserStatus(u.userId, 'disabled', { reason: 'admin' });
     await setUserStatus(u.userId, 'active', { reason: 'admin' });
     await setUserStatus(u.userId, 'active', { reason: 'admin' });
-    await settle();
+    await drain();
     const evs = ofType(USER_REACTIVATED_EVENT);
     expect(evs).toHaveLength(1);
     expect(evs[0]!.payload).toEqual({ userId: u.userId, tenantId: T, source: 'password', reason: 'admin' });
     expect(await setUserStatus('user:does-not-exist', 'disabled', { reason: 'admin' })).toBeNull();
-    await settle();
+    await drain();
     expect(ofType(USER_DEACTIVATED_EVENT)).toHaveLength(1);
   });
 
   it('CONCURRENT re-enables (review SHOULD-3): two setUserStatus(active) racing on one disabled row emit exactly ONE reactivated', async () => {
     const u = await createUser({ tenantId: T, principalId: 'oidc:race', source: 'oidc' });
     await setUserStatus(u.userId, 'disabled', { reason: 'admin' });
-    await settle();
-    // Both read the disabled row before either writes — the get→put shape
-    // decided `changed` on the stale pre-read and emitted twice.
+    await drain();
+    // Both read the disabled row before either writes. What this guards: the
+    // transition is decided INSIDE the CAS mutate, on the row the write lands
+    // on — the CAS loser re-reads `active` and emits nothing. A `changed`
+    // decided on the stale pre-read (or latched across CAS attempts) emits
+    // twice. (Removing only the "no write when unchanged" short-circuit does NOT
+    // turn this red, and is not what it claims: the loser's retry still
+    // re-decides `changed` = false.)
     const [a, b] = await Promise.all([
       setUserStatus(u.userId, 'active', { reason: 'admin' }),
       setUserStatus(u.userId, 'active', { reason: 'scim' }),
     ]);
     expect(a?.status).toBe('active');
     expect(b?.status).toBe('active');
-    await settle();
+    await drain();
     expect(ofType(USER_REACTIVATED_EVENT)).toHaveLength(1);
     // The re-enable never clobbers an epoch bump that landed between its read
     // and its write: the disable bumped to 1 and the row still says 1.
@@ -204,7 +230,7 @@ describe('host.users.user.deactivated / reactivated — ONE site (setUserStatus)
   it('`reason` is the explicit argument, never inferred from user.source (an admin disabling a SCIM row)', async () => {
     const u = await provisionUser({ tenantId: T, userName: 'scim.rowa', externalId: 'ext-rowa' });
     await setUserStatus(u.userId, 'disabled', { reason: 'admin' });
-    await settle();
+    await drain();
     const ev = ofType(USER_DEACTIVATED_EVENT)[0]!;
     expect(ev.payload.source).toBe('scim');
     expect(ev.payload.reason).toBe('admin');
@@ -214,7 +240,7 @@ describe('host.users.user.deactivated / reactivated — ONE site (setUserStatus)
     const u = await provisionUser({ tenantId: T, userName: 'scim.leaver', externalId: 'ext-leaver' });
     await createHostEventBinding({ tenantId: T, eventType: USER_DEACTIVATED_EVENT, workflowId: 'wf:offboarding', createdBy: 'test' });
     await deactivateUser({ tenantId: T, externalId: 'ext-leaver' });
-    await settle();
+    await drain();
     expect(ofType(USER_DEACTIVATED_EVENT)).toHaveLength(1);
     expect(ofType(USER_DEACTIVATED_EVENT)[0]!.payload.reason).toBe('scim');
     expect(startRunCalls).toHaveLength(1);
@@ -227,68 +253,20 @@ describe('host.users.user.deactivated / reactivated — ONE site (setUserStatus)
     // The IdP retries the PATCH (both lanes) — idempotent, silent.
     await deactivateUser({ tenantId: T, externalId: 'ext-leaver' });
     await setScimActive((await getUser(u.userId))!, false);
-    await settle();
+    await drain();
     expect(ofType(USER_DEACTIVATED_EVENT)).toHaveLength(1);
     expect(startRunCalls).toHaveLength(1);
 
     // Re-hire: one reactivated, and it clears the deny.
     await setScimActive((await getUser(u.userId))!, true);
-    await settle();
+    await drain();
     expect(ofType(USER_REACTIVATED_EVENT)).toHaveLength(1);
     expect(ofType(USER_REACTIVATED_EVENT)[0]!.payload.reason).toBe('scim');
     expect(await isLinkedSubjectDenied(T, 'ext-leaver')).toBe(false);
   });
 });
 
-describe('host.users.user.erased — the erase route emits after deleteUser (key pin at the emitter)', () => {
-  it('carries exactly {userId, tenantId, outcome}', async () => {
-    userErased({ userId: 'user:gone', tenantId: T, outcome: 'deleted' });
-    await settle();
-    const evs = ofType(USER_ERASED_EVENT);
-    expect(evs).toHaveLength(1);
-    expect(Object.keys(evs[0]!.payload).sort()).toEqual(['outcome', 'tenantId', 'userId']);
-    expect(evs[0]!.payload).toEqual({ userId: 'user:gone', tenantId: T, outcome: 'deleted' });
-  });
-});
-
-describe('payload discipline — no PII-shaped key ever leaves the emitter', () => {
-  it('across every captured event, no key matches email|userName|externalId|nameId|displayName|principalId', async () => {
-    const u = await provisionUser({ tenantId: T, userName: 'pii.probe@example.test', externalId: 'ext-pii', email: 'pii@example.test', displayName: 'PII Probe' });
-    await setUserStatus(u.userId, 'disabled', { reason: 'scim' });
-    await setUserStatus(u.userId, 'active', { reason: 'admin' });
-    userErased({ userId: u.userId, tenantId: T, outcome: 'deleted' });
-    await settle();
-    expect(delivered.length).toBeGreaterThanOrEqual(4);
-    for (const ev of delivered) {
-      for (const key of Object.keys(ev.payload)) expect(key, `${ev.type} leaked key ${key}`).not.toMatch(FORBIDDEN_KEY);
-      // and no VALUE is the email / userName either
-      expect(JSON.stringify(ev.payload)).not.toContain('pii.probe');
-      expect(JSON.stringify(ev.payload)).not.toContain('ext-pii');
-    }
-  });
-});
-
-describe('ADR 0617 D1a — the self-trigger guard discriminates on origin.workflowId', () => {
-  it('an emit whose origin.workflowId equals the bound workflow starts NO run; another workflow still does', async () => {
-    await createHostEventBinding({ tenantId: T, eventType: USER_DEACTIVATED_EVENT, workflowId: 'wf:offboarding', createdBy: 'test' });
-    await createHostEventBinding({ tenantId: T, eventType: USER_DEACTIVATED_EVENT, workflowId: 'wf:audit-log', createdBy: 'test' });
-
-    await emitHostEvent({
-      type: USER_DEACTIVATED_EVENT,
-      tenantId: T,
-      payload: { userId: 'user:x', tenantId: T, source: 'oidc', reason: 'workflow' },
-      origin: { runId: 'run:self', workflowId: 'wf:offboarding' },
-    });
-    expect(startRunCalls.map((c) => c.workflowId)).toEqual(['wf:audit-log']);
-    // The webhook leg still delivered once, and never carried `origin`.
-    expect(ofType(USER_DEACTIVATED_EVENT)).toHaveLength(1);
-    expect('origin' in ofType(USER_DEACTIVATED_EVENT)[0]!).toBe(false);
-
-    // Same event WITHOUT an origin (the admin/SCIM lanes) starts BOTH bound workflows.
-    await emitHostEvent({ type: USER_DEACTIVATED_EVENT, tenantId: T, payload: { userId: 'user:y', tenantId: T, source: 'oidc', reason: 'admin' } });
-    expect(startRunCalls.map((c) => c.workflowId).sort()).toEqual(['wf:audit-log', 'wf:audit-log', 'wf:offboarding']);
-  });
-
+describe('ADR 0617 D1a — the chain-lineage self-trigger guard discriminates', () => {
   it('CHAIN LINEAGE (review BLOCKER-1): a run of instance B of a chain does NOT start a binding on instance A of the SAME chain; an unrelated bound workflow still starts', async () => {
     // Two REAL from-chain instances of people-hr.offboarding — one per departing
     // employee, because `employeeName` is a required Path-A-frozen param and the
@@ -324,16 +302,6 @@ describe('ADR 0617 D1a — the self-trigger guard discriminates on origin.workfl
     // The same event from the admin/SCIM lanes (no origin) starts all three.
     await emitHostEvent({ type: USER_DEACTIVATED_EVENT, tenantId: T, payload: { userId: 'user:y', tenantId: T, source: 'oidc', reason: 'admin' } });
     expect(startRunCalls.map((c) => c.workflowId).sort()).toEqual([alice.workflowId, 'wf:alice-copy', 'wf:audit-log', 'wf:audit-log'].sort());
-    catalogDefs.clear();
   });
 
-  it('setUserStatus threads `origin` through to the dispatcher (the surface lane)', async () => {
-    const u = await createUser({ tenantId: T, principalId: 'oidc:origin', source: 'oidc' });
-    await createHostEventBinding({ tenantId: T, eventType: USER_DEACTIVATED_EVENT, workflowId: 'wf:offboarding', createdBy: 'test' });
-    await setUserStatus(u.userId, 'disabled', { reason: 'workflow', origin: { runId: 'run:1', workflowId: 'wf:offboarding' } });
-    await settle();
-    expect(ofType(USER_DEACTIVATED_EVENT)).toHaveLength(1);
-    expect(ofType(USER_DEACTIVATED_EVENT)[0]!.payload.reason).toBe('workflow');
-    expect(startRunCalls).toHaveLength(0);
-  });
 });

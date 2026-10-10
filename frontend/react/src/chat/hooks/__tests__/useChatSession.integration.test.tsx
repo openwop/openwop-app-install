@@ -54,6 +54,23 @@ vi.mock('../../../byok/lib/byokClient.js', async (orig) => ({
   ...(await orig<typeof import('../../../byok/lib/byokClient.js')>()),
   getActiveConfig: vi.fn(),
 }));
+// ADR 0764 (CHATWF-1) — the server copy of a builder workflow + the register seam,
+// so a `wf_` mention with NO local copy can be driven and the (absent) register
+// observed. Default: the server has nothing.
+const { loadWorkflowMock, registerWorkflowMock, fetchRegisteredWorkflowMock } = vi.hoisted(() => ({
+  loadWorkflowMock: vi.fn(() => Promise.resolve(null as unknown)),
+  registerWorkflowMock: vi.fn(() => Promise.resolve()),
+  fetchRegisteredWorkflowMock: vi.fn(() => Promise.resolve(null)),
+}));
+vi.mock('../../../builder/persistence/backendStore.js', async (orig) => ({
+  ...(await orig<typeof import('../../../builder/persistence/backendStore.js')>()),
+  loadWorkflow: loadWorkflowMock,
+}));
+vi.mock('../../../builder/persistence/registerClient.js', async (orig) => ({
+  ...(await orig<typeof import('../../../builder/persistence/registerClient.js')>()),
+  registerWorkflow: registerWorkflowMock,
+  fetchRegisteredWorkflow: fetchRegisteredWorkflowMock,
+}));
 vi.mock('../../../client/interruptsClient.js', () => ({
   listOpenInterrupts: vi.fn(() => Promise.resolve([])),
   resolveByRun: vi.fn(() => Promise.resolve()),
@@ -92,6 +109,7 @@ vi.mock('../../conversationTransport.js', async (importOriginal) => {
 import { useChatSession } from '../useChatSession.js';
 import { createRun, cancelRun, pollEvents } from '../../../client/runsClient.js';
 import { getWorkflowRunInputs } from '../../../workflows/workflowsClient.js';
+import { stageSlashInputs } from '../../lib/slashInputs.js';
 import { getActiveConfig } from '../../../byok/lib/byokClient.js';
 import { listOpenInterrupts } from '../../../client/interruptsClient.js';
 import { createChatSession, appendChatMessage, listChatSessionMessagesPage, updateChatMessage, getSessionFeedback } from '../../../client/chatSessionsClient.js';
@@ -182,6 +200,38 @@ describe('useChatSession conversation send lifecycle (integration)', () => {
     const msgs = result.current.session.messages;
     expect(msgs.map((m) => m.role)).toEqual(['user', 'assistant']);
     expect(msgs.find((m) => m.role === 'assistant')?.content).toBe('hello back');
+    expect(result.current.isSending).toBe(false);
+  });
+
+  it('an async exchange whose event stream FAILS still settles by polling (SSE cap 429 — no hang on "Thinking…")', async () => {
+    // Async ack: the POST carries no agent turn, so the hook waits on the settle
+    // signal. The stream then errors (prod 2026-10-09: every run SSE 429'd at the
+    // per-tenant cap), so the signal can only arrive through the poll fallback.
+    // Without it this send waits ASYNC_SETTLE_TIMEOUT_MS (180 s) and the test times out.
+    sendConversationTurnMock.mockResolvedValueOnce({
+      turns: [{ messageId: 'c:1:user', role: 'user', turnIndex: 1, from: 'user', content: 'hi', ts: 0 }],
+      lastSeq: 1,
+    } as never);
+    vi.mocked(pollEvents).mockResolvedValue({
+      events: [{ type: 'conversation.exchanged', sequence: 3, payload: { turn: { role: 'agent' } } }],
+      runId: 'conv-run-1', lastSequence: 3, status: 'running', isTerminal: false,
+    } as never);
+    fetchTurnsMock.mockResolvedValueOnce({
+      turns: [
+        { messageId: 'c:1:user', role: 'user', turnIndex: 1, from: 'user', content: 'hi', ts: 0 },
+        { messageId: 'c:2:agent', role: 'agent', turnIndex: 2, from: 'assistant', content: 'polled reply', ts: 0 },
+      ],
+      lastSeq: 3,
+    } as never);
+    const { result } = renderHook(() => useChatSession());
+    await act(async () => {
+      const sending = result.current.send('hi', CONFIG);
+      await vi.waitFor(() => expect(captured?.runId).toBe('conv-run-1'));
+      captured!.onError?.(new Event('error'));
+      await sending;
+    });
+    expect(vi.mocked(pollEvents)).toHaveBeenCalledWith('conv-run-1', 0);
+    expect(result.current.session.messages.find((m) => m.role === 'assistant')?.content).toBe('polled reply');
     expect(result.current.isSending).toBe(false);
   });
 
@@ -571,6 +621,42 @@ describe('useChatSession workflow_run lifecycle (integration)', () => {
     }
   });
 
+  it('ADR 0768 B2 — staged form inputs let a TWO-required workflow start from chat', async () => {
+    vi.mocked(getWorkflowRunInputs).mockResolvedValueOnce([
+      { name: 'topic', type: 'string', required: true },
+      { name: 'audience', type: 'string', required: true },
+    ]);
+    stageSlashInputs('uppercase', { topic: 'tides', audience: 'kids' });
+    const { result } = renderHook(() => useChatSession());
+    await act(async () => { await result.current.runWorkflowMention(MENTION); });
+    expect(vi.mocked(createRun)).toHaveBeenCalledOnce();
+    expect(vi.mocked(createRun).mock.calls[0]![0].inputs).toMatchObject({ topic: 'tides', audience: 'kids' });
+  });
+
+  it('ADR 0768 B2 — without the staged form the same workflow is refused in-thread (CHAT-MENTION-1)', async () => {
+    vi.mocked(createRun).mockClear();
+    vi.mocked(getWorkflowRunInputs).mockResolvedValueOnce([
+      { name: 'topic', type: 'string', required: true },
+      { name: 'audience', type: 'string', required: true },
+    ]);
+    stageSlashInputs('some-other-workflow', { topic: 'tides', audience: 'kids' });
+    const { result } = renderHook(() => useChatSession());
+    await act(async () => { await result.current.runWorkflowMention(MENTION, 'tides'); });
+    expect(vi.mocked(createRun)).not.toHaveBeenCalled();
+  });
+
+  it('ADR 0768 B2 — a form value wins over trailing text for the single required input', async () => {
+    vi.mocked(createRun).mockClear();
+    vi.mocked(getWorkflowRunInputs).mockResolvedValueOnce([
+      { name: 'topic', type: 'string', required: true },
+      { name: 'tone', type: 'string', required: false },
+    ]);
+    stageSlashInputs('uppercase', { topic: 'from-form', tone: 'dry' });
+    const { result } = renderHook(() => useChatSession());
+    await act(async () => { await result.current.runWorkflowMention(MENTION, 'from-text'); });
+    expect(vi.mocked(createRun).mock.calls[0]![0].inputs).toMatchObject({ topic: 'from-form', tone: 'dry' });
+  });
+
   it('node.started/completed update the workflow_run progress', async () => {
     const { result } = renderHook(() => useChatSession());
     await act(async () => { await result.current.runWorkflowMention(MENTION); });
@@ -748,7 +834,10 @@ describe('useChatSession workflow_run lifecycle (integration)', () => {
     }
     // 1 initial + at most MAX_HEAL_FAILURES (5) heals, then it gives up.
     expect(subscribeCount).toBe(6);
-    expect(result.current.session.messages.find((m) => m.role === 'workflow_run')).toBeTruthy();
+    const run = result.current.session.messages.find((m) => m.role === 'workflow_run') as { workflowRun?: { status?: string; streamLost?: boolean } } | undefined;
+    expect(run).toBeTruthy();
+    // ADR 0764 (CHATWF-6) — giving up is SAID, not left as a "running" forever.
+    expect(run?.workflowRun?.streamLost).toBe(true);
   });
 
   it('reset() tears down the run subscription so a self-heal cannot re-subscribe after leaving', async () => {
@@ -782,6 +871,44 @@ describe('useChatSession workflow_run lifecycle (integration)', () => {
     await act(async () => { await captured!.onEvent(evt('run.cancelled', {})); });
     const run = wfRun(result) as { workflowRun?: { status?: string } };
     expect(run.workflowRun?.status).toBe('cancelled');
+  });
+
+  it('ADR 0764 (CHATWF-6) — a FAILED cancel does not mark the run failed or stop its updates', async () => {
+    const { result } = renderHook(() => useChatSession());
+    await act(async () => { await result.current.runWorkflowMention(MENTION); });
+    const id = (wfRun(result) as { id: string }).id;
+    closeSpy.mockClear();
+    vi.mocked(cancelRun).mockRejectedValueOnce(new Error('503 upstream'));
+
+    await act(async () => { await result.current.cancelWorkflowRun(id); });
+    const run = wfRun(result) as { workflowRun?: { status?: string; cancelError?: string; error?: unknown } };
+    expect(run.workflowRun?.status).toBe('running');
+    expect(run.workflowRun?.error).toBeUndefined();
+    expect(run.workflowRun?.cancelError).toContain('503 upstream');
+    expect(closeSpy).not.toHaveBeenCalled(); // still subscribed — the run may still be running
+
+    // …and the run's real outcome still lands.
+    await act(async () => { await captured!.onEvent(evt('run.completed', { outputs: {} })); });
+    expect((wfRun(result) as { workflowRun?: { status?: string } }).workflowRun?.status).toBe('completed');
+  });
+
+  it('ADR 0764 (CHATWF-1) — a server-owned builder workflow with NO local copy runs (never refused as "deleted", never re-registered)', async () => {
+    loadWorkflowMock.mockResolvedValueOnce({ id: 'wf_remote1', name: 'Remote', version: '1.0.0', nodes: [{ id: 'n1', kind: 'noop', name: 'Start', position: { x: 0, y: 0 }, config: {} }], edges: [], createdAt: '', updatedAt: '' });
+    registerWorkflowMock.mockClear();
+    const { result } = renderHook(() => useChatSession());
+    const remote = { ...MENTION, displayName: 'Remote', slug: 'remote', workflowId: 'wf_remote1' };
+    await act(async () => { await result.current.runWorkflowMention(remote); });
+    expect(vi.mocked(createRun)).toHaveBeenCalledWith(expect.objectContaining({ workflowId: 'wf_remote1' }), expect.anything());
+    expect(registerWorkflowMock).not.toHaveBeenCalled();
+    expect(result.current.session.messages.some((m) => m.role === 'system')).toBe(false);
+  });
+
+  it('ADR 0764 (CHATWF-1) — a builder workflow neither local, nor on the server, nor listed is still refused as deleted', async () => {
+    const { result } = renderHook(() => useChatSession());
+    const gone = { ...MENTION, displayName: 'Gone', slug: 'gone', workflowId: 'wf_gone1' };
+    await act(async () => { await result.current.runWorkflowMention(gone); });
+    expect(vi.mocked(createRun)).not.toHaveBeenCalled();
+    expect(result.current.session.messages.some((m) => m.role === 'system')).toBe(true);
   });
 });
 

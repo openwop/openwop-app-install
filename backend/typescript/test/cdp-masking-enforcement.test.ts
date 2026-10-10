@@ -43,10 +43,10 @@ describe('CDP-F masking enforcement', () => {
   it('user session sees unmasked PII; API-key caller sees masked PII', async () => {
     const tenantId = `org:mask-${Date.now()}-${n++}`;
     const c = cookieClient();
-    expect((await c.post('/v1/host/openwop-app/test/login', { email: `m-${Date.now()}@a.test`, tenantId })).status).toBe(201);
-    await c.post('/v1/host/openwop-app/crm/contacts', { name: 'Ada Lovelace', email: 'ada@acme.test' });
+    expect((await c.post('/host/openwop-app/test/login', { email: `m-${Date.now()}@a.test`, tenantId })).status).toBe(201);
+    await c.post('/host/openwop-app/crm/contacts', { name: 'Ada Lovelace', email: 'ada@acme.test' });
 
-    const resolvePath = '/v1/host/openwop-app/cdp/identity/resolve?type=email&value=ada@acme.test';
+    const resolvePath = '/host/openwop-app/cdp/identity/resolve?type=email&value=ada@acme.test';
 
     // interactive user session → unmasked
     const asUser = await c.get(resolvePath);
@@ -55,7 +55,8 @@ describe('CDP-F masking enforcement', () => {
     expect(asUser.body.contact.name).toBe('Ada Lovelace');
 
     // programmatic API-key → masked PII
-    const token = (await c.post('/v1/host/openwop-app/developer-keys', { name: 'ci' })).body.token as string;
+    // ADR 0795 D2/D3 — a key names its scopes, and reading the workspace is one.
+    const token = (await c.post('/host/openwop-app/developer-keys', { name: 'ci', scopes: ['workspace:read'] })).body.token as string;
     const asKey = await bearerGet(resolvePath, token);
     expect(asKey.status).toBe(200);
     expect(asKey.body.contact.email).toMatch(/^pii_/);

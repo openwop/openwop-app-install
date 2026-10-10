@@ -34,7 +34,7 @@ import { subjectKeyForms } from '../../host/subjectErasureRedaction.js';
 import { listProducts, listOrders, quantizeMoney, CURRENCIES, type Order, type Product } from '../commerce/commerceService.js';
 import type { OrderDiscountContext, OrderDiscountResult, AppliedPromotion } from '../commerce/promotionSeam.js';
 import { resolveSegmentMembers } from '../crm/segmentsService.js';
-import { resolveOne } from '../../host/featureToggles/service.js';
+import { resolveToggle } from '../../host/featureToggles/service.js';
 import { createLogger } from '../../observability/logger.js';
 
 const log = createLogger('promotions');
@@ -388,7 +388,8 @@ function capUnitsToQuantityBudget(
  *  a non-stackable promotion that fires is exclusive of all lower-priority ones. */
 export async function applyPromotions(ctx: OrderDiscountContext): Promise<OrderDiscountResult> {
   // Respect the per-tenant toggle: promotions OFF ⇒ no-op ⇒ commerce byte-identical.
-  const assignment = await resolveOne('promotions', { tenantId: ctx.tenantId });
+  // ADR 0819 §1 opt-out — money/compliance truth: this must apply whatever the tenant's plan.
+  const assignment = await resolveToggle('promotions', { tenantId: ctx.tenantId });
   if (!assignment?.enabled) return { discount: 0, appliedPromotions: [] };
   return applyPromotionsUngated(ctx);
 }

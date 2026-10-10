@@ -53,11 +53,11 @@ let n = 0;
 // the env-gated auth test seam.
 async function signedIn(): Promise<Client> {
   const c = client();
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `notif-${Date.now()}-${n++}@acme.test` });
+  const r = await c.post('/host/openwop-app/test/login', { email: `notif-${Date.now()}-${n++}@acme.test` });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return c;
 }
-const BASE_PATH = '/v1/host/openwop-app/notifications';
+const BASE_PATH = '/host/openwop-app/notifications';
 
 describe('notifications feature — core, always-on (no toggle)', () => {
   it('has NO `notifications` toggle (it is core platform infrastructure)', () => {
@@ -125,11 +125,11 @@ describe('R3 IB-R2-2 — scoped bulk verbs (:archive-read / :bulk-read), one req
     const { getNotificationEmitter } = await import('../src/notifications/emitter.js');
     const tenantId = `org:blk-${Date.now()}-${n++}`;
     const c = client();
-    const login = await c.post('/v1/host/openwop-app/test/login', { email: `blk-${Date.now()}@acme.test`, tenantId });
+    const login = await c.post('/host/openwop-app/test/login', { email: `blk-${Date.now()}@acme.test`, tenantId });
     expect(login.status, JSON.stringify(login.body)).toBe(201);
     const me = login.body.user.userId as string;
     const other = client();
-    const olog = await other.post('/v1/host/openwop-app/test/login', { email: `blk-o-${Date.now()}@acme.test`, tenantId });
+    const olog = await other.post('/host/openwop-app/test/login', { email: `blk-o-${Date.now()}@acme.test`, tenantId });
     const otherId = olog.body.user.userId as string;
 
     const emit = (recipientUserId: string, status: 'unread' | 'read' | 'archived', title: string) =>

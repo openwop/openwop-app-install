@@ -8,7 +8,7 @@
  * negotiation tests).
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, within, cleanup, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import type { ReactNode } from 'react';
 import { resolvePreviewSection, resolvePreviewSections } from '../resolvePreviewLocale.js';
@@ -55,6 +55,8 @@ vi.mock('../cmsClient.js', () => ({
   listLocaleGrants: vi.fn(async () => []), putLocaleGrant: vi.fn(),
   getMyLocaleGrant: vi.fn(async () => null),
   setLocalePublish: vi.fn(),
+  getTranslationStatus: vi.fn(async () => ({ locales: [], sections: {}, counts: {} })),
+  confirmTranslationSource: vi.fn(),
 }));
 vi.mock('../../media/mediaClient.js', () => ({
   listAssets: vi.fn(async () => []), uploadAsset: vi.fn(), absoluteServeUrl: (u: string) => u,
@@ -63,6 +65,8 @@ vi.mock('../../sharing/sharingClient.js', () => ({
   createLink: vi.fn(), listLinks: vi.fn(async () => []), revokeLink: vi.fn(),
   sharedPageUrl: (token: string) => `/shared/${token}`,
 }));
+// The Page tab reads and writes the page's search and social record.
+vi.mock('../../publishing/publishingClient.js', () => ({ getSeo: vi.fn(async () => null), putSeo: vi.fn(async (_o: string, _p: string, seo: unknown) => seo) }));
 vi.mock('../../site/siteConfigClient.js', () => ({
   getSiteConfig: vi.fn(async () => { throw new Error('forbidden'); }),
   putSiteConfig: vi.fn(), invalidateFrontPage: vi.fn(),
@@ -138,14 +142,15 @@ describe('CmsPage — the preview locale selector (CMSLU-5)', () => {
     renderDetail();
     await waitFor(() => expect(screen.getByTestId('public-preview')).toBeTruthy());
     // Base preview: base content, no locale badge.
-    expect(screen.getByText('Hello')).toBeTruthy();
+    const preview = (): HTMLElement => screen.getByTestId('public-preview');
+    expect(within(preview()).getByText('Hello')).toBeTruthy();
     expect(screen.queryByText(/previewing/i)).toBeNull();
 
     // Switch the preview locale to es.
     fireEvent.change(screen.getByLabelText(/preview locale/i), { target: { value: 'es' } });
     // The overlayed section renders Spanish; the untranslated one stays base…
-    await waitFor(() => expect(screen.getByText('Hola')).toBeTruthy());
-    expect(screen.getByText('Untranslated')).toBeTruthy();
+    await waitFor(() => expect(within(preview()).getByText('Hola')).toBeTruthy());
+    expect(within(preview()).getByText('Untranslated')).toBeTruthy();
     // …and the honesty badge names the locale + the fallback count.
     expect(screen.getByText(/previewing es/i)).toBeTruthy();
     expect(screen.getByText(/1 of 2 sections falls back to en/i)).toBeTruthy();
@@ -159,8 +164,8 @@ describe('CmsPage — the preview locale selector (CMSLU-5)', () => {
     fireEvent.change(screen.getByLabelText(/preview locale/i), { target: { value: 'fr' } });
     // …the preview shows BASE content (the fr overlay is stripped, as delivery strips it)…
     await waitFor(() => expect(screen.getByText(/is withheld from delivery/i)).toBeTruthy());
-    expect(screen.queryByText('Bonjour')).toBeNull();
-    expect(screen.getByText('Hello')).toBeTruthy();
+    expect(within(screen.getByTestId('public-preview')).queryByText('Bonjour')).toBeNull();
+    expect(within(screen.getByTestId('public-preview')).getByText('Hello')).toBeTruthy();
     // …and the badge never claims completeness.
     expect(screen.queryByText(/every section has content/i)).toBeNull();
   });

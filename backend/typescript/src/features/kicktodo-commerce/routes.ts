@@ -76,7 +76,7 @@ function mapPayoutError(err: unknown): never {
 // NOT `/kicktodo/commerce` — the reserved-namespace guard (PRD §9.4) rightly
 // reads that as a second commerce owner. This surface is entitlement/link
 // management; the name says so.
-export const KICKTODO_COMMERCE_PREFIX = '/v1/host/openwop-app/kicktodo/entitlements';
+export const KICKTODO_COMMERCE_PREFIX = '/host/openwop-app/kicktodo/entitlements';
 
 type Handler = (req: Request, res: Response) => Promise<void>;
 

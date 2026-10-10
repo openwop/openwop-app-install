@@ -21,6 +21,7 @@ vi.mock('../lib/agentMentions.js', () => ({ useAgentMentions: () => ({ entries: 
 vi.mock('../lib/workflowMentions.js', () => ({
   listWorkflowMentions: () => [],
   refreshWorkflowMentionCache: async () => undefined,
+  workflowMentionLoadFailed: () => false,
 }));
 vi.mock('../../features/profiles/profilesClient.js', () => ({ getMyProfile: async () => ({}) }));
 vi.mock('../../agents/rosterClient.js', () => ({ listRoster: async () => [] }));

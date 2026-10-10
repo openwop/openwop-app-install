@@ -26,20 +26,20 @@ afterAll(async () => { await closeApp(); });
 const client = (): Client => makeClient(() => BASE);
 
 async function signup(c: Client, tenantId: string): Promise<{ userId: string }> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail('gov'), tenantId });
+  const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail('gov'), tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
 const setToggle = (id: string, status: 'on' | 'off'): Promise<void> => enableToggle(id, status);
 
-const S = '/v1/host/openwop-app/strategy';
-const APPROVALS = '/v1/host/openwop-app/approvals';
+const S = '/host/openwop-app/strategy';
+const APPROVALS = '/host/openwop-app/approvals';
 const freshTenant = (): string => `org:gov-${Date.now()}-${n++}`;
 
 async function ownerWithOrg(tenantId: string): Promise<{ owner: Client; userId: string; orgId: string }> {
   const owner = client();
   const u = await signup(owner, tenantId);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return { owner, userId: u.userId, orgId: org.body.orgId };
 }
@@ -296,7 +296,7 @@ describe('strategy activation gate (ADR 0230 §B3)', () => {
     const tenantId = freshTenant();
     const { owner, orgId } = await ownerWithOrg(tenantId);
     const editor = client(); const editorUser = await signup(editor, tenantId);
-    await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'E', subject: editorUser.userId, roles: ['editor'] });
+    await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'E', subject: editorUser.userId, roles: ['editor'] });
     await setToggle('strategy-approval-gate', 'on');
     try {
       const s = (await owner.post(S, { orgId, title: 'Sensitive' })).body;

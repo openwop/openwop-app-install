@@ -71,22 +71,27 @@ describe('ADR 0646 — a shared name is decided by content negotiation, never by
     expect(res.headers.get('cache-control')).toMatch(/no-store/);
   });
 
-  it('a header-less JSON client gets the OPERATION under preferredVersion\'s major (§1.3), not a 404', async () => {
+  // CORRECTED for suite 2.42.8 (`versioning.md` §1.2/§1.3 Class 3 errata): the
+  // `preferredVersion` default applies to `/.well-known/openwop` ONLY — a
+  // header-less request on any other unversioned operation path is major 2. The
+  // ADR 0646 property this file exists for is unchanged: page vs operation is
+  // still decided by content negotiation, never by the default major.
+  it('a header-less JSON client gets the OPERATION under major 2 (§1.2/§1.3), not a 404', async () => {
     const res = await get('/agents', { ...AUTH, Accept: 'application/json' });
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toMatch(/^application\/json/);
-    expect(res.headers.get('openwop-version')).toBe('1.1');
-    // The SAME operation the /v1 twin serves — one implementation, two path keys.
-    const twin = await get('/v1/agents', { ...AUTH, Accept: 'application/json' });
-    expect(twin.status).toBe(200);
-    expect(await res.json()).toEqual(await twin.json());
+    expect(res.headers.get('openwop-version')).toBe('2.0');
+    // The SAME operation an explicit OpenWOP-Version: 2 request gets.
+    const explicit = await get('/agents', { ...AUTH, Accept: 'application/json', 'OpenWOP-Version': '2' });
+    expect(explicit.status).toBe(200);
+    expect(await res.json()).toEqual(await explicit.json());
   });
 
-  it('`Accept: */*` with no header is a protocol client (a bare curl), served under major 1', async () => {
+  it('`Accept: */*` with no header is a protocol client (a bare curl), served under major 2', async () => {
     const res = await get('/agents', { ...AUTH, Accept: '*/*' });
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toMatch(/^application\/json/);
-    expect(res.headers.get('openwop-version')).toBe('1.1');
+    expect(res.headers.get('openwop-version')).toBe('2.0');
   });
 
   it('`OpenWOP-Version: 2` wins over an html-preferring Accept — the header names a contract', async () => {
@@ -105,15 +110,11 @@ describe('ADR 0646 — a shared name is decided by content negotiation, never by
   it('an Accept that admits html but PREFERS JSON is the protocol\'s', async () => {
     const res = await get('/agents', { ...AUTH, Accept: 'application/json, text/html;q=0.9' });
     expect(res.headers.get('content-type')).toMatch(/^application\/json/);
-    expect(res.headers.get('openwop-version')).toBe('1.1');
+    expect(res.headers.get('openwop-version')).toBe('2.0');
   });
 
-  it('the /v1 twin is untouched: versioned path, version header, JSON', async () => {
-    const res = await get('/v1/agents', { ...AUTH, Accept: 'text/html' });
-    expect(res.status).toBe(200);
-    expect(res.headers.get('content-type')).toMatch(/^application\/json/);
-    expect(res.headers.get('openwop-version')).toBe('1.1');
-  });
+  // ADR 0812 P3c-0: the "/v1 twin is untouched" leg was deleted with major 1 —
+  // `/v1/agents` is now the retired path space; the major-2 legs above remain.
 
   it('the other two shared names negotiate the same way', async () => {
     for (const name of ['/prompts', '/runs']) {
@@ -122,7 +123,7 @@ describe('ADR 0646 — a shared name is decided by content negotiation, never by
       expect(page.headers.get('openwop-version'), name).toBeNull();
       const api = await get(name, { ...AUTH, Accept: 'application/json' });
       expect(api.headers.get('content-type'), name).toMatch(/^application\/json/);
-      expect(api.headers.get('openwop-version'), name).toBe('1.1');
+      expect(api.headers.get('openwop-version'), name).toBe('2.0');
     }
   });
 });

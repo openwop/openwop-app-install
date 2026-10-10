@@ -60,6 +60,7 @@ export const messages = {
   // Toasts — success
   copied: 'Copiado',
   seoSaved: 'SEO salvo',
+  seoLiveTier: 'Esta página está publicada ou agendada, então só um administrador do espaço de trabalho pode alterar o SEO dela.',
 
   // Toasts / errors
   loadPagesFailed: 'Falha ao carregar as páginas.',

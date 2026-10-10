@@ -104,6 +104,22 @@
    *                  themes (used by .btn-accent-solid).
    * Both derive a darker, slightly-more-saturated accent (l −0.12, c +0.02). */
   --clay-text:    oklch(from var(--clay) calc(l - 0.12) calc(c + 0.02) h);
+
+  /* ── Video (film) identity — DESIGN.md §6.1. THEME-INDEPENDENT on purpose: a
+   * film's stage is ink and its end card is paper whichever theme the app is
+   * in, so these do not flip in .theme-dark. Published for openwop-site's films
+   * as /design-tokens.css + /design-tokens.json (scripts/gen-design-tokens.mjs). */
+  --video-stage: #1a1a17;
+  --video-stage-text: #f4f1ea;
+  --video-stage-muted: #a8a39a;
+  --video-stage-rule: #4a4842;
+  --video-card: #f4f1ea;
+  --video-card-text: #1a1a17;
+  --video-card-muted: #4a4842;
+  --video-card-faint: #66624f;
+  --video-accent: oklch(58% 0.13 40);
+  --video-accent-on-stage: oklch(72% 0.13 40);
+  --video-accent-on-card: oklch(46% 0.15 40);
   --clay-strong:  oklch(from var(--clay) calc(l - 0.12) calc(c + 0.02) h);
   --clay-rule:    oklch(from var(--clay) l c h / 0.35);
   --clay-wash:    oklch(from var(--clay) l c h / 0.04);
@@ -209,6 +225,11 @@
   --cat-control:     oklch(72% 0.14 75);      /* hue 75 — amber */
   --cat-ai:          var(--color-ai);         /* hue 280 — indigo */
   --cat-integration: oklch(62% 0.11 195);     /* hue 195 — teal */
+  /* Text ON a category fill (badge letter). Theme-invariant because the fills
+   * are: MEASURED against every accent in both themes, pure black is the only
+   * text that clears 4.5:1 on all of them (lowest: flow 4.64); --paper failed
+   * control light (2.25:1), and ink failed flow (3.85:1) — grade-ux U-5. */
+  --cat-on:          oklch(0% 0 0);
 
   /* ── Canvas snap-guide tokens (DESIGN.md §7.4 / CV-6) — editor chrome, NOT
    * run-state functional tokens. Align = the brand clay; space = deliberately
@@ -257,6 +278,7 @@
   --sidebar-w-collapsed: 64px;
   --leftrail-w: 320px;      /* chat left-rail total width (mode rail + list column) */
   --leftrail-rail-w: 48px;  /* skinny vertical mode rail — icon-only; the label is sr-only + shown as the button `title` tooltip on hover (never overflows) */
+  --workbench-w: 440px;     /* chat right-hand Workbench pane (ADR 0768 P2): runs + artifacts */
 
   /* Chat-specific tokens — seated on the warm palette.
    * User bubble uses clay-soft (10% alpha) instead of full clay so the chat
@@ -269,7 +291,7 @@
   --radius-bubble: 16px;
   --radius-pill: 24px;
   --max-bubble-width: 75ch;
-  --chat-input-height-max: 120px;
+  --chat-input-height-max: min(40vh, 320px);
   --chat-feed-pad: var(--space-4);
   /* The shared content spine for the chat surface — the empty-state column AND
    * the composer center on this ONE width so their left/right gutters line up

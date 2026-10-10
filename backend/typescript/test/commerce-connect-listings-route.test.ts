@@ -44,11 +44,11 @@ function client(): Client {
 }
 
 async function login(c: Client): Promise<void> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `cc4-${Date.now()}-${n++}@acme.test` });
+  const r = await c.post('/host/openwop-app/test/login', { email: `cc4-${Date.now()}-${n++}@acme.test` });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
 }
 
-const CC = '/v1/host/openwop-app/commerce-connect';
+const CC = '/host/openwop-app/commerce-connect';
 
 describe('listing editor routes', () => {
   it('native-paid listing requires seller onboarding first (409), then saves as pending', async () => {
@@ -314,7 +314,7 @@ describe('marketplace /listings pricing annotation', () => {
     await saveConfig({ id: 'marketplace', label: 'Marketplace', description: 'test', category: 'Admin', status: 'on', bucketUnit: 'tenant', salt: 'marketplace' }, 'test');
     const c = client();
     await login(c);
-    const r = await c.get('/v1/host/openwop-app/marketplace/listings');
+    const r = await c.get('/host/openwop-app/marketplace/listings');
     expect(r.status).toBe(200);
     for (const l of r.body.listings as { pricing?: unknown }[]) expect(l.pricing).toBeUndefined();
   });

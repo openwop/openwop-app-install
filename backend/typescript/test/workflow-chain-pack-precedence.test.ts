@@ -29,7 +29,8 @@ const manifest = (name: string, version: string, chainId: string) => ({
   name, version, kind: 'workflow-chain', engines: { openwop: '>=1.0.0' },
   chains: [{
     chainId, version: '1.0.0', label: chainId, description: 'test chain', parameters: {},
-    dag: { nodes: [{ id: 'n1', typeId: 'core.openwop.transform' }] },
+    // ADR 0766 — pinned: an unpinned chain from an unwaived pack is refused at register.
+    dag: { nodes: [{ id: 'n1', typeId: 'core.openwop.transform@1.0.0' }] },
   }],
 });
 

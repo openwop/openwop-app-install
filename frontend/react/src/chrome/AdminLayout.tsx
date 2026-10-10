@@ -6,6 +6,7 @@ import { chromeFor, navItemIsActive, GROUP_LABEL_KEYS, FEATURES } from './featur
 import { ChevronDownIcon, ChevronRightIcon } from '../ui/icons/index.js';
 import { IconButton } from '../ui/IconButton.js';
 import { useFeatureBadge, useFeatureLocked } from '../featureToggles/FeatureAccessContext.js';
+import { useLockedNav } from '../featureToggles/lockedTargets.js';
 import { useResolvedNav } from './navConfig/NavConfigProvider.js';
 import { readExpandedHeaders, toggleExpandedHeader } from './navConfig/navCollapseCookie.js';
 import { isAdminCaller, useEffectiveAccessState } from '../client/useEffectiveAccess.js';
@@ -20,7 +21,6 @@ import { AdminRouteProvider, type AdminParentRoute } from './AdminRouteContext.j
 import { NavRailItemContent, NavRailSection } from './NavRailPrimitives.js';
 
 const COLLAPSE_KEY = 'openwop.admin.railCollapsed';
-const FEATURE_STORE = '/marketplace/bundles';
 
 /**
  * <AdminLayout> — the single Admin surface with its own embedded left rail
@@ -39,7 +39,7 @@ const FEATURE_STORE = '/marketplace/bundles';
 export function AdminLayout(): JSX.Element {
   const { t } = useTranslation('chrome');
   const { t: tn } = useTranslation('nav');
-  const lockedFor = useFeatureLocked();
+  const lockedFor = useLockedNav(useFeatureLocked(), t('navLocked'), 'admin-rail');
   const location = useLocation();
   const mobile = useMediaQuery('(max-width: 860px)');
   const [collapsed, setCollapsed] = useState<boolean>(() => {
@@ -193,21 +193,21 @@ export function AdminLayout(): JSX.Element {
                   const badge = badgeFor(item.featureId);
                   const locked = lockedFor(item.featureId);
                   const label = item.labelKey ? tn(item.labelKey, { defaultValue: item.label }) : item.label;
-                  const tooltip = locked ? t('navLocked') : collapsed
+                  const tooltip = locked ? locked.label : collapsed
                     ? label
                     : (item.hintKey ? tn(item.hintKey, { defaultValue: item.hint }) : item.hint);
                   return (
                     <li key={item.to}>
                       <Tooltip text={tooltip} disabled={!collapsed}>
                       <Link
-                        to={locked ? FEATURE_STORE : item.to}
-                        onClick={() => setNavSource('admin-rail')}
+                        to={locked ? locked.to : item.to}
+                        onClick={() => { setNavSource('admin-rail'); locked?.onClick(); }}
                         className={`admin-nav-link${active && !locked ? ' is-active' : ''}`}
                         {...(active && !locked ? { 'aria-current': 'page' as const } : {})}
                         aria-label={collapsed ? label : undefined}
                         title={!collapsed ? tooltip : undefined}
                       >
-                        <NavRailItemContent classPrefix="admin-nav" icon={<Icon size={16} />} label={label} locked={locked} lockedLabel={t('navLocked')} badge={badge} compact={collapsed && !mobile} />
+                        <NavRailItemContent classPrefix="admin-nav" icon={<Icon size={16} />} label={label} locked={!!locked} lockedLabel={locked?.label ?? ''} badge={badge} compact={collapsed && !mobile} />
                       </Link>
                       </Tooltip>
                     </li>

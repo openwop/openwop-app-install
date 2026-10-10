@@ -42,7 +42,7 @@ self.addEventListener('push', (event) => {
   const title = String(payload.title ?? 'OpenWOP');
   const body = String(payload.body ?? '');
   const tag = String(payload.tag ?? '');
-  const actionUrl = typeof payload.actionUrl === 'string' ? payload.actionUrl : '/';
+  const actionUrl = isSafeActionUrl(payload.actionUrl) ? payload.actionUrl : '/inbox';
   const priority = String(payload.priority ?? 'normal');
 
   event.waitUntil(
@@ -61,9 +61,29 @@ self.addEventListener('push', (event) => {
   );
 });
 
+/**
+ * ADR 0816 D7 — the SPA's `isSafeActionUrl` rule (`src/notifications/actionLabels.ts`),
+ * inlined because a service worker cannot import the SPA bundle; a parity test
+ * (`src/notifications/__tests__/swPushActionUrlParity.test.ts`) pins the copy.
+ * In-app paths only: a leading `/`, not protocol-relative `//`, no backslash,
+ * whitespace or control characters, bounded length. Anything else opens the
+ * inbox instead — `openWindow` would otherwise follow an absolute URL off-origin.
+ */
+function isSafeActionUrl(url) {
+  if (typeof url !== 'string' || url.length === 0 || url.length > 2048) return false;
+  if (!url.startsWith('/') || url.startsWith('//')) return false;
+  if (url.includes('\\') || /\s/.test(url)) return false;
+  for (let i = 0; i < url.length; i += 1) {
+    const c = url.charCodeAt(i);
+    if (c < 0x20 || c === 0x7f) return false;
+  }
+  return true;
+}
+
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
-  const targetUrl = (event.notification.data && event.notification.data.actionUrl) || '/';
+  const raw = event.notification.data && event.notification.data.actionUrl;
+  const targetUrl = isSafeActionUrl(raw) ? raw : '/inbox';
   event.waitUntil((async () => {
     // Reuse the open tab when one exists rather than spawning a new
     // one — better UX for users who already have the app open.

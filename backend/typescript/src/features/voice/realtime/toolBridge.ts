@@ -15,13 +15,20 @@
  */
 import { createAgentToolProvider, createScopedAgentToolProvider } from '../../../host/agentToolProvider.js';
 import { toModelToolResult } from '../../../host/toModelToolResult.js';
-import { listManifestAgents } from '../../../host/agentDispatch.js';
+import { getAgentRegistry } from '../../../executor/agentRegistry.js';
+import { resolveAgentToolPermissionSet } from '../../../host/agentProfileService.js';
+import { evaluateToolPermissionSet, agentToolPermissionsEnabled } from '../../../host/agentToolPermissions.js';
 import { effectiveToolAllowlist, resolveAgentToolAllowlistOverride } from '../../../host/agentToolAllowlistService.js';
 import { resolveAgentIdentity, type AgentIdentity } from '../../../host/agentIdentity.js';
 import { sanitizeToolName } from '../../../providers/dispatchProviderTools.js';
-import { buildFirewallHook, SENSITIVE_APPROVAL_TOOLS } from '../../../features/capability-firewall/firewallHook.js';
-import { getCapabilityRules, getUnknownToolPolicy, getFirewallMode, getDefaultDenyVerdict, getPlatformRules } from '../../../features/capability-firewall/ruleStore.js';
+import { buildLaneFirewall } from '../../../host/laneFirewall.js';
+import { resolveConversationToolGate } from '../../../host/conversationToolScope.js';
+import { toolAuthorityHolds } from '../../../host/conversationVisibility.js';
+import { listToolApprovals, approvedToolSets, recordToolApprovalRequested } from '../../conversation-tools/approvalLedger.js';
 import type { RealtimeToolDecl } from './types.js';
+import { createLogger } from '../../../observability/logger.js';
+
+const log = createLogger('features.voice.toolBridge');
 
 /** The agent's allowlisted tool names (∅ when the agent has none / isn't found → default-deny).
  *  ADR 0277 — identity-normalized: the manifest allowlist lives on the persona's REGISTRY
@@ -40,9 +47,19 @@ async function agentIdentityOf(tenantId: string, agentId: string | undefined): P
  *  the decl (offering) and the execute (entitlement) read this, so a revoked
  *  tool is neither declared to the realtime model nor executable. Pure given a
  *  resolved override. */
-function allowlistOf(identity: AgentIdentity | null, override: readonly string[] | undefined): readonly string[] {
+async function allowlistOf(
+  tenantId: string,
+  identity: AgentIdentity | null,
+  override: readonly string[] | undefined,
+): Promise<readonly string[]> {
   if (!identity) return [];
-  const m = listManifestAgents().find((a) => a.agentId === identity.agentId);
+  // ADR 0775 D4 — resolve WITHIN the tenant. The old `listManifestAgents().find`
+  // searched every tenant's user agents, and `user.<slug>` ids repeat across
+  // tenants (ADR 0379), so a session could be offered — and execute — another
+  // tenant's same-named agent's tools (`ARWF-5`). `resolve` answers a pack agent
+  // by its bare id and a user agent only under its owner tenant, and reads
+  // through to storage on a miss.
+  const m = await getAgentRegistry().resolve(identity.agentId, tenantId);
   return effectiveToolAllowlist(m?.toolAllowlist, override);
 }
 
@@ -50,7 +67,7 @@ async function agentAllowlist(tenantId: string, agentId: string | undefined): Pr
   const identity = await agentIdentityOf(tenantId, agentId);
   if (!identity) return [];
   const override = await resolveAgentToolAllowlistOverride(tenantId, identity.agentId);
-  return allowlistOf(identity, override);
+  return allowlistOf(tenantId, identity, override);
 }
 
 /** The realtime tool DECLARATIONS for a session = the agent's allowlist ∩ resolvable builtins.
@@ -62,7 +79,12 @@ async function agentAllowlist(tenantId: string, agentId: string | undefined): Pr
 export async function resolveAgentToolDecls(tenantId: string, agentId: string | undefined): Promise<RealtimeToolDecl[]> {
   const { resolveTool } = createAgentToolProvider({ tenantId: '_decls' });
   const decls: RealtimeToolDecl[] = [];
+  // Grade-code ARCD-6 — with ADR 0102 enforcement on, do not OFFER a tool the
+  // execute side will refuse.
+  const identity = agentId && agentToolPermissionsEnabled() ? await agentIdentityOf(tenantId, agentId) : null;
+  const perms = identity ? await resolveAgentToolPermissionSet(tenantId, agentId ?? identity.agentId, identity.agentId) : [];
   for (const name of await agentAllowlist(tenantId, agentId)) {
+    if (perms.length > 0 && !evaluateToolPermissionSet(name, perms).allowed) continue;
     const def = resolveTool(name);
     if (def) decls.push({ name: sanitizeToolName(def.name), description: def.description ?? '', parameters: (def.inputSchema as Record<string, unknown>) ?? { type: 'object' } });
   }
@@ -86,6 +108,12 @@ export type ToolCallOutcome =
   | { status: 'ok'; result: string; isError?: boolean }
   | { status: 'denied'; reason: string }
   | { status: 'requires_approval'; reason: string };
+
+/** Best-effort: a ledger write never breaks the voice turn. */
+async function recordHeld(tenantId: string, conversationId: string, toolName: string, origin: 'baseline' | 'policy', args: Record<string, unknown>): Promise<void> {
+  try { await recordToolApprovalRequested(tenantId, conversationId, toolName, { origin, input: args }); }
+  catch (err) { log.warn('voice_held_tool_record_failed', { toolName, error: err instanceof Error ? err.message : String(err) }); }
+}
 
 /** Execute one realtime tool call through the host policy stack. */
 export async function executeRealtimeToolCall(input: {
@@ -120,48 +148,83 @@ export async function executeRealtimeToolCall(input: {
   // ADR 0104 — honor the super-admin override on the ENTITLEMENT side too, so a
   // revoked tool can't execute over voice even if a stale decl reached the model.
   const override = identity ? await resolveAgentToolAllowlistOverride(input.tenantId, identity.agentId) : undefined;
-  const name = resolveWireToolName(allowlistOf(identity, override), input.name);
+  const allowlist = await allowlistOf(input.tenantId, identity, override);
+  const name = resolveWireToolName(allowlist, input.name);
   if (!name) {
     return { status: 'denied', reason: `Tool "${input.name}" is not in this agent's allowlist.` };
   }
-  // 2) Capability firewall (composition-aware) + the ADR 0150 SAFE-MODE baseline.
-  //    Built ALWAYS (not only when the tenant has rules) so a SENSITIVE tool
-  //    (code-exec / file-write / off-host egress) needs approval over voice
-  //    exactly as it does over chat — the rule-less path used to skip the hook
-  //    entirely, so those actions ran ungated over voice. Evaluated on the
-  //    CANONICAL id, so rules + the seen-set match the ids typed-chat uses.
-  //    `bypassApproval:false` — a live voice turn has no permission-mode
-  //    pre-authorization. A require-approval verdict returns an HONEST, TYPED
-  //    refusal the model relays; on the browser-relay transport the client also
-  //    shows the in-voice approval card (A7), whose Approve re-invokes this call
-  //    with `userApproved` — never a silent execution.
-  const [rules, unknownToolPolicy, mode, defaultDenyVerdict, platformRules] = await Promise.all([
-    getCapabilityRules(input.tenantId),
-    getUnknownToolPolicy(input.tenantId),
-    getFirewallMode(input.tenantId),
-    getDefaultDenyVerdict(input.tenantId),
-    getPlatformRules(),
-  ]);
-  const fw = buildFirewallHook({
-    rules, unknownToolPolicy,
-    requireApprovalTools: SENSITIVE_APPROVAL_TOOLS,
-    bypassApproval: false,
-    // A7 — the human's one-shot card approval for exactly this canonical tool.
-    // `approvedTools` downgrades ONLY a require-approval verdict; a hard deny
-    // (rules / platform floor) is never bypassed (firewallHook contract).
-    ...(input.userApproved ? { approvedTools: new Set([name]) } : {}),
-    mode, defaultDenyVerdict, platformRules,
+  // 1b) ADR 0102 per-tool permissions — ADR 0775 D3 (architect H1): the voice
+  //     lane never evaluated them, so a roster agent's `never` list was bypassed
+  //     here even with enforcement on. Same resolver + set evaluation + flag as
+  //     the typed loop (`agentDispatch.runChatToolLoop`), keyed by the id the
+  //     session was ADDRESSED by (a `host:` id names the exact member).
+  if (identity) {
+    const perms = await resolveAgentToolPermissionSet(input.tenantId, input.agentId ?? identity.agentId, identity.agentId);
+    const perm = evaluateToolPermissionSet(name, perms);
+    if (!perm.allowed) {
+      const enforcing = agentToolPermissionsEnabled();
+      log.info('agent_tool_permission_denied', { agentId: identity.agentId, toolName: name, reason: perm.reason, enforced: enforcing, lane: 'voice' });
+      if (enforcing) return { status: 'denied', reason: `Tool "${name}" is blocked by this agent's guardrails (${perm.reason}).` };
+    }
+  }
+  // 1c) ADR 0834 D5 — the CONVERSATION's tool scope, through the ONE resolver the chat
+  //     loop uses. Voice runs tools inside the same conversation, and never applied it:
+  //     a tool the owner disabled (or held, or put out of mandate with an intent
+  //     ledger) stayed callable here. The ledger's decisions fold only for the owner's
+  //     own session — the owner approved the tool for their actions, not a participant's.
+  let approvedTools: Set<string> | undefined;
+  let approvedBaselineTools: Set<string> | undefined;
+  if (input.conversationId) {
+    const approvals = await listToolApprovals(input.tenantId, input.conversationId);
+    const gate = await resolveConversationToolGate({
+      tenantId: input.tenantId, conversationKey: input.conversationId, ceiling: allowlist, approvals,
+      foldApprovalsOnlyFor: input.actingUserId ?? '',
+    });
+    if (gate.scope && !gate.scope.enabled.includes(name)) {
+      return { status: 'denied', reason: `Tool "${name}" is not enabled for this conversation.` };
+    }
+    if (gate.scope?.requireApproval.includes(name)) {
+      await recordHeld(input.tenantId, input.conversationId, name, 'policy', input.args);
+      return { status: 'requires_approval', reason: JSON.stringify({ error: 'approval_required', message: 'this conversation requires approval for this tool — ask the user to approve it from the chat' }) };
+    }
+    // FW2-CD-6 — the ONE authority predicate (`toolAuthorityHolds`). The opener's id here
+    // is the durable user; if it ever differs from the owner's stamp key the fold is
+    // skipped (fail-safe: the owner is asked again), never widened.
+    if (toolAuthorityHolds(input.actingUserId, gate.ownerUserId)) {
+      ({ approvedTools, approvedBaselineTools } = approvedToolSets(approvals));
+    }
+  }
+  // 2) Capability firewall (composition-aware) + the safe-mode baseline, built by the
+  //    ONE lane factory (ADR 0834 D1). Evaluated on the CANONICAL id, so rules + the
+  //    seen-set match the ids typed-chat uses. No permission-mode pre-authorization on a
+  //    live voice turn (`bypass` absent). A held verdict returns an HONEST, TYPED refusal
+  //    the model relays; on the browser-relay transport the client also shows the
+  //    in-voice approval card (A7), whose Approve re-invokes this call with
+  //    `userApproved`. ADR 0834 D2: that one-shot card is client-asserted, so it answers
+  //    only the user's own safe-mode ask (`baseline`) — never a tenant/platform/enforce
+  //    ask, which needs a ledger approval from the conversation's owner.
+  if (input.userApproved) (approvedBaselineTools ??= new Set()).add(name);
+  const { hook: fw } = await buildLaneFirewall({
+    tenantId: input.tenantId, lane: 'voice',
+    ...(approvedTools ? { approvedTools } : {}),
+    ...(approvedBaselineTools ? { approvedBaselineTools } : {}),
+    resource: input.conversationId ?? `voice:${input.sessionId}`,
+    dedupeKey: input.sessionId,
   });
   const verdict = fw.evaluate([...seen(input.sessionId)], name);
   if (verdict.decision === 'deny') return { status: 'denied', reason: verdict.reason ?? 'Blocked by the capability firewall.' };
   if (verdict.decision === 'require-approval') {
+    // ADR 0834 D6 — a held voice call lands in the conversation's ledger, so the owner
+    // can approve it from the chat's pending-approval notice (the place the message
+    // below sends the user).
+    if (input.conversationId) await recordHeld(input.tenantId, input.conversationId, name, verdict.origin ?? 'baseline', input.args);
     return {
       status: 'requires_approval',
       // Typed, honest refusal for the model (never a silent bypass): the action
       // was NOT performed and needs a human approval the voice lane can't show.
       reason: JSON.stringify({
         error: 'approval_required',
-        message: 'this action needs human approval — ask the user to run it from the chat where an approval card can be shown',
+        message: 'this action needs human approval — ask the user to approve it in the chat, then ask again',
         ...(verdict.reason ? { detail: verdict.reason } : {}),
       }),
     };

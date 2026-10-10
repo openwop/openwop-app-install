@@ -39,7 +39,16 @@ interface RegisterWebhookRequest {
   /** RFC 0201 §B.4 — absent means `["v1"]`, today's behaviour byte for byte. */
   signatureAlgorithms?: unknown;
 }
-import { wireEventType, eventTypeSpellings } from '../storage/eventEra.js';
+import { wireEventType } from '../storage/eventEra.js';
+import { v2WireEventType, wireEventTypeSpellings } from '../host/hostEventNames.js';
+import {
+  hostEventEnvelope,
+  hostEventEntryForEmitted,
+  hostEventEntryForSubscriptionName,
+  hostEventsV2Enabled,
+  type HostEventEnvelope,
+} from '../host/hostEventTypes.js';
+import { publishHostEventToStream } from '../host/hostEventStream.js';
 import { projectV2Payload, stampV2SchemaVersion } from '../storage/v2PayloadProjection.js';
 import type { Storage } from '../storage/storage.js';
 import { hostExtStorage } from '../host/hostExtPersistence.js';
@@ -48,7 +57,6 @@ import { getEventLog } from '../executor/eventLog.js';
 import { createLogger } from '../observability/logger.js';
 import { sealWebhookSecret } from '../host/webhookSecretCodec.js';
 import { WEBHOOK_MAX_ATTEMPTS } from '../host/webhookDeliveryWorker.js';
-import { negotiatedMajor, v1 } from '../middleware/protocolVersion.js';
 import { projectV2RunIds } from '../host/v2Ids.js';
 import { runOwnerV2 } from '../host/runOwner.js';
 import { assertEgressUrlAllowed, EgressUrlRejectedError } from '../host/webhookEgressGuard.js';
@@ -120,7 +128,7 @@ export function registerWebhookRoutes(app: Express, deps: Deps): void {
   // List subscriptions — tenant-scoped (RFC 0093 §A.3). Secret is NEVER
   // returned — only refs + metadata, so a leaked list response can't be
   // replayed to forge a signed delivery.
-  app.get(v1('/webhooks'), async (req, res, next) => {
+  app.get('/webhooks', async (req, res, next) => {
     try {
       const tenantId = await resolveWebhookTenant(
         req,
@@ -148,7 +156,7 @@ export function registerWebhookRoutes(app: Express, deps: Deps): void {
     }
   });
 
-  app.post(v1('/webhooks'), async (req, res, next) => {
+  app.post('/webhooks', async (req, res, next) => {
     try {
       const body = req.body as RegisterWebhookRequest;
       // Validate required fields per spec/v1/webhooks.md §"Subscription".
@@ -176,6 +184,10 @@ export function registerWebhookRoutes(app: Express, deps: Deps): void {
         req,
         typeof body.tenantId === 'string' ? body.tenantId : undefined,
       );
+      // ADR 0825 P1 / RFC 0236 §E — a major-2 `events[]` may name an advertised
+      // DURABLE host-event type; an ephemeral one is refused. Flag-gated, so the
+      // registration is byte-identical with the flag off.
+      if (hostEventsV2Enabled()) assertNoEphemeralHostEventTypes(body.events);
       // RFC 0201 §B — the per-subscription opt-in. Validated AFTER the tenant
       // gate so a non-member learns nothing from the order of refusals, and
       // BEFORE anything leaves the process.
@@ -231,10 +243,9 @@ export function registerWebhookRoutes(app: Express, deps: Deps): void {
         tags: body.tags,
         secret: await sealWebhookSecret(secret),
         createdAt: new Date().toISOString(),
-        // The contract this subscriber speaks, fixed at registration. A major-2
-        // registration receives tenant-bound runIds in its deliveries; a major-1
-        // one keeps the bare uuid it has always received.
-        protocolMajor: negotiatedMajor(req),
+        // The contract this subscriber speaks, fixed at registration: tenant-bound
+        // runIds in its deliveries. Only major 2 registers (ADR 0812).
+        protocolMajor: 2,
         ...(signatureAlgorithms !== undefined ? { signatureAlgorithms } : {}),
       });
       res.status(201).json({
@@ -262,7 +273,7 @@ export function registerWebhookRoutes(app: Express, deps: Deps): void {
   // unregister (§E.18): the membership gate here, and under major 2 the
   // `403 id_tenant_mismatch` that `v2IdentityMiddleware` raises on a foreign
   // bound id BEFORE this handler looks anything up.
-  app.post(v1('/webhooks/:subscriptionId/rotate-secret'), async (req, res, next) => {
+  app.post('/webhooks/:subscriptionId/rotate-secret', async (req, res, next) => {
     try {
       const tenantId = await resolveWebhookTenant(
         req,
@@ -325,7 +336,7 @@ export function registerWebhookRoutes(app: Express, deps: Deps): void {
     }
   });
 
-  app.delete(v1('/webhooks/:subscriptionId'), async (req, res, next) => {
+  app.delete('/webhooks/:subscriptionId', async (req, res, next) => {
     try {
       // Tenant scope per webhooks.md §Unregister: 403 when the caller is not
       // a member of the requested tenant; 404 when the subscription doesn't
@@ -355,7 +366,7 @@ export function registerWebhookRoutes(app: Express, deps: Deps): void {
   // subscription's URL so an operator can verify reachability + signature
   // handling end-to-end. The 202 means "test delivery enqueued", not "endpoint
   // acknowledged" — the worker delivers (and retries) it asynchronously.
-  app.post(v1('/webhooks/:subscriptionId/test'), async (req, res, next) => {
+  app.post('/webhooks/:subscriptionId/test', async (req, res, next) => {
     try {
       const tenantId = await resolveWebhookTenant(
         req,
@@ -464,6 +475,13 @@ export async function deliverHostExtEvent(input: { type: string; tenantId: strin
     return;
   }
   try {
+    // ADR 0825 P1 / RFC 0236 — behind the flag, a major-2 subscriber gets the
+    // runless `{ hostEvent }` body instead of the synthetic `hostext:` run. With
+    // the flag off, nothing below this branch changes.
+    if (hostEventsV2Enabled()) {
+      await deliverHostEventV2(storage, input);
+      return;
+    }
     const event: EventRecord = {
       // Caller-supplied id when the SAME event also starts runs (the ADR 0208
       // dispatcher stamps it into run.metadata.hostEvent.eventId) — a receiver
@@ -486,6 +504,130 @@ export async function deliverHostExtEvent(input: { type: string; tenantId: strin
   }
 }
 
+/** Emitted names already logged as unadvertised (bounded; one line per type per process). */
+const unadvertisedHostEventTypes = new Set<string>();
+
+/**
+ * ADR 0825 P1 — `deliverHostExtEvent` with `OPENWOP_HOST_EVENTS_V2` on.
+ *
+ *   - MAJOR 1: exactly the pre-flag path (`hostext:` run, `*` and every
+ *     spelling match, the v1-retired skip in `enqueueDelivery`).
+ *   - MAJOR 2: RFC 0236 §E. Only an ADVERTISED type is emitted (§B "MUST NOT
+ *     emit a host-event type it does not advertise"); the body is
+ *     `{ hostEvent }` with no `runId`, sent only to a subscription whose
+ *     `events[]` names the type (`hostEventEntryForSubscriptionName`, which
+ *     also resolves the pre-flag spellings). The event also goes to the
+ *     `/host/events` stream.
+ */
+async function deliverHostEventV2(
+  storage: Storage,
+  input: { type: string; tenantId: string; payload: Record<string, unknown>; eventId?: string },
+): Promise<void> {
+  const eventId = input.eventId ?? randomUUID();
+  const timestamp = new Date().toISOString();
+  const all = await storage.listWebhooks({ tenantId: input.tenantId });
+  const spellings = wireEventTypeSpellings(input.type);
+  const legacy: EventRecord = { eventId, runId: `hostext:${input.type}`, sequence: 0, type: input.type, payload: input.payload, timestamp };
+  for (const sub of all) {
+    if ((sub.protocolMajor ?? 1) !== 1) continue;
+    if (sub.events.includes('*') || sub.events.some((e) => spellings.has(e))) await enqueueDelivery(storage, sub, legacy);
+  }
+  const entry = hostEventEntryForEmitted(input.type);
+  if (entry === undefined) {
+    if (!unadvertisedHostEventTypes.has(input.type)) {
+      if (unadvertisedHostEventTypes.size >= 1024) unadvertisedHostEventTypes.clear();
+      unadvertisedHostEventTypes.add(input.type);
+      log.warn('host_event_unadvertised_not_emitted', { type: input.type });
+    }
+    return;
+  }
+  await fanOutHostEvent(storage, input.tenantId, hostEventEnvelope(entry, { eventId, timestamp, payload: input.payload }), all);
+}
+
+/**
+ * RFC 0236 §C–§E — fan one host event out: to the `/host/events` stream, and,
+ * when it is DURABLE, to every major-2 subscription OF ITS TENANT whose
+ * `events[]` names its type. An ephemeral event is never enqueued (§C: "MUST
+ * NOT deliver it through webhooks"). Exported for tests that drive an envelope
+ * directly; production reaches it through `deliverHostExtEvent`.
+ */
+export async function fanOutHostEvent(
+  storage: Storage,
+  tenantId: string,
+  envelope: HostEventEnvelope,
+  tenantSubscriptions?: Awaited<ReturnType<Storage['listWebhooks']>>,
+): Promise<void> {
+  await publishHostEventToStream(storage, tenantId, envelope);
+  if (envelope.delivery !== 'durable') return;
+  const subs = tenantSubscriptions ?? await storage.listWebhooks({ tenantId });
+  for (const sub of subs) {
+    // Defence in depth: the list is already tenant-scoped (`webhook-cross-tenant-isolation`).
+    if (sub.tenantId !== tenantId || sub.protocolMajor !== 2) continue;
+    if (!sub.events.some((e) => hostEventEntryForSubscriptionName(e)?.type === envelope.type)) continue;
+    await enqueueHostEventDelivery(storage, sub, envelope);
+  }
+}
+
+/**
+ * The durable row for a host-event delivery. Same queue, signing, retries and
+ * dead-lettering as a run delivery (§E "apply exactly as to run deliveries").
+ * The `eventId` is fixed in the persisted body and `webhook-id` is the row id,
+ * so both are identical on every attempt (§E dedup key
+ * `(OpenWOP-Webhook-Id, eventId)`).
+ */
+async function enqueueHostEventDelivery(
+  storage: Storage,
+  sub: { subscriptionId: string; url: string; secret: string; tenantId?: string },
+  envelope: HostEventEnvelope,
+): Promise<void> {
+  const now = Date.now();
+  const tenant = sub.tenantId ?? 'default';
+  const record: WebhookDeliveryRecord = {
+    deliveryId: randomUUID(),
+    subscriptionId: sub.subscriptionId,
+    tenantId: sub.tenantId ?? null,
+    wireSubscriptionId: (projectV2RunIds({ webhookId: sub.subscriptionId }, tenant) as { webhookId: string }).webhookId,
+    url: sub.url,
+    secret: sub.secret,
+    // `OpenWOP-Event-Type` is the host-event type (§E).
+    eventType: envelope.type,
+    payload: JSON.stringify({ hostEvent: envelope }),
+    status: 'pending',
+    attempts: 0,
+    maxAttempts: WEBHOOK_MAX_ATTEMPTS,
+    nextAttemptAt: now,
+    claimedBy: null,
+    claimExpiresAt: null,
+    lastError: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+  await storage.enqueueWebhookDelivery(record, { requireSubscription: true });
+}
+
+/**
+ * RFC 0236 §E — `registerWebhook` MUST refuse an ephemeral host-event type with
+ * `400 validation_error`. Pure, with the lookup injected, because this host
+ * advertises no ephemeral type today and the refusal must still be provable.
+ * Unknown names are NOT refused here: like the v2 reference host, which admits
+ * any registered-org vendor name, this host cannot tell an unadvertised
+ * host-event name from a vendor run-event name (ADR 0825 §Implementation record).
+ */
+export function assertNoEphemeralHostEventTypes(
+  events: readonly unknown[],
+  lookup: (name: string) => { delivery: 'durable' | 'ephemeral' } | undefined = hostEventEntryForSubscriptionName,
+): void {
+  for (const e of events) {
+    if (typeof e !== 'string') continue;
+    if (lookup(e)?.delivery === 'ephemeral') {
+      throw new OpenwopError('validation_error', `${e} is an ephemeral host-event type and is never delivered through webhooks (RFC 0236 §C).`, 400, {
+        field: 'events',
+        type: e,
+      });
+    }
+  }
+}
+
 /**
  * Subscriptions that match one in-process event type under EVERY spelling a
  * subscriber may have registered (`eventTypeSpellings`): a major-2
@@ -502,7 +644,8 @@ async function matchingSubscribers(
   type: string,
   tenantId: string,
 ): Promise<Awaited<ReturnType<Storage['listWebhooks']>>> {
-  const spellings = eventTypeSpellings(type);
+  // ADR 0792 — a host event also matches a subscription registered with its v2 spelling.
+  const spellings = wireEventTypeSpellings(type);
   const all = await storage.listWebhooks({ tenantId });
   const matched = all.filter((sub) => sub.events.includes('*') || sub.events.some((e) => spellings.has(e)));
   // ADR 0735 — a fan-out that matches NOTHING is otherwise indistinguishable
@@ -530,6 +673,9 @@ async function matchingSubscribers(
  * Accepts any `{ type }`-bearing event body: run `EventRecord`s and ADR 0208
  * host-event envelopes serialize verbatim.
  */
+/** Subscriptions already logged as skipped by ADR 0812 decision 2 (bounded). */
+const skippedV1Subscriptions = new Set<string>();
+
 async function enqueueDelivery(
   storage: Storage,
   sub: { subscriptionId: string; url: string; secret: string; tenantId?: string; protocolMajor?: 1 | 2; workspaceId?: string },
@@ -556,6 +702,22 @@ async function enqueueDelivery(
   // by vigilance. Any future emitter that does not pass through here is a bug
   // in the emitter, not a missing branch here.
   const major = sub.protocolMajor ?? 1;
+  // ADR 0812 decision 2 — this host has RETIRED v1 and must not keep emitting the
+  // v1 contract to a subscription registered under it. Silently upgrading the
+  // body to v2 would break that subscriber without warning (a different
+  // envelope, different ids, different event names), so the delivery is NOT
+  // enqueued and the skip is logged once per subscription per process. The
+  // subscriber re-registers under major 2. MEASURED 2026-10-04 on
+  // app.openwop.dev: 30 days of deliveries went only to test targets, so there is
+  // no real subscriber to strand.
+  if (major === 1) {
+    if (!skippedV1Subscriptions.has(sub.subscriptionId)) {
+      if (skippedV1Subscriptions.size >= 4096) skippedV1Subscriptions.clear();
+      skippedV1Subscriptions.add(sub.subscriptionId);
+      log.warn('webhook_v1_subscription_not_delivered', { subscriptionId: sub.subscriptionId, eventType: event.type });
+    }
+    return;
+  }
   const tenant = sub.tenantId ?? 'default';
   // ── THE v2 DELIVERY ENVELOPE (webhooks.md §Delivery; webhook-delivery.schema.json, rc.30) ──
   //
@@ -583,7 +745,14 @@ async function enqueueDelivery(
   // A major-2 subscriber receives the codemap's v2 spelling of the event
   // TYPE as well as tenant-bound ids (`wireEventType`, tolerant on the
   // fan-out path); the in-process event stays in the host's v1 dialect.
-  const wireType = wireEventType(event.type, major === 2 ? 2 : 1);
+  // ADR 0792 — a HOST event (ADR 0208) has no codemap row; its v2 spelling is
+  // owned by host/hostEventNames.ts. Major 1 is untouched (byte-identical).
+  // `v2WireEventType` holds the one precedence (codemap first, then the host rule).
+  const wireType = major === 2 ? v2WireEventType(event.type) : wireEventType(event.type, 1);
+  if (major === 2 && wireType !== event.type && typeof event.runId === 'string' && event.runId.startsWith('hostext:')) {
+    // The synthetic run marker embeds the type too; project it with the type.
+    event = { ...event, runId: `hostext:${wireType}` };
+  }
   let body: unknown = event;
   if (major === 2) {
     // ADR 0722 — the PAYLOAD is projected too, with the same composed function

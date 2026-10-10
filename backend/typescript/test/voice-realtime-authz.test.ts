@@ -15,7 +15,7 @@ import { voiceFeature } from '../src/features/voice/feature.js';
 let BASE: string;
 let server: http.Server;
 let n = 0;
-const RT = '/v1/host/openwop-app/voice/realtime';
+const RT = '/host/openwop-app/voice/realtime';
 const ADMIN = { authorization: 'Bearer dev-token', 'content-type': 'application/json' };
 
 beforeAll(async () => {
@@ -48,7 +48,7 @@ async function normalClient(): Promise<(method: string, path: string, body?: unk
     }
     return res;
   };
-  const login = await call('POST', '/v1/host/openwop-app/test/login', { email: `rtv-${n++}@x.test` });
+  const login = await call('POST', '/host/openwop-app/test/login', { email: `rtv-${n++}@x.test` });
   expect(login.status).toBe(201);
   return call;
 }

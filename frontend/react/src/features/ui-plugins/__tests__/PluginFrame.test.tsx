@@ -2,12 +2,15 @@
  * PluginFrame loader boundary (ADR 0300, RFC 0117/0119). Asserts the load-bearing
  * client-side guarantees without a real iframe:
  *  - the sandbox tokens carry allow-scripts but NOT allow-same-origin (opaque origin),
- *  - the deny-egress CSP is injected as the document's first head child,
+ *  - the plugin is mounted ONLY by `src` from the host's frame document (ADR 0840),
+ *    never an `srcdoc`: the policy it runs under is the header the suite reads,
  *  - the plugin-scoped allowlist forwards a DECLARED method but rejects an undeclared
  *    one with method_not_allowed BEFORE the host seam is ever contacted.
  */
-import { describe, it, expect, vi } from 'vitest';
-import { PLUGIN_SANDBOX, PLUGIN_CSP, withPluginCsp, makePluginMessageHandler } from '../PluginFrame.js';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { render, cleanup, waitFor } from '@testing-library/react';
+import { PluginFrame, PLUGIN_SANDBOX, makePluginMessageHandler } from '../PluginFrame.js';
+import { frameUrl } from '../pluginClient.js';
 import type { ServedPlugin } from '../pluginClient.js';
 
 const VIEWER: ServedPlugin = {
@@ -17,6 +20,8 @@ const VIEWER: ServedPlugin = {
   surface: 'artifact-viewer',
   hostApi: ['artifact.read'],
   entryPath: '/host/openwop-app/ui-plugin/packs/community.openwop.artifact-viewer/plugins/artifact-viewer/entry',
+  framePath: '/host/ui-plugins/community.openwop.artifact-viewer/artifact-viewer/frame',
+  rpcPath: '/host/ui-plugins/community.openwop.artifact-viewer/artifact-viewer/rpc',
 };
 
 const req = (id: number, method: string, params?: unknown) =>
@@ -28,22 +33,16 @@ describe('PluginFrame isolation primitives', () => {
     expect(PLUGIN_SANDBOX).not.toContain('allow-same-origin');
   });
 
-  it('CSP denies egress (default-src none, no connect-src)', () => {
-    expect(PLUGIN_CSP).toContain("default-src 'none'");
-    expect(PLUGIN_CSP).not.toContain('connect-src');
-  });
+  afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
-  it('withPluginCsp injects the CSP as the first head child', () => {
-    const out = withPluginCsp('<!doctype html><html><head><title>x</title></head><body>hi</body></html>');
-    expect(out).toContain('http-equiv="Content-Security-Policy"');
-    // the meta precedes the pre-existing <title> (must govern before any resource load)
-    expect(out.indexOf('Content-Security-Policy')).toBeLessThan(out.indexOf('<title>'));
-  });
-
-  it('wraps a head-less document so the CSP still applies', () => {
-    const out = withPluginCsp('<body>hi</body>');
-    expect(out).toContain('http-equiv="Content-Security-Policy"');
-    expect(out).toContain('<head>');
+  it('mounts the host frame document by src, sandboxed, and never by srcdoc (ADR 0840, RFC 0238 §B.5)', async () => {
+    vi.stubGlobal('fetch', () => Promise.resolve(new Response('<p>ok</p>', { status: 200 })));
+    const { container } = render(<PluginFrame plugin={VIEWER} artifactId="a1" title="t" loadingLabel="loading" errorLabel="failed" />);
+    await waitFor(() => { expect(container.querySelector('iframe')).not.toBeNull(); });
+    const frame = container.querySelector('iframe')!;
+    expect(frame.getAttribute('src')).toBe(frameUrl(VIEWER));
+    expect(frame.getAttribute('sandbox')).toBe(PLUGIN_SANDBOX);
+    expect(frame.hasAttribute('srcdoc'), 'an srcdoc mount would run under a policy no HTTP observer sees').toBe(false);
   });
 });
 
@@ -56,6 +55,8 @@ describe('PluginFrame host.announce (RFC 0130)', () => {
     canvasTypes: ['canvas.checklist'],
     hostApi: ['artifact.read', 'host.announce'],
     entryPath: '/host/openwop-app/ui-plugin/packs/community.openwop.checklist-preview/plugins/checklist-preview/entry',
+    framePath: '/host/ui-plugins/community.openwop.checklist-preview/checklist-preview/frame',
+    rpcPath: '/host/ui-plugins/community.openwop.checklist-preview/checklist-preview/rpc',
   };
 
   it('handles host.announce FRAME-LOCALLY (never contacts the host seam), length-capped', async () => {

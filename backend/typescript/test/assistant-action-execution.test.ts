@@ -13,7 +13,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { __clearToggleStore } from '../src/host/featureToggles/service.js';
 import { __resetAssistantStore, getPendingAction } from '../src/features/assistant/assistantService.js';
-import { enqueueActionWithApproval, decideActionViaApproval } from '../src/features/assistant/actionApproval.js';
+import { enqueueActionWithApproval, decideActionViaApproval, contentHashOf } from '../src/features/assistant/actionApproval.js';
 import { getRegisteredWorkflow } from '../src/host/workflowsRegistry.js';
 import { getChainBackedWorkflow } from '../src/host/chainBackedWorkflows.js';
 import { __hostExtStorage } from '../src/host/hostExtPersistence.js';
@@ -133,7 +133,7 @@ describe('execute-on-approve', () => {
       payload: {},
       draft: 'You have not spoken with Alex in 3 weeks.',
     });
-    const decided = await decideActionViaApproval(TENANT, action.approvalId!, 'approved', { decidedByUserId: 'u-approver' });
+    const decided = await decideActionViaApproval(TENANT, action.approvalId!, 'approved', { expectedContentHash: contentHashOf(action), decidedByUserId: 'u-approver' });
     expect(decided?.changed).toBe(true);
     expect(await waitForStatus(action.actionId, ['sent', 'failed'])).toBe('sent');
     const row = await getPendingAction(TENANT, action.actionId);
@@ -146,7 +146,7 @@ describe('execute-on-approve', () => {
       payload: { to: ['dana@example.com'] },
       draft: 'Hi Dana — the Q3 numbers.',
     });
-    const decided = await decideActionViaApproval(TENANT, action.approvalId!, 'approved', { decidedByUserId: 'u-approver' });
+    const decided = await decideActionViaApproval(TENANT, action.approvalId!, 'approved', { expectedContentHash: contentHashOf(action), decidedByUserId: 'u-approver' });
     expect(decided?.changed).toBe(true);
 
     const row = await getPendingAction(TENANT, action.actionId);

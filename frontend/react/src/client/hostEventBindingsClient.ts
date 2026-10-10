@@ -34,3 +34,19 @@ export async function setHostEventBindingEnabled(bindingId: string, enabled: boo
 export async function deleteHostEventBinding(bindingId: string): Promise<void> {
   await requestJson<undefined>(`${BASE}/${encodeURIComponent(bindingId)}`, { method: 'DELETE' });
 }
+
+/** One row of the host-event catalog: the in-process name, its two-segment v2 type, and its delivery class. */
+export interface HostEventCatalogEntry {
+  emitted: string;
+  type: string;
+  delivery: 'durable' | 'ephemeral';
+}
+
+/**
+ * ADR 0825 — every host-event type this host emits, read from the backend's one
+ * catalog (`host/hostEventTypes.ts`, pinned against the emit sites). Replaces the
+ * hand-kept SPA list, which drifted.
+ */
+export async function getHostEventCatalog(): Promise<HostEventCatalogEntry[]> {
+  return (await requestJson<{ types: HostEventCatalogEntry[] }>('/host/openwop-app/host-events/catalog')).types;
+}

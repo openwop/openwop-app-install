@@ -53,7 +53,7 @@ import {
 const log = createLogger('routes.account');
 
 export function registerAccountRoutes(app: Express, deps: { storage: Storage }): void {
-  app.delete('/v1/host/openwop-app/account', async (req, res, next) => {
+  app.delete('/host/openwop-app/account', async (req, res, next) => {
     try {
       // ADR 0015: "delete my account" wipes the caller's PERSONAL tenant — NOT
       // `req.tenantId`, which is the ACTIVE workspace and may be a shared `ws:`
@@ -204,7 +204,7 @@ export function registerAccountRoutes(app: Express, deps: { storage: Storage }):
       let membershipsRemoved = 0;
       for (const m of memberships) {
         try {
-          if (await deleteMember(m.memberId)) membershipsRemoved += 1;
+          if (await deleteMember(m.memberId, subject ? { actor: subject } : {})) membershipsRemoved += 1;
         } catch (e) {
           if (e instanceof OpenwopError && e.code === 'conflict') {
             log.warn('account-delete: kept a membership that became sole-owned by a concurrent change', {

@@ -116,6 +116,10 @@ export const messages = {
   discardBody: 'Esta pestaña tiene cambios sin guardar. Si sale ahora se descartarán y no habrá forma de recuperarlos.',
   discardConfirm: 'Descartar cambios',
   autoRevertedNotice: 'Guardado, pero editar {{fields}} en una estrategia activa la devuelve a Borrador, así que debe aprobarse de nuevo antes de contar como activa.',
+  staleWrite: "Otra persona cambió esta estrategia mientras la editabas, así que tu cambio no se guardó. Tus ediciones siguen en pantalla; recarga para ver la versión más reciente (se descartarán).",
+  reloadLatest: "Recargar la última versión",
+  toastActivationSubmitted: "Enviada para aprobación. Se activará cuando otra persona aprobadora la apruebe.",
+  fieldPeriod: "Período",
   activationWithdrawnNotice: 'Guardado, pero esta edición ha cambiado contenido que estaba pendiente de aprobación de activación, así que esa revisión se ha retirado. Vuelva a enviar la activación cuando el plan sea definitivo.',
   autoRevertedAndWithdrawnNotice: 'Guardado, pero editar {{fields}} en una estrategia activa la devuelve a Borrador, así que debe aprobarse de nuevo antes de contar como activa. Esta edición también ha cambiado contenido que estaba pendiente de aprobación de activación, así que esa revisión se ha retirado.',
 
@@ -142,6 +146,18 @@ export const messages = {
 
   // Alignment
   alignmentLede: 'Vincule los proyectos y prioridades que hacen realidad esta estrategia. Se muestran los vínculos que puede leer; los que no puede leer quedan ocultos.',
+  // ADR 0852 D4 — the linked projects' team ledgers
+  ledgerRollupTitle: 'Registros del equipo',
+  ledgerRollupLede: 'Para qué sirve ahora cada proyecto vinculado, según su registro del equipo. Los cambios se hacen en el proyecto.',
+  ledgerRollupLoading: 'Cargando los registros del equipo…',
+  ledgerRollupFailed: 'No se pudieron cargar los registros del equipo.',
+  ledgerRollupNone: 'Ninguno de los proyectos vinculados es visible para ti.',
+  ledgerRollupVersion: 'versión {{version}}',
+  ledgerRollupOpenQuestions_one: '{{count}} pregunta abierta',
+  ledgerRollupOpenQuestions_other: '{{count}} preguntas abiertas',
+  ledgerRollupPending_one: '{{count}} cambio pendiente',
+  ledgerRollupPending_other: '{{count}} cambios pendientes',
+  ledgerRollupNoLedger: 'aún sin registro del equipo',
   noLinks: 'Aún no hay vínculos.',
   'linkKind_project': 'Proyecto',
   'linkKind_priority-list': 'Lista de prioridades',

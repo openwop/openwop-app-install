@@ -9,7 +9,7 @@
 
 import { authedHeaders, config, fetchOpts } from '../../client/config.js';
 
-const BASE = '/host/openwop-app/reviews';
+export const BASE = '/host/openwop-app/reviews';
 
 export type ReviewSource = 'interrupt' | 'approval';
 export type ReviewStatus = 'pending' | 'approved' | 'rejected' | 'expired' | 'cancelled' | 'resolved';
@@ -72,6 +72,9 @@ export interface ReviewRequest {
   dueAt?: string;
   risk?: { level: 'low' | 'medium' | 'high' | 'critical'; reasons: string[] };
   /** Multi-approver / quorum progress (ADR 0070), present only for a quorum gate. */
+  /** ADR 0778 D8 — may THIS caller decide it? `false` = the server would
+   *  refuse, so the card offers no decision. Absent = not stated (decide as before). */
+  canDecide?: boolean;
   policy?: { requiredApprovals: number; approvals: number; rejections: number; rejectionPolicy?: string };
   summary?: string;
   /** ADR 0478 §3 — the proposing AGENT'S stated reasoning (attributed claim). */
@@ -87,6 +90,20 @@ export interface ReviewRequest {
   planProposal?: {
     enrollmentId: string;
     proposalId: string;
+  };
+  /** ADR 0862 — an assistant action's card fields + the hash the approve MUST echo as
+   *  `expectedContentHash`. Lockstep with the backend `host/reviewProjection.ts` block. */
+  assistantAction?: { actionId: string; kind: string; contentHash: string; payload: Record<string, unknown> };
+  /** ADR 0778 D10 correction — what an open interrupt's answer form needs, so a
+   *  typed (`requiresValue`) review is answered on the card. A closed allowlist
+   *  per kind (lockstep with backend `interruptAnswerForm`); absent for a kind
+   *  the card cannot answer inline. */
+  answerForm?: {
+    question?: string;
+    profile?: string;
+    connection?: { ref: string; providerId?: string; category?: string; label?: string };
+    current?: unknown;
+    reason?: string;
   };
   composedWorkflow?: {
     definitionHash: string;
@@ -123,9 +140,16 @@ export class ReviewRequestError extends Error {
     super(message);
     this.name = 'ReviewRequestError';
   }
+
+  /** ADR 0778 (grade-ux `APUX-5`) — the shared classifier (`classifyHttpError`)
+   *  reads `status`, not `httpStatus`, so a 403 from this client classified as
+   *  `unknown` and no surface could say "you don't have permission". */
+  get status(): number {
+    return this.httpStatus;
+  }
 }
 
-async function http<T>(path: string, init: RequestInit = {}): Promise<T> {
+export async function http<T>(path: string, init: RequestInit = {}): Promise<T> {
   const res = await fetch(`${config.baseUrl}${path}`, {
     ...fetchOpts(init),
     headers: { ...(init.headers ?? {}), ...authedHeaders({ 'content-type': 'application/json' }) },
@@ -191,7 +215,7 @@ export async function getReview(reviewId: string): Promise<ReviewRequest> {
 export async function decideReview(
   reviewId: string,
   action: string,
-  body: { value?: unknown; note?: string; expectedDefinitionHash?: string } = {},
+  body: { value?: unknown; note?: string; expectedDefinitionHash?: string; expectedContentHash?: string } = {},
 ): Promise<{ reviewId: string; status: string; runId?: string }> {
   return http(`${BASE}/${encodeURIComponent(reviewId)}/actions/${encodeURIComponent(action)}`, {
     method: 'POST',

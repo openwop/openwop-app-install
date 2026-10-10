@@ -57,6 +57,12 @@ recreate" rule has a concrete drop-in. The layering (core → override):
   picks its agent, and supplies its context-aware empty state
   (`builder/WorkflowAuthorWelcome`). It is a thin shell, not a chat.
 
+  > **Correction (ADR 0773 G-10e):** `builder/CreateWithAiPanel` and its drawer
+  > are deleted by the Pair Canvas graduation. The builder's consumer is now
+  > `builder/pair/PairPanel` (the Pair tab), which follows the same rules: its
+  > own chrome, the Workflow Architect `agentId`, and a lazy import of
+  > `EmbeddedChatPanel`.
+
 **Import direction:** `chat/` already imports `builder/`, so a feature that
 `chat/` does *not* import back may **static-import** `EmbeddedChatPanel`; the
 **builder** is the exception and must **lazy-import** it (a static builder→chat

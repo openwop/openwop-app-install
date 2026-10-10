@@ -62,18 +62,18 @@ const enable = async (id: string, status: 'on' | 'off'): Promise<void> => { cons
 async function ownerMemberAgent(role = 'editor'): Promise<{ owner: Client; member: Client; memberId: string; rosterId: string; tenantId: string }> {
   const tenantId = `org:tw-${Date.now()}-${n++}`;
   const owner = client();
-  await owner.post('/v1/host/openwop-app/test/login', { email: uniqEmail('tw-owner'), tenantId });
+  await owner.post('/host/openwop-app/test/login', { email: uniqEmail('tw-owner'), tenantId });
   const member = client();
-  const m = await member.post('/v1/host/openwop-app/test/login', { email: uniqEmail('tw-member'), tenantId });
-  const r = await owner.post('/v1/host/openwop-app/roster', { persona: 'Aide', agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
+  const m = await member.post('/host/openwop-app/test/login', { email: uniqEmail('tw-member'), tenantId });
+  const r = await owner.post('/host/openwop-app/roster', { persona: 'Aide', agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
-  await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(org.body.orgId)}/members`, { displayName: 'M', subject: m.body.user.userId, roles: [role] });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
+  await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(org.body.orgId)}/members`, { displayName: 'M', subject: m.body.user.userId, roles: [role] });
   return { owner, member, memberId: m.body.user.userId, rosterId: r.body.rosterId, tenantId };
 }
 
-const twin = (id: string): string => `/v1/host/openwop-app/agents/${encodeURIComponent(id)}/twin`;
-const GRANTS = '/v1/host/openwop-app/profiles/me/twin-grants';
+const twin = (id: string): string => `/host/openwop-app/agents/${encodeURIComponent(id)}/twin`;
+const GRANTS = '/host/openwop-app/profiles/me/twin-grants';
 
 describe('twin — toggle gating', () => {
   it('404s when twin-recall is off', async () => {
@@ -175,7 +175,7 @@ describe('twin — link + grant authority', () => {
   });
 });
 
-const MEM = '/v1/host/openwop-app/profiles/me/memory';
+const MEM = '/host/openwop-app/profiles/me/memory';
 
 describe('twin — borrowed recall gate (Phase 2)', () => {
   it('the live gate yields the owner corpus only under toggle + link + active grant', async () => {
@@ -223,7 +223,7 @@ describe('twin — borrowed recall gate (Phase 2)', () => {
     expect(await resolveBorrowedRecall(tenantId, rosterId, { callerUserId: memberId })).toBeDefined();
 
     // Another human in the SAME tenant, addressing the SAME granted agent: denied.
-    const meRes = await owner.get('/v1/host/openwop-app/users/me');
+    const meRes = await owner.get('/host/openwop-app/users/me');
     const otherId = meRes.body?.user?.userId ?? meRes.body?.userId;
     expect(otherId, 'need a second real user id for the negative case').toBeTruthy();
     expect(otherId).not.toBe(memberId);
@@ -355,7 +355,7 @@ describe('twin — borrowed recall gate (Phase 2)', () => {
       const { owner, member, memberId, rosterId, tenantId } = await ownerMemberAgent();
       expect((await owner.put(twin(rosterId), { userId: memberId })).status).toBe(200);
       expect((await member.post(GRANTS, { agentId: rosterId, scopes: ['memory'] })).status).toBe(201);
-      const meRes = await owner.get('/v1/host/openwop-app/users/me');
+      const meRes = await owner.get('/host/openwop-app/users/me');
       const otherId = meRes.body?.user?.userId ?? meRes.body?.userId;
       const deniedRows = async () => (await recallRows(memberId)).filter((r) => r.outcome === 'denied');
 
@@ -404,7 +404,7 @@ describe('twin — borrowed recall gate (Phase 2)', () => {
       const { owner, member, memberId, rosterId, tenantId } = await ownerMemberAgent();
       expect((await owner.put(twin(rosterId), { userId: memberId })).status).toBe(200);
       expect((await member.post(GRANTS, { agentId: rosterId, scopes: ['memory'] })).status).toBe(201);
-      const meRes = await owner.get('/v1/host/openwop-app/users/me');
+      const meRes = await owner.get('/host/openwop-app/users/me');
       const otherId = meRes.body?.user?.userId ?? meRes.body?.userId;
       expect(await resolveBorrowedRecall(tenantId, rosterId, { callerUserId: otherId, runId: 'run-audit-deny' })).toBeUndefined();
       const denied = (await recallRows(memberId)).filter((r) => r.outcome === 'denied');
@@ -425,7 +425,7 @@ describe('twin — borrowed recall gate (Phase 2)', () => {
   // TWIN-UX-4 — the recall audit READER: the grantor's own rows, subject- and
   // tenant-scoped, fail-closed on unstamped rows.
   describe('GET /profiles/me/twin-recalls (TWIN-UX-4 reader)', () => {
-    const RECALLS = '/v1/host/openwop-app/profiles/me/twin-recalls';
+    const RECALLS = '/host/openwop-app/profiles/me/twin-recalls';
 
     it('returns the caller their OWN rows only — including denied probes — and withholds unstamped rows', async () => {
       const { owner, member, memberId, rosterId, tenantId } = await ownerMemberAgent();
@@ -436,7 +436,7 @@ describe('twin — borrowed recall gate (Phase 2)', () => {
       // One real recall + one denied probe.
       const retrieve = await resolveBorrowedRecall(tenantId, rosterId, { callerUserId: memberId, runId: 'run-reader-1' });
       expect((await retrieve!.retrieve('vendor contract finance')).length).toBeGreaterThan(0);
-      const meRes = await owner.get('/v1/host/openwop-app/users/me');
+      const meRes = await owner.get('/host/openwop-app/users/me');
       const otherId = meRes.body?.user?.userId ?? meRes.body?.userId;
       expect(await resolveBorrowedRecall(tenantId, rosterId, { callerUserId: otherId })).toBeUndefined();
 

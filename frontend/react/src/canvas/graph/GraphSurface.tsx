@@ -62,6 +62,8 @@ export interface GraphSurfaceProps {
   onSelectNode: (id: string | null) => void;
   onSelectEdge: (id: string | null) => void;
   onMoveNode: (id: string, x: number, y: number, phase: Phase) => void;
+  /** Presentation mode: selection/viewport remain; document gestures do not. */
+  readOnly?: boolean;
   /** Absent (ADR 0360) = edges are DERIVED: no connect handles, no Connect
    *  buttons, no drag-to-connect, no drop-create arming. */
   onConnect?: (from: string, to: string) => void;
@@ -119,7 +121,7 @@ export function GraphSurface(props: GraphSurfaceProps): JSX.Element {
   const nodeSizeH = activeDevice?.height ?? nodeSize.h;
   const [connectFrom, setConnectFrom] = useState<string | null>(null);
   // ADR 0360 grade pass — derived-edge mode: no connect chrome at all.
-  const connectable = typeof onConnect === 'function';
+  const connectable = !props.readOnly && typeof onConnect === 'function';
   const drag = useRef<{ id: string; startX: number; startY: number; ox: number; oy: number; started: boolean } | null>(null);
   const connectDrag = useRef<{ from: string; sourceEdge: Edge; start: { x: number; y: number } } | null>(null);
   const [preview, setPreview] = useState<{ from: string; sourceEdge: Edge; to: { x: number; y: number } } | null>(null);
@@ -202,6 +204,16 @@ export function GraphSurface(props: GraphSurfaceProps): JSX.Element {
     didFit.current = true;
   }, [nodes.length, fit]);
 
+  // Read-only presentations follow viewport size changes (e.g. phone rotation).
+  // Event-driven node paints must not reset a user's pan/zoom.
+  const fittedSize = useRef({ w: 0, h: 0 });
+  useEffect(() => {
+    if (!props.readOnly || !surfaceSize.w || !surfaceSize.h) return;
+    if (fittedSize.current.w === surfaceSize.w && fittedSize.current.h === surfaceSize.h) return;
+    fittedSize.current = surfaceSize;
+    fit();
+  }, [props.readOnly, surfaceSize, fit]);
+
   // ADR 0337 P2b (Guardrail 2) — switching the device frame reflows every
   // default-sized node to a new aspect, so refit the board (a tall→wide switch
   // would otherwise leave nodes clipped). Only on an actual CHANGE, never the
@@ -220,6 +232,7 @@ export function GraphSurface(props: GraphSurfaceProps): JSX.Element {
     const b = boxes.get(id);
     if (!b) return;
     onSelectNode(id);
+    if (props.readOnly) { e.stopPropagation(); return; }
     const c = clientToCanvas(e.clientX, e.clientY, rect(), pan, zoom);
     // Grade F1: arm only — the history 'start' is emitted lazily on the FIRST
     // real move, so a plain click never pushes an undo entry, marks the doc
@@ -227,7 +240,7 @@ export function GraphSurface(props: GraphSurfaceProps): JSX.Element {
     drag.current = { id, startX: c.x, startY: c.y, ox: b.x, oy: b.y, started: false };
     (e.target as Element).setPointerCapture?.(e.pointerId);
     e.stopPropagation();
-  }, [boxes, onSelectNode, pan, zoom, rect]);
+  }, [boxes, onSelectNode, pan, zoom, rect, props.readOnly]);
 
   /** The node whose box contains a canvas point (topmost = last in order). */
   const nodeAt = useCallback((p: { x: number; y: number }): string | null => {
@@ -360,28 +373,29 @@ export function GraphSurface(props: GraphSurfaceProps): JSX.Element {
       case 'ArrowUp': dy = -step; break;
       case 'ArrowDown': dy = step; break;
       case 'Enter': e.preventDefault(); onActivateNode(id); return;
-      case 'c': case 'C': e.preventDefault(); onConnectButton(id); return;
+      case 'c': case 'C': if (connectable) { e.preventDefault(); onConnectButton(id); } return;
       case 'e': case 'E': e.preventDefault(); cycleEdges(id); return;
       case 'Escape': if (connectFrom) { e.preventDefault(); setConnectFrom(null); } return;
       default: return;
     }
     e.preventDefault();
+    if (props.readOnly) return;
     const phase = nudgeActive.current ? 'move' : 'start';
     nudgeActive.current = true;
     if (nudgeTimer.current) clearTimeout(nudgeTimer.current);
     nudgeTimer.current = setTimeout(() => { nudgeActive.current = false; }, 800);
     onMoveNode(id, snap(b.x + dx, gridSnap), snap(b.y + dy, gridSnap), phase);
-  }, [boxes, onActivateNode, onConnectButton, onMoveNode, gridSnap, connectFrom, cycleEdges]);
+  }, [boxes, onActivateNode, onConnectButton, onMoveNode, gridSnap, connectFrom, cycleEdges, props.readOnly, connectable]);
 
   // Delete a selected edge / zoom from the keyboard (grade UX-10).
   const onSurfaceKey = useCallback((e: ReactKeyboardEvent) => {
-    if ((e.key === 'Delete' || e.key === 'Backspace') && selectedEdgeId && onDeleteEdge) {
+    if (!props.readOnly && (e.key === 'Delete' || e.key === 'Backspace') && selectedEdgeId && onDeleteEdge) {
       e.preventDefault();
       onDeleteEdge(selectedEdgeId);
       onAnnounce(labels.deletedEdge, 'polite');
     } else if (e.key === '+' || e.key === '=') { e.preventDefault(); zoomIn(); }
     else if (e.key === '-' || e.key === '_') { e.preventDefault(); zoomOut(); }
-  }, [selectedEdgeId, onDeleteEdge, onAnnounce, labels, zoomIn, zoomOut]);
+  }, [selectedEdgeId, onDeleteEdge, onAnnounce, labels, zoomIn, zoomOut, props.readOnly]);
 
   // Grade code-F6: a pointer edge-click moves focus into the surface so the
   // Delete key works immediately after selecting an edge.
@@ -494,7 +508,7 @@ export function GraphSurface(props: GraphSurfaceProps): JSX.Element {
                     <LinkIcon size={13} aria-hidden />
                   </Button>
                 ) : null}
-                {selected && onAddConnected ? (
+                {selected && onAddConnected && !props.readOnly ? (
                   <Button
                     variant="quiet" size="sm" className="cv-graph__connect"
                     aria-label={labels.addConnected.replace('{label}', n.label)}
@@ -515,7 +529,7 @@ export function GraphSurface(props: GraphSurfaceProps): JSX.Element {
                   users use the Connect button above (the a11y-canonical path).
                   Derived-edge graphs (no onConnect) hide them UNLESS drag-to-
                   empty create (onAddConnected) still gives the drag meaning. */}
-              {(connectable || onAddConnected) ? EDGES.map((side) => (
+              {(!props.readOnly && (connectable || onAddConnected)) ? EDGES.map((side) => (
                 // A pointer-only drag-connect handle; the keyboard path is the
                 // aria-labeled Connect button above (WCAG 2.5.7 alternative), so
                 // the handle is aria-hidden and carries only a pointer listener.

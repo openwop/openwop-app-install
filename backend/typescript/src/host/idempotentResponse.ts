@@ -37,12 +37,13 @@ import { resolveRequestTimeoutMs } from '../middleware/requestTimeout.js';
  * here, which makes registration a compile-time obligation rather than a
  * convention someone can forget.
  */
-export type IdempotentEndpoint = 'POST:/v1/runs' | 'POST:/v1/host/openwop-app/agents';
+export type IdempotentEndpoint = 'POST:/v1/runs' | 'POST:/v1/host/openwop-app/agents' | 'POST:/host/events/test';  // ADR 0812 KEEP: a PERSISTED idempotency-key namespace (primary key + request digest), not a URL
 
 /** Every endpoint in the union, for tests and the lane tripwire. */
 export const IDEMPOTENT_ENDPOINTS: readonly IdempotentEndpoint[] = [
   'POST:/v1/runs',
-  'POST:/v1/host/openwop-app/agents',
+  'POST:/v1/host/openwop-app/agents',  // ADR 0812 KEEP: a PERSISTED idempotency-key namespace (primary key + request digest), not a URL
+  'POST:/host/events/test',  // RFC 0241 §B.5 (ADR 0825): `emitTestHostEvent`
 ];
 
 /**
@@ -54,7 +55,8 @@ export const IDEMPOTENT_ENDPOINTS: readonly IdempotentEndpoint[] = [
  */
 const REQUEST_VERSION: Record<IdempotentEndpoint, string> = {
   'POST:/v1/runs': 'v1',
-  'POST:/v1/host/openwop-app/agents': 'v1',
+  'POST:/v1/host/openwop-app/agents': 'v1',  // ADR 0812 KEEP: a PERSISTED idempotency-key namespace (primary key + request digest), not a URL
+  'POST:/host/events/test': 'v1',
 };
 
 /**

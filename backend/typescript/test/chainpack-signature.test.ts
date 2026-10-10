@@ -8,6 +8,7 @@
  *    in-tree vendored) load unsigned even under the flag (the R7 posture)
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { __setUnpinnedChainPackWaiversForTests } from '../src/host/unpinnedChainPackAllowlist.js';
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { generateKeyPairSync, sign as edSign } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -20,6 +21,7 @@ import {
 
 const EXAMPLE = join(process.cwd(), '..', '..', 'examples', 'workflow-chain-packs', 'approvals');
 
+const waivedSigtestPacks: string[] = [];
 let installRoot = '';
 let otherRoot = '';
 
@@ -30,9 +32,17 @@ function plantPack(root: string, suffix: string): string[] {
   const manifestPath = join(dir, 'pack.json');
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
     name: string;
-    chains: Array<{ chainId: string }>;
+    chains: Array<{ chainId: string; dag: { nodes: Array<{ typeId: string }> } }>;
   };
   manifest.name = `private.sigtest.${suffix}`;
+  // ADR 0766 D5 — this file exercises the V1 signing block (`publicKeyRef` /
+  // `signatureRef`). A v1 block can only ride a v1-shaped manifest: a node pin
+  // routes the manifest to the v2 schema, which refuses a v1 block, and the v1
+  // schema refuses a pin. So the copy is made v1-shaped (pins stripped) and, being
+  // unpinned, registers only when waived — which is exactly a legacy v1 pack.
+  for (const c of manifest.chains) for (const n of c.dag.nodes) n.typeId = n.typeId.replace(/@[0-9.]+$/, '');
+  waivedSigtestPacks.push(manifest.name);
+  __setUnpinnedChainPackWaiversForTests(waivedSigtestPacks);
   for (const c of manifest.chains) c.chainId = `sigtest-${suffix}.${c.chainId}`;
   writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
   return manifest.chains.map((c) => c.chainId);
@@ -67,6 +77,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  waivedSigtestPacks.length = 0;
+  __setUnpinnedChainPackWaiversForTests(null);
   // RESTORE, never delete: `test/setup/isolatePackDir.ts` assigns this ONCE PER
   // WORKER and only when unset, and process.env outlives a FILE inside a worker.
   // Deleting it dropped every LATER file in this worker to the shared

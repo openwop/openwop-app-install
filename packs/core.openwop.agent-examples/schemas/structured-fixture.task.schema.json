@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/core.openwop.agent-examples/1.1.0/structured-fixture.task.schema.json",
+  "$id": "https://packs.openwop.dev/core.openwop.agent-examples/1.1.2/structured-fixture.task.schema.json",
   "title": "StructuredFixtureTask",
   "description": "Task payload for the structured-fixture agent. Validated by the host at dispatch time per RFC 0003 §D + agent-manifest.schema.json `handoff.taskSchemaRef`.",
   "type": "object",

@@ -16,17 +16,18 @@ import { OpenwopError } from '../../types.js';
 import { PREAUTHORIZED_CALLER, type SubjectCaller } from '../../host/subjectAccess.js'; // KBC-1 — `PREAUTHORIZED_CALLER` only on the PUBLIC read lane of an already-minted link (see `kb_collection`)
 import { cleanOpaqueToken, optionalCleanString } from '../../host/boundedStrings.js';
 import { getOrg } from '../../host/accessControlService.js';
-import { getCanvasForTenant } from '../../host/canvasSurface.js';
+import { getCanvasForTenant, getCanvasForCaller } from '../../host/canvasSurface.js';
 import { getBrief as getCreativeBrief } from '../creative-briefs/creativeBriefsService.js';
 import { briefToSharedMarkdown as creativeBriefToSharedMarkdown } from '../creative-briefs/routes.js';
-import { resolveOne } from '../../host/featureToggles/service.js';
+import { resolveOne, resolveToggle } from '../../host/featureToggles/service.js';
+import type { ToggleSubject } from '../../host/featureToggles/types.js';
 import { getPage, resolveSharedRefs, type Section } from '../cms/cmsService.js';
 import { getQuote, projectQuotePublic, SHAREABLE_QUOTE_STATUSES } from '../commerce/quotes.js';
 import { getOrder } from '../commerce/commerceService.js';
 import { bookingShareValidate, bookingShareLoad } from '../crm/bookingService.js';
 import { signShareValidate, signShareLoad } from '../crm/signService.js';
 import { getCollection, listDocuments } from '../kb/kbService.js';
-import { publicDocumentView } from '../documents/documentsService.js';
+import { publicDocumentView, getDocument, canReadDocument } from '../documents/documentsService.js';
 import { hostExtStorage } from '../../host/hostExtPersistence.js';
 import { transcriptToMarkdown } from '../chat-export/transcriptRenderer.js';
 import { getConversationMeta } from '../../host/conversationStore.js';
@@ -163,8 +164,12 @@ const RESOLVERS: Record<ResourceType, ShareResolver> = {
     // OFF stops serving designs on existing links (the sharing toggle alone
     // guarded this surface before). SHARE-1 moved the check to the one gate.
     toggleId: 'app-builder',
-    async validate(tenantId, _orgId, resourceId) {
-      const c = await getCanvasForTenant(tenantId, resourceId);
+    // Canvas-access fix (ADR 0768 Phase 0): the MINTER must be able to read the
+    // canvas (THE shared predicate). The mint already passes `caller`; this
+    // resolver ignored it, so a non-member of a project could publish that
+    // project's canvas as a public link. Refusal = the same uniform 404.
+    async validate(tenantId, _orgId, resourceId, caller) {
+      const c = await getCanvasForCaller(tenantId, resourceId, caller ?? {});
       if (!c || c.canvasTypeId !== 'canvas.app-builder') throw notFound(resourceId);
     },
     async load(tenantId, _orgId, resourceId) {
@@ -333,8 +338,12 @@ const RESOLVERS: Record<ResourceType, ShareResolver> = {
     // SHARE-1 — was UNGATED: an approved SOW/RFP kept resolving on the public
     // internet after the tenant disabled `documents`.
     toggleId: 'documents',
-    async validate(tenantId, orgId, resourceId) {
+    async validate(tenantId, orgId, resourceId, caller) {
       if (!(await publicDocumentView(tenantId, orgId, resourceId))) throw notFound(resourceId);
+      // ADR 0838 A3 — publishing is a read of the text: the MINTER must pass the
+      // same document read gate as every other exit (uniform 404).
+      const doc = await getDocument(tenantId, orgId, resourceId);
+      if (!doc || !(await canReadDocument(tenantId, doc, caller?.subject))) throw notFound(resourceId);
     },
     async load(tenantId, orgId, resourceId) {
       return publicDocumentView(tenantId, orgId, resourceId);
@@ -425,8 +434,12 @@ const RESOLVERS: Record<ResourceType, ShareResolver> = {
   // document + tenant-isolation + toggle-fail-closed contract as app designs.
   slides_canvas: {
     toggleId: 'slides',
-    async validate(tenantId, _orgId, resourceId) {
-      const c = await getCanvasForTenant(tenantId, resourceId);
+    // Canvas-access fix (ADR 0768 Phase 0): the MINTER must be able to read the
+    // canvas (THE shared predicate). The mint already passes `caller`; this
+    // resolver ignored it, so a non-member of a project could publish that
+    // project's canvas as a public link. Refusal = the same uniform 404.
+    async validate(tenantId, _orgId, resourceId, caller) {
+      const c = await getCanvasForCaller(tenantId, resourceId, caller ?? {});
       if (!c || c.canvasTypeId !== 'canvas.slides') throw notFound(resourceId);
     },
     async load(tenantId, _orgId, resourceId) {
@@ -585,8 +598,47 @@ export function __resolverToggleIds(): Record<ResourceType, string | null> {
 async function owningFeatureEnabled(resourceType: ResourceType, tenantId: string): Promise<boolean> {
   const toggleId = RESOLVERS[resourceType].toggleId;
   if (toggleId === null) return true; // no owning toggle exists — recorded at the resolver
-  const toggled = await resolveOne(toggleId, { tenantId });
+  // ADR 0819 §1 opt-out — a PUBLIC lane (tenant from the resource): ADR 0419 never paywalls a shopper/visitor on the operator's plan.
+  // Every anonymous share-link entry (resolve, card, frame view, booking manage,
+  // e-sign) gates here first, so a paywalled read here 404'd those lanes before
+  // their own opt-outs ever ran (ADR 0819 review H1).
+  const toggled = await resolveToggle(toggleId, { tenantId });
   return Boolean(toggled?.enabled);
+}
+
+/**
+ * ADR 0820 G4 — the MINT gate, which is NOT the anonymous-view gate above.
+ *
+ * `createLink` used to call `owningFeatureEnabled` (the toggle-only, visitor-lane
+ * opt-out), so a member whose plan does not include slides / app-builder /
+ * documents / creative-briefs could still PUBLISH a public link to one: the
+ * mint is an authenticated act by the owner, not a visitor read, and ADR 0419's
+ * shopper exemption does not cover it. A member mint now resolves the owning
+ * feature through `resolveOne` (toggle + plan). Toggle off stays the uniform 404
+ * (SHARE-1); a plan refusal is the 403 the route lane's paywall gives.
+ *
+ * `visitor` is for the host's OWN mints on behalf of a visitor — a booking-manage
+ * link, an e-sign link, an order receipt — created inside a lane that already
+ * served that visitor (ADR 0176 money truth / shopper exemption). Those keep the
+ * toggle-only gate, so a lapsed plan never strands a buyer's receipt.
+ */
+export type ShareMintAccess =
+  | { lane: 'member'; subject?: ToggleSubject }
+  | { lane: 'visitor'; why: string };
+
+async function assertMintAccess(resourceType: ResourceType, tenantId: string, actor: string, resourceId: string, access: ShareMintAccess): Promise<void> {
+  if (access.lane === 'visitor') {
+    if (!(await owningFeatureEnabled(resourceType, tenantId))) throw notFound(resourceId);
+    return;
+  }
+  const toggleId = RESOLVERS[resourceType].toggleId;
+  if (toggleId === null) return; // no owning toggle exists — recorded at the resolver
+  const assignment = await resolveOne(toggleId, access.subject ?? { tenantId, userId: actor });
+  if (assignment?.enabled) return;
+  if (assignment?.blockedBy === 'plan') {
+    throw new OpenwopError('forbidden', 'Your plan does not include this feature, so it cannot be shared.', 403, { feature: toggleId, reason: 'plan' });
+  }
+  throw notFound(resourceId);
 }
 
 // ADR 0448 P2 — tokens are HASHED AT REST (the raw token appears exactly once,
@@ -694,6 +746,7 @@ export async function createLink(
   orgId: string,
   actor: string,
   input: { resourceType?: unknown; resourceId?: unknown; label?: unknown; expiresInDays?: unknown; maxViews?: unknown },
+  access: ShareMintAccess = { lane: 'member' },
 ): Promise<ShareLink & { token: string }> {
   const resourceType = input.resourceType;
   if (typeof resourceType !== 'string' || !(RESOURCE_TYPES as readonly string[]).includes(resourceType)) {
@@ -721,11 +774,11 @@ export async function createLink(
     maxViews = n;
   }
 
-  // SHARE-1 — the same owning-feature gate at MINT (this replaces the two
+  // SHARE-1 — the owning-feature gate at MINT (this replaces the two
   // per-resolver `validate` checks booking/sign used to carry). A tenant with
   // the owning feature OFF cannot mint a public link to it; uniform 404, same
-  // shape as a missing resource.
-  if (!(await owningFeatureEnabled(resourceType as ResourceType, tenantId))) throw notFound(resourceId);
+  // shape as a missing resource. ADR 0820 G4: a member mint also needs the plan.
+  await assertMintAccess(resourceType as ResourceType, tenantId, actor, resourceId, access);
 
   // The resource MUST exist in THIS (tenant, org) — cross-org/tenant id 404s — AND be
   // readable by the MINTER (ADR 0643 R3 Blocker 2; only subject-bindable resolvers use it).
@@ -1232,6 +1285,17 @@ function cmsSectionsToMarkdown(sections: Section[]): string {
             const by = [it.name, it.role].filter(Boolean).join(', ');
             return [`> ${it.quote ?? ''}`, ...(by ? [`> — *${by}*`] : []), ''];
           }),
+        ].join('\n'));
+        break;
+      }
+      case 'video': {
+        // ADR 0843 — the film's title, description and a link to it.
+        const src = /^https:\/\//i.test(str('src')) ? str('src') : '';
+        parts.push([
+          ...head(),
+          ...(str('title') ? [`**${str('title')}**${str('length') ? ` (${str('length')})` : ''}`, ''] : []),
+          ...(str('description') ? [str('description'), ''] : []),
+          ...(src ? [`[Watch the video](${src})`, ''] : []),
         ].join('\n'));
         break;
       }

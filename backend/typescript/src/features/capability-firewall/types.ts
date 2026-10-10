@@ -67,8 +67,18 @@ export interface CapabilityRule {
  *  - `enforce`: apply default-deny (unmatched ⇒ `defaultDenyVerdict`). */
 export type FirewallMode = 'default-allow' | 'shadow' | 'enforce';
 
+/** ADR 0834 D2 — WHO imposed a `require-approval`. `baseline` is a user-level ask —
+ *  the safe-mode set (which the user's `bypass` may skip) or, on the ledger, the
+ *  conversation owner's own ADR 0132 scope (which bypass never reaches). `policy` is an
+ *  authority above the user — a tenant rule, the `enforce` default verdict, the platform
+ *  floor — which only an approval raised for that ask satisfies. `policy` outranks
+ *  `baseline`. */
+export type ApprovalOrigin = 'baseline' | 'policy';
+
 export interface CapabilityVerdict {
   decision: 'allow' | 'deny' | 'require-approval';
   ruleId?: string;
   reason?: string;
+  /** Present on every `require-approval` the hook returns (ADR 0834 D2). */
+  origin?: ApprovalOrigin;
 }

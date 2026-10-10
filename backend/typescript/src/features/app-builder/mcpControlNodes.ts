@@ -20,14 +20,36 @@
 import { getNodeRegistry } from '../../executor/nodeRegistry.js';
 import type { NodeContext, NodeOutcome } from '../../executor/types.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
-import { createCanvasForTenant, getCanvasForTenant, listCanvasesForTenant } from '../../host/canvasSurface.js';
+import { createCanvasForTenant, getCanvasForCaller, listCanvasesForCaller } from '../../host/canvasSurface.js';
 import type { Storage } from '../../storage/storage.js';
 import type { HostAdapterSuite } from '../../host/index.js';
 import { resolveAndResume } from '../../routes/interrupts.js';
+import { OpenwopError } from '../../types.js';
 import { APP_BUILDER_CANVAS_TYPE, projectComponentCatalog, catalogTypeListForPrompt } from './componentCatalog.js';
 import { projectAppForShare } from './shareProjection.js';
 import { renderDesign } from './renderCore.js';
 import { APP_BUILDER_DESIGN_WORKFLOW_ID, APP_BUILDER_REPAIR_WORKFLOW_ID } from './designWorkflow.js';
+import { assertTenantScope } from '../../host/accessControlService.js';
+import { isPersonalTenantId } from '../../host/requestSubject.js';
+
+/**
+ * ADR 0835 D4 — the gates `resolve-paused-task` may answer, per chain: the
+ * chain's OWN human gates, by node id. A run started from the gallery is a
+ * template copy with a minted workflow id (so matching `run.workflowId` refused
+ * every real run), and a copy is builder-editable (so matching the chain alone
+ * would admit any gate a member added to it). Expansion prefixes every node id
+ * `<chainId with _>_<12 hex>_`; a bare id is the un-expanded shape.
+ */
+const MCP_RESOLVABLE_GATES: Readonly<Record<string, readonly string[]>> = {
+  [APP_BUILDER_DESIGN_WORKFLOW_ID]: ['clarify', 'review'],
+  [APP_BUILDER_REPAIR_WORKFLOW_ID]: ['review'],
+};
+
+function isChainGate(chainId: string, nodeId: string): boolean {
+  const gates = MCP_RESOLVABLE_GATES[chainId] ?? [];
+  const prefix = `${chainId.replace(/\./g, '_')}_`;
+  return gates.some((g) => nodeId === g || (nodeId.startsWith(prefix) && new RegExp(`^${prefix}[0-9a-f]{12}_${g}$`).test(nodeId)));
+}
 
 export const MCP_NODE_PREFIX = 'app-builder.mcp-node.';
 
@@ -80,13 +102,13 @@ export function registerAppBuilderMcpNodes(deps: { storage: Storage; hostSuite: 
     if (gated) return gated;
     const canvasId = str(inputsOf(ctx).canvasId);
     if (!canvasId) {
-      const all = await listCanvasesForTenant(ctx.tenantId);
+      const all = await listCanvasesForCaller(ctx.tenantId, { subject: ctx.actingUserId });
       const projects = all
         .filter((c) => c.canvasTypeId === APP_BUILDER_CANVAS_TYPE)
         .map((c) => ({ canvasId: c.canvasId, name: c.name, version: c.version, url: `/app-builder/${encodeURIComponent(c.canvasId)}` }));
       return { status: 'success', outputs: { projects } };
     }
-    const canvas = await getCanvasForTenant(ctx.tenantId, canvasId);
+    const canvas = await getCanvasForCaller(ctx.tenantId, canvasId, { subject: ctx.actingUserId });
     if (!canvas || canvas.canvasTypeId !== APP_BUILDER_CANVAS_TYPE) return fail('not_found', `App Builder canvas '${canvasId}' not found in this workspace.`);
     return { status: 'success', outputs: { canvasId, name: canvas.name, version: canvas.version, url: `/app-builder/${encodeURIComponent(canvasId)}` } };
   }));
@@ -97,7 +119,7 @@ export function registerAppBuilderMcpNodes(deps: { storage: Storage; hostSuite: 
     if (gated) return gated;
     const canvasId = str(inputsOf(ctx).canvasId);
     if (!canvasId) return fail('validation_error', '`canvasId` is required.');
-    const canvas = await getCanvasForTenant(ctx.tenantId, canvasId);
+    const canvas = await getCanvasForCaller(ctx.tenantId, canvasId, { subject: ctx.actingUserId });
     if (!canvas || canvas.canvasTypeId !== APP_BUILDER_CANVAS_TYPE) return fail('not_found', `App Builder canvas '${canvasId}' not found in this workspace.`);
     return { status: 'success', outputs: { canvasId, version: canvas.version, app: canvas.state } };
   }));
@@ -124,6 +146,7 @@ export function registerAppBuilderMcpNodes(deps: { storage: Storage; hostSuite: 
       ...(baseVersionRaw !== undefined ? { baseVersion: Number(baseVersionRaw) } : {}),
       producedBy: { kind: 'mcp-client' },
       runId: ctx.runId,
+      ...(ctx.actingUserId ? { actingUserId: ctx.actingUserId } : {}),
     });
     if (!result.ok) return fail(result.error, `${result.message}${result.extra ? ` ${JSON.stringify(result.extra)}` : ''}`);
     return { status: 'success', outputs: { canvasId: result.canvasId, version: result.version, screenCount: result.screenCount, url: result.url, created: result.created } };
@@ -136,7 +159,7 @@ export function registerAppBuilderMcpNodes(deps: { storage: Storage; hostSuite: 
     if (gated) return gated;
     const canvasId = str(inputsOf(ctx).canvasId);
     if (!canvasId) return fail('validation_error', '`canvasId` is required.');
-    const canvas = await getCanvasForTenant(ctx.tenantId, canvasId);
+    const canvas = await getCanvasForCaller(ctx.tenantId, canvasId, { subject: ctx.actingUserId });
     if (!canvas || canvas.canvasTypeId !== APP_BUILDER_CANVAS_TYPE) return fail('not_found', `App Builder canvas '${canvasId}' not found in this workspace.`);
     const projected = projectAppForShare((canvas.state ?? {}) as Record<string, unknown>);
     return {
@@ -166,10 +189,35 @@ export function registerAppBuilderMcpNodes(deps: { storage: Storage; hostSuite: 
     // Tenant + workflow allowlist, fail-closed: never resolve another
     // tenant's interrupt, never a non-app-builder workflow's HITL gate.
     if (!run || run.tenantId !== ctx.tenantId) return fail('not_found', `Interrupt '${interruptId}' not found.`);
-    if (run.workflowId !== APP_BUILDER_DESIGN_WORKFLOW_ID && run.workflowId !== APP_BUILDER_REPAIR_WORKFLOW_ID) {
-      return fail('forbidden', 'Only app-builder design-chain interrupts can be resolved over MCP.');
+    // Lazy: the dispatcher + launch resolver sit above the feature registry.
+    const chainId = MCP_RESOLVABLE_GATES[run.workflowId] ? run.workflowId : await (async () => {
+      const [{ resolveTenantWorkflow }, { chainIdOfDefinition }] = await Promise.all([import('../../host/resolveLaunchDefinition.js'), import('../../host/hostEventDispatcher.js')]);
+      return chainIdOfDefinition((await resolveTenantWorkflow(deps.hostSuite.workflowCatalog, run.tenantId, run.workflowId).catch(() => null))?.definition);
+    })();
+    if (!chainId || !isChainGate(chainId, interrupt.nodeId)) {
+      return fail('forbidden', 'Only the app-builder design and repair chains\' own review gates can be resolved over MCP.');
     }
-    await resolveAndResume(deps.storage, deps.hostSuite, interruptId, inputs.value ?? { resolved: true });
+    // ADR 0835 D4 — WHO answers. The run's principal is the MCP caller; with no
+    // reviewer the resolve took the token lane, which on an open single-approver
+    // gate (the repair review is one) consults no scope at all — so any MCP
+    // client could approve a repair that then wrote the canvas, attributed to
+    // nobody. `approvals:respond` is checked here because the eligibility
+    // helpers skip it on open gates; the subject rides as the reviewer.
+    const reviewer = ctx.actingUserId;
+    if (!reviewer) return fail('forbidden', 'Resolving a review needs an identified caller.');
+    try {
+      await assertTenantScope(run.tenantId, reviewer, 'approvals:respond', isPersonalTenantId(run.tenantId) ? { personalTenant: run.tenantId } : {});
+    } catch {
+      return fail('forbidden', 'Your role in this workspace cannot answer reviews (approvals:respond).');
+    }
+    if (inputs.value === undefined) return fail('validation_error', '`value` is required — the answer to the paused question or review (e.g. { action: "approve" }).');
+    try {
+      await resolveAndResume(deps.storage, deps.hostSuite, interruptId, inputs.value, { subjectRef: reviewer });
+    } catch (err) {
+      // ADR 0778 C1 — lost to a concurrent resolve: a typed conflict, not a crash.
+      if (err instanceof OpenwopError && err.httpStatus === 409) return fail('conflict', `Interrupt '${interruptId}' was already resolved.`);
+      throw err;
+    }
     return { status: 'success', outputs: { interruptId, runId: interrupt.runId, resolved: true } };
   }, { sideEffecting: true }));
 }

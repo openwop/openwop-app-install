@@ -29,8 +29,24 @@
  *  (viii) epoch: two sessions, admin revoke-everywhere → BOTH 401
  *        `session_revoked`; a fresh login works; re-enable does NOT resurrect;
  *        self revoke signs the caller out on the SAME response;
+ *  (xiii) a user-tier cookie carrying NEITHER `userId` NOR `subject` (no mint site
+ *        produces one) is refused 401 `session_revoked` + cleared, never waved past
+ *        the liveness check;
  *  (ix)  SCIM deactivate (`setScimActive` AND `deactivateUser`) bumps the epoch —
- *        the leaver sequence is three writes.
+ *        the leaver sequence is three writes;
+ *  (xiv) ADR 0833 D3 — the session FAMILY on the OIDC lanes: logout refuses a
+ *        bound cookie even beside a valid bearer, signs an unbound session out
+ *        through its canonical row, a verified bearer re-stamps a stale `authAt`
+ *        but keeps the family, and >32 live revocations sign out everywhere.
+ *
+ * Legs deliberately NOT repeated here (same break, covering test named):
+ * bearer-only refusals after a disable are (iii); a signed-out bound cookie
+ * WITHOUT a bearer is `adr0833-session-lifecycle.test.ts` "a COPY of the cookie
+ * stops working after the owner signs out".
+ *
+ * Sabotage that turns it red: `auth.ts`
+ * `if ((session.epoch ?? 0) !== state.sessionEpoch) {` → `if (false) {` reds
+ * (viii); the unbound lane's `account_disabled` throw deleted reds (iii)/(x).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import express from 'express';
@@ -39,6 +55,7 @@ import type { AddressInfo } from 'node:net';
 import { createHash, createSign, generateKeyPairSync, type KeyObject } from 'node:crypto';
 import { createApp } from '../src/index.js';
 import { _resetOidcVerifier } from '../src/middleware/auth.js';
+import { signSession, type SessionPayload } from '../src/middleware/cookieSession.js';
 import { registerSessionAuthority } from '../src/host/sessionAuthority.js';
 import { usersSessionAuthority } from '../src/features/users/feature.js';
 import { createMember, ensurePersonalWorkspace } from '../src/host/accessControlService.js';
@@ -57,8 +74,8 @@ import {
 import { deactivateUser, setScimActive } from '../src/host/auth/scimProvisioningService.js';
 import { __resetMfaCache, setGovernancePolicy } from '../src/host/governanceService.js';
 
-const ME = '/v1/host/openwop-app/users/me';
-const USERS = '/v1/host/openwop-app/users/users';
+const ME = '/host/openwop-app/users/me';
+const USERS = '/host/openwop-app/users/users';
 
 let BASE = '';
 let server: http.Server;
@@ -113,6 +130,11 @@ function decode(cookiePair: string): Record<string, unknown> {
   const payloadB64 = value.slice(0, value.indexOf('.'));
   return JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8')) as Record<string, unknown>;
 }
+/** The typed session payload (for re-signing a tampered copy). */
+function decodeSession(cookiePair: string): SessionPayload {
+  const value = cookiePair.slice('__session='.length);
+  return JSON.parse(Buffer.from(value.slice(0, value.indexOf('.')), 'base64url').toString('utf8')) as SessionPayload;
+}
 /** True iff the response EXPIRES the session cookie (`__session=; …Max-Age=0`). */
 function clearsCookie(setCookies: string[]): boolean {
   return setCookies.some((sc) => /^__session=;/.test(sc) && /Max-Age=0/.test(sc));
@@ -140,12 +162,12 @@ function expectRefused(res: Hit, code: string, label: string): void {
   expect(mintsUserTier(res.setCookies), `${label} minted a user-tier cookie: ${JSON.stringify(res.setCookies)}`).toBe(false);
   expect(mintsAnon(res.setCookies), label).toBe(false);
 }
-const RUNS = '/v1/runs';
-const WORKSPACES = '/v1/host/openwop-app/workspaces';
+const RUNS = '/runs';
+const WORKSPACES = '/host/openwop-app/workspaces';
 
 /** Seam login. Collapsed idiom (`sharedWorkspace` absent) when `tenantId` is given. */
 async function login(subject: string, tenantId?: string): Promise<{ cookie: string; userId: string }> {
-  const res = await hit('/v1/host/openwop-app/test/login', { method: 'POST', body: { subject, displayName: subject, ...(tenantId ? { tenantId } : {}) } });
+  const res = await hit('/host/openwop-app/test/login', { method: 'POST', body: { subject, displayName: subject, ...(tenantId ? { tenantId } : {}) } });
   expect(res.status, JSON.stringify(res.body)).toBe(201);
   const cookie = sessionCookieOf(res.setCookies);
   expect(cookie).toBeTruthy();
@@ -200,7 +222,7 @@ describe('(ii)/(iii) the OIDC bearer branch — the branch the signed-in SPA act
     const sub = 'firebase-uid-epoch-ii';
     const bearer = mintBearer(sub);
     // Bind: the SPA's post-login call that mints the user-tier cookie carrying `userId`.
-    const bind = await hit('/v1/host/openwop-app/users/auth/oidc/bind', { method: 'POST', bearer, body: {} });
+    const bind = await hit('/host/openwop-app/users/auth/oidc/bind', { method: 'POST', bearer, body: {} });
     expect(bind.status, JSON.stringify(bind.body)).toBe(200);
     const bound = sessionCookieOf(bind.setCookies)!;
     const payload = decode(bound);
@@ -225,11 +247,11 @@ describe('(ii)/(iii) the OIDC bearer branch — the branch the signed-in SPA act
     // unbound mint that kept the disabled human signed in).
     expectRefused(await hit(ME, { bearer }), 'account_disabled', 'bearer-only /me');
     expectRefused(await hit(USERS, { bearer }), 'account_disabled', 'bearer-only users list');
-    expectRefused(await hit(RUNS, { bearer }), 'account_disabled', 'bearer-only /v1/runs');
+    expectRefused(await hit(RUNS, { bearer }), 'openwop-app.account_disabled', 'bearer-only /runs (major 2 namespaces a host code)');
     expectRefused(await hit(WORKSPACES, { method: 'POST', bearer, body: { name: 'After disable' } }), 'account_disabled', 'bearer-only POST /workspaces');
     // …and the bind lane is refused by the SAME read before the route's own
     // USERS-1 403 can run, so no lane re-binds.
-    expectRefused(await hit('/v1/host/openwop-app/users/auth/oidc/bind', { method: 'POST', bearer, body: {} }), 'account_disabled', 'bearer-only bind');
+    expectRefused(await hit('/host/openwop-app/users/auth/oidc/bind', { method: 'POST', bearer, body: {} }), 'account_disabled', 'bearer-only bind');
   });
 });
 
@@ -361,7 +383,7 @@ describe('(viii) epoch — sign out everywhere', () => {
   it('self revoke signs the caller out on the SAME response and kills the sibling session', async () => {
     const a = await login('oidc:epoch-self');
     const b = await login('oidc:epoch-self');
-    const res = await hit('/v1/host/openwop-app/users/me/sessions/revoke', { method: 'POST', cookie: a.cookie });
+    const res = await hit('/host/openwop-app/users/me/sessions/revoke', { method: 'POST', cookie: a.cookie });
     expect(res.status, JSON.stringify(res.body)).toBe(200);
     expect(res.body?.signedOut).toBe(true);
     expect(clearsCookie(res.setCookies)).toBe(true);
@@ -375,10 +397,10 @@ describe('(viii) epoch — sign out everywhere', () => {
   it('factor-event `unbound` bumps the epoch (other sessions end); `bound` does not', async () => {
     const a = await login('oidc:epoch-factor');
     const b = await login('oidc:epoch-factor');
-    const bound = await hit('/v1/host/openwop-app/users/me/security/factor-event', { method: 'POST', cookie: a.cookie, body: { event: 'bound' } });
+    const bound = await hit('/host/openwop-app/users/me/security/factor-event', { method: 'POST', cookie: a.cookie, body: { event: 'bound' } });
     expect(bound.status).toBe(202);
     expect((await hit(ME, { cookie: b.cookie })).status).toBe(200);
-    const unbound = await hit('/v1/host/openwop-app/users/me/security/factor-event', { method: 'POST', cookie: a.cookie, body: { event: 'unbound' } });
+    const unbound = await hit('/host/openwop-app/users/me/security/factor-event', { method: 'POST', cookie: a.cookie, body: { event: 'unbound' } });
     expect(unbound.status).toBe(202);
     const r = await hit(ME, { cookie: b.cookie });
     expect(r.status).toBe(401);
@@ -406,7 +428,7 @@ describe('(x) BLOCKER-1 — the unbound `oidc:<sub>` lane in a personal tenant',
     const bearer = mintBearer(sub);
     // Bind (the SPA's post-login mint), then reach the data plane over the
     // bound cookie so the canonical pointer exists (`/me` resolves it).
-    const bind = await hit('/v1/host/openwop-app/users/auth/oidc/bind', { method: 'POST', bearer, body: {} });
+    const bind = await hit('/host/openwop-app/users/auth/oidc/bind', { method: 'POST', bearer, body: {} });
     expect(bind.status, JSON.stringify(bind.body)).toBe(200);
     const userId = decode(sessionCookieOf(bind.setCookies)!).userId as string;
     expect((await hit(ME, { cookie: sessionCookieOf(bind.setCookies)!, bearer })).status).toBe(200);
@@ -433,12 +455,10 @@ describe('(x) BLOCKER-1 — the unbound `oidc:<sub>` lane in a personal tenant',
     expect(clearsCookie(stale.setCookies)).toBe(true);
     // Bearer + the stale unbound cookie: refused on the bearer branch.
     expectRefused(await hit(USERS, { cookie: unbound, bearer }), 'account_disabled', 'bearer + unbound cookie');
-    // Bearer-only (the probe that found the hole): every data-plane call is
-    // refused and NOTHING user-tier is minted — no renewable session survives.
+    // Bearer-only refusals (every data-plane call, no mint) are the SAME check
+    // (ii)/(iii) above already witnesses; here one leg pins that the unbound
+    // cookie's existence changes nothing.
     expectRefused(await hit(USERS, { bearer }), 'account_disabled', 'bearer-only users');
-    expectRefused(await hit(RUNS, { bearer }), 'account_disabled', 'bearer-only runs');
-    expectRefused(await hit(WORKSPACES, { method: 'POST', bearer, body: { name: 'After' } }), 'account_disabled', 'bearer-only POST /workspaces');
-    expectRefused(await hit(ME, { bearer }), 'account_disabled', 'bearer-only /me');
     // Nothing re-created a second row for the human.
     expect((await listUsers(personalTenantOfSub(sub))).map((u) => u.userId)).toEqual([userId]);
   });
@@ -487,7 +507,7 @@ describe('(x) BLOCKER-1 — the unbound `oidc:<sub>` lane in a personal tenant',
 
     expectRefused(await hit(ME, { bearer }), 'account_erased', 'bearer-only after erase');
     expectRefused(await hit(USERS, { bearer }), 'account_erased', 'bearer-only users after erase');
-    expectRefused(await hit('/v1/host/openwop-app/users/auth/oidc/bind', { method: 'POST', bearer, body: {} }), 'account_erased', 'bind after erase');
+    expectRefused(await hit('/host/openwop-app/users/auth/oidc/bind', { method: 'POST', bearer, body: {} }), 'account_erased', 'bind after erase');
     // The creating fold itself refuses on the dangling pointer (defence in
     // depth — this was the `existing[0] ?? createUser(…)` re-creation site).
     await expect(resolveCanonicalUserForTenant({ homeTenant: home, principalId: `oidc:${sub}`, source: 'oidc' }))
@@ -538,7 +558,7 @@ describe('(xii) SHOULD-3 — tenant requireMfa on a deployment-named personal te
     expect(refused.body?.error).toBe('unauthenticated');
     expect((refused.body?.details as { reason?: string } | undefined)?.reason).toBe('mfa_required');
     // The enrollment escape hatch stays open on that tenant.
-    expect((await hit('/v1/host/openwop-app/users/me/security', { cookie: s.cookie })).status).toBe(200);
+    expect((await hit('/host/openwop-app/users/me/security', { cookie: s.cookie })).status).toBe(200);
 
     // Contrast: a `user:`-shaped personal tenant is exempt by construction — the
     // human must be able to reach Settings → Security to enroll.
@@ -548,5 +568,71 @@ describe('(xii) SHOULD-3 — tenant requireMfa on a deployment-named personal te
     await setGovernancePolicy(home, { requireMfa: true });
     __resetMfaCache();
     expect((await hit(USERS, { cookie: personal.cookie })).status).toBe(200);
+  });
+});
+
+describe('(xiii) a user-tier cookie with neither userId nor subject fails closed', () => {
+  it('401 session_revoked, cookie cleared, nothing minted; a real cookie for the same tenant still works', async () => {
+    const tenant = `user:${'d'.repeat(32)}`;
+    const now = Math.floor(Date.now() / 1000);
+    // No mint site produces this shape. Before the fix, assertSessionSubjectLive
+    // returned undefined for it, skipping the erased / disabled / epoch checks.
+    const forged = `__session=${signSession({ sid: 'x'.repeat(24), tenantId: tenant, tier: 'user', personalTenant: tenant, iat: now, exp: now + 300 })}`;
+    const res = await hit(ME, { cookie: forged });
+    expectRefused(res, 'session_revoked', 'subject-less user-tier cookie');
+    expect(clearsCookie(res.setCookies), JSON.stringify(res.setCookies)).toBe(true);
+
+    const { cookie } = await login('oidc:epoch-xiii');
+    expect((await hit(ME, { cookie })).status).toBe(200);
+  });
+});
+
+// ADR 0833 D3 — logout ends the session FAMILY on the bearer lanes the SPA takes.
+describe('(xiv) ADR 0833 D3 — the family on the OIDC lanes', () => {
+  it('a bound cookie signed out by logout is refused even when a valid bearer rides along', async () => {
+    const bearer = mintBearer('firebase-uid-0833-bound');
+    const bind = await hit('/host/openwop-app/users/auth/oidc/bind', { method: 'POST', bearer, body: {} });
+    expect(bind.status, JSON.stringify(bind.body)).toBe(200);
+    const bound = sessionCookieOf(bind.setCookies)!;
+    expect(decode(bound).fid).toBeTruthy();
+    expect((await hit(ME, { cookie: bound, bearer })).status).toBe(200);
+    expect((await hit('/host/openwop-app/users/auth/logout', { method: 'POST', cookie: bound })).status).toBe(200);
+    expectRefused(await hit(ME, { cookie: bound, bearer }), 'session_revoked', 'bearer + signed-out bound cookie');
+  });
+
+  it('an UNBOUND oidc session is signed out through its canonical row', async () => {
+    const sub = 'firebase-uid-0833-unbound';
+    const bearer = mintBearer(sub);
+    // Materialize the canonical row (bind), then use an UNBOUND cookie for the same human.
+    expect((await hit('/host/openwop-app/users/auth/oidc/bind', { method: 'POST', bearer, body: {} })).status).toBe(200);
+    const promoted = await hit(RUNS, { bearer });
+    const unbound = sessionCookieOf(promoted.setCookies)!;
+    expect(decode(unbound).userId).toBeUndefined();
+    expect((await hit(ME, { cookie: unbound })).status).toBe(200);
+    expect((await hit('/host/openwop-app/users/auth/logout', { method: 'POST', cookie: unbound })).status).toBe(200);
+    expectRefused(await hit(ME, { cookie: unbound }), 'session_revoked', 'signed-out unbound cookie');
+  });
+
+  it('a verified bearer re-stamps a stale authAt and KEEPS the family (review H1)', async () => {
+    const sub = 'firebase-uid-0833-restamp';
+    const bearer = mintBearer(sub);
+    const first = sessionCookieOf((await hit(RUNS, { bearer })).setCookies)!;
+    const p = decodeSession(first);
+    const now = Math.floor(Date.now() / 1000);
+    const stale = `__session=${signSession({ ...p, authAt: now - 3 * 86_400, iat: now - 60, exp: now + 3600 })}`;
+    const res = await hit(RUNS, { cookie: stale, bearer });
+    const restamped = decode(sessionCookieOf(res.setCookies)!);
+    expect(restamped.fid).toBe(p.fid);
+    expect(Math.abs((restamped.authAt as number) - now)).toBeLessThan(10);
+  });
+
+  it('past 32 live revocations, a logout signs the account out everywhere instead of evicting one', async () => {
+    const { userId, cookie } = await login('oidc:epoch-0833-overflow');
+    const { revokeSessionFamily, MAX_REVOKED_FAMILIES } = await import('../src/features/users/usersService.js');
+    for (let i = 0; i < MAX_REVOKED_FAMILIES; i += 1) expect(await revokeSessionFamily(userId, `fam-${i}`, 3600)).toBe('revoked');
+    const before = sessionEpochOf((await getUser(userId))!);
+    expect(await revokeSessionFamily(userId, 'fam-overflow', 3600)).toBe('signed-out-everywhere');
+    expect(sessionEpochOf((await getUser(userId))!)).toBe(before + 1);
+    expectRefused(await hit(ME, { cookie }), 'session_revoked', 'every session ended by the overflow');
   });
 });

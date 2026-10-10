@@ -52,6 +52,10 @@ export interface ConversationBubble {
    *  attribution and a muted "did not respond" line instead of empty prose, so a
    *  silent advisor is not read as an agreeing one. */
   noContribution?: true;
+  /** ADR 0768 P3 — how long this reply took: the agent turn's wire `ts` minus the
+   *  preceding user turn's `ts`. Derived from the durable log (so it is the same
+   *  live and on reopen); absent when either timestamp is missing or out of order. */
+  replyMs?: number;
 }
 
 /** Light validation of the dispatch ContentPart[] shape on OPAQUE wire turn
@@ -159,9 +163,16 @@ export function turnsToBubbles(turns: readonly ConversationTurn[]): Conversation
   // Multimodal turns keep their REAL parts (audio player / image); everything
   // else projects to text as before.
   const contentOf = (c: unknown): string | ContentPart[] => (isContentParts(c) ? c : asText(c));
+  let lastUserTs: number | null = null;
+  const replyMsOf = (ts: number): { replyMs?: number } => {
+    if (lastUserTs === null || !Number.isFinite(ts)) return {};
+    const d = ts - lastUserTs;
+    return d >= 0 ? { replyMs: d } : {};
+  };
   for (const t of turns) {
     if (t.role === 'system') continue;
     if (t.role === 'user') {
+      lastUserTs = Number.isFinite(t.ts) ? t.ts : null;
       out.push({ id: t.messageId, role: 'user', content: contentOf(t.content) });
     } else {
       const persona = t.agent?.agentId ?? t.from;
@@ -180,7 +191,7 @@ export function turnsToBubbles(turns: readonly ConversationTurn[]): Conversation
         });
         continue;
       }
-      out.push({ id: t.messageId, role: 'assistant', content: contentOf(t.content), ...(persona && persona !== 'assistant' ? { agentPersona: persona } : {}) });
+      out.push({ id: t.messageId, role: 'assistant', content: contentOf(t.content), ...(persona && persona !== 'assistant' ? { agentPersona: persona } : {}), ...replyMsOf(t.ts) });
     }
   }
   return out;

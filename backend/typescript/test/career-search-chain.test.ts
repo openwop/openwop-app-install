@@ -14,15 +14,15 @@
  * nothing implements looks perfectly valid sitting in the gallery.
  */
 import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadWorkflowChainPacks, defaultWorkflowChainPackRoots, getChain } from '../src/host/workflowChainPackLoader.js';
+import { readPackManifest } from './helpers/readPackManifest.js';
 
 const ROOT = join(process.cwd(), '..', '..');
 const CHAIN_PACK = join(ROOT, 'examples', 'workflow-chain-packs', 'career-search', 'pack.json');
 const NODE_PACK = join(ROOT, 'packs', 'feature.job-search.nodes', 'pack.json');
 
-const manifest = JSON.parse(readFileSync(CHAIN_PACK, 'utf8')) as {
+const manifest = readPackManifest<{
   kind: string;
   chains: Array<{
     chainId: string;
@@ -30,7 +30,7 @@ const manifest = JSON.parse(readFileSync(CHAIN_PACK, 'utf8')) as {
     dag: { nodes: Array<{ id: string; typeId: string }>; edges: Array<{ from: string; to: string }> };
     outputs?: Record<string, { type: string; description?: string }>;
   }>;
-};
+}>(CHAIN_PACK);
 const chain = manifest.chains[0]!;
 
 describe('ADR 0543 P2 — the chain is a valid, loadable pack', () => {
@@ -53,7 +53,7 @@ describe('ADR 0543 P2 — the chain is a valid, loadable pack', () => {
     // A chain referencing a node nothing implements is valid JSON, sits happily
     // in the gallery, and fails at RUN time in front of a user. Checking it here
     // is the difference between a build failure and a support ticket.
-    const nodePack = JSON.parse(readFileSync(NODE_PACK, 'utf8')) as { nodes: Array<{ typeId: string }> };
+    const nodePack = readPackManifest<{ nodes: Array<{ typeId: string }> }>(NODE_PACK);
     const implemented = new Set(nodePack.nodes.map((n) => n.typeId));
     for (const node of chain.dag.nodes) {
       expect(implemented.has(node.typeId), `${node.typeId} is referenced but not implemented`).toBe(true);
@@ -167,7 +167,7 @@ describe('WF-JS-1 — career.campaign: the dispatch-lane chain', () => {
   });
 
   it('its node is IMPLEMENTED by the node pack and declared side-effectful — the pack half of the two-leg classification', () => {
-    const nodePack = JSON.parse(readFileSync(NODE_PACK, 'utf8')) as { nodes: Array<{ typeId: string; capabilities?: string[] }> };
+    const nodePack = readPackManifest<{ nodes: Array<{ typeId: string; capabilities?: string[] }> }>(NODE_PACK);
     const impl = nodePack.nodes.find((n) => n.typeId === 'feature.job-search.nodes.run-campaign');
     expect(impl, 'run-campaign must be in the node pack').toBeTruthy();
     expect(impl!.capabilities, 'a replayed pass must be served, not re-fired').toContain('side-effectful');

@@ -59,6 +59,8 @@ function mkSub(subscriptionId: string, events: string[]): WebhookSubscriptionRec
     events,
     secret: 's',
     createdAt: NOW,
+    // ADR 0812 P3c-0 — a major-2 subscription: a major-1 one is never delivered once v1 retires.
+    protocolMajor: 2,
   };
 }
 

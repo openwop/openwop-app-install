@@ -32,6 +32,7 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from '../src/index.js';
 import { projectBoundId } from '../src/host/boundIdProjection.js';
+import { preferredVersion } from '../src/middleware/protocolVersion.js';
 
 let server: http.Server; let base = '';
 beforeAll(async () => {
@@ -94,7 +95,10 @@ describe('the bound-id path projection (RFC 0184)', () => {
     const { runId } = await createV2();
     const twice = projectBoundId(projectBoundId(runId));
     const r = await req('GET', `/runs/${twice}`, V2);
-    expect(r.status, `a host that projects twice strands its own links (${twice})`).toBe(404);
+    // ADR 0812 P3c-0 — while v1 is served the double projection decodes to a
+    // bare-looking id that names no run (404); after the cut a bare id on a
+    // major-2 path is refused outright (400). Either way it never resolves.
+    expect(r.status, `a host that projects twice strands its own links (${twice})`).toBe(preferredVersion() === '2.0' ? 400 : 404);
   });
 
   it('5. EMIT: the create response spells its links with the projection, never %2F', async () => {
@@ -130,10 +134,5 @@ describe('the bound-id path projection (RFC 0184)', () => {
     }
   });
 
-  it('8. MAJOR 1 IS UNTOUCHED — a `~` segment under v1 is not reinterpreted', async () => {
-    // The projection is a major-2 rule. Narrowing v1 would be a new refusal on
-    // a shipped contract, and `~` is legal in a v1 id.
-    const r = await req('GET', '/v1/runs/some~2Fthing');
-    expect(r.status, 'v1 must answer its own 404, not the v2 validation refusal').not.toBe(400);
-  });
+  // ADR 0812 P3c-0 — leg 8 (major 1 does not reinterpret `~`) was deleted with major 1.
 });

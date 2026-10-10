@@ -58,13 +58,13 @@ describe('CFP-1 — pack allowlists are exactly the registered tool ids', () => 
   ) as { agents: { toolAllowlist: string[] }[] };
 
   it('notebooks researcher allowlist = the three registered ids', () => {
-    const allow = readPack('feature.notebooks.agents').agents[0]!.toolAllowlist;
+    const allow = readPack('vendor.openwop-app.notebooks.agents').agents[0]!.toolAllowlist;
     expect([...allow].sort()).toEqual(
       [NOTEBOOKS_SEARCH_TOOL_ID, NOTEBOOKS_ASK_TOOL_ID, NOTEBOOKS_WRITE_TRANSFORMATION_TOOL_ID].sort(),
     );
   });
   it('podcasts producer allowlist = the two registered ids', () => {
-    const allow = readPack('feature.podcasts.agents').agents[0]!.toolAllowlist;
+    const allow = readPack('vendor.openwop-app.podcasts.agents').agents[0]!.toolAllowlist;
     expect([...allow].sort()).toEqual([PODCASTS_LIST_TOOL_ID, PODCASTS_PRODUCE_TOOL_ID].sort());
   });
   /**

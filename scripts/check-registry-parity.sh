@@ -23,7 +23,8 @@
 # Network-dependent by nature, so it lives in the LIVE lane (ci:full /
 # on-demand), never the offline `npm run ci` gate. Exit codes:
 #   0 = no drift, or registry unreachable (skip, don't fail offline runs)
-#   1 = drift found (local-but-unpublished, or published-but-stale)
+#   1 = drift found (local-but-unpublished, published-but-stale, or a version
+#       collision: same name@version published with different content)
 set -euo pipefail
 
 REGISTRY_URL="${OPENWOP_REGISTRY_URL:-https://packs.openwop.dev}"
@@ -172,6 +173,64 @@ while IFS=$'\t' read -r name version; do
     $name — registry ${reg_version}, repo ${version}"
   fi
 done <<<"$local_rows"
+
+# FOURTH DRIFT SHAPE, added 2026-09-28 (NP-V2 grade-data D-2): a VERSION
+# COLLISION — this repo's `name@version` is ALREADY PUBLISHED, with different
+# content. The three shapes above compare only `latestVersion`, and their "same"
+# branch passes silently, which is exactly where a collision hides. MEASURED:
+# 18 chain packs sat here after ADR 0766 P3 pinned + re-versioned their inner
+# chains without bumping past the published copy — `check-pack-version-bump.mjs`
+# compares a PR against its merge-base, never the registry. A published version
+# is immutable, so the in-repo copy can never be published under that number,
+# and any host installing it gets different expansion ids than this app.
+#
+# Every version the registry lists is checked, not only `latest`. For these
+# manifest-only kinds the published version manifest IS `pack.json` plus the
+# registry-added `signing` + `integrity`, so equality is decidable from it.
+collisions="$(REGISTRY_URL="$REGISTRY_URL" ROOT="$ROOT" INDEX_PATH="$index_path" python3 - <<'PY'
+import json, os, glob, urllib.request, concurrent.futures
+base, root = os.environ["REGISTRY_URL"], os.environ["ROOT"]
+tree = os.environ["INDEX_PATH"].rsplit("/", 1)[0]          # "/v2"
+def get(path):
+    try:
+        with urllib.request.urlopen(base + path, timeout=15) as r:
+            return json.load(r)
+    except Exception:
+        return None
+def canon(d):
+    return json.dumps({k: v for k, v in d.items() if k not in ("signing", "integrity")}, sort_keys=True)
+def check(f):
+    local = json.load(open(f))
+    name, version = local.get("name"), local.get("version")
+    if not name or not version:
+        return None
+    meta = get("%s/packs/%s/index.json" % (tree, name))
+    versions = (meta or {}).get("versions") or []
+    listed = versions.keys() if isinstance(versions, dict) else [v.get("version") if isinstance(v, dict) else v for v in versions]
+    if version not in listed:
+        return None
+    published = get("%s/packs/%s/-/%s.json" % (tree, name, version))
+    if published is None:
+        return "%s@%s — published, but its manifest could not be read (cannot prove equality)" % (name, version)
+    if canon(published) != canon(local):
+        return "%s@%s — published content differs" % (name, version)
+    return None
+files = sorted(glob.glob(root + "/examples/connection-packs/*/pack.json") + glob.glob(root + "/examples/workflow-chain-packs/*/pack.json"))
+with concurrent.futures.ThreadPoolExecutor(8) as ex:
+    for line in ex.map(check, files):
+        if line:
+            print(line)
+PY
+)"
+if [ -n "$collisions" ]; then
+  echo ""
+  echo "VERSION COLLISION — the repo's name@version is already published with DIFFERENT content."
+  echo "  A published version is immutable: bump the pack (and each changed chain) past the"
+  echo "  registry's latest, then publish the new version."
+  printf '%s\n' "$collisions" | sed 's/^/    /'
+  echo ""
+  drift=1
+fi
 
 if [ "$behind_count" -gt 0 ]; then
   echo ""

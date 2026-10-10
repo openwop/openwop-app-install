@@ -38,13 +38,13 @@ let n = 0;
 const enable = async (id: string, status: 'on' | 'off') => { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status }, 'test'); };
 async function ownerWithMember(role: string): Promise<{ owner: ReturnType<typeof client>; member: ReturnType<typeof client>; orgId: string }> {
   const tenantId = `org:test-${Date.now()}-${n++}`;
-  const owner = client(); await owner.post('/v1/host/openwop-app/test/login', { email: `co-${Date.now()}-${n++}@acme.test`, tenantId });
-  const member = client(); const mr = await member.post('/v1/host/openwop-app/test/login', { email: `co-${Date.now()}-${n++}@acme.test`, tenantId });
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Shop' }); const orgId = org.body.orgId;
-  await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: mr.body.user.userId, roles: [role] });
+  const owner = client(); await owner.post('/host/openwop-app/test/login', { email: `co-${Date.now()}-${n++}@acme.test`, tenantId });
+  const member = client(); const mr = await member.post('/host/openwop-app/test/login', { email: `co-${Date.now()}-${n++}@acme.test`, tenantId });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Shop' }); const orgId = org.body.orgId;
+  await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: mr.body.user.userId, roles: [role] });
   return { owner, member, orgId };
 }
-const c = (orgId: string, suffix = '') => `/v1/host/openwop-app/commerce/orgs/${encodeURIComponent(orgId)}${suffix}`;
+const c = (orgId: string, suffix = '') => `/host/openwop-app/commerce/orgs/${encodeURIComponent(orgId)}${suffix}`;
 
 describe('commerce — toggle gating', () => {
   it('404s when off', async () => {
@@ -122,7 +122,7 @@ describe('commerce — coupons + public storefront (Phases 2-3)', () => {
     const { owner, orgId } = await ownerWithMember('owner');
     await owner.post(c(orgId, '/products'), { type: 'physical', name: 'Public Widget', price: 5, inventory: 3 });
     const anon = client(); // no login
-    const r = await anon.get(`/v1/host/openwop-app/public-store/${encodeURIComponent(orgId)}/products`);
+    const r = await anon.get(`/host/openwop-app/public-store/${encodeURIComponent(orgId)}/products`);
     expect(r.status).toBe(200);
     expect(r.body.products.length).toBeGreaterThan(0);
     expect(r.body.products.some((p: { name: string }) => p.name === 'Public Widget')).toBe(true);
@@ -155,7 +155,7 @@ describe('commerce — cart + multi-currency + webhook (deferred P1/P3)', () => 
 
   it('commerce Stripe webhook reports not_configured in demo-mode', async () => {
     const anon = client();
-    const r = await anon.post('/v1/host/openwop-app/commerce/webhook', { type: 'payment_intent.succeeded', data: { object: {} } });
+    const r = await anon.post('/host/openwop-app/commerce/webhook', { type: 'payment_intent.succeeded', data: { object: {} } });
     expect(r.status).toBe(503);
   });
 });
@@ -205,7 +205,7 @@ describe('commerce — RBAC + isolation', () => {
     const { member, orgId } = await ownerWithMember('viewer');
     expect((await member.get(c(orgId, '/products'))).status).toBe(200);
     expect((await member.post(c(orgId, '/products'), { name: 'X', type: 'service', price: 1 })).status).toBe(403);
-    const outsider = client(); await outsider.post('/v1/host/openwop-app/test/login', { email: `co-out-${Date.now()}-${n++}@acme.test`, tenantId: `org:other-${Date.now()}-${n++}` });
+    const outsider = client(); await outsider.post('/host/openwop-app/test/login', { email: `co-out-${Date.now()}-${n++}@acme.test`, tenantId: `org:other-${Date.now()}-${n++}` });
     expect((await outsider.get(c(orgId, '/products'))).status).toBe(404);
   });
 });
@@ -226,7 +226,7 @@ describe('commerce — plan-entitlement gate (ADR 0176 correction / gap-analysis
       expect(blocked.status).toBe(403);
       expect(blocked.body.error ?? blocked.body.code).toBeDefined();
       // Public storefront: a shopper must NEVER see the merchant's plan error.
-      const pub = await owner.get(`/v1/host/openwop-app/public-store/${encodeURIComponent(orgId)}/products`);
+      const pub = await owner.get(`/host/openwop-app/public-store/${encodeURIComponent(orgId)}/products`);
       expect(pub.status).toBe(200);
       expect(pub.body.products.some((x: { name: string }) => x.name === 'Gate Widget')).toBe(true);
     } finally {

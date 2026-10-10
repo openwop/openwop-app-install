@@ -18,22 +18,39 @@
  * unreachable from the status a closed tab actually leaves behind. A test that
  * merely asserted "`resume` works" would have passed against the bug. So the
  * assertion is on what a `running` job RENDERS, which is the thing that was
- * false, and reverting the condition to `=== 'paused'` turns it red.
+ * false, and reverting the condition to `=== 'paused'` turns it red — witnessed
+ * on `continuing a RUNNING job re-enters the drain`, which FINDS the Continue
+ * button on a `running` job before it clicks it.
+ *
+ * Wave-6 /grade-tests (2026-10-09) cut three cases whose every break is caught
+ * elsewhere, each confirmed by a sabotage probe that turned BOTH sides red:
+ *  - "a RUNNING job renders a continue action" → the continue-drain case below
+ *    and `orgAccess.test.tsx` "positive control: the OWNER keeps Reindex…";
+ *  - "a live job stamps when it last advanced" → the KBX-3 positive control;
+ *  - "the paused Notice does not ALSO carry its own live role" → "a PAUSED job
+ *    announces" (the KB passes `announce`) + `ui/__tests__/noticeAnnounce.test.tsx`
+ *    "DROPS its own live region when announcing" (the Notice honours it).
+ *
+ * The announcer is MODULE state, so it is reset per case, and `announce` is
+ * wrapped (real behaviour kept) so a stomped announcement — one overwritten in
+ * the same commit — is still visible in `mock.calls`. Without that, the
+ * exactly-one case could not fail: the slot keeps only the LAST string.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, waitFor, act, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
+type Kb = typeof import('../kbClient.js');
 const api = vi.hoisted(() => ({
-  listOrgs: vi.fn(),
-  listCollections: vi.fn(),
-  listDocuments: vi.fn(),
-  search: vi.fn(),
-  startReindex: vi.fn(),
-  drainReindex: vi.fn(),
-  getReindexJob: vi.fn(),
-  cancelReindex: vi.fn(),
-  deleteDocument: vi.fn(),
+  listOrgs: vi.fn<Kb['listOrgs']>(),
+  listCollections: vi.fn<Kb['listCollections']>(),
+  listDocuments: vi.fn<Kb['listDocuments']>(),
+  search: vi.fn<Kb['search']>(),
+  startReindex: vi.fn<Kb['startReindex']>(),
+  drainReindex: vi.fn<Kb['drainReindex']>(),
+  getReindexJob: vi.fn<Kb['getReindexJob']>(),
+  cancelReindex: vi.fn<Kb['cancelReindex']>(),
+  deleteDocument: vi.fn<Kb['deleteDocument']>(),
 }));
 vi.mock('../kbClient.js', async (importOriginal) => {
   const orig = await importOriginal<typeof import('../kbClient.js')>();
@@ -50,27 +67,49 @@ vi.mock('../../media/mediaClient.js', async (importOriginal) => {
 const toasts = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), info: vi.fn() }));
 vi.mock('../../../ui/toast.js', () => ({ toast: toasts }));
 
-// Typed with the REAL `confirm` signature (`ui/confirm.ts:43` takes ConfirmOptions),
-// not `() => true`. An argument-less mock gives `mock.calls` an EMPTY TUPLE type, so
-// `calls[0]![0]` is a compile error the vitest run never sees — unit tests are not
-// type-checked by `npm run build`, only by `check:test-types`.
-const confirmMock = vi.hoisted(() => vi.fn(async (_opts: { title?: string; body?: string; confirmLabel?: string }) => true));
+// Typed with the REAL `confirm` signature, not `() => true`. An argument-less mock
+// gives `mock.calls` an EMPTY TUPLE type, so `calls[0]![0]` is a compile error the
+// vitest run never sees — unit tests are not type-checked by `npm run build`, only
+// by `check:test-types`.
+const confirmMock = vi.hoisted(() => vi.fn<typeof import('../../../ui/confirm.js')['confirm']>());
 vi.mock('../../../ui/confirm.js', () => ({ confirm: confirmMock }));
 
-import { KnowledgeBasePage } from '../KnowledgeBasePage.js';
-import { currentAnnouncements } from '../../../ui/announce.js';
+// KB2UX-1 — the page reads the caller's per-org authority. These suites test
+// what an OWNER sees; `orgAccess.test.tsx` covers the narrower callers.
+const accessApi = vi.hoisted(() => ({
+  getEffectiveAccess: vi.fn<typeof import('../../../client/accessClient.js')['getEffectiveAccess']>(),
+}));
+vi.mock('../../../client/accessClient.js', async (importOriginal) => {
+  const orig = await importOriginal<Record<string, unknown>>();
+  return { ...orig, ...accessApi };
+});
+// The REAL announcer, wrapped: behaviour unchanged, every call recorded.
+vi.mock('../../../ui/announce.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../../../ui/announce.js')>();
+  return { ...real, announce: vi.fn(real.announce) };
+});
 
-const ORG = { orgId: 'o1', name: 'Acme' };
-const COLLECTION = {
+import { KnowledgeBasePage } from '../KnowledgeBasePage.js';
+import { announce, currentAnnouncements } from '../../../ui/announce.js';
+import type { KbCollection, KbDocument, Org, ReindexJob } from '../kbClient.js';
+import type { EffectiveAccess } from '../../../client/accessClient.js';
+
+const OWNER_ACCESS: EffectiveAccess = { roles: ['owner'], scopes: ['workspace:read', 'workspace:write', 'host:org:manage'], basis: 'member' };
+const LOCK_ANNOUNCE = 'Document changes are paused while this collection is being reindexed.';
+/** Every string handed to the announcer since the per-case reset. */
+const spoken = (): string[] => vi.mocked(announce).mock.calls.map(([m]) => m);
+
+const ORG: Org = { orgId: 'o1', name: 'Acme' };
+const COLLECTION: KbCollection = {
   collectionId: 'c1', name: 'HR Policies', documentCount: 1, chunkCount: 3,
   updatedAt: '2026-09-03T00:00:00.000Z',
 };
-const DOC = { documentId: 'd1', title: 'PTO Policy', source: { kind: 'text' }, chunkCount: 3, createdAt: '2026-09-03T00:00:00.000Z' };
+const DOC: KbDocument = { documentId: 'd1', title: 'PTO Policy', source: { kind: 'text' }, chunkCount: 3, createdAt: '2026-09-03T00:00:00.000Z' };
 
 /** A reindex job, `updatedAt` expressed as "this many ms ago" so the
  *  not-advancing threshold is exercised against a real clock rather than a
  *  frozen literal that quietly ages into whatever the test needs. */
-const job = (over: Record<string, unknown> = {}, agoMs = 0) => ({
+const job = (over: Partial<ReindexJob> = {}, agoMs = 0): ReindexJob => ({
   collectionId: 'c1', targetSpec: { provider: 'local' }, fromSig: 'a', toSig: 'b',
   totalChunks: 100, embeddedChunks: 40, status: 'running',
   costEstimateTokens: 0, costSpentTokens: 0,
@@ -80,7 +119,11 @@ const job = (over: Record<string, unknown> = {}, agoMs = 0) => ({
 });
 
 beforeEach(() => {
+  // Reset the module-level slot FIRST, then the mocks, so this call is not in
+  // `mock.calls` (Vitest 4 `resetAllMocks` restores the wrapped real impl).
+  announce('');
   vi.resetAllMocks();
+  accessApi.getEffectiveAccess.mockResolvedValue(OWNER_ACCESS);
   window.history.replaceState({}, '', '/kb');
   api.listOrgs.mockResolvedValue([ORG]);
   api.listCollections.mockResolvedValue([COLLECTION]);
@@ -99,16 +142,6 @@ const view = async (path = '/kb?org=o1&collection=c1'): Promise<void> => {
 /* ─── KBX-2: the stranded job's non-destructive exit ───────────────── */
 
 describe('KBX-2 — a job stranded in `running` offers more than Cancel', () => {
-  it('a RUNNING job renders a continue action, not only the discard', async () => {
-    api.getReindexJob.mockResolvedValue(job({ status: 'running' }));
-    await view();
-
-    // The Blocker: this button did not exist for `running`, so the only exit
-    // from a 409-locked collection was to throw the whole rebuild away.
-    expect(await screen.findByRole('button', { name: 'Continue rebuild' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Discard rebuild' })).toBeTruthy();
-  });
-
   it('continuing a RUNNING job re-enters the drain — the function was always status-agnostic', async () => {
     api.getReindexJob.mockResolvedValue(job({ status: 'running' }));
     api.drainReindex.mockResolvedValue(job({ status: 'done', embeddedChunks: 100 }));
@@ -200,12 +233,6 @@ describe('KBX-1 / KBX-7 — the reindex asks before it starts, and before it dis
 /* ─── KBX-3: a frozen job is not painted as a live one ─────────────── */
 
 describe('KBX-3 — last-known, and when', () => {
-  it('a live job stamps when it last advanced', async () => {
-    api.getReindexJob.mockResolvedValue(job({ status: 'running' }));
-    await view();
-    expect(await screen.findByText(/Last progress/)).toBeTruthy();
-  });
-
   it('a job that has not advanced for minutes says so, and says what happens next', async () => {
     api.getReindexJob.mockResolvedValue(job({ status: 'running' }, 10 * 60_000));
     await view();
@@ -258,7 +285,11 @@ describe('KBX-5 — a locked collection disables and explains its writes', () =>
 
   it('positive control: with no job, the same six controls are live', async () => {
     await view();
-    expect((screen.getByLabelText('Paste text to chunk + embed into this collection…') as HTMLTextAreaElement).disabled).toBe(false);
+    const text = screen.getByLabelText('Paste text to chunk + embed into this collection…') as HTMLTextAreaElement;
+    expect(text.disabled).toBe(false);
+    fireEvent.change(text, { target: { value: 'hello' } });
+    expect(screen.getByRole('button', { name: /Ingest/ }).hasAttribute('disabled')).toBe(false);
+    expect((screen.getByLabelText('Add from URL') as HTMLInputElement).disabled).toBe(false);
     expect(screen.getByRole('button', { name: /Delete collection/ }).hasAttribute('disabled')).toBe(false);
     expect(screen.queryByText(/adding, importing and deleting documents are paused/)).toBeNull();
     expect(screen.queryByText(/not a connection problem/)).toBeNull();
@@ -285,16 +316,10 @@ describe('KBX-6 — the reindex pause reaches assistive tech', () => {
     // rendering its own region (which, mounted with its text already inside,
     // speaks nothing — `ui/Notice.tsx` documents this at length).
     await waitFor(() => expect(currentAnnouncements().polite).toContain('daily embedding budget was reached'));
-    // …and the visible text is still the server's own reason, unchanged.
-    expect(screen.getByText('daily embedding budget reached')).toBeTruthy();
-  });
-
-  it('the paused Notice does not ALSO carry its own live role (the DS-8 double-announce)', async () => {
-    api.getReindexJob.mockResolvedValue(job({ status: 'paused' }));
-    await view();
-    const notice = (await screen.findByText(/daily embedding budget reached/)).closest('.alert');
-    expect(notice).toBeTruthy();
-    expect(notice!.getAttribute('aria-live')).toBeNull();
+    // KB2UX-2 — the visible text is the LOCALIZED sentence, not the server's
+    // English diagnostic (which used to be rendered verbatim in all 4 locales).
+    expect(screen.getByText(/Paused — daily embedding budget reached/)).toBeTruthy();
+    expect(screen.queryByText('daily embedding budget reached')).toBeNull();
   });
 
   it('exactly ONE lock notice announces — a second string on the same commit silences the first', async () => {
@@ -306,6 +331,9 @@ describe('KBX-6 — the reindex pause reaches assistive tech', () => {
     await view();
     await screen.findByRole('button', { name: 'Resume' });
     await waitFor(() => expect(currentAnnouncements().polite).toContain('daily embedding budget was reached'));
+    // The slot holds only the LAST string, so a lock announcement stomped in the
+    // same commit would be invisible there; the call record is not.
+    expect(spoken()).not.toContain(LOCK_ANNOUNCE);
     expect(currentAnnouncements().polite).not.toContain('Document changes are paused');
     // …and the page-level sentence is still on SCREEN; only the speech is deduped.
     expect(screen.getByText(/adding, importing and deleting documents are paused/)).toBeTruthy();
@@ -316,6 +344,7 @@ describe('KBX-6 — the reindex pause reaches assistive tech', () => {
     await view();
     await screen.findByText(/has not advanced for several minutes/);
     await waitFor(() => expect(currentAnnouncements().polite).toContain('not advancing'));
+    expect(spoken()).not.toContain(LOCK_ANNOUNCE);
   });
 
   it('positive control: a healthy running job speaks the lock sentence', async () => {
@@ -323,5 +352,6 @@ describe('KBX-6 — the reindex pause reaches assistive tech', () => {
     await view();
     await screen.findByText(/adding, importing and deleting documents are paused/);
     await waitFor(() => expect(currentAnnouncements().polite).toContain('Document changes are paused'));
+    expect(spoken()).toContain(LOCK_ANNOUNCE);
   });
 });

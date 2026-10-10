@@ -69,6 +69,7 @@ const typedError = (code: string, message: string): { content: string; isError: 
 export function registerServiceDeskAgentTools(): void {
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: SD_LIST_TOOL_ID,
       description: 'List the org\'s support tickets (id, subject, status, priority, channel). Read-only.',
@@ -98,6 +99,7 @@ export function registerServiceDeskAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: SD_GET_TOOL_ID,
       description: 'Read ONE support ticket incl. its message thread (read-before-draft — always read the thread before drafting a reply).',
@@ -114,6 +116,7 @@ export function registerServiceDeskAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: SD_DRAFT_TOOL_ID,
       description:
@@ -155,6 +158,7 @@ export function registerServiceDeskAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: SD_STATUS_TOOL_ID,
       description: `Set a ticket's status (${TICKET_STATUSES.join(' | ')}). Reversible workflow bookkeeping — sending anything to the customer still requires the draft-reply approval lane.`,

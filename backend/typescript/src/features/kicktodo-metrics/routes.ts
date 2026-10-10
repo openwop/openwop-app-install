@@ -12,7 +12,7 @@ import { requireKicktodoManage, requireString } from '../featureRoute.js';
 import { activationMetrics, engagementMetrics, factoryMetrics } from './metricsService.js';
 import { sampleVerdict, SampleSubjectError, verifierQuality } from './verifierSampleService.js';
 
-export const KICKTODO_METRICS_PREFIX = '/v1/host/openwop-app/kicktodo/metrics';
+export const KICKTODO_METRICS_PREFIX = '/host/openwop-app/kicktodo/metrics';
 
 type Handler = (req: Request, res: Response) => Promise<void>;
 

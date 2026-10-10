@@ -71,6 +71,7 @@ describe('inbox / runs ApprovalCard — the approver sees what they are approvin
       ],
     });
     expect(await screen.findByText(/Happy 10th anniversary/)).toBeTruthy();
+    expect(document.querySelector('.approval-preview-body')?.getAttribute('tabindex')).toBe('0');
     // …and it does NOT offer a picker: this card resolves with {action, comment}
     // and cannot carry a chosen resume value, so a Pick button would be a
     // control that does not do what it looks like it does.

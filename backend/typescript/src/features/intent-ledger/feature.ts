@@ -2,8 +2,11 @@
  * Intent Ledger (ADR 0136) — a reviewable pre-flight mission contract (goal / allowed /
  * forbidden / approvals / success-criteria / expiry) drafted for complex requests; it
  * PROJECTS onto the ADR 0132 capability scope (enforcement reused) + adds success
- * criteria, a relative-TTL expiry, and an authored-vs-completed reckoning. An
- * `intent-ledger` toggle, off by default, per tenant.
+ * criteria, a relative-TTL expiry, and an authored-vs-completed reckoning.
+ *
+ * ALWAYS-ON (ADR 0820 §8.6 / core-audit M8 correction): the `intent-ledger` toggle this header
+ * used to describe was removed when the feature graduated (ADR 0134 / 2026-06-24);
+ * there is no per-tenant switch. Gating is RBAC and visibility only.
  *
  * Phase 1 = the pure projection + stamp. Phase 2 = entity + extractor + complexity gate.
  * Phase 3 = REST + the out_of_mandate expiry term (registerRoutes a no-op until then).

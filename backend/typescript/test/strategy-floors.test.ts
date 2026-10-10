@@ -25,14 +25,14 @@ afterAll(async () => { await closeApp(); });
 
 const client = (): Client => makeClient(() => BASE);
 
-const S = '/v1/host/openwop-app/strategy';
-const PM = '/v1/host/openwop-app/priority-matrix';
+const S = '/host/openwop-app/strategy';
+const PM = '/host/openwop-app/priority-matrix';
 
 async function login(): Promise<{ c: ReturnType<typeof client>; orgId: string; tenantId: string }> {
   const tenantId = `org:fl-${Date.now()}-${n++}`;
   const c = client();
-  expect((await c.post('/v1/host/openwop-app/test/login', { email: `fl-${Date.now()}-${n++}@acme.test`, tenantId })).status).toBe(201);
-  const orgId = (await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
+  expect((await c.post('/host/openwop-app/test/login', { email: `fl-${Date.now()}-${n++}@acme.test`, tenantId })).status).toBe(201);
+  const orgId = (await c.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
   return { c, orgId, tenantId };
 }
 
@@ -179,7 +179,7 @@ describe('D3 — parent lens + CSV import', () => {
 // inbox and from the page are the SAME CAS operation. A HUMAN scenario stays a
 // plain select (no approval).
 describe('D3 — scenario select ↔ shared approval', () => {
-  const APPR = '/v1/host/openwop-app/approvals';
+  const APPR = '/host/openwop-app/approvals';
 
   async function sessionWithIdeas(): Promise<{ c: Client; orgId: string; tenantId: string; listId: string; sessionId: string }> {
     const { c, orgId, tenantId } = await login();
@@ -248,7 +248,7 @@ describe('D3 — scenario select ↔ shared approval', () => {
  * the compensating reopen was tested anywhere.
  */
 describe('ADR 0590 — scenario reject seam (reject / 403 / compensating reopen)', () => {
-  const APPR = '/v1/host/openwop-app/approvals';
+  const APPR = '/host/openwop-app/approvals';
 
   async function agentProposed(): Promise<{ c: Client; tenantId: string; listId: string; sessionId: string; scenarioId: string; approvalId: string }> {
     const { c, orgId, tenantId } = await login();
@@ -296,7 +296,7 @@ describe('ADR 0590 — scenario reject seam (reject / 403 / compensating reopen)
     // membership), so they hold NO workspace:write in the list's org. NOTE:
     // `sharedWorkspace:true` would bounce a non-member to their personal tenant
     // (cross-tenant → 404, the no-existence-leak arm, not this one).
-    expect((await stranger.post('/v1/host/openwop-app/test/login', { email: `fl-stranger-${Date.now()}-${n++}@acme.test`, tenantId })).status).toBe(201);
+    expect((await stranger.post('/host/openwop-app/test/login', { email: `fl-stranger-${Date.now()}-${n++}@acme.test`, tenantId })).status).toBe(201);
     expect((await stranger.post(`${APPR}/${approvalId}/claim`)).status).toBe(403);
     expect((await stranger.post(`${APPR}/${approvalId}/reject`)).status).toBe(403);
     // The no-existence-leak LIST gate also hides the row from the non-decider…
@@ -332,7 +332,7 @@ describe('ADR 0590 — scenario reject seam (reject / 403 / compensating reopen)
  * proposal's approval is still pending returns the existing scenario.
  */
 describe('PMXWF-6 — fork-minted duplicate proposals collapse (content-keyed, pending-gated)', () => {
-  const APPR = '/v1/host/openwop-app/approvals';
+  const APPR = '/host/openwop-app/approvals';
   const args = { name: 'Fork pick', selection: { mode: 'top-n', n: 2 } } as const;
 
   it('1) an IDENTICAL agent re-propose (the fork simulation) is idempotent: one scenario, one pending approval, same id', async () => {

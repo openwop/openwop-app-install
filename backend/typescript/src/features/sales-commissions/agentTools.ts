@@ -2,7 +2,7 @@
  * Commissions Analyst chat tools (CFP-1 repair — CHAT-FIRST-PORT-AUDIT finding
  * #1; D9 field-sales port map row 1 "RIDES").
  *
- * The `feature.sales-commissions.agents` Commissions Analyst used to allowlist
+ * The `vendor.openwop-app.sales-commissions.agents` Commissions Analyst used to allowlist
  * raw node typeIds (`openwop:feature.sales-commissions.nodes.list-plans`, …) that
  * NO host registrant projects into a conversational tool — silently dropped,
  * persona toothless. These register the READ surface the advisory agent needs,
@@ -75,6 +75,7 @@ export function registerCommissionAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: COMMISSIONS_LIST_PLANS_TOOL_ID,
       description: "List the org's commission plans (percentage/fixed rates + accelerators over CRM won deals and territory quota attainment). Read-only. Use to ground comp questions and PROPOSE plan changes — a human disposes.",
@@ -90,6 +91,7 @@ export function registerCommissionAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: COMMISSIONS_LIST_STATEMENTS_TOOL_ID,
       description: "List commission statements, optionally filtered by `subjectId` (the rep), `period` (YYYY-Qn or YYYY-MM), or `planId`. Read-only, and SUBJECT-SCOPED: a rep sees only their own statements unless they hold the commissions-manage scope. Use to explain how a rep's statement was computed.",

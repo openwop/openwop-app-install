@@ -1,5 +1,5 @@
 /**
- * feature.cms.agents — a feature-bound manifest agent (ADR 0064 Phase 3). Proves
+ * vendor.openwop-app.cms.agents — a feature-bound manifest agent (ADR 0064 Phase 3). Proves
  * the CMS feature ships a localizer agent that the host loads at boot (RFC 0003
  * agents[]), tool-allowlisted to the feature's own workflow nodes (ctx.features
  * .cms via feature.cms.nodes). In this host the agent + nodes ARE the chat-
@@ -21,9 +21,9 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-describe('feature.cms.agents.localizer', () => {
+describe('vendor.openwop-app.cms.agents.localizer', () => {
   it('is loaded into the agent registry at boot', async () => {
-    const agent = await getAgentRegistry().resolve('feature.cms.agents.localizer');
+    const agent = await getAgentRegistry().resolve('vendor.openwop-app.cms.agents.localizer');
     expect(agent).not.toBeNull();
     expect(agent!.persona).toBe('WRITER');
     // The system prompt resolved from prompts/cms-localizer.md.
@@ -31,7 +31,7 @@ describe('feature.cms.agents.localizer', () => {
   });
 
   it('is tool-allowlisted to the CMS feature agent tools only (CFP-1)', async () => {
-    const agent = await getAgentRegistry().resolve('feature.cms.agents.localizer');
+    const agent = await getAgentRegistry().resolve('vendor.openwop-app.cms.agents.localizer');
     const allow = (agent!.toolAllowlist ?? []) as string[];
     // CFP-1: the allowlist moved off the WORKFLOW-node typeIds
     // (`openwop:feature.cms.nodes.*`, which never resolved at chat dispatch) to

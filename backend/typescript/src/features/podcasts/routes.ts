@@ -99,7 +99,7 @@ async function notebookReadable(req: Request, notebookId: string, memo?: Map<str
 
 export function registerPodcastsRoutes(deps: RouteDeps): void {
   const { app } = deps;
-  const BASE = '/v1/host/openwop-app/podcasts';
+  const BASE = '/host/openwop-app/podcasts';
 
   // Resolve the org from a query/body, gate the feature + read scope. For create
   // (no entity yet) the org comes from the body.
@@ -477,5 +477,5 @@ export function registerPodcastsRoutes(deps: RouteDeps): void {
   // Public distribution surface (unauthed, org→tenant, published-gated).
   registerPublicPodcastRoutes(deps);
 
-  log.info('podcasts routes registered (/v1/host/openwop-app/podcasts/*)');
+  log.info('podcasts routes registered (/host/openwop-app/podcasts/*)');
 }

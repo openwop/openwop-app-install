@@ -19,6 +19,7 @@ import { buildFirewallHook, SENSITIVE_APPROVAL_TOOLS } from '../src/features/cap
 /** The ADR 0610 witness name — a node type id the classifier keys on, NOT a registered tool id. */
 const SYNTHETIC_EGRESS = 'core.openwop.integration.email-send';
 /** The one REAL off-host egress agent tool. Gated by NAME (it is in SENSITIVE_APPROVAL_TOOLS). */
+const DEST_SYNC = 'openwop:destination-sync.run';
 const HTTP_FETCH = 'openwop:core.openwop.http.fetch';
 const CODE_EXEC = 'openwop:feature.code-exec.nodes.run';
 const READ_TOOL = 'openwop:knowledge.search';
@@ -43,9 +44,15 @@ describe('ADR 0724 §D0 — the class gate\'s REAL population, pinned after a fu
   it('R2: every registered agent tool id is `openwop:`-prefixed — the namespace the egress classifier does NOT key on', () => {
     expect(ids.filter((i) => !i.startsWith('openwop:'))).toEqual([]);
   });
-  it('R3 (the ratchet): ZERO registered tools classify as host-mediated egress — the day this grows, decide ON PURPOSE whether safe mode asks, and revisit ADR 0724', () => {
+  // ADR 0834 D7 — this pinned ZERO, i.e. that the class gate guarded nothing on an agent
+  // lane. It now pins the exact live population, so the gate has something to fail on.
+  it('R3 (the ratchet): EXACTLY the pinned agent tools classify as host-mediated egress — the day this changes, decide ON PURPOSE whether safe mode asks', () => {
     const egress = ids.filter((i) => resolveToolCapability(i)?.egress === 'host-mediated');
-    expect(egress, 'a registered tool now classifies as egress: the class gate has a live population').toEqual([]);
+    expect(egress).toEqual([DEST_SYNC]);
+  });
+  it('R3b (production witness of the CLASS gate): a hook WITHOUT the declared baseline (the name set only) still holds the classified agent tool — remove its classifier row and this goes red', () => {
+    expect(SENSITIVE_APPROVAL_TOOLS.has(DEST_SYNC)).toBe(false);
+    expect(asVoiceOrDispatchLane().evaluate([], DEST_SYNC).decision).toBe('require-approval');
   });
   it('R4: the ADR 0610 D5 witness name is NOT a registered tool id (that witness proved the hook contract on a synthetic name, not production)', () => {
     expect(ids).not.toContain(SYNTHETIC_EGRESS);

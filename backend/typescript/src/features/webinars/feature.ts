@@ -22,10 +22,13 @@ import { onCrmRecordDeleted } from '../../host/crmRecordLifecycle.js';
 import { deleteActivitiesForContactByPrefix } from '../crm/entities/activities.js';
 import { onVerifiedWebinarWebhook } from './webinarProcessor.js';
 import { unbindForm } from './entities/marketingEvent.js';
+import { registerFeatureDataExporter } from '../../host/featureDataExport.js';
+import { exportWebinarsData } from './dataExport.js';
 
 export const webinarsFeature: BackendFeature = {
   id: 'webinars',
   registerRoutes: (deps) => {
+    registerFeatureDataExporter('webinars', exportWebinarsData); // ADR 0820 §7 — read-only export, served after a plan lapse
     registerWebinarsRoutes(deps);
     // Process verified Zoom webhooks (dependency inversion — connections never
     // imports webinars). Observer-only: no workflow fires.
@@ -44,13 +47,13 @@ export const webinarsFeature: BackendFeature = {
     });
   },
   surface: { id: 'webinars', build: buildWebinarsSurface },
-  requiredPacks: [{ name: 'feature.webinars.nodes', version: '1.0.1' }],
+  requiredPacks: [{ name: 'feature.webinars.nodes', version: '1.0.2' }],
   recommends: ['crm', 'forms', 'connections'],
   toggleDefault: {
     id: 'webinars',
     label: 'Webinars',
     description:
-      'Connect Zoom to run webinars as a CRM conversion surface — registrations ride your existing forms/funnels, attendance flows back into the contact timeline + segments, and host.webinar.* events can enroll journeys. No native webinar delivery (integrate the market-leading provider); Livestorm/StreamYard follow via a connection pack. OFF by default.',
+      'Connect Zoom to run webinars as a CRM conversion surface — registrations ride your existing forms/funnels, attendance flows back into the contact timeline + segments, and host.webinar.* events can enroll journeys. No native webinar delivery (integrate the market-leading provider); Livestorm/StreamYard follow via a connection pack.',
     category: 'Marketing',
     status: 'off',
     bucketUnit: 'tenant',

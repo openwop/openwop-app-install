@@ -91,7 +91,7 @@ function withoutDeadRetention<T extends { retention?: Record<string, unknown> }>
 }
 
 export function registerGovernanceRoutes(app: Express, deps: { storage: Storage }): void {
-  app.get('/v1/host/openwop-app/governance/policy', async (req, res, next) => {
+  app.get('/host/openwop-app/governance/policy', async (req, res, next) => {
     try {
       requireSuperadmin(req, 'Governance administration');
       const policy = await getGovernancePolicy(tenantOf(req));
@@ -114,7 +114,7 @@ export function registerGovernanceRoutes(app: Express, deps: { storage: Storage 
   // superadmin Governance panel. Budgets are operator env-configured
   // (OPENWOP_MEDIA_DAILY_{TTS_CHARS,STT_BYTES}); 0 ⇒ uncapped. Usage is this
   // tenant's accumulation for the current UTC day.
-  app.get('/v1/host/openwop-app/governance/media-budget', async (req, res, next) => {
+  app.get('/host/openwop-app/governance/media-budget', async (req, res, next) => {
     try {
       requireSuperadmin(req, 'Governance administration');
       const date = new Date().toISOString().slice(0, 10);
@@ -143,7 +143,7 @@ export function registerGovernanceRoutes(app: Express, deps: { storage: Storage 
   // (0 ⇒ uncapped for this org); `null` CLEARS that field (falls back to the env
   // default). A read-modify-write that preserves the other policy fields (the
   // policy store does a full replace).
-  app.put('/v1/host/openwop-app/governance/media-budget', async (req, res, next) => {
+  app.put('/host/openwop-app/governance/media-budget', async (req, res, next) => {
     try {
       requireSuperadmin(req, 'Governance administration');
       const body = (req.body ?? {}) as { ttsChars?: unknown; sttBytes?: unknown; images?: unknown; videoJobs?: unknown };
@@ -190,7 +190,7 @@ export function registerGovernanceRoutes(app: Express, deps: { storage: Storage 
   // (OPENWOP_BYOK_DAILY_TOKEN_CAP; 0 ⇒ uncapped) with a per-org override. Usage is
   // keyed per (tenant, provider); pass ?provider=<id> to read a specific provider's
   // accumulation for the current UTC day (else zero).
-  app.get('/v1/host/openwop-app/governance/byok-chat-budget', async (req, res, next) => {
+  app.get('/host/openwop-app/governance/byok-chat-budget', async (req, res, next) => {
     try {
       requireSuperadmin(req, 'Governance administration');
       const date = new Date().toISOString().slice(0, 10);
@@ -218,7 +218,7 @@ export function registerGovernanceRoutes(app: Express, deps: { storage: Storage 
   // (0 ⇒ uncapped for this org); a softWarningPct in [0,100]; `null` CLEARS that
   // field (falls back to the env default / the 80% default). A read-modify-write
   // that preserves the other policy fields (the policy store does a full replace).
-  app.put('/v1/host/openwop-app/governance/byok-chat-budget', async (req, res, next) => {
+  app.put('/host/openwop-app/governance/byok-chat-budget', async (req, res, next) => {
     try {
       requireSuperadmin(req, 'Governance administration');
       const body = (req.body ?? {}) as { dailyTokenCap?: unknown; softWarningPct?: unknown };
@@ -268,7 +268,7 @@ export function registerGovernanceRoutes(app: Express, deps: { storage: Storage 
 
   // ADR 0187 — the per-tenant egress firewall rules. Superadmin-managed; layered
   // on top of the always-on SSRF baseline.
-  app.get('/v1/host/openwop-app/governance/egress-rules', async (req, res, next) => {
+  app.get('/host/openwop-app/governance/egress-rules', async (req, res, next) => {
     try {
       requireSuperadmin(req, 'Governance administration');
       const rules = await getEgressRules(tenantOf(req));
@@ -281,7 +281,7 @@ export function registerGovernanceRoutes(app: Express, deps: { storage: Storage 
   // Body: { mode: 'off'|'allowlist'|'denylist', hosts: string[] }. Hosts are
   // normalized + de-duped; each matches itself + any subdomain (suffix). The
   // SSRF baseline (private/loopback/metadata) is never relaxed by an allowlist.
-  app.put('/v1/host/openwop-app/governance/egress-rules', async (req, res, next) => {
+  app.put('/host/openwop-app/governance/egress-rules', async (req, res, next) => {
     try {
       requireSuperadmin(req, 'Governance administration');
       const body = (req.body ?? {}) as { mode?: unknown; hosts?: unknown };
@@ -309,7 +309,7 @@ export function registerGovernanceRoutes(app: Express, deps: { storage: Storage 
     }
   });
 
-  app.put('/v1/host/openwop-app/governance/policy', async (req, res, next) => {
+  app.put('/host/openwop-app/governance/policy', async (req, res, next) => {
     try {
       requireSuperadmin(req, 'Governance administration');
       const body = (req.body ?? {}) as Record<string, unknown>;
@@ -481,7 +481,7 @@ export function registerGovernanceRoutes(app: Express, deps: { storage: Storage 
     }
   });
 
-  app.get('/v1/host/openwop-app/governance/audit', async (req, res, next) => {
+  app.get('/host/openwop-app/governance/audit', async (req, res, next) => {
     try {
       requireSuperadmin(req, 'Governance administration');
       const actionPrefix = typeof req.query.actionPrefix === 'string' ? req.query.actionPrefix : 'assistant.';
@@ -528,7 +528,7 @@ export function registerGovernanceRoutes(app: Express, deps: { storage: Storage 
   // auditor can verify the records offline. Authority: the tenant-level
   // `host:members:manage` gate (the 2026-07 vuln-scan seam) — NEVER cross-
   // tenant (the chain read is keyed by the caller's own tenant, no override).
-  app.get('/v1/host/openwop-app/governance/audit/export', async (req, res, next) => {
+  app.get('/host/openwop-app/governance/audit/export', async (req, res, next) => {
     try {
       await requireTenantScope(req, 'host:members:manage');
       const tenantId = tenantOf(req);

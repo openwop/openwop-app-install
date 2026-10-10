@@ -1,11 +1,12 @@
 {
   "name": "feature.work-selection.nodes",
-  "version": "1.0.0",
+  "version": "1.0.1",
+  "kind": "node",
   "description": "Work-selection node pack (ADR 0534) — read the ranking the autonomous work loop would apply to a board's To Do lane, with the per-criterion values behind each score (due-date urgency, stated priority, age, blocked). READ-ONLY by design: selection is host policy a workflow may observe but never author, so there is no node that reorders or starts anything.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "work-selection", "kanban", "prioritization", "agent", "ranking"],
-  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "engines": { "openwop": ">=1.0.0 <3.0.0" },
   "nodes": [
     {
       "typeId": "feature.work-selection.nodes.preview",

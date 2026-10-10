@@ -32,13 +32,14 @@ import {
   FIELD_TYPES,
   buildFieldSpec,
   getFieldKindValidator,
+  isStrictDate,
   validateFieldValues,
   type FieldSpec,
 } from '../../host/customFields/index.js';
 import { emitHostEvent } from '../../host/hostEventDispatcher.js';
 import { LOCALE_RE, resolveLocalizedValues } from '../../host/i18n/index.js';
 import { normalizeTypeName, projectKeyOf, requireProjectNamespace } from './common.js';
-import { getTermById } from './taxonomyService.js';
+import { listNamespaceTaxonomies, purgeNamespaceTaxonomies, termNamespace } from './taxonomyService.js';
 
 export { normalizeTypeName, requireProjectNamespace } from './common.js';
 
@@ -59,8 +60,10 @@ export interface EntityTypeRecord {
   displayName: string;
   description?: string;
   fields: FieldSpec[];
-  /** `published` gates the entityApi + write nodes (Phases 4/6); in-app member
-   *  CRUD works on drafts so authors can iterate before publishing. */
+  /** `published` gates the API-key lane (the publish gate in `routes.ts`) and the
+   *  anonymous delivery (`gatePublicType`). Session authoring, workflows and chat read
+   *  and write drafts so authors can iterate before publishing. (ADR 0847 D4 — this
+   *  used to claim it gated the write NODES; the surface never did.) */
   status: EntityTypeStatus;
   /** ADR 0407 D2 — anonymous read opt-in. Absent/false ⇒ the type is invisible
    *  to the public read surface (read defaults CLOSED, the ADR 0386 posture).
@@ -406,6 +409,84 @@ async function bumpCount(tenantId: string, typeId: string, delta: 1 | -1): Promi
   throw new OpenwopError('conflict', 'Concurrent write burst — retry.', 409, { typeId });
 }
 
+/** ADR 0847 D3 — does a STORED value still fit its field's CURRENT kind? A schema edit
+ *  never rewrites rows, so a value written under an older kind can sit under a newer
+ *  one. Extension kinds never live in `values` (they ride `ext`), so they never match. */
+function liveValueFits(spec: FieldSpec, v: unknown): boolean {
+  switch (spec.type) {
+    case 'number': return typeof v === 'number' && Number.isFinite(v);
+    case 'boolean': return typeof v === 'boolean';
+    case 'date': return typeof v === 'string' && isStrictDate(v);
+    case 'enum': return typeof v === 'string' && (spec.options ?? []).includes(v);
+    case 'string':
+    case 'reference':
+    case 'media': return typeof v === 'string';
+    default: return false;
+  }
+}
+
+/**
+ * ADR 0847 D3 — the ONE schema-live projection. A user-type row is served through its
+ * type's CURRENT fields: a key the schema no longer declares, or a value that no longer
+ * fits its field's kind, is withheld, and overlays keep only current `localizable`
+ * string fields. Storage is untouched — re-adding the field brings the value back.
+ *
+ * Applied inside every service function that hands a user-type row to a caller
+ * (`getEntity`, `listEntities`, `queryEntities`, `exportEntities`, and the RETURNS of
+ * `createEntity`/`updateEntity`), so every exit — public delivery, the prerender
+ * resolvers, keys, session, the workflow surface, the chat tools, BI — inherits it.
+ * System types are code-owned and re-validated on every put; they pass through.
+ */
+export function liveView(type: EntityTypeRecord, rec: EntityRecord): EntityRecord {
+  return liveProjector(type)(rec);
+}
+
+/** A term id is `${tenantId}:${projectKey}:${taxonomy}:${slug}` (taxonomy names and
+ *  slugs carry no `:`), so namespace membership is a pure prefix check. */
+function termInNamespace(tenantId: string, projectId: string, termId: string): boolean {
+  const prefix = `${tenantId}:${projectId}:`;
+  return termId.startsWith(prefix) && termId.slice(prefix.length).split(':').length === 2;
+}
+
+/** `liveView` for many rows of one type: the field map is built once (grade-code
+ *  `ENT3CD-5` — it was rebuilt per row, on up-to-10k-row scans). */
+export function liveProjector(type: EntityTypeRecord): (rec: EntityRecord) => EntityRecord {
+  if (type.system) return (rec) => rec;
+  const specs = new Map(type.fields.map((f) => [f.key, f]));
+  return (rec) => liveRow(type, specs, rec);
+}
+
+function liveRow(type: EntityTypeRecord, specs: Map<string, FieldSpec>, rec: EntityRecord): EntityRecord {
+  const values: Record<string, string | number | boolean> = {};
+  for (const [k, v] of Object.entries(rec.values)) {
+    const spec = specs.get(k);
+    if (spec && liveValueFits(spec, v)) values[k] = v;
+  }
+  const out: EntityRecord = { ...rec, values };
+  if (rec.localizations) {
+    const overlays: Record<string, Record<string, string>> = {};
+    for (const [locale, overlay] of Object.entries(rec.localizations)) {
+      const kept: Record<string, string> = {};
+      for (const [k, v] of Object.entries(overlay)) {
+        const spec = specs.get(k);
+        if (spec && spec.localizable === true && spec.type === 'string' && typeof v === 'string') kept[k] = v;
+      }
+      if (Object.keys(kept).length > 0) overlays[locale] = kept;
+    }
+    if (Object.keys(overlays).length > 0) out.localizations = overlays;
+    else delete out.localizations;
+  }
+  // Grade-code `ENT3CD-2` — a row written before the same-namespace term rule may
+  // still carry another namespace's term (a private project's id, taxonomy and slug).
+  // Never serve it; the next save drops it from storage.
+  if (rec.termIds) {
+    const kept = rec.termIds.filter((id) => termInNamespace(type.tenantId, type.projectId, id));
+    if (kept.length > 0) out.termIds = kept;
+    else delete out.termIds;
+  }
+  return out;
+}
+
 /** Strip null/undefined (a null on update clears a key — handled by the caller). */
 function compactValues(values: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(values).filter(([, v]) => v !== null && v !== undefined));
@@ -424,8 +505,12 @@ function referenceResolverFor(type: EntityTypeRecord): (refName: string, id: str
   };
 }
 
-/** Validate + dedupe taxonomy membership: every term must exist in the tenant. */
-async function validateTermIds(tenantId: string, raw: unknown): Promise<string[]> {
+/** Validate + dedupe taxonomy membership: every term must exist in the tenant AND in
+ *  the entity's own namespace (ADR 0847 D1 / review A2 — a term id encodes its
+ *  project, taxonomy and slug, so a cross-namespace term would publish a private
+ *  project's classification on a root row; the refusal message is the same as for an
+ *  unknown term, so it is not an existence oracle either). */
+async function validateTermIds(tenantId: string, projectId: string, raw: unknown): Promise<string[]> {
   if (!Array.isArray(raw)) {
     throw new OpenwopError('validation_error', '`termIds` must be an array of term ids.', 400, { field: 'termIds' });
   }
@@ -434,7 +519,7 @@ async function validateTermIds(tenantId: string, raw: unknown): Promise<string[]
     throw new OpenwopError('validation_error', `An entity may carry at most ${MAX_TERMS_PER_ENTITY} terms.`, 400, { field: 'termIds' });
   }
   for (const termId of termIds) {
-    if (!(await getTermById(tenantId, termId))) {
+    if ((await termNamespace(tenantId, termId)) !== projectId) {
       throw new OpenwopError('validation_error', `Unknown term \`${termId}\`.`, 400, { termId });
     }
   }
@@ -522,12 +607,12 @@ export async function createEntity(input: {
     entityLabel: type.name,
     resolveReference: referenceResolverFor(type),
   })) as Record<string, string | number | boolean>;
-  const termIds = input.termIds !== undefined ? await validateTermIds(input.tenantId, input.termIds) : [];
+  const termIds = input.termIds !== undefined ? await validateTermIds(input.tenantId, type.projectId, input.termIds) : [];
   const entityId = input.entityId?.trim() || randomUUID();
   const recordKey = recordKeyOf(type.typeId, entityId);
   const prior = await records.get(recordKey);
   if (prior) {
-    if (input.entityId) return prior; // idempotent re-create (ADR 0162)
+    if (input.entityId) return liveView(type, prior); // idempotent re-create (ADR 0162)
     throw new OpenwopError('conflict', 'Entity id collision — retry.', 409, { entityId });
   }
   await bumpCount(input.tenantId, type.typeId, 1);
@@ -551,13 +636,13 @@ export async function createEntity(input: {
   if (!won) {
     await bumpCount(input.tenantId, type.typeId, -1);
     const raced = await records.get(recordKey);
-    if (raced && input.entityId) return raced; // concurrent idempotent creates converge
+    if (raced && input.entityId) return liveView(type, raced); // concurrent idempotent creates converge
     throw new OpenwopError('conflict', 'Entity id collision — retry.', 409, { entityId });
   }
   await syncRefIndex(rec, [], refTargetKeysOf(type, values));
   await syncTermIndex(rec, [], termIds);
   emitEntityWritten(rec.tenantId, type.name, rec.entityId, 'create');
-  return rec;
+  return liveView(type, rec);
 }
 
 /**
@@ -728,7 +813,7 @@ export async function casSystemEntity(input: {
   if (!existing || !input.matches(existing)) return null; // CAS miss
   const values = await validateSystemScalars(type, input.values);
   const ext = await buildSystemExt(type, input.ext);
-  const termIds = input.termIds !== undefined ? await validateTermIds(input.tenantId, input.termIds) : undefined;
+  const termIds = input.termIds !== undefined ? await validateTermIds(input.tenantId, type.projectId, input.termIds) : undefined;
   const next: EntityRecord = { ...existing, values, updatedBy: input.actor, updatedAt: new Date().toISOString() };
   if (input.orgId !== undefined) next.orgId = input.orgId; else delete next.orgId;
   if (ext && Object.keys(ext).length > 0) next.ext = ext; else delete next.ext;
@@ -769,7 +854,7 @@ export async function putSystemEntity(input: {
   if (!type?.system) throw new OpenwopError('not_found', 'System type not found.', 404, { typeName: input.typeName });
   const values = await validateSystemScalars(type, input.values);
   const ext = await buildSystemExt(type, input.ext);
-  const termIds = input.termIds !== undefined ? await validateTermIds(input.tenantId, input.termIds) : undefined;
+  const termIds = input.termIds !== undefined ? await validateTermIds(input.tenantId, type.projectId, input.termIds) : undefined;
   const localizations = input.localizations !== undefined ? await validateEntityLocalizations(type, input.localizations) : undefined;
   const recordKey = recordKeyOf(type.typeId, input.entityId);
   for (let attempt = 0; attempt < 4; attempt += 1) {
@@ -959,7 +1044,7 @@ export async function listEntities(input: {
   if (!type) throw new OpenwopError('not_found', 'Entity type not found.', 404, { typeName: input.typeName });
   const limit = Math.min(Math.max(input.limit ?? 50, 1), 200);
   // Bounded: rows keyed under the typeId prefix only — never a tenant scan.
-  const rows = await records.listByPrefix(`${type.typeId}|`);
+  const rows = (await records.listByPrefix(`${type.typeId}|`)).map(liveProjector(type));
   rows.sort((a, b) => (a.createdAt === b.createdAt ? a.entityId.localeCompare(b.entityId) : b.createdAt.localeCompare(a.createdAt)));
   let start = 0;
   if (input.cursor) {
@@ -986,7 +1071,7 @@ export async function getEntity(input: {
   const type = await getEntityType(input.tenantId, input.projectId, input.typeName);
   if (!type) return null;
   const rec = await records.get(recordKeyOf(type.typeId, input.entityId));
-  return rec && rec.tenantId === input.tenantId ? rec : null;
+  return rec && rec.tenantId === input.tenantId ? liveView(type, rec) : null;
 }
 
 export async function updateEntity(input: {
@@ -1014,7 +1099,7 @@ export async function updateEntity(input: {
       : input.localizations === null ? null
         : ((await validateEntityLocalizations(type, input.localizations)) ?? null);
   const requiredKeys = new Set(type.fields.filter((f) => f.required).map((f) => f.key));
-  const nextTermIds = input.termIds !== undefined ? await validateTermIds(input.tenantId, input.termIds) : undefined;
+  const nextTermIds = input.termIds !== undefined ? await validateTermIds(input.tenantId, type.projectId, input.termIds) : undefined;
   for (let attempt = 0; attempt < 4; attempt += 1) {
     const existing = await records.get(recordKeyOf(type.typeId, input.entityId));
     if (!existing || existing.tenantId !== input.tenantId) return null;
@@ -1056,7 +1141,7 @@ export async function updateEntity(input: {
       await syncRefIndex(next, refTargetKeysOf(type, existing.values), refTargetKeysOf(type, nextValues));
       if (nextTermIds !== undefined) await syncTermIndex(next, existing.termIds ?? [], nextTermIds);
       emitEntityWritten(next.tenantId, type.name, next.entityId, 'update');
-      return next;
+      return liveView(type, next);
     }
   }
   throw new OpenwopError('conflict', 'Concurrent entity update — retry.', 409, { entityId: input.entityId });
@@ -1295,7 +1380,11 @@ export async function queryEntities(input: {
   }
 
   let rows: EntityRecord[];
-  if (input.termId) {
+  if (input.termId && (await termNamespace(input.tenantId, input.termId)) !== type.projectId) {
+    // ADR 0847 D1 (review A2) — a term outside the type's namespace matches nothing
+    // (never an error: the public read must not become an existence oracle).
+    rows = [];
+  } else if (input.termId) {
     const markers = await termIdx.listByPrefix(`${input.termId}|`);
     // Chunked point-reads — never thousands of concurrent gets against the
     // shared pg pool (the connection-budget rule).
@@ -1308,6 +1397,7 @@ export async function queryEntities(input: {
     rows = await records.listByPrefix(`${type.typeId}|`);
   }
 
+  rows = rows.map(liveProjector(type)); // ADR 0847 D3 — before filter/sort/cursor
   if (input.excludeDrafts) rows = rows.filter((r) => r.status !== 'draft');
   const filtered = rows.filter((r) => filters.every((f) => matchesFilter(r, f)));
 
@@ -1377,7 +1467,7 @@ export async function exportEntities(input: {
 }): Promise<EntityRecord[]> {
   const type = await getEntityType(input.tenantId, input.projectId, input.typeName);
   if (!type) throw new OpenwopError('not_found', 'Entity type not found.', 404, { typeName: input.typeName });
-  const rows = await records.listByPrefix(`${type.typeId}|`);
+  const rows = (await records.listByPrefix(`${type.typeId}|`)).map(liveProjector(type));
   return rows.sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.entityId.localeCompare(b.entityId));
 }
 
@@ -1522,4 +1612,78 @@ export async function deleteRelationship(input: {
   const rec = await relationships.get(`${from.typeId}->${to.typeId}`);
   if (!rec || rec.tenantId !== input.tenantId) return false;
   return relationships.delete(rec.relId);
+}
+
+// ---- Project-namespace lifecycle (ADR 0847 D2) ----
+
+/** Types in one PROJECT namespace (never the root: `projectId` must be non-empty). */
+async function namespaceTypes(tenantId: string, projectId: string): Promise<EntityTypeRecord[]> {
+  return (await types.listForTenantIndexed(tenantId)).filter((t) => t.projectId === projectId && !t.system);
+}
+
+/** What `purgeEntityNamespace` would delete now: types + rows + relationships +
+ *  taxonomies + terms. Feeds the project delete preview. */
+export async function countEntityNamespace(tenantId: string, projectId: string): Promise<number> {
+  if (!projectId) return 0;
+  const ts = await namespaceTypes(tenantId, projectId);
+  let n = ts.length;
+  for (const t of ts) n += (await records.listByPrefix(`${t.typeId}|`)).length;
+  n += (await relationships.listForTenantIndexed(tenantId)).filter((r) => r.projectId === projectId).length;
+  const tax = await listNamespaceTaxonomies(tenantId, projectId);
+  return n + tax.taxonomies.length + tax.terms.length;
+}
+
+/**
+ * ADR 0847 D2 — delete a project's whole entities namespace (the project-delete
+ * dependent; runs BEFORE the project row goes, and a throw keeps the project).
+ *
+ * No restrict policy applies: reference fields resolve only inside one namespace
+ * (`referenceResolverFor`), so nothing outside can point in. Terms are the exception
+ * that predates the same-namespace rule — a row elsewhere may still carry one of this
+ * namespace's term ids, so those memberships are stripped first (review A2). Rows go
+ * before their types, so a crash part-way leaves the types listable and a retry
+ * converges. Returns how many rows of every kind this call deleted.
+ */
+export async function purgeEntityNamespace(tenantId: string, projectId: string): Promise<number> {
+  if (!projectId) return 0; // the workspace root is never purged by a project delete
+  let n = 0;
+  const ts = await namespaceTypes(tenantId, projectId);
+  for (const t of ts) {
+    for (const row of await records.listByPrefix(`${t.typeId}|`)) {
+      if (row.tenantId !== tenantId) continue;
+      for (const marker of await refIdx.listByPrefix(`${row.recordKey}|`)) await refIdx.delete(marker.key);
+      await syncRefIndex(row, refTargetKeysOf(t, row.values), []);
+      await syncTermIndex(row, row.termIds ?? [], []);
+      if (await records.delete(row.recordKey)) {
+        n += 1;
+        emitEntityWritten(tenantId, t.name, row.entityId, 'delete');
+      }
+    }
+  }
+  for (const rel of await relationships.listForTenantIndexed(tenantId)) {
+    if (rel.projectId === projectId && (await relationships.delete(rel.relId))) n += 1;
+  }
+  const { terms: nsTerms } = await listNamespaceTaxonomies(tenantId, projectId);
+  for (const term of nsTerms) {
+    for (const marker of await termIdx.listByPrefix(`${term.termId}|`)) {
+      let stripped = false;
+      for (let attempt = 0; attempt < 4 && !stripped; attempt += 1) {
+        const rec = await records.get(marker.recordKey);
+        if (!rec || rec.tenantId !== tenantId || !(rec.termIds ?? []).includes(term.termId)) { stripped = true; break; }
+        const next: EntityRecord = { ...rec, termIds: (rec.termIds ?? []).filter((id) => id !== term.termId), updatedBy: 'system:entities-project-purge', updatedAt: new Date().toISOString() };
+        if (next.termIds?.length === 0) delete next.termIds;
+        stripped = await records.compareAndSwap(rec, next);
+        if (stripped) emitEntityWritten(tenantId, rec.typeId.slice(rec.typeId.lastIndexOf(':') + 1), rec.entityId, 'update');
+      }
+      // A lost CAS race must keep the project (the seam's contract): retry the delete.
+      if (!stripped) throw new OpenwopError('conflict', 'Concurrent entity write during project purge — retry.', 409, { termId: term.termId });
+      await termIdx.delete(marker.key);
+    }
+  }
+  n += await purgeNamespaceTaxonomies(tenantId, projectId);
+  for (const t of ts) {
+    await counts.delete(t.typeId);
+    if (await types.delete(t.typeId)) n += 1;
+  }
+  return n;
 }

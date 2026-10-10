@@ -40,7 +40,7 @@ import { MARKET_INTEL_WORKFLOW_ID, KERNEL_WORKFLOW_ID } from './intelWorkflows.j
 const log = createLogger('campaign-brief.agent-tools');
 
 const TOGGLE_ID = 'campaign-brief';
-const STRATEGIST_AGENT_ID = 'feature.campaign-brief.agents.brief-strategist';
+const STRATEGIST_AGENT_ID = 'vendor.openwop-app.campaign-brief.agents.brief-strategist';
 
 export const CAMPAIGN_BRIEF_GET_TOOL_ID = 'openwop:campaign-brief.get-brief';
 export const CAMPAIGN_BRIEF_VALIDATE_TOOL_ID = 'openwop:campaign-brief.validate';
@@ -263,6 +263,7 @@ export async function runGenerateKernelTool(deps: StartRunDeps, input: Record<st
 export function registerCampaignBriefAgentTools(deps: StartRunDeps): void {
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: CAMPAIGN_BRIEF_GET_TOOL_ID,
       description:
@@ -281,6 +282,7 @@ export function registerCampaignBriefAgentTools(deps: StartRunDeps): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: CAMPAIGN_BRIEF_VALIDATE_TOOL_ID,
       description:
@@ -298,6 +300,7 @@ export function registerCampaignBriefAgentTools(deps: StartRunDeps): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: CAMPAIGN_BRIEF_RESEARCH_RUN_TOOL_ID,
       description:
@@ -320,6 +323,7 @@ export function registerCampaignBriefAgentTools(deps: StartRunDeps): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: CAMPAIGN_BRIEF_GENERATE_KERNEL_TOOL_ID,
       description:

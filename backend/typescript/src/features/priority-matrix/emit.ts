@@ -8,6 +8,9 @@
  */
 import { emitHostEvent } from '../../host/hostEventDispatcher.js';
 import { hostExtStorage } from '../../host/hostExtPersistence.js';
+import { createLogger } from '../../observability/logger.js';
+
+const log = createLogger('priority-matrix.emit');
 
 export type PriorityEntity = 'list' | 'idea' | 'session';
 
@@ -47,5 +50,7 @@ export function priorityMutated(input: {
       outcome: 'success',
       payload: { tenantId, listId, ...(orgId ? { orgId } : {}) },
     })
-    .catch(() => {});
+    // PM4CD-5 — a lost audit row is a compliance gap; it is never fatal to the write,
+    // and never silent.
+    .catch((err: unknown) => { log.warn('pm_audit_append_failed', { action: `priority.${entity}.${verb}`, error: err instanceof Error ? err.message : String(err) }); });
 }

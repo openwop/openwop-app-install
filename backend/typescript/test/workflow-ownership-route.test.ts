@@ -24,7 +24,7 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-const base = () => `http://127.0.0.1:${PORT}/v1/host/openwop-app/workflows`;
+const base = () => `http://127.0.0.1:${PORT}/host/openwop-app/workflows`;
 
 /** Mint a fresh anon session (distinct tenant) and return its Cookie header. */
 async function newTenantCookie(): Promise<string> {

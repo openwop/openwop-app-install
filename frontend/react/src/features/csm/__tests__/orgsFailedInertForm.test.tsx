@@ -11,12 +11,31 @@
  * That makes the seam two shapes, not one: a failed read either blocks a read
  * (a hang) or blocks a WRITE (an inert control). The second is quieter and the
  * page keeps working around it.
+ *
+ * ADR 0212 §4 (the CRM-link org picker) + HG-4 (`ui/OrgSelectionState`, inline
+ * variant). Sabotage-witnessed (w7 grade-tests): `orgsFailed={false}` reds the
+ * failure-copy and retry legs; gating `load()` on `orgs` reds the first leg;
+ * `retry={() => undefined}` reds the retry leg.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, cleanup, act, screen, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import type * as C from '../csmClient.js';
+import type { Account } from '../csmClient.js';
 
-const { listOrgs, listAccounts } = vi.hoisted(() => ({ listOrgs: vi.fn(), listAccounts: vi.fn() }));
+// EVERY fetching export is replaced. `listCrmCompanies` used to fall through
+// to the real module via the spread — the editor defaults to the first org and
+// fetches its companies — which is why this file sat on the live-fetch
+// allowlist (ADR 0661).
+const api = vi.hoisted(() => ({
+  listOrgs: vi.fn<typeof C.listOrgs>(),
+  listAccounts: vi.fn<typeof C.listAccounts>(),
+  listCrmCompanies: vi.fn<typeof C.listCrmCompanies>(),
+  createAccount: vi.fn<typeof C.createAccount>(),
+  updateAccount: vi.fn<typeof C.updateAccount>(),
+  deleteAccount: vi.fn<typeof C.deleteAccount>(),
+}));
+const { listOrgs, listAccounts } = api;
 // BOTH come from `csmClient` — `listOrgs` is re-exported there (ADR 0212), NOT
 // from `client/accessClient` like most features. Mocking accessClient here did
 // nothing at all: the real `listOrgs` ran, `orgsFailed` stayed false, and the
@@ -24,7 +43,7 @@ const { listOrgs, listAccounts } = vi.hoisted(() => ({ listOrgs: vi.fn(), listAc
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 vi.mock('../csmClient.js', async (orig) => ({
   ...(await orig<typeof import('../csmClient.js')>()),
-  listAccounts, listOrgs,
+  ...api,
 }));
 vi.mock('../../../featureToggles/FeatureAccessContext.js', async (orig) => ({
   ...(await orig<typeof import('../../../featureToggles/FeatureAccessContext.js')>()),
@@ -37,11 +56,12 @@ const ORG = { orgId: 'o1', name: 'Acme' };
 // COMPLETE against the real `Account` — `healthScore` (not `health`),
 // `renewalDate` (not `renewalAt`), and the required `tenantId`/`createdAt`. A
 // thin fixture renders no row, so the link editor never opens and every
-// assertion fails for a reason unrelated to the defect.
-const ACCOUNT = {
+// assertion fails for a reason unrelated to the defect. Typed, so a missing
+// required field (it lacked `updatedAt`) is a compile error, not a comment.
+const ACCOUNT: Account = {
   accountId: 'a1', tenantId: 't1', name: 'Globex', healthScore: 82,
   arr: 1000, renewalDate: '2027-01-01T00:00:00Z', owner: 'u1',
-  createdAt: '2026-01-01T00:00:00Z',
+  createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
 };
 
 /** The picker lives INSIDE the link editor, which opens per-account — so the
@@ -67,17 +87,20 @@ const mount = async (): Promise<void> => {
 
 afterEach(cleanup);
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   listOrgs.mockResolvedValue([ORG]);
   listAccounts.mockResolvedValue([ACCOUNT]);
+  api.listCrmCompanies.mockResolvedValue([{ companyId: 'c1', name: 'Initech' }]);
 });
 
 describe('a failed workspace read does not leave a silently unusable picker', () => {
   it('the accounts still load — this page does NOT hang, which is what hid it', async () => {
     listOrgs.mockRejectedValue(new Error('503'));
     await mount();
-    // The distinguishing fact: the dependent read is ungated, so it ran.
+    // The distinguishing fact: the dependent read is ungated, so it ran —
+    // and the account ROW is on screen, not merely requested.
     expect(listAccounts).toHaveBeenCalled();
+    expect(await screen.findByText('Globex')).toBeTruthy();
   });
 
   it('says the organization list failed, instead of just showing an empty dropdown', async () => {
@@ -111,16 +134,24 @@ describe('a failed workspace read does not leave a silently unusable picker', ()
   });
 
   it('offers a retry for the read that actually failed', async () => {
-    listOrgs.mockRejectedValue(new Error('503'));
+    listOrgs.mockRejectedValueOnce(new Error('503'));
     await mount();
     await openLinkEditor();
-    expect(screen.queryAllByRole('button').some((b) => /Try again/.test(b.textContent ?? ''))).toBe(true);
+    // The retry is WIRED, not merely present: it re-runs the read, and the
+    // picker it was replacing comes back with the organization in it.
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Try again' })); });
+    expect(listOrgs).toHaveBeenCalledTimes(2);
+    expect(document.body.textContent).not.toContain('Could not load your organizations');
+    expect(screen.getByRole('option', { name: 'Acme' })).toBeTruthy();
   });
 
   it('a healthy read says nothing', async () => {
     // The failure mode of this fix: a warning on every ordinary visit.
     await mount();
     await openLinkEditor();
+    // Positive control: the picker rendered, so the absence below is not a
+    // blank editor's.
+    expect(screen.getByRole('option', { name: 'Acme' })).toBeTruthy();
     expect(document.body.textContent).not.toContain('Could not load your organizations');
   });
 });

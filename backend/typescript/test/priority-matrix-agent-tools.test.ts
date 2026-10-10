@@ -48,7 +48,7 @@ function provider(scope: { actingUserId?: string; runId?: string } = {}) {
 }
 
 describe('CFP-1 — priority-matrix agent tools register + the pack rides exactly them', () => {
-  const packDir = new URL('../../../packs/feature.priority-matrix.agents/', import.meta.url);
+  const packDir = new URL('../../../packs/vendor.openwop-app.priority-matrix.agents/', import.meta.url);
   const manifest = JSON.parse(readFileSync(new URL('pack.json', packDir), 'utf8')) as { agents: { toolAllowlist: string[] }[] };
 
   it('all six tools register into the builtin surface', () => {

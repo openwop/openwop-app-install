@@ -62,6 +62,15 @@ function manualSource(externalId: string): SourceRef {
   return { kind: 'manual', externalId: `${MARK}${externalId}`, contentHash: contentHashOf(externalId), capturedAt: new Date().toISOString(), contentTrust: 'trusted' };
 }
 
+/** ADR 0839 D5 — did THIS seeder create the project? */
+function isSeededDemoProject(p: { name: string; createdBy?: string; charter?: { goal?: string } }): boolean {
+  if (!PROJECT_NAMES.includes(p.name)) return false;
+  if (p.createdBy !== undefined) return p.createdBy === ACTOR;
+  return p.charter?.goal === demoProjectGoal(p.name);
+}
+
+const demoProjectGoal = (name: string): string => `Deliver ${name.toLowerCase()} for Solstice Roasters.`;
+
 export async function countDemoOpsPlanning(tenantId: string): Promise<number> {
   return (await listStrategies(tenantId, { includeArchived: true })).filter((s) => s.createdBy === ACTOR).length;
 }
@@ -109,8 +118,8 @@ export async function seedDemoOpsPlanning(tenantId: string): Promise<{ created: 
   const leadUserId = (await getUserByPrincipal(tenantId, personPrincipal('maya-solberg')))?.userId;
   for (const [pi, name] of PROJECT_NAMES.entries()) {
     if (existingProjects.has(name)) continue;
-    const project = await createProject(tenantId, orgId, { name });
-    await updateProject(tenantId, project.id, { charter: { goal: `Deliver ${name.toLowerCase()} for Solstice Roasters.`, status: 'active', health: pi % 3 === 0 ? 'at-risk' : 'on-track', milestones: [{ id: `m1`, title: 'Kickoff', done: true }, { id: 'm2', title: 'Build', done: false }, { id: 'm3', title: 'Launch', done: false }] } }).catch(() => undefined);
+    const project = await createProject(tenantId, orgId, { name }, ACTOR); // ADR 0839 D5 — the seed's own mark
+    await updateProject(tenantId, project.id, { charter: { goal: demoProjectGoal(name), status: 'active', health: pi % 3 === 0 ? 'at-risk' : 'on-track', milestones: [{ id: `m1`, title: 'Kickoff', done: true }, { id: 'm2', title: 'Build', done: false }, { id: 'm3', title: 'Launch', done: false }] } }).catch(() => undefined);
     if (leadUserId) await addProjectMember(tenantId, project.id, `user:${leadUserId}`, 'lead').catch(() => undefined);
     const board = await ensureSubjectBoard(tenantId, { kind: 'project', id: project.id }, `${name} board`);
     const cols = ['todo', 'doing', 'done'];
@@ -260,7 +269,12 @@ export async function clearDemoOpsPlanning(tenantId: string, storage: Storage): 
   // cascade needs `storage`; a partial meta-only delete is the PRJ2-M1
   // inversion), so cascade it HERE first — a user who opened a chat on a demo
   // project must not orphan it on demo-clear.
-  for (const p of (await listProjects(tenantId)).filter((x) => PROJECT_NAMES.includes(x.name))) {
+  // ADR 0839 D5 (`PRJ3WF-5`) — a NAME is not a mark: this used to delete any project
+  // whose name matched a demo name, so a person's own "Website relaunch" went with the
+  // demo data, board and chat included. Only rows the seed made: stamped with its actor,
+  // or — for rows seeded before the stamp existed — unstamped and still carrying the
+  // seed's exact charter goal.
+  for (const p of (await listProjects(tenantId)).filter(isSeededDemoProject)) {
     await deleteConversationCompletely(storage, tenantId, subjectConversationId(tenantId, projectSubject(p.id)));
     const r = await deleteProject(tenantId, p.id); if (r.deleted) cleared += 1;
   }

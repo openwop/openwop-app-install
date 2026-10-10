@@ -98,8 +98,24 @@ import type { WorkflowDefinition } from '../src/executor/types.js';
  *  approval gate keeps the plan editable before any core WorkItem is written.
  *  This is a declared +1—not an unreviewed excuse to hide an App Builder-local
  *  runner—and the generic core node is independently exercised by
- *  kanban-work-items-pack.test.ts. */
-const CEILING = 119;
+ *  kanban-work-items-pack.test.ts.
+ *
+ *  119 → 122 (2026-09-30, ADR 0785 P3/P4): `claude-code.mcp.{add-todo,schema-lookup,
+ *  permission}` are MCP TOOL PROJECTIONS, the same family as every
+ *  `notebooks.mcp.*` / `app-builder.mcp.*` / `docs.mcp.*` / `commerce.ucp.mcp.*` row
+ *  already counted here: their params arrive as the tool call's `arguments`, AJV-
+ *  validated against the tool's inputSchema BEFORE the run starts
+ *  (`mcpSemantics.callTool`), and a param-less from-chain copy fails closed at the
+ *  node's own validation (`title`/`kind`/`tool_name` required → typed failure). A
+ *  declared +3 for one family, not a silent raise.
+ *
+ *  122 → 123 (2026-10-06, ADR 0837 D7): `crm-ops.triage` :: contactId. The Triage
+ *  action launches it chain-backed SAME-ID with `{ contactId, variant }` as run
+ *  inputs (the deferred variable bag), never a param-less copy; a param-less
+ *  from-chain copy fails closed at its first node (`get-contact` → the surface's
+ *  `requireStr` → a typed `validation_error` naming `contactId`). There is no
+ *  honest default for "which contact". A declared +1, not a silent raise. */
+const CEILING = 123;
 
 /** ADR 0507 — the EMBEDDED family, invisible until the detector was widened. These
  *  freeze to `''` rather than `undefined`, so the node SUCCEEDS on truncated input

@@ -65,6 +65,7 @@ async function resolveReadOrg(
 export function registerComputerUseAgentTools(): void {
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: COMPUTER_USE_STATUS_TOOL_ID,
       description:

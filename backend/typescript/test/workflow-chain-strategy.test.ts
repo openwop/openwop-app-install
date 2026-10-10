@@ -131,18 +131,18 @@ describe('strategy cadence reconcile (ADR 0231)', () => {
   it('PUT registers deterministic jobs; disabling removes them; bad cron 400s', async () => {
     const tenantId = `org:cad-${Date.now()}-${n++}`;
     const c = client();
-    const login = await c.post('/v1/host/openwop-app/test/login', { email: `cad-${Date.now()}@acme.test`, tenantId });
+    const login = await c.post('/host/openwop-app/test/login', { email: `cad-${Date.now()}@acme.test`, tenantId });
     expect(login.status).toBe(201);
-    await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+    await c.post('/host/openwop-app/orgs', { name: 'Acme' });
 
     // Enable the weekly check-in cadence.
-    const put = await c.put('/v1/host/openwop-app/strategy/cadence', {
+    const put = await c.put('/host/openwop-app/strategy/cadence', {
       weeklyCheckin: { enabled: true, cron: '0 9 * * 1' },
     });
     expect(put.status, JSON.stringify(put.body)).toBe(200);
     expect(put.body.config.weeklyCheckin.enabled).toBe(true);
 
-    const readBack = await c.get('/v1/host/openwop-app/strategy/cadence');
+    const readBack = await c.get('/host/openwop-app/strategy/cadence');
     expect(readBack.body.config.weeklyCheckin.cron).toBe('0 9 * * 1');
 
     // The deterministic job exists and points at the chain-expanded workflow.
@@ -150,14 +150,14 @@ describe('strategy cadence reconcile (ADR 0231)', () => {
     const job = await getJob(`strategy-cadence:weeklyCheckin:${slugged}`);
     expect(job).toBeTruthy();
     expect(job!.tenantId).toBe(tenantId);
-    expect(job!.workflowId).toBe(`wf.strategy-weekly-checkin.cadence-${slugged}`);
+    expect(job!.workflowId).toBe(`wf.cadence.strategy-weekly-checkin.${slugged}`);
 
     // Disable ⇒ the job is removed. Re-save is idempotent.
-    const off = await c.put('/v1/host/openwop-app/strategy/cadence', { weeklyCheckin: { enabled: false, cron: '0 9 * * 1' } });
+    const off = await c.put('/host/openwop-app/strategy/cadence', { weeklyCheckin: { enabled: false, cron: '0 9 * * 1' } });
     expect(off.status).toBe(200);
     expect(await getJob(`strategy-cadence:weeklyCheckin:${slugged}`)).toBeFalsy();
 
     // Invalid cron fails closed.
-    expect((await c.put('/v1/host/openwop-app/strategy/cadence', { metricSync: { enabled: true, cron: 'not a cron' } })).status).toBe(400);
+    expect((await c.put('/host/openwop-app/strategy/cadence', { metricSync: { enabled: true, cron: 'not a cron' } })).status).toBe(400);
   });
 });

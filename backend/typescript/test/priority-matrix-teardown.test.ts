@@ -31,7 +31,7 @@ beforeAll(async () => {
 });
 afterAll(async () => { await closeApp(); });
 
-const L = '/v1/host/openwop-app/priority-matrix/lists';
+const L = '/host/openwop-app/priority-matrix/lists';
 
 interface Seeded { c: Client; tenantId: string; orgId: string; listIds: string[]; cardIds: string[] }
 
@@ -41,9 +41,9 @@ interface Seeded { c: Client; tenantId: string; orgId: string; listIds: string[]
 async function seedTenant(prefix: string): Promise<Seeded> {
   const c = makeClient(() => BASE);
   const tenantId = `org:${prefix}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-  const login = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail(prefix), tenantId });
+  const login = await c.post('/host/openwop-app/test/login', { email: uniqEmail(prefix), tenantId });
   expect(login.status, JSON.stringify(login.body)).toBe(201);
-  const orgId = (await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
+  const orgId = (await c.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
 
   const single = (await c.post(L, { orgId, name: 'Single bets', presetId: 'weighted' })).body;
   const multi = (await c.post(L, { orgId, name: 'Multi bets', presetId: 'weighted', votingMode: 'multi-voter' })).body;

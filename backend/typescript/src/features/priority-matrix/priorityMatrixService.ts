@@ -28,11 +28,11 @@ import type { ScoreCompleteness } from './scoring.js';
 import { deriveScheduleStatus, rollupSchedule, type ScheduleRollup, type ScheduleState, type ScheduleStatus } from './schedule.js';
 import { indexList, indexIdea, removeList, ideaCardIds, reindexListIdeas } from './priorityMatrixKnowledgeService.js';
 import { priorityMutated } from './emit.js';
-import { deleteIntakeRowsForList } from './intake.js';
+import { deleteIntakeRowsForList, deleteIntakeRowsForCard } from './intake.js';
 import { createLogger } from '../../observability/logger.js';
 
 const log = createLogger('features.priority-matrix');
-import { deleteScoreChangesForList, appendIdeaScoreChange } from './scoreHistory.js';
+import { deleteScoreChangesForList, deleteScoreChangesForCard, appendIdeaScoreChange } from './scoreHistory.js';
 import {
   CRITERIA_PRESETS, DEFAULT_STATUS_COLUMNS, PRESET_IDS,
   type Aggregation, type AgendaSort, type Criterion, type CriteriaSet, type IdeaSchedule, type IdeaScore, type IdeaVote,
@@ -379,7 +379,10 @@ export async function deleteList(tenantId: string, id: string, actor?: string): 
   // no standalone delete path, so this is the only chance to evict their KB docs.
   const cardIds = await ideaCardIds(current.boardId);
   // Board first (its cards become unreachable), then the score overlays + votes + sessions.
-  await deleteBoard(current.boardId);
+  // ADR 0842 D5 — the card hook skips its per-card sweeps for this list (see
+  // `listsBeingDeleted`); the list-wide sweeps below, and `removeList`'s KB eviction, own them.
+  listsBeingDeleted.add(id);
+  try { await deleteBoard(current.boardId); } finally { listsBeingDeleted.delete(id); }
   await removeList(tenantId, current.orgId, id, cardIds);
   for (const s of await scores.listByPrefix(`${id}::`)) await scores.delete(`${s.listId}::${s.cardId}`);
   for (const sc of await schedules.listByPrefix(`${id}::`)) await schedules.delete(`${sc.listId}::${sc.cardId}`);
@@ -701,13 +704,26 @@ export async function editIdea(
  * It resolves the owning list from the card's board, so a card belonging to no PM list is
  * a no-op.
  */
+/**
+ * Lists `deleteList` is tearing down right now. Its `deleteBoard` runs this module's card
+ * hook once per card while the list row still exists, and the per-card sweeps below would
+ * then re-read the tenant's whole score trail once per card — before `deleteList` sweeps
+ * the same rows list-wide anyway. A list in this set skips the per-card overlay sweeps
+ * (its list-wide sweeps own them); every other door still gets them.
+ */
+const listsBeingDeleted = new Set<string>();
+
 async function cleanupOverlaysForDeletedCard(cardId: string, card: KanbanCard): Promise<void> {
-  const owning = (await lists.list()).filter((l) => l.boardId === card.boardId);
-  for (const list of owning) {
+  for (const list of await listsOwningBoard(card.boardId)) {
     const listId = list.id;
+    if (listsBeingDeleted.has(listId)) continue;
     await scores.delete(`${listId}::${cardId}`);
     for (const v of await votes.listByPrefix(`${listId}::${cardId}::`)) await votes.delete(`${listId}::${cardId}::${v.voterId}`);
     await schedules.delete(`${listId}::${cardId}`);
+    // ADR 0842 D5 — intake (requester names/emails), evidence (addedBy) and the score
+    // trail (actor/voterId) were left behind until the whole LIST went.
+    await deleteIntakeRowsForCard(listId, cardId);
+    await deleteScoreChangesForCard(list.tenantId, listId, cardId);
     // The KB doc — `indexIdea` evicts it because the card is already gone from the live
     // ranking by the time this hook runs. This is the eviction that had NO caller outside
     // PM, and therefore the reason a kanban-side delete left a deleted idea retrievable.
@@ -722,6 +738,21 @@ async function cleanupOverlaysForDeletedCard(cardId: string, card: KanbanCard): 
 }
 
 /**
+ * ADR 0842 D6 — the lists backed by `boardId`, read through the BOARD's tenant (a prefix
+ * read of that tenant's lists) instead of `lists.list()` over every tenant, which both
+ * kanban hooks used to do on every card and board delete. The board is still readable
+ * inside a card hook on the `deleteList → deleteBoard` path (`deleteBoard` deletes the
+ * cards BEFORE the board row); a card whose board is already gone is a no-op, and the
+ * list-wide sweeps in `deleteList` and the tenant-teardown hook own that case. Do not
+ * "fix" it back into a global scan.
+ */
+async function listsOwningBoard(boardId: string): Promise<PriorityList[]> {
+  const board = await getBoard(boardId);
+  if (!board) return [];
+  return (await listLists(board.tenantId)).filter((l) => l.boardId === boardId);
+}
+
+/**
  * ADR 0667 D5(b) — claim a board that backs a priority list, so kanban's delete ROUTE can
  * refuse and name PM's own door instead of silently emptying the list.
  *
@@ -731,7 +762,7 @@ async function cleanupOverlaysForDeletedCard(cardId: string, card: KanbanCard): 
  * renders empty with every score, vote, intake and evidence row intact and no signal.
  */
 async function claimBoardForPriorityList(boardId: string): Promise<{ feature: string; ownerLabel: string } | null> {
-  const owning = (await lists.list()).find((l) => l.boardId === boardId);
+  const owning = (await listsOwningBoard(boardId))[0];
   return owning ? { feature: 'priority-matrix', ownerLabel: owning.name } : null;
 }
 
@@ -749,6 +780,10 @@ export async function deleteIdea(tenantId: string, listId: string, cardId: strin
   await scores.delete(`${listId}::${cardId}`);
   for (const v of await votes.listByPrefix(`${listId}::${cardId}::`)) await votes.delete(`${listId}::${cardId}::${v.voterId}`);
   await schedules.delete(`${listId}::${cardId}`);
+  // ADR 0842 D5 — and the per-card overlays carrying people (the kanban hook above also
+  // runs on this delete; both sweeps are idempotent).
+  await deleteIntakeRowsForCard(listId, cardId);
+  await deleteScoreChangesForCard(tenantId, listId, cardId);
   await indexIdea(tenantId, list, cardId, actor); // card gone ⇒ removes the KB doc
   // CMNT-2 — cascade this idea's comment threads (resourceId `${listId}#${cardId}`).
   // Best-effort, never silent; see the note in `deleteList`.
@@ -1255,6 +1290,11 @@ export async function createPlanningSession(
         title: name,
         kind: 'board-agenda',
         format: 'markdown',
+        // ADR 0842 D3 — a project-bound list's agenda belongs to the PROJECT: the
+        // membership gate then applies to the document (a private project's top ideas
+        // were readable by every org viewer) and ADR 0839's project-delete cascade takes
+        // it. A dangling project makes this throw, which falls to the inline floor below.
+        ...(list.projectId ? { ownerSubject: { kind: 'project', id: list.projectId } } : {}),
         provenance: { producedBy: { kind: 'user', id: createdBy } },
         createdBy,
       });
@@ -1264,7 +1304,9 @@ export async function createPlanningSession(
         producedBy: { kind: 'user', id: createdBy },
       });
       agendaDocumentId = doc.documentId;
-    } catch {
+    } catch (err) {
+      // PM4CD-5 — the inline floor is right; dropping the reason silently was not.
+      log.warn('pm_agenda_document_compose_failed', { listId, error: err instanceof Error ? err.message : String(err) });
       // Documents compose is best-effort; the inline agenda is the floor. Roll back
       // a doc that was created before the version write failed, so we never leave an
       // orphan empty board-agenda behind.
@@ -1337,7 +1379,7 @@ export async function updatePlanningSession(
   // version (grade-code F2).
   if (existing.agendaDocumentId) {
     try { await addVersion(tenantId, list.orgId, existing.agendaDocumentId, { content: agendaMarkdown, producedBy: { kind: 'user', id: updatedBy } }); }
-    catch { /* best-effort */ }
+    catch (err) { log.warn('pm_agenda_document_version_failed', { listId, sessionId, error: err instanceof Error ? err.message : String(err) }); } // best-effort, never silent
   }
   priorityMutated({ entity: 'session', verb: 'updated', tenantId, actor: updatedBy, listId, entityId: next.id, orgId: list.orgId });
   return next;
@@ -1398,7 +1440,10 @@ export async function purgeTenantPriorityMatrix(tenantId: string): Promise<numbe
   if (!tenantId) return 0;
   let removed = 0;
   for (const list of await listLists(tenantId)) {
-    await deleteBoard(list.boardId);
+    // ADR 0842 D5 — keep the card hook quiet here too (this docblock's own "must not fan
+    // out KB/comment work"): the sweeps below own every per-card overlay.
+    listsBeingDeleted.add(list.id);
+    try { await deleteBoard(list.boardId); } finally { listsBeingDeleted.delete(list.id); }
     for (const s of await scores.listByPrefix(`${list.id}::`)) { await scores.delete(`${s.listId}::${s.cardId}`); removed += 1; }
     for (const sc of await schedules.listByPrefix(`${list.id}::`)) { await schedules.delete(`${sc.listId}::${sc.cardId}`); removed += 1; }
     for (const v of await votes.listByPrefix(`${list.id}::`)) { await votes.delete(`${v.listId}::${v.cardId}::${v.voterId}`); removed += 1; }

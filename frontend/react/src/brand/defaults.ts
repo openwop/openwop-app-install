@@ -51,6 +51,10 @@ export interface BrandConfig {
   faviconSrc: string;
   /** `<title>` of the document shell. Build-time only. */
   documentTitle: string;
+  /** `<meta name="description">` of the document shell (ADR 0824 D6) — what a
+   *  search result or link preview shows before any page applies its own SEO.
+   *  Build-time only. */
+  description: string;
   /** Web-font stylesheet `<link href>`. Build-time only. */
   fontsHref: string;
   /** Primary deployment domain — surfaced in the privacy disclosure. */
@@ -98,6 +102,9 @@ export const BRAND_DEFAULTS: BrandConfig = {
     "<text x='16' y='22' font-family='Instrument Serif,Times New Roman,serif' " +
     "font-style='italic' font-size='20' fill='%23f4f1ea' text-anchor='middle'>O</text></svg>",
   documentTitle: 'OpenWOP — agent platform',
+  description:
+    'The reference app for OpenWOP, the open-source protocol for multi-agent workflow ' +
+    'orchestration. Watch a workflow run, pause it for approval, rewind it.',
   fontsHref:
     'https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1' +
     '&family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500&display=swap',
@@ -197,6 +204,7 @@ export const BRAND_ENV_KEYS = {
   logoSrc: 'VITE_BRAND_LOGO_SRC',
   faviconSrc: 'VITE_BRAND_FAVICON_SRC',
   documentTitle: 'VITE_BRAND_DOCUMENT_TITLE',
+  description: 'VITE_BRAND_DESCRIPTION',
   fontsHref: 'VITE_BRAND_FONTS_HREF',
   primaryDomain: 'VITE_BRAND_PRIMARY_DOMAIN',
   instanceName: 'VITE_BRAND_INSTANCE_NAME',
@@ -263,6 +271,7 @@ export function resolveBrandFromEnv(
     logoSrc: markSrc,
     faviconSrc: coalesce(env[k.faviconSrc], BRAND_DEFAULTS.faviconSrc),
     documentTitle: coalesce(env[k.documentTitle], BRAND_DEFAULTS.documentTitle),
+    description: coalesce(env[k.description], BRAND_DEFAULTS.description),
     fontsHref: coalesce(env[k.fontsHref], BRAND_DEFAULTS.fontsHref),
     primaryDomain: coalesce(env[k.primaryDomain], BRAND_DEFAULTS.primaryDomain),
     instanceName: coalesce(env[k.instanceName], BRAND_DEFAULTS.instanceName),

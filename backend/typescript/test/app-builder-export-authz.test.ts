@@ -50,13 +50,13 @@ function client() {
   return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b) };
 }
 
-const AB = (orgId: string, rest: string): string => `/v1/host/openwop-app/app-builder/orgs/${encodeURIComponent(orgId)}${rest}`;
+const AB = (orgId: string, rest: string): string => `/host/openwop-app/app-builder/orgs/${encodeURIComponent(orgId)}${rest}`;
 
 async function signInWithCanvas(tag: string): Promise<{ user: ReturnType<typeof client>; orgId: string; canvasId: string }> {
   const user = client();
-  const login = await user.post('/v1/host/openwop-app/test/login', { email: `${tag}@acme.test`, tenantId: `org:${tag}` });
+  const login = await user.post('/host/openwop-app/test/login', { email: `${tag}@acme.test`, tenantId: `org:${tag}` });
   expect(login.status, JSON.stringify(login.body)).toBe(201);
-  const org = await user.post('/v1/host/openwop-app/orgs', { name: tag });
+  const org = await user.post('/host/openwop-app/orgs', { name: tag });
   const orgId = org.body.orgId as string;
   const created = await user.post(AB(orgId, '/canvases'), { name: 'App' });
   expect(created.status, JSON.stringify(created.body)).toBe(201);
@@ -89,7 +89,7 @@ describe('app-builder verb denial paths (grade pass AB-CODE-9)', () => {
   it("cross-tenant org id → 404 on the export verbs (IDOR guard, no existence leak)", async () => {
     const a = await signInWithCanvas('authz-owner');
     const b = client();
-    const login = await b.post('/v1/host/openwop-app/test/login', { email: 'authz-intruder@acme.test', tenantId: 'org:authz-intruder' });
+    const login = await b.post('/host/openwop-app/test/login', { email: 'authz-intruder@acme.test', tenantId: 'org:authz-intruder' });
     expect(login.status).toBe(201);
 
     expect((await b.post(AB(a.orgId, `/canvases/${a.canvasId}/export`), { target: 'react-tailwind' })).status).toBe(404);

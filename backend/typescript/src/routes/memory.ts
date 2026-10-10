@@ -39,7 +39,7 @@ export function registerMemoryRoutes(app: Express): void {
   // exactly as run-create does (`req.tenantId ?? 'default'`) so the ledger
   // scopes to the same tenant the run wrote under. Never read tenant from the
   // query (CTI-1).
-  app.get('/v1/host/openwop-app/memory', async (req, res, next) => {
+  app.get('/host/openwop-app/memory', async (req, res, next) => {
     try {
     const tenantId = req.tenantId ?? 'default';
     const memoryRef = resolveRef(req.query.memoryRef);
@@ -62,7 +62,7 @@ export function registerMemoryRoutes(app: Express): void {
     } catch (err) { next(err); }
   });
 
-  app.get('/v1/host/openwop-app/memory/:memoryId', async (req, res, next) => {
+  app.get('/host/openwop-app/memory/:memoryId', async (req, res, next) => {
     try {
       const tenantId = req.tenantId ?? 'default';
       const memoryRef = resolveRef(req.query.memoryRef);
@@ -76,7 +76,7 @@ export function registerMemoryRoutes(app: Express): void {
     } catch (err) { next(err); }
   });
 
-  app.delete('/v1/host/openwop-app/memory/:memoryId', async (req, res, next) => {
+  app.delete('/host/openwop-app/memory/:memoryId', async (req, res, next) => {
     try {
       const tenantId = req.tenantId ?? 'default';
       const memoryRef = resolveRef(req.query.memoryRef);

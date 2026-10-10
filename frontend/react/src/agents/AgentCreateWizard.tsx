@@ -12,6 +12,7 @@
  * then routes to the new agent's workspace.
  */
 
+import { LOCAL_TZ, cadenceLabel } from '../schedules/SubjectSchedulesPanel.js';
 import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
@@ -24,6 +25,8 @@ import { Notice } from '../ui/Notice.js';
 import { StructuredPromptEditor } from './StructuredPromptEditor.js';
 import { AgentAvatar } from './AgentAvatar.js';
 import { PageHeader } from '../ui/PageHeader.js';
+import { StateCard } from '../ui/StateCard.js';
+import { useAgentWriteAccess, writeErrorMessage } from './agentWriteAccess.js';
 import { ArrowLeftIcon, SparklesIcon } from '../ui/icons/index.js';
 import { FormError } from '../ui/Field.js';
 import { useFocusTrap } from '../ui/useFocusTrap.js';
@@ -101,7 +104,12 @@ export function AgentCreateWizard(): JSX.Element {
   // Trap focus inside the wizard for its whole lifetime (AGT-1) so Tab can't
   // escape to the page behind it; lands on the first control and restores on
   // unmount. The ref is attached to the outermost wizard panel below.
-  const trapRef = useFocusTrap<HTMLElement>(true);
+  // ADR 0775 D1 — creating an agent needs `workspace:write`.
+  const canWrite = useAgentWriteAccess();
+  // Grade-ux ARUX-19 — the trap is for the WIZARD. A viewer is shown a
+  // read-only card with one link; trapping focus there locked keyboard users
+  // out of the rest of the app (WCAG 2.1.2).
+  const trapRef = useFocusTrap<HTMLElement>(canWrite);
   const [step, setStep] = useState(1);
   const [error, setError] = useState<string | null>(null);
   // ADR 0514 P3 — the describe-to-create drawer (toggle-gated, default off).
@@ -309,14 +317,30 @@ export function AgentCreateWizard(): JSX.Element {
           rosterId: entry.rosterId,
           agentId: agent.agentId,
           metadata: { label: preset.label },
+          // `SCTUX-11` — "9:00 AM" means the creator's 9:00, as on every other
+          // schedule surface; without a zone the server evaluated it in UTC.
+          timezone: LOCAL_TZ,
         });
       }
       navigate(`/agents/${encodeURIComponent(entry.rosterId)}`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(writeErrorMessage(err, t('common:error_forbidden')));
       setCreating(false);
     }
   };
+
+  // ADR 0775 D1 (grade-ux ARUX-1) — a viewer used to fill in all five steps
+  // (or describe an agent to the Agent Author) and only learn at Finish, from
+  // a raw `… → 403`, that they could not create one. Say so at the door.
+  if (!canWrite) {
+    return (
+      <section>
+        <Link to="/agents" className="u-fs-12 muted"><ArrowLeftIcon size={12} /> {t('backToAgents')}</Link>
+        <PageHeader eyebrow={t('templatesEyebrow')} title={t('wizTitle')} />
+        <StateCard title={t('viewerCannotCreateTitle')} body={t('viewerCannotCreateBody')} />
+      </section>
+    );
+  }
 
   return (
     <section ref={trapRef}>
@@ -527,7 +551,7 @@ export function AgentCreateWizard(): JSX.Element {
             <div>
               <h3 className="u-fs-13 u-fw-600 u-m-0">{t('wizStarterSchedule')}</h3>
               <div className="u-flex u-gap-1-5 u-wrap u-mt-1">
-                <select value={scheduleWorkflowId} onChange={(e) => setScheduleWorkflowId(e.target.value)}>
+                <select value={scheduleWorkflowId} onChange={(e) => setScheduleWorkflowId(e.target.value)} aria-label={t('wizStarterSchedule')}>
                   <option value="">{t('wizNoStarterSchedule')}</option>
                   {[...selectedWorkflows].map((id) => {
                     const wf = (isCustom ? ROLE_TEMPLATES.flatMap((r) => r.workflows) : recommendedWorkflows).find((w) => w.workflowId === id);
@@ -537,8 +561,8 @@ export function AgentCreateWizard(): JSX.Element {
                 {/* Cadence only matters once a starter workflow is chosen — and
                     the whole block is hidden when heartbeat is "manual" (AGT-5). */}
                 {scheduleWorkflowId ? (
-                  <select value={scheduleCadence} onChange={(e) => setScheduleCadence(e.target.value)}>
-                    {CADENCE_PRESETS.map((p) => <option key={p.key} value={p.key}>{p.label}</option>)}
+                  <select value={scheduleCadence} onChange={(e) => setScheduleCadence(e.target.value)} aria-label={t('wizStarterScheduleCadence')}>
+                    {CADENCE_PRESETS.map((p) => <option key={p.key} value={p.key}>{cadenceLabel(p.cronExpr)}</option>)}
                   </select>
                 ) : null}
               </div>

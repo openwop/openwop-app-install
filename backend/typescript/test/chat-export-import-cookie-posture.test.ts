@@ -42,7 +42,7 @@ describe('chat-export import — production cookie posture (CXC-1)', () => {
     const payload = { format: 'openwop', data: { version: 'openwop-v1', title: 'Anon import', messages: [{ role: 'user', content: 'secret note' }] } };
 
     // Visitor A (no cookie ⇒ minted a fresh anon session + private tenant).
-    const impRes = await fetch(`${BASE}/v1/host/openwop-app/chat-export/import`, {
+    const impRes = await fetch(`${BASE}/host/openwop-app/chat-export/import`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload),
     });
     // Reaches the route in cookie posture — NOT 401. This is the reviewer's finding.
@@ -53,12 +53,12 @@ describe('chat-export import — production cookie posture (CXC-1)', () => {
     expect(sessionId).toBeTruthy();
 
     // Visitor A re-reads its OWN import (same cookie) — allowed.
-    const ownRead = await fetch(`${BASE}/v1/host/openwop-app/chat-export/${sessionId}`, { headers: { cookie: cookieA! } });
+    const ownRead = await fetch(`${BASE}/host/openwop-app/chat-export/${sessionId}`, { headers: { cookie: cookieA! } });
     expect(ownRead.status).toBe(200);
 
     // Visitor B (no cookie ⇒ a DIFFERENT anon session + tenant) cannot read A's import.
     // An owner-less import would instead be tenant-visible; the owned guarantee denies it.
-    const otherRead = await fetch(`${BASE}/v1/host/openwop-app/chat-export/${sessionId}`);
+    const otherRead = await fetch(`${BASE}/host/openwop-app/chat-export/${sessionId}`);
     expect(otherRead.status).not.toBe(200);
   });
 });

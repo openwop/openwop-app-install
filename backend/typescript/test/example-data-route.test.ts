@@ -33,8 +33,8 @@ describe('example-data routes (streaming + provision gate)', () => {
     await new Promise<void>((res) => server.close(() => res()));
   });
 
-  const runPath = '/v1/host/openwop-app/example-data/run';
-  const provisionPath = '/v1/host/openwop-app/example-data/provision-demo';
+  const runPath = '/host/openwop-app/example-data/run';
+  const provisionPath = '/host/openwop-app/example-data/provision-demo';
 
   it('streams NDJSON (step lines + a summary) when Accept: application/x-ndjson', async () => {
     const res = await fetch(`${BASE}${runPath}`, {

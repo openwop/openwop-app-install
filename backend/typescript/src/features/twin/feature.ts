@@ -15,10 +15,13 @@ import type { BackendFeature } from '../types.js';
 import { registerTwinRoutes } from './routes.js';
 import { setBorrowedRecallResolver } from '../../host/twinRecallSurface.js';
 import { resolveBorrowedRecall } from './borrowedRecall.js';
+import { registerFeatureDataExporter } from '../../host/featureDataExport.js';
+import { exportTwinRecallData } from './dataExport.js';
 
-export const twinFeature: BackendFeature = {
+export const twinRecallFeature: BackendFeature = {
   id: 'twin-recall',
   registerRoutes: (deps) => {
+    registerFeatureDataExporter('twin-recall', exportTwinRecallData); // ADR 0820 §7 — read-only export, served after a plan lapse
     registerTwinRoutes(deps);
     // Phase 2 — fill the host borrowed-recall seam so core dispatch can compose
     // a granted twin's owner-corpus without importing this feature (ADR 0001).
@@ -29,7 +32,7 @@ export const twinFeature: BackendFeature = {
     id: 'twin-recall',
     label: 'Digital twin recall',
     description:
-      'Digital-twin cross-subject recall (ADR 0044). Lets a tenant link an agent to a person as their twin, and lets that PERSON grant (and revoke) the agent permission to recall their own memory + knowledge. Phase 1 manages links + consent grants only; fenced recall is Phase 2. Cross-principal access is opt-in per tenant — OFF by default. Only the linked user can grant/revoke; the admin link is tenant-IDOR-guarded; all owner-derived recall is untrusted-fenced.',
+      'Digital-twin cross-subject recall. Lets a tenant link an agent to a person as their twin, and lets that PERSON grant (and revoke) the agent permission to recall their own memory + knowledge. Phase 1 manages links + consent grants only; fenced recall is Phase 2. Cross-principal access is opt-in per tenant. Only the linked user can grant/revoke; the admin link is tenant-IDOR-guarded; all owner-derived recall is untrusted-fenced.',
     category: 'Agents',
     status: 'off',
     bucketUnit: 'tenant',

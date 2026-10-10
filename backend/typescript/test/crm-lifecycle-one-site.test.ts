@@ -34,11 +34,20 @@
  * d.status` guard in `updateDeal` turns the won→won row red; reverting deals'
  * `changedFields(d, next)` to `Object.keys(patch)` turns the no-op title
  * re-PATCH row AND the won→won `updated` count red.
+ * Re-witnessed by grade-tests w4: the contact `created` emit removed, the
+ * `silent` bulk flag ignored, the surface's `origin` dropped, the dispatcher's
+ * self-trigger guard dropped, the won/lost flip guard, `changedFields` as a
+ * keys-not-diff, and the task `done` flip guard — each turns its row red.
+ *
+ * TIMING: the webhook fanout is called synchronously by the emitting write, so
+ * `delivered` is asserted after `settle()` (a queue drain, no sleep); bound RUNS start three awaits later
+ * (bindings read, feature gate, run budget), so `startRunCalls` is awaited with
+ * `vi.waitFor` on the POSITIVE control before the self-skip is asserted.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { Express } from 'express';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/index.js';
 import type { Storage } from '../src/storage/storage.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
@@ -68,15 +77,23 @@ let n = 0;
 
 let delivered: HostEventEnvelope[] = [];
 let startRunCalls: Array<{ tenantId: string; workflowId: string; metadata?: Record<string, unknown> }> = [];
-const settle = () => new Promise((r) => setTimeout(r, 25));
+/** Drain the microtask/immediate queue — no wall-clock sleep. Every lane's
+ *  `crmMutated` → `emitHostEvent` reaches the captured fanout before its first
+ *  await, so the event is in `delivered` once the write's own promise chain
+ *  (and any fire-and-forget tail) has drained. */
+const settle = async (): Promise<void> => { for (let i = 0; i < 5; i++) await new Promise<void>((r) => setImmediate(r)); };
 const ofType = (type: string, tenantId?: string) => delivered.filter((e) => e.type === type && (!tenantId || e.tenantId === tenantId));
 const CREATED = 'host.crm.contact.created';
 const IMPORTED = 'host.crm.contact.imported';
 
-interface Res<T = Record<string, any>> { status: number; body: T }
+interface Body {
+  user: { userId: string }; orgId: string; contactId: string; bookingLinkId: string; slug: string;
+  slots: Array<{ startUtcMs: number } | number>; created: number;
+}
+interface Res<T = Body> { status: number; body: T }
 function client() {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res<any>> => {
+  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
@@ -86,7 +103,7 @@ function client() {
     const single = res.headers.get('set-cookie');
     const setCookies: string[] = typeof h.getSetCookie === 'function' ? h.getSetCookie() : single ? [single] : [];
     for (const sc of setCookies) { const m = /(__session=[^;]+)/.exec(sc); if (m) cookie = m[1]!; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    return { status: res.status, body: (res.status === 204 ? undefined : await res.json().catch(() => undefined)) as Body };
   };
   return {
     get: (p: string) => call('GET', p),
@@ -98,17 +115,17 @@ type Client = ReturnType<typeof client>;
 
 async function signup(c: Client): Promise<{ userId: string; tenantId: string }> {
   const tenantId = `org:crm-ls-${Date.now()}-${n++}`;
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `crm-ls-${n++}@acme.test`, tenantId });
+  const r = await c.post('/host/openwop-app/test/login', { email: `crm-ls-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  return { userId: r.body.user.userId, tenantId };
+  return { userId: r.body.user!.userId, tenantId };
 }
 async function orgOf(c: Client): Promise<string> {
-  const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return org.body.orgId as string;
 }
 
-const CRM = '/v1/host/openwop-app/crm';
+const CRM = '/host/openwop-app/crm';
 const ALL_DAYS = Array.from({ length: 7 }, (_, day) => ({ day, start: '00:00', end: '23:30' }));
 
 beforeAll(async () => {
@@ -159,20 +176,25 @@ describe('ADR 0627 D2 — contact.created by lane (ONE site: contactsService.cre
     // self-trigger row passed because nothing was dispatched at all, this one
     // would not start either — it must, so the skip is proven origin-based.
     await createHostEventBinding({ tenantId, eventType: CREATED, workflowId: 'wf-other-listener', createdBy: userId });
-    const surface = buildCrmSurface({ tenantId, runId: 'run:surface-1', workflowId: 'wf-self-trigger' } as BundleScope);
+    const scope: BundleScope = { tenantId, runId: 'run:surface-1', workflowId: 'wf-self-trigger' };
+    const surface = buildCrmSurface(scope);
     const out = (await surface.createContact!({ name: 'Surface Lead' })) as { success: boolean; contact: { contactId: string } };
     expect(out.success).toBe(true);
     await settle();
     expect(ofType(CREATED, tenantId)).toHaveLength(1);
+    await vi.waitFor(() => {
+      expect(startRunCalls.filter((r) => r.workflowId === 'wf-other-listener'), 'the skip is origin-based: a different workflow bound to the same event DOES start').toHaveLength(1);
+    }, { timeout: 2000, interval: 10 });
     expect(startRunCalls.filter((r) => r.workflowId === 'wf-self-trigger'), 'ADR 0617 D1a — the emitting run must not re-trigger its own workflow').toHaveLength(0);
-    expect(startRunCalls.filter((r) => r.workflowId === 'wf-other-listener'), 'the skip is origin-based: a different workflow bound to the same event DOES start').toHaveLength(1);
 
     const r = await c.post(`${CRM}/contacts`, { name: 'Route Lead 2' });
     expect(r.status).toBe(201);
     await settle();
     expect(ofType(CREATED, tenantId)).toHaveLength(2);
-    expect(startRunCalls.filter((r) => r.workflowId === 'wf-self-trigger'), 'a human/route emit carries no origin and DOES start the bound workflow').toHaveLength(1);
-    expect(startRunCalls.filter((r) => r.workflowId === 'wf-other-listener')).toHaveLength(2);
+    await vi.waitFor(() => {
+      expect(startRunCalls.filter((r) => r.workflowId === 'wf-other-listener')).toHaveLength(2);
+      expect(startRunCalls.filter((r) => r.workflowId === 'wf-self-trigger'), 'a human/route emit carries no origin and DOES start the bound workflow').toHaveLength(1);
+    }, { timeout: 2000, interval: 10 });
     expect(startRunCalls.find((r) => r.workflowId === 'wf-self-trigger')!.metadata).toMatchObject({ hostEvent: { bindingId: binding.bindingId } });
   });
 
@@ -222,11 +244,11 @@ describe('ADR 0627 D2 — contact.created by lane (ONE site: contactsService.cre
     delivered = [];
     const now = Date.now();
     const anon = client();
-    const slots = await anon.get(`/v1/host/openwop-app/public-book/${create.body.slug}/slots?from=${now}&to=${now + 3 * 86400_000}&durationMin=30`);
+    const slots = await anon.get(`/host/openwop-app/public-book/${create.body.slug}/slots?from=${now}&to=${now + 3 * 86400_000}&durationMin=30`);
     expect(slots.status, JSON.stringify(slots.body)).toBe(200);
-    const slot = (slots.body.slots as Array<{ startUtcMs: number } | number>)[1]!;
+    const slot = slots.body.slots![1]!;
     const startUtcMs = typeof slot === 'number' ? slot : slot.startUtcMs;
-    const claim = await anon.post(`/v1/host/openwop-app/public-book/${create.body.slug}/claim`, { slotStartUtcMs: startUtcMs, durationMin: 30, inviteeName: 'Visitor', inviteeEmail: `book-${n++}@x.test` });
+    const claim = await anon.post(`/host/openwop-app/public-book/${create.body.slug}/claim`, { slotStartUtcMs: startUtcMs, durationMin: 30, inviteeName: 'Visitor', inviteeEmail: `book-${n++}@x.test` });
     expect(claim.status, JSON.stringify(claim.body)).toBe(201);
     await settle();
     expect(ofType(CREATED, tenantId)).toHaveLength(1);
@@ -356,17 +378,17 @@ describe('ADR 0627 D2 — transition guards decided on the landed row', () => {
 
     const r = await c.post(`${CRM}/contacts`, { name: 'Patch Me' });
     delivered = [];
-    await updateContact(r.body.contactId, {});
+    await updateContact(r.body.contactId!, {});
     await settle();
     expect(ofType('host.crm.contact.updated', tenantId), 'an empty patch is not an update').toHaveLength(0);
-    await updateContact(r.body.contactId, { name: 'Patch Me' });
+    await updateContact(r.body.contactId!, { name: 'Patch Me' });
     await settle();
     expect(ofType('host.crm.contact.updated', tenantId), 'review S1 — a value-equal re-PATCH is not an update').toHaveLength(0);
-    await updateContact(r.body.contactId, { stage: 'qualified' });
+    await updateContact(r.body.contactId!, { stage: 'qualified' });
     await settle();
     expect(ofType('host.crm.contact.updated', tenantId)).toHaveLength(1);
     expect(ofType('host.crm.contact.updated', tenantId)[0]!.payload).toMatchObject({ changed: ['stage'] });
-    await updateContact(r.body.contactId, { stage: 'qualified', name: 'Patch Me' });
+    await updateContact(r.body.contactId!, { stage: 'qualified', name: 'Patch Me' });
     await settle();
     expect(ofType('host.crm.contact.updated', tenantId), 'a multi-key patch that changes nothing is still not an update').toHaveLength(1);
   });

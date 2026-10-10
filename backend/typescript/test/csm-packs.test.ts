@@ -1,19 +1,27 @@
 /**
  * CSM↔CRM linkage packs (ADR 0212):
- *   - feature.csm.nodes@1.4.0 — health-set reclassified side-effect (ADR 0645 D3)
- *   - feature.csm.nodes@1.3.0 — health-set extended to accept `factors`
- *     (explicit, computed — which since ADR 0582 §15 MUST name its `method`
- *     rather than have `penalty-sum` invented for it) or a `deals`/`tasks` CRM
- *     fan-in (from which it derives a documented default healthScore +
- *     healthFactors, plus the §16 attribution-coverage denominators).
- *   - examples/workflow-chain-packs/csm-ops — loads clean and registers both
- *     chainIds (mirrors crm-packs.test.ts's chain-pack describe block).
+ *   - feature.csm.nodes `health-set` accepts `factors` (explicit, computed —
+ *     which since ADR 0582 §15 MUST name its `method` rather than have
+ *     `penalty-sum` invented for it) or a `deals`/`tasks` CRM fan-in (from which
+ *     it derives a documented default healthScore + healthFactors, ADR 0212 §3,
+ *     plus the §16 attribution-coverage denominators). ADR 0582 §4: the computed
+ *     path REFUSES (recorded + typed) on a partial / unscopeable fan-in; CSM-8
+ *     strict company filter; CSM-11 non-numeric score is a typed failure.
+ *   - CSMUX-13: the agent prompt's health bands are pinned to the console SSoT.
+ *   - examples/workflow-chain-packs/csm-ops — loads clean, freezes params
+ *     (RFC 0013 Path A), WF-CSM-1 the gate gates, WF-CSM-2 the reviewer sees deals.
+ * The node's manifest classification/version legs live in csm-node-replay.test.ts.
+ *
+ * SABOTAGE-WITNESSED (grade-tests w7, probes `w7g1-packs-*`): each formula term,
+ * refusal branch, prompt band and chain edge above was broken in turn and the
+ * case claiming it went red.
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { buildGraph, buildNodeInputs, freshSnapshot, markCompleted } from '../src/executor/scheduler.js';
 import {
   loadWorkflowChainPacks,
   getChain,
@@ -40,25 +48,8 @@ interface NodesManifest {
   runtime: { entry: string };
 }
 
-describe('feature.csm.nodes pack (v1.4.0)', () => {
+describe('feature.csm.nodes pack', () => {
   const manifest = JSON.parse(readFileSync(join(CSM_NODES_PACK_DIR, 'pack.json'), 'utf8')) as NodesManifest;
-
-  // ADR 0645 D3 — 1.3.0 -> 1.4.0: `health-set` was reclassified `role:"side-effect"`
-  // + `["side-effectful"]`. It is a durable writer that was labelled like a read,
-  // so nothing floored or served it and a `:fork` re-executed it. The
-  // classification legs live in `csm-node-replay.test.ts`.
-  it('declares version 1.4.0 with health-set at 1.4.0', () => {
-    expect(manifest.version).toBe('1.4.0');
-    const healthSet = manifest.nodes.find((n) => n.typeId === 'feature.csm.nodes.health-set');
-    expect(healthSet?.version).toBe('1.4.0');
-    // CSMWF-3 / ADR 0645 D3 — this line USED TO READ `.toBe('action')`, which
-    // pinned the misclassification as correct: `health-set` is a durable writer,
-    // and `action` is the label its READ sibling carries. Nothing in the executor
-    // reads `role:"action"` at all (`sideEffects.ts:185-190`), so the node was in
-    // neither the floor nor the served set and a `:fork` re-executed it against
-    // live CRM state. The classification legs live in `csm-node-replay.test.ts`.
-    expect(healthSet?.role).toBe('side-effect');
-  });
 
   // CSMUX-13 / CSMUX-9 — PROMPT-TO-SSoT PARITY. The health-insights agent's
   // system prompt used to say at-risk is `< 50` and critical `< 25`, while the
@@ -66,14 +57,14 @@ describe('feature.csm.nodes pack (v1.4.0)', () => {
   // "ARR at risk" tile counts `< 70`. The CTA that opens this agent sits on that
   // very page, beside that very facet — so an operator asking "which accounts
   // are at risk" got a DIFFERENT set than the screen showed, with nothing
-  // reconciling them. `feature.csm.agents` had ZERO tests, so nothing noticed.
+  // reconciling them. `vendor.openwop-app.csm.agents` had ZERO tests, so nothing noticed.
   //
   // This is the ARCHITECTURE.md non-negotiable: text reaching a model is
   // generated from its SSoT or TEST-PINNED to it. `CsmPage.tsx`'s `healthTier`
   // is the SSoT; this pins the prompt to it in BOTH directions, so moving either
   // one alone goes red.
   it('CSMUX-13: the agent prompt states the SAME health bands the console renders', () => {
-    const prompt = readFileSync(join(REPO_ROOT, 'packs', 'feature.csm.agents', 'prompts', 'csm-health.md'), 'utf8');
+    const prompt = readFileSync(join(REPO_ROOT, 'packs', 'vendor.openwop-app.csm.agents', 'prompts', 'csm-health.md'), 'utf8');
     const page = readFileSync(
       join(REPO_ROOT, 'frontend', 'react', 'src', 'features', 'csm', 'CsmPage.tsx'), 'utf8',
     );
@@ -92,14 +83,6 @@ describe('feature.csm.nodes pack (v1.4.0)', () => {
     // …and the OLD numbers must be gone, in both spellings.
     expect(prompt).not.toContain('`< 50`');
     expect(prompt).not.toContain('`< 25`');
-  });
-
-  it('index.mjs exports runnable health-read/health-set functions', async () => {
-    const mod = (await import(pathToFileURL(join(CSM_NODES_PACK_DIR, manifest.runtime.entry)).href)) as {
-      nodes: Record<string, (ctx: unknown) => Promise<{ status: string; outputs: unknown }>>;
-    };
-    expect(typeof mod.nodes['feature.csm.nodes.health-read']).toBe('function');
-    expect(typeof mod.nodes['feature.csm.nodes.health-set']).toBe('function');
   });
 
   it('health-set computes a documented default healthScore + healthFactors from a deals/tasks fan-in (ADR 0212 §3)', async () => {
@@ -271,8 +254,17 @@ describe('feature.csm.nodes pack (v1.4.0)', () => {
     const healthSet = await loadNode();
     const setHealth = vi.fn(async (args: unknown) => ({ account: args }));
     // An embedded `{{params.healthScore}}` freezes to a STRING (RFC 0013 Path A).
-    const ctx = { config: { accountId: 'csm:1', healthScore: '72' }, inputs: {}, features: { csm: { setHealth, listAccounts: vi.fn() } } };
-    await expect(healthSet(ctx)).rejects.toMatchObject({ code: 'validation_error' });
+    // The fixture carries a complete `factors` write (company + method), so a node
+    // WITHOUT the CSM-11 guard would drop the string score and still reach
+    // `setHealth` — this is what makes the case discriminate the guard rather
+    // than the later "nothing to write" throw (w7 probe packs-csm11 was vacuous
+    // on the bare `{ healthScore: '72' }` fixture).
+    const ctx = {
+      config: { accountId: 'csm:1', companyId: 'cmp:1', healthScore: '72' },
+      inputs: { factors: [{ factor: 'custom', weight: 1, value: 72 }], method: 'weighted-mean' },
+      features: { csm: { setHealth, listAccounts: vi.fn() } },
+    };
+    await expect(healthSet(ctx)).rejects.toMatchObject({ code: 'validation_error', message: expect.stringContaining('`healthScore` MUST be a number') });
     expect(setHealth, 'nothing may be written on the invalid-score path').not.toHaveBeenCalled();
   });
 
@@ -333,6 +325,13 @@ describe('feature.csm.nodes pack (v1.4.0)', () => {
 });
 
 describe('examples/workflow-chain-packs/csm-ops', () => {
+  // Every case below reads the chain registry; load it here so no case depends
+  // on the 'loads through…' case having run first (red under --sequence.shuffle).
+  beforeAll(() => {
+    _resetChainRegistryForTest();
+    loadWorkflowChainPacks({ roots: [CHAIN_PACK_ROOT] });
+  });
+
   it('loads through loadWorkflowChainPacks with zero errors and registers both chains', () => {
     _resetChainRegistryForTest();
     const { installed, errors } = loadWorkflowChainPacks({ roots: [CHAIN_PACK_ROOT] });
@@ -430,19 +429,15 @@ describe('examples/workflow-chain-packs/csm-ops', () => {
   });
 
   it('WF-CSM-2: the reviewer sees the deals — the REAL buildNodeInputs puts them on `artifact`, not the default port', async () => {
-    const { buildNodeInputs } = await import('../src/executor/scheduler.js');
     const def = expandChain(getChain('csm-ops.renewal-risk')!.chain, { params: { orgId: 'org-1' } });
     const reviewId = def.nodes.find((n) => n.typeId === 'core.chat.approvalGate')!.nodeId;
     const dealsId = def.nodes.find((n) => n.typeId === 'feature.crm.nodes.list-deals')!.nodeId;
     const deals = [{ dealId: 'd1', title: 'Renewal' }];
-    // Minimal scheduler graph/snapshot: one completed source feeding the gate.
-    const graph = {
-      incoming: new Map([[reviewId, (def.edges ?? []).filter((e) => e.targetNodeId === reviewId)]]),
-    } as unknown as Parameters<typeof buildNodeInputs>[1];
-    const snapshot = {
-      nodeState: new Map([[dealsId, 'completed']]),
-      nodeOutputs: new Map([[dealsId, { deals }]]),
-    } as unknown as Parameters<typeof buildNodeInputs>[2];
+    // The REAL scheduler graph + snapshot of the expanded definition, with the
+    // deals source marked completed exactly as the executor would.
+    const graph = buildGraph(def);
+    const snapshot = freshSnapshot(def);
+    markCompleted(dealsId, { deals }, snapshot);
     const ports = buildNodeInputs(reviewId, graph, snapshot, {});
     // Pre-fix this was `{ input: { deals } }`, which the executor's single-key
     // unwrap then flattened to `{ deals }` — and the gate reads `inputs.artifact`.

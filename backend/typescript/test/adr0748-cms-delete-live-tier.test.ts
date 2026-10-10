@@ -55,11 +55,11 @@ type Client = ReturnType<typeof client>;
 
 let n = 0;
 async function signup(c: Client, tenantId: string): Promise<{ userId: string }> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `del-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await c.post('/host/openwop-app/test/login', { email: `del-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
-const u = (orgId: string, s = ''): string => `/v1/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${s}`;
+const u = (orgId: string, s = ''): string => `/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${s}`;
 
 async function ownerWithEditor(): Promise<{ owner: Client; editor: Client; orgId: string }> {
   const tenantId = `org:del-${Date.now()}-${n++}`;
@@ -67,10 +67,10 @@ async function ownerWithEditor(): Promise<{ owner: Client; editor: Client; orgId
   await signup(owner, tenantId);
   const editor = client();
   const editorUser = await signup(editor, tenantId);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   const orgId = org.body.orgId as string;
-  const add = await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'E', subject: editorUser.userId, roles: ['editor'] });
+  const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'E', subject: editorUser.userId, roles: ['editor'] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
   return { owner, editor, orgId };
 }

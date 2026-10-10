@@ -12,6 +12,12 @@ Status: implemented (P1–P5, 2026-07-19)
 | P4 | SLA timer-row collection (bounded sweep, never a ticket scan), armed/settled/re-armed on lifecycle, CAS fire-once breach → host event + notification; `/support` FE (queue + detail + reply composer + intake notice), i18n ×4. |
 | P5 | Public widget lane: minted `publicIntakeKey` tenant resolution (re-mint revokes), HMAC visitor sessions (timing-safe verify), double-toggle fail-closed 404s, INTERNAL NOTES REDACTED from every public read, length caps; `service-desk.widget` sub-toggle + ACK. Widget FE embed = the chat-widget feature's embed concern (recorded — these public routes are its API). |
 
+> **CORRECTED 2026-10-07 (ADR 0850 D1).** The P2 forms sink filed EVERY form submission in the
+> tenant into the intake config's `defaultOrgId`, values verbatim, so the intake org's members read
+> other orgs' private-form leads. A form lead now becomes a ticket only when its form opts in
+> (`createTicket`, default off), only in that form's own org, and only while the `service-desk`
+> toggle is on. The intake config still routes WhatsApp and the widget.
+
 OQ-1 resolved: fixed priority enum v1. OQ-2 resolved: scalar + sweep rows. OQ-3 open (email intake — provider decision + trigger recorded). OQ-4 open (CSAT via forms — follow-on).
 
 Decision source: **docs/steward/GAP-SWEEP-2026-07.md §3 row 4** (customer-support/helpdesk is

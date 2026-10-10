@@ -3,6 +3,7 @@
  * /host/openwop-app/analytics/orgs/:orgId — read-only summary + recent events.
  */
 import { authedHeaders, config, fetchOpts } from '../../client/config.js';
+import { noteRequestStatus } from '../../client/entitlementRefresh.js';
 
 export interface Org { orgId: string; name: string }
 
@@ -42,6 +43,11 @@ export interface AnalyticsEvent {
 const root = `${config.baseUrl}/host/openwop-app`;
 
 async function asJson<T>(res: Response, ctx: string): Promise<T> {
+  // ANL-UX-19 / ADR 0857 — a plan refusal (403) re-resolves entitlements through
+  // the shared seam, so the EXISTING route guard renders the locked/upgrade panel
+  // instead of an "Analytics didn't load — Retry" card that fails forever. The
+  // UI-ENT-1b behaviour `requestJson` already has; this client hand-rolls fetch.
+  noteRequestStatus(res.status);
   if (!res.ok) {
     let detail = '';
     try { detail = ((await res.json()) as { message?: string })?.message ?? ''; } catch { /* non-JSON */ }

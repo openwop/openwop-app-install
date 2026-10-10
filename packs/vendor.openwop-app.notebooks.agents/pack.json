@@ -1,0 +1,32 @@
+{
+  "name": "vendor.openwop-app.notebooks.agents",
+  "version": "1.0.2",
+  "kind": "node",
+  "description": "Research Notebooks feature agent pack (+ Phase 5) — a feature-bound manifest agent over the ctx.features.notebooks surface, the notebooks-surface analog of vendor.openwop-app.kb.agents (distinct tooling). The Notebook Research Analyst is grounded in ONE notebook's bound sources, honors per-source context levels (Full/Excluded), cites sources, and can author + persist a transformation as a notebook-owned Document. The chat-driven actions ARE the Phase-5 'AI-chat envelope' path realized via agent+nodes (NO bespoke envelope kind / acceptor seam — the priority-matrix precedent). Its tools are the feature's registered chat tools openwop:notebooks.{search,ask,write-transformation} (CFP-1 — real registerFeatureAgentTool tools over ctx.features.notebooks, NOT the raw node typeIds that resolved to nothing). (agents[] + allowlist.)",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "notebooks", "research", "agent", "rag"],
+  "engines": { "openwop": ">=1.1.0 <3.0.0" },
+  "peerDependencies": {
+    "aiProviders": "supported",
+    "agents.manifestRuntime": "supported"
+  },
+  "agents": [
+    {
+      "agentId": "vendor.openwop-app.notebooks.agents.researcher",
+      "persona": "RESEARCH",
+      "label": "Notebook Research Analyst",
+      "description": "A research analyst grounded in ONE notebook's sources. Retrieves with openwop:notebooks.ask / openwop:notebooks.search (over ctx.features.notebooks), honors per-source context levels (Full/Excluded), composes a cited answer, and on request authors + persists a transformation (summary / key concepts / etc.) as a notebook-owned Document via openwop:notebooks.write-transformation. Tools are allowlisted to the notebooks feature surface only.",
+      "modelClass": "research",
+      "systemPromptRef": "prompts/notebook-researcher.md",
+      "toolAllowlist": [
+        "openwop:notebooks.ask",
+        "openwop:notebooks.search",
+        "openwop:notebooks.write-transformation"
+      ],
+      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
+      "confidence": { "defaultThreshold": 0.6 }
+    }
+  ],
+  "runtime": { "language": "remote", "entry": "pack.json" }
+}

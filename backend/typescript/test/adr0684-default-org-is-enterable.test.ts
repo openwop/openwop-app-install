@@ -20,6 +20,12 @@
  * So this file deliberately does NOT test a step. It runs the sequence a real
  * sign-in runs and asserts the three verbs a participant exercises, including
  * the one that silently undid the join: the NEXT session resolve.
+ *
+ * Sabotage that turns it red (each witnessed by /grade-tests probe):
+ *  - `isWorkspaceRootPair` narrowed (workspace ≠ org===tenant)   → bridge, isWorkspaceOrg, enterable
+ *  - `ensureWorkspaceRootOrg` creates with a differing tenant    → PROVISIONED org satisfies isWorkspaceOrg
+ *  - `isWorkspaceMember` authoritative scan answers true         → a subject who never joined is still refused
+ *  - auto-join drops `setActiveWorkspace`                        → listable, switchable, and sticky (step 3)
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { ensureFeatureDefaultOrgs, assertDeclarationLegal, type FeatureDefaultOrg } from '../src/host/featureDefaultOrgs.js';
@@ -29,6 +35,7 @@ import {
 } from '../src/host/accessControlService.js';
 import { autoJoinDefaultWorkspaces, setDefaultWorkspaceTargets } from '../src/host/workspaceJoinLedger.js';
 import { registerToggleDefault } from '../src/host/featureToggles/registry.js';
+import { resolveActiveWorkspace } from '../src/host/activeWorkspacePref.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
 
@@ -38,7 +45,7 @@ beforeAll(async () => {
   // DECLARED default the sweep is correctly skipped and the reachability
   // assertions below would pass vacuously on zero joins. Registering it is
   // what makes the rest of this file able to fail.
-  registerToggleDefault({ id: DECL.featureId, label: DECL.name, status: 'on', bucketUnit: 'user', salt: DECL.featureId } as never);
+  registerToggleDefault({ id: DECL.featureId, label: DECL.name, status: 'on', bucketUnit: 'user', salt: DECL.featureId });
 });
 
 const DECL: FeatureDefaultOrg = {
@@ -89,7 +96,10 @@ describe('ADR 0684 correction — a joined subject can actually enter', () => {
     //    NEXT bind and drops the preference when it fails. That re-check is the
     //    line that silently undid the join, so asserting the first two without
     //    this one would still have passed a broken build.
-    expect(await isWorkspaceMember(SUBJECT, DECL.tenantId), 're-resolve must agree').toBe(true);
+    // The exact composition the OIDC bind runs (`features/users/authRoutes.ts`):
+    // the stored preference, re-confirmed by the REAL membership predicate.
+    expect(await resolveActiveWorkspace(SUBJECT, PERSONAL, isWorkspaceMember), 'the NEXT bind must land IN the workspace')
+      .toBe(DECL.tenantId);
   });
 
   it('a subject who never joined is still refused — the assertion is not vacuous', async () => {

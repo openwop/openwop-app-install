@@ -3,8 +3,8 @@
 Canonical ReAct (Reason + Act) loop agent. The "hello world" of openwop agents — every framework that ships an agent library ships one of these (LangGraph's `react-agent`, LangChain's `create_react_agent`, CrewAI's task loop, etc.).
 
 | Pack name | `core.openwop.agents.react` |
-| Version | `1.0.0` |
-| Engine | OpenWOP `>=1.1.0 <2.0.0` |
+| Version | `1.0.4` |
+| Engine | OpenWOP `>=1.1.0 <3.0.0` |
 | Runtime | `language: remote` (pure-agent pack) |
 | Nodes | 0 |
 | Agents | 1 (`core.openwop.agents.react.default`) |

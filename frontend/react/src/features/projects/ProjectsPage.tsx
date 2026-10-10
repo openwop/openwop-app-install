@@ -60,15 +60,18 @@ export function ProjectsPage(): JSX.Element {
   const { orgs, orgId, setOrgId, orgsFailed, retry: retryOrgs } = useOrgSelection<Org>(listOrgs);
   const [accessFailed, setAccessFailed] = useState(false);
   const [query, setQuery] = useState('');
+  const [featuresOnly, setFeaturesOnly] = useState(false); // ADR 0852 D3
   const [viewMode, setViewMode] = useViewMode('projects', 'grid');
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return projects ?? [];
-    return (projects ?? []).filter(
+    const scoped = featuresOnly ? (projects ?? []).filter((p) => p.facet === 'feature') : (projects ?? []);
+    if (!q) return scoped;
+    return scoped.filter(
       (p) => p.name.toLowerCase().includes(q) || (p.charter?.goal?.toLowerCase().includes(q) ?? false),
     );
-  }, [projects, query]);
+  }, [projects, query, featuresOnly]);
+  const anyFeature = (projects ?? []).some((p) => p.facet === 'feature');
 
   const refresh = useCallback(async () => {
     try { setLoadFailed(false); setProjects(await listProjects()); }
@@ -100,7 +103,7 @@ export function ProjectsPage(): JSX.Element {
   return (
     <div data-walkthrough="projects.page">
       <PageHeader eyebrow={t('listEyebrow')} title={t('listTitle')} lede={t('listLede')} />
-      {error ? <Notice variant="error">{error}</Notice> : null}
+      {error ? <Notice variant="error" announce={error}>{error}</Notice> : null}
 
       {/* PRJ2-M4 — the access read failed, so we cannot say whether this person
           may create a project. The form stays hidden (fail-closed) and the
@@ -155,6 +158,11 @@ export function ProjectsPage(): JSX.Element {
                 onChange={(e) => setQuery(e.target.value)}
               />
             ) : null}
+            {anyFeature || featuresOnly ? (
+              <label className="u-flex u-items-center u-gap-1 u-fs-13">
+                <input type="checkbox" checked={featuresOnly} onChange={(e) => setFeaturesOnly(e.target.checked)} /> {t('facetFeaturesOnly')}
+              </label>
+            ) : null}
             <ViewToggle value={viewMode} onChange={setViewMode} className="u-ml-auto" />
           </div>
 
@@ -163,7 +171,7 @@ export function ProjectsPage(): JSX.Element {
               icon={<FolderIcon size={20} />}
               title={t('noMatchTitle')}
               body={t('noMatchBody')}
-              action={<Button variant="secondary" onClick={() => setQuery('')}>{t('clearSearch')}</Button>}
+              action={<Button variant="secondary" onClick={() => { setQuery(''); setFeaturesOnly(false); }}>{t('clearSearch')}</Button>}
             />
           ) : viewMode === 'grid' ? (
             <div className="card-grid">

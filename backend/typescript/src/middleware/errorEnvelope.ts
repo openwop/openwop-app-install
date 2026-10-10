@@ -91,6 +91,30 @@ export function sendError(
   emitEnvelope(res.req, res, status, envelope);
 }
 
+/**
+ * ADR 0858 P4 — `sendError`, plus identifiers THIS HOST MINTED, merged into
+ * `details` AFTER the entropy scrub. The scrub exists for echoed caller input; a
+ * run id is a 36-char UUID (≥32 chars of `[A-Za-z0-9-]`) and is always redacted
+ * by it, which made a refusal that names its audit run (`details.runId`, read by
+ * the corpus's negotiation scenarios) unaddressable. Never pass caller input in
+ * `minted`.
+ */
+export function sendErrorWithMintedIds(
+  res: Response,
+  status: number,
+  code: string,
+  message: string,
+  details: Record<string, unknown>,
+  minted: Readonly<Record<string, string>>,
+): void {
+  if (res.headersSent) return;
+  emitEnvelope(res.req, res, status, {
+    error: code,
+    message: sanitizeForErrorMessage(message),
+    details: { ...sanitizeDetails(details), ...minted },
+  });
+}
+
 export function errorEnvelopeMiddleware(): ErrorRequestHandler {
   // The 4-arg signature is required for express to recognize this as
   // an error-handling middleware. _next stays unused.

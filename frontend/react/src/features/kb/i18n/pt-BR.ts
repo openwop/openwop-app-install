@@ -129,7 +129,6 @@ export const messages = {
   scoreUnavailableTooltip: 'Nenhuma pontuação de relevância foi retornada para este trecho',
   reindexCancelled: 'Reindexação cancelada',
   reindexCancelFailed: 'Não foi possível cancelar a reindexação.',
-  reindexFailedWithReason: 'A reindexação falhou: {{reason}}',
   // ── KBX-4 — falhas de escrita traduzidas a partir do status HTTP ────────
   httpBadRequest: 'O servidor rejeitou esses dados. Confira os valores e tente novamente.',
   httpForbidden: 'Você não tem permissão para alterar esta coleção.',
@@ -169,4 +168,9 @@ export const messages = {
   reindexCancelConfirm: 'Descartar esta reconstrução?',
   reindexCancelBody: 'O índice parcialmente construído é excluído e a coleção mantém o modelo de embedding atual. Recomeçar reprocessa cada trecho do zero.',
   reindexJobReadFailed: 'Não foi possível ler o status da reconstrução, então o que aparece aqui pode não refletir um trabalho realmente em andamento.',
+  // KB2UX-1 — per-org authority (useKbOrgAccess).
+  accessChecking: 'Verificando suas permissões nesta organização…',
+  accessCheckFailed: 'Não foi possível confirmar suas permissões nesta organização, então os controles de edição estão ocultos. Você ainda pode pesquisar e ler; o servidor verifica cada alteração de qualquer forma.',
+  readOnlyNotice: 'Você pode pesquisar e ler a base de conhecimento desta organização. Para adicionar, alterar ou excluir conteúdo é preciso ter acesso de edição aqui — peça a um administrador da organização.',
+  reindexOwnerOnly: 'Somente um proprietário da organização pode iniciar, continuar ou descartar uma reconstrução.',
 } as const;

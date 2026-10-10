@@ -663,6 +663,26 @@ export const APP_MIGRATIONS: readonly AppMigration[] = [
       log.info('app_migration_demo_auto_ingest_rekeyed', counts);
     },
   },
+  {
+    // ADR 0789 — §Correction (the failed 2026-09-30 deploy): this version used to
+    // RUN the internal-seed ownership retract. App migrations run inside
+    // `createApp` → `recordAppVersion`, i.e. BEFORE `listen`, and in production
+    // the retract took longer than Cloud Run's 4-minute startup probe (~1,000
+    // rows at ~0.4 rows/s — a full scheduler-job scan per row), so the revision
+    // never became Ready and was rolled back, partially applied.
+    //
+    // The version is KEPT as a no-op marker, not deleted: a host that already ran
+    // the old v22 has recorded it, and renumbering would re-run whatever took its
+    // place. The work moved to `BACKGROUND_APP_JOBS` below, which runs AFTER
+    // listen, batched, resumable, with its own durable done-marker.
+    version: 22,
+    name: 'retract-internal-seed-ownership',
+    async run(): Promise<void> {
+      log.info('app_migration_internal_seed_retract_deferred', {
+        note: 'moved to the post-listen background job `internal-seed-retract` (ADR 0789 §Correction)',
+      });
+    },
+  },
 ];
 
 /** Highest version present in `migrations` (0 when empty). */
@@ -691,4 +711,119 @@ export async function runAppMigrations(
   }
   await storage.setAppMeta(APP_MIGRATION_KEY, String(latestAppMigration(migrations)));
   return { applied: pending.map((m) => m.version) };
+}
+
+/**
+ * ADR 0789 §Correction — work that must happen ONCE per install but must NEVER
+ * gate boot readiness. An app migration runs before `listen` and is awaited, so
+ * anything proportional to data volume there is an outage in waiting (it took
+ * the 2026-09-30 deploy down). A background job instead:
+ *
+ *  - starts only AFTER the server is listening (`main()`), never inside
+ *    `createApp`, so no readiness probe waits on it;
+ *  - must be IDEMPOTENT over a partially-applied state (a crash, a killed
+ *    instance, two instances at once on a rolling deploy): re-running it may
+ *    only finish the job, never redo or double-count it;
+ *  - records a durable done-marker (`app_bg_job:<id>` = `done`) only when a run
+ *    reports `complete`; until then every boot resumes it.
+ */
+export interface BackgroundAppJob {
+  id: string;
+  run(storage: Storage): Promise<{ complete: boolean }>;
+}
+
+export const BACKGROUND_APP_JOBS: readonly BackgroundAppJob[] = [
+  {
+    // ADR 0789 (ADR 0788 § Deferred) — retract the `wf.seed.*` OWNERSHIP rows of
+    // chains that became RFC 0135 `internal` (the four zero-config MCP projection
+    // chains). Ownership only: definitions + revisions stay, so replay holds; a
+    // tenant that edited its copy, or schedules it, keeps it. Idempotent by
+    // construction — a retracted row no longer exists to match — so a partial
+    // run (the failed deploy left prod at ~55 of 324 on one id) simply resumes.
+    id: 'internal-seed-retract',
+    async run(): Promise<{ complete: boolean }> {
+      const { retractInternalSeedOwnership } = await import('./seedWorkflows.js');
+      const { listChains } = await import('./workflowChainPackLoader.js');
+      const r = await retractInternalSeedOwnership();
+      log.info('app_bg_job_internal_seed_retract', { ...r });
+      // The migration-14 lesson: an empty population must never read as "done".
+      // An EMPTY corpus (after the retract's own load) is a failed load — a
+      // missing pack mount — so the job stays pending and the next boot retries.
+      // A loaded corpus with no internal chains genuinely has nothing to do.
+      const corpusLoaded = listChains().length > 0;
+      if (!corpusLoaded) {
+        log.error('app_bg_job_internal_seed_retract_no_corpus', { note: 'the chain corpus is empty — not marked done; the next boot retries' });
+      } else if (r.internalSeedIds === 0) {
+        log.warn('app_bg_job_internal_seed_retract_vacuous', { note: 'no internal zero-config chains in the loaded corpus — nothing to retract' });
+      }
+      if (r.failed > 0) log.error('app_bg_job_internal_seed_retract_incomplete', { failed: r.failed, note: 'not marked done — the next boot resumes it' });
+      return { complete: r.failed === 0 && corpusLoaded };
+    },
+  },
+];
+
+const bgMarkerKey = (id: string): string => `app_bg_job:${id}`;
+/** A single background job that has not settled after this long is treated as
+ *  HUNG: the runner stops waiting (the job stays not-done, so the next boot
+ *  retries it) and moves on. `finally` alone cannot cover a hang — a promise
+ *  that never settles never runs its `finally` (the #3056 wedge class). */
+export const BG_JOB_WEDGE_MS = 30 * 60_000;
+let bgRunning: Promise<void> | null = null;
+let bgRunningStartedAt = 0;
+
+/** Race `p` against a deadline; resolves `'timeout'` if it has not settled. */
+function withDeadline<T>(p: Promise<T>, ms: number): Promise<T | 'timeout'> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<'timeout'>((resolve) => { timer = setTimeout(() => resolve('timeout'), ms); timer.unref?.(); });
+  return Promise.race([p, deadline]).finally(() => { if (timer) clearTimeout(timer); });
+}
+
+/**
+ * Start every not-yet-done background job, sequentially, WITHOUT awaiting them:
+ * returns immediately with a handle the caller may ignore. One run per process
+ * (a second call returns the in-flight handle) — unless that run has been in
+ * flight longer than every job's deadline combined, in which case it is wedged
+ * and a fresh run starts (the jobs are idempotent, so overlap is safe). Never
+ * throws — a job failure or hang is logged and retried on the next boot.
+ */
+export function startBackgroundAppJobs(
+  storage: Storage,
+  jobs: readonly BackgroundAppJob[] = BACKGROUND_APP_JOBS,
+  opts: { jobDeadlineMs?: number } = {},
+): Promise<void> {
+  const jobDeadlineMs = opts.jobDeadlineMs ?? BG_JOB_WEDGE_MS;
+  if (bgRunning && Date.now() - bgRunningStartedAt < jobDeadlineMs * Math.max(1, jobs.length) + 60_000) return bgRunning;
+  if (bgRunning) log.error('app_bg_jobs_wedged', { startedAt: new Date(bgRunningStartedAt).toISOString(), note: 'the previous run never settled — starting a fresh one' });
+  bgRunningStartedAt = Date.now();
+  const run = (async () => {
+    // Let the caller (the listen callback) return first.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    for (const job of jobs) {
+      try {
+        if ((await storage.getAppMeta(bgMarkerKey(job.id))) === 'done') continue;
+        const started = Date.now();
+        log.info('app_bg_job_start', { id: job.id, startedAt: new Date(started).toISOString() });
+        const outcome = await withDeadline(job.run(storage), jobDeadlineMs);
+        if (outcome === 'timeout') {
+          log.error('app_bg_job_timeout', { id: job.id, ms: Date.now() - started, note: 'not marked done — the next boot retries it' });
+          continue;
+        }
+        if (outcome.complete) await storage.setAppMeta(bgMarkerKey(job.id), 'done');
+        log.info('app_bg_job_end', { id: job.id, complete: outcome.complete, ms: Date.now() - started });
+      } catch (err) {
+        log.error('app_bg_job_failed', { id: job.id, error: err instanceof Error ? err.message : String(err) });
+      }
+    }
+  })();
+  // Clear on settle, so a finished run never pins the latch (only the in-flight
+  // one dedupes). Identity-checked: a wedged run settling late must not clear
+  // the fresh run that replaced it.
+  const tracked: Promise<void> = run.finally(() => { if (bgRunning === tracked) bgRunning = null; });
+  bgRunning = tracked;
+  return tracked;
+}
+
+/** Test seam: forget the in-process run handle. */
+export function __resetBackgroundAppJobsForTests(): void {
+  bgRunning = null;
 }

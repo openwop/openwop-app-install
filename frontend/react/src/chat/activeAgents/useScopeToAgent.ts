@@ -18,7 +18,7 @@
  * @see docs/adr/0073-embeddable-conversation-view.md
  */
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { UseActiveAgentsResult } from './useActiveAgents.js';
 import type { AgentMentionEntry } from '../lib/agentMentions.js';
 
@@ -26,13 +26,23 @@ export function useScopeToAgent(
   activeAgents: UseActiveAgentsResult,
   agentEntries: readonly AgentMentionEntry[],
   agentId: string | null,
-): void {
+): boolean {
   const handled = useRef<string | null>(null);
+  // Which agent the conversation is scoped to, once it IS (state, not the ref,
+  // so a consumer re-renders when scoping lands).
+  const [scopedTo, setScopedTo] = useState<string | null>(null);
   useEffect(() => {
     if (!agentId || handled.current === agentId) return;
     const entry = agentEntries.find((e) => e.agentId === agentId || e.slug === agentId.toLowerCase());
     if (!entry) return; // catalog still loading — this effect re-runs when entries arrive
     handled.current = agentId;
     activeAgents.activateAgent(entry);
+    setScopedTo(agentId);
   }, [activeAgents, agentEntries, agentId]);
+  // ADR 0773 — true once the requested agent is active (or none was requested).
+  // A caller that SENDS on the user's behalf (an embed `prompt`) must wait for
+  // this: a turn sent before the catalog loads goes out unscoped, i.e. as plain
+  // chat with none of the agent's tools (measured: the builder's empty-sheet
+  // "Draft it" reached the model with tools=0).
+  return !agentId || scopedTo === agentId;
 }

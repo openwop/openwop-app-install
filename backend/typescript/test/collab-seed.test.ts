@@ -39,11 +39,11 @@ describe('claimCollabSeed (CAS election)', () => {
 let n = 0;
 async function login(): Promise<{ cookie: string; tenantId: string }> {
   const tenantId = `org:seed-${Date.now()}-${n++}`;
-  const res = await fetch(`${BASE}/v1/host/openwop-app/test/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: `seed-${Date.now()}-${n++}@a.test`, tenantId }) });
+  const res = await fetch(`${BASE}/host/openwop-app/test/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: `seed-${Date.now()}-${n++}@a.test`, tenantId }) });
   let cookie = ''; for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
   return { cookie, tenantId };
 }
-const claim = (cookie: string, canvasId: string) => fetch(`${BASE}/v1/host/openwop-app/canvas-collab/${canvasId}/claim-seed`, { method: 'POST', headers: { cookie } });
+const claim = (cookie: string, canvasId: string) => fetch(`${BASE}/host/openwop-app/canvas-collab/${canvasId}/claim-seed`, { method: 'POST', headers: { cookie } });
 
 describe('claim-seed route', () => {
   it('returns seed:true to the first claimant, seed:false after (toggle-gated, tenant-scoped)', async () => {

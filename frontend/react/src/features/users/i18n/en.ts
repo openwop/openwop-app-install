@@ -117,6 +117,7 @@ export const messages = {
   deleteUserBody: 'This permanently erases the account of {{name}} and every record stored under it — profile, memories, workflows, runs, and stored credentials. There is no undo.',
   selfLockoutRefused: 'You can\'t disable, sign out, or delete your own account from here — ask another admin.',
   legalHoldRefused: 'This workspace is under legal hold, so user data cannot be erased. Lift the hold, then retry.',
+  ownerRequiredRefused: 'Only an owner of this workspace can disable, sign out, or delete another owner. Ask an owner to do it.',
   addRequired: 'Enter a principal id.',
   addInvalidPrincipal: 'A principal id is a single token without spaces, e.g. oidc:sub-123.',
   addDuplicate: 'A user with this principal id already exists.',

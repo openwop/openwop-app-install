@@ -56,7 +56,7 @@ import { ensureChallengeAuthor, CHALLENGE_AUTHOR_AGENT_ID } from './challengeAut
 import { guardedEgressFetch } from '../../host/webhookEgressGuard.js';
 import { isForeignOwned } from '../../routes/workflows.js';
 
-export const KICKTODO_CREATOR_PREFIX = '/v1/host/openwop-app/kicktodo/creator';
+export const KICKTODO_CREATOR_PREFIX = '/host/openwop-app/kicktodo/creator';
 
 /** Portfolio-read fan-out cap: the roster `workflows[]` array is tenant-
  *  editable with no length bound, so the /author read must not turn its size

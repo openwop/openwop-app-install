@@ -18,6 +18,11 @@
  *    the bytes — reached every viewer in the tenant, including members of
  *    orgs whose media routes 403 them. Media's own agent tool refuses exactly
  *    this ("internal storage credentials — they NEVER appear in tool output").
+ *
+ * Tracked in docs/steward/UX_UPGRADE-media.md (MED2-B1, MED2-B2, MED2-R3). Reds
+ * if: `deleteAsset` deletes the row when the bytes are another tenant's, or
+ * refuses when they are already gone; the row delete is dropped; `select`
+ * spreads the row (or nests it) into its recorded output.
  */
 import http from 'node:http';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -52,7 +57,7 @@ async function anAsset(name: string) {
     tenantId: TENANT, orgId: ORG, name, contentType: 'image/png',
     sizeBytes: Buffer.from(png, 'base64').byteLength,
     storageRef: stored.storageRef, serveToken: stored.serveToken, uploadedBy: 'u-1',
-  } as never);
+  });
 }
 
 describe('MED2-B1 — a delete that cannot free the bytes does not destroy the record', () => {
@@ -66,7 +71,7 @@ describe('MED2-B1 — a delete that cannot free the bytes does not destroy the r
       tenantId: TENANT, orgId: ORG, name: 'foreign-bytes.png', contentType: 'image/png',
       sizeBytes: foreign.sizeBytes, storageRef: foreign.storageRef, serveToken: foreign.serveToken,
       uploadedBy: 'u-1',
-    } as never);
+    });
 
     await expect(deleteAsset(TENANT, ORG, a.assetId), 'a delete that cannot free foreign bytes must not report success')
       .rejects.toMatchObject({ details: { reason: 'bytes_not_removed' } });
@@ -97,7 +102,7 @@ describe('MED2-B2 — the select node never emits a credential to the bytes', ()
   it('projects the selection instead of spreading the row', async () => {
     await anAsset('selectable.png');
     const media = buildHostSurfaceBundle({ tenantId: TENANT, runId: 'run-1' })
-      .features.media as Record<string, (a: Record<string, unknown>) => Promise<Record<string, unknown>>>;
+      .features.media!;
     const out = await media.select!({ orgId: ORG, limit: 5 });
     const assets = out.assets as Array<Record<string, unknown>>;
     expect(assets.length, 'the node still returns a usable selection').toBeGreaterThan(0);

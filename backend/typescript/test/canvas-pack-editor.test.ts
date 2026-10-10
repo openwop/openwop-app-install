@@ -109,14 +109,14 @@ let n = 0;
 async function orgOwner(): Promise<{ c: ReturnType<typeof client>; orgId: string; tenantId: string }> {
   const tenantId = `org:test-cvpack-${Date.now()}-${n++}`;
   const c = client();
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `cvp-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await c.post('/host/openwop-app/test/login', { email: `cvp-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status).toBe(201);
-  const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status).toBe(201);
   return { c, orgId: org.body.orgId, tenantId };
 }
 
-const BASEP = (orgId: string) => `/v1/host/openwop-app/canvas-packs/${TYPE}/orgs/${encodeURIComponent(orgId)}`;
+const BASEP = (orgId: string) => `/host/openwop-app/canvas-packs/${TYPE}/orgs/${encodeURIComponent(orgId)}`;
 const deck = { title: 'Groceries', items: [{ text: 'Milk', done: false, priority: 'high' }] };
 
 describe('canvas packs (ADR 0310 Phase D)', () => {
@@ -171,14 +171,14 @@ describe('canvas packs (ADR 0310 Phase D)', () => {
     expect(slidesCatalog.some((c) => c.type === 'evil-widget')).toBe(false);
     // ...and no editor routes exist under the pack namespace for the host id.
     const { c, orgId } = await orgOwner();
-    const res = await c.get(`/v1/host/openwop-app/canvas-packs/canvas.slides/orgs/${encodeURIComponent(orgId)}/catalog`);
+    const res = await c.get(`/host/openwop-app/canvas-packs/canvas.slides/orgs/${encodeURIComponent(orgId)}/catalog`);
     expect(res.status).toBe(404);
   });
 
   // ADR 0314 — the Documents creation gallery enumerates pack types + creates blanks.
   it('lists the served pack types (title from the artifact type) and never the evil claim', async () => {
     const { c, orgId } = await orgOwner();
-    const r = await c.get(`/v1/host/openwop-app/canvas-packs/orgs/${encodeURIComponent(orgId)}/types`);
+    const r = await c.get(`/host/openwop-app/canvas-packs/orgs/${encodeURIComponent(orgId)}/types`);
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     expect(r.body.types).toEqual([{ canvasTypeId: TYPE, title: 'Checklist' }]);
   });
@@ -240,8 +240,8 @@ describe('CPKC-2 — the pack-canvas trust boundary, asserted negatively', () =>
 
   it('(b) a project non-member gets a uniform 404 on an owner-subject pack canvas (ADR 0610)', async () => {
     const { c, orgId, tenantId } = await orgOwner();
-    const projectId = String((await c.post('/v1/host/openwop-app/projects', { orgId, name: 'Secret' })).body.id);
-    expect((await c.patch(`/v1/host/openwop-app/projects/${projectId}/visibility`, { visibility: 'private' })).body.visibility).toBe('private');
+    const projectId = String((await c.post('/host/openwop-app/projects', { orgId, name: 'Secret' })).body.id);
+    expect((await c.patch(`/host/openwop-app/projects/${projectId}/visibility`, { visibility: 'private' })).body.visibility).toBe('private');
     const canvas = await createCanvasForTenant(tenantId, {
       canvasTypeId: TYPE, name: 'Secret checklist',
       ownerSubject: { kind: 'project', id: projectId },
@@ -252,7 +252,7 @@ describe('CPKC-2 — the pack-canvas trust boundary, asserted negatively', () =>
 
     // A second user in the SAME tenant + org, with viewer rights but NOT a project member.
     const b = client();
-    const rb = await b.post('/v1/host/openwop-app/test/login', { email: `cvp-nm-${Date.now()}@acme.test`, tenantId });
+    const rb = await b.post('/host/openwop-app/test/login', { email: `cvp-nm-${Date.now()}@acme.test`, tenantId });
     expect(rb.status).toBe(201);
     await createMember({ tenantId, orgId, subject: String(rb.body.user.userId), displayName: 'B', roles: ['viewer'] });
     const denied = await b.get(`${BASEP(orgId)}/canvases/${canvas.canvasId}`);

@@ -38,7 +38,7 @@ export const kicktodoCreatorFeature: BackendFeature = {
     id: 'kicktodo-creator',
     label: 'KickTodo Creator',
     description:
-      'The Challenge Factory: governed research → evidence → plan → gated publication of KickTodo challenges (ADR 0415). Editor/publisher authorization stays fail-closed.',
+      'The Challenge Factory: governed research → evidence → plan → gated publication of KickTodo challenges. Editor/publisher authorization stays fail-closed.',
     category: 'KickTodo',
     status: 'off',
     bucketUnit: 'tenant',
@@ -46,5 +46,5 @@ export const kicktodoCreatorFeature: BackendFeature = {
   },
   dependsOn: ['kicktodo-core'],
   surface: { id: 'kicktodo-creator', build: buildKicktodoCreatorSurface },
-  requiredPacks: [{ name: 'feature.kicktodo.nodes', version: '1.30.0' }],
+  requiredPacks: [{ name: 'feature.kicktodo.nodes', version: '1.30.3' }],
 };

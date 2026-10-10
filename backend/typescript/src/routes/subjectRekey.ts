@@ -24,7 +24,7 @@ import { rekeyLegacyMemberSubjects } from '../host/subjectRekeyMigration.js';
 const tenantOf = (req: Request): string => req.tenantId ?? 'default';
 
 export function registerSubjectRekeyRoute(app: Express, deps: { storage: Storage }): void {
-  app.post('/v1/host/openwop-app/maintenance/rekey-member-subjects', async (req, res, next) => {
+  app.post('/host/openwop-app/maintenance/rekey-member-subjects', async (req, res, next) => {
     try {
       requireSuperadmin(req, 'Subject re-key maintenance');
 

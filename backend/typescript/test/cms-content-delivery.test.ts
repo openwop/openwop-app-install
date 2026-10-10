@@ -1,6 +1,6 @@
 /**
  * RFC 0103 normative public content delivery (ADR 0064 Phase 3) —
- * GET /v1/content/pages/{slug}. Projects the seeded system-site content in the
+ * GET /content/pages/{slug} (major 2). Projects the seeded system-site content in the
  * normative response shape, ANONYMOUSLY (public path), locale-negotiated over
  * the HOST-advertised set (capabilities.content), published-only. The seeded
  * home hero carries es/pt-BR overlays, so negotiation returns real translated
@@ -16,6 +16,8 @@ import { DEFAULT_HERO_HEADINGS } from '../src/host/systemSite.js';
 
 let BASE: string;
 let server: http.Server;
+/** ADR 0812 — the delivery op is addressed on its unversioned v2 path, naming major 2. */
+const V2 = { 'OpenWOP-Version': '2' };
 
 // pt-BR / es hero overlays seeded in host/systemSite.ts (assert real merge).
 const PT_HEADING = DEFAULT_HERO_HEADINGS['pt-BR'];
@@ -28,7 +30,7 @@ interface Delivery {
   sections: Array<{ sectionId: string; sectionType: string; data: Record<string, unknown> }>;
 }
 const get = async (al?: string): Promise<{ status: number; cl: string | null; body: Delivery }> => {
-  const res = await fetch(`${BASE}/v1/content/pages/home`, al ? { headers: { 'accept-language': al } } : {});
+  const res = await fetch(`${BASE}/content/pages/home`, { headers: { ...V2, ...(al ? { 'accept-language': al } : {}) } });
   return { status: res.status, cl: res.headers.get('content-language'), body: (await res.json().catch(() => ({}))) as Delivery };
 };
 const heroHeading = (b: Delivery): unknown => b.sections.find((s) => s.sectionType === 'hero')?.data.heading;
@@ -47,7 +49,7 @@ afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
 });
 
-describe('GET /v1/content/pages/:slug — normative delivery (RFC 0103)', () => {
+describe('GET /content/pages/:slug — normative delivery (RFC 0103)', () => {
   it('serves the seeded system-site home ANONYMOUSLY in the normative shape (base)', async () => {
     const r = await get('en');
     expect(r.status).toBe(200);
@@ -97,16 +99,17 @@ describe('GET /v1/content/pages/:slug — normative delivery (RFC 0103)', () => 
   });
 
   it('404s an unknown slug and 400s a malformed one', async () => {
-    expect((await fetch(`${BASE}/v1/content/pages/does-not-exist`)).status).toBe(404);
-    expect((await fetch(`${BASE}/v1/content/pages/Bad_Slug`)).status).toBe(400);
+    expect((await fetch(`${BASE}/content/pages/does-not-exist`, { headers: V2 })).status).toBe(404);
+    expect((await fetch(`${BASE}/content/pages/Bad_Slug`, { headers: V2 })).status).toBe(400);
   });
 
   it('advertises §A-coherent capabilities.i18n + content (operator-configured)', async () => {
-    const disc = await (await fetch(`${BASE}/.well-known/openwop`)).json() as {
-      capabilities?: { content?: { supported: boolean; baseLocale: string; supportedLocales: string[] }; i18n?: { defaultLocale: string; supportedLocales: string[] } };
+    // ADR 0812 — the v2 root's `i18n` + `content` families (ADR 0748); presence is the claim.
+    const disc = await (await fetch(`${BASE}/.well-known/openwop`, { headers: V2 })).json() as {
+      content?: { status: string; baseLocale: string; supportedLocales: string[] }; i18n?: { defaultLocale: string; supportedLocales: string[] };
     };
-    const i18n = disc.capabilities?.i18n; const content = disc.capabilities?.content;
-    expect(content?.supported).toBe(true);
+    const i18n = disc.i18n; const content = disc.content;
+    expect(content?.status).toBe('experimental');
     expect(content?.baseLocale).toBe(i18n?.defaultLocale);            // §A: content.baseLocale == i18n.defaultLocale
     expect(content?.supportedLocales).not.toContain(content?.baseLocale); // §A: base ∉ content.supported
     for (const l of content?.supportedLocales ?? []) expect(i18n?.supportedLocales).toContain(l); // §A: content ⊆ i18n
@@ -117,20 +120,22 @@ describe('GET /v1/content/pages/:slug — normative delivery (RFC 0103)', () => 
 // CACHEABLE negotiated response.
 describe('ADR 0592 §9 — public-lane cache/withholding honesty (CMSL-6)', () => {
   it('sets Vary: Accept-Language beside the public Cache-Control (a dropped Vary = cross-language CDN cache poisoning)', async () => {
-    const res = await fetch(`${BASE}/v1/content/pages/home`, { headers: { 'accept-language': 'es' } });
+    const res = await fetch(`${BASE}/content/pages/home`, { headers: { ...V2, 'accept-language': 'es' } });
     expect(res.status).toBe(200);
     expect(res.headers.get('vary')).toMatch(/Accept-Language/i);
     expect(res.headers.get('cache-control')).toMatch(/public/);
   });
 
-  it('i18n-UNSET: the route stays live and serves base-only with Content-Language = base', async () => {
+  // ADR 0812 — the v1 leg ("the route stays live, base-only") is replaced by the
+  // major-2 rule: an operation whose family is unadvertised answers 404 not_found
+  // (errors.md § "Unadvertised operations", ADR 0781), so nothing is served at all.
+  it('i18n-UNSET: the content family is unadvertised, so the v2 route answers 404 not_found', async () => {
     const saved = process.env.OPENWOP_I18N_LOCALES;
     delete process.env.OPENWOP_I18N_LOCALES;
     try {
-      const r = await get('pt-BR');
-      expect(r.status).toBe(200);
-      expect(r.cl).toBe('en');                       // nothing advertised → base
-      expect(heroHeading(r.body)).toBe(EN_HEADING);  // no overlay served
+      const res = await fetch(`${BASE}/content/pages/home`, { headers: { ...V2, 'accept-language': 'pt-BR' } });
+      expect(res.status).toBe(404);
+      expect(((await res.json()) as { error?: unknown }).error).toBe('not_found');
     } finally {
       process.env.OPENWOP_I18N_LOCALES = saved;
     }

@@ -1,5 +1,6 @@
 /**
- * RFC 0117 front-end plugin packs — host witness (`POST /v1/host/openwop-app/ui-plugin/rpc`)
+ * RFC 0117 front-end plugin packs — the host's ui-plugin/1 dispatcher (served per plugin at
+ * RFC 0238 `POST /host/ui-plugins/{pack}/{plugin}/rpc`; ADR 0840 D7 deleted the vendor route)
  * + the four SECURITY invariants (SECURITY/invariants.yaml 139→143). The behavioral legs
  * mirror `conformance/src/scenarios/frontend-plugin-packs.test.ts`: the closed allowlist
  * rejects undeclared methods, and a stale `artifact.write` surfaces `artifact_conflict` +
@@ -18,13 +19,26 @@ import { dispatcherForTenant } from '../uiPlugins.js';
 import { __putCanvasForTest, getCanvasForTenant } from '../../host/canvasSurface.js';
 import { initHostExtPersistence } from '../../host/hostExtPersistence.js';
 import { openStorage } from '../../storage/index.js';
+import { registerAppBuilderComponents } from '../../features/app-builder/componentCatalog.js';
 
 beforeAll(async () => {
   initHostExtPersistence(await openStorage('memory://'));
+  // The write path validates against the app-builder catalog (ADR 0835 D7),
+  // which the host registers at boot.
+  registerAppBuilderComponents();
 });
 
 const TENANT = 'tenant-uip';
 const req = (id: number, method: string, params?: unknown) => ({ openwop: UI_PLUGIN_PROTOCOL, id, type: 'request', method, params });
+
+// ADR 0835 D7 — `artifact.write` is the editor's write: it needs workspace:write.
+// These concurrency legs drive it as the trusted operator principal (the same
+// `*` bearer the conformance suite uses over HTTP), so the RFC 0117 §3 semantics
+// are witnessed with an AUTHORIZED caller; an unauthorized one is its own leg.
+const OPERATOR = { wildcardOperator: true } as const;
+const writer = (tenantId: string) => dispatcherForTenant(tenantId, {}, undefined, OPERATOR);
+/** A minimal valid app document — writes now pass `validateAppDoc` like a PATCH. */
+const app = (name: string) => ({ name, screens: [{ id: 'home', name: 'Home', isInitial: true, components: [] }] });
 
 let counter = 0;
 async function seedCanvas(state: Record<string, unknown>, version = 1): Promise<string> {
@@ -83,20 +97,27 @@ describe('frontend-plugin-artifact-concurrency (RFC 0117 §3)', () => {
   });
 
   it('rejects a stale/unknown write token with artifact_conflict + currentVersion and does NOT persist', async () => {
-    const id = await seedCanvas({ title: 'Before' }, 1);
+    const id = await seedCanvas(app('Before'), 1);
     // 'stale-token' is a token the host never minted → conflict (the schema §Concurrency rule).
-    const res = await dispatcherForTenant(TENANT)(req(4, 'artifact.write', { artifactId: id, payload: { title: 'After' }, version: 'stale-token' }));
+    const res = await writer(TENANT)(req(4, 'artifact.write', { artifactId: id, payload: app('After'), version: 'stale-token' }));
     expect(res).toMatchObject({ ok: false, error: { code: 'artifact_conflict', currentVersion: '1' } });
     // No persist: the canvas is untouched (still version 1, original state).
     const after = await getCanvasForTenant(TENANT, id);
-    expect(after).toMatchObject({ version: 1, state: { title: 'Before' } });
+    expect(after).toMatchObject({ version: 1, state: { name: 'Before' } });
   });
 
   it('accepts a fresh write (matching token) via params.payload and bumps the version', async () => {
-    const id = await seedCanvas({ title: 'v1' }, 1);
-    const res = await dispatcherForTenant(TENANT)(req(5, 'artifact.write', { artifactId: id, payload: { title: 'v2' }, version: '1' }));
+    const id = await seedCanvas(app('v1'), 1);
+    const res = await writer(TENANT)(req(5, 'artifact.write', { artifactId: id, payload: app('v2'), version: '1' }));
     expect(res).toMatchObject({ ok: true, result: { version: '2' } });
-    expect(await getCanvasForTenant(TENANT, id)).toMatchObject({ version: 2, state: { title: 'v2' } });
+    expect(await getCanvasForTenant(TENANT, id)).toMatchObject({ version: 2, state: { name: 'v2' } });
+  });
+
+  it('ADR 0835 D7 — a caller with no write authority is refused (unauthorized) and nothing persists', async () => {
+    const id = await seedCanvas(app('v1'), 1);
+    const res = await dispatcherForTenant(TENANT)(req(8, 'artifact.write', { artifactId: id, payload: app('v2'), version: '1' }));
+    expect(res).toMatchObject({ ok: false, error: { code: 'unauthorized' } });
+    expect(await getCanvasForTenant(TENANT, id)).toMatchObject({ version: 1, state: { name: 'v1' } });
   });
 
   it('returns artifact_not_found for an absent artifact (not handler_error)', async () => {

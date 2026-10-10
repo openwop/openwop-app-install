@@ -59,7 +59,7 @@ export function jsonGzipMiddleware() {
       const raw = Buffer.from(JSON.stringify(body), 'utf8');
       // Always advertise that the representation varies by encoding so a shared
       // cache never serves a gzipped body to a non-gzip client.
-      res.setHeader('Vary', 'Accept-Encoding');
+      res.vary('Accept-Encoding');
       if (raw.length < MIN_GZIP_BYTES) {
         // Below threshold: send identity JSON, but keep the Content-Type res.json sets.
         res.setHeader('Content-Type', 'application/json; charset=utf-8');

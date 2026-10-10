@@ -200,7 +200,14 @@ describe('RFC 0215 §A — an unanswered attempt never delays another subscripti
     await d.pump();
     await until(() => hits.some((h) => h.path === '/healthy'), 'healthy attempt behind a flooded subscription');
     expect(hits.filter((h) => h.path === '/held/flood'), 'the flooded subscription has ONE attempt in flight').toHaveLength(1);
+    // The server records the healthy hit BEFORE the dispatcher has finished that
+    // attempt, so for a moment inFlight() is 2 (flood + healthy). Asserting at once
+    // was a race. It went red on the ADR 0863 32-vCPU Linux pilot and green
+    // on a laptop (ADR 0863). Wait for the healthy attempt to SETTLE. What is left
+    // in flight must then be exactly the one flooded lane.
+    await until(() => d.inFlight() === 1, 'the healthy attempt settles, leaving only the flooded lane');
     expect(d.inFlight()).toBe(1);
+    expect(hits.filter((h) => h.path === '/held/flood'), 'still ONE flooded attempt after settling').toHaveLength(1);
   });
 });
 

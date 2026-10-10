@@ -13,9 +13,9 @@ import { getAgentRegistry } from '../src/executor/agentRegistry.js';
 import { notifyChannelActivity, CHANNEL_POST_NOTIFICATION_TYPE } from '../src/host/channelActivityNotify.js';
 import type { ChatMessageRecord } from '../src/types.js';
 
-const CH = '/v1/host/openwop-app/channels';
-const NOTIFS = '/v1/host/openwop-app/notifications';
-const PREFS = '/v1/host/openwop-app/notifications/preferences';
+const CH = '/host/openwop-app/channels';
+const NOTIFS = '/host/openwop-app/notifications';
+const PREFS = '/host/openwop-app/notifications/preferences';
 
 let BASE: string;
 let server: http.Server;
@@ -48,7 +48,7 @@ type Client = ReturnType<typeof client>;
 const TENANT = `t-0214-${Date.now()}`;
 async function login(name: string): Promise<{ c: Client; userId: string }> {
   const c = client();
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `n0214-${name}-${Date.now()}-${n++}@acme.test`, displayName: `${name} P`, tenantId: TENANT });
+  const r = await c.post('/host/openwop-app/test/login', { email: `n0214-${name}-${Date.now()}-${n++}@acme.test`, displayName: `${name} P`, tenantId: TENANT });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return { c, userId: r.body.user.userId as string };
 }

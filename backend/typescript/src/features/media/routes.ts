@@ -28,12 +28,14 @@ import type { Request } from 'express';
 import { OpenwopError } from '../../types.js';
 import { createHash } from 'node:crypto';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
-import { requireOrgScope, requireFeatureEnabled, requireString, optionalString as optString } from '../featureRoute.js';
+import { requireCmsScope, type CmsScopeCtx } from '../cms/cmsScope.js';
+import { requireFeatureEnabled, requireString, optionalString as optString } from '../featureRoute.js';
 import type { Scope } from '../../host/accessControlService.js';
-import { isAllowedUploadMime, allowedUploadMimeList } from '../../host/allowedUploadMime.js';
+import { isAllowedUploadMime, allowedUploadMimeList, storableContentType } from '../../host/allowedUploadMime.js';
 import * as mediaStorage from './mediaStorage.js';
+import { createLogger } from '../../observability/logger.js';
 import {
-  assertOrgCapacity,
+  withOrgCapacity,
   createAsset,
   createCollection,
   deleteAsset,
@@ -53,6 +55,8 @@ import {
   viewAsset,
 } from './mediaService.js';
 
+const log = createLogger('features.media.routes');
+
 // Decoded-bytes cap for an inline upload. Default 32 MiB (was 8 MiB) so
 // NotebookLM-style audio/video transcription sources (ADR 0085) fit — a short
 // recording or a compressed podcast clip routinely exceeds 8 MiB. Overridable via
@@ -64,10 +68,12 @@ const MAX_DECODED_BYTES = process.env.OPENWOP_MAX_UPLOAD_DECODED_BYTES
 const MAX_DECODED_MIB = Math.round(MAX_DECODED_BYTES / (1024 * 1024));
 const BASE64_RE = /^[A-Za-z0-9+/]*={0,2}$/;
 
-/** Validate an upload's bytes + type and return the decoded size. Rejects
- *  non-base64 input, oversize content (on DECODED bytes), and any MIME outside
- *  the shared allowlist (the stored-XSS guard — text/html, svg are excluded). */
-function validateUpload(contentBase64: string, contentType: string): number {
+/** Validate an upload's bytes + type; return the decoded size and the type to
+ *  STORE. Rejects non-base64 input, oversize content (on DECODED bytes), any MIME
+ *  outside the shared allowlist, and bytes that are not the type they claim
+ *  (ADR 0818 §2 — a mislabelled image is relabelled, HTML labelled as one is
+ *  refused). The serve route's headers are the other half (ADR 0818 §1). */
+function validateUpload(contentBase64: string, declaredType: string): { decodedBytes: number; contentType: string } {
   if (!BASE64_RE.test(contentBase64) || contentBase64.length % 4 !== 0) {
     throw new OpenwopError('validation_error', 'Field `contentBase64` must be valid base64.', 400, { field: 'contentBase64' });
   }
@@ -76,20 +82,28 @@ function validateUpload(contentBase64: string, contentType: string): number {
     // `validation_error` is the closest canonical code; the 413 status carries the size semantics.
     throw new OpenwopError('validation_error', `Asset exceeds the maximum size (${MAX_DECODED_MIB} MiB).`, 413, { maxBytes: MAX_DECODED_BYTES });
   }
-  if (!isAllowedUploadMime(contentType)) {
-    throw new OpenwopError('validation_error', `contentType must be one of: ${allowedUploadMimeList()}`, 415, { contentType });
+  if (!isAllowedUploadMime(declaredType)) {
+    throw new OpenwopError('validation_error', `contentType must be one of: ${allowedUploadMimeList()}`, 415, { contentType: declaredType });
   }
-  return decodedBytes;
+  const contentType = storableContentType(declaredType, Buffer.from(contentBase64, 'base64'));
+  if (!contentType) {
+    log.warn('media_upload_type_mismatch', { declaredType });
+    throw new OpenwopError('validation_error', `The file's contents are not a valid ${declaredType}.`, 415, { contentType: declaredType, reason: 'type_mismatch' });
+  }
+  if (contentType !== declaredType) log.info('media_upload_relabelled', { declaredType, storedType: contentType });
+  return { decodedBytes, contentType };
 }
 
-/** Org-scoped RBAC gate (the shared `requireOrgScope`). ADR 0027: Media is
- *  always-on, so there is no toggle gate — only the org-scoped RBAC. */
-const authorize = (req: Request, scope: Scope): ReturnType<typeof requireOrgScope> =>
-  requireOrgScope(req, scope);
+/** Org-scoped RBAC gate. ADR 0027: Media is always-on, so there is no toggle
+ *  gate — only the org-scoped RBAC. ADR 0817: the CMS guard, so the reserved
+ *  system-site org (the public site's pages) has a Media library a super admin
+ *  can use; every other org goes through the shared `requireOrgScope`. */
+const authorize = (req: Request, scope: Scope): Promise<CmsScopeCtx> =>
+  requireCmsScope(req, scope);
 
 export function registerMediaRoutes(deps: RouteDeps): void {
   const { app } = deps;
-  const BASE = '/v1/host/openwop-app/media/orgs/:orgId';
+  const BASE = '/host/openwop-app/media/orgs/:orgId';
 
   // ── Collections ──
   app.post(`${BASE}/collections`, async (req, res, next) => {
@@ -128,11 +142,10 @@ export function registerMediaRoutes(deps: RouteDeps): void {
       const { user, orgId, tenantId } = await authorize(req, 'workspace:write');
       const body = (req.body ?? {}) as { contentBase64?: unknown; contentType?: unknown; name?: unknown; collectionId?: unknown; tags?: unknown; lineage?: unknown; marketing?: unknown };
       const contentBase64 = requireString(body.contentBase64, 'contentBase64');
-      const contentType = requireString(body.contentType, 'contentType');
       const name = requireString(body.name, 'name');
       // Validate bytes + MIME, then check the org has capacity — BOTH before
       // storing, so a rejected upload never orphans bytes.
-      const decodedBytes = validateUpload(contentBase64, contentType);
+      const { decodedBytes, contentType } = validateUpload(contentBase64, requireString(body.contentType, 'contentType'));
       // ADR 0352 P2 — SHA-256 dedup BEFORE storing: identical bytes return the
       // existing asset (200 + deduplicated) instead of a copy. Hash the decoded
       // bytes so re-encoding differences can't defeat it.
@@ -146,25 +159,26 @@ export function registerMediaRoutes(deps: RouteDeps): void {
         res.status(200).json({ ...viewAsset(merged), deduplicated: true });
         return;
       }
-      await assertOrgCapacity(tenantId, orgId, decodedBytes);
-      const stored = await mediaStorage.put(tenantId, { contentBase64, contentType });
-      const asset = await createAsset({
-        tenantId,
-        orgId,
-        ...(optString(body.collectionId) ? { collectionId: optString(body.collectionId) } : {}),
-        name,
-        contentType,
-        sizeBytes: stored.sizeBytes,
-        storageRef: stored.storageRef,
-        serveToken: stored.serveToken,
-        tags: body.tags,
-        uploadedBy: user.userId,
-        contentHash,
-        // ADR 0229 — optional provenance (derivedFrom / generatedBy:'ai' /
-        // prompt / model / rightsNote); sanitized + bounded in the service.
-        ...(body.lineage !== undefined ? { lineage: body.lineage } : {}),
-        // ADR 0352 P1 — optional typed marketing facet.
-        ...(body.marketing !== undefined ? { marketing: body.marketing } : {}),
+      const asset = await withOrgCapacity(tenantId, orgId, decodedBytes, async () => {
+        const stored = await mediaStorage.put(tenantId, { contentBase64, contentType });
+        return createAsset({
+          tenantId,
+          orgId,
+          ...(optString(body.collectionId) ? { collectionId: optString(body.collectionId) } : {}),
+          name,
+          contentType,
+          sizeBytes: stored.sizeBytes,
+          storageRef: stored.storageRef,
+          serveToken: stored.serveToken,
+          tags: body.tags,
+          uploadedBy: user.userId,
+          contentHash,
+          // ADR 0229 — optional provenance (derivedFrom / generatedBy:'ai' /
+          // prompt / model / rightsNote); sanitized + bounded in the service.
+          ...(body.lineage !== undefined ? { lineage: body.lineage } : {}),
+          // ADR 0352 P1 — optional typed marketing facet.
+          ...(body.marketing !== undefined ? { marketing: body.marketing } : {}),
+        });
       });
       res.status(201).json(viewAsset(asset));
     } catch (err) {
@@ -188,9 +202,8 @@ export function registerMediaRoutes(deps: RouteDeps): void {
         const it = (raw ?? {}) as { contentBase64?: unknown; contentType?: unknown; name?: unknown; tags?: unknown };
         try {
           const contentBase64 = requireString(it.contentBase64, 'contentBase64');
-          const contentType = requireString(it.contentType, 'contentType');
           const name = requireString(it.name, 'name');
-          const decodedBytes = validateUpload(contentBase64, contentType);
+          const { decodedBytes, contentType } = validateUpload(contentBase64, requireString(it.contentType, 'contentType'));
           const contentHash = createHash('sha256').update(Buffer.from(contentBase64, 'base64')).digest('hex');
           const existing = await findAssetByContentHash(tenantId, orgId, contentHash, optString(body.collectionId));
           if (existing) {
@@ -199,18 +212,19 @@ export function registerMediaRoutes(deps: RouteDeps): void {
             results.push({ name, status: 'deduplicated', asset: viewAsset(merged) });
             continue;
           }
-          await assertOrgCapacity(tenantId, orgId, decodedBytes);
-          const stored = await mediaStorage.put(tenantId, { contentBase64, contentType });
           const fileTags = parseFilenameTags(name);
           const givenTags = Array.isArray(it.tags) ? it.tags.filter((t): t is string => typeof t === 'string') : [];
-          const asset = await createAsset({
-            tenantId, orgId,
-            ...(optString(body.collectionId) ? { collectionId: optString(body.collectionId) } : {}),
-            name, contentType,
-            sizeBytes: stored.sizeBytes, storageRef: stored.storageRef, serveToken: stored.serveToken,
-            tags: [...givenTags, ...fileTags],
-            uploadedBy: user.userId,
-            contentHash,
+          const asset = await withOrgCapacity(tenantId, orgId, decodedBytes, async () => {
+            const stored = await mediaStorage.put(tenantId, { contentBase64, contentType });
+            return createAsset({
+              tenantId, orgId,
+              ...(optString(body.collectionId) ? { collectionId: optString(body.collectionId) } : {}),
+              name, contentType,
+              sizeBytes: stored.sizeBytes, storageRef: stored.storageRef, serveToken: stored.serveToken,
+              tags: [...givenTags, ...fileTags],
+              uploadedBy: user.userId,
+              contentHash,
+            });
           });
           results.push({ name, status: 'created', asset: viewAsset(asset) });
         } catch (err) {

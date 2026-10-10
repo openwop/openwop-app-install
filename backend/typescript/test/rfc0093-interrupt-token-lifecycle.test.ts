@@ -102,7 +102,7 @@ describe('rfc0093 §B.1 — token expiry', () => {
   it('GET returns 410 interrupt_expired for a token past expiresAt', async () => {
     const run = await seedRun('waiting-input');
     const it_ = await seedInterrupt(run.runId, { expiresAt: new Date(Date.now() - 1_000).toISOString() });
-    const res = await jsonFetch(`/v1/interrupts/${encodeURIComponent(it_.token)}`);
+    const res = await jsonFetch(`/interrupts/${encodeURIComponent(it_.token)}`);
     expect(res.status).toBe(410);
     expect(res.body.error).toBe('interrupt_expired');
   });
@@ -110,7 +110,7 @@ describe('rfc0093 §B.1 — token expiry', () => {
   it('POST returns 410 interrupt_expired for a token past expiresAt', async () => {
     const run = await seedRun('waiting-input');
     const it_ = await seedInterrupt(run.runId, { expiresAt: new Date(Date.now() - 1_000).toISOString() });
-    const res = await jsonFetch(`/v1/interrupts/${encodeURIComponent(it_.token)}`, {
+    const res = await jsonFetch(`/interrupts/${encodeURIComponent(it_.token)}`, {
       method: 'POST',
       body: JSON.stringify({ resumeValue: { answer: 'late' } }),
     });
@@ -121,7 +121,7 @@ describe('rfc0093 §B.1 — token expiry', () => {
   it('an unexpired token inspects fine and reports its expiresAt', async () => {
     const run = await seedRun('waiting-input');
     const it_ = await seedInterrupt(run.runId);
-    const res = await jsonFetch(`/v1/interrupts/${encodeURIComponent(it_.token)}`);
+    const res = await jsonFetch(`/interrupts/${encodeURIComponent(it_.token)}`);
     expect(res.status).toBe(200);
     expect(res.body.expiresAt).toBe(it_.expiresAt);
     expect(res.body.resolved).toBe(false);
@@ -130,7 +130,7 @@ describe('rfc0093 §B.1 — token expiry', () => {
   it('pre-migration rows (no expiresAt) are treated as non-expiring', async () => {
     const run = await seedRun('waiting-input');
     const it_ = await seedInterrupt(run.runId, { expiresAt: undefined });
-    const res = await jsonFetch(`/v1/interrupts/${encodeURIComponent(it_.token)}`);
+    const res = await jsonFetch(`/interrupts/${encodeURIComponent(it_.token)}`);
     expect(res.status).toBe(200);
   });
 });
@@ -189,7 +189,7 @@ describe('rfc0093 §B.2 — invalidation', () => {
     const run = await seedRun('waiting-input');
     const it_ = await seedInterrupt(run.runId);
     await storage.resolveInterrupt(it_.interruptId, { ok: true }, new Date().toISOString());
-    const res = await jsonFetch(`/v1/interrupts/${encodeURIComponent(it_.token)}`, {
+    const res = await jsonFetch(`/interrupts/${encodeURIComponent(it_.token)}`, {
       method: 'POST',
       body: JSON.stringify({ resumeValue: { again: true } }),
     });
@@ -202,13 +202,13 @@ describe('rfc0093 §B.2 — invalidation', () => {
     async (status) => {
       const run = await seedRun(status);
       const it_ = await seedInterrupt(run.runId);
-      const post = await jsonFetch(`/v1/interrupts/${encodeURIComponent(it_.token)}`, {
+      const post = await jsonFetch(`/interrupts/${encodeURIComponent(it_.token)}`, {
         method: 'POST',
         body: JSON.stringify({ resumeValue: { answer: 'too-late' } }),
       });
       expect(post.status).toBe(409);
       expect(post.body.error).toBe('interrupt_already_resolved');
-      const get = await jsonFetch(`/v1/interrupts/${encodeURIComponent(it_.token)}`);
+      const get = await jsonFetch(`/interrupts/${encodeURIComponent(it_.token)}`);
       expect(get.status).toBe(409);
       expect(get.body.error).toBe('interrupt_already_resolved');
     },
@@ -218,13 +218,13 @@ describe('rfc0093 §B.2 — invalidation', () => {
     const run = await seedRun('completed');
     const it_ = await seedInterrupt(run.runId);
     await storage.resolveInterrupt(it_.interruptId, { ok: true }, new Date().toISOString());
-    const res = await jsonFetch(`/v1/interrupts/${encodeURIComponent(it_.token)}`);
+    const res = await jsonFetch(`/interrupts/${encodeURIComponent(it_.token)}`);
     expect(res.status).toBe(200);
     expect(res.body.resolved).toBe(true);
   });
 
   it('an unknown token stays 404 invalid_interrupt_token', async () => {
-    const res = await jsonFetch(`/v1/interrupts/tok_does-not-exist`);
+    const res = await jsonFetch(`/interrupts/tok_does-not-exist`);
     expect(res.status).toBe(404);
     expect(res.body.error).toBe('invalid_interrupt_token');
   });

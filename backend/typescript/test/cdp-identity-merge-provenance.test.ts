@@ -73,7 +73,7 @@ let TENANT = 'cdp-merge-prov';
 async function owner(): Promise<Client> {
   const c = client();
   TENANT = `cdp-merge-prov-${Date.now()}-${n++}`;
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `mp-${Date.now()}-${n++}@acme.test`, tenantId: TENANT });
+  const r = await c.post('/host/openwop-app/test/login', { email: `mp-${Date.now()}-${n++}@acme.test`, tenantId: TENANT });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return c;
 }
@@ -82,14 +82,14 @@ const setToggle = async (id: string, status: 'on' | 'off'): Promise<void> => {
   if (d) await saveConfig({ ...d, status }, 'test');
 };
 const resolve = (c: Client, type: string, value: string): Promise<Res> =>
-  c.get(`/v1/host/openwop-app/cdp/identity/resolve?type=${encodeURIComponent(type)}&value=${encodeURIComponent(value)}`);
+  c.get(`/host/openwop-app/cdp/identity/resolve?type=${encodeURIComponent(type)}&value=${encodeURIComponent(value)}`);
 
 describe('CDP golden record — merge provenance', () => {
   it('a direct hit carries NO mergedFrom', async () => {
     await setToggle('crm', 'on');
     await setToggle('cdp', 'on');
     const c = await owner();
-    const made = await c.post('/v1/host/openwop-app/crm/contacts', { name: 'Direct', email: 'direct@acme.test' });
+    const made = await c.post('/host/openwop-app/crm/contacts', { name: 'Direct', email: 'direct@acme.test' });
     expect(made.status, JSON.stringify(made.body)).toBe(201);
     const r = await resolve(c, 'email', 'direct@acme.test');
     expect(r.status).toBe(200);
@@ -101,9 +101,9 @@ describe('CDP golden record — merge provenance', () => {
     await setToggle('crm', 'on');
     await setToggle('cdp', 'on');
     const c = await owner();
-    const survivor = (await c.post('/v1/host/openwop-app/crm/contacts', { name: 'Survivor', email: 'keep@acme.test' })).body;
-    const source = (await c.post('/v1/host/openwop-app/crm/contacts', { name: 'Dupe', email: 'dupe@acme.test' })).body;
-    const merged = await c.post(`/v1/host/openwop-app/crm/contacts/${survivor.contactId}/merge`, { sourceContactId: source.contactId });
+    const survivor = (await c.post('/host/openwop-app/crm/contacts', { name: 'Survivor', email: 'keep@acme.test' })).body;
+    const source = (await c.post('/host/openwop-app/crm/contacts', { name: 'Dupe', email: 'dupe@acme.test' })).body;
+    const merged = await c.post(`/host/openwop-app/crm/contacts/${survivor.contactId}/merge`, { sourceContactId: source.contactId });
     expect(merged.status, JSON.stringify(merged.body)).toBe(200);
 
     const r = await resolve(c, 'email', 'dupe@acme.test');
@@ -121,9 +121,9 @@ describe('CDP golden record — merge provenance', () => {
     await setToggle('crm', 'on');
     await setToggle('cdp', 'on');
     const c = await owner();
-    const survivor = (await c.post('/v1/host/openwop-app/crm/contacts', { name: 'Survivor', email: 'live@acme.test' })).body;
-    const source = (await c.post('/v1/host/openwop-app/crm/contacts', { name: 'Dupe', email: 'stale@acme.test' })).body;
-    await c.post(`/v1/host/openwop-app/crm/contacts/${source.contactId}/identifiers`, { type: 'loyalty', value: 'LOY-STALE' });
+    const survivor = (await c.post('/host/openwop-app/crm/contacts', { name: 'Survivor', email: 'live@acme.test' })).body;
+    const source = (await c.post('/host/openwop-app/crm/contacts', { name: 'Dupe', email: 'stale@acme.test' })).body;
+    await c.post(`/host/openwop-app/crm/contacts/${source.contactId}/identifiers`, { type: 'loyalty', value: 'LOY-STALE' });
 
     // `mergeContacts` tombstones and THEN reindexes, in two non-transactional
     // steps. This is the state left behind when the second never runs: the key
@@ -149,9 +149,9 @@ describe('CDP golden record — merge provenance', () => {
     await setToggle('crm', 'on');
     await setToggle('cdp', 'on');
     const c = await owner();
-    const survivor = (await c.post('/v1/host/openwop-app/crm/contacts', { name: 'Keeper', email: 'keeper@acme.test' })).body;
-    const source = (await c.post('/v1/host/openwop-app/crm/contacts', { name: 'Gone', email: 'gone@acme.test' })).body;
-    await c.post(`/v1/host/openwop-app/crm/contacts/${survivor.contactId}/merge`, { sourceContactId: source.contactId });
+    const survivor = (await c.post('/host/openwop-app/crm/contacts', { name: 'Keeper', email: 'keeper@acme.test' })).body;
+    const source = (await c.post('/host/openwop-app/crm/contacts', { name: 'Gone', email: 'gone@acme.test' })).body;
+    await c.post(`/host/openwop-app/crm/contacts/${survivor.contactId}/merge`, { sourceContactId: source.contactId });
 
     const r = await resolve(c, 'email', 'keeper@acme.test');
     expect(r.status).toBe(200);
@@ -164,10 +164,10 @@ describe('CDP golden record — merge provenance', () => {
     await setToggle('crm', 'on');
     await setToggle('cdp', 'on');
     const c = await owner();
-    const survivor = (await c.post('/v1/host/openwop-app/crm/contacts', { name: 'S2', email: 's2@acme.test' })).body;
-    const source = (await c.post('/v1/host/openwop-app/crm/contacts', { name: 'D2', email: 'd2@acme.test' })).body;
-    await c.post(`/v1/host/openwop-app/crm/contacts/${source.contactId}/identifiers`, { type: 'loyalty', value: 'LOY-77' });
-    await c.post(`/v1/host/openwop-app/crm/contacts/${survivor.contactId}/merge`, { sourceContactId: source.contactId });
+    const survivor = (await c.post('/host/openwop-app/crm/contacts', { name: 'S2', email: 's2@acme.test' })).body;
+    const source = (await c.post('/host/openwop-app/crm/contacts', { name: 'D2', email: 'd2@acme.test' })).body;
+    await c.post(`/host/openwop-app/crm/contacts/${source.contactId}/identifiers`, { type: 'loyalty', value: 'LOY-77' });
+    await c.post(`/host/openwop-app/crm/contacts/${survivor.contactId}/merge`, { sourceContactId: source.contactId });
 
     const r = await resolve(c, 'loyalty', 'LOY-77');
     expect(r.status).toBe(200);
@@ -181,9 +181,9 @@ describe('CDP golden record — merge provenance', () => {
     await setToggle('crm', 'on');
     await setToggle('cdp', 'on');
     const c = await owner();
-    const a = (await c.post('/v1/host/openwop-app/crm/contacts', { name: 'CycA', email: 'cyc-a@acme.test' })).body;
-    const b = (await c.post('/v1/host/openwop-app/crm/contacts', { name: 'CycB', email: 'cyc-b@acme.test' })).body;
-    await c.post(`/v1/host/openwop-app/crm/contacts/${a.contactId}/identifiers`, { type: 'device', value: 'cyc-dev-1' });
+    const a = (await c.post('/host/openwop-app/crm/contacts', { name: 'CycA', email: 'cyc-a@acme.test' })).body;
+    const b = (await c.post('/host/openwop-app/crm/contacts', { name: 'CycB', email: 'cyc-b@acme.test' })).body;
+    await c.post(`/host/openwop-app/crm/contacts/${a.contactId}/identifiers`, { type: 'device', value: 'cyc-dev-1' });
 
     // Forge A→B→A directly: the merge ROUTE refuses to build a cycle (it checks
     // the survivor's own tombstone), which is exactly why this has to bypass it.
@@ -202,9 +202,9 @@ describe('CDP golden record — merge provenance', () => {
     const c = await owner();
     const ids: string[] = [];
     for (let i = 0; i < 11; i++) {
-      ids.push((await c.post('/v1/host/openwop-app/crm/contacts', { name: `Chain${i}`, email: `chain-${i}-${n}@acme.test` })).body.contactId);
+      ids.push((await c.post('/host/openwop-app/crm/contacts', { name: `Chain${i}`, email: `chain-${i}-${n}@acme.test` })).body.contactId);
     }
-    await c.post(`/v1/host/openwop-app/crm/contacts/${ids[0]}/identifiers`, { type: 'device', value: 'chain-dev-1' });
+    await c.post(`/host/openwop-app/crm/contacts/${ids[0]}/identifiers`, { type: 'device', value: 'chain-dev-1' });
     // ids[0] → ids[1] → … → ids[10]: a 10-hop chain, past the old bound.
     for (let i = 0; i < ids.length - 1; i++) await tombstoneContact(ids[i], TENANT, ids[i + 1]);
 

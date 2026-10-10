@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/core.openwop.agents.audit-summarizer/1.0.0/audit-summarizer.return.schema.json",
+  "$id": "https://packs.openwop.dev/core.openwop.agents.audit-summarizer/1.0.1/audit-summarizer.return.schema.json",
   "title": "AuditSummarizerReturn",
   "type": "object",
   "oneOf": [

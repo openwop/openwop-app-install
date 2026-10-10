@@ -11,6 +11,7 @@ import express, { type Request, type Response } from 'express';
 import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { authorizeOrgScope, requireString, optionalString } from '../featureRoute.js';
+import { VENDOR_ROOT } from '../../middleware/protocolVersion.js';
 import { checkEntitlement } from '../../host/entitlementSeam.js';
 import { CONTACT_STAGES, type ContactStage } from '../crm/contactsService.js';
 import { getConsent, mergeConsentCategories, fullMarketingOptOut, isErasureTombstoned } from '../consent/consentService.js';
@@ -41,8 +42,61 @@ import { createLogger } from '../../observability/logger.js';
 
 const log = createLogger('email.routes');
 const FEATURE = { toggleId: 'email', label: 'Email Marketing' };
-const ORG = '/v1/host/openwop-app/email/orgs/:orgId';
-type Scope = 'workspace:read' | 'workspace:write';
+const ORG = '/host/openwop-app/email/orgs/:orgId';
+// ADR 0848 D3/D4 — sender identity and bounce-webhook verification secrets are org
+// identity settings, held at the admin tier (the platform keeps webhook secrets at
+// `webhooks:manage`; `host:members:manage` is the admin floor ADR 0838 used).
+type Scope = 'workspace:read' | 'workspace:write' | 'host:members:manage' | 'webhooks:manage';
+
+/**
+ * ADR 0848 D5 — test-send is metered per (tenant, member) per clock hour.
+ *
+ * It took any `to` address with no limit, and its idempotency key carries `Date.now()`
+ * so nothing dedups: any editor could send unlimited mail from the org's sender
+ * identity. The egress floor still runs (tombstone + suppression), but consent only
+ * binds an address that resolves to a CRM contact, so an outside address always passed.
+ * Recipients are NOT restricted (every competitor lets you test to any address; agencies
+ * test to clients) — the count is. Per-instance fixed window, the
+ * `analytics/routes.ts` beacon-budget precedent: a durable counter would need a sweep
+ * the opt-in retention lane does not give it (architect review M4). With N instances
+ * the effective cap is N× — stated, accepted for an abuse brake.
+ */
+const testSendWindows = new Map<string, number>();
+function testSendPerHour(): number {
+  const env = (process.env.OPENWOP_EMAIL_TEST_SEND_PER_HOUR ?? '').trim();
+  const raw = env === '' ? NaN : Number(env); // '' is UNSET (default), never 0 = off
+  return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 20;
+}
+/** Seconds until the window frees, or 0 when this send is within budget (and counted). */
+function takeTestSendBudget(tenantId: string, userId: string, now = Date.now()): number {
+  const limit = testSendPerHour();
+  if (limit === 0) return 0;
+  const hour = Math.floor(now / 3_600_000);
+  const key = `${tenantId}\u0000${userId}\u0000${hour}`;
+  if (testSendWindows.size > 5000) { for (const k of testSendWindows.keys()) if (!k.endsWith(`\u0000${hour}`)) testSendWindows.delete(k); }
+  const used = testSendWindows.get(key) ?? 0;
+  if (used >= limit) return Math.max(1, Math.ceil(((hour + 1) * 3_600_000 - now) / 1000));
+  testSendWindows.set(key, used + 1);
+  return 0;
+}
+
+/**
+ * ADR 0848 D8 — the public consent pages refuse to be framed. `/u` and `/p` render
+ * forms that change consent; nothing stopped another site from framing them over a
+ * known token. Set on EVERY response under the two prefixes (a middleware, so the
+ * `next(err)` and error-page exits carry it too — architect review M7). The pages
+ * carry no script, one inline `<style>` and inline style attributes, and post to a
+ * same-origin relative action.
+ */
+function publicPageHeaders(_req: Request, res: Response, next: () => void): void {
+  res.set({
+    'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+    'X-Frame-Options': 'DENY',
+    'X-Content-Type-Options': 'nosniff',
+    'Referrer-Policy': 'no-referrer',
+  });
+  next();
+}
 
 export function registerEmailRoutes(deps: RouteDeps): void {
   const { app, storage } = deps;
@@ -62,12 +116,19 @@ export function registerEmailRoutes(deps: RouteDeps): void {
     try {
       const { orgId, tenantId } = await authz(req, 'workspace:read');
       const s = await getEmailSettings(tenantId, orgId);
-      res.json({ senderAddress: s?.senderAddress ?? '', configured: !!s?.senderAddress });
+      // ADR 0848 D4 — what THIS caller may do, from the same gate the PUT runs, so the
+      // page disables the field instead of letting an editor type and then fail.
+      const canEdit = await authorizeOrgScope(req, FEATURE, 'host:members:manage').then(() => true, (e: unknown) => {
+        // A refusal is the expected answer for an editor; anything else fails CLOSED (read-only) but is logged.
+        if (!(e instanceof OpenwopError && (e.httpStatus === 403 || e.httpStatus === 404))) log.warn('email_settings_canEdit_unresolved', { error: e instanceof Error ? e.message : String(e) });
+        return false;
+      });
+      res.json({ senderAddress: s?.senderAddress ?? '', configured: !!s?.senderAddress, canEdit });
     } catch (err) { next(err); }
   });
   app.put(`${ORG}/settings`, async (req, res, next) => {
     try {
-      const { user, orgId, tenantId } = await authz(req, 'workspace:write');
+      const { user, orgId, tenantId } = await authz(req, 'host:members:manage'); // ADR 0848 D4
       const body = (req.body ?? {}) as Record<string, unknown>;
       const senderAddress = typeof body.senderAddress === 'string' ? body.senderAddress : '';
       const s = await setSenderAddress(tenantId, orgId, senderAddress, user.userId);
@@ -83,12 +144,12 @@ export function registerEmailRoutes(deps: RouteDeps): void {
       const { orgId, tenantId } = await authz(req, 'workspace:read');
       const configs = await listWebhookConfigs(tenantId, orgId);
       // Never leak the secret; return the ingest URL the operator points the provider at.
-      res.json({ configs: configs.map((c) => ({ webhookId: c.webhookId, provider: c.provider, enabled: c.enabled, ingestPath: `/v1/host/openwop-app/public-email/events/${c.webhookId}`, updatedAt: c.updatedAt })) });
+      res.json({ configs: configs.map((c) => ({ webhookId: c.webhookId, provider: c.provider, enabled: c.enabled, ingestPath: `${VENDOR_ROOT}/public-email/events/${c.webhookId}`, updatedAt: c.updatedAt })) });
     } catch (err) { next(err); }
   });
   app.post(`${ORG}/webhook-configs`, async (req, res, next) => {
     try {
-      const { orgId, tenantId } = await authz(req, 'workspace:write');
+      const { orgId, tenantId } = await authz(req, 'webhooks:manage'); // ADR 0848 D3
       const body = (req.body ?? {}) as Record<string, unknown>;
       const provider = typeof body.provider === 'string' ? body.provider : '';
       if (!isBounceProvider(provider)) throw new OpenwopError('validation_error', 'provider must be sendgrid or postmark.', 400, { field: 'provider' });
@@ -97,13 +158,13 @@ export function registerEmailRoutes(deps: RouteDeps): void {
         tenantId, orgId, provider, verificationSecret,
         ...(typeof body.webhookId === 'string' && body.webhookId ? { webhookId: body.webhookId } : {}),
       });
-      res.status(201).json({ webhookId: cfg.webhookId, provider: cfg.provider, ingestPath: `/v1/host/openwop-app/public-email/events/${cfg.webhookId}` });
+      res.status(201).json({ webhookId: cfg.webhookId, provider: cfg.provider, ingestPath: `${VENDOR_ROOT}/public-email/events/${cfg.webhookId}` });
     } catch (err) { next(err); }
   });
   app.delete(`${ORG}/webhook-configs/:webhookId`, async (req, res, next) => {
     try {
-      const { tenantId } = await authz(req, 'workspace:write');
-      const removed = await removeWebhookConfig(tenantId, req.params.webhookId);
+      const { orgId, tenantId } = await authz(req, 'webhooks:manage'); // ADR 0848 D3
+      const removed = await removeWebhookConfig(tenantId, orgId, req.params.webhookId);
       res.json({ removed });
     } catch (err) { next(err); }
   });
@@ -249,6 +310,12 @@ export function registerEmailRoutes(deps: RouteDeps): void {
   app.post(`${ORG}/campaigns/:campaignId/test-send`, async (req, res, next) => {
     try {
       const { user, orgId, tenantId } = await authz(req, 'workspace:write');
+      // ADR 0848 D5 — metered BEFORE any provider or sender is resolved.
+      const retryAfter = takeTestSendBudget(tenantId, user.userId);
+      if (retryAfter > 0) {
+        res.set('Retry-After', String(retryAfter));
+        throw new OpenwopError('rate_limited', `Too many test sends — try again in ${Math.ceil(retryAfter / 60)} minute(s).`, 429, { retryAfterSeconds: retryAfter, limit: 'email_test_send' });
+      }
       const to = typeof (req.body ?? {}).to === 'string' ? (req.body as { to: string }).to.trim() : '';
       const settingsRow = await getEmailSettings(tenantId, orgId);
       const provider = settingsRow?.senderAddress
@@ -287,8 +354,9 @@ export function registerEmailRoutes(deps: RouteDeps): void {
   // no contact id or address ever rides a URL. Toggle-independent: a recipient
   // must always be able to unsubscribe, even if the email feature is later
   // toggled off (CAN-SPAM/GDPR posture).
-  const PUB = '/v1/host/openwop-app/public-email';
+  const PUB = '/host/openwop-app/public-email';
   const urlencoded = express.urlencoded({ extended: false, limit: '16kb' });
+  app.use([`${PUB}/u`, `${PUB}/p`], publicPageHeaders); // ADR 0848 D8
 
   // ── ADR 0241 — PUBLIC bounce/complaint receive endpoint ─────────────────────
   // Signature-gated (the provider signature IS the credential; no host auth),
@@ -379,6 +447,10 @@ export function registerEmailRoutes(deps: RouteDeps): void {
       // 'partial' the recipient is still on the list, so we render the honest
       // failure state — which keeps the POST form on the page, because the done
       // state renders no form and left the recipient with no retry path at all.
+      // CORRECTED 2026-10-07 (ADR 0848 D7): campaign mail now carries the RFC 8058
+      // `List-Unsubscribe` + `List-Unsubscribe-Post` headers, so mail providers DO POST
+      // here (Origin-less, form-encoded) and a 503 provokes their retry. The paragraph
+      // below was true when written and is kept for its reasoning about the status.
       // The 503 is an HONEST STATUS, and that is the whole of its rationale
       // (review MEDIUM-4). This comment used to justify it as "an RFC 8058
       // one-click POST is a machine caller that reads the status" — that
@@ -605,6 +677,7 @@ function sendPublicError(res: Response, status: 403 | 404, key: PublicPageKey, l
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
 <meta name="robots" content="noindex">
 ${PUBLIC_PAGE_STYLE}
 <title>${escapeHtml(t('linkProblemTitle'))}</title>
@@ -628,7 +701,7 @@ ${PUBLIC_PAGE_STYLE}
  *  Self-contained, same posture as the preference page. */
 type UnsubscribePageState = 'prompt' | 'done' | 'failed';
 function renderUnsubscribePage(token: string, state: UnsubscribePageState, t: PublicPageT, locale: string, prefsToken?: string): string {
-  const action = `/v1/host/openwop-app/public-email/u/${escapeHtml(encodeURIComponent(token))}`;
+  const action = `${VENDOR_ROOT}/public-email/u/${escapeHtml(encodeURIComponent(token))}`;
   // EM-UX-2: the link is built from the SIBLING preferences token, never from
   // the unsubscribe token this page was reached by — `/p/:token` rejects any
   // non-`preferences` kind, so the old self-referential link 404'd for every
@@ -636,7 +709,7 @@ function renderUnsubscribePage(token: string, state: UnsubscribePageState, t: Pu
   // or a failed preferences mint) the link is OMITTED: an absent escape hatch is
   // honest, a dead one is not.
   const prefs = prefsToken
-    ? `/v1/host/openwop-app/public-email/p/${escapeHtml(encodeURIComponent(prefsToken))}`
+    ? `${VENDOR_ROOT}/public-email/p/${escapeHtml(encodeURIComponent(prefsToken))}`
     : '';
   const submit = (label: PublicPageKey): string =>
     `<form method="post" action="${action}">
@@ -664,6 +737,7 @@ function renderUnsubscribePage(token: string, state: UnsubscribePageState, t: Pu
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
 <meta name="robots" content="noindex">
 ${PUBLIC_PAGE_STYLE}
 <title>${escapeHtml(t('unsubscribeTitle'))}</title>
@@ -683,7 +757,7 @@ ${PUBLIC_PAGE_STYLE}
 function preferenceWidenMs(): number { const n = Number(process.env.OPENWOP_EMAIL_PREFERENCE_WIDEN_DAYS ?? 30); return (Number.isFinite(n) && n > 0 ? n : 30) * 86_400_000; }
 
 function renderPreferencesPage(token: string, current: Record<PreferenceChannel, boolean>, state: 'form' | 'saved' | 'partial' | 'refused-stale' | 'refused-suppressed' | 'refused-erased', t: PublicPageT, locale: string): string {
-  const action = `/v1/host/openwop-app/public-email/p/${escapeHtml(encodeURIComponent(token))}`;
+  const action = `${VENDOR_ROOT}/public-email/p/${escapeHtml(encodeURIComponent(token))}`;
   const rows = PREFERENCE_CHANNELS.map((ch) => `
       <label style="display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid #d5d5d5;border-radius:8px;cursor:pointer">
         <input type="checkbox" name="${escapeHtml(ch)}" ${current[ch] ? 'checked' : ''} style="width:18px;height:18px">
@@ -694,6 +768,7 @@ function renderPreferencesPage(token: string, current: Record<PreferenceChannel,
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
 <meta name="robots" content="noindex">
 ${PUBLIC_PAGE_STYLE}
 <title>${escapeHtml(t('preferencesTitle'))}</title>

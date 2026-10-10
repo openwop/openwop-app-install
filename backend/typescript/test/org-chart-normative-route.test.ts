@@ -3,7 +3,7 @@
  * trap that makes it silently unreachable.
  *
  * The host advertised `agents.orgChart.supported: true` while serving the chart
- * ONLY at the host-extension alias `/v1/host/openwop-app/org-chart`. The spec
+ * ONLY at the host-extension alias `/host/openwop-app/org-chart`. The spec
  * names `GET /v1/agents/org-chart` (§D), and the conformance scenario
  * `org-position-no-authority-escalation` reads exactly that path to check the
  * §B no-authority invariant on the live wire. So the capability was real and
@@ -15,7 +15,7 @@
  *
  *  1. the routes behave per §C/§D — tenant-scoped, roll-up, `?recursive=false`,
  *     404 for unknown/cross-tenant department;
- *  2. **`/v1/agents/org-chart` is not shadowed.** `routes/agents.ts` serves
+ *  2. **`/agents/org-chart` is not shadowed.** `routes/agents.ts` serves
  *     `GET /v1/agents/:agentId`, which matches the literal segment `org-chart`
  *     and answers `404 not_found`. Express resolves in registration order, so
  *     if `orgChartNormative` were ever moved after `agents` in
@@ -32,6 +32,11 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
+import Ajv2020 from 'ajv/dist/2020.js';
+import addFormats from 'ajv-formats';
+import { readFileSync, readdirSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createApp } from '../src/index.js';
 import { __resetRosterStore, createRosterEntry } from '../src/host/rosterService.js';
 import { __resetOrgChartStore, putChart } from '../src/host/orgChartService.js';
@@ -136,7 +141,7 @@ describe('RFC 0087 §D — normative GET /v1/agents/org-chart', () => {
 
   it('serves the chart at the NORMATIVE path — it is not shadowed by /v1/agents/:agentId', async () => {
     const rosterId = await seedChart(TENANT_A, ['wf-a']);
-    const { status, body } = await get<ChartBody>('/v1/agents/org-chart', KEY_A);
+    const { status, body } = await get<ChartBody>('/agents/org-chart', KEY_A);
 
     expect(status).toBe(200);
     // The shadowing failure mode is specifically a 404 whose body is the
@@ -149,8 +154,8 @@ describe('RFC 0087 §D — normative GET /v1/agents/org-chart', () => {
   it('is tenant-scoped — a second tenant never sees the first tenant\'s chart', async () => {
     await seedChart(TENANT_A, ['wf-a']);
 
-    const a = await get<ChartBody>('/v1/agents/org-chart', KEY_A);
-    const b = await get<ChartBody>('/v1/agents/org-chart', KEY_B);
+    const a = await get<ChartBody>('/agents/org-chart', KEY_A);
+    const b = await get<ChartBody>('/agents/org-chart', KEY_B);
 
     expect(a.body.members).toHaveLength(1);
     // §C / CTI-1 — B has no chart, so B reads an EMPTY chart, never A's rows.
@@ -162,13 +167,13 @@ describe('RFC 0087 §D — normative GET /v1/agents/org-chart', () => {
   it('serves the §D responsibility roll-up, and narrows it with ?recursive=false', async () => {
     await seedChart(TENANT_A, ['wf-social-1', 'wf-social-2']);
 
-    const recursive = await get<ViewBody>('/v1/agents/org-chart/dept-marketing', KEY_A);
+    const recursive = await get<ViewBody>('/agents/org-chart/dept-marketing', KEY_A);
     expect(recursive.status).toBe(200);
     expect(recursive.body.department?.departmentId).toBe('dept-marketing');
     // The member sits in the SUB-department, so a recursive roll-up reaches it.
     expect(recursive.body.responsibilities?.sort()).toEqual(['wf-social-1', 'wf-social-2']);
 
-    const direct = await get<ViewBody>('/v1/agents/org-chart/dept-marketing?recursive=false', KEY_A);
+    const direct = await get<ViewBody>('/agents/org-chart/dept-marketing?recursive=false', KEY_A);
     expect(direct.status).toBe(200);
     // §D — narrowing changes the CONTENT, never the SHAPE.
     expect(direct.body.department?.departmentId).toBe('dept-marketing');
@@ -179,22 +184,90 @@ describe('RFC 0087 §D — normative GET /v1/agents/org-chart', () => {
   it('404s an unknown department, and a cross-tenant one identically', async () => {
     await seedChart(TENANT_A, ['wf-a']);
 
-    const unknown = await get<ViewBody>('/v1/agents/org-chart/dept-nope', KEY_A);
+    const unknown = await get<ViewBody>('/agents/org-chart/dept-nope', KEY_A);
     expect(unknown.status).toBe(404);
 
     // B asking for a department that exists ONLY in A's chart gets the SAME
     // 404 as a department that exists nowhere — the response must not
     // distinguish "absent" from "not yours".
-    const crossTenant = await get<ViewBody>('/v1/agents/org-chart/dept-social', KEY_B);
+    const crossTenant = await get<ViewBody>('/agents/org-chart/dept-social', KEY_B);
     expect(crossTenant.status).toBe(404);
     expect(crossTenant.body.error).toBe(unknown.body.error);
   });
 
   it('keeps the host-extension alias serving the same chart', async () => {
     await seedChart(TENANT_A, ['wf-a']);
-    const normative = await get<ChartBody>('/v1/agents/org-chart', KEY_A);
-    const hostExt = await get<ChartBody>('/v1/host/openwop-app/org-chart', KEY_A);
+    const normative = await get<ChartBody>('/agents/org-chart', KEY_A);
+    const hostExt = await get<ChartBody>('/host/openwop-app/org-chart', KEY_A);
     expect(hostExt.status).toBe(200);
     expect(hostExt.body.members).toEqual(normative.body.members);
   });
+
+  // The route used to serve the stored record verbatim, as
+  // `{ tenantId, departments, members, updatedAt }`. The schema requires
+  // `owner` and is closed, so every response failed it at BOTH majors, and
+  // every assertion above still passed, because each one reads a field the two
+  // shapes share. Validating the whole body is the only check that sees the
+  // envelope.
+  it.each([
+    ['v1', '/agents/org-chart', {}],
+    ['v2', '/agents/org-chart', { 'OpenWOP-Version': '2' }],
+  ] as const)('the %s chart response satisfies agent-org-chart.schema.json', async (major, path, headers) => {
+    await seedChart(TENANT_A, ['wf-a']);
+    const res = await fetch(`${BASE}${path}`, { headers: { authorization: `Bearer ${KEY_A}`, ...headers } });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    const validate = schema(major, 'agent-org-chart.schema.json');
+    expect(validate(body), JSON.stringify(validate.errors)).toBe(true);
+    expect((body as { owner?: { tenantId?: string } }).owner?.tenantId).toBe(TENANT_A);
+  });
+
+  it.each([
+    ['v1', '/agents/org-chart/dept-marketing', {}],
+    ['v2', '/agents/org-chart/dept-marketing', { 'OpenWOP-Version': '2' }],
+  ] as const)('the %s department roll-up satisfies org-chart-responsibility-view.schema.json', async (major, path, headers) => {
+    await seedChart(TENANT_A, ['wf-a']);
+    const res = await fetch(`${BASE}${path}`, { headers: { authorization: `Bearer ${KEY_A}`, ...headers } });
+    expect(res.status).toBe(200);
+    const validate = schema(major, 'org-chart-responsibility-view.schema.json');
+    const body = await res.json();
+    expect(validate(body), JSON.stringify(validate.errors)).toBe(true);
+  });
+
+  it('an EMPTY chart satisfies the schema too — it is the common case for a new tenant', async () => {
+    const { status, body } = await get<unknown>('/agents/org-chart', KEY_B);
+    expect(status).toBe(200);
+    const validate = schema('v1', 'agent-org-chart.schema.json');
+    expect(validate(body), JSON.stringify(validate.errors)).toBe(true);
+  });
+
+  it('a PUT whose department has no roles array is a 400 naming the field, not a 500', async () => {
+    const res = await fetch(`${BASE}/host/openwop-app/org-chart`, {
+      method: 'PUT',
+      headers: { authorization: `Bearer ${KEY_A}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ departments: [{ departmentId: 'd1', name: 'Eng' }], members: [] }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error?: string; details?: { field?: string } };
+    expect(body.error).toBe('validation_error');
+    expect(body.details?.field).toBe('departments[0].roles');
+  });
 });
+
+const SCHEMA_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'schemas');
+
+/** Compile one corpus schema with every sibling registered, so `$ref`s resolve. */
+function schema(major: 'v1' | 'v2', file: string) {
+  const dir = major === 'v2' ? join(SCHEMA_ROOT, 'v2') : SCHEMA_ROOT;
+  const ajv = new Ajv2020({ strict: false, allErrors: true });
+  (addFormats as unknown as (a: unknown) => void)(ajv);
+  for (const f of readdirSync(dir)) {
+    if (!f.endsWith('.json')) continue;
+    try { ajv.addSchema(JSON.parse(readFileSync(join(dir, f), 'utf8')) as Record<string, unknown>, f); } catch { /* not this test's schema */ }
+  }
+  const target = JSON.parse(readFileSync(join(dir, file), 'utf8')) as { $id?: string };
+  const fn = (target.$id ? ajv.getSchema(target.$id) : undefined) ?? ajv.getSchema(file);
+  if (!fn) throw new Error(`${major}/${file} did not register — the validator would be vacuous`);
+  return fn;
+}
+

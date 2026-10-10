@@ -18,7 +18,7 @@ import { readWhatsAppHealth } from './health.js';
 import { OpenwopError } from '../../types.js';
 
 const FEATURE = { toggleId: 'whatsapp', label: 'WhatsApp' };
-const BASE = '/v1/host/openwop-app/whatsapp/orgs/:orgId/attestation';
+const BASE = '/host/openwop-app/whatsapp/orgs/:orgId/attestation';
 
 export function registerWhatsAppRoutes(deps: RouteDeps): void {
   const { app } = deps;
@@ -65,7 +65,7 @@ export function registerWhatsAppRoutes(deps: RouteDeps): void {
   // GET …/whatsapp/orgs/:orgId/health?connectionId=… — binding + attestation +
   // the bound sender's BSP quality rating / messaging tier + the documented
   // enforcement ladder. A degraded read raises `openwop-app.whatsapp.health-degraded`.
-  app.get('/v1/host/openwop-app/whatsapp/orgs/:orgId/health', async (req, res, next) => {
+  app.get('/host/openwop-app/whatsapp/orgs/:orgId/health', async (req, res, next) => {
     try {
       const { user, tenantId } = await authorizeOrgScope(req, FEATURE, 'workspace:read');
       const connectionId = requireString(req.query.connectionId, 'connectionId');

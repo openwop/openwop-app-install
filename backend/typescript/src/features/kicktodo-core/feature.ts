@@ -96,7 +96,7 @@ export const kicktodoCoreFeature: BackendFeature = {
     id: 'kicktodo-core',
     label: 'KickTodo',
     description:
-      'Guided challenges: enroll, daily actions on your board, check-ins, and judged completion through standing goals (ADR 0414).',
+      'Guided challenges: enroll, daily actions on your board, check-ins, and judged completion through standing goals.',
     category: 'KickTodo',
     status: 'off',
     bucketUnit: 'user',
@@ -117,7 +117,7 @@ export const kicktodoCoreFeature: BackendFeature = {
     // ADR 0463 — nodes 1.21.0 (replan-clarify a2ui leg), agents 1.7.0 (the
     // plan-revision `clarification` arm). Pins move in lockstep.
     // ADR 0689 — nodes 1.28.0 (kickbot-coach-turn, the reminder-loop's second node).
-    { name: 'feature.kicktodo.nodes', version: '1.30.0' },
-    { name: 'feature.kicktodo.agents', version: '1.9.0' },
+    { name: 'feature.kicktodo.nodes', version: '1.30.3' },
+    { name: 'vendor.openwop-app.kicktodo.agents', version: '1.9.1' },
   ],
 };

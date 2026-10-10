@@ -101,9 +101,20 @@ export async function deleteCampaign(orgId: string, campaignId: string): Promise
   const res = await fetch(`${base(orgId)}/campaigns/${encodeURIComponent(campaignId)}`, fetchOpts({ method: 'DELETE', headers: authedHeaders() }));
   if (!res.ok) throw new Error(`deleteCampaign returned ${res.status}`);
 }
+/** ADR 0848 D5 — test sends are metered per member per hour; the page formats the
+ *  wait itself (localized) from `Retry-After` instead of showing the server's English. */
+export class TestSendRateLimitedError extends Error {
+  constructor(readonly retryAfterSeconds: number) { super('test_send_rate_limited'); }
+}
 /** R2 EM-G3 — one marked test email to an explicit recipient; 204 on success. */
 export async function sendTestEmail(orgId: string, campaignId: string, to: string): Promise<void> {
   const res = await fetch(`${base(orgId)}/campaigns/${encodeURIComponent(campaignId)}/test-send`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify({ to }) }));
+  if (res.status === 429) {
+    // Only the email meter's 429 is "too many test sends"; the global per-IP budget is not.
+    let limit = '';
+    try { limit = String(((await res.clone().json()) as { details?: { limit?: unknown } }).details?.limit ?? ''); } catch { /* non-JSON */ }
+    if (limit === 'email_test_send') throw new TestSendRateLimitedError(Math.max(1, Number(res.headers.get('retry-after')) || 60));
+  }
   if (!res.ok) {
     let detail = '';
     try { detail = ((await res.json()) as { message?: string }).message ?? ''; } catch { /* non-JSON */ }
@@ -133,9 +144,11 @@ export async function listSends(orgId: string, campaignId: string): Promise<Send
   return (await asJson<{ sends: SendLog[] }>(res, 'listSends')).sends;
 }
 
-/** Sender identity — the per-org verified from-address campaigns send with
- *  (required before /send works; ADR 0019 correction note / ADR 0193). */
-export interface EmailSettings { senderAddress: string; configured: boolean }
+/** Sender identity — the per-org from-address campaigns send with (required before
+ *  /send works; ADR 0019 correction note / ADR 0193). ADR 0848 D4 — `canEdit`: may THIS
+ *  caller change it (an admin-tier setting)? Absent from an older backend ⇒ treated as
+ *  editable (the PUT still decides). */
+export interface EmailSettings { senderAddress: string; configured: boolean; canEdit?: boolean }
 export interface ProviderStatus {
   providers: { provider: string; connected: boolean }[];
   defaultProvider: string | null;

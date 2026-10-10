@@ -14,6 +14,7 @@
  * never from a plain session — see routes/agents.ts `tenantForInventory`).
  */
 
+import { canonicalAgentId } from '../executor/agentIdAliases.js';
 import { getAgentRegistry, type ResolvedAgentManifest } from '../executor/agentRegistry.js';
 
 export function agentVisibleToTenant(a: ResolvedAgentManifest, tenant: string | undefined): boolean {
@@ -39,7 +40,10 @@ export async function resolveAgentForTenant(agentId: string, tenant: string | un
     // MANY tenants — an arbitrary-pick here would let the wildcard dispatch
     // path run an arbitrary tenant's systemPrompt. Resolve only when the id is
     // UNAMBIGUOUS; an ambiguous id is null (the caller must name a tenant).
-    const matches = reg.list().filter((a) => a.agentId === agentId);
+    // ADR 0763 — compare on BOTH spellings: this branch scans raw ids and would
+    // otherwise bypass the registry's alias choke point.
+    const canonical = canonicalAgentId(agentId);
+    const matches = reg.list().filter((a) => a.agentId === agentId || a.agentId === canonical);
     return matches.length === 1 ? matches[0]! : null;
   }
   const a = await getAgentRegistry().resolve(agentId, tenant);

@@ -6,6 +6,9 @@
 export const messages = {
   // Failure copy — shared across the panels below.
   loadFailed: 'Failed to load.',
+  sourcesNoneReadOnlyTitle: 'No sources yet',
+  sourcesNoneReadOnlyBody: 'Someone with edit access to this project can add sources here.',
+  sourcesReadOnlyNote: 'You can read these sources. Adding or changing them needs edit access.',
   // NBU-2 / NBU-5 (ADR 0601) — failed READS state themselves in the panel that
   // failed, each with its own retry. A failed read used to render a permanent
   // loading skeleton under a shared banner an unrelated success could clear.

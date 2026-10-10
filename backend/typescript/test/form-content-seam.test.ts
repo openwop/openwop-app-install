@@ -55,7 +55,7 @@ beforeAll(async () => {
   process.env.OPENWOP_FORM_CONTENT_CONFORMANCE_FIXTURES = join(process.cwd(), '../../conformance-fixtures/form-content');
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 't', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((r) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; r(); }); });
-  const login = await fetch(`${BASE}/v1/host/openwop-app/test/login`, {
+  const login = await fetch(`${BASE}/host/openwop-app/test/login`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ email: `formcontent-seam-${Date.now()}@acme.test` }),
@@ -75,7 +75,7 @@ afterAll(async () => {
 
 const instantiate = async (templateId: string, opts: { withCredential?: boolean } = {}) => {
   const withCredential = opts.withCredential !== false;
-  const res = await fetch(`${BASE}/v1/host/sample/formcontent/instantiate`, {
+  const res = await fetch(`${BASE}/host/sample/formcontent/instantiate`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', ...(withCredential && cookie ? { cookie } : {}) },
     body: JSON.stringify({ templateId }),
@@ -87,7 +87,7 @@ const fields = (j: Record<string, unknown>) =>
 
 describe('RFC 0137 conformance seam — the behavioral witness', () => {
   it('advertises forms.contentPacks on the CANONICAL arm (plain key, document root)', async () => {
-    const res = await fetch(`${BASE}/.well-known/openwop`);
+    const res = await fetch(`${BASE}/.well-known/openwop`, { headers: { 'OpenWOP-Version': '2' } });
     const doc = (await res.json()) as Record<string, unknown> & { capabilities?: Record<string, unknown> };
     const packs = (v: unknown) => (v as { contentPacks?: boolean } | undefined)?.contentPacks;
 
@@ -99,9 +99,10 @@ describe('RFC 0137 conformance seam — the behavioral witness', () => {
     // stayed green if root emission broke outright.
     expect(packs(doc['forms']), 'plain key at the document root (canonical)').toBe(true);
 
-    // The deprecated mirrors, asserted so their removal is a deliberate act.
-    expect(packs(doc['host.forms']), 'dotted root mirror (deprecated)').toBe(true);
-    expect(packs(doc.capabilities?.['forms']), 'plain wrapper mirror (deprecated)').toBe(true);
+    // ADR 0812 P3c-0 — the v1 document's deprecated mirrors retired with major 1; the
+    // closed v2 root carries neither, so their absence is asserted instead.
+    expect(doc['host.forms'], 'dotted root mirror (v1 only)').toBeUndefined();
+    expect(doc.capabilities, 'capabilities wrapper (v1 only)').toBeUndefined();
   });
 
   it('#1 instantiation goes through the NORMAL create path', async () => {
@@ -163,7 +164,7 @@ describe('RFC 0137 conformance seam — the behavioral witness', () => {
       const d = getToggleDefault(id);
       if (d) await saveConfig({ ...d, status: 'on' }, 'test');
     }
-    const orgRes = await fetch(`${BASE}/v1/host/openwop-app/orgs`, {
+    const orgRes = await fetch(`${BASE}/host/openwop-app/orgs`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', cookie },
       body: JSON.stringify({ name: 'Seam pollution probe' }),
@@ -171,7 +172,7 @@ describe('RFC 0137 conformance seam — the behavioral witness', () => {
     const orgBody = (await orgRes.json()) as { org?: { orgId?: string }; orgId?: string };
     const orgId = orgBody.org?.orgId ?? orgBody.orgId;
     expect(orgId, JSON.stringify(orgBody)).toBeTruthy();
-    const list = await fetch(`${BASE}/v1/host/openwop-app/forms/orgs/${encodeURIComponent(String(orgId))}/form-templates`, {
+    const list = await fetch(`${BASE}/host/openwop-app/forms/orgs/${encodeURIComponent(String(orgId))}/form-templates`, {
       headers: { cookie },
     });
     expect(list.status).toBe(200);
@@ -189,8 +190,10 @@ describe('DOCT-1 — the seam is env-gated', () => {
       const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 't2', serviceVersion: '0.0.1', enableConsoleTracer: false });
       const srv: http.Server = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
       const port = (srv.address() as AddressInfo).port;
-      const res = await fetch(`http://127.0.0.1:${port}/v1/host/sample/formcontent/instantiate`, {
-        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ templateId: BASIC }),
+      const res = await fetch(`http://127.0.0.1:${port}/host/sample/formcontent/instantiate`, {
+        // Credentialed, so the answer is about MOUNTING, not the auth guard (an
+        // unmounted unversioned path is a 401 to an anonymous caller).
+        method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer dev-token' }, body: JSON.stringify({ templateId: BASIC }),
       });
       expect(res.status, 'an ungated process must not expose the seam').toBe(404);
       await new Promise<void>((r) => srv.close(() => r()));

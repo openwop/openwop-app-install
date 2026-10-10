@@ -98,8 +98,10 @@ export function HitlDecisionCard({ entry, nodeName }: Props): JSX.Element {
       aria-label={ariaLabel}
       className="hitl-card"
       style={{
-        background: `color-mix(in oklch, ${effectiveColor} 7%, transparent)`,
-        border: `1px solid color-mix(in oklch, ${effectiveColor} 26%, var(--rule))`,
+        // DESIGN.md §3 rule 3 — the outcome reads from the hairline, the edge bar
+        // and the labelled chip below; the surface itself stays paper.
+        background: 'var(--paper)',
+        border: `1px solid color-mix(in oklab, ${effectiveColor} 26%, var(--rule))`,
         // Signature: a status-colored left accent bar — reads the outcome
         // (approved / rejected / cancelled) at a glance, and pairs the color cue
         // with a line-weight cue (thicker on reject) for high-contrast users.
@@ -110,7 +112,7 @@ export function HitlDecisionCard({ entry, nodeName }: Props): JSX.Element {
       <div className="hitl-card__row">
         <span
           className="hitl-card__status"
-          style={{ color: effectiveColor, background: `color-mix(in oklch, ${effectiveColor} 15%, transparent)` }}
+          style={{ color: effectiveColor, border: `1px solid color-mix(in oklab, ${effectiveColor} 40%, var(--rule))` }}
         >
           <StatusIcon kind={effectiveIcon} color={effectiveColor} /> {effectiveVerb}
         </span>

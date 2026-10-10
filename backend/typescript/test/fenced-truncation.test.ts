@@ -213,6 +213,52 @@ describe('CALL-SITE RATCHET — every handler of fenced text is classified', () 
         + '`windowTranscript` admits or drops WHOLE turns — it never shortens a turn\'s text — '
         + 'so no fenced string exists yet when it runs, and nothing shortens one afterwards.',
     },
+    'host/exchange/runDigests.ts': {
+      kind: 'PRODUCES',
+      why:
+        'ADR 0764 D1 — builds a run digest and fences everything run-derived with ONE '
+        + '`fenceUntrustedBlock`. Its `excerpt()` bounds RAW values (outputs, error text, the '
+        + 'name) BEFORE they are fenced — redact, then cut, then fence — so no fenced string '
+        + 'exists yet when anything is shortened, and nothing shortens the fenced result.',
+    },
+    'features/team-intent-ledger/driftCheck.ts': {
+      kind: 'PRODUCES',
+      why:
+        'ADR 0855 D1 — fences the ledger text and the produced work with `fenceUntrustedBlock` '
+        + '(and neutralizes ledger lines). `producedText` cuts the RAW produced text to 8,000 '
+        + 'characters BEFORE it is fenced — cut, then fence — and nothing shortens a fenced string.',
+    },
+    'features/team-intent-ledger/decisionSuggester.ts': {
+      kind: 'PRODUCES',
+      why:
+        'ADR 0853 D3 — fences one chat message with `fenceUntrustedBlock` for the suggester. '
+        + 'The message is bounded RAW when it is enqueued, before any fence exists, and nothing '
+        + 'shortens the fenced string.',
+    },
+    'features/structured-handoffs/handoffCards.ts': {
+      kind: 'PRODUCES',
+      why:
+        'ADR 0854 D2 — the channel card neutralizes the card title and the handoff intent '
+        + '(`neutralizeUntrusted`) into one line of host text. It never fences, and nothing in '
+        + 'it shortens a fenced string (the intent is already bounded when the record is built).',
+    },
+    'host/handoff/handoffRecord.ts': {
+      kind: 'PRODUCES',
+      why:
+        'ADR 0829 D5 — `handoffPromptBlock` neutralizes each line and wraps the structured '
+        + 'handoff note in ONE `fenceUntrustedItems` fence. The bounds in this file '
+        + '(`normalizeHandoffRecord`: per-field caps, list caps, the 8 KiB fit) cut RAW strings '
+        + 'when the record is built or read, before any fence exists — redact, cut, then fence — '
+        + 'and nothing shortens the fenced block afterwards.',
+    },
+    'features/team-intent-ledger/runContext.ts': {
+      kind: 'PRODUCES',
+      why:
+        'ADR 0831 D4 — `ledgerContextBlock` neutralizes each line of the ledger state a run '
+        + 'was stamped with and wraps it in ONE `fenceUntrustedItems` fence. Every field was '
+        + 'bounded when its change was accepted (`ledgerStore.validatePatch`), before any fence '
+        + 'existed; nothing here shortens text, fenced or not.',
+    },
     'host/agentKnowledgeComposition.ts': {
       kind: 'PRODUCES',
       why: 'Neutralizes + fences auto-ingested knowledge items before they enter a turn (ADR 0038 §C). Composition only.',
@@ -220,6 +266,14 @@ describe('CALL-SITE RATCHET — every handler of fenced text is classified', () 
     'host/promptInjectionGuard.ts': {
       kind: 'PRODUCES',
       why: 'Wraps untrusted values in the XML-tag fence and defangs the delimiter (defangAngleFence). Never truncates.',
+    },
+    'host/mcpClient.ts': {
+      kind: 'PRODUCES',
+      why: 'ADR 0788 D2 — defangs every string (and key) an MCP peer returns via `defangPeerFence` where the bytes enter the host, and in every McpError message. Defang only; it never shortens.',
+    },
+    'host/mcpServerRouter.ts': {
+      kind: 'PRODUCES',
+      why: 'ADR 0788 D2 — `fenceSamplingRequest` defangs and wraps each inbound sampling message in ONE host-made <UNTRUSTED> fence before the handler workflow sees it. It joins text parts; it never shortens fenced text.',
     },
     'host/promptCompose.ts': {
       kind: 'PRODUCES',

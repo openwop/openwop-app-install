@@ -47,10 +47,36 @@ describe('armRunAbort / runAbortSignal — the seam', () => {
     expect(signal.aborted).toBe(true);
   });
 
-  it('is idempotent — every node of a run shares ONE cancellation fact', () => {
+  it('every node of a run shares ONE cancellation fact — the armed signal is what readers get', () => {
     const a = armRunAbort('run-2');
-    const b = armRunAbort('run-2');
-    expect(a).toBe(b);
+    expect(runAbortSignal('run-2')).toBe(a);
+    expect(runAbortSignal('run-2')).toBe(runAbortSignal('run-2'));
+  });
+
+  it('ADR 0772 D1.4 — a re-arm (a resumed segment) gets a FRESH signal; the old segment keeps its own deadline', async () => {
+    // This test used to pin `armRunAbort` as idempotent. That was the defect
+    // (`RRWF-2`): the first segment's deadline survived a suspend and every
+    // resumed node was handed an already-aborted signal.
+    const first = armRunAbort('run-2b', Date.now() + 30);
+    const second = armRunAbort('run-2b', Date.now() + 60_000);
+    expect(second).not.toBe(first);
+    expect(runAbortSignal('run-2b')).toBe(second);
+    await new Promise((r) => setTimeout(r, 60));
+    // The old segment's own deadline still cuts ITS nodes (the unfenced resume
+    // path can leave some in flight) — and never reaches the new segment.
+    expect(first.aborted).toBe(true);
+    expect(second.aborted, 'the new segment must not inherit the old deadline').toBe(false);
+    notifyRunTerminal('run-2b', 'completed');
+    expect(second.aborted).toBe(true);
+    expect(runAbortSignal('run-2b')).toBeUndefined();
+  });
+
+  it('terminal aborts EVERY live segment controller through one listener (no per-segment accumulation)', () => {
+    const a = armRunAbort('run-2c', Date.now() + 60_000);
+    const b = armRunAbort('run-2c', Date.now() + 60_000);
+    const c = armRunAbort('run-2c', Date.now() + 60_000);
+    notifyRunTerminal('run-2c', 'cancelled');
+    expect([a.aborted, b.aborted, c.aborted]).toEqual([true, true, true]);
   });
 
   it('aborts on ANY terminal status, not only `cancelled`', () => {

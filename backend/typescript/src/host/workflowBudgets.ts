@@ -30,7 +30,8 @@
  */
 
 import { DurableCollection } from './hostExtPersistence.js';
-import { onWorkflowDeleted } from './workflowsRegistry.js';
+import { onWorkflowDeleted, onWorkflowForked } from './workflowsRegistry.js';
+import { moveKeyedRows } from './forkRepoint.js';
 import { registerSubjectEraser } from './subjectErasure.js';
 import { ERASED, subjectKeyForms } from './subjectErasureRedaction.js';
 import { getOwned } from './workflowOwnership.js';
@@ -339,3 +340,11 @@ export async function eraseSubjectWorkflowBudgets(tenantId: string, subjectKey: 
 export function registerWorkflowBudgetErasure(): void {
   registerSubjectEraser(eraseSubjectWorkflowBudgets);
 }
+
+// ADR 0789 — a budget this tenant set on a SHARED workflow is config for "the
+// workflow", so it moves to the tenant's fork. The spend-day counters are the
+// shared id's HISTORY and stay put: the fork starts its own day at zero.
+onWorkflowForked('workflow:budget', async (tenantId, from, to) => {
+  const rows = (await budgets.listByPrefix(`${tenantId}:`)).filter((r) => r.workflowId === from && r.tenantId === tenantId);
+  return moveKeyedRows(budgets, rows, (r) => r.key, (r) => ({ ...r, workflowId: to, key: budgetKey(tenantId, to) }));
+});

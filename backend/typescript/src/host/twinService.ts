@@ -179,6 +179,14 @@ async function revokeByOwner(storage: Storage, tenantId: string, agentId: string
   return true;
 }
 
+/** ADR 0820 §7 — every twin grant in the tenant (the read-only data export).
+ *  Tenant-scoped through the tenant index armed above. */
+export async function listGrantsForTenant(tenantId: string): Promise<TwinGrant[]> {
+  return (await grants.listForTenantIndexed(tenantId))
+    .filter((g) => g.tenantId === tenantId)
+    .sort((a, b) => b.grantedAt.localeCompare(a.grantedAt));
+}
+
 /** Every grant the caller has issued (active + revoked), newest first. For the
  *  user's "who can recall my memory" view. */
 export async function listGrantsForUser(tenantId: string, userId: string): Promise<TwinGrant[]> {

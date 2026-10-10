@@ -71,7 +71,7 @@ export const NOTEBOOKS_SEARCH_TOOL_ID = 'openwop:notebooks.search';
 export const NOTEBOOKS_ASK_TOOL_ID = 'openwop:notebooks.ask';
 export const NOTEBOOKS_WRITE_TRANSFORMATION_TOOL_ID = 'openwop:notebooks.write-transformation';
 
-const RESEARCHER_AGENT_ID = 'feature.notebooks.agents.researcher';
+const RESEARCHER_AGENT_ID = 'vendor.openwop-app.notebooks.agents.researcher';
 
 /** Per-call toggle honesty (ADR 0308 D2): acting-subject shape (CFPT-1b), fail-closed. */
 async function notebooksEnabled(scope: BundleScope): Promise<boolean> {
@@ -130,6 +130,7 @@ export function registerNotebooksAgentTools(deps: StartRunDeps): void {
   // ── READ: raw ranked hits + citations over the notebook's bound sources. ────
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: NOTEBOOKS_SEARCH_TOOL_ID,
       description:
@@ -183,6 +184,7 @@ export function registerNotebooksAgentTools(deps: StartRunDeps): void {
   // ── READ: the grounded ASK — a fenced, context-level-filtered augmented block. ─
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: NOTEBOOKS_ASK_TOOL_ID,
       description:
@@ -232,6 +234,7 @@ export function registerNotebooksAgentTools(deps: StartRunDeps): void {
   const templateIds = NOTEBOOK_TRANSFORMATIONS.map((t) => t.id);
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: NOTEBOOKS_WRITE_TRANSFORMATION_TOOL_ID,
       description:

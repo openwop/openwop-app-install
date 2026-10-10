@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/core.openwop.agents.research-crew/1.0.0/writer.task.schema.json",
+  "$id": "https://packs.openwop.dev/core.openwop.agents.research-crew/1.0.1/writer.task.schema.json",
   "title": "ResearchWriterTask",
   "type": "object",
   "required": ["goal", "approvedEvidence"],

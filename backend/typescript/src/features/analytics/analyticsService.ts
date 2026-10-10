@@ -14,7 +14,7 @@ import { registerSubjectEraser } from '../../host/subjectErasure.js';
 import { declarePiiFields } from '../../host/dataClassification.js';
 import { registerRetentionPurger, purgeRowsByAge } from '../../host/retentionPurger.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
-import { linkSession } from './identityLinkService.js';
+import { linkSession, isLinkableSessionKey } from './identityLinkService.js';
 import { resolveExperimentStamp, type ExperimentStampDropReason } from './experimentStampResolver.js';
 import { createLogger } from '../../observability/logger.js';
 
@@ -176,7 +176,12 @@ export async function recordEvent(input: { tenantId: string; orgId: string; raw:
   // BEST-EFFORT — never fails (or delays the semantics of) the beacon write;
   // the tenant on the token MUST match the beacon's tenant (no cross-tenant
   // linking from a leaked/replayed token).
-  if (owx && e.sessionKey) {
+  // ADR 0857 A2 — the grammar is checked BEFORE the claim. A session outside the
+  // D1 grammar would otherwise CLAIM the token (first-session-wins) and then have
+  // its link refused, stranding the token so the real recipient's click links nothing.
+  if (owx && e.sessionKey && !isLinkableSessionKey(e.sessionKey)) {
+    log.info('analytics_click_token_unlinked', { tenantId: input.tenantId, orgId: input.orgId, reason: 'session_key_not_linkable' });
+  } else if (owx && e.sessionKey) {
     try {
       // ANLWF-1 / ADR 0651 D1 — the token is CLAIMED by the first session that links
       // through it; a later session presenting the same token gets no link. Before
@@ -198,6 +203,31 @@ export async function recordEvent(input: { tenantId: string; orgId: string; raw:
     } catch { /* best-effort — the event row is already durable */ }
   }
   return e;
+}
+
+/** ADR 0857 D2 — the ONE projection of an event row for every exit that is not
+ *  the store itself: the `/events` route AND `ctx.features.analytics.events`.
+ *  ANL-15 projected the route to this shape because `visitorHash`, `clickIds`
+ *  (cross-site ad identifiers), `owx` and the experiment stamp were reaching
+ *  every `workspace:read` member — and left the run surface stripping only
+ *  `tenantId`, so every run (and any model reading one) still got all four.
+ *  An allowlist, not a denylist: a column added to `AnalyticsEvent` stays
+ *  internal until someone adds it here on purpose. */
+export interface AnalyticsEventView {
+  eventId: string; orgId: string; type: EventType; ts: string;
+  path?: string; name?: string; sessionKey?: string; referrer?: string; utm?: Utm;
+  props?: Record<string, string | number | boolean>;
+}
+export function toEventView(e: AnalyticsEvent): AnalyticsEventView {
+  return {
+    eventId: e.eventId, orgId: e.orgId, type: e.type, ts: e.ts,
+    ...(e.path !== undefined ? { path: e.path } : {}),
+    ...(e.name !== undefined ? { name: e.name } : {}),
+    ...(e.sessionKey !== undefined ? { sessionKey: e.sessionKey } : {}),
+    ...(e.referrer !== undefined ? { referrer: e.referrer } : {}),
+    ...(e.utm !== undefined ? { utm: e.utm } : {}),
+    ...(e.props !== undefined ? { props: e.props } : {}),
+  };
 }
 
 /** Every event stamped for one experiment (ADR 0236 D1) — the cross-feature

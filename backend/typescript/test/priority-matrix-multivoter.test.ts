@@ -43,12 +43,12 @@ function client(): Client {
 
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
 async function signup(c: Client, opts: { tenantId?: string } = {}): Promise<{ userId: string }> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail('mv'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
+  const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail('mv'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
 
-const L = '/v1/host/openwop-app/priority-matrix/lists';
+const L = '/host/openwop-app/priority-matrix/lists';
 // Weighted preset criterion ids; score one benefit criterion so the aggregate is easy to reason about.
 const A = { 'strategic-alignment': 8, roi: 8, urgency: 8, 'compliance-risk': 8, cost: 2 };
 const B = { 'strategic-alignment': 2, roi: 2, urgency: 2, 'compliance-risk': 2, cost: 8 };
@@ -60,8 +60,8 @@ describe('priority-matrix multi-voter (ADR 0059)', () => {
     await signup(owner, { tenantId });
     const member = client();
     const memberUser = await signup(member, { tenantId });
-    const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
-    await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
+    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
+    await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
 
     const list = (await owner.post(L, { orgId, name: 'Council', presetId: 'weighted', votingMode: 'multi-voter', voteAggregation: 'mean' })).body;
     expect(list.votingMode).toBe('multi-voter');
@@ -91,7 +91,7 @@ describe('priority-matrix multi-voter (ADR 0059)', () => {
     const tenantId = `org:mv-${Date.now()}-${n++}`;
     const owner = client();
     await signup(owner, { tenantId });
-    const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
+    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
     const list = (await owner.post(L, { orgId, name: 'Median', presetId: 'weighted', votingMode: 'multi-voter', voteAggregation: 'median' })).body;
     expect(list.voteAggregation).toBe('median');
     // (Single voter here just exercises the median path end-to-end without overwrite.)
@@ -107,8 +107,8 @@ describe('priority-matrix multi-voter (ADR 0059)', () => {
     const ownerUser = await signup(owner, { tenantId });
     const member = client();
     const memberUser = await signup(member, { tenantId });
-    const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
-    await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
+    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
+    await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
 
     const list = (await owner.post(L, { orgId, name: 'Weighted', presetId: 'weighted', votingMode: 'multi-voter', voteAggregation: 'mean' })).body;
     const base = `${L}/${encodeURIComponent(list.id)}`;
@@ -136,8 +136,8 @@ describe('priority-matrix multi-voter (ADR 0059)', () => {
     const ownerUser = await signup(owner, { tenantId });
     const member = client();
     const memberUser = await signup(member, { tenantId });
-    const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
-    await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
+    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
+    await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
     const list = (await owner.post(L, { orgId, name: 'UnifMedian', presetId: 'weighted', votingMode: 'multi-voter', voteAggregation: 'median' })).body;
     const base = `${L}/${encodeURIComponent(list.id)}`;
     const idea = (await owner.post(`${base}/ideas`, { title: 'Idea' })).body;
@@ -160,8 +160,8 @@ describe('priority-matrix multi-voter (ADR 0059)', () => {
     const ownerUser = await signup(owner, { tenantId });
     const member = client();
     const memberUser = await signup(member, { tenantId });
-    const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
-    await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
+    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
+    await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
     const list = (await owner.post(L, { orgId, name: 'Gated', presetId: 'weighted', votingMode: 'multi-voter' })).body;
 
     // A co-tenant editor cannot set per-voter weights.
@@ -179,8 +179,8 @@ describe('priority-matrix multi-voter (ADR 0059)', () => {
     await signup(owner, { tenantId });
     const member = client();
     const memberUser = await signup(member, { tenantId });
-    const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
-    await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
+    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
+    await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
     const list = (await owner.post(L, { orgId, name: 'Default single' })).body;
     expect(list.votingMode).toBe('single'); // default
 

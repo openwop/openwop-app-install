@@ -82,6 +82,10 @@ export const brand: BrandConfig = {
     env.VITE_BRAND_DOCUMENT_TITLE as string | undefined,
     BRAND_DEFAULTS.documentTitle,
   ),
+  description: coalesce(
+    env.VITE_BRAND_DESCRIPTION as string | undefined,
+    BRAND_DEFAULTS.description,
+  ),
   fontsHref: coalesce(
     env.VITE_BRAND_FONTS_HREF as string | undefined,
     BRAND_DEFAULTS.fontsHref,

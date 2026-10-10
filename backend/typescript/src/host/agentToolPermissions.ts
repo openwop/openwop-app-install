@@ -85,6 +85,25 @@ export function evaluateToolPermission(
     : { allowed: false, reason: 'not-allowlisted' };
 }
 
+/**
+ * ADR 0775 D3 — evaluate `toolName` against EVERY permission block that binds a
+ * dispatch (see `resolveAgentToolPermissionSet`). The first DENY wins, in block
+ * order; otherwise `allowlisted` when any block allowlisted it, else `ungated`.
+ * An empty set is ungated.
+ */
+export function evaluateToolPermissionSet(
+  toolName: string,
+  blocks: readonly ToolPermissions[] | null | undefined,
+): ToolPermissionVerdict {
+  let allowlisted = false;
+  for (const block of blocks ?? []) {
+    const v = evaluateToolPermission(toolName, block);
+    if (!v.allowed) return v;
+    if (v.reason === 'allowlisted') allowlisted = true;
+  }
+  return { allowed: true, reason: allowlisted ? 'allowlisted' : 'ungated' };
+}
+
 /** Whether the live per-tool permission gate is enabled (ADR 0102). Default OFF
  *  until real agent tool-call names are validated against the seeded permission
  *  ids — see the ADR's activation gate. Read per-call so a deploy can flip it

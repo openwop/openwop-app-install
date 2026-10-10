@@ -3,8 +3,8 @@
  */
 export const messages = {
   button: 'Tasks',
-  openTitle: 'Task deck',
-  heading: 'Task deck',
+  openTitle: 'Run deck',
+  heading: 'Run deck',
   blurb: 'Your runs and the work delegated from them — pending, running, blocked, delegated, completed, and failed.',
   empty: 'No tasks yet. Runs you start (and the work they delegate) appear here.',
   close: 'Close',
@@ -16,5 +16,5 @@ export const messages = {
   bucket_failed: 'Failed',
   delegatedBy: 'Delegated by {{by}}',
   blockedReason: 'Awaiting: {{reason}}',
-  loadFailed: 'Couldn’t load the task deck.',
+  loadFailed: 'Couldn’t load the run deck.',
 };

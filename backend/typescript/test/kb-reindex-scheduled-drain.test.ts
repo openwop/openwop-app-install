@@ -22,13 +22,20 @@
  * The sabotage that proves this is load-bearing: put `featureId: 'kb'` back on
  * the job and the positive leg goes red on `lastSkipReason === 'feature-disabled'`.
  *
+ * Further sabotage witnesses (grade-tests wave 6): an every-minute cron, dropping the acting-user
+ * or workflow-id half of the surface gate, a tenant-less workflow id, an unarchived
+ * teardown, a `paused` status counted terminal, and an error message that names the
+ * expected id each turn the matching case red. Ceiling: `settleReindex` polls the reindex
+ * row's terminal condition — the run the scheduler starts has no hook to await.
+ *
  * @see docs/adr/0643-kb-reindex-orchestration-write-surface-lifecycle-events.md (D1b, D2)
  */
 
 import http from 'node:http';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/index.js';
 import { buildHostSurfaceBundle } from '../src/host/inMemorySurfaces.js';
+import { createOrg } from '../src/host/accessControlService.js';
 import { tryDurableStorage } from '../src/host/durable/durableStore.js';
 import { __setHeadlessEmbedderForTest } from '../src/host/headlessAi.js';
 import { processDueSchedules } from '../src/host/scheduleDaemon.js';
@@ -52,8 +59,8 @@ let n = 0;
 function fakeEmbedder(): void {
   __setHeadlessEmbedderForTest(async () => ({
     provider: 'openai', model: 'text-embedding-3-small',
-    embed: async (texts: string[]) => texts.map((t) => { const v = new Array(256).fill(0); v[Math.abs(hash(t)) % 256] = 1; return v; }),
-  }) as never);
+    embed: async (texts: readonly string[]) => texts.map((t) => { const v = new Array<number>(256).fill(0); v[Math.abs(hash(t)) % 256] = 1; return v; }),
+  }));
 }
 function hash(s: string): number { let h = 0; for (const c of s) h = (h * 31 + c.charCodeAt(0)) | 0; return h; }
 
@@ -81,7 +88,19 @@ const daemonDeps = (): StartRunDeps => ({
     },
     providerPolicyResolver: { resolveForRun: async () => [] },
   },
-} as unknown as StartRunDeps);
+});
+
+/** Wait for the reindex row the scheduled RUN drives to leave `running`/`paused`. A
+ *  ceiling, not a sleep: the run the daemon starts (`setImmediate(executeRun)`) has no
+ *  hook to await, so this polls the CONDITION and returns the last row seen. */
+async function settleReindex(tenantId: string, orgId: string, collectionId: string): Promise<Awaited<ReturnType<typeof getReindexJob>>> {
+  let job = await getReindexJob(tenantId, orgId, collectionId, { preAuthorized: true });
+  await vi.waitFor(async () => {
+    job = await getReindexJob(tenantId, orgId, collectionId, { preAuthorized: true });
+    if (job && (job.status === 'running' || job.status === 'paused')) throw new Error(`reindex still ${job.status}: ${JSON.stringify(job)}`);
+  }, { timeout: 3000, interval: 25 });
+  return job;
+}
 
 async function fixture(docs = 3): Promise<{ tenantId: string; orgId: string; collectionId: string }> {
   const tenantId = `kbd-${Date.now()}-${n++}`;
@@ -159,11 +178,7 @@ describe('D1b — the drain completes with NO browser', () => {
     // The run executes asynchronously (`setImmediate(executeRun)`), so wait for
     // the job the RUN is driving to reach a terminal state — the reindex job,
     // not the scheduler job.
-    let job = await getReindexJob(tenantId, orgId, collectionId, { preAuthorized: true });
-    for (let i = 0; i < 120 && job && (job.status === 'running' || job.status === 'paused'); i++) {
-      await new Promise((r) => setTimeout(r, 25));
-      job = await getReindexJob(tenantId, orgId, collectionId, { preAuthorized: true });
-    }
+    const job = await settleReindex(tenantId, orgId, collectionId);
     expect(job?.status, `reindex did not finish (last: ${JSON.stringify(job)})`).toBe('done');
     expect(job!.embeddedChunks).toBe(job!.totalChunks);
 
@@ -226,11 +241,7 @@ describe('D1b — the drain completes with NO browser', () => {
       const due = (await getJob(jobId))!.nextFireAt!;
       expect(await processDueSchedules(daemonDeps(), due), 'the daemon must have STARTED the resume run').toBeGreaterThan(0);
       expect((await getJob(jobId))?.lastSkipReason, 'a paused job must not be skipped on its next tick').toBeUndefined();
-      let job = await getReindexJob(tenantId, orgId, collectionId, { preAuthorized: true });
-      for (let i = 0; i < 120 && job && (job.status === 'running' || job.status === 'paused'); i++) {
-        await new Promise((r) => setTimeout(r, 25));
-        job = await getReindexJob(tenantId, orgId, collectionId, { preAuthorized: true });
-      }
+      const job = await settleReindex(tenantId, orgId, collectionId);
       expect(job?.status, `the scheduled resume did not finish (last: ${JSON.stringify(job)})`).toBe('done');
       // ...and NOW it is torn down.
       expect(await getJob(jobId)).toBeFalsy();
@@ -252,9 +263,11 @@ describe('D2 — reindexDrain is STRUCTURALLY scoped, not a general-purpose verb
       .rejects.toMatchObject({ code: 'validation_error', httpStatus: 403 });
     // The refusal is not an existence oracle: it names neither the expected id
     // nor whether the collection is reindexing.
-    await attacker.reindexDrain!({ orgId, collectionId }).catch((err: Error) => {
-      expect(err.message).not.toContain(collectionId);
-      expect(err.message).not.toContain('kb.reindex:');
+    await expect(attacker.reindexDrain!({ orgId, collectionId })).rejects.toMatchObject({
+      message: expect.not.stringContaining(collectionId),
+    });
+    await expect(attacker.reindexDrain!({ orgId, collectionId })).rejects.toMatchObject({
+      message: expect.not.stringContaining('kb.reindex:'),
     });
     // ...and nothing was drained.
     expect((await getReindexJob(tenantId, orgId, collectionId, { preAuthorized: true }))!.embeddedChunks).toBe(0);
@@ -267,6 +280,9 @@ describe('D2 — reindexDrain is STRUCTURALLY scoped, not a general-purpose verb
     // Every fact the old gate checked is satisfied — same tenant, live job, the
     // host-minted workflow id — plus the ONE fact a human-started run always
     // carries and a schedule fire never does.
+    // ADR 0832 — the human must really be in the org, or the seam's org floor
+    // refuses first and this leg never reaches the structural gate it is about.
+    await createOrg({ tenantId, createdBy: 'test', name: 'Reindex', orgId, ownerSubject: 'user:any-member' });
     const human = buildHostSurfaceBundle({ tenantId, runId: 'r-human', workflowId: kbReindexWorkflowId(tenantId, orgId, collectionId), actingUserId: 'user:any-member' }).features.kb!;
     await expect(human.reindexDrain!({ orgId, collectionId })).rejects.toMatchObject({ code: 'validation_error', httpStatus: 403 });
     await expect(human.reindexStatus!({ orgId, collectionId })).rejects.toMatchObject({ httpStatus: 403 });
@@ -287,7 +303,10 @@ describe('D2 — reindexDrain is STRUCTURALLY scoped, not a general-purpose verb
     const { tenantId, orgId, collectionId } = await fixture(2);
     // No startReindex ⇒ no job. Only the admin-gated REST door creates one.
     const kb = buildHostSurfaceBundle({ tenantId, workflowId: kbReindexWorkflowId(tenantId, orgId, collectionId) }).features.kb!;
-    await expect(kb.reindexDrain!({ orgId, collectionId })).rejects.toMatchObject({ code: 'conflict', httpStatus: 409 });
+    // `reindexStatus` is carried ONLY by the surface's live-job refusal. Without it this
+    // case passed with that check removed: `drainReindex` then returns null and the
+    // surface throws the SAME 409 `conflict` ("the job disappeared") one line later.
+    await expect(kb.reindexDrain!({ orgId, collectionId })).rejects.toMatchObject({ code: 'conflict', httpStatus: 409, details: { reindexStatus: '(none)' } });
   });
 
   it('a CROSS-TENANT id cannot be squatted — the workflow id carries the tenant', async () => {

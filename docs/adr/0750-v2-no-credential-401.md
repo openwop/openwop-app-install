@@ -100,3 +100,96 @@ cross-origin, so the stream path never attempts the bootstrap.
 | v2 + no credential → 401 + challenge, no mint | `backend/typescript/src/middleware/auth.ts` | `test/adr0750-v2-no-credential-401.test.ts` (cookies-ENABLED boot; reverting `auth.ts` reds exactly the headline leg, 1 of 4) |
 | Controls: `/me` still mints; a minted session is honoured on v2; a refused bearer is still `invalid_token` with no mint; major 1 unchanged | same file | same test, 3 legs |
 | SPA bootstrap + single retry on the no-credential challenge only | `frontend/react/src/client/anonBootstrap.ts`, `client/runsClient.ts` | `client/__tests__/anonBootstrap.test.ts` (5) |
+
+## Extension — major-1 protocol operations (2026-09-30)
+
+ADR 0745 recorded the major-1 mint as a residual "outside RFC 0200's MUST", adding
+that if v1's own `auth.md` §3 missing-credential rule were ever measured against the
+cookie posture, it belonged in this predicate. It was measured. The v1 floor
+`openwop.floor.auth` (`POST /v1/runs` with no credential MUST answer `401` plus the
+error envelope) failed on production's b29427fef and 2273db9c6 certification cuts with
+`201`, because the mint admitted the call. It was one of major 1's two remaining floor
+reds.
+
+**Decision.** The refusal now also covers a credential-less **protocol client** on a
+**major-1 protocol operation**: `isV1ProtocolOperationPath` (`protocolVersion.ts`),
+meaning a `/v1/…` path whose unversioned twin is in the v2 path manifest.
+
+- **Excluded, still minting.** The vendor host-extension space (`/host/openwop-app`,
+  where the SPA bootstraps its anonymous session through `/users/me`) and the
+  `/host/sample` test seams. Neither is a protocol operation.
+- **Included.** `/host/effect-seams` is a manifest operation, so it is covered.
+- **Unchanged.** A browser document navigation that prefers `text/html` is not a
+  protocol client, as before.
+
+**Why it is safe for the demo visitor (measured).** The SPA makes no major-1 protocol
+calls. All its protocol traffic is major 2 through `sdkFetch`, which already
+re-bootstraps on this 401, and its session bootstrap is the vendor `/users/me` route,
+which still mints. The white-label and scripts clients send a bearer.
+
+**Tests.**
+- `adr0750-v2-no-credential-401.test.ts` pins the floor's exact probe: 401, the
+  envelope, and no `set-cookie`.
+- The same file pins that a browser navigation is not refused.
+- `adr0745-cookie-posture-challenge.test.ts` is inverted: it pinned the mint as
+  "today's major-1 behaviour so a change is a decision", and this is that decision.
+
+Sabotage check: reverting the predicate to major-2-only fails both.
+
+**Found alongside, not fixed here.** The SPA's v2 run-list read (`readRunList`,
+`client/runsClient.ts`) uses a plain `fetch` without the `withSessionBootstrap` retry.
+A cold visit whose list read beats `/me` can surface `listMyRuns failed: 401`. It is
+independent of this change and left as a follow-up.
+
+### A `?streamToken=` is a presented credential (found while extending to major 1)
+
+Extending the refusal to major 1 failed `run-stream-token.test.ts` and exposed a live
+defect in the **original** major-2 predicate. The SPA opens run-event SSE on the
+cross-origin stream base (`streamBase`, `*.run.app`, where the session cookie cannot
+follow) with a same-origin-minted `?streamToken=` and no other credential
+(`client/streamsClient.ts`). The predicate saw no bearer, no key and no cookie, and
+refused `401` before the route could validate the token.
+
+MEASURED on production 2026-09-30: `GET {streamBase}/runs/…/events?streamToken=…`
+under `OpenWOP-Version: 2` answers `401 unauthenticated`, and the v1 twin reaches the
+route (`404 run_not_found`). So cookie-mode viewers' live run streams on major 2 have
+been refused since this ADR shipped, masked wherever the client falls back.
+
+**Fix.** `carriesRunStreamToken(req)` (a GET on `…/runs/{id}/events` with a string
+`streamToken`) exempts the request from the no-credential refusal on both majors. The
+route validates the token (`loadReadableRun`). A bogus token still falls through to
+the tenant gate's `404`.
+
+> **CORRECTED 2026-10-01 — the last sentence is no longer true, and it was the
+> wrong answer.** A token-only request whose token fails verification presented
+> a credential that was *rejected*; `404 run_not_found` told an expired-token
+> viewer their run did not exist. `loadReadableRun` now answers
+> `401 invalid_token` when a presented token fails AND the normal scope + tenant
+> gate also refuses AND the principal is `anonymousPrincipal` (a fresh mint or a
+> returning anon cookie — an identity this host made up, not a credential).
+>
+> Two things it deliberately does not do. It does not verify the token in the
+> middleware: the path id there is the wire id (tenant-bound on major 2) while
+> the token is minted for the bare id, so a middleware check risks refusing
+> valid streams — the exact outage this section records. And it does not refuse
+> on a bad token alone: a same-origin owner whose URL carries a stale token is
+> still served by their cookie, and a real credential that does not own the run
+> keeps its `404`. `run-stream-token.test.ts` pins all three, on both majors.
+> Residual: the anon session is still minted (and its cookie set) on the
+> refused response.
+
+**Tests.**
+- `run-stream-token.test.ts` pins a cookie-less, token-only stream as NOT refused, on
+  both majors.
+- **Sabotage:** removing the exemption fails it, along with the existing "valid token
+  authorizes" leg.
+
+**Tests that stood in "no credential" for "an anonymous user" or "another tenant".**
+Seven suites did this: `stream-run-authz`, `quorum-review`, `crm-tenant-scope-rbac`,
+`conversation-resolve-authz`, `i18n-error-envelope`, `adr0755-content-authority` and
+`run-stream-token`. They now present a real anonymous session (a signed
+`mintAnonSession()` cookie, or the SPA's `/users/me` bootstrap). Each again reaches
+the gate it exists to witness (tenant isolation, eligibility, caller resolution,
+localized 404, the content gate) instead of stopping at the auth layer's 401.
+`adr0755` keeps both legs: the bare write is 401 at the auth layer, and an anon
+session's write is refused by the content gate.

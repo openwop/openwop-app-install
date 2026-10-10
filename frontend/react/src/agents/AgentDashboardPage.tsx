@@ -17,6 +17,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { checkAgent, seedExampleAgents } from './rosterClient.js';
+import { isWriteRefusal, useAgentWriteAccess, writeErrorMessage } from './agentWriteAccess.js';
 import { listApprovals, type PendingApproval } from './approvalsClient.js';
 import { getCapabilities } from '../client/runsClient.js';
 import { useDemoMode } from '../client/useDemoMode.js';
@@ -76,6 +77,9 @@ export function AgentDashboardPage(): JSX.Element {
   const navigate = useNavigate();
   // Gate A (ADR 0196): the "Load example agents" empty-state button is demo-only.
   const demo = useDemoMode();
+  // ADR 0775 D1 — agent-area writes need `workspace:write`; a viewer is not
+  // offered controls the server will refuse (fail-open while unresolved).
+  const canWrite = useAgentWriteAccess();
   const [views, setViews] = useState<AgentView[]>([]);
   // Per-agent approvals power the quick-look drawer's "waiting on you" peek
   // (the GLOBAL queue lives in the Inbox; here it's agent-scoped context).
@@ -178,8 +182,18 @@ export function AgentDashboardPage(): JSX.Element {
           // "Load example agents" / "Create" empty state instead.
           const caps = await getCapabilities().catch(() => ({} as Record<string, unknown>));
           if ((caps as { demoMode?: boolean }).demoMode === true) {
-            await seedExampleAgents();
-            loaded = await loadAgentViews();
+            // The auto-seed is a convenience, not the page's read. ADR 0775 D1
+            // gates it on edit access, so a viewer of an empty shared workspace
+            // is refused (403). The roster read above already answered "no
+            // agents yet", which stays true, so render the empty state with its
+            // explicit actions instead of failing the whole page.
+            // Only the write REFUSAL is folded into the empty state; any other
+            // failure (a 500, the network) still reaches the error notice below.
+            const seeded = await seedExampleAgents().then(() => true, (err: unknown) => {
+              if (isWriteRefusal(err)) return false;
+              throw err;
+            });
+            if (seeded) loaded = await loadAgentViews();
           }
         }
         if (!cancelled) {
@@ -221,7 +235,7 @@ export function AgentDashboardPage(): JSX.Element {
       }
       await refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(writeErrorMessage(err, t('common:error_forbidden')));
     } finally {
       setBusyAgent(null);
     }
@@ -234,7 +248,7 @@ export function AgentDashboardPage(): JSX.Element {
       await seedExampleAgents({ heal: true });
       await refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(writeErrorMessage(err, t('common:error_forbidden')));
     } finally {
       setSeeding(false);
     }
@@ -259,9 +273,9 @@ export function AgentDashboardPage(): JSX.Element {
         eyebrow={t('templatesEyebrow')}
         title={t('dashTitle')}
         lede={t('dashLede')}
-        actions={
-          <Button variant="accent-solid" onClick={() => setHiring(true)}>{t('dashHireAgent')}</Button>
-        }
+        actions={canWrite
+          ? <Button variant="accent-solid" onClick={() => setHiring(true)}>{t('dashHireAgent')}</Button>
+          : undefined}
       />
 
       {error ? <Notice variant="error">{error}</Notice> : null}
@@ -282,8 +296,8 @@ export function AgentDashboardPage(): JSX.Element {
         <StateCard
           icon={<BotIcon size={26} />}
           title={t('dashEmptyTitle')}
-          body={t('dashEmptyBody')}
-          action={
+          body={canWrite ? t('dashEmptyBody') : t('dashEmptyViewerBody')}
+          action={canWrite ? (
             <>
               <Button variant="primary" onClick={() => navigate('/agents/new')}>{t('dashCreateFromTemplate')}</Button>
               {/* Demo-only escape hatch (ADR 0196 Gate A / DEMO-11): one-click
@@ -296,7 +310,7 @@ export function AgentDashboardPage(): JSX.Element {
                 </Button>
               )}
             </>
-          }
+          ) : undefined}
         />
         </>
       ) : (
@@ -369,7 +383,7 @@ export function AgentDashboardPage(): JSX.Element {
                   view={view}
                   busy={busyAgent === view.entry.rosterId}
                   onOpen={onOpenRow(view)}
-                  onCheckNow={() => void onCheckNow(view.entry.rosterId, view.entry.persona)}
+                  onCheckNow={canWrite ? () => void onCheckNow(view.entry.rosterId, view.entry.persona) : undefined}
                   onChat={onChatRow(view)}
                 />
               ))}
@@ -382,7 +396,7 @@ export function AgentDashboardPage(): JSX.Element {
                   view={view}
                   busy={busyAgent === view.entry.rosterId}
                   onOpen={onOpenRow(view)}
-                  onCheckNow={() => void onCheckNow(view.entry.rosterId, view.entry.persona)}
+                  onCheckNow={canWrite ? () => void onCheckNow(view.entry.rosterId, view.entry.persona) : undefined}
                   onChat={onChatRow(view)}
                 />
               ))}
@@ -405,7 +419,7 @@ export function AgentDashboardPage(): JSX.Element {
             onTab={(tab) => openDrawer(drawerView.entry.rosterId, tab)}
             onClose={closeDrawer}
             busy={busyAgent === drawerView.entry.rosterId}
-            onCheckNow={() => void onCheckNow(drawerView.entry.rosterId, drawerView.entry.persona)}
+            onCheckNow={canWrite ? () => void onCheckNow(drawerView.entry.rosterId, drawerView.entry.persona) : undefined}
             onResolved={() => void refresh()}
             onChat={() => {
               const agentId = drawerView.entry.agentRef?.agentId;

@@ -17,6 +17,8 @@
 import type { BackendFeature } from '../types.js';
 import { setSubjectOrgResolver } from '../../host/subjectOrgScope.js';
 import { registerSubjectAccessResolver } from '../../host/subjectAccess.js';
+import { registerSubjectDependent } from '../../host/subjectDependents.js';
+import { deleteCanvasForTenant, listCanvasIdsOwnedBy } from '../../host/canvasSurface.js';
 import { registerProjectsAgentTools } from './agentTools.js';
 import { registerProjectsRoutes } from './routes.js';
 import { getProject, resolveProjectAccess, registerProjectsErasure } from './projectsService.js';
@@ -47,6 +49,20 @@ export const projectsFeature: BackendFeature = {
     registerSubjectAccessResolver('project', async (tenantId, subject, caller) =>
       resolveProjectAccess(tenantId, subject.id, caller),
     );
+    // ADR 0839 D2 — canvases a project OWNS (`ownerSubject`) go with it. The canvas
+    // store is host-owned, so its registrant lives with the subject's owner; the delete
+    // is the canvas's single owner (`deleteCanvasForTenant`: versions, idem row, and the
+    // lifecycle fan-out that purges share links and comments).
+    registerSubjectDependent('project', 'canvases', {
+      count: async (tenantId, subject) => (await listCanvasIdsOwnedBy(tenantId, subject)).length,
+      purge: async (tenantId, subject) => {
+        let n = 0;
+        for (const canvasId of await listCanvasIdsOwnedBy(tenantId, subject)) {
+          if (await deleteCanvasForTenant(tenantId, canvasId)) n += 1;
+        }
+        return n;
+      },
+    });
   },
   // No `toggleDefault` — always-on. The collaborative surfaces (members /
   // visibility / chat, ADR 0054) are also always-on as of 2026-06-16 (§ Correction

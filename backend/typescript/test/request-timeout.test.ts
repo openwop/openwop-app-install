@@ -84,20 +84,20 @@ describe('requestTimeoutMiddleware (API-4)', () => {
   // The conversation `exchange` blocks on a reasoning-model LLM in-request, so
   // the interrupt-resolve routes need the longer budget; everything else keeps 30s.
   it('grants the LLM budget to the interrupt-resolve routes, the tight default elsewhere', () => {
-    expect(isLlmBlockingRoute({ method: 'POST', path: '/v1/runs/r1/interrupts/gate' } as never)).toBe(true);
-    expect(isLlmBlockingRoute({ method: 'POST', path: '/v1/interrupts/tok-123' } as never)).toBe(true);
-    expect(isLlmBlockingRoute({ method: 'GET', path: '/v1/runs/r1/interrupts/gate' } as never)).toBe(false);
-    expect(isLlmBlockingRoute({ method: 'POST', path: '/v1/runs' } as never)).toBe(false);
+    expect(isLlmBlockingRoute({ method: 'POST', path: '/runs/r1/interrupts/gate' } as never)).toBe(true);
+    expect(isLlmBlockingRoute({ method: 'POST', path: '/interrupts/tok-123' } as never)).toBe(true);
+    expect(isLlmBlockingRoute({ method: 'GET', path: '/runs/r1/interrupts/gate' } as never)).toBe(false);
+    expect(isLlmBlockingRoute({ method: 'POST', path: '/runs' } as never)).toBe(false);
 
-    expect(resolveTimeoutForRequest({ method: 'POST', path: '/v1/runs/r1/interrupts/gate' } as never)).toBe(DEFAULT_LLM_REQUEST_TIMEOUT_MS);
-    expect(resolveTimeoutForRequest({ method: 'POST', path: '/v1/runs' } as never)).toBe(DEFAULT_REQUEST_TIMEOUT_MS);
+    expect(resolveTimeoutForRequest({ method: 'POST', path: '/runs/r1/interrupts/gate' } as never)).toBe(DEFAULT_LLM_REQUEST_TIMEOUT_MS);
+    expect(resolveTimeoutForRequest({ method: 'POST', path: '/runs' } as never)).toBe(DEFAULT_REQUEST_TIMEOUT_MS);
   });
 
   it('uses the per-request resolver to time out a slow non-interrupt route at the default', () => {
     vi.useFakeTimers();
     const res = makeRes();
     // Default resolver: a /v1/runs POST gets the 30s budget, not the LLM 120s.
-    requestTimeoutMiddleware()({ method: 'POST', path: '/v1/runs' } as never, res as never, vi.fn());
+    requestTimeoutMiddleware()({ method: 'POST', path: '/runs' } as never, res as never, vi.fn());
     vi.advanceTimersByTime(DEFAULT_REQUEST_TIMEOUT_MS);
     expect(res.statusCode).toBe(503);
   });

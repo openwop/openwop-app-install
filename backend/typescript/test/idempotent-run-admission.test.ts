@@ -44,11 +44,13 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
+import { randomUUID } from 'node:crypto';
 import type { Express } from 'express';
 import { createApp } from '../src/index.js';
 import type { Storage } from '../src/storage/storage.js';
 import type { HostAdapterSuite } from '../src/host/index.js';
 import { idempotencyLeaseMs } from '../src/host/idempotentResponse.js';
+import { bareRunId } from './support/bareRunId.js';
 
 let app: Express;
 let server: http.Server;
@@ -142,11 +144,11 @@ function suppressNextRelease(): void {
 
 describe('ADR 0549 H56 — window (a): holder dies after the run row commits, before the ledger commit', () => {
   it('a same-key retry after the lease lapses REPLAYS the first run — it never mints a second', async () => {
-    const key = `h56-crash-${Math.random().toString(36).slice(2)}`;
+    const key = `h56-crash-${randomUUID()}`;
 
     dieRightAfterNextInsertRun();
     suppressNextRelease();
-    const first = await post<CreateRunBody>('/v1/runs', BODY, { 'idempotency-key': key });
+    const first = await post<CreateRunBody>('/runs', BODY, { 'idempotency-key': key });
     // The client saw a failure (the process "died"), but a run row EXISTS.
     expect(first.status).toBeGreaterThanOrEqual(500);
     const afterCrash = await runsWithKey(key);
@@ -157,11 +159,11 @@ describe('ADR 0549 H56 — window (a): holder dies after the run row commits, be
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(Date.now() + idempotencyLeaseMs() + 5_000);
 
-    const retry = await post<CreateRunBody>('/v1/runs', BODY, { 'idempotency-key': key });
+    const retry = await post<CreateRunBody>('/runs', BODY, { 'idempotency-key': key });
     expect(retry.status).toBe(201);
     // THE assertion. Before H56: `retry.body.runId !== survivingRunId` and two
     // rows — the reclaim minted a second run for one key.
-    expect(retry.body.runId).toBe(survivingRunId);
+    expect(bareRunId(retry.body.runId ?? '')).toBe(survivingRunId);
     expect(retry.headers.get('openwop-Idempotent-Replay')).toBe('true');
     expect(await runsWithKey(key)).toHaveLength(1);
   });
@@ -169,7 +171,7 @@ describe('ADR 0549 H56 — window (a): holder dies after the run row commits, be
 
 describe('ADR 0549 H56 — window (b): a throw between the run insert and the ledger commit', () => {
   it('the retry REPLAYS the run that was already created — the finally can no longer strand it', async () => {
-    const key = `h56-throw-${Math.random().toString(36).slice(2)}`;
+    const key = `h56-throw-${randomUUID()}`;
 
     // A genuine step between insert and complete: the run.create audit record.
     const realRecord = hostSuite.auditSink.record.bind(hostSuite.auditSink);
@@ -178,7 +180,7 @@ describe('ADR 0549 H56 — window (b): a throw between the run insert and the le
       throw new Error('simulated: audit sink threw after the run row committed');
     }) as typeof realRecord;
     try {
-      const first = await post<CreateRunBody>('/v1/runs', BODY, { 'idempotency-key': key });
+      const first = await post<CreateRunBody>('/runs', BODY, { 'idempotency-key': key });
       expect(first.status).toBeGreaterThanOrEqual(500);
     } finally {
       hostSuite.auditSink.record = realRecord;
@@ -189,9 +191,9 @@ describe('ADR 0549 H56 — window (b): a throw between the run insert and the le
 
     // Immediately (lease still live). Before H56 the `finally` had DELETED the
     // pending row, so this claim was a fresh win and a second run was minted.
-    const retry = await post<CreateRunBody>('/v1/runs', BODY, { 'idempotency-key': key });
+    const retry = await post<CreateRunBody>('/runs', BODY, { 'idempotency-key': key });
     expect(retry.status).toBe(201);
-    expect(retry.body.runId).toBe(survivingRunId);
+    expect(bareRunId(retry.body.runId ?? '')).toBe(survivingRunId);
     expect(retry.headers.get('openwop-Idempotent-Replay')).toBe('true');
     expect(await runsWithKey(key)).toHaveLength(1);
   });
@@ -199,7 +201,7 @@ describe('ADR 0549 H56 — window (b): a throw between the run insert and the le
 
 describe('ADR 0549 H56 — the ledger commit rides INSIDE the run insert (storage contract, SQLite)', () => {
   it('insertRun with idempotencyCommit lands the run row and the completed ledger row together', async () => {
-    const key = `h56-atomic-${Math.random().toString(36).slice(2)}`;
+    const key = `h56-atomic-${randomUUID()}`;
     const now = new Date().toISOString();
     const { canonicalRequestDigest } = await import('../src/host/idempotentResponse.js');
     const { buildRunRecord } = await import('../src/host/runDispatch.js');
@@ -216,7 +218,7 @@ describe('ADR 0549 H56 — the ledger commit rides INSIDE the run insert (storag
         responseStatus: 201, responseBody: JSON.stringify({ runId: run.runId }), updatedAt: now,
       },
     });
-    expect((await storage.getRun(run.runId))?.runId).toBe(run.runId);
+    expect((await storage.getRun(bareRunId(run.runId)))?.runId).toBe(bareRunId(run.runId));
     // The ledger row is COMPLETED in the same write — a fresh claim replays it.
     const again = await storage.claimIdempotentResponse({
       tenantId: TENANT, endpoint: 'POST:/v1/runs', key,
@@ -226,7 +228,7 @@ describe('ADR 0549 H56 — the ledger commit rides INSIDE the run insert (storag
   });
 
   it('a ledger commit the CAS rejects ROLLS BACK the run row — both or neither', async () => {
-    const key = `h56-cas-${Math.random().toString(36).slice(2)}`;
+    const key = `h56-cas-${randomUUID()}`;
     const now = new Date().toISOString();
     const { canonicalRequestDigest } = await import('../src/host/idempotentResponse.js');
     const { buildRunRecord } = await import('../src/host/runDispatch.js');
@@ -245,41 +247,22 @@ describe('ADR 0549 H56 — the ledger commit rides INSIDE the run insert (storag
         responseStatus: 201, responseBody: '{}', updatedAt: now,
       },
     })).rejects.toMatchObject({ code: 'idempotency_commit_rejected' });
-    expect(await storage.getRun(run.runId)).toBeNull();
+    expect(await storage.getRun(bareRunId(run.runId))).toBeNull();
     expect(await storage.getDispatchOutbox(run.runId)).toBeNull();
     expect(await runsWithKey(key)).toHaveLength(0);
   });
 });
 
 describe('ADR 0549 H56 — the in-flight 409 carries the code the spec names', () => {
-  it('a concurrent same-key request gets 409 `idempotency_in_flight` with details.retryAfter (idempotency.md §Concurrent duplicates)', async () => {
-    const key = `h56-inflight-${Math.random().toString(36).slice(2)}`;
-    const now = new Date().toISOString();
-    const { canonicalRequestDigest } = await import('../src/host/idempotentResponse.js');
-    // Hold the claim from "another request" so the route's claim reports in-flight.
-    const held = await storage.claimIdempotentResponse({
-      tenantId: TENANT, endpoint: 'POST:/v1/runs', key,
-      requestDigest: canonicalRequestDigest(BODY, 'POST:/v1/runs'), createdAt: now, leaseMs: 60_000,
-    });
-    expect(held.outcome).toBe('claimed');
-    const res = await post<CreateRunBody>('/v1/runs', BODY, { 'idempotency-key': key });
-    expect(res.status).toBe(409);
-    expect(res.body.error).toBe('idempotency_in_flight');
-    expect(typeof res.body.details?.retryAfter).toBe('number');
-    expect(res.body.details?.retryAfter as number).toBeGreaterThan(0);
-    // ADR 0744 — the timing also rides the standard header, equal to the body.
-    expect(res.headers.get('retry-after')).toBe(String(res.body.details?.retryAfter));
-    // No run was admitted for the in-flight key.
-    expect(await runsWithKey(key)).toHaveLength(0);
-  });
-
+  // ADR 0812 P3c-0 — the major-1 `details.retryAfter` leg is deleted with v1; its major-2
+  // twin below (Retry-After header, no timing in details) replaces it.
   it('ADR 0744 — under major 2 the in-flight 409 carries Retry-After and NO retry timing in details', async () => {
     // v2 `errors.md` §Retry timing: timing lives in `Retry-After` only; the
     // negotiator strips `details.retryAfter`, so before ADR 0744 a major-2
     // loser was told nothing about when to come back (openwop RFC 0213 §B draft:
     // MUST 409 `idempotency_in_flight`, no retry timing in `details`, SHOULD
     // `Retry-After`).
-    const key = `adr0744-inflight-${Math.random().toString(36).slice(2)}`;
+    const key = `adr0744-inflight-${randomUUID()}`;
     const now = new Date().toISOString();
     const { canonicalRequestDigest } = await import('../src/host/idempotentResponse.js');
     const held = await storage.claimIdempotentResponse({
@@ -316,10 +299,10 @@ describe('ADR 0549 H56 — the in-flight 409 carries the code the spec names', (
     // The gate caught the gap: the ROUTE moved to the canonical code on rebase
     // and this assertion did not, so the test still pinned the spelling its own
     // comment described as superseded.
-    const key = `h56-mismatch-${Math.random().toString(36).slice(2)}`;
-    const first = await post<CreateRunBody>('/v1/runs', BODY, { 'idempotency-key': key });
+    const key = `h56-mismatch-${randomUUID()}`;
+    const first = await post<CreateRunBody>('/runs', BODY, { 'idempotency-key': key });
     expect(first.status).toBe(201);
-    const divergent = await post<CreateRunBody>('/v1/runs', { ...BODY, inputs: { text: 'DIFFERENT' } }, { 'idempotency-key': key });
+    const divergent = await post<CreateRunBody>('/runs', { ...BODY, inputs: { text: 'DIFFERENT' } }, { 'idempotency-key': key });
     expect(divergent.status).toBe(409);
     expect(divergent.body.error).toBe('idempotency_key_mismatch');
   });

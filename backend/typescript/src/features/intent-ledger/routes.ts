@@ -27,7 +27,7 @@ import type { IntentLedger } from './types.js';
 const RUN_SCAN_LIMIT = 200;
 
 // Always-on (toggle removed, 2026-06-24) — conversation visibility/owner RBAC only.
-const BASE = '/v1/host/openwop-app/intent-ledger/conversations/:conversationId';
+const BASE = '/host/openwop-app/intent-ledger/conversations/:conversationId';
 
 const actingUserOf = (req: Request): string | undefined => req.userId ?? req.principal?.principalId;
 

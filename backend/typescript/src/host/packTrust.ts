@@ -62,8 +62,8 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { locateRepoDir } from './_repoPath.js';
-import { packContentDigest, verifyContentHashes } from '../packs/packContentDigest.js';
-import { isPackRevoked, revocationKey } from './packRevocations.js';
+import { packContentDigest, verifyInstallMarker } from '../packs/packContentDigest.js';
+import { isPackRevoked, onPackRevocationsChanged, revocationKey } from './packRevocations.js';
 import { loadPinnedKeyring } from './packSignature.js';
 import { createLogger } from '../observability/logger.js';
 
@@ -183,6 +183,20 @@ function revokedByEitherSource(packName: string, version: string | null): boolea
   return keyringRevoked().has(revocationKey(packName, version));
 }
 
+/** ADR 0826 — drop ONE dir's cached verdict (the installer calls this after it
+ *  rewrites the dir, so a verdict never outlives the bytes it judged). */
+export function invalidatePackTrustVerdict(packDir: string): void {
+  verdictCache.delete(packDir);
+}
+
+/** ADR 0826 D5 — drop every cached verdict (a revocation-set change can move
+ *  any pack to `revoked`, so no cached tier survives it). */
+export function clearPackTrustVerdicts(): void {
+  verdictCache.clear();
+}
+
+onPackRevocationsChanged(clearPackTrustVerdicts);
+
 /** Test-only: drop the memoised manifest + verdicts + keyring revocations. */
 export function __resetPackTrustCachesForTests(): void {
   manifestCache = undefined;
@@ -281,18 +295,26 @@ function classifyUncached(packDir: string): PackTrustVerdict {
   // Install marker first: cheap (two files) and signature-backed.
   const markerPath = join(packDir, INSTALL_MARKER);
   if (existsSync(markerPath)) {
-    let hashes: Record<string, string> | null = null;
+    let marker: { contentHashes?: unknown; contentDigest?: unknown } | null = null;
     try {
-      const marker = JSON.parse(readFileSync(markerPath, 'utf-8')) as {
-        contentHashes?: Record<string, string>;
-      };
-      hashes = marker.contentHashes && typeof marker.contentHashes === 'object' ? marker.contentHashes : null;
+      marker = JSON.parse(readFileSync(markerPath, 'utf-8')) as { contentHashes?: unknown; contentDigest?: unknown };
     } catch {
-      hashes = null;
+      marker = null;
     }
-    const failure = hashes === null ? 'marker_invalid' : verifyContentHashes(packDir, hashes);
+    // ADR 0826 D3 — the shared verifier: installed SHAPE, the two-file hashes,
+    // and (when the marker carries it) the whole-tree digest.
+    const checked = marker && typeof marker === 'object' ? verifyInstallMarker(packDir, marker) : { failure: 'marker_invalid', legacy: false };
+    const failure = checked.failure;
     if (failure === null) {
-      return finish({ tier: 'operator-trusted', reason: 'install_marker_verified', packName: name, version });
+      // A pre-ADR-0826 marker attests two files only. Same stable reason (it
+      // reaches logs + Operations), but it must not read as the full check.
+      return finish({
+        tier: 'operator-trusted',
+        reason: 'install_marker_verified',
+        packName: name,
+        version,
+        ...(checked.legacy ? { detail: 'legacy_two_file_marker' } : {}),
+      });
     }
     // A tampered install is NOT rescued by a coincidental steward match. Report
     // the tamper — falling through would hide the more serious finding behind

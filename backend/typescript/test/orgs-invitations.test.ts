@@ -1,17 +1,34 @@
 /**
  * Org invitations (ADR 0004, reconciled) — service tests. Invitations DELEGATE
  * org/member ownership to accessControl; this verifies the delegation +
- * fail-closed onboarding invariants.
+ * fail-closed onboarding invariants:
+ *   - accept binds an accessControl member to the user's subject with the
+ *     invited role's scopes (ADR 0004 / RFC 0048);
+ *   - preview informs without redeeming (UX_UPGRADE-invitations IN-G1);
+ *   - fail-closed: wrong email, single-use, bad token; cross-tenant org IDOR;
+ *     non-invitable role; re-invite replaces;
+ *   - the hash index is cleaned on accept / revoke / re-invite (grade-data, PROBE-TOK-2);
+ *   - ORGINV-2 claim-by-delete race, ORGINV-3 email shape, ORGINV-5 pure point-get;
+ *   - R2 XIN-0/1/2: expired reason, inviter display name, already-member idempotence.
+ *
+ * Sabotage that turns it red (grade-tests wave 2, probes `g2-inv-*`): member
+ * bound to `principalId` instead of `userId`; preview deleting the row; the
+ * email-mismatch check dropped; the org-tenant IDOR check dropped; `owner`
+ * accepted as a role; any of the three hash-index deletes dropped; the accept
+ * claim CAS skipped; EMAIL_RE skipped; the `invites.list()` scan fallback
+ * re-added; the `expired` reason dropped; an email-shaped inviter name passed
+ * through; the already-member branch skipped.
  */
 
-import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
-import { __resetHostExtPersistence, initHostExtPersistence } from '../src/host/hostExtPersistence.js';
+import { DurableCollection, __resetHostExtPersistence, initHostExtPersistence } from '../src/host/hostExtPersistence.js';
+import { hashToken } from '../src/host/capabilityToken.js';
 import { __resetUsersStore, createUser, type User } from '../src/features/users/usersService.js';
-import { __resetAccessStores, createOrg, listMembers, resolveEffectiveAccess } from '../src/host/accessControlService.js';
+import { BUILT_IN_ROLES, __resetAccessStores, createOrg, listMembers, resolveEffectiveAccess } from '../src/host/accessControlService.js';
 import { __resetOrgInvites, acceptInvitation, createInvitation, listInvitations, previewInvitation, revokeInvitation } from '../src/features/orgs/invitationsService.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { registerToggleDefault } from '../src/host/featureToggles/registry.js';
@@ -22,19 +39,26 @@ afterAll(() => rmSync(dir, { recursive: true, force: true }));
 const mkUser = (tenantId: string, email?: string): Promise<User> =>
   createUser({ tenantId, principalId: `password:${email ?? tenantId}`, source: 'password', ...(email ? { email, emailProvenance: 'idp' as const } : {}) });
 
+// File-scope setup (grade-tests wave 2): EVERY describe gets fresh, initialized
+// persistence. It used to live inside the first describe only, so the later two
+// ran on whatever the previous test left behind — and run alone (`-t ORGINV-2`)
+// had no persistence at all.
+let n = 0;
+beforeEach(async () => {
+  __resetHostExtPersistence();
+  initHostExtPersistence(openSqliteStorage(join(dir, `inv-${n++}.db`)));
+  await __resetUsersStore();
+  await __resetAccessStores();
+  await __resetOrgInvites();
+  // R2 review F6 — preview/accept now gate on the INVITE tenant's `orgs`
+  // toggle inside the service. In a direct-service harness no feature has
+  // registered its default (that happens at app boot), so register + enable.
+  registerToggleDefault({ id: 'orgs', label: 'Orgs', status: 'on' as const, salt: 'orgs', bucketUnit: 'tenant' as const });
+  await saveConfig({ id: 'orgs', label: 'Orgs', status: 'on' as const, salt: 'orgs', bucketUnit: 'tenant' as const }, 'test');
+});
+afterEach(() => { __resetHostExtPersistence(); });
+
 describe('org invitations (delegating to accessControl)', () => {
-  beforeEach(async () => {
-    __resetHostExtPersistence();
-    initHostExtPersistence(openSqliteStorage(join(dir, 'inv.db')));
-    await __resetUsersStore();
-    await __resetAccessStores();
-    await __resetOrgInvites();
-    // R2 review F6 — preview/accept now gate on the INVITE tenant's `orgs`
-    // toggle inside the service. In a direct-service harness no feature has
-    // registered its default (that happens at app boot), so register + enable.
-    registerToggleDefault({ id: 'orgs', label: 'Orgs', status: 'on' as const, salt: 'orgs', bucketUnit: 'tenant' as const });
-    await saveConfig({ id: 'orgs', label: 'Orgs', status: 'on' as const, salt: 'orgs', bucketUnit: 'tenant' as const }, 'test');
-  });
 
   it('accept onboards the user as an accessControl member bound to their subject + role', async () => {
     const org = await createOrg({ tenantId: 't', createdBy: 'owner-principal', name: 'Acme' });
@@ -48,7 +72,8 @@ describe('org invitations (delegating to accessControl)', () => {
     // accessControl now resolves the invited user's scopes from that role
     const access = await resolveEffectiveAccess('t', { subject: invitee.userId });
     expect(access.basis).toBe('member');
-    expect(access.scopes.length).toBeGreaterThan(0);
+    // The scopes come FROM THE INVITED ROLE (editor), not merely "some" scopes.
+    expect(access.scopes).toEqual(expect.arrayContaining(BUILT_IN_ROLES.editor.scopes));
     expect((await listMembers('t', org.orgId)).some((m) => m.subject === invitee.userId)).toBe(true);
   });
 
@@ -77,16 +102,11 @@ describe('org invitations (delegating to accessControl)', () => {
     await expect(previewInvitation(token)).rejects.toThrow(/invalid or expired/i);
   });
 
-  it('preview performs NO email check — informing is not authorizing', async () => {
-    const org = await createOrg({ tenantId: 't', createdBy: 'owner', name: 'Acme' });
-    const mallory = await mkUser('t', 'mallory@evil.test');
-    const { token } = await createInvitation({ tenantId: 't', orgId: org.orgId, email: 'bob@acme.test', role: 'viewer' });
-
-    // Anyone holding the token can SEE what it is (it arrived in bob's mailbox)…
-    expect((await previewInvitation(token)).email).toBe('bob@acme.test');
-    // …but the email-ownership gate still lives in accept, and still bites.
-    await expect(acceptInvitation(token, mallory)).rejects.toThrow(/different email/i);
-  });
+  // (The former "preview performs NO email check" case was cut in grade-tests
+  // wave 2: preview takes no user, so "no email check" is structural; its two
+  // assertions are carried by "preview describes the invitation…" (the email is
+  // shown) and "is fail-closed…" (the mismatch branch refuses, by message) —
+  // both went red on the same probes, g2-inv-preview-consumes / g2-inv-email-mismatch.)
 
   it('is fail-closed: wrong email cannot accept; single-use; expired/bad token rejected', async () => {
     const org = await createOrg({ tenantId: 't', createdBy: 'owner', name: 'Acme' });
@@ -94,7 +114,8 @@ describe('org invitations (delegating to accessControl)', () => {
     const stranger = await mkUser('t', 'eve@evil.test');
     const { token } = await createInvitation({ tenantId: 't', orgId: org.orgId, email: 'bob@acme.test', role: 'viewer' });
 
-    await expect(acceptInvitation(token, stranger)).rejects.toMatchObject({ code: 'forbidden' }); // email mismatch
+    // Email mismatch — the MISMATCH branch by message, not the `email_unverified` one (also `forbidden`).
+    await expect(acceptInvitation(token, stranger)).rejects.toMatchObject({ code: 'forbidden', message: expect.stringMatching(/different email/i) });
     await acceptInvitation(token, bob); // ok
     await expect(acceptInvitation(token, bob)).rejects.toMatchObject({ code: 'invalid_invite' }); // single-use
     await expect(acceptInvitation('not-a-token', bob)).rejects.toMatchObject({ code: 'invalid_invite' });
@@ -116,7 +137,6 @@ describe('org invitations (delegating to accessControl)', () => {
     expect((await acceptInvitation(second.token, dup)).member.roles).toEqual(['admin']);
   });
   it('accept resolves via the hash index (grade-data) and the index is cleaned up on accept + revoke', async () => {
-    const { DurableCollection } = await import('../src/host/hostExtPersistence.js');
     // WF-ORGINV-1 — the hashidx collection is INDEX-FREE (no tenantOf); this
     // probe construction mirrors the service's.
     const idx = new DurableCollection<{ key: string; inviteId: string; tenantId: string }>('orgs:invite-hashidx', (r) => r.key);
@@ -184,9 +204,7 @@ describe('ORGINV grade-batch — accept race, email shape, point-get verify', ()
   });
 
   it('ORGINV-5 — verify is a pure point-get: an index miss is fail-closed (the cross-tenant scan fallback is gone), and a dangling index row equally so', async () => {
-    const { hashToken } = await import('../src/host/capabilityToken.js');
-    const { DurableCollection } = await import('../src/host/hostExtPersistence.js');
-    const idx = new DurableCollection<{ key: string; inviteId: string }>('orgs:invite-hashidx', (r) => r.key);
+    const idx = new DurableCollection<{ key: string; inviteId: string; tenantId: string; expiresAt: string }>('orgs:invite-hashidx', (r) => r.key);
     const org = await createOrg({ tenantId: 't', createdBy: 'owner', name: 'Acme' });
     const bob = await mkUser('t', 'bob@acme.test');
     const { token } = await createInvitation({ tenantId: 't', orgId: org.orgId, email: 'bob@acme.test', role: 'viewer' });
@@ -202,7 +220,7 @@ describe('ORGINV grade-batch — accept race, email shape, point-get verify', ()
 
     // The reversed mint order's crash shape (index row, no invite row) is the
     // same fail-closed miss — which is why index-first retired the fallback.
-    await idx.put({ key: hashToken('orginv_dangling'), inviteId: 'inv:gone' });
+    await idx.put({ key: hashToken('orginv_dangling'), inviteId: 'inv:gone', tenantId: 't', expiresAt: new Date(Date.now() + 86_400_000).toISOString() });
     await expect(previewInvitation('orginv_dangling')).rejects.toMatchObject({ code: 'invalid_invite' });
   });
 });
@@ -213,7 +231,6 @@ describe('R2 XIN-0/1/2 — expired reason, inviter identity, already-member idem
     const invitee = await mkUser('t', 'bob@acme.test');
     const { token, invite } = await createInvitation({ tenantId: 't', orgId: org.orgId, email: 'bob@acme.test', role: 'viewer' });
     // Age the row past its expiry (direct store surgery — no clock mock needed).
-    const { DurableCollection } = await import('../src/host/hostExtPersistence.js');
     const store = new DurableCollection<{ inviteId: string; expiresAt: string }>('orgs:invite', (i) => i.inviteId);
     const row = (await store.get(invite.inviteId))!;
     await store.put({ ...row, expiresAt: new Date(Date.now() - 60_000).toISOString() });
@@ -233,7 +250,6 @@ describe('R2 XIN-0/1/2 — expired reason, inviter identity, already-member idem
   });
 
   it('accepting while ALREADY a member is idempotent — no duplicate OrgMember row, role unchanged', async () => {
-    const { listMembers } = await import('../src/host/accessControlService.js');
     const org = await createOrg({ tenantId: 't', createdBy: 'owner', name: 'Acme' });
     const invitee = await mkUser('t', 'bob@acme.test');
     const first = await createInvitation({ tenantId: 't', orgId: org.orgId, email: 'bob@acme.test', role: 'editor' });

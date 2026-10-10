@@ -6,11 +6,14 @@
  *     cards / steps / stats layouts). Styled in styles/global.css (`.fp-*`).
  *
  * Content-safety posture (ADR 0009): NO `dangerouslySetInnerHTML`. Prose runs
- * through a tiny SAFE markdown subset — paragraphs + `**bold**` / `*italic*` /
- * `` `code` `` / `[label](url)` with an http(s)/mailto / internal-path guard.
+ * through a tiny SAFE markdown subset — paragraphs, `### ` subheadings, `- ` /
+ * `1. ` lists and `> ` quotes (ADR 0813, `proseBlocks.ts`) + `**bold**` /
+ * `*italic*` / `` `code` `` / `[label](url)` with an http(s)/mailto /
+ * internal-path guard.
  */
+import { CtaLink, isInternal, isSafeHref } from './CtaLink.js';
 import type { ReactNode } from 'react';
-import { Fragment, Suspense, lazy, useEffect, useId, useState } from 'react';
+import { Fragment, Suspense, lazy, useEffect, useId, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { Link } from 'react-router-dom';
@@ -18,12 +21,19 @@ import i18n from '../../i18n/index.js';
 import type { Section } from './cmsClient.js';
 import { assetUrl } from './cmsClient.js';
 import { headingSlug } from './headingSlug.js';
+import { HeadingText, stripHeadingEmphasis } from './headingEmphasis.js';
+import { parseProseBlocks } from './proseBlocks.js';
 import { config, fetchOpts } from '../../client/config.js';
 import { Skeleton } from '../../ui/Skeleton.js';
 import { Button } from '../../ui/Button.js';
 import { useFormat } from '../../i18n/useFormat.js';
+import { useDemoMode } from '../../client/useDemoMode.js';
 // ADR 0331 §D2 — the ONE public fill renderer, lazy so public pages without a
 // form section never load it (and cms/→forms/ stays a soft edge).
+// ADR 0820 §7 — the pricing section (tier grid, cadence switch, comparison,
+// add-ons, credit packs) is its own chunk: only /pricing and pages that author a
+// pricing section ever load it.
+const LazyPricingSection = lazy(() => import('./PricingSection.js').then((m) => ({ default: m.PricingSection })));
 const LazyPublicFormRenderer = lazy(() => import('../forms/render/PublicFormRenderer.js').then((m) => ({ default: m.PublicFormRenderer })));
 import type { IconCmp } from '../../chrome/featureTypes.js';
 import {
@@ -34,7 +44,7 @@ import {
   LayoutGridIcon, GlobeIcon, ClipboardIcon, ScaleIcon, FlagIcon, LifeBuoyIcon,
   ListIcon, MegaphoneIcon, LockIcon, PlugIcon, KeyIcon, BuildingIcon, UserIcon,
   SettingsIcon, TerminalIcon, LinkIcon,
-  ArrowRightIcon,
+  ArrowRightIcon, ArrowUpRightIcon,
 } from '../../ui/icons/index.js';
 
 /** Per-feature card icons (ADR 0027). A card's `icon` slug (authored in
@@ -59,27 +69,9 @@ const ICON_BY_SLUG: Record<string, IconCmp> = {
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
 const pad2 = (n: number): string => String(n).padStart(2, '0');
 
-/** Pricing `features` are the operator's ENTITLEMENT feature ids (`app-builder`,
- *  `cdp`) — internal slugs, not marketing copy. Humanize them for the public
- *  page: Title-case words, UPPER-case known acronyms. Best-effort, deterministic. */
-const FEATURE_ACRONYMS = new Set(['cdp', 'cad', 'crm', 'cms', 'api', 'ai', 'seo', 'sso', 'sms', 'kb', 'ui', 'ux', 'a2a', 'mcp', 'rag', 'hitl', 'byok', 'kpi', 'faq', 'pdf', 'csv', 'url', 'rss', 'dpa', 'aup', 'sla']);
-function humanizeFeatureId(id: string): string {
-  // Limit keys are camelCase config keys (`workflowRuns`) — split those word
-  // boundaries too, not just kebab/snake (R2-G5).
-  return id.replace(/([a-z0-9])([A-Z])/g, '$1 $2').split(/[-_.\s]+/).filter(Boolean)
-    .map((w) => (FEATURE_ACRONYMS.has(w.toLowerCase()) ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1)))
-    .join(' ');
-}
-/** How many feature bullets a tier card shows before an "and N more" line. */
-const FEATURE_CARD_CAP = 6;
-
 export type SectionRenderMode = 'editor' | 'public';
 
-/** An http(s)/mailto URL is safe as an external link; anything else is not. */
-const isSafeHref = (url: string): boolean => /^(https?:|mailto:)/i.test(url.trim());
-/** An internal app path (`/agents`) — single leading slash, NOT `//` or `/\`
- *  (both normalize to a protocol-relative EXTERNAL URL → open-redirect shape). */
-const isInternal = (url: string): boolean => /^\/(?![/\\])/.test(url.trim());
+
 
 /** Inline markdown → React nodes: `**bold**`, `*italic*`, `` `code` ``,
  *  `[label](url)`. No raw HTML; an unsafe link degrades to plain text. */
@@ -107,11 +99,21 @@ function inlineMarkdown(text: string, keyPrefix: string): ReactNode[] {
   return out;
 }
 
-/** Render `text` as paragraphs (blank-line separated), inline-formatted. */
+/** Render `text` as prose blocks (paragraphs, `###` subheadings, lists,
+ *  quotes), inline-formatted. Still no raw HTML. */
 function RichText({ text, className = 'cms-richtext' }: { text: string; className?: string }): JSX.Element {
-  const paras = text.split(/\n{2,}/).map((p) => p.trim()).filter(Boolean);
-  if (paras.length === 0) return <p className={className} />;
-  return <>{paras.map((p, i) => <p key={i} className={className}>{inlineMarkdown(p, `p${i}`)}</p>)}</>;
+  const blocks = parseProseBlocks(text);
+  if (blocks.length === 0) return <p className={className} />;
+  return <>{blocks.map((b, i) => {
+    const k = `b${i}`;
+    switch (b.kind) {
+      case 'h3': return <h3 key={k} className="cms-prose-h3">{inlineMarkdown(b.text, k)}</h3>;
+      case 'ul': return <ul key={k} className="cms-prose-list">{b.items.map((it, j) => <li key={j}>{inlineMarkdown(it, `${k}-${j}`)}</li>)}</ul>;
+      case 'ol': return <ol key={k} className="cms-prose-list">{b.items.map((it, j) => <li key={j}>{inlineMarkdown(it, `${k}-${j}`)}</li>)}</ol>;
+      case 'quote': return <blockquote key={k} className="cms-prose-quote">{inlineMarkdown(b.text, k)}</blockquote>;
+      default: return <p key={k} className={className}>{inlineMarkdown(b.text, k)}</p>;
+    }
+  })}</>;
 }
 
 // ── Public (front-page) building blocks ─────────────────────────────────────
@@ -130,7 +132,7 @@ function SectionHead({ eyebrow, heading, lede }: { eyebrow?: string | undefined;
           same ids for bots. Two sections sharing one heading collide: in the
           prerender first-wins (documented there); in the docs SPA `deriveToc`
           rewrites the LATER duplicate (R2R-1), keeping the first id stable. */}
-      {heading ? <h2 id={headingSlug(heading)} className="fp-head__title">{heading}</h2> : null}
+      {heading ? <h2 id={headingSlug(stripHeadingEmphasis(heading))} className="fp-head__title"><HeadingText text={heading} /></h2> : null}
       {lede ? <p className="fp-head__lede">{inlineMarkdown(lede, 'lede')}</p> : null}
     </header>
   );
@@ -268,11 +270,252 @@ function HeroRunLedger(): JSX.Element {
   );
 }
 
-type HeroVisual = 'workflow' | 'journey' | 'run' | 'image' | 'none';
+/**
+ * ADR 0762 — the OpenWOP intro film (94 s, narrated), rendered and hosted by
+ * openwop.dev (source: openwop-site `video/`). Showcase content, so it is
+ * DEMO-GATED (ADR 0196 Gate A): a white-label install never loads media from
+ * openwop.dev and falls back to the run ledger. The `?v=` must track
+ * openwop.dev's, which serves `/assets/**` immutable — and the backend's
+ * `HERO_FILM` (host/systemSiteProfile.ts, the home VideoObject) must match it
+ * (ADR 0824 D3; pinned by test/public-site-aeo.test.ts).
+ */
+const FILM = {
+  src: 'https://openwop.dev/assets/video/openwop-intro.mp4?v=2026-10-04.1',
+  poster: 'https://openwop.dev/assets/video/openwop-intro-poster.jpg?v=2026-10-04.1',
+  captions: 'https://openwop.dev/assets/video/openwop-intro.en.vtt?v=2026-10-04.1',
+};
+
+/** Click-to-play: nothing downloads until asked (`preload="none"`), and a play
+ *  button over the poster replaces the native control bar until the film starts
+ *  (the bar hides the poster's lower third). The film is narrated, so it carries
+ *  an English captions track. A cross-origin <track> needs a CORS read, hence
+ *  `crossOrigin="anonymous"`: openwop.dev sends Access-Control-Allow-Origin on
+ *  /assets/video/** (openwop-site #140).
+ *
+ *  ADR 0843 — the ONE film player: the home hero's intro film and every CMS
+ *  `video` section render through it, so they cannot drift in behaviour. The
+ *  caller supplies the visible caption (`caption`) and/or a visually hidden
+ *  description (`description`); whichever exists describes the video. */
+function FilmPlayer({ src, poster, captions, length, caption, description, captionExtra }: {
+  src: string;
+  poster: string;
+  captions?: string | undefined;
+  length?: string | undefined;
+  /** Visible caption under the frame (the hero's description is visible). */
+  caption?: ReactNode;
+  /** Screen-reader-only description, wired as aria-describedby. */
+  description?: string | undefined;
+  /** Extra visible caption content (a CMS video's YouTube link). */
+  captionExtra?: ReactNode;
+}): JSX.Element {
+  // `started` hands the video its native controls (and keeps them); `playing`
+  // fades the button out while the video plays and back in when it ends
+  // (pressing it again replays from the start).
+  const [started, setStarted] = useState(false);
+  const [playing, setPlaying] = useState(false);
+  const ref = useRef<HTMLVideoElement>(null);
+  const captionId = useId();
+  const descId = useId();
+  const start = (): void => {
+    setStarted(true);
+    const v = ref.current;
+    if (!v) return;
+    if (v.ended) v.currentTime = 0;
+    v.focus({ preventScroll: true });
+    void v.play().catch(() => {});
+  };
+  const describedBy = [description ? descId : '', caption ? captionId : ''].filter(Boolean).join(' ') || undefined;
+  return (
+    <figure className="fp-film">
+      <div className="fp-film__frame">
+        <video
+          ref={ref}
+          className="fp-film__video"
+          src={src}
+          poster={poster}
+          preload="none"
+          playsInline
+          controls={started}
+          width={1920}
+          height={1080}
+          crossOrigin="anonymous"
+          aria-describedby={describedBy}
+          onPlay={() => { setStarted(true); setPlaying(true); }}
+          onEnded={() => setPlaying(false)}
+        >
+          {captions ? <track kind="captions" srcLang="en" label={i18n.t('site:filmCaptionsLabel')} src={captions} /> : null}
+        </video>
+        {/* Faded out, the button also leaves the tab order and the a11y tree,
+            so it is never an invisible, focusable control. */}
+        <button
+          type="button"
+          className={playing ? 'fp-film__play fp-film__play--faded' : 'fp-film__play'}
+          onClick={start}
+          aria-hidden={playing}
+          tabIndex={playing ? -1 : 0}
+        >
+          <PlayIcon size={18} />
+          <span>{i18n.t('site:filmPlay')}</span>
+          {length ? <span className="fp-film__len">{length}</span> : null}
+        </button>
+      </div>
+      {description ? <span id={descId} className="sr-only">{description}</span> : null}
+      {caption || captionExtra ? (
+        <figcaption id={captionId} className="fp-film__cap">{caption}{captionExtra}</figcaption>
+      ) : null}
+    </figure>
+  );
+}
+
+function HeroFilm(): JSX.Element {
+  return (
+    <FilmPlayer
+      src={FILM.src}
+      poster={FILM.poster}
+      captions={FILM.captions}
+      length={i18n.t('site:filmLength')}
+      caption={i18n.t('site:filmCaption')}
+    />
+  );
+}
+
+/** ADR 0843 — a CMS `video` section: an optional section head, then the film.
+ *  URLs were https-checked on save; re-checked here so a row that reached
+ *  storage another way never loads a non-https source. The visible caption is
+ *  the title (+ a YouTube link); the long description is screen-reader only. */
+const httpsOnly = (v: unknown): string => (/^https:\/\//i.test(str(v).trim()) ? str(v).trim() : '');
+function VideoSection({ d, eyebrow, heading }: { d: Record<string, unknown>; eyebrow?: string | undefined; heading?: string | undefined }): JSX.Element {
+  const { t } = useTranslation('cms');
+  const src = httpsOnly(d.src);
+  const poster = httpsOnly(d.poster);
+  const youtube = httpsOnly(d.youtubeUrl);
+  const title = str(d.title);
+  return (
+    <section className="cms-public-section fp-section">
+      <div className="fp-shell">
+        <SectionHead eyebrow={eyebrow} heading={heading} lede={str(d.lede) || undefined} />
+        {src && poster ? (
+          <FilmPlayer
+            src={src}
+            poster={poster}
+            captions={httpsOnly(d.captions) || undefined}
+            length={str(d.length) || undefined}
+            description={str(d.description) || undefined}
+            caption={title ? <span className="fp-film__title">{title}</span> : null}
+            captionExtra={youtube ? (
+              <>
+                {title ? <span aria-hidden="true"> · </span> : null}
+                <a href={youtube} target="_blank" rel="noopener noreferrer">{t('videoWatchOnYouTube')} <ArrowUpRightIcon size={14} /></a>
+              </>
+            ) : null}
+          />
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
+function RunHero({ copy }: { copy: ReactNode }): JSX.Element {
+  return (
+    <section className="cms-public-section fp-hero fp-hero--run">
+      <div className="fp-shell fp-hero__inner fp-hero__split">
+        <div className="fp-hero__copy">{copy}</div>
+        <HeroRunLedger />
+      </div>
+    </section>
+  );
+}
+
+/** ADR 0762 — the film sits UNDER the copy, full width: it is the page's
+ *  demonstration, so it gets the room a side column cannot give 16:9. The film
+ *  is showcase media from openwop.dev, so it is DEMO-GATED (ADR 0196 Gate A):
+ *  anywhere else this is the run hero. The demo read lives here, not in
+ *  PublicSection, so only a film hero ever asks the host. */
+function FilmOrRunHero({ copy }: { copy: ReactNode }): JSX.Element {
+  const demo = useDemoMode();
+  if (!demo) return <RunHero copy={copy} />;
+  return (
+    <section className="cms-public-section fp-hero fp-hero--film">
+      <div className="fp-shell fp-hero__inner fp-hero__stack">
+        <div className="fp-hero__copy">{copy}</div>
+        <HeroFilm />
+      </div>
+    </section>
+  );
+}
+
+/**
+ * ADR 0762 — the `dives` layout's built-in illustrations, chosen by the
+ * column's `icon` slug (the same opaque, bounded token cards use for a glyph).
+ * Illustrative, not live: aria-hidden, like the hero's run ledger; the column's
+ * own title and text carry the claim. An unknown slug draws nothing.
+ */
+function DiveArt({ kind }: { kind: string }): JSX.Element | null {
+  if (kind === 'canvas') {
+    const steps = ['site:diveCanvasTrigger', 'site:diveCanvasAgent', 'site:diveCanvasApproval', 'site:diveCanvasAction'];
+    return (
+      <div className="fp-dive__art fp-dive__art--canvas" aria-hidden="true">
+        <p className="fp-dive__meta"><span>{i18n.t('site:diveCanvasName')}</span><span>{i18n.t('site:diveCanvasDraft')}</span></p>
+        <ol className="fp-dive__nodes">
+          {steps.map((k, i) => (
+            <li key={k} className={i === 2 ? 'fp-dive__node fp-dive__node--waits' : 'fp-dive__node'}>
+              <span className="fp-dive__node-num">{pad2(i + 1)}</span>{i18n.t(k)}
+            </li>
+          ))}
+        </ol>
+      </div>
+    );
+  }
+  if (kind === 'ledger') {
+    return (
+      <div className="fp-dive__art fp-dive__art--ledger" aria-hidden="true">
+        <p className="fp-dive__meta"><span>{i18n.t('site:heroRunName')}</span><span>{i18n.t('site:diveLedgerLive')}</span></p>
+        <ol className="fp-run__list">
+          {RUN_LEDGER.slice(0, 4).map((row) => (
+            <li key={row.event} className="fp-run__row">
+              <span className="fp-run__at">{row.at}</span>
+              <span className="fp-run__event">{row.event}</span>
+              <span className="fp-run__gloss">{i18n.t(row.gloss)}</span>
+            </li>
+          ))}
+        </ol>
+      </div>
+    );
+  }
+  if (kind === 'approval') {
+    return (
+      <div className="fp-dive__art fp-dive__art--approval" aria-hidden="true">
+        <p className="fp-dive__meta"><span>approval.requested</span><span>{i18n.t('site:heroRunWaiting')}</span></p>
+        <p className="fp-dive__ask">{i18n.t('site:diveApprovalTitle')}</p>
+        <p className="fp-dive__body">{i18n.t('site:diveApprovalBody')}</p>
+        <p className="fp-dive__actions">
+          <span className="fp-btn fp-btn--primary">{i18n.t('site:diveApprove')}</span>
+          <span className="fp-btn fp-btn--ghost">{i18n.t('site:diveDecline')}</span>
+        </p>
+      </div>
+    );
+  }
+  if (kind === 'fork') {
+    return (
+      <div className="fp-dive__art fp-dive__art--fork" aria-hidden="true">
+        <p className="fp-dive__meta"><span>{i18n.t('site:diveForkName')}</span><span>{i18n.t('site:diveForkFrom')}</span></p>
+        <ol className="fp-dive__fork">
+          <li className="fp-dive__fork-row fp-dive__fork-row--reused"><span>1–3</span><span>{i18n.t('site:diveForkReused')}</span></li>
+          <li className="fp-dive__fork-row"><span>4</span><span>agent.decided · {i18n.t('site:diveForkNew')}</span></li>
+          <li className="fp-dive__fork-row fp-dive__fork-row--held"><span>5</span><span>send-email · {i18n.t('site:diveForkHeld')}</span></li>
+        </ol>
+        <p className="fp-dive__note">{i18n.t('site:diveIllustrative')}</p>
+      </div>
+    );
+  }
+  return null;
+}
+
+type HeroVisual = 'workflow' | 'journey' | 'run' | 'film' | 'image' | 'none';
 
 function resolveHeroVisual(d: Record<string, unknown>): HeroVisual {
   const authored = str(d.visual);
-  if (authored === 'workflow' || authored === 'journey' || authored === 'run' || authored === 'image' || authored === 'none') return authored;
+  if (authored === 'workflow' || authored === 'journey' || authored === 'run' || authored === 'film' || authored === 'image' || authored === 'none') return authored;
   return str(d.imageToken) ? 'image' : 'workflow';
 }
 
@@ -284,18 +527,6 @@ function HeroArtwork({ d, visual }: { d: Record<string, unknown>; visual: HeroVi
     return token ? <img className="fp-hero__image" src={assetUrl(token)} alt={str(d.alt)} /> : null;
   }
   return <HeroSchematic />;
-}
-
-function CtaLink({ label, url, primary }: { label: string; url: string; primary?: boolean }): JSX.Element | null {
-  if (!label) return null;
-  const cls = `fp-btn ${primary ? 'fp-btn--primary' : 'fp-btn--ghost'}`;
-  if (isInternal(url)) return <Link className={cls} to={url}>{label}</Link>;
-  if (url && isSafeHref(url)) return <a className={cls} href={url} rel="noopener noreferrer">{label}</a>;
-  // SITE-R2-4 — an empty/unsafe URL used to render a button-STYLED <span> that
-  // did nothing: unfocusable, unclickable, invisible to keyboard/SR users, yet
-  // visually a primary call-to-action. An action nobody can complete must not
-  // be offered — render nothing (like an empty label above).
-  return null;
 }
 
 /** A comparison cell's status class (ADR 0485). The authored glyph itself carries
@@ -331,7 +562,7 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
       const copy = (
         <>
           {eyebrow ? <p className="fp-eyebrow fp-eyebrow--accent">{eyebrow}</p> : null}
-          <h1 className="fp-hero__title">{str(d.heading)}</h1>
+          <h1 className="fp-hero__title"><HeadingText text={str(d.heading)} /></h1>
           {str(d.subheading) ? <p className="fp-hero__lede">{inlineMarkdown(str(d.subheading), 'hl')}</p> : null}
           {str(d.ctaLabel) || str(d.ctaLabel2) ? (
             <div className="fp-hero__cta">
@@ -344,16 +575,8 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
       // The run ledger is the hero's subject, not its backdrop: it sits IN the
       // grid beside the copy (and under it on a phone) instead of floating
       // behind it and disappearing below 900px like the other visuals.
-      if (visual === 'run') {
-        return (
-          <section className="cms-public-section fp-hero fp-hero--run">
-            <div className="fp-shell fp-hero__inner fp-hero__split">
-              <div className="fp-hero__copy">{copy}</div>
-              <HeroRunLedger />
-            </div>
-          </section>
-        );
-      }
+      if (visual === 'film') return <FilmOrRunHero copy={copy} />;
+      if (visual === 'run') return <RunHero copy={copy} />;
       return (
         <section className={`cms-public-section fp-hero fp-hero--${visual}`}>
           <HeroArtwork d={d} visual={visual} />
@@ -387,7 +610,7 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
         <section className="cms-public-section fp-section fp-cta">
           <div className="fp-shell fp-cta__inner">
             {eyebrow ? <p className="fp-eyebrow fp-eyebrow--accent">{eyebrow}</p> : null}
-            {heading ? <h2 className="fp-cta__title">{heading}</h2> : null}
+            {heading ? <h2 className="fp-cta__title"><HeadingText text={heading} /></h2> : null}
             {str(d.subheading) ? <p className="fp-cta__lede">{str(d.subheading)}</p> : null}
             <div className="fp-cta__actions"><CtaLink label={str(d.label)} url={str(d.url)} primary /></div>
           </div>
@@ -399,9 +622,12 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
       const layout = str(d.layout) || 'cards';
 
       if (layout === 'stats') {
+        // ADR 0762 — a heading/lede above the figures (optional: a bare stats
+        // band still renders exactly as before).
         return (
           <section className="cms-public-section fp-section fp-stats">
             <div className="fp-shell">
+              <SectionHead eyebrow={eyebrow} heading={heading} lede={str(d.lede) || undefined} />
               <dl className="fp-stats__grid">
                 {cols.map((c, i) => (
                   <div key={i} className="fp-stat">
@@ -448,6 +674,56 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
                       {str(c.title) ? <h3 className="fp-step__title">{str(c.title)}</h3> : null}
                       <p className="fp-step__text">{inlineMarkdown(str(c.text), `step-${i}`)}</p>
                     </div>
+                  </li>
+                ))}
+              </ol>
+            </div>
+          </section>
+        );
+      }
+      if (layout === 'prompts') {
+        // ADR 0762 — example prompts: a short tag (title) over the prompt itself
+        // (text), set as a quotation. Each card links where it can be typed.
+        return (
+          <section className="cms-public-section fp-section fp-prompts">
+            <div className="fp-shell">
+              <SectionHead eyebrow={eyebrow} heading={heading} lede={str(d.lede) || undefined} />
+              <ul className="fp-prompts__grid">
+                {cols.map((c, i) => {
+                  const href = str(c.href);
+                  const inner = (
+                    <>
+                      {str(c.title) ? <span className="fp-prompt__tag">{str(c.title)}</span> : null}
+                      <q className="fp-prompt__text">{str(c.text)}</q>
+                      {href ? <span className="fp-prompt__action">{t('promptTry')} <ArrowRightIcon size={16} /></span> : null}
+                    </>
+                  );
+                  let card: JSX.Element = <div className="fp-prompt">{inner}</div>;
+                  if (href && isInternal(href)) card = <Link to={href} className="fp-prompt fp-prompt--link">{inner}</Link>;
+                  else if (href && isSafeHref(href)) card = <a href={href} className="fp-prompt fp-prompt--link" rel="noopener noreferrer">{inner}</a>;
+                  return <li key={i}>{card}</li>;
+                })}
+              </ul>
+            </div>
+          </section>
+        );
+      }
+      if (layout === 'dives') {
+        // ADR 0762 — deep dives: one numbered claim per row with a built-in
+        // illustration beside it (DiveArt, by `icon` slug), sides alternating.
+        return (
+          <section className="cms-public-section fp-section fp-dives">
+            <div className="fp-shell">
+              <SectionHead eyebrow={eyebrow} heading={heading} lede={str(d.lede) || undefined} />
+              <ol className="fp-dives__list">
+                {cols.map((c, i) => (
+                  <li key={i} className="fp-dive">
+                    <div className="fp-dive__text">
+                      <span className="fp-dive__num">{pad2(i + 1)}</span>
+                      {str(c.title) ? <h3 className="fp-dive__title">{str(c.title)}</h3> : null}
+                      <p className="fp-dive__lede">{inlineMarkdown(str(c.text), `dive-${i}`)}</p>
+                    </div>
+                    <DiveArt kind={str(c.icon)} />
                   </li>
                 ))}
               </ol>
@@ -519,7 +795,7 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
         <section className="cms-public-section">
           <div className="fp-shell">
             {eyebrow ? <p className="fp-eyebrow">{eyebrow}</p> : null}
-            {heading ? <h2 className="fp-h2">{heading}</h2> : null}
+            {heading ? <h2 className="fp-h2"><HeadingText text={heading} /></h2> : null}
             <ProductGridSection storeOrgId={str(d.storeOrgId)} productIds={Array.isArray(d.productIds) ? (d.productIds as unknown[]).filter((x): x is string => typeof x === 'string') : []} />
           </div>
         </section>
@@ -535,11 +811,14 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
         <section className="cms-public-section fp-section fp-pricing">
           <div className="fp-shell">
             <SectionHead eyebrow={eyebrow} heading={heading} lede={str(d.blurb) || undefined} />
-            <PricingSection
-              tierFilter={Array.isArray(d.tiers) ? (d.tiers as unknown[]).filter((x): x is string => typeof x === 'string') : []}
-              ctaLabel={str(d.ctaLabel) || undefined}
-              ctaUrl={str(d.ctaUrl) || undefined}
-            />
+            <Suspense fallback={<div className="u-p-2" role="status" aria-label={t('common:loading')}><Skeleton /></div>}>
+              <LazyPricingSection
+                tierFilter={Array.isArray(d.tiers) ? (d.tiers as unknown[]).filter((x): x is string => typeof x === 'string') : []}
+                ctaLabel={str(d.ctaLabel) || undefined}
+                ctaUrl={str(d.ctaUrl) || undefined}
+                contactUrl={str(d.contactUrl) || undefined}
+              />
+            </Suspense>
           </div>
         </section>
       );
@@ -564,7 +843,7 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
         <section className="cms-public-section">
           <div className="fp-shell">
             {eyebrow ? <p className="fp-eyebrow">{eyebrow}</p> : null}
-            {heading ? <h2 className="fp-h2">{heading}</h2> : null}
+            {heading ? <h2 className="fp-h2"><HeadingText text={heading} /></h2> : null}
             <Suspense fallback={<div className="u-p-2" role="status"><Skeleton /></div>}>
               <LazyPublicFormRenderer formId={formId} hideTitle={Boolean(heading)} />
             </Suspense>
@@ -583,7 +862,7 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
         <section className="cms-public-section">
           <div className="fp-shell">
             {eyebrow ? <p className="fp-eyebrow">{eyebrow}</p> : null}
-            {heading ? <h2 className="fp-h2">{heading}</h2> : null}
+            {heading ? <h2 className="fp-h2"><HeadingText text={heading} /></h2> : null}
             <EntityListSection
               tenantId={str(d.tenantId)} typeName={str(d.typeName)}
               titleField={str(d.titleField)} bodyField={str(d.bodyField) || undefined}
@@ -603,7 +882,7 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
         <section className="cms-public-section">
           <div className="fp-shell">
             {eyebrow ? <p className="fp-eyebrow">{eyebrow}</p> : null}
-            {heading ? <h2 className="fp-h2">{heading}</h2> : null}
+            {heading ? <h2 className="fp-h2"><HeadingText text={heading} /></h2> : null}
             <EntityDetailSection
               tenantId={str(d.tenantId)} typeName={str(d.typeName)} entityId={str(d.entityId)}
               titleField={str(d.titleField)} bodyField={str(d.bodyField) || undefined}
@@ -638,7 +917,7 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
         <section className="cms-public-section fp-section fp-matrix">
           <div className="fp-shell">
             <SectionHead eyebrow={eyebrow} heading={heading} lede={str(d.lede) || undefined} />
-            <div className="fp-matrix__scroll" role="region" aria-label={heading || t('comparisonRegion', { defaultValue: 'Comparison matrix' })} tabIndex={0}>
+            <div className="fp-matrix__scroll" role="region" aria-label={(heading && stripHeadingEmphasis(heading)) || t('comparisonRegion', { defaultValue: 'Comparison matrix' })} tabIndex={0}>
               <table className="fp-matrix__table">
                 <thead>
                   <tr>
@@ -731,6 +1010,9 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
         </section>
       );
     }
+
+    case 'video':
+      return <VideoSection d={d} eyebrow={eyebrow} heading={heading} />;
 
     case 'quotes': {
       // R2-G10 — attributed social proof. Real <figure>/<blockquote> semantics;
@@ -897,266 +1179,6 @@ function ProductGridSection({ storeOrgId, productIds }: { storeOrgId: string; pr
   );
 }
 
-/** One tier in the public pricing catalog (ADR 0391 §b). Marketing-safe only —
- *  the read NEVER leaks `stripePriceId` or entitlements. `display` is present
- *  only when the operator configured `OPENWOP_BILLING_PLAN_DISPLAY`. */
-interface PublicTier {
-  tier: string;
-  name: string;
-  // '*' = unrestricted (all features) — the billing wire sentinel
-  // (`PublicPricingTier.features: '*' | string[]`); NOT always an array.
-  features?: '*' | string[];
-  limits?: Record<string, unknown>;
-  display?: {
-    price?: string; cadence?: string; blurb?: string; highlighted?: boolean;
-    // R2-G7 — the additive annual price shape; all operator-authored strings.
-    priceAnnual?: string; cadenceAnnual?: string; annualNote?: string;
-  };
-}
-
-/** Live tier grid for the pricing section (one public read per render). Renders
- *  a real display price ONLY when configured; otherwise the tier name + its
- *  feature/limit list + a neutral CTA — it NEVER fabricates a dollar figure. */
-interface PublicBundle { bundleId: string; label: string; priceDisplay?: { price?: string; cadence?: string; blurb?: string } }
-
-/**
- * UX_UPGRADE-site G5 — the plan-COMPARISON view. The tier cards each list their
- * own features, which leaves a visitor to diff three independent lists by eye;
- * a comparison matrix is core 2026 pricing practice. Built entirely from the
- * SAME `tiers[].features` the cards render (union of feature strings × tier,
- * ✓ / —), so the table can never disagree with the cards above it and no new
- * authoring surface or billing config is introduced.
- *
- * Renders only when there is something to compare (≥2 tiers AND ≥1 feature).
- * Mobile is ~58% of pricing traffic, so the table scrolls inside its OWN
- * container (`.fp-compare__scroll`) — the page body never scrolls sideways.
- */
-function TierComparison({ tiers }: { tiers: PublicTier[] }): JSX.Element | null {
-  const { t } = useTranslation('cms');
-  const fmt = useFormat();
-  // A page may carry more than one `pricing` section, so the heading id must be
-  // instance-unique — a duplicate id would silently break both aria-labelledby
-  // references.
-  const headingId = useId();
-  // Only ARRAY feature lists contribute named rows. A `'*'` tier (unrestricted —
-  // all features) is handled per-cell below; iterating it here would add its
-  // characters as bogus feature rows (`for..of '*'`), and String membership would
-  // mismark it — so guard on Array.isArray.
-  const rows = ((): string[] => {
-    const seen = new Set<string>();
-    for (const tt of tiers) {
-      if (!Array.isArray(tt.features)) continue;
-      for (const f of tt.features) if (typeof f === 'string' && f.trim()) seen.add(f);
-    }
-    return [...seen];
-  })();
-  // R2-G5 (DISCARD-1): the tiers' USAGE LIMITS ride the same payload and are the
-  // concrete differentiator (Free vs Pro with identical feature lists but 10×
-  // caps looked identical). Union of limit keys → one row each, cells = the
-  // locale-formatted number. The config declares NO period/unit, so none is
-  // invented (the currency/unit doctrine); an absent key renders as
-  // "not specified" — the payload cannot distinguish "unlimited" from
-  // "unconfigured", so the cell must not claim either.
-  const limitRows = ((): string[] => {
-    const seen = new Set<string>();
-    for (const tt of tiers) {
-      if (!tt.limits || typeof tt.limits !== 'object') continue;
-      for (const [k, v] of Object.entries(tt.limits)) {
-        if (typeof v === 'number' && Number.isFinite(v) && k.trim()) seen.add(k);
-      }
-    }
-    return [...seen];
-  })();
-  if (tiers.length < 2 || (rows.length === 0 && limitRows.length === 0)) return null;
-  return (
-    <section className="fp-compare" aria-labelledby={headingId}>
-      <h3 id={headingId} className="fp-compare__title">{t('pricingCompareTitle', { defaultValue: 'Compare plans' })}</h3>
-      <div className="fp-compare__scroll" tabIndex={0} role="region" aria-labelledby={headingId}>
-        <table className="fp-compare__table">
-          <caption className="sr-only">{t('pricingCompareCaption', { defaultValue: 'Which features each plan includes' })}</caption>
-          <thead>
-            <tr>
-              <th scope="col">{t('pricingCompareFeature', { defaultValue: 'Feature' })}</th>
-              {tiers.map((tt) => <th key={tt.tier} scope="col">{tt.name}</th>)}
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((feature) => (
-              <tr key={feature}>
-                <th scope="row">{humanizeFeatureId(feature)}</th>
-                {tiers.map((tt) => {
-                  // '*' = unrestricted ⇒ the tier includes EVERY feature.
-                  const has = tt.features === '*' || (Array.isArray(tt.features) && tt.features.includes(feature));
-                  return (
-                    <td key={tt.tier} className={has ? 'fp-compare__yes' : 'fp-compare__no'}>
-                      <span aria-hidden="true">{has ? '✓' : '—'}</span>
-                      <span className="sr-only">{has
-                        ? t('pricingCompareIncluded', { defaultValue: 'Included' })
-                        : t('pricingCompareNotIncluded', { defaultValue: 'Not included' })}</span>
-                    </td>
-                  );
-                })}
-              </tr>
-            ))}
-            {limitRows.map((key) => (
-              <tr key={`limit:${key}`}>
-                <th scope="row">{humanizeFeatureId(key)}</th>
-                {tiers.map((tt) => {
-                  const v = tt.limits && typeof tt.limits === 'object' ? (tt.limits as Record<string, unknown>)[key] : undefined;
-                  const isNum = typeof v === 'number' && Number.isFinite(v);
-                  return (
-                    <td key={tt.tier} className={isNum ? 'fp-compare__num' : 'fp-compare__no'}>
-                      {isNum
-                        ? <span>{fmt.number(v)}</span>
-                        : <>
-                            <span aria-hidden="true">—</span>
-                            <span className="sr-only">{t('pricingCompareUnspecified', { defaultValue: 'Not specified' })}</span>
-                          </>}
-                    </td>
-                  );
-                })}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </section>
-  );
-}
-
-function PricingSection({ tierFilter, ctaLabel, ctaUrl }: { tierFilter: string[]; ctaLabel?: string | undefined; ctaUrl?: string | undefined }): JSX.Element {
-  const { t } = useTranslation('cms');
-  const [tiers, setTiers] = useState<PublicTier[] | null>(null);
-  const [bundles, setBundles] = useState<PublicBundle[]>([]); // ADR 0419 — for-sale add-on bundles
-  const [bundlesFailed, setBundlesFailed] = useState(false); // READ-1 — failed ≠ none configured
-  const [error, setError] = useState(false);
-  // R2-G7 — billing-period toggle. Annual is the default when it exists (the
-  // dominant 2026 pattern); with no annual price authored anywhere the toggle
-  // never renders and the single-price render stands (the Linear pattern).
-  const [period, setPeriod] = useState<'monthly' | 'annual'>('annual');
-  useEffect(() => {
-    let live = true;
-    void fetch(`${config.baseUrl}/host/openwop-app/public/pricing`, fetchOpts({}))
-      .then(async (r) => { if (!r.ok) throw new Error(String(r.status)); return (await r.json()) as { tiers: PublicTier[] }; })
-      .then((r) => { if (live) setTiers(Array.isArray(r.tiers) ? r.tiers : []); })
-      .catch(() => { if (live) setError(true); });
-    // Bundle add-ons (ADR 0419) — genuinely-unconfigured (404 / empty) ⇒ nothing
-    // shown; a FAILED read is not "no bundles" (READ-1: a 500 silently removed a
-    // priced revenue surface). It still never blocks the tier grid — the failure
-    // renders as a note in the add-ons slot, not an error page.
-    void fetch(`${config.baseUrl}/host/openwop-app/public/bundle-pricing`, fetchOpts({}))
-      .then(async (r) => {
-        if (r.status === 404) return { bundles: [] as PublicBundle[] };
-        if (!r.ok) throw new Error(String(r.status));
-        return (await r.json()) as { bundles: PublicBundle[] };
-      })
-      .then((r) => { if (live) { setBundlesFailed(false); setBundles(Array.isArray(r.bundles) ? r.bundles : []); } })
-      .catch(() => { if (live) setBundlesFailed(true); });
-    return () => { live = false; };
-  }, []);
-
-  if (error) return <p className="fp-pricing__note">{t('pricingLoadError', { defaultValue: 'Couldn’t load pricing.' })}</p>;
-  if (!tiers) return <div className="u-p-2" role="status"><Skeleton /></div>;
-  // The section may name WHICH tiers to show (in order); empty ⇒ all, as returned.
-  const shown = tierFilter.length > 0
-    ? tierFilter.map((k) => tiers.find((x) => x.tier === k)).filter((x): x is PublicTier => Boolean(x))
-    : tiers;
-  if (shown.length === 0) return <p className="fp-pricing__note">{t('pricingEmpty', { defaultValue: 'No plans configured yet.' })}</p>;
-
-  const hasAnnual = shown.some((tt) => tt.display?.priceAnnual);
-  const annual = hasAnnual && period === 'annual';
-  // The toggle-level note is the operator's OWN discount claim, rendered
-  // verbatim — never a computed percentage. First authored one wins.
-  const annualNote = shown.map((tt) => tt.display?.annualNote).find((n) => n);
-
-  return (
-    <>
-      {hasAnnual ? (
-        <div className="fp-pricing__period" role="group" aria-label={t('pricingBillingPeriodLabel', { defaultValue: 'Billing period' })}>
-          <button
-            type="button" className="fp-period__btn" aria-pressed={!annual}
-            onClick={() => setPeriod('monthly')}
-          >{t('pricingPayMonthly', { defaultValue: 'Pay monthly' })}</button>
-          <button
-            type="button" className="fp-period__btn" aria-pressed={annual}
-            onClick={() => setPeriod('annual')}
-          >{t('pricingPayAnnual', { defaultValue: 'Pay yearly' })}</button>
-          {annualNote ? <span className="fp-pricing__period-note">{annualNote}</span> : null}
-        </div>
-      ) : null}
-      <div className="fp-pricing__grid">
-        {shown.map((tt) => {
-          // Annual mode shows a tier's authored annual price; a tier WITHOUT one
-          // keeps its single authored price + ITS OWN cadence string (which
-          // discloses the period) — never a relabeled number.
-          const useAnnual = annual && Boolean(tt.display?.priceAnnual);
-          const price = useAnnual ? tt.display?.priceAnnual : tt.display?.price;
-          const cadence = useAnnual ? tt.display?.cadenceAnnual : tt.display?.cadence;
-          // '*' = unrestricted (all features). A guarded read: `?? []` does NOT
-          // catch the `'*'` sentinel (a non-null string), so filter blindly
-          // used to CRASH the whole pricing page on an unrestricted tier. Show a
-          // single "everything" bullet for '*'; a real list otherwise; never throw.
-          const allFeatures = tt.features === '*';
-          const features = Array.isArray(tt.features) ? tt.features.filter((f) => typeof f === 'string') : [];
-          return (
-            <article key={tt.tier} className={`fp-tier${tt.display?.highlighted ? ' fp-tier--highlighted' : ''}`}>
-              {tt.display?.highlighted ? <span className="fp-tier__badge">{t('pricingPopular', { defaultValue: 'Popular' })}</span> : null}
-              <h3 className="fp-tier__name">{tt.name}</h3>
-              {price ? (
-                <p className="fp-tier__price">{price}{cadence ? <span className="fp-tier__cadence">{cadence}</span> : null}</p>
-              ) : (
-                <p className="fp-tier__price fp-tier__price--none">{t('pricingContactPrice', { defaultValue: 'Let’s talk' })}</p>
-              )}
-              {tt.display?.blurb ? <p className="fp-tier__blurb">{tt.display.blurb}</p> : null}
-              {allFeatures ? (
-                <ul className="fp-tier__features">
-                  <li>{t('pricingAllFeatures', { defaultValue: 'Everything included' })}</li>
-                </ul>
-              ) : features.length > 0 ? (
-                <ul className="fp-tier__features">
-                  {features.slice(0, FEATURE_CARD_CAP).map((f) => <li key={f}>{humanizeFeatureId(f)}</li>)}
-                  {features.length > FEATURE_CARD_CAP ? (
-                    <li className="fp-tier__features-more">{t('pricingMoreFeatures', { defaultValue: 'and {{n}} more', n: features.length - FEATURE_CARD_CAP })}</li>
-                  ) : null}
-                </ul>
-              ) : null}
-              <CtaLink label={ctaLabel || t('pricingCta', { defaultValue: 'Get started' })} url={ctaUrl || '/chat'} primary={Boolean(tt.display?.highlighted)} />
-            </article>
-          );
-        })}
-      </div>
-      <TierComparison tiers={shown} />
-      {/* ADR 0419 — for-sale add-on bundles (marketing facts, no Stripe id). Only
-          shown when the operator has priced a bundle; anon page ⇒ display only,
-          the Buy flow lives in the authed workspace store. */}
-      {bundlesFailed ? (
-        <p className="fp-pricing__note">{t('bundlePricingLoadError', { defaultValue: 'Couldn’t load add-on bundles.' })}</p>
-      ) : null}
-      {bundles.length > 0 ? (
-        <div className="fp-pricing__addons">
-          <h3 className="fp-pricing__addons-title">{t('pricingAddonsTitle', { defaultValue: 'Add-on feature bundles' })}</h3>
-          {/* UX-419C — the cards are display-only (identical .fp-tier chrome to the
-              actionable plan cards above), so orient the visitor on where to buy. */}
-          <p className="fp-pricing__addons-note">{t('pricingAddonsNote', { defaultValue: 'Purchase add-ons from your workspace store.' })}</p>
-          <div className="fp-pricing__grid">
-            {bundles.map((b) => (
-              <article key={b.bundleId} className="fp-tier">
-                {/* UX-419A — h4 so the "Add-on feature bundles" h3 above outranks
-                    the bundle names it groups (a group header must not sit at its items' level). */}
-                <h4 className="fp-tier__name">{b.label}</h4>
-                {b.priceDisplay?.price ? (
-                  <p className="fp-tier__price">{b.priceDisplay.price}{b.priceDisplay.cadence ? <span className="fp-tier__cadence">{b.priceDisplay.cadence}</span> : null}</p>
-                ) : null}
-                {b.priceDisplay?.blurb ? <p className="fp-tier__blurb">{b.priceDisplay.blurb}</p> : null}
-              </article>
-            ))}
-          </div>
-        </div>
-      ) : null}
-    </>
-  );
-}
-
 /** The simple editor preview (markup kept rough — the public page is `.fp-*`). */
 function EditorPreview({ section }: { section: Section }): JSX.Element {
   const { t } = useTranslation('cms');
@@ -1167,7 +1189,7 @@ function EditorPreview({ section }: { section: Section }): JSX.Element {
         <div className="cms-hero-preview">
           {str(d.imageToken) ? <img src={assetUrl(str(d.imageToken))} alt="" className="cms-hero-img" /> : null}
           {str(d.eyebrow) ? <span className="u-label-sm">{str(d.eyebrow)}</span> : null}
-          <strong className="cms-hero-heading">{str(d.heading)}</strong>
+          <strong className="cms-hero-heading"><HeadingText text={str(d.heading)} /></strong>
           {str(d.subheading) ? <span className="u-label-sm">{str(d.subheading)}</span> : null}
         </div>
       );
@@ -1178,7 +1200,7 @@ function EditorPreview({ section }: { section: Section }): JSX.Element {
         ? <img src={assetUrl(str(d.token))} alt={str(d.alt)} className="cms-img" />
         : <span className="u-label-sm">{t('noImage')}</span>;
     case 'cta':
-      return <span className="chip chip--accent">{str(d.heading) || str(d.label)}</span>;
+      return <span className="chip chip--accent">{stripHeadingEmphasis(str(d.heading)) || str(d.label)}</span>;
     case 'columns': {
       const cols: { title?: string; text?: string }[] = Array.isArray(d.columns) ? d.columns : [];
       return (
@@ -1190,33 +1212,43 @@ function EditorPreview({ section }: { section: Section }): JSX.Element {
     case 'productGrid':
       return (
         <div className="u-grid u-gap-1">
-          {str(d.heading) ? <strong>{str(d.heading)}</strong> : null}
+          {str(d.heading) ? <strong><HeadingText text={str(d.heading)} /></strong> : null}
           <span className="u-label-sm">{t('productGridPreview', { defaultValue: '{{count}} product(s) from the storefront', count: Array.isArray(d.productIds) ? (d.productIds as unknown[]).length : 0 })}</span>
         </div>
       );
     case 'form':
       return (
         <div className="u-grid u-gap-1">
-          {str(d.heading) ? <strong>{str(d.heading)}</strong> : null}
+          {str(d.heading) ? <strong><HeadingText text={str(d.heading)} /></strong> : null}
           <span className="u-label-sm">{str(d.formId) ? t('formSectionPreview', { defaultValue: 'Form: {{id}}', id: str(d.formId) }) : t('formSectionEmpty', { defaultValue: 'No form selected' })}</span>
         </div>
       );
     case 'pricing':
       return (
         <div className="u-grid u-gap-1">
-          {str(d.heading) ? <strong>{str(d.heading)}</strong> : null}
+          {str(d.heading) ? <strong><HeadingText text={str(d.heading)} /></strong> : null}
           <span className="u-label-sm">{t('pricingSectionPreview', { defaultValue: 'Pricing tiers ({{n}})', n: Array.isArray(d.tiers) ? (d.tiers as unknown[]).length : 0 })}</span>
         </div>
       );
     case 'comparison':
       return (
         <div className="u-grid u-gap-1">
-          {str(d.heading) ? <strong>{str(d.heading)}</strong> : null}
+          {str(d.heading) ? <strong><HeadingText text={str(d.heading)} /></strong> : null}
           <span className="u-label-sm">{t('comparisonSectionPreview', {
             defaultValue: 'Comparison matrix ({{r}} rows × {{c}} columns)',
             r: Array.isArray(d.rows) ? (d.rows as unknown[]).length : 0,
             c: Array.isArray(d.columns) ? (d.columns as unknown[]).length : 0,
           })}</span>
+        </div>
+      );
+    case 'video':
+      return (
+        <div className="u-grid u-gap-1">
+          {str(d.heading) ? <strong><HeadingText text={str(d.heading)} /></strong> : null}
+          {httpsOnly(d.poster) ? <img src={httpsOnly(d.poster)} alt="" className="cms-img" /> : null}
+          <span className="u-label-sm">{str(d.title)
+            ? t('videoSectionPreview', { title: str(d.title), length: str(d.length) || '—' })
+            : t('videoSectionEmpty')}</span>
         </div>
       );
     case 'fields': {
@@ -1248,10 +1280,12 @@ export function RenderSection({ section, mode = 'editor' }: { section: Section; 
  * working, so the affordance is an overlay chip, not a whole-block hijack).
  * The wrapper div exists ONLY on this path — the public page's markup (and
  * its `.cms-public-page > .cms-public-section` stagger) is untouched. */
-export function RenderSections({ sections, mode = 'editor', onEditSection }: {
+export function RenderSections({ sections, mode = 'editor', onEditSection, selectedSectionId }: {
   sections: Section[];
   mode?: SectionRenderMode;
   onEditSection?: (sectionId: string) => void;
+  /** The page workspace's selected section, outlined on the page. */
+  selectedSectionId?: string | null | undefined;
 }): JSX.Element {
   const { t } = useTranslation('cms');
   const list = Array.isArray(sections) ? sections : [];
@@ -1259,13 +1293,13 @@ export function RenderSections({ sections, mode = 'editor', onEditSection }: {
   return (
     <>
       {list.map((s) => (
-        <div key={s.sectionId} className="cms-pv-section" data-section-id={s.sectionId}>
+        <div key={s.sectionId} className="cms-pv-section" data-section-id={s.sectionId} data-selected={s.sectionId === selectedSectionId ? 'true' : undefined}>
           <RenderSection section={s} mode={mode} />
           <Button
             variant="secondary"
             size="sm"
             className="cms-pv-edit"
-            aria-label={t('editSectionAria', { type: s.type })}
+            aria-label={t('editSectionAria', { type: t(`sectionType_${s.type}`, { defaultValue: s.type }) })}
             onClick={() => onEditSection(s.sectionId)}
           >
             <PencilIcon /> {t('editSectionAction')}

@@ -15,6 +15,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { PageHeader } from '../../ui/PageHeader.js';
 import { Notice } from '../../ui/Notice.js';
 import { StateCard } from '../../ui/StateCard.js';
+import { CampaignLedgerSection } from './CampaignLedgerSection.js';
 import { Modal } from '../../ui/Modal.js';
 import { ConfirmDialog } from '../../ui/ConfirmDialog.js';
 import { SelectField } from '../../ui/Field.js';
@@ -304,6 +305,8 @@ function CampaignDetail({ t, campaign, orgName, parentName, onBack, onChanged, o
           <div className="list-row-name-line">{campaign.channels.map((c) => <span key={c} className="chip chip--muted">{t(`channel_${c}`, { defaultValue: c })}</span>)}</div>
         )}
       </section>
+
+      <CampaignLedgerSection campaignId={campaign.id} />
 
       <LaunchState t={t} campaign={campaign} />
     </div>

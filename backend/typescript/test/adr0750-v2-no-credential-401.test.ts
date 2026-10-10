@@ -55,7 +55,7 @@ describe('ADR 0750 — a major-2 request with NO credential is 401 + challenge, 
 
 describe('ADR 0750 controls — the anonymous demo visitor is unaffected', () => {
   it('the major-1 /me route still mints an anonymous session, and that session is honoured on the major-2 read', async () => {
-    const me = await fetch(`${base}/v1/host/openwop-app/users/me`);
+    const me = await fetch(`${base}/host/openwop-app/users/me`);
     const cookie = me.headers.get('set-cookie');
     expect(cookie, 'the SPA bootstrap route must still mint').toBeTruthy();
     const sessionPair = (cookie ?? '').split(';')[0];
@@ -72,9 +72,18 @@ describe('ADR 0750 controls — the anonymous demo visitor is unaffected', () =>
     expect(r.headers.get('set-cookie'), 'ADR 0434: never mint a new identity for a refused bearer').toBeNull();
   });
 
-  it('major 1 is unchanged: a no-credential v1 request still gets an anonymous session', async () => {
-    const r = await fetch(`${base}/v1/runs/${RUN_ID}`);
+  it('major 1 protocol operations refuse too: the v1 floor probe (POST /v1/runs, no credential) is 401 + envelope, no mint', async () => {
+    // ADR 0750 major-1 extension — `openwop.floor.auth` (auth.md §3).
+    const r = await fetch(`${base}/runs`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ workflowId: 'conformance-noop' }) });
+    expect(r.status).toBe(401);
+    const body = (await r.json()) as { error?: unknown; message?: unknown };
+    expect(typeof body.error).toBe('string');
+    expect(typeof body.message).toBe('string');
+    expect(r.headers.get('set-cookie'), 'a refusal mints no identity').toBeNull();
+  });
+
+  it('a browser document navigation to a v1 protocol path is not the JSON 401 (not a protocol client)', async () => {
+    const r = await fetch(`${base}/runs`, { headers: { accept: 'text/html' } });
     expect(r.status).not.toBe(401);
-    expect(r.headers.get('set-cookie')).toBeTruthy();
   });
 });

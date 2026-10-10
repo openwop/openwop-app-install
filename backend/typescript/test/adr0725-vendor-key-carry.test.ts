@@ -18,9 +18,16 @@ describe('ADR 0725 — vendor-key carry', () => {
   });
 
   it('moves every undeclared top-level key into ONE box and leaves declared keys in place', () => {
-    const out = carryVendorKeys('conversation.opened', { conversationId: 'c1', initialTurn: { messageId: 'm0' }, participants: [], capabilities: ['multi-turn'] }) as Record<string, unknown>;
-    expect(Object.keys(out).sort()).toEqual(['conversationId', VENDOR_CARRY_KEY]);
-    expect(out[VENDOR_CARRY_KEY]).toEqual({ initialTurn: { messageId: 'm0' }, participants: [], capabilities: ['multi-turn'] });
+    // Suite 2.45.16 DECLARED `initialTurn`, `participants` and `capabilities` on
+    // `run-event-payloads#conversationOpened` (they were undeclared through
+    // 2.45.14 and were the carried examples here). Declared keys now stay in
+    // place; the box receives only what the def still does not name.
+    const out = carryVendorKeys('conversation.opened', {
+      conversationId: 'c1', initialTurn: { messageId: 'm0' }, participants: [], capabilities: ['multi-turn'],
+      hostDraftId: 'd1', uiHint: { pinned: true },
+    }) as Record<string, unknown>;
+    expect(Object.keys(out).sort()).toEqual(['capabilities', 'conversationId', 'initialTurn', 'participants', VENDOR_CARRY_KEY].sort());
+    expect(out[VENDOR_CARRY_KEY]).toEqual({ hostDraftId: 'd1', uiHint: { pinned: true } });
   });
 
   it('carries inside a nested closed+hatched sub-object (run.failed.error enrichment)', () => {

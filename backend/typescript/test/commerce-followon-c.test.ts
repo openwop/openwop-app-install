@@ -61,11 +61,11 @@ function client() {
 }
 async function shopOwner(): Promise<{ owner: ReturnType<typeof client>; orgId: string }> {
   const owner = client();
-  await owner.post('/v1/host/openwop-app/test/login', { email: `fc-${Date.now()}-${n++}@acme.test` });
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Shop' });
+  await owner.post('/host/openwop-app/test/login', { email: `fc-${Date.now()}-${n++}@acme.test` });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Shop' });
   return { owner, orgId: org.body.orgId };
 }
-const c = (orgId: string, s = ''): string => `/v1/host/openwop-app/commerce/orgs/${encodeURIComponent(orgId)}${s}`;
+const c = (orgId: string, s = ''): string => `/host/openwop-app/commerce/orgs/${encodeURIComponent(orgId)}${s}`;
 
 describe('Group C — typed product custom fields (routes)', () => {
   it('defines fields, sets typed values on a product, and exposes them on the storefront', async () => {
@@ -79,7 +79,7 @@ describe('Group C — typed product custom fields (routes)', () => {
     expect(p.status).toBe(201);
     expect(p.body.customFields).toEqual({ material: 'cotton', size: 'M' });
     // Public storefront exposes them as LABEL-resolved pairs (shoppers see "Material", not the key).
-    const pub = await owner.get(`/v1/host/openwop-app/public-store/${encodeURIComponent(orgId)}/products`);
+    const pub = await owner.get(`/host/openwop-app/public-store/${encodeURIComponent(orgId)}/products`);
     const sp = (pub.body.products as any[]).find((x) => x.productId === p.body.productId);
     expect(sp.customFields).toEqual([{ label: 'Material', value: 'cotton' }, { label: 'Size', value: 'M' }]);
   });

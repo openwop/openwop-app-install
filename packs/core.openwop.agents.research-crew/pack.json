@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.agents.research-crew",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Multi-agent research crew. 4 specialists — planner / retriever / critic / writer — bundled into one pack for dispatch via orchestrator. Mirrors CrewAI's sequential/hierarchical crew templates.",
   "author": "OpenWOP Working Group",
   "license": "Apache-2.0",
@@ -15,12 +15,12 @@
     "pattern"
   ],
   "engines": {
-    "openwop": ">=1.1.0 <2.0.0"
+    "openwop": ">=1.1.0 <3.0.0"
   },
   "peerDependencies": {
     "aiProviders": "supported",
-    "host.agentRuntime": "supported",
-    "openwop.agents.memoryBackends": ">=longTerm"
+    "agentRuntime": "supported",
+    "agents": ">=longTerm"
   },
   "agents": [
     {
@@ -42,7 +42,8 @@
       },
       "confidence": {
         "defaultThreshold": 0.7
-      }
+      },
+      "role": "skill"
     },
     {
       "agentId": "core.openwop.agents.research-crew.retriever",
@@ -68,7 +69,8 @@
       },
       "confidence": {
         "defaultThreshold": 0.7
-      }
+      },
+      "role": "skill"
     },
     {
       "agentId": "core.openwop.agents.research-crew.critic",
@@ -89,7 +91,8 @@
       },
       "confidence": {
         "defaultThreshold": 0.75
-      }
+      },
+      "role": "skill"
     },
     {
       "agentId": "core.openwop.agents.research-crew.writer",
@@ -110,11 +113,20 @@
       },
       "confidence": {
         "defaultThreshold": 0.7
-      }
+      },
+      "role": "skill"
     }
   ],
   "runtime": {
     "language": "remote",
     "entry": "pack.json"
+  },
+  "kind": "node",
+  "peerDependenciesMeta": {
+    "agents": {
+      "facets": [
+        "memoryBackends"
+      ]
+    }
   }
 }

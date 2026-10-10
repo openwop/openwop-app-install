@@ -1,7 +1,7 @@
 /**
  * ADR 0440 P4 — the WRITE half of the M7 tenant-isolation fix.
  *
- * `POST /v1/host/openwop-app/workflows` calls `registerWorkflow(def)`, which
+ * `POST /host/openwop-app/workflows` calls `registerWorkflow(def)`, which
  * kv-sets a GLOBAL-by-id key with no tenant component. Without a guard, tenant
  * B could POST under tenant A's workflowId and OVERWRITE A's definition —
  * injecting B's content (prompts, node config, connection refs) into every
@@ -62,40 +62,40 @@ describe('ADR 0440 P4 — cross-tenant workflow overwrite guard', () => {
     await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
     alice = client();
     bob = client();
-    expect((await alice('POST', '/v1/host/openwop-app/test/login', { email: 'alice@acme.test', tenantId: 'org:alice' })).status).toBe(201);
-    expect((await bob('POST', '/v1/host/openwop-app/test/login', { email: 'bob@acme.test', tenantId: 'org:bob' })).status).toBe(201);
+    expect((await alice('POST', '/host/openwop-app/test/login', { email: 'alice@acme.test', tenantId: 'org:alice' })).status).toBe(201);
+    expect((await bob('POST', '/host/openwop-app/test/login', { email: 'bob@acme.test', tenantId: 'org:bob' })).status).toBe(201);
   });
   afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
   it('a tenant can create + overwrite its OWN workflow', async () => {
-    expect((await alice('POST', '/v1/host/openwop-app/workflows', defBody('wf-alice-owns', 'v1'))).status).toBe(201);
+    expect((await alice('POST', '/host/openwop-app/workflows', defBody('wf-alice-owns', 'v1'))).status).toBe(201);
     // Self-overwrite (the builder's autosave) must stay open.
-    expect((await alice('POST', '/v1/host/openwop-app/workflows', defBody('wf-alice-owns', 'v2'))).status).toBe(201);
+    expect((await alice('POST', '/host/openwop-app/workflows', defBody('wf-alice-owns', 'v2'))).status).toBe(201);
   });
 
   it('another tenant CANNOT overwrite it — indistinguishable 404, and A keeps its content', async () => {
-    const attack = await bob('POST', '/v1/host/openwop-app/workflows', defBody('wf-alice-owns', 'HIJACKED'));
+    const attack = await bob('POST', '/host/openwop-app/workflows', defBody('wf-alice-owns', 'HIJACKED'));
     expect(attack.status).toBe(404); // NOT 403 — no existence oracle
     // Alice's content is intact.
-    const read = await alice('GET', '/v1/workflows/wf-alice-owns');
+    const read = await alice('GET', '/workflows/wf-alice-owns');
     expect(read.status).toBe(200);
     expect((read.body?.nodes as Array<{ config?: { marker?: string } }>)[0]?.config?.marker).toBe('v2');
     // And Bob's list never picked up a phantom ownership row.
-    const bobList = await bob('GET', '/v1/host/openwop-app/workflows');
+    const bobList = await bob('GET', '/host/openwop-app/workflows');
     expect((bobList.body?.workflows as Array<{ workflowId: string }>).some((w) => w.workflowId === 'wf-alice-owns')).toBe(false);
   });
 
   it('READ parity — a non-owner also gets an indistinguishable 404 on GET (M7 preserved)', async () => {
     // The guard was extracted from GET into the shared isForeignOwned helper;
     // this pins that the read side still refuses a foreign-owned id the same way.
-    const read = await bob('GET', '/v1/workflows/wf-alice-owns');
+    const read = await bob('GET', '/workflows/wf-alice-owns');
     expect(read.status).toBe(404);
     // Alice still reads her own.
-    expect((await alice('GET', '/v1/workflows/wf-alice-owns')).status).toBe(200);
+    expect((await alice('GET', '/workflows/wf-alice-owns')).status).toBe(200);
   });
 
   it('a FREE id (owned by no one) stays open — ordinary create works for anyone', async () => {
-    expect((await bob('POST', '/v1/host/openwop-app/workflows', defBody('wf-bob-brand-new', 'x'))).status).toBe(201);
+    expect((await bob('POST', '/host/openwop-app/workflows', defBody('wf-bob-brand-new', 'x'))).status).toBe(201);
   });
 
   it('a tenant CANNOT overwrite a host SYSTEM definition (grade-pass blocker)', async () => {
@@ -111,10 +111,10 @@ describe('ADR 0440 P4 — cross-tenant workflow overwrite guard', () => {
     // 404 is required. The guard now consults BOTH. Generalisable: a migration that
     // changes WHICH REGISTRY holds a definition changes every predicate keyed on "is it
     // registered" — and those predicates are the authz layer.
-    const attack = await bob('POST', '/v1/host/openwop-app/workflows', defBody('openwop-app.channel.turn', 'POISONED'));
+    const attack = await bob('POST', '/host/openwop-app/workflows', defBody('openwop-app.channel.turn', 'POISONED'));
     expect(attack.status, 'a tenant overwrote a host system workflow — regression of the P4 grade-pass').toBe(404);
     // Its definition is intact: still the host DEF, not the poison marker.
-    const read = await alice('GET', '/v1/workflows/openwop-app.channel.turn');
+    const read = await alice('GET', '/workflows/openwop-app.channel.turn');
     if (read.status === 200) {
       expect((read.body?.nodes as Array<{ config?: { marker?: string } }>).some((n) => n.config?.marker === 'POISONED')).toBe(false);
     }
@@ -126,18 +126,20 @@ describe('ADR 0440 P4 — cross-tenant workflow overwrite guard', () => {
     // that merged, and nothing tested it. Both drained ids are pinned here now, and
     // the next drain inherits the coverage instead of re-discovering the hole.
     for (const id of ['openwop-app.scheduled-chat.turn', 'openwop-app.channel.turn']) {
-      const attack = await bob('POST', '/v1/host/openwop-app/workflows', defBody(id, 'POISONED'));
+      const attack = await bob('POST', '/host/openwop-app/workflows', defBody(id, 'POISONED'));
       expect(attack.status, `${id}: a chain-backed host workflow must not be tenant-overwritable`).toBe(404);
     }
   });
 
-  it('a seeded / owned public-namespace id stays self-overwritable', async () => {
-    // A tenant that OWNS its copy (seeders recordOwnership directly) self-saves
-    // via getOwned, not via a namespace exemption. Simulate: first create is a
-    // free id in the namespace (open), the re-save is a self-overwrite.
-    expect((await alice('POST', '/v1/host/openwop-app/workflows', defBody('tmpl.alice.custom', 'v1'))).status).toBe(201);
-    expect((await alice('POST', '/v1/host/openwop-app/workflows', defBody('tmpl.alice.custom', 'v2'))).status).toBe(201);
-    // And another tenant cannot then clobber it.
-    expect((await bob('POST', '/v1/host/openwop-app/workflows', defBody('tmpl.alice.custom', 'x'))).status).toBe(404);
+  it('a FREE public-namespace id is NOT creatable through a tenant route (ADR 0789)', async () => {
+    // §Correction (ADR 0789): this leg used to pin the opposite — a tenant could
+    // create `tmpl.alice.custom` and self-overwrite it. A public namespace is one
+    // shared row per id, and the seeders are register-if-missing, so a tenant
+    // that created a free `wf.seed.*` id first would hand its steps to every
+    // tenant seeded afterwards. The self-overwrite half of the old claim is now
+    // a fork, witnessed in `seeded-workflow-tenant-isolation.test.ts`.
+    for (const id of ['tmpl.alice.custom', 'wf.seed.alice-squat', 'openwop-app.authored.alice-squat']) {
+      expect((await alice('POST', '/host/openwop-app/workflows', defBody(id, 'v1'))).status, id).toBe(404);
+    }
   });
 });

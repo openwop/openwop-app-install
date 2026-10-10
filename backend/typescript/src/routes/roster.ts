@@ -39,6 +39,7 @@ import {
   type ResolvedHeartbeatConfig,
 } from '../host/heartbeatService.js';
 import type { RosterEntry } from '../host/rosterService.js';
+import { requireTenantWrite } from '../features/featureRoute.js';
 
 function parseAgentRef(value: unknown): RosterAgentRef {
   if (!value || typeof value !== 'object') {
@@ -150,7 +151,7 @@ function withHeartbeat(
 }
 
 export function registerRosterRoutes(app: Express): void {
-  app.get('/v1/host/openwop-app/roster', async (req, res, next) => {
+  app.get('/host/openwop-app/roster', async (req, res, next) => {
     try {
       const all = await listRoster(tenantOf(req));
       // Advisor-subject agents (`roleKey:'advisor'`, ADR 0040) are persona-only and
@@ -166,8 +167,9 @@ export function registerRosterRoutes(app: Express): void {
     }
   });
 
-  app.post('/v1/host/openwop-app/roster', async (req, res, next) => {
+  app.post('/host/openwop-app/roster', async (req, res, next) => {
     try {
+      await requireTenantWrite(req); // ADR 0775 D1
       const body = (req.body ?? {}) as {
         persona?: unknown;
         agentRef?: unknown;
@@ -209,7 +211,7 @@ export function registerRosterRoutes(app: Express): void {
     }
   });
 
-  app.get('/v1/host/openwop-app/roster/:rosterId', async (req, res, next) => {
+  app.get('/host/openwop-app/roster/:rosterId', async (req, res, next) => {
     try {
       const entry = await getRosterEntry(tenantOf(req), req.params.rosterId);
       if (!entry || entry.tenantId !== tenantOf(req)) {
@@ -221,8 +223,9 @@ export function registerRosterRoutes(app: Express): void {
     }
   });
 
-  app.patch('/v1/host/openwop-app/roster/:rosterId', async (req, res, next) => {
+  app.patch('/host/openwop-app/roster/:rosterId', async (req, res, next) => {
     try {
+      await requireTenantWrite(req); // ADR 0775 D1
       const existing = await getRosterEntry(tenantOf(req), req.params.rosterId);
       if (!existing || existing.tenantId !== tenantOf(req)) {
         throw new OpenwopError('not_found', 'Roster entry not found.', 404, { rosterId: req.params.rosterId });
@@ -275,8 +278,9 @@ export function registerRosterRoutes(app: Express): void {
     }
   });
 
-  app.delete('/v1/host/openwop-app/roster/:rosterId', async (req, res, next) => {
+  app.delete('/host/openwop-app/roster/:rosterId', async (req, res, next) => {
     try {
+      await requireTenantWrite(req); // ADR 0775 D1
       const entry = await getRosterEntry(tenantOf(req), req.params.rosterId);
       if (!entry || entry.tenantId !== tenantOf(req)) {
         throw new OpenwopError('not_found', 'Roster entry not found.', 404, { rosterId: req.params.rosterId });

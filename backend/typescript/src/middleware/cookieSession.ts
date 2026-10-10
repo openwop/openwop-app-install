@@ -72,8 +72,93 @@ export interface SessionPayload {
    *  which matches a row that was never bumped. Only meaningful alongside
    *  `userId`; anon / unbound-subject sessions carry none. */
   epoch?: number;
+  /** ADR 0833 D3 — the session FAMILY: minted on a fresh authentication and
+   *  carried by every refresh, re-pin and re-mint (switch, promotion). Logout
+   *  revokes the family, so a cookie copied BEFORE a re-mint dies with it.
+   *  Absent on a pre-ADR cookie ⇒ the family is its `sid` ({@link familyOf}). */
+  fid?: string;
+  /** ADR 0833 D3 — SERVER time (epoch seconds) at which the IdP credential
+   *  behind this session was last verified (a bearer or assertion). Never the
+   *  IdP's `auth_time`. `exp` is capped at `authAt` + the absolute lifetime, so
+   *  reaching the cap is an ordinary expiry. Absent on a pre-ADR cookie ⇒ the
+   *  clock starts at its next refresh (no mass sign-out on deploy). */
+  authAt?: number;
   iat: number;
   exp: number;
+}
+
+/** ADR 0833 D3 — a session's family id (a legacy cookie's family is its sid). */
+export function familyOf(session: Pick<SessionPayload, 'fid' | 'sid'>): string {
+  return session.fid ?? session.sid;
+}
+
+/** ADR 0833 D3 — the absolute session lifetime in seconds
+ *  (`OPENWOP_SESSION_ABSOLUTE_MAX_HOURS`, default 720 = 30 days). */
+export function sessionAbsoluteMaxSeconds(): number {
+  const raw = Number(process.env.OPENWOP_SESSION_ABSOLUTE_MAX_HOURS);
+  const hours = Number.isFinite(raw) && raw > 0 ? raw : 720;
+  return Math.floor(hours * 3600);
+}
+
+/** The lifetime fields every minted payload gets from {@link buildSessionPayload}. */
+type LifetimeFields = 'sid' | 'iat' | 'exp' | 'fid' | 'authAt';
+
+/**
+ * ADR 0833 D2/D3 — the ONE builder for a session payload's lifetime fields.
+ * Every `signSession` caller (`test/adr0833-*` ratchet) mints through it, so no
+ * mint can widen the session it came from:
+ *
+ *  - `source` — the VERIFIED user-tier session this one replaces (a switch, a
+ *    promotion over a same-identity cookie). Its family is inherited; so are
+ *    `authAt` and, for a `noRefresh` session, its `exp` ceiling and the flag.
+ *    An anon cookie is never a source (it carries no authentication).
+ *  - `freshAuth` — an IdP credential was verified on THIS request (bind,
+ *    bearer promotion, SAML ACS, break-glass): `authAt` restarts at now.
+ *  - `ttlSeconds` — a shorter lifetime than the cookie TTL (break-glass).
+ *
+ * `exp` is always ≤ `authAt` + the absolute lifetime.
+ */
+export function buildSessionPayload(
+  fields: Omit<SessionPayload, LifetimeFields> & { sid?: string },
+  opts: { source?: SessionPayload | null; freshAuth?: boolean; ttlSeconds?: number } = {},
+): SessionPayload {
+  const now = Math.floor(Date.now() / 1000);
+  const sid = fields.sid ?? base64urlEncode(randomBytes(18));
+  // An ANON session authenticates nobody: no family, no `authAt`, no absolute
+  // cap — it slides as it always has (grade-code `USERS2-CD-2`: capping it
+  // stranded an active visitor's sandbox on day 30).
+  if (fields.tier === 'anon') {
+    return { ...fields, sid, iat: now, exp: now + (opts.ttlSeconds ?? COOKIE_TTL_SECONDS) };
+  }
+  const source = opts.source && opts.source.tier === 'user' ? opts.source : undefined;
+  const authAt = opts.freshAuth || !source ? now : (source.authAt ?? now);
+  const noRefresh = fields.noRefresh === true || source?.noRefresh === true;
+  let exp = Math.min(now + (opts.ttlSeconds ?? COOKIE_TTL_SECONDS), authAt + sessionAbsoluteMaxSeconds());
+  if (source?.noRefresh) exp = Math.min(exp, source.exp);
+  return {
+    ...fields,
+    sid,
+    fid: source ? familyOf(source) : base64urlEncode(randomBytes(12)),
+    authAt,
+    ...(noRefresh ? { noRefresh: true } : {}),
+    iat: now,
+    exp,
+  };
+}
+
+/** ADR 0833 D3 — the sliding refresh: same session, same family and `authAt`
+ *  (a legacy cookie's clock starts now), `exp` slid but never past the cap. */
+export function refreshSessionPayload(session: SessionPayload): SessionPayload {
+  const now = Math.floor(Date.now() / 1000);
+  if (session.tier === 'anon') return { ...session, iat: now, exp: now + COOKIE_TTL_SECONDS };
+  const authAt = session.authAt ?? now;
+  return {
+    ...session,
+    fid: familyOf(session),
+    authAt,
+    iat: now,
+    exp: Math.min(now + COOKIE_TTL_SECONDS, authAt + sessionAbsoluteMaxSeconds()),
+  };
 }
 
 export function base64urlEncode(buf: Buffer): string {
@@ -131,7 +216,8 @@ export function signSession(payload: SessionPayload): string {
   return `${payloadB64}.${base64urlEncode(sig)}`;
 }
 
-export function verifySession(cookie: string): SessionPayload | null {
+/** The payload of a cookie whose SIGNATURE verifies (no lifetime checks), or null. */
+function decodeSignedSession(cookie: string): Partial<SessionPayload> | null {
   const dot = cookie.indexOf('.');
   if (dot <= 0 || dot === cookie.length - 1) return null;
   const payloadB64 = cookie.slice(0, dot);
@@ -141,25 +227,40 @@ export function verifySession(cookie: string): SessionPayload | null {
   try { provided = base64urlDecode(sigB64); } catch { return null; }
   if (expected.length !== provided.length) return null;
   if (!timingSafeEqual(expected, provided)) return null;
-  let payload: SessionPayload;
-  try { payload = JSON.parse(base64urlDecode(payloadB64).toString('utf8')) as SessionPayload; }
+  try { return JSON.parse(base64urlDecode(payloadB64).toString('utf8')) as Partial<SessionPayload>; }
   catch { return null; }
+}
+
+export function verifySession(cookie: string): SessionPayload | null {
+  const payload = decodeSignedSession(cookie);
+  if (!payload) return null;
   const now = Math.floor(Date.now() / 1000);
   if (typeof payload.exp !== 'number' || payload.exp < now) return null;
   if (typeof payload.tenantId !== 'string' || typeof payload.sid !== 'string') return null;
-  return payload;
+  // ADR 0833 D3 — the absolute lifetime. Minted cookies already cap `exp`; this
+  // also retires older ones when an operator lowers the cap.
+  if (typeof payload.authAt === 'number' && now > payload.authAt + sessionAbsoluteMaxSeconds()) return null;
+  return payload as SessionPayload;
+}
+
+/**
+ * ADR 0833 D3 — true when `cookie` is a GENUINE (signature-verified) user-tier
+ * session that has ended: past its `exp`, or past `authAt` + the absolute
+ * lifetime. The middleware answers it with `401 … reason: session_expired`
+ * instead of minting an anonymous session over a signed-in user. An anon or
+ * forged cookie is never "ended" — it is simply not a session.
+ */
+export function endedUserSession(cookie: string): boolean {
+  const payload = decodeSignedSession(cookie);
+  if (!payload || payload.tier !== 'user') return false;
+  const now = Math.floor(Date.now() / 1000);
+  if (typeof payload.exp === 'number' && payload.exp < now) return true;
+  return typeof payload.authAt === 'number' && now > payload.authAt + sessionAbsoluteMaxSeconds();
 }
 
 export function mintAnonSession(): SessionPayload {
   const sid = base64urlEncode(randomBytes(18));
-  const now = Math.floor(Date.now() / 1000);
-  return {
-    sid,
-    tenantId: `anon:${sid}`,
-    tier: 'anon',
-    iat: now,
-    exp: now + COOKIE_TTL_SECONDS,
-  };
+  return buildSessionPayload({ sid, tenantId: `anon:${sid}`, tier: 'anon' });
 }
 
 /**
@@ -170,22 +271,25 @@ export function mintAnonSession(): SessionPayload {
  */
 export function issueUserSession(
   res: Response,
-  opts: { userId: string; tenantId: string; personalTenant?: string; subject?: string; mfa?: boolean; epoch: number },
+  opts: UserSessionOpts,
 ): void {
   setSessionCookie(res, mintUserSessionCookieValue(opts));
 }
+
+/** What a user-session mint needs. `source` / `freshAuth` are ADR 0833 D2: a
+ *  login passes `freshAuth`, a re-mint (workspace switch) passes the verified
+ *  cookie it replaces as `source` — never both, never neither by accident. */
+export type UserSessionOpts = {
+  userId: string; tenantId: string; personalTenant?: string; subject?: string; mfa?: boolean; epoch: number;
+} & ({ freshAuth: true; source?: undefined } | { source: SessionPayload | undefined; freshAuth?: undefined });
 
 /**
  * The signed user-session cookie VALUE — the one payload builder every user
  * session is minted through (`issueUserSession` sets it on a response; the
  * RFC 0170 mint seam returns it as a cookie-presented credential).
  */
-export function mintUserSessionCookieValue(
-  opts: { userId: string; tenantId: string; personalTenant?: string; subject?: string; mfa?: boolean; epoch: number },
-): string {
-  const now = Math.floor(Date.now() / 1000);
-  const session: SessionPayload = {
-    sid: base64urlEncode(randomBytes(18)),
+export function mintUserSessionCookieValue(opts: UserSessionOpts): string {
+  const session = buildSessionPayload({
     tenantId: opts.tenantId,
     tier: 'user',
     userId: opts.userId,
@@ -204,9 +308,7 @@ export function mintUserSessionCookieValue(
     // The caller's intrinsic tenant — defaults to the active tenant at login
     // (their personal workspace), preserved verbatim across a later switch.
     personalTenant: opts.personalTenant ?? opts.tenantId,
-    iat: now,
-    exp: now + COOKIE_TTL_SECONDS,
-  };
+  }, opts.freshAuth ? { freshAuth: true } : { source: opts.source ?? null });
   return signSession(session);
 }
 
@@ -221,7 +323,7 @@ export function mintUserSessionCookieValue(
  * treat it as the SAME cookie and actually drop it.
  */
 export function clearSessionCookie(res: Response): void {
-  const secure = process.env.NODE_ENV === 'production' || process.env.OPENWOP_COOKIE_SECURE === 'true';
+  const secure = sessionCookieIsCrossSite();
   const sameSite = secure ? 'None' : 'Lax';
   const parts = [`${COOKIE_NAME}=`, 'Path=/', 'Max-Age=0', 'HttpOnly', `SameSite=${sameSite}`];
   if (secure) parts.push('Secure');
@@ -249,8 +351,19 @@ export function readCookie(header: string | undefined, name: string): string | u
   return undefined;
 }
 
+/**
+ * ADR 0833 D4 — the ONE cookie-posture decision: `true` ⇒ the session cookie is
+ * `SameSite=None; Secure`, so SameSite gives no CSRF protection and the
+ * credentialed-origin check (`cors.ts credentialedOriginAllowed`) must. Read by
+ * the cookie writers below AND by that check, so the two cannot disagree again
+ * (the CSRF guard used to assume "no allowlist ⇒ dev ⇒ Lax").
+ */
+export function sessionCookieIsCrossSite(): boolean {
+  return process.env.NODE_ENV === 'production' || process.env.OPENWOP_COOKIE_SECURE === 'true';
+}
+
 export function setSessionCookie(res: Response, signed: string): void {
-  const secure = process.env.NODE_ENV === 'production' || process.env.OPENWOP_COOKIE_SECURE === 'true';
+  const secure = sessionCookieIsCrossSite();
   // SameSite MUST be `None` in production. The SPA streams run events via SSE
   // directly against the underlying Cloud Run URL (`*-run.app`) — a *cross-site*
   // request — because Firebase Hosting's `/api/**` → Cloud Run rewrite BUFFERS

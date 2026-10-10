@@ -33,7 +33,7 @@ async function api<T = unknown>(path: string, init: RequestInit = {}): Promise<{
 async function pollTerminal(runId: string): Promise<string> {
   for (let i = 0; i < 80; i++) {
     await new Promise((r) => setTimeout(r, 20));
-    const s = (await api<{ status: string }>(`/v1/runs/${runId}`)).body.status;
+    const s = (await api<{ status: string }>(`/runs/${runId}`)).body.status;
     if (['completed', 'failed', 'cancelled'].includes(s)) return s;
   }
   return 'pending';
@@ -42,28 +42,28 @@ async function pollTerminal(runId: string): Promise<string> {
 describe('core.conversationGate — replay-fork determinism', () => {
   it('a self-driving conversation forks (mode: replay) to a byte-equal conversation channel', async () => {
     const workflowId = 'openwop-app.conversation.replay-test';
-    await api('/v1/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({
+    await api('/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({
       workflowId,
       nodes: [{ nodeId: 'convo', typeId: 'core.conversationGate', config: { lifecycle: 'open-exchange-close', mockAutoResume: true, turnCount: 3 } }],
       edges: [],
     }) });
 
-    const create = await api<{ runId: string }>('/v1/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs: {}, tenantId: TENANT }) });
+    const create = await api<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs: {}, tenantId: TENANT }) });
     expect(create.status).toBe(201);
     const sourceRunId = create.body.runId;
     expect(await pollTerminal(sourceRunId)).toBe('completed');
 
-    const sourceConv = (await api<{ channels?: Record<string, unknown> }>(`/v1/runs/${sourceRunId}`)).body.channels;
+    const sourceConv = (await api<{ channels?: Record<string, unknown> }>(`/runs/${sourceRunId}`)).body.channels;
     expect(sourceConv).toBeTruthy();
     // 3 turns → open + 3×(user+agent) + close = 8 channel messages.
     expect((sourceConv as { conversation?: unknown[] }).conversation).toHaveLength(8);
 
-    const fork = await api<{ runId: string }>(`/v1/runs/${sourceRunId}:fork`, { method: 'POST', body: JSON.stringify({ mode: 'replay' }) });
+    const fork = await api<{ runId: string }>(`/runs/${sourceRunId}:fork`, { method: 'POST', body: JSON.stringify({ mode: 'replay' }) });
     expect([200, 201]).toContain(fork.status);
     const forkedRunId = fork.body.runId;
     expect(await pollTerminal(forkedRunId)).toBe('completed');
 
-    const forkedConv = (await api<{ channels?: Record<string, unknown> }>(`/v1/runs/${forkedRunId}`)).body.channels;
+    const forkedConv = (await api<{ channels?: Record<string, unknown> }>(`/runs/${forkedRunId}`)).body.channels;
     // §G: the forked conversation channel is byte-equal to the source's.
     expect(JSON.stringify(forkedConv)).toBe(JSON.stringify(sourceConv));
   });

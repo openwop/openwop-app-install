@@ -7,14 +7,23 @@
  * glow so the canvas doubles as an execution view.
  */
 
+import { CATEGORY_LABEL_KEYS } from '../../palette/categoryLabels.js';
 import { Button } from '../../../ui/Button.js';
-import { memo, useState, type ReactNode } from 'react';
-import { Handle, Position, type NodeProps } from '@xyflow/react';
+import { memo, useEffect, useState, type ReactNode } from 'react';
+import { Handle, NodeToolbar, Position, type NodeProps } from '@xyflow/react';
 import { useTranslation } from 'react-i18next';
 import { catalogEntry } from '../../palette/catalogRegistry.js';
 import { formatUsd } from '../../../i18n/format.js';
 import { useBuilderStore, type NodeRunStatus } from '../../store/builderStore.js';
-import { CircleIcon, CheckIcon, XIcon, PauseIcon, AlertIcon, LinkIcon, PinIcon } from '../../../ui/icons/index.js';
+import { CircleIcon, CheckIcon, XIcon, PauseIcon, AlertIcon, LinkIcon, PinIcon, MessageCircleIcon } from '../../../ui/icons/index.js';
+import { usePairStore } from '../../pair/pairStore.js';
+import { QuickAsk } from '../../pair/QuickAsk.js';
+import { runFromNode } from '../../debugSession.js';
+import { toast } from '../../../ui/toast.js';
+import { GripVerticalIcon, WandIcon } from '../../../ui/icons/index.js';
+
+/** ADR 0773 G-02d — the native drag payload a node's cite handle carries. */
+export const NODE_CITE_MIME = 'application/openwop-node-id';
 
 /** §7.4 / CV-5 — the keyboard-connect affordance state BuilderCanvas feeds
  *  each node (the GraphSurface arm→target pattern, typed-port validated). */
@@ -47,6 +56,58 @@ interface NodeData extends Record<string, unknown> {
   peers?: { clientId: number; name: string; color: string }[];
   /** §7.4 / CV-5 keyboard-connect (absent for client-only nodes). */
   connect?: NodeConnectState;
+  /** ADR 0773 — numbered pending suggestion ops that touch this node. */
+  suggestMarks?: number[];
+  /** ADR 0773 — a pending suggestion removes this node. */
+  suggestRemove?: boolean;
+  /** ADR 0773 D6 — near-selection pair actions (present only on the ONE
+   *  selected node while pairing is on). `runId` = its failed run → Diagnose. */
+  pairActions?: { runId?: string | undefined };
+  /** ADR 0773 G-02d — pairing is on, so the node offers a cite handle. */
+  pairCitable?: boolean;
+}
+
+/** ADR 0773 D6 — Ask / Explain / Diagnose, docked above the selected node
+ *  (the §7.1.2 near-selection toolbar, the only chrome that floats on the sheet). */
+function PairNodeToolbar({ nodeId, name, runId }: { nodeId: string; name: string; runId?: string | undefined }): JSX.Element {
+  const { t } = useTranslation('builder');
+  const [asking, setAsking] = useState(false);
+  const ask = usePairStore((s) => s.ask);
+  // P11 — ⌘. with this node selected opens the prompt here, at the node.
+  const inlineAskFor = usePairStore((s) => s.inlineAskFor);
+  useEffect(() => {
+    if (inlineAskFor !== nodeId) return;
+    setAsking(true);
+    usePairStore.getState().requestInlineAsk(null);
+  }, [inlineAskFor, nodeId]);
+  const run = (mode: 'from-here' | 'only'): void => {
+    void runFromNode(nodeId, mode).catch((err: unknown) => toast.error(err instanceof Error ? err.message : String(err)));
+  };
+  return (
+    <NodeToolbar isVisible position={Position.Top} className="pair-node-toolbar">
+      {asking ? (
+        <QuickAsk autoFocus inline onDone={() => setAsking(false)} />
+      ) : (
+        <div role="group" aria-label={t('pairNodeToolbarAria', { name })} className="pair-node-toolbar__row">
+          <Button size="sm" variant="accent" onClick={() => setAsking(true)}>
+            <MessageCircleIcon size={12} aria-hidden /> {t('pairAsk')}
+          </Button>
+          <Button size="sm" variant="quiet" onClick={() => ask(t('pairExplainPrompt', { name }), { inline: true })}>{t('pairExplain')}</Button>
+          {runId ? (
+            <>
+              <Button size="sm" variant="quiet" onClick={() => ask(t('pairDiagnosePrompt', { name }), { runId, nodeId })}>{t('pairDiagnose')}</Button>
+              {/* G-04c — the existing debug-lane handlers, not a second run path. */}
+              <Button size="sm" variant="quiet" onClick={() => run('only')}>{t('pairRetryStep')}</Button>
+              <Button size="sm" variant="quiet" onClick={() => usePairStore.getState().requestDebug(runId)}>{t('pairDebugSession')}</Button>
+            </>
+          ) : (
+            // G-01b — "Run from here", the Inspector's NodeDebugSection handler.
+            <Button size="sm" variant="quiet" onClick={() => run('from-here')}>{t('debugRunFromHere')}</Button>
+          )}
+        </div>
+      )}
+    </NodeToolbar>
+  );
 }
 
 // Status → accent color + glyph for the live-execution overlay badge.
@@ -65,6 +126,8 @@ function BaseNodeImpl({ id, data, selected }: NodeProps) {
   if (!entry) {
     return <div className="builder-node builder-node-unknown">{t('unknownNodePrefix', { kind: d.kind })}</div>;
   }
+  // NPV2-U-9 — see the handle render below.
+  const handlesInRows = entry.inputs.length > 1 || entry.outputs.length > 1;
   // Client-only nodes (sticky notes, future annotations) get a distinct
   // render: no ports, no run status (they never execute), no missing-
   // capability warnings (preflight skips them), and the prominent
@@ -87,7 +150,8 @@ function BaseNodeImpl({ id, data, selected }: NodeProps) {
     <div
       className={`builder-node${selected ? ' builder-node-selected' : ''}${
         d.runStatus ? ` builder-node-run-${d.runStatus}` : ''
-      }${showCapWarning ? ' builder-node-warn' : ''}`}
+      }${showCapWarning ? ' builder-node-warn' : ''}${d.suggestRemove ? ' builder-node--suggest-remove' : ''}${
+        d.suggestMarks && d.suggestMarks.length > 0 ? ' builder-node--suggested' : ''}`}
       style={{
         borderLeftColor: entry.accent,
         ...(runMeta
@@ -137,6 +201,38 @@ function BaseNodeImpl({ id, data, selected }: NodeProps) {
           <PinIcon size={12} />
         </span>
       )}
+      {d.pairActions ? <PairNodeToolbar nodeId={id} name={d.name} runId={d.pairActions.runId} /> : null}
+      {/* G-04d — a suggested fix on a FAILED node is flagged right beside it. */}
+      {d.runStatus === 'failed' && d.suggestMarks && d.suggestMarks.length > 0 ? (
+        <span className="builder-node-fix-chip">
+          <WandIcon size={11} aria-hidden /> {t('pairFixReady', { count: d.suggestMarks.length })}
+        </span>
+      ) : null}
+      {/* G-02d — a cite handle: native DnD (the node itself drags with xyflow's
+          pointer gesture; `nodrag` keeps them apart). Drop it on the Pair panel. */}
+      {d.pairCitable ? (
+        <Button
+          variant="quiet"
+          size="sm"
+          className="builder-node-cite nodrag"
+          draggable
+          aria-label={t('pairCiteHandleAria', { name: d.name })}
+          title={t('pairCiteHandleTitle')}
+          onDragStart={(e) => { e.dataTransfer.setData(NODE_CITE_MIME, id); e.dataTransfer.effectAllowed = 'copy'; }}
+          onClick={() => usePairStore.getState().cite(id)}
+        >
+          <GripVerticalIcon size={12} aria-hidden />
+        </Button>
+      ) : null}
+      {d.suggestMarks && d.suggestMarks.length > 0 ? (
+        <span
+          className="builder-node-suggest-badge"
+          role="img"
+          aria-label={t('pairNodeMarksAria', { list: d.suggestMarks.map((m) => m + 1).join(', ') })}
+        >
+          {d.suggestMarks.map((m) => m + 1).join('·')}
+        </span>
+      ) : null}
       {/* ADR 0481 D5 — live-session peer markers: quiet identity dots beside
           the pin corner (deliberately NOT a fifth corner badge). */}
       {d.peers && d.peers.length > 0 && (
@@ -175,28 +271,25 @@ function BaseNodeImpl({ id, data, selected }: NodeProps) {
           {runMeta.glyph}
         </span>
       )}
-      {entry.inputs.map((p, i, arr) => (
-        <Handle
-          key={`in-${p.name}`}
-          id={p.name}
-          type="target"
-          position={Position.Left}
-          style={{ top: handleTop(i, arr.length), background: entry.accent }}
-        />
+      {/* NPV2-U-9 — a node with at most one port per side keeps its handles
+          centred on the node. As soon as EITHER side has several, EVERY handle
+          renders inside its own label row (below), so no handle sits beside
+          another port's label — including the lone port on a mixed node. That matters
+          beyond looks: a handle's id is its input field, and an edge dropped on
+          it routes data into that field. */}
+      {!handlesInRows && entry.inputs.map((p) => (
+        <Handle key={`in-${p.name}`} id={p.name} type="target" position={Position.Left} style={{ top: '50%', background: entry.accent }} />
       ))}
-      {entry.outputs.map((p, i, arr) => (
-        <Handle
-          key={`out-${p.name}`}
-          id={p.name}
-          type="source"
-          position={Position.Right}
-          style={{ top: handleTop(i, arr.length), background: entry.accent }}
-        />
+      {!handlesInRows && entry.outputs.map((p) => (
+        <Handle key={`out-${p.name}`} id={p.name} type="source" position={Position.Right} style={{ top: '50%', background: entry.accent }} />
       ))}
       <div className="builder-node-header">
-        <span className="builder-node-badge" style={{ background: entry.accent }}>
+        {/* grade-ux U-5 — the letter + fill are decorative; the category is
+            otherwise conveyed by colour alone, so name it for screen readers. */}
+        <span className="builder-node-badge" style={{ background: entry.accent }} aria-hidden="true">
           {entry.badge}
         </span>
+        <span className="sr-only">{t(CATEGORY_LABEL_KEYS[entry.category])}</span>
         <EditableTitle nodeId={id} name={d.name} />
         {/* §7.4 / CV-5 — keyboard-connect: the selected node arms a source;
             armed, every type-compatible node offers a validated target. */}
@@ -225,6 +318,9 @@ function BaseNodeImpl({ id, data, selected }: NodeProps) {
         <div className="builder-node-ports-col">
           {entry.inputs.map((p) => (
             <div key={p.name} className="builder-node-port">
+              {handlesInRows && (
+                <Handle id={p.name} type="target" position={Position.Left} style={{ background: entry.accent }} />
+              )}
               <span className="builder-node-port-label">{p.name}</span>
             </div>
           ))}
@@ -232,6 +328,9 @@ function BaseNodeImpl({ id, data, selected }: NodeProps) {
         <div className="builder-node-ports-col builder-node-ports-col-right">
           {entry.outputs.map((p) => (
             <div key={p.name} className="builder-node-port builder-node-port-right">
+              {handlesInRows && (
+                <Handle id={p.name} type="source" position={Position.Right} style={{ background: entry.accent }} />
+              )}
               <span className="builder-node-port-label">{p.name}</span>
             </div>
           ))}
@@ -316,15 +415,6 @@ function EditableTitle({ nodeId, name }: { nodeId: string; name: string }) {
       }}
     />
   );
-}
-
-// Single port → exactly on vertical center. Multi-port → evenly
-// spaced around vertical center (20px between adjacent handles).
-function handleTop(index: number, count: number): string {
-  if (count <= 1) return '50%';
-  const SPACING = 20;
-  const offsetPx = (index - (count - 1) / 2) * SPACING;
-  return `calc(50% + ${offsetPx}px)`;
 }
 
 export const BaseNode = memo(BaseNodeImpl);

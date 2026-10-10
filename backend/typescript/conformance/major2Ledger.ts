@@ -58,15 +58,12 @@ export const MAJOR2_UNDECLARED_FAMILIES = [
   // executed for the first time and FAILED. The ledger rows were right; their
   // stated reasons were not. That distinction is the whole lesson here — I read
   // a stale justification and concluded the DECISION was stale too.
-  'family.compensation',           // MEASURED 2026-09-13 via `v2-compensation-read-projection`:
-                                   // "a host advertising `compensation` MUST serve GET /runs/{runId}/compensation"
-                                   // (security-defaults.md §Compensation). This host does not serve that route.
-  'family.forms',                  // MEASURED via `v2-form-when-reuses-edge-conditions`: a field carrying
-                                   // `when: { type: "equals", left, right }` is not honoured
-                                   // (form-content-packs.md §"Conditional visibility", RFC 0177 §E.4).
-  'connections.packsSupported',    // MEASURED via `v2-provider-conflict`: "the later registration of a bare
-                                   // provider id MUST NOT install over the qualified form"
-                                   // (connection-packs.md §"Provider identity", RFC 0177 §D.1).
+  // (`family.compensation` REMOVED 2026-10-03, ADR 0807: `GET /runs/{runId}/compensation`
+  //  is served, so `v2-compensation-read-projection` can pass and the family is declared.)
+  // (`family.forms` REMOVED 2026-10-03, ADR 0808: a field's `when` is validated, stored,
+  //  evaluated at submit and honoured by the public renderer.)
+  // (`connections.packsSupported` REMOVED 2026-10-03, ADR 0809: a v2-only pack's bare provider id
+  //  is unique per host (the later registration is refused) and `<packName>#<id>` resolves.)
   'family.sandbox',                // sandbox.isolationModel — the pack sandbox names no v2 isolation model. STILL TRUE:
                                    // measured 2026-09-13, `sandbox` is absent from this host's v1 document too, so
                                    // there is no behaviour to declare. This one is an honest opt-out, not a stale row.

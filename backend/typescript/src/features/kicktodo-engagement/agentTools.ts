@@ -31,6 +31,7 @@ function toolError(error: string, message: string): ToolResult {
 export function registerKicktodoEngagementAgentTools(): void {
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: KICKTODO_ENGAGEMENT_SUMMARY_TOOL_ID,
       description:

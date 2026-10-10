@@ -20,7 +20,7 @@ vi.mock('../../../client/kicktodoStudioClient.js', () => ({
   getPublication: vi.fn(() => Promise.resolve(null)),
   getNeedsYou: vi.fn(() => Promise.resolve([])),
   getChallengeAuthor: vi.fn(() => Promise.resolve({
-    agentId: 'feature.kicktodo.agents.challenge-author',
+    agentId: 'vendor.openwop-app.kicktodo.agents.challenge-author',
     rosterId: 'host:challenge-author',
     label: 'Challenge Author',
     workflows: [{ workflowId: 'openwop-app.kicktodo.challenge-factory', available: true, nodeCount: 9 }],
@@ -47,10 +47,10 @@ describe('StudioPage', () => {
   it('embeds the ONE chat scoped to the Challenge Author, keeps the full-chat link, and no bespoke create form', async () => {
     render(<MemoryRouter><StudioPage /></MemoryRouter>);
     const embed = await waitFor(() => screen.getByTestId('embedded-chat'));
-    expect(embed.getAttribute('data-agent-id')).toBe('feature.kicktodo.agents.challenge-author');
+    expect(embed.getAttribute('data-agent-id')).toBe('vendor.openwop-app.kicktodo.agents.challenge-author');
     // The escape hatch: the full-chat deep-link survives with the same target.
     const link = screen.getByRole('link', { name: 'Open in full chat' });
-    expect(link.getAttribute('href')).toBe('/?agent=feature.kicktodo.agents.challenge-author');
+    expect(link.getAttribute('href')).toBe('/?agent=vendor.openwop-app.kicktodo.agents.challenge-author');
     // The demolished form must stay demolished: no intake text inputs, no
     // form-submit button. (The welcome's example-intent CARDS may say
     // "Create a…" — they seed the composer, they are not a form.)

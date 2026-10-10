@@ -30,14 +30,14 @@ beforeAll(async () => {
 afterAll(async () => { await closeApp(); });
 
 const client = (): Client => makeClient(() => BASE);
-const S = '/v1/host/openwop-app/strategy';
+const S = '/host/openwop-app/strategy';
 
 async function login(): Promise<{ c: Client; orgId: string; tenantId: string; userId: string }> {
   const tenantId = `org:str2-${Date.now()}-${n++}`;
   const c = client();
-  const res = await c.post('/v1/host/openwop-app/test/login', { email: `s2-${Date.now()}-${n++}@acme.test`, tenantId });
+  const res = await c.post('/host/openwop-app/test/login', { email: `s2-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(res.status).toBe(201);
-  const orgId = (await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
+  const orgId = (await c.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
   return { c, orgId, tenantId, userId: res.body.user.userId };
 }
 
@@ -130,7 +130,7 @@ describe('STR2-M3/M4 — an activation card must not outlive, or misreport, its 
     // handler returned changed:true — and the strategy stayed archived. The inbox said
     // Approved and the strategy disagreed, with nobody told.
     expect((await c.patch(`${S}/${s.id}`, { status: 'archived' })).status).toBe(200);
-    const decide = await c.post(`/v1/host/openwop-app/reviews/approval:${approvalId}/actions/approve`);
+    const decide = await c.post(`/host/openwop-app/reviews/approval:${approvalId}/actions/approve`);
     expect(decide.status).toBe(409);
     expect((await c.get(`${S}/${s.id}`)).body.status).toBe('archived');
     // …and the card is back to pending, so it can still be rejected deliberately.
@@ -142,7 +142,7 @@ describe('STR2-M3/M4 — an activation card must not outlive, or misreport, its 
     const { c, orgId, tenantId } = await login();
     const s = await mkStrategy(c, orgId);
     const approvalId = await queueActivation(c, tenantId, s.id);
-    expect((await c.post(`/v1/host/openwop-app/reviews/approval:${approvalId}/actions/approve`)).status).toBe(200);
+    expect((await c.post(`/host/openwop-app/reviews/approval:${approvalId}/actions/approve`)).status).toBe(200);
     expect((await c.get(`${S}/${s.id}`)).body.status).toBe('active');
     await enableToggle('strategy-approval-gate', 'off');
   });
@@ -179,9 +179,9 @@ describe('review fold-in — the four findings that shipped untested, and two th
     const { c, orgId } = await login();
     const initiatives = Array.from({ length: 50 }, (_, i) => ({ title: `Existing ${i}` }));
     const s = await mkStrategy(c, orgId, { initiatives });
-    const listId = (await c.post('/v1/host/openwop-app/priority-matrix/lists', { orgId, name: 'Ideas', presetId: 'weighted' })).body.id;
-    await c.post(`/v1/host/openwop-app/priority-matrix/lists/${listId}/ideas`, { title: 'Rebuild onboarding' });
-    const card = (await c.get(`/v1/host/openwop-app/priority-matrix/lists/${listId}/ideas`)).body.ideas[0].card;
+    const listId = (await c.post('/host/openwop-app/priority-matrix/lists', { orgId, name: 'Ideas', presetId: 'weighted' })).body.id;
+    await c.post(`/host/openwop-app/priority-matrix/lists/${listId}/ideas`, { title: 'Rebuild onboarding' });
+    const card = (await c.get(`/host/openwop-app/priority-matrix/lists/${listId}/ideas`)).body.ideas[0].card;
     // `parseInitiatives` slices the append away, and the code took `initiatives[length-1]`
     // — a pre-existing, unrelated initiative — stamped its id onto the idea's intake
     // overlay, moved the card to the terminal `done` lane, and returned 201 naming it.
@@ -194,16 +194,16 @@ describe('review fold-in — the four findings that shipped untested, and two th
     // actionable either.
     expect(res.body.details?.max).toBe(50);
     // …and the idea is untouched: still promotable once the operator makes room.
-    const after = (await c.get(`/v1/host/openwop-app/priority-matrix/lists/${listId}/ideas`)).body.ideas[0];
+    const after = (await c.get(`/host/openwop-app/priority-matrix/lists/${listId}/ideas`)).body.ideas[0];
     expect(after.card.status).not.toBe('done');
   });
 
   it('B5: below the cap it promotes, and names the initiative it MINTED', async () => {
     const { c, orgId } = await login();
     const s = await mkStrategy(c, orgId, { initiatives: [{ title: 'Existing' }] });
-    const listId = (await c.post('/v1/host/openwop-app/priority-matrix/lists', { orgId, name: 'Ideas', presetId: 'weighted' })).body.id;
-    await c.post(`/v1/host/openwop-app/priority-matrix/lists/${listId}/ideas`, { title: 'Rebuild onboarding' });
-    const card = (await c.get(`/v1/host/openwop-app/priority-matrix/lists/${listId}/ideas`)).body.ideas[0].card;
+    const listId = (await c.post('/host/openwop-app/priority-matrix/lists', { orgId, name: 'Ideas', presetId: 'weighted' })).body.id;
+    await c.post(`/host/openwop-app/priority-matrix/lists/${listId}/ideas`, { title: 'Rebuild onboarding' });
+    const card = (await c.get(`/host/openwop-app/priority-matrix/lists/${listId}/ideas`)).body.ideas[0].card;
     const res = await c.post(`${S}/${s.id}/initiatives/from-idea`, { listId, cardId: card.id });
     expect(res.status, JSON.stringify(res.body)).toBe(201);
     const minted = res.body.strategy.initiatives.find((i: any) => i.title === 'Rebuild onboarding');
@@ -229,7 +229,7 @@ describe('review fold-in — the four findings that shipped untested, and two th
     // flipped the row to `approved` — a no-op, since resolveApproval early-returns unless
     // the row is pending. So the reviewer got a 404 while the card was consumed as
     // APPROVED, with a governance audit entry saying so for a strategy that is gone.
-    const decide = await c.post(`/v1/host/openwop-app/reviews/approval:${card.approvalId}/actions/approve`);
+    const decide = await c.post(`/host/openwop-app/reviews/approval:${card.approvalId}/actions/approve`);
     expect(decide.status).toBe(409);
     const { getApproval } = await import('../src/host/approvalService.js');
     const closed = await getApproval(card.approvalId);
@@ -270,6 +270,10 @@ describe('review fold-in — the four findings that shipped untested, and two th
     });
     // `syncSourcedKrs` only walks ACTIVE, non-user-scope strategies.
     await enableToggle('strategy-approval-gate', 'off');
+    // ADR 0820 §7 / G11 — a commerce-revenue source reads commerce data, so the
+    // sync now skips it when `commerce` (default OFF) is off for the tenant. This
+    // case is about the no-orders skip, so the source feature must be on.
+    await enableToggle('commerce', 'on');
     expect((await c.patch(`${S}/${s.id}`, { status: 'active' })).status).toBe(200);
     const { syncSourcedKrs } = await import('../src/features/strategy/metricSync.js');
     // Zero is the one value indistinguishable from a correct measurement: it reads as 0%

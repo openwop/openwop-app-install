@@ -1,9 +1,11 @@
 /**
  * ADR 0617 D2 — `ctx.features.users.{deactivate,reactivate}` authority, per
  * LANE (the `comments-surface-authz.test.ts` shape: no lane is assumed
- * unreachable), over the REAL app (`createApp` registers the ADR 0621 session
- * authority + the surface) with the host-event dispatcher re-pointed at FAKE
- * fanout deps so every emit is observable.
+ * unreachable). The claim is the SURFACE's decision, so this runs at the
+ * service layer: a memory storage + host-ext persistence, the users feature's
+ * REAL ADR 0621 session authority registered exactly as `feature.ts` does, and
+ * the host-event dispatcher pointed at FAKE fanout deps so every emit is
+ * observable. No `createApp` boot — no case here makes an HTTP call.
  *
  *   SYSTEM-RUN lane      → 403 `forbidden_scope` with a NAMED exit (no acting user);
  *   NON-MANAGER lane     → 403 (a seated editor without `host:members:manage`);
@@ -20,13 +22,24 @@
  *                          owner — the ONLY shape that short-circuits membership).
  *
  * Plus the pack body's `userId` precedence (inputs → triggerData.payload →
- * config) and its typed refusal on an empty id.
+ * config), the `host.users.user.*` eventName gate (review SHOULD-2) and its
+ * typed refusals.
+ *
+ * Sabotage that turns it red (`src/features/users/surface.ts` unless noted):
+ * `if (!actingUserId) {` → `if (false) {`; the `assertTenantScope(` call
+ * removed; `if (!live || live.status !== 'active')` → `if (!live)`; the
+ * disabled/erased reason swapped; the self-lockout `if` disabled; the IDOR
+ * tenant compare dropped; the `assertMayActOnUser(` call removed; the
+ * `workflowId` / `chainId` origin spreads removed; `reactivate` mapped to
+ * `'disabled'`; the actor-derived `personalTenant` forced `undefined`;
+ * `packs/feature.users.nodes/index.mjs` eventName-prefix gate removed.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import http from 'node:http';
-import type { Express } from 'express';
-import { createApp } from '../src/index.js';
+import { openStorage } from '../src/storage/index.js';
 import type { Storage } from '../src/storage/storage.js';
+import { initHostExtPersistence, __resetHostExtPersistence } from '../src/host/hostExtPersistence.js';
+import { registerSessionAuthority } from '../src/host/sessionAuthority.js';
+import { usersSessionAuthority } from '../src/features/users/feature.js';
 import type { StartRunDeps } from '../src/host/runStarter.js';
 import type { WorkflowDefinition } from '../src/executor/types.js';
 import { createWorkspace, createMember } from '../src/host/accessControlService.js';
@@ -44,8 +57,6 @@ const usersPack = await import(
   /* @vite-ignore */ new URL('../../../packs/feature.users.nodes/index.mjs', import.meta.url).href
 ) as { nodes: Record<string, (ctx: unknown) => Promise<{ status: string; outputs: Record<string, unknown> }>> };
 
-let server: http.Server;
-let app: Express;
 let storage: Storage;
 let WS = '';
 let OTHER = '';
@@ -57,7 +68,11 @@ let foreign: User;
 const catalogDefs = new Map<string, WorkflowDefinition>();
 let delivered: HostEventEnvelope[];
 let startRunCalls: Array<{ tenantId: string; workflowId: string; metadata?: Record<string, unknown> }>;
-const settle = () => new Promise((r) => setTimeout(r, 15));
+/** Settle the fire-and-forget binding loop: a few macrotask turns drain every
+ *  pending microtask (memory storage — no timers or I/O in the pipeline).
+ *  `delivered` itself needs no wait: `emitHostEvent` calls `deliverWebhooks`
+ *  in its first synchronous segment. */
+const settle = async (): Promise<void> => { for (let i = 0; i < 5; i++) await new Promise<void>((r) => setImmediate(r)); };
 const DEACTIVATED = 'host.users.user.deactivated';
 const REACTIVATED = 'host.users.user.reactivated';
 const ofType = (t: string) => delivered.filter((e) => e.type === t);
@@ -68,12 +83,11 @@ async function refuse(p: Promise<unknown>): Promise<OpenwopError> {
 }
 
 beforeAll(async () => {
-  process.env.OPENWOP_STORAGE_DSN = 'memory://';
-  process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
   delete process.env.OPENWOP_DEMO_MODE;
-  app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  storage = app.locals.storage as Storage;
-  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => res()); });
+  storage = await openStorage('memory://');
+  initHostExtPersistence(storage);
+  // The authority the surface's step 2 consults — the users feature's real read.
+  registerSessionAuthority(usersSessionAuthority);
 
   const ws = await createWorkspace({ name: 'ADR 0617 workspace', ownerSubject: 'oidc:u617-founder' });
   WS = ws.orgId ?? ws.tenantId;
@@ -86,11 +100,12 @@ beforeAll(async () => {
   await createMember({ orgId: WS, tenantId: WS, displayName: 'Admin', subject: admin.userId, roles: ['admin'] });
   await createMember({ orgId: WS, tenantId: WS, displayName: 'Editor', subject: editor.userId, roles: ['editor'] });
 });
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
+afterAll(async () => { await storage.close(); __resetHostExtPersistence(); });
 
 beforeEach(async () => {
   delivered = [];
   startRunCalls = [];
+  catalogDefs.clear();
   await __clearHostEventBindings();
   const hostSuite: StartRunDeps['hostSuite'] = {
     workflowCatalog: { getWorkflow: async (id) => ({ workflowId: id, definition: catalogDefs.get(id) ?? { workflowId: id, nodes: [] } }) },
@@ -181,6 +196,19 @@ describe('SELF + IDOR lanes', () => {
   });
 });
 
+describe('ADR 0833 D6 (`UAUWF-8`) — the OWNER rank', () => {
+  // RED on 97baad74b: `deactivate` checked `host:members:manage` and
+  // self-lockout only, so a run whose acting user was an ADMIN disabled an owner.
+  it('an ADMIN-acted run cannot deactivate an OWNER → 403 owner_required; the owner stays active', async () => {
+    const owner = await createUser({ tenantId: WS, principalId: 'oidc:u832-owner', source: 'oidc' }, { silent: true });
+    await createMember({ orgId: WS, tenantId: WS, displayName: 'Owner', subject: owner.userId, roles: ['owner'] });
+    const err = await refuse(asUser(admin.userId).deactivate({ userId: owner.userId }));
+    expect(err.httpStatus).toBe(403);
+    expect(err.details).toMatchObject({ code: 'owner_required' });
+    expect((await getUser(owner.userId))?.status).toBe('active');
+  });
+});
+
 describe('MANAGER lane — success, ONE event with reason:workflow + origin, self-trigger guard, transition guard', () => {
   it('deactivate: status → disabled, epoch bumped, exactly one deactivated event; the executing workflow is NOT restarted, another bound workflow IS', async () => {
     const t = await target();
@@ -221,7 +249,6 @@ describe('MANAGER lane — success, ONE event with reason:workflow + origin, sel
     await settle();
     expect(ofType(DEACTIVATED)).toHaveLength(1);
     expect(startRunCalls.map((c) => c.workflowId)).toEqual(['wf:security-audit']);
-    catalogDefs.clear();
   });
 
   it('reactivate: status → active, exactly one reactivated event with reason:workflow; a repeat is silent', async () => {
@@ -242,11 +269,13 @@ describe('MANAGER lane — success, ONE event with reason:workflow + origin, sel
     const owner = await createUser({ tenantId: home, principalId: 'oidc:u617-owner', source: 'oidc' }, { silent: true });
     const t = await target(home);
     const out = await asUser(owner.userId, home).deactivate({ userId: t.userId });
-    expect(out.status).toBe('disabled');
-    // …but a user whose home tenant is NOT personal-shaped gets no such short-circuit
-    // in a tenant they are not seated in (the USERS-19 rule applied to the run lane).
-    const err = await refuse(asUser(foreign.userId, OTHER).deactivate({ userId: (await target(OTHER)).userId }));
-    expect(err.httpStatus).toBe(403);
+    expect(out).toEqual({ userId: t.userId, status: 'disabled' });
+    expect((await getUser(t.userId))!.status).toBe('disabled');
+    // (A former negative half — a non-personal-home user refused in an unseated
+    // tenant — was cut: it is a plain non-member refusal by `assertTenantScope`,
+    // red under the same break as the EDITOR lane above, and it did NOT go red
+    // when this surface's `isPersonalTenantId` shape check was broken, because
+    // `assertTenantScope` re-checks the shape itself.)
   });
 });
 

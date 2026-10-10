@@ -3,6 +3,9 @@
  * copy. Pure classifier witness: strict ⇒ refuse (loud), non-strict ⇒ skip, otherwise
  * install. Measured 2026-09-11: `core.openwop.integration` 1.1.2 vendored / 1.1.0 pinned
  * live — the WF-EM-6 fix was rmSync'd off the symlink and the pin written every boot.
+ *
+ * Sabotage witnesses (wave 10): `<= 0` → `< 0` reds the equal leg; strict → skip
+ * reds NEWER; comparing only major.minor reds NEWER; null-onDisk → skip reds the first.
  */
 import { describe, expect, it } from 'vitest';
 import { classifyRegistryInstall } from '../src/bootstrap/installRegistryPacks.js';

@@ -8,6 +8,8 @@ import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
 import { checkCodeExecBudget, recordCodeExec } from '../src/host/codeExecBudget.js';
 import { createSandboxRunner } from '../src/host/sandboxAdapter.js';
+import { registerToggleDefault } from '../src/host/featureToggles/registry.js';
+import { codeExecFeature } from '../src/features/code-exec/feature.js';
 
 let server: http.Server;
 let PORT = 0;
@@ -15,6 +17,7 @@ const DAY = '2026-06-24';
 
 beforeAll(async () => {
   initHostExtPersistence(await openStorage('memory://'));
+  registerToggleDefault(codeExecFeature.toggleDefault!); // ADR 0820 §8.2 — the runner's access gate reads it
   server = http.createServer((_req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ exitCode: 0, stdout: 'ok', stderr: '', files: [] })); });
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => { PORT = (server.address() as AddressInfo).port; r(); }));
 });

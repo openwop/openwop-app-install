@@ -31,6 +31,7 @@ import { deleteRegisteredWorkflow } from './workflowsRegistry.js';
 import { purgeTenantVectors } from './vector/vectorTenantPurge.js';
 import { clearTenantSecretCache } from '../byok/secretResolver.js';
 import { __runKvAgeOutOnce } from './kvAgeOut.js';
+import { reconcileTenantIndexesOnce } from './tenantIndexAdoption.js';
 import { eraseTenantOwnedUsage } from '../providers/managedProvider.js';
 import { getRetentionHold } from './retentionHold.js';
 
@@ -473,6 +474,11 @@ export function startRetentionSweepDaemon(deps: RetentionSweepDeps): RetentionSw
       // ADR 0380 §3 — registered append-only kv stores (fail-open per store inside).
       await __runKvAgeOutOnce(deps.storage).catch((err) =>
         log.warn('kv age-out tick error', { error: err instanceof Error ? err.message : String(err) }));
+      // ADR 0866 — deploy-safe tenant-index adoption (fail-open per collection inside).
+      // Default ON: it only ever ADDS index markers, and reads trust an index only
+      // once a pass here has verified it.
+      await reconcileTenantIndexesOnce(deps.storage).catch((err) =>
+        log.warn('tenant index adoption tick error', { error: err instanceof Error ? err.message : String(err) }));
       if (process.env.OPENWOP_RETENTION_SWEEP_ENABLED !== 'true') return;
       await processRetentionSweep(deps);
       const pruneBefore = new Date(Date.now() - CLAIM_PRUNE_AGE_MS).toISOString();

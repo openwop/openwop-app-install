@@ -13,6 +13,7 @@ import http from 'node:http';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createApp } from '../src/index.js';
+import { toWireRunId } from '../src/host/v2Ids.js';
 import { loadAgentsFromManifest } from '../src/packs/agentLoader.js';
 
 let BASE: string;
@@ -30,7 +31,7 @@ beforeAll(async () => {
   process.env.OPENWOP_A2A_DURABLE_TASKS = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   loadAgentsFromManifest(join(REPO_ROOT, 'packs', 'core.openwop.agents.supervisor'));
-  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; A2A_URL = `${BASE}/v1/host/openwop-app/a2a`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; A2A_URL = `${BASE}/host/openwop-app/a2a`; res(); }); });
 });
 afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
@@ -42,20 +43,9 @@ const rpc = (method: string, params?: unknown, id: string | number = 1) =>
   fetch(A2A_URL, { method: 'POST', headers: H, body: JSON.stringify({ jsonrpc: '2.0', id, method, params }) });
 
 describe('ADR 0035 / RFC 0100 — durable A2A server over HTTP', () => {
-  it('advertises the a2a slot with durableTasks/push = true, streaming = false (wired)', async () => {
-    const doc = await (await fetch(`${BASE}/.well-known/openwop`, { headers: H })).json() as {
-      capabilities?: { a2a?: { supported?: boolean; agentCardUrl?: string; streaming?: boolean; pushNotifications?: boolean; durableTasks?: boolean } };
-    };
-    const a2a = doc.capabilities?.a2a;
-    expect(a2a?.supported).toBe(true);
-    expect(a2a?.durableTasks).toBe(true);
-    expect(a2a?.pushNotifications).toBe(true);
-    // `streaming` is decoupled from `durableTasks` onto OPENWOP_A2A_STREAMING
-    // (default off) → advertised `false`: conformance 1.34.0 ships no
-    // `tasks/resubscribe` gated subtest, so `streaming:true` would be vacuous.
-    expect(a2a?.streaming).toBe(false);
-    expect(a2a?.agentCardUrl).toMatch(/\/\.well-known\/agent-card\.json$/);
-  });
+  // ADR 0812 P3c-0: the "advertises the a2a slot (durableTasks/push/streaming/
+  // agentCardUrl)" leg was deleted — it read the v1 discovery document's
+  // `capabilities.a2a` facet; the v2 document carries no `a2a` family record.
 
   it('GET /.well-known/agent-card.json serves the public 0.3 AgentCard header-less while a2a-0.3-legacy is advertised (no credential)', async () => {
     // The agentCardUrl honesty bar: a plain GET — no Authorization header —
@@ -102,21 +92,23 @@ describe('ADR 0035 / RFC 0100 — durable A2A server over HTTP', () => {
     expect(Array.isArray(card.skills)).toBe(true);
   });
 
-  it('mounts the durable seams at the spec-canonical /v1/host/sample/a2a alias', async () => {
+  it('mounts the durable seams at the spec-canonical /host/sample/a2a alias', async () => {
     // The 1.34.0 conformance driver hits the literal `sample` namespace; the
     // same handler is mounted there too (mirrors the RFC 0106 transcriber alias).
-    const start = await fetch(`${BASE}/v1/host/sample/a2a/tasks/start`, {
+    const start = await fetch(`${BASE}/host/sample/a2a/tasks/start`, {
       method: 'POST', headers: H, body: JSON.stringify({ scenario: 'paused-at-approval' }),
     });
     expect(start.status).toBe(201);
     const { taskId } = await start.json() as { taskId?: string };
     expect(typeof taskId).toBe('string');
     // The task is readable back through the sample-alias GET, projected input-required.
-    const get = await fetch(`${BASE}/v1/host/sample/a2a/tasks/${taskId}`, { headers: H });
+    const get = await fetch(`${BASE}/host/sample/a2a/tasks/${taskId}`, { headers: H });
     expect(get.status).toBe(200);
     const rec = await get.json() as { state?: string; runId?: string };
     expect(rec.state).toBe('input-required');
-    expect(rec.runId).toBe(taskId); // taskId == runId (RFC 0100 §2)
+    // taskId == runId (RFC 0100 §2); an unversioned (major-2) read projects the
+    // run id tenant-bound, the start response's `taskId` is the bare opaque id.
+    expect(rec.runId).toBe(toWireRunId(taskId!, 'default'));
   });
 
   it('message/send persists a Task; tasks/get returns it after disconnect', async () => {

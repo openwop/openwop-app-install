@@ -88,7 +88,7 @@ export function ProjectChatTab({ project, canWrite, onSaved }: { project: Projec
           <Notice variant="info"><Trans i18nKey="noAgentsNotice" ns="projects" components={{ 0: <strong /> }} /></Notice>
         )}
 
-        {error ? <Notice variant="error">{error}</Notice> : null}
+        {error ? <Notice variant="error" announce={error}>{error}</Notice> : null}
         {/* ADR 0608 D8 (`CPC-4`) — CORRECTED 2026-08-24. This used to render only
             `if (canWrite)`, with a notice telling a read-only member that "opening
             the project chat needs edit access (workspace:write) in this project's
@@ -170,7 +170,7 @@ function CadenceEditor({ project, agentMembers, onSaved }: { project: Project; a
       <p className="muted u-fs-12 u-m-0">
         {t('cadenceHelp', { max: formatNumber(Math.min(8, agentMembers.length)) })}
       </p>
-      {error ? <Notice variant="error">{error}</Notice> : null}
+      {error ? <Notice variant="error" announce={error}>{error}</Notice> : null}
       {saved ? <Notice variant="success" announce={t('cadenceSaved')}>{t('cadenceSaved')}</Notice> : null}
       <div className="surface-form">
         <SelectField label={t('moderatorLabel')} value={moderator} onChange={(e) => setModerator(e.target.value)}>

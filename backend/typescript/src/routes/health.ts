@@ -1,4 +1,6 @@
 import type { Express } from 'express';
+import { registryInstallStatus } from '../host/registryInstallStatus.js';
+import { chainPackLoadStatus } from '../host/chainPackLoadStatus.js';
 import { hostWebSearchKeyStatus } from '../host/webResearchSurface.js';
 import { createLogger } from '../observability/logger.js';
 import { getManagedProviderStatuses } from '../providers/managedProvider.js';
@@ -131,6 +133,18 @@ export function registerHealthRoutes(app: Express, deps: { storage?: Storage } =
         storage: deps.storage ? (storageError ? { ok: false, error: storageError } : { ok: true }) : { ok: true, skipped: true },
         // Informational — see the note above; never gates `ready`.
         webSearch,
+        // NP-V2 P7 — boot-time registry installs. Informational here, never gating
+        // `ready`: for a `pinned` pack the vendored copy still serves; for a
+        // `feature` pack NOTHING serves it — that feature's nodes are missing —
+        // which a readiness 503 would not fix either (review correction). But
+        // `scripts/verify-deploy.sh` refuses a revision that reports a failure:
+        // the 2026-09-20 refusals were survivable, which is exactly why they went
+        // unseen for eight days. Names only — the reason is in the boot log.
+        registryPacks: registryInstallStatus(),
+        // grade-code C-1 — chain packs the last default-root load REFUSED (a
+        // refused chain is a template missing from the gallery). Informational
+        // here; verify-deploy refuses a revision that reports any.
+        chainPacks: chainPackLoadStatus(),
       },
     });
   });

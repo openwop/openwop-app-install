@@ -20,7 +20,7 @@ export const messages = {
   emptyTitle: 'No memories yet',
   emptyBodyDefault: 'Add facts and preferences here; they are recalled when relevant.',
   externalUnverified: 'External · unverified',
-  externalUnverifiedTitle: 'Imported from an external source — treated as untrusted (ADR 0038 §C).',
+  externalUnverifiedTitle: 'Imported from an external source — treated as untrusted.',
   autoLearned: 'Auto-learned',
   autoLearnedTitle: 'Your assistant inferred this from a conversation — it is not something you typed, so it is treated as unverified.',
   learnedOn: 'Learned {{date}}',

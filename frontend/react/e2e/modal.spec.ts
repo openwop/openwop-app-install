@@ -17,7 +17,7 @@ import { test, expect } from '@playwright/test';
 test.describe('ui/Modal (via Create-board)', () => {
   test.beforeEach(async ({ page }, testInfo) => {
     const ctx = page.context();
-    const res = await ctx.request.post('/api/v1/host/openwop-app/test/login', {
+    const res = await ctx.request.post('/api/host/openwop-app/test/login', {
       data: { email: `modal-${testInfo.workerIndex}@e2e.test` },
     });
     expect(res.status(), `login: ${await res.text()}`).toBe(201);

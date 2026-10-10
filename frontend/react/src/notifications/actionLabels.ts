@@ -31,8 +31,14 @@ const ACTION_LABEL_KEYS: Record<string, string> = {
   'assistant.briefing':        'actionViewBriefing',
 };
 
-/** Catalog key for a notification row's inline action link, by type. */
-export function actionLabelKeyFor(type: NotificationType): string {
+/**
+ * Catalog key for a notification row's inline action link. The DESTINATION
+ * wins over the type when it names a different fix: a `workflow.failed` whose
+ * cause is a connection the user must repair links to `/connections`, and
+ * labelling that link "View run" would send them to the symptom, not the fix.
+ */
+export function actionLabelKeyFor(type: NotificationType, actionUrl?: string): string {
+  if (actionUrl === '/connections' || actionUrl?.startsWith('/connections?')) return 'actionReconnect';
   return ACTION_LABEL_KEYS[type] ?? 'actionView';
 }
 

@@ -31,7 +31,7 @@
 
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { type FeatureSurface, surfaceStr, surfaceOptStr } from '../../host/featureSurfaces.js';
-import { listStrategies, getStrategy, resolveStrategyContext, resolveStrategyHealth, orgReadPredicate } from './strategyService.js';
+import { listStrategies, getStrategy, resolveStrategyContext, resolveStrategyHealth, orgReadPredicate, canSubjectReadStrategy, canSubjectWriteStrategy } from './strategyService.js';
 import { appendCheckIn, listCheckIns, listCheckInsByStrategy, computeStrategyProgress, DEFAULT_STALE_DAYS } from './checkIns.js';
 import { syncSourcedKrs } from './metricSync.js';
 import type { Strategy } from './types.js';
@@ -80,12 +80,62 @@ const refOf = (s: Strategy) => ({
 const runOrgReadPredicate = (scope: BundleScope): ((orgId: string) => Promise<boolean>) =>
   (scope.actingUserId ? orgReadPredicate(scope.tenantId, scope.actingUserId) : async () => true);
 
+/**
+ * ADR 0845 D1 — the STRATEGY-ROW lane asks who started the run.
+ *
+ * ADR 0597 §Correction 1 keyed the cross-entity LINK projection on
+ * `scope.actingUserId` and recorded the row lane as a residual: every verb below
+ * still saw every shared strategy in the tenant, and `checkIn` wrote into any of
+ * them. So an org-A-only editor's run listed and read org-B objectives and wrote
+ * org-B check-ins — including `mode:'sync'` CONFIRMED values — while the route
+ * (`loadStrategyScoped`) and the agent tools (`canSubjectReadStrategy`) refused that
+ * person. ADR 0842's `PMX4WF-1`, one feature over.
+ *
+ * Human-started run ⇒ the route's own predicates (one rule, `strategyService`).
+ * Actorless run (the strategy cadence) ⇒ the tenant-trusted shared view, unchanged:
+ * the scheduled digests depend on it (`strategy-cross-org.test.ts` witnesses it).
+ * `isShared` stays in both: a run never saw user-scoped drafts, even its creator's.
+ *
+ * Every verb is classified in `SURFACE_VERB_ACCESS`; the ratchet in
+ * `strategy-activation-binding.test.ts` fails a new verb until it is classified.
+ */
+export const SURFACE_VERB_ACCESS = {
+  listStrategies: 'read',
+  getStrategy: 'read',
+  getStrategyContext: 'read',
+  getHealth: 'read',
+  checkIn: 'write',
+  listCheckIns: 'read',
+  syncMetrics: 'write',
+  listStaleKrs: 'read',
+} as const;
+
+function runRowAccess(scope: BundleScope) {
+  const actor = scope.actingUserId;
+  return {
+    canRead: async (s: Strategy): Promise<boolean> => isShared(s) && (!actor || await canSubjectReadStrategy(scope.tenantId, actor, s)),
+    canWrite: async (s: Strategy): Promise<boolean> => isShared(s) && (!actor || await canSubjectWriteStrategy(scope.tenantId, actor, s)),
+  };
+}
+
+async function filterAsync<T>(items: T[], pred: (t: T) => Promise<boolean>): Promise<T[]> {
+  const keep = await Promise.all(items.map(pred));
+  return items.filter((_, i) => keep[i]);
+}
+
+/** ADR 0845 D7 — a run's write is attributed to the RUN when the scope knows it. */
+const runActor = (scope: BundleScope, argActor: string | undefined): string =>
+  scope.runId ? `run:${scope.runId}` : (argActor ?? 'workflow');
+
 export function buildStrategySurface(scope: BundleScope): FeatureSurface {
   const tenantId = scope.tenantId;
+  const access = runRowAccess(scope);
+  const readableShared = async (): Promise<Strategy[]> =>
+    filterAsync(await listStrategies(tenantId, { includeArchived: false }), access.canRead);
   return {
-    /** The workspace's SHARED strategies (compact refs; excludes user drafts + archived). */
+    /** The SHARED strategies this run may read (compact refs; excludes user drafts + archived). */
     listStrategies: async () => ({
-      strategies: (await listStrategies(tenantId, { includeArchived: false })).filter(isShared).map(refOf),
+      strategies: (await readableShared()).map(refOf),
     }),
 
     /** One strategy by id, with its objectives/initiatives/links. Returns null for
@@ -93,7 +143,7 @@ export function buildStrategySurface(scope: BundleScope): FeatureSurface {
      *  authorize a creator-only read. */
     getStrategy: async (args) => {
       const s = await getStrategy(tenantId, surfaceStr(args.id));
-      if (!s || !isShared(s)) return { strategy: null };
+      if (!s || !(await access.canRead(s))) return { strategy: null };
       return {
         strategy: {
           ...refOf(s),
@@ -114,7 +164,7 @@ export function buildStrategySurface(scope: BundleScope): FeatureSurface {
       const priorityListId = surfaceOptStr(args.priorityListId);
       const cardId = surfaceOptStr(args.cardId);
       const boardId = surfaceOptStr(args.boardId);
-      const all = (await listStrategies(tenantId, { includeArchived: false })).filter(isShared);
+      const all = await readableShared();
       const linked = all.filter((s) => s.links.some((l) => {
         if (projectId) return l.kind === 'project' && l.projectId === projectId;
         if (priorityListId && cardId) return l.kind === 'priority-idea' && l.listId === priorityListId && l.cardId === cardId;
@@ -123,9 +173,13 @@ export function buildStrategySurface(scope: BundleScope): FeatureSurface {
         return false;
       }));
       // ADR 0597 §Correction 1 — scoped to the run's acting human when it has
-      // one; tenant-wide only for a genuinely subjectless (system) run. Projects
-      // still gate on their own member-scoped access via resolveProjectAccess.
-      const strategies = await resolveStrategyContext(tenantId, linked, undefined, runOrgReadPredicate(scope));
+      // one; tenant-wide only for a genuinely subjectless (system) run.
+      // ADR 0839 D1 — CORRECTED: the sentence that stood here ("projects still gate on
+      // their own member-scoped access") was false. This passed a hard-coded `undefined`,
+      // which the project resolver read as the tenant OWNER, so every run's strategy
+      // context carried private projects' status and milestones. It now passes the run's
+      // actor; a run with none gets no project links (counted as unreadable drops).
+      const strategies = await resolveStrategyContext(tenantId, linked, scope.actingUserId, runOrgReadPredicate(scope));
       return { strategies };
     },
 
@@ -133,8 +187,8 @@ export function buildStrategySurface(scope: BundleScope): FeatureSurface {
      *  Tenant-trusted; each row carries the component `signals` so the caller (the
      *  Strategy Analyst) can reason about gaps without inventing precision. */
     getHealth: async () => {
-      const shared = (await listStrategies(tenantId, { includeArchived: false })).filter(isShared);
-      const strategies = await resolveStrategyHealth(tenantId, shared, undefined, runOrgReadPredicate(scope));
+      const shared = await readableShared();
+      const strategies = await resolveStrategyHealth(tenantId, shared, scope.actingUserId, runOrgReadPredicate(scope)); // ADR 0839 D1 — the run's actor, as above
       return { strategies };
     },
 
@@ -147,8 +201,15 @@ export function buildStrategySurface(scope: BundleScope): FeatureSurface {
      *  see node calls (adsAdapter.ts:204), so the gate lives HERE, in the owner. */
     checkIn: async (args) => {
       const s = await getStrategy(tenantId, surfaceStr(args.strategyId));
-      if (!s || !isShared(s)) return { checkIn: null };
       const mode = surfaceOptStr(args.mode) === 'sync' ? 'sync' : 'agent';
+      // ADR 0845 D1 — the bar of what it CREATES: an agent check-in is a PROPOSAL a
+      // writer must confirm (read suffices); a sync check-in is a CONFIRMED value
+      // (write). `reason` lets the node fail typed instead of succeeding with null.
+      // Unreadable is answered exactly like missing (the route's uniform 404, no
+      // existence oracle); `forbidden` is only for a READABLE strategy the run may
+      // not write a confirmed value into.
+      if (!s || !(await access.canRead(s))) return { checkIn: null, reason: 'not_found' };
+      if (mode === 'sync' && !(await access.canWrite(s))) return { checkIn: null, reason: 'forbidden' };
       const value = typeof args.value === 'number' && Number.isFinite(args.value) ? args.value : undefined;
       const note = surfaceOptStr(args.note);
       const row = await appendCheckIn({
@@ -157,7 +218,7 @@ export function buildStrategySurface(scope: BundleScope): FeatureSurface {
         ...(value !== undefined ? { value } : {}),
         ...(note ? { note } : {}),
         origin: mode,
-        actor: surfaceOptStr(args.actor) ?? 'workflow',
+        actor: runActor(scope, surfaceOptStr(args.actor)),
       });
       return { checkIn: row };
     },
@@ -165,7 +226,7 @@ export function buildStrategySurface(scope: BundleScope): FeatureSurface {
     /** Check-ins for one shared strategy (newest first; optionally one KR). */
     listCheckIns: async (args) => {
       const s = await getStrategy(tenantId, surfaceStr(args.strategyId));
-      if (!s || !isShared(s)) return { checkIns: [] };
+      if (!s || !(await access.canRead(s))) return { checkIns: [] };
       return { checkIns: await listCheckIns(tenantId, s.id, surfaceOptStr(args.krId)) };
     },
 
@@ -174,7 +235,11 @@ export function buildStrategySurface(scope: BundleScope): FeatureSurface {
      *  the standing `measure.source` authorization). Returns the honest
      *  synced/skipped matrix; the run output IS the sync-health view. */
     syncMetrics: async (args) => {
-      const r = await syncSourcedKrs(tenantId, surfaceOptStr(args.actor) ?? 'workflow');
+      // ADR 0845 D1 — a human-started run syncs only what its starter may write;
+      // readable-but-unwritable sourced KRs are reported, not silently dropped.
+      const r = await syncSourcedKrs(tenantId, runActor(scope, surfaceOptStr(args.actor)), scope.actingUserId
+        ? { canWrite: access.canWrite, canRead: access.canRead, canReadSourceOrg: orgReadPredicate(tenantId, scope.actingUserId) }
+        : undefined);
       return { synced: r.synced, skipped: r.skipped };
     },
 
@@ -182,7 +247,7 @@ export function buildStrategySurface(scope: BundleScope): FeatureSurface {
      *  the cadence chain's work list (ADR 0231 §C2). */
     listStaleKrs: async (args) => {
       const staleDays = typeof args.staleDays === 'number' && Number.isFinite(args.staleDays) && args.staleDays > 0 ? args.staleDays : DEFAULT_STALE_DAYS;
-      const shared = (await listStrategies(tenantId, { includeArchived: false })).filter(isShared).filter((s) => s.status === 'active');
+      const shared = (await readableShared()).filter((s) => s.status === 'active');
       const out: Array<{ strategyId: string; strategyTitle: string; orgId: string; krId: string; krTitle: string; ownerUserId?: string }> = [];
       // STRAT-PERF-1 (grade-code): one indexed read for the whole work list.
       const byStrategy = await listCheckInsByStrategy(tenantId);

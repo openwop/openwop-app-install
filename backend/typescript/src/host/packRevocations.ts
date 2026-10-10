@@ -58,6 +58,9 @@
  */
 
 import { DurableCollection } from './hostExtPersistence.js';
+import { createLogger } from '../observability/logger.js';
+
+const log = createLogger('host.packRevocations');
 
 /** Revoke every version of a pack (compromised publisher). */
 export const REVOKE_ALL_VERSIONS = '*';
@@ -85,8 +88,19 @@ let cachedKeys = new Set<string>();
 /** Pack names revoked at every version. */
 let cachedWildcards = new Set<string>();
 
-/** Load (or reload) revocations. Called at boot BEFORE the pack loaders, and
- *  after every mutation. */
+/** ADR 0826 D5 — listeners told when the revocation SET changes (`packTrust`
+ *  drops its cached verdicts: any pack may now be `revoked`). An inversion seam,
+ *  because `packTrust` already imports this module. */
+const changeListeners: Array<() => void> = [];
+export function onPackRevocationsChanged(fn: () => void): void {
+  changeListeners.push(fn);
+}
+
+const fingerprint = (keys: Set<string>, wildcards: Set<string>): string =>
+  JSON.stringify([[...keys].sort(), [...wildcards].sort()]);
+
+/** Load (or reload) revocations. Called at boot BEFORE the pack loaders, after
+ *  every mutation, and on the cross-instance refresh tick (ADR 0826 D5). */
 export async function loadPackRevocations(): Promise<number> {
   const rows = await store.list();
   const keys = new Set<string>();
@@ -95,9 +109,40 @@ export async function loadPackRevocations(): Promise<number> {
     if (r.version === REVOKE_ALL_VERSIONS) wildcards.add(r.packName);
     else keys.add(r.key);
   }
+  const changed = fingerprint(keys, wildcards) !== fingerprint(cachedKeys, cachedWildcards);
   cachedKeys = keys;
   cachedWildcards = wildcards;
+  if (changed) for (const fn of changeListeners) fn();
   return rows.length;
+}
+
+/**
+ * ADR 0826 D5 — the CROSS-INSTANCE half the header always claimed and nothing
+ * did: a revocation written on instance A reached instance A's cache only, so
+ * every other instance kept dispatching the revoked pack until it restarted.
+ * One process-wide poll (idempotent across `createApp` calls; `unref`'d so it
+ * never holds a process open). The store is a handful of host-global rows.
+ */
+let refreshTimer: ReturnType<typeof setInterval> | null = null;
+export const DEFAULT_REVOCATION_REFRESH_MS = 30_000;
+
+export function startPackRevocationRefresh(): void {
+  if (refreshTimer) return;
+  const raw = Number(process.env.OPENWOP_PACK_REVOCATION_REFRESH_MS);
+  const every = Number.isFinite(raw) && raw >= 1_000 ? raw : DEFAULT_REVOCATION_REFRESH_MS;
+  refreshTimer = setInterval(() => {
+    loadPackRevocations().catch((err: unknown) => {
+      // Keep the LAST known set — never degrade to "nothing revoked" on a blip.
+      log.error('pack_revocation_refresh_failed', { error: err instanceof Error ? err.message : String(err) });
+    });
+  }, every);
+  refreshTimer.unref?.();
+}
+
+/** Test affordance: stop the poll. */
+export function __stopPackRevocationRefresh(): void {
+  if (refreshTimer) clearInterval(refreshTimer);
+  refreshTimer = null;
 }
 
 /**
@@ -152,6 +197,7 @@ export async function __clearPackRevocations(): Promise<void> {
   await store.__clear();
   cachedKeys = new Set();
   cachedWildcards = new Set();
+  for (const fn of changeListeners) fn();
 }
 
 /** Test-only: reset ONLY the in-process cache, simulating a cold boot whose

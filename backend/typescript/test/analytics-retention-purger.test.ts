@@ -40,7 +40,7 @@ describe('analytics retention purger (ADR 0077 P3) — the real one', () => {
     expect((await listEvents('tenantA', 'o1', 10)).length).toBe(2);
 
     const total = await processRetentionSweep({ storage }, now);
-    expect(total, 'exactly the one past-window analytics row is purged').toBeGreaterThanOrEqual(1);
+    expect(total, 'the sweep reports at least the one analytics row it purged (the exact rows are asserted below)').toBeGreaterThanOrEqual(1);
     expect((await listEvents('tenantA', 'o1', 10)).map((e) => e.eventId)).toEqual(['fresh']);
     expect((await listEvents('tenantB', 'o1', 10)).map((e) => e.eventId), 'no policy ⇒ no purge; never cross-tenant').toEqual(['foreign-old']);
   });
@@ -51,8 +51,14 @@ describe('analytics retention purger (ADR 0077 P3) — the real one', () => {
     const cutoff = new Date(now - 365 * DAY).toISOString();
     const blank = await purgeRetained('', 'confidential-pii', cutoff);
     const internal = await purgeRetained('tenantC', 'internal', cutoff);
-    expect(JSON.stringify(blank)).not.toMatch(/"analytics":[1-9]/);
-    expect(JSON.stringify(internal)).not.toMatch(/"analytics":[1-9]/);
+    // grade-tests w8 — these two lines used to be
+    // `expect(JSON.stringify(x)).not.toMatch(/"analytics":[1-9]/)`, a regex no real
+    // `PurgeResult[]` can match (it serializes as `"feature":"analytics","deleted":N`).
+    // A blank tenant is refused by `purgeRetained` itself before any purger runs (so the
+    // purger's own `!tenantId` guard is a second, unreachable-here guard); the wrong
+    // classification reaches the analytics purger, which must delete nothing.
+    expect(blank).toEqual([]);
+    expect(internal.find((r) => r.feature === 'analytics')).toMatchObject({ deleted: 0, ok: true });
     expect((await listEvents('tenantC', 'o1', 10)).length).toBe(1);
   });
 });

@@ -9,6 +9,7 @@
  */
 import { authedHeaders, config, fetchOpts } from './config.js';
 import { ApiError } from './requestJson.js';
+import { readErrorMessage } from './errorEnvelope.js';
 
 export type BuiltInRoleId = 'viewer' | 'editor' | 'admin' | 'owner';
 
@@ -114,22 +115,32 @@ function acHeaders(extra?: Record<string, string>): Record<string, string> {
 const jsonHeaders = (): Record<string, string> => acHeaders({ 'content-type': 'application/json' });
 
 /** Resolve a JSON body, surfacing the host's error envelope message when present. */
+/** The parsed error body, or undefined for a non-JSON one. Carried on
+ *  `ApiError.body` so a caller can switch on `details.reason` / `details.field`
+ *  (ADR 0815 — typed owner-tier / last-owner / identity refusals) through
+ *  `readErrorDetail`, instead of rendering the server's English. */
+async function errorBodyOf(res: Response): Promise<unknown> {
+  try {
+    return await res.json();
+  } catch {
+    return undefined; // non-JSON error body
+  }
+}
+
 async function asJson<T>(res: Response, ctx: string): Promise<T> {
   if (!res.ok) {
-    let detail = '';
-    try {
-      const body = (await res.json()) as { error?: { message?: string }; message?: string };
-      detail = body?.error?.message ?? body?.message ?? '';
-    } catch {
-      /* non-JSON error body */
-    }
-    throw new ApiError({ status: res.status, statusText: res.statusText, url: res.url, message: detail || `${ctx} returned ${res.status}` });
+    const body = await errorBodyOf(res);
+    const detail = readErrorMessage(body) ?? '';
+    throw new ApiError({ status: res.status, statusText: res.statusText, url: res.url, body, message: detail || `${ctx} returned ${res.status}` });
   }
   return (await res.json()) as T;
 }
 
 async function expectOk(res: Response, ctx: string): Promise<void> {
-  if (!res.ok && res.status !== 204) throw new ApiError({ status: res.status, statusText: res.statusText, url: res.url, message: `${ctx} returned ${res.status}` });
+  if (!res.ok && res.status !== 204) {
+    const body = await errorBodyOf(res);
+    throw new ApiError({ status: res.status, statusText: res.statusText, url: res.url, body, message: `${ctx} returned ${res.status}` });
+  }
 }
 
 // ── Roles + effective access ──────────────────────────────────────────────────

@@ -1,12 +1,12 @@
 {
   "name": "core.openwop.workflows.incident-postmortem",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "kind": "workflow-chain",
   "description": "Incident-postmortem chains (RFC 0013): after an incident resolves, draft a blameless postmortem from the timeline and turn its action items into tracked tasks. Draft-first (the human edits before anything is shared). Replay-deterministic.",
   "author": "openwop",
   "license": "Apache-2.0",
   "engines": {
-    "openwop": ">=1.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "keywords": [
     "Incident postmortem"
@@ -14,7 +14,7 @@
   "chains": [
     {
       "chainId": "postmortem.draft-blameless",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "Incident → Blameless Postmortem Draft",
       "description": "When an incident is marked resolved, draft a blameless postmortem (summary, timeline, root cause, impact, action items) for the human to edit — as a saved draft, not an auto-send.",
       "parameters": {
@@ -32,7 +32,7 @@
         "nodes": [
           {
             "id": "resolved",
-            "typeId": "core.trigger.event",
+            "typeId": "core.trigger.event@1.0.0",
             "name": "Incident resolved",
             "position": {
               "x": 0,
@@ -45,7 +45,7 @@
           },
           {
             "id": "draft",
-            "typeId": "core.ai.chatCompletion",
+            "typeId": "core.ai.chatCompletion@1.0.0",
             "name": "Draft postmortem",
             "position": {
               "x": 280,
@@ -60,7 +60,7 @@
           },
           {
             "id": "save",
-            "typeId": "core.email.draft",
+            "typeId": "core.email.draft@1.0.0",
             "name": "Save postmortem draft",
             "position": {
               "x": 560,
@@ -90,7 +90,7 @@
     },
     {
       "chainId": "postmortem.action-items",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "label": "Postmortem → Tracked Action Items",
       "description": "Extracts the action items from a postmortem and, after a human confirms scope, files each as a follow-up task so nothing falls through.",
       "parameters": {
@@ -115,7 +115,7 @@
         "nodes": [
           {
             "id": "start",
-            "typeId": "core.trigger.event",
+            "typeId": "core.trigger.event@1.0.0",
             "name": "Postmortem finalized",
             "position": {
               "x": 0,
@@ -128,7 +128,7 @@
           },
           {
             "id": "extract",
-            "typeId": "core.ai.chatCompletion",
+            "typeId": "core.ai.chatCompletion@1.0.0",
             "name": "Extract action items",
             "position": {
               "x": 280,
@@ -143,7 +143,7 @@
           },
           {
             "id": "gate",
-            "typeId": "core.chat.approvalGate",
+            "typeId": "core.chat.approvalGate@1.1.0",
             "name": "Confirm action items",
             "position": {
               "x": 560,
@@ -157,7 +157,7 @@
           },
           {
             "id": "gate-reject",
-            "typeId": "core.flow.noop",
+            "typeId": "core.flow.noop@1.0.0",
             "name": "Rejected — no tasks filed",
             "position": {
               "x": 840,
@@ -168,7 +168,7 @@
           },
           {
             "id": "task",
-            "typeId": "feature.crm.nodes.create-task",
+            "typeId": "feature.crm.nodes.create-task@1.0.0",
             "name": "File action-item task",
             "position": {
               "x": 840,

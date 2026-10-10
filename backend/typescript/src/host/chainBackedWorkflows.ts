@@ -29,7 +29,9 @@
 
 import { getChain, expandChain } from './workflowChainPackLoader.js';
 import { recordOwnership } from './workflowOwnership.js';
+import { recordRevision, HOST_REVISION_TENANT } from './workflowRevisions.js';
 import { createLogger } from '../observability/logger.js';
+import { registerWorkflowFeature } from './workflowFeatureGate.js';
 import type { WorkflowDefinition } from '../executor/types.js';
 
 const log = createLogger('host.chainBackedWorkflows');
@@ -185,11 +187,33 @@ export function buildChainBackedDefinition(
  */
 export function registerChainBackedWorkflow(
   chainId: string,
-  opts: ChainBackedWorkflowOptions & { hostOwned?: { ownerTenant: string; name?: string } } = {},
+  opts: ChainBackedWorkflowOptions & {
+    hostOwned?: { ownerTenant: string; name?: string };
+    /** ADR 0820 §7 / G6 — the feature (TOGGLE id) that owns this workflow. Every
+     *  launch through the ADR 0823 funnel then resolves it (toggle + plan), and a
+     *  tenant copy minted from this chain inherits it. Omit for host system
+     *  workflows that no feature owns. */
+    featureId?: string;
+  } = {},
 ): void {
+  // Recorded even if the build below fails: ownership is a property of the id,
+  // and a later registration of the same id must not run ungated.
+  if (opts.featureId) registerWorkflowFeature(chainId, opts.featureId);
   try {
     const def = buildChainBackedDefinition(chainId, opts);
     registry.set(def.workflowId, def);
+    // grade-data D-1 — a chain-backed definition is RE-EXPANDED every boot, and its
+    // node ids derive from `chainId@chain.version`. A run stamps
+    // `metadata.definitionRevision` (runInsert.ts) and `resolveRunDefinition`
+    // looks that revision up — but nothing ever recorded one for this lane, so a
+    // run paused across a chain-version bump resumed against the NEW head with
+    // different node ids (checkpoints hydrate by node id). Recording the revision
+    // (content-addressed, idempotent — the seed pattern) makes every such run
+    // resolve its own definition. MEASURED 2026-09-28: zero non-terminal runs
+    // were on a chain-backed id when ADR 0766 P3 bumped every chain version.
+    void recordRevision(HOST_REVISION_TENANT, def).catch((err) =>
+      log.error('chain_backed_revision_failed', { chainId, error: err instanceof Error ? err.message : String(err) }),
+    );
     if (opts.hostOwned) {
       void recordOwnership(opts.hostOwned.ownerTenant, def.workflowId, {
         name: opts.hostOwned.name ?? chainId,

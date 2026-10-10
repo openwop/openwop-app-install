@@ -8,6 +8,7 @@
  * reverse pagination (`loadEarlierMessages`), and feedback persistence.
  */
 
+import { encodeMessageForStore } from '../../lib/promoteConversation.js';
 import { useCallback, useEffect } from 'react';
 import i18n from '../../../i18n/index.js';
 import {
@@ -82,15 +83,8 @@ export function useSessionPersistence(core: ChatSessionCore) {
     claimedSet.add(msg.id); // claim immediately to dedup concurrent calls
     try {
       await ensureSessionInBackend(sessionId, title);
-      const { id: _id, meta, ...rest } = msg;
-      const contentJson = JSON.stringify(rest);
-      const args: Parameters<typeof appendChatMessage>[1] = {
-        messageId: msg.id,
-        role: msg.role,
-        content: contentJson,
-      };
-      if (meta) args.meta = JSON.stringify(meta);
-      await appendChatMessage(sessionId, args);
+      // One store encoding, shared with the P4 handoff (promoteConversation).
+      await appendChatMessage(sessionId, encodeMessageForStore(msg));
     } catch (err) {
       // Roll back the dedup claim so a future retry has a chance.
       // The user's session keeps streaming through localStorage; the
@@ -111,9 +105,7 @@ export function useSessionPersistence(core: ChatSessionCore) {
   const persistOrUpdateMessage = useCallback(async (sessionId: string, title: string, msg: ChatMessage): Promise<void> => {
     if (!persist) return;
     const claimedSet = persistedIdsRef.current;
-    const { id: _id, meta, ...rest } = msg;
-    const content = JSON.stringify(rest);
-    const metaStr = meta ? JSON.stringify(meta) : undefined;
+    const { content, meta: metaStr } = encodeMessageForStore(msg);
     try {
       await ensureSessionInBackend(sessionId, title);
       if (claimedSet.has(msg.id)) {

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.data-integration/1.0.0/variable.fetch.output.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.data-integration/1.0.2/variable.fetch.output.json",
   "title": "VariableFetchOutput",
   "type": "object",
   "required": ["variableName", "found"],

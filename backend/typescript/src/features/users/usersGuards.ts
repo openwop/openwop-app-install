@@ -5,7 +5,9 @@
 
 import type { Request } from 'express';
 import { OpenwopError } from '../../types.js';
-import { getUser, upsertFromPrincipal, resolveCanonicalUserForTenant, type User, type UserSource } from './usersService.js';
+import { getUser, getUserByPrincipal, upsertFromPrincipal, resolveCanonicalUserForTenant, type User, type UserSource } from './usersService.js';
+import { holdsOwnerRoleInTenant } from '../../host/accessControlService.js';
+import { tenantOf } from '../../host/requestSubject.js';
 
 /** Principal shapes that represent a DURABLE identity and may be reconciled into
  *  a `User`. A transient `session:<sid>` (or any unknown shape) MUST NOT — that is
@@ -112,4 +114,65 @@ export async function resolveCallerUser(req: Request): Promise<User> {
     throw new OpenwopError('sign_in_required', 'Sign in to access your account.', 401, {});
   }
   return upsertFromPrincipal({ tenantId: req.tenantId ?? 'default', principalId, source });
+}
+
+/**
+ * ADR 0833 D9 — the durable user the caller ACTS AS, for "is this me?"
+ * decisions (self-lockout, who asserted an email). `req.userId` alone missed
+ * the API-key lane: an admin's own `owk_` key carried no `userId`, so it read
+ * as "not self" — it could disable or erase its own issuer, and stamp the
+ * trusted `'admin'` provenance on the admin's own email (S10). A key resolves
+ * to its ISSUER (as a durable `userId`, through the same principal lookup the
+ * approver seam uses, so an unbound `oidc:` issuer resolves too). Authority is
+ * NOT decided here — a key holds scopes, never roles (D6 reads the raw
+ * principal). `undefined` ⇒ no durable human behind the caller.
+ */
+export async function actingHumanUserId(req: Request): Promise<string | undefined> {
+  if (req.userId) return req.userId;
+  const auth = req.principal?.auth as { kind?: string; issuer?: string } | undefined;
+  if (auth?.kind === 'api-key' && typeof auth.issuer === 'string' && auth.issuer) {
+    const direct = await getUser(auth.issuer);
+    if (direct) return direct.userId;
+    return (await getUserByPrincipal(tenantOf(req), auth.issuer))?.userId;
+  }
+  try {
+    return (await resolveCallerUser(req)).userId;
+  } catch (err: unknown) {
+    if (err instanceof OpenwopError && err.code === 'sign_in_required') return undefined;
+    throw err;
+  }
+}
+
+/**
+ * ADR 0833 D6 — only an OWNER may disable, delete or sign out an OWNER.
+ * `host:members:manage` is held by admins too, and the user lifecycle never
+ * passed through the membership code's last-owner guard, so an admin could
+ * lock the workspace's only owner out wherever the owner's durable row lives in
+ * the shared tenant (SAML/SCIM tenants) — and so could a workflow run whose
+ * acting user is an admin (S7, `UAUWF-8`).
+ *
+ * `actorSubject` is the RAW principal: an `apikey:` delegation holds scopes,
+ * never roles (ADR 0797), so a key is never an owner here. Because self-lockout
+ * already refuses the actor's own row, an owner is only ever acted on by
+ * ANOTHER owner, so the last owner cannot be locked out this way. The one
+ * residual — two owners disabling each other at the same instant — is filed
+ * (`USERS2-CD-F7`). Fails closed: a store error throws.
+ */
+export async function assertMayActOnUser(
+  tenantId: string,
+  actorSubject: string | undefined,
+  target: Pick<User, 'userId' | 'principalId'>,
+  action: string,
+): Promise<void> {
+  const targetIsOwner =
+    (await holdsOwnerRoleInTenant(tenantId, target.userId))
+    || (await holdsOwnerRoleInTenant(tenantId, target.principalId));
+  if (!targetIsOwner) return;
+  if (actorSubject && (await holdsOwnerRoleInTenant(tenantId, actorSubject))) return;
+  throw new OpenwopError(
+    'forbidden',
+    `Only an owner can ${action} an owner of this workspace.`,
+    403,
+    { code: 'owner_required', userId: target.userId },
+  );
 }

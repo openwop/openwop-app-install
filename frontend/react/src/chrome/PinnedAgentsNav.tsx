@@ -93,7 +93,7 @@ export function AgentsNavItem({ item, badge, locked = false }: { item: NavItem; 
     <li>
       <div className="app-nav-row">
         <NavLink
-          to={locked ? '/marketplace/bundles' : item.to}
+          to={locked ? '/marketplace/bundles?feature=' + item.featureId : item.to}
           {...(!locked && item.end !== undefined ? { end: item.end } : {})}
           className={`app-nav-link${active && !locked ? ' is-active' : ''}`}
           {...(active && !locked ? { 'aria-current': 'page' as const } : {})}

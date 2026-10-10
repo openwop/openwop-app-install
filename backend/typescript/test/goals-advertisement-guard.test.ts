@@ -77,7 +77,7 @@ describe('ADR 0412 P5 — advertisement ↔ behavior parity', () => {
     process.env.OPENWOP_GOALS_ENABLED = 'true';
     registerGoalVerifier('guard:judge', async () => ({ satisfied: true, confidence: 1, runId: 'run-guard' }));
     const headers = { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` };
-    const created = await fetch(`${BASE}/v1/host/openwop-app/goals`, {
+    const created = await fetch(`${BASE}/host/openwop-app/goals`, {
       method: 'POST',
       headers,
       body: JSON.stringify({
@@ -89,7 +89,7 @@ describe('ADR 0412 P5 — advertisement ↔ behavior parity', () => {
     });
     expect(created.status).toBe(200);
     const goal = (await created.json()) as { id: string };
-    const evaluated = await fetch(`${BASE}/v1/host/openwop-app/goals/${goal.id}/evaluate`, {
+    const evaluated = await fetch(`${BASE}/host/openwop-app/goals/${goal.id}/evaluate`, {
       method: 'POST',
       headers,
       body: JSON.stringify({ snapshotRef: 'guard:ref', snapshotHash: 'guard-hash' }),

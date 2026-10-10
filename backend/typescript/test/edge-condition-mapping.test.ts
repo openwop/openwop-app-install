@@ -2,7 +2,7 @@
  * Edge-condition normalization at the ingest seams — ADR 0207 §Phase 2.
  *
  * Regression guard for the silently-dropped-edge bug: a workflow registered via
- * `validateWorkflowDefinition` (the `POST /v1/host/openwop-app/workflows` path)
+ * `validateWorkflowDefinition` (the `POST /host/openwop-app/workflows` path)
  * carrying the WIRE condition shape `{type,left,right}` used to be cast straight
  * through, so the executor saw `path`/`op` undefined and dropped the edge
  * (fail-closed dead branch, no error). Both ingest seams now route through the

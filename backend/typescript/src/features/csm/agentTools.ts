@@ -3,7 +3,7 @@
  * persona's REAL grounding over the customer-success accounts store.
  *
  * Born of the CHAT-FIRST-PORT-AUDIT #1 finding (docs/chat-first-port/
- * d1-crm-csm.md): the `feature.csm.agents` pack allowlisted the node typeId
+ * d1-crm-csm.md): the `vendor.openwop-app.csm.agents` pack allowlisted the node typeId
  * `openwop:feature.csm.nodes.health-read`, which NO host registrant provided, so
  * `compileAgentTools` silently dropped it and the read-only insights agent ran
  * in the ONE chat with zero tools — surfacing "at-risk accounts" from
@@ -57,6 +57,7 @@ async function csmEnabled(tenantId: string, actingUserId: string | undefined): P
 export function registerCsmAgentTools(): void {
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: CSM_HEALTH_READ_TOOL_ID,
       description:

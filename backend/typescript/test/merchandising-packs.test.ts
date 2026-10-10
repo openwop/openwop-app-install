@@ -84,14 +84,14 @@ describe('merchandising agent packs — tool-allowlisted to their own feature', 
   // agent-allowlist-resolution.test.ts; the tools themselves by
   // merchandising-agent-tools.test.ts).
   it('load with the expected agentId + scoped tools', () => {
-    const merch = loadAgentsFromManifest(packDir('feature.recommendations.agents'));
-    expect(merch[0]?.agentId).toBe('feature.recommendations.agents.merchandiser');
+    const merch = loadAgentsFromManifest(packDir('vendor.openwop-app.recommendations.agents'));
+    expect(merch[0]?.agentId).toBe('vendor.openwop-app.recommendations.agents.merchandiser');
     expect(merch[0]?.toolAllowlist).toContain('openwop:recommendations.create-placement');
-    const pm = loadAgentsFromManifest(packDir('feature.promotions.agents'));
-    expect(pm[0]?.agentId).toBe('feature.promotions.agents.promotions-manager');
+    const pm = loadAgentsFromManifest(packDir('vendor.openwop-app.promotions.agents'));
+    expect(pm[0]?.agentId).toBe('vendor.openwop-app.promotions.agents.promotions-manager');
     expect(pm[0]?.toolAllowlist).toContain('openwop:promotions.draft');
-    const cur = loadAgentsFromManifest(packDir('feature.discovery.agents'));
-    expect(cur[0]?.agentId).toBe('feature.discovery.agents.curator');
+    const cur = loadAgentsFromManifest(packDir('vendor.openwop-app.discovery.agents'));
+    expect(cur[0]?.agentId).toBe('vendor.openwop-app.discovery.agents.curator');
     expect(cur[0]?.toolAllowlist).toContain('openwop:discovery.create-collection');
   });
 });

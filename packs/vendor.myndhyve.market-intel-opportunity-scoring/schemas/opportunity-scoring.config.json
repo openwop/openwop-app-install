@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.market-intel-opportunity-scoring/1.0.0/opportunity-scoring.config.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.market-intel-opportunity-scoring/1.0.2/opportunity-scoring.config.json",
   "title": "MarketIntelOpportunityScoringConfig",
   "type": "object",
   "properties": {

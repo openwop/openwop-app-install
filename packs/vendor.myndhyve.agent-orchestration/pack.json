@@ -1,18 +1,25 @@
 {
   "name": "vendor.myndhyve.agent-orchestration",
-  "version": "1.0.0",
-  "description": "MyndHyve agent-orchestration pack. Six nodes that operate on protocol primitives — spawn, delegate-smart, consensus-vote, message-send, skill-invoke, swarm-execute. Routes through the host's agent runtime (ctx.agentRuntime.*). Inherits suspend mechanics for low-confidence escalation.",
+  "version": "1.0.3",
+  "description": "MyndHyve agent-orchestration pack. Twelve nodes: six agent primitives (spawn, delegate-smart, consensus-vote, message-send, skill-invoke, swarm-execute) and six coordination strategies (vote, consensus, compete, map-reduce, delegate, round-robin). Routes through the host's agent runtime (ctx.agentRuntime.*). Inherits suspend mechanics for low-confidence escalation.",
   "author": "MyndHyve",
   "license": "Apache-2.0",
   "homepage": "https://myndhyve.ai/packs/agent-orchestration",
   "repository": "https://github.com/openwop/openwop",
-  "keywords": ["vendor", "myndhyve", "agents", "orchestration", "consensus", "swarm"],
+  "keywords": [
+    "vendor",
+    "myndhyve",
+    "agents",
+    "orchestration",
+    "consensus",
+    "swarm"
+  ],
   "engines": {
-    "openwop": ">=1.0.0 <2.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "peerDependencies": {
-    "host.agentRuntime": "supported",
-    "host.coordination": "supported"
+    "agentRuntime": "supported",
+    "coordination": "supported"
   },
   "nodes": [
     {
@@ -21,8 +28,12 @@
       "label": "Agent Spawn",
       "description": "Instantiates an agent from an AgentManifest (RFC 0008) or AgentRef (RFC 0007). Returns an agentInstanceId other nodes in the run can reference. Side-effectful (allocates host-side agent state) + cacheable (replays return the original instanceId).",
       "category": "coordination",
+      "x-paletteCategory": "ai",
       "role": "side-effect",
-      "capabilities": ["cacheable", "side-effectful"],
+      "capabilities": [
+        "cacheable",
+        "side-effectful"
+      ],
       "configSchemaRef": "schemas/spawn.config.json",
       "inputSchemaRef": "schemas/spawn.input.json",
       "outputSchemaRef": "schemas/spawn.output.json"
@@ -33,8 +44,12 @@
       "label": "Agent Delegate (Smart)",
       "description": "Delegates a task to one of several agents based on a routing decision (typically LLM-based). Inherits RFC 0011 §F conservative-path: when the routing confidence is below `escalationThreshold` (default 0.7 per RFC 0007 §A1), suspends via ctx.suspend({ reason: 'low-confidence' }) for human approval.",
       "category": "coordination",
+      "x-paletteCategory": "ai",
       "role": "side-effect",
-      "capabilities": ["cacheable", "side-effectful"],
+      "capabilities": [
+        "cacheable",
+        "side-effectful"
+      ],
       "configSchemaRef": "schemas/delegate.config.json",
       "inputSchemaRef": "schemas/delegate.input.json",
       "outputSchemaRef": "schemas/delegate.output.json"
@@ -45,8 +60,12 @@
       "label": "Agent Consensus Vote",
       "description": "Multi-agent voting on a decision. Fans out the question to N agents in parallel, collects votes, and returns the winning option + per-agent vote breakdown. Tie-breaking strategies: `first` (deterministic by agent index), `unresolved` (returns winningOption: null on tie).",
       "category": "coordination",
+      "x-paletteCategory": "ai",
       "role": "side-effect",
-      "capabilities": ["cacheable", "side-effectful"],
+      "capabilities": [
+        "cacheable",
+        "side-effectful"
+      ],
       "configSchemaRef": "schemas/consensus.config.json",
       "inputSchemaRef": "schemas/consensus.input.json",
       "outputSchemaRef": "schemas/consensus.output.json"
@@ -57,8 +76,12 @@
       "label": "Agent Message Send",
       "description": "Sends a message from the calling agent to a target agent. Uses RFC 0007 B2.3 messaging reducer — append-only, idempotent on messageId, replay-deterministic. The target agent reads via its conversation channel on next turn.",
       "category": "coordination",
+      "x-paletteCategory": "ai",
       "role": "side-effect",
-      "capabilities": ["cacheable", "side-effectful"],
+      "capabilities": [
+        "cacheable",
+        "side-effectful"
+      ],
       "configSchemaRef": "schemas/message.config.json",
       "inputSchemaRef": "schemas/message.input.json",
       "outputSchemaRef": "schemas/message.output.json"
@@ -69,8 +92,12 @@
       "label": "Agent Skill Invoke",
       "description": "Invokes a specific skill (tool / function) on an agent by skill ID. Returns the skill's result. The skill must be in the agent's toolAllowlist (RFC 0008 AgentManifest); host enforces.",
       "category": "coordination",
+      "x-paletteCategory": "ai",
       "role": "side-effect",
-      "capabilities": ["cacheable", "side-effectful"],
+      "capabilities": [
+        "cacheable",
+        "side-effectful"
+      ],
       "configSchemaRef": "schemas/skill.config.json",
       "inputSchemaRef": "schemas/skill.input.json",
       "outputSchemaRef": "schemas/skill.output.json"
@@ -81,8 +108,12 @@
       "label": "Agent Swarm Execute",
       "description": "Fans out a task across a swarm of agents and aggregates results. Strategies: `map` (one task per agent, collect all results), `map-reduce` (map + reduce step), `competitive` (first to complete wins).",
       "category": "coordination",
+      "x-paletteCategory": "ai",
       "role": "side-effect",
-      "capabilities": ["cacheable", "side-effectful"],
+      "capabilities": [
+        "cacheable",
+        "side-effectful"
+      ],
       "configSchemaRef": "schemas/swarm.config.json",
       "inputSchemaRef": "schemas/swarm.input.json",
       "outputSchemaRef": "schemas/swarm.output.json"
@@ -93,8 +124,11 @@
       "label": "Coordination Vote",
       "description": "Multi-participant voting with strategy (majority, supermajority, unanimous, plurality, ranked-choice, weighted). Routes through host.coordination.vote(...).",
       "category": "coordination",
+      "x-paletteCategory": "ai",
       "role": "gate",
-      "capabilities": ["side-effectful"],
+      "capabilities": [
+        "side-effectful"
+      ],
       "configSchemaRef": "schemas/coordination.vote.config.json",
       "inputSchemaRef": "schemas/coordination.vote.input.json",
       "outputSchemaRef": "schemas/coordination.vote.output.json"
@@ -105,8 +139,11 @@
       "label": "Coordination Consensus",
       "description": "Multi-agent consensus protocol. Participants iterate proposals until consensus threshold met or max rounds reached. Routes through host.coordination.consensus(...).",
       "category": "coordination",
+      "x-paletteCategory": "ai",
       "role": "gate",
-      "capabilities": ["side-effectful"],
+      "capabilities": [
+        "side-effectful"
+      ],
       "configSchemaRef": "schemas/coordination.consensus.config.json",
       "inputSchemaRef": "schemas/coordination.consensus.input.json",
       "outputSchemaRef": "schemas/coordination.consensus.output.json"
@@ -117,8 +154,11 @@
       "label": "Coordination Compete",
       "description": "Race multiple agents on the same task — first to complete wins. Other in-flight tasks cancelled. Routes through host.coordination.compete(...).",
       "category": "coordination",
+      "x-paletteCategory": "ai",
       "role": "side-effect",
-      "capabilities": ["side-effectful"],
+      "capabilities": [
+        "side-effectful"
+      ],
       "configSchemaRef": "schemas/coordination.compete.config.json",
       "inputSchemaRef": "schemas/coordination.compete.input.json",
       "outputSchemaRef": "schemas/coordination.compete.output.json"
@@ -129,8 +169,11 @@
       "label": "Coordination Map-Reduce",
       "description": "Distributes work across N participants (map), then aggregates results via a reducer. Routes through host.coordination.mapReduce(...).",
       "category": "coordination",
+      "x-paletteCategory": "ai",
       "role": "side-effect",
-      "capabilities": ["side-effectful"],
+      "capabilities": [
+        "side-effectful"
+      ],
       "configSchemaRef": "schemas/coordination.map-reduce.config.json",
       "inputSchemaRef": "schemas/coordination.map-reduce.input.json",
       "outputSchemaRef": "schemas/coordination.map-reduce.output.json"
@@ -141,8 +184,11 @@
       "label": "Coordination Delegate",
       "description": "Selects the best participant for a task based on skill match + load. Routes through host.coordination.delegate(...).",
       "category": "coordination",
+      "x-paletteCategory": "ai",
       "role": "side-effect",
-      "capabilities": ["side-effectful"],
+      "capabilities": [
+        "side-effectful"
+      ],
       "configSchemaRef": "schemas/coordination.delegate.config.json",
       "inputSchemaRef": "schemas/coordination.delegate.input.json",
       "outputSchemaRef": "schemas/coordination.delegate.output.json"
@@ -153,8 +199,11 @@
       "label": "Coordination Round-Robin",
       "description": "Rotates work assignment across participants. Stateful — tracks position in `_roundRobinCursor:<nodeId>` workflow variable. Routes through host.coordination.roundRobin(...).",
       "category": "coordination",
+      "x-paletteCategory": "ai",
       "role": "side-effect",
-      "capabilities": ["side-effectful"],
+      "capabilities": [
+        "side-effectful"
+      ],
       "configSchemaRef": "schemas/coordination.round-robin.config.json",
       "inputSchemaRef": "schemas/coordination.round-robin.input.json",
       "outputSchemaRef": "schemas/coordination.round-robin.output.json"
@@ -165,5 +214,6 @@
     "format": "esm",
     "entry": "./index.mjs",
     "minRuntimeVersion": "node>=20"
-  }
+  },
+  "kind": "node"
 }

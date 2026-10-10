@@ -12,15 +12,18 @@
  * `capabilities.agents.manifestRuntime`, these reflect real installed agents.
  */
 
+import { plantNegotiationAuditRun } from './negotiationAuditRun.js';
 import { randomUUID } from 'node:crypto';
-import { v1 } from '../middleware/protocolVersion.js';
+import { vendorPath } from '../middleware/protocolVersion.js';
 import { listNormativeRoster } from '../host/rosterService.js';
 import type { Express, NextFunction, Request, Response } from 'express';
 import { createLogger } from '../observability/logger.js';
 import { recordProtocolVersion, type ServedProfile } from '../observability/metricSeams.js';
 import {
-  A2A_SUPPORTED_VERSIONS,
   A2A_VERSION_HEADER,
+  a2aMinimumVersion,
+  a2aVersionBelow,
+  servedA2AVersions,
   LEGACY_A2A_PROTOCOL_VERSION,
   cardVersionFor,
   codecVersionFor,
@@ -41,14 +44,12 @@ import { dispatchChat, type ChatMessage } from '../providers/dispatch.js';
 import { getHostTestCompatEndpoint, COMPAT_PROVIDER_ID } from '../host/compatEndpoints.js';
 import { assertSubscriptionScopeAllowed, assertSubscriptionStorageTenant, assertSubscriptionProviderPermitted, CLEARED_SUBSCRIPTION_PROVIDERS } from '../byok/subscriptionCredentialScope.js';
 import { beginCopilotAuthorization, completeCopilotAuthorization, copilotReturnUrl, COPILOT_CALLBACK_ROUTE } from '../byok/copilotOAuth.js';
-import { vendorTwin } from '../middleware/protocolVersion.js';
 import { COPILOT_PROVIDER_ID } from '../aiProviders/copilotSubscription.js';
 import { storeSubscriptionCredential, subscriptionCredentialRef } from '../byok/subscriptionCredential.js';
 import { removeSecret } from '../byok/secretResolver.js';
-import { personalTenantOf } from '../host/requestSubject.js';
-import { createAgentToolProvider, builtinAgentToolIds } from '../host/agentToolProvider.js';
-import { buildFirewallHook, SENSITIVE_APPROVAL_TOOLS } from '../features/capability-firewall/firewallHook.js';
-import { getCapabilityRules, getUnknownToolPolicy, getFirewallMode, getDefaultDenyVerdict, getPlatformRules } from '../features/capability-firewall/ruleStore.js';
+import { callerSubject, personalTenantOf } from '../host/requestSubject.js';
+import { createScopedAgentToolProvider, builtinAgentToolIds } from '../host/agentToolProvider.js';
+import { buildLaneFirewall } from '../host/laneFirewall.js';
 import { advertisedCapabilitySet, mergeDegraded } from '../host/agentCapabilities.js';
 import { projectMemoryDegradation, type MemoryDimension } from '../host/memoryDimensions.js';
 import { gradeSuite, type EvalTask } from '../host/agentEvalGrader.js';
@@ -74,7 +75,8 @@ import type { HostAdapterSuite } from '../host/index.js';
 import type { Storage } from '../storage/storage.js';
 import type { UserAgentRecord } from '../types.js';
 import { agentVisibleToTenant, resolveAgentForTenant } from '../host/agentVisibility.js';
-import { sendError } from '../middleware/errorEnvelope.js';
+import { sendError, sendErrorWithMintedIds } from '../middleware/errorEnvelope.js';
+import { assetServeUrl } from '../host/assetServePath.js';
 
 interface AgentRoutesDeps {
   /** When provided, `dispatch` with `live: true` makes a real model turn. */
@@ -226,7 +228,7 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
   // capabilities.agents.manifestRuntime UNCONDITIONALLY (discovery.ts), so the route
   // is always live; a host that gates the advertisement MUST 404 these endpoints when
   // it does not advertise the capability (RFC 0072 §A: "MUST serve iff advertised").
-  app.get(v1('/agents'), async (req, res) => {
+  app.get('/agents', async (req, res) => {
     const tenant = tenantForInventory(req);
     const agents = await listVisibleAgents(deps.storage, tenant);
     res.json({ agents, total: agents.length });
@@ -239,7 +241,7 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
   // `404 "agent 'roster' is not installed"` while the capability was advertised —
   // a false claim on the live wire, caught by suite 2.42.3+ once its leg stopped
   // being unfailable. The data comes from the roster's ONE owner.
-  app.get(v1('/agents/roster'), async (req, res, next) => {
+  app.get('/agents/roster', async (req, res, next) => {
     try {
       const roster = await listNormativeRoster(tenantForInventory(req));
       res.json({ roster, total: roster.length });
@@ -247,7 +249,7 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
       next(err);
     }
   });
-  app.get(v1('/agents/:agentId'), async (req, res) => {
+  app.get('/agents/:agentId', async (req, res) => {
     const tenant = tenantForInventory(req);
     // `resolve()` reads through to durable storage on a registry miss, so a
     // cold instance still serves a seeded/user agent it hasn't hydrated.
@@ -265,12 +267,12 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
 
   // Host-extension aliases (RFC 0070 convenience; non-normative). The list
   // form additionally reports the host's runtime posture for the CLI.
-  app.get('/v1/host/openwop-app/agents', async (req, res) => {
+  app.get('/host/openwop-app/agents', async (req, res) => {
     const tenant = tenantForInventory(req);
     const agents = await listVisibleAgents(deps.storage, tenant);
     res.json({ agents, total: agents.length, runtime: { manifestRuntime: true } });
   });
-  app.get('/v1/host/openwop-app/agents/:agentId', async (req, res) => {
+  app.get('/host/openwop-app/agents/:agentId', async (req, res) => {
     const tenant = tenantForInventory(req);
     const a = await resolveAgentForTenant(req.params.agentId, tenant);
     if (!a) {
@@ -284,7 +286,7 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
   // default (replay-safe, conformance-stable); a real model turn when the body
   // sets `live: true` AND the host wired an AI adapter (deps.hostSuite). Live
   // turns default to the managed tier so no BYOK is required.
-  app.post('/v1/host/openwop-app/agents/:agentId/dispatch', async (req, res) => {
+  app.post('/host/openwop-app/agents/:agentId/dispatch', async (req, res) => {
     // CTI-1 (AGENTRT-2): gate dispatch on the SAME tenant visibility as the GET
     // routes. Without this a caller could INVOKE another tenant's user-authored
     // agent (its private manifest — system prompt, tool allowlist) by id even
@@ -338,7 +340,16 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
         // ADR 0277 P2 — normalize once: the profile id scopes the knowledge
         // tools; the memory scope + knowledge composition key off it too.
         const dispatchIdentity = await resolveAgentIdentity(tenantId, reqShape.agentId, { allowReverseScan: true });
-        const toolProvider = createAgentToolProvider({ tenantId, runId: reqShape.agentId, agentProfileId: dispatchIdentity.profileId });
+        // ADR 0830 D1 — through the ONE scope composer (ADR 0324), WITH the caller. This
+        // hand-rolled literal carried no `actingUserId`, so every tool on this lane ran
+        // as a system run (tenant-trusted) for any signed-in caller —
+        // `openwop:knowledge.search` included, which then read every org's KB. The
+        // subject is `callerSubject` (an `apikey:`/bearer caller has no `req.userId`,
+        // and resolves through its issuer like every other lane).
+        const toolProvider = createScopedAgentToolProvider({
+          tenantId, runId: reqShape.agentId, agentProfileId: dispatchIdentity.profileId,
+          actingUserId: callerSubject(req), personalTenant: personalTenantOf(req),
+        });
         const memory = createAgentMemoryPort(tenantId);
         const memoryScope = agentMemoryScope(dispatchIdentity.profileId);
         // ADR 0038 Phase 3 — compose the agent's BOUND knowledge (cited KB docs +
@@ -420,22 +431,8 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
         // without it, an agent pack that allowlists a sensitive tool (code-exec,
         // files.write, http.fetch) executes it with no approval. Mirrors
         // agentRunnerNode's hook; an escalated result surfaces in the response.
-        const [fwRules, fwUnknownPolicy, fwMode, fwDefaultDenyVerdict, fwPlatformRules] = await Promise.all([
-          getCapabilityRules(tenantId),
-          getUnknownToolPolicy(tenantId),
-          getFirewallMode(tenantId),
-          getDefaultDenyVerdict(tenantId),
-          getPlatformRules(),
-        ]);
-        const firewall = buildFirewallHook({
-          rules: fwRules,
-          unknownToolPolicy: fwUnknownPolicy,
-          requireApprovalTools: SENSITIVE_APPROVAL_TOOLS,
-          bypassApproval: false,
-          mode: fwMode,
-          defaultDenyVerdict: fwDefaultDenyVerdict,
-          platformRules: fwPlatformRules,
-        });
+        // ADR 0834 D1 — the ONE lane factory (always safe here: no interactive user).
+        const { hook: firewall } = await buildLaneFirewall({ tenantId, lane: 'dispatch', resource: dispatchRunId, dedupeKey: dispatchRunId });
         const result = await runAgentDispatchLive(
           {
             ...reqShape,
@@ -450,6 +447,10 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
             // ADR 0102 — lets the tool loop resolve this standing agent's tool
             // permissions for the per-tool gate (shadow-logged until enabled).
             tenantId,
+            // ADR 0775 D3 — the addressed id (the registry id here: this route
+            // resolves only registry/user agents), so every roster member that
+            // shares it binds.
+            agentAddressedId: req.params.agentId,
             // A4 — cross-run agent memory (RFC 0004). Injected unconditionally;
             // dispatch's `memoryEnabled` gate only reads/writes when the agent's
             // manifest declares `memoryShape.longTerm`, so agents without it are
@@ -491,7 +492,7 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
   // sandbox-MVP seam's gating in testSeam.ts). The request supplies parallel
   // `tasks[]` / `results[]` arrays — the runner produces the results, the host
   // grades them; the grader never makes a model call (replay-safe).
-  app.post('/v1/host/openwop-app/agents/eval-run', (req, res) => {
+  app.post('/host/openwop-app/agents/eval-run', (req, res) => {
     if (!evalSuiteEnabled()) {
       res.status(404).json({ error: 'not_found', message: 'agent eval suite disabled (set OPENWOP_AGENT_EVAL_SUITE_ENABLED=true)' });
       return;
@@ -584,8 +585,8 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
     }
     res.status(200).json({ ok: true, accepted: true, advertised: INPUT_MODALITIES, modalities: [...seen] });
   };
-  app.post('/v1/host/openwop-app/ai/call', aiCallSeam);
-  app.post('/v1/host/sample/ai/call', aiCallSeam);
+  app.post('/host/openwop-app/ai/call', aiCallSeam);
+  app.post('/host/sample/ai/call', aiCallSeam);
 
   // RFC 0121 §B.8 — the subscription-scope safety-rail bind seam. The
   // `aiproviders-subscription-scope` conformance scenario POSTs { provider, mode,
@@ -686,14 +687,14 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
       next(err);
     }
   };
-  app.post('/v1/host/openwop-app/credentials/bind', credentialsBindSeam);
-  app.post('/v1/host/sample/credentials/bind', credentialsBindSeam);
+  app.post('/host/openwop-app/credentials/bind', credentialsBindSeam);
+  app.post('/host/sample/credentials/bind', credentialsBindSeam);
 
   // ADR 0757 — GitHub Copilot connect (RFC 0121 cleared provider). POST returns
   // the consent URL for the SPA to navigate to; the callback is the fixed
   // redirect URI registered with the GitHub OAuth App. Host-internal routes: no
   // wire label names the mechanism (RFC 0121 gap G2).
-  app.post(vendorTwin(`/subscription/${COPILOT_PROVIDER_ID}/authorize`), async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  app.post(vendorPath(`/subscription/${COPILOT_PROVIDER_ID}/authorize`), async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
       const body = (req.body ?? {}) as { returnTo?: unknown };
       const { authorizeUrl } = await beginCopilotAuthorization({
@@ -723,7 +724,7 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
       next(err);
     }
   });
-  app.post(vendorTwin(`/subscription/${COPILOT_PROVIDER_ID}/disconnect`), async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  app.post(vendorPath(`/subscription/${COPILOT_PROVIDER_ID}/disconnect`), async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
       const tenantId = personalTenantOf(req);
       assertSubscriptionStorageTenant(tenantId);
@@ -798,8 +799,8 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
       sendError(res, 500, 'internal_error', err instanceof Error ? err.message : String(err));
     }
   };
-  app.post('/v1/host/openwop-app/ai/call-speech-synthesizer', callSpeechSynthesizerSeam);
-  app.post('/v1/host/sample/ai/call-speech-synthesizer', callSpeechSynthesizerSeam);
+  app.post('/host/openwop-app/ai/call-speech-synthesizer', callSpeechSynthesizerSeam);
+  app.post('/host/sample/ai/call-speech-synthesizer', callSpeechSynthesizerSeam);
 
   // RFC 0106 §B (ADR 0109 P1) — the `ctx.callTranscriber` test seam. Exercises
   // the same per-node adapter `ctx.callTranscriber` uses, with a COLLECTING
@@ -857,8 +858,8 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
       sendError(res, 500, 'internal_error', err instanceof Error ? err.message : String(err));
     }
   };
-  app.post('/v1/host/openwop-app/ai/call-transcriber', callTranscriberSeam);
-  app.post('/v1/host/sample/ai/call-transcriber', callTranscriberSeam);
+  app.post('/host/openwop-app/ai/call-transcriber', callTranscriberSeam);
+  app.post('/host/sample/ai/call-transcriber', callTranscriberSeam);
 
   // RFC 0106 §D/§F (ADR 0109 P4) — the barge-in / cancellation seam. A live mic
   // SESSION is host-internal per RFC 0106 §E, but the WIRE CONTRACT the
@@ -879,7 +880,7 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
 
     // Assistant playback up to (and including) the moment the user cuts in.
     for (let seq = 0; seq <= bargeAt; seq += 1) {
-      emit('voice.synthesis_chunk', { seq, mimeType: 'audio/mpeg', durationMs: 240, url: `https://host/v1/host/openwop-app/assets/turn-chunk-${seq}` });
+      emit('voice.synthesis_chunk', { seq, mimeType: 'audio/mpeg', durationMs: 240, url: `https://host${assetServeUrl(`turn-chunk-${seq}`)}` });
     }
     // User speech overlaps playback → probable barge-in.
     emit('voice.barge_in', { atMs: 1000 + bargeAt * 240 });
@@ -889,8 +890,8 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
 
     res.status(200).json({ events, droppedChunks: totalChunks - 1 - bargeAt });
   };
-  app.post('/v1/host/openwop-app/voice/barge-in', voiceBargeInSeam);
-  app.post('/v1/host/sample/voice/barge-in', voiceBargeInSeam);
+  app.post('/host/openwop-app/voice/barge-in', voiceBargeInSeam);
+  app.post('/host/sample/voice/barge-in', voiceBargeInSeam);
 
   // RFC 0090 §B — verifier turn + gating. This seam runs the host's real RFC 0090
   // commit gate (host/agentDispatch.ts runVerifier, verifierGating) over a
@@ -903,7 +904,7 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
   // Gated on OPENWOP_AGENT_VERIFIER_GATING (mirrors the discovery advertisement
   // of multiAgent.executionModel.verifier{supported,gating} + version 6) — 404
   // when the host does not advertise the verifier, so the scenario soft-skips.
-  app.post('/v1/host/openwop-app/agents/verify-run', async (req, res) => {
+  app.post('/host/openwop-app/agents/verify-run', async (req, res) => {
     if (process.env.OPENWOP_AGENT_VERIFIER_GATING !== 'true') {
       res.status(404).json({ error: 'not_found', message: 'verifier gating disabled (set OPENWOP_AGENT_VERIFIER_GATING=true)' });
       return;
@@ -942,7 +943,7 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
   // host.a2a advertisement flip); 404 when off. JSON-RPC `agent/getCard` AND a
   // GET-able static card at `/.well-known/agent-card.json` (below) both serve
   // the v0.3 AgentCard.
-  app.post('/v1/host/openwop-app/a2a', (req, res) => {
+  app.post('/host/openwop-app/a2a', (req, res) => {
     if (process.env.OPENWOP_A2A_SERVER_ENABLED !== 'true') {
       res.status(404).json({ error: 'not_found', message: 'a2a server endpoint disabled (set OPENWOP_A2A_SERVER_ENABLED=true)' });
       return;
@@ -990,7 +991,7 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
       // The §B audit event, deliberately CONTENT-FREE: the requested version and
       // the outcome, never the request body. A negotiation failure is not a
       // reason to log a peer's payload.
-      log.warn('a2a_version_refused', { requested: version.requested, served: [...A2A_SUPPORTED_VERSIONS] });
+      log.warn('a2a_version_refused', { requested: version.requested, served: [...servedA2AVersions()] });
       res.status(200).json({
         jsonrpc: '2.0',
         id: (req.body as { id?: string | number } | undefined)?.id ?? 0,
@@ -1004,7 +1005,7 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
           code: A2A_10_ERROR.VERSION_NOT_SUPPORTED.code,
           message: `unsupported A2A protocol version: ${version.requested}`,
           data: errorData10(A2A_10_ERROR.VERSION_NOT_SUPPORTED.reason, {
-            supportedVersions: A2A_SUPPORTED_VERSIONS.join(','),
+            supportedVersions: servedA2AVersions().join(','),
           }),
         },
       });
@@ -1081,6 +1082,20 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
       return;
     }
     const asked = dispositionForA2AVersionHeader(req.headers[A2A_VERSION_HEADER]);
+    // ADR 0858 P4 (steward ruling openwop-5e, 2026-10-07) — an EXPLICIT version
+    // under the floor is a negotiation, and `interop.md` §"The floor" makes it
+    // fail closed. On a major-2-only host that is `A2A-Version: 0.3`: refused,
+    // not downgraded (nothing in-tree needs 0.3). Other unsupported values keep
+    // the discovery rule in `cardVersionFor` (the preferred card).
+    if (asked.kind === 'unsupported' && a2aVersionBelow(asked.requested, a2aMinimumVersion())) {
+      sendError(res, 400, 'interop_version_unsupported', `A2A ${asked.requested} is below this host's minimumVersion ${a2aMinimumVersion()}`, {
+        retriable: false,
+        protocol: 'a2a',
+        requested: asked.requested,
+        supported: [...servedA2AVersions()],
+      });
+      return;
+    }
     const era = cardVersionFor(asked);
     const tenantId = (req as AgentReqLike).tenantId ?? 'default';
     // A tenant-PUBLISHED card (ctx.a2a.publishAgentCard) is a 0.3-era artifact —
@@ -1141,7 +1156,11 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
       }
       const tenantId = (req as AgentReqLike).tenantId ?? 'default';
       const calls: A2aCallRecord[] = [];
+      // ADR 0858 P4 — the run whose log the client's `negotiation.decided`
+      // lands on (`routes/negotiationAuditRun.ts`); named in every answer.
+      const audit = deps.storage ? await plantNegotiationAuditRun(deps.storage, tenantId) : null;
       const negotiation = {
+        ...(audit ? { onDecided: audit.record } : {}),
         ...(body.authenticated === true ? { authenticated: true } : {}),
         ...(body.peerOffersOnly ? { peerOffersOnly: body.peerOffersOnly } : {}),
         ...(body.requestVersion ? { requestVersion: body.requestVersion } : {}),
@@ -1177,32 +1196,34 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
           // §B — the canonical OpenWOP envelope, never the upstream body. A raw
           // upstream error would leave the caller parsing a foreign protocol to
           // learn its own request was rejected.
-          sendError(
+          sendErrorWithMintedIds(
             res,
             400,
             'interop_version_unsupported',
             err.message,
             { retriable: false, protocol: 'a2a', requested: err.requested, supported: [...err.supported] },
+            audit ? { runId: audit.wireRunId } : {},
           );
           return;
         }
         throw err;
       }
       const negotiatedVersion = calls.filter((c) => c.method === 'POST').at(-1)?.version ?? calls.at(-1)?.version;
+      const auditRun = audit ? { runId: audit.wireRunId } : {};
       if (!probe) {
-        res.status(200).json({ negotiatedVersion });
+        res.status(200).json({ negotiatedVersion, ...auditRun });
         return;
       }
       const peerAuthority = await settlePeerAuthorityProbe(deps.storage!, probe, reply, calls);
       // A null report means the peer asserted nothing — the block is OMITTED so
       // the suite records `blocked`, never a `false` nobody measured.
-      res.status(200).json({ negotiatedVersion, ...(peerAuthority ? { peerAuthority } : {}) });
+      res.status(200).json({ negotiatedVersion, ...auditRun, ...(peerAuthority ? { peerAuthority } : {}) });
     } catch (err) {
       next(err);
     }
   };
-  app.post('/v1/host/openwop-app/a2a/invoke', a2aInvokeSeam);
-  app.post('/v1/host/sample/a2a/invoke', a2aInvokeSeam);
+  app.post('/host/openwop-app/a2a/invoke', a2aInvokeSeam);
+  app.post('/host/sample/a2a/invoke', a2aInvokeSeam);
 
   // Start a backing run paused at a HITL approval gate and persist its durable
   // Task projection (`input-required`/approval), so a later `tasks/get` returns
@@ -1236,8 +1257,8 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
       next(err);
     }
   };
-  app.post('/v1/host/openwop-app/a2a/tasks/start', a2aTasksStartSeam);
-  app.post('/v1/host/sample/a2a/tasks/start', a2aTasksStartSeam);
+  app.post('/host/openwop-app/a2a/tasks/start', a2aTasksStartSeam);
+  app.post('/host/sample/a2a/tasks/start', a2aTasksStartSeam);
 
   // Read the persisted durable Task projection (RFC 0100 §2 / §3 `tasks/get`).
   // Returns the A2ATaskState record shape (top-level `state` + `runId`).
@@ -1259,8 +1280,8 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
       next(err);
     }
   };
-  app.get('/v1/host/openwop-app/a2a/tasks/:taskId', a2aTasksGetSeam);
-  app.get('/v1/host/sample/a2a/tasks/:taskId', a2aTasksGetSeam);
+  app.get('/host/openwop-app/a2a/tasks/:taskId', a2aTasksGetSeam);
+  app.get('/host/sample/a2a/tasks/:taskId', a2aTasksGetSeam);
 
   // Register a push-config (RFC 0100 §4). The caller URL MUST pass the RFC 0093
   // webhook-egress SSRF guard before any push — a private/loopback target is
@@ -1298,8 +1319,8 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
       next(err);
     }
   };
-  app.post('/v1/host/openwop-app/a2a/tasks/push-config', a2aPushConfigSeam);
-  app.post('/v1/host/sample/a2a/tasks/push-config', a2aPushConfigSeam);
+  app.post('/host/openwop-app/a2a/tasks/push-config', a2aPushConfigSeam);
+  app.post('/host/sample/a2a/tasks/push-config', a2aPushConfigSeam);
 }
 
 /** Durable A2A tasks are wired iff the A2A server is on AND durable tasks are

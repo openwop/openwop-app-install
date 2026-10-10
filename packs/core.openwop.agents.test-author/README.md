@@ -3,8 +3,8 @@
 Generates unit / integration / e2e tests from source code or specs. Framework-aware. Reads existing tests to match house style.
 
 | Pack name | `core.openwop.agents.test-author` |
-| Version | `1.0.0` |
-| Engine | OpenWOP `>=1.1.0 <2.0.0` |
+| Version | `1.0.2` |
+| Engine | OpenWOP `>=1.1.0 <3.0.0` |
 | Agents | 1 |
 | Required host capabilities | `aiProviders`, `host.agentRuntime`, `host.fs` |
 | License | Apache-2.0 |

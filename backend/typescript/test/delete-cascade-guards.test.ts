@@ -41,7 +41,7 @@ function client() {
   return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b), del: (p: string) => call('DELETE', p) };
 }
 async function signup(c: ReturnType<typeof client>): Promise<void> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `dcg-${Date.now()}-${n++}@acme.test` });
+  const r = await c.post('/host/openwop-app/test/login', { email: `dcg-${Date.now()}-${n++}@acme.test` });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
 }
 
@@ -50,19 +50,19 @@ describe('RI-9 — workflow delete refuses while a schedule binds it', () => {
     const c = client();
     await signup(c);
     const wfId = `wf.dcg-${Date.now()}`;
-    expect((await c.post('/v1/host/openwop-app/workflows', { workflowId: wfId, nodes: [{ nodeId: 'a', typeId: 'core.noop' }] })).status).toBe(201);
+    expect((await c.post('/host/openwop-app/workflows', { workflowId: wfId, nodes: [{ nodeId: 'a', typeId: 'core.noop' }] })).status).toBe(201);
 
     // bind a DISABLED job to the workflow — a disabled job is still a latent orphan.
-    const job = await c.post('/v1/host/openwop-app/scheduler/jobs', { jobId: `job-${Date.now()}`, cronExpr: '*/5 * * * *', workflowId: wfId, enabled: false });
+    const job = await c.post('/host/openwop-app/scheduler/jobs', { jobId: `job-${Date.now()}`, cronExpr: '*/5 * * * *', workflowId: wfId, enabled: false });
     expect(job.status).toBe(201);
 
-    const refused = await c.del(`/v1/host/openwop-app/workflows/${wfId}`);
+    const refused = await c.del(`/host/openwop-app/workflows/${wfId}`);
     expect(refused.status).toBe(409);
     expect((refused.body as { details?: { reason?: string } }).details?.reason).toBe('workflow_scheduled');
 
     // remove the schedule → the workflow deletes cleanly.
-    expect((await c.del(`/v1/host/openwop-app/scheduler/jobs/${job.body.jobId as string}`)).status).toBeLessThan(300);
-    expect((await c.del(`/v1/host/openwop-app/workflows/${wfId}`)).status).toBe(200);
+    expect((await c.del(`/host/openwop-app/scheduler/jobs/${job.body.jobId as string}`)).status).toBeLessThan(300);
+    expect((await c.del(`/host/openwop-app/workflows/${wfId}`)).status).toBe(200);
   });
 });
 

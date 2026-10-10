@@ -1,15 +1,26 @@
 /**
- * Account hard-delete tests (P3.6.5).
+ * Account hard-delete tests (P3.6.5) — `DELETE /host/openwop-app/account`
+ * (`src/routes/account.ts`), the self-service erasure of a personal tenant.
+ * Tenant-isolation, BYOK and legal-hold invariants; what is ASSERTED here:
+ *   - an unauthenticated caller is refused 401 `unauthenticated`;
+ *   - the caller's runs and KMS-wrapped BYOK secrets are deleted and counted in
+ *     the reply, and another tenant's run is untouched;
+ *   - ADR 0015: the caller is cascaded out of shared workspaces, and a SOLE
+ *     owner is refused 409 `conflict` (with an actionable workspace list)
+ *     before anything is wiped;
+ *   - CONS-4 / review F2: a LEGAL HOLD refuses 409 `legal_hold`, the hold row
+ *     itself survives (the spoliation defect), and lifting it restores the lane;
+ *   - KB-2 R2 (review F9): the vector-mirror outcome per backend reaches BOTH the
+ *     response and the ADR 0284 `account.delete` audit row, and "a backend
+ *     failed" is distinguishable from "no backend configured".
+ * Two service-level invariants the route relies on also live here:
+ * `deleteMember`'s atomic ≥1-owner guard under concurrency, and ADR 0003 P4
+ * `rekeyMemberSubject` re-deriving the deterministic personal-owner member id.
  *
- * Verifies DELETE /v1/host/openwop-app/account:
- *   - Removes runs, events, interrupts, workflows for the caller
- *   - Removes KMS-encrypted BYOK secrets
- *   - Leaves other tenants' data untouched
- *   - Refuses anon and unauthenticated callers
- *   - Writes an audit_log entry
- *   - KB-2 R2 (review F9): reports the VECTOR-MIRROR purge outcome per backend in
- *     BOTH the response and the ADR 0284 audit payload, and does so in a way that
- *     distinguishes "a backend failed" from "no vector backend is configured"
+ * Sabotage that turns it red (`account.ts`): the `startsWith('user:')` refusal
+ * relaxed; `deleteAllTenantData(tenantId)` aimed elsewhere; the membership
+ * cascade skipped; `if (soleOwned.length > 0)` / `if (hold)` disabled; the
+ * response's or the audit payload's `vectorBackendsFailed` hard-coded `[]`.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -53,6 +64,7 @@ import {
   _resetVectorTenantPurgersForTest,
 } from '../src/host/vector/vectorTenantPurge.js';
 import type { Storage } from '../src/storage/storage.js';
+import { OpenwopError } from '../src/types.js';
 
 function b64url(buf: Buffer | string): string {
   return Buffer.from(buf).toString('base64').replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
@@ -99,13 +111,11 @@ beforeAll(async () => {
   app.use(authMiddleware());
   registerAccountRoutes(app, { storage });
   app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-    type ErrLike = { code?: string; httpStatus?: number; message?: string; details?: Record<string, unknown> };
-    const e = err as ErrLike;
-    res.status(e.httpStatus ?? 500).json({
-      error: e.code ?? 'internal_error',
-      message: e.message,
-      ...(e.details ? { details: e.details } : {}),
-    });
+    if (err instanceof OpenwopError) {
+      res.status(err.httpStatus).json({ error: err.code, message: err.message, ...(err.details ? { details: err.details } : {}) });
+      return;
+    }
+    res.status(500).json({ error: 'internal_error', message: err instanceof Error ? err.message : String(err) });
   });
   appServer = await new Promise<http.Server>((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
   appPort = (appServer.address() as { port: number }).port;
@@ -141,7 +151,7 @@ function mintToken(sub: string): string {
 }
 
 async function callDelete(token?: string): Promise<Response> {
-  return fetch(`http://127.0.0.1:${appPort}/v1/host/openwop-app/account`, {
+  return fetch(`http://127.0.0.1:${appPort}/host/openwop-app/account`, {
     method: 'DELETE',
     headers: token ? { authorization: `Bearer ${token}` } : {},
   });
@@ -151,18 +161,12 @@ describe('P3.6.5 account hard-delete', () => {
   it('refuses unauthenticated callers', async () => {
     const res = await callDelete();
     expect(res.status).toBe(401);
+    expect(((await res.json()) as { error?: string }).error).toBe('unauthenticated');
   });
 
   it('hard-deletes the caller\'s data', async () => {
     const token = mintToken('firebase-uid-alice');
-    // Probe the tenant id by calling once and reading the principal —
-    // we need it to seed data. Just decode the JWT.
-    const parts = token.split('.');
-    const payload = JSON.parse(Buffer.from(parts[1]!, 'base64').toString('utf8'));
-    // Reproduce the tenantIdFromOidc derivation
-    const { createHash } = await import('node:crypto');
-    const h = createHash('sha256').update(`${payload.iss}:${payload.sub}`).digest('hex').slice(0, 32);
-    const tenantId = `user:${h}`;
+    const tenantId = await personalTenantOfSub('firebase-uid-alice');
     const otherTenant = 'user:00000000000000000000000000000000';
     const now = new Date().toISOString();
 
@@ -317,10 +321,14 @@ describe('P3.6.5 account hard-delete', () => {
 
     const results = await Promise.allSettled([deleteMember(ownerA.memberId), deleteMember(ownerB.memberId)]);
     const removed = results.filter((r) => r.status === 'fulfilled' && r.value === true).length;
-    // At most one removal can win; the loser is rejected (conflict) + restored.
+    // At most one removal can win (both may lose: the post-write re-check is
+    // fail-closed); every loser is a typed `conflict`, and RESTORED — the owner
+    // count is exactly what the winners removed, never fewer.
     expect(removed).toBeLessThanOrEqual(1);
-    // The invariant held under concurrency: the workspace still has an owner.
-    expect(await countOwners(ws.tenantId, ws.orgId)).toBeGreaterThanOrEqual(1);
+    const lost = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+    expect(lost).toHaveLength(2 - removed);
+    for (const l of lost) expect(l.reason).toMatchObject({ code: 'conflict' });
+    expect(await countOwners(ws.tenantId, ws.orgId)).toBe(2 - removed);
   });
 
   // ADR 0003 Phase 4 subject re-key: rekeyMemberSubject moves every membership
@@ -411,8 +419,6 @@ describe('KB-2 R2 — the account-delete response + audit report the vector mirr
     return { body, audit: row!.payload as Record<string, unknown> };
   }
 
-  let noneConfigured: VectorReport;
-
   afterAll(() => { _resetVectorTenantPurgersForTest(); });
 
   it('NO vector backend configured — an empty backend list, zero rows, no failures', async () => {
@@ -420,7 +426,6 @@ describe('KB-2 R2 — the account-delete response + audit report the vector mirr
     expect(registeredVectorPurgeBackends(), 'the precondition being modelled').toEqual([]);
 
     const { body, audit } = await deleteAndRead('firebase-uid-vec-none');
-    noneConfigured = body;
     expect(body.deleted).toBe(true);
     expect(body.vectorBackends).toEqual([]);
     expect(body.vectorBackendsFailed).toEqual([]);
@@ -444,6 +449,9 @@ describe('KB-2 R2 — the account-delete response + audit report the vector mirr
   });
 
   it('a FAILING backend is named in the response AND the audit — and is distinguishable from "none configured"', async () => {
+    // Its own "none configured" baseline — no dependence on an earlier case.
+    _resetVectorTenantPurgersForTest();
+    const noneConfigured = (await deleteAndRead('firebase-uid-vec-fail-baseline')).body;
     _resetVectorTenantPurgersForTest();
     registerVectorTenantPurger('probe-pg', async () => { throw new Error('pgvector unreachable'); });
     registerVectorTenantPurger('probe-ok', async () => 2);

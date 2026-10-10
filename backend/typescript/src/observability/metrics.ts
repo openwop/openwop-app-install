@@ -207,7 +207,7 @@ export const METRIC_CATALOG: readonly MetricSpec[] = [
     description: 'Idempotency-Key claims against the ADR 0549 ledger, by endpoint and outcome.',
     kind: 'counter',
     // `endpoint` is the `IdempotentEndpoint` union — a compile-time-closed set of
-    // two route literals, NOT a resolved path. The key and the request digest are
+    // route literals (three), NOT a resolved path. The key and the request digest are
     // caller-supplied and carry customer identifiers (ADR 0549 P2 log hygiene);
     // the tenant id is unbounded. None of the three is a label here, and
     // `idempotencyKey` is in FORBIDDEN_LABELS so the guard refuses it too.

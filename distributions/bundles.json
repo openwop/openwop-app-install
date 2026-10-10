@@ -1,5 +1,5 @@
 {
-  "description": "ADR 0366 Phase 4 \u2014 the full feature-composition catalog. THREE tiers: (1) `core` = the always-included substrate a distribution can never exclude (auth/orgs/chat/workflow-engine/billing/design-system + the always-on/graduated features); (2) `bundles` = sellable feature GROUPINGS (one per toggle `category`) an include-mode manifest selects by name; (3) STANDALONE = every registered feature that is neither core nor bundled \u2014 DERIVED (not listed here), individually selectable in an include-mode manifest's `features[]`. Phase-4 include semantics (a correction to P2's 'core = unbundled by construction'): the excludable universe is `registered \u2212 core`, so a standalone feature defaults OUT and is opted IN \u2014 the licensing-safe direction. INVARIANTS (gen-distribution --check enforces all): every core/bundle id is registered; no id is in two places; `core` is dependsOn-CLOSED (no core feature hard-depends on a non-core one \u2014 so every bundle/standalone the shop offers is actually buildable); an always-on feature (no toggleDefault) MUST be core. A new feature is auto-standalone-selectable unless added to core or a bundle.",
+  "description": "ADR 0366 Phase 4 \u2014 the full feature-composition catalog. THREE tiers: (1) `core` = the always-included substrate a distribution can never exclude (auth/orgs/chat/workflow-engine/billing/design-system + the always-on/graduated features); (2) `bundles` = sellable feature GROUPINGS (one per toggle `category`) an include-mode manifest selects by name; (3) STANDALONE = every registered feature that is neither core nor bundled \u2014 DERIVED (not listed here), individually selectable in an include-mode manifest's `features[]`. Phase-4 include semantics (a correction to P2's 'core = unbundled by construction'): the excludable universe is `registered \u2212 core`, so a standalone feature defaults OUT and is opted IN \u2014 the licensing-safe direction. INVARIANTS (gen-distribution --check enforces all): every core/bundle id is registered (a feature id, or \u2014 ADR 0820 \u00a74 \u2014 a sub-toggle id such as `code-export` whose parent feature ships in the same bundle or core; a sub-toggle strips nothing, it only puts the capability under the bundle's paywall); no id is in two places; `core` is dependsOn-CLOSED (no core feature hard-depends on a non-core one \u2014 so every bundle/standalone the shop offers is actually buildable); an always-on feature (no toggleDefault; or a frontend-only feature no toggle can hide) MUST be core. A new feature is auto-standalone-selectable unless added to core or a bundle. ADR 0820 \u00a77 UI \u2014 `groups` is the ordered list of store goal-groups and each bundle's optional `group` names one of them; the feature store groups its cards by this DATA (labels are i18n in the marketplace namespace), never by a UI-side map. gen-distribution --check validates every `group` against `groups`.",
   "core": [
     "access-hub",
     "agent-knowledge",
@@ -10,21 +10,16 @@
     "capability-firewall",
     "channels",
     "chat-autotitle",
-    "chat-deployment",
     "chat-export",
-    "chat-widget",
     "cms",
-    "code-exec",
     "connections",
-    "context-economy",
+    "consent",
     "conversation-search",
     "conversation-tools",
     "dashboard",
     "developer-keys",
     "developer-tools",
     "entities",
-    "environments",
-    "evals",
     "goals",
     "heartbeat-admin",
     "intent-ledger",
@@ -34,8 +29,6 @@
     "marketplace",
     "media",
     "memory-auto-extract",
-    "model-router",
-    "models",
     "multi-tab-chat",
     "navigation-settings",
     "notifications",
@@ -48,24 +41,30 @@
     "prompts",
     "proposals",
     "publishing",
-    "run-input-forms",
     "runtime-posture",
-    "scheduled-agent-chats",
-    "scheduled-chats",
     "settings",
     "sharing",
+    "structured-handoffs",
     "task-deck",
+    "team-intent-ledger",
     "tool-output-compaction",
     "tutorials",
     "usage-analytics",
     "users",
     "walkthroughs",
-    "widgets",
     "workflow-author"
+  ],
+  "groups": [
+    "sell-grow",
+    "ai-work",
+    "content",
+    "operations",
+    "standalone"
   ],
   "bundles": {
     "sales": {
       "label": "Sales",
+      "group": "sell-grow",
       "features": [
         "territories",
         "sales-commissions",
@@ -75,6 +74,7 @@
     },
     "commerce": {
       "label": "Commerce",
+      "group": "sell-grow",
       "features": [
         "commerce",
         "commerce-ucp",
@@ -86,6 +86,7 @@
     },
     "crm": {
       "label": "CRM",
+      "group": "sell-grow",
       "features": [
         "crm",
         "csm",
@@ -95,6 +96,7 @@
     },
     "marketing": {
       "label": "Marketing",
+      "group": "sell-grow",
       "features": [
         "campaigns",
         "campaign-brief",
@@ -110,15 +112,16 @@
     },
     "customer-data-platform": {
       "label": "Customer Data Platform",
+      "group": "sell-grow",
       "features": [
         "cdp",
         "campaign-journeys",
-        "consent",
         "destination-sync"
       ]
     },
     "content": {
       "label": "Content",
+      "group": "content",
       "features": [
         "comments",
         "docs",
@@ -128,6 +131,7 @@
     },
     "editors": {
       "label": "Editors",
+      "group": "content",
       "features": [
         "cad",
         "campaign-studio",
@@ -138,6 +142,7 @@
     },
     "studio": {
       "label": "Studio",
+      "group": "content",
       "features": [
         "documents",
         "notebooks",
@@ -146,23 +151,30 @@
       ]
     },
     "canvases": {
-      "label": "Canvases",
+      "label": "App Builder",
+      "group": "ai-work",
       "features": [
         "app-builder",
         "canvas-packs",
-        "creative-video"
+        "creative-video",
+        "code-export",
+        "code-publish",
+        "code-sync"
       ]
     },
     "agents": {
       "label": "Agents",
+      "group": "ai-work",
       "features": [
+        "scheduled-agent-chats",
         "advisory-board",
         "insights-suite",
-        "twin"
+        "twin-recall"
       ]
     },
     "leadership": {
-      "label": "Leadership",
+      "label": "Planning & Strategy",
+      "group": "ai-work",
       "features": [
         "priority-matrix",
         "strategy"
@@ -170,14 +182,43 @@
     },
     "integrations": {
       "label": "Integrations",
+      "group": "operations",
       "features": [
         "whatsapp"
       ]
     },
     "job-search": {
       "label": "Job search",
+      "group": "standalone",
       "features": [
         "job-search"
+      ]
+    },
+    "support": {
+      "label": "Support & Chat Deployment",
+      "group": "operations",
+      "features": [
+        "service-desk",
+        "service-desk.widget",
+        "chat-widget",
+        "chat-deployment"
+      ]
+    },
+    "developer": {
+      "label": "Developer",
+      "group": "ai-work",
+      "features": [
+        "claude-code",
+        "code-exec"
+      ]
+    },
+    "governance": {
+      "label": "Governance & AI Ops",
+      "group": "operations",
+      "features": [
+        "environments",
+        "evals",
+        "model-router"
       ]
     }
   }

@@ -34,7 +34,7 @@ function client() {
   return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b) };
 }
 let n = 0;
-async function owner() { const c = client(); const r = await c.post('/v1/host/openwop-app/test/login', { email: `col-${Date.now()}-${n++}@a.test`, tenantId: `org:col-${Date.now()}-${n++}` }); expect(r.status).toBe(201); return c; }
+async function owner() { const c = client(); const r = await c.post('/host/openwop-app/test/login', { email: `col-${Date.now()}-${n++}@a.test`, tenantId: `org:col-${Date.now()}-${n++}` }); expect(r.status).toBe(201); return c; }
 const setToggle = async (id: string, s: 'on' | 'off') => { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status: s }, 'test'); };
 
 const SCHEMA = { type: 'object', required: ['orderId'], properties: { orderId: { type: 'string' } } };
@@ -43,28 +43,28 @@ describe('CDP-G collect', () => {
   it('accepts a schema-valid event and PII-tags the payload', async () => {
     await setToggle('cdp', 'on');
     const c = await owner();
-    await c.post('/v1/host/openwop-app/cdp/event-schemas', { eventType: 'signup', schema: SCHEMA });
-    const r = await c.post('/v1/host/openwop-app/cdp/collect', { eventType: 'signup', payload: { orderId: 'o1', email: 'a@x.test' } });
+    await c.post('/host/openwop-app/cdp/event-schemas', { eventType: 'signup', schema: SCHEMA });
+    const r = await c.post('/host/openwop-app/cdp/collect', { eventType: 'signup', payload: { orderId: 'o1', email: 'a@x.test' } });
     expect(r.status, JSON.stringify(r.body)).toBe(201);
     expect(r.body.hasSchema).toBe(true);
     expect(r.body.piiFields).toContain('email'); // ingest PII tagging
 
-    const events = await c.get('/v1/host/openwop-app/cdp/collected-events');
+    const events = await c.get('/host/openwop-app/cdp/collected-events');
     expect(events.body.events.length).toBe(1);
   });
 
   it('rejects a schema-invalid event (422)', async () => {
     await setToggle('cdp', 'on');
     const c = await owner();
-    await c.post('/v1/host/openwop-app/cdp/event-schemas', { eventType: 'signup', schema: SCHEMA });
-    const r = await c.post('/v1/host/openwop-app/cdp/collect', { eventType: 'signup', payload: { notOrderId: true } });
+    await c.post('/host/openwop-app/cdp/event-schemas', { eventType: 'signup', schema: SCHEMA });
+    const r = await c.post('/host/openwop-app/cdp/collect', { eventType: 'signup', payload: { notOrderId: true } });
     expect(r.status).toBe(422);
   });
 
   it('accepts an unregistered event type (no contract ⇒ no rejection)', async () => {
     await setToggle('cdp', 'on');
     const c = await owner();
-    const r = await c.post('/v1/host/openwop-app/cdp/collect', { eventType: 'freeform', payload: { anything: 1 } });
+    const r = await c.post('/host/openwop-app/cdp/collect', { eventType: 'freeform', payload: { anything: 1 } });
     expect(r.status).toBe(201);
     expect(r.body.hasSchema).toBe(false);
   });
@@ -72,8 +72,8 @@ describe('CDP-G collect', () => {
   it('batch: best-effort per row — one schema failure does not sink the rest', async () => {
     await setToggle('cdp', 'on');
     const c = await owner();
-    await c.post('/v1/host/openwop-app/cdp/event-schemas', { eventType: 'signup', schema: SCHEMA });
-    const r = await c.post('/v1/host/openwop-app/cdp/collect/batch', { events: [
+    await c.post('/host/openwop-app/cdp/event-schemas', { eventType: 'signup', schema: SCHEMA });
+    const r = await c.post('/host/openwop-app/cdp/collect/batch', { events: [
       { eventType: 'signup', payload: { orderId: 'o1' } },   // valid
       { eventType: 'signup', payload: { notOrderId: true } }, // schema-invalid → rejected
       { eventType: 'freeform', payload: { x: 1 } },           // unregistered → accepted
@@ -86,23 +86,23 @@ describe('CDP-G collect', () => {
     expect(r.body.results[1].error.code).toBe('validation_error');
     expect(r.body.results[2]).toMatchObject({ index: 2, ok: true, hasSchema: false });
     // only the two accepted rows landed
-    expect((await c.get('/v1/host/openwop-app/cdp/collected-events')).body.events.length).toBe(2);
+    expect((await c.get('/host/openwop-app/cdp/collected-events')).body.events.length).toBe(2);
   });
 
   it('batch: rejects an oversize batch outright (no silent truncation)', async () => {
     await setToggle('cdp', 'on');
     const c = await owner();
     const events = Array.from({ length: 101 }, (_, i) => ({ eventType: 'freeform', payload: { i } }));
-    const r = await c.post('/v1/host/openwop-app/cdp/collect/batch', { events });
+    const r = await c.post('/host/openwop-app/cdp/collect/batch', { events });
     expect(r.status).toBe(400);
     // nothing landed — rejected before any write
-    expect((await c.get('/v1/host/openwop-app/cdp/collected-events')).body.events.length).toBe(0);
+    expect((await c.get('/host/openwop-app/cdp/collected-events')).body.events.length).toBe(0);
   });
 
   it('batch: a non-array / empty events body is a 400', async () => {
     await setToggle('cdp', 'on');
     const c = await owner();
-    expect((await c.post('/v1/host/openwop-app/cdp/collect/batch', { events: 'nope' })).status).toBe(400);
-    expect((await c.post('/v1/host/openwop-app/cdp/collect/batch', { events: [] })).status).toBe(400);
+    expect((await c.post('/host/openwop-app/cdp/collect/batch', { events: 'nope' })).status).toBe(400);
+    expect((await c.post('/host/openwop-app/cdp/collect/batch', { events: [] })).status).toBe(400);
   });
 });

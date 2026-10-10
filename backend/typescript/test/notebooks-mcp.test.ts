@@ -6,7 +6,7 @@
  *   - tenant isolation (a tool call runs in the caller's tenant — cross-tenant
  *     notebooks are invisible);
  *   - the gate (anonymous principal denied; `notebooks` toggle off ⇒ hidden);
- *   - the `/v1/tools` RFC 0078 projection (descriptors valid + by-id + 404).
+ *   - the `/tools` RFC 0078 projection (descriptors valid + by-id + 404).
  *
  * Requires OPENWOP_MCP_SERVER_ENABLED=true at createApp time (set in beforeAll).
  *
@@ -59,13 +59,13 @@ function client(): Client {
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
 async function ownerWithOrg(who: string): Promise<{ c: Client; orgId: string }> {
   const c = client();
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail(who) });
+  const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail(who) });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   return { c, orgId: org.body.orgId };
 }
 
-const MCP = '/v1/host/openwop-app/mcp';
+const MCP = '/host/openwop-app/mcp';
 let rpcId = 0;
 const rpc = (c: Client, method: string, params?: unknown) =>
   c.post(MCP, { jsonrpc: '2.0', id: ++rpcId, method, ...(params !== undefined ? { params } : {}) });
@@ -88,7 +88,7 @@ describe('notebooks MCP tools — registration + roundtrip', () => {
 
   it('tools/call notebook-list returns a CallToolResult with the caller’s notebook', async () => {
     const { c, orgId } = await ownerWithOrg('mcp-call');
-    const created = await c.post('/v1/host/openwop-app/notebooks', { orgId, name: 'MCP cats' });
+    const created = await c.post('/host/openwop-app/notebooks', { orgId, name: 'MCP cats' });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
     const notebookId = created.body.notebook.id as string;
 
@@ -106,9 +106,9 @@ describe('notebooks MCP tools — registration + roundtrip', () => {
 
   it('tools/call notebook-search runs (grounded over the notebook KB)', async () => {
     const { c, orgId } = await ownerWithOrg('mcp-search');
-    const created = await c.post('/v1/host/openwop-app/notebooks', { orgId, name: 'Felines' });
+    const created = await c.post('/host/openwop-app/notebooks', { orgId, name: 'Felines' });
     const notebookId = created.body.notebook.id as string;
-    await c.post(`/v1/host/openwop-app/notebooks/${notebookId}/sources`, { title: 'Cats', text: 'Cats purr when content and groom with their tongue.' });
+    await c.post(`/host/openwop-app/notebooks/${notebookId}/sources`, { title: 'Cats', text: 'Cats purr when content and groom with their tongue.' });
     const r = await rpc(c, 'tools/call', { name: 'notebook-search', arguments: { notebookId, query: 'why do cats purr' } });
     expect(r.status).toBe(200);
     expect(r.body.result?.isError, JSON.stringify(r.body)).toBe(false);
@@ -123,7 +123,7 @@ describe('notebooks MCP tools — registration + roundtrip', () => {
   it('a tool call runs in the CALLER’s tenant — a cross-tenant notebook is invisible', async () => {
     const a = await ownerWithOrg('mcp-tenantA');
     const b = await ownerWithOrg('mcp-tenantB');
-    const created = await a.c.post('/v1/host/openwop-app/notebooks', { orgId: a.orgId, name: 'A secret' });
+    const created = await a.c.post('/host/openwop-app/notebooks', { orgId: a.orgId, name: 'A secret' });
     const aNotebookId = created.body.notebook.id as string;
     // b calls notebook-get for a's notebook → null (different tenant), not a leak.
     const g = await rpc(b.c, 'tools/call', { name: 'notebook-get', arguments: { notebookId: aNotebookId } });
@@ -169,7 +169,7 @@ describe('notebooks MCP tools — gating (ADR 0087)', () => {
 describe('notebooks MCP tools — /v1/tools projection (RFC 0078)', () => {
   it('lists valid ToolDescriptors + serves by-id + 404s unknown', async () => {
     const { c } = await ownerWithOrg('mcp-catalog');
-    const list = await c.get('/v1/tools');
+    const list = await c.get('/tools');
     expect(list.status).toBe(200);
     expect(Array.isArray(list.body), 'GET /v1/tools MUST be a bare ToolDescriptor[]').toBe(true);
     const search = (list.body as Array<{ toolId: string; source: string; safetyTier: string; inputSchema?: unknown }>)
@@ -179,17 +179,17 @@ describe('notebooks MCP tools — /v1/tools projection (RFC 0078)', () => {
     expect(search!.safetyTier).toBe('read');
     expect(search!.inputSchema).toBeTruthy();
 
-    const byId = await c.get('/v1/tools/mcp:notebook-search');
+    const byId = await c.get('/tools/mcp:notebook-search');
     expect(byId.status).toBe(200);
     expect(byId.body.toolId).toBe('mcp:notebook-search');
 
-    const unknown = await c.get('/v1/tools/mcp:does-not-exist');
+    const unknown = await c.get('/tools/mcp:does-not-exist');
     expect(unknown.status).toBe(404);
   });
 
   it('projects the WRITE tools with safetyTier:write + approval:always (ADR 0087 OQ-1)', async () => {
     const { c } = await ownerWithOrg('mcp-write-desc');
-    const list = (await c.get('/v1/tools')).body as Array<{ toolId: string; safetyTier: string; approval: string; auth?: { scopes?: string[] } }>;
+    const list = (await c.get('/tools')).body as Array<{ toolId: string; safetyTier: string; approval: string; auth?: { scopes?: string[] } }>;
     const addSource = list.find((d) => d.toolId === 'mcp:notebook-add-source');
     expect(addSource, 'mcp:notebook-add-source present').toBeTruthy();
     expect(addSource!.safetyTier).toBe('write');
@@ -214,7 +214,7 @@ describe('notebooks MCP tools — /v1/tools projection (RFC 0078)', () => {
     // over the WIRE bytes rather than over the helper: for every tool the catalog
     // actually serves, `auth.scopes` equals the shared rule's answer.
     const { c } = await ownerWithOrg('mcp-scope-parity');
-    const list = (await c.get('/v1/tools')).body as Array<{ toolId: string; auth?: { scopes?: string[] } }>;
+    const list = (await c.get('/tools')).body as Array<{ toolId: string; auth?: { scopes?: string[] } }>;
     expect(list.length, 'an empty catalog would make this loop vacuous').toBeGreaterThan(0);
     let checked = 0;
     for (const d of list) {
@@ -231,7 +231,7 @@ describe('notebooks MCP tools — /v1/tools projection (RFC 0078)', () => {
 describe('notebooks MCP WRITE tools — HITL gate (ADR 0087 OQ-1)', () => {
   it('a write tools/call SUSPENDS for approval and does NOT mutate until approved', async () => {
     const { c, orgId } = await ownerWithOrg('mcp-write');
-    const created = await c.post('/v1/host/openwop-app/notebooks', { orgId, name: 'Write target' });
+    const created = await c.post('/host/openwop-app/notebooks', { orgId, name: 'Write target' });
     const notebookId = created.body.notebook.id as string;
 
     const r = await rpc(c, 'tools/call', { name: 'notebook-create-note', arguments: { notebookId, content: 'untrusted note' } });
@@ -241,7 +241,7 @@ describe('notebooks MCP WRITE tools — HITL gate (ADR 0087 OQ-1)', () => {
     expect((r.body.result?.content?.[0]?.text ?? '') as string).toContain('awaiting');
 
     // The note was NOT created — approval is load-bearing (no silent mutation).
-    const notes = await c.get(`/v1/host/openwop-app/notebooks/${notebookId}/notes`);
+    const notes = await c.get(`/host/openwop-app/notebooks/${notebookId}/notes`);
     expect((notes.body.notes ?? []).length).toBe(0);
   });
 

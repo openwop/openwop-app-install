@@ -4,7 +4,7 @@
 export const messages = {
   eyebrow: 'Développeur',
   title: 'Extensions d’interface',
-  lede: 'Chargez des packs d’extensions front-end signés et isolés (RFC 0117/0119).',
+  lede: 'Chargez des packs d’extensions front-end signés et isolés.',
 
   notEnabledTitle: 'Les extensions d’interface ne sont pas activées',
   notEnabledBody: 'Demandez à un administrateur d’activer les Extensions d’interface pour ce locataire.',

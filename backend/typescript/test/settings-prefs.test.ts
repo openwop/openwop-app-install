@@ -50,11 +50,11 @@ function client(): Client {
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), put: (p, b) => call('PUT', p, b) };
 }
 
-const PREFS = '/v1/host/openwop-app/settings/prefs';
+const PREFS = '/host/openwop-app/settings/prefs';
 let n = 0;
 async function login(tenantId: string): Promise<{ c: Client; userId: string }> {
   const c = client();
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `set-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await c.post('/host/openwop-app/test/login', { email: `set-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return { c, userId: (r.body as { user: { userId: string } }).user.userId };
 }
@@ -149,11 +149,11 @@ describe('ADR 0693 phase 5 — the ROUTE reads the ACTIVE workspace bucket, not 
     expect(home, 'a managed target is configured in tests, so the figure is present').not.toBeNull();
     expect(home!.scope).toBe('tenant');
 
-    const ws = await c.post('/v1/host/openwop-app/workspaces', { name: `Usage WS ${n++}` });
+    const ws = await c.post('/host/openwop-app/workspaces', { name: `Usage WS ${n++}` });
     expect(ws.status, JSON.stringify(ws.body)).toBe(201);
     const wsId = ws.body.workspaceId as string;
     expect(wsId).toMatch(/^ws:/);
-    const sw = await c.post(`/v1/host/openwop-app/workspaces/${encodeURIComponent(wsId)}/switch`);
+    const sw = await c.post(`/host/openwop-app/workspaces/${encodeURIComponent(wsId)}/switch`);
     expect(sw.status, JSON.stringify(sw.body)).toBe(200);
 
     // The dispatcher's charge: (ACTIVE workspace, acting user) — runs.ts stamps

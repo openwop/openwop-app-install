@@ -1,5 +1,6 @@
 /**
- * Teardown-reachability RECORDED_DEBT drain (baseline 2→0): the CRM dedup-claim
+ * ADR 0590 teardown-reachability RECORDED_DEBT drain (baseline 2→0; the gate is
+ * `teardown-reachability-coverage.test.ts`): the CRM dedup-claim
  * rows `crm:companykeyclaim` / `crm:dealkeyclaim` (convertService.ts) key by
  * `claimId` and their row bodies (`{claimId, companyId}` / `{claimId, dealId}`)
  * carry NO top-level `tenantId`, so `purgeTenantRows` — which matches a row via
@@ -20,6 +21,13 @@
  * Born-red: remove either production tenantOf and A's row survives the purge.
  * `org:cc` vs `org:cc2` proves `split('::')` recovers the tenant without a
  * sibling-prefix collision.
+ *
+ * Wave-4 grade-tests probes (each red): drop either production tenantOf, or make
+ * the company one a fixed-width prefix (`claimId.slice(0, 6)` — `org:cc2` then
+ * reads as `org:cc` and B's row is purged). The contact-claim leg is NOT a
+ * tenantOf witness: that row carries a top-level `tenantId`, so `jsonTenantId`
+ * reaches it with or without the 4th arg (a double guard — it witnesses the
+ * outcome only).
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';

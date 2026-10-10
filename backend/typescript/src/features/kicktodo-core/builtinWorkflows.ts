@@ -82,7 +82,7 @@ export const kicktodoBuiltinWorkflows: readonly WorkflowDefinition[] = [
         typeId: AGENT_RUNNER_TYPE_ID,
         config: { offerTools: ['openwop:kicktodo.today', 'openwop:kicktodo.progress'] as string[] },
         inputs: {
-          agentId: 'feature.kicktodo.agents.replan-composer',
+          agentId: 'vendor.openwop-app.kicktodo.agents.replan-composer',
           task: input('participantIntent'),
           credentialRef: REPLAN_CREDENTIAL_REF,
         },

@@ -22,7 +22,8 @@
  * @see src/host/workflowsRegistry.ts (the global by-id resolver this layers over)
  */
 
-import { DurableCollection } from './hostExtPersistence.js';
+import { DurableCollection, isHostExtPersistenceInitialized } from './hostExtPersistence.js';
+import { createLogger } from '../observability/logger.js';
 import { getRegisteredWorkflowAsync, getRegisteredWorkflow } from './workflowsRegistry.js';
 import { registerCredentialRefConsumer } from './credentialRefRegistry.js';
 // NOTE: this is a CYCLE — `chainBackedWorkflows` imports `recordOwnership` from here.
@@ -32,6 +33,13 @@ import { registerCredentialRefConsumer } from './credentialRefRegistry.js';
 // `isBuiltinWorkflowId` on a chain-backed id, which is exactly the path that would
 // throw or return undefined if the cycle bit.
 import { getChainBackedWorkflow } from './chainBackedWorkflows.js';
+
+// ADR 0794 D2 — the shared-id predicates live beside the mint (`workflowId.ts`),
+// because they are an authorization rule that depends on the id grammar.
+export { PUBLIC_WORKFLOW_ID, SHARED_WORKFLOW_ID, isSharedWorkflowId } from './workflowId.js';
+import { isSharedWorkflowId } from './workflowId.js';
+
+const log = createLogger('host.workflowOwnership');
 
 export interface WorkflowOwnershipRecord {
   /** `${tenantId}:${workflowId}` */
@@ -61,6 +69,25 @@ export interface WorkflowOwnershipRecord {
    *  a machine-authored workflow does not stop being machine-authored because
    *  a human edited it. */
   authoredVia?: string;
+  /** ADR 0770 D3 — for a sub-chain child co-registered by `from-chain`: the
+   *  revision hash of the definition the HOST minted. A later instantiation
+   *  compares the head against it — equal ⇒ pristine, safe to refresh with a
+   *  fresh expansion; different ⇒ the user edited it, reuse it untouched.
+   *  STICKY like `publishedRevision`: only the mint lane sets it. */
+  mintedRevision?: string;
+  /** ADR 0789 — set on a copy-on-write fork of a SHARED definition: the shared id
+   *  it was forked from. STICKY (only the fork lane sets it). Lets a re-seed see
+   *  that this tenant already holds its own copy and skip the shared one, instead
+   *  of listing an "X" beside the tenant's edited "X". */
+  forkedFrom?: string;
+  /** ADR 0789 — on the SHARED id's row: the fork this tenant's first edit claimed
+   *  (a compare-and-swap, so two concurrent first saves converge on ONE fork).
+   *  Preserved across refreshes; only `claimForkOf` sets it. */
+  forkedTo?: string;
+  /** ADR 0789 — on a FORK's row: fork hooks that threw, so their references still
+   *  point at the shared id. Re-run on the fork's next save; cleared when they
+   *  all succeed. Only `setRepointPending` writes it. */
+  repointPending?: string[];
 }
 
 /** Metadata captured at ownership time for cheap listing. */
@@ -73,6 +100,10 @@ export interface OwnershipMeta {
   publishedRevision?: string;
   /** ADR 0596 — set by the workflow-author write lane; omitted meta preserves it. */
   authoredVia?: string;
+  /** ADR 0770 D3 — set by the from-chain child mint lane; omitted meta preserves it. */
+  mintedRevision?: string;
+  /** ADR 0789 — set by the shared-definition fork lane; omitted meta preserves it. */
+  forkedFrom?: string;
 }
 
 const store = new DurableCollection<WorkflowOwnershipRecord>(
@@ -120,6 +151,15 @@ export async function recordOwnership(
       ...((meta.authoredVia ?? existing?.authoredVia) !== undefined
         ? { authoredVia: meta.authoredVia ?? existing?.authoredVia }
         : {}),
+      // ADR 0770 D3 — sticky, same rule (only the from-chain child mint sets it).
+      ...((meta.mintedRevision ?? existing?.mintedRevision) !== undefined
+        ? { mintedRevision: meta.mintedRevision ?? existing?.mintedRevision }
+        : {}),
+      ...((meta.forkedFrom ?? existing?.forkedFrom) !== undefined
+        ? { forkedFrom: meta.forkedFrom ?? existing?.forkedFrom }
+        : {}),
+      ...(existing?.forkedTo !== undefined ? { forkedTo: existing.forkedTo } : {}),
+      ...(existing?.repointPending !== undefined ? { repointPending: existing.repointPending } : {}),
       nodeCount: meta.nodeCount,
       createdAt: existing?.createdAt ?? iso,
       updatedAt: iso,
@@ -140,6 +180,14 @@ export async function recordOwnership(
     ...((meta.authoredVia ?? existing?.authoredVia) !== undefined
       ? { authoredVia: meta.authoredVia ?? existing?.authoredVia }
       : {}),
+    ...((meta.mintedRevision ?? existing?.mintedRevision) !== undefined
+      ? { mintedRevision: meta.mintedRevision ?? existing?.mintedRevision }
+      : {}),
+    ...((meta.forkedFrom ?? existing?.forkedFrom) !== undefined
+      ? { forkedFrom: meta.forkedFrom ?? existing?.forkedFrom }
+      : {}),
+    ...(existing?.forkedTo !== undefined ? { forkedTo: existing.forkedTo } : {}),
+    ...(existing?.repointPending !== undefined ? { repointPending: existing.repointPending } : {}),
     nodeCount: meta.nodeCount,
     createdAt: existing?.createdAt ?? iso,
     updatedAt: iso,
@@ -171,6 +219,37 @@ export async function setPublishedRevision(
     if (await store.compareAndSwap(existing, next)) return true;
   }
   return false; // persistent contention — the caller reports a named failure
+}
+
+/**
+ * ADR 0789 — claim the fork of `sharedId` for `tenantId`: compare-and-swap
+ * `forkedTo` onto the tenant's ownership row of the shared id. Returns the fork id
+ * that won (the candidate, or an earlier claimant's), or `null` when the tenant no
+ * longer owns the shared id (a concurrent fork already completed and removed it).
+ */
+export async function claimForkOf(tenantId: string, sharedId: string, candidateId: string): Promise<string | null> {
+  const key = ownKey(tenantId, sharedId);
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const existing = await store.get(key);
+    if (!existing) return null;
+    if (existing.forkedTo) return existing.forkedTo;
+    if (await store.compareAndSwap(existing, { ...existing, forkedTo: candidateId })) return candidateId;
+  }
+  const settled = await store.get(key);
+  return settled?.forkedTo ?? null;
+}
+
+/** ADR 0789 — record (or clear, with an empty list) the fork hooks still owed on a
+ *  fork's row. CAS so a concurrent save's `recordOwnership` is never clobbered. */
+export async function setRepointPending(tenantId: string, workflowId: string, pending: readonly string[]): Promise<void> {
+  const key = ownKey(tenantId, workflowId);
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const existing = await store.get(key);
+    if (!existing) return;
+    const { repointPending: _prior, ...rest } = existing;
+    const next: WorkflowOwnershipRecord = pending.length > 0 ? { ...rest, repointPending: [...pending] } : rest;
+    if (await store.compareAndSwap(existing, next)) return;
+  }
 }
 
 /** The workflows owned by one tenant (newest first) — list-metadata only. */
@@ -212,7 +291,11 @@ export async function purgeTenantOwnedWorkflowDefs(
   const owned = await listOwned(tenantId);
   let defsDeleted = 0;
   for (const row of owned) {
-    if (!(await isAuthoredByOtherTenant(tenantId, row.workflowId))) {
+    // ADR 0789 — a SHARED definition is never this tenant's to delete, even when
+    // it is the last owner: tenants that forked away (or were retracted) still
+    // have runs stamped with the id, and the deletion cascade drops every
+    // tenant's revisions. Only this tenant's ownership row goes.
+    if (!isSharedWorkflowId(row.workflowId) && !(await isAuthoredByOtherTenant(tenantId, row.workflowId))) {
       deleteDef(row.workflowId);
       defsDeleted += 1;
     }
@@ -237,10 +320,23 @@ export async function allOwnershipByWorkflow(): Promise<Map<string, string[]>> {
 /** True iff SOME tenant has authored `workflowId` (2026-07 vuln-scan M7). Lets a
  *  read distinguish a tenant-authored def (owner-only) from an UN-owned public
  *  fixture / premade template (openwop-app.uppercase, tmpl.*), which stay public.
- *  Small table + infrequent read, so the full scan (matching
- *  `removeOwnershipByWorkflowId`) is acceptable. */
+ *  Narrowed in the database (`ownersOf`) — this table grows with every tenant
+ *  and the read is on request paths, so it must not materialize the table. */
 export async function isAuthoredByAnyTenant(workflowId: string): Promise<boolean> {
-  return (await store.list()).some((r) => r.workflowId === workflowId);
+  return (await ownersOf(workflowId)).length > 0;
+}
+
+/**
+ * Every ownership row for ONE `workflowId`, across tenants (EVID-1). The key is
+ * `${tenantId}:${workflowId}` and the only index is by tenant, so the by-workflow
+ * question used to be answered with `store.list()` — the whole table, on every
+ * by-id read of a workflow the caller does not own. The row's JSON carries the
+ * id verbatim, so the database narrows to the rows that contain it and the exact
+ * `workflowId ===` test below decides (ids are prefixes of each other, and a
+ * tenant id can contain one — a containing row is only a candidate).
+ */
+async function ownersOf(workflowId: string): Promise<WorkflowOwnershipRecord[]> {
+  return store.listContainingText(workflowId, (r) => r.workflowId === workflowId);
 }
 
 /** Every workflowId owned by SOME tenant, materialized in ONE scan — so a
@@ -276,16 +372,52 @@ export async function isBuiltinWorkflowId(workflowId: string): Promise<boolean> 
 
 /**
  * Whether `workflowId` is owned by SOME tenant OTHER than `tenantId` (ADR 0440
- * P4). Short-circuits on the first foreign owner instead of materializing the
- * whole list — the authz guards call this on the write hot path (the 1.5s
- * autosave), so it must not pay an O(all-ownership-rows) scan when it can stop
- * at the first hit.
+ * P4). The authz guards call this on request paths (a by-id read of an un-owned
+ * workflow, the 1.5s autosave), so it reads only that workflow's rows.
+ *
+ * CORRECTED 2026-10-02 (EVID-1): this comment used to say it "short-circuits on
+ * the first foreign owner instead of materializing the whole list". It did the
+ * opposite — `for (… of await store.list())` materialized the whole table and
+ * then stopped early in memory.
  */
 export async function isAuthoredByOtherTenant(tenantId: string, workflowId: string): Promise<boolean> {
-  for (const r of await store.list()) {
-    if (r.workflowId === workflowId && r.tenantId !== tenantId) return true;
+  return (await ownersOf(workflowId)).some((r) => r.tenantId !== tenantId);
+}
+
+/**
+ * ADR 0823 D1 — THE cross-tenant predicate for a workflow id: `true` when
+ * `tenantId` must neither read nor EXECUTE it, because another tenant owns it.
+ *
+ * - a SHARED id (ADR 0789) is one definition every tenant runs — never foreign;
+ * - an id the tenant owns — never foreign (point lookup, the common case);
+ * - otherwise foreign iff some OTHER tenant owns it. An UNOWNED id (host system
+ *   workflows, catalog source A, conformance fixtures) stays open to everyone.
+ *
+ * The launch funnel (`resolveLaunchDefinition.ts`), `resolveRunDefinition` and
+ * the M7 read guard (`routes/workflows.ts` `isForeignOwned`) all ask THIS, so a
+ * definition a tenant cannot read is one it cannot run (the gap ADR 0823 closed:
+ * `POST /runs` with another tenant's id ran it, keys and all).
+ *
+ * D5 — fails CLOSED by THROWING, never by answering. A store error propagates,
+ * so each caller takes its error path (500, retry) instead of concluding the
+ * workflow is gone — a `true` here would make a resume, an interrupt decision or
+ * the dispatch sweeper treat a database blip as a permanent "workflow not found".
+ * The one non-throwing exception is a TEST process that never initialised
+ * host-ext persistence (executor-arm unit tests): no rows exist, so nothing is
+ * foreign. Outside tests an unbound store throws like every other host-ext read.
+ */
+export async function isWorkflowForeignTo(tenantId: string, workflowId: string): Promise<boolean> {
+  if (isSharedWorkflowId(workflowId)) return false;
+  if (!isHostExtPersistenceInitialized() && (process.env.VITEST || process.env.NODE_ENV === 'test')) return false;
+  try {
+    if (await getOwned(tenantId, workflowId)) return false;
+    return await isAuthoredByOtherTenant(tenantId, workflowId);
+  } catch (err) {
+    log.error('workflow_ownership_check_failed', {
+      tenantId, workflowId, error: err instanceof Error ? err.message : String(err),
+    });
+    throw err;
   }
-  return false;
 }
 
 /** Drop the ownership record (after the registry definition is deleted). */
@@ -294,8 +426,8 @@ export async function isAuthoredByOtherTenant(tenantId: string, workflowId: stri
  *  transient defs with zero remaining runs). */
 export async function removeOwnershipByWorkflowId(workflowId: string): Promise<number> {
   let removed = 0;
-  for (const r of await store.list()) {
-    if (r.workflowId === workflowId && (await store.delete(r.key))) removed += 1;
+  for (const r of await ownersOf(workflowId)) {
+    if (await store.delete(r.key)) removed += 1;
   }
   return removed;
 }

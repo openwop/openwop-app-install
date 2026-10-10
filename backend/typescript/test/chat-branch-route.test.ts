@@ -17,10 +17,10 @@ async function j<T = any>(path: string, init: RequestInit = {}): Promise<{ statu
   return { status: res.status, body: (res.status === 204 ? undefined : await res.json()) as T };
 }
 async function newSession(title: string): Promise<string> {
-  return (await j<{ sessionId: string }>('/v1/host/openwop-app/chat/sessions', { method: 'POST', body: JSON.stringify({ title }) })).body.sessionId;
+  return (await j<{ sessionId: string }>('/host/openwop-app/chat/sessions', { method: 'POST', body: JSON.stringify({ title }) })).body.sessionId;
 }
 async function addMsg(id: string, role: string, content: string): Promise<void> {
-  await j(`/v1/host/openwop-app/chat/sessions/${id}/messages`, { method: 'POST', body: JSON.stringify({ messageId: `${id}-${Math.random().toString(36).slice(2)}`, role, content }) });
+  await j(`/host/openwop-app/chat/sessions/${id}/messages`, { method: 'POST', body: JSON.stringify({ messageId: `${id}-${Math.random().toString(36).slice(2)}`, role, content }) });
 }
 
 beforeAll(async () => {
@@ -41,17 +41,17 @@ describe('conversation branch route', () => {
 
     // Branch after the first exchange (carry 2 messages).
     const r = await j<{ sessionId: string; branchedFrom?: { conversationId: string; fromSeq: number }; title: string }>(
-      `/v1/host/openwop-app/chat/sessions/${parent}/branch`, { method: 'POST', body: JSON.stringify({ fromSeq: 2 }) });
+      `/host/openwop-app/chat/sessions/${parent}/branch`, { method: 'POST', body: JSON.stringify({ fromSeq: 2 }) });
     expect(r.status).toBe(201);
     const child = r.body.sessionId;
     expect(child).toBeTruthy();
     expect(child).not.toBe(parent);
     expect(r.body.title).toContain('(branch)');
 
-    const childMsgs = await j<{ messages: unknown[] }>(`/v1/host/openwop-app/chat/sessions/${child}/messages`);
+    const childMsgs = await j<{ messages: unknown[] }>(`/host/openwop-app/chat/sessions/${child}/messages`);
     expect(childMsgs.body.messages).toHaveLength(2);
 
-    const parentMsgs = await j<{ messages: unknown[] }>(`/v1/host/openwop-app/chat/sessions/${parent}/messages`);
+    const parentMsgs = await j<{ messages: unknown[] }>(`/host/openwop-app/chat/sessions/${parent}/messages`);
     expect(parentMsgs.body.messages).toHaveLength(4); // parent unchanged
   });
 
@@ -59,20 +59,20 @@ describe('conversation branch route', () => {
     const parent = await newSession('Full');
     await addMsg(parent, 'user', 'a');
     await addMsg(parent, 'assistant', 'b');
-    const r = await j<{ sessionId: string }>(`/v1/host/openwop-app/chat/sessions/${parent}/branch`, { method: 'POST', body: JSON.stringify({}) });
+    const r = await j<{ sessionId: string }>(`/host/openwop-app/chat/sessions/${parent}/branch`, { method: 'POST', body: JSON.stringify({}) });
     expect(r.status).toBe(201);
     const child = r.body.sessionId;
-    expect((await j<{ messages: unknown[] }>(`/v1/host/openwop-app/chat/sessions/${child}/messages`)).body.messages).toHaveLength(2);
+    expect((await j<{ messages: unknown[] }>(`/host/openwop-app/chat/sessions/${child}/messages`)).body.messages).toHaveLength(2);
   });
 
   it('rejects fromSeq past the end (422) and a negative fromSeq (400)', async () => {
     const parent = await newSession('Bounds');
     await addMsg(parent, 'user', 'only');
-    expect((await j(`/v1/host/openwop-app/chat/sessions/${parent}/branch`, { method: 'POST', body: JSON.stringify({ fromSeq: 99 }) })).status).toBe(422);
-    expect((await j(`/v1/host/openwop-app/chat/sessions/${parent}/branch`, { method: 'POST', body: JSON.stringify({ fromSeq: -1 }) })).status).toBe(400);
+    expect((await j(`/host/openwop-app/chat/sessions/${parent}/branch`, { method: 'POST', body: JSON.stringify({ fromSeq: 99 }) })).status).toBe(422);
+    expect((await j(`/host/openwop-app/chat/sessions/${parent}/branch`, { method: 'POST', body: JSON.stringify({ fromSeq: -1 }) })).status).toBe(400);
   });
 
   it('404s branching a non-existent conversation', async () => {
-    expect((await j('/v1/host/openwop-app/chat/sessions/nope-nope/branch', { method: 'POST', body: JSON.stringify({}) })).status).toBe(404);
+    expect((await j('/host/openwop-app/chat/sessions/nope-nope/branch', { method: 'POST', body: JSON.stringify({}) })).status).toBe(404);
   });
 });

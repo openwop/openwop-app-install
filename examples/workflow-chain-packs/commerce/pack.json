@@ -1,12 +1,12 @@
 {
   "name": "core.openwop.workflows.commerce",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "kind": "workflow-chain",
   "description": "Real-work workflow pack (RFC 0013, ADR 0152) \u2014 the Commerce operations cluster (ecommerce gap plan \u00a75C C8): Post-Purchase Thank-You, Low-Stock Reorder Draft, and the Order Exception Digest. Designed to bind to the ADR 0221 host events (host.commerce.order.paid, host.commerce.inventory.low-stock \u2014 create a host-event binding to enroll; ADR 0208) or the schedule trigger. Every outbound send rides the governed email-send integration node (drafts/approval per the tenant's actionPolicy \u2014 ADR 0033) and the ONE notification seam; order data flows through feature.commerce.nodes over ctx.features.commerce, so the ADR 0221 audit rows + spend thresholds apply by construction. Enrollment state = the run itself; a binding fires one run per event.",
   "author": "openwop",
   "license": "Apache-2.0",
   "engines": {
-    "openwop": ">=1.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "keywords": [
     "Commerce"
@@ -14,7 +14,7 @@
   "chains": [
     {
       "chainId": "commerce.post-purchase-thankyou",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "Post-Purchase Thank-You",
       "description": "On order paid (bind to host.commerce.order.paid): read the order, AI-compose a grounded thank-you, human sign-off, then the governed email-send (compose output flows to send via the edge \u2014 the corpus convention; the tenant actionPolicy decides draft-vs-send, the ADR 0193 ledger dedups re-fires).",
       "parameters": {
@@ -50,7 +50,7 @@
         "nodes": [
           {
             "id": "order",
-            "typeId": "feature.commerce.nodes.get-order",
+            "typeId": "feature.commerce.nodes.get-order@1.0.0",
             "name": "Read the order",
             "position": {
               "x": 0,
@@ -64,7 +64,7 @@
           },
           {
             "id": "compose",
-            "typeId": "core.ai.chatCompletion",
+            "typeId": "core.ai.chatCompletion@1.0.0",
             "name": "Compose thank-you",
             "position": {
               "x": 320,
@@ -79,7 +79,7 @@
           },
           {
             "id": "signoff",
-            "typeId": "core.chat.approvalGate",
+            "typeId": "core.chat.approvalGate@1.1.0",
             "name": "Approve the thank-you email",
             "position": {
               "x": 440,
@@ -94,7 +94,7 @@
           },
           {
             "id": "gate-reject",
-            "typeId": "core.flow.noop",
+            "typeId": "core.flow.noop@1.0.0",
             "name": "Rejected — no email sent",
             "position": {
               "x": 640,
@@ -105,7 +105,7 @@
           },
           {
             "id": "send",
-            "typeId": "core.openwop.integration.email-send",
+            "typeId": "core.openwop.integration.email-send@1.0.0",
             "name": "Send (governed)",
             "position": {
               "x": 640,
@@ -150,7 +150,7 @@
     },
     {
       "chainId": "commerce.low-stock-reorder",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "Low-Stock Reorder Draft",
       "description": "On a low-stock crossing (bind to host.commerce.inventory.low-stock): read catalog context, draft a supplier reorder email, hold it at a purchasing sign-off gate, then send + notify the owner (draft content flows to the send/notify nodes via edges \u2014 the corpus convention). Never mutates inventory.",
       "parameters": {
@@ -186,7 +186,7 @@
         "nodes": [
           {
             "id": "catalog",
-            "typeId": "feature.commerce.nodes.list-products",
+            "typeId": "feature.commerce.nodes.list-products@1.0.0",
             "name": "Catalog context",
             "position": {
               "x": 0,
@@ -200,7 +200,7 @@
           },
           {
             "id": "draft",
-            "typeId": "core.ai.chatCompletion",
+            "typeId": "core.ai.chatCompletion@1.0.0",
             "name": "Draft reorder email",
             "position": {
               "x": 320,
@@ -215,7 +215,7 @@
           },
           {
             "id": "approve",
-            "typeId": "core.chat.approvalGate",
+            "typeId": "core.chat.approvalGate@1.1.0",
             "name": "Purchasing sign-off",
             "position": {
               "x": 640,
@@ -228,7 +228,7 @@
           },
           {
             "id": "gate-reject",
-            "typeId": "core.flow.noop",
+            "typeId": "core.flow.noop@1.0.0",
             "name": "Rejected — no reorder sent, no notification",
             "position": {
               "x": 960,
@@ -239,7 +239,7 @@
           },
           {
             "id": "send",
-            "typeId": "core.openwop.integration.email-send",
+            "typeId": "core.openwop.integration.email-send@1.0.0",
             "name": "Send reorder",
             "position": {
               "x": 960,
@@ -255,7 +255,7 @@
           },
           {
             "id": "notify",
-            "typeId": "feature.notifications.nodes.notify",
+            "typeId": "feature.notifications.nodes.notify@1.0.0",
             "name": "Notify owner",
             "position": {
               "x": 960,
@@ -300,7 +300,7 @@
     },
     {
       "chainId": "commerce.order-exception-digest",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "Order Exception Digest",
       "description": "On a schedule (pair with core.trigger.schedule): list orders, AI-summarize the exceptions \u2014 paid-but-unfulfilled beyond the SLA, aging pending reservations \u2014 and push the summary to the operations inbox (the digest node's output flows to the notification via the edge, the corpus convention). Read-only; escalation stays human.",
       "parameters": {
@@ -328,7 +328,7 @@
         "nodes": [
           {
             "id": "orders",
-            "typeId": "feature.commerce.nodes.list-orders",
+            "typeId": "feature.commerce.nodes.list-orders@1.0.0",
             "name": "List orders",
             "position": {
               "x": 0,
@@ -341,7 +341,7 @@
           },
           {
             "id": "digest",
-            "typeId": "core.ai.chatCompletion",
+            "typeId": "core.ai.chatCompletion@1.0.0",
             "name": "Summarize exceptions",
             "position": {
               "x": 320,
@@ -356,7 +356,7 @@
           },
           {
             "id": "notify",
-            "typeId": "feature.notifications.nodes.notify",
+            "typeId": "feature.notifications.nodes.notify@1.0.0",
             "name": "Push digest",
             "position": {
               "x": 640,

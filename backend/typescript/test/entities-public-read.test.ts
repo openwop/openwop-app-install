@@ -50,7 +50,7 @@ function client(): Client & { login: (subject: string, tenantId: string) => Prom
     post: (p, b) => send('POST', p, b),
     patch: (p, b) => send('PATCH', p, b),
     login: async (subject, tenantId) => {
-      const res = await send('POST', '/v1/host/openwop-app/test/login', { subject, tenantId });
+      const res = await send('POST', '/host/openwop-app/test/login', { subject, tenantId });
       expect([200, 201]).toContain(res.status);
     },
   };
@@ -65,8 +65,8 @@ const setToggle = async (id: string, status: 'on' | 'off'): Promise<void> => {
   await saveConfig({ ...d, status }, 'test');
 };
 
-const B = '/v1/host/openwop-app/entities';
-const P = '/v1/host/openwop-app/public-entities';
+const B = '/host/openwop-app/entities';
+const P = '/host/openwop-app/public-entities';
 
 const TEAM_FIELDS = [
   { key: 'name', label: 'Name', type: 'string', required: true },

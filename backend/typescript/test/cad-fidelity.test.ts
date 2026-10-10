@@ -137,7 +137,7 @@ describe('CAD2-R4 — the model-facing texts name every field the node preserves
     // instruction that causes the loss stayed on the page.
     const { readFileSync } = await import('node:fs');
     const read = (rel: string) => readFileSync(new URL(rel, import.meta.url), 'utf8');
-    const prompt = read('../../../packs/feature.cad.agents/prompts/cad-modeler.md');
+    const prompt = read('../../../packs/vendor.openwop-app.cad.agents/prompts/cad-modeler.md');
     const pack = read('../../../packs/feature.cad.nodes/pack.json');
     const tool = read('../src/features/cad/agentTools.ts');
 

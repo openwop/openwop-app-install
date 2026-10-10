@@ -46,14 +46,14 @@ function client(): Client {
 const uniqEmail = (): string => `cb-${Date.now()}-${n++}@acme.test`;
 async function ownerWithOrg(): Promise<{ owner: Client; orgId: string }> {
   const owner = client();
-  const r = await owner.post('/v1/host/openwop-app/test/login', { email: uniqEmail() });
+  const r = await owner.post('/host/openwop-app/test/login', { email: uniqEmail() });
   expect(r.status).toBe(201);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status).toBe(201);
   return { owner, orgId: org.body.orgId };
 }
 
-const B = '/v1/host/openwop-app/campaign-brief/briefs';
+const B = '/host/openwop-app/campaign-brief/briefs';
 
 describe('campaign-brief briefs — CRUD + validate', () => {
   it('creates a brief seeded with all five channels disabled', async () => {
@@ -121,7 +121,7 @@ describe('campaign-brief briefs — isolation', () => {
     const created = await owner.post(B, { orgId, name: 'Secret', productName: 'P' });
     const id = created.body.brief.id;
     const stranger = client();
-    await stranger.post('/v1/host/openwop-app/test/login', { email: uniqEmail() });
+    await stranger.post('/host/openwop-app/test/login', { email: uniqEmail() });
     expect((await stranger.get(`${B}/${id}`)).status).toBe(404);
     expect((await stranger.del(`${B}/${id}`)).status).toBe(404);
   });

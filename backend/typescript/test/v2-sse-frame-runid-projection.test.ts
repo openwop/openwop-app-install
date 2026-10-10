@@ -36,17 +36,19 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
 
-async function createRunV1(): Promise<string> {
-  const res = await fetch(`${base}/v1/runs`, {
+// ADR 0812 P3c-0 — created under major 2, which hands back the bound id.
+async function createRunV2(): Promise<string> {
+  const V2H = { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json', 'OpenWOP-Version': '2' };
+  const res = await fetch(`${base}/runs`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
+    headers: V2H,
     body: JSON.stringify({ workflowId: 'conformance-noop', inputs: {} }),
   });
-  expect(res.status, 'v1 create').toBe(201);
+  expect(res.status, 'v2 create').toBe(201);
   const j = (await res.json()) as { runId: string };
   // Let the noop run reach its terminal event so the replay carries run.completed.
   for (let i = 0; i < 50; i++) {
-    const s = await fetch(`${base}/v1/runs/${j.runId}`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    const s = await fetch(`${base}/runs/${encodeURIComponent(j.runId)}`, { headers: V2H });
     const snap = (await s.json()) as { status: string };
     if (snap.status === 'completed' || snap.status === 'failed') break;
     await new Promise((r) => setTimeout(r, 20));
@@ -102,28 +104,23 @@ function runIdsIn(frames: Array<{ data: unknown }>): string[] {
 
 describe('SSE frames carry the tenant-bound run id under major 2', () => {
   it('single-frame path: every data frame runId is `default/<id>` (the leg that was broken)', async () => {
-    const bare = await createRunV1();
-    const frames = await readFrames(`/runs/${bare}/events`, { 'OpenWOP-Version': '2' });
+    const bound = await createRunV2();
+    expect(bound.startsWith('default/'), bound).toBe(true);
+    const frames = await readFrames(`/runs/${encodeURIComponent(bound)}/events`, { 'OpenWOP-Version': '2' });
     const ids = runIdsIn(frames);
     expect(ids.length, 'non-vacuous: frames with a runId were read').toBeGreaterThan(0);
-    expect(new Set(ids), 'every frame bound').toEqual(new Set([`default/${bare}`]));
+    expect(new Set(ids), 'every frame bound').toEqual(new Set([bound]));
   });
 
   it('batch path (?bufferMs): every element of the batch array is bound', async () => {
-    const bare = await createRunV1();
-    const frames = await readFrames(`/runs/${bare}/events?bufferMs=30`, { 'OpenWOP-Version': '2' });
+    const bound = await createRunV2();
+    const frames = await readFrames(`/runs/${encodeURIComponent(bound)}/events?bufferMs=30`, { 'OpenWOP-Version': '2' });
     const batches = frames.filter((f) => f.event === 'batch');
     expect(batches.length, 'non-vacuous: at least one batch frame').toBeGreaterThan(0);
     const ids = runIdsIn(batches);
     expect(ids.length).toBeGreaterThan(0);
-    expect(new Set(ids)).toEqual(new Set([`default/${bare}`]));
+    expect(new Set(ids)).toEqual(new Set([bound]));
   });
 
-  it('major 1 is untouched: frames carry the bare id (same bytes as before)', async () => {
-    const bare = await createRunV1();
-    const frames = await readFrames(`/v1/runs/${bare}/events`, {});
-    const ids = runIdsIn(frames);
-    expect(ids.length).toBeGreaterThan(0);
-    expect(new Set(ids)).toEqual(new Set([bare]));
-  });
+  // ADR 0812 P3c-0 — the "major 1 frames carry the bare id" leg was deleted with major 1.
 });

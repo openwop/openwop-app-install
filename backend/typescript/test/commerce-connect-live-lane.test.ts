@@ -97,7 +97,7 @@ const sign = (secret: string, body: string): string => {
 };
 async function deliverWebhook(secret: string, event: Record<string, unknown>): Promise<{ status: number; body: any }> {
   const body = JSON.stringify(event);
-  const res = await fetch(`${BASE}/v1/host/openwop-app/billing/webhook`, {
+  const res = await fetch(`${BASE}/host/openwop-app/billing/webhook`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'stripe-signature': sign(secret, body) },
     body,
@@ -204,12 +204,12 @@ describe('MKT-UX-2 — the Stripe return URLs point at the page the buyer starte
     stripeCalls = [];
 
     // Through the ROUTE, not the service — the route is where the URLs are built.
-    const login = await fetch(`${BASE}/v1/host/openwop-app/test/login`, {
+    const login = await fetch(`${BASE}/host/openwop-app/test/login`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ email: 'ru-buyer@e2e.test' }),
     });
     const cookie = (login.headers.get('set-cookie') ?? '').split(';')[0] ?? '';
-    const res = await fetch(`${BASE}/v1/host/openwop-app/commerce-connect/purchase/checkout`, {
+    const res = await fetch(`${BASE}/host/openwop-app/commerce-connect/purchase/checkout`, {
       method: 'POST', headers: { cookie, 'content-type': 'application/json' },
       body: JSON.stringify({ packName: 'p.ru' }),
     });
@@ -226,7 +226,7 @@ describe('MKT-UX-2 — the Stripe return URLs point at the page the buyer starte
     }
     // The id is DERIVED, never minted: the SAME value the CAS and Stripe's
     // Idempotency-Key use, recomputed here from the row's own buyer tenant.
-    const read = await fetch(`${BASE}/v1/host/openwop-app/commerce-connect/orders/${order.orderId}`, { headers: { cookie } });
+    const read = await fetch(`${BASE}/host/openwop-app/commerce-connect/orders/${order.orderId}`, { headers: { cookie } });
     const stored = (await read.json()) as { order: { buyerTenantId: string } };
     expect(order.orderId).toBe(orderIdFor(stored.order.buyerTenantId, 'p.ru'));
   });

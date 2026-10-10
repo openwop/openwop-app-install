@@ -101,6 +101,8 @@ Secret-resolution errors (same map as `ads-publish-meta`):
 | `secret_revoked` | `CREDENTIAL_REVOKED` | false |
 | `secret_quota_exhausted` | `CREDENTIAL_RESOLVE_FAILED` | **true** |
 
+On a major-2 host (RFC 0228) the same states arrive as registered codes with `details.service: "secrets"`, and the pack maps them identically: `credential_not_found` → `CREDENTIAL_NOT_FOUND` (or `CREDENTIAL_REVOKED` / `CREDENTIAL_EXPIRED` when `details.reason` is `revoked` / `expired`), `credential_forbidden` → `CREDENTIAL_ACCESS_DENIED`, `rate_limited` → `CREDENTIAL_RESOLVE_FAILED` (retryable).
+
 `details.credential` reports which of the two failed: `'oauth'` or `'developerToken'`.
 
 Google Ads API errors:

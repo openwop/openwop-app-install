@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.app-builder.nodes/1.9.3/capture.output.json",
+  "type": "object",
+  "properties": {
+    "artifact": {
+      "description": "The typed artifact envelope (absent when the input was empty)."
+    }
+  }
+}

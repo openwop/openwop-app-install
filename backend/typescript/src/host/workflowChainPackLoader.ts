@@ -40,6 +40,7 @@
 import { verifyInstalledPack } from '../packs/registryInstaller.js';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { subWorkflowId } from './workflowId.js';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Ajv2020, { type ValidateFunction } from 'ajv/dist/2020.js';
@@ -48,6 +49,7 @@ import { OpenwopError } from '../types.js';
 import { createLogger } from '../observability/logger.js';
 import { resolveDefaultPackDir } from '../packs/registryInstaller.js';
 import { loadPinnedKeyring, verifyPinned, type SigningRefs } from './packSignature.js';
+import { isPackRevoked } from './packRevocations.js';
 import { locateRepoSchemasDir } from './_repoPath.js';
 import { validateWorkflowDefinition } from './workflowDefinitionValidation.js';
 import { canonicalize } from './auditChainService.js';
@@ -59,6 +61,9 @@ import type { EdgeDef, WorkflowDefinition } from '../executor/types.js';
 import type { CompensationPolicy } from './compensationUnwind.js';
 import { isParkedPackDirName } from '../bootstrap/mountLocalPacks.js';
 import { semverCompare } from '../util/semver.js';
+import { chainPinFindings, describePinFindings, normalizeChainPins, pinMismatches } from './chainPinRule.js';
+import { isUnpinnedChainPackWaived } from './unpinnedChainPackAllowlist.js';
+import { recordChainPackLoad } from './chainPackLoadStatus.js';
 // Alias the import: the esbuild bundle banner (see package.json `build`) injects its
 // own top-level `import { createRequire } from 'module'`, and esbuild renames local
 // identifiers BEFORE the raw banner text is prepended — so an unaliased `createRequire`
@@ -198,6 +203,12 @@ export interface WorkflowChain {
    *  never merge). Absent ⇒ the chain expresses no policy and inherits the
    *  parent's (or none). */
   compensation?: CompensationPolicy;
+  /** ADR 0766 D1 — HOST-POPULATED, never authored (both manifest schemas are
+   *  closed, so a manifest carrying it is refused). The exact versions this chain
+   *  pinned, keyed by BARE typeId: at registration every node-type reference is
+   *  reduced to its bare id (`normalizeChainPins`), and the pins move here so no
+   *  downstream reader has to parse `typeId@x.y.z`. */
+  nodePins?: Readonly<Record<string, string>>;
 }
 interface ChainPackManifest {
   name: string;
@@ -286,8 +297,29 @@ export type ChainManifestSchemaTree = 'v1' | 'v2';
  */
 export function chainManifestSchemaTree(raw: unknown): ChainManifestSchemaTree {
   const signing = (raw as { signing?: unknown } | null)?.signing;
-  if (!signing || typeof signing !== 'object') return 'v1';
-  return 'keyId' in signing || 'scheme' in signing ? 'v2' : 'v1';
+  if (signing && typeof signing === 'object' && ('keyId' in signing || 'scheme' in signing)) return 'v2';
+  // ADR 0766 D5 — an exact-pinned node reference (`typeId@x.y.z`) is a v2-only
+  // shape exactly as the v2 `signing` block is: the v1 FragmentNode.typeId
+  // pattern (`^[a-z][a-zA-Z0-9._-]*$`) has no room for `@`, so a pinned chain
+  // routed to v1 would be refused for being CORRECT. Any `@` in a node reference
+  // claims the v2 tree, where ids.schema.json's typeId grammar admits an exact
+  // pin and itself refuses a node-level range (`…@^1` fails its pattern). The
+  // range the schema CANNOT refuse — an external sub-chain `ref.version`, typed
+  // as a semver range — is refused by the pin rule after validation.
+  return manifestCarriesNodePin(raw) ? 'v2' : 'v1';
+}
+
+function manifestCarriesNodePin(raw: unknown): boolean {
+  const chains = (raw as { chains?: unknown } | null)?.chains;
+  if (!Array.isArray(chains)) return false;
+  return chains.some((c) => {
+    const nodes = (c as { dag?: { nodes?: unknown } } | null)?.dag?.nodes;
+    return Array.isArray(nodes) && nodes.some((n) => {
+      const node = n as { typeId?: unknown; compensation?: { nodeTypeId?: unknown } } | null;
+      return (typeof node?.typeId === 'string' && node.typeId.includes('@'))
+        || (typeof node?.compensation?.nodeTypeId === 'string' && node.compensation.nodeTypeId.includes('@'));
+    });
+  });
 }
 
 /** Register, under its own `$id`, every sibling schema `doc` reaches by a
@@ -596,14 +628,33 @@ export function loadWorkflowChainPacks(opts: { roots: string[] }): ChainPackLoad
         continue; // nothing from this pack loads
       }
       const chainIds: string[] = [];
-      for (const chain of manifest.chains) {
+      for (const authored of manifest.chains) {
         // RFC 0133 — closed-world composition validation (subChainRef resolution,
         // no pinned workflowId, producedVariables producer/read declaration).
-        const compositionErr = validateChainComposition(chain);
+        const compositionErr = validateChainComposition(authored);
         if (compositionErr) {
           errors.push({ pack: manifest.name, ...compositionErr });
           continue;
         }
+        // ADR 0766 D2 — RFC 0177 §E.1: refuse to register a chain whose node
+        // reference carries a range or no version. Every root, not only the
+        // registry installer (which refused these already; this loader did not).
+        // A range, or one type pinned twice, is refused outright; "no version" is
+        // tolerated only for the packs on the shrinking legacy ratchet.
+        const pinFindings = chainPinFindings(authored);
+        const hardPinFindings = pinFindings.filter((f) => f.problem !== 'unpinned');
+        if (hardPinFindings.length > 0) {
+          errors.push({ pack: manifest.name, code: 'workflow_chain_pin_invalid', message: describePinFindings(hardPinFindings) });
+          continue;
+        }
+        if (pinFindings.length > 0 && !isUnpinnedChainPackWaived(manifest.name)) {
+          errors.push({ pack: manifest.name, code: 'workflow_chain_unpinned', message: describePinFindings(pinFindings) });
+          continue;
+        }
+        const normalized = normalizeChainPins(authored);
+        const chain: WorkflowChain = Object.keys(normalized.nodePins).length > 0
+          ? { ...normalized.chain, nodePins: normalized.nodePins }
+          : normalized.chain;
         const existing = CHAINS.get(chain.chainId);
         if (existing) {
           // ADR 0370 — roots iterate in PRECEDENCE order, so an already-
@@ -743,14 +794,24 @@ export function loadWorkflowChainPacks(opts: { roots: string[] }): ChainPackLoad
   return { installed, errors };
 }
 
-/** Resolve a loaded chain by id (null = absent). */
-export function getChain(chainId: string): { packName: string; packVersion: string; chain: WorkflowChain; category?: string } | null {
-  return CHAINS.get(chainId) ?? null;
+/** ADR 0826 D5 — a chain from a REVOKED pack version is treated as absent at
+ *  READ time, so the kill switch reaches the gallery and `from-chain`
+ *  instantiation on every instance within one revocation-refresh tick, with no
+ *  reload. Workflows already instantiated from it are tenant-owned copies and
+ *  keep running; the executable risk is in their node packs, which the
+ *  executor's dispatch check covers. */
+function liveChain<T extends { packName: string; packVersion: string }>(entry: T | undefined): T | null {
+  return entry && !isPackRevoked(entry.packName, entry.packVersion) ? entry : null;
 }
 
-/** All loaded chains (UI/catalog listing). */
+/** Resolve a loaded chain by id (null = absent, or its pack version is revoked). */
+export function getChain(chainId: string): { packName: string; packVersion: string; chain: WorkflowChain; category?: string } | null {
+  return liveChain(CHAINS.get(chainId));
+}
+
+/** All loaded chains (UI/catalog listing), minus revoked pack versions. */
 export function listChains(): ReadonlyArray<{ packName: string; packVersion: string; chain: WorkflowChain; category?: string }> {
-  return [...CHAINS.values()];
+  return [...CHAINS.values()].filter((e) => liveChain(e) !== null);
 }
 
 /** RFC 0013 + RFC 0124 (WCP4) — single source of truth for the
@@ -839,13 +900,29 @@ export interface ChainFeatureRequirement {
   label: string;
 }
 
+/** ADR 0766 D3 — a node the chain pinned that this host has at another version. */
+export interface ChainPinMismatch {
+  typeId: string;
+  /** The installed node's label, when the host knows it (falls back to typeId). */
+  label: string;
+  pinned: string;
+  installed: string;
+}
+
 export interface ChainRequirements {
-  /** Node typeIds the chain uses that this host cannot resolve (install gap). */
+  /** Node typeIds the chain uses that this host does not have at all (install gap). */
   missingNodeTypeIds: string[];
+  /** Nodes the host HAS, but not at the version the chain pinned (ADR 0766 D3).
+   *  Separate from `missingNodeTypeIds` because the remedy and the words differ
+   *  (grade-ux U-1). Either list non-empty means the template is not ready. */
+  pinMismatches: ChainPinMismatch[];
   connections: ChainConnectionRequirement[];
   /** How many human-approval gates the chain contains (day-1 UX P12/F2 —
    *  the trust signal the pre-flight surfaces: external sends wait for you). */
   approvalGateCount: number;
+  /** How many steps the chain draws (ADR 0773 P11) — the size a template chip
+   *  shows before anyone opens it. */
+  nodeCount: number;
   /** Toggle-gated `ctx.features.<id>` surfaces the chain's nodes read (ADR 0191
    *  Phase 2). Installed-but-gated: a `feature.<id>.nodes.*` node resolves on
    *  the host yet throws `host_capability_disabled` at runtime when the feature
@@ -868,9 +945,16 @@ export function chainRequirements(
    *  and decoupled from the feature-toggle registry (mirrors `providerExists`).
    *  Defaults to "nothing is gated" so older callers keep the prior shape. */
   resolveFeature: (id: string) => { label: string } | null = () => null,
+  /** ADR 0766 D3 — the installed version + label of a node type (undefined =
+   *  not installed). A pin this host cannot honour — the type is installed, but
+   *  at a different version — is reported in `pinMismatches`. Defaults to
+   *  "versions unknown", which reports no pin gaps (the prior shape). */
+  installedNodeOf: (typeId: string) => { version?: string; label?: string } | undefined = () => undefined,
 ): ChainRequirements {
   const nodeTypeIds = [...new Set(chain.dag.nodes.map((n) => n.typeId))];
   const missingNodeTypeIds = nodeTypeIds.filter((t) => !knownTypeIds.has(t));
+  const mismatches = pinMismatches(chain.nodePins, (t) => installedNodeOf(t)?.version)
+    .map((m) => ({ ...m, label: installedNodeOf(m.typeId)?.label ?? m.typeId }));
   // Feature surfaces: a `feature.<id>.nodes.*` node reads `ctx.features.<id>`,
   // which is toggle-gated. Derive the distinct gated ids (always-on features
   // resolve to null and drop out).
@@ -899,7 +983,7 @@ export function chainRequirements(
   // core.openwop.hitl.* family) — a count, not identity, so packs can add
   // gate flavors without a loader change.
   const approvalGateCount = chain.dag.nodes.filter((n) => /approvalgate|\.hitl\./i.test(n.typeId)).length;
-  return { missingNodeTypeIds, connections, approvalGateCount, requiredFeatures };
+  return { missingNodeTypeIds, pinMismatches: mismatches, connections, approvalGateCount, nodeCount: chain.dag.nodes.length, requiredFeatures };
 }
 
 /** Test seam: clear the in-process chain registry. */
@@ -914,7 +998,9 @@ export function _resetChainRegistryForTest(): void {
  *  Returns the load outcome so the caller can surface what newly resolved. */
 export function reloadWorkflowChainPacks(): ChainPackLoadOutcome {
   CHAINS.clear();
-  return loadWorkflowChainPacks({ roots: defaultWorkflowChainPackRoots() });
+  const outcome = loadWorkflowChainPacks({ roots: defaultWorkflowChainPackRoots() });
+  recordChainPackLoad(outcome); // grade-code C-1: a hot reload is a default-root load too
+  return outcome;
 }
 
 // ── expansion (RFC 0013 §"Expansion semantics") ──
@@ -1236,7 +1322,25 @@ function canonicalPolicyJson(v: unknown): string {
   return JSON.stringify(v);
 }
 
-export function expandChain(chain: WorkflowChain, opts: ExpandOptions = {}): WorkflowDefinition {
+export function expandChain(authoredChain: WorkflowChain, opts: ExpandOptions = {}): WorkflowDefinition {
+  // ADR 0766 D1 — the persisted definition carries BARE typeIds: the executor
+  // registry, the builder and every catalog lookup key on them, and a definition
+  // must keep running across a node patch. A registry chain is already bare
+  // (the loader normalized it); a chain reaching expansion by another road (the
+  // conformance seams, a sub-chain child) is normalized here, idempotently. The
+  // pins are not dropped — they are recorded in `metadata.expandedFrom.nodePins`.
+  // grade-code C-10 — expansion is the third reader of chain references, and it
+  // REFUSES a range or a double pin rather than persisting `typeId@^1` into a
+  // definition that would fail at dispatch. (An unpinned reference is still
+  // accepted here: registration owns that rule, and a legacy/definition-level
+  // chain may legitimately carry none.)
+  const hardFindings = chainPinFindings(authoredChain).filter((f) => f.problem !== 'unpinned');
+  if (hardFindings.length > 0) {
+    throw new OpenwopError('validation_error', `chain_pin_invalid: ${describePinFindings(hardFindings)}`, 400, { chainId: authoredChain.chainId });
+  }
+  const normalized = normalizeChainPins(authoredChain);
+  const chain = normalized.chain;
+  const nodePins: Record<string, string> = { ...(authoredChain.nodePins ?? {}), ...normalized.nodePins };
   const deferred = opts.deferred === true;
   const providedParams = opts.params ?? {};
   const paramProps = ((chain.parameters as { properties?: Record<string, ChainParamSpec> }).properties) ?? {};
@@ -1695,7 +1799,12 @@ export function expandChain(chain: WorkflowChain, opts: ExpandOptions = {}): Wor
       // with new params to get a fresh definition. Carries the exact
       // (chainId, version, params) this definition was expanded from. In deferred
       // mode `params` excludes sensitive params (never persisted).
-      expandedFrom: { chainId: chain.chainId, version: chain.version, params: resolvedParams },
+      expandedFrom: {
+        chainId: chain.chainId, version: chain.version, params: resolvedParams,
+        // ADR 0766 D4 — the exact node versions the chain pinned, so the definition
+        // (which survives `:fork` verbatim) still says what it was built against.
+        ...(Object.keys(nodePins).length > 0 ? { nodePins } : {}),
+      },
       // ADR 0504 — the params that did NOT freeze. Minting still succeeds:
       // "Use template = just copy" is a documented contract and refusing here is
       // what the ADR 0498 enforcement revert established would break.
@@ -1769,8 +1878,7 @@ export interface SubChainDeps {
  *  own reference uses a readable `wfc_…` form); this host keeps its collision-safe
  *  hash form, surfaced verbatim in the `subChainWorkflowIds[]` response. */
 export function mintChildWorkflowId(tenantId: string, childChainId: string, version: string): string {
-  const h = createHash('sha256').update(`${tenantId}\0${childChainId}@${version}`).digest('hex').slice(0, 12);
-  return `wf.${slug(childChainId)}.sc-${h}`;
+  return subWorkflowId(tenantId, childChainId, version);
 }
 
 function resolveSubChainRef(ref: string, chain: WorkflowChain, deps: SubChainDeps): WorkflowChain | null {

@@ -93,7 +93,7 @@ async function optIn(subject: string): Promise<void> {
 }
 
 describe('verifyTwilioSignature (URL + sorted params, HMAC-SHA1)', () => {
-  const url = 'https://app.example.test/v1/host/openwop-app/connections-inbound/c1';
+  const url = 'https://app.example.test/host/openwop-app/connections-inbound/c1';
   const params = { MessageSid: 'SM1', From: 'whatsapp:+15558675309', Body: 'hi' };
   it('accepts a correctly-signed request; rejects tamper/missing', () => {
     const sig = twilioSign(url, params);
@@ -109,7 +109,7 @@ describe('verifyTwilioSignature (URL + sorted params, HMAC-SHA1)', () => {
 
 describe('inbound leg — form-encoded HTTP delivery + window ledger + dedup', () => {
   it('accepts a signed form-encoded delivery via the public route, opens the 24h window, dedups the MessageSid', async () => {
-    const path = `/v1/host/openwop-app/connections-inbound/${encodeURIComponent(connectionId)}`;
+    const path = `/host/openwop-app/connections-inbound/${encodeURIComponent(connectionId)}`;
     const url = `https://app.example.test${path}`;
     const params: Record<string, string> = { MessageSid: `SM-${Date.now()}`, From: `whatsapp:${RECIPIENT}`, To: 'whatsapp:+15550001111', Body: 'hello there' };
     const form = new URLSearchParams(params).toString();
@@ -278,15 +278,15 @@ describe('attestation routes — RBAC (host:whatsapp:manage)', () => {
   it('owner attests (explicit confirm required); editor 403s; reads show status', async () => {
     const tenantId = `org:test-wa-rbac-${Date.now()}`;
     const owner = client();
-    expect((await owner.post('/v1/host/openwop-app/test/login', { email: `waown-${Date.now()}@acme.test`, tenantId })).status).toBe(201);
-    const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+    expect((await owner.post('/host/openwop-app/test/login', { email: `waown-${Date.now()}@acme.test`, tenantId })).status).toBe(201);
+    const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
     expect(org.status).toBe(201);
     const orgId = (org.body as { orgId: string }).orgId;
     const editor = client();
-    const editorUser = ((await editor.post('/v1/host/openwop-app/test/login', { email: `waed-${Date.now()}@acme.test`, tenantId })).body as { user: { userId: string } }).user;
-    expect((await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'Ed', subject: editorUser.userId, roles: ['editor'] })).status).toBe(201);
+    const editorUser = ((await editor.post('/host/openwop-app/test/login', { email: `waed-${Date.now()}@acme.test`, tenantId })).body as { user: { userId: string } }).user;
+    expect((await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'Ed', subject: editorUser.userId, roles: ['editor'] })).status).toBe(201);
 
-    const path = `/v1/host/openwop-app/whatsapp/orgs/${encodeURIComponent(orgId)}/attestation`;
+    const path = `/host/openwop-app/whatsapp/orgs/${encodeURIComponent(orgId)}/attestation`;
     expect((await editor.put(path, { confirmNoTraining: true })).status).toBe(403);
     expect((await owner.put(path, {})).status).toBe(400); // explicit confirm required
     expect((await owner.put(path, { confirmNoTraining: true })).status).toBe(201);
@@ -313,18 +313,18 @@ describe('Phase 4 — Meta Cloud API direct adapter', () => {
     const conn = await upsertOAuthConnection({ tenantId: TENANT, provider: 'whatsapp-cloud', userId: 'u1', tokens: { accessToken: 'WABA-TOKEN', tokenType: 'Bearer', scopes: ['whatsapp.send'] } });
     cloudConnectionId = conn.connectionId;
     await setInboundConfig({ tenantId: TENANT, connectionId: cloudConnectionId, provider: 'whatsapp-cloud', workflowId: 'wf-not-in-catalog', signingSecret: APP_SECRET });
-    const ok = await fetch(`${BASE}/v1/host/openwop-app/connections-inbound/${encodeURIComponent(cloudConnectionId)}?hub.mode=subscribe&hub.verify_token=${encodeURIComponent(APP_SECRET)}&hub.challenge=CHALLENGE-42`);
+    const ok = await fetch(`${BASE}/host/openwop-app/connections-inbound/${encodeURIComponent(cloudConnectionId)}?hub.mode=subscribe&hub.verify_token=${encodeURIComponent(APP_SECRET)}&hub.challenge=CHALLENGE-42`);
     expect(ok.status).toBe(200);
     expect(await ok.text()).toBe('CHALLENGE-42');
-    const bad = await fetch(`${BASE}/v1/host/openwop-app/connections-inbound/${encodeURIComponent(cloudConnectionId)}?hub.mode=subscribe&hub.verify_token=wrong&hub.challenge=x`);
+    const bad = await fetch(`${BASE}/host/openwop-app/connections-inbound/${encodeURIComponent(cloudConnectionId)}?hub.mode=subscribe&hub.verify_token=wrong&hub.challenge=x`);
     expect(bad.status).toBe(403);
     // a non-cloud connection answers 404 uniformly
-    const twilioGet = await fetch(`${BASE}/v1/host/openwop-app/connections-inbound/${encodeURIComponent(connectionId)}?hub.mode=subscribe&hub.verify_token=${encodeURIComponent(AUTH_TOKEN)}&hub.challenge=x`);
+    const twilioGet = await fetch(`${BASE}/host/openwop-app/connections-inbound/${encodeURIComponent(connectionId)}?hub.mode=subscribe&hub.verify_token=${encodeURIComponent(AUTH_TOKEN)}&hub.challenge=x`);
     expect(twilioGet.status).toBe(404);
   });
 
   it('a signed Cloud delivery applies the window ledger + dedups on the message id', async () => {
-    const path = `/v1/host/openwop-app/connections-inbound/${encodeURIComponent(cloudConnectionId)}`;
+    const path = `/host/openwop-app/connections-inbound/${encodeURIComponent(cloudConnectionId)}`;
     const cloudSender = '+15557770000';
     const payload = {
       object: 'whatsapp_business_account',

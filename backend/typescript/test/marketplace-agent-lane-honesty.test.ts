@@ -11,6 +11,10 @@
  * states the model could infer anyway, while the unannotated one is the single
  * case where `[]` is not a fact about the catalog. A model receiving it reports
  * that nothing matched — a claim the failed read never established.
+ *
+ * Sabotage witnesses (wave 10): dropping the catch's `note` in `agentTools.ts`,
+ * or folding `listListings`' read failure back to `[]`, turns case 1 red;
+ * annotating EVERY answer turns the negative control red.
  */
 import http from 'node:http';
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
@@ -74,7 +78,7 @@ describe('MKT2-B1 (agent lane) — the one empty that is not an answer says so',
     // The property under test — the model is told this is not an answer.
     expect(typeof body.note, 'the failed read must be annotated').toBe('string');
     expect(body.note, 'and must forbid the false claim, not merely hint').toMatch(/could not be read/i);
-    expect(body.note).toMatch(/not|do not/i);
+    expect(body.note, 'the instruction the model needs').toMatch(/do not tell the user the catalog is empty/i);
   });
 
   it('does NOT annotate a genuinely empty catalog (the negative control)', async () => {
@@ -83,6 +87,7 @@ describe('MKT2-B1 (agent lane) — the one empty that is not an answer says so',
     // could no longer tell a real empty catalog from an unreadable one.
     const { body } = await search();
     expect(Array.isArray(body.listings), 'the read succeeded').toBe(true);
+    expect(body.listings!.length, 'createApp mounted the local packs — a real, non-empty answer').toBeGreaterThan(0);
     expect(body.note, 'a successful read carries no failure note').toBeUndefined();
   });
 });

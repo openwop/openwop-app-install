@@ -1,6 +1,7 @@
 {
   "name": "feature.agent-author.nodes",
-  "version": "1.1.0",
+  "version": "1.1.1",
+  "kind": "node",
   "description": "Agent Author node pack (ADR 0514) — describe-to-create for the digital workforce over the ctx.features['agent-author'] surface. get (closed-world catalog: visible agents, tenant workflows, roster, autonomy levels), draft (LLM authors a roster-entry draft with bounded error-fed repair), validate (closed-world re-check), persist (create through the SHARED wizard path; the agent lands DISABLED for human review — or mode:'draft' stashes the validated draft for the manual wizard's prefill, ADR 0514 OQ1).",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
@@ -12,7 +13,7 @@
     "roster"
   ],
   "engines": {
-    "openwop": ">=1.0.0 <2.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "runtime": {
     "language": "javascript",
@@ -26,7 +27,7 @@
       "version": "1.0.0",
       "label": "Agent Author: Catalog",
       "description": "Reads the closed world for agent authoring: visible agents, the tenant's workflow ids, the current roster (read-before-write), and the legal autonomy levels. Requires ctx.features['agent-author'].",
-      "category": "ai",
+      "category": "integration", "x-paletteCategory": "ai",
       "role": "action",
       "capabilities": [],
       "inputSchemaRef": "schemas/empty.input.schema.json",
@@ -37,7 +38,7 @@
       "version": "1.0.0",
       "label": "Agent Author: Draft",
       "description": "Reads the closed world and calls the LLM to author a candidate roster-agent draft for a natural-language intent, repairing on validation errors up to maxAttempts. Requires ctx.callAI + ctx.features['agent-author'].",
-      "category": "ai",
+      "category": "integration", "x-paletteCategory": "ai",
       "role": "action",
       "capabilities": [],
       "requiredModelCapabilities": [
@@ -55,7 +56,7 @@
       "version": "1.0.1",
       "label": "Agent Author: Validate",
       "description": "Closed-world re-check of a candidate draft (agentId in catalog, workflows resolve, persona distinct, autonomy legal). Fails the run when invalid so the errors feed a repair.",
-      "category": "ai",
+      "category": "integration", "x-paletteCategory": "ai",
       "role": "action",
       "capabilities": [],
       "inputSchemaRef": "schemas/validate.input.schema.json",
@@ -66,7 +67,7 @@
       "version": "1.1.0",
       "label": "Agent Author: Persist",
       "description": "Validates and creates the agent through the SAME createRosterEntry path the manual wizard uses (deterministic id, duplicate-409). The created agent lands DISABLED for human review-and-enable. mode:'draft' stashes the VALIDATED draft for the wizard prefill instead of creating (OQ1).",
-      "category": "ai",
+      "category": "integration", "x-paletteCategory": "ai",
       "role": "action",
       "capabilities": [],
       "inputSchemaRef": "schemas/persist.input.schema.json",

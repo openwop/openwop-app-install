@@ -1,18 +1,25 @@
 {
   "name": "vendor.myndhyve.entities",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "MyndHyve entities + validation + asset-decision + messaging primitives. 5 nodes covering project creation, cross-stage validation (deterministic, no LLM), workspace asset decision gates (brand / persona / KB), and chat send/reply via the messaging connector layer.",
   "author": "MyndHyve",
   "license": "Apache-2.0",
   "homepage": "https://myndhyve.ai/packs/entities",
   "repository": "https://github.com/openwop/openwop",
-  "keywords": ["vendor", "myndhyve", "entities", "validation", "asset-decision", "messaging"],
+  "keywords": [
+    "vendor",
+    "myndhyve",
+    "entities",
+    "validation",
+    "asset-decision",
+    "messaging"
+  ],
   "engines": {
-    "openwop": ">=1.0.0 <2.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "peerDependencies": {
-    "host.entities": "supported",
-    "host.messaging": "supported"
+    "entities": "supported",
+    "messaging": "supported"
   },
   "nodes": [
     {
@@ -22,7 +29,9 @@
       "description": "Create a Project for a given Canvas Type. Generic primitive for multi-step orchestrations; idempotency-keyed via ctx.sideEffects when present.",
       "category": "coordination",
       "role": "side-effect",
-      "capabilities": ["side-effectful"],
+      "capabilities": [
+        "side-effectful"
+      ],
       "configSchemaRef": "schemas/projectCreate.config.json",
       "inputSchemaRef": "schemas/projectCreate.input.json",
       "outputSchemaRef": "schemas/projectCreate.output.json"
@@ -34,7 +43,9 @@
       "description": "Pure advisory validator: deterministic field comparison across two workflow-stage artifacts. No LLM. Compare modes: equal | gte | lte | exists | count-match. `success` is WARNINGS-ONLY by default (`failOnMismatch:false`) — it does NOT block. To hard-block a run, set `failOnMismatch:true` and branch on `{falsy success}`. Not a fail-closed gate.",
       "category": "control",
       "role": "pure",
-      "capabilities": ["cacheable"],
+      "capabilities": [
+        "cacheable"
+      ],
       "configSchemaRef": "schemas/crossStageCheck.config.json",
       "inputSchemaRef": "schemas/crossStageCheck.input.json",
       "outputSchemaRef": "schemas/crossStageCheck.output.json"
@@ -46,7 +57,9 @@
       "description": "HITL gate. Lists workspace assets of a given type (brand / persona / knowledgeBase), pauses for user choice (use-existing / create-new / skip). Auto-resolves if autoResolveVariable is already set.",
       "category": "control",
       "role": "gate",
-      "capabilities": ["side-effectful"],
+      "capabilities": [
+        "side-effectful"
+      ],
       "configSchemaRef": "schemas/assetDecisionGate.config.json",
       "inputSchemaRef": "schemas/assetDecisionGate.input.json",
       "outputSchemaRef": "schemas/assetDecisionGate.output.json"
@@ -58,7 +71,9 @@
       "description": "Send a chat message to an explicitly targeted connector + conversation. Inputs override config defaults. Requires connectorInstanceId, channel, conversationId, and text (or media).",
       "category": "chat",
       "role": "side-effect",
-      "capabilities": ["side-effectful"],
+      "capabilities": [
+        "side-effectful"
+      ],
       "configSchemaRef": "schemas/chatSend.config.json",
       "inputSchemaRef": "schemas/chatSend.input.json",
       "outputSchemaRef": "schemas/chatSend.output.json"
@@ -70,7 +85,9 @@
       "description": "Reply to the chat message that triggered this workflow run. Reads originating ingress envelope from run variables (`_ingressEnvelope`), builds outbound envelope, dispatches via messaging connector.",
       "category": "chat",
       "role": "side-effect",
-      "capabilities": ["side-effectful"],
+      "capabilities": [
+        "side-effectful"
+      ],
       "configSchemaRef": "schemas/chatReply.config.json",
       "inputSchemaRef": "schemas/chatReply.input.json",
       "outputSchemaRef": "schemas/chatReply.output.json"
@@ -81,5 +98,6 @@
     "format": "esm",
     "entry": "./index.mjs",
     "minRuntimeVersion": "node>=20"
-  }
+  },
+  "kind": "node"
 }

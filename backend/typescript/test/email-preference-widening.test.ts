@@ -5,6 +5,13 @@
  *
  * Born red on the pre-ADR route: every leg below that expects 409 answered 200
  * "Your preferences have been saved." — and the tombstone leg CLEARED the tombstone.
+ *
+ * Sabotage-witnessed (grade-tests w9): forcing `fresh`, dropping the no-address or the
+ * suppression refusal, dropping the umbrella from the `effective` rule, granting
+ * `marketing.email:false` on a fresh widen, or mis-keying the D10 `subject_erased` catch
+ * each reds its case. HONEST CEILING: the widening-path tombstone check (routes.ts, the
+ * `refused-erased` leg) is double-guarded by the ADR 0657 D10 write barrier, which yields the
+ * same 409 + copy — removing either alone is a behavioural no-op (probe pw-tombstone-widen).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -32,7 +39,7 @@ beforeAll(async () => {
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 const post = async (token: string, body: string): Promise<{ status: number; text: string }> => {
-  const res = await fetch(`${BASE}/v1/host/openwop-app/public-email/p/${encodeURIComponent(token)}`, {
+  const res = await fetch(`${BASE}/host/openwop-app/public-email/p/${encodeURIComponent(token)}`, {
     method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body,
   });
   return { status: res.status, text: await res.text() };
@@ -77,6 +84,8 @@ describe('ADR 0655 D3 — preference-center widening', () => {
     // email/sms/push are all EFFECTIVELY on through the umbrella; submitting all three on widens nothing.
     const r = await post(tok, 'email=on&sms=on&push=on');
     expect(r.status, r.text.slice(0, 200)).toBe(200);
+    expect(r.text).toContain('Your preferences have been saved.');
+    expect(await isAllowed(T, ct, 'marketing.email'), 'the accepted no-op leaves email on').toBe(true);
   });
 
   it('a SUPPRESSED address may NOT widen even from a fresh link → 409 (EM-UX-23: never "saved" over a re-grant that cannot deliver)', async () => {
@@ -93,7 +102,11 @@ describe('ADR 0655 D3 — preference-center widening', () => {
   it('a row with NO address cannot run the suppression leg → widening refused', async () => {
     const ct = 'ct-noemail';
     const tok = await fresh(ct);
-    expect((await post(tok, 'email=on')).status).toBe(409);
+    const r = await post(tok, 'email=on');
+    expect(r.status).toBe(409);
+    expect(r.text).toContain('cannot be turned back on from this link');
+    expect(r.text).not.toContain('Your preferences have been saved.');
+    expect(await isAllowed(T, ct, 'marketing.email'), 'the refused widening wrote nothing').toBe(false);
   });
 
   it('an ERASED subject: the DSAR erases the link itself (404); a token minted AFTER erasure may narrow but never un-erase, and may not widen', async () => {

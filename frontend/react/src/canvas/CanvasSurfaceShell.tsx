@@ -61,6 +61,9 @@ export interface SurfaceShellConfig {
   center: ReactNode;
   /** Below-the-columns chrome (the builder's RunDrawer). */
   tail?: ReactNode;
+  /** ADR 0773 G-01a — type-supplied, truthful context shown first in the status
+   *  edge (e.g. the builder's "suggestion: 3 pending · J/K to review"). */
+  statusExtra?: ReactNode;
   /** The type's verbs, merged into the shell's view registry. `group: 'type'`
    *  entries label from `typeT`; general/view entries label from the canvas ns. */
   typeShortcuts?: (ctx: SurfaceShellCtx) => ShortcutDef[];
@@ -151,6 +154,7 @@ export function CanvasSurfaceShell({ config }: { config: SurfaceShellConfig }): 
           region as document-backed canvases. These shortcuts are truthful for
           every surface this shell mounts; type-specific state stays in tail. */}
       <CanvasWorkbenchStatus label={tc('workspaceStatus')} className="cv-workbench__status--surface">
+        {config.statusExtra}
         <span>{tc('shortcutsTitle')} <kbd>?</kbd></span>
         <span>{tc('shortcutToggleLeftRail')} <kbd>[</kbd></span>
         <span>{tc('shortcutToggleRightRail')} <kbd>]</kbd></span>

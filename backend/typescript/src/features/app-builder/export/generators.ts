@@ -18,6 +18,8 @@
  * @see docs/adr/0305-app-builder-editor-parity-program.md §Phase C
  */
 
+import { APP_BUILDER_COMPONENTS } from '../componentCatalog.js';
+
 export type ExportTarget = 'react-tailwind' | 'react-styled' | 'vue-tailwind' | 'html-css' | 'react-native' | 'flutter' | 'nextjs';
 export const EXPORT_TARGETS: readonly ExportTarget[] = ['react-tailwind', 'react-styled', 'vue-tailwind', 'html-css', 'react-native', 'flutter', 'nextjs'];
 
@@ -74,7 +76,10 @@ function escapeHtml(raw: unknown): string {
 }
 /** Grade pass 2026-07-07 (F2): ids are interpolated into generated JS/Vue/Dart
  *  STRING and COMMENT contexts — sanitize to the slug charset the validator
- *  enforces on save (defense in depth for surface-inline models). */
+ *  enforces on save (defense in depth for surface-inline models). ADR 0835
+ *  (AB2-CD-1): an UNKNOWN component type lands in an "unsupported" comment the
+ *  same way, and `escapeHtml` leaves `*` and `/` alone — `*\/` closed the JSX
+ *  comment and the rest of the type became live code. */
 function jsId(raw: unknown): string {
   return String(raw ?? '').replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 80);
 }
@@ -256,7 +261,7 @@ function htmlNode(n: ComponentNode, w: Warn, screenHref: (id: string) => string)
     case 'list': return `<ul class="list">\n${indent(kids, 1)}\n</ul>`;
     case 'statCard': { const tone = str(p.tone, 'default'); return `<div class="card stat${hideCls(p.hideOn)}" style="padding:1rem;border-radius:8px"><span class="tone-muted">${escapeHtml(p.label)}</span><strong class="stat-value">${escapeHtml(p.value)}</strong>${p.delta ? `<span class="badge badge-${tone === 'default' ? 'neutral' : tone}">${escapeHtml(p.delta)}</span>` : ''}</div>`; }
     case 'table': { const { cols, rows } = tableData(p); return `<table class="table${hideCls(p.hideOn)}"><thead><tr>${cols.map((c) => `<th>${escapeHtml(c)}</th>`).join('')}</tr></thead><tbody>${rows.map((r) => `<tr>${cols.map((_, i) => `<td>${escapeHtml(r[i] ?? '')}</td>`).join('')}</tr>`).join('')}</tbody></table>`; }
-    default: w.push(n.type, `component '${n.type}' has no html-css mapping — skipped`); return `<!-- unsupported: ${escapeHtml(n.type)} -->`;
+    default: w.push(n.type, `component '${n.type}' has no html-css mapping — skipped`); return `<!-- unsupported: ${jsId(n.type)} -->`;
   }
 }
 const BASE_CSS = `:root{--fg:#111;--muted:#666;--accent:#2563eb;--accent-2:#7c3aed;--border:#e5e7eb;--ok:#16a34a;--warn:#ca8a04;--bad:#dc2626}
@@ -402,7 +407,7 @@ function reactNode(n: ComponentNode, w: Warn): string {
     case 'list': return `<ul className="list-disc pl-5">\n${indent(kids, 1)}\n</ul>`;
     case 'statCard': { const toneCls = ({ success: 'text-green-600', warning: 'text-yellow-600', danger: 'text-red-600' } as Record<string, string>)[str(p.tone, 'default')] ?? 'text-gray-500'; return `<div className="border border-gray-200 rounded-lg p-4 flex flex-col gap-1${twHide(p.hideOn)}"><span className="text-sm text-gray-500">${escapeHtml(p.label)}</span><strong className="text-2xl font-semibold">${escapeHtml(p.value)}</strong>${p.delta ? `<span className="text-sm ${toneCls}">${escapeHtml(p.delta)}</span>` : ''}</div>`; }
     case 'table': { const { cols, rows } = tableData(p); return `<table className="w-full text-left text-sm${twHide(p.hideOn)}"><thead><tr>${cols.map((c) => `<th className="border-b border-gray-200 p-2 font-semibold">${escapeHtml(c)}</th>`).join('')}</tr></thead><tbody>${rows.map((r) => `<tr>${cols.map((_, i) => `<td className="border-b border-gray-100 p-2">${escapeHtml(r[i] ?? '')}</td>`).join('')}</tr>`).join('')}</tbody></table>`; }
-    default: w.push(n.type, `component '${n.type}' has no react-tailwind mapping — skipped`); return `{/* unsupported: ${escapeHtml(n.type)} */}`;
+    default: w.push(n.type, `component '${n.type}' has no react-tailwind mapping — skipped`); return `{/* unsupported: ${jsId(n.type)} */}`;
   }
 }
 /** The shared React App shell — nav buttons + the ab:navigate CustomEvent listener
@@ -491,7 +496,7 @@ function styledNodeInner(n: ComponentNode, w: Warn): string {
     case 'list': return `<ListBox>\n${indent(kids, 1)}\n</ListBox>`;
     case 'statCard': { const v = ({ success: 'success', warning: 'warning', danger: 'danger' } as Record<string, string>)[str(p.tone, 'default')] ?? 'neutral'; return `<CardBox $radius="8px" $shadow="none"><Body $size="sm" $tone="muted">${escapeHtml(p.label)}</Body><Heading as="p" $level={2}>${escapeHtml(p.value)}</Heading>${p.delta ? `<BadgePill $variant="${v}">${escapeHtml(p.delta)}</BadgePill>` : ''}</CardBox>`; }
     case 'table': { const { cols, rows } = tableData(p); return `<TableEl><thead><tr>${cols.map((c) => `<Th>${escapeHtml(c)}</Th>`).join('')}</tr></thead><tbody>${rows.map((r) => `<tr>${cols.map((_, i) => `<Td>${escapeHtml(r[i] ?? '')}</Td>`).join('')}</tr>`).join('')}</tbody></TableEl>`; }
-    default: w.push(n.type, `component '${n.type}' has no react-styled mapping — skipped`); return `{/* unsupported: ${escapeHtml(n.type)} */}`;
+    default: w.push(n.type, `component '${n.type}' has no react-styled mapping — skipped`); return `{/* unsupported: ${jsId(n.type)} */}`;
   }
 }
 const STYLED_UI = `import styled, { css } from 'styled-components';
@@ -639,7 +644,7 @@ function rnNode(n: ComponentNode, w: Warn): string {
     case 'list': return `<View style={{ gap: 8 }}>\n${indent(kids, 1)}\n</View>`;
     case 'statCard': { const toneColor = ({ success: '#16a34a', warning: '#ca8a04', danger: '#dc2626' } as Record<string, string>)[str(p.tone, 'default')] ?? '#6b7280'; return `<View style={styles.card}><Text style={styles.muted}>${escapeHtml(p.label)}</Text><Text style={styles.heading}>${escapeHtml(p.value)}</Text>${p.delta ? `<Text style={{ color: '${toneColor}' }}>${escapeHtml(p.delta)}</Text>` : ''}</View>`; }
     case 'table': { const { cols, rows } = tableData(p); const rowJsx = (cells: string[], bold: boolean): string => `<View style={{ flexDirection: 'row', borderBottomWidth: 1, borderBottomColor: '#e5e7eb' }}>${cols.map((_, i) => `<Text style={{ flex: 1, padding: 6${bold ? ", fontWeight: '600'" : ''} }}>${escapeHtml(cells[i] ?? '')}</Text>`).join('')}</View>`; return `<View>${rowJsx(cols, true)}${rows.map((r) => rowJsx(r, false)).join('')}</View>`; }
-    default: w.push(n.type, `component '${n.type}' has no react-native mapping — skipped`); return `{/* unsupported: ${escapeHtml(n.type)} */}`;
+    default: w.push(n.type, `component '${n.type}' has no react-native mapping — skipped`); return `{/* unsupported: ${jsId(n.type)} */}`;
   }
 }
 function genReactNative(app: AppModel, warnings: string[]): ExportedFile[] {
@@ -802,8 +807,51 @@ const GENERATORS: Record<ExportTarget, (app: AppModel, warnings: string[]) => Ex
 /** Generate framework-native source for `target`. Unknown component types become
  *  warnings (never errors), so export stays additive over the evolving catalog.
  *  Data bindings are expanded (sample rows unrolled + interpolated) up front. */
+// ── ADR 0835 D2 — the export exit's closed-world pass ────────────────────────
+// The mappers interpolate enum-typed props (`fontSize`, `tone`, `direction`,
+// `variant`, …) through `str()`, which does NOT escape: they rely on the value
+// being one of the catalog's options. Nothing upstream guarantees that — the
+// surface's inline export degrades catalog violations to warnings by contract,
+// and other writers (run artifacts, plugins) reached the canvas unvalidated.
+// So the exit enforces it: every enum prop outside its options becomes the
+// declared default (or is dropped) and says so in `warnings[]`. Runs AFTER
+// `expandBindings`, because binding interpolates sample-row data into string
+// values of every prop, enum ones included.
+const ENUM_PROPS = new Map(APP_BUILDER_COMPONENTS.map((c) => [
+  c.type,
+  (c.props ?? []).filter((d) => d.type === 'enum' && d.options?.length).map((d) => ({ name: d.name, options: new Set(d.options), default: d.default })),
+]));
+const THEMES = new Set(['default', 'light', 'dark']);
+
+export function coerceForExport(app: AppModel, warnings: string[]): AppModel {
+  const coerced = new Set<string>();
+  const walk = (n: ComponentNode): ComponentNode => {
+    const out: ComponentNode = { ...n, ...(n.children ? { children: n.children.map(walk) } : {}) };
+    const defs = ENUM_PROPS.get(n.type);
+    if (defs?.length && n.props) {
+      const props = { ...n.props };
+      for (const d of defs) {
+        const v = props[d.name];
+        if (v === undefined || (typeof v === 'string' && d.options.has(v))) continue;
+        if (typeof d.default === 'string' && d.options.has(d.default)) props[d.name] = d.default;
+        else delete props[d.name];
+        coerced.add(`${n.type}.${d.name}`);
+      }
+      out.props = props;
+    }
+    return out;
+  };
+  const screens = app.screens.map((s) => ({ ...s, components: (s.components ?? []).map(walk) }));
+  const theme = app.theme !== undefined && !THEMES.has(app.theme) ? undefined : app.theme;
+  if (app.theme !== undefined && theme === undefined) coerced.add('app.theme');
+  for (const k of coerced) warnings.push(`'${k}' had a value outside its catalog options — exported with the catalog default, or left out where there is none.`);
+  const out: AppModel = { ...app, screens };
+  if (theme) out.theme = theme; else delete out.theme;
+  return out;
+}
+
 export function generate(target: ExportTarget, app: AppModel): GenerateResult {
   const warnings: string[] = [];
-  const files = GENERATORS[target](expandBindings(stripHidden(app)), warnings);
+  const files = GENERATORS[target](coerceForExport(expandBindings(stripHidden(app)), warnings), warnings);
   return { files, warnings };
 }

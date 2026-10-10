@@ -112,14 +112,14 @@ function client() {
 }
 async function shopOwner(): Promise<{ owner: ReturnType<typeof client>; orgId: string; tenantId: string }> {
   const owner = client();
-  const r = await owner.post('/v1/host/openwop-app/test/login', { email: `mcp-${Date.now()}-${n++}@acme.test` });
+  const r = await owner.post('/host/openwop-app/test/login', { email: `mcp-${Date.now()}-${n++}@acme.test` });
   const tenantId: string = r.body.user?.tenantId ?? '';
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Shop' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Shop' });
   // A workspace-scoped merchant credential for THIS tenant (resolves for any actor).
   await createSecretConnection({ tenantId, provider: 'mcpmerchant', kind: 'bearer', secret: 'mcp-token', scope: 'workspace' });
   return { owner, orgId: org.body.orgId, tenantId };
 }
-const buyer = (orgId: string, s = ''): string => `/v1/host/openwop-app/commerce/orgs/${encodeURIComponent(orgId)}/ucp-buyer${s}`;
+const buyer = (orgId: string, s = ''): string => `/host/openwop-app/commerce/orgs/${encodeURIComponent(orgId)}/ucp-buyer${s}`;
 
 describe('ADR 0258 — UCP buyer over MCP', () => {
   it('discovers + searches an MCP merchant, then places a purchase through the money gate', async () => {

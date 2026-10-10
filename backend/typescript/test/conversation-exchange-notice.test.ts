@@ -52,11 +52,11 @@ async function api<T = Record<string, unknown>>(path: string, init: RequestInit 
 }
 
 async function openGateRun(workflowId: string): Promise<string> {
-  await api('/v1/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({ workflowId, nodes: [{ nodeId: 'gate', typeId: 'core.conversationGate', config: { prompt: 'x' } }], edges: [] }) });
-  const runId = (await api<{ runId: string }>('/v1/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs: { provider: 'mock', model: 'mock-1' }, tenantId: '_anon' }) })).body.runId;
+  await api('/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({ workflowId, nodes: [{ nodeId: 'gate', typeId: 'core.conversationGate', config: { prompt: 'x' } }], edges: [] }) });
+  const runId = (await api<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs: { provider: 'mock', model: 'mock-1' }, tenantId: '_anon' }) })).body.runId;
   for (let i = 0; i < 60; i++) {
     await new Promise((r) => setTimeout(r, 20));
-    const s = (await api<{ status: string }>(`/v1/runs/${runId}`)).body.status;
+    const s = (await api<{ status: string }>(`/runs/${runId}`)).body.status;
     if (s.startsWith('waiting')) break;
   }
   return runId;
@@ -67,7 +67,7 @@ describe('exchange ack notice threading (ADR 0178)', () => {
     nextNotice = NOTICE;
     const runId = await openGateRun('adr0178.notice-on');
     const ex = await api<{ notice?: { code: string; usedPct: number; cap: number } }>(
-      `/v1/runs/${runId}/interrupts/gate`,
+      `/runs/${runId}/interrupts/gate`,
       { method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: 'hi' } } }) },
     );
     expect(ex.status).toBe(200);
@@ -78,7 +78,7 @@ describe('exchange ack notice threading (ADR 0178)', () => {
     nextNotice = undefined;
     const runId = await openGateRun('adr0178.notice-off');
     const ex = await api<{ notice?: unknown }>(
-      `/v1/runs/${runId}/interrupts/gate`,
+      `/runs/${runId}/interrupts/gate`,
       { method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: 'hi' } } }) },
     );
     expect(ex.status).toBe(200);

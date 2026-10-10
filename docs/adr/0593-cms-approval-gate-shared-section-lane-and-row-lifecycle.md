@@ -667,6 +667,14 @@ direction: `localizePage` derives `withheld` from `supportedLocales`, so a
 withhold direction to unconfigured tags, an operator can now easily create that
 state and believe they are protected. Witnessed explicitly.
 
+> **CORRECTED 2026-10-07 by ADR 0861 D1 — this ruling is overturned.** The probe
+> described the code accurately and the code was wrong about the operator's intent:
+> the same "inert" hold is how a withheld `pt` reached `pt-BR` readers once `pt` left
+> `supportedLocales`, through the NARROWING direction this ADR left ungated
+> (`CMSL2WF-1`, witnessed red). The withheld set is now the page's (every `draft`
+> key, `withheldLocales`), the hold bites, and the settings diff runs on every change.
+> The witness above is inverted, not deleted (`cms-live-edit-language-settings.test.ts`).
+
 **Why the family cure is complete, and the constraint that makes it so.**
 `LOCALE_RE` admits only `xx` and `xx-YY`, and it validates both
 `supportedLocales` and every overlay key — so `zh-Hant-TW` is unrepresentable

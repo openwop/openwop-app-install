@@ -23,7 +23,7 @@ import {
   listProposalAutoApprovePolicies,
 } from '../host/workflowProposalPolicy.js';
 
-const BASE = '/v1/host/openwop-app/workflow-proposals/admin/policies';
+const BASE = '/host/openwop-app/workflow-proposals/admin/policies';
 
 function subjectOf(req: Request): string {
   return req.userId ?? req.principal?.principalId ?? 'unknown';

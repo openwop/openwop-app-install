@@ -88,7 +88,7 @@ async function runProbe(
   config: Record<string, unknown>,
   agent?: Record<string, unknown>,
 ): Promise<RunSnapshot> {
-  const reg = await jsonFetch('/v1/host/openwop-app/workflows', {
+  const reg = await jsonFetch('/host/openwop-app/workflows', {
     method: 'POST',
     body: JSON.stringify({
       workflowId,
@@ -98,7 +98,7 @@ async function runProbe(
   });
   expect([200, 201], `register ${workflowId}`).toContain(reg.status);
 
-  const create = await jsonFetch<{ runId: string }>('/v1/runs', {
+  const create = await jsonFetch<{ runId: string }>('/runs', {
     method: 'POST',
     body: JSON.stringify({ workflowId, inputs: {} }),
   });
@@ -107,7 +107,7 @@ async function runProbe(
   let snap: RunSnapshot = {};
   for (let i = 0; i < 60; i++) {
     await new Promise((r) => setTimeout(r, 50));
-    snap = (await jsonFetch<RunSnapshot>(`/v1/runs/${create.body.runId}`)).body;
+    snap = (await jsonFetch<RunSnapshot>(`/runs/${create.body.runId}`)).body;
     if (['completed', 'failed', 'cancelled'].includes(snap.status ?? '')) break;
   }
   return snap;

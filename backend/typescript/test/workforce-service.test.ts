@@ -67,10 +67,10 @@ describe('workforceService', () => {
     const second = await seedWorkforceEntities();
     expect(second).toBe(0); // already present
 
-    const wf = await getWorkforce(HERO);
+    const wf = await getWorkforce('demo', HERO);
     expect(wf?.name).toBe('Invoice Exception Workforce');
     expect(wf?.agents.some((a) => a.role === 'supervisor')).toBe(true);
-    expect((await listWorkforces()).length).toBeGreaterThan(0);
+    expect((await listWorkforces('demo')).length).toBeGreaterThan(0);
   });
 
   it('seeds history runs + event logs into the tenant', async () => {
@@ -236,7 +236,7 @@ describe('workforceService', () => {
   it('seeds five starter workforces; all are instrumented with history', async () => {
     const created = await seedWorkforceEntities();
     expect(created).toBe(5);
-    const all = await listWorkforces();
+    const all = await listWorkforces('demo');
     expect(all.map((w) => w.workforceId).sort()).toEqual(
       [
         'workforce.finance.invoice-exception',

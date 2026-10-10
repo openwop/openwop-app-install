@@ -19,7 +19,7 @@ import { join, dirname } from 'node:path';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(here, '../../..');
-const AGENTS_PACK = join(REPO_ROOT, 'packs/feature.kicktodo.agents');
+const AGENTS_PACK = join(REPO_ROOT, 'packs/vendor.openwop-app.kicktodo.agents');
 const NODES_PACK = join(REPO_ROOT, 'packs/feature.kicktodo.nodes');
 
 const readJson = (p: string) => JSON.parse(readFileSync(p, 'utf8'));
@@ -140,10 +140,10 @@ describe('plan-revision return schema (ADR 0459 P1)', () => {
 
 // ── 2. manifests parse + carry the P1/P3 wiring ───────────────────────────
 describe('touched pack manifests (ADR 0459 P1+P3)', () => {
-  it('agents pack is at 1.9.0 and the replan-composer returns the plan-revision schema (READ-only handoff skill)', () => {
+  it('agents pack is at 1.9.1 and the replan-composer returns the plan-revision schema (READ-only handoff skill)', () => {
     const pack = readJson(join(AGENTS_PACK, 'pack.json'));
-    expect(pack.version).toBe('1.9.0');
-    const agent = pack.agents.find((a: { agentId: string }) => a.agentId === 'feature.kicktodo.agents.replan-composer');
+    expect(pack.version).toBe('1.9.1');
+    const agent = pack.agents.find((a: { agentId: string }) => a.agentId === 'vendor.openwop-app.kicktodo.agents.replan-composer');
     expect(agent, 'replan-composer must be declared').toBeDefined();
     expect(agent.handoff?.returnSchemaRef).toBe('schemas/plan-revision.schema.json');
     // A handoff skill: scratchpad-only, no conversation memory, READ tools only.
@@ -152,9 +152,9 @@ describe('touched pack manifests (ADR 0459 P1+P3)', () => {
     expect(agent.modelClass).toBe('research');
   });
 
-  it('nodes pack is at 1.30.0 and declares the P1/P3 + grade-fix action nodes', () => {
+  it('nodes pack is at 1.30.3 and declares the P1/P3 + grade-fix action nodes', () => {
     const pack = readJson(join(NODES_PACK, 'pack.json'));
-    expect(pack.version).toBe('1.30.0');
+    expect(pack.version).toBe('1.30.3');
     for (const typeId of [
       'feature.kicktodo.nodes.apply-revision-commands',
       'feature.kicktodo.nodes.session-reminder',

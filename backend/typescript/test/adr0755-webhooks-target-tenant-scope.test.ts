@@ -45,7 +45,7 @@ afterAll(async () => {
 });
 
 const list = (key: string, tenantId?: string) =>
-  fetch(`${BASE}/v1/webhooks${tenantId ? `?tenantId=${encodeURIComponent(tenantId)}` : ''}`, { headers: { authorization: `Bearer ${key}` } });
+  fetch(`${BASE}/webhooks${tenantId ? `?tenantId=${encodeURIComponent(tenantId)}` : ''}`, { headers: { authorization: `Bearer ${key}` } });
 
 describe('webhooks:manage in the target tenant (enforcement on)', () => {
   it('CONTROL: an admin manages webhooks in their own active tenant', async () => {

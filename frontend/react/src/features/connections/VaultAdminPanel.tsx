@@ -117,8 +117,13 @@ export function VaultAdminPanel(): JSX.Element | null {
     } catch (err) {
       if (err instanceof VaultReferencesError) {
         const forced = await confirm({
-          title: t('vaultDeleteReferencedTitle'),
-          body: t('vaultDeleteReferencedBody', { refs: err.references.join(', ') }),
+          title: err.references.length > 0 ? t('vaultDeleteReferencedTitle') : t('vaultDeleteUnverifiedTitle'),
+          // ADR 0779 D7 — a 409 with NO named references is the server saying it
+          // could not check (`referencesKnown: false`): a known conflict always
+          // names at least one consumer. It used to render "Live references: ."
+          body: err.references.length > 0
+            ? t('vaultDeleteReferencedBody', { refs: err.references.join(', ') })
+            : t('vaultDeleteUnverifiedBody'),
           danger: true,
           confirmLabel: t('vaultDeleteAnyway'),
         });

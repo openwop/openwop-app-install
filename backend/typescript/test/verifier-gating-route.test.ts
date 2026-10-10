@@ -1,7 +1,7 @@
 /**
  * W-2 / RFC 0090 — the `verifier-gating` behavioral contract over HTTP. Boots the
  * real app with the verifier ladder enabled and exercises
- * POST /v1/host/openwop-app/agents/verify-run:
+ * POST /host/openwop-app/agents/verify-run:
  *   - discovery advertises executionModel.version 6 + verifier{supported,gating}
  *   - simulateVerdict 'pass' → commit (status 'completed'); agent.verified emitted
  *   - simulateVerdict 'fail' → commit BLOCKED (status != 'completed'); agent.verified
@@ -11,6 +11,7 @@
  * the reference host passes it non-vacuously under OPENWOP_REQUIRE_BEHAVIOR.
  */
 
+import { v1Advertisement } from './support/v1Advertisement.js';
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
@@ -30,7 +31,7 @@ beforeAll(async () => {
   process.env.OPENWOP_MULTI_AGENT_EXECUTION_MODEL_PHASE_5 = 'true';
   process.env.OPENWOP_AGENT_VERIFIER_GATING = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; URL = `${BASE}/v1/host/openwop-app/agents/verify-run`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; URL = `${BASE}/host/openwop-app/agents/verify-run`; res(); }); });
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
@@ -43,7 +44,10 @@ interface VerifyResp {
 
 describe('RFC 0090 — verifier-gating seam', () => {
   it('advertises executionModel.version 6 + verifier{supported,gating}', async () => {
-    const doc = await (await fetch(`${BASE}/.well-known/openwop`, { headers: H })).json() as {
+    // ADR 0858 debt: this claim is on the v1 document only (the v2 family is ledgered), and
+    // since ADR 0812 P3c the header-less discovery read is v2, so it is read from the v1
+    // builder through the bridge until the family is projected.
+    const doc = await v1Advertisement() as {
       multiAgent?: { executionModel?: { version?: number; verifier?: { supported?: boolean; gating?: boolean } } };
       capabilities?: { multiAgent?: { executionModel?: { version?: number; verifier?: { supported?: boolean; gating?: boolean } } } };
     };

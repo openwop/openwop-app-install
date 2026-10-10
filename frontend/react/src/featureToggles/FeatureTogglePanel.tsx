@@ -36,6 +36,9 @@ import {
   type ToggleConfig,
   type Variant,
   deleteToggleConfig,
+  listToggleHistory,
+  ToggleAdminError,
+  type ToggleChange,
 } from '../client/featureTogglesClient.js';
 import { useAllFeatureAccess } from './FeatureAccessContext.js';
 
@@ -97,6 +100,16 @@ function variantsSum(variants: Variant[] | undefined): number {
   return (variants ?? []).reduce((s, v) => s + (Number.isFinite(v.weight) ? v.weight : 0), 0);
 }
 
+/** ADR 0819 §5 — the row moved since this screen read it. The caller re-reads
+ *  that ONE toggle (sibling drafts survive) and says so, instead of showing the
+ *  server's "reload it" with no way to reload. Returns true when handled. */
+function handleStale(err: unknown, id: string, onStale: (id: string) => void, message: string): boolean {
+  if (!(err instanceof ToggleAdminError && err.reason === 'revision_conflict')) return false;
+  toast.warning(message);
+  onStale(id);
+  return true;
+}
+
 function ToggleCard({
   config,
   lockedBy,
@@ -104,6 +117,7 @@ function ToggleCard({
   openPath,
   labelOf,
   onSaved,
+  onStale,
 }: {
   config: ToggleConfig;
   /** Labels of enabled features that depend on this one (ADR 0194). Non-empty ⇒
@@ -116,6 +130,8 @@ function ToggleCard({
   /** id → display label (for dependency chips). */
   labelOf: (id: string) => string;
   onSaved: (next: ToggleConfig) => void;
+  /** Re-read this one toggle after a revision conflict (ADR 0819 §5). */
+  onStale: (id: string) => void;
 }): JSX.Element {
   const { t } = useTranslation('featureToggles');
   const [draft, setDraft] = useState<ToggleConfig>(config);
@@ -159,11 +175,39 @@ function ToggleCard({
       onSaved(next);
       toast.success(t('saved', { label: draft.label ?? draft.id }));
     } catch (err) {
+      if (handleStale(err, draft.id, onStale, t('staleReloaded', { label: draft.label ?? draft.id }))) return;
       toast.error(err instanceof Error ? err.message : t('saveFailed'));
     } finally {
       setSaving(false);
     }
-  }, [draft, sumOk, onSaved, t]);
+  }, [draft, sumOk, onSaved, onStale, t]);
+
+  const [historyOpen, setHistoryOpen] = useState(false);
+  // ADR 0819 §3 — the kill switch saves IMMEDIATELY from the last saved config
+  // (never the unsaved draft): an incident lever must not ship half an edit.
+  const toggleKill = useCallback(async () => {
+    const killing = !config.killed;
+    const label = config.label ?? config.id;
+    const ok = await confirm({
+      title: t(killing ? 'killConfirmTitle' : 'liftConfirmTitle', { label }),
+      body: t(killing ? 'killConfirmBody' : 'liftConfirmBody'),
+      confirmLabel: t(killing ? 'kill' : 'liftKill'),
+      ...(killing ? { danger: true } : {}),
+    });
+    if (!ok) return;
+    setSaving(true);
+    try {
+      const { id, updatedAt: _at, updatedBy: _by, overridden: _ov, defaultDrift: _dd, ...body } = config;
+      const next = await saveToggleConfig(id, { ...body, killed: killing });
+      onSaved(next);
+      toast.success(t(killing ? 'killedToast' : 'liftedToast', { label }));
+    } catch (err) {
+      if (handleStale(err, config.id, onStale, t('staleReloaded', { label }))) return;
+      toast.error(err instanceof Error ? err.message : t('saveFailed'));
+    } finally {
+      setSaving(false);
+    }
+  }, [config, onSaved, onStale, t]);
 
   return (
     <div className="surface-card u-p-4 u-grid u-gap-3">
@@ -171,6 +215,7 @@ function ToggleCard({
         <div>
           <strong>{draft.label ?? draft.id}</strong>
           <code className="ftoggle-id">{draft.id}</code>
+          {config.killed ? <span className="chip chip--danger u-ml-2">{t('killedChip')}</span> : null}
           {draft.description ? (
             <p className="ftoggle-desc">{draft.description}</p>
           ) : null}
@@ -324,7 +369,28 @@ function ToggleCard({
         </div>
       ) : null}
 
+      {config.killed ? (
+        <Notice variant="warning">{t('killedNotice')}</Notice>
+      ) : null}
+
+      {historyOpen ? <ToggleHistory id={draft.id} /> : null}
+
       <div className="action-bar u-flex u-justify-end u-gap-2">
+        <Button variant="quiet" size="sm" aria-expanded={historyOpen} onClick={() => setHistoryOpen((o) => !o)}>
+          {historyOpen ? t('historyHide') : t('historyShow')}
+        </Button>
+        {/* A disabled control's reason must be VISIBLE text, not a title: a
+            disabled button takes no focus, so a tooltip-only reason is
+            unreachable by keyboard (the FT-U3 lesson). */}
+        {dirty ? <span id={`ftoggle-kill-hint-${draft.id}`} className="muted u-fs-12">{t('killSaveFirst')}</span> : null}
+        <Button
+          variant={config.killed ? 'secondary' : 'danger'}
+          disabled={saving || dirty}
+          aria-describedby={dirty ? `ftoggle-kill-hint-${draft.id}` : undefined}
+          onClick={() => void toggleKill()}
+        >
+          {config.killed ? t('liftKill') : t('kill')}
+        </Button>
         {draft.updatedAt ? (
           <span className="ftoggle-updated">
             {t('updatedAt', { when: formatDateTime(draft.updatedAt) })}
@@ -343,10 +409,11 @@ function ToggleCard({
                 if (!(await confirm({ title: t('revertTitle', { label: draft.label ?? draft.id }), body: t('revertBody'), confirmLabel: t('revertConfirm') }))) return;
                 setSaving(true);
                 try {
-                  const next = await deleteToggleConfig(draft.id);
+                  const next = await deleteToggleConfig(draft.id, config.revision);
                   onSaved(next);
                   toast.success(t('reverted', { label: draft.label ?? draft.id }));
                 } catch (err) {
+                  if (handleStale(err, draft.id, onStale, t('staleReloaded', { label: draft.label ?? draft.id }))) return;
                   toast.error(err instanceof Error ? err.message : t('saveFailed'));
                 } finally {
                   setSaving(false);
@@ -365,6 +432,47 @@ function ToggleCard({
   );
 }
 
+/** ADR 0819 §4 — the audited change history of one toggle, loaded on open.
+ *  The rows carry the SHAPE of each change (status, kill, cohort size), never
+ *  cohort or tenant ids: the audit log is permanent. */
+function ToggleHistory({ id }: { id: string }): JSX.Element {
+  const { t } = useTranslation('featureToggles');
+  const [changes, setChanges] = useState<ToggleChange[] | null>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    let live = true;
+    listToggleHistory(id)
+      .then((c) => { if (live) setChanges(c); })
+      .catch(() => { if (live) setFailed(true); });
+    return () => { live = false; };
+  }, [id]);
+  const describe = (side: ToggleChange['payload']['after']): string =>
+    side ? (side.killed ? t('killedChip') : t(STATUSES.find((s) => s.value === side.status)?.labelKey ?? 'statusOff')) : t('historyCodeDefault');
+  if (failed) return <Notice variant="error" announce={t('historyLoadFailed')}>{t('historyLoadFailed')}</Notice>;
+  if (!changes) return <Skeleton width="60%" />;
+  if (changes.length === 0) return <p className="muted u-fs-12">{t('historyEmpty')}</p>;
+  return (
+    <section aria-label={t('historyAria', { id })}>
+      <ol className="u-grid u-gap-1 u-fs-12">
+        {changes.map((c, i) => (
+          <li key={`${c.at}-${i}`} className="u-flex u-gap-2 u-wrap">
+            <span className="u-ink-3">{formatDateTime(c.at)}</span>
+            <span>{t(HISTORY_ACTION_KEY[c.action] ?? 'historyActionSaved')}</span>
+            <span>{t('historyChange', { from: describe(c.payload.before ?? null), to: describe(c.payload.after ?? null) })}</span>
+            {c.principalId ? <span className="u-ink-3">{t('historyBy', { who: c.principalId })}</span> : null}
+          </li>
+        ))}
+      </ol>
+    </section>
+  );
+}
+
+const HISTORY_ACTION_KEY: Record<string, string> = {
+  'feature-toggle.saved': 'historyActionSaved',
+  'feature-toggle.reverted': 'historyActionReverted',
+  'feature-toggle.tenant-enabled': 'historyActionTenantEnabled',
+};
+
 /** The dense List half of the §4.5 collection canon (rule 6 — rows at fleet
  *  scale): identity · status/attention chips · an INSTANT-save Off/Beta/On
  *  segmented. Split/unit/variant editing stays on the Grid card — the row is
@@ -375,12 +483,14 @@ function ToggleRow({
   attention,
   openPath,
   onSaved,
+  onStale,
 }: {
   config: ToggleConfig;
   lockedBy: string[];
   attention: boolean;
   openPath: string | null;
   onSaved: (next: ToggleConfig) => void;
+  onStale: (id: string) => void;
 }): JSX.Element {
   const { t } = useTranslation('featureToggles');
   const [saving, setSaving] = useState(false);
@@ -394,11 +504,12 @@ function ToggleRow({
       onSaved(next);
       toast.success(t('saved', { label: config.label ?? config.id }));
     } catch (err) {
+      if (handleStale(err, config.id, onStale, t('staleReloaded', { label: config.label ?? config.id }))) return;
       toast.error(err instanceof Error ? err.message : t('saveFailed'));
     } finally {
       setSaving(false);
     }
-  }, [config, onSaved, t]);
+  }, [config, onSaved, onStale, t]);
   const statusLabelKey = STATUSES.find((s) => s.value === config.status)?.labelKey ?? 'statusOff';
   return (
     <div className="list-row">
@@ -416,6 +527,7 @@ function ToggleRow({
       </span>
       <div className="list-row-meta">
         <span className={STATUS_CHIP[config.status]}>{t(statusLabelKey)}</span>
+        {config.killed ? <span className="chip chip--danger" title={t('killedNotice')}>{t('killedChip')}</span> : null}
         {/* Provenance + drift (architect 2026-07-13): a stored row pins the
             toggle; a pinned toggle whose CODE default has since changed would
             silently ignore a GA default-flip — surface both. */}
@@ -520,6 +632,17 @@ export function FeatureTogglePanel(): JSX.Element {
     reload();
     void listFeatureConsole().then(setConsole).catch(() => { /* off-lock refresh is advisory */ });
   }, [reload]);
+
+  // ADR 0819 §5 — after a revision conflict, re-read and replace ONLY that
+  // toggle, so sibling cards keep their unsaved drafts (the FT-C2 rule above).
+  const onStale = useCallback((id: string) => {
+    void listToggleConfigs()
+      .then((all) => {
+        const fresh = all.find((c) => c.id === id);
+        if (fresh) setConfigs((prev) => (prev ?? []).map((c) => (c.id === id ? fresh : c)));
+      })
+      .catch(() => { toast.error(t('loadFailed')); });
+  }, [t]);
 
   // §4.5 filtering — the key-figure tiles ARE the status filter (rule 2), the
   // filterbar carries free-text search + category/sort selects (rule 5), and
@@ -682,6 +805,7 @@ export function FeatureTogglePanel(): JSX.Element {
                   openPath={byId[c.id]?.enabled ? pathByFeatureId.get(c.id) ?? null : null}
                   labelOf={labelOf}
                   onSaved={onSaved}
+                  onStale={onStale}
                 />
               ))}
             </div>
@@ -695,6 +819,7 @@ export function FeatureTogglePanel(): JSX.Element {
                   attention={attentionIds.has(c.id)}
                   openPath={byId[c.id]?.enabled ? pathByFeatureId.get(c.id) ?? null : null}
                   onSaved={onSaved}
+                  onStale={onStale}
                 />
               ))}
             </div>

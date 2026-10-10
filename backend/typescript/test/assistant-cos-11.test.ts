@@ -6,7 +6,7 @@
  * hardened on `workspace:write` for exactly that reason (routes.ts:74-78).
  *
  * The fix uses the ONE shared predicate (`requireTenantScope`):
- *   - the shared work-graph (commitments/decisions/meetings/stakeholders/projects)
+ *   - the shared work-graph (commitments/decisions/meetings/stakeholders)
  *     gates on `workspace:read` — any member reads it, a NON-MEMBER is denied;
  *   - `/pending-actions` gates on `workspace:write` — the drafted outbound bodies
  *     are readable only by someone who could send them (a VIEWER is denied).
@@ -66,7 +66,7 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-const A = '/v1/host/openwop-app/assistant';
+const A = '/host/openwop-app/assistant';
 
 describe('COS-11 — the work-graph reads gate on workspace:read', () => {
   for (const [name, path] of [
@@ -74,7 +74,7 @@ describe('COS-11 — the work-graph reads gate on workspace:read', () => {
     ['decisions', `${A}/decisions`],
     ['meetings', `${A}/meetings`],
     ['stakeholders', `${A}/stakeholders`],
-    ['projects', `${A}/projects`],
+    // `projects` retired with the assistant:project model (ADR 0820 §8 item 4; 0 prod rows); the route 404s.
   ] as const) {
     it(`${name}: a member WITHOUT workspace:read is REFUSED (403); a viewer + editor read`, async () => {
       const denied = await get(path, noReadCookie);

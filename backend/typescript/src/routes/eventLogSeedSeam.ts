@@ -37,13 +37,33 @@ import type { Express, Request, Response, NextFunction } from 'express';
 
 import type { Storage } from '../storage/storage.js';
 import type { RunRecord, EventRecord } from '../types.js';
-import { toWireRunId } from '../host/v2Ids.js';
+import { toWireRunId, fromWireRunId } from '../host/v2Ids.js';
+import { isV2EventTypeName } from '../storage/eventEra.js';
 import { sendError } from '../middleware/errorEnvelope.js';
 import { createLogger } from '../observability/logger.js';
 
 const log = createLogger('routes.eventLogSeedSeam');
 
-export const SEED_PATH = '/v1/host/sample/event-log/seed';
+export const SEED_PATH = '/host/sample/event-log/seed';
+/** `appendEra2Event` (seams-v2, suite 2.42.6) — served at its v1 address and
+ *  reached at the v2 one through the same seams alias as the seed. */
+export const APPEND_PATH = '/host/sample/event-log/append';
+
+const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
+
+/** Closed-world validation of the append body against `api/seams-v2.yaml`. */
+export function validateAppendBody(body: unknown): { error: string } | { runId: string; type: string; payload: Record<string, unknown> } {
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) return { error: 'body must be a JSON object' };
+  const b = body as Record<string, unknown>;
+  const extra = Object.keys(b).filter((k) => k !== 'runId' && k !== 'type' && k !== 'payload');
+  if (extra.length > 0) return { error: `unexpected field(s): ${extra.join(', ')}` };
+  if (typeof b['runId'] !== 'string' || b['runId'].length === 0) return { error: 'runId is REQUIRED and must be a non-empty string' };
+  if (typeof b['type'] !== 'string' || !isV2EventTypeName(b['type'])) {
+    return { error: `type must be a v2 event type name (schemas/v2/run-event.schema.json); got ${JSON.stringify(b['type'])}` };
+  }
+  if (typeof b['payload'] !== 'object' || b['payload'] === null || Array.isArray(b['payload'])) return { error: 'payload must be an object' };
+  return { runId: b['runId'], type: b['type'], payload: b['payload'] as Record<string, unknown> };
+}
 
 /**
  * Seeded runs belong to the CALLER'S tenant, not a fixture tenant.
@@ -138,6 +158,55 @@ function seededWorkflowId(events: readonly { type?: string; payload?: unknown }[
 
 export function registerEventLogSeedSeam(app: Express, deps: { storage: Storage }): void {
   const { storage } = deps;
+
+  /**
+   * `appendEra2Event` — RFC 0176 §A writer-rule witness. The seam is only the
+   * TRIGGER: it hands the v2-named event to `storage.appendEvent`, the same
+   * `eventEraAdapter` writer the executor uses, and that writer decides the
+   * stored spelling from the run's era (an era-2 log stores the codemap's v1
+   * side). There is deliberately no vocabulary logic here — a seam that
+   * translated for itself would witness its own code, not the host's.
+   *
+   * Refusals, per the contract: a run this seam family did not seed is `404`
+   * exactly like an unknown run (so it cannot inject into a real run, and does
+   * not reveal that one exists); a terminal run is `409 run_terminal`; a type
+   * outside the v2 registry is `400`.
+   */
+  app.post(APPEND_PATH, async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      if (process.env.OPENWOP_TEST_SEAM_ENABLED !== 'true') {
+        sendError(res, 404, 'not_found', 'The conformance seam surface is not enabled on this host.');
+        return;
+      }
+      const tenant = callerTenant(req);
+      const parsed = validateAppendBody(req.body);
+      if ('error' in parsed) {
+        sendError(res, 400, 'validation_error', parsed.error);
+        return;
+      }
+      const resolved = fromWireRunId(parsed.runId, tenant);
+      const run = resolved.ok ? await storage.getRun(resolved.runId) : null;
+      const seeded = (run?.metadata as Record<string, unknown> | null | undefined)?.['seededBy'] === 'conformance-seam';
+      if (!run || run.tenantId !== tenant || !seeded) {
+        sendError(res, 404, 'run_not_found', `run ${parsed.runId} not found`);
+        return;
+      }
+      if (TERMINAL.has(run.status)) {
+        sendError(res, 409, 'run_terminal', `run ${parsed.runId} is already ${run.status}`, { status: run.status });
+        return;
+      }
+      const stored = await storage.appendEvent({
+        eventId: randomUUID(),
+        runId: run.runId,
+        type: parsed.type,
+        payload: parsed.payload,
+        timestamp: new Date().toISOString(),
+      });
+      res.status(202).json({ runId: toWireRunId(run.runId, tenant), sequence: stored.sequence });
+    } catch (err) {
+      next(err);
+    }
+  });
 
   app.post(SEED_PATH, async (req: Request, res: Response, next: NextFunction) => {
     try {

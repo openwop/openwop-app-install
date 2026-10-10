@@ -24,6 +24,7 @@ const resolveReadOrg = (scope: Parameters<typeof resolveReadOrgScope>[0], orgIdI
 export function registerAnalyticsAgentTools(): void {
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: ANALYTICS_QUERY_TOOL_ID,
       description:

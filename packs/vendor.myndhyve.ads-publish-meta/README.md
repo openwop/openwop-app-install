@@ -66,6 +66,8 @@ The OAuth plaintext from `ctx.secrets.resolve` flows through this pack and out t
 | `secret_expired` | `CREDENTIAL_EXPIRED` | false |
 | `secret_revoked` | `CREDENTIAL_REVOKED` | false |
 | `secret_quota_exhausted` | `CREDENTIAL_RESOLVE_FAILED` | **true** |
+
+On a major-2 host (RFC 0228) the same states arrive as registered codes with `details.service: "secrets"`, and the pack maps them identically: `credential_not_found` → `CREDENTIAL_NOT_FOUND` (or `CREDENTIAL_REVOKED` / `CREDENTIAL_EXPIRED` when `details.reason` is `revoked` / `expired`), `credential_forbidden` → `CREDENTIAL_ACCESS_DENIED`, `rate_limited` → `CREDENTIAL_RESOLVE_FAILED` (retryable).
 | any other | `CREDENTIAL_RESOLVE_FAILED` | false |
 
 Meta API errors:

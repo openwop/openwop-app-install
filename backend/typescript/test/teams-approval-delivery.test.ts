@@ -41,7 +41,7 @@ function client() {
   };
 }
 
-const PATH = '/v1/host/openwop-app/approval-delivery/teams';
+const PATH = '/host/openwop-app/approval-delivery/teams';
 let n = 0;
 
 describe('teams delivery pref routes — self-service through HTTP', () => {
@@ -49,8 +49,8 @@ describe('teams delivery pref routes — self-service through HTTP', () => {
     const tenantId = `org:teams-${Date.now()}-${n++}`;
     const alice = client();
     const bob = client();
-    expect((await alice.post('/v1/host/openwop-app/test/login', { email: `a-${Date.now()}@t.test`, tenantId })).status).toBe(201);
-    expect((await bob.post('/v1/host/openwop-app/test/login', { email: `b-${Date.now()}@t.test`, tenantId })).status).toBe(201);
+    expect((await alice.post('/host/openwop-app/test/login', { email: `a-${Date.now()}@t.test`, tenantId })).status).toBe(201);
+    expect((await bob.post('/host/openwop-app/test/login', { email: `b-${Date.now()}@t.test`, tenantId })).status).toBe(201);
 
     expect((await alice.put(PATH, { connectionId: '', chatId: '' })).status).toBe(400);
     expect((await alice.put(PATH, { connectionId: 'conn-9', chatId: '19:abc' })).status).toBe(200);

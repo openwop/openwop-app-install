@@ -75,7 +75,7 @@ import { buildDaemonStatus } from '../../routes/daemonStatus.js';
 import { APP_VERSION } from '../../version.js';
 
 const FEATURE = { toggleId: 'operations', label: 'Operations Console' };
-const BASE = '/v1/host/openwop-app/operations';
+const BASE = '/host/openwop-app/operations';
 const RECENT_LIMIT = 20;
 
 const log = createLogger('features.operations');

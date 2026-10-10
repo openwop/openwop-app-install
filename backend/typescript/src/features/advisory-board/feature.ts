@@ -28,10 +28,13 @@ import { registerAdvisoryBoardRoutes } from './routes.js';
 import { resolveBoardAccess, pruneAdvisorFromBoards, reconcileSharedKbForSourceChange } from './service.js';
 import { onRosterMemberDeleted } from '../../host/rosterLifecycle.js';
 import { buildAdvisoryBoardSurface } from './surface.js';
+import { registerFeatureDataExporter } from '../../host/featureDataExport.js';
+import { exportAdvisoryBoardData } from './dataExport.js';
 
 export const advisoryBoardFeature: BackendFeature = {
   id: 'advisory-board',
   registerRoutes: (deps) => {
+    registerFeatureDataExporter('advisory-board', exportAdvisoryBoardData); // ADR 0820 §7 — read-only export, served after a plan lapse
     registerAdvisoryBoardRoutes(deps);
     // ADR 0288 — prune a deleted roster member from every board's live
     // membership (advisors[] + moderator); the board itself survives visibly.
@@ -54,12 +57,12 @@ export const advisoryBoardFeature: BackendFeature = {
     registerShareableKbReconciler(reconcileSharedKbForSourceChange);
   },
   surface: { id: 'advisory-board', build: buildAdvisoryBoardSurface },
-  requiredPacks: [{ name: 'feature.advisory-board.nodes', version: '1.0.0' }],
+  requiredPacks: [{ name: 'feature.advisory-board.nodes', version: '1.0.1' }],
   toggleDefault: {
     id: 'advisory-board',
     label: 'Board of Advisors',
     description:
-      'Assemble councils of named advisor agents (digital-clone personas) and convene them together in one shared chat via `@@`. Each advisor draws from its own bound knowledge (ADR 0038) and the council sees each other\'s turns; a moderator synthesizes. Advisors are roster agents (ADR 0031/0032); the board is a new grouping under /advisors/*, not a Kanban board. Boards are private or workspace-shared. Simulated personas of real people carry a disclaimer; living individuals require an explicit acknowledgement. ON by default (ADR 0229).',
+      'Assemble councils of named advisor agents (digital-clone personas) and convene them together in one shared chat via `@@`. Each advisor draws from its own bound knowledge and the council sees each other\'s turns; a moderator synthesizes. Advisors are roster agents; the board is a grouping under /advisors/*, not a Kanban board. Boards are private or workspace-shared. Simulated personas of real people carry a disclaimer; living individuals require an explicit acknowledgement.',
     category: 'Agents',
     status: 'on',
     bucketUnit: 'tenant',

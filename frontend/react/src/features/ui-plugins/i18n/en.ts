@@ -5,7 +5,7 @@
 export const messages = {
   eyebrow: 'Developer',
   title: 'UI Plugins',
-  lede: 'Load signed, sandboxed front-end plugin packs (RFC 0117/0119).',
+  lede: 'Load signed, sandboxed front-end plugin packs.',
 
   notEnabledTitle: 'UI Plugins is not enabled',
   notEnabledBody: 'Ask an administrator to enable UI Plugins for this tenant.',

@@ -24,12 +24,20 @@ export interface ToolApproval {
   requestedAt: string;
   resolvedAt?: string;
   resolvedBy?: string;
+  /** ADR 0834 D6 — the held call's arguments (scrubbed, capped); present while pending. */
+  requestedInput?: string;
 }
 
 export interface CapabilityScopeView {
   scope: CapabilityScope;
   approvals: ToolApproval[];
+  /** ADR 0834 D3 — what this viewer may do (absent on an older backend ⇒ assume yes). */
+  viewer?: { mayApprove: boolean; mayBypass: boolean; mayEditScope?: boolean };
 }
+
+/** The server refused a decision because the request moved since it was shown, or was
+ *  already decided (ADR 0834 D2). The caller reloads and shows the current state. */
+export class ApprovalConflictError extends Error {}
 
 const base = (sessionId: string): string =>
   `${config.baseUrl}/host/openwop-app/conversation-tools/sessions/${encodeURIComponent(sessionId)}`;
@@ -55,8 +63,10 @@ export async function setCapabilityScope(sessionId: string, scope: CapabilitySco
   return (await asJson<{ scope: CapabilityScope }>(res, 'setCapabilityScope')).scope;
 }
 
-/** Approve or deny a pending per-tool approval. */
-export async function resolveToolApproval(sessionId: string, toolName: string, decision: 'approved' | 'denied'): Promise<ToolApproval> {
-  const res = await fetch(`${base(sessionId)}/approvals/${encodeURIComponent(toolName)}`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify({ decision }) }));
+/** Approve or deny a PENDING per-tool approval. `requestedAt` is the version the user
+ *  saw — the server refuses (409) if the request changed since (ADR 0834 D6). */
+export async function resolveToolApproval(sessionId: string, toolName: string, decision: 'approved' | 'denied', requestedAt?: string): Promise<ToolApproval> {
+  const res = await fetch(`${base(sessionId)}/approvals/${encodeURIComponent(toolName)}`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify({ decision, ...(requestedAt ? { requestedAt } : {}) }) }));
+  if (res.status === 409) throw new ApprovalConflictError('approval_conflict');
   return (await asJson<{ approval: ToolApproval }>(res, 'resolveToolApproval')).approval;
 }

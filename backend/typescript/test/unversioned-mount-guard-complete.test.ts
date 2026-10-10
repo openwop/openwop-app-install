@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { HOST_OWN_UNVERSIONED_MOUNTS } from '../src/middleware/protocolVersion.js';
+import { HOST_OWN_UNVERSIONED_MOUNTS, v2MountedRootPrefixes } from '../src/middleware/protocolVersion.js';
 
 /**
  * The boot collision guard in `protocolVersion.ts` refuses to mount a v2 path
@@ -57,7 +57,21 @@ const EXACT_COMPARE = /(?:path|req\.url|url|pathname) === '(\/[a-zA-Z0-9_.-]*)'/
  *  path space, not a host-own name. `/` cannot collide: the derivation drops
  *  segments of length <= 1. `/.well-known` is filtered out of the manifest
  *  segments by name, for the same reason. */
-const NOT_A_HOST_NAME = new Set(['/v1', '/runs', '/', '/.well-known']);
+// ADR 0812 P3a: `/content` and `/host` are the same case as `/runs`. The
+// spelling-independent matchers (`isCredentialOptionalRead`, the SSE exemption,
+// the MFA exemptions) anchor on the UNVERSIONED protocol (`/content`) and vendor
+// (`/host/openwop-app`) path spaces. Both are v2 manifest roots, so naming them
+// host-own would make the boot collision guard throw.
+// ADR 0812 P3b final batch 2: `/packs` is the v1 Registry HTTP API's path space. The
+// served-v1 shim maps a stripped `/v1/packs…` onto the vendor home; nothing is
+// served at a bare `/packs`, so it is not a root this host occupies unversioned.
+const NOT_A_HOST_NAME = new Set(['/v1', '/runs', '/', '/.well-known', '/content', '/host', '/packs']);
+// ADR 0812 P3c: protocol routes used to register through `v1('/prompts')`, which
+// this literal scan could not see. With `v1()` deleted they are plain literals, so
+// a v2 manifest root is excluded BY NAME, read from the manifest itself: it is the
+// protocol's path space, mounted under major 2, never a host-own name. A
+// `:action` suffix is a key of the same resource, as in `isV2MountedPath`.
+const PROTOCOL_ROOTS = new Set(v2MountedRootPrefixes());
 
 /**
  * Strip comments before scanning. A scan that reads comments counts prose as
@@ -100,7 +114,7 @@ function scan(pattern: RegExp): string[] {
     const text = stripComments(readFileSync(join(entry.parentPath ?? entry.path, entry.name), 'utf8'));
     for (const m of text.matchAll(new RegExp(pattern.source, 'g'))) {
       const root = `/${m[1].replace(/^\//, '').split('/')[0]}`;
-      if (!NOT_A_HOST_NAME.has(root)) roots.add(root);
+      if (!NOT_A_HOST_NAME.has(root) && !PROTOCOL_ROOTS.has(root.split(':')[0]!)) roots.add(root);
     }
   }
   return [...roots].sort();
@@ -130,7 +144,7 @@ describe('HOST_OWN_UNVERSIONED_MOUNTS is complete', () => {
   it('names every root this host occupies unversioned, by any of the three mechanisms', () => {
     // If this fails, do not delete the assertion and do not narrow the scans.
     // Something new took an unversioned name and the guard cannot see it: add
-    // the root to HOST_OWN_UNVERSIONED_MOUNTS, or move the surface under /v1.
+    // the root to HOST_OWN_UNVERSIONED_MOUNTS, or serve it as a protocol route.
     const union = [...new Set(MECHANISMS.flatMap((m) => scan(m.pattern)))].sort();
     expect(union).toEqual([...HOST_OWN_UNVERSIONED_MOUNTS].sort());
   });

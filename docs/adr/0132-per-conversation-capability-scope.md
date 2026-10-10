@@ -1,6 +1,23 @@
 # ADR 0132 — Per-conversation capability scope + per-tool-call approval
 
 **Status:** implemented — all 5 phases (2026-06-24). P1 pure resolver + `run.metadata` stamp (`features/conversation-tools/{scopeResolver,capabilityScopeStamp}.ts`); P2 the loop hook / fourth AND-term in `runChatToolLoop` (`host/agentDispatch.ts` + `host/conversationToolLoop.ts`, live-per-turn enforcement — §replay correction); P3 per-tool approval request→record→fold-on-reattempt (`approvalLedger.ts` + `applyApprovalDecisions`, §Phase-3 correction); P4 REST + owner-gated RBAC under `/v1/host/openwop-app/conversation-tools/sessions/:id/*` (§Phase-4 note); P5 the FE chipset + approvals (`frontend/react/src/conversationTools/`). Each phase: `/architect` GO + `/code-review` CLEAR (+ `/ux-review` PASS for P5); 32 backend tests + the FE gate green.
+> **CORRECTED 2026-10-06 (ADR 0834, feature loop round 2 row 20).** Three claims in this
+> ADR were false at HEAD, measured on `a767ee948`:
+> 1. **"Stamped at creation, read verbatim on `:fork`."** `readCapabilityScopeStamp` has no
+>    caller. Every turn — a fork's included — resolves the scope LIVE (now through
+>    `host/conversationToolScope.ts`, shared with voice). That is the behaviour the §replay
+>    correction below asks for ("tighter wins"); the stamp is provenance only.
+> 2. **"The per-call approval rides the EXISTING interrupt/resume seam" / "the conversation
+>    surfaces an `interrupt.approval` card".** Nothing reads the loop's `pendingApprovals`
+>    after a turn; there is no card. ADR 0834 D6 surfaces a held call on the composer's
+>    conversation-tools control, with the call's arguments and what an approval covers.
+> 3. **The approval grain.** An approval covers every later call of that tool in the
+>    conversation, with any arguments, and could be issued with no pending ask. ADR 0834
+>    D2 makes an approval answer a pending ask (409 otherwise), records the ask's origin,
+>    and checks the version the approver saw; allow-once is ADR 0834 FW2-D1.
+> Also: voice never applied this scope (ADR 0834 D5), and the toggle described below was
+> retired in the 2026-06-24 graduation (always on).
+
 **Date:** 2026-06-24
 **Toggle:** `conversation-tools` · default **OFF** · `bucketUnit: tenant` (a shared
 operator-console surface a workspace opts into). When OFF, the live tool loop is
@@ -231,6 +248,8 @@ a tool whose `auth.scopes` (RFC 0078) exceed the user's own effective scopes
 | 10 | Frontend | An **Enabled-capabilities chipset** in the conversation header/composer: lists the agent's tools (from `GET /v1/tools` filtered to the agent allowlist) with enable/disable + require-approval toggles; `safetyTier` colour-coded; a per-call approval card (existing `interrupt.approval`) when a gated tool is attempted; `ui/` tokens, a11y, light+dark. |
 
 ---
+
+> **Correction 2026-10-03 (found implementing ADR 0773 plan B.2).** The enforcement point read the scope from `getConversationMeta(run.tenantId, params.conversationId)`, and `params.conversationId` is the run-derived gate id (`runId:nodeId:0`, `host/conversation.ts`). ConversationMeta is keyed by the chat SESSION id (`exchange/authorizeResolve.ts`, and the comment at `conversationExchange.ts` "KEY (unchanged)"), and that is the key this feature's own routes and the chat UI's scope control write under. So on every chat-started run (all of which carry `run.metadata.chatSessionId`), a scope set from the UI never narrowed anything. The same mismatch applied to the approval ledger (recorded under the gate id, resolved by the route under the session id) and the ADR 0136 intent ledger. `host/conversationToolLoop.ts` now reads and writes all three under `chatSessionId ?? params.conversationId`, the rule `authorizeResolve` already uses. Witness: `test/conversation-tool-loop-session-key.test.ts` drives the real turn entry with the managed round stubbed and asserts what the model is offered; reading by the gate id again reddens the session-id case. Unit tests of the resolver and the loop core passed throughout, because neither takes the key: the defect lived in the wiring, between two correct parts.
 
 ## Phased plan
 

@@ -24,7 +24,7 @@ import { installConnectionPackManifest } from './connectionPackLoader.js';
 import { authorizationServerMetadataUrls } from './mcpReachVerifier.js';
 import { expireAccessTokenForSeam } from './connectionsService.js';
 import { guardedEgressFetch } from '../../host/webhookEgressGuard.js';
-import { vendorTwin } from '../../middleware/protocolVersion.js';
+import { vendorPath } from '../../middleware/protocolVersion.js';
 
 /** The suite's providers (seams-v2): one with an issuer, two issuer-less ones
  *  that §A.4 requires distinct redirect URIs for. Advertised only while seams are
@@ -55,7 +55,7 @@ async function issResponseParameterOf(issuer: string): Promise<boolean> {
 const str = (v: unknown): string | undefined => (typeof v === 'string' && v !== '' ? v : undefined);
 
 export function registerOAuthConformanceSeams(app: Express, seamAuth: RequestHandler): void {
-  app.post(vendorTwin('/oauth/authorize-start'), seamAuth, async (req, res, next) => {
+  app.post(vendorPath('/oauth/authorize-start'), seamAuth, async (req, res, next) => {
     try {
       const body = (req.body ?? {}) as Record<string, unknown>;
       const subject = subjectOf(req);
@@ -121,7 +121,7 @@ export function registerOAuthConformanceSeams(app: Express, seamAuth: RequestHan
     }
   });
 
-  app.post(vendorTwin('/oauth/expire-refresh'), seamAuth, async (req, res, next) => {
+  app.post(vendorPath('/oauth/expire-refresh'), seamAuth, async (req, res, next) => {
     try {
       const subject = subjectOf(req);
       const provider = str(((req.body ?? {}) as { provider?: unknown }).provider);

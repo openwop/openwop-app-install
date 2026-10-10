@@ -60,6 +60,10 @@ describe('slugToName — humanize a handle for attribution', () => {
     expect(slugToName('user.user:c5118.advisor-leo-da-vincio')).toBe('Leo Da Vincio');
   });
 
+  it('names a pack agentId by its last segment, never the dotted path', () => {
+    expect(slugToName('vendor.openwop-app.assistant.agents.chief-of-staff')).toBe('Chief Of Staff');
+  });
+
   it('returns the input when there is nothing to humanize', () => {
     expect(slugToName('')).toBe('');
   });

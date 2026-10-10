@@ -37,7 +37,7 @@ import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
 import { resolveFeatureToggle } from '../../host/agentToolKit.js';
 import { listOrgs, resolveEffectiveAccess } from '../../host/accessControlService.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
-import { getCanvasForTenant } from '../../host/canvasSurface.js';
+import { getCanvasForCaller } from '../../host/canvasSurface.js';
 import { APP_BUILDER_CANVAS_TYPE, projectComponentCatalog } from './componentCatalog.js';
 import { renderDesign } from './renderCore.js';
 
@@ -94,6 +94,7 @@ export function registerAppBuilderAgentTools(): void {
     // catalog. Same reasoning as slides.catalog; get-design/render stay untrusted
     // because they carry the USER's design.
     contentTrust: 'trusted',
+    effect: 'read',
     // ADR 0604 (TOCC-2) — closed world: an elided enum/id list here makes the
     // model author against a catalog that is not this host's.
     schemaCarrying: true,
@@ -116,6 +117,7 @@ export function registerAppBuilderAgentTools(): void {
   // ── The app-state read path: the model READS the current design. ─────────
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     // ADR 0604 (TOCC-2) — closed world: an elided enum/id list here makes the
     // model author against a catalog that is not this host's.
     schemaCarrying: true,
@@ -142,7 +144,7 @@ export function registerAppBuilderAgentTools(): void {
       if ('content' in gate) return gate;
       const canvasId = str(input.canvasId);
       if (!canvasId) return toolError('validation_error', '`canvasId` is required.');
-      const canvas = await getCanvasForTenant(scope.tenantId, canvasId);
+      const canvas = await getCanvasForCaller(scope.tenantId, canvasId, { subject: scope.actingUserId });
       if (!canvas || canvas.canvasTypeId !== APP_BUILDER_CANVAS_TYPE) {
         return toolError('not_found', `App Builder canvas '${canvasId}' not found in this workspace.`);
       }
@@ -160,6 +162,7 @@ export function registerAppBuilderAgentTools(): void {
   // ── The deliverable path: validate → persist → return a real reference. ──
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: APP_BUILDER_RENDER_TOOL_ID,
       description:
@@ -204,6 +207,7 @@ export function registerAppBuilderAgentTools(): void {
         ownerSubject: { kind: 'user', id: gate.actingUserId },
         producedBy,
         runId: scope.runId,
+        actingUserId: gate.actingUserId,
       });
       if (!result.ok) return toolError(result.error, result.message, result.extra);
       return {

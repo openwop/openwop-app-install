@@ -113,6 +113,9 @@ export async function dispatchChannelAgentTurns(
           // task capped so the agent never receives more than what was stored.
           configurable: { agentId, task: body.slice(0, 100_000), conversationId: channelId, credentialRef: CHANNEL_MANAGED_CREDENTIAL_REF },
           metadata: { channel: { source: 'channel', channelId, triggeringMessageId: triggerMessageId, agentId } },
+          // ADR 0832 D3 — the poster bounds which orgs the turn may reach. NOT
+          // the actor (see the twin-recall note above): it narrows, never grants.
+          orgScopeSubject: authorUserId,
         });
       } catch { /* best-effort per agent */ }
     }

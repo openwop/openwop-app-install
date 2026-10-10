@@ -3,8 +3,8 @@
 Support 3-agent crew. Triage → Resolver → Escalator. Single atomic dispatch handles the full ticket lifecycle.
 
 | Pack name | `core.openwop.agents.support-crew` |
-| Version | `1.0.0` |
-| Engine | OpenWOP `>=1.1.0 <2.0.0` |
+| Version | `1.0.1` |
+| Engine | OpenWOP `>=1.1.0 <3.0.0` |
 | Agents | 3 (triage / resolver / escalator) |
 | Required host capabilities | `aiProviders`, `host.agentRuntime`, `openwop.agents.memoryBackends ≥ longTerm` |
 | License | Apache-2.0 |

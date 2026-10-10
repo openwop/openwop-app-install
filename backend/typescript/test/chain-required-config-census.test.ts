@@ -63,10 +63,11 @@
  * The quarantine is SHRINK-ONLY: a new entry fails the test.
  */
 
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { readPackManifest } from './helpers/readPackManifest.js';
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const CHAIN_PACK_ROOT = join(REPO_ROOT, 'examples', 'workflow-chain-packs');
@@ -93,7 +94,7 @@ const REQUIRED_BINDINGS: Record<string, string[]> = {
   'core.web.search': ['query'],
   'feature.documents.nodes.render': ['orgId', 'documentId'],
   'feature.documents.nodes.get-document': ['orgId', 'documentId'],
-  'feature.documents.nodes.create-document': ['orgId'],
+  'feature.documents.nodes.generate-from-template': ['orgId', 'templateId'], // DOCWF2-7: was a phantom `create-document` typeId
 };
 
 /** Chains this feature owns — excluded from the anti-vacuity floor below, so the
@@ -165,7 +166,7 @@ function census(): Census {
   for (const dir of readdirSync(CHAIN_PACK_ROOT)) {
     let pack: { chains?: Chain[] };
     try {
-      pack = JSON.parse(readFileSync(join(CHAIN_PACK_ROOT, dir, 'pack.json'), 'utf8')) as { chains?: Chain[] };
+      pack = readPackManifest<{ chains?: Chain[] }>(join(CHAIN_PACK_ROOT, dir, 'pack.json'));
     } catch {
       continue; // not a pack dir
     }
@@ -245,7 +246,7 @@ describe('GEN-IS-1 — every chain node binds the config its implementation hard
 
     // And on the real corpus: the three nodes that would otherwise be false
     // positives are bound, and are bound BY EDGE rather than by config/inputs.
-    const pack = JSON.parse(readFileSync(join(CHAIN_PACK_ROOT, 'campaign-journeys', 'pack.json'), 'utf8')) as { chains?: Chain[] };
+    const pack = readPackManifest<{ chains?: Chain[] }>(join(CHAIN_PACK_ROOT, 'campaign-journeys', 'pack.json'));
     const sends: string[] = [];
     for (const chain of pack.chains ?? []) {
       const byEdge = edgeBoundKeys(chain);

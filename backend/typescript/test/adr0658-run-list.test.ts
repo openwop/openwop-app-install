@@ -88,13 +88,10 @@ describe('ADR 0658 — GET /runs under major 2 is RFC 0182 listRuns', () => {
     expect((await list('?limit=abc')).status).toBe(400);
   });
 
-  it('the advertised filters narrow the list; the v1 twin is untouched (no cursor, no closed envelope)', async () => {
+  it('the advertised filters narrow the list', async () => {
     const none = await (await list('?workflowId=does-not-exist')).json() as { runs: unknown[] };
     expect(none.runs).toEqual([]);
-    const v1 = await fetch(`${base}/v1/runs?limit=2`, { headers: { Authorization: 'Bearer dev-token', Accept: 'application/json' } });
-    expect(v1.headers.get('openwop-version')).toBe('1.1');
-    const b = await v1.json() as { runs: Array<{ runId: string }>; nextCursor?: string };
-    expect(b.nextCursor).toBeUndefined();
-    expect(b.runs[0]!.runId).not.toContain('/'); // bare ids on the v1 contract
+    // ADR 0812 P3c-0: the "v1 twin is untouched" half (`/v1/runs`, bare ids, no
+    // cursor) was deleted with major 1; `/v1/runs` is the retired path space.
   });
 });

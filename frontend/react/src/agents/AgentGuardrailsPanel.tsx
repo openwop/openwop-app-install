@@ -38,6 +38,7 @@ import { Notice } from '../ui/Notice.js';
 import { StateCard } from '../ui/StateCard.js';
 import { Field } from '../ui/Field.js';
 import { ShieldIcon, ZapIcon, LifeBuoyIcon, PlugIcon, ActivityIcon } from '../ui/icons/index.js';
+import { writeErrorMessage } from './agentWriteAccess.js';
 
 /** roster level → spec level (ADR 0101 — the backend re-derives this from
  *  `roster.autonomyLevel` on save; we send a consistent value for the type). */
@@ -190,7 +191,7 @@ export function AgentGuardrailsPanel({
       setEditing(false);
       setNotice(t('profileSaved'));
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(writeErrorMessage(err, t('common:error_forbidden')));
     } finally {
       setSaving(false);
     }

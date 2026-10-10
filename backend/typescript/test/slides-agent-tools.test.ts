@@ -58,7 +58,7 @@ const VALID_DECK = {
 };
 
 describe('CFP-1 — the agents pack rides exactly the three registered tools', () => {
-  const packDir = new URL('../../../packs/feature.slides.agents/', import.meta.url);
+  const packDir = new URL('../../../packs/vendor.openwop-app.slides.agents/', import.meta.url);
   const manifest = JSON.parse(readFileSync(new URL('pack.json', packDir), 'utf8')) as {
     agents: { toolAllowlist: string[]; systemPromptRef: string }[];
   };
@@ -189,12 +189,12 @@ describe('CFP-1 — render tool: gates, repair-loop errors, persistence', () => 
   });
 
   it('stamps producedBy provenance (agent when agentProfileId, else user); owner stays the human', async () => {
-    const p = provider({ actingUserId: 'u-1', agentProfileId: 'feature.slides.agents.default', runId: 'run-prov' });
+    const p = provider({ actingUserId: 'u-1', agentProfileId: 'vendor.openwop-app.slides.agents.default', runId: 'run-prov' });
     const created = JSON.parse((await p.executeTool({ name: SLIDES_RENDER_TOOL_ID, input: { deck: { ...VALID_DECK, title: 'Provenance' } } })).content) as { canvasId: string };
     const canvas = await getCanvasForTenant(TENANT, created.canvasId);
     expect(canvas?.ownerSubject).toEqual({ kind: 'user', id: 'u-1' });
     const meta = canvas?.metadata as { producedBy?: { kind: string; id: string }; runId?: string } | undefined;
-    expect(meta?.producedBy).toEqual({ kind: 'agent', id: 'feature.slides.agents.default' });
+    expect(meta?.producedBy).toEqual({ kind: 'agent', id: 'vendor.openwop-app.slides.agents.default' });
     expect(meta?.runId).toBe('run-prov');
   });
 });

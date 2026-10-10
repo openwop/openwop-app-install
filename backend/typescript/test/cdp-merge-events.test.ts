@@ -34,21 +34,21 @@ function client() {
   return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b) };
 }
 let n = 0;
-async function owner() { const c = client(); const r = await c.post('/v1/host/openwop-app/test/login', { email: `me-${Date.now()}-${n++}@a.test`, tenantId: `org:me-${Date.now()}-${n++}` }); expect(r.status).toBe(201); return c; }
+async function owner() { const c = client(); const r = await c.post('/host/openwop-app/test/login', { email: `me-${Date.now()}-${n++}@a.test`, tenantId: `org:me-${Date.now()}-${n++}` }); expect(r.status).toBe(201); return c; }
 const enable = async (id: string) => { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status: 'on' }, 'test'); };
 
 describe('CDP-B merge-event audit', () => {
   it('records the filled fields and absorbed identifiers of a merge', async () => {
     await enable('crm');
     const c = await owner();
-    const survivor = (await c.post('/v1/host/openwop-app/crm/contacts', { name: 'S' })).body; // no email/company
-    const source = (await c.post('/v1/host/openwop-app/crm/contacts', { name: 'D', email: 'd@x.test', company: 'Acme' })).body;
-    await c.post(`/v1/host/openwop-app/crm/contacts/${source.contactId}/identifiers`, { type: 'loyalty', value: 'L9' });
+    const survivor = (await c.post('/host/openwop-app/crm/contacts', { name: 'S' })).body; // no email/company
+    const source = (await c.post('/host/openwop-app/crm/contacts', { name: 'D', email: 'd@x.test', company: 'Acme' })).body;
+    await c.post(`/host/openwop-app/crm/contacts/${source.contactId}/identifiers`, { type: 'loyalty', value: 'L9' });
 
-    const merged = await c.post(`/v1/host/openwop-app/crm/contacts/${survivor.contactId}/merge`, { sourceContactId: source.contactId });
+    const merged = await c.post(`/host/openwop-app/crm/contacts/${survivor.contactId}/merge`, { sourceContactId: source.contactId });
     expect(merged.status, JSON.stringify(merged.body)).toBe(200);
 
-    const events = (await c.get('/v1/host/openwop-app/crm/merge-events')).body.events;
+    const events = (await c.get('/host/openwop-app/crm/merge-events')).body.events;
     expect(events.length).toBe(1);
     const ev = events[0];
     expect(ev.survivorId).toBe(survivor.contactId);

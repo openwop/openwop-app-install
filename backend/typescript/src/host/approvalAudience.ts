@@ -37,7 +37,7 @@
  * PII.
  */
 import type { ApprovalKind, PendingApproval } from './approvalService.js';
-import { resolveEffectiveAccess, listMembers } from './accessControlService.js';
+import { resolveEffectiveAccess, listMembers, type EffectiveAccess } from './accessControlService.js';
 import { isSuperadminTenant } from './superadmin.js';
 
 /** Who is entitled to see/be told about a row of this kind. */
@@ -78,6 +78,8 @@ export const APPROVAL_AUDIENCE: Record<ApprovalKind, Audience> = {
   'commerce-listing-publish': { superadminTenant: true },
   // ADR 0459 P2 — decided by the participant alone, so visible to them alone.
   'kicktodo-plan-proposal': { policyApproverRef: true },
+  // ADR 0785 P4 — a permission prompt about the person's OWN machine: theirs alone.
+  'claude-code-permission': { policyApproverRef: true },
 
   // ── genuinely tenant-scoped ───────────────────────────────────────────────
   // `assistant-action` is the precedent that `null` is a real value, not an oversight:
@@ -112,13 +114,23 @@ export async function mayViewApproval(
   tenantId: string,
   subjectRef: string | undefined,
   a: Pick<PendingApproval, 'kind' | 'orgId' | 'policy'>,
+  /** ADR 0778 C14 — a per-request memo of `resolveEffectiveAccess` by
+   *  (subject, org): the list path calls this once per row, and each call is
+   *  three namespace scans. */
+  accessMemo?: Map<string, Promise<EffectiveAccess>>,
 ): Promise<boolean> {
   const audience = audienceOf(a.kind);
   if (audience === null) return true;
   if ('superadminTenant' in audience) return isSuperadminTenant(tenantId);
   if ('policyApproverRef' in audience) return !!subjectRef && subjectRef === a.policy?.approverRefs?.[0];
   if (!subjectRef || !a.orgId) return false;
-  const access = await resolveEffectiveAccess(tenantId, { subject: subjectRef, orgId: a.orgId });
+  const key = JSON.stringify([tenantId, subjectRef, a.orgId]);
+  let pending = accessMemo?.get(key);
+  if (!pending) {
+    pending = resolveEffectiveAccess(tenantId, { subject: subjectRef, orgId: a.orgId });
+    accessMemo?.set(key, pending);
+  }
+  const access = await pending;
   return (access.scopes as readonly string[]).includes(audience.orgScope);
 }
 

@@ -37,7 +37,7 @@ export const voiceFeature: BackendFeature = {
     id: 'voice',
     label: 'Voice mode',
     description:
-      'Talk to the AI in a full-duplex spoken conversation on the existing chat: a live mic stream is transcribed in real time, the committed turn enters the conversation, and the agent speaks back (streaming TTS) with barge-in. Rides the ONE chat — no new panel or mic. OFF by default; tenant-bucketed (a continuous-ingress cost/abuse profile).',
+      'Talk to the AI in a full-duplex spoken conversation on the existing chat: a live mic stream is transcribed in real time, the committed turn enters the conversation, and the agent speaks back (streaming TTS) with barge-in. Rides the ONE chat — no new panel or mic. Per tenant (continuous audio has a cost/abuse profile).',
     category: 'Chat',
     status: 'off',
     bucketUnit: 'tenant',
@@ -46,6 +46,6 @@ export const voiceFeature: BackendFeature = {
   requiredPacks: [
     // The voice-tuned persona (ADR 0058 chat-drivability = agent + nodes). No NODE pack:
     // voice is ctx-method + transport plumbing, not workflow nodes (matrix row 4).
-    { name: 'feature.voice.agents', version: '1.0.0' },
+    { name: 'vendor.openwop-app.voice.agents', version: '1.0.1' },
   ],
 };

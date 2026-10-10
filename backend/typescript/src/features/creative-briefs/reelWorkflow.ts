@@ -23,6 +23,7 @@ export const CREATIVE_BRIEFS_REEL_ID = 'openwop-app.creative-briefs-reel';
  *  before features register (the app-builder precedent). */
 export function registerCreativeBriefsReelWorkflow(): void {
   registerChainBackedWorkflow(CREATIVE_BRIEFS_REEL_ID, {
+    featureId: 'creative-briefs', // ADR 0820 §7 / G6
     postProcess: (def: WorkflowDefinition) => {
       for (const node of def.nodes) {
         if (node.nodeId === 'reel' || node.nodeId.endsWith('_reel')) node.outputRole = 'primary';

@@ -14,7 +14,7 @@ import type { AddressInfo } from 'node:net';
 import { getSetCookies } from './headerCookies.js';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
-interface GhCall { method: string; url: string; body?: Record<string, unknown> }
+interface GhCall { method: string; url: string; body?: Record<string, unknown>; orgId?: string }
 const ghCalls: GhCall[] = [];
 let ghResponder: (method: string, url: string) => { status: number; json: Record<string, unknown> };
 
@@ -22,9 +22,9 @@ vi.mock('../src/host/brokeredEgress.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/host/brokeredEgress.js')>();
   return {
     ...actual,
-    brokeredFetch: vi.fn(async (_deps: unknown, opts: { method?: string; url: string; body?: string }) => {
+    brokeredFetch: vi.fn(async (deps: { orgId?: string }, opts: { method?: string; url: string; body?: string }) => {
       const method = opts.method ?? 'GET';
-      ghCalls.push({ method, url: opts.url, ...(opts.body ? { body: JSON.parse(opts.body) as Record<string, unknown> } : {}) });
+      ghCalls.push({ method, url: opts.url, ...(opts.body ? { body: JSON.parse(opts.body) as Record<string, unknown> } : {}), ...(deps?.orgId ? { orgId: deps.orgId } : {}) });
       const r = ghResponder(method, opts.url);
       return { outcome: 'sent', res: { status: r.status, json: async () => r.json } };
     }),
@@ -67,15 +67,15 @@ function client(): Client {
 }
 
 const STATE = { name: 'S', screens: [{ id: 'home', name: 'Home', isInitial: true, components: [] }] };
-const AB = (orgId: string) => `/v1/host/openwop-app/app-builder/orgs/${encodeURIComponent(orgId)}`;
-const HOOK = (webhookId: string) => `/v1/host/openwop-app/app-builder-sync/webhook/${encodeURIComponent(webhookId)}`;
+const AB = (orgId: string) => `/host/openwop-app/app-builder/orgs/${encodeURIComponent(orgId)}`;
+const HOOK = (webhookId: string) => `/host/openwop-app/app-builder-sync/webhook/${encodeURIComponent(webhookId)}`;
 
 let n = 0;
 async function boundCanvas(): Promise<{ owner: Client; orgId: string; canvasId: string; tenantId: string; webhookId: string; secret: string }> {
   const tenantId = `org:test-ab-hook-${Date.now()}-${n++}`;
   const owner = client();
-  await owner.post('/v1/host/openwop-app/test/login', { email: `own-${Date.now()}-${n++}@acme.test`, tenantId });
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  await owner.post('/host/openwop-app/test/login', { email: `own-${Date.now()}-${n++}@acme.test`, tenantId });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status).toBe(201);
   const canvas = await createCanvasForTenant(tenantId, { canvasTypeId: 'canvas.app-builder', name: 'S', initialState: STATE });
   const bound = await owner.put(`${AB(org.body.orgId)}/canvases/${canvas.canvasId}/sync-binding`, { owner: 'octo', repo: 'my-app', branch: 'main', target: 'html-css' });
@@ -223,6 +223,49 @@ describe('inbound webhook — toggle honesty', () => {
       expect((await sendHook(webhookId, secret, pushPayload())).status).toBe(404);
     } finally {
       if (def) await saveConfig({ ...def, status: 'on' }, 'test');
+    }
+  });
+});
+
+describe('ADR 0835 — inbound sync hardening (AB2-CD-4/6/7/8)', () => {
+  it('a 64-char signature with a multi-byte character is a 401, not a 500', async () => {
+    const { webhookId } = await boundCanvas();
+    const raw = JSON.stringify(pushPayload());
+    const res = await fetch(`${BASE}${HOOK(webhookId)}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-github-event': 'push', 'x-github-delivery': `dlv-mb-${Date.now()}`, 'x-hub-signature-256': `sha256=${'é'.repeat(64)}` },
+      body: raw,
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it('an app.model.json of `null` is a typed fallback, not a 500 on every redelivery', async () => {
+    const { webhookId, secret, tenantId, canvasId } = await boundCanvas();
+    repoResponder(null, { modelVersion: 1, paths: [] });
+    const res = await sendHook(webhookId, secret, pushPayload());
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.outcome).toBe('fallback_invalid');
+    expect((await getCanvasForTenant(tenantId, canvasId))!.version).toBe(1);
+  });
+
+  it("reads the repo with the BINDING org's credential", async () => {
+    const { webhookId, secret, orgId } = await boundCanvas();
+    repoResponder({ name: 'FromGit', screens: [{ id: 'home', name: 'Home', isInitial: true, components: [] }] }, { modelVersion: 1, paths: [] });
+    await sendHook(webhookId, secret, pushPayload());
+    const reads = ghCalls.filter((c) => c.method === 'GET');
+    expect(reads.length).toBeGreaterThan(0);
+    expect(reads.every((c) => c.orgId === orgId)).toBe(true);
+  });
+
+  it('refuses a branch with a dot-led segment', async () => {
+    const tenantId = `org:test-ab-hook-dot-${Date.now()}-${n++}`;
+    const owner = client();
+    await owner.post('/host/openwop-app/test/login', { email: `own-dot-${Date.now()}-${n++}@acme.test`, tenantId });
+    const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
+    const canvas = await createCanvasForTenant(tenantId, { canvasTypeId: 'canvas.app-builder', name: 'S', initialState: STATE });
+    for (const branch of ['./main', 'a/./b', 'feat/.hidden', '.x']) {
+      const res = await owner.put(`${AB(org.body.orgId)}/canvases/${canvas.canvasId}/sync-binding`, { owner: 'octo', repo: 'my-app', branch, target: 'html-css' });
+      expect(res.status, branch).toBe(400);
     }
   });
 });

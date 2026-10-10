@@ -40,11 +40,13 @@ import { bidiIsolate } from '../../lib/bidi.js';
 import { ArrowDownIcon, ArrowUpIcon, ClipboardIcon, GlobeIcon, InboxIcon, LockIcon, PlusIcon, SaveIcon, SendIcon, TrashIcon } from '../../ui/icons/index.js';
 import { copyToClipboard } from '../../ui/copyToClipboard.js';
 import {
-  deleteForm, deleteSubmission, getForm, hostedFormUrl, listIntakeLists, listOrgs, listSubmissionsPage, publicFormUrl,
+  deleteForm, deleteSubmission, releaseSubmission, getForm, hostedFormUrl, listIntakeLists, listOrgs, listSubmissionsPage, publicFormUrl,
   setFormStatus, updateForm, FIELD_TYPES, FormsRequestError,
   type FieldType, type FormDef, type FormField, type IntakeBinding, type Submission,
 } from './formsClient.js';
 import { statusChipClass } from './FormViews.js';
+import { FieldWhenEditor, controllerKeyOf, whenProblem } from './FieldWhenEditor.js';
+import { effectiveKey, slug } from './fieldKeys.js';
 
 /** The SERVER's caps on authored strings (`formsService`: MAX_TITLE, MAX_LABEL,
  *  MAX_SUBMIT_MESSAGE, MAX_DESCRIPTION), pinned to those constants by
@@ -112,7 +114,7 @@ type DraftField = FormField & { _rid: string };
 /** ADR 0246 — the intake routing draft. An empty `listId` means "not routed"
  *  (cleared on save); a set `listId` requires a `titleField`. */
 interface DraftIntake { listId: string; titleField: string; requesterField: string; notesField: string }
-interface Draft { title: string; fields: DraftField[]; createToContact: boolean; emailOptInField: string; submitMessage: string; intake: DraftIntake }
+interface Draft { title: string; fields: DraftField[]; createToContact: boolean; createTicket: boolean; emailOptInField: string; submitMessage: string; intake: DraftIntake }
 
 const EMPTY_INTAKE: DraftIntake = { listId: '', titleField: '', requesterField: '', notesField: '' };
 
@@ -128,7 +130,19 @@ function pruneIntake(fields: DraftField[], intake: DraftIntake): DraftIntake {
 let _ridSeq = 0;
 const nextRid = (): string => `f${_ridSeq++}`;
 
-const slug = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 64);
+/** ADR 0584 / ADR 0850 D5 — which control held a row; each calls for a
+ *  different operator move (a decoy filled, a spam check, a submission burst). */
+const HELD_REASON_KEY: Record<NonNullable<Submission['flagged']>, string> = {
+  honeypot: 'submissionHeldHoneypot',
+  guard: 'submissionHeldGuard',
+  burst: 'submissionHeldBurst',
+};
+
+/** ADR 0850 D2 — is the designated email opt-in a REQUIRED checkbox? */
+type OptInShape = { fields: ReadonlyArray<Pick<FormField, 'key' | 'required'>>; emailOptInField?: string };
+const optInConflict = (d: OptInShape): boolean =>
+  !!d.emailOptInField && d.fields.some((f) => f.key === d.emailOptInField && f.required);
+
 
 function copy(text: string): void {
   void copyToClipboard(text, i18n.t('forms:publicUrlCopied'));
@@ -149,6 +163,7 @@ function toDraft(f: FormDef): Draft {
     title: f.title,
     fields: f.fields.map((x) => ({ ...x, _rid: nextRid() })),
     createToContact: f.createToContact,
+    createTicket: f.createTicket === true,
     emailOptInField: f.emailOptInField ?? '',
     submitMessage: f.submitMessage ?? '',
     intake: f.intakeBinding
@@ -167,6 +182,7 @@ export function FormDetailPage(): JSX.Element {
   const crmAccess = useFeatureAccess('crm');
   // ADR 0338 §D1 — gates the email opt-in designation control.
   const emailAccess = useFeatureAccess('email');
+  const deskAccess = useFeatureAccess('service-desk');
 
   const [searchParams] = useSearchParams();
   const deepOrg = searchParams.get('org');
@@ -202,7 +218,7 @@ export function FormDetailPage(): JSX.Element {
       // R2 FRM2-2 — an incomplete row used to be SILENTLY DROPPED by save (and
       // every non-Latin-only label slugs to nothing) while staying on screen
       // with the dirty guard disarmed. It is a named blocker now.
-      const effKey = f.key.trim() || slug(f.label);
+      const effKey = effectiveKey(f);
       if (!f.label.trim() || !effKey) { over.push(t('blockerIncompleteField', { n: idx + 1 })); return; }
       // R2 FRM2-7 — duplicate keys blocked HERE with a name, not by the
       // server's raw English toast after the fact.
@@ -211,9 +227,21 @@ export function FormDetailPage(): JSX.Element {
       // R2 FRM2-5 — a select with zero options would ship a public dropdown
       // containing only the placeholder, validating nothing.
       if (f.type === 'select' && !(f.options ?? []).some((o) => o.trim())) over.push(t('blockerSelectNoOptions', { label: f.label || effKey }));
+      // ADR 0850 D7 — a condition that can never be met is named, not saved: a
+      // moved/removed controller is also refused by the server, and a type or
+      // option mismatch would otherwise ship a field that silently never shows.
+      const problem = whenProblem(draft.fields, idx);
+      if (problem) over.push(t(`blockerWhen_${problem}`, { label: f.label || effKey }));
     });
+    // ADR 0850 D2 — consent is never a condition of submitting. Mirrors the
+    // server: moving INTO a required opt-in is blocked; a stored (pre-ADR)
+    // conflict left exactly as it was still saves, so a title edit is never held
+    // hostage (FRM2-1) — the notice below offers the fix instead.
+    if (optInConflict(draft) && !(form && optInConflict(form) && form.emailOptInField === draft.emailOptInField)) {
+      over.push(t('blockerOptInRequired'));
+    }
     return over;
-  }, [draft, t]);
+  }, [draft, form, t]);
   const [subs, setSubs] = useState<Submission[] | null>(null);
   const [subsCursor, setSubsCursor] = useState<string | null>(null);
   /** ADR 0584 (FORM-UX-1) — the operator-visible abuse numbers. Before these,
@@ -366,7 +394,7 @@ export function FormDetailPage(): JSX.Element {
       const fields = draft.fields
         .map(({ _rid, ...f }) => ({
           ...f,
-          key: (f.key.trim() || slug(f.label)),
+          key: effectiveKey(f),
           ...(f.type === 'select' ? { options: (f.options ?? []).map((o) => o.trim()).filter(Boolean) } : {}),
         }))
         .filter((f) => f.key && f.label.trim());
@@ -383,7 +411,7 @@ export function FormDetailPage(): JSX.Element {
           ...(draft.intake.notesField ? { notesField: draft.intake.notesField } : {}),
         };
       }
-      const saved = await updateForm(orgId, form.formId, { title: draft.title.trim() || t('untitledForm'), fields, createToContact: draft.createToContact, emailOptInField: draft.emailOptInField || null, submitMessage: sm, intakeBinding });
+      const saved = await updateForm(orgId, form.formId, { title: draft.title.trim() || t('untitledForm'), fields, createToContact: draft.createToContact, createTicket: draft.createTicket, emailOptInField: draft.emailOptInField || null, submitMessage: sm, intakeBinding });
       setForm(saved); setDirty(false);
       toast.success(t('saved'));
     } catch (e) { toastFailure(e, 'saveFailed'); }
@@ -499,7 +527,7 @@ export function FormDetailPage(): JSX.Element {
         sub.createdAt,
         // Empty on a clean row — an operator scanning the column sees the held
         // ones, not a column of "no".
-        sub.flagged ? t(sub.flagged === 'honeypot' ? 'submissionHeldHoneypot' : 'submissionHeldGuard') : '',
+        sub.flagged ? t(HELD_REASON_KEY[sub.flagged]) : '',
         // FRMUX-3 — the sink outcome, so a bulk export can never present a
         // suppressed subject as a routed lead.
         sub.contactId ?? (sub.error ? t(ERR_LABEL_KEY[sub.error] ?? 'forms:submissionError') : ''),
@@ -528,9 +556,22 @@ export function FormDetailPage(): JSX.Element {
    * Offered on HELD rows only — deleting a real captured lead is a different
    * product decision, and the destructive-action ladder for it is `deleteForm`'s.
    */
+  /** FRM2UX-3 — the held row an action is in flight on: both buttons go busy
+   *  (no second confirm, no Discard racing a Release that is delivering). */
+  const [rowBusy, setRowBusy] = useState<string | null>(null);
+  /** FRM2UX-3 — after a held row's buttons unmount, put focus back on the row
+   *  (or, if the Held filter removed it, the inbox heading) — never `<body>`. */
+  const refocusAfterRowAction = (submissionId: string): void => {
+    requestAnimationFrame(() => {
+      const row = document.getElementById(`sub-${submissionId}`);
+      (row ?? document.getElementById('forms-subs-heading'))?.focus();
+    });
+  };
+
   const discardHeld = useCallback(async (sub: Submission) => {
-    if (!form) return;
+    if (!form || rowBusy) return;
     if (!(await confirm({ title: t('discardHeldConfirm'), body: t('discardHeldBody'), danger: true, confirmLabel: t('common:delete') }))) return;
+    setRowBusy(sub.submissionId);
     try {
       await deleteSubmission(orgId, form.formId, sub.submissionId);
       setSubs((prev) => (prev ?? []).filter((s) => s.submissionId !== sub.submissionId));
@@ -539,8 +580,59 @@ export function FormDetailPage(): JSX.Element {
       // nothing. Floored: the banner may never claim a negative budget.
       setSubsAbuse((prev) => ({ ...prev, flagged: Math.max(0, prev.flagged - 1) }));
       toast.success(t('discardHeldDone'));
+      refocusAfterRowAction(sub.submissionId);
     } catch (e) { toastFailure(e, 'discardHeldFailed'); }
-  }, [form, orgId, t, toastFailure]);
+    finally { setRowBusy(null); }
+  }, [form, orgId, t, toastFailure, rowBusy]);
+
+  /**
+   * ADR 0850 D3 — release ONE held submission: the recovery ADR 0584's quarantine
+   * promised and this page could not offer (Discard was the only action). The
+   * server clears the flag by CAS and delivers the lead exactly as a clean
+   * capture — CRM, tickets, the bound workflow — and records an email opt-in only
+   * from what the visitor was shown, never over a newer choice.
+   */
+  const releaseHeld = useCallback(async (sub: Submission) => {
+    if (!form || rowBusy) return;
+    if (!(await confirm({ title: t('releaseHeldConfirm'), body: t('releaseHeldBody'), confirmLabel: t('releaseHeld') }))) return;
+    setRowBusy(sub.submissionId);
+    try {
+      const r = await releaseSubmission(orgId, form.formId, sub.submissionId);
+      setSubs((prev) => (prev ?? []).map((s) => (s.submissionId === sub.submissionId ? r.submission : s)));
+      // Only a real release moved the server's counter; an idempotent no-op did not.
+      if (r.released) setSubsAbuse((prev) => ({ ...prev, flagged: Math.max(0, prev.flagged - 1) }));
+      toast.success(t(r.released ? 'releaseHeldDone' : 'releaseHeldAlready'));
+      refocusAfterRowAction(sub.submissionId);
+    } catch (e) {
+      // 409 = erased on request; 429 = the form's 50 000-lead ceiling (FRM2UX-7:
+      // the generic 429 copy says "wait a moment", which is the wrong advice).
+      // Keyed on the server's REASON, not the status alone (FRM2CD-5): a 409 is
+      // also a contended row, and a 429 is also the global write limiter.
+      if (e instanceof FormsRequestError && e.reason === 'submission_erased') toast.error(t('releaseHeldErased'));
+      else if (e instanceof FormsRequestError && e.reason === 'form_capacity') toast.error(t('releaseHeldCeiling'));
+      else toastFailure(e, 'releaseHeldFailed');
+    } finally { setRowBusy(null); }
+  }, [form, orgId, t, toastFailure, rowBusy]);
+
+  /** ADR 0850 D7 — set or CLEAR a field's condition. Clearing deletes the key
+   *  (an absent `when` is "always shown"), which a patch spread cannot express. */
+  const setFieldWhen = (i: number, when: FormField['when'] | undefined): void => {
+    editDraft((d) => ({
+      ...d,
+      fields: d.fields.map((f, j) => {
+        if (j !== i) return f;
+        if (when) return { ...f, when };
+        const { when: _cleared, ...rest } = f;
+        return rest;
+      }),
+    }));
+  };
+
+  /** FRM2UX-6 — both opt-in fixes unmount the notice they sit in; land focus on
+   *  the picker they changed rather than `<body>`. */
+  const focusOptInPicker = (): void => {
+    requestAnimationFrame(() => document.getElementById('forms-optin-picker')?.focus());
+  };
 
   const patchField = (i: number, patch: Partial<FormField>): void => {
     editDraft((d) => {
@@ -555,9 +647,22 @@ export function FormDetailPage(): JSX.Element {
         if (patch.key !== undefined) emailOptInField = patch.key;
         if (patch.type !== undefined && patch.type !== 'checkbox') emailOptInField = '';
       }
+      // ADR 0850 D7 — a condition FOLLOWS its controller's rename, the opt-in
+      // precedent above: otherwise renaming a key would orphan every dependent.
+      // Judged on EFFECTIVE keys, so a label edit on an auto-keyed controller
+      // follows too; an emptied key/label (mid-retype) does not move anything.
+      const after = fields[i];
+      const oldK = before ? effectiveKey(before) : '';
+      const newK = after ? effectiveKey(after) : '';
+      // …and only when no OTHER field still answers to the old key: typing through
+      // another field's key must not retarget THAT field's dependents (FRM2CD-4).
+      const stillOwned = fields.some((f, j) => j !== i && effectiveKey(f) === oldK);
+      const followed = oldK && newK && oldK !== newK && !stillOwned
+        ? fields.map((f) => (f.when && controllerKeyOf(f.when) === oldK ? { ...f, when: { ...f.when, left: `fields.${newK}` } } : f))
+        : fields;
       // A key change can orphan an intake mapping — prune it so save never emits
       // a dangling field reference (FE#1).
-      return { ...d, fields, emailOptInField, intake: patch.key !== undefined ? pruneIntake(fields, d.intake) : d.intake };
+      return { ...d, fields: followed, emailOptInField, intake: patch.key !== undefined ? pruneIntake(followed, d.intake) : d.intake };
     });
   };
 
@@ -704,6 +809,10 @@ export function FormDetailPage(): JSX.Element {
         <span className="sr-only" aria-live="polite">{moveNotice}</span>
         {draft.fields.map((f, i) => (
           <div key={f._rid} className="surface-inset u-grid u-gap-1">
+            {/* ADR 0850 D7 — conditional visibility is AUTHORED here now (ADR 0808
+                shipped the model; this page could only display it). A condition
+                that can never be met is a named save blocker above. */}
+            <FieldWhenEditor fields={draft.fields} index={i} onChange={(when) => setFieldWhen(i, when)} />
             <div className="u-flex u-gap-1 u-items-center u-wrap">
               <input value={f.label} onChange={(e) => patchField(i, { label: e.target.value })} placeholder={t('fieldLabelPlaceholder')} aria-label={t('fieldLabelAria')} className="u-flex-1" />
               <input
@@ -808,14 +917,32 @@ export function FormDetailPage(): JSX.Element {
         ) : draft.createToContact ? (
           <Notice variant="info">{t('crmDisabledNotice')}</Notice>
         ) : null}
+        {/* ADR 0850 D1 (user decision 2026-10-07) — a support ticket per
+            submission is a per-form OPT-IN, off by default, filed in THIS
+            form's own workspace desk. Same optional-integration shape as CRM:
+            the control renders only while service-desk is on. */}
+        {deskAccess.enabled ? (
+          <label className="u-label-sm u-flex u-gap-1 u-items-center">
+            <input type="checkbox" checked={draft.createTicket} onChange={(e) => editDraft((d) => ({ ...d, createTicket: e.target.checked }))} />
+            {t('createTicket')}
+          </label>
+        ) : draft.createTicket ? (
+          <Notice variant="info">{t('ticketDisabledNotice')}</Notice>
+        ) : null}
         {/* ADR 0338 §D1 — designate ONE checkbox field as the explicit
             email marketing opt-in (renders only when email is enabled
             and a checkbox field exists). */}
         {emailAccess.enabled && (draft.fields.some((f) => f.type === 'checkbox' && f.key) || draft.emailOptInField) ? (
           <label className="u-label-sm">{t('emailOptInLabel')}
-            <select value={draft.emailOptInField} onChange={(e) => editDraft((d) => ({ ...d, emailOptInField: e.target.value }))} className="u-w-auto">
+            <select id="forms-optin-picker" value={draft.emailOptInField} onChange={(e) => editDraft((d) => ({ ...d, emailOptInField: e.target.value }))} className="u-w-auto">
               <option value="">{t('emailOptInNone')}</option>
-              {draft.fields.filter((f) => f.type === 'checkbox' && f.key).map((f) => <option key={f.key} value={f.key}>{f.label || f.key}</option>)}
+              {/* ADR 0850 D2 — a REQUIRED checkbox is not offered: ticking it is a
+                  condition of submitting, so it cannot be freely given consent.
+                  The current designation stays listed so a conflict is visible
+                  (and fixable below), never an unrendered value. */}
+              {draft.fields.filter((f) => f.type === 'checkbox' && f.key && (!f.required || f.key === draft.emailOptInField)).map((f) => (
+                <option key={f.key} value={f.key}>{f.required ? t('emailOptInRequiredOption', { label: f.label || f.key }) : f.label || f.key}</option>
+              ))}
               {/* R2 FRM2-1 — a form whose stored opt-in no longer matches a
                   checkbox field (older data) keeps a visible, clearable entry
                   instead of an unrendered control the save error points at. */}
@@ -824,6 +951,21 @@ export function FormDetailPage(): JSX.Element {
                 : null}
             </select>
           </label>
+        ) : null}
+        {/* ADR 0850 D2 — name the conflict and offer BOTH fixes in place; the
+            sink records no consent from a required opt-in either way. */}
+        {optInConflict(draft) ? (
+          <Notice variant="warning" announce={t('optInRequiredNotice')}>
+            <p className="u-m-0">{t('optInRequiredNotice')}</p>
+            <div className="u-flex u-gap-1 u-wrap u-mt-1">
+              <Button size="sm" variant="secondary" onClick={() => {
+                const i = draft.fields.findIndex((f) => f.key === draft.emailOptInField);
+                if (i >= 0) patchField(i, { required: false });
+                focusOptInPicker();
+              }}>{t('optInMakeOptional')}</Button>
+              <Button size="sm" variant="quiet" onClick={() => { editDraft((d) => ({ ...d, emailOptInField: '' })); focusOptInPicker(); }}>{t('optInClear')}</Button>
+            </div>
+          </Notice>
         ) : null}
         <label className="u-label-sm">{t('submitMessageLabel')}
           <input value={draft.submitMessage} onChange={(e) => editDraft((d) => ({ ...d, submitMessage: e.target.value }))} placeholder={t('submitMessagePlaceholder')} />
@@ -897,7 +1039,7 @@ export function FormDetailPage(): JSX.Element {
       {/* Submissions for this form */}
       <div className="surface-card u-gap-2">
         <div className="u-flex u-items-center u-gap-2 u-flex-wrap">
-          <h2 className="u-fs-16 u-m-0 u-flex u-gap-1 u-items-center"><InboxIcon /> {t('submissionsHeading')}</h2>
+          <h2 id="forms-subs-heading" tabIndex={-1} className="u-fs-16 u-m-0 u-flex u-gap-1 u-items-center"><InboxIcon /> {t('submissionsHeading')}</h2>
           {subs && subs.length > 0 ? (
             <Button variant="quiet" size="sm" disabled={exporting} loading={exporting} onClick={() => void exportCsv()}>{t('exportCsv')}</Button>
           ) : null}
@@ -975,7 +1117,7 @@ export function FormDetailPage(): JSX.Element {
             ];
             return (
               <details key={s.submissionId} className="surface-inset u-p-0 subs-row">
-                <summary className="u-flex u-gap-2 u-items-center u-wrap subs-row__summary">
+                <summary id={`sub-${s.submissionId}`} className="u-flex u-gap-2 u-items-center u-wrap subs-row__summary">
                   <span className="u-flex-1 subs-row__compact">{compact}</span>
                   {/* ADR 0584 (FORM-UX-1) — a QUARANTINED row, named. It is
                       stored so a false positive is recoverable, but no CRM
@@ -995,10 +1137,11 @@ export function FormDetailPage(): JSX.Element {
                       moves to the next step on purpose, so the sentence is
                       about the EVENT, which is what inflates conversion. */}
                   {s.flagged ? (
-                    <span className="chip chip--warning" title={t(s.flagged === 'honeypot' ? 'submissionHeldHoneypot' : 'submissionHeldGuard')}>
+                    <span className="chip chip--warning" title={t(HELD_REASON_KEY[s.flagged])}>
                       {t('submissionHeld')}
                     </span>
                   ) : s.contactId ? <span className="chip chip--success">{t('submissionContact')}</span> : s.error === 'suppressed' || s.error === 'erased' ? <span className="chip chip--muted" title={t('errSuppressedBody')}>{t('errSuppressed')}</span> : s.error ? <span className="chip chip--danger">{t(ERR_LABEL_KEY[s.error] ?? 'forms:submissionError')}</span> : null}
+                  {s.releasedAt ? <span className="chip chip--muted" title={formatDateTime(s.releasedAt)}>{t('submissionReleased')}</span> : null}
                   <span className="u-label-sm" title={s.createdAt}>{formatDateTime(s.createdAt)}</span>
                 </summary>
                 <dl className="subs-row__detail">
@@ -1008,6 +1151,10 @@ export function FormDetailPage(): JSX.Element {
                   {metaEntries.map(([k, v]) => (
                     <div key={`m:${k}`}><dt className="muted">{k}</dt><dd className="muted">{v}</dd></div>
                   ))}
+                  {/* FRM2UX-10 — the release date, reachable without hover. */}
+                  {s.releasedAt ? (
+                    <div key="released"><dt className="muted">{t('submissionReleased')}</dt><dd className="muted">{formatDateTime(s.releasedAt)}</dd></div>
+                  ) : null}
                   {s.error === 'suppressed' || s.error === 'erased' ? (
                     <div key="suppressed"><dt className="muted">{t('errSuppressed')}</dt><dd className="muted">{t('errSuppressedBody')}</dd></div>
                   ) : null}
@@ -1016,9 +1163,13 @@ export function FormDetailPage(): JSX.Element {
                     quarantine budget is occupancy, so this is what gives it
                     back; without it, 1 000 held rows are permanent and the
                     only reset is deleting the form (and every real lead). */}
+                {/* ADR 0850 D3 — Release is the recovery the quarantine always
+                    promised: the lead goes everywhere a clean one does. Offered
+                    BEFORE Discard, because recovering a real lead is the point. */}
                 {s.flagged ? (
-                  <div className="u-flex u-justify-end u-p-2">
-                    <Button variant="danger" size="sm" onClick={() => void discardHeld(s)}>{t('discardHeld')}</Button>
+                  <div className="u-flex u-justify-end u-gap-1 u-p-2">
+                    <Button variant="secondary" size="sm" loading={rowBusy === s.submissionId} disabled={rowBusy !== null} onClick={() => void releaseHeld(s)}>{t('releaseHeld')}</Button>
+                    <Button variant="danger" size="sm" disabled={rowBusy !== null} onClick={() => void discardHeld(s)}>{t('discardHeld')}</Button>
                   </div>
                 ) : null}
               </details>

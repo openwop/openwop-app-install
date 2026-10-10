@@ -7,15 +7,20 @@
  *  - a share is a point-in-time SNAPSHOT, and the recipient must be told so on
  *    EVERY resource type — which is why all four render branches now go through
  *    one frame.
+ *
+ * Sabotage-witnessed (w7 grade-tests): not returning `applyUnlistedHead`'s
+ * cleanup reds the head leg; a frame that always claims a snapshot reds every
+ * living-type leg; mapping `unavailable` to `gone` reds the retry leg.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { fireEvent, render, screen, cleanup, waitFor } from '@testing-library/react';
+import type * as C from '../sharingClient.js';
 import type { SharedResource } from '../sharingClient.js';
 
-const resolveSharedPublic = vi.fn<() => Promise<SharedResource>>();
+const resolveSharedPublic = vi.fn<typeof C.resolveSharedPublic>();
 vi.mock('../sharingClient.js', async (importOriginal) => ({
-  ...(await importOriginal<Record<string, unknown>>()),
-  resolveSharedPublic: () => resolveSharedPublic(),
+  ...(await importOriginal<typeof import('../sharingClient.js')>()),
+  resolveSharedPublic: (token: string) => resolveSharedPublic(token),
 }));
 // The heavy lazy viewers aren't what these cases are about.
 vi.mock('../../chat/artifacts/AppBuilderInteractiveViewer.js', () => ({ AppBuilderInteractiveViewer: () => <div data-testid="app-viewer" /> }));
@@ -24,7 +29,7 @@ vi.mock('../SharedQuoteView.js', () => ({ SharedQuoteView: () => <div data-testi
 
 const { SharedSharePage } = await import('../SharedSharePage.js');
 
-afterEach(() => { cleanup(); vi.clearAllMocks(); document.head.querySelector('meta[name="robots"]')?.remove(); });
+afterEach(() => { cleanup(); vi.resetAllMocks(); document.head.querySelector('meta[name="robots"]')?.remove(); });
 
 const SNAP = '2026-07-01T09:00:00.000Z';
 const robots = () => document.head.querySelector('meta[name="robots"]')?.getAttribute('content') ?? null;
@@ -57,7 +62,7 @@ describe('shared viewer — snapshot/live honesty on EVERY type (SH-G1/SH-G2, co
   // it carries snapshotAt on the wire. Living types (no snapshotAt) must show
   // the LIVE disclosure instead of a false snapshot date.
   it('tells the recipient a conversation is a snapshot', async () => {
-    resolveSharedPublic.mockResolvedValue({ resourceType: 'conversation', resource: { title: 'Design chat', markdown: 'Hi' }, snapshotAt: SNAP } as SharedResource);
+    resolveSharedPublic.mockResolvedValue({ resourceType: 'conversation', resource: { title: 'Design chat', markdown: 'Hi' }, snapshotAt: SNAP });
     render(<SharedSharePage token="tok" />);
     await screen.findByText('Design chat');
     expect(screen.getByText(/snapshot from/i)).toBeTruthy();
@@ -79,7 +84,7 @@ describe('shared viewer — snapshot/live honesty on EVERY type (SH-G1/SH-G2, co
   }
 
   it('covers the quote type too (it has no title row of its own) — live, not snapshot', async () => {
-    resolveSharedPublic.mockResolvedValue({ resourceType: 'commerce_quote', resource: {} } as SharedResource);
+    resolveSharedPublic.mockResolvedValue({ resourceType: 'commerce_quote', resource: {} });
     render(<SharedSharePage token="tok" />);
     await screen.findByTestId('quote-view');
     expect(screen.getByText(/live view/i)).toBeTruthy();
@@ -144,7 +149,7 @@ describe('R2 SR-1 — the picker default types RENDER (they used to say "Nothing
     resolveSharedPublic.mockResolvedValue({
       resourceType: 'cms_page',
       resource: { title: 'Landing', markdown: '# Build faster\n\nShip the thing.' },
-    } as SharedResource);
+    });
     render(<SharedSharePage token="tok" />);
     await screen.findByText('Build faster');
     expect(screen.getByText('Ship the thing.')).toBeTruthy();
@@ -155,7 +160,7 @@ describe('R2 SR-1 — the picker default types RENDER (they used to say "Nothing
     resolveSharedPublic.mockResolvedValue({
       resourceType: 'kb_collection',
       resource: { name: 'Handbook', markdown: 'Everything we know.\n\n**2 document(s)**\n\n- Doc One\n- Doc Two' },
-    } as SharedResource);
+    });
     render(<SharedSharePage token="tok" />);
     await screen.findByText('Handbook');
     expect(screen.getByText('Doc One')).toBeTruthy();

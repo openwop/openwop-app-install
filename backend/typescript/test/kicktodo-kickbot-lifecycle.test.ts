@@ -136,7 +136,7 @@ describe('KickBot teardown tripwire (ADR 0442 P6 / PRD §6.8 — no orphan under
     await addSubjectNote(T, { kind: 'agent', id: KICKBOT_ROSTER_ID }, 'kickbot-scope fact');
     await addSubjectNote(T, personSubject('p1'), 'participant private fact');
     // Simulate a convene having written a read-only confinement override for a specialist.
-    await upsertAgentToolAllowlistOverride(T, 'feature.kicktodo.agents.plan-builder', { toolAllowlist: ['openwop:kicktodo.today'], updatedBy: 'test' });
+    await upsertAgentToolAllowlistOverride(T, 'vendor.openwop-app.kicktodo.agents.plan-builder', { toolAllowlist: ['openwop:kicktodo.today'], updatedBy: 'test' });
     expect(await getJob(continuationJobId(T, enrollment.goalId))).not.toBeNull(); // loop armed
     expect(await kbCollection()).toBeDefined();                                    // KB collection exists
 
@@ -149,7 +149,7 @@ describe('KickBot teardown tripwire (ADR 0442 P6 / PRD §6.8 — no orphan under
     expect(await kbCollection()).toBeUndefined();                     // P3 KB collection (via the ADR 0288 hook)
     expect(await listSubjectNotes(T, { kind: 'agent', id: KICKBOT_ROSTER_ID })).toEqual([]); // agent memory cleared
     // P5 leave-no-trace — the convene confinement override is cleared (no durable residue).
-    expect(await resolveAgentToolAllowlistOverride(T, 'feature.kicktodo.agents.plan-builder')).toBeUndefined();
+    expect(await resolveAgentToolAllowlistOverride(T, 'vendor.openwop-app.kicktodo.agents.plan-builder')).toBeUndefined();
 
     // SURVIVES — the participant's own state is not KickBot's to delete.
     const participantNotes = await listSubjectNotes(T, personSubject('p1'));

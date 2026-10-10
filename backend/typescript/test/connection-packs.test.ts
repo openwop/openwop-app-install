@@ -133,16 +133,17 @@ describe('RFC 0095 connection-pack loader (T3)', () => {
     }
   });
 
-  it('discovery doc advertises capabilities.connections.packsSupported (§C)', async () => {
+  it('discovery doc advertises connections.packsSupported (§C)', async () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
     process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
     const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
     const server: http.Server = await new Promise((res) => { const s = app.listen(0, '127.0.0.1', () => res(s)); });
     const PORT = (server.address() as AddressInfo).port;
     try {
-      const r = await fetch(`http://127.0.0.1:${PORT}/.well-known/openwop`);
-      const doc = await r.json() as { capabilities?: { connections?: { packsSupported?: boolean } } };
-      expect(doc.capabilities?.connections?.packsSupported).toBe(true);
+      // ADR 0812 — the v2 root's `connections` family, at the document root.
+      const r = await fetch(`http://127.0.0.1:${PORT}/.well-known/openwop`, { headers: { 'OpenWOP-Version': '2' } });
+      const doc = await r.json() as { connections?: { packsSupported?: boolean } };
+      expect(doc.connections?.packsSupported).toBe(true);
     } finally {
       await new Promise<void>((res) => server.close(() => res()));
     }
@@ -157,7 +158,7 @@ describe('RFC 0095 connection-pack loader (T3)', () => {
     const hdrs = { 'content-type': 'application/json', authorization: 'Bearer dev-token' };
     try {
       // examples/connection-packs/github auto-loaded → `github` resolvable, honest oauthConfigured:false (no host creds).
-      const provs = await (await fetch(`http://127.0.0.1:${PORT}/v1/host/openwop-app/providers`, { headers: hdrs })).json() as { providers: { id: string; reach: string; oauthConfigured?: boolean }[] };
+      const provs = await (await fetch(`http://127.0.0.1:${PORT}/host/openwop-app/providers`, { headers: hdrs })).json() as { providers: { id: string; reach: string; oauthConfigured?: boolean }[] };
       const gh = provs.providers.find((p) => p.id === 'github');
       expect(gh?.reach).toBe('mcp');
       expect(gh?.oauthConfigured).toBe(false);
@@ -170,7 +171,7 @@ describe('RFC 0095 connection-pack loader (T3)', () => {
         expect(p?.oauthConfigured).toBe(false);
       }
       // Option C: an unknown provider at the create seam → the spec code, 404.
-      const res = await fetch(`http://127.0.0.1:${PORT}/v1/host/openwop-app/connections`, {
+      const res = await fetch(`http://127.0.0.1:${PORT}/host/openwop-app/connections`, {
         method: 'POST', headers: hdrs,
         body: JSON.stringify({ provider: 'doesnotexist', kind: 'api_key', secret: 'x', scope: 'user' }),
       });

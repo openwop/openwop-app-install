@@ -74,7 +74,7 @@ export function registerTwinRoutes(deps: RouteDeps): void {
   const { app } = deps;
 
   // ── admin LINK ──
-  app.get('/v1/host/openwop-app/agents/:id/twin', async (req, res, next) => {
+  app.get('/host/openwop-app/agents/:id/twin', async (req, res, next) => {
     try {
       await requireFeatureEnabled(req, TOGGLE_ID, LABEL);
       const id = await requireOwnedAgent(req);
@@ -85,7 +85,7 @@ export function registerTwinRoutes(deps: RouteDeps): void {
     } catch (err) { next(err); }
   });
 
-  app.put('/v1/host/openwop-app/agents/:id/twin', async (req, res, next) => {
+  app.put('/host/openwop-app/agents/:id/twin', async (req, res, next) => {
     try {
       await requireFeatureEnabled(req, TOGGLE_ID, LABEL);
       const id = await requireOwnedAgent(req);
@@ -96,7 +96,7 @@ export function registerTwinRoutes(deps: RouteDeps): void {
     } catch (err) { next(err); }
   });
 
-  app.delete('/v1/host/openwop-app/agents/:id/twin', async (req, res, next) => {
+  app.delete('/host/openwop-app/agents/:id/twin', async (req, res, next) => {
     try {
       await requireFeatureEnabled(req, TOGGLE_ID, LABEL);
       const id = await requireOwnedAgent(req);
@@ -131,7 +131,7 @@ export function registerTwinRoutes(deps: RouteDeps): void {
   // authorization check ("you are not the person this agent is linked to") and is
   // deliberately NOT removed or relaxed — the `GEN-TWIN-1` ordering constraint is
   // satisfied by fixing the CALLER, which leaves the guard's meaning intact.
-  app.get('/v1/host/openwop-app/profiles/me/twin-grants', async (req, res, next) => {
+  app.get('/host/openwop-app/profiles/me/twin-grants', async (req, res, next) => {
     try {
       await requireFeatureEnabled(req, TOGGLE_ID, LABEL);
       const user = await resolveCallerUser(req);
@@ -155,7 +155,7 @@ export function registerTwinRoutes(deps: RouteDeps): void {
   // along — a probe by someone else is precisely what a grantor reviews
   // consent FOR; their `attempts` carries the F3 window aggregate. The limit
   // is now a bound on the SUBJECT'S OWN newest rows, not a host-global one.
-  app.get('/v1/host/openwop-app/profiles/me/twin-recalls', async (req, res, next) => {
+  app.get('/host/openwop-app/profiles/me/twin-recalls', async (req, res, next) => {
     try {
       await requireFeatureEnabled(req, TOGGLE_ID, LABEL);
       const user = await resolveCallerUser(req);
@@ -184,7 +184,7 @@ export function registerTwinRoutes(deps: RouteDeps): void {
     } catch (err) { next(err); }
   });
 
-  app.post('/v1/host/openwop-app/profiles/me/twin-grants', async (req, res, next) => {
+  app.post('/host/openwop-app/profiles/me/twin-grants', async (req, res, next) => {
     try {
       await requireFeatureEnabled(req, TOGGLE_ID, LABEL);
       const user = await resolveCallerUser(req);
@@ -195,7 +195,7 @@ export function registerTwinRoutes(deps: RouteDeps): void {
     } catch (err) { next(err); }
   });
 
-  app.delete('/v1/host/openwop-app/profiles/me/twin-grants/:agentId', async (req, res, next) => {
+  app.delete('/host/openwop-app/profiles/me/twin-grants/:agentId', async (req, res, next) => {
     try {
       await requireFeatureEnabled(req, TOGGLE_ID, LABEL);
       const user = await resolveCallerUser(req);

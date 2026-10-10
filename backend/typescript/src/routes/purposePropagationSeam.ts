@@ -25,7 +25,7 @@ interface ForwardRecord {
 }
 
 export function registerPurposePropagationSeamRoutes(app: Express): void {
-  app.post('/v1/host/sample/purpose-propagation/forward', (req: Request, res: Response) => {
+  app.post('/host/sample/purpose-propagation/forward', (req: Request, res: Response) => {
     if (!purposePropagationEnabled()) {
       res.status(404).json({ error: 'not_found', message: 'purpose-propagation seam disabled (RFC 0128 Draft, flag off)' });
       return;

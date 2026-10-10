@@ -125,6 +125,14 @@ describe('fromCanonicalDefinition — happy path', () => {
   });
 });
 
+describe('fromCanonicalDefinition — ADR 0766 exact node pins', () => {
+  it('imports a pinned typeId (`core.noop@1.0.0`, legal in a v2 definition) as its bare kind', () => {
+    const res = fromCanonicalDefinition({ nodes: [{ id: 'a', typeId: 'core.noop@1.0.0' }], edges: [] });
+    expect(res.nodes).toHaveLength(1);
+    expect(res.nodes[0]!.kind).toBe(fromCanonicalDefinition({ nodes: [{ id: 'a', typeId: 'core.noop' }], edges: [] }).nodes[0]!.kind);
+  });
+});
+
 describe('fromCanonicalDefinition — failure modes', () => {
   it('throws on a definition with no nodes', () => {
     expect(() => fromCanonicalDefinition({ nodes: [], edges: [] })).toThrow(CanonicalParseError);

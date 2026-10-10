@@ -64,14 +64,14 @@ let n = 0;
 async function ownerOrg(): Promise<{ owner: Client; orgId: string }> {
   const tenantId = `org:surf-${Date.now()}-${n++}`;
   const owner = client();
-  const r = await owner.post('/v1/host/openwop-app/test/login', { email: `surf-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await owner.post('/host/openwop-app/test/login', { email: `surf-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return { owner, orgId: org.body.orgId };
 }
-const u = (orgId: string, suffix = ''): string => `/v1/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${suffix}`;
-const m = (orgId: string, suffix = ''): string => `/v1/host/openwop-app/media/orgs/${encodeURIComponent(orgId)}${suffix}`;
+const u = (orgId: string, suffix = ''): string => `/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${suffix}`;
+const m = (orgId: string, suffix = ''): string => `/host/openwop-app/media/orgs/${encodeURIComponent(orgId)}${suffix}`;
 
 const PNG_1x1 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
 

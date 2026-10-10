@@ -32,11 +32,13 @@ import { randomUUID } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import type { Subject } from '../../host/subject.js';
 import { subjectReadAllowed, PREAUTHORIZED_CALLER, type SubjectCaller } from '../../host/subjectAccess.js';
+import { runOrgScopeFilter, runOrgScopeSubject } from '../../host/accessControlService.js';
 import { OpenwopError } from '../../types.js';
+import { resolveOne } from '../../host/featureToggles/service.js';
 import { cleanString, optionalCleanString } from '../../host/boundedStrings.js';
 import { buildHostSurfaceBundle } from '../../host/inMemorySurfaces.js';
 import { resolveMediaAsset } from '../../host/inMemorySurfaces.js';
-import { embedText, DEFAULT_EMBEDDING_DIMS, LOCAL_EMBEDDING_MODEL } from '../../aiProviders/localEmbedding.js';
+import { embedText, LOCAL_EMBEDDING_MODEL, effectiveEmbedDims } from '../../aiProviders/localEmbedding.js';
 import { resolveHeadlessEmbedderMaybeTest, resolveHeadlessEmbedderForSpecMaybeTest, type HeadlessEmbedder } from '../../host/headlessAi.js';
 import { createHash } from 'node:crypto';
 import { bm25Search, rrfFuse } from './lexicalIndex.js';
@@ -130,8 +132,95 @@ const MAX = {
  *  formats (PDF/Office) are deferred (ADR open question). */
 const TEXT_MIME = /^(text\/|application\/(json|xml|x-ndjson|markdown)$)/i;
 
+/**
+ * ADR 0830 D1 — the KB "org" ids that are not orgs: tenant-level namespaces a
+ * managed indexer files its collection under (the Team Portfolio, `_team`; the
+ * KickBot corpus, `_kickbot`). No org row exists, so the org-scope predicate would
+ * answer "not found" and recall would silently lose them; they are readable by
+ * whoever is in the tenant, as they always were. A new tenant-level namespace is
+ * added HERE (pinned by `adr0830-kb-ratchets.test.ts`), never by naming a
+ * synthetic org somewhere else.
+ */
+export const TENANT_SCOPED_KB_ORGS: ReadonlySet<string> = new Set(['_team', '_kickbot']);
+
 /** The features that own an ADR 0100 auto-managed collection. */
 export type ManagedSource = 'strategy' | 'priority-matrix' | 'production' | 'docs' | 'kickbot';
+
+/**
+ * G8 (ADR 0820 §8.1) — the toggle id each managed collection's CONTENT is sold under.
+ *
+ * Before this, a managed collection was gated only at its WRITER (each indexer's own
+ * `resolveOne(<feature>)`), and every READER — the KB doors, `tenantRetrieve` /
+ * `ctx.knowledge`, the `openwop:knowledge.search` chat tool, agent-knowledge recall —
+ * served it with no feature read. Paid content indexed once stayed recallable on a free
+ * plan and after a lapse. The reader now resolves `resolveOne(owner, subject)` (toggle +
+ * plan entitlement, ADR 0819), so every bundle whose content is KB-indexed is covered by
+ * ONE mechanism rather than a per-feature special case.
+ *
+ * A `Record` over `ManagedSource` is deliberate: adding a managed source without naming
+ * its owner is a type error. `null` = not plan-gated here, with the reason inline.
+ */
+export const MANAGED_COLLECTION_OWNER: Readonly<Record<ManagedSource, string | null>> = {
+  strategy: 'strategy',
+  'priority-matrix': 'priority-matrix',
+  production: 'production', // also the Team Portfolio collection (`profilesKnowledgeService`, same consumer)
+  docs: 'docs',
+  // The KickBot corpus is the published challenge guidance of the KickTodo distribution.
+  // Its indexer has no toggle gate, `kicktodo-core` is user-bucketed (a system-run read
+  // has no user to bucket), and it sits in no sellable bundle — gating it here would
+  // only make KickBot's own recall flaky. Revisit if kicktodo-core is ever priced.
+  kickbot: null,
+};
+
+/**
+ * G8 — the in-process MAINTENANCE caller: the owning feature removing its own rows
+ * (archive / delete / org-move eviction, the retention sweeps) and nothing else. It
+ * bypasses BOTH gates — it is `preAuthorized` for the subject gate, and recognised by
+ * IDENTITY for the plan gate — because a removal must succeed while the plan is lapsed:
+ * otherwise `removeStrategy` reads "collection absent" and reports a doc as provably
+ * gone while it still sits in the old org's collection (ADR 0597 §Correction 6).
+ * Never pass it on a read that returns content to a model or a user.
+ */
+export const KB_MAINTENANCE_CALLER: SubjectCaller = Object.freeze({ preAuthorized: true as const });
+
+/**
+ * G8 — may `caller` see this managed collection under its owner's plan?
+ *
+ * `content` = the read returns chunk/document text (search, retrieve, getDocument,
+ * listDocuments). A content read is gated even for a `preAuthorized` caller: the
+ * agent-knowledge USE lane retrieves bound collections pre-authorized, and that lane
+ * is exactly the recall leak this closes. A non-content read (a listing, a point
+ * `getCollection`, a write) honours `preAuthorized` as EXISTENCE — the agent-knowledge
+ * prune reads a pre-authorized listing, and filtering it would durably UNBIND an
+ * agent's Strategy KB on a lapse, so a re-subscribe would come back to nothing.
+ *
+ * Fail-closed: an unknown managed source, or a resolver that throws, hides the row.
+ */
+async function managedPlanAllows(
+  tenantId: string,
+  col: Pick<KnowledgeCollection, 'managed'>,
+  caller: SubjectCaller | undefined,
+  content: boolean,
+  memo?: Map<string, Promise<boolean>>,
+): Promise<boolean> {
+  if (!col.managed || caller === KB_MAINTENANCE_CALLER) return true;
+  if (!content && caller?.preAuthorized) return true;
+  if (!Object.prototype.hasOwnProperty.call(MANAGED_COLLECTION_OWNER, col.managed)) return false;
+  const owner = MANAGED_COLLECTION_OWNER[col.managed];
+  if (owner === null) return true;
+  const resolve = async (): Promise<boolean> => {
+    try {
+      return Boolean((await resolveOne(owner, { tenantId, ...(caller?.subject ? { userId: caller.subject } : {}) }))?.enabled);
+    } catch (err) {
+      log.warn('kb_managed_plan_gate_unresolved', { tenantId, owner, error: err instanceof Error ? err.message : String(err) });
+      return false;
+    }
+  };
+  if (!memo) return resolve();
+  let pending = memo.get(owner);
+  if (pending === undefined) { pending = resolve(); memo.set(owner, pending); }
+  return pending;
+}
 
 /**
  * KB-1 R2 — the PRIVILEGED fields, and why they live in a SECOND PARAMETER.
@@ -176,13 +265,17 @@ export interface InternalDocumentFields extends KbEmitOptions {
   documentId?: string;
   revision?: number;
   contentTrust?: 'trusted' | 'untrusted';
+  /** ADR 0830 D4 — this write IS the owning feature's indexer (`upsertDocument`, the
+   *  sanctioned in-process replace path). Every other ingest into a MANAGED collection
+   *  is refused at the service, not only at the KB route. */
+  managedWrite?: true;
   /* `origin` / `silent` (ADR 0643 D3) ride here for the same reason the three
    * above do: they are decisions only an in-process caller may express. A route
    * body never reaches them (`ingestDocument` reads them from THIS argument only). */
 }
 
 const PRIVILEGED_COLLECTION_FIELDS = ['collectionId', 'managed', 'boundSubject'] as const;
-const PRIVILEGED_DOCUMENT_FIELDS = ['documentId', 'revision', 'contentTrust'] as const;
+const PRIVILEGED_DOCUMENT_FIELDS = ['documentId', 'revision', 'contentTrust', 'managedWrite'] as const;
 
 /**
  * Refuse a privileged field that arrived through the UNTRUSTED `input` object.
@@ -292,14 +385,6 @@ export interface RetrievalConfig {
   embedder?: 'local' | 'provider';
 }
 
-/** The effective embed width: pgvector deployments fix it via
- *  `OPENWOP_VECTOR_PG_DIM`; otherwise the local default (256). Provider
- *  embeddings are REQUESTED at this width (Matryoshka truncation), so one
- *  namespace always holds one width. */
-function effectiveEmbedDims(): number {
-  const v = Number(process.env.OPENWOP_VECTOR_PG_DIM);
-  return Number.isFinite(v) && v > 0 ? Math.floor(v) : DEFAULT_EMBEDDING_DIMS;
-}
 
 function resolveEmbedderMode(col: Pick<KnowledgeCollection, 'retrievalConfig' | 'embeddingSpec'>): 'local' | 'provider' {
   // ADR 0398 P3 — an explicit embeddingSpec wins; else the legacy embedder field.
@@ -982,7 +1067,12 @@ export async function listCollections(tenantId: string, orgId: string, caller?: 
  * shape `kb/routes.ts` uses for its listing; the fan-out is what makes an
  * unmemoized version an N+1 against the rate limiter).
  */
-async function filterReadable(tenantId: string, rows: KnowledgeCollection[], caller: SubjectCaller | undefined): Promise<KnowledgeCollection[]> {
+async function filterReadable(tenantId: string, rows: KnowledgeCollection[], caller: SubjectCaller | undefined, content = false): Promise<KnowledgeCollection[]> {
+  // G8 — the managed-collection plan gate first (memoized per owning feature).
+  const planMemo = new Map<string, Promise<boolean>>();
+  const planned: KnowledgeCollection[] = [];
+  for (const col of rows) if (await managedPlanAllows(tenantId, col, caller, content, planMemo)) planned.push(col);
+  rows = planned;
   if (caller?.preAuthorized || !rows.some((c) => c.boundSubject)) return rows;
   const memo = new Map<string, Promise<boolean>>();
   const out: KnowledgeCollection[] = [];
@@ -1076,9 +1166,13 @@ export async function releaseCollectionBoundSubject(tenantId: string, orgId: str
  * An OMITTED `caller` is `{ subject: undefined }` — refused on a bound
  * collection, never a bypass. The bypass is spelled `PREAUTHORIZED_CALLER`.
  */
-async function readableCollection(tenantId: string, orgId: string, collectionId: string, caller: SubjectCaller | undefined): Promise<KnowledgeCollection | null> {
+async function readableCollection(tenantId: string, orgId: string, collectionId: string, caller: SubjectCaller | undefined, content = false): Promise<KnowledgeCollection | null> {
   const col = await collectionRow(tenantId, orgId, collectionId);
-  if (!col?.boundSubject) return col; // not membership-scoped ⇒ org scope is the whole rule
+  if (!col) return null;
+  // G8 — a managed collection whose owning feature is refused for this tenant is
+  // INVISIBLE (the same uniform not-found), never an error. See `managedPlanAllows`.
+  if (!(await managedPlanAllows(tenantId, col, caller, content))) return null;
+  if (!col.boundSubject) return col; // not membership-scoped ⇒ org scope is the whole rule
   return (await subjectReadAllowed(tenantId, col.boundSubject, caller)) ? col : null;
 }
 
@@ -1276,7 +1370,7 @@ export async function deleteCollection(tenantId: string, orgId: string, collecti
 // ─── documents (ingest) ──────────────────────────────────────────────────
 
 export async function listDocuments(tenantId: string, orgId: string, collectionId: string, caller?: SubjectCaller): Promise<Array<Omit<KnowledgeDocument, 'text'>>> {
-  await mustGetCollection(tenantId, orgId, collectionId, caller);
+  await mustGetCollection(tenantId, orgId, collectionId, caller, true); // G8 — a content read
   return (await docsInCollection(tenantId, orgId, collectionId)) // DEBT-2 — bounded org slice
     .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
     // Drop the (potentially large) full text from the list projection.
@@ -1288,7 +1382,7 @@ export async function getDocument(tenantId: string, orgId: string, collectionId:
   // and the document's verbatim text is the thing the ADR 0608 leak actually
   // exposed. A refused collection answers null here, the same uniform not-found
   // an absent document gives.
-  if (!(await readableCollection(tenantId, orgId, collectionId, caller))) return null;
+  if (!(await readableCollection(tenantId, orgId, collectionId, caller, true))) return null; // G8 — a content read
   return documentRow(tenantId, orgId, collectionId, documentId);
 }
 
@@ -1322,6 +1416,11 @@ export async function ingestDocument(
   // (`deleteDocument`/`upsertDocument` already guard before their reads.)
   await assertNoLiveReindex(tenantId, orgId, collectionId); // review fix — no writes during a build
   const col = await mustGetCollection(tenantId, orgId, collectionId, caller);
+  // ADR 0830 D4 — the managed guard at the EXIT. `assertNotManaged` sat on the KB
+  // routes only, so `documents/:id/ingest-to-kb` (and the agent-knowledge and
+  // project ingest lanes, onto a bound Strategy KB) wrote TRUSTED text into a
+  // collection advisors cite as the strategy itself, until the next sync dropped it.
+  if (!internal.managedWrite) refuseManagedCollection(col);
   const docCount = (await docsInCollection(tenantId, orgId, collectionId)).length; // DEBT-2 — bounded org slice
   if (docCount >= MAX.perCollectionDocs) {
     throw new OpenwopError('validation_error', `Document cap reached (${MAX.perCollectionDocs}).`, 400, {});
@@ -1509,7 +1608,11 @@ export async function upsertDocument(
   if (prior) {
     const sameTitle = prior.title === (cleanString(input.title, MAX.title) || prior.title);
     const sameText = typeof input.text === 'string' && prior.text === input.text;
-    if (sameText && sameTitle) {
+    // ADR 0830 D3 — a TRUST change is a change: the Team Portfolio relabel to
+    // `untrusted` must reach existing documents on their next backfill or save, and an
+    // unchanged bio would otherwise keep its stored `trusted` label forever.
+    const sameTrust = (prior.contentTrust === 'untrusted' ? 'untrusted' : 'trusted') === (input.contentTrust === 'untrusted' ? 'untrusted' : 'trusted');
+    if (sameText && sameTitle && sameTrust) {
       const { text: _t, ...projection } = prior;
       return projection;
     }
@@ -1533,6 +1636,7 @@ export async function upsertDocument(
     projection = await ingestDocument(tenantId, orgId, actor, collectionId, publicInput, {
       documentId,
       revision,
+      managedWrite: true,
       ...(contentTrust ? { contentTrust } : {}),
       ...(origin ? { origin } : {}),
       // ADR 0643 D3 — a REPLACE is an `updated` transition, owned below; its ingest
@@ -1576,7 +1680,9 @@ export async function ingestMediaCollection(
   mediaCollectionId: string,
   caller?: SubjectCaller,
 ): Promise<IngestMediaCollectionResult> {
-  await mustGetCollection(tenantId, orgId, collectionId, caller); // tenant/org + KBC-1 subject check (throws 404 if missing)
+  // ADR 0830 D4 — this lane writes through `upsertDocument`, whose `managedWrite` is the
+  // indexers' pass, so the managed refusal must be asked HERE, at this lane's own entry.
+  refuseManagedCollection(await mustGetCollection(tenantId, orgId, collectionId, caller)); // tenant/org + KBC-1 subject check (throws 404 if missing)
   const mediaCol = await getMediaCollection(tenantId, orgId, mediaCollectionId);
   if (!mediaCol) throw new OpenwopError('not_found', 'Media collection not found.', 404, { mediaCollectionId });
   const assets = await listMediaAssets(tenantId, orgId, { collectionId: mediaCollectionId }); // tenant/org scoped
@@ -1630,7 +1736,7 @@ export async function search(tenantId: string, orgId: string, collectionId: stri
 }
 
 export async function searchDetailed(tenantId: string, orgId: string, collectionId: string, queryRaw: unknown, topKRaw: unknown, mode: RetrievalMode = 'dense', caller?: SubjectCaller): Promise<{ hits: SearchHit[]; embedding: EmbeddingInfo; rerank?: RerankInfo }> {
-  const col = await mustGetCollection(tenantId, orgId, collectionId, caller);
+  const col = await mustGetCollection(tenantId, orgId, collectionId, caller, true); // G8 — a content read
   const query = cleanString(queryRaw, MAX.query);
   if (query.length === 0) throw new OpenwopError('validation_error', 'Field `query` is required.', 400, { field: 'query' });
   const topK = clampTopK(topKRaw);
@@ -1759,7 +1865,27 @@ export async function tenantRetrieve(tenantId: string, args: KnowledgeRetrieveAr
   // workflow run and every agent chat turn retrieves through. It fanned out
   // across the tenant's collections with no subject gate at all, which made a
   // project-bound corpus readable from any run in the tenant.
-  const tenantCollections = await filterReadable(tenantId, allRows, caller);
+  // KBCD-2 — narrow to the requested collections FIRST: both gates below cost a
+  // membership resolve, and an agent's bound `collectionIds` is usually one or two.
+  const requested = args.collectionIds && args.collectionIds.length > 0
+    ? allRows.filter((c) => args.collectionIds!.includes(c.collectionId))
+    : allRows;
+  // G8 — `content: true`: this IS the recall lane, so the managed-collection plan gate
+  // applies even to a pre-authorized caller (the agent-knowledge use lane).
+  const subjectReadable = await filterReadable(tenantId, requested, caller, true);
+  // ADR 0830 D1 (S2) — and the ORG dimension, which `filterReadable` never had: it
+  // drops only project-bound rows, so this fan-out returned every org's chunks to
+  // any member of any org (through `ctx.knowledge`, `kb.retrieve` and the
+  // `openwop:knowledge.search` chat tool). Same predicate as the `/kb/orgs/:orgId`
+  // doors, one resolve per org. No acting user ⇒ tenant-trusted, as on every run lane.
+  // A TENANT-SCOPED namespace (`TENANT_SCOPED_KB_ORGS`) is not an org and has no
+  // members to ask: it is the tenant's own, and this caller is already in the tenant.
+  const orgReadable = caller?.preAuthorized
+    ? null
+    : await runOrgScopeFilter(tenantId, runOrgScopeSubject({ actingUserId: caller?.subject, orgScopeSubject: caller?.orgScopeSubject }), subjectReadable.filter((c) => !TENANT_SCOPED_KB_ORGS.has(c.orgId)).map((c) => c.orgId), 'workspace:read', { cause: !caller?.subject });
+  const tenantCollections = orgReadable
+    ? subjectReadable.filter((c) => TENANT_SCOPED_KB_ORGS.has(c.orgId) || orgReadable.has(c.orgId))
+    : subjectReadable;
   // A tenant that HAS knowledge but none this caller may read is not a tenant
   // with "no real knowledge": returning null would fall through to the seeded
   // demo corpus and answer a refused query with fabricated content. Answer
@@ -1768,9 +1894,7 @@ export async function tenantRetrieve(tenantId: string, args: KnowledgeRetrieveAr
   if (allRows.length === 0) return null; // no real knowledge → demo fallback
   if (tenantCollections.length === 0) return { chunks: [], sources: [], latencyMs: 0, hasResults: false };
 
-  let wanted = args.collectionIds && args.collectionIds.length > 0
-    ? tenantCollections.filter((c) => args.collectionIds!.includes(c.collectionId))
-    : tenantCollections;
+  let wanted = tenantCollections;
   if (wanted.length > MAX.retrieveCollections) {
     log.warn('kb_tenant_retrieve_truncated', { tenantId, total: wanted.length, cap: MAX.retrieveCollections });
     wanted = wanted.slice(0, MAX.retrieveCollections);
@@ -1784,7 +1908,7 @@ export async function tenantRetrieve(tenantId: string, args: KnowledgeRetrieveAr
   // is the slowest single search, not the sum). Each is fault-isolated to [].
   const perCollection = await Promise.all(
     wanted.map((c) =>
-      search(tenantId, c.orgId, c.collectionId, args.query, Math.max(resultLimit, 8), resolveRetrievalMode(c), PREAUTHORIZED_CALLER) // KBC-1 — `filterReadable` above already resolved every row in `wanted`
+      search(tenantId, c.orgId, c.collectionId, args.query, Math.max(resultLimit, 8), resolveRetrievalMode(c), KB_MAINTENANCE_CALLER) // KBC-1 + G8 — `filterReadable(…, content)` above already resolved BOTH gates for every row in `wanted` with the real caller; re-resolving here without the user would drop a user-cohort row
         .then((hits) => hits.map((hit) => ({ hit, collectionId: c.collectionId })))
         .catch(() => [] as Array<{ hit: SearchHit; collectionId: string }>),
     ),
@@ -1833,6 +1957,8 @@ export interface RagResult {
   embedding: EmbeddingInfo;
   /** ADR 0351 Phase 2 — how well the KB covered the query (strict-mode gate). */
   coverage: RagCoverage;
+  /** ADR 0830 D5 — the retrieval mode this answer actually used (honesty label). */
+  mode: RetrievalMode;
   /** A grounded prompt assembled from the retrieved chunks, ready to feed to an
    *  agent / `ctx.callAI` IN A WORKFLOW. Generation is run-scoped (the provider
    *  is `ctx`-only), so the feature returns the augmented context, not an answer. */
@@ -1886,7 +2012,13 @@ function buildRagContextBlock(contexts: readonly SearchHit[]): string {
 
 export async function ragQuery(tenantId: string, orgId: string, collectionId: string, queryRaw: unknown, topKRaw: unknown, opts?: { minScore?: number }, caller?: SubjectCaller): Promise<RagResult> {
   const query = cleanString(queryRaw, MAX.query);
-  const detailed = await searchDetailed(tenantId, orgId, collectionId, queryRaw, topKRaw, 'dense', caller);
+  // ADR 0830 D5 — the collection's configured retrieval mode (ADR 0113), as `search`
+  // and `kb.search` already honour it. This was a literal `'dense'`, so a collection
+  // an admin set to hybrid+rerank answered `/rag` and `kb.rag` with plain dense hits
+  // while its own search preview showed the reranked ones.
+  const col = await getCollection(tenantId, orgId, collectionId, caller);
+  const mode: RetrievalMode = col ? resolveRetrievalMode(col) : 'dense';
+  const detailed = await searchDetailed(tenantId, orgId, collectionId, queryRaw, topKRaw, mode, caller);
   const embedding = detailed.embedding;
   const minScore = typeof opts?.minScore === 'number' && Number.isFinite(opts.minScore) ? opts.minScore : undefined;
   const contexts = minScore !== undefined ? detailed.hits.filter((h) => h.score >= minScore) : detailed.hits;
@@ -1902,13 +2034,21 @@ export async function ragQuery(tenantId: string, orgId: string, collectionId: st
   const augmentedPrompt = contexts.length === 0
     ? `No knowledge-base context was found for the question.\n\nQuestion: ${query}`
     : `Answer the question using ONLY the context below. Cite sources by their [n] index. If the context is insufficient, say so.\n\nContext:\n${buildRagContextBlock(contexts)}\n\nQuestion: ${query}`;
-  return { query, contexts, citations, embedding, coverage, augmentedPrompt };
+  return { query, contexts, citations, embedding, coverage, mode, augmentedPrompt };
 }
 
 // ─── helpers ───────────────────────────────────────────────────────────────
 
-async function mustGetCollection(tenantId: string, orgId: string, collectionId: string, caller?: SubjectCaller): Promise<KnowledgeCollection> {
-  const col = await readableCollection(tenantId, orgId, collectionId, caller);
+/** ADR 0830 D4 — a MANAGED collection (ADR 0100) is written only by its owning
+ *  feature's indexer. One refusal, asked by every non-indexer ingest lane. */
+function refuseManagedCollection(col: Pick<KnowledgeCollection, 'collectionId' | 'managed'>): void {
+  if (col.managed) {
+    throw new OpenwopError('validation_error', `This collection is managed (synced from ${col.managed}); edit the source instead.`, 400, { collectionId: col.collectionId, managed: col.managed });
+  }
+}
+
+async function mustGetCollection(tenantId: string, orgId: string, collectionId: string, caller?: SubjectCaller, content = false): Promise<KnowledgeCollection> {
+  const col = await readableCollection(tenantId, orgId, collectionId, caller, content);
   if (!col) throw new OpenwopError('not_found', 'Collection not found.', 404, { collectionId });
   return col;
 }
@@ -1965,6 +2105,20 @@ const OFFICE_MIME = new Set([
 ]);
 
 /**
+ * The bytes an office MIME is allowed to START with (Dependabot #104, CVE-2026-16633).
+ * `officeparser` does not trust the declared type: `parseOffice(buffer)` SNIFFS the
+ * format from the bytes, so a PDF uploaded as `.pptx` reached its bundled pdf.js with
+ * JavaScript evaluation at its default (ON) — the path H61 closed for real PDFs
+ * (`isEvalSupported: false` on the `unpdf` lane) reopened one door over. A positive
+ * allowlist, not a `%PDF-` denylist, so any other smuggled format is refused too:
+ * every OOXML / OpenDocument file is a ZIP container, and RTF opens with `{\rtf`.
+ */
+function officeBytesMatchMime(mime: string, buffer: Buffer): boolean {
+  if (mime === 'application/rtf' || mime === 'text/rtf') return buffer.subarray(0, 5).toString('latin1') === '{\\rtf';
+  return buffer.length >= 4 && buffer[0] === 0x50 && buffer[1] === 0x4b && buffer[2] === 0x03 && buffer[3] === 0x04; // "PK\x03\x04"
+}
+
+/**
  * Extract plain text from uploaded bytes by MIME — the SINGLE extraction owner for
  * file ingest (manual KB upload, media assets, and drive-sync). text/* + json/xml/
  * markdown decode as UTF-8; PDF via `unpdf`; DOCX via `mammoth`; PowerPoint / Excel /
@@ -1979,6 +2133,17 @@ async function extractTextFromBytes(tenantId: string, buffer: Buffer, contentTyp
   // RTF arrives as text/rtf but is NOT plain text — route it to officeparser FIRST,
   // before the text/* catch-all below.
   if (OFFICE_MIME.has(mime)) {
+    // Refused BEFORE officeparser is even imported — see officeBytesMatchMime. 422, the
+    // same answer a corrupt file of the right type gets: the bytes are not the declared
+    // type, so there is nothing this ingest can extract.
+    if (!officeBytesMatchMime(mime, buffer)) {
+      throw new OpenwopError(
+        'validation_error',
+        `The file's contents are not a \`${contentType}\` document.`,
+        422,
+        { contentType, reason: 'content_type_mismatch' },
+      );
+    }
     try {
       const { parseOffice } = await import('officeparser');
       const parsed = await parseOffice(buffer);
@@ -2085,7 +2250,7 @@ async function mediaToTextViaLLM(tenantId: string, buffer: Buffer, mime: string,
   // → null). On the reference host the managed target is MiniMax (text-only), so media
   // routes to the tenant's configured default AI provider; if none is capable, 422 honestly.
   const cap = kind === 'image' ? 'vision' : 'audio';
-  const dispatch = await resolveHeadlessAi(tenantId, kind);
+  const dispatch = await resolveHeadlessAi(tenantId, kind, { featureId: 'kb' });
   if (!dispatch) {
     throw new OpenwopError('validation_error', `No ${cap}-capable AI provider is available for \`${mime}\`. Configure a default AI provider (with a ${cap}-capable model) in BYOK settings.`, 422, { contentType: mime });
   }
@@ -2715,7 +2880,29 @@ const REINDEX_TERMINAL = new Set<ReindexStatus>(['done', 'failed', 'cancelled'])
  * reindex for the three lanes the node is not on.
  */
 async function reapKbReindexDriverIfTerminal(tenantId: string, orgId: string, collectionId: string, status: ReindexStatus | undefined): Promise<void> {
-  if (status && REINDEX_TERMINAL.has(status)) await teardownKbReindexDriver(tenantId, orgId, collectionId);
+  if (!status || !REINDEX_TERMINAL.has(status)) return;
+  // ADR 0830 D6 (`KB2WF-4`) — re-read the row: the driver is shared per collection
+  // (one job id, one workflow id), and `drainReindex` reaps only after the old
+  // namespace GC and the `completed` emit. A reindex started in that window owns the
+  // row by then, and the reap used to delete ITS scheduler job and archive ITS
+  // workflow — a `running` job with no driver (reproduced). Reap only a driver whose
+  // collection has no live job now.
+  const current = await reindexJobs.get(reindexKey(tenantId, orgId, collectionId));
+  if (current && !REINDEX_TERMINAL.has(current.status)) {
+    log.info('kb_reindex_driver_reap_skipped_live_successor', { tenantId, collectionId, current: current.status });
+    return;
+  }
+  await teardownKbReindexDriver(tenantId, orgId, collectionId);
+  // …and close the remaining window: a successor that started AFTER the re-read above
+  // (its CAS insert, then `ensureKbReindexDriver`) can have lost its job or had its
+  // workflow archived by the teardown we just ran. Re-read once more and, if a live job
+  // owns the collection now, re-ensure its driver — idempotent, and it re-registers the
+  // definition un-archived.
+  const after = await reindexJobs.get(reindexKey(tenantId, orgId, collectionId));
+  if (after && !REINDEX_TERMINAL.has(after.status)) {
+    log.info('kb_reindex_driver_reensured_for_successor', { tenantId, collectionId, current: after.status });
+    await ensureKbReindexDriver(tenantId, orgId, collectionId);
+  }
 }
 
 /** Drive a running/paused reindex: embed up to `maxChunks` more into the STAGING namespace
@@ -2926,9 +3113,12 @@ async function drainReindexCore(tenantId: string, orgId: string, collectionId: s
       catch (err) { log.warn('kb_reindex_old_namespace_gc_failed', { tenantId, collectionId, error: err instanceof Error ? err.message : String(err) }); }
     }
     // ADR 0643 D3 — the ONE `reindex.completed` site: the job claimed `done` AND the
-    // collection flipped onto the staged namespace. Emitted LAST, after the old
-    // namespace's GC, so a consumer that reacts by starting the next reindex cannot
-    // race this function's own cleanup. Awaited (D6).
+    // collection flipped onto the staged namespace. Emitted after the old namespace's
+    // GC. CORRECTED (ADR 0830 D6, `KB2WF-4`): this comment used to say that ordering
+    // meant "a consumer that reacts by starting the next reindex cannot race this
+    // function's own cleanup". It could — the driver REAP runs after this, in
+    // `drainReindex`, and took the successor's driver (reproduced). The reap now
+    // re-reads the job row on both sides of the teardown. Awaited (D6).
     await kbMutated({ entity: 'reindex', verb: 'completed', tenantId, orgId, collectionId, ...(emit.origin ? { origin: emit.origin } : {}) });
   }
   return projectJob(job);

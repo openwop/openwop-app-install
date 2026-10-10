@@ -29,7 +29,7 @@ import { saveRun, getRun, listRuns } from '../src/features/manual-tests/manualTe
 
 let server: http.Server;
 let BASE = '';
-const RUNS = '/v1/host/openwop-app/manual-tests/runs';
+const RUNS = '/host/openwop-app/manual-tests/runs';
 
 interface Res { status: number; body: any }
 /** A caller with its OWN cookie jar — i.e. its own browser. */

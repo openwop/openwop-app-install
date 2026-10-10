@@ -49,14 +49,14 @@ let n = 0;
 async function orgOwner(): Promise<{ c: ReturnType<typeof client>; orgId: string; tenantId: string }> {
   const tenantId = `org:test-ab-pub-${Date.now()}-${n++}`;
   const c = client();
-  expect((await c.post('/v1/host/openwop-app/test/login', { email: `abp-${Date.now()}-${n++}@acme.test`, tenantId })).status).toBe(201);
-  const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  expect((await c.post('/host/openwop-app/test/login', { email: `abp-${Date.now()}-${n++}@acme.test`, tenantId })).status).toBe(201);
+  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status).toBe(201);
   return { c, orgId: org.body.orgId, tenantId };
 }
 
 const STATE = { name: 'Pub', screens: [{ id: 'home', name: 'Home', components: [{ type: 'text', props: { text: 'x' } }] }] };
-const AB = (orgId: string) => `/v1/host/openwop-app/app-builder/orgs/${encodeURIComponent(orgId)}`;
+const AB = (orgId: string) => `/host/openwop-app/app-builder/orgs/${encodeURIComponent(orgId)}`;
 const setPublishToggle = async (status: 'on' | 'off'): Promise<void> => {
   const d = getToggleDefault('code-publish');
   if (d) await saveConfig({ ...d, status }, 'test');

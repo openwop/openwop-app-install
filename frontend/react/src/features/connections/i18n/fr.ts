@@ -24,6 +24,21 @@ export const messages = {
   couldNotStart: 'Impossible de démarrer {{label}}.',
   connectionHealthy: '{{name}} est sain.',
   connectionNeedsReconnect: '{{name}} doit se reconnecter.',
+  // ADR 0780 — write authority, row scope, reconnect, status labels
+  changedElsewhere: "Cette connexion a été modifiée ailleurs. Actualisez et réessayez.",
+  revoked: "{{name}} révoquée.",
+  readOnlyNotice: "Vous pouvez consulter les connexions de cet espace de travail, mais vous n’avez pas l’autorisation d’y connecter de nouveaux comptes. Vous pouvez toujours révoquer les vôtres.",
+  reconnect: "Reconnecter",
+  reconnectLabel: "Reconnecter {{name}}",
+  accountLine: "Compte : {{account}}",
+  sharingWorkspace: "Espace de travail",
+  managedByAdmin: "Gérée par un administrateur",
+  status_active: "Active",
+  'status_needs-reconsent': "À reconnecter",
+  status_expired: "Expirée",
+  status_revoked: "Révoquée",
+  providerNotAllowed: "Ce fournisseur n’est pas autorisé dans cet espace de travail — un administrateur définit la liste d’autorisation dans Gouvernance.",
+  noConnectionsBodyReadOnly: "Rien n’est encore connecté ici. Demandez à un administrateur ou à un éditeur de l’espace de travail de connecter un compte.",
 
   // OAuth consent card
   connectWithConsent: 'Connecter avec consentement',
@@ -80,6 +95,8 @@ export const messages = {
   callbackInvalidState: 'La session de consentement a expiré — veuillez réessayer.',
   callbackMissingParams: 'La réponse du fournisseur était incomplète — veuillez réessayer.',
   callbackExchangeFailed: 'Impossible de finaliser l’échange de jetons. Veuillez réessayer.',
+  callbackSubjectMismatch: "Vous êtes connecté avec un compte différent de celui qui a lancé cette connexion. Connectez-vous avec ce compte et réessayez.",
+  callbackIssMismatch: "La réponse du fournisseur n’a pas pu être vérifiée, rien n’a donc été enregistré. Veuillez réessayer.",
   callbackGenericError: 'Impossible de connecter {{provider}}.',
 
   // Governance panel
@@ -203,6 +220,8 @@ export const messages = {
   vaultDeleteConfirm: 'Supprimer le secret {{ref}} ?',
   vaultDeleteReferencedTitle: 'Ce secret est utilisé',
   vaultDeleteReferencedBody: 'Références actives : {{refs}}. Le supprimer les cassera.',
+  vaultDeleteUnverifiedTitle: "Impossible de vérifier ce qui utilise ce secret",
+  vaultDeleteUnverifiedBody: "Le serveur n’a pas pu vérifier ce qui utilise ce secret. Le supprimer quand même peut casser quelque chose qui l’utilise encore.",
   vaultDeleteAnyway: 'Supprimer quand même',
   vaultAddRefLabel: 'Référence d’identification',
   vaultAddValueLabel: 'Valeur',
@@ -217,4 +236,18 @@ export const messages = {
   requireMfaTitle: 'Exigence de deux facteurs',
   requireMfaLabel: 'Exiger l’authentification à deux facteurs pour cet espace de travail',
   requireMfaHint: 'Les membres dont la session n’a pas vérifié de second facteur sont refusés jusqu’à ce qu’ils s’inscrivent (Paramètres → Sécurité) et se reconnectent. Les membres SSO la satisfont via leur fournisseur d’identité. Les clés d’API (identifiants machine) sont exemptées — faites-les tourner si cela compte pour votre espace de travail.',
+  // ADR 0783 D1 — a connection as a workflow data source
+  dataSourceAction: "Source de données",
+  dataSourceLabel: "Source de données pour {{name}}",
+  dataSourceLine: "Source de données : {{url}}",
+  dataSourceTitle: "Source de données — {{name}}",
+  dataSourceHint: "Les workflows de cet espace peuvent lire l'API de cette connexion, et y écrire, via les nœuds REST et GraphQL de Data Integration. Définissez l'URL de base qu'ils appellent : les requêtes restent sous cette URL, sur l'un des hôtes d'API du fournisseur.",
+  dataSourceBaseUrl: "URL de base",
+  dataSourcePlaceholder: "https://example.service-now.com/api/now",
+  dataSourceSave: "Enregistrer",
+  dataSourceClear: "Ne plus utiliser comme source de données",
+  dataSourceSaved: "{{name}} est maintenant une source de données.",
+  dataSourceCleared: "{{name}} n'est plus une source de données.",
+  dataSourceInvalid: "Cette URL de base n'est pas autorisée pour cette connexion.",
+  dataSourceFailed: "Impossible d'enregistrer la source de données. Réessayez.",
 } as const;

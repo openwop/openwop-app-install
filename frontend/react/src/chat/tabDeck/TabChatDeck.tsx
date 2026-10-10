@@ -31,23 +31,29 @@ import { toast } from '../../ui/toast.js';
 import { announce } from '../../ui/announce.js';
 import { TabSession } from './TabSession.js';
 import { StateCard } from '../../ui/StateCard.js';
+import { Button } from '../../ui/Button.js';
 import { PlusIcon } from '../../ui/icons/index.js';
 import { TabStrip, tabButtonId, tabPanelId } from './TabStrip.js';
+import { getDeckTabKind, listDeckTabKinds } from './tabKindRegistry.js';
+import { useFeatureVisible } from '../../featureToggles/FeatureAccessContext.js';
 import { listChatSessionMessagesPage, type ChatSessionHeader } from '../../client/chatSessionsClient.js';
 import { LeftRail, type LeftRailTab } from '../leftRail/LeftRail.js';
-import { useReviewStatusStore, useReviewCount } from '../reviews/reviewStatusStore.js';
+import { Workbench } from '../workbench/Workbench.js';
+import { useMobilePaneArbitration, useWorkbench } from '../workbench/useWorkbench.js';
+import { useReviewStatusStore, useReviewCount, useReviewCountsByConversation } from '../reviews/reviewStatusStore.js';
+import { useRunningConversations } from '../conversations/useRunningConversations.js';
+import { EMPTY_SOURCES, type ConversationSources } from '../workbench/sources.js';
+import { WorkbenchActionsContext } from '../workbench/workbenchActions.js';
 import type { BYOKActiveConfig } from '../../byok/lib/useBYOKConfig.js';
 import type { ChatMessage } from '../types.js';
 
-// ADR budget reclaim — the artifact workbench is a modal (renders only when a review's
-// artifact is opened); lazy-split it out of the eager chat entry chunk (mirrors ChatSidebar).
-const ArtifactWorkbench = lazy(() => import('../artifacts/ArtifactWorkbench.js').then((m) => ({ default: m.ArtifactWorkbench })));
 // ADR 0154 FU-1 — deck parity: create a channel from the library.
 const ChannelCreateDialog = lazy(() => import('../conversations/ChannelCreateDialog.js').then((m) => ({ default: m.ChannelCreateDialog })));
 const ChannelBrowseDialog = lazy(() => import('../conversations/ChannelBrowseDialog.js').then((m) => ({ default: m.ChannelBrowseDialog })));
 
 const MOBILE_BREAKPOINT_PX = 720;
 const EMPTY_RUNS: readonly ChatMessage[] = [];
+const EMPTY_IDS: readonly string[] = [];
 
 /**
  * Reap an abandoned deck-minted conversation. A backend-keyed tab EAGERLY
@@ -111,6 +117,13 @@ export function selectStaleEmptySessions(opts: {
     && !openIds.has(c.sessionId)
     && !freshIds.has(c.sessionId)
     && now - Date.parse(c.updatedAt) >= maxAgeMs);
+}
+
+/** Move `from`'s entry to `to` (no-op when `from` has none). */
+function moveKey<V>(map: Record<string, V>, from: string, to: string): Record<string, V> {
+  if (!(from in map)) return map;
+  const { [from]: value, ...rest } = map;
+  return { ...rest, [to]: value as V };
 }
 
 export function TabChatDeck({ config, byokStored, onReconfigureBYOK }: {
@@ -190,10 +203,24 @@ export function TabChatDeck({ config, byokStored, onReconfigureBYOK }: {
     setRunsByTab((prev) => (prev[sid] === runs ? prev : { ...prev, [sid]: runs }));
   }, []);
   const activeRuns = activeSessionId ? (runsByTab[activeSessionId] ?? EMPTY_RUNS) : EMPTY_RUNS;
+  // ADR 0768 B4 — each tab reports its sources; the Workbench shows the active tab's.
+  const [sourcesByTab, setSourcesByTab] = useState<Record<string, ConversationSources>>({});
+  const handleSources = useCallback((sid: string, src: ConversationSources) => {
+    setSourcesByTab((prev) => (prev[sid]?.key === src.key ? prev : { ...prev, [sid]: src }));
+  }, []);
+  const activeSources = activeSessionId ? (sourcesByTab[activeSessionId] ?? EMPTY_SOURCES) : EMPTY_SOURCES;
 
   // Focus + auto-open the Runs panel on a new dispatch in the ACTIVE tab. Focus resets on
   // tab switch (so the new tab's runs auto-focus), mirroring ChatSidebar's reconcile.
   const [focusedRunId, setFocusedRunId] = useState<string | null>(null);
+  // ADR 0768 P2 — runs + artifacts open in the right-hand Workbench, not the rail.
+  const workbench = useWorkbench(null);
+  // ADR 0768 B4 — lets a turn's receipt open this shell's Sources tab.
+  const selectWorkbenchTab = workbench.select; // stable (useCallback in useWorkbench)
+  const workbenchActions = useMemo(() => ({ openSources: () => selectWorkbenchTab('sources') }), [selectWorkbenchTab]);
+  const openWorkbenchRun = workbench.openRun;
+  const closeRail = useCallback(() => setActiveRailTab(null), []);
+  useMobilePaneArbitration(isMobile, activeRailTab !== null, workbench.tab !== null, closeRail, workbench.close);
   const seenRunIdsRef = useRef<Set<string>>(new Set());
   const prevActiveRef = useRef<string | null>(activeSessionId);
   useEffect(() => {
@@ -210,9 +237,9 @@ export function TabChatDeck({ config, byokStored, onReconfigureBYOK }: {
     if (fresh) {
       for (const m of activeRuns) seen.add(m.id);
       setFocusedRunId(fresh.id);
-      selectRailTab('progress');
+      openWorkbenchRun();
     }
-  }, [activeRuns, activeSessionId, selectRailTab]);
+  }, [activeRuns, activeSessionId, openWorkbenchRun]);
   // Reconcile: keep focus on an existing run (auto-focus the most-recent when stale).
   useEffect(() => {
     const stillExists = focusedRunId !== null && activeRuns.some((m) => m.id === focusedRunId);
@@ -221,9 +248,11 @@ export function TabChatDeck({ config, byokStored, onReconfigureBYOK }: {
 
   // ── Reviews (ADR 0068/0070) — the global review store, mirrors ChatSidebar ─────────
   const reviewCount = useReviewCount();
+  const reviewCountsByConversation = useReviewCountsByConversation();
+  // ADR 0776 P2 — closed conversations with a run in flight.
+  const runningConversations = useRunningConversations();
   const connectReviews = useReviewStatusStore((s) => s.connect);
   const disconnectReviews = useReviewStatusStore((s) => s.disconnect);
-  const [openArtifact, setOpenArtifact] = useState<{ artifactId: string; revisionId?: string } | null>(null);
   useEffect(() => {
     void connectReviews();
     return () => disconnectReviews();
@@ -248,6 +277,32 @@ export function TabChatDeck({ config, byokStored, onReconfigureBYOK }: {
     openTab(sid, streamingRef.current);
   }, [openTab]);
 
+  const featureVisible = useFeatureVisible();
+  const newTabKinds = listDeckTabKinds()
+    .filter((k) => featureVisible(k.featureId))
+    .map((k) => ({ kind: k.kind, label: k.label() }));
+
+  // ADR 0785 D5 — a registered non-conversation tab kind. Its id names no
+  // conversation, so it is never in the deck-minted reap set.
+  // ADR 0785 D5 follow-on — a kind may contribute a rail section (e.g. the user's
+  // running Claude Code sessions), so its tabs stay findable after leaving the chat.
+  // Same visibility rule as the New-tab menu: a hidden feature contributes nothing.
+  // `seed` runs BEFORE the tab joins the deck, so the kind's Component reads the
+  // pre-seeded state at mount (e.g. reattach to a running terminal).
+  const openKindTab = useCallback((kind: string, opts?: { seed?: (tabId: string) => void; title?: string }) => {
+    const id = `${kind}-${crypto.randomUUID()}`;
+    opts?.seed?.(id);
+    openTab(id, streamingRef.current, kind);
+    if (opts?.title) setTitle(id, opts.title);
+  }, [openTab, setTitle]);
+  const newTabOfKind = useCallback((kind: string) => openKindTab(kind), [openKindTab]);
+  const kindTabIds = useMemo(() => {
+    const byKind: Record<string, string[]> = {};
+    for (const tb of tabs) if (tb.kind) (byKind[tb.kind] ??= []).push(tb.sessionId);
+    return byKind;
+  }, [tabs]);
+  const railSectionKinds = listDeckTabKinds().filter((k) => k.RailSection && featureVisible(k.featureId));
+
   // Fire the reap for an id this deck is abandoning (tab close / re-key).
   // `.delete()` doubles as the one-shot claim; streaming is read BEFORE the
   // caller clears it. Fire-and-forget — the UI never waits on it.
@@ -262,31 +317,43 @@ export function TabChatDeck({ config, byokStored, onReconfigureBYOK }: {
   }, [sessions]);
 
   const handleClose = useCallback((sid: string) => {
+    const kindTab = tabs.find((tb) => tb.sessionId === sid)?.kind;
+    if (kindTab) getDeckTabKind(kindTab)?.onClose?.(sid); // e.g. stop the terminal it shows
     reapIfAbandoned(sid); // reads the streaming set before it's cleared below
     streamingRef.current.delete(sid);
     closeTab(sid);
     // Keyboard-close focus handoff to the neighbour tab is owned by TabStrip (it knows
     // the close was keyboard-initiated and refocuses the now-active tab).
-  }, [closeTab, reapIfAbandoned]);
+  }, [closeTab, reapIfAbandoned, tabs]);
 
   // Rename a chat from its tab. Persists via the SAME path as the conversations rail
   // (`sessions.rename` → PATCH → `titleSource:'user'`), so a manual tab rename also stops
   // the ADR 0151 auto-titler from clobbering it; `setTitle` keeps the local restore cache
   // in sync so the new label paints first on reload (G4).
   const handleRename = useCallback(async (sid: string, title: string) => {
-    await sessions.rename(sid, title);
+    // A kind tab (ADR 0785) names no conversation: its label is local only.
+    if (!tabs.find((tb) => tb.sessionId === sid)?.kind) await sessions.rename(sid, title);
     setTitle(sid, title);
-  }, [sessions, setTitle]);
+  }, [sessions, setTitle, tabs]);
 
   // `/clear` in a tab (or the mount-404 recovery of a brand-new tab) mints a new
   // session id; re-key the working set in place so the tab isn't stranded. The
   // NEW id gets an eagerly-created BE row, so it joins the deck-minted set; the
   // OLD id is being abandoned — reap it if it was deck-minted and never used
   // (previously it lingered in the sidebar as a `0 messages` row forever).
+  //
+  // Per-tab state keyed by session id moves with the tab. A `?agent=` tab is
+  // minted client-side with no BE row, so its first history read 404s and the
+  // recovery re-keys it; without the move the agent scope (and a launch
+  // context) stayed on the abandoned id and the turn ran unscoped.
+  const [agentScopes, setAgentScopes] = useState<Record<string, string>>({});
+  const [launchContexts, setLaunchContexts] = useState<Record<string, string>>({});
   const handleSessionIdChange = useCallback((oldId: string, newId: string) => {
     freshSessionIdsRef.current.add(newId);
     reapIfAbandoned(oldId);
     streamingRef.current.delete(oldId);
+    setAgentScopes((prev) => moveKey(prev, oldId, newId));
+    setLaunchContexts((prev) => moveKey(prev, oldId, newId));
     rekeyTab(oldId, newId);
   }, [rekeyTab, reapIfAbandoned]);
 
@@ -466,7 +533,6 @@ export function TabChatDeck({ config, byokStored, onReconfigureBYOK }: {
   // Deep-link `?agent=<id>` → open a NEW tab scoped to that agent (ADR 0140 G3). There's
   // no "the tab for agent X" (multiple tabs can mention one agent), so always open fresh.
   // One-shot + clears the param.
-  const [agentScopes, setAgentScopes] = useState<Record<string, string>>({});
   const didAgentLinkRef = useRef(false);
   useEffect(() => {
     if (didAgentLinkRef.current) return;
@@ -480,6 +546,27 @@ export function TabChatDeck({ config, byokStored, onReconfigureBYOK }: {
     next.delete('agent');
     setSearchParams(next, { replace: true });
   }, [searchParams, openTab, setSearchParams]);
+
+  // ADR 0785 D5 — deep-link `?newTab=<kind>&tabContext=<text>` → open a NEW tab of a
+  // registered kind, handing it the context once (e.g. the ⌘K "Open in Claude Code"
+  // on a workflow page). An unknown or unavailable kind is ignored, never forced.
+  // One-shot + strips both params, like the siblings above.
+  const newTabParamHandled = useRef<string | null>(null);
+  useEffect(() => {
+    const kind = searchParams.get('newTab');
+    if (!kind || newTabParamHandled.current === kind) return;
+    newTabParamHandled.current = kind;
+    const next = new URLSearchParams(searchParams);
+    const context = next.get('tabContext');
+    next.delete('newTab');
+    next.delete('tabContext');
+    setSearchParams(next, { replace: true });
+    const k = getDeckTabKind(kind);
+    if (!k || !featureVisible(k.featureId)) return;
+    const id = `${kind}-${crypto.randomUUID()}`;
+    if (context) setLaunchContexts((prev) => ({ ...prev, [id]: context.slice(0, 4000) }));
+    openTab(id, streamingRef.current, kind);
+  }, [searchParams, setSearchParams, openTab, featureVisible]);
 
   // Deep-link `?rail=<tab>` → select a rail (ENG-14). The last member of the
   // ChatSidebar deep-link family the deck did not consume; `?agent=` and
@@ -498,13 +585,13 @@ export function TabChatDeck({ config, byokStored, onReconfigureBYOK }: {
     const wanted = searchParams.get('rail');
     if (!wanted || railParamHandled.current === wanted) return;
     railParamHandled.current = wanted;
-    if (wanted === 'conversations' || wanted === 'progress' || wanted === 'reviews') {
-      selectRailTab(wanted);
-    }
+    // `progress` is a deep-link alias for the Workbench Run tab (ADR 0768 P2).
+    if (wanted === 'progress') openWorkbenchRun();
+    else if (wanted === 'conversations' || wanted === 'reviews') selectRailTab(wanted);
     const next = new URLSearchParams(searchParams);
     next.delete('rail');
     setSearchParams(next, { replace: true });
-  }, [searchParams, setSearchParams, selectRailTab]);
+  }, [searchParams, setSearchParams, selectRailTab, openWorkbenchRun]);
 
   // Cache each tab's real title once the conversation list loads, so a reload restores
   // the real label at first paint (ADR 0140 G4) instead of flashing "New chat". setTitle
@@ -542,8 +629,8 @@ export function TabChatDeck({ config, byokStored, onReconfigureBYOK }: {
   // for unread, a higher-urgency amber dot for a blocked HITL interrupt.
   const renderStatus = useCallback((sid: string) => {
     const b = badges.statusFor(sid);
-    const kind = b.blocked ? 'blocked' : b.unread ? 'unread' : null;
-    const label = kind === 'blocked' ? t('multiTabBlockedAria') : kind === 'unread' ? t('multiTabUnreadAria') : undefined;
+    const kind = b.blocked ? 'blocked' : b.running ? 'running' : b.unread ? 'unread' : null;
+    const label = kind === 'blocked' ? t('multiTabBlockedAria') : kind === 'running' ? t('multiTabRunningAria') : kind === 'unread' ? t('multiTabUnreadAria') : undefined;
     // A labeled GRAPHIC (role="img"), NOT a live region: a conditionally-mounted
     // `role="status"` never announced (MTCU-201) — the live notification now rides the
     // imperative `announce()` on the rising edge (see onBadgeRaiseRef). This label is
@@ -575,6 +662,7 @@ export function TabChatDeck({ config, byokStored, onReconfigureBYOK }: {
   }, [sessions.sessions, tabs]);
 
   return (
+    <WorkbenchActionsContext.Provider value={workbenchActions}>
     <div className="u-flex u-flex-1 u-minh-0 u-overflow-hidden u-relative">
       {/* Shared rail (ADR 0140 amend) — the persistent Conversations list is now
           mounted here (reusing ConversationsRail, Zone-1 lineup omitted). Selecting a
@@ -590,6 +678,15 @@ export function TabChatDeck({ config, byokStored, onReconfigureBYOK }: {
           error: sessions.error,
           activeSessionId,
           selectionEcho: true,
+          // ADR 0768 P3 — open tabs' live state echoes onto their rows.
+          liveStatusFor: (sid: string) => {
+            // Open tabs: their live client state. Every conversation (closed ones
+            // too): the review inbox (ADR 0776) and the server's in-flight runs
+            // (ADR 0776 P2). Waiting-on-you wins over running.
+            const b = badges.statusFor(sid);
+            if (b.blocked || reviewCountsByConversation.get(sid)) return 'blocked';
+            return b.running || runningConversations.has(sid) ? 'running' : null;
+          },
           onRefresh: sessions.refresh,
           onSelect: openConversation,
           onRename: sessions.rename,
@@ -611,28 +708,26 @@ export function TabChatDeck({ config, byokStored, onReconfigureBYOK }: {
           },
           onCreateChannel: () => setShowCreateChannel(true),
           onBrowseChannels: () => setShowBrowseChannels(true),
-        }}
-        progressProps={{
-          workflowRunMessages: activeRuns,
-          focusedMessageId: focusedRunId,
-          onFocus: setFocusedRunId,
-          onCancel: (id) => (activeSessionId ? (cancelByTabRef.current[activeSessionId]?.(id) ?? Promise.resolve()) : Promise.resolve()),
+          ...(railSectionKinds.length > 0 ? {
+            extraSections: railSectionKinds.map((k) => {
+              const Section = k.RailSection!;
+              return (
+                <Section
+                  key={k.kind}
+                  openTabIds={kindTabIds[k.kind] ?? EMPTY_IDS}
+                  activeTabId={activeSessionId}
+                  focusTab={(id) => { focusTab(id); if (isMobile) selectRailTab(null); }}
+                  openNewTab={(opts) => { openKindTab(k.kind, opts); if (isMobile) selectRailTab(null); }}
+                />
+              );
+            }),
+          } : {}),
         }}
         reviewsProps={{
-          onOpenArtifact: (artifactId, revisionId) => setOpenArtifact({ artifactId, ...(revisionId ? { revisionId } : {}) }),
+          onOpenArtifact: (artifactId, revisionId) => workbench.openArtifact({ artifactId, ...(revisionId ? { revisionId } : {}) }),
         }}
-        progressBadgeCount={activeRuns.length}
         reviewsBadgeCount={reviewCount}
       />
-      {openArtifact ? (
-        <Suspense fallback={null}>
-          <ArtifactWorkbench
-            artifactId={openArtifact.artifactId}
-            {...(openArtifact.revisionId ? { revisionId: openArtifact.revisionId } : {})}
-            onClose={() => setOpenArtifact(null)}
-          />
-        </Suspense>
-      ) : null}
       <div className="u-flex-1 u-flex u-flex-col u-minw-0">
       {/* The APG tablist strip (P4). Tab order = insertion/manual-reorder order, never
           recency-sorted. */}
@@ -647,9 +742,16 @@ export function TabChatDeck({ config, byokStored, onReconfigureBYOK }: {
           onReorder={reorderTab}
           onSetPinned={setPinned}
           onNewTab={newTab}
+          newTabKinds={newTabKinds}
+          onNewTabOfKind={newTabOfKind}
           onToggleRail={() => selectRailTab(activeRailTab === null ? lastRailTabRef.current : null)}
           railOpen={activeRailTab !== null}
-          railBadgeCount={activeRuns.length + reviewCount}
+          railBadgeCount={reviewCount}
+          {...(activeRuns.length > 0 || workbench.artifact ? {
+            onToggleWorkbench: () => (workbench.tab ? workbench.close() : workbench.select(workbench.artifact ? 'artifact' : 'run')),
+            workbenchOpen: workbench.tab !== null,
+            workbenchBadgeCount: activeRuns.length,
+          } : {})}
           renderStatus={renderStatus}
           blockedSids={blockedSids}
           onPopOut={popOutTab}
@@ -706,7 +808,33 @@ export function TabChatDeck({ config, byokStored, onReconfigureBYOK }: {
                 style={{ display: isActive ? undefined : 'none' }}
               >
                 {/* Mount only once visited (lazy-mount), then keep alive. */}
-                {mountedIds.has(tab.sessionId) ? (
+                {mountedIds.has(tab.sessionId) && tab.kind ? (
+                  (() => {
+                    const k = getDeckTabKind(tab.kind);
+                    if (!k) {
+                      // A persisted tab whose kind this build does not ship (excluded by
+                      // the distribution, or the feature was turned off): say so.
+                      return (
+                        <StateCard
+                          announce
+                          icon={<PlusIcon />}
+                          title={t('multiTabKindUnavailable')}
+                          action={<Button variant="secondary" size="sm" onClick={() => handleClose(tab.sessionId)}>{t('multiTabCloseTabNamed', { title: titleFor(tab.sessionId) })}</Button>}
+                        />
+                      );
+                    }
+                    const Kind = k.Component;
+                    return (
+                      <Kind
+                        tabId={tab.sessionId}
+                        active={isActive}
+                        setTitle={(title) => setTitle(tab.sessionId, title)}
+                        close={() => handleClose(tab.sessionId)}
+                        {...(launchContexts[tab.sessionId] ? { launchContext: launchContexts[tab.sessionId] } : {})}
+                      />
+                    );
+                  })()
+                ) : mountedIds.has(tab.sessionId) ? (
                   <TabSession
                     byokStored={byokStored}
                     sessionId={tab.sessionId}
@@ -726,9 +854,11 @@ export function TabChatDeck({ config, byokStored, onReconfigureBYOK }: {
                     {...(scopeAgentId ? { scopeAgentId } : {})}
                     onReconfigureBYOK={onReconfigureBYOK}
                     onWorkflowRuns={handleWorkflowRuns}
+                    onSources={handleSources}
                     onOpenConversation={openConversation}
                     refreshConversations={sessions.refresh}
                     onRequestClose={() => handleClose(tab.sessionId)}
+                    onOpenArtifact={workbench.openArtifact}
                   />
                 ) : null}
               </div>
@@ -737,6 +867,22 @@ export function TabChatDeck({ config, byokStored, onReconfigureBYOK }: {
         )}
       </div>
       </div>
+      <Workbench
+        tab={workbench.tab}
+        onSelectTab={workbench.select}
+        onClose={workbench.close}
+        isMobile={isMobile}
+        sources={activeSources}
+        runProps={{
+          workflowRunMessages: activeRuns,
+          focusedMessageId: focusedRunId,
+          onFocus: setFocusedRunId,
+          onCancel: (id) => (activeSessionId ? (cancelByTabRef.current[activeSessionId]?.(id) ?? Promise.resolve()) : Promise.resolve()),
+        }}
+        artifact={workbench.artifact}
+        onCloseArtifact={() => workbench.closeArtifact(activeRuns.length > 0)}
+      />
     </div>
+    </WorkbenchActionsContext.Provider>
   );
 }

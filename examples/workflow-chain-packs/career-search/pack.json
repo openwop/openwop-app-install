@@ -1,6 +1,6 @@
 {
  "name": "core.openwop.workflows.career-search",
- "version": "1.1.0",
+ "version": "1.1.1",
  "kind": "workflow-chain",
  "description": "Career search + apply (ADR 0543 P2/P3). `career.search` scores and screens a posting; `career.apply` checks a proposed résumé rewrite for fabrication and then STARTS a browser session carrying the apply-grant context. Neither chain submits: the ADR 0541 commit gate owns that decision, so an edited chain cannot route around the grant.",
  "author": "OpenWOP App",
@@ -17,7 +17,7 @@
  "chains": [
   {
    "chainId": "career.search",
-   "version": "1.0.0",
+   "version": "1.0.1",
    "label": "Career: score & screen a role",
    "description": "Scores a job posting against your profile and checks it against any bar the posting STATES. Ends with a verdict you can act on — it never applies to anything, because submitting is bounded by an apply grant you issue separately. Parameters are OPTIONAL with `{}` defaults (ADR 0504): a required whole-value `{{params.X}}` would freeze to undefined when instantiated without params and fail mid-run naming an internal node instead of the parameter.",
    "capabilities": [],
@@ -46,7 +46,7 @@
     "nodes": [
      {
       "id": "score",
-      "typeId": "feature.job-search.nodes.score-fit",
+      "typeId": "feature.job-search.nodes.score-fit@1.0.0",
       "name": "Score fit",
       "position": {
        "x": -160,
@@ -60,7 +60,7 @@
      },
      {
       "id": "eligibility",
-      "typeId": "feature.job-search.nodes.check-eligibility",
+      "typeId": "feature.job-search.nodes.check-eligibility@1.0.0",
       "name": "Check eligibility",
       "position": {
        "x": 120,
@@ -96,7 +96,7 @@
   },
   {
    "chainId": "career.apply",
-   "version": "1.0.0",
+   "version": "1.0.1",
    "label": "Career: prepare & start an application",
    "description": "Checks a proposed résumé rewrite against its source for fabricated numbers, employers and dates, then starts a browser session to fill the application. It does NOT submit — the commit gate consults your apply grant and, without one, stops and asks you first.",
    "capabilities": [
@@ -153,7 +153,7 @@
     "nodes": [
      {
       "id": "guard",
-      "typeId": "feature.job-search.nodes.guard-rewrite",
+      "typeId": "feature.job-search.nodes.guard-rewrite@1.0.0",
       "name": "Guard the rewrite",
       "position": {
        "x": -160,
@@ -168,7 +168,7 @@
      },
      {
       "id": "session",
-      "typeId": "feature.computer-use.nodes.task",
+      "typeId": "feature.computer-use.nodes.task@1.0.0",
       "name": "Start the application session",
       "position": {
        "x": 140,
@@ -214,7 +214,7 @@
   },
   {
    "chainId": "career.campaign",
-   "version": "1.0.0",
+   "version": "1.0.1",
    "label": "Career: run a campaign pass",
    "description": "Runs one pass of your standing job-search campaign: every stored listing is screened, scored and — where a board ships a submit lane and your apply grant allows it — applied to, under the grant's ceiling, hourly pace and your daily cap. Takes no parameters by design: targeting comes from your steering policy, authority from grants you issued, answers from your answer bank. The output is the pass digest — what was applied, parked, and skipped, each with its reason. Registered under its stable id so the career agent's board cards can name it (WF-JS-1 / ADR 0543 D3).",
    "capabilities": [
@@ -230,7 +230,7 @@
     "nodes": [
      {
       "id": "pass",
-      "typeId": "feature.job-search.nodes.run-campaign",
+      "typeId": "feature.job-search.nodes.run-campaign@1.0.0",
       "config": {}
      }
     ],

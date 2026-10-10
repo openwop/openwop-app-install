@@ -279,7 +279,7 @@ args=()
 [ -n "$FILTER" ] && args+=(--filter "$FILTER")
 set +u
 
-SUITE_LOG="$(mktemp -t owp-rc-suite)"
+SUITE_LOG="$(mktemp "${TMPDIR:-/tmp}/owp-rc-suite.XXXXXX")"
 set +e
 OPENWOP_CONFORMANCE_TARGET_URL="$BASE" \
 OPENWOP_API_KEY="$API_KEY" \

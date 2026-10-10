@@ -19,56 +19,62 @@
 import { describe, expect, it } from 'vitest';
 import { __assertTokenQuorumVoteForTests as assertTokenQuorumVote } from '../src/routes/interrupts.js';
 import type { InterruptRecord } from '../src/types.js';
+import { openStorage } from '../src/storage/index.js';
+import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
+
+// ADR 0778 D4(b) — this lane now resolves eligibility through the single
+// resolver (groups, roles, delegations), which reads host-ext rows.
+initHostExtPersistence(await openStorage('memory://'));
 
 const gate = (data: Record<string, unknown>): InterruptRecord =>
   ({ interruptId: 'int-1', runId: 'run-1', nodeId: 'n1', reason: 'approval', status: 'pending', data, token: 'tok-1' } as unknown as InterruptRecord);
 
-describe('ADR 0677 D1 — a non-empty ACL binds on the token lane without a quorum', () => {
-  it('leg 1: a voter NOT on the list is refused 403 — with NO requiredApprovals at all', () => {
+describe('ADR 0677 D1 — a non-empty ACL binds on the token lane without a quorum', async () => {
+  it('leg 1: a voter NOT on the list is refused 403 — with NO requiredApprovals at all', async () => {
     const it_ = gate({ approverRefs: ['urn:conformance:listed-approver'] });
-    expect(() => assertTokenQuorumVote(it_, { voter: 'urn:someone:else' }, true))
-      .toThrowError(/not an eligible approver/i);
+    await expect(assertTokenQuorumVote(it_, { voter: 'urn:someone:else' }, true))
+      .rejects.toThrowError(/not an eligible approver/i);
   });
 
-  it('leg 2: a voter ON the list passes — the ACL admits, it does not merely refuse', () => {
+  it('leg 2: a voter ON the list passes — the ACL admits, it does not merely refuse', async () => {
     const it_ = gate({ approverRefs: ['urn:conformance:listed-approver'] });
-    expect(() => assertTokenQuorumVote(it_, { voter: 'urn:conformance:listed-approver' }, true)).not.toThrow();
+    await expect(assertTokenQuorumVote(it_, { voter: 'urn:conformance:listed-approver' }, true)).resolves.toBeUndefined();
   });
 
-  it('leg 3 (CONFORMANCE GUARD): an EMPTY list is still an open gate — any voter admissible', () => {
+  it('leg 3 (CONFORMANCE GUARD): an EMPTY list is still an open gate — any voter admissible', async () => {
     // `conformance-interrupt-quorum.json` pins `approversList: []`. If this leg ever goes
     // red, the fix has drifted into breaking the `openwop-interrupt-quorum` profile.
     const it_ = gate({ approversList: [] });
-    expect(() => assertTokenQuorumVote(it_, { voter: 'urn:anyone' }, true)).not.toThrow();
-    expect(() => assertTokenQuorumVote(gate({}), { voter: 'urn:anyone' }, true)).not.toThrow();
+    await expect(assertTokenQuorumVote(it_, { voter: 'urn:anyone' }, true)).resolves.toBeUndefined();
+    await expect(assertTokenQuorumVote(gate({}), { voter: 'urn:anyone' }, true)).resolves.toBeUndefined();
   });
 
-  it('leg 4: a list of BLANKS is an open gate, not a refuse-everyone gate', () => {
+  it('leg 4: a list of BLANKS is an open gate, not a refuse-everyone gate', async () => {
     // `approvals.two-stage-sign-off` defaults both approver params to "" and documents
     // "blank = any team member"; chain config freezes params at expansion, so the shipped
     // default really is `approverRefs: [""]`. Treating that as a binding ACL would refuse
     // every member of every tenant using the pack's default instantiation.
-    expect(() => assertTokenQuorumVote(gate({ approverRefs: ['', '  '] }), { voter: 'urn:anyone' }, true)).not.toThrow();
+    await expect(assertTokenQuorumVote(gate({ approverRefs: ['', '  '] }), { voter: 'urn:anyone' }, true)).resolves.toBeUndefined();
   });
 
-  it('leg 5: the legacy `approversList` spelling binds too — not just `approverRefs`', () => {
+  it('leg 5: the legacy `approversList` spelling binds too — not just `approverRefs`', async () => {
     const it_ = gate({ approversList: ['urn:listed'] });
-    expect(() => assertTokenQuorumVote(it_, { voter: 'urn:other' }, true)).toThrowError(/not an eligible approver/i);
+    await expect(assertTokenQuorumVote(it_, { voter: 'urn:other' }, true)).rejects.toThrowError(/not an eligible approver/i);
   });
 
-  it('leg 6: a non-token caller on an ACL gate fails closed', () => {
+  it('leg 6: a non-token caller on an ACL gate fails closed', async () => {
     const it_ = gate({ approverRefs: ['urn:listed'] });
-    expect(() => assertTokenQuorumVote(it_, { voter: 'urn:listed' }, false))
-      .toThrowError(/requires an authenticated approver or a valid interrupt token/i);
+    await expect(assertTokenQuorumVote(it_, { voter: 'urn:listed' }, false))
+      .rejects.toThrowError(/requires an authenticated approver or a valid interrupt token/i);
   });
 
-  it('leg 7: quorum gates are UNCHANGED — the HMAC binding still applies at threshold > 1', () => {
+  it('leg 7: quorum gates are UNCHANGED — the HMAC binding still applies at threshold > 1', async () => {
     // The per-recipient HMAC's rationale is that a SHARED emailed token let one recipient
     // cast ALL listed approvers' votes — a multi-approver concern. ADR 0677 deliberately
     // leaves it scoped to quorum gates; widening it would 403 legitimately-emailed
     // single-approver links. Filed as `ISWF-23`.
     const it_ = gate({ requiredApprovals: 2, approverRefs: ['urn:listed'] });
-    expect(() => assertTokenQuorumVote(it_, { voter: 'urn:listed', voterSig: 'bogus' }, true))
-      .toThrowError(/signed per-approver link/i);
+    await expect(assertTokenQuorumVote(it_, { voter: 'urn:listed', voterSig: 'bogus' }, true))
+      .rejects.toThrowError(/signed per-approver link/i);
   });
 });

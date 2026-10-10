@@ -8,9 +8,12 @@
  * export (ADR 0173) and GitHub publish (ADR 0306), each behind its own toggle —
  * register as `extraRoutes`.
  */
+import type { Request } from 'express';
 import { OpenwopError } from '../../types.js';
+import type { Scope } from '../../host/accessControlService.js';
+import type { User } from '../users/usersService.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
-import { authorizeOrgScope, requireString } from '../featureRoute.js';
+import { authorizeOrgScope, requireFeatureEnabled, requireString } from '../featureRoute.js';
 import { registerCanvasEditorRoutes } from '../canvasEditorRoutes.js';
 import { APP_BUILDER_CANVAS_TYPE } from './componentCatalog.js';
 import { SCREEN_TEMPLATES } from './screenTemplates.js';
@@ -39,6 +42,20 @@ const SYNC_FEATURE = { toggleId: 'code-sync', label: 'Code Sync' };
 
 const log = createLogger('features.app-builder.routes');
 
+/**
+ * ADR 0820 G5 — export, publish and sync act on an app-builder canvas, so they
+ * need the `app-builder` feature (toggle + plan) as well as their own `code-*`
+ * toggle. They used to gate on the `code-*` toggle alone, and those toggles are
+ * in no bundle (two are ON by default), so a tenant whose plan does not include
+ * app-builder could still export or publish an app. `requireFeatureEnabled` is
+ * the route lane's gate: 404 when off, the 403 upgrade lock when the plan
+ * refuses (the same answer the editor routes give).
+ */
+async function codeAuthz(req: Request, codeFeature: { toggleId: string; label: string }, scope: Scope): Promise<{ user: User; orgId: string; tenantId: string }> {
+  await requireFeatureEnabled(req, FEATURE.toggleId, FEATURE.label);
+  return authorizeOrgScope(req, codeFeature, scope);
+}
+
 export function registerAppBuilderRoutes(deps: RouteDeps): void {
   registerExportLineageCleanup();
 
@@ -48,7 +65,7 @@ export function registerAppBuilderRoutes(deps: RouteDeps): void {
   // GitHub HMAC over the exact raw bytes IS the credential; tenant comes from
   // the stored binding. Toggle honesty: a tenant that turned `code-sync` off
   // gets a 404, so a lingering GitHub webhook cannot keep mutating state.
-  deps.app.post('/v1/host/openwop-app/app-builder-sync/webhook/:webhookId', async (req, res, next) => {
+  deps.app.post('/host/openwop-app/app-builder-sync/webhook/:webhookId', async (req, res, next) => {
     try {
       if (!req.rawBody) {
         // Without the exact signed bytes the HMAC cannot be verified — reject,
@@ -59,7 +76,11 @@ export function registerAppBuilderRoutes(deps: RouteDeps): void {
       const binding = await getSyncBindingByWebhookId(req.params.webhookId!);
       if (binding) {
         const assignment = await resolveOne('code-sync', { tenantId: binding.tenantId });
-        if (!assignment || !assignment.enabled) {
+        // ADR 0820 G5 — an inbound sync mutates an app-builder canvas, so the
+        // owner's app-builder access is required too (this is the operator's own
+        // integration, not a visitor lane).
+        const owner = assignment?.enabled ? await resolveOne(FEATURE.toggleId, { tenantId: binding.tenantId }) : null;
+        if (!assignment || !assignment.enabled || !owner?.enabled) {
           res.status(404).json({ outcome: 'unknown_webhook' });
           return;
         }
@@ -80,7 +101,7 @@ export function registerAppBuilderRoutes(deps: RouteDeps): void {
     } catch (err) { next(err); }
   });
   registerCanvasEditorRoutes(deps, {
-    basePath: '/v1/host/openwop-app/app-builder',
+    basePath: '/host/openwop-app/app-builder',
     feature: FEATURE,
     canvasTypeId: APP_BUILDER_CANVAS_TYPE,
     // ADR 0359 Phase 5 — collab-capable (both toggles enforced at the socket).
@@ -93,6 +114,9 @@ export function registerAppBuilderRoutes(deps: RouteDeps): void {
     // ADR 0305 Phase C: closed-world catalog violations reject the write;
     // cross-facet reference issues (mid-edit states) come back as warnings.
     validate: validateAppDoc,
+    // ADR 0835 D3 — an app-builder artifact IS its document, so a run artifact
+    // meets the same closed-world check as a save before it becomes a canvas.
+    validateSeed: validateAppDoc,
     // ADR 0314 — blank app: one empty Home screen (the editor expects ≥1 frame
     // and exactly one `isInitial` home).
     blankState: (name) => ({ name, screens: [{ id: 'home', name: 'Home', isInitial: true, components: [] }] }),
@@ -103,7 +127,7 @@ export function registerAppBuilderRoutes(deps: RouteDeps): void {
       // read is tenant-scoped (CTI-1). Body: { target, format? } (format is always 'zip').
       app.post(`${org}/canvases/:canvasId/export`, async (req, res, next) => {
         try {
-          const { user, tenantId } = await authorizeOrgScope(req, EXPORT_FEATURE, 'workspace:write');
+          const { user, tenantId } = await codeAuthz(req, EXPORT_FEATURE, 'workspace:write');
           const body = (req.body ?? {}) as Record<string, unknown>;
           if (!isExportTarget(body.target)) {
             throw new OpenwopError('validation_error', `\`target\` must be one of: ${EXPORT_TARGETS.join(', ')}.`, 400, { field: 'target' });
@@ -136,7 +160,7 @@ export function registerAppBuilderRoutes(deps: RouteDeps): void {
       // ADR 0348 6c — the canvas's export history (lineage), newest last.
       app.get(`${org}/canvases/:canvasId/exports`, async (req, res, next) => {
         try {
-          const { user, tenantId } = await authorizeOrgScope(req, EXPORT_FEATURE, 'workspace:read');
+          const { user, tenantId } = await codeAuthz(req, EXPORT_FEATURE, 'workspace:read');
           await loadCanvas(tenantId, req.params.canvasId, user.userId); // tenant + existence gate
           res.json({ exports: await listExportLineage(tenantId, req.params.canvasId!) });
         } catch (err) { next(err); }
@@ -147,7 +171,7 @@ export function registerAppBuilderRoutes(deps: RouteDeps): void {
       // consumer nodes); the token stays host-side inside `brokeredFetch`.
       app.post(`${org}/canvases/:canvasId/publish`, async (req, res, next) => {
         try {
-          const { user, orgId, tenantId } = await authorizeOrgScope(req, PUBLISH_FEATURE, 'workspace:write');
+          const { user, orgId, tenantId } = await codeAuthz(req, PUBLISH_FEATURE, 'workspace:write');
           const body = (req.body ?? {}) as Record<string, unknown>;
           if (!isExportTarget(body.target)) {
             throw new OpenwopError('validation_error', `\`target\` must be one of: ${EXPORT_TARGETS.join(', ')}.`, 400, { field: 'target' });
@@ -171,7 +195,7 @@ export function registerAppBuilderRoutes(deps: RouteDeps): void {
       // secret returns exactly once here; reads never include it.
       app.put(`${org}/canvases/:canvasId/sync-binding`, async (req, res, next) => {
         try {
-          const { user, tenantId } = await authorizeOrgScope(req, SYNC_FEATURE, 'host:code-sync:manage');
+          const { user, orgId, tenantId } = await codeAuthz(req, SYNC_FEATURE, 'host:code-sync:manage');
           const body = (req.body ?? {}) as Record<string, unknown>;
           if (!isExportTarget(body.target)) {
             throw new OpenwopError('validation_error', `\`target\` must be one of: ${EXPORT_TARGETS.join(', ')}.`, 400, { field: 'target' });
@@ -183,6 +207,7 @@ export function registerAppBuilderRoutes(deps: RouteDeps): void {
             branch: requireString(body.branch, 'branch'),
             target: body.target,
             boundBy: user.userId,
+            orgId,
           });
           res.status(201).json({ binding: view, webhookSecret });
         } catch (err) { next(err); }
@@ -190,7 +215,7 @@ export function registerAppBuilderRoutes(deps: RouteDeps): void {
 
       app.get(`${org}/canvases/:canvasId/sync-binding`, async (req, res, next) => {
         try {
-          const { user, tenantId } = await authorizeOrgScope(req, SYNC_FEATURE, 'workspace:read');
+          const { user, tenantId } = await codeAuthz(req, SYNC_FEATURE, 'workspace:read');
           await loadCanvas(tenantId, req.params.canvasId, user.userId);
           res.json({ binding: await getSyncBindingView(tenantId, req.params.canvasId!) });
         } catch (err) { next(err); }
@@ -198,7 +223,7 @@ export function registerAppBuilderRoutes(deps: RouteDeps): void {
 
       app.delete(`${org}/canvases/:canvasId/sync-binding`, async (req, res, next) => {
         try {
-          const { user, tenantId } = await authorizeOrgScope(req, SYNC_FEATURE, 'host:code-sync:manage');
+          const { user, tenantId } = await codeAuthz(req, SYNC_FEATURE, 'host:code-sync:manage');
           await loadCanvas(tenantId, req.params.canvasId, user.userId);
           const removed = await deleteSyncBinding(tenantId, req.params.canvasId!);
           if (!removed) throw new OpenwopError('not_found', 'This canvas has no repo binding.', 404);
@@ -211,7 +236,7 @@ export function registerAppBuilderRoutes(deps: RouteDeps): void {
       // binding already authorized WHERE the pushes go.
       app.post(`${org}/canvases/:canvasId/sync`, async (req, res, next) => {
         try {
-          const { user, orgId, tenantId } = await authorizeOrgScope(req, SYNC_FEATURE, 'workspace:write');
+          const { user, orgId, tenantId } = await codeAuthz(req, SYNC_FEATURE, 'workspace:write');
           const canvas = await loadCanvas(tenantId, req.params.canvasId, user.userId);
           const binding = await getSyncBinding(tenantId, req.params.canvasId!);
           if (!binding) {

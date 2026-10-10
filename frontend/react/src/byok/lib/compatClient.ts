@@ -45,8 +45,12 @@ export interface CompatHttpError extends Error { status: number }
 async function asJson<T>(res: Response, ctx: string): Promise<T> {
   if (!res.ok) {
     let detail = '';
-    try { detail = ((await res.json()) as { message?: string })?.message ?? ''; } catch { /* non-JSON */ }
-    throw Object.assign(new Error(detail || `${ctx} returned ${res.status}`), { status: res.status });
+    let body: unknown;
+    try { body = await res.json(); detail = (body as { message?: string })?.message ?? ''; } catch { /* non-JSON */ }
+    // `body` rides along (ADR 0779 D7, grade-ux BYOKUX-H1) so `byokErrorMessage`
+    // can show the server's validation sentence ("baseUrl must be https …")
+    // instead of classifying a 400 as "Something went wrong. Retry."
+    throw Object.assign(new Error(detail || `${ctx} returned ${res.status}`), { status: res.status, ...(body !== undefined ? { body } : {}) });
   }
   return (await res.json()) as T;
 }
@@ -68,5 +72,7 @@ export async function createCompatEndpoint(input: CompatCreateInput): Promise<Co
 /** Delete a compat endpoint (and its stored key). */
 export async function deleteCompatEndpoint(id: string): Promise<void> {
   const res = await fetch(`${BASE}/${encodeURIComponent(id)}`, fetchOpts({ method: 'DELETE', headers: authedHeaders() }));
-  if (!res.ok && res.status !== 204) throw new Error(`deleteCompatEndpoint returned ${res.status}`);
+  // ADR 0779 D7 — carry the status (a `CompatHttpError`) so a 403 reads as the
+  // permission message instead of the raw `… returned 403`.
+  if (!res.ok && res.status !== 204) throw Object.assign(new Error(`deleteCompatEndpoint returned ${res.status}`), { status: res.status });
 }

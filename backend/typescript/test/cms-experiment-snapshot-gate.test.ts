@@ -82,20 +82,20 @@ let n = 0;
 async function ownerOrg(): Promise<{ c: Client; orgId: string }> {
   const tenantId = `org:cmsa11-${Date.now()}-${n++}`;
   const c = client();
-  const login = await c.post('/v1/host/openwop-app/test/login', { email: `cmsa11-${Date.now()}-${n++}@acme.test`, tenantId });
+  const login = await c.post('/host/openwop-app/test/login', { email: `cmsa11-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(login.status, JSON.stringify(login.body)).toBe(201);
-  const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return { c, orgId: org.body.orgId as string };
 }
-const cms = (orgId: string, s = ''): string => `/v1/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${s}`;
+const cms = (orgId: string, s = ''): string => `/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${s}`;
 const exps = (orgId: string, pageId: string, s = ''): string => cms(orgId, `/pages/${encodeURIComponent(pageId)}/experiments${s}`);
 
 const REJECTED = 'REJECTED CONTENT';
 const APPROVED = 'APPROVED CONTENT';
 
 async function pendingFor(c: Client, pageId: string): Promise<any> {
-  const list = await c.get('/v1/host/openwop-app/approvals?status=pending');
+  const list = await c.get('/host/openwop-app/approvals?status=pending');
   expect(list.status).toBe(200);
   return (list.body.items as any[]).find((a) => a.kind === 'content-publish' && a.pageId === pageId);
 }
@@ -118,7 +118,7 @@ async function pageWithRejectedAndApprovedSnapshots(
   expect((await c.post(cms(orgId, `/pages/${pageId}/submit`))).status).toBe(200);
   const first = await pendingFor(c, pageId);
   expect(first, 'submit must queue a content-publish approval').toBeTruthy();
-  const rej = await c.post(`/v1/host/openwop-app/approvals/${first.approvalId}/reject`, { note: 'No.' });
+  const rej = await c.post(`/host/openwop-app/approvals/${first.approvalId}/reject`, { note: 'No.' });
   expect(rej.status, JSON.stringify(rej.body)).toBe(200);
   expect((await c.get(cms(orgId, `/pages/${pageId}`))).body.status).toBe('draft');
 
@@ -127,7 +127,7 @@ async function pageWithRejectedAndApprovedSnapshots(
   expect(patched.status, JSON.stringify(patched.body)).toBe(200);
   expect((await c.post(cms(orgId, `/pages/${pageId}/submit`))).status).toBe(200);
   const second = await pendingFor(c, pageId);
-  const claim = await c.post(`/v1/host/openwop-app/approvals/${second.approvalId}/claim`);
+  const claim = await c.post(`/host/openwop-app/approvals/${second.approvalId}/claim`);
   expect(claim.status, JSON.stringify(claim.body)).toBe(200);
   const live = await c.get(cms(orgId, `/pages/${pageId}`));
   expect(live.body.status).toBe('published');
@@ -285,7 +285,7 @@ describe('CMSA-11 — the controls: what the rule must NOT refuse', () => {
       if (assignWeightedVariant(k, start.body.experimentId, start.body.salt, start.body.variants) === 'candidate') vk = k;
     }
     expect(vk, 'a visitor key must map to the candidate variant').toBeTruthy();
-    const res = await fetch(`${BASE}/v1/host/openwop-app/public/${encodeURIComponent(orgId)}/pages/${encodeURIComponent(slug)}?vk=${vk}`);
+    const res = await fetch(`${BASE}/host/openwop-app/public/${encodeURIComponent(orgId)}/pages/${encodeURIComponent(slug)}?vk=${vk}`);
     const body = await res.json() as any;
     expect(res.status, JSON.stringify(body)).toBe(200);
     expect(body.title).toBe(REJECTED); // content a reviewer refused, live to the public

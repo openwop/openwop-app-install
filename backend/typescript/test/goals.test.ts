@@ -48,7 +48,7 @@ async function api<T = unknown>(path: string, init: RequestInit = {}): Promise<{
 describe('goals — standing-continuation seam (RFC 0097)', () => {
   it('GET /goals seeds a non-vacuous demo active goal', async () => {
     const { status, body } = await api<{ goals: Array<{ id: string; state: string }> }>(
-      '/v1/host/openwop-app/goals?state=active',
+      '/host/openwop-app/goals?state=active',
     );
     expect(status).toBe(200);
     expect(body.goals.length).toBeGreaterThan(0);
@@ -56,7 +56,7 @@ describe('goals — standing-continuation seam (RFC 0097)', () => {
   });
 
   it('create without bounds is rejected 422 (goal-continuation-bounded)', async () => {
-    const res = await api('/v1/host/openwop-app/goals', {
+    const res = await api('/host/openwop-app/goals', {
       method: 'POST',
       body: JSON.stringify({ objective: 'unbounded work', completion: { check: 'host' }, continuation: { mode: 'manual' } }),
     });
@@ -64,7 +64,7 @@ describe('goals — standing-continuation seam (RFC 0097)', () => {
   });
 
   it('create WITH bounds succeeds and is active', async () => {
-    const res = await api<{ id: string; state: string; bounds: unknown }>('/v1/host/openwop-app/goals', {
+    const res = await api<{ id: string; state: string; bounds: unknown }>('/host/openwop-app/goals', {
       method: 'POST',
       body: JSON.stringify({
         objective: 'bounded work',
@@ -78,22 +78,22 @@ describe('goals — standing-continuation seam (RFC 0097)', () => {
   });
 
   it('a client MUST NOT set state: satisfied (POST /goals/{id} → 4xx)', async () => {
-    const list = await api<{ goals: Array<{ id: string }> }>('/v1/host/openwop-app/goals?state=active');
+    const list = await api<{ goals: Array<{ id: string }> }>('/host/openwop-app/goals?state=active');
     const id = list.body.goals[0]!.id;
-    const res = await api(`/v1/host/openwop-app/goals/${id}`, { method: 'POST', body: JSON.stringify({ state: 'satisfied' }) });
+    const res = await api(`/host/openwop-app/goals/${id}`, { method: 'POST', body: JSON.stringify({ state: 'satisfied' }) });
     expect(res.status).toBeGreaterThanOrEqual(400);
     expect(res.status).not.toBe(404); // routed — the leg is non-vacuous
     // Still active — the verdict was refused.
-    const after = await api<{ state: string }>(`/v1/host/openwop-app/goals/${id}`);
+    const after = await api<{ state: string }>(`/host/openwop-app/goals/${id}`);
     expect(after.body.state).toBe('active');
   });
 
   it('client lifecycle: abandon transitions to abandoned (not a judge verdict)', async () => {
-    const created = await api<{ id: string }>('/v1/host/openwop-app/goals', {
+    const created = await api<{ id: string }>('/host/openwop-app/goals', {
       method: 'POST',
       body: JSON.stringify({ objective: 'to abandon', completion: { check: 'verifier' }, continuation: { mode: 'manual' }, bounds: { runTimeoutMs: 1000 } }),
     });
-    const res = await api<{ state: string }>(`/v1/host/openwop-app/goals/${created.body.id}/abandon`, { method: 'POST' });
+    const res = await api<{ state: string }>(`/host/openwop-app/goals/${created.body.id}/abandon`, { method: 'POST' });
     expect(res.status).toBe(200);
     expect(res.body.state).toBe('abandoned');
   });

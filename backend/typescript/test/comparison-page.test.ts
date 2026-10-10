@@ -2,7 +2,7 @@
  * ADR 0485 — the public, host-global "Comparison" CMS page seeded by
  * host/comparisonPage.ts. Drives over HTTP: seeding via the example-data run,
  * then the PUBLIC unauthenticated delivery at
- * /v1/host/openwop-app/public/host-site/pages/compare (the surface the SPA's
+ * /host/openwop-app/public/host-site/pages/compare (the surface the SPA's
  * /p/compare route reads). Mirrors features-page.test.ts.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -31,16 +31,16 @@ interface PublicPage { slug: string; title: string; sections: { type: string; da
 
 describe('comparison page — seeded host-global + publicly delivered', () => {
   it('seeds via the example-data run and is registered on the dashboard', async () => {
-    const status = await admin('GET', '/v1/host/openwop-app/example-data/status');
+    const status = await admin('GET', '/host/openwop-app/example-data/status');
     const steps = (await status.json() as { steps: { id: string }[] }).steps;
     expect(steps.some((s) => s.id === 'comparison-page')).toBe(true);
 
-    const run = await admin('POST', '/v1/host/openwop-app/example-data/run', { steps: ['comparison-page'] });
+    const run = await admin('POST', '/host/openwop-app/example-data/run', { steps: ['comparison-page'] });
     expect(run.status).toBe(200);
   });
 
   it('serves the published comparison page on the PUBLIC (unauthenticated) surface', async () => {
-    const res = await pub('/v1/host/openwop-app/public/host-site/pages/compare');
+    const res = await pub('/host/openwop-app/public/host-site/pages/compare');
     expect(res.status).toBe(200);
     const page = await res.json() as PublicPage;
     expect(page.slug).toBe('compare');
@@ -57,8 +57,8 @@ describe('comparison page — seeded host-global + publicly delivered', () => {
   });
 
   it('re-seeding is idempotent (no duplicate comparison page)', async () => {
-    await admin('POST', '/v1/host/openwop-app/example-data/run', { steps: ['comparison-page'] });
-    const status = await admin('GET', '/v1/host/openwop-app/example-data/status');
+    await admin('POST', '/host/openwop-app/example-data/run', { steps: ['comparison-page'] });
+    const status = await admin('GET', '/host/openwop-app/example-data/status');
     const cmp = (await status.json() as { steps: { id: string; count: number }[] }).steps.find((s) => s.id === 'comparison-page');
     expect(cmp?.count).toBe(1);
   });

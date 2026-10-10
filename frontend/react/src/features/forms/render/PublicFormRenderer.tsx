@@ -20,7 +20,7 @@ import { Notice } from '../../../ui/Notice.js';
 import { Skeleton } from '../../../ui/Skeleton.js';
 import { CheckboxField, SelectField, TextField, TextareaField } from '../../../ui/Field.js';
 import type { FieldError } from '../../../runs/inputSchemaForm.js';
-import { validatePublicField, validatePublicValues, type PublicFormField } from './deriveFields.js';
+import { validatePublicField, validatePublicValues, visibleFields, type PublicFormField } from './deriveFields.js';
 import { useFormEmbed } from './embedContext.js';
 
 interface RenderSchema {
@@ -289,6 +289,11 @@ export function PublicFormRenderer({ formId, context, onSubmitted, renderUnavail
   // canon), not a bare muted line; role=status so SR users hear the wait.
   if (schema === null) return <div className="u-p-2" role="status" aria-label={t('common:loading', { defaultValue: 'Loading…' })}><Skeleton /></div>;
 
+  // ADR 0808 — the fields the visitor can see right now. Everything below —
+  // validation, the summary, the submit payload and the render — reads this,
+  // never `schema.fields`, so a hidden field is never judged, sent or drawn.
+  const shown = visibleFields(schema.fields, values);
+
   const errFor = (key: string): string | undefined => {
     const e = errors.find((x) => x.name === key);
     return e ? t(`runs:${e.key}`, e.values ?? {}) : undefined;
@@ -297,7 +302,7 @@ export function PublicFormRenderer({ formId, context, onSubmitted, renderUnavail
   /** Re-judge ONE field through the same engine submit uses, and splice its
    *  result into the error list (never touching the other fields' errors). */
   const revalidate = (key: string, nextValues: Record<string, string | boolean>): void => {
-    const found = validatePublicField(schema.fields, key, nextValues);
+    const found = validatePublicField(visibleFields(schema.fields, nextValues), key, nextValues);
     setErrors((prev) => [...prev.filter((e) => e.name !== key), ...(found ? [found] : [])]);
   };
 
@@ -322,17 +327,17 @@ export function PublicFormRenderer({ formId, context, onSubmitted, renderUnavail
 
   /** F-G3 — the error summary's ordered problem list, in FIELD order (not the
    *  order the engine happened to emit), each linking to its control. */
-  const summary = schema.fields
+  const summary = shown
     .filter((f) => errors.some((e) => e.name === f.key))
     .map((f) => ({ key: f.key, label: f.label, message: errFor(f.key) ?? '' }));
 
   const submit = async (ev: React.FormEvent): Promise<void> => {
     ev.preventDefault();
-    const found = validatePublicValues(schema.fields, values);
+    const found = validatePublicValues(shown, values);
     setErrors(found);
     // Everything has now been judged, so every field is "touched" — typing a
     // fix clears its error immediately instead of waiting for another submit.
-    setTouched(Object.fromEntries(schema.fields.map((f) => [f.key, true as const])));
+    setTouched(Object.fromEntries(shown.map((f) => [f.key, true as const])));
     if (found.length > 0) {
       // RUX-1 — move focus to the first invalid control so keyboard/SR users
       // land on the problem, not on the submit button. ui/Field stamps
@@ -346,9 +351,11 @@ export function PublicFormRenderer({ formId, context, onSubmitted, renderUnavail
     }
     setState('submitting');
     try {
-      const body: Record<string, unknown> = { values: { ...values, [schema.honeypotField]: honeypot }, clientKey };
+      const kept = Object.fromEntries(shown.filter((f) => f.key in values).map((f) => [f.key, values[f.key]]));
+      const body: Record<string, unknown> = { values: { ...kept, [schema.honeypotField]: honeypot }, clientKey };
       const mergedContext = { ...(embed?.context ?? {}), ...(context ?? {}) };
       if (Object.keys(mergedContext).length > 0) body.context = mergedContext;
+      if (embed?.consentToken) body.consentToken = embed.consentToken; // ADR 0860 D3
       // R2 F5 — the submit API has accepted referrer + UTM attribution since
       // ADR 0226 and no first-party surface ever sent them: the marketing
       // attribution this feature exists to capture was dark end-to-end. Page
@@ -479,7 +486,7 @@ export function PublicFormRenderer({ formId, context, onSubmitted, renderUnavail
           </ul>
         </div>
       ) : null}
-      {schema.fields.map((f) => {
+      {shown.map((f) => {
         const err = errFor(f.key);
         // F-G1 — authored help text, wired by ui/Field through aria-describedby.
         const common = {

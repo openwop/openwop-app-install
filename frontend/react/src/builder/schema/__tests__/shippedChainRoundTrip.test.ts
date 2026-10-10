@@ -41,13 +41,17 @@ const CHAIN_ID = 'commerce.post-purchase-thankyou';
 
 interface PackNode { id: string; typeId: string; config?: Record<string, unknown>; inputs?: Record<string, unknown> }
 
+/** ADR 0766 — shipped chains pin every reference (`typeId@1.2.3`); the host
+ *  registers and persists them BARE, which is the shape this file models. */
+const bare = (typeId: string) => typeId.replace(/@[0-9]+\.[0-9]+\.[0-9]+$/, '');
+
 function loadChainNodes(): PackNode[] {
   const pack = JSON.parse(readFileSync(PACK, 'utf8')) as {
     chains: { chainId: string; dag: { nodes: PackNode[]; edges: { from: string; to: string }[] } }[];
   };
   const chain = pack.chains.find((c) => c.chainId === CHAIN_ID);
   if (!chain) throw new Error(`${CHAIN_ID} not found in ${PACK}`);
-  return chain.dag.nodes;
+  return chain.dag.nodes.map((n) => ({ ...n, typeId: bare(n.typeId) }));
 }
 
 /** The chain as the host would persist it after `expandChain` — node ids are
@@ -62,7 +66,7 @@ function storedDefinition() {
     metadata: { name: 'Post-purchase thank-you' },
     nodes: chain.dag.nodes.map((n) => ({
       nodeId: n.id,
-      typeId: n.typeId,
+      typeId: bare(n.typeId),
       ...(n.config && Object.keys(n.config).length > 0 ? { config: n.config } : {}),
       ...(n.inputs && Object.keys(n.inputs).length > 0 ? { inputs: n.inputs } : {}),
     })),

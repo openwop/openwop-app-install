@@ -83,8 +83,8 @@ describe('D5 — accepting an ambient-work-graph suggestion produces a proposal 
   it('accept → the response carries a proposalId and GET /proposals shows the workflow-chain-pack draft', async () => {
     await enable('users'); await enable('orgs');
     const c = client();
-    await c('POST', '/v1/host/openwop-app/test/login', { email: 'd5-owner@test.dev', tenantId: T });
-    const org = await c('POST', '/v1/host/openwop-app/orgs', { name: 'Acme' });
+    await c('POST', '/host/openwop-app/test/login', { email: 'd5-owner@test.dev', tenantId: T });
+    const org = await c('POST', '/host/openwop-app/orgs', { name: 'Acme' });
     const orgId = org.body.orgId;
 
     // Seed a recurring pattern the human is about to accept.
@@ -97,12 +97,12 @@ describe('D5 — accepting an ambient-work-graph suggestion produces a proposal 
       firstSeenAt: new Date().toISOString(), lastSeenAt: new Date().toISOString(),
     });
 
-    const accept = await c('POST', `/v1/host/openwop-app/work-graph/orgs/${encodeURIComponent(orgId)}/suggestions/${suggestionId}/accept`);
+    const accept = await c('POST', `/host/openwop-app/work-graph/orgs/${encodeURIComponent(orgId)}/suggestions/${suggestionId}/accept`);
     expect(accept.status).toBe(200);
     expect(accept.body.proposalId).toBe(`wg:${suggestionId}`);
     expect(accept.body.draftSeed).toBeTruthy(); // the existing FE lane is untouched
 
-    const proposals = await c('GET', '/v1/host/openwop-app/proposals?kind=workflow-chain-pack');
+    const proposals = await c('GET', '/host/openwop-app/proposals?kind=workflow-chain-pack');
     expect(proposals.status).toBe(200);
     const mine = (proposals.body.proposals as { id: string; kind: string; provenance: { sourceRunIds: string[] } }[]).find((p) => p.id === `wg:${suggestionId}`);
     expect(mine).toBeTruthy();

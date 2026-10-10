@@ -36,7 +36,7 @@ import { composePromptTemplate, type PromptTemplate } from '../host/promptCompos
 import { setSecret } from '../byok/secretResolver.js';
 import { sendError } from '../middleware/errorEnvelope.js';
 
-const SEAM_PATH = '/v1/host/sample/chain/deferred-expand';
+const SEAM_PATH = '/host/sample/chain/deferred-expand';
 const TENANT = 'conformance';
 
 /** Non-sensitive deferred chain: one `topic` param used in a prompt body →

@@ -1,18 +1,19 @@
 {
   "name": "feature.workflow-author.nodes",
-  "version": "1.0.4",
+  "version": "1.0.6",
+  "kind": "node",
   "description": "AI Workflow Author node pack — the meta-workflow building blocks that author OTHER workflows over the ctx.features['workflow-author'] surface. draft (LLM authors a graph from the live node catalog), validate (re-check against the closed-world catalog + registration contract), persist (register the validated WorkflowDefinition). Wired draft→validate→persist they are the workflow-builder brain.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "workflow-author", "meta-workflow", "authoring", "builder"],
-  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "engines": { "openwop": ">=1.0.0 <3.0.0" },
   "nodes": [
     {
       "typeId": "feature.workflow-author.nodes.draft",
       "version": "1.0.1",
       "label": "Workflow Author: Draft",
       "description": "Reads the live node catalog as a closed-world menu and calls the LLM to author a candidate WorkflowDefinition for a natural-language intent, repairing on validation errors up to maxAttempts. Requires ctx.callAI + ctx.features['workflow-author'].",
-      "category": "ai",
+      "category": "integration", "x-paletteCategory": "ai",
       "role": "side-effect",
       "capabilities": [],
       "requiredModelCapabilities": ["structured-output"],

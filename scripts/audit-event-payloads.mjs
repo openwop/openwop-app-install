@@ -216,22 +216,20 @@ const FIXTURE_SEAMS = /routes\/eventLogSeedSeam|conformance\/seams/;
 const FIXTURE_ORIGIN = /^test\//;
 const hostRows = rows.filter((r) => typeof r.origin === 'string' && !FIXTURE_SEAMS.test(r.origin) && !FIXTURE_ORIGIN.test(r.origin));
 // Persisted-seam violations (informational) and WIRE-seam violations (gated).
-// ADR 0726 — two classes of WIRE error are not this host's projection failing:
-//  (a) a bound-kind value whose OPAQUE half is outside the grammar (`r-inline-1`,
-//      `int-gate-19`): a FIXTURE minted it — this host mints UUIDs / ≥32-hex —
-//      and no projection can bind an id the grammar refuses; the sample is a
-//      fixture's spelling flowing through a real emit site;
-//  (b) an `anon:` run: its bound ids stay bare BY DECISION (ADR 0704), so a
-//      pattern error there is the decision, not a defect.
-// Both are reported (informational) and excluded from the gate. Everything else
-// on a bound-kind key — a valid opaque under a real tenant left bare — GATES.
+// ADR 0726 — one class of WIRE error is not this host's projection failing: a
+// bound-kind value whose OPAQUE half is outside the grammar (`r-inline-1`,
+// `int-gate-19`): a FIXTURE minted it — this host mints UUIDs / ≥32-hex — and
+// no projection can bind an id the grammar refuses; the sample is a fixture's
+// spelling flowing through a real emit site. It is reported (informational) and
+// excluded from the gate. Everything else on a bound-kind key — a valid opaque
+// left bare under ANY tenant — GATES. (ADR 0760 removed the second exemption,
+// for `anon:` runs: they are bound now, so a bare anonymous id is a defect.)
 const BOUND_KINDS = new Set(['runId', 'parentRunId', 'sourceRunId', 'childRunId', 'interruptId', 'subscriptionId', 'deliveryId', 'effectId']);
 const OPAQUE_OK = /^[A-Za-z0-9._~-]{16,128}$/;
 const idErrorPath = (e) => /^\/([A-Za-z]+) must match pattern/.exec(e)?.[1];
-function isFixtureOrAnonIdError(row, e) {
+function isFixtureIdError(row, e) {
   const key = idErrorPath(e);
   if (key === undefined || !BOUND_KINDS.has(key)) return false;
-  if (typeof row.tenant === 'string' && row.tenant.startsWith('anon:')) return true;
   const v = row.wire?.[key];
   if (typeof v !== 'string') return false;
   const opaque = v.includes('/') ? v.slice(v.indexOf('/') + 1) : v;
@@ -239,7 +237,7 @@ function isFixtureOrAnonIdError(row, e) {
 }
 for (const r of hostRows) {
   if (r.wireOk !== false || !Array.isArray(r.wireErrors)) continue;
-  const gated = r.wireErrors.filter((e) => !isFixtureOrAnonIdError(r, e));
+  const gated = r.wireErrors.filter((e) => !isFixtureIdError(r, e));
   if (gated.length !== r.wireErrors.length) { r.informationalIdErrors = r.wireErrors.length - gated.length; r.wireErrors = gated; if (gated.length === 0) r.wireOk = true; }
 }
 const informationalIdRows = hostRows.filter((r) => r.informationalIdErrors).length;

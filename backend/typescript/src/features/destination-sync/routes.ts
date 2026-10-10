@@ -34,7 +34,7 @@ async function requireEnabled(req: Request): Promise<void> {
 }
 
 export function registerDestinationSyncRoutes({ app }: RouteDeps): void {
-  const base = '/v1/host/openwop-app/destination-sync/syncs';
+  const base = '/host/openwop-app/destination-sync/syncs';
 
   app.get(base, async (req, res, next) => {
     try { await requireEnabled(req); res.json({ syncs: await listDestinationSyncs(tenantOf(req)) }); } catch (err) { next(err); }

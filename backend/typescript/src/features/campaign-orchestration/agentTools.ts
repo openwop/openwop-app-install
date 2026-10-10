@@ -50,7 +50,7 @@ export const CAMPAIGN_ORCH_RUN_TOOL_ID = 'openwop:campaign-orchestration.run';
 
 /** The named agent this pack ships — the fallback speaker on the inline run turn
  *  when the dispatch scope carries no explicit agent profile. */
-const STRATEGIST_AGENT_ID = 'feature.campaign-orchestration.agents.campaign-strategist';
+const STRATEGIST_AGENT_ID = 'vendor.openwop-app.campaign-orchestration.agents.campaign-strategist';
 const TOGGLE_ID = 'campaign-orchestration';
 
 type ToolResult = { content: string; isError?: boolean };
@@ -68,7 +68,12 @@ async function orchestrationEnabled(tenantId: string, actingUserId: string | und
 
 /** The SAME predicate the Campaign Studio routes enforce (`routes.ts`
  *  `hasOrgScope`) — `resolveEffectiveAccess` on the brief's org. */
-async function hasOrgScope(tenantId: string, subject: string | undefined, orgId: string, scope: Scope): Promise<boolean> {
+// `subject` is REQUIRED. `resolveEffectiveAccess` answers OWNER when no subject is
+// given ("the caller is the tenant's own principal"), so a helper that accepted
+// `undefined` would turn a missing acting user into full access. Every caller
+// already returns early without one; the type now makes a future caller that
+// forgets fail to compile (the KEY-19 shape, ADR 0797).
+async function hasOrgScope(tenantId: string, subject: string, orgId: string, scope: Scope): Promise<boolean> {
   const access = await resolveEffectiveAccess(tenantId, { subject, orgId });
   return access.scopes.includes(scope);
 }
@@ -191,6 +196,7 @@ export async function runOrchestrationRunTool(deps: StartRunDeps, input: Record<
 export function registerCampaignOrchestrationAgentTools(deps: StartRunDeps): void {
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: CAMPAIGN_ORCH_STATUS_TOOL_ID,
       description:
@@ -211,6 +217,7 @@ export function registerCampaignOrchestrationAgentTools(deps: StartRunDeps): voi
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: CAMPAIGN_ORCH_RUN_TOOL_ID,
       description:

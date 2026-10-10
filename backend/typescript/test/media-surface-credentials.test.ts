@@ -16,6 +16,12 @@
  * packs call it. The realized value was nil and the busier door stayed open.
  * This asserts the property across the whole surface rather than one verb, so
  * the next verb added inherits the check instead of the oversight.
+ *
+ * Breaks if either verb's projection carries `serveToken`/`serveUrl`/`storageRef`
+ * or a serve path, or if the serve route stops handing the exact bytes to an
+ * unauthenticated bearer of the token (probes w5g2-sc-*). Case 1 overlaps
+ * media-delete-and-projection's MED2-B2 case (both protected, both kept); this
+ * walker is structural and depth-unbounded.
  */
 import http from 'node:http';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -50,7 +56,7 @@ beforeAll(async () => {
     tenantId: TENANT, orgId: ORG, name: 'shared.png', contentType: 'image/png',
     sizeBytes: stored.sizeBytes, storageRef: stored.storageRef, serveToken: stored.serveToken,
     uploadedBy: 'u-1',
-  } as never);
+  });
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
@@ -104,5 +110,7 @@ describe('MED2-R2 — no recorded surface output carries a byte credential', () 
     const addr = server.address() as { port: number };
     const res = await fetch(`http://127.0.0.1:${addr.port}${mediaStorage.serveUrl(token)}`);
     expect(res.status, 'the serve route is auth-exempt by design (RFC 0055)').toBe(200);
+    expect(res.headers.get('content-type')).toBe('image/png');
+    expect(Buffer.from(await res.arrayBuffer()).equals(Buffer.from(png, 'base64')), 'the token yields the BYTES').toBe(true);
   });
 });

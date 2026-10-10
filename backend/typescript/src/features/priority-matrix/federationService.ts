@@ -28,6 +28,8 @@ import { setSecret, resolveSecret, removeSecret } from '../../byok/secretResolve
 import { registerCredentialRefConsumer } from '../../host/credentialRefRegistry.js';
 import { coalesce, invalidateWhere } from './federationCache.js';
 import type { PortfolioItem } from './priorityMatrixService.js';
+import { OWNED_REF_PREFIXES } from '../../byok/refNamespaces.js';
+import { VENDOR_ROOT } from '../../middleware/protocolVersion.js';
 
 export interface FederatedPeer {
   id: string;
@@ -109,10 +111,10 @@ export function validateBaseUrl(raw: unknown): string {
 // ─── credentials (ADR 0062 — BYOK-enveloped; per-(peer[,user]); env = deprecated) ──
 
 /** Workspace-shared credential ref for a peer (BYOK envelope, KMS-sealed). */
-const peerCredentialRef = (peerId: string): string => `pm-peer:${peerId}`;
+const peerCredentialRef = (peerId: string): string => `${OWNED_REF_PREFIXES.pmPeer}${peerId}`;
 /** Per-user credential ref for a peer — resolving this means the peer authorizes on
  *  THAT user's own token, so the peer slice is filtered to their access (c1). */
-const peerUserCredentialRef = (peerId: string, userId: string): string => `pm-peer:${peerId}:user:${userId}`;
+const peerUserCredentialRef = (peerId: string, userId: string): string => `${OWNED_REF_PREFIXES.pmPeer}${peerId}:user:${userId}`;
 
 /** The deprecated deploy-time env bearer (back-compat fallback only, ADR 0062). */
 function envPeerToken(peer: FederatedPeer): string | undefined {
@@ -312,13 +314,50 @@ const peerCachePrefix = (tenantId: string, peerId: string): string => `${enc(ten
 const peerCacheKey = (tenantId: string, peerId: string, topN: number, identity: string): string =>
   `${peerCachePrefix(tenantId, peerId)}${topN}::${enc(identity)}`;
 
-/** The real SSRF-guarded GET to one peer with a pre-resolved bearer (token already
- *  resolved by {@link cachedPeerFetch}, which also owns the cache key). */
-async function rawPeerGet(peer: FederatedPeer, topN: number, token: string | undefined): Promise<PeerFetchResult> {
+/** One attempt against one peer address. `not-served` means the peer answered
+ *  but does not serve the operation at this address — a `404`, or a `200` that is
+ *  not JSON (a peer behind a static host can answer an unknown path with its SPA
+ *  shell). Only that outcome is retried at the next address; a `401`, a `5xx`, a
+ *  cap breach or a network error is the peer's real answer and is returned. */
+export type PeerAttempt =
+  | { kind: 'ok'; items: PortfolioItem[] }
+  | { kind: 'not-served'; error: string }
+  | { kind: 'error'; error: string };
+
+/**
+ * The addresses a peer's portfolio is read from, in order. A PEER host's
+ * extension API (not a link this host emits), so this host cannot know which
+ * root the peer serves: the RFC 0181 canonical root first, then the `/v1` twin
+ * for a peer that predates it (ADR 0656 class 5). A peer that has retired v1
+ * (ADR 0669) answers the twin `410`, so canonical-first is what keeps
+ * federation alive across either side's cut; the twin leg retires with the
+ * last pre-canonical peer.
+ */
+export function peerPortfolioUrls(baseUrl: string, topN: number): string[] {
+  const base = baseUrl.replace(/\/+$/, '');
+  const tail = `/priority-matrix/portfolio?topN=${encodeURIComponent(String(topN))}`;
+  return [`${base}${VENDOR_ROOT}${tail}`, `${base}/v1${VENDOR_ROOT}${tail}`];
+}
+
+/** Canonical first; the twin only when the canonical address is `not-served`. */
+export async function peerPortfolioGet(
+  baseUrl: string,
+  topN: number,
+  attempt: (url: string) => Promise<PeerAttempt>,
+): Promise<PeerFetchResult> {
+  let notServed = 'not served';
+  for (const url of peerPortfolioUrls(baseUrl, topN)) {
+    const r = await attempt(url);
+    if (r.kind === 'ok') return { ok: true, items: r.items };
+    if (r.kind === 'error') return { ok: false, error: r.error };
+    notServed = r.error;
+  }
+  return { ok: false, error: notServed };
+}
+
+/** The real SSRF-guarded GET to one peer address with a pre-resolved bearer. */
+async function peerGetOnce(url: string, token: string | undefined): Promise<PeerAttempt> {
   try {
-    // A PEER host's extension API (not a link this host emits): the peer may not serve the RFC 0181
-    // canonical root yet, so the call stays on the /v1 twin through the overlap (ADR 0656 class 5).
-    const url = `${peer.baseUrl}/v1/host/openwop-app/priority-matrix/portfolio?topN=${encodeURIComponent(String(topN))}`;
     // ADR 0607 — delivery-time scheme re-check. `peer.baseUrl` rows stored
     // before the registration arm existed still reach here, and this fetch
     // carries the bearer token.
@@ -332,19 +371,29 @@ async function rawPeerGet(peer: FederatedPeer, topN: number, token: string | und
       dispatcher: webhookEgressDispatcher(),
       signal: AbortSignal.timeout(PEER_FETCH_TIMEOUT_MS),
     });
-    if (!res.ok) { await res.body?.cancel().catch(() => undefined); return { ok: false, error: `HTTP ${res.status}` }; }
+    if (res.status === 404) { await res.body?.cancel().catch(() => undefined); return { kind: 'not-served', error: 'HTTP 404' }; }
+    if (!res.ok) { await res.body?.cancel().catch(() => undefined); return { kind: 'error', error: `HTTP ${res.status}` }; }
+    if (!/\bjson\b/i.test(res.headers.get('content-type') ?? '')) {
+      await res.body?.cancel().catch(() => undefined);
+      return { kind: 'not-served', error: 'response is not JSON' };
+    }
     // Fast-path reject on an honest oversized Content-Length, then the real guard:
     // a streaming reader with a hard byte cap (Content-Length is untrusted/optional).
     const declared = Number(res.headers.get('content-length') ?? '0');
-    if (declared > PEER_MAX_BYTES) { await res.body?.cancel().catch(() => undefined); return { ok: false, error: 'response too large' }; }
+    if (declared > PEER_MAX_BYTES) { await res.body?.cancel().catch(() => undefined); return { kind: 'error', error: 'response too large' }; }
     const text = await readCapped(res.body as ReadableStream<Uint8Array> | null, PEER_MAX_BYTES);
-    if (text === null) return { ok: false, error: 'response too large' };
+    if (text === null) return { kind: 'error', error: 'response too large' };
     const body = JSON.parse(text) as { items?: unknown };
     const items = Array.isArray(body.items) ? body.items.map(coerceItem).filter((i): i is PortfolioItem => i !== null) : [];
-    return { ok: true, items };
+    return { kind: 'ok', items };
   } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    return { kind: 'error', error: err instanceof Error ? err.message : String(err) };
   }
+}
+
+/** The real fetch for one peer: {@link peerPortfolioGet} over {@link peerGetOnce}. */
+function rawPeerGet(peer: FederatedPeer, topN: number, token: string | undefined): Promise<PeerFetchResult> {
+  return peerPortfolioGet(peer.baseUrl, topN, (url) => peerGetOnce(url, token));
 }
 
 /**

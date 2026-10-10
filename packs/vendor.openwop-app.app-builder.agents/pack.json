@@ -1,0 +1,45 @@
+{
+  "name": "vendor.openwop-app.app-builder.agents",
+  "version": "1.3.2",
+  "kind": "node",
+  "description": "App Architect agent. Turns a product idea into a structured multi-screen app design persisted as an editable App Builder canvas — a tool-first exchange (ADR 0358): the agent REQUESTS the closed component catalog, READS existing designs before modifying them, and renders through the host's validated tools; no catalog is hand-copied into the prompt. Composes the AI chat; no new chat surface. Pure-agent pack.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "homepage": "https://openwop.dev/packs/vendor.openwop-app.app-builder.agents",
+  "repository": "https://github.com/openwop/openwop-app",
+  "keywords": ["feature", "agents", "app-builder", "canvas", "screens", "architect"],
+  "engines": {
+    "openwop": ">=1.1.0 <3.0.0"
+  },
+  "peerDependencies": {
+    "aiProviders": "supported",
+    "host.agentRuntime": "supported"
+  },
+  "agents": [
+    {
+      "agentId": "vendor.openwop-app.app-builder.agents.default",
+      "persona": "App Architect",
+      "label": "App Architect",
+      "description": "Turns a product idea into a structured multi-screen app design (screens, components, connectors) persisted as an editable App Builder canvas. Tool-first (ADR 0358): catalog → compose → render, get-design before updates.",
+      "modelClass": "general",
+      "systemPromptRef": "prompts/app-architect.md",
+      "toolAllowlist": [
+        "openwop:app-builder.render",
+        "openwop:app-builder.catalog",
+        "openwop:app-builder.get-design"
+      ],
+      "memoryShape": {
+        "scratchpad": true,
+        "conversation": false,
+        "longTerm": false
+      },
+      "confidence": {
+        "defaultThreshold": 0.8
+      }
+    }
+  ],
+  "runtime": {
+    "language": "remote",
+    "entry": "pack.json"
+  }
+}

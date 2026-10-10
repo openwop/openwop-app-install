@@ -9,6 +9,7 @@
  */
 
 import { authedHeaders, config, fetchOpts } from './config.js';
+import { apiErrorFrom } from './errorEnvelope.js';
 
 const base = `${config.baseUrl}/host/openwop-app/workforces`;
 
@@ -67,17 +68,13 @@ export interface WorkforceMetrics {
   weekly: { week: number; runs: number; overrideRate: number; avgCostUsd: number }[];
 }
 
+/** A non-ok response throws an `ApiError` carrying the HTTP `status`, so
+ *  `classifyHttpError` / `loadErrorMessage` map a 403 to the readable
+ *  `common:error_forbidden` instead of surfacing the backend's raw scope text
+ *  (viewer writes are 403, ARUX-12). The message is unchanged: the
+ *  server's own prose, else `<ctx> returned <status>`. */
 async function asJson<T>(res: Response, ctx: string): Promise<T> {
-  if (!res.ok) {
-    let detail = '';
-    try {
-      const body = (await res.json()) as { error?: { message?: string }; message?: string };
-      detail = body?.error?.message ?? body?.message ?? '';
-    } catch {
-      /* non-JSON error body */
-    }
-    throw new Error(detail || `${ctx} returned ${res.status}`);
-  }
+  if (!res.ok) throw await apiErrorFrom(res, `${ctx} returned ${res.status}`);
   return (await res.json()) as T;
 }
 

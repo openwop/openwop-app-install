@@ -87,21 +87,21 @@ describe('widget reference domain — service conventions', () => {
 
 describe('widget reference domain — route conventions', () => {
   it('seed + list round-trip over HTTP (bearer-shared default tenant)', async () => {
-    const seed = await api<{ seeded: boolean; widgets: number }>('/v1/host/openwop-app/widgets/seed', { method: 'POST', body: '{}' });
+    const seed = await api<{ seeded: boolean; widgets: number }>('/host/openwop-app/widgets/seed', { method: 'POST', body: '{}' });
     expect(seed.status).toBe(200);
-    const list = await api<{ widgets: Array<{ widgetId: string; status: string }>; total: number }>('/v1/host/openwop-app/widgets');
+    const list = await api<{ widgets: Array<{ widgetId: string; status: string }>; total: number }>('/host/openwop-app/widgets');
     expect(list.status).toBe(200);
     expect(list.body.total).toBe(2);
   });
 
   it('fail-closed mutation maps to 409 + machine-readable reason', async () => {
-    const list = await api<{ widgets: Array<{ widgetId: string }> }>('/v1/host/openwop-app/widgets');
+    const list = await api<{ widgets: Array<{ widgetId: string }> }>('/host/openwop-app/widgets');
     const id = list.body.widgets[0].widgetId;
 
-    const first = await api<{ status: string }>(`/v1/host/openwop-app/widgets/${id}/archive`, { method: 'POST', body: '{}' });
+    const first = await api<{ status: string }>(`/host/openwop-app/widgets/${id}/archive`, { method: 'POST', body: '{}' });
     expect(first.status).toBe(200);
 
-    const second = await api<unknown>(`/v1/host/openwop-app/widgets/${id}/archive`, { method: 'POST', body: '{}' });
+    const second = await api<unknown>(`/host/openwop-app/widgets/${id}/archive`, { method: 'POST', body: '{}' });
     expect(second.status).toBe(409);
     // H27-b — INVERTED. The machine-readable discriminator was a NEW TOP-LEVEL
     // `reason`, which `error-envelope.schema.json` forbids
@@ -114,7 +114,7 @@ describe('widget reference domain — route conventions', () => {
   });
 
   it('validation failures are 400 with the canonical envelope', async () => {
-    const bad = await api<{ error: string }>('/v1/host/openwop-app/widgets', { method: 'POST', body: '{}' });
+    const bad = await api<{ error: string }>('/host/openwop-app/widgets', { method: 'POST', body: '{}' });
     expect(bad.status).toBe(400);
     expect(bad.body.error).toBe('validation_error');
   });

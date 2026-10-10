@@ -60,6 +60,11 @@ const MUTEX_ALLOWLIST = new Set<string>([
   'features/connections/refreshDaemon.ts',
   'features/cms/publishSweep.ts',
   'features/kicktodo-metrics/verifierSampleDaemon.ts',
+  // ADR 0820 §7 (PR #4582) — the weekly paywall-funnel summary daemon. Its one
+  // claim is `paywall-weekly-summary:sent:<isoWeek>`, a machine-generated ISO-week
+  // key (never caller-supplied), so two instances or a redeploy send at most once a
+  // week. Same hourly-poll shape as `features/crm/snapshotDaemon.ts`.
+  'features/billing/funnelWeeklySummary.ts',
   // NOTE: the Storage interface and the two adapters are deliberately ABSENT.
   // They DECLARE and IMPLEMENT these methods (`async claimOnce(...)`) rather
   // than invoking them on a storage handle, so the call-site predicate does
@@ -101,6 +106,7 @@ const REVIEWED_EXEMPT = new Map<string, string>([
 const LEDGER_ROUTES = new Set<string>([
   'routes/runs.ts',
   'routes/userAgents.ts',
+  'routes/hostEventTestTrigger.ts',
 ]);
 
 function walk(dir: string): string[] {

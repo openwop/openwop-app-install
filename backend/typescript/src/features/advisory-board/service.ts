@@ -14,6 +14,7 @@
 import { randomBytes } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { OpenwopError } from '../../types.js';
+import { resolveOne } from '../../host/featureToggles/service.js';
 import { getRosterEntry } from '../../host/rosterService.js';
 import { parseTurnPolicy } from '../../host/turnPolicy.js';
 import { MAX_MULTI_PARTY_PARTICIPANTS } from '../../host/multiPartyConversation.js';
@@ -147,6 +148,10 @@ export function assertBoardConvenable(board: AdvisoryBoard): void {
  * gate's business, and the board-context leg composes nothing for it anyway.
  */
 export async function boardConveneRefusal(tenantId: string, boardId: string): Promise<string | null> {
+  // G7 — a tenant without the feature is not REFUSED a turn (that would turn a lapse
+  // into an error in core chat); it simply gets no board. The context resolver below
+  // composes nothing for it, so the turn runs as a plain chat.
+  if (!(await boardSeamFeatureOn(tenantId, undefined))) return null;
   const board = await boards.get(`${tenantId}:${boardId}`);
   if (!board) return null;
   try {
@@ -157,6 +162,26 @@ export async function boardConveneRefusal(tenantId: string, boardId: string): Pr
     throw err;
   }
 }
+
+/**
+ * G7 (ADR 0820 §8.1) — the plan gate for the three board SEAMS core chat calls
+ * (`host/boardContextResolver.ts`: convene gate, context resolver, cohort resolver).
+ *
+ * Every advisory-board ROUTE gates on `requireFeatureEnabled`, but the seams are reached
+ * from core's chat routes and turn composer, where no feature id is read: a tenant that
+ * had lost the bundle kept promoting conversations into boardrooms and kept composing
+ * turns grounded in strategy + project context. `resolveOne` = toggle + entitlement
+ * (ADR 0819). Fail-closed: a resolver throw is a refusal.
+ */
+async function boardSeamFeatureOn(tenantId: string, userId: string | undefined): Promise<boolean> {
+  try {
+    return Boolean((await resolveOne(ADVISORY_BOARD_TOGGLE_ID, { tenantId, ...(userId ? { userId } : {}) }))?.enabled);
+  } catch (err) {
+    log.warn('board_seam_gate_unresolved', { tenantId, error: err instanceof Error ? err.message : String(err) });
+    return false;
+  }
+}
+const ADVISORY_BOARD_TOGGLE_ID = 'advisory-board';
 
 /** Validate + normalize the advisor cohort: each must be a roster agent in this
  *  tenant (no cross-tenant ids; no shadow KanbanBoard ids). De-duped, order kept. */
@@ -573,6 +598,8 @@ export async function resolveBoardCohortForCaller(
   boardId: string,
   caller: string | undefined,
 ): Promise<string[] | null> {
+  // G7 — refused ⇒ `null`, which core turns into the same 404 as "no board feature".
+  if (!(await boardSeamFeatureOn(tenantId, caller))) return null;
   const level = await resolveBoardAccess(tenantId, boardId, caller);
   if (level === 'none') return null;
   const board = await boards.get(`${tenantId}:${boardId}`);
@@ -624,6 +651,9 @@ function projectIdsOf(board: AdvisoryBoard): string[] {
  * RBAC-filtered for the convener. Fail-soft: a missing board / no refs ⇒ null.
  */
 export async function resolveBoardStrategyContext(tenantId: string, boardId: string, convener: string | undefined): Promise<BoardContextValue> {
+  // G7 — refused ⇒ an honest EMPTY (not `failed`, not a shortfall): the turn composes
+  // without the paid grounding and no degradation is reported for a plan decision.
+  if (!(await boardSeamFeatureOn(tenantId, convener))) return { block: null, shortfall: 0 };
   const board = await boards.get(`${tenantId}:${boardId}`);
   if (!board) return { block: null, shortfall: 0 };
   const strategyIds = strategyIdsOf(board);
@@ -670,6 +700,47 @@ export async function pruneAdvisorFromBoards(tenantId: string, rosterId: string)
     pruned += 1;
   }
   return pruned;
+}
+
+/**
+ * Re-point every board's live membership from one roster member to another —
+ * `advisors[]` (order kept, no double seat) and the moderator. The inverse of a
+ * prune: used when two roster rows are the SAME advisor and one is being
+ * removed, so the boards that seated the removed row keep the advisor instead of
+ * losing a seat. Returns how many boards changed.
+ */
+export async function repointAdvisorOnBoards(tenantId: string, fromRosterId: string, toRosterId: string): Promise<number> {
+  if (fromRosterId === toRosterId) return 0;
+  let changed = 0;
+  for (const b of await boards.listByPrefix(`${tenantId}:`)) {
+    const isAdvisor = b.advisors.includes(fromRosterId);
+    const isModerator = b.moderatorRosterId === fromRosterId;
+    if (!isAdvisor && !isModerator) continue;
+    const advisors: string[] = [];
+    for (const id of b.advisors) {
+      const next = id === fromRosterId ? toRosterId : id;
+      if (!advisors.includes(next)) advisors.push(next);
+    }
+    await boards.put({
+      ...b,
+      advisors,
+      ...(isModerator ? { moderatorRosterId: toRosterId } : {}),
+      updatedAt: new Date().toISOString(),
+    });
+    changed += 1;
+  }
+  return changed;
+}
+
+/** How many boards seat each roster id (advisor or moderator). */
+export async function boardSeatCounts(tenantId: string): Promise<Map<string, number>> {
+  const counts = new Map<string, number>();
+  for (const b of await boards.listByPrefix(`${tenantId}:`)) {
+    for (const id of new Set([...b.advisors, ...(b.moderatorRosterId ? [b.moderatorRosterId] : [])])) {
+      counts.set(id, (counts.get(id) ?? 0) + 1);
+    }
+  }
+  return counts;
 }
 
 export async function deleteBoard(tenantId: string, userId: string | undefined, boardId: string, allowAdminOverride = false): Promise<void> {

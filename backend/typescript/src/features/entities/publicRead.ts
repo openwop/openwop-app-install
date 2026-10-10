@@ -11,6 +11,7 @@ import { resolveOne } from '../../host/featureToggles/service.js';
 import { listOrgs } from '../../host/accessControlService.js';
 import { getContentLanguageSettings } from '../../host/contentLocales.js';
 import { LOCALE_RE, negotiateLocale } from '../../host/i18n/index.js';
+import { getProject } from '../projects/projectsService.js';
 import {
   getEntity,
   getEntityType,
@@ -64,6 +65,10 @@ async function gatePublicType(tenantId: string, projectId: string | undefined, t
   // `publicRead` were somehow force-set in storage. Defense-in-depth over the
   // `updateEntityType` refusal (lock 1).
   if (!type || type.status !== 'published' || type.publicRead !== true || type.neverPublic) throw notFound();
+  // ADR 0847 D1/D2 (review A6) — a public type inside a project is served only while
+  // that project exists. The project-delete purge removes the namespace; this refuses it
+  // for the window, and for any namespace orphaned before the purge existed.
+  if (type.projectId && !(await getProject(tenantId, type.projectId))) throw notFound();
   return type;
 }
 

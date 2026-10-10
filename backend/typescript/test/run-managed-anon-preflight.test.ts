@@ -66,7 +66,7 @@ function extractCookie(setCookieHeader: string | null): string | null {
 }
 
 async function mintAnonCookie(): Promise<string> {
-  const res = await fetch(`${BASE}/v1/host/openwop-app/workflows`);
+  const res = await fetch(`${BASE}/host/openwop-app/workflows`);
   expect(res.status).toBe(200);
   const cookie = extractCookie(res.headers.get('set-cookie'));
   expect(cookie).toBeTruthy();
@@ -77,7 +77,7 @@ async function registerWorkflow(workflowId: string, nodes: object[], cookie?: st
   const headers: Record<string, string> = { 'content-type': 'application/json' };
   if (cookie) headers.cookie = cookie;
   else headers.authorization = 'Bearer preflight-test-admin';
-  const res = await fetch(`${BASE}/v1/host/openwop-app/workflows`, {
+  const res = await fetch(`${BASE}/host/openwop-app/workflows`, {
     method: 'POST',
     headers,
     body: JSON.stringify({ workflowId, nodes }),
@@ -100,7 +100,7 @@ describe('POST /v1/runs — managed-credentialRef × anon-tenant preflight', () 
       cookie,
     );
 
-    const res = await fetch(`${BASE}/v1/runs`, {
+    const res = await fetch(`${BASE}/runs`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', cookie },
       body: JSON.stringify({ workflowId: 'wf-managed-preflight', inputs: { text: 'hi' } }),
@@ -108,7 +108,7 @@ describe('POST /v1/runs — managed-credentialRef × anon-tenant preflight', () 
 
     expect(res.status).toBe(401);
     const body = (await res.json()) as { error: string; message: string };
-    expect(body.error).toBe('sign_in_required');
+    expect(body.error).toBe('openwop-app.sign_in_required');
     expect(body.message).toMatch(/sign in/i);
   });
 
@@ -120,7 +120,7 @@ describe('POST /v1/runs — managed-credentialRef × anon-tenant preflight', () 
       cookie,
     );
 
-    const res = await fetch(`${BASE}/v1/runs`, {
+    const res = await fetch(`${BASE}/runs`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', cookie },
       body: JSON.stringify({ workflowId: 'wf-non-managed', inputs: { text: 'hello' } }),
@@ -146,7 +146,7 @@ describe('POST /v1/runs — managed-credentialRef × anon-tenant preflight', () 
       cookie,
     );
 
-    const res = await fetch(`${BASE}/v1/runs`, {
+    const res = await fetch(`${BASE}/runs`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', cookie },
       body: JSON.stringify({
@@ -156,7 +156,7 @@ describe('POST /v1/runs — managed-credentialRef × anon-tenant preflight', () 
     });
     expect(res.status).toBe(401);
     const body = (await res.json()) as { error: string; message: string };
-    expect(body.error).toBe('sign_in_required');
+    expect(body.error).toBe('openwop-app.sign_in_required');
     expect(body.message).toMatch(/sign in/i);
   });
 
@@ -175,7 +175,7 @@ describe('POST /v1/runs — managed-credentialRef × anon-tenant preflight', () 
       cookie,
     );
 
-    const res = await fetch(`${BASE}/v1/runs`, {
+    const res = await fetch(`${BASE}/runs`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', cookie },
       body: JSON.stringify({
@@ -201,7 +201,7 @@ describe('POST /v1/runs — managed-credentialRef × anon-tenant preflight', () 
       },
     ]);
 
-    const res = await fetch(`${BASE}/v1/runs`, {
+    const res = await fetch(`${BASE}/runs`, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',

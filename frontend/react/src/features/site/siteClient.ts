@@ -50,7 +50,7 @@ export type PublicPageResult =
  *  the anonymous visitor key — it opts the read into consent-gated experiment
  *  assignment (ADR 0236 D1); omitted ⇒ plain page. An unconfigured org reads as
  *  `notFound` (there is genuinely nothing published). */
-export async function fetchPublicPageResult(orgId: string, slug: string, vk?: string | null): Promise<PublicPageResult> {
+export async function fetchPublicPageResult(orgId: string, slug: string, vk?: string | null, consentToken?: string): Promise<PublicPageResult> {
   if (!orgId) return { status: 'notFound' };
   try {
     const url = `${config.baseUrl}/host/openwop-app/public/${encodeURIComponent(orgId)}/pages/${encodeURIComponent(slug)}${vk ? `?vk=${encodeURIComponent(vk)}` : ''}`;
@@ -58,7 +58,13 @@ export async function fetchPublicPageResult(orgId: string, slug: string, vk?: st
     // so the server's RFC 0103 negotiation (publishing/routes.ts) can localize.
     // `Accept-Language` is CORS-safelisted (no preflight). Gap-analysis fix A1.
     const requestLocale = getRequestLocale();
-    const res = await fetch(url, requestLocale ? { headers: { 'accept-language': requestLocale } } : undefined);
+    // ADR 0860 D3 — the visitor's consent-lane token rides a header (never the
+    // query: a URL lands in request logs), and only beside a `vk`.
+    const headers: Record<string, string> = {
+      ...(requestLocale ? { 'accept-language': requestLocale } : {}),
+      ...(vk && consentToken ? { 'x-openwop-consent-token': consentToken } : {}),
+    };
+    const res = await fetch(url, Object.keys(headers).length > 0 ? { headers } : undefined);
     if (res.status === 404 || res.status === 410) return { status: 'notFound' };
     if (!res.ok) return { status: 'error' };
     const page = (await res.json()) as PublicPage;
@@ -74,7 +80,7 @@ export async function fetchPublicPageResult(orgId: string, slug: string, vk?: st
  *  for "absent" and "failed" (the funnel viewer's own designed unavailable
  *  state) may keep this; surfaces that CLAIM absence must use
  *  `fetchPublicPageResult` instead. */
-export async function fetchPublicPage(orgId: string, slug: string, vk?: string | null): Promise<PublicPage | null> {
-  const r = await fetchPublicPageResult(orgId, slug, vk);
+export async function fetchPublicPage(orgId: string, slug: string, vk?: string | null, consentToken?: string): Promise<PublicPage | null> {
+  const r = await fetchPublicPageResult(orgId, slug, vk, consentToken);
   return r.status === 'ok' ? r.page : null;
 }

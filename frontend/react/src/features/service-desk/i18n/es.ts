@@ -46,10 +46,14 @@ export const messages = {
   sending: "Enviando\u2026",
   emptyTitle: "A\u00fan no hay tickets",
   emptyBody: "Configure la entrada abajo o cree tickets desde WhatsApp, formularios o la API.",
-  intakeUnconfigured: "La entrada no est\u00e1 configurada: los mensajes entrantes de WhatsApp y formularios no se convierten en tickets.",
+  intakeUnconfigured: "La entrada no est\u00e1 configurada: los mensajes entrantes de WhatsApp no se convierten en tickets. Los formularios crean tickets por su cuenta cuando activan \u00abCrear un ticket de soporte\u00bb.",
   intakeEnable: "Registrar la entrada en esta organizaci\u00f3n",
   intakeCheckFailed: "No se pudo comprobar si la recepción entrante está configurada para este espacio de trabajo.",
   intakeRecheck: "Comprobar de nuevo",
   threadStale: "No se pudo cargar la conversación completa: estás viendo el resumen de la cola, que puede omitir mensajes recientes.",
   threadRetry: "Recargar la conversación",
+  // ADR 0768 D5 — the Pocket assistant; its agent reads only orgs the caller can read.
+  pocketTitle: 'Asistente de soporte',
+  pocketScope: 'tickets en las organizaciones que puedes ver',
+  pocketHint: 'Pregunta por tickets o pide un borrador de respuesta. Los borradores esperan aprobación antes de enviarse.',
 };

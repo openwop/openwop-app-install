@@ -81,14 +81,14 @@ describe('review F4 — the HTTP create route is the forgery point, and it IGNOR
       for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
       return { status: res.status, body: await res.json().catch(() => undefined) };
     };
-    const login = await call('POST', '/v1/host/openwop-app/test/login', { email: `forge-${Date.now()}@acme.test`, tenantId: 'org:doc-prov-forge' });
+    const login = await call('POST', '/host/openwop-app/test/login', { email: `forge-${Date.now()}@acme.test`, tenantId: 'org:doc-prov-forge' });
     expect(login.status, JSON.stringify(login.body)).toBe(201);
-    const org = await call('POST', '/v1/host/openwop-app/orgs', { name: 'Forge Inc' });
+    const org = await call('POST', '/host/openwop-app/orgs', { name: 'Forge Inc' });
     expect(org.status, JSON.stringify(org.body)).toBe(201);
     const orgId: string = org.body.orgId;
 
     const validCatalogId = listSeedTemplates()[0]!.catalogId; // a VALID id — the strongest forgery attempt
-    const created = await call('POST', `/v1/host/openwop-app/documents/orgs/${encodeURIComponent(orgId)}/templates`, {
+    const created = await call('POST', `/host/openwop-app/documents/orgs/${encodeURIComponent(orgId)}/templates`, {
       name: 'Forged origin', kind: 'doc', outputFormat: 'markdown',
       promptBody: 'Write about {{x}}.',
       catalogId: validCatalogId,
@@ -97,7 +97,7 @@ describe('review F4 — the HTTP create route is the forgery point, and it IGNOR
     expect(created.body.catalogId, 'the route must IGNORE a client-supplied catalogId — seed origin is stamped only by the seed path').toBeUndefined();
 
     // Persisted row, not just the response projection.
-    const read = await call('GET', `/v1/host/openwop-app/documents/orgs/${encodeURIComponent(orgId)}/templates/${encodeURIComponent(created.body.templateId)}`);
+    const read = await call('GET', `/host/openwop-app/documents/orgs/${encodeURIComponent(orgId)}/templates/${encodeURIComponent(created.body.templateId)}`);
     expect(read.status).toBe(200);
     expect(read.body.catalogId, 'no seed origin on the persisted row either').toBeUndefined();
   });

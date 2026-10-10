@@ -17,7 +17,7 @@ LIST="${OPENWOP_M2_KNOWN_RED:-$ROOT/scripts/conformance-v2-known-red.txt}"
 LOG="${OPENWOP_M2_LOG:-}"
 RUN_RC=""
 if [ -z "$LOG" ]; then
-  LOG="$(mktemp -t owp-m2-lane)"
+  LOG="$(mktemp "${TMPDIR:-/tmp}/owp-m2-lane.XXXXXX")"
   ( cd "$ROOT/backend/typescript" && OPENWOP_TARGET_MAJOR=2 npm run test:conformance ) > "$LOG" 2>&1
   RUN_RC=$?
   echo "  lane log: $LOG (suite exit $RUN_RC)"

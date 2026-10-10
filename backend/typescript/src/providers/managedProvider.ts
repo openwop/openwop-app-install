@@ -17,7 +17,7 @@
  *     can require `user:*`; demo postures may allow `anon:*`.
  *   - Daily token cap: input+output combined, per (tenant, day, provider).
  *     Reset at 00:00 UTC. Configurable via
- *     `OPENWOP_MANAGED_DAILY_TOKEN_CAP` (default 50000).
+ *     `OPENWOP_MANAGED_DAILY_TOKEN_CAP` (default `DEFAULT_MANAGED_DAILY_TOKEN_CAP`).
  *   - Global daily ceiling (optional): input+output combined across ALL
  *     tenants, per (day, provider), via
  *     `OPENWOP_MANAGED_GLOBAL_DAILY_TOKEN_CAP` (unset/0 = disabled).
@@ -26,6 +26,13 @@
  *     (each fresh cookie jar is a fresh anon tenant), so a public demo
  *     SHOULD set the global ceiling. Tracked under the reserved
  *     `managed:global` usage bucket (not a real tenant).
+ *   - ADR 0821 D2 — consumption order: the free daily allowance (per-subject
+ *     cap AND the optional per-tenant ceiling
+ *     `OPENWOP_MANAGED_TENANT_DAILY_TOKEN_CAP`) → the plan's monthly
+ *     `aiCreditsMonthly` → the purchased balance. Only the part of a call past
+ *     the free allowance is drawn (`host/managedCredits.ts`).
+ *     `OPENWOP_BILLING_EXEMPT_TENANTS` are never refused by the free allowance
+ *     and never drawn; the global ceiling still binds them.
  *
  * Result rewriting:
  *   - The returned `provider` / `model` are the user-facing ids, NOT
@@ -50,16 +57,22 @@ import { managedUsageBucket, isReservedUsageBucket, usageBucketMatchersForTenant
 import { registerSubjectEraser } from '../host/subjectErasure.js';
 import type { Storage } from '../storage/storage.js';
 import { managedAnonSignInRequired } from '../host/deployPosture.js';
-import { managedBalanceAvailable, managedBalanceDraw } from '../host/managedBalanceHook.js';
+import { managedBalanceAvailable } from '../host/managedBalanceHook.js';
+import {
+  configureManagedCredits, drawCredits, planAllowanceRemaining, recordFeatureSpend, resolveAttributionFeature,
+} from '../host/managedCredits.js';
+import { isBillingExemptTenant } from '../host/planLimitsSeam.js';
+import { isSinglePrincipalTenant } from '../host/accessControlService.js';
 import { createHash } from 'node:crypto';
 import { listManagedProviderIds } from './catalog.js';
 import { dispatchChat, type ChatMessage, type ContentPart, type ProviderId } from './dispatch.js';
 import { dispatchMiniMaxToolsRound } from './dispatchProviderTools.js';
 import type { ToolDef, ToolUseBlock } from './dispatchAnthropicTools.js';
+import { OWNED_REF_PREFIXES } from '../byok/refNamespaces.js';
 
 const log = createLogger('providers.managed');
 
-export const MANAGED_REF_PREFIX = 'managed:';
+export const MANAGED_REF_PREFIX = OWNED_REF_PREFIXES.managed;
 /** The well-known default managed credential ref (`managed:openwop-free`) — the one
  *  canonical managed provider the host configures. Use this instead of re-deriving the
  *  literal at call sites (the host-side in-service dispatch pattern: cms/translate, KB
@@ -112,6 +125,10 @@ interface ManagedTarget {
   envKeyName: string;
   /** Per-tenant per-day cap (input + output tokens combined). */
   dailyTokenCap: number;
+  /** ADR 0786 D6 — the weight a CACHED prompt token carries in a PREPAID balance
+   *  draw (the provider's cache-read price ÷ its input price). The daily cap keeps
+   *  full weight; only customer money is discounted. */
+  cachedReadWeight: number;
   /** System prompt prepended when the caller didn't supply one. Resolves to
    *  `OPENWOP_MANAGED_SYSTEM_PROMPT` if set, else the brand-neutral fallback. */
   defaultSystemPrompt: string;
@@ -123,9 +140,55 @@ interface ManagedTarget {
  * the process. The hot path runs this once per dispatch — negligible
  * cost vs. an upstream LLM call.
  */
+/** `OPENWOP_MANAGED_CACHED_READ_WEIGHT`, clamped to [0, 1]; a missing or
+ *  malformed value falls back to the target's default. */
+function cachedReadWeightFromEnv(fallback: number): number {
+  const raw = process.env.OPENWOP_MANAGED_CACHED_READ_WEIGHT;
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : fallback;
+}
+
+/**
+ * ADR 0786 D6 — the tokens a managed call draws from a PREPAID balance. ADR 0176
+ * made this a precondition of prepaid going live: a cached prompt token costs the
+ * operator a fraction of an uncached one, so charging it at full weight over-bills
+ * a paying customer. Cross-provider semantics differ (`dispatch.ts`): an
+ * OpenAI-compatible provider's `cached_tokens` is a SUBSET of the prompt tokens,
+ * Anthropic's `cache_read_input_tokens` is DISJOINT from them.
+ */
+export function prepaidDrawTokens(
+  provider: string,
+  usage: { inputTokens: number; outputTokens: number; cachedReadTokens?: number },
+  cachedReadWeight: number,
+): number {
+  const input = Math.max(0, usage.inputTokens);
+  const output = Math.max(0, usage.outputTokens);
+  const cachedRaw = Math.max(0, usage.cachedReadTokens ?? 0);
+  if (provider === 'anthropic') return Math.ceil(input + cachedRaw * cachedReadWeight + output);
+  const cached = Math.min(cachedRaw, input);
+  return Math.ceil(input - cached + cached * cachedReadWeight + output);
+}
+
+/**
+ * ADR 0773 G-10e — the per-tenant daily allowance when the operator sets none.
+ * It was 50,000, which is smaller than ONE Pair Canvas first draft (64–140k
+ * prompt tokens, measured on the managed tier 2026-10-05), so graduating Pair
+ * ON by default would have handed every fresh install a feature whose first use
+ * hits the limit. 150,000 fits the largest measured first draft once a day.
+ *
+ * Kept that small on purpose: since ADR 0821 this is the FREE allowance, spent
+ * before plan credits and paid balance, and it is per acting subject, so every
+ * member of a workspace gets it. An operator who sells credits gives away this
+ * much per member per day. At MiniMax-M3's $0.30/1M input it is at most ~$0.05
+ * per subject per day; on a cookie-per-visitor demo it is per visitor, so the
+ * spend backstop there remains `OPENWOP_MANAGED_GLOBAL_DAILY_TOKEN_CAP`.
+ */
+export const DEFAULT_MANAGED_DAILY_TOKEN_CAP = 150_000;
+
 function getTargets(): Record<string, ManagedTarget> {
   const capRaw = Number(process.env.OPENWOP_MANAGED_DAILY_TOKEN_CAP);
-  const cap = Number.isFinite(capRaw) && capRaw > 0 ? capRaw : 50000;
+  const cap = Number.isFinite(capRaw) && capRaw > 0 ? capRaw : DEFAULT_MANAGED_DAILY_TOKEN_CAP;
   return {
     'openwop-free': {
       provider: 'minimax',
@@ -133,6 +196,9 @@ function getTargets(): Record<string, ManagedTarget> {
       storageRef: `${MANAGED_REF_PREFIX}openwop-free`,
       envKeyName: 'MINIMAX_API_KEY',
       dailyTokenCap: cap,
+      // MiniMax-M3: $0.06 cache read ÷ $0.30 input per 1M = 0.2 (re-measured
+      // 2026-09-29, ADR 0786 D6). Operator-overridable when the model or price moves.
+      cachedReadWeight: cachedReadWeightFromEnv(0.2),
       defaultSystemPrompt: process.env.OPENWOP_MANAGED_SYSTEM_PROMPT ?? FALLBACK_SYSTEM_PROMPT,
     },
   };
@@ -177,6 +243,7 @@ const decryptCache = new Map<string, string>();
 export function configureManagedProvider(input: { storage: Storage; dataDir: string }): void {
   storageRef = input.storage;
   masterKeyPathRef = resolvePath(input.dataDir, '.byok-master-key');
+  configureManagedCredits({ storage: input.storage });
 }
 
 /**
@@ -393,6 +460,16 @@ function globalDailyTokenCap(): number {
   return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0;
 }
 
+/** ADR 0821 D2 (architect #6) — the per-TENANT free daily ceiling, summing every
+ *  subject bucket the tenant owns. The per-subject cap alone scales the free
+ *  allowance with seats (N members ⇒ N× free before plan or packs).
+ *  `OPENWOP_MANAGED_TENANT_DAILY_TOKEN_CAP` unset/0/non-numeric = disabled, which
+ *  is today's behaviour. */
+function tenantDailyTokenCap(): number {
+  const raw = Number(process.env.OPENWOP_MANAGED_TENANT_DAILY_TOKEN_CAP ?? '0');
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0;
+}
+
 export interface ManagedDispatchRequest {
   /** providers.json id, e.g. 'openwop-free'. */
   userFacingProvider: string;
@@ -400,6 +477,11 @@ export interface ManagedDispatchRequest {
   tenantId: string;
   /** ADR 0693 — the ACTING subject, when one exists. See ManagedToolsRoundRequest. */
   actingSubject?: string;
+  /** ADR 0821 D4 — the owning feature of this call (`chat`, `chat-widget`, `cms`, …).
+   *  Absent ⇒ derived from `runId`'s attribution block, else `unattributed`. */
+  featureId?: string;
+  /** ADR 0821 D4 — the workflow run this call serves, for attribution only. */
+  runId?: string;
   messages: readonly ChatMessage[];
   maxTokens?: number;
   onDelta?: (delta: string) => void | Promise<void>;
@@ -432,7 +514,7 @@ async function prepareManagedDispatch(
   tenantId: string,
   reqMessages: readonly ChatMessage[],
   actingSubject?: string,
-): Promise<{ target: ManagedTarget; apiKey: string; messages: readonly ChatMessage[]; date: string }> {
+): Promise<{ target: ManagedTarget; apiKey: string; messages: readonly ChatMessage[]; date: string; meter: ManagedMeter }> {
   const target = getTargets()[userFacingProvider];
   if (!target) throw new ManagedProviderError('managed_unknown', `No managed target configured for provider "${userFacingProvider}".`);
   if (managedAnonSignInRequired() && tenantId.startsWith('anon:')) throw new ManagedProviderError('sign_in_required', 'Sign in to use the free tier.');
@@ -444,12 +526,40 @@ async function prepareManagedDispatch(
   // for a shared workspace it is the acting participant's own allowance.
   const bucket = managedUsageBucket(tenantId, actingSubject);
   const usage = await storageRef.getManagedUsage(bucket, userFacingProvider, date);
-  // ADR 0176 Phase 2 — balance BEFORE cap: a tenant with purchased prepaid credit is not
-  // blocked by the free-tier daily cap (their balance covers usage). Checked via the
-  // dependency-inversion hook so core never imports the billing feature.
-  const prepaid = await managedBalanceAvailable(tenantId);
-  if (prepaid <= 0 && usage.inputTokens + usage.outputTokens >= target.dailyTokenCap) {
-    throw new ManagedProviderError('daily_limit_reached', `Daily limit reached (${target.dailyTokenCap} tokens). Resets at 00:00 UTC.`);
+  // ADR 0821 D2 — the consumption order: free daily allowance → plan monthly
+  // allowance → purchased balance. Step 1 is bounded by BOTH the per-subject cap
+  // (above) AND, when configured, the per-tenant ceiling (architect #6), which
+  // sums every bucket the tenant owns through the SAME matcher teardown uses.
+  const subjectUsed = usage.inputTokens + usage.outputTokens;
+  let freeRemaining = Math.max(0, target.dailyTokenCap - subjectUsed);
+  let tenantCeilingBinds = false;
+  const tenantCap = tenantDailyTokenCap();
+  if (tenantCap > 0) {
+    // A single-principal tenant has no participant buckets: its own row IS the sum.
+    let tenantUsed = subjectUsed;
+    if (!isSinglePrincipalTenant(tenantId)) {
+      const { exact, likePattern, likeEscape } = usageBucketMatchersForTenant(tenantId);
+      const t = await storageRef.sumManagedUsageForTenant(exact, userFacingProvider, date, { pattern: likePattern, escape: likeEscape });
+      tenantUsed = t.inputTokens + t.outputTokens;
+    }
+    const tenantRemaining = Math.max(0, tenantCap - tenantUsed);
+    if (tenantRemaining < freeRemaining) { freeRemaining = tenantRemaining; tenantCeilingBinds = true; }
+  }
+  // ADR 0821 architect #1 — an operator-service tenant (conformance, showcase) is
+  // exempt from LIMITS and CREDITS: never refused by the free allowance and never
+  // drawn. The global ceiling below still binds it (operator backstop), and the
+  // feature paywall is untouched (it never reads this list).
+  const exempt = isBillingExemptTenant(tenantId);
+  if (!exempt && freeRemaining <= 0) {
+    // Free allowance spent ⇒ steps 2–3. Read lazily: a call inside the free
+    // allowance (the common case) costs no allowance or balance read at all.
+    // Both reads go through dependency-inversion seams, so core never imports billing.
+    const payable = (await planAllowanceRemaining(tenantId)) > 0 || (await managedBalanceAvailable(tenantId)) > 0;
+    if (!payable) {
+      throw new ManagedProviderError('daily_limit_reached', tenantCeilingBinds
+        ? `Your workspace's daily free AI allowance is used up (${tenantCap} tokens). Resets at 00:00 UTC.`
+        : `Daily limit reached (${target.dailyTokenCap} tokens). Resets at 00:00 UTC.`);
+    }
   }
   // Global ceiling — the operator's spend backstop across ALL tenants (checked
   // after the per-tenant cap so an over-cap caller gets the actionable message).
@@ -494,7 +604,29 @@ async function prepareManagedDispatch(
     stamped = true;
     return { ...m, content: prependCacheScope(scope, m.content) };
   });
-  return { target, apiKey, messages, date };
+  return { target, apiKey, messages, date, meter: { freeRemaining, exempt } };
+}
+
+/** ADR 0821 D2 — what `prepareManagedDispatch` learned about who pays for the call. */
+interface ManagedMeter {
+  /** Raw tokens still inside the free daily allowance when the call started. */
+  freeRemaining: number;
+  /** An `OPENWOP_BILLING_EXEMPT_TENANTS` tenant: never drawn. */
+  exempt: boolean;
+}
+
+/**
+ * ADR 0821 D2 — the token-equivalents a call charges past the free allowance.
+ * The part of the call that fit inside `freeRemaining` (raw tokens, the cap
+ * rail's unit) is free; the overflow's share of the cache-WEIGHTED draw
+ * (ADR 0786 D6) is charged. Pure.
+ */
+export function chargeableTokens(rawTokens: number, weightedTokens: number, freeRemaining: number): number {
+  if (rawTokens <= 0 || weightedTokens <= 0) return 0;
+  const overflow = Math.max(0, rawTokens - Math.max(0, freeRemaining));
+  if (overflow === 0) return 0;
+  if (overflow >= rawTokens) return weightedTokens;
+  return Math.ceil((weightedTokens * overflow) / rawTokens);
 }
 
 /** MMXC-1 / ADR 0611 — an opaque, stable, secret-free per-tenant cache-scope
@@ -514,19 +646,47 @@ function prependCacheScope(scope: string, content: string | readonly ContentPart
 
 /** Best-effort managed usage increment (per-tenant + reserved global bucket) —
  *  never fails the call on a write error (the safer skew is a free turn). */
-async function recordManagedUsage(tenantId: string, userFacingProvider: string, date: string, inTok: number, outTok: number, actingSubject?: string): Promise<void> {
-  if (!storageRef || (inTok <= 0 && outTok <= 0)) return;
+async function recordManagedUsage(
+  tenantId: string, userFacingProvider: string, date: string, inTok: number, outTok: number, actingSubject: string | undefined,
+  draw: { provider: string; cachedReadTokens?: number; cachedReadWeight: number },
+  meter: ManagedMeter,
+): Promise<number> {
+  if (!storageRef || (inTok <= 0 && outTok <= 0)) return 0;
   try {
     // ADR 0693 — charge the same bucket the cap was read from, or the two
     // disagree and a participant is capped on a total they never accrued.
     await storageRef.incrementManagedUsage(managedUsageBucket(tenantId, actingSubject), userFacingProvider, date, inTok, outTok);
     await storageRef.incrementManagedUsage(GLOBAL_USAGE_TENANT, userFacingProvider, date, inTok, outTok);
-    // ADR 0176 Phase 2 — draw the consumed tokens from the tenant's prepaid balance
-    // first (best-effort; no-op when billing/balance is unwired).
-    await managedBalanceDraw(tenantId, inTok + outTok);
+    if (meter.exempt) return 0;
+    // ADR 0821 D2 (fixes G1) — only the part of the call PAST the free daily
+    // allowance is charged, to the plan's monthly allowance and then the
+    // purchased balance (`drawCredits`). ADR 0786 D6: cached prompt tokens draw
+    // at the target's weight; the cap bucket above still records full weight
+    // (a cost rail should trip early).
+    const weighted = prepaidDrawTokens(draw.provider, { inputTokens: inTok, outputTokens: outTok, ...(draw.cachedReadTokens != null ? { cachedReadTokens: draw.cachedReadTokens } : {}) }, draw.cachedReadWeight);
+    const charge = chargeableTokens(inTok + outTok, weighted, meter.freeRemaining);
+    if (charge <= 0) return 0;
+    const drawn = await drawCredits(tenantId, charge);
+    return drawn.plan + drawn.balance;
   } catch (err) {
     log.warn('failed to increment managed usage', { tenantId, provider: userFacingProvider, error: err instanceof Error ? err.message : String(err) });
+    return 0;
   }
+}
+
+/** ADR 0821 D4 — fold this call into the per-(tenant, day, feature) attribution row.
+ *  AFTER the call and best-effort: `recordFeatureSpend` never throws, and the cap
+ *  row above is untouched (architect #2). */
+async function recordManagedAttribution(
+  req: { tenantId: string; featureId?: string; runId?: string },
+  inTok: number, outTok: number, chargedTokens: number,
+): Promise<void> {
+  if (inTok <= 0 && outTok <= 0) return;
+  const featureId = await resolveAttributionFeature({
+    ...(req.featureId ? { featureId: req.featureId } : {}),
+    ...(req.runId ? { runId: req.runId } : {}),
+  });
+  await recordFeatureSpend({ tenantId: req.tenantId, featureId, inputTokens: inTok, outputTokens: outTok, chargedTokens });
 }
 
 export interface ManagedToolsRoundRequest {
@@ -536,6 +696,11 @@ export interface ManagedToolsRoundRequest {
    *  public chat widget is anonymous by design, so an absent subject is a
    *  permanent legal state that charges the tenant (today's behaviour). */
   actingSubject?: string;
+  /** ADR 0821 D4 — the owning feature of this call (`chat`, `chat-widget`, `cms`, …).
+   *  Absent ⇒ derived from `runId`'s attribution block, else `unattributed`. */
+  featureId?: string;
+  /** ADR 0821 D4 — the workflow run this call serves, for attribution only. */
+  runId?: string;
   messages: readonly ChatMessage[];
   tools: readonly ToolDef[];
   maxTokens?: number;
@@ -575,7 +740,7 @@ function logManagedCache(kind: 'tools-round' | 'chat', tenantId: string, provide
 }
 
 export async function dispatchManagedToolsRound(req: ManagedToolsRoundRequest): Promise<ManagedToolsRoundResult> {
-  const { target, apiKey, messages, date } = await prepareManagedDispatch(req.userFacingProvider, req.tenantId, req.messages, req.actingSubject);
+  const { target, apiKey, messages, date, meter } = await prepareManagedDispatch(req.userFacingProvider, req.tenantId, req.messages, req.actingSubject);
   if (target.provider !== 'minimax') {
     throw new ManagedProviderError('managed_unavailable', 'Tool calling is not available on this managed tier.');
   }
@@ -587,8 +752,10 @@ export async function dispatchManagedToolsRound(req: ManagedToolsRoundRequest): 
     ...(req.maxTokens != null ? { maxTokens: req.maxTokens } : {}),
     ...(req.signal ? { signal: req.signal } : {}),
   });
-  await recordManagedUsage(req.tenantId, req.userFacingProvider, date, round.inputTokens ?? 0, round.outputTokens ?? 0, req.actingSubject);
+  const charged = await recordManagedUsage(req.tenantId, req.userFacingProvider, date, round.inputTokens ?? 0, round.outputTokens ?? 0, req.actingSubject,
+    { provider: target.provider, ...(round.cachedReadTokens != null ? { cachedReadTokens: round.cachedReadTokens } : {}), cachedReadWeight: target.cachedReadWeight }, meter);
   logManagedCache('tools-round', req.tenantId, req.userFacingProvider, round.inputTokens, round.cachedReadTokens);
+  await recordManagedAttribution(req, round.inputTokens ?? 0, round.outputTokens ?? 0, charged);
   return {
     text: round.text,
     toolUses: round.toolUses,
@@ -601,7 +768,7 @@ export async function dispatchManagedToolsRound(req: ManagedToolsRoundRequest): 
 export async function dispatchManagedChat(
   req: ManagedDispatchRequest,
 ): Promise<ManagedDispatchResult> {
-  const { target, apiKey, messages, date } = await prepareManagedDispatch(
+  const { target, apiKey, messages, date, meter } = await prepareManagedDispatch(
     req.userFacingProvider, req.tenantId, req.messages, req.actingSubject,
   );
 
@@ -617,8 +784,10 @@ export async function dispatchManagedChat(
     ...(req.signal ? { signal: req.signal } : {}),
   });
 
-  await recordManagedUsage(req.tenantId, req.userFacingProvider, date, result.usage?.inputTokens ?? 0, result.usage?.outputTokens ?? 0, req.actingSubject);
+  const charged = await recordManagedUsage(req.tenantId, req.userFacingProvider, date, result.usage?.inputTokens ?? 0, result.usage?.outputTokens ?? 0, req.actingSubject,
+    { provider: target.provider, ...(result.usage?.cachedReadTokens != null ? { cachedReadTokens: result.usage.cachedReadTokens } : {}), cachedReadWeight: target.cachedReadWeight }, meter);
   logManagedCache('chat', req.tenantId, req.userFacingProvider, result.usage?.inputTokens, result.usage?.cachedReadTokens);
+  await recordManagedAttribution(req, result.usage?.inputTokens ?? 0, result.usage?.outputTokens ?? 0, charged);
 
   return {
     provider: req.userFacingProvider,

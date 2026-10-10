@@ -22,7 +22,7 @@ import type { BackendFeature } from '../types.js';
 import { ensureNotificationEmitterInstalled } from '../../bootstrap/notifications.js';
 import { configureWebPush } from '../../notifications/webPush.js';
 import { registerNotificationRoutes } from '../../routes/notifications.js';
-import { registerPushSubscriptionRoutes } from '../../routes/pushSubscriptions.js';
+import { registerPushSubscriptionRemovalCascade, registerPushSubscriptionRoutes } from '../../routes/pushSubscriptions.js';
 import { registerNotificationPreferenceRoutes, registerNotificationMutePolicy } from './preferencesRoutes.js';
 import { registerNotificationsAgentTools } from './agentTools.js';
 import { installNotificationSubjectEraser } from '../../host/notificationSubjectErasure.js';
@@ -47,6 +47,8 @@ export const notificationsFeature: BackendFeature = {
     // unconditionally. Anonymous callers are still 401'd by the routes' own auth.
     registerNotificationRoutes(app, { storage });
     registerPushSubscriptionRoutes(app, { storage });
+    // ADR 0816 D3 — leaving a workspace takes your devices there with you.
+    registerPushSubscriptionRemovalCascade(storage);
     registerNotificationPreferenceRoutes(app);
     registerNotificationMutePolicy(); // ADR 0214 D2 — activate the mute enforcement seam
     // ADR 0308 P3 — the `openwop:notifications.notify-me` agent deliverable tool

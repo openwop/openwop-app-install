@@ -7,6 +7,7 @@ import { OpenwopError } from '../../types.js';
 import { CONTACT_STAGES, listContacts } from './contactsService.js';
 import { type CrmSnapshot, getOrCreateDefaultPipeline, getPipeline, listActivities, listCrmSnapshots, listDeals, listStageHistoryForPipeline } from './crmEntitiesService.js';
 import type { PipelineKind } from './entities/pipelines.js';
+import { filterVisibleCrmRecords } from '../../host/crmRecordVisibility.js';
 
 export interface PipelineReport {
   pipelineId: string;
@@ -30,6 +31,10 @@ export interface PipelineReport {
   totals: { openCount: number; wonCount: number; lostCount: number; winRate: number | null };
   aging: Array<{ dealId: string; title: string; stageId: string; daysSinceActivity: number }>;
   snapshots: CrmSnapshot[];
+  /** ADR 0846 D4 — set (and `snapshots` empty) when the viewer is territory-scoped:
+   *  snapshots are org-wide sums a viewer-less daemon wrote, so no per-viewer slice
+   *  of them exists. A renderer says so instead of "no history yet". */
+  snapshotsWithheld?: true;
   conversions: Array<{ fromStageId: string; toStageId: string; count: number }>;
 }
 
@@ -49,7 +54,15 @@ export async function computePipelineReport(tenantId: string, orgId: string, pip
   // rep's report (esp. aging[], which lists dealId/title) never discloses deals
   // outside their territories. A view-all admin (or no viewer) sees the full org.
   const kind: PipelineKind = pipeline.kind ?? 'revenue';
-  const pipelineDeals = await listDeals(tenantId, orgId, { pipelineId: pipeline.pipelineId }, viewerSubject);
+  // ADR 0846 D4 — ONE read of the pipeline's deals, then the same visibility seam
+  // `listDeals` applies. Comparing the two answers "is this viewer actually
+  // narrowed?" from a single snapshot: only then is anything org-wide (snapshots,
+  // other deals' stage history) theirs to withhold. Territories off, view-all, or
+  // a viewer who sees every deal all answer "not scoped" and get the report unchanged.
+  const allPipelineDeals = await listDeals(tenantId, orgId, { pipelineId: pipeline.pipelineId });
+  const pipelineDeals = await filterVisibleCrmRecords({ tenantId, orgId, target: 'deal', callerSubject: viewerSubject, rows: allPipelineDeals, idOf: (d) => d.dealId });
+  const scoped = pipelineDeals.length < allPipelineDeals.length;
+  const visibleDealIds = new Set(pipelineDeals.map((d) => d.dealId));
   const openDeals = pipelineDeals.filter((d) => d.status === 'open');
 
   const perStage = pipeline.stages.map((stage) => {
@@ -105,9 +118,10 @@ export async function computePipelineReport(tenantId: string, orgId: string, pip
     }
   }
 
-  const snapshots = await listCrmSnapshots(tenantId, orgId, pipeline.pipelineId, SNAPSHOT_LOOKBACK);
+  const snapshots = scoped ? [] : await listCrmSnapshots(tenantId, orgId, pipeline.pipelineId, SNAPSHOT_LOOKBACK);
 
-  const history = await listStageHistoryForPipeline(tenantId, orgId, pipeline.pipelineId);
+  const history = (await listStageHistoryForPipeline(tenantId, orgId, pipeline.pipelineId))
+    .filter((row) => !scoped || visibleDealIds.has(row.dealId));
   const conversionsByKey = new Map<string, { fromStageId: string; toStageId: string; count: number }>();
   for (const row of history) {
     if (!row.fromStageId) continue; // the creation row (no move) is not a conversion
@@ -126,6 +140,7 @@ export async function computePipelineReport(tenantId: string, orgId: string, pip
     totals: { openCount: openDeals.length, wonCount, lostCount, winRate },
     aging,
     snapshots,
+    ...(scoped ? { snapshotsWithheld: true as const } : {}),
     conversions: [...conversionsByKey.values()],
   };
 }

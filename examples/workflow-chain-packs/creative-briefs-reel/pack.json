@@ -1,14 +1,14 @@
 {
   "name": "core.openwop.workflows.creative-briefs-reel",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "kind": "workflow-chain",
   "description": "Generate a text-to-video reel from a creative brief (migrated from the deprecated ADR 0411 builtin `openwop-app.creative-briefs-reel`, ADR 0472 Phase 2/4). A single `generate-reel` node — the boundary-clean reel path run through the workflow engine. chainId keeps the original id so the route ignition + replay resolve unchanged; the host registers it chain-backed AND it is a gallery-editable chain.",
   "keywords": ["Creative", "Video"],
-  "engines": { "openwop": ">=1.0.0" },
+  "engines": { "openwop": ">=1.0.0 <3.0.0" },
   "chains": [
     {
       "chainId": "openwop-app.creative-briefs-reel",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "Generate a reel",
       "description": "Turn a creative brief into a text-to-video reel.",
       "parameters": {
@@ -29,7 +29,7 @@
         "nodes": [
           {
             "id": "reel",
-            "typeId": "feature.creative-briefs.nodes.generate-reel",
+            "typeId": "feature.creative-briefs.nodes.generate-reel@1.0.0",
             "name": "Generate reel",
             "position": { "x": 0, "y": 0 },
             "inputs": {

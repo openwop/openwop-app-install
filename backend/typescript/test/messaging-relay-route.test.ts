@@ -13,20 +13,11 @@ const OP = { authorization: 'Bearer dev-token', 'content-type': 'application/jso
 
 let server: http.Server;
 let BASE = '';
-// The self-HTTP bridge captures config.port, so createApp's port MUST equal the
-// listening port. We can't use `listen(0)` here (the OS-assigned port wouldn't
-// match config.port), so grab a guaranteed-free port up front and use it for
-// both. A fresh free port per test also avoids close/re-listen races and stale
-// detached pollers hitting a reused port.
-async function freePort(): Promise<number> {
-  return new Promise((resolve) => {
-    const probe = http.createServer();
-    probe.listen(0, '127.0.0.1', () => {
-      const { port } = probe.address() as AddressInfo;
-      probe.close(() => resolve(port));
-    });
-  });
-}
+// The self-HTTP bridge captures config.port, so bind the REAL listener first
+// and pass its OS-assigned port into createApp. Keep that socket bound while
+// the app builds, then attach the app as its request handler. A closed probe
+// does not reserve a port: a parallel listener can take it during createApp,
+// which caused EADDRINUSE and a hook timeout in the combined D6 gate.
 
 // Fresh in-memory SQLite per test → durable-but-isolated relay state (replaces
 // the old module-Map reset; the gateway is now Storage-backed).
@@ -36,7 +27,15 @@ beforeEach(async () => {
   // The bridge self-polls /v1/runs and the test polls /device/outbound; both
   // share the per-IP (127.0.0.1) sliding window. Disable for the suite.
   process.env.OPENWOP_RATELIMIT_DISABLED = 'true';
-  const port = await freePort();
+  server = http.createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      server.off('error', reject);
+      resolve();
+    });
+  });
+  const { port } = server.address() as AddressInfo;
   const app = await createApp({
     port,
     storageDsn: 'memory://',
@@ -44,8 +43,8 @@ beforeEach(async () => {
     serviceVersion: '0.0.1',
     enableConsoleTracer: false,
   });
-  await new Promise<void>((res) => { server = app.listen(port, res); });
-  BASE = `http://127.0.0.1:${port}/v1/host/openwop-app/messaging`;
+  server.on('request', app);
+  BASE = `http://127.0.0.1:${port}/host/openwop-app/messaging`;
 });
 
 afterEach(async () => { await new Promise<void>((res) => server.close(() => res())); });
@@ -645,10 +644,10 @@ function mockStorage(rules: any[], seedTurns: any[] = [], identities: any[] = []
 }
 
 describe('messaging bridge — routing wiring (unit)', () => {
-  it('passes the rule-resolved workflowId on POST /v1/runs', async () => {
+  it('passes the rule-resolved workflowId on POST /runs', async () => {
     let capturedBody: any;
     const fetchImpl: any = async (url: string, init?: any) => {
-      if (String(url).endsWith('/v1/runs') && init?.method === 'POST') {
+      if (String(url).endsWith('/runs') && init?.method === 'POST') {
         capturedBody = JSON.parse(init.body as string);
         return new Response(JSON.stringify({ runId: 'r-1' }), { status: 201, headers: { 'content-type': 'application/json' } });
       }
@@ -674,7 +673,7 @@ describe('messaging bridge — routing wiring (unit)', () => {
   it('threads prior turns into messages[] (Phase B: chat-style continuity)', async () => {
     let bodies: any[] = [];
     const fetchImpl: any = async (url: string, init?: any) => {
-      if (String(url).endsWith('/v1/runs') && init?.method === 'POST') {
+      if (String(url).endsWith('/runs') && init?.method === 'POST') {
         bodies.push(JSON.parse(init.body as string));
         return new Response(JSON.stringify({ runId: `r-${bodies.length}` }), { status: 201, headers: { 'content-type': 'application/json' } });
       }
@@ -706,7 +705,7 @@ describe('messaging bridge — routing wiring (unit)', () => {
   it('cross-channel identity merges history across linked peers (Phase E)', async () => {
     let postBody: any;
     const fetchImpl: any = async (url: string, init?: any) => {
-      if (String(url).endsWith('/v1/runs') && init?.method === 'POST') {
+      if (String(url).endsWith('/runs') && init?.method === 'POST') {
         postBody = JSON.parse(init.body as string);
         return new Response(JSON.stringify({ runId: 'r-1' }), { status: 201, headers: { 'content-type': 'application/json' } });
       }
@@ -741,16 +740,16 @@ describe('messaging bridge — routing wiring (unit)', () => {
     ]);
   });
 
-  it('rule with agentId dispatches the agent instead of POST /v1/runs (Phase D)', async () => {
+  it('rule with agentId dispatches the agent instead of POST /runs (Phase D)', async () => {
     let runPost: any;
     let dispatchPost: any;
     const fetchImpl: any = async (url: string, init?: any) => {
       const u = String(url);
-      if (u.endsWith('/v1/runs') && init?.method === 'POST') {
+      if (u.endsWith('/runs') && init?.method === 'POST') {
         runPost = JSON.parse(init.body as string);
         return new Response('{}', { status: 201, headers: { 'content-type': 'application/json' } });
       }
-      if (u.includes('/v1/host/openwop-app/agents/') && u.endsWith('/dispatch') && init?.method === 'POST') {
+      if (u.includes('/host/openwop-app/agents/') && u.endsWith('/dispatch') && init?.method === 'POST') {
         dispatchPost = { url: u, body: JSON.parse(init.body as string) };
         return new Response(JSON.stringify({ status: 'completed', result: { text: 'AGENT REPLY' } }), { status: 200, headers: { 'content-type': 'application/json' } });
       }
@@ -821,7 +820,7 @@ describe('messaging bridge — routing wiring (unit)', () => {
   it('falls back to the default workflow when no rule matches (backward-compat)', async () => {
     let capturedBody: any;
     const fetchImpl: any = async (url: string, init?: any) => {
-      if (String(url).endsWith('/v1/runs') && init?.method === 'POST') {
+      if (String(url).endsWith('/runs') && init?.method === 'POST') {
         capturedBody = JSON.parse(init.body as string);
         return new Response(JSON.stringify({ runId: 'r-2' }), { status: 201, headers: { 'content-type': 'application/json' } });
       }

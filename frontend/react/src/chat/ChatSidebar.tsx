@@ -3,6 +3,7 @@
  * input) inside a vertical flex container.
  */
 
+import { attachmentCaps } from './lib/attachmentCaps.js';
 import { Button } from '../ui/Button.js';
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
@@ -12,16 +13,15 @@ import { listOrgs } from '../client/promptLibraryClient.js';
 import { registerPromptCommands } from './promptCommands.js';
 import { ConversationView } from './ConversationView.js';
 import { LeftRail, type LeftRailTab } from './leftRail/LeftRail.js';
-// ADR budget reclaim — the artifact workbench is a modal (renders only when an
-// artifact is opened); lazy-split it + its diff/revision/provenance panels out of the
-// eager chat entry chunk (the PR #804/#808 pattern).
-const ArtifactWorkbench = lazy(() => import('./artifacts/ArtifactWorkbench.js').then((m) => ({ default: m.ArtifactWorkbench })));
+import { Workbench } from './workbench/Workbench.js';
+import { useMobilePaneArbitration, useWorkbench } from './workbench/useWorkbench.js';
 // ADR 0117 Phase 3 — the read-only side-by-side compare view; lazy (zero entry-budget).
 const CompareView = lazy(() => import('./CompareView.js').then((m) => ({ default: m.CompareView })));
 // ADR 0154 — channel-only chrome; lazy so it (and channelsClient's SSE code)
 // stays out of the eager chat entry chunk (only loads when a channel is open).
 const ChannelPresenceBar = lazy(() => import('./conversations/ChannelPresenceBar.js').then((m) => ({ default: m.ChannelPresenceBar })));
 // ADR 0140 follow-on — the right-docked members pane (shared with the deck), lazy.
+import { useRecordDecision } from './decisions/useRecordDecision.js';
 const MembersPane = lazy(() => import('./conversations/MembersPane.js').then((m) => ({ default: m.MembersPane })));
 // ADR 0154 Phase 2 — channel management chrome, lazy (only mounts on demand).
 const ChannelCreateDialog = lazy(() => import('./conversations/ChannelCreateDialog.js').then((m) => ({ default: m.ChannelCreateDialog })));
@@ -29,7 +29,10 @@ const ChannelBrowseDialog = lazy(() => import('./conversations/ChannelBrowseDial
 const ChannelManageDialog = lazy(() => import('./conversations/ChannelManageDialog.js').then((m) => ({ default: m.ChannelManageDialog })));
 // ADR 0192 — channel-only empty state, lazy (entry-budget posture).
 const ChannelEmptyState = lazy(() => import('./conversations/ChannelEmptyState.js').then((m) => ({ default: m.ChannelEmptyState })));
-import { useReviewStatusStore, useReviewCount } from './reviews/reviewStatusStore.js';
+import { useReviewStatusStore, useReviewCount, useReviewCountsByConversation } from './reviews/reviewStatusStore.js';
+import { useRunningConversations } from './conversations/useRunningConversations.js';
+import { collectSources } from './workbench/sources.js';
+import { WorkbenchActionsContext } from './workbench/workbenchActions.js';
 import { DEFAULT_ASSISTANT_ID } from './activeAgents/constants.js';
 import { useScopeToAgent } from './activeAgents/useScopeToAgent.js';
 import { SparklesIcon } from '../ui/icons/index.js';
@@ -212,14 +215,22 @@ export function ChatSidebar({ config, byokStored, onOpenSettings, onRemoveKey, t
     [activeAgents.lineup, t],
   );
   const cadence = useBoardroomCadence({ isSending, errored: error !== null, send, personaOf, emitSystem });
+  // ADR 0768 P2 — Runs moved from the left rail to the right-hand Workbench. A
+  // persisted legacy `progress` rail tab migrates to an open Workbench Run tab.
+  const [initialRailTab] = useState(() => readRailTabFromStorage(tenantId));
   const [activeRailTab, setActiveRailTab] = useState<LeftRailTab | null>(
-    () => readRailTabFromStorage(tenantId),
+    () => (initialRailTab === 'progress' ? null : initialRailTab),
   );
+  const workbench = useWorkbench(tenantId, initialRailTab === 'progress' ? 'run' : null);
+  // ADR 0768 B4 — lets a turn's receipt open this shell's Sources tab.
+  const selectWorkbenchTab = workbench.select; // stable (useCallback in useWorkbench)
+  const workbenchActions = useMemo(() => ({ openSources: () => selectWorkbenchTab('sources') }), [selectWorkbenchTab]);
+  const openWorkbenchRun = workbench.openRun;
   // Track the last non-null tab so the chat-header toggle can reopen
   // the rail to whichever panel the user was last looking at, rather
   // than forcing them through a default tab every time.
   const [lastRailTab, setLastRailTab] = useState<LeftRailTab>(
-    () => readRailTabFromStorage(tenantId) ?? 'conversations',
+    () => (initialRailTab && initialRailTab !== 'progress' ? initialRailTab : 'conversations'),
   );
   const [focusedWorkflowMessageId, setFocusedWorkflowMessageId] = useState<string | null>(() => {
     try { return localStorage.getItem(progressFocusedKey(tenantId)); } catch { return null; }
@@ -282,10 +293,12 @@ export function ChatSidebar({ config, byokStored, onOpenSettings, onRemoveKey, t
   // (ref-counted) so the badge stays current even when the Reviews tab is closed;
   // re-connect on tenant change re-hydrates for the new scope.
   const reviewCount = useReviewCount();
+  const reviewCountsByConversation = useReviewCountsByConversation();
+  // ADR 0776 P2 — closed conversations with a run in flight.
+  const runningConversations = useRunningConversations();
   const connectReviews = useReviewStatusStore((s) => s.connect);
   const disconnectReviews = useReviewStatusStore((s) => s.disconnect);
   const refreshReviews = useReviewStatusStore((s) => s.refresh);
-  const [openArtifact, setOpenArtifact] = useState<{ artifactId: string; revisionId?: string } | null>(null);
   useEffect(() => {
     void connectReviews();
     return () => disconnectReviews();
@@ -302,6 +315,8 @@ export function ChatSidebar({ config, byokStored, onOpenSettings, onRemoveKey, t
   // Workflow_run messages in this session — feed into the panel +
   // run-switcher. Most-recent first so the run-switcher row order
   // mirrors how the user thinks about their dispatch history.
+  // ADR 0768 B4 — the Workbench Sources tab, from messages already held.
+  const conversationSources = useMemo(() => collectSources(session.messages), [session.messages]);
   const workflowRunMessages = useMemo(
     () => session.messages
       .filter((m) => m.role === 'workflow_run')
@@ -354,10 +369,9 @@ export function ChatSidebar({ config, byokStored, onOpenSettings, onRemoveKey, t
       // arrived in a single tick, e.g., hydration race).
       for (const m of workflowRunMessages) seen.add(m.id);
       setFocusedWorkflowMessageId(newRun.id);
-      setActiveRailTab('progress');
-      setLastRailTab('progress');
+      openWorkbenchRun();
     }
-  }, [workflowRunMessages, session.id]);
+  }, [workflowRunMessages, session.id, openWorkbenchRun]);
 
   // Persist rail state on every change so reload restores the user's
   // last view.
@@ -368,6 +382,8 @@ export function ChatSidebar({ config, byokStored, onOpenSettings, onRemoveKey, t
     setActiveRailTab(tab);
     if (tab !== null) setLastRailTab(tab);
   }, []);
+  const closeRail = useCallback(() => setActiveRailTab(null), []);
+  useMobilePaneArbitration(isMobile, activeRailTab !== null, workbench.tab !== null, closeRail, workbench.close);
 
   // ADR 0458 residue — the `?rail=` deep-link, a sibling of `?agent=` above:
   // read ONCE per value, apply only if it names a real rail tab, strip
@@ -379,19 +395,18 @@ export function ChatSidebar({ config, byokStored, onOpenSettings, onRemoveKey, t
     const wanted = searchParams.get('rail');
     if (!wanted || railParamHandled.current === wanted) return;
     railParamHandled.current = wanted;
-    if (wanted === 'conversations' || wanted === 'progress' || wanted === 'reviews') {
-      selectRailTab(wanted);
-    }
+    // `progress` is kept as a deep-link alias for the Workbench Run tab (ADR 0768 P2).
+    if (wanted === 'progress') openWorkbenchRun();
+    else if (wanted === 'conversations' || wanted === 'reviews') selectRailTab(wanted);
     const next = new URLSearchParams(searchParams);
     next.delete('rail');
     setSearchParams(next, { replace: true });
-  }, [searchParams, setSearchParams, selectRailTab]);
+  }, [searchParams, setSearchParams, selectRailTab, openWorkbenchRun]);
 
   const openProgressForRun = useCallback((messageId: string) => {
     setFocusedWorkflowMessageId(messageId);
-    setActiveRailTab('progress');
-    setLastRailTab('progress');
-  }, []);
+    openWorkbenchRun();
+  }, [openWorkbenchRun]);
 
   // Open a persisted conversation: load its messages, then DERIVE the active-
   // agents lineup from its server-side participants (ADR 0043 — so the lineup
@@ -450,8 +465,6 @@ export function ChatSidebar({ config, byokStored, onOpenSettings, onRemoveKey, t
   // (OpenAI Chat Completions + MiniMax don't accept PDF parts) — gate on both
   // vision + provider so the chip warns honestly. Text files (.txt/.md/.json/
   // .csv) inline as text on every provider, so they're never gated.
-  const supportsImageInput = activeModel?.capabilities?.includes('vision') === true;
-  const supportsPdfInput = supportsImageInput && (config.provider === 'anthropic' || config.provider === 'google');
   const supportsWebSearch = activeModel?.webSearch === true;
   // Tool calling is gated to Anthropic in the backend dispatcher
   // (OpenAI / Google have their own wire shapes — see
@@ -467,9 +480,17 @@ export function ChatSidebar({ config, byokStored, onOpenSettings, onRemoveKey, t
   // capability scope) + the per-exchange model switcher, factored into a hook so the
   // standalone sidebar and each multi-tab TabSession render identical modifiers and
   // thread identical send options. `getSubmitExtras` is the `baseSendOptions` below.
-  const { composerModifiers, modelSwitcher, getSubmitExtras } = useComposerModifiers({
+  const approvalContinueRef = useRef<((text: string) => void) | null>(null);
+  const { composerModifiers, modelSwitcher, getSubmitExtras, selectedModel } = useComposerModifiers({
     sessionId: session.id, supportsWebSearch, supportsTools, activeProvider: config.provider,
+    // ADR 0834 D6 — re-read pending tool approvals after each turn; the approvals
+    // dialog's Continue sends through this surface's own submit (bound below).
+    // FW2-UX-1 — the hook re-reads when the turn SETTLES (both are needed for that).
+    messageCount: session.messages.length, isSending, continueRef: approvalContinueRef,
   });
+  // ADR 0768 D2 — judge attachments by the model that will ACTUALLY answer (the
+  // per-message override, else the default).
+  const { supportsImageInput, supportsPdfInput } = attachmentCaps(config.provider, config.model, selectedModel);
 
   // ADR 0054 D6 — the active conversation's owning project (a `project:<id>`
   // Subject), when this is a project group chat; drives the "Convene the team"
@@ -485,6 +506,8 @@ export function ChatSidebar({ config, byokStored, onOpenSettings, onRemoveKey, t
   // ADR 0195 D3b — multi-party surfaces carry public reactions; the PRIVATE
   // feedback thumbs are suppressed there (they stay the 1:1 affordance).
   const isMultiPartyActive = isChannelActive || activeConversation?.type === 'group';
+  // ADR 0853 D2 — "Record as decision" in a project's chat or a bound channel.
+  const recordDecision = useRecordDecision({ sessionId: session.id, projectIdHint: conveneProjectId, isChannel: isChannelActive });
   // ADR 0154 FU-6 — live channel message delivery (debounced reload on each frame).
   useChannelMessageStream(session.id, isChannelActive, refreshNewestMessages); // ADR 0327 P2 slice — incremental merge, not a full session reset per frame
   const [showCreateChannel, setShowCreateChannel] = useState(false);
@@ -643,6 +666,7 @@ export function ChatSidebar({ config, byokStored, onOpenSettings, onRemoveKey, t
       baseSendOptions: getSubmitExtras,
       onAgentActivated: (agentId) => { void sessionsCollection.addParticipant(session.id, `agent:${agentId}`); },
     }, [conveneInterceptor, boardInterceptor]);
+  approvalContinueRef.current = (text: string) => { void onUserSubmit(text); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [send, cancel, reset, emitSystem, config, getSubmitExtras, runWorkflowMention, activeAgents.currentAgentId, activeAgents.activateAgent, agentEntries, session.id, sessionsCollection.addParticipant, conveneInterceptor, boardInterceptor, activeConversation?.type, loadSessionFromBackend, sessionsCollection.markRead, sessionsCollection.refresh, t]);
 
@@ -657,6 +681,7 @@ export function ChatSidebar({ config, byokStored, onOpenSettings, onRemoveKey, t
   const showRoster = isChannelActive ? channelRoster.roster.length > 0 : (session.messages.length > 0 || activeAgents.lineup.length > 1);
 
   return (
+    <WorkbenchActionsContext.Provider value={workbenchActions}>
     <div className="u-flex u-flex-1 u-minh-0 u-border u-radius u-bg-surface u-overflow-hidden u-relative">
       <LeftRail
         activeTab={activeRailTab}
@@ -691,29 +716,16 @@ export function ChatSidebar({ config, byokStored, onOpenSettings, onRemoveKey, t
           // ADR 0192 D7 — mute (notifications prefs owner).
           mutedIds,
           onToggleMute: toggleConversationMute,
-        }}
-        progressProps={{
-          workflowRunMessages,
-          focusedMessageId: focusedWorkflowMessageId,
-          onFocus: (id) => setFocusedWorkflowMessageId(id),
-          onCancel: cancelWorkflowRun,
+          // ADR 0776 — "waiting on you" on ANY conversation, closed ones too, from
+          // the one review inbox (the rail no longer needs the thread loaded).
+          liveStatusFor: (sid: string) => (reviewCountsByConversation.get(sid) ? 'blocked' : runningConversations.has(sid) ? 'running' : null),
         }}
         reviewsProps={{
           onOpenRun: openProgressForRun,
-          onOpenArtifact: (artifactId, revisionId) => setOpenArtifact({ artifactId, ...(revisionId ? { revisionId } : {}) }),
+          onOpenArtifact: (artifactId, revisionId) => workbench.openArtifact({ artifactId, ...(revisionId ? { revisionId } : {}) }),
         }}
-        progressBadgeCount={workflowRunMessages.length}
         reviewsBadgeCount={reviewCount}
       />
-      {openArtifact ? (
-        <Suspense fallback={null}>
-          <ArtifactWorkbench
-            artifactId={openArtifact.artifactId}
-            {...(openArtifact.revisionId ? { revisionId: openArtifact.revisionId } : {})}
-            onClose={() => setOpenArtifact(null)}
-          />
-        </Suspense>
-      ) : null}
       {compareOpen ? (
         <Suspense fallback={null}>
           <CompareView currentSessionId={session.id} onClose={closeCompare} />
@@ -759,7 +771,12 @@ export function ChatSidebar({ config, byokStored, onOpenSettings, onRemoveKey, t
           modelSwitcher={modelSwitcher}
           railOpen={activeRailTab !== null}
           onToggleRail={() => selectRailTab(activeRailTab === null ? lastRailTab : null)}
-          railBadgeCount={workflowRunMessages.length + Math.max(0, activeAgents.lineup.length - 1)}
+          railBadgeCount={Math.max(0, activeAgents.lineup.length - 1)}
+          {...(workflowRunMessages.length > 0 || workbench.artifact ? {
+            onToggleWorkbench: () => (workbench.tab ? workbench.close() : workbench.select(workbench.artifact ? 'artifact' : 'run')),
+            workbenchOpen: workbench.tab !== null,
+            workbenchBadgeCount: workflowRunMessages.length,
+          } : {})}
           membersOpen={membersOpen}
           memberCount={memberCount}
           {...(showRoster ? { onToggleMembers: () => setMembersOpen((o) => !o) } : {})}
@@ -834,17 +851,20 @@ export function ChatSidebar({ config, byokStored, onOpenSettings, onRemoveKey, t
           onCancel={cancel}
           supportsAudioInput={supportsAudioInput}
           supportsImageInput={supportsImageInput}
+          agentEntries={agentEntries}
           supportsPdfInput={supportsPdfInput}
           composerModifiers={composerModifiers}
           onResolveInterrupt={resolveInterrupt}
-          progress={{ focusedMessageId: activeRailTab === 'progress' ? focusedWorkflowMessageId : null, onOpen: openProgressForRun }}
+          progress={{ focusedMessageId: workbench.tab === 'run' ? focusedWorkflowMessageId : null, onOpen: openProgressForRun }}
           onRegenerate={onRegenerate}
           onBranchFrom={(fromSeq) => { void onBranchFrom(fromSeq); }}
           {...(isMultiPartyActive ? { messageActions: channelMessageActions } : { onFeedback: setFeedback })}
+          {...(isMultiPartyActive && recordDecision.onRecord ? { onRecordDecision: recordDecision.onRecord } : {})}
           onReconfigureBYOK={onOpenSettings}
           hasOlderMessages={hasOlderMessages}
           isLoadingEarlier={isLoadingEarlier}
           onLoadEarlier={loadEarlierMessages}
+          onOpenArtifact={workbench.openArtifact}
           footerSlot={(
             <>
               {/* ADR 0311 P2 — approvals that trace back to THIS conversation
@@ -866,6 +886,22 @@ export function ChatSidebar({ config, byokStored, onOpenSettings, onRemoveKey, t
           )}
         />
       </div>
+      <Workbench
+        tab={workbench.tab}
+        onSelectTab={workbench.select}
+        onClose={workbench.close}
+        isMobile={isMobile}
+        sources={conversationSources}
+        runProps={{
+          workflowRunMessages,
+          focusedMessageId: focusedWorkflowMessageId,
+          onFocus: (id) => setFocusedWorkflowMessageId(id),
+          onCancel: cancelWorkflowRun,
+        }}
+        artifact={workbench.artifact}
+        onCloseArtifact={() => workbench.closeArtifact(workflowRunMessages.length > 0)}
+      />
+      {recordDecision.dialog}
       {membersOpen && showRoster ? (
         <Suspense fallback={null}>
           <MembersPane
@@ -889,5 +925,6 @@ export function ChatSidebar({ config, byokStored, onOpenSettings, onRemoveKey, t
         </Suspense>
       ) : null}
     </div>
+    </WorkbenchActionsContext.Provider>
   );
 }

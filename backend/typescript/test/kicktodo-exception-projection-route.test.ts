@@ -26,7 +26,7 @@ let wsTenant: string;
 let editorCookie: string;
 let adminCookie: string;
 
-const EXC = () => `/v1/host/openwop-app/kicktodo/admin/exceptions`;
+const EXC = () => `/host/openwop-app/kicktodo/admin/exceptions`;
 
 const craftCookie = (userId: string, activeTenant: string, personalTenant: string): string => {
   const now = Math.floor(Date.now() / 1000);

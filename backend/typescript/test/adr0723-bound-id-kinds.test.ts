@@ -64,11 +64,9 @@ describe('ADR 0723 — subscriptionId (webhooks)', () => {
     expect(String(r.json.subscriptionId)).toMatch(BOUND);
     return r.json.subscriptionId as string;
   }
-  it('POST /webhooks under major 2 returns a TENANT-BOUND subscriptionId; under major 1 a bare one', async () => {
+  // ADR 0812 P3c-0: the "under major 1 a bare one" half was deleted with major 1.
+  it('POST /webhooks under major 2 returns a TENANT-BOUND subscriptionId', async () => {
     await registerV2();
-    const v1 = await req('POST', '/v1/webhooks', {}, { url: 'https://hooks.example.test/adr0723-v1', events: ['run.completed'] });
-    expect(v1.status).toBe(201);
-    expect(String(v1.json.subscriptionId)).not.toContain('/');
   });
   it('DELETE /webhooks/{~-projected} resolves the bound segment (RFC 0184 §A.1 on a second kind)', async () => {
     const id = await registerV2();
@@ -137,16 +135,13 @@ describe('ADR 0723 — subscriptionId + deliveryId (trigger subscriptions)', () 
       expect(String(d.deliveryId), 'deliveryId is a tenant-bound kind (identity.md §5)').toMatch(BOUND);
       if (d.subscriptionId !== undefined) expect(d.subscriptionId).toBe(id);
     }
-    // Major 1 on the same row: every id bare — the projection is a wire property.
-    const v1 = await req('GET', `/v1/trigger-subscriptions/${id.split('/')[1]}`);
-    expect(v1.status).toBe(200);
-    expect(String(v1.json.subscription.subscriptionId)).not.toContain('/');
-    expect(String(v1.json.deliveries[0].deliveryId)).not.toContain('/');
+    // ADR 0812 P3c-0: the "major 1 on the same row reads every id bare" control
+    // was deleted with major 1.
   });
 });
 
 describe('ADR 0723 — interruptId (events read under major 2)', () => {
-  it('a node.suspended payload written bare is read back with a TENANT-BOUND interruptId on /runs/{id}/events, and bare on /v1', async () => {
+  it('a node.suspended payload written bare is read back with a TENANT-BOUND interruptId on /runs/{id}/events', async () => {
     // An IN-FLIGHT run: `node.suspended` is forward execution, which RFC 0194
     // refuses (at the store) behind a terminal event. `conformance-noop`
     // completes at once; `conformance-cancellable` holds until cancelled.
@@ -162,10 +157,6 @@ describe('ADR 0723 — interruptId (events read under major 2)', () => {
     const ev2 = (v2.json.events as Array<{ type: string; payload: any }>).find((e) => e.type === 'node.suspended');
     expect(ev2, 'the seeded event is on the read').toBeDefined();
     expect(ev2!.payload.interruptId).toBe(`default/${interruptId}`);
-
-    const v1 = await req('GET', `/v1/runs/${bare}/events/poll`);
-    expect(v1.status).toBe(200);
-    const ev1 = (v1.json.events as Array<{ type: string; payload: any }>).find((e) => e.type === 'node.suspended');
-    expect(ev1!.payload.interruptId, 'major 1 is untouched').toBe(interruptId);
+    // ADR 0812 P3c-0: the "bare on /v1" control was deleted with major 1.
   });
 });

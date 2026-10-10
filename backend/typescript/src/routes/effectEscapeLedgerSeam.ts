@@ -65,8 +65,8 @@ const log = createLogger('routes.effect-escape-ledger-seam');
 /** Product (host-namespaced) + spec-canonical (suite-driven) paths — the dual
  *  mount its §20 sibling uses. */
 const SEAM_PATHS = [
-  '/v1/host/openwop-app/replay/effect-escapes',
-  '/v1/host/sample/replay/effect-escapes',
+  '/host/openwop-app/replay/effect-escapes',
+  '/host/sample/replay/effect-escapes',
 ] as const;
 
 function handler(storage: Storage) {

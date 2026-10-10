@@ -70,9 +70,11 @@ import {
   MCP_NAME_HEADER,
   MCP_PROTOCOL_VERSION_HEADER,
   MCP_SUPPORTED_VERSIONS,
+  mcpMinimumRevision,
   versionForMcpProfile,
   type McpProtocolVersion,
 } from './mcpProfile.js';
+import { recordNegotiationDecided, type NegotiationReason, type NegotiationRecorder } from './negotiationDecided.js';
 import { mcpAuditTarget, recordMcpAudit, type McpAuditOutcome, type McpAuditReason } from './mcpAudit.js';
 import { readMcpCache, writeMcpCache, type McpCacheScopeKey } from './mcpClientCache.js';
 import { childOf, traceFields, traceHeaders, type TraceContext } from './traceContext.js';
@@ -85,6 +87,7 @@ import { resolveOperatorMcpCredential } from './mcpOperatorServer.js';
 import { webhookEgressDispatcher, webhookPrivateEgressAllowedFor } from './webhookEgressGuard.js';
 import { stampConnectionUse } from './connectionInjection.js';
 import { recordAuthorityAction } from './authorityContext.js';
+import { defangPeerFence } from './untrustedContent.js';
 
 const log = createLogger('connections.mcp');
 
@@ -214,6 +217,20 @@ export interface McpClientDeps {
    * production path, which is exactly what §23's non-vacuity clause requires.
    */
   directEndpoint?: { url: string; bearer?: string };
+  /**
+   * ADR 0858 P4 — writes `negotiation.decided` onto the run log of the run this
+   * client serves (`interop.md` §"The audit event"). The executor supplies it;
+   * the §23 seam supplies the run it plants. Absent ⇒ a runless caller, whose
+   * negotiations have no run log to land on.
+   */
+  onNegotiationDecided?: NegotiationRecorder;
+  /**
+   * ADR 0858 P4 — `interop.md` §Authentication: "an unauthenticated exchange
+   * MUST NOT lower the negotiated version below `preferredVersion`". Production
+   * calls run under the run's Subject, so the default is authenticated; only the
+   * §23 seam's `authenticated: false` sets this false.
+   */
+  authenticated?: boolean;
 }
 
 /** Carries a stable `code` so a failed MCP call surfaces a typed node error. */
@@ -226,7 +243,10 @@ export class McpError extends Error {
      *  without the caller parsing a foreign protocol's error body. */
     public readonly details?: Record<string, unknown>,
   ) {
-    super(message);
+    // ADR 0788 (grade-code MCPCD-10) — a peer's `error.message` becomes this
+    // message and reaches the run (a node failure an agent reads). Defanged at the
+    // ONE place every McpError is built, so no call site can forget it.
+    super(defangPeerFence(message));
     this.name = 'McpError';
   }
 }
@@ -477,6 +497,9 @@ export function makeMcpClient(deps: McpClientDeps): {
     opts?: { durationMs?: number; pollIntervalMs?: number; maxEvents?: number },
   ): Promise<void>;
 } {
+  /** ADR 0858 P4 — `origin revision` pairs whose acceptance this client already
+   *  recorded, so one node's calls write one `negotiation.decided`, not N. */
+  const acceptedRecorded = new Set<string>();
   /** What this client declares it can do, on every request (§B). */
   function clientCapabilities(): Record<string, unknown> {
     const declared = { ...(deps.clientCapabilities ?? {}) };
@@ -882,15 +905,43 @@ export function makeMcpClient(deps: McpClientDeps): {
   ): Promise<{ body: JsonRpcResult; revision: McpProtocolVersion }> {
     const startedAtMs = Date.now();
     const origin = originOf(target.url);
+    // ADR 0858 P4 — every outcome of this, the ONE place the client decides a
+    // revision, emits `negotiation.decided`. An accepted revision is recorded
+    // once per origin per client (one node's calls), not once per request.
+    const floor = mcpMinimumRevision();
+    const decided = (outcome: 'accepted' | 'refused', reason: NegotiationReason, version?: string): Promise<void> => {
+      if (outcome === 'accepted') {
+        const key = `${origin} ${version ?? ''}`;
+        if (acceptedRecorded.has(key)) return Promise.resolve();
+        acceptedRecorded.add(key);
+      }
+      return recordNegotiationDecided(deps.onNegotiationDecided, {
+        protocol: 'mcp',
+        outcome,
+        reason,
+        floor,
+        peerUrl: target.url,
+        ...(version !== undefined ? { version } : {}),
+      });
+    };
     // ADR 0553 P3 — a manifest pin OVERRIDES a remembered negotiation as well as
     // the preferred default. It has to: `negotiated` is process-global and keyed
     // by origin, so without this a downgrade agreed for an UNPINNED connector
     // pointing at the same host would silently become the opening revision for
     // the pinned one. Two connectors, one origin, one map — the pin is the only
     // thing that distinguishes them.
-    const opening = target.pinnedRevision ?? negotiated.get(origin) ?? advertisedMcpProtocolVersion();
+    //
+    // ADR 0858 P4 — an UNAUTHENTICATED exchange opens at `preferredVersion`
+    // regardless of a remembered downgrade: it may not inherit a lower revision
+    // an authenticated exchange agreed (`interop.md` §Authentication).
+    const opening = target.pinnedRevision
+      ?? (deps.authenticated === false ? undefined : negotiated.get(origin))
+      ?? advertisedMcpProtocolVersion();
     let body = await wireCall(target, opening, method, params, timeoutMs);
-    if (body.error?.code !== MCP_ERR_UNSUPPORTED_VERSION) return { body, revision: opening };
+    if (body.error?.code !== MCP_ERR_UNSUPPORTED_VERSION) {
+      await decided('accepted', 'ok', opening);
+      return { body, revision: opening };
+    }
 
     const peerSupports = Array.isArray(body.error.data?.supported)
       ? (body.error.data?.supported as unknown[]).filter((v): v is string => typeof v === 'string')
@@ -910,6 +961,7 @@ export function makeMcpClient(deps: McpClientDeps): {
     if (target.pinnedRevision !== undefined) {
       log.info('mcp_pinned_downgrade_refused', { origin, pinned: target.pinnedRevision, peerSupports });
       await audit(method, target.serverId, 'downgrade_refused', 'pinned_profile_not_offered', startedAtMs);
+      await decided('refused', 'unsupported');
       throw new McpError('interop_version_unsupported', `peer does not offer the revision '${target.serverId}' is pinned to`, {
         protocol: 'mcp',
         requested: target.pinnedRevision,
@@ -920,7 +972,22 @@ export function makeMcpClient(deps: McpClientDeps): {
     const selected = MCP_SUPPORTED_VERSIONS.find((v) => peerSupports.includes(v));
     if (!selected || selected === opening) {
       await audit(method, target.serverId, 'version_refused', 'unsupported_revision', startedAtMs);
+      // `interop.md` §"The floor": a peer offering only revisions under it.
+      await decided('refused', peerSupports.some((v) => v < floor) && !selected ? 'below-floor' : 'unsupported');
       throw new McpError('interop_version_unsupported', `peer does not support any revision this host serves`, {
+        protocol: 'mcp',
+        requested: opening,
+        supported: peerSupports,
+      });
+    }
+    if (deps.authenticated === false && selected !== advertisedMcpProtocolVersion()) {
+      // ADR 0858 P4 — `interop.md` §Authentication: an unauthenticated exchange
+      // MUST NOT lower the revision below `preferredVersion`. Fail closed; never
+      // a quiet retry at the lower revision.
+      log.info('mcp_unauthenticated_downgrade_refused', { origin, from: opening, to: selected });
+      await audit(method, target.serverId, 'downgrade_refused', 'unsupported_revision', startedAtMs);
+      await decided('refused', 'unauthenticated');
+      throw new McpError('interop_version_unsupported', `refusing to lower an unauthenticated MCP exchange below ${advertisedMcpProtocolVersion()}`, {
         protocol: 'mcp',
         requested: opening,
         supported: peerSupports,
@@ -929,6 +996,14 @@ export function makeMcpClient(deps: McpClientDeps): {
     log.info('mcp_version_downgraded_explicitly', { origin, from: opening, to: selected, peerSupports });
     negotiated.set(origin, selected);
     body = await wireCall(target, selected, method, params, timeoutMs);
+    if (body.error?.code === MCP_ERR_UNSUPPORTED_VERSION) {
+      // The peer named `selected` and then refused it: no revision was agreed.
+      await decided('refused', 'unsupported');
+    } else {
+      // The closed payload has no `downgraded` outcome: `accepted` + the
+      // revision actually used is the explicit, non-silent record.
+      await decided('accepted', 'ok', selected);
+    }
     return { body, revision: selected };
   }
 
@@ -1140,9 +1215,11 @@ export function makeMcpClient(deps: McpClientDeps): {
           //    The shape is CLOSED (§D/§E `mcp-extension-no-authority`): the peer's
           //    `_meta`, extension settings and `requestState` have no field to arrive in,
           //    so a decorated result cannot widen this run's scopes or advance an approval.
+          //    ADR 0788 D2 — and DEFANGED here, where the peer's bytes enter the host,
+          //    so no fence built downstream can be closed from inside (`MCPWF-3`).
           return {
-            result: result?.content ?? result ?? null,
-            ...(result?.structuredContent !== undefined ? { structuredContent: result.structuredContent } : {}),
+            result: defangPeerFence(result?.content ?? result ?? null),
+            ...(result?.structuredContent !== undefined ? { structuredContent: defangPeerFence(result.structuredContent) } : {}),
             isError: result?.isError === true,
             untrustedContent: true,
             negotiatedVersion: revision,
@@ -1216,7 +1293,9 @@ export function makeMcpClient(deps: McpClientDeps): {
     async readResource(serverId, uri, opts) {
       const result = await call(serverId, 'resources/read', { uri }, opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS);
       const first = result?.contents?.[0];
-      return { content: first?.text ?? first?.blob ?? null, mimeType: first?.mimeType ?? '', untrustedContent: true };
+      // ADR 0788 D2 — peer text defanged at entry (a blob is base64, which cannot
+      // carry a fence token, and passes unchanged).
+      return { content: defangPeerFence(first?.text ?? first?.blob ?? null), mimeType: first?.mimeType ?? '', untrustedContent: true };
     },
     async listTools(serverId) {
       // §D — cacheable, and ONLY under the full authorization-context key.
@@ -1307,13 +1386,14 @@ export function makeMcpClient(deps: McpClientDeps): {
 
       if (discoveryRevision === undefined) {
         const result = await call(serverId, 'tools/list', {}, DEFAULT_TIMEOUT_MS);
-        return { tools: Array.isArray(result?.tools) ? result.tools : [] };
+        return { tools: Array.isArray(result?.tools) ? defangPeerFence(result.tools) : [] };
       }
       const key = await cacheKey(serverId, revision, discoveryRevision);
       const cached = readMcpCache(key, 'tools/list');
       if (cached !== undefined) return { tools: Array.isArray(cached) ? cached : [] };
       const result = await call(serverId, 'tools/list', {}, DEFAULT_TIMEOUT_MS);
-      const tools = Array.isArray(result?.tools) ? result.tools : [];
+      // ADR 0788 D2 — defanged BEFORE caching, so a cache hit is as safe as a miss.
+      const tools = Array.isArray(result?.tools) ? defangPeerFence(result.tools) : [];
       writeMcpCache(key, 'tools/list', tools, { ttlMs: result?.ttlMs, cacheScope: result?.cacheScope });
       return { tools };
     },
@@ -1389,7 +1469,7 @@ export function makeMcpClient(deps: McpClientDeps): {
         try {
           const result = await call(spec.serverId, 'resources/read', { uri: spec.uri }, readTimeoutMs, !haveBaseline);
           const first = result?.contents?.[0];
-          const content = first?.text ?? first?.blob ?? null;
+          const content = defangPeerFence(first?.text ?? first?.blob ?? null);
           const hash = sha256(content);
           // Advance the baseline BEFORE delivery so a change is consumed exactly
           // once — a throwing consumer must not cause the same change to re-fire

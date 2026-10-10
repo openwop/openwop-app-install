@@ -22,7 +22,7 @@
  * So on a gated org ONE settings write puts never-reviewed machine drafts in
  * front of the public with the Approvals inbox empty and `page.version`
  * unmoved. Every assertion below therefore reads the ANONYMOUS public delivery
- * route (`/v1/host/openwop-app/public/:orgId/pages/:slug` +
+ * route (`/host/openwop-app/public/:orgId/pages/:slug` +
  * `Accept-Language`), not the settings response — the route returning 409 is
  * not the claim; the public not seeing the content is.
  *
@@ -96,17 +96,17 @@ let n = 0;
 async function owner(): Promise<{ c: Client; orgId: string; tenantId: string }> {
   const tenantId = `org:cmsa10-${Date.now()}-${n++}`;
   const c = client();
-  const login = await c.post('/v1/host/openwop-app/test/login', { email: `cmsa10-${Date.now()}-${n++}@acme.test`, tenantId });
+  const login = await c.post('/host/openwop-app/test/login', { email: `cmsa10-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(login.status, JSON.stringify(login.body)).toBe(201);
-  const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return { c, orgId: org.body.orgId as string, tenantId };
 }
-const u = (orgId: string, s = ''): string => `/v1/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${s}`;
+const u = (orgId: string, s = ''): string => `/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${s}`;
 
 /** The ANONYMOUS delivery boundary — no cookie, `Accept-Language` only. */
 async function publicRead(orgId: string, slug: string, acceptLanguage: string): Promise<Res> {
-  const res = await fetch(`${BASE}/v1/host/openwop-app/public/${encodeURIComponent(orgId)}/pages/${encodeURIComponent(slug)}`, {
+  const res = await fetch(`${BASE}/host/openwop-app/public/${encodeURIComponent(orgId)}/pages/${encodeURIComponent(slug)}`, {
     headers: { 'accept-language': acceptLanguage },
   });
   return { status: res.status, headers: res.headers, body: await res.json().catch(() => undefined) };
@@ -142,7 +142,7 @@ async function publishedPageWithDormantOverlay(
 }
 
 async function pendingContentApprovals(c: Client): Promise<any[]> {
-  const list = await c.get('/v1/host/openwop-app/approvals?status=pending');
+  const list = await c.get('/host/openwop-app/approvals?status=pending');
   expect(list.status).toBe(200);
   return (list.body.items as any[]).filter((a) => a.kind === 'content-publish');
 }
@@ -340,38 +340,58 @@ describe('§C9 F2 — the family cure must not refuse a change that releases NOT
     expect(after.body.sections[0].data.heading).toBe(BASE_TEXT);
   });
 
-  it('withholding an UNSUPPORTED family locale does NOT protect it — the model must not credit a no-op', async () => {
-    // Found by sabotage, not by review: modelling `withheldKeys` from every
-    // `localePublishState` key instead of from the scenario's supportedLocales
-    // left every assertion green. It is the UNDER-refusal direction, so it is
-    // the dangerous one. `localizePage` computes
-    //   withheld = settings.supportedLocales.filter(l => state[l] === 'draft')
-    // so a `draft` marker on a locale that is NOT supported strips nothing —
-    // and since §C8 opened the withhold direction to unconfigured tags, an
-    // operator can now easily create exactly this state and believe they are
-    // safe. Adding `pt-BR` must still refuse.
+  it('withholding an UNSUPPORTED family locale PROTECTS it (ADR 0861 D1 — inverts the §C9 ruling)', async () => {
+    // INVERTED by ADR 0861 D1. This test used to assert the opposite: that a
+    // `draft` marker on a locale NOT in `supportedLocales` "strips nothing", so
+    // adding `pt-BR` had to refuse. It described `localizePage` accurately —
+    // `withheld = supportedLocales.filter(draft)` — and the code was wrong about
+    // the admin's intent: the same no-op let a withheld `pt` reach `pt-BR` readers
+    // through the UNGATED narrowing direction (CMSL2WF-1, next test). The withheld
+    // set is now the page's, so the hold bites, the widening releases nothing (200)
+    // and the reader gets base. Sabotage: restore `supported.filter` in
+    // `localizePage` + `reachableOverlayKeys` and the read below serves DORMANT_TEXT.
     const { c, orgId } = await owner();
     await setGate('off');
     const created = await c.post(u(orgId, '/pages'), {
-      title: 'False comfort',
+      title: 'Real comfort',
       sections: [{ type: 'hero', data: { heading: BASE_TEXT }, localizations: { pt: { heading: DORMANT_TEXT } } }],
     });
     const pageId = created.body.pageId as string;
     const slug = created.body.slug as string;
     expect((await c.post(u(orgId, `/pages/${pageId}/publish`))).status).toBe(200);
-    // Withhold `pt` while it is NOT a configured locale — accepted, but inert.
+    // Withhold `pt` while it is NOT a configured locale — accepted, and it holds.
     expect((await c.post(u(orgId, `/pages/${pageId}/locales/pt/unpublish`))).status).toBe(200);
 
     await setGate('on');
     const widen = await c.put(u(orgId, '/language-settings'), { supportedLocales: ['pt-BR'] });
-    expect(widen.status, JSON.stringify(widen.body)).toBe(409);
-    expect((widen.body?.error?.details ?? widen.body?.details).matchedOverlayLocales).toEqual(['pt']);
+    expect(widen.status, JSON.stringify(widen.body)).toBe(200);
+    expect((await publicRead(orgId, slug, 'pt-BR')).body.sections[0].data.heading).toBe(BASE_TEXT);
+  });
 
-    // The proof that the withhold really was inert: gate OFF, same write, and
-    // the supposedly-withheld overlay reaches the public.
+  it('NARROWING cannot release a withheld overlay (ADR 0861 D1, CMSL2WF-1 — born red)', async () => {
+    // The ungated direction. `['pt','pt-BR'] → ['pt-BR']` with `pt` withheld used to
+    // serve the withheld `pt` text to `pt-BR` readers: the route diffed only on
+    // widening, and delivery forgot the hold once `pt` left the configured set.
+    const { c, orgId } = await owner();
     await setGate('off');
-    expect((await c.put(u(orgId, '/language-settings'), { supportedLocales: ['pt-BR'] })).status).toBe(200);
-    expect((await publicRead(orgId, slug, 'pt-BR')).body.sections[0].data.heading).toBe(DORMANT_TEXT);
+    const created = await c.post(u(orgId, '/pages'), {
+      title: 'Narrowed',
+      sections: [{ type: 'hero', data: { heading: BASE_TEXT }, localizations: { pt: { heading: DORMANT_TEXT } } }],
+    });
+    const pageId = created.body.pageId as string;
+    const slug = created.body.slug as string;
+    expect((await c.post(u(orgId, `/pages/${pageId}/publish`))).status).toBe(200);
+    expect((await c.put(u(orgId, '/language-settings'), { supportedLocales: ['pt', 'pt-BR'] })).status).toBe(200);
+    expect((await c.post(u(orgId, `/pages/${pageId}/locales/pt/unpublish`))).status).toBe(200);
+    expect((await publicRead(orgId, slug, 'pt-BR')).body.sections[0].data.heading).toBe(BASE_TEXT);
+
+    for (const gate of ['on', 'off'] as const) {
+      await setGate(gate);
+      const narrow = await c.put(u(orgId, '/language-settings'), { supportedLocales: ['pt-BR'] });
+      expect(narrow.status, JSON.stringify(narrow.body)).toBe(200);
+      expect((await publicRead(orgId, slug, 'pt-BR')).body.sections[0].data.heading, `gate ${gate}`).toBe(BASE_TEXT);
+      expect((await c.put(u(orgId, '/language-settings'), { supportedLocales: ['pt', 'pt-BR'] })).status).toBe(200);
+    }
   });
 
   it('the refusal names the MATCHED overlay locale, never one that holds no content (F2b)', async () => {

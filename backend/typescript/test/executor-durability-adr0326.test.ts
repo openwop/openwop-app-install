@@ -16,6 +16,7 @@ import http from 'node:http';
 import { createApp } from '../src/index.js';
 import { getNodeRegistry } from '../src/executor/nodeRegistry.js';
 import { publishRunEventTick, subscribeRunEventTicks } from '../src/host/runEventBus.js';
+import { bareRunId } from './support/bareRunId.js';
 
 let server: http.Server;
 let BASE: string;
@@ -55,17 +56,17 @@ async function api<T = Record<string, unknown>>(path: string, init: RequestInit 
 }
 
 async function runToTerminal(workflowId: string, nodes: unknown[], inputs: Record<string, unknown> = {}): Promise<{ runId: string; status: string; events: Array<{ type?: string; nodeId?: string }> }> {
-  await api('/v1/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({ workflowId, nodes, edges: [] }) });
-  const create = await api<{ runId: string }>('/v1/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs, tenantId: '_anon' }) });
+  await api('/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({ workflowId, nodes, edges: [] }) });
+  const create = await api<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs, tenantId: '_anon' }) });
   expect(create.status).toBe(201);
   const runId = create.body.runId;
   let status = 'pending';
   for (let i = 0; i < 120; i++) {
     await new Promise((r) => setTimeout(r, 25));
-    status = (await api<{ status: string }>(`/v1/runs/${runId}`)).body.status;
+    status = (await api<{ status: string }>(`/runs/${runId}`)).body.status;
     if (['completed', 'failed', 'cancelled'].includes(status)) break;
   }
-  const events = (await api<{ events?: Array<{ type?: string; nodeId?: string }> }>(`/v1/runs/${runId}/debug-bundle`)).body.events ?? [];
+  const events = (await api<{ events?: Array<{ type?: string; nodeId?: string }> }>(`/host/openwop-app/runs/${bareRunId(runId)}/debug-bundle`)).body.events ?? [];
   return { runId, status, events };
 }
 
@@ -117,13 +118,13 @@ describe('ADR 0326 P2 — run-event ticks + the SSE watermark', () => {
 
   it('the SSE stream delivers each event exactly once despite in-proc + tick double-sighting', async () => {
     // A run that suspends (conversation gate) so the stream stays open.
-    await api('/v1/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({ workflowId: 'adr0326.sse', nodes: [{ nodeId: 'gate', typeId: 'core.conversationGate', config: { prompt: 'x' } }], edges: [] }) });
-    const create = await api<{ runId: string }>('/v1/runs', { method: 'POST', body: JSON.stringify({ workflowId: 'adr0326.sse', inputs: { provider: 'mock', model: 'mock-1' }, tenantId: '_anon' }) });
+    await api('/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({ workflowId: 'adr0326.sse', nodes: [{ nodeId: 'gate', typeId: 'core.conversationGate', config: { prompt: 'x' } }], edges: [] }) });
+    const create = await api<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({ workflowId: 'adr0326.sse', inputs: { provider: 'mock', model: 'mock-1' }, tenantId: '_anon' }) });
     const runId = create.body.runId;
-    for (let i = 0; i < 60; i++) { await new Promise((r) => setTimeout(r, 20)); const s = (await api<{ status: string }>(`/v1/runs/${runId}`)).body.status; if (s.startsWith('waiting')) break; }
+    for (let i = 0; i < 60; i++) { await new Promise((r) => setTimeout(r, 20)); const s = (await api<{ status: string }>(`/runs/${runId}`)).body.status; if (s.startsWith('waiting')) break; }
 
     const ac = new AbortController();
-    const res = await fetch(`${BASE}/v1/runs/${runId}/events?stream=1`, { headers: { ...H, accept: 'text/event-stream' }, signal: ac.signal });
+    const res = await fetch(`${BASE}/runs/${runId}/events?stream=1`, { headers: { ...H, accept: 'text/event-stream' }, signal: ac.signal });
     expect(res.status).toBe(200);
     const reader = res.body!.getReader();
     let buf = '';
@@ -134,7 +135,7 @@ describe('ADR 0326 P2 — run-event ticks + the SSE watermark', () => {
     await new Promise((r) => setTimeout(r, 150)); // stream subscribed
 
     // One exchange appends events; the in-proc fanout AND the (self-)tick both fire.
-    const ex = await api(`/v1/runs/${runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: 'watermark probe' } } }) });
+    const ex = await api(`/runs/${runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: 'watermark probe' } } }) });
     expect(ex.status).toBe(200);
     await new Promise((r) => setTimeout(r, 400)); // in-proc + coalesced tick + gap fetch settle
     ac.abort();
@@ -154,13 +155,13 @@ describe('post-merge review fixes (architect findings 1-2)', () => {
     // events straight to durable" (no in-proc fanout, no tick) followed by an
     // in-proc append from "instance A" — the non-contiguous in-proc event must
     // trigger a gap fetch so ALL events deliver, in order.
-    await api('/v1/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({ workflowId: 'adr0326.gap', nodes: [{ nodeId: 'gate', typeId: 'core.conversationGate', config: { prompt: 'x' } }], edges: [] }) });
-    const create = await api<{ runId: string }>('/v1/runs', { method: 'POST', body: JSON.stringify({ workflowId: 'adr0326.gap', inputs: { provider: 'mock', model: 'mock-1' }, tenantId: '_anon' }) });
+    await api('/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({ workflowId: 'adr0326.gap', nodes: [{ nodeId: 'gate', typeId: 'core.conversationGate', config: { prompt: 'x' } }], edges: [] }) });
+    const create = await api<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({ workflowId: 'adr0326.gap', inputs: { provider: 'mock', model: 'mock-1' }, tenantId: '_anon' }) });
     const runId = create.body.runId;
-    for (let i = 0; i < 60; i++) { await new Promise((r) => setTimeout(r, 20)); const s = (await api<{ status: string }>(`/v1/runs/${runId}`)).body.status; if (s.startsWith('waiting')) break; }
+    for (let i = 0; i < 60; i++) { await new Promise((r) => setTimeout(r, 20)); const s = (await api<{ status: string }>(`/runs/${runId}`)).body.status; if (s.startsWith('waiting')) break; }
 
     const ac = new AbortController();
-    const res = await fetch(`${BASE}/v1/runs/${runId}/events?stream=1`, { headers: { ...H, accept: 'text/event-stream' }, signal: ac.signal });
+    const res = await fetch(`${BASE}/runs/${runId}/events?stream=1`, { headers: { ...H, accept: 'text/event-stream' }, signal: ac.signal });
     const reader = res.body!.getReader();
     let buf = '';
     const readAll = (async () => { const dec = new TextDecoder(); for (;;) { const { value, done } = await reader.read(); if (done) return; buf += dec.decode(value, { stream: true }); } })();
@@ -169,11 +170,11 @@ describe('post-merge review fixes (architect findings 1-2)', () => {
     const { hostExtStorage } = await import('../src/host/hostExtPersistence.js');
     const storage = hostExtStorage();
     // "Instance B": two durable appends that bypass the in-proc fanout + tick.
-    await storage.appendEvent({ eventId: `gapb-1-${runId}`, runId, type: 'custom.gap-b', payload: { i: 1 }, timestamp: new Date().toISOString() });
-    await storage.appendEvent({ eventId: `gapb-2-${runId}`, runId, type: 'custom.gap-b', payload: { i: 2 }, timestamp: new Date().toISOString() });
+    await storage.appendEvent({ eventId: `gapb-1-${runId}`, runId: bareRunId(runId), type: 'custom.gap-b', payload: { i: 1 }, timestamp: new Date().toISOString() });
+    await storage.appendEvent({ eventId: `gapb-2-${runId}`, runId: bareRunId(runId), type: 'custom.gap-b', payload: { i: 2 }, timestamp: new Date().toISOString() });
     // "Instance A": an in-proc append — NON-contiguous with the stream's watermark.
     const { getEventLog } = await import('../src/executor/eventLog.js');
-    await getEventLog().append({ runId, type: 'custom.gap-a', payload: { i: 3 } });
+    await getEventLog().append({ runId: bareRunId(runId), type: 'custom.gap-a', payload: { i: 3 } });
     await new Promise((r) => setTimeout(r, 300)); // gap fetch settles
     ac.abort();
     await readAll.catch(() => undefined);
@@ -208,14 +209,14 @@ describe('post-merge review fixes (architect findings 1-2)', () => {
 describe('ADR 0326 P3b — fork re-execution (branch resumes from the checkpoint; replay reads the source invocation log)', () => {
   type EvDoc = { sequence: number; type: string; nodeId?: string; payload?: { outputs?: Record<string, unknown> } };
   async function listRunEvents(runId: string): Promise<EvDoc[]> {
-    const res = await fetch(`${BASE}/v1/runs/${runId}/events`, { headers: { ...H, accept: 'application/json' } });
+    const res = await fetch(`${BASE}/runs/${runId}/events`, { headers: { ...H, accept: 'application/json' } });
     return ((await res.json()) as { events: EvDoc[] }).events;
   }
   async function pollTerminal(runId: string): Promise<string> {
     let status = 'pending';
     for (let i = 0; i < 200; i++) {
       await new Promise((r) => setTimeout(r, 25));
-      status = (await api<{ status: string }>(`/v1/runs/${runId}`)).body.status;
+      status = (await api<{ status: string }>(`/runs/${runId}`)).body.status;
       if (['completed', 'failed', 'cancelled'].includes(status)) break;
     }
     return status;
@@ -236,7 +237,7 @@ describe('ADR 0326 P3b — fork re-execution (branch resumes from the checkpoint
         return { status: 'success', outputs: { output: `saw:${JSON.stringify(ctx.inputs)}` } };
       },
     });
-    await api('/v1/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({
+    await api('/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({
       workflowId: 'adr0326.p3b-branch',
       nodes: [
         { nodeId: 'emit', typeId: 'test.p3b.emit' },
@@ -244,7 +245,7 @@ describe('ADR 0326 P3b — fork re-execution (branch resumes from the checkpoint
       ],
       edges: [{ edgeId: 'e1', sourceNodeId: 'emit', targetNodeId: 'consume' }],
     }) });
-    const create = await api<{ runId: string }>('/v1/runs', { method: 'POST', body: JSON.stringify({ workflowId: 'adr0326.p3b-branch', inputs: {}, tenantId: '_anon' }) });
+    const create = await api<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({ workflowId: 'adr0326.p3b-branch', inputs: {}, tenantId: '_anon' }) });
     expect(create.status).toBe(201);
     const sourceRunId = create.body.runId;
     expect(await pollTerminal(sourceRunId)).toBe('completed');
@@ -254,7 +255,7 @@ describe('ADR 0326 P3b — fork re-execution (branch resumes from the checkpoint
     const emitDone = sourceEvents.find((e) => e.type === 'node.completed' && e.nodeId === 'emit');
     expect(emitDone).toBeDefined();
 
-    const fork = await api<{ runId: string }>(`/v1/runs/${sourceRunId}:fork`, {
+    const fork = await api<{ runId: string }>(`/runs/${sourceRunId}:fork`, {
       // `replay.md` §Endpoint: events with `sequence < fromSeq` are FIXED HISTORY.
       // To make everything through `emitDone` fixed, fork from the NEXT sequence.
       // This test previously passed `emitDone.sequence` and still saw emit treated
@@ -271,7 +272,7 @@ describe('ADR 0326 P3b — fork re-execution (branch resumes from the checkpoint
     // pair (the copied one), and emit's execute() never ran under the fork run.
     expect(forkEvents.filter((e) => e.type === 'node.started' && e.nodeId === 'emit').length).toBe(1);
     expect(forkEvents.filter((e) => e.type === 'node.completed' && e.nodeId === 'emit').length).toBe(1);
-    expect(emitExecutions).toEqual([sourceRunId]);
+    expect(emitExecutions).toEqual([bareRunId(sourceRunId)]);
     // The suffix DID re-execute, fed by the checkpoint snapshot's outputs.
     const consumeDone = forkEvents.filter((e) => e.type === 'node.completed' && e.nodeId === 'consume');
     expect(consumeDone.length).toBe(1);
@@ -283,26 +284,26 @@ describe('ADR 0326 P3b — fork re-execution (branch resumes from the checkpoint
   // the open gate as state and re-creates its live interrupt; the full contract
   // is witnessed in `adr0751-fork-suspended-checkpoint.test.ts`.
   it('a branch fork whose fromSeq lands on a suspended checkpoint inherits the gate (ADR 0751 — was a 501)', async () => {
-    await api('/v1/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({
+    await api('/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({
       workflowId: 'adr0326.p3b-suspended',
       nodes: [{ nodeId: 'gate', typeId: 'core.conversationGate', config: { prompt: 'x' } }],
       edges: [],
     }) });
-    const create = await api<{ runId: string }>('/v1/runs', { method: 'POST', body: JSON.stringify({ workflowId: 'adr0326.p3b-suspended', inputs: { provider: 'mock', model: 'mock-1' }, tenantId: '_anon' }) });
+    const create = await api<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({ workflowId: 'adr0326.p3b-suspended', inputs: { provider: 'mock', model: 'mock-1' }, tenantId: '_anon' }) });
     const runId = create.body.runId;
-    for (let i = 0; i < 60; i++) { await new Promise((r) => setTimeout(r, 20)); const s = (await api<{ status: string }>(`/v1/runs/${runId}`)).body.status; if (s.startsWith('waiting')) break; }
+    for (let i = 0; i < 60; i++) { await new Promise((r) => setTimeout(r, 20)); const s = (await api<{ status: string }>(`/runs/${runId}`)).body.status; if (s.startsWith('waiting')) break; }
 
     const events = await listRunEvents(runId);
     const maxSeq = Math.max(...events.map((e) => e.sequence));
-    const fork = await api<{ runId?: string; error?: string }>(`/v1/runs/${runId}:fork`, {
+    const fork = await api<{ runId?: string; error?: string }>(`/runs/${runId}:fork`, {
       method: 'POST', body: JSON.stringify({ fromSeq: maxSeq, mode: 'branch' }),
     });
     expect(fork.status).toBe(201);
     const forkId = String(fork.body.runId);
     let forkStatus = '';
-    for (let i = 0; i < 100; i++) { await new Promise((r) => setTimeout(r, 20)); forkStatus = (await api<{ status: string }>(`/v1/runs/${forkId}`)).body.status; if (forkStatus.startsWith('waiting') || forkStatus === 'failed') break; }
+    for (let i = 0; i < 100; i++) { await new Promise((r) => setTimeout(r, 20)); forkStatus = (await api<{ status: string }>(`/runs/${forkId}`)).body.status; if (forkStatus.startsWith('waiting') || forkStatus === 'failed') break; }
     expect(forkStatus).toMatch(/^waiting/);
-    const gates = await api<{ interrupts: Array<{ kind: string }> }>(`/v1/host/openwop-app/runs/${forkId}/interrupts`);
+    const gates = await api<{ interrupts: Array<{ kind: string }> }>(`/host/openwop-app/runs/${bareRunId(forkId)}/interrupts`);
     expect(gates.body.interrupts.map((g) => g.kind)).toEqual(['conversation']);
   });
 
@@ -321,12 +322,12 @@ describe('ADR 0326 P3b — fork re-execution (branch resumes from the checkpoint
     // Live behavior: attempt 1 → provider failure (recorded, P3a); attempt 2 → success.
     programMock('ai', [{ errorCode: 'provider_unavailable' }, { content: 'recovered' }]);
 
-    await api('/v1/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({
+    await api('/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({
       workflowId: 'adr0326.p3b-replay',
       nodes: [{ nodeId: 'ai', typeId: 'test.p3b.ai', config: { retry: { maxAttempts: 2 } } }],
       edges: [],
     }) });
-    const create = await api<{ runId: string }>('/v1/runs', { method: 'POST', body: JSON.stringify({ workflowId: 'adr0326.p3b-replay', inputs: {}, tenantId: '_anon' }) });
+    const create = await api<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({ workflowId: 'adr0326.p3b-replay', inputs: {}, tenantId: '_anon' }) });
     const sourceRunId = create.body.runId;
     expect(await pollTerminal(sourceRunId)).toBe('completed');
     const sourceEvents = await listRunEvents(sourceRunId);
@@ -336,7 +337,7 @@ describe('ADR 0326 P3b — fork re-execution (branch resumes from the checkpoint
     // Replay fork — the mock program is EXHAUSTED, so any live dispatch would
     // return the default ''. Reproducing the failed→recovered attempt pair
     // proves both reads came from the SOURCE run's invocation log.
-    const fork = await api<{ runId: string }>(`/v1/runs/${sourceRunId}:fork`, {
+    const fork = await api<{ runId: string }>(`/runs/${sourceRunId}:fork`, {
       method: 'POST', body: JSON.stringify({ fromSeq: 0, mode: 'replay' }),
     });
     expect(fork.status).toBe(201);
@@ -352,7 +353,7 @@ describe('ADR 0326 P3b — fork re-execution (branch resumes from the checkpoint
     // Fork-of-a-fork: the fallback reads only ONE level up, so this stays
     // deterministic only because the first fork's log self-healed via
     // copy-on-read (architect finding). Same attempt shape, same output.
-    const fork2 = await api<{ runId: string }>(`/v1/runs/${forkRunId}:fork`, {
+    const fork2 = await api<{ runId: string }>(`/runs/${forkRunId}:fork`, {
       method: 'POST', body: JSON.stringify({ fromSeq: 0, mode: 'replay' }),
     });
     expect(fork2.status).toBe(201);
@@ -468,24 +469,24 @@ describe('ADR 0341 — replay-fork side-effect suppression', () => {
   type Ev341 = { type: string; nodeId?: string; payload?: { outputs?: Record<string, unknown>; error?: { code?: string } } };
   // The events route content-negotiates: SSE by default, JSON with accept.
   const listEv = async (runId: string): Promise<Ev341[]> => {
-    const res = await fetch(`${BASE}/v1/runs/${runId}/events`, { headers: { ...H, accept: 'application/json' } });
+    const res = await fetch(`${BASE}/runs/${runId}/events`, { headers: { ...H, accept: 'application/json' } });
     return ((await res.json()) as { events: Ev341[] }).events;
   };
   const terminal = async (runId: string): Promise<string> => {
     for (let i = 0; i < 100; i++) {
-      const r = await api<{ status: string }>(`/v1/runs/${runId}`);
+      const r = await api<{ status: string }>(`/runs/${runId}`);
       if (['completed', 'failed', 'cancelled'].includes(r.body.status)) return r.body.status;
       await new Promise((res) => setTimeout(res, 50));
     }
     return 'timeout';
   };
   const mkRun = async (workflowId: string): Promise<string> => {
-    const r = await api<{ runId: string }>('/v1/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs: {}, tenantId: '_anon' }) });
+    const r = await api<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs: {}, tenantId: '_anon' }) });
     expect(r.status).toBe(201);
     return r.body.runId;
   };
   const fork = async (runId: string): Promise<string> => {
-    const r = await api<{ runId: string }>(`/v1/runs/${runId}:fork`, { method: 'POST', body: JSON.stringify({ fromSeq: 0, mode: 'replay' }) });
+    const r = await api<{ runId: string }>(`/runs/${runId}:fork`, { method: 'POST', body: JSON.stringify({ fromSeq: 0, mode: 'replay' }) });
     expect(r.status).toBe(201);
     return r.body.runId;
   };
@@ -501,7 +502,7 @@ describe('ADR 0341 — replay-fork side-effect suppression', () => {
       typeId: 'test.adr0341.pure', version: '1.0.0',
       async execute() { pureFires += 1; return { status: 'success', outputs: { n: 1 } }; },
     });
-    await api('/v1/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({
+    await api('/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({
       workflowId: 'adr0341.suppress',
       nodes: [{ nodeId: 'fx', typeId: 'test.adr0341.effect' }, { nodeId: 'p', typeId: 'test.adr0341.pure' }],
       edges: [],
@@ -528,7 +529,7 @@ describe('ADR 0341 — replay-fork side-effect suppression', () => {
         return { status: 'success', outputs: { receipt: 'sent-after-retry' } };
       },
     });
-    await api('/v1/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({
+    await api('/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({
       workflowId: 'adr0341.retry',
       nodes: [{ nodeId: 'fx', typeId: 'test.adr0341.retry-effect', config: { retry: { maxAttempts: 2 } } }],
       edges: [],
@@ -562,7 +563,7 @@ describe('ADR 0341 — replay-fork side-effect suppression', () => {
       typeId: 'test.adr0341.effect2', version: '1.0.0', sideEffecting: true,
       async execute() { effectFires += 1; return { status: 'success', outputs: { receipt: 'should-never-send' } }; },
     });
-    await api('/v1/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({
+    await api('/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({
       workflowId: 'adr0341.missing',
       nodes: [{ nodeId: 'gate', typeId: 'test.adr0341.flaky-gate' }, { nodeId: 'fx', typeId: 'test.adr0341.effect2' }],
       edges: [{ edgeId: 'e1', sourceNodeId: 'gate', targetNodeId: 'fx' }],

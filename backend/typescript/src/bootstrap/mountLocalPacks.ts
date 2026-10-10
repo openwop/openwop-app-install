@@ -49,7 +49,9 @@ const log = createLogger('bootstrap.mountLocalPacks');
 // a deploy can widen (e.g. add `vendor.acme.`) or narrow the mount surface
 // without a code change. No loader change — the registry/signing path is
 // untouched; this only governs which dev-mounted local packs are surfaced.
-const DEFAULT_LOCAL_PACK_PREFIXES = ['core.openwop.', 'vendor.myndhyve.', 'feature.'] as const;
+// ADR 0763 — `vendor.openwop-app.` is this host's own agent packs (renamed from
+// `feature.*.agents`); `feature.` still covers the node/chain/form/canvas packs.
+const DEFAULT_LOCAL_PACK_PREFIXES = ['core.openwop.', 'vendor.myndhyve.', 'vendor.openwop-app.', 'feature.'] as const;
 
 export function localPackPrefixes(): string[] {
   const raw = process.env.OPENWOP_LOCAL_PACK_PREFIXES;

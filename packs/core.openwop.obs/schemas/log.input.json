@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/core.openwop.obs/1.0.0/log.input.json",
+  "$id": "https://packs.openwop.dev/core.openwop.obs/1.0.1/log.input.json",
   "title": "LogInput",
   "type": "object",
   "required": [

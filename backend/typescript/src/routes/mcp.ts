@@ -17,21 +17,40 @@
  * @see RFCS/0020-host-mcp-server-composition.md
  */
 
-import type { Express, Request } from 'express';
+import type { Express, Request, Response } from 'express';
 import type { Storage } from '../storage/storage.js';
 import type { HostAdapterSuite } from '../host/index.js';
 import type { Principal } from '../types.js';
 import { dispatch } from '../host/mcpServerRouter.js';
 import { dispatchCurrent } from '../host/mcpCurrentCodec.js';
 import { MCP_ERR_UNSUPPORTED_VERSION, MCP_PROTOCOL_VERSION_HEADER, MCP_SUPPORTED_VERSIONS, selectMcpCodec } from '../host/mcpProfile.js';
-import { parseRequest, rpcError } from '../host/mcpJsonRpc.js';
+import { parseRequest, rpcError, RPC_INTERNAL_ERROR } from '../host/mcpJsonRpc.js';
 import { enforceMcpPrincipalRateLimit } from '../middleware/rateLimit.js';
 import { sendError } from '../middleware/errorEnvelope.js';
+import { vendorPath } from '../middleware/protocolVersion.js';
 import { anonymousActorAdvertised } from '../host/anonymousActor.js';
+import { mcpCallerFor } from '../host/mcpCaller.js';
+import { exposureFor, type ExposedToolManifest } from '../host/mcpServerRegistry.js';
+import { exposureKey, setEntryDisabled } from '../host/mcpExposure.js';
+import { toDescriptor } from './toolCatalog.js';
+import { requireTenantScope } from '../features/featureRoute.js';
+import { requestOrigin } from '../host/requestOrigin.js';
+import { apiPathPrefixOf } from '../middleware/authChallenge.js';
+import { tenantOf } from '../host/requestSubject.js';
+import { OpenwopError } from '../types.js';
 import { mcpAuditTarget, recordMcpAudit } from '../host/mcpAudit.js';
 import { createLogger } from '../observability/logger.js';
 
 const log = createLogger('routes.mcp');
+
+/** ADR 0788 D4 — the methods that start a workflow run, on either codec. */
+const RUN_STARTING_METHODS: ReadonlySet<string> = new Set([
+  'tools/call',
+  'resources/read',
+  'prompts/get',
+  'sampling/createMessage',
+  'elicitation/create',
+]);
 
 interface Deps {
   storage: Storage;
@@ -39,15 +58,34 @@ interface Deps {
 }
 
 export function registerMcpServerRoutes(app: Express, deps: Deps): void {
+  // ADR 0788 D5/D6 — the exposure view is registered even when the mount is off,
+  // so the "AI clients" page can say so plainly instead of 404ing.
+  registerMcpExposureRoutes(app, deps);
   if (process.env.OPENWOP_MCP_SERVER_ENABLED !== 'true') {
     log.info('mcp server mount disabled (set OPENWOP_MCP_SERVER_ENABLED=true to enable)');
     return;
   }
   log.warn(
-    'mcp server mount ENABLED — POST /v1/host/openwop-app/mcp is reachable. NEVER enable in production without auth review.',
+    'mcp server mount ENABLED — POST /host/openwop-app/mcp is reachable. NEVER enable in production without auth review.',
   );
 
-  app.post('/v1/host/openwop-app/mcp', async (req, res) => {
+  app.post('/host/openwop-app/mcp', async (req, res) => {
+    // ADR 0788 (grade-code MCPCD-1) — Express 4 does not catch an async
+    // handler's rejection, and an unhandled rejection shuts the instance down
+    // (`index.ts`). Resolving the caller reads storage, so a Cloud SQL blip used
+    // to be able to take an instance down through this route. Fail as a JSON-RPC
+    // internal error instead; the cause goes to the log, never to the peer.
+    try {
+      await handleMcpRequest(req, res, deps);
+    } catch (err) {
+      log.error('mcp_request_failed', { error: err instanceof Error ? err.message : String(err) });
+      if (!res.headersSent) res.status(500).json(rpcError(null, RPC_INTERNAL_ERROR, 'internal error'));
+    }
+  });
+}
+
+async function handleMcpRequest(req: Request, res: Response, deps: Deps): Promise<void> {
+  {
     // ADR 0553 P3 — every refusal below emits ONE content-free audit row
     // (`host/mcpAudit.ts`), so an inbound refusal is as auditable as an outbound
     // one and the two share a payload shape. `durationMs` is measured from here
@@ -108,10 +146,17 @@ export function registerMcpServerRoutes(app: Express, deps: Deps): void {
     // the IP floor. On exceed, a canonical 429 is already sent. Applied before
     // codec selection: the budget is about what the method DOES, and both
     // revisions spell `tools/call` the same way.
-    if (parsed.method === 'tools/call' && enforceMcpPrincipalRateLimit(res, principal.principalId)) {
+    //
+    // ADR 0788 D4 — EVERY method that starts a run shares that budget, not just
+    // `tools/call`: `resources/read`, `prompts/get` and the two legacy handler
+    // bridges each run a workflow (sampling one reaches `ctx.callAI` on the
+    // tenant's model key), and they used to sit on the per-IP floor alone.
+    if (RUN_STARTING_METHODS.has(parsed.method) && enforceMcpPrincipalRateLimit(res, principal.principalId)) {
       return;
     }
-    const semanticDeps = { storage: deps.storage, hostSuite: deps.hostSuite, principal };
+    // ADR 0788 D1 — the ONE tenant + launch authority for this request.
+    const caller = await mcpCallerFor(req, principal, deps.hostSuite.workflowCatalog);
+    const semanticDeps = { storage: deps.storage, hostSuite: deps.hostSuite, principal, caller };
 
     // ADR 0553 P2 — ONE mount, TWO codecs, selected by `MCP-Protocol-Version`
     // (RFC 0153 §B). There is deliberately no second route: a `/mcp-2026`
@@ -152,7 +197,7 @@ export function registerMcpServerRoutes(app: Express, deps: Deps): void {
     }
     const response = await dispatch(parsed, semanticDeps);
     res.status(200).json(response);
-  });
+  }
 }
 
 /**
@@ -203,4 +248,115 @@ export function principalFromReq(req: Request): Principal | null {
     };
   }
   return null;
+}
+
+
+// ─────────────────────────────────────────────────────────────────
+// ADR 0788 D5 + D6 — the workspace's MCP exposure: what external AI clients can
+// reach, the switch to narrow it, and how to connect one.
+// ─────────────────────────────────────────────────────────────────
+
+/** The canonical `/host/openwop-app/…` root the SPA reaches (ADR 0652). */
+export const MCP_EXPOSURE_PATH = vendorPath('/mcp/exposure');
+/** The CANONICAL RFC 0181 form (ADR 0656): the `/v1/host/openwop-app/` twin
+ *  retires with `/v1`, and a URL pasted into a client config is durable. */
+const MCP_MOUNT_PATH = '/host/openwop-app/mcp';
+
+/** Where an external client should point. The BACKEND answers this, not the
+ *  SPA (architect H2): the SPA's `/api` base runs through the Hosting rewrite,
+ *  whose request timeout would cut a long synchronous `tools/call`. An operator
+ *  sets `OPENWOP_MCP_PUBLIC_URL` (the direct service URL); otherwise the URL is
+ *  derived from how THIS request arrived, and says so. */
+export function mcpPublicEndpoint(req: Request): { url: string; derived: boolean; viaProxy: boolean } {
+  const configured = process.env.OPENWOP_MCP_PUBLIC_URL?.trim();
+  if (configured) {
+    try {
+      const u = new URL(configured);
+      if (u.protocol === 'https:' || u.protocol === 'http:') return { url: u.toString().replace(/\/$/, ''), derived: false, viaProxy: false };
+    } catch { /* fall through to the derived URL */ }
+    log.warn('mcp_public_url_invalid', { reason: 'not an absolute http(s) URL' });
+  }
+  const prefix = apiPathPrefixOf(req);
+  return { url: `${requestOrigin(req)}${prefix}${MCP_MOUNT_PATH}`, derived: true, viaProxy: prefix !== '' };
+}
+
+async function holdsScope(req: Request, scope: 'workspace:read' | 'host:mcp:manage'): Promise<boolean> {
+  try {
+    await requireTenantScope(req, scope);
+    return true;
+  } catch (err) {
+    if (err instanceof OpenwopError && (err.httpStatus === 401 || err.httpStatus === 403)) return false;
+    throw err;
+  }
+}
+
+function requirePerson(req: Request): Principal {
+  const principal = req.principal;
+  // A person manages exposure, never an anonymous session: an anon visitor has
+  // no workspace an external client could reach (the mount refuses them).
+  if (!principal || principal.auth?.kind === 'anon') {
+    throw new OpenwopError('unauthenticated', 'Sign in to manage AI client access.', 401, {});
+  }
+  return principal;
+}
+
+function registerMcpExposureRoutes(app: Express, deps: Deps): void {
+  app.get(MCP_EXPOSURE_PATH, async (req, res, next) => {
+    try {
+      const principal = requirePerson(req);
+      if (!(await holdsScope(req, 'workspace:read'))) {
+        throw new OpenwopError('forbidden_scope', 'Missing required scope: workspace:read', 403, { requiredScope: 'workspace:read' });
+      }
+      const caller = await mcpCallerFor(req, principal, deps.hostSuite.workflowCatalog);
+      const exposure = await exposureFor(caller);
+      const view = (m: ExposedToolManifest, disabled: boolean) => {
+        const d = toDescriptor(m);
+        return {
+          key: exposureKey(m.source, m.workflowId, m.name),
+          name: m.name,
+          description: m.description ?? '',
+          source: m.source,
+          safetyTier: d.safetyTier,
+          approval: d.approval,
+          requiredScopes: (d.auth as { scopes: string[] }).scopes,
+          ...(m.mcpFeatureToggle ? { featureToggle: m.mcpFeatureToggle } : {}),
+          disabled,
+        };
+      };
+      const tools = [...exposure.tools.map((m) => view(m, false)), ...exposure.suppressed.map((m) => view(m, true))]
+        .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+      res.json({
+        enabled: process.env.OPENWOP_MCP_SERVER_ENABLED === 'true',
+        endpoint: mcpPublicEndpoint(req),
+        protocolVersions: [...MCP_SUPPORTED_VERSIONS],
+        canManage: await holdsScope(req, 'host:mcp:manage'),
+        tools,
+      });
+    } catch (err) { next(err); }
+  });
+
+  // ONE entry per write, merged server-side by CAS (grade-code MCPCD-3): never a
+  // whole-set replace built from one admin's filtered view.
+  app.patch(MCP_EXPOSURE_PATH, async (req, res, next) => {
+    try {
+      const principal = requirePerson(req);
+      await requireTenantScope(req, 'host:mcp:manage');
+      const tenantId = tenantOf(req);
+      const body = (req.body ?? {}) as { key?: unknown; disabled?: unknown };
+      const record = await setEntryDisabled(tenantId, body.key, body.disabled);
+      // Visible in the workspace Audit Log (the flat log that page reads); the
+      // payload carries the tenant stamp that log's tenant filter requires.
+      await deps.storage.appendAudit({
+        timestamp: record.updatedAt,
+        principalId: principal.principalId,
+        action: 'mcp.exposure.updated',
+        resource: `mcp-exposure:${tenantId}`,
+        outcome: 'success',
+        // WHICH entry and which way (grade-ux MCPUX-11), not just a count. The key
+        // is host vocabulary (source:workflowId:toolName), never peer text.
+        payload: { tenantId, key: body.key, disabled: body.disabled, disabledCount: record.disabled.length },
+      });
+      res.json({ disabled: record.disabled, updatedAt: record.updatedAt });
+    } catch (err) { next(err); }
+  });
 }

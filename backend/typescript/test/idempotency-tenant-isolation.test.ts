@@ -308,12 +308,22 @@ describe('ADR 0549 P0 — route-level adversarial cases', () => {
     const mutexKey = 'schedule-fire:victim-job:1';
     const storage = await openStorage(':memory:');
 
-    const created = await post<CreateRunBody>(
-      '/v1/runs',
+    // ADR 0812 P2b — major 2's Idempotency-Key grammar (`idempotency.md`, no
+    // `:`) refuses this exact string on the protocol lane before any claim...
+    const refused = await post<{ error?: string }>(
+      '/runs',
       { workflowId: 'openwop-app.uppercase', tenantId: 'demo', inputs: { text: 'poison' } },
       { 'idempotency-key': mutexKey },
     );
-    expect(created.status).toBe(201);
+    expect(refused.status).toBe(400);
+    // ...so the attack is carried by a lane that still accepts a free-form key
+    // and claims in the SAME `idempotent_response` table: the agents create.
+    const created = await post<{ agentId?: string }>(
+      '/host/openwop-app/agents',
+      { persona: 'Mutex Poison', modelClass: 'chat', systemPrompt: 'You are helpful.' },
+      { 'idempotency-key': mutexKey },
+    );
+    expect(created.status, JSON.stringify(created.body)).toBe(201);
 
     // The daemon's mutex must still be free. This asserts the two lanes do not
     // share storage: the HTTP claim above landed in `idempotent_response`,
@@ -322,10 +332,10 @@ describe('ADR 0549 P0 — route-level adversarial cases', () => {
     expect(daemonClaim.claimed).toBe(true);
   });
 
-  it('reusing one key across /v1/runs and the agents route returns each route its OWN response', async () => {
-    const key = 'cross-endpoint-probe';
+  it('reusing one key across /runs and the agents route returns each route its OWN response', async () => {
+    const key = 'cross-endpoint-probe-adr0549';
     const run = await post<CreateRunBody>(
-      '/v1/runs',
+      '/runs',
       { workflowId: 'openwop-app.uppercase', tenantId: 'demo', inputs: { text: 'x' } },
       { 'idempotency-key': key },
     );
@@ -337,7 +347,7 @@ describe('ADR 0549 P0 — route-level adversarial cases', () => {
     await new Promise((r) => setTimeout(r, 100));
 
     const agent = await post<{ agentId?: string; runId?: string }>(
-      '/v1/host/openwop-app/agents',
+      '/host/openwop-app/agents',
       { persona: 'Cross Endpoint', modelClass: 'chat', systemPrompt: 'You are helpful.' },
       { 'idempotency-key': key },
     );
@@ -350,23 +360,23 @@ describe('ADR 0549 P0 — route-level adversarial cases', () => {
 
   it('same key + same body on one endpoint still replays with the marker header', async () => {
     // The behaviour the fix must NOT break.
-    const key = 'happy-path-replay';
+    const key = 'happy-path-replay-adr0549';
     const body = { workflowId: 'openwop-app.uppercase', tenantId: 'demo', inputs: { text: 'same' } };
-    const first = await post<CreateRunBody>('/v1/runs', body, { 'idempotency-key': key });
+    const first = await post<CreateRunBody>('/runs', body, { 'idempotency-key': key });
     expect(first.status).toBe(201);
     await new Promise((r) => setTimeout(r, 100));
-    const second = await post<CreateRunBody>('/v1/runs', body, { 'idempotency-key': key });
+    const second = await post<CreateRunBody>('/runs', body, { 'idempotency-key': key });
     expect(second.status).toBe(201);
     expect(second.headers.get('openwop-Idempotent-Replay')).toBe('true');
     expect(second.body.runId).toBe(first.body.runId);
   });
 
   it('same key + DIFFERENT body returns 409 replay-mismatch, and survives a restart', async () => {
-    const key = 'mismatch-durable';
-    await post('/v1/runs', { workflowId: 'openwop-app.uppercase', tenantId: 'demo', inputs: { text: 'one' } }, { 'idempotency-key': key });
+    const key = 'mismatch-durable-adr0549';
+    await post('/runs', { workflowId: 'openwop-app.uppercase', tenantId: 'demo', inputs: { text: 'one' } }, { 'idempotency-key': key });
     await new Promise((r) => setTimeout(r, 100));
     const divergent = await post<CreateRunBody>(
-      '/v1/runs',
+      '/runs',
       { workflowId: 'openwop-app.uppercase', tenantId: 'demo', inputs: { text: 'TWO' } },
       { 'idempotency-key': key },
     );
@@ -388,7 +398,7 @@ describe('ADR 0549 P0 — the digest survives a process restart', () => {
     const { join } = await import('node:path');
     const dir = await mkdtemp(join(tmpdir(), 'idem-restart-'));
     const dsn = `sqlite://${join(dir, 'test.db')}`;
-    const key = 'survives-restart';
+    const key = 'survives-restart-adr0549';
     const now = new Date().toISOString();
     const d1 = canonicalRequestDigest({ text: 'first' }, 'POST:/v1/runs');
     const d2 = canonicalRequestDigest({ text: 'second' }, 'POST:/v1/runs');
@@ -623,7 +633,7 @@ describe('ADR 0549 P1 — the route releases a claim it never committed', () => 
     __budgetReadsForTests.budget = async () => ({ hardCap: true, dailyUsd: 1 }) as never;
     __budgetReadsForTests.spend = async () => 999;
 
-    const failed = await post<{ error?: string }>('/v1/runs', body, { 'idempotency-key': key });
+    const failed = await post<{ error?: string }>('/runs', body, { 'idempotency-key': key });
     expect(failed.status).toBe(429);
     expect(failed.body.error).toBe('rate_limited');
 
@@ -632,7 +642,7 @@ describe('ADR 0549 P1 — the route releases a claim it never committed', () => 
     __budgetReadsForTests.budget = realBudget;
     __budgetReadsForTests.spend = realSpend;
 
-    const retry = await post<CreateRunBody>('/v1/runs', body, { 'idempotency-key': key });
+    const retry = await post<CreateRunBody>('/runs', body, { 'idempotency-key': key });
     expect(retry.status).toBe(201);
     expect(typeof retry.body.runId).toBe('string');
   });
@@ -642,10 +652,10 @@ describe('ADR 0549 P1 — the route releases a claim it never committed', () => 
     // is cleared and the row must survive to be replayed.
     const key = `commit-then-replay-${Math.random().toString(36).slice(2)}`;
     const body = { workflowId: 'openwop-app.uppercase', tenantId: 'demo', inputs: { text: 'keep' } };
-    const first = await post<CreateRunBody>('/v1/runs', body, { 'idempotency-key': key });
+    const first = await post<CreateRunBody>('/runs', body, { 'idempotency-key': key });
     expect(first.status).toBe(201);
     await new Promise((r) => setTimeout(r, 100));
-    const second = await post<CreateRunBody>('/v1/runs', body, { 'idempotency-key': key });
+    const second = await post<CreateRunBody>('/runs', body, { 'idempotency-key': key });
     expect(second.status).toBe(201);
     expect(second.headers.get('openwop-Idempotent-Replay')).toBe('true');
     expect(second.body.runId).toBe(first.body.runId);

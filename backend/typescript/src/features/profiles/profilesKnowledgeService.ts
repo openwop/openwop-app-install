@@ -32,7 +32,7 @@ import { OpenwopError } from '../../types.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
 import { registerSubjectEraser } from '../../host/subjectErasure.js';
 import { type ShareableKbProvider } from '../../host/shareableKb.js';
-import { createCollection, deleteDocument, getCollection, upsertDocument } from '../kb/kbService.js';
+import { createCollection, deleteDocument, getCollection, upsertDocument, KB_MAINTENANCE_CALLER } from '../kb/kbService.js';
 import { kbMutated, type KbEmitOptions } from '../kb/emit.js'; // ADR 0643 D3 — silent per-row sweeps + ONE batch event
 import { PREAUTHORIZED_CALLER } from '../../host/subjectAccess.js'; // ADR 0643 R4 NIT 2 — the DSAR remover is an eraser lane
 import { listProfiles, type Profile } from './profilesService.js';
@@ -97,6 +97,10 @@ export async function indexProfile(tenantId: string, userId: string, profile: Pr
     await upsertDocument(tenantId, TEAM_ORG, collectionIdFor(tenantId), docIdFor(userId), userId, {
       title: profile.preferredName || profile.jobTitle || userId,
       text: profileToText(profile),
+      // ADR 0830 D3 — a member writes their own bio, and this collection is recalled
+      // into OTHER members' agent turns. One person's free text must reach another
+      // person's model fenced, never as knowledge-base instructions.
+      contentTrust: 'untrusted',
       ...emit, // ADR 0643 D3 — the backfill sweep passes `{ silent: true }`
     });
   } catch (err) {
@@ -110,7 +114,8 @@ export async function indexProfile(tenantId: string, userId: string, profile: Pr
  *  instead of silently leaving searchable PII behind. Already-gone (no
  *  collection / no doc — most users are never indexed) is SUCCESS, not failure. */
 export async function removeProfileStrict(tenantId: string, userId: string): Promise<void> {
-  if (!(await getCollection(tenantId, TEAM_ORG, collectionIdFor(tenantId)))) return;
+  // G8 — the MAINTENANCE caller: a DSAR removal must reach the row while `production` is refused.
+  if (!(await getCollection(tenantId, TEAM_ORG, collectionIdFor(tenantId), KB_MAINTENANCE_CALLER))) return;
   try {
     // ADR 0643 D3 (review #5) — `{ silent: true }` UNCONDITIONALLY, a correctness rule:
     // this is the admin user-delete + DSAR fan-out lane and `docIdFor(userId)` IS the

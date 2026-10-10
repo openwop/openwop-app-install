@@ -24,7 +24,7 @@ import { join } from 'node:path';
 const CSS_FILES = ['src/styles/foundations/tokens.css', 'src/styles/global.css', 'src/styles/chrome/admin.css', 'src/styles/primitives/adr0510.css', 'src/brand/brand.css'];
 /** Feature class-prefixes under the gate. Add a prefix when a feature grows a
  *  prefixed CSS family — the gate then owns its rename safety. */
-const PREFIXES = ['walkthrough-', 'notifpanel-', 'netpanel-', 'btn-'];
+const PREFIXES = ['walkthrough-', 'notifpanel-', 'netpanel-', 'btn-', 'fstore-'];
 const LITERAL_RE = /'([^'\\\n]*)'|"([^"\\\n]*)"|`([^`\\]*)`/g;
 /** Known prefixed NON-class string values (wire ids etc.) — never selectors.
  *  'walkthrough-step' is the interrupt KIND (a persisted wire value). */
@@ -48,7 +48,7 @@ for (const f of CSS_FILES) {
   // definition, so a genuinely dead class read as defined. Same lesson
   // check-failed-read-sentinels.mjs documents for its own scan.
   const css = readFileSync(f, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
-  for (const m of css.matchAll(/\.([a-z][a-z0-9-]*)/g)) {
+  for (const m of css.matchAll(/\.([a-z][a-z0-9_-]*)/g)) {
     if (PREFIXES.some((p) => m[1].startsWith(p))) defined.add(m[1]);
   }
 }

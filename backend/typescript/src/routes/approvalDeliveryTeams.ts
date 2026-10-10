@@ -19,7 +19,7 @@ import {
   clearTeamsDeliveryPref,
 } from '../host/teamsApprovalDelivery.js';
 
-const PATH = '/v1/host/openwop-app/approval-delivery/teams';
+const PATH = '/host/openwop-app/approval-delivery/teams';
 
 function callerUserId(req: Request): string {
   const userId = req.userId;

@@ -1,6 +1,6 @@
 /**
  * ADR 0486 — the public-site NAV list endpoint
- * `GET /v1/host/openwop-app/public/host-site/pages` (published CMS pages, slug +
+ * `GET /host/openwop-app/public/host-site/pages` (published CMS pages, slug +
  * title) that feeds the public shell's hamburger menu so EVERY published page is
  * reachable from the home page. Asserts: the seeded published pages (features,
  * compare) are listed; the `home` page is excluded (it is the brand link); a
@@ -27,7 +27,7 @@ afterAll(async () => { await new Promise<void>((res) => server.close(() => res()
 
 const admin = (method: string, path: string, body?: unknown) =>
   fetch(`${BASE}${path}`, { method, headers: ADMIN, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-const navList = () => fetch(`${BASE}/v1/host/openwop-app/public/host-site/pages`); // NO auth
+const navList = () => fetch(`${BASE}/host/openwop-app/public/host-site/pages`); // NO auth
 
 interface NavPages { pages: { slug: string; title: string }[] }
 
@@ -49,7 +49,7 @@ describe('public-site nav list (ADR 0486)', () => {
 
   it('never lists a DRAFT page (published-only — no dishonest link into an unpublished page)', async () => {
     // A draft page (created, never published) must not surface in the public nav.
-    const created = await admin('POST', '/v1/host/openwop-app/cms/orgs/host-site/pages', {
+    const created = await admin('POST', '/host/openwop-app/cms/orgs/host-site/pages', {
       title: 'Draft Nav Probe', slug: 'draft-nav-probe',
     });
     expect(created.status).toBeLessThan(300);

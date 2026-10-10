@@ -88,7 +88,7 @@ describe('ADR 0577 — AI briefing tile', () => {
 
   it('a deleted conversation shows the gone state and offers the re-pick picker', async () => {
     getBriefingConfig.mockResolvedValue({ conversationId: 'conv:gone', updatedAt: 'x' });
-    getChatSession.mockRejectedValue(new Error('404'));
+    getChatSession.mockRejectedValue(new Error('not_found: chat_session "conv:gone" not found.')); // the client's real 404 shape
     listScheduledChats.mockResolvedValue([
       { chatId: 'c1', agentId: 'iris', prompt: 'daily summary', conversationId: 'conv:2', cronExpr: '0 8 * * *', enabled: true },
     ]);
@@ -103,6 +103,23 @@ describe('ADR 0577 — AI briefing tile', () => {
     // The assertion is unchanged in strength — `findBy` still fails if the
     // picker never appears.
     expect(await screen.findByLabelText(/show the latest update from/i)).toBeTruthy();
+  });
+
+  it('ADR 0846 grade-ux — a NON-404 conversation failure is a failed read, not "gone"', async () => {
+    getBriefingConfig.mockResolvedValue({ conversationId: 'conv:1', updatedAt: 'x' });
+    getChatSession.mockRejectedValue(new Error('internal: HTTP 500'));
+    renderTile();
+    await screen.findByText(/could not load/i);
+    expect(screen.queryByText(/no longer exists/i)).toBeNull(); // no re-pick invitation over a good setting
+  });
+
+  it('ADR 0846 grade-ux — a failed scheduled-chats read never offers the create CTA', async () => {
+    getBriefingConfig.mockResolvedValue(null);
+    listScheduledChats.mockRejectedValue(new Error('internal: HTTP 500'));
+    renderTile();
+    await screen.findByText(/could not load/i);
+    expect(screen.queryByText(/no scheduled agent chats/i)).toBeNull();
+    expect(screen.queryByRole('link', { name: /briefing/i })).toBeNull();
   });
 
   it('unconfigured with NO scheduled chats: the CTA seeds the ONE chat composer', async () => {

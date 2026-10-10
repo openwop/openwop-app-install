@@ -8,8 +8,19 @@
  * drive it, and it had ZERO test references repo-wide. The test below drives the
  * REAL registered lane (`__runKvAgeOutOnce`), not the swept function, which is
  * the ADR 0371 "test the DAEMON WIRING" rule.
+ *
+ * Sabotage-witnessed (w7 /grade-tests): each of these turns a case here red —
+ * the registered eraser's body replaced with a no-op; `DurableCollection.deleteRow`'s
+ * raw-JSON tenant fallback removed (stranded index marker); the delete cascade
+ * looked up per INSTANCE instead of per namespace; `purgeTenantRows`' raw
+ * `kvDelete` branch disabled; `countShareViewOrThrow`'s capped/uncapped split
+ * inverted either way; the blank-tenant/subject early return removed.
+ *
+ * ORDER: the last describe constructs a foreign handle over `sharing:link`, which
+ * displaces the namespace's registry entry for the rest of the file. It MUST stay
+ * last — see the note above it.
  */
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, vi } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -19,7 +30,7 @@ import { openStorage } from '../src/storage/index.js';
 import type { Storage } from '../src/storage/storage.js';
 import { createOrg } from '../src/host/accessControlService.js';
 import { hostExtStorage } from '../src/host/hostExtPersistence.js';
-import { __listKvAgeOutForTest, __runKvAgeOutOnce } from '../src/host/kvAgeOut.js';
+import { __runKvAgeOutOnce } from '../src/host/kvAgeOut.js';
 import { eraseSubject } from '../src/host/subjectErasure.js';
 import { purgeTenantHostExt } from '../src/host/hostExtPersistence.js';
 import {
@@ -122,18 +133,36 @@ describe('SHARE-2 — erasing a subject REVOKES the links they minted', () => {
   });
 
   it('fails closed on a blank tenant or subject (never a global sweep)', async () => {
-    expect(await eraseSubjectSharing('', 'alice')).toMatchObject({ revoked: 0, anonymized: 0 });
-    expect(await eraseSubjectSharing(T, '')).toMatchObject({ revoked: 0, anonymized: 0 });
+    // Rows that a MISSING guard would match: without these the per-row filter
+    // refuses blank keys on its own and the early return could not fail
+    // (measured: the probe that deleted it stayed green against an empty match).
+    const live = (tokenHash: string, tenantId: string, createdBy: string): ShareLink => ({
+      tokenHash, tenantId, orgId: 'org-blank', resourceType: 'cms_page', resourceId: tokenHash,
+      createdBy, createdAt: new Date().toISOString(), viewCount: 0, revoked: false,
+    });
+    // Row only, no tenant-index marker (`putRow` would file a marker under T).
+    for (const l of [live('blank-tenant-row', '', 'alice'), live('blank-subject-row', T, '')]) {
+      await storage.kvSet(linkKey(l.tokenHash), JSON.stringify(l));
+    }
+
+    try {
+      expect(await eraseSubjectSharing('', 'alice')).toMatchObject({ revoked: 0, anonymized: 0 });
+      expect(await eraseSubjectSharing(T, '')).toMatchObject({ revoked: 0, anonymized: 0 });
+      expect(await getRow('blank-tenant-row')).toMatchObject({ revoked: false, createdBy: 'alice' });
+      expect(await getRow('blank-subject-row')).toMatchObject({ revoked: false, createdBy: '' });
+    } finally {
+      // A blank-tenant row is not a state production can write, and it poisons the
+      // tenant-index backfill that later `listForTenantIndexed` reads run — remove both.
+      await storage.kvDelete(linkKey('blank-tenant-row'));
+      await storage.kvDelete(linkKey('blank-subject-row'));
+    }
   });
 });
 
 describe('WF-SHARE-1/2 — dead links age out on the REGISTERED retention lane', () => {
-  it('the lane is registered at all (the wiring, not the swept function)', () => {
-    const reg = __listKvAgeOutForTest().find((r) => r.id === 'sharing:link');
-    expect(reg, 'sharing:link is not registered for age-out — a host that stops minting would never purge').toBeTruthy();
-    expect(reg).toMatchObject({ prefix: 'hostext:sharing:link:', ttlDays: 30, timestampField: 'deadAt' });
-  });
-
+  // This case IS the registration witness: an unregistered lane, a wrong prefix or
+  // timestampField purges nothing, and any ttlDays outside (5, 45) mis-sorts the two
+  // dead rows below (w7: ttlDays 30→60 turns it red).
   it('purges a long-dead link + its frame-view rows, and KEEPS a live one and one inside the grace window', async () => {
     await seedConversation('conv-sweep');
     const longDead = await createLink(T, ORG, 'alice', { resourceType: 'conversation', resourceId: 'conv-sweep' });
@@ -183,7 +212,7 @@ describe('WF-SHARE-1/2 — dead links age out on the REGISTERED retention lane',
     // Simulate a pre-field row: revoked, with revokedAt but NO deadAt.
     const row = (await getRow(legacy.tokenHash))!;
     const { deadAt: _drop, ...withoutDeadAt } = { ...row, revoked: true, revokedAt: iso(60 * DAY) };
-    await putRow(withoutDeadAt as ShareLink);
+    await putRow(withoutDeadAt);
 
     // Before the backfill the lane cannot see it — no timestamp field, so it is
     // SKIPPED (never deleted on a guess). That is the regression the backfill exists for.
@@ -195,11 +224,6 @@ describe('WF-SHARE-1/2 — dead links age out on the REGISTERED retention lane',
     expect(await getRow(legacy.tokenHash), 'a backfilled 60-day-dead link should now age out').toBeNull();
   });
 
-  // ORDERING IS LOAD-BEARING (R2 review F2): this test constructs a second
-  // handle over `hostext:sharing:link:`, which DISPLACES the namespace's registry
-  // entry for the rest of the file (last construction wins). Every test that
-  // needs the production resolution therefore runs BEFORE it. Moving it up would
-  // silently restore the vacuity the marker assertions above exist to close.
   // SHWF-5 / ADR 0644 D5 — the WIRING witness for the eraser. Everything else in
   // this file calls `eraseSubjectSharing` DIRECTLY, so the `registerSubjectEraser`
   // line at `sharingService.ts:1345` was pinned only by a source-text ratchet
@@ -208,16 +232,13 @@ describe('WF-SHARE-1/2 — dead links age out on the REGISTERED retention lane',
   // other test in the repo stays green. This one drives the HOST lane.
   it('the host eraseSubject lane reaches Sharing through its REGISTERED eraser', async () => {
     const orgB = await createOrg({ tenantId: T, createdBy: 'wire-a', name: 'WireOrg' });
-    const link = await createLink(T, orgB.orgId, 'wire-a', { resourceType: 'cms_page', resourceId: 'wire-page' })
-      .catch(() => null);
-    // The resource type does not matter to erasure — seed raw if the mint refuses.
-    const tokenHash = link ? link.tokenHash : 'wire-hash-1';
-    if (!link) {
-      await storage.kvSet(`hostext:sharing:link:${tokenHash}`, JSON.stringify({
-        tokenHash, tenantId: T, orgId: orgB.orgId, resourceType: 'cms_page', resourceId: 'wire-page',
-        createdBy: 'wire-a', createdAt: new Date().toISOString(), viewCount: 0, revoked: false,
-      }));
-    }
+    // Seeded raw: the resource type does not matter to erasure, and there is no
+    // CMS page to mint against (a `createLink` here always 404'd into a fallback).
+    const tokenHash = 'wire-hash-1';
+    await storage.kvSet(`hostext:sharing:link:${tokenHash}`, JSON.stringify({
+      tokenHash, tenantId: T, orgId: orgB.orgId, resourceType: 'cms_page', resourceId: 'wire-page',
+      createdBy: 'wire-a', createdAt: new Date().toISOString(), viewCount: 0, revoked: false,
+    }));
     const before = (await getRow(tokenHash))!;
     expect(before.revoked, 'non-vacuity: the link must be LIVE before erasure').toBe(false);
 
@@ -241,15 +262,12 @@ describe('WF-SHARE-1/2 — dead links age out on the REGISTERED retention lane',
   it('tenant teardown actually reclaims BOTH Sharing stores', async () => {
     const TT = 'shr-teardown-tenant';
     const org = await createOrg({ tenantId: TT, createdBy: 'td-u', name: 'TdOrg' });
-    const l = await createLink(TT, org.orgId, 'td-u', { resourceType: 'cms_page', resourceId: 'td-page' })
-      .catch(() => null);
-    const th = l ? l.tokenHash : 'td-hash-1';
-    if (!l) {
-      await storage.kvSet(`hostext:sharing:link:${th}`, JSON.stringify({
-        tokenHash: th, tenantId: TT, orgId: org.orgId, resourceType: 'cms_page', resourceId: 'td-page',
-        createdBy: 'td-u', createdAt: new Date().toISOString(), viewCount: 0, revoked: false,
-      }));
-    }
+    // Seeded raw (no CMS page exists to mint against — see the eraser witness).
+    const th = 'td-hash-1';
+    await storage.kvSet(`hostext:sharing:link:${th}`, JSON.stringify({
+      tokenHash: th, tenantId: TT, orgId: org.orgId, resourceType: 'cms_page', resourceId: 'td-page',
+      createdBy: 'td-u', createdAt: new Date().toISOString(), viewCount: 0, revoked: false,
+    }));
     await storage.kvSet(`hostext:sharing:frameview:${th}:7`, JSON.stringify({ tokenHash: th, tenantId: TT, frame: 7, count: 3 }));
 
     // Non-vacuity, both stores, BEFORE the purge.
@@ -262,11 +280,6 @@ describe('WF-SHARE-1/2 — dead links age out on the REGISTERED retention lane',
     expect(await storage.kvGet(`hostext:sharing:frameview:${th}:7`)).toBeFalsy();
   });
 
-  // SHWF-8 / ADR 0644 D7 — `hasActiveLinkForResource` had ZERO references in the
-  // whole test tree, and it gates a DESTRUCTIVE decision: `canvasRetention.ts:75`
-  // deletes an abandoned canvas when this answers false, so a false negative
-  // destroys a resource that still has a live public link. Its own docblock says
-  // the fail direction was gotten backwards once already.
   // SHWF-8 / ADR 0644 D7 — `hasActiveLinkForResource` had ZERO references in the
   // whole test tree, and it gates a DESTRUCTIVE decision: `canvasRetention.ts:75`
   // deletes an abandoned canvas when this answers false, so a false negative
@@ -301,7 +314,63 @@ describe('WF-SHARE-1/2 — dead links age out on the REGISTERED retention lane',
     await seed('hal-bad', { resourceId: 'bad-one', expiresAt: 'not-a-date' });
     expect(await hasActiveLinkForResource(T, 'app_builder_canvas', 'bad-one')).toBe(false);
   });
+});
 
+describe('SHARE-4 — the view cap fails CLOSED under CAS contention', () => {
+  it('a capped link refuses (503) rather than serving an uncounted view', async () => {
+    await seedConversation('conv-cap');
+    const link = await createLink(T, ORG, 'alice', { resourceType: 'conversation', resourceId: 'conv-cap', maxViews: 5 });
+
+    // Simulated contention: every CAS attempt is STUBBED to lose (the honest
+    // description — an earlier comment here called it "a collision, not a stubbed
+    // rejection", which it never was). That is the condition the 8-attempt loop
+    // exhausts under, and the only one a sequential test can reach.
+    const spy = vi.spyOn(DurableCollection.prototype, 'compareAndSwap').mockResolvedValue(false);
+    try {
+      await expect(resolveShared(link.token)).rejects.toMatchObject({ httpStatus: 503, details: { reason: 'view-count-contention' } });
+    } finally {
+      spy.mockRestore();
+    }
+
+    // The cap was not silently spent, and the link still works once contention clears.
+    expect((await getRow(link.tokenHash))?.viewCount).toBe(0);
+    expect((await resolveShared(link.token)).resourceType).toBe('conversation');
+  });
+
+  it('an UNCAPPED link still serves (the count there is analytics, not a promise)', async () => {
+    await seedConversation('conv-uncapped');
+    const link = await createLink(T, ORG, 'alice', { resourceType: 'conversation', resourceId: 'conv-uncapped' });
+    const spy = vi.spyOn(DurableCollection.prototype, 'compareAndSwap').mockResolvedValue(false);
+    try {
+      expect((await resolveShared(link.token)).resourceType).toBe('conversation');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+describe('SHARE-UX-1 — the owner list marks an ORPHANED link instead of falling back to an id', () => {
+  it('flags resourceMissing once the underlying resource is gone, and not before', async () => {
+    await seedConversation('conv-orphan');
+    const link = await createLink(T, ORG, 'alice', { resourceType: 'conversation', resourceId: 'conv-orphan' });
+    const before = (await listLinks(T, ORG)).find((l) => l.tokenHash === link.tokenHash);
+    expect(before?.cardTitle).toBeTruthy();
+    expect(before?.resourceMissing).toBeUndefined();
+
+    await hostExtStorage().deleteChatSession(T, 'conv-orphan');
+    const after = (await listLinks(T, ORG)).find((l) => l.tokenHash === link.tokenHash);
+    expect(after?.cardTitle).toBeUndefined();
+    expect(after?.resourceMissing, 'an orphaned row must not read as a healthy one').toBe(true);
+  });
+});
+
+// ORDERING IS LOAD-BEARING (R2 review F2) — this describe MUST stay LAST in the
+// file. It constructs a second handle over `hostext:sharing:link:`, which
+// DISPLACES the namespace's registry entry for every later test (last
+// construction wins). Every test that needs the production resolution (the
+// marker assertions, the eraser and teardown witnesses) therefore runs before
+// it; moving it up would silently restore the vacuity those assertions close.
+describe('WF-SHARE-1 — the cascade is per NAMESPACE (runs last: displaces the registry entry)', () => {
   it('the frame-view cascade fires from ANY handle over the namespace, not just the one that declared it', async () => {
     // REGRESSION, and the reason the cascade is registered per NAMESPACE rather
     // than per instance. `sharing:link` has two live handles — the hash-keyed
@@ -321,58 +390,5 @@ describe('WF-SHARE-1/2 — dead links age out on the REGISTERED retention lane',
     expect(await _frameViewCountForToken(link.token), 'a second handle must not be able to drop rows without their cascade').toBe(0);
     // …and the marker still goes with it, whichever handle does the deleting.
     expect(await markerExists(link.tokenHash)).toBe(false);
-  });
-});
-
-describe('SHARE-4 — the view cap fails CLOSED under CAS contention', () => {
-  it('a capped link refuses (503) rather than serving an uncounted view', async () => {
-    await seedConversation('conv-cap');
-    const link = await createLink(T, ORG, 'alice', { resourceType: 'conversation', resourceId: 'conv-cap', maxViews: 5 });
-
-    // Force real contention: every CAS attempt loses because the row is rewritten
-    // underneath it. `compareAndSwap` compares the row it was handed, so bumping
-    // an unrelated field between read and swap makes the swap fail for real —
-    // this is a collision, not a stubbed rejection.
-    const original = DurableCollection.prototype.compareAndSwap;
-    DurableCollection.prototype.compareAndSwap = async function patched(this: unknown, ...args: unknown[]) {
-      void args;
-      return false; // every attempt loses the race
-    } as typeof original;
-    try {
-      await expect(resolveShared(link.token)).rejects.toMatchObject({ httpStatus: 503, details: { reason: 'view-count-contention' } });
-    } finally {
-      DurableCollection.prototype.compareAndSwap = original;
-    }
-
-    // The cap was not silently spent, and the link still works once contention clears.
-    expect((await getRow(link.tokenHash))?.viewCount).toBe(0);
-    expect((await resolveShared(link.token)).resourceType).toBe('conversation');
-  });
-
-  it('an UNCAPPED link still serves (the count there is analytics, not a promise)', async () => {
-    await seedConversation('conv-uncapped');
-    const link = await createLink(T, ORG, 'alice', { resourceType: 'conversation', resourceId: 'conv-uncapped' });
-    const original = DurableCollection.prototype.compareAndSwap;
-    DurableCollection.prototype.compareAndSwap = async function patched() { return false; } as typeof original;
-    try {
-      expect((await resolveShared(link.token)).resourceType).toBe('conversation');
-    } finally {
-      DurableCollection.prototype.compareAndSwap = original;
-    }
-  });
-});
-
-describe('SHARE-UX-1 — the owner list marks an ORPHANED link instead of falling back to an id', () => {
-  it('flags resourceMissing once the underlying resource is gone, and not before', async () => {
-    await seedConversation('conv-orphan');
-    const link = await createLink(T, ORG, 'alice', { resourceType: 'conversation', resourceId: 'conv-orphan' });
-    const before = (await listLinks(T, ORG)).find((l) => l.tokenHash === link.tokenHash);
-    expect(before?.cardTitle).toBeTruthy();
-    expect(before?.resourceMissing).toBeUndefined();
-
-    await hostExtStorage().deleteChatSession(T, 'conv-orphan');
-    const after = (await listLinks(T, ORG)).find((l) => l.tokenHash === link.tokenHash);
-    expect(after?.cardTitle).toBeUndefined();
-    expect(after?.resourceMissing, 'an orphaned row must not read as a healthy one').toBe(true);
   });
 });

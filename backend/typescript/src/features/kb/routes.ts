@@ -104,7 +104,7 @@ const kbCaller = (req: Parameters<typeof requireOrgScope>[0]): SubjectCaller => 
 
 export function registerKbRoutes(deps: RouteDeps): void {
   const { app } = deps;
-  const BASE = '/v1/host/openwop-app/kb/orgs/:orgId';
+  const BASE = '/host/openwop-app/kb/orgs/:orgId';
 
   // ADR 0608 D4 (`CPC-2`) — ONE guard in front of every `/collections/:collectionId`
   // route (all methods, all sub-paths), so search / documents / rag / reindex

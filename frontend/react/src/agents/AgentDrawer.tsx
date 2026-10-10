@@ -1,5 +1,5 @@
 import { Button } from '../ui/Button.js';
-import { useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { Link } from 'react-router-dom';
@@ -17,6 +17,10 @@ import { toast } from '../ui/toast.js';
 import { XIcon, CheckIcon, ClockIcon, MessageSquareIcon, AlertIcon, ArrowRightIcon } from '../ui/icons/index.js';
 import { useFocusTrap } from '../ui/useFocusTrap.js';
 import { ModalPortal } from '../ui/ModalPortal.js';
+
+// ADR 0862 (architect B1) — an assistant action is reviewed where its fields are shown.
+const ReviewInInboxLink = lazy(() => import('../assistantAction/AssistantActionFields.js').then((m) => ({ default: m.ReviewInInboxLink })));
+const isAssistantAction = (a: PendingApproval): boolean => a.kind === 'assistant-action' || !!a.actionId;
 
 /**
  * Agent quick-look drawer (agents-workforce redesign PR 2) — a right
@@ -61,7 +65,8 @@ export function AgentDrawer({ view, approvals, approvalsUnavailable, tab, onTab,
   tab: DrawerTab;
   onTab: (tab: DrawerTab) => void;
   onClose: () => void;
-  onCheckNow: () => void;
+  /** Absent for a viewer (ADR 0775 D1): the control is not rendered. */
+  onCheckNow?: (() => void) | undefined;
   busy: boolean;
   onResolved: () => void;
   onChat: () => void;
@@ -140,9 +145,11 @@ export function AgentDrawer({ view, approvals, approvalsUnavailable, tab, onTab,
             <div className="agent-drawer-role">{entry.label ?? t('drawerRoleFallback')}</div>
           </div>
           <div className="action-bar agent-drawer-headactions">
-            <Button variant="secondary" size="sm" disabled={busy || !entry.enabled} onClick={onCheckNow}>
-              {busy ? t('drawerChecking') : t('drawerCheckNow')}
-            </Button>
+            {onCheckNow ? (
+              <Button variant="secondary" size="sm" disabled={busy || !entry.enabled} onClick={onCheckNow}>
+                {busy ? t('drawerChecking') : t('drawerCheckNow')}
+              </Button>
+            ) : null}
             <Button variant="secondary" size="sm" onClick={onChat} title={t('drawerChatTitle', { persona: entry.persona })}>
               <MessageSquareIcon size={14} aria-hidden /> {t('drawerChat')}
             </Button>
@@ -180,11 +187,20 @@ export function AgentDrawer({ view, approvals, approvalsUnavailable, tab, onTab,
                     <AlertIcon size={13} aria-hidden /> {t('drawerWaitingOnYou', { when: relativeTime(a.createdAt) ?? t('drawerNow') })}
                   </div>
                   <div className="agent-drawer-ask-title">{a.cardTitle ?? a.proposal}</div>
-                  <div className="agent-drawer-ask-detail">{t('drawerProposesToRun', { workflow: workflowName(a.workflowId) })}</div>
+                  {/* An assistant action runs no workflow (its `workflowId` is empty), so this line
+                      read "Proposes to run ." — the title above already says what it is. */}
+                  {isAssistantAction(a) ? null : <div className="agent-drawer-ask-detail">{t('drawerProposesToRun', { workflow: workflowName(a.workflowId) })}</div>}
                   <div className="action-bar u-mt-2">
-                    <Button variant="accent-solid" size="sm" disabled={resolving === a.approvalId} onClick={() => void approve(a)}>
-                      <CheckIcon size={14} aria-hidden /> {t('drawerApproveResume')}
-                    </Button>
+                    {/* ADR 0862 — this drawer shows a 77-character summary, which is not
+                        enough to approve an outbound send from (the inbox card shows every
+                        field, and carries the hash the approve must echo). */}
+                    {isAssistantAction(a) ? (
+                      <Suspense fallback={null}><ReviewInInboxLink approvalId={a.approvalId} /></Suspense>
+                    ) : (
+                      <Button variant="accent-solid" size="sm" disabled={resolving === a.approvalId} onClick={() => void approve(a)}>
+                        <CheckIcon size={14} aria-hidden /> {t('drawerApproveResume')}
+                      </Button>
+                    )}
                     <Button variant="secondary" size="sm" disabled={resolving === a.approvalId} onClick={() => void sendBack(a)}>
                       {t('drawerSendBack')}
                     </Button>

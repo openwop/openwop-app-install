@@ -5,7 +5,7 @@
  */
 
 import { getWorkflowDefinitionRaw } from '../../client/workflowsClient.js';
-import { authedHeaders, config, fetchOpts } from '../../client/config.js';
+import { assertSynced, authedHeaders, config, fetchOpts } from '../../client/config.js';
 
 interface RegisterBody {
   workflowId: string;
@@ -45,17 +45,38 @@ interface RegisterBody {
   }>;
 }
 
-export async function registerWorkflow(body: RegisterBody): Promise<{ workflowId: string; nodeCount: number }> {
+/**
+ * @param opts.pristine ADR 0789 — the canvas is unchanged since load.
+ * @param opts.baseRevision ADR 0770 D5 — the head this canvas was loaded from.
+ *   The Run and debug lanes register the canvas before starting a run; without
+ *   the precondition they overwrote a head another tab/device had moved, the
+ *   same clobber the autosave now refuses. A stale base throws
+ *   `SyncFailureError(409, 'workflow_head_moved')`.
+ * @returns `revision` — the persisted head, the next save's base.
+ */
+export async function registerWorkflow(
+  body: RegisterBody,
+  opts: { baseRevision?: string; pristine?: boolean } = {},
+): Promise<{ workflowId: string; nodeCount: number; revision?: string; forkedFrom?: string; repointFailed?: string[] }> {
   const res = await fetch(`${config.baseUrl}/host/openwop-app/workflows`, fetchOpts({
     method: 'POST',
-    headers: authedHeaders({ 'content-type': 'application/json' }),
+    headers: authedHeaders({
+      'content-type': 'application/json',
+      ...(opts.baseRevision ? { 'if-match': `"${opts.baseRevision}"` } : {}),
+      // ADR 0789 — see `isCanvasPristine`: an untouched seeded workflow's Run
+      // must not fork it.
+      ...(opts.pristine ? { 'x-openwop-canvas-pristine': '1' } : {}),
+    }),
     body: JSON.stringify(body),
   }));
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`register_workflow_failed (${res.status}): ${text.slice(0, 300)}`);
-  }
-  return res.json() as Promise<{ workflowId: string; nodeCount: number }>;
+  // ADR 0770 — the typed refusal (status + domain reason) instead of an
+  // `Error('register_workflow_failed (409): <raw body>')` the Run banner then
+  // showed verbatim (grade BLD-14).
+  await assertSynced(res);
+  // ADR 0789 — `workflowId` is the id the server PERSISTED under. For a shared
+  // (seeded) workflow an edit forks onto the tenant's own id (`forkedFrom` set);
+  // callers run and adopt the RETURNED id, never the one they sent.
+  return res.json() as Promise<{ workflowId: string; nodeCount: number; revision?: string; forkedFrom?: string; repointFailed?: string[] }>;
 }
 
 /**

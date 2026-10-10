@@ -12,14 +12,27 @@
  */
 
 import type { BackendFeature } from '../types.js';
+import { campaignOrchestrationParallel } from './orchestrationWorkflow.js';
+import { registerWorkflowsFeature } from '../../host/workflowFeatureGate.js';
 import { registerCampaignStudioRoutes } from './routes.js';
+import { registerCampaignProjectHooks } from './campaignProject.js';
 import { registerCampaignOrchestrationAgentTools } from './agentTools.js';
 import { buildCampaignStudioSurface } from './surface.js';
+import { registerFeatureDataExporter } from '../../host/featureDataExport.js';
+import { exportCampaignOrchestrationData } from './dataExport.js';
 
 export const campaignOrchestrationFeature: BackendFeature = {
   id: 'campaign-orchestration',
+  // ADR 0852 D1 — a campaign's board, chat and team ledger live on its linked project.
+  dependsOn: ['projects'],
   registerRoutes: (deps) => {
+    registerFeatureDataExporter('campaign-orchestration', exportCampaignOrchestrationData); // ADR 0820 §7 — read-only export, served after a plan lapse
+    // ADR 0820 §7 / G6 — this feature OWNS its chain-backed workflows (registered
+    // in `features/index.ts`): every launch resolves 'campaign-orchestration' (toggle + plan).
+    registerWorkflowsFeature([campaignOrchestrationParallel].map((w) => w.workflowId), 'campaign-orchestration');
     registerCampaignStudioRoutes(deps);
+    // ADR 0852 — campaign delete ⇒ archive its project; campaign runs bind to that project.
+    registerCampaignProjectHooks();
     // CFP-1 (ADR 0308 D2) — register the Campaign Strategist's real tools. The
     // run-starter deps ride the closure (a chat-time tool scope carries no
     // storage/hostSuite); the tools resolve the target brief and share the
@@ -28,14 +41,14 @@ export const campaignOrchestrationFeature: BackendFeature = {
   },
   surface: { id: 'campaign-orchestration', build: buildCampaignStudioSurface },
   requiredPacks: [
-    { name: 'feature.campaign-orchestration.nodes', version: '1.1.2' },
-    { name: 'feature.campaign-orchestration.agents', version: '1.2.0' },
+    { name: 'feature.campaign-orchestration.nodes', version: '1.1.3' },
+    { name: 'vendor.openwop-app.campaign-orchestration.agents', version: '1.2.1' },
   ],
   toggleDefault: {
     id: 'campaign-orchestration',
     label: 'Campaign Studio',
     description:
-      'The composable campaign workflow that ties Campaign Studio together — from a confirmed brief, generate the messaging kernel, fan out the five channels, check cross-asset consistency, and finalize a marketing campaign. Driven through the one chat by the Campaign Strategist (ADR 0058). Channels run sequentially today; parallel fan-out is a planned upgrade. OFF by default.',
+      'The composable campaign workflow that ties Campaign Studio together — from a confirmed brief, generate the messaging kernel, fan out the five channels, check cross-asset consistency, and finalize a marketing campaign. Driven through the one chat by the Campaign Strategist. Channels run sequentially today; parallel fan-out is a planned upgrade.',
     category: 'Marketing',
     status: 'off',
     bucketUnit: 'tenant',

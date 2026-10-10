@@ -3,8 +3,8 @@
  * over HTTP. Boots the real app via createApp and exercises the LOCKED
  * post-amendment shape (openwop#745) the gated `voice-transcription-streaming`
  * conformance scenario will drive:
- *   POST /v1/host/sample/ai/call-transcriber  (and the app-canonical
- *        /v1/host/openwop-app/ai/call-transcriber alias)
+ *   POST /host/sample/ai/call-transcriber  (and the app-canonical
+ *        /host/openwop-app/ai/call-transcriber alias)
  *   body { audio: { streamRef } } → { finalText, atMs, language?, events: voice.* }
  *
  * Asserts: the host advertises aiProviders.realtimeVoice.transcription ===
@@ -39,8 +39,8 @@ afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
 });
 
-const APP_PATH = '/v1/host/openwop-app/ai/call-transcriber';
-const SAMPLE_PATH = '/v1/host/sample/ai/call-transcriber';
+const APP_PATH = '/host/openwop-app/ai/call-transcriber';
+const SAMPLE_PATH = '/host/sample/ai/call-transcriber';
 const post = (path: string, body: unknown) => fetch(`${BASE}${path}`, { method: 'POST', headers: H, body: JSON.stringify(body) });
 
 type VoiceEvent = { type: string; payload: Record<string, unknown> };
@@ -49,12 +49,8 @@ type VoiceEvent = { type: string; payload: Record<string, unknown> };
 type SeamOk = { finalText: string; atMs: number; language?: string; events: VoiceEvent[] };
 
 describe('RFC 0106 §B — real-time voice transcriber seam (ADR 0109 P1)', () => {
-  it('advertises aiProviders.realtimeVoice.transcription === "streaming"', async () => {
-    const doc = await (await fetch(`${BASE}/.well-known/openwop`, { headers: H })).json() as {
-      aiProviders?: { realtimeVoice?: { transcription?: unknown } };
-    };
-    expect(doc.aiProviders?.realtimeVoice?.transcription).toBe('streaming');
-  });
+  // ADR 0812 P3c-0 — the v1-document advert leg (`aiProviders.realtimeVoice.transcription`)
+  // was deleted: v2's `realtimeVoice` seat is unfilled here (whd7-v2-projection-parity KNOWN_UNPROJECTED).
 
   it('400s (invalid_request) when neither audio.streamRef nor audio.url is supplied', async () => {
     const res = await post(APP_PATH, { audio: {} });

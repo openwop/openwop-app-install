@@ -16,7 +16,11 @@ export function createCdpClient({ baseUrl, token, fetchImpl = globalThis.fetch }
   if (!baseUrl) throw new Error('createCdpClient: baseUrl is required');
   const url = String(baseUrl).replace(/\/+$/, '');
   const headers = { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) };
-  const BASE = '/v1/host/openwop-app/cdp';
+  // ADR 0812 P3-0 — the unversioned host-extension path. The `/v1` spelling this
+  // used to carry answers 410 on any host that has retired major 1 (the default
+  // since ADR 0812 P1, and app.openwop.dev since 2026-10-03): writes are not
+  // forwarded, so every collect/register call failed.
+  const BASE = '/host/openwop-app/cdp';
 
   const post = async (path, body) => {
     const res = await fetchImpl(`${url}${BASE}${path}`, { method: 'POST', headers, body: JSON.stringify(body) });

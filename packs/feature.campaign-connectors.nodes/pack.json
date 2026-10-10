@@ -1,6 +1,7 @@
 {
   "name": "feature.campaign-connectors.nodes",
-  "version": "1.2.0",
+  "version": "1.2.1",
+  "kind": "node",
   "description": "Campaign Connectors node pack (sync honest-ON per the campaign gap plan C2) — `import-csv` (parse a platform CSV export onto the unified metric schema with dedup + computed fields) and `sync` (pull yesterday's metrics for every dispatched campaign through the Connections broker via ctx.ads — meta/google live; other platforms stay CSV-first with `connector_not_configured`). Over ctx.features['campaign-connectors'] + ctx.ads.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
@@ -12,7 +13,7 @@
     "marketing"
   ],
   "engines": {
-    "openwop": ">=1.0.0 <2.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "nodes": [
     {
@@ -34,7 +35,7 @@
       "capabilities": []
     },
     {
-      "typeId": "feature.campaign-connectors.nodes.audience-sync",
+      "typeId": "feature.campaign-connectors.nodes.audience-sync", "category": "integration",
       "version": "1.0.0",
       "role": "action",
       "label": "Sync Segment → Ad Audience",

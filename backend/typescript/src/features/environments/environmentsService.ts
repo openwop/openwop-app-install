@@ -258,10 +258,26 @@ export interface EnvironmentView extends EnvironmentRecord {
 export async function listEnvironmentsWithDrift(tenantId: string): Promise<EnvironmentView[]> {
   const envs = await listEnvironments(tenantId);
   const liveHash = await liveConfigHash(tenantId);
-  return envs.map((e) => ({
+  return Promise.all(envs.map(async (e) => ({
     ...e,
-    drift: { drifted: e.currentSnapshot !== null && e.currentSnapshot !== liveHash, liveHash },
-  }));
+    drift: { drifted: e.currentSnapshot !== null && (await comparableHash(tenantId, e.currentSnapshot)) !== liveHash, liveHash },
+  })));
+}
+
+/**
+ * The pinned snapshot's hash as drift must compare it: over the domains that
+ * are REGISTERED now. A snapshot taken while a since-removed domain existed
+ * (ADR 0819 §2 removed `feature-toggles`) hashes that payload in, and the live
+ * hash cannot contain it, so without this every such environment reads drifted
+ * after a successful apply, permanently (ADR 0819 review M1). A snapshot whose
+ * domains are all registered keeps its stored hash: no extra hashing.
+ */
+async function comparableHash(tenantId: string, pinned: string): Promise<string> {
+  const snap = await snapshots.get(snapKey(tenantId, pinned));
+  if (!snap) return pinned;
+  const registered = new Set(listConfigDomains().map((d) => d.id));
+  if (Object.keys(snap.domains).every((id) => registered.has(id))) return pinned;
+  return hashDomains(Object.fromEntries(Object.entries(snap.domains).filter(([id]) => registered.has(id))));
 }
 
 export async function setProtection(input: {

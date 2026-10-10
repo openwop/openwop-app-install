@@ -27,24 +27,24 @@ function client() {
   };
 }
 const T = 'il-tenant';
-const u = (conv: string, suffix = ''): string => `/v1/host/openwop-app/intent-ledger/conversations/${conv}${suffix}`;
+const u = (conv: string, suffix = ''): string => `/host/openwop-app/intent-ledger/conversations/${conv}${suffix}`;
 
 // A chat session the caller owns (so getConversationMeta yields a visible, owned meta).
 async function ownedConversation(c: ReturnType<typeof client>): Promise<string> {
-  const r = await c('POST', '/v1/host/openwop-app/chat/sessions', { title: 'L' });
+  const r = await c('POST', '/host/openwop-app/chat/sessions', { title: 'L' });
   return r.body.sessionId;
 }
 
 describe('intent-ledger routes (ADR 0136, always-on)', () => {
   it('unknown conversation ⇒ 404 (always-on, IDOR-safe — no toggle gate)', async () => {
     const c = client();
-    await c('POST', '/v1/host/openwop-app/test/login', { email: 'il-off@test.dev', tenantId: T });
+    await c('POST', '/host/openwop-app/test/login', { email: 'il-off@test.dev', tenantId: T });
     expect((await c('GET', u('any'))).status).toBe(404);
   });
 
   it('draft (user goal) → approve → get reflects approved; edit-after-approve 409', async () => {
     const c = client();
-    await c('POST', '/v1/host/openwop-app/test/login', { email: 'il-owner@test.dev', tenantId: T });
+    await c('POST', '/host/openwop-app/test/login', { email: 'il-owner@test.dev', tenantId: T });
     const conv = await ownedConversation(c);
 
     const draft = await c('POST', u(conv, '/draft'), { goal: 'Draft Q3 report', allowed: ['kb.search'], successCriteria: ['report exists'] });
@@ -63,7 +63,7 @@ describe('intent-ledger routes (ADR 0136, always-on)', () => {
 
   it('draft validation: a body with no goal ⇒ 4xx (manual draft requires a goal)', async () => {
     const c = client();
-    await c('POST', '/v1/host/openwop-app/test/login', { email: 'il-val@test.dev', tenantId: T });
+    await c('POST', '/host/openwop-app/test/login', { email: 'il-val@test.dev', tenantId: T });
     const conv = await ownedConversation(c);
     // Model-authored drafting moved to the intent-ledger.draft-contract agent tool;
     // the REST /draft path is manual-only and fail-closed without a goal.
@@ -73,7 +73,7 @@ describe('intent-ledger routes (ADR 0136, always-on)', () => {
 
   it('reckoning is null when the conversation has no stamped mission run', async () => {
     const c = client();
-    await c('POST', '/v1/host/openwop-app/test/login', { email: 'il-reck@test.dev', tenantId: T });
+    await c('POST', '/host/openwop-app/test/login', { email: 'il-reck@test.dev', tenantId: T });
     const conv = await ownedConversation(c);
     await c('POST', u(conv, '/draft'), { goal: 'g', allowed: ['kb.search'] });
     await c('POST', u(conv, '/approve'));
@@ -84,10 +84,10 @@ describe('intent-ledger routes (ADR 0136, always-on)', () => {
 
   it('non-owner cannot draft (IDOR/owner gate)', async () => {
     const owner = client();
-    await owner('POST', '/v1/host/openwop-app/test/login', { email: 'il-a@test.dev', tenantId: T });
+    await owner('POST', '/host/openwop-app/test/login', { email: 'il-a@test.dev', tenantId: T });
     const conv = await ownedConversation(owner);
     const other = client();
-    await other('POST', '/v1/host/openwop-app/test/login', { email: 'il-b@test.dev', tenantId: T });
+    await other('POST', '/host/openwop-app/test/login', { email: 'il-b@test.dev', tenantId: T });
     const r = await other('POST', u(conv, '/draft'), { goal: 'sneaky' });
     expect([403, 404]).toContain(r.status);
   });

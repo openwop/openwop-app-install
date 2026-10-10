@@ -105,8 +105,8 @@ describe('campaign-intel — nodes + agent', () => {
   });
 
   it('loads the Campaign Intelligence Analyst', () => {
-    const loaded = loadAgentsFromManifest(join(REPO_ROOT, 'packs', 'feature.campaign-intel.agents'));
-    expect(loaded[0].agentId).toBe('feature.campaign-intel.agents.intelligence-analyst');
+    const loaded = loadAgentsFromManifest(join(REPO_ROOT, 'packs', 'vendor.openwop-app.campaign-intel.agents'));
+    expect(loaded[0].agentId).toBe('vendor.openwop-app.campaign-intel.agents.intelligence-analyst');
     // CFP-1: the allowlist now points at REGISTERED chat tools (agentTools.ts),
     // not the surface-backed node typeIds that never resolved at dispatch. That
     // these ids are actually offerable is asserted in campaign-intel-agent-tools.test.ts.
@@ -133,12 +133,12 @@ describe('campaign-intel — routes', () => {
       for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
       return { status: res.status, body: await res.json().catch(() => undefined) } as { status: number; body: any };
     };
-    expect((await call('POST', '/v1/host/openwop-app/test/login', { email: `ci-${Date.now()}-${n++}@acme.test` })).status).toBe(201);
-    const org = await call('POST', '/v1/host/openwop-app/orgs', { name: 'Acme' });
+    expect((await call('POST', '/host/openwop-app/test/login', { email: `ci-${Date.now()}-${n++}@acme.test` })).status).toBe(201);
+    const org = await call('POST', '/host/openwop-app/orgs', { name: 'Acme' });
     const orgId = org.body.orgId;
     const csv = 'Platform,Campaign,Day,Cost,Impr.,Clicks,Conversions,Revenue\nMeta,A,2026-01-01,1000,10000,100,10,1500\nGoogle,B,2026-01-01,1000,10000,100,40,4000';
-    expect((await call('POST', '/v1/host/openwop-app/campaign-connectors/import', { orgId, csv })).status).toBe(201);
-    const budget = await call('GET', `/v1/host/openwop-app/campaign-intel/budget?orgId=${orgId}`);
+    expect((await call('POST', '/host/openwop-app/campaign-connectors/import', { orgId, csv })).status).toBe(201);
+    const budget = await call('GET', `/host/openwop-app/campaign-intel/budget?orgId=${orgId}`);
     expect(budget.status).toBe(200);
     expect(budget.body.reallocations.length).toBe(2);
     expect(budget.body.projectedRoasGain).toBeGreaterThan(0);

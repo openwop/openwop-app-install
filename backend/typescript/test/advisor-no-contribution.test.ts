@@ -40,11 +40,11 @@ async function api<T = Record<string, unknown>>(path: string, init: RequestInit 
 }
 
 async function openGateRun(workflowId: string): Promise<string> {
-  await api('/v1/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({ workflowId, nodes: [{ nodeId: 'gate', typeId: 'core.conversationGate', config: { prompt: 'x' } }], edges: [] }) });
-  const runId = (await api<{ runId: string }>('/v1/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs: { provider: 'mock', model: 'mock-1' }, tenantId: '_anon' }) })).body.runId;
+  await api('/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({ workflowId, nodes: [{ nodeId: 'gate', typeId: 'core.conversationGate', config: { prompt: 'x' } }], edges: [] }) });
+  const runId = (await api<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs: { provider: 'mock', model: 'mock-1' }, tenantId: '_anon' }) })).body.runId;
   for (let i = 0; i < 80; i++) {
     await new Promise((r) => setTimeout(r, 20));
-    const s = (await api<{ status: string }>(`/v1/runs/${runId}`)).body.status;
+    const s = (await api<{ status: string }>(`/runs/${runId}`)).body.status;
     if (s.startsWith('waiting')) break;
   }
   return runId;
@@ -57,10 +57,10 @@ interface Ev { type?: string; payload?: Record<string, unknown> }
 async function lastAgentTurn(runId: string): Promise<{ role?: string; content?: unknown; speakerId?: string } | undefined> {
   for (let i = 0; i < 80; i++) {
     await new Promise((r) => setTimeout(r, 20));
-    const st = (await api<{ status: string }>(`/v1/runs/${runId}`)).body.status;
+    const st = (await api<{ status: string }>(`/runs/${runId}`)).body.status;
     if (st.startsWith('waiting') || ['completed', 'failed', 'cancelled'].includes(st)) break;
   }
-  const events = (await api<{ events?: Ev[] }>(`/v1/runs/${runId}/debug-bundle`)).body.events ?? [];
+  const events = (await api<{ events?: Ev[] }>(`/runs/${runId}/debug-bundle`)).body.events ?? [];
   return events
     .filter((e) => e.type === 'conversation.exchanged')
     .map((e) => e.payload!.turn as { role?: string; content?: unknown; speakerId?: string })
@@ -110,7 +110,7 @@ describe('ADR 0665 D4 — the exchange persists it, and does NOT halt', () => {
   it('an empty completion persists a TYPED non-contribution turn and the exchange still succeeds', async () => {
     // The unprogrammed mock returns '' for a chat call — the real shape of this defect.
     const runId = await openGateRun('adr0665.d4.empty');
-    const ex = await api(`/v1/runs/${runId}/interrupts/gate`, {
+    const ex = await api(`/runs/${runId}/interrupts/gate`, {
       method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: 'what do you think?' } } }),
     });
     // NON-HALTING: a 2xx is what keeps `errored` false, so the cadence dispatches the
@@ -127,7 +127,7 @@ describe('ADR 0665 D4 — the exchange persists it, and does NOT halt', () => {
     const runId = await openGateRun('adr0665.d4.spoke');
     // The conversation gate dispatches with an empty nodeId key (see the RFC 0101 suite).
     programMock('', [{ content: 'Ship on Tuesday.' }]);
-    const ex = await api(`/v1/runs/${runId}/interrupts/gate`, {
+    const ex = await api(`/runs/${runId}/interrupts/gate`, {
       method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: 'what do you think?' } } }),
     });
     expect(ex.status).toBe(200);

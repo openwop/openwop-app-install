@@ -51,6 +51,22 @@ export async function listExportLineage(tenantId: string, canvasId: string): Pro
   return (await rows.get(key(tenantId, canvasId)))?.entries ?? [];
 }
 
+/** ADR 0835 D1 — the lineage key for an export with no stored canvas (the
+ *  surface's inline `export({ app })`, e.g. a render → export → deploy chain).
+ *  One capped row per tenant; erased with the tenant like every row here. */
+export const INLINE_LINEAGE_CANVAS = '_inline';
+
+/** ADR 0835 D1 — did THIS tenant produce an export with this hash? A deploy's
+ *  `exportHash` is its provenance; a hash the tenant never exported (another
+ *  tenant's, or invented) must not be recorded as one. Tenant-prefix scan:
+ *  one row per exported canvas. */
+export async function isTenantExportHash(tenantId: string, hash: string): Promise<boolean> {
+  for (const row of await rows.listForTenant(tenantId)) {
+    if (row.tenantId === tenantId && row.entries.some((e) => e.hash === hash)) return true;
+  }
+  return false;
+}
+
 export async function deleteExportLineage(tenantId: string, canvasId: string): Promise<void> {
   await rows.delete(key(tenantId, canvasId));
 }

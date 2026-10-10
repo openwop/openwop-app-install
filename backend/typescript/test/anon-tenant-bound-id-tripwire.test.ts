@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { locateRepoSchemasDir } from '../src/host/_repoPath.js';
-import { V2_TENANT_ID, toWireRunId } from '../src/host/v2Ids.js';
+import { V2_TENANT_ID, fromWireRunId, toWireRunId } from '../src/host/v2Ids.js';
 
 /**
  * ADR 0704 — this host's `V2_TENANT_ID` guard must be EXACTLY as wide as the
@@ -25,10 +25,9 @@ import { V2_TENANT_ID, toWireRunId } from '../src/host/v2Ids.js';
  * `run.tenantId !== req.tenantId` independently of the id's spelling.
  *
  * **The tripwire fired at suite 2.2.0**, when RFC 0184 widened the five bound-id
- * patterns to admit `anon:`. The steward's decision (ADR 0704 § "The tripwire
- * fired") is to keep anonymous runs UNBOUND for now: binding them is a product
- * change, not a pattern fix. The middle leg therefore pins the residue — corpus
- * admits `anon:`, this host deliberately does not — instead of the old equality.
+ * patterns to admit `anon:`. ADR 0704 first kept anonymous runs UNBOUND; ADR 0760
+ * (issue #4169) binds them, because a bare id on the major-2 wire is exactly what
+ * identity.md §5 forbids. The equality leg is restored.
  */
 function tenantSegmentOf(boundPattern: string): string {
   // `^<tenant>/<opaque>$` — take everything between the anchor and the slash.
@@ -55,30 +54,31 @@ describe('anon-tenant bound ids (crosstalk dd19)', () => {
     expect(src.includes('anon:'), 'cookieSession mints an anon: tenant').toBe(true);
   });
 
-  it('the corpus admits anon: tenants, and the guard is deliberately the grammar WITHOUT them', () => {
-    // Fired as designed at suite 2.2.0 (RFC 0184 widened the five bound-id
-    // patterns to `^(anon:)?…`). ADR 0704 § "The tripwire fired" records the
-    // decision taken then: anon runs stay UNBOUND for now, because binding them
-    // changes the ids every anonymous visitor's links carry, and that is a
-    // product decision (ADR 0469/0470), not a regex fix. So the invariant is
-    // restated rather than deleted: the guard equals the corpus tenant segment
-    // with exactly the `(anon:)?` prefix removed. It reds if the corpus grammar
-    // moves again, or if the guard is widened without revisiting ADR 0704.
+  it('the guard is EXACTLY the corpus tenant segment, anon: prefix included (ADR 0760)', () => {
+    // ADR 0704 kept anonymous runs unbound and pinned the guard to the corpus
+    // segment MINUS `(anon:)?`. ADR 0760 revisits that: an unbound id on the
+    // major-2 wire is what identity.md §5 forbids, and the corpus has admitted
+    // `anon:` since suite 2.2.0. So the original invariant is back — equality,
+    // derived from the vendored schema, red on drift in either direction.
     const seg = tenantSegmentOf(ids.$defs.runId?.pattern ?? '');
     expect(seg.startsWith('(anon:)?'), `ids.schema.json#runId tenant segment admits anon: (got ${seg})`).toBe(true);
-    expect(
-      V2_TENANT_ID.source,
-      'V2_TENANT_ID must be the corpus tenant segment minus `(anon:)?`. Widening it binds '
-        + 'anonymous runs; revisit ADR 0704 first.',
-    ).toBe(`^${seg.slice('(anon:)?'.length)}$`);
+    expect(V2_TENANT_ID.source, 'V2_TENANT_ID must equal the corpus runId tenant segment').toBe(`^${seg}$`);
   });
 
-  it('and today that means an anon tenant produces a BARE id, not an invalid one', () => {
-    // The measured consequence, pinned so it cannot change silently. The day
-    // this flips, `toWireRunId` starts binding anon runs — which is the
-    // behaviour RFC 0184 permits, and ADR 0704 must be revisited first.
+  it('an anon tenant BINDS its runs, and the bound id satisfies the vendored runId grammar', () => {
     const opaque = '7f3a9c1e-2b4d-4a6f-8e10-9c2d5b7a1f04';
     expect(toWireRunId(opaque, 'acme')).toBe(`acme/${opaque}`);
-    expect(toWireRunId(opaque, 'anon:s7Kq2mVx9Lp4')).toBe(opaque);
+    const anon = toWireRunId(opaque, 'anon:s7Kq2mVx9Lp4');
+    expect(anon).toBe(`anon:s7Kq2mVx9Lp4/${opaque}`);
+    expect(new RegExp(ids.$defs.runId?.pattern ?? '^$').test(anon), 'bound anon id matches ids.schema.json#runId').toBe(true);
+  });
+
+  it('inbound: the bound anon id (raw or path-projected) resolves for its own tenant only, and a bare id is still accepted', () => {
+    const opaque = '7f3a9c1e-2b4d-4a6f-8e10-9c2d5b7a1f04';
+    const t = 'anon:s7Kq2mVx9Lp4';
+    expect(fromWireRunId(`${t}/${opaque}`, t)).toEqual({ ok: true, runId: opaque });
+    expect(fromWireRunId(`anon~3As7Kq2mVx9Lp4/${opaque}`, t)).toEqual({ ok: true, runId: opaque });
+    expect(fromWireRunId(opaque, t), 'existing bare anonymous links keep resolving').toEqual({ ok: true, runId: opaque });
+    expect(fromWireRunId(`${t}/${opaque}`, 'anon:someoneElse').ok, 'another anon tenant is refused').toBe(false);
   });
 });

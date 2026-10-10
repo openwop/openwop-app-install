@@ -8,7 +8,7 @@
  * @see docs/adr/0009-cms-page-builder.md
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { DurableCollection, hostExtStorage } from '../../host/hostExtPersistence.js';
 import { OpenwopError } from '../../types.js';
 // Same-feature sibling (cms/). Used only inside `deletePage` (call-time), so the
@@ -35,12 +35,13 @@ import { clearUsageForRef, syncUsageRefs } from '../media/mediaService.js';
 import { emitHostEvent } from '../../host/hostEventDispatcher.js';
 // ADR 0593 D2 — the pending-review cascade. Direction is feature → core (core
 // never imports back), the same edge `contentApproval.ts` already uses.
-import { rejectPendingApprovalForPage } from '../../host/approvalService.js';
+import { deleteResolvedContentApprovalsForPage, rejectPendingApprovalForPage } from '../../host/approvalService.js';
 import { fireCmsPageLifecycle, type CmsContentCollection } from '../../host/cmsPageLifecycle.js';
 import { subjectKeyForms } from '../../host/subjectErasureRedaction.js';
 import type { SubjectEraseReport } from '../../host/subjectErasure.js';
 import { eraseContentLanguageSettingsSubject } from '../../host/contentLocales.js';
 import { createLogger } from '../../observability/logger.js';
+import { isInternalHref } from '../../host/internalHref.js';
 
 const log = createLogger('feature.cms');
 
@@ -70,19 +71,20 @@ const MAX = {
   quote: 600,       // one testimonial quote (plain text)
   cell: 80,         // one comparison cell — a short authored status token, e.g. "✓" / "Leaders only" (ADR 0485)
   fieldKeys: 40,    // named fields a `fields` section may hold (ADR 0748)
+  videoDescription: 1000, // a `video` section's screen-reader description + VideoObject description (ADR 0843)
   perOrgPages: 2000,
 } as const;
 
 /** Section layout for `columns` — how the public renderer lays the items out. */
-const COLUMN_LAYOUTS = ['cards', 'steps', 'stats', 'showcase', 'rows'] as const;
+const COLUMN_LAYOUTS = ['cards', 'steps', 'stats', 'showcase', 'rows', 'prompts', 'dives'] as const;
 /** Optional hero art direction. Absent preserves the original workflow motif. */
-const HERO_VISUALS = ['workflow', 'journey', 'run', 'image', 'none'] as const;
+const HERO_VISUALS = ['workflow', 'journey', 'run', 'film', 'image', 'none'] as const;
 
 export type PageStatus = 'draft' | 'in_review' | 'published' | 'archived';
 export const PAGE_STATUSES: PageStatus[] = ['draft', 'in_review', 'published', 'archived'];
 
-export type SectionType = 'hero' | 'richText' | 'image' | 'cta' | 'columns' | 'productGrid' | 'form' | 'pricing' | 'entityList' | 'entityDetail' | 'comparison' | 'faq' | 'quotes' | 'fields';
-export const SECTION_TYPES: SectionType[] = ['hero', 'richText', 'image', 'cta', 'columns', 'productGrid', 'form', 'pricing', 'entityList', 'entityDetail', 'comparison', 'faq', 'quotes', 'fields'];
+export type SectionType = 'hero' | 'richText' | 'image' | 'cta' | 'columns' | 'productGrid' | 'form' | 'pricing' | 'entityList' | 'entityDetail' | 'comparison' | 'faq' | 'quotes' | 'fields' | 'video';
+export const SECTION_TYPES: SectionType[] = ['hero', 'richText', 'image', 'cta', 'columns', 'productGrid', 'form', 'pricing', 'entityList', 'entityDetail', 'comparison', 'faq', 'quotes', 'fields', 'video'];
 
 /** ADR 0748 — a `fields` section's key grammar and ceiling (the protocol's open
  *  section body, held as flat named text fields). */
@@ -123,6 +125,16 @@ export interface Section {
    * the overlay it describes exists (validate drops orphaned keys).
    */
   aiDrafted?: Record<string, string>;
+  /**
+   * ADR 0861 D6 (CMSL2WF-6) — translation status: locale → a 16-hex digest of the
+   * BASE values at the keys that locale's overlay overrides, taken when the overlay
+   * was last written or confirmed. Base text moved since ⇒ `outdated`. SERVER-OWNED:
+   * `stampSourceDigests` recomputes it from the stored row on every write, so a
+   * client value is never trusted; validation only cleans the shape (the kernel
+   * re-validates every write and would otherwise strip it). Absent key = no claim
+   * (`unknown` — legacy overlays are never backfilled). Never on a delivery shape.
+   */
+  sourceDigest?: Record<string, string>;
 }
 
 export interface Page {
@@ -160,6 +172,10 @@ export interface Page {
    *  page is draft/in_review and the approval gate is OFF; cleared on publish
    *  or cancel. The publish sweep fires it. */
   scheduledPublishAt?: string;
+  /** ADR 0836 D3 — the page `version` the scheduled publish was set against. The
+   *  sweep publishes only that version; any other content cancels the schedule.
+   *  Absent on a schedule set before ADR 0836 (fires unpinned, logged). */
+  scheduledPublishVersion?: number;
   /** One-shot scheduled UNPUBLISH time (ISO, ADR 0204 C2b — the embargo-end
    *  half of the Contentful/Sanity publish-at/unpublish-at pair). Set while
    *  published, or alongside a pending publish schedule (then it must be
@@ -188,6 +204,11 @@ export interface Page {
   docsNav?: string;
   version: number;
   publishedVersion?: number;
+  /** ADR 0859 D2 — which submission this is: bumped ONLY by `submit` from `draft`,
+   *  the one edge the page CAS serialises, so two racing submits agree on it and
+   *  the review row's id derived from it is the same for both. Absent until the
+   *  first submit after ADR 0859 (a legacy in_review page keeps the scan path). */
+  reviewCycle?: number;
   /** ADR 0391 (a) — the timestamp of the LAST publish transition (approve /
    *  publish). Additive-KV: ABSENT on legacy rows + never-published pages, so
    *  public-surface ordering falls back to `updatedAt` (`publishedAt ?? updatedAt`).
@@ -239,14 +260,11 @@ const PAGE_TYPE_FIELDS = [
 // SAME validateSections sanitizer the routes use (the kernel's second line of
 // defense on system-row writes; baseLocale '' keeps this a STRUCTURE check —
 // org-aware locale semantics are the façade's first-line validation).
-// resolveLocale = the per-section overlay merge (ADR 0406: one localization
-// model, kind-scoped depth).
+// ADR 0861 D1 (review L1) — no `resolveLocale`: the one it had was never called
+// and resolved overlays WITHOUT the page's withheld set, a second delivery
+// resolver waiting for a caller. Delivery is `localizePage`, only.
 registerFieldKindValidator('blocks', {
   validate: (value) => validateSections(value, ''),
-  resolveLocale: (value, locale, baseLocale) =>
-    Array.isArray(value)
-      ? (value as Section[]).map((s) => ({ sectionId: s.sectionId, type: s.type, data: resolveSection(s, locale, baseLocale) }))
-      : value,
 });
 
 async function ensurePageType(tenantId: string): Promise<void> {
@@ -310,6 +328,29 @@ const pages = makeKernelAdapter<Page>({
 });
 
 /**
+ * ADR 0836 D1 — the ONE page write that honours a precondition. `expected` is the
+ * row this write was decided on (every authority, gate and version check ran
+ * against it); the swap lands only if storage still holds exactly that row. Before
+ * this, every lane did read → check → `pages.put`, and `put` retries against
+ * whatever it re-reads, so a check ran on one row and the write landed on another.
+ * A miss is a typed 409 (or a 404 when the row is gone) — the honest outcome of a
+ * race `put` used to hide.
+ */
+async function casPage(expected: Page, next: Page): Promise<void> {
+  if (await pages.cas(expected, next)) return;
+  const cur = await pages.get(expected.tenantId, expected.pageId);
+  if (!cur || cur.orgId !== expected.orgId) {
+    throw new OpenwopError('not_found', 'Page not found.', 404, { pageId: expected.pageId });
+  }
+  throw new OpenwopError(
+    'conflict',
+    `The page changed while this change was being saved (now version ${cur.version}) — reload and try again.`,
+    409,
+    { pageId: expected.pageId, currentVersion: cur.version },
+  );
+}
+
+/**
  * ADR 0408 D5 — the id-preserving APP_MIGRATION body: every legacy `cms:page`
  * row becomes a `cms.page` kernel row (pageId = entityId; versions/redirects/
  * experiments keys untouched). Idempotent + concurrency-tolerant: an already-
@@ -343,13 +384,30 @@ export async function migratePagesToKernel(): Promise<{ migrated: number; skippe
  *  dedicated set instead of scanning pages (cheaper than the pre-kernel
  *  cross-tenant page scan; markers self-heal on read). */
 interface ScheduledMarker { pageId: string; tenantId: string; orgId: string; at: string }
-const scheduledMarkers = new DurableCollection<ScheduledMarker>('cms:scheduled', (m) => m.pageId);
+/** ADR 0836 D4 — page ids are per TENANT (and `/v1/content` lets a caller choose
+ *  one), so a marker keyed by `pageId` alone let tenant B overwrite tenant A's
+ *  schedule. Both ids may contain `:`, so each is encoded; NO NUL separator —
+ *  Postgres `TEXT` rejects it (the pre-code review's Blocker). */
+function markerKey(tenantId: string, pageId: string): string {
+  return `${encodeURIComponent(tenantId)}/${encodeURIComponent(pageId)}`;
+}
+const scheduledMarkers = new DurableCollection<ScheduledMarker>('cms:scheduled', (m) => markerKey(m.tenantId, m.pageId));
 /** ADR 0204 C2b — a SEPARATE marker lane for scheduled unpublish. The publish
  *  markers are keyed by pageId alone, so the embargo pair (publish 09:00 +
  *  unpublish 17:00 on ONE page) would collide in one collection — two lanes,
  *  same shape, same self-heal discipline. No subject data (pageId/tenant/org/
  *  at only), same DSAR class as `cms:scheduled`. */
-const scheduledUnpublishMarkers = new DurableCollection<ScheduledMarker>('cms:scheduled-unpublish', (m) => m.pageId);
+const scheduledUnpublishMarkers = new DurableCollection<ScheduledMarker>('cms:scheduled-unpublish', (m) => markerKey(m.tenantId, m.pageId));
+
+/** Remove a page's marker — the tenant-qualified key, and a pre-ADR-0836 row
+ *  stored under the bare `pageId`, but ONLY after reading it back and confirming
+ *  it is this tenant's (a blind legacy delete would drop another tenant's
+ *  schedule for a page that shares the id). Legacy rows drain through here. */
+async function dropMarker(coll: DurableCollection<ScheduledMarker>, tenantId: string, orgId: string, pageId: string): Promise<void> {
+  await coll.delete(markerKey(tenantId, pageId));
+  const legacy = await coll.get(pageId);
+  if (legacy && legacy.tenantId === tenantId && legacy.orgId === orgId && legacy.pageId === pageId) await coll.delete(pageId);
+}
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -364,9 +422,45 @@ function nowIso(): string {
  *  explicit scheme on the non-internal branch. */
 function safeLink(v: unknown, max: number): string {
   const s = (optionalCleanString(v, max) ?? '').trim();
-  if (/^\/(?![/\\])/.test(s)) return s;
+  if (isInternalHref(s)) return s;
+  if (s.startsWith('/')) return ''; // a `/…` that is not a safe internal path is never an external URL either
   const u = safeUrl(v, max);
   return /^(https?:|mailto:)/i.test(u) ? u : '';
+}
+
+/** ADR 0843 — a `video` section's play-button length: `m:ss` (minutes may run
+ *  to three digits). The prerender turns it into an ISO 8601 `PT#M#S`. */
+export const VIDEO_LENGTH_RE = /^\d{1,3}:[0-5]\d$/;
+/** ADR 0843 — the hosts a `youtubeUrl` may name (the link reads "Watch on YouTube"). */
+const YOUTUBE_HOSTS = new Set(['youtube.com', 'www.youtube.com', 'm.youtube.com', 'youtu.be']);
+const UPLOAD_DATE_RE = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
+
+/**
+ * ADR 0843 — a media URL a `video` section loads or links: https ONLY (never
+ * http, protocol-relative, `data:` or `javascript:`), no credentials, within
+ * `MAX.url`. Built on the shared `safeUrl` scheme screen, then parsed.
+ *
+ * Absent ⇒ undefined (the caller decides whether that is a missing required
+ * field). Present but invalid ⇒ a 400 on the base layer; on a partial overlay
+ * (a stored localization or an AI translation's output) it is DROPPED instead —
+ * the translate path logs a dropped key, and a model echoing a mangled URL must
+ * not fail the whole overlay.
+ */
+function httpsMediaUrl(v: unknown, field: string, partial: boolean, hosts?: ReadonlySet<string>): string | undefined {
+  if (v === undefined || v === null || (typeof v === 'string' && v.trim() === '')) return undefined;
+  const reject = (why: string): undefined => {
+    if (partial) return undefined;
+    throw new OpenwopError('validation_error', `video.${field} ${why}`, 400, { field });
+  };
+  if (typeof v !== 'string') return reject('must be a URL string.');
+  if (v.trim().length > MAX.url) return reject(`must be at most ${MAX.url} characters.`);
+  const u = safeUrl(v, MAX.url);
+  let parsed: URL;
+  try { parsed = new URL(u); } catch { return reject('must be an absolute https:// URL.'); }
+  if (parsed.protocol !== 'https:' || !/^https:\/\//i.test(u)) return reject('must be an absolute https:// URL.');
+  if (parsed.username || parsed.password) return reject('must not carry credentials.');
+  if (hosts && !hosts.has(parsed.hostname.toLowerCase())) return reject(`must be a ${[...hosts].join(' / ')} URL.`);
+  return u;
 }
 
 /**
@@ -575,6 +669,8 @@ function buildSectionData(type: SectionType, d: Record<string, unknown>, partial
         ...(optionalCleanString(d.blurb, MAX.text) ? { blurb: optionalCleanString(d.blurb, MAX.text) } : {}),
         ...(tiers.length > 0 ? { tiers } : {}),
         ...(ctaLabel ? { ctaLabel, ctaUrl: safeLink(d.ctaUrl, MAX.url) } : {}),
+        // ADR 0820 §7 — where an UNPRICED plan's "Contact us" goes (same link guard).
+        ...(safeLink(d.contactUrl, MAX.url) ? { contactUrl: safeLink(d.contactUrl, MAX.url) } : {}),
       };
     }
     case 'comparison': {
@@ -672,6 +768,43 @@ function buildSectionData(type: SectionType, d: Record<string, unknown>, partial
         ...opt('heading', MAX.heading),
         ...opt('lede', MAX.lede),
         ...(!partial || has('items') ? { items } : {}),
+      };
+    }
+    case 'video': {
+      // ADR 0843 — a narrated film: click-to-play, poster first, nothing loads
+      // until asked. Every URL is https-only (httpsMediaUrl); every text field
+      // is plain text (never HTML). `title`/`description` also feed the
+      // prerender's VideoObject JSON-LD, so both are required on the base.
+      const src = httpsMediaUrl(d.src, 'src', partial);
+      const poster = httpsMediaUrl(d.poster, 'poster', partial);
+      const captions = httpsMediaUrl(d.captions, 'captions', partial);
+      const youtubeUrl = httpsMediaUrl(d.youtubeUrl, 'youtubeUrl', partial, YOUTUBE_HOSTS);
+      const title = optionalCleanString(d.title, MAX.title);
+      const description = optionalCleanString(d.description, MAX.videoDescription);
+      const lengthRaw = typeof d.length === 'string' ? d.length.trim() : '';
+      const length = VIDEO_LENGTH_RE.test(lengthRaw) ? lengthRaw : undefined;
+      const uploadRaw = typeof d.uploadDate === 'string' ? d.uploadDate.trim() : '';
+      const uploadDate = UPLOAD_DATE_RE.test(uploadRaw) ? uploadRaw : undefined;
+      if (!partial) {
+        if (!src) throw new OpenwopError('validation_error', 'video.src is required (an https:// URL to the video file).', 400, { field: 'src' });
+        if (!poster) throw new OpenwopError('validation_error', 'video.poster is required (an https:// URL to the poster image).', 400, { field: 'poster' });
+        if (!title) throw new OpenwopError('validation_error', 'video.title is required.', 400, { field: 'title' });
+        if (!description) throw new OpenwopError('validation_error', 'video.description is required (what the film shows, for screen readers and search).', 400, { field: 'description' });
+        if (!length) throw new OpenwopError('validation_error', 'video.length is required as m:ss (e.g. 1:57).', 400, { field: 'length' });
+        if (uploadRaw && !uploadDate) throw new OpenwopError('validation_error', 'video.uploadDate must be YYYY-MM-DD.', 400, { field: 'uploadDate' });
+      }
+      return {
+        ...opt('eyebrow', MAX.eyebrow),
+        ...opt('heading', MAX.heading),
+        ...opt('lede', MAX.lede),
+        ...(title ? { title } : {}),
+        ...(description ? { description } : {}),
+        ...(src ? { src } : {}),
+        ...(poster ? { poster } : {}),
+        ...(captions ? { captions } : {}),
+        ...(length ? { length } : {}),
+        ...(uploadDate ? { uploadDate } : {}),
+        ...(youtubeUrl ? { youtubeUrl } : {}),
       };
     }
     case 'fields': {
@@ -786,11 +919,96 @@ export function validateSection(raw: unknown, baseLocale = 'en', pageTenantId?: 
   const localizations = validateLocalizations(type, r.localizations, baseLocale, pageTenantId);
   const hasLoc = !!localizations && Object.keys(localizations).length > 0;
   const aiDrafted = cleanAiDrafted(r.aiDrafted, hasLoc ? localizations : undefined);
+  const sourceDigest = cleanSourceDigest(r.sourceDigest, hasLoc ? localizations : undefined);
   return {
     sectionId, type, data,
     ...(hasLoc ? { localizations } : {}),
     ...(aiDrafted ? { aiDrafted } : {}),
+    ...(sourceDigest ? { sourceDigest } : {}),
   };
+}
+
+/** ADR 0861 D6 — shape-clean a stored digest map (the `cleanAiDrafted` posture:
+ *  invalid entries dropped, never fatal; an entry without its overlay dropped). */
+function cleanSourceDigest(
+  raw: unknown,
+  localizations: Record<string, Record<string, unknown>> | undefined,
+): Record<string, string> | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw) || !localizations) return undefined;
+  const out: Record<string, string> = {};
+  for (const [locale, d] of Object.entries(raw as Record<string, unknown>)) {
+    if (!LOCALE_RE.test(locale) || !localizations[locale]) continue;
+    if (typeof d === 'string' && /^[0-9a-f]{16}$/.test(d)) out[locale] = d;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/** Key-sorted canonical JSON — a digest must not move when only key ORDER does. */
+function canonicalJson(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(canonicalJson).join(',')}]`;
+  if (v && typeof v === 'object') {
+    return `{${Object.keys(v as Record<string, unknown>).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson((v as Record<string, unknown>)[k])}`).join(',')}}`;
+  }
+  return JSON.stringify(v ?? null);
+}
+
+/** ADR 0861 D6 — the digest of what an overlay TRANSLATES: the base values at the
+ *  keys it overrides. An image/URL/number the overlay does not override never
+ *  makes it outdated (review M2). */
+export function sourceDigestOf(base: Record<string, unknown>, overlay: Record<string, unknown>): string {
+  const picked = Object.keys(overlay).sort().map((k) => [k, base[k] ?? null]);
+  return createHash('sha256').update(canonicalJson(picked)).digest('hex').slice(0, 16);
+}
+
+export type TranslationStatus = 'missing' | 'current' | 'outdated' | 'unknown';
+
+/** ADR 0861 D6 — one locale's translation status for a section (or shared row). */
+export function translationStatus(
+  section: Pick<Section, 'data' | 'localizations' | 'sourceDigest'>,
+  locale: string,
+): TranslationStatus {
+  const overlay = section.localizations?.[locale];
+  if (!overlay || Object.keys(overlay).length === 0) return 'missing';
+  const stamp = section.sourceDigest?.[locale];
+  if (!stamp) return 'unknown';
+  return stamp === sourceDigestOf(section.data, overlay) ? 'current' : 'outdated';
+}
+
+/**
+ * ADR 0861 D6 — THE stamp. Runs on every page/shared-section content write AFTER
+ * validation, against the STORED previous sections:
+ *  - an overlay identical to the stored one keeps whatever stamp it had — INCLUDING
+ *    none (review H3: a legacy overlay stays `unknown` until someone writes or
+ *    confirms it; stamping it here would mark it current on no evidence);
+ *  - a new or changed overlay is stamped from the base it is being saved with;
+ *  - `confirm` re-stamps one (section, locale) without changing the overlay.
+ * Client-sent digests are discarded: only `prev` is read.
+ */
+export function stampSourceDigests<S extends Pick<Section, 'sectionId' | 'data' | 'localizations' | 'sourceDigest'>>(
+  prev: ReadonlyArray<Pick<Section, 'sectionId' | 'localizations' | 'sourceDigest'>> | undefined,
+  next: S[],
+  confirm?: { sectionId: string; locale: string },
+): S[] {
+  const before = new Map((prev ?? []).map((s) => [s.sectionId, s] as const));
+  return next.map((s) => {
+    const out: S = { ...s };
+    delete out.sourceDigest;
+    if (!s.localizations) return out;
+    const old = before.get(s.sectionId);
+    const digests: Record<string, string> = {};
+    for (const [locale, overlay] of Object.entries(s.localizations)) {
+      const confirming = confirm?.sectionId === s.sectionId && confirm.locale === locale;
+      const unchanged = !!old?.localizations?.[locale] && JSON.stringify(old.localizations[locale]) === JSON.stringify(overlay);
+      if (!confirming && unchanged) {
+        const carried = old?.sourceDigest?.[locale];
+        if (carried) digests[locale] = carried;
+      } else {
+        digests[locale] = sourceDigestOf(s.data, overlay);
+      }
+    }
+    if (Object.keys(digests).length > 0) out.sourceDigest = digests;
+    return out;
+  });
 }
 
 /** ADR 0592 §3 — sanitize the per-locale AI-provenance map: locale keys must be
@@ -938,13 +1156,22 @@ export async function createPage(input: { tenantId: string; orgId: string; title
   // A FIXED pageId (host-level seeds, ADR 0027) makes creation idempotent: if the
   // row already exists, return it — so a concurrent cross-instance first-boot seed
   // converges on ONE page instead of a `home` + `home-2` duplicate.
-  if (input.pageId) {
-    const prior = await getPage(input.tenantId, input.orgId, input.pageId);
+  //
+  // ADR 0859 D1 (#4515) — the prior read is RAW (tenant + id, the kernel key), never
+  // the org-filtered `getPage`. Through `getPage` another org's page read as absent and
+  // the write below replaced it: a run in org B could take org A's approved, live page.
+  // Another org's id is a uniform 409 that names nobody (the ADR 0848 D1 wording).
+  const ownedOrConflict = (prior: Page): Page => {
+    if (prior.orgId !== input.orgId) throw new OpenwopError('conflict', 'That id is already in use.', 409, { pageId: input.pageId });
     // ADR 0754 — idempotent-return is for seeds; a create-only caller asked for a
     // NEW page, and handing it a concurrent writer's page as its own is an overwrite
     // by another name.
-    if (prior && input.createOnly) throw new OpenwopError('conflict', `A page with id \`${input.pageId}\` already exists.`, 409, { pageId: input.pageId });
-    if (prior) return prior;
+    if (input.createOnly) throw new OpenwopError('conflict', `A page with id \`${input.pageId}\` already exists.`, 409, { pageId: input.pageId });
+    return prior;
+  };
+  if (input.pageId) {
+    const prior = await pages.get(input.tenantId, input.pageId);
+    if (prior) return ownedOrConflict(prior);
   }
   const existing = await listPages(input.tenantId, input.orgId);
   if (existing.length >= MAX.perOrgPages) {
@@ -963,7 +1190,7 @@ export async function createPage(input: { tenantId: string; orgId: string; title
     title,
     slug,
     status: 'draft',
-    sections: validateSections(input.sections, input.baseLocale ?? 'en', input.tenantId),
+    sections: stampSourceDigests(undefined, validateSections(input.sections, input.baseLocale ?? 'en', input.tenantId)),
     ...(tags.length > 0 ? { tags } : {}),
     ...facets,
     ...(input.collection === 'docs' ? { collection: 'docs' as const } : {}),
@@ -976,7 +1203,17 @@ export async function createPage(input: { tenantId: string; orgId: string; title
   };
   // ADR 0754 — the protocol lane creates, never overwrites: a row that appeared
   // under this id after the caller's checks is a 409 here, not a silent update.
-  if (input.createOnly) await pages.create(page); else await pages.put(page);
+  // ADR 0859 D1 — and so does every other lane: a create never overwrites. A row
+  // that appeared in the window is re-read and judged by the same rule as above,
+  // so a same-org seed racing itself still converges on one page.
+  try {
+    await pages.create(page);
+  } catch (err) {
+    if (!(err instanceof OpenwopError && err.code === 'conflict') || !input.pageId) throw err;
+    const raced = await pages.get(input.tenantId, input.pageId);
+    if (!raced) throw err;
+    return ownedOrConflict(raced);
+  }
   await syncPageUsage(page);
   return page;
 }
@@ -993,10 +1230,23 @@ export async function updatePage(
   // Optional on purpose: making it required would break clone/agent/API
   // callers in one move; the SPA editor always sends it. The house pattern is
   // the approval pin (contentApproval.ts) + the commerce order-row CAS.
-  opts?: { expectedVersion?: number },
+  //
+  // ADR 0836 — `authorize` runs on THIS read, the one the CAS then compares
+  // against (D2): status-dependent authority (editor on a draft, admin on a live
+  // page, gate refusal, translator narrowing) is decided on the row actually
+  // written. `transitionPage` never bumps `version`, so the pin alone cannot see
+  // a draft become published in between. `keepSchedule` (D3) re-pins a pending
+  // scheduled publish to the new version; without it the edit cancels the
+  // schedule, because the schedule was set by someone who saw other content.
+  // `keepSchedule` may be a probe, evaluated only when the page HAS a pending
+  // schedule, so the common (unscheduled) save pays no extra authority read.
+  // `confirmSource` (ADR 0861 D6) — re-stamp one overlay's source digest ("still
+  // accurate") in the same validated, version-bumping write.
+  opts?: { expectedVersion?: number; authorize?: (current: Page) => Promise<void>; keepSchedule?: boolean | ((current: Page) => Promise<boolean>); confirmSource?: { sectionId: string; locale: string } },
 ): Promise<Page | null> {
   const p = await getPage(tenantId, orgId, pageId);
   if (!p) return null;
+  if (opts?.authorize) await opts.authorize(p);
   if (opts?.expectedVersion !== undefined && p.version !== opts.expectedVersion) {
     throw new OpenwopError(
       'conflict',
@@ -1018,11 +1268,48 @@ export async function updatePage(
     const desired = slugify(patch.slug);
     const taken = await slugSet(tenantId, orgId, pageId);
     next.slug = uniqueSlug(desired, taken, 'page');
-    // Renaming a PUBLISHED page's slug leaves a redirect so old links survive.
-    // COLLAPSE CHAINS (code-review #4): repoint any redirect that pointed at the
-    // OLD slug to the new one (so a multi-rename A→B→C still resolves A in one
-    // hop), and drop a stale redirect whose fromSlug now equals the new slug.
-    if (next.slug !== p.slug && p.status === 'published') {
+  }
+  if (patch.sections !== undefined) next.sections = stampSourceDigests(p.sections, validateSections(patch.sections, patch.baseLocale ?? 'en', tenantId), opts?.confirmSource);
+  if (patch.tags !== undefined) {
+    const tags = cleanPageTags(patch.tags);
+    if (tags.length > 0) next.tags = tags;
+    else delete next.tags;
+  }
+  // ADR 0392 — docs nav ordering (only meaningful on a docs-collection page).
+  if (patch.docsNav !== undefined && p.collection === 'docs') {
+    const nav = cleanString(patch.docsNav, MAX.slug, '');
+    if (nav) next.docsNav = nav; else delete next.docsNav;
+  }
+  // ADR 0836 D3 — a pending scheduled publish was set against `p.version`.
+  let scheduleCleared = false;
+  if (p.scheduledPublishAt) {
+    const keep = typeof opts?.keepSchedule === 'function' ? await opts.keepSchedule(p) : Boolean(opts?.keepSchedule);
+    if (keep) {
+      next.scheduledPublishVersion = next.version;
+    } else {
+      delete next.scheduledPublishAt;
+      delete next.scheduledPublishVersion;
+      scheduleCleared = true;
+    }
+  }
+  // An unpublish on a not-yet-live page exists only as the end of the embargo
+  // pair (ADR 0204 C2b); with its publish cancelled it is an orphan no lane
+  // would fire and no control would show. Cancel it in the same write.
+  const pairedUnpublishCleared = scheduleCleared && p.status !== 'published' && Boolean(p.scheduledUnpublishAt);
+  if (pairedUnpublishCleared) delete next.scheduledUnpublishAt;
+  // ADR 0836 D9 — an in-place edit of a PUBLISHED page is a publish of the new
+  // content without a transition, so it meets the same blockers.
+  if (p.status === 'published') assertNoPublishBlockers(next);
+  await casPage(p, next);
+  // ADR 0836 D1 — side effects only after the write landed: a lost race used to
+  // leave a redirect to a slug the page never got. The write is committed, so a
+  // failure below is logged rather than thrown (the transitionPage reasoning).
+  // Renaming a PUBLISHED page's slug leaves a redirect so old links survive.
+  // COLLAPSE CHAINS (code-review #4): repoint any redirect that pointed at the
+  // OLD slug to the new one (so a multi-rename A→B→C still resolves A in one
+  // hop), and drop a stale redirect whose fromSlug now equals the new slug.
+  if (next.slug !== p.slug && p.status === 'published') {
+    try {
       const all = await redirects.list();
       for (const r of all) {
         if (r.tenantId !== tenantId || r.orgId !== orgId) continue;
@@ -1037,20 +1324,18 @@ export async function updatePage(
         toSlug: next.slug,
         createdAt: nowIso(),
       });
+    } catch (err) {
+      log.error('cms_redirect_failed_after_commit', { tenantId, pageId, error: err instanceof Error ? err.message : String(err) });
     }
   }
-  if (patch.sections !== undefined) next.sections = validateSections(patch.sections, patch.baseLocale ?? 'en', tenantId);
-  if (patch.tags !== undefined) {
-    const tags = cleanPageTags(patch.tags);
-    if (tags.length > 0) next.tags = tags;
-    else delete next.tags;
+  if (scheduleCleared) {
+    await dropMarker(scheduledMarkers, tenantId, orgId, pageId).catch((err: unknown) => log.warn('cms_marker_drop_failed', { pageId, error: err instanceof Error ? err.message : String(err) }));
+    recordCmsAction('schedule-cleared', next, updatedBy, { reason: 'content-changed' });
   }
-  // ADR 0392 — docs nav ordering (only meaningful on a docs-collection page).
-  if (patch.docsNav !== undefined && p.collection === 'docs') {
-    const nav = cleanString(patch.docsNav, MAX.slug, '');
-    if (nav) next.docsNav = nav; else delete next.docsNav;
+  if (pairedUnpublishCleared) {
+    await dropMarker(scheduledUnpublishMarkers, tenantId, orgId, pageId).catch((err: unknown) => log.warn('cms_marker_drop_failed', { pageId, error: err instanceof Error ? err.message : String(err) }));
+    recordCmsAction('schedule-unpublish-cleared', next, updatedBy, { reason: 'content-changed' });
   }
-  await pages.put(next);
   // ADR 0392 grade pass D2 — an in-place edit of a PUBLISHED page (an admin
   // capability; editors must unpublish first) changes live public content
   // without a transition, so it must re-fire the lifecycle or derived stores
@@ -1223,7 +1508,13 @@ export async function upsertProtocolSection(input: {
     }
     const sections = existing ? page.sections.map((s) => (s.sectionId === cmsId ? next : s)) : [...page.sections, next];
     try {
-      const saved = await updatePage(input.tenantId, input.orgId, input.pageId, { sections, baseLocale: input.baseLocale }, input.actor, { expectedVersion: page.version });
+      const saved = await updatePage(input.tenantId, input.orgId, input.pageId, { sections, baseLocale: input.baseLocale }, input.actor, {
+        expectedVersion: page.version,
+        // ADR 0836 D2 — re-run on updatePage's OWN read, the one the CAS swaps.
+        // `transitionPage` does not bump `version`, so the pin above cannot see a
+        // draft published between this loop's read and the write.
+        authorize: input.authorize,
+      });
       if (!saved) return null;
       const section = saved.sections.find((s) => s.sectionId === cmsId);
       if (!section) throw new OpenwopError('internal_error', 'The section was not stored.', 500, {});
@@ -1315,6 +1606,9 @@ export async function deletePage(
   // decide-arm backstop in `contentApproval.ts` covers a failure here.
   try {
     await rejectPendingApprovalForPage(tenantId, pageId, 'Closed automatically — the page was deleted.', true);
+    // ADR 0859 D6 — pruning now keeps each page's newest resolved review; a deleted
+    // page must not keep one (the governance chain holds the decision).
+    await deleteResolvedContentApprovalsForPage(tenantId, pageId);
   } catch (err) {
     log.warn('cms pending approval cascade failed', { pageId, error: err instanceof Error ? err.message : String(err) });
   }
@@ -1386,8 +1680,14 @@ export interface PageVersion {
    * existed carry neither value. The experiment gate treats that as
    * unidentifiable and REFUSES rather than falling through (the CMSA-7 rule) —
    * see `pageExperimentsService.assertVariantSnapshotReviewed`.
+   *
+   * ADR 0817 — `'seed'`: content a code seed would have written, offered
+   * instead of overwriting a page a person has edited or published. It was
+   * never the page's content, so it is not a capture of the page: the
+   * distinct-content dedupe skips it, and the experiment gate refuses it like
+   * any unreviewed row. A person adopts it with Restore, which lands in draft.
    */
-  origin?: 'publish' | 'submit';
+  origin?: 'publish' | 'submit' | 'seed';
   /** Monotonic snapshot sequence — a stable newest-first tiebreaker for snapshots
    *  taken in the same millisecond. */
   seq: number;
@@ -1424,7 +1724,9 @@ function byNewest(a: { publishedAt: string; seq: number }, b: { publishedAt: str
  */
 async function snapshotPage(page: Page, publishedBy: string, origin: 'publish' | 'submit'): Promise<void> {
   const newest = (await versions.list())
-    .filter((x) => x.pageId === page.pageId)
+    // ADR 0836 D4 — page ids are per tenant: without the tenant/org filter, tenant
+    // B's publish of a same-id page deduped against (and PROMOTED) tenant A's row.
+    .filter((x) => x.tenantId === page.tenantId && x.orgId === page.orgId && x.pageId === page.pageId && x.origin !== 'seed') // ADR 0817: an offer, not a capture
     .sort(byNewest)[0];
   if (newest && newest.version === page.version) {
     // ADR 0593 §C3 (CMSA-11) — dedupe, but PROMOTE. `transitionPage` never
@@ -1458,8 +1760,47 @@ async function snapshotPage(page: Page, publishedBy: string, origin: 'publish' |
   };
   await versions.put(v);
   // Cap history per page (drop the oldest beyond MAX_VERSIONS).
-  const mine = (await versions.list()).filter((x) => x.pageId === page.pageId).sort(byNewest);
+  const mine = (await versions.list()).filter((x) => x.tenantId === page.tenantId && x.orgId === page.orgId && x.pageId === page.pageId).sort(byNewest);
   for (const old of mine.slice(MAX_VERSIONS)) await versions.delete(old.versionId);
+}
+
+/**
+ * ADR 0817 — offer a code seed's newer content for a page the seed may no
+ * longer overwrite (a person edited or published it). It lands in the page's
+ * history as a `'seed'` row the editor can diff and Restore; the page itself
+ * is untouched. Idempotent per content: an identical newest offer is not
+ * recorded twice.
+ */
+export async function offerSeedVersion(
+  page: Page,
+  snapshot: { title: string; sections: Section[] },
+  actor: string,
+  baseLocale = 'en', // `updatePage`'s default — the locale the seed writes in
+): Promise<PageVersion | null> {
+  // The page's own write path validates (ADR 0009 content safety, minted
+  // `sec:` ids) and Restore copies the snapshot verbatim, so validate here.
+  const sections = validateSections(snapshot.sections, baseLocale, page.tenantId);
+  // Ids are minted per validation, so compare content without them.
+  const content = (ss: readonly Section[]): string => JSON.stringify(ss.map(({ sectionId: _id, ...rest }) => rest));
+  const mine = (await versions.list()).filter((x) => x.tenantId === page.tenantId && x.orgId === page.orgId && x.pageId === page.pageId).sort(byNewest);
+  const lastOffer = mine.find((x) => x.origin === 'seed');
+  if (lastOffer && lastOffer.snapshot.title === snapshot.title
+    && content(lastOffer.snapshot.sections) === content(sections)) return null;
+  const v: PageVersion = {
+    origin: 'seed',
+    versionId: `pver:${randomUUID()}`,
+    tenantId: page.tenantId,
+    orgId: page.orgId,
+    pageId: page.pageId,
+    version: page.version,
+    snapshot: { title: snapshot.title, slug: page.slug, sections },
+    publishedBy: actor,
+    publishedAt: nowIso(),
+    seq: ++versionSeq,
+  };
+  await versions.put(v);
+  for (const old of [v, ...mine].slice(MAX_VERSIONS)) await versions.delete(old.versionId);
+  return v;
 }
 
 export async function listVersions(tenantId: string, orgId: string, pageId: string): Promise<PageVersion[]> {
@@ -1488,15 +1829,39 @@ export async function restoreVersion(
   // recorded cause was the generic restore note. The caller that knows the real
   // reason has to supply it, or the governance record says the wrong thing.
   closeReviewNote = 'Closed automatically — a previous version was restored and the page returned to draft.',
+  // ADR 0836 D8 — `expectedVersion` pins the restore to the content the editor
+  // was looking at (a restore over an edit it never saw is the lost update the
+  // page PATCH already refuses). `republishing` is set by the ONE caller that
+  // restores and republishes in the same operation (experiment promote): there
+  // the page never leaves the public surface from a reader's point of view, and a
+  // fire-and-forget `unpublished` racing the `published` could evict a live docs
+  // page from the KB.
+  opts?: { expectedVersion?: number; republishing?: boolean },
 ): Promise<Page | null> {
   const p = await getPage(tenantId, orgId, pageId);
   if (!p) return null;
+  if (opts?.expectedVersion !== undefined && p.version !== opts.expectedVersion) {
+    throw new OpenwopError(
+      'conflict',
+      `The page changed since it was loaded (version ${p.version}, expected ${opts.expectedVersion}) — reload before restoring.`,
+      409,
+      { pageId, currentVersion: p.version, expectedVersion: opts.expectedVersion },
+    );
+  }
   const v = await versions.get(versionId);
   if (!v || v.pageId !== pageId || v.tenantId !== tenantId || v.orgId !== orgId) {
     throw new OpenwopError('not_found', 'Version not found for this page.', 404, { versionId });
   }
+  const wasLive = p.status === 'published' || p.status === 'archived';
   const next: Page = { ...p, title: v.snapshot.title, sections: v.snapshot.sections, status: 'draft', version: p.version + 1, updatedBy: actor, updatedAt: nowIso() };
-  await pages.put(next);
+  // A restore lands in draft: a pending schedule was set against other content
+  // (publish) or a page that is no longer live (unpublish).
+  delete next.scheduledPublishAt;
+  delete next.scheduledPublishVersion;
+  delete next.scheduledUnpublishAt;
+  await casPage(p, next);
+  if (p.scheduledPublishAt) await dropMarker(scheduledMarkers, tenantId, orgId, pageId);
+  if (p.scheduledUnpublishAt) await dropMarker(scheduledUnpublishMarkers, tenantId, orgId, pageId);
   await syncPageUsage(next); // restored sections may reference different assets
   // ADR 0593 D2 (CMSA-2b) — a restore ALWAYS lands the page in `draft`, so a
   // pending review of the pre-restore content is about content that no longer
@@ -1510,7 +1875,18 @@ export async function restoreVersion(
     log.warn('cms pending approval cascade failed', { pageId, error: err instanceof Error ? err.message : String(err) });
   }
   recordCmsAction('restore', next, actor, { restoredVersion: v.version }); // ADR 0204 C1/C5
+  // ADR 0836 D8 (G2) — restoring a live page takes it OFF the public surface.
+  // It used to do so silently: no `unpublished` event or lifecycle, so derived
+  // stores (the docs KB) kept citing a page that now 404s.
+  if (wasLive && !opts?.republishing) recordPageUnpublishedByRestore(next);
   return next;
+}
+
+/** ADR 0836 D8 — the `unpublish` event + lifecycle a restore of a live page owes.
+ *  Exported for the one caller that suppresses it (`republishing`) and must still
+ *  emit it when its republish then fails. */
+export function recordPageUnpublishedByRestore(page: Page): void {
+  recordCmsAction('unpublish', page, page.updatedBy, { cause: 'restore' });
 }
 
 // ── Lifecycle events + audit (ADR 0204 C1/C5) ───────────────────────────────
@@ -1581,8 +1957,10 @@ function recordCmsAction(action: string, page: Page, actor: string, extra?: Reco
 }
 
 /** The lifecycle event a workflow action produces, when it changes public
- *  visibility (ADR 0392). `submit`/`reject`/`restore` don't move the page in/out
- *  of the public surface, so they don't fire. */
+ *  visibility (ADR 0392). `submit`/`reject` don't move the page in/out of the
+ *  public surface, so they don't fire. `restore` DOES when the page was live
+ *  (it lands in draft) — ADR 0836 D8 corrected this comment, which said it never
+ *  did; `restoreVersion` records the `unpublish` itself in that case. */
 const LIFECYCLE_FOR_ACTION: Record<string, 'published' | 'unpublished' | 'archived'> = {
   approve: 'published',
   publish: 'published',
@@ -1618,6 +1996,46 @@ const TRANSITIONS: Record<WorkflowAction, { from: PageStatus[]; to: PageStatus }
   unpublish: { from: ['published', 'archived'], to: 'draft' }, // back to draft to re-edit
 };
 
+/** A `[TODO …]` marker left in content — the seed's convention for "the author
+ *  still owes this". Mirrors the browser checklist's ONE `block` rule
+ *  (`frontend/react/src/features/cms/publishChecks.ts` `TODO`), pinned by a parity
+ *  test. The browser's empty-title rule is deliberately NOT here: server titles
+ *  fall back to "Untitled page", so a witness for it could never go red. */
+export const TODO_MARKER = /\[TODO\b/i;
+
+function collectStrings(v: unknown, out: string[] = []): string[] {
+  if (typeof v === 'string') out.push(v);
+  else if (Array.isArray(v)) v.forEach((x) => collectStrings(x, out));
+  else if (v && typeof v === 'object') Object.values(v as Record<string, unknown>).forEach((x) => collectStrings(x, out));
+  return out;
+}
+
+export interface PublishBlocker { rule: 'todo'; sectionId: string }
+
+/** ADR 0836 D9 — what stops content reaching readers, decided on the server.
+ *  Own-section `data` only, like the browser: a shared-section ref has no own
+ *  content and overlays are translations of what is checked here. */
+export function publishBlockers(page: Pick<Page, 'sections'>): PublishBlocker[] {
+  return page.sections
+    .filter((s) => !s.ref && collectStrings(s.data).some((x) => TODO_MARKER.test(x)))
+    .map((s) => ({ rule: 'todo' as const, sectionId: s.sectionId }));
+}
+
+/** Throws the typed `422 validation_error` (`details.reason: 'publish_blocked'`). */
+export function assertNoPublishBlockers(page: Pick<Page, 'pageId' | 'sections'>): void {
+  const blockers = publishBlockers(page);
+  if (blockers.length === 0) return;
+  // `validation_error` + `details.reason` rather than a new code: a new code is a
+  // wire-registry change (v2 vendor-namespaces it) for what is one more refusal
+  // of the existing shape; the reason is what the editor keys on.
+  throw new OpenwopError(
+    'validation_error',
+    `This page still has ${blockers.length === 1 ? 'a [TODO …] marker' : `${blockers.length} sections with [TODO …] markers`} — finish or remove ${blockers.length === 1 ? 'it' : 'them'} before it goes to readers.`,
+    422,
+    { reason: 'publish_blocked', pageId: page.pageId, blockers },
+  );
+}
+
 export async function transitionPage(
   tenantId: string,
   orgId: string,
@@ -1652,28 +2070,53 @@ export async function transitionPage(
   if (!rule.from.includes(p.status)) {
     throw new OpenwopError('validation_error', `Cannot ${action} a page in status \`${p.status}\`.`, 409, { status: p.status, action });
   }
+  // ADR 0836 D9 — the server half of the pre-publish checklist. Every lane that
+  // moves content TO READERS meets it here: the routes, the protocol lane,
+  // approval decide, experiment promote, the sweep. NOT `submit`: ADR 0828 keeps
+  // submit open with blockers on purpose ("a reviewer can help finish the
+  // page"), and the approve that follows is checked here. (The pre-code review's
+  // AR-M5 asked for submit too; that would have overturned 0828's product call.)
+  if (rule.to === 'published') assertNoPublishBlockers(p);
   const next: Page = { ...p, status: rule.to, updatedBy: actor, updatedAt: nowIso() };
+  // ADR 0859 D2 — a NEW submission (draft → in_review) opens a new review cycle; a
+  // resubmit of an in_review page stays in the cycle it is in (it re-pins that row).
+  if (action === 'submit' && p.status === 'draft') next.reviewCycle = (p.reviewCycle ?? 0) + 1;
   if (rule.to === 'published') {
     next.publishedVersion = next.version;
     next.publishedAt = next.updatedAt; // ADR 0391 (a) — the publish instant (blog order + RSS pubDate)
     delete next.scheduledPublishAt; // any publish consumes a pending schedule (ADR 0204 C2)
+    delete next.scheduledPublishVersion;
     // A pending scheduledUnpublishAt deliberately SURVIVES publish — it is the
     // embargo-end half of the pair (ADR 0204 C2b).
-    await snapshotPage(next, actor, 'publish'); // capture the published snapshot (Phase 3)
   } else if (p.status === 'published' || p.status === 'archived') {
     // Leaving published/archived (manual unpublish, archive) makes a pending
     // unpublish schedule moot — consume the field; the marker self-heals at
     // the next sweep read (the same discipline as the publish lane).
     delete next.scheduledUnpublishAt;
   }
-  if (action === 'submit') {
-    // ADR 0206 (B1): capture at submit too, so review-time version compares
-    // have the submitted content. snapshotPage dedupes by version, so
-    // submit→publish of unchanged content still yields ONE capture (and the
-    // publish arm PROMOTES that row's `origin` — ADR 0593 §C3).
-    await snapshotPage(next, actor, 'submit');
+  await casPage(p, next);
+  // ADR 0836 D1 — the snapshot is written only once the transition landed. It
+  // used to run first, so a lost race could still promote the submit row's
+  // `origin` to 'publish' — the marker the experiment gate trusts.
+  //
+  // The CAS above IS the commit point: the page is published (or in review)
+  // from here on. A snapshot failure must therefore not THROW — a caller that
+  // compensates on a throw (approval decide reopens its row) would record the
+  // opposite of what happened, and the lifecycle event below would be lost.
+  // Version history is derived state; a missing capture is logged, not undone.
+  try {
+    if (rule.to === 'published') {
+      await snapshotPage(next, actor, 'publish'); // capture the published snapshot (Phase 3)
+    } else if (action === 'submit') {
+      // ADR 0206 (B1): capture at submit too, so review-time version compares
+      // have the submitted content. snapshotPage dedupes by version, so
+      // submit→publish of unchanged content still yields ONE capture (and the
+      // publish arm PROMOTES that row's `origin` — ADR 0593 §C3).
+      await snapshotPage(next, actor, 'submit');
+    }
+  } catch (err) {
+    log.error('cms_snapshot_failed_after_commit', { tenantId, pageId, action, error: err instanceof Error ? err.message : String(err) });
   }
-  await pages.put(next);
   recordCmsAction(action, next, actor); // ADR 0204 C1/C5 — event + audit, best-effort
   return next;
 }
@@ -1798,6 +2241,8 @@ export interface SharedSection {
   type: SectionType;
   data: Record<string, unknown>;
   localizations?: Record<string, Record<string, unknown>>;
+  /** ADR 0861 D6 — the same server-owned translation-status stamp as `Section`. */
+  sourceDigest?: Record<string, string>;
   version: number;
   createdBy: string;
   updatedBy: string;
@@ -1855,6 +2300,8 @@ export async function createSharedSection(
     createdAt: ts,
     updatedAt: ts,
   };
+  const [stamped] = stampSourceDigests(undefined, [{ ...row, sectionId: row.sharedSectionId }]);
+  if (stamped?.sourceDigest) row.sourceDigest = stamped.sourceDigest;
   await sharedSections.put(row);
   return row;
 }
@@ -1881,6 +2328,14 @@ export async function updateSharedSection(
     if (loc && Object.keys(loc).length > 0) next.localizations = loc;
     else delete next.localizations;
   }
+  // ADR 0861 D6 — the stamp against the stored row (a base edit leaves an unchanged
+  // overlay's stamp in place, which is what makes it read `outdated`).
+  const [stamped] = stampSourceDigests(
+    [{ sectionId: cur.sharedSectionId, ...(cur.localizations ? { localizations: cur.localizations } : {}), ...(cur.sourceDigest ? { sourceDigest: cur.sourceDigest } : {}) }],
+    [{ ...next, sectionId: next.sharedSectionId }],
+  );
+  if (stamped?.sourceDigest) next.sourceDigest = stamped.sourceDigest;
+  else delete next.sourceDigest;
   await sharedSections.put(next);
   return next;
 }
@@ -1927,17 +2382,29 @@ export async function deliverableSectionsForPage(page: Page): Promise<Section[]>
   return out;
 }
 
-export async function listPagesUsingSharedSection(tenantId: string, orgId: string, sharedSectionId: string): Promise<Array<{ pageId: string; title: string; slug: string; status: PageStatus }>> {
+export async function listPagesUsingSharedSection(tenantId: string, orgId: string, sharedSectionId: string): Promise<Array<{ pageId: string; title: string; slug: string; status: PageStatus; scheduledPublishAt?: string }>> {
   const all = await listPages(tenantId, orgId);
-  const out: Array<{ pageId: string; title: string; slug: string; status: PageStatus }> = [];
+  const out: Array<{ pageId: string; title: string; slug: string; status: PageStatus; scheduledPublishAt?: string }> = [];
   for (const p of all) {
     // §C9 F1 — the DELIVERABLE sections, not merely the live ones.
     const sections = await deliverableSectionsForPage(p);
     if (sections.some((s) => s.ref?.sharedSectionId === sharedSectionId)) {
-      out.push({ pageId: p.pageId, title: p.title, slug: p.slug, status: p.status });
+      out.push({ pageId: p.pageId, title: p.title, slug: p.slug, status: p.status, ...(p.scheduledPublishAt ? { scheduledPublishAt: p.scheduledPublishAt } : {}) });
     }
   }
   return out;
+}
+
+/**
+ * ADR 0836 D6 — the ONE live-tier rule. A write that changes what this page's
+ * readers see (now, or when its scheduled publish fires) needs the admin tier
+ * (`host:members:manage`), whatever the approval-gate setting. Page PATCH and
+ * delete already held this for non-draft pages (ADR 0748); SEO and shared-section
+ * content did not, and neither did a SCHEDULED draft — whose SEO row and shared
+ * content change without moving the page `version` the schedule is pinned to.
+ */
+export function isLiveTierPage(p: { status: PageStatus; scheduledPublishAt?: string }): boolean {
+  return p.status !== 'draft' || Boolean(p.scheduledPublishAt);
 }
 
 /** Delete a shared section — 409 while any page still references it (the
@@ -1960,6 +2427,33 @@ export async function deleteSharedSection(tenantId: string, orgId: string, share
  * from delivery — never rendered empty. Type comes from the shared row (the
  * source of truth; the ref section's own `type` is a hint for the editor).
  */
+/**
+ * ADR 0861 D6 — the page's translation status over the given locales: per section,
+ * per locale, plus per-locale counts. A shared-section reference reports the SHARED
+ * row's status (its own `localizations` are empty by construction, review M3). An
+ * editor-facing read: digests never leave the server, only the verdicts do.
+ */
+export async function pageTranslationStatus(
+  page: Page,
+  locales: readonly string[],
+): Promise<{ sections: Record<string, Record<string, TranslationStatus>>; counts: Record<string, Record<TranslationStatus, number>> }> {
+  const sections: Record<string, Record<string, TranslationStatus>> = {};
+  const counts: Record<string, Record<TranslationStatus, number>> = {};
+  for (const l of locales) counts[l] = { missing: 0, current: 0, outdated: 0, unknown: 0 };
+  for (const sec of page.sections) {
+    const source = sec.ref ? await getSharedSection(page.tenantId, page.orgId, sec.ref.sharedSectionId) : sec;
+    if (!source || Object.keys(source.data ?? {}).length === 0) continue; // nothing to translate
+    const row: Record<string, TranslationStatus> = {};
+    for (const l of locales) {
+      const st = translationStatus(source, l);
+      row[l] = st;
+      counts[l]![st] += 1;
+    }
+    sections[sec.sectionId] = row;
+  }
+  return { sections, counts };
+}
+
 export async function resolveSharedRefs(page: Page): Promise<Page> {
   if (!page.sections.some((s) => s.ref)) return page;
   const resolved: Section[] = [];
@@ -1991,9 +2485,11 @@ export async function setScheduledPublish(tenantId: string, orgId: string, pageI
   const at = Date.parse(atIso);
   if (Number.isNaN(at)) throw new OpenwopError('validation_error', 'Invalid `at` — expected an ISO-8601 timestamp.', 400, { at: atIso });
   if (at <= Date.now()) throw new OpenwopError('validation_error', '`at` must be in the future.', 400, { at: atIso });
-  const next: Page = { ...p, scheduledPublishAt: new Date(at).toISOString(), updatedBy: actor, updatedAt: nowIso() };
-  await pages.put(next);
+  // ADR 0836 D3 — pin the schedule to the content the scheduler is looking at.
+  const next: Page = { ...p, scheduledPublishAt: new Date(at).toISOString(), scheduledPublishVersion: p.version, updatedBy: actor, updatedAt: nowIso() };
+  await casPage(p, next);
   // ADR 0408 — the sweep reads MARKERS, never the page store (see the sweep).
+  await dropMarker(scheduledMarkers, tenantId, orgId, pageId); // a legacy bare-pageId row, if any
   await scheduledMarkers.put({ pageId: next.pageId, tenantId, orgId, at: next.scheduledPublishAt ?? '' });
   recordCmsAction('schedule', next, actor, { scheduledPublishAt: next.scheduledPublishAt });
   return next;
@@ -2006,8 +2502,9 @@ export async function clearScheduledPublish(tenantId: string, orgId: string, pag
   if (!p.scheduledPublishAt) return p;
   const next: Page = { ...p, updatedBy: actor, updatedAt: nowIso() };
   delete next.scheduledPublishAt;
-  await pages.put(next);
-  await scheduledMarkers.delete(next.pageId);
+  delete next.scheduledPublishVersion;
+  await casPage(p, next);
+  await dropMarker(scheduledMarkers, tenantId, orgId, pageId);
   recordCmsAction('schedule-cleared', next, actor, { reason });
   return next;
 }
@@ -2024,7 +2521,7 @@ export async function listScheduledDuePages(nowIso_: string): Promise<Page[]> {
     if (p && p.scheduledPublishAt && p.scheduledPublishAt <= nowIso_ && (p.status === 'draft' || p.status === 'in_review')) {
       out.push(p);
     } else {
-      await scheduledMarkers.delete(m.pageId); // self-heal
+      await dropMarker(scheduledMarkers, m.tenantId, m.orgId, m.pageId); // self-heal
     }
   }
   return out;
@@ -2053,7 +2550,8 @@ export async function setScheduledUnpublish(tenantId: string, orgId: string, pag
     throw new OpenwopError('validation_error', 'The unpublish time must be after the scheduled publish time.', 400, { at: iso, scheduledPublishAt: p.scheduledPublishAt });
   }
   const next: Page = { ...p, scheduledUnpublishAt: iso, updatedBy: actor, updatedAt: nowIso() };
-  await pages.put(next);
+  await casPage(p, next);
+  await dropMarker(scheduledUnpublishMarkers, tenantId, orgId, pageId); // a legacy bare-pageId row, if any
   await scheduledUnpublishMarkers.put({ pageId: next.pageId, tenantId, orgId, at: iso });
   recordCmsAction('schedule-unpublish', next, actor, { scheduledUnpublishAt: iso });
   return next;
@@ -2066,8 +2564,8 @@ export async function clearScheduledUnpublish(tenantId: string, orgId: string, p
   if (!p.scheduledUnpublishAt) return p;
   const next: Page = { ...p, updatedBy: actor, updatedAt: nowIso() };
   delete next.scheduledUnpublishAt;
-  await pages.put(next);
-  await scheduledUnpublishMarkers.delete(next.pageId);
+  await casPage(p, next);
+  await dropMarker(scheduledUnpublishMarkers, tenantId, orgId, pageId);
   recordCmsAction('schedule-unpublish-cleared', next, actor, { reason });
   return next;
 }
@@ -2089,9 +2587,11 @@ export async function listScheduledDueUnpublishPages(nowIso_: string): Promise<P
       // page never went live): clear BOTH field and marker with an audit —
       // deleting only the marker would strand a forever-"pending" schedule
       // the page still displays and no lane will ever fire.
-      await clearScheduledUnpublish(m.tenantId, m.orgId, m.pageId, 'system:cms-scheduler', 'not-published');
+      // ADR 0836 — now a CAS write, so it can 409; one page must not stop the tick.
+      await clearScheduledUnpublish(m.tenantId, m.orgId, m.pageId, 'system:cms-scheduler', 'not-published')
+        .catch((err: unknown) => log.warn('cms_unpublish_marker_clear_failed', { pageId: m.pageId, error: err instanceof Error ? err.message : String(err) }));
     } else {
-      await scheduledUnpublishMarkers.delete(m.pageId); // stale marker — self-heal
+      await dropMarker(scheduledUnpublishMarkers, m.tenantId, m.orgId, m.pageId); // stale marker — self-heal
     }
   }
   return out;
@@ -2123,11 +2623,12 @@ export async function getPublishedBySlug(tenantId: string, orgId: string, slug: 
 // byte-identical; cms remains the management ROUTE surface.
 import {
   getContentLanguageSettings,
+  getStoredContentLanguageSettings,
   updateContentLanguageSettings,
   __resetContentLocales,
   type ContentLanguageSettings,
 } from '../../host/contentLocales.js';
-export { getContentLanguageSettings, updateContentLanguageSettings, type ContentLanguageSettings };
+export { getContentLanguageSettings, getStoredContentLanguageSettings, updateContentLanguageSettings, type ContentLanguageSettings };
 
 /** A delivery-shaped section: base+overlay resolved to one locale; `localizations`
  *  stripped (public delivery never exposes other locales). */
@@ -2135,6 +2636,16 @@ export interface DeliverySection {
   sectionId: string;
   type: SectionType;
   data: Record<string, unknown>;
+}
+
+/**
+ * ADR 0861 D1 — the ONE derivation of a page's withheld locales: every
+ * `localePublishState` key held at `'draft'`, configured or not. Delivery,
+ * the settings live-edit diff and the editor's preview mirror
+ * (`resolvePreviewLocale.ts`) all model the same set.
+ */
+export function withheldLocales(page: Pick<Page, 'localePublishState'>): string[] {
+  return Object.entries(page.localePublishState ?? {}).filter(([, v]) => v === 'draft').map(([l]) => l);
 }
 
 /**
@@ -2148,18 +2659,22 @@ export function localizePage(
   page: Page,
   acceptLanguage: string | undefined | null,
   settings: ContentLanguageSettings,
-): { page: Omit<Page, 'sections'> & { sections: DeliverySection[] }; locale: string } {
+): { page: Omit<Page, 'sections'> & { sections: DeliverySection[] }; locale: string; served: string[] } {
   // ADR 0205 D2 — a locale explicitly held in `'draft'` is withheld from
   // delivery: it is removed from the negotiable set AND its overlays are
   // stripped before resolution, so requests fall through the existing RFC 0103
   // chain (family → base). Absent state = published (backward compatible).
-  const state = page.localePublishState ?? {};
-  const deliverable = settings.supportedLocales.filter((l) => state[l] !== 'draft');
+  //
+  // ADR 0861 D1 (CMSL2WF-1) — the withheld set is a property of the PAGE. It was
+  // `supportedLocales.filter(draft)`, so a hold only bit while its locale was also
+  // configured: a withheld `pt` reached a `pt-BR` reader through the family step
+  // the moment `pt` left the org's locales (the ungated narrowing direction).
+  const withheld = withheldLocales(page);
+  const deliverable = settings.supportedLocales.filter((l) => !withheld.includes(l));
   const supported = [settings.baseLocale, ...deliverable];
   const locale = supported.length > 1
     ? negotiateLocale(acceptLanguage, supported, settings.baseLocale)
     : settings.baseLocale;
-  const withheld = settings.supportedLocales.filter((l) => state[l] === 'draft');
   const sections: DeliverySection[] = page.sections.map((s) => {
     let source = s;
     if (withheld.length > 0 && s.localizations) {
@@ -2174,7 +2689,10 @@ export function localizePage(
       data: resolveSection(source, locale, settings.baseLocale),
     };
   });
-  return { page: { ...page, sections }, locale };
+  // ADR 0861 D5 — the locales this page actually serves (base first), for the
+  // prerender's hreflang. Computed HERE because only this function holds the stored
+  // row; the public projection carries no `localePublishState`.
+  return { page: { ...page, sections }, locale, served: supported };
 }
 
 /** Flip one locale's publish state (ADR 0205 D2). Admin-tier at the route;
@@ -2186,9 +2704,13 @@ export async function setLocalePublishState(
   locale: string,
   state: 'draft' | 'published',
   actor: string,
+  // ADR 0861 D2 — runs on THIS read, the one the CAS compares (the ADR 0836
+  // `updatePage` shape). The release route's live-edit gate lives here.
+  opts?: { authorize?: (current: Page) => Promise<void> },
 ): Promise<Page | null> {
   const p = await getPage(tenantId, orgId, pageId);
   if (!p) return null;
+  if (opts?.authorize) await opts.authorize(p);
   const settings = await getContentLanguageSettings(tenantId, orgId);
   // ADR 0593 §C8 (adversarial review F3) — the "configured locale" precondition
   // applies to the RELEASE direction only. It used to apply to both, and that
@@ -2218,7 +2740,10 @@ export async function setLocalePublishState(
   else map[locale] = 'draft';
   if (Object.keys(map).length > 0) next.localePublishState = map;
   else delete next.localePublishState;
-  await pages.put(next);
+  // ADR 0836 D3 — admin tier (the route requires `host:members:manage`), so a
+  // pending scheduled publish follows this version rather than dying at fire time.
+  if (next.scheduledPublishAt) next.scheduledPublishVersion = next.version;
+  await casPage(p, next);
   recordCmsAction('locale-publish-state', next, actor, { locale, state });
   return next;
 }
@@ -2250,14 +2775,31 @@ export async function eraseCmsSubject(tenantId: string, subjectKey: string): Pro
   const { forms } = subjectKeyForms(subjectKey);
   const hit = (v: unknown): boolean => typeof v === 'string' && forms.has(v);
   let touched = 0;
-  for (const p of await pages.listForTenant(tenantId)) {
-    if (p.tenantId !== tenantId) continue;
+  // ADR 0836 D1 — the list is a whole-tenant snapshot, so a plain `put` reverted
+  // any edit (or schedule change) made since it was taken. Re-read and CAS each
+  // page; one retry absorbs a concurrent edit, a second miss is a real error.
+  const redact = (p: Page): Page | null => {
     let next: Page | null = null;
     if (hit(p.authorId)) next = { ...(next ?? p), authorId: ERASED_SUBJECT };
     if (hit(p.createdBy)) next = { ...(next ?? p), createdBy: ERASED_SUBJECT };
-
     if (hit(p.updatedBy)) next = { ...(next ?? p), updatedBy: ERASED_SUBJECT };
-    if (next) { await pages.put(next); touched += 1; }
+    return next;
+  };
+  for (const listed of await pages.listForTenant(tenantId)) {
+    if (listed.tenantId !== tenantId || !redact(listed)) continue;
+    for (let attempt = 0; ; attempt += 1) {
+      const p = await getPage(tenantId, listed.orgId, listed.pageId);
+      const next = p ? redact(p) : null;
+      if (!p || !next) break;
+      try {
+        await casPage(p, next);
+        touched += 1;
+        break;
+      } catch (err) {
+        if (attempt === 0 && err instanceof OpenwopError && err.code === 'conflict') continue;
+        throw err;
+      }
+    }
   }
   for (const v of await versions.list()) {
     if (v.tenantId !== tenantId || !hit(v.publishedBy)) continue;

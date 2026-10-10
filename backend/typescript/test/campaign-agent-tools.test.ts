@@ -71,12 +71,12 @@ describe('CFP-1 — the campaign packs allowlist EXACTLY the registered tool ids
   };
 
   it('the strategist allowlist is exactly [status, run]', () => {
-    expect(readAllowlist('feature.campaign-orchestration.agents')).toEqual(
+    expect(readAllowlist('vendor.openwop-app.campaign-orchestration.agents')).toEqual(
       [CAMPAIGN_ORCH_STATUS_TOOL_ID, CAMPAIGN_ORCH_RUN_TOOL_ID].sort(),
     );
   });
   it('the generator allowlist is exactly [channels, generate]', () => {
-    expect(readAllowlist('feature.campaign-channels.agents')).toEqual(
+    expect(readAllowlist('vendor.openwop-app.campaign-channels.agents')).toEqual(
       [CAMPAIGN_CHANNELS_LIST_TOOL_ID, CAMPAIGN_CHANNELS_GENERATE_TOOL_ID].sort(),
     );
   });

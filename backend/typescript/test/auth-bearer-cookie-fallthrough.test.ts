@@ -1,30 +1,33 @@
 /**
- * Coverage for the bearer-token fall-through to cookie path landed
- * 2026-05-24. Without this behavior, the Firebase JS SDK's ~hourly
- * ID-token rotation would surface as 401 storms on every request that
- * lands in the few-second window between rotation events — including
- * the `listOpenInterrupts` GET that surfaces the approval card after
- * a workflow suspends.
+ * ADR 0434 Phase 2 + the 2026-05-24 bearer → cookie fall-through, with cookies
+ * ENABLED (the browser deploy shape). The Firebase JS SDK rotates ID tokens
+ * ~hourly; a request landing in the rotation window carries a stale bearer.
  *
- * Three cases (cookies enabled — the browser deploy shape):
- *   1. Expired OIDC JWT + valid `__session` cookie → request succeeds
- *      with `principal.principalId.startsWith('session:')`. The cookie's
- *      tenant wins; the stale bearer doesn't poison the request.
- *   2. Bogus non-JWT Bearer + no cookie → request succeeds with a
- *      freshly-minted anon `__session` cookie. The Bearer is ignored;
- *      the response Set-Cookie carries the new session.
- *   3. Expired OIDC JWT + no cookie → same as #2 (anon session minted).
+ *   1. stale (expired) OIDC JWT + HEALTHY `__session` cookie → the request
+ *      survives on the SAME cookie session (`session:<sid>`), not a 401 storm;
+ *   2. bogus non-JWT bearer + NO cookie → 401 `bearer_rejected_no_session`
+ *      and NO Set-Cookie — never a silently-minted new anon identity (the
+ *      ADR 0434 silent-identity-switch / data-loss chain);
+ *   3. expired JWT + NO cookie → the same refusal;
+ *   4. NO bearer at all + no cookie → an anon session IS still minted (the
+ *      public demo's allowed-with control: the refusal above is the rejected
+ *      bearer, not the missing cookie).
  *
- * A fourth case (server-to-server callers — cookies disabled) lives in
- * `auth-oidc.test.ts`: when cookies are off there's nothing to fall
- * back to, so the strict 401 with `details.reason` is preserved.
+ * The "valid JWT → oidc:* principal" and Firebase-claim-shape cases that used to
+ * open this file were cut: the same break (`oidc:${claims.sub}` mis-derived)
+ * reds `auth-oidc.test.ts` "accepts a valid token…", and no current verifier
+ * change distinguishes the Firebase claim shape from it.
+ * The cookies-DISABLED strict-401 posture lives in `auth-oidc.test.ts`.
+ *
+ * Sabotage that turns it red: `auth.ts` `if (bearerRejected) {` → `if (false) {`
+ * reds cases 2 and 3.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import express, { type Express } from 'express';
 import http from 'node:http';
 import { createSign, generateKeyPairSync, type KeyObject } from 'node:crypto';
-import { authMiddleware, _resetOidcVerifier, _resetFallthroughTracker } from '../src/middleware/auth.js';
+import { authMiddleware, _resetOidcVerifier } from '../src/middleware/auth.js';
 import { registerPersonalTenantSessionAuthority, registerSessionAuthority } from '../src/host/sessionAuthority.js';
 import { usersSessionAuthority } from '../src/features/users/feature.js';
 
@@ -38,11 +41,6 @@ interface SyntheticIssuer {
   audience: string;
   jwksUrl: string;
   mint(overrides?: Partial<{ sub: string; aud: string; exp: number; iat: number }>): string;
-  /** Mint a token with the realistic Firebase Auth claim shape
-   *  (`auth_time`, `email_verified`, `firebase.identities`, etc.).
-   *  Catches verifier changes that tighten claim checks against
-   *  fields the synthetic minimal shape doesn't carry. */
-  mintFirebaseShape(overrides?: Partial<{ sub: string; aud: string; exp: number; email: string }>): string;
   close: () => Promise<void>;
 }
 
@@ -77,36 +75,6 @@ async function startSyntheticIssuer(audience: string): Promise<SyntheticIssuer> 
         sub: overrides.sub ?? 'firebase-uid-stale',
         iat: overrides.iat ?? now,
         exp: overrides.exp ?? now + 300,
-      };
-      const signingInput = `${b64url(JSON.stringify(header))}.${b64url(JSON.stringify(payload))}`;
-      const sig = createSign('sha256').update(signingInput).sign(privateKey as KeyObject);
-      return `${signingInput}.${b64url(sig)}`;
-    },
-    mintFirebaseShape(overrides = {}) {
-      const now = Math.floor(Date.now() / 1000);
-      const sub = overrides.sub ?? 'firebase-uid-real-shape';
-      const email = overrides.email ?? 'user@example.com';
-      const header = { alg: 'RS256', kid, typ: 'JWT' };
-      // Mirrors the actual claim set Firebase Auth issues for a
-      // password-provider sign-in (snapshot from `firebase auth:export`
-      // sanitized). The verifier presently only checks iss/aud/exp;
-      // adding these fields here pins the contract — if a future
-      // change starts asserting on `firebase.identities.email`
-      // existence, this fixture catches the break.
-      const payload = {
-        iss: issuer,
-        aud: overrides.aud ?? audience,
-        sub,
-        iat: now,
-        exp: overrides.exp ?? now + 3600,
-        auth_time: now - 60,
-        email,
-        email_verified: true,
-        user_id: sub,
-        firebase: {
-          identities: { email: [email] },
-          sign_in_provider: 'password',
-        },
       };
       const signingInput = `${b64url(JSON.stringify(header))}.${b64url(JSON.stringify(payload))}`;
       const sig = createSign('sha256').update(signingInput).sign(privateKey as KeyObject);
@@ -174,27 +142,6 @@ const call = (headers: Record<string, string> = {}) =>
   fetch(`http://127.0.0.1:${appPort}/v1/test/whoami`, { headers });
 
 describe('bearer → cookie fall-through (browser-shape deploys)', () => {
-  it('valid OIDC JWT still produces an oidc:* principal (regression guard)', async () => {
-    _resetFallthroughTracker();
-    const token = issuer.mint({ sub: 'firebase-uid-valid' });
-    const res = await call({ authorization: `Bearer ${token}` });
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as { principalId: string };
-    expect(body.principalId).toBe('oidc:firebase-uid-valid');
-  });
-
-  it('valid Firebase-shape JWT (auth_time + firebase.identities) verifies cleanly', async () => {
-    // Pins contract: if a future verifier change starts asserting on
-    // Firebase-specific claims, this test exercises them so the
-    // change is caught here rather than at first prod deploy.
-    _resetFallthroughTracker();
-    const token = issuer.mintFirebaseShape({ sub: 'firebase-uid-realshape', email: 'alice@example.com' });
-    const res = await call({ authorization: `Bearer ${token}` });
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as { principalId: string };
-    expect(body.principalId).toBe('oidc:firebase-uid-realshape');
-  });
-
   it('expired JWT + valid session cookie → session:* principal, NOT 401', async () => {
     // Step 1: warm up an anon session so we have a real signed cookie.
     const seed = await call();
@@ -262,6 +209,11 @@ describe('bearer → cookie fall-through (browser-shape deploys)', () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { principalId: string };
     expect(body.principalId).toMatch(/^session:/);
-    expect(res.headers.get('set-cookie')).toMatch(/^__session=/);
+    const minted = extractSessionCookie(res.headers.get('set-cookie'));
+    expect(minted).toMatch(/^__session=/);
+    const payloadB64 = minted!.slice('__session='.length).split('.')[0]!;
+    const payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8')) as { tier?: string; sid?: string };
+    expect(payload.tier).toBe('anon');
+    expect(body.principalId).toBe(`session:${payload.sid}`);
   });
 });

@@ -18,7 +18,7 @@ import { getAgentRegistry } from '../src/executor/agentRegistry.js';
 
 const OWNER_KEY = 'ownerkey-aaaaaaaa';
 const OTHER_KEY = 'otherkey-bbbbbbbb';
-const CH = '/v1/host/openwop-app/channels';
+const CH = '/host/openwop-app/channels';
 
 let server: http.Server;
 let BASE: string;

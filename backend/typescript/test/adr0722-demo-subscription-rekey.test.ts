@@ -26,9 +26,9 @@ describe('migration 21 — re-key demo auto-ingest subscription ids', () => {
   if (!found) throw new Error('migration 21 is missing');
   const m21 = found;
 
-  it('exists and is the highest version', () => {
+  it('exists (ADR 0789 added v22 above it)', () => {
     expect(m21.name).toBe('rekey-demo-auto-ingest-subscription-ids');
-    expect(Math.max(...APP_MIGRATIONS.map((m) => m.version))).toBe(21);
+    expect(Math.max(...APP_MIGRATIONS.map((m) => m.version))).toBeGreaterThanOrEqual(21);
   });
 
   it('moves a legacy row to the new id and keeps its fields; a re-seed then finds it', async () => {

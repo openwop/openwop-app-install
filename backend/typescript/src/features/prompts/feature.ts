@@ -2,8 +2,11 @@
  * Prompt library (ADR 0116, backlog B6) — a curated, RBAC-gated, shareable,
  * versioned catalog of prompts, insertable into the chat composer via `/prompt`.
  * COMPOSES the existing prompt store (the catalog REFERENCES templates, never
- * copies them), ADR 0013 sharing, ADR 0053/RFC 0027 templates. A `prompts` toggle,
- * off by default, bucketed per TENANT (a shared team asset).
+ * copies them), ADR 0013 sharing, ADR 0053/RFC 0027 templates.
+ *
+ * ALWAYS-ON (ADR 0820 §8.6 / core-audit M8 correction): the `prompts` toggle this header
+ * used to describe was removed when the feature graduated (ADR 0134 / 2026-06-24);
+ * there is no per-tenant switch. Gating is RBAC and visibility only.
  *
  * @see docs/adr/0116-prompt-library.md
  */
@@ -13,7 +16,7 @@ import { buildPromptSurface } from './promptSurface.js';
 
 export const promptsFeature: BackendFeature = {
   id: 'prompts',
-  requiredPacks: [{ name: 'feature.prompts.nodes', version: '1.1.0' }], // NP-HOLE-PROMPTS-1
+  requiredPacks: [{ name: 'feature.prompts.nodes', version: '1.1.1' }], // NP-HOLE-PROMPTS-1
   registerRoutes: (deps) => {
     registerPromptLibraryRoutes(deps);
   },

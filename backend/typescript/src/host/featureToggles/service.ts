@@ -13,7 +13,12 @@
  * (bucketing.ts), so a run can stamp its variant and replay it verbatim.
  */
 
+import { createHash } from 'node:crypto';
 import { DurableCollection } from '../hostExtPersistence.js';
+import { canonicalize } from '../auditChainService.js';
+import { isSellableBundleFeature } from '../featureBundles.js';
+import { checkTenantEntitlement } from '../entitlementSeam.js';
+import { OpenwopError } from '../../types.js';
 import { createLogger } from '../../observability/logger.js';
 import { assignVariant } from './bucketing.js';
 import { packPresence } from '../../packs/registryInstaller.js';
@@ -54,6 +59,7 @@ function mergeStoredOverDefault(def: ToggleConfig, stored: ToggleConfig): Toggle
   return {
     ...def, // id + declared metadata (label/description/category/bucketUnit/salt)
     status: stored.status,
+    ...(stored.killed ? { killed: true } : {}),
     ...(stored.variants !== undefined ? { variants: stored.variants } : {}),
     ...(stored.betaCohort !== undefined ? { betaCohort: stored.betaCohort } : {}),
     ...(stored.tenantOverrides !== undefined ? { tenantOverrides: stored.tenantOverrides } : {}),
@@ -84,6 +90,25 @@ export async function listEffectiveConfigs(): Promise<ToggleConfig[]> {
 }
 
 /**
+ * The admin list projection (ADR 0819 §5): every effective config plus the same
+ * provenance the single-config read carries — `revision` (so an edit started
+ * from the LIST is a CAS too, not last-writer-wins), `overridden` and
+ * `defaultDrift`. Before this, the list omitted `overridden`, so the panel's
+ * revert control only appeared after a save had echoed the single read.
+ */
+export async function listAdminConfigs(): Promise<Array<ToggleConfig & { overridden: boolean; defaultDrift: boolean; revision: string | null }>> {
+  const storedById = new Map((await store.list()).map((r) => [r.id, r]));
+  return listToggleDefaults()
+    .map((def) => {
+      const stored = storedById.get(def.id) ?? null;
+      const effective = stored ? mergeStoredOverDefault(def, stored) : def;
+      const defaultDrift = Boolean(stored && stored.overriddenDefaultStatus !== undefined && stored.overriddenDefaultStatus !== def.status);
+      return { ...effective, overridden: Boolean(stored), defaultDrift, revision: revisionOf(stored) };
+    })
+    .sort((a, b) => a.id.localeCompare(b.id));
+}
+
+/**
  * Delete stored toggle configs whose feature no longer declares a default (it
  * GRADUATED to always-on, or was removed). Called at boot — without it, the
  * admin-saved row for a since-graduated feature lingers in the store forever
@@ -106,8 +131,18 @@ export async function pruneOrphanedConfigs(): Promise<number> {
  *  (architect 2026-07-13, finding 2 — the former path was psql surgery on the
  *  host_ext_kv row).
  *  Returns the now-effective (code-declared) config, or null if none stored. */
-export async function deleteConfig(id: string, deletedBy: string): Promise<ToggleConfig | null> {
+export async function deleteConfig(
+  id: string,
+  deletedBy: string,
+  opts: { expectedRevision?: string | null } = {},
+): Promise<ToggleConfig | null> {
   const stored = await store.get(id);
+  // ADR 0819 §5 — the store has no conditional delete, so this is check-then-
+  // delete: it narrows the lost-update window to the gap between these two
+  // calls and does NOT close it (PUT is a true CAS).
+  if (opts.expectedRevision !== undefined && revisionOf(stored) !== opts.expectedRevision) {
+    throw revisionConflict(id, revisionOf(stored));
+  }
   if (!stored) return null;
   const def = getToggleDefault(id);
   await store.delete(id);
@@ -117,17 +152,46 @@ export async function deleteConfig(id: string, deletedBy: string): Promise<Toggl
 
 /** Admin projection of one effective config + provenance (finding 3): whether a
  *  stored row pins it, and whether the compiled default drifted under the pin. */
-export async function getAdminConfig(id: string): Promise<(ToggleConfig & { overridden: boolean; defaultDrift: boolean }) | null> {
+export async function getAdminConfig(id: string): Promise<(ToggleConfig & { overridden: boolean; defaultDrift: boolean; revision: string | null }) | null> {
   const def = getToggleDefault(id);
   if (!def) return null;
   const stored = await store.get(id);
   const effective = stored ? mergeStoredOverDefault(def, stored) : def;
   const defaultDrift = Boolean(stored && stored.overriddenDefaultStatus !== undefined && stored.overriddenDefaultStatus !== def.status);
-  return { ...effective, overridden: Boolean(stored), defaultDrift };
+  return { ...effective, overridden: Boolean(stored), defaultDrift, revision: revisionOf(stored) };
+}
+
+/**
+ * ADR 0819 §5 — the optimistic-concurrency token for one toggle: a digest of
+ * the EXACT stored row, or `null` when nothing is stored (the toggle follows
+ * its code default). A content digest rather than `updatedAt`: a clock value
+ * can collide across instances, a digest of the row cannot without the rows
+ * being equal.
+ */
+export function revisionOf(stored: ToggleConfig | null): string | null {
+  return stored ? createHash('sha256').update(canonicalize(stored)).digest('hex').slice(0, 16) : null;
+}
+
+/** The current stored row for a toggle (the admin route's before-image). */
+export async function getStoredConfig(id: string): Promise<ToggleConfig | null> {
+  return store.get(id);
+}
+
+function revisionConflict(id: string, current: string | null): OpenwopError {
+  return new OpenwopError(
+    'conflict',
+    `Feature toggle "${id}" was changed by someone else since you loaded it. Reload it and re-apply your change.`,
+    409,
+    { id, reason: 'revision_conflict', revision: current },
+  );
 }
 
 /** Persist an admin-saved config (upsert). Caller validates first. */
-export async function saveConfig(config: ToggleConfig, savedBy: string): Promise<ToggleConfig> {
+export async function saveConfig(
+  config: ToggleConfig,
+  savedBy: string,
+  opts: { expectedRevision?: string | null } = {},
+): Promise<ToggleConfig> {
   const def = getToggleDefault(config.id);
   // Persist ONLY the admin's CHOICES (status/variants/cohort/overrides) + the
   // structural fields (bucketUnit/salt, taken from the def when available). The
@@ -138,6 +202,7 @@ export async function saveConfig(config: ToggleConfig, savedBy: string): Promise
   const next: ToggleConfig = {
     id: config.id,
     status: config.status,
+    ...(config.killed ? { killed: true } : {}),
     bucketUnit: def?.bucketUnit ?? config.bucketUnit,
     salt: def?.salt ?? config.salt,
     ...(config.variants !== undefined ? { variants: config.variants } : {}),
@@ -149,7 +214,16 @@ export async function saveConfig(config: ToggleConfig, savedBy: string): Promise
     // row overrode, so a later compiled-default change surfaces as drift.
     ...(def ? { overriddenDefaultStatus: def.status } : {}),
   };
-  await store.put(next);
+  if (opts.expectedRevision !== undefined) {
+    // ADR 0819 §5 — the revision check IS the write: a CAS against the exact
+    // row the editor loaded. A compare-then-put would only narrow the race.
+    const stored = await store.get(config.id);
+    if (revisionOf(stored) !== opts.expectedRevision || !(await store.compareAndSwap(stored, next))) {
+      throw revisionConflict(config.id, revisionOf(await store.get(config.id)));
+    }
+  } else {
+    await store.put(next);
+  }
   // Return the EFFECTIVE config (declared metadata merged back from code) so the
   // API response is complete even though the stored row is lean.
   return def ? mergeStoredOverDefault(def, next) : next;
@@ -188,11 +262,14 @@ export async function enableTenantOverride(
   id: string,
   tenantId: string,
   actor: string,
-): Promise<'enabled' | 'already-on' | 'unknown'> {
+): Promise<'enabled' | 'already-on' | 'killed' | 'unknown'> {
   const MAX_TRIES = 6;
   for (let attempt = 0; attempt < MAX_TRIES; attempt += 1) {
     const effective = await getEffectiveConfig(id);
     if (!effective) return 'unknown';
+    // ADR 0819 §3 — a killed toggle resolves off whatever override is written,
+    // so writing one and reporting 'enabled' would be a false claim.
+    if (effective.killed) return 'killed';
     if (resolveConfig(effective, { tenantId }).enabled) return 'already-on';
     const stored = await store.get(id); // exact CAS `expected` (null ⇒ insert-if-absent)
     const base = stored ?? effective; // when nothing's stored, persist the default as the base
@@ -206,64 +283,6 @@ export async function enableTenantOverride(
     // Lost the race — another writer changed the row; re-read and retry.
   }
   throw new Error(`enableTenantOverride: CAS contention on toggle '${id}' after ${MAX_TRIES} attempts`);
-}
-
-/**
- * Set (or CLEAR) a tenant's per-tenant status override on ONE toggle
- * (ADR 0387 — the environments config-domain restore seam). CAS-safe like
- * `enableTenantOverride`: it mutates only `tenantOverrides[tenantId]` on the
- * shared config row, so two tenants restoring config snapshots concurrently
- * cannot clobber each other. `status: null` DELETES the tenant's override key
- * (semantically distinct from `'off'` — "no override" vs "override to off", the
- * distinction an exact-match snapshot restore must round-trip). Uses
- * `store.compareAndSwap` directly, NOT `saveConfig`, because changing ONE
- * tenant's override never alters the GLOBAL status — the status-listener seam
- * must not fire. Returns 'set' / 'cleared' / 'unchanged' / 'unknown'.
- */
-export async function setTenantOverrideStatus(
-  id: string,
-  tenantId: string,
-  status: FeatureToggleStatus | null,
-  actor: string,
-): Promise<'set' | 'cleared' | 'unchanged' | 'unknown'> {
-  const MAX_TRIES = 6;
-  for (let attempt = 0; attempt < MAX_TRIES; attempt += 1) {
-    const effective = await getEffectiveConfig(id);
-    if (!effective) return 'unknown';
-    const stored = await store.get(id); // exact CAS `expected` (null ⇒ insert-if-absent)
-    const base = stored ?? effective; // persist the default as the base when nothing's stored
-    const current = base.tenantOverrides?.[tenantId]?.status;
-    const nextOverrides = { ...base.tenantOverrides };
-    if (status === null) {
-      if (current === undefined) return 'unchanged';
-      delete nextOverrides[tenantId];
-    } else {
-      if (current === status) return 'unchanged';
-      nextOverrides[tenantId] = { ...nextOverrides[tenantId], status };
-    }
-    const next: ToggleConfig = {
-      ...base,
-      tenantOverrides: nextOverrides,
-      updatedAt: new Date().toISOString(),
-      updatedBy: actor,
-    };
-    if (await store.compareAndSwap(stored, next)) return status === null ? 'cleared' : 'set';
-    // Lost the race — re-read and retry.
-  }
-  throw new Error(`setTenantOverrideStatus: CAS contention on toggle '${id}' after ${MAX_TRIES} attempts`);
-}
-
-/** Read a tenant's COMPLETE effective per-tenant status-override set — every
- *  toggle whose `tenantOverrides[tenantId]` is set, with its status (ADR 0387
- *  snapshot export). Overrides only (not compiled defaults) — a faithful
- *  restore re-applies exactly these and clears the rest. */
-export async function listTenantOverrides(tenantId: string): Promise<Record<string, FeatureToggleStatus>> {
-  const out: Record<string, FeatureToggleStatus> = {};
-  for (const cfg of await listEffectiveConfigs()) {
-    const status = cfg.tenantOverrides?.[tenantId]?.status;
-    if (status !== undefined) out[cfg.id] = status;
-  }
-  return out;
 }
 
 /**
@@ -294,6 +313,7 @@ export async function purgeTenantOverrides(tenantId: string): Promise<string[]> 
 /** The effective status of a config for one tenant: its override, else the global
  *  default. Mirrors `resolveConfig`'s override precedence. */
 function statusForTenant(cfg: ToggleConfig, tenantId: string): FeatureToggleStatus {
+  if (cfg.killed) return 'off'; // ADR 0819 §3 — a kill beats every override
   return cfg.tenantOverrides?.[tenantId]?.status ?? cfg.status;
 }
 
@@ -302,6 +322,7 @@ function statusForTenant(cfg: ToggleConfig, tenantId: string): FeatureToggleStat
  *  admin console's global Off control conservatively (ADR 0194 Phase 5). */
 function isEnabledAnywhere(cfg: ToggleConfig | null): boolean {
   if (!cfg) return true;
+  if (cfg.killed) return false;
   if (cfg.status !== 'off') return true;
   return Object.values(cfg.tenantOverrides ?? {}).some((o) => (o.status ?? cfg.status) !== 'off');
 }
@@ -333,8 +354,8 @@ export async function computeDisableBlockers(next: ToggleConfig): Promise<Disabl
   for (const dependentId of getFeatureDependents(next.id)) {
     const dep = await getEffectiveConfig(dependentId);
     // Global default scope: dependent on globally, this dependency off globally.
-    const depOnGlobal = dep ? dep.status !== 'off' : true;
-    if (depOnGlobal && next.status === 'off') out.push({ dependentId, tenantId: null });
+    const depOnGlobal = dep ? !dep.killed && dep.status !== 'off' : true;
+    if (depOnGlobal && (next.killed || next.status === 'off')) out.push({ dependentId, tenantId: null });
     // Per-tenant scopes: only tenants overridden on EITHER side can diverge from
     // the global pair above. For each, resolve both sides and flag an orphan.
     const tenants = new Set<string>([
@@ -420,6 +441,9 @@ function inBetaCohort(config: ToggleConfig, subject: ToggleSubject): boolean {
 
 /** Resolve one effective config against a subject. Pure given (config, subject). */
 export function resolveConfig(config: ToggleConfig, subject: ToggleSubject): ResolvedAssignment {
+  // ADR 0819 §3 — the kill switch is evaluated FIRST: no override, cohort or
+  // variant can bring a killed feature back for anyone.
+  if (config.killed) return { id: config.id, status: 'off', enabled: false, variant: null };
   // Apply the per-tenant override (ADR §3.1: tenant override → global default).
   let status = config.status;
   let variants = config.variants;
@@ -460,10 +484,50 @@ export async function resolveAssignments(subject: ToggleSubject): Promise<Resolv
   return configs.map((c) => resolveConfig(c, subject));
 }
 
-/** Resolve a single toggle by id for a subject (null if no such toggle). */
-export async function resolveOne(id: string, subject: ToggleSubject): Promise<ResolvedAssignment | null> {
+/**
+ * The TOGGLE alone for one id and subject (null if no such toggle) — no plan
+ * check. ADR 0819 §1: this is the explicit OPT-OUT from the paywall, for the
+ * lanes that must not be paywalled or that apply the plan themselves:
+ * `requireFeatureEnabled` (its own 403 + the operator's person-level
+ * exemption), the FE assignments map + admin console, ADR 0419's public
+ * shopper lanes, money-truth lanes, and toggles whose OFF state LOOSENS a
+ * restriction (territory visibility, consent) — paywalling those would fail
+ * OPEN on a lapsed plan. Every caller is listed in
+ * `test/feature-toggle-access-ratchet.test.ts`; adding one is a reviewed diff.
+ */
+export async function resolveToggle(id: string, subject: ToggleSubject): Promise<ResolvedAssignment | null> {
   const config = await getEffectiveConfig(id);
   return config ? resolveConfig(config, subject) : null;
+}
+
+/**
+ * Whether `subject` may USE feature `id`: the toggle AND, for a feature sold in
+ * a paid bundle, the tenant's plan entitlement (ADR 0419) — the default every
+ * lane gets (ADR 0819 §1). The paywall used to live only in
+ * `requireFeatureEnabled`, so chat tools, `ctx.features` nodes, the collab
+ * socket, MCP, schedules, triggers and chat recall all served a tenant the
+ * HTTP route refused. Putting it in the one call every lane already makes is
+ * what makes a new lane paywalled by default.
+ *
+ * Fail-CLOSED: an entitlement read that throws for any reason resolves the
+ * feature off. A plan refusal is `blockedBy:'plan'`; any other fault is
+ * `blockedBy:'unresolved'` (logged), so no caller reports an outage as a
+ * plan answer. A no-op when
+ * billing has not registered a check or no plan is narrowed.
+ */
+export async function resolveOne(id: string, subject: ToggleSubject): Promise<ResolvedAssignment | null> {
+  const assignment = await resolveToggle(id, subject);
+  if (!assignment || !assignment.enabled || subject.planExempt || !isSellableBundleFeature(id)) return assignment;
+  try {
+    await checkTenantEntitlement(subject.tenantId, id);
+    return assignment;
+  } catch (err) {
+    if (err instanceof OpenwopError && err.httpStatus === 403) {
+      return { id, status: assignment.status, enabled: false, variant: null, blockedBy: 'plan' };
+    }
+    log.warn('feature_access_entitlement_unresolved', { id, tenantId: subject.tenantId, error: err instanceof Error ? err.message : String(err) });
+    return { id, status: assignment.status, enabled: false, variant: null, blockedBy: 'unresolved' };
+  }
 }
 
 /** Test-only: clear durable overrides. */

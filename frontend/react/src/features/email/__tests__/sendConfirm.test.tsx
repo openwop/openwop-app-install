@@ -5,26 +5,34 @@
  * mails real people, and cannot be recalled — went straight through on a single
  * click. This pins the gate, and pins that the dialog carries information
  * (what is going to whom) rather than being pure friction.
+ *
+ * Sabotage-witnessed (/grade-tests wave 9, `w9g4-sc-*`): sending on a declined
+ * confirm, a body that drops the template/audience, the resend flag forced false,
+ * re-asking a `sending` campaign, and skipping `sendCampaign` each turn their case red.
+ * Every read the page makes is mocked (incl. `getProviderStatus`), so this file no
+ * longer needs a `test-live-fetch-allowlist.txt` line.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import type { Campaign } from '../emailClient.js';
+import type * as EC from '../emailClient.js';
+import type { Campaign, EmailSettings, ProviderStatus } from '../emailClient.js';
 
-const listCampaigns = vi.fn();
-const listTemplates = vi.fn();
-const sendCampaign = vi.fn();
+const listCampaigns = vi.fn<typeof EC.listCampaigns>();
+const listTemplates = vi.fn<typeof EC.listTemplates>();
+const sendCampaign = vi.fn<typeof EC.sendCampaign>();
 const confirmFn = vi.fn();
 
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 vi.mock('../emailClient.js', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
-  listCampaigns: (...a: unknown[]) => listCampaigns(...a),
-  listTemplates: (...a: unknown[]) => listTemplates(...a),
-  sendCampaign: (...a: unknown[]) => sendCampaign(...a),
+  listCampaigns: (...a: Parameters<typeof EC.listCampaigns>) => listCampaigns(...a),
+  listTemplates: (...a: Parameters<typeof EC.listTemplates>) => listTemplates(...a),
+  sendCampaign: (...a: Parameters<typeof EC.sendCampaign>) => sendCampaign(...a),
   listSends: async () => [],
   listSegments: async () => [],
-  getEmailSettings: async () => ({}),
+  getEmailSettings: async (): Promise<EmailSettings> => ({ senderAddress: 'news@acme.test', configured: true }),
+  getProviderStatus: async (): Promise<ProviderStatus> => ({ providers: [], defaultProvider: null, senderAddress: 'news@acme.test' }),
   listOrgs: async () => [{ orgId: 'org:1', name: 'Acme' }],
 }));
 vi.mock('../../../ui/confirm.js', () => ({ confirm: (...a: unknown[]) => confirmFn(...a) }));
@@ -37,7 +45,7 @@ const { EmailPage } = await import('../EmailPage.js');
 const campaign = (status: Campaign['status']): Campaign => ({
   campaignId: 'c1', orgId: 'org:1', templateId: 'tpl1',
   audience: { stage: 'lead' }, status, createdAt: '', updatedAt: '',
-} as Campaign);
+});
 
 // The page reads the URL (org deep-link), so it needs a router.
 const renderPage = () => render(<MemoryRouter><EmailPage /></MemoryRouter>);
@@ -45,7 +53,7 @@ const renderPage = () => render(<MemoryRouter><EmailPage /></MemoryRouter>);
 beforeEach(() => {
   vi.clearAllMocks();
   listTemplates.mockResolvedValue([{ templateId: 'tpl1', orgId: 'org:1', name: 'Welcome', subject: 's', body: 'b', createdAt: '', updatedAt: '' }]);
-  sendCampaign.mockResolvedValue({ status: 'sent', stats: { sent: 3, failed: 0, skipped: 0 } });
+  sendCampaign.mockResolvedValue({ ...campaign('sent'), stats: { sent: 3, failed: 0, skipped: 0 } });
 });
 afterEach(cleanup);
 

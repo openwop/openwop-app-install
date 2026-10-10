@@ -17,6 +17,7 @@ import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 import { parseConnectionResume } from '../src/host/connectionInterrupt.js';
+import { bareRunId } from './support/bareRunId.js';
 
 let server: http.Server;
 let BASE: string;
@@ -43,11 +44,11 @@ async function pollStatus(runId: string): Promise<{ status: string; events: Bund
   let status = 'pending';
   for (let i = 0; i < 60; i++) {
     await new Promise((r) => setTimeout(r, 25));
-    const snap = await jsonFetch<{ status: string }>(`/v1/runs/${runId}`);
+    const snap = await jsonFetch<{ status: string }>(`/runs/${runId}`);
     status = snap.body.status;
     if (['completed', 'failed', 'cancelled'].includes(status) || status.startsWith('waiting')) break;
   }
-  const bundle = await jsonFetch<{ events?: BundleEvent[] }>(`/v1/runs/${runId}/debug-bundle`);
+  const bundle = await jsonFetch<{ events?: BundleEvent[] }>(`/host/openwop-app/runs/${bareRunId(runId)}/debug-bundle`);
   return { status, events: bundle.body.events ?? [] };
 }
 
@@ -58,8 +59,8 @@ const WF_NODES = [{
 }];
 
 async function startRun(workflowId: string, metadata?: Record<string, unknown>): Promise<string> {
-  await jsonFetch('/v1/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({ workflowId, nodes: WF_NODES, edges: [] }) });
-  const create = await jsonFetch<{ runId: string }>('/v1/runs', {
+  await jsonFetch('/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({ workflowId, nodes: WF_NODES, edges: [] }) });
+  const create = await jsonFetch<{ runId: string }>('/runs', {
     method: 'POST',
     body: JSON.stringify({ workflowId, inputs: {}, tenantId: TENANT, ...(metadata ? { metadata } : {}) }),
   });
@@ -76,7 +77,7 @@ describe('connect-to-continue (ADR 0189 P1)', () => {
     expect(sus.events.some((e) => e.type === 'node.suspended' && e.nodeId === 'bq')).toBe(true);
 
     const ints = await jsonFetch<{ interrupts: Array<{ token: string; nodeId: string; kind: string; data?: Record<string, unknown> }> }>(
-      `/v1/host/openwop-app/runs/${runId}/interrupts`,
+      `/host/openwop-app/runs/${bareRunId(runId)}/interrupts`,
     );
     const it0 = ints.body.interrupts.find((i) => i.nodeId === 'bq');
     expect(it0, 'an open interrupt for the connector node').toBeTruthy();
@@ -86,7 +87,7 @@ describe('connect-to-continue (ADR 0189 P1)', () => {
     // The deterministic resume key (replay short-circuit contract).
     expect(it0?.data?.__resumeKey ?? it0?.data?.key).toBe('conn:bq:bigquery');
 
-    const resolve = await jsonFetch(`/v1/interrupts/${it0?.token}`, { method: 'POST', body: JSON.stringify({ resumeValue: { action: 'skip' } }) });
+    const resolve = await jsonFetch(`/interrupts/${it0?.token}`, { method: 'POST', body: JSON.stringify({ resumeValue: { action: 'skip' } }) });
     expect([200, 202, 204]).toContain(resolve.status);
 
     const done = await pollStatus(runId);
@@ -102,7 +103,7 @@ describe('connect-to-continue (ADR 0189 P1)', () => {
     const done = await pollStatus(runId);
     expect(done.status.startsWith('waiting'), `must NOT suspend, was ${done.status}`).toBe(false);
     expect(done.events.some((e) => e.type === 'node.suspended')).toBe(false);
-    const ints = await jsonFetch<{ interrupts: unknown[] }>(`/v1/host/openwop-app/runs/${runId}/interrupts`);
+    const ints = await jsonFetch<{ interrupts: unknown[] }>(`/host/openwop-app/runs/${bareRunId(runId)}/interrupts`);
     expect(ints.body.interrupts).toHaveLength(0);
     expect(JSON.stringify(done.events)).toContain('connector_no_connection');
   });
@@ -111,8 +112,8 @@ describe('connect-to-continue (ADR 0189 P1)', () => {
     const a = await startRun('conn.parity.a', { chatSessionId: 'sess-2' });
     const sus = await pollStatus(a);
     expect(sus.status.startsWith('waiting')).toBe(true);
-    const ints = await jsonFetch<{ interrupts: Array<{ token: string }> }>(`/v1/host/openwop-app/runs/${a}/interrupts`);
-    await jsonFetch(`/v1/interrupts/${ints.body.interrupts[0]?.token}`, { method: 'POST', body: JSON.stringify({ resumeValue: { action: 'skip' } }) });
+    const ints = await jsonFetch<{ interrupts: Array<{ token: string }> }>(`/host/openwop-app/runs/${bareRunId(a)}/interrupts`);
+    await jsonFetch(`/interrupts/${ints.body.interrupts[0]?.token}`, { method: 'POST', body: JSON.stringify({ resumeValue: { action: 'skip' } }) });
     const doneA = await pollStatus(a);
 
     const b = await startRun('conn.parity.b');
@@ -149,12 +150,12 @@ describe('connect-to-continue expiry → skip (lazy, CAS-claimed)', () => {
       // Wait past the 1s deadline, then hit the open-interrupts read (the chat's
       // poll) — the lazy path claims + resumes-as-skip.
       await new Promise((r) => setTimeout(r, 1300));
-      const first = await jsonFetch<{ interrupts: unknown[] }>(`/v1/host/openwop-app/runs/${runId}/interrupts`);
+      const first = await jsonFetch<{ interrupts: unknown[] }>(`/host/openwop-app/runs/${bareRunId(runId)}/interrupts`);
       expect(first.body.interrupts, 'expired prompt drops out of the open listing').toHaveLength(0);
 
       // A second concurrent-style read must not double-resume; the run settles
       // to the graceful no-connection terminal, same as skip/headless.
-      await jsonFetch(`/v1/host/openwop-app/runs/${runId}/interrupts`);
+      await jsonFetch(`/host/openwop-app/runs/${bareRunId(runId)}/interrupts`);
       const done = await pollStatus(runId);
       expect(done.status.startsWith('waiting')).toBe(false);
       const resolved = done.events.filter((e) => e.type === 'interrupt.resolved' && e.nodeId === 'bq');

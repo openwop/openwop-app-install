@@ -141,28 +141,30 @@ describe('pricing comparison matrix', () => {
     expect(screen.queryByRole('group', { name: 'Billing period' })).toBeNull();
   });
 
-  it('defaults to annual, shows the operator’s own note verbatim, and toggles honestly', async () => {
+  // ADR 0820 §7 (2026-10-07) — CORRECTED from "defaults to annual": the page now
+  // opens on MONTHLY like the feature store a visitor lands in after "Choose",
+  // and the switch is a radiogroup with the store's Monthly / Yearly labels.
+  it('defaults to monthly, shows the operator’s own note verbatim, and toggles honestly', async () => {
     mockPricing([
-      // free has NO annual price — in annual mode it keeps ITS OWN price+cadence.
+      // free has NO annual price — in yearly mode it keeps ITS OWN price+cadence.
       { tier: 'free', name: 'Free', features: ['CRM'], display: { price: '$0', cadence: '/mo' } },
       { tier: 'pro', name: 'Pro', features: ['CRM'], display: { price: '$29', cadence: '/mo', priceAnnual: '$290', cadenceAnnual: '/yr', annualNote: 'Two months free on yearly' } },
     ]);
     renderPricing();
-    const group = await screen.findByRole('group', { name: 'Billing period' });
-    // Defaults to annual: the authored annual price + cadence render.
-    expect(screen.getByText('$290')).toBeTruthy();
+    const group = await screen.findByRole('radiogroup', { name: 'Billing period' });
+    expect(screen.getByText('$29')).toBeTruthy();
+    expect(screen.getByText('or $290/yr')).toBeTruthy(); // the other period, quietly
+    // The note is the operator's claim, verbatim — never a computed figure.
+    expect(screen.getByText('Two months free on yearly')).toBeTruthy();
+
+    fireEvent.click(within(group).getByRole('radio', { name: /^Yearly/ }));
+    await screen.findByText('$290');
     expect(screen.getByText('/yr')).toBeTruthy();
     expect(screen.queryByText('$29')).toBeNull();
     // The tier without an annual price keeps its own single price + cadence.
     expect(screen.getByText('$0')).toBeTruthy();
     expect(screen.getByText('/mo')).toBeTruthy();
-    // The note is the operator's claim, verbatim — never a computed figure.
-    expect(screen.getByText('Two months free on yearly')).toBeTruthy();
-
-    fireEvent.click(within(group).getByRole('button', { name: 'Pay monthly' }));
-    await screen.findByText('$29');
-    expect(screen.queryByText('$290')).toBeNull();
-    expect(within(group).getByRole('button', { name: 'Pay monthly' }).getAttribute('aria-pressed')).toBe('true');
+    expect(within(group).getByRole('radio', { name: /^Yearly/ }).getAttribute('aria-checked')).toBe('true');
   });
 
   it('limit-only tiers (no named features) still get a comparison table', async () => {

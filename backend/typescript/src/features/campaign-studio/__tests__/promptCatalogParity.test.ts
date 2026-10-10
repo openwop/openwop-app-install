@@ -13,7 +13,7 @@ import { CAMPAIGN_CHANNEL_TYPES, CAMPAIGN_STAGES } from '../validateCampaignDoc.
 
 describe('campaign-strategist prompt ↔ validateCampaignDoc parity (XCH-CS-1)', () => {
   const here = dirname(fileURLToPath(import.meta.url));
-  const promptPath = join(here, '../../../../../../packs/feature.campaign-studio.agents/prompts/campaign-strategist.md');
+  const promptPath = join(here, '../../../../../../packs/vendor.openwop-app.campaign-studio.agents/prompts/campaign-strategist.md');
   const prompt = readFileSync(promptPath, 'utf8');
 
   it('names every channel type', () => {

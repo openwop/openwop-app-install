@@ -283,7 +283,7 @@ export function GateEvidence({
           </Button>
         ) : null}
       </div>
-      <div className="approval-preview-body">
+      <div className="approval-preview-body" tabIndex={0}>
         {sendMessage ? (
           // ADR 0193's approved-bytes-verbatim preview, now on BOTH cards. This
           // is the one gate that sends AS the human, and the inbox is where the

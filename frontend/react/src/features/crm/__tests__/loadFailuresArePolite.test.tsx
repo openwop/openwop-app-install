@@ -17,23 +17,39 @@
  * `{ assertive: true }` at any of these sites fails this file.
  *
  * It does NOT assert the message is spoken at all (that is `announce`'s own
- * contract with `GlobalLiveRegion`), only its urgency.
+ * contract with `GlobalLiveRegion`), only its urgency. Each case waits for ITS
+ * site's message (not any announce call), so a case cannot pass on another
+ * site's announcement.
+ *
+ * Sabotage-witnessed (wave-4 /grade-tests, w4g5-lf-*): `{ assertive: true }`
+ * re-added at each of the five sites — DealsTab:155, TasksTab:152, ContactsTab's
+ * consolidated announcer, DealDetailPage's stages (:81) and deal-tasks (:281)
+ * reads — turns that site's case red; so do the consolidated announcer speaking
+ * only the last part, and it talking over the primary failure card. (The two
+ * DealDetailPage sites had no case until wave 4 — the header claimed them while
+ * nothing guarded them.)
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, waitFor } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import type { Deal } from '../crmOrgClient.js';
 
-const announceSpy = vi.hoisted(() => vi.fn());
+type OrgApi = typeof import('../crmOrgClient.js');
+type CrmApi = typeof import('../crmClient.js');
+
+const announceSpy = vi.hoisted(() => vi.fn<typeof import('../../../ui/announce.js')['announce']>());
 vi.mock('../../../ui/announce.js', async (orig) => {
   const actual = await orig<Record<string, unknown>>();
   return { ...actual, announce: announceSpy };
 });
 
 const api = vi.hoisted(() => ({
-  listCompanies: vi.fn(),
-  listDeals: vi.fn(),
-  listPipelines: vi.fn(),
-  listTasks: vi.fn(),
+  listCompanies: vi.fn<OrgApi['listCompanies']>(),
+  listDeals: vi.fn<OrgApi['listDeals']>(),
+  listPipelines: vi.fn<OrgApi['listPipelines']>(),
+  listTasks: vi.fn<OrgApi['listTasks']>(),
+  getDeal: vi.fn<OrgApi['getDeal']>(),
+  listActivities: vi.fn<OrgApi['listActivities']>(),
 }));
 vi.mock('../crmOrgClient.js', async (orig) => {
   const actual = await orig<Record<string, unknown>>();
@@ -44,18 +60,38 @@ vi.mock('../crmOrgClient.js', async (orig) => {
 // module, and `ContactsTab` now calls that export on mount, so leaving it out
 // fires a REAL `fetch` from jsdom — a latent flake, not a hard failure, which
 // is exactly why it survived. Same rationale as `contactEmail.test.tsx`'s stub.
-const crm = vi.hoisted(() => ({ listContacts: vi.fn(), listSegments: vi.fn(), listSegmentMembers: vi.fn(), listContactFields: vi.fn() }));
+const crm = vi.hoisted(() => ({
+  listContacts: vi.fn<CrmApi['listContacts']>(),
+  listSegments: vi.fn<CrmApi['listSegments']>(),
+  listSegmentMembers: vi.fn<CrmApi['listSegmentMembers']>(),
+  listContactFields: vi.fn<CrmApi['listContactFields']>(),
+}));
 vi.mock('../crmClient.js', async (orig) => {
   const actual = await orig<Record<string, unknown>>();
   return { ...actual, ...crm };
 });
 
+// DealDetailPage gates on the feature toggle and mounts UserPicker.
+vi.mock('../../../featureToggles/FeatureAccessContext.js', async () => {
+  const { makeFeatureAccess } = await import('../../../featureToggles/__testing__/makeFeatureAccess.js');
+  return { useFeatureAccess: () => makeFeatureAccess({ enabled: true, loading: false }) };
+});
+vi.mock('../../../orgs/orgMembers.js', () => ({
+  loadOrgMembers: vi.fn(async () => []),
+  invalidateOrgMembers: vi.fn(),
+}));
+
 import { DealsTab } from '../DealsTab.js';
+import { DealDetailPage } from '../DealDetailPage.js';
 import { TasksTab } from '../TasksTab.js';
 import { ContactsTab } from '../ContactsTab.js';
 
+const DEAL: Deal = { dealId: 'd1', title: 'Globex expansion', pipelineId: 'p1', stageId: 's1', status: 'open' };
+
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
+  api.getDeal.mockResolvedValue(DEAL);
+  api.listActivities.mockResolvedValue([]);
   api.listPipelines.mockResolvedValue([{ pipelineId: 'p1', name: 'Sales', stages: [{ stageId: 's1', name: 'New', probability: 10 }] }]);
   api.listDeals.mockResolvedValue([]);
   api.listTasks.mockResolvedValue([]);
@@ -67,6 +103,12 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
+/** Every `announce` call's message — whatever its urgency, so a case waits on
+ *  ITS site having spoken, and the urgency check below then judges that call. */
+function announcedMessages(): string[] {
+  return announceSpy.mock.calls.map((call) => String(call[0]));
+}
+
 /** Every `announce` call's options argument — `undefined` is the polite default. */
 function announcedUrgencies(): unknown[] {
   return announceSpy.mock.calls.map((call) => call[1]);
@@ -76,14 +118,14 @@ describe('CRM-UX-8 — load-time failures announce politely', () => {
   it('DealsTab: a failed companies read is polite', async () => {
     api.listCompanies.mockRejectedValue(new Error('companies_500'));
     render(<MemoryRouter><DealsTab orgId="o1" /></MemoryRouter>);
-    await waitFor(() => expect(announceSpy).toHaveBeenCalled());
+    await waitFor(() => expect(announcedMessages()).toContain('Couldn’t load companies — the list may be incomplete, not empty.'));
     expect(announcedUrgencies()).not.toContainEqual({ assertive: true });
   });
 
   it('TasksTab: a failed deals read is polite', async () => {
     api.listDeals.mockRejectedValue(new Error('deals_500'));
     render(<MemoryRouter><TasksTab orgId="o1" /></MemoryRouter>);
-    await waitFor(() => expect(announceSpy).toHaveBeenCalled());
+    await waitFor(() => expect(announcedMessages()).toContain('Couldn’t load deals — the picker may be incomplete, not empty.'));
     expect(announcedUrgencies()).not.toContainEqual({ assertive: true });
   });
 
@@ -94,6 +136,29 @@ describe('CRM-UX-8 — load-time failures announce politely', () => {
     expect(announcedUrgencies()).not.toContainEqual({ assertive: true });
   });
 
+  const renderDealDetail = (): void => {
+    render(
+      <MemoryRouter initialEntries={['/crm/deals/d1?org=o1']}>
+        <Routes><Route path="/crm/deals/:dealId" element={<DealDetailPage />} /></Routes>
+      </MemoryRouter>,
+    );
+  };
+
+  it('DealDetailPage: a failed stages (pipelines) read is polite', async () => {
+    api.listPipelines.mockRejectedValue(new Error('pipelines_500'));
+    renderDealDetail();
+    await waitFor(() => expect(announcedMessages()).toContain('Stages didn’t load'));
+    expect(announcedUrgencies()).not.toContainEqual({ assertive: true });
+  });
+
+  it('DealDetailPage: a failed deal-tasks read is polite', async () => {
+    api.listPipelines.mockResolvedValue([{ pipelineId: 'p1', name: 'Sales', stages: [{ stageId: 's1', name: 'New', probability: 10 }] }]);
+    api.listTasks.mockRejectedValue(new Error('tasks_500'));
+    renderDealDetail();
+    await waitFor(() => expect(announcedMessages()).toContain('Tasks didn’t load'));
+    expect(announcedUrgencies()).not.toContainEqual({ assertive: true });
+  });
+
   it('the spy is wired: the visible chip proves the failure branch really ran', async () => {
     // Guards against the vacuity mode where a mock never rejects and every
     // assertion above passes over ZERO announce calls.
@@ -101,8 +166,10 @@ describe('CRM-UX-8 — load-time failures announce politely', () => {
     render(<MemoryRouter><ContactsTab /></MemoryRouter>);
     // The failure CHIP, not the ever-present "Segments" heading — a substring
     // match on the heading would pass without the failure branch ever running.
-    expect(await screen.findByText('Segments didn’t load')).toBeTruthy();
-    expect(announceSpy).toHaveBeenCalledWith('Segments didn’t load');
+    expect(await screen.findByText('Segments didn’t load', {}, { timeout: 5000 })).toBeTruthy();
+    // The announcement is made in an effect after the chip renders, so wait for it
+    // rather than reading the spy synchronously (#4176).
+    await waitFor(() => expect(announceSpy).toHaveBeenCalledWith('Segments didn’t load'), { timeout: 5000 });
   });
 });
 

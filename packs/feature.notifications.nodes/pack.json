@@ -1,11 +1,12 @@
 {
   "name": "feature.notifications.nodes",
-  "version": "1.0.0",
+  "version": "1.0.1",
+  "kind": "node",
   "description": "In-app notification node over ctx.features.notifications — the ONE notification owner (notifications/emitter.ts: durable row + SSE + Web Push + Teams + email). Replaces core.openwop.integration.notification-push in chains: that node requires a per-recipient deviceToken no chain author can know, so it POSTed to an undefined address and reported success. Audience is EXPLICIT (tenant | self | role:<name>) — never inferred from how the run started.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "notifications", "inbox"],
-  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "engines": { "openwop": ">=1.0.0 <3.0.0" },
   "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs" },
   "nodes": [
     {

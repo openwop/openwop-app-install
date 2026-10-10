@@ -1,21 +1,25 @@
 /**
- * Regression coverage for the cookie-vs-bearer identity coherence fix:
- * when a request arrives with a valid OIDC bearer token AND an anon
- * session cookie, the middleware MUST promote the session cookie to a
- * user-tier cookie keyed to the OIDC-derived tenantId. Without the
- * promotion the cookie path and bearer path disagree about identity —
- * the next request that drops the Authorization header falls back to
- * the still-anon cookie and lands at managed-dispatch as anon, which
- * was the root cause of `sign_in_required` for signed-in users on the
- * free tier.
+ * ADR 0015 §Phase 0 — identity coherence between the bearer and cookie paths.
+ * When a request arrives with a valid OIDC bearer, the middleware MUST promote
+ * (or mint) the session cookie to a user-tier cookie keyed to the OIDC-derived
+ * personal tenant and carrying the `oidc:<sub>` subject. Without it, the next
+ * request that DROPS the Authorization header (SPA token-cache race,
+ * EventSource) fell back to a still-anon cookie and landed at managed-dispatch
+ * as anon — the root cause of `sign_in_required` for signed-in free-tier users,
+ * and a non-deterministic loss of `oidc:<sub>`-keyed org membership.
  *
- * Three checks:
- *   1. Anon cookie + valid OIDC bearer → response carries a Set-Cookie
- *      reissuing the session as `tier:'user'` with the OIDC tenantId.
- *   2. Already-promoted user cookie + matching OIDC bearer → no
- *      Set-Cookie reissued (idempotent steady state).
- *   3. No cookie + valid OIDC bearer → cookie minted at user-tier on
- *      the spot so the next request is covered.
+ * Four checks (bare middleware on a bare Express app — no `createApp`):
+ *   1. anon cookie + valid bearer → Set-Cookie re-issues `tier:'user'` with the
+ *      OIDC tenant;
+ *   2. an already-promoted cookie + the matching bearer → NO Set-Cookie
+ *      (idempotent steady state);
+ *   3. no cookie + valid bearer → a user-tier cookie is minted on the spot;
+ *   4. a cookie-only follow-up resolves the SAME `oidc:<sub>` principal, never
+ *      a per-session `session:<sid>`.
+ *
+ * Sabotage that turns it red: `auth.ts` `|| cookieSession.tier !== 'user'` (the
+ * promotion condition) deleted reds check 1; the cookie branch's
+ * `principalId: session.subject` → `` `session:${session.sid}` `` reds check 4.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';

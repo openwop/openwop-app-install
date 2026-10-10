@@ -45,24 +45,33 @@
  *              while the org's own member gets 201. The refusal must not be a
  *              404, which is what the missing-company answer is: a 403 here says
  *              "you may not ask", never "it is not there".
+ *
+ * SABOTAGE-WITNESSED (grade-tests w7): removing `requireTenantScope`, or relaxing
+ * any write route to `workspace:read`, reds the viewer case; removing the org gate
+ * (`requireOrgScope` / either `authorizeCrmRefOrg` call) reds the CSM-2 legs; running
+ * the org gate on a `crmRef: null` clear reds the clear case; a DELETE that answers
+ * 204 without deleting reds the editor case.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from '../src/index.js';
-import { createWorkspace, createMember } from '../src/host/accessControlService.js';
+import { createWorkspace, createMember, createOrg } from '../src/host/accessControlService.js';
 import { enableTenantOverride } from '../src/host/featureToggles/service.js';
 import { __resetCsmStore } from '../src/features/csm/accountsService.js';
 
 let server: Server;
 let BASE = '';
 let WS = '';
-const CSM = '/v1/host/openwop-app/csm/accounts';
+const CSM = '/host/openwop-app/csm/accounts';
 
-interface Res<T = any> { status: number; body: T }
+interface Res<T> { status: number; body: T }
+interface CrmRefBody { orgId: string; companyId: string }
+interface AccountBody { accountId: string; name: string; crmRef?: CrmRefBody }
+interface AccountList { accounts: AccountBody[] }
 
-async function call<T = any>(cookie: string, method: string, path: string, body?: unknown): Promise<Res<T>> {
+async function call<T = unknown>(cookie: string, method: string, path: string, body?: unknown): Promise<Res<T>> {
   const res = await fetch(`${BASE}${path}`, {
     method,
     headers: { cookie, ...(body !== undefined ? { 'content-type': 'application/json' } : {}) },
@@ -77,8 +86,9 @@ async function call<T = any>(cookie: string, method: string, path: string, body?
  * userId, then switch into the shared workspace. See the header for why the
  * derive-the-subject shortcut would make the crmRef legs vacuous.
  */
+const userIdOf = new Map<string, string>();
 async function member(subject: string, roles: string[]): Promise<string> {
-  const res = await fetch(`${BASE}/v1/host/openwop-app/test/login`, {
+  const res = await fetch(`${BASE}/host/openwop-app/test/login`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ subject, displayName: subject }), // NO tenantId: personal tenant, as OIDC leaves you
@@ -86,8 +96,9 @@ async function member(subject: string, roles: string[]): Promise<string> {
   expect(res.status, 'test seam must mint a personal session').toBeLessThan(300);
   const personalCookie = (res.headers.get('set-cookie') ?? '').split(';')[0] ?? '';
   const { user } = (await res.json()) as { user: { userId: string } };
+  userIdOf.set(subject, user.userId);
   await createMember({ orgId: WS, tenantId: WS, displayName: subject, subject: user.userId, roles });
-  const sw = await fetch(`${BASE}/v1/host/openwop-app/workspaces/${encodeURIComponent(WS)}/switch`, {
+  const sw = await fetch(`${BASE}/host/openwop-app/workspaces/${encodeURIComponent(WS)}/switch`, {
     method: 'POST', headers: { cookie: personalCookie },
   });
   expect(sw.status, `switch into WS must succeed: ${await sw.clone().text()}`).toBe(200);
@@ -96,7 +107,7 @@ async function member(subject: string, roles: string[]): Promise<string> {
 
 /** A caller with NO membership in WS at all — signs in, switches nowhere. */
 async function outsiderSession(subject: string): Promise<string> {
-  const res = await fetch(`${BASE}/v1/host/openwop-app/test/login`, {
+  const res = await fetch(`${BASE}/host/openwop-app/test/login`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ subject, tenantId: WS, displayName: subject, sharedWorkspace: true }),
@@ -143,37 +154,46 @@ beforeAll(async () => {
 
   // `linker` creates an org (becoming its owner) with one company. `editor` has
   // tenant-wide write but NO membership in this org — the CSM-2 subject.
-  const org = await call(linker, 'POST', '/v1/host/openwop-app/orgs', { name: 'Foreign Org' });
-  expect(org.status, JSON.stringify(org.body)).toBe(201);
-  foreignOrgId = org.body.orgId as string;
-  const company = await call(linker, 'POST', `/v1/host/openwop-app/crm/orgs/${encodeURIComponent(foreignOrgId)}/companies`, { name: 'Foreign Co' });
+  // ADR 0815 D1a — a workspace EDITOR may not create a sub-org over HTTP any more
+  // (that was the sub-org door); the org is minted directly with `linker` as its
+  // owner, the shape an owner's `POST /orgs` produces. This suite is about CSM.
+  const linkerId = userIdOf.get('oidc:csmauthz-linker')!;
+  foreignOrgId = (await createOrg({ tenantId: WS, createdBy: linkerId, name: 'Foreign Org', ownerSubject: linkerId })).orgId;
+  const company = await call<{ companyId: string }>(linker, 'POST', `/host/openwop-app/crm/orgs/${encodeURIComponent(foreignOrgId)}/companies`, { name: 'Foreign Co' });
   expect(company.status, JSON.stringify(company.body)).toBe(201);
-  foreignCompanyId = company.body.companyId as string;
+  foreignCompanyId = company.body.companyId;
 });
 
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 describe('CSM-1 — RBAC on all four routes (requireTenantScope)', () => {
   it('an EDITOR is admitted on every route (the gate is not simply closed)', async () => {
-    const created = await call(editor, 'POST', CSM, { name: 'Editor Co', healthScore: 40 });
+    const created = await call<AccountBody>(editor, 'POST', CSM, { name: 'Editor Co', healthScore: 40 });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
-    const id = created.body.accountId as string;
-    expect((await call(editor, 'GET', CSM)).status).toBe(200);
-    expect((await call(editor, 'PATCH', `${CSM}/${encodeURIComponent(id)}`, { name: 'Renamed' })).status).toBe(200);
+    const id = created.body.accountId;
+    const listed = await call<AccountList>(editor, 'GET', CSM);
+    expect(listed.status).toBe(200);
+    expect(listed.body.accounts.map((a) => a.accountId)).toContain(id);
+    const patched = await call<AccountBody>(editor, 'PATCH', `${CSM}/${encodeURIComponent(id)}`, { name: 'Renamed' });
+    expect(patched.status).toBe(200);
+    expect(patched.body.name, 'the admitted PATCH must actually apply').toBe('Renamed');
     expect((await call(editor, 'DELETE', `${CSM}/${encodeURIComponent(id)}`)).status).toBe(204);
+    // An admitted DELETE must actually delete — a 204 over a surviving row is not admission.
+    const after = await call<AccountList>(editor, 'GET', CSM);
+    expect(after.body.accounts.map((a) => a.accountId)).not.toContain(id);
   });
 
   it('a VIEWER can READ but is refused 403 on create, patch and delete', async () => {
     // A row to aim the write legs at — created by someone who may.
-    const seed = await call(editor, 'POST', CSM, { name: 'Viewer Target', healthScore: 55 });
+    const seed = await call<AccountBody>(editor, 'POST', CSM, { name: 'Viewer Target', healthScore: 55 });
     expect(seed.status, JSON.stringify(seed.body)).toBe(201);
-    const id = seed.body.accountId as string;
+    const id = seed.body.accountId;
 
     // Read is GRANTED — `workspace:read` is a viewer scope. A blanket 403 would
     // not be the fix, so this leg is what stops the gate being over-tight.
-    const list = await call(viewer, 'GET', CSM);
+    const list = await call<AccountList>(viewer, 'GET', CSM);
     expect(list.status, JSON.stringify(list.body)).toBe(200);
-    expect((list.body.accounts as unknown[]).some((a) => (a as { accountId: string }).accountId === id)).toBe(true);
+    expect(list.body.accounts.some((a) => a.accountId === id)).toBe(true);
 
     // ...and every WRITE is refused. Before ADR 0582 all three were 201/200/204.
     expect((await call(viewer, 'POST', CSM, { name: 'Viewer Made This' })).status).toBe(403);
@@ -181,8 +201,8 @@ describe('CSM-1 — RBAC on all four routes (requireTenantScope)', () => {
     expect((await call(viewer, 'DELETE', `${CSM}/${encodeURIComponent(id)}`)).status).toBe(403);
 
     // The refusals were REFUSALS, not 403s over an already-applied write.
-    const after = await call(editor, 'GET', CSM);
-    const row = (after.body.accounts as Array<{ accountId: string; name: string }>).find((a) => a.accountId === id);
+    const after = await call<AccountList>(editor, 'GET', CSM);
+    const row = after.body.accounts.find((a) => a.accountId === id);
     expect(row, 'the delete must not have landed').toBeTruthy();
     expect(row!.name).toBe('Viewer Target');
   });
@@ -195,16 +215,21 @@ describe('CSM-1 — RBAC on all four routes (requireTenantScope)', () => {
   // (no path admits a non-member), not as a witness for CSM-1 — the viewer
   // block above is that witness.
   it('a caller with NO membership in the workspace is refused fail-closed', async () => {
+    // A refusal, not a crash: 403 (scope gate) or 404 (bounced to a tenant
+    // where CSM is off). A 500 is not "fail-closed", it is broken.
     const list = await call(outsider, 'GET', CSM);
-    expect(list.status).toBeGreaterThanOrEqual(400);
+    expect([403, 404]).toContain(list.status);
     const created = await call(outsider, 'POST', CSM, { name: 'Outsider Co' });
-    expect(created.status).toBeGreaterThanOrEqual(400);
+    expect([403, 404]).toContain(created.status);
+    // ...and the refused create left nothing behind in the workspace.
+    const book = await call<AccountList>(editor, 'GET', CSM);
+    expect(book.body.accounts.map((a) => a.name)).not.toContain('Outsider Co');
   });
 });
 
 describe('CSM-2 — a body-supplied crmRef.orgId is authorized against the caller', () => {
   it('the org OWNER can link (the control — the gate admits a real grant)', async () => {
-    const created = await call(linker, 'POST', CSM, {
+    const created = await call<AccountBody>(linker, 'POST', CSM, {
       name: 'Linked By Owner',
       crmRef: { orgId: foreignOrgId, companyId: foreignCompanyId },
     });
@@ -228,32 +253,32 @@ describe('CSM-2 — a body-supplied crmRef.orgId is authorized against the calle
     expect(invented.status, 'the refusal must not distinguish existing from absent').toBe(403);
 
     // And nothing was persisted by either attempt.
-    const list = await call(editor, 'GET', CSM);
-    const names = (list.body.accounts as Array<{ name: string }>).map((a) => a.name);
+    const list = await call<AccountList>(editor, 'GET', CSM);
+    const names = list.body.accounts.map((a) => a.name);
     expect(names).not.toContain('Should Not Link');
     expect(names).not.toContain('Should Not Link Either');
   });
 
   it('the PATCH re-link lane is gated the same way (a re-link is the same authority decision)', async () => {
-    const own = await call(editor, 'POST', CSM, { name: 'Unlinked Co' });
+    const own = await call<AccountBody>(editor, 'POST', CSM, { name: 'Unlinked Co' });
     expect(own.status, JSON.stringify(own.body)).toBe(201);
-    const id = own.body.accountId as string;
+    const id = own.body.accountId;
     const patched = await call(editor, 'PATCH', `${CSM}/${encodeURIComponent(id)}`, {
       crmRef: { orgId: foreignOrgId, companyId: foreignCompanyId },
     });
     expect(patched.status, JSON.stringify(patched.body)).toBe(403);
-    const list = await call(editor, 'GET', CSM);
-    const row = (list.body.accounts as Array<{ accountId: string; crmRef?: unknown }>).find((a) => a.accountId === id);
+    const list = await call<AccountList>(editor, 'GET', CSM);
+    const row = list.body.accounts.find((a) => a.accountId === id);
     expect(row?.crmRef, 'the refused link must not have landed').toBeUndefined();
   });
 
   it('clearing a link (crmRef: null) touches no org and stays available', async () => {
-    const created = await call(linker, 'POST', CSM, {
+    const created = await call<AccountBody>(linker, 'POST', CSM, {
       name: 'Linked Then Cleared',
       crmRef: { orgId: foreignOrgId, companyId: foreignCompanyId },
     });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
-    const cleared = await call(linker, 'PATCH', `${CSM}/${encodeURIComponent(created.body.accountId as string)}`, { crmRef: null });
+    const cleared = await call<AccountBody>(linker, 'PATCH', `${CSM}/${encodeURIComponent(created.body.accountId)}`, { crmRef: null });
     expect(cleared.status, JSON.stringify(cleared.body)).toBe(200);
     expect(cleared.body.crmRef).toBeUndefined();
   });

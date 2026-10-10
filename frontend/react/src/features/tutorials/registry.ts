@@ -10,6 +10,7 @@ import { connectYourAi } from './content/connect-your-ai.js';
 import { openYourStorefront } from './content/open-your-storefront.js';
 import { campaignStudioFirstBrief } from './content/campaign-studio-first-brief.js';
 import { modelYourFirstPart } from './content/model-your-first-part.js';
+import { setUpClaudeCode } from './content/set-up-claude-code.js';
 
 export const TUTORIALS: TutorialData[] = [
   connectYourAi,
@@ -17,6 +18,7 @@ export const TUTORIALS: TutorialData[] = [
   buildYourFirstFunnel,
   openYourStorefront,
   modelYourFirstPart,
+  setUpClaudeCode,
 ];
 
 export function getTutorial(id: string): TutorialData | null {

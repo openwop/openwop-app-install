@@ -9,9 +9,11 @@
  *    DOM, cookies, or storage, nor make credentialed same-origin requests. This is
  *    the host's advertised `cross-origin-iframe` mechanism (RFC 0119) — the same
  *    value `/ui-plugin/packs` reports, so advertise and apply can't drift.
- *  - The entry is mounted via `srcdoc` carrying a DENY-EGRESS CSP
- *    (`default-src 'none'`, no `connect-src` → `frontend-plugin-egress`): a plugin
- *    that tries to `fetch()` out is blocked, so it can exfiltrate nothing it sees.
+ *  - The plugin is mounted ONLY by `src` from the host's RFC 0238 frame document
+ *    (ADR 0840), whose Content-Security-Policy HEADER carries the same `sandbox` plus
+ *    the deny-egress policy (`default-src 'none'`, no `connect-src` →
+ *    `frontend-plugin-egress`). It used to be an `srcdoc` with a `<meta>` policy,
+ *    which no HTTP observer could see.
  *  - The plugin talks to the host ONLY through ui-plugin/1 postMessage. Every inbound
  *    request is checked against the plugin's DECLARED `hostApi` (its closed allowlist,
  *    `frontend-plugin-rpc-allowlist`) BEFORE it is forwarded to the canonical host
@@ -20,35 +22,24 @@
  *    (`frontend-plugin-no-byok`) — the plugin can never read BYOK material.
  *
  * The loader is a thin bridge: it NEVER dispatches host logic itself — it forwards
- * allowed requests to `POST …/ui-plugin/rpc` (the single-source host dispatcher that
- * enforces the host allowlist + tenant isolation + canvas concurrency) and posts the
- * response back into the frame.
+ * allowed requests to the plugin's own `POST /host/ui-plugins/{pack}/{plugin}/rpc`
+ * (ADR 0840: the host enforces the plugin's declared hostApi AND its own, tenant
+ * isolation and canvas concurrency) and posts the response back into the frame. The
+ * check below is the first of two, not the only one.
  *
  * @see docs/adr/0300-frontend-plugin-loader-rfc-0117-0119.md
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { callHostRpc, entryUrl, type ServedPlugin } from './pluginClient.js';
+import { callHostRpc, frameUrl, type ServedPlugin } from './pluginClient.js';
 
 const UI_PLUGIN_PROTOCOL = 'ui-plugin/1';
 
-/** The DENY-EGRESS CSP applied to the plugin document (mirror of the host's
- *  `pluginIframeCsp()`): `default-src 'none'` + NO `connect-src` ⇒ no network egress
- *  beyond the ui-plugin/1 postMessage channel. */
-export const PLUGIN_CSP =
-  "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src data: blob:;";
-
 /** allow-scripts ONLY — the deliberate ABSENCE of allow-same-origin is what makes
- *  the frame a distinct opaque origin (the isolation boundary). */
+ *  the frame a distinct opaque origin. ADR 0840: the host's frame response carries
+ *  the same `sandbox` in its Content-Security-Policy header, together with the
+ *  deny-egress policy, so this attribute is the second, independent boundary. There
+ *  is no client-side CSP any more: the header is the policy (RFC 0238 §B). */
 export const PLUGIN_SANDBOX = 'allow-scripts';
-
-/** Inject the deny-egress CSP as the first `<head>` child so it governs the whole
- *  untrusted document (a `<meta>` CSP must precede any resource load). */
-export function withPluginCsp(html: string, csp: string = PLUGIN_CSP): string {
-  const meta = `<meta http-equiv="Content-Security-Policy" content="${csp}">`;
-  if (/<head[^>]*>/i.test(html)) return html.replace(/<head[^>]*>/i, (m) => m + meta);
-  if (/<html[^>]*>/i.test(html)) return html.replace(/<html[^>]*>/i, (m) => `${m}<head>${meta}</head>`);
-  return `<!doctype html><html><head>${meta}</head><body>${html}</body></html>`;
-}
 
 interface UiPluginRequest {
   openwop: typeof UI_PLUGIN_PROTOCOL;
@@ -96,7 +87,7 @@ const ANNOUNCE_MIN_INTERVAL_MS = 1000;
 export function makePluginMessageHandler(
   plugin: ServedPlugin,
   post: (msg: unknown) => void,
-  forward: (message: unknown) => Promise<unknown> = callHostRpc,
+  forward: (message: unknown) => Promise<unknown> = (message) => callHostRpc(plugin, message),
   onAnnounce?: (message: string, politeness: 'polite' | 'assertive') => void,
   // The rate-limit clock OUTLIVES handler recreation (a re-render re-creates
   // the handler; a fresh clock would reset the limiter — grade pass GC-CV-3).
@@ -141,13 +132,16 @@ const ENTRY_FETCH_TIMEOUT_MS = 15_000;
 export function PluginFrame({ plugin, artifactId, title, loadingLabel, errorLabel, docContent, selection, onAnnounce }: Props): JSX.Element {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const announceClock = useRef({ last: 0 });
-  const [srcDoc, setSrcDoc] = useState<string | null>(null);
+  const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const url = useMemo(() => entryUrl(plugin), [plugin]);
+  const url = useMemo(() => frameUrl(plugin), [plugin]);
 
-  // Download the entry bytes → wrap in a deny-egress-CSP srcdoc (opaque origin mount).
+  // ADR 0840 — the plugin is mounted ONLY from the host's frame document (RFC 0238
+  // §B.5), by `src`, so the policy it runs under is the one in the response header:
+  // the policy the conformance suite reads. A failed or unanswered frame request
+  // shows its own error before anything is mounted.
   //
-  // UPU-1 — BOUNDED. An `entryUrl` that never answers (a plugin host that accepts the
+  // UPU-1 — BOUNDED. A frame URL that never answers (a plugin host that accepts the
   // connection and stalls) used to leave the `aria-busy` spinner up forever: no error, no
   // timeout, nothing to retry — the surface simply lied about being in progress. The
   // sibling `IsolationSelfTest` already carries the principle this copies: "a timeout is
@@ -157,12 +151,12 @@ export function PluginFrame({ plugin, artifactId, title, loadingLabel, errorLabe
   // things to the person deciding whether to trust it.
   useEffect(() => {
     let alive = true;
-    setSrcDoc(null); setError(null);
+    setReady(false); setError(null);
     const ctrl = new AbortController();
     const timer = window.setTimeout(() => ctrl.abort(), ENTRY_FETCH_TIMEOUT_MS);
     void fetch(url, { signal: ctrl.signal })
-      .then((r) => { if (!r.ok) throw new Error(`entry ${r.status}`); return r.text(); })
-      .then((html) => { if (alive) setSrcDoc(withPluginCsp(html)); })
+      .then((r) => { if (!r.ok) throw new Error(`frame ${r.status}`); return r.text(); })
+      .then(() => { if (alive) setReady(true); })
       .catch((e) => {
         if (!alive) return;
         const timedOut = ctrl.signal.aborted;
@@ -178,7 +172,7 @@ export function PluginFrame({ plugin, artifactId, title, loadingLabel, errorLabe
   useEffect(() => {
     const frameWin = () => iframeRef.current?.contentWindow ?? null;
     const post = (msg: unknown): void => frameWin()?.postMessage(msg, '*');
-    const handle = makePluginMessageHandler(plugin, post, callHostRpc, onAnnounce, announceClock.current);
+    const handle = makePluginMessageHandler(plugin, post, (m) => callHostRpc(plugin, m), onAnnounce, announceClock.current);
 
     const onMessage = (ev: MessageEvent): void => {
       // Only accept messages from OUR frame (the opaque-origin child) — ignore the rest.
@@ -194,7 +188,7 @@ export function PluginFrame({ plugin, artifactId, title, loadingLabel, errorLabe
     };
     window.addEventListener('message', onMessage);
     return () => window.removeEventListener('message', onMessage);
-  }, [plugin, artifactId, onAnnounce]);
+  }, [plugin, artifactId, onAnnounce, ready]);
 
   // RFC 0130 (canvas-preview): push live editor state into the frame as events.
   // Prop changes ARE the debounce boundary — the chassis batches via its own
@@ -216,13 +210,13 @@ export function PluginFrame({ plugin, artifactId, title, loadingLabel, errorLabe
       </div>
     );
   }
-  if (srcDoc === null) return <div className="muted" role="status" aria-busy="true">{loadingLabel}</div>;
+  if (!ready) return <div className="muted" role="status" aria-busy="true">{loadingLabel}</div>;
 
   return (
     <iframe
       ref={iframeRef}
       sandbox={PLUGIN_SANDBOX}
-      srcDoc={srcDoc}
+      src={url}
       title={title}
       referrerPolicy="no-referrer"
       className="uiplugin-frame"

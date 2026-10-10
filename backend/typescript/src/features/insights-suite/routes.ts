@@ -32,7 +32,7 @@ import { parseCron } from '../../host/cronSchedule.js';
 
 const TOGGLE_ID = 'insights-suite';
 const LABEL = 'Insights & Drafting Agent Suite';
-const BASE = '/v1/host/openwop-app/insights-suite';
+const BASE = '/host/openwop-app/insights-suite';
 
 const tenantOf = (req: Request): string => req.tenantId ?? 'default';
 const actingUserOf = (req: Request): string | undefined => req.userId ?? req.principal?.principalId;

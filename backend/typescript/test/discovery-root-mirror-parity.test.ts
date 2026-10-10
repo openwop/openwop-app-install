@@ -24,9 +24,9 @@
  * finally dropped, leg 2 is the test to delete, and leg 1 stays.
  */
 import http from 'node:http';
-import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
+import { v1Advertisement } from './support/v1Advertisement.js';
 
 /** The ONE dotted key this host still emits, and the only sanctioned exception.
  *  ADR 0537: `forms` is canonical; `host.forms` is a deprecated mirror kept only
@@ -34,22 +34,19 @@ import { createApp } from '../src/index.js';
  *  prose. Delete this entry together with the mirror in `routes/discovery.ts`. */
 const DOTTED_MIRROR_ALLOWLIST = new Set(['host.forms']);
 
-let BASE = '';
 let server: http.Server;
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 't', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((r) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; r(); }); });
+  await new Promise<void>((r) => { server = app.listen(0, '127.0.0.1', () => r()); });
 });
 afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
 
-const discovery = async (): Promise<Record<string, unknown>> => {
-  const res = await fetch(`${BASE}/.well-known/openwop`);
-  expect(res.status).toBe(200);
-  return (await res.json()) as Record<string, unknown>;
-};
+// ADR 0812 — the `capabilities` wrapper is a MAJOR-1 construct (the v2 root has
+// none), so the v1 document is read from its builder, which answers in both modes.
+const discovery = async (): Promise<Record<string, unknown>> => v1Advertisement();
 
 describe('RFC 0073 — every capability family is readable at the document ROOT', () => {
   it('leg 1: every family in the deprecated wrapper is mirrored at the root, identically', async () => {

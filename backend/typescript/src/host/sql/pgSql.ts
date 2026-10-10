@@ -1,23 +1,10 @@
-/**
- * Postgres schema-per-tenant SQL host surface (Phase 2) — `host.db.sql` over a
- * shared Postgres, selected with `OPENWOP_SURFACE_SQL=postgres`.
- *
- * The cross-instance variant of the durable (sqlite-file-per-tenant) sql
- * surface: every instance talks to the same Postgres, and each tenant is
- * isolated in its own schema (`tenant_<id>`) with `search_path` scoped per
- * operation — so two tenants can't see each other's tables and N app instances
- * stay consistent.
- *
- * Same query/execute/transaction contract + non-parametric-SQL guard (RFC 0018)
- * as the in-memory / durable impls. `lastInsertRowid` is sqlite-specific and is
- * reported as 0 here — portable SQL should use `RETURNING` on Postgres.
- *
- * Validation: the pure identifier/guard helpers are unit-tested; the live SQL
- * path is exercised by the gated `pg-sql-live` testcontainers spec.
- */
-
+/** PostgreSQL SQL surface: tenant-authenticated sessions (ADR 0867 correction). */
+import { createHash } from 'node:crypto';
 import type { BundleScope, SqlSurface } from '../inMemorySurfaces.js';
 import { registerSurfaceAdapter, resolveBackendId } from '../surfaceBackends.js';
+import { registerTenantPurgeHook } from '../hostExtPersistence.js';
+import { poolMaxFromEnv } from '../vector/pgVectorVector.js';
+import { createPgSqlRuntime } from './pgSqlRuntime.js';
 
 const PARAM_REJECT_RE = /\$\{|\b(?:OR|AND)\b\s+(?:'[^']*'|"[^"]*")\s*=\s*(?:'[^']*'|"[^"]*")/i;
 export function requireParametric(sql: string): void {
@@ -26,46 +13,33 @@ export function requireParametric(sql: string): void {
   }
 }
 
-/** Deterministic, injection-safe Postgres schema name for a tenant. */
+/** Exact tenant identity, bounded to PostgreSQL's 63-byte identifier limit. */
 export function schemaForTenant(tenantId: string): string {
-  const sanitized = String(tenantId).toLowerCase().replace(/[^a-z0-9_]/g, '_').slice(0, 48);
-  if (!sanitized || sanitized === '_'.repeat(sanitized.length)) {
-    // Fall back to a hash-free stable token; never emit an empty/degenerate schema.
-    return 'tenant_unknown';
-  }
-  return `tenant_${sanitized}`;
+  if (!tenantId) throw new Error('SQL tenant identity is required.');
+  return `owp_sql_${createHash('sha256').update(tenantId).digest('hex').slice(0, 48)}`;
 }
-
-/** Minimal client-pool shape (compatible with `pg.Pool`). */
+export function roleForTenant(tenantId: string): string {
+  return schemaForTenant(tenantId).replace('owp_sql_', 'owp_sql_role_');
+}
 export interface PgClient {
   query(sql: string, params?: unknown[]): Promise<{ rows: unknown[]; rowCount: number | null }>;
-  release(): void;
+  release(): void | Promise<void>;
 }
-export interface PgPool {
-  connect(): Promise<PgClient>;
-}
-
-// Per-process memo of schemas already CREATE-d, to skip the DDL on the hot path.
-const ensuredSchemas = new Set<string>();
-
-export interface PgSqlDeps { pool: PgPool }
+/** Only tenant-authenticated connections cross the pack-facing boundary. */
+export interface PgSqlDeps { connectTenant(tenantId: string): Promise<PgClient> }
 
 export function createPgSql(scope: BundleScope, deps: PgSqlDeps): SqlSurface {
   const schema = schemaForTenant(scope.tenantId);
 
   async function withScopedClient<T>(fn: (c: PgClient) => Promise<T>): Promise<T> {
-    const client = await deps.pool.connect();
+    const client = await deps.connectTenant(scope.tenantId);
     try {
-      if (!ensuredSchemas.has(schema)) {
-        await client.query(`CREATE SCHEMA IF NOT EXISTS "${schema}"`);
-        ensuredSchemas.add(schema);
-      }
-      // Scope every operation to the tenant schema; `public` retained as a
-      // fallback for extensions/types but tenant tables resolve first.
-      await client.query(`SET search_path TO "${schema}", public`);
+      // pg_catalog is searched implicitly before this schema. Listing it
+      // explicitly first would make CREATE TABLE target the protected catalog.
+      await client.query(`SET search_path TO "${schema}"`);
       return await fn(client);
     } finally {
-      client.release();
+      await client.release();
     }
   }
 
@@ -107,38 +81,33 @@ export function createPgSql(scope: BundleScope, deps: PgSqlDeps): SqlSurface {
   };
 }
 
-/** Test affordance — clear the per-process schema memo. */
-export function _resetPgSqlForTesting(): void {
-  ensuredSchemas.clear();
+
+let bootCheck: (() => Promise<void>) | null = null;
+export async function verifyPgSqlBackend(): Promise<void> {
+  if (bootCheck) await bootCheck();
 }
-
-/**
- * Register the Postgres sql adapter. Lazily builds a `pg` Pool from env on first
- * use. Fails fast at boot if `sql=postgres` but config is incomplete.
- */
 export function registerPgSqlAdapter(): void {
+  bootCheck = null;
   const dsn = process.env.OPENWOP_SQL_PG_DSN;
-  let poolPromise: Promise<PgPool> | null = null;
-  const getPool = async (): Promise<PgPool> => {
-    if (!poolPromise) {
-      poolPromise = (async () => {
-        const { Pool } = await import('pg');
-        return new Pool({ connectionString: dsn, max: 10, idleTimeoutMillis: 30_000 }) as unknown as PgPool;
-      })();
-    }
-    return poolPromise;
-  };
-
-  registerSurfaceAdapter('sql', 'postgres', (scope: BundleScope) =>
-    createPgSql(scope, {
-      pool: { connect: async () => (await getPool()).connect() },
-    }),
-  );
-
-  if (resolveBackendId('sql') === 'postgres' && !dsn) {
-    throw new Error(
-      'OPENWOP_SURFACE_SQL=postgres but OPENWOP_SQL_PG_DSN is unset. ' +
-        'Set it, or unset OPENWOP_SURFACE_SQL to use the in-memory/durable sql surface.',
-    );
+  const rolePasswordKey = process.env.OPENWOP_SQL_PG_ROLE_PASSWORD_KEY;
+  const max = poolMaxFromEnv('OPENWOP_SQL_PG_POOL_MAX');
+  const selected = resolveBackendId('sql') === 'postgres';
+  if (selected && (!dsn || !rolePasswordKey || rolePasswordKey.length < 32 || max < 2)) {
+    throw new Error('Postgres SQL requires OPENWOP_SQL_PG_DSN, a stable OPENWOP_SQL_PG_ROLE_PASSWORD_KEY of at least 32 characters, and OPENWOP_SQL_PG_POOL_MAX >= 2.');
   }
+  let runtime: ReturnType<typeof createPgSqlRuntime> | null = null;
+  const getRuntime = () => {
+    if (!dsn || !rolePasswordKey || rolePasswordKey.length < 32 || max < 2) {
+      throw new Error('Postgres SQL provisioning configuration is incomplete.');
+    }
+    return runtime ??= createPgSqlRuntime({ dsn, rolePasswordKey, max });
+  };
+  registerSurfaceAdapter('sql', 'postgres', (scope: BundleScope) =>
+    createPgSql(scope, { connectTenant: async (tenant) => (await getRuntime()).connectTenant(tenant) }));
+  if (dsn) {
+    // Existing teardown seam covers account deletion and anonymous retention.
+    // Missing provisioning credentials remain a reported purge failure, not a skip.
+    registerTenantPurgeHook('postgres-sql', async (tenant) => (await getRuntime()).purgeTenant(tenant));
+  }
+  if (selected) bootCheck = async () => (await getRuntime()).verify();
 }

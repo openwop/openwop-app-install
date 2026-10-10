@@ -8,7 +8,10 @@
  * @see docs/adr/0386-entities-headless-content-modeling.md
  */
 import type { BackendFeature } from '../types.js';
+import { registerMintableScopePattern } from '../developer-keys/keyPolicy.js';
 import { registerToggleDefault } from '../../host/featureToggles/registry.js';
+import { registerSubjectDependent } from '../../host/subjectDependents.js';
+import { countEntityNamespace, purgeEntityNamespace } from './entitiesService.js';
 import { registerEntitiesRoutes } from './routes.js';
 import { registerEntitiesAgentTools } from './agentTools.js';
 import { registerEntitiesErasure } from './erasure.js';
@@ -18,6 +21,8 @@ import { buildEntitiesSurface } from './surface.js';
 export const entitiesFeature: BackendFeature = {
   id: 'entities',
   registerRoutes: (deps) => {
+    // ADR 0795 D3 — this feature's own key-scope grammar (`requireEntitiesScope`).
+    registerMintableScopePattern(/^entities:(admin|[A-Za-z0-9_./-]+:(read|write))$/);
     registerEntitiesRoutes(deps);
     registerEntitiesAgentTools(); // chat-time read tools (ADR 0308 seam)
     // ENT2-M1 — attribution erasure (createdBy/updatedBy; values untouched by
@@ -28,6 +33,13 @@ export const entitiesFeature: BackendFeature = {
     // emit crawler HTML + JSON-LD for referenced entity content (features never
     // import each other; the registry mediates).
     registerEntityContentResolvers();
+    // ADR 0847 D2 — a project's entities namespace goes with the project (the ADR 0839
+    // D2 seam: purged BEFORE the project row, a throw keeps the project). Counted in
+    // the project's delete preview.
+    registerSubjectDependent('project', 'entities', {
+      count: (tenantId, subject) => countEntityNamespace(tenantId, subject.id),
+      purge: (tenantId, subject) => purgeEntityNamespace(tenantId, subject.id),
+    });
     // ADR 0406 D7 — entity localization is its OWN opt-in (never riding the
     // cms-named toggle; the two features gate independently and compose the
     // same core helpers). OFF ⇒ overlay writes reject, delivery serves base
@@ -35,7 +47,7 @@ export const entitiesFeature: BackendFeature = {
     registerToggleDefault({
       id: 'entities-localization',
       label: 'Entity localization',
-      description: 'Per-locale value overlays on localizable entity fields + locale-negotiated public delivery (ADR 0406).',
+      description: 'Per-locale value overlays on localizable entity fields + locale-negotiated public delivery.',
       category: 'Platform',
       status: 'off',
       bucketUnit: 'tenant',
@@ -43,11 +55,11 @@ export const entitiesFeature: BackendFeature = {
     });
   },
   surface: { id: 'entities', build: buildEntitiesSurface },
-  requiredPacks: [{ name: 'feature.entities.nodes', version: '1.1.0' }],
+  requiredPacks: [{ name: 'feature.entities.nodes', version: '1.1.1' }],
   toggleDefault: {
     id: 'entities',
     label: 'Entities',
-    description: 'Headless content-modeling — user-defined content types, fields, and queryable records (ADR 0386).',
+    description: 'Headless content-modeling — user-defined content types, fields, and queryable records.',
     category: 'Platform',
     status: 'off',
     bucketUnit: 'tenant',

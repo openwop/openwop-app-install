@@ -13,6 +13,9 @@ import { registerRetentionPurger, purgeRowsByAge } from '../../host/retentionPur
 import { fireCrmRecordDeleted } from '../../host/crmRecordLifecycle.js';
 import { changedFields, crmMutated, emitOptsOf, type CrmEmitOptions } from './emit.js';
 import { OpenwopError } from '../../types.js';
+import { createLogger } from '../../observability/logger.js';
+import { isErasureTombstoned } from '../consent/consentService.js';
+import { normalizeEmail } from './suppressionService.js';
 import {
   reindexContact,
   unindexContact,
@@ -23,6 +26,8 @@ import {
 } from './contactIdentityService.js';
 
 export type { ContactIdentifier } from './contactIdentityService.js';
+
+const log = createLogger('crm.contacts');
 
 // ADR 0077 P1 — declare this entity's PII fields once at module load (the
 // `registerSubjectEraser` side-effect pattern). `name` + `email` identify a person;
@@ -35,6 +40,18 @@ export type { ContactIdentifier } from './contactIdentityService.js';
 declarePiiFields('crm.contact', ['name', 'email', 'identifiers', 'address', 'phone']);
 
 export type ContactStage = 'lead' | 'qualified' | 'customer' | 'churned';
+
+/** The denormalized last-triage projection (B3a). The route stamps `{ variant,
+ *  runId, at }` at dispatch; ADR 0837 D7's `record-triage` node adds `score` +
+ *  `priority` + `recordedAt` once THAT run scores the contact. */
+export interface ContactTriageStamp {
+  variant: string | null;
+  runId: string;
+  at: string;
+  score?: number;
+  priority?: 'low' | 'normal' | 'high';
+  recordedAt?: string;
+}
 export const CONTACT_STAGES: readonly ContactStage[] = ['lead', 'qualified', 'customer', 'churned'];
 
 /**
@@ -73,7 +90,7 @@ export interface Contact {
    *  time. The run (run.metadata) stays the provenance SSoT; this is a list-
    *  sortable projection. Score/priority land here once the real triage chain
    *  writes back through the governed verb (gap-analysis C2). */
-  lastTriage?: { variant: string | null; runId: string; at: string };
+  lastTriage?: ContactTriageStamp;
   /** Set by a merge (ADR 0209 §2): this contact is a TOMBSTONE — kept for
    *  provenance (referencing rows relinked to `mergedInto` before this was
    *  set), excluded from `listContacts`/duplicate groups, but still resolvable
@@ -399,6 +416,30 @@ export async function ensureContact(input: {
 }
 
 /**
+ * ADR 0837 D4 — has this address's subject been erased in this tenant? The ONE
+ * predicate the unattended creation lanes share (the forms sink, `ensureContact`,
+ * an actorless run's `createContact`). The tombstone hashes the RAW subject key
+ * with no folding, while the eraser may have been handed either spelling, so both
+ * are probed.
+ *
+ * TRI-STATE (CRM2CD-4): a tombstone read failure is `unreadable`, not `erased`.
+ * Every lane still refuses to create on it (fail closed: refusing to rebuild a
+ * profile is recoverable, rebuilding an erased one is not), but it must not
+ * LABEL a person who never filed a DSAR as erased.
+ */
+export async function subjectErasureState(tenantId: string, email: string): Promise<'erased' | 'clear' | 'unreadable'> {
+  const folded = normalizeEmail(email);
+  try {
+    const erased = (await isErasureTombstoned(tenantId, email))
+      || (folded !== email && (await isErasureTombstoned(tenantId, folded)));
+    return erased ? 'erased' : 'clear';
+  } catch (err) {
+    log.error('erasure_tombstone_read_failed_refusing_create', { tenantId, error: err instanceof Error ? err.message : String(err) });
+    return 'unreadable';
+  }
+}
+
+/**
  * `ensureContact` that also says WHETHER it created the row — for a batch lane
  * that counts its creations (the webinar participant sync's ONE
  * `contact.imported { count }`), so it need not pre-read by email to find out.
@@ -407,11 +448,19 @@ export async function ensureContact(input: {
  */
 export async function ensureContactWithOutcome(input: {
   tenantId: string; email?: string | null; name?: string; leadSource?: string;
-} & CrmEmitOptions): Promise<{ contact: Contact | null; created: boolean }> {
+} & CrmEmitOptions): Promise<{ contact: Contact | null; created: boolean; erased?: true; erasureUnreadable?: true }> {
   const email = (input.email ?? '').trim();
   if (!email) return { contact: null, created: false }; // no email ⇒ no contact (D3)
   const existing = await findContactByEmail(input.tenantId, email);
   if (existing) return { contact: existing, created: false };
+  // ADR 0837 D4 — this seam is how every UNATTENDED lane makes a contact (public
+  // booking, guest checkout, the anonymous widget, webinar sync). An erased
+  // subject is not rebuilt by a visitor's next action: the lane is still served,
+  // only the CRM profile is not re-created. A member re-adding the person by hand
+  // goes through `createContact` directly and is unaffected (ADR 0464).
+  const erasure = await subjectErasureState(input.tenantId, email);
+  if (erasure === 'erased') return { contact: null, created: false, erased: true };
+  if (erasure === 'unreadable') return { contact: null, created: false, erasureUnreadable: true };
   // ADR 0627 D2 — `contact.created` fires from `createContact` (the ONE site)
   // for a NEW row only; the found-existing return above emits nothing.
   try {
@@ -653,15 +702,63 @@ export async function casUpdateContact(
 /** Stamp the last-triage projection onto a contact (tenant-guarded — the
  *  triage route is the only caller). Best-effort denormalization: a missing
  *  contact is a no-op, never an error, so a race with delete can't fail the
- *  triage dispatch that already 202'd. */
+ *  triage dispatch that already 202'd.
+ *
+ *  ADR 0837 D6 — a CAS on a fresh read with one retry, never a blind `put` of an
+ *  earlier read (that overwrote a concurrent contact edit). */
 export async function setContactTriage(
   contactId: string,
   tenantId: string,
   stamp: { variant: string | null; runId: string; at: string },
 ): Promise<void> {
-  const existing = await store.get(contactId);
-  if (!existing || existing.tenantId !== tenantId) return;
-  await store.put({ ...existing, lastTriage: stamp, updatedAt: new Date().toISOString() });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const existing = await store.get(contactId);
+    if (!existing || existing.tenantId !== tenantId) return;
+    if (await store.compareAndSwap(existing, { ...existing, lastTriage: stamp, updatedAt: new Date().toISOString() })) return;
+  }
+  log.warn('crm_triage_stamp_lost_race', { contactId });
+}
+
+/** ADR 0837 CRM2CD-2 — undo a dispatch stamp whose run never started: put the
+ *  previous stamp back (or clear it), but ONLY while the stamp still names that
+ *  run, so a newer click is never reverted. Best-effort like the stamp itself. */
+export async function restoreContactTriage(contactId: string, tenantId: string, runId: string, previous: ContactTriageStamp | undefined): Promise<void> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const existing = await store.get(contactId);
+    if (!existing || existing.tenantId !== tenantId || existing.lastTriage?.runId !== runId) return;
+    const { lastTriage: _dropped, ...rest } = existing;
+    const next: Contact = previous ? { ...existing, lastTriage: previous } : rest;
+    if (await store.compareAndSwap(existing, { ...next, updatedAt: new Date().toISOString() })) return;
+  }
+  log.warn('crm_triage_restore_lost_race', { contactId });
+}
+
+/** ADR 0837 D7 / A7 — record a triage RESULT, but only for the run the contact's
+ *  stamp names. A newer Triage click re-stamps the contact with its own run id,
+ *  and a `:fork` runs under an id the route never stamped, so both answer
+ *  `superseded` and change nothing: the column can never show a stale run's
+ *  score. CAS on a fresh read (a concurrent edit is kept, not reverted). */
+export async function recordContactTriageResult(
+  tenantId: string,
+  contactId: string,
+  runId: string,
+  result: { variant: string | null; score: number; priority: 'low' | 'normal' | 'high' },
+): Promise<'recorded' | 'superseded'> {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const existing = await store.get(contactId);
+    if (!existing || existing.tenantId !== tenantId || existing.mergedInto) {
+      throw new OpenwopError('not_found', 'Contact not found.', 404, { contactId });
+    }
+    const stamp = existing.lastTriage;
+    if (!stamp || stamp.runId !== runId) return 'superseded';
+    const next: Contact = {
+      ...existing,
+      lastTriage: { ...stamp, variant: result.variant ?? stamp.variant, score: result.score, priority: result.priority, recordedAt: new Date().toISOString() },
+      updatedAt: new Date().toISOString(),
+    };
+    if (await store.compareAndSwap(existing, next)) return 'recorded';
+  }
+  throw new OpenwopError('conflict', 'The contact kept changing while its triage was recorded — re-run triage.', 409, { contactId });
 }
 
 /**
@@ -741,9 +838,17 @@ export async function deleteContact(contactId: string, opts: CrmEmitOptions = {}
  *  a fresh full retention window. Its purge clock is its PRE-MERGE `updatedAt`;
  *  `mergedAt` carries the merge moment. */
 export async function tombstoneContact(contactId: string, tenantId: string, survivorId: string): Promise<void> {
-  const existing = await store.get(contactId);
-  if (!existing || existing.tenantId !== tenantId) return;
-  await store.put({ ...existing, mergedInto: survivorId, mergedAt: new Date().toISOString() });
+  // ADR 0837 D3 / A3 — a CAS loop on a FRESH read, never a blind `put` of an
+  // earlier read: the merge lock does not cover ordinary edits to the source
+  // (PATCH, identifiers, triage), and a stale `put` would revert them. The loop
+  // keeps whatever landed and only adds the tombstone. It gives up only if the
+  // row is gone or already a tombstone — which the merge lock makes impossible.
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const existing = await store.get(contactId);
+    if (!existing || existing.tenantId !== tenantId || existing.mergedInto) return;
+    if (await store.compareAndSwap(existing, { ...existing, mergedInto: survivorId, mergedAt: new Date().toISOString() })) return;
+  }
+  throw new OpenwopError('conflict', 'The contact kept changing while it was being merged — retry the merge.', 409, { contactId });
 }
 
 // CRM-2 CORRECTION — this block used to read: "DELIBERATELY NOT a

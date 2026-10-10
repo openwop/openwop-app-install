@@ -373,6 +373,7 @@ async function resolveFactoryAi(deps: StartRunDeps, tenantId: string, input: Rec
 export function registerKicktodoCreatorAgentTools(deps: StartRunDeps): void {
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: KICKTODO_CANDIDATES_TOOL_ID,
       description:
@@ -386,6 +387,7 @@ export function registerKicktodoCreatorAgentTools(deps: StartRunDeps): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: KICKTODO_FACTORY_RUN_TOOL_ID,
       description:

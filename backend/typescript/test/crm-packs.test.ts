@@ -1,15 +1,24 @@
 /**
  * CRM chat-drivability + orchestration packs (ADR 0208 §2):
- *   - feature.crm.agents — the stable Sales Ops persona: well-formed manifest,
+ *   - vendor.openwop-app.crm.agents — the stable Sales Ops persona: well-formed manifest,
  *     allowlist referencing only real feature.crm.nodes typeIds.
  *   - feature.crm.nodes@1.3.0 — the ten new role:"action" write nodes: declared
  *     in the manifest, runnable in index.mjs, and deterministic-id (ADR 0162)
  *     on the creation nodes.
- *   - examples/workflow-chain-packs/crm-ops — loads clean and registers both
- *     chainIds (mirrors workflow-chain-exec-ops.test.ts).
+ *   - examples/workflow-chain-packs/crm-ops — loads clean and registers its
+ *     four chainIds (mirrors workflow-chain-exec-ops.test.ts).
+ *
+ * The pack VERSION is not pinned here: `crm-node-replay.test.ts` pins the
+ * relation that matters (the crm feature's `requiredPacks` == the manifest
+ * version), where a literal here only churned on every bump.
+ *
+ * Sabotage-witnessed (grade-tests w4): `idFor` dropping the runId, a governed
+ * write (create-deal) added to an agent allowlist, an invented typeId in the
+ * crm-ops chain, an unfrozen gmail-sync param, and the gmail node's
+ * missing-connectors guard dropped each turn a case red.
  */
 
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -23,7 +32,7 @@ import {
 
 const REPO_ROOT = join(__dirname, '..', '..', '..');
 const NODES_PACK_DIR = join(REPO_ROOT, 'packs', 'feature.crm.nodes');
-const AGENTS_PACK_DIR = join(REPO_ROOT, 'packs', 'feature.crm.agents');
+const AGENTS_PACK_DIR = join(REPO_ROOT, 'packs', 'vendor.openwop-app.crm.agents');
 const CHAIN_PACK_ROOT = join(REPO_ROOT, 'examples', 'workflow-chain-packs');
 
 interface NodeManifestEntry {
@@ -49,7 +58,7 @@ interface AgentsManifest {
   agents: AgentManifestEntry[];
 }
 
-describe('feature.crm.nodes pack (v1.10.0)', () => {
+describe('feature.crm.nodes pack', () => {
   const manifest = JSON.parse(readFileSync(join(NODES_PACK_DIR, 'pack.json'), 'utf8')) as NodesManifest;
 
   const NEW_WRITE_TYPE_IDS = [
@@ -65,8 +74,7 @@ describe('feature.crm.nodes pack (v1.10.0)', () => {
     'feature.crm.nodes.log-activity',
   ];
 
-  it('declares its version and all ten write nodes as role:"side-effect" (ADR 0627 D1 — the fork guard)', () => {
-    expect(manifest.version).toBe('1.10.0'); // ADR 0627 D1/D5 — side-effect writes + schemas, gmail-sync pin + typed outcomes
+  it('declares all ten write nodes as role:"side-effect" (ADR 0627 D1 — the fork guard)', () => {
     const byId = new Map(manifest.nodes.map((n) => [n.typeId, n]));
     for (const typeId of NEW_WRITE_TYPE_IDS) {
       const n = byId.get(typeId);
@@ -281,20 +289,27 @@ describe('feature.crm.nodes pack (v1.10.0)', () => {
   });
 });
 
-describe('feature.crm.agents pack', () => {
+describe('vendor.openwop-app.crm.agents pack', () => {
   const manifest = JSON.parse(readFileSync(join(AGENTS_PACK_DIR, 'pack.json'), 'utf8')) as AgentsManifest;
   const nodesManifest = JSON.parse(readFileSync(join(NODES_PACK_DIR, 'pack.json'), 'utf8')) as NodesManifest;
   const knownTypeIds = new Set(nodesManifest.nodes.map((n) => n.typeId));
+  /** Host-built-in tools an agent may allowlist beside the pack's own nodes. */
+  const HOST_TOOLS = new Set(['schema.lookup']);
+  const agentById = (id: string): AgentManifestEntry => {
+    const a = manifest.agents.find((x) => x.agentId === `vendor.openwop-app.crm.agents.${id}`);
+    expect(a, `agent ${id} is declared`).toBeTruthy();
+    return a!;
+  };
 
-  it('is well-formed: sales-ops + segment-author, namespaced under feature.crm.agents', () => {
-    expect(manifest.name).toBe('feature.crm.agents');
+  it('is well-formed: sales-ops + segment-author, namespaced under vendor.openwop-app.crm.agents', () => {
+    expect(manifest.name).toBe('vendor.openwop-app.crm.agents');
     expect(manifest.agents.length).toBe(2); // sales-ops + ADR 0265 CDP-C segment-author
     for (const a of manifest.agents) {
-      expect(a.agentId.startsWith('feature.crm.agents.')).toBe(true);
+      expect(a.agentId.startsWith('vendor.openwop-app.crm.agents.')).toBe(true);
       expect(a.toolAllowlist.length).toBeGreaterThan(0);
     }
     // The segment-author rides the closed-world draft→validate→persist trio.
-    const author = manifest.agents.find((a) => a.agentId === 'feature.crm.agents.segment-author')!;
+    const author = manifest.agents.find((a) => a.agentId === 'vendor.openwop-app.crm.agents.segment-author')!;
     expect(author.toolAllowlist).toEqual(expect.arrayContaining([
       'openwop:feature.crm.nodes.segment-vocabulary',
       'openwop:feature.crm.nodes.validate-segment',
@@ -303,16 +318,20 @@ describe('feature.crm.agents pack', () => {
   });
 
   it('toolAllowlist references only typeIds feature.crm.nodes actually declares', () => {
-    const agent = manifest.agents[0]!;
-    for (const ref of agent.toolAllowlist) {
-      expect(ref.startsWith('openwop:'), ref).toBe(true);
-      const typeId = ref.slice('openwop:'.length);
-      expect(knownTypeIds.has(typeId), typeId).toBe(true);
+    // EVERY agent (this checked only `agents[0]`), with the host's built-in tools
+    // named explicitly rather than skipped.
+    for (const agent of manifest.agents) {
+      for (const ref of agent.toolAllowlist) {
+        expect(ref.startsWith('openwop:'), `${agent.agentId}: ${ref}`).toBe(true);
+        const typeId = ref.slice('openwop:'.length);
+        expect(knownTypeIds.has(typeId) || HOST_TOOLS.has(typeId), `${agent.agentId}: ${typeId}`).toBe(true);
+      }
     }
   });
 
   it('does NOT allowlist the risky governed writes (create-contact/company/deal, stage moves, convert)', () => {
-    const agent = manifest.agents[0]!;
+    // By id, not by manifest position — and for every agent in the pack.
+    expect(agentById('sales-ops').toolAllowlist.length).toBeGreaterThan(0);
     const disallowed = [
       'feature.crm.nodes.create-contact',
       'feature.crm.nodes.update-contact-stage',
@@ -323,20 +342,30 @@ describe('feature.crm.agents pack', () => {
       'feature.crm.nodes.move-deal-stage',
       'feature.crm.nodes.complete-task',
     ];
-    for (const typeId of disallowed) {
-      expect(agent.toolAllowlist.includes(`openwop:${typeId}`), typeId).toBe(false);
+    for (const agent of manifest.agents) {
+      for (const typeId of disallowed) {
+        expect(agent.toolAllowlist.includes(`openwop:${typeId}`), `${agent.agentId}: ${typeId}`).toBe(false);
+      }
     }
   });
 });
 
 describe('examples/workflow-chain-packs/crm-ops', () => {
-  it('loads through loadWorkflowChainPacks with zero errors and registers all three chains', () => {
+  // Loaded ONCE for the describe, so every case can run alone (the later cases
+  // read the registry the first case used to populate).
+  let loaded: ReturnType<typeof loadWorkflowChainPacks>;
+  beforeAll(() => {
     _resetChainRegistryForTest();
-    const { installed, errors } = loadWorkflowChainPacks({ roots: [CHAIN_PACK_ROOT] });
+    loaded = loadWorkflowChainPacks({ roots: [CHAIN_PACK_ROOT] });
+  });
+
+  it('loads through loadWorkflowChainPacks with zero errors and registers all four chains', () => {
+    const { installed, errors } = loaded;
     expect(errors).toEqual([]);
     const mine = installed.find((p) => p.packName === 'core.openwop.workflows.crm-ops');
     expect(mine).toBeTruthy();
-    expect(mine!.chainIds.sort()).toEqual(['crm-ops.deal-hygiene', 'crm-ops.gmail-sync', 'crm-ops.route-new-lead']);
+    expect(mine!.chainIds.sort()).toEqual(['crm-ops.deal-hygiene', 'crm-ops.gmail-sync', 'crm-ops.route-new-lead', 'crm-ops.triage']);
+    expect(getChain('crm-ops.triage')).not.toBeNull(); // ADR 0837 D7
     expect(getChain('crm-ops.route-new-lead')).not.toBeNull();
     expect(getChain('crm-ops.deal-hygiene')).not.toBeNull();
     expect(getChain('crm-ops.gmail-sync')).not.toBeNull();
@@ -353,7 +382,7 @@ describe('examples/workflow-chain-packs/crm-ops', () => {
       // reject so a rejected review COMPLETES the run without creating a task.
       'core.flow.noop',
     ]);
-    for (const chainId of ['crm-ops.route-new-lead', 'crm-ops.deal-hygiene', 'crm-ops.gmail-sync']) {
+    for (const chainId of ['crm-ops.route-new-lead', 'crm-ops.deal-hygiene', 'crm-ops.gmail-sync', 'crm-ops.triage']) {
       const entry = getChain(chainId)!;
       for (const n of entry.chain.dag.nodes) {
         expect(known.has(n.typeId), `${chainId}:${n.id} → ${n.typeId}`).toBe(true);

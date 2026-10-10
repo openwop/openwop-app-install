@@ -7,6 +7,7 @@
  * the honesty rule (Content-Language + details.locale ONLY when actually localized).
  */
 
+import { mintAnonSession, signSession } from '../src/middleware/cookieSession.js';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -39,8 +40,12 @@ afterAll(async () => { await new Promise<void>((res) => server.close(() => res()
 interface ErrBody { error?: string; message?: string; details?: Record<string, unknown> }
 interface Res { status: number; headers: Headers; body: ErrBody }
 async function getMissing(acceptLanguage?: string): Promise<Res> {
-  const res = await fetch(`${BASE}/v1/workflows/does-not-exist-xyz`, {
-    headers: acceptLanguage ? { 'accept-language': acceptLanguage } : {},
+  // A real anon session: the 404 localization is what this file witnesses, and
+  // since the ADR 0750 major-1 extension a request with no credential at all is
+  // refused 401 before the lookup that produces the localized 404.
+  const cookie = `__session=${signSession(mintAnonSession())}`;
+  const res = await fetch(`${BASE}/workflows/does-not-exist-xyz`, {
+    headers: acceptLanguage ? { 'accept-language': acceptLanguage, cookie } : { cookie },
   });
   const body = (await res.json().catch(() => ({}))) as ErrBody;
   return { status: res.status, headers: res.headers, body };
@@ -50,7 +55,7 @@ describe('localized error envelopes (ADR 0143)', () => {
   it('exact match: Accept-Language pt-BR → localized message + Content-Language + details.locale', async () => {
     const r = await getMissing('pt-BR');
     expect(r.status).toBe(404);
-    expect(r.body.error).toBe('workflow_not_found'); // code NEVER localized
+    expect(r.body.error).toBe('not_found'); // code NEVER localized
     expect(r.body.message).toBe('Fluxo de trabalho não encontrado.');
     expect(r.headers.get('content-language')).toBe('pt-BR');
     expect(r.body.details?.locale).toBe('pt-BR');

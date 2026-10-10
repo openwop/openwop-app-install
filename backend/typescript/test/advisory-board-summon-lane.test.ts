@@ -1,6 +1,6 @@
 /**
  * WF-BOA-2 / WF-BOA-3 — the `@@`-summon attach lane
- * (`POST /v1/host/openwop-app/chat/sessions/:sessionId/board`).
+ * (`POST /host/openwop-app/chat/sessions/:sessionId/board`).
  *
  * This lane had ZERO tests, which is how both blockers survived:
  *
@@ -64,12 +64,12 @@ function client(): Client {
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b) };
 }
 
-const A = '/v1/host/openwop-app/advisors';
-const CHAT = '/v1/host/openwop-app/chat/sessions';
+const A = '/host/openwop-app/advisors';
+const CHAT = '/host/openwop-app/chat/sessions';
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
 
 async function login(c: Client, tenantId: string): Promise<string> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail('abc'), tenantId });
+  const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail('abc'), tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user.userId as string;
 }
@@ -80,11 +80,11 @@ async function world(visibility: 'shared' | 'private' = 'shared'): Promise<World
   const owner = client();
   const tenantId = `org:abc-${Date.now()}-${n++}`;
   await login(owner, tenantId);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   const orgId = org.body.orgId as string;
-  const strategy = await owner.post('/v1/host/openwop-app/strategy', { orgId, scope: 'org', title: 'FY26', summary: SUMMARY });
+  const strategy = await owner.post('/host/openwop-app/strategy', { orgId, scope: 'org', title: 'FY26', summary: SUMMARY });
   expect(strategy.status, JSON.stringify(strategy.body)).toBe(201);
-  const advisor = await owner.post('/v1/host/openwop-app/roster', { persona: 'Ada Lovelace', agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
+  const advisor = await owner.post('/host/openwop-app/roster', { persona: 'Ada Lovelace', agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
   const board = await owner.post(`${A}/boards`, {
     orgId, name: 'Founders', advisors: [advisor.body.rosterId], personaKind: 'historical', visibility,
     contextRefs: [{ kind: 'strategy', strategyId: strategy.body.id }],

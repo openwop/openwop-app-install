@@ -1,6 +1,7 @@
 {
   "name": "feature.bi.nodes",
-  "version": "1.0.0",
+  "version": "1.0.1",
+  "kind": "node",
   "description": "BI feature node pack (ADR 0417) — governed-metric reads over ctx.features.bi: list the closed-world metric catalog, fetch the prompt-facing catalog projection, and run ONE metric with bounded params (metricId + groupBy/since/until/bucket — never a filter AST). run-metric additionally emits the result as an interactive.chart artifact envelope so the run/chat workbench renders the numbers. role:action (recorded) — replay reads the recorded result.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
@@ -12,7 +13,7 @@
     "chart"
   ],
   "engines": {
-    "openwop": ">=1.0.0 <2.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "nodes": [
     {

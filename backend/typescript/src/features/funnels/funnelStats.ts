@@ -18,6 +18,7 @@ import { createLogger } from '../../observability/logger.js';
 import { listCollectedEvents } from '../cdp/collectService.js';
 import { listOrders } from '../commerce/commerceService.js';
 import { getFunnel, listFunnels, listFunnelScopes, type Funnel } from './funnelsService.js';
+import { tenantFeatureCheck } from '../../host/tenantFeatureGate.js';
 
 const log = createLogger('funnels.stats');
 
@@ -148,6 +149,27 @@ const POLL_MS = (() => {
   return Number.isFinite(raw) && raw >= 60_000 ? raw : 15 * 60 * 1000; // default 15m
 })();
 
+/** ADR 0820 §7 / G10 — the toggle the stats sweep's compute belongs to. */
+export const FUNNEL_STATS_FEATURE_ID = 'funnels';
+
+/**
+ * One rebuild pass per (tenant, org) that has at least one funnel — derived from
+ * the funnels the tenant index already knows. ADR 0820 §7 / G10: only tenants
+ * that may use `funnels` (toggle + plan); a lapsed tenant is skipped silently
+ * (the stats READS were already gated, so this stops the compute). Returns the
+ * number of scopes rebuilt.
+ */
+export async function sweepFunnelStats(): Promise<number> {
+  const mayUse = tenantFeatureCheck(FUNNEL_STATS_FEATURE_ID);
+  let rebuilt = 0;
+  for (const scope of await listFunnelScopes()) {
+    if (!(await mayUse(scope.tenantId))) continue;
+    await rebuildFunnelStats(scope.tenantId, scope.orgId);
+    rebuilt += 1;
+  }
+  return rebuilt;
+}
+
 let started = false;
 export function startFunnelStatsSweep(): { stop: () => void } | null {
   if (started) return null;
@@ -157,11 +179,7 @@ export function startFunnelStatsSweep(): { stop: () => void } | null {
     if (running) return;
     running = true;
     try {
-      // Rebuild per (tenant, org) that has at least one funnel — derived from
-      // the funnels the tenant index already knows.
-      for (const scope of await listFunnelScopes()) {
-        await rebuildFunnelStats(scope.tenantId, scope.orgId);
-      }
+      await sweepFunnelStats();
     } catch (err) {
       log.warn('funnel stats rebuild failed', { error: err instanceof Error ? err.message : String(err) });
     } finally { running = false; }

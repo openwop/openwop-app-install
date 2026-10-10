@@ -1018,6 +1018,15 @@ export const MIGRATIONS: Record<number, (client: Queryable) => Promise<void>> = 
       ALTER TABLE webhook_deliveries ADD COLUMN IF NOT EXISTS tenant_id TEXT;
     `);
   },
+  47: async (client) => {
+    // RFC 0173 §C.2 — the idempotency key an attempt PRESENTED to its provider.
+    // Mirrors sqlite mig 49; see it for why this is a new column and not a
+    // revival of the `provider_key` name mig 37 renamed away. NULLABLE WITH NO
+    // BACKFILL; `ADD COLUMN` with no DEFAULT takes no table rewrite.
+    await client.query(`
+      ALTER TABLE invocation_log ADD COLUMN IF NOT EXISTS presented_key TEXT;
+    `);
+  },
 };
 
 /** Highest defined migration — DERIVED from MIGRATIONS, never a hand-bumped cap.

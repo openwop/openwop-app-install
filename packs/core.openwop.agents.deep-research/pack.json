@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.agents.deep-research",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "Long-horizon research agent. Plans, dispatches sub-investigations, retrieves from RAG + web, writes up findings. Mirrors LangGraph Deep Agents (planner + subagents + filesystem). Pure-agent pack.",
   "author": "OpenWOP Working Group",
   "license": "Apache-2.0",
@@ -15,12 +15,12 @@
     "pattern"
   ],
   "engines": {
-    "openwop": ">=1.1.0 <2.0.0"
+    "openwop": ">=1.1.0 <3.0.0"
   },
   "peerDependencies": {
     "aiProviders": "supported",
-    "host.agentRuntime": "supported",
-    "openwop.agents.memoryBackends": ">=longTerm"
+    "agentRuntime": "supported",
+    "agents": ">=longTerm"
   },
   "agents": [
     {
@@ -53,5 +53,13 @@
   "runtime": {
     "language": "remote",
     "entry": "pack.json"
+  },
+  "kind": "node",
+  "peerDependenciesMeta": {
+    "agents": {
+      "facets": [
+        "memoryBackends"
+      ]
+    }
   }
 }

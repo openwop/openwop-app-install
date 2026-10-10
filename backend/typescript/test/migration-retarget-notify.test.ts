@@ -82,7 +82,7 @@ vi.mock('../src/host/workflowsRegistry.js', () => ({
   registerWorkflowDurable: (d: unknown) => registerWorkflowDurable(d as never),
   // The migration reads TWICE: once to decide, once to rebase immediately before
   // the write. `concurrentEdit` simulates a builder save landing in between.
-  getRegisteredWorkflowAsync: async (id: string) => {
+  getRegisteredWorkflowStrict: async (id: string) => {
     reads += 1;
     if (reads === 2 && concurrentEdit !== undefined) return concurrentEdit;
     return registered.get(id) ?? null;

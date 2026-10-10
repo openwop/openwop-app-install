@@ -14,6 +14,7 @@
 
 import { storeMediaAsset, deleteMediaAsset, resolveMediaAsset, listMediaAssetTokens, extendMediaAssetExpiry, capMediaAssetExpiry } from '../../host/inMemorySurfaces.js';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
+import { assetServeUrl } from '../../host/assetServePath.js';
 
 /** ~100 years — the OUTER BACKSTOP, not the lifecycle. ADR 0579 owns the real
  *  lifecycle: bytes live while an asset row references them; the orphan sweep
@@ -131,7 +132,7 @@ export async function collectExternalByteRefs(tenantId: string): Promise<Set<str
 
 /** The relative serve URL for a stored asset's capability token. */
 export function serveUrl(serveToken: string): string {
-  return `/v1/host/openwop-app/assets/${serveToken}`;
+  return assetServeUrl(serveToken);
 }
 
 /**

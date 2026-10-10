@@ -11,6 +11,7 @@
  * id, so re-saving config can't leak workflow copies.
  */
 import { createHash } from 'node:crypto';
+import { cadenceWorkflowId } from '../../host/workflowId.js';
 import { STRATEGY_TOGGLE_ID } from './types.js';
 import { ERASED_USER_REF } from '../../host/subjectErasureRedaction.js';
 import { workflowRoomLive } from '../../host/collab/workflowCollabResource.js';
@@ -66,7 +67,7 @@ type CadenceKey = keyof typeof CHAINS;
 
 const tenantSlug = (tenantId: string): string => createHash('sha256').update(tenantId).digest('hex').slice(0, 10);
 const jobIdFor = (tenantId: string, key: CadenceKey): string => `strategy-cadence:${key}:${tenantSlug(tenantId)}`;
-const workflowIdFor = (tenantId: string, key: CadenceKey): string => `wf.${CHAINS[key].replace(/\./g, '-')}.cadence-${tenantSlug(tenantId)}`;
+const workflowIdFor = (tenantId: string, key: CadenceKey): string => cadenceWorkflowId(tenantId, CHAINS[key]);
 
 export async function getCadenceConfig(tenantId: string): Promise<StrategyCadenceConfig | null> {
   return configs.get(tenantId);

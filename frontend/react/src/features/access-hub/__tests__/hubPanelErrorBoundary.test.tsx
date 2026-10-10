@@ -91,6 +91,8 @@ describe('ADR 0715 D1 — the POPULATION: every console panel is guarded', () =>
     'features/chat-deployment/ChatDeploymentHubPage.tsx',
     'features/campaigns/CampaignStudioHubPage.tsx',
     'features/settings-shell/SettingsPage.tsx',
+    // 2026-10-06 — the Marketplace hub (path-routed; same panel contract).
+    'features/marketplace/MarketplaceHub.tsx',
   ];
 
   it('non-vacuity: every listed file exists and really renders a lazy panel', () => {

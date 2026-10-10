@@ -23,9 +23,10 @@ import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { resolveMediaAsset } from '../../host/inMemorySurfaces.js';
 import { surfaceStr as str, surfaceOptStr as optStr, type FeatureSurface } from '../../host/featureSurfaces.js';
 import { OpenwopError } from '../../types.js';
-import { isAllowedUploadMime, allowedUploadMimeList } from '../../host/allowedUploadMime.js';
+import { assertRunScopeOrg, type Scope } from '../../host/accessControlService.js';
+import { allowedUploadMimeList, storableContentType } from '../../host/allowedUploadMime.js';
 import * as mediaStorage from './mediaStorage.js';
-import { assertOrgCapacity, createAsset, findAssetByContentHash, selectAssets, viewAsset, type MediaAssetView } from './mediaService.js';
+import { withOrgCapacity, createAsset, findAssetByContentHash, selectAssets, viewAsset, type MediaAssetView } from './mediaService.js';
 
 /** Extract the capability token from a host serve URL, or accept a bare token. */
 function parseServeToken(raw: string): string | null {
@@ -36,6 +37,23 @@ function parseServeToken(raw: string): string | null {
 
 export function buildMediaSurface(scope: BundleScope): FeatureSurface {
   const tenantId = scope.tenantId;
+
+  /** ADR 0818 §4 — a run acting FOR a person gets that person's authority in
+   *  the org: the routes' own predicate (`assertOrgScope`, CMNT-4), so a
+   *  viewer's run cannot write where the viewer cannot, and an org that does
+   *  not exist in this tenant is a 404 (a made-up id included).
+   *
+   *  Two lanes stay as they were on main:
+   *  - the WORKSPACE-ROOT id (`orgId === tenantId`) in a single-principal tenant
+   *    (`user:`/`anon:`/`default`). KickTodo lesson media and run artifacts
+   *    write there, and it need not be an org row; with one principal there is
+   *    nobody to escalate over;
+   *  - a run with no acting user (a schedule, a trigger) stays tenant-trusted,
+   *    as every surface without an actor is.
+   *  In a personal tenant a real org passes as its owner's (the routes' own
+   *  personal-owner short-circuit, after the existence check).
+   *  ADR 0830 D1 — the predicate now lives in `assertRunOrgScope`, shared with KB. */
+  const requireScope = (orgId: string, needed: Scope): Promise<void> => assertRunScopeOrg(scope, orgId, needed);
 
   return {
     // Register a host-stored byte asset (serve URL/token) as a durable library
@@ -48,6 +66,7 @@ export function buildMediaSurface(scope: BundleScope): FeatureSurface {
     select: async (args) => {
       const orgId = str(args.orgId);
       if (!orgId) throw new OpenwopError('validation_error', 'Field `orgId` is required.', 400, { field: 'orgId' });
+      await requireScope(orgId, 'workspace:read');
       const r = await selectAssets(tenantId, orgId, {
         ...(str(args.product) ? { product: str(args.product) } : {}),
         ...(str(args.industry) ? { industry: str(args.industry) } : {}),
@@ -92,6 +111,7 @@ export function buildMediaSurface(scope: BundleScope): FeatureSurface {
     createAssetFromServeUrl: async (args) => {
       const orgId = str(args.orgId);
       if (!orgId) throw new OpenwopError('validation_error', 'Field `orgId` is required.', 400, { field: 'orgId' });
+      await requireScope(orgId, 'workspace:write');
       const token = parseServeToken(str(args.url));
       if (!token) throw new OpenwopError('validation_error', 'Field `url` must be a host asset serve URL or token.', 400, { field: 'url' });
       const entry = await resolveMediaAsset(token);
@@ -99,9 +119,12 @@ export function buildMediaSurface(scope: BundleScope): FeatureSurface {
       if (!entry || entry.tenantId !== tenantId) {
         throw new OpenwopError('not_found', 'Asset bytes not found for this tenant.', 404, {});
       }
-      if (!isAllowedUploadMime(entry.contentType)) {
+      // ADR 0818 §2 — store what the bytes ARE (a provider's mislabelled image
+      // is relabelled); refuse bytes that are not the allowlisted type claimed.
+      const contentType = storableContentType(entry.contentType, Buffer.from(entry.contentBase64, 'base64'));
+      if (!contentType) {
         // Same stored-XSS guard as the upload route (text/html, svg excluded).
-        throw new OpenwopError('validation_error', `contentType must be one of: ${allowedUploadMimeList()}`, 415, { contentType: entry.contentType });
+        throw new OpenwopError('validation_error', `The asset's bytes are not a valid ${entry.contentType} (allowed types: ${allowedUploadMimeList()}).`, 415, { contentType: entry.contentType });
       }
       const project = (view: MediaAssetView, deduplicated: boolean): Record<string, unknown> => ({
         assetId: view.assetId,
@@ -133,23 +156,24 @@ export function buildMediaSurface(scope: BundleScope): FeatureSurface {
       const contentHash = createHash('sha256').update(Buffer.from(entry.contentBase64, 'base64')).digest('hex');
       const existing = await findAssetByContentHash(tenantId, orgId, contentHash, optStr(args.collectionId));
       if (existing) return project(viewAsset(existing), true);
-      await assertOrgCapacity(tenantId, orgId, entry.bytes);
       // Re-store on the durable library path (the source token may be a
       // short-TTL scratch asset); the library owns its own storageRef.
-      const stored = await mediaStorage.put(tenantId, { contentBase64: entry.contentBase64, contentType: entry.contentType });
-      const asset = await createAsset({
-        tenantId,
-        orgId,
-        ...(optStr(args.collectionId) ? { collectionId: optStr(args.collectionId) } : {}),
-        name: str(args.name) || 'generated asset',
-        contentType: entry.contentType,
-        sizeBytes: stored.sizeBytes,
-        storageRef: stored.storageRef,
-        serveToken: stored.serveToken,
-        tags: args.tags,
-        uploadedBy: scope.actingUserId ?? scope.runId ?? 'workflow',
-        ...(args.lineage !== undefined ? { lineage: args.lineage } : {}),
-        contentHash,
+      const asset = await withOrgCapacity(tenantId, orgId, entry.bytes, async () => {
+        const stored = await mediaStorage.put(tenantId, { contentBase64: entry.contentBase64, contentType });
+        return createAsset({
+          tenantId,
+          orgId,
+          ...(optStr(args.collectionId) ? { collectionId: optStr(args.collectionId) } : {}),
+          name: str(args.name) || 'generated asset',
+          contentType,
+          sizeBytes: stored.sizeBytes,
+          storageRef: stored.storageRef,
+          serveToken: stored.serveToken,
+          tags: args.tags,
+          uploadedBy: scope.actingUserId ?? scope.runId ?? 'workflow',
+          ...(args.lineage !== undefined ? { lineage: args.lineage } : {}),
+          contentHash,
+        });
       });
       return project(viewAsset(asset), false);
     },

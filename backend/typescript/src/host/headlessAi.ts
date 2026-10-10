@@ -11,9 +11,12 @@
  *   managed-if-capable  →  tenant BYOK default-if-capable  →  null (caller 422s).
  *
  * REPLAY: `resolveHeadlessAi` dispatches a LIVE, non-deterministic provider call —
- * it MUST NOT be used inside a recorded workflow run (no run to fork). Its only
- * caller is `kbService.mediaToTextViaLLM`, which is reached solely on non-recorded
- * service paths (ADR 0108 review). SR-1: the resolved key is captured INSIDE the
+ * it MUST NOT be used inside a recorded workflow run (no run to fork). Its first
+ * caller was `kbService.mediaToTextViaLLM`, reached solely on non-recorded service
+ * paths (ADR 0108 review); every later caller (media, CMS translate/rewrite, the
+ * eval judge, and — ADR 0821 D5 follow-up — chat auto-title and memory extraction,
+ * which run AFTER a chat turn is persisted, outside any run) must hold the same
+ * posture. SR-1: the resolved key is captured INSIDE the
  * returned closure and never escapes this module in a return value/event/log.
  *
  * @see docs/adr/0110-headless-ai-provider-default.md
@@ -26,7 +29,7 @@ import {
   dispatchManagedChat, managedProviderIdFromRef, managedUnderlyingProvider, MANAGED_FREE_REF,
 } from '../providers/managedProvider.js';
 import { dispatchChat, dispatchEmbeddings, EMBEDDINGS_PROVIDERS, type ChatMessage, type ProviderId } from '../providers/dispatch.js';
-import { getDefaultModel } from '../providers/catalog.js';
+import { getClassDefault, getDefaultModel } from '../providers/catalog.js';
 import { createLogger } from '../observability/logger.js';
 import { nativeSearchSatisfies, nativeSearchSuitability } from './webSearchCapability.js';
 import { registerCredentialRefConsumer } from './credentialRefRegistry.js';
@@ -43,6 +46,11 @@ export interface HeadlessAiDefault {
   model: string;
   /** A pointer into the tenant's BYOK store — NOT the key. Resolved host-side at dispatch. */
   credentialRef: string;
+  /** ADR 0821 D5 (corrected by architect #8) — the tenant's OPT-IN to run headless
+   *  TEXT calls (CMS auto-translate, the eval judge) on this BYOK key instead of the
+   *  platform's managed key. Default OFF (absent): switching who pays for
+   *  background calls is the tenant's decision, never a silent default. */
+  preferForText?: boolean;
   updatedBy: string;
   updatedAt: string;
 }
@@ -148,9 +156,12 @@ registerCredentialRefConsumer({
  */
 export async function setHeadlessAiDefault(
   scope: SecretScope,
-  input: { provider?: unknown; model?: unknown; credentialRef?: unknown },
+  input: { provider?: unknown; model?: unknown; credentialRef?: unknown; preferForText?: unknown },
   now: string,
 ): Promise<HeadlessAiDefault> {
+  if (input.preferForText !== undefined && typeof input.preferForText !== 'boolean') {
+    throw new OpenwopError('validation_error', 'preferForText MUST be a boolean.', 400, { field: 'preferForText' });
+  }
   if (typeof input.provider !== 'string' || !(HEADLESS_PROVIDERS as readonly string[]).includes(input.provider)) {
     throw new OpenwopError('validation_error', `provider MUST be one of: ${HEADLESS_PROVIDERS.join(', ')}.`, 400, { field: 'provider' });
   }
@@ -174,6 +185,7 @@ export async function setHeadlessAiDefault(
     provider: input.provider as HeadlessProvider,
     model: input.model.trim(),
     credentialRef: input.credentialRef,
+    ...(input.preferForText === true ? { preferForText: true } : {}),
     updatedBy: scope.actorId ?? 'unknown',
     updatedAt: now,
   };
@@ -186,8 +198,29 @@ export async function clearHeadlessAiDefault(tenantId: string): Promise<void> {
   await defaults.delete(tenantId);
 }
 
-/** A ready-to-call headless dispatch — the resolved key is captured inside; it never escapes. */
-export type HeadlessDispatch = (messages: readonly ChatMessage[], opts: { maxTokens: number; timeoutMs?: number }) => Promise<string>;
+/** A ready-to-call headless dispatch — the resolved key is captured inside; it never escapes.
+ *  `signal` (a caller-owned abort, e.g. auto-title's wall-clock bound) wins over `timeoutMs`. */
+export type HeadlessDispatch = (messages: readonly ChatMessage[], opts: { maxTokens: number; timeoutMs?: number; signal?: AbortSignal }) => Promise<string>;
+
+/** The caller's context for a headless dispatch. */
+export interface HeadlessAiOptions {
+  /** ADR 0821 D4 — the CALLER's feature, so background managed spend is attributed. */
+  featureId?: string;
+  /** ADR 0721 — the person this work is done FOR, so a managed draw meters to their
+   *  bucket rather than the pooled workspace one. Absent ⇒ no field (system work). */
+  actingSubject?: string;
+  /** ADR 0821 D5 follow-up — `'quick'` asks for the BYOK provider's catalog `quick`
+   *  class model (providers.json `classDefaults.quick`) instead of the binding's
+   *  model, for tiny outputs like a chat title. Falls back to the binding's model
+   *  when the provider declares none. Ignored on the managed step (the managed
+   *  target is fixed by the operator). */
+  modelClass?: 'quick';
+}
+
+function signalFor(opts: { timeoutMs?: number; signal?: AbortSignal }): { signal?: AbortSignal } {
+  if (opts.signal) return { signal: opts.signal };
+  return opts.timeoutMs ? { signal: AbortSignal.timeout(opts.timeoutMs) } : {};
+}
 
 export type HeadlessModality = 'image' | 'audio' | 'text';
 
@@ -198,18 +231,44 @@ function providerSupports(provider: string, modality: HeadlessModality): boolean
 
 /**
  * Resolve a dispatch for a headless op needing `modality` input, cost-ordered:
- *   1. managed (cheapest) if its underlying provider supports the modality;
+ *   0. (ADR 0821 D5) `text` only: the tenant's BYOK default FIRST, when the tenant
+ *      opted in (`preferForText`) AND the key resolves now;
+ *   1. managed (cheapest for the tenant) if its underlying provider supports the modality;
  *   2. else the tenant's BYOK default if its provider supports the modality AND the key resolves;
  *   3. else null ⇒ the caller surfaces an honest 422.
- * Returns a CLOSURE so the apiKey never leaves this module (SR-1). For `text` the managed
- * provider always qualifies, so it behaves exactly like the prior hardcoded managed dispatch
- * plus a BYOK fallback if the managed text call is unavailable.
+ * Returns a CLOSURE so the apiKey never leaves this module (SR-1).
+ *
+ * > CORRECTED 2026-10-05 (ADR 0821 D5). This comment used to end "For `text` the
+ * > managed provider always qualifies, so it behaves exactly like the prior hardcoded
+ * > managed dispatch plus a BYOK fallback if the managed text call is unavailable."
+ * > The second half was FALSE: step 1 returns a managed closure for `text`
+ * > unconditionally, so step 2 is unreachable for text and there is NO fallback —
+ * > a managed text failure (cap, outage) surfaces from the closure as-is. The
+ * > true statement is the ladder above. A BYOK tenant's background text calls
+ * > stay on the platform's managed key (metered by ADR 0821 D2) unless it opts in
+ * > through step 0; the opt-in defaults OFF (architect #8, consent).
  */
-export async function resolveHeadlessAi(tenantId: string, modality: HeadlessModality): Promise<HeadlessDispatch | null> {
+export async function resolveHeadlessAi(
+  tenantId: string,
+  modality: HeadlessModality,
+  options?: HeadlessAiOptions,
+): Promise<HeadlessDispatch | null> {
+  if (modality === 'text') {
+    const preferred = await resolvePreferredByokText(tenantId, options?.modelClass);
+    if (preferred) return preferred;
+  }
   const managedProvider = managedUnderlyingProvider(MANAGED_FREE_REF);
   if (managedProvider && providerSupports(managedProvider, modality)) {
     return async (messages, opts) => {
-      const r = await dispatchManagedChat({ userFacingProvider: managedProviderIdFromRef(MANAGED_FREE_REF), tenantId, messages: messages as ChatMessage[], maxTokens: opts.maxTokens, ...(opts.timeoutMs ? { signal: AbortSignal.timeout(opts.timeoutMs) } : {}) });
+      const r = await dispatchManagedChat({
+        userFacingProvider: managedProviderIdFromRef(MANAGED_FREE_REF),
+        tenantId,
+        ...(options?.featureId ? { featureId: options.featureId } : {}),
+        ...(options?.actingSubject ? { actingSubject: options.actingSubject } : {}),
+        messages: messages as ChatMessage[],
+        maxTokens: opts.maxTokens,
+        ...signalFor(opts),
+      });
       return r.completion ?? '';
     };
   }
@@ -219,13 +278,48 @@ export async function resolveHeadlessAi(tenantId: string, modality: HeadlessModa
     if (apiKey) {
       const { provider, model } = def;
       return async (messages, opts) => {
-        const r = await dispatchChat({ provider: provider as ProviderId, model, apiKey, messages: messages as ChatMessage[], maxTokens: opts.maxTokens, ...(opts.timeoutMs ? { signal: AbortSignal.timeout(opts.timeoutMs) } : {}) });
+        const r = await dispatchChat({ provider: provider as ProviderId, model, apiKey, messages: messages as ChatMessage[], maxTokens: opts.maxTokens, ...signalFor(opts) });
         return r.completion ?? '';
       };
     }
     log.warn('headless_ai_default_ref_unresolved', { tenantId }); // ephemeral/expired — fall through to null
   }
   return null;
+}
+
+/** ADR 0821 D5 — step 0 of the ladder: the opted-in BYOK default for text, or null
+ *  (not opted in / no default / key does not resolve now ⇒ the managed step runs).
+ *
+ *  A failure to READ the preference also falls through to managed (logged): with the
+ *  opt-in defaulting OFF, managed is the no-information answer, and the background
+ *  callers (auto-title, memory extraction) must not lose their work to a storage blip.
+ *  Once the BYOK closure is returned, a provider error at CALL time surfaces from the
+ *  closure as-is — there is deliberately no managed retry: the tenant chose to pay
+ *  with its own key, and silently drawing managed on its key's failure would bill
+ *  the platform allowance for a call the tenant opted out of. */
+async function resolvePreferredByokText(tenantId: string, modelClass?: 'quick'): Promise<HeadlessDispatch | null> {
+  let def: HeadlessAiDefault | null;
+  try {
+    def = await getHeadlessAiDefault(tenantId);
+  } catch (err) {
+    log.warn('headless_ai_preference_read_failed', { tenantId, error: err instanceof Error ? err.message : String(err) });
+    return null;
+  }
+  if (!def?.preferForText) return null;
+  const apiKey = await resolveSecret(def.credentialRef, { tenantId });
+  if (!apiKey) {
+    log.warn('headless_ai_preferred_ref_unresolved', { tenantId }); // fall through to managed
+    return null;
+  }
+  const provider = def.provider;
+  // The ONE place a background "quick model" is chosen: the provider's own catalog
+  // class default (providers.json — the SSoT `/refresh-model-catalog` maintains),
+  // never a vendor id hard-coded in a caller.
+  const model = (modelClass ? getClassDefault(provider, modelClass) : null) ?? def.model;
+  return async (messages, opts) => {
+    const r = await dispatchChat({ provider: provider as ProviderId, model, apiKey, messages: messages as ChatMessage[], maxTokens: opts.maxTokens, ...signalFor(opts) });
+    return r.completion ?? '';
+  };
 }
 
 // ── Native web search on the tenant's own key (ADR 0101 Phase 4) ────────────

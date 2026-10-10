@@ -1,20 +1,21 @@
 {
   "name": "core.openwop.workflows.kb-reindex",
-  "version": "1.0.1",
+  "version": "1.0.3",
   "kind": "workflow-chain",
   "description": "The workflow a KB collection's embedding-spec REINDEX (ADR 0398 P3 / ADR 0643 D1b) fires on cadence so the rebuild completes without a browser. One node drains ONE bounded slice — embed the next chunks into the staging namespace, cut over when the staging space is whole — and the host tears the per-collection scheduler job down the moment the job reaches a terminal status (the transient definition is archived while a recorded run replays against it). `orgId`/`collectionId` are supplied by the per-collection job the admin-gated `POST …/reindex` registers; do NOT bind this chain by hand — the surface refuses the node unless a running/paused job already exists AND the executing run is the host-minted `kb.reindex:<tenantId>:<orgId>:<collectionId>` workflow. This lane replaces the SPA's `for (i < 10000) drain()` loop as the DRIVER; the SPA loop stays as the interactive fast path, calling the same route. Resolves on hosts that ship the kb feature + node pack (the OpenWOP reference app).",
   "author": "openwop",
   "license": "Apache-2.0",
   "engines": {
-    "openwop": ">=1.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "keywords": ["Knowledge"],
   "chains": [
     {
       "chainId": "kb.reindex",
-      "version": "1.0.1",
+      "version": "1.0.3",
       "label": "KB Reindex",
-      "description": "Drain one slice of an in-progress KB reindex for a collection. Registered per collection by `POST …/collections/:id/reindex` and fired every 10 minutes until the rebuild completes, pauses out of daily embed budget (it resumes by itself on the next tick after the budget rolls over), fails, or is cancelled — then the scheduler job is removed and the transient definition is archived (deleted outright only if no run ever fired against it; ADR 0643 R3).",
+      "description": "Drain one slice of an in-progress KB reindex for a collection. Registered per collection by `POST …/collections/:id/reindex` and fired every 10 minutes until the rebuild completes, pauses out of daily embed budget (it resumes by itself on the next tick after the budget rolls over), fails, or is cancelled — then the scheduler job is removed and the transient definition is archived; the retention sweeper's transient GC deletes it once no run references it (ADR 0643 R4).",
+      "internal": true,
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -35,7 +36,7 @@
         "nodes": [
           {
             "id": "drain",
-            "typeId": "feature.kb.nodes.reindex-drain",
+            "typeId": "feature.kb.nodes.reindex-drain@1.0.0",
             "name": "Drain one reindex slice",
             "position": { "x": 0, "y": 0 },
             "config": {},

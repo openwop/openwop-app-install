@@ -1,7 +1,7 @@
 /**
  * ADR 0414 P1 — the KickTodo route-registration invariant (PRD §9.4):
  * every KickTodo package registers beneath the ONE collision-resistant owner
- * `/v1/host/openwop-app/kicktodo`, and no two KickTodo registrations claim the
+ * `/host/openwop-app/kicktodo`, and no two KickTodo registrations claim the
  * same (method, path). Express keeps the FIRST registrant, so a collision is a
  * silently-dead route — this test makes it a loud failure instead.
  *

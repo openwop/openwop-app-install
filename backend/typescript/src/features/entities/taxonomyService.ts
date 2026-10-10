@@ -138,6 +138,35 @@ export async function listTerms(tenantId: string, projectId: string | undefined,
   return rows.sort((a, b) => a.order - b.order || a.slug.localeCompare(b.slug));
 }
 
+/** ADR 0847 D1 (review A2) — the namespace ('' = workspace root, else a project id)
+ *  a term's taxonomy lives in, or null for an unknown/foreign term. Term ids encode
+ *  the namespace, so membership must never cross it. */
+export async function termNamespace(tenantId: string, termId: string): Promise<string | null> {
+  const term = await getTermById(tenantId, termId);
+  if (!term) return null;
+  const tax = await taxonomies.get(term.taxonomyId);
+  return tax && tax.tenantId === tenantId ? tax.projectId : null;
+}
+
+/** ADR 0847 D2 — every taxonomy and term of one project namespace (the project-delete
+ *  purge; `projectId` is never '' here — the root namespace is never purged). */
+export async function listNamespaceTaxonomies(tenantId: string, projectId: string): Promise<{ taxonomies: TaxonomyRecord[]; terms: TermRecord[] }> {
+  const taxes = (await taxonomies.listForTenantIndexed(tenantId)).filter((x) => x.projectId === projectId);
+  const out: TermRecord[] = [];
+  for (const tax of taxes) out.push(...(await terms.listByPrefix(`${tax.taxonomyId}:`)).filter((t) => t.tenantId === tenantId));
+  return { taxonomies: taxes, terms: out };
+}
+
+/** ADR 0847 D2 — delete one namespace's taxonomies and terms (no in-use refusal: the
+ *  caller has already removed or stripped every membership). Idempotent. */
+export async function purgeNamespaceTaxonomies(tenantId: string, projectId: string): Promise<number> {
+  const { taxonomies: taxes, terms: ts } = await listNamespaceTaxonomies(tenantId, projectId);
+  let n = 0;
+  for (const t of ts) if (await terms.delete(t.termId)) n += 1;
+  for (const tax of taxes) if (await taxonomies.delete(tax.taxonomyId)) n += 1;
+  return n;
+}
+
 /** Tenant-guarded point lookup used by entity term-membership validation. */
 export async function getTermById(tenantId: string, termId: string): Promise<TermRecord | null> {
   const rec = await terms.get(termId);

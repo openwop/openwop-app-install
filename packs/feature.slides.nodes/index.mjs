@@ -28,15 +28,19 @@ export const BLOCK_TYPES = 'heading, text, bullets, quote, callout, code, image,
 const BLOCK_TYPE_SET = new Set(BLOCK_TYPES.split(', '));
 
 /** XCH-SLIDES-1: the live closed type list from the feature surface, falling
- *  back to the pinned literal on hosts that don't expose it. */
+ *  back to the pinned literal ONLY on hosts that don't expose the surface.
+ *
+ *  A host that exposes the surface and REFUSES the call (the slides feature is
+ *  off, or not in the tenant's plan: `host_capability_disabled`) is not a host
+ *  without the surface. That refusal used to be caught and swallowed here, so
+ *  the draft/deepen nodes went on to generate the deck from the pinned literal
+ *  and delivered the paid output anyway. The refusal now propagates and fails
+ *  the node with its typed code. */
 async function liveBlockTypeList(ctx) {
-  try {
-    const s = ctx.features && ctx.features.slides;
-    if (s && typeof s.getCatalog === 'function') {
-      const cat = await s.getCatalog({});
-      if (cat && typeof cat.blockTypeList === 'string' && cat.blockTypeList.length) return cat.blockTypeList;
-    }
-  } catch { /* fall through to the pinned literal */ }
+  const s = ctx.features && ctx.features.slides;
+  if (!s || typeof s.getCatalog !== 'function') return BLOCK_TYPES;
+  const cat = await s.getCatalog({});
+  if (cat && typeof cat.blockTypeList === 'string' && cat.blockTypeList.length) return cat.blockTypeList;
   return BLOCK_TYPES;
 }
 
@@ -283,7 +287,11 @@ export async function draft(ctx) {
         }
       }
     }
-  } catch { /* validation unavailable — the artifact registry stays the gate */ }
+  } catch (e) {
+    // A refusal is not "validation unavailable" — never deliver past it.
+    if (e && e.code === 'host_capability_disabled') throw e;
+    /* validation unavailable — the artifact registry stays the gate */
+  }
 
   return { status: 'success', outputs: { artifact: deckArtifact(payload), slideCount: payload.slides.length } };
 }

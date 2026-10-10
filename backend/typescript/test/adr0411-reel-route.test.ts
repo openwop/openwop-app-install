@@ -11,12 +11,13 @@ import type { AddressInfo } from 'node:net';
 import { getSetCookies } from './headerCookies.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
+import { toWireRunId } from '../src/host/v2Ids.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 
 let BASE = '';
 let server: http.Server;
-const CB = (orgId: string, s = ''): string => `/v1/host/openwop-app/creative-briefs/orgs/${encodeURIComponent(orgId)}${s}`;
+const CB = (orgId: string, s = ''): string => `/host/openwop-app/creative-briefs/orgs/${encodeURIComponent(orgId)}${s}`;
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -45,9 +46,9 @@ let seq = 0;
 async function ownerWithOrg(): Promise<{ c: ReturnType<typeof client>; orgId: string }> {
   const c = client();
   seq += 1;
-  const login = await c.post('/v1/host/openwop-app/test/login', { email: `reel-${seq}@t.test`, tenantId: `org:reel-${seq}` });
+  const login = await c.post('/host/openwop-app/test/login', { email: `reel-${seq}@t.test`, tenantId: `org:reel-${seq}` });
   expect([200, 201]).toContain(login.status);
-  const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status).toBe(201);
   return { c, orgId: org.body.orgId as string };
 }
@@ -65,7 +66,7 @@ describe('ADR 0411 P3b — Generate reel launch route', () => {
     const launch = await c.post(CB(orgId, `/briefs/${briefId}/reel`), { aspectRatio: '9:16', provider: 'mock' });
     expect(launch.status).toBe(202);
     expect(typeof launch.body.runId).toBe('string');
-    expect(String(launch.body.statusUrl)).toContain('/v1/runs/');
+    expect(String(launch.body.statusUrl)).toContain('/runs/');
 
     const missing = await c.post(CB(orgId, `/briefs/cbrief:does-not-exist/reel`), { provider: 'mock' });
     expect(missing.status).toBe(404);
@@ -78,10 +79,13 @@ describe('ADR 0411 P3b — Generate reel launch route', () => {
     expect(launch.status).toBe(202);
     const runId = String(launch.body.runId);
 
+    // The launch answers the bare opaque run id; a major-2 run read takes it
+    // tenant-bound, bound to the launching org's (active) tenant.
+    const boundRunId = toWireRunId(runId, `org:reel-${seq}`);
     let status = 'pending';
     for (let i = 0; i < 50 && status !== 'completed' && status !== 'failed'; i += 1) {
       await new Promise((r) => setTimeout(r, 100));
-      status = String((await c.get(`/v1/runs/${runId}`)).body.status ?? 'pending');
+      status = String((await c.get(`/runs/${encodeURIComponent(boundRunId)}`)).body.status ?? 'pending');
     }
     expect(status, `run ${runId} did not complete`).toBe('completed');
 

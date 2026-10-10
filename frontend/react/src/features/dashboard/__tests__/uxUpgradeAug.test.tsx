@@ -1,7 +1,10 @@
 /**
  * UX_UPGRADE-dashboard (2026-08-01) — the benchmark-driven upgrades:
  * picker search, pointer-drag reorder (keyboard parity kept), per-tile
- * refresh, the greeting lede, and Continue-working deep links.
+ * refresh, and the greeting lede. (The Continue-working deep-link test lives in
+ * `continueWorkingLinks.test.tsx`: it needs its own module mocks, and getting
+ * them here with `vi.resetModules()` re-ran the i18n bootstrap mid-file — see
+ * that file's header.)
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
@@ -112,29 +115,6 @@ describe('per-tile refresh (view mode)', () => {
   });
 });
 
-describe('Continue-working deep links', () => {
-  it('links each canvas to its own editor route (not the generic list)', async () => {
-    vi.resetModules(); // the tile module is cached from the page renders above
-    vi.doMock('../useDashboardOrg.js', () => ({ useDashboardOrg: () => ({ orgId: 'org1', loading: false, error: null }) }));
-    vi.doMock('../../documents/documentsClient.js', () => ({
-      listCanvasSources: async () => ({
-        canvases: [
-          { canvasId: 'c1', canvasTypeId: 'canvas.slides', name: 'Deck', version: 1, updatedAt: '2026-08-01T00:00:00Z' },
-          { canvasId: 'c2', canvasTypeId: 'pack.custom', name: 'Pack thing', version: 1, updatedAt: '2026-07-31T00:00:00Z' },
-        ],
-        total: 2,
-      }),
-    }));
-    const { default: Tile } = await import('../tiles/ContinueWorkingTile.js');
-    render(<MemoryRouter><Tile compact={false} /></MemoryRouter>);
-    const deck = await screen.findByRole('link', { name: 'Deck' });
-    expect(deck.getAttribute('href')).toBe('/slides/c1?org=org1');
-    expect(screen.getByRole('link', { name: 'Pack thing' }).getAttribute('href')).toBe('/canvas/pack.custom/c2?org=org1');
-    vi.doUnmock('../useDashboardOrg.js');
-    vi.doUnmock('../../documents/documentsClient.js');
-  });
-});
-
 describe('DASH-1 (round 2) — move-to-top/bottom closes the keyboard O(n) tail', () => {
   it('move-to-top puts the last tile first and announces position 1', async () => {
     const { container } = await renderCustomizing();
@@ -168,6 +148,18 @@ describe('DASH-1 (round 2) — move-to-top/bottom closes the keyboard O(n) tail'
       // …and it belongs to the tile that moved, now first in the grid.
       const first = container.querySelector('section.dash-tile');
       expect(first!.contains(active!)).toBe(true);
+    });
+  });
+
+  it('ADR 0846 grade-ux DSHUX-6 — removing a tile keeps focus on the next tile, not <body>', async () => {
+    const { container } = await renderCustomizing();
+    const before = Array.from(container.querySelectorAll('section.dash-tile'));
+    const removes = screen.getAllByRole('button', { name: /remove tile/i });
+    fireEvent.click(removes[0]!);
+    await waitFor(() => {
+      const active = document.activeElement as HTMLButtonElement | null;
+      expect(active?.tagName).toBe('BUTTON');
+      expect(before[1]!.contains(active!)).toBe(true); // the former second tile, now first
     });
   });
 

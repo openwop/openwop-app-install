@@ -38,6 +38,9 @@ export interface KanbanCard {
   description?: string;
   workflowId?: string;
   lastRunId?: string;
+  /** ADR 0774 D3 — the state of `lastRunId`, durable on the card. Absent when
+   *  unknown (e.g. a human trigger-lane run that has not reported back). */
+  lastRunStatus?: 'running' | 'completed' | 'failed' | 'cancelled';
   source?: KanbanCardSource;
   sourceLabel?: string;
   priority?: 'low' | 'normal' | 'high';
@@ -46,6 +49,12 @@ export interface KanbanCard {
   createdBy?: string;
   /** Why this task is assigned to the board's agent (the "why Sally?" answer). */
   assignmentReason?: string;
+  /** ADR 0829 P4 — the handoff note the assigner wrote for the current assignee
+   *  (read it through `runs/handoffNote.ts`; it is untrusted text). */
+  handoff?: unknown;
+  /** ADR 0829 P4 — who wrote `handoff`, and when. */
+  handoffBy?: string;
+  handoffAt?: string;
   /** Free-text note on what's blocking the task (lightweight; not a graph). */
   blockerNote?: string;
   /** ADR 0049 — the single accountable assignee (a userId). */
@@ -103,6 +112,12 @@ export interface KanbanBoard {
 }
 
 const base = `${config.baseUrl}/host/openwop-app/kanban`;
+// The board change stream rides the SSE base (direct to Cloud Run), never the
+// `/api` Hosting proxy: the proxy buffers `text/event-stream` AND does not pass
+// the browser's abort through, so every board visit held a per-tenant SSE slot
+// for the full 3600 s request timeout (MEASURED 2026-10-09: 8 of 8 board
+// streams ran 3601 s; 20 slots exhausted by one user).
+const streamBase = `${config.sseBaseUrl}/host/openwop-app/kanban`;
 const jsonHeaders = (): HeadersInit => authedHeaders({ 'content-type': 'application/json' });
 
 export async function listBoards(): Promise<KanbanBoard[]> {
@@ -251,7 +266,7 @@ export function subscribeBoardEvents(boardId: string, onChange: () => void): () 
   void (async () => {
     try {
       const res = await fetch(
-        `${base}/boards/${encodeURIComponent(boardId)}/events`,
+        `${streamBase}/boards/${encodeURIComponent(boardId)}/events`,
         fetchOpts({ headers: authedHeaders({ accept: 'text/event-stream' }), signal: controller.signal }),
       );
       if (!res.ok || !res.body) return;
@@ -297,7 +312,7 @@ export async function listAssignedToMe(): Promise<AssignedCard[]> {
  *  (`assigneeId: null`). The card never leaves its origin board. */
 export async function assignCard(
   cardId: string,
-  input: { assigneeId?: string | null; assigneeRole?: string; comment?: string; notifyAssignee?: boolean },
+  input: { assigneeId?: string | null; assigneeRole?: string; comment?: string; notifyAssignee?: boolean; handoff?: HandoffNoteDraft },
 ): Promise<{ card: KanbanCard }> {
   const res = await fetch(
     `${base}/cards/${encodeURIComponent(cardId)}/assign`,
@@ -316,4 +331,15 @@ export async function claimCard(cardId: string): Promise<{ card: KanbanCard }> {
   );
   if (!res.ok) throw new Error(`claimCard returned ${res.status}`);
   return (await res.json()) as { card: KanbanCard };
+}
+
+/** ADR 0829 P4 — the note a person writes when handing a card on. The server
+ *  normalizes it (caps, `producedBy: 'human'`) and rejects one with no intent. */
+export interface HandoffNoteDraft {
+  intent: string;
+  decisions?: { summary: string }[];
+  openQuestions?: string[];
+  tried?: { approach: string }[];
+  /** A person's own judgement, picked as low / medium / high (see `HANDOFF_CONFIDENCE`). */
+  confidence?: { value: number; basis?: string };
 }

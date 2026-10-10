@@ -6,6 +6,7 @@
  * positional, so the working copy needs NO identity fields. Hard errors reject
  * the PATCH with 422; no soft warnings.
  */
+import { ASSET_SERVE_PATH, isAssetServePath } from '../../host/assetServePath.js';
 
 /** A paint value must be a SAFE color grammar (ADR 0333 grade pass CODE-D4) —
  *  `url(...)`/`var(...)` in an SVG paint attribute triggers a cross-origin
@@ -52,7 +53,6 @@ const BOOL_FIELDS = new Set(['simulatePressure', 'locked', 'hidden']);
  *  beacon (the exact CODE-D4 class the paint grammar bans) and would also break
  *  the SVG-as-image PNG export; the media library (incl. AI generate/edit) is
  *  the ingestion path for outside imagery. Mirrors the artifact schema pattern. */
-const IMAGE_SRC_RE = /^\/v1\/host\/openwop-app\/assets\/[A-Za-z0-9_-]{1,512}$/;
 
 export function validateDrawingDoc(state: Record<string, unknown>): DrawingValidation {
   const errors: { path: string; message: string }[] = [];
@@ -125,8 +125,8 @@ export function validateDrawingDoc(state: Record<string, unknown>): DrawingValid
         continue;
       }
       if (k === 'src') {
-        if (typeof v !== 'string' || v.length > 600 || !IMAGE_SRC_RE.test(v)) {
-          err(`${path}.src`, 'src must be a host media-asset serve path (/v1/host/openwop-app/assets/<token>) — external URLs are not allowed');
+        if (typeof v !== 'string' || v.length > 600 || !isAssetServePath(v)) {
+          err(`${path}.src`, `src must be a host media-asset serve path (${ASSET_SERVE_PATH}/<token>) — external URLs are not allowed`);
         }
         continue;
       }

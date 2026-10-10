@@ -8,7 +8,8 @@
 import { OpenwopError } from '../../types.js';
 import { createLogger } from '../../observability/logger.js';
 import { getOrg } from '../../host/accessControlService.js';
-import { resolveOne } from '../../host/featureToggles/service.js';
+import { resolveToggle } from '../../host/featureToggles/service.js';
+import { ownerPublicRuntimeLapsed } from '../../host/publicLapse.js';
 import { listPages, type Page } from '../cms/cmsService.js';
 
 const log = createLogger('docs');
@@ -32,8 +33,11 @@ export interface DocsNavItem {
 async function resolveDocsTenant(orgId: string): Promise<string | null> {
   const org = await getOrg(orgId);
   if (!org) return null;
-  const assignment = await resolveOne('docs', { tenantId: org.tenantId });
-  return assignment?.enabled ? org.tenantId : null;
+  // ADR 0819 §1 opt-out — a PUBLIC lane (tenant from the resource): ADR 0419 never paywalls a shopper/visitor on the operator's plan.
+  const assignment = await resolveToggle('docs', { tenantId: org.tenantId });
+  if (!assignment?.enabled) return null;
+  // ADR 0820 §7 — the owner-lapse policy (off unless OPENWOP_BILLING_PUBLIC_LAPSE_GRACE_DAYS is set); the lane's own unavailable shape.
+  return (await ownerPublicRuntimeLapsed('docs', org.tenantId)) ? null : org.tenantId;
 }
 
 /** ADR 0392 — the ordering key for a docs page: its `docsNav` if set, else the
@@ -81,11 +85,20 @@ export async function listPublishedDocs(orgId: string): Promise<DocsNavItem[]> {
  * title is the operator's site name, and each line carries the doc's updated
  * date in the convention's description slot.
  */
-export async function llmsTxt(orgId: string, baseUrl: string, siteTitle: string): Promise<string> {
+export async function llmsTxt(
+  orgId: string,
+  baseUrl: string,
+  siteTitle: string,
+  /** ADR 0824 D5 — a site that can say what it IS opens with that (title,
+   *  `>` summary, one paragraph) before the listing, per the llms.txt shape. */
+  preamble?: { title: string; summary: string; body: string } | null,
+): Promise<string> {
   const resolved = await orderedPublishedDocs(orgId);
   if (!resolved) throw new OpenwopError('not_found', 'No documentation site here.', 404, { orgId });
   const abs = (slug: string): string => `${baseUrl.replace(/\/+$/, '')}/docs/${encodeURIComponent(slug)}`;
-  const lines = [`# ${siteTitle}`, '', '> Product documentation.', '', '## Docs'];
+  const lines = preamble
+    ? [`# ${preamble.title}`, '', `> ${preamble.summary}`, '', preamble.body, '', '## Docs']
+    : [`# ${siteTitle}`, '', '> Product documentation.', '', '## Docs'];
   // The date is the instant's UTC calendar date — machine-facing data for
   // agents (freshness ranking), not a locale-rendered display string.
   for (const p of resolved.pages) lines.push(`- [${p.title}](${abs(p.slug)}) - updated ${p.updatedAt.slice(0, 10)}`);

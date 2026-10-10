@@ -13,7 +13,9 @@ import { StateCard } from '../../ui/StateCard.js';
 import { Skeleton } from '../../ui/Skeleton.js';
 import { TextField } from '../../ui/Field.js';
 import { toast } from '../../ui/toast.js';
-import { BriefcaseIcon } from '../../ui/icons/index.js';
+import { BriefcaseIcon, CheckIcon } from '../../ui/icons/index.js';
+import { Notice } from '../../ui/Notice.js';
+import { useCrmOrgAccess } from './useCrmOrgAccess.js';
 import { useFeatureAccess } from '../../featureToggles/FeatureAccessContext.js';
 import { ActivityTimeline } from './ActivityTimeline.js';
 import { crmActionError, revertedErr } from './crmUiHelpers.js';
@@ -33,7 +35,7 @@ import {
   type Deal,
   type DealStatus,
   type Pipeline,
-  createTask, listTasks, type Task,
+  createTask, listTasks, setTaskStatus, type Task,
 } from './crmOrgClient.js';
 
 export function DealDetailPage(): JSX.Element {
@@ -240,7 +242,8 @@ export function DealDetailPage(): JSX.Element {
             <div className="u-grid u-gap-1"><span className="u-label-sm">{t('fieldOwner')}</span><UserPicker ariaLabel={t('fieldOwner')} emptyLabel={t('ownerPlaceholder')} value={owner} onChange={setOwner} orgId={orgId} /></div>
             <Button variant="primary" type="submit" disabled={busy || !title.trim()}>{t('common:save')}</Button>
           </form>
-          <DealTasksSection orgId={orgId} dealId={dealId} />
+          {/* CRM2UX-6 — keyed by deal, so an offer never survives navigating to another deal. */}
+          <DealTasksSection key={dealId} orgId={orgId} dealId={dealId} closed={status === 'won' || status === 'lost'} />
           <ActivityTimeline orgId={orgId} dealId={dealId} />
         </>
       ) : null}
@@ -251,13 +254,22 @@ export function DealDetailPage(): JSX.Element {
 /** R2 CRM-R2-1 — the deal's own tasks (the bidirectional half of the
  *  deal-linked-task convention: HubSpot/Pipedrive/Attio/Copper all create AND
  *  show tasks from the deal record). Auto-links new tasks to this deal. */
-function DealTasksSection({ orgId, dealId }: { orgId: string; dealId: string }): JSX.Element {
+function DealTasksSection({ orgId, dealId, closed }: { orgId: string; dealId: string; closed: boolean }): JSX.Element {
   const { t } = useTranslation('crm');
+  // CRM2UX-2 — a viewer is not offered writes that can only end in a 403.
+  const { canWrite, failed: accessFailed, retry: retryAccess } = useCrmOrgAccess(orgId);
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const doneButtons = useRef(new Map<string, HTMLButtonElement>());
   const [tasks, setTasks] = useState<Task[] | null>(null);
   const [failed, setFailed] = useState(false);
   const [taskTitle, setTaskTitle] = useState('');
   const [taskDue, setTaskDue] = useState('');
   const [busy, setBusy] = useState(false);
+  // ADR 0837 D8 (ADR 0567 D4) — closing the deal's LAST open task offers the next
+  // one inline: an offer, never a modal gate. The title field takes focus.
+  const [offerNext, setOfferNext] = useState(false);
+  const [completing, setCompleting] = useState<string | null>(null);
+  const titleRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(() => {
     setFailed(false);
@@ -276,14 +288,52 @@ function DealTasksSection({ orgId, dealId }: { orgId: string; dealId: string }):
     setBusy(true);
     try {
       await createTask(orgId, { title: taskTitle.trim(), dealId, ...(taskDue ? { dueDate: taskDue } : {}) });
-      setTaskTitle(''); setTaskDue(''); load();
+      setTaskTitle(''); setTaskDue(''); setOfferNext(false); load();
       toast.success(t('taskAdded'));
     } catch (e) { toast.error(crmActionError(e, 'addFailed')); } finally { setBusy(false); }
   }, [orgId, dealId, taskTitle, taskDue, load, t]);
 
+  const markDone = useCallback(async (task: Task) => {
+    setCompleting(task.taskId);
+    try {
+      await setTaskStatus(orgId, task.taskId, 'done');
+      const remaining = (tasks ?? []).filter((x) => x.taskId !== task.taskId && x.status !== 'done');
+      setTasks((cur) => (cur ?? []).map((x) => (x.taskId === task.taskId ? { ...x, status: 'done' } : x)));
+      toast.success(t('taskMarkedDone', { title: task.title }));
+      if (remaining.length === 0) {
+        // ADR 0567 D4 — the loop: no next activity left, so offer one (never on a
+        // won/lost deal, CRM2UX-6) and put the caret where it is typed.
+        if (!closed) {
+          setOfferNext(true); // focus follows in an effect, once the offer describes the field (N6)
+        } else {
+          headingRef.current?.focus();
+        }
+      } else {
+        // CRM2UX-1 — the clicked button is gone (the task is done): move focus to
+        // the next open task's control rather than dropping it on <body>. Deferred
+        // until the controls re-enable (a disabled button cannot take focus).
+        focusNext.current = remaining[0]!.taskId;
+      }
+      load();
+    } catch (e) { toast.error(crmActionError(e, 'taskMarkDoneFailed')); } finally { setCompleting(null); }
+  }, [orgId, tasks, load, t, closed]);
+
+  const focusNext = useRef<string | null>(null);
+  useEffect(() => {
+    if (completing !== null || !focusNext.current) return;
+    const el = doneButtons.current.get(focusNext.current);
+    focusNext.current = null;
+    (el ?? headingRef.current)?.focus();
+  }, [completing, tasks]);
+
+  // CRM2UX-6 — the offer holds only while it is true: an open task (added here,
+  // by a teammate, or by a run) retires it.
+  const showOffer = offerNext && !closed && !(tasks ?? []).some((x) => x.status !== 'done');
+  useEffect(() => { if (showOffer) titleRef.current?.focus(); }, [showOffer]);
+
   return (
     <div className="surface-card u-p-4 u-grid u-gap-3">
-      <h2 className="u-fs-14 u-m-0">{t('dealTasksTitle')}</h2>
+      <h2 className="u-fs-14 u-m-0" ref={headingRef} tabIndex={-1}>{t('dealTasksTitle')}</h2>
       {failed ? (
         <span className="action-bar">
           <span className="chip chip--danger">{t('dealTasksLoadFailed')}</span>
@@ -305,15 +355,34 @@ function DealTasksSection({ orgId, dealId }: { orgId: string; dealId: string }):
                   Greenwich from being shown the previous day (the app's
                   established date-only idiom — see BookingMonthGrid). */}
               {task.dueDate ? <span className="muted u-fs-12">{formatDate(task.dueDate, { dateStyle: 'medium', timeZone: 'UTC' })}</span> : null}
+              {task.status !== 'done' && canWrite ? (
+                <Button variant="quiet" size="sm" onClick={() => { void markDone(task); }} disabled={completing !== null}
+                  ref={(el: HTMLButtonElement | null) => { if (el) doneButtons.current.set(task.taskId, el); else doneButtons.current.delete(task.taskId); }}
+                  aria-label={t('markTaskDoneLabel', { title: task.title })}>
+                  <CheckIcon size={12} aria-hidden /> {t('markTaskDone')}
+                </Button>
+              ) : null}
             </li>
           ))}
         </ul>
       )}
+      {/* CRM2UX-10 — the offer DESCRIBES the field focus lands on, so it is read
+          once with it rather than queued as a second announcement. */}
+      {showOffer ? <Notice variant="info" id={`next-offer-${dealId}`}>{t('scheduleNextOffer')}</Notice> : null}
+      {accessFailed ? (
+        <span className="action-bar">
+          <span className="muted u-fs-12">{t('accessCheckFailed')}</span>
+          <Button variant="quiet" size="sm" onClick={retryAccess}>{t('common:retry')}</Button>
+        </span>
+      ) : null}
+      {canWrite ? (
       <form className="action-bar" onSubmit={(e) => { e.preventDefault(); void add(); }}>
-        <input value={taskTitle} onChange={(e) => setTaskTitle(e.target.value)} placeholder={t('dealTaskTitlePlaceholder')} aria-label={t('dealTaskTitlePlaceholder')} />
+        <input ref={titleRef} value={taskTitle} onChange={(e) => setTaskTitle(e.target.value)} placeholder={t('dealTaskTitlePlaceholder')} aria-label={t('dealTaskTitlePlaceholder')}
+          {...(showOffer ? { 'aria-describedby': `next-offer-${dealId}` } : {})} />
         <input type="date" value={taskDue} onChange={(e) => setTaskDue(e.target.value)} aria-label={t('fieldDueDate')} />
         <Button variant="secondary" size="sm" type="submit" disabled={busy || !taskTitle.trim()}>{t('addTask')}</Button>
       </form>
+      ) : null}
     </div>
   );
 }

@@ -25,8 +25,11 @@
  * @see src/host/schedulingService.ts — the process-local host-ext precedent
  */
 
+import type { HandoffRecordV1 } from './handoff/handoffRecord.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { DurableCollection, publishHostExtEvent, subscribeHostExtEvent } from './hostExtPersistence.js';
+import { onWorkflowForked } from './workflowsRegistry.js';
+import { casRepoint } from './forkRepoint.js';
 import type { Subject } from './subject.js';
 import { registerSubjectEraser } from './subjectErasure.js';
 import { createLogger } from '../observability/logger.js';
@@ -89,6 +92,13 @@ export interface KanbanCard {
   workflowId?: string;
   /** Set to the runId of the most recent run this card triggered. */
   lastRunId?: string;
+  /** ADR 0774 D3 — the state of `lastRunId`, durable on the card so it survives
+   *  the run row's retention. `running` is written ONLY by the work loop's own
+   *  pick claim and approved-proposal dispatch (the proof reconcile needs before
+   *  it restores a card whose run row is gone); terminal values are stamped by
+   *  the run-terminal seam, guarded on `lastRunId`. Internal: the public card
+   *  PATCH never accepts it. */
+  lastRunStatus?: KanbanCardRunStatus;
   /** Where this task came from (drives the source chip). Defaults to `human`. */
   source?: KanbanCardSource;
   /** Free-text source detail, e.g. the Discord command or the agent name. */
@@ -105,6 +115,15 @@ export interface KanbanCard {
   createdBy?: string;
   /** Why this task is assigned to the board's agent — the "why Sally?" answer. */
   assignmentReason?: string;
+  /** ADR 0829 P4 — the structured handoff note the assigner wrote when they
+   *  handed this card to its current assignee (normalized, `producedBy: 'human'`).
+   *  Replaced or cleared on every (re)assignment, so it always describes the
+   *  CURRENT handoff. Erased by the DSAR eraser like the card's other free text. */
+  handoff?: HandoffRecordV1;
+  /** ADR 0829 P4 — who wrote `handoff` (the assigning caller's subject). */
+  handoffBy?: string;
+  /** ADR 0829 P4 — when `handoff` was written. */
+  handoffAt?: string;
   /** Free-text note describing what's blocking the task (a lightweight blocker;
    *  not a dependency graph). Surfaced as a "Blocked" chip. */
   blockerNote?: string;
@@ -136,6 +155,8 @@ export interface KanbanCard {
   createdAt: string;
   updatedAt: string;
 }
+
+export type KanbanCardRunStatus = 'running' | 'completed' | 'failed' | 'cancelled';
 
 export interface KanbanBoard {
   id: string;
@@ -251,6 +272,12 @@ export interface KanbanWorkItem {
   version: number;
   createdAt: string;
   updatedAt: string;
+  /** ADR 0832 D3 — the person whose run materialized this item (its acting user,
+   *  else its org-scope subject). The daemon's delivery stamps it as the run's
+   *  `orgScopeSubject`, so an auto-dispatched item is bounded by its requester's
+   *  orgs. Narrows only. Not part of the work identity (a retry by another
+   *  person is the same work) and not projected. */
+  requestedBy?: string;
 }
 
 /**
@@ -437,6 +464,9 @@ export interface MaterializeKanbanWorkItemsCommand {
    * deterministic aggregate/event ids, never a process-local cache. */
   idempotencyKey: string;
   dryRun?: boolean;
+  /** ADR 0832 D3 — see `KanbanWorkItem.requestedBy`. Set by the host surface from
+   *  the run scope, never from node args. */
+  requestedBy?: string;
 }
 
 /** The set of editable card fields. A combined content + lane mutation is one
@@ -449,6 +479,8 @@ export interface KanbanCardPatch {
   /** Internal lifecycle projection; public card PATCH deliberately does not
    * accept this field. Normal run delivery records it through the same CAS. */
   lastRunId?: string;
+  /** ADR 0774 D3 — internal, like `lastRunId`; `null` clears it. */
+  lastRunStatus?: KanbanCardRunStatus | null;
   source?: KanbanCardSource;
   sourceLabel?: string;
   priority?: 'low' | 'normal' | 'high';
@@ -458,6 +490,10 @@ export interface KanbanCardPatch {
   blockerNote?: string;
   assigneeId?: string | null;
   assigneeRole?: string | null;
+  /** ADR 0829 P4 — `null` clears the handoff note and its author/time. */
+  handoff?: HandoffRecordV1 | null;
+  handoffBy?: string;
+  handoffAt?: string;
   estimateHours?: number;
   labels?: string[];
   dependsOn?: string[];
@@ -477,6 +513,10 @@ export interface PatchKanbanCardCommand {
    * At most one anchor may be supplied; omission appends in the destination. */
   beforeCardId?: string;
   afterCardId?: string;
+  /** ADR 0774 D2/D4 — an INTERNAL guard evaluated on the fresh read inside the
+   *  CAS loop: false ⇒ `kanban_card_precondition_failed`, nothing written. It is
+   *  a function precisely so no route can build one from request input. */
+  precondition?: (card: KanbanCard, board: KanbanBoard) => boolean;
 }
 
 export type KanbanBoardCommand = MaterializeKanbanWorkItemsCommand | PatchKanbanCardCommand;
@@ -520,6 +560,34 @@ export function isTerminalColumn(board: KanbanBoard, columnId: string): boolean 
   const hay = `${column.id} ${column.name}`.toLowerCase();
   if (DONE_HINTS.some((h) => hay.includes(h))) return true;
   return board.columns.length > 0 && board.columns[board.columns.length - 1].id === columnId;
+}
+
+/** ADR 0774 D1 — the canonical column → lane classification, the server twin of
+ *  the SPA's `kanban/laneKind.ts` (BLD-8). Before this, four backend call sites
+ *  each looked for a lane named exactly `working` while `DEFAULT_COLUMNS` (and so
+ *  every add-todo, career and user-created board) calls it `doing` — the SPA
+ *  already treated both as the working lane, the server did not. Keep the rules
+ *  identical to the SPA's; both sides pin the same case table in a test. */
+export type KanbanLaneKind = 'todo' | 'working' | 'waiting' | 'done';
+
+export function columnLaneKind(col: { id: string; name: string }): KanbanLaneKind | null {
+  const id = col.id.toLowerCase();
+  const name = col.name.toLowerCase();
+  if (id === 'todo' || name === 'to do') return 'todo';
+  if (id === 'working' || id === 'doing' || id === 'in-progress' || name === 'working' || name === 'doing' || name === 'in progress') return 'working';
+  if (id === 'waiting' || name.startsWith('waiting')) return 'waiting';
+  if (id === 'done' || name === 'done') return 'done';
+  return null;
+}
+
+/** The lane the work loop picks FROM (and restores to). */
+export function todoColumnOf(board: KanbanBoard): KanbanColumn | undefined {
+  return board.columns.find((c) => columnLaneKind(c) === 'todo');
+}
+
+/** The lane a pick moves INTO — the "started" lane, by kind not by literal name. */
+export function workingColumnOf(board: KanbanBoard): KanbanColumn | undefined {
+  return board.columns.find((c) => columnLaneKind(c) === 'working');
 }
 
 const boards = new DurableCollection<KanbanBoard>('kanban:board', (b) => b.id);
@@ -1219,6 +1287,7 @@ export async function applyBoardCommand(
     version: 1,
     createdAt: now,
     updatedAt: now,
+    ...(command.requestedBy ? { requestedBy: command.requestedBy } : {}),
   } satisfies KanbanWorkItem));
   const projectedCards = prepared.map(({ proposal, cardId, workItemId, dependencyIds }) => ({
     id: cardId,
@@ -1292,6 +1361,8 @@ function applyKanbanCardPatch(card: KanbanCard, patch: KanbanCardPatch): KanbanC
   if (patch.description !== undefined) next.description = patch.description;
   if (patch.workflowId !== undefined) next.workflowId = patch.workflowId;
   if (patch.lastRunId !== undefined) next.lastRunId = patch.lastRunId;
+  if (patch.lastRunStatus === null) delete next.lastRunStatus;
+  else if (patch.lastRunStatus !== undefined) next.lastRunStatus = patch.lastRunStatus;
   if (patch.source !== undefined) next.source = patch.source;
   if (patch.sourceLabel !== undefined) next.sourceLabel = patch.sourceLabel;
   if (patch.priority !== undefined) next.priority = patch.priority;
@@ -1303,6 +1374,12 @@ function applyKanbanCardPatch(card: KanbanCard, patch: KanbanCardPatch): KanbanC
   else if (patch.assigneeId !== undefined) next.assigneeId = patch.assigneeId;
   if (patch.assigneeRole === null) delete next.assigneeRole;
   else if (patch.assigneeRole !== undefined) next.assigneeRole = patch.assigneeRole;
+  if (patch.handoff === null) { delete next.handoff; delete next.handoffBy; delete next.handoffAt; }
+  else if (patch.handoff !== undefined) {
+    next.handoff = patch.handoff;
+    if (patch.handoffBy !== undefined) next.handoffBy = patch.handoffBy;
+    if (patch.handoffAt !== undefined) next.handoffAt = patch.handoffAt;
+  }
   if (patch.estimateHours !== undefined) next.estimateHours = patch.estimateHours;
   if (patch.labels !== undefined) next.labels = patch.labels;
   if (patch.dependsOn !== undefined) next.dependsOn = patch.dependsOn;
@@ -1331,6 +1408,9 @@ async function applyKanbanCardPatchCommand(command: PatchKanbanCardCommand): Pro
     const [board, card] = await Promise.all([boards.get(command.boardId), cards.get(command.cardId)]);
     if (!board || board.tenantId !== command.tenantId || !card || card.boardId !== board.id) {
       throw boardCommandError('kanban_card_not_found', 'Card does not exist on this board in this tenant.');
+    }
+    if (command.precondition && !command.precondition(card, board)) {
+      throw boardCommandError('kanban_card_precondition_failed', 'The card is no longer in the state this change requires.');
     }
     const targetColumnId = command.columnId ?? card.columnId;
     const destination = board.columns.find((column) => column.id === targetColumnId);
@@ -1908,9 +1988,138 @@ export async function deleteCard(cardId: string): Promise<boolean> {
   return deleted;
 }
 
-/** Record the run a card triggered (set by the route after starting it). */
-export async function setCardLastRun(cardId: string, runId: string): Promise<void> {
-  await updateCardFields(cardId, { lastRunId: runId });
+/** Record the run a card triggered (set by the route after starting it). A new
+ *  run id clears any status the previous run left, so the card never shows the
+ *  old run's outcome against the new run (ADR 0774 D3). Only the loop's own
+ *  dispatch passes `'running'` — the human trigger lane leaves it null. */
+export async function setCardLastRun(
+  cardId: string,
+  runId: string,
+  status: KanbanCardRunStatus | null = null,
+): Promise<void> {
+  await updateCardFields(cardId, { lastRunId: runId, lastRunStatus: status });
+}
+
+/** ADR 0774 D2 — the deterministic run id of the work loop's pick of `card` at
+ *  `version` (and its birth — see below). The claim consumes the version, so a re-presented pick resolves to
+ *  the SAME run (`startWorkflowRun({ runId })`), never a second one, and any
+ *  later pick (after a restore or a compensation, each of which bumps the
+ *  version) gets a fresh id. */
+export function pickRunIdFor(card: Pick<KanbanCard, 'id' | 'version' | 'createdAt'>): string {
+  // `createdAt` is in the key because card ids are NOT unique over time: an
+  // add-todo or KickTodo card deleted and re-filed comes back under the same
+  // deterministic id at version 1, and without it would re-present the OLD
+  // card's run id — adopting a finished run instead of starting new work
+  // (grade-code KSCD-2).
+  const key = createHash('sha256').update(`${card.id}\u0000${card.createdAt}\u0000${card.version ?? 0}`).digest('hex').slice(0, 32);
+  return `kanban-pick-run-${key}`;
+}
+
+function isPreconditionFailure(err: unknown): boolean {
+  return (err as { code?: unknown } | null)?.code === 'kanban_card_precondition_failed';
+}
+
+/**
+ * ADR 0774 D2 — atomically claim a To Do card for a work-loop run. One CAS moves
+ * the card into the working lane and stamps `lastRunId` + `lastRunStatus:
+ * 'running'`, but only if the card is STILL in `fromColumnId` at the version the
+ * pass saw. Returns the claimed card, or null when another pass (or a human) got
+ * there first. The caller starts the run with `claimed.lastRunId`.
+ */
+export async function claimCardForRun(input: {
+  card: KanbanCard;
+  boardId: string;
+  tenantId: string;
+  fromColumnId: string;
+  toColumnId: string;
+}): Promise<KanbanCard | null> {
+  const seenVersion = input.card.version ?? 0;
+  const runId = pickRunIdFor(input.card);
+  try {
+    const { card } = await applyBoardCommand({
+      type: 'card.patch',
+      tenantId: input.tenantId,
+      boardId: input.boardId,
+      cardId: input.card.id,
+      columnId: input.toColumnId,
+      patch: { lastRunId: runId, lastRunStatus: 'running' },
+      precondition: (fresh) => fresh.columnId === input.fromColumnId && (fresh.version ?? 0) === seenVersion,
+    });
+    return card;
+  } catch (err) {
+    if (isPreconditionFailure(err)) return null;
+    throw err;
+  }
+}
+
+/**
+ * ADR 0774 D2 — hand a claimed card back to To Do: a claim whose run never
+ * started, or (grade-code KSCD-1) a recovery restore. Guarded on the FRESH card
+ * still carrying THIS run id AND still sitting in the working lane, so a human
+ * who moved it meanwhile, or a newer pick, wins. A restore that checked a
+ * snapshot and then moved unconditionally could yank a card another pass had
+ * just re-claimed and cause a second run. Returns whether it moved.
+ */
+export async function releaseCardClaim(input: {
+  cardId: string;
+  boardId: string;
+  tenantId: string;
+  runId: string;
+  workingColumnId: string;
+  toColumnId: string;
+  /** The status the released card keeps (a restore records the run's outcome);
+   *  default clears it. */
+  lastRunStatus?: KanbanCardRunStatus | null;
+  /** Written in the SAME CAS as the move (a restore's reason note). */
+  blockerNote?: string;
+}): Promise<boolean> {
+  try {
+    await applyBoardCommand({
+      type: 'card.patch',
+      tenantId: input.tenantId,
+      boardId: input.boardId,
+      cardId: input.cardId,
+      columnId: input.toColumnId,
+      patch: {
+        lastRunStatus: input.lastRunStatus ?? null,
+        ...(input.blockerNote !== undefined ? { blockerNote: input.blockerNote } : {}),
+      },
+      precondition: (fresh) => fresh.lastRunId === input.runId && fresh.columnId === input.workingColumnId,
+    });
+    return true;
+  } catch (err) {
+    if (isPreconditionFailure(err)) return false;
+    throw err;
+  }
+}
+
+/**
+ * ADR 0774 D3 — stamp a run's state onto the card it belongs to, only while the
+ * card still points at that run (a newer pick is never overwritten). Returns
+ * whether it wrote.
+ */
+export async function recordCardRunStatus(
+  cardId: string,
+  runId: string,
+  status: KanbanCardRunStatus,
+): Promise<boolean> {
+  const card = await cards.get(cardId);
+  const board = card ? await boards.get(card.boardId) : null;
+  if (!card || !board || card.lastRunId !== runId || card.lastRunStatus === status) return false;
+  try {
+    await applyBoardCommand({
+      type: 'card.patch',
+      tenantId: board.tenantId,
+      boardId: board.id,
+      cardId,
+      patch: { lastRunStatus: status },
+      precondition: (fresh) => fresh.lastRunId === runId,
+    });
+    return true;
+  } catch (err) {
+    if (isPreconditionFailure(err)) return false;
+    throw err;
+  }
 }
 
 /**
@@ -1997,6 +2206,19 @@ export async function eraseSubjectKanban(tenantId: string, subjectKey: string): 
     if (!boardIds.has(card.boardId)) continue; // cross-tenant / orphaned — never touch
     const mine = (card.assigneeId !== undefined && forms.has(card.assigneeId))
       || (card.createdBy !== undefined && forms.has(card.createdBy));
+    // ADR 0829 P4 — a handoff note is the ASSIGNER's free text, and its decisions
+    // can name other people. The assigner may be neither creator nor assignee, so
+    // the note is checked on its own: erased when the subject wrote it, is named in
+    // it, or the card is otherwise theirs.
+    const noteTouches = card.handoff !== undefined && (
+      (card.handoffBy !== undefined && forms.has(card.handoffBy))
+      || card.handoff.decisions.some((d) => d.decidedBy !== undefined && forms.has(d.decidedBy)));
+    if (!mine && noteTouches) {
+      const next: KanbanCard = { ...card, updatedAt: nowIso() };
+      delete next.handoff; delete next.handoffBy; delete next.handoffAt;
+      await cards.put(next);
+      continue;
+    }
     if (!mine) continue;
     const next: KanbanCard = { ...card, title: ERASED, updatedAt: nowIso() };
     if (next.assigneeId !== undefined && forms.has(next.assigneeId)) next.assigneeId = ERASED;
@@ -2004,6 +2226,7 @@ export async function eraseSubjectKanban(tenantId: string, subjectKey: string): 
     if (next.description !== undefined) next.description = ERASED;
     if (next.assignmentReason !== undefined) next.assignmentReason = ERASED;
     if (next.blockerNote !== undefined) next.blockerNote = ERASED;
+    if (next.handoff !== undefined) { delete next.handoff; delete next.handoffBy; delete next.handoffAt; } // ADR 0829 P4
     await cards.put(next);
   }
 }
@@ -2024,3 +2247,26 @@ export async function __resetKanbanStore(): Promise<void> {
   await workItemRunIndex.__clear();
   await operationReceipts.__clear();
 }
+
+// ADR 0789 — this tenant's board references to a SHARED workflow follow its fork:
+// a column's trigger, a card's bound workflow, and a work item that has not
+// started (an item already running or finished keeps the id it ran — history).
+onWorkflowForked('kanban', async (tenantId, from, to) => {
+  let n = 0;
+  for (const board of await listBoards(tenantId)) {
+    if (board.columns.some((c) => c.triggerWorkflowId === from)) {
+      if (await casRepoint(boards, board.id, (b) => (b.columns.some((c) => c.triggerWorkflowId === from)
+        ? { ...b, columns: b.columns.map((c) => (c.triggerWorkflowId === from ? { ...c, triggerWorkflowId: to } : c)) }
+        : null))) n += 1;
+    }
+    for (const card of await listCards(board.id)) {
+      if (card.workflowId !== from) continue;
+      if (await casRepoint(cards, card.id, (c) => (c.workflowId === from ? { ...c, workflowId: to } : null))) n += 1;
+    }
+  }
+  for (const item of await workItems.listForTenantIndexed(tenantId)) {
+    if (item.workflowId !== from || item.execution.status !== 'idle') continue;
+    if (await casRepoint(workItems, item.workItemId, (w) => (w.workflowId === from && w.execution.status === 'idle' ? { ...w, workflowId: to } : null))) n += 1;
+  }
+  return n;
+});

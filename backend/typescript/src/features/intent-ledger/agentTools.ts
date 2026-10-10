@@ -32,6 +32,7 @@ function toolError(error: string, message: string): { content: string; isError: 
 export function registerIntentLedgerAgentTools(): void {
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     // ADR 0604 review H4 — the WORST-POLARITY member of this class. The payload
     // carries the mission contract's `allowed` AND `forbidden` tool-id arrays;
     // under `lossy` a `forbidden` list of five or more truncates, so a
@@ -91,6 +92,7 @@ export function registerIntentLedgerAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: INTENT_LEDGER_DRAFT_TOOL_ID,
       description:

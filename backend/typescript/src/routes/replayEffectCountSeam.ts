@@ -46,8 +46,8 @@ const log = createLogger('routes.replay-effect-count-seam');
 /** The product (host-namespaced) + spec-canonical (suite-driven) paths, the
  *  same dual-mount posture as the RFC 0095/0118/0122 seams. */
 const SEAM_PATHS = [
-  '/v1/host/openwop-app/replay/effect-count',
-  '/v1/host/sample/replay/effect-count',
+  '/host/openwop-app/replay/effect-count',
+  '/host/sample/replay/effect-count',
 ] as const;
 
 function handleEffectCount(req: Request, res: Response): void {

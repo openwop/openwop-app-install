@@ -3,7 +3,11 @@
  * patterns → "you've done this N times, make it a workflow?" suggestions; accepting hands
  * the candidate to the ADR 0072 workflow-author draft. A read-only projection over the
  * run store (no new run model; the sweep rides the existing scheduler daemon, no new
- * queue). Privacy-sensitive → an `ambient-work-graph` toggle, OFF by default, per tenant.
+ * queue). Privacy-sensitive: the continuous sweep stays env-gated (see below).
+ *
+ * ALWAYS-ON (ADR 0820 §8.6 / core-audit M8 correction): the `ambient-work-graph` toggle this header
+ * used to describe was removed when the feature graduated (ADR 0134 / 2026-06-24);
+ * there is no per-tenant switch. Gating is RBAC and visibility only.
  *
  * Phase 1 = the pure signature + clustering. Phase 2 = the suggestion store + the
  * scheduler sweep. Phase 3 = REST (accept → workflow-author). Phase 4 = FE.

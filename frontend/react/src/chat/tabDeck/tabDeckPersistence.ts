@@ -24,7 +24,8 @@ function isDeckTab(x: unknown): x is DeckTab {
   return typeof t.sessionId === 'string' && t.sessionId.length > 0
     && typeof t.pinned === 'boolean'
     && typeof t.lastActiveSeq === 'number' && Number.isFinite(t.lastActiveSeq) && t.lastActiveSeq >= 0
-    && (t.lastTitle === undefined || typeof t.lastTitle === 'string');
+    && (t.lastTitle === undefined || typeof t.lastTitle === 'string')
+    && (t.kind === undefined || (typeof t.kind === 'string' && /^[a-z][a-z0-9-]{0,31}$/.test(t.kind)));
 }
 
 /**
@@ -46,7 +47,7 @@ export function sanitizeTabDeck(raw: unknown, subject: string): TabDeckState | n
   for (const t of s.tabs) {
     if (!isDeckTab(t) || seen.has(t.sessionId)) continue;
     seen.add(t.sessionId);
-    tabs.push({ sessionId: t.sessionId, pinned: t.pinned, lastActiveSeq: t.lastActiveSeq, ...(t.lastTitle !== undefined ? { lastTitle: t.lastTitle } : {}) });
+    tabs.push({ sessionId: t.sessionId, pinned: t.pinned, lastActiveSeq: t.lastActiveSeq, ...(t.lastTitle !== undefined ? { lastTitle: t.lastTitle } : {}), ...(t.kind !== undefined ? { kind: t.kind } : {}) });
   }
   // Clamp to the hard ceiling: keep pinned first, then most-recent by seq. Loud (no
   // silent truncation) — outside React, a dev console.warn is the parallel to the

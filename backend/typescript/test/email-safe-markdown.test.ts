@@ -1,6 +1,12 @@
 /**
  * ADR 0256 — safe Markdown → HTML renderer. The security core: escape-first, a
  * fixed safe tag set, scheme-allowlisted hrefs. These tests are the XSS gate.
+ *
+ * Sabotage-witnessed (grade-tests w9), one per case: un-escaping `<`, widening the
+ * href scheme to any `[a-z]+:`, un-escaping `"`, renaming `<strong>`, dropping the
+ * bare-URL alternation, re-linkifying an anchor on placeholder restore (nested anchor),
+ * restoring anchors inline instead of via NUL placeholders (GC-2), and an unescaped
+ * pixel `src` each red the case that names them.
  */
 import { describe, it, expect } from 'vitest';
 import { renderMarkdownPreview, renderMarkdownBody } from '../src/features/email/safeMarkdown.js';
@@ -45,8 +51,8 @@ describe('ADR 0256 — safe markdown XSS gate', () => {
   });
 
   it('autolinks bare host-owned URLs (the unsubscribe/preferences lines) exactly once', () => {
-    const h = renderMarkdownPreview('Body.\n\n--\nUnsubscribe: https://app.example/v1/host/openwop-app/public-email/u/TOKEN');
-    expect(h).toContain('<a href="https://app.example/v1/host/openwop-app/public-email/u/TOKEN"');
+    const h = renderMarkdownPreview('Body.\n\n--\nUnsubscribe: https://app.example/host/openwop-app/public-email/u/TOKEN');
+    expect(h).toContain('<a href="https://app.example/host/openwop-app/public-email/u/TOKEN"');
     // exactly one anchor for that URL (no double-wrap from the link/URL alternation).
     expect(h.match(/<a href="https:\/\/app\.example[^"]*TOKEN"/g)?.length).toBe(1);
   });

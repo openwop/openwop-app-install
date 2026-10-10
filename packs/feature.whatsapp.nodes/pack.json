@@ -1,11 +1,12 @@
 {
   "name": "feature.whatsapp.nodes",
-  "version": "1.0.0",
+  "version": "1.0.1",
+  "kind": "node",
   "description": "WhatsApp BSP feature node pack (ADR 0394) — the governed whatsapp.send node over the ctx.features.whatsapp surface. Every compliance gate (explicit per-number opt-in, the 24h customer-service window, template-vs-session discipline, fork-stable idempotency) lives in the host service the surface fronts; the node is a thin, typed-failure caller. Side-effectful: a replay-mode fork reproduces the recorded outcome, never a second paid send.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "whatsapp", "messaging", "bsp", "twilio"],
-  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "engines": { "openwop": ">=1.0.0 <3.0.0" },
   "nodes": [
     {
       "typeId": "feature.whatsapp.nodes.send",

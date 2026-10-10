@@ -54,18 +54,18 @@ function client() {
 }
 async function shopOwner(): Promise<{ owner: ReturnType<typeof client>; orgId: string; tenantId: string }> {
   const owner = client();
-  const r = await owner.post('/v1/host/openwop-app/test/login', { email: `pc-${Date.now()}-${n++}@acme.test` });
+  const r = await owner.post('/host/openwop-app/test/login', { email: `pc-${Date.now()}-${n++}@acme.test` });
   const tenantId: string = r.body.user?.tenantId ?? '';
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Shop' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Shop' });
   return { owner, orgId: org.body.orgId, tenantId };
 }
-const c = (orgId: string, suffix = ''): string => `/v1/host/openwop-app/commerce/orgs/${encodeURIComponent(orgId)}${suffix}`;
-const pub = (orgId: string, suffix = ''): string => `/v1/host/openwop-app/public-store/${encodeURIComponent(orgId)}${suffix}`;
+const c = (orgId: string, suffix = ''): string => `/host/openwop-app/commerce/orgs/${encodeURIComponent(orgId)}${suffix}`;
+const pub = (orgId: string, suffix = ''): string => `/host/openwop-app/public-store/${encodeURIComponent(orgId)}${suffix}`;
 
 describe('C4 — price lists + explainable resolution', () => {
   it('resolves contract > variant > default with priority and currency discipline; orders carry priceSource', async () => {
     const { owner, orgId } = await shopOwner();
-    const contact = await owner.post('/v1/host/openwop-app/crm/contacts', { name: 'Acct Buyer', email: `b-${n++}@x.test` });
+    const contact = await owner.post('/host/openwop-app/crm/contacts', { name: 'Acct Buyer', email: `b-${n++}@x.test` });
     const contactId: string = contact.body.contactId;
     const p = await owner.post(c(orgId, '/products'), { type: 'physical', name: 'Widget', price: 100, currency: 'USD', inventory: 20, variants: [{ name: 'Blue', sku: 'W-B', price: 95 }] });
     const productId: string = p.body.productId;
@@ -144,7 +144,7 @@ describe('C5 — reservations + the stock ledger', () => {
 describe('C3 — quote-to-order', () => {
   it('drafts with negotiated overrides, revises with pinned revisions, sends, and converts at snapshot prices via the public share link', async () => {
     const { owner, orgId, tenantId } = await shopOwner();
-    const contact = await owner.post('/v1/host/openwop-app/crm/contacts', { name: 'Q Buyer', email: `q-${n++}@x.test` });
+    const contact = await owner.post('/host/openwop-app/crm/contacts', { name: 'Q Buyer', email: `q-${n++}@x.test` });
     const p = await owner.post(c(orgId, '/products'), { type: 'service', name: 'Workshop', price: 75, currency: 'USD' });
     const productId: string = p.body.productId;
 

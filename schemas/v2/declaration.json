@@ -206,7 +206,7 @@
     {
       "key": "limits",
       "kind": "family",
-      "normativeText": ["spec/v2/core/runs.md", "spec/v1/capabilities.md", "spec/v1/budget-policy.md"],
+      "normativeText": ["spec/v2/core/runs.md"],
       "anchor": "core",
       "section": "core/capabilities.md#limits",
       "peerDependencyId": "limits",
@@ -269,7 +269,7 @@
     {
       "key": "envelopes",
       "kind": "family",
-      "normativeText": ["spec/v1/ai-envelope.md", "spec/v2/core/events.md"],
+      "normativeText": ["spec/v2/core/events.md"],
       "anchor": "core",
       "section": "core/capabilities.md#envelopes",
       "peerDependencyId": "envelopes",
@@ -290,7 +290,7 @@
     {
       "key": "prompts",
       "kind": "family",
-      "normativeText": ["spec/v1/prompts.md", "spec/v1/capabilities.md"],
+      "normativeText": ["spec/v2/core/host-services.md"],
       "anchor": "core",
       "section": "core/capabilities.md#prompts",
       "peerDependencyId": "prompts",
@@ -343,7 +343,7 @@
     {
       "key": "secrets",
       "kind": "family",
-      "normativeText": ["spec/v1/host-capabilities.md"],
+      "normativeText": ["spec/v2/core/host-services.md"],
       "anchor": "core",
       "section": "core/capabilities.md#secrets",
       "peerDependencyId": "secrets",
@@ -355,10 +355,16 @@
       "facets": [
         "scopes",
         "resolution",
-        "resolveInPack"
+        "resolveInPack",
+        "runSecrets"
       ],
       "floorScenarios": [],
-      "requirementIds": [],
+      "requirementIds": [
+        "openwop.requirement.secrets.run-witness-resolves",
+        "openwop.requirement.secrets.run-witness-redacted",
+        "openwop.requirement.secrets.run-witness-scope-bound",
+        "openwop.requirement.secrets.run-secrets-outside-request-digest"
+      ],
       "owningRfc": null,
       "note": "resolveInPack (RFC 0112-era pack peer dependency) is a declared facet"
     },
@@ -374,11 +380,13 @@
         "adoption": "none"
       },
       "facets": [
-        "packsSupported"
+        "packsSupported",
+        "providerRead"
       ],
       "floorScenarios": [],
       "requirementIds": [],
       "owningRfc": "0095",
+      "facetsFrom": "spec/v2/facets/connections.schema.json",
       "normativeText": [
         "spec/v2/core/connection-packs.md"
       ]
@@ -386,7 +394,7 @@
     {
       "key": "selfHostedRunner",
       "kind": "family",
-      "normativeText": ["spec/v1/capabilities.md"],
+      "normativeText": ["spec/v2/core/execution.md"],
       "anchor": "core",
       "section": "core/capabilities.md#selfHostedRunner",
       "peerDependencyId": "selfHostedRunner",
@@ -443,7 +451,7 @@
     {
       "key": "anonymousActor",
       "kind": "family",
-      "normativeText": ["spec/v1/capabilities.md"],
+      "normativeText": ["spec/v2/core/identity.md"],
       "anchor": "core",
       "section": "core/capabilities.md#anonymousActor",
       "peerDependencyId": "anonymousActor",
@@ -486,7 +494,7 @@
     {
       "key": "feedback",
       "kind": "family",
-      "normativeText": ["spec/v1/observability.md", "spec/v2/core/events.md"],
+      "normativeText": ["spec/v2/core/events.md"],
       "anchor": "core",
       "section": "core/capabilities.md#feedback",
       "peerDependencyId": "feedback",
@@ -625,7 +633,7 @@
     {
       "key": "multiAgent",
       "kind": "family",
-      "normativeText": ["spec/v1/multi-agent-execution.md"],
+      "normativeText": ["spec/v2/core/execution.md"],
       "anchor": "core",
       "section": "core/capabilities.md#multiAgent",
       "peerDependencyId": "multiAgent",
@@ -645,7 +653,7 @@
     {
       "key": "modelCapabilities",
       "kind": "family",
-      "normativeText": ["spec/v1/host-capabilities.md"],
+      "normativeText": ["spec/v2/core/host-services.md"],
       "anchor": "core",
       "section": "core/capabilities.md#modelCapabilities",
       "peerDependencyId": "modelCapabilities",
@@ -665,7 +673,7 @@
     {
       "key": "providerUsage",
       "kind": "family",
-      "normativeText": ["spec/v1/observability.md", "spec/v2/core/events.md"],
+      "normativeText": ["spec/v2/core/events.md"],
       "anchor": "core",
       "section": "core/capabilities.md#providerUsage",
       "peerDependencyId": "providerUsage",
@@ -685,7 +693,7 @@
     {
       "key": "aiProviders",
       "kind": "family",
-      "normativeText": ["spec/v1/host-capabilities.md", "spec/v1/capabilities.md", "spec/v1/ai-envelope.md"],
+      "normativeText": ["spec/v2/core/host-services.md"],
       "anchor": "core",
       "section": "core/capabilities.md#aiProviders",
       "peerDependencyId": "aiProviders",
@@ -717,7 +725,7 @@
     {
       "key": "agents",
       "kind": "family",
-      "normativeText": ["spec/v1/multi-agent-execution.md", "spec/v1/agent-memory.md", "spec/v1/agent-runtime.md", "spec/v1/agent-org-chart.md", "spec/v1/agent-evaluation.md", "spec/v1/capabilities.md"],
+      "normativeText": ["spec/v2/core/execution.md", "spec/v2/facets/agents.schema.json", "schemas/v2/run-event-payloads.schema.json"],
       "anchor": "core",
       "section": "core/capabilities.md#agents",
       "peerDependencyId": "agents",
@@ -755,7 +763,7 @@
     {
       "key": "memory",
       "kind": "family",
-      "normativeText": ["spec/v1/agent-memory.md", "spec/v1/capabilities.md"],
+      "normativeText": ["spec/v2/core/host-services.md"],
       "anchor": "core",
       "section": "core/capabilities.md#memory",
       "peerDependencyId": "memory",
@@ -800,7 +808,7 @@
     {
       "key": "subWorkflow",
       "kind": "family",
-      "normativeText": ["spec/v1/node-packs.md"],
+      "normativeText": ["spec/v2/core/execution.md"],
       "anchor": "core",
       "section": "core/capabilities.md#subWorkflow",
       "peerDependencyId": "subWorkflow",
@@ -819,7 +827,7 @@
     {
       "key": "fs",
       "kind": "family",
-      "normativeText": ["spec/v1/host-capabilities.md"],
+      "normativeText": ["spec/v2/core/storage.md"],
       "anchor": "core",
       "section": "core/capabilities.md#fs",
       "peerDependencyId": "fs",
@@ -842,7 +850,7 @@
     {
       "key": "kvStorage",
       "kind": "family",
-      "normativeText": ["spec/v1/host-capabilities.md"],
+      "normativeText": ["spec/v2/core/storage.md"],
       "anchor": "core",
       "section": "core/capabilities.md#kvStorage",
       "peerDependencyId": "kvStorage",
@@ -865,7 +873,7 @@
     {
       "key": "tableStorage",
       "kind": "family",
-      "normativeText": ["spec/v1/host-capabilities.md"],
+      "normativeText": ["spec/v2/core/storage.md"],
       "anchor": "core",
       "section": "core/capabilities.md#tableStorage",
       "peerDependencyId": "tableStorage",
@@ -887,7 +895,7 @@
     {
       "key": "queueBus",
       "kind": "family",
-      "normativeText": ["spec/v1/host-capabilities.md"],
+      "normativeText": ["spec/v2/core/host-services.md"],
       "anchor": "core",
       "section": "core/capabilities.md#queueBus",
       "peerDependencyId": "queueBus",
@@ -908,7 +916,7 @@
     {
       "key": "scheduling",
       "kind": "family",
-      "normativeText": ["spec/v1/host-capabilities.md"],
+      "normativeText": ["spec/v2/core/host-services.md"],
       "anchor": "core",
       "section": "core/capabilities.md#scheduling",
       "peerDependencyId": "scheduling",
@@ -930,7 +938,7 @@
     {
       "key": "heartbeat",
       "kind": "family",
-      "normativeText": ["spec/v2/core/events.md", "spec/v1/host-capabilities.md"],
+      "normativeText": ["spec/v2/core/events.md"],
       "anchor": "core",
       "section": "core/capabilities.md#heartbeat",
       "peerDependencyId": "heartbeat",
@@ -948,6 +956,26 @@
       "requirementIds": [],
       "owningRfc": "0060",
       "facetsFrom": "spec/v2/facets/heartbeat.schema.json"
+    },
+    {
+      "key": "hostEvents",
+      "kind": "family",
+      "normativeText": ["spec/v2/core/events.md"],
+      "anchor": "core",
+      "section": "core/capabilities.md#hostEvents",
+      "peerDependencyId": "hostEvents",
+      "witness": "witnessable-gated",
+      "maturity": {
+        "technical": "experimental",
+        "adoption": "none"
+      },
+      "facets": [
+        "types"
+      ],
+      "floorScenarios": [],
+      "requirementIds": [],
+      "owningRfc": "0236",
+      "facetsFrom": "spec/v2/facets/hostEvents.schema.json"
     },
     {
       "key": "toolHooks",
@@ -969,7 +997,7 @@
       "requirementIds": [],
       "owningRfc": "0064",
       "normativeText": [
-        "spec/v1/host-capabilities.md"
+        "spec/v2/core/host-services.md"
       ]
     },
     {
@@ -998,7 +1026,7 @@
     {
       "key": "httpClient",
       "kind": "family",
-      "normativeText": ["spec/v1/host-capabilities.md"],
+      "normativeText": ["spec/v2/core/host-services.md"],
       "anchor": "core",
       "section": "core/capabilities.md#httpClient",
       "peerDependencyId": "httpClient",
@@ -1022,7 +1050,7 @@
     {
       "key": "artifactTypes",
       "kind": "family",
-      "normativeText": ["spec/v1/artifact-type-packs.md"],
+      "normativeText": ["spec/v2/core/artifact-type-packs.md", "schemas/v2/artifact-type-pack-manifest.schema.json"],
       "anchor": "core",
       "section": "core/capabilities.md#artifactTypes",
       "peerDependencyId": "artifactTypes",
@@ -1118,7 +1146,7 @@
     {
       "key": "deadLetter",
       "kind": "family",
-      "normativeText": ["spec/v1/host-capabilities.md"],
+      "normativeText": ["spec/v2/core/runs.md"],
       "anchor": "core",
       "section": "core/capabilities.md#deadLetter",
       "peerDependencyId": "deadLetter",
@@ -1162,7 +1190,7 @@
     {
       "key": "triggerBridge",
       "kind": "family",
-      "normativeText": ["spec/v1/trigger-bridge.md"],
+      "normativeText": ["spec/v2/core/webhooks.md"],
       "anchor": "core",
       "section": "core/capabilities.md#triggerBridge",
       "peerDependencyId": "triggerBridge",
@@ -1176,7 +1204,8 @@
         "dedup",
         "retryPolicy",
         "sources",
-        "ingestion"
+        "ingestion",
+        "deadLetter"
       ],
       "floorScenarios": [],
       "requirementIds": [],
@@ -1214,7 +1243,7 @@
     {
       "key": "budget",
       "kind": "family",
-      "normativeText": ["spec/v1/budget-policy.md"],
+      "normativeText": ["spec/v2/core/runs.md", "schemas/v2/budget-policy.schema.json"],
       "anchor": "core",
       "section": "core/capabilities.md#budget",
       "peerDependencyId": "budget",
@@ -1226,10 +1255,14 @@
       "facets": [
         "dimensions",
         "enforce",
+        "onExhaustion",
         "scopes"
       ],
       "floorScenarios": [],
-      "requirementIds": [],
+      "requirementIds": [
+        "openwop.requirement.runs.budget-exhaustion-facet-contains-fail",
+        "openwop.requirement.runs.budget-unserved-exhaustion-refused"
+      ],
       "owningRfc": "0084"
     },
     {
@@ -1239,22 +1272,24 @@
       "anchor": "core",
       "section": "core/capabilities.md#nondeterminismPolicy",
       "peerDependencyId": "nondeterminismPolicy",
-      "witness": "claims-check",
+      "witness": "witnessable-gated",
       "maturity": {
         "technical": "experimental",
         "adoption": "none"
       },
       "facets": [
-        "declared"
+        "declared",
+        "sources"
       ],
       "floorScenarios": [],
       "requirementIds": [],
-      "owningRfc": "0085"
+      "owningRfc": "0085",
+      "facetsFrom": "spec/v2/facets/nondeterminismPolicy.schema.json"
     },
     {
       "key": "workspace",
       "kind": "family",
-      "normativeText": ["spec/v1/agent-workspace.md"],
+      "normativeText": ["spec/v2/core/host-services.md"],
       "anchor": "core",
       "section": "core/capabilities.md#workspace",
       "peerDependencyId": "workspace",
@@ -1276,7 +1311,7 @@
     {
       "key": "uiPlugins",
       "kind": "family",
-      "normativeText": ["spec/v1/frontend-plugin-packs.md"],
+      "normativeText": ["spec/v2/core/packs.md"],
       "anchor": "core",
       "section": "core/capabilities.md#uiPlugins",
       "peerDependencyId": "uiPlugins",
@@ -1289,16 +1324,18 @@
         "isolation",
         "surfaces",
         "hostApi",
-        "maxEntryBytes"
+        "maxEntryBytes",
+        "served"
       ],
       "floorScenarios": [],
       "requirementIds": [],
-      "owningRfc": "0117"
+      "owningRfc": "0117",
+      "facetsFrom": "spec/v2/facets/uiPlugins.schema.json"
     },
     {
       "key": "sql",
       "kind": "family",
-      "normativeText": ["spec/v1/host-capabilities.md"],
+      "normativeText": ["spec/v2/core/storage.md"],
       "anchor": "core",
       "section": "core/capabilities.md#sql",
       "peerDependencyId": "sql",
@@ -1319,7 +1356,7 @@
     {
       "key": "nosql",
       "kind": "family",
-      "normativeText": ["spec/v1/host-capabilities.md"],
+      "normativeText": ["spec/v2/core/storage.md"],
       "anchor": "core",
       "section": "core/capabilities.md#nosql",
       "peerDependencyId": "nosql",
@@ -1339,7 +1376,7 @@
     {
       "key": "vectorStore",
       "kind": "family",
-      "normativeText": ["spec/v1/host-capabilities.md"],
+      "normativeText": ["spec/v2/core/storage.md"],
       "anchor": "core",
       "section": "core/capabilities.md#vectorStore",
       "peerDependencyId": "vectorStore",
@@ -1359,7 +1396,7 @@
     {
       "key": "searchIndex",
       "kind": "family",
-      "normativeText": ["spec/v1/host-capabilities.md"],
+      "normativeText": ["spec/v2/core/storage.md"],
       "anchor": "core",
       "section": "core/capabilities.md#searchIndex",
       "peerDependencyId": "searchIndex",
@@ -1379,7 +1416,7 @@
     {
       "key": "blobStorage",
       "kind": "family",
-      "normativeText": ["spec/v1/host-capabilities.md"],
+      "normativeText": ["spec/v2/core/storage.md"],
       "anchor": "core",
       "section": "core/capabilities.md#blobStorage",
       "peerDependencyId": "blobStorage",
@@ -1400,7 +1437,7 @@
     {
       "key": "cache",
       "kind": "family",
-      "normativeText": ["spec/v1/host-capabilities.md"],
+      "normativeText": ["spec/v2/core/storage.md"],
       "anchor": "core",
       "section": "core/capabilities.md#cache",
       "peerDependencyId": "cache",
@@ -1582,7 +1619,7 @@
     {
       "key": "production",
       "kind": "family",
-      "normativeText": ["spec/v1/production-profile.md"],
+      "normativeText": ["spec/v2/core/conformance.md"],
       "anchor": "core",
       "section": "core/capabilities.md#production",
       "peerDependencyId": "production",
@@ -1622,9 +1659,34 @@
       "facetsFrom": "spec/v2/facets/auth.schema.json"
     },
     {
+      "key": "auditLogIntegrity",
+      "kind": "family",
+      "normativeText": [
+        "spec/v2/core/security-defaults.md"
+      ],
+      "anchor": "core",
+      "section": "core/capabilities.md#auditLogIntegrity",
+      "peerDependencyId": "auditLogIntegrity",
+      "witness": "witnessable-gated",
+      "maturity": {
+        "technical": "experimental",
+        "adoption": "none"
+      },
+      "facets": [
+        "checkpointSignatureAlgorithm",
+        "checkpointPublicKey",
+        "checkpointIntervalEntries",
+        "checkpointIntervalSeconds"
+      ],
+      "floorScenarios": [],
+      "requirementIds": [],
+      "owningRfc": "0224",
+      "facetsFrom": "spec/v2/facets/auditLogIntegrity.schema.json"
+    },
+    {
       "key": "i18n",
       "kind": "family",
-      "normativeText": ["spec/v1/i18n.md"],
+      "normativeText": ["spec/v2/core/i18n.md"],
       "anchor": "core",
       "section": "core/capabilities.md#i18n",
       "peerDependencyId": "i18n",
@@ -1644,7 +1706,7 @@
     {
       "key": "content",
       "kind": "family",
-      "normativeText": ["spec/v1/localized-content.md"],
+      "normativeText": ["spec/v2/core/i18n.md"],
       "anchor": "core",
       "section": "core/capabilities.md#content",
       "peerDependencyId": "content",
@@ -1664,7 +1726,7 @@
     {
       "key": "portability",
       "kind": "family",
-      "normativeText": ["spec/v1/portability.md"],
+      "normativeText": ["spec/v2/core/portability.md"],
       "anchor": "core",
       "section": "core/capabilities.md#portability",
       "peerDependencyId": "portability",
@@ -1734,10 +1796,11 @@
       "anchor": "ext",
       "section": "ext/restTransport/",
       "peerDependencyId": "restTransport",
-      "witness": "claims-check",
+      "extensionName": "rest-transport",
+      "witness": "witnessable-gated",
       "maturity": {
-        "technical": "experimental",
-        "adoption": "none"
+        "technical": "stable",
+        "adoption": "multi-witness"
       },
       "facets": [
         "conditionalRunGet",
@@ -1746,7 +1809,7 @@
       "floorScenarios": [],
       "requirementIds": [],
       "owningRfc": "0115",
-      "reason": "RFC 0169 \u00a7C.5 (claims-check; ext/ unless a behavioral witness lands)"
+      "reason": "RFC 0169 \u00a7C.5 moved it to ext/ as claims-check; RFC 0220 \u00a7C lands the behavioral witness (v2-ext-rest-transport), so the witness is witnessable-gated on the extensions.<org>.rest-transport claim. It stays ext/: becoming core takes its own RFC (ext/README.md)."
     },
     {
       "key": "a2uiSurface",
@@ -1754,7 +1817,8 @@
       "anchor": "ext",
       "section": "ext/a2uiSurface/",
       "peerDependencyId": "a2uiSurface",
-      "witness": "claims-check",
+      "extensionName": "a2ui-surface",
+      "witness": "seam-gated",
       "maturity": {
         "technical": "experimental",
         "adoption": "none"
@@ -1765,7 +1829,7 @@
       "floorScenarios": [],
       "requirementIds": [],
       "owningRfc": "0209",
-      "reason": "RFC 0169 \u00a7C.5 (claims-check; ext/); RFC 0209: the ext README is the v2 contract for `ui.a2ui-surface` schema version 2; facet `deltaTransport` deprecated for v2 (RFC 0197 retirement path)"
+      "reason": "RFC 0169 \u00a7C.5 (ext/); RFC 0220 \u00a7C: the witness is seam-gated (v2-a2ui-v09-surface drives the emit-surface seam; the family row is its family-witness leg); RFC 0209: the ext README is the v2 contract for `ui.a2ui-surface` schema version 2; facet `deltaTransport` deprecated for v2 (RFC 0197 retirement path)"
     },
     {
       "key": "brand",
@@ -1773,9 +1837,10 @@
       "anchor": "ext",
       "section": "ext/brand/",
       "peerDependencyId": "brand",
+      "extensionName": "brand",
       "witness": "claims-check",
       "maturity": {
-        "technical": "experimental",
+        "technical": "stable",
         "adoption": "single-witness"
       },
       "facets": [],
@@ -1790,10 +1855,11 @@
       "anchor": "ext",
       "section": "ext/canvas/",
       "peerDependencyId": "canvas",
+      "extensionName": "canvas",
       "witness": "claims-check",
       "maturity": {
-        "technical": "experimental",
-        "adoption": "single-witness"
+        "technical": "stable",
+        "adoption": "multi-witness"
       },
       "facets": [],
       "floorScenarios": [],
@@ -1807,10 +1873,11 @@
       "anchor": "ext",
       "section": "ext/chat/",
       "peerDependencyId": "chat",
+      "extensionName": "chat",
       "witness": "claims-check",
       "maturity": {
-        "technical": "experimental",
-        "adoption": "single-witness"
+        "technical": "stable",
+        "adoption": "multi-witness"
       },
       "facets": [],
       "floorScenarios": [],
@@ -1824,9 +1891,10 @@
       "anchor": "ext",
       "section": "ext/coordination/",
       "peerDependencyId": "coordination",
+      "extensionName": "coordination",
       "witness": "claims-check",
       "maturity": {
-        "technical": "experimental",
+        "technical": "stable",
         "adoption": "single-witness"
       },
       "facets": [],
@@ -1841,9 +1909,10 @@
       "anchor": "ext",
       "section": "ext/dataIntegration/",
       "peerDependencyId": "dataIntegration",
+      "extensionName": "data-integration",
       "witness": "claims-check",
       "maturity": {
-        "technical": "experimental",
+        "technical": "stable",
         "adoption": "single-witness"
       },
       "facets": [],
@@ -1858,9 +1927,10 @@
       "anchor": "ext",
       "section": "ext/entities/",
       "peerDependencyId": "entities",
+      "extensionName": "entities",
       "witness": "claims-check",
       "maturity": {
-        "technical": "experimental",
+        "technical": "stable",
         "adoption": "single-witness"
       },
       "facets": [],
@@ -1875,10 +1945,11 @@
       "anchor": "ext",
       "section": "ext/kanban/",
       "peerDependencyId": "kanban",
+      "extensionName": "kanban",
       "witness": "claims-check",
       "maturity": {
-        "technical": "experimental",
-        "adoption": "single-witness"
+        "technical": "stable",
+        "adoption": "multi-witness"
       },
       "facets": [],
       "floorScenarios": [],
@@ -1892,10 +1963,11 @@
       "anchor": "ext",
       "section": "ext/knowledge/",
       "peerDependencyId": "knowledge",
+      "extensionName": "knowledge",
       "witness": "claims-check",
       "maturity": {
-        "technical": "experimental",
-        "adoption": "single-witness"
+        "technical": "stable",
+        "adoption": "multi-witness"
       },
       "facets": [],
       "floorScenarios": [],
@@ -1909,10 +1981,11 @@
       "anchor": "ext",
       "section": "ext/launchStudio/",
       "peerDependencyId": "launchStudio",
+      "extensionName": "launch-studio",
       "witness": "claims-check",
       "maturity": {
-        "technical": "experimental",
-        "adoption": "single-witness"
+        "technical": "stable",
+        "adoption": "multi-witness"
       },
       "facets": [],
       "floorScenarios": [],
@@ -1926,10 +1999,11 @@
       "anchor": "ext",
       "section": "ext/messaging/",
       "peerDependencyId": "messaging",
+      "extensionName": "messaging",
       "witness": "claims-check",
       "maturity": {
-        "technical": "experimental",
-        "adoption": "single-witness"
+        "technical": "stable",
+        "adoption": "multi-witness"
       },
       "facets": [],
       "floorScenarios": [],
@@ -1943,10 +2017,11 @@
       "anchor": "ext",
       "section": "ext/webResearch/",
       "peerDependencyId": "webResearch",
+      "extensionName": "web-research",
       "witness": "claims-check",
       "maturity": {
-        "technical": "experimental",
-        "adoption": "single-witness"
+        "technical": "stable",
+        "adoption": "multi-witness"
       },
       "facets": [],
       "floorScenarios": [],
@@ -1958,6 +2033,7 @@
   "profiles": [
     {
       "id": "openwop-discovery-core",
+      "summary": "The host publishes a valid v2 discovery document and negotiates the protocol version; it makes no claim about running workflows.",
       "predicate": {
         "families": [],
         "metadata": [
@@ -1974,6 +2050,7 @@
     },
     {
       "id": "openwop-core-standard",
+      "summary": "The host runs workflows to the executable floor: interrupts, replay, webhooks, idempotency and the event log. This is what an unqualified \"OpenWOP conformant\" claim means.",
       "predicate": {
         "families": [
           "interrupt",
@@ -1996,13 +2073,15 @@
         "v2-run-bulk-cancel",
         "v2-run-pause-resume",
         "v2-run-options-limits",
-        "v2-sse-last-event-id"
+        "v2-sse-last-event-id",
+        "v2-sse-last-event-id-cursor"
       ],
       "requirementIds": [],
-      "note": "rc.59: five unaided run-surface witnesses joined the floor \u2014 v2-run-cancel (runs.md \u00a7Cancel: 409 run_terminal on a terminal run), v2-run-bulk-cancel (\u00a7Cancel: per-entry envelopes, id_tenant_mismatch / not_found, details.maxRunIds), v2-run-pause-resume (\u00a7Pause and resume: 409 run_terminal / run_state_conflict, the literal drainPolicy echo, the immediate cut), v2-run-options-limits (capabilities.md limits metadata honoured on create), v2-sse-last-event-id (events.md \u00a7SSE frames: Last-Event-ID resumes at the next sequence, never re-emits the resumption point). cancelRun, bulkCancelRuns and pauseRun are core operations by the runs.md surface table (only ancestry, annotations and eval-summary are 404-when-unadvertised), so a host that omits one is blocked, not inapplicable, and the floor refuses it \u2014 the prose's outcome. Their optional legs (values mode, the conformance-delay / conformance-cancellable fixtures) record inapplicable with the reason and the file row stays a witnessed pass. Measured before the change: the reference host passes all five (rc.58, 179 / 0 / 0 / 42); neither production host satisfies this predicate, so no existing claim moves. seeded from spec/v1/core-standard-manifest.json at P3-B; floor minted rc.45, one or more unaided witnesses per predicate family: interrupt (token scheme), replay (the effect-seam manifest \u2014 its seam-driven no-re-fire leg lives in v2-effect-seam-no-refire on the seams floor), webhooks (durable delivery), idempotency (Layer-1 key grammar), eventLog (era key, era stamp, closed event type, poll cursor). Deliberately absent: v2-pinned-run-disposition (seam-gated and opt-in), v2-v1-signed-webhook-accepted (a coexistence scenario, driven through the seam; the cut gate is its home), v2-effect-identity-business-key (retry leg seam-driven), v2-approver-enforced (conditional on the refKinds facet)."
+      "note": "2.42.7: v2-sse-last-event-id-cursor joined the floor (events.md \u00a7SSE frames, RFC 0213 \u00a7A: Last-Event-ID is an exclusive cursor, a well-formed id past the log is not refused, and the header is read only after authorization). It was held off the floor until the three bundle hosts were measured. Measured on committed bundles, it is executed-pass on the v2 reference host (2.42.2), MyndHyve (2.42.0) and openwop-app (2.42.2 side revision); the first two carry partial-witness only for the SHOULD leg (a malformed id accepted, recorded not failed), so no existing claim moves. rc.59: five unaided run-surface witnesses joined the floor \u2014 v2-run-cancel (runs.md \u00a7Cancel: 409 run_terminal on a terminal run), v2-run-bulk-cancel (\u00a7Cancel: per-entry envelopes, id_tenant_mismatch / not_found, details.maxRunIds), v2-run-pause-resume (\u00a7Pause and resume: 409 run_terminal / run_state_conflict, the literal drainPolicy echo, the immediate cut), v2-run-options-limits (capabilities.md limits metadata honoured on create), v2-sse-last-event-id (events.md \u00a7SSE frames: Last-Event-ID resumes at the next sequence, never re-emits the resumption point). cancelRun, bulkCancelRuns and pauseRun are core operations by the runs.md surface table (only ancestry, annotations and eval-summary are 404-when-unadvertised), so a host that omits one is blocked, not inapplicable, and the floor refuses it \u2014 the prose's outcome. Their optional legs (values mode, the conformance-delay / conformance-cancellable fixtures) record inapplicable with the reason and the file row stays a witnessed pass. Measured before the change: the reference host passes all five (rc.58, 179 / 0 / 0 / 42); neither production host satisfies this predicate, so no existing claim moves. seeded from spec/v1/core-standard-manifest.json at P3-B; floor minted rc.45, one or more unaided witnesses per predicate family: interrupt (token scheme), replay (the effect-seam manifest \u2014 its seam-driven no-re-fire leg lives in v2-effect-seam-no-refire on the seams floor), webhooks (durable delivery), idempotency (Layer-1 key grammar), eventLog (era key, era stamp, closed event type, poll cursor). Deliberately absent: v2-pinned-run-disposition (seam-gated and opt-in), v2-v1-signed-webhook-accepted (a coexistence scenario, driven through the seam; the cut gate is its home), v2-effect-identity-business-key (retry leg seam-driven), v2-approver-enforced (conditional on the refKinds facet)."
     },
     {
       "id": "openwop-conformance-seams-v2",
+      "summary": "The host mounts the conformance test seams under /conformance/seams/ so the suite can drive seam-based scenarios; it is a testing surface, not a production feature.",
       "predicate": {
         "families": [],
         "metadata": [
@@ -2015,7 +2094,7 @@
         "v2-v1-signed-webhook-accepted",
         "v2-effect-seam-no-refire"
       ],
-      "note": "RFC 0168 \u00a7C.1 \u2014 the seams profile; its own api/seams-v2.yaml; forbidden from the capability namespace. Floor minted rc.45: the four scenarios driven through a seam. rc.62 CLAIM FIX: the predicate now requires `conformance` at the discovery root. Until rc.62 the predicate was EMPTY, and `claimedProfilesForV2` treats an empty predicate as vacuously satisfied, so this profile was CLAIMED BY EVERY v2 HOST \u2014 including two production hosts that never advertised it and carried it at `certified: false`. A profile claimed by a host that never advertised it is a claim the host did not make. The predicate is deliberately NECESSARY, not sufficient: it tests that a `conformance` block exists, while the exact advert (`conformance.seamsProfile === openwop-conformance-seams-v2`) is tested per scenario by `seamsProfileAdvertised`. The two compose honestly \u2014 no conformance block means NOT CLAIMED; a block naming some other profile means claimed, every floor row `inapplicable`, witnessCount 0, and therefore not certified and not blocked. This profile is the instrument, not a capability predicate: each floor file is ALSO gated on the family it witnesses (fork-a-v1-run and effect-seam-no-refire on replay, effect-identity-business-key on idempotency, v1-signed-webhook-accepted on webhooks), records `inapplicable` when that family is absent, and the profile certifies only on a witnessed pass \u2014 a seams host advertising none of those families witnesses nothing through the seam and certifies nothing."
+      "note": "RFC 0168 \u00a7C.1 \u2014 the seams profile; its own api/seams-v2.yaml; forbidden from the capability namespace. Floor minted rc.45: the four scenarios driven through a seam. rc.62 CLAIM FIX: the predicate now requires `conformance` at the discovery root. Until rc.62 the predicate was EMPTY, and `claimedProfilesForV2` treats an empty predicate as vacuously satisfied, so this profile was CLAIMED BY EVERY v2 HOST \u2014 including two production hosts that never advertised it and carried it at `certified: false`. A profile claimed by a host that never advertised it is a claim the host did not make. The predicate is deliberately NECESSARY, not sufficient: it tests that a `conformance` block exists, while the exact advert (`conformance.seamsProfile === openwop-conformance-seams-v2`) is tested per scenario by `seamsProfileAdvertised`. The two compose honestly \u2014 no conformance block means NOT CLAIMED; a block naming some other profile means claimed, every floor row `inapplicable`, witnessCount 0, and therefore not certified and not blocked. This profile is the instrument, not a capability predicate: each floor file is ALSO gated on the family it witnesses (fork-a-v1-run and effect-seam-no-refire on replay, effect-identity-business-key on idempotency, v1-signed-webhook-accepted on webhooks), records `inapplicable` when that family is absent, and the profile certifies only on a witnessed pass \u2014 a seams host advertising none of those families witnesses nothing through the seam and certifies nothing. 2.45.30: every leg of a floor file MUST be seam-driven, because a floor row is recorded per file and one seam-free leg passed it on a host with a `conformance` block and no seams (openwop-app 4683d9f89); the facet and ledger-read legs moved to v2-webhooks-v1-scheme-listed and v2-effect-ledger-keying, and coherence/seams-floor-legs-gated enforces the rule."
     }
   ],
   "aliases": {

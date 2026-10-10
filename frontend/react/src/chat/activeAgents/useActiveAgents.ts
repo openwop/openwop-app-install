@@ -27,6 +27,7 @@
  * the truth and drift.
  */
 
+import { canonicalAgentId } from '../agentIdAliases.js';
 import { useCallback, useMemo, type Dispatch, type SetStateAction } from 'react';
 import type { ChatSession } from '../types.js';
 import type { AgentMentionEntry } from '../lib/agentMentions.js';
@@ -58,21 +59,29 @@ export interface UseActiveAgentsResult {
   remove: (agentId: string) => void;
 }
 
+/** ADR 0763 — rows in canonical agent-id form (legacy saved sessions). */
+function canonicalRows(rows: readonly ActiveAgentRow[]): ActiveAgentRow[] {
+  return rows.map((r) => ({ ...r, agentId: canonicalAgentId(r.agentId) }));
+}
+
 export function useActiveAgents(
   session: ChatSession,
   setSession: Dispatch<SetStateAction<ChatSession>>,
 ): UseActiveAgentsResult {
   const lineup = useMemo<readonly ActiveAgentRow[]>(() => {
-    const persisted = session.activeAgents?.lineup ?? [];
+    // ADR 0763 — a lineup saved (or derived) before the agent-id rename carries
+    // legacy ids; read it in canonical form so every comparison below agrees.
+    const persisted = (session.activeAgents?.lineup ?? []).map((r) => ({ ...r, agentId: canonicalAgentId(r.agentId) }));
     return [DEFAULT_ASSISTANT_ROW, ...persisted];
   }, [session.activeAgents?.lineup]);
 
-  const currentAgentId = session.activeAgents?.currentAgentId ?? DEFAULT_ASSISTANT_ID;
+  const currentAgentId = canonicalAgentId(session.activeAgents?.currentAgentId ?? DEFAULT_ASSISTANT_ID);
 
-  const activateAgent = useCallback((entry: AgentMentionEntry): string => {
+  const activateAgent = useCallback((rawEntry: AgentMentionEntry): string => {
+    const entry = { ...rawEntry, agentId: canonicalAgentId(rawEntry.agentId) };
     let resolvedAgentId = entry.agentId;
     setSession((s) => {
-      const existing = s.activeAgents?.lineup ?? [];
+      const existing = canonicalRows(s.activeAgents?.lineup ?? []);
       const already = existing.find((it) => it.agentId === entry.agentId);
       const nextLineup = already
         ? existing
@@ -101,13 +110,14 @@ export function useActiveAgents(
   const setLineup = useCallback((rows: readonly ActiveAgentRow[]): void => {
     setSession((s) => ({
       ...s,
-      activeAgents: { lineup: [...rows], currentAgentId: null },
+      activeAgents: { lineup: canonicalRows(rows), currentAgentId: null },
     }));
   }, [setSession]);
 
-  const switchTo = useCallback((agentId: string): void => {
+  const switchTo = useCallback((rawAgentId: string): void => {
+    const agentId = canonicalAgentId(rawAgentId);
     setSession((s) => {
-      const existing = s.activeAgents?.lineup ?? [];
+      const existing = canonicalRows(s.activeAgents?.lineup ?? []);
       const isDefault = agentId === DEFAULT_ASSISTANT_ID;
       const isInLineup = existing.some((it) => it.agentId === agentId);
       // Refuse to switch to an id that isn't in the lineup AND isn't
@@ -126,13 +136,14 @@ export function useActiveAgents(
     });
   }, [setSession]);
 
-  const remove = useCallback((agentId: string): void => {
+  const remove = useCallback((rawAgentId: string): void => {
+    const agentId = canonicalAgentId(rawAgentId);
     if (agentId === DEFAULT_ASSISTANT_ID) return; // default is sticky
     setSession((s) => {
-      const existing = s.activeAgents?.lineup ?? [];
+      const existing = canonicalRows(s.activeAgents?.lineup ?? []);
       const filtered = existing.filter((it) => it.agentId !== agentId);
       if (filtered.length === existing.length) return s; // wasn't there
-      const wasCurrent = s.activeAgents?.currentAgentId === agentId;
+      const wasCurrent = canonicalAgentId(s.activeAgents?.currentAgentId ?? '') === agentId;
       return {
         ...s,
         activeAgents: {

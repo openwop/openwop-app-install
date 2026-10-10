@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.kicktodo.nodes/1.30.3/propose-plan-change.input.json",
+  "type": "object",
+  "properties": {
+    "circleId": {
+      "type": "string"
+    },
+    "coachSubject": {
+      "type": "string"
+    },
+    "note": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "circleId",
+    "coachSubject",
+    "note"
+  ]
+}

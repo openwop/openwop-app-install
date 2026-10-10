@@ -1,5 +1,5 @@
 /**
- * ADR 0627 D1 (`CRMWF-5`) — all 27 `feature.crm.nodes` driven THROUGH the real
+ * ADR 0627 D1 (`CRMWF-5`) — all 29 `feature.crm.nodes` (27 + ADR 0837's get-contact / record-triage) driven THROUGH the real
  * `buildCrmSurface` (via the production `buildHostSurfaceBundle`) on a seeded
  * tenant, with the pack's OWN `nodes` map. The `profiles-node-through-surface`
  * shape: the pack→surface edge is crossed for every node, so a key drift on
@@ -16,6 +16,16 @@
  * `createGmailSync`, a real contact match, a real activity append and cursor
  * advance) with only `ctx.connectors` stubbed — and asserts the ADR 0627 D5 pin:
  * every connector invoke carries the sync row's `connectionId`.
+ *
+ * ORDER, stated: this is ONE scenario split into cases — ids minted early
+ * (contactId, companyId, …) are read later, and the last case asserts every
+ * manifest node was exercised. A `-t`-filtered single case is not meaningful;
+ * that is the honest ceiling of an edge sweep over shared state.
+ *
+ * Sabotage-witnessed (grade-tests w4): the node's `entityId` fallback dropped,
+ * the surface's owned-contact guard dropped, record-triage writing without the
+ * run's stamp, the gmail list call unpinned, and `idFor` dropping the runId
+ * each turn a case red.
  */
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -26,14 +36,22 @@ import { createApp } from '../src/index.js';
 import { buildHostSurfaceBundle } from '../src/host/inMemorySurfaces.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
-import { createContact } from '../src/features/crm/contactsService.js';
+import { createContact, getContact, setContactTriage } from '../src/features/crm/contactsService.js';
 import { getOrCreateDefaultPipeline, getActivity } from '../src/features/crm/crmEntitiesService.js';
 import { createGmailSync, getGmailSync } from '../src/features/crm/gmailSyncService.js';
 import { upsertOAuthConnection } from '../src/features/connections/connectionsService.js';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '../../..');
 const PACK_DIR = join(REPO, 'packs/feature.crm.nodes');
-type NodeOut = { status: string; outputs?: Record<string, any>; error?: { code: string; message: string } };
+/** What the cases read off a node's outputs. The pack is untyped JS: the one
+ *  boundary narrowing is the `nodes` map's type at import (below). */
+interface Row { contactId: string; companyId: string; dealId: string; taskId: string; activityId: string; segmentId: string; bookingLinkId: string; stage: string; owner: string; status: string; name: string }
+interface Outputs {
+  contact: Row; company: Row; deal: Row; task: Row; activity: Row; segment: Row; bookingLink: Row;
+  companies: Row[]; deals: Row[]; tasks: Row[]; members: Row[];
+  created: unknown; summary: unknown; errors: unknown; fields: string[]; ops: string[]; valid: boolean; success: boolean;
+}
+type NodeOut = { status: string; outputs?: Outputs; error?: { code: string; message: string } };
 type NodeFn = (ctx: Record<string, unknown>) => Promise<NodeOut>;
 
 const manifest = JSON.parse(readFileSync(join(PACK_DIR, 'pack.json'), 'utf8')) as { runtime: { entry: string }; nodes: Array<{ typeId: string }> };
@@ -98,6 +116,21 @@ describe('feature.crm.nodes through the REAL ctx.features.crm surface (CRMWF-5)'
     const owned = await run('feature.crm.nodes.update-contact-owner', { entityId: contactId, owner: 'user:sales-1' });
     expect(owned.outputs!.contact.contactId).toBe(contactId);
     expect(owned.outputs!.contact.owner).toBe('user:sales-1');
+  });
+
+  it('ADR 0837 D7: get-contact reads the row; record-triage writes only for the run the stamp names', async () => {
+    const read = await run('feature.crm.nodes.get-contact', { contactId });
+    expect(read.outputs!.contact.contactId).toBe(contactId);
+    expect('tenantId' in read.outputs!.contact).toBe(false); // projected
+    const triage = { variant: 'enriched', score: 55, priority: 'normal' };
+    // No stamp names this run yet ⇒ superseded, nothing written.
+    const early = await run('feature.crm.nodes.record-triage', { contactId, triage });
+    expect(early.outputs).toEqual({ success: true, recorded: false, outcome: 'superseded' });
+    await setContactTriage(contactId, T, { variant: 'enriched', runId: RUN, at: new Date().toISOString() });
+    const done = await run('feature.crm.nodes.record-triage', { contactId, triage });
+    expect(done.outputs).toEqual({ success: true, recorded: true, outcome: 'recorded' });
+    expect((await getContact(contactId))!.lastTriage).toMatchObject({ runId: RUN, score: 55, priority: 'normal', variant: 'enriched' });
+    await expect(run('feature.crm.nodes.record-triage', { contactId, triage: { variant: 'basic' } })).rejects.toMatchObject({ code: 'validation_error' });
   });
 
   it('a foreign-tenant or empty contactId is a TYPED refusal crossing the edge (never a success-with-empty)', async () => {
@@ -196,7 +229,9 @@ describe('feature.crm.nodes through the REAL ctx.features.crm surface (CRMWF-5)'
 
   it('booking: create a link, then list bookings (none claimed yet)', async () => {
     const link = await run('feature.crm.nodes.booking-create-link', {
-      orgId: ORG, title: 'Intro call', timezone: 'UTC', weeklyHours: [{ day: 1, start: '09:00', end: '17:00' }], durations: [30], ownerUserId: USER,
+      // ADR 0837 D6 — no explicit `ownerUserId`: an explicit owner must be a member
+      // of the org, and this harness's org has none (the default owner is the run).
+      orgId: ORG, title: 'Intro call', timezone: 'UTC', weeklyHours: [{ day: 1, start: '09:00', end: '17:00' }], durations: [30],
     });
     expect(link.status).toBe('success');
     expect(link.outputs!.bookingLink.bookingLinkId).toBe(`booking-link:${RUN}:n`);
@@ -267,9 +302,8 @@ describe('feature.crm.nodes through the REAL ctx.features.crm surface (CRMWF-5)'
     expect((await getGmailSync(T, sync.syncId))!.cursor).toBe(new Date(internalDate - 1000).toISOString());
   });
 
-  it('every one of the 27 manifest nodes was exercised through the real surface (no vacuous coverage)', () => {
+  it('every one of the 29 manifest nodes was exercised through the real surface (no vacuous coverage)', () => {
     const declared = manifest.nodes.map((n) => n.typeId).sort();
-    expect(declared).toHaveLength(27);
     expect([...exercised].sort()).toEqual(declared);
   });
 });

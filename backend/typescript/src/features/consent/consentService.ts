@@ -5,17 +5,22 @@
  * rule, never per-feature copies (the Sharing-registry lesson). Permissive
  * when the `consent` toggle is off (honest opt-in).
  *
- * R2 CN-SP-2 — `regulatedRegions` is DECLARATIVE ONLY: no enforcement path
- * reads it (subjects carry no region data to match against). Enforcement
- * rides `defaultMode` + per-record categories. The old "fail-closed in
- * regulated regions" claim here was false; the editor now discloses the
- * field's informational role.
+ * R2 CN-SP-2 — `regulatedRegions` WAS declarative only: no enforcement path
+ * read it (subjects carry no region data to match against).
+ *
+ * > CORRECTED 2026-10-07 (ADR 0860 D2): ONE path now reads it — the public
+ * > VISITOR analytics default. A caller that passes `opts.visitor` (the beacon,
+ * > the page read, funnels, the form link gate) gets a region-aware fallback for
+ * > the `analytics` category only: a regulated or unknown region opts in, anywhere
+ * > else falls to `defaultMode ?? 'opt-out'`. The floor (`REGULATED_REGION_FLOOR`)
+ * > always applies; `regulatedRegions` adds to it. Every other category and every
+ * > caller without `opts.visitor` is unchanged.
  */
 
 import { createHash } from 'node:crypto';
 import { OpenwopError } from '../../types.js';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
-import { resolveOne } from '../../host/featureToggles/service.js';
+import { resolveToggle } from '../../host/featureToggles/service.js';
 import { eraseSubject, type SubjectErasureResult } from '../../host/subjectErasure.js';
 import { onCrmRecordMerged } from '../../host/crmRecordLifecycle.js';
 import { recordGovernanceDecision } from '../../host/governanceDecisionLog.js';
@@ -23,6 +28,7 @@ import { getRetentionHold, RetentionHoldError } from '../../host/retentionHold.j
 import { appendAudit, AUDIT_KIND_CONSENT_CHANGE } from '../../host/auditChainService.js';
 import { createLogger } from '../../observability/logger.js';
 import { assertPurposesAtCapture } from '../cdp/purposeVocabService.js';
+import { regionIsRegulated, type VisitorRegion } from './visitorRegion.js';
 
 const log = createLogger('feature.consent');
 
@@ -74,13 +80,97 @@ export interface ConsentRecord {
   categories: ConsentCategories;
   source: string;
   ts: string;
-  expiresAt?: string;
   /** ADR 0268 — the lawful basis asserted for this consent (additive). */
   legalBasis?: LegalBasis;
   /** ADR 0302 — the OPAQUE permitted-purpose codes captured with this consent
    *  (additive; old records lack it). Stored verbatim — never re-validated on read,
    *  so a retro-stored label survives a later vocabulary/strict change unchanged. */
   purposes?: readonly string[];
+  /** ADR 0849 D3 — the record's own consent log (Art. 7(1) proof): each entry is a
+   *  state WRITTEN, newest first, so `history[0]` mirrors the row. Absent on rows
+   *  written before ADR 0849 (the UI says "current state only", never a fabricated
+   *  trail). Bounded (`HISTORY_MAX`, origin pinned) and erased with the row. */
+  history?: ConsentChange[];
+  /** ADR 0849 (grade-code CN2CD-4) — how many entries the bound dropped from between
+   *  the pinned origin and the rest, so the UI shows the gap instead of diffing across it. */
+  historyDropped?: number;
+}
+
+/** ADR 0849 D3 — one written consent state. */
+export interface ConsentChange {
+  ts: string;
+  source: string;
+  categories: ConsentCategories;
+  region?: string;
+  legalBasis?: LegalBasis;
+  purposes?: readonly string[];
+  /** grade-code CN2CD-2 — the state a pre-ADR-0849 row carried when its history began:
+   *  real evidence (its own `ts` + `source`), but NOT the first-ever consent. */
+  legacy?: true;
+}
+
+/** ADR 0849 D3 — the history bound. Far above any real person's number of consent
+ *  changes; small enough that a public `visitor:` row cannot grow without limit. */
+export const HISTORY_MAX = 25;
+
+function changeOf(rec: ConsentRecord): ConsentChange {
+  return {
+    ts: rec.ts, source: rec.source, categories: rec.categories,
+    ...(rec.region ? { region: rec.region } : {}),
+    ...(rec.legalBasis ? { legalBasis: rec.legalBasis } : {}),
+    ...(rec.purposes !== undefined ? { purposes: [...rec.purposes] } : {}),
+  };
+}
+
+/** Same consent STATE (not same write): categories, region, basis and purposes. */
+function sameState(a: ConsentChange, b: ConsentChange): boolean {
+  const cats = (c: ConsentCategories): string => JSON.stringify(Object.entries(c).sort(([x], [y]) => x.localeCompare(y)));
+  return cats(a.categories) === cats(b.categories)
+    && (a.region ?? '') === (b.region ?? '')
+    && (a.legalBasis ?? '') === (b.legalBasis ?? '')
+    && JSON.stringify(a.purposes ?? null) === JSON.stringify(b.purposes ?? null);
+}
+
+/**
+ * ADR 0849 D3 — the row `rec` with its history carried over from `cur` and this write
+ * appended. A write that repeats the newest state appends nothing (architect H1: a
+ * scanner prefetching a one-click unsubscribe 25 times must not evict the opt-in). At
+ * the bound the OLDEST entry is pinned and the second-oldest dropped, so the first
+ * recorded receipt survives any number of later changes. Exported for the ratchet.
+ */
+export function withHistory(cur: ConsentRecord | null, rec: ConsentRecord): ConsentRecord {
+  // grade-code CN2CD-2 — a pre-ADR-0849 row's own state is real evidence (its `ts` and
+  // `source`): it SEEDS the log, marked legacy, rather than being overwritten unrecorded.
+  const prior: ConsentChange[] = cur?.history ?? (cur ? [{ ...changeOf(cur), legacy: true }] : []);
+  let dropped = cur?.historyDropped ?? 0;
+  const keep = (history: ConsentChange[]): ConsentRecord => ({ ...rec, history, ...(dropped > 0 ? { historyDropped: dropped } : {}) });
+  const entry = changeOf(rec);
+  if (prior.length > 0 && sameState(prior[0]!, entry)) return keep(prior);
+  let history = [entry, ...prior];
+  if (history.length > HISTORY_MAX) {
+    history = [...history.slice(0, HISTORY_MAX - 1), history[history.length - 1]!];
+    dropped += 1;
+  }
+  return keep(history);
+}
+
+/** ADR 0849 (architect B3) — a write may not carry an unbounded payload: the public
+ *  capture is unauthenticated, and each history entry copies `purposes` + `region`. */
+const MAX_PURPOSES = 32;
+const MAX_PURPOSE_LENGTH = 64;
+const MAX_REGION_LENGTH = 64;
+function assertWriteBounds(input: { region?: string; purposes?: readonly string[] }): void {
+  if (input.region !== undefined && input.region.length > MAX_REGION_LENGTH) {
+    throw new OpenwopError('validation_error', `Field \`region\` must be at most ${MAX_REGION_LENGTH} characters.`, 400, { field: 'region' });
+  }
+  if (input.purposes !== undefined) {
+    if (input.purposes.length > MAX_PURPOSES) {
+      throw new OpenwopError('validation_error', `Field \`purposes\` may hold at most ${MAX_PURPOSES} codes.`, 400, { field: 'purposes' });
+    }
+    if (input.purposes.some((p) => p.length > MAX_PURPOSE_LENGTH)) {
+      throw new OpenwopError('validation_error', `Each \`purposes\` code must be at most ${MAX_PURPOSE_LENGTH} characters.`, 400, { field: 'purposes' });
+    }
+  }
 }
 
 /** A business PURPOSE (ADR 0268 / CDP-F) — the "permitted downstream use" a
@@ -223,9 +313,18 @@ export async function recordConsent(input: { tenantId: string; subjectKey: strin
    *  400 on the rare path after an operator removed a code. */
   purposesAsserted?: boolean }): Promise<ConsentRecord> {
   assertSubjectKey(input.subjectKey);
+  // ADR 0849 B3 — bound the CALLER's payload. The merge fallthrough (`purposesAsserted`)
+  // re-sends the STORED purposes, already bounded at their own write (grade-code CN2CD-8):
+  // a revocation under contention must never 400 on a row it did not author.
+  if (!input.purposesAsserted) assertWriteBounds(input);
   if (input.purposes !== undefined && !input.purposesAsserted) await assertPurposesAtCapture(input.tenantId, input.purposes); // fail-closed only in strict mode
   await assertNotErased(input.tenantId, input.subjectKey); // D10
-  const rec: ConsentRecord = {
+  // ADR 0849 D3 (architect H3) — read for the history carry-over. This path is a blind
+  // latest-wins put by design (the merge's retries-exhausted fallthrough + the demo
+  // seeder are its only callers), so under contention a concurrent writer's history
+  // entry can be lost exactly as its record can — stated, not hidden.
+  const cur = await records.get(`${input.tenantId}:${input.subjectKey}`);
+  const base: ConsentRecord = {
     tenantId: input.tenantId,
     subjectKey: input.subjectKey,
     categories: normCategories(input.categories),
@@ -235,6 +334,7 @@ export async function recordConsent(input: { tenantId: string; subjectKey: strin
     ...(input.legalBasis ? { legalBasis: input.legalBasis } : {}),
     ...(input.purposes !== undefined ? { purposes: [...input.purposes] } : {}),
   };
+  const rec = withHistory(cur, base);
   await records.put(rec);
   // D10 post-write re-check: a DSAR that tombstoned between the barrier and the put
   // deletes the record AFTER writing the tombstone, so if we see the tombstone now the
@@ -348,6 +448,7 @@ export async function mergeConsentCategories(input: {
   purposes?: readonly string[];
 }): Promise<ConsentRecord> {
   assertSubjectKey(input.subjectKey); // CONS-18 — the merge lane is a write path too
+  assertWriteBounds(input); // ADR 0849 B3
   if (input.purposes !== undefined) await assertPurposesAtCapture(input.tenantId, input.purposes); // fail-closed only in strict mode
   await assertNotErased(input.tenantId, input.subjectKey); // D10 — the barrier, at entry
   for (let attempt = 0; attempt < 5; attempt++) {
@@ -358,7 +459,8 @@ export async function mergeConsentCategories(input: {
     const region = input.region ?? cur?.region;
     const legalBasis = input.legalBasis ?? cur?.legalBasis;
     const purposes = input.purposes ?? cur?.purposes;
-    const rec: ConsentRecord = {
+    // ADR 0849 D3 — the history rides the same CAS: a change and its receipt land together.
+    const rec = withHistory(cur ?? null, {
       tenantId: input.tenantId,
       subjectKey: input.subjectKey,
       categories: normCategories({ ...(cur?.categories ?? {}), ...input.categories }),
@@ -367,7 +469,7 @@ export async function mergeConsentCategories(input: {
       ...(region ? { region } : {}),
       ...(legalBasis ? { legalBasis } : {}),
       ...(purposes !== undefined ? { purposes: [...purposes] } : {}),
-    };
+    });
     if (await records.compareAndSwap(cur ?? null, rec)) {
       if (await isErasureTombstoned(rec.tenantId, rec.subjectKey)) { // D10 post-swap re-check
         await records.delete(`${rec.tenantId}:${rec.subjectKey}`);
@@ -494,7 +596,11 @@ onCrmRecordMerged('consent-crm-merge', async ({ tenantId, entity, sourceId, surv
 export async function listConsent(tenantId: string): Promise<ConsentRecord[]> {
   if (!tenantId) return []; // fail-closed — never an ambiguous-tenant scan
   const rows = await records.listByPrefix(`${tenantId}:`);
-  return rows.filter((r) => r.tenantId === tenantId).sort((a, b) => b.ts.localeCompare(a.ts));
+  // ADR 0849 D3 — the ledger is a list, not a proof: history rides the subject lookup only.
+  return rows
+    .filter((r) => r.tenantId === tenantId)
+    .map(({ history: _history, historyDropped: _dropped, ...row }) => row)
+    .sort((a, b) => b.ts.localeCompare(a.ts));
 }
 
 export async function getPolicy(tenantId: string): Promise<ConsentPolicy | null> {
@@ -587,6 +693,12 @@ export async function writeErasureTombstone(tenantId: string, subjectKey: string
  *  `deleteSubject` never saw). Returns whether a row existed. */
 export async function deleteConsentRecordForErasure(tenantId: string, subjectKey: string): Promise<boolean> {
   return records.delete(`${tenantId}:${subjectKey}`);
+}
+
+/** ADR 0849 D3 — the erasure status a subject lookup reports (any key form). */
+export async function getErasureStatus(tenantId: string, subjectKey: string): Promise<{ erasedAt: string } | null> {
+  if (!subjectKey) return null;
+  return getErasureTombstone(tenantId, subjectKey);
 }
 
 /** The prior tombstone for a key (any form), or null. */
@@ -756,7 +868,22 @@ export async function deleteSubject(
  * Old records have no specifics, so the umbrella keeps governing them —
  * stored records are untouched by the vocabulary extension.
  */
-export async function isAllowed(tenantId: string, subjectKey: string, category: ConsentCategory): Promise<boolean> {
+/** ADR 0860 D2 — the request context of a PUBLIC VISITOR decision. `region: null`
+ *  is "unknown", which is treated as regulated. */
+export interface VisitorDecisionContext { region: VisitorRegion | null }
+
+/** ADR 0860 D2 — the regime a visitor with no record falls to. The floor out-ranks
+ *  the tenant's `defaultMode` (an explicit `opt-out` included) in a regulated or
+ *  unknown region; elsewhere the tenant's choice stands, and no policy ⇒ opt-out. */
+export function visitorDefaultRegime(policy: ConsentPolicy | null, region: VisitorRegion | null): { mode: DefaultMode; basis: string } {
+  if (regionIsRegulated(region, policy?.regulatedRegions ?? [])) {
+    return { mode: 'opt-in', basis: region ? 'visitor-default:regulated' : 'visitor-default:unknown' };
+  }
+  const mode = policy?.defaultMode ?? 'opt-out';
+  return { mode, basis: `visitor-default:${mode}` };
+}
+
+export async function isAllowed(tenantId: string, subjectKey: string, category: ConsentCategory, opts?: { visitor?: VisitorDecisionContext }): Promise<boolean> {
   if (category === 'necessary') return true;
   // ADR 0394 — strict explicit-opt-in categories (WhatsApp): ONLY a recorded
   // explicit `true` for the specific channel permits. No umbrella fallback, no
@@ -777,7 +904,8 @@ export async function isAllowed(tenantId: string, subjectKey: string, category: 
     allowed = false;
     basis = 'erased';
   } else {
-    const assignment = await resolveOne('consent', { tenantId });
+    // ADR 0819 §1 opt-out — OFF here LOOSENS a restriction, so a paywalled read would fail OPEN on a lapsed plan.
+    const assignment = await resolveToggle('consent', { tenantId });
     if (!strict && (!assignment || !assignment.enabled)) return true; // toggle off ⇒ permissive (honest opt-in)
     const rec = await getConsent(tenantId, subjectKey);
     const policy = rec || strict ? null : await getPolicy(tenantId);
@@ -791,6 +919,13 @@ export async function isAllowed(tenantId: string, subjectKey: string, category: 
       } else {
         allowed = rec.categories[category] === true;
       }
+    } else if (category === 'analytics' && opts?.visitor) {
+      // ADR 0860 D2 — the ONLY reader of the visitor context: the no-record
+      // fallback, analytics only. Tombstone, toggle and record precedence above
+      // are untouched.
+      const d = visitorDefaultRegime(policy, opts.visitor.region);
+      allowed = d.mode === 'opt-out';
+      basis = d.basis;
     } else {
       allowed = policy?.defaultMode === 'opt-out';
     }

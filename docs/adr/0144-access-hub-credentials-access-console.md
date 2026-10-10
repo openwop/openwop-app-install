@@ -325,3 +325,25 @@ critical path — can be a follow-up phase).
    scope-reachable — `ConnectionsManager` distinguishes personal vs org by `orgId`).
    A future host-ext `?scope=` on the BYOK routes could add Personal Keys; it is out
    of this frontend-only ADR's scope.
+
+## Addendum (2026-10-06) — sections become a grouped side menu
+
+The hub's single wrapping tab strip had grown to eight sections, and the
+`credentials` / `identity` clusters this ADR defined were invisible in it. The
+sections now render as a **vertical tablist** beside the panel, with each
+cluster labelled (`ui/Tabs` gained `orientation="vertical"` and
+`TabItem.group`; the label is `aria-hidden` because a tablist may own only
+tabs). The split is a **container query** on the console (`.hub-split`), not a
+viewport breakpoint, because the console sits inside the admin rail; under
+760px of its own width it falls back to the wrapping strip.
+
+The Workspace·Personal scope moved from a second tablist into the page
+header's actions as a `.segmented` `aria-pressed` toggle. It changes which
+sections exist, so it was never a tab — and as a second `role="tablist"` it
+was a trap for tests (`e2e/hub-suspense.spec.ts` documents a `.nth(1)` click
+that hit "Personal" instead of a section).
+
+Not done here (needs data the hub does not fetch today, and would add reads
+to every page load): a per-section status hint in the menu, a summary row,
+and a "needs attention" banner for expired connections — all of them in the
+design exploration that prompted this change.

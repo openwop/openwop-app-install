@@ -20,6 +20,7 @@
  * source is worse than no source for anything that persists a claim.
  */
 
+import { meterPlatformUnits } from './managedCredits.js';
 import { fetch as undiciFetch } from 'undici';
 import { createLogger } from '../observability/logger.js';
 import { resolveSecret } from '../byok/secretResolver.js';
@@ -193,11 +194,18 @@ export async function hostWebSearchKeyStatus(): Promise<{
 /** Resolve a search-provider key: BYOK secret `web-search` for the tenant first,
  *  then the host env key. Returns null when neither is configured. */
 async function resolveSearchKey(tenantId: string): Promise<string | null> {
+  return (await resolveSearchKeyWithSource(tenantId))?.key ?? null;
+}
+
+/** ADR 0821 D3 — the same ladder, also saying WHO PAYS: the tenant's own BYOK
+ *  `web-search` key is the tenant's spend; the host-vault and env keys are the
+ *  platform's (metered as `webSearch` units). */
+async function resolveSearchKeyWithSource(tenantId: string): Promise<{ key: string; platformPaid: boolean } | null> {
   // 1. The TENANT's own key — a workspace bringing its own quota overrides the
   //    host default. Scoped, so it can never be read by another tenant.
   try {
     const byok = await resolveSecret(WEB_SEARCH_REF, { tenantId });
-    if (byok) return byok;
+    if (byok) return { key: byok, platformPaid: false };
   } catch {
     // A lookup failure is non-fatal — fall through to the host key.
   }
@@ -218,12 +226,13 @@ async function resolveSearchKey(tenantId: string): Promise<string | null> {
   //    ephemeral mode a scopeless ref resolves to null by design.
   try {
     const hostWide = await resolveSecret(WEB_SEARCH_REF);
-    if (hostWide) return hostWide;
+    if (hostWide) return { key: hostWide, platformPaid: true };
   } catch {
     // Non-fatal — fall through to the env key.
   }
   // 3. The host-operator ENV key — the pre-Vault lane, kept for existing deploys.
-  return process.env.OPENWOP_WEBSEARCH_API_KEY ?? null;
+  const envKey = process.env.OPENWOP_WEBSEARCH_API_KEY;
+  return envKey ? { key: envKey, platformPaid: true } : null;
 }
 
 /**
@@ -340,11 +349,14 @@ export function createWebResearchSurface(scope: BundleScope): WebResearchSurface
     // ordinary lookups working on any capable provider while making a durable
     // consumer opt in explicitly. See `host/webSearchCapability.ts`.
     async search({ query, maxResults = 10, siteFilter, suitability = 'answer-only' }) {
-      const key = await resolveSearchKey(scope.tenantId);
-      if (key) {
+      const resolved = await resolveSearchKeyWithSource(scope.tenantId);
+      if (resolved) {
         try {
-          const live = await searchLive(query, key, maxResults, siteFilter);
+          const live = await searchLive(query, resolved.key, maxResults, siteFilter);
           log.info('web search (live)', { query, engine: live.engine, results: live.results.length });
+          // ADR 0821 D3 — a query on the platform's key is metered (no draw while
+          // `webSearch` has no rate); a tenant's own key is never metered.
+          if (resolved.platformPaid) await meterPlatformUnits({ tenantId: scope.tenantId, unit: 'webSearch', quantity: 1, featureId: 'web-research', ...(scope.runId ? { runId: scope.runId } : {}) });
           return live;
         } catch (err) {
           // An operator who configured a host key did so deliberately — often for

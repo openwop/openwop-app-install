@@ -15,12 +15,19 @@
  *    through the same shared helper but are asserted by their own suites'
  *    absence of `navigator.clipboard.writeText` — stated so the gap is visible
  *    rather than implied.
+ *
+ * Sabotage-witnessed (w7 grade-tests): filtering "Active" on `!revoked` reds the
+ * partition legs; mapping every 404 to `gone` (ignoring `details.reason`) reds
+ * the recipient half; reporting a failed copy through `toast.success` reds the
+ * SHARE-UX-3 leg.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, act, fireEvent, waitFor } from '@testing-library/react';
+import type * as C from '../sharingClient.js';
 
 const { listOrgs, listLinks, listResources, createLink, revokeLink } = vi.hoisted(() => ({
-  listOrgs: vi.fn(), listLinks: vi.fn(), listResources: vi.fn(), createLink: vi.fn(), revokeLink: vi.fn(),
+  listOrgs: vi.fn<typeof C.listOrgs>(), listLinks: vi.fn<typeof C.listLinks>(), listResources: vi.fn<typeof C.listResources>(),
+  createLink: vi.fn<typeof C.createLink>(), revokeLink: vi.fn<typeof C.revokeLink>(),
 }));
 vi.mock('../sharingClient.js', async (orig) => ({
   ...(await orig<typeof import('../sharingClient.js')>()),
@@ -28,20 +35,23 @@ vi.mock('../sharingClient.js', async (orig) => ({
 }));
 
 const { toastSuccess, toastError, toastWarning } = vi.hoisted(() => ({ toastSuccess: vi.fn(), toastError: vi.fn(), toastWarning: vi.fn() }));
-vi.mock('../../../ui/toast.js', () => ({ toast: { success: toastSuccess, error: toastError, warning: toastWarning } }));
+vi.mock('../../../ui/toast.js', () => ({ toast: { success: toastSuccess, error: toastError, warning: toastWarning, info: vi.fn() } }));
 const copyMock = vi.hoisted(() => vi.fn(async () => ({ ok: true }) as { ok: boolean }));
 vi.mock('../../../ui/copyToClipboard.js', () => ({ copyToClipboard: copyMock }));
 const confirmFn = vi.hoisted(() => vi.fn());
 vi.mock('../../../ui/confirm.js', () => ({ confirm: confirmFn, ConfirmRoot: () => null }));
 
 import { SharingPage } from '../SharingPage.js';
-import { linkStatus, isLinkLive, type ShareLink } from '../sharingClient.js';
+import { SharedSharePage } from '../SharedSharePage.js';
+import { linkStatus, isLinkLive, resolveSharedPublic, type ShareLink } from '../sharingClient.js';
 
 const ORG = { orgId: 'o1', name: 'Acme' };
-const base = {
-  resourceType: 'cms_page' as const, resourceId: 'p1',
+const base: Omit<ShareLink, 'tokenHash'> = {
+  resourceType: 'cms_page', resourceId: 'p1',
   createdAt: '2026-08-01T09:00:00.000Z', revoked: false,
 };
+/** A complete, typed link row — no cast over a partial. */
+const link = (over: Partial<ShareLink> = {}): ShareLink => ({ ...base, tokenHash: 'h', ...over });
 const PAST = '2026-08-03T00:00:00.000Z';
 const FUTURE = '2099-01-01T00:00:00.000Z';
 
@@ -50,9 +60,9 @@ const mount = async (): Promise<void> => {
   await act(async () => {});
 };
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   copyMock.mockResolvedValue({ ok: true });
   listOrgs.mockResolvedValue([ORG]);
   listResources.mockResolvedValue([{ id: 'r1', label: 'Q3 deck' }]);
@@ -61,7 +71,7 @@ beforeEach(() => {
 describe('SHARE-UX-2 — link status is derived, not assumed', () => {
   it('classifies revoked / expired / expiring / orphaned / live, in that precedence', () => {
     const now = Date.parse('2026-08-18T00:00:00.000Z');
-    const s = (l: Partial<ShareLink>): string => linkStatus({ ...base, tokenHash: 'h', ...l } as ShareLink, now);
+    const s = (l: Partial<ShareLink>): string => linkStatus(link(l), now);
     // Revocation is deliberate and outranks a lapsed clock.
     expect(s({ revoked: true, expiresAt: PAST })).toBe('revoked');
     expect(s({ expiresAt: PAST })).toBe('expired');
@@ -73,8 +83,8 @@ describe('SHARE-UX-2 — link status is derived, not assumed', () => {
     expect(s({ resourceMissing: true })).toBe('orphaned');
     // An orphan still RESOLVES the gate (and then 404s), so it counts as live
     // for the "which of these are still out there?" question.
-    expect(isLinkLive({ ...base, tokenHash: 'h', resourceMissing: true } as ShareLink, now)).toBe(true);
-    expect(isLinkLive({ ...base, tokenHash: 'h', expiresAt: PAST } as ShareLink, now)).toBe(false);
+    expect(isLinkLive(link({ resourceMissing: true }), now)).toBe(true);
+    expect(isLinkLive(link({ expiresAt: PAST }), now)).toBe(false);
   });
 
   // SHUX-5 — the ONE dead state this file did not cover, and the file's own
@@ -86,7 +96,7 @@ describe('SHARE-UX-2 — link status is derived, not assumed', () => {
   // owner to re-send a URL that 404s.
   it('a link at its VIEW CAP is not live, and outranks the soft states', () => {
     const now = Date.parse('2026-08-18T00:00:00.000Z');
-    const s = (l: Partial<ShareLink>): string => linkStatus({ ...base, tokenHash: 'h', ...l } as ShareLink, now);
+    const s = (l: Partial<ShareLink>): string => linkStatus(link(l), now);
     expect(s({ viewCount: 3, maxViews: 3 })).toBe('cap-reached');
     expect(s({ viewCount: 4, maxViews: 3 })).toBe('cap-reached');   // over, defensively
     // Non-vacuity in both directions: under the cap, and no cap at all.
@@ -97,7 +107,7 @@ describe('SHARE-UX-2 — link status is derived, not assumed', () => {
     expect(s({ viewCount: 3, maxViews: 3, expiresAt: PAST })).toBe('expired');
     // …and it outranks the REVERSIBLE ones, because the server refuses it today.
     expect(s({ viewCount: 3, maxViews: 3, featureDisabled: true })).toBe('cap-reached');
-    expect(isLinkLive({ ...base, tokenHash: 'h', viewCount: 3, maxViews: 3 } as ShareLink, now)).toBe(false);
+    expect(isLinkLive(link({ viewCount: 3, maxViews: 3 }), now)).toBe(false);
   });
 
   it('an EXPIRED link is out of "Active links" and reads in the past tense', async () => {
@@ -141,6 +151,35 @@ describe('SHARE-UX-1 — an orphaned link is named on the owner’s side', () =>
   });
 });
 
+/**
+ * SHARE-UX-1, the RECIPIENT half the header claims. The server always told the
+ * two 404s apart (`details.reason: 'resource-gone'` vs a dead token); the
+ * client read only `res.status`, so a recipient whose document was deleted was
+ * told the owner had probably revoked the link. `resolveSharedPublic` is the
+ * REAL one here (the client mock spreads the original), driven by a real
+ * `Response` — the decision under test is the client's reading of the body.
+ */
+describe('SHARE-UX-1 — the recipient half: deleted content is not a revoked link', () => {
+  const resolve404 = (body: unknown): void => {
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async () => new Response(JSON.stringify(body), { status: 404 })));
+  };
+
+  it('the client maps a resource-gone 404 to `resourceGone`, and any other 404 to `gone`', async () => {
+    resolve404({ details: { reason: 'resource-gone' } });
+    await expect(resolveSharedPublic('tok')).rejects.toMatchObject({ kind: 'resourceGone' });
+    // The conservative reading: no reason ⇒ never invent "the content was deleted".
+    resolve404({});
+    await expect(resolveSharedPublic('tok')).rejects.toMatchObject({ kind: 'gone' });
+  });
+
+  it('the public viewer says the CONTENT was deleted — never that the link was revoked', async () => {
+    resolve404({ details: { reason: 'resource-gone' } });
+    render(<SharedSharePage token="tok" />);
+    expect(await screen.findByText(/this shared content was deleted/i)).toBeTruthy();
+    expect(screen.queryByText(/no longer available/i)).toBeNull();
+  });
+});
+
 describe('SHARE-1 HONESTY — a link whose OWNING FEATURE is off is not “Live”', () => {
   it('takes the status, the chip and an explanation — and leaves the Active list', async () => {
     // R2 review F1. SHARE-1 made `document`, `commerce_*` and `creative_brief`
@@ -153,7 +192,7 @@ describe('SHARE-1 HONESTY — a link whose OWNING FEATURE is off is not “Live�
     // Active/dead partition. It does NOT discriminate the server's emission of
     // `featureDisabled` (`sharing-owning-feature-gate.test.ts` owns that).
     const now = Date.parse('2026-08-18T00:00:00.000Z');
-    const s = (l: Partial<ShareLink>): string => linkStatus({ ...base, tokenHash: 'h', ...l } as ShareLink, now);
+    const s = (l: Partial<ShareLink>): string => linkStatus(link(l), now);
     expect(s({ featureDisabled: true })).toBe('feature-off');
     // It does NOT outrank the two TERMINAL states — re-enabling the feature
     // would not bring a revoked or lapsed link back, so those still win.
@@ -163,7 +202,7 @@ describe('SHARE-1 HONESTY — a link whose OWNING FEATURE is off is not “Live�
     // expires-soon link that is currently darkened is not "Expires soon".
     expect(s({ featureDisabled: true, expiresAt: '2026-08-20T00:00:00.000Z' })).toBe('feature-off');
     expect(s({ featureDisabled: true, expiresAt: FUTURE })).toBe('feature-off');
-    expect(isLinkLive({ ...base, tokenHash: 'h', featureDisabled: true } as ShareLink, now)).toBe(false);
+    expect(isLinkLive(link({ featureDisabled: true }), now)).toBe(false);
 
     listLinks.mockResolvedValue([
       { ...base, resourceType: 'document', tokenHash: 'off', label: 'Q3 SOW', featureDisabled: true },

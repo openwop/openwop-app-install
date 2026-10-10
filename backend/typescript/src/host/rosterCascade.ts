@@ -16,7 +16,9 @@
  * boards/schedules/approvals keyed to the same `rosterId`.
  */
 
-import { deleteRosterEntry, getRosterEntry } from './rosterService.js';
+import { deleteRosterEntry, getRosterEntry, listRoster } from './rosterService.js';
+import { getAgentRegistry } from '../executor/agentRegistry.js';
+import { agentStorageId } from '../executor/agentIdAliases.js';
 import { deleteBoard, listBoardsForSubject } from './kanbanService.js';
 import { deleteJob, listJobsByRoster } from './schedulingService.js';
 import { deleteApprovalsForRoster } from './approvalService.js';
@@ -69,24 +71,6 @@ export async function deleteRosterMemberCascade(
 
   // Pending/resolved approvals proposed for this member (+ their index rows).
   const approvals = await deleteApprovalsForRoster(tenantId, rosterId);
-
-  // The host-synthesized chat-callable inventory agent — but ONLY the per-tenant
-  // `user.<tenant>.<slug>` form the seed / create-wizard mint. Never a shared
-  // pack agent (whose id never begins `user.`), so a roster delete can't yank an
-  // agent definition out from under another reference.
-  let chatAgentDeleted = false;
-  const chatAgentId = entry?.agentRef.agentId;
-  if (chatAgentId && chatAgentId.startsWith('user.')) {
-    // ADR 0379 P2 — the guard only needs to exclude PACK ids now (`user.` vs
-    // `<packId>.`): the tenant check moved INTO the delete predicate (P1), and
-    // new-scheme persona-scoped ids (`user.<slug>`) no longer embed the tenant,
-    // so the old `user.${tenantId}.` prefix would silently skip them (the
-    // architect-caught shape-parse break).
-    chatAgentDeleted = await storage.deleteUserAgent(tenantId, chatAgentId);
-  }
-
-  // The roster row itself.
-  await deleteRosterEntry(tenantId, rosterId);
 
   // Drop just this member from the org chart (and any now-empty department),
   // rather than nuking the whole chart — other members may remain. Clear any
@@ -147,11 +131,55 @@ export async function deleteRosterMemberCascade(
   // ADR 0044 — the twin link dies with the profile; clear its consent grants too.
   await clearTwinGrantsForAgent(tenantId, rosterId);
 
+  // ADR 0775 D5 — the roster row goes AFTER every rosterId-keyed sweep above.
+  // It used to go first, so a throw in a later sweep returned 500 and the
+  // route's 404 pre-check then refused every retry, stranding the orphans
+  // (`ARWF-12`). Every sweep above is keyed by `rosterId` and idempotent, so a
+  // retry now re-runs the whole cascade while the row still exists.
+  await deleteRosterEntry(tenantId, rosterId);
+  // Grade-code ARCD-3 — a profile/capability PUT that passed `requireOwnedAgent`
+  // while the row still existed can land between the sweep above and the row
+  // delete, recreating a profile nothing reaches. Sweep it once more now that
+  // no new write can pass the owned-agent check. Idempotent.
+  await deleteAgentProfile(tenantId, rosterId);
+
+  // The host-synthesized chat-callable inventory agent — ONLY the per-tenant
+  // `user.<slug>` form the seed / create-wizard mint, never a shared pack agent
+  // (whose id never begins `user.`). ADR 0379 P2: the tenant check lives in the
+  // delete predicate, so a persona-scoped `user.<slug>` is matched by prefix.
+  //
+  // ADR 0775 D5 (`ARWF-6`) — and ONLY when no OTHER roster member still points
+  // at it: `POST /roster` accepts any agentRef, so two members may share one
+  // chat agent, and deleting one used to delete the other's. The count runs
+  // AFTER this member's row is gone, so two concurrent deletes of the last two
+  // sharers both see zero and both delete (idempotent) — counting first would
+  // let each see the other and orphan the agent. Deleting also EVICTS it from
+  // this instance's registry (the pair `DELETE /agents/:agentId` performs);
+  // before, the instance kept serving the deleted persona until restart. Other
+  // instances still do until their restart (ADR 0775 P3).
+  let chatAgentDeleted = false;
+  let chatAgentRetired = false;
+  const chatAgentId = entry?.agentRef.agentId;
+  if (chatAgentId && chatAgentId.startsWith('user.')) {
+    const stillReferenced = (await listRoster(tenantId)).some((e) => agentStorageId(e.agentRef.agentId) === agentStorageId(chatAgentId));
+    if (!stillReferenced) {
+      chatAgentRetired = true;
+      chatAgentDeleted = await storage.deleteUserAgent(tenantId, chatAgentId);
+      getAgentRegistry().remove(chatAgentId, tenantId);
+    }
+  }
+
   // ADR 0288 — fire the roster-lifecycle seam LAST so feature-owned refs the
   // host cascade cannot reach (scheduled chats, public widgets, advisory
   // membership) disable/prune themselves. Best-effort; never blocks the delete.
+  // ADR 0775 D5 — the chat `agentId` rides the event ONLY when this cascade
+  // RETIRED that agent (no other member references it — whether or not a
+  // stored row existed to delete). Consumers key widgets and scheduled chats by
+  // it, so naming a chat agent another member still uses disabled THAT
+  // member's widgets and paused its chats. A non-`user.` (pack) agent is never
+  // retired, so it is never named either.
   const lifecycleConsumersRan = await fireRosterMemberDeleted({
-    tenantId, rosterId, ...(chatAgentId ? { agentId: chatAgentId } : {}),
+    tenantId, rosterId, ...(chatAgentRetired && chatAgentId ? { agentId: chatAgentId } : {}),
   });
 
   log.info('roster_member_cascade_deleted', {

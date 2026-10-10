@@ -40,14 +40,14 @@ let n = 0;
 async function scenario(role: string): Promise<{ owner: Client; member: Client; orgId: string }> {
   const tenantId = `org:maps-${Date.now()}-${n++}`;
   const owner = client();
-  await owner.post('/v1/host/openwop-app/test/login', { email: `o-${Date.now()}-${n++}@acme.test`, tenantId });
+  await owner.post('/host/openwop-app/test/login', { email: `o-${Date.now()}-${n++}@acme.test`, tenantId });
   const member = client();
-  const memberId = (await member.post('/v1/host/openwop-app/test/login', { email: `m-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId;
-  const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
-  await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberId, roles: [role] });
+  const memberId = (await member.post('/host/openwop-app/test/login', { email: `m-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId;
+  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
+  await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberId, roles: [role] });
   return { owner, member, orgId };
 }
-const G = (orgId: string): string => `/v1/host/openwop-app/sales-maps/orgs/${encodeURIComponent(orgId)}/geocode`;
+const G = (orgId: string): string => `/host/openwop-app/sales-maps/orgs/${encodeURIComponent(orgId)}/geocode`;
 
 describe('sales-maps — geocode cache', () => {
   it('seeds + caches a manual coordinate; a genuine miss fails loud; validates + write-scopes', async () => {

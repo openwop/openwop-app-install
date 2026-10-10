@@ -20,7 +20,7 @@ import type { Storage } from '../../storage/storage.js';
 import { runUnderWorkerContract } from '../../storage/eventEraAdapter.js';
 import { createLogger } from '../../observability/logger.js';
 import { getInstanceId } from '../../host/instanceId.js';
-import { listExpiringOAuthConnections, warmRefreshConnection } from './connectionsService.js';
+import { listExpiringOAuthConnections, warmRefreshConnection, sweepSecretTombstones } from './connectionsService.js';
 import { sweepExpiredPendingAuth } from './oauthFlow.js';
 
 const log = createLogger('connections.refreshDaemon');
@@ -70,6 +70,8 @@ export function startConnectionsRefreshDaemon(storage: Storage): RefreshDaemon {
       await processExpiringConnections(storage);
       // GC abandoned OAuth consent flows so the pending-auth store stays bounded.
       await sweepExpiredPendingAuth().catch(() => undefined);
+      // ADR 0780 `CONNCD-2` — retry any secret a revoke could not remove.
+      await sweepSecretTombstones().catch(() => undefined);
       await storage
         .pruneOnceByPrefix(CLAIM_KEY_PREFIX, new Date(Date.now() - CLAIM_PRUNE_AGE_MS).toISOString())
         .catch(() => undefined);

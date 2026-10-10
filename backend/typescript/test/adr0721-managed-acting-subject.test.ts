@@ -55,16 +55,15 @@ const EXEMPT: ReadonlyMap<string, string> = new Map([
     + 'design that required one would break the widget. The pooled tenant bucket is the correct '
     + 'meter here: the operator is paying for visitors they cannot identify. Covers BOTH doors in '
     + 'this file (chat round and tools round) — EXEMPT is keyed by file, not by call site.'],
-  ['host/headlessAi.ts',
-    'system work with no acting human. All four callers — workflowEvalJudge, kbService, '
-    + 'cms/translate, mediaService — pass only a tenantId and have no subject in scope; the '
-    + 'dispatch is the HOST acting for the workspace, not for a person.'],
-  ['features/chat-autotitle/titleGenerator.ts',
-    'reachable only through the injected `generate?` seam at features/chat-autotitle/binding.ts, '
-    + 'whose signature tests stub. Threading a subject changes that seam. RECORDED RATHER THAN '
-    + 'EXEMPTED ON MERIT: the spend is real but bounded (one short title per conversation), so '
-    + 'this is a cost decision, not a claim that no subject exists. Closing it is a small, '
-    + 'self-contained follow-up.'],
+  // 2026-10-05 (ADR 0821 D5 follow-up): two rows DELETED, not relaxed.
+  //  - `host/headlessAi.ts` now forwards `options.actingSubject` into its managed
+  //    dispatch, so the walker sees it pass (the anti-rot leg below demanded removal).
+  //  - `features/chat-autotitle/titleGenerator.ts` no longer calls the managed door
+  //    at all — it routes through `resolveHeadlessAi`. The gap that row RECORDED is
+  //    still real and now invisible to this walker: auto-title passes no subject
+  //    (its injected `generate?` seam carries none), so its managed draw stays on
+  //    the pooled bucket. Bounded (one short title per conversation); closing it is
+  //    still the small seam change the old row described.
 ]);
 
 /**

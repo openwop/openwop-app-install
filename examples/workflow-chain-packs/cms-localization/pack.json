@@ -1,12 +1,12 @@
 {
   "name": "vendor.openwop-app.workflows.cms",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "kind": "workflow-chain",
   "description": "CMS content workflows (RFC 0013 / ADR 0204 C6) — chains over the feature.cms.nodes governed verbs. `cms.localize-and-submit` translates ONE draft section into a target locale and submits the page for editorial review: read the draft section, AI-translate its base data (structure-preserving), store the overlay on the draft (sanitized like an editor save), then submit — the SAME approval-gate composition as the editor UI, so when `cms-approval-gate` is ON the run ends at a human ApprovalsInbox row. There is deliberately NO publish step: a node can draft and submit, never publish (the Phase-C architecture ruling). All tenant/org/page values are run parameters (replay-deterministic).",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "engines": {
-    "openwop": ">=1.1.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "keywords": [
     "Content",
@@ -17,7 +17,7 @@
   "chains": [
     {
       "chainId": "cms.localize-and-submit",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "Localize a draft section & submit for review",
       "description": "Translate one section of a DRAFT CMS page into a target locale and submit the page for editorial review. The overlay is drafted by AI (structure-preserving — URLs, media tokens, and {{vars}} are never translated), stored through the same sanitized write path as an editor save, and the submit queues a human approval when the org gates publishing. Nothing is published by this chain.",
       "parameters": {
@@ -55,7 +55,7 @@
         "nodes": [
           {
             "id": "read",
-            "typeId": "feature.cms.nodes.get-draft-page",
+            "typeId": "feature.cms.nodes.get-draft-page@1.0.0",
             "name": "Read draft section",
             "position": {
               "x": 0,
@@ -69,7 +69,7 @@
           },
           {
             "id": "translate",
-            "typeId": "feature.cms.nodes.translate-section",
+            "typeId": "feature.cms.nodes.translate-section@1.1.0",
             "name": "AI translate (base → locale)",
             "position": {
               "x": 280,
@@ -81,7 +81,7 @@
           },
           {
             "id": "store",
-            "typeId": "feature.cms.nodes.update-section-draft",
+            "typeId": "feature.cms.nodes.update-section-draft@1.1.0",
             "name": "Store overlay on draft",
             "position": {
               "x": 560,
@@ -96,7 +96,7 @@
           },
           {
             "id": "submit",
-            "typeId": "feature.cms.nodes.submit-page",
+            "typeId": "feature.cms.nodes.submit-page@1.1.0",
             "name": "Submit for review",
             "position": {
               "x": 840,

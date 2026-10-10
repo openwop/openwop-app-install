@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/core.openwop.db/1.0.0/nosql-update.input.json",
+  "$id": "https://packs.openwop.dev/core.openwop.db/1.0.1/nosql-update.input.json",
   "title": "NosqlUpdateInput",
   "type": "object",
   "required": [

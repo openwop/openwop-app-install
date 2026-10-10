@@ -14,12 +14,13 @@ import { createAgentToolProvider, builtinAgentToolIds } from '../src/host/agentT
 import { applyCostRollup, stampRunCostOnTerminal } from '../src/observability/costEmitter.js';
 import { buildRunRecord } from '../src/host/runDispatch.js';
 import { percentile, clearFleetStatsCache } from '../src/host/workflowFleetStats.js';
+import { bareRunId } from './support/bareRunId.js';
 
 describe('workflow fleet insights (ADR 0476, sqlite memory app)', () => {
   let server: http.Server;
   let BASE: string;
   const TOKEN = 'dev-token';
-  const API = '/v1/host/openwop-app/workflows';
+  const API = '/host/openwop-app/workflows';
   const WF = 'fleet-wf-ok';
   const WF_FAIL = 'fleet-wf-fail';
   const WF_AI = 'fleet-wf-ai';
@@ -54,7 +55,7 @@ describe('workflow fleet insights (ADR 0476, sqlite memory app)', () => {
 
   async function settle(runId: string): Promise<string> {
     for (let i = 0; i < 200; i += 1) {
-      const r = await call<{ status: string }>('GET', `/v1/runs/${runId}`);
+      const r = await call<{ status: string }>('GET', `/runs/${runId}`);
       if (r.body.status && !['pending', 'running'].includes(r.body.status)) return r.body.status;
       await new Promise((res) => setTimeout(res, 25));
     }
@@ -105,9 +106,9 @@ describe('workflow fleet insights (ADR 0476, sqlite memory app)', () => {
     it('stamps END-TO-END at the executor terminal seam, and a fork never inherits it', async () => {
       // WF_COST delays 400ms — record spend for the run WHILE it executes,
       // so the executor's terminal stamp folds it durably.
-      const src = await call<{ runId: string }>('POST', '/v1/runs', { workflowId: WF_COST, inputs: {} });
+      const src = await call<{ runId: string }>('POST', '/runs', { workflowId: WF_COST, inputs: {} });
       expect(src.status).toBe(201);
-      applyCostRollup(src.body.runId, { 'openwop.cost.usd': 0.5 });
+      applyCostRollup(bareRunId(src.body.runId), { 'openwop.cost.usd': 0.5 });
       expect(await settle(src.body.runId)).toBe('completed');
 
       // The stats read proves the durable stamp (the ONLY HTTP cost surface).
@@ -118,7 +119,7 @@ describe('workflow fleet insights (ADR 0476, sqlite memory app)', () => {
       // Fork the source: the fork records NO spend of its own, so if the
       // total stays 0.5 the fork did not inherit the source stamp (the
       // frozen-lie guard); inheritance would read 1.0.
-      const fork = await call<{ runId: string }>('POST', `/v1/runs/${src.body.runId}:fork`, { mode: 'replay' });
+      const fork = await call<{ runId: string }>('POST', `/runs/${src.body.runId}:fork`, { mode: 'replay' });
       expect(fork.status).toBe(201);
       await settle(fork.body.runId);
       clearFleetStatsCache(); // the fork witness must read FRESH data, not the cache
@@ -130,9 +131,9 @@ describe('workflow fleet insights (ADR 0476, sqlite memory app)', () => {
   describe('fleet stats', () => {
     it('aggregates success rate, percentiles, and failure hotspots with the window disclosed', async () => {
       // Ensure outcomes exist: one more completed WF run + one failed run.
-      const ok = await call<{ runId: string }>('POST', '/v1/runs', { workflowId: WF, inputs: {} });
+      const ok = await call<{ runId: string }>('POST', '/runs', { workflowId: WF, inputs: {} });
       expect(await settle(ok.body.runId)).toBe('completed');
-      const bad = await call<{ runId: string }>('POST', '/v1/runs', { workflowId: WF_FAIL, inputs: {} });
+      const bad = await call<{ runId: string }>('POST', '/runs', { workflowId: WF_FAIL, inputs: {} });
       expect(await settle(bad.body.runId)).toBe('failed');
 
       clearFleetStatsCache();
@@ -173,7 +174,7 @@ describe('workflow fleet insights (ADR 0476, sqlite memory app)', () => {
       })).status).toBe(201);
       // A builder draft test-run FAILS — but it is launch:'draft', so it must
       // not mint a failure hotspot or tank the (empty) production stats.
-      const draft = await call<{ runId: string }>('POST', '/v1/runs', {
+      const draft = await call<{ runId: string }>('POST', '/runs', {
         workflowId: WF_SEG, inputs: {}, metadata: { launch: 'draft' },
       });
       expect(await settle(draft.body.runId)).toBe('failed');
@@ -233,40 +234,40 @@ describe('workflow fleet insights (ADR 0476, sqlite memory app)', () => {
     });
 
     it('fails EMPTY without an acting user', async () => {
-      const bad = await call<{ runId: string }>('POST', '/v1/runs', { workflowId: WF_FAIL, inputs: {} });
+      const bad = await call<{ runId: string }>('POST', '/runs', { workflowId: WF_FAIL, inputs: {} });
       expect(await settle(bad.body.runId)).toBe('failed');
-      const res = JSON.parse((await runTool({ runId: bad.body.runId }, {})).content) as { note?: string; failedNodeId?: string };
+      const res = JSON.parse((await runTool({ runId: bareRunId(bad.body.runId) }, {})).content) as { note?: string; failedNodeId?: string };
       expect(res.failedNodeId).toBeUndefined();
       expect(res.note).toBeTruthy();
     });
 
     it('a foreign-tenant run is an indistinguishable empty', async () => {
-      const bad = await call<{ runId: string }>('POST', '/v1/runs', { workflowId: WF_FAIL, inputs: {} });
+      const bad = await call<{ runId: string }>('POST', '/runs', { workflowId: WF_FAIL, inputs: {} });
       expect(await settle(bad.body.runId)).toBe('failed');
       const provider = createAgentToolProvider({ tenantId: 'someone-else', actingUserId: 'u-1' });
-      const res = JSON.parse((await provider.executeTool({ name: TOOL, input: { runId: bad.body.runId } })).content) as { note?: string; failedNodeId?: string };
+      const res = JSON.parse((await provider.executeTool({ name: TOOL, input: { runId: bareRunId(bad.body.runId) } })).content) as { note?: string; failedNodeId?: string };
       expect(res.failedNodeId).toBeUndefined();
       expect(res.note).toContain('No such run');
     });
 
     it('grounds a failed run: classified error, failing node, deep links (incl. debug-in-builder)', async () => {
-      const bad = await call<{ runId: string }>('POST', '/v1/runs', { workflowId: WF_FAIL, inputs: {} });
+      const bad = await call<{ runId: string }>('POST', '/runs', { workflowId: WF_FAIL, inputs: {} });
       expect(await settle(bad.body.runId)).toBe('failed');
-      const res = JSON.parse((await runTool({ runId: bad.body.runId }, { actingUserId: 'u-1' })).content) as {
+      const res = JSON.parse((await runTool({ runId: bareRunId(bad.body.runId) }, { actingUserId: 'u-1' })).content) as {
         failedNodeId?: string; failedNode?: { typeId: string }; error?: { code: string };
         links?: { runDetail: string; debugInBuilder: string };
       };
       expect(res.failedNodeId).toBe('boom');
       expect(res.failedNode?.typeId).toBe('core.fail');
       expect(res.error?.code).toBeTruthy();
-      expect(res.links?.runDetail).toBe(`/runs/${bad.body.runId}`);
-      expect(res.links?.debugInBuilder).toContain(`/builder/${WF_FAIL}?debugRun=${bad.body.runId}`);
+      expect(res.links?.runDetail).toBe(`/runs/${bareRunId(bad.body.runId)}`);
+      expect(res.links?.debugInBuilder).toContain(`/builder/${WF_FAIL}?debugRun=${bareRunId(bad.body.runId)}`);
     });
 
     it('a non-failed run gets an honest redirect note, not a fabricated diagnosis', async () => {
-      const ok = await call<{ runId: string }>('POST', '/v1/runs', { workflowId: WF, inputs: {} });
+      const ok = await call<{ runId: string }>('POST', '/runs', { workflowId: WF, inputs: {} });
       expect(await settle(ok.body.runId)).toBe('completed');
-      const res = JSON.parse((await runTool({ runId: ok.body.runId }, { actingUserId: 'u-1' })).content) as { status?: string; note?: string; failedNodeId?: string };
+      const res = JSON.parse((await runTool({ runId: bareRunId(ok.body.runId) }, { actingUserId: 'u-1' })).content) as { status?: string; note?: string; failedNodeId?: string };
       expect(res.status).toBe('completed');
       expect(res.note).toContain('has not failed');
       expect(res.failedNodeId).toBeUndefined();

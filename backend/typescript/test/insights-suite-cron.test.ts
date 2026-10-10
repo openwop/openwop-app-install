@@ -43,7 +43,7 @@ afterAll(async () => {
 });
 
 const putConfig = (bodyObj: Record<string, unknown>) =>
-  fetch(`${BASE}/v1/host/openwop-app/insights-suite/config`, { method: 'PUT', headers: H, body: JSON.stringify(bodyObj) });
+  fetch(`${BASE}/host/openwop-app/insights-suite/config`, { method: 'PUT', headers: H, body: JSON.stringify(bodyObj) });
 
 describe('ADR 0081 §6 — cron validation at PUT /config', () => {
   it('rejects a malformed cron with 400 invalid_request', async () => {

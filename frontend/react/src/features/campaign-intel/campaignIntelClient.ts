@@ -88,7 +88,7 @@ export async function listOrgs(): Promise<OrgRef[]> {
 }
 
 /** The Analyst agent the chat deep-link scopes to (ADR 0058). */
-export const INTELLIGENCE_ANALYST_AGENT = 'feature.campaign-intel.agents.intelligence-analyst';
+export const INTELLIGENCE_ANALYST_AGENT = 'vendor.openwop-app.campaign-intel.agents.intelligence-analyst';
 
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 

@@ -23,9 +23,10 @@
  * TypeError). That fix made them run — it did not make them branch. A crash is
  * loud; this is not. Hence a ratchet rather than a one-time audit.
  */
-import { readFileSync, readdirSync, existsSync } from 'node:fs';
+import { readdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { readPackManifest } from './helpers/readPackManifest.js';
 
 const ROOT = join(__dirname, '..', '..', '..');
 const PACK_DIRS = ['examples/workflow-chain-packs', 'packs'];
@@ -43,7 +44,7 @@ function chainPacks(): { file: string; chains: Chain[] }[] {
       const file = join(abs, entry, 'pack.json');
       if (!existsSync(file)) continue;
       let parsed: { chains?: Chain[] };
-      try { parsed = JSON.parse(readFileSync(file, 'utf8')); } catch { continue; }
+      try { parsed = readPackManifest(file); } catch { continue; }
       if (parsed.chains?.length) out.push({ file: `${dir}/${entry}/pack.json`, chains: parsed.chains });
     }
   }

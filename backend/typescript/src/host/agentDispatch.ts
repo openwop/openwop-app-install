@@ -32,9 +32,10 @@
 
 import { getAgentRegistry, type ResolvedAgentManifest } from '../executor/agentRegistry.js';
 import { computeArgsHash, extractToolErrorCode, deriveToolErrorCode, CAPABILITY_PRECONDITION_CODES } from './toolHooks.js';
+import { LeaseLostError } from './runEffectContext.js';
 import { scrubSecretShaped } from './redactSecrets.js';
-import { evaluateToolPermission, agentToolPermissionsEnabled, type ToolPermissions } from './agentToolPermissions.js';
-import { resolveAgentToolPermissions } from './agentProfileService.js';
+import { evaluateToolPermissionSet, agentToolPermissionsEnabled, type ToolPermissions } from './agentToolPermissions.js';
+import { resolveAgentToolPermissionSet } from './agentProfileService.js';
 import { effectiveToolAllowlist, resolveAgentToolAllowlistOverride } from './agentToolAllowlistService.js';
 import { applyToolResultTransform } from './toolResultTransform.js';
 import { toModelToolResult } from './toModelToolResult.js';
@@ -320,7 +321,7 @@ export type ResolveAgentTool = (name: string) => AgentToolDef | undefined;
  *  `content` JSON instead — see `deriveToolErrorCode`). */
 export type ExecuteAgentTool = (
   call: { name: string; input: Record<string, unknown> },
-) => Promise<{ content: string; isError?: boolean; errorCode?: string }>;
+) => Promise<{ content: string; isError?: boolean; errorCode?: string; continueTurn?: string | null }>;
 
 /** Bound `ctx.callAIWithTools` (a single Anthropic tool-calling round). */
 export type CallAiWithTools = (req: AiToolCallRequest) => Promise<AiToolCallResult>;
@@ -399,6 +400,11 @@ export interface LiveDispatchDeps {
   /** Caller tenant — used to resolve a standing agent's tool `permissions` for
    *  the ADR 0102 per-tool gate. Absent ⇒ the gate stays ungated for this turn. */
   tenantId?: string;
+  /** ADR 0775 D3 — the id this dispatch was ADDRESSED by, before identity
+   *  resolution: a `host:` roster id names the exact member whose ADR 0102
+   *  permissions bind. Absent ⇒ the registry id, which binds every roster member
+   *  that shares it. */
+  agentAddressedId?: string;
   /** Tool-calling round fn (e.g. `adapter.callAIWithTools`). When present
    *  together with `executeTool` + `resolveTool` AND the agent has a non-empty
    *  resolvable tool surface, the live turn runs a bounded observe→act loop
@@ -442,6 +448,16 @@ export interface LiveDispatchDeps {
    *  disclosure (the link UI names the owner). Absent ⇒ a generic
    *  second-person label. Neutralized before composition (user text). */
   borrowedOwnerName?: string;
+  /** ADR 0829 D5 — the structured handoff note for this turn, ALREADY fenced by
+   *  `handoffPromptBlock`. Composed by the run lane (`agentRunnerNode`) only when
+   *  the `structured-handoffs` toggle is on and the run carries a record. Counts
+   *  as untrusted input (another model wrote it), so a turn that read it is
+   *  tagged untrusted-derived in memory. Absent ⇒ no note (today's behavior). */
+  handoffNote?: string;
+  /** ADR 0831 P2 — context blocks from run-context providers (`host/runContextProviders.ts`),
+   *  each ALREADY fenced. Placed before `Task:`; a turn that read any of them is
+   *  tagged untrusted-derived in memory. Absent ⇒ none (today's behavior). */
+  contextBlocks?: readonly string[];
   /** RFC 0090 — an independent critic over the actor's result. When present, the
    *  live turn runs it before completing, emits `agent.verified`, and (when
    *  `verifierGating`) gates: a non-`pass` verdict escalates instead of
@@ -712,7 +728,8 @@ async function buildInitialMessages(
     }
   }
 
-  const consumedUntrusted = untrustedItems.length > 0 || borrowedItems.length > 0;
+  const contextBlocks = deps.contextBlocks ?? [];
+  const consumedUntrusted = untrustedItems.length > 0 || borrowedItems.length > 0 || !!deps.handoffNote || contextBlocks.length > 0;
   // MEM-UX-14 — the degradation notice is itself a reason to build a scaffold: a
   // turn whose ONLY finding is "I could not read my memory" must still say so,
   // rather than short-circuiting to a bare task and answering as if nothing failed.
@@ -739,6 +756,8 @@ async function buildInitialMessages(
   if (borrowedItems.length > 0) {
     sections.push(fenceUntrustedItems([borrowedRecallPreamble(deps.borrowedOwnerName), ...borrowedItems]));
   }
+  if (deps.handoffNote) sections.push(deps.handoffNote); // ADR 0829 D5 — already fenced
+  for (const b of contextBlocks) sections.push(b); // ADR 0831 P2 — already fenced by their providers
   if (memoryRecall) sections.push(`Relevant memory from earlier runs:\n${memoryRecall}`);
   sections.push(`Task:\n${task}`);
   return { messages: [{ role: 'user', content: sections.join('\n\n') }], consumedUntrusted };
@@ -966,7 +985,7 @@ export interface ChatToolLoopOpts {
    *  present AND the `OPENWOP_AGENT_TOOL_PERMISSIONS_ENABLED` flag is on, a tool
    *  call off the agent's allowlist is refused before it executes. Absent ⇒ no
    *  per-tool gate (the manifest §A14 allowlist + ADR 0036 still apply). */
-  toolPermissions?: ToolPermissions;
+  toolPermissions?: readonly ToolPermissions[];
   /** ADR 0132 — the per-conversation capability scope (RESOLVED effective set) for
    *  this turn. A NARROWING that ANDs *after* the ADR 0102 gate (never widens): the
    *  model is offered only `enabled` tools, and a call whose name is not in
@@ -982,7 +1001,7 @@ export interface ChatToolLoopOpts {
    *  within-turn set of tools already run vs the tool about to run. `deny` → forbidden;
    *  `require-approval` → the same per-tool deferral as the ADR 0132 approval. Absent ⇒
    *  no firewall (the unchanged path). */
-  firewall?: { evaluate: (seenToolNames: readonly string[], nextToolName: string) => { decision: 'allow' | 'deny' | 'require-approval'; reason?: string; ruleId?: string } };
+  firewall?: { evaluate: (seenToolNames: readonly string[], nextToolName: string) => { decision: 'allow' | 'deny' | 'require-approval'; reason?: string; ruleId?: string; origin?: 'baseline' | 'policy' } };
   /** ADR 0397 Phase 1 — best-effort sink for a firewall verdict that narrowed a tool
    *  call (`deny` / `require-approval`). The host closure captures the tenant + run and
    *  records it to the unified governance decision log; this loop stays feature-free and
@@ -1005,6 +1024,11 @@ export interface PendingToolApproval {
   toolName: string;
   callId: string;
   input: Record<string, unknown>;
+  /** ADR 0834 D2 — who imposed the ask: a user-level `baseline` ask (the safe-mode
+   *  set, or the owner's own ADR 0132 scope), or a `policy` above the user (a firewall
+   *  rule, the enforce default, the platform floor). Recorded on the ledger so an
+   *  approval satisfies only what it answered. */
+  origin?: 'baseline' | 'policy';
 }
 
 /** Result of the shared loop. `error` set ⇒ a provider call failed mid-loop. */
@@ -1042,6 +1066,37 @@ export interface ChatToolLoopResult {
  *  `result` is terminal prose). Returns null when the text carries no
  *  handleable envelope. Host-internal: honors the already-Accepted RFC 0021 —
  *  no new wire surface. */
+/** The managed tier's DAILY allowance, as opposed to an upstream burst limit.
+ *  `aiProvidersHost` folds both into `provider_rate_limited` and keeps the
+ *  distinction only in `details.managedCode`; a tool turn that drops it tells
+ *  the user to "wait a few seconds and retry" at a wall that lifts at 00:00 UTC
+ *  (measured: ADR 0773 G-10b case 4, 2026-10-01). */
+export const MANAGED_DAILY_LIMIT = 'daily_limit_reached';
+export function managedLimitCode(err: unknown): typeof MANAGED_DAILY_LIMIT | undefined {
+  const managed = (err as { details?: { managedCode?: unknown } } | null)?.details?.managedCode;
+  return managed === MANAGED_DAILY_LIMIT ? MANAGED_DAILY_LIMIT : undefined;
+}
+
+/** ADR 0796 — the host's one follow-up when a reply announces an action and
+ *  carries no tool call. Host-authored, so it is not fenced. */
+/** ADR 0773 B.7 — bounds on the unfinished-work follow-up: follow-ups per turn,
+ *  and the extra rounds each one may add (the budget never exceeds
+ *  `maxRounds + MAX_CONTINUATIONS * CONTINUATION_ROUNDS`). */
+export const MAX_CONTINUATIONS = 2;
+export const CONTINUATION_ROUNDS = 2;
+
+export const ANNOUNCED_WITHOUT_CALL_NUDGE =
+  'Your reply announced an action but contained no tool call, so nothing happened. '
+  + 'Make the tool call now. If you have nothing further to do, give your final answer instead.';
+
+/** True when a no-tool-call reply ends on a colon: the shape of an action
+ *  announced and not taken. Deliberately narrow — a question, a full stop or a
+ *  list is a real final answer and is left alone. */
+export function endsOnAnnouncement(text: string | undefined | null): boolean {
+  if (!text) return false;
+  return /[:：]\s*$/.test(text);
+}
+
 export function extractSchemaRequestEnvelope(text: string): Record<string, unknown> | null {
   const fences = [...text.matchAll(/```json\s*\n([\s\S]*?)```/g)];
   for (const m of fences) {
@@ -1100,10 +1155,17 @@ export async function runChatToolLoop(
   let rounds = 0;
   // XCH-ENV-2 — per-turn schema.request budget (the advertised schemaRounds).
   let schemaRoundsUsed = 0;
+  // ADR 0796 — the one-per-turn "you announced it, now call it" follow-up.
+  let announceNudged = false;
   // Native web-search/grounding sources accumulated across rounds, deduped by
   // URL, appended as a Sources footer (ADR 0101 Phase 2).
   const citationsByUrl = new Map<string, AiCitation>();
-  for (let round = 0; round < maxRounds; round += 1) {
+  // ADR 0773 B.7 — a tool that reports unfinished work (`continueTurn`) earns the
+  // turn a follow-up when the model stops early, and the rounds to act on it.
+  let roundBudget = maxRounds;
+  let pendingContinuation: string | undefined;
+  let continuations = 0;
+  for (let round = 0; round < roundBudget; round += 1) {
     rounds = round + 1;
     let out: AiToolCallResult;
     try {
@@ -1111,7 +1173,7 @@ export async function runChatToolLoop(
     } catch (err) {
       return {
         finalText: lastText, finalData: lastData, events, rounds,
-        error: { code: (err as { code?: string })?.code ?? 'provider_error', message: err instanceof Error ? err.message : String(err) },
+        error: { code: managedLimitCode(err) ?? (err as { code?: string })?.code ?? 'provider_error', message: err instanceof Error ? err.message : String(err) },
       };
     }
     if (typeof out.content === 'string' && out.content) lastText = out.content;
@@ -1157,6 +1219,40 @@ export async function runChatToolLoop(
         }
         continue;
       }
+      // ADR 0796 — an ANNOUNCED action with no tool call. A reply that ends on a
+      // colon ("First batch — add the trigger:") is the model about to call a
+      // tool and stopping instead; treating it as the final answer leaves the
+      // user with a promise and nothing done (measured on the managed tier, ADR
+      // 0773 G-10b: finish_reason `stop`, zero tool calls, three runs). Ask ONCE
+      // per turn for the call, and only when a round is left to make it in.
+      // ADR 0773 B.7 — a tool said its work is unfinished (a Pair draft that
+      // planned 7 ops and drew 2) and the model stopped anyway. Send the tool's
+      // own follow-up, at most MAX_CONTINUATIONS times per turn, each granting
+      // CONTINUATION_ROUNDS more rounds up to a hard cap. Decided from this
+      // turn's tool results only, so a replay takes the same branch.
+      if (pendingContinuation && continuations < MAX_CONTINUATIONS && toolDefs.length > 0) {
+        continuations += 1;
+        roundBudget = Math.min(Math.max(roundBudget, round + 1 + CONTINUATION_ROUNDS), maxRounds + MAX_CONTINUATIONS * CONTINUATION_ROUNDS);
+        if (out.content) messages.push({ role: 'assistant', content: defangUntrustedFence(out.content) });
+        // Stays armed: only a tool result says the work moved on. Disarming here
+        // made the second follow-up unreachable when the model answered the first
+        // with another announcement and no call (MEASURED, managed tier case 4,
+        // 2026-10-05). MAX_CONTINUATIONS is the bound, not this flag.
+        messages.push({ role: 'user', content: pendingContinuation });
+        await emit({ type: 'agent.reasoned', agentId, reasoning: `${persona} stopped with its plan unfinished; asked once to continue.` });
+        log.info('unfinished_plan_followup', { agentId, round, continuations, roundBudget });
+        continue;
+      }
+      if (!announceNudged && toolDefs.length > 0 && round < roundBudget - 1 && endsOnAnnouncement(out.content)) {
+        announceNudged = true;
+        messages.push({ role: 'assistant', content: defangUntrustedFence(out.content!) });
+        messages.push({ role: 'user', content: ANNOUNCED_WITHOUT_CALL_NUDGE });
+        await emit({ type: 'agent.reasoned', agentId, reasoning: `${persona} announced an action without calling a tool; asked once to make the call.` });
+        // Counts only. The event above reaches the run's stream, not the log, so
+        // a live eval could not tell whether this ever fired (ADR 0773 G-10b).
+        log.info('announced_without_call_followup', { agentId, round, replyChars: out.content!.length });
+        continue;
+      }
       break; // model produced a final answer
     }
     if (out.content) messages.push({ role: 'assistant', content: defangUntrustedFence(out.content) });
@@ -1193,7 +1289,9 @@ export async function runChatToolLoop(
       // list; the requested/resolved decision is recorded by the conversation.
       if (requireApprovalSet && requireApprovalSet.has(call.name)) {
         if (!pendingApprovals.some((p) => p.toolName === call.name)) {
-          pendingApprovals.push({ toolName: call.name, callId: call.id, input: call.input });
+          // ADR 0834 D2 (FW2-CD-5) — the owner's OWN scope ask is user-level: approving
+          // it must not satisfy a later workspace/platform ask on the same tool.
+          pendingApprovals.push({ toolName: call.name, callId: call.id, input: call.input, origin: 'baseline' });
         }
         await emit({ type: 'agent.toolReturned', agentId, toolName: call.name, callId: call.id, status: 'forbidden' });
         messages.push({ role: 'user', content: `Tool "${call.name}" requires human approval for this conversation. The action was requested for review, not performed. Do not retry it; explain that it is awaiting approval.` });
@@ -1207,8 +1305,8 @@ export async function runChatToolLoop(
       // OFF), but a denied call is only BLOCKED when the env flag is on. The
       // verdict is recorded in `agent.toolReturned{forbidden}` so a replay reuses
       // it deterministically (no re-resolution).
-      if (opts.toolPermissions) {
-        const perm = evaluateToolPermission(call.name, opts.toolPermissions);
+      if (opts.toolPermissions && opts.toolPermissions.length > 0) {
+        const perm = evaluateToolPermissionSet(call.name, opts.toolPermissions);
         if (!perm.allowed) {
           const enforcing = agentToolPermissionsEnabled();
           log.info('agent_tool_permission_denied', { agentId, toolName: call.name, reason: perm.reason, enforced: enforcing });
@@ -1240,9 +1338,9 @@ export async function runChatToolLoop(
         if (fw.decision === 'require-approval') {
           log.info('capability_firewall_blocked', { agentId, toolName: call.name, decision: 'require-approval', reason: fw.reason });
           try { opts.onFirewallDecision?.({ toolName: call.name, decision: 'require-approval', ...(fw.reason ? { reason: fw.reason } : {}), ...(fw.ruleId ? { ruleId: fw.ruleId } : {}) }); } catch { /* observability never breaks the turn */ }
-          if (!pendingApprovals.some((p) => p.toolName === call.name)) {
-            pendingApprovals.push({ toolName: call.name, callId: call.id, input: call.input });
-          }
+          const held = pendingApprovals.find((p) => p.toolName === call.name);
+          if (!held) pendingApprovals.push({ toolName: call.name, callId: call.id, input: call.input, ...(fw.origin ? { origin: fw.origin } : {}) });
+          else if (fw.origin === 'policy') held.origin = 'policy';
           await emit({ type: 'agent.toolReturned', agentId, toolName: call.name, callId: call.id, status: 'forbidden' });
           messages.push({ role: 'user', content: `Tool "${call.name}" requires approval (capability firewall: ${fw.reason ?? 'risky combination'}). Requested for review, not performed; do not retry — explain it is awaiting approval.` });
           continue;
@@ -1261,16 +1359,21 @@ export async function runChatToolLoop(
       firewallSeen.push(call.name); // ADR 0135 — this tool's classes now count toward later combinations this turn
       await emit({ type: 'agent.toolCalled', agentId, toolName: call.name, callId: call.id, argsHash: computeArgsHash(call.input), transport: 'native' });
       const startedAt = Date.now();
-      let execOut: { content: string; isError?: boolean; errorCode?: string };
+      let execOut: { content: string; isError?: boolean; errorCode?: string; continueTurn?: string | null };
       try {
         execOut = await deps.executeTool({ name: call.name, input: call.input });
       } catch (err) {
+        // ADR 0764 (CHATCD-3) — a lost lease abandons the node; it is never a tool result.
+        if (err instanceof LeaseLostError) throw err;
         // RFC 0064 §E — carry the thrown error's structured code (the
         // `featureSurfaces` capability gate, `AiProviderError`, `OpenwopError`)
         // so a capability-precondition failure is nameable + duration-suppressed
         // below; unstructured throws fall back to `tool_execution_failed`.
         execOut = { content: `tool_execution_failed: ${err instanceof Error ? err.message : String(err)}`, isError: true, errorCode: extractToolErrorCode(err) };
       }
+      // ADR 0773 B.7 — the latest word from a tool that tracks unfinished work:
+      // a string arms the follow-up, `null` (the work is done) disarms it.
+      if (!execOut.isError && execOut.continueTurn !== undefined) pendingContinuation = execOut.continueTurn || undefined;
       if (execOut.isError) {
         // RFC 0064 §F — a failure MUST carry `error` populated + `status:'error'`
         // (a bare `status:'error'` with no `error` is the WFAU-4 gap: a failure a
@@ -1366,10 +1469,13 @@ async function runToolLoop(
   const validate = req.validateHandoff !== false;
   const initial = await buildInitialMessages(agent, req, deps);
 
-  // ADR 0102 — resolve the standing agent's tool permissions (undefined for a
+  // ADR 0102 — resolve the standing agent's tool permissions (empty for a
   // pack/manifest agent or when no tenant is supplied ⇒ the gate stays ungated).
+  // ADR 0775 D3 — keyed by the id the dispatch was ADDRESSED by (a `host:`
+  // roster id names the exact member) and the registry id (every member sharing
+  // it binds); the registry id alone never resolved a roster agent (`ARWF-4`).
   const toolPermissions = deps.tenantId
-    ? await resolveAgentToolPermissions(deps.tenantId, agent.agentId)
+    ? await resolveAgentToolPermissionSet(deps.tenantId, deps.agentAddressedId ?? agent.agentId, agent.agentId)
     : undefined;
 
   // Delegate the observe→act loop to the SHARED core (runChatToolLoop) — the one

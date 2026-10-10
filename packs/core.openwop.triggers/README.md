@@ -3,8 +3,8 @@
 Workflow entry-point pack. Four universal trigger shapes — webhook, schedule, event, envelope — for external-event-driven workflow dispatch.
 
 | Pack name | `core.openwop.triggers` |
-| Version | `1.0.0` |
-| Engine | OpenWOP `>=1.0.0 <2.0.0` |
+| Version | `1.1.1` |
+| Engine | OpenWOP `>=1.0.0 <3.0.0` |
 | Runtime | JavaScript (ESM), Node `>=20` |
 | External deps | None — pure pass-through of `ctx.triggerData` |
 | License | Apache-2.0 |
@@ -94,7 +94,7 @@ Triggers tied to a specific host concept — canvas state, chat messages, artifa
 
 ## See also
 
-- [`spec/v1/rest-endpoints.md`](../../spec/v1/rest-endpoints.md) — host webhook + event endpoints
-- [`spec/v1/webhooks.md`](../../spec/v1/webhooks.md) — HMAC verification + delivery semantics
-- [`docs/PACKS-MVP-PLAN.md`](../../docs/PACKS-MVP-PLAN.md) — Phase 1 catalog
+- [`spec/v1/rest-endpoints.md`](https://github.com/openwop/openwop/blob/main/spec/v1/rest-endpoints.md) — host webhook + event endpoints
+- [`spec/v1/webhooks.md`](https://github.com/openwop/openwop/blob/main/spec/v1/webhooks.md) — HMAC verification + delivery semantics
+- [`docs/PACKS-MVP-PLAN.md`](https://github.com/openwop/openwop/blob/main/docs/PACKS-MVP-PLAN.md) — Phase 1 catalog
 - `docs/plans/MYNDHYVE-TO-OPENWOP-PACK-MIGRATION.md` (lives in the myndhyve repo) — domain trigger split decisions

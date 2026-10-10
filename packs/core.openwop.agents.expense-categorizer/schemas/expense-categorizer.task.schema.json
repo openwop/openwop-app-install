@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/core.openwop.agents.expense-categorizer/1.0.0/expense-categorizer.task.schema.json",
+  "$id": "https://packs.openwop.dev/core.openwop.agents.expense-categorizer/1.0.1/expense-categorizer.task.schema.json",
   "title": "ExpenseCategorizerTask",
   "type": "object",
   "required": [

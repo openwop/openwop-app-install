@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/core.openwop.agents.structured-extractor/1.0.0/structured-extractor.return.schema.json",
+  "$id": "https://packs.openwop.dev/core.openwop.agents.structured-extractor/1.0.2/structured-extractor.return.schema.json",
   "title": "StructuredExtractorReturn",
   "type": "object",
   "oneOf": [

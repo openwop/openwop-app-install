@@ -24,9 +24,11 @@
 
 import type { Express, Request, Response } from 'express';
 import { resolveMediaAsset, storeMediaAsset } from '../host/inMemorySurfaces.js';
-import { ALLOWED_UPLOAD_MIME } from '../host/allowedUploadMime.js';
+import { ALLOWED_UPLOAD_MIME, storableContentType } from '../host/allowedUploadMime.js';
 import { DurableCollection } from '../host/hostExtPersistence.js';
 import { createLogger } from '../observability/logger.js';
+import { ASSET_SERVE_PATH } from '../host/assetServePath.js';
+import { assetServeHeaders } from '../host/assetServeHeaders.js';
 
 const log = createLogger('routes.mediaAssets');
 
@@ -107,7 +109,7 @@ async function chargeUploadQuota(tenantId: string, bytes: number): Promise<strin
 
 export function registerMediaAssetRoutes(app: Express): void {
   // Serve — always on. The token is the capability.
-  app.get('/v1/host/openwop-app/assets/:token', async (req, res) => {
+  app.get('/host/openwop-app/assets/:token', async (req, res) => {
     const token = req.params.token ?? '';
     const entry = await resolveMediaAsset(token);
     if (!entry) {
@@ -115,7 +117,7 @@ export function registerMediaAssetRoutes(app: Express): void {
       return;
     }
     res.status(200);
-    res.setHeader('Content-Type', entry.contentType || 'application/octet-stream');
+    for (const [k, v] of Object.entries(assetServeHeaders(entry.contentType))) res.setHeader(k, v);
     res.setHeader('Cache-Control', 'private, max-age=300');
     res.send(Buffer.from(entry.contentBase64, 'base64'));
   });
@@ -124,7 +126,7 @@ export function registerMediaAssetRoutes(app: Express): void {
   // req.tenantId (never the body), per CTI-1. Accepts a base64 body so it rides
   // the same JSON pipeline as the rest of the demo (the scoped 12mb parser in
   // index.ts admits an 8mb-base64 payload).
-  app.post('/v1/host/openwop-app/media/upload', async (req: Request, res: Response) => {
+  app.post('/host/openwop-app/media/upload', async (req: Request, res: Response) => {
     const tenantId = req.tenantId ?? 'default';
     const body = (req.body ?? {}) as { contentBase64?: unknown; contentType?: unknown; name?: unknown };
     if (typeof body.contentBase64 !== 'string' || body.contentBase64.length === 0) {
@@ -135,9 +137,17 @@ export function registerMediaAssetRoutes(app: Express): void {
       res.status(413).json({ error: 'payload_too_large', message: `attachment exceeds ${Math.floor(MAX_STORE_BASE64_LEN / (1024 * 1024))} MiB` });
       return;
     }
-    const contentType = typeof body.contentType === 'string' ? body.contentType : '';
-    if (!ALLOWED_UPLOAD_MIME.has(contentType)) {
+    const declaredType = typeof body.contentType === 'string' ? body.contentType : '';
+    if (!ALLOWED_UPLOAD_MIME.has(declaredType)) {
       res.status(415).json({ error: 'unsupported_media_type', message: `contentType must be one of: ${[...ALLOWED_UPLOAD_MIME].join(', ')}` });
+      return;
+    }
+    // ADR 0818 §2 — the same byte check as the library: a mislabelled image is
+    // stored as what it is, and bytes that are not the claimed type are refused.
+    const contentType = storableContentType(declaredType, Buffer.from(body.contentBase64, 'base64'));
+    if (!contentType) {
+      log.warn('media_upload_type_mismatch', { declaredType });
+      res.status(415).json({ error: 'unsupported_media_type', message: `The file's contents are not a valid ${declaredType}.` });
       return;
     }
     const bytes = Buffer.byteLength(body.contentBase64, 'base64');
@@ -160,7 +170,7 @@ export function registerMediaAssetRoutes(app: Express): void {
   // tooling/tests that need to seed an asset without quota accounting.
   const storeEnabled = process.env.OPENWOP_TEST_SEAM_ENABLED === 'true';
   if (storeEnabled) {
-    app.post('/v1/host/openwop-app/media/put', async (req, res) => {
+    app.post('/host/openwop-app/media/put', async (req, res) => {
       const tenantId = req.tenantId ?? 'default';
       const body = (req.body ?? {}) as { contentBase64?: unknown; contentType?: unknown; ttlSeconds?: unknown };
       if (typeof body.contentBase64 !== 'string' || body.contentBase64.length === 0) {
@@ -180,7 +190,7 @@ export function registerMediaAssetRoutes(app: Express): void {
       });
       res.status(201).json(stored);
     });
-    log.warn('media-asset low-level store ENABLED (POST /v1/host/openwop-app/media/put) — test/demo only.');
+    log.warn('media-asset low-level store ENABLED (POST /host/openwop-app/media/put) — test/demo only.');
   }
 
   // ── Sample media generation endpoints (gap D-2) ──────────────────────
@@ -204,7 +214,7 @@ export function registerMediaAssetRoutes(app: Express): void {
   // honest advertisement (`aiProviders.imageGeneration.supported:false`) stands;
   // when off the route simply isn't mounted (uniform 404).
   if (storeEnabled) {
-    app.post('/v1/host/openwop-app/media/generate-image', async (req, res) => {
+    app.post('/host/openwop-app/media/generate-image', async (req, res) => {
       const tenantId = req.tenantId ?? 'default';
       const body = (req.body ?? {}) as { prompt?: unknown };
       const prompt = typeof body.prompt === 'string' ? body.prompt : '';
@@ -215,7 +225,7 @@ export function registerMediaAssetRoutes(app: Express): void {
       const stored = await storeMediaAsset(tenantId, { contentBase64: STUB_PNG_1x1_BASE64, contentType: 'image/png' });
       res.status(201).json({ ...stored, contentType: 'image/png', prompt, stub: true });
     });
-    log.warn('media generate-image STUB route ENABLED (POST /v1/host/openwop-app/media/generate-image) — returns a fixture PNG, test/demo only.');
+    log.warn('media generate-image STUB route ENABLED (POST /host/openwop-app/media/generate-image) — returns a fixture PNG, test/demo only.');
   }
 
   // MEDIA-6 (ADR 0085 OQ-5): the legacy `media/transcribe` + `media/synthesize`
@@ -225,7 +235,7 @@ export function registerMediaAssetRoutes(app: Express): void {
   // `ctx.callSpeechSynthesizer`). They were host-extension only (never advertised,
   // no FE consumer), so removing them touches no wire and no UI.
 
-  log.info('media-asset serve + upload routes registered (GET /v1/host/openwop-app/assets/:token, POST /v1/host/openwop-app/media/upload)');
+  log.info('media-asset serve + upload routes registered', { serve: `${ASSET_SERVE_PATH}/:token` });
 }
 
 // A 1×1 transparent PNG — the deterministic stub the generate-image demo

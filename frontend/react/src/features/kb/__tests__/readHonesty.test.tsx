@@ -36,15 +36,20 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, waitFor, act, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
+type Kb = typeof import('../kbClient.js');
+/** The WIRE shape of a hit. `kbClient.ts` types `score` as required, but the
+ *  wire may omit it — the page already branches on `typeof h.score` (KB-UX-14).
+ *  Typed honestly here rather than cast; the client type is a grade-code row. */
+type WireHit = Omit<import('../kbClient.js').SearchHit, 'score'> & { score?: number };
 const api = vi.hoisted(() => ({
-  listOrgs: vi.fn(),
-  listCollections: vi.fn(),
-  listDocuments: vi.fn(),
-  search: vi.fn(),
-  startReindex: vi.fn(),
-  drainReindex: vi.fn(),
-  getReindexJob: vi.fn(),
-  cancelReindex: vi.fn(),
+  listOrgs: vi.fn<Kb['listOrgs']>(),
+  listCollections: vi.fn<Kb['listCollections']>(),
+  listDocuments: vi.fn<Kb['listDocuments']>(),
+  search: vi.fn<(orgId: string, collectionId: string, query: string) => Promise<WireHit[]>>(),
+  startReindex: vi.fn<Kb['startReindex']>(),
+  drainReindex: vi.fn<Kb['drainReindex']>(),
+  getReindexJob: vi.fn<Kb['getReindexJob']>(),
+  cancelReindex: vi.fn<Kb['cancelReindex']>(),
 }));
 vi.mock('../kbClient.js', async (importOriginal) => {
   const orig = await importOriginal<typeof import('../kbClient.js')>();
@@ -70,10 +75,23 @@ vi.mock('../../../ui/toast.js', () => ({ toast: toasts }));
 const confirmMock = vi.hoisted(() => vi.fn(async () => true));
 vi.mock('../../../ui/confirm.js', () => ({ confirm: confirmMock }));
 
+// KB2UX-1 — the page reads the caller's per-org authority. These suites test
+// what an OWNER sees; `orgAccess.test.tsx` covers the narrower callers.
+const accessApi = vi.hoisted(() => ({
+  getEffectiveAccess: vi.fn<typeof import('../../../client/accessClient.js')['getEffectiveAccess']>(),
+}));
+vi.mock('../../../client/accessClient.js', async (importOriginal) => {
+  const orig = await importOriginal<Record<string, unknown>>();
+  return { ...orig, ...accessApi };
+});
 import { KnowledgeBasePage } from '../KnowledgeBasePage.js';
+import type { KbCollection, Org, ReindexJob } from '../kbClient.js';
+import type { EffectiveAccess } from '../../../client/accessClient.js';
 
-const ORG = { orgId: 'o1', name: 'Acme' };
-const COLLECTION = {
+const OWNER_ACCESS: EffectiveAccess = { roles: ['owner'], scopes: ['workspace:read', 'workspace:write', 'host:org:manage'], basis: 'member' };
+
+const ORG: Org = { orgId: 'o1', name: 'Acme' };
+const COLLECTION: KbCollection = {
   collectionId: 'c1', name: 'HR Policies', documentCount: 1, chunkCount: 3,
   updatedAt: '2026-08-18T00:00:00.000Z',
 };
@@ -82,6 +100,7 @@ beforeEach(() => {
   // resetAllMocks, not clearAllMocks: the *Once queues survive a clear, and a
   // leftover queued response silently answers the NEXT test (observed).
   vi.resetAllMocks();
+  accessApi.getEffectiveAccess.mockResolvedValue(OWNER_ACCESS);
   window.history.replaceState({}, '', '/kb');
   api.listOrgs.mockResolvedValue([ORG]);
   api.listCollections.mockResolvedValue([COLLECTION]);
@@ -157,7 +176,7 @@ describe('KB-UX-1 — a failed search does not render the previous answer', () =
 
     // Retry, and HOLD the request open. This is the frame the "clear the flag
     // but keep the data" fix re-broke three times.
-    const pending = deferred<unknown[]>();
+    const pending = deferred<WireHit[]>();
     api.search.mockReturnValueOnce(pending.promise);
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
 
@@ -240,13 +259,13 @@ describe('KB-UX-4 — a failed list read terminates, and offers a retry', () => 
 /* ─── KB-UX-2: reindex ─────────────────────────────────────────── */
 
 describe('KB-UX-2 — a reindex that did not complete does not report completion', () => {
-  const job = (over: Record<string, unknown> = {}) => ({
+  const job = (over: Partial<ReindexJob> = {}): ReindexJob => ({
     collectionId: 'c1', targetSpec: { provider: 'local' }, fromSig: 'a', toSig: 'b',
     totalChunks: 10, embeddedChunks: 10, status: 'done', costEstimateTokens: 0, costSpentTokens: 0,
     startedAt: '2026-08-18T00:00:00.000Z', updatedAt: '2026-08-18T00:00:00.000Z', ...over,
   });
 
-  const startReindexAndSettle = async (terminal: Record<string, unknown>): Promise<void> => {
+  const startReindexAndSettle = async (terminal: Partial<ReindexJob>): Promise<void> => {
     api.startReindex.mockResolvedValue(job({ status: 'running', embeddedChunks: 0 }));
     api.drainReindex.mockResolvedValue(job(terminal));
     view();
@@ -258,12 +277,15 @@ describe('KB-UX-2 — a reindex that did not complete does not report completion
     await startReindexAndSettle({ status: 'failed', error: 'embedding provider rejected the key' });
     await waitFor(() => expect(toasts.error).toHaveBeenCalled());
     expect(toasts.success).not.toHaveBeenCalled();
-    expect(String(toasts.error.mock.calls[0]![0])).toContain('embedding provider rejected the key');
+    // KB2UX-2 — the toast is the localized sentence; the server's English
+    // diagnostic is for the console only (it used to be interpolated in).
+    expect(toasts.error).toHaveBeenCalledWith('Reindex failed');
+    expect(String(toasts.error.mock.calls[0]![0])).not.toContain('embedding provider rejected the key');
   });
 
   it('a CANCELLED job does not report completion', async () => {
     await startReindexAndSettle({ status: 'cancelled' });
-    await waitFor(() => expect(toasts.info).toHaveBeenCalled());
+    await waitFor(() => expect(toasts.info).toHaveBeenCalledWith('Reindex cancelled'));
     expect(toasts.success).not.toHaveBeenCalled();
   });
 
@@ -281,7 +303,7 @@ describe('KB-UX-2 — a reindex that did not complete does not report completion
 
   it('KB-UX-10 — Cancel is live DURING the drain, not disabled for the whole job', async () => {
     api.startReindex.mockResolvedValue(job({ status: 'running', embeddedChunks: 0 }));
-    const pending = deferred<unknown>();
+    const pending = deferred<ReindexJob>();
     api.drainReindex.mockReturnValueOnce(pending.promise);
     api.cancelReindex.mockResolvedValue(job({ status: 'cancelled' }));
     view();

@@ -1,7 +1,7 @@
 /**
  * Egress send-ledger (ADR 0619) — the ONE durable record of "this (run, node)
- * already sent" for the brokered NON-email egress channels (SMS + push, and
- * voice when `ctx.voice` lands). The email sibling is `emailSentLedger` (ADR 0193);
+ * already sent" for the brokered NON-email egress channels (SMS + push, relay
+ * chat egress per ADR 0769, data-source writes per ADR 0783 D7, and voice when `ctx.voice` lands). The email sibling is `emailSentLedger` (ADR 0193);
  * this generalises the SAME put-on-accept dedup for the other channels so a
  * within-run `config.retry` re-run (ADR 0326 — the invocation-log cache is keyed
  * per attempt, so a retry re-executes the node body) or a genuine cross-run
@@ -26,7 +26,9 @@
  * per run, and `reserveSend` is the cross-instance CAS.
  *
  * Stores NO name/address/body — the recipient (phone number / device token) is
- * hashed into the caller's `idempotencyKey`, never persisted plaintext. So under
+ * hashed into the caller's `idempotencyKey`, never persisted plaintext. A
+ * data-source write (ADR 0783 D7) records its HTTP status only, never the request
+ * or response body: a body read from a customer's API may carry subject data. So under
  * ADR 0464 this collection is classified EXEMPT by PARITY with `email:sent`
  * (`test/subject-erasure-coverage.test.ts`): TTL-swept, no subject data, and early
  * deletion would un-dedup a live send generation and risk double-delivery to the
@@ -42,7 +44,7 @@ import { createLogger } from '../observability/logger.js';
 const log = createLogger('host.egressSentLedger');
 
 /** The brokered non-email egress channels this ledger dedups. */
-export type EgressChannel = 'sms' | 'push' | 'voice';
+export type EgressChannel = 'sms' | 'push' | 'voice' | 'chat' | 'data' | 'a2a';
 
 export interface EgressSentRecord {
   key: string;
@@ -52,6 +54,8 @@ export interface EgressSentRecord {
   /** The provider's accepted-send reference (Twilio `sid` / Expo `id`); `''` on a
    *  reservation row until `recordSend` overwrites it on accept. */
   providerRef: string;
+  /** ADR 0783 D7 — the HTTP status a data-source write was accepted with. */
+  status?: number;
   createdAt: string;
 }
 

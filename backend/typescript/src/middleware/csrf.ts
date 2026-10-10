@@ -26,12 +26,19 @@
  *    threat). Referer's origin is a fallback only; both absent → allow (never
  *    hard-require Referer — privacy settings strip it and would false-403 users).
  *
- * In dev (no `OPENWOP_CORS_ORIGINS`, reflect-any, cookie is `SameSite=Lax`) the
- * allowlist admits every origin, so this is a no-op — matching the cookie posture.
+ * In dev (no `OPENWOP_CORS_ORIGINS`, cookie is `SameSite=Lax`) every origin is
+ * admitted, so this is a no-op — matching the cookie posture.
+ *
+ * > **CORRECTED 2026-10-05 (ADR 0833 D4).** The paragraph above used to say "no
+ * > allowlist ⇒ dev", and the guard trusted it. The cookie's SameSite is read
+ * > from `NODE_ENV`/`OPENWOP_COOKIE_SECURE`, not from the allowlist, so a
+ * > production install that never set `OPENWOP_CORS_ORIGINS` had a
+ * > `SameSite=None` cookie AND a reflect-any guard. `credentialedOriginAllowed`
+ * > now reads the cookie's real posture and falls back to same-origin.
  */
 import type { RequestHandler } from 'express';
 import { OpenwopError } from '../types.js';
-import { originPolicy } from './cors.js';
+import { credentialedOriginAllowed } from './cors.js';
 import { isPublicPath } from './auth.js';
 import { COOKIE_NAME, readCookie } from './cookieSession.js';
 
@@ -57,7 +64,8 @@ export function csrfOriginGuard(): RequestHandler {
     if (!hasSessionCookie) return next();
     const origin = req.header('origin') || refererOrigin(req.header('referer'));
     if (!origin) return next(); // same-origin / non-browser client
-    if (!originPolicy().allowed(origin)) {
+    // ADR 0833 D4 — the same answer the credentialed WebSocket upgrades get.
+    if (!credentialedOriginAllowed(origin, req)) {
       next(new OpenwopError('forbidden', 'Cross-site request blocked (origin not allowed).', 403, { code: 'csrf_origin_rejected' }));
       return;
     }

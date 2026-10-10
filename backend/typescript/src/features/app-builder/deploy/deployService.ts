@@ -15,7 +15,12 @@ export interface DeploymentRecord {
   deployKey: string;
   tenantId: string;
   orgId: string;
+  /** The caller's display name for the app. */
   service: string;
+  /** ADR 0835 D1 — the provider-side service name the host derived
+   *  (`owa-<tenant+org hash>-<service>`). Absent on a record written before the
+   *  namespace existed; such a record is never re-driven against its raw name. */
+  cloudRunService?: string;
   image: string;
   exportHash: string;
   envKeys: string[];
@@ -40,7 +45,22 @@ export const deployments = new DurableCollection<DeploymentRecord>(
  *  enough that a live Cloud Run deploy (minutes) is never stolen. */
 const STALE_DEPLOYING_MS = 15 * 60_000;
 
-const SERVICE_RE = /^[a-z][a-z0-9-]{2,48}$/;
+/** ADR 0835 D1 — the caller's part of the name: 3–32 chars, never ending in
+ *  `-` (Cloud Run refuses it), so `owa-` + 12 hex + `-` + this fits in 49. */
+const SERVICE_RE = /^[a-z][a-z0-9-]{1,30}[a-z0-9]$/;
+
+/**
+ * ADR 0835 D1 — the provider-side name for a tenant org's app. The caller never
+ * names a provider service: a free name let one deploy PATCH any service in the
+ * operator's project, the host's own backend included. Orgs share a tenant
+ * (ADR 0832), so the org is in the hash too — an admin of org A must not reach
+ * org B's same-named app. `owa-` is the prefix the Cloud Run adapter refuses
+ * to act without.
+ */
+export function namespacedServiceName(tenantId: string, orgId: string, service: string): string {
+  const h = createHash('sha256').update(`${tenantId}\u0000${orgId}`).digest('hex').slice(0, 12);
+  return `owa-${h}-${service}`;
+}
 /** A symbolic env KEY — never a value ("K=V", whitespace, or secret-shaped
  *  strings are rejected; the 0343/0349 invariant). */
 const ENV_KEY_RE = /^[A-Z][A-Z0-9_]{0,63}$/;
@@ -67,12 +87,14 @@ export interface StartDeployInput {
 }
 
 export async function startDeploy(adapter: DeployAdapter, input: StartDeployInput): Promise<DeploymentRecord> {
-  if (!SERVICE_RE.test(input.service)) throw new OpenwopError('validation_error', 'Field `service` must be lowercase-kebab (3-49 chars).', 422, { field: 'service' });
+  if (!SERVICE_RE.test(input.service)) throw new OpenwopError('validation_error', 'Field `service` must be lowercase-kebab (3-32 chars, not ending in "-").', 422, { field: 'service' });
+  if (!input.orgId) throw new OpenwopError('validation_error', 'Field `orgId` is required — a deployment belongs to one organization.', 422, { field: 'orgId' });
   if (!input.image.trim()) throw new OpenwopError('validation_error', 'Field `image` is required (v1 deploys prebuilt images — ADR 0424 §Gates).', 422, { field: 'image' });
   if (!/^[0-9a-f]{64}$/.test(input.exportHash)) throw new OpenwopError('validation_error', 'Field `exportHash` must be the sha256 export lineage hash.', 422, { field: 'exportHash' });
   const envKeys = parseEnvKeys(input.envKeys);
 
-  const deployKey = createHash('sha256').update(`${input.service}|${input.exportHash}|${input.image}`).digest('hex').slice(0, 24);
+  const cloudRunService = namespacedServiceName(input.tenantId, input.orgId, input.service);
+  const deployKey = createHash('sha256').update(`${cloudRunService}|${input.exportHash}|${input.image}`).digest('hex').slice(0, 24);
   const key = `${input.tenantId}:${deployKey}`;
   const existing = await deployments.get(key);
   if (existing && existing.tenantId === input.tenantId) {
@@ -80,16 +102,22 @@ export async function startDeploy(adapter: DeployAdapter, input: StartDeployInpu
     // (architect gate 2026-07-18): re-claim it via CAS instead of returning a
     // permanent in-flight tombstone — the creative-video/computer-use stale-
     // state discipline. A FRESH in-flight record is returned untouched (no
-    // stealing a live deploy). Settled records always resolve idempotently.
+    // stealing a live deploy). A SUCCEEDED record resolves idempotently. A
+    // FAILED one is re-driven (ADR 0835 AB2-CD-2): the provider refused, so
+    // nothing is live under it, and the usual cause — an operator config the
+    // adapter 501s on, a transient token fetch — is fixed by retrying the same
+    // inputs. Before, a failure was permanent for those inputs.
+    // (A key minted here always carries `cloudRunService`; a pre-namespace
+    // record has a different key and is never found by this lookup.)
     const stale = existing.status === 'deploying' && Date.now() - Date.parse(existing.updatedAt) > STALE_DEPLOYING_MS;
-    if (!stale) return existing; // idempotent — replay never re-deploys
+    if (!stale && existing.status !== 'failed') return existing; // idempotent — replay never re-deploys
     const reclaimed: DeploymentRecord = { ...existing, status: 'deploying', updatedAt: new Date().toISOString() };
     const won = await deployments.compareAndSwap(existing, reclaimed);
     if (!won) {
       const raced = await deployments.get(key);
       if (raced) return raced;
     } else {
-      const out = await adapter.deploy({ service: existing.service, image: existing.image, envKeys: existing.envKeys });
+      const out = await driveDeploy(adapter, { service: cloudRunService, image: existing.image, envKeys: existing.envKeys });
       const settled: DeploymentRecord = out.ok
         ? { ...reclaimed, status: 'deployed', deploymentId: out.value.deploymentId, url: out.value.url, revision: out.value.revision, updatedAt: new Date().toISOString() }
         : { ...reclaimed, status: 'failed', error: out.error, updatedAt: new Date().toISOString() };
@@ -101,7 +129,7 @@ export async function startDeploy(adapter: DeployAdapter, input: StartDeployInpu
   const now = new Date().toISOString();
   const fresh: DeploymentRecord = {
     deployKey, tenantId: input.tenantId, orgId: input.orgId,
-    service: input.service, image: input.image, exportHash: input.exportHash, envKeys,
+    service: input.service, cloudRunService, image: input.image, exportHash: input.exportHash, envKeys,
     status: 'deploying', createdBy: input.createdBy, createdAt: now, updatedAt: now,
   };
   const won = await deployments.compareAndSwap(null, fresh);
@@ -110,7 +138,7 @@ export async function startDeploy(adapter: DeployAdapter, input: StartDeployInpu
     if (raced) return raced; // single-flight — the concurrent caller owns it
   }
 
-  const out = await adapter.deploy({ service: input.service, image: input.image, envKeys });
+  const out = await driveDeploy(adapter, { service: cloudRunService, image: input.image, envKeys });
   const settled: DeploymentRecord = out.ok
     ? { ...fresh, status: 'deployed', deploymentId: out.value.deploymentId, url: out.value.url, revision: out.value.revision, updatedAt: new Date().toISOString() }
     : { ...fresh, status: 'failed', error: out.error, updatedAt: new Date().toISOString() };
@@ -118,10 +146,25 @@ export async function startDeploy(adapter: DeployAdapter, input: StartDeployInpu
   return settled;
 }
 
+/** A provider call that THROWS (no metadata identity, a refused policy) would
+ *  otherwise leave the record `deploying` until the stale window — the run
+ *  sees an exception and the record claims a deploy is in flight. Settle it. */
+async function driveDeploy(adapter: DeployAdapter, input: { service: string; image: string; envKeys: string[] }): Promise<Awaited<ReturnType<DeployAdapter['deploy']>>> {
+  try {
+    return await adapter.deploy(input);
+  } catch (err) {
+    const code = typeof (err as { code?: unknown })?.code === 'string' ? (err as { code: string }).code : 'deploy_adapter_error';
+    return { ok: false, error: err instanceof Error ? `${code}: ${err.message}` : code };
+  }
+}
+
 export async function rollbackDeploy(adapter: DeployAdapter, tenantId: string, deployKey: string, toRevision: string): Promise<DeploymentRecord> {
   const rec = await deployments.get(`${tenantId}:${deployKey}`);
   if (!rec || rec.tenantId !== tenantId) throw new OpenwopError('not_found', 'Deployment not found.', 404, { deployKey });
-  const out = await adapter.rollback({ service: rec.service, toRevision });
+  if (!rec.cloudRunService) {
+    throw new OpenwopError('conflict', 'This deployment predates service namespacing and cannot be rolled back from here.', 409, { deployKey });
+  }
+  const out = await adapter.rollback({ service: rec.cloudRunService, toRevision });
   if (!out.ok) throw new OpenwopError('invalid_request', `Rollback failed: ${out.error}`, 502, { deployKey, toRevision });
   const settled: DeploymentRecord = { ...rec, status: 'rolled-back', revision: out.value.revision, updatedAt: new Date().toISOString() };
   await deployments.put(settled);

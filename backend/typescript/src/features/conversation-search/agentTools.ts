@@ -20,6 +20,7 @@ const VALID_TYPES: ReadonlySet<string> = new Set<ConversationType>(['agent', 'pe
 export function registerConversationSearchAgentTools(storage: Storage): void {
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: CONVERSATIONS_SEARCH_TOOL_ID,
       description:

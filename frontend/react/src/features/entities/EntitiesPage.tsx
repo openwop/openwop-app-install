@@ -29,13 +29,15 @@ import {
   importEntities,
   listEntities,
   getEntityLocaleContext,
-  listEntityTypes,
+  listEntityTypesForViewer,
   listRelationships,
+  publicEntitiesUrl,
   listTaxonomies,
   listTerms,
   queryEntities,
   updateEntity,
   updateEntityType,
+  type EntitiesViewer,
   type EntityFieldSpec,
   type EntityLocaleContext,
   type EntityFieldType,
@@ -57,12 +59,38 @@ interface DraftField {
   type: EntityFieldType;
   required: boolean;
   options: string; // comma-separated for enum
+  /** Edit mode: the stored enum options. An option may itself contain a comma, so
+   *  an UNCHANGED options text round-trips this array, never a re-split of the text
+   *  (grade-code `ENT3CD-3` — re-splitting rewrote `"Red, dark"` as two options and
+   *  then hid every stored `"Red, dark"` value). */
+  storedOptions?: string[];
   refEntityType: string; // reference only
   /** ADR 0406 — string fields only (the seam enforces). */
   localizable: boolean;
 }
 
 const emptyField = (): DraftField => ({ key: '', label: '', type: 'string', required: false, options: '', refEntityType: '', localizable: false });
+
+/** Open the field editor on an existing type: one draft row per stored field. */
+const draftOf = (spec: EntityFieldSpec): DraftField => ({
+  key: spec.key,
+  label: spec.label === spec.key ? '' : spec.label,
+  type: spec.type,
+  required: spec.required,
+  options: (spec.options ?? []).join(', '),
+  ...(spec.options ? { storedOptions: spec.options } : {}),
+  refEntityType: spec.refEntityType ?? '',
+  localizable: spec.localizable === true,
+});
+
+/** The enum options a draft row will save. */
+function optionsOf(f: DraftField): string[] {
+  if (f.storedOptions && f.options === f.storedOptions.join(', ')) return f.storedOptions;
+  return f.options.split(',').map((o) => o.trim()).filter((o) => o.length > 0);
+}
+
+/** The server's key normalization (`normalizeTypeName`): trimmed, lower-case. */
+const normKey = (k: string): string => k.trim().toLowerCase();
 
 function toSpecInput(f: DraftField): {
   key: string; label?: string; type: EntityFieldType; required: boolean; options?: string[]; refEntityType?: string; localizable?: boolean;
@@ -74,7 +102,7 @@ function toSpecInput(f: DraftField): {
     required: f.required,
     ...(f.type === 'string' && f.localizable ? { localizable: true } : {}),
     ...(f.type === 'enum'
-      ? { options: f.options.split(',').map((o) => o.trim()).filter((o) => o.length > 0) }
+      ? { options: optionsOf(f) }
       : {}),
     ...(f.type === 'reference' && f.refEntityType ? { refEntityType: f.refEntityType } : {}),
   };
@@ -159,9 +187,20 @@ export function EntitiesPage(): JSX.Element {
   const [rows, setRows] = useState<EntityRow[] | null>(null);
   const [nextCursor, setNextCursor] = useState<string | undefined>(undefined);
   const [busy, setBusy] = useState(false);
+  // ADR 0847 (`ENT3UX-2`) — what this viewer may do; nothing is offered until known.
+  const [viewer, setViewer] = useState<EntitiesViewer>({ canWrite: false, canManageTypes: false });
+  // `ENT3UX-4` — a failed sub-read is an error state, never an empty one.
+  const [rowsError, setRowsError] = useState<string | null>(null);
+  const [relError, setRelError] = useState(false);
+  const [refOptionsFailed, setRefOptionsFailed] = useState(false);
+  const [termsFailed, setTermsFailed] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [importErrors, setImportErrors] = useState<Array<{ line: number; message: string }>>([]);
 
-  // New-type form
+  // New-type form — and, with `editingTypeName` set, the field editor for an
+  // existing type (`ENT3UX-1`: the same rows, prefilled).
   const [showTypeForm, setShowTypeForm] = useState(false);
+  const [editingTypeName, setEditingTypeName] = useState<string | null>(null);
   const [typeName, setTypeName] = useState('');
   const [typeDisplay, setTypeDisplay] = useState('');
   const [draftFields, setDraftFields] = useState<DraftField[]>([emptyField()]);
@@ -215,6 +254,8 @@ export function EntitiesPage(): JSX.Element {
     let cancelled = false;
     void (async () => {
       const next: Record<string, Array<{ id: string; label: string }>> = {};
+      let refFailed = false;
+      let taxFailed = false;
       for (const spec of selectedType.fields) {
         if (spec.type !== 'reference' || !spec.refEntityType) continue;
         try {
@@ -225,16 +266,18 @@ export function EntitiesPage(): JSX.Element {
           });
         } catch {
           next[spec.key] = [];
+          refFailed = true;
         }
       }
       try {
-        const taxes = await listTaxonomies();
+        const taxes = (await listTaxonomies()).filter((x) => !x.projectId); // root namespace (ENT3CD-4)
         const byTax: Record<string, Term[]> = {};
         for (const tax of taxes) {
           try {
             byTax[tax.name] = await listTerms(tax.name);
           } catch {
             byTax[tax.name] = [];
+            taxFailed = true;
           }
         }
         if (!cancelled) {
@@ -243,8 +286,13 @@ export function EntitiesPage(): JSX.Element {
         }
       } catch {
         if (!cancelled) setTaxonomies([]);
+        taxFailed = true;
       }
-      if (!cancelled) setRefOptions(next);
+      if (!cancelled) {
+        setRefOptions(next);
+        setRefOptionsFailed(refFailed);
+        setTermsFailed(taxFailed);
+      }
     })();
     return () => {
       cancelled = true;
@@ -254,8 +302,10 @@ export function EntitiesPage(): JSX.Element {
   const refreshRelationships = useCallback(async () => {
     try {
       setRelationships(await listRelationships());
+      setRelError(false);
     } catch {
       setRelationships([]);
+      setRelError(true);
     }
   }, []);
 
@@ -265,8 +315,14 @@ export function EntitiesPage(): JSX.Element {
 
   const refreshTypes = useCallback(async () => {
     try {
-      const list = await listEntityTypes();
+      // This page manages the WORKSPACE-ROOT namespace only: every call it makes
+      // (rows, fields, relationships, taxonomies) is root-scoped, so a project
+      // type listed here would be edited and read in the wrong namespace
+      // (grade-code `ENT3CD-4`). Project namespaces are reached via the API.
+      const { types: all, viewer: v } = await listEntityTypesForViewer();
+      const list = all.filter((x) => !x.projectId);
       setTypes(list);
+      setViewer(v);
       setError(null);
       const first = list[0];
       if (first && !list.some((x) => x.name === selected)) setSelected(first.name);
@@ -289,6 +345,7 @@ export function EntitiesPage(): JSX.Element {
   const refreshRows = useCallback(
     async (typeName0: string, filters?: QueryFilter[]) => {
       setRows(null);
+      setRowsError(null);
       try {
         const effective = filters ?? activeFilters;
         if (effective.length > 0) {
@@ -301,7 +358,7 @@ export function EntitiesPage(): JSX.Element {
           setNextCursor(page.nextCursor);
         }
       } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
+        setRowsError(err instanceof Error ? err.message : String(err));
         setRows([]);
       }
     },
@@ -319,9 +376,59 @@ export function EntitiesPage(): JSX.Element {
     setFilterKey('');
     setFilterValue('');
     setNameQuery('');
+    setImportErrors([]);
     if (selected) void refreshRows(selected, []);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- refreshRows changes with activeFilters; this effect intentionally keys on `selected` only
   }, [selected]);
+
+  const closeTypeForm = useCallback(() => {
+    setShowTypeForm(false);
+    setEditingTypeName(null);
+    setTypeName('');
+    setTypeDisplay('');
+    setDraftFields([emptyField()]);
+  }, []);
+
+  /** `ENT3UX-1` — open the field editor on the selected (user) type. */
+  const openEditFields = useCallback(() => {
+    if (!selectedType) return;
+    setEditingTypeName(selectedType.name);
+    setDraftFields(selectedType.fields.map(draftOf));
+    setShowTypeForm(true);
+  }, [selectedType]);
+
+  /** ADR 0847 D3 — removing a field, or changing its kind, hides its stored values
+   *  everywhere (never deletes them). Say so before saving. */
+  const onSaveFields = useCallback(async () => {
+    const original = types?.find((x) => x.name === editingTypeName);
+    if (!original || !editingTypeName) return;
+    const kept = draftFields.filter((f) => f.key.trim().length > 0);
+    // A field is affected when it is gone, changed kind, or (enum) lost an option a
+    // stored value may hold — each hides stored values (ADR 0847 D3).
+    const affected = original.fields
+      .filter((spec) => {
+        const next = kept.find((f) => normKey(f.key) === spec.key);
+        if (!next || next.type !== spec.type) return true;
+        return spec.type === 'enum' && (spec.options ?? []).some((o) => !optionsOf(next).includes(o));
+      })
+      .map((spec) => spec.label || spec.key);
+    if (affected.length > 0) {
+      const ok = await confirm({ title: t('schemaChangeTitle'), body: t('schemaChangeBody', { fields: affected.join(', ') }) });
+      if (!ok) return;
+    }
+    setBusy(true);
+    try {
+      await updateEntityType(editingTypeName, { fields: kept.map(toSpecInput) });
+      toast.success(t('fieldsSaved'));
+      closeTypeForm();
+      await refreshTypes();
+      if (selected) void refreshRows(selected, activeFilters);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }, [types, editingTypeName, draftFields, closeTypeForm, refreshTypes, refreshRows, selected, activeFilters, t]);
 
   const onCreateType = useCallback(async () => {
     setBusy(true);
@@ -333,18 +440,16 @@ export function EntitiesPage(): JSX.Element {
         fields,
       });
       toast.success(t('typeCreated'));
-      setShowTypeForm(false);
-      setTypeName('');
-      setTypeDisplay('');
-      setDraftFields([emptyField()]);
+      const created = typeName.trim().toLowerCase();
+      closeTypeForm();
       await refreshTypes();
-      setSelected(typeName.trim().toLowerCase());
+      setSelected(created);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
     }
-  }, [draftFields, typeName, typeDisplay, refreshTypes, t]);
+  }, [draftFields, typeName, typeDisplay, refreshTypes, closeTypeForm, t]);
 
   const onTogglePublish = useCallback(async () => {
     if (!selectedType) return;
@@ -367,6 +472,8 @@ export function EntitiesPage(): JSX.Element {
     setBusy(true);
     try {
       const next = selectedType.publicRead !== true;
+      // `ENT3UX-3` — going public exposes every live record to anyone; confirm it.
+      if (next && !(await confirm({ title: t('makePublicTitle', { name: selectedType.displayName }), body: t('makePublicBody') }))) return;
       await updateEntityType(selectedType.name, { publicRead: next });
       toast.success(next ? t('typePublicOn') : t('typePublicOff'));
       await refreshTypes();
@@ -509,7 +616,7 @@ export function EntitiesPage(): JSX.Element {
         return v === undefined ? <span className="muted">—</span> : String(v);
       },
     }));
-    return [
+    const all: DataColumn<EntityRow>[] = [
       ...fieldCols,
       {
         // ADR 0407 — entry publish state (absent = live; draft entries never
@@ -545,7 +652,9 @@ export function EntitiesPage(): JSX.Element {
         ),
       },
     ];
-  }, [selectedType, t, openEditEntity, onDeleteEntity, onToggleEntityStatus]);
+    // ADR 0847 (`ENT3UX-2`) — a reader gets no row actions column at all.
+    return viewer.canWrite ? all : all.filter((c) => c.key !== 'actions');
+  }, [selectedType, t, openEditEntity, onDeleteEntity, onToggleEntityStatus, viewer.canWrite]);
 
   const nameFilter = nameQuery.trim().toLowerCase();
   const visibleRows = useMemo(() => {
@@ -572,14 +681,22 @@ export function EntitiesPage(): JSX.Element {
       </p>
       {error ? <Notice variant="error">{error}</Notice> : null}
 
-      <div className="u-flex u-gap-4 u-items-start">
+      {/* `ENT3UX-5` — wraps: on a narrow screen the detail stacks under the rail. */}
+      <div className="u-flex u-flex-wrap u-gap-4 u-items-start">
         {/* Types rail */}
         <aside className="surface-card u-p-3 u-minw-220">
           <div className="u-flex u-justify-between u-items-center u-mb-2">
             <h2 className="u-fs-13 u-fw-600">{t('typesHeading')}</h2>
-            <Button variant="quiet" size="sm" onClick={() => setShowTypeForm((v) => !v)} aria-label={t('newType')}>
-              <PlusIcon size={14} />
-            </Button>
+            {viewer.canManageTypes ? (
+              <Button
+                variant="quiet"
+                size="sm"
+                onClick={() => (showTypeForm ? closeTypeForm() : setShowTypeForm(true))}
+                aria-label={t('newType')}
+              >
+                <PlusIcon size={14} />
+              </Button>
+            ) : null}
           </div>
           {types === null ? (
             <SkeletonRows rows={3} columns={['70%']} />
@@ -619,22 +736,35 @@ export function EntitiesPage(): JSX.Element {
               className="u-mt-3 surface-form"
               onSubmit={(e) => {
                 e.preventDefault();
-                void onCreateType();
+                void (editingTypeName ? onSaveFields() : onCreateType());
               }}
             >
-              <label className="u-block u-text-sm" htmlFor="ent-type-name">{t('typeNameLabel')}</label>
-              <input id="ent-type-name" className="ui-input u-w-full" value={typeName} onChange={(e) => setTypeName(e.target.value)} required />
-              <label className="u-block u-text-sm u-mt-2" htmlFor="ent-type-display">{t('typeDisplayLabel')}</label>
-              <input id="ent-type-display" className="ui-input u-w-full" value={typeDisplay} onChange={(e) => setTypeDisplay(e.target.value)} />
+              {editingTypeName ? (
+                <p className="u-fs-13 u-fw-600">{t('editFieldsHeading')}</p>
+              ) : (
+                <>
+                  <label className="u-block u-text-sm" htmlFor="ent-type-name">{t('typeNameLabel')}</label>
+                  <input id="ent-type-name" className="ui-input u-w-full" value={typeName} onChange={(e) => setTypeName(e.target.value)} required />
+                  <label className="u-block u-text-sm u-mt-2" htmlFor="ent-type-display">{t('typeDisplayLabel')}</label>
+                  <input id="ent-type-display" className="ui-input u-w-full" value={typeDisplay} onChange={(e) => setTypeDisplay(e.target.value)} />
+                </>
+              )}
               <p className="u-fs-13 u-fw-600 u-mt-2">{t('fieldsHeading')}</p>
               {draftFields.map((f, i) => (
-                <div key={i} className="u-flex u-gap-2 u-mb-1 u-items-center">
+                <div key={i} className="u-flex u-flex-wrap u-gap-2 u-mb-1 u-items-center">
                   <input
                     className="ui-input"
                     placeholder={t('fieldKeyPh')}
                     aria-label={t('fieldKeyPh')}
                     value={f.key}
                     onChange={(e) => setDraftFields((d) => d.map((x, j) => (j === i ? { ...x, key: e.target.value } : x)))}
+                  />
+                  <input
+                    className="ui-input"
+                    placeholder={t('fieldLabelPh')}
+                    aria-label={t('fieldLabelPh')}
+                    value={f.label}
+                    onChange={(e) => setDraftFields((d) => d.map((x, j) => (j === i ? { ...x, label: e.target.value } : x)))}
                   />
                   <select
                     className="ui-input"
@@ -689,6 +819,16 @@ export function EntitiesPage(): JSX.Element {
                       {typeName.trim() ? <option value={typeName.trim().toLowerCase()}>{typeName.trim()}</option> : null}
                     </select>
                   ) : null}
+                  {draftFields.length > 1 ? (
+                    <Button
+                      variant="quiet"
+                      size="sm"
+                      aria-label={t('removeField')}
+                      onClick={() => setDraftFields((d) => d.filter((_, j) => j !== i))}
+                    >
+                      <TrashIcon size={12} />
+                    </Button>
+                  ) : null}
                 </div>
               ))}
               <div className="u-flex u-gap-2 u-mt-2">
@@ -696,16 +836,19 @@ export function EntitiesPage(): JSX.Element {
                   {t('addField')}
                 </Button>
                 <Button type="submit" variant="primary" size="sm" disabled={busy}>
-                  {t('createType')}
+                  {editingTypeName ? t('saveFields') : t('createType')}
+                </Button>
+                <Button variant="quiet" size="sm" onClick={closeTypeForm}>
+                  {t('cancel')}
                 </Button>
               </div>
             </form>
           ) : null}
-          <TaxonomyPanel />
+          <TaxonomyPanel canManage={viewer.canManageTypes} />
         </aside>
 
         {/* Selected type detail + entities */}
-        <section className="u-flex-1">
+        <section className="u-flex-1 u-minw-240">
           {selectedType ? (
             <div className="surface-card u-p-4">
               <div className="u-flex u-justify-between u-items-center u-mb-3">
@@ -732,26 +875,59 @@ export function EntitiesPage(): JSX.Element {
                       feature manages both; the server enforces the same). */}
                   {selectedType.system !== true ? (
                     <>
-                      <Button variant="quiet" size="sm" onClick={() => void onTogglePublish()} disabled={busy}>
-                        {selectedType.status === 'published' ? t('unpublish') : t('publish')}
-                      </Button>
-                      {selectedType.status === 'published' ? (
-                        <Button variant="quiet" size="sm" onClick={() => void onTogglePublicRead()} disabled={busy}>
-                          {selectedType.publicRead === true ? t('makePrivate') : t('makePublic')}
+                      {/* ADR 0847 (`ENT3UX-2`) — offer only what this viewer may do. */}
+                      {viewer.canManageTypes ? (
+                        <>
+                          <Button variant="quiet" size="sm" onClick={openEditFields} disabled={busy}>
+                            {t('editFields')}
+                          </Button>
+                          <Button variant="quiet" size="sm" onClick={() => void onTogglePublish()} disabled={busy}>
+                            {selectedType.status === 'published' ? t('unpublish') : t('publish')}
+                          </Button>
+                          {selectedType.status === 'published' ? (
+                            <Button variant="quiet" size="sm" onClick={() => void onTogglePublicRead()} disabled={busy}>
+                              {selectedType.publicRead === true ? t('makePrivate') : t('makePublic')}
+                            </Button>
+                          ) : null}
+                          <Button variant="quiet" size="sm" onClick={() => void onDeleteType()} disabled={busy}>
+                            {t('deleteType')}
+                          </Button>
+                        </>
+                      ) : null}
+                      {viewer.canWrite ? (
+                        <Button variant="primary" size="sm" onClick={openCreateEntity}>
+                          {t('newEntity')}
                         </Button>
                       ) : null}
-                      <Button variant="quiet" size="sm" onClick={() => void onDeleteType()} disabled={busy}>
-                        {t('deleteType')}
-                      </Button>
-                      <Button variant="primary" size="sm" onClick={openCreateEntity}>
-                        {t('newEntity')}
-                      </Button>
+                      {!viewer.canWrite && !viewer.canManageTypes ? (
+                        <span className="u-text-sm muted">{t('readOnlyHint')}</span>
+                      ) : null}
                     </>
                   ) : (
                     <span className="u-text-sm muted">{t('systemTypeHint')}</span>
                   )}
                 </div>
               </div>
+
+              {/* `ENT3UX-3` — a public type shows WHERE it is public. */}
+              {selectedType.publicRead === true && selectedType.status === 'published' ? (
+                <p className="u-fs-12 u-mb-3 u-flex u-flex-wrap u-gap-2 u-items-center">
+                  <span className="u-fw-600">{t('publicEndpointLabel')}</span>
+                  <code className="u-mono u-break-all">{publicEntitiesUrl(selectedType.tenantId, selectedType.name)}</code>
+                  <Button
+                    variant="quiet"
+                    size="sm"
+                    onClick={() => {
+                      void navigator.clipboard
+                        .writeText(publicEntitiesUrl(selectedType.tenantId, selectedType.name))
+                        .then(() => toast.success(t('endpointCopied')))
+                        .catch((err: unknown) => toast.error(err instanceof Error ? err.message : String(err)));
+                    }}
+                  >
+                    {t('copyEndpoint')}
+                  </Button>
+                </p>
+              ) : null}
 
               {showEntityForm ? (
                 <form
@@ -778,6 +954,8 @@ export function EntitiesPage(): JSX.Element {
                       />
                     </div>
                   ))}
+                  {refOptionsFailed ? <Notice variant="warning" announce={t('refOptionsFailed')}>{t('refOptionsFailed')}</Notice> : null}
+                  {termsFailed ? <Notice variant="warning" announce={t('termsLoadFailed')}>{t('termsLoadFailed')}</Notice> : null}
                   {taxonomies.length > 0 ? (
                     <fieldset className="u-border-0 u-p-0 u-m-0 u-mb-2">
                       <legend className="u-fs-13 u-fw-600">{t('termsHeading')}</legend>
@@ -859,6 +1037,12 @@ export function EntitiesPage(): JSX.Element {
               {/* Relationships (Phase 2) — policies FROM this type */}
               <details className="u-mb-3">
                 <summary className="u-fs-13 u-fw-600 u-cursor-pointer">{t('relationshipsHeading')}</summary>
+                {relError ? (
+                  <Notice variant="error" announce={t('relLoadFailed')}>
+                    {t('relLoadFailed')}{' '}
+                    <Button variant="quiet" size="sm" onClick={() => void refreshRelationships()}>{t('retry')}</Button>
+                  </Notice>
+                ) : null}
                 <ul className="u-list-none u-p-0 u-mt-2">
                   {relationships
                     .filter((r) => r.fromTypeId === selectedType.typeId || r.toTypeId === selectedType.typeId)
@@ -872,7 +1056,7 @@ export function EntitiesPage(): JSX.Element {
                           </span>
                           <span className="chip chip--muted">{t(`cardinality_${r.cardinality.replace('-', '_')}`)}</span>
                           <span className="chip chip--muted">{t(`onDeleteChip_${r.onDelete.replace('-', '')}`)}</span>
-                          <Button
+                          {viewer.canManageTypes ? <Button
                             variant="quiet" size="sm"
                             aria-label={t('deleteRelationship')}
                             onClick={() => {
@@ -892,12 +1076,12 @@ export function EntitiesPage(): JSX.Element {
                             }}
                           >
                             <TrashIcon size={12} />
-                          </Button>
+                          </Button> : null}
                         </li>
                       );
                     })}
                 </ul>
-                <div className="u-flex u-gap-2 u-items-center">
+                {viewer.canManageTypes ? <div className="u-flex u-flex-wrap u-gap-2 u-items-center">
                   <select className="ui-input" aria-label={t('relTargetPh')} value={relTo} onChange={(e) => setRelTo(e.target.value)}>
                     <option value="">{t('relTargetPh')}</option>
                     {(types ?? []).map((x) => (
@@ -928,7 +1112,7 @@ export function EntitiesPage(): JSX.Element {
                   >
                     {t('addRelationship')}
                   </Button>
-                </div>
+                </div> : null}
               </details>
 
               {/* Filter bar + export/import (Phase 3) */}
@@ -953,7 +1137,8 @@ export function EntitiesPage(): JSX.Element {
                 />
                 <Button
                   variant="quiet" size="sm"
-                  disabled={!filterKey}
+                  // `ENT3UX-7` — an empty number filter used to send Number('') = 0.
+                  disabled={!filterKey || (selectedType.fields.find((s) => s.key === filterKey)?.type === 'number' && !Number.isFinite(Number.parseFloat(filterValue)))}
                   onClick={() => {
                     const spec = selectedType.fields.find((s) => s.key === filterKey);
                     const value =
@@ -980,8 +1165,8 @@ export function EntitiesPage(): JSX.Element {
                   <a className="btn-ghost btn-sm" href={exportUrl(selectedType.name)} download>
                     {t('exportBtn')}
                   </a>
-                  <label className="btn-ghost btn-sm">
-                    {t('importBtn')}
+                  {viewer.canWrite ? <label className="btn-ghost btn-sm" aria-busy={importing}>
+                    {importing ? t('importing') : t('importBtn')}
                     <input
                       type="file"
                       accept=".ndjson,.jsonl,.txt,application/x-ndjson"
@@ -989,19 +1174,24 @@ export function EntitiesPage(): JSX.Element {
                       onChange={(e) => {
                         const file = e.target.files?.[0];
                         e.target.value = '';
-                        if (!file || !selectedType) return;
+                        if (!file || !selectedType || importing) return;
+                        setImporting(true);
+                        setImportErrors([]);
                         void file.text().then(async (text) => {
                           try {
                             const r = await importEntities(selectedType.name, text);
                             toast.success(t('importDone', { created: r.created, existing: r.existing, errors: r.errors.length }));
+                            setImportErrors(r.errors);
                             await refreshRows(selectedType.name);
                           } catch (err) {
                             toast.error(err instanceof Error ? err.message : String(err));
+                          } finally {
+                            setImporting(false);
                           }
                         });
                       }}
                     />
-                  </label>
+                  </label> : null}
                 </span>
               </div>
 
@@ -1018,7 +1208,25 @@ export function EntitiesPage(): JSX.Element {
                 </div>
               ) : null}
 
-              {rows === null ? (
+              {/* `ENT3UX-6` — which lines failed, not just how many. */}
+              {importErrors.length > 0 ? (
+                <Notice variant="warning">
+                  <span className="u-fw-600">{t('importErrorsHeading')}</span>
+                  <ul className="u-m-0 u-pl-3">
+                    {importErrors.slice(0, 10).map((e) => (
+                      <li key={e.line}>{t('importErrorLine', { line: e.line, message: e.message })}</li>
+                    ))}
+                  </ul>
+                </Notice>
+              ) : null}
+
+              {/* `ENT3UX-4` — a failed read is an error, never "no records yet". */}
+              {rowsError !== null ? (
+                <Notice variant="error" announce={t('rowsLoadFailed')}>
+                  {t('rowsLoadFailed')} {rowsError}{' '}
+                  <Button variant="quiet" size="sm" onClick={() => void refreshRows(selectedType.name, activeFilters)}>{t('retry')}</Button>
+                </Notice>
+              ) : rows === null ? (
                 <SkeletonRows rows={4} columns={['40%', '30%', '20%']} />
               ) : visibleRows && visibleRows.length === 0 ? (
                 hasActiveFilters ? (

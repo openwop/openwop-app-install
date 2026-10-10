@@ -13,6 +13,9 @@
  * because the frontend union carried four members while the backend registered
  * six, and nothing anywhere compared them. A drift test on one side only would
  * have stayed green through it.
+ *
+ * SABOTAGE (witnessed): building the URL by string concatenation (no encoding) reds
+ * every per-type case; dropping a type from the frontend literal reds the drift case.
  */
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -28,8 +31,14 @@ describe('CMNT-1 — threadActionUrl carries the real type and id, for every com
   for (const rt of RESOURCE_TYPES) {
     it(`${rt}: the link names the resource, never a coerced stand-in`, () => {
       const url = threadActionUrl({ orgId: 'org_1', resourceType: rt, resourceId: 'res#1' });
-      expect(url.startsWith('/comments?')).toBe(true);
-      const q = new URLSearchParams(url.slice('/comments?'.length));
+      // Parse it the way a BROWSER does. `new URLSearchParams(url.slice(…))` treats a raw
+      // `#` as a literal character, so an unencoded id read back intact and the encoding
+      // claim below could not fail (/grade-tests wave 10: the probe that dropped the
+      // encoding stayed green). `URL` splits the fragment off, exactly as navigation does.
+      const parsed = new URL(url, 'https://app.example');
+      expect(parsed.pathname).toBe('/comments');
+      expect(parsed.hash, 'a `#` in any value must be percent-encoded, never start a fragment').toBe('');
+      const q = parsed.searchParams;
       expect(q.get('orgId')).toBe('org_1');
       expect(q.get('resourceType')).toBe(rt);
       expect(q.get('resourceId')).toBe('res#1'); // the `#` MUST be encoded, not truncated

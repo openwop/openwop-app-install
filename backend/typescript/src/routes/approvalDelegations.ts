@@ -28,7 +28,7 @@ function callerSubject(req: Request): string {
 }
 
 export function registerApprovalDelegationRoutes(app: Express): void {
-  app.get('/v1/host/openwop-app/approval-delegations', async (req, res, next) => {
+  app.get('/host/openwop-app/approval-delegations', async (req, res, next) => {
     try {
       const tenantId = tenantOf(req);
       const me = callerSubject(req);
@@ -43,7 +43,7 @@ export function registerApprovalDelegationRoutes(app: Express): void {
     }
   });
 
-  app.post('/v1/host/openwop-app/approval-delegations', async (req, res, next) => {
+  app.post('/host/openwop-app/approval-delegations', async (req, res, next) => {
     try {
       const tenantId = tenantOf(req);
       const me = callerSubject(req);
@@ -69,7 +69,7 @@ export function registerApprovalDelegationRoutes(app: Express): void {
     }
   });
 
-  app.post('/v1/host/openwop-app/approval-delegations/:delegationId/revoke', async (req, res, next) => {
+  app.post('/host/openwop-app/approval-delegations/:delegationId/revoke', async (req, res, next) => {
     try {
       const tenantId = tenantOf(req);
       const me = callerSubject(req);

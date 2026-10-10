@@ -13,6 +13,8 @@ export const messages = {
   loading: 'Carregando o editor…',
   loadError: 'Não foi possível carregar este canvas.',
   notAvailable: 'Este canvas não está disponível — pode ter sido excluído, pertencer a outro espaço ou seu recurso pode estar desabilitado.',
+  invalidArtifact: 'Este design não pode ser aberto no editor: ele usa componentes ou valores fora do catálogo. Peça ao assistente para gerá-lo novamente.',
+  invalidArtifactDetail: 'O que foi recusado',
   noOrg: 'Nenhum espaço de trabalho disponível.',
   retry: 'Tentar novamente',
   liveConnecting: 'Iniciando a sessão ao vivo…',

@@ -1,11 +1,12 @@
 {
   "name": "feature.forms.nodes",
-  "version": "1.2.0",
+  "version": "1.2.1",
+  "kind": "node",
   "description": "Forms feature node pack — read nodes over the ctx.features.forms surface shipped by the Forms feature package. list-forms reads an org's forms; list-submissions reads a form's captured submissions; get-submission reads one submission's values + intake binding (the forms→priority-matrix bridge).",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "forms", "submissions", "lead-capture"],
-  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "engines": { "openwop": ">=1.0.0 <3.0.0" },
   "nodes": [
     {
       "typeId": "feature.forms.nodes.list-forms",

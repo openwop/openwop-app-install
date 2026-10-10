@@ -25,6 +25,11 @@
  * what it deliberately KEEPS. Every "keeps" here is a case where deletion would
  * be a grant or a rewrite, so a future author who "simplifies" the eraser to a
  * delete turns one of these red.
+ *
+ * Wave 10: the review + pack-disable fixtures are written through the PRODUCT
+ * writers (`upsertReview`, `disablePack`), never a test-declared collection — a
+ * writer-side regression (key spelling, index) is otherwise invisible. The
+ * test-side collections below are READERS only.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -34,6 +39,8 @@ import { eraseSubject } from '../src/host/subjectErasure.js';
 import { DurableCollection } from '../src/host/hostExtPersistence.js';
 import { __resetCommerceConnect, listingTombstones, paidListings } from '../src/features/commerce-connect/stores.js';
 import { ERASED_VALUE } from '../src/features/marketplace/erasure.js';
+import { upsertReview, __resetMarketplaceReviews } from '../src/features/marketplace/reviewService.js';
+import { disablePack, __clearPackEnablement } from '../src/features/marketplace/packEnablementService.js';
 
 const TENANT = 'ws:mkt-erasure';
 const SUBJECT = 'usr_departing_member';
@@ -45,7 +52,7 @@ interface ReviewRow {
 }
 interface PackDisableRow { id: string; tenantId: string; packName: string; disabledAt: string; disabledBy: string }
 
-// The SAME namespaces + key + tenant functions as the owning services.
+// READERS over the SAME namespaces as the owning services (writes go through the services).
 const reviews = new DurableCollection<ReviewRow>('marketplace:review', (r) => r.reviewId, undefined, (r) => r.tenantId);
 const packDisables = new DurableCollection<PackDisableRow>('marketplace:pack-disable', (r) => r.id, undefined, (r) => r.tenantId);
 
@@ -63,19 +70,19 @@ afterAll(async () => { await new Promise<void>((res) => server.close(() => res()
 
 beforeEach(async () => {
   await __resetCommerceConnect();
-  for (const r of await reviews.list()) await reviews.delete(r.reviewId);
-  for (const d of await packDisables.list()) await packDisables.delete(d.id);
+  await __resetMarketplaceReviews();
+  await __clearPackEnablement();
 });
 
 const now = '2026-01-01T00:00:00Z';
 
 describe('MPL-7 — marketplace:review: the words go, the rating stays', () => {
   it('anonymizes the author and drops the body, and leaves the rating and the row', async () => {
-    await reviews.put({ reviewId: 'rev1', tenantId: TENANT, orgId: 'org-a', packName: 'vendor.a.nodes', rating: 5, body: 'I loved it, — Jane', authorId: SUBJECT, createdAt: now, updatedAt: now });
+    const { reviewId } = await upsertReview({ tenantId: TENANT, orgId: 'org-a', packName: 'vendor.a.nodes', rating: 5, body: 'I loved it, — Jane', authorId: SUBJECT });
 
     await eraseSubject(TENANT, SUBJECT);
 
-    const r = await reviews.get('rev1');
+    const r = await reviews.get(reviewId);
     expect(r, 'the ROW must survive — deleting it silently moves the pack average, which is other people\'s information').toBeTruthy();
     expect(r!.authorId).toBe(ERASED_VALUE);
     expect(r!.body, 'the person\'s own words go').toBeUndefined();
@@ -83,18 +90,18 @@ describe('MPL-7 — marketplace:review: the words go, the rating stays', () => {
   });
 
   it('leaves ANOTHER member\'s review completely untouched (over-erasure is unrecoverable)', async () => {
-    await reviews.put({ reviewId: 'rev2', tenantId: TENANT, orgId: 'org-a', packName: 'vendor.a.nodes', rating: 3, body: 'fine', authorId: OTHER, createdAt: now, updatedAt: now });
+    const { reviewId } = await upsertReview({ tenantId: TENANT, orgId: 'org-a', packName: 'vendor.a.nodes', rating: 3, body: 'fine', authorId: OTHER });
     await eraseSubject(TENANT, SUBJECT);
-    const r = await reviews.get('rev2');
+    const r = await reviews.get(reviewId);
     expect(r!.authorId).toBe(OTHER);
     expect(r!.body).toBe('fine');
   });
 
   it('is IDEMPOTENT — the contract requires it (the eraser runs once per linked identity key)', async () => {
-    await reviews.put({ reviewId: 'rev3', tenantId: TENANT, orgId: 'org-a', packName: 'vendor.a.nodes', rating: 4, body: 'x', authorId: SUBJECT, createdAt: now, updatedAt: now });
+    const { reviewId } = await upsertReview({ tenantId: TENANT, orgId: 'org-a', packName: 'vendor.a.nodes', rating: 4, body: 'x', authorId: SUBJECT });
     await eraseSubject(TENANT, SUBJECT);
     await eraseSubject(TENANT, SUBJECT);
-    const r = await reviews.get('rev3');
+    const r = await reviews.get(reviewId);
     expect(r!.authorId).toBe(ERASED_VALUE);
     expect(r!.rating).toBe(4);
   });
@@ -102,9 +109,9 @@ describe('MPL-7 — marketplace:review: the words go, the rating stays', () => {
 
 describe('MPL-7 — marketplace:pack-disable: deleting the row would be a GRANT', () => {
   it('anonymizes disabledBy and KEEPS the deny row (deleting it re-enables the pack)', async () => {
-    await packDisables.put({ id: `${TENANT}:vendor.b.nodes`, tenantId: TENANT, packName: 'vendor.b.nodes', disabledAt: now, disabledBy: SUBJECT });
+    await disablePack(TENANT, 'vendor.b.nodes', SUBJECT);
     await eraseSubject(TENANT, SUBJECT);
-    const d = await packDisables.get(`${TENANT}:vendor.b.nodes`);
+    const [d] = (await packDisables.listForTenantIndexed(TENANT)).filter((r) => r.packName === 'vendor.b.nodes');
     expect(d, 'a sparse DENY row: deleting it silently RE-ENABLES a pack the workspace deliberately hid').toBeTruthy();
     expect(d!.disabledBy).toBe(ERASED_VALUE);
     expect(d!.packName).toBe('vendor.b.nodes');

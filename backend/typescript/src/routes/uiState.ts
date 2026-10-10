@@ -29,7 +29,7 @@ function subjectOf(req: Request): string {
 }
 
 export function registerUiStateRoutes(app: Express, _deps: Deps): void {
-  app.get('/v1/host/openwop-app/ui-state', async (req, res, next) => {
+  app.get('/host/openwop-app/ui-state', async (req, res, next) => {
     try {
       const resourceType = typeof req.query.resourceType === 'string' ? req.query.resourceType : undefined;
       const resourceId = typeof req.query.resourceId === 'string' ? req.query.resourceId : undefined;
@@ -40,7 +40,7 @@ export function registerUiStateRoutes(app: Express, _deps: Deps): void {
     }
   });
 
-  app.put('/v1/host/openwop-app/ui-state', async (req, res, next) => {
+  app.put('/host/openwop-app/ui-state', async (req, res, next) => {
     try {
       const b = (req.body ?? {}) as { resourceType?: unknown; resourceId?: unknown; key?: unknown; value?: unknown };
       if (typeof b.resourceType !== 'string' || typeof b.resourceId !== 'string' || typeof b.key !== 'string') {
@@ -53,7 +53,7 @@ export function registerUiStateRoutes(app: Express, _deps: Deps): void {
     }
   });
 
-  app.delete('/v1/host/openwop-app/ui-state/:resourceType/:resourceId/:key', async (req, res, next) => {
+  app.delete('/host/openwop-app/ui-state/:resourceType/:resourceId/:key', async (req, res, next) => {
     try {
       const { resourceType, resourceId, key } = req.params;
       const removed = await deleteUiState(tenantOf(req), subjectOf(req), resourceType, resourceId, key);

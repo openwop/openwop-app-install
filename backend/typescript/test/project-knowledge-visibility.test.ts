@@ -60,17 +60,17 @@ function client(): Client {
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b), del: (p) => call('DELETE', p) };
 }
 
-const P = '/v1/host/openwop-app/projects';
-const NB = '/v1/host/openwop-app/notebooks';
+const P = '/host/openwop-app/projects';
+const NB = '/host/openwop-app/notebooks';
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
-const KB = (orgId: string): string => `/v1/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}`;
+const KB = (orgId: string): string => `/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}`;
 
 /** Owner + a private project + a bound collection holding one secret document. */
 async function privateCorpus() {
   const tenantId = `org:pkv-${Date.now()}-${n++}`;
   const owner = client();
-  await owner.post('/v1/host/openwop-app/test/login', { email: uniqEmail('pkv-owner'), tenantId });
-  const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'PrivCo' })).body.orgId;
+  await owner.post('/host/openwop-app/test/login', { email: uniqEmail('pkv-owner'), tenantId });
+  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'PrivCo' })).body.orgId;
   const projectId = (await owner.post(P, { orgId, name: 'Secret' })).body.id;
   const col = await owner.post(`${P}/${projectId}/knowledge/collections`, { orgId, name: 'Secret notes' });
   expect(col.status, JSON.stringify(col.body)).toBe(201);
@@ -89,8 +89,8 @@ async function privateCorpus() {
 async function privateNotebookCorpus() {
   const tenantId = `org:pkv-nb-${Date.now()}-${n++}`;
   const owner = client();
-  await owner.post('/v1/host/openwop-app/test/login', { email: uniqEmail('pkv-nb-owner'), tenantId });
-  const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'PrivCo' })).body.orgId;
+  await owner.post('/host/openwop-app/test/login', { email: uniqEmail('pkv-nb-owner'), tenantId });
+  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'PrivCo' })).body.orgId;
   const projectId = (await owner.post(P, { orgId, name: 'SecretNB' })).body.id;
   const ensure = await owner.post(`${NB}/${projectId}/ensure`);
   expect(ensure.status, JSON.stringify(ensure.body)).toBe(200);
@@ -107,8 +107,8 @@ async function privateNotebookCorpus() {
 async function privateCreatedNotebookCorpus() {
   const tenantId = `org:pkv-cn-${Date.now()}-${n++}`;
   const owner = client();
-  await owner.post('/v1/host/openwop-app/test/login', { email: uniqEmail('pkv-cn-owner'), tenantId });
-  const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'PrivCo' })).body.orgId;
+  await owner.post('/host/openwop-app/test/login', { email: uniqEmail('pkv-cn-owner'), tenantId });
+  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'PrivCo' })).body.orgId;
   const created = await owner.post(NB, { name: 'SecretCN', orgId });
   expect(created.status, JSON.stringify(created.body)).toBe(201);
   const projectId: string = created.body.notebook.id;
@@ -122,7 +122,7 @@ async function privateCreatedNotebookCorpus() {
 /** A real org VIEWER of the same org who is NOT a project member. */
 async function orgViewer(tenantId: string, orgId: string): Promise<Client & { userId: string }> {
   const viewer = client();
-  const viewerId = (await viewer.post('/v1/host/openwop-app/test/login', { email: uniqEmail('pkv-viewer'), tenantId })).body.user.userId;
+  const viewerId = (await viewer.post('/host/openwop-app/test/login', { email: uniqEmail('pkv-viewer'), tenantId })).body.user.userId;
   await createMember({ tenantId, orgId, subject: viewerId, displayName: 'V', roles: ['viewer'] });
   return Object.assign(viewer, { userId: viewerId as string });
 }
@@ -269,10 +269,10 @@ describe('CPC-2 — a private project\'s corpus is not readable through the KB d
 
 describe('CPC-3 — flipping a shared project to private unbinds it from the advisors', () => {
   async function boardWithAdvisor(owner: Client, orgId: string) {
-    const r = await owner.post('/v1/host/openwop-app/roster', { persona: 'Ada Lovelace', agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
+    const r = await owner.post('/host/openwop-app/roster', { persona: 'Ada Lovelace', agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
     expect(r.status, JSON.stringify(r.body)).toBe(201);
     const rosterId: string = r.body.rosterId;
-    const b = await owner.post('/v1/host/openwop-app/advisors/boards', { orgId, name: 'Council', advisors: [rosterId] });
+    const b = await owner.post('/host/openwop-app/advisors/boards', { orgId, name: 'Council', advisors: [rosterId] });
     expect(b.status, JSON.stringify(b.body)).toBe(201);
     return { boardId: b.body.boardId as string, rosterId };
   }
@@ -280,14 +280,14 @@ describe('CPC-3 — flipping a shared project to private unbinds it from the adv
   it('share-THEN-private unbinds the advisor; private-THEN-org re-binds it', async () => {
     const tenantId = `org:pkv3-${Date.now()}-${n++}`;
     const owner = client();
-    await owner.post('/v1/host/openwop-app/test/login', { email: uniqEmail('pkv3'), tenantId });
-    const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'ShareCo' })).body.orgId;
+    await owner.post('/host/openwop-app/test/login', { email: uniqEmail('pkv3'), tenantId });
+    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'ShareCo' })).body.orgId;
     const projectId = (await owner.post(P, { orgId, name: 'Launch' })).body.id;
     const collectionId: string = (await owner.post(`${P}/${projectId}/knowledge/collections`, { orgId, name: 'Launch notes' })).body.collectionId;
     const { boardId, rosterId } = await boardWithAdvisor(owner, orgId);
 
     // Share while the project is org-visible — the advisor is bound.
-    const shared = await owner.post(`/v1/host/openwop-app/advisors/boards/${boardId}/shared-knowledge`, { kind: 'project', shared: true });
+    const shared = await owner.post(`/host/openwop-app/advisors/boards/${boardId}/shared-knowledge`, { kind: 'project', shared: true });
     expect(shared.status, JSON.stringify(shared.body)).toBe(200);
     const bound = async (): Promise<string[]> => (await getAgentProfile(tenantId, rosterId))?.knowledge?.collectionIds ?? [];
     expect(await bound()).toContain(collectionId);
@@ -299,7 +299,7 @@ describe('CPC-3 — flipping a shared project to private unbinds it from the adv
 
     // Positive control — the advisor's OTHER bindings and the board itself survive;
     // this is a targeted revoke, not a wipe.
-    const status = await owner.get(`/v1/host/openwop-app/advisors/boards/${boardId}/shared-knowledge`);
+    const status = await owner.get(`/host/openwop-app/advisors/boards/${boardId}/shared-knowledge`);
     expect(status.status).toBe(200);
 
     // And back: restoring `org` visibility re-binds, so stored intent stays honest

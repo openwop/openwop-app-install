@@ -12,11 +12,12 @@ import { OpenwopError } from '../../types.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import type { HostEventOrigin } from '../../host/hostEventDispatcher.js';
 import { PREAUTHORIZED_CALLER, type SubjectCaller } from '../../host/subjectAccess.js';
+import { assertRunScopeOrg } from '../../host/accessControlService.js';
 import { surfaceStr as str, surfaceOptCount, type FeatureSurface } from '../../host/featureSurfaces.js';
 import {
   drainReindex, getCollection, getReindexJob, kbReindexSliceChunks, kbReindexWorkflowId,
   listCollections, ragQuery, resolveRetrievalMode, search,
-  tenantRetrieve, type RetrievalMode,
+  tenantRetrieve, TENANT_SCOPED_KB_ORGS, type RetrievalMode,
 } from './kbService.js';
 
 export function buildKbSurface(scope: BundleScope): FeatureSurface {
@@ -37,7 +38,20 @@ export function buildKbSurface(scope: BundleScope): FeatureSurface {
    * so these four verbs inherit it rather than each re-implementing it, and so
    * do `ctx.knowledge`, the REST doors and any surface added later.
    */
-  const caller: SubjectCaller = { ...(scope.actingUserId ? { subject: scope.actingUserId } : {}) };
+  // ADR 0832 D3 — `orgScopeSubject` rides along for `tenantRetrieve`'s org filter
+  // only; `subject` stays the actor, so a causing member grants nothing.
+  const caller: SubjectCaller = {
+    ...(scope.actingUserId ? { subject: scope.actingUserId } : {}),
+    ...(scope.orgScopeSubject ? { orgScopeSubject: scope.orgScopeSubject } : {}),
+  };
+  /** ADR 0830 D1 (S1) — the node names the org, so the run must be allowed to
+   *  read it: the same predicate the `/kb/orgs/:orgId` doors apply
+   *  (`assertOrgScope`), through its run-lane form. Before this, a run acting for
+   *  an org-A member read org B's chunk text by passing org B's id. */
+  const readOrg = async (orgId: string): Promise<void> => {
+    if (TENANT_SCOPED_KB_ORGS.has(orgId)) return; // a tenant-level namespace, not an org (same rule as `tenantRetrieve`)
+    await assertRunScopeOrg(scope, orgId, 'workspace:read');
+  };
   // ADR 0617 D1a / ADR 0643 D3 — the run's origin rides every lifecycle event this
   // surface causes, so a binding on the emitting run's own workflow is skipped.
   const origin: HostEventOrigin = {
@@ -52,6 +66,7 @@ export function buildKbSurface(scope: BundleScope): FeatureSurface {
     search: async (args) => {
       const orgId = str(args.orgId);
       const collectionId = str(args.collectionId);
+      await readOrg(orgId);
       const override: RetrievalMode | undefined =
         args.mode === 'dense' || args.mode === 'hybrid' || args.mode === 'hybrid+rerank' ? args.mode : undefined;
       const col = await getCollection(tenantId, orgId, collectionId, caller);
@@ -61,6 +76,7 @@ export function buildKbSurface(scope: BundleScope): FeatureSurface {
     },
     /** Retrieve → augmented prompt + citations (generation is the node's job). */
     rag: async (args) => {
+      await readOrg(str(args.orgId));
       const r = await ragQuery(tenantId, str(args.orgId), str(args.collectionId), args.query, args.topK,
         typeof args.minScore === 'number' ? { minScore: args.minScore } : undefined, caller);
       // ADR 0351 P2 — coverage + embedding ride the surface so generation nodes
@@ -80,6 +96,7 @@ export function buildKbSurface(scope: BundleScope): FeatureSurface {
     },
     /** List the org's collections (read). */
     listCollections: async (args) => {
+      await readOrg(str(args.orgId));
       return { collections: await listCollections(tenantId, str(args.orgId), caller) };
     },
 

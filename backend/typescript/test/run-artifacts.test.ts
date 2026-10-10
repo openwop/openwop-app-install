@@ -110,7 +110,7 @@ describe('ADR 0083 amendment — reference resolution (media / document / serve)
 
   it('ADR 0115 Phase 4 — URL-based image array (image-gen output) → a file artifact per image, not a JSON blob; replay-idempotent', async () => {
     // The image-generate node emits `images: [{ url }]` (bytes already a host media asset).
-    const out = { images: [{ url: '/v1/host/openwop-app/assets/img-a', mimeType: 'image/png' }, { url: '/v1/host/openwop-app/assets/img-b', mimeType: 'image/png' }] };
+    const out = { images: [{ url: '/host/openwop-app/assets/img-a', mimeType: 'image/png' }, { url: '/host/openwop-app/assets/img-b', mimeType: 'image/png' }] };
     const r = await persistRunArtifact({ tenantId: 'tU', runId: 'uRun', nodeId: 'gen', role: 'deliverable', output: out, now: '2026-06-20T00:00:00Z' });
     expect(r).not.toBeNull();
     const rows = await listRunArtifactsForTenant('tU');
@@ -136,10 +136,10 @@ describe('ADR 0083 amendment — reference resolution (media / document / serve)
   });
 
   it('SERVE reference (renderedMediaToken) → a click-to-open link, not a JSON blob', async () => {
-    const r = await persistRunArtifact({ tenantId: 'tS', runId: 'rndRun', nodeId: 'render', role: 'deliverable', output: { versionId: 'v1', renderedMediaToken: 'tok-xyz', url: '/v1/host/openwop-app/assets/tok-xyz', sizeBytes: 99 }, now: '2026-06-20T00:00:00Z' });
+    const r = await persistRunArtifact({ tenantId: 'tS', runId: 'rndRun', nodeId: 'render', role: 'deliverable', output: { versionId: 'v1', renderedMediaToken: 'tok-xyz', url: '/host/openwop-app/assets/tok-xyz', sizeBytes: 99 }, now: '2026-06-20T00:00:00Z' });
     expect(r?.artifactId).toBe('run-event:rndRun:render');
     const rev = await getArtifactRevision('tS', undefined, r!.artifactId, r!.revisionId);
-    expect(rev?.content).toContain('/v1/host/openwop-app/assets/tok-xyz');
+    expect(rev?.content).toContain('(/host/openwop-app/assets/tok-xyz)');
     expect(rev?.content).toMatch(/^\[.*\]\(/); // a markdown link, not raw JSON
   });
 });

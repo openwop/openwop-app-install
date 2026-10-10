@@ -22,13 +22,13 @@ afterAll(async () => { await closeApp(); });
 const client = (): Client => makeClient(() => BASE);
 
 async function signup(c: Client): Promise<void> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail('ws') });
+  const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail('ws') });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
 }
 
 /** A board owned by the signed-in caller, with two To Do cards of differing priority. */
 async function seedBoard(c: Client): Promise<string> {
-  const board = await c.post('/v1/host/openwop-app/kanban/boards', {
+  const board = await c.post('/host/openwop-app/kanban/boards', {
     name: 'Agent board',
     ownerSubject: { kind: 'agent', id: 'roster-route-1' },
     columns: [
@@ -41,7 +41,7 @@ async function seedBoard(c: Client): Promise<string> {
   const boardId = board.body.board?.id ?? board.body.id;
 
   for (const [title, priority] of [['low one', 'low'], ['high one', 'high']] as const) {
-    const card = await c.post(`/v1/host/openwop-app/kanban/boards/${boardId}/cards`, {
+    const card = await c.post(`/host/openwop-app/kanban/boards/${boardId}/cards`, {
       title, columnId: 'todo', priority,
     });
     expect(card.status, JSON.stringify(card.body)).toBe(201);
@@ -49,7 +49,7 @@ async function seedBoard(c: Client): Promise<string> {
   return boardId;
 }
 
-const RANKING = (boardId: string) => `/v1/host/openwop-app/work-selection/boards/${boardId}/ranking`;
+const RANKING = (boardId: string) => `/host/openwop-app/work-selection/boards/${boardId}/ranking`;
 
 describe('ADR 0534 — the ranking route', () => {
   it('404s when the feature is OFF — a ranking would describe a decision the host is not making', async () => {

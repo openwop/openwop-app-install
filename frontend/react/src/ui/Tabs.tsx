@@ -12,7 +12,7 @@
  * sibling (the pattern already in use). For the common "tab id lives in `?tab`"
  * case, pair it with `useUrlTab` below.
  */
-import type { ReactNode } from 'react';
+import { Fragment, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { handleTablistKeyDown } from './rovingTabs.js';
 
@@ -21,6 +21,16 @@ export interface TabItem<T extends string = string> {
   label: ReactNode;
   /** Rendered but non-activatable (greyed) — e.g. a gated tab shown as locked. */
   disabled?: boolean;
+  /** Visible cluster label drawn before the first tab of each run of equal
+   *  `group`s (the Access Hub's Credentials · Identity). Presentational only: a
+   *  tablist may own nothing but tabs, so the label is `aria-hidden` and every tab
+   *  label must make sense on its own. */
+  group?: string;
+  /** A short status after the label — a count ("3") or a state ("1 issue",
+   *  "Off"). It is part of the tab's accessible name, after a spoken comma. */
+  meta?: string;
+  /** `'attention'` tints `meta` amber (something needs the user). */
+  metaTone?: 'attention';
 }
 
 export interface TabsProps<T extends string = string> {
@@ -40,35 +50,50 @@ export interface TabsProps<T extends string = string> {
   panelId?: string;
   /** Extra class appended to the `.tabs` container (e.g. `'u-mb-4'`). */
   className?: string;
+  /** `'vertical'` lays the tabs out as a side menu (`.tabs--vertical`) and sets
+   *  `aria-orientation`. The arrow keys already move in both axes. */
+  orientation?: 'horizontal' | 'vertical';
 }
 
 /** The tablist row. Render `<TabPanel>` (or a conditional sibling) for the body. */
-export function Tabs<T extends string = string>({ items, value, onChange, label, idBase = 'tabs', panelId, className }: TabsProps<T>): JSX.Element {
+export function Tabs<T extends string = string>({ items, value, onChange, label, idBase = 'tabs', panelId, className, orientation = 'horizontal' }: TabsProps<T>): JSX.Element {
   const controls = panelId ?? `${idBase}-panel`;
+  const vertical = orientation === 'vertical';
+  const classes = ['tabs', vertical ? 'tabs--vertical' : '', className ?? ''].filter(Boolean).join(' ');
   return (
     <div
-      className={className ? `tabs ${className}` : 'tabs'}
+      className={classes}
       role="tablist"
       aria-label={label}
+      aria-orientation={vertical ? 'vertical' : undefined}
       onKeyDown={handleTablistKeyDown}
     >
-      {items.map((item) => {
+      {items.map((item, i) => {
         const selected = item.id === value;
+        const startsGroup = item.group !== undefined && item.group !== items[i - 1]?.group;
         return (
-          <button
-            key={item.id}
-            type="button"
-            role="tab"
-            id={`${idBase}-tab-${item.id}`}
-            aria-selected={selected}
-            aria-controls={controls}
-            tabIndex={selected ? 0 : -1}
-            disabled={item.disabled}
-            className="tab"
-            onClick={() => onChange(item.id)}
-          >
-            {item.label}
-          </button>
+          <Fragment key={item.id}>
+            {startsGroup ? <div className="tabs__group" role="presentation" aria-hidden="true">{item.group}</div> : null}
+            <button
+              type="button"
+              role="tab"
+              id={`${idBase}-tab-${item.id}`}
+              aria-selected={selected}
+              aria-controls={controls}
+              tabIndex={selected ? 0 : -1}
+              disabled={item.disabled}
+              className="tab"
+              onClick={() => onChange(item.id)}
+            >
+              {item.label}
+              {item.meta ? (
+                <span className={`tab__meta${item.metaTone === 'attention' ? ' tab__meta--attention' : ''}`}>
+                  <span className="sr-only">, </span>
+                  {item.meta}
+                </span>
+              ) : null}
+            </button>
+          </Fragment>
         );
       })}
     </div>

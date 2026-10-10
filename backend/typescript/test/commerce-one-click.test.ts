@@ -108,11 +108,11 @@ function client() {
 
 async function paidParentWithSavedPm() {
   const owner = client();
-  const login = await owner.post('/v1/host/openwop-app/test/login', { email: `oc-${Date.now()}-${n++}@acme.test` });
+  const login = await owner.post('/host/openwop-app/test/login', { email: `oc-${Date.now()}-${n++}@acme.test` });
   const tenantId: string = login.body.user?.tenantId ?? '';
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'OneClick Shop' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'OneClick Shop' });
   const orgId: string = org.body.orgId;
-  const c = (sfx: string): string => `/v1/host/openwop-app/commerce/orgs/${encodeURIComponent(orgId)}${sfx}`;
+  const c = (sfx: string): string => `/host/openwop-app/commerce/orgs/${encodeURIComponent(orgId)}${sfx}`;
   const main = await owner.post(c('/products'), { type: 'digital', name: 'Course', price: 100, currency: 'USD' });
   const upsell = await owner.post(c('/products'), { type: 'digital', name: 'Coaching', price: 50, currency: 'USD' });
   const upsell2 = await owner.post(c('/products'), { type: 'digital', name: 'Extra A', price: 10, currency: 'USD' });
@@ -122,7 +122,7 @@ async function paidParentWithSavedPm() {
   // guest checkout WITH consent — live mode creates the session (mock stripe)
   const guest = client();
   const email = `buyer-${n++}@x.test`;
-  const co = await guest.post(`/v1/host/openwop-app/public-store/${encodeURIComponent(orgId)}/checkout`, {
+  const co = await guest.post(`/host/openwop-app/public-store/${encodeURIComponent(orgId)}/checkout`, {
     email, lines: [{ productId: main.body.productId, quantity: 1 }], savePaymentMethod: true,
     funnel: { funnelId: 'fn-oc', stepId: 'st-co' },
   });
@@ -138,7 +138,7 @@ async function paidParentWithSavedPm() {
 }
 
 const oneClick = (orgId: string, orderId: string): string =>
-  `/v1/host/openwop-app/public-store/${encodeURIComponent(orgId)}/orders/${encodeURIComponent(orderId)}/one-click`;
+  `/host/openwop-app/public-store/${encodeURIComponent(orgId)}/orders/${encodeURIComponent(orderId)}/one-click`;
 
 describe('ADR 0296 P2/P3 — saved PM + one-click chains', () => {
   it('is 503 not_configured until the operator opts in', async () => {

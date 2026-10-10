@@ -20,9 +20,7 @@
 
 import type { Storage } from '../storage/storage.js';
 import { OpenwopError } from '../types.js';
-import { createLogger } from '../observability/logger.js';
-
-const log = createLogger('host.seedLock');
+import { withTenantOpLock } from './tenantOpLock.js';
 
 /** A held lock older than this is assumed orphaned (its request was killed
  *  mid-run) and may be stolen. Sized well above the longest full reseed so a
@@ -33,39 +31,19 @@ function lockKey(tenantId: string): string {
   return `demo-seed-lock:${tenantId}`;
 }
 
-/** Claim the lock. Returns true iff acquired. Steals a stale (orphaned) lock via
- *  a CAS on its exact value, so a live run that just refreshed is never stomped. */
-async function acquire(storage: Storage, tenantId: string): Promise<boolean> {
-  const key = lockKey(tenantId);
-  const nowMs = Date.now();
-  const claim = await storage.kvCompareAndSwap(key, null, String(nowMs));
-  if (claim.swapped) return true;
-  // A lock is held — steal it only if it is stale (the prior holder was killed
-  // without releasing). `claim.actual` is the value observed at the CAS above.
-  const heldMs = claim.actual ? Number(claim.actual) : NaN;
-  if (claim.actual && Number.isFinite(heldMs) && nowMs - heldMs > LOCK_TTL_MS) {
-    const steal = await storage.kvCompareAndSwap(key, claim.actual, String(nowMs));
-    if (steal.swapped) {
-      log.warn('seed_lock_stolen', { tenantId, ageMs: nowMs - heldMs });
-      return true;
-    }
-  }
-  return false;
-}
-
-async function release(storage: Storage, tenantId: string): Promise<void> {
-  await storage.kvDelete(lockKey(tenantId)).catch((err) => {
-    log.warn('seed_lock_release_failed', { tenantId, error: err instanceof Error ? err.message : String(err) });
-  });
-}
-
 /**
  * Run `fn` while holding the per-tenant seed lock. Throws a 409 `conflict` when a
  * seed is already running for the tenant (the concurrent-re-click case). The lock
  * is always released once `fn` settles (or throws).
+ *
+ * ADR 0837 D3 — the acquire/steal/release now live in `tenantOpLock.ts`, shared
+ * with the CRM merge lock. Same key and TTL; the release is a CAS on this
+ * holder's token rather than a blind delete (architect A2: a delete after a steal
+ * freed the NEW holder's lock).
  */
 export async function withSeedLock<T>(storage: Storage, tenantId: string, fn: () => Promise<T>): Promise<T> {
-  if (!(await acquire(storage, tenantId))) {
+  const out = await withTenantOpLock(storage, lockKey(tenantId), LOCK_TTL_MS, fn);
+  if (!out.held) {
     throw new OpenwopError(
       'conflict',
       'A demo seed is already running for this workspace. Wait for it to finish before starting another.',
@@ -73,9 +51,5 @@ export async function withSeedLock<T>(storage: Storage, tenantId: string, fn: ()
       { tenantId },
     );
   }
-  try {
-    return await fn();
-  } finally {
-    await release(storage, tenantId);
-  }
+  return out.value;
 }

@@ -17,14 +17,16 @@ import { StateCard } from '../ui/index.js';
 import { HistoryIcon, RotateCcwIcon, XIcon } from '../ui/icons/index.js';
 import { formatDate } from '../i18n/format.js';
 import { drawerEscapeHandler } from './builderShellHelpers.js';
-import { listWorkflowRevisions, rollbackWorkflow, type WorkflowRevisionRow } from '../workflows/workflowsClient.js';
+import { listWorkflowRevisions, rollbackWorkflow, type WorkflowRevisionRow, type RollbackOutcome } from '../workflows/workflowsClient.js';
 
 export function HistoryDrawer({ workflowId, open, onClose, onRestored }: {
   workflowId: string;
   open: boolean;
   onClose(): void;
   /** The canvas must reload the restored head (the caller owns the store). */
-  onRestored(): void;
+  /** ADR 0789 — the rollback's outcome: on a shared (seeded) workflow it names the
+   *  fork the restore landed on, which the shell adopts before reloading. */
+  onRestored(outcome: RollbackOutcome): void;
 }): JSX.Element | null {
   const { t } = useTranslation('builder');
   const rootRef = useRef<HTMLElement | null>(null);
@@ -57,7 +59,7 @@ export function HistoryDrawer({ workflowId, open, onClose, onRestored }: {
         : t('historyRestored'));
       setConfirming(null);
       load();
-      onRestored();
+      onRestored(res);
     } catch {
       // Review L5 — machine codes (`rollback_409`) never reach the UI raw.
       setError(t('historyRestoreFailed'));

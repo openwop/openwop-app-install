@@ -39,7 +39,7 @@ interface Reply { status: number; json: Record<string, unknown>; text: string }
 
 /** One major = one (path, headers) pair. v2 is the unprefixed path + the version header. */
 const MAJORS = [
-  { major: 1, path: '/v1/runs', headers: AUTH },
+  { major: 1, path: '/runs', headers: AUTH },
   { major: 2, path: '/runs', headers: { ...AUTH, 'OpenWOP-Version': '2' } },
 ] as const;
 

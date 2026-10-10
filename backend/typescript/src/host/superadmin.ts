@@ -13,6 +13,7 @@
  */
 
 import type { Request } from 'express';
+import { isNarrowingDeclaration, keyAuthorityRefuses } from './delegatedSubject.js';
 import { OpenwopError } from '../types.js';
 import { createLogger } from '../observability/logger.js';
 import { isPersonalTenantId, personalTenantOf } from './requestSubject.js';
@@ -25,6 +26,15 @@ let warnedDevSuperadmin = false;
 export function isSuperadmin(req: Request): boolean {
   // Wildcard bearer (conformance harness / admin tooling / curl).
   if (req.principal?.tenants?.includes('*')) return true;
+  // ADR 0795 D1 — superadmin is keyed on the TENANT below, so a key minted in a
+  // superadmin tenant would inherit it whatever it declared. A key that
+  // narrowed itself (a `workspace:read` key handed to an AI client) asked for
+  // less than its issuer holds; host-global administration is not in "less".
+  const auth = req.principal?.auth;
+  if (auth?.kind === 'api-key' && isNarrowingDeclaration(auth.scopes)
+    && keyAuthorityRefuses('superadmin', (req.principal?.principalId ?? '').replace(/^apikey:/, ''))) {
+    return false;
+  }
   const allow = (process.env.OPENWOP_SUPERADMIN_TENANTS ?? '')
     .split(',')
     .map((s) => s.trim())
@@ -60,6 +70,47 @@ export function isSuperadmin(req: Request): boolean {
     return true;
   }
   return false;
+}
+
+/** The explicit `OPENWOP_SUPERADMIN_TENANTS` allowlist, parsed. Exported for the
+ *  operator's weekly funnel notice (billing), which addresses these workspaces. */
+export function listedSuperadminTenants(): string[] {
+  return (process.env.OPENWOP_SUPERADMIN_TENANTS ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+/**
+ * A superadmin BY THE ALLOWLIST ONLY — the operator of this host, named in
+ * `OPENWOP_SUPERADMIN_TENANTS`. Deliberately narrower than `isSuperadmin`:
+ * no wildcard bearer and no `OPENWOP_FEATURE_TOGGLES_DEV_OPEN`.
+ *
+ * It exists for the PLAN paywall (ADR 0419): the operator has every feature on
+ * their own host. The dev-open switch must not grant that — it makes EVERY
+ * caller a superadmin, so under it nothing would ever be paywalled and no
+ * entitlement test could fail. A wildcard bearer is tooling, not a person with
+ * a plan.
+ *
+ * Follows the PERSON like `isSuperadmin` does (a listed personal tenant keeps it
+ * after switching into a shared workspace), under the same shape guard, and a
+ * key that narrowed itself does not inherit it (ADR 0795 D1).
+ */
+export function isListedSuperadmin(req: Request): boolean {
+  const auth = req.principal?.auth;
+  if (auth?.kind === 'api-key' && isNarrowingDeclaration(auth.scopes)
+    && keyAuthorityRefuses('superadmin', (req.principal?.principalId ?? '').replace(/^apikey:/, ''))) {
+    return false;
+  }
+  const allow = listedSuperadminTenants();
+  if (req.tenantId && allow.includes(req.tenantId)) return true;
+  const personal = personalTenantOf(req);
+  return isPersonalTenantId(personal) && allow.includes(personal);
+}
+
+/** The same, for a caller with only a tenant id (a daemon, a tier limit). */
+export function isListedSuperadminTenant(tenantId: string | undefined): boolean {
+  return Boolean(tenantId) && listedSuperadminTenants().includes(tenantId as string);
 }
 
 /**

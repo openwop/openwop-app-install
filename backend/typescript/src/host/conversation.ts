@@ -12,6 +12,10 @@
 import { partsFromTurnContent } from './a2aCodec10.js';
 
 /** RFC 0002 §A1 AgentRef projection carried on `role: 'agent'` turns. */
+/** The one live chat transport workflow (ADR 0067): a single `core.conversationGate`
+ *  node resolved in catalog source A (`host/index.ts`). */
+export const CONVERSATION_WORKFLOW_ID = 'openwop-app.conversation';
+
 export interface ConversationTurnAgent {
   agentId: string;
   agentSharing?: 'isolated' | 'shared' | string;

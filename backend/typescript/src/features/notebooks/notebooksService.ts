@@ -207,7 +207,7 @@ export async function createNotebook(
   input: { name?: unknown },
 ): Promise<Notebook> {
   // Project FIRST (it also validates `name` + the workspace cap + provisions the board).
-  const project = await createProject(tenantId, orgId, { name: input.name, facet: 'notebook' });
+  const project = await createProject(tenantId, orgId, { name: input.name, facet: 'notebook' }, actor); // ADR 0839 D5
   // NB-5 — the create is multi-step (project → collection → binding); a failure AFTER the
   // project exists would otherwise leave an orphaned `facet:'notebook'` project that is
   // invisible (toNotebook ⇒ null, 404 on get, filtered from the list) yet still counts
@@ -299,7 +299,7 @@ export async function listNotebooks(tenantId: string): Promise<Notebook[]> {
  * PRJ2-M1). "0 memory entries cleared" for a delete that cleared twelve is the
  * same failure-rendered-as-an-answer shape this round exists to close.
  */
-export async function deleteNotebook(tenantId: string, id: string): Promise<{ deleted: boolean; memoryEntriesCleared: number; schedulesCleared: number; collectionDeleted: boolean }> {
+export async function deleteNotebook(tenantId: string, id: string): Promise<{ deleted: boolean; memoryEntriesCleared: number; schedulesCleared: number; collectionDeleted: boolean; dependentsDeleted: Record<string, number> }> {
   const p = await getProject(tenantId, id);
   // ADR 0601 / NBC-1 — the `p.facet !== 'notebook'` half of this guard is GONE.
   // The ADR 0084 correction redefined a notebook as ANY project with a bound KB
@@ -327,28 +327,32 @@ export async function deleteNotebook(tenantId: string, id: string): Promise<{ de
   // says may be SHARED. A shared collection named `Sources: Q3 research` was
   // deleted out from under every other project bound to it. PROVED: shared
   // collection 200 → 404, a second project's knowledge list → [].
-  if (!p) return { deleted: false, memoryEntriesCleared: 0, schedulesCleared: 0, collectionDeleted: false };
+  if (!p) return { deleted: false, memoryEntriesCleared: 0, schedulesCleared: 0, collectionDeleted: false, dependentsDeleted: {} };
   // The one predicate the consent dialog also reads (`deletesCorpus` on the
   // project projection). Stamp-only: no name guess, no position-0 guess. A
   // legacy notebook whose corpus predates the stamp keeps its collection —
   // an orphan, which is recoverable; a destroyed shared corpus is not.
   const collectionId = notebookCorpusToDelete(p);
+  // ADR 0839 grade-code — the PROJECT first, the corpus second. `deleteProject` asserts the
+  // retention hold and can now throw from a dependent purge; deleting the corpus before it
+  // destroyed every source of a notebook that then survived (under a hold, despite the
+  // hold). `deleteProject` already releases the collection's project stamp and clears the
+  // binding, so the collection is safe to delete afterwards.
+  const res = await deleteProject(tenantId, id);
+  // Defensive: ensure the binding is gone even if deleteProject's cascade changes.
+  await clearSubjectKnowledge(tenantId, projectSubject(id));
   let collectionDeleted = false;
-  if (collectionId) {
+  if (collectionId && res.deleted) {
     try {
       await deleteCollection(tenantId, p.orgId, collectionId, PREAUTHORIZED_CALLER); // KBC-1
       collectionDeleted = true;
     } catch (err) {
-      // best-effort: a missing collection must not block the project cascade,
+      // best-effort: a missing collection must not fail a delete that already landed,
       // but surface it (orphaned vectors are otherwise invisible).
       log.warn('notebook_delete_collection_failed', { id, collectionId, error: err instanceof Error ? err.message : String(err) });
     }
   }
-  // deleteProject clears the board, memory, and the subject-knowledge binding.
-  const res = await deleteProject(tenantId, id);
-  // Defensive: ensure the binding is gone even if deleteProject's cascade changes.
-  await clearSubjectKnowledge(tenantId, projectSubject(id));
-  return { deleted: res.deleted, memoryEntriesCleared: res.memoryEntriesCleared, schedulesCleared: res.schedulesCleared, collectionDeleted };
+  return { deleted: res.deleted, memoryEntriesCleared: res.memoryEntriesCleared, schedulesCleared: res.schedulesCleared, collectionDeleted, dependentsDeleted: res.dependentsDeleted };
 }
 
 /** Add a TEXT source to the notebook: ingest into the bound KB collection (chunk

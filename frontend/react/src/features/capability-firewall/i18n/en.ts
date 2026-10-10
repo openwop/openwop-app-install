@@ -158,4 +158,7 @@ export const messages = {
   loadFailedTitle: "Could not load the firewall rules",
   decisionsFailedTitle: "Could not load recent decisions",
   decisionsFailedBody: "This is a failed read, not an empty history — it does not mean the firewall has blocked nothing.",
+  modeEnforceConfirmTitle: 'Turn on deny-by-default?',
+  modeEnforceConfirmBody: 'Every agent action that no rule allows will be blocked (or held for approval) in this workspace, on every lane — chat, runs, voice and public widgets. Check Recent decisions in shadow first.',
+  modeEnforceConfirm: 'Enforce',
 };

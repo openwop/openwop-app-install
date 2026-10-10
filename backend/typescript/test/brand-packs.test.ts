@@ -11,7 +11,7 @@ import { loadAgentsFromManifest } from '../src/packs/agentLoader.js';
 import { nodes as nodePack } from '../../../packs/feature.brand.nodes/index.mjs';
 
 const REPO_ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..', '..');
-const AGENT_PACK = join(REPO_ROOT, 'packs', 'feature.brand.agents');
+const AGENT_PACK = join(REPO_ROOT, 'packs', 'vendor.openwop-app.brand.agents');
 
 describe('feature.brand.nodes — node pack', () => {
   it('exports the five brand node fns', () => {
@@ -88,12 +88,12 @@ describe('feature.brand.nodes — node pack', () => {
   });
 });
 
-describe('feature.brand.agents — agent pack', () => {
+describe('vendor.openwop-app.brand.agents — agent pack', () => {
   it('loads the Brand Steward with its tool-allowlist', () => {
     const loaded = loadAgentsFromManifest(AGENT_PACK);
     expect(loaded.length).toBe(1);
     const steward = loaded[0];
-    expect(steward.agentId).toBe('feature.brand.agents.brand-steward');
+    expect(steward.agentId).toBe('vendor.openwop-app.brand.agents.brand-steward');
     // CFP-1: the allowlist now names the REAL registered agent tools
     // (`openwop:brand.<verb>`, resolvable in `builtinAgentToolIds()`), not the
     // dead `feature.brand.nodes.*` node typeIds that no provider projected.

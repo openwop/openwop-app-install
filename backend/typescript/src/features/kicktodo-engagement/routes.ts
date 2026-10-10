@@ -20,7 +20,7 @@ import {
   OptInRequiredError,
 } from './engagementService.js';
 
-export const KICKTODO_ENGAGEMENT_PREFIX = '/v1/host/openwop-app/kicktodo/engagement';
+export const KICKTODO_ENGAGEMENT_PREFIX = '/host/openwop-app/kicktodo/engagement';
 
 type Handler = (req: Request, res: Response) => Promise<void>;
 

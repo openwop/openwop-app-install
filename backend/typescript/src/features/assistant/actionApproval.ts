@@ -172,6 +172,37 @@ export async function decideActionViaApproval(
 ): Promise<AssistantActionDecision | null> {
   const approval = await getApproval(approvalId);
   if (!approval || approval.tenantId !== tenantId || !approval.actionId) return null;
+  const actionId = approval.actionId;
+
+  // ADR 0862 D1 — the hash is REQUIRED here, in the one decision function every lane
+  // reaches (`/approvals/:id/claim`, `/reviews/:id/actions/approve`, the assistant route).
+  // ADR 0662 required it on the assistant route alone — a route no client called — so the
+  // check was skipped on every real approval. Refused BEFORE the CAS: nothing is consumed.
+  // The message is written for a human, because an older SPA bundle shows it verbatim.
+  if (outcome === 'approved') {
+    if (opts.expectedContentHash === undefined) {
+      throw new OpenwopError(
+        'validation_error',
+        'This approval card is out of date. Reload it and review the action again before approving. '
+          + '(API and CLI callers: send `expectedContentHash`, the `contentHash` of the action card you reviewed.)',
+        400,
+        // `hint` is for a non-SPA client (the first-party CLI has no flag for this yet — an
+        // ADR 0862 follow-up): where the value it must echo lives.
+        { field: 'expectedContentHash', reason: 'content_hash_required', actionId, hint: 'GET /host/openwop-app/approvals → items[].action.contentHash' },
+      );
+    }
+    // An early, non-consuming refusal of a card that is already stale. NOT the definitive
+    // check (that is post-CAS below, ADR 0473 F2/F3) — just the cheap one.
+    const before = await getPendingAction(tenantId, actionId);
+    // An ERASED action is refused here too (grade-code): past this point the CAS would
+    // consume the approval over a row that can never execute, leaving `approved` over
+    // `rejected` with no audit line. Refusing first leaves the approval pending, where a
+    // reject still closes it honestly.
+    if (before && (before.erasedAt !== undefined || (before.status === 'pending' && contentHashOf(before) !== opts.expectedContentHash))) {
+      throw contentChanged(actionId, contentHashOf(before));
+    }
+  }
+
   const lock = await resolveApproval(approvalId, {
     status: outcome,
     ...(opts.decidedByUserId ? { decidedBy: opts.decidedByUserId } : {}),
@@ -179,43 +210,65 @@ export async function decideActionViaApproval(
   });
   if (!lock) return null;
   if (!lock.changed) return { approval: lock.approval, action: null, changed: false };
-  const action = await decidePendingAction(tenantId, approval.actionId, {
-    status: outcome,
-    ...(opts.decidedByUserId !== undefined ? { approvedByUserId: opts.decidedByUserId } : {}),
-  });
 
-  // §12 T6 — the winning APPROVE claim is the single dispatch site (the CAS
-  // above is the exactly-once guarantee). Execution rides runStarter under
-  // the approving human's identity; deps are bound at boot. Pre-T6 hosts
-  // (no deps registered) keep the record-only posture.
-  if (outcome === 'approved' && execDeps) {
-    const row = await getPendingAction(tenantId, approval.actionId);
+  let action: PendingAction | null;
+  try {
+    action = await decidePendingAction(tenantId, actionId, {
+      status: outcome,
+      ...(opts.decidedByUserId !== undefined ? { approvedByUserId: opts.decidedByUserId } : {}),
+    });
+  } catch (err) {
+    // ADR 0862 D2 (architect H1) — the approval is consumed and the action write could not
+    // land: an `approved` approval over a `pending` action is a ghost no lane can decide.
+    // Reopen the approval so the human can decide again, then surface the ORIGINAL failure
+    // (a failing reopen is logged, never allowed to replace it).
+    log.warn('assistant_decide_action_write_failed_reopening', {
+      tenantId, approvalId, actionId, error: err instanceof Error ? err.message : String(err),
+    });
+    await reopenApproval(approvalId).catch((reopenErr: unknown) => log.error('assistant_decide_reopen_failed', {
+      tenantId, approvalId, actionId, error: reopenErr instanceof Error ? reopenErr.message : String(reopenErr),
+    }));
+    throw err;
+  }
+
+  if (outcome === 'approved') {
+    const row = await getPendingAction(tenantId, actionId);
     // ADR 0662 D2 — the definitive integrity check sits HERE: after the CAS (so it cannot
     // race the lock, ADR 0473 F2/F3) and before execution. A mismatch means the action
-    // changed between the render the human approved and now, so BOTH rows are restored —
-    // reopening only the approval would leave the action marked `approved`, never executed
-    // and never reporting failure, which is the lying state this whole decision targets.
-    if (row && opts.expectedContentHash !== undefined) {
-      const actual = contentHashOf(row);
-      if (actual !== opts.expectedContentHash) {
-        await reopenPendingAction(tenantId, approval.actionId);
-        await reopenApproval(approvalId);
-        throw new OpenwopError(
-          'conflict',
-          'This action changed since you reviewed it. Re-read it before approving.',
-          409,
-          { actionId: approval.actionId, contentHash: actual },
-        );
-      }
+    // changed between the render the human approved and now, so BOTH rows are restored.
+    // ADR 0862 — hoisted out of the `execDeps` guard so it runs on every host, and the hash
+    // is always present now (required above).
+    if (row && contentHashOf(row) !== opts.expectedContentHash) {
+      const reopened = await reopenPendingAction(tenantId, actionId);
+      // Reopen the approval only when the action went back to `pending` too. If it could
+      // not (an erasure cancelled it meanwhile), a pending approval over a terminal action
+      // would be the lying pair this guards against, just mirrored.
+      if (reopened) await reopenApproval(approvalId);
+      throw contentChanged(actionId, contentHashOf(row));
     }
-    if (row) {
+    // §12 T6 — the winning APPROVE claim is the single dispatch site (the CAS above is the
+    // exactly-once guarantee). Pre-T6 hosts (no deps registered) keep record-only.
+    if (row && execDeps) {
       const runId = await executeApprovedAction(execDeps, tenantId, row, opts.decidedByUserId);
       if (runId) await attachRunId(approvalId, runId);
-      const after = await getPendingAction(tenantId, approval.actionId);
+      const after = await getPendingAction(tenantId, actionId);
       return { approval: lock.approval, action: (after ?? action) as Record<string, unknown> | null, changed: true };
     }
   }
   return { approval: lock.approval, action: action as Record<string, unknown> | null, changed: true };
+}
+
+/** The ONE content-changed refusal — carries `reason` so every client maps it the same way.
+ *  `action_changed`, NOT the strategy gate's `content_changed`: a client maps reasons to
+ *  copy without knowing the approval's kind, and "the strategy changed" is the wrong
+ *  sentence for an email. Both read as still-pending (the row was reopened). */
+function contentChanged(actionId: string, contentHash: string): OpenwopError {
+  return new OpenwopError(
+    'conflict',
+    'This action changed since you reviewed it. Re-read it before approving.',
+    409,
+    { reason: 'action_changed', actionId, contentHash },
+  );
 }
 
 let execDeps: StartRunDeps | null = null;
@@ -256,7 +309,7 @@ export function cardFieldsFor(kind: PendingActionKind): readonly CardField[] {
   return CARD_FIELDS[kind] ?? [];
 }
 
-function projectActionCard(a: PendingAction): Record<string, unknown> {
+export function projectActionCard(a: PendingAction): Record<string, unknown> {
   // ADR 0662 D1 — this allowlist used to be `{to}` for every kind, while
   // `executeApprovedAction` dispatched the WHOLE payload. Its intent was right (keep a
   // future kind from leaking secrets onto the approval row) and its effect was that a
@@ -382,8 +435,17 @@ export function registerAssistantActionApproval(deps?: StartRunDeps): void {
     }
   });
   registerAssistantActionApprovalHandler(decideActionViaApproval);
-  registerAssistantActionProjector(async (tenantId, actionId) => {
+  registerAssistantActionProjector(async (tenantId, actionId, viewer) => {
     const action = await getPendingAction(tenantId, actionId);
-    return action ? projectActionCard(action) : null;
+    if (!action) return null;
+    // ADR 0862 (grade-code) — COS-11 put the assistant's own queue behind write authority
+    // ("a viewer must not read a draft they cannot send"), while this projector handed the
+    // same draft, recipients and event body to every tenant member through `/approvals`
+    // and `/reviews`. Same predicate as the decide gate, same two request-level exits.
+    // An internal caller (no viewer) reads the full card.
+    if (viewer && !viewer.isOperator && !viewer.isPersonalOwner && !(await hasAssistantWriteAuthority(tenantId, viewer.subject))) {
+      return { actionId: action.actionId, kind: action.kind, status: action.status, withheld: true };
+    }
+    return projectActionCard(action);
   });
 }

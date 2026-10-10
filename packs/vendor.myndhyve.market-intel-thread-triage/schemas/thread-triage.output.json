@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.market-intel-thread-triage/1.0.0/thread-triage.output.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.market-intel-thread-triage/1.0.2/thread-triage.output.json",
   "title": "MarketIntelThreadTriageOutput",
   "type": "object",
   "required": ["triagedThreads", "extractionQueue", "skippedThreads", "diversityAnalysis", "summary", "warnings", "success"],

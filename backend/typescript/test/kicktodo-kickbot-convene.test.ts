@@ -32,9 +32,9 @@ import { conveneSpecialist, convenableSpecialists } from '../src/features/kickto
 import { KICKTODO_CONVENE_TURN_WORKFLOW_ID, KICKTODO_CONVENE_CREDENTIAL_REF, seedKicktodoConveneTurnWorkflow } from '../src/features/kicktodo-core/conveneTurnWorkflow.js';
 
 const T = 'tenant-convene';
-const PLAN_BUILDER = 'feature.kicktodo.agents.plan-builder';
+const PLAN_BUILDER = 'vendor.openwop-app.kicktodo.agents.plan-builder';
 const ACTOR = { tenantId: T, actingUserId: 'user:u1', agentProfileId: 'host:kickbot', conversationId: 'conv-1' };
-const KICKTODO_AGENTS_PACK = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..', '..', 'packs', 'feature.kicktodo.agents');
+const KICKTODO_AGENTS_PACK = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..', '..', 'packs', 'vendor.openwop-app.kicktodo.agents');
 
 function registerSpecialist(agentId: string, toolAllowlist: string[] = ['openwop:kicktodo.today', 'openwop:kicktodo.progress']): void {
   getAgentRegistry().register({
@@ -42,7 +42,7 @@ function registerSpecialist(agentId: string, toolAllowlist: string[] = ['openwop
     persona: 'RESEARCH',
     modelClass: 'research',
     systemPrompt: 'test specialist',
-    packName: 'feature.kicktodo.agents',
+    packName: 'vendor.openwop-app.kicktodo.agents',
     packVersion: '1.3.0',
     toolAllowlist,
     confidence: { defaultThreshold: 0.6 },
@@ -153,7 +153,7 @@ describe('KickBot convenes a specialist (ADR 0442 P5)', () => {
 
   it('rejects an unknown specialist (closed allowlist), never a free-form agentId', async () => {
     registerSpecialist(PLAN_BUILDER);
-    const r = await conveneSpecialist({ specialist: 'feature.evil.agents.exfiltrator', goal: 'x' }, ACTOR);
+    const r = await conveneSpecialist({ specialist: 'vendor.openwop-app.evil.agents.exfiltrator', goal: 'x' }, ACTOR);
     expect(r.isError).toBe(true);
     expect(parse(r).error).toBe('unknown_specialist');
   });
@@ -174,7 +174,7 @@ describe('KickBot convenes a specialist (ADR 0442 P5)', () => {
 
   it('bounds fan-out — refuses once the participant already has the max pending convened specialists', async () => {
     for (const s of ['plan-builder', 'safety-reviewer', 'progress-verifier', 'accountability-steward']) {
-      registerSpecialist(`feature.kicktodo.agents.${s}`);
+      registerSpecialist(`vendor.openwop-app.kicktodo.agents.${s}`);
     }
     // 5 distinct convenes (distinct goals ⇒ distinct jobIds) fill the cap.
     for (let i = 0; i < 5; i++) {
@@ -204,7 +204,7 @@ describe('the convenable specialists LOAD through the real pack loader', () => {
 
   it('all 4 convenable specialists load with COMPILED handoff validators', () => {
     for (const short of convenableSpecialists()) {
-      const agent = getAgentRegistry().get(`feature.kicktodo.agents.${short}`);
+      const agent = getAgentRegistry().get(`vendor.openwop-app.kicktodo.agents.${short}`);
       expect(agent, `${short} loaded from the pack`).toBeTruthy();
       expect(typeof agent!.handoff?.validateTask, `${short} has a compiled task validator`).toBe('function');
       expect(typeof agent!.handoff?.validateReturn, `${short} has a compiled return validator`).toBe('function');

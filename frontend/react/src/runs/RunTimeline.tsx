@@ -30,6 +30,7 @@ const SEG_STATUS_KEYS: Record<SegStatus, string> = {
   completed: 'segStatusCompleted',
   failed: 'segStatusFailed',
   suspended: 'segStatusSuspended',
+  cut: 'segStatusCut',
 };
 
 interface Props {
@@ -44,7 +45,9 @@ interface Props {
   onRetry?: () => void;
 }
 
-type SegStatus = 'running' | 'completed' | 'failed' | 'suspended';
+/** `cut` — still open when the RUN reached terminal (a run-duration breach or a
+ *  cancel stops a node without a terminal node event; ADR 0772 D1). */
+type SegStatus = 'running' | 'completed' | 'failed' | 'suspended' | 'cut';
 
 interface Segment {
   nodeId: string;
@@ -61,7 +64,10 @@ const SEG_COLOR: Record<SegStatus, string> = {
   completed: 'var(--color-success)',
   failed: 'var(--color-danger)',
   suspended: 'var(--color-ai)',
+  cut: 'var(--ink-3)',
 };
+
+const RUN_TERMINAL_TYPES: ReadonlySet<string> = new Set(['run.completed', 'run.failed', 'run.cancelled']);
 
 // Fold the event log into per-node segments. A `node.started` opens a
 // segment; the next terminal node event (`completed`/`failed`/
@@ -95,6 +101,15 @@ function buildSegments(events: readonly RunEventDoc[]): {
     }
     const nodeId = ev.nodeId ?? '(run)';
     const lane = ensureLane(nodeId);
+
+    // ADR 0772 D1 — a node still open when the run reaches terminal was cut by
+    // it (a deadline breach or a cancel records no terminal node event), so it
+    // must stop rendering as live work: it is closed at the run's terminal.
+    if (!ev.nodeId && RUN_TERMINAL_TYPES.has(ev.type)) {
+      for (const seg of open.values()) {
+        if (seg.endMs === null && seg.status === 'running') { seg.endMs = Number.isNaN(ms) ? seg.startMs : ms; seg.status = 'cut'; }
+      }
+    }
 
     if (ev.nodeId && ev.type === 'node.started') {
       // Close any dangling open segment first (defensive — a started

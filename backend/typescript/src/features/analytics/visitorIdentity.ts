@@ -4,8 +4,15 @@
  * `visitorHash = sha256(dailySalt | orgId | clientIp | userAgent)` computed AT
  * INGEST; the raw IP/UA are never persisted, and the salt is reclaimed after a
  * bounded TTL, so yesterday's hashes stop being re-derivable once that TTL
- * lapses. No cookie, no localStorage, no consent-banner burden on operators'
- * public pages — uniques are per-UTC-day honest and cross-day impossible.
+ * lapses. This DIMENSION needs no cookie and no localStorage. Uniques are
+ * per-UTC-day honest, and cross-day linking is impossible.
+ *
+ * CORRECTED (ADR 0857 D5): this header used to say "No cookie, no localStorage,
+ * no consent-banner burden on operators' public pages". That is true of the
+ * hash, but not of the page. The first-party renderer stores a durable `vk` in
+ * `localStorage` (`site/visitorBeacon.ts`) for experiment stickiness and the
+ * beacon session, before any consent check. Whether to gate it is ADR 0857
+ * product decision 2.
  *
  * Salt lifecycle (ADR 0569 decision 2): ONE salt per UTC day, shared across
  * instances through the durable KV (accuracy across Cloud Run instances wins
@@ -64,6 +71,7 @@ import type { Request } from 'express';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { registerKvAgeOut } from '../../host/kvAgeOut.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
+import { clientIp } from '../../host/clientIp.js';
 
 interface DailySalt {
   /** UTC day, `YYYY-MM-DD` — the row id. */
@@ -175,14 +183,6 @@ registerKvAgeOut({
  *  isolation). Not a route, not exported through any surface. */
 export async function __sweepExpiredSaltsForTest(nowMs = Date.now()): Promise<number> {
   return sweepExpiredSalts(nowMs);
-}
-
-/** The rate-limiter's client-IP convention (middleware/rateLimit.ts) — first
- *  X-Forwarded-For hop behind Cloud Run's trusted L7 proxy, else the socket. */
-function clientIp(req: Request): string {
-  const xff = req.header('x-forwarded-for');
-  if (xff) return (xff.split(',')[0] ?? xff).trim();
-  return req.socket.remoteAddress ?? 'unknown';
 }
 
 /**

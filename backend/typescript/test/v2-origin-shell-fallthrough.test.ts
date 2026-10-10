@@ -25,6 +25,11 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from '../src/index.js';
+import { preferredVersion } from '../src/middleware/protocolVersion.js';
+
+// ADR 0812 P3c-0 — an API request names a run by its TENANT-BOUND id (the
+// dev-token's tenant is `default`); a bare id is refused 400 after the cut.
+const MISSING_BOUND = encodeURIComponent('default/some-run-id-0123456789');
 
 const SHELL = '<!doctype html><html><head><title>shell</title></head><body>SPA-SHELL-MARKER</body></html>';
 let shellServer: http.Server;
@@ -64,7 +69,7 @@ describe('ADR 0631 — a manifest root serves the SPA shell to a browser and the
   });
 
   it('2. the same path naming major 2 → the API (JSON, OpenWOP-Version: 2.0), never the shell', async () => {
-    const r = await get('/runs/some-run-id', { ...HTML, 'OpenWOP-Version': '2' });
+    const r = await get(`/runs/${MISSING_BOUND}`, { ...HTML, 'OpenWOP-Version': '2' });
     expect(r.ver).toBe('2.0');
     expect(r.type).toContain('application/json');
     expect(r.body).not.toContain('SPA-SHELL-MARKER');
@@ -72,7 +77,7 @@ describe('ADR 0631 — a manifest root serves the SPA shell to a browser and the
   });
 
   it('3. headerless but NOT preferring HTML (a curl / SDK) → today\'s JSON 404, not the shell', async () => {
-    const r = await get('/runs/some-run-id', { Accept: '*/*' });
+    const r = await get(`/runs/${MISSING_BOUND}`, { Accept: '*/*' });
     expect(r.status).toBe(404);
     expect(r.type).toContain('application/json');
     expect(r.body).not.toContain('SPA-SHELL-MARKER');
@@ -87,15 +92,17 @@ describe('ADR 0631 — a manifest root serves the SPA shell to a browser and the
   });
 
   it('5. the responses declare what they vary on (OpenWOP-Version on the API branch, Accept on the shell branch)', async () => {
-    const api = await get('/runs/some-run-id', { ...HTML, 'OpenWOP-Version': '2' });
+    const api = await get(`/runs/${MISSING_BOUND}`, { ...HTML, 'OpenWOP-Version': '2' });
     expect(api.vary).toContain('openwop-version');
     const shell = await get('/runs/some-run-id', HTML);
     expect(shell.vary).toContain('accept');
   });
 
-  it('6. a versioned path never falls through: /v1/runs/<id> from a browser is still the JSON 404', async () => {
+  it('6. a versioned path never falls through: /v1/runs/<id> from a browser is still JSON', async () => {
     const r = await get('/v1/runs/some-run-id', HTML);
-    expect(r.status).toBe(404);
+    // ADR 0812 P3c-0 — 404 while 1.x is served; the withdrawn path space answers 410 after the cut.
+    expect(r.status).toBe(preferredVersion() === '2.0' ? 410 : 404);
     expect(r.type).toContain('application/json');
+    expect(r.body).not.toContain('SPA-SHELL-MARKER');
   });
 });

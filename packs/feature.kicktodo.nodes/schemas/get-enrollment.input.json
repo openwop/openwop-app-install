@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.kicktodo.nodes/1.30.3/get-enrollment.input.json",
+  "type": "object",
+  "properties": {
+    "enrollmentId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "enrollmentId"
+  ]
+}

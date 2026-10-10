@@ -34,6 +34,7 @@ import {
   type NormalizeMode, type FederatedPeer, type PeerStatus,
 } from './priorityMatrixClient.js';
 import { MODEL_LABEL_KEY } from './pmShared.js';
+import { getEffectiveAccess } from '../../client/accessClient.js';
 
 /** Exhaustive over `PresetId` — adding a preset without a label is a type error,
  *  which is what keeps the picker from silently dropping one. */
@@ -56,6 +57,10 @@ export function PriorityMatrixPage(): JSX.Element {
   const [projects, setProjects] = useState<ProjectRef[]>([]);
   const [presets, setPresets] = useState<CriteriaSet[]>([]);
   const [orgsFailed, setOrgsFailed] = useState(false);
+  /** PM4UX-1 — the caller belongs to workspaces but may write in none of them, so
+   *  "New list" would only ever end in a 403. */
+  const [noWritableOrg, setNoWritableOrg] = useState(false);
+  const canCreate = !noWritableOrg;
   /** PMX-8c / PMXU-19 (ADR 0590) — the projects read FAILED: project scoping
    *  degrades and the create form's picker is empty for a REASON the user is told. */
   const [projectsFailed, setProjectsFailed] = useState(false);
@@ -65,12 +70,15 @@ export function PriorityMatrixPage(): JSX.Element {
    *  "Create one to start" — an invitation to duplicate a list that may exist. */
   const [listsFailed, setListsFailed] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
+  /** PM4UX-4 — a failed create (a 403 included) is said INSIDE the modal; it used to
+   *  land on the page banner behind the overlay, so the submit looked inert. */
+  const [createError, setCreateError] = useState<string | null>(null);
   // PMXU-7 (ADR 0590) — the create-list modal guarded against a silent
   // backdrop/Escape close discarding a typed name.
   const [createDirty, setCreateDirty] = useState(false);
   const confirmDiscardCreate = useConfirmDiscardUnsaved(createDirty);
   useUnsavedChangesWarning(createOpen && createDirty);
-  const guardedCreateClose = (): void => { void confirmDiscardCreate().then((ok) => { if (ok) { setCreateDirty(false); setCreateOpen(false); } }); };
+  const guardedCreateClose = (): void => { void confirmDiscardCreate().then((ok) => { if (ok) { setCreateDirty(false); setCreateOpen(false); setCreateError(null); } }); };
 
   const refreshLists = useCallback(async () => {
     try {
@@ -86,7 +94,19 @@ export function PriorityMatrixPage(): JSX.Element {
     // PM-G1 — a failed orgs read left `orgs` empty, which empties the workspace
     // select, leaves `effectiveOrg` blank, and makes submit silently inert (the
     // handler returns early on `!effectiveOrg`). A dead form with no explanation.
-    void listOrgs().then((o) => { setOrgs(o); setOrgsFailed(false); }).catch(() => setOrgsFailed(true));
+    void listOrgs().then(async (o) => {
+      setOrgs(o); setOrgsFailed(false);
+      // PM4UX-1 — a list can only be created where the caller holds `workspace:write`
+      // (the server's gate), so narrow the offer to those workspaces once the answer is
+      // in. A FAILED access read keeps the workspace (the server still refuses, and the
+      // modal now says so); an account with NO workspaces keeps its own explanation.
+      if (o.length === 0) return;
+      const writable = await Promise.all(o.map(async (org) => {
+        try { return (await getEffectiveAccess({ orgId: org.orgId })).scopes.includes('workspace:write'); }
+        catch { return true; }
+      }));
+      setOrgs(o.filter((_, i) => writable[i])); setNoWritableOrg(writable.every((w) => !w));
+    }).catch(() => setOrgsFailed(true));
     // PMX-8c — the literal PM-G1 shape lived one line below the PM-G1 fix: a
     // failed projects read silently collapsed project scoping to workspace-wide.
     void listProjects().then((p) => { setProjects(p); setProjectsFailed(false); }).catch(() => setProjectsFailed(true));
@@ -117,18 +137,18 @@ export function PriorityMatrixPage(): JSX.Element {
         eyebrow={t('eyebrow')}
         title={t('title')}
         lede={t('lede')}
-        actions={lists && lists.length > 0 ? <Button variant="primary" size="sm" onClick={() => setCreateOpen(true)}><PlusIcon size={13} /> {t('newList')}</Button> : undefined}
+        actions={lists && lists.length > 0 && canCreate ? <Button variant="primary" size="sm" onClick={() => setCreateOpen(true)}><PlusIcon size={13} /> {t('newList')}</Button> : undefined}
       />
       {error ? <Notice variant="error">{error}</Notice> : null}
       {projectsFailed ? <Notice variant="warning" announce={t('projectsLoadFailed')}>{t('projectsLoadFailed')}</Notice> : null}
 
       {createOpen ? (
-        <Modal label={t('createModalLabel')} onClose={guardedCreateClose}>
+        <Modal label={t('createModalLabel')} onClose={guardedCreateClose} error={createError} errorAnnounce={createError ?? undefined}>
           <h3 className="u-mt-0">{t('createModalHeading')}</h3>
           <CreateListForm
             orgs={orgs} orgsFailed={orgsFailed} projects={projects} projectsFailed={projectsFailed} presets={presets}
             onCreated={async (l) => { navigate(`/priority-matrix/${encodeURIComponent(l.id)}`); }}
-            onError={setError}
+            onError={setCreateError}
             onDirtyChange={setCreateDirty}
           />
         </Modal>
@@ -145,7 +165,7 @@ export function PriorityMatrixPage(): JSX.Element {
           icon={<ListOrderedIcon size={22} />}
           title={t('noListsTitle')}
           body={t('noListsBody')}
-          action={<Button variant="primary" size="sm" onClick={() => setCreateOpen(true)}><PlusIcon size={13} /> {t('createFirstList')}</Button>}
+          {...(canCreate ? { action: <Button variant="primary" size="sm" onClick={() => setCreateOpen(true)}><PlusIcon size={13} /> {t('createFirstList')}</Button> } : {})}
         />
       ) : (
         <>
@@ -396,6 +416,16 @@ function FederatedPeersAdmin(props: { onError: (m: string) => void; onChanged: (
   const [label, setLabel] = useState('');
   const [baseUrl, setBaseUrl] = useState('');
   const [busy, setBusy] = useState(false);
+  /** PM4UX-6 — adding/removing a peer and the workspace-shared credential are
+   *  superadmin-only on the server; everyone else is offered only their OWN credential.
+   *  `false` until the answer is in, so no control flashes on then vanishes. */
+  const [superadmin, setSuperadmin] = useState(false);
+  useEffect(() => {
+    let live = true;
+    void getEffectiveAccess().then((a) => { if (live) setSuperadmin(a.superadmin === true); })
+      .catch((e: unknown) => { console.warn('[priority-matrix] effective-access read failed:', e instanceof Error ? e.message : e); });
+    return () => { live = false; };
+  }, []);
 
   const refresh = useCallback(async () => {
     try { setPeers(await listPeers()); setPeersFailed(false); } catch { setPeersFailed(true); }
@@ -422,20 +452,20 @@ function FederatedPeersAdmin(props: { onError: (m: string) => void; onChanged: (
       {peersFailed ? (
         <Notice variant="warning" announce={t('peersLoadFailed')}>{t('peersLoadFailed')} <Button variant="link" onClick={() => void refresh()}>{t('common:retry')}</Button></Notice>
       ) : null}
-      <form className="surface-form u-mt-2" onSubmit={(e) => void onAdd(e)}>
+      {superadmin ? <form className="surface-form u-mt-2" onSubmit={(e) => void onAdd(e)}>
         <TextField label={t('peerLabel')} value={label} onChange={(e) => setLabel(e.target.value)} placeholder={t('peerLabelPlaceholder')} />
         <TextField label={t('baseUrl')} value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder={t('baseUrlPlaceholder')} />
         <Button variant="primary" type="submit" disabled={!label.trim() || !baseUrl.trim() || busy}><PlusIcon size={14} /> {t('addPeer')}</Button>
-      </form>
+      </form> : null}
       {peers.length > 0 ? (
         <ul className="u-mt-2 u-flex u-flex-col u-gap-2 u-list-none u-p-0">
           {peers.map((p) => (
             <li key={p.id} className="u-flex u-flex-col u-gap-1">
               <div className="u-flex u-items-center u-gap-2">
                 <strong className="u-fs-12">{p.label}</strong> <span className="muted u-fs-12">{p.baseUrl}</span>
-                <Button variant="quiet" size="sm" className="u-ml-auto" onClick={() => void onDelete(p.id, p.label)} aria-label={t('removePeerLabel', { label: p.label })}><TrashIcon size={14} /></Button>
+                {superadmin ? <Button variant="quiet" size="sm" className="u-ml-auto" onClick={() => void onDelete(p.id, p.label)} aria-label={t('removePeerLabel', { label: p.label })}><TrashIcon size={14} /></Button> : null}
               </div>
-              <PeerCredentialForm peerId={p.id} onError={props.onError} />
+              <PeerCredentialForm peerId={p.id} onError={props.onError} allowTenantScope={superadmin} />
             </li>
           ))}
         </ul>
@@ -446,7 +476,7 @@ function FederatedPeersAdmin(props: { onError: (m: string) => void; onChanged: (
 
 /** Set a peer's bearer (ADR 0062). "My own" closes the authz asymmetry per-user;
  *  "Workspace shared" is superadmin-only (a 403 surfaces as a clear message). */
-function PeerCredentialForm(props: { peerId: string; onError: (m: string) => void }): JSX.Element {
+function PeerCredentialForm(props: { peerId: string; onError: (m: string) => void; allowTenantScope: boolean }): JSX.Element {
   const { t } = useTranslation('priority-matrix');
   const [token, setToken] = useState('');
   const [scope, setScope] = useState<'user' | 'tenant'>('user');
@@ -465,10 +495,10 @@ function PeerCredentialForm(props: { peerId: string; onError: (m: string) => voi
       <TextField label={t('bearerToken')} type="password" value={token} onChange={(e) => { setToken(e.target.value); setSaved(false); }} placeholder={t('bearerTokenPlaceholder')} autoComplete="off" />
       <SelectField label={t('scope')} value={scope} onChange={(e) => setScope(e.target.value as 'user' | 'tenant')}>
         <option value="user">{t('scopeUser')}</option>
-        <option value="tenant">{t('scopeTenant')}</option>
+        {props.allowTenantScope ? <option value="tenant">{t('scopeTenant')}</option> : null}
       </SelectField>
       <Button type="submit" variant="secondary" disabled={!token.trim() || busy}>{t('common:save')}</Button>
-      {saved ? <span className="muted u-fs-12">{t('saved')}</span> : null}
+      {saved ? <span className="muted u-fs-12" role="status">{t('saved')}</span> : null}
     </form>
   );
 }

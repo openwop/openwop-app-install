@@ -3,8 +3,15 @@
  *
  * The refusals matter more than the happy path here: a bad declaration must stop
  * the deployment at BOOT, not surface as a 404 to the first stranger who visits.
+ *
+ * Sabotage that turns it red (each witnessed by /grade-tests probe):
+ *  - hyphen-form regex / EQUAL / reserved / two-owner checks dropped → the matching REFUSES case
+ *  - collision check widened to any prior                            → allows the SAME feature to re-declare
+ *  - OPENWOP_DISABLE_FEATURE_DEFAULT_ORGS ignored                     → operator opt-out
+ *  - validation moved inside the create loop                         → validates BEFORE creating anything
+ *  - `ensureWorkspaceRootOrg` re-creates every boot                  → idempotent across boots (fixed clock)
  */
-import { describe, it, expect, beforeAll, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import { assertDeclarationLegal, ensureFeatureDefaultOrgs, type FeatureDefaultOrg } from '../src/host/featureDefaultOrgs.js';
 import { getOrg } from '../src/host/accessControlService.js';
 import { SYSTEM_SITE_ORG } from '../src/host/systemSite.js';
@@ -72,15 +79,24 @@ describe('ADR 0684 phase 1 — provisioning', () => {
 
   it('provisions a declared org, and is idempotent across boots', async () => {
     const d = decl({ orgId: 'host-p1a', tenantId: 'host-p1a' });
-    await ensureFeatureDefaultOrgs([d]);
-    const first = await getOrg('host-p1a');
-    expect(first?.tenantId).toBe('host-p1a');
+    // Only `Date` is faked: a re-create on the second boot would stamp a
+    // DIFFERENT createdAt, instead of possibly the same millisecond.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+      await ensureFeatureDefaultOrgs([d]);
+      const first = await getOrg('host-p1a');
+      expect(first?.tenantId).toBe('host-p1a');
 
-    // A redeploy must be a no-op, not a second row or a throw.
-    await ensureFeatureDefaultOrgs([d]);
-    const second = await getOrg('host-p1a');
-    expect(second?.orgId).toBe(first?.orgId);
-    expect(second?.createdAt).toBe(first?.createdAt);
+      // A redeploy must be a no-op, not a second row or a throw.
+      vi.setSystemTime(new Date('2026-01-01T00:00:05.000Z'));
+      await ensureFeatureDefaultOrgs([d]);
+      const second = await getOrg('host-p1a');
+      expect(second?.orgId).toBe(first?.orgId);
+      expect(second?.createdAt).toBe(first?.createdAt);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('the operator opt-out suppresses every declaration', async () => {

@@ -30,6 +30,8 @@
  * @see scheduler.ts for the trigger-rule + condition evaluation.
  */
 
+import { NEGOTIATION_DECIDED_EVENT, type NegotiationRecorder } from '../host/negotiationDecided.js';
+import { runOption } from '../host/runOptions.js';
 import { runUnderWorkerContract } from '../storage/eventEraAdapter.js';
 import { declaredRunCredentialRefs, runAiCredentialRef } from '../host/runCredentials.js';
 import { trace, context as otelContext, SpanStatusCode } from '@opentelemetry/api';
@@ -52,10 +54,14 @@ import {
   getRunSecrets,
   clearRunSecrets,
   stripSecretsFromPersisted,
+  stripKnownRunSecrets,
   nonEnumerableSecretsView,
 } from '../byok/ephemeralRunSecrets.js';
 import { resolveSecret } from '../byok/secretResolver.js';
 import { persistRunArtifact } from '../host/runArtifactStore.js';
+import { buildInterruptRequestedPayload, GATE_PREVIEW_ARTIFACT_TYPE } from './interruptRequestedPayload.js';
+import { deriveRecordedResolutions, isRecordedRejection } from './forkReplayResolutions.js';
+import { ensureApprovalPreview } from './gatePreview.js';
 import { sanitizeFreeTextDeep } from '../byok/textRedaction.js';
 import { OpenwopError } from '../types.js';
 import type { Storage } from '../storage/storage.js';
@@ -70,7 +76,7 @@ import type { ProviderPolicyResolver } from '../host/index.js';
 import { createAiProvidersAdapter, AiProviderError, type AiProviderErrorCode } from '../aiProviders/aiProvidersHost.js';
 import { createSandboxRunner } from '../host/sandboxAdapter.js';
 import { classifyDispatchError } from '../observability/errorRecovery.js';
-import { isSideEffectingNode, indexSourceOutcomes, type SourceNodeOutcome } from './sideEffects.js';
+import { isSideEffectingNode, indexSourceOutcomes, ExecutionOrdinals, type SourceOutcomeIndex } from './sideEffects.js';
 import {
   classifyRunTrigger,
   classifyWorkflowKind,
@@ -80,6 +86,7 @@ import {
 } from '../observability/metricSeams.js';
 import { runWithEffectContext, ReplayEffectError, LeaseLostError, markDispatchLeaseLost, hasLostDispatchLease, type EffectKind, type RunEffectContext } from '../host/runEffectContext.js';
 import { isolationMode, resolveIsolationPlan } from '../host/packIsolationPolicy.js';
+import { isPackRevoked } from '../host/packRevocations.js';
 import { dispatchPackNodeIsolated } from '../host/packIsolationDispatch.js';
 import { recordForwardObligation, unwindTerminatedRun } from '../host/compensationRuntime.js';
 import { compensationTriggerFor, type TerminalCause, type CompensationTrigger } from '../host/compensationUnwind.js';
@@ -90,13 +97,15 @@ import { getInstanceId } from '../host/instanceId.js';
 import { makeConnectionSafeFetch } from '../host/connectionInjection.js';
 import { makeSlackAdapter } from '../host/slackAdapter.js';
 import { makeEmailAdapter } from '../host/emailAdapter.js';
-import { makeSmsAdapter } from '../host/smsAdapter.js';
+import { makeMessagingAdapter } from '../host/chatEgressAdapter.js';
+import { makeDataIntegrationAdapter, type DataIntegrationMcp } from '../host/dataIntegrationAdapter.js';
 import { makeAdsAdapter } from '../host/adsAdapter.js';
+import { gateAdsAdapter, gateVideoGenerator } from '../host/hostCapabilityGates.js';
 import { makeNotificationAdapter } from '../host/notificationAdapter.js';
 import { makeConnectorsAdapter } from '../host/connectorsAdapter.js';
 import { makeMcpClient, McpError } from '../host/mcpClient.js';
 import { runTraceContext } from '../host/traceContext.js';
-import { armRunAbort, notifyRunTerminal, runAbortSignal, runPauseRequest, clearRunPause, noteInterruptedNode, type RunPauseRequest } from './runLifecycle.js';
+import { armRunAbort, isDeadlineAbort, notifyRunTerminal, runAbortSignal, runPauseRequest, clearRunPause, noteInterruptedNode, type RunPauseRequest } from './runLifecycle.js';
 // ADR 0553 P3 — the terminal-status predicate, taken from the PACKAGE rather
 // than re-exported through `host/runCancel.ts`: the executor must not grow an
 // import edge into `host/` for a pure predicate, and `runCancel` gets it from
@@ -114,6 +123,8 @@ import { resolveDeclaredInputs, buildNodeCtxInputs } from './nodeCtxInputs.js';
 import { setRunAgent, hydrateRunAgent } from '../host/runAgentRuntime.js';
 import { hydrateRunChannels } from '../host/channelsRuntime.js';
 import { enforceManifestHandoffContract } from './handoffGate.js';
+import { HANDOFF_KEY, readHandoffRecord } from '../host/handoff/handoffRecord.js';
+import { notifyHandoffRecorded } from '../host/handoff/handoffObservers.js';
 import { SuspendSignal, makeSuspendFn } from './suspendSignal.js';
 import { CredentialGateError, nodeOAuthDeclarationOf, runCredentialGate } from '../host/credentialGate.js';
 import { beginNodeActivity } from '../host/effectIdentity.js';
@@ -287,6 +298,14 @@ export async function emitTerminalFailure(input: {
    *  it), so this is how the failure stays visible instead of vanishing with the
    *  exception. Additive on `_errorObject` (`additionalProperties: true`). */
   compensationError?: string;
+  /** `run.failed.failedNodeId` (declared on the v1 and v2 `runFailed` defs):
+   *  the node whose failure the run could not route around. RFC 0223 makes it
+   *  a MUST for a rejected approval gate; it is equally true of every drained
+   *  failure, so `finalizeRun` passes it whenever the scheduler names one. */
+  failedNodeId?: string;
+  /** ADR 0480 — an operator's REJECT is not an outcome of the workflow, so a
+   *  run that fails on it is not scored (a gate TIMEOUT is, and is). */
+  skipOnlineEvals?: boolean;
 }): Promise<void> {
   const eventLog = getEventLog();
   // Enrich the canonical {code, message} pair with the BE's recovery
@@ -358,7 +377,7 @@ export async function emitTerminalFailure(input: {
   await eventLog.append({
     runId: input.runId,
     type: 'run.failed',
-    payload: errorPayload,
+    payload: input.failedNodeId !== undefined ? { ...errorPayload, failedNodeId: input.failedNodeId } : errorPayload,
   });
   await input.storage.updateRun(input.runId, {
     status: 'failed',
@@ -374,7 +393,7 @@ export async function emitTerminalFailure(input: {
   const failedSpendUsd = await stampRunCostOnTerminal(input.storage, input.runId);
   void foldWorkflowSpendOnTerminal(input.storage, input.runId, failedSpendUsd);
   // ADR 0480 — online eval scoring (fire-and-forget; production runs only).
-  void scoreOnlineEvalsOnTerminal(input.storage, input.runId);
+  if (!input.skipOnlineEvals) void scoreOnlineEvalsOnTerminal(input.storage, input.runId);
   clearRunSecrets(input.runId);
   notifyRunTerminal(input.runId, 'failed');
   // Fan out a user-visible notification so the bell + /inbox surface
@@ -475,10 +494,14 @@ async function runOneNode(input: {
    *  expanded from, computed ONCE per run body from `definition.metadata` and
    *  threaded onto the surface bundle as `BundleScope.chainId`. */
   chainId?: string;
-  /** ADR 0341 — replay fork: the source run's terminal outcomes by nodeId
-   *  (ordered per attempt). A side-effecting node reproduces its recorded
-   *  outcome instead of executing live; absent record ⇒ fail closed. */
-  sourceOutcomes?: Map<string, SourceNodeOutcome[]>;
+  /** ADR 0341 — replay fork: the source run's terminal outcomes by nodeId and
+   *  EXECUTION ORDINAL (ADR 0772 D2). A side-effecting node reproduces its
+   *  recorded outcome instead of executing live; absent record ⇒ fail closed. */
+  sourceOutcomes?: SourceOutcomeIndex;
+  /** ADR 0772 D2 — this run's live execution ordinals, seeded from its own log
+   *  (a fork's inherited prefix included). Claimed at `node.started`, closed at
+   *  the node's terminal event, so the live count equals the log fold. */
+  ordinals?: ExecutionOrdinals;
   policyResolver?: ProviderPolicyResolver;
   /** On a re-invoke resume (interrupt.md §"key field"), the resolution seeded for
    *  this node so `ctx.suspend`/`ctx.interrupt` returns it instead of suspending. */
@@ -492,11 +515,21 @@ async function runOneNode(input: {
        *  no guarded effect (including every replay-served outcome). */
       observedEffectKinds: ReadonlySet<EffectKind>;
     }
-  | { kind: 'failure'; error: { code: string; message: string } }
+  | {
+      kind: 'failure';
+      error: { code: string; message: string };
+      /** ADR 0772 D2 — set when the failure was SERVED from the source run's
+       *  execution `n`: the replay retries exactly when the source did. */
+      servedExecution?: number;
+    }
   // ADR 0632 — the attempt was aborted by an `immediate` pause: not a failure,
   // no `node.failed` in the log (it would be a false history AND replay poison —
   // a replay fork folds `node.failed` at face value and dead-letters the child).
   | { kind: 'interrupted' }
+  // ADR 0772 D1 — the execution failed because the run's DEADLINE aborted it. The
+  // breach is the run's fact (`cap.breached` + `run.failed{run_timeout}`), so
+  // nothing is recorded for the node, exactly as for a pause cut above.
+  | { kind: 'deadline' }
   | {
       kind: 'suspended';
       interrupt: NonNullable<Extract<NodeOutcome, { status: 'suspended' }>['interrupt']>;
@@ -644,6 +677,11 @@ async function runOneNode(input: {
     type: 'node.started',
     payload: { nodeId: nodeRef.nodeId, typeId: nodeRef.typeId },
   });
+  // ADR 0772 D2 — the execution ordinal, claimed exactly where the log records
+  // the start, so paths that refuse BEFORE `node.started` never consume one.
+  const executionOrdinal = input.ordinals?.start(nodeRef.nodeId);
+  /** Close the execution the log just recorded a terminal event for. */
+  const closeExecution = (): void => { input.ordinals?.terminal(nodeRef.nodeId); };
 
   const rawSecrets = getRunSecrets(run.runId);
   const secretsForCtx = nonEnumerableSecretsView(rawSecrets);
@@ -684,16 +722,34 @@ async function runOneNode(input: {
   const bundleActingUserId = typeof (run.metadata as Record<string, unknown> | undefined)?.actingUserId === 'string'
     ? String((run.metadata as Record<string, unknown>).actingUserId)
     : undefined;
+  const bundlePersonalTenant = typeof (run.metadata as Record<string, unknown> | undefined)?.personalTenant === 'string'
+    ? String((run.metadata as Record<string, unknown>).personalTenant)
+    : undefined;
+  const bundleOrgScopeSubject = typeof (run.metadata as Record<string, unknown> | undefined)?.orgScopeSubject === 'string'
+    ? String((run.metadata as Record<string, unknown>).orgScopeSubject)
+    : undefined;
   // RFC 0207 — the W3C trace context the run was CREATED under, stamped on the
   // run row by the creating request (`routes/runs.ts`, a reserved metadata
   // key). Threaded onto the surface bundle, onto `ctx`, and into the MCP client
   // so every outbound MCP request and A2A message this node makes continues the
   // caller's trace. Correlation only; never authority.
   const runTrace = runTraceContext(run.metadata as Record<string, unknown> | undefined);
+  // ADR 0858 P4 — `interop.md` §"The audit event": every A2A / MCP version
+  // negotiation this node makes lands on THIS run's log as `negotiation.decided`
+  // (a recorded fact like `provider.usage`, outside the replay-observable set).
+  const recordNegotiation: NegotiationRecorder = async (payload) => {
+    await eventLog.append({
+      runId: run.runId,
+      nodeId: nodeRef.nodeId,
+      type: NEGOTIATION_DECIDED_EVENT,
+      payload: { ...payload },
+    });
+  };
   const surfaces = buildHostSurfaceBundle({
     tenantId: run.tenantId,
     ...(run.scopeId ? { scopeId: run.scopeId } : {}),
     runId: run.runId,
+    recordNegotiation,
     ...(runTrace ? { traceContext: runTrace } : {}),
     // ADR 0617 D1a — the run's workflow, so a surface-emitted host event can
     // carry `origin.workflowId` and never re-trigger the workflow executing it;
@@ -706,6 +762,14 @@ async function runOneNode(input: {
     // signal), so member-scoped narrowing filters (CMS translator grants)
     // apply to feature-surface writes exactly as on the HTTP editor path.
     ...(bundleActingUserId ? { actingUserId: bundleActingUserId } : {}),
+    // ADR 0822 D1 — the run owner's REQUEST-stamped personal tenant (a reserved,
+    // host-authoritative key, re-stamped to the forking caller on `:fork`), so an
+    // in-run write gate grants the implicit personal-workspace owner on the same
+    // value the chat tool lane reads — never re-derived from a user row.
+    ...(bundlePersonalTenant ? { personalTenant: bundlePersonalTenant } : {}),
+    // ADR 0832 D3 — the member who caused an actorless run (reserved, host-stamped),
+    // read ONLY by the org-membership floors; never an actor.
+    ...(bundleOrgScopeSubject ? { orgScopeSubject: bundleOrgScopeSubject } : {}),
   });
 
   // Fixture-shape input resolution. When the workflow definition's
@@ -745,11 +809,21 @@ async function runOneNode(input: {
   // interrupt on this node, subject to the same resume, timeout and replay
   // rules, not a second pausing mechanism the run does not know about.
   const suspendFn = makeSuspendFn(nodeRef.nodeId, input.suspendResolution);
+  // ADR 0772 D1 — the signal THIS execution was handed, captured once. The
+  // deadline classification below asks this object why it aborted; looking the
+  // run up again would miss a controller that terminal, a pause or a re-arm has
+  // since removed from the registry.
+  const nodeSignal = runAbortSignal(run.runId);
+  // ADR 0820 G3/G14 — the subject the executor-level capability gates resolve
+  // against (`host/hostCapabilityGates.ts`), the same one `featureSurfaces.gate` uses.
+  const capabilityGateScope = { tenantId: run.tenantId, ...(actingUserId ? { actingUserId } : {}) };
+  // ADR 0829 P2 — the handoff record the run was created with (untrusted; re-normalized).
+  const handoffRecord = readHandoffRecord(run.metadata);
   const ctx: NodeContext = {
     // ADR 0632 — surface the run abort signal on the node ctx itself (until now
     // it reached only the MCP client deps below), so `core.delay` and friends can
     // stop on an `immediate` pause instead of sleeping the request out.
-    ...(runAbortSignal(run.runId) ? { signal: runAbortSignal(run.runId)! } : {}),
+    ...(nodeSignal ? { signal: nodeSignal } : {}),
     runId: run.runId,
     nodeId: nodeRef.nodeId,
     tenantId: run.tenantId,
@@ -788,6 +862,7 @@ async function runOneNode(input: {
     // ADR 0099 — the per-run compaction decision frozen at run creation; read
     // once here (constant across the run, copied verbatim on :fork).
     compaction: readCompactionDecision(run.metadata),
+    ...(handoffRecord ? { handoff: handoffRecord } : {}),
     secrets: secretsForCtx,
     async emit(type, payload, opts) {
       // ADR 0675 — NORMALISE, and refuse what cannot be normalised.
@@ -829,7 +904,7 @@ async function runOneNode(input: {
     // ADR 0401 P3 — the image caps join the spread (callImageGenerator was
     // never bound here despite the node schema declaring it — the latent gap
     // this closes; edit/upscale are the new siblings).
-    ...(aiAdapter ? { callAI: aiAdapter.callAI, callAIWithTools: aiAdapter.callAIWithTools, callSpeechSynthesizer: aiAdapter.callSpeechSynthesizer, callTranscriber: aiAdapter.callTranscriber, callImageGenerator: aiAdapter.callImageGenerator, callImageEditor: aiAdapter.callImageEditor, callImageUpscaler: aiAdapter.callImageUpscaler, callVideoGenerator: aiAdapter.callVideoGenerator } : {}),
+    ...(aiAdapter ? { callAI: aiAdapter.callAI, callAIWithTools: aiAdapter.callAIWithTools, callSpeechSynthesizer: aiAdapter.callSpeechSynthesizer, callTranscriber: aiAdapter.callTranscriber, callImageGenerator: aiAdapter.callImageGenerator, callImageEditor: aiAdapter.callImageEditor, callImageUpscaler: aiAdapter.callImageUpscaler, callVideoGenerator: gateVideoGenerator(aiAdapter.callVideoGenerator, capabilityGateScope, nodeRef.typeId) } : {}),
     // ADR 0114 Phase 2 — `ctx.runSandboxedCode` present ONLY when a sandbox endpoint
     // is configured (else honest-off `capability_not_provided`, Phase 1 behavior).
     ...(sandboxRunner ? { runSandboxedCode: sandboxRunner } : {}),
@@ -897,13 +972,14 @@ async function runOneNode(input: {
       ...(actingUserId ? { actingUserId } : {}),
       orgId: run.tenantId,
     }),
-    ads: makeAdsAdapter({
+    // ADR 0820 G3 — each ads method checks its owning feature (ADS_METHOD_FEATURE).
+    ads: gateAdsAdapter(makeAdsAdapter({
       storage,
       tenantId: run.tenantId,
       runId: run.runId,
       ...(actingUserId ? { actingUserId } : {}),
       orgId: run.tenantId,
-    }),
+    }), capabilityGateScope),
     email: makeEmailAdapter({
       storage,
       tenantId: run.tenantId,
@@ -911,7 +987,7 @@ async function runOneNode(input: {
       ...(actingUserId ? { actingUserId } : {}),
       orgId: run.tenantId,
     }),
-    messaging: makeSmsAdapter({
+    messaging: makeMessagingAdapter({
       storage,
       tenantId: run.tenantId,
       runId: run.runId,
@@ -955,6 +1031,7 @@ async function runOneNode(input: {
         storage,
         tenantId: run.tenantId,
         runId: run.runId,
+        onNegotiationDecided: recordNegotiation,
         // RFC 0207 §A — the trace the run was CREATED under (persisted on the
         // run row, because the executor runs after the creating request is
         // gone). Every outbound MCP request carries a child of it.
@@ -964,7 +1041,7 @@ async function runOneNode(input: {
         // armed, here: `executeRunBody` arms exactly one per run, so a node
         // reached outside a run body (a test harness) gets `undefined` and the
         // pre-P3 behaviour rather than a controller nobody will ever fire.
-        ...(runAbortSignal(run.runId) ? { signal: runAbortSignal(run.runId)! } : {}),
+        ...(nodeSignal ? { signal: nodeSignal } : {}),
         ...(actingUserId ? { actingUserId } : {}),
         orgId: run.tenantId,
         // ADR 0553 P2 / RFC 0153 §C.1 — an MRTR `input_required` becomes a
@@ -1005,6 +1082,30 @@ async function runOneNode(input: {
       });
     },
   };
+  // ADR 0783 — `ctx.dataIntegration` over the run's OWN MCP client (the per-user,
+  // governance-gated one built above), its variable bag and (phase 2a) its
+  // connector broker. `host/extFamilyRecords.ts` claims the family on this
+  // wiring (D9); its test pins the tenant and broker handed over here.
+  ctx.dataIntegration = makeDataIntegrationAdapter({
+    runId: run.runId,
+    tenantId: run.tenantId,
+    ...(ctx.mcp?.invokeTool && ctx.mcp.readResource ? { mcp: ctx.mcp as DataIntegrationMcp } : {}),
+    // ADR 0783 phase 2a — data sources ride the run's OWN connector broker, so
+    // the provider allowlist, the actor's connection authority and the egress
+    // pins all apply exactly as for any other connector call.
+    ...(ctx.connectors ? { connectors: ctx.connectors } : {}),
+    // ADR 0865 B17 — `applyBinding` passes the run lane's one canvas gate under
+    // the SAME scope `ctx.canvas` was built with (tenant, person, personal tenant).
+    // ADR 0858 P4 — a fetchA2A negotiation is recorded on THIS run's log.
+    recordNegotiation,
+    canvasScope: {
+      tenantId: run.tenantId,
+      runId: run.runId,
+      ...(bundleActingUserId ? { actingUserId: bundleActingUserId } : {}),
+      ...(bundlePersonalTenant ? { personalTenant: bundlePersonalTenant } : {}),
+      ...(bundleOrgScopeSubject ? { orgScopeSubject: bundleOrgScopeSubject } : {}),
+    },
+  });
 
   let outcome: NodeOutcome;
   // `observability.md §"Node-level attributes"`: `openwop.node_attempt`
@@ -1032,7 +1133,11 @@ async function runOneNode(input: {
   // spec's re-execute semantics and the RFC 0041 §B divergence machinery.
   let replayServed: NodeOutcome | null = null;
   if (input.sourceOutcomes && isSideEffectingNode(nodeRef.typeId, module)) {
-    const recorded = input.sourceOutcomes.get(nodeRef.nodeId)?.[(input.attempt ?? 1) - 1];
+    // ADR 0772 D2 — keyed on `(sourceRunId, nodeId, n)` (replay.md §Suppression
+    // rule 2), never on the per-body retry attempt: that counter restarts on
+    // every resume and at a fork's first live execution.
+    const n = executionOrdinal ?? input.attempt ?? 1;
+    const recorded = input.sourceOutcomes.get(nodeRef.nodeId)?.get(n);
     if (recorded?.kind === 'completed') {
       replayServed = { status: 'success', outputs: recorded.outputs ?? {} };
       recordReplayServed('recorded-success');
@@ -1040,7 +1145,7 @@ async function runOneNode(input: {
       replayServed = { status: 'failure', error: recorded.error };
       recordReplayServed('recorded-failure');
     } else {
-      replayServed = { status: 'failure', error: { code: 'replay_source_missing', message: `Replay fork: the source run has no recorded outcome for side-effecting node '${nodeRef.nodeId}' (attempt ${input.attempt ?? 1}); a replay never fires a new side effect.` } };
+      replayServed = { status: 'failure', error: { code: 'replay_source_missing', message: `Replay fork: the source run has no recorded outcome for side-effecting node '${nodeRef.nodeId}' (execution ${n}); a replay never fires a new side effect.` } };
       // ADR 0556 P1 — `source-missing` is the fail-closed arm: the replay
       // reached a side-effecting node the source never executed. This is the
       // metric that makes the ADR 0341 guard's THIRD outcome visible; the other
@@ -1072,6 +1177,15 @@ async function runOneNode(input: {
   // ADR 0555 P1 — WHERE this node runs. Decided here and nowhere else; the
   // refuse arm is a typed node failure, never a quiet fallback to in-process.
   const isolationPlan = resolveIsolationPlan({ mode: isolationMode(), origin: module.packOrigin });
+  // ADR 0826 D5 — the revocation kill switch, enforced HERE because this is the
+  // one site BOTH placements pass through (the isolated lane never calls
+  // `module.execute`, so a check in the loader's wrapper would miss exactly the
+  // untrusted population — /architect A1). The module stays imported (Node cannot
+  // unload it); nothing reaches it. A replay-SERVED outcome executes no code and
+  // is unaffected, exactly as after a restart, when the loader stubs the pack.
+  const revokedOrigin = module.packOrigin && isPackRevoked(module.packOrigin.packName, module.packOrigin.packVersion)
+    ? module.packOrigin
+    : null;
   try {
     // ADR 0531 — establish the run-scoped effect context around EVERY node
     // execution (live and replay alike, so an absent context unambiguously
@@ -1091,7 +1205,7 @@ async function runOneNode(input: {
     // Suspends by throwing a `SuspendSignal` (the catch below records it like any
     // other interrupt); a decline/expiry is a typed `CredentialGateError`. Never on
     // a replay-served outcome, which reproduces what the original run recorded.
-    const oauthDeclaration = replayServed ? null : nodeOAuthDeclarationOf(nodeRef.config);
+    const oauthDeclaration = replayServed || revokedOrigin ? null : nodeOAuthDeclarationOf(nodeRef.config);
     if (oauthDeclaration) {
       await runCredentialGate({
         runId: run.runId,
@@ -1104,7 +1218,9 @@ async function runOneNode(input: {
       });
     }
     outcome = replayServed ?? (
-      isolationPlan.kind === 'refuse'
+      revokedOrigin
+        ? { status: 'failure', error: { code: 'pack_revoked', message: `Pack '${revokedOrigin.packName}@${revokedOrigin.packVersion}' is revoked on this host and will not execute (ADR 0826 D5).` } }
+        : isolationPlan.kind === 'refuse'
         ? { status: 'failure', error: { code: isolationPlan.code, message: isolationPlan.message } }
         : isolationPlan.kind === 'isolate'
           ? await dispatchPackNodeIsolated({
@@ -1289,6 +1405,7 @@ async function runOneNode(input: {
           },
         }),
       });
+      closeExecution();
       return {
         kind: 'failure',
         error: {
@@ -1306,6 +1423,7 @@ async function runOneNode(input: {
       // (additionalProperties false), consistent with nodeStarted/nodeFailed.
       payload: stripSecretsFromPersisted({ nodeId: nodeRef.nodeId, outputs: outcome.outputs }),
     });
+    closeExecution();
     // Normalize outputs to a Record<string, unknown> for the snapshot.
     const outputsObj =
       outcome.outputs && typeof outcome.outputs === 'object' && !Array.isArray(outcome.outputs)
@@ -1315,6 +1433,17 @@ async function runOneNode(input: {
   }
 
   if (outcome.status === 'failure') {
+    // ADR 0772 D1 (`RRWF-1`) — a failure while this execution's signal is aborted
+    // BY THE DEADLINE is the breach, not the node's own failure. `core.delay`
+    // rejects on that abort and the catch above maps the rejection to
+    // `internal_error`; if that settled before the drain loop's own deadline
+    // timer, the run used to finalize as the node's failure, and a timed-out run
+    // answered `internal_error` instead of `run_timeout`. Classified by CAUSE,
+    // because ordering by time cannot be made exact under load.
+    if (isDeadlineAbort(nodeSignal)) {
+      log.info('node_deadline_cut', { runId: run.runId, nodeId: nodeRef.nodeId, code: outcome.error.code });
+      return { kind: 'deadline' };
+    }
     // Phase 4: when this node failed with `envelope_refusal` AND the
     // original run got a valid envelope at the same nodeId, that's a
     // refusal-divergence. Emit `replay.divergedAtRefusal` + override the
@@ -1345,6 +1474,7 @@ async function runOneNode(input: {
           type: 'node.failed',
           payload: stripSecretsFromPersisted({ nodeId: nodeRef.nodeId, error: overriddenError }),
         });
+        closeExecution();
         return { kind: 'failure', error: overriddenError };
       }
     }
@@ -1362,7 +1492,12 @@ async function runOneNode(input: {
       type: 'node.failed',
       payload: stripSecretsFromPersisted({ nodeId: nodeRef.nodeId, error: outcome.error }),
     });
-    return { kind: 'failure', error: outcome.error };
+    closeExecution();
+    return {
+      kind: 'failure',
+      error: outcome.error,
+      ...(replayServed && executionOrdinal !== undefined ? { servedExecution: executionOrdinal } : {}),
+    };
   }
 
   // Suspended.
@@ -1380,6 +1515,15 @@ export interface ExecuteRunOptions {
    * claimed the run and says it has re-opens `WHD-12`.
    */
   executionPreclaimed?: boolean;
+  /**
+   * Fired once the run's opening event (`run.started`, or `run.resumed` on a
+   * resume) is durable and the row says `running`. The `:resume` route awaits
+   * it before answering `202 { status: running }`, because runs.md §Pause and
+   * resume lets a client read the log immediately after the 202 and expect
+   * `run.resumed` in it. The route used to answer first, so the claim raced the
+   * write. Measured on prod (rev 00780) as a red certification floor row.
+   */
+  onStarted?: () => void;
   resumeFromNodeIndex?: number;
   /** New-style resume: hydrate the snapshot from these completed nodes. */
   resumeSnapshot?: SerializedSnapshot;
@@ -1393,6 +1537,22 @@ export interface ExecuteRunOptions {
   resumeStyle?: 'reinvoke';
   /** The deterministic resume key the re-invoked ctx.suspend call must match. */
   resumeKey?: string;
+  /**
+   * RFC 0223 (interrupt.md §Rejection) — the resumed node's interrupt resolved
+   * REJECTED, so the node FAILS with this error instead of completing. It is
+   * failed exactly as the drain loop fails any node (`markFailed` +
+   * `node.failed` + `releaseDownstream`), so the scheduler's triggerRule logic
+   * routes it: `all_complete` / `any_failed` edges continue, the rest skip,
+   * and the run fails naming the gate only when nothing admits it. Requires
+   * `resumeNodeId`; overrides `resumeStyle` (a rejected gate is never re-run).
+   */
+  resumeRejection?: {
+    code: string;
+    message: string;
+    /** ADR 0480 — a human/quorum reject is an operator act, excluded from
+     *  online-eval scoring when the run dies on it; a timeout is an outcome. */
+    operatorAct?: boolean;
+  };
   policyResolver?: ProviderPolicyResolver;
   /** ADR 0326 P3b — replay-mode fork: ALSO consult THIS run's Layer-2
    *  invocation log on cache misses (reads only; writes stay on the fork's
@@ -1424,15 +1584,34 @@ export function snapshotFromEventPrefix(events: ReadonlyArray<{ type: string; no
   const outputs = new Map<string, Record<string, unknown>>();
   const errors = new Map<string, { code: string; message: string }>();
   const openKinds = new Map<string, string>();
+  // ADR 0772 D2 (`RRWF-4`) — the same open-execution rule as the replay
+  // ordinal. A `node.started` that OPENS an execution (none open) means the node
+  // was IN FLIGHT at the checkpoint unless a later event says otherwise, so its
+  // earlier settled state is cleared and the fork re-executes it. This fold used
+  // to ignore `node.started`, so a node retried in the source (`node.failed`,
+  // then attempt 2 in flight at `fromSeq`) was restored `failed`: never re-run,
+  // its downstream released as failed. A start that CONTINUES an open execution
+  // (the reinvoke resume after `node.suspended`) keeps today's behaviour.
+  const inFlight = new Set<string>();
   for (const ev of events) {
     const nodeId = ev.nodeId;
     if (!nodeId) continue;
     const p = (ev.payload ?? {}) as { outputs?: unknown; error?: { code?: string; message?: string }; kind?: unknown };
-    if (ev.type === 'node.completed') {
+    if (ev.type === 'node.started') {
+      if (!inFlight.has(nodeId)) {
+        inFlight.add(nodeId);
+        state.delete(nodeId);
+        outputs.delete(nodeId);
+        errors.delete(nodeId);
+        openKinds.delete(nodeId);
+      }
+    } else if (ev.type === 'node.completed') {
+      inFlight.delete(nodeId);
       state.set(nodeId, 'completed');
       outputs.set(nodeId, (p.outputs && typeof p.outputs === 'object' && !Array.isArray(p.outputs) ? p.outputs : { output: p.outputs }) as Record<string, unknown>);
       openKinds.delete(nodeId);
     } else if (ev.type === 'node.failed') {
+      inFlight.delete(nodeId);
       state.set(nodeId, 'failed');
       errors.set(nodeId, { code: p.error?.code ?? 'internal_error', message: p.error?.message ?? 'failed in the forked prefix' });
       openKinds.delete(nodeId);
@@ -1504,6 +1683,8 @@ export function executeRun(
       // status the row carries instead of surfacing a dispatch error, which
       // would otherwise reach the fail-closed path.
       if (err instanceof RunLogClosedError) {
+        // ADR 0779 D5 — the run ended under this execution; release its keys.
+        clearRunSecrets(run.runId);
         const recorded = (await storage.getRun(run.runId))?.status;
         log.info('run_log_closed_execution_stopped', { runId: run.runId, refused: err.type, closedBy: err.closedBy, recorded });
         return { status: recorded ?? (err.closedBy === 'run.cancelled' ? 'cancelled' : err.closedBy === 'run.failed' ? 'failed' : 'completed') };
@@ -1700,6 +1881,7 @@ async function executeRunInner(
     });
     await storage.updateRun(run.runId, { status: 'running' });
   }
+  options.onStarted?.();
 
   // Multi-instance dispatch lease: claim this run for this instance. The lease
   // outlives the maximum legal runtime (run-duration ceiling + buffer), so an
@@ -1776,16 +1958,22 @@ async function executeRunBody(input: ExecuteRunBodyInput): Promise<ExecuteRunRes
   // ADR 0341 — replay fork: fold the SOURCE run's terminal outcomes once
   // (batched drain — the adapters cap listEvents at 1000/page); flagged
   // side-effecting nodes reproduce these instead of executing live.
-  let sourceOutcomes: Map<string, SourceNodeOutcome[]> | null = null;
-  if (options.replayInvocationsFromRunId) {
-    const srcEvents: { type: string; nodeId?: string; payload: unknown }[] = [];
-    let fromSeq = -1;
-    for (;;) {
-      const batch = await storage.listEvents(options.replayInvocationsFromRunId, { fromSeq, limit: 1000 });
-      for (const e of batch) { if (e.sequence > fromSeq) fromSeq = e.sequence; srcEvents.push(e); }
-      if (batch.length < 1000) break;
-    }
+  //
+  // ADR 0772 D6 (`RRWF-19`) — the replay source is a property of the RUN, not of
+  // whichever dispatcher happened to call. Gate resolution and `:resume` re-enter
+  // here without `replayInvocationsFromRunId`, and a resumed replay fork then ran
+  // with `sourceOutcomes` null AND `effectCtx.replaying` false — both the ADR
+  // 0341 fast path and the ADR 0531 backstop stood down, and every side effect
+  // after an inherited gate fired for real. The explicit option still wins (the
+  // compensation seam passes its own, and agrees).
+  const replaySourceRunId = options.replayInvocationsFromRunId
+    ?? (run.forkMode === 'replay' && typeof run.parentRunId === 'string' ? run.parentRunId : undefined);
+  let sourceOutcomes: SourceOutcomeIndex | null = null;
+  let sourceOrdinals: ExecutionOrdinals | null = null;
+  if (replaySourceRunId) {
+    const srcEvents = await drainRunEvents(storage, replaySourceRunId);
     sourceOutcomes = indexSourceOutcomes(srcEvents);
+    sourceOrdinals = ExecutionOrdinals.fold(srcEvents);
   }
   // Cycle detection + snapshot construction.
   let graph: SchedulerGraph;
@@ -1800,6 +1988,29 @@ async function executeRunBody(input: ExecuteRunBodyInput): Promise<ExecuteRunRes
     const message = err instanceof Error ? err.message : String(err);
     await emitTerminalFailure({ storage, runId: run.runId, error: { code, message } });
     return { status: 'failed' };
+  }
+
+  // ADR 0326 P3b — a checkpoint-snapshot resume (a branch fork's copied prefix,
+  // or a pause resume) carries no single resume target. See the release below.
+  const isForkCheckpointResume = options.resumeSnapshot !== undefined && options.resumeNodeId === undefined;
+
+  // ADR 0779 D5 — an interrupt (or legacy index) resume re-resolves the run's
+  // keys HERE, before the resume-seeding block below scrubs `resumeValue` and
+  // emits the resumed node's `node.completed`. The old premise ("resumes already
+  // have the bundle in the ephemeral store") held only on the same instance
+  // before a restart; elsewhere the run met `byok_required` for a key that
+  // exists, and on the same instance it dispatched with a rotated or deleted
+  // key's old plaintext. TOLERANT: a declared ref that no longer resolves is
+  // skipped, not fatal — a run whose remaining nodes never dispatch still
+  // completes, and a node that needs the key fails with its own typed error.
+  if (isResume && !isForkCheckpointResume) {
+    try {
+      await prepareRunSecrets(run, definition, { tolerant: true });
+    } catch (err) {
+      // A store outage must not turn a resume into a crash; the dispatching
+      // node reports the missing key with its own typed error.
+      log.warn('resume_secret_prep_failed', { runId: run.runId, error: err instanceof Error ? err.message : String(err) });
+    }
   }
 
   // ctx.suspend/ctx.interrupt resume: nodeId → seeded resolution. The resumed
@@ -1832,7 +2043,9 @@ async function executeRunBody(input: ExecuteRunBodyInput): Promise<ExecuteRunRes
       }
     }
     const resumeNode = definition.nodes[options.resumeFromNodeIndex]?.nodeId;
-    if (resumeNode) {
+    // A rejection names the gate itself as `resumeFromNodeIndex`; it is failed
+    // below, never marked ready.
+    if (resumeNode && !options.resumeRejection) {
       // Set the previous-node output to the resumed value so the resume target
       // sees it on its `input` port.
       const prev = definition.nodes[options.resumeFromNodeIndex - 1]?.nodeId;
@@ -1851,12 +2064,28 @@ async function executeRunBody(input: ExecuteRunBodyInput): Promise<ExecuteRunRes
   // the run completes, because `interrupt.resolved` doesn't
   // carry the same semantics (it tells the FE the interrupt is
   // closed, not that the node finished).
-  if (options.resumeSnapshot && options.resumeNodeId) {
+  if (options.resumeRejection && options.resumeNodeId) {
+    const rejectedId = options.resumeNodeId;
+    const { code, message } = options.resumeRejection;
+    markFailed(rejectedId, { code, message }, snapshot);
+    await eventLog.append({
+      runId: run.runId,
+      nodeId: rejectedId,
+      type: 'node.failed',
+      // `retryable: false` — RFC 0223: a rejection MUST NOT be retried.
+      payload: { nodeId: rejectedId, error: { code, message, retryable: false } },
+    });
+    await storage.updateRun(run.runId, { currentNodeId: rejectedId }).catch(() => {});
+    releaseDownstream(rejectedId, graph, snapshot, (skippedId, reason) =>
+      log.debug('node_skipped', { runId: run.runId, nodeId: skippedId, reason, by: rejectedId }),
+    );
+  } else if (options.resumeSnapshot && options.resumeNodeId) {
     // Two-layer redaction at the resume-time persistence boundary:
     //
-    //   1. `stripSecretsFromPersisted` strips `__secret:*` reference
-    //      tokens (BYOK ephemeral references the executor injects
-    //      into node ctx). Structured-payload concern.
+    //   1. `stripSecretsFromPersisted` replaces any string equal to a
+    //      secret a run resolved (Tier 1) and credential-shaped strings
+    //      (Tier 2). (An earlier comment said it stripped `__secret:*`
+    //      reference tokens; no such stripping exists — ADR 0779.)
     //   2. `sanitizeFreeTextDeep` walks string leaves for
     //      accidentally-pasted upstream API keys. HITL approval
     //      cards carry a free-text `comment` field that users have
@@ -1900,7 +2129,32 @@ async function executeRunBody(input: ExecuteRunBodyInput): Promise<ExecuteRunRes
   // promotes pending nodes whose triggers are already satisfied, so this is
   // a pure re-derivation. (Interrupt resumes always carry `resumeNodeId`
   // and release through the branches above — this path is fork-only.)
-  const isForkCheckpointResume = options.resumeSnapshot !== undefined && options.resumeNodeId === undefined;
+  // (`isForkCheckpointResume` is computed above, beside the D5 secret prep.)
+  // ADR 0772 (grade-code H1) — a fork cut BETWEEN a node's failure and its retry
+  // (the natural "fork from here" on attempt 2's `node.started`) restores the node
+  // `failed` from the prefix, and the release below would then skip its
+  // downstream — a fork failing where the source went on to succeed. A checkpoint
+  // fork taken inside the retry decides per mode: a REPLAY re-opens the node when
+  // the source went on to start another execution (fixed history, served by D2);
+  // a BRANCH applies the node's own retry policy to the attempts the prefix
+  // already consumed, and carries that count into the budget.
+  if (isForkCheckpointResume) {
+    const ownPrefix = ExecutionOrdinals.fold(await drainRunEvents(storage, run.runId));
+    for (const id of snapshot.order) {
+      if (snapshot.nodeState.get(id) !== 'failed') continue;
+      const consumed = ownPrefix.highest(id);
+      if (consumed === 0) continue; // a pre-start refusal, not a failed execution
+      const err = snapshot.nodeErrors.get(id);
+      const node = definition.nodes.find((n) => n.nodeId === id);
+      const retries = replaySourceRunId
+        ? (sourceOrdinals?.highest(id) ?? 0) > consumed
+        : node !== undefined && consumed < nodeRetryMaxAttempts(node) && !(err && NON_RETRYABLE_NODE_ERRORS.has(err.code));
+      if (!retries) continue;
+      snapshot.nodeState.set(id, 'ready');
+      snapshot.nodeErrors.delete(id);
+      nodeAttempts.set(id, consumed + 1);
+    }
+  }
   if (isForkCheckpointResume) {
     for (const id of snapshot.order) {
       const s = snapshot.nodeState.get(id);
@@ -1908,10 +2162,11 @@ async function executeRunBody(input: ExecuteRunBodyInput): Promise<ExecuteRunRes
     }
   }
 
-  // Resolve all required secrets up-front (only on initial run; resumes
-  // already have the run-secrets bundle in the ephemeral store). A fork's
-  // checkpoint resume is a NEW run id with no ephemeral bundle — its suffix
-  // nodes still need their credentialRefs resolved (ADR 0326 P3b).
+  // Resolve all required secrets up-front on an initial run (strict: a missing
+  // run-level ref fails the run before any node). A fork's checkpoint resume is a
+  // NEW run id with no ephemeral bundle — its suffix nodes still need their
+  // credentialRefs resolved (ADR 0326 P3b). An interrupt resume prepared its
+  // keys above, before the seeding block (ADR 0779 D5).
   if (!isResume || isForkCheckpointResume) {
     try {
       await prepareRunSecrets(run, definition);
@@ -1968,7 +2223,52 @@ async function executeRunBody(input: ExecuteRunBodyInput): Promise<ExecuteRunRes
   // ADR 0751 — a fork that inherited an OPEN gate re-creates its live interrupt
   // row before anything can report the run as waiting on it.
   if (isForkCheckpointResume) {
-    const suspendedIds = [...snapshot.nodeState.entries()].filter(([, st]) => st === 'suspended').map(([id]) => id);
+    let suspendedIds = [...snapshot.nodeState.entries()].filter(([, st]) => st === 'suspended').map(([id]) => id);
+    // RFC 0223 (openwop#1756) — a REPLAY fork derives a gate's decision from the
+    // source's recorded `interrupt.resolved` instead of re-creating the gate live
+    // and waiting for a new one (`forkReplayResolutions.ts`). Applied here exactly
+    // as a live resolution: a rejection fails the node and the scheduler routes it.
+    const derived = await deriveRecordedResolutions({ storage, suspend, run, suspendedNodeIds: suspendedIds });
+    for (const d of derived) {
+      suspendedKinds.delete(d.nodeId);
+      if (d.conflict) {
+        // Someone else decided a replay fork's gate: a replay never re-decides,
+        // and the recorded decision no longer matches the row — fail CLOSED
+        // (forkReplayResolutions.ts §DERIVED_MARKER), never apply either.
+        const error = { code: 'replay_gate_conflict', message: `Replay fork: gate '${d.nodeId}' was decided outside the replay; the recorded decision was not applied.` };
+        markFailed(d.nodeId, error, snapshot);
+        await eventLog.append({ runId: run.runId, nodeId: d.nodeId, type: 'node.failed', payload: { nodeId: d.nodeId, error: { ...error, retryable: false } } });
+        releaseDownstream(d.nodeId, graph, snapshot);
+        continue;
+      }
+      if (!d.alreadyRecorded) {
+        await eventLog.append({ runId: run.runId, nodeId: d.nodeId, type: 'interrupt.resolved', payload: d.payload });
+      }
+      if (isRecordedRejection(d.payload)) {
+        const code = 'approval_rejected';
+        const message = d.payload['action'] === 'timeout'
+          ? 'Approval gate timed out (auto-rejected; reason: timeout) — derived from the replay source.'
+          : 'Approval gate rejected — derived from the replay source.';
+        markFailed(d.nodeId, { code, message }, snapshot);
+        if (!d.alreadyRecorded) {
+          await eventLog.append({ runId: run.runId, nodeId: d.nodeId, type: 'node.failed', payload: { nodeId: d.nodeId, error: { code, message, retryable: false } } });
+        }
+        releaseDownstream(d.nodeId, graph, snapshot);
+      } else {
+        const outputs = { output: sanitizeFreeTextDeep(stripSecretsFromPersisted(d.resolvedValue)) };
+        snapshot.nodeOutputs.set(d.nodeId, outputs);
+        snapshot.nodeState.set(d.nodeId, 'completed');
+        if (!d.alreadyRecorded) {
+          await eventLog.append({ runId: run.runId, nodeId: d.nodeId, type: 'node.completed', payload: stripSecretsFromPersisted({ nodeId: d.nodeId, outputs }) });
+        }
+        releaseDownstream(d.nodeId, graph, snapshot);
+      }
+    }
+    if (derived.length > 0) {
+      const done = new Set(derived.map((d) => d.nodeId));
+      suspendedIds = suspendedIds.filter((id) => !done.has(id));
+      log.info('fork_gate_derived_from_source', { runId: run.runId, parentRunId: run.parentRunId, gates: derived.map((d) => ({ nodeId: d.nodeId, decision: d.payload['decision'], ...(d.conflict ? { conflict: true } : {}) })) });
+    }
     const forked = await ensureForkInterrupts({ storage, suspend, run, suspendedNodeIds: suspendedIds });
     if (forked.unrecoverable.length > 0) {
       await emitTerminalFailure({
@@ -1995,7 +2295,7 @@ async function executeRunBody(input: ExecuteRunBodyInput): Promise<ExecuteRunRes
    *  is `run.configurable.recursionLimit` (per spec) or `unset`/0/negative
    *  → no cap. */
   let nodeExecutionCount = 0;
-  const recursionLimitRaw = (run.configurable as Record<string, unknown> | undefined)?.recursionLimit;
+  const recursionLimitRaw = runOption(run.configurable, 'recursionLimit');
   const recursionLimit = typeof recursionLimitRaw === 'number' && recursionLimitRaw > 0
     ? recursionLimitRaw
     : Number.POSITIVE_INFINITY;
@@ -2008,7 +2308,7 @@ async function executeRunBody(input: ExecuteRunBodyInput): Promise<ExecuteRunRes
    *  (the clock is re-anchored when the executor re-enters on resume). On
    *  breach we emit `cap.breached {kind:'run-duration'}` then `run.failed`
    *  with `error.code:'run_timeout'`, mirroring the node-executions path. */
-  const runTimeoutRaw = (run.configurable as Record<string, unknown> | undefined)?.runTimeoutMs;
+  const runTimeoutRaw = runOption(run.configurable, 'runTimeoutMs');
   const requestedTimeoutMs = typeof runTimeoutRaw === 'number' && runTimeoutRaw > 0 ? runTimeoutRaw : undefined;
   const effectiveTimeoutMs = requestedTimeoutMs !== undefined
     ? Math.min(requestedTimeoutMs, RUN_DURATION_CEILING_MS)
@@ -2124,6 +2424,12 @@ async function executeRunBody(input: ExecuteRunBodyInput): Promise<ExecuteRunRes
     return { status: 'failed' };
   };
 
+  /** ADR 0772 D1 — set when a node was cut by the run deadline; the loop's next
+   *  turn breaches regardless of where the clock reads on the boundary ms. */
+  let deadlineTripped = false;
+  /** ADR 0772 D2 — seeded just before the drain loop (replay forks only). */
+  let ordinals: ExecutionOrdinals | undefined;
+
   function launch(nodeId: string): void {
     const nodeRef = nodeById.get(nodeId);
     const task = (async () => {
@@ -2176,8 +2482,9 @@ async function executeRunBody(input: ExecuteRunBodyInput): Promise<ExecuteRunRes
         inputsByPort,
         attempt: nodeAttempts.get(nodeId) ?? 1, // ADR 0326 P3a — real attempt threading
         ...(runChainId ? { chainId: runChainId } : {}),
-        ...(options.replayInvocationsFromRunId ? { replayInvocationsFromRunId: options.replayInvocationsFromRunId } : {}),
+        ...(replaySourceRunId ? { replayInvocationsFromRunId: replaySourceRunId } : {}),
         ...(sourceOutcomes ? { sourceOutcomes } : {}),
+        ...(ordinals ? { ordinals } : {}),
         ...(options.policyResolver ? { policyResolver: options.policyResolver } : {}),
         ...(reinvokeResolutions.has(nodeId) ? { suspendResolution: reinvokeResolutions.get(nodeId)! } : {}),
       });
@@ -2223,6 +2530,10 @@ async function executeRunBody(input: ExecuteRunBodyInput): Promise<ExecuteRunRes
             now: new Date().toISOString(),
           });
         }
+      } else if (out.kind === 'deadline') {
+        // ADR 0772 D1 — no retry, no `markFailed`: the run is breaching. The node
+        // stays `running` (never re-popped); `breachRunDuration` ends the run.
+        deadlineTripped = true;
       } else if (out.kind === 'interrupted') {
         noteInterruptedNode(run.runId, nodeId);
         // ADR 0632 — the node stopped because an `immediate` pause fired the
@@ -2242,7 +2553,15 @@ async function executeRunBody(input: ExecuteRunBodyInput): Promise<ExecuteRunRes
         // carry determinism).
         const maxAttempts = nodeRetryMaxAttempts(nodeRef);
         const attempt = nodeAttempts.get(nodeId) ?? 1;
-        if (attempt < maxAttempts && !NON_RETRYABLE_NODE_ERRORS.has(out.error.code)) {
+        // ADR 0772 D2 — a failure SERVED from the source's execution `n` retries
+        // exactly when the source went on to start execution `n+1`: the source's
+        // retry decisions are fixed history, not this body's budget (which
+        // restarts per segment, so a source that retried across a suspend would
+        // otherwise run the fork out of attempts where the source had not).
+        const retry = out.servedExecution !== undefined
+          ? (sourceOrdinals?.highest(nodeId) ?? 0) > out.servedExecution
+          : attempt < maxAttempts && !NON_RETRYABLE_NODE_ERRORS.has(out.error.code);
+        if (retry) {
           nodeAttempts.set(nodeId, attempt + 1);
           log.info('node_retry_scheduled', { runId: run.runId, nodeId, attempt: attempt + 1, maxAttempts, code: out.error.code });
           // Grade-code fix (2026-07-09 session grade): backoff must NOT hold a
@@ -2281,8 +2600,9 @@ async function executeRunBody(input: ExecuteRunBodyInput): Promise<ExecuteRunRes
         // RFC 0199 §E.3 — a `credential` ask has no gate content to preview, and its
         // `CredentialData` is closed: binding a preview artifact onto it would make
         // the wire payload invalid.
+        let preview: { artifactId: string; revisionId: string } | null = null;
         if (run.forkMode !== 'replay' && out.interrupt.kind !== 'credential') {
-          const preview = await persistRunArtifact({
+          preview = await persistRunArtifact({
             tenantId: run.tenantId,
             runId: run.runId,
             nodeId,
@@ -2290,9 +2610,16 @@ async function executeRunBody(input: ExecuteRunBodyInput): Promise<ExecuteRunRes
             output: inputsByPort,
             now: new Date().toISOString(),
           });
-          if (preview && interruptData && typeof interruptData === 'object' && !Array.isArray(interruptData)) {
-            interruptData = { ...(interruptData as Record<string, unknown>), artifactId: preview.artifactId, revisionId: preview.revisionId };
-          }
+        }
+        // loop row 3, P2 — interrupt.md §Events — an approval's `interrupt.requested` names its artifact
+        // (`ApprovalData.artifactId`, REQUIRED), and that id MUST resolve: a
+        // gate with no upstream output (or a replay fork, which persists
+        // nothing) gets the inherited or a minimal honest preview instead.
+        if (out.interrupt.kind === 'approval' && !preview) {
+          preview = await ensureApprovalPreview({ run, nodeId, data: interruptData });
+        }
+        if (preview && interruptData && typeof interruptData === 'object' && !Array.isArray(interruptData)) {
+          interruptData = { ...(interruptData as Record<string, unknown>), artifactId: preview.artifactId, revisionId: preview.revisionId };
         }
         const interrupt = await suspend.createInterrupt({
           runId: run.runId,
@@ -2320,22 +2647,44 @@ async function executeRunBody(input: ExecuteRunBodyInput): Promise<ExecuteRunRes
           // which must not reach the log. `reason` is seated on `nodeSuspended`;
           // the other three are undeclared, so a major-2 read boxes them under
           // `vendor.openwop-app` (RFC 0185 §C) and the v1 read keeps them flat.
-          payload: stripSecretsFromPersisted({ interruptId: interrupt.interruptId, kind: interrupt.kind, ...suspendDiagnostics(interruptData) }),
+          // ADR 0829 D2 — the structured handoff record of an escalation rides this row
+          // under the hatch-matching `openwop-handoff` key (already normalized and
+          // redacted by its builder; redacted again here with the rest of the row).
+          payload: stripSecretsFromPersisted({
+            interruptId: interrupt.interruptId,
+            kind: interrupt.kind,
+            ...suspendDiagnostics(interruptData),
+            ...(out.interrupt.handoff ? { [HANDOFF_KEY]: out.interrupt.handoff } : {}),
+          }),
         });
-        if (interrupt.kind === 'credential') {
-          // RFC 0199 §E.3 — the `credential` ask is a closed wire object
-          // (`suspend-request` + `CredentialData`), so it is written as exactly
-          // that: the engine's own `__resume*` routing keys stay on the stored
-          // record and never reach the event. (This host records other kinds as
-          // `node.suspended` only; that wider gap is ADR 0753's, not this kind's.)
-          const { __resumeKey: _rk, __resumeStyle: _rs, ...credentialData } = (interruptData ?? {}) as Record<string, unknown>;
-          await eventLog.append({
-            runId: run.runId,
-            nodeId,
-            type: 'interrupt.requested',
-            payload: { kind: 'credential', key: nodeId, data: credentialData, resumeSchema: interrupt.resumeSchema },
+        // ADR 0831 P3 — announce the escalation's record (fail-soft; one per interrupt).
+        if (out.interrupt.handoff) {
+          await notifyHandoffRecorded({
+            tenantId: run.tenantId,
+            record: out.interrupt.handoff,
+            origin: { kind: 'run', runId: run.runId, ref: `interrupt:${interrupt.interruptId}` },
           });
         }
+        // interrupt.md §Events — EVERY kind records `interrupt.requested` with the
+        // InterruptPayload, once per suspension, right after `node.suspended`
+        // (loop row 3, P2 — interrupt.md §Events). It was the credential kind alone (RFC 0199 §E.3); the
+        // payload is now the per-kind projection in `interruptRequestedPayload.ts`.
+        // Emitted only here, where a node SUSPENDS: a resume, a recovery
+        // re-dispatch and a fork's re-created gate (forkInterrupts.ts) never
+        // pass through this branch, so none of them emits a second request.
+        await eventLog.append({
+          runId: run.runId,
+          nodeId,
+          type: 'interrupt.requested',
+          payload: stripSecretsFromPersisted(buildInterruptRequestedPayload({
+            runId: run.runId,
+            nodeId,
+            kind: interrupt.kind,
+            data: interruptData,
+            ...(interrupt.resumeSchema !== undefined ? { resumeSchema: interrupt.resumeSchema } : {}),
+            ...(preview ? { preview: { artifactId: preview.artifactId, artifactType: GATE_PREVIEW_ARTIFACT_TYPE } } : {}),
+          })),
+        });
         suspendedKinds.set(nodeId, out.interrupt.kind);
         markSuspended(nodeId, snapshot);
       }
@@ -2421,13 +2770,20 @@ async function executeRunBody(input: ExecuteRunBodyInput): Promise<ExecuteRunRes
     }
   };
 
+  // ADR 0772 D2 — seed this run's live execution ordinals from its OWN log (a
+  // fork's inherited prefix included), AFTER the resume writes above and before
+  // the first launch, so every later claim continues the log's count. Replay
+  // only: nothing else reads the ordinal yet (D5 will), and a log read on every
+  // resume of every run would be cost with no consumer.
+  if (replaySourceRunId) ordinals = ExecutionOrdinals.fold(await drainRunEvents(storage, run.runId));
+
   /**
    * Drain ready queue with bounded concurrency. Returns when no more nodes
    * can run without external input.
    */
   while (true) {
     // RFC 0058 — trip the wall-clock bound before scheduling more work.
-    if (isRunDurationBreached(Date.now(), runDeadlineAt)) return await breachRunDuration();
+    if (deadlineTripped || isRunDurationBreached(Date.now(), runDeadlineAt)) return await breachRunDuration();
 
     await renewDispatchLeaseIfDue();
 
@@ -2437,7 +2793,12 @@ async function executeRunBody(input: ExecuteRunBodyInput): Promise<ExecuteRunRes
     // flight the run transitions to `paused` with its ready set recorded, and
     // this process returns — resume re-enters through `executeRun`.
     const pauseReq = runPauseRequest(run.runId) ?? await readPersistedPauseRequest(storage, run.runId);
-    if (pauseReq && inflight.size === 0) {
+    // ADR 0772 D4 (`RRWF-8`) — and no retry backoff pending. A node waiting on
+    // its retry timer is still `running` (popped, never re-queued), so pausing
+    // then persisted it `running` and nothing ever re-popped it after `:resume`:
+    // the run ended `scheduler stalled`. With `slots` 0 while paused, the timer
+    // just flips the node to `ready`, and the next turn pauses with it there.
+    if (pauseReq && inflight.size === 0 && pendingRetryTimers === 0) {
       return await pauseRun({ storage, run, snapshot, suspendedKinds, request: pauseReq });
     }
     const slots = pauseReq ? 0 : Math.max(0, maxConcurrency - inflight.size);
@@ -2448,6 +2809,7 @@ async function executeRunBody(input: ExecuteRunBodyInput): Promise<ExecuteRunRes
       if (disp.done) {
         return await finalizeRun({
           storage, run, snapshot, graph, definition, disposition: disp, suspendedKinds, nodeAttempts,
+          ...(options.resumeRejection?.operatorAct && options.resumeNodeId ? { operatorRejectedNodeId: options.resumeNodeId } : {}),
           ...(terminalCause ? { compensationTrigger: compensationTriggerFor(terminalCause) } : {}),
         });
       }
@@ -2510,6 +2872,19 @@ async function executeRunBody(input: ExecuteRunBodyInput): Promise<ExecuteRunRes
   }
 }
 
+/** Every event of `runId`, oldest first — the adapters cap `listEvents` at
+ *  1000/page, so this drains in batches. */
+async function drainRunEvents(storage: Storage, runId: string): Promise<{ type: string; nodeId?: string; payload: unknown }[]> {
+  const out: { type: string; nodeId?: string; payload: unknown }[] = [];
+  let fromSeq = -1;
+  for (;;) {
+    const batch = await storage.listEvents(runId, { fromSeq, limit: 1000 });
+    for (const e of batch) { if (e.sequence > fromSeq) fromSeq = e.sequence; out.push(e); }
+    if (batch.length < 1000) break;
+  }
+  return out;
+}
+
 /** The durable copy of a pause request (`run.metadata.pauseRequest`), for a
  *  scheduler on an instance that did not take the request. */
 async function readPersistedPauseRequest(storage: Storage, runId: string): Promise<RunPauseRequest | undefined> {
@@ -2530,6 +2905,10 @@ async function pauseRun(input: {
   const interruptedNodeId = request.interruptedNodeIds?.[0];
   const pausedNodeIds = [...snapshot.nodeState.entries()].filter(([, st]) => st === 'ready').map(([id]) => id);
   await persistSnapshot(storage, run.runId, snapshot, suspendedKinds);
+  // ADR 0779 D5 — nothing is in flight and the resume re-prepares; do not hold
+  // provider plaintext for the length of the pause. After the persist, whose
+  // scrub reads the registered values; before any other await.
+  clearRunSecrets(run.runId);
   const pausedAt = new Date().toISOString();
   const row = await storage.getRun(run.runId);
   const meta = { ...((row?.metadata as Record<string, unknown> | undefined) ?? {}) };
@@ -2570,6 +2949,8 @@ async function finalizeRun(input: {
   /** RFC 0151 §B — which trigger this terminal failure unwinds under. Absent
    *  means an ordinary node failure; a cap breach names itself. */
   compensationTrigger?: CompensationTrigger;
+  /** The gate an operator rejected on this resume (ADR 0480 eval exclusion). */
+  operatorRejectedNodeId?: string;
 }): Promise<ExecuteRunResult> {
   const { storage, run, snapshot, definition, disposition, suspendedKinds } = input;
   const eventLog = getEventLog();
@@ -2796,7 +3177,8 @@ async function finalizeRun(input: {
       storage,
       runId: run.runId,
       error: err,
-      ...(failedNodeId ? { deadLetterNodeId: failedNodeId, attempts: input.nodeAttempts.get(failedNodeId) ?? 1 } : {}),
+      ...(failedNodeId ? { deadLetterNodeId: failedNodeId, failedNodeId, attempts: input.nodeAttempts.get(failedNodeId) ?? 1 } : {}),
+      ...(failedNodeId !== undefined && failedNodeId === input.operatorRejectedNodeId ? { skipOnlineEvals: true } : {}),
       ...(compensationError !== undefined ? { compensationError } : {}),
     });
     return { status: 'failed' };
@@ -2810,6 +3192,11 @@ async function finalizeRun(input: {
   await storage.updateRun(run.runId, { status: interruptKind, currentNodeId: firstSuspended });
   // Persist scheduler snapshot for resume.
   await persistSnapshot(storage, run.runId, snapshot, suspendedKinds);
+  // ADR 0779 D5 — the suspend disposition is reached only with nothing in flight
+  // and no retry timer pending, and every resume re-prepares; release the run's
+  // provider plaintext for the length of the human wait. After the persist (its
+  // scrub reads the registered values), before any other await.
+  clearRunSecrets(run.runId);
   // Back-compat: also surface pausedAtIndex for legacy callers when the
   // workflow is purely linear and exactly one node is suspended.
   // Defensive: a registered fixture/pack edge may carry `id` instead of
@@ -2868,11 +3255,18 @@ async function persistSnapshot(
   snapshot: SchedulerSnapshot,
   suspendedKinds: Map<string, string>,
 ): Promise<void> {
+  // ADR 0779 D4 — `scheduler_snapshot` was the one persisted copy of node
+  // outputs/errors that bypassed the scrub every event gets. Round-trip through
+  // JSON FIRST (a Date/Buffer then serialises exactly as it always did — the
+  // walker would turn it into `{}`), then scrub: outputs by known run-secret
+  // value only (interrupt/pause resume read them back as live inputs), errors
+  // fully (as `node.failed` does).
+  const jsonCopy = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
   const ser: SerializedSnapshot = {
     schemaVersion: 1,
     nodeState: [...snapshot.nodeState.entries()].map(([k, v]) => [k, v]),
-    nodeOutputs: [...snapshot.nodeOutputs.entries()],
-    nodeErrors: [...snapshot.nodeErrors.entries()],
+    nodeOutputs: stripKnownRunSecrets(jsonCopy([...snapshot.nodeOutputs.entries()])),
+    nodeErrors: stripSecretsFromPersisted(jsonCopy([...snapshot.nodeErrors.entries()])),
     suspendedKinds: [...suspendedKinds.entries()],
   };
   await storage.updateRun(runId, { schedulerSnapshot: JSON.stringify(ser) as never });
@@ -2897,7 +3291,11 @@ function hydrateSnapshot(
 
 /* ─── Secret prep (unchanged from linear executor) ─────────── */
 
-async function prepareRunSecrets(run: RunRecord, definition: WorkflowDefinition): Promise<void> {
+async function prepareRunSecrets(
+  run: RunRecord,
+  definition: WorkflowDefinition,
+  opts: { tolerant?: boolean } = {},
+): Promise<void> {
   // In OPENWOP_BYOK_EPHEMERAL=true mode the resolver needs the run's
   // tenant so it can find the right per-session bucket. Anon runs get
   // a session-derived tenant id ('anon:<sid>'); bearer-authed runs
@@ -2930,7 +3328,10 @@ async function prepareRunSecrets(run: RunRecord, definition: WorkflowDefinition)
     if (ref.startsWith('managed:')) continue;
     const value = await resolveSecret(ref, scope);
     if (value) required.set(ref, value);
-    else {
+    else if (opts.tolerant) {
+      // ADR 0779 D5 — a resume: skip it; the node that needs it fails typed.
+      log.warn('resume_credential_unresolved', { runId: run.runId, credentialRef: ref });
+    } else {
       throw new OpenwopError(
         'credential_unavailable',
         `Required credential ${ref} not resolved by host`,
@@ -2939,7 +3340,9 @@ async function prepareRunSecrets(run: RunRecord, definition: WorkflowDefinition)
       );
     }
   }
-  if (required.size > 0) {
+  // A resume REPLACES whatever this instance still held (a rotation or delete is
+  // honoured), including with nothing.
+  if (required.size > 0 || opts.tolerant) {
     setRunSecrets(run.runId, Object.fromEntries(required));
   }
 }

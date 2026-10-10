@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/feature.kb.nodes/1.2.0/search.output.json",
+  "$id": "https://packs.openwop.dev/feature.kb.nodes/1.2.1/search.output.json",
   "title": "KbSearchOutput",
   "type": "object",
   "required": [

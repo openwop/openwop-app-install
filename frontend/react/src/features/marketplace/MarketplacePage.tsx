@@ -8,7 +8,7 @@
  */
 import { Button } from '../../ui/Button.js';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
+import { useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import i18n from '../../i18n/index.js';
 import { formatCurrency, formatDate, formatNumber } from '../../i18n/format.js';
@@ -23,15 +23,18 @@ import { toast } from '../../ui/toast.js';
 import { ViewToggle, useViewMode } from '../../ui/ViewToggle.js';
 import { BoxesIcon, LockIcon, StarIcon, TrashIcon } from '../../ui/icons/index.js';
 import { useFeatureAccess } from '../../featureToggles/FeatureAccessContext.js';
+import { useHub } from '../../chrome/hubContext.js';
 import { confirm } from '../../ui/confirm.js';
 import { handleRadiogroupKeyDown } from '../../ui/rovingTabs.js';
 import {
   listListings, installPack, listOrgs, listReviews, postReview, deleteReview,
   fetchDisabledPacks, setPackEnabled, removePack, restorePack,
-  type Listing, type Review, type RatingSummary, type Org,
+  revokePack, unrevokePack, listRevocations, revocationsCovering,
+  type Listing, type Review, type RatingSummary, type Org, type MarketplaceViewer,
   purchaseListing, getPurchaseOrder, listMyOrders, type PurchaseOrder,
 } from './marketplaceClient.js';
 import { ListingCard, ListingRow } from './MarketplaceViews.js';
+import { RevokePackDialog } from './RevokePackDialog.js';
 
 /** MKT-UX-5 — the caller's LATEST actionable order state per pack. `purchases` is
  *  newest-first from the route, so the first row per pack is its latest order; only
@@ -66,7 +69,7 @@ function Stars({ value, onPick, label }: { value: number; onPick?: (n: number) =
     return (
       <span className="mkt-stars" role="img" aria-label={t('starsReadLabel', { count: Math.round(value) })}>
         {stars.map((n) => (
-          <span key={n} className="mkt-star" aria-hidden>
+          <span key={n} aria-hidden>
             <StarIcon fill={n <= Math.round(value) ? 'currentColor' : 'none'} />
           </span>
         ))}
@@ -97,6 +100,7 @@ function Stars({ value, onPick, label }: { value: number; onPick?: (n: number) =
 
 export function MarketplacePage(): JSX.Element {
   const { t } = useTranslation('marketplace');
+  const { embedded } = useHub();
   const access = useFeatureAccess('marketplace');
   const [listings, setListings] = useState<Listing[] | null>(null);
   // MKT-UX-5 — the caller's latest actionable order state per pack (`pending` /
@@ -131,6 +135,11 @@ export function MarketplacePage(): JSX.Element {
   // MKT2-M2 (R3) — failure is its own state (the error used to sit above a
   // permanent skeleton with no retry).
   const [listingsFailed, setListingsFailed] = useState(false);
+  // ADR 0826 D1 — what THIS caller may do, from the listings response (the same
+  // predicates the write routes enforce). `null` = the server did not say.
+  const [viewer, setViewer] = useState<MarketplaceViewer | null>(null);
+  // ADR 0826 D5 — the pack whose revoke dialog is open.
+  const [revoking, setRevoking] = useState<Listing | null>(null);
 
   const load = useCallback(() => {
     setError(null);
@@ -151,7 +160,7 @@ export function MarketplacePage(): JSX.Element {
       // never a fabricated purchase state. Does not gate the page on the orders read.
       listMyOrders().catch(() => ({ purchases: [] as PurchaseOrder[], sales: [] as PurchaseOrder[] })),
     ])
-      .then(([ls, disabled, orders]) => { setListings(ls.listings); setPricingDegraded(ls.pricingDegraded); setWsDisabled(new Set(disabled)); setOrdersByPack(deriveOrderStatuses(orders.purchases)); setError(null); })
+      .then(([ls, disabled, orders]) => { setListings(ls.listings); setViewer(ls.viewer); setPricingDegraded(ls.pricingDegraded); setWsDisabled(new Set(disabled)); setOrdersByPack(deriveOrderStatuses(orders.purchases)); setError(null); })
       .catch((err) => {
         setListingsFailed(true);
         // MKT-UX-13 — clear the STALE degraded flag. Two reasons, one line.
@@ -337,6 +346,46 @@ export function MarketplacePage(): JSX.Element {
     }
   }, [load, t]);
 
+  // ADR 0826 D5 — the kill switch. The dialog collects scope + reason; the toast
+  // names the features the revocation took down (the server computes them).
+  const revoke = useCallback(async (l: Listing, version: string, reason: string) => {
+    setBusy(true);
+    try {
+      const { requiredBy } = await revokePack(l.packName, version, reason);
+      toast.success(requiredBy.length > 0
+        ? t('revokedWithImpact', { pack: l.packName, features: requiredBy.join(', ') })
+        : t('revoked', { pack: l.packName }));
+      setRevoking(null);
+      load();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : t('revokeFailed'));
+    } finally {
+      setBusy(false);
+    }
+  }, [load, t]);
+
+  // Lift EVERY revocation that covers this listing (its exact version and any `*`).
+  const unrevoke = useCallback(async (l: Listing) => {
+    if (!(await confirm({ title: t('unrevokeConfirm', { pack: l.packName }), body: t('unrevokeBody'), confirmLabel: t('unrevokePack') }))) return;
+    setBusy(true);
+    try {
+      const covering = revocationsCovering(l, await listRevocations());
+      if (covering.length === 0) {
+        // Revoked by the static operator list (`OPENWOP_TRUSTED_PACK_REVOCATIONS`),
+        // which this screen cannot change. Never report a lift that did not happen.
+        toast.error(t('revokedByConfig', { pack: l.packName }));
+        return;
+      }
+      for (const r of covering) await unrevokePack(r.packName, r.version);
+      toast.success(t('unrevoked', { pack: l.packName }));
+      load();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : t('unrevokeFailed'));
+    } finally {
+      setBusy(false);
+    }
+  }, [load, t]);
+
   // ADR 0194 P3 — workspace availability curation (optimistic; reverts on failure).
   const toggleAvailability = useCallback(async (l: Listing) => {
     // Never write from a set we could not read — the value would be a guess.
@@ -363,7 +412,7 @@ export function MarketplacePage(): JSX.Element {
   if (!access.enabled) {
     return (
       <section data-walkthrough="marketplace.page" className="u-grid u-gap-4">
-        <PageHeader eyebrow={t('eyebrow')} title={t('title')} />
+        {embedded ? null : <PageHeader eyebrow={t('eyebrow')} title={t('title')} />}
         <StateCard icon={<LockIcon />} title={t('notEnabledTitle')} body={t('notEnabledBody')} />
       </section>
     );
@@ -373,9 +422,9 @@ export function MarketplacePage(): JSX.Element {
 
   return (
     <section className="u-grid u-gap-4">
-      <PageHeader eyebrow={t('eyebrow')} title={t('title')} lede={t('lede')} />
-      {/* ADR 0366 P3 — the bundle shop rides the same feature (no second nav entry) */}
-      <p className="muted"><Link to="/marketplace/bundles">{t('bundleShopLink')}</Link></p>
+      {/* The Marketplace hub owns the page chrome and the wayfinding to the feature
+          store + the distribution composer (its tabs); standalone keeps a header. */}
+      {embedded ? null : <PageHeader eyebrow={t('eyebrow')} title={t('title')} lede={t('lede')} />}
       {error ? <Notice variant="error">{error}</Notice> : null}
       {curationUnknown ? <Notice variant="warning">{t('curationUnknown')}</Notice> : null}
 
@@ -459,6 +508,9 @@ export function MarketplacePage(): JSX.Element {
               onPurge={() => void purge(l)}
               onPurchase={() => void purchase(l)}
               orderStatus={ordersByPack.get(l.packName)}
+              viewer={viewer}
+              onRevoke={() => setRevoking(l)}
+              onUnrevoke={() => void unrevoke(l)}
             />
           ))}
         </ul>
@@ -479,6 +531,9 @@ export function MarketplacePage(): JSX.Element {
               onPurge={() => void purge(l)}
               onPurchase={() => void purchase(l)}
               orderStatus={ordersByPack.get(l.packName)}
+              viewer={viewer}
+              onRevoke={() => setRevoking(l)}
+              onUnrevoke={() => void unrevoke(l)}
             />
           ))}
         </div>
@@ -486,6 +541,14 @@ export function MarketplacePage(): JSX.Element {
 
       {selectedListing ? (
         <ReviewsPanel listing={selectedListing} onClose={() => setSelected(null)} />
+      ) : null}
+      {revoking ? (
+        <RevokePackDialog
+          listing={revoking}
+          busy={busy}
+          onConfirm={(version, reason) => void revoke(revoking, version, reason)}
+          onClose={() => setRevoking(null)}
+        />
       ) : null}
     </section>
   );
@@ -626,7 +689,7 @@ function ReviewsPanel({ listing, onClose }: { listing: Listing; onClose: () => v
       ) : (
         <ul className="u-grid u-gap-2 mkt-reviews">
           {reviews.map((r) => (
-            <li key={r.reviewId} className="surface-card u-p-3 mkt-review">
+            <li key={r.reviewId} className="surface-card u-p-3">
               <div className="mkt-review-head">
                 <Stars value={r.rating} />
                 <span className="u-text-muted">{authorLabel(r.authorId)} · {when(r.createdAt)}</span>

@@ -64,14 +64,16 @@ describe('ENV2-M1 — the approval says what changes, not just where it lands', 
   it('is computed from the SAME diff the preview uses, over real payloads', () => {
     // Not a second opinion invented for the review: `diffDomainPayloads` is the
     // extracted form of what `diffSnapshots` (and therefore the preview) runs.
+    // A REGISTERED domain's payloads (ADR 0819 §2 removed `feature-toggles`;
+    // the diff reports registered domains only, so it would now be skipped).
     const diff = diffDomainPayloads(
-      { 'feature-toggles': { a: 'on', b: 'off' } as never },
-      { 'feature-toggles': { a: 'off', c: 'on' } as never },
+      { 'workflow-pins': { a: 'a1b2c3d4e5f6a1b2', b: 'b1b2c3d4e5f6a1b2' } as never },
+      { 'workflow-pins': { a: 'c1b2c3d4e5f6a1b2', c: 'd1b2c3d4e5f6a1b2' } as never },
     );
     const text = describeSnapshotChange(diff);
     // b removed, c added, a changed — whatever the domain's own diff() reports,
     // the sentence must be non-empty and mention the domain.
-    expect(text).toContain('feature-toggles');
+    expect(text).toContain('workflow-pins');
     expect(text).not.toBe('no config entries change');
   });
 

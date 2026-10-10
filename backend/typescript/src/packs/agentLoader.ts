@@ -15,9 +15,11 @@
  *      so the dispatch path can validate task/return payloads.
  */
 
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { join, isAbsolute, normalize, relative } from 'node:path';
-import Ajv2020, { type ValidateFunction } from 'ajv/dist/2020.js';
+import type Ajv2020 from 'ajv/dist/2020.js';
+import type { ValidateFunction } from 'ajv/dist/2020.js';
+import { SharedMetaAjv2020 } from './sharedMetaAjv.js';
 import { getAgentRegistry, type ResolvedAgentManifest, type AgentSchemaValidator } from '../executor/agentRegistry.js';
 import { classifyPackDir } from '../host/packTrust.js';
 import { createLogger } from '../observability/logger.js';
@@ -69,6 +71,14 @@ function resolveRef(packDir: string, ref: string, kind: string): string {
   if (!existsSync(abs) || !statSync(abs).isFile()) {
     throw new Error(`${kind} '${ref}' does not exist in the pack`);
   }
+  // ADR 0826 D2.3 — the check above is LEXICAL; `statSync`/`readFileSync` follow
+  // links. Contain by REAL path too, so a link inside the pack can never read a
+  // host file into a prompt. (The pack dir itself may be a symlink — every dev
+  // mount is — so compare real against real.)
+  const realRel = relative(realpathSync(packDir), realpathSync(abs));
+  if (realRel.startsWith('..') || isAbsolute(realRel)) {
+    throw new Error(`${kind} '${ref}' resolves outside the pack root (RFC 0003 §C: no path traversal)`);
+  }
   return abs;
 }
 
@@ -104,13 +114,16 @@ export interface DependencyDisposition {
  */
 export function resolveDependencyDisposition(
   peerDependencies: Record<string, unknown> | undefined,
-  peerDependenciesMeta: Record<string, { optional?: boolean } | undefined> | undefined,
-  hostSatisfies: (cap: string) => boolean,
+  peerDependenciesMeta: Record<string, { optional?: boolean; facets?: readonly string[] } | undefined> | undefined,
+  hostSatisfies: (cap: string, facets?: readonly string[]) => boolean,
 ): DependencyDisposition {
   const refused: string[] = [];
   const degraded: string[] = [];
   for (const cap of Object.keys(peerDependencies ?? {})) {
-    if (hostSatisfies(cap)) continue;
+    // NP-V2-7 — a v2 requirement names its facets in `peerDependenciesMeta.<family>.facets`
+    // (spec/v2/core/packs.md §"Peer-dependency identifiers"); the family alone is not enough.
+    const facets = peerDependenciesMeta?.[cap]?.facets;
+    if (hostSatisfies(cap, Array.isArray(facets) ? facets : [])) continue;
     if (peerDependenciesMeta?.[cap]?.optional === true) degraded.push(cap);
     else refused.push(cap);
   }
@@ -120,7 +133,7 @@ export function resolveDependencyDisposition(
 export interface LoadAgentsOptions {
   /** When provided, RFC 0072 §C disposition is computed against this predicate:
    *  optional-unmet peer-deps populate each agent's `degraded[]`. */
-  hostSatisfies?: (cap: string) => boolean;
+  hostSatisfies?: (cap: string, facets?: readonly string[]) => boolean;
   /** When true (and `hostSatisfies` provided), a pack with a required-unmet peer
    *  dependency is refused (no agents loaded) per RFC 0072 §C. Default false —
    *  the bootstrap eager pass loads regardless, pending the pack peerDep migration. */
@@ -133,7 +146,7 @@ export function loadAgentsFromManifest(packDir: string, opts: LoadAgentsOptions 
   let manifest: {
     name?: string; version?: string; agents?: RawAgentManifest[];
     peerDependencies?: Record<string, unknown>;
-    peerDependenciesMeta?: Record<string, { optional?: boolean } | undefined>;
+    peerDependenciesMeta?: Record<string, { optional?: boolean; facets?: readonly string[] } | undefined>;
   };
   try {
     manifest = JSON.parse(readFileSync(manifestPath, 'utf-8'));
@@ -215,7 +228,11 @@ export function loadAgentsFromManifest(packDir: string, opts: LoadAgentsOptions 
   // Fresh Ajv per pack-load: handoff schema files within a pack carry distinct
   // `$id`s, and a per-load instance means a `$id` reused across two packs never
   // collides on a shared registry (the documented Ajv `compile` gotcha).
-  const ajv = new Ajv2020({ allErrors: true, strict: false });
+  // Boot perf (2026-10-08): the instance validates schemas against ONE process-wide compiled
+  // 2020-12 meta-schema instead of recompiling it per pack (~10 ms each, the
+  // largest single cost of createApp). User schemas still compile here, so the
+  // `$id` isolation above is unchanged.
+  const ajv = new SharedMetaAjv2020({ allErrors: true, strict: false });
 
   for (const raw of manifest.agents) {
     try {

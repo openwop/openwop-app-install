@@ -20,11 +20,16 @@
  * lives here, where the hook is the thing under test and both directions are
  * asserted. Asserting only the hidden direction would pass against a Buy button
  * that had simply been deleted.
+ *
+ * Sabotage-witnessed (/grade-tests wave 10): `canPurchase = true` reds the VIEWER and
+ * UNRESOLVED cases; gating on the wrong scope reds the EDITOR and OWNER cases;
+ * dropping the standalone PageHeader reds the hub case.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import type { EffectiveAccess } from '../../../client/accessClient.js';
+import type { Listing } from '../marketplaceClient.js';
 
 const api = vi.hoisted(() => ({
   listListings: vi.fn(),
@@ -58,7 +63,7 @@ const PAID = {
   packName: 'vendor.paid.nodes', version: '1.0.0', title: 'Paid Pack', category: 'nodes',
   installed: false, origin: 'registry' as const,
   pricing: { lane: 'native-paid' as const, priceMajorUnits: 99, currency: 'usd', purchasable: true },
-};
+} satisfies Listing;
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -107,5 +112,17 @@ describe('MPL-2 — Buy is gated on workspace:write, not on `purchasable` alone'
     access.current = { roles: ['owner'], scopes: ['workspace:read', 'workspace:write'], basis: 'tenant-owner' };
     at();
     expect(await screen.findByRole('button', { name: /^buy$/i })).toBeTruthy();
+  });
+});
+
+describe('Marketplace hub — the packs page no longer carries inline store / composer links', () => {
+  it('no "Feature store →" or "Compose a white-label distribution…" link (the hub tabs replace them)', async () => {
+    access.current = { roles: ['owner'], scopes: ['workspace:read', 'workspace:write'], basis: 'tenant-owner' };
+    at();
+    await waitFor(() => expect(screen.getByText('vendor.paid.nodes')).toBeTruthy());
+    expect(document.querySelector('a[href="/marketplace/bundles"]')).toBeNull();
+    expect(document.querySelector('a[href="/marketplace/distribution"]')).toBeNull();
+    // Standalone (outside the hub) it still has its header — the hub drops it when embedded.
+    expect(screen.getByRole('heading', { level: 1, name: 'Marketplace' })).toBeTruthy();
   });
 });

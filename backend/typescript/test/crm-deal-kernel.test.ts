@@ -3,6 +3,9 @@
  * neverPublic system type, the full Deal round-trips via ext.deal with
  * queryable scalars + top-level orgId, and the legacy→kernel migration is
  * id-preserving + idempotent.
+ *
+ * Sabotage-witnessed (w4 grade-tests): `neverPublic: false`, dropping the org
+ * check in `getDeal`, or dropping `org_id` from the kernel values reds case 1.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { initHostExtPersistence, DurableCollection } from '../src/host/hostExtPersistence.js';
@@ -52,7 +55,7 @@ describe('ADR 0409 Phase 3 — crm.deal on the kernel', () => {
       createdBy: 'u0', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-02T00:00:00.000Z',
     });
     const first = await migrateDealsToKernel();
-    expect(first.migrated).toBeGreaterThanOrEqual(1);
+    expect(first.migrated).toBe(1); // exactly the one legacy row — never an over-count
     expect((await migrateDealsToKernel()).migrated).toBe(0);
     const got = await getDeal('tenant-legacy', 'org-legacy', 'deal:legacy-1');
     expect(got).toMatchObject({ title: 'Old Deal', amount: 9_000, currency: 'EUR', pipelineId: 'pl-1' });

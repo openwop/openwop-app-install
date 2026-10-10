@@ -17,6 +17,7 @@ export const messages = {
   runsCadence: 'Runs {{cadence}}',
   runsCadenceWithTz: 'Runs {{cadence}} · {{timezone}}',
   lastRun: 'Last run {{when}}',
+  nextRun: 'Next run {{when}}',
   viewRun: 'view run',
 
   // Cadence preset labels (mirrors CADENCE_PRESETS by key)
@@ -29,6 +30,7 @@ export const messages = {
   pause: 'Pause',
   resume: 'Resume',
   runNow: 'Run now',
+  keepCadence: 'Keep current ({{cadence}})',
   saveChanges: 'Save changes',
 
   // Form fields / selects
@@ -44,10 +46,23 @@ export const messages = {
   deleteConfirm: 'Delete the schedule “{{label}}”? This can\'t be undone.',
 
   // Run-now notices
-  firedWithRun: 'Fired — ',
+  firedWithRunLink: 'Fired.',
+  runNowSkipped: 'Did not run — {{reason}}.',
   firedNoWorkflow: 'Fired (no workflow bound).',
 
   // ADR 0313 D3 — silent-schedule chips
   wontFire: 'Won\u2019t fire — cadence didn\u2019t parse',
+  cadenceExhausted: 'Won\u2019t fire again — no future time matches this cadence',
   oneShotDone: 'Completed (one-shot)',
+  // ADR 0815 D4 — a job paused because the member it ran as left the workspace
+  pausedOwnerLeft: 'Paused — the person it ran as left',
+  statusPlanLapsed: 'Paused — plan lapsed',
+  planLapsedHint: 'Your plan no longer includes this feature, so these runs are skipped. It resumes by itself when the feature is back on your plan.',
+  planLapsedLink: 'See plans',
+  pausedReownNeeded: 'This schedule was paused because the person it ran as left the workspace. Resume it from here to run it as you.',
+  pausedRecreate: 'This schedule was paused because the person it ran as left the workspace. Create it again from its feature to run it as you.',
+  resumeReownTitle: 'Resume and take ownership?',
+  resumeReownBody: 'The person this schedule ran as was removed from the workspace. If you resume it, it runs as you from now on.',
+  resumeReownConfirm: 'Resume as me',
+  pausedOwnerLeftRunNow: 'Resume it first — the person it ran as left the workspace',
 } as const;

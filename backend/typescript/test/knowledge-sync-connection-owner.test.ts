@@ -35,7 +35,7 @@ import { createCollection } from '../src/features/kb/kbService.js';
 import { createSyncSource } from '../src/features/knowledge-sync/knowledgeSyncService.js';
 import { runKnowledgeSyncOnce } from '../src/features/knowledge-sync/knowledgeSyncRunner.js';
 
-const KS = '/v1/host/openwop-app/knowledge-sync';
+const KS = '/host/openwop-app/knowledge-sync';
 const NOW = '2026-06-22T00:00:00.000Z';
 const FOLDER = '1AbcDEF_ghiJKL-mnoPQRstuVWxyz0123456789';
 
@@ -78,8 +78,8 @@ beforeEach(async () => {
 /** One tenant, one org, and the acting user's own subject id. */
 async function member(who: string, tenantId: string): Promise<{ c: ReturnType<typeof client>; orgId: string; userId: string }> {
   const c = client();
-  const login = await c.post('/v1/host/openwop-app/test/login', { email: `${who}-${Date.now()}-${n++}@acme.test`, tenantId });
-  const orgId = (await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' })).body.orgId as string;
+  const login = await c.post('/host/openwop-app/test/login', { email: `${who}-${Date.now()}-${n++}@acme.test`, tenantId });
+  const orgId = (await c.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId as string;
   // `POST /test/login` responds `{ user }` and the session's acting subject is
   // `user.userId` — which is exactly what `actingUserOf(req)` resolves to, and so
   // exactly what the guard compares against.

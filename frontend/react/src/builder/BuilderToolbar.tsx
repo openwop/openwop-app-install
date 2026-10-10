@@ -13,7 +13,7 @@ import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useBuilderStore } from './store/builderStore.js';
 import { newWorkflowId } from './persistence/localStore.js';
-import { UndoIcon, RedoIcon, SparklesIcon, ChevronDownIcon, PlusIcon, PlayIcon, ArrowLeftIcon, MoreHorizontalIcon, UsersIcon } from '../ui/icons/index.js';
+import { UndoIcon, RedoIcon, ChevronDownIcon, PlusIcon, PlayIcon, ArrowLeftIcon, MoreHorizontalIcon, UsersIcon } from '../ui/icons/index.js';
 import { InfoTip } from '../ui/InfoTip.js';
 import { Menu, type MenuEntry } from '../ui/Menu.js';
 import { useMediaQuery } from '../ui/useMediaQuery.js';
@@ -27,9 +27,7 @@ interface BuilderToolbarProps {
   canUndo: boolean;
   canRedo: boolean;
   running: boolean;
-  aiOpen: boolean;
   /** ADR 0596 (`WFAU-5`) — the drawer restores focus HERE on close. */
-  aiTriggerRef?: React.Ref<HTMLButtonElement>;
   undo(): void;
   redo(): void;
   onExport(): void;
@@ -41,7 +39,6 @@ interface BuilderToolbarProps {
   onNewWorkflow(): void;
   onValidate(): void;
   onRun(): void;
-  onCreateWithAi(): void;
   /** ADR 0476 — pre-run cost hint ("~$0.02/run"); null hides it (fail-soft). */
   /** `unavailable` marks the READ-FAILED arm, which must not read as a price
    *  (UX-BLD-2) — it styles as a warning chip, never the muted cost chip. */
@@ -64,9 +61,9 @@ interface BuilderToolbarProps {
 }
 
 export function BuilderToolbar({
-  name, workflowId, canUndo, canRedo, running, aiOpen, aiTriggerRef, draft, onSaveDraft,
+  name, workflowId, canUndo, canRedo, running,  draft, onSaveDraft,
   undo, redo, onExport, onOpenHistory, onExportChainPack, onPublishToRegistry, onImportFile,
-  onNewWorkflow, onValidate, onRun, onCreateWithAi, runEstimate, heatmapOn, onToggleHeatmap, onOpenEvals,
+  onNewWorkflow, onValidate, onRun,  runEstimate, heatmapOn, onToggleHeatmap, onOpenEvals,
   costHeatmapOn, onToggleCostHeatmap,
   publish, onPublishChanges, collab, onToggleCollab,
 }: BuilderToolbarProps) {
@@ -206,20 +203,7 @@ export function BuilderToolbar({
         </>
       ) : null}
 
-      {/* ADR 0596 (`WFAU-5`) — a DISCLOSURE, not a toggle button: it controls a
-          separate region, so `aria-expanded` + `aria-controls` is the correct
-          pairing. `aria-pressed` described a two-state button and told AT
-          nothing about the drawer it governs. */}
-      <Button
-        variant="accent" size="sm"
-        onClick={onCreateWithAi}
-        {...(aiTriggerRef ? { ref: aiTriggerRef } : {})}
-        aria-expanded={aiOpen}
-        aria-controls="builder-ai-drawer"
-        title={t('createWithAiTitle')}
-      >
-        <SparklesIcon size={14} aria-hidden /> {t('createWithAi')}
-      </Button>
+      {/* ADR 0773 G-10e — "Create with AI" retired: the builder's Pair rail is the AI entry. */}
 
       {publish ? (
         <Button

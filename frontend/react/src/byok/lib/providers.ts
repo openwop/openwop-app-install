@@ -23,6 +23,10 @@ export interface ProviderModel {
   webSearch?: boolean;
   /** Model accepts raw audio input as a content part (no separate STT). */
   audioInput?: boolean;
+  /** Anthropic: thinking is adaptive and always on (the backend dispatcher never
+   *  sends a manual budget to it). Backend-only behaviour; typed here so the
+   *  shared `providers.json` stays one schema. */
+  adaptiveThinkingOnly?: boolean;
 }
 
 export interface ProviderConfig {

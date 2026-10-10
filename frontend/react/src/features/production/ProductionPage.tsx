@@ -51,7 +51,7 @@ import {
   type PlanStatus,
 } from './productionClient.js';
 
-const PRODUCTION_PLANNER_AGENT = 'feature.production.agents.production-planner';
+const PRODUCTION_PLANNER_AGENT = 'vendor.openwop-app.production.agents.production-planner';
 
 const crudErr = (e: unknown): void => { toast.error(e instanceof Error ? e.message : i18n.t('production:actionFailed')); };
 

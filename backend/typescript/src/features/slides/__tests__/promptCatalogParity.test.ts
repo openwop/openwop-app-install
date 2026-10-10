@@ -22,7 +22,7 @@ import { slidesCatalogProjection } from '../surface.js';
 registerSlideBlocks();
 
 const here = dirname(fileURLToPath(import.meta.url));
-const promptPath = join(here, '../../../../../../packs/feature.slides.agents/prompts/slide-designer.md');
+const promptPath = join(here, '../../../../../../packs/vendor.openwop-app.slides.agents/prompts/slide-designer.md');
 const packPath = join(here, '../../../../../../packs/feature.slides.nodes/index.mjs');
 const prompt = readFileSync(promptPath, 'utf8');
 const packSource = readFileSync(packPath, 'utf8');

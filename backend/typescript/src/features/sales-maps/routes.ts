@@ -21,7 +21,7 @@ const authorize = (req: Request, scope: Scope) => authorizeOrgScope(req, { toggl
 
 export function registerSalesMapsRoutes(deps: RouteDeps): void {
   const { app } = deps;
-  const BASE = '/v1/host/openwop-app/sales-maps/orgs/:orgId';
+  const BASE = '/host/openwop-app/sales-maps/orgs/:orgId';
 
   app.post(`${BASE}/geocode`, async (req, res, next) => {
     try {

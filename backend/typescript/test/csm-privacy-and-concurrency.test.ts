@@ -13,6 +13,18 @@
  * Every write was an unguarded read-modify-write whole-row `put`, so two
  * concurrent PATCHes lost a field and a PATCH racing a DELETE RESURRECTED the
  * deleted row.
+ *
+ * SABOTAGE-WITNESSED (grade-tests w7, probes `w7g1-priv-*`): dropping the PII
+ * declaration, masking `owner` globally, not redacting / over-matching / sweeping
+ * cross-tenant in the eraser, unregistering it, ignoring the purge cutoff or the
+ * classification, not writing the purge redaction, and replacing the CAS with a
+ * bare put each turn the claiming case red.
+ *
+ * KNOWN DEFECT (ADR 0582 §13) — BLOCKED-ON-PRODUCT: a free-text `owner` NAME is
+ * not reached by the DSAR sweep. The case below asserts the CORRECT behaviour as
+ * `it.fails`; when the write boundary normalises `owner` to a subject ref (or the
+ * sweep otherwise reaches the name) it starts passing, `it.fails` reports that,
+ * and this marker must be flipped to a plain `it`. Never loosen it.
  */
 
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -89,24 +101,26 @@ describe('CSM-4 — `owner` is declared, classified and erasable', () => {
     expect((await getAccount(theirs.accountId))!.owner).toBe('user:cs-2');
   });
 
-  // ADR 0582 §13 — the LIMIT of the leg above, pinned so the coverage claim
-  // cannot be read wider than it is. The test above uses `owner:'user:cs-1'`,
-  // the DOCUMENTED contract ("an opaque CS-owner subject id"). The field's only
-  // real PRODUCER is a free-text "Account owner" box in the SPA, and
-  // `eraseCsmSubject` matches on EXACT equality with the subject key — so for a
-  // display name the DSAR sweep does nothing at all. This is deliberately
-  // asserted rather than fixed with a substring/fuzzy match, which would erase
-  // the wrong people. Real coverage for that case is the age-based retention
-  // purger (value-agnostic) + ADR 0284 tenant teardown; closing it properly
-  // means normalising `owner` to a subject ref at the write boundary.
-  it('DOCUMENTED GAP — a free-text owner NAME is NOT reached by the DSAR sweep', async () => {
+  // ADR 0582 §13 — KNOWN DEFECT, BLOCKED-ON-PRODUCT. The leg above uses
+  // `owner:'user:cs-1'`, the DOCUMENTED contract ("an opaque CS-owner subject
+  // id"). The field's only real PRODUCER is a free-text "Account owner" box in
+  // the SPA, and `eraseCsmSubject` matches on EXACT equality with the subject
+  // key — so for a display name the DSAR sweep does nothing at all. This case
+  // used to ASSERT that (it pinned the defect, and would have gone red on the
+  // fix). It now asserts the CORRECT outcome — the person's name is gone after
+  // their DSAR — wrapped in `it.fails` because the product does not do it yet.
+  // The fix is NOT a substring/fuzzy match (that erases the wrong people); it is
+  // normalising `owner` to a subject ref at the write boundary. When that lands
+  // this starts passing, `it.fails` goes red, and it must become a plain `it`.
+  // Interim real coverage: the age-based retention purger + ADR 0284 teardown.
+  it.fails('KNOWN DEFECT (ADR 0582 §13) — a DSAR erases the owner even when it was entered as a NAME', async () => {
     const acct = await createAccount({ tenantId: T, name: 'Umbrella', healthScore: 55, owner: 'Dana Scully' });
     // The DSAR runs for the very person whose NAME is in the field.
     await eraseSubject(T, 'user:dana');
     expect(
       (await getAccount(acct.accountId))!.owner,
-      'a display-name owner survives erasure today — the sweep keys on an exact subject match',
-    ).toBe('Dana Scully');
+      "the data subject's name must not survive their own erasure request",
+    ).not.toBe('Dana Scully');
   });
 
   it('erasure is tenant-scoped — another workspace\'s row with the same owner is untouched', async () => {
@@ -134,14 +148,16 @@ describe('CSM-12 — retention reaches `csm:account`', () => {
     expect(after!.arr, 'the tenant\'s ARR is not the person\'s data').toBe(1000);
   });
 
-  it('leaves a row NEWER than the cutoff alone, and never runs without a tenant', async () => {
+  // The blank-tenant leg that used to sit here asserted the HOST's guard
+  // (`purgeRetained` returns [] before any purger runs), so CSM's own
+  // `if (!tenantId) return 0` is an unreachable double guard (w7 probe
+  // priv-purge-tenantless: vacuous). That host guard is witnessed in
+  // retention-purgers.test.ts.
+  it('leaves a row NEWER than the cutoff alone', async () => {
     const fresh = await createAccount({ tenantId: T, name: 'Fresh Co', owner: 'user:cs-new' });
     const past = new Date(Date.now() - 60_000).toISOString();
     const results = await purgeRetained(T, 'confidential-pii', past);
     expect(results.find((r) => r.feature === 'csm')!.deleted).toBe(0);
-    expect((await getAccount(fresh.accountId))!.owner).toBe('user:cs-new');
-    // Fail-closed: an ambiguous tenant is never a global sweep.
-    expect(await purgeRetained('', 'confidential-pii', new Date(Date.now() + 60_000).toISOString())).toEqual([]);
     expect((await getAccount(fresh.accountId))!.owner).toBe('user:cs-new');
   });
 
@@ -154,10 +170,14 @@ describe('CSM-12 — retention reaches `csm:account`', () => {
 });
 
 describe('CSM-6/CSM-7 — writes are compare-and-swap', () => {
-  it('a PATCH racing a DELETE returns null (a 404 at the route) and does NOT resurrect the row', async () => {
+  // HONEST CEILING (w7 probe priv-mutate-null: vacuous). The delete runs BEFORE
+  // the update, so `updateAccount`'s pre-read returns null before the CAS
+  // `mutate` loop is entered; `mutate`'s own "deleted under us" guard is a second
+  // line this case cannot reach without a deterministic interleave hook (none
+  // exists). What it does witness: a patch to a deleted row returns null and does
+  // not re-create it.
+  it('a PATCH after a DELETE returns null and does NOT resurrect the row', async () => {
     const a = await createAccount({ tenantId: T, name: 'Doomed Co', healthScore: 50 });
-    // Delete lands between the caller's read and its write — the exact TOCTOU
-    // that used to re-`put` the whole row back into the store.
     await deleteAccount(a.accountId);
     const updated = await updateAccount(a.accountId, { name: 'Renamed' });
     expect(updated, 'a vanished row must not be re-created by a patch').toBeNull();

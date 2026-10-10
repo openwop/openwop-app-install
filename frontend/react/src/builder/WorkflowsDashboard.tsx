@@ -13,7 +13,7 @@ import { useStorageSubject } from '../platform/useStorageSubject.js';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { confirm } from '../ui/confirm.js';
-import { newWorkflowId } from './persistence/localStore.js';
+import { duplicateWorkflowId, newWorkflowId } from './persistence/localStore.js';
 // ADR 0163 Phase 3 — the builder dashboard is now backed by the per-tenant
 // backend ownership index (durable, assignable), with localStorage as a
 // draft/offline cache. The sync localStore API is left intact for other
@@ -193,9 +193,16 @@ export function WorkflowsDashboard() {
   // ADR 0163 Phase 4 — the template gallery, fed by installed workflow-chain packs.
   const [chains, setChains] = useState<ChainTemplate[]>([]);
   const [chainsLoading, setChainsLoading] = useState(true);
+  // ADR 0770 D8 — a failed gallery read is an ERROR state, not "no templates
+  // installed" (listChainTemplates used to return [] on any failure).
+  const [chainsError, setChainsError] = useState(false);
   const refreshChains = () => {
     setChainsLoading(true);
-    void listChainTemplates().then((c) => { setChains(c); setChainsLoading(false); });
+    setChainsError(false);
+    void listChainTemplates()
+      .then((c) => { setChains(c); })
+      .catch(() => { setChains([]); setChainsError(true); })
+      .finally(() => { setChainsLoading(false); });
   };
   useEffect(refreshChains, []);
 
@@ -207,9 +214,19 @@ export function WorkflowsDashboard() {
     () => [...new Set(chains.map((c) => c.category ?? t('categoryPack')))].sort((a, b) => a.localeCompare(b)),
     [chains, t],
   );
-  const visibleChains = chainCategory === 'all'
-    ? chains
-    : chains.filter((c) => (c.category ?? t('categoryPack')) === chainCategory);
+  // ADR 0770 D8 — text search over the gallery (n8n / Zapier / Make all lead
+  // their template galleries with one; ~164 chains behind a category <select>
+  // was the gap). Matches label, description, category and chain id, and
+  // composes with the category filter.
+  const [chainQuery, setChainQuery] = useState('');
+  const visibleChains = useMemo(() => {
+    const q = chainQuery.trim().toLowerCase();
+    return chains.filter((c) => {
+      if (chainCategory !== 'all' && (c.category ?? t('categoryPack')) !== chainCategory) return false;
+      if (!q) return true;
+      return [c.label, c.description, c.category ?? '', c.chainId].some((f) => f.toLowerCase().includes(q));
+    });
+  }, [chains, chainCategory, chainQuery, t]);
 
   // First-visit preload (ADR 0163 — replaces the retired toy-example seed):
   // Workflow seeding is owned by the demo seeder (POST /example-data/seed),
@@ -269,16 +286,41 @@ export function WorkflowsDashboard() {
       if (out.warnings?.length) {
         toast.warning(t('templateNeedsSetup', { nodes: out.warnings.join(', ') }));
       }
+      // ADR 0766 D3 / grade-ux U-2 — installed, but not the version the template
+      // was built for. Named by label, with both versions, so it cannot read as
+      // "not installed" (which is what the old `typeId@pinned` warning said).
+      if (out.pinMismatches?.length) {
+        toast.warning(t('templateVersionMismatch', {
+          count: out.pinMismatches.length,
+          nodes: out.pinMismatches.map((m) => t('templateVersionMismatchItem', { label: m.label, pinned: m.pinned, installed: m.installed })).join(', '),
+        }));
+      }
       // UXN-1 — RFC 0133 co-registration receipt: a template with sub-chains
       // ALSO minted its child workflow(s); without this the extra list entry is
       // explained only by the child's own name.
       if (out.subChainWorkflowIds?.length) {
         toast.info(t('templateChildWorkflows', { count: out.subChainWorkflowIds.length }));
       }
+      // ADR 0770 D3 — children this workspace had already EDITED are bound
+      // as-is, not rebuilt; say so, or the user wonders why the template's
+      // latest steps did not appear in them.
+      if (out.reusedSubChainWorkflowIds?.length) {
+        toast.info(t('templateReusedChildWorkflows', { count: out.reusedSubChainWorkflowIds.length }));
+      }
       setPreflightChain(null);
       nav(`/builder/${out.workflowId}`);
-    } catch {
-      setPreflightError(t('templateInstantiateError'));
+    } catch (err) {
+      // ADR 0770 D1/D8 (grade BLD-11) — a view-only member and a disabled pack
+      // each need a different next step than "try again".
+      setPreflightError(
+        err instanceof SyncFailureError && err.status === 403 && err.reason === 'forbidden_scope'
+          ? t('templateInstantiateReadOnly')
+          // `forbidden` is the ADR 0194 disabled-pack refusal (`packEnablement.ts`);
+          // keyed on the reason, not any 403 (grade-ux WBUX-6).
+          : err instanceof SyncFailureError && err.status === 403 && err.reason === 'forbidden'
+            ? t('templateInstantiateDisabledPack')
+            : t('templateInstantiateError'),
+      );
     } finally {
       setPreflightBusy(false);
     }
@@ -354,7 +396,7 @@ export function WorkflowsDashboard() {
     const wf = await loadOrToast(id);
     if (!wf) return;
     const now = new Date().toISOString();
-    if (!(await saveOrToast({ ...wf, id: newWorkflowId(), name: `${wf.name} (copy)`, createdAt: now, updatedAt: now }))) return;
+    if (!(await saveOrToast({ ...wf, id: duplicateWorkflowId(), name: t('workflowNameSuffixCopy', { name: wf.name }), createdAt: now, updatedAt: now }))) return;
     refresh();
   }
 
@@ -373,7 +415,14 @@ export function WorkflowsDashboard() {
         toast.error(t('deleteReferencedBody', { name: wf.name }));
         return;
       }
-      throw err;
+      // ADR 0770 (grade BLD-12) — every other refusal was RETHROWN from a click
+      // handler: an unhandled rejection with no feedback at all.
+      toast.error(
+        err instanceof SyncFailureError && err.reason === 'forbidden_scope'
+          ? t('deleteReadOnly')
+          : t('deleteFailed', { name: wf.name }),
+      );
+      return;
     }
     refresh();
   }
@@ -461,6 +510,7 @@ export function WorkflowsDashboard() {
             type="search"
             className="ui-input filterbar-search"
             placeholder={t('searchByNamePlaceholder')}
+            aria-label={t('searchWorkflowsLabel')}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
@@ -569,30 +619,59 @@ export function WorkflowsDashboard() {
         <div className="workflows-section-header">
           <h2>{t('templatesFromPacks')}</h2>
           <span className="muted">{t('templatesFromPacksHint')}</span>
-          {chainCategories.length > 1 ? (
-            <select
-              className="u-ml-auto"
-              aria-label={t('templateCategoryFilterLabel')}
-              value={chainCategory}
-              onChange={(e) => setChainCategory(e.target.value)}
-            >
-              <option value="all">{t('templateCategoryAll')}</option>
-              {chainCategories.map((c) => (
-                <option key={c} value={c}>{c}</option>
-              ))}
-            </select>
-          ) : null}
           <Button
             variant="secondary"
             size="sm"
-            {...(chainCategories.length > 1 ? {} : { className: 'u-ml-auto' })}
+            className="u-ml-auto"
             onClick={() => setInstalling(true)}
           >
             {t('installPackCta')}
           </Button>
         </div>
+        {/* ADR 0770 D8 — the gallery's search + category cut in their own
+            filterbar row, the same shape as "Your workflows" above (grade-ux
+            WBUX-9: inside the header a growing search pushed the controls into
+            an unaligned wrap at narrow widths). */}
+        {chains.length > 0 ? (
+          <div className="workflows-toolbar filterbar">
+            <input
+              type="search"
+              className="ui-input filterbar-search"
+              placeholder={t('searchTemplatesPlaceholder')}
+              aria-label={t('searchTemplatesLabel')}
+              value={chainQuery}
+              onChange={(e) => setChainQuery(e.target.value)}
+            />
+            {chainCategories.length > 1 ? (
+              <select
+                aria-label={t('templateCategoryFilterLabel')}
+                value={chainCategory}
+                onChange={(e) => setChainCategory(e.target.value)}
+              >
+                <option value="all">{t('templateCategoryAll')}</option>
+                {chainCategories.map((c) => (
+                  <option key={c} value={c}>{c}</option>
+                ))}
+              </select>
+            ) : null}
+          </div>
+        ) : null}
         {chainsLoading ? (
           <StateCard icon={<WorkflowIcon size={20} />} title={t('common:loading')} loading />
+        ) : chainsError ? (
+          <StateCard
+            announce
+            icon={<WorkflowIcon size={20} />}
+            title={t('templatesLoadErrorTitle')}
+            body={t('templatesLoadErrorBody')}
+            action={<Button variant="primary" onClick={refreshChains}>{t('loadErrorRetry')}</Button>}
+          />
+        ) : chains.length > 0 && visibleChains.length === 0 ? (
+          <StateCard
+            icon={<WorkflowIcon size={20} />}
+            title={t('templatesNoMatchTitle')}
+            action={<Button variant="secondary" onClick={() => { setChainQuery(''); setChainCategory('all'); }}>{t('templatesClearFilters')}</Button>}
+          />
         ) : chains.length > 0 ? (
           (() => {
             // Day-1 UX P6 — "Start here": templates the host DERIVED as needing
@@ -706,7 +785,9 @@ function ChainTemplateCard({ chain, onUse }: ChainTemplateCardProps) {
         ) : (
           <span aria-hidden="true" />
         )}
-        <Button variant="primary" onClick={onUse}>{t('useTemplate')}</Button>
+        {/* ADR 0770 D8 (grade BLD-16) — every card's button read "Use template";
+            a screen-reader user tabbing the gallery heard ~164 identical names. */}
+        <Button variant="primary" aria-label={t('useTemplateNamed', { name: chain.label })} onClick={onUse}>{t('useTemplate')}</Button>
       </div>
     </div>
   );

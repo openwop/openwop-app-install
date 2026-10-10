@@ -18,7 +18,7 @@
  */
 import { test, expect, type APIRequestContext } from '@playwright/test';
 
-const API = '/api/v1/host/openwop-app';
+const API = '/api/host/openwop-app';
 
 /** Same opt-in seam `collab-ct.spec.ts` uses for its visual harness. */
 const SHOT_DIR = process.env.CT_SHOT_DIR ?? '';
@@ -65,7 +65,8 @@ async function seedWorkflow(ctx: APIRequestContext, workflowId: string): Promise
 }
 
 async function readHead(ctx: APIRequestContext, workflowId: string) {
-  const res = await ctx.get(`/api/v1/workflows/${encodeURIComponent(workflowId)}`);
+  // ADR 0812 P3c — the /v1 path space is gone; the v2 route returns the same stored definition.
+  const res = await ctx.get(`/api/workflows/${encodeURIComponent(workflowId)}`, { headers: { 'OpenWOP-Version': '2' } });
   expect(res.status()).toBe(200);
   return (await res.json()) as { nodes?: Array<{ nodeId: string; inputs?: Record<string, unknown> }> };
 }

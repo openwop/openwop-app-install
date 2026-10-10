@@ -17,6 +17,7 @@
  *
  * @see docs/adr/0294-funnel-a-funnel-entity-builder-analytics.md
  */
+import { isInternalHref } from '../../host/internalHref.js';
 import { randomUUID } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { OpenwopError } from '../../types.js';
@@ -276,7 +277,7 @@ export function coerceCompletionCta(raw: unknown): { label: string; url: string 
   const r = raw as { label?: unknown; url?: unknown };
   const label = typeof r.label === 'string' ? cleanString(r.label, 80) : '';
   const url = typeof r.url === 'string' ? r.url.trim().slice(0, 2048) : '';
-  const safe = /^\/(?![\/\\])/.test(url) || /^https?:\/\//i.test(url);
+  const safe = isInternalHref(url) || /^https?:\/\//i.test(url); // ADR 0836 D7 — the shared predicate
   if (!label || !url || !safe) return null;
   return { label, url };
 }

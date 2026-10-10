@@ -112,7 +112,8 @@ describe('fireEffectSeam (RFC 0173 §C.2)', () => {
     const wireA = String(a.json['runId']);
     const tenant = wireA.slice(0, wireA.lastIndexOf('/'));
     expect(tenant.length, 'the wire runId carries the caller tenant').toBeGreaterThan(0);
-    const runOf = async (id: string) => (await (await fetch(`${base}/v1/runs/${encodeURIComponent(id.slice(id.lastIndexOf('/') + 1))}`, { headers: AUTH })).json()) as { workflowId: string; metadata?: { definitionRevision?: string } };
+    // ADR 0812 P3c-0 — read by the bound wire id under major 2 (a bare id is refused after the cut).
+    const runOf = async (id: string) => (await (await fetch(`${base}/runs/${encodeURIComponent(id)}`, { headers: V2 })).json()) as { workflowId: string; metadata?: { definitionRevision?: string } };
     const [ra, rb] = [await runOf(wireA), await runOf(String(b.json['runId']))];
     expect(ra.workflowId, 'the definition is keyed to the CALLING tenant').toBe(fireWorkflowId(tenant, seam));
     expect(rb.workflowId, 'a second fire reuses the same definition, not a new one').toBe(ra.workflowId);
@@ -124,7 +125,7 @@ describe('fireEffectSeam (RFC 0173 §C.2)', () => {
     // Never in the tenant ownership index — so never in /builder or the `/` picker.
     expect((await listOwned(tenant)).map((o) => o.workflowId)).not.toContain(ra.workflowId);
     expect((await allOwnershipByWorkflow()).has(ra.workflowId)).toBe(false);
-    const listed = await (await fetch(`${base}/v1/host/openwop-app/workflows`, { headers: AUTH })).json() as { workflows?: Array<{ workflowId?: string }> };
+    const listed = await (await fetch(`${base}/host/openwop-app/workflows`, { headers: AUTH })).json() as { workflows?: Array<{ workflowId?: string }> };
     expect(JSON.stringify(listed)).not.toContain('conformance.effect-seam.fire');
   });
 

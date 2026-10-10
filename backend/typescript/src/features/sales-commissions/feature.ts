@@ -7,7 +7,7 @@
  * Host-extension only — no OpenWOP RFC (rides Accepted RFC 0049 scopes).
  *
  * Ships `off` (ADR 0001 §6 — brand-new feature). `bucketUnit: 'tenant'` — a
- * shared B2B surface (ADR 0015). The `ctx.features.commissions` surface + node/
+ * shared B2B surface (ADR 0015). The `ctx.features['sales-commissions']` surface + node/
  * agent packs land in P4, so no `surface`/`requiredPacks` yet.
  *
  * @see docs/adr/0280-sales-commissions.md
@@ -21,6 +21,8 @@ import { registerCommissionStatementGate } from './statementApproval.js';
 import { registerSubjectEraser } from '../../host/subjectErasure.js';
 import { eraseSubjectCommissions } from './entities/statement.js';
 import { erasePlanSubject } from './entities/plan.js';
+import { registerFeatureDataExporter } from '../../host/featureDataExport.js';
+import { exportSalesCommissionsData } from './dataExport.js';
 
 /** R2 COM2-M9 — subject erasure over FOUR subject-keyed fields no ratchet can see. */
 async function eraseSalesCommissionsSubject(tenantId: string, subjectKey: string): Promise<void> {
@@ -31,6 +33,7 @@ async function eraseSalesCommissionsSubject(tenantId: string, subjectKey: string
 export const salesCommissionsFeature: BackendFeature = {
   id: 'sales-commissions',
   registerRoutes: (deps) => {
+    registerFeatureDataExporter('sales-commissions', exportSalesCommissionsData); // ADR 0820 §7 — read-only export, served after a plan lapse
     registerCommissionRoutes(deps);
     // CFP-1 (D9) — the advisory Commissions Analyst's READ chat tools (self-gating
     // on the `sales-commissions` toggle per call; fail-empty without an acting
@@ -51,8 +54,11 @@ export const salesCommissionsFeature: BackendFeature = {
     // anonymous-arrow registrations in the tree.
     registerSubjectEraser(eraseSalesCommissionsSubject);
   },
-  // Face 2 (ADR 0014) — the ctx.features.commissions workflow surface (P4).
-  surface: { id: 'commissions', build: buildCommissionSurface },
+  // Face 2 (ADR 0014) — the ctx.features['sales-commissions'] workflow surface (P4).
+  // ADR 0820 G2 — the surface id IS the toggle id. It used to be 'commissions',
+  // which no toggle carries, so `featureSurfaces.gate` read it as always-on and
+  // every commission node ran ungated in any tenant, whatever the toggle or plan.
+  surface: { id: 'sales-commissions', build: buildCommissionSurface },
   toggleDefault: {
     id: 'sales-commissions',
     label: 'Sales Commissions',
@@ -63,7 +69,7 @@ export const salesCommissionsFeature: BackendFeature = {
     salt: 'sales-commissions',
   },
   requiredPacks: [
-    { name: 'feature.sales-commissions.nodes', version: '1.1.0' },
-    { name: 'feature.sales-commissions.agents', version: '1.0.1' },
+    { name: 'feature.sales-commissions.nodes', version: '1.2.0' },
+    { name: 'vendor.openwop-app.sales-commissions.agents', version: '1.0.3' },
   ],
 };

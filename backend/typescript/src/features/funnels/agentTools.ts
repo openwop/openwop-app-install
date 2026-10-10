@@ -106,6 +106,7 @@ export function registerFunnelsAgentTools(): void {
   // ── Reads — ground before proposing. FAIL EMPTY without an acting user. ────
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: FUNNELS_LIST_TOOL_ID,
       description:
@@ -134,6 +135,7 @@ export function registerFunnelsAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: FUNNELS_GET_TOOL_ID,
       description:
@@ -169,6 +171,7 @@ export function registerFunnelsAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: FUNNELS_STEP_STATS_TOOL_ID,
       description:
@@ -202,6 +205,7 @@ export function registerFunnelsAgentTools(): void {
   // ── Write — DRAFT-ONLY. Create or revise a draft; publish stays human. ─────
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: FUNNELS_DRAFT_TOOL_ID,
       description:

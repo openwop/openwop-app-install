@@ -64,7 +64,7 @@ function provider(scope: { actingUserId?: string; runId?: string } = {}) {
 }
 
 describe('CFP-1 — the pack rides the real host-registered tools', () => {
-  const packDir = new URL('../../../packs/feature.production.agents/', import.meta.url);
+  const packDir = new URL('../../../packs/vendor.openwop-app.production.agents/', import.meta.url);
   const manifest = JSON.parse(readFileSync(new URL('pack.json', packDir), 'utf8')) as {
     agents: { toolAllowlist: string[]; systemPromptRef: string }[];
   };

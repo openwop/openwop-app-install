@@ -70,14 +70,14 @@ function client(): Client {
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), del: (p) => call('DELETE', p) };
 }
 
-const NB = '/v1/host/openwop-app/notebooks';
-const PROJ = '/v1/host/openwop-app/projects';
+const NB = '/host/openwop-app/notebooks';
+const PROJ = '/host/openwop-app/projects';
 
 async function ownerWithOrg(who: string): Promise<{ c: Client; orgId: string }> {
   const c = client();
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `${who}-${Date.now()}-${n++}@acme.test` });
+  const r = await c.post('/host/openwop-app/test/login', { email: `${who}-${Date.now()}-${n++}@acme.test` });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   return { c, orgId: org.body.orgId };
 }
 
@@ -114,7 +114,7 @@ describe('ADR 0601 / NBC-1 — DELETE /notebooks/:id validates BEFORE it destroy
     // …and the claim is TRUE: the project, its sources and its corpus are gone.
     expect((await c.get(`${NB}/${id}`)).status).toBe(404);
     expect((await c.get(`${PROJ}/${id}`)).status).toBe(404);
-    expect((await c.get(`/v1/host/openwop-app/kb/orgs/${orgId}/collections/${collectionId}`)).status).toBe(404);
+    expect((await c.get(`/host/openwop-app/kb/orgs/${orgId}/collections/${collectionId}`)).status).toBe(404);
   });
 
   it('THE ORDERING INVARIANT — a response that says deleted:false destroyed NOTHING', async () => {
@@ -151,7 +151,7 @@ describe('ADR 0601 / NBC-1 — DELETE /notebooks/:id validates BEFORE it destroy
     expect(del.status).toBe(200);
     expect(del.body.deleted).toBe(true);
     expect(del.body.collectionDeleted).toBe(true);
-    expect((await c.get(`/v1/host/openwop-app/kb/orgs/${orgId}/collections/${collectionId}`)).status).toBe(404);
+    expect((await c.get(`/host/openwop-app/kb/orgs/${orgId}/collections/${collectionId}`)).status).toBe(404);
   });
 });
 
@@ -166,7 +166,7 @@ describe('ADR 0601 / NBC-1 — the SIBLING door: DELETE /projects/:id', () => {
     // removing the one inside `deleteNotebook` does nothing for this lane. Without
     // fixing the discriminator too, the collection survives with no owner.
     expect(del.body.notebookCorpusDeleted, JSON.stringify(del.body)).toBe(true);
-    expect((await c.get(`/v1/host/openwop-app/kb/orgs/${orgId}/collections/${collectionId}`)).status).toBe(404);
+    expect((await c.get(`/host/openwop-app/kb/orgs/${orgId}/collections/${collectionId}`)).status).toBe(404);
   });
 
   it('CONTROL — a plain project with NO bound collection still deletes cleanly', async () => {
@@ -195,7 +195,7 @@ describe('ADR 0601 / NBC-1 — the SIBLING door: DELETE /projects/:id', () => {
     // that MINT a corpus — and this collection was minted by the KB surface, so
     // it is not stamped on anyone and cannot be erased by anyone's delete.
     const { c, orgId } = await ownerWithOrg('nb-del-shared');
-    const shared = await c.post(`/v1/host/openwop-app/kb/orgs/${orgId}/collections`, { name: 'Sources: Q3 research', description: 'Shared corpus' });
+    const shared = await c.post(`/host/openwop-app/kb/orgs/${orgId}/collections`, { name: 'Sources: Q3 research', description: 'Shared corpus' });
     expect(shared.status, JSON.stringify(shared.body)).toBe(201);
     const sharedId = (shared.body.collectionId ?? shared.body.id) as string;
 
@@ -215,7 +215,7 @@ describe('ADR 0601 / NBC-1 — the SIBLING door: DELETE /projects/:id', () => {
     expect(del.body.deleted).toBe(true);
     expect(del.body.notebookCorpusDeleted, 'A delete that erases nothing must not claim it did').toBe(false);
     // The shared corpus other projects still use MUST survive…
-    expect((await c.get(`/v1/host/openwop-app/kb/orgs/${orgId}/collections/${sharedId}`)).status).toBe(200);
+    expect((await c.get(`/host/openwop-app/kb/orgs/${orgId}/collections/${sharedId}`)).status).toBe(200);
     // …and Project B must still SEE it. A 200 on the collection with an empty
     // binding list would be the same outage wearing a different status code.
     const knowledgeB = await c.get(`${PROJ}/${idB}/knowledge`);
@@ -271,7 +271,7 @@ describe('ADR 0601 § Corrections (HIGH-2) — the consent gate and the eraser s
         name: 'plain project bound to a SHARED corpus named like a provisioned one',
         make: async () => {
           const { c, orgId } = await ownerWithOrg('nb-consent-shared');
-          const shared = await c.post(`/v1/host/openwop-app/kb/orgs/${orgId}/collections`, { name: 'Sources: shared', description: 'Shared' });
+          const shared = await c.post(`/host/openwop-app/kb/orgs/${orgId}/collections`, { name: 'Sources: shared', description: 'Shared' });
           const sharedId = (shared.body.collectionId ?? shared.body.id) as string;
           const plain = await c.post(PROJ, { orgId, name: 'Bound to shared' });
           const id = plain.body.id as string;

@@ -40,7 +40,7 @@ interface Entry { agentId: string; degraded?: string[]; requiresCapabilities?: s
 
 describe('RFC 0092 §B — agent-capability-degraded projection', () => {
   it('surfaces the unmet key in the named agent\'s degraded[] (non-vacuous)', async () => {
-    const list = await (await fetch(`${BASE}/v1/agents`, { headers: H })).json() as { agents: Entry[] };
+    const list = await (await fetch(`${BASE}/agents`, { headers: H })).json() as { agents: Entry[] };
     const agent = list.agents.find((a) => a.agentId === DEGRADED_AGENT);
     expect(agent).toBeDefined();
     expect(Array.isArray(agent!.degraded)).toBe(true);
@@ -53,12 +53,12 @@ describe('RFC 0092 §B — agent-capability-degraded projection', () => {
 
   it('every degraded key is a capability the host does NOT advertise', async () => {
     // The single demo key is a synthetic vendor capability no host surface provides.
-    const one = await (await fetch(`${BASE}/v1/agents/${encodeURIComponent(DEGRADED_AGENT)}`, { headers: H })).json() as Entry;
+    const one = await (await fetch(`${BASE}/agents/${encodeURIComponent(DEGRADED_AGENT)}`, { headers: H })).json() as Entry;
     expect(one.degraded).toContain('vendor.demo.unmet-capability');
   });
 
   it('an all-met agent omits degraded[] (§B iff-contract)', async () => {
-    const list = await (await fetch(`${BASE}/v1/agents`, { headers: H })).json() as { agents: Entry[] };
+    const list = await (await fetch(`${BASE}/agents`, { headers: H })).json() as { agents: Entry[] };
     // At least one other installed agent should have no unmet capability → no field.
     const allMet = list.agents.filter((a) => a.agentId !== DEGRADED_AGENT);
     // Not asserting all — just that omission is the norm for agents with nothing unmet.

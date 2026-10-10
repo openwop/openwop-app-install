@@ -14,17 +14,21 @@ import type { Request, Response, NextFunction } from 'express';
 import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { requireFeatureEnabled, requireString, optionalString } from '../featureRoute.js';
-import { requireCmsScope } from './cmsScope.js';
+import { holdsCmsScope, requireCmsScope, requireLiveTier } from './cmsScope.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
 import { rejectPendingApprovalForPage, findPendingContentApprovalForPage, findLatestContentApprovalForPage } from '../../host/approvalService.js';
 import { claimApproval, rejectApproval } from '../../host/approvalDecision.js';
 import { isSuperadmin } from '../../host/superadmin.js';
-import { blockingLiveEditPages, isApprovalGateOn, liveEditGateActive, liveEditRefusal, queueContentApproval, refuseLiveEdit } from './contentApproval.js';
+import { blockingLiveEditPages, isApprovalGateOn, liveEditGateActive, liveEditRefusal, queueContentApproval, refuseLiveEdit, selfApprovalBlocked } from './contentApproval.js';
 import { LOCALE_RE } from '../../host/i18n/index.js';
 import { autoTranslateMissingOverlays, translateSectionData } from './translate.js';
+import { REWRITE_ACTIONS, REWRITE_INSTRUCTION_MAX, rewriteSectionData, type RewriteAction } from './rewrite.js';
 import { ManagedProviderError } from '../../providers/managedProvider.js';
 import {
   assertLocaleScopedSectionsPatch,
+  type Page,
+  withheldLocales,
+  isLiveTierPage,
   clearScheduledPublish,
   clearScheduledUnpublish,
   createPage,
@@ -33,6 +37,8 @@ import {
   deliverableSectionsForPage,
   deleteSharedSection,
   getContentLanguageSettings,
+  getStoredContentLanguageSettings,
+  pageTranslationStatus,
   getLocaleGrant,
   getPage,
   getPublishedBySlug,
@@ -60,11 +66,33 @@ import {
   type WorkflowAction,
 } from './cmsService.js';
 
+/** ADR 0813 — `authorId: "me"` sets the post byline to the CALLER's principal.
+ *  The editor cannot know the backend user id (an OIDC bind may rekey it), so
+ *  the server resolves the alias; any other value passes through unchanged. */
+function resolveAuthorAlias(raw: unknown, callerUserId: string): unknown {
+  return raw === 'me' ? callerUserId : raw;
+}
+
+/** The page-PATCH lane's live-edit refusal (a `published` page under the gate —
+ *  `liveEditGateActive` carries the system-site exemption). ONE copy, shared by
+ *  PATCH and confirm-source (ADR 0861 D6, grade-code CMSL2CD-2), so the two edit
+ *  lanes cannot drift; `in_review` is left to the approval's version pin. */
+async function refusePublishedEditUnderGate(tenantId: string, orgId: string, current: Page): Promise<void> {
+  if (current.status === 'published' && await liveEditGateActive(tenantId, orgId)) {
+    throw new OpenwopError(
+      'conflict',
+      'Publishing is gated on approval — unpublish this page before editing it, then submit it for review.',
+      409,
+      { pageId: current.pageId, gate: 'cms-approval-gate', status: current.status },
+    );
+  }
+}
+
 export function registerCmsRoutes(deps: RouteDeps): void {
   const { app } = deps;
   // chat-first-port C1 — the shared decision core needs the storage/hostSuite pair.
   const decisionDeps = { storage: deps.storage, hostSuite: deps.hostSuite };
-  const BASE = '/v1/host/openwop-app/cms/orgs/:orgId';
+  const BASE = '/host/openwop-app/cms/orgs/:orgId';
 
   // ── Reads ──
   // `?q=&tag=&status=` only NARROW the tenant+org-scoped set (ADR 0206 B3).
@@ -112,7 +140,7 @@ export function registerCmsRoutes(deps: RouteDeps): void {
       const settings = await getContentLanguageSettings(tenantId, orgId);
       const { page, locale } = localizePage(hit.page, req.headers['accept-language'], settings);
       res.setHeader('Content-Language', locale);
-      res.setHeader('Vary', 'Accept-Language, Accept-Encoding');
+      res.vary('Accept-Language, Accept-Encoding');
       // Cookie-authed, org-scoped, delivery-SHAPED — the one read a shared cache
       // could plausibly mis-cache because it looks public. Freshness matters in
       // the editor; nothing here benefits from caching (Phase-A review A5).
@@ -143,6 +171,67 @@ export function registerCmsRoutes(deps: RouteDeps): void {
     }
   });
 
+  // ADR 0861 D6 (CMSL2WF-6) — translation status: which overlays are missing,
+  // current, OUTDATED (the base text they translate changed since) or unknown
+  // (legacy, never stamped). Read tier, like the page itself; verdicts only.
+  app.get(`${BASE}/pages/:pageId/translation-status`, async (req, res, next) => {
+    try {
+      const { orgId, tenantId } = await requireCmsScope(req, 'workspace:read');
+      const page = await getPage(tenantId, orgId, req.params.pageId);
+      if (!page) throw new OpenwopError('not_found', 'Page not found.', 404, { pageId: req.params.pageId });
+      const settings = await getContentLanguageSettings(tenantId, orgId);
+      res.json({ locales: settings.supportedLocales, ...(await pageTranslationStatus(page, settings.supportedLocales)) });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // ADR 0861 D6 — "still accurate": re-stamp one overlay's source without changing
+  // it. A page write like any other (bumps `version`, so an approval pin sees it),
+  // decided on the CAS row with the PATCH lane's authority spelled out: the live
+  // tier off-draft, the gate refusal on a live page, and a translator's grant.
+  app.post(`${BASE}/pages/:pageId/sections/:sectionId/locales/:locale/confirm-source`, async (req, res, next) => {
+    try {
+      await requireFeatureEnabled(req, 'cms-localization', 'Content localization');
+      const { user, orgId, tenantId } = await requireCmsScope(req, 'workspace:write');
+      const { sectionId, locale } = req.params;
+      let adminProbe: Promise<boolean> | null = null;
+      const isAdmin = (): Promise<boolean> => (adminProbe ??= holdsCmsScope(req, 'host:members:manage'));
+      const grant = await getLocaleGrant(tenantId, orgId, user.userId);
+      if (grant && !grant.locales.includes(locale)) {
+        throw new OpenwopError('forbidden_scope', `Your translator grant does not cover \`${locale}\`.`, 403, { grantedLocales: grant.locales });
+      }
+      const page = await getPage(tenantId, orgId, req.params.pageId);
+      if (!page) throw new OpenwopError('not_found', 'Page not found.', 404, { pageId: req.params.pageId });
+      const section = page.sections.find((s) => s.sectionId === sectionId);
+      if (!section?.localizations?.[locale]) {
+        throw new OpenwopError('not_found', 'That section has no translation in this locale.', 404, { sectionId, locale });
+      }
+      // grade-ux CMSL2UX-1 — the pin is the version the EDITOR holds, not the one this
+      // route just read. Pinning to the fresh read let a confirm land on top of a save
+      // the editor never saw; the SPA then adopted the new version over its stale copy
+      // and its next autosave silently overwrote the other editor's save.
+      const rawExpected = (req.body as { expectedVersion?: unknown } | undefined)?.expectedVersion;
+      if (rawExpected !== undefined && (typeof rawExpected !== 'number' || !Number.isInteger(rawExpected))) {
+        throw new OpenwopError('validation_error', '`expectedVersion` must be an integer page version.', 400, { expectedVersion: rawExpected });
+      }
+      const settings = await getContentLanguageSettings(tenantId, orgId);
+      const updated = await updatePage(tenantId, orgId, page.pageId, { sections: page.sections, baseLocale: settings.baseLocale }, user.userId, {
+        expectedVersion: typeof rawExpected === 'number' ? rawExpected : page.version,
+        confirmSource: { sectionId, locale },
+        keepSchedule: () => isAdmin(),
+        authorize: async (current) => {
+          if (current.status !== 'draft' && !(await isAdmin())) await requireLiveTier(req);
+          await refusePublishedEditUnderGate(tenantId, orgId, current);
+        },
+      });
+      if (!updated) throw new OpenwopError('not_found', 'Page not found.', 404, { pageId: req.params.pageId });
+      res.json(updated);
+    } catch (err) {
+      next(err);
+    }
+  });
+
   // ── Content edits (workspace:write) ──
   app.post(`${BASE}/pages`, async (req, res, next) => {
     try {
@@ -158,7 +247,7 @@ export function registerCmsRoutes(deps: RouteDeps): void {
         sections: body.sections,
         ...(body.tags !== undefined ? { tags: body.tags } : {}),
         ...(body.kind !== undefined ? { kind: body.kind } : {}),
-        ...(body.authorId !== undefined ? { authorId: body.authorId } : {}),
+        ...(body.authorId !== undefined ? { authorId: resolveAuthorAlias(body.authorId, user.userId) } : {}),
         ...(body.category !== undefined ? { category: body.category } : {}),
         // ADR 0392 — a docs page is authored in the docs collection.
         ...(body.collection === 'docs' ? { collection: 'docs' as const } : {}),
@@ -179,9 +268,16 @@ export function registerCmsRoutes(deps: RouteDeps): void {
       // page that is live/under-review/archived changes content outside the
       // review flow, so it requires the admin tier — editors must `unpublish`
       // (→ draft) first. Re-authorize for the admin scope when not a draft.
-      const current = await getPage(tenantId, orgId, req.params.pageId);
-      if (!current) throw new OpenwopError('not_found', 'Page not found.', 404, { pageId: req.params.pageId });
-      if (current.status !== 'draft') await requireCmsScope(req,'host:members:manage');
+      //
+      // ADR 0836 D2 — every status-dependent decision below (this tier, the
+      // gate refusal, the translator diff) runs inside `authorize`, on the row
+      // `updatePage` compares-and-swaps. It used to run on a read here, and a
+      // publish landing before `updatePage`'s own read let an editor edit live
+      // content: `transitionPage` does not bump `version`, so no pin saw it.
+      // Probed lazily and once: only a non-draft or scheduled page needs it, and
+      // autosave runs this route on every keystroke pause.
+      let adminProbe: Promise<boolean> | null = null;
+      const isAdmin = (): Promise<boolean> => (adminProbe ??= holdsCmsScope(req, 'host:members:manage'));
       // UX_UPGRADE-content R2 (CMS2-B1) — the THIRD path to live content, and
       // the only one that was not gated. `publish` (:387) and `schedule` (:411)
       // both 409 when `cms-approval-gate` is ON; PATCH did not, and it edits a
@@ -217,14 +313,7 @@ export function registerCmsRoutes(deps: RouteDeps): void {
       // The `published`-only STATE arm is deliberately NOT `isGatedLiveEditState` here, and
       // the reasoning is at `:196-199`: this lane bumps `page.version`, so an `in_review`
       // page is caught by the approval's version pin rather than by this refusal.
-      if (current.status === 'published' && await liveEditGateActive(tenantId, orgId)) {
-        throw new OpenwopError(
-          'conflict',
-          'Publishing is gated on approval — unpublish this page before editing it, then submit it for review.',
-          409,
-          { pageId: req.params.pageId, gate: 'cms-approval-gate', status: current.status },
-        );
-      }
+      const gateRefusal = (current: Page): Promise<void> => refusePublishedEditUnderGate(tenantId, orgId, current);
       const body = (req.body ?? {}) as { title?: unknown; slug?: unknown; sections?: unknown; tags?: unknown; kind?: unknown; authorId?: unknown; category?: unknown; expectedVersion?: unknown };
       // ADR 0592 §1 (CMSL-1) — optional optimistic-concurrency pin. When sent
       // it must be a number; the mismatch 409 itself is thrown by `updatePage`
@@ -245,20 +334,30 @@ export function registerCmsRoutes(deps: RouteDeps): void {
         if (body.title !== undefined || body.slug !== undefined || body.tags !== undefined || body.kind !== undefined || body.authorId !== undefined || body.category !== undefined || (body as { docsNav?: unknown }).docsNav !== undefined) {
           throw new OpenwopError('forbidden_scope', 'Your translator grant covers locale overlays only — title/slug/tags are immutable.', 403, { grantedLocales: grant.locales });
         }
-        if (body.sections !== undefined) {
+      }
+      const authorize = async (current: Page): Promise<void> => {
+        if (current.status !== 'draft' && !(await isAdmin())) await requireLiveTier(req); // throws the canonical 403 (+ reason)
+        await gateRefusal(current);
+        if (grant && body.sections !== undefined) {
           assertLocaleScopedSectionsPatch(current, validateSections(body.sections, settings.baseLocale), grant.locales);
         }
-      }
+      };
       const patch: { title?: string; slug?: string; sections?: unknown; tags?: unknown; baseLocale?: string; kind?: unknown; authorId?: unknown; category?: unknown; docsNav?: string } = { baseLocale: settings.baseLocale };
       if (typeof body.title === 'string') patch.title = body.title;
       if (typeof body.slug === 'string') patch.slug = body.slug;
       if (body.sections !== undefined) patch.sections = body.sections;
       if (body.tags !== undefined) patch.tags = body.tags;
       if (body.kind !== undefined) patch.kind = body.kind;
-      if (body.authorId !== undefined) patch.authorId = body.authorId;
+      if (body.authorId !== undefined) patch.authorId = resolveAuthorAlias(body.authorId, user.userId);
       if (body.category !== undefined) patch.category = body.category;
       if (typeof (body as { docsNav?: unknown }).docsNav === 'string') patch.docsNav = String((body as { docsNav?: unknown }).docsNav);
-      const updated = await updatePage(tenantId, orgId, req.params.pageId, patch, user.userId, expectedVersion !== undefined ? { expectedVersion } : undefined);
+      // ADR 0836 D3 — an admin's edit keeps (re-pins) a pending scheduled
+      // publish; anyone else's cancels it, visibly, in this same write.
+      const updated = await updatePage(tenantId, orgId, req.params.pageId, patch, user.userId, {
+        ...(expectedVersion !== undefined ? { expectedVersion } : {}),
+        authorize,
+        keepSchedule: () => isAdmin(),
+      });
       if (!updated) throw new OpenwopError('not_found', 'Page not found.', 404, { pageId: req.params.pageId });
       res.json(updated);
     } catch (err) {
@@ -368,12 +467,19 @@ export function registerCmsRoutes(deps: RouteDeps): void {
               // Persistence rides the EXISTING validated write path
               // (updatePage → validateSections → validateLocalizations).
               type Sections = NonNullable<typeof updated>['sections'];
+              // ADR 0861 D3 (review M1) — the base each draft was translated FROM. A
+              // re-merge onto a fresh read drops the drafts of a section whose base
+              // moved in the window: the missing-only rule extended to its source,
+              // so translation status never stamps an old-base translation current.
+              const translatedFrom = new Map(updated.sections.map((s) => [s.sectionId, JSON.stringify(s.data)] as const));
+              const submittedCycle = updated.reviewCycle;
               const applyMerge = (sections: Sections): { merged: Sections; applied: Record<string, number> } => {
                 const applied: Record<string, number> = {};
                 const draftedAt = new Date().toISOString();
                 const merged = sections.map((s) => {
                   const drafted = sweep.overlays.get(s.sectionId);
                   if (!drafted) return s;
+                  if (translatedFrom.get(s.sectionId) !== JSON.stringify(s.data)) return s;
                   const loc = { ...(s.localizations ?? {}) };
                   const ai = { ...(s.aiDrafted ?? {}) };
                   let changed = false;
@@ -394,7 +500,26 @@ export function registerCmsRoutes(deps: RouteDeps): void {
                 const { merged, applied } = applyMerge(base.sections);
                 if (Object.keys(applied).length === 0) break; // everything drafted already exists — nothing to persist
                 try {
-                  const saved = await updatePage(tenantId, orgId, updated.pageId, { sections: merged, baseLocale: settings.baseLocale }, user.userId, { expectedVersion: base.version });
+                  // ADR 0836 D3 — keepSchedule: this merge only ADDS missing locale
+                  // overlays under the org's own auto-translate policy (stamped
+                  // `aiDrafted`); the base content the schedule was set against is
+                  // unchanged, so it re-pins rather than cancelling an admin's launch.
+                  const saved = await updatePage(tenantId, orgId, updated.pageId, { sections: merged, baseLocale: settings.baseLocale }, user.userId, {
+                    expectedVersion: base.version,
+                    keepSchedule: true,
+                    // ADR 0861 D3 (CMSL2WF-3) — the drafts land only on the review they
+                    // belong to. The sweep runs with the page `in_review` and no approval
+                    // row yet; an approve in that window (lazy backfill) publishes without
+                    // bumping `version`, so the version pin alone let N+1 — AI overlays,
+                    // unreviewed — go live. `authorize` refuses only by THROWING; a
+                    // `conflict` keeps the degrade flag (any other code would vanish into
+                    // the outer catch, the ADR 0592 §9 F6 failure).
+                    authorize: async (cur) => {
+                      if (cur.status !== 'in_review' || cur.reviewCycle !== submittedCycle) {
+                        throw new OpenwopError('conflict', 'The page left review while it was being translated.', 409, { reason: 'review-moved', pageId: cur.pageId });
+                      }
+                    },
+                  });
                   if (saved) {
                     updated = saved;
                     autoTranslated = applied;
@@ -402,7 +527,9 @@ export function registerCmsRoutes(deps: RouteDeps): void {
                   break;
                 } catch (err) {
                   if (err instanceof OpenwopError && err.code === 'conflict') {
-                    if (attempt === 0) {
+                    // A moved review cannot come back on a re-read — no retry.
+                    const reviewMoved = (err.details as { reason?: unknown } | undefined)?.reason === 'review-moved';
+                    if (attempt === 0 && !reviewMoved) {
                       const fresh = await getPage(tenantId, orgId, updated.pageId);
                       if (!fresh) break;
                       base = fresh; // re-merge onto the state the winner left
@@ -442,7 +569,15 @@ export function registerCmsRoutes(deps: RouteDeps): void {
       if (autoTranslateDegraded?.invalid) degradeParts.push(`${autoTranslateDegraded.invalid} translation(s) returned unusable output`);
       if (autoTranslateDegraded?.conflict) degradeParts.push('concurrent edits — the AI drafts were discarded');
       const degradeNote = degradeParts.length > 0 ? ` — auto-translate incomplete: ${degradeParts.join('; ')}` : '';
-      await queueContentApproval(tenantId, orgId, updated, `Publish CMS page "${updated.title}"${aiNote}${degradeNote}`);
+      // ADR 0861 D3 (review H6) — queue on a FRESH read. After a sweep an approve may
+      // already have decided this cycle (lazy backfill); queueing on the stale
+      // `updated` would open a new pending row for a page that is live.
+      const current = await getPage(tenantId, orgId, updated.pageId);
+      if (!current || current.status !== 'in_review' || current.reviewCycle !== updated.reviewCycle) {
+        res.json({ ...(current ?? updated), ...(autoTranslateDegraded ? { autoTranslateDegraded } : {}) });
+        return;
+      }
+      await queueContentApproval(tenantId, orgId, updated, `Publish CMS page "${updated.title}"${aiNote}${degradeNote}`, { submittedBy: user.userId, notify: true });
       res.json({
         ...updated,
         ...(autoTranslated ? { autoTranslated } : {}),
@@ -470,7 +605,9 @@ export function registerCmsRoutes(deps: RouteDeps): void {
           // row — lazily backfill one so it stays decidable instead of 409ing.
           const page = await getPage(tenantId, orgId, req.params.pageId);
           if (page && page.status === 'in_review') {
-            await queueContentApproval(tenantId, orgId, page, `Review "${page.title ?? page.slug}"`);
+            // ADR 0859 D3 (review H3) — no submitter, no notice: this runs INSIDE a decide,
+            // and the deciding manager is not the person who submitted the page.
+            await queueContentApproval(tenantId, orgId, page, `Review "${page.title ?? page.slug}"`, { notify: false });
             appr = await findPendingContentApprovalForPage(tenantId, req.params.pageId);
           }
         }
@@ -515,10 +652,22 @@ export function registerCmsRoutes(deps: RouteDeps): void {
   // outcome, its reason, its author and its time; never the whole row.
   app.get(`${BASE}/pages/:pageId/review`, async (req, res, next) => {
     try {
-      const { orgId, tenantId } = await requireCmsScope(req, 'workspace:write');
+      const { user, orgId, tenantId } = await requireCmsScope(req, 'workspace:write');
       const page = await getPage(tenantId, orgId, req.params.pageId);
       if (!page) throw new OpenwopError('not_found', 'Page not found.', 404, { pageId: req.params.pageId });
-      const a = await findLatestContentApprovalForPage(tenantId, req.params.pageId);
+      const latest = await findLatestContentApprovalForPage(tenantId, req.params.pageId);
+      // ADR 0859 D6 (code grade CMSA2CD-2) — retention now keeps a page's newest
+      // review, so a page re-created at a reused id must not show the previous
+      // page's decision: a review older than the page is not about it.
+      const a = latest && latest.createdAt >= page.createdAt ? latest : null;
+      // ADR 0859 D4 — the SAME predicate the decide handler refuses on, so the editor
+      // shows "waiting for another approver" rather than an Approve button that 403s.
+      // Asked only of someone who could approve at all (code grade CMSA2CD-6: the
+      // distinct-holder probe is a member scan, and for an editor the answer is moot).
+      const awaitingAnotherApprover = a && a.orgId === orgId && a.status === 'pending' && user.userId
+        && (await holdsCmsScope(req, 'host:members:manage'))
+        ? await selfApprovalBlocked(tenantId, orgId, user.userId, a)
+        : false;
       res.json({
         review: a && a.orgId === orgId
           ? {
@@ -535,6 +684,8 @@ export function registerCmsRoutes(deps: RouteDeps): void {
               ...(a.note !== undefined ? { note: a.note } : {}),
               ...(typeof a.pageVersion === 'number' ? { pageVersion: a.pageVersion } : {}),
               ...(a.aiDraftedLocales ? { aiDraftedLocales: a.aiDraftedLocales } : {}),
+              ...(a.liveReferenceSections ? { liveReferenceSections: a.liveReferenceSections } : {}),
+              ...(awaitingAnotherApprover ? { awaitingAnotherApprover: true } : {}),
             }
           : null,
       });
@@ -651,7 +802,13 @@ export function registerCmsRoutes(deps: RouteDeps): void {
   app.post(`${BASE}/pages/:pageId/restore/:versionId`, async (req, res, next) => {
     try {
       const { user, orgId, tenantId } = await requireCmsScope(req,'host:members:manage');
-      const restored = await restoreVersion(tenantId, orgId, req.params.pageId, req.params.versionId, user.userId);
+      // ADR 0836 D8 — optional pin: restore over the content the editor was
+      // looking at, or 409 (the PATCH pin's shape).
+      const ev = ((req.body ?? {}) as { expectedVersion?: unknown }).expectedVersion;
+      if (ev !== undefined && (typeof ev !== 'number' || !Number.isInteger(ev))) {
+        throw new OpenwopError('validation_error', '`expectedVersion` must be an integer page version.', 400, { expectedVersion: ev });
+      }
+      const restored = await restoreVersion(tenantId, orgId, req.params.pageId, req.params.versionId, user.userId, undefined, ev !== undefined ? { expectedVersion: ev } : undefined);
       if (!restored) throw new OpenwopError('not_found', 'Page not found.', 404, { pageId: req.params.pageId });
       res.json(restored);
     } catch (err) {
@@ -692,6 +849,7 @@ export function registerCmsRoutes(deps: RouteDeps): void {
   // footer are exactly what a marketing site shares — gating them would reproduce
   // the outage CMS2-B1 had to be corrected for.
   const assertSharedSectionEditable = async (
+    req: Request,
     tenantId: string,
     orgId: string,
     sharedSectionId: string,
@@ -703,10 +861,11 @@ export function registerCmsRoutes(deps: RouteDeps): void {
     touchesDeliveredContent: boolean,
   ): Promise<void> => {
     if (!touchesDeliveredContent) return;
-    const blocking = await blockingLiveEditPages(
-      tenantId, orgId,
-      await listPagesUsingSharedSection(tenantId, orgId, sharedSectionId),
-    );
+    const using = await listPagesUsingSharedSection(tenantId, orgId, sharedSectionId);
+    // ADR 0836 D6 — the live TIER first (gate ON or OFF): an editor rewriting a
+    // section a live or scheduled page renders is editing that page's live copy.
+    if (using.some(isLiveTierPage)) await requireLiveTier(req);
+    const blocking = await blockingLiveEditPages(tenantId, orgId, using);
     if (blocking.length === 0) return;
     throw liveEditRefusal('this shared section', blocking, {
       sharedSectionId,
@@ -751,7 +910,7 @@ export function registerCmsRoutes(deps: RouteDeps): void {
       await denyIfTranslator(tenantId, orgId, user.userId); // ADR 0205 D1 — shared content is base content
       const body = (req.body ?? {}) as { name?: unknown; data?: unknown; localizations?: unknown };
       await assertSharedSectionEditable(
-        tenantId, orgId, req.params.sharedSectionId,
+        req, tenantId, orgId, req.params.sharedSectionId,
         body.data !== undefined || body.localizations !== undefined,
       );
       const settings = await getContentLanguageSettings(tenantId, orgId);
@@ -829,15 +988,22 @@ export function registerCmsRoutes(deps: RouteDeps): void {
       // The REVERSE direction stays open: withholding removes content, which is
       // the fail-safe direction the `unpublish` / `schedule-unpublish` routes
       // are deliberately ungated for. Do not add the gate there by symmetry.
-      const target = await getPage(tenantId, orgId, req.params.pageId);
-      if (target && await refuseLiveEdit(tenantId, orgId, target.status)) {
-        throw liveEditRefusal(
-          `the ${req.params.locale} translation of this page`,
-          [{ pageId: target.pageId, title: target.title, status: target.status }],
-          { pageId: target.pageId, locale: req.params.locale, status: target.status },
-        );
-      }
-      const updated = await setLocalePublishState(tenantId, orgId, req.params.pageId, req.params.locale, 'published', user.userId);
+      // ADR 0861 D2 (CMSL2WF-2) — the gate runs on the row the CAS compares. It
+      // ran on this route's own read while the service re-read and swapped
+      // against ITS read; `transitionPage` never bumps `version`, so an approve
+      // landing between the two left the swap valid and released the withheld
+      // overlay onto a now-live page with the inbox empty.
+      const updated = await setLocalePublishState(tenantId, orgId, req.params.pageId, req.params.locale, 'published', user.userId, {
+        authorize: async (target) => {
+          if (await refuseLiveEdit(tenantId, orgId, target.status)) {
+            throw liveEditRefusal(
+              `the ${req.params.locale} translation of this page`,
+              [{ pageId: target.pageId, title: target.title, status: target.status }],
+              { pageId: target.pageId, locale: req.params.locale, status: target.status },
+            );
+          }
+        },
+      });
       if (!updated) throw new OpenwopError('not_found', 'Page not found.', 404, { pageId: req.params.pageId });
       res.json(updated);
     } catch (err) { next(err); }
@@ -879,7 +1045,10 @@ export function registerCmsRoutes(deps: RouteDeps): void {
       // 409 names the offenders so the operator can migrate deliberately. The
       // guard lives HERE (feature layer): host/contentLocales must not import
       // features (core-purity), and only cms can see the content.
-      const cur = await getContentLanguageSettings(tenantId, orgId);
+      // ADR 0861 D4 (CMSL2WF-4) — every gate below decides on THIS row, and the write
+      // is a CAS against it (`null` = never configured → insert-if-absent).
+      const stored = await getStoredContentLanguageSettings(tenantId, orgId);
+      const cur = stored ?? await getContentLanguageSettings(tenantId, orgId);
       if (body.baseLocale !== undefined) {
         const nextBase = String(body.baseLocale);
         if (nextBase !== cur.baseLocale) {
@@ -944,8 +1113,15 @@ export function registerCmsRoutes(deps: RouteDeps): void {
       // the NEW base — is already refused by the ADR 0592 §9 guard above.
       if (Array.isArray(body.supportedLocales)) {
         const nextSupported = [...new Set(body.supportedLocales.map((l) => String(l)))];
-        const widening = nextSupported.some((l) => !cur.supportedLocales.includes(l));
-        if (widening) {
+        // ADR 0861 D1 (CMSL2WF-1) — the diff runs on EVERY change, not only a
+        // widening. It used to assume a narrowing could only remove content, and
+        // that was true only of the old model: with a withheld set derived from
+        // `supportedLocales`, dropping `pt` RELEASED a withheld `pt` overlay to
+        // `pt-BR` readers. With the page-derived set a genuine narrowing diffs
+        // empty by construction, so the fail-safe direction stays open.
+        const changed = nextSupported.length !== cur.supportedLocales.length
+          || nextSupported.some((l) => !cur.supportedLocales.includes(l));
+        if (changed) {
           const shared = new Map(
             (await listSharedSections(tenantId, orgId)).map((s) => [s.sharedSectionId, s] as const),
           );
@@ -971,21 +1147,23 @@ export function registerCmsRoutes(deps: RouteDeps): void {
            * and the keys reported are the MATCHED ones, so the refusal never
            * again names a locale that holds no content (F2b).
            *
-           * NOTE the withheld set is derived from the SUPPORTED list of the
-           * scenario being modelled, exactly as `localizePage` does: withholding
-           * a locale that is not in `supportedLocales` has no delivery effect,
-           * so it must not be credited with one here.
+           * CORRECTED by ADR 0861 D1 (it overturns this note's ruling): the
+           * withheld set is the PAGE's — every `draft` key, configured or not —
+           * exactly as `localizePage` now derives it (`withheldLocales`). The
+           * old note said withholding an unconfigured locale "has no delivery
+           * effect, so it must not be credited with one". It described the code
+           * accurately and the code was wrong about the admin's intent: that
+           * no-op is how a withheld `pt` reached `pt-BR` readers.
            */
           const reachableOverlayKeys = (
             supported: readonly string[],
-            state: Record<string, string> | undefined,
+            page: Pick<Page, 'localePublishState'>,
             held: ReadonlySet<string>,
           ): Set<string> => {
-            const st = state ?? {};
-            const withheldKeys = new Set(supported.filter((l) => st[l] === 'draft'));
+            const withheldKeys = new Set(withheldLocales(page));
             const out = new Set<string>();
             for (const l of supported) {
-              if (st[l] === 'draft') continue; // not in `deliverable` — nothing negotiates to it
+              if (withheldKeys.has(l)) continue; // not in `deliverable` — nothing negotiates to it
               // resolveSection: exact, then language FAMILY, then base — over
               // the overlay map `localizePage` has already stripped.
               if (held.has(l) && !withheldKeys.has(l)) { out.add(l); continue; }
@@ -1013,8 +1191,8 @@ export function registerCmsRoutes(deps: RouteDeps): void {
                 if (v && typeof v === 'object' && Object.keys(v).length > 0) held.add(k);
               }
             }
-            const before = reachableOverlayKeys(cur.supportedLocales, p.localePublishState, held);
-            const after = reachableOverlayKeys(nextSupported, p.localePublishState, held);
+            const before = reachableOverlayKeys(cur.supportedLocales, p, held);
+            const after = reachableOverlayKeys(nextSupported, p, held);
             const releasing = [...after].filter((k) => !before.has(k));
             if (releasing.length > 0) {
               candidates.push({ pageId: p.pageId, title: p.title, status: p.status, locales: releasing });
@@ -1042,7 +1220,44 @@ export function registerCmsRoutes(deps: RouteDeps): void {
           }
         }
       }
-      res.json(await updateContentLanguageSettings(tenantId, orgId, body, user.userId));
+      res.json(await updateContentLanguageSettings(tenantId, orgId, body, user.userId, { expected: stored }));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // ── AI section rewrite (ADR 0828 phase 3) ──
+  // Rewrite one section's text (improve / shorten / expand / tone / fix, or
+  // the author's own instruction). Write-gated like any edit; the response is
+  // a PROPOSAL the editor shows before applying. Provider unavailable → 503.
+  app.post(`${BASE}/rewrite-section`, async (req, res, next) => {
+    try {
+      const { tenantId } = await requireCmsScope(req, 'workspace:write');
+      const b = (req.body ?? {}) as { sectionType?: unknown; data?: unknown; action?: unknown; instruction?: unknown };
+      const sectionType = String(b.sectionType ?? '');
+      if (!SECTION_TYPES.includes(sectionType as SectionType)) {
+        throw new OpenwopError('validation_error', `sectionType must be one of: ${SECTION_TYPES.join(', ')}`, 400, { sectionType: b.sectionType });
+      }
+      const action = String(b.action ?? '') as RewriteAction;
+      if (action !== 'custom' && !(REWRITE_ACTIONS as readonly string[]).includes(action)) {
+        throw new OpenwopError('validation_error', `action must be one of: ${[...REWRITE_ACTIONS, 'custom'].join(', ')}`, 400, { action: b.action });
+      }
+      const instruction = typeof b.instruction === 'string' ? b.instruction.trim() : '';
+      if (action === 'custom' && !instruction) {
+        throw new OpenwopError('validation_error', 'A custom rewrite needs an instruction.', 400, { field: 'instruction' });
+      }
+      if (instruction.length > REWRITE_INSTRUCTION_MAX) {
+        throw new OpenwopError('validation_error', `The instruction is limited to ${REWRITE_INSTRUCTION_MAX} characters.`, 400, { field: 'instruction', max: REWRITE_INSTRUCTION_MAX });
+      }
+      const data = (typeof b.data === 'object' && b.data !== null && !Array.isArray(b.data) ? b.data : {}) as Record<string, unknown>;
+      try {
+        res.json({ data: await rewriteSectionData(tenantId, sectionType as SectionType, data, action, instruction || undefined) });
+      } catch (err) {
+        if (err instanceof ManagedProviderError) {
+          throw new OpenwopError('host_capability_missing', 'AI rewriting is unavailable right now. Edit the text yourself, or try again later.', 503, { reason: err.message });
+        }
+        throw err;
+      }
     } catch (err) {
       next(err);
     }

@@ -124,4 +124,7 @@ export const messages = {
   badgeSqlite: 'SQLite reference host',
   badgePython: 'Python in-memory reference host',
   badgeInMemory: 'In-memory reference host',
+  mcpMovedTitle: 'AI clients (MCP)',
+  mcpMovedBody: 'The tools external AI clients can use, the server address, and their keys now live in Access.',
+  mcpMovedLink: 'Open AI clients',
 } as const;

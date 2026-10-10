@@ -14,10 +14,15 @@
  *     unchanged pass emits nothing (sabotage: drop the runner's `silent: true` ⇒
  *     the per-file count goes red);
  *   - a source whose CONNECTION OWNER is not a member of the project the target
- *     collection is bound to is REFUSED at the KB (the pass records the error and
- *     ingests nothing) while the same source under a member's connection ingests —
- *     the runner re-resolves at use instead of writing PREAUTHORIZED forever
- *     (sabotage: pass `PREAUTHORIZED_CALLER` in the runner again ⇒ red at "ingested 0").
+ *     collection is bound to is REFUSED before anything is listed or fetched (the
+ *     pass THROWS, which `syncNow` counts toward retirement), while the same source
+ *     under a member's connection ingests — the runner re-resolves at use instead
+ *     of writing PREAUTHORIZED forever. Measured (wave-6 /grade-tests): a
+ *     PREAUTHORIZED caller in the runner, or dropping its pre-listing
+ *     `getCollection` check, turns that case red at the `rejects.toThrow`.
+ *
+ * Every emit here is awaited by the lane that causes it, so `settle` is a drain,
+ * not a timer.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -31,8 +36,8 @@ import type { Storage } from '../src/storage/storage.js';
 import { initHostEventDispatcher, type HostEventEnvelope } from '../src/host/hostEventDispatcher.js';
 import type { StartRunDeps } from '../src/host/runStarter.js';
 import { PREAUTHORIZED_CALLER } from '../src/host/subjectAccess.js';
-import { getConnection } from '../src/features/connections/connectionsService.js';
-import { listFolder, fetchKnowledgeSource } from '../src/host/knowledgeSourceFetch.js';
+import { getConnection, type Connection } from '../src/features/connections/connectionsService.js';
+import { listFolder, fetchKnowledgeSource, type FetchedSource, type SyncFolderFile, type SyncFolderListing } from '../src/host/knowledgeSourceFetch.js';
 import { runKnowledgeSyncOnce } from '../src/features/knowledge-sync/knowledgeSyncRunner.js';
 import { createSyncSource, syncDocumentId } from '../src/features/knowledge-sync/knowledgeSyncService.js';
 import { addProjectMember, createProject, setProjectVisibility, projectSubject } from '../src/features/projects/projectsService.js';
@@ -55,26 +60,28 @@ let n = 0;
  *  genuine member — `addProjectMember` refuses a principal who is not in the org. */
 async function realMember(): Promise<{ tenantId: string; orgId: string; userId: string }> {
   let cookie = '';
-  const post = async (path: string, body: unknown): Promise<{ status: number; body: any }> => {
+  interface Body { user: { userId: string }; orgId: string }
+  const post = async (path: string, body: unknown): Promise<{ status: number; body: Body }> => {
     const res = await fetch(`${BASE}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, body: JSON.stringify(body) });
     for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]!; }
-    return { status: res.status, body: await res.json().catch(() => undefined) };
+    const parsed: unknown = await res.json().catch(() => ({}));
+    return { status: res.status, body: parsed as Body };
   };
   const tenantId = `org:kb-sync-bound-${Date.now()}-${n++}`;
-  const login = await post('/v1/host/openwop-app/test/login', { email: `sync-member-${n++}@acme.test`, tenantId });
+  const login = await post('/host/openwop-app/test/login', { email: `sync-member-${n++}@acme.test`, tenantId });
   expect(login.status, JSON.stringify(login.body)).toBe(201);
-  const org = await post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
-  return { tenantId, orgId: org.body.orgId as string, userId: login.body.user.userId as string };
+  return { tenantId, orgId: org.body.orgId, userId: login.body.user.userId };
 }
 let delivered: HostEventEnvelope[] = [];
-const settle = () => new Promise((r) => setTimeout(r, 25));
+const settle = async (): Promise<void> => { for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r)); };
 const INGESTED = 'host.kb.document.ingested';
 const kbEvents = (tenantId: string) => delivered.filter((e) => e.type.startsWith('host.kb.') && e.tenantId === tenantId);
 
-const file = (id: string, rev: string) => ({ fileId: id, name: `${id}.doc`, mimeType: 'application/vnd.google-apps.document', revision: rev });
-const listing = (files: ReturnType<typeof file>[], complete = true) => ({ files, complete });
-const conn = (userId: string) => ({ connectionId: 'c1', tenantId: 't', userId, provider: 'google', kind: 'oauth2', displayName: 'D', status: 'active', scopes: [], connectedAt: NOW });
+const file = (id: string, rev: string): SyncFolderFile => ({ fileId: id, name: `${id}.doc`, mimeType: 'application/vnd.google-apps.document', revision: rev });
+const listing = (files: SyncFolderFile[], complete = true): SyncFolderListing => ({ files, complete });
+const conn = (userId: string, tenantId: string): Connection => ({ connectionId: 'c1', tenantId, userId, provider: 'google', kind: 'oauth2', displayName: 'D', status: 'active', scopes: [], connectedAt: NOW, updatedAt: NOW });
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -95,18 +102,18 @@ afterAll(async () => { await new Promise<void>((res) => server.close(() => res()
 beforeEach(() => {
   delivered = [];
   mConn.mockReset(); mList.mockReset(); mFetch.mockReset();
-  mFetch.mockImplementation(async (_deps, ref) => ({ title: `Doc ${(ref as { ref: string }).ref}`, text: `hello world from ${(ref as { ref: string }).ref}` }) as never);
+  mFetch.mockImplementation(async (_deps, input): Promise<FetchedSource> => ({ title: `Doc ${input.ref}`, text: `hello world from ${input.ref}`, sourceUrl: `https://drive.test/${input.ref}` }));
 });
 
 describe('ADR 0643 D3 — the sync runner is a silent bulk lane', () => {
   it('ingesting N files → 0 per-file ingested + ONE ingested { count: N }; a prune-only pass and an unchanged pass emit nothing', async () => {
     const tenantId = `kb-sync-silent-${Date.now()}-${n++}`;
     const orgId = 'org1';
-    mConn.mockResolvedValue({ ...conn('user:owner'), tenantId } as never);
+    mConn.mockResolvedValue(conn('user:owner', tenantId));
     const col = await createCollection(tenantId, orgId, 'user:owner', { name: 'Synced' });
     const source = await createSyncSource(tenantId, orgId, { connectionId: 'c1', provider: 'google', externalFolderId: 'F', collectionId: col.collectionId, cadence: 'hourly' }, NOW);
 
-    mList.mockResolvedValueOnce(listing([file('a', 'r1'), file('b', 'r1'), file('c', 'r1')]) as never);
+    mList.mockResolvedValueOnce(listing([file('a', 'r1'), file('b', 'r1'), file('c', 'r1')]));
     const first = await runKnowledgeSyncOnce({ storage }, source);
     expect(first.ingested, `errors: ${JSON.stringify(first.errors)}`).toBe(3);
     expect(await getDocument(tenantId, orgId, col.collectionId, syncDocumentId(source.id, 'a'), PREAUTHORIZED_CALLER), 'non-vacuity: the real KB holds the synced document').not.toBeNull();
@@ -120,7 +127,7 @@ describe('ADR 0643 D3 — the sync runner is a silent bulk lane', () => {
 
     // Prune-only pass (b vanished): nothing.
     delivered = [];
-    mList.mockResolvedValueOnce(listing([file('a', 'r1'), file('c', 'r1')]) as never);
+    mList.mockResolvedValueOnce(listing([file('a', 'r1'), file('c', 'r1')]));
     const second = await runKnowledgeSyncOnce({ storage }, source);
     expect(second).toMatchObject({ ingested: 0, pruned: 1 });
     await settle();
@@ -128,7 +135,7 @@ describe('ADR 0643 D3 — the sync runner is a silent bulk lane', () => {
 
     // Unchanged pass: nothing.
     delivered = [];
-    mList.mockResolvedValueOnce(listing([file('a', 'r1'), file('c', 'r1')]) as never);
+    mList.mockResolvedValueOnce(listing([file('a', 'r1'), file('c', 'r1')]));
     const third = await runKnowledgeSyncOnce({ storage }, source);
     expect(third).toMatchObject({ ingested: 0, pruned: 0 });
     await settle();
@@ -148,8 +155,8 @@ describe('ADR 0643 R3 (Blocker 2) — the runner writes AS THE CONNECTION OWNER,
 
     // The connection now belongs to a NON-member (the source's creator, whose
     // membership has since lapsed — or a connection re-bound underneath it).
-    mConn.mockResolvedValue({ ...conn(intruder), tenantId } as never);
-    mList.mockResolvedValueOnce(listing([file('a', 'r1')]) as never);
+    mConn.mockResolvedValue(conn(intruder, tenantId));
+    mList.mockResolvedValueOnce(listing([file('a', 'r1')]));
     // R4 Should 3 — refused BEFORE it pays: one thrown error (which `syncNow` counts
     // toward MAX_CONSECUTIVE_FAILURES and retires the source after 5), NO folder
     // listing, NO fetch. The R3 shape listed + fetched every changed file on every pass
@@ -160,8 +167,8 @@ describe('ADR 0643 R3 (Blocker 2) — the runner writes AS THE CONNECTION OWNER,
     expect(await listDocuments(tenantId, orgId, col.collectionId, PREAUTHORIZED_CALLER)).toEqual([]);
 
     // Positive control — the same source under a MEMBER's connection ingests.
-    mConn.mockResolvedValue({ ...conn(member), tenantId } as never);
-    mList.mockResolvedValueOnce(listing([file('a', 'r1')]) as never);
+    mConn.mockResolvedValue(conn(member, tenantId));
+    mList.mockResolvedValueOnce(listing([file('a', 'r1')]));
     const ok = await runKnowledgeSyncOnce({ storage }, { ...source, createdBy: member });
     expect(ok.ingested, `errors: ${JSON.stringify(ok.errors)}`).toBe(1);
     expect((await listDocuments(tenantId, orgId, col.collectionId, PREAUTHORIZED_CALLER)).map((d) => d.documentId)).toEqual([syncDocumentId(source.id, 'a')]);
@@ -169,7 +176,7 @@ describe('ADR 0643 R3 (Blocker 2) — the runner writes AS THE CONNECTION OWNER,
 });
 
 describe('ADR 0643 D3 (R4 Should 2) — the media-collection bridge is a silent bulk lane', () => {
-  it('ingesting N media assets → 0 per-asset ingested/updated + ONE ingested { count: N }; a re-run (idempotent upserts) emits nothing', async () => {
+  it('ingesting N media assets → 0 per-asset ingested/updated + ONE ingested { count: N }; a re-run (idempotent upserts) emits no per-asset event', async () => {
     const tenantId = `kb-media-silent-${Date.now()}-${n++}`;
     const orgId = 'org1';
     const kb = await createCollection(tenantId, orgId, 'actor', { name: 'From media' });

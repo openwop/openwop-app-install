@@ -91,6 +91,17 @@ describe('summarizeProvenance', () => {
     expect(p.human.interrupts).toBeGreaterThanOrEqual(1);
   });
 
+  it('ADR 0812 — flags an open interrupt from the page\'s open-interrupt read when the major-2 snapshot carries none', () => {
+    seq = 0;
+    const events: RunEventDoc[] = [ev('run.started', {})];
+    // The closed v2 snapshot has no `interrupt`, which is what the SPA receives.
+    const snapshot = { runId: 'run-1', workflowId: 'wf', status: 'waiting-approval' } as unknown as RunSnapshot;
+    expect(summarizeProvenance(events, snapshot).human.open, 'without the read, nothing marks it open').toBe(false);
+    const p = summarizeProvenance(events, snapshot, 'approval');
+    expect(p.human.open).toBe(true);
+    expect(p.human.kinds).toContain('approval');
+  });
+
   it('marks model substitution when model.capability.substituted fired', () => {
     seq = 0;
     const events: RunEventDoc[] = [

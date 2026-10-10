@@ -12,8 +12,9 @@
  *
  * Mechanics:
  *  - FIFO order is a durable per-(tenant,queue) monotonic sequence, zero-padded
- *    so the kv key sorts lexicographically === chronologically. `kvList` returns
- *    keys ascending, so the lowest key is the head.
+ *    so the kv key sorts lexicographically === chronologically. `listPage`
+ *    returns keys ascending, so the lowest key is the head (ADR 0868: a receive
+ *    reads a page of CLAIM_PAGE rows, not the whole queue).
  *  - At-most-once delivery across instances: a consumer CLAIMS the head by
  *    `kvDelete` — which returns whether THIS caller removed the row. Two
  *    instances racing the same head: exactly one delete returns true, the other
@@ -30,7 +31,7 @@
 
 import { randomUUID } from 'node:crypto';
 import type { BundleScope, QueueSurface, QueueBusSurface } from '../inMemorySurfaces.js';
-import { requireDurableStorage } from './durableStore.js';
+import { listPage, requireDurableStorage, scanPrefix } from './durableStore.js';
 
 const enc = encodeURIComponent;
 const SEQ_WIDTH = 16; // supports 1e16 messages per (tenant, queue/subject)
@@ -53,13 +54,20 @@ async function nextSequence(counterKey: string): Promise<number> {
 
 /** Claim the lexicographically-lowest (oldest) row under `prefix`, returning it
  *  iff THIS caller removed it. Skips rows another instance grabbed first. */
+const CLAIM_PAGE = 8;
 async function claimHead(prefix: string): Promise<{ key: string; value: string } | null> {
   const storage = requireDurableStorage();
-  const rows = await storage.kvList(prefix); // ascending by key
-  for (const row of rows) {
-    if (await storage.kvDelete(row.key)) return row;
+  let after: string | undefined;
+  for (;;) {
+    // ADR 0868: a small page from the head. A row another instance claimed
+    // first fails its delete; move on, and only then read the next page.
+    const page = await listPage(prefix, { after, limit: CLAIM_PAGE });
+    for (const row of page) {
+      if (await storage.kvDelete(row.key)) return row;
+    }
+    if (page.length < CLAIM_PAGE) return null;
+    after = page[page.length - 1]!.key;
   }
-  return null;
 }
 
 // ── host.queue ──────────────────────────────────────────────────────
@@ -90,7 +98,7 @@ export function createDurableQueue(scope: BundleScope): QueueSurface {
 // snapshot projects depth + reasons + ids ONLY (payloads may carry tenant
 // PII); replay deletes the DLQ row and re-publishes the ORIGINAL payload onto
 // the base subject with the scheme's own sequence counter. Superadmin-gated at
-// the route; the kvList prefix scan is a cold operator read, never a hot path.
+// the route; a cold operator read (ADR 0868: one tenant reads only its range).
 
 export interface DurableDlqSnapshotRow {
   tenantId: string;
@@ -101,10 +109,11 @@ export interface DurableDlqSnapshotRow {
 }
 
 export async function snapshotDurableDlqSubjects(tenantId?: string): Promise<DurableDlqSnapshotRow[]> {
-  const storage = requireDurableStorage();
-  const rows = await storage.kvList('hostsurf:bus:');
+  // ADR 0868: one tenant's snapshot reads that tenant's bus range only. The
+  // all-tenant operator view still walks every bus row, in batches.
+  const scanRoot = tenantId !== undefined ? `hostsurf:bus:${enc(tenantId)}:` : 'hostsurf:bus:';
   const grouped = new Map<string, { tenantId: string; subject: string; messages: BusMessage[] }>();
-  for (const row of rows) {
+  for await (const row of scanPrefix(scanRoot, { op: 'bus.dlq-snapshot' })) {
     const parts = row.key.split(':'); // hostsurf:bus:<t>:<subject>:<seq>
     if (parts.length < 5) continue;
     const t = decodeURIComponent(parts[2]!);
@@ -131,8 +140,7 @@ export async function replayDurableDlqMessage(tenantId: string, dlqSubject: stri
   const storage = requireDurableStorage();
   const t = enc(tenantId);
   const prefix = `hostsurf:bus:${t}:${enc(dlqSubject)}:`;
-  const rows = await storage.kvList(prefix);
-  for (const row of rows) {
+  for await (const row of scanPrefix(prefix, { op: 'bus.dlq-replay' })) {
     let msg: BusMessage;
     try { msg = JSON.parse(row.value) as BusMessage; } catch { continue; }
     if (msg.id !== messageId) continue;
@@ -163,12 +171,20 @@ export async function purgeTenantDurableSurfaces(tenantId: string): Promise<numb
   const storage = requireDurableStorage();
   const t = enc(tenantId);
   let purged = 0;
-  const rows = await storage.kvList('hostsurf:');
-  for (const row of rows) {
-    const parts = row.key.split(':'); // hostsurf:<family>:<tenant>:…
-    if (parts.length >= 3 && parts[2] === t) {
+  // ADR 0868: a skip-scan over the families, never a read of every tenant's
+  // rows. Read the first key of the next family (one row), purge
+  // `hostsurf:<family>:<tenant>:`, then jump past that family: `<family>;`
+  // sorts after every `<family>:…` key (';' is ':' + 1). Discovering the
+  // families from the data means a family added later is purged too.
+  let after: string | undefined;
+  for (;;) {
+    const [first] = await listPage('hostsurf:', { after, limit: 1 });
+    if (!first) break;
+    const family = first.key.split(':')[1] ?? '';
+    for await (const row of scanPrefix(`hostsurf:${family}:${t}:`, { op: 'purge' })) {
       if (await storage.kvDelete(row.key)) purged += 1;
     }
+    after = `hostsurf:${family};`;
   }
   return purged;
 }
@@ -239,11 +255,11 @@ export function createDurableQueueBus(scope: BundleScope): QueueBusSurface {
     },
     async streamSubscribe({ stream, fromBeginning }) {
       if (fromBeginning !== true) return { records: [], fromBeginningSnapshot: false };
-      const rows = await storage().kvList(msgPrefix(stream));
-      const records = rows.map((r) => {
+      const records: Array<{ id: string; payload: unknown }> = [];
+      for await (const r of scanPrefix(msgPrefix(stream), { op: 'bus.stream-snapshot' })) {
         const m = JSON.parse(r.value) as BusMessage;
-        return { id: m.id, payload: m.payload };
-      });
+        records.push({ id: m.id, payload: m.payload });
+      }
       return { records, fromBeginningSnapshot: true, count: records.length };
     },
   };

@@ -25,8 +25,8 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-async function jsonGet<T = any>(path: string): Promise<{ status: number; body: T }> {
-  const res = await fetch(`${BASE}${path}`, { headers: { authorization: `Bearer ${TOKEN}` } });
+async function jsonGet<T = any>(path: string, extra: Record<string, string> = {}): Promise<{ status: number; body: T }> {
+  const res = await fetch(`${BASE}${path}`, { headers: { authorization: `Bearer ${TOKEN}`, ...extra } });
   return { status: res.status, body: (await res.json()) as T };
 }
 
@@ -45,9 +45,11 @@ async function seed(sizes: number[]): Promise<void> {
 
 describe('RFC 0113 — injectionBudget advert', () => {
   it('declares memory.injectionBudget with an honest tokenCounter unit', async () => {
-    const d = (await jsonGet('/.well-known/openwop')).body as { capabilities: { memory?: { injectionBudget?: { supported?: boolean; tokenCounter?: string } } } };
-    const ib = d.capabilities.memory?.injectionBudget;
-    expect(ib?.supported).toBe(true);
+    // ADR 0812 P3c-0 — v2 spelling: the `memory` record sits at the closed v2 root and the
+    // facet's PRESENCE is the claim (no `supported` flag).
+    const d = (await jsonGet('/.well-known/openwop', { 'OpenWOP-Version': '2' })).body as { memory?: { injectionBudget?: { tokenCounter?: string } } };
+    const ib = d.memory?.injectionBudget;
+    expect(ib, 'memory.injectionBudget is advertised').toBeDefined();
     expect(ib?.tokenCounter).toBe('chars'); // this host counts chars, not BPE tokens
   });
 });
@@ -108,12 +110,12 @@ describe('RFC 0113 — listMemoryEntries tokenBudget (unit)', () => {
   });
 });
 
-describe('RFC 0113 — GET /v1/host/openwop-app/memory?tokenBudget', () => {
+describe('RFC 0113 — GET /host/openwop-app/memory?tokenBudget', () => {
   it('applies the budget over the wire (recency-ranked, whole entries)', async () => {
     await seed([100, 100, 100]);
-    const full = await jsonGet('/v1/host/openwop-app/memory');
+    const full = await jsonGet('/host/openwop-app/memory');
     expect((full.body.entries as unknown[]).length).toBe(3);
-    const budgeted = await jsonGet('/v1/host/openwop-app/memory?tokenBudget=250');
+    const budgeted = await jsonGet('/host/openwop-app/memory?tokenBudget=250');
     expect(budgeted.status).toBe(200);
     expect((budgeted.body.entries as Array<{ content: string }>).length).toBe(2);
     expect((budgeted.body.entries as Array<{ content: string }>).every((e) => e.content.length === 100)).toBe(true);
@@ -121,9 +123,9 @@ describe('RFC 0113 — GET /v1/host/openwop-app/memory?tokenBudget', () => {
 
   it('rank=recency is accepted; an unknown rank falls back to recency (graceful)', async () => {
     await seed([10, 20]);
-    const r1 = await jsonGet('/v1/host/openwop-app/memory?rank=recency');
+    const r1 = await jsonGet('/host/openwop-app/memory?rank=recency');
     expect(r1.status).toBe(200);
-    const r2 = await jsonGet('/v1/host/openwop-app/memory?rank=relevance'); // not offered → recency
+    const r2 = await jsonGet('/host/openwop-app/memory?rank=relevance'); // not offered → recency
     expect(r2.status).toBe(200);
     expect((r2.body.entries as unknown[]).length).toBe(2);
   });

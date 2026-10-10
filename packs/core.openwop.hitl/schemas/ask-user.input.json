@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/core.openwop.hitl/1.0.0/ask-user.input.json",
+  "$id": "https://packs.openwop.dev/core.openwop.hitl/1.0.1/ask-user.input.json",
   "title": "AskUserInput",
   "type": "object",
   "required": [

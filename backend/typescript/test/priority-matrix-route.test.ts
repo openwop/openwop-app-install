@@ -26,7 +26,7 @@ afterAll(async () => { await closeApp(); });
 const client = (): Client => makeClient(() => BASE);
 
 async function signup(c: Client, opts: { tenantId?: string } = {}): Promise<{ userId: string }> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail('pm'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
+  const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail('pm'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
@@ -35,12 +35,12 @@ const enable = (status: 'on' | 'off'): Promise<void> => enableToggle('priority-m
 async function ownerWithOrg(): Promise<{ owner: Client; userId: string; orgId: string }> {
   const owner = client();
   const u = await signup(owner);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return { owner, userId: u.userId, orgId: org.body.orgId };
 }
 
-const L = '/v1/host/openwop-app/priority-matrix/lists';
+const L = '/host/openwop-app/priority-matrix/lists';
 // Default "weighted" preset criterion ids (ADR 0058 CRITERIA_PRESETS.weighted).
 const HIGH = { 'strategic-alignment': 10, roi: 10, urgency: 10, 'compliance-risk': 10, cost: 1 };
 const LOW = { 'strategic-alignment': 1, roi: 1, urgency: 1, 'compliance-risk': 1, cost: 10 };
@@ -73,7 +73,7 @@ describe('priority-matrix — lists + scoping', () => {
 
   it('scopes a list to a project, and 404s a bogus project', async () => {
     const { owner, orgId } = await ownerWithOrg();
-    const proj = await owner.post('/v1/host/openwop-app/projects', { orgId, name: 'Launch Q3' });
+    const proj = await owner.post('/host/openwop-app/projects', { orgId, name: 'Launch Q3' });
     expect(proj.status, JSON.stringify(proj.body)).toBe(201);
     const ok = await owner.post(L, { orgId, name: 'Launch priorities', projectId: proj.body.id });
     expect(ok.status, JSON.stringify(ok.body)).toBe(201);
@@ -120,9 +120,9 @@ describe('priority-matrix — config authority', () => {
     await signup(owner, { tenantId });
     const member = client();
     const memberUser = await signup(member, { tenantId });
-    const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+    const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
     const orgId = org.body.orgId;
-    await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
+    await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
     const list = (await owner.post(L, { orgId, name: 'Guarded', presetId: 'weighted' })).body;
 
     const newSet = { aggregation: 'weighted-sum', criteria: [{ name: 'Only one', weight: 9, direction: 'benefit' }] };
@@ -145,10 +145,10 @@ describe('priority-matrix — cross-org isolation (project-scoped lists)', () =>
     const member = client();
     const memberUser = await signup(member, { tenantId });
     // Two orgs in the same tenant/workspace.
-    const orgA = (await owner.post('/v1/host/openwop-app/orgs', { name: 'Alpha' })).body.orgId;
-    const orgB = (await owner.post('/v1/host/openwop-app/orgs', { name: 'Bravo' })).body.orgId;
+    const orgA = (await owner.post('/host/openwop-app/orgs', { name: 'Alpha' })).body.orgId;
+    const orgB = (await owner.post('/host/openwop-app/orgs', { name: 'Bravo' })).body.orgId;
     // The member is an editor in A only.
-    await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
+    await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
     // A list scoped to org B.
     const listB = (await owner.post(L, { orgId: orgB, name: 'B-only', presetId: 'weighted' })).body;
     const base = `${L}/${encodeURIComponent(listB.id)}`;
@@ -302,9 +302,9 @@ describe('priority-matrix — schedule status (ADR 0103)', () => {
     await signup(owner, { tenantId });
     const viewer = client();
     const viewerUser = await signup(viewer, { tenantId });
-    const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
+    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
     // Viewer role = workspace:read but NOT workspace:write (accessControl built-in).
-    await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'V', subject: viewerUser.userId, roles: ['viewer'] });
+    await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'V', subject: viewerUser.userId, roles: ['viewer'] });
     const list = (await owner.post(L, { orgId, name: 'Gated', presetId: 'weighted' })).body;
     const base = `${L}/${encodeURIComponent(list.id)}`;
     const idea = (await owner.post(`${base}/ideas`, { title: 'Item' })).body;
@@ -319,7 +319,7 @@ describe('priority-matrix — schedule status (ADR 0103)', () => {
 
     // Cross-org isolation: a list in another org of the same tenant the viewer has no
     // membership in → a uniform 404 (no existence leak), on both read and write.
-    const orgB = (await owner.post('/v1/host/openwop-app/orgs', { name: 'OrgB' })).body.orgId;
+    const orgB = (await owner.post('/host/openwop-app/orgs', { name: 'OrgB' })).body.orgId;
     const listB = (await owner.post(L, { orgId: orgB, name: 'B-only', presetId: 'weighted' })).body;
     const baseB = `${L}/${encodeURIComponent(listB.id)}`;
     expect((await viewer.get(`${baseB}/schedule`)).status).toBe(404);

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.landing-page/1.0.0/structure-create.output.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.landing-page/1.0.2/structure-create.output.json",
   "title": "LandingStructureCreateOutput",
   "type": "object",
   "required": ["pageId", "page", "sections", "layoutConfig", "success"],

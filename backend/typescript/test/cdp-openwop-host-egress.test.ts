@@ -95,7 +95,7 @@ describe('prepareOnward surface verb — flag-gated envelope prep for the http-n
     const sync = await createDestinationSync({
       tenantId: TENANT, name: 'Peer CDP', destinationKind: 'openwop-host', sourceObject: 'contact',
       fieldMap: [{ from: 'email', to: 'email_address' }],
-      connectionId: 'conn:peer', peerIngestUrl: 'https://peer.example/v1/host/openwop-app/trigger-bridge/ingest',
+      connectionId: 'conn:peer', peerIngestUrl: 'https://peer.example/host/openwop-app/trigger-bridge/ingest',
     });
     return sync.syncId;
   }
@@ -121,7 +121,7 @@ describe('prepareOnward surface verb — flag-gated envelope prep for the http-n
       ],
     });
     expect(out.error).toBeUndefined();
-    expect(out.peerIngestUrl).toBe('https://peer.example/v1/host/openwop-app/trigger-bridge/ingest');
+    expect(out.peerIngestUrl).toBe('https://peer.example/host/openwop-app/trigger-bridge/ingest');
     expect(out.connectionId).toBe('conn:peer');
     expect(out.dropped).toBe(1); // the [] record
     const envs = out.envelopes as OnwardEnvelope[];

@@ -27,13 +27,13 @@ async function startApp(): Promise<{ port: number; close: () => Promise<void> }>
   });
   app.use(ipRateLimitMiddleware());
   app.get('/ping', (_req, res) => res.json({ ok: true }));
-  app.post('/v1/runs', runQuotaMiddleware(), (_req, res) => res.status(201).json({ ok: true }));
+  app.post('/runs', runQuotaMiddleware(), (_req, res) => res.status(201).json({ ok: true }));
   // A route that RESERVES, mirroring what `routes/runs.ts` does. The previous
   // version of this file said "Need a test route that actually calls
   // reserveConcurrentSlot… (Done via the synthetic app in startApp())" — it was
   // not done, and the concurrent-run quota ended up with no coverage at all.
   let seq = 0;
-  app.post('/v1/runs-reserving', runQuotaMiddleware(), (req, res) => {
+  app.post('/runs-reserving', runQuotaMiddleware(), (req, res) => {
     const runId = `run-${++seq}`;
     reserveConcurrentSlot(req, runId);
     res.status(201).json({ runId });
@@ -41,8 +41,8 @@ async function startApp(): Promise<{ port: number; close: () => Promise<void> }>
   // Long-lived SSE stream routes — exempt from the per-IP burst bucket when
   // requested as text/event-stream (the reconnect-feedback-loop fix). The
   // handlers reply immediately so the test's fetch resolves.
-  app.get('/v1/host/openwop-app/notifications/stream', (_req, res) => res.json({ ok: true }));
-  app.get('/v1/runs/:runId/events', (_req, res) => res.json({ ok: true }));
+  app.get('/host/openwop-app/notifications/stream', (_req, res) => res.json({ ok: true }));
+  app.get('/runs/:runId/events', (_req, res) => res.json({ ok: true }));
   return new Promise((resolve) => {
     server = app.listen(0, '127.0.0.1', () => {
       port = (server.address() as { port: number }).port;
@@ -147,14 +147,14 @@ describe('P0.4 rate limit', () => {
 
   it('per-session run quota: 3 runs/min then 429', async () => {
     for (let i = 0; i < 3; i++) {
-      const r = await fetch(`http://127.0.0.1:${port}/v1/runs`, {
+      const r = await fetch(`http://127.0.0.1:${port}/runs`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', 'x-test-tenant': 'anon:alice' },
         body: '{}',
       });
       expect(r.status).toBe(201);
     }
-    const blocked = await fetch(`http://127.0.0.1:${port}/v1/runs`, {
+    const blocked = await fetch(`http://127.0.0.1:${port}/runs`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-test-tenant': 'anon:alice' },
       body: '{}',
@@ -168,14 +168,14 @@ describe('P0.4 rate limit', () => {
 
   it('per-session quota is isolated between sessions', async () => {
     for (let i = 0; i < 3; i++) {
-      await fetch(`http://127.0.0.1:${port}/v1/runs`, {
+      await fetch(`http://127.0.0.1:${port}/runs`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', 'x-test-tenant': 'anon:alice' },
         body: '{}',
       });
     }
     // Alice exhausted; Bob still has full quota.
-    const bob = await fetch(`http://127.0.0.1:${port}/v1/runs`, {
+    const bob = await fetch(`http://127.0.0.1:${port}/runs`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-test-tenant': 'anon:bob' },
       body: '{}',
@@ -202,7 +202,7 @@ describe('P0.4 rate limit', () => {
     _resetRateLimitState();
     _resetRunLifecycle();
 
-    const reserve = (): Promise<Response> => fetch(`http://127.0.0.1:${port}/v1/runs-reserving`, {
+    const reserve = (): Promise<Response> => fetch(`http://127.0.0.1:${port}/runs-reserving`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-test-tenant': 'anon:conc' },
       body: '{}',
@@ -234,7 +234,7 @@ describe('P0.4 rate limit', () => {
     _resetRateLimitState();
     _resetRunLifecycle();
 
-    const reserveAs = (tenant: string): Promise<Response> => fetch(`http://127.0.0.1:${port}/v1/runs-reserving`, {
+    const reserveAs = (tenant: string): Promise<Response> => fetch(`http://127.0.0.1:${port}/runs-reserving`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-test-tenant': tenant },
       body: '{}',
@@ -254,9 +254,9 @@ describe('P0.4 rate limit', () => {
     // burst. Far past the budget, every SSE (re)connect to a known stream path
     // stays 200 — so a throttled tab's reconnects can't keep it throttled.
     for (let i = 0; i < 12; i++) {
-      const a = await fetch(`http://127.0.0.1:${port}/v1/host/openwop-app/notifications/stream`, { headers: sse });
+      const a = await fetch(`http://127.0.0.1:${port}/host/openwop-app/notifications/stream`, { headers: sse });
       expect(a.status).toBe(200);
-      const b = await fetch(`http://127.0.0.1:${port}/v1/runs/run-xyz/events`, { headers: sse });
+      const b = await fetch(`http://127.0.0.1:${port}/runs/run-xyz/events`, { headers: sse });
       expect(b.status).toBe(200);
     }
   });
@@ -264,18 +264,18 @@ describe('P0.4 rate limit', () => {
   it('CS-CH-1 — channel stream/presence + voice transcript SSE are exempt too (the reconnect-storm class)', async () => {
     const sse = { Accept: 'text/event-stream' };
     for (let i = 0; i < 12; i++) {
-      const stream = await fetch(`http://127.0.0.1:${port}/v1/host/openwop-app/channels/chan-1/stream`, { headers: sse });
+      const stream = await fetch(`http://127.0.0.1:${port}/host/openwop-app/channels/chan-1/stream`, { headers: sse });
       expect(stream.status).not.toBe(429);
-      const presence = await fetch(`http://127.0.0.1:${port}/v1/host/openwop-app/channels/chan-1/presence`, { headers: sse });
+      const presence = await fetch(`http://127.0.0.1:${port}/host/openwop-app/channels/chan-1/presence`, { headers: sse });
       expect(presence.status).not.toBe(429);
-      const voice = await fetch(`http://127.0.0.1:${port}/v1/host/openwop-app/voice/realtime/messages/stream?conversationId=c1`, { headers: sse });
+      const voice = await fetch(`http://127.0.0.1:${port}/host/openwop-app/voice/realtime/messages/stream?conversationId=c1`, { headers: sse });
       expect(voice.status).not.toBe(429);
     }
     // Without the Accept header the same channel path still counts (no free polling).
     _resetRateLimitState();
     let blocked = false;
     for (let i = 0; i < 8; i++) {
-      const r = await fetch(`http://127.0.0.1:${port}/v1/host/openwop-app/channels/chan-1/stream`, { headers: { Accept: 'application/json' } });
+      const r = await fetch(`http://127.0.0.1:${port}/host/openwop-app/channels/chan-1/stream`, { headers: { Accept: 'application/json' } });
       if (r.status === 429) { blocked = true; break; }
     }
     expect(blocked).toBe(true);
@@ -295,7 +295,7 @@ describe('P0.4 rate limit', () => {
     _resetRateLimitState();
     let blockedOnJsonPoll = false;
     for (let i = 0; i < 8; i++) {
-      const r = await fetch(`http://127.0.0.1:${port}/v1/runs/run-xyz/events`, { headers: { Accept: 'application/json' } });
+      const r = await fetch(`http://127.0.0.1:${port}/runs/run-xyz/events`, { headers: { Accept: 'application/json' } });
       if (r.status === 429) { blockedOnJsonPoll = true; break; }
     }
     expect(blockedOnJsonPoll).toBe(true);

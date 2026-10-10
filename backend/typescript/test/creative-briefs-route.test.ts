@@ -47,10 +47,10 @@ function client() {
   return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b), patch: (p: string, b?: unknown) => call('PATCH', p, b), del: (p: string) => call('DELETE', p) };
 }
 
-const CB = (orgId: string, s = ''): string => `/v1/host/openwop-app/creative-briefs/orgs/${encodeURIComponent(orgId)}${s}`;
-const M = (orgId: string, s = ''): string => `/v1/host/openwop-app/media/orgs/${encodeURIComponent(orgId)}${s}`;
-const SHARE = (orgId: string): string => `/v1/host/openwop-app/sharing/orgs/${encodeURIComponent(orgId)}/links`;
-const COMMENTS = (orgId: string, s = ''): string => `/v1/host/openwop-app/comments/orgs/${encodeURIComponent(orgId)}/comments${s}`;
+const CB = (orgId: string, s = ''): string => `/host/openwop-app/creative-briefs/orgs/${encodeURIComponent(orgId)}${s}`;
+const M = (orgId: string, s = ''): string => `/host/openwop-app/media/orgs/${encodeURIComponent(orgId)}${s}`;
+const SHARE = (orgId: string): string => `/host/openwop-app/sharing/orgs/${encodeURIComponent(orgId)}/links`;
+const COMMENTS = (orgId: string, s = ''): string => `/host/openwop-app/comments/orgs/${encodeURIComponent(orgId)}/comments${s}`;
 
 // A valid 1x1 PNG (the media upload seed).
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
@@ -58,9 +58,9 @@ const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwA
 async function ownerWithOrg() {
   const c = client();
   const tenantId = `org:cb-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `cb-${Date.now()}-${Math.floor(Math.random() * 1e6)}@t.test`, tenantId });
+  const r = await c.post('/host/openwop-app/test/login', { email: `cb-${Date.now()}-${Math.floor(Math.random() * 1e6)}@t.test`, tenantId });
   expect(r.status).toBe(201);
-  const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status).toBe(201);
   return { c, orgId: org.body.orgId as string, tenantId };
 }
@@ -126,17 +126,17 @@ describe('creative-briefs lifecycle', () => {
     const id = created.body.briefId;
 
     // Draft brief refuses to mint a share link (409 from the resolver).
-    const mintDraft = await c.post(`/v1/host/openwop-app/sharing/orgs/${encodeURIComponent(orgId)}/links`, { resourceType: 'creative_brief', resourceId: id });
+    const mintDraft = await c.post(`/host/openwop-app/sharing/orgs/${encodeURIComponent(orgId)}/links`, { resourceType: 'creative_brief', resourceId: id });
     expect([400, 409]).toContain(mintDraft.status);
 
     await c.post(CB(orgId, `/briefs/${id}/transition`), { status: 'review' });
     await c.post(CB(orgId, `/briefs/${id}/transition`), { status: 'approved' });
-    const mint = await c.post(`/v1/host/openwop-app/sharing/orgs/${encodeURIComponent(orgId)}/links`, { resourceType: 'creative_brief', resourceId: id });
+    const mint = await c.post(`/host/openwop-app/sharing/orgs/${encodeURIComponent(orgId)}/links`, { resourceType: 'creative_brief', resourceId: id });
     expect(mint.status, JSON.stringify(mint.body)).toBe(201);
 
     // Stranger tenant: uniform 404.
     const stranger = client();
-    await stranger.post('/v1/host/openwop-app/test/login', { email: `x-${Date.now()}@t.test`, tenantId: `org:x-${Date.now()}` });
+    await stranger.post('/host/openwop-app/test/login', { email: `x-${Date.now()}@t.test`, tenantId: `org:x-${Date.now()}` });
     expect((await stranger.get(CB(orgId, `/briefs/${id}`))).status).toBe(404);
   });
 
@@ -175,12 +175,12 @@ describe('creative-briefs lifecycle', () => {
     const mint = await c.post(SHARE(orgId), { resourceType: 'creative_brief', resourceId: id });
     expect(mint.status, JSON.stringify(mint.body)).toBe(201);
     const token = mint.body.token as string;
-    expect((await c.get(`/v1/host/openwop-app/shared/${token}`)).status).toBe(200); // live before
+    expect((await c.get(`/host/openwop-app/shared/${token}`)).status).toBe(200); // live before
 
     const after = await c.post(CB(orgId, `/briefs/${id}/moodboard`), { product: 'FlashPick' });
     expect(after.status).toBe(200);
     expect(after.body.status).toBe('draft'); // demoted — no silent mutation of an approved brief
-    expect((await c.get(`/v1/host/openwop-app/shared/${token}`)).status).toBe(404); // link purged
+    expect((await c.get(`/host/openwop-app/shared/${token}`)).status).toBe(404); // link purged
   });
 
   it('deleting a brief clears its media usage-refs and prunes its comments (CB-CODE-2 / CS-DATA-2/14)', async () => {
@@ -233,7 +233,7 @@ describe('creative-briefs lifecycle', () => {
     const mint = await c.post(SHARE(orgId), { resourceType: 'creative_brief', resourceId: id });
     expect(mint.status, JSON.stringify(mint.body)).toBe(201);
 
-    const shared = await c.get(`/v1/host/openwop-app/shared/${mint.body.token}`);
+    const shared = await c.get(`/host/openwop-app/shared/${mint.body.token}`);
     expect(shared.status).toBe(200);
     const md = shared.body.resource.markdown as string;
     expect(md).toContain('Warehouse hero.png'); // resolvable asset renders by NAME

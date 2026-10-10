@@ -31,6 +31,8 @@ import {
   type CreateUserAgentInput,
 } from '../client/agentsClient.js';
 import { PageHeader } from '../ui/PageHeader.js';
+import { StateCard } from '../ui/StateCard.js';
+import { useAgentWriteAccess, writeErrorMessage } from './agentWriteAccess.js';
 import { TextField, TextareaField, SelectField, CheckboxField } from '../ui/Field.js';
 import { ArrowLeftIcon } from '../ui/icons/index.js';
 
@@ -66,6 +68,8 @@ const INITIAL: FormState = {
 export function AgentNewPage(): JSX.Element {
   const { t } = useTranslation('agents');
   const [form, setForm] = useState<FormState>(INITIAL);
+  // ADR 0775 D1 — creating (or forking) an agent needs `workspace:write`.
+  const canWrite = useAgentWriteAccess();
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const navigate = useNavigate();
@@ -127,9 +131,23 @@ export function AgentNewPage(): JSX.Element {
       const created = await createUserAgent(input);
       navigate(`/agents/templates/${encodeURIComponent(created.agentId)}`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(writeErrorMessage(err, t('common:error_forbidden')));
       setIsSubmitting(false);
     }
+  }
+
+  // ADR 0775 D1 (grade-ux ARUX-1) — refuse at the door, not at Submit.
+  if (!canWrite) {
+    return (
+      <section>
+        <div className="u-mb-3">
+          <Link to="/agents" className="u-fs-12 u-ink-3">
+            <ArrowLeftIcon size={12} /> {t('newBack')}
+          </Link>
+        </div>
+        <StateCard title={t('viewerCannotCreateTitle')} body={t('viewerCannotCreateBody')} />
+      </section>
+    );
   }
 
   return (

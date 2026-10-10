@@ -1,7 +1,7 @@
 /**
  * Store Assistant chat tools (CFP-1 — CHAT-FIRST-PORT-AUDIT #1; ADR 0308 seam).
  *
- * The `feature.commerce.agents.store-assistant` pack allowlisted node typeIds that
+ * The `vendor.openwop-app.commerce.agents.store-assistant` pack allowlisted node typeIds that
  * NOTHING projected into the conversational tool loop, so the agent dispatched with
  * ZERO callable tools (a persona that could only talk). This registers the honest
  * subset as REAL agent tools through the one `registerFeatureAgentTool` seam, so the
@@ -114,9 +114,12 @@ function readTool(
   // fixes its own trust collapses N per-tool decisions into one and defeats the
   // compiler ratchet: every tool it mints would silently inherit one call.
   contentTrust: BuiltinTool['contentTrust'],
+  // ADR 0784 — threaded as a PARAMETER for the same reason as `contentTrust`.
+  effect: BuiltinTool['effect'],
 ): BuiltinTool {
   return {
     contentTrust,
+    effect,
     def,
     async run(input, scope) {
       if (!scope.actingUserId) return empty('No acting user on this turn — commerce access is resolved per signed-in user.');
@@ -159,6 +162,7 @@ export function registerCommerceAgentTools(): void {
       return ok(capRows({ orgId, total: products.length, products }, 'products'));
     },
     'untrusted',   // customer-authored names, addresses, order notes
+    'read',
   ));
 
   registerFeatureAgentTool(readTool(
@@ -181,6 +185,7 @@ export function registerCommerceAgentTools(): void {
       return ok({ orgId, order: project(order) });
     },
     'untrusted',   // customer-authored names, addresses, order notes
+    'read',
   ));
 
   registerFeatureAgentTool(readTool(
@@ -198,6 +203,7 @@ export function registerCommerceAgentTools(): void {
       return ok(capRows({ orgId, total: orders.length, orders }, 'orders'));
     },
     'untrusted',   // customer-authored names, addresses, order notes
+    'read',
   ));
 
   registerFeatureAgentTool(readTool(
@@ -215,6 +221,7 @@ export function registerCommerceAgentTools(): void {
       return ok(capRows({ orgId, total: coupons.length, coupons }, 'coupons'));
     },
     'untrusted',   // customer-authored names, addresses, order notes
+    'read',
   ));
 
   registerFeatureAgentTool(readTool(
@@ -232,6 +239,7 @@ export function registerCommerceAgentTools(): void {
       return ok(capRows({ orgId, total: quotes.length, quotes }, 'quotes'));
     },
     'untrusted',   // customer-authored names, addresses, order notes
+    'read',
   ));
 
   registerFeatureAgentTool(readTool(
@@ -254,6 +262,7 @@ export function registerCommerceAgentTools(): void {
       return ok({ orgId, quote: project(quote) });
     },
     'untrusted',   // customer-authored names, addresses, order notes
+    'read',
   ));
 
   registerFeatureAgentTool(readTool(
@@ -285,6 +294,7 @@ export function registerCommerceAgentTools(): void {
       return ok({ orgId, productId: product.productId, ...resolved });
     },
     'untrusted',   // customer-authored names, addresses, order notes
+    'read',
   ));
 
   // ── DRAFT-GRADE ACTION ───────────────────────────────────────────────────────
@@ -292,6 +302,7 @@ export function registerCommerceAgentTools(): void {
   // no send). The human reviews/sends/accepts it on the governed QuotesTab path.
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: COMMERCE_CREATE_QUOTE_TOOL_ID,
       description:

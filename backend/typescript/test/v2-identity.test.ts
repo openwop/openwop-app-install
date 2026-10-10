@@ -58,7 +58,8 @@ describe('identity.md §5 — the tenant-bound run id is a reversible wire proje
     // the host-minted opaque grammar excludes. They are not reachable on the v2
     // path space; inventing an encoding would break the round-trip above.
     expect(toWireRunId(`hostext:sync:${UUID}`, 'default')).toBe(`hostext:sync:${UUID}`);
-    expect(toWireRunId(UUID, 'anon:abcdef')).toBe(UUID);
+    // ADR 0760: an `anon:` tenant IS expressible (RFC 0184 admits the prefix), so it binds.
+    expect(toWireRunId(UUID, 'anon:abcdef')).toBe(`anon:abcdef/${UUID}`);
     expect(toWireRunId(`default/${UUID}`, 'default')).toBe(`default/${UUID}`);
   });
 

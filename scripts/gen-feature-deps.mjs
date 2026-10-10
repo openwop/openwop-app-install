@@ -106,11 +106,13 @@ function declaredDeps(id) {
 /** Pure: does this ONE service-file's text resolve `id`'s own toggle? Exported so
  *  the const-hop path is unit-testable without a fixture on disk. */
 export function textGatesOwnToggle(text, id) {
-  // Literal own toggle: resolveOne('<id>', …) or requireFeatureEnabled(req, '<id>', …).
-  if (new RegExp(`(?:resolveOne|requireFeatureEnabled)\\([^)]*['"]${id}['"]`).test(text)) return true;
+  // Literal own toggle: resolveOne('<id>', …), resolveToggle('<id>', …) (ADR 0819 —
+  // the pure read the paywall opt-outs use; it gates the toggle exactly as before)
+  // or requireFeatureEnabled(req, '<id>', …).
+  if (new RegExp(`(?:resolveOne|resolveToggle|requireFeatureEnabled)\\([^)]*['"]${id}['"]`).test(text)) return true;
   // Const-aliased own toggle: `const X = '<id>'` … resolveOne(X, …).
   for (const m of text.matchAll(new RegExp(`\\bconst\\s+([A-Za-z_$][\\w$]*)\\s*=\\s*['"]${id}['"]`, 'g'))) {
-    if (new RegExp(`(?:resolveOne|requireFeatureEnabled)\\(\\s*${m[1]}\\b`).test(text)) return true;
+    if (new RegExp(`(?:resolveOne|resolveToggle|requireFeatureEnabled)\\(\\s*${m[1]}\\b`).test(text)) return true;
   }
   return false;
 }
@@ -147,6 +149,7 @@ function computeEdges() {
   // symbol-level: a consumer importing a PURE helper from that file does not break
   // when the target is off. Reviewed per edge; the reason is the record.
   const HARD_DEP_NOT_REALLY = {
+    'advisory-board->strategy': 'ADR 0820 §8.1 / G7 — strategyService now resolves its own toggle+plan, but ONLY inside the context seam (resolveStrategyContextRefs → strategyContextAllowed), which returns EMPTY when refused; the board degrades to no strategy context. getStrategy/canSubjectReadStrategy (board attach validation) do not gate. Degrade, not break ⇒ [2], not a lock',
     'service-desk->whatsapp': 'imports the pure parser extractWaInbound; whatsappService self-gates only in its SEND path, which service-desk never calls — so it does NOT break when whatsapp is off ⇒ [2], not a lock',
   };
   // TARGET-level soft override (ADR 0446 F/D.2): the target's service resolves its own

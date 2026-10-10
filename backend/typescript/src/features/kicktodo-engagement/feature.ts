@@ -24,13 +24,13 @@ export const kicktodoEngagementFeature: BackendFeature = {
     id: 'kicktodo-engagement',
     label: 'KickTodo Engagement',
     description:
-      'Opt-in leaderboard (k-floor, closed projection), deterministic awards, and variant-stamp effectiveness reads (ADR 0425).',
+      'Opt-in leaderboard (k-floor, closed projection), deterministic awards, and variant-stamp effectiveness reads.',
     category: 'KickTodo',
     status: 'off',
     bucketUnit: 'tenant',
     salt: 'kicktodo-engagement',
   },
   dependsOn: ['kicktodo-core'],
-  requiredPacks: [{ name: 'feature.kicktodo.nodes', version: '1.30.0' }],
+  requiredPacks: [{ name: 'feature.kicktodo.nodes', version: '1.30.3' }],
   surface: { id: 'kicktodo-engagement', build: buildKicktodoEngagementSurface }, // ADR 0425 P5
 };

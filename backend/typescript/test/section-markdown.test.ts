@@ -31,6 +31,7 @@ function fixture(type: Section['type']): Section {
     case 'faq': return { ...base, data: { heading: 'FAQ', items: [{ q: 'Why?', a: 'Because.' }] } };
     case 'quotes': return { ...base, data: { items: [{ quote: 'Great.', name: 'Ana', role: 'CTO' }, { quote: 'Anon.' }] } };
     case 'fields': return { ...base, data: { heading: 'Plain', seats: 3 } };
+    case 'video': return { ...base, data: { heading: 'Watch', title: 'The film', description: 'What it shows.', length: '1:57', src: 'https://media.example.test/f.mp4', poster: 'https://media.example.test/f.jpg' } };
   }
 }
 

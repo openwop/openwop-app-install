@@ -60,7 +60,7 @@ async function api<T = Record<string, unknown>>(path: string, init: RequestInit 
 const BOUNDS = { maxLoopIterations: 5, runTimeoutMs: 60_000 };
 
 async function createRouteGoal(verifierRef: string): Promise<string> {
-  const { status, body } = await api<{ id: string }>('/v1/host/openwop-app/goals', {
+  const { status, body } = await api<{ id: string }>('/host/openwop-app/goals', {
     method: 'POST',
     body: JSON.stringify({
       objective: 'Reach the declared outcome',
@@ -78,7 +78,7 @@ describe('evaluate — convergence transitions (route)', () => {
     registerGoalVerifier('v:pass', async () => ({ satisfied: true, confidence: 0.9, runId: 'run-1' }));
     const id = await createRouteGoal('v:pass');
     const { status, body } = await api<{ goal: { state: string; completion: { lastVerdict: unknown } }; verdict: { satisfied: boolean }; replayed: boolean }>(
-      `/v1/host/openwop-app/goals/${id}/evaluate`,
+      `/host/openwop-app/goals/${id}/evaluate`,
       { method: 'POST', body: JSON.stringify({ snapshotRef: 'ev:1', snapshotHash: 'h1' }) },
     );
     expect(status).toBe(200);
@@ -91,7 +91,7 @@ describe('evaluate — convergence transitions (route)', () => {
   it('unsatisfied (no escalate) → goal stays active with the verdict recorded', async () => {
     registerGoalVerifier('v:not-yet', async () => ({ satisfied: false, confidence: 0.4, runId: 'run-2' }));
     const id = await createRouteGoal('v:not-yet');
-    const { status, body } = await api<{ goal: { state: string } }>(`/v1/host/openwop-app/goals/${id}/evaluate`, {
+    const { status, body } = await api<{ goal: { state: string } }>(`/host/openwop-app/goals/${id}/evaluate`, {
       method: 'POST',
       body: JSON.stringify({ snapshotRef: 'ev:2', snapshotHash: 'h2' }),
     });
@@ -102,7 +102,7 @@ describe('evaluate — convergence transitions (route)', () => {
   it('escalate verdict → terminal `escalated`', async () => {
     registerGoalVerifier('v:escalate', async () => ({ satisfied: false, confidence: 0.8, runId: 'run-3', escalate: true }));
     const id = await createRouteGoal('v:escalate');
-    const { body } = await api<{ goal: { state: string } }>(`/v1/host/openwop-app/goals/${id}/evaluate`, {
+    const { body } = await api<{ goal: { state: string } }>(`/host/openwop-app/goals/${id}/evaluate`, {
       method: 'POST',
       body: JSON.stringify({ snapshotRef: 'ev:3', snapshotHash: 'h3' }),
     });
@@ -118,11 +118,11 @@ describe('evaluate — replay idempotency', () => {
       return { satisfied: true, confidence: 1, runId: 'run-4' };
     });
     const id = await createRouteGoal('v:count');
-    const first = await api<{ replayed: boolean }>(`/v1/host/openwop-app/goals/${id}/evaluate`, {
+    const first = await api<{ replayed: boolean }>(`/host/openwop-app/goals/${id}/evaluate`, {
       method: 'POST',
       body: JSON.stringify({ snapshotRef: 'ev:4', snapshotHash: 'h4' }),
     });
-    const second = await api<{ replayed: boolean; verdict: { runId: string } }>(`/v1/host/openwop-app/goals/${id}/evaluate`, {
+    const second = await api<{ replayed: boolean; verdict: { runId: string } }>(`/host/openwop-app/goals/${id}/evaluate`, {
       method: 'POST',
       body: JSON.stringify({ snapshotRef: 'ev:4', snapshotHash: 'h4' }),
     });
@@ -136,11 +136,11 @@ describe('evaluate — replay idempotency', () => {
   it('NEW evidence against a terminal goal → 409 (no re-judging a closed goal)', async () => {
     registerGoalVerifier('v:done', async () => ({ satisfied: true, confidence: 1, runId: 'run-5' }));
     const id = await createRouteGoal('v:done');
-    await api(`/v1/host/openwop-app/goals/${id}/evaluate`, {
+    await api(`/host/openwop-app/goals/${id}/evaluate`, {
       method: 'POST',
       body: JSON.stringify({ snapshotRef: 'ev:5', snapshotHash: 'h5' }),
     });
-    const { status } = await api(`/v1/host/openwop-app/goals/${id}/evaluate`, {
+    const { status } = await api(`/host/openwop-app/goals/${id}/evaluate`, {
       method: 'POST',
       body: JSON.stringify({ snapshotRef: 'ev:6', snapshotHash: 'h6' }),
     });
@@ -151,12 +151,12 @@ describe('evaluate — replay idempotency', () => {
 describe('evaluate — fail-closed judge errors', () => {
   it('unregistered verifierRef → 409, goal untouched', async () => {
     const id = await createRouteGoal('v:nobody-home');
-    const { status } = await api(`/v1/host/openwop-app/goals/${id}/evaluate`, {
+    const { status } = await api(`/host/openwop-app/goals/${id}/evaluate`, {
       method: 'POST',
       body: JSON.stringify({ snapshotRef: 'ev:7', snapshotHash: 'h7' }),
     });
     expect(status).toBe(409);
-    const g = await api<{ state: string; completion: { lastVerdict?: unknown } }>(`/v1/host/openwop-app/goals/${id}`);
+    const g = await api<{ state: string; completion: { lastVerdict?: unknown } }>(`/host/openwop-app/goals/${id}`);
     expect(g.body.state).toBe('active');
     expect(g.body.completion.lastVerdict).toBeUndefined();
   });
@@ -166,19 +166,19 @@ describe('evaluate — fail-closed judge errors', () => {
       throw new Error('provider down');
     });
     const id = await createRouteGoal('v:boom');
-    const { status } = await api(`/v1/host/openwop-app/goals/${id}/evaluate`, {
+    const { status } = await api(`/host/openwop-app/goals/${id}/evaluate`, {
       method: 'POST',
       body: JSON.stringify({ snapshotRef: 'ev:8', snapshotHash: 'h8' }),
     });
     expect(status).toBe(502);
-    const g = await api<{ state: string }>(`/v1/host/openwop-app/goals/${id}`);
+    const g = await api<{ state: string }>(`/host/openwop-app/goals/${id}`);
     expect(g.body.state).toBe('active');
   });
 
   it('malformed verdict (typed failure, never success-with-empty) → 502', async () => {
     registerGoalVerifier('v:garbage', async () => ({ satisfied: 'yes' } as never));
     const id = await createRouteGoal('v:garbage');
-    const { status } = await api(`/v1/host/openwop-app/goals/${id}/evaluate`, {
+    const { status } = await api(`/host/openwop-app/goals/${id}/evaluate`, {
       method: 'POST',
       body: JSON.stringify({ snapshotRef: 'ev:9', snapshotHash: 'h9' }),
     });
@@ -191,20 +191,20 @@ describe('contributing-run binding', () => {
     registerGoalVerifier('v:x', async () => ({ satisfied: false, confidence: 0, runId: 'r' }));
     const id = await createRouteGoal('v:x');
     for (let i = 0; i < 2; i++) {
-      const { status } = await api(`/v1/host/openwop-app/goals/${id}/runs`, {
+      const { status } = await api(`/host/openwop-app/goals/${id}/runs`, {
         method: 'POST',
         body: JSON.stringify({ runId: 'run:contrib-1' }),
       });
       expect(status).toBe(200);
     }
-    const { body } = await api<{ progress: { contributingRunIds: string[] } }>(`/v1/host/openwop-app/goals/${id}`);
+    const { body } = await api<{ progress: { contributingRunIds: string[] } }>(`/host/openwop-app/goals/${id}`);
     expect(body.progress.contributingRunIds).toEqual(['run:contrib-1']);
   });
 
   it('missing runId → 400; unknown goal → 404', async () => {
-    const bad = await api('/v1/host/openwop-app/goals/nope/runs', { method: 'POST', body: JSON.stringify({}) });
+    const bad = await api('/host/openwop-app/goals/nope/runs', { method: 'POST', body: JSON.stringify({}) });
     expect(bad.status).toBe(400);
-    const missing = await api('/v1/host/openwop-app/goals/nope/runs', {
+    const missing = await api('/host/openwop-app/goals/nope/runs', {
       method: 'POST',
       body: JSON.stringify({ runId: 'run:x' }),
     });
@@ -235,14 +235,14 @@ describe('wire projection', () => {
   it('host-private evidence sidecar never appears on wire/service output', async () => {
     registerGoalVerifier('v:wire', async () => ({ satisfied: true, confidence: 1, runId: 'run-w' }));
     const id = await createRouteGoal('v:wire');
-    const { body } = await api<Record<string, unknown>>(`/v1/host/openwop-app/goals/${id}/evaluate`, {
+    const { body } = await api<Record<string, unknown>>(`/host/openwop-app/goals/${id}/evaluate`, {
       method: 'POST',
       body: JSON.stringify({ snapshotRef: 'ev:w', snapshotHash: 'hw' }),
     });
     expect((body.goal as Record<string, unknown>).host).toBeUndefined();
-    const got = await api<Record<string, unknown>>(`/v1/host/openwop-app/goals/${id}`);
+    const got = await api<Record<string, unknown>>(`/host/openwop-app/goals/${id}`);
     expect(got.body.host).toBeUndefined();
-    const listed = await api<{ goals: Record<string, unknown>[] }>('/v1/host/openwop-app/goals');
+    const listed = await api<{ goals: Record<string, unknown>[] }>('/host/openwop-app/goals');
     expect(listed.body.goals.every((g) => g.host === undefined)).toBe(true);
   });
 });

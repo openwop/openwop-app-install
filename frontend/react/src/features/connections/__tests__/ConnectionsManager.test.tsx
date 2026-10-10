@@ -18,13 +18,21 @@ vi.mock('../connectionsClient.js', () => ({
 }));
 vi.mock('../../../client/accessClient.js', () => ({ getEffectiveAccess: vi.fn() }));
 vi.mock('../../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
+// ADR 0780 — the write-access hook reads this; a test sets the caller's role.
+const accessState = vi.hoisted(() => ({ value: { access: { basis: 'member', scopes: ['workspace:write'] as string[] }, resolved: true } }));
+vi.mock('../../../client/useEffectiveAccess.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../../../client/useEffectiveAccess.js')>();
+  return { ...real, useEffectiveAccessState: () => accessState.value };
+});
 
 import {
   listProviders, listConnections, createConnection, revokeConnection,
   type Provider, type Connection,
 } from '../connectionsClient.js';
-import { getEffectiveAccess } from '../../../client/accessClient.js';
+import { getEffectiveAccess, type EffectiveAccess } from '../../../client/accessClient.js';
 import { ConnectionsManager } from '../ConnectionsManager.js';
+import { toast } from '../../../ui/toast.js';
+import { ApiError } from '../../../client/requestJson.js';
 
 const mProviders = vi.mocked(listProviders);
 const mConnections = vi.mocked(listConnections);
@@ -35,11 +43,21 @@ const mAccess = vi.mocked(getEffectiveAccess);
 const prov = (over: Partial<Provider> = {}): Provider =>
   ({ id: 'servicenow', label: 'ServiceNow', kind: 'api_key', reach: 'user', refreshable: false, oauthConfigured: false, writeScopes: [], ...over });
 const conn = (over: Partial<Connection> = {}): Connection =>
-  ({ connectionId: 'c1', provider: 'servicenow', kind: 'api_key', displayName: 'My ServiceNow', status: 'active', scopes: [], connectedAt: '2026-06-22T00:00:00Z', ...over });
+  ({ connectionId: 'c1', provider: 'servicenow', kind: 'api_key', displayName: 'My ServiceNow', status: 'active', scopes: [], connectedAt: '2026-06-22T00:00:00Z', userId: 'user:me', ...over });
+
+const ADMIN_ACCESS: EffectiveAccess = { roles: ['admin'], scopes: ['host:connections:manage'], basis: 'member' };
+
+/** A WORKSPACE row: neither `userId` nor `orgId` (omitted, not `undefined`). */
+const workspaceConn = (over: Partial<Connection> = {}): Connection => {
+  const { userId: _owner, ...row } = conn(over);
+  return row;
+};
 
 beforeEach(() => {
   mProviders.mockReset(); mConnections.mockReset(); mCreate.mockReset(); mRevoke.mockReset(); mAccess.mockReset();
   mAccess.mockResolvedValue({ scopes: [] });
+  accessState.value = { access: { basis: 'member', scopes: ['workspace:write'] }, resolved: true };
+  vi.mocked(toast.error).mockReset();
 });
 afterEach(cleanup);
 
@@ -114,5 +132,105 @@ describe('ConnectionsManager (FP-2)', () => {
     await waitFor(() => expect(mCreate).toHaveBeenCalledWith(
       expect.objectContaining({ provider: 'servicenow', secret: 'super-secret', scope: 'user' }),
     ));
+  });
+
+  it('ADR 0780: a Viewer is not offered the connect controls — one read-only notice instead', async () => {
+    accessState.value = { access: { basis: 'member', scopes: ['workspace:read'] }, resolved: true };
+    mProviders.mockResolvedValue([prov(), prov({ id: 'slack', label: 'Slack', kind: 'oauth2', oauthConfigured: true })]);
+    mConnections.mockResolvedValue([conn()]);
+    render(<ConnectionsManager />);
+    await waitFor(() => expect(screen.getByText('My ServiceNow')).toBeTruthy());
+    expect(screen.getByText(/don't have permission to connect new accounts/)).toBeTruthy();
+    expect(screen.queryByText('Connect')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Connect Slack' })).toBeNull();
+    // Their OWN row can still be revoked (the server allows it to every role).
+    expect(screen.getByLabelText('Revoke My ServiceNow')).toBeTruthy();
+  });
+
+  it('ADR 0780: a workspace row is labelled Workspace, and a non-admin gets no manage buttons for it', async () => {
+    mProviders.mockResolvedValue([prov()]);
+    mConnections.mockResolvedValue([workspaceConn({ connectionId: 'ws1', displayName: 'Shared ServiceNow' })]);
+    render(<ConnectionsManager />);
+    await waitFor(() => expect(screen.getByText('Shared ServiceNow')).toBeTruthy());
+    expect(screen.getByText('Workspace')).toBeTruthy();
+    expect(screen.queryByText('Personal')).toBeNull();
+    expect(screen.getByText('Managed by an admin')).toBeTruthy();
+    expect(screen.queryByLabelText('Revoke Shared ServiceNow')).toBeNull();
+  });
+
+  it('ADR 0780: an admin keeps the manage buttons on a workspace row', async () => {
+    mAccess.mockResolvedValue({ ...ADMIN_ACCESS });
+    mProviders.mockResolvedValue([prov()]);
+    mConnections.mockResolvedValue([workspaceConn({ connectionId: 'ws1', displayName: 'Shared ServiceNow' })]);
+    render(<ConnectionsManager />);
+    await waitFor(() => expect(screen.getByLabelText('Revoke Shared ServiceNow')).toBeTruthy());
+  });
+
+  it('ADR 0780: a refused write says so (common:error_forbidden), not "Revoke failed."', async () => {
+    const origConfirm = window.confirm;
+    window.confirm = () => true;
+    mProviders.mockResolvedValue([prov()]);
+    mConnections.mockResolvedValue([conn()]);
+    mRevoke.mockRejectedValue(new ApiError({ status: 403, statusText: 'Forbidden', url: '/x', body: { error: 'forbidden', message: 'Only the connecting user may manage this connection.' } }));
+    render(<ConnectionsManager />);
+    await waitFor(() => expect(screen.getByText('My ServiceNow')).toBeTruthy());
+    fireEvent.click(screen.getByLabelText('Revoke My ServiceNow'));
+    await waitFor(() => expect(vi.mocked(toast.error)).toHaveBeenCalled());
+    const said = String(vi.mocked(toast.error).mock.calls[0]?.[0]);
+    expect(said).not.toBe('Revoke failed.');
+    expect(said).not.toContain('Only the connecting user');
+    window.confirm = origConfirm;
+  });
+
+  it('ADR 0780: status is a localized label and a needs-reconsent oauth row offers Reconnect in place', async () => {
+    mProviders.mockResolvedValue([prov({ id: 'slack', label: 'Slack', kind: 'oauth2', oauthConfigured: true })]);
+    mConnections.mockResolvedValue([conn({ provider: 'slack', kind: 'oauth2', displayName: 'My Slack', status: 'needs-reconsent' })]);
+    render(<ConnectionsManager />);
+    await waitFor(() => expect(screen.getByText('My Slack')).toBeTruthy());
+    expect(screen.getByText('Needs reconnecting')).toBeTruthy();
+    expect(screen.getByLabelText('Reconnect My Slack')).toBeTruthy();
+  });
+
+  it('CONNUX-6: revoking the LAST row lands focus on the list heading, not <body>', async () => {
+    const origConfirm = window.confirm;
+    window.confirm = () => true;
+    mProviders.mockResolvedValue([prov()]);
+    mConnections.mockResolvedValueOnce([conn()]).mockResolvedValue([]);
+    mRevoke.mockResolvedValue(undefined);
+    render(<ConnectionsManager />);
+    await waitFor(() => expect(screen.getByText('My ServiceNow')).toBeTruthy());
+    fireEvent.click(screen.getByLabelText('Revoke My ServiceNow'));
+    await waitFor(() => expect(screen.getByText('No connections yet')).toBeTruthy());
+    await waitFor(() => expect(document.activeElement?.tagName).toBe('H2'));
+    window.confirm = origConfirm;
+  });
+
+  it('CONNUX-6: an in-flight row action is aria-disabled, never natively disabled (focus stays put)', async () => {
+    let finish!: (v: { ok: boolean; status: string }) => void;
+    const { testConnection } = await import('../connectionsClient.js');
+    vi.mocked(testConnection).mockImplementation(() => new Promise((r) => { finish = r; }));
+    mProviders.mockResolvedValue([prov()]);
+    mConnections.mockResolvedValue([conn()]);
+    render(<ConnectionsManager />);
+    await waitFor(() => expect(screen.getByText('My ServiceNow')).toBeTruthy());
+    const btn = screen.getByLabelText('Test My ServiceNow') as HTMLButtonElement;
+    btn.focus();
+    fireEvent.click(btn);
+    await waitFor(() => expect(btn.getAttribute('aria-disabled')).toBe('true'));
+    expect(btn.disabled).toBe(false);
+    expect(document.activeElement).toBe(btn);
+    finish({ ok: true, status: 'active' });
+  });
+
+  it('a provider-allowlist 403 says it is a policy, not the caller\'s role', async () => {
+    mProviders.mockResolvedValue([prov()]);
+    mConnections.mockResolvedValue([]);
+    mCreate.mockRejectedValue(new ApiError({ status: 403, statusText: 'Forbidden', url: '/x', body: { error: 'forbidden', message: 'x', details: { provider: 'servicenow' } } }));
+    render(<ConnectionsManager />);
+    await waitFor(() => expect(screen.getByText('Connect')).toBeTruthy());
+    fireEvent.change(document.querySelector('input[type="password"]') as HTMLInputElement, { target: { value: 'k' } });
+    fireEvent.click(screen.getByText('Connect'));
+    await waitFor(() => expect(vi.mocked(toast.error)).toHaveBeenCalled());
+    expect(String(vi.mocked(toast.error).mock.calls[0]?.[0])).toMatch(/allowlist/);
   });
 });

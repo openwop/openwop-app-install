@@ -13,7 +13,20 @@
  * Time-travel discipline: only `Date` is faked (`toFake: ['Date']`) so the HTTP
  * server keeps working; all post-travel reads ride the auth-exempt
  * `GET /assets/:token` route or direct service imports — an 8-day jump would
- * otherwise expire the session cookie and fail for an unrelated reason.
+ * otherwise expire the session cookie and fail for an unrelated reason. Clock-
+ * shift safe: vitest installs the fake `Date` at the CURRENT global `Date.now()`
+ * (the shifted clock under `OPENWOP_CI_CLOCKSHIFT=1`), the same clock that
+ * stamped every asset expiry.
+ *
+ * Sabotage that turns it red (grade-tests w3 probes, each witnessed):
+ *   - the avatar / portfolio writer skips `promoteToDurable`     → the two PROF-1 TTL cases
+ *   - replace / clear / remove skips `releaseProfileByteRef`      → the three F1 release cases
+ *   - `releaseByteRef` ignores the external referent check        → the co-referent case
+ *   - erasure skips the avatar or the portfolio release           → the subject-erasure case
+ *   - `addPortfolioToken` promotes BEFORE the capacity check      → F2
+ *   - the backfill keeps a dead ref                               → F4
+ *   - the profiles byte-ref provider omits avatars                → the sweep "spares" case
+ *   - the sweep swallows a provider throw                         → the fail-CLOSED case
  */
 
 import http from 'node:http';
@@ -23,6 +36,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
+import type { OwnProfileView } from '../src/features/profiles/profilesService.js';
 
 let BASE: string;
 let server: http.Server;
@@ -46,21 +60,25 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-interface Res<T = any> { status: number; body: T }
-function client(): { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; put: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res> } {
+/** The host error envelope (`errorEnvelope.ts`). */
+interface ErrorBody { error: string; message?: string; details?: unknown }
+interface Res<T> { status: number; body: T }
+/** Typed per call at the JSON boundary — the one place a wire body becomes a product type. */
+type Call = <T = ErrorBody>(p: string, b?: unknown) => Promise<Res<T>>;
+function client(): { get: Call; post: Call; put: Call; del: Call } {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T,>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
-    for (const sc of getSetCookies(res.headers) as string[]) {
+    for (const sc of getSetCookies(res.headers)) {
       const m = /(__session=[^;]+)/.exec(sc);
-      if (m) cookie = m[1];
+      if (m) cookie = m[1]!;
     }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    const out: unknown = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    return { status: res.status, body: out as T };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), put: (p, b) => call('PUT', p, b), del: (p) => call('DELETE', p) };
 }
@@ -68,7 +86,7 @@ function client(): { get: (p: string) => Promise<Res>; post: (p: string, b?: unk
 let n = 0;
 async function signedIn(): Promise<ReturnType<typeof client>> {
   const c = client();
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `dur-${Date.now()}-${n++}@acme.test` });
+  const r = await c.post('/host/openwop-app/test/login', { email: `dur-${Date.now()}-${n++}@acme.test` });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return c;
 }
@@ -77,9 +95,9 @@ async function signedIn(): Promise<ReturnType<typeof client>> {
 const PNG_1x1 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
 
 async function upload(c: ReturnType<typeof client>): Promise<string> {
-  const r = await c.post('/v1/host/openwop-app/media/upload', { contentBase64: PNG_1x1, contentType: 'image/png', name: 'a.png' });
+  const r = await c.post<{ token: string }>('/host/openwop-app/media/upload', { contentBase64: PNG_1x1, contentType: 'image/png', name: 'a.png' });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  return r.body.token as string;
+  return r.body.token;
 }
 
 const EIGHT_DAYS_MS = 8 * 24 * 60 * 60 * 1000;
@@ -96,7 +114,7 @@ describe('PROF-1 — profile images survive past the scratch TTL (time-travel)',
     const avatarToken = await upload(c);
     const controlToken = await upload(c); // uploaded, never persisted → stays scratch
 
-    const set = await c.put('/v1/host/openwop-app/profiles/me/avatar', { token: avatarToken });
+    const set = await c.put<OwnProfileView>('/host/openwop-app/profiles/me/avatar', { token: avatarToken });
     expect(set.status, JSON.stringify(set.body)).toBe(200);
     // Promotion is IN PLACE — the stored reference is the SAME token the client
     // holds (token-keyed idempotency + remove-by-token stay intact).
@@ -107,24 +125,24 @@ describe('PROF-1 — profile images survive past the scratch TTL (time-travel)',
     // Counter-polarity FIRST: the un-promoted control token is dead, which
     // proves the clock actually advanced and the scratch TTL really bites —
     // without this the avatar assertion could pass vacuously on a frozen clock.
-    const dead = await c.get(`/v1/host/openwop-app/assets/${encodeURIComponent(controlToken)}`);
+    const dead = await c.get(`/host/openwop-app/assets/${encodeURIComponent(controlToken)}`);
     expect(dead.status).toBe(404);
 
     // The promoted avatar bytes are still served.
-    const alive = await c.get(`/v1/host/openwop-app/assets/${encodeURIComponent(avatarToken)}`);
+    const alive = await c.get(`/host/openwop-app/assets/${encodeURIComponent(avatarToken)}`);
     expect(alive.status).toBe(200);
   });
 
   it('a persisted portfolio image outlives 7 days', async () => {
     const c = await signedIn();
     const token = await upload(c);
-    const add = await c.post('/v1/host/openwop-app/profiles/me/portfolio', { token });
+    const add = await c.post<OwnProfileView>('/host/openwop-app/profiles/me/portfolio', { token });
     expect(add.status, JSON.stringify(add.body)).toBe(201);
     expect(add.body.portfolioAssetTokens).toContain(token);
 
     travel(EIGHT_DAYS_MS);
 
-    const alive = await c.get(`/v1/host/openwop-app/assets/${encodeURIComponent(token)}`);
+    const alive = await c.get(`/host/openwop-app/assets/${encodeURIComponent(token)}`);
     expect(alive.status).toBe(200);
   });
 });
@@ -134,66 +152,66 @@ describe('F1 — every reference-OUT path reclaims the promoted bytes (no indefi
     const c = await signedIn();
     const first = await upload(c);
     const second = await upload(c);
-    expect((await c.put('/v1/host/openwop-app/profiles/me/avatar', { token: first })).status).toBe(200);
-    expect((await c.put('/v1/host/openwop-app/profiles/me/avatar', { token: second })).status).toBe(200);
+    expect((await c.put('/host/openwop-app/profiles/me/avatar', { token: first })).status).toBe(200);
+    expect((await c.put('/host/openwop-app/profiles/me/avatar', { token: second })).status).toBe(200);
 
     travel(EIGHT_DAYS_MS);
-    expect((await c.get(`/v1/host/openwop-app/assets/${encodeURIComponent(first)}`)).status).toBe(404); // released
-    expect((await c.get(`/v1/host/openwop-app/assets/${encodeURIComponent(second)}`)).status).toBe(200); // live ref
+    expect((await c.get(`/host/openwop-app/assets/${encodeURIComponent(first)}`)).status).toBe(404); // released
+    expect((await c.get(`/host/openwop-app/assets/${encodeURIComponent(second)}`)).status).toBe(200); // live ref
   });
 
   it('clearing the avatar demotes its token back to the scratch window', async () => {
     const c = await signedIn();
     const token = await upload(c);
-    expect((await c.put('/v1/host/openwop-app/profiles/me/avatar', { token })).status).toBe(200);
-    expect((await c.del('/v1/host/openwop-app/profiles/me/avatar')).status).toBe(200);
+    expect((await c.put('/host/openwop-app/profiles/me/avatar', { token })).status).toBe(200);
+    expect((await c.del('/host/openwop-app/profiles/me/avatar')).status).toBe(200);
 
     travel(EIGHT_DAYS_MS);
-    expect((await c.get(`/v1/host/openwop-app/assets/${encodeURIComponent(token)}`)).status).toBe(404);
+    expect((await c.get(`/host/openwop-app/assets/${encodeURIComponent(token)}`)).status).toBe(404);
   });
 
   it('removing a portfolio image demotes it; a kept sibling stays durable', async () => {
     const c = await signedIn();
     const removed = await upload(c);
     const kept = await upload(c);
-    expect((await c.post('/v1/host/openwop-app/profiles/me/portfolio', { token: removed })).status).toBe(201);
-    expect((await c.post('/v1/host/openwop-app/profiles/me/portfolio', { token: kept })).status).toBe(201);
-    expect((await c.del(`/v1/host/openwop-app/profiles/me/portfolio/${encodeURIComponent(removed)}`)).status).toBe(200);
+    expect((await c.post('/host/openwop-app/profiles/me/portfolio', { token: removed })).status).toBe(201);
+    expect((await c.post('/host/openwop-app/profiles/me/portfolio', { token: kept })).status).toBe(201);
+    expect((await c.del(`/host/openwop-app/profiles/me/portfolio/${encodeURIComponent(removed)}`)).status).toBe(200);
 
     travel(EIGHT_DAYS_MS);
-    expect((await c.get(`/v1/host/openwop-app/assets/${encodeURIComponent(removed)}`)).status).toBe(404);
-    expect((await c.get(`/v1/host/openwop-app/assets/${encodeURIComponent(kept)}`)).status).toBe(200);
+    expect((await c.get(`/host/openwop-app/assets/${encodeURIComponent(removed)}`)).status).toBe(404);
+    expect((await c.get(`/host/openwop-app/assets/${encodeURIComponent(kept)}`)).status).toBe(200);
   });
 
   it('a token STILL referenced elsewhere on the profile is NOT demoted (the co-referent guard)', async () => {
     const c = await signedIn();
     const token = await upload(c);
-    expect((await c.put('/v1/host/openwop-app/profiles/me/avatar', { token })).status).toBe(200);
-    expect((await c.post('/v1/host/openwop-app/profiles/me/portfolio', { token })).status).toBe(201);
+    expect((await c.put('/host/openwop-app/profiles/me/avatar', { token })).status).toBe(200);
+    expect((await c.post('/host/openwop-app/profiles/me/portfolio', { token })).status).toBe(201);
     // Clearing the avatar releases the ref — but the portfolio still holds it,
     // so the post-write referent check must keep it durable.
-    expect((await c.del('/v1/host/openwop-app/profiles/me/avatar')).status).toBe(200);
+    expect((await c.del('/host/openwop-app/profiles/me/avatar')).status).toBe(200);
 
     travel(EIGHT_DAYS_MS);
-    expect((await c.get(`/v1/host/openwop-app/assets/${encodeURIComponent(token)}`)).status).toBe(200);
+    expect((await c.get(`/host/openwop-app/assets/${encodeURIComponent(token)}`)).status).toBe(200);
   });
 
   it('subject erasure (DSAR + the admin cascade) reclaims avatar AND portfolio bytes — the /team-visible URL dies', async () => {
     const c = await signedIn();
     const avatarToken = await upload(c);
     const portfolioToken = await upload(c);
-    expect((await c.put('/v1/host/openwop-app/profiles/me/avatar', { token: avatarToken })).status).toBe(200);
-    expect((await c.post('/v1/host/openwop-app/profiles/me/portfolio', { token: portfolioToken })).status).toBe(201);
-    const me = await c.get('/v1/host/openwop-app/profiles/me');
+    expect((await c.put('/host/openwop-app/profiles/me/avatar', { token: avatarToken })).status).toBe(200);
+    expect((await c.post('/host/openwop-app/profiles/me/portfolio', { token: portfolioToken })).status).toBe(201);
+    const me = await c.get<OwnProfileView>('/host/openwop-app/profiles/me');
     expect(me.status).toBe(200);
 
     const { deleteSubjectProfile } = await import('../src/features/profiles/profilesService.js');
-    expect(await deleteSubjectProfile(me.body.tenantId as string, me.body.userId as string)).toBe(true);
+    expect(await deleteSubjectProfile(me.body.tenantId, me.body.userId)).toBe(true);
 
     travel(EIGHT_DAYS_MS);
     // The same token-URLs the /team directory rendered — dead after the window.
-    expect((await c.get(`/v1/host/openwop-app/assets/${encodeURIComponent(avatarToken)}`)).status).toBe(404);
-    expect((await c.get(`/v1/host/openwop-app/assets/${encodeURIComponent(portfolioToken)}`)).status).toBe(404);
+    expect((await c.get(`/host/openwop-app/assets/${encodeURIComponent(avatarToken)}`)).status).toBe(404);
+    expect((await c.get(`/host/openwop-app/assets/${encodeURIComponent(portfolioToken)}`)).status).toBe(404);
   });
 });
 
@@ -202,11 +220,11 @@ describe('F2 — a refused write never strands durable bytes', () => {
     const c = await signedIn();
     for (let i = 0; i < 24; i += 1) {
       const t = await upload(c);
-      const add = await c.post('/v1/host/openwop-app/profiles/me/portfolio', { token: t });
+      const add = await c.post('/host/openwop-app/profiles/me/portfolio', { token: t });
       expect(add.status, JSON.stringify(add.body)).toBe(201);
     }
     const over = await upload(c);
-    const refused = await c.post('/v1/host/openwop-app/profiles/me/portfolio', { token: over });
+    const refused = await c.post('/host/openwop-app/profiles/me/portfolio', { token: over });
     expect(refused.status, JSON.stringify(refused.body)).toBe(409);
 
     // The refused token must NOT have been promoted (F2: the capacity check
@@ -218,7 +236,7 @@ describe('F2 — a refused write never strands durable bytes', () => {
 
     // …so the bytes die on their own instead of being stranded for a century.
     travel(EIGHT_DAYS_MS);
-    expect((await c.get(`/v1/host/openwop-app/assets/${encodeURIComponent(over)}`)).status).toBe(404);
+    expect((await c.get(`/host/openwop-app/assets/${encodeURIComponent(over)}`)).status).toBe(404);
   });
 });
 
@@ -279,16 +297,19 @@ describe('PROF-1 — the ADR 0579 orphan sweep honors profile references', () =>
   });
 
   it('fails CLOSED when a byte-ref provider throws — nothing is deleted on partial knowledge', async () => {
-    // Registered LAST in this file on purpose: the provider registry is
-    // module-global for this worker, so every later sweep in the file would
-    // abort too.
+    // The provider registry is module-global for this worker and has no
+    // unregister, so the throwing provider is SCOPED to this case's own tenant
+    // — any other tenant's sweep (in this file or later) still enumerates.
     const { storeMediaAsset, resolveMediaAsset } = await import('../src/host/inMemorySurfaces.js');
     const { registerExternalByteRefProvider } = await import('../src/features/media/mediaStorage.js');
     const { sweepOrphanedMediaBytes } = await import('../src/features/media/erasure.js');
 
     const tenantId = `org:sweepfail-${Date.now()}-${n++}`;
     const orphan = await storeMediaAsset(tenantId, { contentBase64: PNG_1x1, contentType: 'image/png', ttlSeconds: 100 * 365 * 24 * 60 * 60 });
-    registerExternalByteRefProvider(async () => { throw new Error('enumeration unavailable'); });
+    registerExternalByteRefProvider(async (t) => {
+      if (t === tenantId) throw new Error('enumeration unavailable');
+      return [];
+    });
 
     const prevGrace = process.env.OPENWOP_MEDIA_ORPHAN_GRACE_MS;
     process.env.OPENWOP_MEDIA_ORPHAN_GRACE_MS = '0';

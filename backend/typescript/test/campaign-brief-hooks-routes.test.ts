@@ -18,6 +18,7 @@ import { persistVocEvidence } from '../src/features/campaign-brief/vocService.js
 import { persistAngles } from '../src/features/campaign-brief/angleService.js';
 import { emitCandidateHooks } from '../src/features/campaign-brief/hookBankService.js';
 import { persistTargetingPack } from '../src/features/campaign-brief/targetingService.js';
+import { createOrg } from '../src/host/accessControlService.js';
 
 let BASE: string;
 let server: http.Server;
@@ -50,13 +51,17 @@ function client(): Client {
 }
 
 const uniqEmail = (): string => `hb-${Date.now()}-${n++}@acme.test`;
-const CB = '/v1/host/openwop-app/campaign-brief';
+const CB = '/host/openwop-app/campaign-brief';
 const REF = { documentId: 'doc-1', sourceKind: 'kb' as const, locator: 'chunk:0', contentHash: 'a'.repeat(64) };
 
 async function ownerWithBrief(): Promise<{ owner: Client; orgId: string; briefId: string }> {
   const owner = client();
-  expect((await owner.post('/v1/host/openwop-app/test/login', { email: uniqEmail(), tenantId: TENANT })).status).toBe(201);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const who = await owner.post('/host/openwop-app/test/login', { email: uniqEmail(), tenantId: TENANT });
+  expect(who.status).toBe(201);
+  // ADR 0815 D1a — creating an org inside a SHARED tenant is owner-tier over HTTP,
+  // and every test here shares the tenant; the org under test is minted directly,
+  // owned by this caller (the shape `POST /orgs` produces for an owner).
+  const org = { body: await createOrg({ tenantId: TENANT, createdBy: who.body.user.userId, name: 'Acme', ownerSubject: who.body.user.userId }) };
   const brief = await owner.post(`${CB}/briefs`, { orgId: org.body.orgId, name: 'Q4', productName: 'FlashPick' });
   expect(brief.status, JSON.stringify(brief.body)).toBe(201);
   return { owner, orgId: org.body.orgId, briefId: brief.body.brief.id };
@@ -116,7 +121,7 @@ describe('hook-bank routes', () => {
     const { orgId } = await ownerWithBrief();
     const { emitted } = await emitCandidateHooks(TENANT, orgId, 'angle-1', [{ text: 'Private hook', format: 'question' }], 'test');
     const stranger = client();
-    await stranger.post('/v1/host/openwop-app/test/login', { email: uniqEmail(), tenantId: TENANT });
+    await stranger.post('/host/openwop-app/test/login', { email: uniqEmail(), tenantId: TENANT });
     expect((await stranger.get(`${CB}/hooks?orgId=${orgId}`)).status).toBe(404);
     expect((await stranger.post(`${CB}/hooks/${emitted[0].id}/promote`, { orgId, status: 'tested' })).status).toBe(404);
   });

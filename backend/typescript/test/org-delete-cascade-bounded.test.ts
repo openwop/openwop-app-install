@@ -11,11 +11,15 @@
  * (it throws the statement-timeout error) for the duration of `deleteOrg`, then
  * asserts the delete still succeeds and removes EXACTLY the org's scaffolding:
  * a sibling org in the same tenant, and another tenant, keep theirs.
+ *
+ * Sabotage that turns it red (each witnessed by /grade-tests probe):
+ *  - any cascade read made a full `list()` (e.g. groups)          → … every full namespace scan times out
+ *  - the member read widened to the tenant (sibling over-delete)  → … every full namespace scan times out
+ *  - `listForOrg`'s exact `orgId` filter dropped                  → listForOrg returns what list()+filter returns
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { DurableCollection, initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
-import type { Storage } from '../src/storage/storage.js';
 import {
   createCustomRole, createGroup, createMember, createOrg, createTeam, deleteOrg,
   listCustomRoles, listGroups, listMembers, listTeams,
@@ -42,7 +46,7 @@ beforeAll(async () => {
       const v = Reflect.get(target, prop, receiver) as unknown;
       return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(target) : v;
     },
-  }) as Storage;
+  });
   initHostExtPersistence(trapped);
 });
 

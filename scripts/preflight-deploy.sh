@@ -346,10 +346,15 @@ fi
 # `v2p4`, `p4c`, `v2p5`) held 16–20 slots permanently; the first certify run scaled
 # the service out and the front door answered 500 for 7 min, then again for 11.
 # The arithmetic is the gate: pool × maxScale + tags × pool ≤ max_connections − 3.
+# ADR 0867: "pool" is PER INSTANCE and sums every pg pool the process can open —
+# the Storage pool (OPENWOP_PG_POOL_MAX) plus, when selected, the sql surface's
+# (OPENWOP_SQL_PG_POOL_MAX, `OPENWOP_SURFACE_SQL=postgres`) and pgvector's
+# (OPENWOP_VECTOR_PG_POOL_MAX, `OPENWOP_SURFACE_VECTOR=pgvector`); each defaults
+# to 10, as in the adapters (`poolMaxFromEnv`).
 # (A deploy briefly runs old + new revisions together, so headroom matters too.)
 if command -v gcloud >/dev/null 2>&1 && [ -n "${OPENWOP_DEPLOY_SERVICE:-}" ]; then
   SVC_JSON=$(gcloud run services describe "$OPENWOP_DEPLOY_SERVICE" ${GC_ID[@]+"${GC_ID[@]}"} --region "${OPENWOP_DEPLOY_REGION:-us-central1}" --project "${OPENWOP_DEPLOY_PROJECT:-openwop-dev}" --format=json 2>/dev/null || true)
-  BUDGET=$(printf '%s' "$SVC_JSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);const t=(j.spec&&j.spec.template)||{};const a=(t.metadata&&t.metadata.annotations)||{};const env=(((t.spec||{}).containers||[])[0]||{}).env||[];const pool=Number((env.find(e=>e.name==="OPENWOP_PG_POOL_MAX")||{}).value||10);const max=Number(a["autoscaling.knative.dev/maxScale"]||100);const min=Number(a["autoscaling.knative.dev/minScale"]||0);const tags=((j.spec&&j.spec.traffic)||[]).filter(x=>x.tag).map(x=>x.tag);process.stdout.write(pool+"\t"+max+"\t"+min+"\t"+tags.length+"\t"+tags.join(","))}catch(e){process.stdout.write("")}})' 2>/dev/null || true)
+  BUDGET=$(printf '%s' "$SVC_JSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);const t=(j.spec&&j.spec.template)||{};const a=(t.metadata&&t.metadata.annotations)||{};const env=(((t.spec||{}).containers||[])[0]||{}).env||[];const ev=n=>(env.find(e=>e.name===n)||{}).value;const pm=n=>{const v=Number(ev(n));return Number.isInteger(v)&&v>0?v:10};const sel=k=>(ev("OPENWOP_SURFACE_"+k)||ev("OPENWOP_SURFACE_BACKEND")||"memory").trim();const parts=[["storage",pm("OPENWOP_PG_POOL_MAX")]];if(sel("SQL")==="postgres")parts.push(["sql",pm("OPENWOP_SQL_PG_POOL_MAX")]);if(sel("VECTOR")==="pgvector")parts.push(["pgvector",pm("OPENWOP_VECTOR_PG_POOL_MAX")]);const pool=parts.reduce((n,[,v])=>n+v,0);const why=parts.map(([k,v])=>k+" "+v).join(" + ");const max=Number(a["autoscaling.knative.dev/maxScale"]||100);const min=Number(a["autoscaling.knative.dev/minScale"]||0);const tags=((j.spec&&j.spec.traffic)||[]).filter(x=>x.tag).map(x=>x.tag);process.stdout.write(pool+"\t"+max+"\t"+min+"\t"+tags.length+"\t"+tags.join(",")+"\t"+why)}catch(e){process.stdout.write("")}})' 2>/dev/null || true)
   # Two OUTCOMES, never one. `refusing to guess` and `the budget does not fit`
   # are different facts: the first is an UNKNOWN, the second is a MEASURED
   # breach. They shared `fail=1` and one summary line until 2026-09-11, so an
@@ -365,7 +370,7 @@ if command -v gcloud >/dev/null 2>&1 && [ -n "${OPENWOP_DEPLOY_SERVICE:-}" ]; th
     echo "  pg budget : UNREADABLE (gcloud run services describe returned no JSON) — refusing to guess"
     budget_unreadable=1
   else
-    pool=$(printf '%s' "$BUDGET" | cut -f1); maxs=$(printf '%s' "$BUDGET" | cut -f2); mins=$(printf '%s' "$BUDGET" | cut -f3); ntags=$(printf '%s' "$BUDGET" | cut -f4); tagnames=$(printf '%s' "$BUDGET" | cut -f5)
+    pool=$(printf '%s' "$BUDGET" | cut -f1); maxs=$(printf '%s' "$BUDGET" | cut -f2); mins=$(printf '%s' "$BUDGET" | cut -f3); ntags=$(printf '%s' "$BUDGET" | cut -f4); tagnames=$(printf '%s' "$BUDGET" | cut -f5); poolwhy=$(printf '%s' "$BUDGET" | cut -f6)
     maxconn=${OPENWOP_PG_MAX_CONNECTIONS:-25}; usable=$((maxconn - 3))
     idle=$(( mins > 0 ? ntags * pool : 0 )); need=$(( pool * maxs + idle ))
     if [ "$need" -gt "$usable" ]; then
@@ -374,6 +379,7 @@ if command -v gcloud >/dev/null 2>&1 && [ -n "${OPENWOP_DEPLOY_SERVICE:-}" ]; th
       budget_breach=1
     else
       echo "  pg budget : OK    pool $pool × maxScale $maxs + tagged-idle $idle = $need ≤ $usable usable (max_connections $maxconn − 3)"
+      echo "              per-instance pool = $poolwhy"
       [ "$ntags" -gt 0 ] && echo "  NOTE      : $ntags tagged revision(s) ($tagnames) each hold an idle instance under minScale $mins — remove tags you are not using."
     fi
   fi
@@ -386,6 +392,45 @@ if command -v gcloud >/dev/null 2>&1 && [ -n "${OPENWOP_DEPLOY_SERVICE:-}" ]; th
     echo "  project/region, or no permission on the service. Restore the read, then re-run — do not assume a breach."
     exit 1
   fi
+fi
+
+# ── Gate 8: no evidence cut is in progress ─────────────────────────────────
+# `publish-evidence.sh` reads the serving commit once and labels both bundles
+# with it, so a deploy that lands mid-cut produces evidence for build B filed
+# under build A. MEASURED 2026-10-05: a cut took the lock at 04:12:13Z, a deploy
+# shifted traffic at 04:12:25Z and deleted the old revision at 04:15Z, and both
+# suites ran against the NEW build under the OLD commit's name (pulled by hand).
+# The cut lock existed the whole time; nothing on the deploy side read it.
+# Three outcomes, kept apart the way Gate 5 keeps them: no lock (or an expired
+# one) passes, a live lock refuses and names its holder, and an unreadable lock
+# refuses as UNMEASURED — it never claims a cut is running that it did not see.
+if command -v gcloud >/dev/null 2>&1 && [ -n "${OPENWOP_CERT_BUNDLE_ORIGIN:-}" ]; then
+  CUT_LOCK="${OPENWOP_CERT_BUNDLE_ORIGIN%/}/.cut-lock.json"
+  # shellcheck source=lib/cut-lock.sh
+  . "$(dirname "$0")/lib/cut-lock.sh"
+  lock_line=$(cut_lock_state "$CUT_LOCK" ${GC_ID[@]+"${GC_ID[@]}"} --project "${OPENWOP_DEPLOY_PROJECT:-openwop-dev}")
+  lock_rest="${lock_line#* }"
+  case "${lock_line%% *}" in
+    absent)  note "OK" "cut lock: no evidence cut in progress" ;;
+    expired) note "OK" "cut lock: a stale lock past its expiresAt (its cut is over): $lock_rest" ;;
+    held)
+      note "FAIL" "cut lock: an evidence cut is IN PROGRESS — $lock_rest"
+      echo; echo "PREFLIGHT FAILED — an evidence cut holds $CUT_LOCK."
+      echo "  A deploy now would make its bundles describe a build they did not test. Wait for the"
+      echo "  cut to finish (or ask its holder to stop it); a dead holder's lock lapses at expiresAt."
+      exit 1 ;;
+    unparseable)
+      note "FAIL" "cut lock: $CUT_LOCK exists but is not a readable lock — refusing to guess: $lock_rest"
+      echo; echo "PREFLIGHT FAILED — the cut lock COULD NOT BE READ as a lock (not the same as a cut in progress)."
+      exit 1 ;;
+    *)
+      note "FAIL" "cut lock: UNREADABLE ($lock_rest) — refusing to guess"
+      echo; echo "PREFLIGHT FAILED — the cut lock COULD NOT BE READ, which is not the same as a cut in progress."
+      echo "  Restore the read (gcloud auth login, the right project, storage.objects.get on the bucket), then re-run."
+      exit 1 ;;
+  esac
+else
+  note "SKIP" "cut lock: no gcloud or no OPENWOP_CERT_BUNDLE_ORIGIN — evidence cuts are not published from here"
 fi
 
 # ── Gate 7: the Firebase deploy identity can SEE the Firebase project ──────

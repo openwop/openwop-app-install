@@ -45,6 +45,9 @@ export function PrivacyPanel(): JSX.Element {
   return (
     <div className="u-grid u-gap-3">
       <p>{t('privacyHint')}</p>
+      {/* ADR 0860 D8 — the ADR 0512 nav-telemetry posture, stated where it stays
+          visible (the in-app banner is dismissible). Independent of the toggle. */}
+      <p className="u-text-muted">{t('privacyNavTelemetry')}</p>
       {error ? <Notice variant="error">{error}</Notice> : null}
       {KEYS.map((key) => (
         <label key={key} className="action-bar">

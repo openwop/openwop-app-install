@@ -1,7 +1,7 @@
 {
   "name": "feature.commerce.buyer.nodes",
-  "version": "1.1.2",
-  "description": "UCP buyer node pack (MCP transport) \u2014 outbound agentic shopping against external UCP merchants over ctx.features.commerce: discover, search, build an AP2-mandated cart, checkout (ALWAYS human-approved + org-capped, fail-closed), track. A merchant is a REST base URL (merchantUrl) OR a reach:'mcp' connection (merchantServerId). The host is the payer; AP2 mandates are conformant eddsa-jcs-2022-signed when a key is configured (else an explicit not-VC-signed warning).",
+  "version": "1.1.3",
+  "description": "UCP buyer node pack (MCP transport) — outbound agentic shopping against external UCP merchants over ctx.features.commerce: discover, search, build an AP2-mandated cart, checkout (ALWAYS human-approved + org-capped, fail-closed), track. A merchant is a REST base URL (merchantUrl) OR a reach:'mcp' connection (merchantServerId). The host is the payer; AP2 mandates are conformant eddsa-jcs-2022-signed when a key is configured (else an explicit not-VC-signed warning).",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": [
@@ -12,7 +12,7 @@
     "procurement"
   ],
   "engines": {
-    "openwop": ">=1.0.0 <2.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "nodes": [
     {
@@ -37,7 +37,7 @@
       "typeId": "feature.commerce.buyer.nodes.build-cart",
       "version": "1.0.0",
       "label": "UCP buyer: Build cart",
-      "description": "Author the AP2 Intent\u2192Cart mandates for what the human authorized and persist a DRAFT purchase (no money moves). Inputs: { orgId, merchantUrl | merchantServerId, intent, maxAmountMinor (in the MINOR units of `currency` — the exponent varies: USD/EUR 2, JPY 0, so \u00a550,000 is 50000 and NOT 5000000), currency, lines:[{externalProductId,name?,quantity,unitPriceMinor}] } (REST or reach:'mcp' \u2014 ADR 0258). Output: { purchase }.",
+      "description": "Author the AP2 Intent→Cart mandates for what the human authorized and persist a DRAFT purchase (no money moves). Inputs: { orgId, merchantUrl | merchantServerId, intent, maxAmountMinor (in the MINOR units of `currency` — the exponent varies: USD/EUR 2, JPY 0, so ¥50,000 is 50000 and NOT 5000000), currency, lines:[{externalProductId,name?,quantity,unitPriceMinor}] } (REST or reach:'mcp' — ADR 0258). Output: { purchase }.",
       "category": "integration",
       "role": "action",
       "capabilities": []
@@ -46,13 +46,11 @@
       "typeId": "feature.commerce.buyer.nodes.checkout",
       "version": "1.0.0",
       "label": "UCP buyer: Checkout (gated)",
-      "description": "Place the purchase \u2014 REAL-MONEY class: fails approval_required until a human signs off in the reviews inbox AND the org spend cap (OPENWOP_UCP_BUYER_ORG_CAP_MINOR, fail-closed) allows it. Idempotent: a placed purchase never re-posts. Inputs: { orgId, purchaseId }. Output: { purchase }.",
+      "description": "Place the purchase — REAL-MONEY class: fails approval_required until a human signs off in the reviews inbox AND the org spend cap (OPENWOP_UCP_BUYER_ORG_CAP_MINOR, fail-closed) allows it. Idempotent: a placed purchase never re-posts. Inputs: { orgId, purchaseId }. Output: { purchase }.",
       "category": "integration",
       "role": "action",
       "capabilities": [],
-      "metadata": {
-        "mcpApproval": "always"
-      }
+      "x-mcpApproval": "always"
     },
     {
       "typeId": "feature.commerce.buyer.nodes.track-order",
@@ -78,5 +76,6 @@
     "format": "esm",
     "entry": "./index.mjs",
     "minRuntimeVersion": "node>=20"
-  }
+  },
+  "kind": "node"
 }

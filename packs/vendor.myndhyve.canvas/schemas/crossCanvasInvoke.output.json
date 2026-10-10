@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.canvas/1.0.0/crossCanvasInvoke.output.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.canvas/1.0.2/crossCanvasInvoke.output.json",
   "title": "CrossCanvasInvokeOutput",
   "type": "object",
   "required": ["childRunId", "targetCanvasId"],

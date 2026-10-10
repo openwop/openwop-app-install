@@ -24,6 +24,7 @@
  * bearer-authed probes still group consistently.
  */
 
+import { CONVERSATION_WORKFLOW_ID } from '../host/conversation.js';
 import type { Express, Request, Response } from 'express';
 import { randomUUID } from 'node:crypto';
 import { OpenwopError } from '../types.js';
@@ -46,7 +47,9 @@ import {
   removeParticipant,
   markRead,
   setConversationRun,
+  setConversationFocus,
 } from '../host/conversationStore.js';
+import { focusReadable } from '../host/conversationFocus.js';
 import { resolveBoardContextResult, resolveBoardCohortForCaller } from '../host/boardContextResolver.js';
 import { deleteConversationCompletely } from '../host/conversationCascade.js';
 import { readMarkersOf, readMarkersByConversation, type ReadMarkerView } from '../host/conversationReadState.js';
@@ -54,6 +57,9 @@ import { publishChatMessageAppended, publishConversationFrame } from '../host/ch
 import { addReaction, removeReaction, listReactionsForConversation, aggregateReactions, deleteReactionsForMessage, isReactionEmoji, REACTION_EMOJI } from '../host/messageReactionsStore.js';
 import { resolveSubjectAccess, levelSatisfies } from '../host/subjectAccess.js';
 import { isVisibleToAsync, isRailListed } from '../host/conversationVisibility.js';
+import { listRunningConversations } from '../host/runningByConversation.js';
+import { toolEffectsFor } from '../host/toolEffects.js';
+import { requireProtocolScope } from '../host/protocolAuthorization.js';
 import { setMessageFeedback, getMessageFeedback, listMessageFeedbackForSession, isFeedbackRating } from '../host/messageFeedbackStore.js';
 import { encodeMessageCursor, decodeMessageCursor, MAX_MESSAGE_PAGE } from '../host/messageCursor.js';
 
@@ -235,7 +241,7 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
   // capabilities per configured provider, so the composer can badge/disable a
   // model by what it supports (vision/tools/long-context). Static introspection
   // (same posture as the public capabilities advertisement); no tenant state.
-  app.get('/v1/host/openwop-app/chat/model-capabilities', (_req, res, next) => {
+  app.get('/host/openwop-app/chat/model-capabilities', (_req, res, next) => {
     try {
       // ADR 0164 — advertise ONLY user-selectable providers (the catalog's
       // `!managed && !hidden` set). The prior hard-coded array leaked `minimax`
@@ -261,7 +267,7 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
   // (no declared default) and is harmless.
 
   // ── sessions collection ────────────────────────────────────────────
-  app.get('/v1/host/openwop-app/chat/sessions', async (req, res, next) => {
+  app.get('/host/openwop-app/chat/sessions', async (req, res, next) => {
     try {
       const tenantId = tenantFromReq(req);
       const [sessions, metas, readByConversation] = await Promise.all([
@@ -298,7 +304,32 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
     }
   });
 
-  app.post('/v1/host/openwop-app/chat/sessions', async (req, res, next) => {
+  // ADR 0784 P2 — read/write effect of the tools the caller saw, by name. The
+  // receipt's join key is `agent.toolCalled.toolName`; unknown names are omitted.
+  app.get('/host/openwop-app/chat/tool-effects', (req, res, next) => {
+    try {
+      const raw = typeof req.query.names === 'string' ? req.query.names : '';
+      const names = raw.split(',').map((n) => n.trim()).filter((n) => n.length > 0 && n.length <= 200);
+      res.json({ effects: toolEffectsFor(names) });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // ADR 0776 P2 — the caller's conversations with a run in flight (the rail's
+  // "Running" for conversations the client does not hold open). Registered
+  // BEFORE `/chat/sessions/:sessionId`, which would otherwise match "running".
+  app.get('/host/openwop-app/chat/sessions/running', async (req, res, next) => {
+    try {
+      // It exposes run state, so the same gate as the review inbox.
+      await requireProtocolScope(req, 'runs:read');
+      res.json(await listRunningConversations(storage, tenantFromReq(req), actingUserOf(req)));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.post('/host/openwop-app/chat/sessions', async (req, res, next) => {
     try {
       const body = (req.body ?? {}) as CreateSessionRequest;
       if (typeof body !== 'object' || body === null) {
@@ -375,7 +406,7 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
   });
 
   // ── session item ───────────────────────────────────────────────────
-  app.get('/v1/host/openwop-app/chat/sessions/:sessionId', async (req, res, next) => {
+  app.get('/host/openwop-app/chat/sessions/:sessionId', async (req, res, next) => {
     try {
       const tenantId = tenantFromReq(req);
       const session = await storage.getChatSession(tenantId, req.params.sessionId);
@@ -393,7 +424,7 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
     }
   });
 
-  app.patch('/v1/host/openwop-app/chat/sessions/:sessionId', async (req, res, next) => {
+  app.patch('/host/openwop-app/chat/sessions/:sessionId', async (req, res, next) => {
     try {
       const tenantId = tenantFromReq(req);
       const existing = await storage.getChatSession(tenantId, req.params.sessionId);
@@ -434,7 +465,7 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
     }
   });
 
-  app.delete('/v1/host/openwop-app/chat/sessions/:sessionId', async (req, res, next) => {
+  app.delete('/host/openwop-app/chat/sessions/:sessionId', async (req, res, next) => {
     try {
       const tenantId = tenantFromReq(req);
       if (!(await storage.getChatSession(tenantId, req.params.sessionId))) {
@@ -462,7 +493,7 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
   //                                `nextCursor` to page older, or null at the
   //                                start of history (ADR 0043 Phase 3b).
   // GET …/messages?limit=N&before=<cursor> → the N messages older than the cursor.
-  app.get('/v1/host/openwop-app/chat/sessions/:sessionId/messages', async (req, res, next) => {
+  app.get('/host/openwop-app/chat/sessions/:sessionId/messages', async (req, res, next) => {
     try {
       const tenantId = tenantFromReq(req);
       const session = await storage.getChatSession(tenantId, req.params.sessionId);
@@ -529,7 +560,7 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
   // same suspended run instead of opening a fresh one + orphaning the old. The
   // caller must already see the session (visibility gate); the run id itself is
   // opaque and non-sensitive.
-  app.put('/v1/host/openwop-app/chat/sessions/:sessionId/conversation-run', async (req, res, next) => {
+  app.put('/host/openwop-app/chat/sessions/:sessionId/conversation-run', async (req, res, next) => {
     try {
       const tenantId = tenantFromReq(req);
       if (!(await storage.getChatSession(tenantId, req.params.sessionId))) {
@@ -540,6 +571,22 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
       if (typeof body.conversationRunId !== 'string' || !ID_PATTERN.test(body.conversationRunId)) {
         throw new OpenwopError('validation_error', 'conversationRunId MUST match /^[A-Za-z0-9_-]{1,64}$/.', 400);
       }
+      // ADR 0764 D5 — the id must name THIS session's conversation run, not merely
+      // look like one. An unvalidated bind let a caller point a session (and every
+      // participant's next open of it) at any run id. Absent/foreign ⇒ the uniform
+      // 404; wrong workflow or a run bound to a DIFFERENT session ⇒ 400. A run
+      // carrying no `chatSessionId` stays bindable (older SPA builds omitted it).
+      const bound = await storage.getRun(body.conversationRunId);
+      if (!bound || bound.tenantId !== tenantId) {
+        throw new OpenwopError('run_not_found', `run ${body.conversationRunId} not found`, 404);
+      }
+      if (bound.workflowId !== CONVERSATION_WORKFLOW_ID) {
+        throw new OpenwopError('validation_error', `conversationRunId MUST name an ${CONVERSATION_WORKFLOW_ID} run.`, 400);
+      }
+      const boundSession = (bound.metadata as { chatSessionId?: unknown } | undefined)?.chatSessionId;
+      if (typeof boundSession === 'string' && boundSession !== req.params.sessionId) {
+        throw new OpenwopError('validation_error', 'conversationRunId belongs to a different chat session.', 400);
+      }
       await setConversationRun(tenantId, req.params.sessionId, body.conversationRunId);
       res.status(204).end();
     } catch (err) {
@@ -547,12 +594,61 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
     }
   });
 
+  // ADR 0777 — focus an EMBEDDED conversation on the entity beside it, so its
+  // agent's tools default to it and the UI may say "this canvas". Unlike the
+  // routes above it does NOT require a stored chat-session row: an embed is
+  // ephemeral (persist:false) until "Continue in full chat". Checks, in order:
+  // an acting user; the caller may see an EXISTING conversation; the caller may
+  // READ the entity (THE predicate for its kind). A refusal is the uniform 404 —
+  // and nothing is stored. The client value is only a request, never trusted.
+  // One registration for both verbs (one /v1 host-extension path ref, ADR 0642).
+  app.route('/host/openwop-app/chat/sessions/:sessionId/focus')
+    .put(async (req, res, next) => {
+      try {
+        const tenantId = tenantFromReq(req);
+        const caller = actingUserOf(req);
+        if (!caller) throw new OpenwopError('unauthenticated', 'Authentication required.', 401);
+        if (!ID_PATTERN.test(req.params.sessionId)) throw new OpenwopError('validation_error', 'sessionId MUST match /^[A-Za-z0-9_-]{1,64}$/.', 400);
+        const body = (req.body ?? {}) as { kind?: unknown; id?: unknown };
+        // CANVAS only (ADR 0777 §Correction): a workflow's binding is ADR 0773's
+        // pairing context, never a second mechanism here.
+        if (body.kind !== 'canvas' || typeof body.id !== 'string' || !body.id || body.id.length > 200) {
+          throw new OpenwopError('validation_error', "focus MUST be { kind: 'canvas', id }.", 400);
+        }
+        const existing = await getConversationMeta(tenantId, req.params.sessionId);
+        if (existing) await requireVisibleAsync(existing, req, tenantId, req.params.sessionId);
+        const focus = { kind: body.kind, id: body.id } as const;
+        if (!(await focusReadable(tenantId, focus, caller))) {
+          throw new OpenwopError('not_found', `${focus.kind} "${focus.id}" not found.`, 404);
+        }
+        const meta = await setConversationFocus(tenantId, req.params.sessionId, focus, caller);
+        res.status(200).json({ focus: meta.focus });
+      } catch (err) {
+        next(err);
+      }
+    })
+    .delete(async (req, res, next) => {
+      try {
+        const tenantId = tenantFromReq(req);
+        const caller = actingUserOf(req);
+        if (!caller) throw new OpenwopError('unauthenticated', 'Authentication required.', 401);
+        const existing = await getConversationMeta(tenantId, req.params.sessionId);
+        if (existing) {
+          await requireVisibleAsync(existing, req, tenantId, req.params.sessionId);
+          await setConversationFocus(tenantId, req.params.sessionId, undefined, caller);
+        }
+        res.status(204).end();
+      } catch (err) {
+        next(err);
+      }
+    });
+
   // ADR 0117 — branch a conversation at a settled turn. Forks the message
   // lineage: a child conversation seeded with the parent's first `fromSeq`
   // messages, recording `branchedFrom`. Participant-scoped (404 on a parent the
   // caller may not see). The child opens its own conversation run lazily (ADR
   // 0043) — server-side agent-context :fork is a documented refinement (OQ).
-  app.post('/v1/host/openwop-app/chat/sessions/:sessionId/branch', async (req, res, next) => {
+  app.post('/host/openwop-app/chat/sessions/:sessionId/branch', async (req, res, next) => {
     try {
       const tenantId = tenantFromReq(req);
       const parentId = req.params.sessionId;
@@ -592,7 +688,7 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
     } catch (err) { next(err); }
   });
 
-  app.post('/v1/host/openwop-app/chat/sessions/:sessionId/messages', async (req, res, next) => {
+  app.post('/host/openwop-app/chat/sessions/:sessionId/messages', async (req, res, next) => {
     try {
       const tenantId = tenantFromReq(req);
       const session = await storage.getChatSession(tenantId, req.params.sessionId);
@@ -605,7 +701,7 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
       // archived check, mention/agent dispatch, live publish, and counters. The
       // generic append reaching a channel would silently skip all four.
       if (convMeta?.type === 'channel') {
-        throw new OpenwopError('validation_error', 'Channel messages MUST be posted via /v1/host/openwop-app/channels/:id/messages.', 400);
+        throw new OpenwopError('validation_error', 'Channel messages MUST be posted via /host/openwop-app/channels/:id/messages.', 400);
       }
       const body = (req.body ?? {}) as AppendMessageRequest;
       if (typeof body !== 'object' || body === null) {
@@ -708,7 +804,7 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
   // (the messageId is unique → append would 409). `created_at`/`role` are
   // immutable, so thread order + counts are unaffected. 404 if the message (or
   // session) doesn't exist — the client falls back to a fresh append.
-  app.put('/v1/host/openwop-app/chat/sessions/:sessionId/messages/:messageId', async (req, res, next) => {
+  app.put('/host/openwop-app/chat/sessions/:sessionId/messages/:messageId', async (req, res, next) => {
     try {
       const tenantId = tenantFromReq(req);
       if (!(await storage.getChatSession(tenantId, req.params.sessionId))) {
@@ -817,7 +913,7 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
   // edit. The FE detects a tombstone by meta.deletedAt — never by parsing the
   // content sentinel — and tombstoned rows can never dispatch an agent turn
   // (dispatch happens only on the channel POST path, which this is not).
-  app.delete('/v1/host/openwop-app/chat/sessions/:sessionId/messages/:messageId', async (req, res, next) => {
+  app.delete('/host/openwop-app/chat/sessions/:sessionId/messages/:messageId', async (req, res, next) => {
     try {
       const tenantId = tenantFromReq(req);
       if (!(await storage.getChatSession(tenantId, req.params.sessionId))) {
@@ -872,12 +968,12 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
   // "viewer" mean the same set on both route families); the emoji vocabulary
   // is server-bounded. Idempotent point writes keyed
   // (tenant, conversation, message, subject, emoji).
-  app.put('/v1/host/openwop-app/chat/sessions/:sessionId/messages/:messageId/reactions/:emoji', async (req, res, next) => {
+  app.put('/host/openwop-app/chat/sessions/:sessionId/messages/:messageId/reactions/:emoji', async (req, res, next) => {
     try {
       await handleReaction(req, res, 'add');
     } catch (err) { next(err); }
   });
-  app.delete('/v1/host/openwop-app/chat/sessions/:sessionId/messages/:messageId/reactions/:emoji', async (req, res, next) => {
+  app.delete('/host/openwop-app/chat/sessions/:sessionId/messages/:messageId/reactions/:emoji', async (req, res, next) => {
     try {
       await handleReaction(req, res, 'remove');
     } catch (err) { next(err); }
@@ -926,7 +1022,7 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
   // POST { type: 'agent'|'person', subjectRef, title? } → the persistent 1:1 with
   // that subject. Idempotent via the canonical dmKey: a second open resolves to
   // the SAME conversation instead of forking a new session (Slack `conversations.open`).
-  app.post('/v1/host/openwop-app/chat/conversations/open', async (req, res, next) => {
+  app.post('/host/openwop-app/chat/conversations/open', async (req, res, next) => {
     try {
       const tenantId = tenantFromReq(req);
       const body = (req.body ?? {}) as { type?: unknown; subjectRef?: unknown; title?: unknown };
@@ -973,7 +1069,7 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
   // cohort as members. The `@@<board>` summon calls this on the current chat so
   // the boardroom turns persist in a conversation that shows under Groups —
   // without forking a new session mid-turn. Idempotent (re-summon is a no-op).
-  app.post('/v1/host/openwop-app/chat/sessions/:sessionId/board', async (req, res, next) => {
+  app.post('/host/openwop-app/chat/sessions/:sessionId/board', async (req, res, next) => {
     try {
       const tenantId = tenantFromReq(req);
       const session = await storage.getChatSession(tenantId, req.params.sessionId);
@@ -1036,7 +1132,7 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
   });
 
   // ── participants (ADR 0043 — replaces the FE-only "active agents" panel) ──
-  app.get('/v1/host/openwop-app/chat/sessions/:sessionId/participants', async (req, res, next) => {
+  app.get('/host/openwop-app/chat/sessions/:sessionId/participants', async (req, res, next) => {
     try {
       const tenantId = tenantFromReq(req);
       if (!(await storage.getChatSession(tenantId, req.params.sessionId))) {
@@ -1053,7 +1149,7 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
     }
   });
 
-  app.put('/v1/host/openwop-app/chat/sessions/:sessionId/participants', async (req, res, next) => {
+  app.put('/host/openwop-app/chat/sessions/:sessionId/participants', async (req, res, next) => {
     try {
       const tenantId = tenantFromReq(req);
       if (!(await storage.getChatSession(tenantId, req.params.sessionId))) {
@@ -1074,7 +1170,7 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
       // legacy channels (requireOwner is permissive there; assertChannelManage
       // 404s). Architect finding 2.
       if (existing?.type === 'channel') {
-        throw new OpenwopError('validation_error', 'Channel membership MUST be managed via /v1/host/openwop-app/channels/:id/members.', 400);
+        throw new OpenwopError('validation_error', 'Channel membership MUST be managed via /host/openwop-app/channels/:id/members.', 400);
       }
       // Lazily materialize meta for a legacy session, then add — reusing the meta
       // we just read (existing wins; otherwise create it once).
@@ -1086,7 +1182,7 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
     }
   });
 
-  app.delete('/v1/host/openwop-app/chat/sessions/:sessionId/participants/:subjectRef', async (req, res, next) => {
+  app.delete('/host/openwop-app/chat/sessions/:sessionId/participants/:subjectRef', async (req, res, next) => {
     try {
       const tenantId = tenantFromReq(req);
       if (!(await storage.getChatSession(tenantId, req.params.sessionId))) {
@@ -1098,7 +1194,7 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
       // ADR 0192 D3 — same guard as the PUT: channel membership only via the
       // channel routes (incl. self-leave `DELETE …/channels/:id/members/me`).
       if (existing?.type === 'channel') {
-        throw new OpenwopError('validation_error', 'Channel membership MUST be managed via /v1/host/openwop-app/channels/:id/members.', 400);
+        throw new OpenwopError('validation_error', 'Channel membership MUST be managed via /host/openwop-app/channels/:id/members.', 400);
       }
       const meta = await removeParticipant(tenantId, req.params.sessionId, decodeURIComponent(req.params.subjectRef), existing);
       res.json({ participants: withReadMarkers(meta?.participants ?? [], await readMarkersOf(tenantId, req.params.sessionId), callerSubject(req)) });
@@ -1108,7 +1204,7 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
   });
 
   // ── read state (ADR 0043 Phase 3 — unread badge) ───────────────────
-  app.post('/v1/host/openwop-app/chat/sessions/:sessionId/read', async (req, res, next) => {
+  app.post('/host/openwop-app/chat/sessions/:sessionId/read', async (req, res, next) => {
     try {
       const tenantId = tenantFromReq(req);
       const session = await storage.getChatSession(tenantId, req.params.sessionId);
@@ -1129,7 +1225,7 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
   // ── message feedback (ADR 0071) ──────────────────────────────────────────
   // Per-(user, message) chat thumbs — DISTINCT from RFC 0056 run annotations.
   // Bound to the caller's own subject; the conversation must be visible (404).
-  app.post('/v1/host/openwop-app/chat/messages/:messageId/feedback', async (req, res, next) => {
+  app.post('/host/openwop-app/chat/messages/:messageId/feedback', async (req, res, next) => {
     try {
       const tenantId = tenantFromReq(req);
       const b = (req.body ?? {}) as { conversationId?: unknown; rating?: unknown; reason?: unknown };
@@ -1155,7 +1251,7 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
     }
   });
 
-  app.get('/v1/host/openwop-app/chat/messages/:messageId/feedback', async (req, res, next) => {
+  app.get('/host/openwop-app/chat/messages/:messageId/feedback', async (req, res, next) => {
     try {
       const tenantId = tenantFromReq(req);
       const conversationId = typeof req.query.conversationId === 'string' ? req.query.conversationId : '';
@@ -1175,7 +1271,7 @@ export function registerChatSessionRoutes(app: Express, deps: { storage: Storage
   // GET → { feedback: { <messageId>: <rating> } } so reopening a chat re-displays
   // 👍/👎 in ONE round-trip (not an N+1 per-message fetch). Visibility-gated;
   // returns ONLY the caller's own ratings (subject pinned server-side).
-  app.get('/v1/host/openwop-app/chat/sessions/:sessionId/feedback', async (req, res, next) => {
+  app.get('/host/openwop-app/chat/sessions/:sessionId/feedback', async (req, res, next) => {
     try {
       const tenantId = tenantFromReq(req);
       if (!(await storage.getChatSession(tenantId, req.params.sessionId))) {

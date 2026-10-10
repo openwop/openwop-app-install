@@ -21,9 +21,11 @@
  */
 
 import { Button } from '../../ui/Button.js';
+import { isOwnedWorkflow } from '../lib/workflowMentions.js';
 import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
+import { runDetailPath, useCanOpenRunDetail } from '../runDetailAccess.js';
 import { StepList, STATUS_COLORS, STATUS_LABEL_KEYS } from './StepList.js';
 import { formatElapsed } from './formatters.js';
 import { formatNumber } from '../../i18n/format.js';
@@ -57,6 +59,9 @@ interface Props {
   onClose: () => void;
   /** Cancel an in-flight workflow_run. */
   onCancel: (messageId: string) => Promise<void>;
+  /** ADR 0768 P2 — rendered inside the chat Workbench, whose tab strip is the
+   *  header (title + the one close button). Omits this panel's own header. */
+  hideHeader?: boolean;
 }
 
 export function WorkflowProgressPanel({
@@ -65,6 +70,7 @@ export function WorkflowProgressPanel({
   onFocus,
   onClose,
   onCancel,
+  hideHeader = false,
 }: Props): JSX.Element {
   const { t } = useTranslation('chat');
   // Esc closes the panel — but ONLY when focus is inside it. A
@@ -95,20 +101,22 @@ export function WorkflowProgressPanel({
       className="workflow-progress-panel u-w-full u-h-full u-bg-surface u-flex u-flex-col"
       tabIndex={-1}
       onKeyDown={(e) => { if (e.key === 'Escape') onClose(); }}
-      aria-labelledby={headingId}
+      {...(hideHeader ? { 'aria-label': t('workflowProgress') } : { 'aria-labelledby': headingId })}
     >
-      <LeftRailPanelHeader
-        titleId={headingId}
-        title={t('workflowProgress')}
-        onClose={onClose}
-        closeLabel={t('closeWorkflowProgress')}
-      />
+      {hideHeader ? null : (
+        <LeftRailPanelHeader
+          titleId={headingId}
+          title={t('workflowProgress')}
+          onClose={onClose}
+          closeLabel={t('closeWorkflowProgress')}
+        />
+      )}
 
       {workflowRunMessages.length === 0 ? (
         <StateCard
           icon={<WorkflowIcon size={20} />}
           title={t('noRunsTitle')}
-          body={<>{t('noRunsPrefix')}<code>@</code>{t('noRunsSuffix')}</>}
+          body={<>{t('noRunsPrefix')}<code>/</code>{t('noRunsSuffix')}</>}
         />
       ) : (
         <>
@@ -155,9 +163,11 @@ function RunSwitcher({
                 type="button"
                 onClick={() => onFocus(m.id)}
                 className="wfprog-run-btn"
+                // grade-ux CHATUX-14 — the focused run was marked only visually.
+                aria-current={isActive ? 'true' : undefined}
                 style={{
                   background: isActive
-                    ? 'color-mix(in oklch, var(--clay-text) 18%, transparent)'
+                    ? 'color-mix(in oklab, var(--clay-text) 18%, transparent)'
                     : 'transparent',
                   borderLeft: isActive
                     ? '2px solid var(--clay-text)'
@@ -191,6 +201,7 @@ function FocusedRunView({
   onCancel: (messageId: string) => Promise<void>;
 }): JSX.Element | null {
   const { t } = useTranslation('chat');
+  const canOpenRun = useCanOpenRunDetail();
   const run = message.workflowRun;
   if (!run) return null;
 
@@ -227,7 +238,7 @@ function FocusedRunView({
               onClick={() => { void onCancel(message.id); }}
               title={t('cancelThisRun')}
             >
-              Cancel
+              {t('common:cancel')}
             </Button>
           )}
         </div>
@@ -241,7 +252,12 @@ function FocusedRunView({
               </span>
               {total > 0 && <span className="muted">{progressPct}%</span>}
             </div>
-            <div className="wfprog-bar">
+            <div
+              className="wfprog-bar"
+              role="progressbar"
+              aria-label={stepLabel}
+              {...(total > 0 ? { 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-valuenow': progressPct } : {})}
+            >
               <div className="wfprog-bar-fill" style={{
                 width: total > 0 ? `${progressPct}%` : '30%',
                 background: STATUS_COLORS[run.status],
@@ -307,19 +323,21 @@ function FocusedRunView({
       {/* Footer */}
       <div className="muted wfprog-footer">
         {run.slug && <code>/{run.slug}</code>}
-        {run.runId && (
+        {run.runId && !run.runUnavailable && (
           <>
             {run.slug && <span>·</span>}
-            <Link to={`/runs/${run.runId}`} title={t('openRunDetail')}>
-              run {run.runId.slice(0, 12)}
-            </Link>
+            {canOpenRun ? (
+              <Link to={runDetailPath(run.runId)} title={t('openRunDetail')}>
+                {t('runIdShort', { id: run.runId.slice(0, 12) })}
+              </Link>
+            ) : <span>{t('runIdShort', { id: run.runId.slice(0, 12) })}</span>}
           </>
         )}
-        {run.workflowId && run.workflowId.startsWith('wf_') && (
+        {isOwnedWorkflow(run.workflowId) && (
           <>
             <span>·</span>
             <Link to={`/builder/${run.workflowId}`} title={t('openWorkflowInBuilder')}>
-              open in builder →
+              {t('openInBuilderLink')}
             </Link>
           </>
         )}

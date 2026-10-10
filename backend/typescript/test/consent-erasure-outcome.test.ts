@@ -10,6 +10,14 @@
  * way up to a green toast. Under GDPR Art. 5(2) the controller must be able to
  * demonstrate the erasure; being told it happened when it didn't is worse than
  * being told nothing.
+ *
+ * Sabotage-witnessed (/grade-tests wave 9): dropping `failedErasers.size` from
+ * `failed` reds the failure-count, distinct and route cases; hard-coding the route's
+ * `ok: true` reds the route case; counting a failure per KEY reds the distinct case.
+ * RECORDED REDUNDANCY (protected — kept pending an explicit human ask): "a failing
+ * eraser does not stop the others" and "counts the LINKED identity keys" are also
+ * caught by `subject-erasure-fanout-adr0657.test.ts` ("an eraser that never resolves
+ * …" / "erase(u1) reaches u1, a@x.test AND crm:c1"), red under the same probes.
  */
 
 import type { AddressInfo } from 'node:net';
@@ -122,9 +130,12 @@ describe('DELETE …/subjects/:key — `ok` reports the erasure, not the request
   });
   afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-  async function ownerClient(): Promise<{ call: (m: string, p: string, b?: unknown) => Promise<{ status: number; body: any }>; orgId: string }> {
+  interface Json { [k: string]: unknown }
+  interface EraseBody { ok: boolean; erasure: { failed: number; total: number } }
+  type Call = <T = Json>(m: string, p: string, b?: unknown) => Promise<{ status: number; body: T }>;
+  async function ownerClient(): Promise<{ call: Call; orgId: string }> {
     let cookie = '';
-    const call = async (method: string, path: string, body?: unknown): Promise<{ status: number; body: any }> => {
+    const call: Call = async <T = Json>(method: string, path: string, body?: unknown): Promise<{ status: number; body: T }> => {
       const res = await fetch(`${BASE}${path}`, {
         method,
         headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
@@ -135,13 +146,16 @@ describe('DELETE …/subjects/:key — `ok` reports the erasure, not the request
         const m = /(__session=[^;]+)/.exec(c);
         if (m) cookie = m[1];
       }
-      return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+      const text = res.status === 204 ? '' : await res.text();
+      return { status: res.status, body: (text ? JSON.parse(text) : {}) as T };
     };
-    const login = await call('POST', '/v1/host/openwop-app/test/login', { email: `ce-${Date.now()}@acme.test`, tenantId: 'default' });
+    const login = await call('POST', '/host/openwop-app/test/login', { email: `ce-${Date.now()}@acme.test`, tenantId: 'default' });
     expect(login.status, JSON.stringify(login.body)).toBe(201);
-    const org = await call('POST', '/v1/host/openwop-app/orgs', { name: 'Erasure Co' });
+    const org = await call<{ orgId?: string; org?: { orgId?: string } }>('POST', '/host/openwop-app/orgs', { name: 'Erasure Co' });
     expect(org.status, JSON.stringify(org.body)).toBe(201);
-    return { call, orgId: org.body.org?.orgId ?? org.body.orgId };
+    const orgId = org.body.org?.orgId ?? org.body.orgId;
+    expect(orgId, 'a missing orgId would 404 the route under test').toBeTruthy();
+    return { call, orgId: orgId! };
   }
 
   it('ok:false — and the failure count — when a feature eraser throws', async () => {
@@ -150,7 +164,7 @@ describe('DELETE …/subjects/:key — `ok` reports the erasure, not the request
     // reports a failure that occurs ALONGSIDE working erasers, not in a vacuum.
     registerSubjectEraser(async function unavailableStore() { throw new Error('feature store unavailable'); });
 
-    const del = await call('DELETE', `/v1/host/openwop-app/consent/orgs/${orgId}/subjects/nobody-here`);
+    const del = await call<EraseBody>('DELETE', `/host/openwop-app/consent/orgs/${orgId}/subjects/nobody-here`);
     // Still 200 — accepted, idempotent, retryable …
     expect(del.status).toBe(200);
     // … but NOT ok. This is the assertion the old hard-coded `ok: true` made

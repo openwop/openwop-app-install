@@ -9,6 +9,12 @@
  *      SendGrid mock — suppression, erasure tombstone, consent, and the clean path;
  *   3. D8 — a reservation is in-flight, not sent; a stale one is released.
  * Plus the review-B1 ratchet: `sendViaSmtp` has exactly ONE importer.
+ *
+ * Sabotage-witnessed (w9 grade-tests): the no-guard marketing refusal, a throwing
+ * guard mapped to a refusal, the refused-address COUNT, the suppression / erasure /
+ * consent legs of the email guard, the adapter consulting the guard at all, a refusal
+ * taking a ledger reservation, a fresh reservation reading as sent, and a stale one not
+ * being released each turn a case red.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -22,7 +28,10 @@ import { __resetConnectionsStore, createSecretConnection } from '../src/features
 import { __resetRecipientEgressGuardsForTests, __registerPermissiveEgressGuardForTests, consultRecipientEgressGuard } from '../src/host/recipientEgressGuard.js';
 import { registerEmailEgressGuard } from '../src/features/email/egressGuard.js';
 import { addSuppression, removeSuppression } from '../src/features/crm/suppressionService.js';
-import { deleteSubject } from '../src/features/consent/consentService.js';
+import { deleteSubject, mergeConsentCategories, fullMarketingOptOut } from '../src/features/consent/consentService.js';
+import { createContact } from '../src/features/crm/contactsService.js';
+import { saveConfig } from '../src/host/featureToggles/service.js';
+import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { reserveSend, priorSend, releaseSend } from '../src/host/emailSentLedger.js';
 
 const T = 'tguard';
@@ -55,7 +64,9 @@ describe('ADR 0655 — recipient egress guard', () => {
   beforeEach(() => { calls = 0; __resetRecipientEgressGuardsForTests(); registerEmailEgressGuard(); });
 
   const adapter = () => makeEmailAdapter({ storage, tenantId: T, runId: 'run-guard', actingUserId: 'u1', orgId: T });
-  const msg = (to: string, extra: Record<string, unknown> = {}) => ({ from: 'ops@acme.test', to, subject: `hi ${Math.random()}`, text: 'body', provider: 'sendgrid', ...extra });
+  // A distinct subject per message keeps the derived ledger keys distinct (deterministic, no random).
+  let seq = 0;
+  const msg = (to: string, extra: Record<string, unknown> = {}) => ({ from: 'ops@acme.test', to, subject: `hi ${++seq}`, text: 'body', provider: 'sendgrid', ...extra });
 
   describe('1. the seam posture (review B3)', () => {
     it('no guard registered: a MARKETING send is refused, a TRANSACTIONAL one proceeds', async () => {
@@ -96,7 +107,7 @@ describe('ADR 0655 — recipient egress guard', () => {
         // all-or-nothing: one suppressed cc refuses the whole message
         expect(await adapter().send(msg('clean2@x.test', { cc: 'gone@x.test' }))).toMatchObject({ sent: false, error: 'email_recipient_suppressed' });
         expect(calls).toBe(0);
-        expect(await priorSend(`${T}:x`)).toBeNull();
+        // (that a refusal holds no ledger reservation is the dedicated case below)
       } finally { await removeSuppression(T, 'gone@x.test'); }
     });
 
@@ -105,6 +116,19 @@ describe('ADR 0655 — recipient egress guard', () => {
       expect(await adapter().send(msg('erased@x.test'))).toMatchObject({ sent: false, error: 'email_recipient_erased' });
       expect(await adapter().send(msg('Erased@X.test', { purpose: 'transactional' }))).toMatchObject({ sent: false, error: 'email_recipient_erased' });
       expect(calls).toBe(0);
+    });
+
+    it('a contact who opted OUT of marketing email is refused for marketing; a transactional send still goes', async () => {
+      const toggle = getToggleDefault('consent')!;
+      await saveConfig({ ...toggle, status: 'on' }, 'test'); // consent OFF is permissive by design
+      try {
+        const c = await createContact({ tenantId: T, name: 'NC', email: 'nc@x.test', stage: 'lead' });
+        await mergeConsentCategories({ tenantId: T, subjectKey: c.contactId, categories: fullMarketingOptOut(), source: 'test' });
+        expect(await adapter().send(msg('nc@x.test'))).toMatchObject({ sent: false, error: 'email_recipient_no_consent' });
+        expect(calls).toBe(0);
+        expect((await adapter().send(msg('nc@x.test', { purpose: 'transactional' }))).sent, 'the consent leg is marketing-only').toBe(true);
+        expect(calls).toBe(1);
+      } finally { await saveConfig(toggle, 'test'); }
     });
 
     it('a refusal never holds a ledger reservation (a later clean retry of the same key sends)', async () => {

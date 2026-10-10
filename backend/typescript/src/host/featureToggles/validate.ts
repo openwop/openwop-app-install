@@ -125,6 +125,10 @@ export function validateToggleConfig(id: string, body: unknown): ToggleConfig {
   if (typeof b.label === 'string') config.label = b.label;
   if (typeof b.description === 'string') config.description = b.description;
   if (typeof b.category === 'string') config.category = b.category;
+  if (b.killed !== undefined) {
+    if (typeof b.killed !== 'boolean') fail('Field `killed` MUST be a boolean.', 'killed');
+    if (b.killed) config.killed = true;
+  }
   const vs = variants(b.variants, 'variants');
   if (vs !== undefined) config.variants = vs;
   const cohort = stringArray(b.betaCohort, 'betaCohort');

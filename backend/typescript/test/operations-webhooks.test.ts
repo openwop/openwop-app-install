@@ -56,14 +56,14 @@ function client(): Client {
 let n = 0;
 async function login(tenantId: string): Promise<{ c: Client; orgId: string }> {
   const c = client();
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `ops-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await c.post('/host/openwop-app/test/login', { email: `ops-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status).toBe(201);
   return { c, orgId: org.body.orgId };
 }
 
-const OPS = '/v1/host/openwop-app/operations';
+const OPS = '/host/openwop-app/operations';
 
 async function seedDelivery(subscriptionId: string, tenantId: string, status: 'pending' | 'dead'): Promise<string> {
   // A webhook subscription + a queued delivery in the DURABLE queue — the rows

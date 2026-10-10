@@ -70,7 +70,7 @@ describe('runChatToolLoop — per-tool permission gate wiring (ADR 0102)', () =>
       {
         provider: 'anthropic', model: 'm', credentialRef: 'r', systemPrompt: 'sp',
         messages: [{ role: 'user', content: 'go' }], tools: [tool('crm.field.delete')],
-        agentId: 'a', persona: 'P', toolPermissions: perms,
+        agentId: 'a', persona: 'P', toolPermissions: [perms],
       },
       { callAIWithTools: mockProvider('crm.field.delete'), executeTool: async (c) => { executed.push(c.name); return { content: 'x' }; } },
     );
@@ -85,7 +85,7 @@ describe('runChatToolLoop — per-tool permission gate wiring (ADR 0102)', () =>
       {
         provider: 'anthropic', model: 'm', credentialRef: 'r', systemPrompt: 'sp',
         messages: [{ role: 'user', content: 'go' }], tools: [tool('crm.field.delete')],
-        agentId: 'a', persona: 'P', toolPermissions: perms,
+        agentId: 'a', persona: 'P', toolPermissions: [perms],
       },
       { callAIWithTools: mockProvider('crm.field.delete'), executeTool: async (c) => { executed.push(c.name); return { content: 'x' }; } },
     );
@@ -100,7 +100,7 @@ describe('runChatToolLoop — per-tool permission gate wiring (ADR 0102)', () =>
       {
         provider: 'anthropic', model: 'm', credentialRef: 'r', systemPrompt: 'sp',
         messages: [{ role: 'user', content: 'go' }], tools: [tool('crm.read')],
-        agentId: 'a', persona: 'P', toolPermissions: perms,
+        agentId: 'a', persona: 'P', toolPermissions: [perms],
       },
       { callAIWithTools: mockProvider('crm.read'), executeTool: async (c) => { executed.push(c.name); return { content: 'x' }; } },
     );
@@ -133,7 +133,7 @@ describe('runChatToolLoop — ADR 0104 offering × ADR 0102 entitlement compose 
       {
         provider: 'anthropic', model: 'm', credentialRef: 'r', systemPrompt: 'sp',
         messages: [{ role: 'user', content: 'go' }], tools: [tool('crm.field.delete')],
-        agentId: 'a', persona: 'P', toolPermissions: { read: ['crm.read'], write: [], never: [] },
+        agentId: 'a', persona: 'P', toolPermissions: [{ read: ['crm.read'], write: [], never: [] }],
       },
       { callAIWithTools: callsThen('crm.field.delete'), executeTool: async (c) => { executed.push(c.name); return { content: 'x' }; } },
     );
@@ -150,7 +150,7 @@ describe('runChatToolLoop — ADR 0104 offering × ADR 0102 entitlement compose 
       {
         provider: 'anthropic', model: 'm', credentialRef: 'r', systemPrompt: 'sp',
         messages: [{ role: 'user', content: 'go' }], tools: [tool('crm.read')],
-        agentId: 'a', persona: 'P', toolPermissions: { read: ['crm.read', 'crm.field.delete'], write: [], never: [] },
+        agentId: 'a', persona: 'P', toolPermissions: [{ read: ['crm.read', 'crm.field.delete'], write: [], never: [] }],
       },
       { callAIWithTools: callsThen('crm.field.delete'), executeTool: async (c) => { executed.push(c.name); return { content: 'x' }; } },
     );

@@ -13,6 +13,7 @@ import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { persistVocEvidence } from '../src/features/campaign-brief/vocService.js';
+import { createOrg } from '../src/host/accessControlService.js';
 
 let BASE: string;
 let server: http.Server;
@@ -45,13 +46,17 @@ function client(): Client {
 }
 
 const uniqEmail = (): string => `voc-${Date.now()}-${n++}@acme.test`;
-const B = '/v1/host/openwop-app/campaign-brief/briefs';
+const B = '/host/openwop-app/campaign-brief/briefs';
 const REF = { documentId: 'doc-1', sourceKind: 'kb' as const, locator: 'chunk:0', contentHash: 'a'.repeat(64) };
 
 async function ownerWithBrief(): Promise<{ owner: Client; orgId: string; briefId: string }> {
   const owner = client();
-  expect((await owner.post('/v1/host/openwop-app/test/login', { email: uniqEmail(), tenantId: TENANT })).status).toBe(201);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const who = await owner.post('/host/openwop-app/test/login', { email: uniqEmail(), tenantId: TENANT });
+  expect(who.status).toBe(201);
+  // ADR 0815 D1a — creating an org inside a SHARED tenant is owner-tier over HTTP,
+  // and every test here shares the tenant; the org under test is minted directly,
+  // owned by this caller (the shape `POST /orgs` produces for an owner).
+  const org = { body: await createOrg({ tenantId: TENANT, createdBy: who.body.user.userId, name: 'Acme', ownerSubject: who.body.user.userId }) };
   const brief = await owner.post(B, { orgId: org.body.orgId, name: 'Q4', productName: 'FlashPick' });
   expect(brief.status, JSON.stringify(brief.body)).toBe(201);
   return { owner, orgId: org.body.orgId, briefId: brief.body.brief.id };
@@ -87,7 +92,7 @@ describe('campaign-brief VOC routes', () => {
       { quote: 'private customer words', sourceRef: REF, theme: 'secret', sentiment: 'pain' },
     ]);
     const stranger = client();
-    await stranger.post('/v1/host/openwop-app/test/login', { email: uniqEmail(), tenantId: TENANT });
+    await stranger.post('/host/openwop-app/test/login', { email: uniqEmail(), tenantId: TENANT });
     expect((await stranger.get(`${B}/${briefId}/voc`)).status).toBe(404);
     expect((await stranger.del(`${B}/${briefId}/voc/${row.id}`)).status).toBe(404);
   });

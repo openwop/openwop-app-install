@@ -22,8 +22,10 @@
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
-import { createApp } from '../src/index.js';
+import { createApp, loadConfigFromEnv } from '../src/index.js';
+import { buildV2Advertisement } from '../src/routes/discovery.js';
 import { getNodeRegistry } from '../src/executor/nodeRegistry.js';
+import { bareRunId } from './support/bareRunId.js';
 
 let server: http.Server;
 let BASE: string;
@@ -62,11 +64,11 @@ async function api<T = Record<string, unknown>>(path: string, init: RequestInit 
 interface Ev { type?: string; nodeId?: string; payload?: Record<string, unknown> }
 
 async function failedRun(workflowId: string, nodeConfig: Record<string, unknown> = {}): Promise<{ runId: string; events: Ev[] }> {
-  await api('/v1/host/openwop-app/workflows', {
+  await api('/host/openwop-app/workflows', {
     method: 'POST',
     body: JSON.stringify({ workflowId, nodes: [{ nodeId: 'boom', typeId: 'test.always-fails', config: nodeConfig }], edges: [] }),
   });
-  const create = await api<{ runId: string }>('/v1/runs', {
+  const create = await api<{ runId: string }>('/runs', {
     method: 'POST',
     body: JSON.stringify({ workflowId, inputs: {}, tenantId: '_anon' }),
   });
@@ -75,11 +77,11 @@ async function failedRun(workflowId: string, nodeConfig: Record<string, unknown>
   let status = 'pending';
   for (let i = 0; i < 200; i++) {
     await new Promise((r) => setTimeout(r, 25));
-    status = (await api<{ status: string }>(`/v1/runs/${runId}`)).body.status;
+    status = (await api<{ status: string }>(`/runs/${runId}`)).body.status;
     if (['completed', 'failed', 'cancelled'].includes(status)) break;
   }
   expect(status).toBe('failed');
-  const events = (await api<{ events?: Ev[] }>(`/v1/runs/${runId}/debug-bundle`)).body.events ?? [];
+  const events = (await api<{ events?: Ev[] }>(`/host/openwop-app/runs/${bareRunId(runId)}/debug-bundle`)).body.events ?? [];
   return { runId, events };
 }
 
@@ -88,7 +90,7 @@ describe('RFC 0053 — a terminally-failed run is dead-lettered', () => {
     const { runId, events } = await failedRun('rfc0053.basic');
     const dl = events.find((e) => e.type === 'run.dead_lettered');
     expect(dl, 'no run.dead_lettered event was emitted').toBeTruthy();
-    expect(dl?.payload?.runId).toBe(runId);
+    expect(dl?.payload?.runId).toBe(bareRunId(runId));
     expect(dl?.payload?.nodeId).toBe('boom');
     expect(dl?.payload?.attempts).toBe(1); // no config.retry ⇒ one attempt
     expect(typeof dl?.payload?.reason).toBe('string');
@@ -125,7 +127,7 @@ describe('RFC 0053 — a terminally-failed run is dead-lettered', () => {
 
   it('stays FORK-ELIGIBLE (§C.2) — a dead-lettered run can still be forked', async () => {
     const { runId } = await failedRun('rfc0053.forkable');
-    const fork = await api<{ runId: string }>(`/v1/runs/${runId}:fork`, {
+    const fork = await api<{ runId: string }>(`/runs/${runId}:fork`, {
       method: 'POST',
       body: JSON.stringify({ mode: 'replay' }),
     });
@@ -141,14 +143,16 @@ describe('RFC 0053 — the capability advert is honest', () => {
   // `deadLetter` and `queueBus` as TOP-LEVEL capability properties. Asserting
   // against the schema's actual shape, not the RFC's prose shorthand.
   async function caps(): Promise<Record<string, unknown>> {
-    const r = await api<{ capabilities?: Record<string, unknown> }>('/.well-known/openwop');
-    return r.body.capabilities ?? {};
+    // ADR 0858 P3 — both families have v2 records now, so the claim is read from
+    // the v2 root, where presence is the claim (RFC 0192: no `supported`).
+    return buildV2Advertisement(loadConfigFromEnv());
   }
 
-  it('advertises deadLetter.supported, distinct from queueBus', async () => {
+  it('advertises deadLetter, distinct from queueBus', async () => {
     const c = await caps();
-    const dl = c['deadLetter'] as { supported?: boolean } | undefined;
-    expect(dl?.supported).toBe(true);
+    const dl = c['deadLetter'] as Record<string, unknown> | undefined;
+    expect(dl, 'the v2 root carries a deadLetter record').toBeTruthy();
+    expect(dl).not.toHaveProperty('supported');
     // Distinct surfaces — the RFC calls out this exact confusion. queueBus
     // dead-letters transport MESSAGES; this one dead-letters RUNS.
     const qb = c['queueBus'] as { deadLetterSupported?: boolean } | undefined;

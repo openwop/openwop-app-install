@@ -31,7 +31,7 @@ import { resolveFeatureToggle } from '../../host/agentToolKit.js';
 import { listOrgs, resolveEffectiveAccess } from '../../host/accessControlService.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { getNodeRegistry } from '../../executor/nodeRegistry.js';
-import { createCanvasForTenant, getCanvasForTenant, updateCanvasForTenant } from '../../host/canvasSurface.js';
+import { createCanvasForTenant, updateCanvasForTenant, getCanvasForCaller } from '../../host/canvasSurface.js';
 import { SLIDES_CANVAS_TYPE } from './blockCatalog.js';
 import { validateSlidesDoc } from './validateSlidesDoc.js';
 import { slidesCatalogProjection } from './surface.js';
@@ -158,6 +158,7 @@ export function registerSlidesAgentTools(): void {
     // catalog (legal types + enum values), no tenant or user data. Fencing a closed
     // catalog tells the model to distrust the very vocabulary it must author against.
     contentTrust: 'trusted',
+    effect: 'read',
     // ADR 0604 (TOCC-2) — closed world: an elided enum/id list here makes the
     // model author against a catalog that is not this host's.
     schemaCarrying: true,
@@ -180,6 +181,7 @@ export function registerSlidesAgentTools(): void {
   // ── The deck-state read path: the model READS an existing deck. ───────────
   registerFeatureAgentTool({
     contentTrust: 'untrusted',   // the USER's deck content
+    effect: 'read',
     // ADR 0604 (TOCC-2) — closed world: an elided enum/id list here makes the
     // model author against a catalog that is not this host's.
     schemaCarrying: true,
@@ -210,7 +212,7 @@ export function registerSlidesAgentTools(): void {
       if ('content' in gate) return gate;
       const canvasId = str(input.canvasId);
       if (!canvasId) return toolError('validation_error', '`canvasId` is required.');
-      const canvas = await getCanvasForTenant(scope.tenantId, canvasId);
+      const canvas = await getCanvasForCaller(scope.tenantId, canvasId, { subject: scope.actingUserId });
       if (!canvas || canvas.canvasTypeId !== SLIDES_CANVAS_TYPE) {
         return toolError('not_found', `Slide deck '${canvasId}' not found in this workspace.`);
       }
@@ -228,6 +230,7 @@ export function registerSlidesAgentTools(): void {
   // ── The deliverable path: normalize → validate → persist → real reference. ─
   registerFeatureAgentTool({
     contentTrust: 'untrusted',   // echoes the deck it rendered
+    effect: 'write',
     def: {
       name: SLIDES_RENDER_TOOL_ID,
       description:
@@ -280,7 +283,7 @@ export function registerSlidesAgentTools(): void {
         if (!Number.isInteger(baseVersion) || baseVersion < 1) {
           return toolError('validation_error', 'Updating an existing deck requires `baseVersion` — read it with the get-design tool first.');
         }
-        const existing = await getCanvasForTenant(scope.tenantId, canvasId);
+        const existing = await getCanvasForCaller(scope.tenantId, canvasId, { subject: scope.actingUserId });
         if (!existing || existing.canvasTypeId !== SLIDES_CANVAS_TYPE) {
           return toolError('not_found', `Slide deck '${canvasId}' not found in this workspace.`);
         }

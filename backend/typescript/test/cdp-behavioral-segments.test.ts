@@ -46,23 +46,23 @@ function client() {
 let n = 0;
 async function owner() {
   const c = client();
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `cdpc-${Date.now()}-${n++}@a.test`, tenantId: `org:cdpc-${Date.now()}-${n++}` });
+  const r = await c.post('/host/openwop-app/test/login', { email: `cdpc-${Date.now()}-${n++}@a.test`, tenantId: `org:cdpc-${Date.now()}-${n++}` });
   expect(r.status).toBe(201);
   return c;
 }
 const enable = async (id: string) => { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status: 'on' }, 'test'); };
-const members = async (c: ReturnType<typeof client>, id: string) => (await c.get(`/v1/host/openwop-app/crm/segments/${id}/members`)).body.members as { contactId: string }[];
+const members = async (c: ReturnType<typeof client>, id: string) => (await c.get(`/host/openwop-app/crm/segments/${id}/members`)).body.members as { contactId: string }[];
 
 describe('CDP-C behavioral/calculated segment traits', () => {
   it('numeric ops over identifierCount select the right members', async () => {
     await enable('crm');
     const c = await owner();
-    const a = (await c.post('/v1/host/openwop-app/crm/contacts', { name: 'A', email: 'a@x.test' })).body; // identifierCount = 1
-    const b = (await c.post('/v1/host/openwop-app/crm/contacts', { name: 'B', email: 'b@x.test' })).body;
-    await c.post(`/v1/host/openwop-app/crm/contacts/${b.contactId}/identifiers`, { type: 'phone', value: '+15550001' });
-    await c.post(`/v1/host/openwop-app/crm/contacts/${b.contactId}/identifiers`, { type: 'loyalty', value: 'L1' }); // B = 3
+    const a = (await c.post('/host/openwop-app/crm/contacts', { name: 'A', email: 'a@x.test' })).body; // identifierCount = 1
+    const b = (await c.post('/host/openwop-app/crm/contacts', { name: 'B', email: 'b@x.test' })).body;
+    await c.post(`/host/openwop-app/crm/contacts/${b.contactId}/identifiers`, { type: 'phone', value: '+15550001' });
+    await c.post(`/host/openwop-app/crm/contacts/${b.contactId}/identifiers`, { type: 'loyalty', value: 'L1' }); // B = 3
 
-    const seg = (await c.post('/v1/host/openwop-app/crm/segments', { name: 'multi-id', filters: [{ field: 'identifierCount', op: 'gte', value: '2' }] })).body;
+    const seg = (await c.post('/host/openwop-app/crm/segments', { name: 'multi-id', filters: [{ field: 'identifierCount', op: 'gte', value: '2' }] })).body;
     const ids = (await members(c, seg.segmentId)).map((m) => m.contactId);
     expect(ids).toContain(b.contactId);
     expect(ids).not.toContain(a.contactId);
@@ -71,9 +71,9 @@ describe('CDP-C behavioral/calculated segment traits', () => {
   it('daysSinceCreated recency: just-created contacts are < 1 day old, not > 0', async () => {
     await enable('crm');
     const c = await owner();
-    await c.post('/v1/host/openwop-app/crm/contacts', { name: 'New', email: 'new@x.test' });
-    const fresh = (await c.post('/v1/host/openwop-app/crm/segments', { name: 'fresh', filters: [{ field: 'daysSinceCreated', op: 'lt', value: '1' }] })).body;
-    const old = (await c.post('/v1/host/openwop-app/crm/segments', { name: 'old', filters: [{ field: 'daysSinceCreated', op: 'gt', value: '0' }] })).body;
+    await c.post('/host/openwop-app/crm/contacts', { name: 'New', email: 'new@x.test' });
+    const fresh = (await c.post('/host/openwop-app/crm/segments', { name: 'fresh', filters: [{ field: 'daysSinceCreated', op: 'lt', value: '1' }] })).body;
+    const old = (await c.post('/host/openwop-app/crm/segments', { name: 'old', filters: [{ field: 'daysSinceCreated', op: 'gt', value: '0' }] })).body;
     expect((await members(c, fresh.segmentId)).length).toBeGreaterThanOrEqual(1);
     expect((await members(c, old.segmentId)).length).toBe(0);
   });
@@ -81,7 +81,7 @@ describe('CDP-C behavioral/calculated segment traits', () => {
   it('rejects a non-numeric value for a numeric op at the write boundary', async () => {
     await enable('crm');
     const c = await owner();
-    const bad = await c.post('/v1/host/openwop-app/crm/segments', { name: 'bad', filters: [{ field: 'identifierCount', op: 'gt', value: 'lots' }] });
+    const bad = await c.post('/host/openwop-app/crm/segments', { name: 'bad', filters: [{ field: 'identifierCount', op: 'gt', value: 'lots' }] });
     expect(bad.status, JSON.stringify(bad.body)).toBe(400);
   });
 });

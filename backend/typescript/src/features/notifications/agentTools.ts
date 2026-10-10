@@ -14,6 +14,7 @@
  */
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
 import { getNotificationEmitter } from '../../notifications/emitter.js';
+import { isSafeInAppPath } from '../../host/safeRedirect.js';
 
 export const NOTIFY_ME_TOOL_ID = 'openwop:notifications.notify-me';
 
@@ -23,28 +24,16 @@ export const AGENT_DELIVERABLE_NOTIFICATION_TYPE = 'agent.deliverable';
 
 const TITLE_MAX = 200;
 const MESSAGE_MAX = 1_000;
-const URL_MAX = 500;
 
 function toolError(error: string, message: string): { content: string; isError: true } {
   return { content: JSON.stringify({ error, message }), isError: true };
 }
 
-/** In-app paths only: leading `/`, not protocol-relative `//`, no whitespace or
- *  control characters (header/markdown smuggling), bounded length. */
-export function isSafeInAppPath(url: string): boolean {
-  if (url.length === 0 || url.length > URL_MAX) return false;
-  if (!url.startsWith('/') || url.startsWith('//')) return false;
-  if (url.includes('\\') || /\s/.test(url)) return false;
-  for (let i = 0; i < url.length; i += 1) {
-    const c = url.charCodeAt(i);
-    if (c < 0x20 || c === 0x7f) return false;
-  }
-  return true;
-}
 
 export function registerNotificationsAgentTools(): void {
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: NOTIFY_ME_TOOL_ID,
       description:

@@ -20,8 +20,14 @@
  *     IdP address; a verified sign-in REPLACES a self-set one;
  *   - the bind route folds the verified claim too.
  *
- * Sabotage (run once, restored): drop the `req.oidcEmail = …` line in
- * `middleware/auth.ts` — the verified lane goes red.
+ * Sabotage that turns it red (re-witnessed in grade-tests wave 2, probes `g2-oidc-*`):
+ *   - drop the `req.oidcEmail = …` line in `middleware/auth.ts` → the verified
+ *     lane, the replace case and the bind case;
+ *   - surface the email WITHOUT the `email_verified === true` check → the
+ *     unverified, absent-flag and replace cases;
+ *   - accept an absent flag (`!== false`) → "a claim WITHOUT the flag";
+ *   - `applyIdpEmail` not re-stamping `'idp'` → the replace and bind cases;
+ *   - the bind route's already-bound branch skipping `applyIdpEmail` → the bind case.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -83,16 +89,16 @@ function client(tokenOf: () => string | undefined): Client {
 
 let n = 0;
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@idp.test`;
-const invitesPath = (orgId: string) => `/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/invites`;
-const ACCEPT = '/v1/host/openwop-app/orgs/invitations/accept';
-const ME = '/v1/host/openwop-app/users/me';
+const invitesPath = (orgId: string) => `/host/openwop-app/orgs/${encodeURIComponent(orgId)}/invites`;
+const ACCEPT = '/host/openwop-app/orgs/invitations/accept';
+const ME = '/host/openwop-app/users/me';
 
 /** The INVITER may use the seam — the finding is about the RECIPIENT's lane. */
 async function inviterOrg(): Promise<{ owner: Client; orgId: string }> {
   const owner = client(() => undefined);
-  const r = await owner.post('/v1/host/openwop-app/test/login', { email: uniqEmail('owner') });
+  const r = await owner.post('/host/openwop-app/test/login', { email: uniqEmail('owner') });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  const org = (await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' })).body;
+  const org = (await owner.post('/host/openwop-app/orgs', { name: 'Acme' })).body;
   return { owner, orgId: org.orgId as string };
 }
 
@@ -147,7 +153,7 @@ describe('USERS-20 — accept on the real OIDC bearer lane (no test seam for the
     const acc = await alice.post(ACCEPT, { token: inv.body.token });
     expect(acc.status, JSON.stringify(acc.body)).toBe(201);
     expect(acc.body.subject).toBe(me.body.userId); // member fields are top-level on the accept response
-    const members = await owner.get(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`);
+    const members = await owner.get(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`);
     expect(members.body.members.some((m: { subject?: string }) => m.subject === me.body.userId)).toBe(true);
   });
 
@@ -165,7 +171,7 @@ describe('USERS-20 — accept on the real OIDC bearer lane (no test seam for the
     const acc = await bob.post(ACCEPT, { token: inv.body.token });
     expect(acc.status, JSON.stringify(acc.body)).toBe(403);
     expect(acc.body.details).toMatchObject({ code: 'forbidden', reason: 'email_unverified' });
-    const preview = await client(() => undefined).get(`/v1/host/openwop-app/orgs/invitations/preview?token=${encodeURIComponent(inv.body.token)}`);
+    const preview = await client(() => undefined).get(`/host/openwop-app/orgs/invitations/preview?token=${encodeURIComponent(inv.body.token)}`);
     expect(preview.status).toBe(200);
   });
 
@@ -188,7 +194,7 @@ describe('USERS-20 — accept on the real OIDC bearer lane (no test seam for the
     // (the personal-owner short-circuit lets her) → 'self' → refused.
     const me0 = await dana.get(ME);
     expect(me0.body.email).toBeUndefined();
-    const patched = await dana.patch(`/v1/host/openwop-app/users/users/${encodeURIComponent(me0.body.userId)}`, { email });
+    const patched = await dana.patch(`/host/openwop-app/users/users/${encodeURIComponent(me0.body.userId)}`, { email });
     expect(patched.status, JSON.stringify(patched.body)).toBe(200);
     expect(patched.body.emailProvenance).toBe('self');
     const refused = await dana.post(ACCEPT, { token: inv.body.token });
@@ -219,11 +225,11 @@ describe('USERS-20 — accept on the real OIDC bearer lane (no test seam for the
     const sub = `fb-erin-${n++}`;
     let token = mint(sub, { email, email_verified: false });
     const erin = client(() => token);
-    const bind0 = await erin.post('/v1/host/openwop-app/users/auth/oidc/bind');
+    const bind0 = await erin.post('/host/openwop-app/users/auth/oidc/bind');
     expect(bind0.status, JSON.stringify(bind0.body)).toBe(200);
     expect(bind0.body.user.email).toBeUndefined();
     token = mint(sub, { email, email_verified: true });
-    const bind1 = await erin.post('/v1/host/openwop-app/users/auth/oidc/bind');
+    const bind1 = await erin.post('/host/openwop-app/users/auth/oidc/bind');
     expect(bind1.status, JSON.stringify(bind1.body)).toBe(200);
     expect(bind1.body.bound).toBe(true);
     expect(bind1.body.user.userId).toBe(bind0.body.user.userId);

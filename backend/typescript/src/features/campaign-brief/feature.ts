@@ -12,16 +12,24 @@
  */
 
 import type { BackendFeature } from '../types.js';
+import { KERNEL_WORKFLOWS, MARKET_INTEL_WORKFLOWS } from './intelWorkflows.js';
+import { registerWorkflowsFeature } from '../../host/workflowFeatureGate.js';
 import { registerCampaignBriefRoutes } from './routes.js';
 import { registerCampaignBriefAgentTools } from './agentTools.js';
 import { buildCampaignBriefSurface } from './surface.js';
 import { onKnowledgeDocumentChanged } from '../../host/knowledgeLifecycle.js';
 import { markKernelsStaleForDoc } from './briefService.js';
 import { getNotificationEmitter } from '../../notifications/emitter.js';
+import { registerFeatureDataExporter } from '../../host/featureDataExport.js';
+import { exportCampaignBriefData } from './dataExport.js';
 
 export const campaignBriefFeature: BackendFeature = {
   id: 'campaign-brief',
   registerRoutes: (deps) => {
+    registerFeatureDataExporter('campaign-brief', exportCampaignBriefData); // ADR 0820 §7 — read-only export, served after a plan lapse
+    // ADR 0820 §7 / G6 — this feature OWNS its chain-backed workflows (registered
+    // in `features/index.ts`): every launch resolves 'campaign-brief' (toggle + plan).
+    registerWorkflowsFeature([...KERNEL_WORKFLOWS, ...MARKET_INTEL_WORKFLOWS].map((w) => w.workflowId), 'campaign-brief');
     registerCampaignBriefRoutes(deps);
     // CFP-1 — the Campaign Brief Strategist's chat tools: reads (get-brief,
     // validate) + the two pipeline igniters (research.run → market-intel,
@@ -50,14 +58,14 @@ export const campaignBriefFeature: BackendFeature = {
   },
   surface: { id: 'campaign-brief', build: buildCampaignBriefSurface },
   requiredPacks: [
-    { name: 'feature.campaign-brief.nodes', version: '1.5.0' },
-    { name: 'feature.campaign-brief.agents', version: '1.3.1' },
+    { name: 'feature.campaign-brief.nodes', version: '1.5.2' },
+    { name: 'vendor.openwop-app.campaign-brief.agents', version: '1.3.2' },
   ],
   toggleDefault: {
     id: 'campaign-brief',
     label: 'Personas & Campaign Brief',
     description:
-      'Define marketing personas (buyer stage, pain points, objections) and campaign briefs that gather product, persona, brand, and channels into one workspace — then generate the messaging kernel, the shared strategic foundation every channel echoes, grounded in your knowledge base with citations. The second layer of Campaign Studio. OFF by default.',
+      'Define marketing personas (buyer stage, pain points, objections) and campaign briefs that gather product, persona, brand, and channels into one workspace — then generate the messaging kernel, the shared strategic foundation every channel echoes, grounded in your knowledge base with citations. The second layer of Campaign Studio.',
     category: 'Marketing',
     status: 'off',
     bucketUnit: 'tenant',

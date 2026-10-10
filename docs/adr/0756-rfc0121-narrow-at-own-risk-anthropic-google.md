@@ -3,6 +3,7 @@
 **Status:** implemented — 2026-09-26
 **Supersedes (in part):** ADR 0180 (the at-own-risk mechanism, for `anthropic` and `google`) and ADR 0182 (the Claude Code harness of the local subscription shim). Everything else in both ADRs stands.
 **Depends on / extends:** ADR 0179 (the §B.8 scope rail), ADR 0180, ADR 0182. Companion: ADR 0757 (GitHub Copilot, the RFC 0121 cleared provider).
+**Superseded in part by:** [ADR 0785](0785-claude-code-local-agent-host.md) (2026-09-29): for the `claude-code` feature path only, the steward accepted app-driven use of the user's own Claude login at the user's own risk. Every rail below stays in force: `subscription:anthropic` is still refused at advertisement, bind and dispatch; the `claude -p` shim route stays deleted; and no Claude credential reaches this host.
 **Surface:** host runtime + the local shim. **NON-NORMATIVE — no new RFC** (narrows this host's use of Active RFC 0121; no wire change).
 
 ## Why this exists

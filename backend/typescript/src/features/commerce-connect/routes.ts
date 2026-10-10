@@ -31,7 +31,7 @@ import {
   listDisputes, listRecentOrders, refundOrder, importSellers, type SellerAccount,
 } from './connectService.js';
 
-const BASE = '/v1/host/openwop-app/commerce-connect';
+const BASE = '/host/openwop-app/commerce-connect';
 
 const FEATURE = { toggleId: 'commerce-connect', label: 'Commerce Connect' } as const;
 

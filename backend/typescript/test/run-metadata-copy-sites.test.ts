@@ -14,7 +14,7 @@
  *
  * `derivedFromRun` had exactly ONE call site repo-wide when §D1 shipped
  * (`routes/runs.ts` `:fork`). The redrive route
- * (`POST /v1/host/openwop-app/runs/redrive`) was the second copier and had
+ * (`POST /host/openwop-app/runs/redrive`) was the second copier and had
  * none, so it HALF-inherited: a present decision survived, an absent one was
  * re-resolved against the live toggle. Proved by execution, not by reading.
  *
@@ -64,6 +64,13 @@ const CLASSIFIED: Record<string, { source: MetadataSource; why: string }> = {
     why: 'Defines insertRunWithStartContext and forwards `derivedFromRun` to stampRunStartContext. It is the consumer of this decision, never the maker.',
   },
 
+  'routes/negotiationAuditRun.ts': {
+    source: 'FRESH',
+    why:
+      'ADR 0858 P4: the §22/§23 invoke seams plant the run whose log records ' +
+      '`negotiation.decided`. It composes the whole record itself (metadata is the literal ' +
+      '`{ seededBy, purpose }`, status `completed`, it never executes). There is no source run.',
+  },
   'routes/effectTransportRetrySeam.ts': {
     source: 'FRESH',
     why:
@@ -152,12 +159,6 @@ const CLASSIFIED: Record<string, { source: MetadataSource; why: string }> = {
     why:
       'Each eval case builds `metadata: { launch: "draft" }` plus the host-side `launchResolved` / ' +
       '`eval` stamps. It reads runs back only to settle the case verdict, after creation.',
-  },
-  'features/crm/routes.ts': {
-    source: 'FRESH',
-    why:
-      'The triage run composes `metadata: { crm, featureVariant }` from the CONTACT row and the toggle ' +
-      'assignment. The run reads in this file serve the CRM run-status views, not run creation.',
   },
   'routes/artifactTypeSeam.ts': {
     source: 'FRESH',

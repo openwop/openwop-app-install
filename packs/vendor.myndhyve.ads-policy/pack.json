@@ -1,14 +1,21 @@
 {
   "name": "vendor.myndhyve.ads-policy",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "MyndHyve ads.policy.check — built-in policy text-rule scanner. Detects claims (guarantees, income, superlatives), trademark mentions, prohibited content (before/after, deceptive urgency), discriminatory targeting. Caller-supplied placement text-limits + trust-guardrail results for fuller coverage; standalone for text-rule-only checks.",
   "author": "MyndHyve",
   "license": "Apache-2.0",
   "homepage": "https://myndhyve.ai/packs/ads-policy",
   "repository": "https://github.com/openwop/openwop",
-  "keywords": ["vendor", "myndhyve", "ads", "policy", "compliance", "trust"],
+  "keywords": [
+    "vendor",
+    "myndhyve",
+    "ads",
+    "policy",
+    "compliance",
+    "trust"
+  ],
   "engines": {
-    "openwop": ">=1.0.0 <2.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "runtime": {
     "language": "javascript",
@@ -28,5 +35,6 @@
       "inputSchemaRef": "schemas/policy-check.input.json",
       "outputSchemaRef": "schemas/policy-check.output.json"
     }
-  ]
+  ],
+  "kind": "node"
 }

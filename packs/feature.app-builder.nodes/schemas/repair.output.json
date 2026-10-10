@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.app-builder.nodes/1.9.3/repair.output.json",
+  "type": "object",
+  "properties": {
+    "artifact": {
+      "description": "The repaired candidate (canvas.app-builder envelope)."
+    },
+    "canvasId": {},
+    "baseVersion": {
+      "description": "The version the candidate was built from (the applyRepair CAS basis)."
+    }
+  }
+}

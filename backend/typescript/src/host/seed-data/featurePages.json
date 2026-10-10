@@ -8,13 +8,13 @@
     "subheading": "OpenWOP brings AI coworkers and repeatable workflows into one reviewable workspace. Begin with the core loop below, then search the catalog when a real task calls for something more.",
     "ctaLabel": "Try it free — no signup",
     "ctaUrl": "/chat",
-    "ctaLabel2": "Read the open standard",
+    "ctaLabel2": "Read the protocol",
     "ctaUrl2": "https://openwop.dev"
   },
   "about": {
     "eyebrow": "The shortest tour",
     "heading": "Three things make the rest click.",
-    "body": "Start in **Chat** with a real request. Give recurring work to **agents** — AI coworkers with a role and tools. Use **workflows** to turn that work into repeatable, visible steps.\n\nFrom there, OpenWOP lets you watch the run, decide where people need to approve it, and keep the record. It is a working app *and* an open standard, so what you build remains portable rather than locked to one vendor. Every card below links to the relevant surface; features marked **optional** are add-ons you can enable when the job needs them."
+    "body": "Start in **Chat** with a real request. Give recurring work to **agents** — AI coworkers with a role and tools. Use **workflows** to turn that work into repeatable, visible steps.\n\nFrom there, OpenWOP lets you watch the run, decide where people need to approve it, and keep the record. It is a working app built on an open-source protocol, so your agents and workflows can move to any host that implements it rather than staying locked to one vendor. Every card below links to the relevant surface; features marked **optional** are add-ons you can enable when the job needs them."
   },
   "howItWorks": {
     "eyebrow": "How it works",
@@ -108,6 +108,7 @@
         { "name": "Users", "tagline": "Manage accounts and identity.", "appPath": "/users", "icon": "user" },
         { "name": "Feature toggles", "tagline": "Turn features on, off, or beta — and split traffic.", "appPath": "/feature-toggles", "icon": "settings" },
         { "name": "CLI", "tagline": "Drive the platform from your terminal.", "appPath": "/cli", "icon": "terminal" },
+        { "name": "Claude Code", "tagline": "Pair your own Claude Code and use it from a chat tab.", "appPath": "/p/claude-code", "icon": "terminal", "optional": true },
         { "name": "Marketplace", "tagline": "Browse and install signed feature packs.", "appPath": "/marketplace", "icon": "package", "optional": true },
         { "name": "Sharing", "tagline": "Share pages and collections with public links.", "appPath": "/sharing", "icon": "link", "optional": true }
       ]
@@ -115,7 +116,7 @@
   ],
   "stats": [
     { "value": "One loop", "label": "chat → workflow → reviewable run" },
-    { "value": "Open", "label": "standard — no vendor lock-in" },
+    { "value": "Open", "label": "source protocol — no vendor lock-in" },
     { "value": "Optional", "label": "add-ons when the job calls for them" },
     { "value": "Yours", "label": "data, agents & AI keys" }
   ],

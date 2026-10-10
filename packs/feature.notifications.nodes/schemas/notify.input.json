@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/feature.notifications.nodes/1.0.0/notify.input.json",
+  "$id": "https://packs.openwop.dev/feature.notifications.nodes/1.0.1/notify.input.json",
   "title": "NotifyInput",
   "description": "Runtime content. `title` is the only required field — everything about WHO is config, everything about WHAT is input. There is deliberately no recipient input: a chain author cannot know a per-recipient identifier, which is exactly the defect this node replaces.",
   "type": "object",

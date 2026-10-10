@@ -13,26 +13,25 @@
 import type { Request } from 'express';
 import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
-import { authorizeOrgScope, requireFeatureEnabled, requireString, optionalString, tenantOf } from '../featureRoute.js';
+import { authorizeOrgScope, requireFeatureEnabled, requireString, optionalString, tenantOf, toggleSubjectOf } from '../featureRoute.js';
 import { resolveCallerUser } from '../users/usersGuards.js';
 import { getOrg, resolveEffectiveAccess } from '../../host/accessControlService.js';
-import { resolveSubjectAccess, levelSatisfies } from '../../host/subjectAccess.js';
 import type { Subject, SubjectKind } from '../../host/subject.js';
 import { ingestDocument } from '../kb/kbService.js';
 import {
   listDocuments, getDocument, getDocumentByIdForTenant, createDocument, updateDocument, deleteDocument,
   listVersions, getVersion, addVersion,
   listTemplates, getTemplate, createTemplate, updateTemplate, deleteTemplate, assemble,
-  instantiateSeedTemplate, renderDocument, RENDER_FORMATS, materializeCanvasToDocument,
+  instantiateSeedTemplate, renderDocument, RENDER_FORMATS, materializeCanvasToDocument, canReadDocument,
   type DocStatus, type Provenance, type RenderFormat,
 } from './documentsService.js';
 import { listSeedTemplates } from './seedTemplates.js';
 import { markdownToHtml } from './render.js';
 import { listArtifactTypes } from '../../host/artifactTypes.js';
-import { listCanvasesForTenant, getCanvasForTenant, deleteCanvasForTenant } from '../../host/canvasSurface.js';
+import { getCanvasForTenant, deleteCanvasForTenant, listCanvasesForCaller, getCanvasForCaller } from '../../host/canvasSurface.js';
 
 const FEATURE = { toggleId: 'documents', label: 'Documents & Templates' };
-const ORG = '/v1/host/openwop-app/documents/orgs/:orgId';
+const ORG = '/host/openwop-app/documents/orgs/:orgId';
 
 type Scope = 'workspace:read' | 'workspace:write';
 const SUBJECT_KINDS: readonly SubjectKind[] = ['agent', 'user', 'project'];
@@ -57,7 +56,7 @@ export function registerDocumentsRoutes(deps: RouteDeps): void {
   // requireOrgScope applies — but against the RESOLVED org. Every failure is a
   // uniform 404 (a tenant member without org access must not learn the doc
   // exists). Distinct path segment (`/locate/` vs `/orgs/`) — no route shadow.
-  app.get('/v1/host/openwop-app/documents/locate/:documentId', async (req, res, next) => {
+  app.get('/host/openwop-app/documents/locate/:documentId', async (req, res, next) => {
     try {
       await requireFeatureEnabled(req, FEATURE.toggleId, FEATURE.label);
       // ADR 0508 Phase 2 — this handler HAND-ROLLS the `requireOrgScope` logic
@@ -97,11 +96,9 @@ export function registerDocumentsRoutes(deps: RouteDeps): void {
       // ADR 0610 D3′ — drop project-owned rows the caller cannot READ (a private
       // project's docs must not enumerate to a non-member org viewer). One seam
       // call per owned row; null ⇒ not membership-scoped ⇒ keep.
-      const visible = (await Promise.all(documents.map(async (d) => {
-        if (!d.ownerSubject) return d;
-        const level = await resolveSubjectAccess(tenantId, d.ownerSubject, user.userId);
-        return level !== null && !levelSatisfies(level, 'read') ? null : d;
-      }))).filter((d): d is NonNullable<typeof d> => d !== null);
+      // ADR 0838 D3 — the ONE read predicate.
+      const visible = (await Promise.all(documents.map(async (d) => ((await canReadDocument(tenantId, d, user.userId)) ? d : null))))
+        .filter((d): d is NonNullable<typeof d> => d !== null);
       res.json({ documents: visible });
     } catch (err) { next(err); }
   });
@@ -112,9 +109,11 @@ export function registerDocumentsRoutes(deps: RouteDeps): void {
   // for ANY canvas type, so the picker doesn't depend on editor toggles.
   app.get(`${ORG}/canvas-sources`, async (req, res, next) => {
     try {
-      const { tenantId } = await authz(req, 'workspace:read');
+      const { user, tenantId } = await authz(req, 'workspace:read');
       const q = typeof req.query.q === 'string' ? req.query.q.trim().toLowerCase() : '';
-      const rows = await listCanvasesForTenant(tenantId);
+      // Only canvases THIS caller may read (the shared predicate) — a private
+      // project's canvases are not offered to non-members.
+      const rows = await listCanvasesForCaller(tenantId, { subject: user.userId });
       // The picker shows the newest slice, not an unbounded dump — a canvas-
       // heavy tenant would otherwise ship thousands of rows into a modal.
       // `q` (ADR 0316) searches the WHOLE tenant set before the cap, so the
@@ -135,8 +134,10 @@ export function registerDocumentsRoutes(deps: RouteDeps): void {
   // absent/cross-tenant). Relocated verbatim from the removed canvases feature.
   app.delete(`${ORG}/canvases/:canvasId`, async (req, res, next) => {
     try {
-      const { tenantId } = await authz(req, 'workspace:write');
-      const canvas = await getCanvasForTenant(tenantId, req.params.canvasId);
+      const { user, tenantId } = await authz(req, 'workspace:write');
+      // The shared predicate: a non-member may not delete a member-scoped canvas
+      // (uniform 404 — same as absent).
+      const canvas = await getCanvasForCaller(tenantId, req.params.canvasId, { subject: user.userId });
       if (!canvas) throw new OpenwopError('not_found', `canvas '${req.params.canvasId}' not found`, 404);
       // WF-SHARE-3 — the share-link purge that used to sit here (a hand-kept
       // `canvas.app-builder` → `app_builder_canvas` mapping) is GONE: it rides
@@ -154,7 +155,7 @@ export function registerDocumentsRoutes(deps: RouteDeps): void {
     try {
       const { user, orgId, tenantId } = await authz(req, 'workspace:write');
       const canvasId = requireString((req.body ?? {}).canvasId, 'canvasId');
-      const result = await materializeCanvasToDocument(tenantId, orgId, canvasId, user.userId);
+      const result = await materializeCanvasToDocument(tenantId, orgId, canvasId, user.userId, { ...toggleSubjectOf(req), tenantId });
       res.status(result.created ? 201 : 200).json(result);
     } catch (err) { next(err); }
   });
@@ -254,6 +255,8 @@ export function registerDocumentsRoutes(deps: RouteDeps): void {
         ...(body.status !== undefined ? { status: body.status } : {}),
         ...(body.ownerSubject !== undefined ? { ownerSubject: body.ownerSubject } : {}),
         ...(body.promotedCanvasId !== undefined ? { promotedCanvasId: body.promotedCanvasId } : {}),
+        // ADR 0838 A1 — approve what you SAW: the version on the approver's screen.
+        ...(body.approvedVersionId !== undefined ? { approvedVersionId: body.approvedVersionId } : {}),
       });
       if (!doc) throw notFound(req.params.documentId);
       res.json(doc);
@@ -289,6 +292,9 @@ export function registerDocumentsRoutes(deps: RouteDeps): void {
         ...(optionalString(body.renderedMediaToken) ? { renderedMediaToken: optionalString(body.renderedMediaToken)! } : {}),
         producedBy: { kind: 'user', id: user.userId },
         ...(optionalString(body.idempotencyKey) ? { idempotencyKey: optionalString(body.idempotencyKey)! } : {}),
+        // ADR 0838 D5 — a checked save: two people saving at once get `409
+        // stale_base` instead of one silently burying the other's version.
+        ...(body.baseVersionId !== undefined ? { baseVersionId: requireString(body.baseVersionId, 'baseVersionId') } : {}),
       });
       res.status(201).json(version);
     } catch (err) { next(err); }
@@ -502,7 +508,6 @@ async function assertOwnerReadable(
   caller: string,
   documentId: string,
 ): Promise<void> {
-  if (!ownerSubject) return;
-  const level = await resolveSubjectAccess(tenantId, ownerSubject, caller);
-  if (level !== null && !levelSatisfies(level, 'read')) throw notFound(documentId);
+  // ADR 0838 D3 — a thin wrapper over THE predicate every exit shares.
+  if (!(await canReadDocument(tenantId, { ...(ownerSubject ? { ownerSubject } : {}) }, caller))) throw notFound(documentId);
 }

@@ -14,8 +14,11 @@
  */
 
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
+import { resolveFeatureToggle } from '../../host/agentToolKit.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
+import { OpenwopError } from '../../types.js';
 import {
+  assertAgentAuthorWrite,
   buildAgentAuthorCatalog,
   validateAgentDraft,
   persistAgentDraft,
@@ -32,6 +35,16 @@ type ToolResult = { content: string; isError?: boolean };
 function toolError(error: string, message: string): ToolResult {
   return { content: JSON.stringify({ error, message }), isError: true };
 }
+
+/** ADR 0775 D7 (`ARWF-9`) — per-call toggle honesty (ADR 0308 D2): the
+ *  `agent-author` toggle is default OFF, and the tools used to run regardless.
+ *  Per-tenant, dynamic, fail-closed. */
+async function agentAuthorEnabled(scope: BundleScope): Promise<boolean> {
+  return resolveFeatureToggle('agent-author', scope);
+}
+
+const DISABLED = (): ToolResult =>
+  toolError('feature_disabled', 'Agent Author is not enabled for this workspace — tell the user they can create an agent in the wizard at /agents/new.');
 
 /** JSON Schema for the draft object, shared by draft/validate/persist inputs.
  *  Mirrors `AgentDraft` — the pack's schemas/*.json pin the same shape. */
@@ -58,6 +71,7 @@ export function registerAgentAuthorAgentTools(): void {
   // installed agent packs). The ids alone would be trusted; the personas are not.
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     // ADR 0604 (TOCC-2) — closed world: an elided enum/id list here makes the
     // model author against a catalog that is not this host's.
     schemaCarrying: true,
@@ -73,6 +87,7 @@ export function registerAgentAuthorAgentTools(): void {
       if (!scope.actingUserId) {
         return { content: JSON.stringify({ agents: [], workflows: [], roster: [], autonomyLevels: [] }) };
       }
+      if (!(await agentAuthorEnabled(scope))) return DISABLED();
       return { content: JSON.stringify(await buildAgentAuthorCatalog({ tenantId: scope.tenantId })) };
     },
   });
@@ -83,6 +98,7 @@ export function registerAgentAuthorAgentTools(): void {
   registerFeatureAgentTool({
     // TRUSTED: returns the CLOSED WORLD (legal ids + autonomy enums) — host-authored.
     contentTrust: 'trusted',
+    effect: 'read',
     def: {
       name: AGENT_AUTHOR_DRAFT_TOOL_ID,
       description:
@@ -94,6 +110,7 @@ export function registerAgentAuthorAgentTools(): void {
     },
     async run(input, scope: BundleScope) {
       if (!scope.actingUserId) return toolError('no_acting_user', 'Agent authoring requires a signed-in user turn.');
+      if (!(await agentAuthorEnabled(scope))) return DISABLED();
       const v = await validateAgentDraft((input as { draft?: unknown }).draft, { tenantId: scope.tenantId });
       return { content: JSON.stringify(v) };
     },
@@ -104,6 +121,7 @@ export function registerAgentAuthorAgentTools(): void {
   registerFeatureAgentTool({
     // TRUSTED: verdicts over the model's OWN draft; echoes no stored text.
     contentTrust: 'trusted',
+    effect: 'read',
     def: {
       name: AGENT_AUTHOR_VALIDATE_TOOL_ID,
       description:
@@ -113,6 +131,7 @@ export function registerAgentAuthorAgentTools(): void {
     },
     async run(input, scope: BundleScope) {
       if (!scope.actingUserId) return toolError('no_acting_user', 'Agent authoring requires a signed-in user turn.');
+      if (!(await agentAuthorEnabled(scope))) return DISABLED();
       const v = await validateAgentDraft((input as { draft?: unknown }).draft, { tenantId: scope.tenantId });
       return { content: JSON.stringify({ ok: v.ok, errors: v.errors }) };
     },
@@ -124,6 +143,7 @@ export function registerAgentAuthorAgentTools(): void {
   registerFeatureAgentTool({
     // TRUSTED: host-minted id + ack.
     contentTrust: 'trusted',
+    effect: 'write',
     def: {
       name: AGENT_AUTHOR_PERSIST_TOOL_ID,
       description:
@@ -145,6 +165,7 @@ export function registerAgentAuthorAgentTools(): void {
     },
     async run(input, scope: BundleScope) {
       if (!scope.actingUserId) return toolError('no_acting_user', 'Creating an agent requires a signed-in user turn — it writes the roster.');
+      if (!(await agentAuthorEnabled(scope))) return DISABLED();
       const { draft, mode } = input as { draft?: unknown; mode?: unknown };
       if (mode === 'draft') {
         // Stash ONLY a closed-world-valid draft (the doctrine: model output
@@ -154,6 +175,15 @@ export function registerAgentAuthorAgentTools(): void {
         if (!v.ok) return toolError('validation_error', v.errors.join(' '));
         await stashAgentDraft(scope.tenantId, scope.actingUserId, v.draft);
         return { content: JSON.stringify({ stashed: true, persona: v.draft.persona, wizardPath: '/agents/new' }) };
+      }
+      try {
+        // ADR 0775 D7 — the SAME write authority `POST /roster` requires.
+        await assertAgentAuthorWrite(scope);
+      } catch (e) {
+        if (e instanceof OpenwopError) return toolError(e.code, e.code === 'forbidden_scope'
+          ? 'You do not have permission to create agents in this workspace (it needs edit access). Nothing was created — tell the user to ask a workspace owner.'
+          : e.message);
+        throw e;
       }
       try {
         const out = await persistAgentDraft(draft, { tenantId: scope.tenantId });

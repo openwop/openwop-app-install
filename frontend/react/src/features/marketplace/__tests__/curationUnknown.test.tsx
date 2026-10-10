@@ -13,6 +13,10 @@
  * harness needs the whole client + orgs + reviews + access surface mocked. I tried
  * that first and every assertion failed on fixture completeness rather than on the
  * behaviour under test — which is the trap, not the bug.
+ *
+ * Sabotage-witnessed (/grade-tests wave 10): dropping `curationUnknown` from the
+ * checkbox's `disabled` reds case 1; always-disabled reds case 2; `checked={true}`
+ * or dropping the hidden chip reds case 3.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
@@ -53,22 +57,18 @@ const view = (p: ReturnType<typeof props>) =>
 afterEach(cleanup);
 
 describe('availability control when curation is unknown', () => {
-  it('is INERT and says so — a checkbox reflecting a fabricated set is worse than none', () => {
-    view(props(true));
+  it('is INERT and says so, and a click fires no write — a checkbox reflecting a fabricated set is worse than none', () => {
+    const p = props(true);
+    view(p);
     const box = screen.getByRole('checkbox') as HTMLInputElement;
     expect(box.disabled).toBe(true);
     expect(screen.getByText(/Availability unknown/i)).toBeTruthy();
     // And it must NOT present the confident label as though the state were read.
     expect(screen.queryByText(/^Available in this workspace$/)).toBeNull();
-  });
-
-  it('does not fire the write when clicked while unknown', () => {
-    const p = props(true);
-    view(p);
-    screen.getByRole('checkbox').click();
     // `disabled` blocks the DOM event; the page-level `if (curationUnknown) return`
     // is the second line of defence. Either way no write is attempted from a set
     // that was never read.
+    box.click();
     expect(p.onToggleAvailability).not.toHaveBeenCalled();
   });
 

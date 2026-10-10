@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/feature.kb.nodes/1.2.0/list-collections.output.json",
+  "$id": "https://packs.openwop.dev/feature.kb.nodes/1.2.1/list-collections.output.json",
   "title": "KbListCollectionsOutput",
   "type": "object",
   "required": [

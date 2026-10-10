@@ -36,7 +36,10 @@ import { Button } from './Button.js';
  */
 
 export type ToastVariant = 'success' | 'error' | 'info' | 'warning';
-export interface ToastItem { id: number; variant: ToastVariant; message: string }
+/** ADR 0773 G-03a — an optional single action on a toast (e.g. "Undo"). Running
+ *  it dismisses the toast. Additive: every existing toast has none. */
+export interface ToastAction { label: string; run: () => void }
+export interface ToastItem { id: number; variant: ToastVariant; message: string; action?: ToastAction }
 
 let items: ToastItem[] = [];
 const listeners = new Set<() => void>();
@@ -87,7 +90,7 @@ export function setToastsPaused(next: boolean): void {
   }
 }
 
-function push(variant: ToastVariant, message: string, ttlMs: number): number {
+function push(variant: ToastVariant, message: string, ttlMs: number, action?: ToastAction): number {
   // UI-4: coalesce an identical (variant + message) toast that is already
   // showing instead of stacking duplicates — a bulk op that fires the same
   // "Saved"/"Failed" N times shows ONE toast, not a wall of them. Refresh the
@@ -106,13 +109,14 @@ function push(variant: ToastVariant, message: string, ttlMs: number): number {
   // re-announces rather than being swallowed as an unchanged string.
   announce(message, { assertive: variant === 'error' });
 
-  const existing = items.find((t) => t.variant === variant && t.message === message);
+  // An ACTION toast never coalesces: its action is bound to one event.
+  const existing = action ? undefined : items.find((t) => t.variant === variant && t.message === message);
   if (existing) {
     armDismiss(existing.id, ttlMs);
     return existing.id;
   }
   const id = ++seq;
-  items = [...items, { id, variant, message }];
+  items = [...items, { id, variant, message, ...(action ? { action } : {}) }];
   emit();
   armDismiss(id, ttlMs);
   return id;
@@ -135,6 +139,9 @@ export const toast = {
   error: (m: string, ttlMs = 0) => push('error', m, ttlMs),
   info: (m: string, ttlMs = 4000) => push('info', m, ttlMs),
   warning: (m: string, ttlMs = 5000) => push('warning', m, ttlMs),
+  /** ADR 0773 G-03a — a toast carrying one action (Undo). Paused like any other
+   *  on hover/focus, so the action stays reachable (WCAG 2.2.1). */
+  withAction: (variant: ToastVariant, m: string, action: ToastAction, ttlMs = 5000) => push(variant, m, ttlMs, action),
 };
 
 /** @internal — the store seam `ToasterView` renders from. */
@@ -165,6 +172,7 @@ function ToasterFallback(): JSX.Element {
       {list.map((t) => (
         <div key={t.id} className={`toast alert ${t.variant}`}>
           <span className="toast-message">{t.message}</span>
+          {t.action ? <Button variant="secondary" size="sm" className="toast-action" onClick={() => { t.action?.run(); dismiss(t.id); }}>{t.action.label}</Button> : null}
           <Button variant="quiet" size="sm" className="toast-close" aria-label={i18n.t('ui:toastDismiss')} onClick={() => dismiss(t.id)}>×</Button>
         </div>
       ))}

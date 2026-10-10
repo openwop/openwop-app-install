@@ -21,7 +21,7 @@ import { listPendingPushes, deletePendingPush, pendingPushCounts } from './pendi
 import { makeWebinarAdapter } from './host/webinarAdapter.js';
 
 const FEATURE = { toggleId: 'webinars', label: 'Webinars' };
-const ORG = '/v1/host/openwop-app/webinars/orgs/:orgId';
+const ORG = '/host/openwop-app/webinars/orgs/:orgId';
 
 type Scope = 'workspace:read' | 'workspace:write';
 

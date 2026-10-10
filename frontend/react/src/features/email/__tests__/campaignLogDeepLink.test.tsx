@@ -11,24 +11,37 @@
  * click, so an INBOUND `?log=` link opens a populated panel instead of an empty one.
  * That is the difference between a deep link that works and one that only looks like
  * it does.
+ *
+ * Sabotage-witnessed (/grade-tests wave 9): `logFor` ignoring the URL turns case 1
+ * red (`w9g4-cl-url-open`); a default `?log=` turns case 2 red (`w9g4-cl-url-none`).
+ * A third case ("a ?log= naming an unknown campaign does not crash the page") was
+ * CUT: the stale id matches no rendered row, so no code path could crash and its
+ * probe stayed green (`w9g4-cl-stale-VACUOUS`). A FAILED log read on a real row is
+ * pinned by `adr0654D10.test.tsx` "failed log read → failed state + Retry…"
+ * (witnessed red by `w9g4-d10-sends-failed`).
+ *
+ * Every read the page makes is mocked (incl. `getProviderStatus`), so this file
+ * no longer needs a `test-live-fetch-allowlist.txt` line.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import type { Campaign, SendLog } from '../emailClient.js';
+import type * as EC from '../emailClient.js';
+import type { Campaign, EmailSettings, ProviderStatus, SendLog } from '../emailClient.js';
 
-const listCampaigns = vi.fn();
-const listTemplates = vi.fn();
-const listSends = vi.fn();
+const listCampaigns = vi.fn<typeof EC.listCampaigns>();
+const listTemplates = vi.fn<typeof EC.listTemplates>();
+const listSends = vi.fn<typeof EC.listSends>();
 
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 vi.mock('../emailClient.js', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
-  listCampaigns: (...a: unknown[]) => listCampaigns(...a),
-  listTemplates: (...a: unknown[]) => listTemplates(...a),
-  listSends: (...a: unknown[]) => listSends(...a),
+  listCampaigns: (...a: Parameters<typeof EC.listCampaigns>) => listCampaigns(...a),
+  listTemplates: (...a: Parameters<typeof EC.listTemplates>) => listTemplates(...a),
+  listSends: (...a: Parameters<typeof EC.listSends>) => listSends(...a),
   listSegments: async () => [],
-  getEmailSettings: async () => ({}),
+  getEmailSettings: async (): Promise<EmailSettings> => ({ senderAddress: 'news@acme.test', configured: true }),
+  getProviderStatus: async (): Promise<ProviderStatus> => ({ providers: [], defaultProvider: null, senderAddress: 'news@acme.test' }),
   listOrgs: async () => [{ orgId: 'org:1', name: 'Acme' }],
 }));
 vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
@@ -40,11 +53,11 @@ const { EmailPage } = await import('../EmailPage.js');
 const campaign: Campaign = {
   campaignId: 'c1', orgId: 'org:1', templateId: 'tpl1',
   audience: { stage: 'lead' }, status: 'sent', createdAt: '', updatedAt: '',
-} as Campaign;
+};
 
 const send: SendLog = {
   sendId: 's1', campaignId: 'c1', contactId: 'contact-42', status: 'sent', ts: '',
-} as SendLog;
+};
 
 const renderAt = (entry: string) =>
   render(<MemoryRouter initialEntries={[entry]}><EmailPage /></MemoryRouter>);
@@ -52,7 +65,7 @@ const renderAt = (entry: string) =>
 beforeEach(() => {
   vi.clearAllMocks();
   listCampaigns.mockResolvedValue([campaign]);
-  listTemplates.mockResolvedValue([{ templateId: 'tpl1', name: 'Welcome', subject: 'Hi', body: 'x' }]);
+  listTemplates.mockResolvedValue([{ templateId: 'tpl1', orgId: 'org:1', name: 'Welcome', subject: 'Hi', body: 'x', createdAt: '', updatedAt: '' }]);
   listSends.mockResolvedValue([send]);
 });
 afterEach(cleanup);
@@ -70,18 +83,9 @@ describe('the campaign send log follows the URL', () => {
     renderAt('/email?org=org:1');
     // Give the page the same settle time the positive case gets, so this is a
     // real "did not happen" rather than a race that has not resolved yet.
+    // `listCampaigns` and the sends effect fire in the SAME org commit, so once the
+    // campaigns read has been issued the sends effect has already run (or not).
     await waitFor(() => expect(listCampaigns).toHaveBeenCalled());
     expect(listSends).not.toHaveBeenCalled();
-  });
-
-  it('a ?log= naming an unknown campaign does not crash the page', async () => {
-    // The param is user-supplied and can outlive the campaign it names.
-    listSends.mockRejectedValue(new Error('404'));
-    renderAt('/email?org=org:1&log=deleted-campaign');
-    await waitFor(() => expect(listSends).toHaveBeenCalledWith('org:1', 'deleted-campaign'));
-    // The campaigns list still renders — a stale param must not take the page.
-    // `findAll`: the template name appears both as a card and as an option in
-    // the new-campaign picker, by design.
-    expect((await screen.findAllByText('Welcome')).length).toBeGreaterThan(0);
   });
 });

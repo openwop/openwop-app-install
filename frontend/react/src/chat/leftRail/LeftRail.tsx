@@ -57,10 +57,12 @@ interface Props {
    *  conversations via its tab strip + library picker, so its rail is Runs + Reviews
    *  only — ADR 0140). The standalone ChatSidebar always supplies it. */
   conversationsProps?: Omit<ComponentProps<typeof ConversationsRail>, 'onClose'>;
-  progressProps: Omit<ComponentProps<typeof WorkflowProgressPanel>, 'onClose'>;
+  /** ADR 0768 P2 — omit to move Runs out of the rail (both chat shells now show
+   *  runs in the right-hand Workbench). Kept optional for any other host. */
+  progressProps?: Omit<ComponentProps<typeof WorkflowProgressPanel>, 'onClose'>;
   reviewsProps: Omit<ComponentProps<typeof ReviewInboxPanel>, 'onClose'>;
 
-  progressBadgeCount: number;
+  progressBadgeCount?: number;
   /** Pending human-review count (ADR 0068/0070) — drives the Reviews tab badge. */
   reviewsBadgeCount: number;
 }
@@ -81,7 +83,7 @@ export function LeftRail({
   const tabs: TabDescriptor[] = [
     // The Conversations panel is optional — the multi-tab deck omits it (ADR 0140).
     ...(conversationsProps ? [{ id: 'conversations' as const, labelKey: 'tabConversations', icon: <MessageSquareIcon size={16} /> }] : []),
-    { id: 'progress', labelKey: 'tabWorkflow', icon: <WorkflowIcon size={16} />, badge: progressBadgeCount },
+    ...(progressProps ? [{ id: 'progress' as const, labelKey: 'tabWorkflow', icon: <WorkflowIcon size={16} />, ...(progressBadgeCount !== undefined ? { badge: progressBadgeCount } : {}) }] : []),
     { id: 'reviews', labelKey: 'tabReviews', icon: <InboxIcon size={16} />, badge: reviewsBadgeCount, badgeLabel: t('reviewsBadgeA11y', { count: reviewsBadgeCount }) },
   ];
 
@@ -112,7 +114,7 @@ export function LeftRail({
         {activeTab === 'conversations' && conversationsProps && (
           <ConversationsRail {...conversationsProps} onClose={close} />
         )}
-        {activeTab === 'progress' && (
+        {activeTab === 'progress' && progressProps && (
           <WorkflowProgressPanel {...progressProps} onClose={close} />
         )}
         {activeTab === 'reviews' && (

@@ -41,18 +41,21 @@ async function call(method: string, path: string, body?: unknown, headers: Recor
   return { status: res.status, json: (await res.json().catch(() => undefined)) as any };
 }
 
-async function createRunV1(): Promise<string> {
-  const r = await call('POST', '/v1/runs', { workflowId: 'conformance-noop', inputs: {} });
-  expect(r.status, 'v1 create').toBe(201);
+// ADR 0812 P3c-0 — runs are created under major 2, which hands back the
+// tenant-bound id (the v1 create that returned a bare id is gone).
+async function createRunV2(): Promise<string> {
+  const r = await call('POST', '/runs', { workflowId: 'conformance-noop', inputs: {} }, { 'OpenWOP-Version': '2' });
+  expect(r.status, 'v2 create').toBe(201);
   return r.json.runId as string;
 }
 
 describe('POST /runs:bulk-cancel accepts the tenant-bound id under major 2', () => {
   it('ACCEPTS the projected id a v2 client was handed (the leg that was broken)', async () => {
-    const bare = await createRunV1();
+    const bound = await createRunV2();
     // What GET /runs/{id} under major 2 returns — the id the client actually holds.
-    const v2read = await call('GET', `/runs/${bare}`, undefined, { 'OpenWOP-Version': '2' });
-    expect(v2read.json.runId, 'v2 read is tenant-bound').toBe(`default/${bare}`);
+    const v2read = await call('GET', `/runs/${encodeURIComponent(bound)}`, undefined, { 'OpenWOP-Version': '2' });
+    expect(v2read.json.runId, 'v2 read is tenant-bound').toBe(bound);
+    expect(bound.startsWith('default/'), bound).toBe(true);
 
     const r = await call('POST', '/runs:bulk-cancel', { runIds: [v2read.json.runId] }, { 'OpenWOP-Version': '2' });
     expect(r.status).toBe(200);
@@ -63,15 +66,11 @@ describe('POST /runs:bulk-cancel accepts the tenant-bound id under major 2', () 
     expect(row.error?.error, JSON.stringify(row)).toBe('run_terminal');
   });
 
-  it('still accepts a BARE id under major 1 (v1 callers untouched)', async () => {
-    const bare = await createRunV1();
-    const r = await call('POST', '/v1/runs:bulk-cancel', { runIds: [bare] });
-    expect(r.json.results[0].ok).toBe(true);
-  });
+  // ADR 0812 P3c-0 — the "bare id under major 1" leg was deleted with major 1.
 
   it('REFUSES a foreign tenant segment as not_found (no existence oracle)', async () => {
-    const bare = await createRunV1();
-    const r = await call('POST', '/runs:bulk-cancel', { runIds: [`other-tenant/${bare}`] }, { 'OpenWOP-Version': '2' });
+    const opaque = (await createRunV2()).split('/')[1];
+    const r = await call('POST', '/runs:bulk-cancel', { runIds: [`other-tenant/${opaque}`] }, { 'OpenWOP-Version': '2' });
     expect(r.json.results[0].ok).toBe(false);
     expect(r.json.results[0].error.error, 'v2 entry error is the envelope, not the v1 {code} object').toBe('not_found');
   });

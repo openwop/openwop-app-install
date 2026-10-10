@@ -23,6 +23,8 @@ export const MESSAGE_PAGE_SIZE = 50;
 // up and surfacing a retry. Generous: removing the ~60s ceiling for long replies
 // is the whole point, so this matches the backend dispatch budget (180s).
 export const ASYNC_SETTLE_TIMEOUT_MS = 180_000;
+/** Poll cadence when the run's event stream fails (useTurnTransport's SSE→poll fallback). */
+export const STREAM_FALLBACK_POLL_MS = 1_500;
 /** The CANONICAL chat-message id for a conversation wire turn — the single id used
  *  for display, the durable store, dedup, and reopen, so there is no per-path id
  *  duality (feedback / regenerate / "load earlier" all key on the same value).

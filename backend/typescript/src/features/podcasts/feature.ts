@@ -22,6 +22,8 @@
  */
 
 import type { BackendFeature } from '../types.js';
+import { podcastsBuiltinWorkflows } from './generateWorkflow.js';
+import { registerWorkflowsFeature } from '../../host/workflowFeatureGate.js';
 import { registerPodcastsRoutes } from './routes.js';
 import { registerPodcastsAgentTools } from './agentTools.js';
 import { buildPodcastsSurface } from './surface.js';
@@ -29,6 +31,9 @@ import { buildPodcastsSurface } from './surface.js';
 export const podcastsFeature: BackendFeature = {
   id: 'podcasts',
   registerRoutes: (deps) => {
+    // ADR 0820 §7 / G6 — this feature OWNS its chain-backed workflows (registered
+    // in `features/index.ts`): every launch resolves 'podcasts' (toggle + plan).
+    registerWorkflowsFeature(podcastsBuiltinWorkflows.map((w) => w.workflowId), 'podcasts');
     // CFP-1 (blocker B1) — the Podcast Producer's real chat tools (list / produce),
     // the ADR 0308 D2 feature-registered-builtin seam: process-wide + inert until
     // the producer pack allowlists the ids; per-tenant toggle + org-access honesty
@@ -44,7 +49,7 @@ export const podcastsFeature: BackendFeature = {
     id: 'podcasts',
     label: 'Podcasts',
     description:
-      'Turn a research notebook into a multi-speaker narrated audio episode. Define reusable show-format and cast profiles (1–4 speakers, each with a voice + persona), then generate an episode: an executor run drafts an outline + a multi-speaker transcript (Documents), voices each turn via the speech-synthesis adapter, and assembles the ordered audio clips. OFF by default; tenant-bucketed.',
+      'Turn a research notebook into a multi-speaker narrated audio episode. Define reusable show-format and cast profiles (1–4 speakers, each with a voice + persona), then generate an episode: an executor run drafts an outline + a multi-speaker transcript (Documents), voices each turn via the speech-synthesis adapter, and assembles the ordered audio clips.',
     category: 'Studio',
     status: 'off',
     bucketUnit: 'tenant',
@@ -53,8 +58,8 @@ export const podcastsFeature: BackendFeature = {
   requiredPacks: [
     // The generation pipeline (outline / transcript / synthesize (RFC 0105) / mix /
     // select-content over ctx.features.{podcasts,notebooks,documents}).
-    { name: 'feature.podcasts.nodes', version: '1.1.0' },
+    { name: 'feature.podcasts.nodes', version: '1.1.1' },
     // The optional Podcast Producer agent (chat-drivability = agent + nodes, ADR 0058).
-    { name: 'feature.podcasts.agents', version: '1.0.1' },
+    { name: 'vendor.openwop-app.podcasts.agents', version: '1.0.2' },
   ],
 };

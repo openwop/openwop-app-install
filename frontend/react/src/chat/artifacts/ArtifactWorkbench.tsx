@@ -7,7 +7,7 @@
  */
 
 import { Button } from '../../ui/Button.js';
-import { Suspense, useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { Suspense, useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Modal } from '../../ui/Modal.js';
 import { StateCard, Notice } from '../../ui/index.js';
@@ -40,9 +40,12 @@ interface Props {
   /** Optional revision to open on (e.g. the revision a review pinned). */
   revisionId?: string;
   onClose: () => void;
+  /** ADR 0768 P2 — render inline in the chat's right-hand Workbench pane
+   *  instead of as a modal. The close affordance then belongs to the pane. */
+  docked?: boolean;
 }
 
-export function ArtifactWorkbench({ artifactId, revisionId, onClose }: Props): JSX.Element {
+export function ArtifactWorkbench({ artifactId, revisionId, onClose, docked = false }: Props): JSX.Element {
   const { t } = useTranslation('chat');
   const [tab, setTab] = useState<Tab>('preview');
   const [artifact, setArtifact] = useState<ArtifactProjection | null>(null);
@@ -136,7 +139,7 @@ export function ArtifactWorkbench({ artifactId, revisionId, onClose }: Props): J
   const title = artifact ? artifact.title : t('artifactWorkbenchFallbackTitle');
 
   return (
-    <Modal label={title} onClose={onClose} className="surface-card artifact-workbench">
+    <WorkbenchFrame docked={docked} label={title} onClose={onClose}>
       <header className="artifact-workbench__head">
         <h2 className="artifact-workbench__title">{title}</h2>
         {artifact ? (
@@ -246,6 +249,13 @@ export function ArtifactWorkbench({ artifactId, revisionId, onClose }: Props): J
           </>
         ) : null}
       </div>
-    </Modal>
+    </WorkbenchFrame>
   );
+}
+
+/** Modal (Library, legacy callers) or a plain labelled section (docked in the
+ *  chat Workbench, ADR 0768 P2). Same body either way. */
+function WorkbenchFrame({ docked, label, onClose, children }: { docked: boolean; label: string; onClose: () => void; children: ReactNode }): JSX.Element {
+  if (docked) return <section aria-label={label} className="artifact-workbench artifact-workbench--docked">{children}</section>;
+  return <Modal label={label} onClose={onClose} className="surface-card artifact-workbench">{children}</Modal>;
 }

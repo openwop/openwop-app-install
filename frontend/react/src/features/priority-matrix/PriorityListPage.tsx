@@ -222,6 +222,10 @@ function ListDetail(props: {
   // every keystroke in the page minted a new loader + refired its effect (a
   // real network read per keystroke against the 60 req/min per-IP budget).
   const { list, onError } = props;
+  // PM4UX-1 (ADR 0842 D9) — offer only controls that can succeed (DESIGN.md "403 ⇒
+  // hidden"). The server projects these from the predicates its doors enforce.
+  const canWrite = list.viewer?.canWrite ?? true;
+  const canConfigure = list.viewer?.canConfigure ?? true;
   const [ideas, setIdeas] = useState<RankedIdea[] | null>(null);
   const [ideasFailed, setIdeasFailed] = useState(false);
   const [sessions, setSessions] = useState<PlanningSession[]>([]);
@@ -386,9 +390,11 @@ function ListDetail(props: {
     } catch (e) { props.onError(e instanceof Error ? e.message : t('setVoterWeightFailed')); }
   };
 
+  // PM4UX-3 — the failure is RE-THROWN so `IdeaForm` keeps what the user typed (it
+  // cleared the fields on a swallowed failure, losing the text) and shows it in place.
   const onSubmitIdea = async (title: string, description: string): Promise<void> => {
-    try { await submitIdea(list.id, { title, ...(description ? { description } : {}) }); await refresh(); }
-    catch (e) { props.onError(e instanceof Error ? e.message : t('submitIdeaFailed')); }
+    await submitIdea(list.id, { title, ...(description ? { description } : {}) });
+    await refresh();
   };
 
   // ADR 0259 — per-idea edit / clone / delete.
@@ -482,6 +488,13 @@ function ListDetail(props: {
     setSelection(new Set());
     await buildAgenda({ kind: 'manual', ideas: rows }, agendaSort);
   };
+  // PM4UX-8 — a double-click minted two sessions; the bulk button is busy while one builds.
+  const [agendaBusy, setAgendaBusy] = useState(false);
+  const runAddToAgenda = async (rows: RankedIdea[]): Promise<void> => {
+    if (agendaBusy) return;
+    setAgendaBusy(true);
+    try { await addToAgenda(rows); } finally { setAgendaBusy(false); }
+  };
   const buildTopN = (n: number): Promise<void> => buildAgenda({ kind: 'topn', n }, agendaSort);
   // The "Order by" control — re-order the CURRENT session IN PLACE (PATCH), so the
   // saved doc tracks the order without spawning a duplicate session per reorder.
@@ -508,22 +521,23 @@ function ListDetail(props: {
     { key: 'idea', header: t('colIdea'), render: (r) => <span className="u-flex u-items-center u-gap-2 u-wrap"><strong>{r.card.title}</strong>{ideaSourceChip(r)}</span>, sortValue: (r) => r.card.title },
     ...(strategyOn ? [{
       key: 'strategy', header: t('colStrategy'),
-      render: (r: RankedIdea) => (
-        <StrategyAlignment
+      render: (r: RankedIdea) => (!canWrite
+        ? <span className="muted u-fs-12">{(strategyRefs.get(r.card.id) ?? []).map((x) => x.title).join(', ') || t('emDash')}</span>
+        : <StrategyAlignment
           listId={list.id}
           cardId={r.card.id}
           refs={strategyRefs.get(r.card.id) ?? []}
           onChanged={refreshStrategy}
           onError={props.onError}
-        />
-      ),
+        />),
     } as DataColumn<RankedIdea>] : []),
     ...list.criteriaSet.criteria.map((c): DataColumn<RankedIdea> => ({
       key: `crit-${c.id}`,
       header: c.name,
       ...(c.scaleHint ? { headerTitle: c.scaleHint } : {}),
-      render: (r) => (
-        <input
+      render: (r) => (!canWrite
+        ? <span className="u-fs-13">{draft[r.card.id]?.[c.id] || t('emDash')}</span>
+        : <input
           type="number" min={1} max={10}
           value={draft[r.card.id]?.[c.id] ?? ''}
           aria-label={t('scoreInputLabel', { title: r.card.title, criterion: c.name })}
@@ -541,8 +555,7 @@ function ListDetail(props: {
             setScoreError((m) => ({ ...m, [key]: true }));
             props.onError(t('scoreOutOfRange', { criterion: c.name }));
           }}
-        />
-      ),
+        />),
     })),
     // R3 — this column showed "0", which read as "scored worst".
     //
@@ -562,22 +575,24 @@ function ListDetail(props: {
       // HAVE target dates).
       render: (r) => (schedule === 'failed'
         ? <span className="muted u-fs-12">{t('scheduleUnavailable')}</span>
-        : <ScheduleCell listId={list.id} idea={r} status={scheduleLoaded?.byCard.get(r.card.id)} onChanged={refreshSchedule} onError={onError} />),
+        : <ScheduleCell listId={list.id} idea={r} status={scheduleLoaded?.byCard.get(r.card.id)} onChanged={refreshSchedule} onError={onError} readOnly={!canWrite} />),
       sortValue: (r) => scheduleLoaded?.byCard.get(r.card.id)?.targetDate ?? '',
     },
     ...(list.votingMode === 'multi-voter' ? [{
       key: 'votes', header: t('colVotes'), align: 'right' as const,
-      render: (r: RankedIdea) => (
-        <Button variant="quiet" size="sm" onClick={() => void openBreakdown(r)} aria-label={t('voteBreakdownButtonLabel', { title: r.card.title })}>{formatNumber(r.voterCount ?? 0)}</Button>
+      // PM4UX-1 — the per-voter breakdown is config authority; everyone else sees the count.
+      render: (r: RankedIdea) => (!canConfigure
+        ? <span className="u-fs-13">{formatNumber(r.voterCount ?? 0)}</span>
+        : <Button variant="quiet" size="sm" onClick={() => void openBreakdown(r)} aria-label={t('voteBreakdownButtonLabel', { title: r.card.title })}>{formatNumber(r.voterCount ?? 0)}</Button>
       ),
     } as DataColumn<RankedIdea>] : []),
     {
       key: 'status', header: t('colStatus'),
-      render: (r) => (
-        <select aria-label={t('statusSelectLabel', { title: r.card.title })} value={r.status.columnId} onChange={(e) => void onMove(r, e.target.value)}>
+      render: (r) => (!canWrite
+        ? <span className="chip chip--muted">{r.status.columnName}</span>
+        : <select aria-label={t('statusSelectLabel', { title: r.card.title })} value={r.status.columnId} onChange={(e) => void onMove(r, e.target.value)}>
           {STATUS_IDS.map((id) => <option key={id} value={id}>{t(STATUS_LABEL_KEY[id])}</option>)}
-        </select>
-      ),
+        </select>),
     },
     // ADR 0232 — intake & evidence panel (requester/source/value, evidence
     // pointers, merge-a-duplicate, promote-to-project).
@@ -587,8 +602,8 @@ function ListDetail(props: {
         <Button variant="quiet" size="sm" onClick={() => setIntakeFor(r)} aria-label={t('intakeButtonLabel', { title: r.card.title })}>{t('intakeButton')}</Button>
       ),
     },
-    // ADR 0259 — per-idea edit / clone / delete overflow menu.
-    {
+    // ADR 0259 — per-idea edit / clone / delete overflow menu (writers only).
+    ...(!canWrite ? [] : [{
       key: 'actions', header: <span className="sr-only">{t('colActions')}</span>, align: 'right',
       render: (r) => (
         <Menu
@@ -599,7 +614,7 @@ function ListDetail(props: {
           portal
         />
       ),
-    },
+    } as DataColumn<RankedIdea>]),
   ];
 
   // The Grid cell — a read/scan tile of the SAME fields the table shows in read
@@ -625,12 +640,15 @@ function ListDetail(props: {
                     ? <span className="muted u-fs-12">{t('priorityPartial', { scored: r.completeness.scored, declared: r.completeness.declared })}</span>
                     : null}
                 </>}
-            <Menu
-              label={t('ideaActionsLabel', { title: r.card.title })}
-              triggerClassName="ghost btn-sm"
-              triggerContent={<MoreHorizontalIcon size={16} />}
-              items={ideaActionItems(r)}
-            />
+            {canWrite ? (
+              <Menu
+                label={t('ideaActionsLabel', { title: r.card.title })}
+                triggerClassName="ghost btn-sm"
+                triggerContent={<MoreHorizontalIcon size={16} />}
+                items={ideaActionItems(r)}
+                portal
+              />
+            ) : null}
           </span>
         </div>
         <div className="u-flex u-gap-2 u-wrap u-items-center">
@@ -643,7 +661,9 @@ function ListDetail(props: {
             <span className="chip chip--accent"><FlagIcon size={11} aria-hidden /> {t('strategyAlignedCount', { count: alignedCount, formattedCount: formatNumber(alignedCount) })}</span>
           ) : null}
           {list.votingMode === 'multi-voter' ? (
-            <Button variant="quiet" size="sm" onClick={() => void openBreakdown(r)} aria-label={t('voteBreakdownButtonLabel', { title: r.card.title })}>{t('votesChip', { count: r.voterCount ?? 0, formattedCount: formatNumber(r.voterCount ?? 0) })}</Button>
+            canConfigure
+              ? <Button variant="quiet" size="sm" onClick={() => void openBreakdown(r)} aria-label={t('voteBreakdownButtonLabel', { title: r.card.title })}>{t('votesChip', { count: r.voterCount ?? 0, formattedCount: formatNumber(r.voterCount ?? 0) })}</Button>
+              : <span className="chip chip--muted">{t('votesChip', { count: r.voterCount ?? 0, formattedCount: formatNumber(r.voterCount ?? 0) })}</span>
           ) : null}
         </div>
         <span className="muted u-fs-12">{ownerName(r)}</span>
@@ -660,6 +680,7 @@ function ListDetail(props: {
           others={(ideas ?? []).filter((r) => r.card.id !== intakeFor.card.id)}
           onClose={() => setIntakeFor(null)}
           onChanged={refresh}
+          readOnly={!canWrite}
         />
       ) : null}
       {editIdeaFor ? (
@@ -716,7 +737,7 @@ function ListDetail(props: {
       ) : null}
 
       {editOpen ? (
-        <EditListModal list={list} onClose={() => setEditOpen(false)} onChanged={async () => { await props.onChanged(); await refresh(); }} onError={props.onError} />
+        <EditListModal list={list} canConfigure={canConfigure} onClose={() => setEditOpen(false)} onChanged={async () => { await props.onChanged(); await refresh(); }} />
       ) : null}
 
       {confirmDeleteOpen ? (
@@ -739,15 +760,19 @@ function ListDetail(props: {
           <span className="chip chip--muted">{list.votingMode === 'multi-voter' ? t('chipMultiVoter', { aggregation: list.voteAggregation }) : t('chipSingleScore')}</span>
           <span className="muted u-fs-12">{t('ideaCount', { count: ideas?.length ?? 0, formattedCount: formatNumber(ideas?.length ?? 0) })}</span>
         </div>
-        <div className="action-bar">
-          <Button variant="secondary" size="sm" onClick={() => setEditOpen(true)}>{t('common:edit')}</Button>
-          <Button variant="secondary" size="sm" onClick={() => setCriteriaOpen(true)}><ScaleIcon size={13} /> {t('criteria')}</Button>
-          <Button variant="quiet" size="sm" onClick={() => setConfirmDeleteOpen(true)} aria-label={t('deleteList')}><TrashIcon size={14} /></Button>
-        </div>
+        {canWrite ? (
+          <div className="action-bar">
+            <Button variant="secondary" size="sm" onClick={() => setEditOpen(true)}>{t('common:edit')}</Button>
+            {canConfigure ? <Button variant="secondary" size="sm" onClick={() => setCriteriaOpen(true)}><ScaleIcon size={13} /> {t('criteria')}</Button> : null}
+            {canConfigure ? <Button variant="quiet" size="sm" onClick={() => setConfirmDeleteOpen(true)} aria-label={t('deleteList')}><TrashIcon size={14} /></Button> : null}
+          </div>
+        ) : null}
       </div>
 
-      {/* ── Add idea ── */}
-      <IdeaForm onSubmit={onSubmitIdea} />
+      {/* ── Add idea (writers) / the read-only note (everyone else) ── */}
+      {canWrite
+        ? <IdeaForm onSubmit={onSubmitIdea} />
+        : <Notice variant="info">{t('readOnlyList')}</Notice>}
 
       {/* ── Ranked ideas — Grid (scan) / List (the sortable, selectable scoring
           table whose bulk action is "add to meeting agenda"). The List is the
@@ -800,12 +825,14 @@ function ListDetail(props: {
             caption={t('captionRankedIdeas')}
             columns={ideaColumns}
             initialSort={{ key: 'rank', dir: 'asc' }}
-            selectable
-            selected={selection}
-            onSelectionChange={setSelection}
-            bulkActions={(rows) => (
-              <Button variant="primary" size="sm" onClick={() => void addToAgenda(rows)}><ClipboardIcon size={13} /> {t('addToAgendaBulk', { n: formatNumber(rows.length) })}</Button>
-            )}
+            {...(canWrite ? {
+              selectable: true,
+              selected: selection,
+              onSelectionChange: setSelection,
+              bulkActions: (rows: RankedIdea[]) => (
+                <Button variant="primary" size="sm" disabled={agendaBusy} onClick={() => void runAddToAgenda(rows)}><ClipboardIcon size={13} /> {t('addToAgendaBulk', { n: formatNumber(rows.length) })}</Button>
+              ),
+            } : {})}
             empty={<StateCard icon={<ListOrderedIcon size={18} />} title={t('noIdeasTitle')} body={t('noIdeasBody')} />}
           />
         )}
@@ -818,13 +845,14 @@ function ListDetail(props: {
         sessions={sessions}
         ownerName={ownerName}
         onBuildTopN={buildTopN}
+        canWrite={canWrite}
         onReorder={reorderAgenda}
         onOpenSession={(s) => { setAgendaSessionId(s.id); setAgenda({ ideas: [], markdown: s.agendaMarkdown, name: s.name }); }}
       />
 
       {/* ── What-if scenarios (ADR 0235 §D1) — active for the open session ── */}
       {agendaSessionId ? (
-        <ScenarioPanel listId={list.id} sessionId={agendaSessionId} strategyRefs={strategyRefs} onError={props.onError} />
+        <ScenarioPanel listId={list.id} sessionId={agendaSessionId} strategyRefs={strategyRefs} onError={props.onError} readOnly={!canWrite} />
       ) : null}
     </div>
   );
@@ -834,13 +862,18 @@ function ListDetail(props: {
  *  un-editable after creation — you couldn't even rename one. Reuses the
  *  shared Modal; criteria/weights stay in CriteriaModal (this is metadata only). */
 function EditListModal(props: {
-  list: PriorityList; onClose: () => void; onChanged: () => Promise<void>; onError: (m: string) => void;
+  list: PriorityList; onClose: () => void; onChanged: () => Promise<void>;
+  /** PM4UX-1 — the scoring mode is config authority (creator / org admin); an editor
+   *  may rename only. */
+  canConfigure: boolean;
 }): JSX.Element {
   const { t } = useTranslation('priority-matrix');
   const { list } = props;
   const [name, setName] = useState(list.name);
   const [votingMode, setVotingMode] = useState<VotingMode>(list.votingMode);
   const [busy, setBusy] = useState(false);
+  /** PM4UX-10 — said INSIDE the modal, not on the page banner behind its overlay. */
+  const [error, setError] = useState<string | null>(null);
   const canSave = name.trim().length > 0 && !busy;
   // PMXU-7 (ADR 0590) — backdrop/Escape close discarded edits silently.
   const dirty = name !== list.name || votingMode !== list.votingMode;
@@ -852,20 +885,24 @@ function EditListModal(props: {
     if (!canSave) return;
     setBusy(true);
     try {
-      await updateList(list.id, { name: name.trim(), votingMode });
+      // Send the scoring mode ONLY when it changed: the PATCH asks for config authority
+      // whenever `votingMode` is present, so an editor's rename always 403'd.
+      await updateList(list.id, { name: name.trim(), ...(votingMode !== list.votingMode ? { votingMode } : {}) });
       await props.onChanged();
       props.onClose();
-    } catch (er) { props.onError(er instanceof Error ? er.message : t('updateListFailed')); setBusy(false); }
+    } catch (er) { setError(er instanceof Error ? er.message : t('updateListFailed')); setBusy(false); }
   };
   return (
-    <Modal label={t('editList')} onClose={guardedClose}>
+    <Modal label={t('editList')} onClose={guardedClose} error={error} errorAnnounce={error ?? undefined}>
       <h3 className="u-mt-0">{t('editList')}</h3>
       <form className="u-flex u-flex-col u-gap-3" onSubmit={(e) => void onSubmit(e)}>
         <TextField label={t('listName')} required value={name} onChange={(e) => setName(e.target.value)} placeholder={t('listNamePlaceholder')} />
-        <SelectField label={t('scoringMode')} value={votingMode} onChange={(e) => setVotingMode(e.target.value as VotingMode)}>
-          <option value="single">{t('scoringModeSingle')}</option>
-          <option value="multi-voter">{t('scoringModeMulti')}</option>
-        </SelectField>
+        {props.canConfigure ? (
+          <SelectField label={t('scoringMode')} value={votingMode} onChange={(e) => setVotingMode(e.target.value as VotingMode)}>
+            <option value="single">{t('scoringModeSingle')}</option>
+            <option value="multi-voter">{t('scoringModeMulti')}</option>
+          </SelectField>
+        ) : null}
         <div className="action-bar u-justify-end">
           <Button variant="secondary" onClick={guardedClose} disabled={busy}>{t('common:cancel')}</Button>
           <Button variant="primary" type="submit" disabled={!canSave}>{t('common:save')}</Button>
@@ -882,6 +919,8 @@ function EditListModal(props: {
 function ScheduleCell(props: {
   listId: string; idea: RankedIdea; status: IdeaScheduleStatus | undefined;
   onChanged: () => Promise<void>; onError: (m: string) => void;
+  /** PM4UX-1 — a reader sees the schedule state, not a date control that 403s. */
+  readOnly?: boolean;
 }): JSX.Element {
   const { t } = useTranslation('priority-matrix');
   const { idea, status } = props;
@@ -912,6 +951,7 @@ function ScheduleCell(props: {
       <span className={`chip ${SCHEDULE_CHIP_CLASS[state]} u-fs-11`}>
         <Icon size={11} /> {t(SCHEDULE_LABEL_KEY[state])}{suffix ? <span className="muted u-fs-11"> {suffix}</span> : null}
       </span>
+      {props.readOnly ? (dateVal ? <span className="muted u-fs-12">{fmtDate(dateVal)}</span> : null) : <>
       <input
         type="date"
         className="u-w-auto"
@@ -930,6 +970,7 @@ function ScheduleCell(props: {
           <TrashIcon size={12} />
         </Button>
       ) : null}
+      </>}
     </div>
   );
 }
@@ -939,15 +980,19 @@ function IdeaForm(props: { onSubmit: (title: string, description: string) => Pro
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const submit = async (e: React.FormEvent): Promise<void> => {
     e.preventDefault();
     if (!title.trim() || busy) return;
-    setBusy(true);
+    setBusy(true); setError(null);
+    // PM4UX-3 — clear the fields ONLY on success; a failure keeps the text and says why.
     try { await props.onSubmit(title.trim(), description.trim()); setTitle(''); setDescription(''); }
+    catch (err) { setError(err instanceof Error ? err.message : t('submitIdeaFailed')); }
     finally { setBusy(false); }
   };
   return (
     <form className="surface-card u-flex u-flex-col" onSubmit={(e) => void submit(e)}>
+      {error ? <Notice variant="error" announce={error}>{error}</Notice> : null}
       <TextField label={t('ideaTitleLabel')} required value={title} onChange={(e) => setTitle(e.target.value)} placeholder={t('ideaTitlePlaceholder')} />
       <TextareaField label={t('ideaContextLabel')} value={description} onChange={(e) => setDescription(e.target.value)} rows={2} placeholder={t('ideaContextPlaceholder')} />
       <div className="action-bar u-justify-end"><Button variant="primary" type="submit" disabled={!title.trim() || busy}><PlusIcon size={14} /> {t('addIdea')}</Button></div>
@@ -1053,6 +1098,8 @@ function AgendaPanel(props: {
   onBuildTopN: (n: number) => Promise<void>;
   onReorder: (sort: AgendaSort) => Promise<void>;
   onOpenSession: (s: PlanningSession) => void;
+  /** PM4UX-1 — building / re-ordering an agenda writes a session; readers browse. */
+  canWrite: boolean;
 }): JSX.Element {
   const { t } = useTranslation('priority-matrix');
   // PMXU-12 (ADR 0590) — the R2 forms-pass number-field pattern: keep the RAW
@@ -1079,16 +1126,18 @@ function AgendaPanel(props: {
     <section className="surface-card u-flex u-flex-col u-gap-3">
       <div className="u-flex u-items-center u-gap-2 u-wrap">
         <ClipboardIcon size={16} /> <h3 className="u-fs-14 u-m-0">{t('meetingAgenda')}</h3>
-        <span className="muted u-fs-12 u-ml-auto">{t('orBuildFromTop')}</span>
-        <Field label={t('topN')}>{(w) => <input {...w} type="number" min={1} max={50} value={nRaw} aria-invalid={nValid ? undefined : true} onChange={(e) => setNRaw(e.target.value)} className="u-w-auto" />}</Field>
-        <Button variant="secondary" size="sm" disabled={busy || !nValid} onClick={async () => { setBusy(true); try { await props.onBuildTopN(n); } finally { setBusy(false); } }}><FlagIcon size={13} /> {t('buildTopN', { n: nValid ? formatNumber(n) : nRaw })}</Button>
+        {props.canWrite ? <>
+          <span className="muted u-fs-12 u-ml-auto">{t('orBuildFromTop')}</span>
+          <Field label={t('topN')}>{(w) => <input {...w} type="number" min={1} max={50} value={nRaw} aria-invalid={nValid ? undefined : true} onChange={(e) => setNRaw(e.target.value)} className="u-w-auto" />}</Field>
+          <Button variant="secondary" size="sm" disabled={busy || !nValid} onClick={async () => { setBusy(true); try { await props.onBuildTopN(n); } finally { setBusy(false); } }}><FlagIcon size={13} /> {t('buildTopN', { n: nValid ? formatNumber(n) : nRaw })}</Button>
+        </> : null}
       </div>
 
       {agenda ? (
         <>
           <div className="u-flex u-items-baseline u-gap-2 u-wrap">
             <span className="proj-eyebrow">{t('agendaEyebrow')}</span><span className="muted u-fs-12">{agenda.name}</span>
-            {agenda.ideas.length > 0 ? (
+            {agenda.ideas.length > 0 && props.canWrite ? (
               <SelectField label={t('orderBy')} className="u-ml-auto" value={props.agendaSort} disabled={busy} onChange={(e) => { setBusy(true); void props.onReorder(e.target.value as AgendaSort).finally(() => setBusy(false)); }}>
                 {(['priority', 'created', 'owner', 'status', 'title'] as AgendaSort[]).map((s) => <option key={s} value={s}>{t(AGENDA_SORT_LABEL_KEY[s])}</option>)}
               </SelectField>
@@ -1111,7 +1160,7 @@ function AgendaPanel(props: {
           </details>
         </>
       ) : (
-        <p className="muted u-fs-13 u-m-0"><Trans ns="priority-matrix" i18nKey="agendaEmpty" components={[<strong key="0" />]} /></p>
+        <p className="muted u-fs-13 u-m-0">{props.canWrite ? <Trans ns="priority-matrix" i18nKey="agendaEmpty" components={[<strong key="0" />]} /> : t('agendaEmptyReadOnly')}</p>
       )}
 
       {props.sessions.length > 0 ? (

@@ -16,6 +16,7 @@ import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
+import { bareRunId } from './support/bareRunId.js';
 
 let server: http.Server;
 let BASE: string;
@@ -42,17 +43,17 @@ async function pollStatus(runId: string): Promise<{ status: string; events: Bund
   let status = 'pending';
   for (let i = 0; i < 60; i++) {
     await new Promise((r) => setTimeout(r, 25));
-    const snap = await jsonFetch<{ status: string }>(`/v1/runs/${runId}`);
+    const snap = await jsonFetch<{ status: string }>(`/runs/${runId}`);
     status = snap.body.status;
     if (['completed', 'failed', 'cancelled'].includes(status) || status.startsWith('waiting')) break;
   }
-  const bundle = await jsonFetch<{ events?: BundleEvent[] }>(`/v1/runs/${runId}/debug-bundle`);
+  const bundle = await jsonFetch<{ events?: BundleEvent[] }>(`/host/openwop-app/runs/${bareRunId(runId)}/debug-bundle`);
   return { status, events: bundle.body.events ?? [] };
 }
 
 async function startGateRun(workflowId: string, resumeValue: Record<string, unknown>): Promise<{ runId: string; out: Record<string, unknown>; bundleText: string }> {
-  await jsonFetch('/v1/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({ workflowId, nodes: [{ nodeId: 'gate', typeId: 'core.chat.approvalGate', config: { title: 'Review' } }], edges: [] }) });
-  const create = await jsonFetch<{ runId: string }>('/v1/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs: { artifact: 'draft v1' }, tenantId: TENANT }) });
+  await jsonFetch('/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({ workflowId, nodes: [{ nodeId: 'gate', typeId: 'core.chat.approvalGate', config: { title: 'Review' } }], edges: [] }) });
+  const create = await jsonFetch<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs: { artifact: 'draft v1' }, tenantId: TENANT }) });
   expect(create.status).toBe(201);
   const runId = create.body.runId;
 
@@ -62,16 +63,16 @@ async function startGateRun(workflowId: string, resumeValue: Record<string, unkn
   expect(sus.events.some((e) => e.type === 'node.suspended' && e.nodeId === 'gate')).toBe(true);
 
   // Resolve via the token surface.
-  const ints = await jsonFetch<{ interrupts: Array<{ token: string; nodeId: string }> }>(`/v1/host/openwop-app/runs/${runId}/interrupts`);
+  const ints = await jsonFetch<{ interrupts: Array<{ token: string; nodeId: string }> }>(`/host/openwop-app/runs/${bareRunId(runId)}/interrupts`);
   const token = ints.body.interrupts.find((i) => i.nodeId === 'gate')?.token;
   expect(token, 'an open interrupt token for the gate').toBeTruthy();
-  const resolve = await jsonFetch(`/v1/interrupts/${token}`, { method: 'POST', body: JSON.stringify({ resumeValue }) });
+  const resolve = await jsonFetch(`/interrupts/${token}`, { method: 'POST', body: JSON.stringify({ resumeValue }) });
   expect([200, 202, 204]).toContain(resolve.status);
 
   const done = await pollStatus(runId);
   expect(done.status, 'run completes after resume').toBe('completed');
   const ev = done.events.find((e) => e.type === 'node.completed' && e.nodeId === 'gate');
-  const bundle = await jsonFetch(`/v1/runs/${runId}/debug-bundle`);
+  const bundle = await jsonFetch(`/host/openwop-app/runs/${bareRunId(runId)}/debug-bundle`);
   return { runId, out: (ev?.payload?.outputs as Record<string, unknown>) ?? {}, bundleText: JSON.stringify(bundle.body) };
 }
 
@@ -96,10 +97,10 @@ describe('ctx.suspend re-invoke resume', () => {
     // run AND the re-invoke; the deterministic idempotencyKey must collapse them.
     // Measure the shared session's message-count delta for ONE gate run: it must
     // grow by exactly 1 (re-invoke double-emit would make it 2).
-    const before = await jsonFetch<{ messages: unknown[] }>(`/v1/host/openwop-app/chat/sessions/workflow-${TENANT}/messages`);
+    const before = await jsonFetch<{ messages: unknown[] }>(`/host/openwop-app/chat/sessions/workflow-${TENANT}/messages`);
     const beforeCount = before.body.messages?.length ?? 0;
     await startGateRun('chat.gate.idem', { decision: 'accept' });
-    const after = await jsonFetch<{ messages: unknown[] }>(`/v1/host/openwop-app/chat/sessions/workflow-${TENANT}/messages`);
+    const after = await jsonFetch<{ messages: unknown[] }>(`/host/openwop-app/chat/sessions/workflow-${TENANT}/messages`);
     const delta = (after.body.messages?.length ?? 0) - beforeCount;
     expect(delta, 'one card emitted across the full suspend+resume lifecycle').toBe(1);
   });

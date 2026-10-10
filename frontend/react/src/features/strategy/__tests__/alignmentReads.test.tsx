@@ -10,6 +10,7 @@
  *    reading as "there are no eligible parents".
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+vi.mock('../StrategyLedgerRollup.js', () => ({ StrategyLedgerRollup: () => null })); // own tests: strategyLedgerRollup.test.tsx
 import { render, screen, cleanup, waitFor, act } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import type { Strategy, ProjectRef } from '../strategyClient.js';

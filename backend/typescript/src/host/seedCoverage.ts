@@ -27,6 +27,8 @@ const SEEDED = new Set<string>(DEMO_FEATURE_TOGGLE_IDS);
  * terse; the point is that the exclusion was a decision, not an oversight.
  */
 export const ACKNOWLEDGED_UNSEEDED: Readonly<Record<string, string>> = {
+  'claude-code':
+    'Claude Code pairing (ADR 0785) — every row is a REAL credential ceremony: a paired device row points at a live developer key, and a pairing row is a ten-minute device-code exchange. Seeding either would mint working keys for a fabricated machine (a credential nobody holds) or leave expired codes that age out within a day. A demo pairs a real companion in under a minute.',
   'work-selection':
     'ranked work selection (ADR 0534) — the feature PERSISTS NOTHING. The ranking is recomputed per heartbeat pass from live card fields (priority, dueAt, age, blockerNote); there is no store, no table and no KV namespace to seed. What a demo needs is richer KANBAN cards, which the kanban seeders own — see DATA-ASSESSMENT-work-loop-0534-0535.md SEED-WL-1.',
   'agent-author':
@@ -57,9 +59,16 @@ export const ACKNOWLEDGED_UNSEEDED: Readonly<Record<string, string>> = {
   // Runtime behavior — "data" is produced by using the app, nothing to seed.
   'chat-autotitle': 'runtime chat behavior — no persisted demo entity',
   'multi-tab-chat': 'runtime chat UI behavior — no data',
+  'builder-pair': 'ADR 0773 — pairing context + suggestions are per-conversation, 24 h, created by a live Architect turn; seeding one would be a fake suggestion on a real canvas',
   accessibility: 'authored-content a11y (ADR 0363) — alt text/checks ride EXISTING media/cms/document content; no standalone demo entity to seed',
   'tool-output-compaction': 'runtime tool-output behavior — no data',
   'twin-recall': 'runtime memory recall — no seeded corpus',
+  // ADR 0820 §8 — these five regained a toggle (always-on → sellable). None owns seedable rows:
+  'chat-widget': 'a widget config is a per-site embed (allowed origins + agent binding); seeded configs would point at origins nobody owns. A demo creates one in the chat-deployment console in seconds',
+  'code-exec': 'a sandbox runner with no stored rows — each run is ephemeral output in the artifact workbench',
+  'evals': 'online-eval judge settings ride workflows; eval sets are authored per workflow, and the showcase/demo workflows carry none to seed against',
+  'model-router': 'routing rules are per-tenant config over the providers THAT tenant advertises; a seeded rule would name providers a demo tenant has not configured',
+  'scheduled-agent-chats': 'a schedule fires real managed-key agent turns on a cron; seeding one would burn platform tokens for a fabricated user (ADR 0821 cost class high)',
   voice: 'runtime voice chat — no seeded transcript',
   'chat-deployment': 'operator config (embed/deploy a chat) — not tenant demo data',
   'realtime-collab': 'runtime CRDT sync transport (ADR 0335/0359, all canvas types, OFF) — collaboration sessions are runtime state, no persisted demo entity',

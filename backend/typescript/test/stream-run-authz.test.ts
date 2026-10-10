@@ -13,12 +13,14 @@
  * @see src/host/runAccess.ts
  */
 
+import { mintAnonSession, signSession } from '../src/middleware/cookieSession.js';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { Request } from 'express';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { loadReadableRun } from '../src/host/runAccess.js';
+import { toWireRunId } from '../src/host/v2Ids.js';
 import { type RunRecord } from '../src/types.js';
 import type { Storage } from '../src/storage/storage.js';
 
@@ -36,25 +38,27 @@ function stubStorage(run: RunRecord | null): Storage {
   return { getRun: async (id: string) => (run && run.runId === id ? run : null) } as unknown as Storage;
 }
 
+// ADR 0812 P3c-0 — long enough for the v2 opaque-id grammar (16–128), so it can be tenant-bound on the wire.
+const RUN_A_ID = 'run-A-0123456789abcdef';
 const RUN_A: RunRecord = {
-  runId: 'run-A', workflowId: 'wf', tenantId: 'tenant-A', status: 'completed',
+  runId: RUN_A_ID, workflowId: 'wf', tenantId: 'tenant-A', status: 'completed',
   inputs: {}, metadata: {}, configurable: {}, createdAt: 'now', updatedAt: 'now',
 };
 
 describe('loadReadableRun (unit)', () => {
   it('returns the run for the owning tenant', async () => {
-    const run = await loadReadableRun(fakeReq({ tenantId: 'tenant-A' }), stubStorage(RUN_A), 'run-A');
-    expect(run.runId).toBe('run-A');
+    const run = await loadReadableRun(fakeReq({ tenantId: 'tenant-A' }), stubStorage(RUN_A), RUN_A_ID);
+    expect(run.runId).toBe(RUN_A_ID);
   });
 
   it('404s a caller from a DIFFERENT tenant (no existence leak)', async () => {
-    await expect(loadReadableRun(fakeReq({ tenantId: 'tenant-B' }), stubStorage(RUN_A), 'run-A'))
+    await expect(loadReadableRun(fakeReq({ tenantId: 'tenant-B' }), stubStorage(RUN_A), RUN_A_ID))
       .rejects.toMatchObject({ code: 'run_not_found', httpStatus: 404 });
   });
 
   it('allows a wildcard operator principal across tenants', async () => {
-    const run = await loadReadableRun(fakeReq({ tenants: ['*'] }), stubStorage(RUN_A), 'run-A');
-    expect(run.runId).toBe('run-A');
+    const run = await loadReadableRun(fakeReq({ tenants: ['*'] }), stubStorage(RUN_A), RUN_A_ID);
+    expect(run.runId).toBe(RUN_A_ID);
   });
 
   it('404s a missing run', async () => {
@@ -64,7 +68,7 @@ describe('loadReadableRun (unit)', () => {
 
   it('falls back to "default" tenant when req carries none', async () => {
     // A run owned by a real tenant must NOT be readable by a tenant-less caller.
-    await expect(loadReadableRun(fakeReq({}), stubStorage(RUN_A), 'run-A'))
+    await expect(loadReadableRun(fakeReq({}), stubStorage(RUN_A), RUN_A_ID))
       .rejects.toMatchObject({ httpStatus: 404 });
   });
 });
@@ -89,18 +93,41 @@ beforeAll(async () => {
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 describe('run-read paths reject a cross-tenant caller (HTTP)', () => {
-  // A fetch with no cookie is an anon principal — tenant `anon:<sid>`, never
+  // An anonymous SESSION is a principal in its own `anon:<sid>` tenant, never
   // `tenant-A`. Each path must 404 rather than serve tenant-A's run/events.
+  // ADR 0750 major-1 extension: a request with NO credential is now refused 401
+  // before any lookup, so the probe presents a real anon session cookie — the
+  // tenant check, not the no-credential refusal, is what this file witnesses.
+  //
+  // ADR 0812 P3c-0 — major 2 addresses a run by a TENANT-BOUND id, and the
+  // identity layer refuses a segment that is not the caller's own tenant
+  // (`403 id_tenant_mismatch`) before any lookup. So each caller binds the id
+  // to ITS OWN tenant: that passes the identity check and reaches
+  // `loadReadableRun`, which is the read gate this file witnesses.
   const paths = [
-    { label: 'GET /v1/runs/:id', path: '/v1/runs/run-A', accept: 'application/json' },
-    { label: 'SSE  /v1/runs/:id/events', path: '/v1/runs/run-A/events', accept: 'text/event-stream' },
-    { label: 'JSON /v1/runs/:id/events', path: '/v1/runs/run-A/events', accept: 'application/json' },
-    { label: 'poll /v1/runs/:id/events/poll', path: '/v1/runs/run-A/events/poll', accept: 'application/json' },
-    { label: 'bundle /v1/runs/:id/debug-bundle', path: '/v1/runs/run-A/debug-bundle', accept: 'application/json' },
+    { label: 'GET /runs/:id', tail: '', accept: 'application/json' },
+    { label: 'SSE  /runs/:id/events', tail: '/events', accept: 'text/event-stream' },
+    { label: 'JSON /runs/:id/events', tail: '/events', accept: 'application/json' },
+    { label: 'poll /runs/:id/events/poll', tail: '/events/poll', accept: 'application/json' },
+    { label: 'bundle /runs/:id/debug-bundle', tail: '/debug-bundle', accept: 'application/json' },
   ];
-  for (const { label, path, accept } of paths) {
+  const runPath = (tenant: string, tail: string) => `/runs/${encodeURIComponent(toWireRunId(RUN_A_ID, tenant))}${tail}`;
+  // ADR 0812 P2b — POSITIVE CONTROL. These paths moved off `/v1`, and a 404 is
+  // also what an unrouted or refused path answers, so the negative below would
+  // pass vacuously. The wildcard operator reads the SAME run on the SAME path.
+  for (const { label, tail, accept } of paths) {
+    it(`${label} → 200 for a principal that may read tenant-A`, async () => {
+      const ac = new AbortController();
+      // The wildcard dev-token's request tenant is `default`.
+      const res = await fetch(`${BASE}${runPath('default', tail)}`, { headers: { accept, authorization: 'Bearer dev-token', 'OpenWOP-Version': '2' }, signal: ac.signal });
+      expect(res.status, `${label} must be routed and serve run-A`).toBe(200);
+      ac.abort();
+    });
+  }
+  for (const { label, tail, accept } of paths) {
     it(`${label} → 404 for a different tenant`, async () => {
-      const res = await fetch(`${BASE}${path}`, { headers: { accept } });
+      const session = mintAnonSession();
+      const res = await fetch(`${BASE}${runPath(session.tenantId, tail)}`, { headers: { accept, cookie: `__session=${signSession(session)}`, 'OpenWOP-Version': '2' } });
       expect(res.status, `${label} should not leak tenant-A`).toBe(404);
     });
   }

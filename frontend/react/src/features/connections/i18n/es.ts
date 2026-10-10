@@ -24,6 +24,21 @@ export const messages = {
   couldNotStart: 'No se pudo iniciar {{label}}.',
   connectionHealthy: '{{name}} está correcto.',
   connectionNeedsReconnect: '{{name}} necesita volver a conectarse.',
+  // ADR 0780 — write authority, row scope, reconnect, status labels
+  changedElsewhere: "Esta conexión cambió en otro lugar. Actualice e inténtelo de nuevo.",
+  revoked: "{{name}} revocada.",
+  readOnlyNotice: "Puede ver las conexiones de este espacio de trabajo, pero no tiene permiso para conectar cuentas nuevas aquí. Aún puede revocar las suyas.",
+  reconnect: "Volver a conectar",
+  reconnectLabel: "Volver a conectar {{name}}",
+  accountLine: "Cuenta: {{account}}",
+  sharingWorkspace: "Espacio de trabajo",
+  managedByAdmin: "Administrada por un administrador",
+  status_active: "Activa",
+  'status_needs-reconsent': "Requiere volver a conectar",
+  status_expired: "Caducada",
+  status_revoked: "Revocada",
+  providerNotAllowed: "Este proveedor no está permitido en este espacio de trabajo; un administrador define la lista de permitidos en Gobernanza.",
+  noConnectionsBodyReadOnly: "Aún no hay nada conectado aquí. Pida a un administrador o editor del espacio de trabajo que conecte una cuenta.",
 
   // OAuth consent card
   connectWithConsent: 'Conectar con consentimiento',
@@ -80,6 +95,8 @@ export const messages = {
   callbackInvalidState: 'La sesión de consentimiento caducó — inténtelo de nuevo.',
   callbackMissingParams: 'La respuesta del proveedor estaba incompleta — inténtelo de nuevo.',
   callbackExchangeFailed: 'No se pudo completar el intercambio de tokens. Inténtelo de nuevo.',
+  callbackSubjectMismatch: "Ha iniciado sesión con una cuenta distinta de la que inició esta conexión. Inicie sesión con esa cuenta e inténtelo de nuevo.",
+  callbackIssMismatch: "No se pudo verificar la respuesta del proveedor, así que no se guardó nada. Inténtelo de nuevo.",
   callbackGenericError: 'No se pudo conectar {{provider}}.',
 
   // Governance panel
@@ -203,6 +220,8 @@ export const messages = {
   vaultDeleteConfirm: '¿Eliminar el secreto {{ref}}?',
   vaultDeleteReferencedTitle: 'Este secreto está en uso',
   vaultDeleteReferencedBody: 'Referencias activas: {{refs}}. Eliminarlo las romperá.',
+  vaultDeleteUnverifiedTitle: "No se pudo comprobar qué usa este secreto",
+  vaultDeleteUnverifiedBody: "El servidor no pudo comprobar qué usa este secreto. Eliminarlo de todos modos puede romper algo que aún lo usa.",
   vaultDeleteAnyway: 'Eliminar de todos modos',
   vaultAddRefLabel: 'Referencia de credencial',
   vaultAddValueLabel: 'Valor',
@@ -217,4 +236,18 @@ export const messages = {
   requireMfaTitle: 'Requisito de dos factores',
   requireMfaLabel: 'Exigir autenticación de dos factores para este espacio de trabajo',
   requireMfaHint: 'Los miembros cuya sesión no haya verificado un segundo factor son rechazados hasta que se inscriban (Configuración → Seguridad) y vuelvan a iniciar sesión. Los miembros de SSO lo cumplen a través de su proveedor de identidad. Las claves de API (credenciales de máquina) están exentas — rótelas si eso importa para su espacio de trabajo.',
+  // ADR 0783 D1 — a connection as a workflow data source
+  dataSourceAction: "Fuente de datos",
+  dataSourceLabel: "Fuente de datos de {{name}}",
+  dataSourceLine: "Fuente de datos: {{url}}",
+  dataSourceTitle: "Fuente de datos — {{name}}",
+  dataSourceHint: "Los flujos de trabajo de este espacio pueden leer de la API de esta conexión, y escribir en ella, con los nodos REST y GraphQL de Data Integration. Define la URL base que usan: las solicitudes se quedan dentro de ella, en uno de los hosts de API del proveedor.",
+  dataSourceBaseUrl: "URL base",
+  dataSourcePlaceholder: "https://example.service-now.com/api/now",
+  dataSourceSave: "Guardar",
+  dataSourceClear: "Dejar de usar como fuente de datos",
+  dataSourceSaved: "{{name}} ahora es una fuente de datos.",
+  dataSourceCleared: "{{name}} ya no es una fuente de datos.",
+  dataSourceInvalid: "Esa URL base no está permitida para esta conexión.",
+  dataSourceFailed: "No se pudo guardar la fuente de datos. Inténtalo de nuevo.",
 } as const;

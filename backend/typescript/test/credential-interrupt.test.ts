@@ -12,6 +12,7 @@ import http from 'node:http';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
+import { bareRunId } from './support/bareRunId.js';
 
 vi.mock('../src/host/webhookEgressGuard.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/host/webhookEgressGuard.js')>();
@@ -54,7 +55,7 @@ beforeAll(async () => {
   await new Promise<void>((res) => {
     server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
   });
-  const reg = await fetch(`${BASE}/v1/host/openwop-app/workflows`, {
+  const reg = await fetch(`${BASE}/host/openwop-app/workflows`, {
     method: 'POST',
     headers: H,
     body: JSON.stringify({
@@ -72,7 +73,7 @@ afterAll(async () => {
 });
 
 async function startRun(): Promise<string> {
-  const r = await fetch(`${BASE}/v1/runs`, { method: 'POST', headers: H, body: JSON.stringify({ workflowId: WF, inputs: {} }) });
+  const r = await fetch(`${BASE}/runs`, { method: 'POST', headers: H, body: JSON.stringify({ workflowId: WF, inputs: {} }) });
   expect([200, 201, 202], await r.clone().text()).toContain(r.status);
   return ((await r.json()) as { runId: string }).runId;
 }
@@ -80,7 +81,7 @@ async function startRun(): Promise<string> {
 async function settle(runId: string, want: (s: string) => boolean): Promise<string> {
   let status = '';
   for (let i = 0; i < 100; i++) {
-    const r = await fetch(`${BASE}/v1/runs/${runId}`, { headers: H });
+    const r = await fetch(`${BASE}/runs/${runId}`, { headers: H });
     status = ((await r.json()) as { status: string }).status;
     if (want(status)) return status;
     await new Promise((res) => setTimeout(res, 50));
@@ -89,12 +90,12 @@ async function settle(runId: string, want: (s: string) => boolean): Promise<stri
 }
 
 async function events(runId: string): Promise<Ev[]> {
-  const r = await fetch(`${BASE}/v1/runs/${runId}/events/poll?timeout=0`, { headers: H });
+  const r = await fetch(`${BASE}/runs/${runId}/events/poll?timeout=0`, { headers: H });
   return ((await r.json()) as { events?: Ev[] }).events ?? [];
 }
 
 async function resolve(runId: string, resumeValue: unknown): Promise<Response> {
-  return fetch(`${BASE}/v1/runs/${runId}/interrupts/${NODE}`, { method: 'POST', headers: H, body: JSON.stringify({ resumeValue }) });
+  return fetch(`${BASE}/runs/${runId}/interrupts/${NODE}`, { method: 'POST', headers: H, body: JSON.stringify({ resumeValue }) });
 }
 
 function v2SuspendRequestValidator(): (x: unknown) => boolean {
@@ -110,7 +111,7 @@ function v2SuspendRequestValidator(): (x: unknown) => boolean {
 }
 
 async function mySubject(): Promise<string> {
-  const run = await storage.getRun(await startRun());
+  const run = await storage.getRun(bareRunId(await startRun()));
   return String((run?.metadata as Record<string, unknown>).actingUserId);
 }
 
@@ -133,11 +134,14 @@ describe('RFC 0199 §C — the credential interrupt (facet advertised)', () => {
     expect(await settle(runId, (s) => s.startsWith('waiting') || s === 'completed' || s === 'failed')).toBe('waiting-input');
     const ask = (await events(runId)).find((e) => e.type === 'interrupt.requested');
     expect(ask?.payload?.kind).toBe('credential');
-    expect(ask?.payload?.key).toBe(NODE);
+    // interrupt.md §Re-entry — the key derives from the run, the node and the
+    // visit (loop row 3, P2 — interrupt.md §Events moved every kind onto `interruptRequestKey`; this was
+    // the bare node id, which named no run).
+    expect(ask?.payload?.key).toBe(`${runId.split('/').pop()}:${NODE}:${NODE}`);
     const data = ask?.payload?.data as Record<string, unknown>;
     expect(data).toMatchObject({ provider: 'slack', scopes: ['chat:write'], reason: 'missing' });
     // The canonical, version-agnostic vendor root (ADR 0652) — it outlives `/v1`.
-    expect(String(data.connectUrl)).toBe(`${PUBLIC_BASE}/host/openwop-app/connections/connect/${encodeURIComponent(runId)}/${NODE}`);
+    expect(String(data.connectUrl)).toBe(`${PUBLIC_BASE}/host/openwop-app/connections/connect/${encodeURIComponent(bareRunId(runId))}/${NODE}`);
     expect(v2SuspendRequestValidator()(ask?.payload)).toBe(true);
   });
 
@@ -156,7 +160,7 @@ describe('RFC 0199 §C — the credential interrupt (facet advertised)', () => {
   });
 
   it('§C.3 — connectUrl is not pre-authenticated: anonymous gets no authorization URL', async () => {
-    const r = await fetch(`${BASE}/v1/host/openwop-app/connections/connect/${runId}/${NODE}`, { redirect: 'manual' });
+    const r = await fetch(`${BASE}/host/openwop-app/connections/connect/${bareRunId(runId)}/${NODE}`, { redirect: 'manual' });
     expect(r.status).toBeGreaterThanOrEqual(400);
     expect(r.headers.get('location') ?? '').not.toContain('slack.com');
   });
@@ -164,9 +168,9 @@ describe('RFC 0199 §C — the credential interrupt (facet advertised)', () => {
   it('§C.3 — connectUrl refuses a user other than the run\'s owner (no authorization URL)', async () => {
     const other = await startRun();
     await settle(other, (s) => s === 'waiting-input');
-    const run = await storage.getRun(other);
-    await storage.updateRun(other, { metadata: { ...(run!.metadata as Record<string, unknown>), actingUserId: 'someone-else' } });
-    const r = await fetch(`${BASE}/v1/host/openwop-app/connections/connect/${other}/${NODE}`, { headers: H, redirect: 'manual' });
+    const run = await storage.getRun(bareRunId(other));
+    await storage.updateRun(bareRunId(other), { metadata: { ...(run!.metadata as Record<string, unknown>), actingUserId: 'someone-else' } });
+    const r = await fetch(`${BASE}/host/openwop-app/connections/connect/${bareRunId(other)}/${NODE}`, { headers: H, redirect: 'manual' });
     expect(r.status).toBe(403);
     expect(r.headers.get('location')).toBeNull();
   });
@@ -192,7 +196,7 @@ describe('RFC 0199 §C — the credential interrupt (facet advertised)', () => {
     const authorizeUrl = new URL(open.headers.get('location') ?? '');
     expect(authorizeUrl.host).toBe('slack.com');
     const state = authorizeUrl.searchParams.get('state')!;
-    const cb = await fetch(`${BASE}/v1/host/openwop-app/connections/slack/callback?state=${encodeURIComponent(state)}&code=abc`, { headers: H, redirect: 'manual' });
+    const cb = await fetch(`${BASE}/host/openwop-app/connections/slack/callback?state=${encodeURIComponent(state)}&code=abc`, { headers: H, redirect: 'manual' });
     expect(cb.status).toBe(302);
     expect(cb.headers.get('location')).toContain('connected=slack');
     expect(await settle(run2, (s) => s === 'completed' || s === 'failed')).toBe('completed');
@@ -208,7 +212,8 @@ describe('RFC 0199 §C — the credential interrupt (facet advertised)', () => {
     const run3 = await startRun();
     expect(await settle(run3, (s) => s === 'waiting-input' || s === 'completed' || s === 'failed')).toBe('waiting-input');
     const evs = await events(run3);
-    const expired = evs.findIndex((e) => e.type === 'connector.auth_expired');
+    // The major-2 vocabulary spells it `connector.auth-expired` (the v1 read said `auth_expired`).
+    const expired = evs.findIndex((e) => e.type === 'connector.auth-expired');
     const asked = evs.findIndex((e) => e.type === 'interrupt.requested');
     expect(expired).toBeGreaterThanOrEqual(0);
     expect(expired).toBeLessThan(asked);

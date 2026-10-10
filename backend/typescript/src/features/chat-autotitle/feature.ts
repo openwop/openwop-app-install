@@ -26,7 +26,7 @@ export const chatAutotitleFeature: BackendFeature = {
       'On the first message of a new chat, a quick model names the conversation by its '
       + 'topic (in the conversation\'s own language) instead of using the first 60 '
       + 'characters. It names a chat ONCE and never overrides a name you set yourself. '
-      + 'A per-user preference, ON by default; turn it off to keep the plain substring name.',
+      + 'A per-user preference; turn it off to keep the plain substring name.',
     category: 'Chat',
     status: 'on',
     bucketUnit: 'user',

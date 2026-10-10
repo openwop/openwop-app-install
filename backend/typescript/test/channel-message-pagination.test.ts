@@ -17,7 +17,7 @@ import { createApp } from '../src/index.js';
 
 let server: http.Server;
 let BASE: string;
-const CH = '/v1/host/openwop-app/channels';
+const CH = '/host/openwop-app/channels';
 let n = 0;
 
 beforeAll(async () => {
@@ -45,7 +45,7 @@ function client() {
 const TENANT = `t-chpage-${Date.now()}`;
 async function login(name: string) {
   const c = client();
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `chpage-${name}-${n++}@x.test`, displayName: name, tenantId: TENANT });
+  const r = await c.post('/host/openwop-app/test/login', { email: `chpage-${name}-${n++}@x.test`, displayName: name, tenantId: TENANT });
   expect(r.status).toBe(201);
   return c;
 }

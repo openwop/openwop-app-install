@@ -1,14 +1,22 @@
 {
   "name": "core.openwop.agents.lead-concierge",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Value-first website lead concierge for the public anonymous chat widget (ADR 0470). Answers visitor questions from grounded knowledge, then — only after delivering value — offers a human follow-up and captures a lead via crm.lead.capture. AI-disclosed, consent-aware, no offer/price authority. Chat-persona pack.",
   "author": "OpenWOP Working Group",
   "license": "Apache-2.0",
   "homepage": "https://openwop.dev/packs/core.openwop.agents.lead-concierge",
   "repository": "https://github.com/openwop/openwop",
-  "keywords": ["core", "agents", "lead-capture", "widget", "sales", "concierge", "pattern"],
+  "keywords": [
+    "core",
+    "agents",
+    "lead-capture",
+    "widget",
+    "sales",
+    "concierge",
+    "pattern"
+  ],
   "engines": {
-    "openwop": ">=1.1.0 <2.0.0"
+    "openwop": ">=1.1.0 <3.0.0"
   },
   "peerDependencies": {
     "aiProviders": "supported",
@@ -39,5 +47,6 @@
   "runtime": {
     "language": "remote",
     "entry": "pack.json"
-  }
+  },
+  "kind": "node"
 }

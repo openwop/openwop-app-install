@@ -9,6 +9,7 @@
  * file (CRMGAP-FE-10), following the ReportsTab.tsx precedent this branch set:
  * ContactsTab.tsx, CompaniesTab.tsx, DealsTab.tsx, TasksTab.tsx, ReportsTab.tsx.
  */
+import { ChatPocket } from '../../chat/ChatPocket.js';
 import { Button } from '../../ui/Button.js';
 import { useEffect, useRef } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
@@ -30,12 +31,12 @@ import { GmailSyncTab } from './GmailSyncTab.js';
 import { BookingTab } from './BookingTab.js';
 import { SignTab } from './SignTab.js';
 
-/** ADR 0208 §2 (C2) — the stable feature.crm.agents persona every CRM install
+/** ADR 0208 §2 (C2) — the stable vendor.openwop-app.crm.agents persona every CRM install
  *  ships (feature.crm.nodes@1.3.0 is a required pack, so the agent pack's
  *  toolAllowlist always resolves). Replaces the earlier roster-lookup
  *  resolution (gap-analysis §5B / Phase B4), which hid the affordance on any
  *  host that hadn't happened to seed a "sales-execution" roster entry. */
-const SALES_AGENT_ID = 'feature.crm.agents.sales-ops';
+const SALES_AGENT_ID = 'vendor.openwop-app.crm.agents.sales-ops';
 type Tab = 'contacts' | 'companies' | 'deals' | 'tasks' | 'booking' | 'esign' | 'reports' | 'gmailsync';
 const TABS: { id: Tab; labelKey: string }[] = [
   { id: 'contacts', labelKey: 'tabContacts' },
@@ -148,7 +149,15 @@ export function CrmPage(): JSX.Element {
             {tab === 'gmailsync' ? <GmailSyncTab orgId={orgId} /> : null}
           </OrgSelectionState>
         )}
-      </TabPanel>
+        {/* ADR 0768 D5 — the feature's assistant in a Pocket. Honest scope: the agent's
+          tools read every org the caller can read, not only the one on screen. */}
+      <ChatPocket
+        agentId="vendor.openwop-app.crm.agents.sales-ops"
+        title={t('pocketTitle')}
+        contextLabel={t('pocketScope')}
+        renderEmptyState={() => <p className="chat-pocket__hint">{t('pocketHint')}</p>}
+      />
+    </TabPanel>
     </section>
   );
 }

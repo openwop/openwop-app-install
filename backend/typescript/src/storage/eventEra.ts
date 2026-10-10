@@ -164,7 +164,8 @@ export function loadCodemap(): Codemap {
  * vocabulary whose v1 spelling is NOT a valid v2 type, mapped onto the host's
  * own registered vendor org (`openwop-app`, spec/v2/declaration.json).
  *
- * `ui.a2ui-surface` is the one today. RFC 0209 §D.14 carves `ui.*`/`media.*`
+ * `ui.a2ui-surface` was the first (`interrupt.vote.recorded` below is the
+ * second). RFC 0209 §D.14 carves `ui.*`/`media.*`
  * out of the `<org>.` rule for ENVELOPE KINDS only; as a run-event TYPE,
  * events.md §Types still requires a registered first segment, and `ui` is not
  * one. So an era-2 log holding it failed every major-2 read with
@@ -178,8 +179,59 @@ export function loadCodemap(): Codemap {
  */
 const HOST_VENDOR_ROWS: ReadonlyArray<readonly [string, string]> = [
   ['ui.a2ui-surface', 'openwop-app.a2ui-surface'],
+  // A quorum gate's PARTIAL vote (routes/interrupts.ts): progress toward a
+  // decision, not a resolution. RFC 0223 forbids `interrupt.resolved` for a
+  // vote that does not decide the gate, and `interrupt.vote.recorded` sits in
+  // the protocol's `interrupt.` family without being a registered type there,
+  // so an era-3 log served an unregistered protocol-looking name on major 2.
+  // Same treatment as the row above: spelling only, v1 wire unchanged.
+  ['interrupt.vote.recorded', 'openwop-app.interrupt-vote-recorded'],
+  // ADR 0792 P3 — a `core.webhook` node's response record (executor.ts), under
+  // the unregistered org `host`: a major-2 read of a log holding it failed with
+  // `500 event_type_unmapped`, which ADR 0687's "no host event reaches the run
+  // log" missed because this one is a RUN event, not an ADR 0208 host event.
+  ['host.webhook.response', 'openwop-app.webhook-response'],
 ];
 const HOST_VENDOR_FORWARD: ReadonlyMap<string, string> = new Map(HOST_VENDOR_ROWS);
+
+/**
+ * READ-ONLY legacy rows: this host's own event types as they were spelled
+ * BEFORE ADR 0682 (2026-09-14) moved them out of protocol namespaces.
+ *
+ * ADR 0682 renamed the WRITER only. The old spellings are still on disk in
+ * every era-2 log written before it — a conversation is one long-lived run, so
+ * an agent conversation started in early September still holds them (the ADR
+ * counted 967 / 275 / 17 / 12 / 2 rows in production). None is a codemap row
+ * and none carries a vendor prefix, so a major-2 read of such a log failed
+ * whole with `500 event_type_unmapped`: the chat showed "No response" for a
+ * conversation that had nothing wrong with it (seen live 2026-10-01).
+ *
+ * These are NOT `HOST_VENDOR_ROWS`. Those are bidirectional — the inverse side
+ * makes an era-2 WRITE of the vendor name land under the v1 spelling, which is
+ * right for a type whose v1 wire spelling is still current and wrong here: it
+ * would put the squatting names ADR 0682 retired back on disk and back on the
+ * v1 wire. This map is consulted on the major-2 READ of an era-2 log and
+ * nowhere else.
+ *
+ * Each target is the registered vendor spelling the writer uses today (or used
+ * between ADR 0682 and ADR 0687's protocol-name correction). Vendor, not the
+ * protocol `output.chunk` / `interrupt.resolved`: a vendor type is passed
+ * through uninterpreted, and these payloads were never validated against the
+ * protocol payload schemas.
+ */
+const HOST_LEGACY_READ_ROWS: ReadonlyMap<string, string> = new Map([
+  ['ai.message.chunk', 'openwop-app.ai.message-chunk'],
+  ['ai.message.error', 'openwop-app.ai.message-error'],
+  ['node.message', 'openwop-app.node.message'],
+  ['node.interrupt.resolved', 'openwop-app.node.interrupt-resolved'],
+  ['conversation.titled', 'openwop-app.conversation.titled'],
+]);
+
+/** The legacy map, for the test that pins every row to the corpus and the
+ *  vendor registry. */
+export function hostLegacyReadRows(): ReadonlyMap<string, string> {
+  return HOST_LEGACY_READ_ROWS;
+}
 
 /** Test seam — drops the memoised map so a fixture can re-read it. */
 export function resetCodemapCache(): void {
@@ -271,6 +323,20 @@ export function toStorageVocabulary(type: string, era: number): string {
  * the codemap's v2 column, so it tracks the corpus rather than a hand list.
  */
 let v2OnlyCache: ReadonlySet<string> | null = null;
+
+/**
+ * Is `type` a name in the v2 event registry (`schemas/v2/run-event.schema.json`
+ * `type` enum)? That enum is exactly the codemap's corpus v2 column plus the
+ * v2-only types, so it is answered from the two sets this module already loads.
+ * The host vendor rows are excluded — they are this host's spellings, not
+ * registry names.
+ */
+export function isV2EventTypeName(type: string): boolean {
+  if (HOST_VENDOR_V2.has(type)) return false;
+  return loadCodemap().inverse.has(type) || V2_ONLY_TYPES.has(type);
+}
+const HOST_VENDOR_V2: ReadonlySet<string> = new Set(HOST_VENDOR_ROWS.map(([, v2]) => v2));
+
 const V2_ONLY_TYPES = {
   has(type: string): boolean {
     if (v2OnlyCache === null) v2OnlyCache = loadV2OnlyTypes();
@@ -319,6 +385,10 @@ export function toContractVocabulary(type: string, era: number, contract: Contra
     const mapped = forward.get(type);
     if (mapped !== undefined) return mapped;
     if (isVendorType(type)) return type;
+    // This host's pre-ADR-0682 spellings, still on disk (HOST_LEGACY_READ_ROWS).
+    // After the corpus and vendor branches, so it can never shadow either.
+    const legacy = HOST_LEGACY_READ_ROWS.get(type);
+    if (legacy !== undefined) return legacy;
     throw new OpenwopError(
       'event_type_unmapped',
       `event type ${type} is not named by spec/v2/event-codemap.json and carries no vendor prefix — this era-${era} log cannot be translated`,

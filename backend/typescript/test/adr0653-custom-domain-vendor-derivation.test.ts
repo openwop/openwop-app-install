@@ -22,7 +22,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { vendorTwin } from '../src/middleware/protocolVersion.js';
+import { vendorPath } from '../src/middleware/protocolVersion.js';
 
 const SRC = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'middleware', 'customDomain.ts'),
@@ -37,17 +37,20 @@ describe('ADR 0653 pB — the vendor prefix is derived, not written', () => {
     expect(SRC).not.toContain(versionedVendorLiteral);
   });
 
-  it('and it routes through vendorTwin', () => {
-    expect(SRC).toContain('vendorTwin');
-    expect(SRC).toMatch(/import \{ vendorTwin \} from '\.\/protocolVersion\.js'/);
+  // ADR 0812 P3b: the `public` family migrated, so the derivation helper is now
+  // `vendorPath` (the unversioned vendor path the routes register on). The
+  // property under test is unchanged: DERIVED, never written.
+  it('and it routes through vendorPath', () => {
+    expect(SRC).toContain('vendorPath');
+    expect(SRC).toMatch(/import \{[^}]*\bvendorPath\b[^}]*\} from '\.\/protocolVersion\.js'/);
   });
 
-  it('vendorTwin still produces the twin the rewrite depends on', () => {
+  it('vendorPath produces the vendor path the rewrite depends on', () => {
     // If this ever stops holding, the derivation is correct and the CONSTANT
     // moved — which is exactly the migration this indirection exists to absorb.
     // Asserting the shape rather than the string keeps the test honest through
     // the flip: it pins that a twin is produced, not that it is spelled `/v1`.
-    const twin = vendorTwin('/public');
+    const twin = vendorPath('/public');
     expect(twin.endsWith('/host/openwop-app/public')).toBe(true);
     expect(twin.startsWith('/')).toBe(true);
   });
@@ -57,7 +60,7 @@ describe('ADR 0653 pB — the vendor prefix is derived, not written', () => {
     // differently, a request could pass the prefix check and rewrite to an
     // address the check never validated — the org-equality invariant the
     // docblock says "holds by construction" would quietly stop holding.
-    const usages = SRC.match(/vendorTwin\('\/public'\)/g) ?? [];
+    const usages = SRC.match(/vendorPath\('\/public'\)/g) ?? [];
     expect(usages.length).toBeGreaterThanOrEqual(2);
   });
 });

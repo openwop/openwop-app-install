@@ -29,7 +29,9 @@ import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { createLogger } from '../../observability/logger.js';
 import { tenantOf, requireFeatureEnabled, publicBaseUrl } from '../featureRoute.js';
-import { assertOrgScope, resolveEffectiveAccess, ACT_AS_HEADER } from '../../host/accessControlService.js';
+import { assertOrgScope, onMemberAuthorityLost, type EffectiveAccess } from '../../host/accessControlService.js';
+import { actingAccess, actingMemberId, callerOrgAccess } from '../../host/actingAccess.js';
+import { isSuperadmin } from '../../host/superadmin.js';
 import { callerSubject, personalTenantOf } from '../../host/requestSubject.js';
 import { resolveCallerUser } from '../users/usersGuards.js';
 import type { User } from '../users/usersService.js';
@@ -42,6 +44,7 @@ import {
   listInvitations,
   previewInvitation,
   revokeInvitation,
+  revokePendingInvitesBy,
   type OrgInvitation,
 } from './invitationsService.js';
 
@@ -78,23 +81,24 @@ function requireString(value: unknown, field: string): string {
  * the tenant owner (the 2026-07 vuln-scan H2 lesson — never a bare `{}`, which
  * `resolveEffectiveAccess` resolves to FULL OWNER scopes).
  */
-async function requireMemberManage(req: Request): Promise<void> {
+async function requireMemberManage(req: Request): Promise<EffectiveAccess> {
   const orgId = req.params.orgId;
-  const actingMember = req.header(ACT_AS_HEADER)?.trim();
-  if (actingMember) {
-    // Simulated member: authority is THAT membership's, never the real
-    // principal's and never the personal-owner short-circuit.
-    const access = await resolveEffectiveAccess(tenantOf(req), { memberId: actingMember, orgId });
+  if (actingMemberId(req) !== undefined) {
+    // Simulated member: authority is THAT membership's — never the personal-
+    // owner short-circuit — and, ADR 0797 (CE-8), never MORE than the caller's
+    // own: the header narrows.
+    const access = await actingAccess(req, await callerOrgAccess(req, orgId), orgId);
     if (!access.scopes.includes('host:members:manage')) {
-      throw new OpenwopError('forbidden_scope', 'Missing required scope: host:members:manage', 403, { requiredScope: 'host:members:manage', actingAs: actingMember });
+      throw new OpenwopError('forbidden_scope', 'Missing required scope: host:members:manage', 403, { requiredScope: 'host:members:manage', actingAs: actingMemberId(req) });
     }
-    return;
+    return access;
   }
   const subject = callerSubject(req);
   if (!subject) throw new OpenwopError('forbidden_scope', 'Missing required scope: host:members:manage', 403, { requiredScope: 'host:members:manage' });
   await assertOrgScope(tenantOf(req), subject, orgId, 'host:members:manage', {
     ...(personalTenantOf(req) ? { personalTenant: personalTenantOf(req) } : {}),
   });
+  return callerOrgAccess(req, orgId);
 }
 
 /** ORGINV-4 — the management wire shape. Projects OUT `tokenHash` (the at-rest
@@ -108,6 +112,11 @@ function toClientInvite(inv: OrgInvitation): Omit<OrgInvitation, 'tokenHash'> & 
 
 export function registerOrgsRoutes(deps: RouteDeps): void {
   const { app } = deps;
+  // ADR 0815 D4 — an invite dies with its inviter's authority in that org. Not
+  // behind the `orgs` toggle: a dead inviter's invite must die while invitations
+  // are switched off too.
+  onMemberAuthorityLost('orgs.pending-invites', (lost) =>
+    revokePendingInvitesBy(lost.tenantId, lost.orgId, { subject: lost.subject, memberIds: lost.memberIds }));
   const h = (fn: (req: Request, res: Response, user: User) => Promise<void>) => async (req: Request, res: Response, next: (e?: unknown) => void) => {
     try {
       await requireEnabled(req);
@@ -118,10 +127,16 @@ export function registerOrgsRoutes(deps: RouteDeps): void {
     }
   };
 
-  app.post('/v1/host/openwop-app/orgs/:orgId/invites', h(async (req, res, user) => {
-    await requireMemberManage(req);
+  app.post('/host/openwop-app/orgs/:orgId/invites', h(async (req, res, user) => {
+    const access = await requireMemberManage(req);
+    const inviterRow = (await callerOrgAccess(req, req.params.orgId)).memberId;
     const body = (req.body ?? {}) as Record<string, unknown>;
     const tenantId = tenantOf(req);
+    // ADR 0797 (CE-8) — an invitation to be an OWNER is an owner grant, and
+    // `host:members:manage` is an admin's too.
+    if (body.role === 'owner' && !access.roles.includes('owner') && !isSuperadmin(req)) {
+      throw new OpenwopError('forbidden', 'Only an owner can invite an owner.', 403, { code: 'owner_required' });
+    }
     // ADR 0622 D5 — ONE composition owner for the route AND the workflow
     // surface: no-sender precheck BEFORE any mint (R2 review F3 / ORGINV-7),
     // mint without replace, deliver, then supersede the prior invite only once
@@ -141,6 +156,9 @@ export function registerOrgsRoutes(deps: RouteDeps): void {
       // names from the public preview).
       createdBy: user.userId,
       ...(user.displayName || user.email ? { createdByName: user.displayName || user.email } : {}),
+      // ADR 0815 D4 — the row the removal cascade matches on: the CALLER's own,
+      // never the acted-as member's (under act-as `access` carries theirs).
+      ...(inviterRow ? { createdByMemberId: inviterRow } : {}),
       baseUrl: publicBaseUrl(req),
       tokenEchoed: exposeTokens(),
     }).catch(asHttp);
@@ -150,13 +168,13 @@ export function registerOrgsRoutes(deps: RouteDeps): void {
     res.status(201).json({ invite: toClientInvite(invite), delivery: delivery.outcome, ...(exposeTokens() ? { token } : {}) });
   }));
 
-  app.get('/v1/host/openwop-app/orgs/:orgId/invites', h(async (req, res, _user) => {
+  app.get('/host/openwop-app/orgs/:orgId/invites', h(async (req, res, _user) => {
     await requireMemberManage(req);
     const rows = await listInvitations(tenantOf(req), req.params.orgId).catch(asHttp);
     res.json({ invites: rows.map(toClientInvite) });
   }));
 
-  app.delete('/v1/host/openwop-app/orgs/:orgId/invites/:inviteId', h(async (req, res, user) => {
+  app.delete('/host/openwop-app/orgs/:orgId/invites/:inviteId', h(async (req, res, user) => {
     await requireMemberManage(req);
     await revokeInvitation(tenantOf(req), req.params.orgId, req.params.inviteId).catch(asHttp);
     // ORGINV-6 — revoke is a security-relevant action (it kills a live link);
@@ -176,7 +194,7 @@ export function registerOrgsRoutes(deps: RouteDeps): void {
   // recipient must be able to see what they're being invited to BEFORE deciding
   // whether to sign in at all. It is strictly non-mutating — it never redeems
   // the single use (UX_UPGRADE-invitations IN-G1).
-  app.get('/v1/host/openwop-app/orgs/invitations/preview', async (req, res, next) => {
+  app.get('/host/openwop-app/orgs/invitations/preview', async (req, res, next) => {
     try {
       // R2 IN-SP-12 (reshaped by review F6) — the toggle gate lives in the
       // SERVICE now, resolved against the INVITE's tenant: gating here on the
@@ -197,7 +215,7 @@ export function registerOrgsRoutes(deps: RouteDeps): void {
   // resolved against the INVITE's tenant (`invitationsService.ts`, R2 F6).
   // Sign-in stays required — `resolveCallerUser` refuses anonymous callers —
   // because the accepting identity is what the new member binds to.
-  app.post('/v1/host/openwop-app/orgs/invitations/accept', async (req, res, next) => {
+  app.post('/host/openwop-app/orgs/invitations/accept', async (req, res, next) => {
     try {
       const user = await resolveCallerUser(req);
       const body = (req.body ?? {}) as Record<string, unknown>;
@@ -218,7 +236,7 @@ export function registerOrgsRoutes(deps: RouteDeps): void {
   // scanner could trip. Idempotent: declining a declined invite is the same
   // 200; the service's CAS makes the decline-vs-accept race yield exactly one
   // outcome.
-  app.post('/v1/host/openwop-app/orgs/invitations/decline', async (req, res, next) => {
+  app.post('/host/openwop-app/orgs/invitations/decline', async (req, res, next) => {
     try {
       const user = await resolveCallerUser(req);
       const body = (req.body ?? {}) as Record<string, unknown>;

@@ -33,6 +33,8 @@ export interface RenderDesignArgs {
   producedBy: Record<string, unknown>;
   /** Idempotency basis on create (retries inside one run short-circuit). */
   runId?: string | undefined;
+  /** Who is asking — updates are gated on the caller's read access to the canvas. */
+  actingUserId?: string | undefined;
 }
 
 export type RenderDesignResult =
@@ -95,7 +97,9 @@ export async function renderDesign(tenantId: string, args: RenderDesignArgs): Pr
     if (!Number.isInteger(baseVersion) || baseVersion < 1) {
       return { ok: false, error: 'validation_error', message: 'Updating an existing canvas requires `baseVersion` — read it with the get-design tool first.' };
     }
-    const applyRepair = buildAppBuilderSurface({ tenantId }).applyRepair;
+    // The acting user rides into the surface so the update's canvas load is
+    // gated by THE shared predicate (not refused for the legitimate owner).
+    const applyRepair = buildAppBuilderSurface({ tenantId, ...(args.actingUserId ? { actingUserId: args.actingUserId } : {}) }).applyRepair;
     if (!applyRepair) return { ok: false, error: 'host_capability_missing', message: 'The app-builder surface does not expose applyRepair on this host.' };
     try {
       const applied = (await applyRepair({ canvasId: args.canvasId, expectedVersion: baseVersion, app: payload })) as { canvasId: string; newVersion: number };

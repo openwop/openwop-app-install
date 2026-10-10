@@ -102,7 +102,8 @@ async function asJson<T>(res: Response, ctx: string): Promise<T> {
     } catch {
       /* non-JSON */
     }
-    throw new Error(detail || `${ctx} returned ${res.status}`);
+    // `status` lets a caller tell "there is none" (404) from a failed read.
+    throw Object.assign(new Error(detail || `${ctx} returned ${res.status}`), { status: res.status });
   }
   return (await res.json()) as T;
 }

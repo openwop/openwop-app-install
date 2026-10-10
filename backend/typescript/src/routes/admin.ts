@@ -94,7 +94,7 @@ function authAdmin(req: Request, res: Response): boolean {
 }
 
 export function registerAdminRoutes(app: Express): void {
-  app.post('/v1/host/openwop-app/admin/cleanup', (req, res) => {
+  app.post('/host/openwop-app/admin/cleanup', (req, res) => {
     if (!authAdmin(req, res)) return;
 
     // Cleanup window: any tenant whose `lastSeen` is older than this
@@ -131,7 +131,7 @@ export function registerAdminRoutes(app: Express): void {
   // ADR 0371 Phase 3 — run-retention observability + legal holds. The
   // counters are per-instance (the sweep runs on whichever instance's tick
   // fires); holds are durable + global.
-  app.get('/v1/host/openwop-app/admin/run-retention', (req, res) => {
+  app.get('/host/openwop-app/admin/run-retention', (req, res) => {
     if (!authAdmin(req, res)) return;
     void (async () => {
       res.json({
@@ -146,7 +146,7 @@ export function registerAdminRoutes(app: Express): void {
       });
     })();
   });
-  app.post('/v1/host/openwop-app/admin/run-retention/hold', (req, res) => {
+  app.post('/host/openwop-app/admin/run-retention/hold', (req, res) => {
     if (!authAdmin(req, res)) return;
     void (async () => {
       const body = (req.body ?? {}) as { tenantId?: unknown; reason?: unknown };
@@ -158,7 +158,7 @@ export function registerAdminRoutes(app: Express): void {
       res.json({ ok: true });
     })();
   });
-  app.delete('/v1/host/openwop-app/admin/run-retention/hold/:tenantId', (req, res) => {
+  app.delete('/host/openwop-app/admin/run-retention/hold/:tenantId', (req, res) => {
     if (!authAdmin(req, res)) return;
     void (async () => {
       const removed = await clearRetentionHold(req.params.tenantId ?? '');
@@ -168,7 +168,7 @@ export function registerAdminRoutes(app: Express): void {
 
   // GET variant for liveness / monitoring — returns current state
   // without performing any cleanup. Still admin-authed.
-  app.get('/v1/host/openwop-app/admin/cleanup/status', (req, res) => {
+  app.get('/host/openwop-app/admin/cleanup/status', (req, res) => {
     if (!authAdmin(req, res)) return;
     const now = Date.now();
     res.json({

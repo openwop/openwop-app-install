@@ -55,17 +55,17 @@ const enable = async (status: 'on' | 'off'): Promise<void> => {
 async function ownerWithMember(role: string): Promise<{ owner: Client; member: Client; orgId: string }> {
   const tenantId = `org:comm-${Date.now()}-${n++}`;
   const owner = client();
-  await owner.post('/v1/host/openwop-app/test/login', { email: `owner-${Date.now()}-${n++}@acme.test`, tenantId });
+  await owner.post('/host/openwop-app/test/login', { email: `owner-${Date.now()}-${n++}@acme.test`, tenantId });
   const member = client();
-  const memberUser = (await member.post('/v1/host/openwop-app/test/login', { email: `member-${Date.now()}-${n++}@acme.test`, tenantId })).body.user;
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const memberUser = (await member.post('/host/openwop-app/test/login', { email: `member-${Date.now()}-${n++}@acme.test`, tenantId })).body.user;
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   const orgId = org.body.orgId;
-  const add = await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: [role] });
+  const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: [role] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
   return { owner, member, orgId };
 }
-const base = (orgId: string): string => `/v1/host/openwop-app/commissions/orgs/${encodeURIComponent(orgId)}`;
+const base = (orgId: string): string => `/host/openwop-app/commissions/orgs/${encodeURIComponent(orgId)}`;
 const validPlan = {
   name: 'AE Standard', currency: 'usd', assignment: { kind: 'role', ref: 'ae' }, effectiveFrom: '2026-01-01',
   rules: [{ basis: 'deal-won', type: 'percentage', rate: 5, accelerators: [{ attainmentGte: 100, rate: 8 }], cap: 50000 }],

@@ -142,4 +142,8 @@ export const messages = {
   busy_glb: 'Exportando GLB…',
   busy_png: 'Exportando PNG…',
   busy_bom: 'Generando la lista de materiales…',
+  // ADR 0768 follow-up P1 — the embed's honest "can see" scope (the agent is NOT bound to what is on screen)
+  assistCanSee: "los modelos CAD que puedes abrir en este espacio de trabajo",
+  // ADR 0777 — the embed's label once bound to the open model
+  assistCanSeeThis: "este modelo",
 };

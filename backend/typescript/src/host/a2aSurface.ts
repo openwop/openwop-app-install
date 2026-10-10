@@ -26,11 +26,13 @@ import { guardedEgressFetch } from './webhookEgressGuard.js';
 import type { BundleScope } from './inMemorySurfaces.js';
 import { recordAuthorityAction } from './authorityContext.js';
 import {
-  A2A_SUPPORTED_VERSIONS,
+  a2aMinimumVersion,
+  a2aVersionBelow,
   advertisedA2AProtocolVersion,
-  servesA2AVersion,
+  clientA2AVersions,
   type A2AProtocolVersion,
 } from './a2aProfile.js';
+import { recordNegotiationDecided, type NegotiationReason, type NegotiationRecorder } from './negotiationDecided.js';
 import { projectPeerError10, textPart10 } from './a2aCodec10.js';
 import { childOf, traceFields, traceHeaders, type TraceContext } from './traceContext.js';
 
@@ -64,7 +66,25 @@ export interface A2aPeerBinding {
   endpoint: string;
   /** Every version the peer's card offered, for the refusal's `supported[]`. */
   peerVersions: readonly string[];
+  /** ADR 0865 B2 — the transport the binding was negotiated over; every RPC on
+   *  it uses the same one. Absent ⇒ the default SSRF-guarded fetch. */
+  transport?: A2aTransport;
 }
+
+/**
+ * ADR 0865 B2 — how this client reaches a peer. The default is today's anonymous,
+ * SSRF-guarded fetch. `ctx.dataIntegration.fetchA2A` passes one that goes through
+ * the Connections broker (credential, `apiHosts` pin, tenant firewall) and refuses
+ * any URL outside the source base, so the card, the card-chosen endpoint and every
+ * poll are confined to it. Codec, negotiation and state normalization stay HERE:
+ * there is still one A2A client.
+ */
+export type A2aTransport = (
+  url: string,
+  init: { method: 'GET' | 'POST'; headers: Record<string, string>; body?: string; signal?: AbortSignal },
+) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
+
+const defaultTransport: A2aTransport = (url, init) => guardedEgressFetch(url, init);
 
 /**
  * A negotiation that could not complete honestly — no shared version, or a
@@ -104,6 +124,14 @@ export interface A2aNegotiationOptions {
   /** Treat the peer as offering only this version (the suite's `peerOffersOnly`). */
   peerOffersOnly?: string;
   onCall?: A2aCallRecorder;
+  /**
+   * ADR 0858 P4 — where `negotiation.decided` lands: the run log of the run this
+   * exchange happens inside. Production supplies it through
+   * `BundleScope.recordNegotiation`; the §22 seam supplies the run it plants.
+   */
+  onDecided?: NegotiationRecorder;
+  /** ADR 0865 B2 — the transport for the card GET and every RPC on the binding. */
+  transport?: A2aTransport;
 }
 
 /** `0.3.0` / `1.0.0` → `0.3` / `1.0`. Cards in the wild carry either form. */
@@ -144,13 +172,14 @@ function readPeerCard(card: unknown, baseUrl: string): { versions: string[]; end
 
 /** Fetch a peer's Agent Card, asking for the era this host prefers (§B sender
  *  rule applies to the card GET too — a dual-era peer shapes the card by it). */
-async function fetchPeerCard(baseUrl: string, askVersion: string, onCall?: A2aCallRecorder): Promise<unknown> {
+async function fetchPeerCard(baseUrl: string, askVersion: string, onCall?: A2aCallRecorder, transport: A2aTransport = defaultTransport): Promise<unknown> {
   let lastErr: unknown = null;
   for (const path of AGENT_CARD_PATHS) {
     const url = new URL(path, baseUrl).toString();
     try {
       onCall?.({ method: 'GET', url, version: askVersion });
-      const res = await guardedEgressFetch(url, {
+      const res = await transport(url, {
+        method: 'GET',
         headers: { accept: 'application/json', [A2A_VERSION_HEADER_WIRE]: askVersion },
         signal: AbortSignal.timeout(RPC_TIMEOUT_MS),
       });
@@ -183,23 +212,53 @@ async function fetchPeerCard(baseUrl: string, askVersion: string, onCall?: A2aCa
  *   5. No shared version at all ⇒ refuse.
  */
 export async function negotiateA2aPeer(baseUrl: string, opts: A2aNegotiationOptions = {}): Promise<A2aPeerBinding> {
+  // ADR 0858 P4 — the set this host NEGOTIATES today (on a major-2-only host,
+  // `1.0` only) and its floor. Every outcome below emits `negotiation.decided`.
+  // The OUTBOUND set (`clientA2AVersions`) — not gated on the advert switch,
+  // because it only governs this host's own calls.
+  const served = clientA2AVersions();
+  const floor = a2aMinimumVersion(served);
+  const speaks = (v: string): v is A2AProtocolVersion => (served as readonly string[]).includes(v);
+  const decided = (outcome: 'accepted' | 'refused', reason: NegotiationReason, version?: string): Promise<void> =>
+    recordNegotiationDecided(opts.onDecided, {
+      protocol: 'a2a',
+      outcome,
+      reason,
+      floor,
+      peerUrl: baseUrl,
+      ...(version !== undefined ? { version } : {}),
+    });
   const requested = opts.requestVersion ?? advertisedA2AProtocolVersion();
-  if (!servesA2AVersion(requested)) {
+  if (!speaks(requested)) {
+    await decided('refused', a2aVersionBelow(requested, floor) ? 'below-floor' : 'unsupported');
     throw new A2aVersionRefusedError(
       requested,
-      [...A2A_SUPPORTED_VERSIONS],
+      [...served],
       `this host does not speak A2A ${requested}`,
     );
   }
-  const card = await fetchPeerCard(baseUrl, requested, opts.onCall);
+  // ADR 0858 P4 — a seam-declared peer offer (`peerOffersOnly`) this host does
+  // not serve leaves nothing to negotiate whatever the card says: the
+  // intersection is empty. Refuse BEFORE any egress — "a refusal needs no
+  // contact" (`v2-minimum-version-refused`), and nothing below the floor is sent.
+  if (opts.peerOffersOnly !== undefined && !speaks(opts.peerOffersOnly)) {
+    await decided('refused', a2aVersionBelow(opts.peerOffersOnly, floor) ? 'below-floor' : 'unsupported');
+    throw new A2aVersionRefusedError(requested, [opts.peerOffersOnly], `peer offers no A2A version this host speaks`);
+  }
+  const card = await fetchPeerCard(baseUrl, requested, opts.onCall, opts.transport);
+  const via = opts.transport ? { transport: opts.transport } : {};
   const read = readPeerCard(card, baseUrl);
   const offered = opts.peerOffersOnly ? read.versions.filter((v) => v === opts.peerOffersOnly) : read.versions;
   if (offered.includes(requested)) {
-    return { version: requested, endpoint: read.endpointFor(requested), peerVersions: offered };
+    await decided('accepted', 'ok', requested);
+    return { version: requested, endpoint: read.endpointFor(requested), peerVersions: offered, ...via };
   }
   // Highest mutually-spoken version, in this host's own preference order.
-  const shared = A2A_SUPPORTED_VERSIONS.find((v) => offered.includes(v));
+  const shared = served.find((v) => offered.includes(v));
   if (!shared) {
+    // A peer that offers only versions under the floor is the `interop.md`
+    // §"The floor" case: fail closed, whatever policy says about downgrades.
+    await decided('refused', offered.some((v) => a2aVersionBelow(v, floor)) ? 'below-floor' : 'unsupported');
     throw new A2aVersionRefusedError(requested, offered, `peer offers no A2A version this host speaks`);
   }
   if (opts.authenticated === true) {
@@ -208,7 +267,13 @@ export async function negotiateA2aPeer(baseUrl: string, opts: A2aNegotiationOpti
     // content-free." RFC 0049's authorization decision is the carrier the spec
     // recommends; this host has no A2A negotiation event, so the audit is the
     // content-free log line below (§B G7 remains an open spec gap).
+    //
+    // ADR 0858 P4 — the event exists now (above). This branch is reachable only
+    // while v1 is served (0.3 is the only version below 1.0, and a major-2-only
+    // host does not serve it), so it keeps RFC 0152's major-1 policy; the closed
+    // `reason` enum has no "policy" member, and `unsupported` is the nearest.
     log.warn('a2a_version_downgrade_refused', { requested, negotiated: shared, authenticated: true });
+    await decided('refused', 'unsupported');
     throw new A2aVersionRefusedError(
       requested,
       offered,
@@ -216,7 +281,10 @@ export async function negotiateA2aPeer(baseUrl: string, opts: A2aNegotiationOpti
     );
   }
   log.info('a2a_version_downgraded', { requested, negotiated: shared });
-  return { version: shared, endpoint: read.endpointFor(shared), peerVersions: offered };
+  // The closed payload has no `downgraded` outcome: `accepted` + the version
+  // actually used is the explicit, non-silent record.
+  await decided('accepted', 'ok', shared);
+  return { version: shared, endpoint: read.endpointFor(shared), peerVersions: offered, ...via };
 }
 
 /** §D.1 — the operation names, per version. One table, both directions. */
@@ -351,11 +419,12 @@ async function rpc(binding: A2aPeerBinding, method: string, params: Json, onCall
   // it stays on the RPC path rather than the card GET so one logical call
   // records one action.
   recordAuthorityAction('a2a', 'attempt');
-  let res: Awaited<ReturnType<typeof guardedEgressFetch>>;
+  let res: Awaited<ReturnType<A2aTransport>>;
   onCall?.({ method: 'POST', url: binding.endpoint, version: binding.version, rpcMethod: method, params });
   try {
-    // (2026-07 vuln-scan M1) caller-supplied baseUrl → SSRF-guarded egress.
-    res = await guardedEgressFetch(binding.endpoint, {
+    // (2026-07 vuln-scan M1) caller-supplied baseUrl → SSRF-guarded egress; or,
+    // ADR 0865 B2, the binding's own brokered transport.
+    res = await (binding.transport ?? defaultTransport)(binding.endpoint, {
       method: 'POST',
       headers: {
         // RFC 0207 §B — the HTTP carrier, beside the `Message.metadata.openwop`
@@ -369,7 +438,14 @@ async function rpc(binding: A2aPeerBinding, method: string, params: Json, onCall
       signal: AbortSignal.timeout(RPC_TIMEOUT_MS),
     });
   } catch (err) {
-    throw Object.assign(new Error(`A2A ${method} transport error: ${err instanceof Error ? err.message : String(err)}`), { code: 'a2a_transport_error' });
+    // ADR 0865 B3 — a brokered transport's confinement refusal is the caller's
+    // own typed answer, not a network failure; it keeps its code.
+    if ((err as { code?: string }).code === 'validation_error') throw err;
+    // ADR 0865 B4 correction — keep the broker's own reason: whether the request
+    // can have left (a timeout) or provably did not (no connection) decides
+    // whether a send may be retried.
+    const brokerError = (err as { brokerError?: string }).brokerError;
+    throw Object.assign(new Error(`A2A ${method} transport error: ${err instanceof Error ? err.message : String(err)}`), { code: 'a2a_transport_error', ...(brokerError ? { brokerError } : {}) });
   }
   const body = (await res.json().catch(() => ({}))) as {
     result?: unknown;
@@ -390,7 +466,7 @@ async function rpc(binding: A2aPeerBinding, method: string, params: Json, onCall
     });
   }
   if (!res.ok) {
-    throw Object.assign(new Error(`A2A ${method} returned HTTP ${res.status}`), { code: 'a2a_transport_error' });
+    throw Object.assign(new Error(`A2A ${method} returned HTTP ${res.status}`), { code: 'a2a_transport_error', httpStatus: res.status });
   }
   return normalizeResult(body.result);
 }
@@ -477,6 +553,21 @@ interface Negotiated {
   negotiation?: A2aNegotiationOptions;
 }
 
+/**
+ * ADR 0865 B2/B6 — the two operations `ctx.dataIntegration.fetchA2A` needs, on a
+ * binding it negotiated over its own transport. They are the surface's own
+ * `sendMessage`/`getTask` minus the per-call negotiation, so the codec, the
+ * operation names and the state normalization are this module's and nobody
+ * else's.
+ */
+export function a2aSendMessageOn(binding: A2aPeerBinding, message: unknown, trace?: TraceContext | null): Promise<unknown> {
+  return rpc(binding, methodName('sendMessage', binding.version), messageParams(binding.version, message, null, null, trace), undefined, trace);
+}
+
+export function a2aGetTaskOn(binding: A2aPeerBinding, taskId: string): Promise<unknown> {
+  return rpc(binding, methodName('getTask', binding.version), { id: taskId });
+}
+
 export interface A2aSurface {
   discoverAgent(baseUrl: string, opts?: { extended?: boolean } & Negotiated): Promise<unknown>;
   sendMessage(args: { baseUrl: string; message: unknown; taskId?: string | null; contextId?: string | null } & Negotiated): Promise<unknown>;
@@ -526,6 +617,12 @@ export function createA2aSurface(scope: BundleScope): A2aSurface {
    *  message, so the metadata carrier and the HTTP header name the same span
    *  and two concurrent sends stay distinguishable. */
   const traceForCall = (): TraceContext | null => (scope.traceContext ? childOf(scope.traceContext) : null);
+  /** ADR 0858 P4 — every negotiation records onto the run's log (a caller's own
+   *  `onDecided`, e.g. the §22 seam's planted run, wins). */
+  const neg = (n?: A2aNegotiationOptions): A2aNegotiationOptions => ({
+    ...(scope.recordNegotiation ? { onDecided: scope.recordNegotiation } : {}),
+    ...(n ?? {}),
+  });
 
   return {
     async discoverAgent(baseUrl, opts) {
@@ -533,7 +630,7 @@ export function createA2aSurface(scope: BundleScope): A2aSurface {
       // shapes its card by that header (the suite's `A2AFakePeer` does exactly
       // this), so a header-less GET against a 1.0 peer returns the 0.3 card and
       // the negotiation that follows reads the wrong document.
-      const binding = await negotiateA2aPeer(baseUrl, opts?.negotiation ?? {});
+      const binding = await negotiateA2aPeer(baseUrl, neg(opts?.negotiation));
       let card = await fetchPeerCard(baseUrl, binding.version, opts?.negotiation?.onCall);
       // The authenticated extended card is an optional JSON-RPC follow-up.
       if (opts?.extended === true) {
@@ -548,24 +645,24 @@ export function createA2aSurface(scope: BundleScope): A2aSurface {
     },
 
     async sendMessage({ baseUrl, message, taskId, contextId, negotiation }) {
-      const b = await negotiateA2aPeer(baseUrl, negotiation ?? {});
+      const b = await negotiateA2aPeer(baseUrl, neg(negotiation));
       const trace = traceForCall();
       return rpc(b, methodName('sendMessage', b.version), messageParams(b.version, message, taskId, contextId, trace), negotiation?.onCall, trace);
     },
 
     async sendAndStream({ baseUrl, message, taskId, contextId, negotiation }, onEvent) {
-      const b = await negotiateA2aPeer(baseUrl, negotiation ?? {});
+      const b = await negotiateA2aPeer(baseUrl, neg(negotiation));
       const trace = traceForCall();
       return rpcStream(b, methodName('sendStreamingMessage', b.version), messageParams(b.version, message, taskId, contextId, trace), onEvent, trace);
     },
 
     async getTask({ baseUrl, taskId, negotiation }) {
-      const b = await negotiateA2aPeer(baseUrl, negotiation ?? {});
+      const b = await negotiateA2aPeer(baseUrl, neg(negotiation));
       return rpc(b, methodName('getTask', b.version), { id: taskId }, negotiation?.onCall);
     },
 
     async listTasks({ baseUrl, filter, cursor, limit, negotiation }) {
-      const b = await negotiateA2aPeer(baseUrl, negotiation ?? {});
+      const b = await negotiateA2aPeer(baseUrl, neg(negotiation));
       return rpc(b, methodName('listTasks', b.version), {
         ...(filter ? { filter } : {}),
         // 1.0 renamed the pagination pair; a `cursor`/`limit` sent to a 1.0 peer
@@ -576,30 +673,30 @@ export function createA2aSurface(scope: BundleScope): A2aSurface {
     },
 
     async cancelTask({ baseUrl, taskId, negotiation }) {
-      const b = await negotiateA2aPeer(baseUrl, negotiation ?? {});
+      const b = await negotiateA2aPeer(baseUrl, neg(negotiation));
       return rpc(b, methodName('cancelTask', b.version), { id: taskId }, negotiation?.onCall);
     },
 
     async resubscribe({ baseUrl, taskId, negotiation }, onEvent) {
-      const b = await negotiateA2aPeer(baseUrl, negotiation ?? {});
+      const b = await negotiateA2aPeer(baseUrl, neg(negotiation));
       return rpcStream(b, methodName('subscribeToTask', b.version), { id: taskId }, onEvent);
     },
 
     pushConfig: {
       async create({ baseUrl, taskId, pushNotificationConfig, negotiation }) {
-        const b = await negotiateA2aPeer(baseUrl, negotiation ?? {});
+        const b = await negotiateA2aPeer(baseUrl, neg(negotiation));
         return rpc(b, methodName('createPushConfig', b.version), { taskId, pushNotificationConfig }, negotiation?.onCall);
       },
       async get({ baseUrl, taskId, configId, negotiation }) {
-        const b = await negotiateA2aPeer(baseUrl, negotiation ?? {});
+        const b = await negotiateA2aPeer(baseUrl, neg(negotiation));
         return rpc(b, methodName('getPushConfig', b.version), { taskId, ...(configId ? { pushNotificationConfigId: configId } : {}) }, negotiation?.onCall);
       },
       async list({ baseUrl, taskId, negotiation }) {
-        const b = await negotiateA2aPeer(baseUrl, negotiation ?? {});
+        const b = await negotiateA2aPeer(baseUrl, neg(negotiation));
         return rpc(b, methodName('listPushConfig', b.version), { taskId }, negotiation?.onCall);
       },
       async delete({ baseUrl, taskId, configId, negotiation }) {
-        const b = await negotiateA2aPeer(baseUrl, negotiation ?? {});
+        const b = await negotiateA2aPeer(baseUrl, neg(negotiation));
         return rpc(b, methodName('deletePushConfig', b.version), { taskId, ...(configId ? { pushNotificationConfigId: configId } : {}) }, negotiation?.onCall);
       },
     },

@@ -62,14 +62,20 @@ function verifySignature(secret: string, rawBody: Buffer, signatureHeader: strin
   if (!signatureHeader?.startsWith('sha256=')) return false;
   const expected = createHmac('sha256', secret).update(rawBody).digest('hex');
   const provided = signatureHeader.slice('sha256='.length);
-  if (provided.length !== expected.length) return false;
+  // ADR 0835 AB2-CD-6 — `timingSafeEqual` compares BYTES: a 64-char header with
+  // a multi-byte character passed the length check and threw a RangeError, so an
+  // unauthenticated request got a 500 instead of the 401.
+  if (!/^[0-9a-f]{64}$/.test(provided)) return false;
   return timingSafeEqual(Buffer.from(provided, 'utf8'), Buffer.from(expected, 'utf8'));
 }
 
 function egressDeps(storage: Storage, binding: SyncBinding): BrokeredEgressDeps {
   // No session exists on a webhook — the acting principal is the admin who
   // wired the channel (the binding's durable owner), the tenant the binding's.
-  return { storage, tenantId: binding.tenantId, runId: `sync-inbound:${binding.canvasId}`, actingUserId: binding.boundBy };
+  // ADR 0835 AB2-CD-4 — and the binding's org: without it the broker fell back
+  // to the tenant's first org connection, which may be another org's (orgs
+  // share a tenant). A binding written before the field stays as it was.
+  return { storage, tenantId: binding.tenantId, runId: `sync-inbound:${binding.canvasId}`, actingUserId: binding.boundBy, ...(binding.orgId ? { orgId: binding.orgId } : {}) };
 }
 
 async function fetchRepoFile(deps: BrokeredEgressDeps, binding: SyncBinding, path: string, ref: string): Promise<string | null> {
@@ -201,6 +207,9 @@ async function processVerifiedPush(
   let model: unknown;
   try {
     model = JSON.parse(modelRaw);
+    // ADR 0835 AB2-CD-7 — `null` / a scalar / an array is valid JSON but not a
+    // model; reading `.screens` off null threw, and every redelivery 500'd.
+    if (!model || typeof model !== 'object' || Array.isArray(model)) throw new Error('not an object');
   } catch {
     const fallbackBranch = await pushFallbackRef(deps, binding, after);
     await conclude(binding, args.deliveryId, 'fallback_invalid', { reason: 'model is not valid JSON', fallbackBranch });

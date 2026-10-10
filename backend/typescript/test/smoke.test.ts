@@ -7,6 +7,7 @@ import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
+import { preferredVersion } from '../src/middleware/protocolVersion.js';
 import {
   setRunSecrets,
   stripSecretsFromPersisted,
@@ -40,7 +41,8 @@ afterAll(async () => {
 
 interface DiscoveryBody {
   protocolVersion: string;
-  capabilities: { interrupts: { kinds: readonly string[] } };
+  protocolVersions: readonly string[];
+  interrupt?: { status?: string; tokenAlgs?: readonly string[] };
 }
 
 interface CreateRunBody {
@@ -75,21 +77,26 @@ async function jsonFetch<T = unknown>(
 
 describe('discovery', () => {
   it('serves /.well-known/openwop with capabilities', async () => {
-    const { status, body } = await jsonFetch<DiscoveryBody>('/.well-known/openwop');
+    // ADR 0812 P3c-0 — the major-2 document. v1's `capabilities.interrupts.kinds`
+    // has no v2 seat; the v2 `interrupt` record is the advertisement.
+    const { status, body } = await jsonFetch<DiscoveryBody>('/.well-known/openwop', { headers: { 'OpenWOP-Version': '2' } });
     expect(status).toBe(200);
-    expect(body.protocolVersion).toBe('1.1');
-    expect(body.capabilities.interrupts.kinds).toContain('approval');
+    // `protocolVersion` is `preferredVersion` (1.1 while v1 is still served, 2.0 after the cut).
+    expect(body.protocolVersion).toBe(preferredVersion());
+    expect(body.protocolVersions).toContain('2.0');
+    expect(body.interrupt?.status).toBe('experimental');
+    expect(body.interrupt?.tokenAlgs ?? []).toContain('hs256');
   });
 
   it('rejects unauth requests on protected routes', async () => {
-    const res = await fetch(`${BASE}/v1/runs/nonexistent`);
+    const res = await fetch(`${BASE}/runs/nonexistent`);
     expect(res.status).toBe(401);
   });
 });
 
 describe('run lifecycle', () => {
   it('creates and completes a sample run', async () => {
-    const create = await jsonFetch<CreateRunBody>('/v1/runs', {
+    const create = await jsonFetch<CreateRunBody>('/runs', {
       method: 'POST',
       body: JSON.stringify({
         workflowId: 'openwop-app.uppercase',
@@ -105,7 +112,7 @@ describe('run lifecycle', () => {
     let final: RunSnapshotBody | null = null;
     for (let i = 0; i < 20; i++) {
       await new Promise((r) => setTimeout(r, 50));
-      const snap = await jsonFetch<RunSnapshotBody>(`/v1/runs/${runId}`);
+      const snap = await jsonFetch<RunSnapshotBody>(`/runs/${runId}`);
       final = snap.body;
       if (['completed', 'failed', 'cancelled'].includes(snap.body.status)) break;
     }
@@ -113,8 +120,8 @@ describe('run lifecycle', () => {
   });
 
   it('replays the same response for an Idempotency-Key', async () => {
-    const headers = { 'idempotency-key': 'fixed-key-001' };
-    const first = await jsonFetch<CreateRunBody>('/v1/runs', {
+    const headers = { 'idempotency-key': 'fixed-key-001-smoke-replay' };
+    const first = await jsonFetch<CreateRunBody>('/runs', {
       method: 'POST',
       headers,
       body: JSON.stringify({
@@ -127,7 +134,7 @@ describe('run lifecycle', () => {
     // Wait briefly for the inline dispatch to finish so the cached
     // response is final (not __pending__) before the second request.
     await new Promise((r) => setTimeout(r, 100));
-    const second = await jsonFetch<CreateRunBody>('/v1/runs', {
+    const second = await jsonFetch<CreateRunBody>('/runs', {
       method: 'POST',
       headers,
       body: JSON.stringify({

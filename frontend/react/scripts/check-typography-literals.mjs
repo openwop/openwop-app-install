@@ -23,7 +23,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const SRC = join(__dirname, '..', 'src');
 
 /** Lower these whenever a cleanup removes literals; never raise them. */
-const SIZE_BASELINE = readGateBaseline('check-typography-literals', 'OPENWOP_FONTSIZE_BASELINE', 589);
+const SIZE_BASELINE = readGateBaseline('check-typography-literals', 'OPENWOP_FONTSIZE_BASELINE', 456);
 const WEIGHT_BASELINE = readGateBaseline('check-typography-literals', 'OPENWOP_FONTWEIGHT_BASELINE', 0);
 
 const walkCss = (dir, acc = []) => {

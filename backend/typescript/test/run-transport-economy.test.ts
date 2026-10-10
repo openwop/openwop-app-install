@@ -1,7 +1,7 @@
 /**
  * RFC 0115 — Run Transport Economy. Reference-host conformance for the
  * conditional GET (sequence-derived ETag + If-None-Match/304) and
- * Content-Encoding negotiation on GET /v1/runs/{runId}.
+ * Content-Encoding negotiation on GET /runs/{runId}.
  *
  * Node's global `fetch` (undici) transparently decompresses gzip and strips
  * `Content-Encoding`, so the encoding assertions use the low-level `http`
@@ -13,6 +13,7 @@ import http from 'node:http';
 import * as zlib from 'node:zlib';
 import { gunzipSync, brotliDecompressSync } from 'node:zlib';
 import { createApp } from '../src/index.js';
+import { bareRunId } from './support/bareRunId.js';
 
 /** Decode a Content-Encoding back to identity bytes (mirrors the encoders). */
 function decode(enc: string, body: Buffer): Buffer {
@@ -75,7 +76,7 @@ function rawGet(
 }
 
 async function createCompletedRun(): Promise<string> {
-  const res = await fetch(`${BASE}/v1/runs`, {
+  const res = await fetch(`${BASE}/runs`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
     body: JSON.stringify({ workflowId: 'openwop-app.uppercase', tenantId: 'demo', inputs: { text: 'hi' } }),
@@ -83,20 +84,28 @@ async function createCompletedRun(): Promise<string> {
   const { runId } = (await res.json()) as { runId: string };
   for (let i = 0; i < 40; i++) {
     await new Promise((r) => setTimeout(r, 50));
-    const snap = await rawGet(`/v1/runs/${runId}`);
+    const snap = await rawGet(`/runs/${runId}`);
     const status = (JSON.parse(snap.body.toString('utf8')) as { status: string }).status;
     if (['completed', 'failed', 'cancelled'].includes(status)) break;
   }
   return runId;
 }
 
+/**
+ * ADR 0812 P3c-0 — the advert on the v2 document: the v1 `restTransport` family has no
+ * core v2 record, so it rides this host's `openwop-app.rest-transport` extension.
+ */
+async function restTransport(): Promise<{ conditionalRunGet?: boolean; contentEncodings?: string[] } | undefined> {
+  const res = await rawGet('/.well-known/openwop', { 'openwop-version': '2' });
+  const body = JSON.parse(res.body.toString('utf8')) as {
+    extensions?: { 'openwop-app.rest-transport'?: { conditionalRunGet?: boolean; contentEncodings?: string[] } };
+  };
+  return body.extensions?.['openwop-app.rest-transport'];
+}
+
 describe('RFC 0115 — restTransport advertisement', () => {
   it('advertises conditionalRunGet + an honest, non-empty contentEncodings list', async () => {
-    const res = await rawGet('/.well-known/openwop');
-    const body = JSON.parse(res.body.toString('utf8')) as {
-      capabilities: { restTransport?: { conditionalRunGet?: boolean; contentEncodings?: string[] } };
-    };
-    const rt = body.capabilities.restTransport;
+    const rt = await restTransport();
     expect(rt?.conditionalRunGet).toBe(true);
     // gzip is the SHOULD baseline on any Node build; br/zstd only appear where
     // the runtime can encode them. The advert must be a subset of the RFC 0115
@@ -106,11 +115,11 @@ describe('RFC 0115 — restTransport advertisement', () => {
   });
 });
 
-describe('RFC 0115 — conditional GET on /v1/runs/{runId}', () => {
+describe('RFC 0115 — conditional GET on /runs/{runId}', () => {
   it('emits a strong ETag on 200 and honors If-None-Match with 304 (empty body)', async () => {
     const runId = await createCompletedRun();
 
-    const first = await rawGet(`/v1/runs/${runId}`);
+    const first = await rawGet(`/runs/${runId}`);
     expect(first.status).toBe(200);
     const etag = first.headers['etag'];
     expect(typeof etag).toBe('string');
@@ -118,31 +127,31 @@ describe('RFC 0115 — conditional GET on /v1/runs/{runId}', () => {
     expect(etag!.startsWith('W/')).toBe(false);
     expect(first.headers['vary']).toMatch(/Accept-Encoding/i);
 
-    const revalidate = await rawGet(`/v1/runs/${runId}`, { 'if-none-match': etag! });
+    const revalidate = await rawGet(`/runs/${runId}`, { 'if-none-match': etag! });
     expect(revalidate.status).toBe(304);
     expect(revalidate.body.length).toBe(0);
   });
 
   it('keeps the ETag stable while the run does not advance, and changes it when it does', async () => {
     const runId = await createCompletedRun();
-    const before = (await rawGet(`/v1/runs/${runId}`)).headers['etag'] as string;
+    const before = (await rawGet(`/runs/${runId}`)).headers['etag'] as string;
 
     // Stable across repeated reads with no intervening transition.
-    expect((await rawGet(`/v1/runs/${runId}`)).headers['etag']).toBe(before);
+    expect((await rawGet(`/runs/${runId}`)).headers['etag']).toBe(before);
 
     // Advance the run's persisted event log (same storage the handler reads
     // its sequence from) → the sequence-derived ETag MUST change. Written to the
     // STORE directly: the run is terminal, and RFC 0194 closes its log to live
     // appends (eventLog.ts). What this pins is the handler reading the stored
     // sequence, not the append path.
-    await appStorage.appendEvent({ eventId: `tick-${runId}`, runId, type: 'host.test.tick', payload: { n: 1 }, timestamp: new Date().toISOString() });
+    await appStorage.appendEvent({ eventId: `tick-${bareRunId(runId)}`, runId: bareRunId(runId), type: 'host.test.tick', payload: { n: 1 }, timestamp: new Date().toISOString() });
 
-    const after = (await rawGet(`/v1/runs/${runId}`)).headers['etag'] as string;
+    const after = (await rawGet(`/runs/${runId}`)).headers['etag'] as string;
     expect(after).not.toBe(before);
 
     // The previously-cached ETag is now stale → a conditional GET re-downloads
     // (200), it does NOT spuriously 304.
-    const stale = await rawGet(`/v1/runs/${runId}`, { 'if-none-match': before });
+    const stale = await rawGet(`/runs/${runId}`, { 'if-none-match': before });
     expect(stale.status).toBe(200);
   });
 });
@@ -151,19 +160,16 @@ describe('RFC 0115 — Content-Encoding negotiation', () => {
   it('every advertised encoding round-trips byte-identically to identity (Content-Encoding + Vary set)', async () => {
     const runId = await createCompletedRun();
 
-    const identity = await rawGet(`/v1/runs/${runId}`); // no Accept-Encoding
+    const identity = await rawGet(`/runs/${runId}`); // no Accept-Encoding
     expect(identity.headers['content-encoding']).toBeUndefined();
 
     // Drive the witness off the host's own advert so it can't drift from what
     // the host actually serves (gzip is the baseline; br when present).
-    const disc = JSON.parse((await rawGet('/.well-known/openwop')).body.toString()) as {
-      capabilities: { restTransport?: { contentEncodings?: string[] } };
-    };
-    const advertised = disc.capabilities.restTransport?.contentEncodings ?? [];
+    const advertised = (await restTransport())?.contentEncodings ?? [];
     expect(advertised).toContain('gzip');
 
     for (const enc of advertised) {
-      const res = await rawGet(`/v1/runs/${runId}`, { 'accept-encoding': enc });
+      const res = await rawGet(`/runs/${runId}`, { 'accept-encoding': enc });
       expect(res.status).toBe(200);
       expect(res.headers['content-encoding']).toBe(enc);
       expect(res.headers['vary']).toMatch(/Accept-Encoding/i);
@@ -173,21 +179,17 @@ describe('RFC 0115 — Content-Encoding negotiation', () => {
 
   it('honors server preference (br before gzip) when the client accepts both', async () => {
     const runId = await createCompletedRun();
-    const advertised = (
-      JSON.parse((await rawGet('/.well-known/openwop')).body.toString()) as {
-        capabilities: { restTransport?: { contentEncodings?: string[] } };
-      }
-    ).capabilities.restTransport?.contentEncodings ?? [];
-    const res = await rawGet(`/v1/runs/${runId}`, { 'accept-encoding': 'gzip, br' });
+    const advertised = (await restTransport())?.contentEncodings ?? [];
+    const res = await rawGet(`/runs/${runId}`, { 'accept-encoding': 'gzip, br' });
     // The chosen encoding is whichever the host prefers among what it serves.
     const expected = advertised.includes('br') ? 'br' : 'gzip';
     expect(res.headers['content-encoding']).toBe(expected);
-    expect(decode(expected, res.body).equals((await rawGet(`/v1/runs/${runId}`)).body)).toBe(true);
+    expect(decode(expected, res.body).equals((await rawGet(`/runs/${runId}`)).body)).toBe(true);
   });
 
   it('falls back to identity when the client accepts no encoding we serve', async () => {
     const runId = await createCompletedRun();
-    const res = await rawGet(`/v1/runs/${runId}`, { 'accept-encoding': 'identity' });
+    const res = await rawGet(`/runs/${runId}`, { 'accept-encoding': 'identity' });
     expect(res.status).toBe(200);
     expect(res.headers['content-encoding']).toBeUndefined();
   });

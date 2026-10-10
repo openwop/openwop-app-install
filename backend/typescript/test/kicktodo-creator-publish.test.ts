@@ -45,7 +45,7 @@ function client() {
     get: (p: string) => send('GET', p),
     post: (p: string, b?: unknown) => send('POST', p, b),
     login: async (subject: string, tenantId: string) => {
-      const res = await send('POST', '/v1/host/openwop-app/test/login', { subject, tenantId });
+      const res = await send('POST', '/host/openwop-app/test/login', { subject, tenantId });
       expect([200, 201]).toContain(res.status);
       // USERS-19 (ADR 0617 D2): a deployment-named tenant is NOT a personal
       // shape, so the collapsed `personalTenant === tenantId` cookie no longer
@@ -60,8 +60,8 @@ function client() {
   };
 }
 
-const CB = '/v1/host/openwop-app/kicktodo/creator';
-const KB = '/v1/host/openwop-app/kicktodo';
+const CB = '/host/openwop-app/kicktodo/creator';
+const KB = '/host/openwop-app/kicktodo';
 const TENANT = 'tenant-kt-publish';
 
 beforeAll(async () => {
@@ -192,7 +192,7 @@ describe('gated publication (submit → distinct approver → publish)', () => {
     await author.login('user:lane-author', TENANT);
     const { candidateId, challengeId } = await setupPublishable(author);
     const submitted = await (await author.post(`${CB}/candidates/${candidateId}/submit-publication`, { challengeId, challengeVersion: 1 })).json() as { approvalId: string };
-    const CLAIM = `/v1/host/openwop-app/approvals/${encodeURIComponent(submitted.approvalId)}/claim`;
+    const CLAIM = `/host/openwop-app/approvals/${encodeURIComponent(submitted.approvalId)}/claim`;
 
     // Separation of duties holds on the lane: the submitter is refused 403.
     expect((await author.post(CLAIM, {})).status).toBe(403);
@@ -227,7 +227,7 @@ describe('gated publication (submit → distinct approver → publish)', () => {
     const submitted = await (await author.post(`${CB}/candidates/${candidateId}/submit-publication`, { challengeId, challengeVersion: 1 })).json() as { approvalId: string };
     const approver = client();
     await approver.login('user:lane-approver-2', TENANT);
-    const reject = await approver.post(`/v1/host/openwop-app/approvals/${encodeURIComponent(submitted.approvalId)}/reject`, { note: 'day 3 overclaims' });
+    const reject = await approver.post(`/host/openwop-app/approvals/${encodeURIComponent(submitted.approvalId)}/reject`, { note: 'day 3 overclaims' });
     expect(reject.status).toBe(200);
     expect((await getApproval(submitted.approvalId))?.status).toBe('rejected');
     const pub = await (await approver.get(`${KB}/challenges/${challengeId}/versions/1`)).json() as { status: string };

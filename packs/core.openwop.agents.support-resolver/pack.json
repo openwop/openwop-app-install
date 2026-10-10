@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.agents.support-resolver",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "Customer support resolver agent. KB-grounded answers with explicit citation, escalation handoff on low confidence. Pure-agent pack.",
   "author": "OpenWOP Working Group",
   "license": "Apache-2.0",
@@ -15,12 +15,12 @@
     "vertical"
   ],
   "engines": {
-    "openwop": ">=1.1.0 <2.0.0"
+    "openwop": ">=1.1.0 <3.0.0"
   },
   "peerDependencies": {
     "aiProviders": "supported",
-    "host.agentRuntime": "supported",
-    "openwop.agents.memoryBackends": ">=longTerm"
+    "agentRuntime": "supported",
+    "agents": ">=longTerm"
   },
   "agents": [
     {
@@ -45,11 +45,20 @@
       },
       "confidence": {
         "defaultThreshold": 0.75
-      }
+      },
+      "role": "skill"
     }
   ],
   "runtime": {
     "language": "remote",
     "entry": "pack.json"
+  },
+  "kind": "node",
+  "peerDependenciesMeta": {
+    "agents": {
+      "facets": [
+        "memoryBackends"
+      ]
+    }
   }
 }

@@ -1,86 +1,107 @@
 /**
  * CSM feature (ADR 0001 §6 Phase 6) — the second feature, proving the contract
  * is additive (wired by appending to BACKEND_FEATURES only) and works for a
- * plain on/off feature with no variants/packs.
+ * plain on/off feature with no variants/packs. Later claims carried here:
+ *   - ADR 0014: the `ctx.features.csm` surface is registered, tenant-guarded
+ *     (CTI-1) and projects out internal columns; the nodes run over it;
+ *   - ADR 0212 §1/§2: `crmRef` validation (dangling / half-ref / cross-tenant /
+ *     tombstone) and computed-health provenance;
+ *   - ADR 0582 §4/§5 + ADR 0645 D2 (CSMWF-2, CSMCD-1): a computed set must name
+ *     its company and arithmetic, and a vanished link REFUSES (recorded + typed);
+ *   - R2 CS-SP-2/CS-SP-4: arrCurrency and factors-without-score.
+ *
+ * SABOTAGE-WITNESSED (grade-tests w7, probes `w7g1-feat-*`): every guard named
+ * above was broken one at a time in accountsService/surface/routes/feature.ts and
+ * the case that claims it went red. ONE app boot serves every HTTP case.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
-import { BACKEND_FEATURES } from '../src/features/index.js';
+import { registeredFeatureSurfaceIds } from '../src/host/featureSurfaces.js';
 import { __clearToggleStore } from '../src/host/featureToggles/service.js';
 import {
   __resetCsmStore,
   createAccount,
   getAccountForTenant,
+  listAccounts,
   setAccountHealthForTenant,
   scrubCrmRefsForDeletedCompany,
+  updateAccount,
 } from '../src/features/csm/accountsService.js';
 import { pathToFileURL } from 'node:url';
 import { join } from 'node:path';
 import { buildCsmSurface } from '../src/features/csm/surface.js';
-
-const REPO_ROOT = join(__dirname, '..', '..', '..');
 import { createCompany, tombstoneCompany, __resetCrmEntities } from '../src/features/crm/crmEntitiesService.js';
 
+const REPO_ROOT = join(__dirname, '..', '..', '..');
+const TOKEN = 'dev-token';
+let server: http.Server;
+let BASE: string;
+
+// ONE boot for the whole file (it used to boot twice, and two describes ran on
+// the first boot's persistence without saying so). The toggle store starts
+// cleared so the first describe can witness "404 while off".
+beforeAll(async () => {
+  process.env.OPENWOP_STORAGE_DSN = 'memory://';
+  process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
+  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  await __clearToggleStore();
+  await __resetCsmStore();
+  await __resetCrmEntities();
+  await new Promise<void>((res) => {
+    server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
+  });
+});
+afterAll(async () => {
+  await new Promise<void>((res) => server.close(() => res()));
+});
+
+async function jf<T = unknown>(path: string, init: RequestInit = {}): Promise<{ status: number; body: T }> {
+  const res = await fetch(`${BASE}${path}`, {
+    ...init,
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}`, ...(init.headers as Record<string, string> ?? {}) },
+  });
+  const raw = res.status === 204 ? undefined : await res.json();
+  return { status: res.status, body: raw as T };
+}
+
+async function setCsm(status: 'on' | 'off'): Promise<void> {
+  const res = await jf('/host/openwop-app/feature-toggles/admin/configs/csm', {
+    method: 'PUT',
+    body: JSON.stringify({ status, bucketUnit: 'tenant', salt: 'csm' }),
+  });
+  expect(res.status).toBe(200);
+}
+const enableCsm = (): Promise<void> => setCsm('on');
+
 describe('CSM feature (sqlite memory app)', () => {
-  let server: http.Server;
-  let BASE: string;
-  const TOKEN = 'dev-token';
-
-  beforeAll(async () => {
-    process.env.OPENWOP_STORAGE_DSN = 'memory://';
-    process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
-    const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-    await __clearToggleStore();
-    await __resetCsmStore();
-    await new Promise<void>((res) => {
-      server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
-    });
-  });
-  afterAll(async () => {
-    await new Promise<void>((res) => server.close(() => res()));
-  });
-
-  async function jf<T = unknown>(path: string, init: RequestInit = {}): Promise<{ status: number; body: T }> {
-    const res = await fetch(`${BASE}${path}`, {
-      ...init,
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}`, ...(init.headers as Record<string, string> ?? {}) },
-    });
-    const raw = res.status === 204 ? undefined : await res.json();
-    return { status: res.status, body: raw as T };
-  }
-
-  it('is registered as a backend feature (additive — appended to BACKEND_FEATURES)', () => {
-    expect(BACKEND_FEATURES.some((f) => f.id === 'csm')).toBe(true);
-  });
-
   it('404s while off, CRUD works once enabled', async () => {
-    expect((await jf('/v1/host/openwop-app/csm/accounts')).status).toBe(404);
-    const on = await jf('/v1/host/openwop-app/feature-toggles/admin/configs/csm', {
-      method: 'PUT',
-      body: JSON.stringify({ status: 'on', bucketUnit: 'tenant', salt: 'csm' }),
-    });
-    expect(on.status).toBe(200);
+    // Explicitly OFF first, so this does not depend on running before the
+    // describe that enables csm (it failed under --sequence.shuffle).
+    await setCsm('off');
+    expect((await jf('/host/openwop-app/csm/accounts')).status).toBe(404);
+    await enableCsm();
 
-    const created = await jf<{ accountId: string; healthScore: number }>('/v1/host/openwop-app/csm/accounts', {
+    const created = await jf<{ accountId: string; healthScore: number }>('/host/openwop-app/csm/accounts', {
       method: 'POST',
       body: JSON.stringify({ name: 'Acme', healthScore: 42 }),
     });
     expect(created.status).toBe(201);
     expect(created.body.healthScore).toBe(42);
 
-    const list = await jf<{ accounts: { accountId: string }[] }>('/v1/host/openwop-app/csm/accounts');
+    const list = await jf<{ accounts: { accountId: string }[] }>('/host/openwop-app/csm/accounts');
     expect(list.body.accounts.some((a) => a.accountId === created.body.accountId)).toBe(true);
   });
 
-  it('advertises the ctx.features.csm surface at /.well-known/openwop (ADR 0014)', async () => {
-    const disco = await jf<{ hostExtensions?: { featureSurfaces?: string[] } }>('/.well-known/openwop');
-    expect(disco.status).toBe(200);
-    // The surface is registered at boot (csmFeature.surface), so it's advertised
-    // regardless of toggle state; per-tenant gating is enforced at use, not here.
-    expect(disco.body.hostExtensions?.featureSurfaces).toContain('host.sample.csm');
+  it('advertises the ctx.features.csm surface at /.well-known/openwop (ADR 0014)', () => {
+    // ADR 0812 P3c-0 / ADR 0858 — this read `hostExtensions.featureSurfaces` off the
+    // v1 discovery builder; the v2 root carries no such family, so it now asserts the
+    // live registry that advertisement is derived from (`host.sample.<id>`), populated
+    // at boot by csmFeature.surface regardless of toggle state (the accessibility
+    // precedent, accessibility-agent-tools.test.ts).
+    expect(registeredFeatureSurfaceIds()).toContain('csm');
   });
 });
 
@@ -99,10 +120,14 @@ describe('CSM extension surface (ADR 0014 — ctx.features.csm + nodes)', () => 
   it('setAccountHealthForTenant is tenant-guarded + idempotent (replay-safe)', async () => {
     const a = await createAccount({ tenantId: 't1', name: 'Beta', healthScore: 80 });
     expect(await setAccountHealthForTenant('t2', a.accountId, { healthScore: 10 })).toBeNull();
+    // ...and the refused cross-tenant write left the row untouched.
+    expect((await getAccountForTenant('t1', a.accountId))?.healthScore).toBe(80);
     const r1 = await setAccountHealthForTenant('t1', a.accountId, { healthScore: 12 });
     const r2 = await setAccountHealthForTenant('t1', a.accountId, { healthScore: 12 });
     expect(r1?.healthScore).toBe(12);
-    expect(r2?.healthScore).toBe(12); // same inputs → same result (fork/replay never duplicates)
+    expect(r2?.healthScore).toBe(12); // same inputs → same result
+    // Update-only: a replayed write never mints a second row (fork/replay never duplicates).
+    expect((await listAccounts('t1')).filter((x) => x.name === 'Beta')).toHaveLength(1);
   });
 
   it('buildCsmSurface projects internal fields + tenant-isolates', async () => {
@@ -118,7 +143,7 @@ describe('CSM extension surface (ADR 0014 — ctx.features.csm + nodes)', () => 
     expect(got.account?.name).toBe('Gamma');
   });
 
-  it('feature.csm.nodes read/set run over a stub ctx.features.csm', async () => {
+  it('feature.csm.nodes read/set run over the real ctx.features.csm surface', async () => {
     await __resetCsmStore();
     const mod = await import('../../../packs/feature.csm.nodes/index.mjs');
     const a = await createAccount({ tenantId: 't1', name: 'Delta', healthScore: 90 });
@@ -126,6 +151,8 @@ describe('CSM extension surface (ADR 0014 — ctx.features.csm + nodes)', () => 
     const ctx = (inputs: Record<string, unknown>) => ({ features: { csm: surf }, inputs });
     const read = await mod.nodes['feature.csm.nodes.health-read'](ctx({}));
     expect(read.status).toBe('success');
+    const readAccounts = (read.outputs?.accounts ?? []) as Array<{ accountId: string; healthScore?: number }>;
+    expect(readAccounts.find((x) => x.accountId === a.accountId)?.healthScore).toBe(90);
     const set = await mod.nodes['feature.csm.nodes.health-set'](ctx({ accountId: a.accountId, healthScore: 20 }));
     expect(set.status).toBe('success');
     expect((await getAccountForTenant('t1', a.accountId))?.healthScore).toBe(20);
@@ -133,57 +160,42 @@ describe('CSM extension surface (ADR 0014 — ctx.features.csm + nodes)', () => 
 });
 
 describe('CSM↔CRM linkage (ADR 0212)', () => {
-  let server: http.Server;
-  let BASE: string;
-  const TOKEN = 'dev-token';
-
+  // Shares the file-level boot; enabling is idempotent, so this describe does
+  // not depend on the first one having run.
   beforeAll(async () => {
-    process.env.OPENWOP_STORAGE_DSN = 'memory://';
-    process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
-    const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-    await __clearToggleStore();
     await __resetCsmStore();
-    await __resetCrmEntities();
-    await new Promise<void>((res) => {
-      server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
-    });
-    await jf('/v1/host/openwop-app/feature-toggles/admin/configs/csm', {
-      method: 'PUT',
-      body: JSON.stringify({ status: 'on', bucketUnit: 'tenant', salt: 'csm' }),
-    });
-  });
-  afterAll(async () => {
-    await new Promise<void>((res) => server.close(() => res()));
+    await enableCsm();
   });
 
-  async function jf<T = unknown>(path: string, init: RequestInit = {}): Promise<{ status: number; body: T }> {
-    const res = await fetch(`${BASE}${path}`, {
-      ...init,
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}`, ...(init.headers as Record<string, string> ?? {}) },
-    });
-    const raw = res.status === 204 ? undefined : await res.json();
-    return { status: res.status, body: raw as T };
+  /** No account with this name was persisted (the refusal was a refusal). */
+  async function notPersisted(name: string): Promise<void> {
+    const list = await jf<{ accounts: { name: string }[] }>('/host/openwop-app/csm/accounts');
+    expect(list.body.accounts.map((a) => a.name)).not.toContain(name);
   }
 
   it('§1: POST /accounts 404s on a dangling crmRef (company not found)', async () => {
-    const res = await jf('/v1/host/openwop-app/csm/accounts', {
+    const res = await jf<{ error: string }>('/host/openwop-app/csm/accounts', {
       method: 'POST',
       body: JSON.stringify({ name: 'Dangling', crmRef: { orgId: 'org-1', companyId: 'cmp:does-not-exist' } }),
     });
     expect(res.status).toBe(404);
+    expect(res.body.error).toBe('not_found');
+    await notPersisted('Dangling');
   });
 
   it('§1: POST /accounts 400s on a half-ref (orgId without companyId)', async () => {
-    const res = await jf('/v1/host/openwop-app/csm/accounts', {
+    const res = await jf<{ error: string }>('/host/openwop-app/csm/accounts', {
       method: 'POST',
       body: JSON.stringify({ name: 'HalfRef', crmRef: { orgId: 'org-1' } }),
     });
     expect(res.status).toBe(400);
+    expect(res.body.error).toBe('validation_error');
+    await notPersisted('HalfRef');
   });
 
   it('§1: a real, same-tenant company links; a cross-tenant company 404s fail-closed', async () => {
     const company = await createCompany({ tenantId: 'default', orgId: 'org-1', name: 'Real Co', createdBy: 'user:test' });
-    const created = await jf<{ accountId: string; crmRef?: { orgId: string; companyId: string } }>('/v1/host/openwop-app/csm/accounts', {
+    const created = await jf<{ accountId: string; crmRef?: { orgId: string; companyId: string } }>('/host/openwop-app/csm/accounts', {
       method: 'POST',
       body: JSON.stringify({ name: 'Linked', crmRef: { orgId: 'org-1', companyId: company.companyId } }),
     });
@@ -193,21 +205,25 @@ describe('CSM↔CRM linkage (ADR 0212)', () => {
     // A company that exists, but under a DIFFERENT tenant, reads as not-found
     // for 'default' (CTI-1) — never leak/link across tenants.
     const otherTenantCompany = await createCompany({ tenantId: 'other-tenant', orgId: 'org-1', name: 'Other Tenant Co', createdBy: 'user:test' });
-    const crossTenant = await jf('/v1/host/openwop-app/csm/accounts', {
+    const crossTenant = await jf<{ error: string }>('/host/openwop-app/csm/accounts', {
       method: 'POST',
-      body: JSON.stringify({ name: 'ShouldFail', crmRef: { orgId: 'org-1', companyId: otherTenantCompany.companyId } }),
+      body: JSON.stringify({ name: 'ShouldFailCrossTenant', crmRef: { orgId: 'org-1', companyId: otherTenantCompany.companyId } }),
     });
     expect(crossTenant.status).toBe(404);
+    expect(crossTenant.body.error).toBe('not_found');
+    await notPersisted('ShouldFailCrossTenant');
   });
 
   it('§1: a merge-tombstoned company fails closed (not just missing)', async () => {
     const company = await createCompany({ tenantId: 'default', orgId: 'org-1', name: 'Soon Tombstoned', createdBy: 'user:test' });
     await tombstoneCompany('default', 'org-1', company.companyId, 'cmp:survivor');
-    const res = await jf('/v1/host/openwop-app/csm/accounts', {
+    const res = await jf<{ error: string }>('/host/openwop-app/csm/accounts', {
       method: 'POST',
-      body: JSON.stringify({ name: 'ShouldFail', crmRef: { orgId: 'org-1', companyId: company.companyId } }),
+      body: JSON.stringify({ name: 'ShouldFailTombstone', crmRef: { orgId: 'org-1', companyId: company.companyId } }),
     });
     expect(res.status).toBe(404);
+    expect(res.body.error).toBe('not_found');
+    await notPersisted('ShouldFailTombstone');
   });
 
   // CSMWF-2 / ADR 0645 D2 — a MERGED company must not yield a fabricated score.
@@ -220,7 +236,7 @@ describe('CSM↔CRM linkage (ADR 0212)', () => {
   // so the executive summary gets QUIETER exactly when measurement breaks.
   it('CSMWF-2: a merge-tombstoned company REFUSES to score instead of writing 100', async () => {
     const company = await createCompany({ tenantId: 'default', orgId: 'org-1', name: 'Merges Later', createdBy: 'user:test' });
-    const created = await jf<{ accountId: string }>('/v1/host/openwop-app/csm/accounts', {
+    const created = await jf<{ accountId: string }>('/host/openwop-app/csm/accounts', {
       method: 'POST',
       body: JSON.stringify({ name: 'MergeVictim', crmRef: { orgId: 'org-1', companyId: company.companyId } }),
     });
@@ -267,7 +283,7 @@ describe('CSM↔CRM linkage (ADR 0212)', () => {
   // defeated on the one path where the link is legitimately gone.
   it('CSMWF-2: a scrubbed crmRef records the refusal rather than throwing', async () => {
     const company = await createCompany({ tenantId: 'default', orgId: 'org-1', name: 'Deleted Later', createdBy: 'user:test' });
-    const created = await jf<{ accountId: string }>('/v1/host/openwop-app/csm/accounts', {
+    const created = await jf<{ accountId: string }>('/host/openwop-app/csm/accounts', {
       method: 'POST',
       body: JSON.stringify({ name: 'DeleteVictim', crmRef: { orgId: 'org-1', companyId: company.companyId } }),
     });
@@ -295,11 +311,11 @@ describe('CSM↔CRM linkage (ADR 0212)', () => {
     )) as { healthSet: (ctx: unknown) => Promise<{ status: string }> };
 
     const company = await createCompany({ tenantId: 'default', orgId: 'org-1', name: 'Seam Co', createdBy: 'user:test' });
-    const created = await jf<{ accountId: string }>('/v1/host/openwop-app/csm/accounts', {
+    const created = await jf<{ accountId: string }>('/host/openwop-app/csm/accounts', {
       method: 'POST',
       body: JSON.stringify({ name: 'SeamVictim', crmRef: { orgId: 'org-1', companyId: company.companyId } }),
     });
-    const surface = buildCsmSurface({ tenantId: 'default' } as never);
+    const surface = buildCsmSurface({ tenantId: 'default' });
     const ctx = {
       features: { csm: surface },
       inputs: { accountId: created.body.accountId, deals: [], tasks: [], companyId: company.companyId },
@@ -324,11 +340,11 @@ describe('CSM↔CRM linkage (ADR 0212)', () => {
 
   it('§1: PATCH with crmRef: null clears an existing link', async () => {
     const company = await createCompany({ tenantId: 'default', orgId: 'org-1', name: 'Clear Me Co', createdBy: 'user:test' });
-    const created = await jf<{ accountId: string }>('/v1/host/openwop-app/csm/accounts', {
+    const created = await jf<{ accountId: string }>('/host/openwop-app/csm/accounts', {
       method: 'POST',
       body: JSON.stringify({ name: 'ToClear', crmRef: { orgId: 'org-1', companyId: company.companyId } }),
     });
-    const cleared = await jf<{ crmRef?: unknown }>(`/v1/host/openwop-app/csm/accounts/${created.body.accountId}`, {
+    const cleared = await jf<{ crmRef?: unknown }>(`/host/openwop-app/csm/accounts/${created.body.accountId}`, {
       method: 'PATCH',
       body: JSON.stringify({ crmRef: null }),
     });
@@ -340,7 +356,7 @@ describe('CSM↔CRM linkage (ADR 0212)', () => {
    *  company must be the account's own link, so the fixture needs a real one. */
   async function linkedAccount(name: string): Promise<{ accountId: string; companyId: string }> {
     const company = await createCompany({ tenantId: 'default', orgId: 'org-1', name: `${name} Co`, createdBy: 'user:test' });
-    const created = await jf<{ accountId: string }>('/v1/host/openwop-app/csm/accounts', {
+    const created = await jf<{ accountId: string }>('/host/openwop-app/csm/accounts', {
       method: 'POST',
       body: JSON.stringify({ name, crmRef: { orgId: 'org-1', companyId: company.companyId } }),
     });
@@ -388,7 +404,7 @@ describe('CSM↔CRM linkage (ADR 0212)', () => {
     await surf.setHealth({ accountId, healthScore: 40, factors: [{ factor: 'openTasks', weight: 3, value: 5 }], companyId, method: 'penalty-sum' });
 
     const patched = await jf<{ healthFactors?: unknown; healthComputedAt?: unknown; healthScore?: number; healthMethod?: unknown }>(
-      `/v1/host/openwop-app/csm/accounts/${accountId}`,
+      `/host/openwop-app/csm/accounts/${accountId}`,
       { method: 'PATCH', body: JSON.stringify({ healthScore: 10 }) },
     );
     expect(patched.status).toBe(200);
@@ -401,15 +417,16 @@ describe('CSM↔CRM linkage (ADR 0212)', () => {
   it('§2: healthFactors is bounded — >12 entries or an oversized factor name is a validation_error', async () => {
     const surf = buildCsmSurface({ tenantId: 'default' });
     const tooMany = Array.from({ length: 13 }, (_, i) => ({ factor: `f${i}`, weight: 1, value: 1 }));
-    await expect(surf.setHealth({ accountId: 'csm:nonexistent', healthScore: 1, factors: tooMany, method: 'penalty-sum' })).rejects.toThrow();
+    await expect(surf.setHealth({ accountId: 'csm:nonexistent', healthScore: 1, factors: tooMany, method: 'penalty-sum' }))
+      .rejects.toMatchObject({ code: 'validation_error', details: { field: 'healthFactors', max: 12 } });
     const tooLongName = [{ factor: 'x'.repeat(65), weight: 1, value: 1 }];
-    await expect(surf.setHealth({ accountId: 'csm:nonexistent', healthScore: 1, factors: tooLongName, method: 'penalty-sum' })).rejects.toThrow();
+    await expect(surf.setHealth({ accountId: 'csm:nonexistent', healthScore: 1, factors: tooLongName, method: 'penalty-sum' }))
+      .rejects.toMatchObject({ code: 'validation_error', details: { field: 'healthFactors', max: 64 } });
   });
 });
 
 describe('R2 csm honesty ratchets (UX_UPGRADE-csm XCS-2/3)', () => {
   it('factors WITHOUT healthScore are rejected fail-closed (CS-SP-4 — they minted a fresh computed stamp on a stale score)', async () => {
-    const { createAccount, setAccountHealthForTenant } = await import('../src/features/csm/accountsService.js');
     const company = await createCompany({ tenantId: 't-r2', orgId: 'org-r2', name: 'Stamp Co', createdBy: 'user:test' });
     const a = await createAccount({ tenantId: 't-r2', name: 'StampCo', healthScore: 60, crmRef: { orgId: 'org-r2', companyId: company.companyId } });
     await expect(setAccountHealthForTenant('t-r2', a.accountId, {
@@ -430,7 +447,6 @@ describe('R2 csm honesty ratchets (UX_UPGRADE-csm XCS-2/3)', () => {
   });
 
   it('ADR 0582 §5: a factor breakdown with no stated arithmetic is refused (the two in-tree producers disagree under identical headers)', async () => {
-    const { createAccount, setAccountHealthForTenant } = await import('../src/features/csm/accountsService.js');
     const company = await createCompany({ tenantId: 't-r2', orgId: 'org-r2', name: 'Method Co', createdBy: 'user:test' });
     const a = await createAccount({ tenantId: 't-r2', name: 'MethodCo', crmRef: { orgId: 'org-r2', companyId: company.companyId } });
     await expect(setAccountHealthForTenant('t-r2', a.accountId, {
@@ -441,7 +457,6 @@ describe('R2 csm honesty ratchets (UX_UPGRADE-csm XCS-2/3)', () => {
   });
 
   it('arrCurrency validates, uppercases, clears with null, and never survives without an amount (CS-SP-2)', async () => {
-    const { createAccount, updateAccount } = await import('../src/features/csm/accountsService.js');
     const a = await createAccount({ tenantId: 't-r2', name: 'CurCo', arr: 1000, arrCurrency: 'eur' });
     expect(a.arrCurrency).toBe('EUR'); // uppercased at the boundary
     await expect(createAccount({ tenantId: 't-r2', name: 'BadCo', arr: 1, arrCurrency: 'NOPE!' }))

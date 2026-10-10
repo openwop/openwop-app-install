@@ -24,12 +24,9 @@ import type { AddressInfo } from 'node:net';
 import { fetch as undiciFetch } from 'undici';
 import { createApp } from '../src/index.js';
 import type { Storage } from '../src/storage/storage.js';
-import {
-  makeConnectionSafeFetch,
-  SAFE_FETCH_MAX_RESPONSE_BODY_BYTES,
-  SAFE_FETCH_REQUEST_TIMEOUT_MS,
-} from '../src/host/connectionInjection.js';
+import { makeConnectionSafeFetch } from '../src/host/connectionInjection.js';
 import { makeGuardedAgent } from '../src/host/webhookEgressGuard.js';
+import { bareRunId } from './support/bareRunId.js';
 
 let server: http.Server;
 let BASE = '';
@@ -60,50 +57,27 @@ afterAll(async () => {
 });
 
 interface Disco {
-  capabilities?: {
-    httpClient?: {
-      supported?: boolean;
-      ssrfGuard?: boolean;
-      maxResponseBodyBytes?: number;
-      requestTimeoutMs?: number;
-      methods?: string[];
-      safeFetch?: { supported?: boolean };
-      egressPolicy?: unknown;
-    };
-    auth?: { profiles?: string[]; oidc?: { supported?: boolean; issuers?: string[]; audience?: string } };
-  };
+  auth?: { lanes?: Array<{ lane: string; issuers?: string[] }> };
 }
 
-const disco = async (): Promise<Disco> => (await (await fetch(`${BASE}/.well-known/openwop`)).json()) as Disco;
+const disco = async (): Promise<Disco> => (await (await fetch(`${BASE}/.well-known/openwop`, { headers: { 'OpenWOP-Version': '2' } })).json()) as Disco;
 
 describe('discovery advertisement (advertise/enforce agreement + honest-off OIDC)', () => {
-  it('advertises httpClient with the ENFORCED constants and no egressPolicy sub-block', async () => {
-    const hc = (await disco()).capabilities?.httpClient;
-    expect(hc?.supported).toBe(true);
-    expect(hc?.ssrfGuard).toBe(true);
-    // The advertised numbers ARE the constants the dispatcher enforces —
-    // sabotage check: hard-coding either side breaks this pairing.
-    expect(hc?.maxResponseBodyBytes).toBe(SAFE_FETCH_MAX_RESPONSE_BODY_BYTES);
-    expect(hc?.requestTimeoutMs).toBe(SAFE_FETCH_REQUEST_TIMEOUT_MS);
-    expect(hc?.safeFetch?.supported).toBe(true);
-    expect(Array.isArray(hc?.methods) && hc.methods.includes('GET') && hc.methods.includes('POST')).toBe(true);
-    // RFC 0079 egressPolicy is deliberately NOT claimed (no egress.decided emission).
-    expect(hc?.egressPolicy).toBeUndefined();
-  });
+  // ADR 0812 P3c-0 — the `httpClient` advert leg is deleted: that family exists only in the
+  // retired v1 document (the v2 root carries no `httpClient` record), so there is no
+  // advertised value left to pair with the enforced constants.
 
-  it('OIDC is honest-off: no profile / no oidc block without env, both with env', async () => {
-    const before = (await disco()).capabilities?.auth;
-    expect(before?.profiles ?? []).not.toContain('openwop-auth-oidc-user-bearer');
-    expect(before?.oidc).toBeUndefined();
+  // ADR 0812 P3c-0 — v2 spelling: the `oidc` LANE of the v2 `auth` family replaces the v1
+  // `openwop-auth-oidc-user-bearer` profile + `oidc` block (the lane carries no audience).
+  it('OIDC is honest-off: no oidc lane without env, the lane with its issuer with env', async () => {
+    const before = (await disco()).auth;
+    expect(before?.lanes?.some((l) => l.lane === 'oidc')).toBe(false);
 
     process.env.OPENWOP_OIDC_ISSUER = 'https://issuer.example.test';
     process.env.OPENWOP_OIDC_AUDIENCE = 'aud-test';
     try {
-      const after = (await disco()).capabilities?.auth;
-      expect(after?.profiles).toContain('openwop-auth-oidc-user-bearer');
-      expect(after?.oidc?.supported).toBe(true);
-      expect(after?.oidc?.issuers).toEqual(['https://issuer.example.test']);
-      expect(after?.oidc?.audience).toBe('aud-test');
+      const after = (await disco()).auth;
+      expect(after?.lanes?.find((l) => l.lane === 'oidc')?.issuers).toEqual(['https://issuer.example.test']);
     } finally {
       delete process.env.OPENWOP_OIDC_ISSUER;
       delete process.env.OPENWOP_OIDC_AUDIENCE;
@@ -193,7 +167,7 @@ describe('ctx.http.safeFetch hardening + durable audit pair', () => {
 /** The test seam requires a non-anonymous principal (`host-sample-test-seams.md`
  *  §"Production safety" — an enabled seam MUST NOT accept an identity the host
  *  minted because no credential was presented). These helpers used to call the
- *  `/v1/host/sample/*` seam with no credentials at all and got 200s, which was
+ *  `/host/sample/*` seam with no credentials at all and got 200s, which was
  *  the defect, not the baseline. The real conformance harness already sends a
  *  Bearer key (`conformance/run.ts`), so this only aligns the local suite. */
 const SEAM_AUTH = { authorization: 'Bearer dev-token' } as const;
@@ -209,34 +183,37 @@ describe('conformance seams (/http/safe-fetch + /http/safe-fetch-run)', () => {
   };
 
   it('blocks a metadata target: { outcome: blocked, blocked: ssrf }', async () => {
-    const { status, json } = await post('/v1/host/sample/http/safe-fetch', { url: 'http://169.254.169.254/latest/meta-data/' });
+    const { status, json } = await post('/host/sample/http/safe-fetch', { url: 'http://169.254.169.254/latest/meta-data/' });
     expect(status).toBe(200);
     expect(json.outcome).toBe('blocked');
     expect(json.blocked).toBe('ssrf');
   });
 
   it('blocks a simulated DNS-rebind (public name → denied address)', async () => {
-    const { json } = await post('/v1/host/sample/http/safe-fetch', { url: 'http://example.com/', simulateRebindTo: '169.254.169.254' });
+    const { json } = await post('/host/sample/http/safe-fetch', { url: 'http://example.com/', simulateRebindTo: '169.254.169.254' });
     expect(json.outcome).toBe('blocked');
     expect(json.blocked).toBe('ssrf');
   });
 
   it('refuses Connection: upgrade: { outcome: blocked, blocked: upgrade }', async () => {
-    const { json } = await post('/v1/host/sample/http/safe-fetch', { url: 'https://example.com/', init: { headers: { Connection: 'upgrade' } } });
+    const { json } = await post('/host/sample/http/safe-fetch', { url: 'https://example.com/', init: { headers: { Connection: 'upgrade' } } });
     expect(json.outcome).toBe('blocked');
     expect(json.blocked).toBe('upgrade');
   });
 
   it('safe-fetch-run returns a runId whose DURABLE event log carries the audit pair (queryable via the events seam)', async () => {
-    const { status, json } = await post('/v1/host/sample/http/safe-fetch-run', { url: 'http://169.254.169.254/latest/meta-data/' });
+    const { status, json } = await post('/host/sample/http/safe-fetch-run', { url: 'http://169.254.169.254/latest/meta-data/' });
     expect(status).toBe(200);
     expect(json.outcome).toBe('blocked');
-    const runId = json.runId as string;
-    expect(typeof runId).toBe('string');
+    // The seam answers with the projected (tenant-bound, once v1 retires) id; the events
+    // seam is a host lane keyed on the bare id (`./support/bareRunId.ts`).
+    const runId = bareRunId(json.runId as string);
+    expect(typeof json.runId).toBe('string');
 
-    // The suite's event-log query seam — must surface the DURABLE pair.
-    const calledRes = (await (await fetch(`${BASE}/v1/host/sample/test/runs/${runId}/events?type=agent.toolCalled`, { headers: SEAM_AUTH })).json()) as { events: Array<{ payload: Record<string, unknown> }> };
-    const returnedRes = (await (await fetch(`${BASE}/v1/host/sample/test/runs/${runId}/events?type=agent.toolReturned`, { headers: SEAM_AUTH })).json()) as { events: Array<{ payload: Record<string, unknown> }> };
+    // The suite's event-log query seam — must surface the DURABLE pair. v2 spelling of the
+    // event types (`agent.tool-called` / `agent.tool-returned`) on the header-less seam call.
+    const calledRes = (await (await fetch(`${BASE}/host/sample/test/runs/${runId}/events?type=agent.tool-called`, { headers: SEAM_AUTH })).json()) as { events: Array<{ payload: Record<string, unknown> }> };
+    const returnedRes = (await (await fetch(`${BASE}/host/sample/test/runs/${runId}/events?type=agent.tool-returned`, { headers: SEAM_AUTH })).json()) as { events: Array<{ payload: Record<string, unknown> }> };
     expect(calledRes.events.length).toBe(1);
     expect(calledRes.events[0]!.payload.transport).toBe('http');
     const callId = calledRes.events[0]!.payload.callId;

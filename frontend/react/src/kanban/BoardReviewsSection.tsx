@@ -8,8 +8,9 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { listReviews, decideReview, type ReviewRequest } from '../chat/reviews/reviewClient.js';
+import { listReviews, type ReviewRequest } from '../chat/reviews/reviewClient.js';
 import { ReviewCard } from '../chat/reviews/ReviewCard.js';
+import { useReviewStatusStore } from '../chat/reviews/reviewStatusStore.js';
 
 export function BoardReviewsSection({ boardId }: { boardId: string }): JSX.Element | null {
   const { t } = useTranslation('kanban');
@@ -31,7 +32,17 @@ export function BoardReviewsSection({ boardId }: { boardId: string }): JSX.Eleme
           key={r.reviewId}
           review={r}
           compact
-          onDecide={async (action, body) => { await decideReview(r.reviewId, action, body); load(); }}
+          // ADR 0778 (`APUX-8`) — through the shared store, like the inbox: the
+          // badge and every other surface see the decision, a 409 is judged by
+          // status, and a failure survives the card's remount. Reload on
+          // failure too, or a stale card stays up.
+          onDecide={async (action, body) => {
+            try {
+              await useReviewStatusStore.getState().decide(r.reviewId, action, body);
+            } finally {
+              load();
+            }
+          }}
         />
       ))}
     </section>

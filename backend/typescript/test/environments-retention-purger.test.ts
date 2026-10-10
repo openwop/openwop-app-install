@@ -11,16 +11,30 @@ import { createApp } from '../src/index.js';
 import {
   snapshotLiveConfig, listSnapshots, createEnvironment, movePointer,
 } from '../src/features/environments/environmentsService.js';
-import { setTenantOverrideStatus } from '../src/host/featureToggles/service.js';
+import { registerConfigDomain } from '../src/host/configDomains.js';
 import { purgeRetained } from '../src/host/retentionPurger.js';
 
 const T = 'tenant-env-retention';
 let server: http.Server;
 
+// A test-owned domain whose live value the cases mutate between captures, so two
+// snapshots differ. (These cases used to mutate per-tenant TOGGLE overrides,
+// which ADR 0819 §2 removed from the snapshot: they are operator state.)
+const live = new Map<string, Record<string, string>>();
+const setLive = (key: string, value: string): void => { live.set(T, { ...(live.get(T) ?? {}), [key]: value }); };
+
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', res); });
+  registerConfigDomain({
+    id: 'test-retention-state',
+    label: 'Test state',
+    restore: 'exact-match',
+    async export(tenantId) { return { ...(live.get(tenantId) ?? {}) }; },
+    async import(tenantId, payload) { live.set(tenantId, { ...(payload as Record<string, string>) }); },
+    diff: () => ({ added: 0, changed: 0, removed: 0 }),
+  });
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
@@ -28,9 +42,9 @@ const FUTURE = '2099-01-01T00:00:00.000Z';
 
 describe('R3 — retention reaches snapshot HISTORY; the pinned snapshot never ages away', () => {
   it('purges dormant snapshots; the currently-pinned one survives any cutoff; promotions untouched', async () => {
-    // Two distinct snapshots: mutate a toggle between captures so the hashes differ.
+    // Two distinct snapshots: mutate live config between captures so the hashes differ.
     const s1 = await snapshotLiveConfig({ tenantId: T, sourceEnv: null, createdBy: 'op' });
-    await setTenantOverrideStatus('csm', T, 'on', 'op');
+    setLive('csm', 'on');
     const s2 = await snapshotLiveConfig({ tenantId: T, sourceEnv: null, createdBy: 'op' });
     expect(s1.hash).not.toBe(s2.hash);
     // Pin s2 on an environment (movePointer with fromEnvName: null = the rollback/pin path).
@@ -50,7 +64,7 @@ describe('R3 — retention reaches snapshot HISTORY; the pinned snapshot never a
     // Seed a FRESH dormant snapshot: the first version of this test reused the
     // drained state from the previous case, so removing the classification
     // guard still deleted zero rows — a vacuous probe, caught and rewritten.
-    await setTenantOverrideStatus('entities', T, 'off', 'op');
+    setLive('entities', 'off');
     const dormant = await snapshotLiveConfig({ tenantId: T, sourceEnv: null, createdBy: 'op' });
     const results = await purgeRetained(T, 'confidential-pii', FUTURE);
     const env = results.find((r) => r.feature === 'environments');

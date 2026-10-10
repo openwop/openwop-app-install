@@ -28,6 +28,20 @@ import type { InsertRunOptions, Storage } from '../storage/storage.js';
 import type { RunRecord } from '../types.js';
 import { stampRunStartContext, type RunStartContext } from './runStartContext.js';
 import { extractRunAttribution } from './agentRunActivityIndex.js';
+import { getNodeRegistry } from '../executor/nodeRegistry.js';
+import { pinMismatches } from './chainPinRule.js';
+import { createLogger } from '../observability/logger.js';
+
+const log = createLogger('host.runInsert');
+
+/** grade-data D-3 — the node pins a definition carries: a chain expansion's
+ *  (`expandedFrom.nodePins`, ADR 0766 D3) and a directly submitted definition's
+ *  (`nodePins`, D-6). */
+function definitionNodePins(def: WorkflowDefinition): Record<string, string> | undefined {
+  const meta = def.metadata as { nodePins?: Record<string, string>; expandedFrom?: { nodePins?: Record<string, string> } } | undefined;
+  const pins = { ...(meta?.expandedFrom?.nodePins ?? {}), ...(meta?.nodePins ?? {}) };
+  return Object.keys(pins).length > 0 ? pins : undefined;
+}
 import { revisionHashOf } from './definitionHash.js';
 import type { WorkflowDefinition } from '../executor/types.js';
 
@@ -82,6 +96,20 @@ export async function insertRunWithStartContext(
   if (ctx?.definition && (run.metadata as Record<string, unknown> | undefined)?.definitionRevision === undefined) {
     run.metadata = { ...(run.metadata ?? {}), definitionRevision: revisionHashOf(ctx.definition) };
   }
+  // grade-data D-3 — the definition says which node versions it was built
+  // against; say so on the run when this host runs a DIFFERENT one, instead of
+  // running, forking and exporting it silently. Stamped once, like the revision
+  // pin above: a fork keeps its parent's record verbatim. Only node modules
+  // already loaded are compared (a pack node resolves lazily; an unloaded one is
+  // unknown here, not a mismatch).
+  if (ctx?.definition && (run.metadata as Record<string, unknown> | undefined)?.nodePinMismatches === undefined) {
+    const registry = getNodeRegistry();
+    const mismatches = pinMismatches(definitionNodePins(ctx.definition), (typeId) => registry.get(typeId)?.version);
+    if (mismatches.length > 0) {
+      run.metadata = { ...(run.metadata ?? {}), nodePinMismatches: mismatches };
+      log.warn('run_node_pin_mismatch', { runId: run.runId, workflowId: run.workflowId, mismatches });
+    }
+  }
   // ADR 0099 Phase 2 — derive the attributed agent (for per-agent lossy opt-in)
   // from the run's own attribution block, via the shared convention reader.
   // `agentProfile` is keyed by ROSTER id (upsertAgentProfile(tenantId, rosterId)),
@@ -99,6 +127,8 @@ export async function insertRunWithStartContext(
     // ADR 0604 (TOCWF-1) — forwarded so a per-run-decision contributor can tell
     // a fresh metadata blob from a `:fork`-copied one. See RunStartContext.
     ...(ctx?.derivedFromRun ? { derivedFromRun: true } : {}),
+    // ADR 0831 P2 — read-only view of the blob being stamped.
+    metadata: run.metadata ?? {},
   });
   const opts: InsertRunOptions = {
     ...(ctx?.enqueueDispatch ? { dispatchOutbox: { nextAttemptAt: Date.now() + DISPATCH_OUTBOX_HINT_GRACE_MS } } : {}),

@@ -29,6 +29,13 @@
  * `unbindCollection` legitimately writes `[]` when the last collection is removed,
  * so gating there would trade a destructive write for a silent no-op.
  *
+ * Every case owns its tenant: the "does NOT prune" legs need a tenant with NO
+ * collections, and a sibling's `createCollection` would make them prune (they went red
+ * under reordering before — /grade-tests wave 6).
+ * SABOTAGE-WITNESSED (wave 6): removing `listingLooksWiped`, the `authoritative` arm,
+ * or the dangling comparison, or bypassing the shared rule at either call site, reds
+ * the matching case.
+ *
  * @see backend/typescript/src/host/knowledgeBindingPrune.ts
  * @see docs/adr/0603-podcasts-destructive-mix-and-deferred-param-aliases.md
  */
@@ -45,7 +52,6 @@ import { getSubjectKnowledge, setSubjectKnowledge } from '../src/host/subjectKno
 import { projectSubject } from '../src/features/projects/projectsService.js';
 import { createCollection } from '../src/features/kb/kbService.js';
 
-const T = 'org:kbp-guard';
 const INIT = { roleKey: 'analyst', autonomy: { specLevel: 'draft-only' as const } };
 
 beforeAll(async () => { initHostExtPersistence(await openStorage('memory://')); });
@@ -70,7 +76,8 @@ describe('the shared rule', () => {
 describe('H1a — `getAgentKnowledge` does not unbind an agent on a read', () => {
   const AGENT = 'agent-kbp';
 
-  it('does NOT prune when the tenant listing comes back empty while bindings exist', async () => {
+  it('does NOT prune when the tenant listing comes back empty while bindings exist (agent)', async () => {
+    const T = 'org:kbp-guard-agent-none';
     await setAgentKnowledge(T, AGENT, { collectionIds: ['col-a', 'col-b'] }, INIT);
 
     const view = await getAgentKnowledge(T, AGENT, PREAUTHORIZED_CALLER);
@@ -84,9 +91,10 @@ describe('H1a — `getAgentKnowledge` does not unbind an agent on a read', () =>
     ).toEqual(['col-a', 'col-b']);
   });
 
-  it('DOES prune a genuinely dangling binding once the listing is authoritative', async () => {
+  it('DOES prune a genuinely dangling binding once the listing is authoritative (agent)', async () => {
     // The positive control: without it the assertion above would pass against a
     // prune that simply never runs.
+    const T = 'org:kbp-guard-agent-prune';
     const col = await createCollection(T, 'org-1', 'actor', { name: 'Agent real' });
     await setAgentKnowledge(T, AGENT, { collectionIds: [col.collectionId, 'col-gone'] }, INIT);
 
@@ -101,8 +109,8 @@ describe('H1a — `getAgentKnowledge` does not unbind an agent on a read', () =>
 describe('H1b — `getProjectKnowledge` does not unbind a project (and so a notebook) on a read', () => {
   const PROJECT = 'proj-kbp';
 
-  it('does NOT prune when the tenant listing comes back empty while bindings exist', async () => {
-    const T2 = 'org:kbp-guard-proj'; // its own tenant: the sibling test above creates a collection
+  it('does NOT prune when the tenant listing comes back empty while bindings exist (project)', async () => {
+    const T2 = 'org:kbp-guard-project-none';
     await setSubjectKnowledge(T2, projectSubject(PROJECT), { collectionIds: ['col-a', 'col-b'] });
 
     const view = await getProjectKnowledge(T2, PROJECT);
@@ -115,7 +123,8 @@ describe('H1b — `getProjectKnowledge` does not unbind a project (and so a note
     ).toEqual(['col-a', 'col-b']);
   });
 
-  it('DOES prune a genuinely dangling binding once the listing is authoritative', async () => {
+  it('DOES prune a genuinely dangling binding once the listing is authoritative (project)', async () => {
+    const T = 'org:kbp-guard-project-prune';
     const col = await createCollection(T, 'org-1', 'actor', { name: 'Project real' });
     await setSubjectKnowledge(T, projectSubject(PROJECT), { collectionIds: [col.collectionId, 'col-gone'] });
 

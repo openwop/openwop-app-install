@@ -27,7 +27,7 @@ async function jsonFetch<T = unknown>(path: string, init: RequestInit = {}): Pro
 describe('POST /v1/runs — malformed inputs shape', () => {
   beforeAll(async () => {
     // Register a workflow that declares a `transcript` variable (like the prod chain).
-    const reg = await jsonFetch('/v1/host/openwop-app/workflows', {
+    const reg = await jsonFetch('/host/openwop-app/workflows', {
       method: 'POST',
       body: JSON.stringify({
         workflowId: 'app.malformed-inputs-test',
@@ -40,7 +40,7 @@ describe('POST /v1/runs — malformed inputs shape', () => {
   });
 
   it('rejects an ARRAY inputs with a clean 4xx (not 500)', async () => {
-    const res = await jsonFetch<{ error?: string }>('/v1/runs', {
+    const res = await jsonFetch<{ error?: string }>('/runs', {
       method: 'POST',
       body: JSON.stringify({
         workflowId: 'app.malformed-inputs-test',
@@ -54,7 +54,7 @@ describe('POST /v1/runs — malformed inputs shape', () => {
   });
 
   it('still accepts a well-formed object inputs', async () => {
-    const res = await jsonFetch<{ runId?: string }>('/v1/runs', {
+    const res = await jsonFetch<{ runId?: string }>('/runs', {
       method: 'POST',
       body: JSON.stringify({ workflowId: 'app.malformed-inputs-test', inputs: { transcript: 'hello' } }),
     });
@@ -63,7 +63,7 @@ describe('POST /v1/runs — malformed inputs shape', () => {
   });
 
   it('still accepts null / omitted inputs', async () => {
-    const res = await jsonFetch('/v1/runs', { method: 'POST', body: JSON.stringify({ workflowId: 'app.malformed-inputs-test' }) });
+    const res = await jsonFetch('/runs', { method: 'POST', body: JSON.stringify({ workflowId: 'app.malformed-inputs-test' }) });
     expect(res.status).toBe(201);
   });
 });

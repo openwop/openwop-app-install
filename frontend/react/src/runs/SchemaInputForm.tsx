@@ -54,6 +54,25 @@ export function SchemaInputForm({ schema, raw, onRawChange, onBlockingChange }: 
   // Leaving the component (or the schema going away) must not strand a stale block.
   useEffect(() => () => onBlockingChange?.(false), [onBlockingChange]);
 
+  // ADR 0772 (`RRUX-2`) — what the form SHOWS is what is SENT. Schema defaults
+  // were merged into the displayed value (and validated as present) but never
+  // written to `raw`, and submit posts `raw`: a required field the form showed
+  // filled went out empty. Written through once per schema, and ONLY the default
+  // keys the payload lacks: text that does not parse (typed into the plain
+  // textarea before the schema loaded) is left alone, and keys the schema does
+  // not declare stay — the JSON escape hatch may carry them (grade-code L2).
+  // Only when it changes the payload, so it never loops.
+  useEffect(() => {
+    let parsed: unknown;
+    try { parsed = JSON.parse(raw); } catch { return; }
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return;
+    const current = parsed as Record<string, unknown>;
+    const missing = Object.entries(seedDefaults(fields)).filter(([k]) => current[k] === undefined || current[k] === null || current[k] === '');
+    if (missing.length > 0) onRawChange(JSON.stringify({ ...current, ...Object.fromEntries(missing) }, null, 2));
+    // Keyed on the schema alone: a user edit must never re-trigger the seed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fields]);
+
   const set = (name: string, v: unknown) => {
     const next = { ...value, [name]: v };
     onRawChange(JSON.stringify(compactInputs(fields, next), null, 2));

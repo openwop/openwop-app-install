@@ -76,7 +76,13 @@ registerRetentionPurger({
   },
 });
 
-export interface CapDecision { allowed: boolean; reason?: 'turn_cap' | 'session_cap' | 'write_cap' | 'auto_write_cap' }
+export interface CapDecision {
+  allowed: boolean;
+  reason?: 'turn_cap' | 'session_cap' | 'write_cap' | 'auto_write_cap';
+  /** ADR 0821 D3 — this turn OPENED a new visitor conversation (the CAS-create
+   *  won), the unit `widgetConversation` is metered on. */
+  newSession?: true;
+}
 
 /**
  * ADR 0469 A3 — count a HELD anon write against the widget's per-day write cap,
@@ -189,7 +195,7 @@ export async function checkWidgetTurn(widget: WidgetConfig, sessionId: string, d
         const cur = await dayCounts.get(dKey);
         if (await dayCounts.compareAndSwap(cur ?? null, { dKey, sessions: (cur?.sessions ?? 0) + 1, tenantId, updatedAt })) break;
       }
-      return { allowed: true };
+      return { allowed: true, newSession: true };
     }
     // EXISTING session — gate on the per-session turn cap, then CAS-increment.
     // Refresh `updatedAt` so a session active across days ages from its last turn.

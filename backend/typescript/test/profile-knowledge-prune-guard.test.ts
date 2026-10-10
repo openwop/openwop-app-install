@@ -12,6 +12,18 @@
  * The guard is resolved in the NON-DESTRUCTIVE direction: an unpruned dangling
  * binding is recoverable; an unbound document set is not.
  *
+ * This file pins the profile-memory WIRING of the shared rule
+ * (`host/knowledgeBindingPrune.ts`, unit-pinned in
+ * `knowledge-binding-prune-guard.test.ts`). Each case owns its tenant AND its user
+ * (the profile store is keyed by the globally-unique userId), so neither depends on
+ * the other's collections or run order.
+ *
+ * Sabotage that turns it red:
+ *   - `listingSize: collectionIds.length` at the profile call site → case 1
+ *     (w3g2-prune-wiring)
+ *   - dropping the `setProfileKnowledge(…, { collectionIds: liveIds })` prune write
+ *     → case 2 (w3g2-prune-positive)
+ *
  * @see docs/adr/0589-twin-tenancy-and-recall-audience.md
  */
 
@@ -22,13 +34,12 @@ import { getProfileKnowledge } from '../src/features/profile-memory/profileKnowl
 import { getOrCreateProfile, setProfileKnowledge, getProfile } from '../src/features/profiles/profilesService.js';
 import { createCollection } from '../src/features/kb/kbService.js';
 
-const T = 'org:pk-prune';
-const USER = 'user:pk-prune-subject';
-
 beforeAll(async () => { initHostExtPersistence(await openStorage('memory://')); });
 
 describe('TWIN-UX-10 — the prune-on-read is guarded', () => {
   it('does NOT prune when the tenant listing comes back empty while bindings exist', async () => {
+    const T = 'org:pk-prune-wiped'; // a tenant with NO collections: the listing is empty
+    const USER = 'user:pk-prune-wiped';
     await getOrCreateProfile(T, USER);
     await setProfileKnowledge(T, USER, { collectionIds: ['col-a', 'col-b'] });
 
@@ -48,6 +59,9 @@ describe('TWIN-UX-10 — the prune-on-read is guarded', () => {
     // The positive control. Without it the assertion above would pass against a
     // prune that simply never runs — which is the same "green means nothing"
     // shape the guard exists to end.
+    const T = 'org:pk-prune-dangling';
+    const USER = 'user:pk-prune-dangling';
+    await getOrCreateProfile(T, USER);
     const col = await createCollection(T, 'org-1', 'actor', { name: 'Real' });
     await setProfileKnowledge(T, USER, { collectionIds: [col.collectionId, 'col-gone'] });
 

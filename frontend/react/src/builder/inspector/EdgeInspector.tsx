@@ -11,6 +11,7 @@ import { useBuilderStore } from '../store/builderStore.js';
 import type { BuilderEdge, EdgeCondition, EdgeTriggerRule } from '../schema/workflow.js';
 import { CONDITION_OPS, TRIGGER_RULE_OPTIONS } from './inspectorHelpers.js';
 import { TextField, SelectField } from '../../ui/Field.js';
+import { EdgeAsk, SuggestionDiffCard } from '../pair/InspectorPair.js';
 
 export function EdgeInspector({ edge }: { edge: BuilderEdge }) {
   const { t } = useTranslation('builder');
@@ -20,9 +21,14 @@ export function EdgeInspector({ edge }: { edge: BuilderEdge }) {
   const removeEdge = useBuilderStore.getState().removeEdge;
   const conditionOp = cond?.op ?? 'eq';
   const conditionMeta = CONDITION_OPS.find((o) => o.value === conditionOp)!;
+  const allNodes = useBuilderStore((s) => s.nodes);
+  const nodeName = (id: string): string => allNodes.find((n) => n.id === id)?.name ?? id;
   return (
     <aside className="builder-inspector">
       <h3 className="builder-inspector-title">{t('edge')}</h3>
+      {/* ADR 0773 D5/D6 — pending ops on this edge + point-and-ask on it. */}
+      <SuggestionDiffCard edgeId={edge.id} />
+      <EdgeAsk fromName={nodeName(edge.source)} toName={nodeName(edge.target)} />
       <p className="muted builder-inspector-desc">
         {t('edgeInspectorDesc')}
       </p>

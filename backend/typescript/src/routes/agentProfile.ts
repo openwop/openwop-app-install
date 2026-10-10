@@ -41,6 +41,7 @@ import {
   type AgentProfileInput,
 } from '../host/agentProfileService.js';
 import { resolveConnectionReadiness, gateAutonomyByReadiness } from '../host/connectionReadiness.js';
+import { requireTenantWrite } from '../features/featureRoute.js';
 
 function tenantOf(req: Request): string {
   return (req as { tenantId?: string }).tenantId ?? 'default';
@@ -289,8 +290,9 @@ export function registerAgentProfileRoutes(app: Express): void {
     return found;
   };
 
-  app.put('/v1/host/openwop-app/agents/:id/capabilities/:capabilityId', async (req, res, next) => {
+  app.put('/host/openwop-app/agents/:id/capabilities/:capabilityId', async (req, res, next) => {
     try {
+      await requireTenantWrite(req); // ADR 0775 D1
       const entry = await requireOwnedAgent(req);
       const capability = requireElectableCapability(req);
       // `activateAgentCapability` creates a minimal profile when none exists, so
@@ -308,8 +310,9 @@ export function registerAgentProfileRoutes(app: Express): void {
     }
   });
 
-  app.delete('/v1/host/openwop-app/agents/:id/capabilities/:capabilityId', async (req, res, next) => {
+  app.delete('/host/openwop-app/agents/:id/capabilities/:capabilityId', async (req, res, next) => {
     try {
+      await requireTenantWrite(req); // ADR 0775 D1
       const entry = await requireOwnedAgent(req);
       const capability = requireElectableCapability(req);
       const profile = await deactivateAgentCapability(tenantOf(req), entry.rosterId, capability);
@@ -320,7 +323,7 @@ export function registerAgentProfileRoutes(app: Express): void {
     }
   });
 
-  app.get('/v1/host/openwop-app/agents/:id/profile', async (req, res, next) => {
+  app.get('/host/openwop-app/agents/:id/profile', async (req, res, next) => {
     try {
       const entry = await requireOwnedAgent(req);
       const profile = await getAgentProfile(tenantOf(req), entry.rosterId);
@@ -333,8 +336,9 @@ export function registerAgentProfileRoutes(app: Express): void {
     }
   });
 
-  app.put('/v1/host/openwop-app/agents/:id/profile', async (req, res, next) => {
+  app.put('/host/openwop-app/agents/:id/profile', async (req, res, next) => {
     try {
+      await requireTenantWrite(req); // ADR 0775 D1
       const entry = await requireOwnedAgent(req);
       const input = parseProfileBody(req.body);
       // ADR 0493 — `roster.autonomyLevel` is the single autonomy source of truth
@@ -365,7 +369,7 @@ export function registerAgentProfileRoutes(app: Express): void {
   // at pick time). A twin with unmet connections reports `gatedAutonomy:'review'`
   // and `effective.acting:false` — the honest `supported:false` signal the FE
   // connection-status surface renders. Same fail-closed tenant gate as /profile.
-  app.get('/v1/host/openwop-app/agents/:id/connection-readiness', async (req, res, next) => {
+  app.get('/host/openwop-app/agents/:id/connection-readiness', async (req, res, next) => {
     try {
       const entry = await requireOwnedAgent(req);
       const id = entry.rosterId;

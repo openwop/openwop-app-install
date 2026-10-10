@@ -66,7 +66,7 @@ beforeAll(async () => {
   // reading one back from signup — `/auth/me` does not carry it, which is what made the
   // first version of this fixture vacuous (caught by the assertion below).
   tenantId = `org:audience-${Date.now()}`;
-  const login = await fetch(`${BASE}/v1/host/openwop-app/test/login`, {
+  const login = await fetch(`${BASE}/host/openwop-app/test/login`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ email: `audience-${Date.now()}@acme.test`, tenantId }),
   });
@@ -76,7 +76,7 @@ beforeAll(async () => {
 afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
 
 const listKinds = async (): Promise<string[]> => {
-  const res = await fetch(`${BASE}/v1/host/openwop-app/approvals?status=pending`, { headers: { cookie } });
+  const res = await fetch(`${BASE}/host/openwop-app/approvals?status=pending`, { headers: { cookie } });
   expect(res.status).toBe(200);
   const body = await res.json() as { items?: Array<{ kind?: string }>; approvals?: Array<{ kind?: string }> };
   return (body.items ?? body.approvals ?? []).map((a) => a.kind ?? 'run-proposal');
@@ -92,7 +92,7 @@ describe('ADR 0672 D1 — the list route filters by the audience owner', () => {
   });
 
   it('leg 2: the row TEXT never reaches them either — existence and content both withheld', async () => {
-    const res = await fetch(`${BASE}/v1/host/openwop-app/approvals?status=pending`, { headers: { cookie } });
+    const res = await fetch(`${BASE}/host/openwop-app/approvals?status=pending`, { headers: { cookie } });
     const raw = JSON.stringify(await res.json());
     for (const k of SCOPED) {
       expect(raw, `the proposal text for ${k} leaked`).not.toContain(`SECRET-${k}`);

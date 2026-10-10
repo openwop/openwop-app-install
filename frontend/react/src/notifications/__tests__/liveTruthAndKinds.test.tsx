@@ -43,7 +43,7 @@ describe('R2 IB-SP-4 — approval-kind honesty (NeedsYouInbox first tests)', () 
     await screen.findByText(/Publish "Summer launch"/);
     expect(screen.queryByText(/approve & run/i)).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: /^approve$/i }));
-    await waitFor(() => expect(claimApproval).toHaveBeenCalledWith('a1'));
+    await waitFor(() => expect(claimApproval).toHaveBeenCalledWith('a1', undefined, undefined));
     // The toast describes what approving DID: published, not "running".
     await waitFor(() => expect(toastSuccess).toHaveBeenCalledWith(expect.stringMatching(/published/i)));
   });

@@ -4,7 +4,7 @@
 export const messages = {
   eyebrow: 'Desarrollador',
   title: 'Complementos de UI',
-  lede: 'Carga paquetes de complementos de front-end firmados y aislados (RFC 0117/0119).',
+  lede: 'Carga paquetes de complementos de front-end firmados y aislados.',
 
   notEnabledTitle: 'Complementos de UI no está habilitado',
   notEnabledBody: 'Pide a un administrador que habilite Complementos de UI para este inquilino.',

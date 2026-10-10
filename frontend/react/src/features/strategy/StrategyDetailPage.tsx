@@ -9,6 +9,7 @@
 import { Button } from '../../ui/Button.js';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
+import { StrategyLedgerRollup } from './StrategyLedgerRollup.js';
 import { useTranslation } from 'react-i18next';
 import { PageHeader } from '../../ui/PageHeader.js';
 import { Tabs, TabPanel, useUrlTab } from '../../ui/Tabs.js';
@@ -20,7 +21,7 @@ import { FlagIcon, PlusIcon, TrashIcon, LinkIcon, CheckIcon, XIcon } from '../..
 import {
   listStrategies, getStrategy, updateStrategy, archiveStrategy, deleteStrategy,
   replaceLinks, listProjects, getStrategyDetailContext, FeatureDisabledError,
-  listStrategyCheckIns, createCheckIn, decideCheckIn, getStrategyTimeline, importObjectives, type TimelineItem,
+  listStrategyCheckIns, createCheckIn, decideCheckIn, getStrategyTimeline, importObjectives, StrategyStaleWriteError, type TimelineItem, type UpdateStrategyPatch,
   type Strategy, type StrategyScope, type PlanningHorizon, type StrategyStatus, type StrategyConfidence,
   type StrategyRisk, type StrategyObjective, type StrategyKeyResult, type StrategyInitiative, type StrategyLink,
   type ProjectRef, type StrategyHealthState, type StrategyContextEntry, type StrategyCheckIn,
@@ -49,6 +50,24 @@ const EMPTY_DIRTY: ReadonlySet<string> = new Set<string>();
 
 const TABS = ['overview', 'objectives', 'initiatives', 'alignment', 'timeline'] as const;
 type Tab = (typeof TABS)[number];
+/** ADR 0845 D4 — one place an editor's failure becomes text. A lost compare-and-swap
+ *  (someone else changed the strategy since this screen read it) gets localized copy
+ *  that the page pairs with a Reload action; everything else keeps the server's own,
+ *  more specific message. */
+function errorText(e: unknown, t: TFn, fallbackKey: string): string {
+  if (e instanceof StrategyStaleWriteError) return t('staleWrite');
+  return e instanceof Error ? e.message : t(fallbackKey);
+}
+
+/** The protected field ids the backend names, as the labels the editors use. */
+const PROTECTED_FIELD_LABEL_KEYS: Record<string, string> = {
+  objectives: 'detailObjectives',
+  planningHorizon: 'fieldHorizon',
+  accountableExecutive: 'fieldExec',
+  period: 'fieldPeriod',
+  orgId: 'fieldOrg',
+};
+
 const TAB_LABEL_KEYS: Record<Tab, string> = {
   overview: 'detailOverview',
   objectives: 'detailObjectives',
@@ -170,6 +189,7 @@ export function StrategyDetailPage(): JSX.Element {
     setErrorTick((n) => n + 1);
   }, []);
   const errorRef = useRef<HTMLDivElement | null>(null);
+  const revertedLabels = (autoReverted ?? []).map((f) => (PROTECTED_FIELD_LABEL_KEYS[f] ? t(PROTECTED_FIELD_LABEL_KEYS[f]!) : f)).join(', ');
   useEffect(() => { if (error) errorRef.current?.focus(); }, [error, errorTick]);
   const leaveGuard = useCallback(async (): Promise<boolean> => {
     if (!dirty) return true;
@@ -271,7 +291,14 @@ export function StrategyDetailPage(): JSX.Element {
               repeat, which is the only thing that re-runs its prop-keyed announce
               effect when the message is unchanged. The focus HOLDER stays mounted,
               so the ref (and the focus above) is unaffected. */}
-          <Notice key={errorTick} variant="error" announce={error}>{error}</Notice>
+          <Notice key={errorTick} variant="error" announce={error}>
+            {error}
+            {/* ADR 0845 D4 — the save lost to a newer write. Reload discards THIS
+                screen's unsaved edits for the latest version; until then they stay. */}
+            {error === t('staleWrite') ? (
+              <> <Button variant="link" onClick={() => { clearDirty(); setError(null); void refresh(); }}>{t('reloadLatest')}</Button></>
+            ) : null}
+          </Notice>
         </div>
       ) : null}
       {/* ADR 0598 §Correction 4 — ONE polite message per save, and the two
@@ -292,14 +319,14 @@ export function StrategyDetailPage(): JSX.Element {
           withdrawal notice going silent would recreate exactly the §8 defect
           and redden the gate §4 extended. */}
       {autoReverted && reviewClosed ? (
-        <Notice variant="warning" announce={t('autoRevertedAndWithdrawnNotice', { fields: autoReverted.join(', ') })}>
-          {t('autoRevertedAndWithdrawnNotice', { fields: autoReverted.join(', ') })}
+        <Notice variant="warning" announce={t('autoRevertedAndWithdrawnNotice', { fields: revertedLabels })}>
+          {t('autoRevertedAndWithdrawnNotice', { fields: revertedLabels })}
         </Notice>
       ) : (
         <>
           {autoReverted ? (
-            <Notice variant="warning" announce={t('autoRevertedNotice', { fields: autoReverted.join(', ') })}>
-              {t('autoRevertedNotice', { fields: autoReverted.join(', ') })}
+            <Notice variant="warning" announce={t('autoRevertedNotice', { fields: revertedLabels })}>
+              {t('autoRevertedNotice', { fields: revertedLabels })}
             </Notice>
           ) : null}
           {reviewClosed ? (
@@ -337,13 +364,14 @@ export function StrategyDetailPage(): JSX.Element {
               onError={raiseError}
               onDirty={onDirty.overview}
               onReviewClosed={setReviewClosed}
+              onAutoReverted={setAutoReverted}
               t={t}
             />
           ) : null}
           {tab === 'objectives' ? (
             <div className="u-flex u-flex-col u-gap-4">
               <ObjectivesEditor key={strategy.updatedAt} strategy={strategy} onChanged={refresh} onError={raiseError} onAutoReverted={setAutoReverted} onDirty={onDirty.objectives} onReviewClosed={setReviewClosed} t={t} />
-              <ImportObjectivesBlock strategy={strategy} onChanged={refresh} onError={raiseError} onDirty={onDirty.import} t={t} />
+              <ImportObjectivesBlock strategy={strategy} onChanged={refresh} onError={raiseError} onDirty={onDirty.import} onAutoReverted={setAutoReverted} onReviewClosed={setReviewClosed} t={t} />
               <CheckInsPanel strategy={strategy} onError={raiseError} onDirty={onDirty.checkins} t={t} />
             </div>
           ) : null}
@@ -416,7 +444,7 @@ function TimelineView({ strategy, t }: { strategy: Strategy; t: TFn }): JSX.Elem
   );
 }
 
-function OverviewEditor({ strategy, allStrategies, strategiesFailed, onChanged, onClosed, onError, onDirty, onReviewClosed, t }: { strategy: Strategy; allStrategies: Strategy[]; strategiesFailed: boolean; onChanged: () => void | Promise<void>; onClosed: () => void | Promise<void>; onError: (m: string) => void; /** SPU-4 — report VALUE-equality dirtiness so the page can guard the exits. */ onDirty: (d: boolean) => void; /** ADR 0597 §Correction 4 — this save can WITHDRAW a pending activation review. */ onReviewClosed: (v: boolean) => void; t: TFn }): JSX.Element {
+function OverviewEditor({ strategy, allStrategies, strategiesFailed, onChanged, onClosed, onError, onDirty, onReviewClosed, onAutoReverted, t }: { strategy: Strategy; allStrategies: Strategy[]; strategiesFailed: boolean; onChanged: () => void | Promise<void>; onClosed: () => void | Promise<void>; onError: (m: string) => void; /** SPU-4 — report VALUE-equality dirtiness so the page can guard the exits. */ onDirty: (d: boolean) => void; /** ADR 0597 §Correction 4 — this save can WITHDRAW a pending activation review. */ onReviewClosed: (v: boolean) => void; /** ADR 0845 / STR3UX-3 — a protected edit here returns an active strategy to Draft. */ onAutoReverted: (fields: string[] | null) => void; t: TFn }): JSX.Element {
   const [title, setTitle] = useState(strategy.title);
   const [summary, setSummary] = useState(strategy.summary ?? '');
   const [rationale, setRationale] = useState(strategy.rationale ?? '');
@@ -457,15 +485,31 @@ function OverviewEditor({ strategy, allStrategies, strategiesFailed, onChanged, 
   const save = async (): Promise<void> => {
     setBusy(true);
     try {
-      const res = await updateStrategy(strategy.id, {
-        title: title.trim(), summary, rationale, scope, planningHorizon: horizon, status,
-        confidence: (confidence as StrategyConfidence) || null,
-        risk: (risk as StrategyRisk) || null,
-        healthOverride: (healthOverride as StrategyHealthState) || null,
-        ownerUserId: owner, accountableExecutive: exec,
-        parentStrategyId: parentId || null,
-      });
+      // ADR 0845 / STR3UX-3 — send only what CHANGED. The PATCH gate is presence-based
+      // (a protected key in the body is the trigger), and this form used to send
+      // `planningHorizon` and `accountableExecutive` on every save, so fixing a typo
+      // in the summary of an ACTIVE strategy deactivated it and named two fields
+      // nobody touched.
+      const patch: UpdateStrategyPatch = {};
+      if (title.trim() !== strategy.title) patch.title = title.trim();
+      if (summary !== (strategy.summary ?? '')) patch.summary = summary;
+      if (rationale !== (strategy.rationale ?? '')) patch.rationale = rationale;
+      if (scope !== strategy.scope) patch.scope = scope;
+      if (horizon !== strategy.planningHorizon) patch.planningHorizon = horizon;
+      if (status !== strategy.status) patch.status = status;
+      if (confidence !== (strategy.confidence ?? '')) patch.confidence = (confidence as StrategyConfidence) || null;
+      if (risk !== (strategy.risk ?? '')) patch.risk = (risk as StrategyRisk) || null;
+      if (healthOverride !== (strategy.healthOverride ?? '')) patch.healthOverride = (healthOverride as StrategyHealthState) || null;
+      if (owner !== (strategy.ownerUserId ?? '')) patch.ownerUserId = owner;
+      if (exec !== (strategy.accountableExecutive ?? '')) patch.accountableExecutive = exec;
+      if (parentId !== (strategy.parentStrategyId ?? '')) patch.parentStrategyId = parentId || null;
+      const res = await updateStrategy(strategy.id, patch);
+      onAutoReverted(res.autoRevertedToDraft ? (res.autoRevertedFields ?? []) : null);
       onReviewClosed(res.activationReviewClosed === true);
+      // One message per save: a disclosure notice already reports the save.
+      if (res.autoRevertedToDraft) { await onChanged(); return; }
+      // STR3UX-10 — with the approval gate on, an activation is SUBMITTED, not saved.
+      if (res.activationPending && patch.status === 'active') { toast.info(t('toastActivationSubmitted')); await onChanged(); return; }
       // ADR 0598 §Correction 4 — the SAME "one message per save" rule §2 wrote
       // for the objectives editor. "Saved — but … that review was withdrawn"
       // already reports the save; a plain "Strategy saved" behind it in the
@@ -473,14 +517,14 @@ function OverviewEditor({ strategy, allStrategies, strategiesFailed, onChanged, 
       // has to act on. This save path had NO suppression at all.
       if (res.activationReviewClosed !== true) toast.success(t('toastStrategySaved'));
       await onChanged();
-    } catch (e) { onError(e instanceof Error ? e.message : t('saveFailed')); }
+    } catch (e) { onError(errorText(e, t, 'saveFailed')); }
     finally { setBusy(false); }
   };
 
   const archive = async (): Promise<void> => {
     setBusy(true);
     try { await archiveStrategy(strategy.id); toast.success(t('toastArchived')); await onClosed(); }
-    catch (e) { onError(e instanceof Error ? e.message : t('saveFailed')); setConfirmAction(null); }
+    catch (e) { onError(errorText(e, t, 'saveFailed')); setConfirmAction(null); }
     finally { setBusy(false); }
   };
   const hardDelete = async (): Promise<void> => {
@@ -490,7 +534,7 @@ function OverviewEditor({ strategy, allStrategies, strategiesFailed, onChanged, 
     // failed" happened — <Toaster> lives at the shell, so it survives the route
     // change that this editor does not.
     try { await deleteStrategy(strategy.id); toast.success(t('toastDeleted')); await onClosed(); }
-    catch (e) { onError(e instanceof Error ? e.message : t('saveFailed')); setConfirmAction(null); }
+    catch (e) { onError(errorText(e, t, 'saveFailed')); setConfirmAction(null); }
     finally { setBusy(false); }
   };
 
@@ -669,7 +713,7 @@ function ObjectivesEditor({ strategy, onChanged, onError, onAutoReverted, onDirt
       if (!res.autoRevertedToDraft && res.activationReviewClosed !== true) toast.success(t('toastObjectivesSaved'));
       await onChanged();
     }
-    catch (e) { onError(e instanceof Error ? e.message : t('saveFailed')); }
+    catch (e) { onError(errorText(e, t, 'saveFailed')); }
     finally { setBusy(false); }
   };
 
@@ -748,7 +792,7 @@ function InitiativesEditor({ strategy, onChanged, onError, onDirty, t }: { strat
     if (blanks > 0) { onError(t('blankTitlesBlockSave', { count: blanks })); return; }
     setBusy(true);
     try { await updateStrategy(strategy.id, { initiatives }); toast.success(t('toastInitiativesSaved')); await onChanged(); }
-    catch (e) { onError(e instanceof Error ? e.message : t('saveFailed')); }
+    catch (e) { onError(errorText(e, t, 'saveFailed')); }
     finally { setBusy(false); }
   };
 
@@ -774,7 +818,7 @@ function InitiativesEditor({ strategy, onChanged, onError, onDirty, t }: { strat
  * ADR 0235 §D3 — CSV objective import (`objective,keyResult,target,unit`).
  * Server-side parse + caps; the response reports imported/skipped honestly.
  */
-function ImportObjectivesBlock({ strategy, onChanged, onError, onDirty, t }: { strategy: Strategy; onChanged: () => void | Promise<void>; onError: (m: string) => void; /** ADR 0598 §Correction 5 — this block holds a DRAFT (the pasted CSV) on a
+function ImportObjectivesBlock({ strategy, onChanged, onError, onDirty, onAutoReverted, onReviewClosed, t }: { strategy: Strategy; onChanged: () => void | Promise<void>; onError: (m: string) => void; /** ADR 0845 / STR3UX-2 — an import is a protected write. */ onAutoReverted: (fields: string[] | null) => void; onReviewClosed: (v: boolean) => void; /** ADR 0598 §Correction 5 — this block holds a DRAFT (the pasted CSV) on a
    *  guarded tab and reported nothing, so a tab switch destroyed it silently.
    *  SPU-4's enumeration walked the four tab editors and stopped. */ onDirty: (d: boolean) => void; t: TFn }): JSX.Element {
   const [csv, setCsv] = useState('');
@@ -793,6 +837,11 @@ function ImportObjectivesBlock({ strategy, onChanged, onError, onDirty, t }: { s
     setBusy(true);
     try {
       const r = await importObjectives(strategy.id, csv);
+      // ADR 0845 / STR3UX-2 — an import into an active strategy returns it to Draft,
+      // and one into a strategy under review withdraws that review. Both used to
+      // happen with only "N rows imported" on screen (the STR2-M5 family).
+      onAutoReverted(r.autoRevertedToDraft ? (r.autoRevertedFields ?? ['objectives']) : null);
+      onReviewClosed(r.activationReviewClosed === true);
       const summary = t('importResult', { imported: formatNumber(r.imported), skipped: formatNumber(r.skipped.length) });
       setResult(summary);
       setSkipped(r.skipped);
@@ -812,7 +861,7 @@ function ImportObjectivesBlock({ strategy, onChanged, onError, onDirty, t }: { s
         ? [summary, ...r.skipped.map((sk) => t('importSkippedRow', { line: sk.line, reason: sk.reason }))].join(' ')
         : summary);
       await onChanged();
-    } catch (e) { onError(e instanceof Error ? e.message : t('importFailed')); }
+    } catch (e) { onError(errorText(e, t, 'importFailed')); }
     finally { setBusy(false); }
   };
   return (
@@ -941,7 +990,7 @@ function CheckInsPanel({ strategy, onError, onDirty, t }: { strategy: Strategy; 
       setDraft((p) => ({ ...p, [krId]: { value: '', note: '' } }));
       toast.success(t('toastCheckinRecorded'));
       await refresh();
-    } catch (e) { onError(e instanceof Error ? e.message : t('checkinFailed')); }
+    } catch (e) { onError(errorText(e, t, 'checkinFailed')); }
     finally { setBusy(null); }
   };
 
@@ -952,7 +1001,7 @@ function CheckInsPanel({ strategy, onError, onDirty, t }: { strategy: Strategy; 
       toast.success(t(decision === 'confirm' ? 'toastCheckinConfirmed' : 'toastCheckinDismissed'));
       await refresh();
     }
-    catch (e) { onError(e instanceof Error ? e.message : t('checkinFailed')); }
+    catch (e) { onError(errorText(e, t, 'checkinFailed')); }
     finally { setBusy(null); }
   };
 
@@ -1041,7 +1090,7 @@ function AlignmentEditor({ strategy, projects, projectsFailed, onChanged, onErro
   const save = async (): Promise<void> => {
     setBusy(true);
     try { await replaceLinks(strategy.id, links); toast.success(t('toastAlignmentSaved')); await onChanged(); }
-    catch (e) { onError(e instanceof Error ? e.message : t('saveFailed')); }
+    catch (e) { onError(errorText(e, t, 'saveFailed')); }
     finally { setBusy(false); }
   };
 
@@ -1092,6 +1141,11 @@ function AlignmentEditor({ strategy, projects, projectsFailed, onChanged, onErro
       <div className="action-bar u-justify-end">
         <Button variant="primary" size="sm" disabled={busy} onClick={() => void save()}>{busy ? t('common:saving') : t('saveAlignment')}</Button>
       </div>
+      {/* ADR 0852 D4 — the SAVED links' and initiatives' projects (not unsaved edits). */}
+      <StrategyLedgerRollup projectIds={[
+        ...strategy.links.filter((l) => l.kind === 'project').map((l) => (l as { projectId: string }).projectId),
+        ...strategy.initiatives.flatMap((i) => i.linkedProjectIds ?? []),
+      ]} />
     </div>
   );
 }

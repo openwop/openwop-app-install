@@ -30,14 +30,15 @@ import { getRunAgent } from '../host/runAgentRuntime.js';
 import type { AgentRef } from '../executor/types.js';
 import { getChildParentNodeId } from '../executor/subWorkflowDispatcher.js';
 // RFC 0151 §D — the rollup and the advert predicate it is paired with.
-import { compensationStatusForRuns, type CompensationStatus } from '../host/compensationLedger.js';
+import { compensationStatusForRuns, obligationsAccountableTo, type CompensationStatus } from '../host/compensationLedger.js';
+import { projectCompensation } from '../host/compensationProjection.js';
 import { advertisesCompensation } from '../host/compensationCapability.js';
 import { snapshotCostRollup } from '../observability/costEmitter.js';
 import { workflowBudgetExhausted } from '../host/workflowBudgets.js';
-import { executeRun, snapshotFromEventPrefix, type SerializedSnapshot } from '../executor/executor.js';
+import { emitTerminalFailure, executeRun, snapshotFromEventPrefix, type SerializedSnapshot } from '../executor/executor.js';
 import { forkDispatchOptions } from '../executor/forkInterrupts.js';
 import { requestRunPause, clearRunPause, abortRunForPause, type RunPauseRequest } from '../executor/runLifecycle.js';
-import { buildRunRecord, dispatchRunInBackground } from '../host/runDispatch.js';
+import { buildRunRecord, dispatchRunInBackground, stripCallerAttribution } from '../host/runDispatch.js';
 import { ownerStampFromRequest, runOwner, runOwnerV2, type RunOwnerBlock, type RunOwnerBlockV2 } from '../host/runOwner.js';
 import { insertRunWithStartContext } from '../host/runInsert.js';
 import { traceContextFromHeaders } from '../host/traceContext.js';
@@ -52,6 +53,8 @@ import {
 } from '../host/authorityContext.js';
 import { resolveRunDefinition } from '../host/resolveRunDefinition.js';
 import { resolveLaunchWorkflow } from '../host/resolveLaunchDefinition.js';
+import { withRunLimit } from '../host/runLimitSeam.js';
+import { launchSubjectOf } from '../features/featureRoute.js';
 import { approvalGatesWithGroupRole, validateApproverResolvability } from '../host/approverResolution.js';
 import { listOrgs } from '../host/accessControlService.js';
 import { CROSS_HOST_CAUSATION_HOST_ID, isPhase3Enabled } from './discovery.js';
@@ -65,7 +68,7 @@ import { runAiCredentialRefViolation } from '../host/runCredentials.js';
 import { advertisedByokProviders } from '../aiProviders/aiProvidersHost.js';
 import { createLogger } from '../observability/logger.js';
 import { runQuotaMiddleware, reserveConcurrentSlot } from '../middleware/rateLimit.js';
-import { negotiatedMajor, v2ErrorCode, v1, vendorTwin } from '../middleware/protocolVersion.js';
+import { isProtocolRequest, v2ErrorCode, vendorPath } from '../middleware/protocolVersion.js';
 import { RUN_LIST, mintRunListCursor, parseRunListCursor } from '../host/runList.js';
 import { requestOrigin } from '../host/requestOrigin.js';
 import { fromWireRunId, toWireRunId } from '../host/v2Ids.js';
@@ -74,6 +77,7 @@ import { cancelRunAndCascade, isTerminalRunStatus } from '../host/runCancel.js';
 import { isManagedCredentialRef, MANAGED_DEFAULTING_TYPE_IDS } from '../providers/managedProvider.js';
 import { managedAnonSignInRequired } from '../host/deployPosture.js';
 import { requireProtocolScope, requireKeyLaneScope, holdsProtocolScope } from '../host/protocolAuthorization.js';
+import { decideTokenProjector } from './interrupts.js';
 import { dataResidencyEnabled, dataResidencyRegions, residencyRegionAdmissible, readResidencyRegion } from '../features/cdp/dataResidency.js';
 import { loadReadableRun, loadOwnedRun } from '../host/runAccess.js';
 import { resolveRunArtifact } from '../host/runArtifactRead.js';
@@ -88,9 +92,13 @@ import {
 import { idempotencyOutcomeOf, recordIdempotencyClaim } from '../observability/metricSeams.js';
 import { scrubSecretShaped } from '../host/redactSecrets.js';
 import { sendError } from '../middleware/errorEnvelope.js';
+import { hostSatisfies } from '../bootstrap/agentPackResolver.js';
 import { isForkMode } from '../host/forkModes.js';
 import { effectIdFor } from '../host/effectIdentity.js';
+import { councilRosterExceededRefusal } from '../host/exchange/councilTurn.js';
 
+/** Upper bound on how long `:resume` waits for `run.resumed` to be durable before answering. */
+const RESUME_START_WAIT_MS = 10_000;
 const log = createLogger('routes.runs');
 
 /** ADR 0549 P0 — this route's entry in the ledger's closed endpoint union. */
@@ -163,7 +171,7 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
   // surface (capabilities.feedback), NOT the RFC 0049 run-lifecycle vocabulary —
   // it has no run-scope mapping and gating it would over-reach RFC 0049.
 
-  app.post(v1('/runs'), runQuotaMiddleware(), async (req, res, next) => {
+  app.post('/runs', runQuotaMiddleware(), async (req, res, next) => {
     // ADR 0549 P1 — hoisted ABOVE the try so the `finally` can see them. The
     // release is owed by whoever wins a claim, and the only scope that reliably
     // runs on every exit path is a `finally` sibling to the try.
@@ -172,6 +180,27 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
     let heldTenantId: string | undefined;
     try {
       const body = req.body as HostCreateRunRequest;
+      // #4318 — `spec/v2/core/runs.md` §Refusals: `mode: "eval"` starts an
+      // eval-suite projection, and a host that does not advertise
+      // `agents.evalSuite` MUST reject it `422 capability_not_provided`. This
+      // handler never read `mode`, so a complete eval body (no `workflowId`,
+      // which v2 does not require under `mode: eval`) answered `400 workflowId
+      // is required`, and one that also named a workflow answered 201 and ran
+      // it as an ordinary run. The check follows the ADVERT (`hostSatisfies`),
+      // so it steps aside the day the normative surface is served. It sits
+      // before every other check and before the Idempotency-Key claim: it
+      // creates no run and strands no ledger row.
+      if (
+        body && typeof body === 'object'
+        && (body as { mode?: unknown }).mode === 'eval' && !hostSatisfies('agents', ['evalSuite'])
+      ) {
+        throw new OpenwopError(
+          'capability_not_provided',
+          'This host does not advertise agents.evalSuite, so it cannot start an eval run.',
+          422,
+          { capability: 'agents.evalSuite' },
+        );
+      }
       if (!body || typeof body !== 'object' || !body.workflowId) {
         throw new OpenwopError('invalid_request', 'workflowId is required', 400);
       }
@@ -316,7 +345,14 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
       // builder's test-run) opts back into the head. Substitution happens
       // BEFORE validation/gates so every check sees the definition that runs.
       const launchDraft = (body.metadata as Record<string, unknown> | undefined)?.launch === 'draft';
-      const wf = await resolveLaunchWorkflow(hostSuite.workflowCatalog, tenantId, body.workflowId, { launch: launchDraft ? 'draft' : 'published' });
+      // ADR 0823 — a workflow another tenant owns resolves as not-found (the 404
+      // below); a wildcard operator, who may already act as any tenant, is exempt (D6).
+      const wf = await resolveLaunchWorkflow(hostSuite.workflowCatalog, tenantId, body.workflowId, {
+        launch: launchDraft ? 'draft' : 'published',
+        operator: principal.tenants?.includes('*') === true,
+        // ADR 0820 §7 / G6 — the owning-feature gate inside the funnel (typed 403).
+        subject: launchSubjectOf(req),
+      });
       // ADR 0197 Phase 3 — best-effort input validation for schema-bearing
       // workflows. Always-on since ADR 0434 (the `run-input-forms` toggle
       // graduated; it was an explicit opt-in "until the toggle GAs"). Same 400
@@ -405,15 +441,13 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
         // tenantId, agentId, callbackUrl, evalSuiteRef) and `run-options.schema.json`
         // (tags, metadata, configurable), CLOSED at the composition: an unknown ROOT
         // key is 400 validation_error. Found by rc.54's `v2-run-options-limits`
-        // (201 for `conformanceUnknownRootKey`). v1's open bag is untouched.
-        if (negotiatedMajor(req) === 2) {
-          const unknownRoot = Object.keys(body as Record<string, unknown>).find((k) => !V2_CREATE_ROOT_KEYS.has(k));
-          if (unknownRoot !== undefined) {
-            sendError(res, 400, 'validation_error', `Unknown root key "${unknownRoot}" on the create body (closed at the composition).`, { field: unknownRoot });
-            return;
-          }
+        // (201 for `conformanceUnknownRootKey`).
+        const unknownRoot = Object.keys(body as Record<string, unknown>).find((k) => !V2_CREATE_ROOT_KEYS.has(k));
+        if (unknownRoot !== undefined) {
+          sendError(res, 400, 'validation_error', `Unknown root key "${unknownRoot}" on the create body (closed at the composition).`, { field: unknownRoot });
+          return;
         }
-        if (negotiatedMajor(req) === 2 && body.configurable !== undefined) {
+        if (body.configurable !== undefined) {
           const v2Violation = v2ConfigurableViolation(body.configurable);
           if (v2Violation) {
             throw new OpenwopError(
@@ -638,7 +672,8 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
           // stamps (engineVersion, variants) never leak as the caller's metadata.
           ...(Array.isArray(body.tags) ? { tags: body.tags as string[] } : {}),
           ...(body.metadata && typeof body.metadata === 'object' && !Array.isArray(body.metadata) ? { callerMetadata: body.metadata as Record<string, unknown> } : {}),
-          ...((body.metadata as Record<string, unknown>) ?? {}),
+          // Caller metadata never carries host-written attribution (see stripCallerAttribution).
+          ...stripCallerAttribution((body.metadata as Record<string, unknown>) ?? {}),
           // ADR 0075 §D3/§D4 — the run's resolved approver org, read verbatim by
           // group/role eligibility + targeting (replay-safe; never re-resolved).
           ...(approverOrgId ? { approverOrgId } : {}),
@@ -700,7 +735,9 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
       // matches nothing, the run insert is rolled back, and the reclaimer's run
       // is the one that exists: mapped to the protocol's in-flight 409 below.
       try {
-        await insertRunWithStartContext(storage, run, {
+        // ADR 0821 P5 follow-up — the plan's monthly run limit (a no-op until
+        // wired), AFTER every refusal above; a failed insert releases it.
+        await withRunLimit(tenantId, () => insertRunWithStartContext(storage, run, {
           enqueueDispatch: true,
           ...(wf ? { definition: wf.definition } : {}),
           ...(idempotencyKey && heldClaimToken
@@ -716,7 +753,7 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
                 },
               }
             : {}),
-        });
+        }));
       } catch (err) {
         if (err instanceof IdempotentCommitRejectedError) {
           // Nothing of ours exists — the insert rolled back. The `finally`
@@ -814,7 +851,7 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
    *   status   optional run status filter
    *   limit    max rows (default 50, capped to 200)
    */
-  app.get([v1('/runs'), vendorTwin('/runs')], async (req, res, next) => {
+  app.get(['/runs', vendorPath('/runs')], async (req, res, next) => {
     try {
       await requireProtocolScope(req, 'runs:read'); // RFC 0049 (ADR 0006 Phase 3) — owk_ key scopes always (ADR 0745 D2); membership only when enforced
       // RFC 0182 `listRuns` (ADR 0658) — under major 2, `GET /runs` is the
@@ -824,7 +861,7 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
       // cursor (a foreign one is `400 validation_error`), and only the
       // advertised filters honoured. The v1 / vendor-twin list below is the
       // host-extension list it always was.
-      if (negotiatedMajor(req) === 2) {
+      if (isProtocolRequest(req)) {
         const tenantId = req.tenantId ?? 'default';
         const rawLimit = req.query.limit;
         let limit: number = RUN_LIST.defaultPageSize;
@@ -849,7 +886,13 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
           if (typeof v === 'string' && v.length > 0) filters[f] = v;
         }
         const rows = await storage.listRuns({ tenantId, limit, ...filters, ...(before ? { before } : {}) });
-        const runs = rows.map((r) => closeV2Snapshot(projectRunSnapshot(r)));
+        // RFC 0151 §D — `compensationStatus` is on EVERY snapshot, the list
+        // included. This branch used to project without it while the major-2
+        // getRun carried it (the "second call site gets forgotten" class the
+        // steward A-grade wire test pins). One ledger scan for the page, and the
+        // page is single-tenant by construction.
+        const compensation = await resolveCompensationStatuses(tenantId, rows.map((r) => r.runId));
+        const runs = rows.map((r) => closeV2Snapshot(projectRunSnapshot(r, compensation.get(r.runId))));
         const last = rows[rows.length - 1];
         const nextCursor = rows.length === limit && last !== undefined
           ? mintRunListCursor({ createdAt: last.createdAt, runId: last.runId })
@@ -903,7 +946,7 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
   // colon is legal inside an Express path segment). Regex-literal pinned
   // like :fork. Returns a deterministic, replay-aware structured diff of
   // the two runs' event logs + terminal states.
-  app.get(/^\/v1\/runs\/([^/:]+):diff$/, async (req, res, next) => {
+  app.get(/^\/runs\/([^/:]+):diff$/, async (req, res, next) => {
     try {
       await requireProtocolScope(req, 'runs:read'); // RFC 0049 (ADR 0006 Phase 3) — owk_ key scopes always (ADR 0745 D2); membership only when enforced
       const runId = (req.params as Record<string, string>)['0'];
@@ -960,7 +1003,24 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
     }
   });
 
-  app.get(v1('/runs/:runId'), async (req, res, next) => {
+  /**
+   * ADR 0807 — `GET /runs/{runId}/compensation` (`getRunCompensation`,
+   * `security-defaults.md` §Compensation): the v2 compensation read projection,
+   * the obligation's deployed-wire witness. Same read gate as the snapshot (`loadReadableRun`:
+   * `runs:read` + tenant ownership, a non-owned run 404s), and the same rows the
+   * snapshot's `compensationStatus` is folded from.
+   */
+  app.get('/runs/:runId/compensation', async (req, res, next) => {
+    try {
+      const run = await loadReadableRun(req, storage, req.params.runId);
+      const rows = (await obligationsAccountableTo(run.tenantId, [run.runId])).get(run.runId) ?? [];
+      res.json(projectCompensation(run.runId, rows));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.get('/runs/:runId', async (req, res, next) => {
     try {
       // Scope seam (RFC 0049) + tenant ownership — adds the tenant check this
       // read previously lacked (architecture review #1).
@@ -973,7 +1033,7 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
       // O(N) tenant-sibling scan below, so an unchanged poll is cheap.
       const etag = runEtag(run.runId, await storage.getMaxSequence(run.runId));
       res.setHeader('ETag', etag);
-      res.setHeader('Vary', 'Accept-Encoding');
+      res.vary('Accept-Encoding');
       if (ifNoneMatchSatisfied(req, etag)) {
         res.status(304).end();
         return;
@@ -1018,7 +1078,10 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
           // route: `approvals:respond`, not the `runs:read` this read needed. A
           // `?streamToken` read never gets it (a stream grant is not an approval
           // grant — runAccess.ts's own rule for `loadOwnedRun`).
-          const mayResolve = typeof req.query?.streamToken !== 'string' && (await holdsProtocolScope(req, 'approvals:respond'));
+          // ADR 0778 D2 (`APCD-1`) — and an approval gate's token only to a caller
+          // who clears the always-on decide floor (`decideTokenProjector`).
+          const mayResolve = typeof req.query?.streamToken !== 'string'
+            && (await decideTokenProjector(req, run.tenantId, await holdsProtocolScope(req, 'approvals:respond'))(first));
           snapshot.interrupt = {
             kind: first.kind,
             nodeId: first.nodeId,
@@ -1040,7 +1103,7 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
       // for. The projector already closed its own fields; closing again here is
       // what makes the CLOSURE hold over the body the route actually sends
       // rather than over an intermediate value.
-      sendNegotiatedRunJson(req, res, currentContract() === 2 ? closeV2Snapshot(snapshot) : snapshot);
+      sendNegotiatedRunJson(req, res, closeV2Snapshot(snapshot));
     } catch (err) {
       next(err);
     }
@@ -1057,7 +1120,7 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
   // v1"): when `Accept` prefers `application/a2a+json` the body is an A2A
   // `Artifact` (`schemas/v2/artifact.schema.json`), else the host-defined JSON
   // object. `Vary: Accept` rides every negotiated answer (§A.2).
-  const artifactPathRe = /^\/v1\/runs\/([^/]+)\/artifacts\/([^/]+)$/;
+  const artifactPathRe = /^\/runs\/([^/]+)\/artifacts\/([^/]+)$/;
   const A2A_MEDIA = 'application/a2a+json';
   app.use((req, res, next) => {
     const m = artifactPathRe.exec(req.path);
@@ -1103,9 +1166,8 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
       if (!artifact) {
         throw new OpenwopError('not_found', `artifact '${artifactId}' not found on run '${runId}'`, 404);
       }
-      const negotiated = currentContract() === 2;
-      if (negotiated) res.setHeader('Vary', 'Accept');
-      if (negotiated && req.accepts(['application/json', A2A_MEDIA]) === A2A_MEDIA) {
+      res.vary('Accept');
+      if (req.accepts(['application/json', A2A_MEDIA]) === A2A_MEDIA) {
         res.status(200).type(A2A_MEDIA).send(JSON.stringify(artifact10({
           artifactId: artifact.artifactId,
           ...(artifact.name ? { name: artifact.name } : {}),
@@ -1155,7 +1217,7 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
    * `v2-effect-identity-business-key`'s real requirement true here: the key is
    * stable across both transport attempts.
    */
-  app.get(v1('/runs/:runId/effects'), async (req, res, next) => {
+  app.get('/runs/:runId/effects', async (req, res, next) => {
     try {
       const run = await loadReadableRun(req, storage, req.params.runId);
       const rows = await storage.listRunEffects(run.runId);
@@ -1192,12 +1254,15 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
           nodeId: r.nodeId,
           attempt: r.attempt,
           keying: 'activity-recipe' as const,
-          // `invocationId` is what this host stores; `providerKey` is OPTIONAL
-          // in the schema and is deliberately OMITTED rather than filled with
-          // the invocation id under a different name. Migration 39 renamed the
-          // provider-key column to `invocation_id`, so there is no provider key
-          // to report — and an omitted optional field is honest where a
-          // mislabelled one is not.
+          // `providerKey` is the key the attempt PRESENTED on the wire, and is
+          // reported only when the attempt recorded one (`presented_key`, sqlite
+          // mig 49 / postgres mig 47). It is never filled with the invocation id
+          // under a different name — migration 39 renamed the old provider-key
+          // column to `invocation_id` because the two are different things, and
+          // an omitted optional field is honest where a mislabelled one is not.
+          // Suite 2.42.5's retry leg compares this value with the
+          // `Idempotency-Key` its own receiver saw, so it must be the wire value.
+          ...(r.presentedKey ? { providerKey: r.presentedKey } : {}),
           invocationId: r.invocationId,
           // Only two states are reachable from this table, and that is a
           // faithful report rather than a gap: `state`'s own description says
@@ -1212,7 +1277,7 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
     }
   });
 
-  app.get(v1('/runs/:runId/ancestry'), async (req, res, next) => {
+  app.get('/runs/:runId/ancestry', async (req, res, next) => {
     try {
       if (!isPhase3Enabled()) {
         // Capability not advertised — the endpoint is opt-in even within
@@ -1263,7 +1328,7 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
   // Express 4 doesn't accept directly in a path string (path-to-regexp
   // treats `:` as a param prefix) — use a literal regex to match.
   const MAX_RUN_IDS = 100;
-  app.post(/^\/v1\/runs:bulk-cancel$/, async (req, res, next) => {
+  app.post(/^\/runs:bulk-cancel$/, async (req, res, next) => {
     try {
       await requireProtocolScope(req, 'runs:cancel'); // RFC 0049 (ADR 0006 Phase 3) — owk_ key scopes always (ADR 0745 D2); membership only when enforced
       const body = (req.body ?? {}) as { runIds?: unknown; reason?: unknown };
@@ -1300,22 +1365,20 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
       // webhook defect inverted: projection applied on the way out and not on
       // the way in. Resolved through the same seam as the path, so the grammar
       // and the tenant check are one predicate, not a second drifting copy.
-      const major = negotiatedMajor(req);
-      // ADR 0632 (bus finding `cea0`) — under major 2 an `ok: false` entry's
+      // ADR 0632 (bus finding `cea0`) — an `ok: false` entry's
       // `error` is the v2 ERROR ENVELOPE (`api/v2/openapi.yaml` bulkCancelRuns
       // results[].error $refs error-envelope.schema.json): `{ error, message,
       // details? }` with the code passed through the registry (unregistered
       // host codes vendor-prefixed), never the v1 `{ code, message }` object.
-      // The v1 shape is unchanged on the v1 mount (its suite pins it).
       const entryError = (code: string, message: string, details?: Record<string, unknown>): Record<string, unknown> =>
-        major === 2 ? { error: v2ErrorCode(code), message, ...(details ? { details } : {}) } : { code, message };
+        ({ error: v2ErrorCode(code), message, ...(details ? { details } : {}) });
       for (const rawId of body.runIds) {
         if (typeof rawId !== 'string' || rawId.length === 0) {
           results.push({ runId: String(rawId), ok: false, error: entryError('invalid_request', 'runId MUST be a non-empty string') });
           continue;
         }
         let lookupId = rawId;
-        if (major === 2 && rawId.includes('/')) {
+        if (rawId.includes('/')) {
           const resolved = fromWireRunId(rawId, callerTenant);
           if (!resolved.ok) {
             // Same non-disclosing shape as the path guard: a foreign or
@@ -1335,11 +1398,10 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
           // ok with the existing terminal status. Conformance asserts
           // this directly per the "re-bulk-cancel after first cancel"
           // subtest.
-          // `runs.md` §Cancel: `ok: true` carries `cancelling | cancelled` only. Under
-          // major 2 an already-terminal run is `ok: false` + `run_terminal` (the bulk
-          // twin of the single-cancel 409, #3650); v1 keeps its idempotent `ok: true`.
-          if (major === 2) results.push({ runId: rawId, ok: false, error: entryError('run_terminal', `run ${rawId} is already ${run.status}`, { status: run.status }) });
-          else results.push({ runId: rawId, ok: true, status: run.status });
+          // `runs.md` §Cancel: `ok: true` carries `cancelling | cancelled` only. An
+          // already-terminal run is `ok: false` + `run_terminal` (the bulk twin of
+          // the single-cancel 409, #3650).
+          results.push({ runId: rawId, ok: false, error: entryError('run_terminal', `run ${rawId} is already ${run.status}`, { status: run.status }) });
           continue;
         }
         try {
@@ -1353,8 +1415,7 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
           const outcome = await cancelRunAndCascade(storage, run, reason);
           if (outcome === 'already-terminal') {
             const now = (await storage.getRun(lookupId))?.status ?? run.status;
-            if (major === 2) results.push({ runId: rawId, ok: false, error: entryError('run_terminal', `run ${rawId} is already ${now}`, { status: now }) });
-            else results.push({ runId: rawId, ok: true, status: now });
+            results.push({ runId: rawId, ok: false, error: entryError('run_terminal', `run ${rawId} is already ${now}`, { status: now }) });
             continue;
           }
           results.push({ runId: rawId, ok: true, status: 'cancelled' });
@@ -1368,7 +1429,7 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
     }
   });
 
-  app.post(v1('/runs/:runId/cancel'), async (req, res, next) => {
+  app.post('/runs/:runId/cancel', async (req, res, next) => {
     try {
       // Tenant-ownership gate (2026-07 vuln-scan): cancel is a MUTATION, so it uses
       // loadOwnedRun — which enforces run.tenantId ownership WITHOUT honoring the
@@ -1376,14 +1437,9 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
       const run = await loadOwnedRun(req, storage, req.params.runId, 'runs:cancel');
       if (isTerminalRunStatus(run.status)) {
         // `runs.md` §Cancel: the 200 grammar is `{ runId, status: cancelling | cancelled }`;
-        // echoing `completed` is outside it, so under major 2 the conforming
-        // refusal is the registered `409 run_terminal` (`4f74`). The 1.x mount
-        // keeps its idempotent 200 — that contract never said otherwise.
-        if (negotiatedMajor(req) === 2) {
-          sendError(res, 409, 'run_terminal', `Run ${run.runId} is already ${run.status}.`, { status: run.status });
-          return;
-        }
-        res.json({ runId: run.runId, status: run.status });
+        // echoing `completed` is outside it, so the conforming refusal is the
+        // registered `409 run_terminal` (`4f74`).
+        sendError(res, 409, 'run_terminal', `Run ${run.runId} is already ${run.status}.`, { status: run.status });
         return;
       }
       // The effect — including the normative child cascade — lives in
@@ -1402,7 +1458,7 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
   // deletion surface (see admin.ts); this is sample-app cleanup UX. Tenant-
   // scoped: a caller may only delete a run under its own tenant, and a miss
   // returns 404 (never reveal another tenant's run by id). Returns 204.
-  app.delete([v1('/runs/:runId'), vendorTwin('/runs/:runId')], async (req, res, next) => {
+  app.delete(['/runs/:runId', vendorPath('/runs/:runId')], async (req, res, next) => {
     try {
       const principal = req.principal;
       if (!principal) throw new OpenwopError('unauthenticated', 'Bearer token required', 401);
@@ -1426,7 +1482,9 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
   //    the retention sweep forever (a user promise). Tenant-scoped via the
   //    same readable-run gate as the rest of the run surface; the pin lives on
   //    run.metadata.pinned so it survives replay/fork verbatim.
-  app.post('/v1/host/openwop-app/runs/:runId/pin', async (req, res, next) => {
+  // ONE literal for both verbs (the v1-reliance ratchet counts route literals).
+  const PIN_PATH = '/host/openwop-app/runs/:runId/pin';
+  app.post(PIN_PATH, async (req, res, next) => {
     try {
       // ADR 0755 (WIT-AUTH-2) — a mutation: the SSE `?streamToken` read grant
       // must not authorize it.
@@ -1441,6 +1499,24 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
     }
   });
 
+  // ADR 0812 — the READ of the same two fields. Major 2's closed RunSnapshot
+  // carries neither `pinned` nor `removalAt` (`host/v2Snapshot.ts` filters to the
+  // schema's properties), and the SPA has spoken major 2 since v1 retired, so its
+  // run page could never show a pin or unpin one: `!snapshot.pinned` was always
+  // true. Same readable-run gate and the same derivation as the v1 snapshot.
+  app.get(PIN_PATH, async (req, res, next) => {
+    try {
+      const run = await loadReadableRun(req, storage, req.params.runId);
+      res.json({
+        runId: run.runId,
+        pinned: (run.metadata as Record<string, unknown> | undefined)?.pinned === true,
+        ...(run.removalAt !== undefined ? { removalAt: run.removalAt } : {}),
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   // ── Run feedback / annotations (RFC 0056) ────────────────────────────
   // Per-run side-store (advertised via capabilities.feedback in
   // routes/discovery.ts). `signal.correction` + `note` are untrusted user
@@ -1450,7 +1526,7 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
   // replayable event log (RFC 0056 §B/§D); tenant-scoped (CTI-1).
   const SIGNAL_KINDS = ['rating', 'correction', 'label', 'flag'] as const;
 
-  app.post(v1('/runs/:runId/annotations'), async (req, res, next) => {
+  app.post('/runs/:runId/annotations', async (req, res, next) => {
     try {
       const principal = req.principal;
       if (!principal) throw new OpenwopError('unauthenticated', 'Bearer token required', 401);
@@ -1503,7 +1579,7 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
     }
   });
 
-  app.get(v1('/runs/:runId/annotations'), async (req, res, next) => {
+  app.get('/runs/:runId/annotations', async (req, res, next) => {
     try {
       const principal = req.principal;
       if (!principal) throw new OpenwopError('unauthenticated', 'Bearer token required', 401);
@@ -1533,7 +1609,7 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
   // route answers the requested state (202 `status: 'paused'`) and the
   // transition emits `run.paused` when the drain completes. `immediate` fires
   // the run's abort signal for nodes that observe `ctx.signal`.
-  app.post(/^\/v1\/runs\/([^/:]+):pause$/, async (req, res, next) => {
+  app.post(/^\/runs\/([^/:]+):pause$/, async (req, res, next) => {
     try {
       const runId = (req.params as Record<string, string>)['0'];
       const run = await loadOwnedRun(req, storage, runId, 'runs:cancel');
@@ -1546,7 +1622,7 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
         sendError(res, 400, 'validation_error', 'reason must be a string.', { field: 'reason' }); return;
       }
       if (isTerminalRunStatus(run.status)) {
-        sendError(res, 409, negotiatedMajor(req) === 2 ? 'run_terminal' : 'conflict', `Run ${run.runId} is already ${run.status}.`, { runStatus: run.status }); return;
+        sendError(res, 409, 'run_terminal', `Run ${run.runId} is already ${run.status}.`, { runStatus: run.status }); return;
       }
       const meta = (run.metadata ?? {}) as Record<string, unknown>;
       const idemKey = req.header('idempotency-key');
@@ -1560,7 +1636,7 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
         if (idemKey !== undefined && idemKey !== '' && meta.pauseIdempotencyKey === idemKey && meta.pauseResponse !== undefined) {
           res.status(202).json(meta.pauseResponse); return;
         }
-        sendError(res, 409, negotiatedMajor(req) === 2 ? 'run_state_conflict' : 'conflict', `Run ${run.runId} is ${run.status === 'paused' ? 'already paused' : 'already pausing'}.`, { runStatus: run.status, ...(typeof meta.pausedAt === 'string' ? { pausedAt: meta.pausedAt } : {}) }); return;
+        sendError(res, 409, 'run_state_conflict', `Run ${run.runId} is ${run.status === 'paused' ? 'already paused' : 'already pausing'}.`, { runStatus: run.status, ...(typeof meta.pausedAt === 'string' ? { pausedAt: meta.pausedAt } : {}) }); return;
       }
       const request: RunPauseRequest = { ...(typeof body.reason === 'string' ? { reason: body.reason } : {}), drainPolicy, requestedAt: new Date().toISOString() };
       const response = { runId: run.runId, status: 'paused' };
@@ -1583,7 +1659,7 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
     } catch (err) { next(err); }
   });
 
-  app.post(/^\/v1\/runs\/([^/:]+):resume$/, async (req, res, next) => {
+  app.post(/^\/runs\/([^/:]+):resume$/, async (req, res, next) => {
     try {
       const runId = (req.params as Record<string, string>)['0'];
       const run = await loadOwnedRun(req, storage, runId, 'runs:cancel');
@@ -1593,8 +1669,8 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
       }
       if (run.status !== 'paused') {
         // `runs.md` §Pause and resume: a resume refused because the run is TERMINAL carries
-        // `run_terminal`; any other non-paused status is `run_state_conflict` (v1: `conflict`).
-        const code = negotiatedMajor(req) !== 2 ? 'conflict' : (isTerminalRunStatus(run.status) ? 'run_terminal' : 'run_state_conflict');
+        // `run_terminal`; any other non-paused status is `run_state_conflict`.
+        const code = isTerminalRunStatus(run.status) ? 'run_terminal' : 'run_state_conflict';
         sendError(res, 409, code, `Run ${run.runId} is ${run.status}, not paused.`, { runStatus: run.status }); return;
       }
       const resolved = await resolveRunDefinition(run, hostSuite.workflowCatalog);
@@ -1608,15 +1684,33 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
       const serialized = (run as unknown as { schedulerSnapshot?: string }).schedulerSnapshot;
       // Re-enter through `executeRun` — the same path HITL resume takes: it
       // emits `run.resumed`, sets `running`, and drains from the ready set.
+      //
+      // The 202 waits for `onStarted`, i.e. until `run.resumed` is durable.
+      // runs.md §Pause and resume lets a client read the log right after the
+      // 202 and expect `run.resumed` in it. Answering first raced the write:
+      // green locally, red on prod's certification floor
+      // (`openwop.floor.v2-run-pause-resume`, rev 00780). The wait is bounded
+      // and also ends if `executeRun` settles without starting (a claim lost to
+      // another instance, or an error), so the route can never hang on it. The
+      // run itself still continues detached.
+      let started!: () => void;
+      const startedOrSettled = new Promise<void>((resolve) => { started = resolve; });
       void executeRun(storage, { ...run, metadata: meta as never }, wf.definition, {
         ...(serialized ? { resumeSnapshot: JSON.parse(serialized) as SerializedSnapshot } : { resumeFromNodeIndex: 0 }),
         ...(hostSuite.providerPolicyResolver ? { policyResolver: hostSuite.providerPolicyResolver } : {}),
-      }).catch((err) => log.warn('run_resume_failed', { runId: run.runId, error: err instanceof Error ? err.message : String(err) }));
+        onStarted: () => started(),
+      }).catch((err) => log.warn('run_resume_failed', { runId: run.runId, error: err instanceof Error ? err.message : String(err) }))
+        .finally(() => started());
+      await Promise.race([startedOrSettled, new Promise<void>((resolve) => { setTimeout(resolve, RESUME_START_WAIT_MS).unref(); })]);
       res.status(202).json({ runId: run.runId, status: 'running', resumedAt });
     } catch (err) { next(err); }
   });
 
-  app.post(/^\/v1\/runs\/([^/:]+):fork$/, async (req, res, next) => {
+  // ADR 0772 D3 (`RRWF-6`) — a fork IS run creation, so it carries the same run
+  // quota as `POST /v1/runs`. It used to carry none: a caller at quota forked
+  // indefinitely. Usage is charged only on a response below 400, so a refused
+  // fork (422 `fork_point_invalid`, a 5xx) costs nothing.
+  app.post(/^\/runs\/([^/:]+):fork$/, runQuotaMiddleware(), async (req, res, next) => {
     try {
       // Express regex routes expose captures via req.params['0'], ['1'], …
       const runId = (req.params as Record<string, string>)['0'];
@@ -1853,7 +1947,10 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
       // mutation is never persisted): the pinned revision when the copied
       // metadata carries one, else head — and the honesty stamp rides the SAME
       // insert. No definition arg: the copied pin must be preserved verbatim.
-      const resolvedFork = await resolveRunDefinition(forkedRun, hostSuite.workflowCatalog);
+      // ADR 0823 D3 — a fork MINTS a run, so it is re-authorized like a launch.
+      const resolvedFork = await resolveRunDefinition(forkedRun, hostSuite.workflowCatalog, {
+        relaunch: { operator: req.principal?.tenants?.includes('*') === true, subject: launchSubjectOf(req) },
+      });
       if (!resolvedFork) {
         throw new OpenwopError(
           'workflow_not_found',
@@ -1863,12 +1960,33 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
         );
       }
       forkedRun.metadata = { ...(forkedRun.metadata ?? {}), definitionResolvedFrom: resolvedFork.resolvedFrom };
-      await insertRunWithStartContext(storage, forkedRun, { derivedFromRun: true });
+      // ADR 0772 D3 (`RRWF-6`) — the run-create refusals, applied to the fork's
+      // RESOLVED definition (the head may have gained a gated typeId since the
+      // source ran) and to the workflow's daily budget (ADR 0482 §5), which a fork
+      // spends exactly as a new run does.
+      const gatedRefusal = capabilityGatedTypeIdRefusal(resolvedFork.definition.nodes);
+      if (gatedRefusal) throw gatedRefusal;
+      if (await workflowBudgetExhausted(sourceRun.tenantId, forkedRun.workflowId)) {
+        throw new OpenwopError(
+          'rate_limited',
+          'This workflow\'s daily budget is exhausted. Runs resume tomorrow (UTC), or raise the budget.',
+          429,
+          { reason: 'workflow_budget_exhausted', workflowId: forkedRun.workflowId },
+        );
+      }
+      // ADR 0821 P5 follow-up — a fork is a NEW run, so it counts (a no-op until wired).
+      await withRunLimit(sourceRun.tenantId, () => insertRunWithStartContext(storage, forkedRun, { derivedFromRun: true }));
 
       // Replay events up to fromSeq into the new run, then re-dispatch.
       // Sample-grade: copies events as-is. Real impls re-execute pure
       // nodes deterministically (the `replay` mode) vs. branching from
       // a checkpoint (the `branch` mode).
+      // ADR 0772 D3 (`RRWF-7`) — a copy that fails part-way must not leave a
+      // runnable fork. The row is already `pending`, and the orphan sweeper would
+      // run it 120 s later on a log missing events. Mark it failed first, then
+      // let the error answer the request, carrying the row's id so the client can
+      // find it.
+      try {
       for (const ev of prefixEvents) {
         await getEventLog().append({
           runId: newRunId,
@@ -1892,6 +2010,36 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
           timestamp: ev.timestamp,
         });
       }
+      } catch (copyErr) {
+        // The storage error text is logged, never echoed to the client.
+        log.error('fork_prefix_copy_failed', { runId: newRunId, sourceRunId: sourceRun.runId, error: copyErr instanceof Error ? copyErr.message : String(copyErr) });
+        const message = "the fork's inherited prefix could not be copied";
+        // The row first, on its own: if the log write is what failed, the
+        // terminal event below may fail too, and the row is what the sweeper reads.
+        await storage.updateRun(newRunId, {
+          status: 'failed',
+          completedAt: new Date().toISOString(),
+          error: { code: 'fork_prefix_incomplete', message },
+        }).catch(() => undefined);
+        // Not an outcome of the workflow: a partial log must not be scored.
+        await emitTerminalFailure({ storage, runId: newRunId, skipOnlineEvals: true, error: { code: 'fork_prefix_incomplete', message } })
+          .catch((e: unknown) => log.warn('fork_prefix_incomplete_terminal_unrecorded', { runId: newRunId, error: e instanceof Error ? e.message : String(e) }));
+        // The fork's id rides `Location`, not `details`: the error envelope's
+        // entropy scrub redacts a UUID in `details` or `message` (the row-2
+        // lesson), so an id placed there would be present and always unreadable.
+        res.setHeader('Location', `/runs/${newRunId}`);
+        throw new OpenwopError('internal_error', message, 500);
+      }
+      // ADR 0772 D3 — bound only now: a failed copy above must not hold a
+      // concurrent-runs slot until the TTL, and a successful one is a real run.
+      reserveConcurrentSlot(req, newRunId);
+      hostSuite.auditSink.record({
+        principalId: req.principal?.principalId ?? 'anonymous',
+        action: 'run.fork',
+        resource: `run:${newRunId}`,
+        outcome: 'success',
+        payload: { sourceRunId: sourceRun.runId, fromSeq, mode: body.mode, workflowId: forkedRun.workflowId, tenantId: sourceRun.tenantId },
+      });
 
       // ADR 0474 — replay/branch re-execute the resolution made above (pinned
       // revision when inherited; head otherwise).
@@ -1968,59 +2116,36 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
     }
   });
 
-  app.get(v1('/runs/:runId/events/poll'), async (req, res, next) => {
+  app.get('/runs/:runId/events/poll', async (req, res, next) => {
     try {
       const run = await loadReadableRun(req, storage, req.params.runId);
-      // Accept both `lastSequence` (spec-canonical: version-negotiation.md
-      // §"Poll cursor" — the highest sequence the caller has ALREADY observed;
-      // the response carries events with sequence > N) and the sample's
-      // legacy `fromSeq`. Every storage backend's `listEvents` is already
-      // exclusive (`WHERE sequence > fromSeq`), so the cursor maps 1:1.
-      // ADR 0625: the route used to add 1 here, which double-skipped — with
-      // this host's first event at sequence 1, `lastSequence=0` silently
-      // dropped `run.started` on every run. The RFC 0165 §B.2 echo scenario
-      // (the first suite leg to read the FIRST event through this cursor)
-      // caught it. Beyond-the-end values return an empty events array per
-      // the forward-compat contract — NOT a 4xx.
-      // `spec/v2/core/events.md` §Poll renames the cursor to `afterSequence`
-      // and closes the response to `{ runId, events, lastSequence, status,
-      // isTerminal }`. Both are major-2 shapes; the v1 wire above keeps
-      // `lastSequence`/`fromSeq` and `{ events, isComplete }` untouched, so the
-      // two contracts read the SAME exclusive `listEvents` cursor and differ
-      // only in what they call it and what they wrap it in.
-      const major = negotiatedMajor(req);
+      // `spec/v2/core/events.md` §Poll: the cursor is `afterSequence` (the highest
+      // sequence the caller has ALREADY observed) and the response is closed to
+      // `{ runId, events, lastSequence, status, isTerminal }`. Every storage
+      // backend's `listEvents` is exclusive (`WHERE sequence > fromSeq`), so the
+      // cursor maps 1:1. ADR 0625: the route used to add 1 here, which
+      // double-skipped the first event. Beyond-the-end values return an empty
+      // events array per the forward-compat contract — NOT a 4xx.
       const limit = Math.min(Number(req.query.limit ?? 100) || 100, 1000);
-      if (major === 2) {
-        // Omission means "from the first event": `listEvents` is exclusive
-        // (`WHERE sequence > fromSeq`), so the floor is −1, not 0 — a log whose
-        // first event is sequence 0 must not be skipped by an absent cursor.
-        const afterRaw = req.query.afterSequence;
-        const afterSequence = afterRaw === undefined ? -1 : (Number(afterRaw) || 0);
-        const events = await storage.listEvents(run.runId, { fromSeq: afterSequence, limit });
-        // §Poll: the highest sequence in the log at the time of the response,
-        // −1 when the log is empty. A cursor past the end therefore still
-        // answers 200 with an empty `events` array — never a 4xx.
-        const maxSequence = await storage.getMaxSequence(run.runId);
-        respondJson(res, 200, {
-          runId: run.runId,
-          events,
-          // `getMaxSequence` already answers -1 for an empty log; `> 0 ? … : -1`
-          // reported an empty log for a log holding exactly event 0.
-          lastSequence: maxSequence,
-          status: run.status,
-          isTerminal: ['completed', 'failed', 'cancelled'].includes(run.status),
-        });
-        return;
-      }
-      // v1 numbers from 0 too (`schemas/run-event.schema.json`: "First event is 0"),
-      // and the cursor is exclusive, so an ABSENT cursor is -1, not 0.
-      const lastSeqRaw = req.query.lastSequence;
-      const fromSeq = lastSeqRaw !== undefined
-        ? (Number(lastSeqRaw) || 0)
-        : (req.query.fromSeq !== undefined ? (Number(req.query.fromSeq) || 0) : -1);
-      const events = await storage.listEvents(run.runId, { fromSeq, limit });
-      const isComplete = ['completed', 'failed', 'cancelled'].includes(run.status);
-      respondJson(res, 200, { events, isComplete });
+      // Omission means "from the first event": `listEvents` is exclusive
+      // (`WHERE sequence > fromSeq`), so the floor is −1, not 0 — a log whose
+      // first event is sequence 0 must not be skipped by an absent cursor.
+      const afterRaw = req.query.afterSequence;
+      const afterSequence = afterRaw === undefined ? -1 : (Number(afterRaw) || 0);
+      const events = await storage.listEvents(run.runId, { fromSeq: afterSequence, limit });
+      // §Poll: the highest sequence in the log at the time of the response,
+      // −1 when the log is empty. A cursor past the end therefore still
+      // answers 200 with an empty `events` array — never a 4xx.
+      const maxSequence = await storage.getMaxSequence(run.runId);
+      respondJson(res, 200, {
+        runId: run.runId,
+        events,
+        // `getMaxSequence` already answers -1 for an empty log; `> 0 ? … : -1`
+        // reported an empty log for a log holding exactly event 0.
+        lastSequence: maxSequence,
+        status: run.status,
+        isTerminal: ['completed', 'failed', 'cancelled'].includes(run.status),
+      });
     } catch (err) {
       next(err);
     }
@@ -2042,7 +2167,7 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
   // the twin is the honest form either way: if the corpus later gives the
   // operation a protocol path, the twin becomes the overlap spelling.
   // Same handler, both paths: one owner, no drift.
-  app.get([v1('/runs/:runId/debug-bundle'), vendorTwin('/runs/:runId/debug-bundle')], async (req, res, next) => {
+  app.get(['/runs/:runId/debug-bundle', vendorPath('/runs/:runId/debug-bundle')], async (req, res, next) => {
     try {
       const run = await loadReadableRun(req, storage, req.params.runId);
       const allEvents = await storage.listEvents(run.runId, { fromSeq: -1, limit: 100_000 });
@@ -2385,8 +2510,14 @@ function hasManagedCredentialRef(
 }
 
 export function capabilityGatedTypeIdRefusal(
-  nodes: ReadonlyArray<{ nodeId: string; typeId: string }>,
+  nodes: ReadonlyArray<{ nodeId: string; typeId: string; config?: Record<string, unknown> }>,
 ): OpenwopError | null {
+  // RFC 0239 §C (ADR 0858 P3) — a council roster over the advertised
+  // `multiPartyConversation.maxParticipants` is refused at run admission, never
+  // truncated. Here so every lane that admits a definition (create, fork,
+  // debug, evals, compose) refuses it through this one choke.
+  const rosterRefusal = councilRosterExceededRefusal(nodes);
+  if (rosterRefusal) return rosterRefusal;
   // `core.conversationGate` is now SUPPORTED — the host advertises
   // `capabilities.conversationPrimitive: true` (routes/discovery.ts) and
   // implements the open/exchange/close lifecycle (bootstrap/nodes.ts +

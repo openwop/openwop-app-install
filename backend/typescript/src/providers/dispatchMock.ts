@@ -59,6 +59,13 @@ interface ProgramState {
    *  assert what reached the prompt (e.g. a board's injected strategy context or
    *  owner-subject knowledge). In-memory + conformance-gated like the rest. */
   lastReceivedMessages: ReadonlyArray<{ role: string; content: string }> | null;
+  /** The `maxTokens` EVERY call received since the program was seeded, in
+   *  call order — read via `GET …/test/mock-ai/dispatch-budgets`
+   *  (host-sample-test-seams.md §28). Per attempt: the value the provider
+   *  request carried, never a running total. `lastReceivedMaxTokens` loses the
+   *  earlier calls, so it cannot show that a schema-violation retry kept its
+   *  budget (RFC 0033 §C). */
+  receivedMaxTokens: Array<number | null>;
 }
 
 const programs = new Map<string, ProgramState>();
@@ -75,7 +82,7 @@ const programs = new Map<string, ProgramState>();
  *  the host process spans the whole suite. That is what `resetMockPrograms`
  *  (and the seam route that now exposes it) is for — see its header. */
 export function programMock(nodeId: string, program: MockProgram): void {
-  programs.set(nodeId, { program, cursor: 0, lastReceivedMaxTokens: null, lastReceivedMessages: null });
+  programs.set(nodeId, { program, cursor: 0, lastReceivedMaxTokens: null, lastReceivedMessages: null, receivedMaxTokens: [] });
 }
 
 /**
@@ -139,6 +146,12 @@ export function lastReceivedMaxTokens(nodeId: string): number | null {
 
 /** Return the messages the most-recent mock dispatch for `nodeId` received (the
  *  composed system prompt + prior turns). `null` when no call has fired. */
+/** Every `maxTokens` a mock dispatch for `nodeId` received since its program
+ *  was seeded, in call order. Empty when unseeded or no call has fired. */
+export function receivedMaxTokens(nodeId: string): ReadonlyArray<number | null> {
+  return programs.get(nodeId)?.receivedMaxTokens ?? [];
+}
+
 export function lastReceivedMessages(nodeId: string): ReadonlyArray<{ role: string; content: string }> | null {
   return programs.get(nodeId)?.lastReceivedMessages ?? null;
 }
@@ -211,6 +224,7 @@ export async function dispatchMock(req: DispatchRequest & { nodeId?: string }): 
   // Record the maxTokens for the §B truncation-budget assertion.
   if (state) {
     state.lastReceivedMaxTokens = req.maxTokens ?? null;
+    state.receivedMaxTokens.push(req.maxTokens ?? null);
     state.lastReceivedMessages = req.messages.map((m) => ({ role: m.role, content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content) }));
   }
   const behavior: MockBehavior =

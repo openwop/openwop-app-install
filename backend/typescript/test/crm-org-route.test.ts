@@ -8,6 +8,14 @@
  * The legacy tenant-scoped contacts surface is untouched here (its own test
  * still covers it); a deal links a tenant contact to prove the two layers
  * compose.
+ *
+ * Sabotage-witnessed (grade-tests w4): company create accepting read scope,
+ * the pipeline-delete and stage-removal referential refusals, stage-name status
+ * derivation, and an explicit status in the same patch winning over derivation
+ * each turn a case red. The `assertUnderCap` unit case that used to close this
+ * file was cut: `crm-gmail-sync-pin.test.ts` ('the REAL per-org cap error
+ * classifies as `capped` …') calls the same primitive at the same threshold
+ * and goes red under the same sabotage (`count >= max` → `>`).
  */
 
 import http from 'node:http';
@@ -37,7 +45,19 @@ afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
 });
 
-interface Res<T = any> { status: number; body: T }
+/** The response fields these cases read; `res.json()` is untyped and is
+ *  narrowed to this ONE stated shape at the boundary in `call`. */
+interface Stage { stageId: string; name: string; probability: number }
+interface Row { companyId: string; dealId: string; taskId: string; activityId: string; body: string; customFields: Record<string, unknown> }
+interface Body {
+  error: string; orgId: string; user: { userId: string };
+  pipelines: Array<{ pipelineId: string; stages: Stage[] }>; pipelineId: string; stages: Stage[];
+  companyId: string; contactId: string; dealId: string; taskId: string; activityId: string; stageId: string;
+  status: string; owner: string; closeDate: string; tags: string[]; customFields: Record<string, unknown>;
+  companies: Row[]; deals: Row[]; tasks: Row[]; activities: Row[];
+  created: number; skipped: number; errors: unknown[];
+}
+interface Res<T = Body> { status: number; body: T }
 interface Client {
   get: (p: string) => Promise<Res>;
   post: (p: string, b?: unknown) => Promise<Res>;
@@ -59,7 +79,7 @@ function client(initialCookie = ''): Client {
       if (m) cookie = m[1];
     }
     const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    return { status: res.status, body: out as Body };
   };
   return {
     get: (p) => call('GET', p),
@@ -75,7 +95,7 @@ const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.tes
 // ADR 0026: real sign-in is Firebase OIDC; tests mint an authenticated user via
 // the env-gated auth test seam. Pass a shared `tenantId` to make co-tenant users.
 async function signup(c: Client, opts: { tenantId?: string } = {}): Promise<{ userId: string }> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail('crm'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
+  const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail('crm'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
@@ -92,14 +112,14 @@ async function ownerWithMember(role: string): Promise<{ owner: Client; member: C
   await signup(owner, { tenantId });
   const member = client();
   const memberUser = await signup(member, { tenantId });
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   const orgId = org.body.orgId;
-  const add = await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: [role] });
+  const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: [role] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
   return { owner, member, memberId: memberUser.userId, orgId };
 }
-const c = (orgId: string, suffix = ''): string => `/v1/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}${suffix}`;
+const c = (orgId: string, suffix = ''): string => `/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}${suffix}`;
 
 describe('crm org surface — toggle gating', () => {
   it('404s when the crm toggle is off', async () => {
@@ -130,7 +150,7 @@ describe('crm org surface — companies, deals, pipelines (owner)', () => {
     expect((await owner.get(c(orgId, '/companies?q=glob'))).body.companies).toHaveLength(1);
 
     // A tenant-scoped contact (legacy surface) to link.
-    const contact = await owner.post('/v1/host/openwop-app/crm/contacts', { name: 'Jane' });
+    const contact = await owner.post('/host/openwop-app/crm/contacts', { name: 'Jane' });
     expect(contact.status).toBe(201);
     const contactId = contact.body.contactId;
 
@@ -165,8 +185,8 @@ describe('crm org surface — deal owner/closeDate/status (ADR 0008 amendment)',
     await enableCrm('on');
     const { owner, orgId } = await ownerWithMember('viewer');
     const pipeline = (await owner.get(c(orgId, '/pipelines'))).body.pipelines[0];
-    const wonStage = pipeline.stages.find((s: { name: string }) => s.name === 'Won');
-    const lostStage = pipeline.stages.find((s: { name: string }) => s.name === 'Lost');
+    const wonStage = pipeline.stages.find((s) => s.name === 'Won')!;
+    const lostStage = pipeline.stages.find((s) => s.name === 'Lost')!;
 
     // Create: defaults to open (first stage), accepts owner + closeDate.
     const deal = await owner.post(c(orgId, '/deals'), { title: 'Amendment deal', owner: 'user:alice', closeDate: '2026-09-30' });
@@ -188,8 +208,13 @@ describe('crm org surface — deal owner/closeDate/status (ADR 0008 amendment)',
     expect((await owner.patch(c(orgId, `/deals/${id}`), { stageId: pipeline.stages[0].stageId })).body.status).toBe('open');
 
     // Explicit status in the SAME patch as a stage move wins over derivation.
-    const explicit = await owner.patch(c(orgId, `/deals/${id}`), { stageId: wonStage.stageId, status: 'open' });
-    expect(explicit.body.status).toBe('open');
+    // `lost` differs from BOTH the derived value (won) and the prior one (open),
+    // so only the explicit-status write can produce it. (It used to send 'open'
+    // from an open deal: with the explicit write removed, the skipped derivation
+    // left the prior 'open' in place and the case still passed — probe
+    // w4g2-or-explicit-status was vacuous.)
+    const explicit = await owner.patch(c(orgId, `/deals/${id}`), { stageId: wonStage.stageId, status: 'lost' });
+    expect(explicit.body.status).toBe('lost');
 
     // Owner + closeDate clear with null.
     const cleared = await owner.patch(c(orgId, `/deals/${id}`), { owner: null, closeDate: null });
@@ -224,11 +249,13 @@ describe('crm org surface — RBAC', () => {
     await signup(ownerC, { tenantId });
     const bob = client();
     const bobUser = await signup(bob, { tenantId });
-    const orgA = (await ownerC.post('/v1/host/openwop-app/orgs', { name: 'A' })).body.orgId;
-    const orgB = (await ownerC.post('/v1/host/openwop-app/orgs', { name: 'B' })).body.orgId;
-    await ownerC.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'Bob', subject: bobUser.userId, roles: ['editor'] });
+    const orgA = (await ownerC.post('/host/openwop-app/orgs', { name: 'A' })).body.orgId;
+    const orgB = (await ownerC.post('/host/openwop-app/orgs', { name: 'B' })).body.orgId;
+    await ownerC.post(`/host/openwop-app/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'Bob', subject: bobUser.userId, roles: ['editor'] });
     expect((await bob.post(c(orgA, '/companies'), { name: 'OK' })).status).toBe(201);
-    expect((await bob.get(c(orgB, '/companies'))).status).toBe(403);
+    const crossOrg = await bob.get(c(orgB, '/companies'));
+    expect(crossOrg.status).toBe(403);
+    expect(crossOrg.body.error).toBe('forbidden_scope');
   });
 });
 
@@ -346,12 +373,19 @@ describe('crm org surface — custom fields + import (Phase 3)', () => {
     await enableCrm('on');
     const { owner, orgId } = await ownerWithMember('viewer');
     expect((await owner.post(c(orgId, '/fields'), { entityType: 'company', key: 'note', label: 'Note', type: 'string' })).status).toBe(201);
-    // The seam uses the SAME host cleanString (cap 120 + secret-shape scrub) CRM already used —
-    // so a >120-char value is capped, exactly as before delegation.
-    const long = 'x'.repeat(200);
+    // The seam uses the SAME host cleanString (cap 120 + secret-shape scrub) CRM already used.
+    // BOUNDED: a long value of SHORT words — not a 40+-char run, which the scrub
+    // would redact first and so hide whether the cap applies at all (the old
+    // `'x'.repeat(200)` fixture was exactly that: it came back as the 24-char
+    // redaction marker, and the length check passed with or without the cap).
+    const long = 'word '.repeat(60).trim();
     const co = await owner.post(c(orgId, '/companies'), { name: 'Bounded', customFields: { note: long } });
     expect(co.status, JSON.stringify(co.body)).toBe(201);
-    expect((co.body.customFields.note as string).length).toBeLessThanOrEqual(120);
+    expect(co.body.customFields.note, 'capped at exactly 120 chars').toBe(long.slice(0, 120));
+    // SCRUBBED: a pasted credential shape is redacted, never stored.
+    const secret = await owner.post(c(orgId, '/companies'), { name: 'Scrubbed', customFields: { note: 'key sk-live1234567890abcd here' } });
+    expect(secret.status, JSON.stringify(secret.body)).toBe(201);
+    expect(secret.body.customFields.note).toBe('key [REDACTED:secret-shaped] here');
   });
 
   it('import: dedup by key, column mapping, per-row errors', async () => {
@@ -456,27 +490,5 @@ describe('crm org surface — followup hardening', () => {
     for (const co of list.body.companies) {
       expect(co.customFields.tier).toBe('gold');
     }
-  });
-
-  // CRMGAP-6/9: the import route's running cap counter (seeded from one
-  // pre-loop `listCompanies`, incremented per successful create, checked via
-  // the shared `assertUnderCap` — CRMGAP-9's one cap-check primitive every
-  // per-scope CRM entity count uses) must throw the SAME validation_error/409
-  // shape at the SAME threshold the direct-create path's internal
-  // full-collection check uses — a full 5000-row fixture is too slow for a
-  // unit test, so this pins the shared primitive directly instead.
-  it('assertUnderCap (the primitive the import route\'s hoisted counter and createCompany both call) enforces MAX_PER_ORG_ENTITIES', async () => {
-    const { assertUnderCap, MAX_PER_ORG_ENTITIES } = await import('../src/features/crm/crmEntitiesService.js');
-    expect(MAX_PER_ORG_ENTITIES).toBe(5000);
-    expect(() => assertUnderCap(4999, MAX_PER_ORG_ENTITIES, 'companies')).not.toThrow();
-    let threw: unknown;
-    try {
-      assertUnderCap(5000, MAX_PER_ORG_ENTITIES, 'companies');
-    } catch (e) {
-      threw = e;
-    }
-    expect(threw).toBeInstanceOf(Error);
-    expect((threw as { code?: string }).code).toBe('validation_error');
-    expect((threw as { httpStatus?: number }).httpStatus).toBe(409);
   });
 });

@@ -9,11 +9,13 @@
  * ADR 0642's inventory has exactly that problem: it is a table in a document,
  * and nothing notices when the code moves underneath it.
  *
- * WHAT THIS IS NOT. It is NOT a gate demanding zero. Zero is currently
- * FORBIDDEN: `versioning.md` §1.1 requires `preferredVersion` to name a 1.x
- * member for as long as `protocolVersions[]` carries one, so a host that
- * removed v1 today would be non-conformant, not ahead of schedule. Retirement
- * is ATOMIC and gated on the v1 EOS clock (2026-12-04) — see ADR 0642.
+ * WHAT THIS IS NOT. It is NOT (yet) a gate demanding zero.
+ *
+ * CORRECTED 2026-10-04 (ADR 0812): this used to say zero was FORBIDDEN until
+ * the v1 EOS clock (2026-12-04). RFC 0234 (corpus 2.45.14) moved the floor to
+ * 2026-10-04, app.openwop.dev retired v1 that day, and the product decision is to
+ * DROP v1 from this codebase. Zero is now the TARGET. ADR 0812 P1–P3 drive the
+ * counts there, and the ratchet keeps them from rising meanwhile.
  *
  * WHAT IT IS: a RATCHET. "No NEW v1 reliance" is enforceable today and is the
  * only half that is. Counts may fall freely; a count that RISES fails, because
@@ -25,50 +27,19 @@
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { execFileSync } from 'node:child_process';
+import { scanMatches, stripeChokeViolations, V1_PATH } from './v1RelianceScan.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const BASELINE = join(ROOT, 'scripts', 'v1-reliance-baseline.json');
 
-/**
- * Every CODE-line match of `pattern` under `dir` — comments and test files
- * excluded.
- *
- * CORRECTED 2026-09-10. The first version counted every occurrence of the
- * literal, so a PR that MOVED four SPA surfaces off `/v1/` and documented why
- * (header comments naming the old and new addresses, and a wire-level test
- * asserting the new ones) reported spaProtocolCallSites 87 → 91 and
- * spaHostExtensionCallSites 543 → 555 — the ratchet fired on the migration it
- * exists to reward, and was re-baselined over before the numbers were read.
- * Attributed line by line: +11 in one test file's URL expectations, +19 in
- * comments, and a NET FALL in code. A ratchet that counts prose polices a
- * spelling, not the invariant; this one now reads whole lines and drops any
- * that begin with a comment marker, and never reads a test file.
- */
-function matches(dir, pattern, includes, excludes = []) {
-  const args = ['-rnE', pattern, dir];
-  for (const inc of includes) args.push(`--include=${inc}`);
-  for (const ex of excludes) args.push(ex);
-  let lines;
-  try {
-    lines = execFileSync('grep', args, { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }).split('\n');
-  } catch { return []; }           // grep exits 1 on no match
-  const re = new RegExp(pattern, 'g');
-  const out = [];
-  for (const line of lines) {
-    if (!line) continue;
-    const text = line.replace(/^[^:]+:\d+:/, '');          // strip `path:line:`
-    const t = text.trimStart();
-    if (t.startsWith('//') || t.startsWith('*') || t.startsWith('/*')) continue;
-    for (const m of text.match(re) ?? []) out.push(m);
-  }
-  return out;
-}
+/** Scanning lives in `v1RelianceScan.mjs` so its reach is test-pinned (ADR 0786).
+ *  History kept here: CORRECTED 2026-09-10 — comments and test files are not call
+ *  sites (a PR that MOVED four SPA surfaces off /v1/ once read as +12). */
+const matches = (dir, pattern, includes, excludes = []) => scanMatches(ROOT, dir, pattern, includes, excludes);
 
 /** Test files are assertions ABOUT the wire, not calls on it. */
 const NO_TESTS = ['--exclude-dir=__tests__', '--exclude=*.test.ts', '--exclude=*.test.tsx'];
 const TS = ['*.ts', '*.tsx'];
-const V1_PATH = '/v1/[a-zA-Z0-9._{}$/-]*';
 /** Doc citations (`spec/v1/foo.md`, schema filenames) are prose, not call sites. */
 const isDocCitation = (m) => /\.md\.?$|\.json$|\.schema\./.test(m);
 
@@ -116,12 +87,48 @@ const preferred = readExport('backend/typescript/src/middleware/protocolVersion.
 /** Does the SPA ever select major 2? One header would change the whole picture. */
 const spaVersionHeader = matches('frontend/react/src', 'OpenWOP-Version|openwop-version|protocolVersion: V2_PROTOCOL_VERSION|major: 2', TS, NO_TESTS).length;
 
+/**
+ * URLs this host BUILDS that point at its own paths through a VERSIONED prefix:
+ * a self-call (`${baseUrl}/v1/runs`), or a link it hands out
+ * (`${publicBaseUrl(req)}/v1/host/…`). Each is a 410 on the day that major
+ * retires. On 2026-09-30 they included the sub-run dispatcher and the messaging
+ * bridge, which would have failed every sub-workflow and messaging run on the
+ * ADR 0669 cut.
+ *
+ * Version-neutral on purpose (`/v<N>/`, not `/v1/`), so the next major needs no
+ * edit here. "Our own paths" are DERIVED from the v2 path manifest's first
+ * segments plus `host/`, never restated, so a new protocol family is covered the
+ * day it lands. A third-party `/v1` API (ElevenLabs' `/v1/text-to-speech`) matches
+ * neither.
+ */
+const ownSegments = [...new Set(JSON.parse(readFileSync(join(ROOT, 'schemas/v2/path-manifest.json'), 'utf8')).operations
+  .map((o) => o.path.split('/')[1]?.split(':')[0])
+  .filter((seg) => seg && !seg.startsWith('.')))];
+const VERSIONED_OWN_URL = `\\$\\{[^}]*\\}/v[0-9]+/(host/|(${ownSegments.map((x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})([/?:]|$))`;
+const versionedOwnUrls = matches('backend/typescript/src', VERSIONED_OWN_URL, ['*.ts'], NO_TESTS);
+
+/**
+ * ADR 0812 P2 — the TEST CORPUS's `/v1` addressing. Excluded from every count
+ * above on purpose: a test is an assertion about the wire, not a call on it.
+ * With v1 being deleted it IS reliance, because each such test must be moved or
+ * ported before P3 can remove the code it exercises. Counted separately so P2's
+ * batches show progress and a new test cannot quietly add to the migration.
+ * Includes the deliberate `/v1`-twin tests (retirement rehearsals, ADR 0806),
+ * which P3 rewrites last.
+ */
+const testCorpus = [
+  ...matches('backend/typescript/test', V1_PATH, TS),
+  ...matches('frontend/react/e2e', V1_PATH, TS),
+].filter((m) => !isDocCitation(m));
+
 const measured = {
+  testCorpusV1Refs: testCorpus.length,
   spaProtocolCallSites: spaProtocol.length,
   spaHostExtensionCallSites: spaHostExt.length,
   spaOpenWopVersionHeaders: spaVersionHeader,
   backendProtocolPathRefs: beProtocol.length,
   backendHostExtensionPathRefs: beHostExt.length,
+  backendVersionedOwnUrls: versionedOwnUrls.length,
 };
 
 /**
@@ -143,6 +150,13 @@ const facts = [
   ['v2 routing', "req.url = `/v1${req.url}` — v2 is a rewrite onto the v1 handlers"],
 ];
 
+// ADR 0786 — the Stripe exemption must not be able to hide an OpenWOP path.
+const chokeViolations = stripeChokeViolations(ROOT);
+if (chokeViolations.length > 0) {
+  for (const v of chokeViolations) console.error(`✗ check-v1-reliance: ${v}`);
+  process.exit(1);
+}
+
 if (process.argv.includes('--update')) {
   writeFileSync(BASELINE, JSON.stringify(measured, null, 2) + '\n');
   console.log('✓ check-v1-reliance: baseline updated to current measurement.');
@@ -156,7 +170,7 @@ if (!existsSync(BASELINE)) {
 }
 const base = JSON.parse(readFileSync(BASELINE, 'utf8'));
 
-console.log('▶ v1 reliance inventory (ADR 0642; EOS 2026-12-04)\n');
+console.log('▶ v1 reliance inventory (ADR 0642 / ADR 0812; v1 retired on app.openwop.dev 2026-10-04)\n');
 for (const [k, v] of facts) console.log(`  ${k.padEnd(48)} ${v}`);
 console.log();
 
@@ -189,6 +203,5 @@ if (failed > 0) {
   process.exit(1);
 }
 console.log(`✓ check-v1-reliance: no new v1 reliance${improved ? ` (${improved} count(s) fell — re-baseline with --update)` : ''}.`);
-console.log('  NOTE: zero is not the target today. `versioning.md` §1.1 requires a 1.x');
-console.log('  preferredVersion while protocolVersions[] carries one, so removing v1 before');
-console.log('  the EOS overlap ends would be non-conformant. This ratchets, it does not cut.');
+console.log('  NOTE: zero is the target (ADR 0812: v1 is being removed from this codebase).');
+console.log('  Counts may only fall. Re-baseline with --update as each phase lands.');

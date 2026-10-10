@@ -8,8 +8,10 @@
  * keeps it minimal.
  */
 
+import type { HandoffRecordV1 } from '../host/handoff/handoffRecord.js';
 import type { ContentPart } from '../providers/dispatch.js';
 import type { A2aSurface } from '../host/a2aSurface.js';
+import type { DataIntegrationAdapter } from '../host/dataIntegrationAdapter.js';
 import type { KanbanSurface } from '../host/kanbanSurface.js';
 import type { KnowledgeSurface } from '../host/knowledgeSurface.js';
 import type { ChatSurface } from '../host/chatSurface.js';
@@ -478,6 +480,15 @@ export interface NodeContext {
    * it to `applyToolResultTransform`. `undefined` ⇒ identity (no compaction). */
   compaction?: CompactionDecision;
   /**
+   * ADR 0829 P2 — the structured handoff record this run was created with
+   * (`run.metadata["openwop-handoff"]`, stamped on a `core.dispatch` child),
+   * re-normalized as untrusted at ctx build (the `trustBoundary` pattern).
+   * Copied verbatim on `:fork` with the rest of the metadata. Consumers gate it
+   * on the `structured-handoffs` toggle and reach a model only through
+   * `handoffPromptBlock` (fenced). `undefined` ⇒ no record.
+   */
+  handoff?: HandoffRecordV1;
+  /**
    * RFC 0151 §C — present ONLY when this node is executing as an INVERSE ACTION
    * (a compensator the unwind invoked), absent on every forward execution.
    *
@@ -811,7 +822,10 @@ export interface NodeContext {
        *  SuiteQL's `Prefer: transient`). The broker strips any `authorization` /
        *  `content-type` variant, so a node can't override the credential. */
       extraHeaders?: Record<string, string>;
-    }): Promise<{ ok: boolean; status?: number; data?: unknown; error?: string }>;
+      /** ADR 0627 D5 — an exact connection pin (no fall-through). Typed here at
+       *  last (ADR 0783 D2 is its first TS caller; the CRM node passes it untyped). */
+      connectionId?: string;
+    }): Promise<{ ok: boolean; status?: number; data?: unknown; error?: string; link?: string }>;
     /** Resolve the acting human's connected provider for a capability CATEGORY
      *  ("email-calendar" / "hr" / …) — the Phase-2 binding (ADR 0186). Returns the
      *  provider id for `invoke`, or `null` when no authorized connection of that
@@ -825,6 +839,11 @@ export interface NodeContext {
   /** ctx.variables — run-scoped mutable variable bag (get/set), backed by the
    *  variables runtime. Used by launch-studio to thread step context. */
   variables?: { get(name: string): unknown; set(name: string, value: unknown): void };
+  /** ctx.dataIntegration — ADR 0783 (`host/dataIntegrationAdapter.ts`): `fetchMCP`,
+   *  `fetchVariable`, `transform`, `computeVariable` (phase 1) and, over a
+   *  Connection acting as a data source, `fetchRest` (GET) and `fetchGraphql`
+   *  (queries) (phase 2a). Unclaimed until every phase-2 witness is green (D9). */
+  dataIntegration?: DataIntegrationAdapter;
   /** ctx.mcp — host-side MCP. `expose` (RFC 0020) registers the host AS a server;
    *  `invokeTool`/`readResource`/`listTools`/`serverStatus` (ADR 0030) are the
    *  OUTBOUND client — `serverId` is a `reach:'mcp'` Connections provider, called
@@ -894,6 +913,10 @@ export type NodeOutcome =
         kind: 'approval' | 'clarification' | 'refinement' | 'cancellation' | 'external-event' | 'conversation' | 'timer' | 'tour-step' | 'walkthrough-step' | 'credential';
         data: unknown;
         resumeSchema?: Record<string, unknown>;
+        /** ADR 0829 — a normalized structured handoff record. The executor writes it
+         *  onto `node.suspended` under `openwop-handoff`; it never enters `data`
+         *  (every per-kind interrupt `data` def is closed, with no hatch). */
+        handoff?: HandoffRecordV1;
       };
     };
 
@@ -1030,6 +1053,16 @@ export interface WorkflowDefinition {
      *  caps at `partial` — is RFC 0151 UQ4 unwind work that rides
      *  `compensationLedger`/`compensationUnwind`, NOT this carry. */
     irreversibleEffect?: boolean;
+    /** §WorkflowNode `name` — the author's display label (ADR 0770 D4).
+     *  Authoring metadata: the executor ignores it. The builder writes it only
+     *  when it differs from the catalog default, so an untouched node keeps the
+     *  hash it had before this field was carried. */
+    name?: string;
+    /** §WorkflowNode `position` — canvas coordinates (ADR 0770 D4). Pure
+     *  layout: stripped from both `definitionHashOf` and `revisionHashOf`, so
+     *  a drag is never a content change. `expandChain` deliberately does not
+     *  emit it (see the ADR). */
+    position?: { x: number; y: number };
   }>;
   /** DAG edges. When absent or empty, the executor builds an implicit linear
    *  chain from `nodes` (back-compat path for callers that pre-date the

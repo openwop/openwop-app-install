@@ -98,7 +98,9 @@ export function buildConsentSurface(scope: BundleScope): FeatureSurface {
     // the omission became a GRANT.
     record: async (args) => {
       const rec = await mergeConsentCategories({
-        tenantId, subjectKey: requireSubjectKey(args.subjectKey), categories: requireCategories(args.categories), source: 'workflow',
+        // ADR 0849 D2 — the run that wrote it, so the record's history names it.
+        tenantId, subjectKey: requireSubjectKey(args.subjectKey), categories: requireCategories(args.categories),
+        source: scope.runId ? `workflow:${scope.runId}` : 'workflow',
       });
       return { categories: rec.categories };
     },

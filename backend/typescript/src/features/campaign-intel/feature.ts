@@ -28,14 +28,14 @@ export const campaignIntelFeature: BackendFeature = {
   },
   surface: { id: 'campaign-intel', build: buildCampaignIntelSurface },
   requiredPacks: [
-    { name: 'feature.campaign-intel.nodes', version: '1.1.1' },
-    { name: 'feature.campaign-intel.agents', version: '1.2.1' },
+    { name: 'feature.campaign-intel.nodes', version: '1.1.2' },
+    { name: 'vendor.openwop-app.campaign-intel.agents', version: '1.2.2' },
   ],
   toggleDefault: {
     id: 'campaign-intel',
     label: 'Campaign Intelligence',
     description:
-      'Turn campaign performance into decisions — budget recommendations (shift spend toward higher ROAS), creative-fatigue detection, and outcome forecasts. Ask the Campaign Intelligence Analyst in chat ("how should I allocate my budget?") for data-backed answers. The last layer of Campaign Studio. OFF by default.',
+      'Turn campaign performance into decisions — budget recommendations (shift spend toward higher ROAS), creative-fatigue detection, and outcome forecasts. Ask the Campaign Intelligence Analyst in chat ("how should I allocate my budget?") for data-backed answers. The last layer of Campaign Studio.',
     category: 'Marketing',
     status: 'off',
     bucketUnit: 'tenant',

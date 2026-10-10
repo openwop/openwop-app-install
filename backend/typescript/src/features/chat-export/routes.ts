@@ -25,7 +25,7 @@ import { importConversation } from './importService.js';
 export function registerChatExportRoutes(deps: RouteDeps): void {
   const { app } = deps;
 
-  app.get('/v1/host/openwop-app/chat-export/:sessionId', async (req, res, next) => {
+  app.get('/host/openwop-app/chat-export/:sessionId', async (req, res, next) => {
     try {
       const tenantId = req.tenantId ?? '_anon';
       const actingUserId = req.userId ?? req.principal?.principalId;
@@ -54,7 +54,7 @@ export function registerChatExportRoutes(deps: RouteDeps): void {
   // fencing on the model-facing path comes from the search TOOL's own
   // `contentTrust` declaration (`conversation-search/agentTools.ts:22` ->
   // `host/toModelToolResult.ts:101`). See `importService.ts`'s docblock.
-  app.post('/v1/host/openwop-app/chat-export/import', async (req, res, next) => {
+  app.post('/host/openwop-app/chat-export/import', async (req, res, next) => {
     try {
       const tenantId = req.tenantId ?? '_anon';
       const userId = req.userId ?? req.principal?.principalId;

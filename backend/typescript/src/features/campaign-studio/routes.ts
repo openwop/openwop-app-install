@@ -11,7 +11,7 @@ import { validateCampaignDoc } from './validateCampaignDoc.js';
 
 export function registerCampaignStudioEditorRoutes(deps: RouteDeps): void {
   registerCanvasEditorRoutes(deps, {
-    basePath: '/v1/host/openwop-app/campaign-studio',
+    basePath: '/host/openwop-app/campaign-studio',
     feature: { toggleId: 'campaign-studio', label: 'Campaign Studio' },
     canvasTypeId: 'canvas.campaign',
     // ADR 0359 Phase 5 — collab-capable (both toggles enforced at the socket).

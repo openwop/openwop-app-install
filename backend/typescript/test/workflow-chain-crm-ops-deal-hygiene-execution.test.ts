@@ -11,17 +11,22 @@
  * pick which stale deals need a follow-up — it does not infer staleness
  * itself. The correct execution assertion is "the run suspends with a
  * pending interrupt at the review gate," not "the run completes."
+ *
+ * SABOTAGE (wave-4 grade-tests probe w4g3-ch-gate-noop): swap the gate node for a
+ * noop → the run never suspends → red. See the BLOCKED-ON-PRODUCT note below for
+ * the approval-card title/deals half of the claim.
  */
 
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { getSetCookies } from './headerCookies.js';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { getChain, expandChain } from '../src/host/workflowChainPackLoader.js';
 import { registerWorkflow } from '../src/host/workflowsRegistry.js';
+import { bareRunId } from './support/bareRunId.js';
 
 let BASE: string;
 let server: http.Server;
@@ -40,11 +45,12 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
-interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res> }
+interface Res<T = unknown> { status: number; body: T }
+// The JSON boundary is untyped; each call site names the body shape it reads.
+interface Client { get: <T = unknown>(p: string) => Promise<Res<T>>; post: <T = unknown>(p: string, b?: unknown) => Promise<Res<T>> }
 function client(): Client {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T,>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
@@ -53,40 +59,39 @@ function client(): Client {
     const sc = getSetCookies(res.headers);
     for (const c of sc as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
     const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    return { status: res.status, body: out as T };
   };
-  return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b) };
+  return { get: <T,>(p: string) => call<T>('GET', p), post: <T,>(p: string, b?: unknown) => call<T>('POST', p, b) };
 }
 
 let n = 0;
 async function ownerOrg(): Promise<{ owner: Client; orgId: string; tenantId: string }> {
   const tenantId = `org:dealhygiene-${Date.now()}-${n++}`;
   const owner = client();
-  const r = await owner.post('/v1/host/openwop-app/test/login', { email: `dealhygiene-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await owner.post('/host/openwop-app/test/login', { email: `dealhygiene-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return { owner, orgId: org.body.orgId, tenantId };
 }
-const c = (orgId: string, suffix = ''): string => `/v1/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}${suffix}`;
+const c = (orgId: string, suffix = ''): string => `/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}${suffix}`;
 
 interface RunSnapshot { status: string }
+/** Run-settle poll — the executor exposes no hook to await, so this polls the
+ *  real condition (a terminal or suspended status) rather than sleeping blind. */
 async function pollRun(owner: Client, runId: string): Promise<RunSnapshot> {
-  let snap: RunSnapshot = { status: 'pending' };
-  for (let i = 0; i < 80; i++) {
-    const r = await owner.get(`/v1/runs/${runId}`);
+  return vi.waitFor(async () => {
+    const r = await owner.get<RunSnapshot>(`/runs/${runId}`);
     expect(r.status, JSON.stringify(r.body)).toBe(200);
-    snap = r.body as RunSnapshot;
-    if (snap.status === 'completed' || snap.status === 'failed' || snap.status === 'cancelled' || snap.status.startsWith('waiting')) break;
-    await new Promise((res) => setTimeout(res, 25));
-  }
-  return snap;
+    expect(r.body.status).toMatch(/^(completed|failed|cancelled|waiting)/);
+    return r.body;
+  }, { timeout: 4000, interval: 25 });
 }
 
 describe('crm-ops.deal-hygiene — end-to-end execution (real executor, suspends at the human gate)', () => {
   it('reads open deals then SUSPENDS at core.chat.approvalGate — the reviewer picks staleness, the chain does not infer it', async () => {
     const { owner, orgId } = await ownerOrg();
-    const deal = await owner.post(c(orgId, '/deals'), { title: 'Quiet since Q1' });
+    const deal = await owner.post<{ dealId: string }>(c(orgId, '/deals'), { title: 'Quiet since Q1' });
     expect(deal.status, JSON.stringify(deal.body)).toBe(201);
 
     const found = getChain('crm-ops.deal-hygiene');
@@ -95,16 +100,16 @@ describe('crm-ops.deal-hygiene — end-to-end execution (real executor, suspends
     const expanded = expandChain(found!.chain, { params });
     registerWorkflow(expanded);
 
-    const create = await owner.post('/v1/runs', { workflowId: expanded.workflowId, inputs: params });
+    const create = await owner.post<{ runId: string }>('/runs', { workflowId: expanded.workflowId, inputs: params });
     expect(create.status, JSON.stringify(create.body)).toBe(201);
-    const runId = create.body.runId as string;
+    const runId = create.body.runId;
 
     const snap = await pollRun(owner, runId);
     expect(snap.status.startsWith('waiting'), `run should suspend at the review gate, was ${JSON.stringify(snap)}`).toBe(true);
 
-    const ints = await owner.get(`/v1/host/openwop-app/runs/${runId}/interrupts`);
+    const ints = await owner.get<{ interrupts: Array<{ token: string; nodeId: string }> }>(`/host/openwop-app/runs/${bareRunId(runId)}/interrupts`);
     expect(ints.status, JSON.stringify(ints.body)).toBe(200);
-    const interrupts = ints.body.interrupts as Array<{ token: string; nodeId: string }>;
+    const interrupts = ints.body.interrupts;
     const gate = interrupts.find((i) => i.nodeId.includes('review'));
     expect(gate, `expected a pending interrupt for the review gate: ${JSON.stringify(interrupts)}`).toBeTruthy();
 
@@ -112,14 +117,26 @@ describe('crm-ops.deal-hygiene — end-to-end execution (real executor, suspends
     // filtering condition — the card's title interpolates it (workflow
     // variable substitution, not a node input edge), so a leaked
     // `{{params.staleDays}}` literal would mean the chain's templating broke.
-    const debug = await owner.get(`/v1/runs/${runId}/debug-bundle`);
+    type BundleEvent = { type: string; nodeId?: string; payload?: { outputs?: { deals?: Array<{ dealId: string }> } } };
+    const debug = await owner.get<{ events: BundleEvent[] }>(`/host/openwop-app/runs/${bareRunId(runId)}/debug-bundle`);
     expect(debug.status, JSON.stringify(debug.body)).toBe(200);
-    expect(JSON.stringify(debug.body)).not.toContain('{{params.staleDays}}');
-    expect(JSON.stringify(debug.body)).not.toContain('{{inputs.staleDays}}');
+    // "reads open deals": the list node completed with the seeded deal in its output.
+    const read = debug.body.events.find((e) => e.type === 'node.completed' && (e.nodeId ?? '').endsWith('_open-deals'));
+    expect(read?.payload?.outputs?.deals?.map((d) => d.dealId), 'the chain read the org\'s open deal').toContain(deal.body.dealId);
+    // BLOCKED-ON-PRODUCT (wave-4 grade-tests, probe w4g3-ch-title-leak vacuous):
+    // the interrupt card is the generic `openwop-app.gate-preview` ("Approve <nodeId>")
+    // — `core.chat.approvalGate` does not surface the chain's `config.title` (the
+    // `~{{params.staleDays}} days` review context) nor the `open-deals → review.artifact`
+    // deals, so neither the interpolated title nor the deals-on-the-card can be
+    // asserted. These two negatives are INERT until the card carries the title;
+    // replace them with `toContain('~21 days')` + the dealId on the interrupt then.
+    const bundle = JSON.stringify(debug.body);
+    expect(bundle).not.toContain('{{params.staleDays}}');
+    expect(bundle).not.toContain('{{inputs.staleDays}}');
 
     // No follow-up task exists yet — the suspend didn't silently fall through.
-    const tasks = await owner.get(c(orgId, '/tasks'));
+    const tasks = await owner.get<{ tasks: unknown[] }>(c(orgId, '/tasks'));
     expect(tasks.status, JSON.stringify(tasks.body)).toBe(200);
-    expect((tasks.body.tasks as unknown[]).length).toBe(0);
+    expect(tasks.body.tasks).toHaveLength(0);
   });
 });

@@ -19,7 +19,7 @@ import { registerCdpErasure } from './erasure.js';
 
 export const cdpFeature: BackendFeature = {
   id: 'cdp',
-  requiredPacks: [{ name: 'feature.cdp.nodes', version: '1.1.0' }], // NP-HOLE-CDP-1; 1.1.0 = CLNP-3 masked output
+  requiredPacks: [{ name: 'feature.cdp.nodes', version: '1.1.1' }], // NP-HOLE-CDP-1; 1.1.0 = CLNP-3 masked output
   registerRoutes: (deps) => {
     registerCdpRoutes(deps);
     registerCdpAgentTools(); // XCH-HOLE-6 (round 3) — openwop:cdp.identity.resolve (ADR 0308 seam)
@@ -36,7 +36,7 @@ export const cdpFeature: BackendFeature = {
   toggleDefault: {
     id: 'cdp',
     label: 'Customer Data Platform',
-    description: 'Unified customer identity resolution — resolve a customer by any identifier (ADR 0263).',
+    description: 'Unified customer identity resolution — resolve a customer by any identifier.',
     category: 'Customer Data Platform',
     status: 'off',
     bucketUnit: 'tenant',

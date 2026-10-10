@@ -54,6 +54,15 @@ describe('TabChatDeck — ?rail= deep link (ENG-14)', () => {
     expect(selectedRailTab()).toMatch(/review/i);
   });
 
+  it('treats ?rail=progress as the Workbench Run tab (ADR 0768 P2 alias)', async () => {
+    // Runs moved out of the rail; the old deep link must still land somewhere
+    // real — the right-hand Workbench, on Run — not be silently dropped.
+    await renderAt('/chat?rail=progress');
+    const pane = screen.getByRole('complementary', { name: /workbench/i });
+    expect(pane).toBeTruthy();
+    expect(screen.getByRole('tab', { name: /^run/i }).getAttribute('aria-selected')).toBe('true');
+  });
+
   it('ignores an unknown rail value rather than selecting nothing', async () => {
     await renderAt('/chat?rail=not-a-real-rail');
     // The guard only accepts the deck's own LeftRailTab union, so an unknown

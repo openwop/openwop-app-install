@@ -2,7 +2,7 @@
  * ADR 0632 / bus finding `4024` — `events.md` §Stream modes: under major 2 a
  * `values` stream is ONE synthesized `state.snapshot` per `updates`-tier
  * transition (never the raw event), and a `Last-Event-ID` resumption emits a
- * snapshot FIRST. v1 `values` keeps its raw `node.completed`/`run.completed`.
+ * snapshot FIRST. (v1 `values` kept its raw frames; that leg went with major 1.)
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -11,7 +11,6 @@ import { createApp } from '../src/index.js';
 
 let server: Server; let base = '';
 const V2 = { Authorization: 'Bearer dev-token', 'Content-Type': 'application/json', 'OpenWOP-Version': '2' };
-const V1 = { Authorization: 'Bearer dev-token', 'Content-Type': 'application/json' };
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://'; process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true'; process.env.OPENWOP_TEST_SEAM_ENABLED = 'true';
@@ -76,14 +75,7 @@ describe('v2 values stream = synthesized state.snapshot frames', () => {
     // No frame after the leading snapshot names sequence 1 (the resumption point).
     expect(fs.slice(1).some((f) => f.id === '1')).toBe(false);
   });
-  it('v1 values mode is untouched: raw node.completed / run.completed frames', async () => {
-    const id = await completedRun(V1, '/v1/runs');
-    const r = await fetch(`${base}/v1/runs/${encodeURIComponent(id)}/events?streamMode=values`, { headers: { ...V1, Accept: 'text/event-stream' } });
-    expect(r.status).toBe(200);
-    const fs = frames(await r.text());
-    expect(fs.some((f) => f.event === 'state.snapshot')).toBe(false);
-    expect(fs.some((f) => f.event === 'run.completed' || f.event === 'node.completed')).toBe(true);
-  });
+  // ADR 0812 P3c-0 — the "v1 values mode is untouched" leg was deleted with major 1.
 });
 
 describe('a failed snapshot projection is surfaced, never silent (measured on prod 2026-09-05)', () => {

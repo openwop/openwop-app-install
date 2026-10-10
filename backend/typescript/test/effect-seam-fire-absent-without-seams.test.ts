@@ -41,12 +41,12 @@ describe('guardrail 1 — a non-seams boot has no effect-seam node or workflow',
   it('the node is not registered, the route refuses, and no workflow appears anywhere', async () => {
     expect(getNodeRegistry().isResolvable(FIRE_NODE_TYPE), 'the node must not exist on a normal boot').toBe(false);
     const seam = SEAM_ROWS[0]?.seam ?? '';
-    const res = await fetch(`${base}/v1/host/sample/effect-seams/fire`, { method: 'POST', headers: AUTH, body: JSON.stringify({ seam }) });
+    const res = await fetch(`${base}/host/sample/effect-seams/fire`, { method: 'POST', headers: AUTH, body: JSON.stringify({ seam }) });
     expect(res.status).toBe(404);
     expect(await getRegisteredWorkflowAsync(fireWorkflowId('default', seam)), 'no transient definition was registered').toBeNull();
     expect(listRegisteredWorkflows().some((w) => w.workflowId.startsWith('conformance.effect-seam.fire'))).toBe(false);
     expect([...(await allOwnershipByWorkflow()).keys()].some((id) => id.startsWith('conformance.effect-seam.fire'))).toBe(false);
-    const listed = await (await fetch(`${base}/v1/host/openwop-app/workflows`, { headers: AUTH })).text();
+    const listed = await (await fetch(`${base}/host/openwop-app/workflows`, { headers: AUTH })).text();
     expect(listed).not.toContain('conformance.effect-seam.fire');
   });
 });

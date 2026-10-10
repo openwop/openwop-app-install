@@ -54,7 +54,7 @@ async function api<T = Record<string, unknown>>(path: string, init: RequestInit 
 }
 
 async function createGoalWith(bounds: Record<string, number>, verifierRef: string): Promise<string> {
-  const { status, body } = await api<{ id: string }>('/v1/host/openwop-app/goals', {
+  const { status, body } = await api<{ id: string }>('/host/openwop-app/goals', {
     method: 'POST',
     body: JSON.stringify({
       objective: 'Bounded objective',
@@ -69,12 +69,12 @@ async function createGoalWith(bounds: Record<string, number>, verifierRef: strin
 
 const evaluate = (id: string, hash: string) =>
   api<{ goal: { state: string; progress: { iterations: number } }; replayed: boolean }>(
-    `/v1/host/openwop-app/goals/${id}/evaluate`,
+    `/host/openwop-app/goals/${id}/evaluate`,
     { method: 'POST', body: JSON.stringify({ snapshotRef: `ev:${hash}`, snapshotHash: hash }) },
   );
 
 const bindRun = (id: string, runId: string, costUsd?: number) =>
-  api<{ state: string }>(`/v1/host/openwop-app/goals/${id}/runs`, {
+  api<{ state: string }>(`/host/openwop-app/goals/${id}/runs`, {
     method: 'POST',
     body: JSON.stringify({ runId, ...(costUsd !== undefined ? { costUsd } : {}) }),
   });
@@ -115,7 +115,7 @@ describe('iterations bound', () => {
     await evaluate(id, 'same');
     const replayed = await evaluate(id, 'same');
     expect(replayed.body.replayed).toBe(true);
-    const { body } = await api<{ progress: { iterations: number } }>(`/v1/host/openwop-app/goals/${id}`);
+    const { body } = await api<{ progress: { iterations: number } }>(`/host/openwop-app/goals/${id}`);
     expect(body.progress.iterations).toBe(1);
   });
 });
@@ -132,7 +132,7 @@ describe('wall-clock bound', () => {
     const { status } = await evaluate(id, 'h1');
     expect(status).toBe(409);
     expect(calls).toBe(0);
-    const g = await api<{ state: string }>(`/v1/host/openwop-app/goals/${id}`);
+    const g = await api<{ state: string }>(`/host/openwop-app/goals/${id}`);
     expect(g.body.state).toBe('bound-exceeded');
   });
 });

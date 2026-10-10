@@ -24,7 +24,7 @@ import {
   OrgProgramNotFoundError,
 } from './orgProgramService.js';
 
-export const KICKTODO_ORG_PREFIX = '/v1/host/openwop-app/kicktodo/org-programs';
+export const KICKTODO_ORG_PREFIX = '/host/openwop-app/kicktodo/org-programs';
 
 const FEATURE = { toggleId: 'kicktodo-organizations', label: 'KickTodo Organizations' };
 

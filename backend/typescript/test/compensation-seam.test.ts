@@ -19,6 +19,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
+import { bareRunId } from './support/bareRunId.js';
 import { _resetCompensationLedgerForTest } from '../src/host/compensationLedger.js';
 import { __resetCompensationSeamForTest } from '../src/routes/compensationSeam.js';
 
@@ -30,7 +31,7 @@ beforeAll(async () => {
   process.env.OPENWOP_TEST_SEAM_ENABLED = 'true';
   // A cross-tenant operator key, which is exactly what the conformance harness
   // carries. Without it every request lands on its own anonymous tenant, so the
-  // seam's run and the follow-up `GET /v1/runs/{runId}` would be scoped to
+  // seam's run and the follow-up `GET /runs/{runId}` would be scoped to
   // DIFFERENT tenants and the read would 404 — a false red that says nothing
   // about compensation.
   process.env.OPENWOP_API_KEYS = 'seam-operator-key:*';
@@ -66,10 +67,12 @@ interface UnwindBody {
   compensatedOrder?: number[];
 }
 
-const AUTH = { authorization: 'Bearer seam-operator-key' } as const;
+// ADR 0812 — major 2 named explicitly, so the seam's projection (tenant-bound ids,
+// hyphenated v2 event types) is the same whichever way the header-less default falls.
+const AUTH = { authorization: 'Bearer seam-operator-key', 'OpenWOP-Version': '2' } as const;
 
 async function unwind(nodes?: number): Promise<UnwindBody> {
-  const res = await fetch(`${BASE}/v1/host/sample/test/compensation/unwind`, {
+  const res = await fetch(`${BASE}/host/sample/test/compensation/unwind`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', ...AUTH },
     body: JSON.stringify(nodes === undefined ? {} : { nodes }),
@@ -89,7 +92,7 @@ describe('host-sample-test-seams.md §21 — the compensation unwind seam', () =
 
   it('drives the REAL executor: the run fails forward AND unwinds', async () => {
     const body = await unwind(3);
-    const snap = await fetch(`${BASE}/v1/runs/${encodeURIComponent(body.runId!)}?tenantId=default`, { headers: AUTH });
+    const snap = await fetch(`${BASE}/runs/${encodeURIComponent(body.runId!)}?tenantId=default`, { headers: AUTH });
     expect(snap.status).toBe(200);
     const run = (await snap.json()) as { status?: string };
     // RFC 0151 §D — the FORWARD status is untouched. There is deliberately no
@@ -123,7 +126,7 @@ describe('host-sample-test-seams.md §21 — the compensation unwind seam', () =
     const types = (body.events ?? []).map((e) => e.type);
     expect(types).toContain('compensation.completed');
     expect(types).not.toContain('compensation.failed');
-    expect(types).not.toContain('compensation.manual_intervention_required');
+    expect(types).not.toContain('compensation.manual-intervention-required');
   });
 
   it('event payloads are content-free — no credentials, no provider bodies', async () => {
@@ -174,14 +177,14 @@ describe('host-sample-test-seams.md §21 — the compensation unwind seam', () =
   // seam ignored `fail:false` and fired the trigger anyway, so the leg's
   // positive control recorded `blocked` instead of asserting anything.
   it('`fail: false` runs the SAME compensator-declaring workflow to completion', async () => {
-    const res = await fetch(`${BASE}/v1/host/sample/test/compensation/unwind`, {
+    const res = await fetch(`${BASE}/host/sample/test/compensation/unwind`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...AUTH },
       body: JSON.stringify({ nodes: 2, fail: false }),
     });
     expect(res.status).toBe(200);
     const body = (await res.json()) as UnwindBody;
-    const run = await fetch(`${BASE}/v1/runs/${body.runId}`, { headers: AUTH });
+    const run = await fetch(`${BASE}/runs/${encodeURIComponent(body.runId!)}`, { headers: AUTH });
     expect(((await run.json()) as { status?: string }).status).toBe('completed');
     // No unwind happened, so no compensation events and nothing compensated.
     expect(body.events ?? []).toEqual([]);
@@ -200,7 +203,7 @@ describe('host-sample-test-seams.md §21 — the compensation unwind seam', () =
     // `"false"` is truthy: a coercing seam would run the FAILING workflow and
     // the healthy leg would assert `none` about a run that unwound — a pass
     // for the wrong reason, which is worse than a refusal.
-    const res = await fetch(`${BASE}/v1/host/sample/test/compensation/unwind`, {
+    const res = await fetch(`${BASE}/host/sample/test/compensation/unwind`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...AUTH },
       body: JSON.stringify({ nodes: 2, fail: 'false' }),
@@ -210,7 +213,7 @@ describe('host-sample-test-seams.md §21 — the compensation unwind seam', () =
 
   it('rejects a node count outside 1..8 rather than silently clamping', async () => {
     for (const nodes of [0, 9]) {
-      const res = await fetch(`${BASE}/v1/host/sample/test/compensation/unwind`, {
+      const res = await fetch(`${BASE}/host/sample/test/compensation/unwind`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', ...AUTH },
         body: JSON.stringify({ nodes }),
@@ -222,7 +225,7 @@ describe('host-sample-test-seams.md §21 — the compensation unwind seam', () =
 
 describe('host-sample-test-seams.md §21 — the replay seam (RFC 0151 §F)', () => {
   it('replaying a run that already unwound re-fires NOTHING', async () => {
-    const res = await fetch(`${BASE}/v1/host/sample/test/compensation/replay`, {
+    const res = await fetch(`${BASE}/host/sample/test/compensation/replay`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...AUTH },
       body: '{}',
@@ -247,14 +250,14 @@ describe('host-sample-test-seams.md §21 — the replay seam (RFC 0151 §F)', ()
     //   3. ADR 0531's `assertEffectAllowed`, which fails an inverse effect
     //      closed during a replay.
     // Each is asserted somewhere it is the ONLY fence standing.
-    const res = await fetch(`${BASE}/v1/host/sample/test/compensation/replay`, {
+    const res = await fetch(`${BASE}/host/sample/test/compensation/replay`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...AUTH },
       body: '{}',
     });
     const body = (await res.json()) as { runId?: string };
     const { obligationsForRunTree } = await import('../src/host/compensationLedger.js');
-    expect(await obligationsForRunTree('default', body.runId!)).toHaveLength(0);
+    expect(await obligationsForRunTree('default', bareRunId(body.runId!))).toHaveLength(0);
   });
 
   it('reports the SOURCE run\'s recorded plan as `replayed` — §F is "uses recorded outcomes", not "has none"', async () => {
@@ -270,7 +273,7 @@ describe('host-sample-test-seams.md §21 — the replay seam (RFC 0151 §F)', ()
     // regressed to reading the replay's own tree, `replayed` would come back
     // EMPTY and this fails — where a laxer assertion would compare two empty
     // arrays and pass.
-    const res = await fetch(`${BASE}/v1/host/sample/test/compensation/replay`, {
+    const res = await fetch(`${BASE}/host/sample/test/compensation/replay`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...AUTH },
       body: '{}',
@@ -292,7 +295,7 @@ describe('host-sample-test-seams.md §21 — the replay seam (RFC 0151 §F)', ()
     // §C's rule made observable: three attempts, ONE downstream key. The keys
     // are recorded by the fake downstream, not reported by the host, so a host
     // that presented a different key per attempt cannot hide it here.
-    const res = await fetch(`${BASE}/v1/host/sample/test/compensation/unwind`, {
+    const res = await fetch(`${BASE}/host/sample/test/compensation/unwind`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...AUTH },
       body: JSON.stringify({ nodes: 2, failFirstInverseAttempts: 2 }),
@@ -310,14 +313,15 @@ describe('host-sample-test-seams.md §21 — the replay seam (RFC 0151 §F)', ()
       new Set(first!.downstreamKeys).size,
       'a second key at the downstream is a second obligation — two refunds',
     ).toBe(1);
-    expect(first!.downstreamKeys[0]).toBe(first!.effectId);
+    // The downstream sees the stored key; the v2 report binds it to the tenant.
+    expect(first!.effectId).toBe(`default/${first!.downstreamKeys[0]}`);
     // ...and exactly one plan entry per forward ordinal: no duplicate obligations.
     const ordinals = (body.inverseActions ?? []).map((a) => a.ordinal);
     expect(new Set(ordinals).size).toBe(ordinals.length);
   });
 
   it('`hold: true` leaves a HELD plan the snapshot reports as `manual`', async () => {
-    const res = await fetch(`${BASE}/v1/host/sample/test/compensation/unwind`, {
+    const res = await fetch(`${BASE}/host/sample/test/compensation/unwind`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...AUTH },
       body: JSON.stringify({ nodes: 2, hold: true }),
@@ -327,9 +331,9 @@ describe('host-sample-test-seams.md §21 — the replay seam (RFC 0151 §F)', ()
       events?: Array<{ type: string }>;
       inverseActions?: Array<{ outcome: string }>;
     };
-    expect((body.events ?? []).some((e) => e.type === 'compensation.manual_intervention_required')).toBe(true);
+    expect((body.events ?? []).some((e) => e.type === 'compensation.manual-intervention-required')).toBe(true);
     expect((body.inverseActions ?? []).some((a) => a.outcome === 'held')).toBe(true);
-    const snap = await fetch(`${BASE}/v1/runs/${encodeURIComponent(body.runId!)}`, { headers: AUTH });
+    const snap = await fetch(`${BASE}/runs/${encodeURIComponent(body.runId!)}`, { headers: AUTH });
     expect((await snap.json() as { compensationStatus?: string }).compensationStatus).toBe('manual');
   });
 });
@@ -347,19 +351,20 @@ describe('host-sample-test-seams.md §21 — the replay seam (RFC 0151 §F)', ()
  * legs were paired in the first place.
  */
 describe('ADR 0554 wire flip — the behaviour ships AND the advert does, as a pair', () => {
-  it('advertises capabilities.compensation, with the shape §A closes', async () => {
-    const res = await fetch(`${BASE}/.well-known/openwop`);
-    const caps = (await res.json()) as { capabilities?: Record<string, unknown> };
-    const comp = caps.capabilities?.['compensation'] as Record<string, unknown> | undefined;
+  it('advertises the v2 compensation family, with the shape §A closes', async () => {
+    // ADR 0812 — the v2 root's `compensation` record; presence is the claim (no `supported`).
+    const res = await fetch(`${BASE}/.well-known/openwop`, { headers: { 'OpenWOP-Version': '2' } });
+    const caps = (await res.json()) as Record<string, unknown>;
+    const comp = caps['compensation'] as Record<string, unknown> | undefined;
     expect(comp, 'the advert is the claim — the seam being wired never was').toBeDefined();
-    expect(comp!['supported']).toBe(true);
+    expect(comp!['status']).toBe('experimental');
     // §A: an advertising host MUST implement `reverse-completion`, and this seam
     // suite is the witness that it does — the legs above drive the REAL executor
     // and read the order the inverse actions actually ran in.
     expect(comp!['orderingModels']).toEqual(['reverse-completion']);
     // The closed object, so a host-private key cannot ride along on the advert.
     expect(Object.keys(comp!).sort()).toEqual(
-      ['manualIntervention', 'orderingModels', 'profileVersion', 'supported'],
+      ['manualIntervention', 'orderingModels', 'profileVersion', 'since', 'status', 'until', 'witness'],
     );
   });
 
@@ -370,7 +375,7 @@ describe('ADR 0554 wire flip — the behaviour ships AND the advert does, as a p
     // `status` stays `failed`, which §D calls the normal successful outcome of a
     // compensation and the reason the two fields are separate.
     const body = await unwind();
-    const snap = await fetch(`${BASE}/v1/runs/${encodeURIComponent(body.runId!)}`, { headers: AUTH });
+    const snap = await fetch(`${BASE}/runs/${encodeURIComponent(body.runId!)}`, { headers: AUTH });
     const run = (await snap.json()) as Record<string, unknown>;
     expect(run['compensationStatus']).toBe('completed');
     expect(run['status'], 'RFC 0151 forbids reinterpreting the forward status').toBe('failed');

@@ -22,7 +22,17 @@ export const consentFeature: BackendFeature = {
   },
   // Face 2 (ADR 0014): `ctx.features.consent` — the same isAllowed/record helper,
   // exposed to workflow nodes (single enforcement path).
-  surface: { id: 'consent', build: buildConsentSurface },
+  //
+  // ADR 0849 D2 — `record` writes a subject's consent on their behalf, which no HTTP door
+  // lets a non-admin do, so the run's PERSON — its actor, else the member who caused it
+  // (kanban Run, a canvas invoke, an armed trigger, an approval) — must hold the DSAR /
+  // regime authority. No person (a system job) ⇒ no check, as on every floor. Corrected
+  // by grade-code CN2CD-1: an actor-lane-only exemption let every cause-lane run through.
+  surface: {
+    id: 'consent',
+    build: buildConsentSurface,
+    orgPolicy: { tenantMethodScopes: { record: 'host:members:manage' } },
+  },
   toggleDefault: {
     id: 'consent',
     label: 'Consent',
@@ -42,5 +52,5 @@ export const consentFeature: BackendFeature = {
   // registry install TARGET when the pack is absent from disk, so it MUST move
   // in the same commit as `pack.json`: a bumped pack.json against a stale pin
   // fetches the OLD content under the new version.
-  requiredPacks: [{ name: 'feature.consent.nodes', version: '1.2.0' }],
+  requiredPacks: [{ name: 'feature.consent.nodes', version: '1.2.1' }],
 };

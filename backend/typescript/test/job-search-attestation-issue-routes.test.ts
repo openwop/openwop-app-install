@@ -15,13 +15,13 @@ import { createApp } from '../src/index.js';
 import { enableTenantOverride } from '../src/host/featureToggles/service.js';
 import { createApplyGrant, consumeSubmit } from '../src/host/applyGrant.js';
 
-const BASE_PATH = '/v1/host/openwop-app/job-search';
+const BASE_PATH = '/host/openwop-app/job-search';
 
 let server: Server;
 let BASE: string;
 
 async function login(email: string, tenantId?: string): Promise<{ cookie: string; orgId: string; tenantId: string; userId: string }> {
-  const res = await fetch(`${BASE}/v1/host/openwop-app/test/login`, {
+  const res = await fetch(`${BASE}/host/openwop-app/test/login`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify(tenantId ? { email, tenantId } : { email }),
   });
@@ -29,8 +29,8 @@ async function login(email: string, tenantId?: string): Promise<{ cookie: string
   const cookie = (res.headers.getSetCookie?.() ?? []).map((c) => c.split(';')[0]).join('; ');
   const body = (await res.json()) as { tenantId?: string; user?: { tenantId?: string; userId?: string } };
   void tenantId;
-  const orgs = await (await fetch(`${BASE}/v1/host/openwop-app/orgs`, { headers: { cookie } })).json() as { orgs?: Array<{ orgId: string }> };
-  const me = await (await fetch(`${BASE}/v1/host/openwop-app/me`, { headers: { cookie } })).json() as { user?: { userId?: string } };
+  const orgs = await (await fetch(`${BASE}/host/openwop-app/orgs`, { headers: { cookie } })).json() as { orgs?: Array<{ orgId: string }> };
+  const me = await (await fetch(`${BASE}/host/openwop-app/me`, { headers: { cookie } })).json() as { user?: { userId?: string } };
   return {
     cookie,
     orgId: orgs.orgs?.[0]?.orgId ?? '',
@@ -96,7 +96,7 @@ describe('ADR 0544 P4 — issuance at the HTTP boundary', () => {
     });
     expect(res.status).toBe(201);
     const { token } = (await res.json()) as { token: string };
-    const view = await (await fetch(`${BASE}/v1/host/openwop-app/public-attestations/${token}`)).text();
+    const view = await (await fetch(`${BASE}/host/openwop-app/public-attestations/${token}`)).text();
     expect(view).not.toContain('camp-somebody-elses');
   });
 

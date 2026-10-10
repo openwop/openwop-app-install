@@ -19,13 +19,13 @@ export const campaignConnectorsFeature: BackendFeature = {
   registerRoutes: (deps) => registerCampaignConnectorsRoutes(deps),
   surface: { id: 'campaign-connectors', build: buildCampaignConnectorsSurface },
   requiredPacks: [
-    { name: 'feature.campaign-connectors.nodes', version: '1.2.0' },
+    { name: 'feature.campaign-connectors.nodes', version: '1.2.1' },
   ],
   toggleDefault: {
     id: 'campaign-connectors',
     label: 'Campaign Connectors & Performance',
     description:
-      'Bring real ad-performance data into Campaign Studio — import platform CSV exports (Google / Meta / LinkedIn and more) onto a unified metric schema (spend, impressions, clicks, conversions, ROAS) with dedup + computed fields, and see KPI rollups per platform. Live OAuth sync (Google / Meta / LinkedIn Ads) is honest-off until the connector is brokered. OFF by default.',
+      'Bring real ad-performance data into Campaign Studio — import platform CSV exports (Google / Meta / LinkedIn and more) onto a unified metric schema (spend, impressions, clicks, conversions, ROAS) with dedup + computed fields, and see KPI rollups per platform. Live OAuth sync (Google / Meta / LinkedIn Ads) is honest-off until the connector is brokered.',
     category: 'Marketing',
     status: 'off',
     bucketUnit: 'tenant',

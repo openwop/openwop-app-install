@@ -2,21 +2,22 @@
  * Agents-demo experience — backend foundations (PRD Phase 0).
  *
  * Covers the new host-extension surfaces that back the "AI coworkers" UX:
- *   - POST /v1/host/openwop-app/example-data/seed seeds the registered demo domains
+ *   - POST /host/openwop-app/example-data/seed seeds the registered demo domains
  *     idempotently (no-op on re-run; never clobbers an existing roster)
  *   - seeded boards carry source-tagged cards; the To Do column triggers the
  *     agent's first portfolio workflow
- *   - POST /v1/host/openwop-app/roster/:id/check (heartbeat) claims the first To Do
+ *   - POST /host/openwop-app/roster/:id/check (heartbeat) claims the first To Do
  *     card, starts a run, and moves the card to Working
  *   - scheduler jobs are durable + tenant-scoped + roster-filterable, and a
  *     :trigger on a workflow-bearing job starts a real run
- *   - PATCH /v1/host/openwop-app/agents/:id edits a user-authored agent's instructions
+ *   - PATCH /host/openwop-app/agents/:id edits a user-authored agent's instructions
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
+import { toWireRunId } from '../src/host/v2Ids.js';
 import { getAgentRegistry } from '../src/executor/agentRegistry.js';
 
 let server: http.Server;
@@ -47,6 +48,7 @@ async function api<T = unknown>(path: string, init: RequestInit = {}): Promise<{
     headers: {
       'content-type': 'application/json',
       authorization: `Bearer ${TOKEN}`,
+      'OpenWOP-Version': '2',
       ...(init.headers ?? {}),
     },
   });
@@ -64,13 +66,13 @@ interface RosterEntry {
 
 describe('agents-demo backend foundations', () => {
   it('seeds the 10 canonical work-twins (incl. the Chief of Staff) and is idempotent', async () => {
-    const first = await api<{ seeded: boolean; agents: number; domains: string[] }>('/v1/host/openwop-app/example-data/seed', { method: 'POST', body: '{}' });
+    const first = await api<{ seeded: boolean; agents: number; domains: string[] }>('/host/openwop-app/example-data/seed', { method: 'POST', body: '{}' });
     expect(first.status).toBe(200);
     expect(first.body.seeded).toBe(true);
     expect(first.body.agents).toBe(10); // 8 twins + Iris + Executive Operations (ADR 0032)
     expect(first.body.domains).toEqual(['user-agents', 'roster', 'workflows', 'boards', 'cards', 'schedules', 'org-chart']);
 
-    const roster = await api<{ roster: RosterEntry[] }>('/v1/host/openwop-app/roster');
+    const roster = await api<{ roster: RosterEntry[] }>('/host/openwop-app/roster');
     expect(roster.body.roster.length).toBe(10);
     expect(roster.body.roster.map((r) => r.persona)).toContain('Ava'); // Sales Execution Twin
 
@@ -88,22 +90,22 @@ describe('agents-demo backend foundations', () => {
     expect(iris.roleKey).toBe('chief-of-staff');
 
     // Re-seed is a no-op (does not clobber the existing roster).
-    const second = await api<{ seeded: boolean; domains: string[] }>('/v1/host/openwop-app/example-data/seed', { method: 'POST', body: '{}' });
+    const second = await api<{ seeded: boolean; domains: string[] }>('/host/openwop-app/example-data/seed', { method: 'POST', body: '{}' });
     expect(second.body.seeded).toBe(false);
     expect(second.body.domains).toEqual(['user-agents', 'roster', 'workflows', 'boards', 'cards', 'schedules', 'org-chart']);
-    const rosterAgain = await api<{ roster: RosterEntry[] }>('/v1/host/openwop-app/roster');
+    const rosterAgain = await api<{ roster: RosterEntry[] }>('/host/openwop-app/roster');
     expect(rosterAgain.body.roster.length).toBe(10);
   });
 
   it('registers each seeded persona as a chat-callable inventory agent (so @Idris works in chat)', async () => {
-    // The chat `@`-mention list is fed by GET /v1/agents (RFC 0072); before this
+    // The chat `@`-mention list is fed by GET /agents (RFC 0072); before this
     // wiring the personas existed ONLY as roster entries (a synthetic
     // attribution-only agentRef) and were unreachable from chat. The seed now
     // registers each as a tenant-owned user-agent with the persona's authored
     // systemPrompt, so it surfaces in the inventory and the chat-responder can
     // resolve inputs.agentId → systemPrompt (gated by ownerTenant).
     const inv = await api<{ agents: Array<{ agentId: string; persona: string; modelClass: string; packName: string }> }>(
-      '/v1/agents',
+      '/agents',
     );
     expect(inv.status).toBe(200);
     const personas = inv.body.agents.map((a) => a.persona);
@@ -119,13 +121,13 @@ describe('agents-demo backend foundations', () => {
   });
 
   it('seeded board has source-tagged cards under a triggering To Do column', async () => {
-    const roster = await api<{ roster: RosterEntry[] }>('/v1/host/openwop-app/roster');
+    const roster = await api<{ roster: RosterEntry[] }>('/host/openwop-app/roster');
     const idris = roster.body.roster.find((r) => r.roleKey === 'it-service-desk')!;
     // Work-twin portfolios bind the pinned template pack (ADR 0032 Phase 2.0).
     expect(idris.workflows[0]).toBe('tmpl.it.incident-triage');
 
     const boards = await api<{ boards: Array<{ id: string; rosterId?: string; columns: Array<{ id: string; triggerWorkflowId?: string }> }> }>(
-      '/v1/host/openwop-app/kanban/boards',
+      '/host/openwop-app/kanban/boards',
     );
     const board = boards.body.boards.find((b) => b.rosterId === idris.rosterId)!;
     expect(board).toBeTruthy();
@@ -133,7 +135,7 @@ describe('agents-demo backend foundations', () => {
     expect(todo.triggerWorkflowId).toBe('tmpl.it.incident-triage');
 
     const detail = await api<{ cards: Array<{ source?: string; sourceLabel?: string; columnId: string }> }>(
-      `/v1/host/openwop-app/kanban/boards/${board.id}`,
+      `/host/openwop-app/kanban/boards/${board.id}`,
     );
     expect(detail.body.cards.length).toBeGreaterThan(0);
     expect(detail.body.cards.some((c) => c.source === 'schedule')).toBe(true);
@@ -141,7 +143,7 @@ describe('agents-demo backend foundations', () => {
     // ?include=cards returns every board WITH its cards in one request (the
     // dashboard batch path — no N+1 getBoard).
     const batched = await api<{ boards: Array<{ id: string; rosterId?: string; cards: Array<{ source?: string }> }> }>(
-      '/v1/host/openwop-app/kanban/boards?include=cards',
+      '/host/openwop-app/kanban/boards?include=cards',
     );
     expect(batched.status).toBe(200);
     const idrisBoard = batched.body.boards.find((b) => b.rosterId === idris.rosterId)!;
@@ -150,7 +152,7 @@ describe('agents-demo backend foundations', () => {
   });
 
   it('heartbeat check claims a To Do card, starts a run, and moves it to Working', async () => {
-    const roster = await api<{ roster: RosterEntry[] }>('/v1/host/openwop-app/roster');
+    const roster = await api<{ roster: RosterEntry[] }>('/host/openwop-app/roster');
     // Idris (IT Service Desk) is `guided`, and its first To Do card is routine
     // (normal priority), so the heartbeat RUNS it rather than proposing — the
     // demoable autonomous path. Its trigger workflow is a draft-only template
@@ -158,7 +160,7 @@ describe('agents-demo backend foundations', () => {
     const idris = roster.body.roster.find((r) => r.roleKey === 'it-service-desk')!;
 
     const checked = await api<{ picked: boolean; cardId: string; runId: string; lastHeartbeatAt?: string }>(
-      `/v1/host/openwop-app/roster/${idris.rosterId}/check`,
+      `/host/openwop-app/roster/${idris.rosterId}/check`,
       { method: 'POST', body: '{}' },
     );
     expect(checked.status).toBe(200);
@@ -166,7 +168,7 @@ describe('agents-demo backend foundations', () => {
     expect(typeof checked.body.runId).toBe('string');
     // The heartbeat stamps "last checked" on the entry + returns it.
     expect(typeof checked.body.lastHeartbeatAt).toBe('string');
-    const afterCheck = await api<RosterEntry & { lastHeartbeatAt?: string }>(`/v1/host/openwop-app/roster/${idris.rosterId}`);
+    const afterCheck = await api<RosterEntry & { lastHeartbeatAt?: string }>(`/host/openwop-app/roster/${idris.rosterId}`);
     expect(afterCheck.status).toBe(200);
     expect(afterCheck.body.lastHeartbeatAt).toBe(checked.body.lastHeartbeatAt);
 
@@ -176,7 +178,8 @@ describe('agents-demo backend foundations', () => {
     // so poll until terminal.
     let status = 'pending';
     for (let i = 0; i < 50 && status !== 'completed' && status !== 'failed'; i++) {
-      const run = await api<{ status: string }>(`/v1/runs/${checked.body.runId}`);
+      // The heartbeat answers the bare run id; a major-2 run read takes it bound (`dev-token` acts in `default`).
+      const run = await api<{ status: string }>(`/runs/${encodeURIComponent(toWireRunId(checked.body.runId, 'default'))}`);
       expect(run.status).toBe(200);
       status = run.body.status;
       if (status === 'completed' || status === 'failed') break;
@@ -185,9 +188,9 @@ describe('agents-demo backend foundations', () => {
     expect(status).toBe('completed');
 
     // The card moved out of To Do (into Working).
-    const boards = await api<{ boards: Array<{ id: string; rosterId?: string }> }>('/v1/host/openwop-app/kanban/boards');
+    const boards = await api<{ boards: Array<{ id: string; rosterId?: string }> }>('/host/openwop-app/kanban/boards');
     const board = boards.body.boards.find((b) => b.rosterId === idris.rosterId)!;
-    const detail = await api<{ cards: Array<{ id: string; columnId: string }> }>(`/v1/host/openwop-app/kanban/boards/${board.id}`);
+    const detail = await api<{ cards: Array<{ id: string; columnId: string }> }>(`/host/openwop-app/kanban/boards/${board.id}`);
     const movedCard = detail.body.cards.find((c) => c.id === checked.body.cardId)!;
     expect(movedCard.columnId).toBe('working');
 
@@ -198,7 +201,7 @@ describe('agents-demo backend foundations', () => {
         runId: string; status: string; source: string; timestamp: string;
         createdAt?: string; completedAt?: string; durationMs?: number; causationId?: string;
       }>;
-    }>(`/v1/host/openwop-app/roster/${idris.rosterId}/activity`);
+    }>(`/host/openwop-app/roster/${idris.rosterId}/activity`);
     expect(activity.status).toBe(200);
     const entry = activity.body.items.find((i) => i.runId === checked.body.runId)!;
     expect(entry).toBeTruthy();
@@ -213,19 +216,19 @@ describe('agents-demo backend foundations', () => {
   });
 
   it('scheduler jobs are durable + roster-filterable, and :trigger starts a run', async () => {
-    const roster = await api<{ roster: RosterEntry[] }>('/v1/host/openwop-app/roster');
+    const roster = await api<{ roster: RosterEntry[] }>('/host/openwop-app/roster');
     const idris = roster.body.roster.find((r) => r.roleKey === 'it-service-desk')!;
 
     // The seed registered Idris's schedules; filter by roster.
     const byRoster = await api<{ jobs: Array<{ jobId: string; rosterId?: string; workflowId?: string }> }>(
-      `/v1/host/openwop-app/scheduler/jobs?rosterId=${encodeURIComponent(idris.rosterId)}`,
+      `/host/openwop-app/scheduler/jobs?rosterId=${encodeURIComponent(idris.rosterId)}`,
     );
     expect(byRoster.body.jobs.length).toBeGreaterThan(0);
     expect(byRoster.body.jobs.every((j) => j.rosterId === idris.rosterId)).toBe(true);
 
     const job = byRoster.body.jobs.find((j) => j.workflowId)!;
     const fired = await api<{ runsFired: number; runId?: string }>(
-      `/v1/host/openwop-app/scheduler/jobs/${encodeURIComponent(job.jobId)}/trigger`,
+      `/host/openwop-app/scheduler/jobs/${encodeURIComponent(job.jobId)}/trigger`,
       { method: 'POST', body: '{}' },
     );
     expect(fired.status).toBe(200);
@@ -234,13 +237,13 @@ describe('agents-demo backend foundations', () => {
   });
 
   it('PATCH edits a user-authored agent’s instructions', async () => {
-    const created = await api<{ agentId: string; systemPrompt?: string }>('/v1/host/openwop-app/agents', {
+    const created = await api<{ agentId: string; systemPrompt?: string }>('/host/openwop-app/agents', {
       method: 'POST',
       body: JSON.stringify({ persona: 'Edith', modelClass: 'chat', systemPrompt: 'You are Edith. Original.' }),
     });
     expect(created.status).toBe(201);
 
-    const patched = await api<{ systemPrompt: string }>(`/v1/host/openwop-app/agents/${created.body.agentId}`, {
+    const patched = await api<{ systemPrompt: string }>(`/host/openwop-app/agents/${created.body.agentId}`, {
       method: 'PATCH',
       body: JSON.stringify({ systemPrompt: 'You are Edith. Updated instructions.' }),
     });
@@ -248,7 +251,7 @@ describe('agents-demo backend foundations', () => {
     expect(patched.body.systemPrompt).toBe('You are Edith. Updated instructions.');
 
     // persona is immutable.
-    const rejected = await api<{ error: string }>(`/v1/host/openwop-app/agents/${created.body.agentId}`, {
+    const rejected = await api<{ error: string }>(`/host/openwop-app/agents/${created.body.agentId}`, {
       method: 'PATCH',
       body: JSON.stringify({ persona: 'Renamed' }),
     });
@@ -261,7 +264,7 @@ describe('agents-demo backend foundations', () => {
     // from the idempotent no-op (`seeded:false, agents:6`).
     process.env.OPENWOP_DEMO_SEED_ENABLED = 'false';
     try {
-      const res = await api<{ seeded: boolean; agents: number }>('/v1/host/openwop-app/example-data/seed', {
+      const res = await api<{ seeded: boolean; agents: number }>('/host/openwop-app/example-data/seed', {
         method: 'POST',
         body: '{}',
       });
@@ -321,14 +324,14 @@ describe('demo seed heal mode — restores missing surfaces (live bug 2026-06-04
 
     // Silent auto-seed shape (no heal): the board MUST stay gone — the auto
     // path must never resurrect a deliberate deletion.
-    const plain = await api<{ seeded: boolean; healed?: unknown }>('/v1/host/openwop-app/example-data/seed', { method: 'POST', body: '{}' });
+    const plain = await api<{ seeded: boolean; healed?: unknown }>('/host/openwop-app/example-data/seed', { method: 'POST', body: '{}' });
     expect(plain.status).toBe(200);
     expect(plain.body.healed).toBeUndefined();
     expect((await listBoardsWithCards('default')).some((b) => b.rosterId === victim.rosterId)).toBe(false);
 
     // Explicit heal: the board comes back, WITH its sample cards.
     const heal = await api<{ seeded: boolean; healed: { boards: number; schedules: number; profiles: number; prunedLegacy: number; orgChart: boolean } }>(
-      '/v1/host/openwop-app/example-data/seed',
+      '/host/openwop-app/example-data/seed',
       { method: 'POST', body: JSON.stringify({ heal: true }) },
     );
     expect(heal.status).toBe(200);
@@ -342,7 +345,7 @@ describe('demo seed heal mode — restores missing surfaces (live bug 2026-06-04
 
     // Heal is idempotent: a second heal finds nothing missing.
     const again = await api<{ healed: { boards: number; schedules: number; profiles: number; prunedLegacy: number; orgChart: boolean } }>(
-      '/v1/host/openwop-app/example-data/seed',
+      '/host/openwop-app/example-data/seed',
       { method: 'POST', body: JSON.stringify({ heal: true }) },
     );
     expect(again.body.healed).toEqual({ boards: 0, schedules: 0, profiles: 0, prunedLegacy: 0, orgChart: false });

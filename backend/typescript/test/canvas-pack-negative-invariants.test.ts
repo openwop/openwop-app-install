@@ -46,8 +46,8 @@ let server: http.Server;
 const TYPE = 'canvas.checklist';
 const REPO_PACK = join(process.cwd(), '..', '..', 'packs', 'community.openwop.canvas-checklist');
 const PACKBASE = (orgId: string): string =>
-  `/v1/host/openwop-app/canvas-packs/${TYPE}/orgs/${encodeURIComponent(orgId)}/canvases`;
-const P = '/v1/host/openwop-app/projects';
+  `/host/openwop-app/canvas-packs/${TYPE}/orgs/${encodeURIComponent(orgId)}/canvases`;
+const P = '/host/openwop-app/projects';
 const validState = (title: string) => ({ title, items: [{ text: 'Milk', done: false, priority: 'high' }] });
 
 let prevPackDir: string | undefined;
@@ -106,8 +106,8 @@ const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.tes
 async function packCanvas(visibility: 'private' | 'org' = 'private') {
   const tenantId = `org:cpkc2-${Date.now()}-${n++}`;
   const owner = client();
-  await owner.post('/v1/host/openwop-app/test/login', { email: uniqEmail('own'), tenantId });
-  const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'PrivCo' })).body.orgId;
+  await owner.post('/host/openwop-app/test/login', { email: uniqEmail('own'), tenantId });
+  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'PrivCo' })).body.orgId;
   const projectId = (await owner.post(P, { orgId, name: 'Secret' })).body.id;
   const canvas = await createCanvasForTenant(tenantId, {
     canvasTypeId: TYPE, name: 'Secret list',
@@ -121,13 +121,13 @@ async function packCanvas(visibility: 'private' | 'org' = 'private') {
 /** A real org VIEWER of the same org who is NOT a project member. */
 async function orgViewer(tenantId: string, orgId: string): Promise<ReturnType<typeof client> & { userId: string }> {
   const viewer = client();
-  const viewerId = (await viewer.post('/v1/host/openwop-app/test/login', { email: uniqEmail('view'), tenantId })).body.user.userId;
+  const viewerId = (await viewer.post('/host/openwop-app/test/login', { email: uniqEmail('view'), tenantId })).body.user.userId;
   await createMember({ tenantId, orgId, subject: viewerId, displayName: 'V', roles: ['viewer'] });
   return Object.assign(viewer, { userId: viewerId as string });
 }
 
 async function mintTicket(c: ReturnType<typeof client>, canvasId: string): Promise<Res> {
-  return c.post(`/v1/host/openwop-app/canvas-collab/${encodeURIComponent(canvasId)}/ticket`);
+  return c.post(`/host/openwop-app/canvas-collab/${encodeURIComponent(canvasId)}/ticket`);
 }
 
 describe('CPKC-2 (a) — a pack canvas type is EXCLUDED from real-time collab', () => {
@@ -142,8 +142,8 @@ describe('CPKC-2 (a) — a pack canvas type is EXCLUDED from real-time collab', 
   it('the collab ticket-mint 404s for a pack canvas EVEN with realtime-collab ON (registry exclusion, not the master toggle)', async () => {
     const tenantId = `org:cpkc2-mint-${Date.now()}-${n++}`;
     const owner = client();
-    await owner.post('/v1/host/openwop-app/test/login', { email: uniqEmail('mint'), tenantId });
-    await owner.post('/v1/host/openwop-app/orgs', { name: 'MintCo' });
+    await owner.post('/host/openwop-app/test/login', { email: uniqEmail('mint'), tenantId });
+    await owner.post('/host/openwop-app/orgs', { name: 'MintCo' });
 
     // POSITIVE CONTROL: the mint route DOES mint for a first-party collab type
     // (canvas.document, registered + document-editor + realtime-collab ON) — so the

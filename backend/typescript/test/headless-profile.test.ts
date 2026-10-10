@@ -24,7 +24,7 @@ import { saveConfig, __clearToggleStore } from '../src/host/featureToggles/servi
 import { voiceFeature } from '../src/features/voice/feature.js';
 import { hostProfile, presentationEnabled, type PresentationCapability } from '../src/host/hostProfile.js';
 
-const H = { authorization: 'Bearer dev-token', 'content-type': 'application/json' };
+const H = { authorization: 'Bearer dev-token', 'content-type': 'application/json', 'OpenWOP-Version': '2' };
 const CAPS: PresentationCapability[] = ['uiPlugins', 'realtimeVoice', 'chatWidget'];
 
 describe('ADR 0168 — presentationEnabled gate (unit)', () => {
@@ -88,11 +88,13 @@ const discover = async (base: string): Promise<Advert> => (await (await fetch(`$
 const status = (base: string, method: string, path: string) =>
   fetch(`${base}${path}`, { method, headers: H, ...(method === 'POST' ? { body: '{}' } : {}) }).then((r) => r.status);
 
-// uiPlugins RPC → 400 for a bad body when mounted (cleanly ≠ 404). voice/session →
+// uiPlugins → the isolation probe is 200 when presented and 404 under headless (ADR 0840
+// D7 deleted the host-global RPC this used to probe; the per-plugin RPC 404s for an
+// unknown plugin even when mounted, so it is no mount signal). voice/session →
 // non-404 when mounted+toggle-on. (The widget public gateway is uniform-404 by design,
 // so it has no clean HTTP mount signal — covered by the unit gate test above.)
-const UIPLUGIN_RPC = '/v1/host/openwop-app/ui-plugin/rpc';
-const VOICE_SESSION = '/v1/host/openwop-app/voice/session';
+const UIPLUGIN_PROBE = '/host/openwop-app/ui-plugin/isolation-probe';
+const VOICE_SESSION = '/host/openwop-app/voice/session';
 
 describe('ADR 0168 — full profile (default) presents uiPlugins + realtimeVoice', () => {
   let base: string; let server: http.Server;
@@ -102,12 +104,13 @@ describe('ADR 0168 — full profile (default) presents uiPlugins + realtimeVoice
   it('advertises uiPlugins + realtimeVoice (and non-presentational surfaces unaffected)', async () => {
     const d = await discover(base);
     expect(d.uiPlugins, 'uiPlugins advertised at the discovery root').toBeTruthy();
-    expect(d.aiProviders?.realtimeVoice ?? d.realtimeVoice, 'realtimeVoice advertised').toBeTruthy();
+    // ADR 0812 P3c-0 — the v1 `realtimeVoice` advert retired with major 1 (the v2
+    // `aiProviders` record has no such facet); the voice-session mount leg below witnesses it.
     expect(d.agents, 'agents capability unaffected by profile').toBeTruthy();
   });
 
   it('mounts the uiPlugins RPC + voice routes (non-404)', async () => {
-    expect(await status(base, 'POST', UIPLUGIN_RPC), 'ui-plugin RPC mounted').not.toBe(404);
+    expect(await status(base, 'GET', UIPLUGIN_PROBE), 'ui-plugin surface presented').toBe(200);
     expect(await status(base, 'POST', VOICE_SESSION), 'voice session mounted (toggle on)').not.toBe(404);
   });
 });
@@ -126,7 +129,7 @@ describe('ADR 0168 — headless profile withholds advert + unmounts routes', () 
   });
 
   it('unmounts the uiPlugins RPC + voice routes (404 even with the voice toggle ON)', async () => {
-    expect(await status(base, 'POST', UIPLUGIN_RPC), 'ui-plugin RPC unmounted').toBe(404);
+    expect(await status(base, 'GET', UIPLUGIN_PROBE), 'ui-plugin surface withheld').toBe(404);
     expect(await status(base, 'POST', VOICE_SESSION), 'voice session unmounted despite toggle on').toBe(404);
   });
 });
@@ -140,7 +143,7 @@ describe('ADR 0168 — per-capability override wins over the profile (integratio
     const d = await discover(base);
     expect(d.uiPlugins, 'override re-presents uiPlugins advert').toBeTruthy();
     expect(d.aiProviders?.realtimeVoice, 'realtimeVoice still withheld').toBeUndefined();
-    expect(await status(base, 'POST', UIPLUGIN_RPC), 'override re-mounts ui-plugin RPC').not.toBe(404);
+    expect(await status(base, 'GET', UIPLUGIN_PROBE), 'override re-presents the ui-plugin surface').toBe(200);
     expect(await status(base, 'POST', VOICE_SESSION), 'voice still unmounted').toBe(404);
   });
 });

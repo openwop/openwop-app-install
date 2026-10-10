@@ -23,7 +23,7 @@ import type { Express, Request, Response } from 'express';
 import { expandChain, isChainExpansionSeamServable, loadChainSamplePack } from '../host/workflowChainPackLoader.js';
 import { sendError } from '../middleware/errorEnvelope.js';
 
-const SEAM_PATH = '/v1/host/sample/workflow-chain:expand';
+const SEAM_PATH = '/host/sample/workflow-chain:expand';
 
 /** The resolver lives in host/workflowChainPackLoader.ts: the ADVERTISEMENT
  *  consults it too, and this module already imports that one. ONE function, so

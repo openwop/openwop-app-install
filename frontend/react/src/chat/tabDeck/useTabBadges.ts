@@ -17,7 +17,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ChatMessage } from '../types.js';
 
-export interface TabBadge { unread: boolean; blocked: boolean; }
+/** `running` (ADR 0768 P3) is OPTIONAL and only ever present as `true`, so every
+ *  pre-existing badge value (and the tests that pin them) is unchanged. */
+export interface TabBadge { unread: boolean; blocked: boolean; running?: true }
 export const NO_BADGE: TabBadge = { unread: false, blocked: false };
 
 /**
@@ -32,17 +34,21 @@ export const NO_BADGE: TabBadge = { unread: false, blocked: false };
 export function deriveActivity(
   messages: readonly ChatMessage[],
   isSending: boolean,
-): { lastInboundId: string | null; blocked: boolean } {
+): { lastInboundId: string | null; blocked: boolean; running: boolean } {
   let lastInboundId: string | null = null;
   let blocked = false;
+  // ADR 0768 P3 — a turn in flight, or a workflow run not yet settled.
+  let running = isSending;
   for (let i = 0; i < messages.length; i++) {
     const m = messages[i]!;
     const inbound = m.role !== 'user' && m.role !== 'system';
     const inFlight = isSending && i === messages.length - 1; // the streaming bubble
     if (inbound && !inFlight) lastInboundId = m.id;
     if ((m.activeInterrupts?.length ?? 0) > 0) blocked = true;
+    const st = m.workflowRun?.status;
+    if (st === 'running' || st === 'pending') running = true;
   }
-  return { lastInboundId, blocked };
+  return { lastInboundId, blocked, running };
 }
 
 /** Pure badge computation — active short-circuits first, blocked outranks unread. */
@@ -51,16 +57,20 @@ export function computeTabBadge(
   lastInboundId: string | null,
   seenInboundId: string | null,
   blocked: boolean,
+  running = false,
 ): TabBadge {
   if (active) return NO_BADGE; // visible inline — never badge the active tab
   if (blocked) return { unread: false, blocked: true };
+  // Running outranks unread: the reply is still arriving. Never announced — it is a
+  // state, not an arrival; the `unread` rising edge fires when it settles.
+  if (running) return { unread: false, blocked: false, running: true };
   return { unread: lastInboundId !== null && lastInboundId !== seenInboundId, blocked: false };
 }
 
 export interface UseTabBadgesResult {
   statusFor: (sessionId: string) => TabBadge;
   /** Stable — a TabSession reports its latest finalized inbound message id + blocked. */
-  reportActivity: (sessionId: string, lastInboundId: string | null, blocked: boolean) => void;
+  reportActivity: (sessionId: string, lastInboundId: string | null, blocked: boolean, running?: boolean) => void;
 }
 
 /**
@@ -81,6 +91,7 @@ export function useTabBadges(
   const [status, setStatus] = useState<Record<string, TabBadge>>({});
   const lastInbound = useRef(new Map<string, string | null>());
   const lastBlocked = useRef(new Map<string, boolean>());
+  const lastRunning = useRef(new Map<string, boolean>());
   const seenInbound = useRef(new Map<string, string | null>());
   const shownBadge = useRef(new Map<string, TabBadge>()); // last badge set per sid (blocked rising-edge basis)
   const announcedInbound = useRef(new Map<string, string | null>()); // last inbound id baselined/announced per sid
@@ -95,12 +106,12 @@ export function useTabBadges(
     shownBadge.current.set(sid, badge);
     setStatus((prev) => {
       const cur = prev[sid] ?? NO_BADGE;
-      if (cur.unread === badge.unread && cur.blocked === badge.blocked) return prev; // no churn
+      if (cur.unread === badge.unread && cur.blocked === badge.blocked && Boolean(cur.running) === Boolean(badge.running)) return prev; // no churn
       return { ...prev, [sid]: badge };
     });
   }, []);
 
-  const reportActivity = useCallback((sid: string, lastInboundId: string | null, blocked: boolean) => {
+  const reportActivity = useCallback((sid: string, lastInboundId: string | null, blocked: boolean, running = false) => {
     // The FIRST report for a sid establishes the baseline (the on-load snapshot of a
     // restored tab's history) — announcing it would spam "new reply" for every already-
     // unread background tab on page load. Only IN-SESSION transitions announce (mirrors
@@ -109,9 +120,10 @@ export function useTabBadges(
     const lastAnnounced = announcedInbound.current.get(sid) ?? null;
     lastInbound.current.set(sid, lastInboundId);
     lastBlocked.current.set(sid, blocked);
+    lastRunning.current.set(sid, running);
     const active = sid === activeRef.current;
     if (active) seenInbound.current.set(sid, lastInboundId);
-    const next = computeTabBadge(active, lastInboundId, seenInbound.current.get(sid) ?? null, blocked);
+    const next = computeTabBadge(active, lastInboundId, seenInbound.current.get(sid) ?? null, blocked, running);
     const prev = shownBadge.current.get(sid) ?? NO_BADGE;
     setBadge(sid, next);
     announcedInbound.current.set(sid, lastInboundId); // advance the baseline
@@ -135,7 +147,7 @@ export function useTabBadges(
       setBadge(activeSessionId, NO_BADGE);
     }
     if (prev && prev !== activeSessionId) {
-      setBadge(prev, computeTabBadge(false, lastInbound.current.get(prev) ?? null, seenInbound.current.get(prev) ?? null, lastBlocked.current.get(prev) ?? false));
+      setBadge(prev, computeTabBadge(false, lastInbound.current.get(prev) ?? null, seenInbound.current.get(prev) ?? null, lastBlocked.current.get(prev) ?? false, lastRunning.current.get(prev) ?? false));
     }
   }, [activeSessionId, setBadge]);
 
@@ -145,12 +157,12 @@ export function useTabBadges(
     const open = new Set(openIds);
     const prevOpen = new Set(prevOpenRef.current);
     prevOpenRef.current = openIds;
-    for (const map of [lastInbound, lastBlocked, seenInbound, shownBadge, announcedInbound]) {
+    for (const map of [lastInbound, lastBlocked, lastRunning, seenInbound, shownBadge, announcedInbound]) {
       for (const k of map.current.keys()) if (!open.has(k)) map.current.delete(k);
     }
     for (const sid of openIds) {
       if (!prevOpen.has(sid)) { // newly opened — clean slate
-        lastInbound.current.delete(sid); lastBlocked.current.delete(sid); seenInbound.current.delete(sid);
+        lastInbound.current.delete(sid); lastBlocked.current.delete(sid); lastRunning.current.delete(sid); seenInbound.current.delete(sid);
         shownBadge.current.delete(sid); announcedInbound.current.delete(sid);
       }
     }

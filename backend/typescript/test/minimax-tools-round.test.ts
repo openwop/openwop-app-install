@@ -46,4 +46,50 @@ describe('dispatchMiniMaxToolsRound', () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('rate limited', { status: 429 }));
     await expect(dispatchMiniMaxToolsRound({ model: 'm', apiKey: 'k', messages: [], tools: [] })).rejects.toThrow(/minimax_429/);
   });
+  // ADR 0773 G-10b (2026-09-30) — the managed tier's reasoning leaked into the
+  // visible answer, and a 4096-token round ended mid-thought with no action.
+  it('removes <think> reasoning from the visible text', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      choices: [{ message: { content: '<think> long private reasoning </think>Drew one change.' }, finish_reason: 'stop' }],
+    }), { status: 200 }));
+    const r = await dispatchMiniMaxToolsRound({ model: 'm', apiKey: 'k', messages: [], tools: [] });
+    expect(r.text).toBe('Drew one change.');
+  });
+
+  it('drops an orphan </think> instead of showing it as the answer', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      choices: [{ message: { content: '<think>plan the op</think>\n</think>', tool_calls: [{ id: 'c1', type: 'function', function: { name: 'search', arguments: '{}' } }] }, finish_reason: 'tool_calls' }],
+    }), { status: 200 }));
+    const r = await dispatchMiniMaxToolsRound({
+      model: 'm', apiKey: 'k', messages: [],
+      tools: [{ name: 'search', description: 'web search', inputSchema: { type: 'object' } }],
+    });
+    expect(r.text).toBe('');
+    expect(r.toolUses).toHaveLength(1);
+  });
+
+  it('never runs a tool call that appears only inside a thought', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      choices: [{ message: { content: '<think>maybe <invoke name="search"><parameter name="q">x</parameter></invoke>? no.</think>Nothing to do.' }, finish_reason: 'stop' }],
+    }), { status: 200 }));
+    const r = await dispatchMiniMaxToolsRound({
+      model: 'm', apiKey: 'k', messages: [],
+      tools: [{ name: 'search', description: 'web search', inputSchema: { type: 'object' } }],
+    });
+    expect(r.toolUses).toEqual([]);
+    expect(r.text).toBe('Nothing to do.');
+  });
+
+  it('gives a reasoning round room to think AND act (default max_tokens > 4096)', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+    }), { status: 200 }));
+    await dispatchMiniMaxToolsRound({ model: 'm', apiKey: 'k', messages: [], tools: [] });
+    const body = JSON.parse((fetchMock.mock.calls[0]![1] as RequestInit).body as string) as { max_tokens: number };
+    expect(body.max_tokens).toBeGreaterThan(4096);
+    // an explicit caller budget still wins
+    fetchMock.mockClear();
+    await dispatchMiniMaxToolsRound({ model: 'm', apiKey: 'k', messages: [], tools: [], maxTokens: 1000 });
+    expect((JSON.parse((fetchMock.mock.calls[0]![1] as RequestInit).body as string) as { max_tokens: number }).max_tokens).toBe(1000);
+  });
 });

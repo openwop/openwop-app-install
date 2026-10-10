@@ -29,7 +29,8 @@ import { NATIVE_IMAGE_PROVIDERS, IMAGE_OP_SUPPORT } from '../../providers/dispat
 import { resolveSecret, listSecretRefs } from '../../byok/secretResolver.js';
 import { resolveMediaAsset } from '../../host/inMemorySurfaces.js';
 import * as mediaStorage from './mediaStorage.js';
-import { assertOrgCapacity, createAsset, findAssetByContentHash, getAsset, mergeAssetMetadataOnDedup, viewAsset, type MediaAssetLineage } from './mediaService.js';
+import { withOrgCapacity, createAsset, findAssetByContentHash, getAsset, mergeAssetMetadataOnDedup, viewAsset, type MediaAssetLineage } from './mediaService.js';
+import { sniffImageType } from '../../host/allowedUploadMime.js';
 
 const MAX = { prompt: 4_000, model: 200, n: 4 } as const;
 
@@ -56,7 +57,7 @@ function toRouteError(err: AiProviderError): OpenwopError {
 
 export function registerImageGenRoutes(deps: RouteDeps): void {
   const { app, hostSuite } = deps;
-  const BASE = '/v1/host/openwop-app/media/orgs/:orgId';
+  const BASE = '/host/openwop-app/media/orgs/:orgId';
 
   // Which image providers can this tenant actually dispatch to? (BYOK-honest:
   // a provider appears ONLY with a stored tenant key — the dialog renders an
@@ -139,6 +140,9 @@ export function registerImageGenRoutes(deps: RouteDeps): void {
         const token = img.url.match(/\/assets\/([A-Za-z0-9_-]{1,512})\/?$/)?.[1];
         const entry = token ? await resolveMediaAsset(token) : null;
         if (!entry || entry.tenantId !== tenantId) continue; // defensive — the adapter minted it for this tenant
+        // ADR 0818 §2 — a provider's label is not trusted: store what the bytes are.
+        const contentType = sniffImageType(Buffer.from(entry.contentBase64, 'base64'));
+        if (!contentType) continue;
         const contentHash = createHash('sha256').update(Buffer.from(entry.contentBase64, 'base64')).digest('hex');
         const lineage = { generatedBy: 'ai', prompt: prompt.slice(0, 500), provider, ...(optionalString(body.model) ? { model: optionalString(body.model) } : {}), op: 'generate' };
         const existing = await findAssetByContentHash(tenantId, orgId, contentHash);
@@ -146,21 +150,22 @@ export function registerImageGenRoutes(deps: RouteDeps): void {
           assets.push(viewAsset(await mergeAssetMetadataOnDedup(existing, {})));
           continue;
         }
-        await assertOrgCapacity(tenantId, orgId, entry.bytes);
-        const stored = await mediaStorage.put(tenantId, { contentBase64: entry.contentBase64, contentType: entry.contentType });
-        const asset = await createAsset({
-          tenantId,
-          orgId,
-          ...(optionalString(body.collectionId) ? { collectionId: optionalString(body.collectionId) } : {}),
-          name: `${prompt.replace(/[^\w .-]/g, ' ').trim().slice(0, 80) || 'generated image'}.png`,
-          contentType: entry.contentType,
-          sizeBytes: stored.sizeBytes,
-          storageRef: stored.storageRef,
-          serveToken: stored.serveToken,
-          tags: ['ai-generated'],
-          uploadedBy: user.userId,
-          lineage,
-          contentHash,
+        const asset = await withOrgCapacity(tenantId, orgId, entry.bytes, async () => {
+          const stored = await mediaStorage.put(tenantId, { contentBase64: entry.contentBase64, contentType });
+          return createAsset({
+            tenantId,
+            orgId,
+            ...(optionalString(body.collectionId) ? { collectionId: optionalString(body.collectionId) } : {}),
+            name: `${prompt.replace(/[^\w .-]/g, ' ').trim().slice(0, 80) || 'generated image'}.png`,
+            contentType,
+            sizeBytes: stored.sizeBytes,
+            storageRef: stored.storageRef,
+            serveToken: stored.serveToken,
+            tags: ['ai-generated'],
+            uploadedBy: user.userId,
+            lineage,
+            contentHash,
+          });
         });
         assets.push(viewAsset(asset));
       }
@@ -225,22 +230,25 @@ export function registerImageGenRoutes(deps: RouteDeps): void {
       const token = img.url.match(/\/assets\/([A-Za-z0-9_-]{1,512})\/?$/)?.[1];
       const out = token ? await resolveMediaAsset(token) : null;
       if (!out || out.tenantId !== tenantId) continue;
+      const contentType = sniffImageType(Buffer.from(out.contentBase64, 'base64')); // ADR 0818 §2
+      if (!contentType) continue;
       const contentHash = createHash('sha256').update(Buffer.from(out.contentBase64, 'base64')).digest('hex');
       const existing = await findAssetByContentHash(tenantId, orgId, contentHash);
       if (existing) { assets.push(viewAsset(await mergeAssetMetadataOnDedup(existing, {}))); continue; }
-      await assertOrgCapacity(tenantId, orgId, out.bytes);
-      const stored = await mediaStorage.put(tenantId, { contentBase64: out.contentBase64, contentType: out.contentType });
-      const asset = await createAsset({
-        tenantId, orgId,
-        name: `${source.name.replace(/\.[a-z0-9]{1,8}$/i, '')}${derived.nameSuffix}.png`,
-        contentType: out.contentType,
-        sizeBytes: stored.sizeBytes,
-        storageRef: stored.storageRef,
-        serveToken: stored.serveToken,
-        tags: ['ai-generated'],
-        uploadedBy: user.userId,
-        lineage: { ...derived.lineage, derivedFrom: source.assetId, generatedBy: 'ai', provider },
-        contentHash,
+      const asset = await withOrgCapacity(tenantId, orgId, out.bytes, async () => {
+        const stored = await mediaStorage.put(tenantId, { contentBase64: out.contentBase64, contentType });
+        return createAsset({
+          tenantId, orgId,
+          name: `${source.name.replace(/\.[a-z0-9]{1,8}$/i, '')}${derived.nameSuffix}.png`,
+          contentType,
+          sizeBytes: stored.sizeBytes,
+          storageRef: stored.storageRef,
+          serveToken: stored.serveToken,
+          tags: ['ai-generated'],
+          uploadedBy: user.userId,
+          lineage: { ...derived.lineage, derivedFrom: source.assetId, generatedBy: 'ai', provider },
+          contentHash,
+        });
       });
       assets.push(viewAsset(asset));
     }

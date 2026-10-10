@@ -41,8 +41,10 @@ describe('ADR 0672 D6 — quorum is dead config for content-publish, in producti
     let callSites = 0;
     for (const file of ROOTS.flatMap((r) => walk(r))) {
       const text = readFileSync(file, 'utf8');
-      let i = text.indexOf('createContentApproval(');
-      while (i !== -1) {
+      // ADR 0859 D2 — `createContentApprovalOnce` is the creator the CMS lane calls now
+      // (`createContentApproval` wraps it), so the scan covers both names.
+      const sites = [...text.matchAll(/createContentApproval(?:Once)?\(/g)].map((m) => m.index ?? 0);
+      for (const i of sites) {
         // Skip the declaration itself.
         const isDecl = text.slice(Math.max(0, i - 30), i).includes('function ');
         if (!isDecl) {
@@ -55,7 +57,6 @@ describe('ADR 0672 D6 — quorum is dead config for content-publish, in producti
             offenders.push(`${file.slice(SRC.length + 1)} @${i}`);
           }
         }
-        i = text.indexOf('createContentApproval(', i + 1);
       }
     }
     // Non-vacuity: if the walk stops finding call sites, a clean result means nothing.

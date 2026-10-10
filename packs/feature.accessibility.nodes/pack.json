@@ -1,11 +1,12 @@
 {
   "name": "feature.accessibility.nodes",
-  "version": "1.0.0",
+  "version": "1.0.1",
+  "kind": "node",
   "description": "Accessibility node pack (ADR 0363) — check authored content for WCAG issues (missing image alt text, skipped heading levels, non-descriptive link text, low color contrast) and generate AI alt text for a media asset, both over ctx.features.accessibility. Enables workflows to gate publishing on zero blocking a11y issues or auto-alt-text a media library.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "accessibility", "a11y", "wcag", "alt-text", "content"],
-  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "engines": { "openwop": ">=1.0.0 <3.0.0" },
   "nodes": [
     {
       "typeId": "feature.accessibility.nodes.check",

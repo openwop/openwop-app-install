@@ -13,7 +13,7 @@
  * @see docs/adr/0073-embeddable-conversation-view.md
  */
 
-import { lazy, Suspense, useEffect, useState, type ReactNode } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { MessageFeed } from './MessageFeed.js';
 // ADV-UX-1 — lazy: the notice pulls `advisoryBoardClient` and only ever mounts in
@@ -33,6 +33,8 @@ import { MessageFeed } from './MessageFeed.js';
 const BoardDisclaimerNotice = lazy(() => import('./conversations/BoardDisclaimerNotice.js').then((m) => ({ default: m.BoardDisclaimerNotice })));
 import { WelcomeCard } from './WelcomeCard.js';
 import { ChatInput } from './ChatInput.js';
+import { SignInRequiredNotice } from './SignInRequiredNotice.js';
+import { NeedsYouTray } from './NeedsYouTray.js';
 import { useFeatureAccess } from '../featureToggles/FeatureAccessContext.js';
 
 // Lazy — voice mode (+ its client) stays out of the entry chunk; only loaded when the
@@ -63,6 +65,8 @@ export interface ConversationViewProps {
   supportsAudioInput: boolean;
   supportsImageInput: boolean;
   supportsPdfInput: boolean;
+  /** ADR 0768 D1 — see ChatInput.agentEntries. */
+  agentEntries?: readonly AgentMentionEntry[];
 
   // Conversation-level feed handlers (an embed wants these too).
   onResolveInterrupt: (messageId: string, value: unknown, nodeId?: string) => Promise<void>;
@@ -157,19 +161,38 @@ export interface ConversationViewProps {
   unreadFromIndex?: number;
   onSummarize?: () => void;
   summarizeBusy?: boolean;
+  /** ADR 0768 follow-up P2 — open a run's durable artifact in the Workbench. */
+  onOpenArtifact?: (a: { artifactId: string }) => void;
+  /** ADR 0768 P6 — a narrow host (the Pocket): compact composer. */
+  composerCompact?: boolean;
+}
+
+/** Does the newest failed turn already carry this exact error text? */
+export function errorShownInFeed(messages: readonly ChatMessage[], error: string): boolean {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]!;
+    if (m.meta?.error) return m.meta.error.message === error;
+    if (m.workflowRun?.error) return m.workflowRun.error.message === error;
+    if (m.role === 'user') return false;
+  }
+  return false;
 }
 
 export function ConversationView(props: ConversationViewProps): JSX.Element {
   const { t } = useTranslation('chat');
   const {
     messages, tenantId, error, isSending, onPickSuggestion,
-    onSend, onCancel, supportsAudioInput, supportsImageInput, supportsPdfInput,
+    onSend, onCancel, supportsAudioInput, supportsImageInput, supportsPdfInput, agentEntries,
     onResolveInterrupt, onRegenerate, onFeedback, onReconfigureBYOK, onBranchFrom,
     hasOlderMessages, isLoadingEarlier, onLoadEarlier, isHydrating = false, progress, footerSlot,
     renderEmptyState, composerModifiers, voiceAgentId, voiceConversationId, voiceBoardActive, onVoiceSpeakingAgent, draftKey, commentsContext, onLiveTranscript, onReloadConversation,
     composerPlaceholder, mentionEntries, authorDirectory, viewerSubjectRef, messageActions,
-    unreadFromIndex, onSummarize, summarizeBusy, boardId,
+    unreadFromIndex, onSummarize, summarizeBusy, boardId, onOpenArtifact, composerCompact = false,
   } = props;
+  const [composerSeed, setComposerSeed] = useState<{ text: string; nonce: number } | undefined>(undefined);
+  const fillComposer = useCallback((text: string) => {
+    setComposerSeed((prev) => ({ text, nonce: (prev?.nonce ?? 0) + 1 }));
+  }, []);
   // Default the rail-coupled props when no progress chrome is present (embed).
   const focusedWorkflowMessageId = progress?.focusedMessageId ?? null;
   const onOpenWorkflowProgress = progress?.onOpen ?? (() => { /* no progress rail in this surface */ });
@@ -180,6 +203,8 @@ export function ConversationView(props: ConversationViewProps): JSX.Element {
   // persist THROUGH `isSending` so it can voice the reply). The reply text it speaks is the
   // most recent assistant message.
   const voiceAccess = useFeatureAccess('voice');
+  // ADR 0768 P3 — the `@@` Board chip rides the Board of Advisors toggle.
+  const boardsAccess = useFeatureAccess('advisory-board');
   // ADR 0147 — live voice is now the headless LiveVoiceController (no standalone
   // pill); its state drives the ONE composer mic. leadingControls carries only
   // the next-message modifiers.
@@ -210,7 +235,11 @@ export function ConversationView(props: ConversationViewProps): JSX.Element {
           </div>
         ) : (
           <div className="u-flex-1 u-overflow-y-auto">
-            {renderEmptyState ? renderEmptyState(onPickSuggestion) : <WelcomeCard onPickSuggestion={onPickSuggestion} />}
+            {/* The default welcome FILLS the composer (its cards say "pre-fill the
+                composer", and an agent pill alone is "@iris " with no task) — the
+                person reads, edits, then sends. A host's own empty state keeps
+                its send semantics. */}
+            {renderEmptyState ? renderEmptyState(onPickSuggestion) : <WelcomeCard onPickSuggestion={fillComposer} />}
           </div>
         )
       ) : (
@@ -229,15 +258,27 @@ export function ConversationView(props: ConversationViewProps): JSX.Element {
           onLoadEarlier={onLoadEarlier}
           {...(commentsContext ? { commentsContext } : {})}
           {...(authorDirectory ? { authorDirectory } : {})}
+          {...(mentionEntries ? { mentionEntries } : {})}
           {...(viewerSubjectRef ? { viewerSubjectRef } : {})}
           {...(messageActions ? { messageActions } : {})}
           {...(unreadFromIndex !== undefined ? { unreadFromIndex } : {})}
           {...(onSummarize ? { onSummarize } : {})}
           {...(summarizeBusy ? { summarizeBusy } : {})}
+          {...(onOpenArtifact ? { onOpenArtifact } : {})}
         />
       )}
 
-      {error && <div role="alert" className="alert error u-m-2 u-fs-12">{error}</div>}
+      {/* The banner is for failures with NO turn of their own (a load, an
+          interrupt resolution). A failed reply or workflow dispatch already
+          renders its ErrorCard / run bubble in the feed — echoing the same text
+          here showed every failure twice, once as raw wire text. */}
+      {error && !errorShownInFeed(messages, error) && (
+        <div role="alert" className="alert error u-m-2 u-text-sm">{error}</div>
+      )}
+
+      {/* ADR 0768 P1 — open interrupts stay reachable above the composer, in
+          every density (Studio + every EmbeddedChatPanel consumer). */}
+      {messages.length > 0 && !isHydrating ? <NeedsYouTray messages={messages} /> : null}
 
       {footerSlot ? <div className="cv-spine">{footerSlot}</div> : null}
 
@@ -259,6 +300,7 @@ export function ConversationView(props: ConversationViewProps): JSX.Element {
           (.cv-spine) so it lines up with the empty-state column above. */}
       <div className="u-p-3 u-border-t">
         <div className="cv-spine">
+        <SignInRequiredNotice onUseOwnKey={onReconfigureBYOK} />
         <ChatInput
           onSend={onSend}
           onCancel={onCancel}
@@ -268,8 +310,15 @@ export function ConversationView(props: ConversationViewProps): JSX.Element {
           supportsAudioInput={supportsAudioInput}
           supportsImageInput={supportsImageInput}
           supportsPdfInput={supportsPdfInput}
+          {...(agentEntries ? { agentEntries } : {})}
           {...(mentionEntries ? { mentionEntries } : {})}
           {...(draftKey ? { draftKey } : {})}
+          seed={composerSeed}
+          // Not offered when the plan does not include boards: a button that opens
+          // a paywall is a worse invitation than no button (typing `@@` still
+          // explains the lock and links to the bundles).
+          boardSigil={boardsAccess.enabled && !boardsAccess.locked}
+          compact={composerCompact}
           {...(leadingControls ? { leadingControls } : {})}
           {...(voiceAccess.enabled && liveVoice ? { liveVoice } : {})}
         />

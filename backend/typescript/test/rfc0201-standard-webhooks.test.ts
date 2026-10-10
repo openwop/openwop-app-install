@@ -32,6 +32,8 @@ import { decodeWhsec, signStandardWebhooks, signWebhookV1 } from '../src/host/we
 import { processDueWebhookDeliveries, signingHeaders, WEBHOOK_MAX_ATTEMPTS } from '../src/host/webhookDeliveryWorker.js';
 import { verifyWebhookEndpoint } from '../src/host/webhookEndpointVerification.js';
 import { __resetVerificationBudgetForTests, secretRotationOverlapSeconds, takeVerificationBudget } from '../src/host/webhookStandardWebhooks.js';
+import { bareRunId } from './support/bareRunId.js';
+import { toWireRunId } from '../src/host/v2Ids.js';
 
 const mintWhsec = (bytes = 32): string => `whsec_${randomBytes(bytes).toString('base64')}`;
 
@@ -144,7 +146,7 @@ async function call(method: string, path: string, body?: unknown): Promise<{ sta
   const text = await res.text();
   return { status: res.status, text, json: text ? (JSON.parse(text) as Record<string, unknown>) : {} };
 }
-const register = (body: Record<string, unknown>) => call('POST', '/v1/webhooks', body);
+const register = (body: Record<string, unknown>) => call('POST', '/webhooks', body);
 const optIn = (mode: string, secret: string) => ({ url: `${rxBase}/${mode}`, events: ['run.completed'], signatureAlgorithms: ['v1', 'standard-webhooks-1'], secret });
 
 describe('RFC 0201 §B — registration opt-in', () => {
@@ -155,7 +157,7 @@ describe('RFC 0201 §B — registration opt-in', () => {
     // The exact key set this route answered before ADR 0747 — a host-minted
     // secret, returned once, and no signatureAlgorithms.
     expect(Object.keys(res.json).sort()).toEqual(['events', 'secret', 'secretFingerprint', 'subscriptionId', 'url', 'webhookId']);
-    const row = await inspect.getWebhook(res.json.webhookId as string);
+    const row = await inspect.getWebhook(bareRunId(res.json.webhookId as string));
     expect(row?.signatureAlgorithms).toBeUndefined();
   });
 
@@ -206,7 +208,7 @@ describe('RFC 0201 §B — registration opt-in', () => {
     expect(h.headers['x-openwop-event-type']).toBeUndefined();
     expect(String(h.headers['webhook-id'])).toMatch(/^[A-Za-z0-9_-]{16,128}$/);
     expect(swVerifies(secret, h.headers as Record<string, string>, h.body)).toBe(1);
-    const row = await inspect.getWebhook(res.json.webhookId as string);
+    const row = await inspect.getWebhook(bareRunId(res.json.webhookId as string));
     expect(row?.signatureAlgorithms).toEqual(['v1', 'standard-webhooks-1']);
   });
 
@@ -262,7 +264,7 @@ describe('RFC 0201 §B — registration opt-in', () => {
     try {
       const secret = mintWhsec();
       expect((await register(optIn('echo', secret))).status).toBe(201);
-      const res2 = await fetch(`${base}/v1/webhooks`, {
+      const res2 = await fetch(`${base}/webhooks`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: 'Bearer dev-token' },
         body: JSON.stringify(optIn('echo', secret)),
@@ -280,20 +282,21 @@ describe('RFC 0201 §E — rotateWebhookSecret', () => {
   it('refuses unknown (404), non-opted (400) and a malformed secret (400); rotates an opted-in row with no secret in the body', async () => {
     const s1 = mintWhsec();
     const s2 = mintWhsec();
-    expect((await call('POST', '/v1/webhooks/00000000-0000-4000-8000-000000000000/rotate-secret', { secret: s2 })).status).toBe(404);
+    // ADR 0812 P3c-0 — an unknown id in the caller's own tenant-BOUND spelling (a bare id is a 400 on the v2 path).
+    expect((await call('POST', `/webhooks/${encodeURIComponent(toWireRunId('00000000-0000-4000-8000-000000000000', 'default'))}/rotate-secret`, { secret: s2 })).status).toBe(404);
 
     const plain = await register({ url: `${rxBase}/no-echo`, events: ['run.completed'] });
-    const notOpted = await call('POST', `/v1/webhooks/${String(plain.json.webhookId)}/rotate-secret`, { secret: s2 });
+    const notOpted = await call('POST', `/webhooks/${String(plain.json.webhookId)}/rotate-secret`, { secret: s2 });
     expect(notOpted.status).toBe(400);
     expect(notOpted.json.error).toBe('validation_error');
 
     const reg = await register(optIn('echo', s1));
     const id = String(reg.json.webhookId);
-    expect((await call('POST', `/v1/webhooks/${id}/rotate-secret`, { secret: 'nope' })).status).toBe(400);
-    expect((await call('POST', `/v1/webhooks/${id}/rotate-secret?tenantId=someone-else`, { secret: s2 })).status).toBe(403);
+    expect((await call('POST', `/webhooks/${id}/rotate-secret`, { secret: 'nope' })).status).toBe(400);
+    expect((await call('POST', `/webhooks/${id}/rotate-secret?tenantId=someone-else`, { secret: s2 })).status).toBe(403);
 
     const hitsBefore = hits.length;
-    const rotated = await call('POST', `/v1/webhooks/${id}/rotate-secret`, { secret: s2 });
+    const rotated = await call('POST', `/webhooks/${id}/rotate-secret`, { secret: s2 });
     expect(rotated.status).toBe(200);
     expect(Object.keys(rotated.json).sort()).toEqual(['previousSecretExpiresAt', 'rotatedAt']);
     const span = Date.parse(String(rotated.json.previousSecretExpiresAt)) - Date.parse(String(rotated.json.rotatedAt));
@@ -301,14 +304,14 @@ describe('RFC 0201 §E — rotateWebhookSecret', () => {
     expect(rotated.text.includes(s2) || rotated.text.includes(s2.slice(6))).toBe(false);
     expect(hits.length).toBe(hitsBefore); // §E.21 — no re-verification
 
-    const row = await inspect.getWebhook(id);
+    const row = await inspect.getWebhook(bareRunId(id));
     expect(row?.secret).toBe(s2);            // plaintext passthrough: no KMS in this posture
     expect(row?.previousSecret).toBe(s1);
     expect(row?.previousSecretExpiresAt).toBe(Date.parse(String(rotated.json.previousSecretExpiresAt)));
 
     // ADR 0755 (WIT-WH-9) — the list shows the opt-in and the running overlap,
     // and still no secret in any encoding.
-    const list = await call('GET', '/v1/webhooks');
+    const list = await call('GET', '/webhooks');
     const listed = (list.json.subscriptions as Array<Record<string, unknown>>).find((x) => x.webhookId === id);
     expect(listed?.signatureAlgorithms).toEqual(['v1', 'standard-webhooks-1']);
     expect(listed?.rotatedAt).toBe(rotated.json.rotatedAt);
@@ -320,9 +323,9 @@ describe('RFC 0201 §E — rotateWebhookSecret', () => {
     const [s1, s2, s3] = [mintWhsec(), mintWhsec(), mintWhsec()];
     const reg = await register(optIn('echo', s1));
     const id = String(reg.json.webhookId);
-    await call('POST', `/v1/webhooks/${id}/rotate-secret`, { secret: s2 });
-    await call('POST', `/v1/webhooks/${id}/rotate-secret`, { secret: s3 });
-    const row = await inspect.getWebhook(id);
+    await call('POST', `/webhooks/${id}/rotate-secret`, { secret: s2 });
+    await call('POST', `/webhooks/${id}/rotate-secret`, { secret: s3 });
+    const row = await inspect.getWebhook(bareRunId(id));
     expect([row?.secret, row?.previousSecret]).toEqual([s3, s2]);
   });
 });
@@ -338,15 +341,12 @@ describe('RFC 0201 — the major-2 surface', () => {
     return { status: res.status, json: text ? (JSON.parse(text) as Record<string, unknown>) : {} };
   }
 
-  it('§A.3 / §E.18 — the v2 facet lists standard-webhooks-1 beside v1 and advertises secretRotation; v1 says the same', async () => {
+  // ADR 0812 P3c-0 — the "v1 says the same" comparison leg is deleted with the v1 document.
+  it('§A.3 / §E.18 — the v2 facet lists standard-webhooks-1 beside v1 and advertises secretRotation', async () => {
     const d2 = await v2('GET', '/.well-known/openwop');
     const facet = d2.json.webhooks as { signatureAlgorithms?: string[]; secretRotation?: { overlapSeconds?: number } };
     expect(facet.signatureAlgorithms).toEqual(['v1', 'standard-webhooks-1']);
     expect(facet.secretRotation?.overlapSeconds).toBe(secretRotationOverlapSeconds());
-    const d1 = await call('GET', '/.well-known/openwop');
-    const w1 = (d1.json.capabilities as { webhooks?: { signatureAlgorithms?: string[]; secretRotation?: unknown } }).webhooks;
-    expect(w1?.signatureAlgorithms).toEqual(facet.signatureAlgorithms);
-    expect(w1?.secretRotation).toEqual(facet.secretRotation);
   });
 
   it('§E.18 — v2 rotate-secret: a foreign-tenant bound id is 403 id_tenant_mismatch before lookup; the own bound id rotates', async () => {

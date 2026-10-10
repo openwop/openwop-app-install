@@ -40,7 +40,7 @@ function client() {
     post: (p: string, b?: unknown) => send('POST', p, b),
     patch: (p: string, b?: unknown) => send('PATCH', p, b),
     login: async (subject: string, tenantId: string) => {
-      const res = await send('POST', '/v1/host/openwop-app/test/login', { subject, tenantId });
+      const res = await send('POST', '/host/openwop-app/test/login', { subject, tenantId });
       expect([200, 201]).toContain(res.status);
     },
   };
@@ -52,7 +52,7 @@ const setToggle = async (id: string, status: 'on' | 'off'): Promise<void> => {
   await saveConfig({ ...d, status }, 'test');
 };
 
-const B = '/v1/host/openwop-app/environments';
+const B = '/host/openwop-app/environments';
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -79,16 +79,21 @@ describe('environments — service determinism (ADR 0387)', () => {
   it('snapshot hash is deterministic and import(export) leaves zero drift', async () => {
     const svc = await import('../src/features/environments/environmentsService.js');
     const domains = await import('../src/host/configDomains.js');
-    const { setTenantOverrideStatus } = await import('../src/host/featureToggles/service.js');
     const T = 'tenant-det';
 
-    // Register the toggle domain (feature boot would; here register directly).
-    const { featureTogglesDomain } = await import('../src/features/environments/domains/featureTogglesDomain.js');
-    domains.registerConfigDomain(featureTogglesDomain);
-
-    // Establish some toggle overrides for the tenant.
-    await setTenantOverrideStatus('csm', T, 'on', 'test');
-    await setTenantOverrideStatus('entities', T, 'off', 'test');
+    // A test-owned EXACT-MATCH domain over an in-memory map. ADR 0819 §2 removed
+    // `feature-toggles`, the only shipped domain in this register; the register
+    // itself (and this round-trip law) stays for the next STATE domain.
+    const live = new Map<string, Record<string, string>>();
+    domains.registerConfigDomain({
+      id: 'test-state',
+      label: 'Test state',
+      restore: 'exact-match',
+      async export(tenantId) { return { ...(live.get(tenantId) ?? {}) }; },
+      async import(tenantId, payload) { live.set(tenantId, { ...(payload as Record<string, string>) }); },
+      diff: () => ({ added: 0, changed: 0, removed: 0 }),
+    });
+    live.set(T, { csm: 'on', entities: 'off' });
 
     const h1 = await svc.liveConfigHash(T);
     const h2 = await svc.liveConfigHash(T); // export twice, same state
@@ -97,14 +102,43 @@ describe('environments — service determinism (ADR 0387)', () => {
     // Snapshot, mutate, then apply the snapshot back → live hash returns to h1.
     const snap = await svc.snapshotLiveConfig({ tenantId: T, sourceEnv: null, createdBy: 'test' });
     expect(snap.hash).toBe(h1);
-    await setTenantOverrideStatus('csm', T, 'off', 'test'); // drift the live config
-    await setTenantOverrideStatus('developer-keys', T, 'on', 'test'); // an override NOT in the snapshot
+    live.set(T, { csm: 'off', entities: 'off', 'developer-keys': 'on' }); // drift + a stray entry
     expect(await svc.liveConfigHash(T)).not.toBe(h1);
 
     await svc.applyToLive({ tenantId: T, snapshotHash: snap.hash, actor: 'test' });
-    // Exact-match restore: the stray developer-keys override is cleared, csm is
-    // restored → the live hash is byte-identical to the snapshot.
     expect(await svc.liveConfigHash(T)).toBe(h1);
+  });
+
+  it('ADR 0819 §2: per-tenant toggle overrides are operator state, never part of a snapshot', async () => {
+    const svc = await import('../src/features/environments/environmentsService.js');
+    const { enableTenantOverride } = await import('../src/host/featureToggles/service.js');
+    const T = 'tenant-no-toggle-domain';
+    const before = await svc.captureLiveConfig(T);
+    expect(Object.keys(before)).not.toContain('feature-toggles');
+    const h1 = await svc.liveConfigHash(T);
+    await enableTenantOverride('developer-keys', T, 'operator');
+    expect(await svc.liveConfigHash(T)).toBe(h1);
+  });
+
+  it('ADR 0819 M1: an environment pinned to a pre-0819 snapshot is not drifted by the removed domain', async () => {
+    const svc = await import('../src/features/environments/environmentsService.js');
+    const { DurableCollection } = await import('../src/host/hostExtPersistence.js');
+    const T = 'tenant-legacy-snapshot';
+    // A snapshot as a pre-0819 host stored it: today's live domains PLUS the
+    // `feature-toggles` payload, under a hash that covered all of them.
+    const live = await svc.captureLiveConfig(T);
+    const legacyHash = 'f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0';
+    const store = new DurableCollection<Record<string, unknown>>('env:snapshot', (r) => String(r.snapshotId), undefined, (r) => String(r.tenantId));
+    await store.put({
+      snapshotId: `${T}:${legacyHash}`, tenantId: T, hash: legacyHash,
+      domains: { ...live, 'feature-toggles': { crm: 'on' } },
+      sourceEnv: null, createdBy: 'pre-0819', createdAt: new Date().toISOString(),
+    });
+    await svc.createEnvironment({ tenantId: T, name: 'prod' });
+    await svc.movePointer({ tenantId: T, fromEnvName: null, toEnvName: 'prod', snapshotHash: legacyHash, actor: 'test' });
+    const [env] = await svc.listEnvironmentsWithDrift(T);
+    expect(env?.currentSnapshot).toBe(legacyHash);
+    expect(env?.drift?.drifted).toBe(false);
   });
 
   it('re-snapshotting identical config dedupes on hash', async () => {
@@ -197,7 +231,7 @@ describe('environments — routes + RBAC (ADR 0387)', () => {
 });
 
 describe('environments — H2 promotion-approval gate (ADR 0387)', () => {
-  const APPR = '/v1/host/openwop-app/approvals';
+  const APPR = '/host/openwop-app/approvals';
 
   it('settings default OFF; PATCH toggles the gate', async () => {
     await setToggle('environments', 'on');

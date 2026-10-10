@@ -17,15 +17,18 @@
 import { createKnowledgeSurface } from './knowledgeSurface.js';
 import { createWebResearchSurface } from './webResearchSurface.js';
 import { extractToolErrorCode } from './toolHooks.js';
+import { LeaseLostError } from './runEffectContext.js';
 import type { BundleScope } from './inMemorySurfaces.js';
 import type { TurnRunDispatchSink } from './turnRunDispatch.js';
 import type { AgentToolDef, ExecuteAgentTool, ResolveAgentTool } from './agentDispatch.js';
 import { getNodeRegistry } from '../executor/nodeRegistry.js';
+import { featureAccessRefusal } from './workflowFeatureGate.js';
+import { toolError } from './agentToolKit.js';
 import type { NodeContext } from '../executor/types.js';
 import { createSandboxRunner } from './sandboxAdapter.js';
 import { getAgentProfile } from './agentProfileService.js';
 import { createHash } from 'node:crypto';
-import { createCard, ensureSubjectBoard, notifyBoardChanged } from './kanbanService.js';
+import { createCard, ensureSubjectBoard, getCard, notifyBoardChanged, todoColumnOf } from './kanbanService.js';
 import { getRosterEntry } from './rosterService.js';
 import { persistRunArtifact, runArtifactKey } from './runArtifactStore.js';
 
@@ -63,6 +66,14 @@ export interface BuiltinTool {
    *  hardcoding it, or it collapses N per-tool decisions into one and defeats
    *  the ratchet (see `features/commerce/agentTools.ts` `readTool`). */
   contentTrust: 'trusted' | 'untrusted';
+  /** ADR 0784 — can a call CHANGE anything? REQUIRED, the `contentTrust` way:
+   *  the compiler is the ratchet. `'write'` if a call can change anything durable
+   *  in this host (rows, cards, artifacts, canvases, settings, memory) or cause
+   *  an effect outside it (email/SMS/push, webhook, payment, post, connector
+   *  write). `'read'` otherwise, including external READS and pure compute. An
+   *  argument-dependent tool (`preview | apply`) is `'write'`. DISPLAY ONLY (the
+   *  turn receipt): never an input to gating, capability or permission checks. */
+  effect: 'read' | 'write';
   /**
    * ADR 0604 (TOCC-2) — does this tool's RESULT carry a CLOSED WORLD the model
    * must cite back exactly? Set `true` for a JSON Schema, an enum, a catalog of
@@ -94,7 +105,21 @@ export interface BuiltinTool {
    * reason `contentTrust` does — collapsing N decisions into one defeats it.
    */
   schemaCarrying?: true;
-  run(input: Record<string, unknown>, scope: BundleScope): Promise<{ content: string; isError?: boolean }>;
+  /**
+   * ADR 0834 D4 — does a call need the user's approval in `safe` permission mode?
+   * Set it for a tool that sends model-chosen data off-host or runs model-written
+   * work (a composed workflow, code) — the asks the safe-mode baseline exists for.
+   * `{ reason }` is the text the held answer gives the model (e.g. pointing at a
+   * reviewed alternative). DECLARED here, at the tool, so the baseline cannot miss a
+   * tool the way a hand-kept name list did; `test/safe-mode-baseline-census.test.ts`
+   * makes every live tool an explicit decision. Origin `baseline`: the user's own
+   * bypass may skip it (ADR 0834 D2).
+   */
+  safeModeApproval?: true | { reason: string };
+  /** `continueTurn` (ADR 0773 B.7): host-internal, never sent to the model as-is.
+   *  A string = the tool's work is unfinished, and the chat loop may send it as
+   *  ONE follow-up if the model then stops without a call; `null` clears one. */
+  run(input: Record<string, unknown>, scope: BundleScope): Promise<{ content: string; isError?: boolean; continueTurn?: string | null }>;
 }
 
 /**
@@ -140,10 +165,22 @@ const SCHEMA_CARRYING_PROJECTED_TYPE_IDS: ReadonlySet<string> = new Set([
   'feature.crm.nodes.validate-segment',
 ]);
 
-function computeNodeTool(typeId: string): BuiltinTool {
+/**
+ * ADR 0820 §7 / G7 — the feature that owns a projected compute node: a
+ * `feature.<id>.nodes.*` typeId belongs to feature `<id>` (the node pack's own
+ * namespace, which IS the toggle id for every projected pack today:
+ * insights-suite, crm, assistant). `core.*` nodes are core and never gated.
+ */
+export function computeNodeOwningFeature(typeId: string): string | null {
+  const m = /^feature\.([a-z0-9-]+)\.nodes\./.exec(typeId);
+  return m ? m[1]! : null;
+}
+
+function computeNodeTool(typeId: string, effect: BuiltinTool['effect']): BuiltinTool {
   return {
     // RFC 0137 §F1 — a compute node returns whatever its inputs produced; the caller supplies them
     contentTrust: 'untrusted',
+    effect,
     ...(SCHEMA_CARRYING_PROJECTED_TYPE_IDS.has(typeId) ? { schemaCarrying: true as const } : {}),
     def: {
       name: `openwop:${typeId}`,
@@ -153,6 +190,16 @@ function computeNodeTool(typeId: string): BuiltinTool {
       inputSchema: { type: 'object', additionalProperties: true },
     },
     async run(input, scope) {
+      // ADR 0820 §7 / G7 — a projected FEATURE node is that feature's product:
+      // toggle + plan, the typed refusals every feature tool uses. A feature with
+      // no toggle (always-on) resolves null ⇒ served. Fail-closed on a read error.
+      const featureId = computeNodeOwningFeature(typeId);
+      if (featureId) {
+        const refusal = await featureAccessRefusal(featureId, scope.tenantId, scope.actingUserId ? { userId: scope.actingUserId } : {});
+        if (refusal === 'plan') return toolError('not_entitled', `${featureId} is not included in this workspace's plan.`);
+        if (refusal === 'unresolved') return toolError('feature_unavailable', `${featureId} could not be checked right now — tell the user to try again shortly.`);
+        if (refusal === 'toggle') return toolError('feature_disabled', `The ${featureId} feature is not enabled for this workspace.`);
+      }
       const node = await getNodeRegistry().resolve(typeId);
       if (!node) return { content: `node not available: ${typeId}`, isError: true };
       const ctx: NodeContext = {
@@ -197,6 +244,7 @@ async function boundCollectionIds(scope: BundleScope): Promise<string[] | undefi
 const KNOWLEDGE_SEARCH: BuiltinTool = {
   // RFC 0137 §F1 — KB chunks carry per-chunk contentTrust — synced/ingested docs are untrusted
   contentTrust: 'untrusted',
+  effect: 'read',
   def: {
     name: 'openwop:knowledge.search',
     description:
@@ -236,6 +284,7 @@ const KNOWLEDGE_SEARCH: BuiltinTool = {
 const WEB_RESEARCH: BuiltinTool = {
   // RFC 0137 §F1 — WEB SEARCH RESULTS — the canonical prompt-injection vector
   contentTrust: 'untrusted',
+  effect: 'read',
   def: {
     name: 'openwop:ai.research.web',
     description:
@@ -278,6 +327,7 @@ const WEB_RESEARCH: BuiltinTool = {
 const HTTP_FETCH: BuiltinTool = {
   // RFC 0137 §F1 — arbitrary remote body from an attacker-choosable host
   contentTrust: 'untrusted',
+  effect: 'read',
   def: {
     name: 'openwop:core.openwop.http.fetch',
     description:
@@ -304,10 +354,11 @@ const HTTP_FETCH: BuiltinTool = {
  *  knowledge surface (the same retrieval behind `openwop:knowledge.search`) so a
  *  research agent's "retrieve from the KB" step actually returns grounded chunks
  *  — the honest available capability here (no vector store configured). */
-function knowledgeRetrieverTool(name: string): BuiltinTool {
+function knowledgeRetrieverTool(name: string, effect: BuiltinTool['effect']): BuiltinTool {
   return {
     // RFC 0137 §F1 — retrieved corpus passages — same taint as knowledge.search
     contentTrust: 'untrusted',
+    effect,
     def: {
       name,
       description:
@@ -356,6 +407,7 @@ const RAG_RETRIEVER_IDS = ['openwop:core.rag.retriever-basic', 'openwop:core.rag
 const KANBAN_ADD_TODO: BuiltinTool = {
   // RFC 0137 §F1 — returns a host-authored write acknowledgement, not stored content
   contentTrust: 'trusted',
+  effect: 'write',
   def: {
     name: 'openwop:kanban.add-todo',
     description:
@@ -389,16 +441,21 @@ const KANBAN_ADD_TODO: BuiltinTool = {
     // The agent's own board (idempotent, deterministic id) — its `todo` column is
     // the roster heartbeat's work-intake contract.
     const board = await ensureSubjectBoard(scope.tenantId, { kind: 'agent', id: agentId });
-    const todo = board.columns.find((c) => c.id === 'todo' || c.name.toLowerCase() === 'to do');
+    const todo = todoColumnOf(board);
     if (!todo) return err('no_todo_column', 'This agent\'s board has no To Do column — ask the user to add one.');
     const persona = (await getRosterEntry(scope.tenantId, agentId).catch(() => null))?.persona ?? 'Agent';
     // Deterministic id: an identical retried call returns the same card (the
     // GD-0308-1 pattern; createCard short-circuits on an existing cardId).
     const key = createHash('sha256').update([scope.runId ?? scope.tenantId, agentId, 'openwop:kanban.add-todo', title, detail, dueAtISO].join('\u0000')).digest('hex').slice(0, 32);
+    const cardId = `card-todo-${key}`;
+    // ADR 0774 D7 — read first, so the receipt can say whether THIS call filed
+    // the card or found one an identical earlier call filed (which may since
+    // have been worked, moved or completed).
+    const alreadyFiled = (await getCard(cardId)) !== null;
     const card = await createCard({
       boardId: board.id,
       columnId: todo.id,
-      cardId: `card-todo-${key}`,
+      cardId,
       title,
       ...(detail ? { description: detail } : {}),
       source: 'agent',
@@ -409,15 +466,20 @@ const KANBAN_ADD_TODO: BuiltinTool = {
       ...(scope.conversationId ? { sourceConversationId: scope.conversationId } : {}),
       ...(dueAtISO ? { dueAt: new Date(Date.parse(dueAtISO)).toISOString() } : {}),
     });
-    notifyBoardChanged(board.id);
+    if (!alreadyFiled) notifyBoardChanged(board.id);
+    // The column the card is ACTUALLY in — a deduped card may have moved on.
+    const column = board.columns.find((c) => c.id === card.columnId)?.name ?? todo.name;
     return {
       content: JSON.stringify({
         filed: true,
+        alreadyFiled,
         cardId: card.id,
         title: card.title,
         board: board.name,
-        column: 'To Do',
-        note: 'Todo filed on your board. Tell the user the exact title and that it is on your board\'s To Do column. It will not run by itself unless a workflow is bound — do not promise autonomous execution.',
+        column,
+        note: alreadyFiled
+          ? `You already filed this exact todo; it is now in your board's ${column} column. Tell the user that, not that you filed it again.`
+          : 'Todo filed on your board. Tell the user the exact title and that it is on your board\'s To Do column. Your heartbeat may pick it up later, and a todo with no bound workflow is proposed for the user\'s approval before anything runs — do not promise it will run on its own.',
       }),
     };
   },
@@ -426,6 +488,7 @@ const KANBAN_ADD_TODO: BuiltinTool = {
 const CODE_EXEC: BuiltinTool = {
   // RFC 0137 §F1 — arbitrary program output
   contentTrust: 'untrusted',
+  effect: 'write',
   def: {
     name: 'openwop:feature.code-exec.nodes.run',
     description:
@@ -508,6 +571,7 @@ const CODE_EXEC: BuiltinTool = {
 const SCHEMA_LOOKUP: BuiltinTool = {
   // RFC 0137 §F1 — host-authored schema; fencing would bury the contract the model must read
   contentTrust: 'trusted',
+  effect: 'read',
   // ADR 0604 (TOCC-2) — the archetype: its whole output IS the schema.
   schemaCarrying: true,
   def: {
@@ -528,33 +592,12 @@ const SCHEMA_LOOKUP: BuiltinTool = {
     },
   },
   async run(input) {
-    const kind = String(input.kind ?? '');
-    if (kind === 'node') {
-      const names = Array.isArray(input.names) ? input.names.filter((n): n is string => typeof n === 'string') : [];
-      if (!names.length) return { content: JSON.stringify({ error: 'validation_error', message: 'kind "node" needs names[] (node typeIds).' }), isError: true };
-      const { buildSchemaResponse } = await import('./schemaResponder.js');
-      return { content: JSON.stringify(buildSchemaResponse({ names })) };
-    }
-    if (kind === 'canvas-component') {
-      const canvasTypeId = typeof input.canvasTypeId === 'string' ? input.canvasTypeId : '';
-      if (!canvasTypeId) return { content: JSON.stringify({ error: 'validation_error', message: 'kind "canvas-component" needs canvasTypeId.' }), isError: true };
-      const { listCanvasComponents, catalogPromptSchema } = await import('./canvasComponentCatalog.js');
-      const components = listCanvasComponents(canvasTypeId);
-      return { content: JSON.stringify({ canvasTypeId, components, promptSchema: catalogPromptSchema(canvasTypeId) }) };
-    }
-    if (kind === 'artifact-type') {
-      const { listArtifactTypes, getArtifactType } = await import('./artifactTypes.js');
-      const names = Array.isArray(input.names) ? input.names.filter((n): n is string => typeof n === 'string') : [];
-      if (names.length) {
-        const found = names.map((n) => {
-          const t = getArtifactType(n);
-          return t ? { artifactTypeId: t.artifactTypeId, title: t.title, schema: t.schema } : { artifactTypeId: n, notFound: true };
-        });
-        return { content: JSON.stringify({ artifactTypes: found }) };
-      }
-      return { content: JSON.stringify({ artifactTypes: listArtifactTypes().map((t) => ({ artifactTypeId: t.artifactTypeId, title: t.title })) }) };
-    }
-    return { content: JSON.stringify({ error: 'validation_error', message: `unknown kind '${kind}'.` }), isError: true };
+    // ADR 0785 P3 — the ONE implementation, shared with the Claude Code MCP tool.
+    const { lookupAppSchemas } = await import('./schemaLookup.js');
+    const r = await lookupAppSchemas(input);
+    return r.ok
+      ? { content: JSON.stringify(r.value) }
+      : { content: JSON.stringify({ error: r.error, message: r.message }), isError: true };
   },
 };
 
@@ -565,8 +608,8 @@ const BUILTINS: ReadonlyMap<string, BuiltinTool> = new Map<string, BuiltinTool>(
   [HTTP_FETCH.def.name, HTTP_FETCH],
   [CODE_EXEC.def.name, CODE_EXEC],
   [KANBAN_ADD_TODO.def.name, KANBAN_ADD_TODO],
-  ...RAG_RETRIEVER_IDS.map((id): [string, BuiltinTool] => [id, knowledgeRetrieverTool(id)]),
-  ...PROJECTABLE_COMPUTE_NODE_TYPE_IDS.map((t): [string, BuiltinTool] => { const tool = computeNodeTool(t); return [tool.def.name, tool]; }),
+  ...RAG_RETRIEVER_IDS.map((id): [string, BuiltinTool] => [id, knowledgeRetrieverTool(id, 'read')]),
+  ...PROJECTABLE_COMPUTE_NODE_TYPE_IDS.map((t): [string, BuiltinTool] => { const tool = computeNodeTool(t, 'read'); return [tool.def.name, tool]; }),
 ]);
 
 /** The tool ids this host can offer a live agent turn. A host intersects this
@@ -591,6 +634,18 @@ export function builtinAgentToolIds(): readonly string[] {
  *  unregistered tool errors, and "it errored" is not evidence it opted in. */
 export function builtinAgentTool(id: string): BuiltinTool | undefined {
   return BUILTINS.get(id);
+}
+
+/** ADR 0834 D4 — every registered tool that declares `safeModeApproval`, with its
+ *  held-answer reason (undefined ⇒ the generic safe-mode reason). Read per lane build,
+ *  so a feature that registers a tool late is still covered. */
+export function declaredSafeModeApprovals(): Map<string, string | undefined> {
+  const out = new Map<string, string | undefined>();
+  for (const [id, tool] of BUILTINS) {
+    const d = tool.safeModeApproval;
+    if (d) out.set(id, d === true ? undefined : d.reason);
+  }
+  return out;
 }
 
 export function registerFeatureAgentTool(tool: BuiltinTool): void {
@@ -636,6 +691,10 @@ export interface AgentToolCallScope {
    *  `personalTenantOf(req)`, via `run.metadata.personalTenant`), so a req-less
    *  tenant gate can grant the implicit owner of an `anon:`/`user:` sandbox. */
   personalTenant?: string | undefined;
+  /** ADR 0832 D3 — the member who caused an actorless turn (a channel post), via
+   *  `run.metadata.orgScopeSubject`. Read only by org-membership floors; the
+   *  tools still act for nobody. */
+  orgScopeSubject?: string | undefined;
   /** The conversation the call runs inside (ADR 0309 — the unforgeable
    *  delivery destination for schedule-followup). */
   conversationId?: string | undefined;
@@ -657,6 +716,7 @@ export function createScopedAgentToolProvider(
     ...(scope.agentProfileId ? { agentProfileId: scope.agentProfileId } : {}),
     ...(scope.actingUserId ? { actingUserId: scope.actingUserId } : {}),
     ...(scope.personalTenant ? { personalTenant: scope.personalTenant } : {}),
+    ...(scope.orgScopeSubject ? { orgScopeSubject: scope.orgScopeSubject } : {}),
     ...(scope.conversationId ? { conversationId: scope.conversationId } : {}),
     ...(scope.onRunDispatched ? { onRunDispatched: scope.onRunDispatched } : {}),
   });
@@ -683,6 +743,11 @@ export function createAgentToolProvider(
         // `SyntaxError: Unexpected token 'B', "BEGIN UNTR"`.
         return await tool.run(input, scope);
       } catch (err) {
+        // ADR 0764 (grade-code CHATCD-3) — a LOST LEASE is not a tool failure: this
+        // instance no longer owns the run, and swallowing it into a tool error let
+        // the former owner keep looping its agent and complete the node. Propagate
+        // it to the executor's quiet abandon path (`executor.ts` re-throws it too).
+        if (err instanceof LeaseLostError) throw err;
         // RFC 0064 §F — preserve the THROWN error's structured code so the
         // dispatcher can name it on `agent.toolReturned.error.code` and suppress
         // `durationMs` for a capability-precondition gate (e.g. `featureSurfaces`

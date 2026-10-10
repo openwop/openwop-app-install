@@ -43,16 +43,16 @@ let n = 0;
 const enable = async (id: string, status: 'on' | 'off'): Promise<void> => { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status }, 'test'); };
 async function ownerWithMember(role: string): Promise<{ owner: ReturnType<typeof client>; member: ReturnType<typeof client>; orgId: string }> {
   const tenantId = `org:test-${Date.now()}-${n++}`;
-  const owner = client(); await owner.post('/v1/host/openwop-app/test/login', { email: `co-${Date.now()}-${n++}@acme.test`, tenantId });
-  const member = client(); const mr = await member.post('/v1/host/openwop-app/test/login', { email: `co-${Date.now()}-${n++}@acme.test`, tenantId });
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Shop' }); const orgId = org.body.orgId;
-  await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: mr.body.user.userId, roles: [role] });
+  const owner = client(); await owner.post('/host/openwop-app/test/login', { email: `co-${Date.now()}-${n++}@acme.test`, tenantId });
+  const member = client(); const mr = await member.post('/host/openwop-app/test/login', { email: `co-${Date.now()}-${n++}@acme.test`, tenantId });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Shop' }); const orgId = org.body.orgId;
+  await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: mr.body.user.userId, roles: [role] });
   return { owner, member, orgId };
 }
-const commerce = (orgId: string, s = ''): string => `/v1/host/openwop-app/commerce/orgs/${encodeURIComponent(orgId)}${s}`;
-const reco = (orgId: string, s = ''): string => `/v1/host/openwop-app/recommendations/orgs/${encodeURIComponent(orgId)}${s}`;
-const promo = (orgId: string, s = ''): string => `/v1/host/openwop-app/promotions/orgs/${encodeURIComponent(orgId)}${s}`;
-const disc = (orgId: string, s = ''): string => `/v1/host/openwop-app/discovery/orgs/${encodeURIComponent(orgId)}${s}`;
+const commerce = (orgId: string, s = ''): string => `/host/openwop-app/commerce/orgs/${encodeURIComponent(orgId)}${s}`;
+const reco = (orgId: string, s = ''): string => `/host/openwop-app/recommendations/orgs/${encodeURIComponent(orgId)}${s}`;
+const promo = (orgId: string, s = ''): string => `/host/openwop-app/promotions/orgs/${encodeURIComponent(orgId)}${s}`;
+const disc = (orgId: string, s = ''): string => `/host/openwop-app/discovery/orgs/${encodeURIComponent(orgId)}${s}`;
 const mkProduct = (cl: ReturnType<typeof client>, orgId: string, name: string, price: number, cats: string[] = ['photo']): Promise<Res> =>
   cl.post(commerce(orgId, '/products'), { type: 'physical', name, price, currency: 'USD', inventory: 100, categories: cats });
 
@@ -73,7 +73,7 @@ describe('recommendations — routes', () => {
     const a = await mkProduct(owner, orgId, 'Cheap', 50);
     await mkProduct(owner, orgId, 'Pricey', 120);
     await owner.post(reco(orgId, '/placements'), { slot: 'pdp', source: 'upsell' });
-    const path = `/v1/host/openwop-app/public-recommendations/${encodeURIComponent(orgId)}/resolve?slot=pdp&productId=${a.body.productId}`;
+    const path = `/host/openwop-app/public-recommendations/${encodeURIComponent(orgId)}/resolve?slot=pdp&productId=${a.body.productId}`;
     const plain = await owner.get(path);
     expect(plain.status).toBe(200);
     expect(plain.body.products.length).toBeGreaterThan(0); // Pricey (higher, same category)
@@ -88,7 +88,7 @@ describe('recommendations — routes', () => {
     const a = await mkProduct(owner, orgId, 'Cheap', 50);
     await mkProduct(owner, orgId, 'Pricey', 120);
     await owner.post(reco(orgId, '/placements'), { slot: 'pdp', source: 'upsell', segmentId: 'seg-x' });
-    const res = await owner.get(`/v1/host/openwop-app/public-recommendations/${encodeURIComponent(orgId)}/resolve?slot=pdp&productId=${a.body.productId}`);
+    const res = await owner.get(`/host/openwop-app/public-recommendations/${encodeURIComponent(orgId)}/resolve?slot=pdp&productId=${a.body.productId}`);
     expect(res.status).toBe(200);
     expect(res.body.products).toHaveLength(0); // targeted ⇒ inert for an anonymous public caller
   });
@@ -96,7 +96,7 @@ describe('recommendations — routes', () => {
   it('public resolve returns empty when the toggle is off (no error leak)', async () => {
     const { owner, orgId } = await ownerWithMember('owner');
     await enable('recommendations', 'off');
-    const res = await owner.get(`/v1/host/openwop-app/public-recommendations/${encodeURIComponent(orgId)}/resolve?slot=pdp`);
+    const res = await owner.get(`/host/openwop-app/public-recommendations/${encodeURIComponent(orgId)}/resolve?slot=pdp`);
     expect(res.status).toBe(200);
     expect(res.body.products).toHaveLength(0);
     await enable('recommendations', 'on');
@@ -155,7 +155,7 @@ describe('discovery — routes', () => {
     expect(col.status, JSON.stringify(col.body)).toBe(201);
     expect((await member.post(disc(orgId, '/collections'), { name: 'x', type: 'manual' })).status).toBe(403);
     await mkProduct(owner, orgId, 'Camera', 100);
-    const search = await owner.get(`/v1/host/openwop-app/public-discovery/${encodeURIComponent(orgId)}/search?q=Camera`);
+    const search = await owner.get(`/host/openwop-app/public-discovery/${encodeURIComponent(orgId)}/search?q=Camera`);
     expect(search.status).toBe(200);
     expect(search.body.products.length).toBeGreaterThan(0);
     // R2 PD2-3 (review B1) — the honest counts must reach the WIRE. They were computed,
@@ -173,7 +173,7 @@ describe('discovery — routes', () => {
     expect(opSearch.body.total).toBe(opSearch.body.products.length);
     expect(opSearch.body.hiddenByRules).toBe(0);
     await enable('discovery', 'off');
-    const off = await owner.get(`/v1/host/openwop-app/public-discovery/${encodeURIComponent(orgId)}/search?q=Camera`);
+    const off = await owner.get(`/host/openwop-app/public-discovery/${encodeURIComponent(orgId)}/search?q=Camera`);
     expect(off.body.products).toHaveLength(0);
     await enable('discovery', 'on');
   });

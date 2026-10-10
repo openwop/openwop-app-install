@@ -6,6 +6,8 @@ import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
 import { setRouterConfig, setRouterEnabled } from '../src/features/model-router/configService.js';
 import { resolveModelRoute } from '../src/features/model-router/resolveRoute.js';
+import { registerToggleDefault } from '../src/host/featureToggles/registry.js';
+import { modelRouterFeature } from '../src/features/model-router/feature.js';
 
 const T = 'mrr-tenant';
 const ORG = 'org-mrr';
@@ -15,7 +17,12 @@ const cfg = {
   fallback: { provider: 'anthropic', model: 'small' },
 };
 
-beforeAll(async () => { initHostExtPersistence(await openStorage('memory://')); });
+beforeAll(async () => {
+  initHostExtPersistence(await openStorage('memory://'));
+  // ADR 0820 §8.2 — the router resolves only while its feature is enabled; register the
+  // default (ON) the way boot does. The refusal arm lives in adr0820-core-reclass.test.ts.
+  registerToggleDefault(modelRouterFeature.toggleDefault!);
+});
 
 describe('resolveModelRoute', () => {
   it('returns null when no config exists (router off → explicit model kept)', async () => {

@@ -29,8 +29,16 @@ import { randomUUID } from 'node:crypto';
 import { OpenwopError } from '../types.js';
 import { createLogger } from '../observability/logger.js';
 import { DurableCollection } from './hostExtPersistence.js';
+import { hostEventTypeSpellings, v2HostEventType } from './hostEventNames.js';
+import { hostEventEntryForEmitted, hostEventsV2Enabled } from './hostEventTypes.js';
+import { tenantMayUseFeature } from './tenantFeatureGate.js';
+import { isSellableBundleFeature } from './featureBundles.js';
+import { WorkflowFeatureRefusedError } from './workflowFeatureGate.js';
+import { onWorkflowForked } from './workflowsRegistry.js';
+import { casRepoint } from './forkRepoint.js';
 import { checkAutonomousRunBudget } from './runBudgetService.js';
 import type { StartRunDeps } from './runStarter.js';
+import { resolveTenantWorkflow } from './resolveLaunchDefinition.js';
 
 const log = createLogger('host.events');
 
@@ -209,15 +217,29 @@ export function chainIdOfDefinition(definition: { metadata?: unknown } | null | 
  *  unreadable definition answers `false` — the binding then proceeds to
  *  `startRun`, which resolves (and refuses) the same id on its own path; this
  *  guard never widens what a binding can start, it only narrows it. */
-async function boundWorkflowSharesChain(workflowId: string, chainId: string): Promise<boolean> {
+async function boundWorkflowSharesChain(tenantId: string, workflowId: string, chainId: string): Promise<boolean> {
   if (!deps) return false;
   try {
-    const wf = await deps.hostSuite.workflowCatalog.getWorkflow(workflowId);
+    const wf = await resolveTenantWorkflow(deps.hostSuite.workflowCatalog, tenantId, workflowId); // ADR 0823
     return chainIdOfDefinition(wf?.definition) === chainId;
   } catch (err) {
     log.warn('host_event_lineage_resolve_failed', { workflowId, chainId, error: err instanceof Error ? err.message : String(err) });
     return false;
   }
+}
+
+/**
+ * ADR 0820 §7 / G10 — the feature that owns a host event: the `<feature>`
+ * segment of `host.<feature>.<entity>.<verb>` (read through the ADR 0792 v2
+ * projection, so `crm.segment.entered` and the `openwop-app.` spellings resolve
+ * too). `null` for a name this host does not own. A segment with no registered
+ * toggle (`kanban`, `users`, …) is core and resolves as always-on downstream.
+ */
+export function hostEventOwningFeature(type: string): string | null {
+  const v2 = v2HostEventType(type);
+  if (!v2) return null;
+  const seg = v2.split('.')[1];
+  return seg && seg.length > 0 ? seg : null;
 }
 
 /**
@@ -235,15 +257,46 @@ export async function emitHostEvent(event: HostEvent): Promise<void> {
     const envelope: HostEventEnvelope = {
       ...wireEvent,
       payload: safePayload,
-      eventId: `hev:${randomUUID()}`,
+      // ADR 0825 P1 — under the RFC 0236 flag the id is minted in the v2
+      // `eventId` grammar (no `:`), so the webhook body, the `/host/events`
+      // frame and `run.metadata.hostEvent.eventId` carry ONE id. Flag off: unchanged.
+      eventId: hostEventsV2Enabled() ? `hev-${randomUUID()}` : `hev:${randomUUID()}`,
       timestamp: new Date().toISOString(),
     };
+    // ADR 0820 §7 / G10 — started BEFORE the webhook fanout so the binding loop
+    // below pays no added latency after delivery (see the gate below). Never throws.
+    const eventFeature = hostEventOwningFeature(event.type);
+    const featureUsable: Promise<boolean> = eventFeature && isSellableBundleFeature(eventFeature)
+      ? tenantMayUseFeature(eventFeature, event.tenantId)
+      : Promise.resolve(true);
     await deps.deliverWebhooks(envelope).catch((err) => {
       log.warn('host_event_webhook_fanout_failed', { type: event.type, error: err instanceof Error ? err.message : String(err) });
     });
+    // ADR 0792 — a binding may name the event in either spelling (the in-process
+    // v1 name, or its v2 `openwop-app.` projection); stored rows are never rewritten.
+    // ADR 0825 / RFC 0236 — and in its two-segment `hostEvents` type
+    // (`openwop-app.crm-contact-created`). The binding route has always ACCEPTED
+    // that spelling (`isV2HostEventName` allows two segments after the org), so
+    // without it here such a binding was stored and then never fired.
+    const spellings = new Set(hostEventTypeSpellings(event.type));
+    const advertised = hostEventEntryForEmitted(event.type)?.type;
+    if (advertised !== undefined) spellings.add(advertised);
     const matched = (await bindings.listForTenantIndexed(event.tenantId)).filter(
-      (b) => b.enabled && b.eventType === event.type,
+      (b) => b.enabled && spellings.has(b.eventType),
     );
+    // ADR 0820 §7 / G10 — a binding starts workflows off a FEATURE's event, so
+    // the event's owning feature must be usable by this tenant (toggle + plan).
+    // A silent, cheap skip: the webhook fanout above is the normative wire and
+    // stays ungated.
+    //
+    // Only for a SELLABLE bundle feature: a non-sellable toggle (`orgs`,
+    // `forms`, …) is not a paywall, and several of their emitters do not gate
+    // on their own toggle, so refusing their bindings would break automation
+    // the feature itself still performs.
+    if (matched.length > 0 && !(await featureUsable)) {
+      log.debug('host_event_bindings_skipped_feature', { type: event.type, tenantId: event.tenantId, featureId: eventFeature });
+      return;
+    }
     for (const binding of matched) {
       // ADR 0617 D1a — self-trigger guard. An event emitted from INSIDE a run of
       // the bound workflow must not start another run of that same workflow.
@@ -265,7 +318,7 @@ export async function emitHostEvent(event: HostEvent): Promise<void> {
       // (the admin/SCIM lanes pay no read); the bound definition's stamp is the
       // honest source (`expandedFrom.chainId`), not the id's spelling — a
       // builder copy keeps the stamp and drops the `chainId:` prefix.
-      if (origin?.chainId !== undefined && await boundWorkflowSharesChain(binding.workflowId, origin.chainId)) {
+      if (origin?.chainId !== undefined && await boundWorkflowSharesChain(binding.tenantId, binding.workflowId, origin.chainId)) {
         log.info('host_event_chain_lineage_skipped', {
           type: event.type,
           tenantId: event.tenantId,
@@ -295,9 +348,21 @@ export async function emitHostEvent(event: HostEvent): Promise<void> {
             triggerData: { eventName: event.type, payload: safePayload },
             hostEvent: { eventId: envelope.eventId, bindingId: binding.bindingId },
           },
+          // ADR 0832 D3 (review B2) — whoever armed the trigger chose the workflow
+          // and its params, so their org memberships bound what the fire may reach.
+          // It narrows only; the fire still acts for nobody. `createdBy` is the
+          // creating request's principal id, which equals the member key on the
+          // cookie lane; a bearer-created binding fails closed (ADR 0832 residue).
+          ...(binding.createdBy && binding.createdBy !== 'anonymous' ? { orgScopeSubject: binding.createdBy } : {}),
         });
         if (runId) log.info('host_event_triggered_run', { type: event.type, workflowId: binding.workflowId, runId });
       } catch (err) {
+        // ADR 0820 §7 / G6 — the bound WORKFLOW's owning feature refused at the
+        // funnel: the expected steady state for a lapsed tenant, not an error.
+        if (err instanceof WorkflowFeatureRefusedError) {
+          log.debug('host_event_binding_feature_refused', { type: event.type, workflowId: binding.workflowId, featureId: err.featureId, blockedBy: err.blockedBy });
+          continue;
+        }
         const reason = err instanceof OpenwopError ? ((err.details as { reason?: string } | undefined)?.reason ?? err.code) : (err instanceof Error ? err.message : String(err));
         log.warn('host_event_binding_dispatch_failed', { type: event.type, workflowId: binding.workflowId, bindingId: binding.bindingId, reason });
       }
@@ -311,3 +376,14 @@ export async function emitHostEvent(event: HostEvent): Promise<void> {
 export async function __clearHostEventBindings(): Promise<void> {
   await bindings.__clear();
 }
+
+// ADR 0789 — an event source this tenant bound to a SHARED workflow starts the
+// tenant's fork of it once the tenant has edited it.
+onWorkflowForked('host-event:binding', async (tenantId, from, to) => {
+  let n = 0;
+  for (const row of await listHostEventBindings(tenantId)) {
+    if (row.workflowId !== from) continue;
+    if (await casRepoint(bindings, row.bindingId, (r) => (r.workflowId === from && r.tenantId === tenantId ? { ...r, workflowId: to } : null))) n += 1;
+  }
+  return n;
+});

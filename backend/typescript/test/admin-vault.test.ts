@@ -19,7 +19,7 @@ import { setSecret } from '../src/byok/secretResolver.js';
 let server: http.Server;
 let BASE: string;
 const ADMIN = { authorization: 'Bearer dev-token', 'content-type': 'application/json' };
-const VAULT = '/v1/host/openwop-app/vault';
+const VAULT = '/host/openwop-app/vault';
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -86,6 +86,23 @@ describe('ADR 0389 P2 — secrets vault', () => {
     expect(conn.status).toBe(403); // delegated tokens never reveal
   });
 
+  it('ADR 0779 D2: refs another lifecycle owns are never set, revealed or rotated raw here (not only connection:*)', async () => {
+    for (const ref of ['connection-inbound:c1', 'subscription:github.copilot', 'compat-key:compat-1', 'pm-peer:p1', 'email-webhook:w1']) {
+      const add = await fetch(`${BASE}${VAULT}/secrets`, {
+        method: 'POST', headers: ADMIN, body: JSON.stringify({ credentialRef: ref, value: 'x'.repeat(24), scope: 'host' }),
+      });
+      expect(add.status, `vault add of ${ref}`).toBe(400);
+      const reveal = await fetch(`${BASE}${VAULT}/secrets/${encodeURIComponent(ref)}/reveal`, {
+        method: 'POST', headers: ADMIN, body: JSON.stringify({ scope: 'host' }),
+      });
+      expect(reveal.status, `vault reveal of ${ref}`).toBe(400);
+      const rotate = await fetch(`${BASE}${VAULT}/secrets/${encodeURIComponent(ref)}/rotate`, {
+        method: 'POST', headers: ADMIN, body: JSON.stringify({ value: 'y'.repeat(24), scope: 'host' }),
+      });
+      expect(rotate.status, `vault rotate of ${ref}`).toBe(400);
+    }
+  });
+
   it('reveal demands step-up for a non-wildcard session (cookie caller ⇒ 403 stepup_required)', async () => {
     // Become a superadmin TENANT via env; the anon cookie session has no fresh
     // auth_time ⇒ fail closed.
@@ -93,8 +110,8 @@ describe('ADR 0389 P2 — secrets vault', () => {
     const setCookie = mint.headers.get('set-cookie') ?? '';
     const m = /(__session=[^;]+)/.exec(setCookie);
     expect(m).toBeTruthy();
-    // Extract the anon tenant from a whoami-ish route: use /v1/host/openwop-app/me/workspaces
-    const who = await fetch(`${BASE}/v1/host/openwop-app/me/workspaces`, { headers: { cookie: m![1]! } });
+    // Extract the anon tenant from a whoami-ish route: use /host/openwop-app/me/workspaces
+    const who = await fetch(`${BASE}/host/openwop-app/me/workspaces`, { headers: { cookie: m![1]! } });
     expect(who.status).toBe(200);
     const personal = ((await who.json()) as { personal: string }).personal;
     process.env.OPENWOP_SUPERADMIN_TENANTS = personal;
@@ -131,9 +148,9 @@ describe('ADR 0389 P2 — secrets vault', () => {
     // Bind the secret as a tenant's headless-AI default → a live consumer.
     // (Tenant-scoped: the consumer check keys off the CALLER's tenant, so use a
     // tenant superadmin session.)
-    const mint = await fetch(`${BASE}/v1/host/openwop-app/me/workspaces`);
+    const mint = await fetch(`${BASE}/host/openwop-app/me/workspaces`);
     const cookie = /(__session=[^;]+)/.exec(mint.headers.get('set-cookie') ?? '')?.[1] ?? '';
-    const who = await fetch(`${BASE}/v1/host/openwop-app/me/workspaces`, { headers: { cookie } });
+    const who = await fetch(`${BASE}/host/openwop-app/me/workspaces`, { headers: { cookie } });
     const personal = ((await who.json()) as { personal: string }).personal;
     process.env.OPENWOP_SUPERADMIN_TENANTS = personal;
     try {
@@ -172,9 +189,9 @@ describe('ADR 0389 P2 — secrets vault', () => {
    */
   describe('delete refuses when consumers are UNKNOWN (ENG-2)', () => {
     it('host-scoped secret: cross-tenant consumers are not enumerable → 409, not a silent delete', async () => {
-      const mint = await fetch(`${BASE}/v1/host/openwop-app/me/workspaces`);
+      const mint = await fetch(`${BASE}/host/openwop-app/me/workspaces`);
       const cookie = /(__session=[^;]+)/.exec(mint.headers.get('set-cookie') ?? '')?.[1] ?? '';
-      const who = await fetch(`${BASE}/v1/host/openwop-app/me/workspaces`, { headers: { cookie } });
+      const who = await fetch(`${BASE}/host/openwop-app/me/workspaces`, { headers: { cookie } });
       const personal = ((await who.json()) as { personal: string }).personal;
       process.env.OPENWOP_SUPERADMIN_TENANTS = personal;
       try {

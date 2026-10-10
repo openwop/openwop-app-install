@@ -19,7 +19,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { __clearToggleStore } from '../src/host/featureToggles/service.js';
 import { __resetAssistantStore, getPendingAction } from '../src/features/assistant/assistantService.js';
-import { enqueueActionWithApproval, decideActionViaApproval } from '../src/features/assistant/actionApproval.js';
+import { enqueueActionWithApproval, decideActionViaApproval, contentHashOf } from '../src/features/assistant/actionApproval.js';
 import { __hostExtStorage } from '../src/host/hostExtPersistence.js';
 import type { NotificationRecord } from '../src/types.js';
 
@@ -70,7 +70,7 @@ describe('AST-UX-1 — the approver is told when their approved action does not 
       payload: { to: ['dana@example.com'] },
       draft: 'Hi Dana — the Q3 numbers.',
     });
-    const decided = await decideActionViaApproval(TENANT, action.approvalId!, 'approved', { decidedByUserId: APPROVER });
+    const decided = await decideActionViaApproval(TENANT, action.approvalId!, 'approved', { expectedContentHash: contentHashOf(action), decidedByUserId: APPROVER });
     expect(decided?.changed).toBe(true);
 
     // No Google connection exists, so the Phase-D seam fails closed and the
@@ -104,7 +104,7 @@ describe('AST-UX-1 — the approver is told when their approved action does not 
       payload: {},
       draft: 'You have not spoken with Alex in 3 weeks.',
     });
-    await decideActionViaApproval(TENANT, action.approvalId!, 'approved', { decidedByUserId: APPROVER });
+    await decideActionViaApproval(TENANT, action.approvalId!, 'approved', { expectedContentHash: contentHashOf(action), decidedByUserId: APPROVER });
     expect(await waitForStatus(action.actionId, ['sent', 'failed'])).toBe('sent');
     expect(await addressedReceipts(action.actionId)).toEqual([]);
   }, 20_000);

@@ -24,6 +24,21 @@
  * invitation and sends ONE real (fake-endpoint) email; a `:fork` in replay mode
  * completes WITH the recorded outputs, mints NO second row, sends NO second
  * email, and emits NO second `created`.
+ *
+ * Sabotage that turns it red: `"role": "side-effect"` → `"action"` in
+ * `packs/feature.orgs.nodes/pack.json` (leg 1); the orgs entry deleted from
+ * `SIDE_EFFECTING_TYPE_PATTERNS` (leg 2); the invite entry dropped from
+ * `MANIFEST_SIDE_EFFECT_FLOOR` or `MANIFEST_FAST_PATH_SERVED`
+ * (`sideEffectFloor.generated.ts`); `isSideEffectingNode` returning false for
+ * the invite (the predicate case AND the behavioural fork, which then re-mints
+ * and re-sends); the `requiredPacks` version drifted from the manifest; a
+ * `token` property added to the invite output schema.
+ *
+ * WAITS. Emits need no wait (`emitHostEvent` calls `deliverWebhooks` before its
+ * first await, inside the node's own surface call, so `delivered` is final once
+ * the run is terminal). The only wait is `settleRun`, a bounded poll for a
+ * TERMINAL run status over HTTP — a condition, not a sleep; its 25 ms poll
+ * interval is the recorded ceiling of driving a real run through `createApp`.
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -126,17 +141,25 @@ describe('BEHAVIOURAL — a replay :fork is served the recorded outcome and neve
   let cookie = '';
   let requests: Array<{ body: string }> = [];
   const delivered: HostEventEnvelope[] = [];
-  const TENANT = `org:u622-replay-${Date.now()}`;
-  const call = async (method: string, path: string, body?: unknown): Promise<{ status: number; body: any }> => {
+  const TENANT = 'org:u622-replay'; // fixed: one createApp per file, nothing collides
+  interface RunBody {
+    runId?: string;
+    status?: string;
+    error?: unknown;
+    user?: { userId: string };
+    events?: Array<{ type: string; nodeId?: string; payload?: { outputs?: Record<string, unknown> } }>;
+  }
+  const call = async (method: string, path: string, body?: unknown): Promise<{ status: number; body: RunBody }> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    return { status: res.status, body: await res.json().catch(() => undefined) };
+    const parsed: unknown = await res.json().catch(() => ({}));
+    return { status: res.status, body: (parsed ?? {}) as RunBody };
   };
   /** Terminal status, with the run's error folded in so a red names the cause. */
   const settleRun = async (runId: string): Promise<string> => {
-    let snap: { status?: string; error?: unknown } = {};
+    let snap: RunBody = {};
     for (let i = 0; i < 200; i++) {
-      snap = (await call('GET', `/v1/runs/${runId}`)).body ?? snap;
+      snap = (await call('GET', `/runs/${runId}`)).body;
       if (['completed', 'failed', 'cancelled'].includes(snap.status ?? '')) break;
       await new Promise((r) => setTimeout(r, 25));
     }
@@ -188,47 +211,45 @@ describe('BEHAVIOURAL — a replay :fork is served the recorded outcome and neve
     // The first login into an explicit, absent workspace FOUNDS and OWNS it —
     // the owner holds host:members:manage at the root org, so the surface's
     // authority check passes; the owner's own brokered connection delivers.
-    const login = await call('POST', '/v1/host/openwop-app/test/login', { email: 'replay-owner@acme.test', tenantId: TENANT, displayName: 'Rae Owner' });
+    const login = await call('POST', '/host/openwop-app/test/login', { email: 'replay-owner@acme.test', tenantId: TENANT, displayName: 'Rae Owner' });
     expect(login.status).toBe(201);
-    const ownerId = login.body.user.userId as string;
+    const ownerId = login.body.user!.userId;
     await setSenderAddress(TENANT, TENANT, 'invites@acme.test', 'test');
     await createSecretConnection({ tenantId: TENANT, provider: 'sendgrid', kind: 'api_key', secret: 'SG.replay', scope: 'user', userId: ownerId });
 
     const workflowId = 'orgs.replay.invite';
     registerWorkflow({ workflowId, nodes: [{ nodeId: 'n1', typeId: INVITE, config: { email: 'newhire@acme.test', role: 'editor' } }], edges: [] });
-    const create = await call('POST', '/v1/runs', { workflowId, inputs: {} });
+    const create = await call('POST', '/runs', { workflowId, inputs: {} });
     expect(create.status, JSON.stringify(create.body)).toBe(201);
-    const runId = create.body.runId as string;
+    const runId = create.body.runId!;
     expect(await settleRun(runId)).toBe('completed');
     const afterLive = await listInvitations(TENANT, TENANT);
     expect(afterLive).toHaveLength(1);
     expect(afterLive[0]).toMatchObject({ email: 'newhire@acme.test', role: 'editor', createdBy: ownerId, createdByName: 'Rae Owner' });
     expect(requests).toHaveLength(1);
     expect(requests[0]!.body).toContain('https://app.replay.test/invitations/accept?token=');
-    await new Promise((r) => setTimeout(r, 15));
     expect(ofType('host.orgs.invitation.created')).toHaveLength(1);
     expect(ofType('host.orgs.invitation.created')[0]!.payload).toMatchObject({ inviteId: afterLive[0]!.inviteId, delivery: 'sent', superseded: false });
-    const liveBundle = await call('GET', `/v1/runs/${runId}/debug-bundle`);
-    const liveDone = ((liveBundle.body?.events as Array<{ type: string; nodeId?: string; payload?: { outputs?: Record<string, unknown> } }>) ?? []).find((e) => e.type === 'node.completed' && e.nodeId === 'n1');
+    const liveBundle = await call('GET', `/runs/${runId}/debug-bundle`);
+    const liveDone = (liveBundle.body.events ?? []).find((e) => e.type === 'node.completed' && e.nodeId === 'n1');
     expect(liveDone?.payload?.outputs).toEqual({ inviteId: afterLive[0]!.inviteId, orgId: TENANT, delivery: 'sent' });
 
     // Fork in replay mode: the side-effect node must be SERVED its recorded
     // outcome, never re-executed — a re-mint would be a NEW inviteId that
     // supersedes (kills) the link already in the recipient's inbox.
     const before = delivered.length;
-    const fork = await call('POST', `/v1/runs/${runId}:fork`, { mode: 'replay' });
+    const fork = await call('POST', `/runs/${runId}:fork`, { mode: 'replay' });
     expect(fork.status, JSON.stringify(fork.body)).toBe(201);
-    expect(await settleRun(fork.body.runId as string)).toBe('completed');
+    expect(await settleRun(fork.body.runId!)).toBe('completed');
     const afterFork = await listInvitations(TENANT, TENANT);
     expect(afterFork.map((i) => i.inviteId)).toEqual([afterLive[0]!.inviteId]); // same row, no second mint
     expect(afterFork[0]!.tokenHash).toBe(afterLive[0]!.tokenHash); // the emailed link still resolves
     expect(requests).toHaveLength(1); // no second email
-    await new Promise((r) => setTimeout(r, 15));
     expect(delivered.length).toBe(before);
     expect(ofType('host.orgs.invitation.created')).toHaveLength(1);
     // The fork's node completed WITH the recorded outputs.
-    const bundle = await call('GET', `/v1/runs/${fork.body.runId}/debug-bundle`);
-    const done = ((bundle.body?.events as Array<{ type: string; nodeId?: string; payload?: { outputs?: Record<string, unknown> } }>) ?? []).find((e) => e.type === 'node.completed' && e.nodeId === 'n1');
+    const bundle = await call('GET', `/runs/${fork.body.runId}/debug-bundle`);
+    const done = (bundle.body.events ?? []).find((e) => e.type === 'node.completed' && e.nodeId === 'n1');
     expect(done?.payload?.outputs).toEqual({ inviteId: afterLive[0]!.inviteId, orgId: TENANT, delivery: 'sent' });
   });
 });

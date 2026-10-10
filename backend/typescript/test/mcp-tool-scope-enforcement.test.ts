@@ -25,13 +25,12 @@
 
 import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
-import { listTools, isToolAllowed, requiredScopeForTool } from '../src/host/mcpServerRegistry.js';
+import { listTools, isToolAllowed, isToolAllowedWith, requiredScopeForTool, type ExposedToolManifest } from '../src/host/mcpServerRegistry.js';
 import { toDescriptor } from '../src/routes/toolCatalog.js';
 import { createMember } from '../src/host/accessControlService.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import type { Principal } from '../src/types.js';
-import { registerWorkflow } from '../src/host/workflowsRegistry.js';
 
 const T = 'tenant-scope-gate';
 
@@ -50,7 +49,7 @@ beforeAll(async () => {
   // would resolve to owner and the fail-closed case would pass vacuously.
   delete process.env.OPENWOP_DEMO_MODE;
   await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  for (const id of ['notebooks', 'kb', 'users', 'commerce-ucp', 'app-builder', 'docs']) {
+  for (const id of ['notebooks', 'kb', 'users', 'commerce-ucp', 'app-builder', 'docs', 'claude-code']) {
     const d = getToggleDefault(id);
     if (d) await saveConfig({ ...d, status: 'on' }, 'test');
   }
@@ -64,14 +63,23 @@ beforeAll(async () => {
 // and the parity assertions below would agree with a catalog that re-derived its
 // own scope. (That is not hypothetical — a first draft of this file was GREEN
 // under exactly that sabotage. See ADR 0601 § Witnesses.)
-registerWorkflow({
+//
+// ADR 0788 D1 — it is now a HOST-source manifest built here, not a workflow put
+// in the global registry: the MCP registry no longer reads that registry at all
+// (it leaked every tenant's tools to every caller, `MCPWF-1`), and a WORKSPACE
+// tool is never ungated. So the null branch is reachable only for a host
+// projection that carries no metadata — none ships today — and this is the only
+// honest way left to walk it.
+const ungatedHost: ExposedToolManifest = {
+  name: 'adr0601-ungated-sample',
+  description: 'An ungated sample tool.',
+  inputSchema: { type: 'object', additionalProperties: true },
   workflowId: 'test.adr0601.ungated-tool',
-  nodes: [{ nodeId: 'expose', typeId: 'core.openwop.mcp.expose-tool', config: { name: 'adr0601-ungated-sample', description: 'An ungated sample tool.', inputSchema: { type: 'object', additionalProperties: true } } }],
-  edges: [],
-} as never);
+  source: 'host',
+};
 
 const tool = (name: string) => {
-  const t = listTools().find((x) => x.name === name);
+  const t = [...listTools(), ungatedHost].find((x) => x.name === name);
   expect(t, `tool ${name} is not registered — the assertion below would be vacuous`).toBeTruthy();
   return t!;
 };
@@ -121,6 +129,10 @@ describe('ADR 0601 / NBC-3 — a write tool enforces the scope it advertises', (
       'app-builder-create-project',
       'app-builder-render-design',
       'app-builder-resolve-paused-task',
+      // ADR 0785 P3 — files onto the CALLER'S OWN personal board; a deliberate bump.
+      'claude-code-add-todo',
+      // ADR 0785 P4 — files an owner-only approval card and waits; a deliberate bump.
+      'claude-code-permission',
       'notebook-add-source',
       'notebook-create-note',
       'ucp-place-order',
@@ -157,7 +169,7 @@ describe('ADR 0601 / NBC-3 — a write tool enforces the scope it advertises', (
     // descriptor claims, the gate honours, and whatever it claims nothing for,
     // the gate lets through. Drift in either direction is red.
     const seen = { claimed: 0, unclaimed: 0 };
-    for (const t of listTools()) {
+    for (const t of [...listTools(), ungatedHost]) {
       const advertised = (toDescriptor(t).auth as { scopes: string[] }).scopes;
       if (advertised.length === 0) {
         // Claims nothing ⇒ must be reachable by a principal holding nothing.
@@ -177,5 +189,26 @@ describe('ADR 0601 / NBC-3 — a write tool enforces the scope it advertises', (
     // registered — sabotage H's first green was exactly this branch being empty.)
     expect(seen.claimed, 'tools advertising a scope').toBeGreaterThanOrEqual(19);
     expect(seen.unclaimed, 'tools advertising none').toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe('ADR 0788 D1 — a WORKSPACE tool is gated by the launch predicate, never by its author metadata', () => {
+  const planted: ExposedToolManifest = {
+    name: 'planted', inputSchema: { type: 'object' }, workflowId: 'wf.planted', source: 'workspace',
+    // What a malicious author would declare to get past the ADR 0601 gate —
+    // the manifest builder overrides it, and the gate ignores it regardless.
+    mcpSafetyTier: 'read',
+  };
+
+  it('advertises the launch scopes, whatever the author declared', () => {
+    expect((toDescriptor(planted).auth as { scopes: string[] }).scopes).toEqual(['workspace:write', 'runs:create']);
+    expect(toDescriptor(planted).safetyTier).toBe('write');
+  });
+
+  it('is refused without launch authority, even for a principal holding workspace:write', async () => {
+    const authority = async () => ['workspace:read', 'workspace:write'] as never;
+    expect(await isToolAllowedWith(planted, writer, authority, { tenantId: T, workspaceLaunch: false })).toBe(false);
+    expect(await isToolAllowedWith(planted, writer, authority)).toBe(false);
+    expect(await isToolAllowedWith(planted, writer, authority, { tenantId: T, workspaceLaunch: true })).toBe(true);
   });
 });

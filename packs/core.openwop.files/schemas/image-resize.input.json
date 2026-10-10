@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/core.openwop.files/1.0.0/image-resize.input.json",
+  "$id": "https://packs.openwop.dev/core.openwop.files/1.0.1/image-resize.input.json",
   "title": "ImageResizeInput",
   "type": "object",
   "required": [

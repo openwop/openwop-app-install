@@ -34,8 +34,11 @@ import { useTranslation } from 'react-i18next';
 import type { ReactNode } from 'react';
 import { useBYOKConfig } from '../byok/lib/useBYOKConfig.js';
 import { StateCard } from '../ui/StateCard.js';
-import { KeyIcon } from '../ui/icons/index.js';
-import { EmbeddedConversation } from './EmbeddedConversation.js';
+import { AlertIcon, KeyIcon } from '../ui/icons/index.js';
+import { SessionExpiredCard } from './SessionExpiredCard.js';
+import { EmbeddedConversation, type EmbedBeforeSend, type EmbedToolActivity } from './EmbeddedConversation.js';
+
+export type { EmbedBeforeSend, EmbedToolActivity };
 
 export function EmbeddedChatPanel({
   agentId,
@@ -44,6 +47,14 @@ export function EmbeddedChatPanel({
   onManageProvider,
   byokFallback,
   onTurnSettled,
+  contextLabel,
+  density = 'dock',
+  beforeSend,
+  onConversationId,
+  onToolActivity,
+  prompt,
+  stopSignal,
+  focus,
 }: {
   agentId: string;
   renderEmptyState?: (onPick: (text: string) => void) => ReactNode;
@@ -54,10 +65,28 @@ export function EmbeddedChatPanel({
   onManageProvider?: () => void;
   /** Replace the default BYOK gate UI entirely (rare). */
   byokFallback?: ReactNode;
+  /** ADR 0768 P5 — what this agent can see, stated up front ("Can see: this
+   *  workflow"). The FEATURE supplies it: only it knows the scope it grants. */
+  contextLabel?: ReactNode;
+  /** ADR 0768 P5 — `dock` (a side panel; default) or `pocket` (a compact
+   *  popover). Presentation only; the conversation is identical. */
+  density?: 'dock' | 'pocket';
+  /** ADR 0773 — see `EmbeddedConversation`. Generic, chat-owned seams: a
+   *  feature prepares its own state before a send, learns the session id, and
+   *  hears tool call/return TRIGGERS (never results). */
+  beforeSend?: EmbedBeforeSend;
+  onConversationId?: (conversationId: string) => void;
+  onToolActivity?: (activity: EmbedToolActivity) => void;
+  prompt?: { id: number; text: string } | null;
+  stopSignal?: number;
+  /** ADR 0777 — bind the conversation to the entity beside it, so the agent's
+   *  tools default to it. `label` replaces `contextLabel` ONLY once the server
+   *  accepts the binding (it checks the caller may read the entity). */
+  focus?: { kind: 'canvas'; id: string; label: ReactNode };
 }): JSX.Element {
   const { t } = useTranslation('chat');
   const navigate = useNavigate();
-  const { config, isValid, status } = useBYOKConfig();
+  const { config, isValid, status, refresh } = useBYOKConfig();
   const manageProvider = onManageProvider ?? ((): void => { void navigate('/'); });
 
   // ADR 0517 — while the binding is still resolving we know NOTHING, so claiming
@@ -67,6 +96,26 @@ export function EmbeddedChatPanel({
 
   if (!config || !isValid) {
     if (byokFallback !== undefined) return <>{byokFallback}</>;
+    // ADR 0764 (grade-ux CHATUX-2) — only `needs-key` means "connect a provider".
+    // A signed-out user's keys still exist (sign in, NEVER the wizard) and an
+    // outage is never a reason to ask for a key — the same three-way split the
+    // full chat has made since ADR 0517 (`ChatTab.tsx`). The embed used to fold
+    // all three into "Connect an AI provider".
+    if (status === 'session-expired') {
+      return <div className="embed-byok-gate"><SessionExpiredCard onUseWizard={manageProvider} /></div>;
+    }
+    if (status === 'error') {
+      return (
+        <div className="embed-byok-gate">
+          <StateCard
+            icon={<AlertIcon aria-hidden />}
+            title={t('embedProviderUnreachable')}
+            announce
+            action={<Button variant="secondary" onClick={() => { void refresh(); }}>{t('common:retry')}</Button>}
+          />
+        </div>
+      );
+    }
     // The chat surface (route `/`) owns BYOK setup; send the user there.
     // A DESIGNED gate state (grade-pass ST-2): consumers give the panel a tall
     // flex column (`.studio-author-panel`, `.commerce-assistant-panel`), so a
@@ -91,6 +140,14 @@ export function EmbeddedChatPanel({
       {...(tenantId !== undefined ? { tenantId } : {})}
       {...(renderEmptyState ? { renderEmptyState } : {})}
       {...(onTurnSettled ? { onTurnSettled } : {})}
+      {...(contextLabel !== undefined ? { contextLabel } : {})}
+      density={density}
+      {...(beforeSend ? { beforeSend } : {})}
+      {...(onConversationId ? { onConversationId } : {})}
+      {...(onToolActivity ? { onToolActivity } : {})}
+      {...(prompt !== undefined ? { prompt } : {})}
+      {...(stopSignal !== undefined ? { stopSignal } : {})}
+      {...(focus ? { focus } : {})}
     />
   );
 }

@@ -30,8 +30,16 @@
 #   scripts/deploy.sh --frontend-only
 #   scripts/deploy.sh --allow-unverified-live    # passed through to preflight
 #   scripts/deploy.sh --preflight-only           # stamp + gate, deploy nothing
+#   scripts/deploy.sh --publish-evidence         # after a VERIFIED backend deploy,
+#                                                # also run publish-evidence.sh (~10 min
+#                                                # load test) so the §D pointer is not
+#                                                # left PENDING for the new commit
 #   scripts/deploy.sh --skip-certify             # ship with the RFC 0089 §D
 #                                                # pointer ABSENT (never stale)
+#   scripts/deploy.sh --retire-previous          # delete the superseded revision
+#                                                # after verify (ADR 0802; opt-in)
+#   scripts/deploy.sh --ignore-hour-window       # do NOT hold a backend build that
+#                                                # would boot near the top of an hour
 
 set -uo pipefail
 
@@ -48,7 +56,7 @@ ENV_FILE="$ROOT/scripts/deploy.env"
 # the question actually asked — especially for the reader most likely to ask it,
 # who has not configured anything yet.
 for arg in "$@"; do
-  case "$arg" in -h|--help) sed -n '2,33p' "$0" | sed 's/^#[[:space:]]\{0,1\}//'; exit 0 ;; esac
+  case "$arg" in -h|--help) sed -n '2,42p' "$0" | sed 's/^#[[:space:]]\{0,1\}//'; exit 0 ;; esac
 done
 
 if [ ! -f "$ENV_FILE" ]; then
@@ -83,7 +91,8 @@ while IFS= read -r line || [ -n "$line" ]; do
   export "$key=$val"
 done < "$ENV_FILE"
 
-DO_BACKEND=1; DO_FRONTEND=1; PREFLIGHT_ONLY=0; DO_CERTIFY=1; PREFLIGHT_ARGS=()
+DO_BACKEND=1; DO_FRONTEND=1; PREFLIGHT_ONLY=0; DO_CERTIFY=1; DO_PUBLISH_EVIDENCE=0; PREFLIGHT_ARGS=()
+RETIRE_PREVIOUS=0; HOLD_FOR_HOUR=1
 for arg in "$@"; do
   case "$arg" in
     --backend-only)  DO_FRONTEND=0; PREFLIGHT_ARGS+=("$arg") ;;
@@ -103,6 +112,21 @@ for arg in "$@"; do
     # copy), which RFC 0089 §D makes fully conformant. There is deliberately no
     # flag that ships a stale one.
     --skip-certify) DO_CERTIFY=0 ;;
+    # WHD-18 / ADR 0735. In origin mode every deploy leaves the §D pointer
+    # ABSENT (verify-deploy: PENDING) until scripts/publish-evidence.sh cuts and
+    # uploads the signed post-deploy bundle for the NEW commit. That step stays
+    # out of the default path on purpose (a ~10-minute load test against the
+    # live service), so it is opt-in here and never implied.
+    # MEASURED 2026-09-28: three deploys in two hours each left the pointer
+    # absent, because nobody ran the separate step after them.
+    --publish-evidence) DO_PUBLISH_EVIDENCE=1 ;;
+    # ADR 0802. The hour hold is on by default; `--ignore-hour-window` skips it.
+    # Retiring the superseded revision is OPT-IN since the 2026-10-02 correction:
+    # deleting a revision removes it from routing but does NOT stop its running
+    # instance (measured), so by default the rollback target is kept.
+    --retire-previous) RETIRE_PREVIOUS=1 ;;
+    --keep-previous) RETIRE_PREVIOUS=0 ;;   # the default; kept so old commands still parse
+    --ignore-hour-window) HOLD_FOR_HOUR=0 ;;
     -h|--help) ;;  # handled before the config check above
     *) echo "deploy: unknown argument: $arg" >&2; exit 2 ;;
   esac
@@ -147,7 +171,9 @@ SHA="$(git rev-parse HEAD)"
 # nothing outside the deploy reads it. In exchange gate 4 stops being a deadlock
 # and becomes a real VERIFICATION that the write landed and matches HEAD.
 if [ "$DO_BACKEND" -eq 1 ]; then
-  if ! node "$ROOT/scripts/write-build-commit.mjs" "$SHA"; then
+  # OPENWOP_STAMP_DEPLOYER — also write build-meta/deployer.json (which checkout +
+  # session made this build). Only a deploy stamps it; see write-build-commit.mjs.
+  if ! OPENWOP_STAMP_DEPLOYER=1 node "$ROOT/scripts/write-build-commit.mjs" "$SHA"; then
     echo "deploy: could not stamp the image commit — aborting before preflight." >&2
     exit 1
   fi
@@ -214,6 +240,75 @@ if [ "$DO_FRONTEND" -eq 1 ] && [ ! -d "$ROOT/frontend/react/node_modules" ]; the
   exit 1
 fi
 
+# Wait for the background frontend build (ADR 0863) and refuse on failure. Safe
+# to call more than once: the second call is a no-op.
+await_frontend_build() {
+  [ -n "${FE_BUILD_PID:-}" ] || return 0
+  local rc=0
+  wait "$FE_BUILD_PID" || rc=$?
+  FE_BUILD_PID=""
+  if [ "$rc" -ne 0 ]; then
+    tail -40 "$FE_BUILD_LOG" >&2
+    echo "deploy: frontend build FAILED (exit $rc) — nothing uploaded. Full log: $FE_BUILD_LOG" >&2
+    exit 1
+  fi
+  echo "  frontend build: done (log $FE_BUILD_LOG)"
+}
+
+# ── ADR 0863 — build the frontend WHILE certify runs ─────────────────────────
+# The frontend build (~3 min of tsc + vite + gates) reads nothing certify writes:
+# certify writes build-meta/, which only the backend IMAGE copies. So it starts
+# here, in the background, and is AWAITED before the backend ships. That is
+# stronger than the old order as well as faster. Before, only the frontend's
+# DEPS were proven before the backend shipped, and the build itself could still
+# fail after Cloud Run had the new backend (the 2026-08-11 half-deploy shape).
+# Now a failed frontend build ships nothing.
+#
+# The image cannot be built in parallel the same way: the Dockerfile COPYs
+# build-meta/, so it has to follow certify.
+#
+# OPENWOP_DEPLOY_FRONTEND_PARALLEL=0 runs the build to completion right here
+# instead, e.g. when certify is flaking on a loaded machine.
+FE_BUILD_PID=""; FE_BUILD_LOG=""; CERT_BUILD_PID=""
+cancel_owned_builds() {
+  local pid
+  for pid in "$FE_BUILD_PID" "$CERT_BUILD_PID"; do
+    [ -z "$pid" ] || kill -TERM "$pid" 2>/dev/null || true
+  done
+  for pid in "$FE_BUILD_PID" "$CERT_BUILD_PID"; do
+    [ -z "$pid" ] || wait "$pid" 2>/dev/null || true
+  done
+  FE_BUILD_PID=""; CERT_BUILD_PID=""
+}
+trap cancel_owned_builds EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+# Bash defers signal traps while a foreground external command runs. Waiting
+# on our own background supervisor keeps the trap responsive during certify.
+run_owned_certification() {
+  local rc=0
+  node "$ROOT/scripts/lib/owned-process.mjs" "$@" &
+  CERT_BUILD_PID=$!
+  wait "$CERT_BUILD_PID" || rc=$?
+  CERT_BUILD_PID=""
+  return "$rc"
+}
+if [ "$DO_FRONTEND" -eq 1 ]; then
+  FE_BUILD_LOG="$(mktemp "${TMPDIR:-/tmp}/owp-deploy-frontend.XXXXXX")"
+  echo
+  echo "▶ frontend → build (distribution: $OPENWOP_DISTRIBUTION) — in the background while certify runs; log: $FE_BUILD_LOG"
+  # The commit is exported so write-build-info.mjs stamps the same SHA the
+  # backend carries, rather than re-deriving it. Pass the distribution on the
+  # build command as well as exporting it from deploy.env: this makes the
+  # artifact identity visible at the mutation point and prevents a refactor of
+  # config parsing from silently falling back to the default distribution.
+  OPENWOP_BUILD_COMMIT="$SHA" \
+      OPENWOP_DISTRIBUTION="$OPENWOP_DISTRIBUTION" \
+      node "$ROOT/scripts/lib/owned-process.mjs" "$ROOT/frontend/react" npm run build > "$FE_BUILD_LOG" 2>&1 &
+  FE_BUILD_PID=$!
+  [ "${OPENWOP_DEPLOY_FRONTEND_PARALLEL:-1}" = "0" ] && await_frontend_build
+fi
+
 # ── ADR 0550 P4 — PRODUCE the certification stamp, or ship without it ─────────
 # `write-build-commit.mjs` above has already DELETED any pre-existing bundle: it
 # cannot re-derive one, and a stale bundle is a public claim about a different
@@ -238,6 +333,20 @@ if [ "$DO_BACKEND" -eq 1 ]; then
   if [ "$DO_CERTIFY" -eq 0 ]; then
     echo
     echo "▶ certify: SKIPPED (--skip-certify) — the RFC 0089 §D pointer will be ABSENT, not stale"
+  elif [ -n "${OPENWOP_CERT_BUNDLE_ORIGIN:-}" ]; then
+    # ADR 0812 P3c — ORIGIN MODE builds no image bundle. The host serves the
+    # verified bundle read from OPENWOP_CERT_BUNDLE_ORIGIN (what publish-evidence
+    # cuts against the live service), and never this image's own (verify-deploy:
+    # "conformance claims document … withheld in origin mode"). Until the P3c fold
+    # this lane still certified MAJOR 1 (the in-process host served v1, so
+    # --target-major followed preferredVersion 1.1), and that is the only reason
+    # it passed. With v1 gone it certifies major 2, where the in-process host
+    # claims no profile (the claim needs the production posture: signing,
+    # tenant-B key, operator fixtures), so every deploy refused to ship
+    # (MEASURED 2026-10-08, claimedProfiles minItems). The gate this host needs
+    # on deploy day is the major-2 ratchet below, which still runs.
+    echo
+    echo "▶ certify: image bundle NOT built — origin mode (the served bundle comes from publish-evidence; ADR 0812 P3c)"
   else
     echo
     echo "▶ certify (ADR 0550 P4) — full conformance lane, strict, no quarantine (~10 min)"
@@ -246,7 +355,7 @@ if [ "$DO_BACKEND" -eq 1 ]; then
     # then try to read evidence from GCS (no metadata server here: a bounded 2 s
     # stall per discovery read per minute) and serve none of its own. The gate
     # measures the CODE, not the deployment's evidence origin, so unset it here.
-    if ! ( cd "$ROOT/backend/typescript" && unset OPENWOP_CERT_BUNDLE_ORIGIN && npm run test:conformance -- --certify ); then
+    if ! run_owned_certification "$ROOT/backend/typescript" env -u OPENWOP_CERT_BUNDLE_ORIGIN npm run test:conformance -- --certify; then
       echo "deploy: the certify lane FAILED — refusing to ship." >&2
       echo "        A certification stamp is a public claim; shipping without saying so" >&2
       echo "        would degrade silently. Re-run, or ship deliberately unclaimed:" >&2
@@ -265,6 +374,11 @@ if [ "$DO_BACKEND" -eq 1 ]; then
     fi
     echo "  certified: $(node -e 'const c=require(process.argv[1]);process.stdout.write(`${c.claimedProfiles.length} profile(s) — ${c.claimedProfiles.join(", ")||"(none)"}`)' "$CLAIMS")"
 
+  fi
+  # Runs in BOTH evidence modes (ADR 0812 P3c moved it out of the image-certify
+  # branch, so origin mode keeps it); only --skip-certify, the emergency escape,
+  # skips it, exactly as before.
+  if [ "$DO_CERTIFY" -eq 1 ]; then
     # ── major 2, as a SECOND gate rather than a different claim (ADR 0687) ─────
     # The obvious version of "move deploy-day certify to major 2" is to set
     # OPENWOP_TARGET_MAJOR=2 on the line above. That would be wrong, and the
@@ -282,7 +396,7 @@ if [ "$DO_BACKEND" -eq 1 ]; then
     # so a green here proved only that the gaps were the gaps we knew about.
     echo
     echo "▶ conformance@major2 ratchet — no unlisted v2 red may ship"
-    if ! bash "$ROOT/scripts/check-conformance-major2.sh"; then
+    if ! run_owned_certification "$ROOT" bash "$ROOT/scripts/check-conformance-major2.sh"; then
       echo "deploy: the major-2 lane regressed — refusing to ship." >&2
       echo "        Either fix the scenario, or admit it with a reason in" >&2
       echo "        scripts/conformance-v2-known-red.txt (an admission is a" >&2
@@ -292,7 +406,36 @@ if [ "$DO_BACKEND" -eq 1 ]; then
   fi
 fi
 
+# The frontend must have BUILT before the backend ships (ADR 0863, above).
+await_frontend_build
+
 if [ "$DO_BACKEND" -eq 1 ]; then
+  # ── ADR 0802 — do not BOOT near the top of an hour ──────────────────────────
+  # The hourly scheduled jobs queue the 4-connection pool for ~10 minutes
+  # (MEASURED 2026-10-02 18:00Z: 449 queued callers, 0.5 s reads on one idle
+  # instance). A boot landing in that window stacks its own burst, and a second
+  # copy of every daemon, on top. Held HERE — after certify, before the build —
+  # because a revision built and left at 0% keeps a live instance of its own.
+  if [ "$HOLD_FOR_HOUR" -eq 1 ]; then
+    HOLD_S=$(node "$ROOT/scripts/lib/deploy-timing.mjs" hour-wait "$(date -u +%s)")
+    if [ "${HOLD_S:-0}" -gt 0 ]; then
+      echo
+      echo "▶ hold: this build would boot inside the top-of-hour window — waiting $(( HOLD_S / 60 ))m $(( HOLD_S % 60 ))s (ADR 0802; --ignore-hour-window to skip)"
+      node -e 'setTimeout(() => {}, Number(process.argv[1]) * 1000)' "$HOLD_S"
+    fi
+  fi
+  # ── ADR 0802 — remember what serves NOW, to retire it after verify ──────────
+  # Read before the deploy: afterwards the same field names the new revision.
+  PREV_REVISION=""; PREV_IMAGE=""
+  if [ "$RETIRE_PREVIOUS" -eq 1 ]; then
+    PREV_REVISION=$(gcloud run services describe "$OPENWOP_DEPLOY_SERVICE" --region "$OPENWOP_DEPLOY_REGION" \
+      --project "$OPENWOP_DEPLOY_PROJECT" --account "$OPENWOP_DEPLOY_ACCOUNT" --format=json \
+      | node "$ROOT/scripts/lib/deploy-timing.mjs" previous-serving "" || true)
+    if [ -n "$PREV_REVISION" ]; then
+      PREV_IMAGE=$(gcloud run revisions describe "$PREV_REVISION" --region "$OPENWOP_DEPLOY_REGION" \
+        --project "$OPENWOP_DEPLOY_PROJECT" --account "$OPENWOP_DEPLOY_ACCOUNT" --format='value(status.imageDigest)' || true)
+    fi
+  fi
   echo
   echo "▶ backend → Cloud Run ($OPENWOP_DEPLOY_SERVICE)"
   # --update-env-vars MERGES. Never --set-env-vars: that replaces the whole map
@@ -336,19 +479,9 @@ fi
 
 if [ "$DO_FRONTEND" -eq 1 ]; then
   echo
-  echo "▶ frontend → build (distribution: $OPENWOP_DISTRIBUTION)"
-  # The commit is exported so write-build-info.mjs stamps the same SHA the
-  # backend carries, rather than re-deriving it. Pass the distribution on the
-  # build command as well as exporting it from deploy.env: this makes the
-  # artifact identity visible at the mutation point and prevents a refactor of
-  # config parsing from silently falling back to the default distribution.
-  if ! ( cd "$ROOT/frontend/react" && \
-      OPENWOP_BUILD_COMMIT="$SHA" \
-      OPENWOP_DISTRIBUTION="$OPENWOP_DISTRIBUTION" \
-      npm run build ); then
-    echo "deploy: frontend build FAILED — nothing uploaded." >&2
-    exit 1
-  fi
+  # Built above, in the background while certify ran (ADR 0863). Already awaited
+  # before the backend, so this is a no-op unless the backend half was skipped.
+  await_frontend_build
   echo
   echo "▶ frontend → Firebase Hosting ($OPENWOP_DEPLOY_HOSTING_TARGET)"
   # --account is NOT optional here. Without it the Firebase half takes its
@@ -398,4 +531,73 @@ fi
 if ! bash "$ROOT/scripts/verify-deploy.sh" "${VERIFY_ARGS[@]}"; then
   echo "deploy: DEPLOYED BUT NOT VERIFIED — see above." >&2
   exit 1
+fi
+
+# ── ADR 0802 — retire the revision this deploy superseded ───────────────────
+# A superseded revision keeps an instance for as long as a request holds it
+# open — an hour-long SSE stream does — and that instance keeps running every
+# background daemon against the same database. MEASURED 2026-10-02: revision
+# 00829 stayed alive 47 minutes after traffic left it; on db-f1-micro reads
+# were 0.5–1.3 s for all of them and normal within five minutes of its shutdown.
+#
+# CORRECTED 2026-10-02 (the first real retire): deleting the revision did NOT
+# stop its instance — 00830's kept logging and firing schedules for 14+ minutes
+# after DeleteRevision. So this step removes routing and the rollback target and
+# nothing else, and it is OPT-IN (`--retire-previous`). On db-custom-1-3840 the
+# overlap measured harmless (p50 26 ms with both instances alive).
+#
+# Only after VERIFY: until the new revision is proven, the old one is the
+# rollback. Only the ONE revision that was serving, never by pattern. Deleting
+# a revision does not delete its image, so rollback stays one command — printed
+# below — at the cost of a ~1 minute boot instead of an instant traffic shift.
+if [ "$DO_BACKEND" -eq 1 ] && [ "$RETIRE_PREVIOUS" -eq 1 ]; then
+  echo
+  if [ -z "$PREV_REVISION" ]; then
+    echo "  retire    SKIPPED  — could not name exactly one untagged serving revision before the deploy; nothing deleted"
+  elif [ "$PREV_REVISION" = "$CREATED" ]; then
+    echo "  retire    SKIPPED  — the serving revision did not change"
+  else
+    # Re-read: it must hold no traffic and no tag NOW. A revision that still
+    # routes is not superseded, whatever it was ten minutes ago.
+    STILL=$(gcloud run services describe "$OPENWOP_DEPLOY_SERVICE" --region "$OPENWOP_DEPLOY_REGION" \
+      --project "$OPENWOP_DEPLOY_PROJECT" --account "$OPENWOP_DEPLOY_ACCOUNT" --format=json \
+      | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const t=(JSON.parse(s).status.traffic||[]).filter(x=>x.revisionName===process.argv[1]&&(Number(x.percent)>0||x.tag));process.stdout.write(String(t.length))})' "$PREV_REVISION" || echo unknown)
+    if [ "$STILL" != "0" ]; then
+      echo "  retire    SKIPPED  — $PREV_REVISION still holds traffic or a tag (read: $STILL); nothing deleted" >&2
+    elif gcloud run revisions delete "$PREV_REVISION" --region "$OPENWOP_DEPLOY_REGION" \
+        --project "$OPENWOP_DEPLOY_PROJECT" --account "$OPENWOP_DEPLOY_ACCOUNT" --quiet; then
+      echo "  retire    OK       $PREV_REVISION deleted from routing. Its RUNNING instance is NOT stopped by this —"
+      echo "                     it lives until its open requests end (up to an hour) and keeps running its daemons."
+      echo "            rollback, if needed (no rebuild):"
+      echo "              gcloud run deploy $OPENWOP_DEPLOY_SERVICE --image ${PREV_IMAGE:-<image digest unavailable>} \\"
+      echo "                --region $OPENWOP_DEPLOY_REGION --project $OPENWOP_DEPLOY_PROJECT   # then update-traffic --to-revisions <new>=100"
+    else
+      echo "  retire    FAILED   — $PREV_REVISION was NOT deleted. The deploy itself is verified; its instance will linger" >&2
+      echo "            until its open streams end (up to an hour). Delete it by hand, or expect slow reads until then." >&2
+    fi
+  fi
+fi
+
+# ── publish the post-deploy evidence (opt-in; see --publish-evidence) ────────
+# Only after a VERIFIED backend deploy: the evidence describes the BACKEND's
+# commit, and publishing for a deploy that did not verify would sign a claim
+# about something unconfirmed. A frontend-only deploy leaves the backend (and
+# its evidence) as it was.
+if [ "$DO_PUBLISH_EVIDENCE" -eq 1 ]; then
+  if [ "$DO_BACKEND" -ne 1 ]; then
+    echo "  evidence  SKIPPED  (--publish-evidence: no backend was deployed, so its evidence did not change)"
+  elif ! bash "$ROOT/scripts/publish-evidence.sh"; then
+    echo "deploy: DEPLOYED AND VERIFIED, but the evidence was NOT published — the §D pointer stays PENDING. Re-run scripts/publish-evidence.sh." >&2
+    exit 1
+  fi
+elif [ "$DO_BACKEND" -eq 1 ] && [ -n "${OPENWOP_CERT_BUNDLE_ORIGIN:-}" ]; then
+  # The opt-in stays opt-in, but it is no longer SILENT. In origin mode a
+  # backend deploy that did not publish leaves the new commit with no evidence
+  # at all. MEASURED 2026-09-28: production served commits with no evidence
+  # after four consecutive deploys, because the separate step was never run.
+  # Say so where the deployer is already looking, with the exact command.
+  echo
+  echo "  evidence  PENDING  — this deploy did not publish certification evidence for $(git -C "$ROOT" rev-parse --short=12 HEAD)."
+  echo "            Its §D pointer stays absent until someone runs:"
+  echo "              scripts/publish-evidence.sh        (~10 min load test; or deploy with --publish-evidence)"
 fi

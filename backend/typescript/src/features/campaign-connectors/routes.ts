@@ -11,7 +11,8 @@ import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { resolveEffectiveAccess, type Scope } from '../../host/accessControlService.js';
 import { requireFeatureEnabled, requireString, authorizeOrgScope } from '../featureRoute.js';
-import { resolveOne } from '../../host/featureToggles/service.js';
+import { resolveToggle } from '../../host/featureToggles/service.js';
+import { ownerPublicRuntimeLapsed } from '../../host/publicLapse.js';
 import { getOrg } from '../../host/accessControlService.js';
 import { isAllowed } from '../consent/consentService.js';
 import { upsertPixel, listPixels, removePixel, publicPixelsForOrg, relayConversion, listConversions, dispatchQueuedConversions, type ConversionEvent } from './pixelService.js';
@@ -23,6 +24,24 @@ import { hostExtStorage } from '../../host/hostExtPersistence.js';
 import { randomUUID } from 'node:crypto';
 import { AD_PLATFORMS, type AdPlatform } from './types.js';
 import type { ColumnMapping } from './csvImport.js';
+import { createLogger } from '../../observability/logger.js';
+
+const consentLog = createLogger('features.campaign-connectors');
+
+/**
+ * ADR 0849 D4 (architect H4) — the public pixel + conversion lanes ask the consent gate
+ * per request; a consent-store read error used to reach `next(err)` and 500 a public
+ * page load. An unreadable consent is NOT a grant: it answers like a refusal (no pixels,
+ * conversion not recorded) and says so in the log — the ADR 0657 D5 / CNWF-6 shape.
+ */
+async function marketingAllowedOrUnreadable(tenantId: string, vk: string, lane: 'pixels' | 'conversions'): Promise<boolean | 'unreadable'> {
+  try {
+    return await isAllowed(tenantId, vk, 'marketing');
+  } catch (err) {
+    consentLog.warn('consent_unreadable', { tenantId, lane, error: err instanceof Error ? err.name : 'unknown' }); // the class only — a storage message can embed the row key
+    return 'unreadable';
+  }
+}
 
 const TOGGLE_ID = 'campaign-connectors';
 const LABEL = 'Campaign Connectors';
@@ -39,7 +58,7 @@ async function requireOrgScopeFor(req: Request, orgId: string, scope: Scope): Pr
 
 export function registerCampaignConnectorsRoutes(deps: RouteDeps): void {
   const { app } = deps;
-  const BASE = '/v1/host/openwop-app/campaign-connectors';
+  const BASE = '/host/openwop-app/campaign-connectors';
 
   // C2 — live "Sync Now": pull yesterday's metrics for every dispatched
   // campaign of the platform through the acting user's connection (the broker
@@ -166,13 +185,15 @@ export function registerCampaignConnectorsRoutes(deps: RouteDeps): void {
   // PUBLIC: which pixels a consented visitor loads. Marketing consent — an
   // unconsented visitor gets an EMPTY list (the page renders, no pixels), and
   // the response never distinguishes "none configured" from "not consented".
-  app.get('/v1/host/openwop-app/public/:orgId/pixels', async (req, res, next) => {
+  app.get('/host/openwop-app/public/:orgId/pixels', async (req, res, next) => {
     try {
       const org = await getOrg(req.params.orgId);
       if (!org) throw new OpenwopError('not_found', 'Site not found.', 404, {});
-      const assignment = await resolveOne(TOGGLE_ID, { tenantId: org.tenantId });
+      // ADR 0819 §1 opt-out — a PUBLIC lane (tenant from the resource): ADR 0419 never paywalls a shopper/visitor on the operator's plan.
+      const assignment = await resolveToggle(TOGGLE_ID, { tenantId: org.tenantId });
       const vk = typeof req.query.vk === 'string' && req.query.vk.length <= 128 ? req.query.vk : '';
-      if (!assignment?.enabled || !vk || !(await isAllowed(org.tenantId, vk, 'marketing'))) {
+      // ADR 0820 §7 — the owner-lapse policy (off unless the grace knob is set) answers like the toggle: no pixels.
+      if (!assignment?.enabled || (await ownerPublicRuntimeLapsed(TOGGLE_ID, org.tenantId)) || !vk || (await marketingAllowedOrUnreadable(org.tenantId, vk, 'pixels')) !== true) {
         res.json({ pixels: [] });
         return;
       }
@@ -183,16 +204,20 @@ export function registerCampaignConnectorsRoutes(deps: RouteDeps): void {
   // PUBLIC: the conversions relay intake. Consent-gated like the analytics
   // beacon (202 recorded:false — never an error a probe can mine); the email
   // identifier is hashed server-side before anything persists.
-  app.post('/v1/host/openwop-app/public/:orgId/conversions', async (req, res, next) => {
+  app.post('/host/openwop-app/public/:orgId/conversions', async (req, res, next) => {
     try {
       const org = await getOrg(req.params.orgId);
       if (!org) throw new OpenwopError('not_found', 'Site not found.', 404, {});
-      const assignment = await resolveOne(TOGGLE_ID, { tenantId: org.tenantId });
-      if (!assignment?.enabled) { res.status(202).json({ recorded: false, reason: 'not_enabled' }); return; }
+      // ADR 0819 §1 opt-out — a PUBLIC lane (tenant from the resource): ADR 0419 never paywalls a shopper/visitor on the operator's plan.
+      const assignment = await resolveToggle(TOGGLE_ID, { tenantId: org.tenantId });
+      // ADR 0820 §7 — a lapsed owner past the grace window answers like the toggle being off.
+      if (!assignment?.enabled || (await ownerPublicRuntimeLapsed(TOGGLE_ID, org.tenantId))) { res.status(202).json({ recorded: false, reason: 'not_enabled' }); return; }
       const b = (req.body ?? {}) as { vk?: unknown; eventId?: unknown; eventName?: unknown; email?: unknown; value?: unknown; currency?: unknown };
       const vk = typeof b.vk === 'string' && b.vk.length <= 128 ? b.vk : '';
-      if (!vk || !(await isAllowed(org.tenantId, vk, 'marketing'))) {
-        res.status(202).json({ recorded: false, reason: 'consent' });
+      if (!vk) { res.status(202).json({ recorded: false, reason: 'consent' }); return; }
+      const allowed = await marketingAllowedOrUnreadable(org.tenantId, vk, 'conversions');
+      if (allowed !== true) {
+        res.status(202).json({ recorded: false, reason: allowed === 'unreadable' ? 'consent_unreadable' : 'consent' });
         return;
       }
       const { event, deduped } = await relayConversion(org.tenantId, req.params.orgId, { eventId: b.eventId, eventName: b.eventName, email: b.email, value: b.value, currency: b.currency, visitor: vk });

@@ -3,8 +3,8 @@
 Multi-agent supervisor. Routes user tasks to specialized subagents via RFC 0007 dispatch and aggregates results. Mirrors LangGraph Supervisor and CrewAI's hierarchical-process pattern.
 
 | Pack name | `core.openwop.agents.supervisor` |
-| Version | `1.0.0` |
-| Engine | OpenWOP `>=1.1.0 <2.0.0` |
+| Version | `1.0.4` |
+| Engine | OpenWOP `>=1.1.0 <3.0.0` |
 | Runtime | `language: remote` (pure-agent pack) |
 | Agents | 1 (`core.openwop.agents.supervisor.default`) |
 | Required host capabilities | `aiProviders`, `host.agentRuntime` |

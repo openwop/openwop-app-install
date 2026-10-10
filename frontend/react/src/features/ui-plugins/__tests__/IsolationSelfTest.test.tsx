@@ -11,12 +11,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, cleanup, act } from '@testing-library/react';
 
-vi.mock('../pluginClient.js', () => ({ callHostRpc: vi.fn() }));
+vi.mock('../pluginClient.js', () => ({ callHostRpc: vi.fn(), isolationProbeUrl: () => '/api/host/openwop-app/ui-plugin/isolation-probe' }));
 
 import { IsolationSelfTest } from '../IsolationSelfTest.js';
 import type { ServedPlugin } from '../pluginClient.js';
 
-const plugin = { packName: 'p', packVersion: '1', pluginId: 'x', surface: 'artifact-viewer', hostApi: ['artifact.read'], entryPath: '/e' } as ServedPlugin;
+const plugin = { packName: 'p', packVersion: '1', pluginId: 'x', surface: 'artifact-viewer', hostApi: ['artifact.read'], entryPath: '/e', framePath: '/f', rpcPath: '/r' } as ServedPlugin;
 
 /** Post a probe message as if it came from the hidden frame. The component
  *  authenticates by window REFERENCE (the frame is an opaque origin, so

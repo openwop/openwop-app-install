@@ -34,7 +34,7 @@ import { syncNow } from './knowledgeSyncRunner.js';
 
 const log = createLogger('features.knowledgeSync.routes');
 const TOGGLE = { toggleId: 'knowledge-sync', label: 'Knowledge sync' };
-const BASE = '/v1/host/openwop-app/knowledge-sync';
+const BASE = '/host/openwop-app/knowledge-sync';
 
 const actingUserOf = (req: Request): string | undefined => req.userId ?? req.principal?.principalId;
 const nowIso = (): string => new Date().toISOString();

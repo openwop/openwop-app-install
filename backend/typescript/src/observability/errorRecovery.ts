@@ -185,6 +185,38 @@ function classifyAiProviderError(err: AiProviderError): ClassifiedError {
         'This replay stopped rather than repeat a real action the original run already performed.',
     };
   }
+  // A CONNECTED ACCOUNT the provider refused (feature.assistant ingest, and any
+  // node that names its refusal). These fell to the generic "Something went
+  // wrong. Check the server logs." default arm, which an owner cannot act on,
+  // and a scheduled loop then re-notified it on every tick. Each names the fix.
+  const CONNECTION_REFUSALS: Record<string, ClassifiedError> = {
+    connection_reauth_required: {
+      category: 'auth',
+      action: 'reconfigure',
+      userMessage: 'The connected account needs to sign in again. Reconnect it in Connections.',
+    },
+    connection_scope_missing: {
+      category: 'auth',
+      action: 'reconfigure',
+      userMessage: 'The connected account is missing a permission this workflow needs. Reconnect it in Connections and grant the requested access.',
+    },
+    connection_forbidden: {
+      category: 'auth',
+      action: 'reconfigure',
+      userMessage: 'The provider refused the connected account. Check the connection in Connections.',
+    },
+    provider_api_disabled: {
+      category: 'config',
+      action: 'abort',
+      userMessage: "The provider's API is disabled for this app. An administrator must enable it.",
+    },
+    upstream_unavailable: {
+      category: 'network',
+      action: 'retry',
+      userMessage: 'The provider could not be reached. It will be retried on the next run.',
+    },
+  };
+  if (Object.prototype.hasOwnProperty.call(CONNECTION_REFUSALS, codeString)) return CONNECTION_REFUSALS[codeString]!;
   if (codeString === 'managed_unavailable') {
     return {
       category: 'network',
@@ -204,6 +236,22 @@ function classifyAiProviderError(err: AiProviderError): ClassifiedError {
         userMessage: 'The selected provider, model, or feature is not available on this host. Pick a different one.',
       };
     case 'provider_policy_denied':
+      // One wire code for every policy refusal; the cause rides `reason`
+      // (capabilities.md "Wire-format error"). Keep the specific guidance.
+      if (err.details.reason === 'byok_required' || err.details.reason === 'byok_required_but_unresolved') {
+        return {
+          category: 'auth',
+          action: 'reconfigure',
+          userMessage: 'Host policy requires your own API key for this provider. Add or update your key in the settings.',
+        };
+      }
+      if (err.details.reason === 'model_not_allowed') {
+        return {
+          category: 'config',
+          action: 'reconfigure',
+          userMessage: 'The host policy does not allow this model for the current tenant or scope. Pick a different one.',
+        };
+      }
       return {
         category: 'config',
         action: 'reconfigure',

@@ -65,8 +65,8 @@ import { sendError } from '../middleware/errorEnvelope.js';
 const log = createLogger('routes.compensation-seam');
 
 const SEAM_PATHS = [
-  '/v1/host/openwop-app/test/compensation',
-  '/v1/host/sample/test/compensation',
+  '/host/openwop-app/test/compensation',
+  '/host/sample/test/compensation',
 ] as const;
 
 /** The seam's deterministic fake effect pair. Namespaced under the host

@@ -35,6 +35,9 @@
  * `requireTenantScope` short-circuits for a `user:`/`anon:`-shaped PERSONAL
  * workspace, so the solo-user and anon-demo flows are untouched — the gate bites
  * exactly where ADR 0711 says it should, in tenants with more than one human.
+ *
+ * ADR 0779 D1 — all SIX writes go through `requireByokManage`; ADR 0711 gated
+ * four and missed `PUT`/`DELETE /ai-default`, which any member could call.
  */
 
 import type { Express } from 'express';
@@ -43,7 +46,9 @@ import { listSecretRefs, removeSecret, setSecret, type SecretScope } from '../by
 import { lookupCredentialRefConsumers, type ConsumerLookup } from '../host/credentialRefRegistry.js';
 import { createLogger } from '../observability/logger.js';
 import { requireTenantScope } from '../features/featureRoute.js';
+import { systemOwnedRefOwner } from '../byok/refNamespaces.js';
 import { appendAudit } from '../host/auditChainService.js';
+import { managedAnonSignInRequired } from '../host/deployPosture.js';
 import { getHeadlessAiDefault, setHeadlessAiDefault, clearHeadlessAiDefault } from '../host/headlessAi.js';
 import {
   MANAGED_FREE_REF,
@@ -51,7 +56,7 @@ import {
   getManagedProviderStatuses,
 } from '../providers/managedProvider.js';
 import {
-  getChatByokConfig, setChatByokConfig, clearChatByokConfig, isChatByokConfigUsable,
+  getChatByokConfig, setChatByokConfig, clearChatByokConfig, isChatByokConfigUsable, isManagedRef,
 } from '../host/chatByokConfig.js';
 
 const log = createLogger('routes.byok');
@@ -62,6 +67,18 @@ interface SetSecretRequest {
 }
 
 const REF_PATTERN = /^[a-zA-Z0-9_.\-:]{1,128}$/;
+
+/** ADR 0517 / ADR 0711: report dispatch posture for the effective binding,
+ * whether chosen or defaulted. GET and successful PUT must tell the same truth. */
+function chatBindingSignInRequired(binding: { credentialRef: string } | null, tenantId: string): boolean {
+  return binding !== null && isManagedRef(binding.credentialRef)
+    && tenantId.startsWith('anon:') && managedAnonSignInRequired();
+}
+
+/** ADR 0779 D1 — the ONE write authority for the tenant-wide key store. */
+function requireByokManage(req: import('express').Request): Promise<void> {
+  return requireTenantScope(req, 'host:byok:manage');
+}
 
 function scopeFromReq(req: import('express').Request): { tenantId: string; actorId?: string } | undefined {
   // In ephemeral mode the resolver needs a tenantId. Pull it from the
@@ -106,18 +123,24 @@ async function effectiveManagedDefault(): Promise<{ provider: string; model: str
   return { provider: id, model: id, credentialRef: MANAGED_FREE_REF };
 }
 
+/** The refs `GET /byok/secrets` lists for this caller — the ONE reader that route and
+ *  the Access hub summary share (ADR 0864 D2). */
+export function listCallerSecretRefs(req: import('express').Request): Promise<readonly string[]> {
+  return listSecretRefs(scopeFromReq(req));
+}
+
 export function registerByokRoutes(app: Express): void {
-  app.get('/v1/host/openwop-app/byok/secrets', async (req, res, next) => {
+  app.get('/host/openwop-app/byok/secrets', async (req, res, next) => {
     try {
-      res.json({ credentialRefs: await listSecretRefs(scopeFromReq(req)) });
+      res.json({ credentialRefs: await listCallerSecretRefs(req) });
     } catch (err) {
       next(err);
     }
   });
 
-  app.post('/v1/host/openwop-app/byok/secrets', async (req, res, next) => {
+  app.post('/host/openwop-app/byok/secrets', async (req, res, next) => {
     try {
-      await requireTenantScope(req, 'host:byok:manage');
+      await requireByokManage(req);
       const body = req.body as SetSecretRequest;
       if (!body || typeof body !== 'object') {
         throw new OpenwopError('validation_error', 'Request body MUST be a JSON object.', 400);
@@ -138,6 +161,18 @@ export function registerByokRoutes(app: Express): void {
           { field: 'value' },
         );
       }
+      // ADR 0779 D2 — another lifecycle owns this namespace (an OAuth token, a
+      // user-scoped subscription token, a compat endpoint's key, …). Refused
+      // before anything is read or written.
+      const owner = systemOwnedRefOwner(body.credentialRef);
+      if (owner !== null) {
+        throw new OpenwopError(
+          'validation_error',
+          `\`${body.credentialRef}\` is managed by ${owner}; it cannot be set from the keys page.`,
+          400,
+          { credentialRef: body.credentialRef, owner },
+        );
+      }
       await setSecret(body.credentialRef, body.value, scopeFromReq(req));
       // Echo back ONLY the ref + a masked preview. Never the value.
       res.status(201).json({
@@ -150,9 +185,9 @@ export function registerByokRoutes(app: Express): void {
     }
   });
 
-  app.delete('/v1/host/openwop-app/byok/secrets/:credentialRef', async (req, res, next) => {
+  app.delete('/host/openwop-app/byok/secrets/:credentialRef', async (req, res, next) => {
     try {
-      await requireTenantScope(req, 'host:byok:manage');
+      await requireByokManage(req);
       const ref = req.params.credentialRef;
       if (!REF_PATTERN.test(ref)) {
         throw new OpenwopError('validation_error', 'Invalid credentialRef.', 400, { credentialRef: ref });
@@ -164,6 +199,17 @@ export function registerByokRoutes(app: Express): void {
       // two delete paths can no longer disagree about what is safe to remove.
       const scope = scopeFromReq(req);
       const force = req.query.force === 'true';
+      // ADR 0779 D2 — an owned ref is removed by its owner's lifecycle. Only the
+      // audited force path below may remove one here, for the orphans no owner
+      // can reach any more (a pasted `subscription:*` in a shared workspace, a
+      // `compat-key:*` whose endpoint row is gone).
+      const owner = systemOwnedRefOwner(ref);
+      if (owner !== null && !force) {
+        throw new OpenwopError('conflict', `This secret is managed by ${owner}. Remove it there, or delete with ?force=true to override.`, 409, {
+          credentialRef: ref,
+          owner,
+        });
+      }
       let lookup: ConsumerLookup;
       try {
         lookup = await lookupCredentialRefConsumers(scope?.tenantId, ref, { hostScoped: scope === undefined });
@@ -206,6 +252,7 @@ export function registerByokRoutes(app: Express): void {
           // rather than only that an override happened.
           referencesKnown: lookup.known,
           consumers: lookup.known ? lookup.consumers : null,
+          owner,
           unknownReason: lookup.known ? null : lookup.reason,
           at: new Date().toISOString(),
         });
@@ -227,22 +274,26 @@ export function registerByokRoutes(app: Express): void {
     return s;
   };
 
-  app.get('/v1/host/openwop-app/byok/ai-default', async (req, res, next) => {
+  app.get('/host/openwop-app/byok/ai-default', async (req, res, next) => {
     try {
       res.json({ default: await getHeadlessAiDefault(tenantScope(req).tenantId) });
     } catch (err) { next(err); }
   });
 
-  app.put('/v1/host/openwop-app/byok/ai-default', async (req, res, next) => {
+  app.put('/host/openwop-app/byok/ai-default', async (req, res, next) => {
     try {
-      const body = (req.body ?? {}) as { provider?: unknown; model?: unknown; credentialRef?: unknown };
+      await requireByokManage(req);
+      // ADR 0821 D5 — `preferForText` (boolean, default false) is the tenant's
+      // opt-in to run headless TEXT calls on this key instead of the managed one.
+      const body = (req.body ?? {}) as { provider?: unknown; model?: unknown; credentialRef?: unknown; preferForText?: unknown };
       const saved = await setHeadlessAiDefault(tenantScope(req), body, new Date().toISOString());
       res.status(200).json({ default: saved });
     } catch (err) { next(err); }
   });
 
-  app.delete('/v1/host/openwop-app/byok/ai-default', async (req, res, next) => {
+  app.delete('/host/openwop-app/byok/ai-default', async (req, res, next) => {
     try {
+      await requireByokManage(req);
       await clearHeadlessAiDefault(tenantScope(req).tenantId);
       res.status(204).send();
     } catch (err) { next(err); }
@@ -254,7 +305,7 @@ export function registerByokRoutes(app: Express): void {
   // host/chatByokConfig.ts for the incident). Same session-tenant scope as the
   // secrets above, so the pointer follows the account, not the browser.
 
-  app.get('/v1/host/openwop-app/byok/active-config', async (req, res, next) => {
+  app.get('/host/openwop-app/byok/active-config', async (req, res, next) => {
     try {
       const scope = tenantScope(req);
       const config = await getChatByokConfig(scope.tenantId);
@@ -300,33 +351,40 @@ export function registerByokRoutes(app: Express): void {
         // was logged out, not key-less. The SPA branches on this to offer re-auth
         // instead of a first-run wizard that would mint a duplicate key.
         anonymous: scope.tenantId.startsWith('anon:'),
+        // Managed dispatch requires sign-in even when the wizard stored that
+        // binding. Own-key bindings are exempt. `valid` remains the key verdict.
+        signInRequired: chatBindingSignInRequired(config ?? managedDefault, scope.tenantId),
       });
     } catch (err) { next(err); }
   });
 
-  app.put('/v1/host/openwop-app/byok/active-config', async (req, res, next) => {
+  app.put('/host/openwop-app/byok/active-config', async (req, res, next) => {
     try {
-      await requireTenantScope(req, 'host:byok:manage');
+      await requireByokManage(req);
       const body = (req.body ?? {}) as { provider?: unknown; model?: unknown; credentialRef?: unknown };
       const saved = await setChatByokConfig(tenantScope(req), body, new Date().toISOString());
       res.status(200).json({
         config: { provider: saved.provider, model: saved.model, credentialRef: saved.credentialRef },
         valid: true,
+        stored: true,
         anonymous: saved.tenantId.startsWith('anon:'),
+        signInRequired: chatBindingSignInRequired(saved, saved.tenantId),
       });
     } catch (err) { next(err); }
   });
 
-  app.delete('/v1/host/openwop-app/byok/active-config', async (req, res, next) => {
+  app.delete('/host/openwop-app/byok/active-config', async (req, res, next) => {
     try {
-      await requireTenantScope(req, 'host:byok:manage');
+      await requireByokManage(req);
       await clearChatByokConfig(tenantScope(req).tenantId);
       res.status(204).send();
     } catch (err) { next(err); }
   });
 }
 
+/** ADR 0779 D3 — at most the last four characters, and only for a value long
+ *  enough that four is a small fraction of it (`first4…last4` showed 8 of 9). */
 function maskInline(value: string): string {
-  if (value.length <= 8) return '••••';
-  return `${value.slice(0, 4)}…${value.slice(-4)}`;
+  if (value.length < 16) return '••••';
+  return `…${value.slice(-4)}`;
 }

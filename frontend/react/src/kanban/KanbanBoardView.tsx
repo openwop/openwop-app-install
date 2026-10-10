@@ -45,6 +45,8 @@ import { Button } from '../ui/Button.js';
 import { Markdown } from '../ui/Markdown.js';
 import { MarkdownEditor } from '../ui/MarkdownEditor.js';
 import { AssigneeControl } from './AssigneeControl.js';
+import { CardHandoffNote } from './CardHandoffNote.js';
+import { useBackendSession } from '../auth/backendSession.js';
 import { columnSnapCoordinateGetter } from './columnKeyboardCoordinates.js';
 import type { KanbanBoard, KanbanCard, KanbanColumn, KanbanCardSource, KanbanWorkItem } from './kanbanClient.js';
 import { columnLaneKind, type LaneKind } from './laneKind.js';
@@ -152,7 +154,7 @@ function WorkItemSummary({
   return (
     <div className="kb-work-item" role="group" aria-label={t('workItemAria', { state: t(WORK_ITEM_STATE_KEY[workItem.state]) })}>
       <div className="kb-work-item-head">
-        <span className={`kb-work-state kb-work-state--${workItem.state}`} role="status">{t(WORK_ITEM_STATE_KEY[workItem.state])}</span>
+        <span className={`kb-work-state kb-work-state--${workItem.state}`}>{t(WORK_ITEM_STATE_KEY[workItem.state])}</span>
         <span className="kb-work-mode">{workItem.execution.mode === 'auto' ? t('workModeAuto') : t('workModeManual')}</span>
       </div>
       <div className="kb-work-meta">
@@ -165,8 +167,8 @@ function WorkItemSummary({
       ) : (
         <div className="kb-work-warning"><AlertIcon size={12} aria-hidden /> {t('workNoWorkflow')}</div>
       )}
-      {runStatus ? <div className="kb-work-run-status" role="status">{runStatus}</div> : null}
-      {workItem.execution.lastError ? <div className="kb-work-warning" role="status"><AlertIcon size={12} aria-hidden /> {t('workRunNeedsAttention')}</div> : null}
+      {runStatus ? <div className="kb-work-run-status">{runStatus}</div> : null}
+      {workItem.execution.lastError ? <div className="kb-work-warning"><AlertIcon size={12} aria-hidden /> {t('workRunNeedsAttention')}</div> : null}
       {canRun ? (
         <Button
           variant="accent-solid"
@@ -189,6 +191,21 @@ const SOURCE_OPTIONS: ReadonlyArray<{ value: KanbanCardSource; labelKey: string 
   { value: 'api', labelKey: 'sourceApi' },
 ];
 
+/**
+ * What the card's "who" line shows. `createdBy` is documented as free text (a
+ * person's name, "Discord"), but some writers store a canonical user id there —
+ * subject erasure matches on it, so the WRITE must stay an id. Printing it showed
+ * `user:460db9a9-…` on the first Claude Code card (ADR 0785, 2026-10-05). The
+ * viewer's own id reads as "You"; any other id-shaped value is not shown at all
+ * (an id is not a name); real free text is shown as written.
+ */
+export function creatorLabel(createdBy: string | undefined, myUserId: string | undefined, youLabel: string): string | null {
+  if (!createdBy) return null;
+  if (myUserId && createdBy === myUserId) return youLabel;
+  if (/^(user|oidc|saml|scim|anon|usr)[:_]/.test(createdBy)) return null;
+  return createdBy;
+}
+
 function DraggableCard({
   card,
   lane,
@@ -203,6 +220,7 @@ function DraggableCard({
   workItem,
   onRunWorkItem,
   workItemRunning,
+  cardExtra,
 }: {
   card: KanbanCard;
   /** Canonical lane of the column this card sits in (null = custom lane). */
@@ -227,8 +245,11 @@ function DraggableCard({
   workItem?: KanbanWorkItem | undefined;
   onRunWorkItem?: ((workItemId: string) => void) | undefined;
   workItemRunning?: boolean | undefined;
+  /** See `KanbanBoardView.cardExtra`. */
+  cardExtra?: ((card: KanbanCard) => React.ReactNode) | undefined;
 }): JSX.Element {
   const { t } = useTranslation('kanban');
+  const myUserId = useBackendSession().user?.userId;
   // Drag activates from a dedicated grip handle, NOT the whole card: dnd-kit's
   // listeners/attributes set role="button"+tabindex on their element, and the
   // card body holds real interactive controls (delete, run link, move buttons)
@@ -378,15 +399,18 @@ function DraggableCard({
         ) : null}
         {card.priority === 'high' ? <span className="chip chip--danger kb-prio">{t('priorityHigh')}</span> : null}
         {card.priority === 'low' ? <span className="chip chip--muted kb-prio">{t('priorityLow')}</span> : null}
-        {card.createdBy ? (
-          <span className="kb-person"><UserIcon size={12} aria-hidden /> {card.createdBy}</span>
-        ) : null}
+        {(() => {
+          const who = creatorLabel(card.createdBy, myUserId, t('createdByYou'));
+          return who ? <span className="kb-person"><UserIcon size={12} aria-hidden /> {who}</span> : null;
+        })()}
         {card.dueAt ? <span className="muted u-fs-12">{t('dueDate', { date: card.dueAt.slice(0, 10) })}</span> : null}
         {/* ADR 0049 — assign this card to a workspace member (notifies them + */}
         {/* surfaces it on their "My Work" mirror). */}
-        <AssigneeControl cardId={card.id} assigneeId={card.assigneeId} />
+        <AssigneeControl cardId={card.id} assigneeId={card.assigneeId} cardTitle={card.title} />
       </div>
+      {cardExtra?.(card)}
       {card.assignmentReason ? <div className="muted u-fs-12">{t('whyAssigned', { reason: card.assignmentReason })}</div> : null}
+      {card.handoff ? <CardHandoffNote handoff={card.handoff} /> : null}
       {card.blockerNote ? <div className="kanban-blocker"><AlertIcon size={12} /> {t('blocked', { note: card.blockerNote })}</div> : null}
       {workItem ? <WorkItemSummary workItem={workItem} workflowOptions={workflowOptions} onRun={onRunWorkItem} running={workItemRunning} /> : null}
       {/* ADR 0313 D3 — a bare todo card on an agent board says what the
@@ -409,6 +433,15 @@ function DraggableCard({
           </Button>
         ) : null}
         <span className="kb-card-foot-spacer" />
+        {card.lastRunId && card.lastRunStatus && runStatusChipShows(card.lastRunStatus, lane) ? (
+          // ADR 0774 D3/D6 — what the linked run is doing, durable on the card:
+          // "finished" asks for review rather than closing the card (ADR 0535).
+          // A plain chip, NOT a live region (grade-ux KSUX-1): one per card
+          // would be N polite regions re-announcing, title-less, on every poll.
+          <span className={`chip ${RUN_STATUS_CHIP[card.lastRunStatus].tone}`}>
+            {t(RUN_STATUS_CHIP[card.lastRunStatus].labelKey)}
+          </span>
+        ) : null}
         {card.lastRunId ? (
           <Link
             to={`/runs/${card.lastRunId}`}
@@ -422,6 +455,24 @@ function DraggableCard({
       </div>
     </div>
   );
+}
+
+/** ADR 0774 D6 — the run-status chip: label + existing chip tone per status. */
+const RUN_STATUS_CHIP: Record<NonNullable<KanbanCard['lastRunStatus']>, { labelKey: string; tone: string }> = {
+  running: { labelKey: 'runStatusRunning', tone: 'chip--accent' },
+  completed: { labelKey: 'runStatusCompleted', tone: 'chip--success' },
+  failed: { labelKey: 'runStatusFailed', tone: 'chip--danger' },
+  // DESIGN §5.3 maps a cancelled run to danger (grade-ux KSUX-4).
+  cancelled: { labelKey: 'runStatusCancelled', tone: 'chip--danger' },
+};
+
+/** Grade-ux KSUX-2 — "Finished — needs review" is only true while the card is
+ *  still in flight. Once a human has moved it on (Done, or back to To Do) the
+ *  review happened, or the card is being re-queued, so a completed run says
+ *  nothing. The other states stay true wherever the card sits: a failed run's
+ *  card is RESTORED to To Do precisely so the failure is visible there. */
+function runStatusChipShows(status: NonNullable<KanbanCard['lastRunStatus']>, lane: LaneKind | null): boolean {
+  return status !== 'completed' || lane === 'working' || lane === 'waiting';
 }
 
 /** The ONE contextual action per lane (boards redesign): what a human most
@@ -446,7 +497,7 @@ function DroppableColumn({
   onMove,
   footer,
   todoAutonomy, onSetColumnLimit, selectedIds,
-  workItemsByCardId, onRunWorkItem, startingWorkItemIds,
+  workItemsByCardId, onRunWorkItem, startingWorkItemIds, cardExtra,
 }: {
   column: KanbanColumn;
   cards: KanbanCard[];
@@ -473,6 +524,7 @@ function DroppableColumn({
   workItemsByCardId?: ReadonlyMap<string, KanbanWorkItem> | undefined;
   onRunWorkItem?: ((workItemId: string) => void) | undefined;
   startingWorkItemIds?: ReadonlySet<string> | undefined;
+  cardExtra?: ((card: KanbanCard) => React.ReactNode) | undefined;
 }): JSX.Element {
   const { t } = useTranslation('kanban');
   const { setNodeRef, isOver } = useDroppable({ id: column.id });
@@ -559,7 +611,7 @@ function DroppableColumn({
         </form>
       ) : null}
       {cards.map((c) => (
-        <DraggableCard key={c.id} card={c} lane={lane} laneTargets={laneTargets} onDelete={onDeleteCard} onMove={onMove} onEdit={onEditCard} todoAutonomy={todoAutonomy} columnHasTrigger={Boolean(column.triggerWorkflowId)} isSelected={selectedIds?.has(c.id)} workflowOptions={workflowOptions} workItem={workItemsByCardId?.get(c.id)} onRunWorkItem={onRunWorkItem} workItemRunning={startingWorkItemIds?.has(workItemsByCardId?.get(c.id)?.workItemId ?? '')} />
+        <DraggableCard key={c.id} card={c} lane={lane} laneTargets={laneTargets} onDelete={onDeleteCard} onMove={onMove} onEdit={onEditCard} todoAutonomy={todoAutonomy} columnHasTrigger={Boolean(column.triggerWorkflowId)} isSelected={selectedIds?.has(c.id)} workflowOptions={workflowOptions} workItem={workItemsByCardId?.get(c.id)} onRunWorkItem={onRunWorkItem} workItemRunning={startingWorkItemIds?.has(workItemsByCardId?.get(c.id)?.workItemId ?? '')} cardExtra={cardExtra} />
       ))}
       {onAddCard && adding ? (
         <form
@@ -688,6 +740,7 @@ export function KanbanBoardView({
   workItemsByCardId,
   onRunWorkItem,
   startingWorkItemIds,
+  cardExtra,
 }: {
   board: KanbanBoard;
   cards: KanbanCard[];
@@ -729,6 +782,10 @@ export function KanbanBoardView({
    * automatic work; absent on read-only/embedded consumers. */
   onRunWorkItem?: ((workItemId: string) => void) | undefined;
   startingWorkItemIds?: ReadonlySet<string> | undefined;
+  /** Optional per-card extra line, rendered under the card's meta row (e.g. the
+   *  CRM board's next-activity marker, ADR 0837 D8). Domain content stays with
+   *  the consumer; the board only gives it a slot. */
+  cardExtra?: ((card: KanbanCard) => React.ReactNode) | undefined;
 }): JSX.Element {
   const { t } = useTranslation('kanban');
   // Mirror props into local state for an optimistic move; re-sync when the
@@ -942,6 +999,7 @@ export function KanbanBoardView({
               onRunWorkItem={onRunWorkItem}
               startingWorkItemIds={startingWorkItemIds}
               todoAutonomy={todoAutonomy}
+              cardExtra={cardExtra}
             />
           );
         })}

@@ -27,7 +27,7 @@ import { STANDARD_BANK, CORE_KEYS, coverageReport } from './standardBank.js';
 import { sendError } from '../../../middleware/errorEnvelope.js';
 
 const FEATURE = { toggleId: JOB_SEARCH_TOGGLE, label: JOB_SEARCH_LABEL };
-const JOB_SEARCH_BASE = '/v1/host/openwop-app/job-search';
+const JOB_SEARCH_BASE = '/host/openwop-app/job-search';
 
 export function registerAnswerBankRoutes(deps: RouteDeps): void {
   const { app } = deps;

@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.workflows.inbox",
-  "version": "1.1.2",
+  "version": "1.1.3",
   "kind": "workflow-chain",
   "description": "Real-work workflow pack (RFC 0013, ADR 0190 Phase 2) — the personal-productivity Inbox cluster: triage your own inbox (classify, draft the urgent reply, digest the rest), nudge unanswered threads, and debrief calls into coaching notes. Distinct from core.openwop.workflows.support (a customer-support mailbox with queue routing): these serve YOUR inbox and YOUR calls. Drafting uses core.email.draft — it creates a draft in your mailbox and never sends (the draft is the human gate); the one real send (follow-up nudger) waits on an approval. All tenant values are run parameters (replay-deterministic).",
   "author": "openwop",
@@ -10,7 +10,7 @@
   "chains": [
     {
       "chainId": "inbox.triage",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "label": "Personal Inbox Triage",
       "description": "Triage an email from YOUR inbox: classify it (urgent / needs-reply / FYI / newsletter), draft a reply INTO YOUR DRAFTS FOLDER when it needs one (never sends — you review and send), and deliver a one-line triage note. For a shared support mailbox with queue routing, use Support Email Triage instead.",
       "parameters": {
@@ -29,18 +29,18 @@
       "capabilities": ["side-effectful"],
       "dag": {
         "nodes": [
-          { "id": "classify", "typeId": "core.ai.chatCompletion", "name": "Classify the email", "position": { "x": 0, "y": 80 }, "config": { "systemPrompt": "You are a personal inbox assistant. Classify this email: urgent / needs-reply / FYI / newsletter, with a one-line reason. If it needs a reply, list the points a reply must hit. End with 'REPLY: yes' or 'REPLY: no'. Email: {{params.emailText}}",
+          { "id": "classify", "typeId": "core.ai.chatCompletion@1.0.0", "name": "Classify the email", "position": { "x": 0, "y": 80 }, "config": { "systemPrompt": "You are a personal inbox assistant. Classify this email: urgent / needs-reply / FYI / newsletter, with a one-line reason. If it needs a reply, list the points a reply must hit. End with 'REPLY: yes' or 'REPLY: no'. Email: {{params.emailText}}",
             "provider": "{{params.provider}}",
             "model": "{{params.model}}"
           }, "inputs": {} },
-          { "id": "route", "typeId": "core.flow.if", "name": "Needs a reply?", "position": { "x": 280, "y": 80 }, "config": { "predicate": { "path": "", "op": "contains", "value": "REPLY: yes" } }, "inputs": {} },
-          { "id": "draft", "typeId": "core.ai.chatCompletion", "name": "Compose reply text", "position": { "x": 560, "y": 0 }, "config": { "systemPrompt": "Write a {{params.replyTone}} reply hitting every point the triage listed, in the first person.",
+          { "id": "route", "typeId": "core.flow.if@1.0.0", "name": "Needs a reply?", "position": { "x": 280, "y": 80 }, "config": { "predicate": { "path": "", "op": "contains", "value": "REPLY: yes" } }, "inputs": {} },
+          { "id": "draft", "typeId": "core.ai.chatCompletion@1.0.0", "name": "Compose reply text", "position": { "x": 560, "y": 0 }, "config": { "systemPrompt": "Write a {{params.replyTone}} reply hitting every point the triage listed, in the first person.",
             "provider": "{{params.provider}}",
             "model": "{{params.model}}"
           }, "inputs": {} },
-          { "id": "toDrafts", "typeId": "core.email.draft", "name": "Save to Drafts (never sends)", "position": { "x": 840, "y": 0 }, "config": { "to": "{{params.replyToAddress}}", "subject": "{{params.replySubject}}" }, "inputs": {} },
-          { "id": "notifyTriaged", "typeId": "feature.notifications.nodes.notify", "name": "Triage note (no reply needed)", "position": { "x": 840, "y": 160 }, "config": { "audience": "tenant" }, "inputs": { "title": "Personal Inbox Triage" } },
-          { "id": "notifyDrafted", "typeId": "feature.notifications.nodes.notify", "name": "Triage note (reply drafted)", "position": { "x": 1120, "y": 0 }, "config": { "audience": "tenant" }, "inputs": { "title": "Personal Inbox Triage" } }
+          { "id": "toDrafts", "typeId": "core.email.draft@1.0.0", "name": "Save to Drafts (never sends)", "position": { "x": 840, "y": 0 }, "config": { "to": "{{params.replyToAddress}}", "subject": "{{params.replySubject}}" }, "inputs": {} },
+          { "id": "notifyTriaged", "typeId": "feature.notifications.nodes.notify@1.0.0", "name": "Triage note (no reply needed)", "position": { "x": 840, "y": 160 }, "config": { "audience": "tenant" }, "inputs": { "title": "Personal Inbox Triage" } },
+          { "id": "notifyDrafted", "typeId": "feature.notifications.nodes.notify@1.0.0", "name": "Triage note (reply drafted)", "position": { "x": 1120, "y": 0 }, "config": { "audience": "tenant" }, "inputs": { "title": "Personal Inbox Triage" } }
         ],
         "edges": [
           { "from": "classify.content", "to": "route.value" },
@@ -54,7 +54,7 @@
     },
     {
       "chainId": "inbox.followup-nudger",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "label": "Follow-up Nudger",
       "description": "Paste an email thread that went quiet and get a polite, context-aware follow-up drafted and sent — behind a human approval, because it leaves the building. Keeps the ask crisp and gives the recipient an easy out.",
       "parameters": {
@@ -74,13 +74,13 @@
       "capabilities": ["side-effectful"],
       "dag": {
         "nodes": [
-          { "id": "draft", "typeId": "core.ai.chatCompletion", "name": "Draft polite follow-up", "position": { "x": 0, "y": 0 }, "config": { "systemPrompt": "Draft a short, polite follow-up to this thread, quiet for {{params.daysQuiet}} days: restate the one ask in a single sentence, offer an easy out ('if now isn't the time…'), keep it under 80 words, first person. Thread: {{params.threadText}}",
+          { "id": "draft", "typeId": "core.ai.chatCompletion@1.0.0", "name": "Draft polite follow-up", "position": { "x": 0, "y": 0 }, "config": { "systemPrompt": "Draft a short, polite follow-up to this thread, quiet for {{params.daysQuiet}} days: restate the one ask in a single sentence, offer an easy out ('if now isn't the time…'), keep it under 80 words, first person. Thread: {{params.threadText}}",
             "provider": "{{params.provider}}",
             "model": "{{params.model}}"
           }, "inputs": {} },
-          { "id": "approve", "typeId": "core.chat.approvalGate", "name": "Approve before send", "position": { "x": 280, "y": 0 }, "config": { "title": "Approve this follow-up before it is sent", "artifactType": "email.body", "actions": ["approve", "reject"] }, "inputs": {} },
-          { "id": "gate-reject", "typeId": "core.flow.noop", "name": "Rejected — no email sent", "position": { "x": 560, "y": 160 }, "config": {}, "inputs": {} },
-          { "id": "send", "typeId": "core.openwop.integration.email-send", "name": "Send follow-up", "position": { "x": 560, "y": 0 }, "config": {
+          { "id": "approve", "typeId": "core.chat.approvalGate@1.1.0", "name": "Approve before send", "position": { "x": 280, "y": 0 }, "config": { "title": "Approve this follow-up before it is sent", "artifactType": "email.body", "actions": ["approve", "reject"] }, "inputs": {} },
+          { "id": "gate-reject", "typeId": "core.flow.noop@1.0.0", "name": "Rejected — no email sent", "position": { "x": 560, "y": 160 }, "config": {}, "inputs": {} },
+          { "id": "send", "typeId": "core.openwop.integration.email-send@1.0.0", "name": "Send follow-up", "position": { "x": 560, "y": 0 }, "config": {
             "from": "{{params.senderEmail}}"
           }, "inputs": {
             "to": "{{params.recipientEmail}}",
@@ -96,7 +96,7 @@
     },
     {
       "chainId": "inbox.call-debrief",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "label": "Call Debrief & Coaching Notes",
       "description": "Turn any call transcript into a debrief you'll actually use: a crisp summary, the objections or pushback raised (and how they were handled), coaching notes on what to do differently, and the committed next steps — delivered as a notification.",
       "parameters": {
@@ -112,11 +112,11 @@
       "capabilities": [],
       "dag": {
         "nodes": [
-          { "id": "debrief", "typeId": "core.ai.chatCompletion", "name": "Debrief the call", "position": { "x": 0, "y": 0 }, "config": { "systemPrompt": "Debrief this call transcript into: Summary (3 lines) · Objections/pushback raised and how each was handled · Coaching notes (2-3 specific, kind, actionable) · Committed next steps with owners. Be faithful to the transcript. Transcript: {{params.transcript}}",
+          { "id": "debrief", "typeId": "core.ai.chatCompletion@1.0.0", "name": "Debrief the call", "position": { "x": 0, "y": 0 }, "config": { "systemPrompt": "Debrief this call transcript into: Summary (3 lines) · Objections/pushback raised and how each was handled · Coaching notes (2-3 specific, kind, actionable) · Committed next steps with owners. Be faithful to the transcript. Transcript: {{params.transcript}}",
             "provider": "{{params.provider}}",
             "model": "{{params.model}}"
           }, "inputs": {} },
-          { "id": "notify", "typeId": "feature.notifications.nodes.notify", "name": "Deliver debrief", "position": { "x": 280, "y": 0 }, "config": { "audience": "tenant" }, "inputs": { "title": "Call Debrief & Coaching Notes" } }
+          { "id": "notify", "typeId": "feature.notifications.nodes.notify@1.0.0", "name": "Deliver debrief", "position": { "x": 280, "y": 0 }, "config": { "audience": "tenant" }, "inputs": { "title": "Call Debrief & Coaching Notes" } }
         ],
         "edges": [
           { "from": "debrief.content", "to": "notify.message" }

@@ -12,36 +12,55 @@
  *  - EM-UX-13            send AND re-send confirms carry `danger`.
  *  - EM-UX-7 / -8 / -9   the page-level failure and the sends failure carry a
  *    Retry, and the in-panel failures announce POLITELY.
+ *
+ * Every claim above is sabotage-witnessed (/grade-tests wave 9, `w9g4-d10-*`):
+ * mounting the panel eagerly, `danger`/`force` on every release, keeping a
+ * released row, releasing on a declined confirm, toasting a generic message,
+ * writing `[]` on a failed read (suppressions / provider / templates /
+ * campaigns / sends), an assertive suppressions announce, a dead filter or sends
+ * Retry, and dropping `danger` from send / re-send each turn its case red.
+ *
+ * Mocks are typed against the real client (`vi.fn<typeof EC.x>`), so a fixture
+ * that drifts from `Campaign` / `ProviderStatus` / `Suppression` fails `tsc`.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
-import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import type { Campaign } from '../emailClient.js';
+import type * as EC from '../emailClient.js';
+import type { Campaign, EmailTemplate, ProviderStatus } from '../emailClient.js';
+import type * as SC from '../suppressionsClient.js';
 import type { Suppression } from '../suppressionsClient.js';
 
 const api = vi.hoisted(() => ({
-  listCampaigns: vi.fn(), listTemplates: vi.fn(), sendCampaign: vi.fn(), listSends: vi.fn(), getProviderStatus: vi.fn(),
+  listCampaigns: vi.fn<typeof EC.listCampaigns>(),
+  listTemplates: vi.fn<typeof EC.listTemplates>(),
+  sendCampaign: vi.fn<typeof EC.sendCampaign>(),
+  listSends: vi.fn<typeof EC.listSends>(),
+  getProviderStatus: vi.fn<typeof EC.getProviderStatus>(),
 }));
-const supp = vi.hoisted(() => ({ listSuppressions: vi.fn(), removeSuppression: vi.fn() }));
+const supp = vi.hoisted(() => ({
+  listSuppressions: vi.fn<typeof SC.listSuppressions>(),
+  removeSuppression: vi.fn<typeof SC.removeSuppression>(),
+}));
 const confirmFn = vi.hoisted(() => vi.fn());
 const toasts = vi.hoisted(() => ({ error: vi.fn(), success: vi.fn(), info: vi.fn() }));
 
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 vi.mock('../emailClient.js', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
-  listCampaigns: (...a: unknown[]) => api.listCampaigns(...a),
-  listTemplates: (...a: unknown[]) => api.listTemplates(...a),
-  sendCampaign: (...a: unknown[]) => api.sendCampaign(...a),
-  listSends: (...a: unknown[]) => api.listSends(...a),
-  getProviderStatus: (...a: unknown[]) => api.getProviderStatus(...a),
+  listCampaigns: (...a: Parameters<typeof EC.listCampaigns>) => api.listCampaigns(...a),
+  listTemplates: (...a: Parameters<typeof EC.listTemplates>) => api.listTemplates(...a),
+  sendCampaign: (...a: Parameters<typeof EC.sendCampaign>) => api.sendCampaign(...a),
+  listSends: (...a: Parameters<typeof EC.listSends>) => api.listSends(...a),
+  getProviderStatus: (...a: Parameters<typeof EC.getProviderStatus>) => api.getProviderStatus(...a),
   listSegments: async () => [],
   getEmailSettings: async () => ({ senderAddress: 'news@acme.test', configured: true }),
   listOrgs: async () => [{ orgId: 'org:1', name: 'Acme' }],
 }));
 vi.mock('../suppressionsClient.js', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
-  listSuppressions: (...a: unknown[]) => supp.listSuppressions(...a),
-  removeSuppression: (...a: unknown[]) => supp.removeSuppression(...a),
+  listSuppressions: (...a: Parameters<typeof SC.listSuppressions>) => supp.listSuppressions(...a),
+  removeSuppression: (...a: Parameters<typeof SC.removeSuppression>) => supp.removeSuppression(...a),
 }));
 vi.mock('../../../ui/confirm.js', () => ({ confirm: (...a: unknown[]) => confirmFn(...a) }));
 vi.mock('../../../ui/toast.js', () => ({ toast: toasts }));
@@ -52,10 +71,11 @@ vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
 const { EmailPage } = await import('../EmailPage.js');
 const { currentAnnouncements } = await import('../../../ui/announce.js');
 
-const tpl = { templateId: 'tpl1', orgId: 'org:1', name: 'Welcome', subject: 's', body: 'b', createdAt: '', updatedAt: '' };
+const tpl: EmailTemplate = { templateId: 'tpl1', orgId: 'org:1', name: 'Welcome', subject: 's', body: 'b', createdAt: '', updatedAt: '' };
 const campaign = (status: Campaign['status']): Campaign => ({
   campaignId: 'c1', orgId: 'org:1', templateId: 'tpl1', audience: { stage: 'lead' }, status, createdAt: '', updatedAt: '',
-} as Campaign);
+});
+const connected: ProviderStatus = { providers: [{ provider: 'sendgrid', connected: true }], defaultProvider: 'sendgrid', senderAddress: 'news@acme.test' };
 const row = (email: string, reason: Suppression['reason']): Suppression => ({
   key: `t1::${email}`, tenantId: 't1', email, reason, actor: 'u1',
   // RELATIVE, deliberately. The assertion below reads the rendered relative time
@@ -75,8 +95,8 @@ beforeEach(() => {
   api.listTemplates.mockResolvedValue([tpl]);
   api.listCampaigns.mockResolvedValue([]);
   api.listSends.mockResolvedValue([]);
-  api.getProviderStatus.mockResolvedValue({ providers: [{ provider: 'sendgrid', connected: true }], defaultProvider: 'sendgrid', senderAddress: 'news@acme.test' });
-  api.sendCampaign.mockResolvedValue({ status: 'sent', stats: { sent: 1, failed: 0, skipped: 0 } });
+  api.getProviderStatus.mockResolvedValue(connected);
+  api.sendCampaign.mockResolvedValue({ ...campaign('sent'), stats: { sent: 1, failed: 0, skipped: 0 } });
   supp.listSuppressions.mockResolvedValue([]);
   supp.removeSuppression.mockResolvedValue(true);
   confirmFn.mockResolvedValue(true);
@@ -190,15 +210,18 @@ describe('ADR 0655 D10 — Suppressions panel (EM-UX-5 / EM-UX-23)', () => {
 
 describe('EM-UX-27 — provider status: failed ≠ absent', () => {
   it('a FAILED read renders the failed state with Retry under the provider heading', async () => {
-    api.getProviderStatus.mockRejectedValue(new Error('ps_500'));
+    api.getProviderStatus.mockRejectedValueOnce(new Error('ps_500'));
     renderPage();
     expect(await screen.findByText(/provider status didn’t load/i)).toBeTruthy();
-    expect(screen.getByText('Sending provider')).toBeTruthy();
+    const heading = screen.getByRole('heading', { name: 'Sending provider' });
     expect(currentAnnouncements().polite).toMatch(/provider status didn’t load/i);
     const before = api.getProviderStatus.mock.calls.length;
-    const retry = screen.getByText(/provider status didn’t load/i).parentElement!.querySelector('button')!;
-    fireEvent.click(retry);
+    // The Retry INSIDE the provider card (the page has several same-named Retries).
+    fireEvent.click(within(heading.parentElement!).getByRole('button', { name: /retry/i }));
     await waitFor(() => expect(api.getProviderStatus.mock.calls.length).toBeGreaterThan(before));
+    // …and the retry RECOVERS: the second read lands and the failed state is gone.
+    expect(await screen.findByText(/sendgrid/i)).toBeTruthy();
+    expect(screen.queryByText(/provider status didn’t load/i)).toBeNull();
   });
   it('a successful read renders the providers, and no failed state', async () => {
     renderPage();

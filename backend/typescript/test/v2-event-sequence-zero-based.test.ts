@@ -17,7 +17,6 @@ import { createApp } from '../src/index.js';
 
 let server: Server; let base = '';
 const V2 = { Authorization: 'Bearer dev-token', 'Content-Type': 'application/json', 'OpenWOP-Version': '2' };
-const V1 = { Authorization: 'Bearer dev-token', 'Content-Type': 'application/json' };
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://'; process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true'; process.env.OPENWOP_TEST_SEAM_ENABLED = 'true';
@@ -57,14 +56,15 @@ describe('a run\'s first event is sequence 0 (RFC 0171 §A.3)', () => {
     expect(r.json.lastSequence, 'lastSequence is the highest sequence returned').toBe(Math.max(...seqs));
   });
 
-  it('major 1 numbers from 0 too, and an absent cursor is not a cursor at 0', async () => {
-    const id = await completedRun(V1, '/v1');
-    const r = await req('GET', `/v1/runs/${encodeURIComponent(id)}/events/poll?timeout=1`, V1);
+  // ADR 0812 P3c-0 — the major-1 numbering leg was deleted with major 1; its
+  // cursor half (an explicit cursor of 0 is exclusive) is kept under major 2.
+  it('an absent cursor is not a cursor at 0 — an explicit afterSequence=0 skips exactly event 0', async () => {
+    const id = await completedRun(V2, '');
+    const r = await req('GET', `/runs/${encodeURIComponent(id)}/events/poll?timeout=1`, V2);
     expect(r.status).toBe(200);
-    const seqs = (r.json.events as Array<{ sequence: number }>).map((e) => e.sequence);
-    expect(seqs[0]).toBe(0);
-    // An EXPLICIT cursor of 0 is exclusive and must skip exactly event 0.
-    const after0 = await req('GET', `/v1/runs/${encodeURIComponent(id)}/events/poll?timeout=1&fromSeq=0`, V1);
+    expect((r.json.events as Array<{ sequence: number }>)[0]?.sequence).toBe(0);
+    const after0 = await req('GET', `/runs/${encodeURIComponent(id)}/events/poll?timeout=1&afterSequence=0`, V2);
+    expect(after0.status, after0.text.slice(0, 160)).toBe(200);
     expect((after0.json.events as Array<{ sequence: number }>)[0]?.sequence).toBe(1);
   });
 
@@ -74,18 +74,14 @@ describe('a run\'s first event is sequence 0 (RFC 0171 §A.3)', () => {
     const all = (poll.json.events as Array<{ sequence: number }>).map((e) => e.sequence);
     expect(all[0]).toBe(0);
 
-    // The debug bundle and diff are v1-mount readers, so they need a v1 (bare-id) run.
-    const v1id = await completedRun(V1, '/v1');
-    const v1poll = await req('GET', `/v1/runs/${encodeURIComponent(v1id)}/events/poll?timeout=1`, V1);
-    const v1all = (v1poll.json.events as Array<{ sequence: number }>).map((e) => e.sequence);
-    expect(v1all[0]).toBe(0);
-
-    const bundle = await req('GET', `/v1/runs/${encodeURIComponent(v1id)}/debug-bundle`, V1);
+    // ADR 0812 P3c-0 — the debug bundle and diff are read under major 2 with the
+    // bound id (they used to need a v1 bare-id run).
+    const bundle = await req('GET', `/runs/${encodeURIComponent(id)}/debug-bundle`, V2);
     expect(bundle.status, bundle.text.slice(0, 160)).toBe(200);
     const bseq = ((bundle.json.events ?? []) as Array<{ sequence: number }>).map((e) => e.sequence);
-    expect(bseq, 'the debug bundle is the whole log, event 0 included').toEqual(v1all);
+    expect(bseq, 'the debug bundle is the whole log, event 0 included').toEqual(all);
 
-    const diff = await req('GET', `/v1/runs/${encodeURIComponent(v1id)}:diff?against=${encodeURIComponent(v1id)}`, V1);
+    const diff = await req('GET', `/runs/${encodeURIComponent(id)}:diff?against=${encodeURIComponent(id)}`, V2);
     if (diff.status === 200) {
       const seqs = JSON.stringify(diff.json).match(/"sequence":(\d+)/g) ?? [];
       if (seqs.length > 0) expect(seqs[0], 'the diff reads the whole log').toBe('"sequence":0');

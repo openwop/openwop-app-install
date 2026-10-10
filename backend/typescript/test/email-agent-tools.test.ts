@@ -9,6 +9,14 @@
  * closed-world validation with structured error feedback — all gated exactly
  * like the HTTP routes (per-tenant `email` toggle, acting user, org RBAC).
  * Boots the REAL app (the ADR 0308 D2 registration seam is what's under test).
+ *
+ * Sabotage-witnessed (w9 grade-tests): a pack allowlist drift, dropping the
+ * registration, the read path's toggle / acting-user empties, the draft-only list
+ * filter, the `stage` defect, the per-run idempotency id, the update write, the
+ * update not_found, the missing-id empty read, and the toolkit's acting_user_required
+ * each turn a case red. Recorded DOUBLE GUARD: save-draft's own `emailEnabled` check is
+ * shadowed by `resolveActionOrgScope`'s toggle check (same typed `feature_disabled`),
+ * so "fails closed when the toggle is off" cannot fail on either one alone.
  */
 import http from 'node:http';
 import { readFileSync } from 'node:fs';
@@ -20,7 +28,9 @@ import { EMAIL_GET_CAMPAIGN_TOOL_ID, EMAIL_SAVE_DRAFT_TOOL_ID } from '../src/fea
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { createOrg, listOrgs } from '../src/host/accessControlService.js';
-import { getCampaign, getTemplate } from '../src/features/email/emailService.js';
+import {
+  getCampaign, getTemplate, setSenderAddress, createTemplate, createCampaign, sendCampaign,
+} from '../src/features/email/emailService.js';
 
 const TENANT = 'default';
 
@@ -46,7 +56,7 @@ function provider(scope: { actingUserId?: string; runId?: string } = {}) {
 }
 
 describe('CFP-1 — the email agents pack rides the real registered tools', () => {
-  const packDir = new URL('../../../packs/feature.email.agents/', import.meta.url);
+  const packDir = new URL('../../../packs/vendor.openwop-app.email.agents/', import.meta.url);
   const manifest = JSON.parse(readFileSync(new URL('pack.json', packDir), 'utf8')) as {
     agents: { toolAllowlist: string[]; systemPromptRef: string }[];
   };
@@ -69,10 +79,7 @@ describe('CFP-1 — get-campaign: the app-state read path', () => {
     const out = await provider({ actingUserId: 'u-1' }).executeTool({ name: EMAIL_GET_CAMPAIGN_TOOL_ID, input: {} });
     expect(out.isError).toBeFalsy();
     expect(JSON.parse(out.content)).toEqual({ campaigns: [], templates: [] });
-    // the write path (save-draft) keeps the typed feature_disabled.
-    const write = await provider({ actingUserId: 'u-1' }).executeTool({ name: EMAIL_SAVE_DRAFT_TOOL_ID, input: { subject: 's', body: 'b' } });
-    expect(write.isError).toBe(true);
-    expect(JSON.parse(write.content)).toMatchObject({ error: 'feature_disabled' });
+    // (the write path's typed feature_disabled is the "fails closed when the toggle is off" case)
     await setEmail('on');
   });
 
@@ -86,11 +93,29 @@ describe('CFP-1 — get-campaign: the app-state read path', () => {
   it('lists the org\'s draft campaigns + templates for grounding', async () => {
     await setEmail('on');
     const p = provider({ actingUserId: 'u-1', runId: 'run-get-list' });
-    await p.executeTool({ name: EMAIL_SAVE_DRAFT_TOOL_ID, input: { subject: 'Fall sale', body: 'Hi {{contact.name}}, save now.' } });
+    const draft = JSON.parse((await p.executeTool({ name: EMAIL_SAVE_DRAFT_TOOL_ID, input: { subject: 'Fall sale', body: 'Hi {{contact.name}}, save now.' } })).content) as { campaignId: string };
+    // A NON-draft campaign in the same org, so the draft-only filter can fail: an empty
+    // audience exhausts on the first pass, which marks the campaign 'sent'.
+    const orgId = (await listOrgs(TENANT))[0]!.orgId;
+    await setSenderAddress(TENANT, orgId, 'news@acme.test', 'u-1');
+    const prevBase = process.env.OPENWOP_EMAIL_LINK_BASE_URL;
+    process.env.OPENWOP_EMAIL_LINK_BASE_URL = 'https://app.example';
+    let sentId = '';
+    try {
+      const tpl = await createTemplate({ tenantId: TENANT, orgId, name: 'Sent one', subject: 'Done', body: 'x', createdBy: 'u-1' });
+      const cmp = await createCampaign({ tenantId: TENANT, orgId, templateId: tpl.templateId, createdBy: 'u-1' });
+      sentId = cmp.campaignId;
+      const sent = await sendCampaign(TENANT, orgId, sentId, { provider: { id: 'test-transport', send: async () => {} } });
+      expect(sent?.status, 'precondition: the fixture campaign is no longer a draft').toBe('sent');
+    } finally {
+      if (prevBase === undefined) delete process.env.OPENWOP_EMAIL_LINK_BASE_URL; else process.env.OPENWOP_EMAIL_LINK_BASE_URL = prevBase;
+    }
     const out = await p.executeTool({ name: EMAIL_GET_CAMPAIGN_TOOL_ID, input: {} });
     expect(out.isError).toBeFalsy();
-    const res = JSON.parse(out.content) as { campaigns: { status: string }[]; templates: { subject: string }[] };
-    expect(res.campaigns.every((c) => c.status === 'draft')).toBe(true);
+    const res = JSON.parse(out.content) as { campaigns: { campaignId: string; status: string }[]; templates: { subject: string }[] };
+    const ids = res.campaigns.map((c) => c.campaignId);
+    expect(ids).toContain(draft.campaignId);
+    expect(ids, 'a sent campaign is not a draft to ground on').not.toContain(sentId);
     expect(res.templates.some((t) => t.subject === 'Fall sale')).toBe(true);
   });
 
@@ -156,8 +181,11 @@ describe('CFP-1 — save-draft: validate → persist a DRAFT, never a send', () 
   it('is idempotent within a run (retries do not mint duplicate drafts)', async () => {
     await setEmail('on');
     const p = provider({ actingUserId: 'u-1', runId: 'run-idem' });
-    const a = JSON.parse((await p.executeTool({ name: EMAIL_SAVE_DRAFT_TOOL_ID, input: { subject: 'Same', body: 'Same body' } })).content) as { campaignId: string };
-    const b = JSON.parse((await p.executeTool({ name: EMAIL_SAVE_DRAFT_TOOL_ID, input: { subject: 'Same', body: 'Same body' } })).content) as { campaignId: string };
+    const a = JSON.parse((await p.executeTool({ name: EMAIL_SAVE_DRAFT_TOOL_ID, input: { subject: 'Same', body: 'Same body' } })).content) as { campaignId?: string; created?: boolean };
+    const b = JSON.parse((await p.executeTool({ name: EMAIL_SAVE_DRAFT_TOOL_ID, input: { subject: 'Same', body: 'Same body' } })).content) as { campaignId?: string };
+    // Both failing would make the ids equal as `undefined` — the first call must be a real create.
+    expect(a.created).toBe(true);
+    expect(a.campaignId).toMatch(/^cmp:agent:/);
     expect(b.campaignId).toBe(a.campaignId);
   });
 

@@ -67,15 +67,15 @@ async function ownerWithOrg(): Promise<{ owner: Client; orgId: string; tenantId:
   const owner = client();
   // Explicit tenant so a test can set the kernel via the service (no kernel HTTP route).
   const tenantId = `user:cg-${Date.now()}-${n++}`;
-  const r = await owner.post('/v1/host/openwop-app/test/login', { email: uniqEmail(), tenantId });
+  const r = await owner.post('/host/openwop-app/test/login', { email: uniqEmail(), tenantId });
   expect(r.status).toBe(201);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status).toBe(201);
   return { owner, orgId: org.body.orgId, tenantId };
 }
 
-const BRIEF = '/v1/host/openwop-app/campaign-brief/briefs';
-const ORCH = '/v1/host/openwop-app/campaign-orchestration';
+const BRIEF = '/host/openwop-app/campaign-brief/briefs';
+const ORCH = '/host/openwop-app/campaign-orchestration';
 
 function storageOrThrow() {
   const s = __hostExtStorage();

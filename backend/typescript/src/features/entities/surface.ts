@@ -7,6 +7,11 @@
  * Conventions (csm/crm precedent):
  * - Tenant comes from the run scope, NEVER node args (CTI-1); every service
  *   call is tenant-guarded at the service layer.
+ * - ADR 0847 D1 — a run is limited to its starter's access: a person-started run
+ *   reads/writes only what that person could in the app (tenant tier + the project
+ *   namespace rule); a system run is tenant-trusted in the workspace root and refused
+ *   in a project namespace. Every verb asks `runCallerAllows` (classified in
+ *   `test/adr0847-entities-namespace-and-schema-exits.test.ts`).
  * - Node output is recorded in the durable event log → INTERNAL storage
  *   columns are projected out before returning.
  * - Creation idempotency: the pack node layer supplies a deterministic
@@ -16,7 +21,9 @@
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { surfaceStr as str, surfaceOptStr as optStr, type FeatureSurface } from '../../host/featureSurfaces.js';
 import { resolveLocalizedValues } from '../../host/i18n/index.js';
+import { OpenwopError } from '../../types.js';
 import { entityLocaleContext } from './common.js';
+import { filterRunReadable, runCallerAllows, runCallerOf } from './namespaceAccess.js';
 import {
   createEntity,
   deleteEntity,
@@ -82,7 +89,15 @@ export function projectType(t: EntityTypeRecord): Record<string, unknown> {
 export function buildEntitiesSurface(scope: BundleScope): FeatureSurface {
   const tenantId = scope.tenantId;
   const actor = `run:${scope.runId ?? 'unknown'}`;
+  const caller = runCallerOf(scope);
   const projectIdOf = (args: Record<string, unknown>): string | undefined => optStr(args.projectId);
+  const mayRead = (args: Record<string, unknown>): Promise<boolean> => runCallerAllows(tenantId, caller, projectIdOf(args), 'read');
+  /** Writes refused as not-found: a namespace the caller cannot reach is indistinguishable from absent. */
+  const requireWrite = async (args: Record<string, unknown>): Promise<void> => {
+    if (!(await runCallerAllows(tenantId, caller, projectIdOf(args), 'write'))) {
+      throw new OpenwopError('not_found', 'Entity type not found.', 404, { typeName: str(args.typeName) });
+    }
+  };
   // ADR 0409 — SYSTEM types (crm.*, cms.page, commerce.product) are façade-
   // owned; the generic workflow surface's READ verbs must not expose them (the
   // façade's per-org RBAC would be bypassed). Writes are already blocked by
@@ -93,15 +108,16 @@ export function buildEntitiesSurface(scope: BundleScope): FeatureSurface {
   };
   return {
     listTypes: async (args) => {
-      const types = (await listEntityTypes(tenantId, projectIdOf(args))).filter((t) => !t.system);
+      const types = await filterRunReadable(tenantId, caller, (await listEntityTypes(tenantId, projectIdOf(args))).filter((t) => !t.system));
       return { types: types.map(projectType) };
     },
     getType: async (args) => {
+      if (!(await mayRead(args))) return { type: null };
       const type = await getEntityType(tenantId, projectIdOf(args), str(args.typeName));
       return { type: type && !type.system ? projectType(type) : null };
     },
     query: async (args) => {
-      if (!(await isUserType(args))) return { entities: [], total: 0 };
+      if (!(await mayRead(args)) || !(await isUserType(args))) return { entities: [], total: 0 };
       const limitRaw = typeof args.limit === 'number' && Number.isFinite(args.limit) ? args.limit : undefined;
       const sortKey = optStr((args.sort as { key?: unknown } | undefined)?.key);
       const sortDir = (args.sort as { dir?: unknown } | undefined)?.dir;
@@ -133,7 +149,7 @@ export function buildEntitiesSurface(scope: BundleScope): FeatureSurface {
       };
     },
     get: async (args) => {
-      if (!(await isUserType(args))) return { entity: null };
+      if (!(await mayRead(args)) || !(await isUserType(args))) return { entity: null };
       const entity = await getEntity({
         tenantId,
         projectId: projectIdOf(args),
@@ -148,6 +164,7 @@ export function buildEntitiesSurface(scope: BundleScope): FeatureSurface {
       return { entity: projectOne(entity) };
     },
     create: async (args) => {
+      await requireWrite(args);
       if (args.values === null || typeof args.values !== 'object' || Array.isArray(args.values)) {
         throw new Error('`values` must be an object.');
       }
@@ -169,6 +186,7 @@ export function buildEntitiesSurface(scope: BundleScope): FeatureSurface {
       return { entity: projectOne(entity) };
     },
     update: async (args) => {
+      await requireWrite(args);
       if (args.values === null || typeof args.values !== 'object' || Array.isArray(args.values)) {
         throw new Error('`values` must be an object.');
       }
@@ -189,6 +207,7 @@ export function buildEntitiesSurface(scope: BundleScope): FeatureSurface {
       return { entity: projectOne(entity) };
     },
     delete: async (args) => {
+      await requireWrite(args);
       const deleted = await deleteEntity({
         tenantId,
         projectId: projectIdOf(args),

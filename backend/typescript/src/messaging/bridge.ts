@@ -32,6 +32,7 @@ import { enqueueOutbound } from '../routes/messaging.js';
 import type { ChatIngressEnvelope, MessagingBridge, MessagingRoutingRuleRecord, RelayChannel, RelayDeviceRecord } from './types.js';
 import type { Storage } from '../storage/storage.js';
 import { createLogger } from '../observability/logger.js';
+import { VENDOR_ROOT, selfCallHeaders } from '../middleware/protocolVersion.js';
 
 const log = createLogger('messaging.bridge');
 
@@ -108,9 +109,9 @@ export function createSelfHttpBridge(cfg: SelfHttpBridgeConfig): MessagingBridge
       }
 
       const workflowId = rule?.workflowId ?? cfg.defaultWorkflowId;
-      const createRes = await fetchImpl(`${cfg.baseUrl}/v1/runs`, {
+      const createRes = await fetchImpl(`${cfg.baseUrl}/runs`, {
         method: 'POST',
-        headers,
+        headers: { ...headers, ...selfCallHeaders() },
         body: JSON.stringify({
           workflowId,
           tenantId: device.tenantId,
@@ -253,12 +254,13 @@ interface ReplyArgs {
 
 const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 
+
 async function completeAndReply(a: ReplyArgs): Promise<void> {
   const deadline = Date.now() + a.timeoutMs;
   let status = 'pending';
   while (Date.now() < deadline) {
     await delay(a.pollIntervalMs);
-    const snap = await a.fetchImpl(`${a.baseUrl}/v1/runs/${encodeURIComponent(a.runId)}`, { headers: a.headers });
+    const snap = await a.fetchImpl(`${a.baseUrl}/runs/${encodeURIComponent(a.runId)}`, { headers: { ...a.headers, ...selfCallHeaders() } });
     if (!snap.ok) continue;
     const body = (await snap.json()) as { status?: string };
     if (body.status && TERMINAL.has(body.status)) { status = body.status; break; }
@@ -266,7 +268,7 @@ async function completeAndReply(a: ReplyArgs): Promise<void> {
 
   let text: string | null = null;
   if (status === 'completed') {
-    const evRes = await a.fetchImpl(`${a.baseUrl}/v1/runs/${encodeURIComponent(a.runId)}/events/poll?fromSeq=0&limit=1000`, { headers: a.headers });
+    const evRes = await a.fetchImpl(`${a.baseUrl}/runs/${encodeURIComponent(a.runId)}/events/poll?fromSeq=0&limit=1000`, { headers: { ...a.headers, ...selfCallHeaders() } });
     if (evRes.ok) {
       const evBody = (await evRes.json()) as { events?: Array<{ type?: string; payload?: unknown }> };
       text = extractReplyText(evBody.events ?? []);
@@ -327,7 +329,8 @@ async function dispatchToAgent(a: AgentDispatchArgs): Promise<void> {
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   let res: Response;
   try {
-    res = await a.fetchImpl(`${a.baseUrl}/v1/host/openwop-app/agents/${encodeURIComponent(a.agentId)}/dispatch`, {
+    // A host extension: the unversioned vendor path, which the cut leaves in place.
+    res = await a.fetchImpl(`${a.baseUrl}${VENDOR_ROOT}/agents/${encodeURIComponent(a.agentId)}/dispatch`, {
       method: 'POST',
       headers: a.headers,
       body: JSON.stringify({

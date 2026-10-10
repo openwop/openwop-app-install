@@ -43,13 +43,18 @@ import type { Storage } from '../storage/storage.js';
 import { executeRun } from '../executor/executor.js';
 import { getEventLog } from '../executor/eventLog.js';
 import { createLogger } from '../observability/logger.js';
+import { DurableCollection } from './hostExtPersistence.js';
+import { openWebhookSecret, sealWebhookSecret } from './webhookSecretCodec.js';
 import { resolveLaunchWorkflow } from './resolveLaunchDefinition.js';
+import { WorkflowFeatureRefusedError } from './workflowFeatureGate.js';
+import { withRunLimit } from './runLimitSeam.js';
 import { resolveOne } from './featureToggles/service.js';
 import { isDeniedWebhookHost, webhookEgressDispatcher, webhookPrivateEgressAllowed } from './webhookEgressGuard.js';
 import {
   deliver,
   getSubscription,
   makeDedupKey,
+  recordRefusedDelivery,
   type SubscriptionSource,
 } from './triggerBridgeService.js';
 
@@ -110,6 +115,19 @@ export function isAcceptedIngestionSource(s: string): s is SubscriptionSource {
  * `.../ingest` return `501` and the `triggerBridge.ingestion` capability sub-block
  * is NOT advertised (so a consumer never reads a claim the host won't honor).
  */
+/**
+ * ADR 0793 / RFC 0230 — the signed, credential-less ingest route
+ * (`/host/openwop-app/trigger-ingest/{id}`) and its discovery facet
+ * (`triggerBridge.ingestion.inboundSigning: ["standard-webhooks-1"]`). DEFAULT OFF:
+ * it opens an unauthenticated route that starts runs, so turning it on is an
+ * operator decision (`OPENWOP_TRIGGER_INBOUND_SIGNING=true`).
+ */
+export { SIGNED_INGEST_ROOT } from './signedIngestRoot.js';
+
+export function inboundSigningEnabled(): boolean {
+  return triggerIngestionEnabled() && process.env.OPENWOP_TRIGGER_INBOUND_SIGNING === 'true';
+}
+
 export function triggerIngestionEnabled(): boolean {
   return process.env.OPENWOP_TRIGGER_INGESTION_ENABLED !== 'false';
 }
@@ -314,6 +332,9 @@ export interface WebhookIngressInput {
   /** A stable per-delivery id the sender provides for dedup (e.g. a delivery
    *  GUID header); falls back to a hash of the body. */
   externalDeliveryId?: string;
+  /** ADR 0793 / RFC 0230 — set by the signed-ingest route: the Standard Webhooks
+   *  verification verdict, which REPLACES the legacy `signature` check. */
+  preVerified?: boolean;
 }
 
 export interface EmailIngressInput {
@@ -375,7 +396,7 @@ export interface IngestResult {
   outcome: 'delivered' | 'deduped' | 'dead-lettered' | 'skipped' | 'rejected';
   runId?: string;
   /** Set on a `rejected`/`dead-lettered` verification failure (§F.2). */
-  reason?: 'signature-invalid' | 'body-too-large' | 'workflow-not-found' | 'paused' | 'feature-disabled';
+  reason?: 'signature-invalid' | 'body-too-large' | 'workflow-not-found' | 'paused' | 'feature-disabled' | 'plan-lapsed';
 }
 
 /**
@@ -397,8 +418,11 @@ export async function ingestExternalEvent(deps: IngestDeps, subscriptionId: stri
   // Fail-closed: an unreadable toggle does not start someone's workflow.
   if (sub.featureId) {
     let enabled = false;
+    let planRefused = false;
     try {
-      enabled = (await resolveOne(sub.featureId, { tenantId: sub.tenantId }))?.enabled === true;
+      const resolved = await resolveOne(sub.featureId, { tenantId: sub.tenantId });
+      enabled = resolved?.enabled === true;
+      planRefused = !enabled && resolved?.blockedBy === 'plan';
     } catch (err) {
       log.warn('trigger_ingest_feature_unresolved', {
         subscriptionId, featureId: sub.featureId,
@@ -406,8 +430,11 @@ export async function ingestExternalEvent(deps: IngestDeps, subscriptionId: stri
       });
     }
     if (!enabled) {
-      log.info('trigger_ingest_feature_disabled', { subscriptionId, featureId: sub.featureId });
-      return { outcome: 'skipped', reason: 'feature-disabled' };
+      // ADR 0820 §7 — a PLAN refusal is a lapse (`plan-lapsed`), the twin of the
+      // schedule daemon's `planLapsedSkip`; a toggle switched off stays the
+      // distinct `feature-disabled`. Both are the same non-destructive skip.
+      log.info('trigger_ingest_feature_disabled', { subscriptionId, featureId: sub.featureId, planRefused });
+      return { outcome: 'skipped', reason: planRefused ? 'plan-lapsed' : 'feature-disabled' };
     }
   }
   if (!sub.workflowId) {
@@ -420,7 +447,20 @@ export async function ingestExternalEvent(deps: IngestDeps, subscriptionId: stri
   if (!isAcceptedIngestionSource(input.source)) return { outcome: 'skipped' };
 
   // ADR 0474 P1b — event-triggered launches are production: published-when-present.
-      const wf = await resolveLaunchWorkflow(deps.hostSuite.workflowCatalog, sub.tenantId, sub.workflowId);
+  // ADR 0820 §7 / G6 — the funnel also applies the workflow's OWNING-FEATURE
+  // gate (a subscription with no `featureId` is still gated by its workflow's
+  // feature). A refusal is a SKIP, not a dead-letter: non-destructive, the
+  // subscription stays armed and resumes when access returns.
+  let wf: Awaited<ReturnType<typeof resolveLaunchWorkflow>>;
+  try {
+    wf = await resolveLaunchWorkflow(deps.hostSuite.workflowCatalog, sub.tenantId, sub.workflowId);
+  } catch (err) {
+    if (err instanceof WorkflowFeatureRefusedError) {
+      log.info('trigger_ingest_feature_disabled', { subscriptionId, featureId: err.featureId, blockedBy: err.blockedBy });
+      return { outcome: 'skipped', reason: err.blockedBy === 'plan' ? 'plan-lapsed' : 'feature-disabled' };
+    }
+    throw err;
+  }
   if (!wf) {
     log.warn('trigger_ingest_workflow_not_found', { subscriptionId, workflowId: sub.workflowId });
     return { outcome: 'dead-lettered', reason: 'workflow-not-found' };
@@ -436,12 +476,17 @@ export async function ingestExternalEvent(deps: IngestDeps, subscriptionId: stri
 
   if (input.source === 'webhook') {
     if (!bodyWithinCap(input.rawBody)) return { outcome: 'rejected', reason: 'body-too-large' };
-    if (sub.secretFingerprint && input.signature !== undefined) {
+    if (input.preVerified !== undefined) {
+      // ADR 0793 / RFC 0230 — the signed-ingest route verified the Standard
+      // Webhooks signature (and timestamp skew) against the sealed `whsec_`
+      // secret before calling here; its verdict is the verification.
+      verified = input.preVerified;
+    } else if (sub.secretFingerprint && input.signature !== undefined) {
       // The cleartext secret is held by the operator/sender; the host verifies
       // the HMAC against the secret it minted at registration. Sample host
       // re-derives from the per-subscription secret store (below).
-      const secret = ingestSecrets.get(subscriptionId);
-      verified = secret ? verifyWebhookSignature(secret, input.rawBody, input.signature) : false;
+      const stored = await loadIngestSecret(subscriptionId);
+      verified = stored !== null && stored.scheme === 'legacy-hex' ? verifyWebhookSignature(stored.secret, input.rawBody, input.signature) : false;
     } else if (sub.secretFingerprint) {
       verified = false; // signing expected, none supplied
     } else {
@@ -536,6 +581,11 @@ export async function ingestExternalEvent(deps: IngestDeps, subscriptionId: stri
   // dead-letters with reason `signature-invalid`.
   if (mode === 'required' && !verified) {
     log.info('trigger_ingest_verification_failed', { subscriptionId, source: input.source });
+    // RFC 0232 §C.3 — the refused delivery is recorded in the subscription's
+    // dead-letter sink (`reason: verification_failed`, no state change). The
+    // key is the same opaque hash a delivered event would carry, never the
+    // inbound id in cleartext.
+    await recordRefusedDelivery(subscriptionId, makeDedupKey(subscriptionId, dedupSeed));
     return { outcome: 'rejected', reason: 'signature-invalid' };
   }
 
@@ -595,7 +645,8 @@ export async function ingestExternalEvent(deps: IngestDeps, subscriptionId: stri
         createdAt: now,
         updatedAt: now,
       };
-      await insertRunWithStartContext(deps.storage, run, { definition: wf.definition });
+      // ADR 0821 P5 follow-up — the plan's monthly run limit (a no-op until wired).
+      await withRunLimit(sub.tenantId, () => insertRunWithStartContext(deps.storage, run, { definition: wf.definition }));
       // ADR 0677 `ISWF-6a` — seed the variable bag. Without this the trigger lane was the
       // ONLY run-start path that never called `seedRunVariables` (the others:
       // `runStarter.ts:139`, `mcpSemantics.ts:360`, `workflowEvalRunner.ts:262`,
@@ -643,17 +694,52 @@ export async function ingestExternalEvent(deps: IngestDeps, subscriptionId: stri
 
 /**
  * The webhook signing secret is returned to the caller ONCE at registration and
- * held here so the ingestion path can verify inbound HMAC signatures. It is
- * NEVER returned on a re-read (the subscription persists only the fingerprint).
- * Sample-grade in-memory store; a production host holds it in a secret manager.
+ * held here, SEALED (`sealWebhookSecret`: a KMS envelope when configured), so the
+ * ingestion path can verify inbound signatures. It is NEVER returned on a re-read
+ * (the subscription record carries only the fingerprint) and lives in its own
+ * collection so no subscription read can ever project it.
+ *
+ * ADR 0793 — this used to be an in-memory `Map`, which on a multi-instance /
+ * restarting deployment silently lost the secret: a correctly signed delivery
+ * then failed verification on any instance that had not minted it. Durable now.
+ * `scheme` records which construction the secret signs under: the legacy
+ * `sha256=<hex>` body HMAC, or RFC 0230's `standard-webhooks-1` (`whsec_`).
  */
-const ingestSecrets = new Map<string, string>();
+export type IngestSigningScheme = 'legacy-hex' | 'standard-webhooks-1';
 
-export function storeIngestSecret(subscriptionId: string, secret: string): void {
-  ingestSecrets.set(subscriptionId, secret);
+interface IngestSecretRow {
+  subscriptionId: string;
+  tenantId: string;
+  scheme: IngestSigningScheme;
+  sealed: string;
+  createdAt: string;
 }
 
-/** Test-only: clear the in-memory signing-secret store. */
-export function __resetIngestSecrets(): void {
-  ingestSecrets.clear();
+const ingestSecretCol = new DurableCollection<IngestSecretRow>('triggerbridge:ingest-secret', (r) => r.subscriptionId);
+
+export async function storeIngestSecret(subscriptionId: string, secret: string, opts: { tenantId: string; scheme?: IngestSigningScheme }): Promise<void> {
+  await ingestSecretCol.put({
+    subscriptionId,
+    tenantId: opts.tenantId,
+    scheme: opts.scheme ?? 'legacy-hex',
+    sealed: await sealWebhookSecret(secret),
+    createdAt: new Date().toISOString(),
+  });
+}
+
+/** The opened secret and its scheme, or null when none is stored. */
+export async function loadIngestSecret(subscriptionId: string): Promise<{ secret: string; scheme: IngestSigningScheme } | null> {
+  const row = await ingestSecretCol.get(subscriptionId);
+  if (!row) return null;
+  return { secret: await openWebhookSecret(row.sealed), scheme: row.scheme };
+}
+
+/** Test-only: clear the signing-secret store. */
+/** Remove a subscription's sealed signing secret (its subscription is being deleted). */
+export async function deleteIngestSecret(subscriptionId: string): Promise<boolean> {
+  return ingestSecretCol.delete(subscriptionId);
+}
+
+export async function __resetIngestSecrets(): Promise<void> {
+  for (const r of await ingestSecretCol.list()) await ingestSecretCol.delete(r.subscriptionId);
 }

@@ -1,6 +1,6 @@
 /**
  * W-2 / RFC 0091 — the `callai-multimodal` behavioral contract over HTTP. Boots
- * the real app via createApp and exercises POST /v1/host/openwop-app/ai/call:
+ * the real app via createApp and exercises POST /host/openwop-app/ai/call:
  *   - a `string` content stays valid (back-compat)
  *   - an advertised modality ContentPart (image / document) is accepted
  *   - an UNADVERTISED modality (audio) is rejected with `unsupported_modality`
@@ -25,7 +25,7 @@ beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; URL = `${BASE}/v1/host/openwop-app/ai/call`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; URL = `${BASE}/host/openwop-app/ai/call`; res(); }); });
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 

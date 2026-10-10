@@ -101,8 +101,10 @@ export interface FeatureNav {
  *  Access Hub (`/access`); ADR 0145 generalized the primitive so multiple
  *  consoles project from the one `FEATURES` manifest — each filtering ONLY its
  *  own tabs by this discriminator. Omitting `hub` defaults to `'access'`, so the
- *  Access Hub's existing tabs need no change. */
-export type HubId = 'access' | 'chat-deployment' | 'models' | 'campaigns';
+ *  Access Hub's existing tabs need no change. `'marketplace'` (2026-10-06) is the
+ *  one PATH-routed console: its tabs are its routes' own URLs, not `?tab=`
+ *  (see `features/marketplace/MarketplaceHub.tsx`). */
+export type HubId = 'access' | 'chat-deployment' | 'models' | 'campaigns' | 'marketplace';
 
 /** Group a route into a tabbed console (ADR 0144 Access Hub; generalized to many
  *  consoles by ADR 0145). When set, the console named by `hub` renders this

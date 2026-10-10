@@ -32,7 +32,7 @@ import type { AddressInfo } from 'node:net';
 import type http from 'node:http';
 import { createApp } from '../src/index.js';
 
-const PATH = '/v1/host/sample/workflow-chain:expand';
+const PATH = '/host/sample/workflow-chain:expand';
 const PACK = 'vendor.openwop.workflow-chain-sample';
 const TOKEN = 'dev-token';
 
@@ -60,8 +60,11 @@ async function bootAndProbe(seamEnabled: boolean): Promise<{ advertised: unknown
   await new Promise<void>((res) => server.once('listening', () => res()));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 
-  const disco = (await (await fetch(`${base}/.well-known/openwop`)).json()) as {
-    capabilities?: { workflowChainPacks?: { hostExpansionSeam?: unknown } };
+  // ADR 0812 P3c-0 — the major-2 document. `hostExpansionSeam` was a v1-only
+  // facet (the closed v2 `workflowChainPacks` record declares no seat for it),
+  // so major 2 must never claim it, in either boot.
+  const disco = (await (await fetch(`${base}/.well-known/openwop`, { headers: { 'OpenWOP-Version': '2' } })).json()) as {
+    workflowChainPacks?: { hostExpansionSeam?: unknown };
   };
 
   const res = await fetch(`${base}${PATH}`, {
@@ -74,17 +77,19 @@ async function bootAndProbe(seamEnabled: boolean): Promise<{ advertised: unknown
     }),
   });
 
-  return { advertised: disco.capabilities?.workflowChainPacks?.hostExpansionSeam, status: res.status };
+  return { advertised: disco.workflowChainPacks?.hostExpansionSeam, status: res.status };
 }
 
 afterEach(async () => {
   await Promise.all(servers.splice(0).map((s) => new Promise<void>((res) => s.close(() => res()))));
 });
 
-describe('ADR 0550 P2 — hostExpansionSeam advertises exactly when it serves', () => {
-  it('seam enabled: advertises true AND serves 200', async () => {
+describe('ADR 0550 P2 — hostExpansionSeam never advertises what it does not serve', () => {
+  // ADR 0812 P3c-0 — the "advertises true when enabled" half was the v1
+  // document's claim and was deleted with it; major 2 has no seat to claim.
+  it('seam enabled: serves 200 (and major 2 claims nothing — it has no seat)', async () => {
     const { advertised, status } = await bootAndProbe(true);
-    expect(advertised).toBe(true);
+    expect(advertised).toBeUndefined();
     expect(status).toBe(200);
   });
 
@@ -94,12 +99,12 @@ describe('ADR 0550 P2 — hostExpansionSeam advertises exactly when it serves', 
     expect(status).not.toBe(200);
   });
 
-  it('the two are PAIRED — no boot advertises what it will not serve', async () => {
-    // One assertion over every state this host can boot into, so a change that
-    // fixes only one side cannot leave this file green.
+  it('no boot advertises what it will not serve', async () => {
+    // One assertion over every state this host can boot into.
     for (const seamEnabled of [true, false]) {
       const { advertised, status } = await bootAndProbe(seamEnabled);
-      expect(advertised === true).toBe(status === 200);
+      if (advertised === true) expect(status).toBe(200);
+      expect(status === 200).toBe(seamEnabled);
     }
   });
 });

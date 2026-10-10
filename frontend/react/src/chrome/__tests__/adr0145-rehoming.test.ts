@@ -10,9 +10,12 @@ const SRC = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
  *  appear in `/assignments`, so a `hubTab.featureId` naming one is permanently invisible.
  *  Mirrors `backend/.../features/index.ts` RETIRED_TOGGLE_IDS; the backend parity test is
  *  the authority, this is the local tripwire. */
-const RETIRED_TOGGLES = new Set(['evals', 'scheduled-agent-chats', 'model-router', 'chat-widget']);
+// ADR 0820 §8.2 — `evals`, `scheduled-agent-chats`, `model-router` and `chat-widget`
+// left the retired list: each has a default-ON toggle again (sold in a bundle). The
+// mirror of the backend's RETIRED_TOGGLE_IDS for the ids these consoles could name.
+const RETIRED_TOGGLES = new Set<string>(['models', 'context-economy', 'run-input-forms']);
 /** Ids that DO register a toggle default (enough for the models hub assertion below). */
-const REGISTERED_TOGGLES = new Set(['campaign-intel', 'campaign-brief', 'campaign-connectors', 'campaign-orchestration']);
+const REGISTERED_TOGGLES = new Set(['campaign-intel', 'campaign-brief', 'campaign-connectors', 'campaign-orchestration', 'evals', 'model-router', 'scheduled-agent-chats', 'chat-widget']);
 import { visibleHubRoutes, tabIdOf } from '../hubProjection.js';
 
 /**
@@ -147,16 +150,29 @@ describe('ADR 0145 — re-graduated tabs gate on their toggle', () => {
   // Rewritten to assert the real contract, with the gating behaviour still tested
   // against a feature that genuinely IS toggle-gated.
 
-  it('ADR 0719 — a GRADUATED surface carries no featureId, so its tab always renders', () => {
-    for (const p of ['/leaderboard', '/scheduled-chats', '/model-router', '/widgets']) {
+  // ── ADR 0820 §8.2 — the four surfaces have toggles AGAIN ──────────────────
+  // ADR 0719 was right for its time: the featureIds named RETIRED toggles, so an
+  // absent `/assignments` entry hid the tabs for everyone. ADR 0820 §8.2 moved
+  // evals + model-router (Governance), scheduled-agent-chats (Agents) and
+  // chat-widget (Support) out of core with a real default-ON toggle each, so the
+  // tabs gate on a LIVE toggle id again — and a disabled feature is dropped.
+  it('ADR 0820 §8.2 — each re-toggled surface names its own live toggle', () => {
+    const want: Record<string, string> = {
+      '/leaderboard': 'evals',
+      '/scheduled-chats': 'scheduled-agent-chats',
+      '/model-router': 'model-router',
+      '/widgets': 'chat-widget',
+    };
+    for (const [p, id] of Object.entries(want)) {
       const r = FEATURES.find((f) => f.path === p && f.hubTab);
-      expect(r?.hubTab?.featureId, `${p}: a graduated feature must not name a retired toggle`).toBeUndefined();
+      expect(r?.hubTab?.featureId, p).toBe(id);
     }
-    // …and with a hook that resolves NOTHING (every id unknown), both tabs still render,
-    // because an absent featureId short-circuits to visible.
+    // Disabled ⇒ dropped from the console…
     const nothingRegistered = (id?: string): boolean => !id;
-    expect(visibleHubRoutes(FEATURES, nothingRegistered, true, 'models').map(tabIdOf)).toEqual(['model-router', 'leaderboard']);
-    expect(visibleHubRoutes(FEATURES, nothingRegistered, true, 'chat-deployment').map(tabIdOf)).toEqual(['scheduled-chats', 'widgets']);
+    expect(visibleHubRoutes(FEATURES, nothingRegistered, true, 'models').map(tabIdOf)).toEqual([]);
+    expect(visibleHubRoutes(FEATURES, nothingRegistered, true, 'chat-deployment').map(tabIdOf)).toEqual([]);
+    // …and enabled ⇒ rendered (the positive control).
+    expect(visibleHubRoutes(FEATURES, all, true, 'models').map(tabIdOf)).toEqual(['model-router', 'leaderboard']);
   });
 
   it('ADR 0719 — gating still works where a toggle REALLY exists (campaigns)', () => {

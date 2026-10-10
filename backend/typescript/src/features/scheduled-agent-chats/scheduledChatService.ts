@@ -19,11 +19,16 @@
  */
 import { randomUUID } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
+import { onWorkflowForked } from '../../host/workflowsRegistry.js';
+import { casRepoint } from '../../host/forkRepoint.js';
 import { OpenwopError } from '../../types.js';
 import { registerJob, setJobEnabled, deleteJob, getJob } from '../../host/schedulingService.js';
 import { registerSubjectEraser, type SubjectEraseReport } from '../../host/subjectErasure.js';
 import { subjectKeyForms } from '../../host/subjectErasureRedaction.js';
 import { parseCron } from '../../host/cronSchedule.js';
+import { getConversationMeta } from '../../host/conversationStore.js';
+import { isVisibleToAsync } from '../../host/conversationVisibility.js';
+import { registerScheduledJobReadGate } from '../../host/scheduledJobReadGates.js';
 import { SCHEDULED_CHAT_TURN_WORKFLOW_ID, SCHEDULED_CHAT_CREDENTIAL_REF } from './scheduledChatTurnWorkflow.js';
 
 /** The owner a scheduled chat is scoped + authorized under. Exactly one arm:
@@ -57,6 +62,11 @@ export interface ScheduledChat {
 const chats = new DurableCollection<ScheduledChat>('schedchat:config', (c) =>
   c.channelId ? `${c.tenantId}:chan:${c.channelId}:${c.chatId}` : `${c.tenantId}:${c.orgId}:${c.chatId}`);
 const jobIdOf = (chatId: string): string => `schedchat-${chatId}`;
+/** The feature's toggle id (ADR 0820 §8.2). Stamped as `featureId` on every
+ *  scheduler job this feature registers, so the daemon's per-tenant fire-time gate
+ *  (ADR 0599 §6, `scheduleDaemon.ts`) skips its fires while the feature is refused —
+ *  by the toggle OR the plan. Non-destructive: the row survives and resumes. */
+export const SCHEDULED_AGENT_CHATS_TOGGLE = 'scheduled-agent-chats';
 /** Sentinel the erased actor is re-attributed to (mirrors memory-auto-extract's
  *  `grantService`; a schedchat row's key is scope-derived, never the actor, so this
  *  scrub updates in place without a re-key). */
@@ -104,6 +114,7 @@ export async function createScheduledChat(tenantId: string, scope: ScheduledChat
   // scheduler refuses (horizon).
   const reg = await registerJob({
     jobId: jobIdOf(chat.chatId), tenantId, cronExpr, agentId, enabled: true,
+    featureId: SCHEDULED_AGENT_CHATS_TOGGLE, // ADR 0820 §8.2 — the daemon gates the fire
     ...(workflowId ? { workflowId } : {}),
     ...(chat.timezone ? { timezone: chat.timezone } : {}),
     // The agent-runner node reads `task` (the prompt) + `credentialRef`; the autonomous
@@ -147,6 +158,26 @@ export async function listScheduledChatsWithStatus(tenantId: string, scope: Sche
 export async function getScheduledChat(tenantId: string, scope: ScheduledChatScope, chatId: string): Promise<ScheduledChat | null> {
   return (await chats.get(keyOf(tenantId, scope, chatId))) ?? null;
 }
+
+/** ADR 0846 D1 — may this caller SEE (and therefore read or manage) a scheduled chat?
+ *  The schedule's prompt and its target are the conversation's business, so the gate is
+ *  the conversation's own read predicate — the one CREATE checks before binding. The
+ *  caller is `req.userId ?? principalId`, the spelling the chat routes hand this same
+ *  predicate (`routes/chatSessions.ts` `actingUserOf`) and the one `ownerUserId` is
+ *  stamped in; the canonical `resolveCallerUser` id is a different key on a
+ *  personal-tenant bearer lane and would hide an owner's own schedules. */
+export async function canSeeScheduledChat(tenantId: string, chat: Pick<ScheduledChat, 'conversationId'>, actingUser: string | undefined): Promise<boolean> {
+  return isVisibleToAsync(await getConversationMeta(tenantId, chat.conversationId), tenantId, actingUser);
+}
+
+// ADR 0846 D1b — the generic scheduler routes reach this feature's job too (it
+// carries `metadata.kind` and the conversation in `configurable`); hold them to
+// the same predicate, or they list, pause, delete and fire what the feature's own
+// routes refuse.
+registerScheduledJobReadGate('scheduled-agent-chat', async (job, actingUser) => {
+  const conversationId = job.configurable?.['conversationId'];
+  return canSeeScheduledChat(job.tenantId, { conversationId: typeof conversationId === 'string' ? conversationId : '' }, actingUser);
+});
 
 async function mustGet(tenantId: string, scope: ScheduledChatScope, chatId: string): Promise<ScheduledChat> {
   const c = await getScheduledChat(tenantId, scope, chatId);
@@ -243,3 +274,16 @@ export async function deleteScheduledChatsForAgent(tenantId: string, channelId: 
   }
   return removed;
 }
+
+// ADR 0789 — a scheduled chat whose turn-workflow override is a SHARED workflow
+// follows this tenant's fork. Its scheduler job (`schedchat-<chatId>`) carries the
+// same id and is re-pointed by the scheduler's own hook.
+onWorkflowForked('schedchat:config', async (tenantId, from, to) => {
+  let n = 0;
+  for (const c of await chats.listByPrefix(`${tenantId}:`)) {
+    if (c.workflowId !== from) continue;
+    const key = c.channelId ? `${c.tenantId}:chan:${c.channelId}:${c.chatId}` : `${c.tenantId}:${c.orgId}:${c.chatId}`;
+    if (await casRepoint(chats, key, (r) => (r.workflowId === from && r.tenantId === tenantId ? { ...r, workflowId: to } : null))) n += 1;
+  }
+  return n;
+});

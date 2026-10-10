@@ -14,7 +14,7 @@ import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { createCanvasForTenant } from '../src/host/canvasSurface.js';
 
-const BASEPATH = '/v1/host/openwop-app/document-editor';
+const BASEPATH = '/host/openwop-app/document-editor';
 let BASE: string;
 let server: http.Server;
 
@@ -53,9 +53,9 @@ let n = 0;
 async function orgOwner(): Promise<{ c: ReturnType<typeof client>; orgId: string; tenantId: string }> {
   const tenantId = `org:test-doc-ed-${Date.now()}-${n++}`;
   const c = client();
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `doced-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await c.post('/host/openwop-app/test/login', { email: `doced-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status).toBe(201);
-  const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status).toBe(201);
   return { c, orgId: org.body.orgId, tenantId };
 }

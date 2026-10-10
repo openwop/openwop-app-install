@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/core.openwop.agents.support-crew/1.0.0/triage.return.schema.json",
+  "$id": "https://packs.openwop.dev/core.openwop.agents.support-crew/1.0.1/triage.return.schema.json",
   "title": "SupportCrewTriageReturn",
   "type": "object",
   "required": ["queue", "severity", "priority", "rationale"],

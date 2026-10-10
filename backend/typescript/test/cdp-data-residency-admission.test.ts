@@ -2,7 +2,7 @@
  * RFC 0129 / ADR 0290 — data-residency admission-control gate (host tier-1 witness).
  *
  * The frozen contract: when the host ADVERTISES residency (flag on) and a
- * `POST /v1/runs` pins a `residency.region`, an advertised region is admitted and an
+ * `POST /runs` pins a `residency.region`, an advertised region is admitted and an
  * unadvertised region is rejected `residency_unavailable` (422) with NO run created.
  * Flag off ⇒ residency is ignored. The advert appears only when the flag is on AND
  * at least one region is pinned (honest-off).
@@ -30,14 +30,21 @@ afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
 });
 
+/** ADR 0858 P3 slice 3 — the v2 root, read over the wire (the family is projected at major 2). */
+async function v2Root(): Promise<Record<string, any>> {
+  const r = await fetch(`${BASE}/.well-known/openwop`, { headers: { 'OpenWOP-Version': '2' } });
+  expect(r.status).toBe(200);
+  return (await r.json()) as Record<string, any>;
+}
+
 async function jsonFetch<T = unknown>(path: string, init: RequestInit = {}): Promise<{ status: number; body: T }> {
   const res = await fetch(`${BASE}${path}`, { ...init, headers: { 'content-type': 'application/json', authorization: 'Bearer dev-token', ...(init.headers ?? {}) } });
   return { status: res.status, body: (await res.json()) as T };
 }
 
-describe('RFC 0129 data-residency admission gate (POST /v1/runs)', () => {
+describe('RFC 0129 data-residency admission gate (POST /runs)', () => {
   beforeAll(async () => {
-    const reg = await jsonFetch('/v1/host/openwop-app/workflows', {
+    const reg = await jsonFetch('/host/openwop-app/workflows', {
       method: 'POST',
       body: JSON.stringify({
         workflowId: 'app.residency-admission-test',
@@ -49,7 +56,7 @@ describe('RFC 0129 data-residency admission gate (POST /v1/runs)', () => {
   });
 
   it('admits an ADVERTISED region — proceeds, no residency rejection', async () => {
-    const res = await jsonFetch<{ runId?: string; error?: string }>('/v1/runs', {
+    const res = await jsonFetch<{ runId?: string; error?: string }>('/runs', {
       method: 'POST',
       body: JSON.stringify({ workflowId: 'app.residency-admission-test', residency: { region: 'eu' } }),
     });
@@ -59,7 +66,7 @@ describe('RFC 0129 data-residency admission gate (POST /v1/runs)', () => {
   });
 
   it('rejects an UNADVERTISED region — 422 residency_unavailable, NO run created', async () => {
-    const res = await jsonFetch<{ runId?: string; error?: string; message?: string; details?: { requestedRegion?: string; availableRegions?: string[] } }>('/v1/runs', {
+    const res = await jsonFetch<{ runId?: string; error?: string; message?: string; details?: { requestedRegion?: string; availableRegions?: string[] } }>('/runs', {
       method: 'POST',
       body: JSON.stringify({ workflowId: 'app.residency-admission-test', residency: { region: 'antarctica' } }),
     });
@@ -77,7 +84,7 @@ describe('RFC 0129 data-residency admission gate (POST /v1/runs)', () => {
   });
 
   it('with residency but NO region field, admits normally (nothing pinned)', async () => {
-    const res = await jsonFetch<{ runId?: string }>('/v1/runs', {
+    const res = await jsonFetch<{ runId?: string }>('/runs', {
       method: 'POST',
       body: JSON.stringify({ workflowId: 'app.residency-admission-test', residency: {} }),
     });
@@ -88,7 +95,7 @@ describe('RFC 0129 data-residency admission gate (POST /v1/runs)', () => {
   it('FLAG OFF — residency is ignored even for an unadvertised region', async () => {
     delete process.env.OPENWOP_DATA_RESIDENCY_ENABLED;
     try {
-      const res = await jsonFetch<{ runId?: string; error?: string }>('/v1/runs', {
+      const res = await jsonFetch<{ runId?: string; error?: string }>('/runs', {
         method: 'POST',
         body: JSON.stringify({ workflowId: 'app.residency-admission-test', residency: { region: 'antarctica' } }),
       });
@@ -101,16 +108,18 @@ describe('RFC 0129 data-residency admission gate (POST /v1/runs)', () => {
 });
 
 describe('RFC 0129 data-residency advert (/.well-known/openwop) — honest-off', () => {
-  it('advertises capabilities.dataResidency ONLY when flag on with non-empty regions', async () => {
-    const on = await jsonFetch<{ capabilities?: { dataResidency?: { supported?: boolean; regions?: string[] } } }>('/.well-known/openwop');
-    expect(on.body.capabilities?.dataResidency).toEqual({ supported: true, regions: ['eu', 'us'] });
+  it('advertises dataResidency ONLY when flag on with non-empty regions', async () => {
+    // ADR 0858 P3 slice 3 — the v2 record: presence is the claim (no `supported`),
+    // `regions` is the list the admission gate above admits.
+    const rec = (await v2Root()).dataResidency;
+    expect(rec).toMatchObject({ regions: ['eu', 'us'] });
+    expect(rec).not.toHaveProperty('supported');
   });
 
   it('OMITS dataResidency entirely when the flag is OFF', async () => {
     delete process.env.OPENWOP_DATA_RESIDENCY_ENABLED;
     try {
-      const off = await jsonFetch<{ capabilities?: { dataResidency?: unknown } }>('/.well-known/openwop');
-      expect(off.body.capabilities?.dataResidency).toBeUndefined();
+      expect((await v2Root()).dataResidency).toBeUndefined();
     } finally {
       process.env.OPENWOP_DATA_RESIDENCY_ENABLED = 'true';
     }
@@ -120,8 +129,7 @@ describe('RFC 0129 data-residency advert (/.well-known/openwop) — honest-off',
     const prevRegions = process.env.OPENWOP_DATA_RESIDENCY_REGIONS;
     process.env.OPENWOP_DATA_RESIDENCY_REGIONS = '';
     try {
-      const empty = await jsonFetch<{ capabilities?: { dataResidency?: unknown } }>('/.well-known/openwop');
-      expect(empty.body.capabilities?.dataResidency).toBeUndefined();
+      expect((await v2Root()).dataResidency).toBeUndefined();
     } finally {
       process.env.OPENWOP_DATA_RESIDENCY_REGIONS = prevRegions;
     }

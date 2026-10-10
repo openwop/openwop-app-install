@@ -25,7 +25,9 @@ beforeAll(async () => {
   storage = await openStorage('memory://');
   initHostExtPersistence(storage);
   loadWorkflowChainPacks({ roots: [CHAIN_PACK_ROOT] });
-  zeroConfigCount = listChains().filter(
+  // The seeder's own population: zero-config AND not RFC 0135 `internal` (the
+  // ADR 0788 D3 MCP projection chains are internal and zero-config).
+  zeroConfigCount = listChains().filter(({ chain }) => chain.internal !== true).filter(
     ({ chain }) => !Array.isArray((chain.parameters as { required?: unknown }).required)
       || ((chain.parameters as { required?: string[] }).required ?? []).length === 0,
   ).length;
@@ -83,7 +85,12 @@ describe('seedZeroConfigWorkflows — RFC 0135 internal guard', () => {
       chains: [chain('seedguard.public', false), chain('seedguard.child', true)],
     }, null, 2));
     _resetChainRegistryForTest();
+    // ADR 0766 — the subject here is the RFC 0135 internal guard, not pins; the
+    // synthetic pack is waived rather than pinned so it keeps its v1 shape.
+    const { __setUnpinnedChainPackWaiversForTests } = await import('../src/host/unpinnedChainPackAllowlist.js');
+    __setUnpinnedChainPackWaiversForTests(['core.openwop.seedguard']);
     const { errors } = loadWorkflowChainPacks({ roots: [root] });
+    __setUnpinnedChainPackWaiversForTests(null);
     expect(errors).toEqual([]);
 
     const TENANT = 'user:seed-internal';

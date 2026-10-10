@@ -260,7 +260,7 @@ export function registerScimAuthRoutes(app: Express): void {
   // OPENWOP_TEST_SAML_IDP_URL + OPENWOP_TEST_SCIM_URL alone, so the `sample`
   // alias must be reachable whether or not the rewrite is active. The handler
   // 404s without OPENWOP_TEST_SCIM_URL, so registering both is production-safe.
-  app.post(['/v1/host/openwop-app/auth/scim/provision', '/v1/host/sample/auth/scim/provision'], async (req, res, next) => {
+  app.post(['/host/openwop-app/auth/scim/provision', '/host/sample/auth/scim/provision'], async (req, res, next) => {
     try {
       if (!process.env.OPENWOP_TEST_SCIM_URL) {
         throw new OpenwopError('not_found', 'SCIM test seam not configured (set OPENWOP_TEST_SCIM_URL).', 404, {});

@@ -37,11 +37,17 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const WORKSPACES = ['backend/typescript', 'frontend/react'];
 const BLOCKING = new Set(['high', 'critical']);
 
-const cfg = JSON.parse(readFileSync(join(ROOT, 'scripts', 'audit-exceptions.json'), 'utf8'));
+// Test seams (scripts/test-gate-tooling.sh): a fixture exceptions file and a
+// directory of canned `npm audit --json` reports (`<ws with / → __>.json`), so the
+// matcher's failure cases can be RUN, not just read.
+const cfg = JSON.parse(readFileSync(process.env.OPENWOP_AUDIT_EXCEPTIONS ?? join(ROOT, 'scripts', 'audit-exceptions.json'), 'utf8'));
 const exceptions = cfg.exceptions ?? [];
 
 /** `npm audit --json` exits non-zero when it finds anything — that is not an error. */
 function auditJson(ws) {
+  if (process.env.OPENWOP_AUDIT_REPORTS_DIR) {
+    return JSON.parse(readFileSync(join(process.env.OPENWOP_AUDIT_REPORTS_DIR, `${ws.replace(/\//g, '__')}.json`), 'utf8'));
+  }
   try {
     return JSON.parse(execFileSync('npm', ['audit', '--omit=dev', '--json'], {
       cwd: join(ROOT, ws), encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
@@ -147,14 +153,31 @@ for (const ws of WORKSPACES) {
     // already resolves a parent's `via` chain down to the root advisory ids —
     // that is what it is for. A package whose advisory ids cannot be resolved
     // at all now falls through to UNEXPECTED, which is the fail-loud direction.
-    const hit = exceptions.find((e) => e.workspace === ws && ids.includes(e.advisory));
-    if (hit) { seen.add(hit.advisory); continue; }
-    unexpected.push(`${ws}: ${name} (${v.severity}) ${ids.join(', ') || '—'}`);
+    //
+    // EVERY id, not the first (2026-09-30). This read
+    // `exceptions.find(… ids.includes(e.advisory))` then `continue`: for a package
+    // carrying TWO advisories, an exception for ONE waived BOTH, and only the
+    // first entry was marked `seen` (the second then read as STALE). The same
+    // fail-open H60 closed for package names, one level down — found when
+    // @grpc/grpc-js reported GHSA-m9gg + GHSA-f596 together.
+    const uncovered = [];
+    for (const id of ids) {
+      if (exceptions.some((e) => e.workspace === ws && e.advisory === id)) seen.add(id);
+      else uncovered.push(id);
+    }
+    if (ids.length > 0 && uncovered.length === 0) continue;
+    unexpected.push(`${ws}: ${name} (${v.severity}) ${(uncovered.length ? uncovered : ids).join(', ') || '—'}`);
   }
 }
 
 const expired = exceptions.filter((e) => e.revisitAfter < today);
-const stale = exceptions.filter((e) => !seen.has(e.advisory));
+// A VENDORED entry (`"vendored": true`) records a copy npm audit CANNOT see (a
+// dependency bundled into another package's dist), so the audit's silence says
+// nothing about it: the STALE arm would demand deleting the only record of a live
+// risk the moment the audit-visible copies of the same advisory are fixed (#4166
+// did exactly that for GHSA-hq66's unpdf-bundled pdf.js). Its staleness is owned by
+// a test that measures the bundled version (test/kb-vendored-pdfjs.test.ts).
+const stale = exceptions.filter((e) => !seen.has(e.advisory) && e.vendored !== true);
 
 let failed = false;
 

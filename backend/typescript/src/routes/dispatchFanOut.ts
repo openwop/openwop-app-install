@@ -25,7 +25,7 @@ import {
   type ChildTerminal,
 } from '../host/dispatchFanOut.js';
 
-const RPC_PATH = '/v1/host/openwop-app/dispatch/fanout';
+const RPC_PATH = '/host/openwop-app/dispatch/fanout';
 
 function tenantOf(req: Request): string {
   return (req as { tenantId?: string }).tenantId ?? 'default';
@@ -91,6 +91,6 @@ export function registerDispatchFanOutRoutes(app: Express): void {
   // Conformance alias — the pinned suite drives the fixed canonical /v1/host/sample/dispatch/fanout.
   // Env-gated (404s in prod); registered BEFORE testSeam.ts's catch-all sample→openwop-app rewrite.
   if (process.env.OPENWOP_TEST_SEAM_ENABLED === 'true') {
-    app.post('/v1/host/sample/dispatch/fanout', handleFanOut);
+    app.post('/host/sample/dispatch/fanout', handleFanOut);
   }
 }

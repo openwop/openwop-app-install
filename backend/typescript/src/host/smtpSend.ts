@@ -22,6 +22,7 @@
 
 import nodemailer from 'nodemailer';
 import type { EmailAdapterDeps, EmailSendArgs, EmailSendResult } from './emailAdapter.js';
+import { listUnsubscribeHeaders } from './emailAdapter.js'; // ADR 0848 D7 — call-time use only (the two modules import each other)
 import { assertSmtpDialAllowed } from './smtpEgress.js';
 import { resolveConnectionCredential } from '../features/connections/connectionsService.js';
 import { stampConnectionUse } from './connectionInjection.js';
@@ -82,6 +83,8 @@ export interface SmtpMessage {
   text?: string;
   html?: string;
   replyTo?: string;
+  /** ADR 0848 D7 — the RFC 8058 pair only (`listUnsubscribeHeaders`), never a free map. */
+  headers?: Record<string, string>;
 }
 /** Minimal transporter shape — lets tests inject a fake instead of a socket. */
 export interface SmtpTransport { sendMail(msg: SmtpMessage): Promise<{ messageId?: string }>; }
@@ -140,6 +143,7 @@ export async function sendViaSmtp(
     ...(servername ? { servername } : {}),
   });
 
+  const lu = listUnsubscribeHeaders(args);
   const msg: SmtpMessage = {
     from: args.from,
     to: args.to,
@@ -149,6 +153,7 @@ export async function sendViaSmtp(
     ...(args.text !== undefined ? { text: args.text } : {}),
     ...(args.html !== undefined ? { html: args.html } : {}),
     ...(args.replyTo ? { replyTo: args.replyTo } : {}),
+    ...(lu ? { headers: lu } : {}),
   };
   let info: { messageId?: string };
   try {

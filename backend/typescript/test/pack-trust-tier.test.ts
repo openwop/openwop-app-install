@@ -79,6 +79,12 @@ function writePack(dir: string, opts: { version?: string } = {}): void {
  * classifier's own reasons for the synthetic ones.
  */
 function writeInstallMarker(dir: string, hashes: Record<string, string>): void {
+  // ADR 0826 D3 — a registry install copies only pack.json, index.mjs and the
+  // schemas/keys/prompts subdirs, and a marker-bearing dir holding anything else
+  // is now `install_marker_tampered` (an unverified `lib/` that `index.mjs` could
+  // import is exactly the gap). So a marker fixture takes the installer's shape;
+  // the steward fixtures keep `lib/` to exercise the whole-tree digest.
+  rmSync(join(dir, 'lib'), { recursive: true, force: true });
   writeFileSync(
     join(dir, '.openwop-installed.json'),
     JSON.stringify(
@@ -135,6 +141,19 @@ describe('ADR 0555 P0 — pack trust tiers', () => {
     expect(v.dispatchable).toBe(true);
     expect(v.packName).toBe(PACK_NAME);
     expect(v.version).toBe(PACK_VERSION);
+  });
+
+  it('ADR 0826 D3: an auxiliary lib/ beside a valid install marker is untrusted (the installer never writes one)', () => {
+    writeInstallMarker(packDir, {
+      'pack.json': sha256File(join(packDir, 'pack.json')),
+      'index.mjs': sha256File(join(packDir, 'index.mjs')),
+    });
+    mkdirSync(join(packDir, 'lib'), { recursive: true });
+    writeFileSync(join(packDir, 'lib', 'helper.mjs'), 'export const helper = "planted";\n');
+    const v = classifyPackDir(packDir, { noCache: true });
+    expect(v.tier).toBe('untrusted');
+    expect(v.reason).toBe('install_marker_tampered');
+    expect(v.detail).toBe('unexpected_entry:lib');
   });
 
   it('(d) a mutated file under a valid install marker is untrusted and REFUSED', () => {

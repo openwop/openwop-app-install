@@ -86,7 +86,7 @@ export async function buildOwnedTaskDeck(
 export function registerTaskDeckRoutes(deps: RouteDeps): void {
   const { app, storage } = deps;
 
-  app.get('/v1/host/openwop-app/tasks', async (req, res, next) => {
+  app.get('/host/openwop-app/tasks', async (req, res, next) => {
     try {
       const tenantId = tenantOf(req);
       const userId = actingUserOf(req);

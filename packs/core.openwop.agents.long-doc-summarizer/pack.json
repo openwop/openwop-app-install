@@ -1,18 +1,24 @@
 {
   "name": "core.openwop.agents.long-doc-summarizer",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Long-document summarizer using map-reduce. Splits input into chunks, summarizes each, then synthesizes a final summary. Handles documents that exceed any single LLM's context window. Pure-agent pack.",
   "author": "OpenWOP Working Group",
   "license": "Apache-2.0",
   "homepage": "https://openwop.dev/packs/core.openwop.agents.long-doc-summarizer",
   "repository": "https://github.com/openwop/openwop",
-  "keywords": ["core", "agents", "summarization", "map-reduce", "pattern"],
+  "keywords": [
+    "core",
+    "agents",
+    "summarization",
+    "map-reduce",
+    "pattern"
+  ],
   "engines": {
-    "openwop": ">=1.1.0 <2.0.0"
+    "openwop": ">=1.1.0 <3.0.0"
   },
   "peerDependencies": {
     "aiProviders": "supported",
-    "host.agentRuntime": "supported"
+    "agentRuntime": "supported"
   },
   "agents": [
     {
@@ -37,11 +43,13 @@
       },
       "confidence": {
         "defaultThreshold": 0.7
-      }
+      },
+      "role": "skill"
     }
   ],
   "runtime": {
     "language": "remote",
     "entry": "pack.json"
-  }
+  },
+  "kind": "node"
 }

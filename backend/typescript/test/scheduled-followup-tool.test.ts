@@ -9,7 +9,7 @@ import { createApp } from '../src/index.js';
 import { createAgentToolProvider, builtinAgentToolIds } from '../src/host/agentToolProvider.js';
 import { SCHEDULE_FOLLOWUP_TOOL_ID, MAX_PENDING_FOLLOWUPS_PER_USER } from '../src/features/scheduled-agent-chats/agentTools.js';
 import { SCHEDULED_CHAT_TURN_WORKFLOW_ID } from '../src/features/scheduled-agent-chats/scheduledChatTurnWorkflow.js';
-import { getJob, registerJob, markJobFired, listJobsForSubject } from '../src/host/schedulingService.js';
+import { getJob, registerJob, markJobFired, listJobsForSubject, MAX_FUTURE_HORIZON_DAYS } from '../src/host/schedulingService.js';
 import { TOOL_GROUNDED_COMMITMENTS } from '../src/host/chatContext.js';
 
 const TENANT = 'default';
@@ -43,12 +43,17 @@ describe('ADR 0309 D1 — one-shot scheduling primitive', () => {
     expect(spent?.lastRunAt).toBeTruthy();     // but the row survives for the Schedules tab
   });
 
-  it('GC-R2: a TYPO\u2019d cron + firstFireAtMs stays INERT \u2014 the one-shot sentinel is opt-in (public route safety)', async () => {
+  it('GC-R2: a TYPO\u2019d cron + firstFireAtMs never becomes a surprise one-shot \u2014 the sentinel is opt-in', async () => {
+    // CORRECTED (ADR 0787 D6): an ENABLED typo is now REFUSED at write
+    // (`invalid_cron`) instead of stored inert behind a 201 — the GC-R2 property
+    // (it never fires as a one-shot) holds more strongly. A DISABLED typo (a
+    // portability import) is still stored inert, and judged when enabled.
     const r = await registerJob({ jobId: 'once-test-3', tenantId: TENANT, cronExpr: 'every 5 minutes', firstFireAtMs: Date.now() + 3_600_000, workflowId: 'wf-x' });
-    expect(r.ok).toBe(true);
-    if (!r.ok) return;
-    // Pre-ADR-0309 behavior preserved: unparseable non-sentinel cadence never fires.
-    expect(r.job.nextFireAt).toBeUndefined();
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe('invalid_cron');
+    const off = await registerJob({ jobId: 'once-test-3b', tenantId: TENANT, cronExpr: 'every 5 minutes', firstFireAtMs: Date.now() + 3_600_000, workflowId: 'wf-x', enabled: false });
+    expect(off.ok).toBe(true);
+    if (off.ok) expect(off.job.nextFireAt).toBeUndefined();
   });
 
   it('a recurring cron is unaffected by the fallback (computeNextFire still wins)', async () => {
@@ -92,7 +97,8 @@ describe('ADR 0309 D2 — the schedule-followup tool', () => {
     for (const [runAtISO, code] of [
       [new Date(Date.now() - 1000).toISOString(), 'validation_error'],
       [new Date(Date.now() + 10_000).toISOString(), 'validation_error'],
-      [new Date(Date.now() + 40 * 24 * 3_600_000).toISOString(), 'horizon_exceeded'],
+      // ADR 0787 D6 — the horizon is the ONE advertised constant (366 days, was 30).
+      [new Date(Date.now() + (MAX_FUTURE_HORIZON_DAYS + 1) * 24 * 3_600_000).toISOString(), 'horizon_exceeded'],
       ['not-a-date', 'validation_error'],
     ] as const) {
       const out = await runTool({ task: 'T', runAtISO }, FULL_SCOPE);

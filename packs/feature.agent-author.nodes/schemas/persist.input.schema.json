@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/feature.agent-author.nodes/1.1.0/persist.input.schema.json",
+  "$id": "https://packs.openwop.dev/feature.agent-author.nodes/1.1.1/persist.input.schema.json",
   "title": "Agent Author Persist Input",
   "type": "object",
   "required": ["draft"],

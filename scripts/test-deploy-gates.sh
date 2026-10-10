@@ -95,6 +95,17 @@ class H(http.server.SimpleHTTPRequestHandler):
                 body = open(v2, "rb").read()
                 self.send_response(200); self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
+        # ADR 0840 D3 — the isolation probe through the public origin. Honest: the
+        # frame policy in the CSP header. `.plugin-csp-replaced` makes the stub answer
+        # with the APP policy instead, which is what Firebase does when the plugin
+        # header rule loses (measured: it REPLACES the origin header).
+        if self.path.split("?", 1)[0] == "/api/host/openwop-app/ui-plugin/isolation-probe":
+            replaced = os.path.exists(os.path.join(self.directory, ".plugin-csp-replaced"))
+            csp = "default-src \x27self\x27; connect-src \x27self\x27 https://*.run.app" if replaced else "sandbox allow-scripts; default-src \x27none\x27; script-src \x27unsafe-inline\x27 \x27unsafe-eval\x27; style-src \x27unsafe-inline\x27; img-src data: blob:"
+            body = b"<!doctype html><title>probe</title>"
+            self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Security-Policy", csp)
+            self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
         if self.path.startswith("/runs/"):
             dishonest = os.path.exists(os.path.join(self.directory, ".v2-dishonest"))
             if self.headers.get("OpenWOP-Version") and not dishonest:
@@ -464,7 +475,9 @@ fi
 # left the case GREEN while the ratchet's result was discarded entirely. A
 # proximity grep measures layout, not control flow. Assert the negation itself.
 ratchet_call=$(printf '%s' "$certify_block" | grep -n 'check-conformance-major2.sh' | head -1 | cut -d: -f2-)
-if grep -qE '^[[:space:]]*if ! bash ' <<<"$ratchet_call"; then
+# ADR 0863: the owned supervisor's wait preserves the child's result. Executable
+# major2-fail/cancel cases in test-owned-deploy.mjs prove refusal and cleanup.
+if grep -qE '^[[:space:]]*if ! (bash |run_owned_certification "\$ROOT" bash )' <<<"$ratchet_call"; then
   ok "  ...and REFUSES to ship when it fails (its exit status is the branch condition)"
 else
   bad "the major-2 ratchet's result is discarded — deploy.sh continues past a red lane: $ratchet_call"
@@ -478,10 +491,20 @@ fi
 # And it must not be reachable when the operator skipped certification: a
 # --skip-certify deploy deliberately makes no claim, and a hard v2 gate there
 # would make the documented escape hatch un-runnable.
-if grep -q 'DO_CERTIFY' <<<"$certify_block"; then
-  bad "the major-2 ratchet block re-tests DO_CERTIFY — it should already be inside the certify arm"
+# ADR 0812 P3c — the ratchet moved OUT of the image-certify arm so that ORIGIN
+# mode (which builds no image bundle) still runs it; the escape hatch is now an
+# explicit `DO_CERTIFY -eq 1` guard around it rather than its position.
+if grep -qE 'if \[ "\$DO_CERTIFY" -eq 1 \]; then' <<<"$certify_block"; then
+  ok "  ...and is guarded by DO_CERTIFY -eq 1, so --skip-certify stays usable"
 else
-  ok "  ...and sits inside the certify arm, so --skip-certify stays usable"
+  bad "the major-2 ratchet is not guarded by DO_CERTIFY -eq 1 — --skip-certify would run a hard v2 gate"
+fi
+# Origin mode must not bypass it: the origin arm only announces, it never exits.
+origin_arm=$(sed -n '/elif \[ -n "\${OPENWOP_CERT_BUNDLE_ORIGIN:-}" \]; then/,/^  else$/p' "$ROOT/scripts/deploy.sh")
+if [ -n "$origin_arm" ] && ! grep -qE '\bexit\b' <<<"$origin_arm"; then
+  ok "  ...and the origin-mode arm (no image bundle) falls through to it rather than exiting"
+else
+  bad "the origin-mode certify arm is missing or exits — origin deploys would skip the major-2 ratchet"
 fi
 
 # ── the peer-build window must SPAN the deploy, not a fixed guess ──────────
@@ -550,6 +573,31 @@ set_live "$NEW"
 printf '{"commit":"%s","stamped":true,"dirty":true}' "$NEW" > "$STUB_DIR/build-info.json"
 check "FAILS on a DIRTY frontend build even at the right commit" 1 "$(V "$NEW")"
 
+# NP-V2 P7 — a boot-time registry install that FAILED fails the deploy. It is
+# survivable by design (the vendored copy serves), which is exactly why the
+# 2026-09-20 refusals sat unseen for eight days behind a warn line.
+printf '{"commit":"%s","stamped":true,"dirty":false}' "$NEW" > "$STUB_DIR/build-info.json"
+printf '{"status":"ready","build":{"commit":"%s","stamped":true},"checks":{"registryPacks":{"attempted":2,"installed":1,"failed":[{"name":"core.openwop.workflows.x","version":"1.0.0"}]}}}' "$NEW" > "$STUB_DIR/api/readiness"
+check "FAILS when readiness reports a failed registry install (NP-V2 P7)" 1 "$(V "$NEW")"
+printf '{"status":"ready","build":{"commit":"%s","stamped":true},"checks":{"registryPacks":{"attempted":2,"installed":2,"failed":[]}}}' "$NEW" > "$STUB_DIR/api/readiness"
+check "  ...and PASSES when every attempted install succeeded" 0 "$(V "$NEW")"
+set_live "$NEW"
+check "  ...and a backend that predates the report is NOT a failure (said so, not read as none)" 0 "$(V "$NEW")"
+VW() { ( cd "$REPO" && BASE="$STUB" SHELL_CONVERGE_S=0 OPENWOP_DEPLOY_PROJECT= OPENWOP_DEPLOY_REGION= bash "$ROOT/scripts/verify-deploy.sh" "$@" >/dev/null 2>&1; echo $? ); }
+printf '{"status":"ready","build":{"commit":"%s","stamped":true},"checks":{"registryPacks":{"attempted":2,"installed":1,"failed":[{"name":"core.openwop.workflows.x","version":"1.0.0","lane":"pinned"}]}}}' "$NEW" > "$STUB_DIR/api/readiness"
+check "  ...a named --allow-registry-failures waives it (printed WAIVED, not OK)" 0 "$(VW "$NEW" --allow-registry-failures)"
+printf '{"status":"ready","build":{"commit":"%s","stamped":true},"checks":{"registryPacks":{"attempted":3,"installed":1,"failed":[]}}}' "$NEW" > "$STUB_DIR/api/readiness"
+check "  ...an INCONSISTENT report (installed + failed != attempted) FAILS" 1 "$(V "$NEW")"
+printf '{"status":"ready","build":{"commit":"%s","stamped":true},"checks":{"registryPacks":{"attempted":1,"installed":1,"failed":{}}}}' "$NEW" > "$STUB_DIR/api/readiness"
+check "  ...a MALFORMED report (failed not an array) FAILS closed" 1 "$(V "$NEW")"
+# grade-code C-1 — a chain pack the boot load REFUSED fails the deploy.
+printf '{"status":"ready","build":{"commit":"%s","stamped":true},"checks":{"chainPacks":{"loaded":62,"refused":[{"pack":"vendor.x","code":"workflow_chain_unpinned"}]}}}' "$NEW" > "$STUB_DIR/api/readiness"
+check "FAILS when readiness reports a REFUSED chain pack (grade-code C-1)" 1 "$(V "$NEW")"
+check "  ...a named --allow-chain-pack-failures waives it" 0 "$(VW "$NEW" --allow-chain-pack-failures)"
+printf '{"status":"ready","build":{"commit":"%s","stamped":true},"checks":{"chainPacks":{"loaded":63,"refused":[]}}}' "$NEW" > "$STUB_DIR/api/readiness"
+check "  ...and PASSES when none were refused" 0 "$(V "$NEW")"
+set_live "$NEW"
+
 # Single-half deploys must not fail on the half they deliberately did not touch.
 # Without this, `deploy.sh --backend-only` deploys correctly and then reports
 # DEPLOYED BUT NOT VERIFIED — which trains people to ignore a red verify.
@@ -587,7 +635,11 @@ printf '%s' "$CLAIMS_JSON" > "$CERT_META/conformance-claims.json"
 # file at the stub root made the fetch 404 — and the negative cases below still
 # went red, for the wrong reason. A negative that passes on a 404 proves nothing.
 CLAIMS_STUB="$STUB_DIR/api/v1/host/openwop-app/conformance"; mkdir -p "$CLAIMS_STUB"
-printf '%s' "$CLAIMS_JSON" > "$CLAIMS_STUB/claims"
+# check-wire-claims reads the claims document at the UNVERSIONED vendor path,
+# which the host serves on both sides of the ADR 0669 cut. Only `claims` moves;
+# the in-image bundle stays where the advertised pointer below names it.
+CLAIMS_FILE="$STUB_DIR/api/host/openwop-app/conformance/claims"; mkdir -p "$(dirname "$CLAIMS_FILE")"
+printf '%s' "$CLAIMS_JSON" > "$CLAIMS_FILE"
 cp "$TMP/bundle.json" "$CLAIMS_STUB/certification-bundle"
 
 # Unstamped checkout: the arm SKIPS loudly and must not fail the deploy.
@@ -612,7 +664,7 @@ check "stamped + pointer + matching claims → PASSES" 0 "$(W "$CERT_META")"
 # artifact we built does not. A commit stamp cannot see this — the commit was
 # never the claim.
 printf '%s' '{"claimsVersion":"1","claimedProfiles":["openwop-core-standard","openwop-discovery-core","openwop-replay-fork"],"evidence":{"bundleSha256":"'"$(printf '%064d' 1)"'"}}' \
-  > "$CLAIMS_STUB/claims"
+  > "$CLAIMS_FILE"
 check "deployed claims name an EXTRA profile → FAILS (stale claim)" 1 "$(W "$CERT_META")"
 
 # The POINTER must resolve to the evidence the claims name. A pointer nobody can
@@ -626,7 +678,7 @@ check "advertised pointer 404s → FAILS" 1 "$(W "$CERT_META")"
 cp "$TMP/bundle.json" "$CLAIMS_STUB/certification-bundle"
 
 # Restore for anything downstream that reads the stub.
-printf '%s' "$CLAIMS_JSON" > "$CLAIMS_STUB/claims"
+printf '%s' "$CLAIMS_JSON" > "$CLAIMS_FILE"
 
 echo "== check-wire-claims: ORIGIN mode — the signed post-deploy bundle (WHD-18, ADR 0735) =="
 # The served evidence is the suite CLI's v3 cut, read by the host from an
@@ -662,7 +714,7 @@ PY3
 # WO <expected-commit> → exit code; output kept for the PENDING/OK assertions.
 WO() { ( cd "$REPO" && OPENWOP_BUILD_META_DIR="$CLAIMS_META" OPENWOP_CERT_BUNDLE_ORIGIN="gs://b/p" EXPECTED_COMMIT="$1" \
          node "$ROOT/scripts/check-wire-claims.mjs" "$STUB/api" >"$TMP/wo.out" 2>&1; echo $? ); }
-rm -f "$CLAIMS_STUB/claims"   # origin mode: /claims is withheld (404)
+rm -f "$CLAIMS_FILE"   # origin mode: /claims is withheld (404)
 
 origin_docs no no "[$FIXKEY]"
 check "origin mode, nothing published yet → PASSES (exit 0)" 0 "$(WO "$FIXCOMMIT")"
@@ -697,9 +749,9 @@ cp "$FIX" "$MAJ2_STUB/major-2"
 origin_docs yes yes "[$FIXKEY]"
 check "…with the major-2 bundle behind the MAJOR-1 pointer → FAILS (target-major)" 1 "$(WO "$FIXCOMMIT")"
 origin_docs no yes "[$FIXKEY]"
-printf '%s' "$CLAIMS_JSON" > "$CLAIMS_STUB/claims"
+printf '%s' "$CLAIMS_JSON" > "$CLAIMS_FILE"
 check "…while the in-image /claims is still served (200) → FAILS" 1 "$(WO "$FIXCOMMIT")"
-rm -f "$CLAIMS_STUB/claims"
+rm -f "$CLAIMS_FILE"
 
 # End to end through verify-deploy.sh: the EXPECTED_COMMIT plumbing is what binds
 # the bundle, so exercise it from the entry point an operator actually runs.
@@ -716,7 +768,7 @@ grep -qE 'certification bundle \(major 2\) +OK +v3' "$TMP/vo.out" && ok "  ...an
 cp "$TMP/doc.origin.bak" "$DOC"; rm -f "$DOC.v2" "$MAJ2_STUB/major-2"
 cp "$TMP/build-info.origin.bak" "$STUB_DIR/build-info.json"
 if [ -f "$TMP/readiness.origin.bak" ]; then cp "$TMP/readiness.origin.bak" "$STUB_DIR/api/readiness"; else rm -f "$STUB_DIR/api/readiness"; fi
-printf '%s' "$CLAIMS_JSON" > "$CLAIMS_STUB/claims"
+printf '%s' "$CLAIMS_JSON" > "$CLAIMS_FILE"
 
 # ── the a2a posture arm: a SKIP that used to be a RED ──────────────────────
 # Found 2026-09-09 on a live KickTodo deploy. The agent-card arm gated on
@@ -748,6 +800,34 @@ check "  ...but a2a ADVERTISED with stale versions still FAILS (the guard did no
 cp "$TMP/doc.bak" "$DOC"
 check "  ...and the restored document passes again (control)" 0 "$(W "$CLAIMS_META")"
 
+# ── the v2-only posture: v1-root claims are N/A, not MISSING/STALE ─────────
+# Found 2026-10-04 on the ADR 0669 cut of app.openwop.dev. With v1 retired, the
+# header-less discovery read returns the v2 document, which by schema has no
+# `contractProvenance` and no `replay.sideEffectSuppression`, so a healthy
+# deploy printed MISSING + STALE and the "deploy the backend" advice. Also
+# BIDIRECTIONAL: the same two fields dropped from a document that still serves
+# 1.x must keep failing, or the guard has deleted the check.
+v2only_doc() { python3 - "$DOC" "$1" <<'PY5'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d.pop("contractProvenance", None)
+d.get("capabilities", {}).pop("replay", None)
+d["protocolVersions"] = ["2.0"] if sys.argv[2] == "v2only" else ["1.1", "2.0"]
+json.dump(d, open(sys.argv[1], "w"))
+PY5
+}
+v2only_doc v2only
+WV() { ( cd "$REPO" && OPENWOP_BUILD_META_DIR="$CLAIMS_META" node "$ROOT/scripts/check-wire-claims.mjs" "$STUB/api" >"$TMP/wv.out" 2>&1; echo $? ); }
+check "v2-only host (protocolVersions [2.0]) → v1-root claims N/A, PASSES" 0 "$(WV)"
+if [ "$(grep -c 'N/A .*v2-only host' "$TMP/wv.out")" = 2 ]; then
+  ok "  ...and both v1-root rows say N/A (contractProvenance + sideEffectSuppression)"
+else
+  bad "  ...expected two N/A rows; got: $(grep -E 'contractProvenance|sideEffect' "$TMP/wv.out" | tr '\n' ' ')"
+fi
+v2only_doc both
+check "  ...but a host still serving 1.x with those fields missing FAILS (the guard did not delete the check)" 1 "$(WV)"
+cp "$TMP/doc.bak" "$DOC"
+
 echo "== deploy.sh + write-build-commit: the certify stamp (ADR 0550 P4) =="
 # THE HAZARD: `build-meta/*` is gitignored but `.gcloudignore` deliberately
 # un-ignores it, so a long-lived deploy checkout carries the LAST certify's
@@ -772,6 +852,20 @@ fi
 # ...and the commit stamp it CAN derive still lands, so the deletion above is a
 # targeted removal rather than the script having failed outright.
 if [ -s "$WBC_ROOT/build-meta/commit.txt" ]; then ok "  ...while still writing the commit stamp it can derive"; else bad "write-build-commit wrote no commit.txt"; fi
+
+# ADR 0782 / NP-V2 Track C — build-meta/deployer.json (which checkout + session
+# made the build). Written ONLY on the deploy path; any other run DELETES a stale
+# copy, so a non-deploy run can never label a build it did not make.
+OPENWOP_STAMP_DEPLOYER=1 OPENWOP_DEPLOY_SESSION=gate-test node "$WBC_ROOT/scripts/write-build-commit.mjs" "$(printf '%040d' 4)" >/dev/null 2>&1
+if node -e 'const d=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); process.exit(d.checkout==="wbcroot" && d.session==="gate-test" && d.stampedAt ? 0 : 1)' "$WBC_ROOT/build-meta/deployer.json" 2>/dev/null; then
+  ok "write-build-commit stamps deployer.json on the deploy path (checkout + session)"
+else
+  bad "write-build-commit did not stamp deployer.json with checkout + session"
+fi
+node "$WBC_ROOT/scripts/write-build-commit.mjs" "$(printf '%040d' 5)" >/dev/null 2>&1
+if [ -e "$WBC_ROOT/build-meta/deployer.json" ]; then bad "a non-deploy run left a stale deployer.json"; else ok "a non-deploy run DELETES a stale deployer.json"; fi
+case "$(cat "$ROOT/scripts/deploy.sh")" in *"OPENWOP_STAMP_DEPLOYER=1 node"*) ok "deploy.sh opts in to the deployer stamp" ;;
+  *) bad "deploy.sh does not request the deployer stamp" ;; esac
 
 # deploy.sh must PRODUCE the stamp on the deploy path, and must REFUSE to ship
 # when the lane cannot. Asserted on the source, because running the real lane
@@ -931,6 +1025,25 @@ else
   bad "deploy.sh checks frontend deps AFTER shipping the backend (line $dep_line > $gcloud_line) — half-deploy risk"
 fi
 
+# ADR 0863 — the frontend is BUILT (not just installed) before the backend ships.
+# The build starts in the background before certify; the pin is that its await
+# precedes the Cloud Run write, and that the build starts before certify, which is
+# where the time is saved.
+fe_launch=$(grep -nE '^[^#]*FE_BUILD_PID=\$!' "$ROOT/scripts/deploy.sh" | head -1 | cut -d: -f1)
+fe_await=$(grep -nE '^await_frontend_build$' "$ROOT/scripts/deploy.sh" | head -1 | cut -d: -f1)
+fe_cert=$(grep -nE '^[^#]*npm run test:conformance -- --certify' "$ROOT/scripts/deploy.sh" | head -1 | cut -d: -f1)
+if [ -n "$fe_launch" ] && [ -n "$fe_await" ] && [ -n "$fe_cert" ] && [ -n "$gcloud_line" ] \
+   && [ "$fe_launch" -lt "$fe_cert" ] && [ "$fe_await" -lt "$gcloud_line" ]; then
+  ok "deploy.sh builds the frontend during certify and awaits it before the backend ships (launch $fe_launch < certify $fe_cert; await $fe_await < deploy $gcloud_line)"
+else
+  bad "deploy.sh: frontend build must start before certify and be awaited before 'gcloud run deploy' (launch=$fe_launch certify=$fe_cert await=$fe_await deploy=$gcloud_line)"
+fi
+if grep -qE 'tail -40 "\$FE_BUILD_LOG"' "$ROOT/scripts/deploy.sh" && grep -qE 'frontend build FAILED \(exit \$rc\) — nothing uploaded' "$ROOT/scripts/deploy.sh"; then
+  ok "a failed background frontend build refuses the deploy and shows its log"
+else
+  bad "deploy.sh: a failed background frontend build must exit non-zero and print its log"
+fi
+
 # Presence is insufficient for the backend suite: a stale but valid install
 # certified and stamped 2.1.5 while package-lock resolved 2.31.0 (2026-09-20).
 # Exercise both polarities of the dedicated parity checker and pin its ordering
@@ -1053,6 +1166,10 @@ cat > "$FAKEBIN/gcloud" <<'FAKE'
 case "$*" in
   *"services describe"*) printf '%s' "${GCLOUD_FAKE_SERVICE_JSON:-}"; exit 0 ;;
   *"revisions list"*) exit 0 ;;
+  # CE-16 — `logging read` answers the staged revision names of `schedule fired`
+  # lines (one per line), or fails with GCLOUD_FAKE_LOGS_RC.
+  *"logging read"*) [ -n "${GCLOUD_FAKE_LOGS_RC:-}" ] && { echo "ERROR: permission denied" >&2; exit "$GCLOUD_FAKE_LOGS_RC"; }
+                    printf '%s' "${GCLOUD_FAKE_LOGS:-}"; [ -n "${GCLOUD_FAKE_LOGS:-}" ] && echo; exit 0 ;;
 esac
 printf '%s' "${GCLOUD_FAKE_OUT:-}"
 [ -n "${GCLOUD_FAKE_OUT:-}" ] && echo
@@ -1095,6 +1212,29 @@ check "pg budget: one tag that still fits (4 × 3 + 4 = 16) PASSES with a NOTE" 
 case "$(PBOUT "$(svc_json 4 3 1 'smoke')")" in *"NOTE      : 1 tagged revision"*) ok "  ...and the NOTE names the idle tag" ;; *) bad "  ...but no NOTE about the tag" ;; esac
 check "pg budget: minScale 0 → tags hold no idle instance (4 × 5 + 0 = 20) PASSES" 0 "$(PB "$(svc_json 4 5 0 'smoke,rlhi')")"
 check "pg budget: UNREADABLE service JSON FAILS (never guess a budget)" 1 "$(PB "")"
+# ADR 0867 — "pool" is per INSTANCE and sums every pg pool the process opens:
+# the Storage pool, plus the sql surface's when `sql=postgres` and pgvector's when
+# `vector=pgvector` (each default 10). Before this, Gate 5 counted only the first.
+svc_env() { # svc_env <maxScale> <minScale> <env-items-json>
+  printf '{"spec":{"template":{"metadata":{"annotations":{"autoscaling.knative.dev/maxScale":"%s","autoscaling.knative.dev/minScale":"%s"}},"spec":{"containers":[{"env":[%s]}]}},"traffic":[{"revisionName":"live","percent":100}]},"status":{"traffic":[{"revisionName":"live","percent":100}]}}' "$1" "$2" "$3"
+}
+# Each env item lives in a single-quoted variable: an inline `{"a":1,"b":2}`
+# inside nested "$( … )" is BRACE-EXPANDED by bash into two broken words.
+E_POOL='{"name":"OPENWOP_PG_POOL_MAX","value":"4"}'
+E_DUR='{"name":"OPENWOP_SURFACE_BACKEND","value":"durable"}'
+E_SQL='{"name":"OPENWOP_SURFACE_SQL","value":"postgres"}'
+E_SQL2='{"name":"OPENWOP_SQL_PG_POOL_MAX","value":"2"}'
+E_VEC='{"name":"OPENWOP_SURFACE_VECTOR","value":"pgvector"}'
+E_VEC2='{"name":"OPENWOP_VECTOR_PG_POOL_MAX","value":"2"}'
+E_GVEC='{"name":"OPENWOP_SURFACE_BACKEND","value":"pgvector"}'
+check "pg budget: durable everywhere adds NO pool (4 × 3 = 12) PASSES" 0 "$(PB "$(svc_env 3 1 "$E_POOL,$E_DUR")")"
+check "pg budget: sql=postgres at its default 10 → (4+10) × 3 = 42 > 22 FAILS" 1 "$(PB "$(svc_env 3 1 "$E_POOL,$E_SQL")")"
+check "pg budget: sql=postgres pool 2 + pgvector pool 2 → (4+2+2) × 2 = 16 PASSES" 0 "$(PB "$(svc_env 2 1 "$E_POOL,$E_SQL,$E_SQL2,$E_VEC,$E_VEC2")")"
+check "pg budget: pgvector selected via the GLOBAL default still counts → (4+10) × 2 = 28 > 22 FAILS" 1 "$(PB "$(svc_env 2 1 "$E_POOL,$E_GVEC")")"
+case "$(PBOUT "$(svc_env 3 1 "$E_POOL,$E_SQL,$E_SQL2")")" in
+  *"per-instance pool = storage 4 + sql 2"*) ok "  ...and the OK line itemises the per-instance pool" ;;
+  *) bad "  ...but the per-instance pool was not itemised" ;;
+esac
 # …and the SUMMARY must say which fact it is. `refusing to guess` in the detail
 # followed by `the connection budget does not fit` in the headline is a gate
 # that is honest where nobody looks and false where everybody does — it misled
@@ -1111,6 +1251,31 @@ case "$BREACH_OUT" in *"the connection budget does not fit"*) ok "  ...while a M
   *) bad "  ...but a measured breach no longer names the breach" ;; esac
 case "$BREACH_OUT" in *"COULD NOT BE MEASURED"*) bad "  ...and a measured breach wrongly reports itself as unmeasured" ;;
   *) ok "  ...and a measured breach is not reported as unmeasured" ;; esac
+
+
+# ── verify-deploy: superseded revisions still firing scheduled jobs (CE-16, WHD-28) ──
+# Each case stages the serving revision (services describe → status.traffic) and
+# the revision names of recent `schedule fired` lines (logging read). Every case
+# can fail: the standalone stale case goes green if the arm stops failing, the
+# after-deploy case goes red if it starts failing every deploy, the OK case goes
+# red if the arm is unconditionally angry, and the two degraded cases go red if
+# either one is ever read as a pass.
+SR_SVC='{"status":{"traffic":[{"revisionName":"live-rev","percent":100}]},"spec":{"template":{"spec":{"containers":[{"env":[]}]}}}}'
+SR() { ( cd "$REPO" && PATH="$FAKEBIN:$PATH" BASE="$STUB" OPENWOP_DEPLOY_PROJECT=p OPENWOP_DEPLOY_REGION=r SHELL_CONVERGE_S=0 \
+        GCLOUD_FAKE_OUT="b1	2026-08-18T16:28:06+00:00	SUCCESS" GCLOUD_FAKE_SERVICE_JSON="$SR_SVC" GCLOUD_FAKE_LOGS="$1" GCLOUD_FAKE_LOGS_RC="${3:-}" \
+        bash "$ROOT/scripts/verify-deploy.sh" ${2:-} "$NEW" 2>&1; echo "EXIT=$?" ); }
+SR_OK="$(SR "$(printf 'live-rev\nlive-rev')")"
+case "$SR_OK" in *"stale revs  OK"*) ok "stale revs: every fire from the serving revision → OK" ;; *) bad "stale revs: a clean window did not read OK" ;; esac
+SR_BAD="$(SR "$(printf 'live-rev\nold-rev\nold-rev')")"
+case "$SR_BAD" in *"stale revs  FAILED"*"EXIT=1"*) ok "stale revs: a NON-serving revision firing jobs FAILS standalone" ;; *) bad "stale revs: a stale revision firing jobs did not fail standalone" ;; esac
+case "$SR_BAD" in *"old-rev fired 2 job(s):  gcloud run revisions delete old-rev"*) ok "  ...and names the revision, its fire count and the exact delete command" ;; *) bad "  ...but did not print the delete command" ;; esac
+SR_AD="$(SR "$(printf 'old-rev\nlive-rev')" --after-deploy)"
+case "$SR_AD" in *"stale revs  ACTION"*) ok "stale revs: right after a deploy the old revision is an ACTION, not a failure" ;; *) bad "stale revs: --after-deploy did not report an ACTION" ;; esac
+case "$SR_AD" in *"stale revs  FAILED"*) bad "  ...but it still FAILED every deploy" ;; *) ok "  ...and does not fail every deploy for an old instance that is still draining" ;; esac
+SR_EMPTY="$(SR "")"
+case "$SR_EMPTY" in *"stale revs  NOT CORROBORATED"*) ok "stale revs: no fires in the window → NOT CORROBORATED, never OK" ;; *) bad "stale revs: an empty window was not reported as NOT CORROBORATED" ;; esac
+SR_ERR="$(SR "" "" 1)"
+case "$SR_ERR" in *"stale revs  UNMEASURED"*) ok "stale revs: a failed log query → UNMEASURED, never OK" ;; *) bad "stale revs: a failed log query was not reported as UNMEASURED" ;; esac
 
 B1='b1	2026-08-18T16:28:06+00:00	SUCCESS'
 B2='b2	2026-08-18T16:29:11+00:00	SUCCESS'
@@ -1312,6 +1477,14 @@ touch "$STUB_DIR/.v2-dishonest"
 check "FAILS when the ORIGIN answers the SPA shell to a major-2 request on a manifest root (ADR 0631)" 1 "$(S)"
 rm -f "$STUB_DIR/.v2-dishonest"
 check "  ...and passes again once the origin routes the root to the backend" 0 "$(S)"
+# ── ADR 0840 D3 — a plugin frame keeps its policy through the CDN ──
+# Measured: Firebase REPLACES the origin's CSP when its own rule wins. If the
+# plugin rule ever loses, the probe goes out under the app policy, and a frame
+# mounted by `src` would run weaker than the srcdoc it replaced.
+touch "$STUB_DIR/.plugin-csp-replaced"
+check "FAILS when the CDN replaces the plugin frame policy with the app's (ADR 0840 D3)" 1 "$(S)"
+rm -f "$STUB_DIR/.plugin-csp-replaced"
+check "  ...and passes again once the plugin policy reaches the browser" 0 "$(S)"
 
 # THE REGRESSION. Hosting pruned the bundle the cached shell still names, so the
 # asset URL falls through to the SPA rewrite. The STATUS is unhelpful (a real
@@ -1342,6 +1515,446 @@ if grep -qE '^[^#]*UA=.*Mozilla' "$ROOT/scripts/verify-deploy.sh"; then
 else
   bad "the shell arm lost its browser user-agent — it now probes the bot prerender"
 fi
+
+# ── evidence mode is read from the LIVE service (WHD-18 / ADR 0735) ────────
+# verify-deploy used to take OPENWOP_CERT_BUNDLE_ORIGIN only from deploy.env, so
+# a deploy.env without the line checked an ORIGIN-mode host with IMAGE-mode
+# expectations: "certificationBundleUrl MISSING" + "claims document STALE" on
+# three consecutive production deploys (2026-09-27/28), all false reds. The mode
+# now comes from the deployed service when gcloud and the deploy scope exist.
+# A stub gcloud answers `run services describe` with the origin in
+# $GCLOUD_FAKE_ORIGIN (empty = the service carries none) or fails with
+# $GCLOUD_FAKE_DESCRIBE_RC, and `builds list` with one build (the peer arm).
+GCBIN="$TMP/gcbin"; mkdir -p "$GCBIN"
+cat > "$GCBIN/gcloud" <<'GCEOF'
+#!/usr/bin/env bash
+case "$*" in
+  *"run services describe"*)
+    if [ "${GCLOUD_FAKE_DESCRIBE_RC:-0}" != "0" ]; then echo "ERROR: (gcloud) PERMISSION_DENIED" >&2; exit "$GCLOUD_FAKE_DESCRIBE_RC"; fi
+    if [ -n "${GCLOUD_FAKE_ORIGIN:-}" ]; then env='[{"name":"OPENWOP_CERT_BUNDLE_ORIGIN","value":"'"$GCLOUD_FAKE_ORIGIN"'"}]'; else env='[{"name":"OTHER","value":"x"}]'; fi
+    printf '{"spec":{"template":{"spec":{"containers":[{"env":%s}]}}}}\n' "$env" ;;
+  *"builds list"*) echo "fake-build-1" ;;
+  *) exit 0 ;;
+esac
+GCEOF
+chmod +x "$GCBIN/gcloud"
+set_live "$NEW"
+printf '{"commit":"%s","stamped":true,"dirty":false}' "$NEW" > "$STUB_DIR/build-info.json"
+# EV <local-origin> <live-origin> [describe-rc] — prints "<exit> <evidence line>",
+# plus " [origin-arm]" when the ORIGIN-mode evidence checks actually ran.
+EV() { ( cd "$REPO" && out=$(PATH="$GCBIN:$PATH" BASE="$STUB" SHELL_CONVERGE_S=0 \
+          OPENWOP_DEPLOY_PROJECT=p OPENWOP_DEPLOY_REGION=r OPENWOP_DEPLOY_ACCOUNT=deployer@example.com \
+          OPENWOP_CERT_BUNDLE_ORIGIN="$1" GCLOUD_FAKE_ORIGIN="$2" GCLOUD_FAKE_DESCRIBE_RC="${3:-0}" \
+          bash "$ROOT/scripts/verify-deploy.sh" "$NEW" --backend-only 2>&1); rc=$?
+        arm=""; grep -q 'certification bundle (major 2)' <<<"$out" && arm=" [origin-arm]"
+        printf '%s %s%s' "$rc" "$(grep -m1 'evidence mode' <<<"$out")" "$arm" ); }
+ORIGIN_A="gs://bucket-a/openwop-app-backend"; ORIGIN_B="gs://bucket-b/openwop-app-backend"
+# The stub is an IMAGE-mode host (a v2 bundle and the in-image claims document,
+# from the arms above), so once origin mode is adopted the origin checks rightly
+# red it. What these two cases pin is the SELECTION: that the origin arm ran.
+r=$(EV "" "$ORIGIN_A")
+if grep -q "read from the live service" <<<"$r" && grep -q "\[origin-arm\]" <<<"$r"; then
+  ok "local UNSET, service in origin mode: adopts the service's origin and runs the origin-mode evidence checks"
+else bad "local UNSET, service in origin mode: origin not adopted from the service: $r"; fi
+r=$(EV "$ORIGIN_A" "$ORIGIN_A")
+if grep -q "\[origin-arm\]" <<<"$r"; then ok "local and service AGREE on the origin: the origin-mode evidence checks run"
+else bad "local and service AGREE: the origin arm did not run: $r"; fi
+check "local origin DISAGREES with the service: FAILS (would verify a source the host does not use)" 1 "$(r=$(EV "$ORIGIN_B" "$ORIGIN_A"); echo "${r%% *}")"
+check "local sets an origin, the service carries NONE: FAILS" 1 "$(r=$(EV "$ORIGIN_A" ""); echo "${r%% *}")"
+r=$(EV "" "")
+check "neither sets an origin: image mode, passes" 0 "${r%% *}"
+if grep -q "image (the live service carries no" <<<"$r"; then ok "  ...and names image mode as the service's"; else bad "  ...image mode not attributed to the service: $r"; fi
+r=$(EV "" "" 1)
+check "the service cannot be described: not a failure on its own" 0 "${r%% *}"
+if grep -q "UNREADABLE" <<<"$r"; then ok "  ...but it is reported UNREADABLE, never a silent default"; else bad "  ...the unreadable service was not reported: $r"; fi
+
+# ── --publish-evidence and the kept refused bundle (WHD-18 / ADR 0735) ─────
+# STRUCTURAL, like the --after-deploy guard: exercising either for real needs
+# production secrets, a tunnel and a ten-minute cut. What must hold is WHERE
+# they sit and WHAT gates them.
+DS="$ROOT/scripts/deploy.sh"; PE="$ROOT/scripts/publish-evidence.sh"
+if grep -qE '^[[:space:]]+--publish-evidence\) DO_PUBLISH_EVIDENCE=1 ;;' "$DS" && grep -qE 'DO_PUBLISH_EVIDENCE=0' "$DS"; then
+  ok "deploy.sh accepts --publish-evidence, and it defaults OFF (a load test is never implied)"
+else bad "deploy.sh: --publish-evidence is not parsed, or does not default off"; fi
+v_line=$(grep -nE 'bash "\$ROOT/scripts/verify-deploy\.sh"' "$DS" | head -1 | cut -d: -f1)
+p_line=$(grep -nE 'bash "\$ROOT/scripts/publish-evidence\.sh"' "$DS" | head -1 | cut -d: -f1)
+if [ -n "$v_line" ] && [ -n "$p_line" ] && [ "$p_line" -gt "$v_line" ]; then
+  ok "deploy.sh publishes evidence only AFTER verify-deploy (never signs an unverified deploy)"
+else bad "deploy.sh: publish-evidence.sh is not called after verify-deploy.sh (verify=$v_line publish=$p_line)"; fi
+if awk -v p="$p_line" 'NR<p && /DO_PUBLISH_EVIDENCE" -eq 1/ {g=1} NR<p && /DO_BACKEND" -ne 1/ {b=1} END {exit !(g&&b)}' "$DS"; then
+  ok "  ...gated on --publish-evidence AND on a backend having been deployed"
+else bad "  ...publish-evidence.sh is not gated on the flag and the backend condition"; fi
+# Not publishing must not be SILENT: a verified origin-mode backend deploy
+# without the flag names the pending evidence and the command.
+if awk -v p="$p_line" 'NR>p && /elif \[ "\$DO_BACKEND" -eq 1 \] && \[ -n "\$\{OPENWOP_CERT_BUNDLE_ORIGIN:-\}" \]/ {f=1} f && /scripts\/publish-evidence\.sh/ {ok=1} END {exit !ok}' "$DS"; then
+  ok "deploy.sh names the PENDING evidence and the command when a backend deploy did not publish (origin mode)"
+else bad "deploy.sh: a backend deploy without --publish-evidence leaves pending evidence silently"; fi
+k_line=$(grep -nE 'cp "\$OUT\.rejected\.json"' "$PE" | head -1 | cut -d: -f1)
+d_line=$(grep -nE 'die "major \$m: the suite wrote no bundle' "$PE" | head -1 | cut -d: -f1)
+if [ -n "$k_line" ] && [ -n "$d_line" ] && [ "$k_line" -lt "$d_line" ]; then
+  ok "publish-evidence keeps a REFUSED bundle before dying (the cleanup trap would delete it)"
+else bad "publish-evidence: the refused bundle is not copied out before the fatal exit (keep=$k_line die=$d_line)"; fi
+
+# ── the evidence-cut lock: one cut at a time (2026-09-28) ──────────────────
+# BEHAVIOURAL, against a fake gcloud that keeps objects as files with a
+# generation counter and honours --if-generation-match, the one GCS
+# property the lock rests on. BASE points at a closed port, so every run
+# that gets past the lock dies at its first host request and exercises the
+# release path too. MEASURED: two sessions' overlapping cuts published
+# disturbed bundles for c3d06c29.
+LKBIN="$TMP/lockbin"; LKSTORE="$TMP/lockstore"; mkdir -p "$LKBIN" "$LKSTORE"
+cat > "$LKBIN/gcloud" <<'FAKE'
+#!/usr/bin/env bash
+# Fake `gcloud storage {cp,rm,cat,objects describe}`. Object = file under
+# $LKSTORE, generation = file.gen. A precondition miss exits 1, like a 412.
+key() { printf '%s' "$1" | tr '/:' '__'; }
+match=""; args=()
+for a in "$@"; do case "$a" in --if-generation-match=*) match="${a#*=}" ;; --project|--account|--content-type=*|--format=*) ;; *) args+=("$a") ;; esac; done
+set -- "${args[@]}"
+[ "$1" = storage ] || exit 0; shift
+case "$1" in
+  cp) f="$LKSTORE/$(key "$3")"; cur="$(cat "$f.gen" 2>/dev/null || echo 0)"
+      [ -z "$match" ] || [ "$match" = "$cur" ] || { echo "412 precondition" >&2; exit 1; }
+      cp "$2" "$f"; echo $((cur + 1)) > "$f.gen" ;;
+  rm) f="$LKSTORE/$(key "$2")"; [ -f "$f" ] || exit 1
+      [ -z "$match" ] || [ "$match" = "$(cat "$f.gen")" ] || exit 1
+      rm -f "$f"; echo "$(cat "$f.gen")" > "$f.gen.dead"; rm -f "$f.gen" ;;
+  cat) f="$LKSTORE/$(key "$2")"; [ -f "$f" ] && cat "$f" ;;
+  objects) f="$LKSTORE/$(key "$3")"; [ -f "$f" ] && cat "$f.gen" ;;
+esac
+FAKE
+for t in cloudflared; do printf '#!/bin/sh\nexit 0\n' > "$LKBIN/$t"; done
+chmod +x "$LKBIN"/*
+cat > "$TMP/lock.env" <<'ENV'
+BASE=http://127.0.0.1:9
+OPENWOP_DEPLOY_PROJECT=p
+OPENWOP_DEPLOY_ACCOUNT=a@example.com
+OPENWOP_CERT_BUNDLE_ORIGIN=gs://lock-test-bucket/evidence
+OPENWOP_BUNDLE_SIGNING_KEY_ID=k1
+ENV
+LKOBJ="$LKSTORE/$(printf '%s' 'gs://lock-test-bucket/evidence/.cut-lock.json' | tr '/:' '__')"
+PE_LOCK() { PATH="$LKBIN:$PATH" LKSTORE="$LKSTORE" PUBLISH_EVIDENCE_ENV_FILE="$TMP/lock.env" \
+  OPENWOP_CONFORMANCE_BIN=/usr/bin/true bash "$PE" --allow-any-commit "$@" 2>&1; }
+seed_lock() { # seed_lock <expiresAtEpoch>
+  printf '{"holder":"other-box:4242:x","user":"peer","expiresAtEpoch":%d}\n' "$1" > "$LKOBJ"; echo 7 > "$LKOBJ.gen"; }
+
+out="$(PE_LOCK)"
+if grep -q "cut lock held" <<<"$out" && grep -q "cut lock released" <<<"$out" && [ ! -f "$LKOBJ" ]; then
+  ok "no lock: the cut takes it, and releases it on exit (even a failed run)"
+else bad "the free lock was not taken and released: $out"; fi
+if awk '/cut lock held/ {l=NR} /could not read .*readiness/ {r=NR} END {exit !(l && r && l < r)}' <<<"$out"; then
+  ok "  ...and it is taken BEFORE the first request to the host (the harm is two load tests)"
+else bad "  ...the lock is not taken before the first host request: $out"; fi
+
+seed_lock $(( $(date +%s) + 3600 ))
+out="$(PE_LOCK)"; rc=$?
+if [ "$rc" -ne 0 ] && grep -q "another evidence cut holds" <<<"$out" && grep -q "other-box:4242" <<<"$out" && [ "$(cat "$LKOBJ.gen")" = 7 ]; then
+  ok "a held lock REFUSES a second cut, names the holder, and is left untouched"
+else bad "a held lock did not refuse the second cut (rc=$rc): $out"; fi
+if ! grep -q "could not read" <<<"$out"; then ok "  ...and the refused cut never reached the host"; else bad "  ...the refused cut still contacted the host"; fi
+
+seed_lock $(( $(date +%s) - 60 ))
+out="$(PE_LOCK)"
+if grep -q "taking over the cut lock (gen 7, expired)" <<<"$out" && grep -q "cut lock held" <<<"$out"; then
+  ok "an EXPIRED lock (a SIGKILLed holder) is taken over"
+else bad "an expired lock was not taken over: $out"; fi
+
+seed_lock $(( $(date +%s) + 3600 ))
+out="$(PE_LOCK --break-lock)"
+if grep -q "taking over the cut lock (gen 7, --break-lock)" <<<"$out" && grep -q "cut lock held" <<<"$out"; then
+  ok "--break-lock takes over an unexpired lock (a holder confirmed dead)"
+else bad "--break-lock did not take over: $out"; fi
+
+printf 'not json' > "$LKOBJ"; echo 7 > "$LKOBJ.gen"
+out="$(PE_LOCK)"; rc=$?
+if [ "$rc" -ne 0 ] && grep -q "another evidence cut holds" <<<"$out"; then
+  ok "an unparseable lock counts as HELD (refuse, never guess it expired)"
+else bad "an unparseable lock was treated as free (rc=$rc): $out"; fi
+rm -f "$LKOBJ" "$LKOBJ.gen"
+
+# CORRECTED 2026-10-04: this used to pin the probe to `"$BASE/v1/runs"`, the path
+# that answers 410 on a v1-retired host — so it held the probe on the exact URL
+# that had made it inert. It now pins the major-2 probe AND its fail-closed shape.
+q_line=$(grep -nE '"\$BASE/api/runs"' "$PE" | head -1 | cut -d: -f1)
+c_line=$(grep -nE '^  "\$BIN" --base-url' "$PE" | head -1 | cut -d: -f1)
+if [ -n "$q_line" ] && [ -n "$c_line" ] && [ "$q_line" -lt "$c_line" ] \
+   && sed -n "$((q_line-2)),${q_line}p" "$PE" | grep -q "OpenWOP-Version: 2" \
+   && grep -qE '^  429\)$' "$PE" && grep -qE '^  400\|404\|422\)$' "$PE"; then
+  ok "publish-evidence probes the run quota on the major-2 surface BEFORE the load test, and refuses on a 429 (never publishes throttling as evidence)"
+else bad "publish-evidence: no major-2 run-quota probe ahead of the suite (probe=$q_line suite=$c_line)"; fi
+# The probe must FAIL CLOSED: a status it cannot read (410 from a retired path, a
+# redirect, a 5xx) is not "open". The default branch must die.
+if awk '/^case "\$code" in/,/^esac/' "$PE" | grep -A1 -E '^  \*\)$' | grep -q 'die '; then
+  ok "the run-quota probe fails closed on any status it cannot read (a 410 is not 'open')"
+else bad "publish-evidence: the run-quota probe has no fail-closed default branch"; fi
+if grep -qE 'gcloud storage rm "\$LOCK" --if-generation-match="\$LOCK_GEN"' "$PE"; then
+  ok "the release is generation-matched (a run that lost its lock never deletes a successor's)"
+else bad "publish-evidence: the lock release is not generation-matched"; fi
+
+# ── ADR 0802 — hold near the top of an hour; retire the superseded revision ──
+echo
+echo "== deploy timing + retire (ADR 0802) =="
+DT="$ROOT/scripts/lib/deploy-timing.mjs"
+eqv() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (expected '$2', got '$3')"; fi; }
+# ONE node process for every case: this harness also runs inside the backend
+# suite under a 120 s cap, and ~30 node spawns here pushed it to the edge at
+# load 18 (MEASURED 2026-10-03). Output: one `key=value` line per case.
+# The module path goes in the ENVIRONMENT, not argv: a path in argv[1] makes the
+# module's own isEntryModule() take it for the CLI entry and exit with usage.
+DT_OUT=$(DT_MODULE="$DT" node --input-type=module -e '
+  const m = await import(process.env.DT_MODULE);
+  const at = (iso) => Date.parse(iso) / 1000;
+  const hw = (iso) => m.hourWindowWaitSeconds(at(iso));
+  const out = {
+    h1730: hw("2026-10-02T17:30:00Z"), h174159: hw("2026-10-02T17:41:59Z"), h1742: hw("2026-10-02T17:42:00Z"),
+    h1745: hw("2026-10-02T17:45:00Z"), h1800: hw("2026-10-02T18:00:00Z"), h180659: hw("2026-10-02T18:06:59Z"),
+    h1807: hw("2026-10-02T18:07:00Z"),
+  };
+  const t = at("2026-10-02T17:55:00Z"); out.again = m.hourWindowWaitSeconds(t + m.hourWindowWaitSeconds(t));
+  const ps = (doc, c) => m.previousServingRevision(doc, c) ?? "";
+  out.p1 = ps({ status: { traffic: [{ revisionName: "r-old", percent: 100 }] } }, "");
+  out.p2 = ps({ status: { traffic: [{ revisionName: "r-new", percent: 0 }, { revisionName: "r-old", percent: 100 }] } }, "r-new");
+  out.p3 = ps({ status: { traffic: [{ revisionName: "a", percent: 50 }, { revisionName: "b", percent: 50 }] } }, "");
+  out.p4 = ps({ status: { traffic: [{ revisionName: "r-old", percent: 100, tag: "canary" }] } }, "");
+  out.p5 = ps({ status: {} }, "");
+  for (const [k, v] of Object.entries(out)) console.log(`${k}=${v}`);
+')
+dv() { printf '%s\n' "$DT_OUT" | sed -n "s/^$1=//p"; }
+# Lead is 8 min: a build started at HH:MM boots at about HH:MM+8.
+eqv "mid-hour build starts at once (17:30 → boots 17:38)"                 0    "$(dv h1730)"
+eqv "17:41:59 still starts (boots 17:49:59, one second outside)"          0    "$(dv h174159)"
+eqv "17:42 is held until it would boot at 18:15"                          1500 "$(dv h1742)"
+eqv "17:45 is held until it would boot at 18:15"                          1320 "$(dv h1745)"
+eqv "18:00 is held until it would boot at 18:15"                          420  "$(dv h1800)"
+eqv "18:06:59 is held one more second"                                    1    "$(dv h180659)"
+eqv "18:07 starts (boots 18:15, the window's far edge)"                   0    "$(dv h1807)"
+eqv "a held build is not held again when its wait ends"                   0    "$(dv again)"
+eqv "names the one serving revision"                          "r-old" "$(dv p1)"
+eqv "ignores the revision this deploy created"                "r-old" "$(dv p2)"
+eqv "a traffic SPLIT names nothing (never delete on a guess)" ""      "$(dv p3)"
+eqv "a TAGGED serving revision names nothing"                 ""      "$(dv p4)"
+eqv "no traffic block names nothing"                          ""      "$(dv p5)"
+# The CLI entry points deploy.sh actually calls (one spawn each).
+eqv "CLI hour-wait answers"                                   420     "$(node "$DT" hour-wait "$(node -e 'process.stdout.write(String(Date.parse("2026-10-02T18:00:00Z")/1000))')")"
+eqv "CLI previous-serving: unreadable input names nothing"    ""      "$(printf 'not json' | node "$DT" previous-serving '')"
+# Structural, like the other deploy.sh assertions: the ORDER is the property.
+D="$ROOT/scripts/deploy.sh"
+ln() { grep -nE "$1" "$D" | head -1 | cut -d: -f1; }
+l_hold=$(ln 'deploy-timing.mjs" hour-wait'); l_prev=$(ln 'deploy-timing.mjs" previous-serving'); l_build=$(ln '^  if ! gcloud run deploy ')
+l_verify=$(ln 'scripts/verify-deploy.sh" "\$\{VERIFY_ARGS'); l_del=$(ln 'gcloud run revisions delete "\$PREV_REVISION"'); l_cert=$(ln 'npm run test:conformance -- --certify')
+if [ -n "$l_hold" ] && [ -n "$l_build" ] && [ -n "$l_cert" ] && [ "$l_cert" -lt "$l_hold" ] && [ "$l_hold" -lt "$l_build" ]; then
+  ok "the top-of-hour hold sits AFTER certify and BEFORE the build (a built revision left at 0% keeps an instance)"
+else bad "deploy.sh: hold is not between certify and the build (certify=$l_cert hold=$l_hold build=$l_build)"; fi
+if [ -n "$l_prev" ] && [ -n "$l_build" ] && [ "$l_prev" -lt "$l_build" ]; then
+  ok "the serving revision is read BEFORE the deploy (afterwards the field names the new one)"
+else bad "deploy.sh: previous revision is not captured before the build (prev=$l_prev build=$l_build)"; fi
+if [ -n "$l_del" ] && [ -n "$l_verify" ] && [ "$l_verify" -lt "$l_del" ]; then
+  ok "the superseded revision is deleted only AFTER verify (until then it is the rollback)"
+else bad "deploy.sh: revisions delete does not follow verify (verify=$l_verify delete=$l_del)"; fi
+if [ "$(sed 's/"[^"]*"//g' "$D" | grep -cE '^[^#]*gcloud run revisions delete')" = "1" ]; then
+  ok "exactly ONE revisions-delete call exists, and it names \$PREV_REVISION"
+else bad "deploy.sh: expected exactly one 'gcloud run revisions delete' call"; fi
+if grep -q -- '--retire-previous) RETIRE_PREVIOUS=1' "$D" && grep -q -- '--ignore-hour-window) HOLD_FOR_HOUR=0' "$D" && grep -q '^RETIRE_PREVIOUS=0; HOLD_FOR_HOUR=1' "$D"; then
+  ok "retire is OPT-IN (deleting a revision does not stop its instance); the hour hold is on by default with an opt-out"
+else bad "deploy.sh: retire must default OFF behind --retire-previous; the hold must default ON behind --ignore-hour-window"; fi
+if grep -q 'its instance and daemons stop with it' "$D"; then
+  bad "deploy.sh still claims deleting a revision stops its instance (falsified 2026-10-02)"
+else ok "deploy.sh no longer claims that deleting a revision stops its instance"; fi
+
+echo "== evidence cut vs deploy (2026-10-05: a deploy landed inside a held cut lock) =="
+# Behavioural, both halves. A deploy at 04:12:25Z shifted traffic 12 s after a cut
+# read the serving commit, and both bundles were labelled with the commit it
+# replaced. Each half can fail: Gate 8 goes green if it stops reading the lock,
+# and the cut-side re-check goes green if it stops comparing.
+PE="$ROOT/scripts/publish-evidence.sh"
+AS() { # AS <labelled-commit> [base] → exit of assert_still_serving against the stub
+  ( BASE="${2:-$STUB}"; COMMIT="$1"; HELPERS="$ROOT/scripts/lib/publish-evidence-helpers.mjs"
+    die() { exit 1; }
+    eval "$(sed -n '/^assert_still_serving() {/,/^}/p' "$PE")"
+    ( assert_still_serving "test" ) >/dev/null 2>&1; echo $? )
+}
+set_live "$NEW"
+check "cut re-check: the labelled commit is still serving → continues" 0 "$(AS "$NEW")"
+check "cut re-check: a different commit is serving (a mid-cut deploy) → refuses to upload" 1 "$(AS "$OLD")"
+check "cut re-check: readiness unreadable → refuses (an unread commit supports no label)" 1 "$(AS "$NEW" http://127.0.0.1:9)"
+as_after=$(grep -nE 'assert_still_serving "major \$m, after the suite"' "$PE" | cut -d: -f1)
+as_before=$(grep -nE 'assert_still_serving "major \$m, before the upload"' "$PE" | cut -d: -f1)
+up_line=$(grep -nE 'gcloud storage cp "\$OUT" "\$DEST"' "$PE" | cut -d: -f1)
+if [ -n "$as_after" ] && [ -n "$as_before" ] && [ -n "$up_line" ] && [ "$as_after" -lt "$as_before" ] && [ "$as_before" -lt "$up_line" ]; then
+  ok "  ...and it runs after each suite AND immediately before each upload"
+else bad "publish-evidence: the serving re-check is not between the suite and the upload (after=$as_after before=$as_before upload=$up_line)"; fi
+
+# Gate 8 reads `gcloud storage cat <origin>/.cut-lock.json` through its own fake.
+CLBIN="$TMP/cutlockbin"; mkdir -p "$CLBIN"
+cat > "$CLBIN/gcloud" <<'FAKE'
+#!/usr/bin/env bash
+case "$*" in
+  *"storage cat"*) [ -n "${CL_RC:-}" ] && { printf '%s\n' "${CL_ERR:-}" >&2; exit "$CL_RC"; }
+                   printf '%s' "${CL_LOCK:-}"; exit 0 ;;
+  *"services describe"*) printf '%s' "${GCLOUD_FAKE_SERVICE_JSON:-}"; exit 0 ;;
+esac
+exit 0
+FAKE
+chmod +x "$CLBIN/gcloud"
+CL() { ( cd "$REPO" && PATH="$CLBIN:$PATH" BASE="$STUB" OPENWOP_DEPLOY_SERVICE=svc OPENWOP_DEPLOY_PROJECT=p OPENWOP_DEPLOY_REGION=r \
+        OPENWOP_PG_MAX_CONNECTIONS=25 GCLOUD_FAKE_SERVICE_JSON="$(svc_json 4 3 1 '')" OPENWOP_CERT_BUNDLE_ORIGIN=gs://b/evidence \
+        CL_LOCK="$1" CL_RC="${2:-}" CL_ERR="${3:-}" bash "$ROOT/scripts/preflight-deploy.sh" 2>&1; echo "EXIT $?" ); }
+future=$(( $(date +%s) + 3600 )); past=$(( $(date +%s) - 60 ))
+held_lock="{\"holder\":\"box:11077:20261005T041213Z\",\"pid\":11077,\"expiresAtEpoch\":$future}"
+out=$(CL "" 1 "ERROR: One or more URLs matched no objects.")
+case "$out" in *"EXIT 0"*) ok "preflight Gate 8: no cut lock → passes" ;; *) bad "preflight Gate 8: no cut lock should pass: $(printf '%s' "$out" | tail -3)" ;; esac
+out=$(CL "$held_lock")
+case "$out" in *"EXIT 1"*) ok "preflight Gate 8: a LIVE cut lock refuses the deploy" ;; *) bad "preflight Gate 8: a live cut lock did not refuse" ;; esac
+case "$out" in *"box:11077"*) ok "  ...and names the holder" ;; *) bad "  ...but does not name the holder" ;; esac
+out=$(CL "{\"holder\":\"old\",\"expiresAtEpoch\":$past}")
+case "$out" in *"EXIT 0"*) ok "preflight Gate 8: an EXPIRED lock (its cut is over) passes" ;; *) bad "preflight Gate 8: an expired lock blocked the deploy" ;; esac
+case "$out" in *"stale lock"*) ok "  ...and says the lock was stale" ;; *) bad "  ...but passed without saying so" ;; esac
+out=$(CL "" 1 "ERROR: (gcloud.storage.cat) [a@x] does not have permission")
+case "$out" in *"EXIT 1"*) ok "preflight Gate 8: an UNREADABLE lock refuses" ;; *) bad "preflight Gate 8: an unreadable lock was read as no lock" ;; esac
+case "$out" in *"COULD NOT BE READ"*) ok "  ...as UNMEASURED, not as a cut in progress" ;; *) bad "  ...but does not say it could not read the lock" ;; esac
+case "$out" in *"IN PROGRESS"*) bad "  ...and claims a cut it never saw" ;; *) ok "  ...and does not claim a cut it never saw" ;; esac
+out=$(CL "not json")
+case "$out" in *"EXIT 1"*) ok "preflight Gate 8: an unparseable lock refuses (never guess)" ;; *) bad "preflight Gate 8: an unparseable lock passed" ;; esac
+
+echo "== update-env.sh: an env change must reach requests (CE-16) =="
+# A STATEFUL fake. Revisions are files under $UE/revs/<name> holding
+# "<Ready> <commit>" then KEY=VALUE lines; the service is $UE/serving +
+# $UE/latest. `services update` mints the next revision from the serving one
+# (or, with UE_NEW_READY/UE_NEW_COMMIT/UE_DROP, a broken one); `update-traffic`
+# moves $UE/serving. Every mutation is logged, so a case can assert what was
+# NOT done. Each case can fail: the shift case goes red if the script stops
+# shifting, the refusal cases go red if any of them shift anyway.
+UEBIN="$TMP/uebin"; mkdir -p "$UEBIN"
+cat > "$UEBIN/gcloud" <<'FAKE'
+#!/usr/bin/env bash
+UE="$UE_DIR"; echo "$*" >> "$UE/calls"
+rev_json() { local f="$UE/revs/$1"; local hdr; hdr=$(head -1 "$f")
+  node -e 'const [ready,commit]=process.argv[1].split(" ");const env=process.argv.slice(2).map(l=>{const i=l.indexOf("=");return{name:l.slice(0,i),value:l.slice(i+1)}});env.push({name:"OPENWOP_BUILD_COMMIT",value:commit});console.log(JSON.stringify({spec:{containers:[{env}]},status:{conditions:[{type:"Ready",status:ready}]}}))' "$hdr" $(tail -n +2 "$f"); }
+case "$*" in
+  *"storage cat"*) [ -n "${UE_LOCK:-}" ] && { printf '%s' "$UE_LOCK"; exit 0; }; echo "ERROR: One or more URLs matched no objects." >&2; exit 1 ;;
+  *"services describe"*) printf '{"status":{"traffic":[{"revisionName":"%s","percent":100}],"latestCreatedRevisionName":"%s"}}\n' "$(cat "$UE/serving")" "$(cat "$UE/latest")" ;;
+  *"revisions describe"*) rev_json "$(printf '%s\n' "$@" | awk 'f{print;exit} $0=="describe"{f=1}')" ;;
+  *"services update-traffic"*) to=$(printf '%s\n' "$@" | awk 'f{print;exit} $0=="--to-revisions"{f=1}'); echo "${to%=100}" > "$UE/serving" ;;
+  *"services update"*)
+    [ -n "${UE_NOOP:-}" ] && exit 0
+    spec=$(printf '%s\n' "$@" | awk 'f{print;exit} $0=="--update-env-vars"{f=1}'); spec="${spec#^@@^}"
+    cur="$UE/revs/$(cat "$UE/serving")"; new="rev-$(( $(ls "$UE/revs" | wc -l) + 1 ))"
+    read -r ready commit < "$cur"
+    { echo "${UE_NEW_READY:-$ready} ${UE_NEW_COMMIT:-$commit}"; tail -n +2 "$cur"
+      [ -z "${UE_DROP:-}" ] && printf '%s\n' "$spec" | awk 'BEGIN{RS="@@"} NF{sub(/\n$/,""); print}'; } > "$UE/revs/$new"
+    echo "$new" > "$UE/latest" ;;
+esac
+exit 0
+FAKE
+chmod +x "$UEBIN/gcloud"
+ue_reset() { UE="$TMP/ue.$RANDOM$RANDOM"; mkdir -p "$UE/revs"; printf 'True cafe1234cafe1234\nOPENWOP_X=old\n' > "$UE/revs/rev-1"; echo rev-1 > "$UE/serving"; echo rev-1 > "$UE/latest"; : > "$UE/calls"
+  printf 'OPENWOP_DEPLOY_SERVICE=svc\nOPENWOP_DEPLOY_PROJECT=p\nOPENWOP_DEPLOY_ACCOUNT=a@example.com\nOPENWOP_CERT_BUNDLE_ORIGIN=gs://b/evidence\n' > "$UE/deploy.env"; }
+UEX() { ( PATH="$UEBIN:$PATH" UE_DIR="$UE" UPDATE_ENV_ENV_FILE="$UE/deploy.env" bash "$ROOT/scripts/update-env.sh" "$@" >"$UE/out" 2>&1; echo $? ); }
+ue_reset; check "update-env: a new Ready revision with the same commit and the values → shifted by name" 0 "$(UEX OPENWOP_RATELIMIT_IP_READ_REQS_PER_MIN=1200)"
+[ "$(cat "$UE/serving")" = rev-2 ] && ok "  ...and rev-2 now serves (the 0%-traffic strand is fixed)" || bad "  ...but traffic stayed on $(cat "$UE/serving")"
+grep -q -- '--to-latest' "$UE/calls" && bad "  ...and it used --to-latest (resolves by serial)" || ok "  ...by NAME, never --to-latest"
+grep -q 'set-env-vars' "$UE/calls" && bad "  ...and it used --set-env-vars (wipes the config)" || ok "  ...merging with --update-env-vars, never --set-env-vars"
+ue_reset; check "update-env: a value containing a comma survives the gcloud delimiter" 0 "$(UEX 'OPENWOP_LIST=a,b,c')"
+grep -qx 'OPENWOP_LIST=a,b,c' "$UE/revs/rev-2" && ok "  ...verbatim on the revision" || bad "  ...but the revision holds: $(tail -n +2 "$UE/revs/rev-2" | tr '\n' ' ')"
+ue_reset; check "update-env: the new revision is NOT Ready → refuses, no shift" 1 "$(UE_NEW_READY=False UEX OPENWOP_X=new)"
+[ "$(cat "$UE/serving")" = rev-1 ] && ok "  ...rev-1 still serves" || bad "  ...but it shifted anyway"
+ue_reset; check "update-env: the new revision carries ANOTHER commit (a deploy in between) → refuses, no shift" 1 "$(UE_NEW_COMMIT=beef5678beef5678 UEX OPENWOP_X=new)"
+[ "$(cat "$UE/serving")" = rev-1 ] && ok "  ...rev-1 still serves" || bad "  ...but it shifted anyway"
+ue_reset; check "update-env: the new revision LACKS the value → refuses, no shift" 1 "$(UE_DROP=1 UEX OPENWOP_X=new)"
+ue_reset; check "update-env: no revision created and the value is NOT already set → refuses" 1 "$(UE_NOOP=1 UEX OPENWOP_X=new)"
+ue_reset; check "update-env: no revision created because the value IS already set → OK, nothing to shift" 0 "$(UE_NOOP=1 UEX OPENWOP_X=old)"
+ue_reset; check "update-env: an evidence cut holds its lock → refuses BEFORE updating" 1 "$(UE_LOCK="{\"holder\":\"x\",\"expiresAtEpoch\":$(( $(date +%s) + 600 ))}" UEX OPENWOP_X=new)"
+grep -q 'services update ' "$UE/calls" && bad "  ...but it ran services update anyway" || ok "  ...and never ran services update"
+ue_reset; check "update-env: refuses to write the provenance stamp OPENWOP_BUILD_COMMIT" 2 "$(UEX OPENWOP_BUILD_COMMIT=deadbeef)"
+ue_reset; check "update-env: --dry-run changes nothing" 0 "$(UEX --dry-run OPENWOP_X=new)"
+grep -q 'services update' "$UE/calls" && bad "  ...but --dry-run ran an update" || ok "  ...no update was run"
+# Other `services update` flags strand at 0% the same way, so they ride the same shift.
+ue_reset; check "update-env: a passthrough-only update (-- --update-secrets=…) is shifted by name too" 0 "$(UEX -- --update-secrets=FOO=foo:latest)"
+grep -q -- '--update-secrets=FOO=foo:latest' "$UE/calls" && ok "  ...the flag reached gcloud" || bad "  ...but the flag never reached gcloud"
+[ "$(cat "$UE/serving")" = rev-2 ] && ok "  ...and rev-2 serves" || bad "  ...but traffic stayed on $(cat "$UE/serving")"
+for refused in --set-env-vars=A=1 --clear-env-vars --env-vars-file=x.yaml --image=gcr.io/x --region=eu --update-env-vars=A=1; do
+  ue_reset; check "update-env: refuses passthrough $refused" 2 "$(UEX -- "$refused")"
+  grep -q 'services update' "$UE/calls" && bad "  ...but ran an update anyway"
+done
+
+echo "== publish-evidence: major 1 after the v1 sunset (CE-20) =="
+# STRUCTURAL for the run-time half (a real cut needs prod secrets): the skip must
+# key on the DISCOVERY's protocolVersions and only touch a DEFAULTED major set,
+# and the served check must have a route fallback for major 1. --print-config
+# is exercised behaviourally in test/whd18-scripts.test.ts.
+if grep -q 'ADVERTISES_V1="$(node' "$PE" && grep -q 'startsWith("1.")' "$PE"; then
+  ok "publish-evidence reads whether discovery advertises a 1.x protocol"
+else bad "publish-evidence: no protocolVersions check for major 1"; fi
+if awk '/if \[ "\$ADVERTISES_V1" = "0" \]; then/{f=1} f&&/MAJORS_DEFAULTED" -eq 1/{g=1} g&&/MAJORS=\(2\)/{print "y"; exit}' "$PE" | grep -q y; then
+  ok "  ...and drops major 1 ONLY from a defaulted set (an explicit --major 1 is still cut)"
+else bad "publish-evidence: major 1 is dropped without checking the set was defaulted"; fi
+if grep -q 'elif \[ "\$m" = 1 \] && \[ "\$ADVERTISES_V1" = "0" \]; then' "$PE"; then
+  ok "  ...and an explicit major-1 cut is checked at its route, not via a pointer that cannot exist"
+else bad "publish-evidence: the major-1 served check still needs a pointer the v1 sunset removed"; fi
+
+echo "== release-freeze.sh: one visible, reversible freeze of main (CE-17) =="
+# A STATEFUL fake gh: rulesets live in $FG/rulesets.json; `pr merge` is refused
+# while an ACTIVE freeze exists (what GitHub does), so a case can prove the
+# guarded merge lifted it and the trap put it back. Each case can fail: the
+# holder-merge case goes red if the toggle is dropped, the trap case goes red if
+# a failed merge leaves enforcement disabled, and the non-holder cases go red if
+# anyone can merge or thaw.
+FGBIN="$TMP/fgbin"; mkdir -p "$FGBIN"
+cat > "$FGBIN/gh" <<'FAKE'
+#!/usr/bin/env bash
+FG="$FG_DIR"; R="$FG/rulesets.json"; [ -f "$R" ] || echo '[]' > "$R"; echo "$*" >> "$FG/calls"
+js() { node -e "$1" "$R" "${@:2}"; }
+case "$*" in
+  "repo view"*) echo "o/r" ;;
+  "api repos/o/r/rulesets") cat "$R" ;;
+  "api -X POST repos/o/r/rulesets --input -")
+    [ -n "${FG_POST_FAIL:-}" ] && exit 1
+    body=$(cat); js 'const fs=require("fs");const a=JSON.parse(fs.readFileSync(process.argv[1]));const b=JSON.parse(process.argv[2]);a.push({id:a.length+101,name:b.name,enforcement:b.enforcement,rules:b.rules,conditions:b.conditions});fs.writeFileSync(process.argv[1],JSON.stringify(a))' "$body" ;;
+  "api -X PUT repos/o/r/rulesets/"*)
+    id="${4##*/}"; v="${6#enforcement=}"
+    js 'const fs=require("fs");const a=JSON.parse(fs.readFileSync(process.argv[1]));for(const r of a)if(String(r.id)===process.argv[2])r.enforcement=process.argv[3];fs.writeFileSync(process.argv[1],JSON.stringify(a))' "$id" "$v" ;;
+  "api -X DELETE repos/o/r/rulesets/"*)
+    id="${4##*/}"; js 'const fs=require("fs");const a=JSON.parse(fs.readFileSync(process.argv[1]));fs.writeFileSync(process.argv[1],JSON.stringify(a.filter(r=>String(r.id)!==process.argv[2])))' "$id" ;;
+  "pr merge "*)
+    [ -n "${FG_MERGE_FAIL:-}" ] && exit 1
+    active=$(js 'const a=JSON.parse(require("fs").readFileSync(process.argv[1]));process.stdout.write(a.some(r=>r.enforcement==="active")?"1":"")')
+    [ -n "$active" ] && { echo "blocked by ruleset" >&2; exit 1; }
+    touch "$FG/merged-$3" ;;
+  "pr view "*) [ -f "$FG/merged-$3" ] && echo MERGED || echo OPEN ;;
+esac
+exit 0
+FAKE
+chmod +x "$FGBIN/gh"
+fg_reset() { FG="$TMP/fg.$RANDOM$RANDOM"; mkdir -p "$FG"; echo '[]' > "$FG/rulesets.json"; : > "$FG/calls"; }
+RF() { ( PATH="$FGBIN:$PATH" FG_DIR="$FG" RELEASE_FREEZE_REPO=o/r bash "$ROOT/scripts/release-freeze.sh" "$@" >"$FG/out" 2>&1; echo $? ); }
+enforcement() { node -e 'const a=JSON.parse(require("fs").readFileSync(process.argv[1]));process.stdout.write(a.map(r=>r.enforcement).join(",")||"none")' "$FG/rulesets.json"; }
+fg_reset; check "release-freeze: status on an open main → 0" 0 "$(RF status)"
+check "release-freeze: freeze needs a --reason (other sessions read it)" 2 "$(RF freeze --holder ce)"
+check "release-freeze: freeze → created" 0 "$(RF freeze --holder ce --reason 'release c8a1 deploy')"
+check "release-freeze: status while frozen → 3" 3 "$(RF status)"
+grep -q 'FROZEN by ce until' "$FG/out" && ok "  ...and names the holder and expiry" || bad "  ...but does not name the holder: $(cat "$FG/out")"
+grep -q 'release c8a1 deploy' "$FG/out" && ok "  ...and the reason" || bad "  ...but not the reason"
+node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1]))[0];process.exit(r.rules[0].type==="update"&&r.conditions.ref_name.include[0]==="~DEFAULT_BRANCH"?0:1)' "$FG/rulesets.json" \
+  && ok "  ...as an 'update' rule on the default branch" || bad "  ...but the ruleset does not block updates to the default branch"
+check "release-freeze: a second freeze is refused" 1 "$(RF freeze --holder other --reason x)"
+check "release-freeze: a NON-holder cannot merge through it" 1 "$(RF merge 42 --holder other)"
+[ -f "$FG/merged-42" ] && bad "  ...but #42 merged anyway" || ok "  ...and #42 did not merge"
+check "release-freeze: the HOLDER's guarded merge lands" 0 "$(RF merge 42 --holder ce)"
+[ -f "$FG/merged-42" ] && ok "  ...#42 merged" || bad "  ...but #42 did not merge"
+[ "$(enforcement)" = active ] && ok "  ...and the freeze is ACTIVE again afterwards" || bad "  ...but enforcement is now $(enforcement)"
+check "release-freeze: a FAILED guarded merge → nonzero" 1 "$(FG_MERGE_FAIL=1 RF merge 43 --holder ce)"
+[ "$(enforcement)" = active ] && ok "  ...and the trap still re-enabled the freeze (main never left open)" || bad "  ...and main was LEFT OPEN: enforcement $(enforcement)"
+check "release-freeze: a non-holder cannot thaw" 1 "$(RF thaw --holder other)"
+check "release-freeze: --force thaws someone else's" 0 "$(RF thaw --holder other --force)"
+check "  ...and main is open again" 0 "$(RF status)"
+fg_reset; printf '[{"id":7,"enforcement":"active","name":"release-freeze | holder=gone | until=2020-01-01T00:00:00Z | reason=old"}]' > "$FG/rulesets.json"
+check "release-freeze: an expired freeze still reports frozen" 3 "$(RF status)"
+grep -q 'EXPIRED' "$FG/out" && ok "  ...flagged EXPIRED (the holder may be gone)" || bad "  ...but not flagged as expired"
+# merge-train refuses BEFORE its 45-minute gate when someone else holds the freeze.
+MT() { ( PATH="$FGBIN:$PATH" FG_DIR="$FG" RELEASE_FREEZE_REPO=o/r OPENWOP_FREEZE_HOLDER="${1:-}" OPENWOP_TRAIN_DIR="$TMP/no-train" \
+        bash "$ROOT/scripts/merge-train.sh" --dry-run 4242 >"$FG/mt" 2>&1; echo $? ); }
+check "merge-train: someone else's freeze → refuses" 1 "$(MT me)"
+grep -q 'Not gating a train that cannot merge' "$FG/mt" && ok "  ...before the gate, naming the freeze" || bad "  ...but not for the freeze: $(tail -2 "$FG/mt")"
 
 # Restore for anything downstream.
 shell_ref TESTAAAA

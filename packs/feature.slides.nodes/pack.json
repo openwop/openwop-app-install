@@ -1,6 +1,7 @@
 {
   "name": "feature.slides.nodes",
-  "version": "1.1.1",
+  "version": "1.1.3",
+  "kind": "node",
   "description": "Slides canvas node pack: the `render` producer plus the ADR 0328 P6 `slides.design` chain nodes (outline / draft / deepen / notes / audit) and `restyle`. AI nodes run through ctx.callAI (BYOK; provider/model from node config); outline/draft are the paid core, deepen/notes are soft-fail-loud enhancers, audit is deterministic (zero AI). Constrained typed JSON against the closed slide/block catalog, never executable code.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
@@ -12,7 +13,7 @@
     "presentation"
   ],
   "engines": {
-    "openwop": ">=1.0.0 <2.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "nodes": [
     {
@@ -20,7 +21,7 @@
       "version": "1.0.0",
       "label": "Render slide deck",
       "description": "Emit a `canvas.slides` artifact. Inputs: { title?, theme?, slides: [{ layout, title?, subtitle?, bullets?, attribution?, imageUrl?, notes? }] } (or `deck` as the whole object, or `source` as its JSON). Output: a typed canvas.slides artifact (contentTrust: model-authored structured JSON). Pure transform.",
-      "category": "transform",
+      "category": "data",
       "role": "action"
     },
     {
@@ -28,7 +29,7 @@
       "version": "1.1.0",
       "label": "Outline deck",
       "description": "ONE ctx.callAI call turning a `brief` into a deck outline, emitted as a SKELETON canvas.slides artifact (one section slide per planned slide, intent in notes) for the HITL outline gate, plus the outline object for the draft stage. Hard-fails on AI failure (the paid checkpoint).",
-      "category": "ai",
+      "category": "integration", "x-paletteCategory": "ai",
       "role": "action"
     },
     {
@@ -36,7 +37,7 @@
       "version": "1.1.0",
       "label": "Draft deck from outline",
       "description": "ONE ctx.callAI call expanding the approved `outline` into a full blocks-based deck against the closed block catalog, re-normalized through the same gate as render. Hard-fails on AI failure (the paid core).",
-      "category": "ai",
+      "category": "integration", "x-paletteCategory": "ai",
       "role": "action"
     },
     {
@@ -44,7 +45,7 @@
       "version": "1.1.0",
       "label": "Deepen thin slides",
       "description": "Per-slide regeneration (the ADR 0325 shape): enrich the thinnest blocks slides (config maxSlides<=4, minBlocks threshold), one ctx.callAI per slide, each re-normalized; failures keep the original and surface a loud `warning`.",
-      "category": "ai",
+      "category": "integration", "x-paletteCategory": "ai",
       "role": "action"
     },
     {
@@ -52,7 +53,7 @@
       "version": "1.1.0",
       "label": "Generate speaker notes",
       "description": "ONE ctx.callAI call writing speaker notes for slides missing them; the deck passes through unchanged on failure with a loud `warning`.",
-      "category": "ai",
+      "category": "integration", "x-paletteCategory": "ai",
       "role": "action"
     },
     {
@@ -60,7 +61,7 @@
       "version": "1.1.0",
       "label": "Audit deck (deterministic)",
       "description": "Zero-AI quality report: empty slides, duplicate titles, bullet/block overload, missing notes, deck-too-small, all-skipped, plus upstream deepen/notes warnings as findings. Outputs { report: { score, findings, summary } } and passes the artifact THROUGH for the review gate.",
-      "category": "transform",
+      "category": "data",
       "role": "action"
     },
     {
@@ -68,7 +69,7 @@
       "version": "1.1.0",
       "label": "Restyle deck (content-preserving)",
       "description": "ONE ctx.callAI call returning ONLY style fields (theme + per-slide variant/background/transition) applied onto the input deck \u2014 content preservation by construction; the model's content fields are never read.",
-      "category": "ai",
+      "category": "integration", "x-paletteCategory": "ai",
       "role": "action"
     }
   ],

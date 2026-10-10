@@ -1,13 +1,32 @@
 /**
  * Users & Authentication feature — service-level tests (ADR 0002, Phase 1).
  *
- * Verifies the identity invariants the ADR's architect findings make binding:
+ * Verifies the identity invariants the ADR's architect findings make binding,
+ * each with the sabotage (in `src/features/users/usersService.ts` unless noted)
+ * that turns it red:
  *   - upsertFromPrincipal is idempotent + STABLE across logins (finding C4):
- *     same (tenant, principal) => same userId; never a second record.
- *   - raw IdP groups are captured, NOT mapped to roles (finding H6 boundary).
+ *     same (tenant, principal) => same userId, profile refreshed.
+ *     Red: `if (!existing) {` → `if (true) {` in upsertFromPrincipal.
+ *   - ONE canonical user per personal tenant across auth channels (the
+ *     2026-06-12 identity-split incident: a pin written on the oidc identity
+ *     was invisible on the bound-cookie identity), and a pre-existing split
+ *     converges on the federated (oidc) row.
+ *     Red: the canonical-pointer hit made principal-keyed; the adoption sort
+ *     preferring non-oidc.
+ *   - raw IdP groups are captured verbatim (finding H6 boundary — no role
+ *     mapping here; the `User` type itself has no role field).
+ *   - concurrent first-access converges on ONE row (deterministic `userIdFor`).
+ *     The single-call idempotent return is witnessed by
+ *     `users-lifecycle-host-events.test.ts` ("nothing on the idempotent
+ *     return"), which goes red when that guard is deleted — a row-count check
+ *     here cannot, because the deterministic id overwrites the same row.
+ *   - USERS-3: the auth hot path point-reads the deterministic id (no scan);
+ *     the scan survives only for legacy randomUUID-era rows.
+ *   - the reconcilable-principal guard (ADR 0003: no transient `session:` user).
  *   - the lifecycle is FAIL-CLOSED (finding H5): disable => isActiveUser false;
  *     a re-login does NOT silently re-activate a disabled user.
- *   - tenant isolation: one tenant never sees another's users.
+ *   - tenant isolation: one tenant never sees another's users; updateUser
+ *     clears on null.
  * Mirrors test/host-ext-durability.test.ts: a real sqlite Storage wired via
  * initHostExtPersistence, since the store is read-through DurableCollection.
  */
@@ -90,17 +109,8 @@ describe('users service: identity reconciliation', () => {
   it('captures raw IdP groups verbatim and assigns no role (boundary H6)', async () => {
     const u = await upsertFromPrincipal({ tenantId: 't', principalId: 'saml:nameid-9', groups: ['Finance', 'Approvers'], source: 'saml' });
     expect(u.groups).toEqual(['Finance', 'Approvers']);
-    // The record carries identity + groups only — there is no `role`/`permissions`
-    // field on a User; that is ADR 0005's surface.
-    expect(u).not.toHaveProperty('role');
-    expect(u).not.toHaveProperty('permissions');
-  });
-
-  it('createUser is idempotent per (tenant, principal)', async () => {
-    const a = await createUser({ tenantId: 't', principalId: 'p1' });
-    const b = await createUser({ tenantId: 't', principalId: 'p1' });
-    expect(b.userId).toBe(a.userId);
-    expect(await listUsers('t')).toHaveLength(1);
+    // Persisted verbatim, not just echoed by the return value.
+    expect((await getUser(u.userId))!.groups).toEqual(['Finance', 'Approvers']);
   });
 
   // Concurrency: the unindexed get-then-put would race to two random ids. With a
@@ -144,7 +154,7 @@ describe('users service: getUserByPrincipal point-read (USERS-3)', () => {
     // Simulate a pre-deterministic-id record: same namespace, unrelated key —
     // exactly what a randomUUID-era row looks like in a real deploy.
     const legacyStore = new DurableCollection<User>('users:user', (u) => u.userId);
-    const now = new Date().toISOString();
+    const now = '2026-01-01T00:00:00.000Z'; // fixed: the timestamp is not under test
     const legacy: User = {
       userId: 'user:legacy-nondeterministic-0001',
       tenantId: 't',

@@ -4,7 +4,8 @@ import addFormats from 'ajv-formats';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildV2Advertisement } from '../src/routes/discovery.js';
+import { buildV2Advertisement, v2A2aRecord, v2McpRecord } from '../src/routes/discovery.js';
+import { _setV2ProjectA2aForTest } from '../src/host/a2aProfile.js';
 import { MAX_SUB_CHAIN_DEPTH } from '../src/host/workflowChainPackLoader.js';
 import type { AppConfig } from '../src/index.js';
 
@@ -83,12 +84,19 @@ describe('ADR 0670 — the published v2 advertisement satisfies the v2 schema', 
     // then executed for the first time and failed their v2 MUSTs. The negative
     // half below is the load-bearing one: re-adding any of the three would
     // restore a FALSE wire claim, and this is what notices.
+    //
+    // CORRECTED 2026-10-03 (ADR 0807/0808/0809): `compensation`, `forms` and `connections` moved to the positive half
+    // in the same commit that made `GET /runs/{runId}/compensation` real. This
+    // guard is what made that move deliberate rather than incidental.
     const doc = buildV2Advertisement(CONFIG) as Record<string, unknown>;
-    for (const f of ['feedback', 'workflowChainPacks']) {
+    for (const f of ['feedback', 'workflowChainPacks', 'compensation', 'forms', 'connections']) {
       expect(doc[f], `${f} must be declared at major 2`).toBeTruthy();
     }
-    for (const f of ['compensation', 'forms', 'connections']) {
-      expect(doc[f], `${f} FAILS its v2 scenario — declaring it is a false claim`).toBeUndefined();
+    // All three that failed in 2026-09 now pass their scenarios and are
+    // declared (ADR 0807/0808/0809); `sandbox` is the one honest opt-out left,
+    // and it is pinned here so its return is a deliberate act too.
+    for (const f of ['sandbox']) {
+      expect(doc[f], `${f} is an honest opt-out — no isolation model to declare`).toBeUndefined();
     }
   });
 
@@ -118,5 +126,31 @@ describe('ADR 0670 — the published v2 advertisement satisfies the v2 schema', 
     // leg keeps only what it was always for — the closed record's key set.
     expect(family['subChains']).toEqual({ maxDepth: MAX_SUB_CHAIN_DEPTH });
     expect(family['deferredParameters'], 'removed from the v2 schema by RFC 0192').toBeUndefined();
+  });
+
+  it('ADR 0858 P4 — the built a2a (major-2-only host) and mcp records validate', () => {
+    // Both records are built but withheld (`V2_PROJECT_A2A` / `V2_PROJECT_MCP`,
+    // behaviour gaps), so they are spliced in here: projecting one later must not
+    // be the first time anything validated it.
+    const saved = { r: process.env.OPENWOP_V1_RETIRED, a: process.env.OPENWOP_A2A_SERVER_ENABLED };
+    process.env.OPENWOP_A2A_SERVER_ENABLED = 'true';
+    _setV2ProjectA2aForTest(true);
+    try {
+      const a2a = v2A2aRecord('2.0', '2.1');
+      expect(a2a, 'the a2a record is built on a major-2-only host with the A2A server on').toBeTruthy();
+      const doc = { ...(buildV2Advertisement(CONFIG) as Record<string, unknown>), a2a: a2a! };
+      const withMcp = { ...doc, mcp: v2McpRecord('2.0', '2.1') };
+      const validate = validator();
+      const ok = validate(withMcp);
+      const errors = (validate.errors ?? []).map((e) => `${e.instancePath || '(root)'} ${e.message} ${JSON.stringify(e.params)}`);
+      expect(errors, errors.join('\n')).toEqual([]);
+      expect(ok).toBe(true);
+      // `interop.md` §"Legacy profiles are absent".
+      expect(JSON.stringify([(doc['a2a'] as Record<string, unknown>)['profiles'], withMcp.mcp['profiles']])).not.toContain('-legacy');
+    } finally {
+      _setV2ProjectA2aForTest(undefined);
+      if (saved.r === undefined) delete process.env.OPENWOP_V1_RETIRED; else process.env.OPENWOP_V1_RETIRED = saved.r;
+      if (saved.a === undefined) delete process.env.OPENWOP_A2A_SERVER_ENABLED; else process.env.OPENWOP_A2A_SERVER_ENABLED = saved.a;
+    }
   });
 });

@@ -221,6 +221,21 @@ async function createAd(accessToken, adAccountId, params, log) {
   return metaPost(accessToken, `act_${adAccountId}/ads`, body, log);
 }
 
+function mapSecretError(err) {
+  const code = err?.code;
+  // RFC 0228 — a major-2 host has no per-service `secret_*` rows. The same five
+  // states arrive as registered codes with `details.service: "secrets"`, and
+  // `details.reason` (optional) tells a revoked or expired credential from a
+  // missing one. Both spellings are checked so the pack runs on either major.
+  const reason = err?.details?.reason;
+  if (code === 'secret_revoked' || (code === 'credential_not_found' && reason === 'revoked')) return { code: 'CREDENTIAL_REVOKED', retryable: false };
+  if (code === 'secret_expired' || (code === 'credential_not_found' && reason === 'expired')) return { code: 'CREDENTIAL_EXPIRED', retryable: false };
+  if (code === 'secret_not_found' || code === 'credential_not_found') return { code: 'CREDENTIAL_NOT_FOUND', retryable: false };
+  if (code === 'secret_access_denied' || code === 'credential_forbidden') return { code: 'CREDENTIAL_ACCESS_DENIED', retryable: false };
+  if (code === 'secret_quota_exhausted' || code === 'rate_limited') return { code: 'CREDENTIAL_RESOLVE_FAILED', retryable: true };
+  return { code: 'CREDENTIAL_RESOLVE_FAILED', retryable: false };
+}
+
 export async function adsPublishMeta(ctx) {
   ensureSecretsResolve(ctx);
   const log = makeLog(ctx);
@@ -289,13 +304,9 @@ export async function adsPublishMeta(ctx) {
     return {
       status: 'error',
       error: {
-        code: err?.code === 'secret_not_found' ? 'CREDENTIAL_NOT_FOUND'
-          : err?.code === 'secret_access_denied' ? 'CREDENTIAL_ACCESS_DENIED'
-          : err?.code === 'secret_expired' ? 'CREDENTIAL_EXPIRED'
-          : err?.code === 'secret_revoked' ? 'CREDENTIAL_REVOKED'
-          : 'CREDENTIAL_RESOLVE_FAILED',
+        code: mapSecretError(err).code,
         message: String(err?.message ?? err),
-        retryable: err?.code === 'secret_quota_exhausted',
+        retryable: mapSecretError(err).retryable,
       },
     };
   }

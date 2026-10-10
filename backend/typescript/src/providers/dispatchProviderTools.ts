@@ -8,9 +8,11 @@
  * caller (agent loop / pack) orchestrates execution + the next round.
  */
 
+import { toGeminiFunctionDeclaration } from './geminiSchema.js';
 import type { ContentPart } from './dispatch.js';
 import type { ToolDef, ToolsRoundRequest, ToolsRoundResult } from './dispatchAnthropicTools.js';
 import { createLogger } from '../observability/logger.js';
+import { ThinkBlockSplitter } from './thinkBlockSplitter.js';
 
 const log = createLogger('providers.tools');
 
@@ -81,28 +83,10 @@ export function toolNameMap(tools: readonly ToolDef[]): Map<string, string> {
   return m;
 }
 
-/** Keywords Gemini's FunctionDeclaration parameter schema accepts (an OpenAPI
- *  subset). Everything else (`additionalProperties`, `minLength`, `minimum`,
- *  `$schema`, …) is dropped — Gemini rejects the whole request otherwise. */
-const GEMINI_SCHEMA_KEYS = new Set(['type', 'format', 'description', 'nullable', 'enum', 'items', 'properties', 'required', 'minItems', 'maxItems']);
-
-/** Recursively project a JSON Schema onto Gemini's accepted subset. */
-export function toGeminiSchema(schema: unknown): unknown {
-  if (Array.isArray(schema)) return schema.map(toGeminiSchema);
-  if (!schema || typeof schema !== 'object') return schema;
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(schema as Record<string, unknown>)) {
-    if (!GEMINI_SCHEMA_KEYS.has(k)) continue; // drop additionalProperties / minLength / $schema / …
-    if (k === 'properties' && v && typeof v === 'object') {
-      out.properties = Object.fromEntries(Object.entries(v as Record<string, unknown>).map(([pk, pv]) => [pk, toGeminiSchema(pv)]));
-    } else if (k === 'items') {
-      out.items = toGeminiSchema(v);
-    } else {
-      out[k] = v;
-    }
-  }
-  return out;
-}
+/** The Gemini schema projection lives in ONE module (`geminiSchema.ts`) shared by
+ *  generateContent tool rounds and both Gemini Live egress paths. Re-exported here
+ *  for the existing import sites. */
+export { toGeminiSchema } from './geminiSchema.js';
 
 // ── OpenAI (chat completions, function tools) ──────────────────────────────
 
@@ -120,18 +104,44 @@ const MINIMAX_DEFAULT_BASE_URL = 'https://api.minimax.io/v1';
 /** One tool-calling round against an OpenAI-compatible Chat Completions endpoint
  *  (OpenAI, MiniMax). The observe→act loop lives in the caller (`runChatToolLoop`);
  *  this is a SINGLE request that returns the assistant text + any tool calls. */
+/** The visible answer of a completed (non-streamed) round, reasoning removed. */
+function stripThinkBlocks(content: string): string {
+  if (!content.includes('<think>') && !content.includes('</think>')) return content;
+  const splitter = new ThinkBlockSplitter();
+  const a = splitter.push(content);
+  const b = splitter.flush();
+  // An ORPHAN closing tag is not reasoning and not an answer. MiniMax-M3 emits
+  // one after a closed block on tool-call rounds; the bare `</think>` then
+  // became the round's visible text, was stored as the assistant message, and
+  // surfaced as the chat bubble when the turn ended there (measured: 8 visible
+  // chars on 6 of 21 rounds, ADR 0773 G-10b, 2026-10-01).
+  return (a.visible + b.visible).replace(/<\/think>/g, '').trim();
+}
+
+/**
+ * Output budget for one tool round when the caller sets none. A reasoning model
+ * spends output tokens THINKING before it acts, so 4096 let MiniMax-M3 end a
+ * round mid-thought with no tool call and no answer (measured on the managed
+ * tier, ADR 0773 G-10b, 2026-09-30). Non-reasoning providers keep 4096.
+ */
+const REASONING_TOOLS_ROUND_MAX_TOKENS = 16_384;
+function defaultToolsRoundMaxTokens(provider: string): number {
+  return provider === 'minimax' ? REASONING_TOOLS_ROUND_MAX_TOKENS : 4096;
+}
+
 async function openAICompatibleToolsRound(
   req: ToolsRoundRequest,
   endpoint: string,
   errPrefix: string,
 ): Promise<ToolsRoundResult> {
   const names = toolNameMap(req.tools); // sanitized → original
+  const maxTokens = req.maxTokens ?? defaultToolsRoundMaxTokens(errPrefix);
   const res = await fetch(endpoint, {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: `Bearer ${req.apiKey}` },
     body: JSON.stringify({
       model: req.model,
-      max_tokens: req.maxTokens ?? 4096,
+      max_tokens: maxTokens,
       messages: req.messages.map((m) => ({ role: m.role, content: contentToText(m.content) })),
       tools: req.tools.map((t: ToolDef) => ({
         type: 'function',
@@ -161,7 +171,15 @@ async function openAICompatibleToolsRound(
   let toolUses = (choice?.message?.tool_calls ?? [])
     .filter((c) => c.type === 'function')
     .map((c) => ({ id: c.id, name: names.get(c.function.name) ?? c.function.name, input: safeParseArgs(c.function.arguments) }));
-  let text = choice?.message?.content ?? '';
+  // Reasoning models (MiniMax) put their chain-of-thought INLINE as
+  // `<think>…</think>`. The plain-chat path splits it off (dispatch.ts runs a
+  // ThinkBlockSplitter); this tool round did not, so the whole reasoning reached
+  // the visible answer (measured: a 17k-char <think> dump in the builder's Pair
+  // chat, ADR 0773 G-10b, 2026-09-30). Split FIRST, so a tool call that appears
+  // only inside a thought is never parsed and run below.
+  const rawContent = choice?.message?.content ?? '';
+  const structuredToolCalls = toolUses.length;
+  let text = stripThinkBlocks(rawContent);
   // MiniMax-M sometimes returns the tool call as inline TEXT instead of structured
   // `tool_calls` (it leaks `<invoke …>` markup into the bubble + nothing executes). When
   // we see that shape with no structured calls, parse + strip it so it runs like normal.
@@ -179,6 +197,23 @@ async function openAICompatibleToolsRound(
       log.info('inline_tool_call_parsed', { provider: errPrefix, count: toolUses.length, names: toolUses.map((t) => t.name) });
     }
   }
+  // Why a round ended, in COUNTS only (never content). Without this a turn that
+  // announces a tool call and then stops is undiagnosable: a model stop, an output
+  // budget cut (`length`) and a call the parser never saw all look the same from
+  // the chat (measured: ADR 0773 G-10b cases 2 and 4, 2026-10-01).
+  log.info('tools_round_outcome', {
+    provider: errPrefix,
+    finishReason: choice?.finish_reason ?? null,
+    maxTokens,
+    outputTokens: data.usage?.completion_tokens ?? null,
+    structuredToolCalls,
+    inlineToolCalls: toolUses.length - structuredToolCalls,
+    rawChars: rawContent.length,
+    visibleChars: text.length,
+    // A call that lives only inside a thought is dropped on purpose (see above);
+    // this counts how often that is what happened.
+    invokeMarkupInRaw: /<invoke\s+name=|<tool_call>/i.test(rawContent),
+  });
   return {
     text,
     toolUses,
@@ -285,10 +320,10 @@ export async function dispatchGoogleToolsRound(req: ToolsRoundRequest): Promise<
         // grounding-only round with no host tools.
         ...(req.tools.length > 0
           ? [{
-              functionDeclarations: req.tools.map((t: ToolDef) => ({
+              functionDeclarations: req.tools.map((t: ToolDef) => toGeminiFunctionDeclaration({
                 name: sanitizeToolName(t.name),
                 description: t.description,
-                parameters: toGeminiSchema(t.inputSchema),
+                parameters: t.inputSchema,
               })),
             }]
           : []),

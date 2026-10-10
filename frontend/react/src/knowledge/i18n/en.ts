@@ -29,7 +29,7 @@ export const messages = {
   docCount_other: '{{count}} docs',
   unbind: 'Unbind',
   externalUnverified: 'External · unverified',
-  externalUnverifiedTitle: 'Imported from an external source — treated as untrusted (ADR 0038 §C).',
+  externalUnverifiedTitle: 'Imported from an external source — treated as untrusted.',
   removeDocument: 'Remove document',
   // CollectionCard — ingest form
   documentTitleLabel: 'Document title',

@@ -30,6 +30,10 @@ import { formatNumber, formatDateTime } from '../i18n/format.js';
 interface Props {
   events: readonly RunEventDoc[];
   snapshot?: RunSnapshot | null;
+  /** The open interrupt's kind, from the host's open-interrupt read. ADR 0812:
+   *  the major-2 snapshot is closed and carries no `interrupt`, so the page that
+   *  already lists open interrupts passes the kind down. */
+  openInterruptKind?: string | undefined;
 }
 
 export interface ModelUse {
@@ -77,6 +81,7 @@ function asRecord(v: unknown): Record<string, unknown> {
 export function summarizeProvenance(
   events: readonly RunEventDoc[],
   snapshot?: RunSnapshot | null,
+  openInterruptKindIn?: string,
 ): ProvenanceSummary {
   const models = new Map<string, ModelUse>();
   let substituted = false;
@@ -157,7 +162,7 @@ export function summarizeProvenance(
     ? Math.max(0, new Date(completedAt).getTime() - new Date(startedAt).getTime())
     : undefined;
 
-  const openInterruptKind = snapshot?.interrupt?.kind;
+  const openInterruptKind = openInterruptKindIn ?? snapshot?.interrupt?.kind;
   if (openInterruptKind) interruptKinds.add(openInterruptKind);
 
   return {
@@ -214,9 +219,9 @@ function jsonPreview(v: unknown): string {
   }
 }
 
-export function RunProvenancePanel({ events, snapshot }: Props) {
+export function RunProvenancePanel({ events, snapshot, openInterruptKind }: Props) {
   const { t } = useTranslation('runs');
-  const p = useMemo(() => summarizeProvenance(events, snapshot), [events, snapshot]);
+  const p = useMemo(() => summarizeProvenance(events, snapshot, openInterruptKind), [events, snapshot, openInterruptKind]);
   if (p.eventCount === 0) return null;
 
   const duration = fmtDuration(p.durationMs);

@@ -15,6 +15,7 @@ export const CHANNELS_LIST_TOOL_ID = 'openwop:channels.list';
 export function registerChannelsAgentTools(): void {
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: CHANNELS_LIST_TOOL_ID,
       description:

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/core.openwop.agents.sales-coach/1.0.0/sales-coach.task.schema.json",
+  "$id": "https://packs.openwop.dev/core.openwop.agents.sales-coach/1.0.1/sales-coach.task.schema.json",
   "title": "SalesCoachTask",
   "type": "object",
   "required": [

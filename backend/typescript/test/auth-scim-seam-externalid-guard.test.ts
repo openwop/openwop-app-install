@@ -17,6 +17,15 @@
  *     the open posture the RFC 0159 scenario drives (stated residual);
  *   - with a bearer configured, the existing `requireScimBearer` 401s a caller
  *     that does not present it.
+ *
+ * The deactivate case pre-provisions the victim in the link realm, so the "no
+ * deny row" assertion is reachable: without the guard the deny WOULD be written.
+ *
+ * Sabotage that turns it red (`authScim.ts`): `requireBearerForLinkRealmWrite`'s
+ * `if (!externalId || process.env.OPENWOP_SCIM_BEARER || !samlConfigured()) return;`
+ * → `return;` ⇒ both anonymous cases succeed; dropping `|| !samlConfigured()` ⇒ the
+ * pure-conformance case 403s; deleting `if (process.env.OPENWOP_SCIM_BEARER)
+ * requireScimBearer(req);` ⇒ the bearer case's bearer-less call 201s.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import express, { type Express } from 'express';
@@ -30,6 +39,7 @@ import { registerScimAuthRoutes } from '../src/routes/authScim.js';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
 import { __resetHostExtPersistence, initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { __resetUsersStore, getScimUserByExternalId } from '../src/features/users/usersService.js';
+import { provisionUser } from '../src/host/auth/scimProvisioningService.js';
 import { __resetSubjectLinkStore, isLinkedSubjectDenied } from '../src/host/auth/subjectLinkService.js';
 
 const REALM = 'scim-guard';
@@ -37,15 +47,17 @@ const SAML_ENV = {
   OPENWOP_SAML_IDP_SSO_URL: 'https://example.okta.com/app/abc/sso/saml',
   OPENWOP_SAML_IDP_CERT: 'MIIBdummybase64certbodywithoutpemheaders0000000000',
   OPENWOP_SAML_SP_ENTITY_ID: 'https://app.openwop.dev/saml',
-  OPENWOP_SAML_ACS_URL: 'https://app.openwop.dev/api/v1/host/openwop-app/auth/saml/sso/acs',
+  OPENWOP_SAML_ACS_URL: 'https://app.openwop.dev/api/host/openwop-app/auth/saml/sso/acs',
   OPENWOP_SAML_TENANT: REALM,
 };
 const dir = mkdtempSync(join(tmpdir(), 'owop-scim-guard-'));
+const ENV_KEYS = ['OPENWOP_SESSION_SECRET', 'OPENWOP_TEST_SCIM_URL', 'OPENWOP_SCIM_TENANT', 'OPENWOP_SCIM_BEARER', 'OPENWOP_AUTH_ENFORCE_BEARER', ...Object.keys(SAML_ENV)];
+const SAVED_ENV = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
 let server: http.Server;
 let port: number;
 
 const seam = (body: unknown, bearer?: string, cookie?: string): Promise<Response> =>
-  fetch(`http://127.0.0.1:${port}/v1/host/openwop-app/auth/scim/provision`, {
+  fetch(`http://127.0.0.1:${port}/host/openwop-app/auth/scim/provision`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', ...(bearer ? { authorization: `Bearer ${bearer}` } : {}), ...(cookie ? { cookie } : {}) },
     body: JSON.stringify(body),
@@ -75,7 +87,10 @@ beforeAll(async () => {
 afterAll(async () => {
   await new Promise<void>((r) => server.close(() => r()));
   rmSync(dir, { recursive: true, force: true });
-  for (const k of ['OPENWOP_TEST_SCIM_URL', 'OPENWOP_SCIM_TENANT', 'OPENWOP_SCIM_BEARER', ...Object.keys(SAML_ENV)]) delete process.env[k];
+  for (const k of ENV_KEYS) {
+    if (SAVED_ENV[k] === undefined) delete process.env[k];
+    else process.env[k] = SAVED_ENV[k];
+  }
 });
 beforeEach(async () => {
   __resetHostExtPersistence();
@@ -96,10 +111,15 @@ describe('USERS-14 — externalId-addressed seam ops on a host with a production
     expect(await getScimUserByExternalId(REALM, 'ext-victim')).toBeNull();
   });
 
-  it('an anonymous caller cannot deny a NameID via deactivate-user by externalId (403, no deny row)', async () => {
+  it('an anonymous caller cannot deny a NameID via deactivate-user by externalId (403, no deny row, victim still active)', async () => {
+    // The victim REALLY exists in the link realm, so an unguarded deactivate would
+    // write the deny and disable the row — making both assertions below reachable.
+    await provisionUser({ tenantId: REALM, userName: 'victim@acme.test', externalId: 'ext-victim' });
     const res = await seam({ scimUrl: 'x', op: 'deactivate-user', externalId: 'ext-victim' });
     expect(res.status).toBe(403);
+    expect(((await res.json()) as { details?: { reason?: string } }).details?.reason).toBe('scim_bearer_required');
     expect(await isLinkedSubjectDenied(REALM, 'ext-victim')).toBe(false);
+    expect((await getScimUserByExternalId(REALM, 'ext-victim'))!.status).toBe('active');
   });
 
   it('a plain userName-addressed op (caller tenant, no realm write) still works', async () => {
@@ -112,7 +132,10 @@ describe('USERS-14 — externalId-addressed seam ops on a host with a production
   it('with a bearer configured, the externalId op is reachable ONLY by presenting it', async () => {
     const cookie = await anonCookie();
     process.env.OPENWOP_SCIM_BEARER = 'guard-bearer-0123456789abcdef';
-    expect((await seam({ scimUrl: 'x', op: 'create-user', externalId: 'ext-ok', userName: 'ok@acme.test' }, undefined, cookie)).status).toBe(401);
+    const refused = await seam({ scimUrl: 'x', op: 'create-user', externalId: 'ext-ok', userName: 'ok@acme.test' }, undefined, cookie);
+    expect(refused.status).toBe(401);
+    expect(((await refused.json()) as { error?: string }).error).toBe('unauthenticated');
+    expect(await getScimUserByExternalId(REALM, 'ext-ok')).toBeNull();
     expect((await seam({ scimUrl: 'x', op: 'create-user', externalId: 'ext-ok', userName: 'ok@acme.test' }, 'guard-bearer-0123456789abcdef', cookie)).status).toBe(201);
     expect(await getScimUserByExternalId(REALM, 'ext-ok')).not.toBeNull();
   });

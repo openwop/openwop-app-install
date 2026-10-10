@@ -81,5 +81,5 @@ export const messages = {
   colActor: 'Por',
 
   confirmApplyTitle: 'Aplicar este snapshot à configuração ao vivo?',
-  confirmApplyBody: 'Isto SOBRESCREVE a configuração ao vivo do workspace com o snapshot {{hash}}. Alternâncias de recursos fora do snapshot são limpas. Ponteiros de publicação e versões publicadas de fluxos de trabalho são somente-aplicação: entradas ausentes do snapshot mantêm seu valor ao vivo atual (o desvio mostrará a diferença).',
+  confirmApplyBody: 'Isto SOBRESCREVE a configuração ao vivo do workspace com o snapshot {{hash}}. Ponteiros de publicação e versões publicadas de fluxos de trabalho são somente-aplicação: entradas ausentes do snapshot mantêm seu valor ao vivo atual (o desvio mostrará a diferença). As alternâncias de recursos são gerenciadas pelo operador do host e não fazem parte dos snapshots.',
 } as const;

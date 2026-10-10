@@ -93,22 +93,22 @@ describe('catalog CRUD + system metrics', () => {
 
 describe('runMetric — evaluation', () => {
   it('sums kernel deal amounts, org-scoped and tenant-isolated', async () => {
-    const r = await runMetric(T1, 'sys-pipeline-value', { orgId: 'org-1' });
+    const r = await runMetric(T1, 'sys-pipeline-value', { orgId: 'org-1' }, undefined);
     expect(r.points.length).toBeGreaterThanOrEqual(1);
     const total = r.points.reduce((s, p) => s + p.value, 0);
     expect(total).toBe(4000); // 1000 + 3000 — never the foreign tenant's 999999
   });
   it('an org with no rows aggregates to nothing', async () => {
-    const r = await runMetric(T1, 'sys-pipeline-value', { orgId: 'org-empty' });
+    const r = await runMetric(T1, 'sys-pipeline-value', { orgId: 'org-empty' }, undefined);
     expect(r.points).toEqual([]);
   });
   it('buckets by month over the timeField', async () => {
-    const r = await runMetric(T1, 'sys-pipeline-value', { orgId: 'org-1', bucket: 'month' });
+    const r = await runMetric(T1, 'sys-pipeline-value', { orgId: 'org-1', bucket: 'month' }, undefined);
     expect(r.bucket).toBe('month');
     expect(r.points).toEqual([{ key: '2026-07', value: 4000, n: 2 }]);
   });
   it('range params filter via the timeField', async () => {
-    const r = await runMetric(T1, 'sys-pipeline-value', { orgId: 'org-1', since: '2026-07-10' });
+    const r = await runMetric(T1, 'sys-pipeline-value', { orgId: 'org-1', since: '2026-07-10' }, undefined);
     expect(r.points.reduce((s, p) => s + p.value, 0)).toBe(3000); // Beta only
   });
   it('evaluates user-type metrics with stored filters + groupBy over queryEntities', async () => {
@@ -116,17 +116,17 @@ describe('runMetric — evaluation', () => {
       title: 'High ticket hours', entityType: 'ticket', aggregate: 'sum', field: 'hours',
       filters: [{ key: 'severity', op: 'eq', value: 'high' }], groupBy: 'severity',
     });
-    const r = await runMetric(T1, 'high-ticket-hours', { orgId: 'org-1' });
+    const r = await runMetric(T1, 'high-ticket-hours', { orgId: 'org-1' }, undefined);
     expect(r.points).toEqual([{ key: 'high', value: 10, n: 2 }]); // 4 + 6, ticket 'a' filtered out
   });
   it('rejects range/bucket runs on a metric without a timeField, and groupBy+bucket together', async () => {
-    await expect(runMetric(T1, 'sys-company-count', { orgId: 'org-1', bucket: 'month' }))
+    await expect(runMetric(T1, 'sys-company-count', { orgId: 'org-1', bucket: 'month' }, undefined))
       .rejects.toMatchObject({ code: 'validation_error' });
-    await expect(runMetric(T1, 'sys-pipeline-value', { orgId: 'org-1', bucket: 'month', groupBy: 'stage_id' }))
+    await expect(runMetric(T1, 'sys-pipeline-value', { orgId: 'org-1', bucket: 'month', groupBy: 'stage_id' }, undefined))
       .rejects.toMatchObject({ code: 'validation_error' });
   });
   it('a kernel type never minted for the tenant returns an honest empty result', async () => {
-    const r = await runMetric('tenant-bi-fresh', 'sys-product-count', { orgId: 'org-1' });
+    const r = await runMetric('tenant-bi-fresh', 'sys-product-count', { orgId: 'org-1' }, undefined);
     expect(r.points).toEqual([]);
     expect(r.totalRows).toBe(0);
   });
@@ -154,6 +154,12 @@ describe('ADR 0417 P2 — chat tools (toggle-gated, fail-empty)', () => {
     const d = getToggleDefault('bi');
     expect(d).toBeTruthy();
     await saveConfig({ ...d!, status: 'on' }, 'test');
+    // BI-SCOPE-1 — the tool now applies the route's org gate, so the caller must
+    // actually READ org-1 (this test used to pass for a non-member, which pinned
+    // the defect). Make u1 a reader of a real org-1.
+    const { createOrg, createMember, getOrg } = await import('../src/host/accessControlService.js');
+    if (!(await getOrg('org-1'))) await createOrg({ tenantId: T1, createdBy: 'u1', name: 'Org 1', orgId: 'org-1' });
+    await createMember({ orgId: 'org-1', tenantId: T1, displayName: 'U1', subject: 'u1', roles: ['viewer'] });
     const ok = await exec('openwop:bi.run-metric', { metricId: 'sys-pipeline-value', orgId: 'org-1' }, { tenantId: T1, actingUserId: 'u1' });
     const parsed = JSON.parse(ok.content) as { result: { points: Array<{ value: number }> } };
     expect(parsed.result.points.reduce((s, p) => s + p.value, 0)).toBe(4000);

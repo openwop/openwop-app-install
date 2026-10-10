@@ -150,6 +150,9 @@ export async function finalizeFromBrief(tenantId: string, brief: CampaignBrief, 
   await campaigns.put(campaign);
   await snapshotCampaign(campaign, createdBy); // pin the finalized revision
   recordCampaignAction('finalized', campaign, createdBy, { refinalized: Boolean(existing) });
+  // ADR 0852 D1 — the campaign's project (create-or-return; fail-soft). Dynamic
+  // import: campaignProject.ts reads campaigns through this module.
+  await (await import('./campaignProject.js')).linkProjectOnFinalize(campaign, createdBy);
   return campaign;
 }
 

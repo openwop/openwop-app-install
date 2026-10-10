@@ -29,8 +29,9 @@
 
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
 import { A2A_JSONRPC_PATH } from '../host/a2aCard.js';
+import { VENDOR_ROOT } from './protocolVersion.js';
 import { errorData10 } from '../host/a2aCodec10.js';
-import { A2A_VERSION_HEADER, dispositionForA2AVersionHeader } from '../host/a2aProfile.js';
+import { A2A_VERSION_HEADER, LEGACY_A2A_PROTOCOL_VERSION, codecVersionFor, dispositionForA2AVersionHeader, type A2AVersionDisposition } from '../host/a2aProfile.js';
 
 /** The domain of the ErrorInfo a host-level refusal carries (not an A2A error). */
 export const OPENWOP_ERROR_DOMAIN = 'openwop.dev';
@@ -80,14 +81,22 @@ export function toA2aJsonRpcRefusal(
   };
 }
 
+function headerlessLegacy(d: A2AVersionDisposition): boolean {
+  return d.kind === 'absent' && codecVersionFor(d) === LEGACY_A2A_PROTOCOL_VERSION;
+}
+
 export function a2aInterfaceErrorsMiddleware(): RequestHandler {
   return (req: Request, res: Response, next: NextFunction): void => {
     const path = req.url.split('?')[0] ?? req.url;
     if (
       req.method !== 'POST' ||
-      path !== A2A_JSONRPC_PATH ||
+      // Mounted BEFORE the version middleware, so it sees the inbound spelling:
+      // the advertised vendor path, or its `/v1` twin until the ADR 0669 cut.
+      (path !== A2A_JSONRPC_PATH && path !== `/v1${VENDOR_ROOT}/a2a`) ||  // ADR 0812 KEEP: runs BEFORE the negotiator, so it sees the inbound /v1 spelling; the 410 that answers it keeps its A2A shape
       process.env.OPENWOP_A2A_SERVER_ENABLED !== 'true' ||
-      dispositionForA2AVersionHeader(req.headers[A2A_VERSION_HEADER]).kind === 'absent'
+      // A header-less request is a 0.3 one only while 0.3 is served; on a
+      // major-2-only host it is the 1.0 interface (ADR 0858 P4).
+      headerlessLegacy(dispositionForA2AVersionHeader(req.headers[A2A_VERSION_HEADER]))
     ) {
       next();
       return;

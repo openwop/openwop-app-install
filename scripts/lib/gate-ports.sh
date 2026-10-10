@@ -77,3 +77,25 @@ gate_assert_port_owned_by() {
   done
   return 0
 }
+
+# Every descendant of $1 (depth-first), then $1 itself, one PID per line.
+gate_tree_pids() {
+  local c
+  for c in $(pgrep -P "$1" 2>/dev/null); do gate_tree_pids "$c"; done
+  printf '%s\n' "$1"
+}
+
+# SIGTERM a process and its WHOLE subtree (ADR 0863). The tree is snapshotted
+# before any signal is sent, because a child whose parent dies first is
+# re-parented to init and drops out of `pgrep -P`.
+#
+# This matters because `pkill -P <wrapper>` reaches only direct children, so it
+# leaves Vite behind on Linux. There `npm run dev` runs its script through
+# `sh -c`, which adds a level between npm and Vite and does not forward npm's
+# SIGTERM. The leak did not happen on macOS, where /bin/sh execs the last command
+# in place, so it surfaced only on the ADR 0863 Linux pilot.
+gate_kill_tree() {
+  local pids; pids="$(gate_tree_pids "$1")"
+  # shellcheck disable=SC2086
+  kill $pids 2>/dev/null || true
+}

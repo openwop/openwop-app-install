@@ -26,10 +26,14 @@ export interface ConversationResolve {
    *  open-time default). The conversation resume value is host-internal + not
    *  strictly validated, so this is not a wire-shape change. */
   webSearch?: unknown;
-  /** Per-EXCHANGE permission mode (ADR 0150). `'safe'` (default) gates the high-blast-radius
-   *  tools behind the firewall's approval card; `'bypass'` lets the agent act without asking
-   *  (the user pre-authorized via the composer toolbar). Host-internal resume value (like
-   *  `webSearch`) — not a wire-shape change; rides the run log ⇒ replay-deterministic. */
+  /** Per-EXCHANGE permission mode (ADR 0150). `'safe'` (default) holds the high-blast-radius
+   *  tools for an approval in the conversation's ledger; `'bypass'` skips those safe-mode
+   *  asks — ONLY when the caller is the run's acting principal (ADR 0834 D3; anyone else
+   *  runs `safe`), and never a workspace/platform ask (D2). Host-internal resume value (like
+   *  `webSearch`) — not a wire-shape change. CORRECTED (ADR 0834 D7): this said the mode
+   *  "rides the run log ⇒ replay-deterministic"; chat exchanges arrive over HTTP and are not
+   *  replayed. What is deterministic is a recorded run's tool VERDICTS (`agent.toolReturned`),
+   *  which replay verbatim; a `:fork`'s next turn takes the mode its new request sends. */
   permissionMode?: unknown;
 }
 

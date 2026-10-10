@@ -122,6 +122,7 @@ export const messages = {
   // ADR 0621 D5 — motif affiché dans la fenêtre de connexion après une déconnexion forcée
   sessionRefused_account_disabled: 'Votre compte a été désactivé par un administrateur : vous avez donc été déconnecté. Contactez l’administrateur de votre espace de travail pour rétablir l’accès.',
   sessionRefused_account_erased: 'Votre compte a été supprimé : vous avez donc été déconnecté. Il ne peut plus servir à se connecter.',
-  sessionRefused_session_revoked: 'Vous avez été déconnecté sur tous vos appareils. Reconnectez-vous pour continuer.',
+  sessionRefused_session_revoked: 'Vous avez été déconnecté. Reconnectez-vous pour continuer.',
+  sessionRefused_session_expired: 'Votre session a pris fin : vous avez été déconnecté. Reconnectez-vous pour continuer.',
   sessionRefused_self_revoked: 'Vous vous êtes déconnecté de tous vos appareils, celui-ci compris. Reconnectez-vous pour continuer.',
 } as const;

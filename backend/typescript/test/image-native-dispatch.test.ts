@@ -101,7 +101,7 @@ describe('callImageGenerator native path (integration)', () => {
     globalThis.fetch = fetchMock as unknown as typeof fetch;
     const r = await adapter.callImageGenerator({ prompt: 'a blue circle', provider: 'openai', credentialRef: 'my-openai', n: 1 });
     expect(r.images).toHaveLength(1);
-    expect(r.images[0]!.url).toMatch(/^\/v1\/host|^http/); // a host media serve ref, not raw base64
+    expect(r.images[0]!.url).toMatch(/^\/host\/openwop-app\/assets\/|^http/); // a host media serve ref, not raw base64
     expect(r.usage).toMatchObject({ images: 1 });
     expect(fetchMock).toHaveBeenCalledOnce();
     expect((fetchMock.mock.calls[0] as [string])[0]).toContain('api.openai.com');

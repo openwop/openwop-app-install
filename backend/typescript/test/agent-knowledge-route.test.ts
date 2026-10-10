@@ -58,7 +58,7 @@ function client(): Client {
 
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
 async function signup(c: Client, opts: { tenantId?: string } = {}): Promise<{ userId: string }> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail('ak'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
+  const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail('ak'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
@@ -66,9 +66,9 @@ async function signup(c: Client, opts: { tenantId?: string } = {}): Promise<{ us
 async function ownerWithAgent(): Promise<{ owner: Client; rosterId: string; orgId: string }> {
   const owner = client();
   await signup(owner);
-  const r = await owner.post('/v1/host/openwop-app/roster', { persona: 'Researcher', agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
+  const r = await owner.post('/host/openwop-app/roster', { persona: 'Researcher', agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return { owner, rosterId: r.body.rosterId, orgId: org.body.orgId };
 }
@@ -80,15 +80,15 @@ async function ownerMemberAgent(role: string): Promise<{ owner: Client; member: 
   await signup(owner, { tenantId });
   const member = client();
   const memberUser = await signup(member, { tenantId });
-  const r = await owner.post('/v1/host/openwop-app/roster', { persona: 'R', agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const r = await owner.post('/host/openwop-app/roster', { persona: 'R', agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   const orgId = org.body.orgId;
-  const add = await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: [role] });
+  const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: [role] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
   return { owner, member, rosterId: r.body.rosterId, orgId };
 }
 
-const k = (rosterId: string, suffix = ''): string => `/v1/host/openwop-app/agents/${encodeURIComponent(rosterId)}/knowledge${suffix}`;
+const k = (rosterId: string, suffix = ''): string => `/host/openwop-app/agents/${encodeURIComponent(rosterId)}/knowledge${suffix}`;
 const FELINE = 'Feline companions: cats groom themselves with their tongue and purr when content. A kitten is a young cat that loves to play and pounce.';
 const DB = 'Relational databases use B-tree indexes to speed up SQL query execution and JOIN operations across large tables.';
 
@@ -146,7 +146,7 @@ describe('agent-knowledge — documents: create + ingest + retrieve', () => {
     const view = await owner.get(k(rosterId));
     expect(view.body.collections.length).toBe(0);
     // The KB collection still exists (shareable across twins).
-    expect((await owner.get(`/v1/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections/${cid}`)).status).toBe(200);
+    expect((await owner.get(`/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections/${cid}`)).status).toBe(200);
   });
 });
 
@@ -171,7 +171,7 @@ describe('agent-knowledge — notes (recalled memory)', () => {
     const { owner, rosterId } = await ownerWithAgent();
     // The agent's real session tenant (so we plant the turn summary in the exact
     // namespace the note route writes to). Read it back off the roster entry.
-    const tenantId = (await owner.get(`/v1/host/openwop-app/roster/${encodeURIComponent(rosterId)}`)).body.tenantId;
+    const tenantId = (await owner.get(`/host/openwop-app/roster/${encodeURIComponent(rosterId)}`)).body.tenantId;
     expect(typeof tenantId).toBe('string');
 
     // Simulate exactly what `persistTurnSummary` writes for a memoryShape.longTerm
@@ -254,7 +254,7 @@ describe('agent-knowledge — ADR 0036 profile policy', () => {
   it('a permissions.never action class denies the write (403)', async () => {
     const { owner, rosterId, orgId } = await ownerWithAgent();
     // Set a profile that forbids the knowledge.ingest action class.
-    const put = await owner.put(`/v1/host/openwop-app/agents/${encodeURIComponent(rosterId)}/profile`, {
+    const put = await owner.put(`/host/openwop-app/agents/${encodeURIComponent(rosterId)}/profile`, {
       roleKey: 'researcher',
       permissions: { read: [], write: [], never: ['knowledge.ingest'] },
       autonomy: { specLevel: 'draft-only' },
@@ -271,7 +271,7 @@ describe('agent-knowledge — ingest node write path (ADR 0038 §B)', () => {
   it('ingestDocToBoundCollection writes a cited doc into a bound collection; unbound → 404; memory untouched', async () => {
     const { owner, rosterId, orgId } = await ownerWithAgent();
     const cid = (await owner.post(k(rosterId, '/collections'), { orgId, name: 'Auto-ingest' })).body.collectionId;
-    const tenantId = (await owner.get(`/v1/host/openwop-app/roster/${encodeURIComponent(rosterId)}`)).body.tenantId;
+    const tenantId = (await owner.get(`/host/openwop-app/roster/${encodeURIComponent(rosterId)}`)).body.tenantId;
 
     // The write path the trigger→workflow ingest node calls: org resolved from the
     // binding (no orgId supplied). Writes the KB-document side only.
@@ -293,7 +293,7 @@ describe('agent-knowledge — ingest node write path (ADR 0038 §B)', () => {
   it('contentTrust flows doc→chunk→retrieval: untrusted ingest is marked untrusted, manual is trusted (ADR 0038 §C)', async () => {
     const { owner, rosterId, orgId } = await ownerWithAgent();
     const cid = (await owner.post(k(rosterId, '/collections'), { orgId, name: 'Mixed-trust' })).body.collectionId;
-    const tenantId = (await owner.get(`/v1/host/openwop-app/roster/${encodeURIComponent(rosterId)}`)).body.tenantId;
+    const tenantId = (await owner.get(`/host/openwop-app/roster/${encodeURIComponent(rosterId)}`)).body.tenantId;
 
     // Manual ingest (trusted) + a simulated trigger/provider ingest (untrusted).
     await ingestDocToBoundCollection(tenantId, 'run:test', rosterId, cid, { title: 'Curated cats', text: FELINE });

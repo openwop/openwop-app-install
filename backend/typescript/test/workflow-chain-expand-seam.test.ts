@@ -1,5 +1,5 @@
 /**
- * RFC 0013 — the `/v1/host/sample/workflow-chain:expand` host-expansion witness seam
+ * RFC 0013 — the `/host/sample/workflow-chain:expand` host-expansion witness seam
  * (drives `workflow-chain-host-expansion.test.ts` non-vacuously against the published
  * `vendor.openwop.workflow-chain-sample` fixture). Pins the wire shape + negatives so
  * the published legs can't regress silently.
@@ -13,7 +13,7 @@ import { loadChainSamplePack } from '../src/host/workflowChainPackLoader.js';
 let server: http.Server;
 let BASE: string;
 const TOKEN = 'dev-token';
-const PATH = '/v1/host/sample/workflow-chain:expand';
+const PATH = '/host/sample/workflow-chain:expand';
 const PACK = 'vendor.openwop.workflow-chain-sample';
 
 async function post(body: unknown): Promise<{ status: number; body: Record<string, unknown> }> {
@@ -82,10 +82,16 @@ describe('RFC 0013 workflow-chain:expand witness seam', () => {
   });
 
   it('negatives: unknown pack → 404 pack_not_found; unknown chain → 404 chain_not_found; missing chainId → 422', async () => {
-    expect((await post({ packName: 'vendor.acme.nope', chainId: 'x' })).body.error).toBe('pack_not_found');
-    expect((await post({ packName: PACK, chainId: `${PACK}.nope` })).body.error).toBe('chain_not_found');
+    // ADR 0812 P3c-0 — the seam lives on a major-2 path, so a host code travels
+    // vendor-namespaced (`v2ErrorCode`); the refusal and status are unchanged.
+    const pack = await post({ packName: 'vendor.acme.nope', chainId: 'x' });
+    expect(pack.status).toBe(404);
+    expect(pack.body.error).toBe('openwop-app.pack_not_found');
+    const chain = await post({ packName: PACK, chainId: `${PACK}.nope` });
+    expect(chain.status).toBe(404);
+    expect(chain.body.error).toBe('openwop-app.chain_not_found');
     const missing = await post({ packName: PACK });
     expect(missing.status).toBe(422);
-    expect(missing.body.error).toBe('invalid_request');
+    expect(missing.body.error).toBe('openwop-app.invalid_request');
   });
 });

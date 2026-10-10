@@ -104,7 +104,7 @@ describe('ADR 0082 — no mock-ai; real source/analysis/LLM nodes', () => {
       'knowledge.retrieve': ['query'],
       'feature.documents.nodes.render': ['orgId', 'documentId'],
       'feature.documents.nodes.get-document': ['orgId', 'documentId'],
-      'feature.documents.nodes.create-document': ['orgId'],
+      'feature.documents.nodes.generate-from-template': ['orgId', 'templateId'], // DOCWF2-7: was a phantom `create-document` typeId
     };
     // Anti-vacuity anchor #1: the table must actually MATCH something in these
     // chains. A future edit that renames a typeId would otherwise silently

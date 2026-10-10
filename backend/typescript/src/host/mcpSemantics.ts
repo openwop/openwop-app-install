@@ -36,24 +36,18 @@ import { assertApprovalSurfaceTrusted } from './a2uiSurfaceAdmission.js';
 import { randomUUID } from 'node:crypto';
 import { insertRunWithStartContext } from './runInsert.js';
 import { resolveLaunchWorkflow } from './resolveLaunchDefinition.js';
+import { WorkflowFeatureRefusedError } from './workflowFeatureGate.js';
+import { withRunLimit } from './runLimitSeam.js';
 import { seedRunVariables } from './variablesRuntime.js';
 import type { Storage } from '../storage/storage.js';
 import type { HostAdapterSuite } from './index.js';
 import type { InterruptRecord, Principal, RunRecord } from '../types.js';
 import { executeRun } from '../executor/executor.js';
-import {
-  findElicitationHandler,
-  findPromptByName,
-  findResourceByUri,
-  findSamplingHandler,
-  findToolByName,
-  isToolAllowed,
-  listPrompts,
-  listResources,
-  listResourceTemplates,
-  listToolsForPrincipal,
-} from './mcpServerRegistry.js';
-import { awaitRunResumeChain, resolveAndResume } from '../routes/interrupts.js';
+import { exposureFor, findToolForCaller, listToolsForCaller, type ExposedHandler } from './mcpServerRegistry.js';
+import type { McpCaller } from './mcpCaller.js';
+import type { LaunchResolvedWorkflow } from './resolveLaunchDefinition.js';
+import { awaitRunResumeChain, needsNamedApprover, resolveAndResume } from '../routes/interrupts.js';
+import { OpenwopError } from '../types.js';
 import { compileToolSchema } from './toolSchemaValidation.js';
 import { createLogger } from '../observability/logger.js';
 
@@ -63,6 +57,9 @@ export interface McpSemanticDeps {
   storage: Storage;
   hostSuite: HostAdapterSuite;
   principal: Principal;
+  /** ADR 0788 D1 — the request-resolved tenant + launch authority every
+   *  enumeration and launch below is made for. */
+  caller: McpCaller;
 }
 
 /**
@@ -101,12 +98,12 @@ export interface McpToolView {
   inputSchema: Record<string, unknown>;
 }
 
-export async function toolsView(principal: Principal): Promise<McpToolView[]> {
+export async function toolsView(caller: McpCaller): Promise<McpToolView[]> {
   // ADR 0087 — authorization-scoped: a caller sees only the tools their auth +
   // feature toggles permit (gated tools hidden from anon / toggle-off callers).
   // This is also WHY the current revision's `cacheScope` for `tools/list` is
   // `private` and never `public` (RFC 0153 §D): the list depends on the caller.
-  const tools = await listToolsForPrincipal(principal);
+  const tools = await listToolsForCaller(caller);
   return tools
     .map((t) => ({ name: t.name, description: t.description ?? '', inputSchema: t.inputSchema }))
     // §D: ordering MUST be deterministic (upstream SHOULD → OpenWOP MUST).
@@ -115,8 +112,8 @@ export async function toolsView(principal: Principal): Promise<McpToolView[]> {
     .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }
 
-export function resourcesView(): Array<Record<string, unknown>> {
-  return listResources()
+export async function resourcesView(caller: McpCaller): Promise<Array<Record<string, unknown>>> {
+  return (await exposureFor(caller)).resources
     .map((r) => {
       const view: Record<string, unknown> = { uri: r.uri };
       if (r.name !== undefined) view.name = r.name;
@@ -127,8 +124,8 @@ export function resourcesView(): Array<Record<string, unknown>> {
     .sort((a, b) => String(a.uri).localeCompare(String(b.uri)));
 }
 
-export function resourceTemplatesView(): Array<Record<string, unknown>> {
-  return listResourceTemplates()
+export async function resourceTemplatesView(caller: McpCaller): Promise<Array<Record<string, unknown>>> {
+  return (await exposureFor(caller)).resourceTemplates
     .map((r) => {
       const view: Record<string, unknown> = { uriTemplate: r.uri };
       if (r.name !== undefined) view.name = r.name;
@@ -139,8 +136,8 @@ export function resourceTemplatesView(): Array<Record<string, unknown>> {
     .sort((a, b) => String(a.uriTemplate).localeCompare(String(b.uriTemplate)));
 }
 
-export function promptsView(): Array<Record<string, unknown>> {
-  return listPrompts()
+export async function promptsView(caller: McpCaller): Promise<Array<Record<string, unknown>>> {
+  return (await exposureFor(caller)).prompts
     .map((p) => {
       const view: Record<string, unknown> = { name: p.name };
       if (p.description !== undefined) view.description = p.description;
@@ -150,7 +147,16 @@ export function promptsView(): Array<Record<string, unknown>> {
     .sort((a, b) => String(a.name).localeCompare(String(b.name)));
 }
 
-export { findSamplingHandler, findElicitationHandler };
+/** ADR 0788 D1 — the legacy handler bridges resolve their handler through the
+ *  caller-scoped exposure: the caller tenant's OWN workflows only, and only when
+ *  the caller may launch them. It used to be "first workflow wins" across every
+ *  tenant, so a planted handler answered everyone's sampling on their model key. */
+export async function findSamplingHandler(caller: McpCaller): Promise<ExposedHandler | null> {
+  return (await exposureFor(caller)).samplingHandler;
+}
+export async function findElicitationHandler(caller: McpCaller): Promise<ExposedHandler | null> {
+  return (await exposureFor(caller)).elicitationHandler;
+}
 
 // ─────────────────────────────────────────────────────────────────
 // tools/call — workflow as MCP tool
@@ -165,10 +171,12 @@ export async function callTool(
   if (typeof name !== 'string' || name.length === 0) {
     return { kind: 'not-exposed', message: 'tools/call requires params.name' };
   }
-  const tool = findToolByName(name);
+  // ADR 0788 D1 — resolved through the SAME caller-scoped enumeration the list
+  // used, which already applied the gate: list and call cannot disagree.
+  const tool = await findToolForCaller(deps.caller, name);
   // ADR 0087 — fail-closed + uniform: a tool the caller isn't authorized for is
   // indistinguishable from a non-existent one (no existence leak via the error).
-  if (!tool || !(await isToolAllowed(tool, deps.principal))) {
+  if (!tool) {
     // MCP-2 — observability for a security-sensitive external surface: the WIRE
     // error stays uniform (`not exposed`), but the LOG distinguishes unknown vs
     // unauthorized so an operator can see denial RATE + abuse on the MCP door
@@ -176,7 +184,7 @@ export async function callTool(
     // is otherwise untraced).
     log.info('mcp_tool_denied', {
       toolName: name,
-      reason: tool ? 'unauthorized' : 'unknown_tool',
+      reason: 'unknown_or_unauthorized',
       principalId: deps.principal.principalId,
     });
     return { kind: 'not-exposed', message: `tool '${name}' not exposed` };
@@ -204,7 +212,7 @@ export async function callTool(
     };
   }
 
-  const outcome = await runWorkflow({ deps, workflowId: tool.workflowId, inputs: args });
+  const outcome = await runWorkflow({ deps, workflowId: tool.workflowId, inputs: args, resolved: await workspaceResolved(deps, tool.workflowId) });
 
   // MCP-2 — one structured line per executed tool call (count + latency +
   // outcome), the SRE-alertable signal for the external MCP door.
@@ -228,9 +236,9 @@ export async function readResource(uri: unknown, deps: McpSemanticDeps): Promise
   if (!isSafeResourceUri(uri)) {
     return { kind: 'invalid-uri', message: 'resource uri rejected: unsupported scheme or path traversal' };
   }
-  const resource = findResourceByUri(uri);
+  const resource = (await exposureFor(deps.caller)).resources.find((r) => r.uri === uri);
   if (!resource) return { kind: 'not-exposed', message: `resource '${uri}' not exposed` };
-  return runWorkflow({ deps, workflowId: resource.workflowId, inputs: { uri } });
+  return runWorkflow({ deps, workflowId: resource.workflowId, inputs: { uri }, resolved: await workspaceResolved(deps, resource.workflowId) });
 }
 
 export async function getPrompt(
@@ -241,21 +249,29 @@ export async function getPrompt(
   if (typeof name !== 'string' || name.length === 0) {
     return { kind: 'not-exposed', message: 'prompts/get requires params.name' };
   }
-  const prompt = findPromptByName(name);
+  const prompt = (await exposureFor(deps.caller)).prompts.find((p) => p.name === name);
   if (!prompt) return { kind: 'not-exposed', message: `prompt '${name}' not exposed` };
   // RFC 0020 §D: prompt arguments are NOT template-evaluated. We pass
   // them as inputs.arguments and let the workflow do the rendering
   // explicitly (no eval, no Function constructor).
-  return runWorkflow({ deps, workflowId: prompt.workflowId, inputs: { arguments: asObject(rawArgs) } });
+  return runWorkflow({ deps, workflowId: prompt.workflowId, inputs: { arguments: asObject(rawArgs) }, resolved: await workspaceResolved(deps, prompt.workflowId) });
 }
 
 /** Where the exposed `resources/read` / `prompts/get` projections need it. */
-export function findResourceMimeType(uri: string): string | undefined {
-  return findResourceByUri(uri)?.mimeType;
+export async function findResourceMimeType(caller: McpCaller, uri: string): Promise<string | undefined> {
+  return (await exposureFor(caller)).resources.find((r) => r.uri === uri)?.mimeType;
 }
 
-export function findPromptDescription(name: string): string | undefined {
-  return findPromptByName(name)?.description;
+export async function findPromptDescription(caller: McpCaller, name: string): Promise<string | undefined> {
+  return (await exposureFor(caller)).prompts.find((p) => p.name === name)?.description;
+}
+
+/** The launch-resolved definition a WORKSPACE entry was listed from, so the call
+ *  runs exactly that graph (architect H1). `undefined` for host projections,
+ *  which resolve through the catalog as they always have. */
+async function workspaceResolved(deps: McpSemanticDeps, workflowId: string): Promise<LaunchResolvedWorkflow | undefined> {
+  const hit = (await exposureFor(deps.caller)).workspaceDefinitions.get(workflowId);
+  return hit ? { workflowId, definition: hit.definition, launchResolved: hit.launchResolved } : undefined;
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -280,7 +296,7 @@ export function findPromptDescription(name: string): string | undefined {
  * listed approver when the gate declares an explicit list.
  */
 export async function resumeInterrupt(
-  deps: McpSemanticDeps,
+  deps: Omit<McpSemanticDeps, 'caller'>,
   interruptId: string,
   resumeValue: unknown,
 ): Promise<McpRunOutcome> {
@@ -296,16 +312,30 @@ export async function resumeInterrupt(
   } catch (err) {
     return { kind: 'failed', runId: interrupt.runId, text: err instanceof Error ? err.message : 'approval blocked by untrusted content' };
   }
-  // Single use, enforced by CONSUMING the interrupt (the ENG-6 claim pattern):
-  // the storage CAS flips resolved_at NULL→set and returns `won` only to the
-  // first caller, so a replayed `requestState` — even one whose HMAC verifies —
-  // finds nothing left to resolve.
-  const wonAt = new Date().toISOString();
-  const won = await deps.storage.resolveInterrupt(interrupt.interruptId, resumeValue, wonAt);
-  if (!won) {
-    return { kind: 'failed', runId: interrupt.runId, text: 'interrupt already resolved' };
+  // ADR 0778 D5 — a gate that needs a NAMED approver (a quorum, or a declared
+  // ACL) is not decidable here: `requestState` carries no approver identity to
+  // vote as. Refused BEFORE anything is consumed, so the gate stays open for the
+  // inbox. This lane used to claim first, so a quorum vote came back `pending`
+  // (or an ineligible voter 403'd) with the interrupt already spent and the run
+  // never resumed.
+  if (needsNamedApprover(interrupt.data)) {
+    return { kind: 'failed', runId: interrupt.runId, text: 'this approval needs a named approver — decide it in the inbox' };
   }
-  await resolveAndResume(deps.storage, deps.hostSuite, interruptId, resumeValue, { capabilityToken: true });
+  // Single use (ADR 0778 C7). This used to be enforced by claiming here, before
+  // `resolveAndResume` validated anything, so every refusal inside it (a
+  // `timeout` action, a credential shape, an unresolvable gate node, a terminal
+  // run) stranded the run with its interrupt consumed. Every terminal branch of
+  // `resolveAndResume` now claims for itself (D1), so a replayed `requestState`
+  // — even one whose HMAC verifies — still finds nothing left to resolve, and a
+  // refusal leaves the gate open.
+  try {
+    await resolveAndResume(deps.storage, deps.hostSuite, interruptId, resumeValue, { capabilityToken: true });
+  } catch (err) {
+    if (err instanceof OpenwopError && err.httpStatus === 409) {
+      return { kind: 'failed', runId: interrupt.runId, text: 'interrupt already resolved' };
+    }
+    throw err;
+  }
   await awaitRunResumeChain(interrupt.runId);
   return await outcomeForRun(deps, interrupt.runId);
 }
@@ -327,20 +357,32 @@ export async function runWorkflowById(
   workflowId: string,
   inputs: Record<string, unknown>,
 ): Promise<McpRunOutcome> {
-  return runWorkflow({ deps, workflowId, inputs });
+  return runWorkflow({ deps, workflowId, inputs, resolved: await workspaceResolved(deps, workflowId) });
 }
 
 async function runWorkflow(input: {
   deps: McpSemanticDeps;
   workflowId: string;
   inputs: Record<string, unknown>;
+  /** Pre-resolved by the enumeration (workspace entries). */
+  resolved?: LaunchResolvedWorkflow | undefined;
 }): Promise<McpRunOutcome> {
   const { deps, workflowId, inputs } = input;
-  const tenantId =
-    deps.principal.tenants[0] && deps.principal.tenants[0] !== '*' ? deps.principal.tenants[0] : 'mcp-default';
+  // ADR 0788 D1 — ONE tenant per request (`tenantOf(req)`), the same one the
+  // enumeration and gate used. The private `'mcp-default'` spelling for a
+  // wildcard principal is gone: a wildcard operator acts in `'default'`, where it
+  // authors.
+  const tenantId = deps.caller.tenantId;
 
   // ADR 0474 P1b — MCP-mounted launches are production: published-when-present.
-  const wf = await resolveLaunchWorkflow(deps.hostSuite.workflowCatalog, tenantId, workflowId);
+  let wf: LaunchResolvedWorkflow | null;
+  try {
+    wf = input.resolved ?? await resolveLaunchWorkflow(deps.hostSuite.workflowCatalog, tenantId, workflowId);
+  } catch (err) {
+    // ADR 0820 §7 / G6 — the owning-feature refusal is a typed tool failure.
+    if (err instanceof WorkflowFeatureRefusedError) return { kind: 'failed', runId: '', text: err.message };
+    throw err;
+  }
   if (!wf) {
     return { kind: 'failed', runId: '', text: `workflowId ${workflowId} unknown` };
   }
@@ -354,12 +396,18 @@ async function runWorkflow(input: {
     status: 'pending',
     inputs,
     // RFC 0020 §D — every MCP-originated run is untrusted, on BOTH wires.
-    metadata: { launchResolved: wf.launchResolved, source: 'mcp-server-mount', trustBoundary: 'untrusted' },
+    // ADR 0785 P3 — and it names who it acts for, the SAME way an HTTP-created run
+    // does (`routes/runs.ts`: `req.userId ?? principal.principalId`; an MCP caller
+    // is never an unbound session, so the principal id IS that value). Before this
+    // an MCP run carried no acting user at all, so no backing node could do
+    // per-caller work — `ctx.actingUserId` was always undefined on this lane.
+    metadata: { launchResolved: wf.launchResolved, source: 'mcp-server-mount', trustBoundary: 'untrusted', actingUserId: deps.principal.principalId },
     configurable: {},
     createdAt: now,
     updatedAt: now,
   };
-  await insertRunWithStartContext(deps.storage, run, { definition: wf.definition });
+  // ADR 0821 P5 follow-up — the plan's monthly run limit (a no-op until wired).
+  await withRunLimit(tenantId, () => insertRunWithStartContext(deps.storage, run, { definition: wf.definition }));
 
   // Seed the run's variable bag from the inbound inputs (the MCP `arguments`) per the
   // workflow's `variables[]`, so `{type:'variable'}` node inputs resolve — the
@@ -375,7 +423,7 @@ async function runWorkflow(input: {
 }
 
 /** Read a run's terminal disposition + outputs from the event log and status. */
-async function outcomeForRun(deps: McpSemanticDeps, runId: string): Promise<McpRunOutcome> {
+async function outcomeForRun(deps: Omit<McpSemanticDeps, 'caller'>, runId: string): Promise<McpRunOutcome> {
   const run = await deps.storage.getRun(runId);
   const events = await deps.storage.listEvents(runId);
   let outputs: Record<string, unknown> | null = null;

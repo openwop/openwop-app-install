@@ -9,6 +9,7 @@
  *
  * @see docs/adr/0135-capability-firewall.md
  */
+import type { Request } from 'express';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { requireTenantScope, tenantOf } from '../featureRoute.js';
 import { callerSubject } from '../../host/requestSubject.js';
@@ -21,13 +22,13 @@ import type { FirewallMode } from './compositionEvaluator.js';
 import { OpenwopError } from '../../types.js';
 
 // Always-on (toggle removed, 2026-06-24) — RBAC-gated only (no toggle gate).
-const BASE = '/v1/host/openwop-app/capability-firewall/orgs/:orgId/rules';
+const BASE = '/host/openwop-app/capability-firewall/orgs/:orgId/rules';
 // ADR 0397 Phase 1 — the firewall-scoped decisions view (a read op, workspace:read).
-const DECISIONS = '/v1/host/openwop-app/capability-firewall/orgs/:orgId/decisions';
+const DECISIONS = '/host/openwop-app/capability-firewall/orgs/:orgId/decisions';
 // ADR 0397 Phase 2 — the side-effect-free policy simulator (a read op, workspace:read).
-const SIMULATE = '/v1/host/openwop-app/capability-firewall/orgs/:orgId/simulate';
+const SIMULATE = '/host/openwop-app/capability-firewall/orgs/:orgId/simulate';
 // ADR 0397 Phase 5 — the superadmin platform-baseline rules (global floor, superadmin-only).
-const PLATFORM = '/v1/host/openwop-app/capability-firewall/platform/rules';
+const PLATFORM = '/host/openwop-app/capability-firewall/platform/rules';
 
 const MODES = new Set<FirewallMode>(['default-allow', 'shadow', 'enforce']);
 const SIM_TIERS = new Set(['pure', 'read', 'write', 'exec']);
@@ -78,6 +79,14 @@ function readUnknownToolPolicy(body: unknown): 'skip' | 'treat-as-risky' {
   const v = (body as { unknownToolPolicy?: unknown })?.unknownToolPolicy ?? 'treat-as-risky';
   if (v !== 'skip' && v !== 'treat-as-risky') throw new OpenwopError('validation_error', "unknownToolPolicy MUST be 'skip' or 'treat-as-risky'.", 400);
   return v;
+}
+
+/** Whether this tenant runs the default policy, and how many rules it stores — read
+ *  under the SAME authority as `GET` the rule set (ADR 0864 D2). One point read. */
+export async function readFirewallPosture(req: Request): Promise<{ isDefault: boolean; rules: number }> {
+  await requireTenantScope(req, 'workspace:read');
+  const stored = await getStoredRuleSet(tenantOf(req));
+  return { isDefault: stored === null, rules: stored?.rules.length ?? 0 };
 }
 
 export function registerCapabilityFirewallRoutes(deps: RouteDeps): void {

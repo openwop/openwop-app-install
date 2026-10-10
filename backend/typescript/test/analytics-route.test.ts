@@ -12,9 +12,10 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
-import { __resetAnalyticsStore, recordEvent, listEvents, deleteSubjectEvents } from '../src/features/analytics/analyticsService.js';
+import { __resetAnalyticsStore, recordEvent, listEvents, deleteSubjectEvents, type AnalyticsEventView, type AnalyticsSummary } from '../src/features/analytics/analyticsService.js';
 import { __resetOrgBeaconBudgetForTests } from '../src/features/analytics/routes.js';
 import { buildAnalyticsSurface } from '../src/features/analytics/surface.js';
+import { registeredFeatureSurfaceIds } from '../src/host/featureSurfaces.js';
 import { DurableCollection } from '../src/host/hostExtPersistence.js';
 
 let BASE: string;
@@ -31,10 +32,19 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+interface Res<T = unknown> { status: number; body: T }
+interface LoginBody { user?: { tenantId?: string; userId?: string }; tenantId?: string; userId?: string }
+interface OrgBody { orgId: string }
+interface SummaryBody {
+  summary: AnalyticsSummary;
+  firstEventAt?: string;
+  lifetime?: { firstEventAt?: string; uniqueVisitorsSince?: string };
+}
+interface EventsBody { events: AnalyticsEventView[] }
+interface BeaconBody { recorded?: boolean; reason?: string; eventId?: string; error?: string }
 function client(initialCookie = '') {
   let cookie = initialCookie;
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
@@ -43,18 +53,23 @@ function client(initialCookie = '') {
     const h = res.headers as { getSetCookie?: () => string[] };
     const sc = typeof h.getSetCookie === 'function' ? h.getSetCookie() : [];
     for (const c of sc) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    // JSON boundary: the caller names the response shape it reads (`Res<T>`).
+    const out = (res.status === 204 ? undefined : await res.json().catch(() => undefined)) as T;
     return { status: res.status, body: out };
   };
-  return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b), del: (p: string) => call('DELETE', p) };
+  return {
+    get: <T = unknown>(p: string) => call<T>('GET', p),
+    post: <T = BeaconBody>(p: string, b?: unknown) => call<T>('POST', p, b),
+    del: <T = unknown>(p: string) => call<T>('DELETE', p),
+  };
 }
 const pub = client();
 let n = 0;
 async function ownerWithOrg(): Promise<{ owner: ReturnType<typeof client>; orgId: string; tenantId: string }> {
   const owner = client();
-  const su = await owner.post('/v1/host/openwop-app/test/login', { email: `an-${Date.now()}-${n++}@acme.test` });
+  const su = await owner.post<LoginBody>('/host/openwop-app/test/login', { email: `an-${Date.now()}-${n++}@acme.test` });
   expect(su.status, JSON.stringify(su.body)).toBe(201);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post<OrgBody>('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return { owner, orgId: org.body.orgId, tenantId: su.body.user?.tenantId ?? su.body.tenantId ?? '' };
 }
@@ -64,8 +79,10 @@ describe('Analytics: beacon + reporting', () => {
   it('is registered + advertises ctx.features.analytics', async () => {
     const { BACKEND_FEATURES } = await import('../src/features/index.js');
     expect(BACKEND_FEATURES.some((f) => f.id === 'analytics')).toBe(true);
-    const disco = await pub.get('/.well-known/openwop');
-    expect(disco.body.hostExtensions?.featureSurfaces).toContain('host.sample.analytics');
+    // ADR 0812 P3c-0: this read `hostExtensions.featureSurfaces` off the v1
+    // discovery document; the v2 document has no such root, so it asserts the
+    // live registry that advertisement was derived from (populated by the boot).
+    expect(registeredFeatureSurfaceIds()).toContain('analytics');
   });
 
   // ANL-15 (grade-code 2026-09-10) — the events response stripped only `tenantId`,
@@ -73,14 +90,14 @@ describe('Analytics: beacon + reporting', () => {
   // every workspace:read member, undeclared by the client type and rendered nowhere.
   it('ANL-15: the events response is projected to the DECLARED client shape', async () => {
     const { owner, orgId } = await ownerWithOrg();
-    expect((await pub.post(`/v1/host/openwop-app/public-analytics/${orgId}/collect`, {
+    expect((await pub.post(`/host/openwop-app/public-analytics/${orgId}/collect`, {
       type: 'pageview', path: '/p', sessionKey: 's-proj', clickIds: { gclid: 'G-SECRET' }, owx: 'tok:not-a-real-token', referrer: 'https://ref.example/x',
     })).status).toBe(201);
-    const ev = await owner.get(`/v1/host/openwop-app/analytics/orgs/${orgId}/events`);
+    const ev = await owner.get<EventsBody>(`/host/openwop-app/analytics/orgs/${orgId}/events`);
     expect(ev.status).toBe(200);
-    const row = ev.body.events.find((e: { sessionKey?: string }) => e.sessionKey === 's-proj');
+    const row = ev.body.events.find((e) => e.sessionKey === 's-proj');
     expect(row).toBeTruthy();
-    expect(Object.keys(row).sort()).toEqual(['eventId', 'orgId', 'path', 'referrer', 'sessionKey', 'ts', 'type']);
+    expect(Object.keys(row!).sort()).toEqual(['eventId', 'orgId', 'path', 'referrer', 'sessionKey', 'ts', 'type']);
     expect(JSON.stringify(ev.body)).not.toContain('G-SECRET');
     expect(JSON.stringify(ev.body)).not.toContain('tok:not-a-real-token');
   });
@@ -88,7 +105,7 @@ describe('Analytics: beacon + reporting', () => {
   // ANL-12 — the query string / fragment is where tokens, emails and ids ride.
   it('ANL-12: path and referrer are stored WITHOUT query string or fragment', async () => {
     const { orgId, tenantId } = await ownerWithOrg();
-    expect((await pub.post(`/v1/host/openwop-app/public-analytics/${orgId}/collect`, {
+    expect((await pub.post(`/host/openwop-app/public-analytics/${orgId}/collect`, {
       type: 'pageview', path: '/signup?email=alice%40example.com&utm_id=9', sessionKey: 's-q', referrer: 'https://partner.example/a?session=abc#frag',
     })).status).toBe(201);
     const row = (await listEvents(tenantId, orgId, 10)).find((e) => e.sessionKey === 's-q');
@@ -101,15 +118,15 @@ describe('Analytics: beacon + reporting', () => {
   // traffic; the distinct totals behind the top-10 cut ride the wire.
   it('ANL-UX-15: `sessions` is OMITTED when no business row carried a sessionKey; totals ride the summary', async () => {
     const { owner, orgId } = await ownerWithOrg();
-    expect((await pub.post(`/v1/host/openwop-app/public-analytics/${orgId}/collect`, { type: 'pageview', path: '/a' })).status).toBe(201);
-    expect((await pub.post(`/v1/host/openwop-app/public-analytics/${orgId}/collect`, { type: 'pageview', path: '/b' })).status).toBe(201);
-    const s1 = await owner.get(`/v1/host/openwop-app/analytics/orgs/${orgId}/summary`);
+    expect((await pub.post(`/host/openwop-app/public-analytics/${orgId}/collect`, { type: 'pageview', path: '/a' })).status).toBe(201);
+    expect((await pub.post(`/host/openwop-app/public-analytics/${orgId}/collect`, { type: 'pageview', path: '/b' })).status).toBe(201);
+    const s1 = await owner.get<SummaryBody>(`/host/openwop-app/analytics/orgs/${orgId}/summary`);
     expect(s1.body.summary.total).toBe(2);
     expect('sessions' in s1.body.summary, 'un-keyed traffic must not print a confident 0 sessions').toBe(false);
     expect(s1.body.summary.topPathsTotal).toBe(2);
     expect(s1.body.summary.utmSourcesTotal).toBe(0);
-    expect((await pub.post(`/v1/host/openwop-app/public-analytics/${orgId}/collect`, { type: 'pageview', path: '/c', sessionKey: 'k1' })).status).toBe(201);
-    const s2 = await owner.get(`/v1/host/openwop-app/analytics/orgs/${orgId}/summary`);
+    expect((await pub.post(`/host/openwop-app/public-analytics/${orgId}/collect`, { type: 'pageview', path: '/c', sessionKey: 'k1' })).status).toBe(201);
+    const s2 = await owner.get<SummaryBody>(`/host/openwop-app/analytics/orgs/${orgId}/summary`);
     expect(s2.body.summary.sessions).toBe(1);
   });
 
@@ -123,14 +140,14 @@ describe('Analytics: beacon + reporting', () => {
     process.env.OPENWOP_ANALYTICS_BEACON_ORG_REQS_PER_MIN = '2';
     __resetOrgBeaconBudgetForTests();
     try {
-      expect((await pub.post(`/v1/host/openwop-app/public-analytics/${orgId}/collect`, { type: 'pageview', path: '/1' })).status).toBe(201);
-      expect((await pub.post(`/v1/host/openwop-app/public-analytics/${orgId}/collect`, { type: 'pageview', path: '/2' })).status).toBe(201);
+      expect((await pub.post(`/host/openwop-app/public-analytics/${orgId}/collect`, { type: 'pageview', path: '/1' })).status).toBe(201);
+      expect((await pub.post(`/host/openwop-app/public-analytics/${orgId}/collect`, { type: 'pageview', path: '/2' })).status).toBe(201);
       // raw fetch: the test client keeps status+body only, and the header is the point
-      const third = await fetch(`${BASE}/v1/host/openwop-app/public-analytics/${orgId}/collect`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ type: 'pageview', path: '/3' }) });
+      const third = await fetch(`${BASE}/host/openwop-app/public-analytics/${orgId}/collect`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ type: 'pageview', path: '/3' }) });
       expect(third.status).toBe(429);
       expect(((await third.json()) as { error?: string }).error).toBe('rate_limited');
       expect(third.headers.get('retry-after')).toBe('60');
-      expect((await pub.post(`/v1/host/openwop-app/public-analytics/${otherOrg}/collect`, { type: 'pageview', path: '/1' })).status, 'the budget is per ORG').toBe(201);
+      expect((await pub.post(`/host/openwop-app/public-analytics/${otherOrg}/collect`, { type: 'pageview', path: '/1' })).status, 'the budget is per ORG').toBe(201);
     } finally {
       if (prev === undefined) delete process.env.OPENWOP_ANALYTICS_BEACON_ORG_REQS_PER_MIN; else process.env.OPENWOP_ANALYTICS_BEACON_ORG_REQS_PER_MIN = prev;
       __resetOrgBeaconBudgetForTests();
@@ -139,16 +156,16 @@ describe('Analytics: beacon + reporting', () => {
 
   it('public beacon records (consent off ⇒ permissive); reporting aggregates it', async () => {
     const { owner, orgId } = await ownerWithOrg();
-    expect((await pub.post(`/v1/host/openwop-app/public-analytics/${orgId}/collect`, { type: 'pageview', path: '/home', sessionKey: 's1', utm: { source: 'google' } })).status).toBe(201);
-    expect((await pub.post(`/v1/host/openwop-app/public-analytics/${orgId}/collect`, { type: 'conversion', sessionKey: 's1' })).status).toBe(201);
+    expect((await pub.post(`/host/openwop-app/public-analytics/${orgId}/collect`, { type: 'pageview', path: '/home', sessionKey: 's1', utm: { source: 'google' } })).status).toBe(201);
+    expect((await pub.post(`/host/openwop-app/public-analytics/${orgId}/collect`, { type: 'conversion', sessionKey: 's1' })).status).toBe(201);
 
-    const sum = await owner.get(`/v1/host/openwop-app/analytics/orgs/${orgId}/summary`);
+    const sum = await owner.get<SummaryBody>(`/host/openwop-app/analytics/orgs/${orgId}/summary`);
     expect(sum.body.summary.total).toBe(2);
     expect(sum.body.summary.byType).toMatchObject({ pageview: 1, conversion: 1 });
     expect(sum.body.summary.sessions).toBe(1);
     expect(sum.body.summary.topPaths).toContainEqual({ path: '/home', count: 1 });
     expect(sum.body.summary.utmSources).toContainEqual({ source: 'google', count: 1 });
-    const evs = await owner.get(`/v1/host/openwop-app/analytics/orgs/${orgId}/events`);
+    const evs = await owner.get<EventsBody>(`/host/openwop-app/analytics/orgs/${orgId}/events`);
     expect(evs.body.events).toHaveLength(2);
   });
 
@@ -156,16 +173,16 @@ describe('Analytics: beacon + reporting', () => {
     const { owner, orgId } = await ownerWithOrg();
     // LCP samples: [1000,1500,2000,2600] → nearest-rank p75 = ceil(0.75*4)-1 = idx 2 = 2000 → "good" (≤2500).
     for (const value of [1000, 1500, 2000, 2600]) {
-      expect((await pub.post(`/v1/host/openwop-app/public-analytics/${orgId}/collect`, { type: 'event', name: 'web-vital', sessionKey: 'v1', props: { metric: 'LCP', value } })).status).toBe(201);
+      expect((await pub.post(`/host/openwop-app/public-analytics/${orgId}/collect`, { type: 'event', name: 'web-vital', sessionKey: 'v1', props: { metric: 'LCP', value } })).status).toBe(201);
     }
     // One CLS sample well over the 0.25 poor threshold.
-    expect((await pub.post(`/v1/host/openwop-app/public-analytics/${orgId}/collect`, { type: 'event', name: 'web-vital', sessionKey: 'v1', props: { metric: 'CLS', value: 0.4 } })).status).toBe(201);
+    expect((await pub.post(`/host/openwop-app/public-analytics/${orgId}/collect`, { type: 'event', name: 'web-vital', sessionKey: 'v1', props: { metric: 'CLS', value: 0.4 } })).status).toBe(201);
     // CWV-1: an UNKNOWN metric name (open beacon → untrusted) must be IGNORED, not
     // aggregated into a junk vitals row; and a spoofed enormous value is CLAMPED.
-    expect((await pub.post(`/v1/host/openwop-app/public-analytics/${orgId}/collect`, { type: 'event', name: 'web-vital', sessionKey: 'v1', props: { metric: 'JUNK', value: 5 } })).status).toBe(201);
-    expect((await pub.post(`/v1/host/openwop-app/public-analytics/${orgId}/collect`, { type: 'event', name: 'web-vital', sessionKey: 'v1', props: { metric: 'FCP', value: 1e308 } })).status).toBe(201);
-    const sum = await owner.get(`/v1/host/openwop-app/analytics/orgs/${orgId}/summary`);
-    const vitals = sum.body.summary.vitals as { metric: string; p75: number; rating: string; count: number }[];
+    expect((await pub.post(`/host/openwop-app/public-analytics/${orgId}/collect`, { type: 'event', name: 'web-vital', sessionKey: 'v1', props: { metric: 'JUNK', value: 5 } })).status).toBe(201);
+    expect((await pub.post(`/host/openwop-app/public-analytics/${orgId}/collect`, { type: 'event', name: 'web-vital', sessionKey: 'v1', props: { metric: 'FCP', value: 1e308 } })).status).toBe(201);
+    const sum = await owner.get<SummaryBody>(`/host/openwop-app/analytics/orgs/${orgId}/summary`);
+    const vitals = sum.body.summary.vitals ?? [];
     expect(vitals).toContainEqual({ metric: 'LCP', p75: 2000, rating: 'good', count: 4 });
     expect(vitals).toContainEqual({ metric: 'CLS', p75: 0.4, rating: 'poor', count: 1 });
     expect(vitals.some((v) => v.metric === 'JUNK')).toBe(false); // unknown metric dropped
@@ -184,7 +201,7 @@ describe('Analytics: beacon + reporting', () => {
   // cannot pass by the endpoint simply being broken.
   it('ANLWF-9: unknown org and analytics-off are the SAME uniform 404 on the beacon', async () => {
     const { orgId } = await ownerWithOrg();
-    const base = (o: string) => `/v1/host/openwop-app/public-analytics/${encodeURIComponent(o)}/collect`;
+    const base = (o: string) => `/host/openwop-app/public-analytics/${encodeURIComponent(o)}/collect`;
     expect((await pub.post(base(orgId), { type: 'pageview', sessionKey: 'u-1' })).status).toBe(201);   // positive
     const unknown = await pub.post(base('org-does-not-exist'), { type: 'pageview', sessionKey: 'u-2' });
     expect(unknown.status).toBe(404);
@@ -201,47 +218,70 @@ describe('Analytics: beacon + reporting', () => {
 
   it('ANLWF-9: an oversize props bag is refused with 413, and a bag just under the cap lands', async () => {
     const { owner, orgId } = await ownerWithOrg();
-    const base = `/v1/host/openwop-app/public-analytics/${encodeURIComponent(orgId)}/collect`;
+    const base = `/host/openwop-app/public-analytics/${encodeURIComponent(orgId)}/collect`;
     const big = await pub.post(base, { type: 'event', sessionKey: 'p-1', props: { blob: 'x'.repeat(5000) } });
     expect(big.status, JSON.stringify(big.body).slice(0, 160)).toBe(413);
     const fine = await pub.post(base, { type: 'event', sessionKey: 'p-2', props: { note: 'x'.repeat(1000) } });
     expect(fine.status).toBe(201);
-    const evs = (await owner.get(`/v1/host/openwop-app/analytics/orgs/${encodeURIComponent(orgId)}/events`)).body.events as Array<{ sessionKey?: string }>;
+    const evs = (await owner.get<EventsBody>(`/host/openwop-app/analytics/orgs/${encodeURIComponent(orgId)}/events`)).body.events;
     expect(evs.some((e) => e.sessionKey === 'p-1'), 'the 413 must not have stored a row').toBe(false);
     expect(evs.some((e) => e.sessionKey === 'p-2')).toBe(true);
   });
 
   it('ANLWF-9: the beacon path is INSIDE the per-IP limiter (not on any exemption list)', async () => {
-    const { __isSseExemptPathForTests } = await import('../src/middleware/rateLimit.js');
-    expect(__isSseExemptPathForTests('/v1/host/openwop-app/public-analytics/org-x/collect')).toBe(false);
-    // Mount order is the other half of the claim: the limiter is `app.use`d before
-    // `registerAllRoutes`. Pinned from source so a reorder cannot pass silently.
-    const { readFileSync } = await import('node:fs');
-    const { join, dirname } = await import('node:path');
-    const { fileURLToPath } = await import('node:url');
-    const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'index.ts'), 'utf8');
-    expect(src.indexOf('app.use(ipRateLimitMiddleware())'), 'limiter must be mounted').toBeGreaterThan(0);
-    expect(src.indexOf('app.use(ipRateLimitMiddleware())')).toBeLessThan(src.indexOf('registerAllRoutes('));
+    const { __isSseExemptPathForTests, _resetRateLimitState } = await import('../src/middleware/rateLimit.js');
+    expect(__isSseExemptPathForTests('/host/openwop-app/public-analytics/org-x/collect')).toBe(false);
+    // BEHAVIOURAL (grade-tests w8): this used to pin `index.ts` TEXT order, which a
+    // limiter exempting the path inside its own body passed. Drive the real request:
+    // a 1/min write budget, a proxied (non-loopback) caller, two beacons ⇒ the second
+    // is the LIMITER's 429 (scope/reason envelope), not the per-org budget's.
+    const { orgId } = await ownerWithOrg();
+    const prev = process.env.OPENWOP_RATELIMIT_IP_REQS_PER_MIN;
+    process.env.OPENWOP_RATELIMIT_IP_REQS_PER_MIN = '1';
+    _resetRateLimitState();
+    try {
+      const hit = (): Promise<Response> => fetch(`${BASE}/host/openwop-app/public-analytics/${orgId}/collect`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-forwarded-for': '198.51.100.23' },
+        body: JSON.stringify({ type: 'pageview', path: '/rl' }),
+      });
+      expect((await hit()).status).toBe(201);
+      const second = await hit();
+      expect(second.status).toBe(429);
+      expect(second.headers.get('retry-after')).toBeTruthy();
+      const body = (await second.json()) as { error?: string; details?: { reason?: string } };
+      expect(body).toMatchObject({ error: 'rate_limited', details: { reason: 'ip_request_rate' } });
+    } finally {
+      if (prev === undefined) delete process.env.OPENWOP_RATELIMIT_IP_REQS_PER_MIN; else process.env.OPENWOP_RATELIMIT_IP_REQS_PER_MIN = prev;
+      _resetRateLimitState();
+    }
   });
 
   it('drops partial, garbage AND unresolvable experiment stamps — the event still lands (ADR 0236 D1 / ADR 0651 D3)', async () => {
-    const { owner, orgId } = await ownerWithOrg();
+    const { orgId, tenantId } = await ownerWithOrg();
     // ANLWF-3 / ADR 0651 D3 — this leg used to assert a stamp for a FABRICATED
     // experiment id was persisted verbatim: the forgery, pinned as the contract. A
     // stamp is now RE-DERIVED at ingest and an id nothing owns yields no stamp (the
     // event still lands). The positive leg — a real running experiment, a forged
     // variant in, the DERIVED variant persisted — lives beside the experiment
     // fixtures in `cms-page-experiments.test.ts`.
-    expect((await pub.post(`/v1/host/openwop-app/public-analytics/${orgId}/collect`, { type: 'pageview', sessionKey: 'ex1', experiment: { id: 'pexp:1', variant: 'B' } })).status).toBe(201);
+    expect((await pub.post(`/host/openwop-app/public-analytics/${orgId}/collect`, { type: 'pageview', sessionKey: 'ex1', experiment: { id: 'pexp:1', variant: 'B' } })).status).toBe(201);
     // partial/garbage stamps → recorded WITHOUT an experiment field
-    expect((await pub.post(`/v1/host/openwop-app/public-analytics/${orgId}/collect`, { type: 'pageview', sessionKey: 'ex2', experiment: { id: 'pexp:1' } })).status).toBe(201);
-    expect((await pub.post(`/v1/host/openwop-app/public-analytics/${orgId}/collect`, { type: 'pageview', sessionKey: 'ex3', experiment: 'not-an-object' })).status).toBe(201);
-    const evs = await owner.get(`/v1/host/openwop-app/analytics/orgs/${orgId}/events`);
-    const byKey = new Map((evs.body.events as Array<{ sessionKey?: string; experiment?: unknown }>).map((e) => [e.sessionKey, e.experiment]));
-    expect(byKey.has('ex1'), 'the event itself must still land').toBe(true);
-    expect(byKey.get('ex1'), 'an unknown experiment id must NOT be stamped').toBeUndefined();
-    expect(byKey.get('ex2')).toBeUndefined();
-    expect(byKey.get('ex3')).toBeUndefined();
+    expect((await pub.post(`/host/openwop-app/public-analytics/${orgId}/collect`, { type: 'pageview', sessionKey: 'ex2', experiment: { id: 'pexp:1' } })).status).toBe(201);
+    expect((await pub.post(`/host/openwop-app/public-analytics/${orgId}/collect`, { type: 'pageview', sessionKey: 'ex3', experiment: 'not-an-object' })).status).toBe(201);
+    // Read the STORED rows (grade-tests w8). This used to read `GET …/events`, which
+    // projects through `toEventView` — an allowlist with no `experiment` key — so every
+    // `toBeUndefined()` below was true whatever ingest stored.
+    const byKey = new Map((await listEvents(tenantId, orgId, 100)).map((e) => [e.sessionKey, e]));
+    for (const k of ['ex1', 'ex2', 'ex3']) expect(byKey.has(k), `the ${k} event itself must still land`).toBe(true);
+    expect(byKey.get('ex1')!.experiment, 'an unknown experiment id must NOT be stamped').toBeUndefined();
+    expect(byKey.get('ex2')!.experiment).toBeUndefined();
+    expect(byKey.get('ex3')!.experiment).toBeUndefined();
+    // ANL-21 — a refused stamp is COUNTED, never silently lost; the id rides only when
+    // the experiment is known to this tenant+org (never the client's string).
+    expect(byKey.get('ex1')!.experimentDropped).toEqual({ reason: 'unknown' });
+    expect(byKey.get('ex2')!.experimentDropped).toEqual({ reason: 'unknown' });
+    expect(byKey.get('ex3')!.experimentDropped, 'a non-object stamp was never a request').toBeUndefined();
   });
 });
 
@@ -251,7 +291,7 @@ describe('Analytics: consent gate (ADR 0020 pairing) + toggle gating', () => {
     expect(tenantId, 'a blank tenant would make the grant below address a different keyspace').toBeTruthy();
     try {
       await enable('consent', 'on'); // now isAllowed enforces; no record + opt-in default ⇒ deny
-      const denied = await pub.post(`/v1/host/openwop-app/public-analytics/${orgId}/collect`, { type: 'pageview', sessionKey: 's2' });
+      const denied = await pub.post(`/host/openwop-app/public-analytics/${orgId}/collect`, { type: 'pageview', sessionKey: 's2' });
       expect(denied.status).toBe(202);
       expect(denied.body.recorded).toBe(false);
       // grant analytics consent for s2, then the beacon records
@@ -262,7 +302,7 @@ describe('Analytics: consent gate (ADR 0020 pairing) + toggle gating', () => {
       // the public route now calls.
       const { mergeConsentCategories } = await import('../src/features/consent/consentService.js');
       await mergeConsentCategories({ tenantId, subjectKey: 's2', categories: { analytics: true }, source: 'public' });
-      expect((await pub.post(`/v1/host/openwop-app/public-analytics/${orgId}/collect`, { type: 'pageview', sessionKey: 's2' })).status).toBe(201);
+      expect((await pub.post(`/host/openwop-app/public-analytics/${orgId}/collect`, { type: 'pageview', sessionKey: 's2' })).status).toBe(201);
     } finally {
       await enable('consent', 'off');
     }
@@ -272,8 +312,8 @@ describe('Analytics: consent gate (ADR 0020 pairing) + toggle gating', () => {
     const { owner, orgId } = await ownerWithOrg();
     try {
       await enable('analytics', 'off');
-      expect((await pub.post(`/v1/host/openwop-app/public-analytics/${orgId}/collect`, { type: 'pageview' })).status).toBe(404);
-      expect((await owner.get(`/v1/host/openwop-app/analytics/orgs/${orgId}/summary`)).status).toBe(404);
+      expect((await pub.post(`/host/openwop-app/public-analytics/${orgId}/collect`, { type: 'pageview' })).status).toBe(404);
+      expect((await owner.get<SummaryBody>(`/host/openwop-app/analytics/orgs/${orgId}/summary`)).status).toBe(404);
     } finally {
       await enable('analytics', 'on');
     }
@@ -466,10 +506,10 @@ describe('ANL-UX-2/3/4 R2 — the summary stops fabricating, and starts distingu
     // since ~8 days ago. Driven through the REAL provider with an acting user —
     // the existing fail-empty assertion could never discriminate this.
     const { owner, orgId } = await ownerWithOrg();
-    const me = await owner.get('/v1/host/openwop-app/users/me');
+    const me = await owner.get<LoginBody>('/host/openwop-app/users/me');
     expect(me.status, JSON.stringify(me.body)).toBe(200);
-    const tenantId: string = me.body.user?.tenantId ?? me.body.tenantId;
-    const actingUserId: string = me.body.user?.userId ?? me.body.userId;
+    const tenantId = me.body.user?.tenantId ?? me.body.tenantId ?? '';
+    const actingUserId = me.body.user?.userId ?? me.body.userId ?? '';
     expect(Boolean(tenantId && actingUserId), 'the harness must yield a real acting user').toBe(true);
 
     await seed(tenantId, orgId, daysAgoIso(45), 'h-a');
@@ -492,13 +532,13 @@ describe('ANL-UX-2/3/4 R2 — the summary stops fabricating, and starts distingu
 
   it('ANL-UX-2 R2 — `lifetime` is ALWAYS on the wire, so a client can tell "never" from "unknown"', async () => {
     const { owner, orgId } = await ownerWithOrg();
-    const res = await owner.get(`/v1/host/openwop-app/analytics/orgs/${orgId}/summary?days=7`);
+    const res = await owner.get<SummaryBody>(`/host/openwop-app/analytics/orgs/${orgId}/summary?days=7`);
     expect(res.status, JSON.stringify(res.body)).toBe(200);
     // Never recorded ⇒ `firstEventAt` is omitted, but `lifetime` is PRESENT —
     // and it is `lifetime`'s own absence that means "this backend does not know",
     // which is the distinction the page needs to stop claiming "not installed".
     expect(res.body.firstEventAt).toBeUndefined();
     expect(res.body.lifetime, 'a backend that knows must SAY it knows').toBeTruthy();
-    expect(res.body.lifetime.firstEventAt).toBeUndefined();
+    expect(res.body.lifetime!.firstEventAt).toBeUndefined();
   });
 });

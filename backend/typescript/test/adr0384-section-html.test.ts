@@ -70,6 +70,9 @@ function fixture(type: Section['type']): Section {
     // ADR 0748 — protocol-authored flat fields: a definition list, all text escaped.
     case 'fields':
       return { ...base, data: { heading: '<b>Plain</b>', seats: 3 } };
+    // ADR 0843 — a narrated film: poster <img>, title, description, followable links.
+    case 'video':
+      return { ...base, data: { heading: 'Watch', title: 'The film', description: 'What it shows.', length: '1:57', src: 'https://media.example.test/f.mp4', poster: 'https://media.example.test/f.jpg', captions: 'https://media.example.test/f.vtt', youtubeUrl: 'https://www.youtube.com/watch?v=abc123XYZ' } };
   }
 }
 
@@ -160,6 +163,17 @@ describe('ADR 0384 sectionHtml — golden fixture', () => {
 <section>
 <dl><dt>heading</dt><dd>&lt;b&gt;Plain&lt;/b&gt;</dd><dt>seats</dt><dd>3</dd></dl>
 </section>
+<section>
+<h2 id="watch">Watch</h2>
+<figure>
+<img src="https://media.example.test/f.jpg" alt="The film" width="1920" height="1080">
+<figcaption>
+<p><strong>The film</strong></p>
+<p>What it shows.</p>
+<p><a href="https://media.example.test/f.mp4" rel="noopener noreferrer">Watch the video (1:57)</a> <a href="https://www.youtube.com/watch?v=abc123XYZ" rel="noopener noreferrer">Watch on YouTube</a> <a href="https://media.example.test/f.vtt" rel="noopener noreferrer">Captions (WebVTT)</a></p>
+</figcaption>
+</figure>
+</section>
 </main>`);
   });
 
@@ -170,6 +184,31 @@ describe('ADR 0384 sectionHtml — golden fixture', () => {
     const stats = sectionHtml({ sectionId: 's', type: 'columns', data: { layout: 'stats', columns: [{ title: '42', text: 'answers' }] } } as Section, OPTS);
     expect(stats).toContain('<dl>');
     expect(stats).toContain('<dt>42</dt><dd>answers</dd>');
+  });
+});
+
+// ADR 0813 — KEEP IN LOCKSTEP with frontend/react/src/features/cms/__tests__/proseBlocks.test.tsx.
+describe('ADR 0813 sectionHtml — prose blocks', () => {
+  const rich = (text: string): string => sectionHtml({ sectionId: 's', type: 'richText', data: { text } } as Section, OPTS) ?? '';
+
+  it('renders subheadings, both list kinds and quotes; paragraphs are unchanged', () => {
+    const html = rich('Intro with **bold**.\n\n### A subheading\n\n- one [link](https://example.com)\n- two\n\n1. first\n2. second\n\n> quoted *line*\n> continues\n\nA closing paragraph.');
+    expect(html).toBe('<section>\n<p>Intro with <strong>bold</strong>.</p>\n<h3>A subheading</h3>\n'
+      + '<ul><li>one <a href="https://example.com" rel="noopener noreferrer">link</a></li><li>two</li></ul>\n'
+      + '<ol><li>first</li><li>second</li></ol>\n<blockquote>quoted <em>line</em> continues</blockquote>\n'
+      + '<p>A closing paragraph.</p>\n</section>');
+  });
+
+  it('a block is a list only when EVERY line is an item; a `###` only when it stands alone', () => {
+    expect(rich('- item\nnot an item')).toBe('<section>\n<p>- item\nnot an item</p>\n</section>');
+    expect(rich('### head\nand more')).toBe('<section>\n<p>### head\nand more</p>\n</section>');
+    expect(rich('*emphasis* opens a paragraph')).toBe('<section>\n<p><em>emphasis</em> opens a paragraph</p>\n</section>');
+  });
+
+  it('escapes HTML inside every new block (no raw pass-through)', () => {
+    const html = rich('### <script>x</script>\n\n- <img src=x onerror=y>\n\n> <b>q</b>');
+    expect(html).not.toMatch(/<script|<img|<b>/);
+    expect(html).toContain('<h3>&lt;script&gt;x&lt;/script&gt;</h3>');
   });
 });
 

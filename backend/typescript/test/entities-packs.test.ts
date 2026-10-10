@@ -28,7 +28,7 @@ const EXPECTED_TYPE_IDS = [
 describe('feature.entities.nodes pack', () => {
   it('manifest pins name/version and exactly the six node typeIds', () => {
     expect(manifest.name).toBe('feature.entities.nodes');
-    expect(manifest.version).toBe('1.1.0');
+    expect(manifest.version).toBe('1.1.1');
     expect(manifest.nodes.map((n) => n.typeId).sort()).toEqual([...EXPECTED_TYPE_IDS].sort());
     for (const n of manifest.nodes) expect(n.role).toBe('action');
   });
@@ -38,7 +38,7 @@ describe('feature.entities.nodes pack', () => {
       join(here, '..', 'src', 'features', 'entities', 'feature.ts'),
       'utf8',
     );
-    expect(featureSrc).toContain("{ name: 'feature.entities.nodes', version: '1.1.0' }");
+    expect(featureSrc).toContain("{ name: 'feature.entities.nodes', version: '1.1.1' }");
   });
 
   it('impl exports exactly the manifest nodes; executors drive the surface; create uses the ADR 0162 id', async () => {

@@ -13,11 +13,15 @@
  *
  * `/email` stays a HUB (provider status · sender · templates · campaigns) — this
  * pins the templates lane, not a dissolution of the page.
+ *
+ * Sabotage-witnessed (/grade-tests wave 9, `w9g4-tr-*`): dropping `?org=` from the
+ * href, a delete button or a <textarea> on a cell, loading a different id, a 404
+ * treated as a load failure, and removing the detail Delete each turn a case red.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
-import type { EmailTemplate } from '../emailClient.js';
+import type { EmailTemplate, ProviderStatus } from '../emailClient.js';
 
 const client = vi.hoisted(() => ({
   listOrgs: vi.fn(), listTemplates: vi.fn(), getTemplate: vi.fn(), createTemplate: vi.fn(),
@@ -61,7 +65,9 @@ beforeEach(() => {
   client.listCampaigns.mockResolvedValue([]);
   client.listSegments.mockResolvedValue([]);
   client.getEmailSettings.mockResolvedValue({ senderAddress: 'a@b.test', configured: true });
-  client.getProviderStatus.mockResolvedValue(null);
+  // A real `ProviderStatus` — `getProviderStatus` never resolves null (that parked the
+  // hub's provider card in "loading" forever).
+  client.getProviderStatus.mockResolvedValue({ providers: [], defaultProvider: null, senderAddress: 'a@b.test' } satisfies ProviderStatus);
 });
 
 describe('the Email hub templates collection', () => {
@@ -109,6 +115,6 @@ describe('the template detail page', () => {
 
   it('owns the delete action', async () => {
     renderDetail();
-    expect(await screen.findByRole('button', { name: /delete/i })).toBeTruthy();
+    expect(await screen.findByRole('button', { name: /^delete$/i })).toBeTruthy();
   });
 });

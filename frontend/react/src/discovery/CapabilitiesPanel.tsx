@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { Link } from 'react-router-dom';
 import i18n from '../i18n/index.js';
 import { useFeatureAccess } from '../featureToggles/FeatureAccessContext.js';
 import { getCapabilities } from '../client/runsClient.js';
 import { authedHeaders, config, fetchOpts } from '../client/config.js';
-import { McpToolsPanel } from '../mcp/McpToolsPanel.js';
 import { PageHeader } from '../ui/PageHeader.js';
 import { DataTable } from '../ui/DataTable.js';
 import { KeyFigureBand } from '../ui/KeyFigure.js';
@@ -213,9 +213,9 @@ export function CapabilitiesPanel() {
               ariaLabel={t('coverageAriaLabel')}
               {...(blocked > 0 ? { activeKey: coverageFilter, onToggle: (k: string) => setCoverageFilter((p) => (p === k ? null : k)) } : {})}
               figures={[
-                { key: 'runnable', label: t('figureRunnable'), value: runnable.length, glyph: <CheckIcon size={13} /> },
-                { key: 'total', label: t('figureTotalNodes'), value: nodes.length, glyph: <BoxesIcon size={13} /> },
-                { key: 'blocked', label: t('figureBlocked'), value: blocked, tone: blocked > 0 ? 'attention' : 'default', glyph: <ZapIcon size={13} /> },
+                { key: 'runnable', label: t('figureRunnable'), value: runnable.length },
+                { key: 'total', label: t('figureTotalNodes'), value: nodes.length },
+                { key: 'blocked', label: t('figureBlocked'), value: blocked, tone: blocked > 0 ? 'attention' : 'default' },
               ]}
             />
             {blockedRows.length > 0 ? (
@@ -367,7 +367,13 @@ export function CapabilitiesPanel() {
         )}
       </div>
 
-      <McpToolsPanel />
+      {/* ADR 0788 D6 — the MCP tool list moved to Access → AI clients, where a
+          person can also get the server address and a key. A pointer, not a copy. */}
+      <div className="surface-card">
+        <h2>{t('mcpMovedTitle')}</h2>
+        <p className="muted">{t('mcpMovedBody')}</p>
+        <Link to="/access?tab=mcp">{t('mcpMovedLink')}</Link>
+      </div>
       <A2APeerPanel />
 
       {devTools.enabled && (

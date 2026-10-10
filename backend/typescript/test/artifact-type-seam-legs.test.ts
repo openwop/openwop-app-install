@@ -52,8 +52,10 @@ const manifest = (entry: Record<string, unknown>) => ({
  *  valid but the loader cannot resolve its `schemaRef` — the only way to reach the
  *  finding-2 path, since leg 5's validator would otherwise reject first. */
 const install = async (m: unknown, withSchema = true) => {
-  const res = await fetch(`${BASE}/v1/host/sample/artifacttypes/install`, {
-    method: 'POST', headers: { 'content-type': 'application/json' },
+  const res = await fetch(`${BASE}/host/sample/artifacttypes/install`, {
+    // ADR 0812 — on the unversioned seam path a credential-less call is a major-2
+    // request and is refused 401 (RFC 0200); the `/v1` twin minted an anon session.
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer dev-token' },
     body: JSON.stringify({ manifest: m, schemas: withSchema ? { [ID]: SCHEMA } : {} }),
   });
   return { status: res.status, json: (await res.json()) as Record<string, unknown> };
@@ -65,7 +67,8 @@ describe('RFC 0139 — seam legs', () => {
     // fields by name, ignored it, registered the type, and returned 200.
     const bad = await install(manifest({ dispalyName: 'typo' }));
     expect(bad.status, 'an unknown manifest key was silently accepted').not.toBe(200);
-    expect(String(bad.json.error ?? '')).toBe('manifest_invalid');
+    // Major 2 vendor-namespaces a host-own code (`v2ErrorCode`).
+    expect(String(bad.json.error ?? '')).toBe('openwop-app.manifest_invalid');
   });
 
   it('leg 5 is not over-broad: a RECOGNISED-shape manifest still installs', async () => {

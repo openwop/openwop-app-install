@@ -18,8 +18,11 @@ import { join } from 'node:path';
 import { BACKEND_FEATURES } from '../src/features/index.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 
-/** The four graduated features + the one retired inert switch. */
-const GRADUATED = ['run-input-forms', 'sharing', 'developer-keys', 'models', 'context-economy'] as const;
+/** The graduated features still registered as packages (core substrate). */
+const GRADUATED = ['sharing', 'developer-keys'] as const;
+/** ADR 0820 §8.3 — graduated in ADR 0434, then retired as REGISTRY entries too:
+ *  each was a `registerRoutes: () => {}` shell kept only so `core` could name it. */
+const RETIRED_ENTRIES = ['run-input-forms', 'models', 'context-economy'] as const;
 
 const REPO_ROOT = join(import.meta.dirname, '../../..');
 
@@ -60,5 +63,22 @@ describe('ADR 0434 — graduated substrate toggles', () => {
     // commented-out block would make the feature invisible to the "always-on must
     // be core" check — passing CI while shipping excludable substrate.
     expect(/\btoggleDefault\s*:/.test(src), `${id}/feature.ts must not contain the literal 'toggleDefault:'`).toBe(false);
+  });
+
+  it.each(RETIRED_ENTRIES)('%s is no longer a registered backend feature, nor named by the catalog (ADR 0820 §8.3)', (id) => {
+    expect(BACKEND_FEATURES.find((f) => f.id === id)).toBeUndefined();
+    const catalog = JSON.parse(readFileSync(join(REPO_ROOT, 'distributions/bundles.json'), 'utf8')) as {
+      core: string[];
+      bundles: Record<string, { features: string[] }>;
+    };
+    expect(catalog.core).not.toContain(id);
+    for (const def of Object.values(catalog.bundles)) expect(def.features).not.toContain(id);
+  });
+
+  it.each(RETIRED_ENTRIES)('%s still resolves no toggle, and its stale overrides are still retired at boot', (id) => {
+    expect(getToggleDefault(id)).toBeFalsy();
+    const src = readFileSync(join(import.meta.dirname, '../src/features/index.ts'), 'utf8');
+    const list = /const RETIRED_TOGGLE_IDS = \[([\s\S]*?)\] as const;/.exec(src)?.[1] ?? '';
+    expect(list).toContain(`'${id}'`);
   });
 });

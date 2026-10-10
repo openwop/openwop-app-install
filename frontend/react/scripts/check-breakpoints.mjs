@@ -4,7 +4,11 @@
  *
  * Responsive thresholds express layout INTENT, not device brands. The governed
  * vocabulary below is the named set (plus each value's max-width complement,
- * `B - 1`); a new media query must use one of these. The stragglers that
+ * `B - 1`); a new media OR CONTAINER query must use one of these, in the
+ * `min-/max-width` form or the range form (`width >= 760px`, `width < 760px`).
+ * Container queries joined the gate with the Access Hub's `.hub-split`
+ * (ADR 0144 addendum): a component inside the shell is laid out by its own
+ * width, and the same intent vocabulary names that width. The stragglers that
  * predate the vocabulary are held in a shrink-only EXCEPTIONS ledger — they
  * are Phase 7 migration targets, not license for new ad-hoc widths.
  *
@@ -27,6 +31,10 @@ const ALLOWED = new Set(VOCABULARY.flatMap((b) => [`${b}px`, `${b - 1}px`]));
  *  never add). Each entry is `[threshold, maxOccurrences]`. */
 const EXCEPTIONS = new Map([
   ['620px', 1],
+  // Found 2026-10-07 when the scan learned to read EVERY width on a line: the
+  // old pattern kept only the last one, so `(min-width: 621px) and (max-width:
+  // 860px)` was counted as 860 and this half was never checked.
+  ['621px', 1],
   ['700px', 3],
   ['761px', 2],
   ['861px', 2],
@@ -49,7 +57,12 @@ for (const file of walkCss(SRC)) {
   const src = readFileSync(file, 'utf8');
   const lines = src.split('\n');
   lines.forEach((line, i) => {
-    for (const m of line.matchAll(/@media[^\n{]*\((?:min|max)-width:\s*([0-9.]+(?:px|rem|em))/g)) {
+    if (!/@(?:media|container)\b/.test(line)) return;
+    const found = [
+      ...line.matchAll(/\((?:min|max)-width:\s*([0-9.]+(?:px|rem|em))/g),
+      ...line.matchAll(/\(\s*width\s*[<>]=?\s*([0-9.]+(?:px|rem|em))\s*\)/g),
+    ];
+    for (const m of found) {
       const t = m[1];
       counts.set(t, (counts.get(t) ?? 0) + 1);
       sites.push({ t, at: `${relative(SRC, file)}:${i + 1}` });

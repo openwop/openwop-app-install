@@ -16,12 +16,17 @@
  * MED2-R1 guards this fix's own first cut, which answered a failed LIBRARY read
  * with `source = 'missing'` → "Not a library image": one false claim swapped for
  * another, inside the fix for that family. `source` must stay `null`.
+ *
+ * Sabotage: `setProvidersFailed(true)` → `setProviders([])` reds the first case;
+ * `setLibraryFailed(true)` → `setSource('missing')` reds the third.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import type * as Client from '../mediaClient.js';
+import type { ImageProviderOption, MediaAsset } from '../mediaClient.js';
 
-const listAssets = vi.hoisted(() => vi.fn());
-const listImageProviders = vi.hoisted(() => vi.fn());
+const listAssets = vi.hoisted(() => vi.fn<typeof Client.listAssets>());
+const listImageProviders = vi.hoisted(() => vi.fn<typeof Client.listImageProviders>());
 vi.mock('../mediaClient.js', () => ({
   listAssets,
   listImageProviders,
@@ -32,12 +37,12 @@ vi.mock('../mediaClient.js', () => ({
 
 import { EditImageDialog } from '../EditImageDialog.js';
 
-const SOURCE = {
+const SOURCE: MediaAsset = {
   assetId: 'a1', orgId: 'o1', name: 'hero.png', contentType: 'image/png', sizeBytes: 10,
   tags: [], usageCount: 0, serveUrl: '/host/openwop-app/assets/tok-a1', serveToken: 'tok-a1',
   createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
 };
-const PROVIDERS = [{ provider: 'openai', ops: ['edit', 'inpaint'] }];
+const PROVIDERS: ImageProviderOption[] = [{ provider: 'openai', credentialRefs: ['byok:openai'], ops: ['edit', 'inpaint'] }];
 
 const open = () =>
   render(

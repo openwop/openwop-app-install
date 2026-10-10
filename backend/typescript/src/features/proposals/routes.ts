@@ -99,7 +99,7 @@ export function registerProposalsRoutes(deps: RouteDeps): void {
 
   // List — seeds a canonical demo draft so the behavioral leg is non-vacuous.
   app.get(
-    '/v1/host/openwop-app/proposals',
+    '/host/openwop-app/proposals',
     wrap(async (req, res) => {
       const tenant = tenantOf(req);
       await ensureDemoProposal(tenant);
@@ -110,7 +110,7 @@ export function registerProposalsRoutes(deps: RouteDeps): void {
   );
 
   app.get(
-    '/v1/host/openwop-app/proposals/:id',
+    '/host/openwop-app/proposals/:id',
     wrap(async (req, res) => {
       const p = await getProposal(tenantOf(req), paramId(req));
       if (!p) throw new OpenwopError('not_found', 'Proposal not found.', 404);
@@ -120,7 +120,7 @@ export function registerProposalsRoutes(deps: RouteDeps): void {
 
   // Revise — MUST NOT activate.
   app.patch(
-    '/v1/host/openwop-app/proposals/:id',
+    '/host/openwop-app/proposals/:id',
     wrap(async (req, res) => {
       const body = (req.body ?? {}) as { title?: unknown; rationale?: unknown; artifact?: unknown };
       const patch: { title?: string; rationale?: string; artifact?: Record<string, unknown> } = {};
@@ -138,7 +138,7 @@ export function registerProposalsRoutes(deps: RouteDeps): void {
 
   // Apply — scope-gated (403), installs the stored byte image (no re-synthesis).
   app.post(
-    '/v1/host/openwop-app/proposals/:id/apply',
+    '/host/openwop-app/proposals/:id/apply',
     wrap(async (req, res) => {
       await assertCanApply(req);
       try {
@@ -158,7 +158,7 @@ export function registerProposalsRoutes(deps: RouteDeps): void {
   );
 
   app.post(
-    '/v1/host/openwop-app/proposals/:id/reject',
+    '/host/openwop-app/proposals/:id/reject',
     wrap(async (req, res) => {
       const existing = await getProposal(tenantOf(req), paramId(req));
       if (!existing) throw new OpenwopError('not_found', 'Proposal not found.', 404);
@@ -171,7 +171,7 @@ export function registerProposalsRoutes(deps: RouteDeps): void {
 
   // Archive (soft delete).
   app.delete(
-    '/v1/host/openwop-app/proposals/:id',
+    '/host/openwop-app/proposals/:id',
     wrap(async (req, res) => {
       const existing = await getProposal(tenantOf(req), paramId(req));
       if (!existing) throw new OpenwopError('not_found', 'Proposal not found.', 404);

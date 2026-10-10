@@ -29,6 +29,12 @@ export const SIGN_TARGET_KINDS: SignTargetKind[] = ['commerce_quote', 'document'
 export interface SignTarget {
   kind: SignTargetKind;
   id: string;
+  /** ADR 0838 (row 24 grade-code H1) — for a document, the immutable version
+   *  the request was made over. Every later render (the signer page, sign,
+   *  certificate) shows THAT text, never text saved after the request. Absent
+   *  on requests made before this field (they render the current version, as
+   *  before, and a change since still voids the sign through the hash). */
+  versionId?: string;
 }
 
 export interface RenderedTarget {
@@ -38,6 +44,8 @@ export interface RenderedTarget {
   canonical: string;
   /** A short title for the certificate / calendar / UI. */
   title: string;
+  /** For a document: the version rendered (pinned onto the request's target). */
+  versionId?: string;
 }
 
 /** Stable stringify: object keys sorted recursively, so the serialization is
@@ -62,7 +70,7 @@ const money = (n: unknown): string => (typeof n === 'number' && Number.isFinite(
  * (never a private/PII field). Throws `not_found` if the target is missing or not
  * in a signable state for this (tenant, org).
  */
-export async function renderTarget(tenantId: string, orgId: string, target: SignTarget): Promise<RenderedTarget> {
+export async function renderTarget(tenantId: string, orgId: string, target: SignTarget, opts: { reader?: string } = {}): Promise<RenderedTarget> {
   if (target.kind === 'commerce_quote') {
     const { getQuote, projectQuotePublic } = await import('../commerce/quotes.js');
     const q = await getQuote(tenantId, orgId, target.id);
@@ -96,13 +104,19 @@ export async function renderTarget(tenantId: string, orgId: string, target: Sign
   }
 
   // document
-  const { getDocument, getVersion } = await import('../documents/documentsService.js');
+  const { getDocument, getVersion, canReadDocument } = await import('../documents/documentsService.js');
   const doc = await getDocument(tenantId, orgId, target.id);
   if (!doc) throw new OpenwopError('not_found', 'Document not found.', 404, { target: target.id });
-  if (!doc.currentVersionId) throw new OpenwopError('not_found', 'Document has no content to sign.', 404, { target: target.id });
-  const version = await getVersion(tenantId, orgId, target.id, doc.currentVersionId);
+  // ADR 0838 D3 — sending a document out to a signer is a READ of its text: the
+  // requester must pass the same document read gate as every other exit.
+  if (opts.reader !== undefined && !(await canReadDocument(tenantId, doc, opts.reader))) {
+    throw new OpenwopError('not_found', 'Document not found.', 404, { target: target.id });
+  }
+  const versionId = target.versionId ?? doc.currentVersionId;
+  if (!versionId) throw new OpenwopError('not_found', 'Document has no content to sign.', 404, { target: target.id });
+  const version = await getVersion(tenantId, orgId, target.id, versionId);
   if (!version) throw new OpenwopError('not_found', 'Document has no content to sign.', 404, { target: target.id });
   const content = version.content;
-  const canonicalObj = { kind: 'document', documentId: target.id, versionId: doc.currentVersionId, content };
-  return { markdown: content, canonical: stableStringify(canonicalObj), title: doc.title };
+  const canonicalObj = { kind: 'document', documentId: target.id, versionId, content };
+  return { markdown: content, canonical: stableStringify(canonicalObj), title: doc.title, versionId };
 }

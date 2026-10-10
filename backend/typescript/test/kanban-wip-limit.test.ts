@@ -39,11 +39,11 @@ function client(): { get: (p: string) => Promise<{ status: number; body: any }>;
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b) };
 }
 
-const KB = '/v1/host/openwop-app/kanban';
+const KB = '/host/openwop-app/kanban';
 
 async function boardOwner(): Promise<{ c: ReturnType<typeof client>; boardId: string; todoId: string }> {
   const c = client();
-  expect((await c.post('/v1/host/openwop-app/test/login', { email: `wip-${Date.now()}-${Math.floor(Math.random() * 1e6)}@acme.test` })).status).toBe(201);
+  expect((await c.post('/host/openwop-app/test/login', { email: `wip-${Date.now()}-${Math.floor(Math.random() * 1e6)}@acme.test` })).status).toBe(201);
   const b = await c.post(`${KB}/boards`, { name: 'WIP board' });
   expect(b.status, JSON.stringify(b.body)).toBe(201);
   const todo = (b.body.columns as Array<{ id: string; name: string }>).find((col) => /to ?do/i.test(col.name) || col.id === 'todo');

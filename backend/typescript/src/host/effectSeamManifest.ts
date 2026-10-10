@@ -81,6 +81,7 @@ export const SEAM_CALL_SITES: ReadonlyArray<{ file: string; effectKind: string; 
   { file: 'src/subruns/subRunDispatcher.ts', effectKind: 'dispatch', seam: 'queue.sub-run-dispatch' },
   { file: 'src/notifications/emitter.ts', effectKind: 'notification', seam: 'queue.notification-emit' },
   { file: 'src/host/smtpEgress.ts', effectKind: 'email', seam: 'smtp.send' },
+  { file: 'src/host/runStarter.ts', effectKind: 'dispatch', seam: 'queue.run-start' },
 ];
 
 export const SEAM_ROWS: readonly SeamRow[] = [
@@ -106,4 +107,9 @@ export const SEAM_ROWS: readonly SeamRow[] = [
   // rather than choosing.
   { seam: 'smtp.send', kind: 'smtp', guarded: true, guardedBy: GUARDED_BY, branchReFires: true,
     note: 'Direct SMTP egress (host/smtpEgress.ts).' },
+  // ADR 0764 D3 — a run started from inside a node execution (an agent tool the
+  // agent-runner re-issues on `:fork`). It was unlisted, so a fork started a
+  // duplicate real run and the suite could not see the seam.
+  { seam: 'queue.run-start', kind: 'queue', guarded: true, guardedBy: GUARDED_BY, branchReFires: true,
+    note: 'host/runStarter.ts startWorkflowRun — every host-initiated run launch (agent tools, schedules, approvals).' },
 ];

@@ -34,14 +34,14 @@ async function jsonFetch<T = unknown>(path: string, init: RequestInit = {}): Pro
 }
 
 async function newSession(title: string): Promise<string> {
-  const r = await jsonFetch<{ sessionId: string }>('/v1/host/openwop-app/chat/sessions', { method: 'POST', body: JSON.stringify({ title }) });
+  const r = await jsonFetch<{ sessionId: string }>('/host/openwop-app/chat/sessions', { method: 'POST', body: JSON.stringify({ title }) });
   return r.body.sessionId;
 }
 
 /** Append a message with a KNOWN id (so the edit/delete can target it). */
 async function appendMsg(sessionId: string, role: string, content: string): Promise<string> {
   const messageId = `${sessionId}-${Math.random().toString(36).slice(2)}`;
-  await jsonFetch(`/v1/host/openwop-app/chat/sessions/${sessionId}/messages`, {
+  await jsonFetch(`/host/openwop-app/chat/sessions/${sessionId}/messages`, {
     method: 'POST', body: JSON.stringify({ messageId, role, content }),
   });
   return messageId;
@@ -49,7 +49,7 @@ async function appendMsg(sessionId: string, role: string, content: string): Prom
 
 interface SearchResp { hits: Array<{ conversationId: string; messageId?: string; snippet: string }> }
 async function search(q: string): Promise<SearchResp> {
-  return (await jsonFetch<SearchResp>(`/v1/host/openwop-app/chat/search?q=${encodeURIComponent(q)}`)).body;
+  return (await jsonFetch<SearchResp>(`/host/openwop-app/chat/search?q=${encodeURIComponent(q)}`)).body;
 }
 /** Message-level hits for a conversation (title hits carry no messageId). */
 const msgHits = (r: SearchResp, sessionId: string): number =>
@@ -72,7 +72,7 @@ describe('CSC-1 — search freshness tracks in-place edit + tombstone-delete', (
     // Baseline (non-vacuous): the original text is indexed + matches.
     expect(msgHits(await search('aardvarkoriginal'), s), 'baseline: original text indexed').toBe(1);
 
-    const put = await jsonFetch(`/v1/host/openwop-app/chat/sessions/${s}/messages/${mid}`, {
+    const put = await jsonFetch(`/host/openwop-app/chat/sessions/${s}/messages/${mid}`, {
       method: 'PUT', body: JSON.stringify({ content: 'bluejayupdated forecast text' }),
     });
     expect(put.status, 'edit succeeds').toBe(200);
@@ -89,7 +89,7 @@ describe('CSC-1 — search freshness tracks in-place edit + tombstone-delete', (
     await appendMsg(s, 'assistant', 'acknowledged'); // a sibling so the conv isn't empty post-tombstone
     expect(msgHits(await search('crocodileconfidential'), s), 'baseline: content indexed').toBe(1);
 
-    const del = await jsonFetch(`/v1/host/openwop-app/chat/sessions/${s}/messages/${mid}`, { method: 'DELETE' });
+    const del = await jsonFetch(`/host/openwop-app/chat/sessions/${s}/messages/${mid}`, { method: 'DELETE' });
     expect([200, 204]).toContain(del.status);
 
     // The deleted content must NO LONGER match (born-red: tombstone keeps count ⇒ stale).

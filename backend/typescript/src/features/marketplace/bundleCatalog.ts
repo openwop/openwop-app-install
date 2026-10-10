@@ -50,12 +50,17 @@ export interface BundleFeatureInfo {
 export interface FeatureBundleInfo {
   id: string;
   label: string;
+  /** ADR 0820 §7 UI — the store goal-group (one of the catalog's `groups`),
+   *  when `bundles.json` declares one. The store groups cards by this DATA. */
+  group?: string;
   features: BundleFeatureInfo[];
 }
 
 export interface FeatureBundleCatalog {
   /** False when this deployment ships no `distributions/bundles.json`. */
   available: boolean;
+  /** ADR 0820 §7 UI — the ordered store goal-group ids from `bundles.json`. */
+  groups: string[];
   bundles: FeatureBundleInfo[];
   /** Non-core, non-bundled registered features — individually selectable. */
   standalone: BundleFeatureInfo[];
@@ -76,7 +81,7 @@ function enrich(id: string, registeredIds: Set<string>): BundleFeatureInfo {
 }
 
 export function featureBundleCatalog(): FeatureBundleCatalog {
-  const empty: FeatureBundleCatalog = { available: false, bundles: [], standalone: [], core: [] };
+  const empty: FeatureBundleCatalog = { available: false, groups: [], bundles: [], standalone: [], core: [] };
   const parsed = readBundleCatalog();
   if (!parsed) return empty;
 
@@ -91,6 +96,7 @@ export function featureBundleCatalog(): FeatureBundleCatalog {
     bundles.push({
       id,
       label: def.label ?? id,
+      ...(def.group ? { group: def.group } : {}),
       features: featureIds.map((fid) => enrich(fid, registeredIds)),
     });
   }
@@ -104,5 +110,5 @@ export function featureBundleCatalog(): FeatureBundleCatalog {
 
   const core = coreIds.slice().sort().map((id) => enrich(id, registeredIds));
 
-  return { available: true, bundles, standalone, core };
+  return { available: true, groups: parsed.groups, bundles, standalone, core };
 }

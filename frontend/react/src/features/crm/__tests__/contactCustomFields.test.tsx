@@ -11,10 +11,18 @@
  * unset and `''` as a real empty value), and an unparseable number must be
  * omitted too rather than sent as NaN — which JSON-serializes to `null` and
  * would silently ERASE a stored value on a typo.
+ *
+ * Sabotage that turns it red (wave-4 /grade-tests probes, 9/9 witnessed): the
+ * boolean's `false` seed dropped; an empty box or a NaN sent; booleans sent as
+ * strings; `required` ignored by `missingRequired`; the page's failed read
+ * written as `[]`; the enum-options gate, the reference entity or the
+ * declined-confirm guard removed.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor, fireEvent, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
+// Type-only (erased at runtime, so it does not race `vi.mock`).
+import type * as CrmClient from '../crmClient.js';
 
 import { toDraft, toWire, missingRequired } from '../ContactCustomFields.js';
 import type { ContactFieldDef } from '../crmClient.js';
@@ -69,9 +77,9 @@ describe('CRM-UX-7 — draft ⇄ wire', () => {
 
 // ── The definitions page ────────────────────────────────────────────────────
 const api = vi.hoisted(() => ({
-  listContactFields: vi.fn(),
-  createContactField: vi.fn(),
-  deleteContactField: vi.fn(),
+  listContactFields: vi.fn<typeof CrmClient.listContactFields>(),
+  createContactField: vi.fn<typeof CrmClient.createContactField>(),
+  deleteContactField: vi.fn<typeof CrmClient.deleteContactField>(),
 }));
 vi.mock('../crmClient.js', async (orig) => {
   const actual = await orig<Record<string, unknown>>();
@@ -87,11 +95,13 @@ vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
 import { ContactFieldsPage } from '../ContactFieldsPage.js';
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   access.useFeatureAccess.mockReturnValue(makeFeatureAccess({ enabled: true, loading: false }));
   api.listContactFields.mockResolvedValue(DEFS);
+  api.createContactField.mockImplementation(async (input) => ({ defId: 'f-new', createdAt: '2026-01-01T00:00:00Z', required: false, ...input }));
+  api.deleteContactField.mockResolvedValue(undefined);
 });
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 function viewFields(): void {
   render(
@@ -199,13 +209,16 @@ describe('CRM-UX-7 — the definitions page', () => {
     }));
   });
 
-  it('a delete is confirmed, and the confirm names what stops matching', async () => {
+  it('a delete is confirmed, and the confirm names the field being deleted', async () => {
+    // Retitled from "…names what stops matching": with no <ConfirmRoot> host
+    // mounted, `confirm()` falls back to `window.confirm(opts.title)`, so the
+    // BODY (the consequence copy) is not observable at this layer — the title
+    // naming the field is.
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
     viewFields();
     fireEvent.click(await screen.findByLabelText('Delete the Tier field'));
     await waitFor(() => expect(api.deleteContactField).toHaveBeenCalledWith('f1'));
-    expect(confirmSpy).toHaveBeenCalled();
-    confirmSpy.mockRestore();
+    expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining('Tier'));
   });
 
   it('a declined confirm deletes nothing', async () => {
@@ -214,6 +227,5 @@ describe('CRM-UX-7 — the definitions page', () => {
     fireEvent.click(await screen.findByLabelText('Delete the Tier field'));
     await waitFor(() => expect(confirmSpy).toHaveBeenCalled());
     expect(api.deleteContactField).not.toHaveBeenCalled();
-    confirmSpy.mockRestore();
   });
 });

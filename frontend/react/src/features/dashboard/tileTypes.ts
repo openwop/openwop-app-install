@@ -42,6 +42,9 @@ export interface DashboardTileDef {
   defaultSize: TileSize;
   /** May the user toggle half↔full at runtime? */
   resizable: boolean;
+  /** Show the per-tile refresh control. `false` for a tile that reads no data
+   *  (ADR 0844 — the Ask composer), where "refresh" would do nothing. */
+  refreshable?: boolean;
   /** Lazy component — registered eagerly (metadata), rendered lazily. */
   component: LazyExoticComponent<ComponentType<DashboardTileProps>>;
 }

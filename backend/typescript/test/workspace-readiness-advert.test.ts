@@ -18,6 +18,8 @@
  * the whole capability turns the sqlite leg red. Neither can pass vacuously,
  * because each asserts the OPPOSITE of the other on the same key.
  */
+import { loadConfigFromEnv } from '../src/index.js';
+import { v1Advertisement } from './support/v1Advertisement.js';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -93,7 +95,7 @@ describe('ADR 0551 P2 — fail closed on request', () => {
 let memServer: http.Server;
 let memBase: string;
 let fileServer: http.Server;
-let fileBase: string;
+let fileDsnUsed = '';
 let tmp: string;
 
 beforeAll(async () => {
@@ -106,9 +108,10 @@ beforeAll(async () => {
 
   tmp = mkdtempSync(join(tmpdir(), 'owp-workspace-advert-'));
   const fileDsn = `sqlite://${join(tmp, 'workspace.db')}`;
+  fileDsnUsed = fileDsn;
   process.env.OPENWOP_STORAGE_DSN = fileDsn;
   const fileApp = await createApp({ port: 0, storageDsn: fileDsn, serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { fileServer = fileApp.listen(0, '127.0.0.1', () => { fileBase = `http://127.0.0.1:${(fileServer.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { fileServer = fileApp.listen(0, '127.0.0.1', () => res()); });
 }, 60_000);
 
 afterAll(async () => {
@@ -122,10 +125,12 @@ afterAll(async () => {
  *  and `dispatch` — NOT inside the nested `capabilities` object. Asserting the
  *  wrong path would make "absent" true everywhere and both legs below vacuous,
  *  which is why the shape is checked before the key is. */
-async function advertisement(base: string): Promise<Record<string, unknown>> {
-  const res = await fetch(`${base}/.well-known/openwop`);
-  expect(res.status).toBe(200);
-  const body = (await res.json()) as Record<string, unknown>;
+async function advertisement(storageDsn: string): Promise<Record<string, unknown>> {
+  // ADR 0858 debt: this claim is on the v1 document only (the v2 family is ledgered), and
+  // since ADR 0812 P3c the header-less discovery read is v2, so it is read from the v1
+  // builder through the bridge until the family is projected.
+  // The builder reads `config.storageDsn`, so each leg names its own boot's profile.
+  const body = await v1Advertisement({ ...loadConfigFromEnv(), storageDsn }) as Record<string, unknown>;
   expect(body.protocolVersion).toBeTruthy();
   expect(body.capabilities).toBeTypeOf('object');
   return body;
@@ -133,7 +138,7 @@ async function advertisement(base: string): Promise<Record<string, unknown>> {
 
 describe('ADR 0551 P2 — /.well-known/openwop follows the readiness check', () => {
   it('a memory:// boot does NOT advertise the workspace', async () => {
-    const ad = await advertisement(memBase);
+    const ad = await advertisement('memory://');
     expect(ad.workspace).toBeUndefined();
     // Sibling root keys are still there — the absence is the gate, not a
     // truncated document.
@@ -141,7 +146,7 @@ describe('ADR 0551 P2 — /.well-known/openwop follows the readiness check', () 
   });
 
   it('a sqlite FILE boot DOES advertise it, with the same shape as before', async () => {
-    const ad = await advertisement(fileBase);
+    const ad = await advertisement(fileDsnUsed);
     // The shape is unchanged — P2 gates the claim, it does not renegotiate it.
     expect(ad.workspace).toEqual({ supported: true, maxFileBytes: 65_536 });
   });
@@ -151,7 +156,7 @@ describe('ADR 0551 P2 — /.well-known/openwop follows the readiness check', () 
     // eight conformance scenarios and every workspace unit test. Gating those
     // would have traded a real coverage loss for an honesty gain the flag does
     // not require — so this pins that they were NOT gated.
-    const res = await fetch(`${memBase}/v1/host/workspace/files`, {
+    const res = await fetch(`${memBase}/host/workspace/files`, {
       headers: { authorization: 'Bearer dev-token' },
     });
     expect(res.status).toBe(200);

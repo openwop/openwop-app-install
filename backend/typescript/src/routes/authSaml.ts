@@ -52,7 +52,7 @@ function subjectDigest(nameId: string): string {
 export function registerSamlAuthRoutes(app: Express): void {
   // BOTH spellings (see the authScim registration note) — the pinned suite drives
   // the `sample` alias, reachable independent of the testSeam rewrite.
-  app.post(['/v1/host/openwop-app/auth/saml/validate', '/v1/host/sample/auth/saml/validate'], async (req, res, next) => {
+  app.post(['/host/openwop-app/auth/saml/validate', '/host/sample/auth/saml/validate'], async (req, res, next) => {
     try {
       const configured = process.env.OPENWOP_TEST_SAML_IDP_URL;
       if (!configured) {

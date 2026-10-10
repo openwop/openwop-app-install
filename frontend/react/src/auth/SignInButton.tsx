@@ -12,17 +12,13 @@
  * matched to the existing dark builder palette.
  */
 
-import { useEffect, useState, useRef } from 'react';
-import { Button } from '../ui/Button.js';
-import { Notice } from '../ui/Notice.js';
-import { Trans, useTranslation } from 'react-i18next';
+import { Suspense, lazy, useEffect, useState, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import i18n from '../i18n/index.js';
 import { getFormatLocale } from '../i18n/format.js';
-import { Modal } from '../ui/Modal.js';
 import { BuildingIcon, EyeIcon, GlobeIcon, LogOutIcon, TrashIcon, UserIcon } from '../ui/icons/index.js';
-import { A11yPrefsFields } from '../ui/A11yPrefsControl.js';
-import { LanguageSwitcher, localeOptionCount } from '../i18n/LanguageSwitcher.js';
+import { localeOptionCount } from '../i18n/LanguageSwitcher.js';
 import { publishAccountPresence } from './accountPresence.js';
 import { refreshBackendSession, setBackendSessionUser, useBackendSession } from './backendSession.js';
 import {
@@ -34,21 +30,30 @@ import {
 import { useAuth } from './useAuth.js';
 import { finalizeFirebaseSession } from './finalizeSession.js';
 import { logout } from '../features/users/usersClient.js';
-import { GoogleMark } from '../brand/vendor/GoogleMark.js';
 import { useDemoMode } from '../client/useDemoMode.js';
 import { brand } from '../brand/brand.js';
-import { MicrosoftMark } from '../brand/vendor/MicrosoftMark.js';
-import { GithubMark } from '../brand/vendor/GithubMark.js';
-import { AuthCard } from './AuthCard.js';
 import {
   ExistingProviderSignInError,
   getRedirectState,
   signInWithGithub,
   signInWithGoogle,
   signInWithMicrosoft,
-  microsoftSignInEnabled,
 } from './firebase.js';
-import { deleteAccount, RequiresRecentLoginError } from './deleteAccount.js';
+import type { PendingLink, SignInProvider } from './AccountDialogs.js';
+
+// CLNP-8 — the dialogs load on demand (see AccountDialogs.tsx for what moved and why
+// it is safe). One loader, shared by the four lazies and the prefetch, so a warmed
+// chunk serves every dialog.
+const loadAccountDialogs = (): Promise<typeof import('./AccountDialogs.js')> => import('./AccountDialogs.js');
+const SignInDialog = lazy(() => loadAccountDialogs().then((m) => ({ default: m.SignInDialog })));
+const DeleteAccountDialog = lazy(() => loadAccountDialogs().then((m) => ({ default: m.DeleteAccountDialog })));
+const A11yPrefsDialog = lazy(() => loadAccountDialogs().then((m) => ({ default: m.A11yPrefsDialog })));
+const LanguageDialog = lazy(() => loadAccountDialogs().then((m) => ({ default: m.LanguageDialog })));
+/** Warm the dialogs chunk. Fire-and-forget: a failed prefetch is a non-event — the
+ *  lazy import retries when a dialog actually opens. */
+function prefetchAccountDialogs(): void {
+  void loadAccountDialogs().catch(() => undefined);
+}
 
 function describeSignInError(err: unknown): string {
   if (err instanceof ExistingProviderSignInError) return err.message;
@@ -74,99 +79,6 @@ function describeSignInError(err: unknown): string {
     return err.message;
   }
   return String(err);
-}
-
-interface PendingLink {
-  email: string;
-  existingProviders: readonly string[];
-  attemptedProvider: 'google.com' | 'github.com' | 'microsoft.com';
-}
-
-function providerLabel(id: string): string {
-  if (id === 'google.com') return i18n.t('auth:providerGoogle');
-  if (id === 'github.com') return i18n.t('auth:providerGithub');
-  if (id === 'microsoft.com') return i18n.t('auth:providerMicrosoft');
-  return id;
-}
-
-/**
- * Body shown after Firebase rejects sign-in with
- * `auth/account-exists-with-different-credential`. Explains the
- * collision in plain language and offers a single-click flow to:
- *   1. Sign in with the existing provider.
- *   2. Link the rejected credential to the same Firebase user.
- *
- * When `existingProviders` is empty (email-enumeration protection
- * stripped the list), both buttons are offered.
- */
-function LinkAccountBody(props: {
-  pendingLink: PendingLink;
-  busy: boolean;
-  error: string | null;
-  onContinue: (which: 'google' | 'github' | 'microsoft') => Promise<void>;
-  onCancel: () => void;
-}) {
-  const { t } = useTranslation('auth');
-  const { pendingLink, busy, error, onContinue, onCancel } = props;
-  const attempted = providerLabel(pendingLink.attemptedProvider);
-  const known = pendingLink.existingProviders.length > 0;
-  // Render only the existing provider's button when we know it.
-  // Otherwise fall back to both, the user picks the one they
-  // remember signing up with.
-  const choices = known
-    ? pendingLink.existingProviders
-    : ['google.com', 'github.com', ...(microsoftSignInEnabled() ? ['microsoft.com'] : [])].filter((p) => p !== pendingLink.attemptedProvider);
-  return (
-    <>
-      <h3 className="signin-modal-title">{t('linkYourAccount', { provider: attempted })}</h3>
-      <p className="signin-modal-lede muted">
-        {known ? (
-          <Trans
-            t={t}
-            i18nKey="alreadySignedUpKnown"
-            values={{
-              email: pendingLink.email,
-              providers: pendingLink.existingProviders.map(providerLabel).join(` ${t('or')} `),
-              attempted,
-            }}
-            components={{ 0: <strong /> }}
-          />
-        ) : (
-          <Trans
-            t={t}
-            i18nKey="alreadySignedUpUnknown"
-            values={{ email: pendingLink.email, attempted }}
-            components={{ 0: <strong /> }}
-          />
-        )}
-      </p>
-      {error ? <Notice variant="error">{error}</Notice> : null}
-      {choices.map((id) => {
-        const which = id === 'google.com' ? 'google' : id === 'microsoft.com' ? 'microsoft' : 'github';
-        // USERS-UX-17 — one shared `.signin-provider` register; the per-vendor
-        // modifier classes this used to add were defined nowhere.
-        return (
-          <button
-            key={id}
-            className="signin-provider"
-            disabled={busy}
-            type="button"
-            onClick={() => onContinue(which)}
-          >
-            {t('continueWith', { provider: providerLabel(id) })}
-          </button>
-        );
-      })}
-      <button
-        className="signin-modal-cancel"
-        type="button"
-        disabled={busy}
-        onClick={onCancel}
-      >
-        {t('cancel')}
-      </button>
-    </>
-  );
 }
 
 export function SignInButton() {
@@ -229,8 +141,6 @@ export function SignInButton() {
   const [error, setError] = useState<string | null>(null);
   const [pendingLink, setPendingLink] = useState<PendingLink | null>(null);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
-  const [deleting, setDeleting] = useState(false);
-  const [deleteError, setDeleteError] = useState<string | null>(null);
   // Accessibility preferences live in the account menu (moved from the Sidebar
   // footer); the modal reuses the shared A11yPrefsFields (one store, one UI).
   const [a11yOpen, setA11yOpen] = useState(false);
@@ -248,6 +158,14 @@ export function SignInButton() {
   // (signed-out / Firebase-unconfigured). `null` while auth is still resolving.
   const accountPresent: boolean | null = !isConfigured ? false : loading ? null : Boolean(user || backendUser);
   useEffect(() => { publishAccountPresence(accountPresent); }, [accountPresent]);
+  // Warm the dialogs chunk once the page is idle, so the first open does not wait
+  // on the network (the ChatTab prefetch precedent).
+  useEffect(() => {
+    const w = window as Window & { requestIdleCallback?: (cb: () => void) => number };
+    if (typeof w.requestIdleCallback === 'function') w.requestIdleCallback(prefetchAccountDialogs);
+    else { const id = window.setTimeout(prefetchAccountDialogs, 2000); return () => window.clearTimeout(id); }
+    return undefined;
+  }, []);
 
   /**
    * Subscribe to the boot-time redirect-result promise exactly once.
@@ -338,7 +256,7 @@ export function SignInButton() {
    * effect above subscribes to. This function only initiates the
    * redirect; the browser handles the rest.
    */
-  async function attemptSignIn(which: 'google' | 'github' | 'microsoft'): Promise<void> {
+  async function attemptSignIn(which: SignInProvider): Promise<void> {
     setBusy(true);
     setError(null);
     try {
@@ -352,85 +270,32 @@ export function SignInButton() {
     }
   }
 
-  const oidcButtons = (
-    <div className="u-grid u-gap-1">
-      <button className="signin-provider" disabled={busy} aria-busy={busy} type="button" onClick={() => { void attemptSignIn('google'); }}>
-        <GoogleMark />
-        {t('continueWithGoogle')}
-      </button>
-      <button className="signin-provider" disabled={busy} aria-busy={busy} type="button" onClick={() => { void attemptSignIn('github'); }}>
-        <GithubMark />
-        {t('continueWithGithub')}
-      </button>
-      {microsoftSignInEnabled() ? (
-        <button className="signin-provider" disabled={busy} aria-busy={busy} type="button" onClick={() => { void attemptSignIn('microsoft'); }}>
-          <MicrosoftMark />
-          {t('continueWithMicrosoft')}
-        </button>
-      ) : null}
-      {/* §11: surface a visible, announced "still signing in" status while the
-       *  redirect round-trip is in flight (the page navigates away, then returns
-       *  via processRedirectResult on the next load). */}
-      <div className="signin-status muted" role="status" aria-live="polite">
-        {busy ? t('signingInRedirect') : ''}
-      </div>
-    </div>
-  );
-
   if (!account) {
     return (
       <>
         <button
           className="signin-trigger"
           onClick={() => setModalOpen(true)}
+          onMouseEnter={prefetchAccountDialogs}
+          onFocus={prefetchAccountDialogs}
           type="button"
         >
           {t('signIn')}
         </button>
         {modalOpen ? (
-          <Modal
-            label={t('signIn')}
-            onClose={() => { dismissReason(); setModalOpen(false); }}
-            className="signin-modal"
-            scrimClassName="signin-modal-backdrop"
-          >
-            {pendingLink ? (
-              <LinkAccountBody
-                pendingLink={pendingLink}
-                busy={busy}
-                error={error}
-                onContinue={attemptSignIn}
-                onCancel={() => { setPendingLink(null); setError(null); }}
-              />
-            ) : (
-              <>
-                <h3 className="signin-modal-title">
-                  <Trans t={t} i18nKey={demo ? 'signInToSaveTitle' : 'signInIdentityTitle'} components={{ 0: <em /> }} />
-                </h3>
-                <p className="signin-modal-lede muted">
-                  {t(demo ? 'signInToSaveLede' : 'signInIdentityLede')}
-                </p>
-                {presentingReason && signOutReason ? (
-                  <Notice variant="error" announce={t(`sessionRefused_${signOutReason}`)}>
-                    {t(`sessionRefused_${signOutReason}`)}
-                  </Notice>
-                ) : null}
-                {error ? <Notice variant="error">{error}</Notice> : null}
-                <AuthCard
-                  oidc={oidcButtons}
-                  passwordEnabled={true}
-                  onAuthed={onAuthed}
-                />
-                <button
-                  className="signin-modal-cancel"
-                  type="button"
-                  onClick={() => { dismissReason(); setModalOpen(false); }}
-                >
-                  {t('cancel')}
-                </button>
-              </>
-            )}
-          </Modal>
+          <Suspense fallback={null}>
+            <SignInDialog
+              pendingLink={pendingLink}
+              busy={busy}
+              error={error}
+              demo={demo}
+              refusalReason={presentingReason && signOutReason ? signOutReason : null}
+              onAttempt={attemptSignIn}
+              onAuthed={onAuthed}
+              onCancelLink={() => { setPendingLink(null); setError(null); }}
+              onClose={() => { dismissReason(); setModalOpen(false); }}
+            />
+          </Suspense>
         ) : null}
       </>
     );
@@ -445,6 +310,8 @@ export function SignInButton() {
         ref={triggerRef}
         className="account-menu-trigger"
         onClick={() => setMenuOpen((v) => !v)}
+        onMouseEnter={prefetchAccountDialogs}
+        onFocus={prefetchAccountDialogs}
         aria-haspopup="menu"
         aria-expanded={menuOpen}
         aria-label={account.name}
@@ -539,7 +406,6 @@ export function SignInButton() {
               onClick={() => {
                 setMenuOpen(false);
                 setConfirmingDelete(true);
-                setDeleteError(null);
               }}
               type="button"
             >
@@ -550,71 +416,19 @@ export function SignInButton() {
         </div>
       ) : null}
       {confirmingDelete ? (
-        <Modal
-          label={t('confirmAccountDeletion')}
-          onClose={() => { if (!deleting) { setConfirmingDelete(false); restoreFocusToTrigger(); } }}
-          className="signin-modal"
-          scrimClassName="signin-modal-backdrop"
-        >
-            <h3 className="signin-modal-title">{t('deleteAccountTitle')}</h3>
-            <p>
-              <Trans
-                t={t}
-                i18nKey="deleteAccountBody"
-                values={{ email: account.email }}
-                components={{ 0: <strong /> }}
-              />
-            </p>
-            {deleteError ? <Notice variant="error">{deleteError}</Notice> : null}
-            <div className="button-row">
-              <button
-                type="button"
-                className="signin-modal-cancel"
-                disabled={deleting}
-                onClick={() => { setConfirmingDelete(false); restoreFocusToTrigger(); }}
-              >
-                {t('cancel')}
-              </button>
-              {/* USERS-UX-17 — the destructive confirm reads as danger (the
-                  `.signin-danger` class it used to carry was never defined). */}
-              <Button
-                variant="danger"
-                loading={deleting}
-                onClick={async () => {
-                  setDeleting(true);
-                  setDeleteError(null);
-                  try {
-                    const result = await deleteAccount();
-                    console.warn('openwop: account deleted', result);
-                    setConfirmingDelete(false);
-                    // Force reload — the SPA's caches reference a
-                    // tenant id that no longer exists.
-                    window.location.href = '/';
-                  } catch (err) {
-                    if (err instanceof RequiresRecentLoginError) {
-                      setDeleteError(err.message);
-                    } else {
-                      setDeleteError(err instanceof Error ? err.message : String(err));
-                    }
-                  } finally {
-                    setDeleting(false);
-                  }
-                }}
-              >
-                {deleting ? t('deleting') : t('deleteEverything')}
-              </Button>
-            </div>
-        </Modal>
+        <Suspense fallback={null}>
+          <DeleteAccountDialog email={account.email} onClose={() => { setConfirmingDelete(false); restoreFocusToTrigger(); }} />
+        </Suspense>
       ) : null}
       {a11yOpen ? (
-        <Modal onClose={() => { setA11yOpen(false); restoreFocusToTrigger(); }} label={t('a11y:prefsTitle')} showClose>
-          <A11yPrefsFields />
-        </Modal>
+        <Suspense fallback={null}>
+          <A11yPrefsDialog onClose={() => { setA11yOpen(false); restoreFocusToTrigger(); }} />
+        </Suspense>
       ) : null}
       {langOpen ? (
-        <Modal onClose={() => { setLangOpen(false); restoreFocusToTrigger(); }} label={t('common:language')} showClose>
-          <LanguageSwitcher />
-        </Modal>
+        <Suspense fallback={null}>
+          <LanguageDialog onClose={() => { setLangOpen(false); restoreFocusToTrigger(); }} />
+        </Suspense>
       ) : null}
     </div>
   );

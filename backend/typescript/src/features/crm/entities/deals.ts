@@ -21,7 +21,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { DurableCollection } from '../../../host/hostExtPersistence.js';
-import { filterVisibleCrmRecords } from '../../../host/crmRecordVisibility.js';
+import { filterVisibleCrmRecords, registerCrmKernelProjection } from '../../../host/crmRecordVisibility.js';
 import { fireCrmRecordDeleted, onCrmRecordDeleted } from '../../../host/crmRecordLifecycle.js';
 import { OpenwopError } from '../../../types.js';
 import { MAX, MAX_PER_ORG_ENTITIES, assertUnderCap, cleanStr, isStrictDate, nowIso, optStr } from './shared.js';
@@ -42,6 +42,9 @@ export interface Deal {
   title: string;
   pipelineId: string;
   stageId: string;
+  /** ADR 0210 correction — last stage-history sequence reserved by this deal's
+   *  winning CAS. Optional for pre-correction rows; never derived from wall time. */
+  stageHistorySequence?: number;
   amount?: number;
   currency?: string;
   companyId?: string;
@@ -153,6 +156,8 @@ export interface StageHistoryRow {
   toStageId: string;
   actor: string;
   at: string;
+  /** Write-forward landed-deal order; absent on historical rows. */
+  sequence?: number;
   amountAtMove?: number;
   /** The stage's INDEX in its pipeline's ordered `stages` at the moment of the
    *  move (grade-trio residual closure) — a write-time SNAPSHOT, so reports
@@ -172,6 +177,7 @@ async function appendStageHistory(input: {
   fromStageId: string | null;
   toStageId: string;
   actor: string;
+  sequence: number;
   amountAtMove?: number;
   toStagePosition?: number;
 }): Promise<void> {
@@ -185,6 +191,7 @@ async function appendStageHistory(input: {
     toStageId: input.toStageId,
     actor: input.actor,
     at: nowIso(),
+    sequence: input.sequence,
     ...(typeof input.amountAtMove === 'number' ? { amountAtMove: input.amountAtMove } : {}),
     ...(typeof input.toStagePosition === 'number' ? { toStagePosition: input.toStagePosition } : {}),
   };
@@ -195,7 +202,37 @@ async function appendStageHistory(input: {
 export async function getStageHistory(tenantId: string, orgId: string, dealId: string): Promise<StageHistoryRow[]> {
   return (await stageHistory.listForTenantIndexed(tenantId))
     .filter((r) => r.orgId === orgId && r.dealId === dealId)
-    .sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
+    .sort((a, b) => {
+      const aSequence = validStageSequence(a.sequence) ? a.sequence : undefined;
+      const bSequence = validStageSequence(b.sequence) ? b.sequence : undefined;
+      if (aSequence !== undefined && bSequence !== undefined && aSequence !== bSequence) return bSequence - aSequence;
+      // Sequenced rows are write-forward, after this deal's unsequenced history.
+      if (aSequence !== undefined && bSequence === undefined) return -1;
+      if (aSequence === undefined && bSequence !== undefined) return 1;
+      if (a.at !== b.at) return a.at < b.at ? 1 : -1;
+      // Legacy tied timestamps carry no recoverable authoritative order. Keep a
+      // deterministic fallback, without fabricating timestamps or backfilled ranks.
+      return a.historyId < b.historyId ? 1 : a.historyId > b.historyId ? -1 : 0;
+    });
+}
+
+function validStageSequence(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 1;
+}
+
+/** Reserve in the deal CAS, never by append completion time. Only legacy rows
+ *  need a history scan; a CAS loser re-reads the counter even if the winner's
+ *  append is still in flight. No old row or timestamp is rewritten. */
+async function nextStageHistorySequence(d: Deal): Promise<number> {
+  let previous = d.stageHistorySequence;
+  if (!validStageSequence(previous)) {
+    const history = await getStageHistory(d.tenantId, d.orgId, d.dealId);
+    previous = history.length;
+    for (const row of history) if (validStageSequence(row.sequence)) previous = Math.max(previous, row.sequence);
+  }
+  const next = previous + 1;
+  if (!Number.isSafeInteger(next)) throw new OpenwopError('conflict', 'Deal stage-history sequence exhausted.', 409, { dealId: d.dealId });
+  return next;
 }
 
 /** All stage-history rows for a tenant+org's pipeline — the report's raw input
@@ -226,6 +263,16 @@ function parseCloseDate(value: unknown): string {
 
 /** Read projection — pre-amendment rows have no `status`. */
 const projectDeal = (d: Deal): Deal => (d.status ? d : { ...d, status: 'open' });
+
+// ADR 0846 D2 — a kernel reader (a BI metric over `crm.deal`) filters each row on
+// the SAME domain record this module's own reads hand the visibility resolver.
+registerCrmKernelProjection(CRM_DEAL_TYPE, {
+  target: 'deal',
+  project: (rec) => {
+    const d = rec.ext?.['deal'] as Deal | undefined;
+    return d && typeof d.dealId === 'string' && typeof d.orgId === 'string' ? { id: d.dealId, orgId: d.orgId, record: projectDeal(d) } : null;
+  },
+});
 
 /** Resolve the (pipeline, stage) a deal should sit on — defaulting to the org's
  *  default pipeline's first stage, validating any explicit ids belong to the org. */
@@ -315,6 +362,7 @@ export async function createDeal(input: {
     title: cleanStr(input.title, MAX.name, 'Untitled deal'),
     pipelineId,
     stageId,
+    stageHistorySequence: 1,
     ...(typeof input.amount === 'number' && Number.isFinite(input.amount) ? { amount: input.amount } : {}),
     ...(optStr(input.currency, 8) ? { currency: optStr(input.currency, 8) } : {}),
     ...(input.companyId ? { companyId: input.companyId } : {}),
@@ -337,6 +385,7 @@ export async function createDeal(input: {
     fromStageId: null,
     toStageId: d.stageId,
     actor: input.actor ?? input.createdBy,
+    sequence: 1,
     ...(typeof d.amount === 'number' ? { amountAtMove: d.amount } : {}),
     toStagePosition: stageIndex,
   });
@@ -428,6 +477,8 @@ export async function updateDeal(
       }
     }
     if (patch.customFields !== undefined) next.customFields = patch.customFields;
+    // Reserve the rank in the same authoritative CAS as the stage transition.
+    if (stageMoved) next.stageHistorySequence = await nextStageHistorySequence(d);
     const swapped = await deals.cas(raw, next);
     if (!swapped) continue; // lost the race — re-read and recompute
     return await commitDealUpdate(d, next, { stageMoved, movedToPosition, actor, opts });
@@ -445,6 +496,7 @@ async function commitDealUpdate(
   const { stageMoved, movedToPosition, actor, opts } = ctx;
   const { tenantId, orgId, dealId } = next;
   if (stageMoved) {
+    if (!validStageSequence(next.stageHistorySequence)) throw new OpenwopError('internal_error', 'Landed stage move has no history sequence.', 500, { dealId });
     await appendStageHistory({
       tenantId: next.tenantId,
       orgId: next.orgId,
@@ -453,6 +505,7 @@ async function commitDealUpdate(
       fromStageId: d.stageId,
       toStageId: next.stageId,
       actor,
+      sequence: next.stageHistorySequence,
       ...(typeof next.amount === 'number' ? { amountAtMove: next.amount } : {}),
       ...(movedToPosition >= 0 ? { toStagePosition: movedToPosition } : {}),
     });
@@ -465,7 +518,7 @@ async function commitDealUpdate(
   const emit = { tenantId, orgId, entityId: dealId, actor, ...opts } as const;
   // `changed` is the pre-image→landed DIFF (review S1), so a value-equal
   // re-PATCH emits no `updated` either — the landed row IS `next` (the CAS won).
-  const changed = changedFields(d, next);
+  const changed = changedFields(d, next, ['updatedAt', 'stageHistorySequence']);
   if (changed.length > 0) crmMutated({ entity: 'deal', verb: 'updated', changed, ...emit });
   if (stageMoved) crmMutated({ entity: 'deal', verb: 'stage-changed', ...emit });
   if (next.status !== d.status && (next.status === 'won' || next.status === 'lost')) crmMutated({ entity: 'deal', verb: next.status, ...emit });

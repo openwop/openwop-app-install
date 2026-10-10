@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.market-intel-ad-angles/1.0.0/ad-angles.output.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.market-intel-ad-angles/1.0.2/ad-angles.output.json",
   "title": "MarketIntelAdAnglesOutput",
   "type": "object",
   "required": ["briefs", "segmentBreakdown", "crossAngleThemes", "testingPriority", "warnings", "briefCount", "success"],

@@ -3,8 +3,16 @@
  * over Postgres + the pgvector extension, selected with
  * `OPENWOP_SURFACE_VECTOR=pgvector`.
  *
- * The scale answer for vector search: real ANN/IVF indexing + the `<=>` cosine
- * distance operator instead of the durable-but-O(n) brute-force cosine.
+ * Shared across instances, durable, and ordered by pgvector's `<=>` cosine
+ * distance in the database instead of brute-force cosine in the app.
+ *
+ * > **CORRECTED 2026-10-09 (ADR 0867).** This said "real ANN/IVF indexing". No
+ * > index was ever created: `createTableSql` builds only the
+ * > `(tenant, namespace, id)` primary key, so a query is an EXACT scan of one
+ * > tenant's namespace through that key's prefix. That is deliberate for now:
+ * > an HNSW/IVF index post-filters by tenant, so a small tenant in a large table
+ * > can get fewer than `topK` (or zero) matches unless iterative scans are on
+ * > (pgvector ≥ 0.8). Exact is correct; ANN is an ADR 0867 follow-up.
  *
  * Validation boundary (honest): this environment has no Postgres+pgvector, so
  * the live path is NOT exercised here. The risk — SQL correctness — is pinned by
@@ -19,6 +27,12 @@
  *   OPENWOP_VECTOR_PG_DSN   (required; postgres://… — may equal OPENWOP_STORAGE_DSN)
  *   OPENWOP_VECTOR_PG_DIM   (required; embedding dimension, e.g. 1536)
  *   OPENWOP_VECTOR_PG_TABLE (default "host_vectors")
+ *   OPENWOP_VECTOR_PG_POOL_MAX (default 10; counted by preflight-deploy.sh Gate 5)
+ *
+ * The extension is created on first use (`CREATE EXTENSION IF NOT EXISTS
+ * vector`); on Cloud SQL the app's database user may create it. `main()` calls
+ * `verifyPgVectorBackend()` before listening, so a host that cannot reach or
+ * prepare pgvector fails its startup probe and never takes traffic.
  */
 
 import type { BundleScope, VectorSurface } from '../inMemorySurfaces.js';
@@ -37,11 +51,21 @@ const ident = (table: string) => {
 export function toVectorLiteral(vec: number[]): string {
   return `[${vec.join(',')}]`;
 }
+export const CREATE_EXTENSION_SQL = 'CREATE EXTENSION IF NOT EXISTS vector';
 export function createTableSql(table: string, dim: number): string {
   return `CREATE TABLE IF NOT EXISTS ${ident(table)} (` +
     `tenant text NOT NULL, namespace text NOT NULL, id text NOT NULL, ` +
     `embedding vector(${Number(dim)}) NOT NULL, metadata jsonb, ` +
     `PRIMARY KEY (tenant, namespace, id))`;
+}
+/** CREATE IF NOT EXISTS does not validate a table left by an earlier config. */
+export async function verifyPgVectorDimension(run: SqlRunner, table: string, dim: number): Promise<void> {
+  const { rows } = await run(`SELECT format_type(a.atttypid, a.atttypmod) AS embedding_type
+    FROM pg_attribute a WHERE a.attrelid = to_regclass($1) AND a.attname = 'embedding'
+      AND NOT a.attisdropped`, [ident(table)]);
+  if (rows[0]?.['embedding_type'] !== `vector(${dim})`) {
+    throw new Error('pgvector embedding column differs from OPENWOP_VECTOR_PG_DIM; migrate explicitly before activation.');
+  }
 }
 export function upsertSql(table: string): string {
   return `INSERT INTO ${ident(table)} (tenant, namespace, id, embedding, metadata) ` +
@@ -129,7 +153,23 @@ export function createPgVectorVector(scope: BundleScope, deps: PgVectorDeps): Ve
  * and ensures the table exists. Fails fast at boot if `vector=pgvector` but
  * config is incomplete.
  */
+/** Set by `registerPgVectorAdapter` while pgvector is SELECTED: prepares the
+ *  extension + table and runs one round trip. Null otherwise. */
+let bootCheck: (() => Promise<void>) | null = null;
+
+/** ADR 0867 — prove the selected pgvector backend works before taking traffic. */
+export async function verifyPgVectorBackend(): Promise<void> {
+  if (bootCheck) await bootCheck();
+}
+
+/** A positive-integer pool size from `name`, else `fallback`. Exported for Gate 5 parity. */
+export function poolMaxFromEnv(name: string, fallback = 10): number {
+  const n = Number(process.env[name]);
+  return Number.isInteger(n) && n > 0 ? n : fallback;
+}
+
 export function registerPgVectorAdapter(): void {
+  bootCheck = null;
   const dimRaw = process.env.OPENWOP_VECTOR_PG_DIM;
   const dsn = process.env.OPENWOP_VECTOR_PG_DSN;
   const table = process.env.OPENWOP_VECTOR_PG_TABLE || 'host_vectors';
@@ -139,9 +179,12 @@ export function registerPgVectorAdapter(): void {
     if (!runnerPromise) {
       runnerPromise = (async () => {
         const { Pool } = await import('pg');
-        const pool = new Pool({ connectionString: dsn });
+        const pool = new Pool({ connectionString: dsn, max: poolMaxFromEnv('OPENWOP_VECTOR_PG_POOL_MAX'), idleTimeoutMillis: 30_000 });
+        await pool.query(CREATE_EXTENSION_SQL);
         await pool.query(createTableSql(table, Number(dimRaw)));
-        return (sql, params) => pool.query(sql, params as unknown[]).then((r) => ({ rows: r.rows }));
+        const run: SqlRunner = (sql, params) => pool.query(sql, params as unknown[]).then((r) => ({ rows: r.rows }));
+        await verifyPgVectorDimension(run, table, Number(dimRaw));
+        return run;
       })();
     }
     return runnerPromise;
@@ -200,5 +243,11 @@ export function registerPgVectorAdapter(): void {
           'Set them, or unset OPENWOP_SURFACE_VECTOR to use the in-memory/durable vector store.',
       );
     }
+    bootCheck = async () => {
+      // A rejected first attempt is memoized by `getRunner`; let the boot check
+      // see it, and let the process exit rather than serve a broken surface.
+      const run = await getRunner();
+      await run('SELECT 1', []);
+    };
   }
 }

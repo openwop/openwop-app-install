@@ -25,6 +25,7 @@ import { getLayout, putLayout, type TileLayout } from './dashboardClient.js';
 import { ALL_DASHBOARD_TILES } from './allTiles.js';
 import { resolveTiles, mergeForPersist, type SavedTile } from './resolveTiles.js';
 import { DashboardTileCard } from './DashboardTileCard.js';
+import { invalidateHomeActivity } from './sharedRead.js';
 
 /** Picker group order — the catalog's categories, work-first. */
 const CATEGORY_ORDER = ['Work', 'Business', 'Content', 'AI', 'Operations'] as const;
@@ -107,8 +108,11 @@ export function DashboardPage(): JSX.Element {
     ? `${t(`greeting${slot}Named`, { name: firstName })} ${t('subtitleBrief')}`
     : `${t(`greeting${slot}`)} ${t('subtitleBrief')}`;
 
-  // Load the caller's saved layout once.
+  // Load the caller's saved layout once. Tiles mount only after it settles, so
+  // dropping the cached activity reads here lands before any tile reads them
+  // (issue 4511: a run/chat/connection made elsewhere shows on return, not in 30 s).
   useEffect(() => {
+    invalidateHomeActivity();
     const ctl = new AbortController();
     getLayout(ctl.signal)
       .then((l) => { setLayoutFailed(false); setSaved(l ? l.tiles : null); })
@@ -252,6 +256,17 @@ export function DashboardPage(): JSX.Element {
     // D-G3 — removal is recoverable, but only if you know where it went. Say so
     // rather than leaving the tile to silently vanish off the grid.
     setAnnounce(t(enabled ? 'addedAnnounce' : 'removedAnnounce', { name: nameOf(id) }));
+    // Removal unmounts the button that was pressed; without this, focus falls to
+    // <body>. Land on the next tile's remove control (the previous one at the end).
+    if (!enabled) {
+      const ids = availableResolved.filter((r) => r.enabled).map((r) => r.def.id);
+      const at = ids.indexOf(id);
+      const neighbour = ids[at + 1] ?? ids[at - 1];
+      if (neighbour) {
+        const removeLabel = t('removeTile', { defaultValue: 'Remove tile' });
+        setRefocus({ id: neighbour, label: removeLabel, fallback: t('moveUp', { defaultValue: 'Move up' }) });
+      }
+    }
   };
 
   // Pointer-drag reorder (customize mode): place the dragged tile at the drop

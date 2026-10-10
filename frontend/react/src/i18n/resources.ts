@@ -102,10 +102,27 @@ for (const [path, loader] of Object.entries(import.meta.glob('/src/features/*/i1
   if (!SHELL_FEATURE_NAMESPACES.has(ns)) enFeatureLoaders[ns] = loader;
 }
 
+/**
+ * ADR 0819 — AREA catalogs (`src/<area>/i18n/`) are eager by default because
+ * areas are usually shell. An area rendered ONLY by one lazily-imported route
+ * can defer exactly like a feature catalog. `featureToggles` qualifies: its
+ * sole consumer is `featureToggles/FeatureTogglePanel.tsx`, which
+ * `chrome/features.tsx` lazy-imports. Guarded by `namespaceSplit.test.ts`.
+ * A NEGATIVE glob pattern is what keeps it out of the eager chunk; filtering an
+ * eager glob's result afterwards would change nothing (see above).
+ *
+ * ADR 0862 D3 — `assistantAction` qualifies for the same reason: its only renderer is
+ * `assistantAction/AssistantActionFields.tsx`, which every consumer lazy-imports and
+ * which owns its own Suspense boundary.
+ */
+for (const [path, loader] of Object.entries(import.meta.glob(['/src/featureToggles/i18n/en.ts', '/src/assistantAction/i18n/en.ts']))) {
+  enFeatureLoaders[nsFromPath(path)] = loader;
+}
+
 const en = build({
   ...import.meta.glob('/src/i18n/locales/en/*.ts', { eager: true }),
   ...shellFeatureCatalogs,
-  ...import.meta.glob('/src/*/i18n/en.ts', { eager: true }),
+  ...import.meta.glob(['/src/*/i18n/en.ts', '!/src/featureToggles/i18n/en.ts', '!/src/assistantAction/i18n/en.ts'], { eager: true }),
 });
 
 /** Namespaces deferred out of the eager `en` bundle (feature pages own them). */

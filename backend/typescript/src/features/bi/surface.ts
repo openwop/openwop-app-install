@@ -8,6 +8,8 @@ import type { BundleScope, SurfaceFn } from '../../host/inMemorySurfaces.js';
 import { AGGREGATES, METRIC_FILTER_OPS, TIME_BUCKETS } from './metricTypes.js';
 import { listMetrics, runMetric } from './biService.js';
 import { parseRunParams } from './routes.js';
+import { OpenwopError } from '../../types.js';
+import { assertRunScopeOrg } from '../../host/accessControlService.js';
 
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
 
@@ -41,7 +43,18 @@ export function buildBiSurface(scope: BundleScope): Record<string, SurfaceFn> {
   return {
     listMetrics: async () => ({ metrics: await listMetrics(tenantId) }),
     getCatalog: async () => ({ ...(await projectBiCatalog(tenantId)) }),
-    runMetric: async (args) =>
-      ({ result: await runMetric(tenantId, str(args.metricId), parseRunParams(str(args.orgId), args)) }),
+    // ADR 0846 D3 — the run is limited to its starter's access: the same org gate
+    // every sibling run surface applies (`assertRunScopeOrg`, the MEDWF-2 pattern),
+    // and the run actor as the viewer (as `crm/surface.ts` does). An empty org is
+    // refused rather than read as "no org filter". An actorless run stays
+    // tenant-trusted — the standing `assertRunScopeOrg` contract.
+    runMetric: async (args) => {
+      const orgId = str(args.orgId);
+      if (!orgId) throw new OpenwopError('validation_error', 'Field `orgId` is required.', 400, { field: 'orgId' });
+      await assertRunScopeOrg(scope, orgId, 'workspace:read');
+      // grade-code M1 — a run caused by a person who is not its actor (a kanban Run, a
+      // channel post) reads AS that person: `orgScopeSubject` narrows, never grants.
+      return { result: await runMetric(tenantId, str(args.metricId), parseRunParams(orgId, args), scope.actingUserId ?? scope.orgScopeSubject) };
+    },
   };
 }

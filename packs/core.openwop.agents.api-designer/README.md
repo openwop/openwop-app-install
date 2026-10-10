@@ -3,8 +3,8 @@
 Authors OpenAPI 3.1, AsyncAPI 3.0, and JSON Schema 2020-12 documents from briefs. Self-validates output.
 
 | Pack name | `core.openwop.agents.api-designer` |
-| Version | `1.0.0` |
-| Engine | OpenWOP `>=1.1.0 <2.0.0` |
+| Version | `1.0.2` |
+| Engine | OpenWOP `>=1.1.0 <3.0.0` |
 | Agents | 1 |
 | Required host capabilities | `aiProviders`, `host.agentRuntime`, `host.fs` |
 | License | Apache-2.0 |

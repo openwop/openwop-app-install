@@ -33,7 +33,7 @@ export interface ConfigDomainDiff {
  * the counts in `ConfigDomainDiff`.
  *
  * `path` is the flattened key (`orgId/funnelId` for a nested payload like
- * publish-pointers, a bare id for a flat one like feature-toggles), matching how
+ * publish-pointers, a bare id for a flat one), matching how
  * those domains already flatten inside their own `diff()`.
  */
 export interface ConfigEntryChange {
@@ -124,9 +124,11 @@ export interface ConfigDomain {
   /** Restore a captured payload onto the tenant's live config. TWO registers
    *  (ADR 0479 correction — the original comment claimed one, but the built
    *  domains already disagreed):
-   *   - STATE domains (feature-toggles): EXACT-MATCH — apply everything in
-   *     the payload AND clear live config it omits, so `import(export(state))`
-   *     leaves zero drift.
+   *   - STATE domains: EXACT-MATCH — apply everything in the payload AND
+   *     clear live config it omits, so `import(export(state))` leaves zero
+   *     drift. (ADR 0819 §2: `feature-toggles`, the only domain in this
+   *     register, was removed — its payload was operator state a workspace
+   *     must not restore. The register stays for the next STATE domain.)
    *   - PRODUCTION-POINTER domains (publish-pointers, workflow-pins):
    *     APPLY-ONLY — omitted live pointers are left untouched (clearing them
    *     would change production behavior, e.g. a cleared workflow pin flips

@@ -16,6 +16,8 @@
  */
 import { SAML, ValidateInResponseTo, type SamlConfig, type CacheProvider, type CacheItem } from '@node-saml/node-saml';
 import type { Storage } from '../../storage/storage.js';
+import { createHash } from 'node:crypto';
+import { registerKvAgeOut } from '../kvAgeOut.js';
 
 /** How long a pending SP-initiated AuthnRequest id stays replay-valid. */
 const SAML_REQUEST_TTL_MS = 10 * 60 * 1000;
@@ -192,6 +194,13 @@ export async function samlValidate(
   const a = profile as Record<string, unknown>;
   const getXml = (profile as { getAssertionXml?: () => string }).getAssertionXml;
   const assertionXml = typeof getXml === 'function' ? getXml.call(profile) : undefined;
+  // ADR 0833 D5 — every accepted assertion is SINGLE-USE, on both lanes. The
+  // InResponseTo cache alone is not that: its get + remove is not atomic, it is
+  // skipped when the UNSIGNED outer `InResponseTo` is absent (node-saml reads
+  // it from the Response wrapper), and an IdP-initiated assertion has none at
+  // all — so one captured response replayed until `NotOnOrAfter` (S6). The ID
+  // and Issuer are read from the SIGNATURE-VERIFIED assertion XML.
+  await claimAssertionOnce(assertionXml, storage);
   const acr = assertionXml
     ? /<(?:\w+:)?AuthnContextClassRef[^>]*>([^<]+)</.exec(assertionXml)?.[1]?.trim()
     : undefined;
@@ -209,6 +218,38 @@ export async function samlValidate(
     displayName: asString(a.displayName) ?? asString(a.name) ?? asString(a['urn:oid:2.16.840.1.113730.3.1.241']),
     groups: asGroups(a.groups ?? a.Groups ?? a['http://schemas.xmlsoap.org/claims/Group']),
   };
+}
+
+/** How long a claimed assertion id is kept. Far longer than any IdP's
+ *  `NotOnOrAfter` window plus clock skew, so a replay inside the assertion's
+ *  validity always meets its claim. */
+const ASSERTION_CLAIM_TTL_DAYS = 2;
+const ASSERTION_CLAIM_PREFIX = 'saml:assertion:';
+
+registerKvAgeOut({
+  id: 'saml:assertion',
+  prefix: ASSERTION_CLAIM_PREFIX,
+  ttlDays: ASSERTION_CLAIM_TTL_DAYS,
+  timestampField: 'claimedAt',
+  // A claim is keyed on the IdP's assertion id; no tenant owns it.
+  hostGlobal: true,
+});
+
+/**
+ * ADR 0833 D5 — claim `(Issuer, Assertion@ID)` with an atomic put-if-absent.
+ * Throws (the ACS's refusal) when the id is missing, already claimed, or there
+ * is no storage to make the claim durable across instances: an ACS that cannot
+ * prove single use does not accept the assertion.
+ */
+async function claimAssertionOnce(assertionXml: string | undefined, storage: Storage | undefined): Promise<void> {
+  if (!storage) throw new Error('SAML assertion replay protection needs durable storage; refusing.');
+  const root = assertionXml ? /<(?:[\w.-]+:)?Assertion\b[^>]*>/.exec(assertionXml)?.[0] : undefined;
+  const id = root ? /\sID=(["'])([^"']+)\1/.exec(root)?.[2] : undefined;
+  if (!id) throw new Error('SAML assertion carries no ID; it cannot be made single-use.');
+  const issuer = assertionXml ? /<(?:[\w.-]+:)?Issuer[^>]*>([^<]+)</.exec(assertionXml)?.[1]?.trim() ?? '' : '';
+  const key = `${ASSERTION_CLAIM_PREFIX}${createHash('sha256').update(`${issuer}|${id}`).digest('hex')}`;
+  const { swapped } = await storage.kvCompareAndSwap(key, null, JSON.stringify({ claimedAt: new Date().toISOString() }));
+  if (!swapped) throw new Error('SAML assertion was already used.');
 }
 
 /** SP metadata XML — the company uploads this (or its URL) to Okta. */

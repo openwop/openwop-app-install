@@ -51,17 +51,17 @@ function client(): Client {
 }
 
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
-const A = '/v1/host/openwop-app/advisors';
-const CHAT = '/v1/host/openwop-app/chat/sessions';
+const A = '/host/openwop-app/advisors';
+const CHAT = '/host/openwop-app/chat/sessions';
 
 async function login(c: Client, tenantId: string): Promise<{ userId: string }> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail('abc'), tenantId });
+  const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail('abc'), tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
 
 async function makeAdvisor(c: Client, persona: string): Promise<string> {
-  const r = await c.post('/v1/host/openwop-app/roster', { persona, agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
+  const r = await c.post('/host/openwop-app/roster', { persona, agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.rosterId;
 }
@@ -74,7 +74,7 @@ async function setup(visibility: 'shared' | 'private' = 'shared'): Promise<{
   await login(owner, tenantId);
   const a = await makeAdvisor(owner, 'Ada Lovelace');
   const b = await makeAdvisor(owner, 'Alan Turing');
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   const board = await owner.post(`${A}/boards`, { orgId: org.body.orgId, name: 'Founders', advisors: [a, b], personaKind: 'historical', visibility });
   expect(board.status, JSON.stringify(board.body)).toBe(201);
   return { owner, tenantId, orgId: org.body.orgId, boardId: board.body.boardId, advisors: [a, b] };
@@ -98,7 +98,7 @@ describe('ADR 0278 — canonical board conversation', () => {
     // A second user in the SAME tenant, granted org membership (editor scope).
     const member = client();
     const memberUser = await login(member, tenantId);
-    await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
+    await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
 
     // Join = the member's open resolves the SAME conversation…
     const joined = await member.post(`${A}/boards/${encodeURIComponent(boardId)}/chat`);
@@ -141,7 +141,7 @@ describe('ADR 0278 — canonical board conversation', () => {
 
   it('deleting the board unbinds shared knowledge and releases the conversation to the legacy gate (GRADE-13)', async () => {
     const { owner, tenantId, boardId, advisors: [a] } = await setup('shared');
-    await owner.post(`/v1/host/openwop-app/advisors/boards/${encodeURIComponent(boardId)}/shared-knowledge`, { kind: 'strategy', shared: true });
+    await owner.post(`/host/openwop-app/advisors/boards/${encodeURIComponent(boardId)}/shared-knowledge`, { kind: 'strategy', shared: true });
     const opened = await owner.post(`${A}/boards/${encodeURIComponent(boardId)}/chat`);
     const sessionId = opened.body.sessionId as string;
     const { getAgentProfile } = await import('../src/host/agentProfileService.js');

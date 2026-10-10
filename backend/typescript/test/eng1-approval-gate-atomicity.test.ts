@@ -30,6 +30,8 @@ import {
   sweepExpiredApprovalGates,
 } from '../src/executor/approvalGateTimeout.js';
 import type { InterruptRecord, RunRecord } from '../src/types.js';
+import { createHostAdapterSuite } from '../src/host/index.js';
+import { installRejectedGateRouter } from './support/rejectedGateRouter.js';
 
 let storage: Storage;
 let seq = 0;
@@ -39,6 +41,10 @@ beforeEach(async () => {
   setEventLogBackend(storage);
   setSuspendBackend(storage);
   initInMemorySurfaces({ dataDir: mkdtempSync(join(tmpdir(), 'openwop-eng1-gate-')) });
+  // RFC 0223 — the timeout routes its failure through the resume seam (index.ts
+  // installs this at boot). The seeded workflow is not registered, so this also
+  // exercises the dispatcher's fail-closed branch for an unresolvable definition.
+  installRejectedGateRouter(storage, createHostAdapterSuite({ storage }));
 });
 
 async function seedRun(): Promise<RunRecord> {
@@ -156,6 +162,6 @@ describe('ENG-1 approval-gate timeout atomicity (lazy + sweep)', () => {
     const resolved = events.find((e) => e.type === 'interrupt.resolved');
     // ADR 0722 A.2 — `outcome` (single-valued, undeclared on the closed def) became
     // RFC 0183's `decision`; `reason` stays until the corpus seats it.
-    expect(resolved?.payload).toMatchObject({ decision: 'rejected', reason: 'timeout' });
+    expect(resolved?.payload).toMatchObject({ decision: 'rejected', action: 'timeout', reason: 'timeout' });
   });
 });

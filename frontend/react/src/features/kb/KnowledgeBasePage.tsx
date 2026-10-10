@@ -128,6 +128,7 @@ import {
   type EmbeddingProvider, type ReindexJob,
 } from './kbClient.js';
 import { kbActionError, focusFirst } from './kbUiHelpers.js';
+import { useKbOrgAccess } from './useKbOrgAccess.js';
 // ADR 0398 P2 — read the tenant's media collections for the "add source" picker (kb→media read).
 import { listCollections as listMediaCollections, type MediaCollection } from '../media/mediaClient.js';
 import { DocumentCard, DocumentRow } from './KbViews.js';
@@ -330,7 +331,20 @@ export function KnowledgeBasePage(): JSX.Element {
    */
   const reindex = useReindexJob(orgId, selected?.collectionId ?? '');
   const writesLocked = reindex.locked;
-  const lockReason = writesLocked ? t('writesPausedShort') : undefined;
+  /**
+   * KB2UX-1 — the caller's authority in THIS org, beside the reindex lock. The
+   * two are different reasons a control cannot act: the lock is temporary and is
+   * explained in place (the control stays visible, disabled); missing authority
+   * is permanent for this person, so the control is not offered at all and one
+   * Notice says why. While the read is in flight the controls render disabled
+   * rather than absent, so a caller who CAN write sees no layout jump.
+   */
+  const orgAccess = useKbOrgAccess(orgId);
+  const accessPending = orgAccess.state === 'loading';
+  const showWrites = accessPending || orgAccess.canWrite;
+  const showReindexControls = accessPending || orgAccess.canReindex;
+  const writesDisabled = writesLocked || accessPending;
+  const lockReason = writesLocked ? t('writesPausedShort') : accessPending ? t('accessChecking') : undefined;
 
   const selectOrg = useCallback((id: string) => {
     setOrgId(id);
@@ -645,6 +659,20 @@ export function KnowledgeBasePage(): JSX.Element {
         orgs={orgs} orgsFailed={orgsFailed} retry={retryOrgs} icon={<BoxesIcon />}
         emptyBody={t('orgsEmptyClause')} failedBody={t('orgsFailedClause')}
       >
+        {/* KB2UX-1 — ONE statement of why the write controls are absent. A
+            failed permission read says so; it never reads as "you have none". */}
+        {orgAccess.state === 'failed' ? (
+          <div className="u-mb-3">
+            <Notice variant="warning" announce={t('accessCheckFailed')}>
+              {t('accessCheckFailed')}{' '}
+              <Button variant="quiet" size="sm" onClick={orgAccess.retry}>{t('common:retry')}</Button>
+            </Notice>
+          </div>
+        ) : orgAccess.state === 'ready' && !orgAccess.canWrite ? (
+          <div className="u-mb-3">
+            <Notice variant="info" announce={t('readOnlyNotice')}>{t('readOnlyNotice')}</Notice>
+          </div>
+        ) : null}
         <div className="kbase-layout">
           {/* Collection list — rule 13 rail variant (the Forms precedent): a name
               filter once the UNFILTERED total passes ~3, compact inline zero-match
@@ -704,10 +732,13 @@ export function KnowledgeBasePage(): JSX.Element {
                 <span className="chip" title={t('documentsTooltip')}>{formatNumber(c.documentCount)}<span className="sr-only"> {t('documentsTooltip')}</span></span>
               </div>
             ))}
-            <div className="u-flex u-gap-1 u-mt-2">
-              <input ref={newCollectionRef} value={newName} onChange={(e) => setNewName(e.target.value)} placeholder={t('newCollectionPlaceholder')} aria-label={t('newCollectionPlaceholder')} onKeyDown={(e) => { if (e.key === 'Enter') void create(); }} />
-              <Button variant="quiet" disabled={creating || !newName.trim()} aria-label={t('createCollection')} onClick={() => void create()}><PlusIcon /></Button>
-            </div>
+            {/* KB2UX-1 — creating a collection needs `workspace:write` here. */}
+            {showWrites ? (
+              <div className="u-flex u-gap-1 u-mt-2">
+                <input ref={newCollectionRef} value={newName} onChange={(e) => setNewName(e.target.value)} placeholder={t('newCollectionPlaceholder')} aria-label={t('newCollectionPlaceholder')} disabled={accessPending} onKeyDown={(e) => { if (e.key === 'Enter' && !accessPending) void create(); }} />
+                <Button variant="quiet" disabled={creating || accessPending || !newName.trim()} aria-label={t('createCollection')} onClick={() => void create()}><PlusIcon /></Button>
+              </div>
+            ) : null}
           </div>
 
           {/* Selected collection */}
@@ -722,10 +753,10 @@ export function KnowledgeBasePage(): JSX.Element {
                   source, so it is not deletable from here at all. */}
               <div className="u-flex u-items-center u-gap-2 u-wrap">
                 <h2 className="u-fs-16 u-m-0 u-flex-1">{selected.name}</h2>
-                {selected.managed ? null : (
+                {selected.managed || !showWrites ? null : (
                   <Button
                     variant="danger"
-                    disabled={writesLocked}
+                    disabled={writesDisabled}
                     title={lockReason}
                     onClick={() => void removeCollection(selected.collectionId, selected.name)}
                   >
@@ -754,7 +785,10 @@ export function KnowledgeBasePage(): JSX.Element {
                   three conditions partition, and exactly one fires.) The sync
                   notice below never announces: it is a detail of the same
                   fact, and a second string here would silence the first. */}
-              {writesLocked ? (
+              {/* KB2UX-1 — only to a caller who could otherwise write: "your
+                  changes are paused" is not news to someone who cannot make any,
+                  and a second announcement would stomp the read-only one. */}
+              {writesLocked && orgAccess.canWrite ? (
                 <Notice
                   variant="warning"
                   {...(reindex.job?.status === 'paused' || reindex.stalled ? {} : { announce: t('writesPausedAnnounce') })}
@@ -774,7 +808,7 @@ export function KnowledgeBasePage(): JSX.Element {
                 {/* ADR 0113 — retrieval-mode selector (hybrid lift + local rerank).
                     CS-UX-3: three sibling labels (one labelable control each) —
                     nesting all three selects in one <label> mis-associated them. */}
-                {selected.managed ? null : (
+                {selected.managed || !showWrites ? null : (
                   <div className="u-flex u-items-center u-gap-2 u-wrap">
                     <label className="field u-flex u-items-center u-gap-2">
                       <span className="field-label u-m-0">{t('retrievalModeLabel')}</span>
@@ -782,7 +816,7 @@ export function KnowledgeBasePage(): JSX.Element {
                         value={cfgPending.mode ?? selected.retrievalConfig?.mode ?? 'dense'}
                         onChange={(e) => void changeRetrievalMode(e.target.value as RetrievalMode)}
                         className="u-w-auto"
-                        disabled={cfgPending.mode !== undefined}
+                        disabled={accessPending || cfgPending.mode !== undefined}
                       >
                         <option value="dense">{t('retrievalModeDense')}</option>
                         <option value="hybrid">{t('retrievalModeHybrid')}</option>
@@ -799,7 +833,7 @@ export function KnowledgeBasePage(): JSX.Element {
                         value={cfgPending.embedder ?? selected.retrievalConfig?.embedder ?? 'local'}
                         onChange={(e) => void changeEmbedder(e.target.value as EmbedderMode)}
                         className="u-w-auto"
-                        disabled={cfgPending.embedder !== undefined}
+                        disabled={accessPending || cfgPending.embedder !== undefined}
                       >
                         <option value="local">{t('embedderLocal')}</option>
                         <option value="provider">{t('embedderProvider')}</option>
@@ -812,7 +846,7 @@ export function KnowledgeBasePage(): JSX.Element {
                         value={cfgPending.enrichment ?? selected.retrievalConfig?.enrichment ?? 'off'}
                         onChange={(e) => void changeEnrichment(e.target.value as EnrichmentMode)}
                         className="u-w-auto"
-                        disabled={cfgPending.enrichment !== undefined}
+                        disabled={accessPending || cfgPending.enrichment !== undefined}
                       >
                         <option value="off">{t('enrichmentOff')}</option>
                         <option value="heading-path">{t('enrichmentHeadingPath')}</option>
@@ -870,27 +904,27 @@ export function KnowledgeBasePage(): JSX.Element {
               {/* Ingest — suppressed for an auto-managed collection (content is synced) */}
               {selected.managed ? (
                 <Notice variant="info">{t('managedNotice', { source: t(`managedSource_${selected.managed}`) })}</Notice>
-              ) : (
+              ) : !showWrites ? null : (
                 <div className="surface-card u-gap-2" aria-busy={ingesting || uploading || addingUrl || importingMedia || undefined}>
                   <h2 className="u-fs-16 u-m-0">{t('addDocumentHeading')}</h2>
-                  <input value={docTitle} onChange={(e) => setDocTitle(e.target.value)} placeholder={t('titlePlaceholder')} aria-label={t('titlePlaceholder')} disabled={writesLocked} />
-                  <textarea value={docText} onChange={(e) => setDocText(e.target.value)} placeholder={t('ingestPlaceholder')} aria-label={t('ingestPlaceholder')} rows={5} disabled={writesLocked} />
+                  <input value={docTitle} onChange={(e) => setDocTitle(e.target.value)} placeholder={t('titlePlaceholder')} aria-label={t('titlePlaceholder')} disabled={writesDisabled} />
+                  <textarea value={docText} onChange={(e) => setDocText(e.target.value)} placeholder={t('ingestPlaceholder')} aria-label={t('ingestPlaceholder')} rows={5} disabled={writesDisabled} />
                   <div className="u-flex u-justify-end">
-                    <Button variant="primary" disabled={ingesting || writesLocked || !docText.trim()} title={lockReason} onClick={() => void ingest()}><PlusIcon /> {ingesting ? t('ingesting') : t('ingest')}</Button>
+                    <Button variant="primary" disabled={ingesting || writesDisabled || !docText.trim()} title={lockReason} onClick={() => void ingest()}><PlusIcon /> {ingesting ? t('ingesting') : t('ingest')}</Button>
                   </div>
                   <label className="field">
                     <span className="field-label"><PaperclipIcon size={14} /> {t('uploadFileLabel')}</span>
-                    <input type="file" accept={KB_UPLOAD_ACCEPT} disabled={uploading || writesLocked}
+                    <input type="file" accept={KB_UPLOAD_ACCEPT} disabled={uploading || writesDisabled}
                       onChange={(e) => { void uploadFile(e.target.files?.[0]); e.target.value = ''; }} />
-                    <span className="field-help">{uploading ? t('uploading') : writesLocked ? t('writesPausedShort') : t('uploadFileHint')}</span>
+                    <span className="field-help">{uploading ? t('uploading') : writesDisabled ? lockReason : t('uploadFileHint')}</span>
                   </label>
                   {/* ADR 0351 P4 — add a web page by URL (server-side fetch, untrusted-fenced). */}
                   <label className="field">
                     <span className="field-label">{t('urlLabel')}</span>
                     <div className="u-flex u-gap-2">
-                      <input type="url" value={docUrl} onChange={(e) => setDocUrl(e.target.value)} placeholder={t('urlPlaceholder')} aria-label={t('urlLabel')} className="u-flex-1" disabled={writesLocked}
+                      <input type="url" value={docUrl} onChange={(e) => setDocUrl(e.target.value)} placeholder={t('urlPlaceholder')} aria-label={t('urlLabel')} className="u-flex-1" disabled={writesDisabled}
                         onKeyDown={(e) => { if (e.key === 'Enter') void ingestFromUrl(); }} />
-                      <Button variant="primary" disabled={addingUrl || writesLocked || !docUrl.trim()} title={lockReason} onClick={() => void ingestFromUrl()}><PlusIcon /> {addingUrl ? t('common:saving') : t('addUrl')}</Button>
+                      <Button variant="primary" disabled={addingUrl || writesDisabled || !docUrl.trim()} title={lockReason} onClick={() => void ingestFromUrl()}><PlusIcon /> {addingUrl ? t('common:saving') : t('addUrl')}</Button>
                     </div>
                     <span className="field-help">{t('urlHint')}</span>
                   </label>
@@ -902,11 +936,11 @@ export function KnowledgeBasePage(): JSX.Element {
                     <label className="field">
                       <span className="field-label">{t('mediaCollectionLabel')}</span>
                       <div className="u-flex u-gap-2">
-                        <select value={mediaCollectionId} onChange={(e) => setMediaCollectionId(e.target.value)} aria-label={t('mediaCollectionLabel')} className="u-flex-1" disabled={importingMedia || writesLocked}>
+                        <select value={mediaCollectionId} onChange={(e) => setMediaCollectionId(e.target.value)} aria-label={t('mediaCollectionLabel')} className="u-flex-1" disabled={importingMedia || writesDisabled}>
                           <option value="">{t('mediaCollectionPlaceholder')}</option>
                           {mediaCollections.map((mc) => <option key={mc.collectionId} value={mc.collectionId}>{mc.name}</option>)}
                         </select>
-                        <Button variant="primary" disabled={importingMedia || writesLocked || !mediaCollectionId} title={lockReason} onClick={() => void ingestFromMediaCollection()}><PlusIcon /> {importingMedia ? t('common:saving') : t('addMediaCollection')}</Button>
+                        <Button variant="primary" disabled={importingMedia || writesDisabled || !mediaCollectionId} title={lockReason} onClick={() => void ingestFromMediaCollection()}><PlusIcon /> {importingMedia ? t('common:saving') : t('addMediaCollection')}</Button>
                       </div>
                       <span className="field-help">{t('mediaCollectionHint')}</span>
                     </label>
@@ -974,13 +1008,13 @@ export function KnowledgeBasePage(): JSX.Element {
                     ) : viewMode === 'grid' ? (
                       <div className="card-grid">
                         {visibleDocs.map((d) => (
-                          <DocumentCard key={d.documentId} document={d} onRemove={(id) => void removeDoc(id)} onOpen={selectDoc} canRemove={!selected.managed} removeDisabledReason={lockReason} />
+                          <DocumentCard key={d.documentId} document={d} onRemove={(id) => void removeDoc(id)} onOpen={selectDoc} canRemove={!selected.managed && showWrites} removeDisabledReason={lockReason} />
                         ))}
                       </div>
                     ) : (
                       <div className="surface-card list-view">
                         {visibleDocs.map((d) => (
-                          <DocumentRow key={d.documentId} document={d} onRemove={(id) => void removeDoc(id)} onOpen={selectDoc} canRemove={!selected.managed} removeDisabledReason={lockReason} />
+                          <DocumentRow key={d.documentId} document={d} onRemove={(id) => void removeDoc(id)} onOpen={selectDoc} canRemove={!selected.managed && showWrites} removeDisabledReason={lockReason} />
                         ))}
                       </div>
                     )}
@@ -1002,6 +1036,8 @@ export function KnowledgeBasePage(): JSX.Element {
                   collectionId={selected.collectionId}
                   collectionName={selected.name}
                   currentProvider={selected.embeddingSpec?.provider ?? (selected.retrievalConfig?.embedder === 'provider' ? 'provider-default' : 'local')}
+                  canAct={showReindexControls}
+                  actPending={accessPending}
                 />
               )}
 
@@ -1009,7 +1045,7 @@ export function KnowledgeBasePage(): JSX.Element {
                   KBX-5 / CT-KBX-3 — the sync runner writes through the same two
                   functions the lock guards, so a "Sync now" during a reindex fails
                   with what reads as a Drive/credential problem. Say so first. */}
-              {writesLocked ? (
+              {writesLocked && orgAccess.canWrite ? (
                 <Notice variant="warning">{t('syncPausedNotice')}</Notice>
               ) : null}
               <KnowledgeSyncPanel orgId={orgId} collectionId={selected.collectionId} />
@@ -1052,12 +1088,19 @@ export function KnowledgeBasePage(): JSX.Element {
  *  ago were pixel-identical: a determinate bar parked at the last drain's count,
  *  a percentage, a token-spend line, none of it labelled last-known. The stamp
  *  and the not-advancing state are `DESIGN.md` §4.6's `stale` row. */
-function ReindexPanel({ reindex, orgId, collectionId, collectionName, currentProvider }: {
+function ReindexPanel({ reindex, orgId, collectionId, collectionName, currentProvider, canAct, actPending }: {
   reindex: ReindexController;
   orgId: string;
   collectionId: string;
   collectionName: string;
   currentProvider: string;
+  /** KB2UX-1 — the caller holds `host:org:manage` in this org (or the read is
+   *  still in flight). Every reindex WRITE route asks for it, and it is
+   *  owner-only by default, so an `admin` reaching this admin-tier page used to
+   *  be offered Start / Continue / Discard and refused on each. Progress stays
+   *  visible to everyone who can read the collection; only the actions go. */
+  canAct: boolean;
+  actPending: boolean;
 }): JSX.Element {
   const { t } = useTranslation('kb');
   const [provider, setProvider] = useState<EmbeddingProvider>('local');
@@ -1089,7 +1132,13 @@ function ReindexPanel({ reindex, orgId, collectionId, collectionName, currentPro
     // no toast (suppressed here), no announcement, no focus change.
     if (terminal?.status === 'paused') return;
     // `failed`, or a drain that never terminated within the loop bound.
-    toast.error(terminal?.error ? t('reindexFailedWithReason', { reason: terminal.error }) : t('reindexFailed'));
+    // KB2UX-2 — `terminal.error` is the server's free-text English diagnostic
+    // (`kbService.ts` `fail(reason, error)`), not a sentence in the user's
+    // language, so it goes to the console and the toast says what is true in
+    // every locale. A localized REASON needs a reason code on the job view
+    // (backend residue, filed with KB2UX-2).
+    if (terminal?.error) console.warn('[kb] reindex failed:', terminal.error);
+    toast.error(t('reindexFailed'));
   }, [t]);
 
   /**
@@ -1194,8 +1243,13 @@ function ReindexPanel({ reindex, orgId, collectionId, collectionName, currentPro
             <span className="muted u-fs-11" title={formatDateTime(job!.updatedAt)}>
               {t('reindexUpdatedAt', { when: formatRelativeTime(job!.updatedAt) })}
             </span>
+            {/* KB2UX-2 — `job.error` here is the server's English budget
+                diagnostic ("Daily embed budget reached (N tokens; M used)…"),
+                which was rendered verbatim in all four locales. `paused` has
+                exactly one writer — the embed budget — so the localized
+                sentence states the same fact. */}
             {job!.status === 'paused' && (
-              <Notice variant="warning" announce={t('reindexPausedAnnounce')}>{job!.error ?? t('reindexPaused')}</Notice>
+              <Notice variant="warning" announce={t('reindexPausedAnnounce')}>{t('reindexPaused')}</Notice>
             )}
             {/* KBX-3 — the state that did not exist: a job that is not
                 advancing. The copy is written for ADR 0643's end state (D1b: a
@@ -1206,18 +1260,18 @@ function ReindexPanel({ reindex, orgId, collectionId, collectionName, currentPro
             {reindex.stalled && (
               <Notice variant="warning" announce={t('reindexStalledAnnounce')}>{t('reindexStalled')}</Notice>
             )}
-            <div className="u-flex u-gap-2 u-wrap">
+            {canAct ? (<div className="u-flex u-gap-2 u-wrap">
               {/* KBX-2 — rendered for `running` as well as `paused`. `resume()`
                   is status-agnostic; only this condition was not. */}
-              <Button variant="primary" className="u-fs-12" disabled={busy} onClick={() => void resume()}>
+              <Button variant="primary" className="u-fs-12" disabled={busy || actPending} onClick={() => void resume()}>
                 {job!.status === 'paused' ? t('reindexResume') : t('reindexContinue')}
               </Button>
               {/* KB-UX-10 — NOT `disabled={busy}`. Cancel was dead for the whole
                   drain, i.e. exactly when a user wants it. */}
-              <Button variant="secondary" className="u-fs-12" onClick={() => void cancel()}>{t('reindexCancel')}</Button>
-            </div>
+              <Button variant="secondary" className="u-fs-12" disabled={actPending} onClick={() => void cancel()}>{t('reindexCancel')}</Button>
+            </div>) : null}
           </div>
-        ) : (
+        ) : !canAct ? null : (
           <div className="u-flex u-items-center u-gap-2 u-wrap">
             <select value={provider} onChange={(e) => setProvider(e.target.value as EmbeddingProvider)} className="u-w-auto" disabled={busy} aria-label={t('reindexLabel')}>
               <option value="local">{t('reindexProviderLocal')}</option>
@@ -1225,10 +1279,11 @@ function ReindexPanel({ reindex, orgId, collectionId, collectionName, currentPro
               <option value="google">Google</option>
               <option value="cohere">Cohere</option>
             </select>
-            <Button variant="primary" className="u-fs-12" disabled={busy} onClick={() => void start()}>{t('reindexStart')}</Button>
+            <Button variant="primary" className="u-fs-12" disabled={busy || actPending} onClick={() => void start()}>{t('reindexStart')}</Button>
           </div>
         )}
         <span className="field-help">{t('reindexHint', { current: currentProvider })}</span>
+        {canAct ? null : <span className="field-help">{t('reindexOwnerOnly')}</span>}
       </div>
     </div>
   );

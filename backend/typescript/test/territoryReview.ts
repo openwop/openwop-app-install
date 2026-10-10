@@ -22,5 +22,5 @@ export async function transitionModelViaReview(
   const submit = await client.post(`${base}/models/${modelId}/${transition}`);
   if (submit.status !== 202) return submit; // 403 / 404 / 409 surfaced verbatim
   const approvalId = submit.body.review.approvalId as string;
-  return client.post(`/v1/host/openwop-app/reviews/approval:${approvalId}/actions/approve`);
+  return client.post(`/host/openwop-app/reviews/approval:${approvalId}/actions/approve`);
 }

@@ -22,6 +22,9 @@ import type { Storage } from '../storage/storage.js';
 import type { InterruptRecord, RunRecord } from '../types.js';
 import { timeoutApprovalGateIfDue } from '../executor/approvalGateTimeout.js';
 import { mayViewApproval } from './approvalAudience.js';
+import { gateAclOf, isEligibleApprover, type ApproverRefs } from './approverResolution.js';
+import type { EffectiveAccess } from './accessControlService.js';
+import { isTerminalRunStatus } from '@openwop/openwop';
 import { getApproval, listApprovals, getAssistantActionProjector, type PendingApproval, type ApprovalStatus } from './approvalService.js';
 import { getArtifact, getArtifactRevision } from './artifactProjection.js';
 import { tallyDecisions } from './reviewDecisionLedger.js';
@@ -37,13 +40,11 @@ const log = createLogger('host.reviewProjection');
  *  interrupts — tenant lives on the run). A cold read path; truncation is logged
  *  so a half-shown inbox is never mistaken for "all clear".
  *
- *  KNOWN LIMITATION (ADR 0068): the scan is GLOBAL then tenant-filtered, so in a
- *  busy multi-tenant deployment a tenant's interrupts past the first 500 OPEN rows
- *  (across all tenants) would not surface. This host is effectively single-tenant
- *  (`_anon`/`default`), so it's a non-issue here; a true multi-tenant deployment
- *  needs a tenant-indexed open-interrupt query in the runtime store (out of scope —
- *  it would change the runtime store, not host-extension code). Never a LEAK:
- *  other tenants' rows are filtered out, only the caller's own may be undercounted. */
+ *  Tenant-scoped (#4215) and restricted to NON-terminal runs (ADR 0778 D3) on
+ *  both real adapters; an adapter without `listOpenInterruptsForTenant` falls
+ *  back to the global scan, filtered per row below. CORRECTED (ADR 0778): this
+ *  comment used to call the scan "GLOBAL then tenant-filtered", which had been
+ *  false since #4215. */
 const INTERRUPT_SCAN_LIMIT = 500;
 
 export type ReviewSource = 'interrupt' | 'approval';
@@ -108,6 +109,13 @@ export interface ReviewRequest {
   requestedAt: string;
   dueAt?: string;
   risk?: { level: 'low' | 'medium' | 'high' | 'critical'; reasons: string[] };
+  /** ADR 0778 D8 — may THIS caller decide it? Present only when the route
+   *  supplied the caller (`ReviewAuthCtx.decider`). `false` means the server
+   *  would refuse; the SPA hides the decide buttons then. Advisory — the decide
+   *  route re-checks. Absent on approval-source reviews without a declared
+   *  approver list: that lane's authority has personal-owner and superadmin
+   *  arms this projection does not re-derive, so it does not guess. */
+  canDecide?: boolean;
   /** Multi-approver / quorum progress (ADR 0070), present only for a quorum gate. */
   policy?: { requiredApprovals: number; approvals: number; rejections: number; rejectionPolicy?: string };
   /** A human-readable one-liner for the card (the approval proposal / interrupt prompt). */
@@ -142,6 +150,21 @@ export interface ReviewRequest {
   planProposal?: {
     enrollmentId: string;
     proposalId: string;
+  };
+  /** ADR 0862 D1/D3 — an assistant action's card as the approver must see it: every
+   *  field the executor consumes (the projector's per-kind `CARD_FIELDS`, redacted) and
+   *  the `contentHash` the approve MUST echo as `expectedContentHash`. Pending rows only. */
+  /** The fields an open interrupt's answer form needs, so a reviewer can answer
+   *  a typed (`requiresValue`) review on the card itself (ADR 0778 D10
+   *  correction). A CLOSED allowlist per kind — never the raw `data`, which can
+   *  carry anything a node put there. Absent for a kind the card cannot answer
+   *  inline (credential, external-event, low-confidence, unknown). */
+  answerForm?: ReviewAnswerForm;
+  assistantAction?: {
+    actionId: string;
+    kind: string;
+    contentHash: string;
+    payload: Record<string, unknown>;
   };
   composedWorkflow?: {
     definitionHash: string;
@@ -184,9 +207,148 @@ export interface ReviewAuthCtx {
   tenantId: string;
   /** The caller's subject ref (req.userId ?? principal.principalId), for org RBAC. */
   subjectRef?: string;
+  /** ADR 0778 D8 — what the decide route would check, computed ONCE per request
+   *  by the route: `holdsRespond` = the D2 floor (`approvals:respond`), and
+   *  `reviewerRef` = the D6 reviewer identity. Absent ⇒ no `canDecide`. */
+  decider?: { holdsRespond: boolean; reviewerRef?: string };
+  /** ADR 0862 — the two REQUEST-level exits the assistant card's read gate honours
+   *  (wildcard operator; own personal workspace). Absent ⇒ neither applies. */
+  viewerExits?: { isOperator: boolean; isPersonalOwner: boolean };
+}
+
+/** Per-request memo for the per-row authority reads (ADR 0778 C14): one
+ *  eligibility resolution per distinct (reviewer, ACL, org), one effective-access
+ *  resolution per (subject, org). Unmemoized, 500 rows would re-run the group
+ *  expansion and the member scans 500 times. */
+interface ReadMemo {
+  eligible: Map<string, Promise<boolean>>;
+  access: Map<string, Promise<EffectiveAccess>>;
+}
+
+function newReadMemo(): ReadMemo {
+  return { eligible: new Map(), access: new Map() };
+}
+
+function memoEligible(memo: ReadMemo, reviewerRef: string, refs: ApproverRefs, ctx: { tenantId: string; orgId?: string }): Promise<boolean> {
+  const key = JSON.stringify([reviewerRef, refs, ctx.tenantId, ctx.orgId ?? null]);
+  let hit = memo.eligible.get(key);
+  if (!hit) {
+    hit = isEligibleApprover(reviewerRef, refs, ctx).then((r) => r.eligible).catch(() => false);
+    memo.eligible.set(key, hit);
+  }
+  return hit;
+}
+
+/** ADR 0778 D8 — the decide authority for an interrupt review, mirroring the
+ *  route: non-approval kinds are answerable by anyone who can see them; an
+ *  approval gate with a declared ACL admits its approvers (and their delegates);
+ *  an open one needs the D2 floor. */
+async function interruptCanDecide(it: InterruptRecord, run: RunRecord, ctx: ReviewAuthCtx, memo: ReadMemo): Promise<boolean | undefined> {
+  const decider = ctx.decider;
+  if (!decider) return undefined;
+  const acl = gateAclOf(it.data);
+  // A declared ACL binds on EVERY kind (`assertEligibleApprover` does not read
+  // the kind), so it decides here before the kind does (grade-code `APCD-8`).
+  if (!acl.declared) {
+    if (it.kind !== 'approval') return true;
+    // An open QUORUM gate counts identified voters only: a caller with no
+    // reviewer identity (an `apikey:`) is refused there whatever its scopes.
+    const required = (it.data as { requiredApprovals?: unknown } | null)?.requiredApprovals;
+    if (typeof required === 'number' && required > 1 && !decider.reviewerRef) return false;
+    return decider.holdsRespond;
+  }
+  if (!decider.reviewerRef) return false;
+  const orgId = (run.metadata as Record<string, unknown> | undefined)?.approverOrgId;
+  return memoEligible(
+    memo,
+    decider.reviewerRef,
+    { approverRefs: acl.subjects, approverGroupRefs: acl.groupRefs, approverRoleRefs: acl.roleRefs },
+    { tenantId: run.tenantId, ...(typeof orgId === 'string' ? { orgId } : {}) },
+  );
+}
+
+/** Approval-source `canDecide`, only where it can be stated honestly: a QUORUM
+ *  approval with a declared approver list, which is the only case the approvals
+ *  lane decides on eligibility (`approvalDecision.ts` finalizes a single-approver
+ *  approval before reading the list, then applies per-kind rules with operator
+ *  and personal-owner arms this does not re-derive — grade-code `APCD-7`).
+ *  Otherwise absent (see the field's doc). */
+async function approvalCanDecide(a: PendingApproval, ctx: ReviewAuthCtx, memo: ReadMemo): Promise<boolean | undefined> {
+  const decider = ctx.decider;
+  if (!decider) return undefined;
+  const required = (a.policy as { requiredApprovals?: unknown } | undefined)?.requiredApprovals;
+  if (!(typeof required === 'number' && required > 1)) return undefined;
+  const refs: ApproverRefs = {
+    ...(a.policy?.approverRefs ? { approverRefs: a.policy.approverRefs } : {}),
+    ...(a.policy?.approverGroupRefs ? { approverGroupRefs: a.policy.approverGroupRefs } : {}),
+    ...(a.policy?.approverRoleRefs ? { approverRoleRefs: a.policy.approverRoleRefs } : {}),
+  };
+  if (!gateAclOf(refs).declared) return undefined;
+  const subject = ctx.subjectRef;
+  if (!subject) return false;
+  return memoEligible(memo, subject, refs, { tenantId: ctx.tenantId, ...(a.orgId ? { orgId: a.orgId } : {}) });
+}
+
+/** The runs behind an interrupt page, in ONE read where the store supports it
+ *  (ADR 0778 D8), else one `getRun` per distinct id. */
+async function loadRuns(storage: Storage, runIds: readonly string[]): Promise<Map<string, RunRecord>> {
+  const ids = [...new Set(runIds)];
+  const out = new Map<string, RunRecord>();
+  if (ids.length === 0) return out;
+  if (storage.getRunsByIds) {
+    for (const r of await storage.getRunsByIds(ids)) out.set(r.runId, r);
+    return out;
+  }
+  for (const id of ids) {
+    const r = await storage.getRun(id);
+    if (r) out.set(id, r);
+  }
+  return out;
 }
 
 // ── mappers ──────────────────────────────────────────────────────────────
+
+export interface ReviewAnswerForm {
+  /** clarification: the question asked. */
+  question?: string;
+  /** clarification: `'openwop-connection'` for a connect-to-continue prompt. */
+  profile?: string;
+  /** clarification connection prompt: which connection is missing. No secrets —
+   *  `ConnectionPromptMeta` (host/connectionInterrupt.ts) carries none. */
+  connection?: { ref: string; providerId?: string; category?: string; label?: string };
+  /** refinement: the draft to refine. */
+  current?: unknown;
+  /** cancellation: why cancelling was requested. */
+  reason?: string;
+}
+
+const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined);
+
+/** The answer-form fields for an open interrupt, by kind. Each field is named
+ *  explicitly; nothing else in `data` reaches the projection. */
+export function interruptAnswerForm(it: InterruptRecord): ReviewAnswerForm | undefined {
+  if (it.resolvedAt) return undefined;
+  const data = (it.data ?? {}) as Record<string, unknown>;
+  if (it.kind === 'clarification') {
+    const conn = data.connection && typeof data.connection === 'object' ? data.connection as Record<string, unknown> : undefined;
+    const ref = str(conn?.ref);
+    return {
+      ...(str(data.question) ? { question: str(data.question) } : {}),
+      ...(str(data.profile) ? { profile: str(data.profile) } : {}),
+      ...(conn && ref ? {
+        connection: {
+          ref,
+          ...(str(conn.providerId) ? { providerId: str(conn.providerId) } : {}),
+          ...(str(conn.category) ? { category: str(conn.category) } : {}),
+          ...(str(conn.label) ? { label: str(conn.label) } : {}),
+        },
+      } : {}),
+    };
+  }
+  if (it.kind === 'refinement') return 'current' in data ? { current: data.current } : {};
+  if (it.kind === 'cancellation') return str(data.reason) ? { reason: str(data.reason) } : {};
+  return undefined;
+}
 
 /** Derive the action list for an OPEN interrupt from its kind + data. An
  *  `approval`-kind gate with a declared `data.actions` allowlist surfaces those
@@ -225,6 +387,14 @@ function artifactBinding(data: { artifactId?: unknown; revisionId?: unknown }): 
 
 /** Project an OPEN interrupt (+ its run) into a ReviewRequest. The caller has
  *  already verified `run.tenantId === ctx.tenantId`. */
+function conversationIdOf(run: RunRecord, data: { conversationId?: unknown }): { conversationId?: string } {
+  const fromRun = (run.metadata as { chatSessionId?: unknown } | undefined)?.chatSessionId;
+  const id = typeof fromRun === 'string' && fromRun ? fromRun
+    : typeof data.conversationId === 'string' && data.conversationId ? data.conversationId
+      : undefined;
+  return id ? { conversationId: id } : {};
+}
+
 export function interruptToReview(it: InterruptRecord, run: RunRecord): ReviewRequest {
   const data = (it.data ?? {}) as {
     prompt?: unknown; summary?: unknown; conversationId?: unknown;
@@ -250,6 +420,7 @@ export function interruptToReview(it: InterruptRecord, run: RunRecord): ReviewRe
         }))
         .filter((a) => a.content || a.label)
     : [];
+  const answerForm = interruptAnswerForm(it);
   const binding = artifactBinding(data);
   const assets: ReviewAsset[] = [
     ...optionAssets,
@@ -266,6 +437,12 @@ export function interruptToReview(it: InterruptRecord, run: RunRecord): ReviewRe
     runId: it.runId,
     nodeId: it.nodeId,
     interruptId: it.interruptId,
+    // ADR 0776 — the conversation this approval belongs to. It was DECLARED on the
+    // interrupt's data type and never mapped, so `?conversationId=` silently
+    // dropped every interrupt review (approvals only). The run's own
+    // `metadata.chatSessionId` is the stamp every chat-dispatched run carries;
+    // `data.conversationId` is the fallback a node may set explicitly.
+    ...conversationIdOf(run, data),
     ...binding,
     // Attribute to the initiating human when known; otherwise the named workflow
     // (never the bare literal "workflow" — that told the reviewer nothing).
@@ -278,6 +455,7 @@ export function interruptToReview(it: InterruptRecord, run: RunRecord): ReviewRe
     ...(summary ? { summary } : {}),
     ...(assets.length > 0 ? { assets } : {}),
     actions: interruptActions(it),
+    ...(answerForm ? { answerForm } : {}),
     provenanceRefs: [
       { kind: 'run', ref: it.runId },
       { kind: 'node', ref: it.nodeId },
@@ -417,12 +595,22 @@ export async function withComposedLiveView(review: ReviewRequest, a: PendingAppr
  * approves what will actually be sent. Enriches only PENDING rows: a resolved
  * assistant-action is an audit row, and its live draft may already be redacted.
  */
-export async function withAssistantActionView(review: ReviewRequest, a: PendingApproval): Promise<ReviewRequest> {
-  if (a.kind !== 'assistant-action' || a.status !== 'pending' || !a.actionId) return review;
+export async function withAssistantActionView(review: ReviewRequest, a: PendingApproval, ctx: ReviewAuthCtx): Promise<ReviewRequest> {
+  if (a.kind !== 'assistant-action' || a.status !== 'pending') return review;
+  // ADR 0862 — no decision without the card the decision must bind to. This
+  // also covers old/missing action rows and an unavailable feature projector.
+  const unavailable = { ...review, canDecide: false };
+  if (!a.actionId) return unavailable;
   const projector = getAssistantActionProjector();
-  if (!projector) return review;
-  const action = await projector(a.tenantId, a.actionId);
-  if (!action) return review;
+  if (!projector) return unavailable;
+  // ADR 0862 — the card (draft, recipients, event body) is withheld from a reader without
+  // the action's write authority; the review itself stays visible, un-enriched.
+  const action = await projector(a.tenantId, a.actionId, {
+    ...(ctx.subjectRef ? { subject: ctx.subjectRef } : {}),
+    isOperator: ctx.viewerExits?.isOperator === true,
+    isPersonalOwner: ctx.viewerExits?.isPersonalOwner === true,
+  });
+  if (!action || action.withheld === true) return unavailable;
 
   const kind = typeof action.kind === 'string' ? action.kind : undefined;
   const draft = typeof action.draft === 'string' ? action.draft : undefined;
@@ -466,6 +654,18 @@ export async function withAssistantActionView(review: ReviewRequest, a: PendingA
     // The concrete thing being approved — an inline preview of the current draft
     // (the frozen 77-char summary was all the reviewer could see before).
     ...(draft ? { assets: [...(review.assets ?? []), { label: 'Draft', content: draft }] } : {}),
+    // ADR 0862 — the fields + the hash, from the SAME projector output the inbox renders:
+    // without them this lane could only approve blind, and under D1 not at all.
+    ...(kind && typeof action.contentHash === 'string' && typeof action.actionId === 'string'
+      ? {
+          assistantAction: {
+            actionId: action.actionId,
+            kind,
+            contentHash: action.contentHash,
+            payload: action.payload && typeof action.payload === 'object' ? (action.payload as Record<string, unknown>) : {},
+          },
+        }
+      : {}),
   };
 }
 
@@ -571,8 +771,8 @@ export function approvalToReview(a: PendingApproval): ReviewRequest {
  * notification lane all consume — so the claim is true by construction rather than by
  * assertion.
  */
-async function approvalVisible(a: PendingApproval, ctx: ReviewAuthCtx): Promise<boolean> {
-  return mayViewApproval(ctx.tenantId, ctx.subjectRef, a);
+async function approvalVisible(a: PendingApproval, ctx: ReviewAuthCtx, memo?: ReadMemo): Promise<boolean> {
+  return mayViewApproval(ctx.tenantId, ctx.subjectRef, a, memo?.access);
 }
 
 // ── list / get ───────────────────────────────────────────────────────────
@@ -598,24 +798,39 @@ export interface ListReviewsOpts {
 export async function listReviews(storage: Storage, ctx: ReviewAuthCtx, opts: ListReviewsOpts = {}): Promise<ReviewRequest[]> {
   const wantPending = opts.status === undefined || opts.status === 'pending';
   const out: ReviewRequest[] = [];
+  const memo = newReadMemo();
 
   // Interrupts — only meaningful for the pending inbox (the store holds OPEN ones).
   if (wantPending) {
-    const open = await storage.listOpenInterruptsAll(INTERRUPT_SCAN_LIMIT);
+    // Tenant-scoped in ONE query where the store supports it. The global scan
+    // read every tenant's open interrupts and one run per interrupt,
+    // sequentially, only to discard the other tenants': MEASURED 2026-09-28 in
+    // prod at 100-120 s per inbox read, which held the 4-connection pool and
+    // timed out every other read on the page.
+    const open = storage.listOpenInterruptsForTenant
+      ? await storage.listOpenInterruptsForTenant(ctx.tenantId, INTERRUPT_SCAN_LIMIT)
+      : await storage.listOpenInterruptsAll(INTERRUPT_SCAN_LIMIT);
     if (open.length === INTERRUPT_SCAN_LIMIT) {
       log.warn('review_interrupt_scan_truncated', { limit: INTERRUPT_SCAN_LIMIT, tenantId: ctx.tenantId });
     }
-    const runCache = new Map<string, RunRecord | null>();
-    for (const it of open) {
-      // A conversation gate is a live chat exchange, not a human review request.
-      if (it.kind === 'conversation') continue;
+    // ADR 0778 D8 — the runs of the page in ONE read, not one `getRun` per row.
+    const candidates = open.filter((it) => it.kind !== 'conversation'); // a chat gate is not a review request
+    const runs = await loadRuns(storage, candidates.map((it) => it.runId));
+    for (const it of candidates) {
+      const run = runs.get(it.runId);
+      // Tenant isolation FIRST (no existence leak). The lazy timeout below
+      // WRITES; on the global fallback it used to run before this check and so
+      // could time out another tenant's gate from this tenant's inbox read.
+      if (!run || run.tenantId !== ctx.tenantId) continue;
+      // ADR 0778 D3/C11 — a terminal run's gate is waiting on no one. The SQL
+      // already excludes these; this also covers the global-scan fallback.
+      if (isTerminalRunStatus(run.status)) continue;
       // RFC 0093 §D lazy enforcement: an overdue approval gate auto-rejects here
       // and drops out of the inbox.
       if (await timeoutApprovalGateIfDue(storage, it)) continue;
-      let run = runCache.get(it.runId);
-      if (run === undefined) { run = await storage.getRun(it.runId); runCache.set(it.runId, run); }
-      if (!run || run.tenantId !== ctx.tenantId) continue; // tenant isolation (no existence leak)
-      out.push(await withMediaAssets(await withQuorumPolicy(interruptToReview(it, run), it), ctx));
+      const review = await withMediaAssets(await withQuorumPolicy(interruptToReview(it, run), it), ctx);
+      const canDecide = await interruptCanDecide(it, run, ctx, memo);
+      out.push(canDecide === undefined ? review : { ...review, canDecide });
     }
   }
 
@@ -625,10 +840,12 @@ export async function listReviews(storage: Storage, ctx: ReviewAuthCtx, opts: Li
   if (opts.status === undefined || approvalStatus !== undefined) {
     const approvals = await listApprovals(ctx.tenantId, approvalStatus);
     for (const a of approvals) {
-      if (await approvalVisible(a, ctx)) {
+      if (await approvalVisible(a, ctx, memo)) {
         // COS-14 — assistant-action rows carry the ADR 0027 safety signals via
         // `withAssistantActionView` (mutually exclusive kind with composed).
-        out.push(await withAssistantActionView(await withComposedLiveView(await withApprovalQuorumPolicy(approvalToReview(a), a), a), a));
+        const review = await withAssistantActionView(await withComposedLiveView(await withApprovalQuorumPolicy(approvalToReview(a), a), a), a, ctx);
+        const canDecide = a.status === 'pending' ? await approvalCanDecide(a, ctx, memo) : undefined;
+        out.push(review.canDecide === false || canDecide === undefined ? review : { ...review, canDecide });
       }
     }
   }
@@ -653,13 +870,22 @@ export async function getReview(storage: Storage, ctx: ReviewAuthCtx, reviewId: 
     if (!it || it.kind === 'conversation') return null; // a chat gate is not a review
     const run = await storage.getRun(it.runId);
     if (!run || run.tenantId !== ctx.tenantId) return null;
-    return withMediaAssets(await withQuorumPolicy(interruptToReview(it, run), it), ctx);
+    // ADR 0778 D3 — an OPEN gate on a terminal run is no longer a review (404).
+    // A resolved one still reads (a deep link to a decided gate is not "not
+    // found" — grade-code `APCD-10`).
+    if (!it.resolvedAt && isTerminalRunStatus(run.status)) return null;
+    const review = await withMediaAssets(await withQuorumPolicy(interruptToReview(it, run), it), ctx);
+    const canDecide = it.resolvedAt ? undefined : await interruptCanDecide(it, run, ctx, newReadMemo());
+    return canDecide === undefined ? review : { ...review, canDecide };
   }
   if (source === 'approval') {
     const a = await getApproval(sourceId);
     if (!a || a.tenantId !== ctx.tenantId) return null;
-    if (!(await approvalVisible(a, ctx))) return null;
-    return withAssistantActionView(await withComposedLiveView(await withApprovalQuorumPolicy(approvalToReview(a), a), a), a);
+    const memo = newReadMemo();
+    if (!(await approvalVisible(a, ctx, memo))) return null;
+    const review = await withAssistantActionView(await withComposedLiveView(await withApprovalQuorumPolicy(approvalToReview(a), a), a), a, ctx);
+    const canDecide = a.status === 'pending' ? await approvalCanDecide(a, ctx, memo) : undefined;
+    return review.canDecide === false || canDecide === undefined ? review : { ...review, canDecide };
   }
   return null;
 }

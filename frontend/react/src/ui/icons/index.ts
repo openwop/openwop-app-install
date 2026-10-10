@@ -136,3 +136,4 @@ export { SquareIcon } from './SquareIcon.js';
 export { SlashIcon } from './SlashIcon.js';
 export { ArrowUpRightIcon } from './ArrowUpRightIcon.js';
 export { PipetteIcon } from './PipetteIcon.js';
+export { PanelRightIcon } from './PanelRightIcon.js';

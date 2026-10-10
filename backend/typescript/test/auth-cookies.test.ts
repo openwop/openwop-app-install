@@ -11,6 +11,7 @@ import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
+import { projectBoundId } from '../src/host/boundIdProjection.js';
 
 let server: http.Server;
 let BASE: string;
@@ -45,20 +46,20 @@ function extractCookie(setCookieHeader: string | null): string | null {
 
 describe('cookie-mode auth (P0.2)', () => {
   it('mints a session cookie on first request', async () => {
-    // Hit a route that requires auth. /v1/host/openwop-app/workflows is a
+    // Hit a route that requires auth. /host/openwop-app/workflows is a
     // GET that 200s with an empty list once authed.
-    const res = await fetch(`${BASE}/v1/host/openwop-app/workflows`);
+    const res = await fetch(`${BASE}/host/openwop-app/workflows`);
     expect(res.status).toBe(200);
     const cookie = extractCookie(res.headers.get('set-cookie'));
     expect(cookie).toMatch(/^__session=/);
   });
 
   it('preserves the session across requests + derives tenantId from cookie', async () => {
-    const first = await fetch(`${BASE}/v1/host/openwop-app/workflows`);
+    const first = await fetch(`${BASE}/host/openwop-app/workflows`);
     const cookie = extractCookie(first.headers.get('set-cookie'))!;
     // Register a workflow (POST) carrying the cookie; the run should
     // inherit the cookie-derived tenant.
-    const reg = await fetch(`${BASE}/v1/host/openwop-app/workflows`, {
+    const reg = await fetch(`${BASE}/host/openwop-app/workflows`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', cookie },
       body: JSON.stringify({
@@ -70,7 +71,7 @@ describe('cookie-mode auth (P0.2)', () => {
 
     // Create a run WITHOUT passing tenantId in the body. The cookie's
     // tenant should be used.
-    const runRes = await fetch(`${BASE}/v1/runs`, {
+    const runRes = await fetch(`${BASE}/runs`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', cookie },
       body: JSON.stringify({ workflowId: 'cookie-test', inputs: { text: 'hello' } }),
@@ -81,7 +82,7 @@ describe('cookie-mode auth (P0.2)', () => {
     // Fetch run snapshot to confirm the run was authed to the cookie's
     // tenant. (The snapshot projection doesn't echo tenantId; the
     // success of the create + fetch is the assertion.)
-    const snap = await fetch(`${BASE}/v1/runs/${run.runId}`, {
+    const snap = await fetch(`${BASE}/runs/${projectBoundId(run.runId)}`, {
       headers: { cookie },
     });
     expect(snap.status).toBe(200);
@@ -91,9 +92,9 @@ describe('cookie-mode auth (P0.2)', () => {
   });
 
   it('rejects a body.tenantId that doesn\'t match the cookie\'s tenant', async () => {
-    const first = await fetch(`${BASE}/v1/host/openwop-app/workflows`);
+    const first = await fetch(`${BASE}/host/openwop-app/workflows`);
     const cookie = extractCookie(first.headers.get('set-cookie'))!;
-    await fetch(`${BASE}/v1/host/openwop-app/workflows`, {
+    await fetch(`${BASE}/host/openwop-app/workflows`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', cookie },
       body: JSON.stringify({
@@ -101,7 +102,7 @@ describe('cookie-mode auth (P0.2)', () => {
         nodes: [{ nodeId: 'shout', typeId: 'local.openwop-app.uppercase' }],
       }),
     });
-    const runRes = await fetch(`${BASE}/v1/runs`, {
+    const runRes = await fetch(`${BASE}/runs`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', cookie },
       body: JSON.stringify({
@@ -119,7 +120,7 @@ describe('cookie-mode auth (P0.2)', () => {
   it('rejects a tampered signature → new cookie minted', async () => {
     // Forge a payload + bad sig
     const forged = '__session=eyJzaWQiOiJYIiwidGVuYW50SWQiOiJhbm9uOlgiLCJ0aWVyIjoiYW5vbiIsImlhdCI6MSwiZXhwIjoyMDAwMDAwMDAwfQ.BADSIG';
-    const res = await fetch(`${BASE}/v1/host/openwop-app/workflows`, {
+    const res = await fetch(`${BASE}/host/openwop-app/workflows`, {
       headers: { cookie: forged },
     });
     expect(res.status).toBe(200); // a fresh cookie is minted

@@ -40,3 +40,25 @@ describe('columnLaneKind', () => {
     expect(columnLaneKind({ id: 'x', name: 'todo list' })).toBeNull();
   });
 });
+
+// ADR 0774 D1 — the SAME case table the backend twin (`columnLaneKind` in
+// `host/kanbanService.ts`) pins in `test/kanban-stack-claim-heartbeat.test.ts`.
+// The server uses it to decide which lane the agent's pick claims a card into;
+// if the two drift, the board shows one "in progress" and the loop uses another.
+describe('columnLaneKind — the server-parity table (ADR 0774)', () => {
+  it.each([
+    [{ id: 'todo', name: 'To Do' }, 'todo'],
+    [{ id: 'x', name: 'to do' }, 'todo'],
+    [{ id: 'working', name: 'Working' }, 'working'],
+    [{ id: 'doing', name: 'Doing' }, 'working'],
+    [{ id: 'col-2', name: 'Doing' }, 'working'],
+    [{ id: 'in-progress', name: 'Started' }, 'working'],
+    [{ id: 'col-5', name: 'In Progress' }, 'working'],
+    [{ id: 'waiting', name: 'Waiting on Human' }, 'waiting'],
+    [{ id: 'col-3', name: 'Waiting for review' }, 'waiting'],
+    [{ id: 'done', name: 'Done' }, 'done'],
+    [{ id: 'backlog', name: 'Backlog' }, null],
+  ] as const)('%o → %s', (col, kind) => {
+    expect(columnLaneKind(col)).toBe(kind);
+  });
+});

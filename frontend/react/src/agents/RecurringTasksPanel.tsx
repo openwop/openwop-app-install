@@ -25,13 +25,33 @@ import { listLoops, setLoopEnabled, type AssistantLoop } from '../features/assis
 import { StatusBadge } from '../ui/StatusBadge.js';
 import { toast } from '../ui/toast.js';
 import { formatDateTime } from '../i18n/format.js';
+import { StateCard } from '../ui/StateCard.js';
+import { Notice } from '../ui/Notice.js';
+import { ClockIcon } from '../ui/icons/index.js';
+import { useScopeWriteAccess, writeErrorMessage } from '../lib/writeAccess.js';
+import { Link } from 'react-router-dom';
+
+/** ADR 0862 — the loop's typed failure code → what to tell the human. Codes are the
+ *  ingest node's `providerRejection` vocabulary (`packs/feature.assistant.nodes`). */
+const FAIL_REASON_KEY: Record<string, string> = {
+  connection_reauth_required: 'loopFailReauth',
+  connection_scope_missing: 'loopFailScope',
+  provider_api_disabled: 'loopFailApiDisabled',
+  connection_forbidden: 'loopFailForbidden',
+  upstream_unavailable: 'loopFailUnavailable',
+};
+/** The codes the human fixes on the Connections page (mirrors notify.ts RECONNECT_CODES). */
+const RECONNECT = new Set(['connection_reauth_required', 'connection_scope_missing', 'connection_forbidden']);
 
 /** WF-COS-4 — reason code → catalog key. A `Record` rather than a ternary chain
  *  so a new reason code on the wire is a compile error here, not silence. */
-const SKIP_REASON_KEY: Record<NonNullable<AssistantLoop['lastSkipReason']>, string> = {
+const SKIP_REASON_KEY: Record<Exclude<NonNullable<AssistantLoop['lastSkipReason']>, 'no-next-fire'>, string> = {
   budget: 'recurringSkipBudget',
   'workflow-unresolved': 'recurringSkipUnresolved',
   'dispatch-error': 'recurringSkipDispatch',
+  'feature-disabled': 'recurringSkipFeatureDisabled',
+  'plan-lapsed': 'recurringSkipPlanLapsed',
+  'actor-inactive': 'recurringSkipActorInactive',
 };
 
 /**
@@ -52,7 +72,7 @@ const SKIP_REASON_KEY: Record<NonNullable<AssistantLoop['lastSkipReason']>, stri
  */
 function skipReasonKey(reason: string | undefined): string {
   if (reason !== undefined && Object.prototype.hasOwnProperty.call(SKIP_REASON_KEY, reason)) {
-    return SKIP_REASON_KEY[reason as NonNullable<AssistantLoop['lastSkipReason']>];
+    return SKIP_REASON_KEY[reason as keyof typeof SKIP_REASON_KEY];
   }
   // Adversarial-review F6 — two DIFFERENT truths, two sentences: no reason on
   // the wire = "no reason was recorded"; a reason we can't map = one WAS
@@ -63,14 +83,20 @@ function skipReasonKey(reason: string | undefined): string {
 
 export function RecurringTasksPanel(): JSX.Element {
   const { t } = useTranslation('agents');
+  // ADR 0862 — the failure copy lives in the lazy `assistantAction` namespace; read without
+  // suspending, and the failure line renders once it has loaded.
+  const { t: ta, ready: failCopyReady } = useTranslation('assistantAction', { useSuspense: false });
   const [loops, setLoops] = useState<AssistantLoop[] | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // ADR 0787 — enabling/pausing a loop is a workspace WRITE (the route gates it);
+  // a Viewer sees the loops and their state, not a button that 403s.
+  const canWrite = useScopeWriteAccess('workspace:write');
 
   const load = useCallback(() => {
     void listLoops()
-      .then(setLoops)
-      .catch((e) => setError(e instanceof Error ? e.message : t('recurringLoadError')));
+      .then((l) => { setLoops(l); setError(null); })
+      .catch((e: unknown) => { setLoops([]); setError(writeErrorMessage(t, e)); });
   }, [t]);
 
   useEffect(() => { load(); }, [load]);
@@ -83,7 +109,7 @@ export function RecurringTasksPanel(): JSX.Element {
         toast.success(loop.enabled ? t('recurringPaused', { label: loop.label }) : t('recurringEnabled', { label: loop.label }));
         load();
       } catch (e) {
-        toast.error(e instanceof Error ? e.message : t('recurringUpdateError'));
+        toast.error(writeErrorMessage(t, e));
       } finally {
         setBusy(null);
       }
@@ -99,10 +125,11 @@ export function RecurringTasksPanel(): JSX.Element {
           {t('recurringLede')}
         </p>
       </header>
-      {error ? <p className="muted">{error}</p> : null}
+      {error ? <Notice variant="error" announce={error}>{error}</Notice> : null}
+      {loops === null ? <StateCard icon={<ClockIcon />} title={t('common:loading')} loading /> : null}
       <ul className="u-grid u-gap-2">
         {(loops ?? []).map((loop) => (
-          <li key={loop.loopId} className="u-flex u-gap-2 u-items-center">
+          <li key={loop.loopId} className="u-flex u-wrap u-gap-2 u-items-center">
             <span className="u-flex-1">
               <strong>{loop.label}</strong>
               <span className="muted u-block">{loop.description}</span>
@@ -117,7 +144,11 @@ export function RecurringTasksPanel(): JSX.Element {
                   as plain text rather than an announcing Notice: this panel is
                   read on demand, and the page's single polite slot is not the
                   place for a per-row status (noticeSweepTranche). */}
-              {loop.lastSkippedAt ? (
+              {/* ADR 0787 D6 — `no-next-fire` is not a dropped fire: the cadence
+                  has no further slot, so say THAT, not "did not run". */}
+              {loop.enabled && loop.lastSkipReason === 'no-next-fire' ? (
+                <span className="u-block u-text-sm u-text-warning">{t('recurringCadenceExhausted')}</span>
+              ) : loop.lastSkippedAt ? (
                 <span className="u-block u-text-sm u-text-warning">
                   {t('recurringSkipped', {
                     when: formatDateTime(loop.lastSkippedAt),
@@ -125,16 +156,42 @@ export function RecurringTasksPanel(): JSX.Element {
                   })}
                 </span>
               ) : null}
+              {/* ADR 0662 D3 / ADR 0862 — a run that STARTED and FAILED. The server has
+                  projected `lastRunStatus` since it.14; nothing rendered it, so a loop
+                  failing most of its runs read "Last run …" beside a green On. */}
+              {/* ADR 0862 — the loop stopped ITSELF after repeated connection refusals. */}
+              {failCopyReady && !loop.enabled && loop.autoPausedCode ? (
+                <span className="u-block u-text-sm u-text-warning">
+                  {ta('loopAutoPaused', {
+                    when: loop.autoPausedAt ? formatDateTime(loop.autoPausedAt) : '',
+                    reason: ta(FAIL_REASON_KEY[loop.autoPausedCode] ?? 'loopFailOther'),
+                  })}{' '}
+                  <Link className="inline-link" to="/connections">{ta('loopReconnect')}</Link>
+                </span>
+              ) : failCopyReady && loop.lastRunStatus === 'failed' && loop.lastRunAt ? (
+                <span className="u-block u-text-sm u-text-warning">
+                  {ta('loopLastRunFailed', {
+                    when: formatDateTime(loop.lastRunAt),
+                    reason: ta(FAIL_REASON_KEY[loop.lastRunErrorCode ?? ''] ?? 'loopFailOther'),
+                  })}{' '}
+                  {loop.lastRunErrorCode && RECONNECT.has(loop.lastRunErrorCode) ? (
+                    <Link className="inline-link" to="/connections">{ta('loopReconnect')}</Link>
+                  ) : loop.lastRunId ? (
+                    <Link className="inline-link" to={`/runs/${encodeURIComponent(loop.lastRunId)}`}>{ta('loopViewRun')}</Link>
+                  ) : null}
+                </span>
+              ) : null}
             </span>
             <StatusBadge status={loop.enabled ? 'active' : 'paused'} label={loop.enabled ? t('recurringOn') : t('recurringOff')} />
-            <Button
-              variant={loop.enabled ? 'secondary' : 'accent'}
-              disabled={busy === loop.loopId}
-              aria-pressed={loop.enabled}
-              onClick={() => void toggle(loop)}
-            >
-              {loop.enabled ? t('recurringPause') : t('recurringEnable')}
-            </Button>
+            {canWrite ? (
+              <Button
+                variant={loop.enabled ? 'secondary' : 'accent'}
+                disabled={busy === loop.loopId}
+                onClick={() => void toggle(loop)}
+              >
+                {loop.enabled ? t('recurringPause') : t('recurringEnable')}
+              </Button>
+            ) : null}
           </li>
         ))}
         {loops !== null && loops.length === 0 ? <li className="muted">{t('recurringEmpty')}</li> : null}

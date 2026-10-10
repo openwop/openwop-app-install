@@ -7,6 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
+import { createOrg } from '../src/host/accessControlService.js';
 
 let BASE: string; let server: http.Server;
 beforeAll(async () => {
@@ -30,12 +31,15 @@ function client() {
 }
 async function enable(id: string): Promise<void> { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status: 'on' }, 'test'); }
 const T = 'cf-tenant';
-const rulesPath = (orgId: string): string => `/v1/host/openwop-app/capability-firewall/orgs/${encodeURIComponent(orgId)}/rules`;
+const rulesPath = (orgId: string): string => `/host/openwop-app/capability-firewall/orgs/${encodeURIComponent(orgId)}/rules`;
 async function ownerWithOrg(email: string): Promise<{ c: ReturnType<typeof client>; orgId: string }> {
   const c = client();
-  await c('POST', '/v1/host/openwop-app/test/login', { email, tenantId: T });
-  const org = await c('POST', '/v1/host/openwop-app/orgs', { name: 'Acme' });
-  return { c, orgId: org.body.orgId };
+  const who = await c('POST', '/host/openwop-app/test/login', { email, tenantId: T });
+  // ADR 0815 D1a — creating an org inside a SHARED tenant is owner-tier over HTTP,
+  // and every test here shares the tenant; the org under test is minted directly,
+  // owned by this caller (the shape `POST /orgs` produces for an owner).
+  const org = await createOrg({ tenantId: T, createdBy: who.body.user.userId, name: 'Acme', ownerSubject: who.body.user.userId });
+  return { c, orgId: org.orgId };
 }
 
 describe('capability-firewall routes (ADR 0135, always-on)', () => {

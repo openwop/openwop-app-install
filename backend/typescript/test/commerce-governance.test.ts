@@ -26,6 +26,7 @@ import { listApprovals, resolveApproval } from '../src/host/approvalService.js';
 import { buildCommerceSurface } from '../src/features/commerce/surface.js';
 import { listActivities } from '../src/features/crm/crmEntitiesService.js';
 import type { Storage } from '../src/storage/storage.js';
+import { bareRunId } from './support/bareRunId.js';
 
 let BASE: string; let server: http.Server; let app: Express; let storage: Storage; let n = 0;
 
@@ -58,15 +59,15 @@ function client() {
 
 async function shopOwner(): Promise<{ owner: ReturnType<typeof client>; orgId: string; tenantId: string }> {
   const owner = client();
-  const r = await owner.post('/v1/host/openwop-app/test/login', { email: `cgov-${Date.now()}-${n++}@acme.test` });
+  const r = await owner.post('/host/openwop-app/test/login', { email: `cgov-${Date.now()}-${n++}@acme.test` });
   expect(r.status).toBe(201);
   const tenantId: string = r.body.tenantId ?? r.body.user?.tenantId ?? '';
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Shop' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Shop' });
   expect(org.status).toBe(201);
   return { owner, orgId: org.body.orgId, tenantId };
 }
 
-const c = (orgId: string, suffix = ''): string => `/v1/host/openwop-app/commerce/orgs/${encodeURIComponent(orgId)}${suffix}`;
+const c = (orgId: string, suffix = ''): string => `/host/openwop-app/commerce/orgs/${encodeURIComponent(orgId)}${suffix}`;
 
 function storageOrThrow(): Storage {
   const s = __hostExtStorage();
@@ -104,17 +105,17 @@ describe('B1 — audit rows across the lifecycle', () => {
 describe('B2 — host events (emitHostEvent, ADR 0208)', () => {
   it('enqueues a webhook delivery for host.commerce.order.paid', async () => {
     const { owner, orgId } = await shopOwner();
-    const sub = await owner.post('/v1/webhooks', { url: 'https://example.com/openwop-test/commerce-events', events: ['host.commerce.order.paid'] });
+    const sub = await owner.post('/webhooks', { url: 'https://example.com/openwop-test/commerce-events', events: ['host.commerce.order.paid'] });
     expect(sub.status, JSON.stringify(sub.body)).toBe(201);
     await productAndPaidOrder(owner, orgId, 9);
     let found = false;
     for (let i = 0; i < 40 && !found; i++) {
       const claimed = await storage.claimDueWebhookDeliveries(`cgov-worker-${i}`, Date.now() + 1, 5000, 20);
-      if (claimed.some((d) => d.subscriptionId === sub.body.webhookId && d.eventType === 'host.commerce.order.paid')) found = true;
+      if (claimed.some((d) => d.subscriptionId === bareRunId(sub.body.webhookId) && d.eventType === 'openwop-app.commerce.order-paid')) found = true;
       else await new Promise((r) => setTimeout(r, 25));
     }
     expect(found).toBe(true);
-    await owner.del(`/v1/webhooks/${sub.body.webhookId}`);
+    await owner.del(`/webhooks/${sub.body.webhookId}`);
   });
 
   it('fires low-stock once per downward crossing (audit-row proof)', async () => {
@@ -249,7 +250,7 @@ describe('B5 — surface order-ops verbs', () => {
 describe('B6 — order↔CRM Activity linkage', () => {
   it('paying an order with a contact appends ONE deterministic-id activity', async () => {
     const { owner, orgId, tenantId } = await shopOwner();
-    const contact = await owner.post('/v1/host/openwop-app/crm/contacts', { name: 'Buyer Bea', email: 'bea@acme.test' });
+    const contact = await owner.post('/host/openwop-app/crm/contacts', { name: 'Buyer Bea', email: 'bea@acme.test' });
     expect(contact.status, JSON.stringify(contact.body)).toBe(201);
     const contactId: string = contact.body.contactId;
 

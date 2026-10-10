@@ -32,8 +32,8 @@ let adminCookie: string;
 let submitterCookie: string;
 let submitterUserId = '';
 
-const CLAIM = (id: string) => `/v1/host/openwop-app/approvals/${encodeURIComponent(id)}/claim`;
-const REJECT = (id: string) => `/v1/host/openwop-app/approvals/${encodeURIComponent(id)}/reject`;
+const CLAIM = (id: string) => `/host/openwop-app/approvals/${encodeURIComponent(id)}/claim`;
+const REJECT = (id: string) => `/host/openwop-app/approvals/${encodeURIComponent(id)}/reject`;
 
 const craftCookie = (userId: string, activeTenant: string, personalTenant: string): string => {
   const now = Math.floor(Date.now() / 1000);

@@ -84,52 +84,60 @@ export async function upsertIdeaIntake(input: {
 }): Promise<IdeaIntake> {
   const { tenantId, orgId, listId, cardId, actor, patch } = input;
   await assertIdeaOnList(tenantId, listId, cardId);
-  const existing = await getIdeaIntake(listId, cardId);
-  const next: IdeaIntake = existing ? { ...existing } : { listId, cardId, updatedBy: actor, updatedAt: '' };
-  if (patch.requester !== undefined) {
-    const v = cleanString(patch.requester, 200);
-    if (v) next.requester = v; else delete next.requester;
-  }
-  if (patch.sourceChannel !== undefined) {
-    if (patch.sourceChannel === null) delete next.sourceChannel;
-    else if (typeof patch.sourceChannel === 'string' && (SOURCE_CHANNELS as readonly string[]).includes(patch.sourceChannel)) next.sourceChannel = patch.sourceChannel as IntakeSourceChannel;
-    else throw new OpenwopError('validation_error', `sourceChannel must be one of: ${SOURCE_CHANNELS.join(', ')}.`, 400, {});
-  }
-  if (patch.estimatedValue !== undefined) {
-    if (patch.estimatedValue === null) delete next.estimatedValue;
-    else {
-      const n = typeof patch.estimatedValue === 'number' ? patch.estimatedValue : Number(patch.estimatedValue);
-      if (!Number.isFinite(n)) throw new OpenwopError('validation_error', 'estimatedValue must be a finite number.', 400, {});
-      next.estimatedValue = n;
+  // PM4CD-1 (ADR 0842) — a CAS on the row, like `markPromoted`. The plain read-modify-put
+  // lost the race to a concurrent promote: the stale write erased `promotedTo`, which
+  // this module calls unrecoverable (the project it pointed at stays minted). The patch
+  // is re-applied to the FRESH row on a lost race; validation errors throw on attempt 1.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const existing = await getIdeaIntake(listId, cardId);
+    const next: IdeaIntake = existing ? { ...existing } : { listId, cardId, updatedBy: actor, updatedAt: '' };
+    if (patch.requester !== undefined) {
+      const v = cleanString(patch.requester, 200);
+      if (v) next.requester = v; else delete next.requester;
+    }
+    if (patch.sourceChannel !== undefined) {
+      if (patch.sourceChannel === null) delete next.sourceChannel;
+      else if (typeof patch.sourceChannel === 'string' && (SOURCE_CHANNELS as readonly string[]).includes(patch.sourceChannel)) next.sourceChannel = patch.sourceChannel as IntakeSourceChannel;
+      else throw new OpenwopError('validation_error', `sourceChannel must be one of: ${SOURCE_CHANNELS.join(', ')}.`, 400, {});
+    }
+    if (patch.estimatedValue !== undefined) {
+      if (patch.estimatedValue === null) delete next.estimatedValue;
+      else {
+        const n = typeof patch.estimatedValue === 'number' ? patch.estimatedValue : Number(patch.estimatedValue);
+        if (!Number.isFinite(n)) throw new OpenwopError('validation_error', 'estimatedValue must be a finite number.', 400, {});
+        next.estimatedValue = n;
+      }
+    }
+    if (patch.estimatedValueUnit !== undefined) {
+      const v = cleanString(patch.estimatedValueUnit, 40);
+      if (v) next.estimatedValueUnit = v; else delete next.estimatedValueUnit;
+    }
+    if (patch.notes !== undefined) {
+      const v = cleanString(patch.notes, 2000);
+      if (v) next.notes = v; else delete next.notes;
+    }
+    // ADR 0247 OQ-5 — provenance back to the originating form submission (set by
+    // the forms→intake bridge chain; opaque id, no PII). PMX-5 (ADR 0590): this
+    // is a REFERENCE lane — `cleanOpaqueToken` (charset-validated, NOT the
+    // secret-shaped scrub that would corrupt any 40+-char id at save), with a
+    // loud 400 for a non-token value instead of a silent mangle-or-drop.
+    if (patch.sourceSubmissionId !== undefined) {
+      const raw = String(patch.sourceSubmissionId ?? '').trim();
+      if (!raw) delete next.sourceSubmissionId;
+      else {
+        const v = cleanOpaqueToken(raw, 128);
+        if (!v) throw new OpenwopError('validation_error', 'sourceSubmissionId must be an opaque submission id.', 400, { field: 'sourceSubmissionId' });
+        next.sourceSubmissionId = v;
+      }
+    }
+    next.updatedBy = actor;
+    next.updatedAt = new Date().toISOString();
+    if (await intakes.compareAndSwap(existing ?? null, next)) {
+      priorityMutated({ entity: 'idea', verb: 'intake-updated', tenantId, actor, listId, entityId: cardId, orgId });
+      return next;
     }
   }
-  if (patch.estimatedValueUnit !== undefined) {
-    const v = cleanString(patch.estimatedValueUnit, 40);
-    if (v) next.estimatedValueUnit = v; else delete next.estimatedValueUnit;
-  }
-  if (patch.notes !== undefined) {
-    const v = cleanString(patch.notes, 2000);
-    if (v) next.notes = v; else delete next.notes;
-  }
-  // ADR 0247 OQ-5 — provenance back to the originating form submission (set by
-  // the forms→intake bridge chain; opaque id, no PII). PMX-5 (ADR 0590): this
-  // is a REFERENCE lane — `cleanOpaqueToken` (charset-validated, NOT the
-  // secret-shaped scrub that would corrupt any 40+-char id at save), with a
-  // loud 400 for a non-token value instead of a silent mangle-or-drop.
-  if (patch.sourceSubmissionId !== undefined) {
-    const raw = String(patch.sourceSubmissionId ?? '').trim();
-    if (!raw) delete next.sourceSubmissionId;
-    else {
-      const v = cleanOpaqueToken(raw, 128);
-      if (!v) throw new OpenwopError('validation_error', 'sourceSubmissionId must be an opaque submission id.', 400, { field: 'sourceSubmissionId' });
-      next.sourceSubmissionId = v;
-    }
-  }
-  next.updatedBy = actor;
-  next.updatedAt = new Date().toISOString();
-  await intakes.put(next);
-  priorityMutated({ entity: 'idea', verb: 'intake-updated', tenantId, actor, listId, entityId: cardId, orgId });
-  return next;
+  throw new OpenwopError('conflict', 'The idea\'s intake was modified concurrently; retry.', 409, { cardId });
 }
 
 export async function listIdeaEvidence(listId: string, cardId: string): Promise<IdeaEvidence[]> {
@@ -299,6 +307,18 @@ export async function markPromoted(input: {
     }
   }
   throw new OpenwopError('conflict', 'The idea was modified concurrently while promoting; retry.', 409, { cardId });
+}
+
+/** ADR 0842 D5 — one idea's intake + evidence go with the idea. Both idea-delete doors
+ *  (PM's `deleteIdea` and kanban's card-delete hook) call this; idempotent, prefix-bounded. */
+export async function deleteIntakeRowsForCard(listId: string, cardId: string): Promise<number> {
+  let removed = 0;
+  if (await intakes.delete(`${listId}::${cardId}`)) removed += 1;
+  for (const ev of await evidence.listByPrefix(`ev:${listId}::${cardId}::`)) {
+    await evidence.delete(ev.evidenceId);
+    removed += 1;
+  }
+  return removed;
 }
 
 /** R2 PM review — cascade the list's intake + evidence rows. They carry `requester`

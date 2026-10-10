@@ -25,6 +25,8 @@ export default function PipelineTrendTile(_props: DashboardTileProps): JSX.Eleme
 
   if (status === 'loading') return <SkeletonRows rows={2} columns={['40%', '55%']} />;
   if (status === 'error') return <p className="dash-tile__state muted">{t('tileError')}</p>;
+  // ADR 0846 D4 — a territory-scoped viewer gets no org-wide history; say why.
+  if (data?.snapshotsWithheld) return <p className="dash-tile__state muted">{t('pipelineTrendWithheld')}</p>;
   const snaps = data?.snapshots ?? [];
   if (status === 'no-org' || snaps.length === 0) return <p className="dash-tile__state muted">{t('pipelineTrendEmpty')}</p>;
 

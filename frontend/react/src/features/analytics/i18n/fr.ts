@@ -51,6 +51,7 @@ export const messages = {
   // ADR 0569 — uniques quotidiens (sans cookies)
   figureVisitors: 'Uniques quotidiens',
   visitorsDisclosure: 'Les uniques quotidiens sont sans cookies : un hachage de visiteur salé qui change chaque jour UTC — aucune identité inter-jours n\u2019existe et un chiffre multi-jours est la somme des uniques de chaque jour. Le comptage a commencé le {{since}}.',
+  consentFilterNote: 'La gestion du consentement est activée : un visiteur n\u2019est compté que si son consentement analytique le permet, ces chiffres excluent donc tous ceux qui l\u2019ont refusé.',
   figurePageviews: 'Pages vues',
   figureConversions: 'Conversions',
 
@@ -115,4 +116,8 @@ export const messages = {
   navColRoute: 'Route',
   navColSource: 'Source',
   navColCount: 'Total',
+  // ADR 0768 D5 — the Pocket assistant; its agent reads only orgs the caller can read.
+  pocketTitle: 'Assistant analyses',
+  pocketScope: 'les analyses des organisations que vous pouvez consulter',
+  pocketHint: 'Demandez ce qui a changé, p. ex. « pourquoi les conversions ont-elles baissé la semaine dernière ? »',
 } as const;

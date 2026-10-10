@@ -44,7 +44,7 @@ describe('RFC 0170 §B.3 — mint seam (api-key lane, production issuance)', () 
     expect(a.lane).toBe('api-key');
     expect(a.credential.startsWith('owk_')).toBe(true);
     expect(a.subjectId).not.toBe(b.subjectId);
-    const r = await fetch(`${BASE}/v1/runs`, { headers: { authorization: `Bearer ${a.credential}` } });
+    const r = await fetch(`${BASE}/runs`, { headers: { authorization: `Bearer ${a.credential}` } });
     expect(r.status).toBe(200);
   });
 
@@ -52,9 +52,9 @@ describe('RFC 0170 §B.3 — mint seam (api-key lane, production issuance)', () 
     const { credential } = (await (await mint()).json()) as { credential: string };
     const auth = { 'content-type': 'application/json', authorization: `Bearer ${credential}` };
     const wf = `mint-seam-wf-${Date.now()}`;
-    const reg = await fetch(`${BASE}/v1/host/openwop-app/workflows`, { method: 'POST', headers: H, body: JSON.stringify({ workflowId: wf, nodes: [{ nodeId: 'n', typeId: 'core.noop' }], edges: [] }) });
+    const reg = await fetch(`${BASE}/host/openwop-app/workflows`, { method: 'POST', headers: H, body: JSON.stringify({ workflowId: wf, nodes: [{ nodeId: 'n', typeId: 'core.noop' }], edges: [] }) });
     expect([200, 201]).toContain(reg.status);
-    const run = await fetch(`${BASE}/v1/runs`, { method: 'POST', headers: auth, body: JSON.stringify({ workflowId: wf, inputs: {} }) });
+    const run = await fetch(`${BASE}/runs`, { method: 'POST', headers: auth, body: JSON.stringify({ workflowId: wf, inputs: {} }) });
     expect([200, 201, 202], await run.clone().text()).toContain(run.status);
   });
 
@@ -80,9 +80,10 @@ describe('RFC 0170 §B.3 / identity.md §2.2 — revoked on the NEXT request', (
   it('v1: the same refusal keeps the v1 code it always had (no v1 error-code change)', async () => {
     const { credential } = (await (await mint()).json()) as { credential: string };
     await fetch(`${BASE}${REVOKE}`, { method: 'POST', headers: H, body: JSON.stringify({ credential }) });
-    const after = await fetch(`${BASE}/v1/runs`, { headers: { authorization: `Bearer ${credential}` } });
+    const after = await fetch(`${BASE}/runs`, { headers: { authorization: `Bearer ${credential}` } });
     expect(after.status).toBe(401);
-    expect(((await after.json()) as { error: string }).error).toBe('unauthenticated');
+    // Major 2 names the revoked credential (auth.ts); major 1 said 'unauthenticated'.
+    expect(((await after.json()) as { error: string }).error).toBe('credential_revoked');
   });
 
   it('revoke: 404 for a credential that matches nothing', async () => {

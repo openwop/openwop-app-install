@@ -3,8 +3,8 @@
 Production-grade structured-extraction agent. Caller supplies a JSON Schema; agent extracts conforming output with an auto-fix loop on validation failure. Mirrors LangGraph Trustcall.
 
 | Pack name | `core.openwop.agents.structured-extractor` |
-| Version | `1.0.0` |
-| Engine | OpenWOP `>=1.1.0 <2.0.0` |
+| Version | `1.0.1` |
+| Engine | OpenWOP `>=1.1.0 <3.0.0` |
 | Runtime | `language: remote` |
 | Agents | 1 |
 | Required host capabilities | `aiProviders`, `host.agentRuntime` |
@@ -35,4 +35,4 @@ Note that `task.outputSchema` is an **inline JSON Schema** (the caller passes th
 ## See also
 
 - [`packs/core.openwop.agents/`](../core.openwop.agents/) — see `output-parser-structured` + `output-parser-auto-fix` sub-nodes for the in-workflow equivalent
-- [`RFCS/0003-agent-packs.md`](../../RFCS/0003-agent-packs.md) §D — handoff schema resolution
+- [`RFCS/0003-agent-packs.md`](https://github.com/openwop/openwop/blob/main/RFCS/0003-agent-packs.md) §D — handoff schema resolution

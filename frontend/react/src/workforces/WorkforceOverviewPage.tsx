@@ -35,6 +35,7 @@ import {
   type WorkforceStatus,
 } from '../client/workforcesClient.js';
 import { formatCurrency, formatDate, formatDurationMs, formatNumber, formatPercent } from '../i18n/format.js';
+import { useAgentWriteAccess, writeErrorMessage } from '../agents/agentWriteAccess.js';
 
 function pct(n: number): string {
   return formatPercent(n, { minimumFractionDigits: 1, maximumFractionDigits: 1 });
@@ -78,6 +79,8 @@ export function WorkforceOverviewPage(): JSX.Element {
   // `notifications` toggle (ADR 0010). Hide the button when the feature is off
   // so it doesn't route to a surface whose bell + nav are hidden.
   const isVisible = useFeatureVisible();
+  // ADR 0775 D1 (grade-ux ARUX-5) — cut-over needs `workspace:write`.
+  const canWrite = useAgentWriteAccess();
   const [wf, setWf] = useState<Workforce | null>(null);
   const [metrics, setMetrics] = useState<WorkforceMetrics | null>(null);
   const [governance, setGovernance] = useState<WorkforceGovernance | null>(null);
@@ -94,7 +97,7 @@ export function WorkforceOverviewPage(): JSX.Element {
       const updated = await updateWorkforceStatus(workforceId, status);
       setWf(updated);
     } catch (e: unknown) {
-      setCutoverError(e instanceof Error ? e.message : String(e));
+      setCutoverError(writeErrorMessage(e, t('common:error_forbidden')));
     } finally {
       setCutoverBusy(false);
     }
@@ -178,12 +181,18 @@ export function WorkforceOverviewPage(): JSX.Element {
                 {metrics ? <> {t('proveFirstOverride')} <strong>{pct(metrics.overrideRate)}</strong> {t('proveFirstOverrideTail')}</> : null}.
               </p>
             ) : null}
-            {/* Cut-over mutates the GLOBAL workforce entity (shared across
-                visitors), so it is read-only on illustrative showcase data —
-                you manage your own, not the demo's. */}
+            {/* Cut-over is YOUR workspace's decision (ADR 0775 D2 made it a
+                per-tenant overlay; it used to mutate one shared record). It is
+                still read-only on illustrative showcase data — the graduation
+                evidence behind it is the demo's, not yours — and for a viewer,
+                whom the server refuses (ADR 0775 D1). */}
             {isShowcase ? (
               <p className="muted u-mbox-t2 u-fs-14">
                 {t('showcaseReadOnly')}
+              </p>
+            ) : !canWrite ? (
+              <p className="muted u-mbox-t2 u-fs-14">
+                {t('viewerReadOnly')}
               </p>
             ) : (
               <div className="action-bar u-gap-2 u-wrap u-mt-2 u-items-center">
@@ -205,15 +214,15 @@ export function WorkforceOverviewPage(): JSX.Element {
           </>
         ) : (
           <>
-            <p className="wf-gate"><strong>{t('runningOnItsOwnLead')}</strong> {t('runningOnItsOwnTail')}{!isShowcase ? <>{' '}{t('rollBackAnyTimeClause')}</> : null}</p>
-            {!isShowcase && prev ? (
+            <p className="wf-gate"><strong>{t('runningOnItsOwnLead')}</strong> {t('runningOnItsOwnTail')}{!isShowcase && canWrite ? <>{' '}{t('rollBackAnyTimeClause')}</> : null}</p>
+            {!isShowcase && canWrite && prev ? (
               <div className="action-bar u-mt-2">
                 <Button variant="secondary" disabled={cutoverBusy} onClick={() => { void cutOver(prev.status); }}>{t('rollBackTo', { label: t(journeyLabelKey(prev.status)) })}</Button>
               </div>
             ) : null}
           </>
         )}
-        {cutoverError ? <Notice variant="error">{cutoverError}</Notice> : null}
+        {cutoverError ? <Notice variant="error" announce={cutoverError}>{cutoverError}</Notice> : null}
       </section>
 
       {/* NEEDS YOU — decision-first (DESIGN.md §4.5 rule 1). Real fields only.

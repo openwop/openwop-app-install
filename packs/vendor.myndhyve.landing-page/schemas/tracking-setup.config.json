@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.landing-page/1.0.0/tracking-setup.config.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.landing-page/1.0.2/tracking-setup.config.json",
   "title": "Landing-tracking-setup-config",
   "type": "object",
   "properties": {

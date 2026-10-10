@@ -14,12 +14,18 @@
  *   - Esc (while streaming) → cancel
  */
 
+import { useMediaQuery } from '../ui/useMediaQuery.js';
 import { Button } from '../ui/Button.js';
-import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from 'react';
+import { lazy, Suspense, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
+import type { ComboboxWiring } from './lib/comboboxWiring.js';
 import { useTranslation } from 'react-i18next';
 import { useAudioRecorder, blobToBase64, type RecordedAudio } from './hooks/useAudioRecorder.js';
 import { formatDurationSeconds } from '../i18n/format.js';
 import { SlashAutocomplete } from './SlashAutocomplete.js';
+import { SlashInputsPanel, type SlashInputsState } from './SlashInputsPanel.js';
+import { AgentHandoffHint } from './AgentHandoffHint.js';
+import { stageSlashInputs } from './lib/slashInputs.js';
+import { toRunInputs } from '../ui/RunInputsForm.js';
 import { refreshWorkflowMentionCache } from './lib/workflowMentions.js';
 import { voicePhaseKey } from './lib/voicePhaseWords.js';
 import { voiceCtxBlockLabels } from './voiceCtxLabels.js';
@@ -90,6 +96,9 @@ interface Props {
   mentionEntries?: readonly AgentMentionEntry[];
   /** Reason the send button is disabled, shown in title tooltip. */
   disabledReason?: string | undefined;
+  /** Fill the composer from the surface that owns it (a welcome-card pick).
+   *  A new `nonce` applies `text`; the person still presses Enter to send. */
+  seed?: { text: string; nonce: number } | undefined;
   /** Hint that the active provider supports audio input. When false, the
    *  "Send audio" option is hidden (a clip can't be read by this model). */
   supportsAudioInput?: boolean;
@@ -121,11 +130,20 @@ interface Props {
   /** Hint that the active model accepts PDF documents (Anthropic / Gemini).
    *  Text files (.txt/.md/.json/.csv) inline as text and work everywhere. */
   supportsPdfInput?: boolean;
+  /** ADR 0768 D1 — the shell's submit-time agent entries, for the handoff hint. */
+  agentEntries?: readonly AgentMentionEntry[];
   /** Next-message modifiers (web search, workflow tools) rendered as a slim chip
    *  row above the input bar — they change the message you're about to send, so
    *  they live with the composer, not in the header. Omitted in surfaces (e.g.
    *  embeds) that expose no modifiers → the row doesn't render. */
   leadingControls?: ReactNode;
+  /** ADR 0768 P3 — show the `@@` Board chip. The CALLER resolves the
+   *  `advisory-board` toggle (ConversationView already reads feature access), so
+   *  the composer stays free of feature-access context for its many test hosts. */
+  boardSigil?: boolean;
+  /** ADR 0768 P6 — a narrow HOST (the Pocket) regardless of viewport: fold the
+   *  sigil chips into the `+` menu. */
+  compact?: boolean;
   /** Optional localStorage key under which the in-progress text is mirrored so a
    *  refresh / crash restores it (and re-loaded when the key changes, e.g. on a
    *  conversation switch). Omit it (embeds) for a non-persisted, ephemeral
@@ -144,9 +162,13 @@ export function ChatInput({
   supportsAudioInput,
   supportsImageInput,
   supportsPdfInput,
+  agentEntries,
   leadingControls,
+  boardSigil = false,
+  compact = false,
   liveVoice,
   draftKey,
+  seed,
 }: Props): JSX.Element {
   const { t } = useTranslation('chat');
   // CHAT-7/A11Y-8 — surface the live-voice PHASE. The visible word rides the
@@ -186,6 +208,8 @@ export function ChatInput({
   // in-progress text. The effects below keep it in sync as the user types and
   // re-load it when `draftKey` changes (conversation switch).
   const [text, setText] = useState(() => takeStagedComposerDraft() ?? (draftKey ? readDraft(draftKey) : ''));
+  // ADR 0768 B2 — a picked `/workflow`'s typed inputs, staged for the dispatch on send.
+  const [slashInputs, setSlashInputs] = useState<SlashInputsState | null>(null);
   const [pendingAudio, setPendingAudio] = useState<PendingAudio | null>(null);
   const [pendingFiles, setPendingFiles] = useState<readonly PendingFile[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
@@ -195,6 +219,24 @@ export function ChatInput({
   // caret position.
   const [cursorPos, setCursorPos] = useState(0);
   const taRef = useRef<HTMLTextAreaElement>(null);
+  // grade-ux CHATUX-1 — ARIA combobox wiring: each picker reports its highlighted
+  // option; the textarea points aria-activedescendant/-controls/-expanded at it.
+  // At most one picker shows options at a time (`/`, `@`, `@@` triggers are
+  // mutually exclusive), so the first non-null report is THE active one.
+  const pickerIdBase = useId().replace(/:/g, '');
+  const [activeOption, setActiveOption] = useState<{ slash: string | null; agent: string | null; board: string | null }>({ slash: null, agent: null, board: null });
+  const wiring = useMemo(() => {
+    const make = (key: 'slash' | 'agent' | 'board'): ComboboxWiring => ({
+      listboxId: `${pickerIdBase}-${key}`,
+      onActiveChange: (id) => setActiveOption((prev) => (prev[key] === id ? prev : { ...prev, [key]: id })),
+    });
+    return { slash: make('slash'), agent: make('agent'), board: make('board') };
+  }, [pickerIdBase]);
+  const activeKey = activeOption.slash ? 'slash' : activeOption.agent ? 'agent' : activeOption.board ? 'board' : null;
+  // ADR 0770 — `role="combobox"` REQUIRES `aria-controls` in both states. Open,
+  // it names the active picker's listbox; closed, it names the always-rendered
+  // container the pickers mount into, so the reference never dangles.
+  const pickersId = `${pickerIdBase}-pickers`;
 
   function syncCursor(): void {
     const el = taRef.current;
@@ -221,6 +263,20 @@ export function ChatInput({
   // already-mounted composer (no navigation, so the mount-time stage above
   // never fires). Appends below any in-progress text rather than clobbering
   // it, then moves focus so the user can edit/send the quoted draft.
+  // A pick on this surface's own empty state fills THIS composer (never a
+  // different mounted one, which the global live-seed lane below could pick).
+  useEffect(() => {
+    if (!seed) return;
+    setText(seed.text);
+    setCursorPos(seed.text.length);
+    requestAnimationFrame(() => {
+      const ta = taRef.current;
+      if (!ta) return;
+      ta.focus();
+      ta.setSelectionRange(seed.text.length, seed.text.length);
+    });
+  }, [seed]);
+
   useEffect(() => subscribeLiveComposer((seeded) => {
     setText((cur) => (cur.trim() ? `${cur.replace(/\s+$/, '')}\n\n${seeded}` : seeded));
     taRef.current?.focus();
@@ -243,12 +299,15 @@ export function ChatInput({
     void refreshWorkflowMentionCache();
   }, []);
 
-  // Auto-resize: clamp scrollHeight to var(--chat-input-height-max) (120px).
+  // Auto-resize: clamp scrollHeight to the textarea's own CSS max-height
+  // (`--chat-input-height-max`, min(40vh, 320px)) — read, not hard-coded, so a
+  // long draft gets room on a tall window and the token stays the one source.
   useEffect(() => {
     const el = taRef.current;
     if (!el) return;
     el.style.height = 'auto';
-    el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
+    const max = parseFloat(getComputedStyle(el).maxHeight);
+    el.style.height = `${Number.isFinite(max) ? Math.min(el.scrollHeight, max) : el.scrollHeight}px`;
   }, [text]);
 
   // Revoke any outstanding image-thumbnail object URLs on unmount.
@@ -311,6 +370,7 @@ export function ChatInput({
       setAttachError(err instanceof Error ? err.message : t('attachmentFailed'));
       return;
     }
+    if (slashInputs) stageSlashInputs(slashInputs.slug, toRunInputs(slashInputs.variables, slashInputs.values));
     onSend(text.trim(), attachments.length > 0 ? attachments : undefined);
     setText('');
     // A sent message is no longer a draft — drop it immediately so a refresh
@@ -350,55 +410,91 @@ export function ChatInput({
 
   const canSend = !disabled && (text.trim().length > 0 || pendingAudio !== null || pendingFiles.length > 0);
 
+  // ADR 0768 P1 — sigil chips. Both place the caret after the sigil so the
+  // picker (which reads text + cursorPos) opens on the next render.
+  const canSeedSlash = /^\s*(@[a-z0-9][a-z0-9-]*\s+)?$/i.test(text);
+  function placeCaret(next: string, pos: number): void {
+    setText(next);
+    requestAnimationFrame(() => {
+      const el = taRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(pos, pos);
+      setCursorPos(pos);
+    });
+  }
+  function seedSlash(): void {
+    const next = text.trim() === '' ? '/' : `${text.replace(/\s*$/, ' ')}/`;
+    placeCaret(next, next.length);
+  }
+  function seedMention(sigil: '@' | '@@'): void {
+    const pos = Math.min(cursorPos, text.length);
+    const before = text.slice(0, pos);
+    const lead = before.length > 0 && !/\s$/.test(before) ? ' ' : '';
+    placeCaret(`${before}${lead}${sigil}${text.slice(pos)}`, pos + lead.length + sigil.length);
+  }
+  const seedAgent = (): void => seedMention('@');
+  // ADR 0768 P3 — `@@` convenes a Board of Advisors (BoardMentionAutocomplete).
+  const seedBoard = (): void => seedMention('@@');
+  const narrowViewport = useMediaQuery('(max-width: 479px)');
+  const narrowComposer = compact || narrowViewport;
+
   return (
     <div className="u-relative">
       {/* Unified slash picker — shows built-in commands AND
           registered workflows in one menu, grouped under subheads.
           Replaces the prior CommandAutocomplete after the 2026-05-28
           mention-symbol swap (`@` is now agents, `/` is unified). */}
-      <SlashAutocomplete
-        text={text}
-        onPick={(newText) => { setText(newText); taRef.current?.focus(); }}
-        onDismiss={() => { /* dismiss is implicit on text change */ }}
-      />
-      {/* `@` picker — agents only (was workflows pre-2026-05-28).
-          Workflows live under `/` in SlashAutocomplete above. In a CHANNEL the
-          entries are the channel's agent MEMBERS (server mention slugs) instead
-          of the tenant-wide list (ADR 0192 D8). */}
-      <AgentMentionAutocomplete
-        text={text}
-        cursorPos={cursorPos}
-        {...(mentionEntries ? { entriesOverride: mentionEntries } : {})}
-        onPick={(newText, newCursorPos) => {
-          setText(newText);
-          // Restore the cursor after React commits the new value.
-          requestAnimationFrame(() => {
-            const el = taRef.current;
-            if (!el) return;
-            el.focus();
-            el.setSelectionRange(newCursorPos, newCursorPos);
-            setCursorPos(newCursorPos);
-          });
-        }}
-        onDismiss={() => { /* dismiss is implicit on text/cursor change */ }}
-      />
-      {/* `@@` picker — Boards of Advisors. Mutually exclusive with the `@`
-          agent picker above (single `@` vs `@@` triggers never overlap). */}
-      <BoardMentionAutocomplete
-        text={text}
-        cursorPos={cursorPos}
-        onPick={(newText, newCursorPos) => {
-          setText(newText);
-          requestAnimationFrame(() => {
-            const el = taRef.current;
-            if (!el) return;
-            el.focus();
-            el.setSelectionRange(newCursorPos, newCursorPos);
-            setCursorPos(newCursorPos);
-          });
-        }}
-        onDismiss={() => { /* dismiss is implicit on text/cursor change */ }}
-      />
+      <div id={pickersId}>
+        <SlashAutocomplete
+          text={text}
+          combobox={wiring.slash}
+          onPick={(newText) => { setText(newText); taRef.current?.focus(); }}
+          onDismiss={() => { /* dismiss is implicit on text change */ }}
+        />
+        {/* `@` picker — agents only (was workflows pre-2026-05-28).
+            Workflows live under `/` in SlashAutocomplete above. In a CHANNEL the
+            entries are the channel's agent MEMBERS (server mention slugs) instead
+            of the tenant-wide list (ADR 0192 D8). */}
+        <AgentMentionAutocomplete
+          text={text}
+          combobox={wiring.agent}
+          cursorPos={cursorPos}
+          {...(mentionEntries ? { entriesOverride: mentionEntries } : {})}
+          onPick={(newText, newCursorPos) => {
+            setText(newText);
+            // Restore the cursor after React commits the new value.
+            requestAnimationFrame(() => {
+              const el = taRef.current;
+              if (!el) return;
+              el.focus();
+              el.setSelectionRange(newCursorPos, newCursorPos);
+              setCursorPos(newCursorPos);
+            });
+          }}
+          onDismiss={() => { /* dismiss is implicit on text/cursor change */ }}
+        />
+        {/* `@@` picker — Boards of Advisors. Mutually exclusive with the `@`
+            agent picker above (single `@` vs `@@` triggers never overlap). */}
+        <BoardMentionAutocomplete
+          text={text}
+          combobox={wiring.board}
+          cursorPos={cursorPos}
+          onPick={(newText, newCursorPos) => {
+            setText(newText);
+            requestAnimationFrame(() => {
+              const el = taRef.current;
+              if (!el) return;
+              el.focus();
+              el.setSelectionRange(newCursorPos, newCursorPos);
+              setCursorPos(newCursorPos);
+            });
+          }}
+          onDismiss={() => { /* dismiss is implicit on text/cursor change */ }}
+        />
+      </div>
+      <SlashInputsPanel text={text} onChange={setSlashInputs} />
+      <AgentHandoffHint text={text} hasAttachments={pendingFiles.length > 0 || pendingAudio !== null} inChannel={mentionEntries !== undefined} entries={agentEntries} />
       {pendingAudio && (
         <div className="u-flex u-items-center u-gap-2 u-pad-6x10 u-mb-1-5 u-bg-surface-2 u-border u-radius u-fs-12">
           <MicIcon size={14} />
@@ -425,6 +521,12 @@ export function ChatInput({
           </Button>
         </div>
       )}
+      {/* ADR 0768 D2 — say it in text, not only in a hover title on a warning icon. */}
+      {pendingFiles.some((pf) => (pf.isImage && supportsImageInput === false) || (pf.file.type === 'application/pdf' && supportsPdfInput === false)) ? (
+        <p className="chatinput-attach-note">
+          <AlertIcon size={12} /> {t('attachUnreadableNote')}
+        </p>
+      ) : null}
       {pendingFiles.length > 0 && (
         <div className="u-flex u-wrap u-gap-1-5 u-mb-1-5">
           {pendingFiles.map((pf) => {
@@ -503,10 +605,39 @@ export function ChatInput({
           onClick={syncCursor}
           placeholder={liveVoice?.active ? phaseWord : recorder.isRecording ? t('recordingPlaceholder') : (placeholder ?? t('askAnythingPlaceholder'))}
           aria-label={t('composerAriaLabel')}
-          disabled={disabled}
+          // ADR 0770 (row-1 gap) — ARIA 1.2 editable combobox. `aria-expanded` is
+          // not valid on the implicit textbox role, so without this a screen
+          // reader was never told the picker popup opened.
+          role="combobox"
+          aria-autocomplete="list"
+          aria-expanded={activeKey !== null}
+          aria-controls={activeKey ? wiring[activeKey].listboxId : pickersId}
+          {...(activeKey ? { 'aria-activedescendant': activeOption[activeKey]! } : {})}
+          // Typing stays open while a reply streams — only SENDING waits
+          // (`submit` returns early and Send is Stop). Disabling the field threw
+          // the caret out of it on every send and blocked writing the next turn.
           spellCheck={false}
           className="chatinput-textarea"
         />
+        {narrowComposer ? (
+          // ADR 0768 P6 — on a narrow composer the chips would squeeze the text
+          // area to nothing; the same four actions live behind the `+` menu.
+          <Menu
+            label={t('composerMoreActions')}
+            triggerTitle={t('composerMoreActions')}
+            triggerClassName="chatinput-attach-btn"
+            triggerContent={<PlusIcon size={18} />}
+            disabled={disabled ?? false}
+            dropUp
+            items={[
+              { id: 'attach', label: t('attachFile'), onSelect: () => fileInputRef.current?.click() },
+              { id: 'workflow', label: t('sigilWorkflowAria'), onSelect: seedSlash, disabled: !canSeedSlash, ...(canSeedSlash ? {} : { title: t('sigilWorkflowBlockedTitle') }) },
+              { id: 'agent', label: t('sigilAgentAria'), onSelect: seedAgent },
+              ...(boardSigil ? [{ id: 'board', label: t('sigilBoardAria'), onSelect: seedBoard }] : []),
+            ]}
+          />
+        ) : (
+        <>
         <button
           type="button"
           onClick={() => fileInputRef.current?.click()}
@@ -517,6 +648,45 @@ export function ChatInput({
         >
           <PlusIcon size={18} />
         </button>
+        {/* ADR 0768 P1 — the composer's sigils made visible. They only SEED the
+            text; the existing `/` and `@` autocompletes do the rest, so there is
+            one picker per sigil, not a second one. `/` opens only on an empty
+            message or an `@agent ` hand-off prefix (detectSlashTrigger's grammar),
+            so it is disabled — with a reason — once other text is typed. */}
+        <Button
+          variant="quiet"
+          onClick={seedSlash}
+          disabled={disabled || !canSeedSlash}
+          title={canSeedSlash ? t('sigilWorkflowTitle') : t('sigilWorkflowBlockedTitle')}
+          aria-label={t('sigilWorkflowAria')}
+          className="chatinput-sigil-btn"
+        >
+          <span aria-hidden="true">/</span>
+        </Button>
+        <Button
+          variant="quiet"
+          onClick={seedAgent}
+          disabled={disabled}
+          title={t('sigilAgentTitle')}
+          aria-label={t('sigilAgentAria')}
+          className="chatinput-sigil-btn"
+        >
+          <span aria-hidden="true">@</span>
+        </Button>
+        {boardSigil ? (
+          <Button
+            variant="quiet"
+            onClick={seedBoard}
+            disabled={disabled}
+            title={t('sigilBoardTitle')}
+            aria-label={t('sigilBoardAria')}
+            className="chatinput-sigil-btn chatinput-sigil-btn--wide"
+          >
+            <span aria-hidden="true">@@</span>
+          </Button>
+        ) : null}
+        </>
+        )}
         {(() => {
           // ADR 0147 — ONE mic. A clip needs a multimodal model; live needs the
           // voice feature. Active session → a hot stop button (clay=live,

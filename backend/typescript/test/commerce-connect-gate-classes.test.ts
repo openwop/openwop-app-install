@@ -21,12 +21,12 @@ import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 
 let BASE = '';
 let server: http.Server;
-const B = '/v1/host/openwop-app/commerce-connect';
+const B = '/host/openwop-app/commerce-connect';
 
 const SUPER_TENANT = 'org:cc-gate-super';
 
 async function login(email: string, tenantId?: string): Promise<string> {
-  const res = await fetch(`${BASE}/v1/host/openwop-app/test/login`, {
+  const res = await fetch(`${BASE}/host/openwop-app/test/login`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify(tenantId ? { email, tenantId } : { email }),
   });

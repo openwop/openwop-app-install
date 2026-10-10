@@ -109,4 +109,64 @@ describe('run-dispatch crash recovery', () => {
     expect(run?.status).toBe('failed');
     expect(run?.error?.code).toBe('dispatch_abandoned');
   });
+
+  // ── EVID-3: a run whose LOG is closed but whose ROW is not terminal ─────────
+  // Ten such runs sat on production for days: every sweep tried to abandon
+  // them, the closed log refused `run.failed`, and each attempt appended one
+  // more `run.dead_lettered`. The row follows the log; nothing is appended.
+  const hostSuite = {
+    workflowCatalog: { getWorkflow: async () => ({ definition: { workflowId: 'wf-1', nodes: [] } }) },
+    providerPolicyResolver: undefined,
+  } as unknown as HostAdapterSuite;
+  const closeLog = (runId: string, type: string) =>
+    storage.appendEvent({ eventId: `e-${runId}`, runId, type, payload: null, timestamp: oldIso });
+  const eventTypes = async (runId: string) => (await storage.listEvents(runId)).map((e) => e.type);
+
+  it('reconciles a chronically-orphaned run whose log is already closed, appending nothing', async () => {
+    setEventLogBackend(storage);
+    const old = new Date(NOW - 2 * HOUR).toISOString(); // past the abandon ceiling
+    await storage.insertRun(makeRun({ runId: 'ended-cancelled', status: 'running', createdAt: old }));
+    await storage.insertRun(makeRun({ runId: 'ended-failed', status: 'pending', createdAt: old }));
+    await closeLog('ended-cancelled', 'run.cancelled');
+    await closeLog('ended-failed', 'run.failed');
+
+    expect(await sweepOrphanedRuns({ storage, hostSuite }, 'sweeper-a', NOW)).toBe(0);
+    expect((await storage.getRun('ended-cancelled'))?.status).toBe('cancelled');
+    expect((await storage.getRun('ended-failed'))?.status).toBe('failed');
+    expect((await storage.getRun('ended-failed'))?.completedAt).toBeTruthy();
+    // The log is untouched: no dead-letter record, no second terminal.
+    expect(await eventTypes('ended-cancelled')).toEqual(['run.cancelled']);
+    expect(await eventTypes('ended-failed')).toEqual(['run.failed']);
+    // …and they are no longer orphans: a later sweep claims nothing.
+    expect(await storage.claimOrphanedRuns('sweeper-b', NOW + HOUR, new Date(NOW).toISOString(), 720_000, 10)).toEqual([]);
+  });
+
+  it('reconciles a YOUNG closed-log run too, instead of re-dispatching it until the ceiling', async () => {
+    setEventLogBackend(storage);
+    // 30 min old: past the grace window, well under the 1 h abandon ceiling.
+    await storage.insertRun(makeRun({ runId: 'ended-completed', status: 'running', createdAt: new Date(NOW - HOUR / 2).toISOString() }));
+    await closeLog('ended-completed', 'run.completed');
+    const getWorkflow = vi.fn(async () => ({ definition: { workflowId: 'wf-1', nodes: [] } }));
+    const suite = { workflowCatalog: { getWorkflow }, providerPolicyResolver: undefined } as unknown as HostAdapterSuite;
+
+    expect(await sweepOrphanedRuns({ storage, hostSuite: suite }, 'sweeper-a', NOW)).toBe(0);
+    const run = await storage.getRun('ended-completed');
+    expect(run?.status).toBe('completed');
+    expect(run?.error).toBeUndefined(); // a completed run gets no synthetic error
+    expect(getWorkflow).not.toHaveBeenCalled(); // never reached the re-dispatch lane
+    expect(await eventTypes('ended-completed')).toEqual(['run.completed']);
+  });
+
+  it('falls back to the refused append when the store cannot answer runLogClosedBy', async () => {
+    setEventLogBackend(storage);
+    const old = new Date(NOW - 2 * HOUR).toISOString();
+    await storage.insertRun(makeRun({ runId: 'ended-legacy', status: 'running', createdAt: old }));
+    await closeLog('ended-legacy', 'run.cancelled');
+    const without = Object.create(storage) as Storage;
+    Object.defineProperty(without, 'runLogClosedBy', { value: undefined });
+
+    expect(await sweepOrphanedRuns({ storage: without, hostSuite }, 'sweeper-a', NOW)).toBe(0);
+    expect((await storage.getRun('ended-legacy'))?.status).toBe('cancelled');
+    expect(await storage.claimOrphanedRuns('sweeper-b', NOW + HOUR, new Date(NOW).toISOString(), 720_000, 10)).toEqual([]);
+  });
 });

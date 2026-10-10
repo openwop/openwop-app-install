@@ -1,7 +1,7 @@
 /**
  * Procurement Concierge chat tools (CFP-1 — CHAT-FIRST-PORT-AUDIT #1; ADR 0308 seam).
  *
- * The `feature.commerce.buyer.agents.procurement-concierge` pack allowlisted node
+ * The `vendor.openwop-app.commerce.buyer.agents.procurement-concierge` pack allowlisted node
  * typeIds that nothing projected into the tool loop, so the agent dispatched with
  * ZERO callable tools. This registers the honest, MONEY-SAFE subset.
  *
@@ -86,6 +86,7 @@ export function registerCommerceBuyerAgentTools(): void {
   // ── READS ──────────────────────────────────────────────────────────────────
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: BUYER_LIST_PURCHASES_TOOL_ID,
       description: 'List the org\'s outbound UCP purchases (merchant, intent, amount, status, approval state). Read-only.',
@@ -107,6 +108,7 @@ export function registerCommerceBuyerAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: BUYER_TRACK_ORDER_TOOL_ID,
       description: 'Track one outbound purchase — re-checks the merchant\'s current delivery/order status. Read-only.',
@@ -140,6 +142,7 @@ export function registerCommerceBuyerAgentTools(): void {
   // ── PREPARE (no money) ───────────────────────────────────────────────────────
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: BUYER_BUILD_CART_TOOL_ID,
       description:
@@ -213,6 +216,7 @@ export function registerCommerceBuyerAgentTools(): void {
   // ── REQUEST-ONLY (never completes a purchase) ─────────────────────────────────
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: BUYER_CHECKOUT_TOOL_ID,
       description:

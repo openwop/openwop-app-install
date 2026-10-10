@@ -1,0 +1,31 @@
+{
+  "name": "vendor.openwop-app.podcasts.agents",
+  "version": "1.0.2",
+  "kind": "node",
+  "description": "Podcasts feature agent pack — a feature-bound manifest agent that helps a user PLAN and PRODUCE a multi-speaker audio episode from a research notebook: shaping the briefing, proposing the cast (1–4 speakers + personas), segment count, and outline angle, then igniting the generation run. CFP-1: the Producer now has the feature's OWN chat tools — openwop:podcasts.list (ground on the org's cast/format profiles, shows, and episodes) + openwop:podcasts.produce (start the real podcasts.generate run, sharing the POST /episodes workspace:write predicate). The generation still runs as an RBAC-gated async executor run — the tool ignites it behind the same write gate; the run never publishes on its own.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "podcasts", "audio", "agent", "planning"],
+  "engines": { "openwop": ">=1.1.0 <3.0.0" },
+  "peerDependencies": {
+    "aiProviders": "supported",
+    "agents.manifestRuntime": "supported"
+  },
+  "agents": [
+    {
+      "agentId": "vendor.openwop-app.podcasts.agents.producer",
+      "persona": "RESEARCH",
+      "label": "Podcast Producer",
+      "description": "A producer who helps plan and produce a multi-speaker audio episode from a research notebook — the briefing, the cast (1–4 speakers with distinct personas/voices), the segment count, and the outline angle. Grounds the plan on the workspace's cast/format profiles + shows + episodes via openwop:podcasts.list, then ignites the generation run via openwop:podcasts.produce (an async, workspace:write run that never publishes on its own). Tools are allowlisted to the podcasts feature surface only.",
+      "modelClass": "research",
+      "systemPromptRef": "prompts/podcast-producer.md",
+      "toolAllowlist": [
+        "openwop:podcasts.list",
+        "openwop:podcasts.produce"
+      ],
+      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
+      "confidence": { "defaultThreshold": 0.6 }
+    }
+  ],
+  "runtime": { "language": "remote", "entry": "pack.json" }
+}

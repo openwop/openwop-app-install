@@ -337,3 +337,31 @@ above are resolved:
 Cutover runbook: `docs/research/myndhyve-cutover-runbook.md`. Tests: `billing.test.ts`
 (+5: CAS concurrency, clover period location, unmapped-price tier, invoice.created/failed,
 payment_method attach/detach) and `stripe-live-payments.test.ts` (+1: pinned `Stripe-Version`).
+
+## Correction note — ADR 0786 (2026-09-29, feature loop row 9)
+
+Four claims above were false against the code, and one was false against Stripe:
+
+- **"R-1 done" was not reachable for anything bought through this host.** Plan and
+  token-pack Checkout Sessions carried no metadata, so their events could not be traced
+  to a tenant and were acked `applied:false`; the pack credit read `priceId` /
+  `line_items` fields a real webhook payload never carries (the tests fabricated both).
+  Only imported (R-1) state ever worked live. ADR 0786 D1.
+- **"idempotent per `event.id`" stranded a paid event on a crash**: the claim was
+  written before the effect and released only on a thrown error. ADR 0786 D0 makes it a
+  lease.
+- **"`payment_method.*` keep the portal's card current" and the invoice parity** applied
+  to ANY subscription stamped with the tenant — including commerce product
+  subscriptions, which overwrote a merchant's plan. And `2025-12-15.clover` (the
+  version this ADR pinned) removed `invoice.subscription`
+  (`parent.subscription_details.subscription`), so the ADR 0279 `invoice.paid` bridge
+  never fired on a live invoice. ADR 0786 D3.
+- **"billing coupons, and invoice generation … shipped"** (§ Deferred-work follow-on):
+  `billingCouponDiscount` has no caller, so no coupon is ever applied; `billing:invoice`
+  rows are minted only by a superadmin `POST /invoices` with a caller-supplied amount,
+  and no real Stripe invoice ever becomes a row. Filed as `BILLWF-10`.
+- **The cached-read decision contradicts itself** ("the cap deliberately keeps charging
+  cached reads at FULL weight" … "applied consistently to BOTH the cap increment and the
+  balance draw"). ADR 0786 D6 resolves it for the balance only — the cap keeps full
+  weight, per the first sentence's reasoning — and ships it with the fix that made
+  prepaid live.

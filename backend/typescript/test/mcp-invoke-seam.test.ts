@@ -1,6 +1,6 @@
 /**
  * ADR 0553 P2 — `host-sample-test-seams.md` §23, the MCP revision-negotiation
- * driver (`POST /v1/host/sample/mcp/invoke`).
+ * driver (`POST /host/sample/mcp/invoke`).
  *
  * The seam exists because RFC 0153 §B is about what leaves this host toward a
  * peer, which no request to this host's own API can observe. These legs check
@@ -96,7 +96,7 @@ beforeAll(async () => {
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   peer = new Peer();
   await peer.start();
-  const login = await fetch(`${BASE}/v1/host/openwop-app/test/login`, {
+  const login = await fetch(`${BASE}/host/openwop-app/test/login`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ email: `mcp-seam-${Date.now()}@acme.test` }),
@@ -123,7 +123,7 @@ afterAll(async () => {
 afterEach(() => { peer.reset(); _resetMcpNegotiation(); });
 
 async function invoke(body: Record<string, unknown>): Promise<{ status: number; body: Record<string, unknown> }> {
-  const res = await fetch(`${BASE}/v1/host/sample/mcp/invoke`, {
+  const res = await fetch(`${BASE}/host/sample/mcp/invoke`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
     body: JSON.stringify(body),

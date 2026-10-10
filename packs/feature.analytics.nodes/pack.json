@@ -1,11 +1,12 @@
 {
   "name": "feature.analytics.nodes",
-  "version": "1.1.1",
+  "version": "1.1.2",
+  "kind": "node",
   "description": "Analytics feature node pack — read nodes over the ctx.features.analytics surface. query reads a metric summary / recent events into a run (e.g. gate a branch on conversion volume). track + conversion-forward are Phase 2/3.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "analytics", "metrics", "measurement"],
-  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "engines": { "openwop": ">=1.0.0 <3.0.0" },
   "nodes": [
     {
       "typeId": "feature.analytics.nodes.query",

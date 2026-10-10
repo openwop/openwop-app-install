@@ -1,7 +1,9 @@
 {
-  "spaProtocolCallSites": 2,
+  "testCorpusV1Refs": 936,
+  "spaProtocolCallSites": 1,
   "spaHostExtensionCallSites": 0,
-  "spaOpenWopVersionHeaders": 2,
-  "backendProtocolPathRefs": 103,
-  "backendHostExtensionPathRefs": 743
+  "spaOpenWopVersionHeaders": 3,
+  "backendProtocolPathRefs": 77,
+  "backendHostExtensionPathRefs": 704,
+  "backendVersionedOwnUrls": 5
 }

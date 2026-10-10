@@ -34,8 +34,8 @@ import { refsForProvider } from '../src/host/chatByokConfig.js';
 let server: Server;
 let BASE = '';
 let n = 0;
-const AC = '/v1/host/openwop-app/byok/active-config';
-const SECRETS = '/v1/host/openwop-app/byok/secrets';
+const AC = '/host/openwop-app/byok/active-config';
+const SECRETS = '/host/openwop-app/byok/secrets';
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -85,7 +85,7 @@ function client() {
 
 async function loggedIn(who: string) {
   const c = client();
-  await c.post('/v1/host/openwop-app/test/login', { email: `${who}-${Date.now()}-${n++}@acme.test` });
+  await c.post('/host/openwop-app/test/login', { email: `${who}-${Date.now()}-${n++}@acme.test` });
   return c;
 }
 
@@ -113,20 +113,20 @@ describe('/byok/active-config (ADR 0517)', () => {
     const c = client();
     expect((await c.post(SECRETS, { credentialRef: 'byok:google', value: 'AIza-round-trip' })).status).toBe(201);
 
-    const put = await c.put(AC, { provider: 'google', model: 'gemini-3.1-flash-lite', credentialRef: 'byok:google' });
+    const put = await c.put(AC, { provider: 'google', model: 'gemini-3.8-flash', credentialRef: 'byok:google' });
     expect(put.status, JSON.stringify(put.body)).toBe(200);
 
     // A DIFFERENT client object — i.e. a different "browser" — but the same
     // session cookie is what a real returning user presents. The binding is on
     // the server, so nothing about the client's local storage matters.
     const again = await c.get(AC);
-    expect(again.body.config).toMatchObject({ provider: 'google', model: 'gemini-3.1-flash-lite', credentialRef: 'byok:google' });
+    expect(again.body.config).toMatchObject({ provider: 'google', model: 'gemini-3.8-flash', credentialRef: 'byok:google' });
     expect(again.body.valid).toBe(true);
   });
 
   it('refuses a binding whose ref is not one of the caller\'s own secrets (IDOR)', async () => {
     const c = client();
-    const r = await c.put(AC, { provider: 'google', model: 'gemini-3.1-flash-lite', credentialRef: 'byok:google:someone-elses' });
+    const r = await c.put(AC, { provider: 'google', model: 'gemini-3.8-flash', credentialRef: 'byok:google:someone-elses' });
     expect(r.status).toBe(400);
     expect(String(r.body.error)).toMatch(/validation/i);
   });
@@ -162,7 +162,7 @@ describe('/byok/active-config (ADR 0517)', () => {
   it('the ADR 0499 delete guard SEES the chat binding — the key cannot be silently pulled', async () => {
     const c = client();
     await c.post(SECRETS, { credentialRef: 'byok:google', value: 'AIza-guarded' });
-    await c.put(AC, { provider: 'google', model: 'gemini-3.1-flash-lite', credentialRef: 'byok:google' });
+    await c.put(AC, { provider: 'google', model: 'gemini-3.8-flash', credentialRef: 'byok:google' });
 
     const blocked = await c.del(`${SECRETS}/byok%3Agoogle`);
     expect(blocked.status, JSON.stringify(blocked.body)).toBe(409);
@@ -172,7 +172,7 @@ describe('/byok/active-config (ADR 0517)', () => {
   it('reports valid:false — never a usable-looking binding — once the key is force-deleted', async () => {
     const c = client();
     await c.post(SECRETS, { credentialRef: 'byok:google', value: 'AIza-forced' });
-    await c.put(AC, { provider: 'google', model: 'gemini-3.1-flash-lite', credentialRef: 'byok:google' });
+    await c.put(AC, { provider: 'google', model: 'gemini-3.8-flash', credentialRef: 'byok:google' });
     expect((await c.del(`${SECRETS}/byok%3Agoogle?force=true`)).status).toBe(204);
 
     const r = await c.get(AC);
@@ -183,7 +183,7 @@ describe('/byok/active-config (ADR 0517)', () => {
   it('DELETE clears the binding', async () => {
     const c = client();
     await c.post(SECRETS, { credentialRef: 'byok:google', value: 'AIza-clear' });
-    await c.put(AC, { provider: 'google', model: 'gemini-3.1-flash-lite', credentialRef: 'byok:google' });
+    await c.put(AC, { provider: 'google', model: 'gemini-3.8-flash', credentialRef: 'byok:google' });
     expect((await c.del(AC)).status).toBe(204);
     expect((await c.get(AC)).body.config).toBeNull();
   });
@@ -191,7 +191,7 @@ describe('/byok/active-config (ADR 0517)', () => {
   it('one session\'s binding is invisible to another (tenant isolation)', async () => {
     const alice = client();
     await alice.post(SECRETS, { credentialRef: 'byok:google', value: 'AIza-alice' });
-    await alice.put(AC, { provider: 'google', model: 'gemini-3.1-flash-lite', credentialRef: 'byok:google' });
+    await alice.put(AC, { provider: 'google', model: 'gemini-3.8-flash', credentialRef: 'byok:google' });
 
     const bob = client();
     expect((await bob.get(AC)).body.config).toBeNull();

@@ -61,6 +61,6 @@ export function registerConversationSearchRoutes(deps: RouteDeps): void {
     }
   };
 
-  app.get('/v1/host/openwop-app/chat/search', handle);
-  app.post('/v1/host/openwop-app/chat/search', handle);
+  app.get('/host/openwop-app/chat/search', handle);
+  app.post('/host/openwop-app/chat/search', handle);
 }

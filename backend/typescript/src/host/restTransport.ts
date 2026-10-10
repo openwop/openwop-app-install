@@ -21,7 +21,6 @@
  */
 import zlib from 'node:zlib';
 import type { Request, Response } from 'express';
-import { negotiatedMajor } from '../middleware/protocolVersion.js';
 import { projectV2RunIds } from './v2Ids.js';
 
 /** Encodings RFC 0115 allows in `restTransport.contentEncodings`. */
@@ -40,13 +39,37 @@ const ENCODERS: Record<RunEncoding, ((s: string) => Buffer) | null> = {
 };
 
 /**
- * Encodings this host will actually negotiate, in server preference order
- * (zstd > br > gzip when present — better ratio first). Honest: an entry
- * appears only if the runtime can encode it. On Node 22.13 this is
- * `["br","gzip"]`.
+ * The encodings a client can actually RECEIVE, which is two facts intersected:
+ *  - what this runtime can encode (zstd needs Node ≥ 22.15/23), and
+ *  - what the path in front of it passes through, which only the operator knows.
+ *
+ * The second one is not hypothetical. MEASURED on app.openwop.dev (rev 00780,
+ * 2026-09-28): the origin answers a zstd-only `Accept-Encoding` with
+ * `Content-Encoding: zstd`. The Firebase Hosting door in front of it answers
+ * the same request as IDENTITY, because the CDN speaks only br and gzip. So
+ * `contentEncodings: ["zstd", …]` was true of the process and false for every
+ * client that reaches it through the door, and the certification run
+ * (`v2-ext-rest-transport`) caught it. `OPENWOP_REST_TRANSPORT_ENCODINGS` (a
+ * comma list) declares the path's set. Unset, the runtime set stands. A
+ * declared coding the runtime cannot encode is dropped, never advertised.
  */
-export const SUPPORTED_RUN_ENCODINGS: readonly RunEncoding[] = (['zstd', 'br', 'gzip'] as const).filter(
-  (e) => ENCODERS[e] !== null,
+export function resolveRunEncodings(
+  runtime: readonly RunEncoding[],
+  declared: string | undefined,
+): readonly RunEncoding[] {
+  if (declared === undefined || declared.trim() === '') return runtime;
+  const allowed = new Set(declared.split(',').map((t) => t.trim().toLowerCase()).filter(Boolean));
+  return runtime.filter((e) => allowed.has(e));
+}
+
+/**
+ * Encodings this host will actually negotiate, in server preference order
+ * (zstd > br > gzip when present — better ratio first). The advert and the
+ * encoder both read this one list, so neither can claim what the other won't do.
+ */
+export const SUPPORTED_RUN_ENCODINGS: readonly RunEncoding[] = resolveRunEncodings(
+  (['zstd', 'br', 'gzip'] as const).filter((e) => ENCODERS[e] !== null),
+  process.env.OPENWOP_REST_TRANSPORT_ENCODINGS,
 );
 
 /** Strong ETag for a run snapshot, keyed to its event-log head sequence. */
@@ -104,12 +127,10 @@ export function sendNegotiatedRunJson(req: Request, res: Response, body: unknown
   // `identity.md` §5 — this sender bypasses `res.json`, so it applies the
   // major-2 run-id projection itself rather than inheriting the wrapper
   // `middleware/protocolVersion.ts` installs. One implementation, two callers
-  // (see `host/v2Ids.ts`); under major 1 this is a single comparison.
-  const projected = negotiatedMajor(req) === 2
-    ? projectV2RunIds(body, (req as { tenantId?: string }).tenantId ?? 'default')
-    : body;
+  // (see `host/v2Ids.ts`).
+  const projected = projectV2RunIds(body, (req as { tenantId?: string }).tenantId ?? 'default');
   const json = JSON.stringify(projected);
-  res.setHeader('Vary', 'Accept-Encoding');
+  res.vary('Accept-Encoding');
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
 
   const enc = negotiateEncoding(req);

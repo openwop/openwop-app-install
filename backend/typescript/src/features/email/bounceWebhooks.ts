@@ -23,6 +23,8 @@ import { setSecret, resolveSecret, removeSecret } from '../../byok/secretResolve
 import { registerCredentialRefConsumer } from '../../host/credentialRefRegistry.js';
 import { createLogger } from '../../observability/logger.js';
 import { addSuppression, normalizeEmail } from '../crm/suppressionService.js';
+import { OWNED_REF_PREFIXES } from '../../byok/refNamespaces.js';
+import { OpenwopError } from '../../types.js';
 
 const log = createLogger('email.bounceWebhooks');
 
@@ -49,7 +51,7 @@ export interface EmailWebhookConfig {
 }
 
 const store = new DurableCollection<EmailWebhookConfig>('email:webhook-config', (c) => c.webhookId, undefined, (c) => c.tenantId);
-const secretRef = (webhookId: string): string => `email-webhook:${webhookId}`;
+const secretRef = (webhookId: string): string => `${OWNED_REF_PREFIXES.emailWebhook}${webhookId}`;
 
 // ── Soft-bounce escalation (ADR 0249) ────────────────────────────────────────
 // A HARD bounce is unambiguous → suppress immediately (above). A SOFT bounce
@@ -107,7 +109,16 @@ export async function setWebhookConfig(input: {
   tenantId: string; orgId: string; provider: BounceProvider; verificationSecret: string; webhookId?: string;
 }): Promise<EmailWebhookConfig> {
   const existing = input.webhookId ? await store.get(input.webhookId) : undefined;
-  const owned = existing && existing.tenantId === input.tenantId ? existing : undefined;
+  // ADR 0848 D3 — a config belongs to ONE (tenant, org). This checked the tenant only,
+  // then rewrote `orgId` to the caller's and REPLACED the verification secret: an editor
+  // in org B could stop org A's suppression ingest, or re-key it to a secret B knows and
+  // forge A's bounces. A supplied id the caller's org does not own is refused with the
+  // same `not_found` an unknown id gets on delete — never re-keyed, and never silently
+  // swapped for a fresh id the caller did not ask for.
+  if (existing && (existing.tenantId !== input.tenantId || existing.orgId !== input.orgId)) {
+    throw new OpenwopError('not_found', 'Webhook config not found.', 404, { webhookId: input.webhookId });
+  }
+  const owned = existing ?? undefined;
   const webhookId = owned?.webhookId ?? `ewh:${randomUUID()}`;
   const now = new Date().toISOString();
   const config: EmailWebhookConfig = {
@@ -142,9 +153,10 @@ export async function listWebhookConfigs(tenantId: string, orgId: string): Promi
   return all.filter((c) => c.orgId === orgId);
 }
 
-export async function removeWebhookConfig(tenantId: string, webhookId: string): Promise<boolean> {
+export async function removeWebhookConfig(tenantId: string, orgId: string, webhookId: string): Promise<boolean> {
   const existing = await store.get(webhookId);
-  if (!existing || existing.tenantId !== tenantId) return false;
+  // ADR 0848 D3 — owned by (tenant, ORG); this took no org at all.
+  if (!existing || existing.tenantId !== tenantId || existing.orgId !== orgId) return false;
   await removeSecret(secretRef(webhookId), { tenantId }).catch(() => undefined);
   return store.delete(webhookId);
 }

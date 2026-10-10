@@ -8,10 +8,16 @@
  * link to a page that could neither explain nor act on the refusal. The other
  * egress codes keep their suppressions link — one per-code map, pinned here in
  * both directions.
+ *
+ * Sabotage-witnessed (/grade-tests wave 9, `w9g4-eh-*`): pointing the erased code
+ * at `/email`, the suppressed code at `/consent`, or giving an unknown code a
+ * fallback link each turns its case red. The `getRun` fixture is a production-
+ * shaped `RunSnapshot` (typed), not a loose record.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
+import type { RunSnapshot } from '@openwop/openwop';
 
 const api = vi.hoisted(() => ({
   getRun: vi.fn(),
@@ -36,12 +42,19 @@ vi.mock('../../workflows/workflowsClient.js', async (importOriginal) => {
   return { ...orig, getRunRevision: vi.fn(async () => null) };
 });
 
+// ADR 0661 — the page's module graph reaches the SDK's discovery read
+// (`/.well-known/openwop`). Refused deterministically here (the
+// `runDetailIntegrity.test.tsx` precedent) instead of riding the shrink-only
+// live-fetch allowlist: no leg may depend on a race with the network.
+vi.stubGlobal('fetch', vi.fn<typeof fetch>(() => Promise.reject(new Error('no network in unit tests'))));
 const { RunDetailPage } = await import('../RunDetailPage.js');
 
-function failedRun(code: string): Record<string, unknown> {
+function failedRun(code: string): RunSnapshot {
   return {
     runId: 'r1', status: 'failed', workflowId: 'wf1',
-    createdAt: '2026-08-01T00:00:00Z', updatedAt: '2026-08-01T00:00:00Z',
+    owner: { tenant: 't1', subject: { issuer: 'urn:openwop:test', subjectId: 'u1', tenant: 't1', lane: 'session', kind: 'user' } },
+    eventLogSchemaVersion: 3,
+    startedAt: '2026-08-01T00:00:00Z', completedAt: '2026-08-01T00:00:00Z',
     error: { code, message: 'refused' },
   };
 }

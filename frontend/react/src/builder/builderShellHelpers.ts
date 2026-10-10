@@ -7,9 +7,12 @@
 
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { getCapabilities } from '../client/runsClient.js';
-import { catalogEntry } from './palette/catalogRegistry.js';
+import { catalogEntry, catalogEntryByTypeId, isDynamicCatalogLoaded } from './palette/catalogRegistry.js';
+import { SerializeError } from './schema/serialize.js';
+import { ChainExportVersionError } from './schema/chainPackManifest.js';
 import i18n from '../i18n/index.js';
 import { formatNumber } from '../i18n/format.js';
+import type { SyncFailureError } from '../client/config.js';
 
 /**
  * UX-BLD-1 — "the thing isn't there" vs "the read failed".
@@ -321,8 +324,8 @@ export function canvasOrNowhereFocused(): boolean {
  * clear commits together with the "open the drawer" state update, meaning the
  * first render in which the AI panel mounts already had `undefined`. Both
  * producers therefore handed off into an EMPTY drawer, silently dropping the
- * user's context: the exact no-op `CreateWithAiPanel`'s own comment claimed to
- * have fixed.
+ * user's context: the exact no-op the since-retired `CreateWithAiPanel`'s own
+ * comment claimed to have fixed (ADR 0773 G-10e).
  *
  * The latch keeps the last DEFINED value it ever saw, so the source may be
  * cleared freely. It latches during render rather than in an effect, which
@@ -337,4 +340,52 @@ export function useLatchedValue<T>(value: T | undefined): T | undefined {
   const latched = useRef<T | undefined>(undefined);
   if (value !== undefined) latched.current = value;
   return latched.current;
+}
+
+/**
+ * ADR 0770 (grade-ux WBUX-1) — the localized sentence for a REFUSED definition
+ * write on the Run / debug lanes. `registerWorkflow` throws the typed
+ * `SyncFailureError`, whose message is a machine code; showing it verbatim put
+ * `sync_failed_403: forbidden_scope` in front of a view-only member.
+ */
+export function runRefusalMessage(err: SyncFailureError, t: (key: string) => string): string {
+  if (err.status === 403 && err.reason === 'forbidden_scope') return t('builder:runRefusedReadOnly');
+  if (err.status === 403 && err.reason === 'forbidden') return t('builder:runRefusedDisabledPack');
+  if (err.status === 401) return t('builder:syncFailedAuth');
+  if (err.status === 429) return t('builder:syncFailedRateLimited');
+  return t('builder:runRefusedGeneric');
+}
+
+/**
+ * What to tell the author when a chain export fails, and which node to select
+ * (grade-ux U-3/U-8, grade-code C-14 — ONE mapping for both export actions).
+ *
+ * - A serialization error names its own node.
+ * - A version error with the catalog NEVER loaded is not the nodes' fault:
+ *   every version is unknown, so say the catalog did not load.
+ * - Otherwise name the offending node INSTANCES as the canvas labels them and
+ *   select the first; fall back to catalog labels / typeIds only when no
+ *   instance matches.
+ */
+export function chainExportFailure(
+  err: unknown,
+  nodes: ReadonlyArray<{ id: string; kind: string; name: string }>,
+  catalogLoaded: boolean = isDynamicCatalogLoaded(),
+): { message: string; selectNodeId?: string } {
+  if (err instanceof SerializeError) {
+    return { message: err.message, ...(err.nodeId ? { selectNodeId: err.nodeId } : {}) };
+  }
+  if (err instanceof ChainExportVersionError) {
+    if (!catalogLoaded) return { message: i18n.t('builder:exportChainPackCatalogUnavailable') };
+    const unknown = new Set(err.typeIds);
+    const offending = nodes.filter((n) => unknown.has(catalogEntry(n.kind)?.typeId ?? n.kind));
+    const types = offending.length > 0
+      ? offending.map((n) => n.name).join(', ')
+      : err.typeIds.map((typeId) => catalogEntryByTypeId(typeId)?.label ?? typeId).join(', ');
+    return {
+      message: i18n.t('builder:exportChainPackNoVersion', { types }),
+      ...(offending[0] ? { selectNodeId: offending[0].id } : {}),
+    };
+  }
+  return { message: err instanceof Error ? err.message : String(err) };
 }

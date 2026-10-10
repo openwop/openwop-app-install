@@ -27,6 +27,8 @@
  * @see RFCS/0086-standing-agent-roster-and-workflow-portfolio.md §C/§D/§E
  */
 
+import { normalizeHandoffRecord } from '../host/handoff/handoffRecord.js';
+import { notifyHandoffRecorded } from '../host/handoff/handoffObservers.js';
 import { randomUUID } from 'node:crypto';
 import type { Express, Request } from 'express';
 import { OpenwopError } from '../types.js';
@@ -67,6 +69,8 @@ import { getRosterEntry } from '../host/rosterService.js';
 import { openSseChannel } from '../host/sseChannel.js';
 import { tenantOf } from '../host/tenantGuard.js';
 import { callerSubject, personalTenantOf, isDurableCaller, isOwnPersonalWorkspace } from '../host/requestSubject.js';
+import { keyDeclarationPermits } from '../host/protocolAuthorization.js';
+import { callerHoldsTenantScope, callerSubjectSpellings } from '../features/featureRoute.js';
 import { resolveCallerUser } from '../features/users/usersGuards.js';
 import { isWorkspaceMember, listMembers, type Scope } from '../host/accessControlService.js';
 import { resolveSubjectAccess, levelSatisfies } from '../host/subjectAccess.js';
@@ -86,7 +90,7 @@ interface Deps {
 /** One legacy v1 route root while the protocol overlap remains active. Keeping
  * it centralized means Kanban has one migration point on the v1 retirement
  * date, rather than every operation carrying an independent path dependency. */
-const KANBAN_ROUTE_ROOT = '/v1/host/openwop-app/kanban';
+const KANBAN_ROUTE_ROOT = '/host/openwop-app/kanban';
 
 // tenantOf moved to the shared host/tenantGuard (DATA-2).
 
@@ -157,10 +161,49 @@ async function authorizeBoard(req: Request, boardId: string, need: Scope = 'work
   const lvl = await boardAccess(req, board);
   if (lvl !== null) return levelSatisfies(lvl, need === 'workspace:write' ? 'write' : 'read') ? board : null;
   // Legacy (non-org) boards — agent + personal — keep their tenant/owner visibility.
-  if (board.tenantId === tenantOf(req)) return board;
+  // ADR 0774 D5 — visibility, not authority: a WRITE additionally needs the
+  // tenant's `workspace:write`. The board stays readable, so a refusal is a 403
+  // (`BoardWriteRefused`), never a 404 that would lie about its existence.
+  if (board.tenantId === tenantOf(req)) {
+    if (need === 'workspace:write') await assertBoardTenantWrite(req, board.tenantId);
+    return board;
+  }
   const subject = callerSubject(req);
   if (board.ownerUserId && subject && board.ownerUserId === subject) return board;
   return null;
+}
+
+/** ADR 0774 D5 — the refusal `authorizeBoard` throws for a caller who can SEE a
+ *  legacy board but may not write it. A distinct class so `authorizeCard` can
+ *  try the ADR 0049 assignee carve-out before surfacing it. */
+class BoardWriteRefused extends OpenwopError {
+  constructor() {
+    super('forbidden_scope', 'Missing required scope: workspace:write', 403, { requiredScope: 'workspace:write' });
+  }
+}
+
+/**
+ * ADR 0774 D5 — may this caller WRITE a legacy (agent / personal / unowned)
+ * board in `tenantId`, the caller's active tenant? Before this, any caller in
+ * the tenant could, so a read-only member of a shared workspace could delete
+ * boards or bind a workflow and start a run.
+ *
+ *  - the wildcard operator principal: yes (the trusted escape hatch every
+ *    authority gate honours);
+ *  - an `owk_` key that DECLARES scopes without `workspace:write`: no, always —
+ *    a key narrowing its own delegation can only remove authority;
+ *  - the caller's OWN personal workspace (`isOwnPersonalWorkspace`): yes — its
+ *    implicit owner. Grade-code KSCD-3: the first cut tested the tenant's SHAPE
+ *    (`user:`/`anon:`), but a member invited into someone else's personal
+ *    workspace also acts in a `user:` tenant, and must not inherit its owner's
+ *    authority. Ownership is the test, as in `assertTenantScope`;
+ *  - otherwise the credential's scopes in the tenant, read by provenance
+ *    (`credentialScopesIn`): an env key is the tenant's own principal, an
+ *    `owk_` key holds its issuer's current scopes, a person holds their own.
+ */
+async function assertBoardTenantWrite(req: Request, tenantId: string): Promise<void> {
+  // ADR 0775 D1 — the ONE predicate, shared with the agent-area write routes.
+  if (!(await callerHoldsTenantScope(req, tenantId, 'workspace:write'))) throw new BoardWriteRefused();
 }
 
 /** ADR 0049 D4 — authorize a caller for a specific CARD. Board members get full
@@ -173,7 +216,14 @@ async function authorizeCard(
   card: KanbanCard,
   need: Scope = 'workspace:read',
 ): Promise<{ board: KanbanBoard; scope: 'board' | 'assignment' } | null> {
-  const board = await authorizeBoard(req, card.boardId, need);
+  let refused: BoardWriteRefused | null = null;
+  let board: KanbanBoard | null = null;
+  try {
+    board = await authorizeBoard(req, card.boardId, need);
+  } catch (err) {
+    if (!(err instanceof BoardWriteRefused)) throw err;
+    refused = err;
+  }
   if (board) return { board, scope: 'board' };
   // The assignee carve-out (ADR 0049 D4): a card's assignee may act on THAT card
   // even without board membership. This is reached when board-scope access is
@@ -183,6 +233,9 @@ async function authorizeCard(
     const b = await getBoard(card.boardId);
     if (b) return { board: b, scope: 'assignment' };
   }
+  // Not the assignee: a caller who can see the board but not write it gets the
+  // honest 403, not the "not found" the null return maps to.
+  if (refused) throw refused;
   return null;
 }
 
@@ -255,6 +308,8 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
         triggerWorkflowId?: unknown;
         rosterId?: unknown;
       };
+      // ADR 0774 D5 — creating a board in the active tenant is a tenant write.
+      await assertBoardTenantWrite(req, tenantOf(req));
       if (typeof body.name !== 'string' || body.name.trim().length === 0) {
         throw new OpenwopError('validation_error', 'Field `name` is required and MUST be a non-empty string.', 400, {
           field: 'name',
@@ -415,7 +470,7 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
       }
       let runId: string | null;
       try {
-        runId = await deliverReservedWorkItem(deps, reservation);
+        runId = await deliverReservedWorkItem(deps, reservation, Date.now(), callerSubject(req));
       } catch (err) {
         recordKanbanWorkItemDelivery('manual', 'failed');
         throw err;
@@ -690,6 +745,11 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
   });
 
   // ADR 0049 — assign a card to a person (or address it to a role), or unassign.
+  // ADR 0829 P4 — with `structured-handoffs` ON, an assignment may carry
+  // `handoff` (intent / decisions / openQuestions / tried / confidence), written
+  // by the caller and stored on the card for the new assignee. Every assignment
+  // REPLACES the note (absent ⇒ cleared), so it always describes the current
+  // handoff; unassign clears it. Toggle OFF ⇒ the field is ignored.
   // Body: { assigneeId: "<userId>", comment?, notifyAssignee? } to assign a
   //       person; { assigneeId: null } to unassign; { assigneeRole: "<role>" }
   //       to address an unclaimed role. The card NEVER leaves its origin board —
@@ -707,14 +767,34 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
         assigneeRole?: unknown;
         comment?: unknown;
         notifyAssignee?: unknown;
+        handoff?: unknown;
       };
       const comment = typeof body.comment === 'string' ? body.comment : undefined;
+      // ADR 0829 P4 — the note travels with the assignment. A note that is sent
+      // but has no intent is a client error, not a silent drop.
+      const handoffsOn = body.handoff !== undefined && body.handoff !== null;
+      const note = handoffsOn ? normalizeHandoffRecord(body.handoff, 'human') : null;
+      if (handoffsOn && !note) {
+        throw new OpenwopError('validation_error', 'A handoff note needs an `intent`.', 400, { field: 'handoff.intent' });
+      }
+      const handoffPatch = note
+        ? { handoff: note, handoffBy: callerSubject(req) ?? 'unknown', handoffAt: new Date().toISOString() }
+        : { handoff: null };
       const notify = body.notifyAssignee !== false;
       const prev = existing.assigneeId;
+      // ADR 0831 P3 — once the note is stored, announce it (fail-soft; one ref per note).
+      const announceNote = async (): Promise<void> => {
+        if (!note || !('handoffAt' in handoffPatch)) return;
+        await notifyHandoffRecorded({
+          tenantId: board.tenantId,
+          record: note,
+          origin: { kind: 'card', cardId, boardId: board.id, ref: `card:${cardId}:${handoffPatch.handoffAt}`, by: handoffPatch.handoffBy ?? 'unknown' },
+        });
+      };
 
       // Unassign — clear the assignee and withdraw their inbox item.
       if (body.assigneeId === null) {
-        await updateCardFields(cardId, { assigneeId: null, assignmentReason: comment ?? '' });
+        await updateCardFields(cardId, { assigneeId: null, assignmentReason: comment ?? '', handoff: null });
         if (prev) await withdrawAssignmentNotification({ tenantId: board.tenantId, cardId, recipientUserId: prev });
         notifyBoardChanged(board.id);
         res.json({ card: await getCard(cardId) });
@@ -724,7 +804,8 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
       // Role-addressed (unclaimed) — surfaces in every role-holder's mirror;
       // the first to claim becomes the accountable assignee (ADR 0049 D2).
       if (typeof body.assigneeRole === 'string' && body.assigneeRole.trim().length > 0) {
-        await updateCardFields(cardId, { assigneeId: null, assigneeRole: body.assigneeRole.trim(), assignmentReason: comment });
+        await updateCardFields(cardId, { assigneeId: null, assigneeRole: body.assigneeRole.trim(), assignmentReason: comment, ...handoffPatch });
+        await announceNote();
         if (prev) await withdrawAssignmentNotification({ tenantId: board.tenantId, cardId, recipientUserId: prev });
         notifyBoardChanged(board.id);
         res.json({ card: await getCard(cardId) });
@@ -745,11 +826,14 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
       if (!selfOnOwnWorkspace && !(await isWorkspaceMember(assigneeId, board.tenantId))) {
         throw new OpenwopError('validation_error', 'Assignee must be a member of this workspace.', 400, { field: 'assigneeId' });
       }
-      await updateCardFields(cardId, { assigneeId, assigneeRole: null, ...(comment ? { assignmentReason: comment } : {}) });
+      await updateCardFields(cardId, { assigneeId, assigneeRole: null, ...(comment ? { assignmentReason: comment } : {}), ...handoffPatch });
+      await announceNote();
       if (notify && assigneeId !== prev) {
         const card = await getCard(cardId);
         if (card) {
-          await emitAssignmentNotification({ tenantId: board.tenantId, card, assigneeId, comment, boardName: board.name });
+          // ADR 0829 P4 — no comment ⇒ the note's intent is the notification text.
+          const message = comment ?? note?.intent;
+          await emitAssignmentNotification({ tenantId: board.tenantId, card, assigneeId, ...(message ? { comment: message } : {}), boardName: board.name });
           if (prev) await withdrawAssignmentNotification({ tenantId: board.tenantId, cardId, recipientUserId: prev });
         }
       }
@@ -787,9 +871,52 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
       if (!existing.assigneeRole || existing.assigneeId) {
         throw new OpenwopError('validation_error', 'This card is not available to claim.', 400, {});
       }
-      await updateCardFields(cardId, { assigneeId: subject, assigneeRole: null });
+      // Grade-code KSCD-4 — a claim makes the caller the assignee, whose
+      // carve-out may move the card into a trigger lane. Before this, any
+      // workspace member (a viewer included) could claim a role card on a
+      // legacy board and so reach the one write path ADR 0774 D5 leaves an
+      // assignee. An `owk_` key that declared scopes without `workspace:write`
+      // cannot claim either.
+      const principalAuth = req.principal?.auth;
+      if (principalAuth?.kind === 'api-key' && !keyDeclarationPermits(principalAuth.scopes, 'workspace:write')) {
+        throw new BoardWriteRefused();
+      }
+      // On an org/project board `claimLvl === 'write'` already proved board
+      // write access above. On a legacy board, membership alone is not enough:
+      // the caller holds the addressed role, or already has the tenant's
+      // `workspace:write` (they could have assigned it to themselves anyway).
+      const heldRoles = (await Promise.all((await callerSubjectSpellings(req)).map((s) => callerRolesIn(board.tenantId, s)))).flat();
+      if (claimLvl === null && !heldRoles.includes(existing.assigneeRole)) {
+        try {
+          await assertBoardTenantWrite(req, board.tenantId);
+        } catch (err) {
+          if (!(err instanceof BoardWriteRefused)) throw err;
+          throw new OpenwopError('forbidden', 'Only a holder of the role this task is addressed to can claim it.', 403, {
+            role: existing.assigneeRole,
+          });
+        }
+      }
+      // ADR 0774 D4 — the check above read a snapshot; two claimers both pass
+      // it. The precondition re-checks on the fresh read INSIDE the CAS, so
+      // exactly one claim lands and the other gets a 409, not a silent overwrite.
+      let claimed: KanbanCard;
+      try {
+        claimed = (await applyBoardCommand({
+          type: 'card.patch',
+          tenantId: board.tenantId,
+          boardId: board.id,
+          cardId,
+          patch: { assigneeId: subject, assigneeRole: null },
+          precondition: (fresh) => Boolean(fresh.assigneeRole) && !fresh.assigneeId,
+        })).card;
+      } catch (err) {
+        if ((err as { code?: unknown } | null)?.code === 'kanban_card_precondition_failed') {
+          throw new OpenwopError('conflict', 'Someone else claimed this task first.', 409, { cardId });
+        }
+        rethrowCardCommandError(err);
+      }
       notifyBoardChanged(board.id);
-      res.json({ card: await getCard(cardId) });
+      res.json({ card: claimed });
     } catch (err) {
       next(err);
     }

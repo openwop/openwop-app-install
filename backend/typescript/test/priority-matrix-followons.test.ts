@@ -21,12 +21,12 @@ afterAll(async () => { await closeApp(); });
 const client = (): Client => makeClient(() => BASE);
 
 async function signup(c: Client, opts: { tenantId?: string } = {}): Promise<{ userId: string }> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail('fo'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
+  const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail('fo'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
 
-const L = '/v1/host/openwop-app/priority-matrix/lists';
+const L = '/host/openwop-app/priority-matrix/lists';
 const HIGH = { 'strategic-alignment': 10, roi: 10, urgency: 10, 'compliance-risk': 10, cost: 1 };
 const MID = { 'strategic-alignment': 5, roi: 5, urgency: 5, 'compliance-risk': 5, cost: 5 };
 const LOW = { 'strategic-alignment': 1, roi: 1, urgency: 1, 'compliance-risk': 1, cost: 10 };
@@ -41,7 +41,7 @@ describe('portfolio normalization (ADR 0060)', () => {
   it('list-relative + percentile attach a 0–100 score; the top of each list normalizes to ~100', async () => {
     const owner = client();
     await signup(owner);
-    const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
+    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
     const list = (await owner.post(L, { orgId, name: 'L', presetId: 'weighted' })).body;
     await scoredIdea(owner, list.id, 'top', HIGH);
     await scoredIdea(owner, list.id, 'mid', MID);
@@ -69,8 +69,8 @@ describe('vote breakdown (ADR 0059) — config-authority gated', () => {
     await signup(owner, { tenantId });
     const member = client();
     const memberUser = await signup(member, { tenantId });
-    const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
-    await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
+    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
+    await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
     const list = (await owner.post(L, { orgId, name: 'Council', presetId: 'weighted', votingMode: 'multi-voter' })).body;
     const idea = (await owner.post(`${L}/${encodeURIComponent(list.id)}/ideas`, { title: 'shared' })).body;
     await owner.put(`${L}/${encodeURIComponent(list.id)}/ideas/${encodeURIComponent(idea.id)}/scores`, { scores: HIGH });
@@ -89,7 +89,7 @@ describe('single→multi-voter seeding (ADR 0059)', () => {
   it('seeds the creator’s vote from the existing shared score so priority survives the switch', async () => {
     const owner = client();
     await signup(owner);
-    const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
+    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
     const list = (await owner.post(L, { orgId, name: 'Switch', presetId: 'weighted' })).body; // single (default)
     const idea = await scoredIdea(owner, list.id, 'kept', HIGH);
     const before = (await owner.get(`${L}/${encodeURIComponent(list.id)}/ideas`)).body.ideas[0];

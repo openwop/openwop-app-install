@@ -35,7 +35,7 @@ import { getManagedProviderStatuses, type ManagedProviderStatus } from '../../pr
 import { hostWebSearchKeyStatus } from '../../host/webResearchSurface.js';
 import { readDeployPosture, type DeployPosture } from '../../host/deployPosture.js';
 import { effectiveImplementation, readInMemoryAllowance, type SurfaceKey } from '../../host/surfaceBackends.js';
-import { scheduleDaemonLiveness, type ScheduleDaemonLiveness } from '../../host/scheduleDaemon.js';
+import { scheduleDaemonLiveness, scheduleDaemonFleet, type ScheduleDaemonLiveness, type ScheduleDaemonInstance } from '../../host/scheduleDaemon.js';
 import { getEffectiveConfig, resolveOne, buildFeatureConsole } from '../../host/featureToggles/service.js';
 import type { FeatureToggleStatus } from '../../host/featureToggles/types.js';
 import { declaredDefaultWorkspaceTargets } from '../../host/workspaceJoinLedger.js';
@@ -91,6 +91,9 @@ export interface KicktodoReadinessReport {
     factory: { ready: boolean; reasons: string[] };
     surfaces: { implementation: Record<string, string>; inMemoryAllowance: 'all' | 'none' | string[] };
     scheduler: ScheduleDaemonLiveness;
+    /** ADR 0787 D7 — every instance running the fenced daemon that ticked within
+     *  the hour. Two distinct `revision`s = two revisions firing (WHD-28). */
+    schedulerFleet: ScheduleDaemonInstance[];
     storage: { ok: true; skipped?: true } | { ok: false; error: string };
   };
 }
@@ -120,7 +123,8 @@ export async function buildKicktodoReadiness(input: { tenantId: string; storage?
     const config = await getEffectiveConfig(id);
     const callerTenant = (await resolveOne(id, { tenantId: input.tenantId }))?.enabled ?? false;
     const defaultWorkspace = defaultTenant ? ((await resolveOne(id, { tenantId: defaultTenant }))?.enabled ?? false) : null;
-    features.push({ id, registered: config !== null, global: config?.status ?? null, callerTenant, defaultWorkspace });
+    // ADR 0819 §3 — a killed toggle is OFF everywhere whatever its stored status.
+    features.push({ id, registered: config !== null, global: config ? (config.killed ? 'off' : config.status) : null, callerTenant, defaultWorkspace });
   }
   const core = features.find((f) => f.id === 'kicktodo-core');
   if (!core?.registered) blockers.push('kicktodo-core is not registered on this build');
@@ -160,6 +164,16 @@ export async function buildKicktodoReadiness(input: { tenantId: string; storage?
 
   // Scheduler — the daemon that fires every reminder.
   const scheduler = scheduleDaemonLiveness();
+  let schedulerFleet: ScheduleDaemonInstance[] = [];
+  try {
+    schedulerFleet = await scheduleDaemonFleet();
+  } catch { /* reported as empty — the per-process check above still gates */ }
+  // ADR 0787 D7 (`SCTCD-10`) — two revisions ticking means a superseded revision's
+  // instance is still firing schedules (WHD-28). Fire-once holds for revisions
+  // running the fenced daemon, but the stale one also runs every OTHER worker on
+  // old code — say so rather than leave it to be spotted by eye.
+  const fleetRevisions = [...new Set(schedulerFleet.map((r) => r.revision).filter((r): r is string => r !== null))];
+  if (fleetRevisions.length > 1) blockers.push(`schedule daemons from ${fleetRevisions.length} revisions ticked within the hour (${fleetRevisions.join(', ')}) — a superseded revision is still running workers`);
   if (!scheduler.started) blockers.push('schedule daemon has not started on this instance — no reminder, session or coach turn can fire');
   else if (scheduler.ageMs !== null && scheduler.ageMs > scheduler.pollIntervalMs * 4) blockers.push(`schedule daemon last ticked ${Math.round(scheduler.ageMs / 1000)}s ago (poll ${scheduler.pollIntervalMs / 1000}s) — starved`);
 
@@ -194,6 +208,7 @@ export async function buildKicktodoReadiness(input: { tenantId: string; storage?
       factory: { ready: factoryReasons.length === 0, reasons: factoryReasons },
       surfaces: { implementation, inMemoryAllowance },
       scheduler,
+      schedulerFleet,
       storage,
     },
   };

@@ -21,6 +21,7 @@ import { StateCard } from '../../ui/StateCard.js';
 import { Skeleton } from '../../ui/Skeleton.js';
 import { Notice } from '../../ui/index.js';
 import { KeyIcon, WandIcon, XIcon } from '../../ui/icons/index.js';
+import { assetAlt } from './MediaViews.js';
 import {
   absoluteServeUrl, aiEditAsset, aiUpscaleAsset, listAssets, listImageProviders,
   type ImageEditOp, type ImageProviderOption, type MediaAsset,
@@ -182,7 +183,7 @@ export function EditImageDialog({
             {action === 'inpaint' ? (
               <MaskPainter ref={maskRef} imageUrl={absoluteServeUrl(source.serveUrl)} />
             ) : (
-              <img src={absoluteServeUrl(source.serveUrl)} alt={source.name} className="media-thumb-img" />
+              <img src={absoluteServeUrl(source.serveUrl)} alt={assetAlt(source) || source.name} className="media-thumb-img" />
             )}
 
             {promptNeeded ? (

@@ -12,6 +12,7 @@ import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import type { FeatureSurface } from '../../host/featureSurfaces.js';
 import { resolveDisabledPacks } from '../../host/packVisibility.js';
 import { parseFieldContract } from '../../host/preserveDroppedFields.js';
+import { assertModelWorkflowWrite } from '../../host/workflowWriteAuthority.js';
 import {
   buildAuthoringCatalog,
   validateAuthoredWorkflow,
@@ -61,15 +62,28 @@ export function buildWorkflowAuthorSurface(scope: BundleScope): FeatureSurface {
      *  another tenant's workflow — ADR 0163). Throws on any structural /
      *  capability / closed-world / ownership violation. */
     persistDraft: async (args) => {
+      // ADR 0822 D1 — the same write authority as the Architect's chat tool and
+      // the builder's REST save, judged on the run's acting user and its
+      // REQUEST-stamped `personalTenant` (threaded in-run by the executor). Throws
+      // the route's `403 forbidden_scope`; the node relays it as a typed failure.
+      await assertModelWorkflowWrite(scope);
       // ADR 0595 §Correction 1 — `clearFields` is the ADR 0524 Phase E0
       // declaration, reached from a lane that has no HTTP request to carry the
       // `x-openwop-field-contract` header. Parsed by that header's OWN parser
       // (it already accepts the array form), so the two lanes can never drift
       // on which tokens are honoured or on the closed-world drop of unknown ones.
       const declaredFields = parseFieldContract((args ?? {}).clearFields);
+      // ADR 0773 G-10c (closes ADR 0770 `WBWF-17` on the NODE lane) — the
+      // meta-workflow authors NEW workflows from an intent; it has no read step,
+      // so it may only CREATE. Overwriting an existing workflow needs the
+      // revision a caller actually read, else a typed `base_revision_required`.
+      const baseRevision = typeof (args as { baseRevision?: unknown } | undefined)?.baseRevision === 'string'
+        ? (args as { baseRevision: string }).baseRevision : undefined;
       const out = await persistAuthoredWorkflow((args ?? {}).definition, {
         tenantId: scope.tenantId,
         ...(declaredFields ? { declaredFields } : {}),
+        ...(baseRevision ? { baseRevision } : {}),
+        requireBaseRevision: true,
       });
       return {
         workflowId: out.workflowId,

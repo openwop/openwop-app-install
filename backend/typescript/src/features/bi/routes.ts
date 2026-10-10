@@ -13,7 +13,7 @@ import type { RunMetricParams } from './metricTypes.js';
 import { sendError } from '../../middleware/errorEnvelope.js';
 
 const FEATURE = { toggleId: 'bi', label: 'Business metrics' };
-const ORG = '/v1/host/openwop-app/bi/orgs/:orgId';
+const ORG = '/host/openwop-app/bi/orgs/:orgId';
 type Scope = 'workspace:read' | 'host:members:manage';
 
 const str = (v: unknown): string | undefined => (typeof v === 'string' && v ? v : undefined);
@@ -95,8 +95,10 @@ export function registerBiRoutes(deps: RouteDeps): void {
 
   app.post(`${ORG}/metrics/:metricId/run`, async (req, res, next) => {
     try {
-      const { orgId, tenantId } = await authz(req, 'workspace:read');
-      const result = await runMetric(tenantId, req.params.metricId, parseRunParams(orgId, (req.body ?? {}) as Record<string, unknown>));
+      const { user, orgId, tenantId } = await authz(req, 'workspace:read');
+      // ADR 0846 D2 — read as the caller: the CRM's own routes pass this same id as
+      // the viewer (`crm/orgRoutes.ts` deals list + pipeline report).
+      const result = await runMetric(tenantId, req.params.metricId, parseRunParams(orgId, (req.body ?? {}) as Record<string, unknown>), user.userId);
       res.json({ result });
     } catch (err) { next(err); }
   });

@@ -21,7 +21,7 @@ import {
   __resetAssistantStore,
   getPendingAction,
 } from '../src/features/assistant/assistantService.js';
-import { enqueueActionWithApproval, decideActionViaApproval } from '../src/features/assistant/actionApproval.js';
+import { enqueueActionWithApproval, decideActionViaApproval, contentHashOf } from '../src/features/assistant/actionApproval.js';
 import { setGovernancePolicy, __resetGovernanceStore } from '../src/host/governanceService.js';
 import { buildAssistantHealth } from '../src/features/assistant/health.js';
 
@@ -45,7 +45,7 @@ describe('COS-8 — honest status under a non-approval-required policy', () => {
     await setGovernancePolicy(TENANT, { actionPolicy: { nudge: 'draft-only' } });
 
     const a = await enqueueActionWithApproval(TENANT, { kind: 'nudge', payload: {}, draft: 'draft-only nudge' });
-    await decideActionViaApproval(TENANT, a.approvalId!, 'approved', { decidedByUserId: 'u1' });
+    await decideActionViaApproval(TENANT, a.approvalId!, 'approved', { expectedContentHash: contentHashOf(a), decidedByUserId: 'u1' });
 
     const row = await getPendingAction(TENANT, a.actionId);
     // Was `approved` (the lie); must now be the honest terminal status.
@@ -56,13 +56,13 @@ describe('COS-8 — honest status under a non-approval-required policy', () => {
     // draft-only nudge → suppressed (a human clicked, but the gate was a no-op).
     await setGovernancePolicy(TENANT, { actionPolicy: { nudge: 'draft-only' } });
     const suppressed = await enqueueActionWithApproval(TENANT, { kind: 'nudge', payload: {}, draft: 'suppressed' });
-    await decideActionViaApproval(TENANT, suppressed.approvalId!, 'approved', { decidedByUserId: 'u1' });
+    await decideActionViaApproval(TENANT, suppressed.approvalId!, 'approved', { expectedContentHash: contentHashOf(suppressed), decidedByUserId: 'u1' });
 
     // A real human-gated approval (approval-required nudge sends internally → sent)
     // and a real human rejection — these ARE human decisions and DO count.
     await setGovernancePolicy(TENANT, { actionPolicy: { nudge: 'approval-required' } });
     const sent = await enqueueActionWithApproval(TENANT, { kind: 'nudge', payload: {}, draft: 'sent' });
-    await decideActionViaApproval(TENANT, sent.approvalId!, 'approved', { decidedByUserId: 'u1' });
+    await decideActionViaApproval(TENANT, sent.approvalId!, 'approved', { expectedContentHash: contentHashOf(sent), decidedByUserId: 'u1' });
     const rejected = await enqueueActionWithApproval(TENANT, { kind: 'nudge', payload: {}, draft: 'rejected' });
     await decideActionViaApproval(TENANT, rejected.approvalId!, 'rejected', {});
 
@@ -82,7 +82,7 @@ describe('COS-8 — honest status under a non-approval-required policy', () => {
   it('reads approvalRate:null (zero human decisions) when every action was policy-suppressed', async () => {
     await setGovernancePolicy(TENANT, { actionPolicy: { nudge: 'draft-only' } });
     const a = await enqueueActionWithApproval(TENANT, { kind: 'nudge', payload: {}, draft: 'only suppressed' });
-    await decideActionViaApproval(TENANT, a.approvalId!, 'approved', { decidedByUserId: 'u1' });
+    await decideActionViaApproval(TENANT, a.approvalId!, 'approved', { expectedContentHash: contentHashOf(a), decidedByUserId: 'u1' });
 
     const health = await buildAssistantHealth(TENANT);
     expect(health.actions.suppressed).toBe(1);

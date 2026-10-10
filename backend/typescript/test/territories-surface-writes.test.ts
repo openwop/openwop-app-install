@@ -46,18 +46,18 @@ describe('territories A5 — governed surface writes enforce the run owner scope
   it('activateModel requires host:territories:manage; setQuota requires workspace:write; system run denied', async () => {
     const tenantId = `org:terrsw-${Date.now()}-${n++}`;
     const owner = client();
-    const ownerId = (await owner.post('/v1/host/openwop-app/test/login', { email: `o-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId;
+    const ownerId = (await owner.post('/host/openwop-app/test/login', { email: `o-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId;
     const editor = client();
-    const editorId = (await editor.post('/v1/host/openwop-app/test/login', { email: `e-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId;
+    const editorId = (await editor.post('/host/openwop-app/test/login', { email: `e-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId;
     const viewer = client();
-    const viewerId = (await viewer.post('/v1/host/openwop-app/test/login', { email: `v-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId;
+    const viewerId = (await viewer.post('/host/openwop-app/test/login', { email: `v-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId;
 
-    const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
-    const om = (p: string) => `/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}${p}`;
+    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
+    const om = (p: string) => `/host/openwop-app/orgs/${encodeURIComponent(orgId)}${p}`;
     await owner.post(om('/members'), { displayName: 'E', subject: editorId, roles: ['editor'] });
     await owner.post(om('/members'), { displayName: 'V', subject: viewerId, roles: ['viewer'] });
 
-    const t = (p: string) => `/v1/host/openwop-app/territories/orgs/${encodeURIComponent(orgId)}${p}`;
+    const t = (p: string) => `/host/openwop-app/territories/orgs/${encodeURIComponent(orgId)}${p}`;
     const modelId = (await owner.post(t('/models'), { name: 'M' })).body.modelId;
     const terr = (await owner.post(t(`/models/${modelId}/territories`), { name: 'West' })).body;
 

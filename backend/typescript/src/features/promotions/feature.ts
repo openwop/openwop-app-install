@@ -17,10 +17,13 @@ import { setOrderDiscountHook } from '../commerce/promotionSeam.js';
 import { onProductDeleted } from '../commerce/productLifecycleSeam.js';
 import { registerSubjectEraser } from '../../host/subjectErasure.js';
 import { applyPromotions, pruneProductRefs, erasePromotionSubject } from './promotionsService.js';
+import { registerFeatureDataExporter } from '../../host/featureDataExport.js';
+import { exportPromotionsData } from './dataExport.js';
 
 export const promotionsFeature: BackendFeature = {
   id: 'promotions',
   registerRoutes: (deps) => {
+    registerFeatureDataExporter('promotions', exportPromotionsData); // ADR 0820 §7 — read-only export, served after a plan lapse
     registerPromotionsRoutes(deps);
     // CFP-1 — the Promotions Manager's conversational tools (chat-first port).
     registerPromotionsAgentTools();
@@ -53,8 +56,8 @@ export const promotionsFeature: BackendFeature = {
     salt: 'promotions',
   },
   requiredPacks: [
-    { name: 'feature.promotions.nodes', version: '1.0.0' },
-    { name: 'feature.promotions.agents', version: '1.0.1' },
+    { name: 'feature.promotions.nodes', version: '1.0.1' },
+    { name: 'vendor.openwop-app.promotions.agents', version: '1.0.2' },
   ],
   dependsOn: ['commerce'],
   recommends: ['crm'],

@@ -7,6 +7,11 @@
  * + details.disabledPacks on POST /workflows), unknown-typeId behavior UNCHANGED
  * (registration has never done a closed-world check), and re-enable restoring
  * the default. Enforcement is observable only at the HTTP boundary.
+ *
+ * Sabotage witnesses (wave 10): catalog filter removed, the choke's `hit.add`
+ * disabled, the deny-store prefix widened (tenant B sees A's row), `enablePack`
+ * a no-op, or unknown typeIds hitting the choke → case 1 red; the listing or the
+ * boolean check removed → case 2 red; the toggle gate dropped from GET → case 3 red.
  */
 
 import http from 'node:http';
@@ -32,7 +37,11 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+interface Res { status: number; body: unknown }
+interface EnablementBody { disabled: string[] }
+interface CatalogBody { nodes: CatalogNode[] }
+interface RegBody { workflowId?: string }
+interface ErrBody { error?: string; details?: { disabledPacks?: string[]; feature?: string } }
 function client() {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
@@ -53,7 +62,7 @@ let n = 0;
 async function tenantUser(): Promise<ReturnType<typeof client>> {
   const c = client();
   n += 1;
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `pe-${n}@acme.test`, tenantId: `t-pe-${n}` });
+  const r = await c.post('/host/openwop-app/test/login', { email: `pe-${n}@acme.test`, tenantId: `t-pe-${n}` });
   expect(r.status).toBe(201);
   return c;
 }
@@ -62,9 +71,9 @@ interface CatalogNode { typeId: string; packName?: string; source: string }
 
 /** A pack that declares nodes in the live catalog — the enforcement target. */
 async function packWithNodes(c: ReturnType<typeof client>): Promise<{ packName: string; typeId: string }> {
-  const cat = await c.get('/v1/host/openwop-app/node-catalog');
+  const cat = await c.get('/host/openwop-app/node-catalog');
   expect(cat.status).toBe(200);
-  const node = (cat.body.nodes as CatalogNode[]).find((x) => x.source === 'pack' && x.packName);
+  const node = (cat.body as CatalogBody).nodes.find((x) => x.source === 'pack' && x.packName);
   expect(node, 'test env needs at least one pack-declared node in the catalog').toBeTruthy();
   return { packName: node!.packName!, typeId: node!.typeId };
 }
@@ -76,52 +85,56 @@ describe('pack enablement (ADR 0194 P3)', () => {
     const { packName, typeId } = await packWithNodes(a);
 
     // Baseline: empty deny list.
-    const before = await a.get('/v1/host/openwop-app/marketplace/pack-enablement');
+    const before = await a.get('/host/openwop-app/marketplace/pack-enablement');
     expect(before.status).toBe(200);
-    expect(before.body.disabled).toEqual([]);
+    expect((before.body as EnablementBody).disabled).toEqual([]);
 
     // Disable for tenant A.
-    const put = await a.put(`/v1/host/openwop-app/marketplace/pack-enablement/${encodeURIComponent(packName)}`, { enabled: false });
+    const put = await a.put(`/host/openwop-app/marketplace/pack-enablement/${encodeURIComponent(packName)}`, { enabled: false });
     expect(put.status, JSON.stringify(put.body)).toBe(200);
-    expect((await a.get('/v1/host/openwop-app/marketplace/pack-enablement')).body.disabled).toEqual([packName]);
+    expect(((await a.get('/host/openwop-app/marketplace/pack-enablement')).body as EnablementBody).disabled).toEqual([packName]);
 
     // Palette: A no longer sees the pack's nodes; B (another tenant) still does.
-    const catA = await a.get('/v1/host/openwop-app/node-catalog');
-    expect((catA.body.nodes as CatalogNode[]).some((x) => x.packName === packName)).toBe(false);
-    const catB = await b.get('/v1/host/openwop-app/node-catalog');
-    expect((catB.body.nodes as CatalogNode[]).some((x) => x.packName === packName)).toBe(true);
+    const catA = await a.get('/host/openwop-app/node-catalog');
+    expect((catA.body as CatalogBody).nodes.some((x) => x.packName === packName)).toBe(false);
+    const catB = await b.get('/host/openwop-app/node-catalog');
+    expect((catB.body as CatalogBody).nodes.some((x) => x.packName === packName)).toBe(true);
 
     // Registration choke point: A is refused with the curated-dimension error…
-    const defBody = { workflowId: `pe.block.${n}`, nodes: [{ nodeId: 'n1', typeId }], edges: [] };
-    const regA = await a.post('/v1/host/openwop-app/workflows', defBody);
+    const k = n; // `n` is module-shared; pin this case's ids
+    const defBody = { workflowId: `pe.block.${k}`, nodes: [{ nodeId: 'n1', typeId }], edges: [] };
+    const regA = await a.post('/host/openwop-app/workflows', defBody);
     expect(regA.status).toBe(403);
-    expect(regA.body.error).toBe('forbidden');
-    expect(regA.body.details?.disabledPacks).toContain(packName);
+    expect((regA.body as ErrBody).error).toBe('forbidden');
+    expect((regA.body as ErrBody).details?.disabledPacks).toContain(packName);
     // …while B registers the same shape fine (isolation).
-    const regB = await b.post('/v1/host/openwop-app/workflows', { ...defBody, workflowId: `pe.ok.${n}` });
+    const regB = await b.post('/host/openwop-app/workflows', { ...defBody, workflowId: `pe.ok.${k}` });
     expect([200, 201]).toContain(regB.status);
+    expect((regB.body as RegBody).workflowId).toBe(`pe.ok.${k}`);
 
     // Unknown typeIds keep today's behavior — no closed-world gate smuggled in.
-    const regUnknown = await a.post('/v1/host/openwop-app/workflows', {
-      workflowId: `pe.unknown.${n}`,
+    const regUnknown = await a.post('/host/openwop-app/workflows', {
+      workflowId: `pe.unknown.${k}`,
       nodes: [{ nodeId: 'n1', typeId: 'totally.unknown.type' }],
       edges: [],
     });
     expect([200, 201]).toContain(regUnknown.status);
+    expect((regUnknown.body as RegBody).workflowId).toBe(`pe.unknown.${k}`);
 
     // Re-enable restores the default.
-    expect((await a.put(`/v1/host/openwop-app/marketplace/pack-enablement/${encodeURIComponent(packName)}`, { enabled: true })).status).toBe(200);
-    const catA2 = await a.get('/v1/host/openwop-app/node-catalog');
-    expect((catA2.body.nodes as CatalogNode[]).some((x) => x.packName === packName)).toBe(true);
-    const regA2 = await a.post('/v1/host/openwop-app/workflows', { ...defBody, workflowId: `pe.after.${n}` });
+    expect((await a.put(`/host/openwop-app/marketplace/pack-enablement/${encodeURIComponent(packName)}`, { enabled: true })).status).toBe(200);
+    const catA2 = await a.get('/host/openwop-app/node-catalog');
+    expect((catA2.body as CatalogBody).nodes.some((x) => x.packName === packName)).toBe(true);
+    const regA2 = await a.post('/host/openwop-app/workflows', { ...defBody, workflowId: `pe.after.${k}` });
     expect([200, 201]).toContain(regA2.status);
+    expect((regA2.body as RegBody).workflowId).toBe(`pe.after.${k}`);
   });
 
   it('validates input and 404s an unknown pack', async () => {
     const a = await tenantUser();
-    expect((await a.put('/v1/host/openwop-app/marketplace/pack-enablement/no.such.pack', { enabled: false })).status).toBe(404);
+    expect((await a.put('/host/openwop-app/marketplace/pack-enablement/no.such.pack', { enabled: false })).status).toBe(404);
     const { packName } = await packWithNodes(a);
-    expect((await a.put(`/v1/host/openwop-app/marketplace/pack-enablement/${encodeURIComponent(packName)}`, { enabled: 'nope' })).status).toBe(400);
+    expect((await a.put(`/host/openwop-app/marketplace/pack-enablement/${encodeURIComponent(packName)}`, { enabled: 'nope' })).status).toBe(400);
   });
 
   it('toggle OFF ⇒ the curation routes 404 (backend authority)', async () => {
@@ -129,7 +142,10 @@ describe('pack enablement (ADR 0194 P3)', () => {
     const d = getToggleDefault('marketplace');
     if (d) await saveConfig({ ...d, status: 'off' }, 'test');
     try {
-      expect((await a.get('/v1/host/openwop-app/marketplace/pack-enablement')).status).toBe(404);
+      const off = await a.get('/host/openwop-app/marketplace/pack-enablement');
+      expect(off.status).toBe(404);
+      // The 404 is the toggle gate's, not an unmounted route's.
+      expect((off.body as ErrBody).details?.feature).toBe('marketplace');
     } finally {
       if (d) await saveConfig({ ...d, status: 'on' }, 'test');
     }

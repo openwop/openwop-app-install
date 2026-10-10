@@ -8,8 +8,10 @@
  *
  *  1. semantics — `approvedTools` downgrades ONLY a require-approval verdict;
  *     a hard deny (tenant rule / platform floor) is NEVER bypassed;
- *  2. bridge wiring — `userApproved` becomes `approvedTools: new Set([name])`
- *     on the CANONICAL name (never blanket `bypassApproval`);
+ *  2. bridge wiring — `userApproved` becomes a one-shot approval on the CANONICAL
+ *     name (never blanket `bypassApproval`). ADR 0834 D2: it is the BASELINE-only set
+ *     (`approvedBaselineTools`) — the card is client-asserted, so it answers the
+ *     user's own safe-mode ask, never a workspace/platform/enforce ask;
  *  3. route authority — the flag is honored only for a session with a BOUND
  *     human (`resolved.userId`); a user-less session cannot self-approve.
  */
@@ -31,7 +33,7 @@ describe('A7 — one-shot approvedTools semantics (the voice card\'s Approve)', 
       rules: [],
       requireApprovalTools: SENSITIVE_APPROVAL_TOOLS,
       bypassApproval: false,
-      ...(approved ? { approvedTools: new Set([approved]) } : {}),
+      ...(approved ? { approvedBaselineTools: new Set([approved]) } : {}),
     });
 
   it('without the one-shot, a SENSITIVE tool stays require-approval (the card trigger)', () => {
@@ -43,7 +45,9 @@ describe('A7 — one-shot approvedTools semantics (the voice card\'s Approve)', 
   });
 
   it('the one-shot is per-tool — a DIFFERENT sensitive tool still requires approval', () => {
-    expect(voiceHook(CODE_EXEC_ID).evaluate([], 'openwop:core.files.write').decision).toBe('require-approval');
+    // ADR 0834 D4 — this used `openwop:core.files.write`, which no agent tool ever
+    // registered (removed from the set); http.fetch is a real member.
+    expect(voiceHook(CODE_EXEC_ID).evaluate([], 'openwop:core.openwop.http.fetch').decision).toBe('require-approval');
   });
 
   it('a hard deny (enforce-mode floor) is NEVER bypassed by the one-shot', () => {
@@ -64,10 +68,10 @@ describe('A7 — one-shot approvedTools semantics (the voice card\'s Approve)', 
 describe('A7 — wiring pins (source-level, the voice-tool-parity idiom)', () => {
   it('the bridge maps userApproved to a per-tool approvedTools one-shot on the canonical name', () => {
     const src = srcOf('features/voice/realtime/toolBridge.ts');
-    expect(src).toContain('approvedTools: new Set([name])');
-    // Never blanket bypass: the voice lane keeps bypassApproval:false always.
-    expect(src).toContain('bypassApproval: false');
-    expect(src).not.toContain('bypassApproval: true');
+    expect(src).toContain('if (input.userApproved) (approvedBaselineTools ??= new Set()).add(name);');
+    // Never blanket bypass: the voice lane passes no `bypass` to the lane factory.
+    expect(src).not.toMatch(/bypass(Approval)?:\s*true/);
+    expect(src).not.toMatch(/buildLaneFirewall\(\{[^}]*\bbypass\b/);
   });
 
   it('the route honors userApproved ONLY for a session with a bound human', () => {

@@ -1,18 +1,18 @@
 {
   "name": "core.openwop.workflows.destination-sync",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "kind": "workflow-chain",
   "description": "CDP → peer-OpenWOP-host onward-sync (ADR 0289/RFC 0128), migrated from the deprecated builtin (ADR 0472 P4). chainId keeps the original id; peerIngestUrl resolves at runtime via the http node config template.",
   "keywords": [
     "CDP"
   ],
   "engines": {
-    "openwop": ">=1.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "chains": [
     {
       "chainId": "openwop-app.cdp.sync-to-openwop-host",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "Sync CDP records to a peer host",
       "description": "Prepare the onward envelope and POST a CDP record batch to a peer OpenWOP host (purpose-labelled).",
       "parameters": {
@@ -37,7 +37,7 @@
         "nodes": [
           {
             "id": "prepare-onward",
-            "typeId": "feature.destination-sync.nodes.prepare-onward",
+            "typeId": "feature.destination-sync.nodes.prepare-onward@1.0.0",
             "inputs": {
               "syncId": "{{params.syncId}}",
               "records": "{{params.records}}"
@@ -45,7 +45,7 @@
           },
           {
             "id": "egress",
-            "typeId": "core.openwop.http.fetch",
+            "typeId": "core.openwop.http.fetch@1.0.0",
             "config": {
               "method": "POST",
               "url": "{{inputs.peerIngestUrl}}"

@@ -2,7 +2,7 @@
  * CONS-2 — an unauthenticated caller could FORGE or WIPE any subject's consent,
  * and read it. CONS-3 — a form EMAIL opt-in silently GRANTED sms and push.
  *
- * CONS-2. `POST /v1/host/openwop-app/public-consent/:orgId` took `subjectKey`
+ * CONS-2. `POST /host/openwop-app/public-consent/:orgId` took `subjectKey`
  * from the request BODY with no proof-of-possession and called `recordConsent`,
  * which REPLACES the stored record wholesale. That keyspace is shared with CRM
  * contactIds, `User.userId`s, email addresses and (since ADR 0394) raw E.164
@@ -23,6 +23,14 @@
  * ships, so a fix that merely blocked unauthenticated writes would leave the
  * feature with no way in at all. The first case pins that mint-then-reuse works
  * end-to-end with no prior state.
+ *
+ * Sabotage-witnessed (/grade-tests wave 9): accepting a body `subjectKey`, the
+ * truthiness test on `subjectToken`, the non-string check, the HMAC compare, the
+ * tenant in the signed message, the uniform 404, the merge, both key bounds and the
+ * tenant belt filter each red their cases. CEILINGS (double guards): token trimming
+ * happens in the route AND the verifier; the `${tenantId}:` scan prefix already
+ * isolates the prefix neighbour and an empty tenant, so the `!tenantId` early return
+ * and the prefix are each green alone — the belt case is the one that can fail.
  */
 
 import http from 'node:http';
@@ -47,7 +55,12 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res { status: number; body: any }
+/** Every response this file reads, at the shape the routes send. */
+interface Body {
+  ok?: boolean; subjectToken?: string; message?: string; recorded?: boolean;
+  categories?: Record<string, boolean>; tenantId?: string; orgId?: string;
+}
+interface Res { status: number; body: Body | undefined }
 function client(): { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res> } {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
@@ -60,7 +73,10 @@ function client(): { get: (p: string) => Promise<Res>; post: (p: string, b?: unk
     for (const c of (typeof h.getSetCookie === 'function' ? h.getSetCookie() : [])) {
       const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]!;
     }
-    return { status: res.status, body: await res.json().catch(() => undefined) };
+    const text = await res.text();
+    let parsed: Body | undefined;
+    try { parsed = text ? (JSON.parse(text) as Body) : undefined; } catch { parsed = undefined; }
+    return { status: res.status, body: parsed };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b) };
 }
@@ -71,28 +87,28 @@ let TENANT = '';
 
 async function newOrg(): Promise<string> {
   const owner = client();
-  const su = await owner.post('/v1/host/openwop-app/test/login', { email: `forge-${Date.now()}-${n++}@acme.test` });
+  const su = await owner.post('/host/openwop-app/test/login', { email: `forge-${Date.now()}-${n++}@acme.test` });
   expect(su.status, JSON.stringify(su.body)).toBe(201);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
-  TENANT = su.body.tenantId ?? org.body.tenantId ?? '';
+  TENANT = su.body?.tenantId ?? org.body?.tenantId ?? '';
   // A blank tenant would make every `recordConsent` / `isAllowed` below address
   // the SAME empty keyspace and the forgery cases would pass vacuously.
   expect(TENANT, 'the harness must resolve a real tenant').toBeTruthy();
-  return org.body.orgId as string;
+  return org.body!.orgId!;
 }
 
-const PUB = (orgId: string): string => `/v1/host/openwop-app/public-consent/${orgId}`;
+const PUB = (orgId: string): string => `/host/openwop-app/public-consent/${orgId}`;
 
 describe('CONS-2 — the public lane cannot address an authed subject', () => {
   it('the exit exists: mint-then-reuse works with no prior state', async () => {
     const orgId = await newOrg();
     const mint = await anon.post(PUB(orgId), { categories: { analytics: true } });
     expect(mint.status).toBe(201);
-    expect(typeof mint.body.subjectToken).toBe('string');
-    const read = await anon.get(`${PUB(orgId)}/${encodeURIComponent(mint.body.subjectToken)}`);
-    expect(read.body.recorded).toBe(true);
-    expect(read.body.categories.analytics).toBe(true);
+    expect(typeof mint.body?.subjectToken).toBe('string');
+    const read = await anon.get(`${PUB(orgId)}/${encodeURIComponent(mint.body!.subjectToken!)}`);
+    expect(read.body?.recorded).toBe(true);
+    expect(read.body?.categories?.analytics).toBe(true);
   });
 
   it('a body `subjectKey` is REFUSED (400) and names the replacement — never silently ignored', async () => {
@@ -115,7 +131,11 @@ describe('CONS-2 — the public lane cannot address an authed subject', () => {
     // visitor id is the victim's key.
     expect((await anon.post(PUB(orgId), { subjectKey: 'crm:victim', categories: { marketing: true } })).status).toBe(400);
     expect((await anon.post(PUB(orgId), { subjectToken: 'v1.crm:victim.deadbeef', categories: { marketing: true } })).status).toBe(400);
-    expect((await anon.post(PUB(orgId), { subjectToken: `v1.${'0'.repeat(8)}-0000-0000-0000-000000000000.forged`, categories: { marketing: true } })).status).toBe(400);
+    // A WELL-FORMED forgery: a valid UUID and a signature of the real length (43
+    // base64url chars), so it passes the shape + length checks and is refused by the
+    // HMAC compare itself (wave 9: the old 6-char `forged` stopped at the length check,
+    // so no case in this test ever reached the signature compare).
+    expect((await anon.post(PUB(orgId), { subjectToken: `v1.${'0'.repeat(8)}-0000-4000-8000-000000000000.${'A'.repeat(43)}`, categories: { marketing: true } })).status).toBe(400);
 
     // The revocation stands, byte for byte.
     const still = await getConsent(TENANT, 'crm:victim');
@@ -202,7 +222,7 @@ describe('CONS-2 / review F1 — a falsy `subjectToken` is a 400, never a silent
     // The visitor arrives with no token, is minted one, and opts OUT of marketing.
     const first = await anon.post(PUB(orgId), { categories: { marketing: false } });
     expect(first.status).toBe(201);
-    const tokenA = first.body.subjectToken as string;
+    const tokenA = first.body!.subjectToken!;
     const visitorA = (await listConsent(TENANT))[0]!.subjectKey;
     expect(visitorA.startsWith(PUBLIC_SUBJECT_PREFIX)).toBe(true);
     expect(await isAllowed(TENANT, visitorA, 'marketing')).toBe(false);
@@ -232,7 +252,7 @@ describe('CONS-2 / review F1 — a falsy `subjectToken` is a 400, never a silent
     const orgId = await newOrg();
     const mint = await anon.post(PUB(orgId), { categories: { analytics: true } });
     expect(mint.status).toBe(201);
-    const padded = `  ${mint.body.subjectToken as string}\n`;
+    const padded = `  ${mint.body!.subjectToken!}\n`;
     // `verifyPublicSubjectToken` trims, so the POST body lane and the GET
     // path-param lane cannot disagree. Without the trim this 400s on
     // `parts[0] === '  v1'` — a refusal for a token that is, in every sense the

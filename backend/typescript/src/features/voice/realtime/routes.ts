@@ -9,6 +9,8 @@
  *
  * Namespace: disjoint from ADR 0138's `/voice/session/*` and core's `/voice/barge-in`.
  */
+import { canonicalAgentId } from '../../../executor/agentIdAliases.js';
+import type { Request } from 'express';
 import type { RouteDeps } from '../../../routes/registerAllRoutes.js';
 import { OpenwopError } from '../../../types.js';
 import { resolveSecret } from '../../../byok/secretResolver.js';
@@ -33,10 +35,11 @@ import { listRoster } from '../../../host/rosterService.js';
 import { resolveAgentIdentity } from '../../../host/agentIdentity.js';
 import { RealtimeProviderError, type RealtimeProviderId, type RealtimeToolDecl } from './types.js';
 import { sendError } from '../../../middleware/errorEnvelope.js';
+import { resolveTenantWorkflow } from '../../../host/resolveLaunchDefinition.js';
 
 const log = createLogger('features.voice.realtime');
 const OPENAI_BASE = (process.env.OPENAI_BASE_URL ?? 'https://api.openai.com').replace(/\/$/, '');
-const BASE = '/v1/host/openwop-app/voice/realtime';
+const BASE = '/host/openwop-app/voice/realtime';
 /**
  * ADR 0199 — the session's instructions are COMPOSED per request from the same
  * chat-context owner the text exchange uses (persona + identity anchor +
@@ -45,7 +48,7 @@ const BASE = '/v1/host/openwop-app/voice/realtime';
  * is retired — the persona half of RT-2 finally shipped.
  */
 async function composeRealtimeInstructions(
-  deps: { storage: import('../../../storage/storage.js').Storage; getWorkflowName: (id: string) => Promise<string | null> },
+  deps: { storage: import('../../../storage/storage.js').Storage; getWorkflowName: (tenantId: string, workflowId: string) => Promise<string | null> },
   tenantId: string,
   opts: {
     agentId?: string | undefined; conversationId?: string | undefined; callerUserId?: string | undefined;
@@ -152,13 +155,20 @@ async function scopedConversationIdOf(
   return visible ? conversationId : undefined;
 }
 
+/** The provider `GET …/capability` reports for this caller — the ONE reader that route
+ *  and the Access hub summary share (ADR 0864 D2). Never the credentialRef/model. */
+export async function readRealtimeProvider(req: Request): Promise<string> {
+  await requireFeatureEnabled(req, 'voice', 'Voice mode');
+  return (await getRealtimeConfig(tenantOf(req))).provider;
+}
+
 export function registerRealtimeRoutes(deps: RouteDeps): void {
   const { app, storage, hostSuite } = deps;
   // Workflow display names for the Phase 2 work snapshot — resolved through
   // the catalog (fail-soft to the id).
-  const getWorkflowName = async (id: string): Promise<string | null> => {
+  const getWorkflowName = async (tenantId: string, id: string): Promise<string | null> => {
     try {
-      const wf = await hostSuite.workflowCatalog.getWorkflow(id);
+      const wf = await resolveTenantWorkflow(hostSuite.workflowCatalog, tenantId, id);
       const name = wf?.definition.metadata?.['name'];
       return typeof name === 'string' && name.length > 0 ? name : null;
     } catch {
@@ -325,7 +335,7 @@ export function registerRealtimeRoutes(deps: RouteDeps): void {
         const roster = await listRoster(tenantId).catch(() => [] as Awaited<ReturnType<typeof listRoster>>);
         const delegable: DelegableAgent[] = roster
           .filter((r) => r.enabled)
-          .filter((r) => r.rosterId !== agentId && r.rosterId !== homeIdentity?.rosterId && r.agentRef.agentId !== homeIdentity?.agentId)
+          .filter((r) => r.rosterId !== agentId && r.rosterId !== homeIdentity?.rosterId && canonicalAgentId(r.agentRef.agentId) !== canonicalAgentId(homeIdentity?.agentId ?? '')) // ADR 0763 — a stored legacy id is the same agent
           .map((r) => ({ agentId: r.rosterId, persona: r.persona }));
         if (delegable.length > 0) {
           const homePersona = roster.find((r) => r.rosterId === (homeIdentity?.rosterId ?? agentId))?.persona ?? 'the host agent';
@@ -506,9 +516,7 @@ export function registerRealtimeRoutes(deps: RouteDeps): void {
   // returns ONLY the provider id (never the credentialRef/model binding).
   app.get(`${BASE}/capability`, async (req, res, next) => {
     try {
-      await requireFeatureEnabled(req, 'voice', 'Voice mode');
-      const c = await getRealtimeConfig(tenantOf(req));
-      res.status(200).json({ provider: c.provider });
+      res.status(200).json({ provider: await readRealtimeProvider(req) });
     } catch (err) { next(err); }
   });
 

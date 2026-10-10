@@ -12,7 +12,7 @@
  * So this asserts the label actually TRACKS the request, in both directions,
  * and at the seam that decides it.
  *
- * The pair that matters most is the last one: `/v1/runs/:runId/events` serves
+ * The pair that matters most is the last one: `/runs/:runId/events` serves
  * BOTH an SSE stream and a JSON polling mode on the same path, separated only
  * by `Accept`. A route-template filter — the design this phase started with —
  * cannot tell them apart and would have dropped the JSON polling requests, real
@@ -30,9 +30,9 @@ function fakeReq(over: { method?: string; path?: string; accept?: string; route?
   const accept = over.accept ?? 'application/json';
   return {
     method: over.method ?? 'GET',
-    path: over.path ?? '/v1/workflows',
+    path: over.path ?? '/workflows',
     baseUrl: '',
-    route: { path: over.route ?? over.path ?? '/v1/workflows' },
+    route: { path: over.route ?? over.path ?? '/workflows' },
     header: (name: string) => (name.toLowerCase() === 'accept' ? accept : undefined),
   } as unknown as Request;
 }
@@ -58,18 +58,18 @@ beforeEach(() => _resetMetricsForTest());
 describe('ADR 0556 P2 — the stream label tracks the REQUEST, not the route', () => {
   it('marks a real EventStream connection `stream: true`', () => {
     const attrs = recordThrough(fakeReq({
-      path: '/v1/runs/019abc/events',
-      route: '/v1/runs/:runId/events',
+      path: '/runs/019abc/events',
+      route: '/runs/:runId/events',
       accept: 'text/event-stream',
     }));
     expect(attrs.stream).toBe(true);
     // And the route is still the TEMPLATE — one series for every run there will
     // ever be, which is the P0 rule this label rides alongside.
-    expect(attrs.route).toBe('/v1/runs/:runId/events');
+    expect(attrs.route).toBe('/runs/:runId/events');
   });
 
   it('marks an ordinary request `stream: false`', () => {
-    expect(recordThrough(fakeReq({ path: '/v1/workflows' })).stream).toBe(false);
+    expect(recordThrough(fakeReq({ path: '/workflows' })).stream).toBe(false);
   });
 
   it('distinguishes the JSON POLLING mode of the SAME path from its SSE mode', () => {
@@ -77,11 +77,11 @@ describe('ADR 0556 P2 — the stream label tracks the REQUEST, not the route', (
     // template — only `Accept` differs, and one of them is a 30 ms request
     // while the other is a session that can last for hours.
     const sse = recordThrough(fakeReq({
-      path: '/v1/runs/019abc/events', route: '/v1/runs/:runId/events', accept: 'text/event-stream',
+      path: '/runs/019abc/events', route: '/runs/:runId/events', accept: 'text/event-stream',
     }));
     _resetMetricsForTest();
     const polling = recordThrough(fakeReq({
-      path: '/v1/runs/019abc/events', route: '/v1/runs/:runId/events', accept: 'application/json',
+      path: '/runs/019abc/events', route: '/runs/:runId/events', accept: 'application/json',
     }));
     expect(sse.stream).toBe(true);
     expect(polling.stream).toBe(false);
@@ -93,7 +93,7 @@ describe('ADR 0556 P2 — the stream label tracks the REQUEST, not the route', (
     // so a caller cannot get themselves excluded from the latency objective by
     // sending the header on a write.
     expect(recordThrough(fakeReq({
-      method: 'POST', path: '/v1/runs/019abc/events', route: '/v1/runs/:runId/events',
+      method: 'POST', path: '/runs/019abc/events', route: '/runs/:runId/events',
       accept: 'text/event-stream',
     })).stream).toBe(false);
   });
@@ -103,19 +103,19 @@ describe('ADR 0556 P2 — the stream label tracks the REQUEST, not the route', (
     // stream family the limiter knows about, so a route joining SSE_STREAM_PATHS
     // is excluded from the SLO the moment it is exempted from the rate budget.
     for (const path of [
-      '/v1/host/openwop-app/notifications/stream',
-      '/v1/host/openwop-app/kanban/boards/b1/events',
-      '/v1/runs/r1/events',
-      '/v1/host/openwop-app/channels/c1/stream',
-      '/v1/host/openwop-app/channels/c1/presence',
-      '/v1/host/openwop-app/voice/realtime/messages/stream',
-      '/v1/host/openwop-app/present/p1/events',
+      '/host/openwop-app/notifications/stream',
+      '/host/openwop-app/kanban/boards/b1/events',
+      '/runs/r1/events',
+      '/host/openwop-app/channels/c1/stream',
+      '/host/openwop-app/channels/c1/presence',
+      '/host/openwop-app/voice/realtime/messages/stream',
+      '/host/openwop-app/present/p1/events',
     ]) {
       expect(isLongLivedSseStream(fakeReq({ path, accept: 'text/event-stream' })), path).toBe(true);
     }
     // ...and a public write surface is NOT one, however it is labelled.
     expect(isLongLivedSseStream(fakeReq({
-      path: '/v1/host/openwop-app/public-forms/f1/submit', accept: 'text/event-stream',
+      path: '/host/openwop-app/public-forms/f1/submit', accept: 'text/event-stream',
     }))).toBe(false);
   });
 });

@@ -6,6 +6,11 @@
  * (b) the `core.email.draft` node creates a draft via ctx.connectors at the fixed
  * create-message endpoint, NEVER a send endpoint, maps {draftId, webLink}, and
  * fails closed (no surface / bad config / connector error).
+ *
+ * Sabotage-witnessed (w9 grade-tests): dropping the CR/LF guard, pointing either
+ * provider at its SEND url, dropping the recipient / subject guards, losing the
+ * connector error code, or adding Mail.Send to the graph draft group / default
+ * scopes each turn a case red.
  */
 
 import { describe, expect, it, beforeAll } from 'vitest';
@@ -137,19 +142,27 @@ describe('ADR 0076 §2 — core.email.draft node', () => {
     expect((out as { error: { code: string } }).error.code).toBe('invalid_config');
     expect(invoked).toBe(false); // never reached the connector — fail-closed before egress
     // And the same guard for a header-breaking recipient.
+    let invoked2 = false;
     const r2 = await getNode().execute(makeCtx({
       config: { to: 'a@x.com\r\nBcc: evil@x.com', subject: 's', body: 'x', connectorId: 'gmail' },
-      connectors: { invoke: async () => ({ ok: true, data: { id: 'd' } }) },
+      connectors: { invoke: async () => { invoked2 = true; return { ok: true, data: { id: 'd' } }; } },
     }));
     expect(r2.status).toBe('failure');
+    expect((r2 as { error: { code: string } }).error.code).toBe('invalid_config');
+    expect(invoked2).toBe(false);
   });
 
   it('fails closed: absent connector surface, missing recipients/subject, connector error', async () => {
-    expect((await getNode().execute(makeCtx({ config: { to: 'a@x.com', subject: 's' } }))).status).toBe('failure'); // no connectors
+    const code = (o: unknown): string => (o as { error: { code: string } }).error.code;
+    const noSurface = await getNode().execute(makeCtx({ config: { to: 'a@x.com', subject: 's' } })); // no connectors
+    expect(noSurface.status).toBe('failure');
+    expect(code(noSurface)).toBe('host_capability_missing');
     const noTo = await getNode().execute(makeCtx({ config: { subject: 's' }, connectors: { invoke: async () => ({ ok: true }) } }));
     expect(noTo.status).toBe('failure');
+    expect(code(noTo)).toBe('invalid_config');
     const noSubj = await getNode().execute(makeCtx({ config: { to: 'a@x.com' }, connectors: { invoke: async () => ({ ok: true }) } }));
     expect(noSubj.status).toBe('failure');
+    expect(code(noSubj)).toBe('invalid_config');
     const connErr = await getNode().execute(makeCtx({ config: { to: 'a@x.com', subject: 's' }, connectors: { invoke: async () => ({ ok: false, error: 'connector_no_connection' }) } }));
     expect(connErr.status).toBe('failure');
     expect((connErr as { error: { code: string } }).error.code).toBe('connector_no_connection');

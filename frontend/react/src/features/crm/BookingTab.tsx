@@ -232,7 +232,13 @@ export function BookingTab({ orgId }: Props): JSX.Element {
     { key: 'status', header: t('bookingColStatus'), render: (b) => <span className={b.status === 'confirmed' ? 'chip chip--success' : 'chip chip--muted'}>{t(`bookingBookingStatus_${b.status}`)}</span> },
     // R2 CC-SP-4 — the visitor's note was collected on the public page and
     // shown to NO ONE. It is often the whole point of the booking.
-    { key: 'note', header: t('bookingColNote'), render: (b) => b.inviteeNote ? <span className="u-fs-12">{b.inviteeNote}</span> : <span className="muted">—</span> },
+    { key: 'note', header: t('bookingColNote'), render: (b) => (b.inviteeNote || b.cancelReason) ? (
+      <span className="u-grid u-gap-1 u-fs-12">
+        {b.inviteeNote ? <span>{b.inviteeNote}</span> : null}
+        {/* ADR 0837 D4 — the reason moved here from the timeline note. */}
+        {b.cancelReason ? <span className="muted">{t('bookingCancelReason', { reason: b.cancelReason })}</span> : null}
+      </span>
+    ) : <span className="muted">—</span> },
   ];
 
   return (

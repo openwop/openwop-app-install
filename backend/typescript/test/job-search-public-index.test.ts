@@ -19,7 +19,7 @@ import { createApp } from '../src/index.js';
 import { upsertListing, setListingsPublic, LISTING_TYPE } from '../src/features/job-search/boards/listing.js';
 import { enableTenantOverride } from '../src/host/featureToggles/service.js';
 
-const PUB = '/v1/host/openwop-app/public-entities';
+const PUB = '/host/openwop-app/public-entities';
 const OWNER = 'user:jobs-public-owner';
 const OTHER = 'user:jobs-public-other';
 

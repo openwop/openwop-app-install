@@ -18,7 +18,7 @@ import { randomUUID } from 'node:crypto';
 import type {
   BundleScope, VectorSurface, SearchSurface, NoSqlSurface,
 } from '../inMemorySurfaces.js';
-import { requireDurableStorage } from './durableStore.js';
+import { requireDurableStorage, scanPrefix } from './durableStore.js';
 import { cosine, tokenize, assertSafeFilter, matchesFilter, project, applySort } from './queryHelpers.js';
 import { createLogger } from '../../observability/logger.js';
 
@@ -57,10 +57,12 @@ async function casUpdateDoc(key: string, filter: Doc, mutate: (d: Doc) => Doc): 
   return false;
 }
 
-async function listParsed<T>(prefix: string): Promise<Array<{ key: string; value: T }>> {
-  const rows = await requireDurableStorage().kvList(prefix);
+async function listParsed<T>(prefix: string, op: string): Promise<Array<{ key: string; value: T }>> {
+  // ADR 0868: batched and reported. These reads still need every row (a
+  // similarity rank, a full-text score, an arbitrary-predicate match); the
+  // production vector path is pgvector, which ranks in the database.
   const out: Array<{ key: string; value: T }> = [];
-  for (const r of rows) {
+  for await (const r of scanPrefix(prefix, { op })) {
     try {
       out.push({ key: r.key, value: JSON.parse(r.value) as T });
     } catch {
@@ -85,7 +87,7 @@ export function createDurableVector(scope: BundleScope): VectorSurface {
     },
     async query({ namespace, vector, topK }) {
       const q = vector as number[];
-      const entries = await listParsed<VectorEntry>(prefix(namespace));
+      const entries = await listParsed<VectorEntry>(prefix(namespace), 'vector.query');
       const results = entries.map(({ value: e }) => ({ id: e.id, score: cosine(q, e.vector), metadata: e.metadata }));
       results.sort((a, b) => b.score - a.score);
       const k = typeof topK === 'number' && topK > 0 ? topK : 10;
@@ -113,7 +115,7 @@ export function createDurableSearch(scope: BundleScope): SearchSurface {
     async query({ index, q, k }) {
       const queryTokens = tokenize(String(q ?? ''));
       if (queryTokens.length === 0) return { hits: [] };
-      const docs = await listParsed<SearchDoc>(prefix(index));
+      const docs = await listParsed<SearchDoc>(prefix(index), 'search.query');
       const hits: Array<{ id: string; score: number; fields: Record<string, unknown> }> = [];
       for (const { value: d } of docs) {
         const docTokens = tokenize(Object.values(d.fields).map((v) => String(v)).join(' '));
@@ -158,7 +160,7 @@ export function createDurableNosql(scope: BundleScope): NoSqlSurface {
     async find({ datasource, collection, filter, projection, sort, limit }) {
       const f = (filter as Doc) ?? {};
       assertSafeFilter(f);
-      const rows = await listParsed<Doc>(prefix(datasource, collection));
+      const rows = await listParsed<Doc>(prefix(datasource, collection), 'nosql.scan');
       let hits = rows.map((r) => r.value).filter((d) => matchesFilter(d, f));
       hits = applySort(hits, sort as Doc | undefined);
       if (typeof limit === 'number' && limit >= 0) hits = hits.slice(0, limit);
@@ -170,7 +172,7 @@ export function createDurableNosql(scope: BundleScope): NoSqlSurface {
       const u = (update as Doc) ?? {};
       const set = (u.$set as Doc | undefined) ?? (Object.keys(u).some((k) => k.startsWith('$')) ? {} : u);
       const unset = u.$unset as Doc | undefined;
-      const rows = await listParsed<Doc>(prefix(datasource, collection));
+      const rows = await listParsed<Doc>(prefix(datasource, collection), 'nosql.scan');
       const matches = rows.filter((r) => matchesFilter(r.value, f));
       let modified = 0;
       for (const { key } of matches) {
@@ -193,7 +195,7 @@ export function createDurableNosql(scope: BundleScope): NoSqlSurface {
     async delete({ datasource, collection, filter }) {
       const f = (filter as Doc) ?? {};
       assertSafeFilter(f);
-      const rows = await listParsed<Doc>(prefix(datasource, collection));
+      const rows = await listParsed<Doc>(prefix(datasource, collection), 'nosql.scan');
       let deleted = 0;
       for (const { key, value: d } of rows) if (matchesFilter(d, f)) { await storage().kvDelete(key); deleted++; }
       return { deleted };

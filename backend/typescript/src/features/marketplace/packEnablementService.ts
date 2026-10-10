@@ -13,6 +13,7 @@
  * @see docs/adr/0194-feature-dependency-graph-and-lifecycle.md §Phase 3
  */
 
+import { packNameForms, packStorageName } from '../../executor/agentIdAliases.js';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { setDisabledPacksResolver } from '../../host/packVisibility.js';
 
@@ -30,12 +31,16 @@ interface PackDisable {
 // and tenant teardown need. Self-healing backfill, no re-key, no migration.
 const store = new DurableCollection<PackDisable>('marketplace:pack-disable', (r) => r.id, undefined, (r) => r.tenantId);
 
-const keyOf = (tenantId: string, packName: string): string => `${tenantId}:${packName}`;
+// ADR 0763 — keyed by the pack's storage spelling, so the renamed agent packs
+// share one disable row with their pre-rename name.
+const keyOf = (tenantId: string, packName: string): string => `${tenantId}:${packStorageName(packName)}`;
 
 /** Pack names this tenant has disabled (empty = everything enabled). */
 export async function disabledPacks(tenantId: string): Promise<Set<string>> {
   const rows = await store.listByPrefix(`${tenantId}:`);
-  return new Set(rows.map((r) => r.packName));
+  // Both spellings answer `has()` — a row disabled under the old name still
+  // disables the renamed pack (ADR 0763).
+  return new Set(rows.flatMap((r) => [...packNameForms(r.packName)]));
 }
 
 /** Disable (idempotent) — deterministic key, so a retry never duplicates. */

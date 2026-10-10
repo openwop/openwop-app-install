@@ -13,6 +13,7 @@
  * 404 masking existence. Legacy/unowned conversations stay tenant-visible so
  * conformance + anon/demo flows are unchanged.
  */
+import { mintAnonSession, signSession } from '../src/middleware/cookieSession.js';
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
@@ -57,7 +58,7 @@ async function loginClient(email: string): Promise<{ call: Client; userId: strin
     const text = await res.text();
     return { status: res.status, body: (text ? JSON.parse(text) : {}) as Record<string, unknown> };
   };
-  const login = await call('POST', '/v1/host/openwop-app/test/login', { email, tenantId: TENANT });
+  const login = await call('POST', '/host/openwop-app/test/login', { email, tenantId: TENANT });
   expect(login.status).toBe(201);
   return { call, userId: (login.body.user as { userId: string }).userId };
 }
@@ -65,7 +66,7 @@ async function loginClient(email: string): Promise<{ call: Client; userId: strin
 async function waitSuspended(call: Client, runId: string): Promise<void> {
   for (let i = 0; i < 80; i++) {
     await new Promise((r) => setTimeout(r, 20));
-    const { body } = await call('GET', `/v1/runs/${runId}`);
+    const { body } = await call('GET', `/runs/${runId}`);
     if (typeof body.status === 'string' && body.status.startsWith('waiting')) return;
   }
   throw new Error(`run ${runId} never suspended`);
@@ -73,7 +74,7 @@ async function waitSuspended(call: Client, runId: string): Promise<void> {
 
 const WORKFLOW_ID = 'openwop-app.conversation.authz-test';
 async function createConversationRun(call: Client, chatSessionId?: string): Promise<string> {
-  const create = await call('POST', '/v1/runs', {
+  const create = await call('POST', '/runs', {
     workflowId: WORKFLOW_ID,
     inputs: { provider: 'mock', model: 'mock-1' },
     tenantId: TENANT,
@@ -86,7 +87,7 @@ async function createConversationRun(call: Client, chatSessionId?: string): Prom
 }
 
 const exchange = (call: Client, runId: string, content: string) =>
-  call('POST', `/v1/runs/${runId}/interrupts/gate`, { resumeValue: { operation: 'exchange', turn: { content } } });
+  call('POST', `/runs/${runId}/interrupts/gate`, { resumeValue: { operation: 'exchange', turn: { content } } });
 
 describe('CS-BE-1 — conversation resolve is caller-visibility gated', () => {
   let alice: { call: Client; userId: string };
@@ -96,7 +97,7 @@ describe('CS-BE-1 — conversation resolve is caller-visibility gated', () => {
     alice = await loginClient('alice-authz@x.test');
     mallory = await loginClient('mallory-authz@x.test');
     // Workflow registration (admin surface).
-    const wf = await fetch(`${BASE}/v1/host/openwop-app/workflows`, {
+    const wf = await fetch(`${BASE}/host/openwop-app/workflows`, {
       method: 'POST', headers: ADMIN, body: JSON.stringify({
         workflowId: WORKFLOW_ID,
         nodes: [{ nodeId: 'gate', typeId: 'core.conversationGate', config: { prompt: 'hi' } }], edges: [],
@@ -111,7 +112,7 @@ describe('CS-BE-1 — conversation resolve is caller-visibility gated', () => {
     const runId = await createConversationRun(alice.call, 'conv-owned-by-alice');
     const ex = await exchange(alice.call, runId, 'hello from alice');
     expect(ex.status).toBe(200);
-    const close = await alice.call('POST', `/v1/runs/${runId}/interrupts/gate`, { resumeValue: { operation: 'close' } });
+    const close = await alice.call('POST', `/runs/${runId}/interrupts/gate`, { resumeValue: { operation: 'close' } });
     expect(close.status).toBe(200);
   });
 
@@ -119,7 +120,7 @@ describe('CS-BE-1 — conversation resolve is caller-visibility gated', () => {
     const runId = await createConversationRun(alice.call, 'conv-owned-by-alice');
     const ex = await exchange(mallory.call, runId, 'injected');
     expect(ex.status).toBe(404);
-    const close = await mallory.call('POST', `/v1/runs/${runId}/interrupts/gate`, { resumeValue: { operation: 'close' } });
+    const close = await mallory.call('POST', `/runs/${runId}/interrupts/gate`, { resumeValue: { operation: 'close' } });
     expect(close.status).toBe(404);
     // The owner is unaffected afterwards.
     expect((await exchange(alice.call, runId, 'still mine')).status).toBe(200);
@@ -131,13 +132,18 @@ describe('CS-BE-1 — conversation resolve is caller-visibility gated', () => {
     expect((await exchange(mallory.call, runId, 'forged injection')).status).toBe(404);
   });
 
-  it('an ANONYMOUS caller (no session cookie) is 404ed on an owned conversation — fail-soft caller resolution stays fail-closed', async () => {
+  it('an ANONYMOUS caller (an anon session) is 404ed on an owned conversation — fail-soft caller resolution stays fail-closed', async () => {
     const runId = await createConversationRun(alice.call, 'conv-owned-by-alice');
-    const res = await fetch(`${BASE}/v1/runs/${runId}/interrupts/gate`, {
-      method: 'POST', headers: { 'content-type': 'application/json' },
+    // An anon SESSION (ADR 0750 major-1 extension: no credential at all is now
+    // refused 401 before caller resolution, which is what this leg witnesses).
+    const res = await fetch(`${BASE}/runs/${runId}/interrupts/gate`, {
+      method: 'POST', headers: { 'content-type': 'application/json', cookie: `__session=${signSession(mintAnonSession())}` },
       body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: 'anon probe' } } }),
     });
-    expect(res.status).toBe(404);
+    // ADR 0812 P2b — under major 2 the bound id's tenant is not the anon caller's:
+    // `identity.md` §5 refuses it `403 id_tenant_mismatch` before any lookup.
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error?: string }).error).toBe('id_tenant_mismatch');
   });
 
   it('a legacy/unowned conversation (no meta) stays exchangeable — conformance/anon flows unchanged', async () => {

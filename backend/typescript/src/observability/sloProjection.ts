@@ -518,8 +518,10 @@ export const SLO_CATALOG: readonly SloSpec[] = [
       value: 0.97,
       numerator: { match: { outcome: { in: ['ok'] } } },
       // An operator who has not configured a key is a CONFIGURATION state, and
-      // counting it makes a fresh install look like a provider outage.
-      denominator: { match: { outcome: { notIn: ['byok_required', 'byok_required_but_unresolved'] } } },
+      // counting it makes a fresh install look like a provider outage. A host
+      // POLICY refusal (`provider_policy_denied`, every mode; the cause rides
+      // `reason`) is the same kind of configuration decision.
+      denominator: { match: { outcome: { notIn: ['byok_required', 'byok_required_but_unresolved', 'provider_policy_denied'] } } },
     },
     severity: 'ticket',
     runbookHeading: 'M1 Provider failure rate',

@@ -22,8 +22,9 @@
  * record why that pack's field is expendable.
  */
 import { describe, it, expect } from 'vitest';
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { readPackManifest } from './helpers/readPackManifest.js';
 
 /** Node fields the wire models but `validateWorkflowDefinition` drops. */
 const DROPPED_BY_VALIDATOR = [
@@ -84,7 +85,7 @@ function collectNodes(value: unknown, acc: Record<string, unknown>[] = []): Reco
 describe('ADR 0440 — no shipped pack node carries a field the validator drops', () => {
   const files = SCAN_ROOTS.flatMap((root) => jsonFilesUnder(root));
   const allNodes = files.flatMap((file) => {
-    try { return collectNodes(JSON.parse(readFileSync(file, 'utf8'))); } catch { return []; }
+    try { return collectNodes(readPackManifest(file)); } catch { return []; }
   });
 
   it('examines a real population of NODES (never a vacuous pass)', () => {
@@ -103,7 +104,7 @@ describe('ADR 0440 — no shipped pack node carries a field the validator drops'
     for (const file of files) {
       let parsed: unknown;
       try {
-        parsed = JSON.parse(readFileSync(file, 'utf8'));
+        parsed = readPackManifest(file);
       } catch {
         continue; // not valid JSON — other gates cover that
       }

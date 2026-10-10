@@ -110,6 +110,8 @@ describe('ADR 0753 D12 — seams configure, the production builder builds (R9)',
     expect(url.origin + url.pathname).toBe('https://as.suite.example/authorize');
     expect(url.searchParams.get('code_challenge_method')).toBe('S256');
     expect(url.searchParams.get('state')?.length).toBeGreaterThanOrEqual(22);
+    // ADR 0812 KEEP — the redirect URI stays on the registered `/v1` twin by design
+    // (oauthFlow.redirectUri; the twin callback GET is forwarded, ADR 0806).
     expect(url.searchParams.get('redirect_uri')).toBe('https://host.example/v1/host/openwop-app/connections/synthetic/callback');
     expect(getProvider('synthetic')?.issResponseParameter).toBe(true);
   });
@@ -147,7 +149,7 @@ describe('ADR 0753 D6 — OPENWOP_OAUTH_DISABLED_PROVIDERS makes a held provider
       expect(await oauthAdvertised()).toBe(true);
       const { isOAuthConfigured } = await import('../src/features/connections/oauthFlow.js');
       expect(await isOAuthConfigured('google')).toBe(false);
-      const r = await fetch(`${BASE}/v1/host/openwop-app/connections/google/authorize`, { method: 'POST', headers: H, body: '{}' });
+      const r = await fetch(`${BASE}/host/openwop-app/connections/google/authorize`, { method: 'POST', headers: H, body: '{}' });
       expect(r.status).toBe(409);
     } finally {
       delete process.env.OPENWOP_OAUTH_DISABLED_PROVIDERS;

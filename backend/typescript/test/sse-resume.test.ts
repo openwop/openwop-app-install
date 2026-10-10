@@ -95,7 +95,7 @@ function parseSseBlock(block: string): SseFrame | null {
 }
 
 async function createSampleRun(): Promise<string> {
-  const res = await fetch(`${BASE}/v1/runs`, {
+  const res = await fetch(`${BASE}/runs`, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
@@ -114,7 +114,7 @@ async function createSampleRun(): Promise<string> {
 async function waitForTerminal(runId: string): Promise<void> {
   for (let i = 0; i < 40; i++) {
     await new Promise((r) => setTimeout(r, 25));
-    const snap = await fetch(`${BASE}/v1/runs/${runId}`, {
+    const snap = await fetch(`${BASE}/runs/${runId}`, {
       headers: { authorization: `Bearer ${TOKEN}` },
     });
     const body = (await snap.json()) as { status: string };
@@ -132,7 +132,7 @@ describe('SSE Last-Event-ID resume — chat-improvements §2B.4', () => {
     await waitForTerminal(runId);
 
     // Baseline: subscribe with no Last-Event-ID, capture every event.
-    const res = await fetch(`${BASE}/v1/runs/${runId}/events`, {
+    const res = await fetch(`${BASE}/runs/${runId}/events`, {
       headers: { authorization: `Bearer ${TOKEN}` },
     });
     expect(res.status).toBe(200);
@@ -172,7 +172,7 @@ describe('SSE Last-Event-ID resume — chat-improvements §2B.4', () => {
       .filter((s): s is number => typeof s === 'number');
     const mid = sequences[Math.floor(sequences.length / 2)]!;
 
-    const res = await fetch(`${BASE}/v1/runs/${runId}/events`, {
+    const res = await fetch(`${BASE}/runs/${runId}/events`, {
       headers: {
         authorization: `Bearer ${TOKEN}`,
         'last-event-id': String(mid),
@@ -194,8 +194,8 @@ describe('SSE Last-Event-ID resume — chat-improvements §2B.4', () => {
     }
   });
 
-  it('malformed Last-Event-ID returns 400 invalid_request', async () => {
-    const res = await fetch(`${BASE}/v1/runs/${runId}/events`, {
+  it('malformed Last-Event-ID returns 400 validation_error', async () => {
+    const res = await fetch(`${BASE}/runs/${runId}/events`, {
       headers: {
         authorization: `Bearer ${TOKEN}`,
         'last-event-id': 'not-a-number',
@@ -204,9 +204,10 @@ describe('SSE Last-Event-ID resume — chat-improvements §2B.4', () => {
     expect(res.status).toBe(400);
     // Canonical openwop error envelope: `{error, message, details?}` per
     // OpenwopError.toEnvelope() in `src/types.ts`.
-    const body = (await res.json()) as { error?: string; details?: { header?: string } };
-    expect(body.error).toBe('invalid_request');
-    expect(body.details?.header).toBe('Last-Event-ID');
+    const body = (await res.json()) as { error?: string; details?: { field?: string } };
+    expect(body.error).toBe('validation_error');
+    // Major 2 names the offending input as `details.field` (streams.ts); major 1 used `details.header`.
+    expect(body.details?.field).toBe('Last-Event-ID');
   });
 
   it('ADR 0744 — under major 2 a malformed Last-Event-ID is 400 validation_error naming the field', async () => {

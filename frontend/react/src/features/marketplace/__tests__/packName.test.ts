@@ -1,3 +1,11 @@
+/**
+ * Human display name for a pack id (display only — the dotted id stays canonical;
+ * ADR 0763 for the `vendor.openwop-app.<feature>.*` host scope it also strips).
+ *
+ * Sabotage-witnessed (/grade-tests wave 10): dropping the vendor-scope skip, the
+ * acronym upper-casing, the kind-token drop, its `i < parts.length - 1` bound, or
+ * the `|| packName` fallback each red the case named for it.
+ */
 import { describe, it, expect } from 'vitest';
 import { prettyPackName } from '../packName';
 
@@ -6,13 +14,13 @@ describe('prettyPackName', () => {
     expect(prettyPackName('core.openwop.agent-examples')).toBe('Agent Examples');
     expect(prettyPackName('core.openwop.agents')).toBe('Agents');
     expect(prettyPackName('feature.crm.nodes')).toBe('CRM Nodes');
-    expect(prettyPackName('feature.commerce.agents')).toBe('Commerce Agents');
+    expect(prettyPackName('vendor.openwop-app.commerce.agents')).toBe('Commerce Agents');
   });
 
   it('uppercases known acronyms', () => {
     expect(prettyPackName('core.openwop.a2a')).toBe('A2A');
     expect(prettyPackName('feature.cdp.nodes')).toBe('CDP Nodes');
-    expect(prettyPackName('feature.ucp.agents')).toBe('UCP Agents');
+    expect(prettyPackName('vendor.openwop-app.ucp.agents')).toBe('UCP Agents');
   });
 
   it('drops a leading kind token when a specific name follows', () => {
@@ -24,8 +32,12 @@ describe('prettyPackName', () => {
     expect(prettyPackName('core.openwop.nodes')).toBe('Nodes');
   });
 
-  it('falls back to the raw id for a nameless input', () => {
+  it('title-cases a single-segment id', () => {
     expect(prettyPackName('solo')).toBe('Solo');
-    expect(prettyPackName('')).toBe('');
+  });
+
+  it('falls back to the raw id when no word survives', () => {
+    expect(prettyPackName('-')).toBe('-');
+    expect(prettyPackName('core.openwop.-')).toBe('core.openwop.-');
   });
 });

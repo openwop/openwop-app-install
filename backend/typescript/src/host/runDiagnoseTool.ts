@@ -42,6 +42,7 @@ export function registerRunDiagnoseTool(deps: { storage: Storage }): void {
     // http.fetch, web research, or a form read, so those bytes are attacker-choosable.
     // Host-computed framing does not launder an embedded payload.
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: RUN_DIAGNOSE_TOOL_ID,
       description:

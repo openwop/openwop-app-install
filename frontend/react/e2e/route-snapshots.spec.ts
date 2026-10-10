@@ -1,6 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { API, enableToggle } from './support/session.js';
 import { serveFontsLocally } from './support/localFonts.js';
+import { serveFilmLocally } from './support/localFilm.js';
 
 /**
  * Critical-route visual snapshots (ADR 0510 Phase 2, DSA-031 — route half).
@@ -26,10 +27,18 @@ import { serveFontsLocally } from './support/localFonts.js';
  * layout shift, which is what all three sources actually produced.
  */
 
-const ROUTES: Array<{ route: string; name: string; anonymous?: boolean }> = [
+const ROUTES: Array<{ route: string; name: string; anonymous?: boolean; boundKey?: boolean }> = [
   { route: '/', name: 'public-home', anonymous: true },
   { route: '/dashboard', name: 'dashboard' },
   { route: '/chat', name: 'chat' },
+  // The gate host seeds no managed key, so `chat` above is the BYOK gate and has
+  // never seen the chat itself — the 2026-10-07 welcome redesign (#4583) passed
+  // this spec with zero pixel change. Binding a key reaches the welcome screen:
+  // header, hierarchy, the none-installed workflow line, hint and composer. Its
+  // workflow CARDS and agent PILLS stay uncovered — the pinned chain-pack fixture
+  // has none of the four starter templates and the workspace no `user.*` agents;
+  // covering them means growing those shared fixtures, a separate decision.
+  { route: '/chat', name: 'chat-welcome', boundKey: true },
   { route: '/builder', name: 'builder' },
   { route: '/access?tab=appearance', name: 'appearance' },
 ];
@@ -37,6 +46,22 @@ const ROUTES: Array<{ route: string; name: string; anonymous?: boolean }> = [
 async function login(page: Page): Promise<void> {
   const res = await page.request.post(`${API}/test/login`, { data: { email: 'route-snap@e2e.test' } });
   expect(res.status(), await res.text()).toBe(201);
+}
+
+/** A workspace with a bound key, so `/chat` renders the chat rather than the BYOK
+ *  gate. One workspace PER THEME: the welcome's first-run checklist is per-tenant
+ *  state, and a shared tenant would let the light run change what dark renders.
+ *  Nothing dispatches — the key only has to be stored and bound. */
+async function loginWithBoundKey(page: Page, theme: string): Promise<void> {
+  const res = await page.request.post(`${API}/test/login`, {
+    data: { email: `route-snap-welcome-${theme}@e2e.test`, tenantId: `ws-route-snap-welcome-${theme}` },
+  });
+  expect(res.status(), await res.text()).toBe(201);
+  const ref = 'openai:route-snap';
+  const put = await page.request.post(`${API}/byok/secrets`, { data: { credentialRef: ref, value: 'sk-route-snap-0123456789abcdef' } });
+  expect(put.status(), await put.text()).toBeLessThan(300);
+  const bind = await page.request.put(`${API}/byok/active-config`, { data: { provider: 'openai', model: 'gpt-5.6-terra', credentialRef: ref } });
+  expect(bind.status(), await bind.text()).toBeLessThan(300);
 }
 
 test.describe('critical-route visual snapshots (ci:full)', () => {
@@ -56,7 +81,7 @@ test.describe('critical-route visual snapshots (ci:full)', () => {
   });
   test.use({ viewport: { width: 1280, height: 900 } });
 
-  for (const { route, name, anonymous } of ROUTES) {
+  for (const { route, name, anonymous, boundKey } of ROUTES) {
     for (const theme of ['light', 'dark'] as const) {
       // H100 — `/builder` is ADVISORY, and the reason is that the assertion is
       // currently FALSE, not that the page is broken.
@@ -132,7 +157,10 @@ test.describe('critical-route visual snapshots (ci:full)', () => {
         // NetworkError flakes): never depend on the live font CDN in a
         // pixel-compared run.
         await serveFontsLocally(page);
+        // ADR 0762 — the public home's film poster, same rule as the fonts.
+        await serveFilmLocally(page);
         if (anonymous) await context.clearCookies();
+        else if (boundKey) await loginWithBoundKey(page, theme);
         else await login(page);
         // DSYS-4 stability evidence, runs 1-3 finding: the BYOK gate's
         // operator fineprint renders on `useFeatureAccess('developer-tools')`
@@ -142,12 +170,47 @@ test.describe('critical-route visual snapshots (ci:full)', () => {
         // toggle PINNED (the feature-gated spec's own harness helper) and the
         // DOM state awaited — a mask cannot fix a layout shift, and a settle
         // timeout cannot fix a boot-environment fork.
-        if (route === '/chat') await enableToggle(page.request, 'developer-tools');
+        if (name === 'chat') await enableToggle(page.request, 'developer-tools');
+        // The dashboard lede picks Morning/Afternoon/Evening from
+        // `new Date().getHours()`. MEASURED 2026-10-08: rendering "Good
+        // morning." against the evening baseline still PASSES — the swap is
+        // under the 0.001 ratio — so this never reddened the gate; it silently
+        // spent the diff budget by hour of day. Pin the hour to the baseline's
+        // slot (evening) so the capture does not depend on when the gate runs.
+        // Only getHours moves, not Date.now, so relative timestamps are
+        // unaffected.
+        if (route === '/dashboard') {
+          await page.addInitScript(() => { Date.prototype.getHours = function getHours() { return 20; }; });
+        }
         await page.goto(route);
-        if (route === '/chat') {
+        if (name === 'chat') {
           await page.waitForSelector('.byok-section-fineprint--operator', { state: 'attached', timeout: 30_000 });
         }
+        if (boundKey) await page.waitForSelector('.welcome-home', { timeout: 30_000 });
         await page.waitForSelector('main#main-content, main#public-main');
+        // The public home passes through four skeleton stages inside
+        // `main#public-main` (auth, the front-page pointer, the lazy chunk, the
+        // CMS page fetch), so the shell selector above matches long before the
+        // page exists. Under parallel workers on a cold boot the capture landed
+        // on the placeholder (764px against the 5250px baseline). Wait for the
+        // rendered page with no skeleton left in it.
+        if (anonymous) {
+          await page.waitForSelector('main#public-main .cms-public-page', { timeout: 30_000 });
+          await page.waitForFunction(() => !document.querySelector('main#public-main .skeleton'), null, { timeout: 30_000 });
+        }
+        // ADR 0844 — dashboard tiles mount lazily (`LazyMount`, a 200px
+        // IntersectionObserver margin), and the taller home puts the last row
+        // just past that line at 1280×900. Whether it mounted then depended on
+        // whether the tiles above were still short skeletons when the observer
+        // ran — a race. Scroll every tile into view so all of them mount, then
+        // wait for every one to finish loading: the baseline is the whole page,
+        // loaded, regardless of timing.
+        if (route === '/dashboard') {
+          await page.waitForSelector('.dash-tile', { timeout: 30_000 });
+          for (const tile of await page.locator('.dash-tile').all()) await tile.scrollIntoViewIfNeeded();
+          await page.waitForFunction(() => !document.querySelector('.dash-tile .skeleton-rows, .dash-tile .skeleton'), null, { timeout: 30_000 });
+          await page.evaluate(() => window.scrollTo(0, 0));
+        }
         // H86 — `/builder` populates its template gallery from an unchained
         // `listChainTemplates()` promise, so the settle timeout below samples
         // whatever had rendered rather than a determinate DOM. Wait for the

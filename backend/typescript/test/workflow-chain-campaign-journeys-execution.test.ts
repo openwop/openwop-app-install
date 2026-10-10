@@ -212,6 +212,7 @@ import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { getChain, expandChain } from '../src/host/workflowChainPackLoader.js';
 import { registerWorkflow } from '../src/host/workflowsRegistry.js';
+import { bareRunId } from './support/bareRunId.js';
 
 let BASE: string;
 let server: http.Server;
@@ -266,9 +267,9 @@ let n = 0;
 async function ownerOrg(): Promise<{ owner: Client; orgId: string; tenantId: string; userId: string }> {
   const tenantId = `org:cjchain-${Date.now()}-${n++}`;
   const owner = client();
-  const r = await owner.post('/v1/host/openwop-app/test/login', { email: `cjchain-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await owner.post('/host/openwop-app/test/login', { email: `cjchain-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return { owner, orgId: org.body.orgId, tenantId, userId: String(r.body.user?.userId ?? '') };
 }
@@ -283,7 +284,7 @@ interface RunSnapshot { status: string; error?: { code: string; message: string 
 async function pollRun(owner: Client, runId: string): Promise<RunSnapshot> {
   let snap: RunSnapshot = { status: 'pending' };
   for (let i = 0; i < 80; i++) {
-    const r = await owner.get(`/v1/runs/${runId}`);
+    const r = await owner.get(`/runs/${runId}`);
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     snap = r.body as RunSnapshot;
     if (snap.status === 'completed' || snap.status === 'failed' || snap.status === 'cancelled' || snap.status.startsWith('waiting')) break;
@@ -294,7 +295,7 @@ async function pollRun(owner: Client, runId: string): Promise<RunSnapshot> {
 
 interface BundleEvent { type?: string; nodeId?: string; payload?: Record<string, unknown> }
 async function bundleEvents(owner: Client, runId: string): Promise<BundleEvent[]> {
-  const b = await owner.get(`/v1/runs/${runId}/debug-bundle`);
+  const b = await owner.get(`/host/openwop-app/runs/${bareRunId(runId)}/debug-bundle`);
   expect(b.status, JSON.stringify(b.body)).toBe(200);
   return (b.body.events as BundleEvent[]) ?? [];
 }
@@ -307,12 +308,12 @@ function completedOutputs(events: BundleEvent[], nodeSuffix: string): Record<str
 /** Resolve the open interrupt whose nodeId ends with `nodeSuffix` via the
  *  RFC 0093 capability-token resume path (`chat-suspend-resume.test.ts`). */
 async function resumeInterrupt(owner: Client, runId: string, nodeSuffix: string, resumeValue: Record<string, unknown>): Promise<void> {
-  const ints = await owner.get(`/v1/host/openwop-app/runs/${runId}/interrupts`);
+  const ints = await owner.get(`/host/openwop-app/runs/${bareRunId(runId)}/interrupts`);
   expect(ints.status, JSON.stringify(ints.body)).toBe(200);
   const interrupts = ints.body.interrupts as Array<{ token: string; nodeId: string }>;
   const target = interrupts.find((i) => i.nodeId.endsWith(nodeSuffix));
   expect(target, `expected an open interrupt for a node ending in "${nodeSuffix}": ${JSON.stringify(interrupts)}`).toBeTruthy();
-  const resolve = await owner.post(`/v1/interrupts/${target!.token}`, { resumeValue });
+  const resolve = await owner.post(`/interrupts/${target!.token}`, { resumeValue });
   expect([200, 202, 204]).toContain(resolve.status);
 }
 
@@ -321,7 +322,7 @@ describe('campaign-journeys.re-engage-contact — end-to-end execution (real exe
     const { owner, orgId, tenantId, userId } = await ownerOrg();
     sgCalls = 0;
     await connectSendgrid(tenantId, userId);
-    const contact = await owner.post('/v1/host/openwop-app/crm/contacts', { name: 'Quiet Customer', email: 'quiet@acme.test' });
+    const contact = await owner.post('/host/openwop-app/crm/contacts', { name: 'Quiet Customer', email: 'quiet@acme.test' });
     expect(contact.status, JSON.stringify(contact.body)).toBe(201);
     const contactId = contact.body.contactId as string;
 
@@ -334,7 +335,7 @@ describe('campaign-journeys.re-engage-contact — end-to-end execution (real exe
     // `journeyId` is the documented workaround for the headline bug (see file
     // header) — `enroll` is this chain's graph SOURCE node, so its
     // `ctx.inputs` is exactly this run-input object.
-    const create = await owner.post('/v1/runs', { workflowId: expanded.workflowId, inputs: { ...params, journeyId: 're-engage' } });
+    const create = await owner.post('/runs', { workflowId: expanded.workflowId, inputs: { ...params, journeyId: 're-engage' } });
     expect(create.status, JSON.stringify(create.body)).toBe(201);
     const runId = create.body.runId as string;
 
@@ -358,7 +359,7 @@ describe('campaign-journeys.re-engage-contact — end-to-end execution (real exe
     expect(sgCalls, 'the mock provider received exactly one send').toBe(1);
 
     // BUG-2 fix proof: the follow-up task landed in the RIGHT org.
-    const tasks = await owner.get(`/v1/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}/tasks`);
+    const tasks = await owner.get(`/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}/tasks`);
     expect(tasks.status, JSON.stringify(tasks.body)).toBe(200);
     const followUp = (tasks.body.tasks as Array<{ title: string }>).find((t) => t.title === 'Follow up on re-engagement');
     expect(followUp, `expected a follow-up task in org ${orgId}: ${JSON.stringify(tasks.body)}`).toBeTruthy();
@@ -369,14 +370,14 @@ describe('campaign-journeys.re-engage-contact — end-to-end execution (real exe
   // complete green with `sent:false`.
   it('ADR 0655 D2: with no email Connection the approved send FAILS the run typed (email_not_connected)', async () => {
     const { owner, orgId } = await ownerOrg();
-    const contact = await owner.post('/v1/host/openwop-app/crm/contacts', { name: 'Unwired', email: 'unwired@acme.test' });
+    const contact = await owner.post('/host/openwop-app/crm/contacts', { name: 'Unwired', email: 'unwired@acme.test' });
     expect(contact.status).toBe(201);
     const contactId = contact.body.contactId as string;
     const found = getChain('campaign-journeys.re-engage-contact');
     const params = { contactId, fromAddress: 'sender@acme.test', orgId, subject: 'Hello', body: 'Hi' };
     const expanded = expandChain(found!.chain, { params });
     registerWorkflow(expanded);
-    const create = await owner.post('/v1/runs', { workflowId: expanded.workflowId, inputs: { ...params, journeyId: 're-engage-unwired' } });
+    const create = await owner.post('/runs', { workflowId: expanded.workflowId, inputs: { ...params, journeyId: 're-engage-unwired' } });
     expect(create.status, JSON.stringify(create.body)).toBe(201);
     const runId = create.body.runId as string;
     const snap = await pollRun(owner, runId);
@@ -395,7 +396,7 @@ describe('campaign-journeys.re-engage-contact — end-to-end execution (real exe
   // reached the provider and reported not-connected).
   it('ADR 0655 D1: a chain send to a SUPPRESSED recipient fails at the send node BEFORE the provider', async () => {
     const { owner, orgId, tenantId } = await ownerOrg();
-    const contact = await owner.post('/v1/host/openwop-app/crm/contacts', { name: 'Opted Out', email: 'optedout@acme.test' });
+    const contact = await owner.post('/host/openwop-app/crm/contacts', { name: 'Opted Out', email: 'optedout@acme.test' });
     expect(contact.status, JSON.stringify(contact.body)).toBe(201);
     const contactId = contact.body.contactId as string;
     const { addSuppression } = await import('../src/features/crm/suppressionService.js');
@@ -406,7 +407,7 @@ describe('campaign-journeys.re-engage-contact — end-to-end execution (real exe
     const params = { contactId, fromAddress: 'sender@acme.test', orgId, subject: 'We miss you', body: 'Come back!' };
     const expanded = expandChain(found!.chain, { params });
     registerWorkflow(expanded);
-    const create = await owner.post('/v1/runs', { workflowId: expanded.workflowId, inputs: { ...params, journeyId: 're-engage-sup' } });
+    const create = await owner.post('/runs', { workflowId: expanded.workflowId, inputs: { ...params, journeyId: 're-engage-sup' } });
     expect(create.status, JSON.stringify(create.body)).toBe(201);
     const runId = create.body.runId as string;
     const snap = await pollRun(owner, runId);
@@ -425,7 +426,7 @@ describe('campaign-journeys.re-engage-contact — end-to-end execution (real exe
 
   it('fails cleanly for an ineligible contact at the enroll pre-check — never enrolls or reaches the sign-off gate (JRNY-1)', async () => {
     const { owner, orgId } = await ownerOrg();
-    const contact = await owner.post('/v1/host/openwop-app/crm/contacts', { name: 'No Email Contact' });
+    const contact = await owner.post('/host/openwop-app/crm/contacts', { name: 'No Email Contact' });
     expect(contact.status, JSON.stringify(contact.body)).toBe(201);
     const contactId = contact.body.contactId as string;
 
@@ -435,7 +436,7 @@ describe('campaign-journeys.re-engage-contact — end-to-end execution (real exe
     const expanded = expandChain(found!.chain, { params });
     registerWorkflow(expanded);
 
-    const create = await owner.post('/v1/runs', { workflowId: expanded.workflowId, inputs: { ...params, journeyId: 're-engage-noemail' } });
+    const create = await owner.post('/runs', { workflowId: expanded.workflowId, inputs: { ...params, journeyId: 're-engage-noemail' } });
     expect(create.status, JSON.stringify(create.body)).toBe(201);
     const runId = create.body.runId as string;
 
@@ -445,7 +446,7 @@ describe('campaign-journeys.re-engage-contact — end-to-end execution (real exe
     // `{status:'failed', error}`, as every `feature.campaign-journeys.nodes`
     // function does, no longer gets masked to the generic `pack_node_error`).
     // JRNY-1: the enroll pre-check rejects the no-email contact as not_eligible.
-    expect(snap.error?.code).toBe('not_eligible');
+    expect(snap.error?.code).toBe('openwop-app.not_eligible');
 
     const events = await bundleEvents(owner, runId);
     const failedEvent = events.find((e) => e.type === 'node.failed');
@@ -458,7 +459,7 @@ describe('campaign-journeys.re-engage-contact — end-to-end execution (real exe
 
   it('enrollment guard: a second run for the same (journey, contact) fails with already_enrolled', async () => {
     const { owner, orgId } = await ownerOrg();
-    const contact = await owner.post('/v1/host/openwop-app/crm/contacts', { name: 'Repeat Customer', email: 'repeat@acme.test' });
+    const contact = await owner.post('/host/openwop-app/crm/contacts', { name: 'Repeat Customer', email: 'repeat@acme.test' });
     expect(contact.status, JSON.stringify(contact.body)).toBe(201);
     const contactId = contact.body.contactId as string;
 
@@ -469,18 +470,18 @@ describe('campaign-journeys.re-engage-contact — end-to-end execution (real exe
     registerWorkflow(expanded);
     const inputs = { ...params, journeyId: 're-engage-idem' };
 
-    const first = await owner.post('/v1/runs', { workflowId: expanded.workflowId, inputs });
+    const first = await owner.post('/runs', { workflowId: expanded.workflowId, inputs });
     expect(first.status, JSON.stringify(first.body)).toBe(201);
     const firstSnap = await pollRun(owner, first.body.runId as string);
     expect(firstSnap.status.startsWith('waiting'), `first run should reach the sign-off gate: ${JSON.stringify(firstSnap)}`).toBe(true);
 
-    const second = await owner.post('/v1/runs', { workflowId: expanded.workflowId, inputs });
+    const second = await owner.post('/runs', { workflowId: expanded.workflowId, inputs });
     expect(second.status, JSON.stringify(second.body)).toBe(201);
     const secondSnap = await pollRun(owner, second.body.runId as string);
     expect(secondSnap.status, `second run should fail — already enrolled: ${JSON.stringify(secondSnap)}`).toBe('failed');
     // ADR 0237: the enrollment guard's own `already_enrolled` code now
     // propagates (was masked to `pack_node_error`).
-    expect(secondSnap.error?.code).toBe('already_enrolled');
+    expect(secondSnap.error?.code).toBe('openwop-app.already_enrolled');
 
     const secondEvents = await bundleEvents(owner, second.body.runId as string);
     const failedEvent = secondEvents.find((e) => e.type === 'node.failed');
@@ -491,7 +492,7 @@ describe('campaign-journeys.re-engage-contact — end-to-end execution (real exe
 describe('campaign-journeys.welcome-series — end-to-end execution (real executor, trigger-fed direct run-start)', () => {
   it('walks the REAL trigger → enroll → eligibility path and suspends at the sign-off gate with real contact data', async () => {
     const { owner } = await ownerOrg();
-    const contact = await owner.post('/v1/host/openwop-app/crm/contacts', { name: 'New Signup', email: 'newsignup@acme.test' });
+    const contact = await owner.post('/host/openwop-app/crm/contacts', { name: 'New Signup', email: 'newsignup@acme.test' });
     expect(contact.status, JSON.stringify(contact.body)).toBe(201);
     const contactId = contact.body.contactId as string;
 
@@ -505,7 +506,7 @@ describe('campaign-journeys.welcome-series — end-to-end execution (real execut
     // directly started run) into its own output — that's how the extra
     // `journeyId` workaround key reaches `enroll` through the trigger edge
     // (see file header).
-    const create = await owner.post('/v1/runs', { workflowId: expanded.workflowId, inputs: { ...params, journeyId: 'welcome-series' } });
+    const create = await owner.post('/runs', { workflowId: expanded.workflowId, inputs: { ...params, journeyId: 'welcome-series' } });
     expect(create.status, JSON.stringify(create.body)).toBe(201);
     const runId = create.body.runId as string;
 
@@ -518,7 +519,7 @@ describe('campaign-journeys.welcome-series — end-to-end execution (real execut
     // worth proving separately).
     expect(completedOutputs(events, 'gate1')).toMatchObject({ eligible: true, contactId, email: 'newsignup@acme.test', name: 'New Signup' });
 
-    const ints = await owner.get(`/v1/host/openwop-app/runs/${runId}/interrupts`);
+    const ints = await owner.get(`/host/openwop-app/runs/${bareRunId(runId)}/interrupts`);
     expect(ints.status, JSON.stringify(ints.body)).toBe(200);
     const gate = (ints.body.interrupts as Array<{ nodeId: string }>).find((i) => i.nodeId.endsWith('_signoff'));
     expect(gate, `expected a pending interrupt for the sign-off gate: ${JSON.stringify(ints.body)}`).toBeTruthy();

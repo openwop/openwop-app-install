@@ -51,8 +51,8 @@ function seedRun(r: Partial<RunRecord> & { runId: string; status: RunRecord['sta
 describe('task-deck route (ADR 0133 P3)', () => {
   it('serves without a toggle (always-on) — empty deck for a fresh user', async () => {
     const c = client();
-    await c('POST', '/v1/host/openwop-app/test/login', { email: 'td-off@test.dev' });
-    const r = await c('GET', '/v1/host/openwop-app/tasks');
+    await c('POST', '/host/openwop-app/test/login', { email: 'td-off@test.dev' });
+    const r = await c('GET', '/host/openwop-app/tasks');
     expect(r.status).toBe(200);
     expect(r.body.deck.buckets.running).toEqual([]);
   });
@@ -60,7 +60,7 @@ describe('task-deck route (ADR 0133 P3)', () => {
   it('shows the caller’s own runs + direct children; hides another user’s runs', async () => {
     await enable('users'); await enable('task-deck');
     const c = client();
-    const login = await c('POST', '/v1/host/openwop-app/test/login', { email: 'td-owner@test.dev', tenantId: TENANT });
+    const login = await c('POST', '/host/openwop-app/test/login', { email: 'td-owner@test.dev', tenantId: TENANT });
     const me = login.body.user?.userId;
     expect(me).toBeTruthy();
 
@@ -68,7 +68,7 @@ describe('task-deck route (ADR 0133 P3)', () => {
     await seedRun({ runId: 'child-1', status: 'running', parentRunId: 'mine-1', metadata: { actingUserId: 'service', parentRunId: 'mine-1', delegatedBy: 'agent:a1' } });
     await seedRun({ runId: 'theirs-1', status: 'running', metadata: { actingUserId: 'someone-else' } });
 
-    const r = await c('GET', '/v1/host/openwop-app/tasks');
+    const r = await c('GET', '/host/openwop-app/tasks');
     expect(r.status).toBe(200);
     const running = r.body.deck.buckets.running.map((x: any) => x.runId);
     expect(running).toContain('mine-1');     // owned
@@ -80,7 +80,7 @@ describe('task-deck route (ADR 0133 P3)', () => {
   it('anon (no session) ⇒ empty deck, not a tenant dump', async () => {
     await enable('users'); await enable('task-deck');
     const c = client(); // no login
-    const r = await c('GET', '/v1/host/openwop-app/tasks');
+    const r = await c('GET', '/host/openwop-app/tasks');
     // unauthenticated may 401 at the auth layer OR return an empty deck; never another user's data
     if (r.status === 200) {
       const b = r.body.deck.buckets;

@@ -42,7 +42,7 @@ describe('ADR 0523 — a save cannot silently drop fields the head carried', () 
     contract: string,
     extra: Record<string, unknown> = {},
   ) =>
-    api('/v1/host/openwop-app/workflows', {
+    api('/host/openwop-app/workflows', {
       method: 'POST',
       headers: { 'x-openwop-field-contract': contract },
       body: JSON.stringify({ workflowId, metadata: { name: workflowId }, nodes, ...extra }),
@@ -50,13 +50,13 @@ describe('ADR 0523 — a save cannot silently drop fields the head carried', () 
 
   /** POST a definition; returns the 201 body. */
   const save = (workflowId: string, nodes: unknown[], extra: Record<string, unknown> = {}) =>
-    api('/v1/host/openwop-app/workflows', {
+    api('/host/openwop-app/workflows', {
       method: 'POST',
       body: JSON.stringify({ workflowId, metadata: { name: workflowId }, nodes, ...extra }),
     });
 
   const head = async (workflowId: string) =>
-    (await api(`/v1/workflows/${encodeURIComponent(workflowId)}`)).body as
+    (await api(`/workflows/${encodeURIComponent(workflowId)}`)).body as
       | { nodes?: { nodeId: string; inputs?: Record<string, unknown> }[]; variables?: unknown; configurableSchema?: unknown }
       | undefined;
 

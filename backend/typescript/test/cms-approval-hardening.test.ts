@@ -85,16 +85,16 @@ let n = 0;
 async function owner(): Promise<{ c: Client; orgId: string; tenantId: string; userId: string }> {
   const tenantId = `org:cmsah-${Date.now()}-${n++}`;
   const c = client();
-  const login = await c.post('/v1/host/openwop-app/test/login', { email: `cmsah-${Date.now()}-${n++}@acme.test`, tenantId });
+  const login = await c.post('/host/openwop-app/test/login', { email: `cmsah-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(login.status, JSON.stringify(login.body)).toBe(201);
-  const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return { c, orgId: org.body.orgId as string, tenantId, userId: login.body.user.userId as string };
 }
-const u = (orgId: string, s = ''): string => `/v1/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${s}`;
+const u = (orgId: string, s = ''): string => `/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${s}`;
 
 async function pendingFor(c: Client, pageId: string): Promise<any> {
-  const list = await c.get('/v1/host/openwop-app/approvals?status=pending');
+  const list = await c.get('/host/openwop-app/approvals?status=pending');
   expect(list.status).toBe(200);
   return (list.body.items as any[]).find((a) => a.kind === 'content-publish' && a.pageId === pageId);
 }
@@ -125,7 +125,7 @@ describe('CMSA-3 — the approve-what-you-saw pin is a PRECONDITION, not a check
       return null;
     });
     try {
-      const claim = await c.post(`/v1/host/openwop-app/approvals/${appr.approvalId}/claim`);
+      const claim = await c.post(`/host/openwop-app/approvals/${appr.approvalId}/claim`);
       expect(claim.status, JSON.stringify(claim.body)).toBe(409);
       // WITHOUT these two the test is VACUOUS. If the spy never intercepted the
       // handler's read, the pre-CAS staleness check would fire instead and
@@ -153,7 +153,7 @@ describe('CMSA-3 — the approve-what-you-saw pin is a PRECONDITION, not a check
     const pageId = created.body.pageId as string;
     await c.post(u(orgId, `/pages/${pageId}/submit`));
     const appr = await pendingFor(c, pageId);
-    const claim = await c.post(`/v1/host/openwop-app/approvals/${appr.approvalId}/claim`);
+    const claim = await c.post(`/host/openwop-app/approvals/${appr.approvalId}/claim`);
     expect(claim.status, JSON.stringify(claim.body)).toBe(200);
     expect((await c.get(u(orgId, `/pages/${pageId}`))).body.status).toBe('published');
   });
@@ -170,7 +170,7 @@ describe('CMSA-7 — an UNPINNED review refuses once and pins itself, instead of
     const legacy = await createContentApproval({ tenantId, orgId, pageId, pageTitle: 'Legacy', proposal: 'Publish' });
     expect(legacy.pageVersion).toBeUndefined();
 
-    const first = await c.post(`/v1/host/openwop-app/approvals/${legacy.approvalId}/claim`);
+    const first = await c.post(`/host/openwop-app/approvals/${legacy.approvalId}/claim`);
     expect(first.status, JSON.stringify(first.body)).toBe(409);
     expect(first.body?.details?.reason).toBe('unpinned_review');
     expect((await c.get(u(orgId, `/pages/${pageId}`))).body.status).toBe('in_review'); // did NOT fall through
@@ -179,7 +179,7 @@ describe('CMSA-7 — an UNPINNED review refuses once and pins itself, instead of
     const pinned = await getApproval(legacy.approvalId);
     expect(typeof pinned?.pageVersion).toBe('number');
     expect(pinned?.status).toBe('pending');
-    const second = await c.post(`/v1/host/openwop-app/approvals/${legacy.approvalId}/claim`);
+    const second = await c.post(`/host/openwop-app/approvals/${legacy.approvalId}/claim`);
     expect(second.status, JSON.stringify(second.body)).toBe(200);
     expect((await c.get(u(orgId, `/pages/${pageId}`))).body.status).toBe('published');
   });
@@ -194,7 +194,7 @@ describe('CMSA-7 — an UNPINNED review refuses once and pins itself, instead of
     const pageId = created.body.pageId as string;
     await c.post(u(orgId, `/pages/${pageId}/submit`));
     const legacy = await createContentApproval({ tenantId, orgId, pageId, pageTitle: 'Legacy reject', proposal: 'Publish' });
-    const rej = await c.post(`/v1/host/openwop-app/approvals/${legacy.approvalId}/reject`, { note: 'Not yet' });
+    const rej = await c.post(`/host/openwop-app/approvals/${legacy.approvalId}/reject`, { note: 'Not yet' });
     expect(rej.status, JSON.stringify(rej.body)).toBe(200);
     expect((await c.get(u(orgId, `/pages/${pageId}`))).body.status).toBe('draft');
   });
@@ -362,7 +362,7 @@ describe('ADR 0593 class enumeration — SEO metadata was the SECOND read-time i
   // description, og image and canonical URL were rewritable with the inbox
   // empty. Not in any tracker; found by grepping the class, not the instance.
   const seo = (orgId: string, pageId: string): string =>
-    `/v1/host/openwop-app/publishing/orgs/${encodeURIComponent(orgId)}/pages/${encodeURIComponent(pageId)}/seo`;
+    `/host/openwop-app/publishing/orgs/${encodeURIComponent(orgId)}/pages/${encodeURIComponent(pageId)}/seo`;
 
   it('refuses an SEO write against a PUBLISHED page while the gate is ON', async () => {
     const { c, orgId } = await owner();
@@ -415,7 +415,7 @@ describe('the losing concurrent decide is told the truth', () => {
     const appr = await pendingFor(c, pageId);
 
     // The winner's decide lands through the ordinary route.
-    expect((await c.post(`/v1/host/openwop-app/approvals/${appr.approvalId}/claim`)).status).toBe(200);
+    expect((await c.post(`/host/openwop-app/approvals/${appr.approvalId}/claim`)).status).toBe(200);
     expect((await c.get(u(orgId, `/pages/${pageId}`))).body.status).toBe('published');
 
     const handler = getContentApprovalHandler();
@@ -437,7 +437,7 @@ describe('the losing concurrent decide is told the truth', () => {
 
 describe('F1 — the SEO gate must cover `in_review`, not only `published`', () => {
   const seo = (orgId: string, pageId: string): string =>
-    `/v1/host/openwop-app/publishing/orgs/${encodeURIComponent(orgId)}/pages/${encodeURIComponent(pageId)}/seo`;
+    `/host/openwop-app/publishing/orgs/${encodeURIComponent(orgId)}/pages/${encodeURIComponent(pageId)}/seo`;
 
   it('refuses an SEO write against an IN-REVIEW page (the pin cannot see it)', async () => {
     // `putSeo` writes `publishing:seo`, which never moves `page.version`, and
@@ -458,7 +458,7 @@ describe('F1 — the SEO gate must cover `in_review`, not only `published`', () 
 
     // …and the approve does NOT ship a canonical the reviewer never saw.
     const appr = await pendingFor(c, pageId);
-    expect((await c.post(`/v1/host/openwop-app/approvals/${appr.approvalId}/claim`)).status).toBe(200);
+    expect((await c.post(`/host/openwop-app/approvals/${appr.approvalId}/claim`)).status).toBe(200);
     expect((await c.get(seo(orgId, pageId))).body.seo.canonicalUrl).toBe('https://acme.test/launch');
   });
 
@@ -494,7 +494,7 @@ describe('F2 — releasing a withheld locale on a PUBLISHED page is a publish', 
 
   /** What an `Accept-Language: es` visitor is actually served. */
   async function servedEs(orgId: string, slug: string): Promise<unknown> {
-    const res = await fetch(`${BASE}/v1/host/openwop-app/public/${encodeURIComponent(orgId)}/pages/${encodeURIComponent(slug)}`, {
+    const res = await fetch(`${BASE}/host/openwop-app/public/${encodeURIComponent(orgId)}/pages/${encodeURIComponent(slug)}`, {
       headers: { 'accept-language': 'es' },
     });
     expect(res.status).toBe(200);

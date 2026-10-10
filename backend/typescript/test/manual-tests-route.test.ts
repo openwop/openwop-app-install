@@ -32,8 +32,8 @@ function client() {
   return { get: (p: string) => call('GET', p), put: (p: string, b?: unknown) => call('PUT', p, b), post: (p: string, b?: unknown) => call('POST', p, b) };
 }
 let n = 0;
-const login = async (tenantId: string) => { const c = client(); await c.post('/v1/host/openwop-app/test/login', { email: `mt-${Date.now()}-${n++}@acme.test`, tenantId }); return c; };
-const RUNS = '/v1/host/openwop-app/manual-tests/runs';
+const login = async (tenantId: string) => { const c = client(); await c.post('/host/openwop-app/test/login', { email: `mt-${Date.now()}-${n++}@acme.test`, tenantId }); return c; };
+const RUNS = '/host/openwop-app/manual-tests/runs';
 
 describe('manual-tests — durable per-user runs', () => {
   it('saves and reads back a run; prunes untested rows; preserves notes', async () => {

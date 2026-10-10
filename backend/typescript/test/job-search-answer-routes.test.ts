@@ -14,12 +14,12 @@ import { createApp } from '../src/index.js';
 import { enableTenantOverride } from '../src/host/featureToggles/service.js';
 import { assertFlatErrorEnvelope, detailOf } from './helpers/errorEnvelope.js';
 
-const BASE_PATH = '/v1/host/openwop-app/job-search/me/answers';
+const BASE_PATH = '/host/openwop-app/job-search/me/answers';
 let server: Server;
 let BASE: string;
 
 async function login(email: string) {
-  const res = await fetch(`${BASE}/v1/host/openwop-app/test/login`, {
+  const res = await fetch(`${BASE}/host/openwop-app/test/login`, {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email }),
   });
   const cookie = (res.headers.getSetCookie?.() ?? []).map((c) => c.split(';')[0]).join('; ');

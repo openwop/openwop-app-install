@@ -31,13 +31,13 @@
  *    `importance` / `intendedCadenceDays` / `lastMeaningfulContactAt` / `notes`
  *    are all assertions about that person. Redacting `person` would leave a row
  *    KEYED BY A STABLE PSEUDONYM OF THE ERASED PERSON whose remaining fields
- *    profile them — strictly worse than deletion. Cascade: the id is cleared
- *    from every `Project.stakeholderIds`.
+ *    profile them — strictly worse than deletion. (The cascade that cleared
+ *    the id from `Project.stakeholderIds` went with `assistant:project`, below.)
  *
  *  • `assistant:commitment` — REDACT `owner`, KEEP the row. The row is the
  *    workspace's record of a piece of WORK and is load-bearing for records that
  *    are not the subject's: it back-refs a live kanban card (`kanbanCardId`),
- *    the board projection and the briefing read it, and Project/Meeting point at
+ *    the board projection and the briefing read it, and Meeting points at
  *    it. Deleting it would destroy the org's own task history and strand the
  *    card. `description` is redacted ONLY on an owner match, because a one-line
  *    imperative commitment is usually *about* its owner ("send Dana the Q3
@@ -73,14 +73,12 @@
  *    `anon-surface-write` `onSubjectMatch:'cancel'` precedent, and redaction
  *    alone would not have been enough.
  *
- *  • `assistant:project` — DELIBERATELY NOT ERASED, and stated here rather than
- *    left to be inferred from its absence. `name`/`summary`/`status`/`priority`
- *    carry no PersonRef and no address. Free text *could* name someone, but
- *    that is the settled `crm:*` timeline-body case (`crm/erasure.ts`):
- *    declare it PII so log masking and retention see it, do not erase it. The
- *    project IS touched by the stakeholder cascade — an erased stakeholder's id
- *    is removed from `stakeholderIds` — which is a reference repair, not an
- *    erasure of the project's own content.
+ *  • `assistant:project` — RETIRED, so there is nothing to erase (ADR 0820 §8
+ *    item 4, core-audit §2b.4a). It was a second Project model beside the core
+ *    `projects` feature; prod held 0 rows (MEASURED read-only 2026-10-05), so the
+ *    store, its routes and its two nodes were removed without a migration. A
+ *    commitment's / decision's optional `projectId` now names a CORE project,
+ *    whose erasure is the `projects` feature's decision.
  *
  *  • `assistant:commitment:by-tenant` / `:by-status` — DELIBERATELY NOT ERASED.
  *    `CommitmentIndexRow = {ixId, commitmentId}` holds no subject data. The real
@@ -110,7 +108,7 @@
  *    NEW commitment instead of updating the redacted one — RESIDUAL 1 below,
  *    made strictly worse. Declaring them (entity-aware) is what closes the gap
  *    that IS closable here: masking and retention now see them. This is the
- *    same posture as `assistant:project`.
+ *    `crm:*` timeline-body posture.
  *
  * ── WHAT THIS DOES NOT DO, named so it is not implied ───────────────────────
  *
@@ -147,14 +145,13 @@ import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { declarePiiFields } from '../../host/dataClassification.js';
 import { getCard, updateCardFields } from '../../host/kanbanService.js';
 import { createLogger } from '../../observability/logger.js';
-import { isCommitmentRow } from './assistantService.js';
+import { casUpdateCommitment, casUpdatePendingAction, isCommitmentRow } from './assistantService.js';
 import type {
   Commitment,
   Decision,
   Meeting,
   PendingAction,
   PersonRef,
-  Project,
   StakeholderProfile,
 } from './assistantService.js';
 
@@ -184,10 +181,9 @@ const ERASED_PERSON: PersonRef = { kind: 'email', address: ERASED_VALUE };
 
 // The SAME namespaces + key + tenant functions as `assistantService.ts` — this
 // module reads and writes the SAME rows. Declared here rather than exported from
-// the service so the erasure seam does not widen six public surfaces (the
+// the service so the erasure seam does not widen five public surfaces (the
 // `features/crm/erasure.ts` precedent). `test/assistant-erasure.test.ts` asserts
 // the two declarations stay identical.
-const projects = new DurableCollection<Project>('assistant:project', (p) => p.projectId, undefined, (p) => p.tenantId);
 const commitments = new DurableCollection<Commitment>('assistant:commitment', (c) => c.commitmentId, isCommitmentRow, (c) => c.tenantId);
 const decisions = new DurableCollection<Decision>('assistant:decision', (d) => d.decisionId, undefined, (d) => d.tenantId);
 const meetings = new DurableCollection<Meeting>('assistant:meeting', (m) => m.meetingId, undefined, (m) => m.tenantId);
@@ -217,10 +213,6 @@ declarePiiFields('assistant.decision', ['decidedBy', 'statement', 'rationale', '
 declarePiiFields('assistant.meeting', ['attendees', 'title', 'transcriptKbDocId'], { maskGloballyByFieldName: false });
 declarePiiFields('assistant.stakeholder', ['person', 'notes'], { maskGloballyByFieldName: false });
 declarePiiFields('assistant.pendingAction', ['payload', 'draft', 'recipientDiff', 'approvedByUserId', 'editedByUserId'], { maskGloballyByFieldName: false });
-// `assistant:project` is exempt from ERASURE (see the header) but NOT from
-// classification — that is precisely the `crm:*` timeline-body posture: declare
-// the free text so masking and retention see it, do not erase it.
-declarePiiFields('assistant.project', ['name', 'summary'], { maskGloballyByFieldName: false });
 
 /** Case-folded comparison key for an address-shaped subject key. */
 const fold = (v: string): string => v.trim().toLowerCase();
@@ -329,26 +321,33 @@ export async function eraseAssistantSubject(tenantId: string, subjectKey: string
   );
 
   // ── leg 1: pending actions — redact, and CANCEL anything still executable ──
-  for (const a of await pendingActions.listForTenantIndexed(tenantId)) {
-    const byAddress = actionAddresses(a).includes(fold(subjectKey));
-    const byDecider = a.approvedByUserId === subjectKey || a.editedByUserId === subjectKey;
-    const bySource = a.sourceCommitmentId !== undefined && subjectCommitmentIds.has(a.sourceCommitmentId);
-    if (!byAddress && !byDecider && !bySource) continue;
-    const next: PendingAction = {
-      ...a,
-      payload: {},
-      draft: ERASED_VALUE,
-      // The cancel. A `pending` row is executable; every other status is already
-      // terminal and must keep its decided value (the audit trail is the point).
-      status: a.status === 'pending' ? 'rejected' : a.status,
-      erasedAt: a.erasedAt ?? new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-    delete next.recipientDiff;
-    if (a.approvedByUserId !== undefined) next.approvedByUserId = ERASED_VALUE;
-    if (a.editedByUserId !== undefined) next.editedByUserId = ERASED_VALUE;
-    await pendingActions.put(next);
-    touched += 1;
+  for (const listed of await pendingActions.listForTenantIndexed(tenantId)) {
+    const matches = (a: PendingAction): boolean =>
+      actionAddresses(a).includes(fold(subjectKey))
+      || a.approvedByUserId === subjectKey || a.editedByUserId === subjectKey
+      || (a.sourceCommitmentId !== undefined && subjectCommitmentIds.has(a.sourceCommitmentId));
+    if (!matches(listed)) continue;
+    // ADR 0862 D2 (architect H2) — redact the CURRENT row through the shared CAS, never a
+    // spread of the list read: a stale `put` here could wipe an `executionRunId` (or a
+    // decision) written since the list, which is exactly what the reopen guard reads.
+    const out = await casUpdatePendingAction(tenantId, listed.actionId, (a) => {
+      const ts = new Date().toISOString();
+      const next: PendingAction = {
+        ...a,
+        payload: {},
+        draft: ERASED_VALUE,
+        // The cancel. A `pending` row is executable; every other status is already
+        // terminal and must keep its decided value (the audit trail is the point).
+        status: a.status === 'pending' ? 'rejected' : a.status,
+        erasedAt: a.erasedAt ?? ts,
+        updatedAt: ts,
+      };
+      delete next.recipientDiff;
+      if (a.approvedByUserId !== undefined) next.approvedByUserId = ERASED_VALUE;
+      if (a.editedByUserId !== undefined) next.editedByUserId = ERASED_VALUE;
+      return next;
+    });
+    if (out.ok) touched += 1;
   }
 
   // ── leg 2: commitments — redact the owner (and the description on a match) ─
@@ -370,9 +369,16 @@ export async function eraseAssistantSubject(tenantId: string, subjectKey: string
   // cannot match it — widening it would only loosen the kanban eraser for rows
   // it already handles correctly. Idempotent: a re-run writes the same
   // tombstone, and a deleted card yields `null` from `updateCardFields`.
-  for (const c of tenantCommitments) {
-    if (!subjectCommitmentIds.has(c.commitmentId)) continue;
-    await commitments.put({ ...c, owner: ERASED_PERSON, description: ERASED_VALUE, updatedAt: new Date().toISOString() });
+  for (const listed of tenantCommitments) {
+    if (!subjectCommitmentIds.has(listed.commitmentId)) continue;
+    // ADR 0862 (grade-code) — redact the CURRENT row through the shared CAS, and follow
+    // ITS back-ref: a spread of the leg-0 read would drop a `kanbanCardId` set since, and
+    // the card it names would keep the subject's text.
+    const out = await casUpdateCommitment(tenantId, listed.commitmentId, (c) => ({
+      ...c, owner: ERASED_PERSON, description: ERASED_VALUE, updatedAt: new Date().toISOString(),
+    }));
+    if (!out) continue;
+    const c = out.next;
     touched += 1;
     if (c.kanbanCardId) {
       const card = await getCard(c.kanbanCardId);
@@ -403,23 +409,11 @@ export async function eraseAssistantSubject(tenantId: string, subjectKey: string
     touched += 1;
   }
 
-  // ── leg 5: stakeholders — DELETE, then repair the project references ──────
-  const removedStakeholderIds: string[] = [];
+  // ── leg 5: stakeholders — DELETE ──────────────────────────────────────────
   for (const s of await stakeholders.listForTenantIndexed(tenantId)) {
     if (!personMatches(s.person, subjectKey)) continue;
     await stakeholders.delete(s.stakeholderId);
-    removedStakeholderIds.push(s.stakeholderId);
     touched += 1;
-  }
-  if (removedStakeholderIds.length > 0) {
-    // Reference repair, not erasure of the project's own content: a dangling
-    // stakeholderId would resolve to `null` on every read of the project.
-    for (const p of await projects.listForTenantIndexed(tenantId)) {
-      const kept = (p.stakeholderIds ?? []).filter((id) => !removedStakeholderIds.includes(id));
-      if (kept.length === (p.stakeholderIds ?? []).length) continue;
-      await projects.put({ ...p, stakeholderIds: kept, updatedAt: new Date().toISOString() });
-      touched += 1;
-    }
   }
 
   if (touched > 0) log.info('assistant_subject_erased', { tenantId, rows: touched });

@@ -114,6 +114,47 @@ export function projectAgents(agents: readonly AgentEntry[]): AgentMentionEntry[
   return [...bySig.values()].map((a) => projectAgentEntry(a, usedSlugs));
 }
 
+/**
+ * Resolve agent ids to mention entries for a caller that already KNOWS the exact
+ * ids it wants (a board's advisors, a project's team) — as opposed to the
+ * picker, which shows a list.
+ *
+ * `entries` is the picker's list, and it is a lossy view for this purpose:
+ * `projectAgents` collapses same-looking agents onto ONE kept id, and the hook
+ * that produces it starts empty and fills in asynchronously. Matching a roster
+ * row's `agentRef.agentId` against it by `===` therefore misses an advisor whose
+ * id was the one collapsed away, and misses EVERY advisor when the convene runs
+ * before the list has loaded — which the user sees as "none of its advisors are
+ * available as agents yet" on a board whose advisors all exist.
+ *
+ * So: take the picker's entry when it has that exact id, and for the rest ask
+ * the inventory itself, once. Only an id the SERVER does not list is unresolved.
+ */
+export async function resolveAgentEntriesById(
+  agentIds: readonly string[],
+  entries: readonly AgentMentionEntry[],
+  fetchAgents: () => Promise<readonly AgentEntry[]> = listAgents,
+): Promise<Map<string, AgentMentionEntry>> {
+  const out = new Map<string, AgentMentionEntry>();
+  const byId = new Map(entries.map((e) => [e.agentId, e]));
+  const missing: string[] = [];
+  for (const id of new Set(agentIds)) {
+    const hit = byId.get(id);
+    if (hit) out.set(id, hit); else missing.push(id);
+  }
+  if (missing.length === 0) return out;
+  let inventory: readonly AgentEntry[];
+  try { inventory = await fetchAgents(); } catch { return out; }
+  const rawById = new Map(inventory.map((a) => [a.agentId, a]));
+  // Slugs must not collide with the picker's, or with each other.
+  const usedSlugs = new Set(entries.map((e) => e.slug));
+  for (const id of missing) {
+    const raw = rawById.get(id);
+    if (raw) out.set(id, projectAgentEntry(raw, usedSlugs));
+  }
+  return out;
+}
+
 /** React hook: fetch agents on mount, expose `{ entries, isLoading,
  *  error }`. Cached at the hook-instance level — every consumer
  *  refetches on mount, which is the right behavior for a picker
@@ -234,10 +275,17 @@ function slugify(name: string): string {
 
 /** Humanize a handle slug into a display name: `andru-carnagie` → `Andru
  *  Carnagie`. The inverse of `slugify` for attribution labels + rail rows where
- *  only the slug is in scope; also accepts a trailing agentId segment
- *  (`…advisor-leo-da-vincio` → `Leo Da Vincio`). Title-cases each word. */
+ *  only the slug is in scope; also accepts a full agentId, using its trailing
+ *  segment (`…advisor-leo-da-vincio` → `Leo Da Vincio`,
+ *  `vendor.x.agents.chief-of-staff` → `Chief Of Staff`). Title-cases each word. */
 export function slugToName(slug: string): string {
-  const tail = slug.includes('advisor-') ? slug.slice(slug.lastIndexOf('advisor-') + 'advisor-'.length) : slug;
+  // A dotted agentId names a pack/tenant path, not a person: only its last
+  // segment is the name (`vendor.openwop-app.assistant.agents.chief-of-staff`
+  // → `Chief Of Staff`, never "Vendor.openwop App.assistant…" — MEASURED on
+  // prod 2026-10-09 when a lineup miss fell through to this fallback).
+  const tail = slug.includes('advisor-')
+    ? slug.slice(slug.lastIndexOf('advisor-') + 'advisor-'.length)
+    : slug.slice(slug.lastIndexOf('.') + 1);
   const words = tail.split(/[-_]+/).filter(Boolean);
   if (words.length === 0) return slug;
   return words.map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');

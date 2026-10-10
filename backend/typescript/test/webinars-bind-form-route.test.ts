@@ -17,6 +17,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
+import { createOrg } from '../src/host/accessControlService.js';
 
 let BASE: string;
 let server: http.Server;
@@ -56,12 +57,13 @@ function client() {
 let n = 0;
 async function setup(): Promise<{ c: ReturnType<typeof client>; orgId: string; eventId: string }> {
   const c = client();
-  const login = await c.post('/v1/host/openwop-app/test/login', { email: `wb-${Date.now()}-${n++}@acme.test`, tenantId: 'default' });
+  const login = await c.post('/host/openwop-app/test/login', { email: `wb-${Date.now()}-${n++}@acme.test`, tenantId: 'default' });
   expect(login.status, JSON.stringify(login.body)).toBe(201);
-  const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Webinar Co' });
-  expect(org.status, JSON.stringify(org.body)).toBe(201);
-  const orgId = org.body.org?.orgId ?? org.body.orgId;
-  const ev = await c.post(`/v1/host/openwop-app/webinars/orgs/${orgId}/events`, { providerEventId: `zoom-${n}`, title: 'Launch webinar' });
+  // ADR 0815 D1a — `default` is the SAML host-global shape: after its first org,
+  // creating one over HTTP is owner-tier. The org under test is minted directly,
+  // owned by this caller (the shape `POST /orgs` produces for an owner).
+  const orgId = (await createOrg({ tenantId: 'default', createdBy: login.body.user.userId, name: 'Webinar Co', ownerSubject: login.body.user.userId })).orgId;
+  const ev = await c.post(`/host/openwop-app/webinars/orgs/${orgId}/events`, { providerEventId: `zoom-${n}`, title: 'Launch webinar' });
   expect(ev.status, JSON.stringify(ev.body)).toBe(201);
   return { c, orgId, eventId: ev.body.eventId };
 }
@@ -69,41 +71,43 @@ async function setup(): Promise<{ c: ReturnType<typeof client>; orgId: string; e
 describe('WEB-G1: bind-form refuses a form that does not exist', () => {
   it('a made-up form id is REFUSED, not silently bound', async () => {
     const { c, orgId, eventId } = await setup();
-    const bind = await c.post(`/v1/host/openwop-app/webinars/orgs/${orgId}/events/${eventId}/bind-form`, { formId: 'form-typo-999' });
+    const bind = await c.post(`/host/openwop-app/webinars/orgs/${orgId}/events/${eventId}/bind-form`, { formId: 'form-typo-999' });
     // Was 200 + `{ ok: true }`, which is how the dashboard came to display a
     // binding that could never deliver a registrant.
     expect(bind.status).toBe(404);
     expect(bind.body.error).toBe('not_found');
 
     // And nothing was written: the event still has no form.
-    const list = await c.get(`/v1/host/openwop-app/webinars/orgs/${orgId}/events`);
+    const list = await c.get(`/host/openwop-app/webinars/orgs/${orgId}/events`);
     const mine = list.body.events.find((e: { eventId: string }) => e.eventId === eventId);
     expect(mine.formId).toBeUndefined();
   });
 
   it('a REAL form binds, and the event reports it', async () => {
     const { c, orgId, eventId } = await setup();
-    const form = await c.post(`/v1/host/openwop-app/forms/orgs/${orgId}/forms`, { title: 'Webinar signup', fields: [] });
+    const form = await c.post(`/host/openwop-app/forms/orgs/${orgId}/forms`, { title: 'Webinar signup', fields: [] });
     expect(form.status, JSON.stringify(form.body)).toBe(201);
     const formId = form.body.form?.formId ?? form.body.formId;
 
-    const bind = await c.post(`/v1/host/openwop-app/webinars/orgs/${orgId}/events/${eventId}/bind-form`, { formId });
+    const bind = await c.post(`/host/openwop-app/webinars/orgs/${orgId}/events/${eventId}/bind-form`, { formId });
     expect(bind.status, JSON.stringify(bind.body)).toBe(200);
     expect(bind.body.formId).toBe(formId);
 
-    const list = await c.get(`/v1/host/openwop-app/webinars/orgs/${orgId}/events`);
+    const list = await c.get(`/host/openwop-app/webinars/orgs/${orgId}/events`);
     const mine = list.body.events.find((e: { eventId: string }) => e.eventId === eventId);
     expect(mine.formId).toBe(formId);
   });
 
   it("a form from ANOTHER workspace is refused (the check is org-scoped)", async () => {
     const { c, orgId, eventId } = await setup();
-    const other = await c.post('/v1/host/openwop-app/orgs', { name: 'Other Co' });
+    // The caller owns `orgId`, so it may create a second org here (ADR 0815 D1a).
+    const other = await c.post('/host/openwop-app/orgs', { name: 'Other Co' });
+    expect(other.status, JSON.stringify(other.body)).toBe(201);
     const otherOrgId = other.body.org?.orgId ?? other.body.orgId;
-    const form = await c.post(`/v1/host/openwop-app/forms/orgs/${otherOrgId}/forms`, { title: 'Elsewhere', fields: [] });
+    const form = await c.post(`/host/openwop-app/forms/orgs/${otherOrgId}/forms`, { title: 'Elsewhere', fields: [] });
     const foreignId = form.body.form?.formId ?? form.body.formId;
 
-    const bind = await c.post(`/v1/host/openwop-app/webinars/orgs/${orgId}/events/${eventId}/bind-form`, { formId: foreignId });
+    const bind = await c.post(`/host/openwop-app/webinars/orgs/${orgId}/events/${eventId}/bind-form`, { formId: foreignId });
     expect(bind.status).toBe(404);
   });
 });

@@ -170,20 +170,20 @@ let n = 0;
 async function ownerOrg(): Promise<{ owner: Client; orgId: string; tenantId: string }> {
   const tenantId = `org:mktgchain-${Date.now()}-${n++}`;
   const owner = client();
-  const r = await owner.post('/v1/host/openwop-app/test/login', { email: `mktgchain-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await owner.post('/host/openwop-app/test/login', { email: `mktgchain-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return { owner, orgId: (org.body as { orgId: string }).orgId, tenantId };
 }
-const crmPath = (orgId: string, suffix = ''): string => `/v1/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}${suffix}`;
-const cmsPath = (orgId: string, suffix = ''): string => `/v1/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${suffix}`;
+const crmPath = (orgId: string, suffix = ''): string => `/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}${suffix}`;
+const cmsPath = (orgId: string, suffix = ''): string => `/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${suffix}`;
 
 interface RunSnapshot { status: string; error?: { code: string; message: string } }
 async function pollRun(owner: Client, runId: string): Promise<RunSnapshot> {
   let snap: RunSnapshot = { status: 'pending' };
   for (let i = 0; i < 80; i++) {
-    const r = await owner.get(`/v1/runs/${runId}`);
+    const r = await owner.get(`/runs/${runId}`);
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     snap = r.body as RunSnapshot;
     if (snap.status === 'completed' || snap.status === 'failed' || snap.status === 'cancelled' || snap.status.startsWith('waiting')) break;
@@ -194,7 +194,7 @@ async function pollRun(owner: Client, runId: string): Promise<RunSnapshot> {
 
 interface BundleEvent { type?: string; nodeId?: string; payload?: Record<string, unknown> }
 async function bundleEvents(owner: Client, runId: string): Promise<BundleEvent[]> {
-  const b = await owner.get(`/v1/runs/${runId}/debug-bundle`);
+  const b = await owner.get(`/runs/${runId}/debug-bundle`);
   expect(b.status, JSON.stringify(b.body)).toBe(200);
   return ((b.body as { events?: BundleEvent[] }).events) ?? [];
 }
@@ -227,7 +227,7 @@ describe('marketing.campaign-launch — real executor, honest failure at the AI 
     const expanded = expandChain(found!.chain, { params });
     registerWorkflow(expanded);
 
-    const create = await owner.post('/v1/runs', { workflowId: expanded.workflowId, inputs: params });
+    const create = await owner.post('/runs', { workflowId: expanded.workflowId, inputs: params });
     expect(create.status, JSON.stringify(create.body)).toBe(201);
     const runId = (create.body as { runId: string }).runId;
 
@@ -240,7 +240,7 @@ describe('marketing.campaign-launch — real executor, honest failure at the AI 
       // credential-less test tenant fails one step LATER and honestly:
       // `byok_required` — configure a key — instead of naming a provider that
       // never existed.
-    expect(snap.error?.code).toBe('byok_required');
+    expect(snap.error?.code).toBe('openwop-app.byok_required');
 
     const events = await bundleEvents(owner, runId);
 

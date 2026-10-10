@@ -1,14 +1,14 @@
 {
   "name": "core.openwop.workflows.kicktodo-plan-generation",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "kind": "workflow-chain",
   "description": "KickTodo plan generation as an RFC 0013 / RFC 0133 chain pack (migrated from the deprecated ADR 0072 builtin `openwop-app.kicktodo.plan-generation`). Generate a validated challenge plan with the run-scoped provider (closed-world validatePlan + one bounded repair inside the node; fails closed on stub providers), then decompose it into a draft. Demonstrates RFC 0133 produced variables: `generate` writes the validated `plan` to the run bag and `decompose` reads it by name — no typed output port, so an explicit edge is not the right shape.",
   "keywords": ["KickTodo", "Challenges"],
-  "engines": { "openwop": ">=1.0.0" },
+  "engines": { "openwop": ">=1.0.0 <3.0.0" },
   "chains": [
     {
       "chainId": "kicktodo.plan-generation",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "Generate a challenge plan",
       "description": "Generate a validated plan from research, then decompose it into a challenge draft.",
       "parameters": {
@@ -36,7 +36,7 @@
         "nodes": [
           {
             "id": "generate",
-            "typeId": "feature.kicktodo.nodes.plan-generate",
+            "typeId": "feature.kicktodo.nodes.plan-generate@1.0.0",
             "name": "Generate plan",
             "position": { "x": 0, "y": 0 },
             "inputs": {
@@ -48,7 +48,7 @@
           },
           {
             "id": "decompose",
-            "typeId": "feature.kicktodo.nodes.decompose",
+            "typeId": "feature.kicktodo.nodes.decompose@1.0.0",
             "name": "Decompose into a draft",
             "position": { "x": 200, "y": 0 },
             "inputs": {

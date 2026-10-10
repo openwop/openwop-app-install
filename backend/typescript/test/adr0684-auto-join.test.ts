@@ -6,6 +6,16 @@
  * default participant workspace is the one everybody is in, a removal there is an
  * abuse control, not org hygiene. A silently-rejoining banned participant is the
  * failure this design exists to make impossible.
+ *
+ * Subject: `src/host/workspaceJoinLedger.ts` (`autoJoinDefaultWorkspaces`, `claimJoin`,
+ * `hasJoined`). Concurrency of the claim lives in `join-ledger-claim-is-atomic.test.ts`.
+ *
+ * Sabotage that turns it red (each witnessed by /grade-tests probe):
+ *  - toggle gate `if (!gate?.enabled) continue` dropped      → FAILS CLOSED
+ *  - ledger key made per-call (random suffix)                → won exactly once, idempotent, REMOVAL WINS
+ *  - ledger key drops the workspace half                     → keyed per (subject, workspace)
+ *  - `createMember` / `setActiveWorkspace` dropped           → joins the subject and makes the workspace active
+ *  - the per-target catch rethrows                           → never throws
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { autoJoinDefaultWorkspaces, hasJoined, claimJoin } from '../src/host/workspaceJoinLedger.js';
@@ -27,7 +37,7 @@ const withToggleOn = async (t: ReturnType<typeof target>) => {
   // A DECLARED default, not a stored override: `getEffectiveConfig` ignores an
   // override whose feature declares nothing (a graduated feature must not
   // reappear), so a stored row alone leaves the gate closed.
-  registerToggleDefault({ id: t.featureId, label: t.name, status: 'on', bucketUnit: 'user', salt: t.featureId } as never);
+  registerToggleDefault({ id: t.featureId, label: t.name, status: 'on', bucketUnit: 'user', salt: t.featureId });
   return t;
 };
 
@@ -93,8 +103,15 @@ describe('ADR 0684 §7 — auto-join', () => {
   });
 
   it('never throws — a failed join must not fail a sign-in', async () => {
-    // No org exists for this target, so createMember's org lookup has nothing to
-    // bind to. The contract is that the caller (the OIDC bind route) still returns.
-    await expect(autoJoinDefaultWorkspaces('user:j4', 'J Four', 'user:j4', [target('missing-org')])).resolves.toBeTypeOf('number');
+    // A target whose join throws AFTER the toggle gate admitted it (the getter
+    // fires at the ledger read, inside the per-target try). The contract is that
+    // the caller (the OIDC bind route) still returns, and the NEXT target is still
+    // joined — a throw that escaped, or aborted the loop, fails one of the two.
+    const bad = await withToggleOn(target('aj4-bad'));
+    const throwing = { featureId: bad.featureId, orgId: bad.orgId, name: bad.name, get tenantId(): string { throw new Error('store unavailable'); } };
+    const good = await withToggleOn(target('aj4'));
+    await createOrg({ tenantId: good.tenantId, orgId: good.orgId, createdBy: 'system', name: good.name });
+    await expect(autoJoinDefaultWorkspaces('user:j4', 'J Four', 'user:j4', [throwing, good])).resolves.toBe(1);
+    expect((await listMembers(good.tenantId, good.orgId)).some((m) => m.subject === 'user:j4')).toBe(true);
   });
 });

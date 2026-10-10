@@ -18,7 +18,7 @@ describe('Kanban workflow inventory', () => {
     render(
       <CreateBoardModal
         roster={[]}
-        workflowOptions={[{ workflowId: 'wf.customer-launch', name: 'Customer launch handoff', nodeCount: 4, createdAt: '', updatedAt: '' }]}
+        workflowOptions={[{ workflowId: 'wf.customer-launch', kind: 'workflow', name: 'Customer launch handoff', nodeCount: 4, createdAt: '', updatedAt: '' }]}
         workflowOptionsLoading={false}
         workflowOptionsFailed={false}
         onClose={vi.fn()}

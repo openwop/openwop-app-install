@@ -55,25 +55,30 @@ afterAll(async () => { await new Promise<void>((res) => server.close(() => res()
 interface Res { status: number; body: any }
 function client() {
   let cookie = '';
+  // `connection: close` is load-bearing. The pure render tests in this file are
+  // SYNCHRONOUS CPU work; under load a run of them blocks the event loop past the
+  // server's 5s keep-alive, the server closes the pooled socket, and the next
+  // POST reuses it — `fetch failed` / ECONNRESET in ~50ms (undici does not retry
+  // a POST). It read as a load timeout for months and was not one.
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
-    const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
+    const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', connection: 'close', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
     return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
   };
   return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b), put: (p: string, b?: unknown) => call('PUT', p, b), del: (p: string) => call('DELETE', p) };
 }
 
-const CB = (orgId: string, s = ''): string => `/v1/host/openwop-app/creative-briefs/orgs/${encodeURIComponent(orgId)}${s}`;
-const M = (orgId: string, s = ''): string => `/v1/host/openwop-app/media/orgs/${encodeURIComponent(orgId)}${s}`;
+const CB = (orgId: string, s = ''): string => `/host/openwop-app/creative-briefs/orgs/${encodeURIComponent(orgId)}${s}`;
+const M = (orgId: string, s = ''): string => `/host/openwop-app/media/orgs/${encodeURIComponent(orgId)}${s}`;
 
 // A valid 1x1 PNG.
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
 
 async function ownerWithOrg() {
   const c = client();
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `cbr-${Date.now()}-${Math.floor(Math.random() * 1e6)}@t.test`, tenantId: `org:cbr-${Date.now()}-${Math.floor(Math.random() * 1e6)}` });
+  const r = await c.post('/host/openwop-app/test/login', { email: `cbr-${Date.now()}-${Math.floor(Math.random() * 1e6)}@t.test`, tenantId: `org:cbr-${Date.now()}-${Math.floor(Math.random() * 1e6)}` });
   expect(r.status).toBe(201);
-  const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status).toBe(201);
   return { c, orgId: org.body.orgId as string };
 }
@@ -359,7 +364,7 @@ describe('brand custom fonts in the render (ADR 0399 OQ-1)', () => {
     const { bundledFontBuffers } = await import('../src/features/creative-briefs/render/fonts.js');
     const INTER_B64 = bundledFontBuffers()[0]!.toString('base64');
     const { c, orgId } = await ownerWithOrg();
-    const brand = await c.post('/v1/host/openwop-app/brand/brands', { orgId, name: 'Acme' });
+    const brand = await c.post('/host/openwop-app/brand/brands', { orgId, name: 'Acme' });
     expect(brand.status, JSON.stringify(brand.body)).toBe(201);
     const brandId = brand.body.brand.id;
     const brief = await c.post(CB(orgId, '/briefs'), { title: 'Font brief', assetType: 'image', sceneDescription: 'S.' });
@@ -371,7 +376,7 @@ describe('brand custom fonts in the render (ADR 0399 OQ-1)', () => {
     expect(before.body.brand.fontFamilies.serif).toBe('PT Serif'); // bundled default
 
     // Upload Inter as the custom SERIF font (differs from bundled PT Serif).
-    const put = await c.put(`/v1/host/openwop-app/brand/brands/${brandId}/fonts/serif`, { contentBase64: INTER_B64, licenseAttested: true });
+    const put = await c.put(`/host/openwop-app/brand/brands/${brandId}/fonts/serif`, { contentBase64: INTER_B64, licenseAttested: true });
     expect(put.status, JSON.stringify(put.body)).toBe(201);
 
     const after = await c.post(CB(orgId, `/briefs/${briefId}/renders`), { templateId: 'meta.feed.1x1', brandId });

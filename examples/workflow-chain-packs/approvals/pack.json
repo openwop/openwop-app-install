@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.workflows.approvals",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "kind": "workflow-chain",
   "description": "Real-work workflow pack (RFC 0013, ADR 0198) — the Approvals cluster, the single most-used enterprise automation shape (Power Automate's #1 template is a sign-off flow with ~3.35M instantiations): Request Sign-off (an open gate any team member can approve — the zero-config marquee) and Two-Stage Sign-off (an ordered approval chain: stage two is only asked after stage one approves — sequential chains are DAG composition, not a new primitive). Gates support quorum (requiredApprovals), named approvers (approverRefs), and out-of-office delegation (an approver's active delegation lets their delegate act, counted as ONE identity — ADR 0198). All tenant values are run parameters (replay-deterministic).",
   "author": "openwop",
@@ -10,7 +10,7 @@
   "chains": [
     {
       "chainId": "approvals.request-sign-off",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "label": "Request Sign-off",
       "description": "The classic sign-off: describe what needs approval, get a crisp summary card, and any team member signs off (or rejects) — then the decision comes back to you as a notification. Zero configuration; approvers on leave are covered automatically by their delegations.",
       "parameters": {
@@ -26,12 +26,12 @@
       "capabilities": ["side-effectful"],
       "dag": {
         "nodes": [
-          { "id": "summarize", "typeId": "core.ai.chatCompletion", "name": "Summarize for sign-off", "position": { "x": 0, "y": 0 }, "config": { "systemPrompt": "Write a crisp sign-off card for this item: WHAT is being approved (1 line), WHY it matters, and what saying yes commits us to. Under 120 words, no fluff. Item: {{params.item}}",
+          { "id": "summarize", "typeId": "core.ai.chatCompletion@1.0.0", "name": "Summarize for sign-off", "position": { "x": 0, "y": 0 }, "config": { "systemPrompt": "Write a crisp sign-off card for this item: WHAT is being approved (1 line), WHY it matters, and what saying yes commits us to. Under 120 words, no fluff. Item: {{params.item}}",
             "provider": "{{params.provider}}",
             "model": "{{params.model}}"
           }, "inputs": {} },
-          { "id": "gate", "typeId": "core.chat.approvalGate", "name": "Sign-off (any team member)", "position": { "x": 280, "y": 0 }, "config": {}, "inputs": {} },
-          { "id": "notify", "typeId": "feature.notifications.nodes.notify", "name": "Decision back to requester", "position": { "x": 560, "y": 0 }, "config": { "audience": "tenant" }, "inputs": { "title": "Request Sign-off" } }
+          { "id": "gate", "typeId": "core.chat.approvalGate@1.1.0", "name": "Sign-off (any team member)", "position": { "x": 280, "y": 0 }, "config": {}, "inputs": {} },
+          { "id": "notify", "typeId": "feature.notifications.nodes.notify@1.0.0", "name": "Decision back to requester", "position": { "x": 560, "y": 0 }, "config": { "audience": "tenant" }, "inputs": { "title": "Request Sign-off" } }
         ],
         "edges": [
           { "from": "summarize", "to": "gate" },
@@ -44,7 +44,7 @@
     },
     {
       "chainId": "approvals.two-stage-sign-off",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "label": "Two-Stage Sign-off",
       "description": "An ordered approval chain: stage one (e.g. the manager) approves first; only then is stage two (e.g. compliance) asked. Name each stage's approver by id to route the request to them — or leave a stage blank to open it to the whole team. Approvers on leave are covered automatically by their delegations.",
       "parameters": {
@@ -62,13 +62,13 @@
       "capabilities": ["side-effectful"],
       "dag": {
         "nodes": [
-          { "id": "summarize", "typeId": "core.ai.chatCompletion", "name": "Summarize for sign-off", "position": { "x": 0, "y": 0 }, "config": { "systemPrompt": "Write a crisp sign-off card for this item: WHAT is being approved (1 line), WHY it matters, and what saying yes commits us to. Under 120 words. Item: {{params.item}}",
+          { "id": "summarize", "typeId": "core.ai.chatCompletion@1.0.0", "name": "Summarize for sign-off", "position": { "x": 0, "y": 0 }, "config": { "systemPrompt": "Write a crisp sign-off card for this item: WHAT is being approved (1 line), WHY it matters, and what saying yes commits us to. Under 120 words. Item: {{params.item}}",
             "provider": "{{params.provider}}",
             "model": "{{params.model}}"
           }, "inputs": {} },
-          { "id": "stageOne", "typeId": "core.chat.approvalGate", "name": "Stage 1 approval", "position": { "x": 280, "y": 0 }, "config": { "approverRefs": ["{{params.stageOneApprover}}"] }, "inputs": {} },
-          { "id": "stageTwo", "typeId": "core.chat.approvalGate", "name": "Stage 2 approval (after stage 1)", "position": { "x": 560, "y": 0 }, "config": { "approverRefs": ["{{params.stageTwoApprover}}"] }, "inputs": {} },
-          { "id": "notify", "typeId": "feature.notifications.nodes.notify", "name": "Decision back to requester", "position": { "x": 840, "y": 0 }, "config": { "audience": "tenant" }, "inputs": { "title": "Two-Stage Sign-off" } }
+          { "id": "stageOne", "typeId": "core.chat.approvalGate@1.1.0", "name": "Stage 1 approval", "position": { "x": 280, "y": 0 }, "config": { "approverRefs": ["{{params.stageOneApprover}}"] }, "inputs": {} },
+          { "id": "stageTwo", "typeId": "core.chat.approvalGate@1.1.0", "name": "Stage 2 approval (after stage 1)", "position": { "x": 560, "y": 0 }, "config": { "approverRefs": ["{{params.stageTwoApprover}}"] }, "inputs": {} },
+          { "id": "notify", "typeId": "feature.notifications.nodes.notify@1.0.0", "name": "Decision back to requester", "position": { "x": 840, "y": 0 }, "config": { "audience": "tenant" }, "inputs": { "title": "Two-Stage Sign-off" } }
         ],
         "edges": [
           { "from": "summarize", "to": "stageOne" },

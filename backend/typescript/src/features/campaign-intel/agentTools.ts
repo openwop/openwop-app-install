@@ -102,6 +102,7 @@ export function registerCampaignIntelAgentTools(): void {
   // ── Budget reallocation (read): rank platforms by ROAS, recommend a shift. ──
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: CAMPAIGN_INTEL_BUDGET_OPTIMIZE_TOOL_ID,
       description:
@@ -129,6 +130,7 @@ export function registerCampaignIntelAgentTools(): void {
   // ── Forecast + creative-fatigue (read). ─────────────────────────────────────
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: CAMPAIGN_INTEL_FORECAST_TOOL_ID,
       description:
@@ -156,6 +158,7 @@ export function registerCampaignIntelAgentTools(): void {
   // ── Goal-based budget planner ("$X → N conversions", deterministic). ────────
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: CAMPAIGN_INTEL_PLAN_BUDGET_TOOL_ID,
       description:
@@ -204,6 +207,7 @@ export function registerCampaignIntelAgentTools(): void {
   // same fail-empty posture as the three tools above. ───────────────────────
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: CAMPAIGN_INTEL_PACING_TOOL_ID,
       description:
@@ -226,6 +230,7 @@ export function registerCampaignIntelAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: CAMPAIGN_INTEL_ATTRIBUTION_TOOL_ID,
       description:

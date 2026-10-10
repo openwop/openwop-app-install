@@ -12,6 +12,9 @@ vi.mock('../lib/byokClient.js', () => ({
   deleteKey: vi.fn().mockResolvedValue(undefined),
   listStoredRefs: vi.fn().mockResolvedValue([]),
 }));
+// ADR 0779 D7 — Remove now asks first (it disables web search for every agent).
+const confirmMock = vi.fn().mockResolvedValue(true);
+vi.mock('../../ui/confirm.js', () => ({ confirm: (...a: unknown[]) => confirmMock(...a) }));
 import { storeKey, deleteKey } from '../lib/byokClient.js';
 import { WebSearchKeyCard } from '../KeysPage.js';
 
@@ -51,5 +54,26 @@ describe('WebSearchKeyCard (WSRCH-6)', () => {
 
     await waitFor(() => expect(mockDelete).toHaveBeenCalledWith('web-search'));
     await waitFor(() => expect(onChanged).toHaveBeenCalled());
+    expect(confirmMock).toHaveBeenCalled();
+  });
+
+  it('ADR 0779 D7 — a declined confirm removes nothing, and a failed remove says so (no unhandled rejection)', async () => {
+    confirmMock.mockResolvedValueOnce(false);
+    const onChanged = vi.fn();
+    render(<WebSearchKeyCard configured={true} onChanged={onChanged} />);
+    fireEvent.click(screen.getByRole('button', { name: /remove/i }));
+    await waitFor(() => expect(confirmMock).toHaveBeenCalled());
+    expect(mockDelete).not.toHaveBeenCalled();
+
+    mockDelete.mockRejectedValueOnce(Object.assign(new Error('DELETE … → 403'), { status: 403 }));
+    fireEvent.click(screen.getByRole('button', { name: /remove/i }));
+    expect(await screen.findByText(/You don't have permission to do that here/)).toBeTruthy();
+    expect(onChanged).not.toHaveBeenCalled();
+  });
+
+  it('ADR 0779 D7 — a caller who cannot manage keys is offered neither the form nor Remove', () => {
+    render(<WebSearchKeyCard configured={true} onChanged={vi.fn()} canManage={false} />);
+    expect(screen.queryByRole('button', { name: /remove/i })).toBeNull();
+    expect(screen.queryByLabelText('Search-provider API key')).toBeNull();
   });
 });

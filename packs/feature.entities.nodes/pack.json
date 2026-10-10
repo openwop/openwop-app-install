@@ -1,11 +1,12 @@
 {
   "name": "feature.entities.nodes",
-  "version": "1.1.0",
+  "version": "1.1.1",
+  "kind": "node",
   "description": "Entities feature node pack (ADR 0386 Phase 6) — read/query/write user-defined content types over ctx.features.entities. Tenant-guarded; creates are idempotent via deterministic entity:<runId>:<nodeId> ids (ADR 0162). 'On entity written' automation rides host-event bindings (host.entities.entity.written), not a pack trigger node.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "entities", "content-modeling", "headless"],
-  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "engines": { "openwop": ">=1.0.0 <3.0.0" },
   "nodes": [
     {
       "typeId": "feature.entities.nodes.types-read",

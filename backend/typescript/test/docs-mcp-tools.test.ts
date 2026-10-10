@@ -65,9 +65,9 @@ describe('ctx.features.docs surface + llms.txt', () => {
       for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
       return res.json();
     };
-    const login = await call('/v1/host/openwop-app/test/login', { email: `docsmcp-${Date.now()}@acme.test` });
+    const login = await call('/host/openwop-app/test/login', { email: `docsmcp-${Date.now()}@acme.test` });
     TENANT = login.user.tenantId ?? login.tenantId;
-    const org = await call('/v1/host/openwop-app/orgs', { name: 'Docs Co' });
+    const org = await call('/host/openwop-app/orgs', { name: 'Docs Co' });
     ORG = org.orgId;
   });
   afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
@@ -98,7 +98,7 @@ describe('ctx.features.docs surface + llms.txt', () => {
 
   it('llms.txt lists published docs with absolute /docs URLs', async () => {
     await publishDoc('guide', 'The Guide', 'How to use it.');
-    const res = await fetch(`${BASE}/v1/host/openwop-app/public/${encodeURIComponent(ORG)}/llms.txt`);
+    const res = await fetch(`${BASE}/host/openwop-app/public/${encodeURIComponent(ORG)}/llms.txt`);
     expect(res.status).toBe(200);
     const txt = await res.text();
     expect(txt).toContain('## Docs');
@@ -110,7 +110,7 @@ describe('ctx.features.docs surface + llms.txt', () => {
   it('llms.txt carries per-line updated dates and honors OPENWOP_PUBLIC_SITE_NAME', async () => {
     process.env.OPENWOP_PUBLIC_SITE_NAME = 'Acme Product';
     try {
-      const res = await fetch(`${BASE}/v1/host/openwop-app/public/${encodeURIComponent(ORG)}/llms.txt`);
+      const res = await fetch(`${BASE}/host/openwop-app/public/${encodeURIComponent(ORG)}/llms.txt`);
       const txt = await res.text();
       expect(txt.startsWith('# Acme Product')).toBe(true);
       expect(txt).toMatch(/- \[The Guide\]\([^)]+\) - updated \d{4}-\d{2}-\d{2}/);
@@ -134,7 +134,7 @@ describe('ctx.features.docs surface + llms.txt', () => {
 
   // R2-D12 — the `.md` page door (the append-`.md` convention).
   it('GET pages/:slug.md serves the page as one markdown document; unknown slug 404s', async () => {
-    const res = await fetch(`${BASE}/v1/host/openwop-app/public/${encodeURIComponent(ORG)}/pages/guide.md`);
+    const res = await fetch(`${BASE}/host/openwop-app/public/${encodeURIComponent(ORG)}/pages/guide.md`);
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toContain('markdown');
     const md = await res.text();
@@ -142,7 +142,7 @@ describe('ctx.features.docs surface + llms.txt', () => {
     expect(md).toContain('How to use it.');
     expect(md).toMatch(/\*Updated \d{4}-\d{2}-\d{2}\*/);
 
-    const miss = await fetch(`${BASE}/v1/host/openwop-app/public/${encodeURIComponent(ORG)}/pages/nope.md`);
+    const miss = await fetch(`${BASE}/host/openwop-app/public/${encodeURIComponent(ORG)}/pages/nope.md`);
     expect(miss.status).toBe(404);
   });
 });

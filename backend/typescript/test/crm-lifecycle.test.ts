@@ -7,6 +7,15 @@
  *   - stage history on create + move
  *   - the pipeline report shape
  *   - CSV export (header row, quoting/formula guard, RBAC, toggle-off 404)
+ *
+ * Sabotage-witnessed (grade-tests w4): duplicate grouping without case-folding
+ * (email, company name), the merge's blank-fill, the task relink, free-mail
+ * domains identifying a company, convert accepting read scope, the report's
+ * currency folding, and the CSV formula guard each turn a case red.
+ *
+ * Ceiling, stated: 'two concurrent merges into the SAME survivor' cannot
+ * witness the CAS — one await separates `getContactForCas` from the swap, so a
+ * blind put stays green (probe w4g2-lc-merge-cas). It pins the end state only.
  */
 
 import http from 'node:http';
@@ -36,16 +45,38 @@ afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
 });
 
-interface Res<T = any> { status: number; body: T; text?: string; headers: Headers }
+/** The response fields these cases read. `res.json()` is untyped; the ONE
+ *  boundary narrowing is in `call` (`out as T`), and each route's shape is
+ *  stated here instead of being laundered through `any` at every read. */
+interface Stage { stageId: string; name: string }
+interface Company { companyId: string; name: string; domain?: string; tags: string[]; customFields: Record<string, unknown> }
+interface Body {
+  error: string; orgId: string; user: { userId: string };
+  contactId: string; companyId: string; dealId: string; taskId: string; activityId: string;
+  name: string; email: string; owner: string; company: string;
+  stage: string; mergedInto: string; stageId: string; tags: string[]; customFields: Record<string, unknown>;
+  contacts: Array<{ contactId: string }>; companies: Array<{ companyId: string }>;
+  activities: Array<{ activityId: string; contactId?: string }>;
+  groups: Array<{ key: string; contacts?: unknown[]; companies?: unknown[] }>;
+  pipelines: Array<{ pipelineId: string; stages: Stage[] }>;
+  history: Array<{ fromStageId: string | null; toStageId: string }>;
+  funnel: Array<{ stage: string; count: number }>;
+  perStage: Array<{ stageId: string; sum: number; sums: unknown[] }>;
+  currencies: string[]; totals: Record<string, number>;
+  aging: Array<{ dealId: string }>; snapshots: unknown[]; conversions: unknown[];
+}
+/** POST /contacts/:id/convert. */
+interface ConvertBody { created: { company: boolean; deal: boolean }; company: Company; deal: { dealId: string }; contact: { stage: string } }
+interface Res<T = Body> { status: number; body: T; text?: string; headers: Headers }
 interface Client {
-  get: (p: string) => Promise<Res>;
-  post: (p: string, b?: unknown) => Promise<Res>;
-  patch: (p: string, b?: unknown) => Promise<Res>;
-  del: (p: string) => Promise<Res>;
+  get: <T = Body>(p: string) => Promise<Res<T>>;
+  post: <T = Body>(p: string, b?: unknown) => Promise<Res<T>>;
+  patch: <T = Body>(p: string, b?: unknown) => Promise<Res<T>>;
+  del: <T = Body>(p: string) => Promise<Res<T>>;
 }
 function client(initialCookie = ''): Client {
   let cookie = initialCookie;
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
@@ -59,23 +90,23 @@ function client(initialCookie = ''): Client {
     const contentType = res.headers.get('content-type') ?? '';
     if (contentType.includes('text/csv')) {
       const text = await res.text();
-      return { status: res.status, body: undefined, text, headers: res.headers };
+      return { status: res.status, body: undefined as T, text, headers: res.headers };
     }
     const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out, headers: res.headers };
+    return { status: res.status, body: out as T, headers: res.headers };
   };
   return {
-    get: (p) => call('GET', p),
-    post: (p, b) => call('POST', p, b),
-    patch: (p, b) => call('PATCH', p, b),
-    del: (p) => call('DELETE', p),
+    get: <T = Body>(p: string) => call<T>('GET', p),
+    post: <T = Body>(p: string, b?: unknown) => call<T>('POST', p, b),
+    patch: <T = Body>(p: string, b?: unknown) => call<T>('PATCH', p, b),
+    del: <T = Body>(p: string) => call<T>('DELETE', p),
   };
 }
 
 let n = 0;
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
 async function signup(c: Client, opts: { tenantId?: string } = {}): Promise<{ userId: string }> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail('crm'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
+  const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail('crm'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
@@ -90,44 +121,44 @@ async function ownerWithMember(role: string): Promise<{ owner: Client; member: C
   await signup(owner, { tenantId });
   const member = client();
   const memberUser = await signup(member, { tenantId });
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   const orgId = org.body.orgId;
-  const add = await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: [role] });
+  const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: [role] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
   return { owner, member, memberId: memberUser.userId, orgId };
 }
-const c = (orgId: string, suffix = ''): string => `/v1/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}${suffix}`;
+const c = (orgId: string, suffix = ''): string => `/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}${suffix}`;
 
 describe('crm lifecycle — duplicate review', () => {
   it('groups contacts by case-folded email; email-less contacts never group', async () => {
     await enableCrm('on');
     const { owner } = await ownerWithMember('viewer');
     const email = `dup-${Date.now()}@acme.test`;
-    await owner.post('/v1/host/openwop-app/crm/contacts', { name: 'Ada', email: email.toUpperCase() });
+    await owner.post('/host/openwop-app/crm/contacts', { name: 'Ada', email: email.toUpperCase() });
     // ADR 0627 D6 — CREATE claims the primary email and an email PATCH is gated
     // the same way (review S1), so no API lane can mint a primary-email duplicate
     // any more. Duplicate review exists for the rows that PRE-DATE the claim
     // (and for the merge-released / imported shapes): seed one the way it
     // really arises — a legacy row already in the store, no claim, same address.
-    const dupCreate = await owner.post('/v1/host/openwop-app/crm/contacts', { name: 'Ada Two', email });
+    const dupCreate = await owner.post('/host/openwop-app/crm/contacts', { name: 'Ada Two', email });
     expect(dupCreate.status, JSON.stringify(dupCreate.body)).toBe(409);
-    const adaTwo = (await owner.post('/v1/host/openwop-app/crm/contacts', { name: 'Ada Two', email: `other-${Date.now()}@acme.test` })).body;
-    const dupPatch = await owner.patch(`/v1/host/openwop-app/crm/contacts/${encodeURIComponent(adaTwo.contactId)}`, { email });
+    const adaTwo = (await owner.post('/host/openwop-app/crm/contacts', { name: 'Ada Two', email: `other-${Date.now()}@acme.test` })).body;
+    const dupPatch = await owner.patch(`/host/openwop-app/crm/contacts/${encodeURIComponent(adaTwo.contactId)}`, { email });
     expect(dupPatch.status, 'the PATCH lane is gated like the create lane').toBe(409);
     const { hostExtStorage } = await import('../src/host/hostExtPersistence.js');
     const rowKey = `hostext:crm:contact:${adaTwo.contactId}`;
     const legacyRow = JSON.parse((await hostExtStorage().kvGet(rowKey))!);
     await hostExtStorage().kvSet(rowKey, JSON.stringify({ ...legacyRow, email }));
-    await owner.post('/v1/host/openwop-app/crm/contacts', { name: 'No Email' });
+    await owner.post('/host/openwop-app/crm/contacts', { name: 'No Email' });
 
-    const dups = await owner.get('/v1/host/openwop-app/crm/duplicates?entityType=contact');
+    const dups = await owner.get('/host/openwop-app/crm/duplicates?entityType=contact');
     expect(dups.status, JSON.stringify(dups.body)).toBe(200);
     const group = dups.body.groups.find((g: { key: string }) => g.key === email.toLowerCase());
     expect(group).toBeTruthy();
-    expect(group.contacts).toHaveLength(2);
+    expect(group!.contacts).toHaveLength(2);
 
-    expect((await owner.get('/v1/host/openwop-app/crm/duplicates?entityType=bogus')).status).toBe(400);
+    expect((await owner.get('/host/openwop-app/crm/duplicates?entityType=bogus')).status).toBe(400);
   });
 
   it('groups companies by case-folded domain, else exact case-folded name', async () => {
@@ -151,14 +182,15 @@ describe('crm lifecycle — contact merge', () => {
   it('survivor wins, source fills blanks, relinks references, tombstones the source', async () => {
     await enableCrm('on');
     const { owner, orgId } = await ownerWithMember('viewer');
-    const survivor = (await owner.post('/v1/host/openwop-app/crm/contacts', { name: 'Survivor', owner: 'user:alice' })).body;
-    const source = (await owner.post('/v1/host/openwop-app/crm/contacts', { name: 'Source', email: 'source@acme.test', company: 'SourceCo' })).body;
+    const survivor = (await owner.post('/host/openwop-app/crm/contacts', { name: 'Survivor', owner: 'user:alice' })).body;
+    // The source carries its OWN owner, so "survivor wins" is falsifiable.
+    const source = (await owner.post('/host/openwop-app/crm/contacts', { name: 'Source', email: 'source@acme.test', company: 'SourceCo', owner: 'user:bob' })).body;
 
     const deal = (await owner.post(c(orgId, '/deals'), { title: 'D', contactId: source.contactId })).body;
     const task = (await owner.post(c(orgId, '/tasks'), { title: 'T', contactId: source.contactId })).body;
     const activity = (await owner.post(c(orgId, '/activities'), { kind: 'note', body: 'n', contactId: source.contactId })).body;
 
-    const merged = await owner.post(`/v1/host/openwop-app/crm/contacts/${survivor.contactId}/merge`, { sourceContactId: source.contactId });
+    const merged = await owner.post(`/host/openwop-app/crm/contacts/${survivor.contactId}/merge`, { sourceContactId: source.contactId });
     expect(merged.status, JSON.stringify(merged.body)).toBe(200);
     expect(merged.body.owner).toBe('user:alice'); // survivor wins, never regressed
     expect(merged.body.email).toBe('source@acme.test'); // source fills a blank
@@ -167,18 +199,18 @@ describe('crm lifecycle — contact merge', () => {
     // Relinked.
     expect((await owner.get(c(orgId, `/deals/${deal.dealId}`))).body.contactId).toBe(survivor.contactId);
     expect((await owner.get(c(orgId, `/tasks/${task.taskId}`))).body.contactId).toBe(survivor.contactId);
-    expect((await owner.get(c(orgId, '/activities'))).body.activities.find((a: { activityId: string }) => a.activityId === activity.activityId).contactId).toBe(survivor.contactId);
+    expect((await owner.get(c(orgId, '/activities'))).body.activities.find((a) => a.activityId === activity.activityId)?.contactId).toBe(survivor.contactId);
 
     // Tombstoned: excluded from list, still resolvable by id.
-    const list = await owner.get('/v1/host/openwop-app/crm/contacts');
+    const list = await owner.get('/host/openwop-app/crm/contacts');
     expect(list.body.contacts.some((x: { contactId: string }) => x.contactId === source.contactId)).toBe(false);
-    const byId = await owner.get(`/v1/host/openwop-app/crm/contacts/${source.contactId}`);
+    const byId = await owner.get(`/host/openwop-app/crm/contacts/${source.contactId}`);
     expect(byId.status).toBe(200);
     expect(byId.body.mergedInto).toBe(survivor.contactId);
 
     // 409s: self-merge, merge into/from a tombstone.
-    expect((await owner.post(`/v1/host/openwop-app/crm/contacts/${survivor.contactId}/merge`, { sourceContactId: survivor.contactId })).status).toBe(409);
-    expect((await owner.post(`/v1/host/openwop-app/crm/contacts/${survivor.contactId}/merge`, { sourceContactId: source.contactId })).status).toBe(409);
+    expect((await owner.post(`/host/openwop-app/crm/contacts/${survivor.contactId}/merge`, { sourceContactId: survivor.contactId })).status).toBe(409);
+    expect((await owner.post(`/host/openwop-app/crm/contacts/${survivor.contactId}/merge`, { sourceContactId: source.contactId })).status).toBe(409);
   });
 
   // CRMGAP-8 — TOCTOU: two DIFFERENT sources merged into the SAME survivor
@@ -186,27 +218,28 @@ describe('crm lifecycle — contact merge', () => {
   // `put` (the CAS retry in `crmMergeService.mergeContacts`). Before the fix
   // this was a real lost-update race: whichever `put` landed second would
   // overwrite the first writer's fill with a snapshot that never saw it.
+  // CEILING: not a deterministic CAS witness (see header); asserts the end state.
   it('two concurrent merges into the SAME survivor (different sources) both land — no lost update', async () => {
     await enableCrm('on');
     const { owner } = await ownerWithMember('viewer');
-    const survivor = (await owner.post('/v1/host/openwop-app/crm/contacts', { name: 'Survivor' })).body; // no email/company/owner set
-    const sourceEmail = (await owner.post('/v1/host/openwop-app/crm/contacts', { name: 'Source Email', email: 'race@acme.test' })).body;
-    const sourceCompany = (await owner.post('/v1/host/openwop-app/crm/contacts', { name: 'Source Company', company: 'RaceCo' })).body;
+    const survivor = (await owner.post('/host/openwop-app/crm/contacts', { name: 'Survivor' })).body; // no email/company/owner set
+    const sourceEmail = (await owner.post('/host/openwop-app/crm/contacts', { name: 'Source Email', email: 'race@acme.test' })).body;
+    const sourceCompany = (await owner.post('/host/openwop-app/crm/contacts', { name: 'Source Company', company: 'RaceCo' })).body;
 
     const [r1, r2] = await Promise.all([
-      owner.post(`/v1/host/openwop-app/crm/contacts/${survivor.contactId}/merge`, { sourceContactId: sourceEmail.contactId }),
-      owner.post(`/v1/host/openwop-app/crm/contacts/${survivor.contactId}/merge`, { sourceContactId: sourceCompany.contactId }),
+      owner.post(`/host/openwop-app/crm/contacts/${survivor.contactId}/merge`, { sourceContactId: sourceEmail.contactId }),
+      owner.post(`/host/openwop-app/crm/contacts/${survivor.contactId}/merge`, { sourceContactId: sourceCompany.contactId }),
     ]);
     expect(r1.status, JSON.stringify(r1.body)).toBe(200);
     expect(r2.status, JSON.stringify(r2.body)).toBe(200);
 
     // BOTH fills must be present — neither concurrent merge's write was lost.
-    const final = await owner.get(`/v1/host/openwop-app/crm/contacts/${survivor.contactId}`);
+    const final = await owner.get(`/host/openwop-app/crm/contacts/${survivor.contactId}`);
     expect(final.body.email).toBe('race@acme.test');
     expect(final.body.company).toBe('RaceCo');
     // Both sources tombstoned.
-    expect((await owner.get(`/v1/host/openwop-app/crm/contacts/${sourceEmail.contactId}`)).body.mergedInto).toBe(survivor.contactId);
-    expect((await owner.get(`/v1/host/openwop-app/crm/contacts/${sourceCompany.contactId}`)).body.mergedInto).toBe(survivor.contactId);
+    expect((await owner.get(`/host/openwop-app/crm/contacts/${sourceEmail.contactId}`)).body.mergedInto).toBe(survivor.contactId);
+    expect((await owner.get(`/host/openwop-app/crm/contacts/${sourceCompany.contactId}`)).body.mergedInto).toBe(survivor.contactId);
   });
 });
 
@@ -234,21 +267,22 @@ describe('crm lifecycle — lead conversion', () => {
   it('creates company + deal, is idempotent-by-outcome, advances stage forward-only, RBAC-gated', async () => {
     await enableCrm('on');
     const { owner, member, orgId } = await ownerWithMember('viewer');
-    const contact = (await owner.post('/v1/host/openwop-app/crm/contacts', { name: 'Prospect', email: 'prospect@newco.test' })).body;
+    const contact = (await owner.post('/host/openwop-app/crm/contacts', { name: 'Prospect', email: 'prospect@newco.test' })).body;
     expect(contact.stage).toBe('lead');
 
     // Viewer is read-only: 403.
-    const denied = await member.post(`/v1/host/openwop-app/crm/contacts/${contact.contactId}/convert`, { orgId });
+    const denied = await member.post(`/host/openwop-app/crm/contacts/${contact.contactId}/convert`, { orgId });
     expect(denied.status).toBe(403);
+    expect(denied.body.error).toBe('forbidden_scope');
 
-    const converted = await owner.post(`/v1/host/openwop-app/crm/contacts/${contact.contactId}/convert`, { orgId });
+    const converted = await owner.post<ConvertBody>(`/host/openwop-app/crm/contacts/${contact.contactId}/convert`, { orgId });
     expect(converted.status, JSON.stringify(converted.body)).toBe(200);
     expect(converted.body.created).toEqual({ company: true, deal: true });
     expect(converted.body.company.domain).toBe('newco.test');
     expect(converted.body.contact.stage).toBe('qualified'); // lead → qualified
 
     // Re-convert: idempotent by outcome — same company + same OPEN deal, no dupes.
-    const again = await owner.post(`/v1/host/openwop-app/crm/contacts/${contact.contactId}/convert`, { orgId });
+    const again = await owner.post<ConvertBody>(`/host/openwop-app/crm/contacts/${contact.contactId}/convert`, { orgId });
     expect(again.status, JSON.stringify(again.body)).toBe(200);
     expect(again.body.created).toEqual({ company: false, deal: false });
     expect(again.body.company.companyId).toBe(converted.body.company.companyId);
@@ -260,8 +294,8 @@ describe('crm lifecycle — lead conversion', () => {
   it('free-mail domains never identify a company; falls back to name match', async () => {
     await enableCrm('on');
     const { owner, orgId } = await ownerWithMember('viewer');
-    const contact = (await owner.post('/v1/host/openwop-app/crm/contacts', { name: 'Gmail Prospect', email: 'someone@gmail.com', company: 'FreeMailCo' })).body;
-    const converted = await owner.post(`/v1/host/openwop-app/crm/contacts/${contact.contactId}/convert`, { orgId });
+    const contact = (await owner.post('/host/openwop-app/crm/contacts', { name: 'Gmail Prospect', email: 'someone@gmail.com', company: 'FreeMailCo' })).body;
+    const converted = await owner.post<ConvertBody>(`/host/openwop-app/crm/contacts/${contact.contactId}/convert`, { orgId });
     expect(converted.status, JSON.stringify(converted.body)).toBe(200);
     expect(converted.body.company.domain).toBeUndefined();
     expect(converted.body.company.name).toBe('FreeMailCo');
@@ -299,8 +333,8 @@ describe('crm lifecycle — pipeline report', () => {
     const wonStage = pipeline.stages.find((s: { name: string }) => s.name === 'Won');
     const lostStage = pipeline.stages.find((s: { name: string }) => s.name === 'Lost');
 
-    await owner.post('/v1/host/openwop-app/crm/contacts', { name: 'Lead1', stage: 'lead' });
-    await owner.post('/v1/host/openwop-app/crm/contacts', { name: 'Cust1', stage: 'customer' });
+    await owner.post('/host/openwop-app/crm/contacts', { name: 'Lead1', stage: 'lead' });
+    await owner.post('/host/openwop-app/crm/contacts', { name: 'Cust1', stage: 'customer' });
 
     const openDeal = (await owner.post(c(orgId, '/deals'), { title: 'Open', amount: 1000 })).body;
     // R2 CC-SP-3 — two more OPEN deals in the first stage with mixed/cased
@@ -308,18 +342,18 @@ describe('crm lifecycle — pipeline report', () => {
     await owner.post(c(orgId, '/deals'), { title: 'Euro', amount: 300, currency: 'EUR' });
     await owner.post(c(orgId, '/deals'), { title: 'LowerUsd', amount: 700, currency: 'usd' });
     await owner.post(c(orgId, '/deals'), { title: 'UpperUsd', amount: 100, currency: 'USD' });
-    await owner.post(c(orgId, '/deals'), { title: 'Won', amount: 500, stageId: wonStage.stageId });
-    await owner.post(c(orgId, '/deals'), { title: 'Lost', amount: 200, stageId: lostStage.stageId });
+    await owner.post(c(orgId, '/deals'), { title: 'Won', amount: 500, stageId: wonStage!.stageId });
+    await owner.post(c(orgId, '/deals'), { title: 'Lost', amount: 200, stageId: lostStage!.stageId });
 
     const report = await owner.get(c(orgId, `/reports/pipeline?pipelineId=${pipeline.pipelineId}`));
     expect(report.status, JSON.stringify(report.body)).toBe(200);
-    expect(report.body.funnel.find((f: { stage: string }) => f.stage === 'lead').count).toBeGreaterThanOrEqual(1);
+    expect(report.body.funnel.find((f) => f.stage === 'lead')?.count).toBeGreaterThanOrEqual(1);
     const firstStage = report.body.perStage.find((s: { stageId: string }) => s.stageId === pipeline.stages[0].stageId);
-    expect(firstStage.sum).toBe(2100); // the compat figure stays (blind)
+    expect(firstStage!.sum).toBe(2100); // the compat figure stays (blind)
     // R2 CC-SP-3 — the currency-grouped sums: unitless / EUR / USD, with the
     // agent-cased 'usd' folded into ONE 'USD' group (review F11), and the
     // report-level currency list uppercased+sorted.
-    expect(firstStage.sums).toEqual([
+    expect(firstStage!.sums).toEqual([
       { currency: null, sum: 1000, weightedSum: expect.any(Number) },
       { currency: 'EUR', sum: 300, weightedSum: expect.any(Number) },
       { currency: 'USD', sum: 800, weightedSum: expect.any(Number) },
@@ -329,6 +363,8 @@ describe('crm lifecycle — pipeline report', () => {
     expect(Array.isArray(report.body.aging)).toBe(true);
     expect(Array.isArray(report.body.snapshots)).toBe(true);
     expect(Array.isArray(report.body.conversions)).toBe(true);
+    // aging / snapshots / conversions are empty-by-construction in a fresh tenant
+    // (no deal has sat in a stage, no snapshot ran): shape is all there is to pin.
     // The 'Open' deal never moved, so it shouldn't be an aging outlier this soon.
     expect(report.body.aging.some((a: { dealId: string }) => a.dealId === openDeal.dealId)).toBe(false);
   });
@@ -362,9 +398,10 @@ describe('crm lifecycle — CSV export', () => {
   it('tenant contact export', async () => {
     await enableCrm('on');
     const { owner } = await ownerWithMember('viewer');
-    await owner.post('/v1/host/openwop-app/crm/contacts', { name: 'Export Me' });
-    const exp = await owner.get('/v1/host/openwop-app/crm/export?entityType=contacts');
+    await owner.post('/host/openwop-app/crm/contacts', { name: 'Export Me' });
+    const exp = await owner.get('/host/openwop-app/crm/export?entityType=contacts');
     expect(exp.status).toBe(200);
     expect(exp.text?.split('\r\n')[0]).toContain('contactId,name,email');
+    expect(exp.text, 'the export carries the tenant\'s contact rows, not just a header').toContain('Export Me');
   });
 });

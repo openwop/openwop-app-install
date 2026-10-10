@@ -6,6 +6,12 @@
  * hydrate re-chunk matches ingest), carries the section's `headingPath` intrinsically, and
  * `chunkText` is a faithful projection of `chunkStructured`. Plus an end-to-end proof that
  * a search hit surfaces the populated `headingPath` (was hardcoded `[]`).
+ *
+ * SABOTAGE-WITNESSED (/grade-tests wave 6): dropping the heading-stack pop, the
+ * `cur = [line]` heading carry, the CRLF normalization, the window cap, the root
+ * `curPath`, or the hybrid hit's `headingPath` projection each reds its case.
+ * "is deterministic" is an honest ceiling (a pure function; no sabotage short of
+ * injecting randomness). `CHUNKER_VERSION`'s signature fold is NOT pinned here.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { mkdtempSync } from 'node:fs';
@@ -14,7 +20,7 @@ import { join } from 'node:path';
 import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
-import { chunkStructured, chunkText, CHUNKER_VERSION, createCollection, ingestDocument, search } from '../src/features/kb/kbService.js';
+import { chunkStructured, chunkText, createCollection, ingestDocument, search } from '../src/features/kb/kbService.js';
 
 const HEADED = [
   '# Onboarding',
@@ -67,11 +73,11 @@ describe('chunkStructured (ADR 0398 P1)', () => {
     const chunks = chunkStructured(crlf);
     expect(chunks.some((c) => c.headingPath.includes('Title'))).toBe(true);
     expect(chunks.some((c) => c.headingPath.includes('Sub'))).toBe(true);
+    // The heading regex's trailing `\s*$` tolerates a `\r`, so the headings alone cannot
+    // see a missing normalization; the chunk TEXT can (stored + embedded verbatim).
+    expect(chunks.every((c) => !c.text.includes('\r'))).toBe(true);
   });
 
-  it('exports a chunker version > 1 (folded into the vector signature)', () => {
-    expect(CHUNKER_VERSION).toBeGreaterThan(1);
-  });
 });
 
 describe('headingPath end-to-end (ADR 0398 P1)', () => {

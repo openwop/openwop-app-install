@@ -207,21 +207,29 @@ export async function clearLinkedSubjectDeny(tenantId: string, externalId: strin
  * that identifier plus a timestamp; a lingering row is fail-SAFE (it only ever
  * DENIES, never grants) but is still a subject identifier, so erasure removes it.
  *
- * A DSAR key may arrive bare (the externalId itself) or auth-principal-scoped
- * (`saml:<NameID>` / `scim:<userName>`). `subjectKeyForms` reaches the bare form;
- * a `saml:`/`scim:` strip reaches the row via RFC 0159's externalId==NameID
- * equality. A key from a different identity space matches nothing (a harmless
- * no-op — the ADR 0464 eraser contract). Idempotent; tenant-scoped via
+ * A DSAR key may arrive bare (the externalId itself) or as `saml:<NameID>`.
+ * `subjectKeyForms` reaches the bare form; a `saml:` strip reaches the row via
+ * RFC 0159's externalId == NameID equality. A key from a different identity space
+ * matches nothing (a harmless no-op — the ADR 0464 eraser contract).
+ *
+ * CE-15 — `scim:<userName>` is NOT stripped. A SCIM principal is the userName, not
+ * the externalId, so stripping it compared one person's NAME with every row's
+ * opaque id: a DSAR for `scim:jsmith` deleted the deny of whoever's externalId
+ * happened to be `jsmith`, re-opening SAML for a leaver (fail OPEN). A SCIM-keyed
+ * DSAR now leaves its own deny row in place — fail SAFE (a deny only denies; the
+ * tenant teardown marker reclaims it) — until principals are issuer-qualified and
+ * the subject's own externalId can be resolved without widening every eraser
+ * (ADR 0787 D4 refused that resolver for the same reason). Idempotent; tenant-scoped via
  * `listByPrefix` (never a cross-tenant scan). Called from the host-erasers boot
  * step (host/hostSubjectErasers.ts).
  */
 export async function eraseSubjectLinkDeny(tenantId: string, subjectKey: string): Promise<SubjectEraseReport> {
   if (!tenantId || !subjectKey) return { rowsTouched: 0 };
   const { forms } = subjectKeyForms(subjectKey);
-  const stripped = subjectKey.replace(/^(?:saml|scim):/, '');
+  const nameId = subjectKey.startsWith('saml:') ? subjectKey.slice('saml:'.length) : undefined;
   let rowsTouched = 0;
   for (const row of await store.listByPrefix(`${tenantId}:`)) {
-    if (forms.has(row.externalId) || row.externalId === stripped) {
+    if (forms.has(row.externalId) || (nameId !== undefined && row.externalId === nameId)) {
       await store.delete(denyKey(row.tenantId, row.externalId));
       rowsTouched++;
     }

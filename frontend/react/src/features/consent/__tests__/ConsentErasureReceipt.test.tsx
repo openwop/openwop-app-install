@@ -8,27 +8,31 @@
  * partial erasure reads as a partial erasure, and that the outcome PERSISTS on
  * the page: a toast is not evidence, and this is the one action an operator may
  * later have to demonstrate they performed.
+ *
+ * Sabotage-witnessed (/grade-tests w9): announcing/showing the partial receipt as a
+ * success, dropping the retry guidance or the foundNothing branch, re-adding a success
+ * toast, or dropping the confirm body each turn a case here red.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor, fireEvent, act } from '@testing-library/react';
 import type { SubjectErasureResult } from '../consentClient.js';
-import { currentAnnouncements } from '../../../ui/announce.js';
+import { announce, currentAnnouncements } from '../../../ui/announce.js';
 
 let eraseResult: SubjectErasureResult = { ok: true, consentRecord: true, erasure: { total: 4, failed: 0, keysResolved: 2 } };
 const toastSuccess = vi.fn();
 const toastError = vi.fn();
-const toastWarning = vi.fn();
 let confirmBody: unknown = null;
 
 vi.mock('../consentClient.js', async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
   listOrgs: vi.fn(async () => [{ orgId: 'org-1', name: 'Acme' }]),
   getPolicy: vi.fn(async () => ({ policy: { tenantId: 't', regulatedRegions: ['EU'], defaultMode: 'opt-in' }, legalHold: null })),
+  getAccess: vi.fn(async () => ({ canManage: true })), // ADR 0849 D1 — an admin by default
   listRecords: vi.fn(async () => []),
-  getSubject: vi.fn(async () => null),
+  getSubject: vi.fn(async () => ({ record: null, erased: false })),
   deleteSubject: vi.fn(async () => eraseResult),
 }));
-vi.mock('../../../ui/toast.js', () => ({ toast: { success: (m: string) => toastSuccess(m), error: (m: string) => toastError(m), warning: (m: string) => toastWarning(m), info: vi.fn() } }));
+vi.mock('../../../ui/toast.js', () => ({ toast: { success: (m: string) => toastSuccess(m), error: (m: string) => toastError(m), warning: vi.fn(), info: vi.fn() } }));
 vi.mock('../../../ui/confirm.js', () => ({
   confirm: vi.fn(async (opts: { body?: unknown }) => { confirmBody = opts.body; return true; }),
 }));
@@ -50,7 +54,10 @@ async function erase(): Promise<void> {
 
 beforeEach(() => {
   eraseResult = { ok: true, consentRecord: true, erasure: { total: 4, failed: 0, keysResolved: 2 } };
-  toastSuccess.mockClear(); toastError.mockClear(); toastWarning.mockClear(); confirmBody = null;
+  toastSuccess.mockClear(); toastError.mockClear(); confirmBody = null;
+  // The live-region values are module state: reset them so no case's announcement
+  // assertion can be satisfied by an EARLIER case's (order/shuffle independence).
+  announce(''); announce('', { assertive: true });
 });
 afterEach(cleanup);
 
@@ -115,7 +122,8 @@ describe('consent erasure — what the operator is told', () => {
     eraseResult = { ok: true, consentRecord: true, erasure: { total: 4, failed: 0, keysResolved: 2, foundNothing: false, rowsTouched: 7 } };
     await erase();
     expect(await screen.findByText(/reported success/i)).toBeTruthy();
-    expect(toastWarning).not.toHaveBeenCalled();
+    // foundNothing:false must not route to the zero-row branch.
+    expect(screen.queryByText(/found NOTHING/i)).toBeNull();
     expect(currentAnnouncements().polite).toMatch(/erasure completed/i);
   });
 

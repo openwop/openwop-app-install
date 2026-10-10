@@ -62,7 +62,7 @@ describe('generator parity (every type × every target)', () => {
 // marked-illustrative JSON example may keep only the stable primitives.
 describe('prompt ↔ catalog INDEPENDENCE (the ADR 0358 tripwire)', () => {
   const here = dirname(fileURLToPath(import.meta.url));
-  const promptPath = join(here, '../../../../../../packs/feature.app-builder.agents/prompts/app-architect.md');
+  const promptPath = join(here, '../../../../../../packs/vendor.openwop-app.app-builder.agents/prompts/app-architect.md');
   const prompt = readFileSync(promptPath, 'utf8');
   it('carries NO reconstructible catalog (sentinel types absent)', () => {
     for (const sentinel of ['statCard', 'radioGroup', 'fileUpload', 'textarea', 'accordion', 'snackbar', 'form (children']) {

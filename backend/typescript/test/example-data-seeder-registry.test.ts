@@ -1,8 +1,8 @@
 /**
  * Demo-seeder registry endpoints (the `/demo-data` dashboard surface):
- *   GET  /v1/host/openwop-app/example-data/status  — per-step live counts
- *   POST /v1/host/openwop-app/example-data/run     — seed selected steps, dryRun preview
- *   POST /v1/host/openwop-app/example-data/clear   — remove demo entities
+ *   GET  /host/openwop-app/example-data/status  — per-step live counts
+ *   POST /host/openwop-app/example-data/run     — seed selected steps, dryRun preview
+ *   POST /host/openwop-app/example-data/clear   — remove demo entities
  *
  * Proves the registry is honest (counts reflect real stored data), extensible
  * (status enumerates every registered step), idempotent (re-run skips), and
@@ -54,7 +54,7 @@ afterAll(async () => { await new Promise<void>((res) => server.close(() => res()
 
 describe('demo-seeder registry', () => {
   it('status enumerates every registered step, starting at zero', async () => {
-    const { status, body } = await api<{ steps: Step[] }>('/v1/host/openwop-app/example-data/status');
+    const { status, body } = await api<{ steps: Step[] }>('/host/openwop-app/example-data/status');
     expect(status).toBe(200);
     const ids = body.steps.map((s) => s.id);
     expect(ids).toContain('agents');
@@ -77,39 +77,39 @@ describe('demo-seeder registry', () => {
   });
 
   it('dryRun previews without writing', async () => {
-    const { body } = await api<RunResult>('/v1/host/openwop-app/example-data/run', { method: 'POST', body: JSON.stringify({ dryRun: true }) });
+    const { body } = await api<RunResult>('/host/openwop-app/example-data/run', { method: 'POST', body: JSON.stringify({ dryRun: true }) });
     expect(body.dryRun).toBe(true);
     // Empty per-tenant seeders would create; the always-present host-global pages would skip.
     expect(body.results.filter((r) => !HOST_GLOBAL.has(r.step)).every((r) => r.action === 'created')).toBe(true);
-    const after = await api<{ steps: Step[] }>('/v1/host/openwop-app/example-data/status');
+    const after = await api<{ steps: Step[] }>('/host/openwop-app/example-data/status');
     expect(after.body.steps.filter((s) => !HOST_GLOBAL.has(s.id)).every((s) => s.count === 0)).toBe(true);
   });
 
   it('run seeds all steps; counts go up; re-run skips (idempotent)', async () => {
-    const first = await api<RunResult>('/v1/host/openwop-app/example-data/run', { method: 'POST', body: JSON.stringify({}) });
+    const first = await api<RunResult>('/host/openwop-app/example-data/run', { method: 'POST', body: JSON.stringify({}) });
     expect(first.body.success).toBe(true);
     expect(first.body.summary.created).toBeGreaterThan(0);
 
-    const status = await api<{ steps: Step[] }>('/v1/host/openwop-app/example-data/status');
+    const status = await api<{ steps: Step[] }>('/host/openwop-app/example-data/status');
     const agents = status.body.steps.find((s) => s.id === 'agents');
     const workforces = status.body.steps.find((s) => s.id === 'workforces');
     expect(agents?.count).toBeGreaterThan(0);
     expect(workforces?.count).toBeGreaterThan(0);
 
-    const second = await api<RunResult>('/v1/host/openwop-app/example-data/run', { method: 'POST', body: JSON.stringify({}) });
+    const second = await api<RunResult>('/host/openwop-app/example-data/run', { method: 'POST', body: JSON.stringify({}) });
     expect(second.body.summary.created).toBe(0); // all present → skipped
     expect(second.body.results.every((r) => r.action === 'skipped')).toBe(true);
-  });
+  }, 60_000); // #4176: 15 s timed out under peer load; the assertion is unchanged
 
   it('run honours a step selection', async () => {
-    const { body } = await api<RunResult>('/v1/host/openwop-app/example-data/run', { method: 'POST', body: JSON.stringify({ steps: ['agents'] }) });
+    const { body } = await api<RunResult>('/host/openwop-app/example-data/run', { method: 'POST', body: JSON.stringify({ steps: ['agents'] }) });
     expect(body.results.map((r) => r.step)).toEqual(['agents']);
   });
 
   it('clear removes demo entities; counts return to zero', async () => {
-    const { body } = await api<RunResult>('/v1/host/openwop-app/example-data/clear', { method: 'POST', body: JSON.stringify({}) });
+    const { body } = await api<RunResult>('/host/openwop-app/example-data/clear', { method: 'POST', body: JSON.stringify({}) });
     expect(body.success).toBe(true);
-    const status = await api<{ steps: Step[] }>('/v1/host/openwop-app/example-data/status');
+    const status = await api<{ steps: Step[] }>('/host/openwop-app/example-data/status');
     // Per-tenant seeders clear to zero; host-global content is deployment-wide
     // and never cleared per-tenant. Derived from the ONE `HOST_GLOBAL` set above
     // plus the legal pages — this used to be a second hand-maintained literal,

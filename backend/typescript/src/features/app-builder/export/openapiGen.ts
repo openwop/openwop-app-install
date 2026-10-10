@@ -34,7 +34,7 @@ function fieldsToSchema(fields: { name?: unknown; type?: unknown; required?: unk
   const required: string[] = [];
   for (const f of (fields ?? []).slice(0, 40)) {
     if (typeof f?.name !== 'string' || !f.name) continue;
-    properties[f.name] = FIELD_JSON[String(f.type)] ?? { type: 'string' };
+    properties[f.name] = (Object.hasOwn(FIELD_JSON, String(f.type)) ? FIELD_JSON[String(f.type)] : undefined) ?? { type: 'string' };
     if (f.required === true) required.push(f.name);
   }
   return { type: 'object', properties, ...(required.length ? { required } : {}), additionalProperties: false };
@@ -54,7 +54,7 @@ export function generateOpenApi(state: Record<string, unknown>): Record<string, 
   for (const op of operations.slice(0, 50)) {
     if (typeof op?.id !== 'string' || !op.id) continue;
     const kind = String(op.kind ?? 'action');
-    const method = KIND_METHOD[kind] ?? 'post';
+    const method = (Object.hasOwn(KIND_METHOD, kind) ? KIND_METHOD[kind] : undefined) ?? 'post';
     const modelRef = typeof op.modelId === 'string' && op.modelId && schemas[op.modelId] ? { $ref: `#/components/schemas/${op.modelId}` } : { type: 'object' as const };
     const outType = String(op.output?.type ?? (kind === 'list' ? 'modelList' : 'object'));
     const responseSchema = outType === 'modelList' ? { type: 'array', items: modelRef }
@@ -73,7 +73,7 @@ export function generateOpenApi(state: Record<string, unknown>): Record<string, 
           ? { requestBody: { required: true, content: { 'application/json': { schema: fieldsToSchema(op.input) } } } }
           : {}),
         ...(op.input?.length && method === 'get'
-          ? { parameters: op.input.slice(0, 20).flatMap((f) => (typeof f?.name === 'string' && f.name ? [{ name: f.name, in: 'query', required: f.required === true, schema: FIELD_JSON[String(f.type)] ?? { type: 'string' } }] : [])) }
+          ? { parameters: op.input.slice(0, 20).flatMap((f) => (typeof f?.name === 'string' && f.name ? [{ name: f.name, in: 'query', required: f.required === true, schema: (Object.hasOwn(FIELD_JSON, String(f.type)) ? FIELD_JSON[String(f.type)] : undefined) ?? { type: 'string' } }] : [])) }
           : {}),
         responses: {
           '200': responseSchema

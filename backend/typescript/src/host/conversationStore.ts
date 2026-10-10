@@ -18,6 +18,7 @@
  * @see docs/adr/0043-persistent-conversations.md
  */
 
+import { agentStorageId } from '../executor/agentIdAliases.js';
 import { createHash } from 'node:crypto';
 import { DurableCollection } from './hostExtPersistence.js';
 import { setReadMarker, deleteReadMarkersOf } from './conversationReadState.js';
@@ -100,6 +101,10 @@ export interface ConversationParticipant {
   responsePolicy?: 'all' | 'mention';
 }
 
+/** ADR 0777 — CANVAS only: a builder WORKFLOW's binding is ADR 0773's pairing
+ *  context (`builder-pair` PairContext), which owns that concept. */
+export interface ConversationFocus { kind: 'canvas'; id: string }
+
 export interface ConversationMeta {
   conversationId: string;
   tenantId: string;
@@ -137,11 +142,23 @@ export interface ConversationMeta {
   branchedFrom?: { conversationId: string; fromSeq: number };
   /** ADR 0126 — channel descriptor (only on `type:'channel'`). v1 local-host;
    *  presence/typing/receipts are RFC-gated + NOT carried here. */
-  channel?: { name: string; description?: string; visibility: 'public' | 'private'; archived?: boolean };
+  channel?: {
+    name: string; description?: string; visibility: 'public' | 'private'; archived?: boolean;
+    /** ADR 0852 D5 — a POINTER to an org-visible project this channel works on
+     *  (not ownership: `ownerSubject` keeps its meaning). Set by the channel owner
+     *  with write on the project. */
+    boundProjectId?: string;
+  };
   /** ADR 0132 — per-conversation capability scope CONFIG (the user's narrowing of
    *  the agent's permitted tools). Absent ⇒ agent-default (no narrowing). The
    *  resolved EFFECTIVE set is stamped per-run in `run.metadata.capabilityScope`. */
   capabilityScope?: ConversationCapabilityScope;
+  /** ADR 0777 — the entity an EMBEDDED chat sits beside (the builder's open
+   *  workflow, the CAD editor's canvas). A tool DEFAULT only: never affects who
+   *  may see the conversation (that is `ownerSubject`), never widens access
+   *  (every tool re-checks its own predicate on the resolved id). Server-set,
+   *  after the route verified the caller may read the entity. */
+  focus?: ConversationFocus;
   participants: ConversationParticipant[];
   createdAt: string;
   updatedAt: string;
@@ -161,7 +178,10 @@ const now = (): string => new Date().toISOString();
 /** The deterministic 1:1 dedup key for an owner + the single other party
  *  (order-independent), so reopening a DM never forks a new conversation. */
 export function dmKeyOf(a: SubjectRef, b: SubjectRef): string {
-  return [a, b].sort().join('|');
+  // ADR 0763 — an `agent:<id>` party is keyed by the agent's storage spelling,
+  // so reopening a DM with a renamed agent resumes the existing conversation.
+  const norm = (r: SubjectRef): string => (r.startsWith('agent:') ? `agent:${agentStorageId(r.slice('agent:'.length))}` : r);
+  return [norm(a), norm(b)].sort().join('|');
 }
 
 /** Read a stored meta, normalizing the legacy `strategyContext` snapshot key to
@@ -196,6 +216,35 @@ export async function setConversationRun(tenantId: string, conversationId: strin
   }
   const ts = now();
   await metas.put({ conversationId, tenantId, type: 'agent', conversationRunId, participants: [], createdAt: ts, updatedAt: ts });
+}
+
+/** ADR 0777 — set (or clear) an embedded conversation's focus. The ROUTE owns
+ *  the checks (caller may see this conversation; caller may read the entity).
+ *  A conversation with no meta yet (an ephemeral embed) gets one OWNED BY THE
+ *  CALLER: an embedded agent chat is 1:1, so this narrows visibility rather
+ *  than widening it (unlike the tenant-visible minimal meta the run/scope
+ *  setters create). */
+export async function setConversationFocus(
+  tenantId: string,
+  conversationId: string,
+  focus: ConversationFocus | undefined,
+  callerUserId: string,
+): Promise<ConversationMeta> {
+  const key = `${tenantId}:${conversationId}`;
+  const existing = await loadMeta(key);
+  const ts = now();
+  if (existing) {
+    const next: ConversationMeta = { ...existing, updatedAt: ts };
+    if (focus) next.focus = focus; else delete next.focus;
+    await metas.put(next);
+    return next;
+  }
+  const created: ConversationMeta = {
+    conversationId, tenantId, type: 'agent', ownerUserId: callerUserId, participants: [], createdAt: ts, updatedAt: ts,
+    ...(focus ? { focus } : {}),
+  };
+  await metas.put(created);
+  return created;
 }
 
 /** ADR 0132 — set (or clear) a conversation's capability-scope CONFIG. Mirrors
@@ -499,7 +548,7 @@ export async function removeParticipant(tenantId: string, conversationId: string
 export async function setConversationChannel(
   tenantId: string,
   conversationId: string,
-  patch: Partial<{ name: string; description: string; visibility: 'public' | 'private'; archived: boolean }>,
+  patch: Partial<{ name: string; description: string; visibility: 'public' | 'private'; archived: boolean; boundProjectId: string }>,
 ): Promise<ConversationMeta | null> {
   const meta = await loadMeta(`${tenantId}:${conversationId}`);
   if (!meta || meta.type !== 'channel' || !meta.channel) return null;
@@ -507,6 +556,7 @@ export async function setConversationChannel(
   // An empty-string description means CLEAR — drop the key so consumers never
   // see (and never have to special-case) `description: ''` (ADR 0192 D4).
   if (channel.description === '') delete channel.description;
+  if (channel.boundProjectId === '') delete channel.boundProjectId; // '' ⇒ unbind
   const next: ConversationMeta = { ...meta, channel, updatedAt: now() };
   await metas.put(next);
   return next;

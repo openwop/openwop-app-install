@@ -32,7 +32,7 @@ function identityEtag(identity: BrandIdentity | undefined): string {
 export function registerAppBrandRoutes(app: Express): void {
   // ── PUBLIC: the app identity the anonymous SPA applies at load (pre-auth) ──
   // Hardwired to the reserved app brand — NO id param, identity subset only.
-  app.get('/v1/host/openwop-app/public-brand', async (_req, res, next) => {
+  app.get('/host/openwop-app/public-brand', async (_req, res, next) => {
     try {
       const brand = await getAppBrand();
       const identity = brand.identity ?? {};
@@ -45,7 +45,7 @@ export function registerAppBrandRoutes(app: Express): void {
   });
 
   // ── ADMIN (superadmin): read the full app brand (working copy for the editor) ──
-  app.get('/v1/host/openwop-app/app-brand', async (req, res, next) => {
+  app.get('/host/openwop-app/app-brand', async (req, res, next) => {
     try {
       requireSuperadmin(req, 'App-brand editing');
       res.json({ brand: await getAppBrand() });
@@ -53,7 +53,7 @@ export function registerAppBrandRoutes(app: Express): void {
   });
 
   // ── ADMIN (superadmin): edit the app brand identity (+ name/description) ──
-  app.put('/v1/host/openwop-app/app-brand', async (req, res, next) => {
+  app.put('/host/openwop-app/app-brand', async (req, res, next) => {
     try {
       requireSuperadmin(req, 'App-brand editing');
       const body = (req.body ?? {}) as { name?: unknown; description?: unknown; identity?: unknown };
@@ -74,7 +74,7 @@ export function registerAppBrandRoutes(app: Express): void {
   // through the PUT above (same `safeBrandAsset` validation as ever). Copying
   // severs the public logo from any tenant's asset lifecycle. Raster-only —
   // SVG is rejected here (no sanitizer dependency; ADR 0511 §2).
-  app.post('/v1/host/openwop-app/app-brand/assets', async (req, res, next) => {
+  app.post('/host/openwop-app/app-brand/assets', async (req, res, next) => {
     try {
       requireSuperadmin(req, 'App-brand editing');
       const body = (req.body ?? {}) as { slot?: unknown; contentBase64?: unknown; contentType?: unknown };

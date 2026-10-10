@@ -6,9 +6,14 @@
  * hook + fires it; `commerce/subscriptions.ts` registers the handler. Default = no-op ⇒
  * billing is byte-identical when the product-subscriptions feature is absent/demo-mode.
  */
+import { createLogger } from '../../observability/logger.js';
+
+const log = createLogger('billing');
+
 export interface SubscriptionInvoicePaid {
   tenantId: string;
-  /** The Stripe subscription id on the paid invoice (`invoice.subscription`). */
+  /** The Stripe subscription id on the paid invoice (`parent.subscription_details.subscription`
+   *  on the pinned clover API version; `invoice.subscription` before basil — ADR 0786 D3). */
   stripeSubscriptionId: string;
   /** The Stripe invoice id (`invoice.id`) — the handler dedupes the cycle on this so a
    *  re-delivered / retried event never places a second period order (ADR 0279 /architect
@@ -25,8 +30,21 @@ export function setSubscriptionInvoiceHook(fn: SubscriptionInvoiceHook | null): 
 
 /** Called by billing's `invoice.paid` branch; the documented no-op when unwired. Never
  *  throws into the webhook path (a subscription-cycle failure must not fail the whole
- *  Stripe event — it's retried on the next delivery). */
+ *  Stripe event).
+ *
+ *  ADR 0786 correction: the old comment said a failure "is retried on the next
+ *  delivery". It is not — the webhook answers 2xx, so Stripe never redelivers, and
+ *  the swallowed error was not even logged. It is now logged loudly so a lost
+ *  period order is at least visible; whether to propagate (the cycle dedupes by
+ *  invoiceId, so a retry is safe) is filed as BILLWF-20. */
 export async function fireSubscriptionInvoicePaid(e: SubscriptionInvoicePaid): Promise<void> {
   if (!hook || !e.stripeSubscriptionId) return;
-  try { await hook(e); } catch { /* swallowed — the event is retried; the cycle dedupes by invoiceId */ }
+  try {
+    await hook(e);
+  } catch (err) {
+    log.error('subscription invoice.paid hook failed — this period order was NOT placed and Stripe will not redeliver', {
+      tenantId: e.tenantId, stripeSubscriptionId: e.stripeSubscriptionId, invoiceId: e.invoiceId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }

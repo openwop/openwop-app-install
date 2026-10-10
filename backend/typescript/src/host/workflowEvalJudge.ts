@@ -63,7 +63,7 @@ function parseVerdict(reply: string): { pass: boolean; score?: number; reason: s
  *  as a FAILED assertion with the reason visible — ADR 0477 §3). */
 export function tenantEvalJudge(tenantId: string): EvalJudge {
   return async ({ criteria, output, threshold }) => {
-    const dispatch = await resolveHeadlessAi(tenantId, 'text');
+    const dispatch = await resolveHeadlessAi(tenantId, 'text', { featureId: 'evals' });
     if (!dispatch) {
       return { pass: false, detail: 'judge_unavailable: no managed or tenant-default AI provider is configured (Settings → AI defaults)' };
     }

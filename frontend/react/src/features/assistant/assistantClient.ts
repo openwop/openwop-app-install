@@ -49,7 +49,17 @@ export interface AssistantLoop {
    *  as "last run: just now" beside a link to an older run. The panel renders
    *  this beside `lastRunAt`; showing one without the other is half the truth. */
   lastSkippedAt?: string;
-  lastSkipReason?: 'budget' | 'workflow-unresolved' | 'dispatch-error';
+  /** ADR 0787 — `feature-disabled` (the owning feature is off) and
+   *  `no-next-fire` (the cadence has no further slot; NOT a dropped fire). */
+  lastSkipReason?: 'budget' | 'workflow-unresolved' | 'dispatch-error' | 'feature-disabled' | 'plan-lapsed' | 'actor-inactive' | 'no-next-fire';
+  /** ADR 0662 D3 / ADR 0862 — how `lastRunId` ENDED, and (when it failed) its typed error
+   *  code. The server projected the status since it.14 and nothing rendered it, so a loop
+   *  failing most of its runs read "Last run …" beside a green On. */
+  lastRunStatus?: string;
+  lastRunErrorCode?: string;
+  /** ADR 0862 — the loop paused ITSELF after repeated connection refusals (code + when). */
+  autoPausedCode?: string;
+  autoPausedAt?: string;
 }
 
 export async function listLoops(): Promise<AssistantLoop[]> {
@@ -88,7 +98,7 @@ export interface AssistantHealth {
     taintedShare: number | null;
   };
   commitments: { open: number; stale: number; citationCoverage: number | null };
-  loops: { loopId: string; label: string; enabled: boolean }[];
+  loops: { loopId: string; label: string; enabled: boolean; lastRunStatus?: string }[];
 }
 
 export async function getAssistantHealth(): Promise<AssistantHealth | null> {

@@ -20,16 +20,25 @@ import { useTranslation } from 'react-i18next';
 import { NodePalette } from './palette/NodePalette.js';
 import { BuilderCanvas } from './canvas/BuilderCanvas.js';
 import { Inspector } from './inspector/Inspector.js';
-import { useBuilderStore } from './store/builderStore.js';
+import { PairRail } from './pair/PairRail.js';
+import { usePairStore } from './pair/pairStore.js';
+import { BUILDER_PAIR_TOGGLE } from './pair/InspectorPair.js';
+import { PairStatus } from './pair/PairStatus.js';
+import { registerQueryCommandSource } from '../ui/commandContributions.js';
+import { MessageCircleIcon as PairAskIcon } from '../ui/icons/index.js';
+import { useFeatureAccess } from '../featureToggles/FeatureAccessContext.js';
+import { useBuilderStore, enqueueBuilderWrite, adoptForkedWorkflow, adoptRestoreOutcome, resolveForkAlias, isCanvasPristine } from './store/builderStore.js';
 import { newWorkflowId } from './persistence/localStore.js';
 import { registerWorkflow } from './persistence/registerClient.js';
 import { serializeWithIdMap, SerializeError } from './schema/serialize.js';
 import { fromCanonicalDefinition, looksCanonical } from './schema/deserialize.js';
 import { buildChainPackManifest } from './schema/chainPackManifest.js';
-import { createRun, listMyRuns } from '../client/runsClient.js';
+import { catalogEntryByTypeId, loadDynamicCatalog } from './palette/catalogRegistry.js';
+import { createRun, listWorkflowRunCosts } from '../client/runsClient.js';
 import { classifyHttpError } from '../client/classifyHttpError.js';
 import { promoteWorkflow, listWorkflowSummaries } from '../workflows/workflowsClient.js';
-import { saveWorkflow } from './persistence/backendStore.js';
+import { saveWorkflow, HEAD_MOVED_REASON } from './persistence/backendStore.js';
+import { SyncFailureError } from '../client/config.js';
 import { toast } from '../ui/toast.js';
 import { useLiveRegion } from '../ui/announce.js';
 import { subscribeToRun } from '../client/streamsClient.js';
@@ -47,14 +56,13 @@ import {
   nextRangeSelection,
   floodSelection,
   canvasOrNowhereFocused,
-  useLatchedValue,
-  drawerEscapeHandler,
+  chainExportFailure,
   type PreflightIssue,
   type LimitIssue,
+  runRefusalMessage,
 } from './builderShellHelpers.js';
 import { listConnections, listProviders } from '../features/connections/connectionsClient.js';
 import { BuilderToolbar } from './BuilderToolbar.js';
-import { CreateWithAiPanel } from './CreateWithAiPanel.js';
 import { PublishHelpBanner } from './PublishHelpBanner.js';
 import { PreflightBanner, type UnboundConnection } from './PreflightBanner.js';
 import { RunOverlayBanner } from './RunOverlayBanner.js';
@@ -64,7 +72,7 @@ import { SyncFailureBanner } from './SyncFailureBanner.js';
 import { ProposalBanner } from './ProposalBanner.js';
 import { HistoryDrawer } from './HistoryDrawer.js';
 import { EvalsDrawer } from './EvalsDrawer.js';
-import { loadWorkflow as loadBackendWorkflowForRestore } from './persistence/backendStore.js';
+import { loadWorkflowWithHead as loadBackendWorkflowForRestore } from './persistence/backendStore.js';
 import { RemovedReferencedNodesNotice } from './RemovedReferencedNodesNotice.js';
 import { definitionMetadataFor } from './persistence/definitionMetadata.js';
 import { DebugSessionBanner } from './DebugSessionBanner.js';
@@ -73,6 +81,7 @@ import { fetchFleetStats, fetchWorkflowEstimate, type WorkflowCostEstimate } fro
 import { formatCurrency } from '../i18n/format.js';
 import { RunDrawer } from './RunDrawer.js';
 import type { ShortcutDef } from '../canvas/shortcuts.js';
+import type { TFunction } from 'i18next';
 import { CanvasSurfaceShell, type SurfaceShellConfig, type SurfaceShellCtx } from '../canvas/CanvasSurfaceShell.js';
 import { copySelection, pasteClipboard, duplicateSelection, hasClipboard } from './nodeClipboard.js';
 import { probeWorkflowCollabAvailable, useWorkflowCollabSession, type WorkflowCollabState } from './collab/workflowCollabSession.js';
@@ -88,6 +97,26 @@ export function BuilderShell({ onNewWorkflow }: Props) {
   const { t } = useTranslation('builder');
   const nav = useNavigate();
   const workflowId = useBuilderStore((s) => s.workflowId);
+  // ADR 0773 — the Pair Canvas rail (Pair · Inspect) replaces the Create-with-AI
+  // drawer when the `builder-pair` toggle is on; off, the builder is unchanged.
+  const pairEnabled = useFeatureAccess(BUILDER_PAIR_TOGGLE).enabled;
+  // A suggestion is about ONE workflow; switching workflows closes its review.
+  useEffect(() => {
+    usePairStore.getState().reset();
+    if (pairEnabled && workflowId) void usePairStore.getState().refreshRoom(workflowId);
+  }, [workflowId, pairEnabled]);
+  // G-01d — typing a sentence in ⌘K offers "Ask the Architect: …" (last row).
+  useEffect(() => {
+    if (!pairEnabled) return undefined;
+    return registerQueryCommandSource('builder-pair-ask', (query) => ({
+      id: 'builder-pair-ask',
+      label: t('pairCmdkAsk', { query }),
+      hint: t('pairCmdkAskHint'),
+      group: t('pairCmdkGroup'),
+      icon: PairAskIcon,
+      run: () => usePairStore.getState().ask(query),
+    }));
+  }, [pairEnabled, t]);
   const name = useBuilderStore((s) => s.name);
   const undo = useBuilderStore((s) => s.undo);
   const redo = useBuilderStore((s) => s.redo);
@@ -105,6 +134,7 @@ export function BuilderShell({ onNewWorkflow }: Props) {
   useEffect(() => { setGreenRun(false); }, [workflowId]);
 
   const [running, setRunning] = useState(false);
+  const runInFlight = useRef(false);
   const [error, setError] = useState<string | null>(null);
   // ADR 0483 (B5) — the large-canvas advisory: past the 200-node perf budget,
   // say so honestly ONCE per workflow per session (dismissible; muted — an
@@ -172,6 +202,14 @@ export function BuilderShell({ onNewWorkflow }: Props) {
     const c = collabRef.current;
     return c.active && c.status === 'live' ? c : null;
   };
+  // G-04c — a node toolbar's "Debug session" asks the shell to open it (the
+  // RunOverlayBanner handler — one debug path, not a second).
+  const debugRequest = usePairStore((s) => s.debugRequest);
+  const debugHandlerRef = useRef<(runId: string) => Promise<void>>(async () => undefined);
+  useEffect(() => {
+    if (debugRequest) void debugHandlerRef.current(debugRequest.runId);
+  }, [debugRequest]);
+
   const typeShortcuts = useCallback(({ announce }: SurfaceShellCtx): ShortcutDef[] => [
     // ⌘Z/⇧⌘Z — the surface owns undo (the zustand snapshot stack; the binding's
     // per-user undo while live).
@@ -254,7 +292,11 @@ export function BuilderShell({ onNewWorkflow }: Props) {
         announce(t('annNodeFloodSelected', { count: next.length }));
       },
     })),
-  ], [t, tc]);
+    // ADR 0773 D5 — the suggestion review verbs as registered commands (canon
+    // §7.1.6: every action is a command). Gated on a pending suggestion and on
+    // canvas-or-nowhere focus so a letter typed into a field is never eaten.
+    ...(pairEnabled ? pairShortcuts(announce, t) : []),
+  ], [t, tc, pairEnabled]);
   // ADR 0481 D5 — presence: identity + node selection over awareness; peers
   // mirror into the store for the canvas node markers; join/leave coalesced
   // into the polite live region below (the useCollabPresence precedent).
@@ -329,10 +371,6 @@ export function BuilderShell({ onNewWorkflow }: Props) {
   >(null);
   // Success summary from the last Validate click; null when none/cleared.
   const [validateOk, setValidateOk] = useState<string | null>(null);
-  // "Create with AI" drawer (ADR 0072/0073) — slides down from the header.
-  // `aiOpen` drives the slide; `aiHasOpened` keeps the embedded chat mounted
-  // after the first open (so reopen resumes and the slide-up can animate).
-  const [aiOpen, setAiOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [evalsOpen, setEvalsOpen] = useState(false);
   // ADR 0476 — pre-run cost hint (fail-soft; absent until data exists) + the
@@ -404,7 +442,8 @@ export function BuilderShell({ onNewWorkflow }: Props) {
     try {
       // ux-2 — the M2 server-side workflow filter: 'latest run' is truly THIS
       // workflow's latest, not whatever survived the tenant's global page.
-      const runs = await listMyRuns({ workflowId, limit: 25 });
+      // A host read: `costByNode` is not a v2 snapshot field (see listWorkflowRunCosts).
+      const runs = await listWorkflowRunCosts(workflowId, 25);
       const latest = runs
         .filter((r) => ['completed', 'failed', 'cancelled'].includes(r.status)
           && r.costByNode && Object.keys(r.costByNode).length > 0)
@@ -429,7 +468,6 @@ export function BuilderShell({ onNewWorkflow }: Props) {
   // ADR 0475 — outcome notice for the ?debugRun prefill (unmatched node ids
   // from an older-revision run are reported, never silently dropped).
   const [debugNotice, setDebugNotice] = useState<string | null>(null);
-  const [aiHasOpened, setAiHasOpened] = useState(false);
   const hostLimits = useHostLimits();
 
   // ADR 0137 — an accepted Ambient Work Graph suggestion arrives in router state.
@@ -443,27 +481,11 @@ export function BuilderShell({ onNewWorkflow }: Props) {
     const goal = seed.sampleGoal ?? seed.name;
     return t('aiSeedPrompt', { steps, goal: goal ?? steps, defaultValue: `Create a workflow that performs these steps in order: ${steps}.${goal ? ` Goal: ${goal}.` : ''}` });
   }, [seed, t]);
-  // ADR 0596 (`WFAU-3`) — LATCH the synthesized prompt, because the effect below
-  // clears the router state it is derived from. See `useLatchedValue`'s docblock
-  // for the batching mechanism this defeats; the short version is that the panel
-  // used to mount with `seedPrompt === undefined` on both ADR 0137 hand-offs.
-  const latchedSeedPrompt = useLatchedValue(seedPrompt);
-  // ADR 0596 (`WFAU-5`) — drawer focus management.
-  const aiDrawerRef = useRef<HTMLDivElement | null>(null);
-  const aiTriggerRef = useRef<HTMLButtonElement | null>(null);
-  // Focus moves INTO the drawer when it opens — the house pattern
-  // (`HistoryDrawer.tsx:44`, `EvalsDrawer.tsx:120`). Without it the drawer was
-  // reachable only by tabbing the whole toolbar again.
-  useEffect(() => { if (aiOpen) aiDrawerRef.current?.focus(); }, [aiOpen]);
-  const closeAiDrawer = useCallback(() => {
-    setAiOpen(false);
-    // Restore focus to the control that opened it. Deferred a frame: the drawer
-    // is still the active subtree at this point in the commit.
-    requestAnimationFrame(() => aiTriggerRef.current?.focus());
-  }, []);
   useEffect(() => {
     if (!seedPrompt) return;
-    setAiHasOpened(true); setAiOpen(true);
+    // ADR 0773 G-10e — the ADR 0137 hand-off seeds the Pair thread (the
+    // Create-with-AI drawer it used to open is retired).
+    usePairStore.getState().ask(seedPrompt);
     // Clear the history state so a refresh/back doesn't re-trigger the seeded turn.
     nav('.', { replace: true, state: {} });
   }, [seedPrompt, nav]);
@@ -547,6 +569,7 @@ export function BuilderShell({ onNewWorkflow }: Props) {
 
   // Grade-ux #4 — in-builder debug entry for a failed overlay run: the same
   // prefill the ?debugRun deep link performs, without leaving the canvas.
+  debugHandlerRef.current = (runId: string) => onDebugFromOverlayRun(runId);
   async function onDebugFromOverlayRun(runId: string): Promise<void> {
     try {
       const res = await prefillDebugSessionFromRun(workflowId, runId);
@@ -645,6 +668,20 @@ export function BuilderShell({ onNewWorkflow }: Props) {
   }
 
   async function onRun(force = false) {
+    // ADR 0770 D6 (`WBWF-13`) — re-entrancy guard, set SYNCHRONOUSLY. `running`
+    // is state, so it only disabled the button after the connection lookup
+    // below resolved; a double-click inside that await registered the workflow
+    // twice and started two runs.
+    if (runInFlight.current) return;
+    runInFlight.current = true;
+    try {
+      await runOnce(force);
+    } finally {
+      runInFlight.current = false;
+    }
+  }
+
+  async function runOnce(force: boolean) {
     setError(null);
     setValidateOk(null);
     const snap0 = useBuilderStore.getState().snapshot();
@@ -699,10 +736,31 @@ export function BuilderShell({ onNewWorkflow }: Props) {
       // head's ONLY writer: this register would 409 `workflow_room_live` and
       // kill the run. Skip it — the run executes the current server head
       // (the session's periodic derive) — and say so honestly.
+      // ADR 0789 — the id the register persisted under (a seeded workflow's edit
+      // forks); the run must start THAT id, not the one serialized above.
+      let runWorkflowId = def.workflowId;
       if (useBuilderStore.getState().collabLive) {
         toast.info(t('collabRunSessionState'));
       } else {
-        await registerWorkflow({ ...def, metadata: definitionMetadataFor(snap) });
+        // ADR 0770 D5 — register against the loaded head (read inside the
+        // serialized write turn, WBCD-5); adopt the new one.
+        const registered = await enqueueBuilderWrite(() => {
+          const base = useBuilderStore.getState().baseRevision;
+          // ADR 0789 — inside the write turn: a fork an earlier queued save
+          // adopted re-targets this register, and an untouched canvas says so.
+          const targetId = resolveForkAlias(def.workflowId);
+          return registerWorkflow({ ...def, workflowId: targetId, metadata: definitionMetadataFor(snap) }, {
+            ...(base ? { baseRevision: base } : {}),
+            ...(targetId === def.workflowId && isCanvasPristine(snap) ? { pristine: true } : {}),
+          });
+        });
+        if (registered.revision) useBuilderStore.getState().setBaseRevision(registered.revision);
+        // ADR 0789 — a seeded workflow's edit forked onto this tenant's own id:
+        // adopt it, and run THAT (the shared id still holds the unedited steps).
+        if (registered.forkedFrom && registered.workflowId !== def.workflowId) {
+          adoptForkedWorkflow(def.workflowId, registered.workflowId, registered.revision, (registered.repointFailed?.length ?? 0) > 0);
+        }
+        runWorkflowId = registered.workflowId;
       }
       // Omit body.tenantId so the BE infers from the authenticated
       // session/bearer (req.tenantId): `anon:<sid>` for cookie-anon
@@ -713,7 +771,7 @@ export function BuilderShell({ onNewWorkflow }: Props) {
       // ADR 0474 P1b — the builder's Run is a DRAFT run: it executes the head
       // just registered above, not the published revision (the host-local
       // metadata convention; production launches resolve published).
-      const res = await createRun({ workflowId: def.workflowId, inputs, metadata: { launch: 'draft' } });
+      const res = await createRun({ workflowId: runWorkflowId, inputs, metadata: { launch: 'draft' } });
       // Stay on the canvas and paint the run live, rather than navigating
       // straight to the text event log. The banner offers a jump to the
       // full run detail for the timeline / reasoning / inspector views.
@@ -722,6 +780,17 @@ export function BuilderShell({ onNewWorkflow }: Props) {
       if (err instanceof SerializeError) {
         setError(err.message);
         if (err.nodeId) useBuilderStore.getState().selectNode(err.nodeId);
+      } else if (err instanceof SyncFailureError && err.reason === HEAD_MOVED_REASON) {
+        // ADR 0770 D5 — someone else saved this workflow since it was opened:
+        // raise the SAME conflict banner the autosave does (Reload / Keep mine),
+        // rather than running over their version. The banner alone reports it
+        // (grade-ux WBUX-3: a second copy in the alert region was read twice).
+        useBuilderStore.setState({ syncState: 'failed', syncFailureStatus: err.status, syncFailureReason: err.reason });
+      } else if (err instanceof SyncFailureError) {
+        // grade-ux WBUX-1 — `registerWorkflow` throws the typed refusal now; its
+        // message is a machine code (`sync_failed_403: forbidden_scope`), which
+        // the generic branch below would have shown verbatim.
+        setError(runRefusalMessage(err, t));
       } else {
         // ADR 0482 (ux-1) — a budget-exhausted 429 gets the honest localized
         // budget sentence instead of the raw SDK message.
@@ -755,11 +824,21 @@ export function BuilderShell({ onNewWorkflow }: Props) {
   // (the authoring half of "publish as a chain pack" — the user submits
   // it via the PR-based registry flow; the app never signs/pushes). Runs
   // the same graph validation as Run, so cycles/orphans surface here too.
-  function onExportChainPack() {
+  // ONE failure path for both chain-export actions (builderShellHelpers).
+  function reportChainExportFailure(err: unknown): void {
+    const { message, selectNodeId } = chainExportFailure(err, useBuilderStore.getState().snapshot().nodes);
+    setError(message);
+    if (selectNodeId) useBuilderStore.getState().selectNode(selectNodeId);
+  }
+
+  async function onExportChainPack(): Promise<void> {
     setError(null);
     try {
+      // ADR 0766 — pins come from the host catalog; make sure it has loaded
+      // (cached after the first call) rather than blame the host for a race.
+      await loadDynamicCatalog();
       const snap = useBuilderStore.getState().snapshot();
-      const manifest = buildChainPackManifest(snap);
+      const manifest = buildChainPackManifest(snap, (typeId) => catalogEntryByTypeId(typeId)?.version);
       const blob = new Blob([JSON.stringify(manifest, null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -771,12 +850,7 @@ export function BuilderShell({ onNewWorkflow }: Props) {
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
     } catch (err) {
-      if (err instanceof SerializeError) {
-        setError(err.message);
-        if (err.nodeId) useBuilderStore.getState().selectNode(err.nodeId);
-      } else {
-        setError(err instanceof Error ? err.message : String(err));
-      }
+      reportChainExportFailure(err);
     }
   }
 
@@ -787,11 +861,14 @@ export function BuilderShell({ onNewWorkflow }: Props) {
   // This action materializes the manifest + opens a checklist with the
   // canonical GitHub registry directory URL so the operator can finish
   // the submission with one click into the registry.
-  function onPublishToRegistry() {
+  async function onPublishToRegistry(): Promise<void> {
     setError(null);
     try {
+      // ADR 0766 — pins come from the host catalog; make sure it has loaded
+      // (cached after the first call) rather than blame the host for a race.
+      await loadDynamicCatalog();
       const snap = useBuilderStore.getState().snapshot();
-      const manifest = buildChainPackManifest(snap);
+      const manifest = buildChainPackManifest(snap, (typeId) => catalogEntryByTypeId(typeId)?.version);
       const manifestJson = JSON.stringify(manifest, null, 2);
       // Strip `community.local.` prefix from the manifest name to get
       // the final slug; the registry directory uses the bare slug as
@@ -800,12 +877,7 @@ export function BuilderShell({ onNewWorkflow }: Props) {
       const slug = manifest.name.replace(/^community\.local\./, '');
       setPublishHelp({ slug, size: manifestJson.length, manifestJson });
     } catch (err) {
-      if (err instanceof SerializeError) {
-        setError(err.message);
-        if (err.nodeId) useBuilderStore.getState().selectNode(err.nodeId);
-      } else {
-        setError(err instanceof Error ? err.message : String(err));
-      }
+      reportChainExportFailure(err);
     }
   }
 
@@ -910,9 +982,6 @@ export function BuilderShell({ onNewWorkflow }: Props) {
           onToggleHeatmap={() => { void onToggleHeatmap(); }}
           costHeatmapOn={failureHeat !== null && failureHeatMode === 'cost'}
           onToggleCostHeatmap={() => { void onToggleCostHeatmap(); }}
-          aiOpen={aiOpen}
-          aiTriggerRef={aiTriggerRef}
-          onCreateWithAi={() => { setAiHasOpened(true); setAiOpen((v) => !v); }}
           collab={collabAvailable ? {
             status: collabChipStatus,
             peerCount: collabPeerCount,
@@ -927,31 +996,10 @@ export function BuilderShell({ onNewWorkflow }: Props) {
             and without atomic some AT reads only the CHANGED portion — i.e.
             just the marker. Matches GlobalLiveRegion. */}
         <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">{collabAnnounce}</div>
-        {/* ADR 0596 (`WFAU-5`) — the focus/Escape pattern BOTH sibling builder
-            drawers already implement (`HistoryDrawer`, `EvalsDrawer`): focus in
-            on open, Escape to close, focus restored to the trigger. Close lives
-            INSIDE the collapsing region, so without restoration activating it
-            stranded focus on <body> when `visibility:hidden` landed 220 ms later.
-            `inert` when closed rather than `aria-hidden` alone: `aria-hidden`
-            flips synchronously while `visibility` lags the transition, so during
-            the close animation visible, focusable content sat inside an
-            aria-hidden subtree (WCAG 4.1.2). `inert` removes it from BOTH the
-            a11y tree and the tab order for exactly that window. */}
-        <div
-          className="builder-ai-drawer"
-          id="builder-ai-drawer"
-          data-open={aiOpen ? 'true' : 'false'}
-          aria-hidden={!aiOpen}
-          {...(aiOpen ? {} : { inert: '' })}
-          tabIndex={-1}
-          ref={aiDrawerRef}
-          onKeyDown={drawerEscapeHandler(closeAiDrawer)}
-        >
-          <div className="builder-ai-drawer-inner">
-            {aiHasOpened && <CreateWithAiPanel onClose={closeAiDrawer} open={aiOpen} {...(latchedSeedPrompt ? { seedPrompt: latchedSeedPrompt } : {})} />}
-          </div>
-        </div>
-        {error && <div role="alert" className="alert error builder-toolbar-error">{error}</div>}
+        {/* grade-ux U-8 — a role=alert region that MOUNTS with its text inside is
+            not reliably announced (DESIGN §4.6 rule 8); `announce` speaks it
+            assertively, the branch for a failed user action. */}
+        {error && <div className="builder-toolbar-slot"><Notice variant="error" announce={error}>{error}</Notice></div>}
         {validateOk && (
           <div className="alert success builder-toolbar-error" role="status">
             <CheckIcon size={14} /> {validateOk}
@@ -982,10 +1030,22 @@ export function BuilderShell({ onNewWorkflow }: Props) {
             workflowId={workflowId}
             open={historyOpen}
             onClose={() => setHistoryOpen(false)}
-            onRestored={() => {
+            onRestored={(outcome) => {
               // Reload the restored head into the canvas (the BuilderTab load path).
-              void loadBackendWorkflowForRestore(workflowId).then((restored) => {
-                if (restored) useBuilderStore.getState().loadFromSaved(restored);
+              // ADR 0770 D5 (grade-code WBCD-4) — adopt the restored head's revision
+              // with it (one fresh read), or the next autosave carries no base; and
+              // surface a failed reload — `loadWorkflow` throws now, and an
+              // unhandled rejection here left the pre-restore canvas live, whose
+              // next autosave silently reverted the rollback.
+              // ADR 0789 — restoring a SHARED (seeded) workflow forked it: adopt the
+              // fork first (store, cache, URL), then reload THAT, never the shared id.
+              const restoredId = adoptRestoreOutcome(workflowId, outcome);
+              void loadBackendWorkflowForRestore(restoredId).then(({ workflow: restored, headRevision }) => {
+                if (!restored) return;
+                useBuilderStore.getState().loadFromSaved(restored);
+                useBuilderStore.getState().setBaseRevision(headRevision);
+              }).catch((err: unknown) => {
+                toast.error(err instanceof Error ? err.message : String(err));
               });
             }}
           />
@@ -1040,30 +1100,83 @@ export function BuilderShell({ onNewWorkflow }: Props) {
       defaultW: 260,
     },
     railR: {
-      content: <Inspector />,
-      className: 'builder-rail builder-rail--inspector',
-      label: t('inspectorRail'),
+      content: pairEnabled ? <PairRail /> : <Inspector />,
+      className: `builder-rail builder-rail--inspector${pairEnabled ? ' builder-rail--pair' : ''}`,
+      label: pairEnabled ? t('pairRailLabel') : t('inspectorRail'),
       expandLabel: t('expandInspector'),
       collapseLabel: t('collapseInspector'),
       resizeLabel: t('resizeInspector'),
       announceCollapsed: t('annInspectorCollapsed'),
       announceExpanded: t('annInspectorExpanded'),
-      defaultW: 320,
+      defaultW: pairEnabled ? 400 : 320,
     },
     center: (
       // BLD-6: corrupt node data (e.g. a NaN position from a bad import or
       // localStorage row) makes xyflow throw — without a boundary that
       // white-screens the whole builder. Contain the crash to the canvas.
       <ErrorBoundary label="builder canvas">
-        <BuilderCanvas />
+        <BuilderCanvas pairEnabled={pairEnabled} />
       </ErrorBoundary>
     ),
     // §7.2.5 / CV-17 — the run/inspect drawer (payloads live here).
     tail: <RunDrawer />,
+    // ADR 0773 G-01a — "suggestion: n pending · J/K to review" in the status edge.
+    ...(pairEnabled ? { statusExtra: <PairStatus /> } : {}),
     typeShortcuts,
     typeT: t,
     commandsGroupLabel: t('commandsGroup'),
   };
 
   return <CanvasSurfaceShell config={shellConfig} />;
+}
+
+/** ADR 0773 D5 — the suggestion-review commands. Enabled only while a
+ *  suggestion has pending ops and focus is on the canvas (or nowhere). */
+function pairShortcuts(announce: (msg: string) => void, t: TFunction<'builder'>): ShortcutDef[] {
+  const ps = usePairStore.getState;
+  const pending = (): boolean => ps().opState.some((x) => x === 'pending');
+  const focused = (): boolean => ps().focusedOp !== null;
+  return [
+    { combo: 'j', labelKey: 'shortcutPairNext', group: 'type', enabled: () => pending() && canvasOrNowhereFocused(), run: () => { ps().step(1); } },
+    { combo: 'k', labelKey: 'shortcutPairPrev', group: 'type', enabled: () => pending() && canvasOrNowhereFocused(), run: () => { ps().step(-1); } },
+    {
+      combo: 'mod+enter', labelKey: 'shortcutPairKeep', group: 'type',
+      enabled: () => pending() && focused() && canvasOrNowhereFocused(),
+      run: () => { const i = ps().focusedOp; if (i === null) return; const r = ps().keep([i]); announce(t('pairAnnKept', { count: r.kept.length })); },
+    },
+    {
+      combo: 'mod+backspace', labelKey: 'shortcutPairDrop', group: 'type',
+      enabled: () => pending() && focused() && canvasOrNowhereFocused(),
+      run: () => { const i = ps().focusedOp; if (i === null) return; ps().drop([i]); announce(t('pairAnnDropped')); },
+    },
+    {
+      combo: 'mod+shift+enter', labelKey: 'shortcutPairKeepAll', group: 'type', enabled: () => pending() && canvasOrNowhereFocused(),
+      run: () => { const r = ps().keepAll(); announce(t('pairAnnKept', { count: r.kept.length })); },
+    },
+    // P11 — Esc tucks the review away; the changes stay drawn and J/K brings it back.
+    {
+      combo: 'escape', labelKey: 'shortcutPairCloseReview', group: 'type',
+      enabled: () => pending() && ps().reviewOpen && canvasOrNowhereFocused(),
+      run: () => { ps().closeReview(); announce(t('pairAnnReviewClosed')); },
+    },
+    // Not canvas-gated (named in shortcutScope's exempt list): it only MOVES
+    // focus to the Pair composer, so it may fire from a rail button or the
+    // Inspector chrome. It never fires while typing in a field — the registry's
+    // keydown owner skips text contexts (`inTextContext`) — review CR-9.
+    {
+      combo: 'mod+.', labelKey: 'shortcutPairAsk', group: 'type',
+      enabled: () => document.getElementById('pair-panel-pair') !== null,
+      run: () => {
+        // P11 — from the canvas with something selected, the prompt opens AT the
+        // selection (the node toolbar's inline ask); otherwise it is the rail's.
+        const sel = useBuilderStore.getState().selectedNodeIds;
+        if (canvasOrNowhereFocused() && sel.length > 0) {
+          ps().requestInlineAsk(sel.length === 1 ? sel[0]! : '*');
+          return;
+        }
+        ps().setTab('pair');
+        requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('#pair-panel-pair textarea')?.focus());
+      },
+    },
+  ];
 }

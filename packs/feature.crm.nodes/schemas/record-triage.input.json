@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.crm.nodes/1.11.0/record-triage.input.json",
+  "title": "CrmRecordTriageInput",
+  "description": "Read from the merged `{ ...ctx.config, ...ctx.inputs }` bag. `triage` is the upstream `triage` node's output; its fields may also arrive flat.",
+  "type": "object",
+  "properties": {
+    "contactId": {
+      "type": "string"
+    },
+    "triage": {
+      "type": "object",
+      "properties": {
+        "variant": {
+          "type": "string",
+          "enum": [
+            "basic",
+            "enriched"
+          ]
+        },
+        "score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "priority": {
+          "type": "string",
+          "enum": [
+            "low",
+            "normal",
+            "high"
+          ]
+        }
+      }
+    }
+  },
+  "additionalProperties": true
+}

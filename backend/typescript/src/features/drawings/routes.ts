@@ -11,7 +11,7 @@ import { validateDrawingDoc } from './validateDrawingDoc.js';
 
 export function registerDrawingsEditorRoutes(deps: RouteDeps): void {
   registerCanvasEditorRoutes(deps, {
-    basePath: '/v1/host/openwop-app/drawings',
+    basePath: '/host/openwop-app/drawings',
     feature: { toggleId: 'drawings', label: 'Drawings' },
     canvasTypeId: 'canvas.drawing',
     // ADR 0359 Phase 5 — collab-capable (both toggles enforced at the socket).

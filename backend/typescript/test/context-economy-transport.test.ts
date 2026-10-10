@@ -32,6 +32,14 @@ function harness(acceptEncoding: string | undefined) {
     getHeader: (k: string) => headers[k.toLowerCase()],
     setHeader: (k: string, v: string) => { headers[k.toLowerCase()] = v; },
     removeHeader: (k: string) => { delete headers[k.toLowerCase()]; },
+    // Express's res.vary APPENDS (never overwrites) — the middleware now uses it
+    // so it cannot erase a Vary an earlier middleware declared.
+    vary: (field: string) => {
+      const have = (headers['vary'] ?? '').split(',').map((f) => f.trim()).filter(Boolean);
+      for (const f of field.split(',').map((x) => x.trim()).filter(Boolean)) if (!have.some((h) => h.toLowerCase() === f.toLowerCase())) have.push(f);
+      headers['vary'] = have.join(', ');
+      return res;
+    },
     end: (buf: Buffer) => { ended = buf; return res; },
     json: ((body: unknown) => { ended = Buffer.from(JSON.stringify(body)); return res; }) as Response['json'],
   } as unknown as Response;

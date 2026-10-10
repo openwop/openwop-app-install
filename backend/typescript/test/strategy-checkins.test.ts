@@ -25,15 +25,15 @@ afterAll(async () => { await closeApp(); });
 
 const client = (): Client => makeClient(() => BASE);
 
-const S = '/v1/host/openwop-app/strategy';
+const S = '/host/openwop-app/strategy';
 const freshTenant = (): string => `org:ci-${Date.now()}-${n++}`;
 
 async function ownerWithStrategy(measured = true): Promise<{ owner: Client; orgId: string; s: any; tenantId: string }> {
   const tenantId = freshTenant();
   const owner = client();
-  const login = await owner.post('/v1/host/openwop-app/test/login', { email: uniqEmail('ci'), tenantId });
+  const login = await owner.post('/host/openwop-app/test/login', { email: uniqEmail('ci'), tenantId });
   expect(login.status).toBe(201);
-  const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
+  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
   const s = (await owner.post(S, {
     orgId, title: 'Measured plan', scope: 'org',
     objectives: [{
@@ -141,7 +141,7 @@ describe('check-ins — human route vs agent surface vs sync (ADR 0231 actor cla
 // and from the strategy page are the SAME CAS operation (no double-decide, no
 // bespoke minting).
 describe('check-in ↔ shared approval (D3 reconciliation)', () => {
-  const APPR = '/v1/host/openwop-app/approvals';
+  const APPR = '/host/openwop-app/approvals';
 
   it('a proposed check-in raises a strategy-checkin approval in the reviews inbox', async () => {
     const { owner, s, tenantId } = await ownerWithStrategy();

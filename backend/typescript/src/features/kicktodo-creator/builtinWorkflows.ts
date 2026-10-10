@@ -36,9 +36,9 @@ const SIM_CREDENTIAL_REF = 'managed:openwop-free';
  *  (ADR 0458 §2.2 / ADR 0442 convene precedent). `port` names the input the
  *  `sim-collect` node reads each verdict from. */
 const SIM_STAGES = [
-  { nodeId: 'sim-newcomer', agentId: 'feature.kicktodo.agents.sim-newcomer', port: 'newcomer' },
-  { nodeId: 'sim-time-poor', agentId: 'feature.kicktodo.agents.sim-time-poor', port: 'timePoor' },
-  { nodeId: 'sim-skeptic', agentId: 'feature.kicktodo.agents.sim-skeptic', port: 'skeptic' },
+  { nodeId: 'sim-newcomer', agentId: 'vendor.openwop-app.kicktodo.agents.sim-newcomer', port: 'newcomer' },
+  { nodeId: 'sim-time-poor', agentId: 'vendor.openwop-app.kicktodo.agents.sim-time-poor', port: 'timePoor' },
+  { nodeId: 'sim-skeptic', agentId: 'vendor.openwop-app.kicktodo.agents.sim-skeptic', port: 'skeptic' },
 ] as const;
 
 const SLOTS = [0, 1, 2, 3] as const;

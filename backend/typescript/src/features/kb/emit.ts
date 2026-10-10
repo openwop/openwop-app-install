@@ -51,9 +51,8 @@
  *
  * `KB_EVENT_TYPES` is the closed-world catalog leg: `kbMutated`'s
  * `entity`/`verb` pair is typed against `KB_EVENT_VERBS`, and
- * `test/host-event-catalog-parity.test.ts` asserts the frontend's hand-listed
- * `KNOWN_HOST_EVENT_TYPES ∩ host.kb.*` equals this set in BOTH directions,
- * pinned to an exact count.
+ * `test/adr0825-rfc0236-host-events.test.ts` asserts the host-event catalog
+ * (`host/hostEventTypes.ts`) ∩ `host.kb.*` equals this set in BOTH directions.
  */
 import { emitHostEvent, type HostEventOrigin } from '../../host/hostEventDispatcher.js';
 

@@ -205,6 +205,7 @@ export async function runRunTool(deps: StartRunDeps, input: Record<string, unkno
 export function registerDestinationSyncAgentTools(deps: StartRunDeps): void {
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: DESTINATION_SYNC_LIST_TOOL_ID,
       description:
@@ -218,6 +219,7 @@ export function registerDestinationSyncAgentTools(deps: StartRunDeps): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: DESTINATION_SYNC_DRY_RUN_TOOL_ID,
       description:
@@ -238,6 +240,9 @@ export function registerDestinationSyncAgentTools(deps: StartRunDeps): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
+    // ADR 0834 D4 — forwards model-supplied records to a peer host (off-host egress).
+    safeModeApproval: true,
     def: {
       name: DESTINATION_SYNC_RUN_TOOL_ID,
       description:

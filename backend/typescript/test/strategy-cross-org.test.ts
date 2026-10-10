@@ -43,15 +43,15 @@ beforeAll(async () => {
 afterAll(async () => { await closeApp(); });
 
 const client = (): Client => makeClient(() => BASE);
-const S = '/v1/host/openwop-app/strategy';
-const PM = '/v1/host/openwop-app/priority-matrix';
+const S = '/host/openwop-app/strategy';
+const PM = '/host/openwop-app/priority-matrix';
 
-const mkOrg = (c: Client, name: string) => c.post('/v1/host/openwop-app/orgs', { name });
+const mkOrg = (c: Client, name: string) => c.post('/host/openwop-app/orgs', { name });
 const addMember = (owner: Client, orgId: string, subject: string, roles: string[]) =>
-  owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject, roles });
+  owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject, roles });
 
 async function signup(c: Client, tenantId: string): Promise<{ userId: string }> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail('xorg'), tenantId });
+  const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail('xorg'), tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }

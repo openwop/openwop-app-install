@@ -16,8 +16,9 @@
  */
 
 import { OpenwopError } from '../types.js';
+import { parseNodeRef } from './chainPinRule.js';
 import type { EdgeDef, WorkflowDefinition } from '../executor/types.js';
-import { resolveCapabilityFlag } from './capabilityOverlay.js';
+import { resolveCapabilityFlag, subWorkflowInputMappingHonoured } from './capabilityOverlay.js';
 import { dispatchCapability, validateDispatchFanOutConfig } from './dispatchFanOut.js';
 import { normalizeEdgeCondition } from './edgeConditionMapping.js';
 import {
@@ -186,7 +187,7 @@ export function checkMappingCapability(
     }
     if (node.typeId === 'core.subWorkflow') {
       const hasMapping = hasNonEmptyMapping(cfg, ['inputMapping']);
-      if (hasMapping && resolveCapabilityFlag('subWorkflow.inputMapping') !== true) {
+      if (hasMapping && !subWorkflowInputMappingHonoured()) {
         throw new OpenwopError(
           'validation_error',
           `Node '${node.nodeId}' (core.subWorkflow) declares non-empty inputMapping but the host does not advertise capabilities.subWorkflow.inputMapping: true.`,
@@ -428,6 +429,13 @@ export function validateWorkflowDefinition(raw: unknown): WorkflowDefinition {
     throw new OpenwopError('validation_error', 'Field `nodes` MUST be a non-empty array.', 400, { field: 'nodes' });
   }
   const seen = new Set<string>();
+  // grade-data D-6 — the v2 ids grammar admits an exact pin (`typeId@x.y.z`,
+  // RFC 0177 §E.1). The registry and executor key on the bare id, so a pinned
+  // reference is NORMALIZED here, the one choke every direct definition passes,
+  // and the pin is kept in `metadata.nodePins` (a chain-expanded definition keeps
+  // its pins under `metadata.expandedFrom.nodePins`, ADR 0766 D3). Before this,
+  // the bare-id pattern below refused a grammar-legal id with a 400.
+  const nodePins: Record<string, string> = {};
   const nodes = obj.nodes.map((n, i) => {
     if (!n || typeof n !== 'object') {
       throw new OpenwopError('validation_error', `nodes[${i}] MUST be an object.`, 400);
@@ -440,8 +448,21 @@ export function validateWorkflowDefinition(raw: unknown): WorkflowDefinition {
       throw new OpenwopError('validation_error', `Duplicate nodeId: ${node.nodeId}`, 400);
     }
     seen.add(node.nodeId);
-    if (typeof node.typeId !== 'string' || !TYPE_ID_PATTERN.test(node.typeId)) {
-      throw new OpenwopError('validation_error', `nodes[${i}].typeId MUST match [a-zA-Z0-9_.-]{1,128}.`, 400);
+    let typeId = node.typeId;
+    if (typeof typeId === 'string' && typeId.includes('@')) {
+      const ref = parseNodeRef(typeId);
+      if (ref.ranged || ref.version === null) {
+        throw new OpenwopError('validation_error', `nodes[${i}].typeId pins a node version, which MUST be exact (x.y.z) — a range or empty version is refused (RFC 0177 §E.1).`, 400, { field: `nodes[${i}].typeId` });
+      }
+      const prior = nodePins[ref.typeId];
+      if (prior !== undefined && prior !== ref.version) {
+        throw new OpenwopError('validation_error', `nodes[${i}].typeId pins ${ref.typeId}@${ref.version}, but another node pins ${ref.typeId}@${prior}; one definition cannot run two versions of a node type.`, 400, { field: `nodes[${i}].typeId` });
+      }
+      nodePins[ref.typeId] = ref.version;
+      typeId = ref.typeId;
+    }
+    if (typeof typeId !== 'string' || !TYPE_ID_PATTERN.test(typeId)) {
+      throw new OpenwopError('validation_error', `nodes[${i}].typeId MUST match [a-zA-Z0-9_.-]{1,128}, optionally pinned as @x.y.z.`, 400);
     }
     if (node.config != null && (typeof node.config !== 'object' || Array.isArray(node.config))) {
       throw new OpenwopError('validation_error', `nodes[${i}].config MUST be an object when present.`, 400);
@@ -497,9 +518,25 @@ export function validateWorkflowDefinition(raw: unknown): WorkflowDefinition {
         { field: `nodes[${i}].irreversibleEffect` },
       );
     }
+    // ADR 0770 D4 — §WorkflowNode `name` + `position`, the builder's authoring
+    // layout. Unlisted, this rebuild dropped both, so every reopen re-gridded
+    // the canvas and reverted renamed nodes (the allowlist-drop class again).
+    if (node.name !== undefined && (typeof node.name !== 'string' || node.name.length > 256)) {
+      throw new OpenwopError('validation_error', `nodes[${i}].name MUST be a string of at most 256 characters when present.`, 400, { field: `nodes[${i}].name` });
+    }
+    const position = node.position as { x?: unknown; y?: unknown } | undefined;
+    if (position !== undefined && (
+      !position || typeof position !== 'object' || Array.isArray(position)
+      || typeof position.x !== 'number' || !Number.isFinite(position.x)
+      || typeof position.y !== 'number' || !Number.isFinite(position.y)
+    )) {
+      throw new OpenwopError('validation_error', `nodes[${i}].position MUST be { x: number, y: number } when present.`, 400, { field: `nodes[${i}].position` });
+    }
     return {
       nodeId: node.nodeId,
-      typeId: node.typeId,
+      typeId,
+      ...(node.name !== undefined ? { name: node.name as string } : {}),
+      ...(position !== undefined ? { position: { x: position.x as number, y: position.y as number } } : {}),
       ...(node.config ? { config: node.config as Record<string, unknown> } : {}),
       ...(node.inputs ? { inputs: node.inputs as Record<string, unknown> } : {}),
       ...(node.outputRole !== undefined ? { outputRole: node.outputRole as 'primary' | 'secondary' } : {}),
@@ -589,6 +626,10 @@ export function validateWorkflowDefinition(raw: unknown): WorkflowDefinition {
       throw new OpenwopError('validation_error', 'Field `metadata` MUST be an object when present.', 400, { field: 'metadata' });
     }
     def.metadata = obj.metadata as Record<string, unknown>;
+  }
+  if (Object.keys(nodePins).length > 0) {
+    const prev = (def.metadata?.nodePins ?? {}) as Record<string, string>;
+    def.metadata = { ...(def.metadata ?? {}), nodePins: { ...prev, ...nodePins } };
   }
   if (obj.variables !== undefined) {
     if (!Array.isArray(obj.variables)) {

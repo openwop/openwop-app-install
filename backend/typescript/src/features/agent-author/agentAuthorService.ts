@@ -16,9 +16,12 @@
  * @see docs/adr/0514-agent-author-describe-to-create.md
  */
 
+import { OpenwopError, type Principal } from '../../types.js';
 import { getAgentRegistry } from '../../executor/agentRegistry.js';
 import { agentVisibleToTenant } from '../../host/agentVisibility.js';
 import { createRosterEntry, listRoster } from '../../host/rosterService.js';
+import { credentialScopesIn } from '../../host/protocolAuthorization.js';
+import { isPersonalTenantId } from '../../host/requestSubject.js';
 import { listAuthoredWorkflows } from '../workflow-author/workflowAuthorService.js';
 
 export const AUTONOMY_LEVELS = ['auto', 'guided', 'review'] as const;
@@ -128,6 +131,41 @@ export async function validateAgentDraft(value: unknown, opts: { tenantId: strin
 /** Validate then create through the SHARED wizard path. The created agent
  *  lands `enabled: false` — the draft-never-auto-activate consensus (ADR 0514
  *  §4): a human reviews and enables it in the workspace. */
+/**
+ * ADR 0775 D7 (architect B1) — the roster-WRITE authority for the two req-less
+ * persist lanes (the chat tool and the node surface). `POST /roster` gates on
+ * `workspace:write` (ADR 0775 D1); without this a viewer the route refuses
+ * could still create a roster agent by asking the Agent Author in chat, and a
+ * headless run could create one with no human at all. Same decision as the
+ * route, through the credential reading the route uses (`credentialScopesIn`):
+ * the acting user's tenant-wide scope union, or the implicit owner of their own
+ * personal workspace. Throws the
+ * route's `403 forbidden_scope`, also without a human.
+ */
+export async function assertAgentAuthorWrite(scope: {
+  tenantId: string;
+  actingUserId?: string | undefined;
+  personalTenant?: string | undefined;
+}): Promise<void> {
+  if (!scope.actingUserId) {
+    throw new OpenwopError('forbidden_scope', 'Creating an agent requires a signed-in user turn — it writes the roster.', 403, { requiredScope: 'workspace:write' });
+  }
+  // The implicit owner of their own personal workspace (the ADR 0617 D2 shape rule).
+  if (scope.personalTenant === scope.tenantId && isPersonalTenantId(scope.tenantId)) return;
+  // Grade-code ARCD-2 — the SAME reading the route's `callerHoldsTenantScope`
+  // makes for a person: `credentialScopesIn` (the tenant-wide scope union, and
+  // the `resolveEffectiveAccess` fallback for a non-member), not the
+  // member-union-only `assertTenantScope`. A req-less run knows ONE spelling of
+  // the human (the stamped canonical `actingUserId`), so a membership keyed ONLY
+  // under a legacy `oidc:<sub>` is refused here where the route admits it. That
+  // residual is safe-direction (it refuses, never admits) and is filed.
+  const principal: Principal = { principalId: scope.actingUserId, tenants: [scope.tenantId], token: '' };
+  const scopes = await credentialScopesIn(principal, scope.tenantId, scope.actingUserId);
+  if (!scopes.includes('workspace:write')) {
+    throw new OpenwopError('forbidden_scope', 'Missing required scope: workspace:write', 403, { requiredScope: 'workspace:write' });
+  }
+}
+
 export async function persistAgentDraft(value: unknown, opts: { tenantId: string }): Promise<{ rosterId: string; persona: string }> {
   const v = await validateAgentDraft(value, opts);
   if (!v.ok) {

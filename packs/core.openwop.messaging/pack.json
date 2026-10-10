@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.messaging",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Queue + stream primitives — publish, consume (trigger), ack/nack/dead-letter, stream subscribe/publish. Capability-gated on host.queueBus. Sibling to host.messaging (outbound-egress-only).",
   "author": "OpenWOP Working Group",
   "license": "Apache-2.0",
@@ -17,7 +17,7 @@
     "pubsub"
   ],
   "engines": {
-    "openwop": ">=1.0.0 <2.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "peerDependencies": {
     "queueBus": "supported"
@@ -132,5 +132,6 @@
       "inputSchemaRef": "schemas/stream-publish.input.json",
       "outputSchemaRef": "schemas/stream-publish.output.json"
     }
-  ]
+  ],
+  "kind": "node"
 }

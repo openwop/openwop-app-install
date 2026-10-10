@@ -71,6 +71,7 @@ import {
   type McpToolCallResult,
 } from './mcpSemantics.js';
 import { mcpRequestDigest, mintMcpRequestState, verifyMcpRequestState } from './mcpRequestState.js';
+import { findToolForCaller } from './mcpServerRegistry.js';
 import { classifyMcpRpcOutcome, recordMcpRequest, recordProtocolVersion } from '../observability/metricSeams.js';
 import {
   isErrorResponse,
@@ -94,7 +95,7 @@ const DISCOVER_TTL_MS = 3_600_000;
 
 /**
  * §D — `cacheScope` follows the TENANT BOUNDARY, not a guess about volatility.
- * Every list this host serves is derived from `listToolsForPrincipal` and the
+ * Every list this host serves is derived from `listToolsForCaller` (ADR 0788) and the
  * caller's tenant, so `private` is the only honest value; `public` is permitted
  * only when the result is byte-identical for every caller, which for a
  * multi-tenant host's tool list is never.
@@ -202,24 +203,24 @@ async function dispatchCurrentRequest(input: CurrentCodecInput): Promise<McpCode
       case 'tools/list':
         return ok(id, {
           resultType: 'complete',
-          tools: await toolsView(deps.principal),
+          tools: await toolsView(deps.caller),
           ttlMs: LIST_TTL_MS,
           cacheScope: PRIVATE,
         });
 
       case 'resources/list':
-        return ok(id, { resultType: 'complete', resources: resourcesView(), ttlMs: LIST_TTL_MS, cacheScope: PRIVATE });
+        return ok(id, { resultType: 'complete', resources: await resourcesView(deps.caller), ttlMs: LIST_TTL_MS, cacheScope: PRIVATE });
 
       case 'resources/templates/list':
         return ok(id, {
           resultType: 'complete',
-          resourceTemplates: resourceTemplatesView(),
+          resourceTemplates: await resourceTemplatesView(deps.caller),
           ttlMs: LIST_TTL_MS,
           cacheScope: PRIVATE,
         });
 
       case 'prompts/list':
-        return ok(id, { resultType: 'complete', prompts: promptsView(), ttlMs: LIST_TTL_MS, cacheScope: PRIVATE });
+        return ok(id, { resultType: 'complete', prompts: await promptsView(deps.caller), ttlMs: LIST_TTL_MS, cacheScope: PRIVATE });
 
       case 'tools/call':
         return await dispatchToolsCall(id, params, deps, asObject(meta[MCP_META_CLIENT_CAPABILITIES]));
@@ -290,6 +291,17 @@ async function dispatchToolsCall(
     }
     const interrupt = await deps.storage.getInterrupt(verdict.interruptId);
     if (!interrupt || interrupt.resolvedAt) {
+      return { status: 200, body: rpcError(id, RPC_INVALID_PARAMS, 'requestState failed verification') };
+    }
+    // ADR 0788 (grade-code MCPCD-5) — the state binds a PRINCIPAL id, and
+    // principal ids are not issuer-qualified, nor do they say which workspace the
+    // caller acts in now. So the retry is re-judged by the SAME caller-scoped
+    // rules as the first call: the run must belong to this request's tenant, and
+    // the tool must still be one this caller may call. A member removed from the
+    // workspace (or a tool switched off) between the rounds is refused here
+    // rather than answering the gate on a stale authority. Uniform on the wire.
+    const run = await deps.storage.getRun(interrupt.runId);
+    if (!run || run.tenantId !== deps.caller.tenantId || typeof params.name !== 'string' || !(await findToolForCaller(deps.caller, params.name))) {
       return { status: 200, body: rpcError(id, RPC_INVALID_PARAMS, 'requestState failed verification') };
     }
     const key = interruptRequestKey(interrupt);
@@ -531,7 +543,7 @@ async function dispatchResourcesRead(
   }
   const uri = String(params.uri);
   const view: Record<string, unknown> = { uri, text: outcome.text };
-  const mimeType = findResourceMimeType(uri);
+  const mimeType = await findResourceMimeType(deps.caller, uri);
   if (mimeType !== undefined) view.mimeType = mimeType;
   return ok(id, { resultType: 'complete', contents: [view], ttlMs: LIST_TTL_MS, cacheScope: PRIVATE });
 }
@@ -552,7 +564,7 @@ async function dispatchPromptsGet(
     ttlMs: LIST_TTL_MS,
     cacheScope: PRIVATE,
   };
-  const description = findPromptDescription(String(params.name));
+  const description = await findPromptDescription(deps.caller, String(params.name));
   if (description !== undefined) view.description = description;
   return ok(id, view);
 }

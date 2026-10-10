@@ -28,6 +28,7 @@ import { authedHeaders, config, fetchOpts } from './config.js';
 import { cachedRead } from './requestCache.js';
 import type { AgentInventoryEntry } from '@openwop/openwop';
 import { requestJson, ApiError } from './requestJson.js';
+import { ApiError as StatusError, readErrorMessage } from './errorEnvelope.js';
 
 export type AgentEntry = AgentInventoryEntry;
 
@@ -172,12 +173,10 @@ export async function updateUserAgent(
     fetchOpts({ method: 'PATCH', headers: authedHeaders({ 'content-type': 'application/json' }), body: JSON.stringify(patch) }),
   );
   if (!res.ok) {
-    let detail = `${res.status}`;
-    try {
-      const body = (await res.json()) as { message?: string };
-      if (body.message) detail = body.message;
-    } catch { /* ignore */ }
-    throw new Error(`updateUserAgent failed: ${detail}`);
+    // Carry the HTTP status (ARUX-12) so a viewer's 403 classifies as
+    // `forbidden`; the message text is unchanged.
+    const server = readErrorMessage(await res.json().catch(() => undefined));
+    throw new StatusError(`updateUserAgent failed: ${server ?? res.status}`, res.status, server);
   }
   return (await res.json()) as UserAgentProjection;
 }

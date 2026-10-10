@@ -10,12 +10,14 @@
  * TWO DESIGN CHOICES THAT MATTER MORE THAN THE CODE:
  *
  * 1. **The probe does NOT run inside the real plugin document.** Injecting probe
- *    script into a downloaded, untrusted plugin's `srcdoc` would mean editing a
+ *    script into a downloaded, untrusted plugin's document would mean editing a
  *    security-critical mount to test it — changing the thing under test. Instead
- *    this mounts its OWN first-party probe document using the **same exported
- *    `PLUGIN_SANDBOX` and `PLUGIN_CSP` constants** the real frame uses. Those are
- *    imported, never copied, so the test cannot drift from the boundary: weaken
- *    either constant and this goes red.
+ *    this mounts its OWN first-party probe document, delivered the way a plugin
+ *    frame is (ADR 0840): the host serves it with the same Content-Security-Policy
+ *    header builder, and it is mounted by `src` under the same exported
+ *    `PLUGIN_SANDBOX`. Weaken the header or the attribute and this goes red, and
+ *    because the probe travels the real path, a proxy that strips or replaces the
+ *    header turns it red too.
  *
  * 2. **`no-BYOK` is NOT probed, and is not given a tick.** It is the ABSENCE of a
  *    credential-bearing method from a closed allowlist — a property of the schema,
@@ -29,8 +31,8 @@ import { Button } from '../../ui/Button.js';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { CheckIcon, AlertIcon, ShieldIcon } from '../../ui/icons/index.js';
-import { PLUGIN_CSP, PLUGIN_SANDBOX, makePluginMessageHandler } from './PluginFrame.js';
-import type { ServedPlugin } from './pluginClient.js';
+import { PLUGIN_SANDBOX, makePluginMessageHandler } from './PluginFrame.js';
+import { isolationProbeUrl, type ServedPlugin } from './pluginClient.js';
 
 export type LegOutcome = 'pass' | 'fail' | 'running' | 'asserted' | 'inconclusive';
 
@@ -41,27 +43,6 @@ export interface LegResult {
   detail?: string;
 }
 
-/** The probe document. First-party, tiny, and mounted under the SAME sandbox + CSP
- *  as a real plugin. It reports what it observes; it never asserts a verdict — the
- *  host decides pass/fail, so the untrusted side cannot self-certify. */
-const PROBE_HTML = `<!doctype html><html><head>
-<meta http-equiv="Content-Security-Policy" content="${PLUGIN_CSP}">
-</head><body><script>
-(function () {
-  function send(m) { parent.postMessage(Object.assign({ probe: 'openwop-isolation' }, m), '*'); }
-  // Leg 1 — ISOLATED: with allow-scripts and NO allow-same-origin the document is
-  // an opaque origin, so origin serializes as "null".
-  try { send({ leg: 'isolated', origin: String(window.origin) }); }
-  catch (e) { send({ leg: 'isolated', origin: 'threw: ' + String(e) }); }
-  // Leg 2 — EGRESS-DENIED: default-src 'none' with no connect-src must block this.
-  // A REJECTED promise is the pass; a resolved one means egress worked.
-  try {
-    fetch('https://example.invalid/openwop-egress-probe', { mode: 'no-cors' })
-      .then(function () { send({ leg: 'egress', blocked: false, note: 'fetch resolved' }); })
-      .catch(function (e) { send({ leg: 'egress', blocked: true, note: String(e && e.name || e) }); });
-  } catch (e) { send({ leg: 'egress', blocked: true, note: 'threw: ' + String(e) }); }
-})();
-</script></body></html>`;
 
 /** How long to wait for the framed probe before calling a leg inconclusive. A
  *  timeout is NOT a pass — an unanswered probe proves nothing either way. */
@@ -107,9 +88,10 @@ export function IsolationSelfTest({ plugin }: { plugin: ServedPlugin | undefined
       nobyok: { id: 'nobyok', outcome: 'asserted' },
     });
     void runAllowlistLeg();
-    // Re-mount the probe frame by clearing then re-setting srcdoc.
+    // (Re-)mount the probe frame from the host, as a plugin frame is mounted. A
+    // fresh query string forces a real reload on every run.
     const f = frameRef.current;
-    if (f) { f.srcdoc = ''; f.srcdoc = PROBE_HTML; }
+    if (f) f.src = `${isolationProbeUrl()}?run=${Date.now()}`;
   }, [runAllowlistLeg]);
 
   useEffect(() => {
@@ -195,8 +177,8 @@ export function IsolationSelfTest({ plugin }: { plugin: ServedPlugin | undefined
 
       {ran ? <p className="u-fs-12 muted u-m-0">{t('selfTestNoByokNote')}</p> : null}
 
-      {/* The probe frame — same sandbox + CSP constants as a real plugin mount,
-          imported rather than copied so it cannot drift from the boundary. */}
+      {/* The probe frame — mounted by src from the host, under the same sandbox
+          constant and header policy as a real plugin mount (ADR 0840). */}
       <iframe
         ref={frameRef}
         title={t('selfTestFrameTitle')}

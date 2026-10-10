@@ -10,6 +10,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { BoxesIcon } from '../../ui/icons/index.js';
 
 let lockedId: string | null = 'crm';
+
 vi.mock('../navConfig/NavConfigProvider.js', () => ({
   useResolvedNav: () => ({
     workspace: [{ id: 'g', headerless: true, items: [{ to: '/crm', icon: BoxesIcon, label: 'CRM', featureId: 'crm' }] }],
@@ -49,10 +50,12 @@ describe('Sidebar — locked feature (ADR 0419)', () => {
     expect(home.querySelector('.app-header-sub')).toBeNull();
   });
 
-  it('a locked feature links to the feature store, not its own page', () => {
+  it('a locked feature links to the store for THAT feature (which opens its bundle), not its own page', () => {
     mount();
     const link = within(screen.getByLabelText('Primary')).getByRole('link', { name: /CRM/i });
-    expect(link.getAttribute('href')).toBe('/marketplace/bundles');
+    // ADR 0419 §8 — the store resolves `?feature=` to the bundle that sells it
+    // (BundleShopPage.test); the entry-chunk Sidebar does no lookup of its own.
+    expect(link.getAttribute('href')).toBe('/marketplace/bundles?feature=crm');
     expect(link.querySelector('.app-nav-lock')).toBeTruthy(); // the lock affordance
   });
 

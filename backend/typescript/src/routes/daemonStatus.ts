@@ -19,7 +19,7 @@ interface Deps {
 }
 
 export function registerDaemonStatusRoutes(app: Express, deps: Deps): void {
-  app.get('/v1/host/openwop-app/daemon-status', (_req, res) => {
+  app.get('/host/openwop-app/daemon-status', (_req, res) => {
     res.json(buildDaemonStatus(deps));
   });
 }

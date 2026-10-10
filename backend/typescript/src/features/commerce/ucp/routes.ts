@@ -20,7 +20,8 @@ import { authorizeOrgScope, requireFeatureEnabled, publicBaseUrl, requireString 
 import type { Scope } from '../../../host/accessControlService.js';
 import type { User } from '../../users/usersService.js';
 import { getOrg } from '../../../host/accessControlService.js';
-import { resolveOne } from '../../../host/featureToggles/service.js';
+import { resolveToggle } from '../../../host/featureToggles/service.js';
+import { ownerPublicRuntimeLapsed } from '../../../host/publicLapse.js';
 import { listProducts, getProduct, getCart, setCartItem, clearCart, checkoutCart, getOrder, markAsPaid, cancelOrder } from '../commerceService.js';
 import type { Product } from '../commerceService.js';
 import { resolveAp2Payment } from './ap2.js';
@@ -31,8 +32,8 @@ import {
 import { toUcpCatalogItem, toUcpCart, toUcpOrder, ucpDiscovery, oauthMetadata } from './ucpAdapter.js';
 
 const UCP_TOGGLE = 'commerce-ucp';
-const ADMIN_BASE = '/v1/host/openwop-app/commerce/orgs/:orgId/ucp';
-const UCP_BASE = '/v1/host/openwop-app/commerce/ucp/orgs/:orgId';
+const ADMIN_BASE = '/host/openwop-app/commerce/orgs/:orgId/ucp';
+const UCP_BASE = '/host/openwop-app/commerce/ucp/orgs/:orgId';
 
 /** Resolve the merchant org from the URL (tenant from the resource, never the request) and
  *  enforce the `commerce-ucp` toggle FOR THAT TENANT. Unknown org OR disabled surface ⇒ a
@@ -40,8 +41,11 @@ const UCP_BASE = '/v1/host/openwop-app/commerce/ucp/orgs/:orgId';
 async function resolveMerchant(orgId: string): Promise<{ tenantId: string; orgId: string; merchantName: string }> {
   const org = await getOrg(orgId);
   if (!org) throw new OpenwopError('not_found', 'Merchant not found.', 404, {});
-  const assignment = await resolveOne(UCP_TOGGLE, { tenantId: org.tenantId });
+  // ADR 0819 §1 opt-out — a PUBLIC lane (tenant from the resource): ADR 0419 never paywalls a shopper/visitor on the operator's plan.
+  const assignment = await resolveToggle(UCP_TOGGLE, { tenantId: org.tenantId });
   if (!assignment || !assignment.enabled) throw new OpenwopError('not_found', 'Merchant not found.', 404, {});
+  // ADR 0820 §7 — the owner-lapse policy (off unless the grace knob is set); same uniform 404.
+  if (await ownerPublicRuntimeLapsed(UCP_TOGGLE, org.tenantId)) throw new OpenwopError('not_found', 'Merchant not found.', 404, {});
   return { tenantId: org.tenantId, orgId, merchantName: org.name };
 }
 

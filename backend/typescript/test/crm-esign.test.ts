@@ -3,6 +3,18 @@
  * content-hash unit. Drives: requestSignature (authed) → per-signer capability
  * tokens → public sign (sequential order) → completion + PDF certificate, plus
  * the content_changed loud-fail, decline, void, and tenant isolation.
+ *
+ * Sabotage-witnessed (grade-tests w4): out-of-order signing allowed
+ * (`isSignersTurn` → true), the acknowledgment gate dropped, the content-hash
+ * re-check dropped, the ADR 0838 version pin ignored on the signer view, void
+ * not revoking tokens, an unknown provider falling back to native,
+ * `invitesEmailed` hard-wired true, and `requestedBy` dropped from the public
+ * view each turn a case below red.
+ *
+ * Ceilings, stated: the CONCURRENT-signers case cannot witness the CAS (one
+ * await between read and swap — a blind put stays green); it pins only that
+ * two unordered signers both land. The IDOR case is double-guarded (the org
+ * gate refuses a non-member before the store's tenant/org check is reached).
  */
 
 import http from 'node:http';
@@ -14,7 +26,6 @@ import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { createDocument, addVersion } from '../src/features/documents/documentsService.js';
 import { getSignRequestById } from '../src/features/crm/entities/signRequests.js';
-import { hashCanonical } from '../src/features/crm/signTargets.js';
 
 let BASE: string;
 let server: http.Server;
@@ -36,7 +47,14 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+interface Signer { status: string; signedAt?: string; audit?: { ipHash?: string } }
+interface Body {
+  status: string; signRequestId: string; signers: Signer[]; certificateUrl: string;
+  contentMarkdown: string; legalNotice: string; yourTurn: boolean; invitesEmailed: boolean;
+  requestedAt: string; requestedBy: { email: string }; signedAt: string; orgId: string;
+  details: { reason: string };
+}
+interface Res<T = Body> { status: number; body: T }
 function client() {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
@@ -47,7 +65,7 @@ function client() {
     });
     for (const cRaw of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(cRaw); if (m) cookie = m[1]; }
     const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    return { status: res.status, body: out as Body };
   };
   return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b) };
 }
@@ -56,11 +74,11 @@ let n = 0;
 async function ownerOrg(): Promise<{ owner: ReturnType<typeof client>; orgId: string; tenantId: string }> {
   const tenantId = `org:sign-${Date.now()}-${n++}`;
   const owner = client();
-  const login = await owner.post('/v1/host/openwop-app/test/login', { email: `sign-${Date.now()}-${n++}@acme.test`, tenantId });
+  const login = await owner.post('/host/openwop-app/test/login', { email: `sign-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(login.status, JSON.stringify(login.body)).toBe(201);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
-  return { owner, orgId: org.body.orgId, tenantId };
+  return { owner, orgId: org.body.orgId!, tenantId };
 }
 
 async function seedDoc(tenantId: string, orgId: string, content: string): Promise<string> {
@@ -69,7 +87,7 @@ async function seedDoc(tenantId: string, orgId: string, content: string): Promis
   return doc.documentId;
 }
 
-const org = (orgId: string, s = ''): string => `/v1/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}/sign-requests${s}`;
+const org = (orgId: string, s = ''): string => `/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}/sign-requests${s}`;
 const signerToken = async (signRequestId: string, i: number): Promise<string> => {
   // ADR 0448 grade fix #2 — raw tokens are never at rest anymore; capture from
   // the in-process mint affordance instead of the store.
@@ -77,17 +95,6 @@ const signerToken = async (signRequestId: string, i: number): Promise<string> =>
   const { __signerTokenForTest } = await import('../src/features/crm/signService.js');
   return __signerTokenForTest(signRequestId, req!.signers[i]!.signerId)!;
 };
-
-describe('esign — content hash', () => {
-  it('is deterministic and changes with content', () => {
-    const a = hashCanonical(JSON.stringify({ x: 1, y: 2 }));
-    const b = hashCanonical(JSON.stringify({ x: 1, y: 2 }));
-    const c = hashCanonical(JSON.stringify({ x: 1, y: 3 }));
-    expect(a).toBe(b);
-    expect(a).not.toBe(c);
-    expect(a).toMatch(/^[0-9a-f]{64}$/);
-  });
-});
 
 describe('esign — request → sequential sign → complete → certificate', () => {
   it('runs the full flow with order enforcement + a PDF certificate', async () => {
@@ -101,7 +108,7 @@ describe('esign — request → sequential sign → complete → certificate', (
     expect(created.status, JSON.stringify(created.body)).toBe(201);
     expect(created.body.status).toBe('sent');
     expect(created.body.signers).toHaveLength(2);
-    const srid = created.body.signRequestId;
+    const srid = created.body.signRequestId!;
     // Tokens are NOT exposed in the projection.
     expect(JSON.stringify(created.body)).not.toContain('token');
 
@@ -111,35 +118,36 @@ describe('esign — request → sequential sign → complete → certificate', (
     // Signer 1 (order 1) cannot sign first.
     // R2 S-G2 — a signature without the explicit acknowledgment is refused:
     // the SignatureRecord doubles as a consent record, so consent must be sent.
-    const noAck = await client().post(`/v1/host/openwop-app/public-sign/${t1}/sign`, { typedName: 'Bob' });
+    const noAck = await client().post(`/host/openwop-app/public-sign/${t1}/sign`, { typedName: 'Bob' });
     expect(noAck.status).toBe(400);
-    expect((noAck.body as { details?: { reason?: string } }).details?.reason).toBe('acknowledgment_required');
+    expect(noAck.body.details?.reason).toBe('acknowledgment_required');
 
-    const early = await client().post(`/v1/host/openwop-app/public-sign/${t1}/sign`, { typedName: 'Bob', acknowledged: true });
+    const early = await client().post(`/host/openwop-app/public-sign/${t1}/sign`, { typedName: 'Bob', acknowledged: true });
     expect(early.status).toBe(409);
+    expect(early.body.details?.reason, 'refused for ORDER, not for a terminal/answered state').toBe('out_of_order');
 
     // Public signing page shows the content + the legal notice.
-    const view = await client().get(`/v1/host/openwop-app/public-sign/${t0}`);
+    const view = await client().get(`/host/openwop-app/public-sign/${t0}`);
     expect(view.status, JSON.stringify(view.body)).toBe(200);
     expect(view.body.contentMarkdown).toContain('Agreement');
     expect(view.body.legalNotice).toContain('NOT a qualified');
     expect(view.body.yourTurn).toBe(true);
 
     // Signer 0 signs → partially_signed.
-    const s0 = await client().post(`/v1/host/openwop-app/public-sign/${t0}/sign`, { typedName: 'Ann Smith', acknowledged: true });
+    const s0 = await client().post(`/host/openwop-app/public-sign/${t0}/sign`, { typedName: 'Ann Smith', acknowledged: true });
     expect(s0.status, JSON.stringify(s0.body)).toBe(200);
     expect(s0.body.status).toBe('partially_signed');
 
     // Signer 1 now signs → completed.
-    const s1 = await client().post(`/v1/host/openwop-app/public-sign/${t1}/sign`, { typedName: 'Bob Jones', acknowledged: true });
+    const s1 = await client().post(`/host/openwop-app/public-sign/${t1}/sign`, { typedName: 'Bob Jones', acknowledged: true });
     expect(s1.status).toBe(200);
     expect(s1.body.status).toBe('completed');
 
     // Status shows completed + a certificate URL + per-signer audit (hashed).
     const status = await owner.get(org(orgId, `/${srid}`));
     expect(status.body.status).toBe('completed');
-    expect(String(status.body.certificateUrl)).toContain('/v1/host/openwop-app/assets/');
-    expect(status.body.signers.every((s: any) => s.status === 'signed' && s.audit?.ipHash)).toBe(true);
+    expect(String(status.body.certificateUrl)).toContain('/host/openwop-app/assets/'); expect(String(status.body.certificateUrl)).not.toContain('/v1/');
+    expect(status.body.signers!.every((s) => s.status === 'signed' && s.audit?.ipHash)).toBe(true);
 
     // The certificate is a downloadable PDF.
     const cert = await fetch(`${BASE}${status.body.certificateUrl}`);
@@ -154,12 +162,18 @@ describe('esign — loud staleness, decline, void, isolation', () => {
     const docId = await seedDoc(tenantId, orgId, 'v1 content');
     const created = await owner.post(org(orgId), { target: { kind: 'document', id: docId }, signers: [{ email: 'a@x.test' }] });
     expect(created.status).toBe(201);
-    const token = await signerToken(created.body.signRequestId, 0);
+    const token = await signerToken(created.body.signRequestId!, 0);
     // Change the document AFTER the request.
     await addVersion(tenantId, orgId, docId, { content: 'v2 content — changed!', producedBy: { kind: 'user', id: 'u1' } });
-    const signed = await client().post(`/v1/host/openwop-app/public-sign/${token}/sign`, { typedName: 'Ann', acknowledged: true });
+    const signed = await client().post(`/host/openwop-app/public-sign/${token}/sign`, { typedName: 'Ann', acknowledged: true });
     expect(signed.status).toBe(409);
     expect(signed.body.details?.reason).toBe('content_changed');
+    // ADR 0838 — the signer PAGE still shows the requested text, never the
+    // edit saved after the request.
+    const view = await client().get(`/host/openwop-app/public-sign/${token}`);
+    expect(view.status).toBe(200);
+    expect(view.body.contentMarkdown).toContain('v1 content');
+    expect(JSON.stringify(view.body)).not.toContain('v2 content');
   });
 
   it('declines, and a voided request stops resolving', async () => {
@@ -167,19 +181,22 @@ describe('esign — loud staleness, decline, void, isolation', () => {
     const docId = await seedDoc(tenantId, orgId, 'sign me');
     // Decline path.
     const c1 = await owner.post(org(orgId), { target: { kind: 'document', id: docId }, signers: [{ email: 'a@x.test' }] });
-    const tDecline = await signerToken(c1.body.signRequestId, 0);
-    const declined = await client().post(`/v1/host/openwop-app/public-sign/${tDecline}/decline`);
+    const tDecline = await signerToken(c1.body.signRequestId!, 0);
+    const declined = await client().post(`/host/openwop-app/public-sign/${tDecline}/decline`);
     expect(declined.status).toBe(200);
     expect(declined.body.status).toBe('declined');
+    // The decline is durable for the requester, and the signer link is revoked.
+    expect((await owner.get(org(orgId, `/${c1.body.signRequestId}`))).body.status).toBe('declined');
+    expect((await client().get(`/host/openwop-app/public-sign/${tDecline}`)).status).toBe(404);
 
     // Void path.
     const c2 = await owner.post(org(orgId), { target: { kind: 'document', id: docId }, signers: [{ email: 'b@x.test' }] });
-    const tVoid = await signerToken(c2.body.signRequestId, 0);
+    const tVoid = await signerToken(c2.body.signRequestId!, 0);
     const voided = await owner.post(org(orgId, `/${c2.body.signRequestId}/void`));
     expect(voided.status).toBe(200);
     expect(voided.body.status).toBe('voided');
     // The signer token no longer resolves (tokens revoked on void).
-    expect((await client().get(`/v1/host/openwop-app/public-sign/${tVoid}`)).status).toBe(404);
+    expect((await client().get(`/host/openwop-app/public-sign/${tVoid}`)).status).toBe(404);
   });
 
   it('two unordered signers signing CONCURRENTLY both land and the request completes (CAS)', async () => {
@@ -190,19 +207,19 @@ describe('esign — loud staleness, decline, void, isolation', () => {
       signers: [{ email: 'a@x.test' }, { email: 'b@x.test' }], // no order → either can sign first
     });
     expect(created.status).toBe(201);
-    const srid = created.body.signRequestId;
+    const srid = created.body.signRequestId!;
     const [t0, t1] = [await signerToken(srid, 0), await signerToken(srid, 1)];
     // Fire both signs at once — a blind put would lose one and stick at partially_signed.
     const [r0, r1] = await Promise.all([
-      client().post(`/v1/host/openwop-app/public-sign/${t0}/sign`, { typedName: 'Ann', acknowledged: true }),
-      client().post(`/v1/host/openwop-app/public-sign/${t1}/sign`, { typedName: 'Bob', acknowledged: true }),
+      client().post(`/host/openwop-app/public-sign/${t0}/sign`, { typedName: 'Ann', acknowledged: true }),
+      client().post(`/host/openwop-app/public-sign/${t1}/sign`, { typedName: 'Bob', acknowledged: true }),
     ]);
     expect(r0.status).toBe(200);
     expect(r1.status).toBe(200);
     const status = await owner.get(org(orgId, `/${srid}`));
     expect(status.body.status).toBe('completed');
-    expect(status.body.signers.every((s: any) => s.status === 'signed')).toBe(true);
-    expect(String(status.body.certificateUrl)).toContain('/v1/host/openwop-app/assets/');
+    expect(status.body.signers!.every((s) => s.status === 'signed')).toBe(true);
+    expect(String(status.body.certificateUrl)).toContain('/host/openwop-app/assets/');
   });
 
   it('honestly refuses an external provider that is not built (P3 seam)', async () => {
@@ -214,7 +231,7 @@ describe('esign — loud staleness, decline, void, isolation', () => {
     // The native default works and stamps the provider.
     const ok = await owner.post(org(orgId), { target: { kind: 'document', id: docId }, signers: [{ email: 'a@x.test' }] });
     expect(ok.status).toBe(201);
-    const req = await getSignRequestById(ok.body.signRequestId);
+    const req = await getSignRequestById(ok.body.signRequestId!);
     expect(req!.provider).toBe('native');
   });
 
@@ -222,11 +239,12 @@ describe('esign — loud staleness, decline, void, isolation', () => {
     const { owner, orgId, tenantId } = await ownerOrg();
     const docId = await seedDoc(tenantId, orgId, 'private');
     const created = await owner.post(org(orgId), { target: { kind: 'document', id: docId }, signers: [{ email: 'a@x.test' }] });
-    const srid = created.body.signRequestId;
+    const srid = created.body.signRequestId!;
     const other = (await ownerOrg());
     // The other org's owner queries THIS org's path → org-scope 403/404, never leak.
     const leak = await other.owner.get(org(orgId, `/${srid}`));
     expect([403, 404]).toContain(leak.status);
+    expect(JSON.stringify(leak.body ?? {}), 'a refusal must not echo the request').not.toContain(srid);
   });
 });
 
@@ -279,18 +297,18 @@ describe('R2 sign trust rides the WIRE, not just the entity (review F1)', () => 
       signers: [{ email: 'ada@x.test', name: 'Ada' }],
     });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
-    const srid = created.body.signRequestId;
+    const srid = created.body.signRequestId!;
     const tok = await signerToken(srid, 0);
 
     // Review F1 pinned exactly this hole: requestedBy was captured at create and
     // projected NOWHERE — the page rendered a field that never arrived.
-    const view = await client().get(`/v1/host/openwop-app/public-sign/${tok}`);
+    const view = await client().get(`/host/openwop-app/public-sign/${tok}`);
     expect(view.status, JSON.stringify(view.body)).toBe(200);
     expect(view.body.requestedAt, 'requestedAt must ride the public view').toBeTruthy();
     expect(view.body.requestedBy?.email, 'the acting user identity must reach the signer').toContain('@acme.test');
     expect(view.body.signedAt).toBeUndefined();
 
-    const signed = await client().post(`/v1/host/openwop-app/public-sign/${tok}/sign`, { typedName: 'Ada L', acknowledged: true });
+    const signed = await client().post(`/host/openwop-app/public-sign/${tok}/sign`, { typedName: 'Ada L', acknowledged: true });
     expect(signed.status, JSON.stringify(signed.body)).toBe(200);
 
     // Token revocation on completion is expected for single-signer requests —

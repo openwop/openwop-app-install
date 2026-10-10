@@ -41,6 +41,11 @@ export interface PriorityList {
   createdBy: string;
   createdAt: string;
   updatedAt: string;
+  /** PM4UX-1 (ADR 0842 D9) — what THIS caller may do, projected by the server from the
+   *  same predicates its doors enforce: `canWrite` = `workspace:write` in the list's org;
+   *  `canConfigure` = list creator or org admin (criteria, voting, delete). Absent only
+   *  on a pre-D9 backend, where the page keeps its historic (unfiltered) controls. */
+  viewer?: { canWrite: boolean; canConfigure: boolean };
 }
 /** PMXU-1 (ADR 0590) — actor class stamped by the backend writer. Absent on
  *  rows written before the stamp existed (pre-fix rows are NOT claimed human). */
@@ -329,7 +334,9 @@ export async function promoteIdeaToProject(listId: string, cardId: string): Prom
 }
 
 // ── score history + "why ranked here" (ADR 0234 §C7 / STRAT-FE2) ──
-export interface ScoreChange { changeId: string; priorPriority?: number; newPriority?: number; scores: Record<string, number>; actor: string; voterId?: string; createdAt: string }
+/** ADR 0842 D2 — below config authority, another voter's row arrives WITHOUT `voterId`,
+ *  `actor` and `scores` (ballot secrecy); the priority movement is always present. */
+export interface ScoreChange { changeId: string; priorPriority?: number; newPriority?: number; scores?: Record<string, number>; actor?: string; voterId?: string; createdAt: string }
 export interface ScoreBreakdownRow { criterionId: string; name: string; weight: number; score?: number; weighted?: number }
 export async function getIdeaScoreHistory(listId: string, cardId: string): Promise<{ history: ScoreChange[]; breakdown: ScoreBreakdownRow[]; computedPriority?: number; rank?: number }> {
   const res = await fetch(`${base}/lists/${encodeURIComponent(listId)}/ideas/${encodeURIComponent(cardId)}/score-history`, fetchOpts({ headers: authedHeaders() }));

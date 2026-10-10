@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { ProviderConfig, ProviderModel } from './lib/providers.js';
 import { ShieldIcon } from '../ui/icons/index.js';
+import { byokErrorMessage, useByokWriteAccess } from './lib/byokWriteAccess.js';
 import { storeKey } from './lib/byokClient.js';
 import { Field } from '../ui/Field.js';
 
@@ -36,6 +37,7 @@ export function KeyEntry({
   existingRef?: string | null;
 }): JSX.Element {
   const { t } = useTranslation('byok');
+  const canManage = useByokWriteAccess();
   const [key, setKey] = useState('');
   const [show, setShow] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -74,7 +76,9 @@ export function KeyEntry({
       setKey('');
       await onStored(targetRef);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      // ADR 0779 D7 — a 403 (a member of a shared workspace) reads as the
+      // localized permission message, not `POST … → 403: Missing required scope`.
+      setError(byokErrorMessage(t, err));
     } finally {
       setSubmitting(false);
     }
@@ -98,13 +102,17 @@ export function KeyEntry({
           </p>
           <p className="muted u-mt-1 u-fs-12">{t('savedKeyExplain')}</p>
           <div className="button-row">
-            <Button variant="primary" onClick={() => { void adopt(); }} disabled={adopting || submitting}>
+            <Button variant="primary" onClick={() => { void adopt(); }} disabled={!canManage || adopting || submitting}>
               {adopting ? t('savedKeyUsing') : t('savedKeyUse')}
             </Button>
           </div>
           <p className="muted u-mt-2 u-fs-12">{t('savedKeyReplaceHint')}</p>
         </div>
       )}
+
+      {/* ADR 0779 D7 (grade-ux H2) — say it BEFORE a member pastes a secret the
+          server will refuse, not after. */}
+      {!canManage && <p className="muted u-fs-12">{t('readOnlyNotice')}</p>}
 
       <div className="alert info u-flex u-items-start u-gap-2">
         <span className="byok-entry-icon" aria-hidden="true"><ShieldIcon size={16} /></span>
@@ -128,6 +136,7 @@ export function KeyEntry({
               placeholder={provider.apiKeyPlaceholder}
               autoComplete="off"
               spellCheck={false}
+              disabled={!canManage}
             />
             <Button
               variant="secondary" className="keyentry-show-btn"
@@ -146,7 +155,7 @@ export function KeyEntry({
         <Button
           variant={existingRef ? 'secondary' : 'primary'}
           type="submit"
-          disabled={submitting || adopting || !key.trim()}
+          disabled={!canManage || submitting || adopting || !key.trim()}
         >
           {submitting ? t('storing') : (existingRef ? t('replaceKey') : t('storeKey'))}
         </Button>

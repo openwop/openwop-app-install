@@ -176,16 +176,28 @@ export async function emitRunFailureNotification(
     if (audience.aggregatePerJobPerDay && await alreadyNoticedToday(storage, run.tenantId, run.workflowId)) {
       return; // one per job per day — a broken reminder must not page once per participant
     }
+    // An UNATTENDED run (a schedule or trigger fired it) that fails the SAME way
+    // again is not news. A loop whose Google connection lacks a scope failed on
+    // every 30-minute tick and notified on every one: the same "High" row, over
+    // and over, with no way to tell a new problem from the old one. So an
+    // unattended failure notifies once per workflow + error code per 24 h; a
+    // DIFFERENT code still notifies at once, and a person-started run always does.
+    if (isUnattendedRun(run.metadata) && await alreadyNoticedToday(storage, run.tenantId, run.workflowId, error.code)) {
+      return;
+    }
+    // A refused CONNECTION is fixed in Connections, not by reading the run, so the
+    // notice says so and links there (the run stays linked via `runId`).
+    const needsReconnect = RECONNECT_CODES.has(error.code);
     await getNotificationEmitter().emit({
       tenantId: run.tenantId,
       type: 'workflow.failed',
       priority: 'high',
-      title: 'Workflow failed',
+      title: needsReconnect ? 'Connection needs attention' : 'Workflow failed',
       // userMessage is the curated, redacted form — safe to surface.
       message: `${workflowLabel}: ${truncate(error.userMessage, 240)}`,
       runId,
       workflowId: run.workflowId,
-      actionUrl: `/runs/${runId}`,
+      actionUrl: needsReconnect ? '/connections' : `/runs/${runId}`,
       ...(audience.recipientRole ? { recipientRole: audience.recipientRole } : {}),
       metadata: stripSecretsFromPersisted({ errorCode: error.code, noticeAudience: audience.reason }),
     });
@@ -286,12 +298,24 @@ function truncate(s: string, max: number): string {
  * fails toward MORE notices, never fewer: a missed aggregation is noise, a false
  * positive would silently swallow the only signal an operator gets.
  */
-async function alreadyNoticedToday(storage: Storage, tenantId: string, workflowId: string): Promise<boolean> {
+/** Error codes whose fix is reconnecting an account (`observability/errorRecovery.ts`). */
+export const RECONNECT_CODES: ReadonlySet<string> = new Set(['connection_reauth_required', 'connection_scope_missing', 'connection_forbidden']);
+
+/** A schedule or trigger started this run, so nobody is watching it. */
+function isUnattendedRun(metadata: unknown): boolean {
+  const m = (metadata ?? {}) as Record<string, unknown>;
+  const schedule = m.schedule as Record<string, unknown> | undefined;
+  return (schedule !== undefined && typeof schedule === 'object') || m.source === 'schedule' || m.source === 'trigger' || m.source === 'webhook';
+}
+
+/** A `workflow.failed` notice for this workflow in the last 24 h (and, when given, with this error code). */
+async function alreadyNoticedToday(storage: Storage, tenantId: string, workflowId: string, errorCode?: string): Promise<boolean> {
   try {
     const sinceMs = Date.now() - 24 * 60 * 60 * 1000;
     const rows = await storage.listNotifications({ tenantId, limit: 200, includeArchived: true });
     return rows.some((r) => r.type === 'workflow.failed'
       && r.workflowId === workflowId
+      && (errorCode === undefined || (r.metadata as { errorCode?: unknown } | undefined)?.errorCode === errorCode)
       && Date.parse(r.createdAt) >= sinceMs);
   } catch {
     // A failed lookup must not suppress the notice — degrade to emitting.

@@ -30,10 +30,20 @@ export function assetSubLine(a: MediaAsset): string {
   return `${assetFormat(a)} · ${formatBytes(a.sizeBytes)}`;
 }
 
+/** ADR 0818 §5 (MED2-M1) — the alt text a library thumbnail carries: its own
+ *  alt text, else `""`. Every thumbnail sits beside its visible file name, so
+ *  the name as alt would be read twice; a decorative image is `""` by
+ *  definition. A preview WITHOUT a visible caption falls back to the name at
+ *  the call site. */
+export function assetAlt(a: MediaAsset): string {
+  if (a.altTextSource === 'decorative') return '';
+  return a.altText ?? '';
+}
+
 /** The asset thumbnail (image preview) or a file icon — shared by Card + Row. */
 function AssetThumb({ a }: { a: MediaAsset }): JSX.Element {
   return isImage(a) ? (
-    <img src={absoluteServeUrl(a.serveUrl)} alt={a.name} className="media-thumb-img" />
+    <img src={absoluteServeUrl(a.serveUrl)} alt={assetAlt(a)} className="media-thumb-img" />
   ) : (
     <ImageIcon aria-hidden />
   );
@@ -73,6 +83,7 @@ export function MediaAssetCard({
   onDelete,
   onShowUsage,
   onEditAltText,
+  deleting = false,
 }: {
   asset: MediaAsset;
   onDelete: () => void;
@@ -80,6 +91,8 @@ export function MediaAssetCard({
   onShowUsage?: () => void;
   /** ADR 0363 P1 — open the alt-text editor (image assets only). */
   onEditAltText?: () => void;
+  /** ADR 0818 §5 — the delete is reading usage before it asks: the trigger is busy. */
+  deleting?: boolean;
 }): JSX.Element {
   const { t } = useTranslation('media');
   return (
@@ -96,7 +109,7 @@ export function MediaAssetCard({
         <span className="u-flex u-gap-1">
           {onEditAltText && isImage(a) ? <IconButton label={t('altEditLabel')} icon={<PencilIcon />} className="btn-ghost" onClick={onEditAltText} /> : null}
           {onShowUsage ? <IconButton label={t('usedByLabel')} icon={<LinkIcon />} className="btn-ghost" onClick={onShowUsage} /> : null}
-          <IconButton label={t('deleteAssetLabel')} icon={<TrashIcon />} className="btn-ghost" onClick={onDelete} />
+          <IconButton label={t('deleteAssetLabel')} icon={<TrashIcon />} className="btn-ghost" onClick={onDelete} disabled={deleting} aria-busy={deleting || undefined} />
         </span>
       </div>
     </div>
@@ -108,6 +121,7 @@ export function MediaAssetRow({
   onDelete,
   onShowUsage,
   onEditAltText,
+  deleting = false,
 }: {
   asset: MediaAsset;
   onDelete: () => void;
@@ -115,6 +129,8 @@ export function MediaAssetRow({
   onShowUsage?: () => void;
   /** ADR 0363 P1 — open the alt-text editor (image assets only). */
   onEditAltText?: () => void;
+  /** ADR 0818 §5 — the delete is reading usage before it asks: the trigger is busy. */
+  deleting?: boolean;
 }): JSX.Element {
   const { t } = useTranslation('media');
   return (
@@ -135,7 +151,7 @@ export function MediaAssetRow({
       <div className="list-row-actions action-bar">
         {onEditAltText && isImage(a) ? <IconButton label={t('altEditLabel')} icon={<PencilIcon />} className="btn-ghost" onClick={onEditAltText} /> : null}
         {onShowUsage ? <IconButton label={t('usedByLabel')} icon={<LinkIcon />} className="btn-ghost" onClick={onShowUsage} /> : null}
-        <IconButton label={t('deleteAssetLabel')} icon={<TrashIcon />} className="btn-ghost" onClick={onDelete} />
+        <IconButton label={t('deleteAssetLabel')} icon={<TrashIcon />} className="btn-ghost" onClick={onDelete} disabled={deleting} aria-busy={deleting || undefined} />
       </div>
     </div>
   );

@@ -49,7 +49,7 @@ describe('resolveConversationModelTarget — precedence + the same-provider bump
 
   it('group + reasoning + no stamp/override → bumps to the provider OWN class default', () => {
     const t = resolveConversationModelTarget({ runInputs: inputs, metadata: {}, tier: GROUP_REASONING });
-    expect(t).toEqual({ provider: 'anthropic', model: 'claude-opus-5' }); // classDefaults
+    expect(t).toEqual({ provider: 'anthropic', model: 'claude-opus-5-5' }); // classDefaults
   });
 
   it('the bump NEVER crosses providers (google stays google)', () => {
@@ -108,10 +108,10 @@ describe('CS-GB-2 — a board-group exchange dispatches the resolved model end-t
     await ensureConversationMeta(TENANT, 'conv-csgb-group', { type: 'group' });
 
     const workflowId = 'openwop-app.csgb.board-test';
-    await fetch(`${BASE}/v1/host/openwop-app/workflows`, {
+    await fetch(`${BASE}/host/openwop-app/workflows`, {
       method: 'POST', headers: H, body: JSON.stringify({ workflowId, nodes: [{ nodeId: 'gate', typeId: 'core.conversationGate', config: { prompt: 'x' } }], edges: [] }),
     });
-    const create = await fetch(`${BASE}/v1/runs`, {
+    const create = await fetch(`${BASE}/runs`, {
       method: 'POST', headers: H,
       body: JSON.stringify({ workflowId, inputs: { provider: 'mock', model: 'mock-1' }, tenantId: TENANT, metadata: { chatSessionId: 'conv-csgb-group' } }),
     });
@@ -119,17 +119,17 @@ describe('CS-GB-2 — a board-group exchange dispatches the resolved model end-t
     const { runId } = await create.json() as { runId: string };
     for (let i = 0; i < 60; i++) {
       await new Promise((r) => setTimeout(r, 20));
-      const s = await (await fetch(`${BASE}/v1/runs/${runId}`, { headers: H })).json() as { status: string };
+      const s = await (await fetch(`${BASE}/runs/${runId}`, { headers: H })).json() as { status: string };
       if (s.status.startsWith('waiting')) break;
     }
-    const ex = await fetch(`${BASE}/v1/runs/${runId}/interrupts/gate`, {
+    const ex = await fetch(`${BASE}/runs/${runId}/interrupts/gate`, {
       method: 'POST', headers: H,
       body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: '@probe.csgb.reasoner what next?', to: 'probe.csgb.reasoner' } } }),
     });
     expect(ex.status).toBe(200);
     // mock has no classDefaults → the dispatched/provenance model stays mock-1
     // (proves the bump is catalog-driven and never invents a model).
-    const bundle = await (await fetch(`${BASE}/v1/runs/${runId}/debug-bundle`, { headers: H })).json() as { events?: Array<{ type?: string; payload?: { turn?: { agent?: { model?: { model?: string; provider?: string } } } } }> };
+    const bundle = await (await fetch(`${BASE}/runs/${runId}/debug-bundle`, { headers: H })).json() as { events?: Array<{ type?: string; payload?: { turn?: { agent?: { model?: { model?: string; provider?: string } } } } }> };
     const agentTurn = (bundle.events ?? []).find((e) => e.type === 'conversation.exchanged' && e.payload?.turn?.agent?.model);
     if (agentTurn) {
       expect(agentTurn.payload?.turn?.agent?.model?.model).toBe('mock-1');

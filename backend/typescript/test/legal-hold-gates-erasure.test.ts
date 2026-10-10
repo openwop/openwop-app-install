@@ -16,17 +16,41 @@
  * tenant refuses, and CLEARING the hold restores every lane. A gate with no
  * exit would be its own defect.
  *
- * NON-VACUITY: each lane's assertion is sabotage-probed independently — see the
- * commit message for the three probes and what each turned red.
+ * NON-VACUITY: each lane's assertion is sabotage-probed independently
+ * (/grade-tests wave 9, ids `w9g4-lh-*`), and every one turned its case red:
+ *   - `eraseSubject`'s `assertNoRetentionHold` removed → the two DSAR cases;
+ *   - `deleteSubject`'s pre-mutation hold check removed → a tombstone is minted
+ *     (case 3); its DENY flipped to `allow` → case 3;
+ *   - `purgeRetained`'s hold branch removed → the purge-lane case;
+ *   - kv age-out: the declared-`tenantId` skip removed, or the id-shaped
+ *     resolver truncated at the FIRST `:` (`ws:held` → `ws`) → the sweep case;
+ *     `RETENTION_HOLD_KV_PREFIX` drifted → the prefix case AND the sweep case;
+ *   - the anon-teardown hold check removed → the TEARDOWN case;
+ *   - `hostGlobal` ignored by the accounting, or the shipping salt registration
+ *     dropping `hostGlobal: true` → the two F7 cases; `scanned` zeroed → CONS-13;
+ *   - `clearRetentionHold` made a no-op → every release half.
+ *
+ * COST NOTE. `pruneAbandonedAnonTenants` lives in `retentionSweepDaemon.ts`,
+ * whose static import graph is ~1.9k modules (it reaches the workflow
+ * registry, compose tool and managed provider). It is imported STATICALLY
+ * below: the TEARDOWN case used to `await import()` it inside the test body,
+ * which billed the whole graph's transform to that one case's 15 s timeout
+ * (~28 s under a parallel gate), and — after the F7 case's `vi.resetModules()`
+ * — bound a FRESH `retentionHold` / `hostExtPersistence` instance that
+ * `beforeEach` never initialised (an order dependence under shuffle). Static
+ * bindings are always the graph `beforeEach` wired; the graph is paid once, at
+ * collection, which no test timeout bounds — the honest ceiling for a lane that
+ * exists only in that module.
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import { DurableCollection, initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import {
-  setRetentionHold, clearRetentionHold, RetentionHoldError,
+  setRetentionHold, clearRetentionHold, getRetentionHold, RetentionHoldError,
   RETENTION_HOLD_KV_PREFIX, listHeldTenantsFrom,
 } from '../src/host/retentionHold.js';
+import { pruneAbandonedAnonTenants } from '../src/host/retentionSweepDaemon.js';
 import {
   eraseSubject, registerSubjectEraser, __resetSubjectErasers, __resetSubjectKeyResolvers,
 } from '../src/host/subjectErasure.js';
@@ -51,6 +75,7 @@ beforeEach(async () => {
   await clearRetentionHold(HELD);
   await clearRetentionHold(FREE);
 });
+afterEach(() => { vi.unstubAllEnvs(); });
 
 describe('CONS-4 — legal hold gates the DSAR erasure lane', () => {
   it('eraseSubject REFUSES (typed) under a hold, and no eraser runs', async () => {
@@ -208,8 +233,6 @@ describe('CONS-13 — the age-out lane can no longer fail silently', () => {
  */
 describe('CONS-4 / review F2 — legal hold gates the anon-tenant TEARDOWN lane', () => {
   it('skips a held anon tenant, tears down the unheld one, and leaves the hold row intact', async () => {
-    const { pruneAbandonedAnonTenants } = await import('../src/host/retentionSweepDaemon.js');
-    const { getRetentionHold } = await import('../src/host/retentionHold.js');
     const HELD_ANON = 'anon:held-visitor';
     const FREE_ANON = 'anon:free-visitor';
     const NOW = Date.parse('2026-08-19T12:00:00.000Z');
@@ -219,7 +242,7 @@ describe('CONS-4 / review F2 — legal hold gates the anon-tenant TEARDOWN lane'
       inputs: null, metadata: {}, configurable: {}, createdAt: old, updatedAt: old,
     });
 
-    process.env.OPENWOP_ANON_TENANT_RETENTION_DAYS = '14';
+    vi.stubEnv('OPENWOP_ANON_TENANT_RETENTION_DAYS', '14');
     try {
       await storage.insertRun(mkRun('held-r1', HELD_ANON));
       await storage.insertRun(mkRun('free-r1', FREE_ANON));
@@ -245,7 +268,6 @@ describe('CONS-4 / review F2 — legal hold gates the anon-tenant TEARDOWN lane'
       expect(await pruneAbandonedAnonTenants({ storage }, NOW)).toBe(1);
       expect(await storage.getRun('held-r1')).toBeNull();
     } finally {
-      delete process.env.OPENWOP_ANON_TENANT_RETENTION_DAYS;
       await clearRetentionHold(HELD_ANON);
     }
   });

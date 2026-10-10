@@ -19,10 +19,11 @@ import type * as Y from 'yjs';
 import type { Request } from 'express';
 import { registerCollabResourceDriver, hasLiveRoomGlobal, pruneCollabSnapshot, type RoomMeta } from './collabRoom.js';
 import { COLLAB_TOGGLE_ID, mintCollabTicket, claimCollabSeed, deleteCollabSeedClaim, deleteCollabSeedClaimsAnyTenant } from './collabServer.js';
-import { getOwned, recordOwnership } from '../workflowOwnership.js';
+import { getOwned, recordOwnership, SHARED_WORKFLOW_ID } from '../workflowOwnership.js';
 import { lifecycleOf } from '../workflowLifecycle.js';
 import { recordRevision } from '../workflowRevisions.js';
-import { registerWorkflow, getRegisteredWorkflowAsync, onWorkflowDeleted } from '../workflowsRegistry.js';
+import { requireWorkflowWrite } from '../workflowWriteAuthority.js';
+import { registerWorkflowDurable, getRegisteredWorkflowAsync, onWorkflowDeleted } from '../workflowsRegistry.js';
 import { validateWorkflowDefinition } from '../workflowDefinitionValidation.js';
 import { getChainBackedWorkflow } from '../chainBackedWorkflows.js';
 import { assertNoDisabledPacks } from '../packEnablement.js';
@@ -40,10 +41,11 @@ const log = createLogger('host.collab.workflow');
 export const WORKFLOW_COLLAB_TOGGLE_ID = 'workflow-collab';
 export const WORKFLOW_ROOM_PREFIX = 'wf:';
 
-/** Mirrors routes/workflows.ts PUBLIC_WORKFLOW_ID (kept small + cross-
- *  referenced there): reserved public namespaces never open rooms — every
- *  tenant can read them, and a room would make one tenant their author. */
-const RESERVED_PUBLIC_ID = /^(wf\.seed\.|tmpl\.|openwop-app\.)/;
+/** Shared definitions never open rooms — every tenant can read them, and a room
+ *  would make one tenant their author. Single-sourced (ADR 0788); widened to the
+ *  ADR 0789 SHARED predicate, which adds the two seeded demo walkthroughs (their
+ *  one row is shared by every seeded tenant exactly like `wf.seed.*`). */
+const RESERVED_PUBLIC_ID = SHARED_WORKFLOW_ID;
 
 export const workflowRoomId = (workflowId: string): string => `${WORKFLOW_ROOM_PREFIX}${workflowId}`;
 
@@ -143,7 +145,9 @@ async function deriveWorkflowHead(roomId: string, doc: Y.Doc, meta: RoomMeta): P
     ...candidate,
     metadata: (lifecycle !== undefined ? { ...strippedMeta, lifecycle } : strippedMeta) as WorkflowDefinition['metadata'],
   } as WorkflowDefinition;
-  registerWorkflow(def);
+  // ADR 0770 D2 (grade-code WBCD-7) — durable before the ownership/revision
+  // writes below, like every REST write lane.
+  await registerWorkflowDurable(def);
   // Code-review H2 — the delete-resurrection TOCTOU: a DELETE landing between
   // the eligibility check and registerWorkflow would be silently undone (and
   // the orphan def publicly readable). Re-check ownership AFTER the register;
@@ -191,6 +195,10 @@ onWorkflowDeleted(async (workflowId, tenantIds) => {
 
 async function requireWorkflowCollabAccess(req: Request): Promise<{ tenantId: string; workflowId: string }> {
   await requireFeatureEnabled(req, COLLAB_TOGGLE_ID, 'Real-time collaboration');
+  // ADR 0770 D1 — a room's derive registers the head, so a ticket IS a write:
+  // the same `workspace:write` gate as the REST write verbs (a viewer joining
+  // a room could otherwise rewrite the workflow the REST routes refuse them).
+  await requireWorkflowWrite(req);
   const tenantId = tenantOf(req);
   const workflowId = req.params.workflowId ?? '';
   // The resource's own toggle — same UNIFORM 404 body as every other miss.
@@ -205,7 +213,7 @@ async function requireWorkflowCollabAccess(req: Request): Promise<{ tenantId: st
 export const workflowCollabFeature: BackendFeature = {
   id: WORKFLOW_COLLAB_TOGGLE_ID,
   registerRoutes: ({ app }) => {
-    app.post('/v1/host/openwop-app/workflow-collab/:workflowId/ticket', (req, res, next) => {
+    app.post('/host/openwop-app/workflow-collab/:workflowId/ticket', (req, res, next) => {
       void (async () => {
         try {
           const { tenantId, workflowId } = await requireWorkflowCollabAccess(req);
@@ -215,7 +223,7 @@ export const workflowCollabFeature: BackendFeature = {
         } catch (err) { next(err); }
       })();
     });
-    app.post('/v1/host/openwop-app/workflow-collab/:workflowId/claim-seed', (req, res, next) => {
+    app.post('/host/openwop-app/workflow-collab/:workflowId/claim-seed', (req, res, next) => {
       void (async () => {
         try {
           const { tenantId, workflowId } = await requireWorkflowCollabAccess(req);
@@ -229,7 +237,7 @@ export const workflowCollabFeature: BackendFeature = {
     id: WORKFLOW_COLLAB_TOGGLE_ID,
     label: 'Workflow builder multiplayer',
     description:
-      'Real-time co-editing of workflow drafts in the builder (Yjs CRDT over the shared collab transport, ADR 0481). OFF by default — ADR 0364 Phase 4 records the toggle flip as a product decision, and the Playwright browser canary (the Gate B residual) is a recorded precondition for production enablement. Live only when BOTH this and realtime-collab are on.',
+      'Real-time co-editing of workflow drafts in the builder (Yjs CRDT over the shared collab transport). Live only when BOTH this and realtime-collab are on.',
     category: 'Documents',
     status: 'off',
     bucketUnit: 'tenant',

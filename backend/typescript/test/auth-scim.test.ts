@@ -10,6 +10,11 @@
  *    active identity (finding H5 / RFC 0049 §C);
  *  - the principal id is stable across joiner/mover/leaver (finding C4) and
  *    SCIM shares the durable User store with SSO/password identities.
+ *
+ * Sabotage that turns it red (`scimProvisioningService.ts`): `deactivateUser`'s
+ * `'disabled'` → `'active'` ⇒ the fail-closed case; `byName?.source === 'scim' ?
+ * byName : null` → `byName` ⇒ the finding-#5 case; dropping `byId.tenantId ===
+ * tenantId &&` ⇒ the cross-tenant resolve case.
  */
 
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
@@ -85,7 +90,12 @@ describe('SCIM provisioning (RFC 0050 §B)', () => {
     // else a SCIM bearer could deactivate accounts it never provisioned.
     const pw = await createUser({ tenantId: 't', principalId: 'password:vip@t.test', source: 'password' });
     expect(await resolveScimUser('t', pw.userId)).toBeNull(); // by durable id
-    expect(await resolveScimUser('t', 'vip@t.test')).toBeNull(); // by name
+    // By name: the lookup keys on the `scim:`-prefixed principal, so only a
+    // non-SCIM row that CARRIES that principal (e.g. an admin-created one) can
+    // reach the source check. A `password:` principal never would, which is
+    // why this leg used to stay green with the check deleted (grade-tests probe).
+    await createUser({ tenantId: 't', principalId: 'scim:admin-made@t.test', source: 'manual' });
+    expect(await resolveScimUser('t', 'admin-made@t.test')).toBeNull();
     // a genuinely SCIM-provisioned user IS resolvable
     const scim = await provisionUser({ tenantId: 't', userName: 'scim@t.test' });
     expect((await resolveScimUser('t', scim.userId))!.userId).toBe(scim.userId);

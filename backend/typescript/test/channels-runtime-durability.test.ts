@@ -17,6 +17,7 @@ import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
+import { bareRunId } from './support/bareRunId.js';
 import {
   appendChannelMessage, snapshotRunChannels, hydrateRunChannels, clearRunChannels,
   __resetAllRunChannelsForTests, type ConversationMessage,
@@ -100,20 +101,20 @@ describe('CS-WF-2 — the run snapshot route hydrates before projecting', () => 
   it('GET /v1/runs/:runId returns channels after the in-memory cache is wiped', async () => {
     // A real run so the route resolves it (conversation gate suspends).
     const workflowId = 'openwop-app.channels.durability-test';
-    await fetch(`${BASE}/v1/host/openwop-app/workflows`, {
+    await fetch(`${BASE}/host/openwop-app/workflows`, {
       method: 'POST', headers: H, body: JSON.stringify({
         workflowId, nodes: [{ nodeId: 'gate', typeId: 'core.chat.approvalGate', config: { title: 'hold' } }], edges: [],
       }),
     });
-    const create = await fetch(`${BASE}/v1/runs`, {
+    const create = await fetch(`${BASE}/runs`, {
       method: 'POST', headers: H, body: JSON.stringify({ workflowId, inputs: {}, tenantId: '_anon' }),
     });
     expect(create.status).toBe(201);
     const { runId } = await create.json() as { runId: string };
-    appendChannelMessage(runId, 'messages', msg('routed'));
+    appendChannelMessage(bareRunId(runId), 'messages', msg('routed'));
     await settle();
     __resetAllRunChannelsForTests(); // snapshot read lands on "another instance"
-    const snap = await fetch(`${BASE}/v1/runs/${runId}`, { headers: H });
+    const snap = await fetch(`${BASE}/runs/${runId}`, { headers: H });
     expect(snap.status).toBe(200);
     const body = await snap.json() as { channels?: Record<string, ConversationMessage[]> };
     expect(body.channels?.messages?.map((m) => m.messageId)).toEqual(['routed']);

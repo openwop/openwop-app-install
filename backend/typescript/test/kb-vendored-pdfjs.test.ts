@@ -22,6 +22,14 @@
  * It also pins the one mitigation the app controls on this call site
  * (`isEvalSupported: false`), because that flag is a single word that a future
  * refactor of `extractTextFromBytes` would drop without any other signal.
+ *
+ * Gap id: steward H61 (GHSA-hq66-cqwq-w95j). The `revisitAfter` legs are a DELIBERATE
+ * time-box: they overlap `scripts/check-audit.mjs`'s EXPIRED arm and go red under the
+ * clock-shift lane (`OPENWOP_CI_CLOCKSHIFT=1`) by design — kept as part of this
+ * tripwire (decision, /grade-tests wave 6). An expiry is a security re-assessment,
+ * never a date bump.
+ * SABOTAGE-WITNESSED (wave 6): `isEvalSupported: true` at the call site, or renaming
+ * the exception's `package`, each reds its case.
  */
 
 import { readFileSync } from 'node:fs';

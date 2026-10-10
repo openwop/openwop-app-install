@@ -15,31 +15,41 @@
  * - reschedule-email honesty (CRMPUB-6): confirmationEmailed=false renders the
  *   warning instead of implying delivery;
  * - cancel ends in a cancelled state that offers a rebook door.
+ *
+ * Sabotage that turns it red (wave-4 /grade-tests probes, 10/10 witnessed): a
+ * 500 or a 404 collapsed into the other's phase; the horizon hardcoded to 60;
+ * the rotated token not adopted, or re-read; `confirmationEmailed` assumed
+ * true; a declined confirm ignored; the cancel reason always / never sent;
+ * the slots-failure callback a no-op.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+// Type-only (erased at runtime, so it does not race `vi.mock`).
+import type * as BookingClient from '../bookingClient.js';
+import type * as ConfirmModule from '../../../ui/confirm.js';
+import type { ManageView } from '../bookingClient.js';
 
-const getManageView = vi.fn();
-const getPublicSlots = vi.fn();
-const cancelBooking = vi.fn();
-const rescheduleBooking = vi.fn();
+const getManageView = vi.fn<typeof BookingClient.getManageView>();
+const getPublicSlots = vi.fn<typeof BookingClient.getPublicSlots>();
+const cancelBooking = vi.fn<typeof BookingClient.cancelBooking>();
+const rescheduleBooking = vi.fn<typeof BookingClient.rescheduleBooking>();
 vi.mock('../bookingClient.js', () => ({
-  getManageView: (...a: unknown[]) => getManageView(...a),
-  getPublicSlots: (...a: unknown[]) => getPublicSlots(...a),
-  cancelBooking: (...a: unknown[]) => cancelBooking(...a),
-  rescheduleBooking: (...a: unknown[]) => rescheduleBooking(...a),
+  getManageView: (...a: Parameters<typeof BookingClient.getManageView>) => getManageView(...a),
+  getPublicSlots: (...a: Parameters<typeof BookingClient.getPublicSlots>) => getPublicSlots(...a),
+  cancelBooking: (...a: Parameters<typeof BookingClient.cancelBooking>) => cancelBooking(...a),
+  rescheduleBooking: (...a: Parameters<typeof BookingClient.rescheduleBooking>) => rescheduleBooking(...a),
 }));
 
-const confirmFn = vi.fn();
+const confirmFn = vi.fn<typeof ConfirmModule.confirm>();
 vi.mock('../../../ui/confirm.js', () => ({
-  confirm: (...a: unknown[]) => confirmFn(...a),
+  confirm: (...a: Parameters<typeof ConfirmModule.confirm>) => confirmFn(...a),
   ConfirmRoot: () => null,
 }));
 
 const { PublicBookingManagePage } = await import('../PublicBookingManagePage.js');
 
 const SLOT = Date.UTC(2026, 7, 10, 16, 0, 0);
-const VIEW = {
+const VIEW: ManageView = {
   bookingId: 'bk1', status: 'confirmed', slotStartUtcMs: SLOT, durationMin: 45,
   inviteeName: 'Ada Lovelace', timezone: 'America/New_York', title: 'Intro call',
   slug: 'intro', location: 'Room 4', videoLink: 'https://meet.example/xyz',
@@ -50,7 +60,7 @@ function httpError(status: number): Error & { status: number } {
   return Object.assign(new Error(`http ${status}`), { status });
 }
 
-beforeEach(() => { vi.clearAllMocks(); });
+beforeEach(() => { vi.resetAllMocks(); });
 
 describe('manage page — discriminated failed reads (CRMPUB-3)', () => {
   it('renders a RETRYABLE card on a 500, and Retry re-reads the view', async () => {
@@ -81,7 +91,8 @@ describe('manage page — the payload rendered (CRMPUB2-4/5)', () => {
 
     await screen.findByText('Intro call');
     expect(screen.getByText('Ada Lovelace')).toBeTruthy();
-    expect(screen.getByText(/45/)).toBeTruthy();
+    // The duration FACT, not any '45' on the page (a time can contain one).
+    expect(screen.getByText('45 minutes')).toBeTruthy();
     expect(screen.getByText('Room 4')).toBeTruthy();
     const video = screen.getByRole('link', { name: 'https://meet.example/xyz' }) as HTMLAnchorElement;
     expect(video.href).toBe('https://meet.example/xyz');
@@ -149,7 +160,7 @@ describe('manage page — reschedule (CRMPUB2-2/14, CRMPUB-3/6)', () => {
   async function slotsCallAt(nowMs: number): Promise<unknown[]> {
     vi.setSystemTime(nowMs);
     getManageView.mockResolvedValue(VIEW);
-    getPublicSlots.mockResolvedValue({ slots: [SLOT + 86_400_000] });
+    getPublicSlots.mockResolvedValue({ slots: [SLOT + 86_400_000], timezone: 'America/New_York' });
     render(<PublicBookingManagePage token="tok1" />);
     await screen.findByText('Intro call');
     fireEvent.click(screen.getByRole('button', { name: /reschedule/i }));
@@ -176,9 +187,9 @@ describe('manage page — reschedule (CRMPUB2-2/14, CRMPUB-3/6)', () => {
     // honest, and it is the leg that would have named the cause immediately.
     const [, from, to] = await slotsCallAt(Date.UTC(2026, 7, 25, 12, 0, 0));
     const windowDays = ((to as number) - (from as number)) / 86_400_000;
+    // Bounded by the month boundary, which is inside the LINK's 15-day horizon
+    // (never the old hardcoded 60).
     expect(windowDays).toBe(8);
-    // Still bounded by the LINK's horizon, never the old hardcoded 60.
-    expect(windowDays).toBeLessThan(15);
   });
 
   it('a failed slots read renders the retryable slots card, NOT "no times available"', async () => {
@@ -196,7 +207,7 @@ describe('manage page — reschedule (CRMPUB2-2/14, CRMPUB-3/6)', () => {
   it('adopts the ROTATED token from the reschedule response (the old one is revoked)', async () => {
     const NEW_SLOT = SLOT + 86_400_000;
     getManageView.mockResolvedValue(VIEW);
-    getPublicSlots.mockResolvedValue({ slots: [NEW_SLOT] });
+    getPublicSlots.mockResolvedValue({ slots: [NEW_SLOT], timezone: 'America/New_York' });
     rescheduleBooking.mockResolvedValue({
       status: 'confirmed', slotStartUtcMs: NEW_SLOT,
       manageUrl: 'https://app.example/book/manage/tok2', confirmationEmailed: true,
@@ -225,7 +236,7 @@ describe('manage page — reschedule (CRMPUB2-2/14, CRMPUB-3/6)', () => {
   it('confirmationEmailed=false renders the no-email warning instead of implying delivery', async () => {
     const NEW_SLOT = SLOT + 86_400_000;
     getManageView.mockResolvedValue(VIEW);
-    getPublicSlots.mockResolvedValue({ slots: [NEW_SLOT] });
+    getPublicSlots.mockResolvedValue({ slots: [NEW_SLOT], timezone: 'America/New_York' });
     // No manageUrl minted: the page renders success from the response itself.
     rescheduleBooking.mockResolvedValue({ status: 'confirmed', slotStartUtcMs: NEW_SLOT, confirmationEmailed: false });
     render(<PublicBookingManagePage token="tok1" />);

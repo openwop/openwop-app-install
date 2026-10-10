@@ -47,6 +47,7 @@ import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { findMissingRequiredConfig, expandChain, findUnfilledExpansionParams, type WorkflowChain } from '../src/host/workflowChainPackLoader.js';
+import { readPackManifest } from './helpers/readPackManifest.js';
 
 const REPO = join(import.meta.dirname, '../../..');
 const CHAIN_ROOT = join(REPO, 'examples/workflow-chain-packs');
@@ -88,7 +89,7 @@ function allChains(): WorkflowChain[] {
     const p = join(CHAIN_ROOT, dir, 'pack.json');
     if (!existsSync(p)) continue;
     try {
-      const pack = JSON.parse(readFileSync(p, 'utf8')) as { chains?: WorkflowChain[] };
+      const pack = readPackManifest<{ chains?: WorkflowChain[] }>(p);
       for (const c of pack.chains ?? []) out.push(c);
     } catch { /* malformed pack — the loader's own tests cover that */ }
   }
@@ -307,7 +308,10 @@ describe('pack VALUES, not just keys', () => {
         }
       }
     }
-    expect(bad, 'A default that violates its node\'s own schema fails at dispatch, not at authoring.').toEqual([]);
+    // NP-V2-10 is CLOSED (ADR 0792): the three chain-pack triggers that named
+    // four-segment `host.*` events now carry the v2 spelling, and the host
+    // matches either spelling, so no default here may violate its node's schema.
+    expect(bad, 'A default that violates its node\'s own schema is refused by any host that validates config (and by the registry gate).').toEqual([]);
   });
 });
 

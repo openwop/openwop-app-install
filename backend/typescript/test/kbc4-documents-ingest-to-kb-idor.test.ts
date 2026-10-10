@@ -36,6 +36,11 @@
  *
  * Positive controls throughout guard against a dead cure.
  *
+ * SABOTAGE-WITNESSED (/grade-tests wave 6): deleting the `assertOwnerReadable` line at
+ * ingest-to-kb, render or promote-html reds that door's legs (the GONE legs only since
+ * they strand the document — see `strandedFixture`); dropping the ADR 0839 D2 cascade
+ * reds its leg; removing `levelFor`'s workspace:write arm reds the writer premise.
+ *
  * @see docs/adr/0643-kb-reindex-orchestration-write-surface-lifecycle-events.md
  * @see docs/adr/0610-owner-subject-access-and-egress-allowlist.md (D3')
  */
@@ -49,6 +54,7 @@ import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { createMember } from '../src/host/accessControlService.js';
 import { registerSubjectAccessResolver } from '../src/host/subjectAccess.js';
+import { __swapSubjectDependentForTest } from '../src/host/subjectDependents.js';
 import { resolveProjectAccess } from '../src/features/projects/projectsService.js';
 
 let BASE: string;
@@ -69,22 +75,28 @@ afterAll(async () => { await new Promise<void>((res) => server.close(() => res()
 // leak a stubbed predicate into a sibling test.
 afterEach(() => { registerSubjectAccessResolver('project', async (t, s, c) => resolveProjectAccess(t, s.id, c)); });
 
-interface Res<T = any> { status: number; body: T }
+/** The response fields this file reads — typed, so no read is an untyped `any`. */
+interface ApiBody {
+  orgId?: string; id?: string; documentId?: string; visibility?: string; collectionId?: string;
+  user?: { userId: string }; documents?: unknown[]; document?: { title: string };
+  dependentsDeleted?: { documents?: number };
+}
+interface Res<T = ApiBody | undefined> { status: number; body: T }
 interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; patch: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res> }
 function client(): Client {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const out = res.status === 204 ? undefined : ((await res.json().catch(() => undefined)) as ApiBody | undefined);
     return { status: res.status, body: out };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b), del: (p) => call('DELETE', p) };
 }
 
-const P = '/v1/host/openwop-app/projects';
-const DOC = (orgId: string): string => `/v1/host/openwop-app/documents/orgs/${encodeURIComponent(orgId)}/documents`;
-const KB = (orgId: string): string => `/v1/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections`;
+const P = '/host/openwop-app/projects';
+const DOC = (orgId: string): string => `/host/openwop-app/documents/orgs/${encodeURIComponent(orgId)}/documents`;
+const KB = (orgId: string): string => `/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections`;
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
 
 const TITLE = 'Merger plan';
@@ -94,71 +106,88 @@ const SECRET = 'BOARD-ONLY: acquire Globex for 42M before Q3';
 async function fixture(visibility: 'private' | 'org' = 'private') {
   const tenantId = `org:kbc4-${Date.now()}-${n++}`;
   const owner = client();
-  await owner.post('/v1/host/openwop-app/test/login', { email: uniqEmail('own'), tenantId });
-  const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'PrivCo' })).body.orgId;
-  const projectId = (await owner.post(P, { orgId, name: 'Secret' })).body.id;
+  await owner.post('/host/openwop-app/test/login', { email: uniqEmail('own'), tenantId });
+  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'PrivCo' })).body?.orgId as string;
+  const projectId = (await owner.post(P, { orgId, name: 'Secret' })).body?.id as string;
   const create = await owner.post(DOC(orgId), {
     title: TITLE, kind: 'note', format: 'markdown',
     ownerSubject: { kind: 'project', id: projectId },
   });
   expect(create.status, JSON.stringify(create.body)).toBe(201);
-  const documentId: string = create.body.documentId;
+  const documentId = create.body?.documentId as string;
   // Content is load-bearing: with no current version the route 400s on "no content
   // to ingest" BEFORE it would leak, which would make the witness pass for the
   // wrong reason.
   const ver = await owner.post(`${DOC(orgId)}/${documentId}/versions`, { content: SECRET });
   expect(ver.status, JSON.stringify(ver.body)).toBe(201);
-  expect((await owner.patch(`${P}/${projectId}/visibility`, { visibility })).body.visibility).toBe(visibility);
+  expect((await owner.patch(`${P}/${projectId}/visibility`, { visibility })).body?.visibility).toBe(visibility);
   return { tenantId, orgId, projectId, documentId, owner };
 }
 
 /** A real org EDITOR (workspace:write — what this door gates on) who is NOT a project member. */
 async function orgEditor(tenantId: string, orgId: string): Promise<Client & { userId: string }> {
   const c = client();
-  const userId = (await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail('edit'), tenantId })).body.user.userId;
+  const userId = (await c.post('/host/openwop-app/test/login', { email: uniqEmail('edit'), tenantId })).body?.user?.userId as string;
   await createMember({ tenantId, orgId, subject: userId, displayName: 'E', roles: ['editor'] });
-  return Object.assign(c, { userId: userId as string });
+  return Object.assign(c, { userId });
 }
 
 /** A real org VIEWER (workspace:read only) who is NOT a project member — the caller
  *  `levelFor` can actually walk to `'none'`, and the one the write doors exclude. */
 async function orgViewer(tenantId: string, orgId: string): Promise<Client & { userId: string }> {
   const c = client();
-  const userId = (await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail('view'), tenantId })).body.user.userId;
+  const userId = (await c.post('/host/openwop-app/test/login', { email: uniqEmail('view'), tenantId })).body?.user?.userId as string;
   await createMember({ tenantId, orgId, subject: userId, displayName: 'V', roles: ['viewer'] });
-  return Object.assign(c, { userId: userId as string });
+  return Object.assign(c, { userId });
+}
+
+/**
+ * ADR 0839 D2 made a project delete take the documents it OWNS, so after a delete the
+ * document is GONE and every door 404s at `getDocument` BEFORE the owner gate — which
+ * made the three "owning project is GONE" legs below pass without ever reaching
+ * `assertOwnerReadable` (MEASURED, /grade-tests wave 6: removing the gate left them
+ * green). They therefore reproduce the LEGACY state those legs are about — a document
+ * stranded by a delete that predates the cascade — exactly as the recoverable leg does.
+ */
+async function strandedFixture<R>(body: (f: Awaited<ReturnType<typeof fixture>>) => Promise<R>): Promise<R> {
+  const prev = __swapSubjectDependentForTest('project', 'documents', undefined);
+  try {
+    const f = await fixture('org');
+    expect((await f.owner.del(`${P}/${f.projectId}`)).status).toBe(200);
+    return await body(f);
+  } finally { __swapSubjectDependentForTest('project', 'documents', prev); }
 }
 
 const newCollection = async (c: Client, orgId: string, name: string): Promise<string> => {
   const col = await c.post(KB(orgId), { name });
   expect(col.status, JSON.stringify(col.body)).toBe(201);
-  return col.body.collectionId as string;
+  return col.body?.collectionId as string;
 };
 
 /** Nothing named the document reached the collection, whatever shape the refusal took. */
 async function assertNothingCopied(c: Client, orgId: string, collectionId: string): Promise<void> {
   const listed = await c.get(`${KB(orgId)}/${encodeURIComponent(collectionId)}/documents`);
   expect(listed.status).toBe(200);
-  expect(listed.body.documents ?? []).toHaveLength(0);
+  expect(Array.isArray(listed.body?.documents), 'the successful read must return a document array').toBe(true);
+  expect(listed.body?.documents).toHaveLength(0);
   expect(JSON.stringify(listed.body)).not.toContain(TITLE);
 }
 
 describe('KBC-4 — ingest-to-kb consults the ADR 0610 D3′ owner-readable seam', () => {
   it('refuses a document whose owning project is GONE — the read door already does (born-red)', async () => {
-    const { orgId, projectId, documentId, owner } = await fixture('org');
-    expect((await owner.del(`${P}/${projectId}`)).status).toBe(200);
+    await strandedFixture(async ({ orgId, documentId, owner }) => {
+      // The precondition that makes this a leak and not a preference: the READ door
+      // refuses this (still existing) row outright.
+      expect((await owner.get(`${DOC(orgId)}/${documentId}`)).status).toBe(404);
 
-    // The precondition that makes this a leak and not a preference: the READ door
-    // refuses this row outright.
-    expect((await owner.get(`${DOC(orgId)}/${documentId}`)).status).toBe(404);
-
-    // …so the COPY door must refuse it too. Before the fix this returned 201 and
-    // wrote the full version text into the collection.
-    const collectionId = await newCollection(owner, orgId, 'Sink');
-    const copied = await owner.post(`${DOC(orgId)}/${documentId}/ingest-to-kb`, { collectionId });
-    expect(copied.status, JSON.stringify(copied.body)).toBe(404);
-    expect(JSON.stringify(copied.body ?? {})).not.toContain(TITLE);
-    await assertNothingCopied(owner, orgId, collectionId);
+      // …so the COPY door must refuse it too. Before the fix this returned 201 and
+      // wrote the full version text into the collection.
+      const collectionId = await newCollection(owner, orgId, 'Sink');
+      const copied = await owner.post(`${DOC(orgId)}/${documentId}/ingest-to-kb`, { collectionId });
+      expect(copied.status, JSON.stringify(copied.body)).toBe(404);
+      expect(JSON.stringify(copied.body ?? {})).not.toContain(TITLE);
+      await assertNothingCopied(owner, orgId, collectionId);
+    });
   });
 
   it('refuses whenever the subjectAccess seam denies the caller (born-red)', async () => {
@@ -180,17 +209,16 @@ describe('KBC-4 — ingest-to-kb consults the ADR 0610 D3′ owner-readable seam
     await assertNothingCopied(attacker, orgId, collectionId);
   });
 
-  it('the OWNER still ingests, and a project MEMBER still ingests (no dead cure)', async () => {
-    const { tenantId, orgId, documentId, projectId, owner } = await fixture('private');
+  it('the OWNER still ingests (no dead cure)', async () => {
+    // (A former "project MEMBER still ingests" leg was cut: its member was an org EDITOR,
+    // who `levelFor` grants 'write' before membership is read, so it proved nothing about
+    // membership — that premise is the write-doors case "an org WRITER is never refused".)
+    const { orgId, documentId, owner } = await fixture('private');
 
     const ok = await owner.post(`${DOC(orgId)}/${documentId}/ingest-to-kb`, { collectionId: await newCollection(owner, orgId, 'Owner KB') });
     expect(ok.status, JSON.stringify(ok.body)).toBe(201);
-    expect(ok.body.document.title).toBe(TITLE);
+    expect(ok.body?.document?.title).toBe(TITLE);
 
-    const member = await orgEditor(tenantId, orgId);
-    expect((await owner.post(`${P}/${projectId}/members`, { ref: `user:${member.userId}`, role: 'observer' })).status).toBe(201);
-    const viaMember = await member.post(`${DOC(orgId)}/${documentId}/ingest-to-kb`, { collectionId: await newCollection(member, orgId, 'Member KB') });
-    expect(viaMember.status, JSON.stringify(viaMember.body)).toBe(201);
   });
 });
 
@@ -240,12 +268,12 @@ describe('the door CLASS — every by-id door that can EGRESS content asks the s
   });
 
   it('promote-html: also refuses a document whose owning project is GONE (born-red)', async () => {
-    const { orgId, projectId, documentId, owner } = await fixture('org');
-    expect((await owner.del(`${P}/${projectId}`)).status).toBe(200);
-    expect((await owner.get(`${DOC(orgId)}/${documentId}`)).status).toBe(404);
-    const gone = await owner.post(`${DOC(orgId)}/${documentId}/promote-html`);
-    expect(gone.status, JSON.stringify(gone.body)).toBe(404);
-    expect(JSON.stringify(gone.body ?? {})).not.toContain(SECRET);
+    await strandedFixture(async ({ orgId, documentId, owner }) => {
+      expect((await owner.get(`${DOC(orgId)}/${documentId}`)).status).toBe(404);
+      const gone = await owner.post(`${DOC(orgId)}/${documentId}/promote-html`);
+      expect(gone.status, JSON.stringify(gone.body)).toBe(404);
+      expect(JSON.stringify(gone.body ?? {})).not.toContain(SECRET);
+    });
   });
 
   it('render: refuses too — it mints a durable PDF media token of the same body (born-red)', async () => {
@@ -254,11 +282,11 @@ describe('the door CLASS — every by-id door that can EGRESS content asks the s
     // refusal is the deleted-owner shape — but the egress is the worst of the set:
     // a Media token outlives the request, exactly the "escapes durably" property the
     // ingest-door fix is justified by.
-    const { orgId, projectId, documentId, owner } = await fixture('org');
-    expect((await owner.del(`${P}/${projectId}`)).status).toBe(200);
-    const rendered = await owner.post(`${DOC(orgId)}/${documentId}/render`, { format: 'pdf' });
-    expect(rendered.status, JSON.stringify(rendered.body)).toBe(404);
-    expect(JSON.stringify(rendered.body ?? {})).not.toContain('mediaToken');
+    await strandedFixture(async ({ orgId, documentId, owner }) => {
+      const rendered = await owner.post(`${DOC(orgId)}/${documentId}/render`, { format: 'pdf' });
+      expect(rendered.status, JSON.stringify(rendered.body)).toBe(404);
+      expect(JSON.stringify(rendered.body ?? {})).not.toContain('mediaToken');
+    });
   });
 });
 
@@ -286,6 +314,13 @@ describe('the door CLASS — every by-id door that can EGRESS content asks the s
  * the row permanently: unreadable, un-renderable, un-reassignable and UNDELETABLE,
  * with its content still on disk. Neither door egresses content (PATCH returns the row
  * projection, DELETE returns 204), so there is nothing to trade for that.
+ *
+ * CORRECTED (ADR 0839 D2, 2026-10-06) — "documents are not cascaded on project delete"
+ * is no longer true: a project delete now deletes the documents it OWNS, after a
+ * confirm that names them, so a NEW stranding cannot happen through that door. The
+ * argument above still holds for the population stranded BEFORE the cascade existed
+ * (production rows from earlier deletes), which is why the exit stays and why the
+ * recoverable leg below now reproduces that legacy state explicitly.
  */
 describe('the write doors: the refusal population is exactly "owner is gone", and it must stay recoverable', () => {
   it('an org WRITER is never refused by visibility — the population is empty for them', async () => {
@@ -297,20 +332,33 @@ describe('the write doors: the refusal population is exactly "owner is gone", an
     expect((await writer.post(`${DOC(orgId)}/${documentId}/versions`, { content: 'edit' })).status).toBe(201);
   });
 
-  it('a stranded document (owning project deleted) stays RECOVERABLE and cleanable', async () => {
+  it('ADR 0839 D2 — a project delete now takes the documents it owns (no new strandings)', async () => {
     const { orgId, projectId, documentId, owner } = await fixture('org');
-    expect((await owner.del(`${P}/${projectId}`)).status).toBe(200);
-    expect((await owner.get(`${DOC(orgId)}/${documentId}`)).status, 'unreadable while stranded').toBe(404);
+    const del = await owner.del(`${P}/${projectId}`);
+    expect(del.status).toBe(200);
+    expect(del.body?.dependentsDeleted?.documents).toBe(1);
+    expect((await owner.patch(`${DOC(orgId)}/${documentId}`, { ownerSubject: null })).status, 'gone, not stranded').toBe(404);
+  });
 
-    // THE EXIT: re-point ownerSubject, and the row is readable again. Gating PATCH
-    // would remove this and make the strand permanent.
-    const fixed = await owner.patch(`${DOC(orgId)}/${documentId}`, { ownerSubject: null });
-    expect(fixed.status, JSON.stringify(fixed.body)).toBe(200);
-    expect((await owner.get(`${DOC(orgId)}/${documentId}`)).status, 'recovered').toBe(200);
+  it('a document stranded BEFORE the cascade (owning project deleted) stays RECOVERABLE and cleanable', async () => {
+    // Reproduce the pre-ADR-0839 state: delete the project with the documents registrant
+    // absent, exactly as earlier deploys did.
+    const prev = __swapSubjectDependentForTest('project', 'documents', undefined);
+    try {
+      const { orgId, projectId, documentId, owner } = await fixture('org');
+      expect((await owner.del(`${P}/${projectId}`)).status).toBe(200);
+      expect((await owner.get(`${DOC(orgId)}/${documentId}`)).status, 'unreadable while stranded').toBe(404);
 
-    // …and a stranded row can always be deleted rather than becoming dead data.
-    const second = await fixture('org');
-    expect((await second.owner.del(`${P}/${second.projectId}`)).status).toBe(200);
-    expect((await second.owner.del(`${DOC(second.orgId)}/${second.documentId}`)).status, 'cleanable').toBe(204);
+      // THE EXIT: re-point ownerSubject, and the row is readable again. Gating PATCH
+      // would remove this and make the strand permanent.
+      const fixed = await owner.patch(`${DOC(orgId)}/${documentId}`, { ownerSubject: null });
+      expect(fixed.status, JSON.stringify(fixed.body)).toBe(200);
+      expect((await owner.get(`${DOC(orgId)}/${documentId}`)).status, 'recovered').toBe(200);
+
+      // …and a stranded row can always be deleted rather than becoming dead data.
+      const second = await fixture('org');
+      expect((await second.owner.del(`${P}/${second.projectId}`)).status).toBe(200);
+      expect((await second.owner.del(`${DOC(second.orgId)}/${second.documentId}`)).status, 'cleanable').toBe(204);
+    } finally { __swapSubjectDependentForTest('project', 'documents', prev); }
   });
 });

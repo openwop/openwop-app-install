@@ -120,7 +120,11 @@ export function ActiveRunsTab(): JSX.Element {
     }
   }
 
-  const onCancel = (runId: string) => runAction(runId, () => cancelRun(runId, 'cancelled from Active runs'));
+  // ADR 0772 (`RRUX-4`) — the same irreversible act asks first here too.
+  const onCancel = async (runId: string) => {
+    if (!(await confirm({ title: t('cancelRunConfirmTitle'), body: t('cancelRunConfirmBody'), danger: true, confirmLabel: t('cancelRun') }))) return;
+    void runAction(runId, () => cancelRun(runId, 'cancelled from Active runs'));
+  };
   const onDelete = async (runId: string) => {
     if (!(await confirm({ title: t('deleteRunConfirm'), danger: true, confirmLabel: t('common:delete') }))) return;
     void runAction(runId, () => deleteRun(runId));

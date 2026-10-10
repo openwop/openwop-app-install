@@ -5,8 +5,8 @@
  * area).
  *
  *   GET    /v1/host/openwop-app/compat-endpoints?orgId=…    — list (workspace:read)
- *   POST   /v1/host/openwop-app/compat-endpoints            — create (workspace:write)
- *   DELETE /v1/host/openwop-app/compat-endpoints/:id        — delete (workspace:write)
+ *   POST   /v1/host/openwop-app/compat-endpoints            — create (workspace:write + host:byok:manage, ADR 0779)
+ *   DELETE /v1/host/openwop-app/compat-endpoints/:id        — delete (workspace:write + host:byok:manage, ADR 0779)
  *
  * Gating: env flag `OPENWOP_COMPAT_PROVIDER_ENABLED` (default OFF). This is the
  * operator opt-in to ALLOW configuring self-hosted endpoints; it is independent of
@@ -29,8 +29,10 @@ import {
   getCompatEndpoint, listCompatEndpoints, putCompatEndpoint, deleteCompatEndpoint,
   type CompatEndpoint, type CompatDeclaredCapabilities,
 } from '../host/compatEndpoints.js';
+import { OWNED_REF_PREFIXES } from '../byok/refNamespaces.js';
+import { requireTenantScope } from '../features/featureRoute.js';
 
-const BASE = '/v1/host/openwop-app/compat-endpoints';
+const BASE = '/host/openwop-app/compat-endpoints';
 
 const enabled = (): boolean => process.env.OPENWOP_COMPAT_PROVIDER_ENABLED === 'true';
 const tenantOf = (req: Request): string => req.tenantId ?? '_anon';
@@ -46,6 +48,33 @@ async function requireOrgScope(req: Request, orgId: string, scope: Scope): Promi
   if (!access.scopes.includes(scope)) {
     throw new OpenwopError('forbidden_scope', `Missing required scope: ${scope}`, 403, { requiredScope: scope, orgId });
   }
+}
+
+/** Bound on the per-org access checks one count may make. */
+const MAX_COUNTED_ORGS = 50;
+
+/**
+ * ADR 0866 — how many endpoints the caller can read across `orgIds` (the orgs the
+ * Endpoints panel offers in its picker). The same authority as GET, applied per org:
+ * the env gate, then `workspace:read` in that org. An org the caller cannot read is
+ * skipped, exactly as the panel's GET would refuse it. Returns `null` when there are
+ * more orgs than this will check, so a caller omits the count rather than
+ * under-report it.
+ */
+export async function countReadableCompatEndpoints(req: Request, orgIds: readonly string[]): Promise<number | null> {
+  if (!enabled()) throw new OpenwopError('not_found', 'compat-endpoints disabled (set OPENWOP_COMPAT_PROVIDER_ENABLED=true).', 404, {});
+  if (orgIds.length > MAX_COUNTED_ORGS) return null;
+  let n = 0;
+  for (const orgId of orgIds) {
+    try {
+      await requireOrgScope(req, orgId, 'workspace:read'); // GET's own check
+    } catch (err) {
+      if (err instanceof OpenwopError && err.httpStatus === 403) continue;
+      throw err;
+    }
+    n += (await listCompatEndpoints(tenantOf(req), orgId)).length;
+  }
+  return n;
 }
 
 /** Validate an operator-supplied base URL: https-only + non-private host, unless
@@ -94,13 +123,16 @@ export function registerCompatEndpointRoutes(app: Express): void {
       const body = (req.body ?? {}) as Record<string, unknown>;
       const orgId = reqString(body.orgId, 'orgId');
       await requireOrgScope(req, orgId, 'workspace:write');
+      // ADR 0779 D1 — an endpoint (and the key it mints) is dispatched for every
+      // member, so creating one is BYOK-admin-class, on top of the org check.
+      await requireTenantScope(req, 'host:byok:manage');
       const label = reqString(body.label, 'label');
       const baseUrl = validateBaseUrl(reqString(body.baseUrl, 'baseUrl'));
       const id = `compat-${randomUUID()}`; // opaque, non-URL (§A.3)
       const now = new Date().toISOString();
       let credentialRef: string | undefined;
       if (typeof body.apiKey === 'string' && body.apiKey.trim()) {
-        credentialRef = `compat-key:${id}`;
+        credentialRef = `${OWNED_REF_PREFIXES.compatKey}${id}`;
         await setSecret(credentialRef, body.apiKey.trim(), { tenantId });
       }
       const endpoint: CompatEndpoint = {
@@ -123,6 +155,7 @@ export function registerCompatEndpointRoutes(app: Express): void {
       const existing = await getCompatEndpoint(tenantId, req.params.id);
       if (!existing) throw new OpenwopError('not_found', 'Compat endpoint not found.', 404, {}); // uniform 404 (no existence leak)
       await requireOrgScope(req, existing.orgId, 'workspace:write');
+      await requireTenantScope(req, 'host:byok:manage');
       if (existing.credentialRef) await removeSecret(existing.credentialRef, { tenantId });
       await deleteCompatEndpoint(tenantId, req.params.id);
       res.status(204).end();

@@ -2,15 +2,17 @@
  * Eval leaderboard routes (ADR 0123 Phase 2) — host-extension, org-scoped + RBAC.
  * `GET /v1/host/openwop-app/evals/orgs/:orgId/leaderboard` — per-model win-rate +
  * Elo over the tenant's MessageFeedback. ADMIN-tier reads (EVC-1): the leaderboard +
- * arena/rating gate on `host:members:manage`, not the `workspace:read` VIEWER scope —
- * the `evals` toggle graduated always-on (ADR 0134), so it is not a gate here.
- * `arena/match` stays `workspace:write` (an editor casting a verdict).
+ * arena/rating gate on `host:members:manage`, not the `workspace:read` VIEWER scope.
+ * `arena/match` stays `workspace:write` (an editor casting a verdict). ADR 0820
+ * §8.2 — every route gates on the `evals` toggle + plan first (`authorizeOrgScope`).
  *
  * @see docs/adr/0123-eval-feedback-leaderboard.md
  */
 import { randomUUID } from 'node:crypto';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
-import { requireOrgScope } from '../featureRoute.js';
+import { authorizeOrgScope } from '../featureRoute.js';
+
+const FEATURE = { toggleId: 'evals', label: 'Model evals' } as const;
 import { hostExtStorage } from '../../host/hostExtPersistence.js';
 import { OpenwopError } from '../../types.js';
 import { buildTenantLeaderboard } from './leaderboardService.js';
@@ -40,9 +42,9 @@ function metaModelResolver(): (conversationId: string, messageId: string) => Pro
 
 export function registerEvalsRoutes(deps: RouteDeps): void {
   const { app } = deps;
-  app.get('/v1/host/openwop-app/evals/orgs/:orgId/leaderboard', async (req, res, next) => {
+  app.get('/host/openwop-app/evals/orgs/:orgId/leaderboard', async (req, res, next) => {
     try {
-      const { tenantId } = await requireOrgScope(req, 'host:members:manage'); // EVC-1: admin-tier read
+      const { tenantId } = await authorizeOrgScope(req, FEATURE, 'host:members:manage'); // EVC-1: admin-tier read
       const leaderboard = await buildTenantLeaderboard(tenantId, metaModelResolver());
       res.json({ leaderboard });
     } catch (err) { next(err); }
@@ -52,9 +54,9 @@ export function registerEvalsRoutes(deps: RouteDeps): void {
   // the SESSION subject (not client-supplied) — a winner can't be attributed to
   // someone else. The two live model dispatches are normal runs (the FE arena drives
   // them); this records the verdict + updates both models' head-to-head Elo.
-  app.post('/v1/host/openwop-app/evals/orgs/:orgId/arena/match', async (req, res, next) => {
+  app.post('/host/openwop-app/evals/orgs/:orgId/arena/match', async (req, res, next) => {
     try {
-      const { user, tenantId } = await requireOrgScope(req, 'workspace:write');
+      const { user, tenantId } = await authorizeOrgScope(req, FEATURE, 'workspace:write');
       const b = (req.body ?? {}) as { modelA?: unknown; modelB?: unknown; winner?: unknown };
       if (typeof b.modelA !== 'string' || typeof b.modelB !== 'string') {
         throw new OpenwopError('validation_error', '`modelA` and `modelB` are required.', 400, {});
@@ -69,9 +71,9 @@ export function registerEvalsRoutes(deps: RouteDeps): void {
     } catch (err) { next(err); }
   });
 
-  app.get('/v1/host/openwop-app/evals/orgs/:orgId/arena/rating', async (req, res, next) => {
+  app.get('/host/openwop-app/evals/orgs/:orgId/arena/rating', async (req, res, next) => {
     try {
-      const { tenantId } = await requireOrgScope(req, 'host:members:manage'); // EVC-1: admin-tier read
+      const { tenantId } = await authorizeOrgScope(req, FEATURE, 'host:members:manage'); // EVC-1: admin-tier read
       const model = typeof req.query.model === 'string' ? req.query.model : '';
       if (!model) throw new OpenwopError('validation_error', '`model` query param is required.', 400, { field: 'model' });
       res.json({ model, elo: await getArenaRating(tenantId, model) });

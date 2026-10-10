@@ -49,17 +49,17 @@ function client() {
 type Client = ReturnType<typeof client>;
 
 async function signIn(c: Client, email: string): Promise<void> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email });
+  const r = await c.post('/host/openwop-app/test/login', { email });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
 }
 
 /** A REAL `ws:` shared workspace, created + switched into through the routes — the
  *  switch is what makes active !== personal. The workspace root is itself an org. */
 async function sharedWorkspace(c: Client): Promise<string> {
-  const ws = await c.post('/v1/host/openwop-app/workspaces', { name: `UCP WS ${n++}` });
+  const ws = await c.post('/host/openwop-app/workspaces', { name: `UCP WS ${n++}` });
   expect(ws.status, JSON.stringify(ws.body)).toBe(201);
   expect(ws.body.workspaceId, 'must be a real shared workspace').toMatch(/^ws:/);
-  const sw = await c.post(`/v1/host/openwop-app/workspaces/${encodeURIComponent(ws.body.workspaceId)}/switch`);
+  const sw = await c.post(`/host/openwop-app/workspaces/${encodeURIComponent(ws.body.workspaceId)}/switch`);
   expect(sw.status, JSON.stringify(sw.body)).toBe(200);
   return ws.body.workspaceId as string;
 }
@@ -67,18 +67,18 @@ async function sharedWorkspace(c: Client): Promise<string> {
 /** Invite a second human into the workspace root org and have them accept — the real
  *  two-member path (the workspace root IS an org, orgId === tenantId === ws). */
 async function joinAsMember(owner: Client, ws: string, joiner: Client, email: string, role: string): Promise<void> {
-  const invite = await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(ws)}/invites`, { email, role });
+  const invite = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(ws)}/invites`, { email, role });
   expect(invite.status, JSON.stringify(invite.body)).toBe(201);
   expect(invite.body.token, 'the dev/test invite path must expose the token').toBeTruthy();
   await signIn(joiner, email);
-  const accepted = await joiner.post('/v1/host/openwop-app/orgs/invitations/accept', { token: invite.body.token });
+  const accepted = await joiner.post('/host/openwop-app/orgs/invitations/accept', { token: invite.body.token });
   expect(accepted.status, JSON.stringify(accepted.body)).toBe(201);
-  const sw = await joiner.post(`/v1/host/openwop-app/workspaces/${encodeURIComponent(ws)}/switch`);
+  const sw = await joiner.post(`/host/openwop-app/workspaces/${encodeURIComponent(ws)}/switch`);
   expect(sw.status, JSON.stringify(sw.body)).toBe(200);
 }
 
 const clientsPath = (orgId: string): string =>
-  `/v1/host/openwop-app/commerce/orgs/${encodeURIComponent(orgId)}/ucp/clients`;
+  `/host/openwop-app/commerce/orgs/${encodeURIComponent(orgId)}/ucp/clients`;
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';

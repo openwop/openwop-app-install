@@ -22,10 +22,16 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { optionId, useReportActiveOption, type ComboboxWiring } from './lib/comboboxWiring.js';
 import { Trans, useTranslation } from 'react-i18next';
 import { listBoards } from '../features/advisory-board/advisoryBoardClient.js';
+import { Link } from 'react-router-dom';
+import { useFeatureAccess } from '../featureToggles/FeatureAccessContext.js';
+import { useLockedNav } from '../featureToggles/lockedTargets.js';
 
 interface Props {
+  /** Combobox wiring to the composer textarea (grade-ux CHATUX-1). */
+  combobox?: ComboboxWiring;
   text: string;
   cursorPos: number;
   onPick: (newText: string, newCursorPos: number) => void;
@@ -76,16 +82,19 @@ export function filterBoardMentions(boards: readonly BoardMentionEntry[], query:
 
 /** Fetch boards on mount → `{ boards, isLoading, error }`. Mirrors
  *  `useAgentMentions` (refetch per mount; newly-created boards show on reload). */
-export function useBoardMentions(): {
+export function useBoardMentions(enabled = true): {
   boards: readonly BoardMentionEntry[];
   isLoading: boolean;
   error: string | null;
 } {
   const [boards, setBoards] = useState<readonly BoardMentionEntry[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState(enabled);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    // A plan that does not include boards is not a load failure: don't ask the
+    // server for a list it will refuse (the caller renders the locked state).
+    if (!enabled) { setIsLoading(false); return undefined; }
     let cancelled = false;
     void (async () => {
       try {
@@ -95,20 +104,31 @@ export function useBoardMentions(): {
         setError(null);
       } catch (err) {
         if (cancelled) return;
-        setError(err instanceof Error ? err.message : String(err));
+        // The copy ends the sentence itself ("Couldn't load boards: {{error}}."),
+        // and server messages end in a period too — it rendered "feature..".
+        setError((err instanceof Error ? err.message : String(err)).replace(/[.\s]+$/, ''));
       } finally {
         if (!cancelled) setIsLoading(false);
       }
     })();
     return () => { cancelled = true; };
-  }, []);
+  }, [enabled]);
 
   return { boards, isLoading, error };
 }
 
-export function BoardMentionAutocomplete({ text, cursorPos, onPick, onDismiss }: Props): JSX.Element | null {
+export function BoardMentionAutocomplete({ text, cursorPos, onPick, onDismiss, combobox }: Props): JSX.Element | null {
   const { t } = useTranslation('chat');
-  const { boards, isLoading, error } = useBoardMentions();
+  // ADR 0419 — the toggle is on but the plan does not include boards. That is a
+  // paid feature not bought yet, so it gets the locked state and the way to
+  // unlock it — not "Couldn't load boards: Your plan (free) does not include this
+  // feature..", a raw refusal dressed as a failure (seen live 2026-10-01).
+  const access = useFeatureAccess('advisory-board');
+  const { boards, isLoading, error } = useBoardMentions(!access.locked);
+  // ADR 0419 — where it upsells: the bundle that sells boards (the nav's target).
+  // Resolved only in the locked branch below, so the lock counts as SEEN (strategy §8)
+  // only when the panel actually shows it.
+  const storeFor = useLockedNav(() => access.locked, '', 'chat-picker');
   const mention = detectBoardMentionState(text, cursorPos);
   const query = mention?.query ?? '';
   const matches = useMemo(
@@ -118,6 +138,7 @@ export function BoardMentionAutocomplete({ text, cursorPos, onPick, onDismiss }:
 
   const [selectedIdx, setSelectedIdx] = useState(0);
   useEffect(() => { setSelectedIdx(0); }, [query, mention?.atPos]);
+  useReportActiveOption(combobox, !!mention && !isLoading && !error, matches.length, selectedIdx);
 
   const apply = useCallback(
     (picked: BoardMentionEntry): void => {
@@ -160,6 +181,14 @@ export function BoardMentionAutocomplete({ text, cursorPos, onPick, onDismiss }:
   const listRef = useRef<HTMLDivElement>(null);
   if (!mention) return null;
 
+  if (access.locked) {
+    const store = storeFor('advisory-board');
+    return (
+      <EmptyPanel listRef={listRef}>
+        <Trans i18nKey="boardsLocked" ns="chat" components={{ 1: <Link to={store?.to ?? ''} onClick={store?.onClick} /> }} />
+      </EmptyPanel>
+    );
+  }
   if (isLoading && boards.length === 0) {
     return <EmptyPanel listRef={listRef}>{t('loadingBoards')}</EmptyPanel>;
   }
@@ -182,17 +211,18 @@ export function BoardMentionAutocomplete({ text, cursorPos, onPick, onDismiss }:
   }
 
   return (
-    <div ref={listRef} role="listbox" aria-label={t('boardMentionsAria')} className="mentionac-listbox">
+    <div ref={listRef} role="listbox" id={combobox?.listboxId} aria-label={t('boardMentionsAria')} className="mentionac-listbox">
       {matches.map((board, i) => (
         <BoardRow
           key={board.handle}
+          id={optionId(combobox?.listboxId ?? 'boardac', i)}
           board={board}
           selected={i === selectedIdx}
           onClick={() => apply(board)}
           onHover={() => setSelectedIdx(i)}
         />
       ))}
-      <div className="mentionac-tip">
+      <div className="mentionac-tip" aria-hidden="true">
         {t('boardMentionTip')}
       </div>
     </div>
@@ -211,11 +241,10 @@ function EmptyPanel({
   return (
     <div
       ref={listRef}
-      className="mentionac-empty"
-      style={{
-        border: `1px solid ${tone === 'error' ? 'var(--color-danger)' : 'var(--rule)'}`,
-        color: tone === 'error' ? 'var(--color-danger)' : 'var(--ink-3)',
-      }}
+      className={tone === 'error' ? 'mentionac-empty mentionac-empty--error' : 'mentionac-empty'}
+      // Announced: the list's loading / error / empty state replaced the options,
+      // and a screen-reader user otherwise hears nothing change (grade-ux CHATUX-4).
+      role={tone === 'error' ? 'alert' : 'status'}
     >
       {children}
     </div>
@@ -223,11 +252,13 @@ function EmptyPanel({
 }
 
 function BoardRow({
+  id,
   board,
   selected,
   onClick,
   onHover,
 }: {
+  id: string;
   board: BoardMentionEntry;
   selected: boolean;
   onClick: () => void;
@@ -236,13 +267,15 @@ function BoardRow({
   const { t } = useTranslation('chat');
   return (
     <div
+      id={id}
       role="option"
       aria-selected={selected}
       onClick={onClick}
+      // Focus stays in the composer (aria-activedescendant), so this rarely fires;
+      // it keeps the pointer handler paired with a keyboard one (jsx-a11y).
       onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } }}
       onMouseEnter={onHover}
       className="mentionac-row"
-      style={{ background: selected ? 'var(--paper-2)' : 'transparent' }}
     >
       <div className="u-flex u-items-center u-gap-2 u-wrap">
         <code className="u-fw-600 u-fs-12">@@{board.handle}</code>

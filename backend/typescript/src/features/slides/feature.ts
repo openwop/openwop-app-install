@@ -39,7 +39,7 @@ export const slidesFeature: BackendFeature = {
     id: 'slides',
     label: 'Slides',
     description:
-      'Slide decks — generate them from the AI chat or a workflow (the Slide Designer agent emits a typed `canvas.slides` deck inline in chat) AND create/edit them full-screen: slide strip with reorder/rename/duplicate, layout starters, a per-slide property panel, undo/redo, and version history. Constrained typed JSON — never executable code; exports via Documents (pptx/pdf). ON by default.',
+      'Slide decks — generate them from the AI chat or a workflow (the Slide Designer agent emits a typed `canvas.slides` deck inline in chat) AND create/edit them full-screen: slide strip with reorder/rename/duplicate, layout starters, a per-slide property panel, undo/redo, and version history. Constrained typed JSON — never executable code; exports via Documents (pptx/pdf).',
     category: 'Documents',
     status: 'on',
     bucketUnit: 'tenant',
@@ -49,7 +49,7 @@ export const slidesFeature: BackendFeature = {
   // workbench by the ADR 0083 run-output producer); the Slide Designer agent drives
   // it through the existing chat (ADR 0058) — no new chat surface.
   requiredPacks: [
-    { name: 'feature.slides.nodes', version: '1.1.1' },
-    { name: 'feature.slides.agents', version: '1.1.1' },
+    { name: 'feature.slides.nodes', version: '1.1.3' },
+    { name: 'vendor.openwop-app.slides.agents', version: '1.1.2' },
   ],
 };

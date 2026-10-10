@@ -9,19 +9,24 @@
  * D6 (security): the create path validates its target — the agent must resolve and
  * the caller must be able to SEE the bound conversation (org path) / own the channel
  * (channel path); a channel schedule's `conversationId` is FORCED to the channelId.
- * The feature is always-on (graduated, no toggle), so gating is RBAC (org path) /
- * channel-membership (channel path), not a toggle check.
+ *
+ * ADR 0820 §8.2 — the feature has a toggle again (default ON, sold in the Agents
+ * bundle), so BOTH scopes gate on toggle + plan first: the org path through
+ * `authorizeOrgScope`, the channel path through `requireFeatureEnabled`, then the
+ * same RBAC / channel-membership checks as before.
  */
 import type { Request } from 'express';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
-import { requireOrgScope, requireString } from '../featureRoute.js';
+import { authorizeOrgScope, requireFeatureEnabled, requireString } from '../featureRoute.js';
 import { resolveCallerUser } from '../users/usersGuards.js';
 import { OpenwopError } from '../../types.js';
 import { resolveAgentForTenant } from '../../host/agentVisibility.js';
 import { getConversationMeta } from '../../host/conversationStore.js';
 import { isVisibleToAsync } from '../../host/conversationVisibility.js';
 import { assertChannelManage, isChannelAgentMember, getChannel } from '../channels/channelService.js';
-import { createScheduledChat, deleteScheduledChat, deleteScheduledChatsForAgent, getScheduledChat, listScheduledChatsWithStatus, setScheduledChatEnabled } from './scheduledChatService.js';
+import { canSeeScheduledChat, createScheduledChat, deleteScheduledChat, deleteScheduledChatsForAgent, getScheduledChat, listScheduledChatsWithStatus, setScheduledChatEnabled, SCHEDULED_AGENT_CHATS_TOGGLE, type ScheduledChat } from './scheduledChatService.js';
+
+const FEATURE = { toggleId: SCHEDULED_AGENT_CHATS_TOGGLE, label: 'Scheduled agent chats' } as const;
 
 /** D6 — a schedulable agent must exist (else every tick silently fails). Mirrors the
  *  channel add-agent guard (channelService `addChannelAgent`).
@@ -33,22 +38,41 @@ async function assertAgentResolves(tenantId: string, agentId: string): Promise<v
   }
 }
 
+/** ADR 0846 D1 — the caller as the conversation predicate keys it (see
+ *  `canSeeScheduledChat`). CREATE and every ORG read/manage door use this one spelling. */
+const actingUserOf = (req: Request): string | undefined => req.userId ?? req.principal?.principalId;
+
+/** ADR 0846 D1 — an ORG schedule the caller may see, else the same 404 as a missing
+ *  row (no existence oracle). The ONE gate for get/pause/delete. */
+async function visibleOrgChat(req: Request, tenantId: string, orgId: string, chatId: string): Promise<ScheduledChat> {
+  const chat = await getScheduledChat(tenantId, { orgId }, chatId);
+  if (!chat || !(await canSeeScheduledChat(tenantId, chat, actingUserOf(req)))) {
+    throw new OpenwopError('not_found', 'Scheduled chat not found.', 404, { chatId });
+  }
+  return chat;
+}
+
 export function registerScheduledChatRoutes(deps: RouteDeps): void {
   const { app } = deps;
-  const ORG = '/v1/host/openwop-app/scheduled-chats/orgs/:orgId/chats';
-  const CH = '/v1/host/openwop-app/scheduled-chats/channels/:channelId/chats';
+  const ORG = '/host/openwop-app/scheduled-chats/orgs/:orgId/chats';
+  const CH = '/host/openwop-app/scheduled-chats/channels/:channelId/chats';
 
   // ── ORG scope (RBAC) ────────────────────────────────────────────────────────
   app.get(ORG, async (req, res, next) => {
     try {
-      const { orgId, tenantId } = await requireOrgScope(req, 'workspace:read');
-      res.json({ chats: await listScheduledChatsWithStatus(tenantId, { orgId }) });
+      const { orgId, tenantId } = await authorizeOrgScope(req, FEATURE, 'workspace:read');
+      // ADR 0846 D1 — only schedules whose conversation the caller can see. The tile
+      // and this page render `prompt` and link `conversationId`; both are that
+      // conversation's business.
+      const all = await listScheduledChatsWithStatus(tenantId, { orgId });
+      const shown = await Promise.all(all.map((c) => canSeeScheduledChat(tenantId, c, actingUserOf(req))));
+      res.json({ chats: all.filter((_, i) => shown[i]) });
     } catch (err) { next(err); }
   });
 
   app.post(ORG, async (req, res, next) => {
     try {
-      const { user, orgId, tenantId } = await requireOrgScope(req, 'workspace:write');
+      const { user, orgId, tenantId } = await authorizeOrgScope(req, FEATURE, 'workspace:write');
       const body = (req.body ?? {}) as Record<string, unknown>;
       // D6 — validate the target BEFORE binding a job: the agent must exist, and the
       // caller must be able to SEE the conversation they bind — closing the IDOR of
@@ -63,7 +87,7 @@ export function registerScheduledChatRoutes(deps: RouteDeps): void {
       const conversationId = requireString(body.conversationId, 'conversationId').trim();
       await assertAgentResolves(tenantId, agentId);
       const meta = await getConversationMeta(tenantId, conversationId);
-      if (!(await isVisibleToAsync(meta, tenantId, user.userId))) {
+      if (!(await isVisibleToAsync(meta, tenantId, actingUserOf(req)))) {
         throw new OpenwopError('not_found', 'Conversation not found.', 404, { conversationId });
       }
       res.status(201).json({ chat: await createScheduledChat(tenantId, { orgId }, user.userId, { ...body, agentId, conversationId }) });
@@ -72,24 +96,24 @@ export function registerScheduledChatRoutes(deps: RouteDeps): void {
 
   app.get(`${ORG}/:chatId`, async (req, res, next) => {
     try {
-      const { orgId, tenantId } = await requireOrgScope(req, 'workspace:read');
-      const chat = await getScheduledChat(tenantId, { orgId }, req.params.chatId);
-      if (!chat) throw new OpenwopError('not_found', 'Scheduled chat not found.', 404, { chatId: req.params.chatId });
-      res.json({ chat });
+      const { orgId, tenantId } = await authorizeOrgScope(req, FEATURE, 'workspace:read');
+      res.json({ chat: await visibleOrgChat(req, tenantId, orgId, req.params.chatId) });
     } catch (err) { next(err); }
   });
 
   app.post(`${ORG}/:chatId/pause`, async (req, res, next) => {
     try {
-      const { orgId, tenantId } = await requireOrgScope(req, 'workspace:write');
+      const { orgId, tenantId } = await authorizeOrgScope(req, FEATURE, 'workspace:write');
       const enabled = (req.body as { enabled?: unknown })?.enabled !== false; // default re-enable; {enabled:false} pauses
+      await visibleOrgChat(req, tenantId, orgId, req.params.chatId);
       res.json({ chat: await setScheduledChatEnabled(tenantId, { orgId }, req.params.chatId, enabled) });
     } catch (err) { next(err); }
   });
 
   app.delete(`${ORG}/:chatId`, async (req, res, next) => {
     try {
-      const { orgId, tenantId } = await requireOrgScope(req, 'workspace:write');
+      const { orgId, tenantId } = await authorizeOrgScope(req, FEATURE, 'workspace:write');
+      await visibleOrgChat(req, tenantId, orgId, req.params.chatId);
       await deleteScheduledChat(tenantId, { orgId }, req.params.chatId);
       res.status(204).end();
     } catch (err) { next(err); }
@@ -100,6 +124,7 @@ export function registerScheduledChatRoutes(deps: RouteDeps): void {
   // (getChannel). The bound agent MUST be a channel member (M3) and the reply always
   // posts in-channel — `conversationId` is forced to the channelId, never body-supplied.
   const channelCaller = async (req: Request): Promise<{ tenantId: string; userId: string; channelId: string }> => {
+    await requireFeatureEnabled(req, FEATURE.toggleId, FEATURE.label); // ADR 0820 §8.2 — toggle + plan first
     const user = await resolveCallerUser(req);
     // NOT org-scoped: the CHANNEL paths are membership-gated by `getChannel` /
     // `assertChannelManage` (ADR 0202 D3), not by `requireOrgScope`, so there is no

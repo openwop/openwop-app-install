@@ -8,7 +8,7 @@ import { authedHeaders, config, fetchOpts } from '../../client/config.js';
 export interface Org { orgId: string; name: string }
 export type FieldType = 'text' | 'email' | 'number' | 'textarea' | 'select' | 'checkbox';
 export const FIELD_TYPES: readonly FieldType[] = ['text', 'email', 'number', 'textarea', 'select', 'checkbox'];
-export interface FormField { key: string; label: string; type: FieldType; required: boolean; options?: string[]; /** UX_UPGRADE-forms F-G1 — optional per-field help text. */ description?: string; /** F9 — number-only authored constraints. */ min?: number; max?: number; step?: number }
+export interface FormField { key: string; label: string; type: FieldType; required: boolean; options?: string[]; /** UX_UPGRADE-forms F-G1 — optional per-field help text. */ description?: string; /** F9 — number-only authored constraints. */ min?: number; max?: number; step?: number; /** ADR 0808 — conditional visibility (edge-condition grammar over an earlier field). */ when?: { type: 'equals' | 'notEquals' | 'contains' | 'truthy' | 'falsy'; left: string; right?: unknown } }
 export type FormStatus = 'draft' | 'published';
 
 /** ADR 0246 — routes this form's submissions to a priority-matrix intake list. */
@@ -21,6 +21,8 @@ export interface FormDef {
   status: FormStatus;
   fields: FormField[];
   createToContact: boolean;
+  /** ADR 0850 D1 — file a service-desk ticket per submission, in this form's own org (default off). */
+  createTicket?: boolean;
   emailOptInField?: string;
   submitMessage?: string;
   intakeBinding?: IntakeBinding;
@@ -54,7 +56,9 @@ export interface Submission {
    *  still advances, deliberately (a false positive must not be walled into a
    *  step they cannot leave), so what is suppressed is the analytics event —
    *  which is the half that inflates conversion. */
-  flagged?: 'honeypot' | 'guard';
+  flagged?: 'honeypot' | 'guard' | 'burst';
+  /** ADR 0850 D3 — an operator released this row from quarantine. */
+  releasedAt?: string;
 }
 
 const root = `${config.baseUrl}/host/openwop-app`;
@@ -77,19 +81,29 @@ export class FormsRequestError extends Error {
   readonly status: number;
   /** The server's own `message`, when it sent one. Never the primary copy. */
   readonly detail: string | undefined;
-  constructor(op: string, status: number, detail?: string) {
+  /** ADR 0850 — the server's `details.reason`, when it sent one: the SAME status
+   *  can mean different things (a 409 erased vs contended; a 429 the form's lead
+   *  ceiling vs the global write limiter — grade-code FRM2CD-5). */
+  readonly reason: string | undefined;
+  constructor(op: string, status: number, detail?: string, reason?: string) {
     super(detail || `${op} returned ${status}`);
     this.name = 'FormsRequestError';
     this.status = status;
     this.detail = detail || undefined;
+    this.reason = reason || undefined;
   }
 }
 
 async function asJson<T>(res: Response, ctx: string): Promise<T> {
   if (!res.ok) {
     let detail = '';
-    try { detail = ((await res.json()) as { message?: string })?.message ?? ''; } catch { /* non-JSON */ }
-    throw new FormsRequestError(ctx, res.status, detail);
+    let reason = '';
+    try {
+      const body = (await res.json()) as { message?: string; details?: { reason?: unknown } };
+      detail = body?.message ?? '';
+      reason = typeof body?.details?.reason === 'string' ? body.details.reason : '';
+    } catch { /* non-JSON */ }
+    throw new FormsRequestError(ctx, res.status, detail, reason);
   }
   return (await res.json()) as T;
 }
@@ -151,7 +165,7 @@ export async function createFormFromTemplate(orgId: string, templateId: string, 
   return asJson<FormDef>(res, 'createFormFromTemplate');
 }
 
-export async function updateForm(orgId: string, formId: string, patch: { title?: string; fields?: FormField[]; createToContact?: boolean; emailOptInField?: string | null; submitMessage?: string; intakeBinding?: IntakeBinding | null }): Promise<FormDef> {
+export async function updateForm(orgId: string, formId: string, patch: { title?: string; fields?: FormField[]; createToContact?: boolean; createTicket?: boolean; emailOptInField?: string | null; submitMessage?: string; intakeBinding?: IntakeBinding | null }): Promise<FormDef> {
   const res = await fetch(`${base(orgId)}/${encodeURIComponent(formId)}`, fetchOpts({ method: 'PATCH', headers: jsonHeaders(), body: JSON.stringify(patch) }));
   return asJson<FormDef>(res, 'updateForm');
 }
@@ -194,6 +208,15 @@ export async function listSubmissions(orgId: string, formId: string): Promise<Su
 export async function deleteSubmission(orgId: string, formId: string, submissionId: string): Promise<void> {
   const res = await fetch(`${base(orgId)}/${encodeURIComponent(formId)}/submissions/${encodeURIComponent(submissionId)}`, fetchOpts({ method: 'DELETE', headers: authedHeaders() }));
   if (!res.ok) throw new FormsRequestError('deleteSubmission', res.status);
+}
+
+/** ADR 0850 D3 — release ONE held submission: clear its flag and deliver it as a
+ *  clean capture would have been (CRM, tickets, consent per the capture-time
+ *  snapshot, the host event). `released:false` means it was not held — the call
+ *  is idempotent. 409 = erased on request; 429 = the form's lead ceiling. */
+export async function releaseSubmission(orgId: string, formId: string, submissionId: string): Promise<{ released: boolean; submission: Submission }> {
+  const res = await fetch(`${base(orgId)}/${encodeURIComponent(formId)}/submissions/${encodeURIComponent(submissionId)}/release`, fetchOpts({ method: 'POST', headers: authedHeaders() }));
+  return asJson(res, 'releaseSubmission');
 }
 
 /** FRMB-PAGE — paged variant (the channels idiom): newest-first `limit` page +

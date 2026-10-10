@@ -25,7 +25,7 @@ import { createApp } from '../src/index.js';
 import { getAgentRegistry } from '../src/executor/agentRegistry.js';
 import { markAsBoardGroup, getConversationMeta, ensureConversationMeta } from '../src/host/conversationStore.js';
 import { programMock, resetMockPrograms } from '../src/providers/dispatchMock.js';
-import { participantRosterOf, isParticipant, MAX_MULTI_PARTY_PARTICIPANTS } from '../src/host/multiPartyConversation.js';
+import { participantRosterOf, isParticipant } from '../src/host/multiPartyConversation.js';
 import type { ConversationMeta } from '../src/host/conversationStore.js';
 
 let server: http.Server;
@@ -57,10 +57,10 @@ async function poll(runId: string): Promise<{ status: string; events: Ev[] }> {
   let status = 'pending';
   for (let i = 0; i < 80; i++) {
     await new Promise((r) => setTimeout(r, 20));
-    status = (await api<{ status: string }>(`/v1/runs/${runId}`)).body.status;
+    status = (await api<{ status: string }>(`/runs/${runId}`)).body.status;
     if (['completed', 'failed', 'cancelled'].includes(status) || status.startsWith('waiting')) break;
   }
-  const events = (await api<{ events?: Ev[] }>(`/v1/runs/${runId}/debug-bundle`)).body.events ?? [];
+  const events = (await api<{ events?: Ev[] }>(`/runs/${runId}/debug-bundle`)).body.events ?? [];
   return { status, events };
 }
 const ofType = (events: Ev[], type: string): Ev[] => events.filter((e) => e.type === type);
@@ -73,13 +73,8 @@ function registerAgent(agentId: string, persona: string, label: string): void {
   });
 }
 
-describe('RFC 0101 — multiPartyConversation capability', () => {
-  it('advertises multiPartyConversation { supported, maxParticipants } at /.well-known/openwop', async () => {
-    const wk = await api<{ capabilities?: { multiPartyConversation?: { supported?: boolean; maxParticipants?: number } } }>('/.well-known/openwop');
-    expect(wk.body.capabilities?.multiPartyConversation?.supported).toBe(true);
-    expect(wk.body.capabilities?.multiPartyConversation?.maxParticipants).toBe(MAX_MULTI_PARTY_PARTICIPANTS);
-  });
-});
+// ADR 0812 P3c-0 — the `multiPartyConversation` discovery-advert block is deleted: the record
+// exists only in the retired v1 document (the v2 root carries no such record).
 
 describe('RFC 0101 — participant roster + speaker attribution (helper)', () => {
   it('derives the agent roster from a board-group meta, and ignores non-board chats', () => {
@@ -145,7 +140,7 @@ describe('RFC 0101 — participant roster + speaker attribution (helper)', () =>
   // the turn through the persistence primitives directly — so the widening is
   // INERT there; no roster check runs on that path.
   it('derives a single-participant roster for a NOTEBOOK chat room — the seated researcher does not 422', () => {
-    const RESEARCHER = 'feature.notebooks.agents.researcher';
+    const RESEARCHER = 'vendor.openwop-app.notebooks.agents.researcher';
     const base: Omit<ConversationMeta, 'type' | 'boardId' | 'participants'> = {
       conversationId: 'c', tenantId: TENANT, createdAt: '', updatedAt: '',
     };
@@ -195,12 +190,12 @@ describe('RFC 0101 — multi-party council on the conversation wire (ADR 0040 Ph
     // Open the conversation via a gate that declares the cohort as participants at
     // OPEN time → the roster lands on `conversation.opened` (RFC 0101 (1)).
     const workflowId = `openwop-app.conversation.mp-${Date.now()}`;
-    await api('/v1/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({
+    await api('/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({
       workflowId,
       nodes: [{ nodeId: 'gate', typeId: 'core.conversationGate', config: { prompt: 'Council convened.', participants: cohort.map((a) => ({ agentId: a })) } }],
       edges: [],
     }) });
-    const { body: run2 } = await api<{ runId: string }>('/v1/runs', { method: 'POST', body: JSON.stringify({
+    const { body: run2 } = await api<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({
       // ADR 0315: byok + non-tool-calling provider keeps these council turns on the
       // inline completion path the test programs via the dispatch mock.
       workflowId, inputs: { provider: 'mock', model: 'mock-1', credentialRef: 'byok:mock' }, tenantId: TENANT, metadata: { chatSessionId: sessionId },
@@ -215,7 +210,7 @@ describe('RFC 0101 — multi-party council on the conversation wire (ADR 0040 Ph
 
     // Advisor turn (in-cohort) — attributed with a speakerId that IS a participant.
     programMock('', [{ content: 'First principles: simplify, then scale.' }]);
-    const adv = await api(`/v1/runs/${rid}/interrupts/gate`, { method: 'POST', body: JSON.stringify({
+    const adv = await api(`/runs/${rid}/interrupts/gate`, { method: 'POST', body: JSON.stringify({
       resumeValue: { operation: 'exchange', turn: { content: 'How should we grow?', to: elon } },
     }) });
     expect(adv.status).toBe(200);
@@ -230,7 +225,7 @@ describe('RFC 0101 — multi-party council on the conversation wire (ADR 0040 Ph
 
     // Moderator turn (the chair) — also attributed, also a participant.
     programMock('', [{ content: 'Agreements: scale. Dissent: pace. Decision: pilot first.' }]);
-    await api(`/v1/runs/${rid}/interrupts/gate`, { method: 'POST', body: JSON.stringify({
+    await api(`/runs/${rid}/interrupts/gate`, { method: 'POST', body: JSON.stringify({
       resumeValue: { operation: 'exchange', turn: { content: 'Synthesize the panel.', to: chair } },
     }) });
     const afterMod = await poll(rid);
@@ -242,7 +237,7 @@ describe('RFC 0101 — multi-party council on the conversation wire (ADR 0040 Ph
 
     // RFC 0101 (3) — a turn from a NON-participant agent is rejected fail-closed.
     programMock('', [{ content: 'I was not invited.' }]);
-    const denied = await api<{ error?: { code?: string } }>(`/v1/runs/${rid}/interrupts/gate`, { method: 'POST', body: JSON.stringify({
+    const denied = await api<{ error?: { code?: string } }>(`/runs/${rid}/interrupts/gate`, { method: 'POST', body: JSON.stringify({
       resumeValue: { operation: 'exchange', turn: { content: 'Let me in.', to: stranger } },
     }) });
     expect(denied.status).toBe(422);
@@ -291,12 +286,12 @@ describe('RFC 0101 — multi-party council on the conversation wire (ADR 0040 Ph
     expect(participantRosterOf(meta)).toEqual([{ agentId: inRoom }]);
 
     const workflowId = `openwop-app.conversation.mp-proj-${Date.now()}`;
-    await api('/v1/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({
+    await api('/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({
       workflowId,
       nodes: [{ nodeId: 'gate', typeId: 'core.conversationGate', config: { prompt: 'Project room.' } }],
       edges: [],
     }) });
-    const { body: run } = await api<{ runId: string }>('/v1/runs', { method: 'POST', body: JSON.stringify({
+    const { body: run } = await api<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({
       workflowId, inputs: { provider: 'mock', model: 'mock-1', credentialRef: 'byok:mock' }, tenantId: TENANT, metadata: { chatSessionId: sessionId },
     }) });
     const rid = run.runId;
@@ -305,7 +300,7 @@ describe('RFC 0101 — multi-party council on the conversation wire (ADR 0040 Ph
     // POSITIVE CONTROL FIRST — a seated agent still speaks. Without this the 422
     // below would pass equally well against a room where nobody can speak at all.
     programMock('', [{ content: 'Status: on track.' }]);
-    const ok = await api(`/v1/runs/${rid}/interrupts/gate`, { method: 'POST', body: JSON.stringify({
+    const ok = await api(`/runs/${rid}/interrupts/gate`, { method: 'POST', body: JSON.stringify({
       resumeValue: { operation: 'exchange', turn: { content: 'Where are we?', to: inRoom } },
     }) });
     expect(ok.status).toBe(200);
@@ -316,7 +311,7 @@ describe('RFC 0101 — multi-party council on the conversation wire (ADR 0040 Ph
 
     // The enforcement: a NON-member agent is refused fail-closed.
     programMock('', [{ content: 'I am not in this project.' }]);
-    const denied = await api(`/v1/runs/${rid}/interrupts/gate`, { method: 'POST', body: JSON.stringify({
+    const denied = await api(`/runs/${rid}/interrupts/gate`, { method: 'POST', body: JSON.stringify({
       resumeValue: { operation: 'exchange', turn: { content: 'Let me in.', to: outsider } },
     }) });
     expect(denied.status).toBe(422);

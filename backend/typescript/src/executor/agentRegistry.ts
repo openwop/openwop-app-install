@@ -9,6 +9,8 @@
  * the reference app; multi-instance hosts would replicate via a shared store.
  */
 
+import { canonicalAgentId } from './agentIdAliases.js';
+import { isPackRevoked } from '../host/packRevocations.js';
 import type { PackTrustReason, PackTrustTier } from '../host/packTrust.js';
 
 /** A pack-declared agent manifest, resolved for runtime use.
@@ -130,11 +132,33 @@ let resolver: AgentPackResolver | null = null;
 
 const userKey = (tenant: string, agentId: string): string => `u\u0000${tenant}\u0000${agentId}`;
 
-function lookup(agentId: string, tenant?: string): ResolvedAgentManifest | null {
+/** ADR 0826 D5 — a PACK agent whose pack version is revoked is not dispatchable,
+ *  from the moment the revocation reaches this instance (no restart): every
+ *  lookup — `has`/`get`/`resolve` — and the dispatchable list treat it as absent.
+ *  User-authored agents (`ownerTenant`) carry no pack provenance to revoke. */
+function revoked(agent: ResolvedAgentManifest): boolean {
+  return agent.ownerTenant === undefined && isPackRevoked(agent.packName, agent.packVersion);
+}
+
+function lookupExact(agentId: string, tenant?: string): ResolvedAgentManifest | null {
   const pack = inProcess.get(agentId);
-  if (pack) return pack;
+  if (pack) return revoked(pack) ? null : pack;
   if (tenant !== undefined) return inProcess.get(userKey(tenant, agentId)) ?? null;
   return null;
+}
+
+/** ADR 0763 — THE alias choke point: `has`/`get`/`resolve` all read here. A
+ *  legacy `feature.*.agents.*` id reaches the renamed agent when one is
+ *  registered under its canonical id; otherwise the literal id is looked up
+ *  exactly as before (inert until the rename). One-way: a canonical id never
+ *  falls back to a legacy agent. */
+function lookup(agentId: string, tenant?: string): ResolvedAgentManifest | null {
+  const canonical = canonicalAgentId(agentId);
+  if (canonical !== agentId) {
+    const hit = lookupExact(canonical, tenant);
+    if (hit) return hit;
+  }
+  return lookupExact(agentId, tenant);
 }
 
 export function getAgentRegistry() {
@@ -166,9 +190,14 @@ export function getAgentRegistry() {
       const direct = lookup(agentId, tenant);
       if (direct) return direct;
       if (resolver) {
-        await resolver(agentId, tenant);
-        const reread = lookup(agentId, tenant);
-        if (reread) return reread;
+        // ADR 0763 — hand the pack scan the canonical spelling first (it
+        // matches manifests by exact agentId), then the literal one.
+        const canonical = canonicalAgentId(agentId);
+        for (const candidate of canonical !== agentId ? [canonical, agentId] : [agentId]) {
+          await resolver(candidate, tenant);
+          const reread = lookup(agentId, tenant);
+          if (reread) return reread;
+        }
       }
       return null;
     },
@@ -179,7 +208,7 @@ export function getAgentRegistry() {
     /** All resolved manifests (for the inventory route / CLI). Dispatchable
      *  agents only — refused ones are read through `listRefused()`. */
     list(): readonly ResolvedAgentManifest[] {
-      return Array.from(inProcess.values()).sort((a, b) => a.agentId.localeCompare(b.agentId));
+      return Array.from(inProcess.values()).filter((a) => !revoked(a)).sort((a, b) => a.agentId.localeCompare(b.agentId));
     },
     /** ADR 0555 P1 — record an agent this host refuses to register, with the
      *  trust verdict that caused it. Never reachable by `get`/`has`/`resolve`. */

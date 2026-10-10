@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.workflows.marketing",
-  "version": "1.1.9",
+  "version": "1.1.11",
   "kind": "workflow-chain",
   "description": "Real-work workflow pack (RFC 0013, ADR 0149) — the Marketing & Advertising cluster: Full Campaign Launch, Ad Performance Optimization Loop, Content Brief Generator, and Content Repurposing. Reasons with core.ai.chatCompletion over real tenant data (feature.crm / feature.kb / feature.cms / feature.email); reads/optimizes the ad platforms provider-agnostically via the core.openwop.connectors.ad-* capability nodes (Meta or Google, whichever the tenant connected — ADR 0186). The optimization loop routes within-guardrail changes to auto-apply and out-of-guardrail changes to a core.chat.approvalGate via a core.flow.if conditional node (ADR 0149 open-question resolution: a flow conditional, not a new primitive). Every launch/publish/apply is approval- or guardrail-gated; all tenant values are run parameters (replay-deterministic). Published under core.openwop.workflows.* (openwop-team key).",
   "author": "openwop",
@@ -10,7 +10,7 @@
   "chains": [
     {
       "chainId": "marketing.campaign-launch",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "label": "Full Campaign Launch",
       "description": "From a brief: select the audience (CRM), draft ad copy and creative, reference the landing page (CMS), consolidate for review, then launch on the ad platform after approval.",
       "parameters": {
@@ -27,19 +27,19 @@
       "capabilities": ["side-effectful"],
       "dag": {
         "nodes": [
-          { "id": "audience", "typeId": "feature.crm.nodes.list-companies", "name": "Audience select", "position": { "x": 0, "y": 0 }, "config": { "orgId": "{{params.orgId}}" }, "inputs": {} },
-          { "id": "copy", "typeId": "core.ai.chatCompletion", "name": "Ad copy", "position": { "x": 320, "y": 0 }, "config": { "systemPrompt": "Write ad copy variants for the campaign brief: {{params.brief}}",
+          { "id": "audience", "typeId": "feature.crm.nodes.list-companies@1.0.0", "name": "Audience select", "position": { "x": 0, "y": 0 }, "config": { "orgId": "{{params.orgId}}" }, "inputs": {} },
+          { "id": "copy", "typeId": "core.ai.chatCompletion@1.0.0", "name": "Ad copy", "position": { "x": 320, "y": 0 }, "config": { "systemPrompt": "Write ad copy variants for the campaign brief: {{params.brief}}",
             "provider": "{{params.provider}}",
             "model": "{{params.model}}"
           }, "inputs": {} },
-          { "id": "creative", "typeId": "core.ai.chatCompletion", "name": "Creative variants", "position": { "x": 320, "y": 140 }, "config": { "systemPrompt": "Propose creative concepts/variants for the campaign brief: {{params.brief}}",
+          { "id": "creative", "typeId": "core.ai.chatCompletion@1.0.0", "name": "Creative variants", "position": { "x": 320, "y": 140 }, "config": { "systemPrompt": "Propose creative concepts/variants for the campaign brief: {{params.brief}}",
             "provider": "{{params.provider}}",
             "model": "{{params.model}}"
           }, "inputs": {} },
-          { "id": "page", "typeId": "feature.cms.nodes.list-pages", "name": "Landing page (CMS)", "position": { "x": 320, "y": 280 }, "config": { "orgId": "{{params.orgId}}" }, "inputs": {} },
-          { "id": "review", "typeId": "core.chat.approvalGate", "name": "Consolidated review", "position": { "x": 640, "y": 140 }, "config": { "title": "Approve launching this campaign on the ad platform", "artifactType": "marketing.campaign", "actions": ["approve", "reject"] }, "inputs": {} },
-          { "id": "gate-reject", "typeId": "core.flow.noop", "name": "Rejected — campaign not launched", "position": { "x": 960, "y": 300 }, "config": {}, "inputs": {} },
-          { "id": "launch", "typeId": "core.openwop.http.openapi-call", "name": "Launch campaign (Google Ads)", "position": { "x": 960, "y": 140 }, "config": { "connectionRef": "core.openwop.connections.google-ads", "operationId": "createCampaign" }, "inputs": {} }
+          { "id": "page", "typeId": "feature.cms.nodes.list-pages@1.0.0", "name": "Landing page (CMS)", "position": { "x": 320, "y": 280 }, "config": { "orgId": "{{params.orgId}}" }, "inputs": {} },
+          { "id": "review", "typeId": "core.chat.approvalGate@1.1.0", "name": "Consolidated review", "position": { "x": 640, "y": 140 }, "config": { "title": "Approve launching this campaign on the ad platform", "artifactType": "marketing.campaign", "actions": ["approve", "reject"] }, "inputs": {} },
+          { "id": "gate-reject", "typeId": "core.flow.noop@1.0.0", "name": "Rejected — campaign not launched", "position": { "x": 960, "y": 300 }, "config": {}, "inputs": {} },
+          { "id": "launch", "typeId": "core.openwop.http.openapi-call@1.0.0", "name": "Launch campaign (Google Ads)", "position": { "x": 960, "y": 140 }, "config": { "connectionRef": "core.openwop.connections.google-ads", "operationId": "createCampaign" }, "inputs": {} }
         ],
         "edges": [
           { "from": "audience", "to": "copy" },
@@ -55,7 +55,7 @@
     },
     {
       "chainId": "marketing.ad-optimization",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "label": "Ad Performance Optimization Loop",
       "description": "Read ad metrics from whichever platform the tenant connected (provider-agnostic core.openwop.connectors.ad-metrics — Meta or Google, not hard-coded), diagnose anomalies and recommend a bid/budget shift, then a core.flow.if guardrail routes within-guardrail changes straight to a budget recommendation and out-of-guardrail changes through approval first — finally log the learnings. Budget changes are RECOMMENDED by default (the ad-budget-update node dry-runs unless you set config.dryRun:false); a deliberate opt-in applies the change live via ctx.ads.updateBudget behind the same guardrail + approval gate (ADR 0186 slice 4b). Pair with an hourly scheduled trigger.",
       "parameters": {
@@ -74,17 +74,17 @@
       "capabilities": ["side-effectful"],
       "dag": {
         "nodes": [
-          { "id": "fetch", "typeId": "core.openwop.connectors.ad-metrics", "name": "Fetch ad metrics", "position": { "x": 0, "y": 60 }, "config": { "platform": "{{params.platform}}", "adAccountId": "{{params.adAccountId}}", "campaignId": "{{params.campaignId}}" }, "inputs": {} },
-          { "id": "diagnose", "typeId": "core.ai.chatCompletion", "name": "Diagnose + recommend", "position": { "x": 280, "y": 60 }, "config": { "systemPrompt": "Detect anomalies vs thresholds and recommend a bid/budget shift. State whether the change is within the guardrail ({{params.guardrail}}). End with a line 'WITHIN GUARDRAIL: yes' or 'WITHIN GUARDRAIL: no'.",
+          { "id": "fetch", "typeId": "core.openwop.connectors.ad-metrics@1.0.0", "name": "Fetch ad metrics", "position": { "x": 0, "y": 60 }, "config": { "platform": "{{params.platform}}", "adAccountId": "{{params.adAccountId}}", "campaignId": "{{params.campaignId}}" }, "inputs": {} },
+          { "id": "diagnose", "typeId": "core.ai.chatCompletion@1.0.0", "name": "Diagnose + recommend", "position": { "x": 280, "y": 60 }, "config": { "systemPrompt": "Detect anomalies vs thresholds and recommend a bid/budget shift. State whether the change is within the guardrail ({{params.guardrail}}). End with a line 'WITHIN GUARDRAIL: yes' or 'WITHIN GUARDRAIL: no'.",
             "provider": "{{params.provider}}",
             "model": "{{params.model}}"
           }, "inputs": {} },
-          { "id": "guard", "typeId": "core.flow.if", "name": "Within guardrail?", "position": { "x": 560, "y": 60 }, "config": {"predicate": {"path": "", "op": "contains", "value": "WITHIN GUARDRAIL: no"}}, "inputs": {} },
-          { "id": "autoApply", "typeId": "core.openwop.connectors.ad-budget-update", "name": "Recommend change (within guardrail)", "position": { "x": 840, "y": 0 }, "config": { "platform": "{{params.platform}}", "adAccountId": "{{params.adAccountId}}", "campaignId": "{{params.campaignId}}" }, "inputs": {} },
-          { "id": "review", "typeId": "core.chat.approvalGate", "name": "Approve (beyond guardrail)", "position": { "x": 840, "y": 140 }, "config": { "title": "Approve this beyond-guardrail budget change", "artifactType": "marketing.ad-budget", "actions": ["approve", "reject"] }, "inputs": {} },
-          { "id": "gate-reject", "typeId": "core.flow.noop", "name": "Rejected — no budget change applied", "position": { "x": 1120, "y": 300 }, "config": {}, "inputs": {} },
-          { "id": "applyReviewed", "typeId": "core.openwop.connectors.ad-budget-update", "name": "Recommend approved change", "position": { "x": 1120, "y": 140 }, "config": { "platform": "{{params.platform}}", "adAccountId": "{{params.adAccountId}}", "campaignId": "{{params.campaignId}}" }, "inputs": {} },
-          { "id": "log", "typeId": "feature.notifications.nodes.notify", "name": "Log learnings", "position": { "x": 1400, "y": 60 }, "config": { "audience": "tenant" }, "inputs": { "title": "Ad Performance Optimization Loop" } }
+          { "id": "guard", "typeId": "core.flow.if@1.0.0", "name": "Within guardrail?", "position": { "x": 560, "y": 60 }, "config": {"predicate": {"path": "", "op": "contains", "value": "WITHIN GUARDRAIL: no"}}, "inputs": {} },
+          { "id": "autoApply", "typeId": "core.openwop.connectors.ad-budget-update@1.0.0", "name": "Recommend change (within guardrail)", "position": { "x": 840, "y": 0 }, "config": { "platform": "{{params.platform}}", "adAccountId": "{{params.adAccountId}}", "campaignId": "{{params.campaignId}}" }, "inputs": {} },
+          { "id": "review", "typeId": "core.chat.approvalGate@1.1.0", "name": "Approve (beyond guardrail)", "position": { "x": 840, "y": 140 }, "config": { "title": "Approve this beyond-guardrail budget change", "artifactType": "marketing.ad-budget", "actions": ["approve", "reject"] }, "inputs": {} },
+          { "id": "gate-reject", "typeId": "core.flow.noop@1.0.0", "name": "Rejected — no budget change applied", "position": { "x": 1120, "y": 300 }, "config": {}, "inputs": {} },
+          { "id": "applyReviewed", "typeId": "core.openwop.connectors.ad-budget-update@1.0.0", "name": "Recommend approved change", "position": { "x": 1120, "y": 140 }, "config": { "platform": "{{params.platform}}", "adAccountId": "{{params.adAccountId}}", "campaignId": "{{params.campaignId}}" }, "inputs": {} },
+          { "id": "log", "typeId": "feature.notifications.nodes.notify@1.0.0", "name": "Log learnings", "position": { "x": 1400, "y": 60 }, "config": { "audience": "tenant" }, "inputs": { "title": "Ad Performance Optimization Loop" } }
         ],
         "edges": [
           { "from": "fetch", "to": "diagnose" },
@@ -101,7 +101,7 @@
     },
     {
       "chainId": "marketing.content-brief",
-      "version": "1.0.1",
+      "version": "1.0.3",
       "label": "Content Brief Generator",
       "description": "Gather sources from the knowledge base and synthesize a structured SEO content brief for a topic/keyword.",
       "parameters": {
@@ -119,27 +119,27 @@
       "capabilities": ["side-effectful"],
       "dag": {
         "nodes": [
-          { "id": "gather", "typeId": "feature.kb.nodes.rag", "name": "Gather sources", "position": { "x": 0, "y": 0 }, "config": {}, "inputs": {
+          { "id": "gather", "typeId": "feature.kb.nodes.rag@1.0.0", "name": "Gather sources", "position": { "x": 0, "y": 0 }, "config": {}, "inputs": {
               "query": "{{params.topic}}",
               "orgId": "{{params.orgId}}",
               "collectionId": "{{params.collectionId}}"
             } },
-          { "id": "brief", "typeId": "core.ai.chatCompletion", "name": "Structured SEO brief", "position": { "x": 320, "y": 0 }, "config": { "systemPrompt": "Produce a structured SEO content brief for \"{{params.topic}}\" grounded in the gathered sources: intent, outline, key questions, and target keywords.",
+          { "id": "brief", "typeId": "core.ai.chatCompletion@1.0.0", "name": "Structured SEO brief", "position": { "x": 320, "y": 0 }, "config": { "systemPrompt": "Produce a structured SEO content brief for \"{{params.topic}}\" grounded in the gathered sources: intent, outline, key questions, and target keywords.",
             "provider": "{{params.provider}}",
             "model": "{{params.model}}"
           }, "inputs": {} },
-          { "id": "deliver", "typeId": "feature.notifications.nodes.notify", "name": "Deliver brief", "position": { "x": 600, "y": 0 }, "config": { "audience": "tenant" }, "inputs": { "title": "Content Brief Generator" } }
+          { "id": "deliver", "typeId": "feature.notifications.nodes.notify@1.0.0", "name": "Deliver brief", "position": { "x": 600, "y": 0 }, "config": { "audience": "tenant" }, "inputs": { "title": "Content Brief Generator" } }
         ],
         "edges": [
           { "from": "gather", "to": "brief" },
-          { "from": "brief", "to": "deliver" }
+          { "from": "brief.content", "to": "deliver.message" }
         ]
       },
       "outputs": { "brief": { "type": "string", "description": "The SEO content brief." } }
     },
     {
       "chainId": "marketing.content-repurposing",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "label": "Content Repurposing",
       "description": "From a published piece, outline then generate a channel-ready set (LinkedIn, X thread, newsletter), gate for approval, then schedule. Pair with a doc-published event trigger.",
       "parameters": {
@@ -157,22 +157,22 @@
       "capabilities": ["side-effectful"],
       "dag": {
         "nodes": [
-          { "id": "outline", "typeId": "core.ai.chatCompletion", "name": "Outline", "position": { "x": 0, "y": 120 }, "config": { "systemPrompt": "Outline the key angles to repurpose this content across channels. Source: {{params.sourceText}}",
+          { "id": "outline", "typeId": "core.ai.chatCompletion@1.0.0", "name": "Outline", "position": { "x": 0, "y": 120 }, "config": { "systemPrompt": "Outline the key angles to repurpose this content across channels. Source: {{params.sourceText}}",
             "provider": "{{params.provider}}",
             "model": "{{params.model}}"
           }, "inputs": {} },
-          { "id": "linkedin", "typeId": "core.ai.chatCompletion", "name": "LinkedIn post", "position": { "x": 320, "y": 0 }, "config": { "systemPrompt": "Write a LinkedIn post from the outline.",
+          { "id": "linkedin", "typeId": "core.ai.chatCompletion@1.0.0", "name": "LinkedIn post", "position": { "x": 320, "y": 0 }, "config": { "systemPrompt": "Write a LinkedIn post from the outline.",
             "provider": "{{params.provider}}",
             "model": "{{params.model}}"
           }, "inputs": {} },
-          { "id": "xthread", "typeId": "core.ai.chatCompletion", "name": "X thread", "position": { "x": 320, "y": 120 }, "config": { "systemPrompt": "Write an X thread from the outline.",
+          { "id": "xthread", "typeId": "core.ai.chatCompletion@1.0.0", "name": "X thread", "position": { "x": 320, "y": 120 }, "config": { "systemPrompt": "Write an X thread from the outline.",
             "provider": "{{params.provider}}",
             "model": "{{params.model}}"
           }, "inputs": {} },
-          { "id": "newsletter", "typeId": "feature.email.nodes.render", "name": "Newsletter render", "position": { "x": 320, "y": 240 }, "config": {}, "inputs": { "orgId": "{{params.orgId}}", "templateId": "{{params.templateId}}" } },
-          { "id": "review", "typeId": "core.chat.approvalGate", "name": "Approve before publish", "position": { "x": 640, "y": 120 }, "config": { "title": "Approve scheduling this content set for publishing", "artifactType": "marketing.content-set", "actions": ["approve", "reject"] }, "inputs": {} },
-          { "id": "gate-reject", "typeId": "core.flow.noop", "name": "Rejected — nothing scheduled", "position": { "x": 960, "y": 300 }, "config": {}, "inputs": {} },
-          { "id": "schedule", "typeId": "feature.notifications.nodes.notify", "name": "Schedule + notify", "position": { "x": 960, "y": 120 }, "config": { "audience": "tenant" }, "inputs": { "title": "Content Repurposing" } }
+          { "id": "newsletter", "typeId": "feature.email.nodes.render@1.0.0", "name": "Newsletter render", "position": { "x": 320, "y": 240 }, "config": {}, "inputs": { "orgId": "{{params.orgId}}", "templateId": "{{params.templateId}}" } },
+          { "id": "review", "typeId": "core.chat.approvalGate@1.1.0", "name": "Approve before publish", "position": { "x": 640, "y": 120 }, "config": { "title": "Approve scheduling this content set for publishing", "artifactType": "marketing.content-set", "actions": ["approve", "reject"] }, "inputs": {} },
+          { "id": "gate-reject", "typeId": "core.flow.noop@1.0.0", "name": "Rejected — nothing scheduled", "position": { "x": 960, "y": 300 }, "config": {}, "inputs": {} },
+          { "id": "schedule", "typeId": "feature.notifications.nodes.notify@1.0.0", "name": "Schedule + notify", "position": { "x": 960, "y": 120 }, "config": { "audience": "tenant" }, "inputs": { "title": "Content Repurposing" } }
         ],
         "edges": [
           { "from": "outline", "to": "linkedin" },

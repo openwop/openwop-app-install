@@ -32,6 +32,7 @@ import {
 } from '../src/host/workflowChainPackLoader.js';
 import { manifestSigningKeyId } from '../src/packs/registryInstaller.js';
 import { locateRepoSchemasDir } from '../src/host/_repoPath.js';
+import { __setUnpinnedChainPackWaiversForTests } from '../src/host/unpinnedChainPackAllowlist.js';
 
 const V2_SIGNING = { keyId: 'openwop-team-1', scheme: 'ed25519-canonical-json' };
 const V1_SIGNING = { publicKeyRef: 'keys/p.pem', signatureRef: 'p.sig', method: 'manual' };
@@ -66,7 +67,13 @@ function chainPack(name: string, chainId: string, signing: unknown, extra: Recor
 let root: string;
 beforeAll(() => {
   root = mkdtempSync(join(tmpdir(), 'adr0713-chains-'));
+  // ADR 0766 — this file's subject is schema ROUTING, not pins. Since a pin
+  // claims the v2 tree, the v1 route is reachable only by an UNPINNED manifest,
+  // which registers only when waived; the fixtures are waived for that reason.
+  const waived: string[] = [];
   const write = (dir: string, manifest: Record<string, unknown>) => {
+    waived.push(manifest['name'] as string);
+    __setUnpinnedChainPackWaiversForTests(waived);
     mkdirSync(join(root, dir), { recursive: true });
     writeFileSync(join(root, dir, 'pack.json'), JSON.stringify(manifest, null, 2));
   };
@@ -90,7 +97,7 @@ beforeAll(() => {
   }
   _resetChainRegistryForTest();
 });
-afterAll(() => { rmSync(root, { recursive: true, force: true }); _resetChainRegistryForTest(); });
+afterAll(() => { rmSync(root, { recursive: true, force: true }); _resetChainRegistryForTest(); __setUnpinnedChainPackWaiversForTests(null); });
 
 describe('ADR 0713 Phase 1b — chain-pack loader and the v2 signing block', () => {
   it('loads a chain pack whose pack.json carries the v2 { keyId, scheme } block', () => {

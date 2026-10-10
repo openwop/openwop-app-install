@@ -14,7 +14,7 @@
  * would flip its production launches back to HEAD, the exact class ADR 0474
  * closed. Drift detection is the honesty surface for the divergence. This
  * follows the `publishPointersDomain` production-pointer register, NOT the
- * `featureTogglesDomain` exact-match register (see configDomains.ts).
+ * exact-match register (see configDomains.ts).
  *
  * Per-item failures are AGGREGATED AND NAMED, never swallowed (ADR 0479 §4):
  * a silently-unapplied pin means production runs the WRONG revision after a

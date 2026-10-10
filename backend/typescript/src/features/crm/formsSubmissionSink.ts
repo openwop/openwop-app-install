@@ -16,13 +16,17 @@
  * over a contact the org already keeps. Only the marker's `contactId` is set.
  */
 
-import { resolveOne } from '../../host/featureToggles/service.js';
+import { resolveToggle } from '../../host/featureToggles/service.js';
 import { registerSubmissionSink } from '../forms/submissionSinks.js';
 import type { FormDef, Submission } from '../forms/formsService.js';
-import { createContact, duplicateEmailContactIdOf, resolveContactSurvivor } from './contactsService.js';
-import { suppressionBlocksSend, normalizeEmail } from './suppressionService.js';
+import { createHash } from 'node:crypto';
 import { createLogger } from '../../observability/logger.js';
-import { isErasureTombstoned } from '../consent/consentService.js';
+import { OpenwopError } from '../../types.js';
+import { createContact, duplicateEmailContactIdOf, getContact, resolveContactSurvivor, subjectErasureState } from './contactsService.js';
+import { createActivity } from './crmEntitiesService.js';
+import { suppressionBlocksSend } from './suppressionService.js';
+
+const log = createLogger('crm.formsSink');
 
 function deriveContact(form: FormDef, values: Submission['values']): { name: string; email?: string; company?: string } | null {
   const emailField = form.fields.find((f) => f.type === 'email');
@@ -33,7 +37,36 @@ function deriveContact(form: FormDef, values: Submission['values']): { name: str
   return { name, ...(email ? { email } : {}), ...(company ? { company } : {}) };
 }
 
-const log = createLogger('crm.formsSubmissionSink');
+/**
+ * ADR 0860 D7 — the existing contact still learns that the form was submitted: one
+ * timeline note, with the form's TITLE only (an anonymous form is not an authority
+ * over the contact's record, ADR 0627 D6, so no submitted value is written).
+ *
+ * Architect H2 — this is an anonymous write into a store capped per org, so the id
+ * is per (form, contact, UTC day): a bot replaying known emails adds at most one
+ * note per form, per contact, per day, and a re-run of the sinks is idempotent.
+ * Best-effort: a failure (the cap included) is logged and never fails the capture.
+ */
+async function noteSubmissionOnExistingContact(form: FormDef, contactId: string): Promise<void> {
+  const day = new Date().toISOString().slice(0, 10);
+  const key = createHash('sha256').update(`${form.formId}\n${contactId}\n${day}`).digest('hex').slice(0, 40);
+  try {
+    await createActivity({
+      tenantId: form.tenantId, orgId: form.orgId, kind: 'note',
+      body: `Submitted the form "${form.title}".`,
+      contactId,
+      createdBy: `system:forms:${form.formId}`,
+      activityId: `act:form-sub-${key}`,
+      validators: {
+        validateDeal: async () => false,
+        validateCompany: async () => false,
+        validateContact: async (id) => { const c = await getContact(id); return c !== null && c.tenantId === form.tenantId; },
+      },
+    });
+  } catch (err) {
+    log.warn('form_submission_activity_failed', { tenantId: form.tenantId, formId: form.formId, error: err instanceof OpenwopError ? err.code : err instanceof Error ? err.name : 'unknown' });
+  }
+}
 
 /** Register the `crm-contact` sink. Called once from crm's boot path. */
 export function registerCrmFormsSink(): void {
@@ -41,7 +74,8 @@ export function registerCrmFormsSink(): void {
     id: 'crm-contact',
     async onSubmission(form, submission) {
       if (!form.createToContact) return undefined;
-      const crm = await resolveOne('crm', { tenantId: submission.tenantId });
+      // ADR 0819 §1 opt-out — a PUBLIC lane (tenant from the resource): ADR 0419 never paywalls a shopper/visitor on the operator's plan.
+      const crm = await resolveToggle('crm', { tenantId: submission.tenantId });
       if (!crm || !crm.enabled) return undefined; // CRM off ⇒ silent skip, never an error
       const mapped = deriveContact(form, submission.values);
       if (!mapped) return { error: 'no_contact_fields' };
@@ -71,29 +105,25 @@ export function registerCrmFormsSink(): void {
         const sup = await suppressionBlocksSend(submission.tenantId, mapped.email);
         if (sup === 'unreadable') return { error: 'suppression_unreadable' };
         if (sup === 'suppressed') return { error: 'suppressed' };
-        // The tombstone hashes the RAW subject key with no folding, while the
-        // eraser may have been handed either spelling — probe both.
-        const folded = normalizeEmail(mapped.email);
-        try {
-          if ((await isErasureTombstoned(submission.tenantId, mapped.email))
-            || (folded !== mapped.email && (await isErasureTombstoned(submission.tenantId, folded)))) {
-            return { error: 'erased' };
-          }
-        } catch (err) {
-          log.error('erasure_tombstone_read_failed_refusing_create', { tenantId: submission.tenantId, formId: form.formId, error: err instanceof Error ? err.message : String(err) });
-          return { error: 'suppression_unreadable' };
-        }
+        // ADR 0837 D4 — the ONE erasure predicate the unattended lanes share
+        // (a tombstone read error fails closed and is logged).
+        const erasure = await subjectErasureState(submission.tenantId, mapped.email);
+        if (erasure === 'erased') return { error: 'erased' };
+        if (erasure === 'unreadable') return { error: 'suppression_unreadable' }; // CRM2CD-4: unreadable is not "erased"
       }
       try {
         // ADR 0627 D2 — `contact.created` fires inside `createContact` (this lane emitted nothing before).
         const contact = await createContact({ tenantId: submission.tenantId, name: mapped.name, ...(mapped.email ? { email: mapped.email } : {}), ...(mapped.company ? { company: mapped.company } : {}), actor: `system:forms:${form.formId}` });
-        return { contactId: contact.contactId };
+        return { contactId: contact.contactId, contactCreated: true }; // ADR 0860 D7 — the ONLY branch that may link a session
       } catch (err) {
         // ADR 0627 D6 — a repeat submission from an address that already has a
         // contact is the EXISTING contact, not a failure (the claim 409 names it).
         const existingId = duplicateEmailContactIdOf(err);
         const existing = existingId ? await resolveContactSurvivor(submission.tenantId, existingId) : null;
-        if (existing) return { contactId: existing.contactId };
+        if (existing) {
+          await noteSubmissionOnExistingContact(form, existing.contactId);
+          return { contactId: existing.contactId }; // ADR 0860 D7 — NOT `contactCreated`: no session link
+        }
         return { error: 'contact_create_failed' };
       }
     },

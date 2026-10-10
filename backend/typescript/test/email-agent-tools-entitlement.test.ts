@@ -4,6 +4,12 @@
  * the read fails EMPTY, the write fails typed. The plan is narrowed BEFORE boot (the
  * `entitlement-central-gate.test.ts` shape: plan config is read at startup). Born red:
  * the tools checked the toggle only.
+ *
+ * Sabotage-witnessed (w9 grade-tests): removing the tool's own `checkTenantEntitlement`
+ * (`features/email/agentTools.ts`) turns this red through the READ half — the read then
+ * surfaces a TYPED refusal instead of failing empty. The WRITE half is a recorded DOUBLE
+ * GUARD (honest ceiling): `resolveActionOrgScope → resolveOne` (ADR 0819 §1) applies the
+ * plan again and returns the same `not_entitled`, so it cannot fail on that one break.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';

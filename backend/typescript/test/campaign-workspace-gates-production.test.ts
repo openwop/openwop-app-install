@@ -130,7 +130,7 @@ describe('growth interests (P6)', () => {
 
 // ── Workspace aggregate route (ADR 0356 P2) — cross-tenant isolation ─────────
 describe('workspace aggregate — uniform 404 for a cross-tenant campaign', () => {
-  const ORCH = '/v1/host/openwop-app/campaign-orchestration';
+  const ORCH = '/host/openwop-app/campaign-orchestration';
   const FINALIZE_KERNEL = {
     headline: 'H', supportingStatement: 'S', proofPoints: ['p'], primaryCta: 'go', secondaryCta: 'see',
     tone: 'warm', channelTones: {}, sourceDocIds: [], generatedAt: '2026-07-01T00:00:00Z',
@@ -167,16 +167,16 @@ describe('workspace aggregate — uniform 404 for a cross-tenant campaign', () =
   async function login(): Promise<{ c: Client; tenantId: string }> {
     const c = client();
     const tenantId = `user:cwg-${Date.now()}-${n++}`;
-    const r = await c.post('/v1/host/openwop-app/test/login', { email: `cwg-${Date.now()}-${n++}@acme.test`, tenantId });
+    const r = await c.post('/host/openwop-app/test/login', { email: `cwg-${Date.now()}-${n++}@acme.test`, tenantId });
     expect(r.status).toBe(201);
     return { c, tenantId };
   }
 
   it('owner reads the aggregate; a foreign tenant gets the SAME 404 as a nonexistent id', async () => {
     const { c: owner, tenantId } = await login();
-    const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+    const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
     expect(org.status).toBe(201);
-    const brief = await owner.post('/v1/host/openwop-app/campaign-brief/briefs', { orgId: org.body.orgId, name: 'Q4', productName: 'FlashPick' });
+    const brief = await owner.post('/host/openwop-app/campaign-brief/briefs', { orgId: org.body.orgId, name: 'Q4', productName: 'FlashPick' });
     expect(brief.status, JSON.stringify(brief.body)).toBe(201);
     await setKernel(tenantId, brief.body.brief.id, FINALIZE_KERNEL);
     const fin = await owner.post(`${ORCH}/finalize`, { briefId: brief.body.brief.id });

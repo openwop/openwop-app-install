@@ -62,6 +62,19 @@ describe('TabChatDeck P6 — dead-tab prune', () => {
     expect(screen.getAllByRole('tab').map((el) => el.getAttribute('data-sid')).filter(Boolean)).toEqual(['a']);
   });
 
+  it('never prunes a restored KIND tab — it names no conversation, and closing it stops the session (ADR 0785)', async () => {
+    const { registerDeckTabKind, __clearDeckTabKindsForTest } = await import('../tabKindRegistry.js');
+    const onClose = vi.fn();
+    registerDeckTabKind({ kind: 'test-tool', label: () => 'Tool', featureId: 'claude-code', Component: () => <div data-testid="kind-surface" />, onClose });
+    try {
+      sessionsState = { sessions: [{ sessionId: 'a' }], isLoading: false, error: null }; // the kind tab is NOT a conversation
+      saveTabDeck({ tabs: [{ sessionId: 'a', pinned: false, lastActiveSeq: 1 }, { sessionId: 'tool-1', pinned: false, lastActiveSeq: 2, kind: 'test-tool' }], activeSessionId: 'tool-1', seq: 2 }, 'u1');
+      await act(async () => { render(<MemoryRouter><TabChatDeck config={CONFIG} byokStored onReconfigureBYOK={vi.fn()} /></MemoryRouter>); });
+      expect(onClose).not.toHaveBeenCalled();
+      expect(screen.getAllByRole('tab').map((el) => el.getAttribute('data-sid')).filter(Boolean).sort()).toEqual(['a', 'tool-1']);
+    } finally { __clearDeckTabKindsForTest(); }
+  });
+
   it('does NOT prune while the sessions list is still loading (offline safety)', async () => {
     sessionsState = { sessions: [], isLoading: true, error: null }; // not yet loaded
     saveTabDeck({ tabs: [{ sessionId: 'a', pinned: false, lastActiveSeq: 2 }, { sessionId: 'b', pinned: false, lastActiveSeq: 1 }], activeSessionId: 'a', seq: 2 }, 'u1');

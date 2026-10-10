@@ -1,6 +1,7 @@
 {
   "name": "feature.walkthroughs.nodes",
-  "version": "1.0.0",
+  "version": "1.0.1",
+  "kind": "node",
   "description": "Walkthroughs feature node pack \u2014 reads over ctx.features.walkthroughs (ADR 0378): the launchable walkthrough list and the tenant's progress, so an onboarding/heartbeat workflow can gate a branch on walkthrough state (the engine's ui.walkthrough.* step nodes are HOST-registered suspend primitives by design \u2014 this pack wraps only the ctx READ surface). role:action (recorded).",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
@@ -11,7 +12,7 @@
     "progress"
   ],
   "engines": {
-    "openwop": ">=1.0.0 <2.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "nodes": [
     {

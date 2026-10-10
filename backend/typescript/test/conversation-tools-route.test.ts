@@ -9,6 +9,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
+import { recordToolApprovalRequested } from '../src/features/conversation-tools/approvalLedger.js';
 
 let BASE: string;
 let server: http.Server;
@@ -40,12 +41,12 @@ function client() {
 }
 async function enable(id: string): Promise<void> { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status: 'on' }, 'test'); }
 
-const SCOPE_PATH = (sid: string) => `/v1/host/openwop-app/conversation-tools/sessions/${sid}/capability-scope`;
+const SCOPE_PATH = (sid: string) => `/host/openwop-app/conversation-tools/sessions/${sid}/capability-scope`;
 
 describe('capability-scope routes (ADR 0132 P4)', () => {
   it('toggle OFF ⇒ 404', async () => {
     const c = client();
-    await c('POST', '/v1/host/openwop-app/test/login', { email: 'a@test.dev' });
+    await c('POST', '/host/openwop-app/test/login', { email: 'a@test.dev' });
     const r = await c('GET', SCOPE_PATH('s1'));
     expect(r.status).toBe(404);
   });
@@ -53,9 +54,9 @@ describe('capability-scope routes (ADR 0132 P4)', () => {
   it('owner can set + read the scope; default when unset', async () => {
     await enable('users'); await enable('conversation-tools');
     const c = client();
-    await c('POST', '/v1/host/openwop-app/test/login', { email: 'owner@test.dev' });
+    await c('POST', '/host/openwop-app/test/login', { email: 'owner@test.dev' });
     // create a conversation the caller owns
-    const created = await c('POST', '/v1/host/openwop-app/chat/sessions', { title: 'T' });
+    const created = await c('POST', '/host/openwop-app/chat/sessions', { title: 'T' });
     const sid = created.body.sessionId;
     expect(sid).toBeTruthy();
 
@@ -74,12 +75,12 @@ describe('capability-scope routes (ADR 0132 P4)', () => {
   it('a non-owner gets an IDOR-safe 404 (no existence leak)', async () => {
     await enable('users'); await enable('conversation-tools');
     const owner = client();
-    await owner('POST', '/v1/host/openwop-app/test/login', { email: 'owner2@test.dev' });
-    const created = await owner('POST', '/v1/host/openwop-app/chat/sessions', { title: 'Private' });
+    await owner('POST', '/host/openwop-app/test/login', { email: 'owner2@test.dev' });
+    const created = await owner('POST', '/host/openwop-app/chat/sessions', { title: 'Private' });
     const sid = created.body.sessionId;
 
     const other = client();
-    await other('POST', '/v1/host/openwop-app/test/login', { email: 'intruder@test.dev' });
+    await other('POST', '/host/openwop-app/test/login', { email: 'intruder@test.dev' });
     const r = await other('GET', SCOPE_PATH(sid));
     expect(r.status).toBe(404); // not 403 — no existence leak
   });
@@ -87,20 +88,33 @@ describe('capability-scope routes (ADR 0132 P4)', () => {
   it('invalid scope shape ⇒ 400', async () => {
     await enable('users'); await enable('conversation-tools');
     const c = client();
-    await c('POST', '/v1/host/openwop-app/test/login', { email: 'val@test.dev' });
-    const created = await c('POST', '/v1/host/openwop-app/chat/sessions', { title: 'V' });
+    await c('POST', '/host/openwop-app/test/login', { email: 'val@test.dev' });
+    const created = await c('POST', '/host/openwop-app/chat/sessions', { title: 'V' });
     const sid = created.body.sessionId;
     const r = await c('PUT', SCOPE_PATH(sid), { scope: { mode: 'bogus' } });
     expect(r.status).toBe(400);
   });
 
-  it('resolve a per-tool approval (approved)', async () => {
+  // ADR 0834 D2/D3 — an approval answers a PENDING ask, and only the conversation's
+  // owner (the principal its tools act as) may give it.
+  it('resolve a per-tool approval: 409 with nothing pending, 200 for the owner once asked', async () => {
     await enable('users'); await enable('conversation-tools');
     const c = client();
-    await c('POST', '/v1/host/openwop-app/test/login', { email: 'appr@test.dev' });
-    const created = await c('POST', '/v1/host/openwop-app/chat/sessions', { title: 'A' });
+    const login = await c('POST', '/host/openwop-app/test/login', { email: 'appr@test.dev', tenantId: 't-appr' });
+    expect(login.status).toBeLessThan(300);
+    const created = await c('POST', '/host/openwop-app/chat/sessions', { title: 'A' });
     const sid = created.body.sessionId;
-    const r = await c('POST', `/v1/host/openwop-app/conversation-tools/sessions/${sid}/approvals/email.send`, { decision: 'approved' });
+    const unversioned = await c('POST', `/host/openwop-app/conversation-tools/sessions/${sid}/approvals/email.send`, { decision: 'approved' });
+    expect(unversioned.status).toBe(400); // approve what you saw — the version is required
+    const early = await c('POST', `/host/openwop-app/conversation-tools/sessions/${sid}/approvals/email.send`, { decision: 'approved', requestedAt: '2026-01-01T00:00:00.000Z' });
+    expect(early.status).toBe(409); // nothing pending — nothing approvable in advance
+    await recordToolApprovalRequested('t-appr', sid, 'email.send', { origin: 'baseline', input: { to: 'x@example.com' } });
+    const view = await c('GET', SCOPE_PATH(sid));
+    const pending = view.body.approvals.find((a: { toolName: string }) => a.toolName === 'email.send');
+    expect(pending).toMatchObject({ status: 'pending', requestedInput: expect.stringContaining('x@example.com') });
+    const stale = await c('POST', `/host/openwop-app/conversation-tools/sessions/${sid}/approvals/email.send`, { decision: 'approved', requestedAt: '1970-01-01T00:00:00.000Z' });
+    expect(stale.status).toBe(409);
+    const r = await c('POST', `/host/openwop-app/conversation-tools/sessions/${sid}/approvals/email.send`, { decision: 'approved', requestedAt: pending.requestedAt });
     expect(r.status).toBe(200);
     expect(r.body.approval).toMatchObject({ toolName: 'email.send', status: 'approved' });
     const get = await c('GET', SCOPE_PATH(sid));

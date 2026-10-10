@@ -22,8 +22,8 @@ import { createEnvironmentPromotionApproval } from '../src/host/approvalService.
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 
-const B = '/v1/host/openwop-app/environments';
-const APPR = '/v1/host/openwop-app/approvals';
+const B = '/host/openwop-app/environments';
+const APPR = '/host/openwop-app/approvals';
 let server: http.Server;
 let ORIGIN = '';
 let n = 0;
@@ -47,7 +47,7 @@ async function loginTo(tenantId: string, who: string): Promise<C> {
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
     return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
   };
-  const r = await call('POST', '/v1/host/openwop-app/test/login', { email: `${who}-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await call('POST', '/host/openwop-app/test/login', { email: `${who}-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return {
     userId: r.body.user.userId,

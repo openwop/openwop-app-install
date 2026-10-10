@@ -13,7 +13,7 @@ describe('agent-allowlists admin routes (sqlite memory app)', () => {
   let server: http.Server;
   let BASE: string;
   const TOKEN = 'dev-token'; // wildcard bearer ⇒ superadmin
-  const ADMIN = '/v1/host/openwop-app/agent-allowlists/admin';
+  const ADMIN = '/host/openwop-app/agent-allowlists/admin';
 
   beforeAll(async () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';

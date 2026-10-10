@@ -48,7 +48,7 @@ async function requireOrgScopeFor(req: Request, orgId: string, scope: Scope): Pr
 
 export function registerCampaignIntelRoutes(deps: RouteDeps): void {
   const { app } = deps;
-  const BASE = '/v1/host/openwop-app/campaign-intel';
+  const BASE = '/host/openwop-app/campaign-intel';
 
   app.get(`${BASE}/budget`, async (req, res, next) => {
     try {

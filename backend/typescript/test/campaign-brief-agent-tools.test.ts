@@ -1,5 +1,5 @@
 /**
- * CFP-1 — the Campaign Brief Strategist's chat tools (feature.campaign-brief.agents).
+ * CFP-1 — the Campaign Brief Strategist's chat tools (vendor.openwop-app.campaign-brief.agents).
  * Before this the pack allowlisted raw `feature.campaign-brief.nodes.*` typeIds
  * that project into NO conversational tool, so the Strategist resolved zero tools
  * and the flagship kernel + market-intel pipeline had no igniter. These tests
@@ -70,7 +70,7 @@ describe('CFP-1 — campaign-brief agent tools register + allowlist parity', () 
   });
 
   it('the pack allowlist is exactly the four registered tool ids (all offerable)', () => {
-    const packDir = new URL('../../../packs/feature.campaign-brief.agents/', import.meta.url);
+    const packDir = new URL('../../../packs/vendor.openwop-app.campaign-brief.agents/', import.meta.url);
     const manifest = JSON.parse(readFileSync(new URL('pack.json', packDir), 'utf8')) as { agents: { toolAllowlist: string[] }[] };
     expect([...manifest.agents[0]!.toolAllowlist].sort()).toEqual([...ALL_IDS].sort());
     const universe = new Set(builtinAgentToolIds());

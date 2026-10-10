@@ -71,7 +71,7 @@ const orgOf = (req: Request): string => requireString((req.body ?? {})?.orgId, '
 
 export function registerProfileKnowledgeRoutes(deps: RouteDeps): void {
   const { app } = deps;
-  const BASE = '/v1/host/openwop-app/profiles/me/knowledge';
+  const BASE = '/host/openwop-app/profiles/me/knowledge';
 
   // GET / — the caller's knowledge view.
   app.get(BASE, async (req, res, next) => {

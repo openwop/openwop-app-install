@@ -25,6 +25,9 @@ const toRow = (j: ScheduledJob): SubjectScheduleRow => ({
   ...(j.lastSkippedAt !== undefined ? { lastSkippedAt: j.lastSkippedAt } : {}),
   ...(j.lastSkipReason !== undefined ? { lastSkipReason: j.lastSkipReason } : {}),
   ...(j.nextFireAt !== undefined ? { nextFireAt: j.nextFireAt } : {}),
+  ...(j.planLapsed !== undefined ? { planLapsed: j.planLapsed } : {}),
+  // ADR 0815 D4 — paused by the server because its member left the workspace.
+  ...(j.metadata?.disabledReason === 'acting_member_removed' ? { pausedReason: 'acting_member_removed' as const } : {}),
 });
 const labelFor = (wf: string, cron: string): string => `${workflowName(wf)} · ${cadenceLabel(cron)}`;
 

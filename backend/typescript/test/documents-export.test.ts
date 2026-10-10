@@ -43,17 +43,17 @@ function client() {
   return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b) };
 }
 
-const D = (orgId: string, s = ''): string => `/v1/host/openwop-app/documents/orgs/${encodeURIComponent(orgId)}${s}`;
-const M = (orgId: string, s = ''): string => `/v1/host/openwop-app/media/orgs/${encodeURIComponent(orgId)}${s}`;
+const D = (orgId: string, s = ''): string => `/host/openwop-app/documents/orgs/${encodeURIComponent(orgId)}${s}`;
+const M = (orgId: string, s = ''): string => `/host/openwop-app/media/orgs/${encodeURIComponent(orgId)}${s}`;
 
 // A valid 1x1 PNG.
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
 
 async function ownerWithOrg() {
   const c = client();
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `dx-${Date.now()}-${Math.floor(Math.random() * 1e6)}@t.test`, tenantId: `org:dx-${Date.now()}-${Math.floor(Math.random() * 1e6)}` });
+  const r = await c.post('/host/openwop-app/test/login', { email: `dx-${Date.now()}-${Math.floor(Math.random() * 1e6)}@t.test`, tenantId: `org:dx-${Date.now()}-${Math.floor(Math.random() * 1e6)}` });
   expect(r.status).toBe(201);
-  const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status).toBe(201);
   return { c, orgId: org.body.orgId as string };
 }
@@ -120,7 +120,7 @@ describe('renderMarkdownToDocx (ADR 0400 P1)', () => {
 
   it('embeds a resolver-supplied host image and degrades an external URL to linked text', async () => {
     const png = Buffer.from(PNG, 'base64');
-    const buf = await renderMarkdownToDocx('![host pic](/v1/host/openwop-app/assets/tok123)\n\n![ext pic](https://cdn.example.com/x.png)\n', {
+    const buf = await renderMarkdownToDocx('![host pic](/host/openwop-app/assets/tok123)\n\n![ext pic](https://cdn.example.com/x.png)\n', {
       resolveImage: async (src) => (src.includes('tok123') ? { data: png, kind: 'png', width: 1, height: 1 } : null),
     });
     const zip = await JSZip.loadAsync(buf);
@@ -224,7 +224,7 @@ describe('renderMarkdownToEpub (ADR 0400 P2)', () => {
       title: 'D', identifier: 'urn:x:2', modifiedAt: '2026-07-17T00:00:00Z',
       resolveImage: async (src: string) => (src.includes('tok9') ? { data: png, kind: 'png' as const, width: 1, height: 1 } : null),
     };
-    const mdSrc = '# C\n\n![in](/v1/host/openwop-app/assets/tok9)\n\n![out](https://ex.com/a.png)\n';
+    const mdSrc = '# C\n\n![in](/host/openwop-app/assets/tok9)\n\n![out](https://ex.com/a.png)\n';
     const a = await renderMarkdownToEpub(mdSrc, opts);
     const b = await renderMarkdownToEpub(mdSrc, opts);
     expect(Buffer.compare(a, b)).toBe(0);
@@ -281,7 +281,7 @@ describe('renderMarkdownToOdt (ADR 0400 P3)', () => {
   it('embeds host images with sizing and degrades external URLs', async () => {
     const { renderMarkdownToOdt } = await import('../src/features/documents/render.js');
     const png = Buffer.from(PNG, 'base64');
-    const buf = await renderMarkdownToOdt('![in](/v1/host/openwop-app/assets/tokZ)\n\n![out](https://x.com/y.png)\n', {
+    const buf = await renderMarkdownToOdt('![in](/host/openwop-app/assets/tokZ)\n\n![out](https://x.com/y.png)\n', {
       resolveImage: async (src) => (src.includes('tokZ') ? { data: png, kind: 'png', width: 96, height: 48 } : null),
     });
     const zip = await JSZip.loadAsync(buf);

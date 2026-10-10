@@ -5,7 +5,7 @@
  * spreadsheet never evaluates untrusted cell content as a formula).
  */
 
-const FORMULA_PREFIX = /^[=+\-@]/;
+const FORMULA_PREFIX = /^[=+\-@\t\r]/; // ADR 0837 D6 — OWASP also lists a leading TAB and CR
 const NEEDS_QUOTING = /[",\n\r]/;
 
 /** One CSV cell: stringify, formula-guard, then RFC 4180-quote if needed. */

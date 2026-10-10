@@ -17,25 +17,20 @@
  */
 
 import { Button } from '../../ui/Button.js';
+import { PaletteDescribe, PaletteSuggestions } from '../pair/InspectorPair.js';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type React from 'react';
 import { useTranslation } from 'react-i18next';
 import { type NodeCatalogEntry } from './nodeCatalog.js';
 import { loadDynamicCatalog, useCatalog, catalogEntryByTypeId } from './catalogRegistry.js';
 import { expandQuery } from './searchAliases.js';
+import { CATEGORY_LABEL_KEYS } from './categoryLabels.js';
 import { PALETTE_MIME } from '../canvas/BuilderCanvas.js';
 import type { NodeCategory } from '../schema/workflow.js';
 import { useBuilderStore } from '../store/builderStore.js';
 import { PackBrowser } from '../../registry/PackBrowser.js';
 import { ChevronRightIcon, ChevronDownIcon, XIcon } from '../../ui/icons/index.js';
 
-const CATEGORY_LABEL_KEYS: Record<NodeCategory, string> = {
-  flow: 'paletteCategoryFlow',
-  data: 'paletteCategoryData',
-  ai: 'paletteCategoryAi',
-  control: 'paletteCategoryControl',
-  integration: 'paletteCategoryIntegration',
-};
 
 const CATEGORY_ORDER: NodeCategory[] = ['flow', 'data', 'control', 'ai', 'integration'];
 
@@ -197,8 +192,13 @@ export function NodePalette() {
         ) : null}
       </div>
 
+      {!searching ? <PaletteSuggestions /> : null}
+
       {searching && totalMatches === 0 ? (
-        <p className="builder-palette-empty muted">{t('noNodesMatch')}</p>
+        <div className="builder-palette-empty">
+          <p className="muted u-m-0">{t('noNodesMatch')}</p>
+          <PaletteDescribe query={query} />
+        </div>
       ) : null}
 
       {CATEGORY_ORDER.map((cat) => {

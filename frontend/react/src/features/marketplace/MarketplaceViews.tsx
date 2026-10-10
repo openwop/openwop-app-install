@@ -14,7 +14,7 @@ import { formatCurrency } from '../../i18n/format.js';
 import type { TFunction } from 'i18next';
 import { PackageIcon } from '../../ui/icons/index.js';
 import { useEffectiveAccess } from '../../client/useEffectiveAccess.js';
-import type { Listing } from './marketplaceClient.js';
+import type { Listing, MarketplaceViewer } from './marketplaceClient.js';
 import { prettyPackName } from './packName.js';
 
 /** The contextual one-liner from REAL fields — the pack description, else a
@@ -44,9 +44,25 @@ function ListingChips({ l, t, wsDisabled, orderStatus }: { l: Listing; t: TFunct
         </span>
       )}
       {wsDisabled ? <span className="chip chip--warning">{t('hiddenInWorkspace')}</span> : null}
+      <TrustChip l={l} t={t} />
       <PricingChip l={l} t={t} orderStatus={orderStatus} />
     </>
   );
+}
+
+/**
+ * ADR 0826 D6 — the server's trust verdict, not an inference from a marker's
+ * presence (`MKT2-27`: "Installed" used to imply "verified" while nothing checked).
+ * One chip per tier; the tooltip says what the tier MEANS for this pack's code.
+ */
+function TrustChip({ l, t }: { l: Listing; t: TFunction }): JSX.Element | null {
+  switch (l.trust?.tier) {
+    case 'steward': return <span className="chip chip--muted" title={t('trustStewardWhy')}>{t('trustSteward')}</span>;
+    case 'operator-trusted': return <span className="chip chip--success" title={t('trustVerifiedWhy')}>{t('trustVerified')}</span>;
+    case 'untrusted': return <span className="chip chip--warning" title={t('trustUnverifiedWhy')}>{t('trustUnverified')}</span>;
+    case 'revoked': return <span className="chip chip--danger" title={t('trustRevokedWhy')}>{t('trustRevoked')}</span>;
+    default: return null;
+  }
 }
 
 /** ADR 0385 P4 — paid-lane chip (price / external / purchased). MKT-UX-5 adds the
@@ -94,9 +110,17 @@ function ListingActions({
   onPurge,
   onPurchase,
   orderStatus,
+  viewer,
+  onRevoke,
+  onUnrevoke,
 }: {
   l: Listing;
   busy: boolean;
+  /** ADR 0826 D1 — what this caller may do (server-computed). `null`/absent = the
+   *  server did not say: offer every control and let it refuse (legacy). */
+  viewer?: MarketplaceViewer | null | undefined;
+  onRevoke?: (() => void) | undefined;
+  onUnrevoke?: (() => void) | undefined;
   /** True when the caller's workspace disabled this pack (ADR 0194 P3). */
   wsDisabled: boolean;
   /** Which packs are hidden could not be read — the availability control must not
@@ -121,9 +145,14 @@ function ListingActions({
   // grid of N cards still issues ONE `/access/effective` read — the rate-limit
   // fan-out rule. Presentation only; the route stays the authority.
   const canPurchase = useEffectiveAccess().scopes.includes('workspace:write');
+  // ADR 0826 D1 — never offer a control the server refuses this caller.
+  const canCurate = viewer?.canCurate ?? true;
+  const canAdminister = viewer?.canAdminister ?? true;
+  const revoked = l.trust?.tier === 'revoked';
   // ADR 0194 P4 — a removed pack shows only its recovery/final actions; the
   // workspace-availability + install controls return once restored.
   if (l.tombstoned) {
+    if (!canAdminister) return <></>;
     return (
       <>
         <Button variant="quiet" disabled={busy} onClick={onRestore}>{t('restorePack')}</Button>
@@ -139,27 +168,44 @@ function ListingActions({
   }
   return (
     <>
-      <label className="u-iflex u-gap-2 u-items-center mkt-availability">
+      <label className="u-iflex u-gap-2 u-items-center mkt-availability" title={!canCurate ? t('curateReadOnly') : undefined}>
         <input
           type="checkbox"
           checked={!wsDisabled}
-          disabled={busy || curationUnknown}
+          disabled={busy || curationUnknown || !canCurate}
           onChange={onToggleAvailability}
           aria-label={t('availabilityAria', { pack: l.packName })}
         />
         <span>{curationUnknown ? t('availabilityUnknown') : t('availableInWorkspace')}</span>
+        {/* The tooltip alone never reaches a screen reader or a touch user. */}
+        {!canCurate ? <span className="sr-only">{t('curateReadOnly')}</span> : null}
       </label>
       <Button variant="quiet" onClick={onReviews}>{t('reviewsAction')}</Button>
       {/* MKT-UX-11 — host-wide removal, beside the benign **Reviews** quiet button. */}
-      <Button
-        variant="danger"
-        disabled={busy || removeBlocked !== null}
-        title={removeBlocked ?? undefined}
-        onClick={onRemove}
-        aria-label={t('removeAria', { pack: l.packName })}
-      >
-        {t('removePack')}
-      </Button>
+      {canAdminister ? (
+        <Button
+          variant="danger"
+          disabled={busy || removeBlocked !== null}
+          title={removeBlocked ?? undefined}
+          onClick={onRemove}
+          aria-label={t('removeAria', { pack: l.packName })}
+        >
+          {t('removePack')}
+        </Button>
+      ) : null}
+      {/* ADR 0826 D5 — the kill switch (operators only). A revoked pack offers the
+          lift instead; both open their own confirmation. */}
+      {canAdminister && viewer && onRevoke && onUnrevoke ? (
+        revoked ? (
+          <Button variant="quiet" disabled={busy} onClick={onUnrevoke} aria-label={t('unrevokeAria', { pack: l.packName })}>
+            {t('unrevokePack')}
+          </Button>
+        ) : (
+          <Button variant="danger" disabled={busy} onClick={onRevoke} aria-label={t('revokeAria', { pack: l.packName })}>
+            {t('revokePack')}
+          </Button>
+        )
+      ) : null}
       {l.pricing?.lane === 'external-link' && l.pricing.externalPaymentUrl ? (
         <a className="btn-ghost" href={l.pricing.externalPaymentUrl} target="_blank" rel="noopener noreferrer">
           {t('openExternalPayment')}
@@ -179,14 +225,16 @@ function ListingActions({
       {/* MKT2-B2 — a `local` pack was never published to the registry, so
           `installPackFromRegistry`'s manifest fetch necessarily 404s. The action
           was enabled and could not succeed; say what is true instead. */}
-      <Button
-        variant="primary"
-        disabled={busy || l.installed || l.origin === 'local'}
-        title={l.origin === 'local' && !l.installed ? t('bundledWhy') : undefined}
-        onClick={onInstall}
-      >
-        {l.installed ? t('installed') : l.origin === 'local' ? t('bundledTitle') : t('install')}
-      </Button>
+      {canAdminister ? (
+        <Button
+          variant="primary"
+          disabled={busy || l.installed || l.origin === 'local' || revoked}
+          title={l.origin === 'local' && !l.installed ? t('bundledWhy') : undefined}
+          onClick={onInstall}
+        >
+          {l.installed ? t('installed') : l.origin === 'local' ? t('bundledTitle') : t('install')}
+        </Button>
+      ) : null}
     </>
   );
 }
@@ -212,9 +260,14 @@ export interface ListingCellProps {
    *  or `failed`. Absent ⇒ never attempted (or already paid). Drives the payment
    *  chip + disabling Buy while a purchase is pending. */
   orderStatus?: 'pending' | 'failed' | undefined;
+  /** ADR 0826 D1 — the caller's capabilities, from the listings response. */
+  viewer?: MarketplaceViewer | null | undefined;
+  /** ADR 0826 D5 — open the revoke dialog / lift a revocation (operators). */
+  onRevoke?: (() => void) | undefined;
+  onUnrevoke?: (() => void) | undefined;
 }
 
-export function ListingCard({ listing: l, busy, wsDisabled, curationUnknown, onReviews, onInstall, onToggleAvailability, onRemove, onRestore, onPurge, onPurchase, orderStatus }: ListingCellProps): JSX.Element {
+export function ListingCard({ listing: l, busy, wsDisabled, curationUnknown, onReviews, onInstall, onToggleAvailability, onRemove, onRestore, onPurge, onPurchase, orderStatus, viewer, onRevoke, onUnrevoke }: ListingCellProps): JSX.Element {
   const { t } = useTranslation('marketplace');
   return (
     <li className="surface-card u-p-4 mkt-card">
@@ -234,6 +287,7 @@ export function ListingCard({ listing: l, busy, wsDisabled, curationUnknown, onR
           >{l.installed ? t('installed') : l.origin === 'local' ? t('bundledChip') : t('notInstalled')}</span>
         )}
         {wsDisabled ? <span className="chip chip--warning">{t('hiddenInWorkspace')}</span> : null}
+        <TrustChip l={l} t={t} />
         <PricingChip l={l} t={t} orderStatus={orderStatus} />
       </div>
       {l.description ? <p className="mkt-card-desc">{l.description}</p> : null}
@@ -241,13 +295,13 @@ export function ListingCard({ listing: l, busy, wsDisabled, curationUnknown, onR
         <p className="u-text-muted mkt-card-meta">{t('requiredBy', { packs: l.requiredBy.join(', ') })}</p>
       ) : null}
       <div className="action-bar">
-        <ListingActions l={l} busy={busy} wsDisabled={wsDisabled} curationUnknown={curationUnknown} onReviews={onReviews} onInstall={onInstall} onToggleAvailability={onToggleAvailability} onRemove={onRemove} onRestore={onRestore} onPurge={onPurge} onPurchase={onPurchase} orderStatus={orderStatus} />
+        <ListingActions l={l} busy={busy} wsDisabled={wsDisabled} curationUnknown={curationUnknown} onReviews={onReviews} onInstall={onInstall} onToggleAvailability={onToggleAvailability} onRemove={onRemove} onRestore={onRestore} onPurge={onPurge} onPurchase={onPurchase} orderStatus={orderStatus} viewer={viewer} onRevoke={onRevoke} onUnrevoke={onUnrevoke} />
       </div>
     </li>
   );
 }
 
-export function ListingRow({ listing: l, busy, wsDisabled, curationUnknown, onReviews, onInstall, onToggleAvailability, onRemove, onRestore, onPurge, onPurchase, orderStatus }: ListingCellProps): JSX.Element {
+export function ListingRow({ listing: l, busy, wsDisabled, curationUnknown, onReviews, onInstall, onToggleAvailability, onRemove, onRestore, onPurge, onPurchase, orderStatus, viewer, onRevoke, onUnrevoke }: ListingCellProps): JSX.Element {
   const { t } = useTranslation('marketplace');
   return (
     <div className="list-row">
@@ -268,7 +322,7 @@ export function ListingRow({ listing: l, busy, wsDisabled, curationUnknown, onRe
         ) : null}
       </div>
       <div className="list-row-actions action-bar">
-        <ListingActions l={l} busy={busy} wsDisabled={wsDisabled} curationUnknown={curationUnknown} onReviews={onReviews} onInstall={onInstall} onToggleAvailability={onToggleAvailability} onRemove={onRemove} onRestore={onRestore} onPurge={onPurge} onPurchase={onPurchase} orderStatus={orderStatus} />
+        <ListingActions l={l} busy={busy} wsDisabled={wsDisabled} curationUnknown={curationUnknown} onReviews={onReviews} onInstall={onInstall} onToggleAvailability={onToggleAvailability} onRemove={onRemove} onRestore={onRestore} onPurge={onPurge} onPurchase={onPurchase} orderStatus={orderStatus} viewer={viewer} onRevoke={onRevoke} onUnrevoke={onUnrevoke} />
       </div>
     </div>
   );

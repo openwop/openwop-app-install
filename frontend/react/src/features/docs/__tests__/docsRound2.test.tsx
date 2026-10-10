@@ -28,6 +28,9 @@ vi.mock('../../site/siteClient.js', async (importOriginal) => ({
     return r.status === 'ok' ? r.page : null;
   },
 }));
+// ADR 0860 — the consent banner and posture read are covered by visitorConsent.test.tsx.
+vi.mock('../../site/visitorConsent.js', () => ({ consentTokenFor: () => undefined, loadPosture: async () => null }));
+vi.mock('../../site/VisitorConsentBanner.js', () => ({ VisitorConsentBanner: () => null }));
 vi.mock('../../site/visitorBeacon.js', () => ({ getVisitorKey: () => null, sendExperimentPageview: () => {} }));
 vi.mock('../../site/webVitalsBeacon.js', () => ({ reportWebVitals: () => {} }));
 vi.mock('../../../client/useDemoMode.js', () => ({ useDemoMode: () => false }));

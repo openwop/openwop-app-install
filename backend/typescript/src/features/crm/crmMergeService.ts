@@ -31,6 +31,8 @@
  * survivor state this call never actually wrote.
  */
 import { OpenwopError } from '../../types.js';
+import { withTenantOpLock } from '../../host/tenantOpLock.js';
+import { hostExtStorage } from '../../host/hostExtPersistence.js';
 import { crmMutated, type CrmEmitOptions } from './emit.js';
 import { cleanTagList } from '../../host/boundedStrings.js';
 import { fireCrmRecordMerged, fireCrmRecordUnmerged } from '../../host/crmRecordLifecycle.js';
@@ -101,7 +103,7 @@ export async function findDuplicateCompanies(tenantId: string, orgId: string): P
 /** Merge `sourceContactId` into `survivorId` (tenant-scoped — contacts are the
  *  tenant-wide rolodex). Returns the merged survivor. CAS-guarded (CRMGAP-8,
  *  see file doc) against a concurrent merge into the same survivor. */
-export async function mergeContacts(tenantId: string, survivorId: string, sourceContactId: string, actor = 'system', opts: Omit<CrmEmitOptions, 'actor'> = {}): Promise<Contact> {
+async function mergeContactsUnlocked(tenantId: string, survivorId: string, sourceContactId: string, actor = 'system', opts: Omit<CrmEmitOptions, 'actor'> = {}): Promise<Contact> {
   if (survivorId === sourceContactId) {
     throw new OpenwopError('conflict', 'Cannot merge a contact into itself.', 409, { contactId: survivorId });
   }
@@ -200,7 +202,7 @@ export async function mergeContacts(tenantId: string, survivorId: string, source
  * Replays the merge-event snapshot; idempotent (a consumed event no-ops). Fails
  * closed if the recorded state no longer holds.
  */
-export async function unmergeContacts(tenantId: string, mergeEventId: string, opts: CrmEmitOptions = {}): Promise<{ survivorId: string; sourceId: string }> {
+async function unmergeContactsUnlocked(tenantId: string, mergeEventId: string, opts: CrmEmitOptions = {}): Promise<{ survivorId: string; sourceId: string }> {
   const ev = await getMergeEvent(tenantId, mergeEventId);
   if (!ev) throw new OpenwopError('not_found', 'Merge event not found.', 404, { mergeEventId });
   if (ev.unmergedAt) throw new OpenwopError('conflict', 'This merge was already reversed.', 409, { mergeEventId });
@@ -228,7 +230,7 @@ export async function unmergeContacts(tenantId: string, mergeEventId: string, op
  *  survivor. Also merges `customFields` (survivor wins per-key) and unions
  *  tags. CAS-guarded (CRMGAP-8, see file doc) against a concurrent merge into
  *  the same survivor. */
-export async function mergeCompanies(tenantId: string, orgId: string, survivorId: string, sourceCompanyId: string, actor = 'system', opts: Omit<CrmEmitOptions, 'actor'> = {}): Promise<Company> {
+async function mergeCompaniesUnlocked(tenantId: string, orgId: string, survivorId: string, sourceCompanyId: string, actor = 'system', opts: Omit<CrmEmitOptions, 'actor'> = {}): Promise<Company> {
   if (survivorId === sourceCompanyId) {
     throw new OpenwopError('conflict', 'Cannot merge a company into itself.', 409, { companyId: survivorId });
   }
@@ -298,7 +300,7 @@ export async function mergeCompanies(tenantId: string, orgId: string, survivorId
  * since the merge is respected/left). Consumes the event LAST, so a mid-way failure is
  * safely retried. Idempotent (`unmergedAt` → 409 already-reversed).
  */
-export async function unmergeCompanies(tenantId: string, orgId: string, mergeEventId: string, opts: CrmEmitOptions = {}): Promise<{ survivorId: string; sourceId: string }> {
+async function unmergeCompaniesUnlocked(tenantId: string, orgId: string, mergeEventId: string, opts: CrmEmitOptions = {}): Promise<{ survivorId: string; sourceId: string }> {
   const ev = await getCompanyMergeEvent(tenantId, mergeEventId);
   if (!ev || ev.orgId !== orgId) throw new OpenwopError('not_found', 'Company merge event not found.', 404, { mergeEventId });
   if (ev.unmergedAt) throw new OpenwopError('conflict', 'This merge was already reversed.', 409, { mergeEventId });
@@ -323,4 +325,46 @@ export async function unmergeCompanies(tenantId: string, orgId: string, mergeEve
   await consumeCompanyMergeEvent(tenantId, mergeEventId);
   crmMutated({ entity: 'company', verb: 'updated', tenantId, orgId, entityId: ev.sourceId, changed: ['mergedInto'], ...opts }); // review S5 — same shape as unmergeContacts
   return { survivorId: ev.survivorId, sourceId: ev.sourceId };
+}
+
+// ── ADR 0837 D3 — one merge at a time per tenant ─────────────────────────────
+// `mergeContacts` checked the source once, outside its CAS loop, and only the
+// survivor was compare-and-swapped. So A←B and B←A at the same moment both
+// passed, each tombstoned into the other, both left the rolodex, and
+// `resolveContactSurvivor` returned null on the cycle; S merged into two
+// survivors at once relinked S's records twice. Merges are rare human/steward
+// acts, so every merge and unmerge (contact and company, every lane — the
+// route, the approval apply, the demo seed) runs under ONE per-tenant lock, and
+// the existing checks are sound inside it. A busy lock is a typed 409.
+
+/** Long enough for a merge's cross-feature relink fan-out; a holder that
+ *  outlives it logs `tenant_op_lock_lost` on release. */
+const MERGE_LOCK_TTL_MS = 5 * 60_000;
+
+async function underMergeLock<T>(tenantId: string, fn: () => Promise<T>): Promise<T> {
+  const out = await withTenantOpLock(hostExtStorage(), `crm-merge:${tenantId}`, MERGE_LOCK_TTL_MS, fn);
+  if (!out.held) {
+    throw new OpenwopError('conflict', 'A merge is already running in this workspace. Try again in a moment.', 409, { reason: 'merge_in_progress' });
+  }
+  return out.value;
+}
+
+/** Merge `sourceContactId` into `survivorId` — see {@link mergeContactsUnlocked}. */
+export function mergeContacts(...args: Parameters<typeof mergeContactsUnlocked>): Promise<Contact> {
+  return underMergeLock(args[0], () => mergeContactsUnlocked(...args));
+}
+
+/** Reverse a recorded contact merge — see {@link unmergeContactsUnlocked}. */
+export function unmergeContacts(...args: Parameters<typeof unmergeContactsUnlocked>): ReturnType<typeof unmergeContactsUnlocked> {
+  return underMergeLock(args[0], () => unmergeContactsUnlocked(...args));
+}
+
+/** Merge two companies in one org — see {@link mergeCompaniesUnlocked}. */
+export function mergeCompanies(...args: Parameters<typeof mergeCompaniesUnlocked>): Promise<Company> {
+  return underMergeLock(args[0], () => mergeCompaniesUnlocked(...args));
+}
+
+/** Reverse a recorded company merge — see {@link unmergeCompaniesUnlocked}. */
+export function unmergeCompanies(...args: Parameters<typeof unmergeCompaniesUnlocked>): ReturnType<typeof unmergeCompaniesUnlocked> {
+  return underMergeLock(args[0], () => unmergeCompaniesUnlocked(...args));
 }

@@ -2,7 +2,7 @@
  * Executive-Assistant memory graph (ADR 0023 — host-extension, best-effort).
  *
  * The ONE new owned concept of the assistant feature: a structured entity graph
- * (Project / Commitment / Decision / Meeting / StakeholderProfile / PendingAction)
+ * (Commitment / Decision / Meeting / StakeholderProfile / PendingAction)
  * layered OVER the existing owners — people resolve to CRM contacts (PersonRef),
  * action items project onto the host.kanban board, and unstructured sources live
  * in the `kb` feature (SourceRef.kbDocumentId). This module owns the graph only.
@@ -16,9 +16,10 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import { DurableCollection, hostExtStorage } from '../../host/hostExtPersistence.js';
-import { createCard, getCard, getPersonalBoard, type KanbanCard } from '../../host/kanbanService.js';
+import { createCard, deleteCard, getBoard, getCard, getPersonalBoard, type KanbanCard } from '../../host/kanbanService.js';
 import { deadlineProximityOf, priorityScore, scoreToCardPriority, PRIORITY_PROFILES } from './prioritization.js';
 import { createLogger } from '../../observability/logger.js';
+import { OpenwopError } from '../../types.js';
 
 const log = createLogger('features.assistant');
 
@@ -50,21 +51,13 @@ export interface SourceRef {
 
 // ─── entities ───────────────────────────────────────────────────────────────
 
-export type ProjectStatus = 'active' | 'paused' | 'done' | 'archived';
-
-export interface Project {
-  projectId: string;
-  tenantId: string;
-  name: string;
-  status: ProjectStatus;
-  priority: number; // 0..100
-  summary?: string;
-  boardId?: string; // → host.kanban board (tactical surface)
-  kbCollectionId?: string; // → kb collection (document corpus)
-  stakeholderIds: string[];
-  createdAt: string;
-  updatedAt: string;
-}
+// ADR 0820 §8 item 4 (core-audit §2b.4a) — the assistant's own `Project` entity
+// (`assistant:project`) is RETIRED: it was a second, parallel Project model beside
+// the core `projects` feature, its frontend was already gone, and prod held 0 rows
+// (MEASURED read-only 2026-10-05). `projectId` on a commitment / decision is now an
+// optional link to a CORE project (`projects:project`, the id the CoS agent reads
+// from `openwop:projects.list`). It is an opaque tenant-local filter key: nothing
+// here reads the project through it, so it grants no project access.
 
 export type CommitmentStatus = 'open' | 'in-progress' | 'blocked' | 'done' | 'dropped';
 
@@ -271,11 +264,10 @@ export function isCommitmentRow(parsed: unknown): Commitment | null {
 //     eraser relies on is the same one every task-list / briefing / health /
 //     board read now enjoys.
 //
-// `features/assistant/erasure.ts` re-declares handles over the SAME six
+// `features/assistant/erasure.ts` re-declares handles over the SAME five
 // namespaces with the SAME key + tenant functions (the `features/crm/erasure.ts`
 // precedent — the erasure seam must not widen six public surfaces). Those two
 // declarations MUST stay identical; `test/assistant-erasure.test.ts` asserts it.
-const projects = new DurableCollection<Project>('assistant:project', (p) => p.projectId, undefined, (p) => p.tenantId);
 const commitments = new DurableCollection<Commitment>('assistant:commitment', (c) => c.commitmentId, isCommitmentRow, (c) => c.tenantId);
 const decisions = new DurableCollection<Decision>('assistant:decision', (d) => d.decisionId, undefined, (d) => d.tenantId);
 const meetings = new DurableCollection<Meeting>('assistant:meeting', (m) => m.meetingId, undefined, (m) => m.tenantId);
@@ -401,93 +393,6 @@ function commitmentDedupKey(tenantId: string, source: SourceRef, description: st
   return createHash('sha256').update(`${tenantId}:${source.contentHash}:${norm}`).digest('hex').slice(0, 24);
 }
 
-// ─── Projects ───────────────────────────────────────────────────────────────
-
-export async function listProjects(tenantId: string): Promise<Project[]> {
-  // COS-7 — bounded per-tenant read via the built-in `tenantOf` index, NOT a
-  // cross-tenant `.list()` filtered in memory. `listForTenantIndexed` reads only
-  // this tenant's index slice (an empty tenant reads an empty slice — never a
-  // cross-tenant fallback), so this is behavior-preserving. Same transform as
-  // `listCommitments` (COS-4).
-  return (await projects.listForTenantIndexed(tenantId))
-    .sort((a, b) => b.priority - a.priority);
-}
-
-export async function getProject(tenantId: string, projectId: string): Promise<Project | null> {
-  const p = await projects.get(projectId);
-  return p && p.tenantId === tenantId ? p : null;
-}
-
-export async function createProject(
-  tenantId: string,
-  input: { name: string; priority?: number; summary?: string; status?: ProjectStatus; boardId?: string; kbCollectionId?: string },
-): Promise<Project> {
-  const ts = now();
-  const project: Project = {
-    projectId: `prj:${randomUUID()}`,
-    tenantId,
-    name: input.name,
-    status: input.status ?? 'active',
-    priority: clamp(input.priority, 0, 100, 50),
-    ...(input.summary !== undefined ? { summary: input.summary } : {}),
-    ...(input.boardId !== undefined ? { boardId: input.boardId } : {}),
-    ...(input.kbCollectionId !== undefined ? { kbCollectionId: input.kbCollectionId } : {}),
-    stakeholderIds: [],
-    createdAt: ts,
-    updatedAt: ts,
-  };
-  await projects.put(project);
-  return project;
-}
-
-export async function updateProject(
-  tenantId: string,
-  projectId: string,
-  patch: Partial<Pick<Project, 'name' | 'status' | 'priority' | 'summary' | 'boardId' | 'kbCollectionId' | 'stakeholderIds'>>,
-): Promise<Project | null> {
-  const existing = await getProject(tenantId, projectId);
-  if (!existing) return null;
-  const next: Project = { ...existing, updatedAt: now() };
-  if (patch.name !== undefined) next.name = patch.name;
-  if (patch.status !== undefined) next.status = patch.status;
-  if (patch.priority !== undefined) next.priority = clamp(patch.priority, 0, 100, existing.priority);
-  if (patch.summary !== undefined) next.summary = patch.summary;
-  if (patch.boardId !== undefined) next.boardId = patch.boardId;
-  if (patch.kbCollectionId !== undefined) next.kbCollectionId = patch.kbCollectionId;
-  if (patch.stakeholderIds !== undefined) next.stakeholderIds = patch.stakeholderIds;
-  await projects.put(next);
-  return next;
-}
-
-/**
- * Delete an assistant project + SCRUB its soft references (grade-data PLAN-1 /
- * DG-INT-3). Renamed from `deleteProject` — it shared a name with the STRONG
- * cascade in `projects/projectsService.ts` while silently orphaning every
- * commitment/decision that pointed at it. Scrub, never delete, the children:
- * a commitment/decision has standalone value (the task-deck and meeting minutes
- * read them) and `projectId` is optional on both — clearing the field is the
- * type-correct SET-NULL. Parent-first ordering: the project row goes first, so
- * a mid-scrub failure leaves re-scrubbable soft refs, never a resurrected
- * project. Bounded reads: commitments via the ADR 0029 tenant index; decisions
- * are the same per-tenant scan `listDecisions` already does.
- */
-export async function deleteAssistantProject(tenantId: string, projectId: string): Promise<boolean> {
-  const existing = await getProject(tenantId, projectId);
-  if (!existing) return false;
-  const removed = await projects.delete(projectId);
-  for (const c of await listCommitments(tenantId, { projectId })) {
-    const next = { ...c };
-    delete next.projectId;
-    await commitments.put(next);
-  }
-  for (const d of await listDecisions(tenantId, projectId)) {
-    const next = { ...d };
-    delete next.projectId;
-    await decisions.put(next);
-  }
-  return removed;
-}
-
 // ─── Commitments (the PM core) ──────────────────────────────────────────────
 
 export async function listCommitments(
@@ -529,6 +434,30 @@ export async function getCommitment(tenantId: string, commitmentId: string): Pro
 }
 
 /**
+ * ADR 0862 (grade-code) — the ONE commitment-row write. `updateCommitment`, the source
+ * upsert and erasure each spread an earlier read and blind-`put` it, so an ingest tick
+ * that read before a board projection's CAS could erase the `kanbanCardId` back-ref — and
+ * the next projection minted a second card (COS2WF-3, reached through a different writer).
+ * `mutate` sees the CURRENT row; the swap is against exactly that row; it never falls back
+ * to `put`. Returns the written row, or null when the row is gone / `mutate` refused.
+ */
+export async function casUpdateCommitment(
+  tenantId: string,
+  commitmentId: string,
+  mutate: (current: Commitment) => Commitment | null,
+): Promise<{ next: Commitment; prev: Commitment } | null> {
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const current = await commitments.get(commitmentId);
+    if (!current || current.tenantId !== tenantId) return null;
+    const next = mutate(current);
+    if (next === null) return null;
+    if (await commitments.compareAndSwap(current, next)) return { next, prev: current };
+  }
+  log.warn('assistant_commitment_cas_exhausted', { tenantId, commitmentId });
+  throw new OpenwopError('conflict', 'This commitment kept changing while it was being saved. Try again.', 409, { commitmentId });
+}
+
+/**
  * Upsert a commitment keyed by its source — the idempotency invariant Loop 2/3
  * depend on. The commitmentId is DERIVED deterministically from (tenant, source
  * hash, normalized description), so re-extracting a changed source UPDATES in
@@ -547,23 +476,23 @@ export async function upsertCommitmentBySource(
   },
 ): Promise<{ commitment: Commitment; created: boolean }> {
   const commitmentId = `cmt:${commitmentDedupKey(tenantId, input.source, input.description)}`;
-  const existing = await commitments.get(commitmentId);
   const ts = now();
-  if (existing && existing.tenantId === tenantId) {
-    const next: Commitment = {
-      ...existing,
-      owner: input.owner,
-      description: input.description,
-      source: input.source,
-      confidence: clamp(input.confidence, 0, 1, existing.confidence),
-      updatedAt: ts,
-      ...(input.dueAt !== undefined ? { dueAt: input.dueAt } : {}),
-      ...(input.projectId !== undefined ? { projectId: input.projectId } : {}),
-      ...(input.status !== undefined ? { status: input.status } : {}),
-    };
-    await commitments.put(next);
-    await indexCommitment(next, existing.status);
-    return { commitment: next, created: false };
+  // Update-in-place through the CAS (never a spread of an earlier read: a concurrent board
+  // projection's `kanbanCardId` must survive an ingest re-tick).
+  const updated = await casUpdateCommitment(tenantId, commitmentId, (existing) => ({
+    ...existing,
+    owner: input.owner,
+    description: input.description,
+    source: input.source,
+    confidence: clamp(input.confidence, 0, 1, existing.confidence),
+    updatedAt: ts,
+    ...(input.dueAt !== undefined ? { dueAt: input.dueAt } : {}),
+    ...(input.projectId !== undefined ? { projectId: input.projectId } : {}),
+    ...(input.status !== undefined ? { status: input.status } : {}),
+  }));
+  if (updated) {
+    await indexCommitment(updated.next, updated.prev.status);
+    return { commitment: updated.next, created: false };
   }
   const commitment: Commitment = {
     commitmentId,
@@ -578,7 +507,11 @@ export async function upsertCommitmentBySource(
     ...(input.dueAt !== undefined ? { dueAt: input.dueAt } : {}),
     ...(input.projectId !== undefined ? { projectId: input.projectId } : {}),
   };
-  await commitments.put(commitment);
+  // Insert-only-if-absent: two first ingests of one source converge on ONE row; the loser
+  // re-enters as an update.
+  if (!(await commitments.compareAndSwap(null, commitment))) {
+    return upsertCommitmentBySource(tenantId, input);
+  }
   await indexCommitment(commitment);
   return { commitment, created: true };
 }
@@ -588,19 +521,20 @@ export async function updateCommitment(
   commitmentId: string,
   patch: Partial<Pick<Commitment, 'status' | 'dueAt' | 'projectId' | 'kanbanCardId' | 'owner' | 'description' | 'driftsFromSource'>>,
 ): Promise<Commitment | null> {
-  const existing = await getCommitment(tenantId, commitmentId);
-  if (!existing) return null;
-  const next: Commitment = { ...existing, updatedAt: now() };
-  if (patch.status !== undefined) next.status = patch.status;
-  if (patch.dueAt !== undefined) next.dueAt = patch.dueAt;
-  if (patch.projectId !== undefined) next.projectId = patch.projectId;
-  if (patch.kanbanCardId !== undefined) next.kanbanCardId = patch.kanbanCardId;
-  if (patch.owner !== undefined) next.owner = patch.owner;
-  if (patch.description !== undefined) next.description = patch.description;
-  if (patch.driftsFromSource !== undefined) next.driftsFromSource = patch.driftsFromSource;
-  await commitments.put(next);
-  await indexCommitment(next, existing.status);
-  return next;
+  const out = await casUpdateCommitment(tenantId, commitmentId, (existing) => {
+    const next: Commitment = { ...existing, updatedAt: now() };
+    if (patch.status !== undefined) next.status = patch.status;
+    if (patch.dueAt !== undefined) next.dueAt = patch.dueAt;
+    if (patch.projectId !== undefined) next.projectId = patch.projectId;
+    if (patch.kanbanCardId !== undefined) next.kanbanCardId = patch.kanbanCardId;
+    if (patch.owner !== undefined) next.owner = patch.owner;
+    if (patch.description !== undefined) next.description = patch.description;
+    if (patch.driftsFromSource !== undefined) next.driftsFromSource = patch.driftsFromSource;
+    return next;
+  });
+  if (!out) return null;
+  await indexCommitment(out.next, out.prev.status);
+  return out.next;
 }
 
 export async function deleteCommitment(tenantId: string, commitmentId: string): Promise<boolean> {
@@ -661,6 +595,18 @@ export async function projectCommitmentToBoard(
   }
 
   let boardId = opts.boardId;
+  if (boardId) {
+    // ADR 0862 (grade-code Blocker) — `boardId` is caller-controlled: the model-facing
+    // `assistant.populate-board` tool, the surface and (since D5) node config all pass it,
+    // and `createCard` never checks the board's tenant. Personal board ids are DERIVABLE
+    // (`sha256(tenantId:userId)`), so a model steered by untrusted connected content could
+    // write a card onto another tenant's board. Same guard `getPersonalBoard` carries.
+    const board = await getBoard(boardId);
+    if (!board || board.tenantId !== tenantId) {
+      log.warn('assistant_board_projection_foreign_board_refused', { tenantId, commitmentId, boardId });
+      return null;
+    }
+  }
   if (!boardId && opts.ownerUserId) {
     const board = await getPersonalBoard(tenantId, opts.ownerUserId);
     boardId = board?.id;
@@ -688,14 +634,37 @@ export async function projectCommitmentToBoard(
     assignmentReason: `Extracted commitment (${commitment.source.kind} source, confidence ${commitment.confidence.toFixed(2)})`,
     ...(commitment.dueAt ? { dueAt: commitment.dueAt } : {}),
   });
-  const updated = await updateCommitment(tenantId, commitmentId, { kanbanCardId: card.id });
-  return { card, created: true, commitment: updated ?? commitment, status: 'created' };
+  // ADR 0862 D4 (`COS2WF-3`) — the back-ref is CAS'd onto the row, never blind-written. Two
+  // concurrent projections (the chat tool and the palette node) both saw no `kanbanCardId`
+  // and both created a card; the later back-ref won and the earlier card was orphaned on the
+  // board. A lost swap is NOT proof of a competing card — an ingest tick may have touched
+  // the row — so re-read and decide: another card won ⇒ drop ours and reuse it; otherwise retry.
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const current = await commitments.get(commitmentId);
+    if (!current || current.tenantId !== tenantId) {
+      await deleteCard(card.id);
+      return null;
+    }
+    if (current.kanbanCardId && current.kanbanCardId !== card.id) {
+      log.info('assistant_board_projection_lost_race', { tenantId, commitmentId, dropped: card.id, kept: current.kanbanCardId });
+      await deleteCard(card.id);
+      const winner = await getCard(current.kanbanCardId);
+      return { card: winner, created: false, commitment: current, status: winner ? 'reused' : 'dismissed' };
+    }
+    const next: Commitment = { ...current, kanbanCardId: card.id, updatedAt: now() };
+    if (await commitments.compareAndSwap(current, next)) {
+      await indexCommitment(next, current.status);
+      return { card, created: true, commitment: next, status: 'created' };
+    }
+  }
+  await deleteCard(card.id);
+  throw Object.assign(new Error(`commitment ${commitmentId} kept changing during board projection`), { code: 'conflict', status: 409 });
 }
 
 // ─── Decisions ──────────────────────────────────────────────────────────────
 
 export async function listDecisions(tenantId: string, projectId?: string): Promise<Decision[]> {
-  // COS-7 — bounded per-tenant read (see `listProjects`). Residual `projectId`
+  // COS-7 — bounded per-tenant read via `listForTenantIndexed` (never a cross-tenant `.list()`). Residual `projectId`
   // filter + sort preserved.
   return (await decisions.listForTenantIndexed(tenantId))
     .filter((d) => (projectId ? d.projectId === projectId : true))
@@ -750,7 +719,7 @@ export async function logDecision(
 // ─── Meetings ───────────────────────────────────────────────────────────────
 
 export async function listMeetings(tenantId: string): Promise<Meeting[]> {
-  // COS-7 — bounded per-tenant read (see `listProjects`).
+  // COS-7 — bounded per-tenant read via `listForTenantIndexed` (never a cross-tenant `.list()`).
   return (await meetings.listForTenantIndexed(tenantId))
     .sort((a, b) => b.startAt.localeCompare(a.startAt));
 }
@@ -801,7 +770,7 @@ export async function recordMeeting(
 // ─── Stakeholders (overlay on a CRM contact) ────────────────────────────────
 
 export async function listStakeholders(tenantId: string): Promise<StakeholderProfile[]> {
-  // COS-7 — bounded per-tenant read (see `listProjects`).
+  // COS-7 — bounded per-tenant read via `listForTenantIndexed` (never a cross-tenant `.list()`).
   return (await stakeholders.listForTenantIndexed(tenantId))
     .sort((a, b) => b.importance - a.importance);
 }
@@ -843,7 +812,7 @@ export async function upsertStakeholder(
 // ─── Pending actions (drafts on the existing approval loop) ─────────────────
 
 export async function listPendingActions(tenantId: string, status?: PendingActionStatus): Promise<PendingAction[]> {
-  // COS-7 — bounded per-tenant read (see `listProjects`). Residual `status`
+  // COS-7 — bounded per-tenant read via `listForTenantIndexed` (never a cross-tenant `.list()`). Residual `status`
   // filter + sort preserved.
   return (await pendingActions.listForTenantIndexed(tenantId))
     .filter((a) => (status ? a.status === status : true))
@@ -899,31 +868,73 @@ export async function enqueuePendingAction(
 }
 
 /**
+ * ADR 0862 D2 — the ONE action-row write. Every writer used to read a row, spread it, and
+ * blind-`put` the result, so whichever writer landed last resurrected the status and
+ * fields the others had just written: an edit that landed after the approval CAS put a
+ * consumed action back to `pending` (a ghost no lane can decide), and a stale erasure
+ * could wipe the `executionRunId` the reopen guard depends on.
+ *
+ * `mutate` sees the CURRENT row and returns the next one, or `null` to refuse; the swap is
+ * a `compareAndSwap` against exactly that row (the raw object from `get()`, so the byte
+ * match holds). A lost race re-reads and re-decides. Exhausting the retries THROWS — it
+ * never falls back to `put`, because a fallback `put` is the defect this exists to remove.
+ */
+const ACTION_CAS_ATTEMPTS = 8;
+
+export type PendingActionCasOutcome =
+  | { ok: true; action: PendingAction }
+  | { ok: false; reason: 'missing' | 'refused'; current: PendingAction | null };
+
+export async function casUpdatePendingAction(
+  tenantId: string,
+  actionId: string,
+  mutate: (current: PendingAction) => PendingAction | null,
+): Promise<PendingActionCasOutcome> {
+  for (let attempt = 0; attempt < ACTION_CAS_ATTEMPTS; attempt++) {
+    const current = await pendingActions.get(actionId);
+    if (!current || current.tenantId !== tenantId) return { ok: false, reason: 'missing', current: null };
+    const next = mutate(current);
+    if (next === null) return { ok: false, reason: 'refused', current };
+    if (await pendingActions.compareAndSwap(current, next)) return { ok: true, action: next };
+  }
+  log.warn('assistant_action_cas_exhausted', { tenantId, actionId, attempts: ACTION_CAS_ATTEMPTS });
+  throw new OpenwopError('conflict', 'This action kept changing while it was being saved. Re-read it and try again.', 409, { actionId });
+}
+
+/**
  * Edit a still-pending action's draft/payload (ADR 0023 §12 T4). Only the
  * draft surface is editable — kind, sources, and taint are immutable (an edit
  * never launders provenance). Stamps `editedAt`/`editedByUserId` so the card
- * shows the approver they are approving an edited draft. Returns null when
- * the action is missing or no longer pending (a decided action is re-drafted,
- * not edited).
+ * shows the approver they are approving an edited draft.
+ *
+ * ADR 0862 D2 — `isVersionRead` is the editor's approve-what-you-see guard (the caller
+ * compares the content hash the editor was shown), and BOTH it and the `pending` gate are
+ * decided inside the CAS, on the row that is swapped. A decided action is re-drafted, not
+ * edited; a row that changed since the editor read it is refused rather than overwritten.
  */
 export async function editPendingAction(
   tenantId: string,
   actionId: string,
   patch: { draft?: string; payload?: Record<string, unknown>; recipientDiff?: { before: string[]; after: string[] }; editedByUserId?: string },
-): Promise<PendingAction | null> {
-  const existing = await getPendingAction(tenantId, actionId);
-  if (!existing || existing.status !== 'pending') return null;
-  const next: PendingAction = {
-    ...existing,
-    updatedAt: now(),
-    editedAt: now(),
-    ...(patch.draft !== undefined ? { draft: patch.draft } : {}),
-    ...(patch.payload !== undefined ? { payload: patch.payload } : {}),
-    ...(patch.recipientDiff !== undefined ? { recipientDiff: patch.recipientDiff } : {}),
-    ...(patch.editedByUserId !== undefined ? { editedByUserId: patch.editedByUserId } : {}),
-  };
-  await pendingActions.put(next);
-  return next;
+  isVersionRead: (current: PendingAction) => boolean,
+): Promise<{ ok: true; action: PendingAction } | { ok: false; reason: 'missing' | 'not_pending' | 'content_changed'; current: PendingAction | null }> {
+  let refusal: 'not_pending' | 'content_changed' = 'not_pending';
+  const out = await casUpdatePendingAction(tenantId, actionId, (existing) => {
+    if (existing.status !== 'pending') { refusal = 'not_pending'; return null; }
+    if (!isVersionRead(existing)) { refusal = 'content_changed'; return null; }
+    const ts = now();
+    return {
+      ...existing,
+      updatedAt: ts,
+      editedAt: ts,
+      ...(patch.draft !== undefined ? { draft: patch.draft } : {}),
+      ...(patch.payload !== undefined ? { payload: patch.payload } : {}),
+      ...(patch.recipientDiff !== undefined ? { recipientDiff: patch.recipientDiff } : {}),
+      ...(patch.editedByUserId !== undefined ? { editedByUserId: patch.editedByUserId } : {}),
+    };
+  });
+  if (out.ok) return out;
+  return { ok: false, reason: out.reason === 'missing' ? 'missing' : refusal, current: out.current };
 }
 
 /**
@@ -938,14 +949,18 @@ export async function editPendingAction(
  *
  * `'pending'` is deliberately absent from `decidePendingAction`'s union (that verb is for
  * DECISIONS), so this is a separate, narrowly-scoped verb rather than a widened one.
+ *
+ * ADR 0862 D2 — it reopens ONLY an `approved` row with no `executionRunId`: something that
+ * already dispatched is never made re-approvable. Returns null when it refuses.
  */
 export async function reopenPendingAction(tenantId: string, actionId: string): Promise<PendingAction | null> {
-  const existing = await getPendingAction(tenantId, actionId);
-  if (!existing) return null;
-  const { approvedByUserId: _dropped, ...rest } = existing;
-  const next: PendingAction = { ...rest, status: 'pending', updatedAt: now() };
-  await pendingActions.put(next);
-  return next;
+  const out = await casUpdatePendingAction(tenantId, actionId, (existing) => {
+    // …nor an ERASED row: the erasure's cancel is final (COS-1 SEND/ERASE symmetry).
+    if (existing.status !== 'approved' || existing.executionRunId !== undefined || existing.erasedAt !== undefined) return null;
+    const { approvedByUserId: _dropped, ...rest } = existing;
+    return { ...rest, status: 'pending', updatedAt: now() };
+  });
+  return out.ok ? out.action : null;
 }
 
 /**
@@ -964,42 +979,42 @@ export function isAutoAllowEligible(action: Pick<PendingAction, 'derivedFromUntr
 
 /** Back-link the approval act onto the action row (set once at enqueue). */
 export async function setPendingActionApproval(tenantId: string, actionId: string, approvalId: string): Promise<void> {
-  const existing = await getPendingAction(tenantId, actionId);
-  if (!existing) return;
-  await pendingActions.put({ ...existing, approvalId, updatedAt: now() });
+  await casUpdatePendingAction(tenantId, actionId, (existing) => ({ ...existing, approvalId, updatedAt: now() }));
 }
 
 /** §12 T6 — record the dispatched execution run (set once by the winning claim). */
 export async function setPendingActionExecution(tenantId: string, actionId: string, executionRunId: string): Promise<void> {
-  const existing = await getPendingAction(tenantId, actionId);
-  if (!existing) return;
-  await pendingActions.put({ ...existing, executionRunId, updatedAt: now() });
+  await casUpdatePendingAction(tenantId, actionId, (existing) => ({ ...existing, executionRunId, updatedAt: now() }));
 }
 
 /** Decide a pending action. Send/execution is the action layer's concern (later
- *  phase, behind the Connections write scopes); this records the decision only. */
+ *  phase, behind the Connections write scopes); this records the decision only.
+ *  The approval CAS upstream is the lock, so the decision always applies — it is
+ *  CAS'd here only so it is written onto the CURRENT row rather than a stale spread —
+ *  with ONE exception: an erasure's cancel is final, so a row erased to `rejected` is
+ *  never re-decided (returns null). Before ADR 0862 a late approve flipped it back to
+ *  `approved` and only the execution guard's re-reject restored it. */
 export async function decidePendingAction(
   tenantId: string,
   actionId: string,
   decision: { status: Extract<PendingActionStatus, 'approved' | 'rejected' | 'sent' | 'failed' | 'suppressed'>; approvedByUserId?: string },
 ): Promise<PendingAction | null> {
-  const existing = await getPendingAction(tenantId, actionId);
-  if (!existing) return null;
-  const next: PendingAction = {
+  const out = await casUpdatePendingAction(tenantId, actionId, (existing) => (existing.erasedAt !== undefined && existing.status === 'rejected' ? null : {
     ...existing,
     status: decision.status,
     updatedAt: now(),
     ...(decision.approvedByUserId !== undefined ? { approvedByUserId: decision.approvedByUserId } : {}),
-  };
-  await pendingActions.put(next);
-  return next;
+  }));
+  if (!out.ok && out.reason === 'refused') {
+    log.warn('assistant_decide_refused_erased_action', { tenantId, actionId, attempted: decision.status });
+  }
+  return out.ok ? out.action : null;
 }
 
 // ─── test-only ──────────────────────────────────────────────────────────────
 
 export async function __resetAssistantStore(): Promise<void> {
   await Promise.all([
-    projects.__clear(),
     commitments.__clear(),
     commitmentsByTenant.__clear(),
     commitmentsByStatus.__clear(),

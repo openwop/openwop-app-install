@@ -51,6 +51,14 @@ describe('useTabDeck — persistence (ADR 0140 P6)', () => {
     expect(result.current.restoredSessionIds).toEqual(['x', 'y']);
   });
 
+  it('a restored KIND tab is restored but never counted as a conversation (ADR 0785: the prune closed and stopped Claude Code)', () => {
+    saveTabDeck({ tabs: [{ sessionId: 'conv-1', pinned: false, lastActiveSeq: 1 }, { sessionId: 'cc-tab-1', pinned: false, lastActiveSeq: 2, kind: 'claude-code' }], activeSessionId: 'cc-tab-1', seq: 2 }, 'u1');
+    const { result } = renderHook(() => useTabDeck({ persistSubject: 'u1' }));
+    expect(result.current.tabs.map((t) => [t.sessionId, t.kind])).toEqual([['conv-1', undefined], ['cc-tab-1', 'claude-code']]);
+    expect(result.current.activeSessionId).toBe('cc-tab-1');
+    expect(result.current.restoredSessionIds).toEqual(['conv-1']);
+  });
+
   it('persists changes (debounced) under the user key', () => {
     const { result } = renderHook(() => useTabDeck({ persistSubject: 'u1' }));
     act(() => { result.current.openTab('a'); });

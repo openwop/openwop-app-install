@@ -30,6 +30,20 @@ describe('sessionRefusalOf', () => {
     expect(sessionRefusalOf(401, { error: 'credential_revoked' })).toBe('session_revoked');
     expect(sessionRefusalOf(401, { error: { code: 'credential_revoked' } })).toBe('session_revoked');
   });
+  // ADR 0833 D3 / grade-ux USERS2-UX-2 — an ENDED signed-in session is a
+  // reason on `unauthenticated`, not a code; it signs out with its own notice.
+  it('an ended session (401 unauthenticated, reason session_expired) is a refusal; a plain unauthenticated is not', () => {
+    expect(sessionRefusalOf(401, { error: 'unauthenticated', details: { reason: 'session_expired' } })).toBe('session_expired');
+    expect(sessionRefusalOf(401, { error: 'unauthenticated', details: { reason: 'bearer_rejected_no_session' } })).toBeNull();
+    expect(sessionRefusalOf(403, { error: 'unauthenticated', details: { reason: 'session_expired' } })).toBeNull();
+  });
+
+  // grade-ux USERS2-UX-5 — the v2 wire namespaces host codes.
+  it('reads the v2-namespaced spelling of a host refusal code', () => {
+    expect(sessionRefusalOf(401, { error: 'openwop-app.account_disabled' })).toBe('account_disabled');
+    expect(sessionRefusalOf(401, { error: 'openwop-app.account_erased' })).toBe('account_erased');
+  });
+
   it('is null for an ordinary 401, a non-401, and garbage bodies', () => {
     expect(sessionRefusalOf(401, { error: 'sign_in_required' })).toBeNull();
     expect(sessionRefusalOf(403, { error: 'account_disabled' })).toBeNull();

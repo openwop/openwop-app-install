@@ -25,7 +25,10 @@ const MAX_SCHEMA_INLINE_BYTES = 8 * 1024;
 
 export interface CatalogNode {
   typeId: string;
-  version: string;
+  /** Absent when neither the pack row nor a registered module declares one
+   *  (grade-code C-14: typed honestly, so a caller that pins or compares versions
+   *  must handle "unknown" rather than read `undefined` as a string). */
+  version?: string;
   label: string;
   description: string;
   category: string;
@@ -38,6 +41,11 @@ export interface CatalogNode {
   configSchema?: unknown;
   inputSchema?: unknown;
   outputSchema?: unknown;
+  /** ADR 0782 — the pack author's builder-port intent, from the node entry's
+   *  RFC 0138 `x-ports` hint. `single` = ONE input port whatever the input
+   *  schema's `required` says. Absent = the builder's default derivation. Only
+   *  a recognised value is served. */
+  ports?: 'single';
   /** Host surfaces this node needs to execute (e.g., `host.kvStorage`). Empty
    *  means no host surface required (pure data / control nodes). */
   requiresHostSurfaces: string[];
@@ -53,10 +61,17 @@ export interface CatalogNode {
 
 interface PackManifestNode {
   typeId: string;
-  version: string;
+  version?: string;
   label?: string;
   description?: string;
   category?: string;
+  /** NP-V2 P5 — the builder palette's grouping when it is finer than the spec
+   *  `category` enum (`chat|control|data|canvas|coordination|integration`), which
+   *  has no `flow` or `ai`. Carried through the RFC 0138 `x-` extension hatch so
+   *  the manifest stays v2-valid and the palette does not move. */
+  'x-paletteCategory'?: string;
+  /** ADR 0782 — builder-port intent (RFC 0138 `x-` hatch); see CatalogNode.ports. */
+  'x-ports'?: string;
   role?: string;
   capabilities?: string[];
   requiredModelCapabilities?: string[];
@@ -121,10 +136,14 @@ export function buildNodeCatalog(): CatalogNode[] {
         const required = requiredHostSurfacesFor(n.typeId);
         nodes.push({
           typeId: n.typeId,
-          version: n.version,
+          // ADR 0766 — a pack row without a version must not mask the registered
+          // module's (the de-dup below prefers the pack row).
+          version: n.version ?? registry.get(n.typeId)?.version,
           label: n.label ?? n.typeId,
           description: n.description ?? '',
-          category: n.category ?? 'flow',
+          // The palette groups on this field (frontend `mapCategory`): prefer the
+          // palette hint, then the spec category.
+          category: n['x-paletteCategory'] ?? n.category ?? 'flow',
           role: n.role,
           capabilities: n.capabilities,
           source: 'pack',
@@ -132,6 +151,7 @@ export function buildNodeCatalog(): CatalogNode[] {
           configSchema: readSchemaInline(packDir, entry, n.configSchemaRef),
           inputSchema: readSchemaInline(packDir, entry, n.inputSchemaRef),
           outputSchema: readSchemaInline(packDir, entry, n.outputSchemaRef),
+          ...(n['x-ports'] === 'single' ? { ports: 'single' as const } : {}),
           requiresHostSurfaces: [...required],
           missingHostSurfaces: required.filter((s) => !supported.has(s)),
           ...(Array.isArray(n.requiredModelCapabilities) ? { requiredModelCapabilities: n.requiredModelCapabilities } : {}),
@@ -256,6 +276,33 @@ export function findUnknownTypeIds(def: WorkflowDefinition, legal: Set<string> =
     if (!legal.has(node.typeId)) bad.add(node.typeId);
   }
   return [...bad];
+}
+
+/**
+ * ADR 0782 — edges that name a `targetInput` on a node whose pack declares
+ * `x-ports: "single"`. Such an edge routes at run time but has no handle on the
+ * builder canvas, so it is INVISIBLE to the author who later opens the workflow.
+ * One helper, used by BOTH authoring doors (validate + persist), as the cycle
+ * check is. Returns human-readable errors; empty ⇒ fine.
+ */
+export function findSinglePortEdgeViolations(
+  def: WorkflowDefinition,
+  catalog: readonly CatalogNode[] = buildNodeCatalog(),
+): string[] {
+  const single = new Set(catalog.filter((n) => n.ports === 'single').map((n) => n.typeId));
+  if (single.size === 0) return [];
+  const typeOf = new Map(def.nodes.map((n) => [n.nodeId, n.typeId] as const));
+  const out: string[] = [];
+  for (const e of def.edges ?? []) {
+    const t = typeOf.get(e.targetNodeId);
+    if (t && single.has(t) && e.targetInput) {
+      out.push(
+        `Edge into '${e.targetNodeId}' (${t}) sets targetInput '${e.targetInput}', but ${t} has a single input port: `
+        + 'remove targetInput and deliver the fields as output keys of one upstream node.',
+      );
+    }
+  }
+  return out;
 }
 
 function readSchemaInline(packDir: string, packEntry: string, ref: string | undefined): unknown {

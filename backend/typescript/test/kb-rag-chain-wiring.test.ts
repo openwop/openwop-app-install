@@ -9,6 +9,12 @@
  *
  * These drive the REAL node against a REAL seeded collection, per chain, so a
  * regression surfaces on the chain that broke rather than three chains away.
+ *
+ * Incident: #2692 (be4d64385) "four KB chains could never retrieve" — the WF-KB-9
+ * config-vs-inputs class. Sabotage witnesses (grade-tests wave 6): moving
+ * `support.kb-answer`'s `query` out of the rag node's `inputs` reds that chain's row;
+ * making the node read `ctx.config` instead of `ctx.inputs` (the original defect
+ * shape) reds all three.
  */
 import http from 'node:http';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -73,14 +79,15 @@ describe.each(CASES)('%s — the KB step resolves', (chainId, nodeId, queryParam
       collectionId,
     };
     // Supply every other required param so expansion is realistic.
-    for (const k of ((found!.chain.parameters as { required?: string[] })?.required) ?? []) {
+    const required = found!.chain.parameters.required;
+    for (const k of Array.isArray(required) ? required.filter((x): x is string => typeof x === 'string') : []) {
       if (!(k in params)) params[k] = `test-${k}`;
     }
     const def = expandChain(found!.chain, { params });
     const node = def.nodes.find((n) => n.nodeId.endsWith(nodeId) && n.typeId === 'feature.kb.nodes.rag');
     expect(node, `${chainId}: rag node ${nodeId} not in the expanded definition`).toBeDefined();
 
-    const declared = (node!.inputs ?? {}) as Record<string, unknown>;
+    const declared: Record<string, unknown> = node!.inputs ?? {};
     expect(declared.orgId, 'orgId must reach ctx.inputs — config is never read by this node').toBe(ORG);
     expect(declared.collectionId).toBe(collectionId);
     expect(declared.query).toBe('What is the pricing model?');

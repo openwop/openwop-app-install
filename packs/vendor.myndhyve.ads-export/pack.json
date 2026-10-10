@@ -1,14 +1,20 @@
 {
   "name": "vendor.myndhyve.ads-export",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "MyndHyve ads.export.pack — pure-logic export pack builder. Bundles copy variants + creative assets + tracking links into a structured AdExportPack record (JSON-serializable). Lifted from src/canvas-types/campaign-studio/ads-studio/export/AdExportPackService.ts. No host capabilities required; deterministic.",
   "author": "MyndHyve",
   "license": "Apache-2.0",
   "homepage": "https://myndhyve.ai/packs/ads-export",
   "repository": "https://github.com/openwop/openwop",
-  "keywords": ["vendor", "myndhyve", "ads", "export", "campaign"],
+  "keywords": [
+    "vendor",
+    "myndhyve",
+    "ads",
+    "export",
+    "campaign"
+  ],
   "engines": {
-    "openwop": ">=1.0.0 <2.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "runtime": {
     "language": "javascript",
@@ -28,5 +34,6 @@
       "inputSchemaRef": "schemas/export-pack.input.json",
       "outputSchemaRef": "schemas/export-pack.output.json"
     }
-  ]
+  ],
+  "kind": "node"
 }

@@ -34,6 +34,7 @@ import { put as putMediaBytes } from '../features/media/mediaStorage.js';
 import { createAsset, assertOrgCapacity, deleteAsset } from '../features/media/mediaService.js';
 import { getDocumentByIdForTenant } from '../features/documents/documentsService.js';
 import { isRegisteredArtifactType, validateArtifact } from './artifactTypes.js';
+import { assetServeUrl } from './assetServePath.js';
 
 const log = createLogger('host.runArtifact');
 
@@ -222,7 +223,7 @@ function detectBase64All(v: unknown): MediaBytes[] {
 function detectServeRef(v: unknown): { serveUrl: string; name: string } | null {
   const r = asRecord(v);
   if (!r) return null;
-  if (typeof r.renderedMediaToken === 'string') return { serveUrl: `/v1/host/openwop-app/assets/${r.renderedMediaToken}`, name: 'Rendered file' };
+  if (typeof r.renderedMediaToken === 'string') return { serveUrl: assetServeUrl(r.renderedMediaToken), name: 'Rendered file' };
   const img = asRecord(r.image);
   if (img && typeof img.url === 'string') return { serveUrl: img.url, name: typeof img.alt === 'string' && img.alt ? img.alt : 'Image' };
   if (typeof r.url === 'string' && r.url.includes('/assets/')) return { serveUrl: r.url, name: 'File' };
@@ -501,6 +502,14 @@ export async function listRunArtifactsForTenant(tenantId: string): Promise<RunAr
   return (await runArtifacts.list())
     .filter((a) => a.tenantId === tenantId && !a.linkedArtifactId)
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+/** Every row ONE run produced (inline + link rows), via the key's run prefix:
+ *  `${runId}:${nodeId}` (and `…#i` for multi-file outputs) — a scoped prefix
+ *  read, never the tenant-wide `.list()` scan (ADR 0768 follow-up P2). The
+ *  caller owns authorization; rows are raw. */
+export async function listRunArtifactsForRun(runId: string): Promise<RunArtifactRecord[]> {
+  return runArtifacts.listByPrefix(`${runId}:`);
 }
 
 /** Test-only — clear the store. */

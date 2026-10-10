@@ -7,6 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
+import { v1Advertisement } from './support/v1Advertisement.js';
 import { BACKEND_FEATURES } from '../src/features/index.js';
 import { __clearToggleStore } from '../src/host/featureToggles/service.js';
 import {
@@ -52,17 +53,28 @@ describe('Assistant feature (sqlite memory app)', () => {
     expect(BACKEND_FEATURES.some((f) => f.id === 'assistant')).toBe(true);
   });
 
-  it('project CRUD works (graduated off its toggle — serves unconditionally)', async () => {
+  it('the memory graph serves unconditionally (graduated off its toggle)', async () => {
     // ADR 0023 § Correction — no 404-while-off; the surface is always-on substrate.
-    const created = await jf<{ projectId: string; priority: number }>('/v1/host/openwop-app/assistant/projects', {
+    const list = await jf<{ commitments: unknown[] }>('/host/openwop-app/assistant/commitments');
+    expect(list.status).toBe(200);
+    expect(Array.isArray(list.body.commitments)).toBe(true);
+  });
+
+  it('the assistant projects model is RETIRED (ADR 0820 §8 item 4): no routes, no surface reads', async () => {
+    // 0 `assistant:project` rows in prod (MEASURED read-only 2026-10-05). Projects
+    // are the core `projects` feature; the CoS reads them via `openwop:projects.list`.
+    // POSITIVE control above: the sibling commitments route on the same router is 200.
+    const created = await fetch(`${BASE}/host/openwop-app/assistant/projects`, {
       method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
       body: JSON.stringify({ name: 'Q3 launch', priority: 80 }),
     });
-    expect(created.status).toBe(201);
-    expect(created.body.priority).toBe(80);
-
-    const list = await jf<{ projects: { projectId: string }[] }>('/v1/host/openwop-app/assistant/projects');
-    expect(list.body.projects.some((p) => p.projectId === created.body.projectId)).toBe(true);
+    expect(created.status).toBe(404);
+    const list = await fetch(`${BASE}/host/openwop-app/assistant/projects`, { headers: { authorization: `Bearer ${TOKEN}` } });
+    expect(list.status).toBe(404);
+    const surf = buildAssistantSurface({ tenantId: 'default' });
+    expect(surf.listProjects).toBeUndefined();
+    expect(surf.getProject).toBeUndefined();
   });
 
   it('approval queue: pending action can be approved through the REST surface', async () => {
@@ -78,15 +90,14 @@ describe('Assistant feature (sqlite memory app)', () => {
     const { getPendingAction } = await import('../src/features/assistant/assistantService.js');
     const { contentHashOf } = await import('../src/features/assistant/actionApproval.js');
     const row = await getPendingAction('default', enq.pendingAction.actionId);
-    const approved = await jf<{ status: string }>(`/v1/host/openwop-app/assistant/pending-actions/${enq.pendingAction.actionId}/approve`, { method: 'POST', body: JSON.stringify({ expectedContentHash: contentHashOf(row!) }) });
+    const approved = await jf<{ status: string }>(`/host/openwop-app/assistant/pending-actions/${enq.pendingAction.actionId}/approve`, { method: 'POST', body: JSON.stringify({ expectedContentHash: contentHashOf(row!) }) });
     expect(approved.status).toBe(200);
     expect(approved.body.status).toBe('approved');
   });
 
   it('advertises the ctx.features.assistant surface at /.well-known/openwop (ADR 0014)', async () => {
-    const disco = await jf<{ hostExtensions?: { featureSurfaces?: string[] } }>('/.well-known/openwop');
-    expect(disco.status).toBe(200);
-    expect(disco.body.hostExtensions?.featureSurfaces).toContain('host.sample.assistant');
+    // ADR 0812 — the v2 root carries no `hostExtensions.featureSurfaces` (ADR 0014) yet; read the v1 claim from its builder.
+    expect((await v1Advertisement()).hostExtensions?.featureSurfaces).toContain('host.sample.assistant');
   });
 });
 

@@ -36,7 +36,7 @@
 
 import { createLogger } from '../../observability/logger.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
-import { createCollection, deleteDocument, getCollection, getDocument, listDocuments, upsertDocument } from '../kb/kbService.js';
+import { createCollection, deleteDocument, getCollection, getDocument, listDocuments, upsertDocument, KB_MAINTENANCE_CALLER } from '../kb/kbService.js';
 import { kbMutated, type KbEmitOptions } from '../kb/emit.js'; // ADR 0643 D3 — silent per-row sweep + ONE batch event
 import { getVendor, listVendors, type Vendor } from './productionService.js';
 
@@ -118,9 +118,10 @@ export async function indexVendor(tenantId: string, orgId: string, actor: string
 export async function removeVendor(tenantId: string, orgId: string, vendorId: string): Promise<boolean> {
   try {
     const collectionId = collectionIdFor(orgId);
-    if (!(await getCollection(tenantId, orgId, collectionId))) return true;
-    if (!(await getDocument(tenantId, orgId, collectionId, docIdFor(vendorId)))) return true; // never indexed / already gone
-    await deleteDocument(tenantId, orgId, collectionId, docIdFor(vendorId));
+    // G8 — the MAINTENANCE caller: retention must not depend on the plan either.
+    if (!(await getCollection(tenantId, orgId, collectionId, KB_MAINTENANCE_CALLER))) return true;
+    if (!(await getDocument(tenantId, orgId, collectionId, docIdFor(vendorId), KB_MAINTENANCE_CALLER))) return true; // never indexed / already gone
+    await deleteDocument(tenantId, orgId, collectionId, docIdFor(vendorId), KB_MAINTENANCE_CALLER);
     return true;
   } catch (err) {
     log.warn('production_kb_remove_failed', { orgId, vendorId, err: String(err) });
@@ -215,8 +216,8 @@ export async function backfillProductionKb(tenantId: string, orgId: string, acto
     }
     const collectionId = collectionIdFor(orgId);
     // Sweep only an EXISTING collection — never create one just to find it empty.
-    if (await getCollection(tenantId, orgId, collectionId)) {
-      const docs = await listDocuments(tenantId, orgId, collectionId);
+    if (await getCollection(tenantId, orgId, collectionId, KB_MAINTENANCE_CALLER)) { // G8 — the sweep is retention, not a read
+      const docs = await listDocuments(tenantId, orgId, collectionId, KB_MAINTENANCE_CALLER);
       if (docs.length > MAX_SWEEP_DOCS) out.complete = false; // truthful: we will not see them all
       for (const doc of docs.slice(0, MAX_SWEEP_DOCS)) {
         if (!doc.documentId.startsWith('vendor:')) continue;
@@ -224,7 +225,7 @@ export async function backfillProductionKb(tenantId: string, orgId: string, acto
         try {
           // Point read on the primary store — the non-lossy oracle. Present ⇒ live.
           if (await getVendor(tenantId, orgId, doc.documentId.slice('vendor:'.length))) continue;
-          await deleteDocument(tenantId, orgId, collectionId, doc.documentId, undefined, { silent: true }); // ADR 0643 D3 — bulk lane
+          await deleteDocument(tenantId, orgId, collectionId, doc.documentId, KB_MAINTENANCE_CALLER, { silent: true }); // ADR 0643 D3 — bulk lane
           out.removedOrphans++;
         } catch (err) {
           // Step over one bad doc rather than abandoning the sweep — but the pass is

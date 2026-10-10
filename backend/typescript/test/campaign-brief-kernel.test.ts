@@ -185,11 +185,11 @@ describe('protected-field re-approval (BRIEF-1) — order-insensitive diff', () 
   });
 });
 
-describe('feature.campaign-brief.agents — agent pack', () => {
+describe('vendor.openwop-app.campaign-brief.agents — agent pack', () => {
   it('loads the Brief Strategist with its tool-allowlist', () => {
-    const loaded = loadAgentsFromManifest(join(REPO_ROOT, 'packs', 'feature.campaign-brief.agents'));
+    const loaded = loadAgentsFromManifest(join(REPO_ROOT, 'packs', 'vendor.openwop-app.campaign-brief.agents'));
     expect(loaded.length).toBe(1);
-    expect(loaded[0].agentId).toBe('feature.campaign-brief.agents.brief-strategist');
+    expect(loaded[0].agentId).toBe('vendor.openwop-app.campaign-brief.agents.brief-strategist');
     // CFP-1: the Strategist now carries the REAL registered agent tools
     // (`openwop:campaign-brief.<verb>`) — `generate-kernel` ignites the
     // messaging-kernel builtin workflow (assemble → callAI → setKernel → human gate).

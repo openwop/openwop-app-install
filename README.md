@@ -1,14 +1,14 @@
-> **Published white-label install bundle.** Auto-synced from `openwop/openwop-app` (source `7faab7190`). Clone or download the release zip, then follow **[WHITE-LABEL.md](./frontend/react/WHITE-LABEL.md)** to deploy your own. Generated — PRs here are not merged; development happens upstream.
+> **Published white-label install bundle.** Auto-synced from `openwop/openwop-app` (source `56711ab87`). Clone or download the release zip, then follow **[WHITE-LABEL.md](./frontend/react/WHITE-LABEL.md)** to deploy your own. Generated — PRs here are not merged; development happens upstream.
 
 # openwop-app — OpenWOP Application
 
 > **The live reference deployment of an OpenWOP host** — and a white-label starting point you can fork and rebrand. Consumes the protocol via the published [`@openwop/openwop`](https://www.npmjs.com/package/@openwop/openwop) SDK; the protocol spec itself lives in [`openwop/openwop`](https://github.com/openwop/openwop). Carved from that monorepo (`apps/workflow-engine`) with full history.
 >
 > **Status:** Runs in production at [app.openwop.dev](https://app.openwop.dev/). Adopt it as a white-label template (see [`frontend/react/WHITE-LABEL.md`](./frontend/react/WHITE-LABEL.md)); harden against your own security review before your own production use. Productionization state is tracked in the steward assessments (`docs/steward/CODEBASE-ASSESSMENT.md`, `docs/steward/UX-ASSESSMENT.md`, `docs/steward/DATA-ASSESSMENT.md`).
-> **SDK:** consumes `@openwop/openwop` `2.0.0` (major 2) plus `@openwop/openwop-v1` (an npm alias of 1.9.0) for the two reads with no major-2 home — discovery and the debug bundle (ADR 0647) — and `@openwop/openwop-conformance` for the black-box suite.
+> **SDK:** consumes `@openwop/openwop` `2.0.0` (major 2) only — discovery is read at major 2 through `client/capabilitiesV2Adapter.ts` and the debug bundle through its host-extension twin (ADR 0730) — and `@openwop/openwop-conformance` for the black-box suite.
 > **License:** [Apache-2.0](./LICENSE).
 >
-> **Live demo:** [app.openwop.dev](https://app.openwop.dev/) — anonymous, browser-session-scoped. Build + run workflows visually; BYOK keys are session-only. Resets every 24h. [Smoke test](./DEPLOY-SMOKE.md) · [Privacy](https://app.openwop.dev/privacy)
+> **Live:** [app.openwop.dev](https://app.openwop.dev/). Sign up free (email, Google or GitHub) to keep your work and use the built-in AI; without signing in you get a private, cookie-scoped sandbox. [Smoke test](./DEPLOY-SMOKE.md) · [Privacy](https://app.openwop.dev/privacy)
 
 A deployable reference application demonstrating the full vertical slice of an OpenWOP host: a Cloud Run-shape TypeScript backend that implements the v1.1 wire contract, paired with a React frontend that consumes it via the published SDK.
 
@@ -155,6 +155,27 @@ The per-family breakdown stays qualitative:
 | `openwop-sandbox-isolation` | — | ❌ all | No pack sandbox (no process/network/env isolation gate) |
 | `openwop-durable-webhooks` | partial | partial | Demonstrates HMAC delivery; Cloud Tasks queue stubbed |
 
+## Protocol versions: v2 only (v1 is retired by default and being removed)
+
+This host speaks **OpenWOP v2**. v1 is **retired by default** (ADR 0812 P1):
+- `/v1/*` answers `410`.
+- Public unauthenticated v1 reads get a bodiless `308` to the unversioned path
+  (ADR 0806), so links others hold keep working.
+- Discovery advertises only `"2.0"`.
+
+app.openwop.dev retired v1 on 2026-10-04, and RFC 0234 lets a host drop 1.x
+from that date.
+
+- **Clients:** call the unversioned root with `OpenWOP-Version: 2`.
+  `@openwop/cli` ≥ 1.4.1 does.
+- **v1 cannot be re-enabled.** It was removed from this codebase (ADR 0812
+  P3c), and the former opt-in `OPENWOP_V1_RETIRED=false` no longer does
+  anything. Pin an older release if you still need a 1.x host.
+- A host that still has v1 webhook subscriptions (registered under major 1)
+  stops delivering to them once v1 is retired, and logs
+  `webhook_v1_subscription_not_delivered`. Re-register them under major 2.
+- The procedure is in `docs/runbooks/V1-RETIREMENT-CUT.md`.
+
 ## Deploy to Cloud Run
 
 ```bash
@@ -188,21 +209,21 @@ groups are captured verbatim for host-side group→role mapping (ADR 0006).
 
 | Route | Purpose |
 |---|---|
-| `GET  /v1/host/openwop-app/auth/saml/sso/login[?returnTo=/]` | SP-initiated redirect to the IdP |
-| `POST /v1/host/openwop-app/auth/saml/sso/acs` | IdP POSTs the `SAMLResponse` → validate → session |
-| `GET  /v1/host/openwop-app/auth/saml/sso/metadata` | SP metadata XML (upload to the IdP) |
+| `GET  /host/openwop-app/auth/saml/sso/login[?returnTo=/]` | SP-initiated redirect to the IdP |
+| `POST /host/openwop-app/auth/saml/sso/acs` | IdP POSTs the `SAMLResponse` → validate → session |
+| `GET  /host/openwop-app/auth/saml/sso/metadata` | SP metadata XML (upload to the IdP) |
 
 ### Configure (two sides — IdP + this host)
 
 **1. In your IdP (Okta example) — create a "SAML 2.0" app:**
 
-- **Single sign-on URL (ACS):** `https://<your-host>/api/v1/host/openwop-app/auth/saml/sso/acs`
+- **Single sign-on URL (ACS):** `https://<your-host>/api/host/openwop-app/auth/saml/sso/acs`
 - **Audience URI (SP Entity ID):** a stable value, e.g. `https://<your-host>/saml`
   (use the **same** value as `OPENWOP_SAML_SP_ENTITY_ID` below)
 - **Name ID format:** `EmailAddress` (recommended); add a `groups` attribute if you
   want IdP groups captured.
 - *(Optional)* instead of typing the above, import this SP's metadata URL:
-  `https://<your-host>/api/v1/host/openwop-app/auth/saml/sso/metadata`
+  `https://<your-host>/api/host/openwop-app/auth/saml/sso/metadata`
 
 Then, from the app's **Sign On** tab, copy the **Identity Provider Single Sign-On
 URL** and the **X.509 Signing Certificate**.
@@ -214,7 +235,7 @@ defaults to `default`). Locally, drop them in `backend/typescript/.env`:
 OPENWOP_SAML_IDP_SSO_URL=https://<your-org>.okta.com/app/<app-id>/sso/saml
 OPENWOP_SAML_IDP_CERT=<X.509 signing cert — full PEM, or one-line base64 body>
 OPENWOP_SAML_SP_ENTITY_ID=https://<your-host>/saml
-OPENWOP_SAML_ACS_URL=https://<your-host>/api/v1/host/openwop-app/auth/saml/sso/acs
+OPENWOP_SAML_ACS_URL=https://<your-host>/api/host/openwop-app/auth/saml/sso/acs
 OPENWOP_SAML_TENANT=<workspace SAML users land in; default `default`>
 ```
 
@@ -222,10 +243,20 @@ OPENWOP_SAML_TENANT=<workspace SAML users land in; default `default`>
 7-secret + env binding) is preserved — use `--update-*`, never `--set-*`, and keep
 the certificate in Secret Manager rather than a plaintext env var:
 
+> **A bare `gcloud run services update` does not take effect anywhere in this README (CE-16, 2026-10-05).**
+> `scripts/deploy.sh` routes traffic BY NAME, so the service's traffic spec pins one
+> revision and any `services update` mints a new revision that receives **0%
+> traffic** — the change never reaches a request, and gcloud's success line does not
+> say so. Run it through **`scripts/update-env.sh KEY=VALUE …`** (other flags after
+> `--`, e.g. `-- --update-secrets=NAME=secret:latest`), which verifies the new
+> revision (Ready, same commit, every value) and shifts 100% to it by name. If you
+> run gcloud directly, follow it with
+> `gcloud run services update-traffic <service> --to-revisions <new-revision>=100`.
+
 ```bash
 gcloud run services update openwop-app-backend \
   --region us-central1 --project openwop-dev \
-  --update-env-vars OPENWOP_SAML_IDP_SSO_URL=https://<org>.okta.com/app/<id>/sso/saml,OPENWOP_SAML_SP_ENTITY_ID=https://app.openwop.dev/saml,OPENWOP_SAML_ACS_URL=https://app.openwop.dev/api/v1/host/openwop-app/auth/saml/sso/acs,OPENWOP_SAML_TENANT=<tenant> \
+  --update-env-vars OPENWOP_SAML_IDP_SSO_URL=https://<org>.okta.com/app/<id>/sso/saml,OPENWOP_SAML_SP_ENTITY_ID=https://app.openwop.dev/saml,OPENWOP_SAML_ACS_URL=https://app.openwop.dev/api/host/openwop-app/auth/saml/sso/acs,OPENWOP_SAML_TENANT=<tenant> \
   --update-secrets OPENWOP_SAML_IDP_CERT=<secret-name>:latest
 ```
 
@@ -367,8 +398,11 @@ the demo host's operator runbook lives in
    (and teammates) as test users; Google's full verification is only needed
    once external users are involved (Gmail/Drive are restricted scopes).
 3. *Credentials → Create credentials → OAuth client ID → **Web application***.
-   Authorized redirect URI (exact):
-   `https://<your-host>/api/v1/host/openwop-app/connections/google/callback`.
+   Authorized redirect URIs (exact) — add **both**: the host sends the first
+   until v1 is retired and the second after (ADR 0806), so registering both now
+   makes the retirement invisible to Google:
+   `https://<your-host>/api/v1/host/openwop-app/connections/google/callback`
+   `https://<your-host>/api/host/openwop-app/connections/google/callback`.
    Tip: one client can carry several redirect URIs — add
    `…/connections/gmail/callback` on the same client if you also want the
    narrow draft-only `gmail` provider.
@@ -386,11 +420,15 @@ the demo host's operator runbook lives in
 
 ### Configure an OAuth provider (two sides — provider + this host)
 
-**1. Register an OAuth app with the provider.** Register this **redirect URI**
-(exact — the host builds the same path):
+**1. Register an OAuth app with the provider.** Register **both** of these
+**redirect URIs** (exact — the host builds the same paths). It sends the first
+until OpenWOP v1 is retired on this host and the second after (ADR 0806);
+providers accept several, so registering both now means the retirement changes
+nothing a provider can see:
 
 ```
 https://<your-host>/api/v1/host/openwop-app/connections/<provider>/callback
+https://<your-host>/api/host/openwop-app/connections/<provider>/callback
 ```
 
 | Provider | Where | Scopes (read defaults · write re-consent) | Notes |
@@ -427,6 +465,25 @@ consent round-trip returns you to `/connections` with the app connected. The tok
 is stored KMS-enveloped, scoped to the connecting user (or shared to an org for an
 admin-managed connection); write access (e.g. Gmail send) is a separate re-consent.
 
+## Claude Code (your own, in a chat tab)
+
+Users can pair the Claude Code on their own machine with a workspace. It then opens as a
+terminal tab in the AI chat, reads and adds to-dos over MCP, and sends its permission
+prompts to the Inbox; workflows can also hand it tasks. A small companion,
+[`@openwop/agent-host`](clients/agent-host/), connects out from the user's machine, and
+their Claude credential never leaves it.
+
+**Setup (users and operators): [`docs/CLAUDE-CODE-SETUP.md`](docs/CLAUDE-CODE-SETUP.md).**
+It is off by default: enable it with `OPENWOP_CLAUDE_CODE_AT_OWN_RISK=true` plus the
+`claude-code` toggle ([ADR 0785](docs/adr/0785-claude-code-local-agent-host.md)).
+
+## API keys
+
+People and tools that are not a browser — the OpenWOP CLI, scripts, CI — call a
+workspace with an API key, created under **Access → API keys**. Scopes, expiry,
+rotation, workspace rules, leak reporting and every operator setting are in
+[`docs/API-KEYS.md`](docs/API-KEYS.md).
+
 ## Stripe payments (billing + the Connect seller marketplace)
 
 White-label deployments that want paid plans, AI-token packs, storefront checkout,
@@ -441,11 +498,14 @@ demo mode (`demo:` sentinels, no live money) — configure it when you're ready.
 1. Create (or reuse) a Stripe account; copy a **secret API key** (`sk_live_…` /
    `sk_test_…`).
 2. Add a **webhook endpoint** pointed at
-   `https://<your-backend>/v1/host/openwop-app/billing/webhook`, subscribed to:
+   `https://<your-backend>/host/openwop-app/billing/webhook`, subscribed to:
    `customer.subscription.*`, `invoice.*`, `checkout.session.completed`,
+   `checkout.session.async_payment_succeeded`, `checkout.session.async_payment_failed`,
    `payment_intent.succeeded`, `payment_method.attached/detached`, and (for the
    marketplace) `charge.refunded` + `charge.dispute.created/closed`. Copy its
-   **signing secret** (`whsec_…`).
+   **signing secret** (`whsec_…`). The two `async_payment_*` events are required
+   (ADR 0786): a purchase paid by a delayed method (ACH, SEPA) completes *unpaid*
+   and is fulfilled only when `async_payment_succeeded` arrives.
 3. **Marketplace only:** add a *second* webhook endpoint registration at the
    **same URL** with **"Listen to events on Connected accounts"** enabled
    (`connect=true`), subscribed to `account.updated`, `capability.updated`,
@@ -491,6 +551,23 @@ Verify: `stripe trigger checkout.session.completed` (Stripe CLI) or a test-mode
 checkout; the webhook route answers `202` and the order/subscription state
 advances. A `503 not_configured` from the webhook means the signing secrets
 aren't set yet.
+
+What the webhook does with a verified event (ADR 0786):
+- **Fulfilment reads the checkout this host created.** A token pack or one-time
+  bundle is credited only for a Checkout Session this host minted (its tenant and
+  price come from that record) and only when Stripe reports it `paid`. A session
+  created elsewhere (a Payment Link, the dashboard) is ignored.
+- **Subscription state is fetched from Stripe**, not taken from the event payload,
+  because Stripe does not deliver events in order. `billing:stripe-key` must be set
+  for this; without it the payload is applied as delivered and a warning is logged.
+- **`409` from the webhook is expected and harmless**: another delivery of the same
+  event is being processed, and Stripe will retry it. It is common during an
+  add-then-retire endpoint cutover.
+- **Only workspace owners and admins** (`host:billing:manage`) can start a checkout
+  or open the billing portal; anonymous demo sessions cannot buy.
+- **Prepaid AI tokens** are drawn at a discount for cached prompt tokens:
+  `OPENWOP_MANAGED_CACHED_READ_WEIGHT` (0–1, default `0.2`, MiniMax-M3's cache-read
+  ratio). The free daily cap still counts them at full weight.
 
 > **⚠ `OPENWOP_BYOK_EPHEMERAL` gotcha — applies to ALL billing secrets.** Billing
 > resolves `billing:stripe-key` / `billing:webhook-secret` **host-global** (no
@@ -540,11 +617,68 @@ toggle above. Activation is pure operator config — reversible, and **inert unt
 4. **Set `billing:stripe-key` + `billing:webhook-secret`** (Secrets Vault, host scope
    — mind the `OPENWOP_BYOK_EPHEMERAL` gotcha above) and flip the **`billing`** +
    **`marketplace`** toggles ON.
-5. **Smoke, then buy:** a bundle checkout MUST return `mode:"live"` (`demo` means the
+5. **Plan ladder, trials, grace and annual prices (ADR 0820 §5/§7)** — all optional;
+   each defaults to the behaviour above:
+   - **Plans reference bundles:** a `PLAN_FEATURES` entry may be `"bundle:<id>"`, e.g.
+     `{"free":["bundle:content"],"pro":["bundle:content","bundle:agents","bundle:leadership"]}`.
+     Prefer this to listing feature ids — a `bundles.json` change then moves the plan
+     with it. An unknown bundle is ignored (logged), never a wider plan.
+   - **Standalone bundles:** `OPENWOP_BILLING_STANDALONE_BUNDLES=["job-search"]` — sold
+     only on their own. No plan grants them, even a plan left `"*"`; price them, or
+     they are locked for everyone.
+   - **Included-in-plan:** nothing to set. A bundle the tenant's plan already covers
+     shows "Included in your plan" in the store and its checkout is refused (409).
+   - **Trials:** `OPENWOP_BILLING_TRIAL_DAYS={"plan:pro":14,"bundle:crm":7}` (1–730
+     days) — the first subscription of that plan/bundle starts as a Stripe trial.
+   - **Dunning grace:** `OPENWOP_BILLING_PAST_DUE_GRACE_DAYS=7` keeps a `past_due`
+     subscription entitled for 7 days from the failed payment (pair it with Stripe
+     Smart Retries); `unpaid`/`canceled` still revoke at once. The billing page shows a
+     banner with the end date. Default `0` = access drops at the first failed payment.
+   - **Annual prices:** mint a yearly Stripe Price, list it in `BUNDLE_PRICES` beside
+     the monthly one, and mark it `OPENWOP_BILLING_BUNDLE_PRICE_CADENCE={"price_crm_year":"year"}`.
+     Add `"priceAnnual":"$290","cadenceAnnual":"/yr"` to that bundle's
+     `BUNDLE_DISPLAY` entry — the store offers the yearly Buy only when the amount is
+     published. Plans: `OPENWOP_BILLING_PLAN_PRICE_CADENCE` likewise
+     (`POST …/billing/checkout {"plan":"pro","cadence":"year"}`).
+   - **Preflight every change:** `node scripts/check-billing-config.mjs --cloud-run
+     <service> --region <r> --project <p>` (or with the vars in your shell) — it
+     expands `bundle:` entries, enforces standalone bundles, validates every knob
+     above, and exits 1 on a feature that is locked with no way to buy it.
+6. **Smoke, then buy:** a bundle checkout MUST return `mode:"live"` (`demo` means the
    key didn't resolve — fix before arming); then buy with a Stripe test card
    (`4242 4242 4242 4242`) → the webhook grants the entitlement → the bundle's
    features unlock and the store flips to "Owned". Reversible any time by flipping
    `billing` OFF (everything back to `'*'`) or unsetting the env vars.
+
+### Sell AI-credit packs (ADR 0821 D1/D7)
+
+AI credits are one-time top-ups of the prepaid balance, used after the free daily
+allowance and the plan's monthly credits; they never expire. The store
+(`/marketplace/bundles`) shows them in an **AI credits** strip.
+
+1. **Mint one one-time Stripe Price per pack** and map it to its size in token-
+   equivalents: `OPENWOP_BILLING_TOKEN_PACK_PRICES={"price_…":1000000,"price_…":5000000}`.
+   `OPENWOP_BILLING_TOKENS_PER_CREDIT` (default `1000`) converts tokens to the credits
+   the store shows (1,000,000 tokens = 1,000 credits).
+2. **Optional display copy:** `OPENWOP_BILLING_TOKEN_PACK_DISPLAY={"price_…":{"price":"$5","label":"Starter"}}`,
+   keyed by pack price id. Without an entry, the store still lists the pack's credits
+   but offers **no buy button** (a money action is never shown without its amount).
+   A key that is not a configured pack price is ignored (logged).
+3. The store reads `GET …/billing/token-packs` (billing toggle; no Stripe id on the
+   wire: each pack has an opaque `packKey`) and buys with
+   `POST …/billing/token-packs/<packKey>/checkout` (`host:billing:manage`); the server
+   resolves the price. Fulfilment is the same paid-session credit as every pack.
+4. `node scripts/check-billing-config.mjs` validates both env values (a display key
+   that is not a pack price is an ERROR; a pack with no display price WARNs).
+
+**Public pages after a lapse (ADR 0820 §7).** By default a tenant's public runtimes
+(storefront, UCP, custom domains, funnels, pixels, webinar sign-ups, the dealer
+partner portal, the docs site, podcast feeds) keep serving whatever the owner's
+plan. Set `OPENWOP_BILLING_PUBLIC_LAPSE_GRACE_DAYS=<N>` to keep them up for N days
+after the owner's entitlement ends, then answer with each lane's normal "not found".
+An entitlement-store fault always serves; visitors are never refused for their own
+state; unsubscribe, preferences, bounces, WhatsApp STOP/START and consent capture are
+never affected. Whatever the knob, the storefront honours the `commerce` toggle.
 
 ## White-labeling (rebrand + redeploy as your own product)
 

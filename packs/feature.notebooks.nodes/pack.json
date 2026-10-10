@@ -1,11 +1,12 @@
 {
   "name": "feature.notebooks.nodes",
-  "version": "1.1.0",
+  "version": "1.1.1",
+  "kind": "node",
   "description": "Research Notebooks feature node pack — workflow nodes over the `ctx.features.notebooks` surface. `ask` runs multi-query grounded retrieval over a notebook's bound KB sources and returns a FENCED, context-level-filtered augmented prompt + citations for a downstream callPrompt/agent (generation is run-scoped). `search` returns raw ranked hits. Transformations T1: `read-source` reads a source's full text into a chatCompletion `messages` payload and `store-summary` persists the LLM summary via the one justified surface write — with `core.ai.chatCompletion` they form the `notebooks.summarize` built-in workflow. Action nodes — they read/write the tenant notebook/KB store (a side-effect), so their outputs are recorded and replay/fork read the recorded result. Fencing + Full/Excluded/Summary context-level filtering are inherited from the HOST surface, not reimplemented here.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "notebooks", "knowledge", "rag", "research"],
-  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "engines": { "openwop": ">=1.0.0 <3.0.0" },
   "nodes": [
     {
       "typeId": "feature.notebooks.nodes.ask",

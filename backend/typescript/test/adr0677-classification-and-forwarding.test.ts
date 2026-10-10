@@ -56,7 +56,7 @@ describe('ADR 0677 D1 part 3 — core.chat.approvalGate forwards the approver AC
 
   it('leg 4: the pack version moved — a pack behaviour change needs a bump + republish', () => {
     const pack = JSON.parse(readFileSync(join(REPO, 'packs', 'vendor.myndhyve.chat', 'pack.json'), 'utf8')) as { version: string };
-    expect(pack.version).toBe('1.3.0');
+    expect(pack.version).toBe('1.3.1');
   });
 });
 

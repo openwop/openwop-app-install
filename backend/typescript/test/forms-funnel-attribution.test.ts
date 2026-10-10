@@ -6,6 +6,13 @@
  *  - context is OPAQUE public input: unknown funnel ids are inert (submission
  *    still captured, no event), oversized/overflowing context entries drop;
  *  - the public funnel step payload exposes the ready-made `formContext`.
+ *
+ * Sabotage-witnessed (grade-tests w8, probes w8g1-ffa-*): resolving the funnel without
+ * the submission's tenant, skipping the consent gate, dropping `submissionId` or the
+ * `form-submit` source, widening the context caps, blanking `formContext.stepId`, and
+ * removing the distinct-visitor dedupe each turn a case red. (funnels-phase3's rollup
+ * case also reddens on the dedupe, but for VIEWS; the sink-emitted, submissionId-keyed
+ * completion path is only witnessed here, so case 6 stays.)
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -34,13 +41,20 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+/** The response fields these cases read. */
+type Body = {
+  user?: { tenantId?: string }; orgId?: string; pageId?: string; formId?: string;
+  funnel?: { funnelId: string; slug: string; steps: Array<{ stepId: string }> };
+  step?: { formContext?: { funnelId: string; stepId: string } };
+  submissions?: Array<{ meta: { context?: Record<string, string> } }>;
+};
+interface Res { status: number; body: Body }
 function client() {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const out = res.status === 204 ? {} : ((await res.json().catch(() => ({}))) as Body);
     return { status: res.status, body: out };
   };
   return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b), patch: (p: string, b?: unknown) => call('PATCH', p, b) };
@@ -49,30 +63,33 @@ const anon = client;
 
 async function fixture(): Promise<{ user: ReturnType<typeof client>; orgId: string; tenantId: string; funnelId: string; stepId: string; formId: string; slug: string }> {
   const user = client();
-  const login = await user.post('/v1/host/openwop-app/test/login', { email: `ffa-${Date.now()}-${n++}@acme.test` });
+  const login = await user.post('/host/openwop-app/test/login', { email: `ffa-${Date.now()}-${n++}@acme.test` });
   const tenantId = login.body.user?.tenantId ?? '';
-  const org = await user.post('/v1/host/openwop-app/orgs', { name: 'Attribution Co' });
-  const orgId: string = org.body.orgId;
-  const page = await user.post(`/v1/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages`, { title: 'Opt-in' });
-  await user.post(`/v1/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages/${page.body.pageId}/publish`);
-  const funnel = await user.post(`/v1/host/openwop-app/funnels/orgs/${encodeURIComponent(orgId)}/funnels`, {
-    name: 'Launch', slug: `launch-${n}`, steps: [{ kind: 'optin', pageId: page.body.pageId }],
+  const org = await user.post('/host/openwop-app/orgs', { name: 'Attribution Co' });
+  const orgId: string = org.body.orgId!;
+  const page = await user.post(`/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages`, { title: 'Opt-in' });
+  const pageId = page.body.pageId!;
+  await user.post(`/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages/${pageId}/publish`);
+  const funnel = await user.post(`/host/openwop-app/funnels/orgs/${encodeURIComponent(orgId)}/funnels`, {
+    name: 'Launch', slug: `launch-${n}`, steps: [{ kind: 'optin', pageId }],
   });
   expect(funnel.status, JSON.stringify(funnel.body)).toBe(201);
-  const publish = await user.post(`/v1/host/openwop-app/funnels/orgs/${encodeURIComponent(orgId)}/funnels/${funnel.body.funnel.funnelId}/publish`);
+  const created = funnel.body.funnel!;
+  const publish = await user.post(`/host/openwop-app/funnels/orgs/${encodeURIComponent(orgId)}/funnels/${created.funnelId}/publish`);
   expect(publish.status, JSON.stringify(publish.body)).toBe(200);
-  const stepId: string = funnel.body.funnel.steps[0].stepId;
-  const form = await user.post(`/v1/host/openwop-app/forms/orgs/${encodeURIComponent(orgId)}/forms`, {
+  const stepId = created.steps[0]!.stepId;
+  const form = await user.post(`/host/openwop-app/forms/orgs/${encodeURIComponent(orgId)}/forms`, {
     title: 'Opt-in form', fields: [{ key: 'email', label: 'Email', type: 'email', required: true }],
   });
-  await user.patch(`/v1/host/openwop-app/forms/orgs/${encodeURIComponent(orgId)}/forms/${form.body.formId}/status`, { status: 'published' });
-  return { user, orgId, tenantId, funnelId: funnel.body.funnel.funnelId, stepId, formId: form.body.formId, slug: funnel.body.funnel.slug };
+  await user.patch(`/host/openwop-app/forms/orgs/${encodeURIComponent(orgId)}/forms/${form.body.formId!}/status`, { status: 'published' });
+  const formId = form.body.formId!;
+  return { user, orgId, tenantId, funnelId: created.funnelId, stepId, formId, slug: created.slug };
 }
 
 describe('ADR 0332 — funnel opt-in attribution', () => {
   it('a context-stamped public submit emits funnel.step_completed (source form-submit) and persists bounded context', async () => {
     const { user, orgId, tenantId, funnelId, stepId, formId } = await fixture();
-    const sub = await anon().post(`/v1/host/openwop-app/public-forms/${encodeURIComponent(formId)}/submit`, {
+    const sub = await anon().post(`/host/openwop-app/public-forms/${encodeURIComponent(formId)}/submit`, {
       values: { email: 'lead@x.com' },
       context: { funnelId, stepId, visitor: 'vk-attr-1' },
     });
@@ -87,15 +104,15 @@ describe('ADR 0332 — funnel opt-in attribution', () => {
     expect(pl.stepKind).toBe('optin');
     expect(pl.visitor).toBe('vk-attr-1');
 
-    const subs = await user.get(`/v1/host/openwop-app/forms/orgs/${encodeURIComponent(orgId)}/forms/${encodeURIComponent(formId)}/submissions`);
-    expect(subs.body.submissions[0].meta.context).toEqual({ funnelId, stepId, visitor: 'vk-attr-1' });
+    const subs = await user.get(`/host/openwop-app/forms/orgs/${encodeURIComponent(orgId)}/forms/${encodeURIComponent(formId)}/submissions`);
+    expect(subs.body.submissions![0]!.meta.context).toEqual({ funnelId, stepId, visitor: 'vk-attr-1' });
   });
 
   it('unknown funnel context is inert: submission captured, no event; oversized context entries drop', async () => {
     const { user, orgId, tenantId, formId } = await fixture();
     const bigVal = 'x'.repeat(300);
     const overflow = Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`k${i}`, 'v']));
-    const sub = await anon().post(`/v1/host/openwop-app/public-forms/${encodeURIComponent(formId)}/submit`, {
+    const sub = await anon().post(`/host/openwop-app/public-forms/${encodeURIComponent(formId)}/submit`, {
       values: { email: 'lead2@x.com' },
       context: { funnelId: 'funnel:nope', stepId: 'step:nope', big: bigVal, ...overflow },
     });
@@ -106,17 +123,18 @@ describe('ADR 0332 — funnel opt-in attribution', () => {
     );
     expect(events).toHaveLength(0);
 
-    const subs = await user.get(`/v1/host/openwop-app/forms/orgs/${encodeURIComponent(orgId)}/forms/${encodeURIComponent(formId)}/submissions`);
-    const ctx = subs.body.submissions[0].meta.context as Record<string, string>;
+    const subs = await user.get(`/host/openwop-app/forms/orgs/${encodeURIComponent(orgId)}/forms/${encodeURIComponent(formId)}/submissions`);
+    const ctx = subs.body.submissions![0]!.meta.context!;
     expect(ctx.big).toBeUndefined(); // oversized value dropped
-    expect(Object.keys(ctx).length).toBeLessThanOrEqual(8); // entry cap
+    // 14 eligible entries were sent (funnelId, stepId, k0..k11): exactly the cap survives.
+    expect(Object.keys(ctx)).toHaveLength(8);
   });
 
   it('the public funnel step payload exposes the ready-made formContext', async () => {
     const { orgId, funnelId, stepId, slug } = await fixture();
-    const entry = await anon().get(`/v1/host/openwop-app/public/${encodeURIComponent(orgId)}/funnels/${encodeURIComponent(slug)}`);
+    const entry = await anon().get(`/host/openwop-app/public/${encodeURIComponent(orgId)}/funnels/${encodeURIComponent(slug)}`);
     expect(entry.status, JSON.stringify(entry.body)).toBe(200);
-    expect(entry.body.step.formContext).toEqual({ funnelId, stepId });
+    expect(entry.body.step?.formContext).toEqual({ funnelId, stepId });
   });
 
   // GC-FRM-1 — the sink runs the context visitor through the SAME server-side
@@ -129,7 +147,7 @@ describe('ADR 0332 — funnel opt-in attribution', () => {
     expect(consentDefault).toBeTruthy();
     await saveConfig({ ...consentDefault!, status: 'on' }, 'test');
     try {
-      const denied = await anon().post(`/v1/host/openwop-app/public-forms/${encodeURIComponent(formId)}/submit`, {
+      const denied = await anon().post(`/host/openwop-app/public-forms/${encodeURIComponent(formId)}/submit`, {
         values: { email: 'gated@x.com' },
         context: { funnelId, stepId, visitor: 'vk-unconsented' },
       });
@@ -141,7 +159,7 @@ describe('ADR 0332 — funnel opt-in attribution', () => {
       expect((events[0]!.payload as { visitor: string }).visitor).toBe(''); // …but the vk never lands
 
       await recordConsent({ tenantId, subjectKey: 'vk-consented', categories: { analytics: true }, source: 'test' });
-      const allowed = await anon().post(`/v1/host/openwop-app/public-forms/${encodeURIComponent(formId)}/submit`, {
+      const allowed = await anon().post(`/host/openwop-app/public-forms/${encodeURIComponent(formId)}/submit`, {
         values: { email: 'ok@x.com' },
         context: { funnelId, stepId, visitor: 'vk-consented' },
       });
@@ -161,7 +179,7 @@ describe('ADR 0332 — funnel opt-in attribution', () => {
   it('a context naming another tenant\'s real funnel emits nothing', async () => {
     const victim = await fixture();   // owns a real funnel
     const attacker = await fixture(); // its form, its tenant
-    const sub = await anon().post(`/v1/host/openwop-app/public-forms/${encodeURIComponent(attacker.formId)}/submit`, {
+    const sub = await anon().post(`/host/openwop-app/public-forms/${encodeURIComponent(attacker.formId)}/submit`, {
       values: { email: 'x@x.com' },
       context: { funnelId: victim.funnelId, stepId: victim.stepId, visitor: 'vk-cross' },
     });
@@ -186,14 +204,13 @@ describe('ADR 0332 — funnel opt-in attribution', () => {
   it('two distinct submissions by ONE visitor count as ONE step completion (distinct-visitor semantics)', async () => {
     const { tenantId, orgId, funnelId, stepId, formId } = await fixture();
     for (const email of ['a@x.com', 'b@x.com']) {
-      const r = await anon().post(`/v1/host/openwop-app/public-forms/${encodeURIComponent(formId)}/submit`, {
+      const r = await anon().post(`/host/openwop-app/public-forms/${encodeURIComponent(formId)}/submit`, {
         values: { email }, context: { funnelId, stepId, visitor: 'vk-twice' },
       });
       expect(r.status).toBe(201);
     }
-    const { rebuildFunnelStats: rebuild, getFunnelStats: getStats } = await import('../src/features/funnels/funnelStats.js');
-    await rebuild(tenantId, orgId);
-    const days = await getStats(tenantId, orgId, funnelId);
+    await rebuildFunnelStats(tenantId, orgId);
+    const days = await getFunnelStats(tenantId, orgId, funnelId);
     const total = days.reduce((acc, d) => acc + (d.steps[stepId]?.completions ?? 0), 0);
     expect(total).toBe(1);
   });
@@ -203,7 +220,7 @@ describe('ADR 0332 — funnel opt-in attribution', () => {
   // often its event lands in the window (the GC-D1-1 discipline).
   it('form-submit completions carry submissionId and the day-stats rollup dedupes on it', async () => {
     const { tenantId, orgId, funnelId, stepId, formId } = await fixture();
-    const sub = await anon().post(`/v1/host/openwop-app/public-forms/${encodeURIComponent(formId)}/submit`, {
+    const sub = await anon().post(`/host/openwop-app/public-forms/${encodeURIComponent(formId)}/submit`, {
       values: { email: 'once@x.com' },
       context: { funnelId, stepId, visitor: 'vk-idem' },
     });

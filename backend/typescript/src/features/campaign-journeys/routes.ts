@@ -15,7 +15,7 @@ const tenantOf = (req: Request): string => req.tenantId ?? 'default';
 
 export function registerCampaignJourneysRoutes(deps: RouteDeps): void {
   const { app } = deps;
-  const BASE = '/v1/host/openwop-app/campaign-journeys';
+  const BASE = '/host/openwop-app/campaign-journeys';
 
   app.get(`${BASE}/enrollments`, async (req, res, next) => {
     try {

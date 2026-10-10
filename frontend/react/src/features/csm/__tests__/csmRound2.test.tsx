@@ -12,10 +12,17 @@
  *  - CS-SP-2 / CSM-R2-3: ARR renders with its unit; the portfolio band groups
  *    by currency — never a blind cross-unit total.
  *  - CS-SP-7: an emptied health-score field errors instead of recording 0.
+ *
+ * Sabotage-witnessed (w7 grade-tests): making `retryCompanies` not bump its
+ * tick reds CS-SP-1 (the editor-open refetch also fails here, so ONLY the
+ * Retry can recover); dropping the grid's `days <= 30` chip reds CS-SP-5;
+ * rendering ARR without its currency reds CS-SP-2; sending `arrCurrency`
+ * without an amount reds the create leg.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import type * as C from '../csmClient.js';
 import type { Account } from '../csmClient.js';
 
 const access = vi.hoisted(() => ({ value: { enabled: true, loading: false, variant: undefined as string | undefined } }));
@@ -23,20 +30,23 @@ vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
   useFeatureAccess: () => access.value,
 }));
 
-const listAccounts = vi.hoisted(() => vi.fn(async (): Promise<Account[]> => []));
-const listOrgs = vi.hoisted(() => vi.fn(async () => [{ orgId: 'org-1', name: 'Org One' }]));
-const listCrmCompanies = vi.hoisted(() => vi.fn(async () => [{ companyId: 'cmp:1', name: 'Acme Corp' }]));
-const createAccount = vi.hoisted(() => vi.fn(async (..._a: unknown[]) => ({})));
+const api = vi.hoisted(() => ({
+  listAccounts: vi.fn<typeof C.listAccounts>(),
+  listOrgs: vi.fn<typeof C.listOrgs>(),
+  listCrmCompanies: vi.fn<typeof C.listCrmCompanies>(),
+  createAccount: vi.fn<typeof C.createAccount>(),
+  deleteAccount: vi.fn<typeof C.deleteAccount>(),
+  updateAccount: vi.fn<typeof C.updateAccount>(),
+}));
+const { listAccounts, listCrmCompanies, createAccount } = api;
 const toastError = vi.hoisted(() => vi.fn());
 vi.mock('../../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: toastError, info: vi.fn() } }));
 
-vi.mock('../csmClient.js', () => ({
-  listAccounts,
-  listOrgs,
-  listCrmCompanies,
-  createAccount,
-  deleteAccount: vi.fn(),
-  updateAccount: vi.fn(),
+// Partial mock: every fetching export replaced; the REAL `CsmRequestError`
+// survives for the page's `instanceof` map (CSMWF-11).
+vi.mock('../csmClient.js', async (orig) => ({
+  ...(await orig<typeof import('../csmClient.js')>()),
+  ...api,
 }));
 
 import { CsmPage } from '../CsmPage.js';
@@ -44,7 +54,7 @@ import { CsmPage } from '../CsmPage.js';
 const acct = (id: string, name: string, over: Partial<Account> = {}): Account => ({
   accountId: id, tenantId: 't1', name, healthScore: 80,
   createdAt: '2026-08-01T00:00:00Z', updatedAt: '2026-08-01T00:00:00Z', ...over,
-} as Account);
+});
 
 const day = (offset: number): string => {
   const d = new Date();
@@ -56,27 +66,38 @@ const renderPage = () => render(<MemoryRouter><CsmPage /></MemoryRouter>);
 
 beforeEach(() => {
   access.value = { enabled: true, loading: false, variant: undefined };
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   // useViewMode persists to localStorage — the grid-view test would leak its
   // 'grid' choice into every later render in this file.
   window.localStorage.clear();
-  listOrgs.mockResolvedValue([{ orgId: 'org-1', name: 'Org One' }]);
+  api.listOrgs.mockResolvedValue([{ orgId: 'org-1', name: 'Org One' }]);
   listCrmCompanies.mockResolvedValue([{ companyId: 'cmp:1', name: 'Acme Corp' }]);
+  listAccounts.mockResolvedValue([]);
+  createAccount.mockImplementation(async (input) => acct('new', input.name));
 });
 afterEach(() => cleanup());
 
 describe('CS-SP-1 — company-read failure is visible and retryable', () => {
   it('a failed read shows "name unavailable" in the cell, and a retry that succeeds recovers the picker', async () => {
     listAccounts.mockResolvedValue([acct('a1', 'Globex', { crmRef: { orgId: 'org-1', companyId: 'cmp:1' } })]);
-    listCrmCompanies.mockRejectedValueOnce(new Error('boom')).mockResolvedValue([{ companyId: 'cmp:1', name: 'Acme Corp' }]);
+    // BOTH the initial batch read AND the editor-open refetch fail, so the
+    // Retry is the only path back — otherwise opening the editor alone would
+    // recover and the retry claim could not fail.
+    listCrmCompanies
+      .mockRejectedValueOnce(new Error('boom'))
+      .mockRejectedValueOnce(new Error('boom'))
+      .mockResolvedValue([{ companyId: 'cmp:1', name: 'Acme Corp' }]);
     renderPage();
     // The cell names the failure — it does NOT silently show the raw id.
     await screen.findByText(/name unavailable/i);
     expect(screen.queryByText('cmp:1')).toBeNull();
     // Open the link editor for that org → failed state shows error + retry.
     fireEvent.click(screen.getByRole('button', { name: /edit crm company link for .*Globex/i }));
-    const retry = await screen.findByRole('button', { name: /retry/i });
-    fireEvent.click(retry);
+    await waitFor(() => expect(listCrmCompanies).toHaveBeenCalledTimes(2));
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+    expect(screen.queryAllByText('Acme Corp')).toHaveLength(0);
+    expect(screen.getAllByText('Company names didn’t load').length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole('button', { name: 'Retry loading company names' }));
     // The retry refetches (the old [] cache made this impossible) and the
     // company name appears.
     await waitFor(() => expect(screen.getAllByText('Acme Corp').length).toBeGreaterThan(0));
@@ -101,7 +122,11 @@ describe('CS-SP-5 + CSM-G3 — grid chip parity, facet, undated sink', () => {
     renderPage();
     await screen.findByText('SoonCo');
     fireEvent.click(screen.getByRole('button', { name: /grid/i }));
-    await waitFor(() => expect(screen.getAllByText(/renews in|days/i).length).toBeGreaterThan(0));
+    // The GRID is what renders now — no table rows to borrow a chip from.
+    await waitFor(() => expect(document.querySelector('tbody')).toBeNull());
+    const card = (name: string): HTMLElement => screen.getByText(name).closest('.surface-card') as HTMLElement;
+    expect(within(card('SoonCo')).getByText(/^in 5\s*d$/)).toBeTruthy();
+    expect(within(card('FarCo')).queryByText(/^in \d+\s*d$/)).toBeNull();
   });
 
   it('the renewal facet narrows to renewing-soon and past-due', async () => {
@@ -132,9 +157,9 @@ describe('CS-SP-2 / CSM-R2-3 — currency truth', () => {
     renderPage();
     await screen.findByText('UsdCo');
     const band = screen.getByRole('group', { name: /portfolio/i });
-    // Grouped: both figures present, the blind 150,000 absent.
-    expect(band.textContent).toMatch(/100,000|100 000/);
-    expect(band.textContent).toMatch(/50,000|50 000/);
+    // Grouped: both figures present WITH their unit, the blind 150,000 absent.
+    expect(band.textContent).toMatch(/\$100,000/);
+    expect(band.textContent).toMatch(/€50,000/);
     expect(band.textContent).not.toMatch(/150,?\s?000/);
   });
 
@@ -148,6 +173,16 @@ describe('CS-SP-2 / CSM-R2-3 — currency truth', () => {
     fireEvent.click(screen.getByRole('button', { name: /add account/i }));
     await waitFor(() => expect(createAccount).toHaveBeenCalled());
     expect(createAccount.mock.calls[0]![0]).toMatchObject({ arr: 5000, arrCurrency: 'EUR' });
+
+    // …and a currency with NO amount is not sent: a unit on nothing.
+    createAccount.mockClear();
+    await waitFor(() => expect((screen.getByLabelText(/^account$/i) as HTMLInputElement).value).toBe(''));
+    fireEvent.change(screen.getByLabelText(/^account$/i), { target: { value: 'OtherCo' } });
+    fireEvent.change(screen.getByLabelText(/^currency$/i), { target: { value: 'usd' } });
+    fireEvent.click(screen.getByRole('button', { name: /add account/i }));
+    await waitFor(() => expect(createAccount).toHaveBeenCalled());
+    expect(createAccount.mock.calls[0]![0]).toMatchObject({ name: 'OtherCo' });
+    expect(createAccount.mock.calls[0]![0]).not.toHaveProperty('arrCurrency');
   });
 });
 
@@ -166,7 +201,7 @@ describe('CS-SP-7 / ADR 0582 §4 — an emptied score field is UNSCORED, never a
     fireEvent.change(screen.getByLabelText(/^health \(0/i), { target: { value: '' } });
     fireEvent.click(screen.getByRole('button', { name: /add account/i }));
     await waitFor(() => expect(createAccount).toHaveBeenCalled());
-    const payload = createAccount.mock.calls[0]![0] as Record<string, unknown>;
+    const payload = createAccount.mock.calls[0]![0];
     expect('healthScore' in payload, 'an unscored account must carry NO score').toBe(false);
     expect(toastError).not.toHaveBeenCalled();
   });
@@ -186,7 +221,8 @@ describe('CS-SP-7 / ADR 0582 §4 — an emptied score field is UNSCORED, never a
     fireEvent.change(score, { target: { value: '140' } });
     expect(score.checkValidity()).toBe(false);
     fireEvent.click(screen.getByRole('button', { name: /add account/i }));
-    await new Promise((r) => setTimeout(r, 50));
+    // Native validation blocks the submit synchronously; drain, don't sleep.
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
     expect(createAccount).not.toHaveBeenCalled();
     // ...while an EMPTY field is valid, which is what makes "unscored" reachable.
     fireEvent.change(score, { target: { value: '' } });
@@ -221,7 +257,7 @@ describe('F8 coverage — formatArr edge branches (band-level)', () => {
   it('a unitless account groups beside a currency group; an invalid agent code degrades, never crashes', async () => {
     listAccounts.mockResolvedValue([
       acct('a1', 'UnitlessCo', { arr: 700 }),
-      acct('a2', 'BadCodeCo', { arr: 300, arrCurrency: 'XX!' as string }),
+      acct('a2', 'BadCodeCo', { arr: 300, arrCurrency: 'XX!' }),
     ]);
     renderPage();
     await screen.findByText('UnitlessCo');

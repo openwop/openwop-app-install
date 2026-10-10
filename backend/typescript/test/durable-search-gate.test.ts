@@ -19,11 +19,11 @@
 import { describe, expect, it, beforeAll, afterAll, afterEach } from 'vitest';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createApp } from '../src/index.js';
 import { buildHostSurfaceBundle } from '../src/host/inMemorySurfaces.js';
 import { DurableSearchUnavailableError } from '../src/host/webResearchSurface.js';
+import { readPackManifest } from './helpers/readPackManifest.js';
 
 let app: http.Server;
 let provider: http.Server;
@@ -113,9 +113,9 @@ describe('the evidence-storing chains ASK for the durable gate', () => {
     join(import.meta.dirname, '..', '..', '..', 'examples', 'workflow-chain-packs', name, 'pack.json');
 
   const searchNodesOf = (name: string) => {
-    const pack = JSON.parse(readFileSync(packPath(name), 'utf8')) as {
+    const pack = readPackManifest<{
       chains: Array<{ dag?: { nodes?: Array<{ typeId: string; config?: Record<string, unknown>; inputs?: Record<string, unknown> }> } }>;
-    };
+    }>(packPath(name));
     return pack.chains.flatMap((c) => c.dag?.nodes ?? []).filter((n) => n.typeId === 'core.web.search');
   };
 

@@ -106,7 +106,7 @@ function client(): Client {
   return { get: (p) => call('GET', p), post: (p, b, m) => call(m ?? 'POST', p, b), del: (p) => call('DELETE', p) };
 }
 
-const P = (orgId: string, suffix = ''): string => `/v1/host/openwop-app/production/orgs/${encodeURIComponent(orgId)}${suffix}`;
+const P = (orgId: string, suffix = ''): string => `/host/openwop-app/production/orgs/${encodeURIComponent(orgId)}${suffix}`;
 const COLLECTION = (orgId: string): string => `mgd-production-${orgId}`;
 const DOC_ID = (vendorId: string): string => `vendor:${vendorId}`;
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
@@ -119,8 +119,8 @@ const setProduction = async (patch: Record<string, unknown>): Promise<void> => {
 async function workspace(): Promise<{ owner: Client; orgId: string; tenantId: string; userId: string }> {
   const tenantId = `org:kbc5-${Date.now()}-${n++}`;
   const owner = client();
-  const userId = (await owner.post('/v1/host/openwop-app/test/login', { email: uniqEmail('own'), tenantId })).body.user.userId;
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const userId = (await owner.post('/host/openwop-app/test/login', { email: uniqEmail('own'), tenantId })).body.user.userId;
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return { owner, orgId: org.body.orgId, tenantId, userId };
 }
@@ -131,7 +131,7 @@ async function profilesUser(): Promise<{ c: Client; tenantId: string; userId: st
   if (def) await saveConfig({ ...def, status: 'on' }, 'test');
   const tenantId = `org:kbc5p-${Date.now()}-${n++}`;
   const c = client();
-  const userId = (await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail('prof'), tenantId })).body.user.userId;
+  const userId = (await c.post('/host/openwop-app/test/login', { email: uniqEmail('prof'), tenantId })).body.user.userId;
   return { c, tenantId, userId };
 }
 
@@ -216,7 +216,7 @@ describe('KBC-5(ii) — backfillProductionKb is reachable, and reconciles both d
     await setProduction({ status: 'on' });
 
     const viewerC = client();
-    const viewerId = (await viewerC.post('/v1/host/openwop-app/test/login', { email: uniqEmail('view'), tenantId: w.tenantId })).body.user.userId;
+    const viewerId = (await viewerC.post('/host/openwop-app/test/login', { email: uniqEmail('view'), tenantId: w.tenantId })).body.user.userId;
     await createMember({ tenantId: w.tenantId, orgId: w.orgId, subject: viewerId, displayName: 'V', roles: ['viewer'] });
     expect((await viewerC.post(P(w.orgId, '/reindex-kb'))).status, 'a viewer cannot drive the sweep').toBe(403);
 
@@ -361,15 +361,15 @@ describe('ADR 0643 D6 — the remaining four converted sites are awaited too (6/
 
   it('profiles PATCH /me blocks on the team-portfolio KB index', async () => {
     const w = await profilesUser();
-    const res = await blocksOnKb(() => w.c.post('/v1/host/openwop-app/profiles/me', { jobTitle: 'Gaffer' }, 'PATCH'));
+    const res = await blocksOnKb(() => w.c.post('/host/openwop-app/profiles/me', { jobTitle: 'Gaffer' }, 'PATCH'));
     expect(res.status, JSON.stringify(res.body)).toBe(200);
   });
 
   it('profiles PUT /me/skills blocks on the team-portfolio KB index', async () => {
     const w = await profilesUser();
     // A profile with signal, so `indexProfile` upserts rather than taking the remove branch.
-    expect((await w.c.post('/v1/host/openwop-app/profiles/me', { jobTitle: 'Gaffer' }, 'PATCH')).status).toBe(200);
-    const res = await blocksOnKb(() => w.c.post('/v1/host/openwop-app/profiles/me/skills', { skills: [{ name: 'Lighting', proficiency: 4 }] }, 'PUT'));
+    expect((await w.c.post('/host/openwop-app/profiles/me', { jobTitle: 'Gaffer' }, 'PATCH')).status).toBe(200);
+    const res = await blocksOnKb(() => w.c.post('/host/openwop-app/profiles/me/skills', { skills: [{ name: 'Lighting', proficiency: 4 }] }, 'PUT'));
     expect(res.status, JSON.stringify(res.body)).toBe(200);
   });
 });

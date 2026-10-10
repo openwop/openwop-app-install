@@ -87,7 +87,7 @@ const PROBE = {
 };
 
 async function seam(body: Record<string, unknown>): Promise<{ cacheKey: string; recipe: string }> {
-  const res = await fetch(`${BASE}/v1/host/openwop-app/test/llm-cache-key`, {
+  const res = await fetch(`${BASE}/host/openwop-app/test/llm-cache-key`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: 'Bearer dev-token' },
     body: JSON.stringify(body),
@@ -97,23 +97,8 @@ async function seam(body: Record<string, unknown>): Promise<{ cacheKey: string; 
 }
 
 describe('ADR 0549 P3 — the advertised recipe is the recipe the host computes', () => {
-  it('discovery advertises a recipe at all (RFC 0041 §D)', async () => {
-    const res = await fetch(`${BASE}/.well-known/openwop`);
-    const caps = (await res.json()) as Record<string, unknown>;
-    const em = (caps.multiAgent as { executionModel?: Record<string, unknown> } | undefined)?.executionModel;
-    // Vacuity guard: `beforeAll` turns Phase 4 on, so a boot that does not
-    // reach version 4 means the advert moved and this leg is testing nothing.
-    expect(em?.version, 'Phase 4 must be advertised, or this assertion is vacuous').toBeGreaterThanOrEqual(4);
-    const rd = em?.replayDeterminism as { llmCacheKeyRecipe?: unknown } | undefined;
-    expect(typeof rd?.llmCacheKeyRecipe).toBe('string');
-    // `spec-rfc-0041` means "the canonical recipe". A host computing its own
-    // must say so in the host-extension namespace instead.
-    expect(
-      rd!.llmCacheKeyRecipe === 'spec-rfc-0041' || String(rd!.llmCacheKeyRecipe).startsWith('x-host-'),
-      'llmCacheKeyRecipe must be `spec-rfc-0041` or `x-host-<host>-<recipe>` (RFC 0041 §A)',
-    ).toBe(true);
-  });
-
+  // ADR 0812 P3c-0 — the discovery-advert leg is deleted: `multiAgent.executionModel.replayDeterminism`
+  // exists only in the retired v1 document (the v2 root carries no such record); the seam legs below remain.
   it('the seam reports the CANONICAL recipe, and reports which one', async () => {
     const { cacheKey, recipe } = await seam(PROBE);
     expect(recipe).toBe(SEMANTIC_REQUEST_RECIPE_V2);

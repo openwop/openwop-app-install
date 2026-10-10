@@ -75,13 +75,13 @@ let n = 0;
 async function ownerOrg(): Promise<{ owner: ReturnType<typeof client>; orgId: string; tenantId: string }> {
   const tenantId = `org:chx-${Date.now()}-${n++}`;
   const owner = client();
-  const r = await owner.post('/v1/host/openwop-app/test/login', { email: `chx-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await owner.post('/host/openwop-app/test/login', { email: `chx-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status).toBe(201);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status).toBe(201);
   return { owner, orgId: org.body.orgId, tenantId };
 }
-const u = (orgId: string, s = ''): string => `/v1/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${s}`;
+const u = (orgId: string, s = ''): string => `/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${s}`;
 
 /** Resolve `{{inputs.name}}` config tokens from the run params — the harness
  *  equivalent of the executor's per-run variable interpolation. */
@@ -168,6 +168,10 @@ describe('cms.localize-and-submit — end-to-end execution', () => {
     const pageId = created.body.pageId as string;
     const sectionId = created.body.sections[0].sectionId as string;
     await putLocaleGrant(tenantId, orgId, 'user:translator-1', ['pt-BR'], 'test');
+    // A grant NARROWS a member (ADR 0205 D1); the translator is in the org, as the
+    // HTTP editor path requires and the seam's org floor now does too (ADR 0832).
+    const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'T', subject: 'user:translator-1', roles: ['editor'] });
+    expect(add.status, JSON.stringify(add.body)).toBe(201);
 
     // The run carries the translator's durable principal (scope.actingUserId).
     const features = buildFeatureSurfaces({ tenantId, runId: 'run:granted', actingUserId: 'user:translator-1' });

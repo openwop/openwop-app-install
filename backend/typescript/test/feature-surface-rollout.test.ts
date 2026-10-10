@@ -8,16 +8,15 @@
  */
 
 import http from 'node:http';
-import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
+import { v1Advertisement } from './support/v1Advertisement.js';
 import { buildHostSurfaceBundle } from '../src/host/inMemorySurfaces.js';
 import { createCompany } from '../src/features/crm/crmEntitiesService.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 
 let server: http.Server;
-let BASE: string;
 
 const setCrm = async (status: 'on' | 'off'): Promise<void> => { const d = getToggleDefault('crm'); if (d) await saveConfig({ ...d, status }, 'test'); };
 
@@ -25,7 +24,7 @@ beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => res()); });
   await setCrm('on'); // surfaces are toggle-gated — a node reads CRM only when enabled
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
@@ -78,9 +77,8 @@ describe('ctx.features.crm — the second reference surface', () => {
 
 describe('discovery advertises feature surfaces', () => {
   it('lists the composed surfaces at the document root', async () => {
-    const res = await fetch(`${BASE}/.well-known/openwop`);
-    expect(res.status).toBe(200);
-    const ad = await res.json() as { hostExtensions?: { featureSurfaces?: string[] } };
+    // ADR 0812 — the v2 root carries no `hostExtensions.featureSurfaces` (ADR 0014) yet; read the v1 claim from its builder.
+    const ad = await v1Advertisement() as { hostExtensions?: { featureSurfaces?: string[] } };
     const surfaces = ad.hostExtensions?.featureSurfaces ?? [];
     expect(surfaces).toContain('host.sample.kb');
     expect(surfaces).toContain('host.sample.crm');

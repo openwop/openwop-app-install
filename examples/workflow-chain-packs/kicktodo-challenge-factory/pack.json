@@ -1,18 +1,18 @@
 {
   "name": "core.openwop.workflows.kicktodo-challenge-factory",
-  "version": "1.5.0",
+  "version": "1.5.2",
   "kind": "workflow-chain",
   "description": "The Challenge Factory (ADR 0458) + its lesson-batch child — migrated from the deprecated builtins (ADR 0472 P4, the terminal quarantine step). chainIds keep the original ids; build-0..3 reference lesson-batch via RFC 0133 config.subChainRef (host-default binds it to the shared same-id child); truthy/falsy reject-safe barriers ride RFC 0134; produced vars (plan/evidenceSummary/evidenceClaims/planBrief/planEvidenceBrief) declared per RFC 0133 §2.2; 1.4.0 (ADR 0458 §2.2 correction) grounds the plan, the lessons and the skeptic on the STRUCTURED evidence.",
   "keywords": [
     "KickTodo"
   ],
   "engines": {
-    "openwop": ">=1.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "chains": [
     {
       "chainId": "openwop-app.kicktodo.challenge-factory",
-      "version": "1.5.0",
+      "version": "1.5.2",
       "label": "Challenge Factory",
       "description": "Research a topic → draft an outline → approve → build lesson batches (each checkpoint approved) → simulate with three personas → submit for publication.",
       "parameters": {
@@ -58,7 +58,7 @@
         "nodes": [
           {
             "id": "research-frame",
-            "typeId": "feature.kicktodo.nodes.research-frame",
+            "typeId": "feature.kicktodo.nodes.research-frame@1.0.0",
             "inputs": {
               "topic": "{{params.topic}}",
               "audience": "{{params.audience}}"
@@ -66,7 +66,7 @@
           },
           {
             "id": "search",
-            "typeId": "core.web.search",
+            "typeId": "core.web.search@1.0.0",
             "config": {
               "suitability": "durable"
             },
@@ -78,12 +78,12 @@
           },
           {
             "id": "normalize",
-            "typeId": "feature.kicktodo.nodes.source-normalize",
+            "typeId": "feature.kicktodo.nodes.source-normalize@1.0.0",
             "inputs": {}
           },
           {
             "id": "fetch",
-            "typeId": "core.web.fetch",
+            "typeId": "core.web.fetch@1.0.0",
             "name": "Read the sources",
             "position": {
               "x": 180,
@@ -96,7 +96,7 @@
           },
           {
             "id": "extract-claims",
-            "typeId": "feature.kicktodo.nodes.claim-extract",
+            "typeId": "feature.kicktodo.nodes.claim-extract@1.0.0",
             "name": "Extract cited claims",
             "position": {
               "x": 540,
@@ -111,7 +111,7 @@
           },
           {
             "id": "verify-claims",
-            "typeId": "feature.kicktodo.nodes.claim-verify",
+            "typeId": "feature.kicktodo.nodes.claim-verify@1.0.0",
             "name": "Verify each claim against its source",
             "position": {
               "x": 720,
@@ -126,14 +126,14 @@
           },
           {
             "id": "evidence-graph",
-            "typeId": "feature.kicktodo.nodes.evidence-graph",
+            "typeId": "feature.kicktodo.nodes.evidence-graph@1.0.0",
             "inputs": {
               "candidateId": "{{params.candidateId}}"
             }
           },
           {
             "id": "generate",
-            "typeId": "feature.kicktodo.nodes.plan-generate",
+            "typeId": "feature.kicktodo.nodes.plan-generate@1.0.0",
             "inputs": {
               "candidateId": "{{params.candidateId}}",
               "topic": "{{params.topic}}",
@@ -153,7 +153,7 @@
           },
           {
             "id": "outline-approve",
-            "typeId": "core.chat.approvalGate",
+            "typeId": "core.chat.approvalGate@1.1.0",
             "config": {
               "title": "Approve the challenge outline?",
               "artifactType": "challenge-outline",
@@ -168,7 +168,7 @@
           },
           {
             "id": "plan-validate",
-            "typeId": "feature.kicktodo.nodes.plan-validate",
+            "typeId": "feature.kicktodo.nodes.plan-validate@1.0.0",
             "inputs": {
               "plan": {
                 "type": "variable",
@@ -178,7 +178,7 @@
           },
           {
             "id": "checkpoint-plan",
-            "typeId": "feature.kicktodo.nodes.checkpoint-plan",
+            "typeId": "feature.kicktodo.nodes.checkpoint-plan@1.0.0",
             "inputs": {
               "plan": {
                 "type": "variable",
@@ -193,7 +193,7 @@
           },
           {
             "id": "build-0",
-            "typeId": "core.subWorkflow",
+            "typeId": "core.subWorkflow@1.0.0",
             "config": {
               "waitForCompletion": true,
               "onChildFailure": "absorb",
@@ -212,7 +212,7 @@
           },
           {
             "id": "gate-0",
-            "typeId": "core.chat.approvalGate",
+            "typeId": "core.chat.approvalGate@1.1.0",
             "config": {
               "title": "Approve the lessons for checkpoint 1?",
               "artifactType": "challenge-lesson-batch",
@@ -221,7 +221,7 @@
           },
           {
             "id": "fail-0",
-            "typeId": "core.fail",
+            "typeId": "core.fail@1.0.0",
             "config": {
               "code": "checkpoint_rejected",
               "message": "Checkpoint 1 was rejected — the factory run stops here."
@@ -229,7 +229,7 @@
           },
           {
             "id": "build-1",
-            "typeId": "core.subWorkflow",
+            "typeId": "core.subWorkflow@1.0.0",
             "config": {
               "waitForCompletion": true,
               "onChildFailure": "absorb",
@@ -248,7 +248,7 @@
           },
           {
             "id": "gate-1",
-            "typeId": "core.chat.approvalGate",
+            "typeId": "core.chat.approvalGate@1.1.0",
             "config": {
               "title": "Approve the lessons for checkpoint 2?",
               "artifactType": "challenge-lesson-batch",
@@ -257,7 +257,7 @@
           },
           {
             "id": "fail-1",
-            "typeId": "core.fail",
+            "typeId": "core.fail@1.0.0",
             "config": {
               "code": "checkpoint_rejected",
               "message": "Checkpoint 2 was rejected — the factory run stops here."
@@ -265,7 +265,7 @@
           },
           {
             "id": "build-2",
-            "typeId": "core.subWorkflow",
+            "typeId": "core.subWorkflow@1.0.0",
             "config": {
               "waitForCompletion": true,
               "onChildFailure": "absorb",
@@ -284,7 +284,7 @@
           },
           {
             "id": "gate-2",
-            "typeId": "core.chat.approvalGate",
+            "typeId": "core.chat.approvalGate@1.1.0",
             "config": {
               "title": "Approve the lessons for checkpoint 3?",
               "artifactType": "challenge-lesson-batch",
@@ -293,7 +293,7 @@
           },
           {
             "id": "fail-2",
-            "typeId": "core.fail",
+            "typeId": "core.fail@1.0.0",
             "config": {
               "code": "checkpoint_rejected",
               "message": "Checkpoint 3 was rejected — the factory run stops here."
@@ -301,7 +301,7 @@
           },
           {
             "id": "build-3",
-            "typeId": "core.subWorkflow",
+            "typeId": "core.subWorkflow@1.0.0",
             "config": {
               "waitForCompletion": true,
               "onChildFailure": "absorb",
@@ -320,7 +320,7 @@
           },
           {
             "id": "gate-3",
-            "typeId": "core.chat.approvalGate",
+            "typeId": "core.chat.approvalGate@1.1.0",
             "config": {
               "title": "Approve the lessons for checkpoint 4?",
               "artifactType": "challenge-lesson-batch",
@@ -329,7 +329,7 @@
           },
           {
             "id": "fail-3",
-            "typeId": "core.fail",
+            "typeId": "core.fail@1.0.0",
             "config": {
               "code": "checkpoint_rejected",
               "message": "Checkpoint 4 was rejected — the factory run stops here."
@@ -337,7 +337,7 @@
           },
           {
             "id": "decompose",
-            "typeId": "feature.kicktodo.nodes.decompose",
+            "typeId": "feature.kicktodo.nodes.decompose@1.0.0",
             "inputs": {
               "plan": {
                 "type": "variable",
@@ -349,12 +349,12 @@
           },
           {
             "id": "sim-newcomer",
-            "typeId": "local.openwop-app.agent-runner",
+            "typeId": "local.openwop-app.agent-runner@1.0.0",
             "config": {
               "offerTools": []
             },
             "inputs": {
-              "agentId": "feature.kicktodo.agents.sim-newcomer",
+              "agentId": "vendor.openwop-app.kicktodo.agents.sim-newcomer",
               "task": {
                 "type": "variable",
                 "variableName": "planBrief"
@@ -364,12 +364,12 @@
           },
           {
             "id": "sim-time-poor",
-            "typeId": "local.openwop-app.agent-runner",
+            "typeId": "local.openwop-app.agent-runner@1.0.0",
             "config": {
               "offerTools": []
             },
             "inputs": {
-              "agentId": "feature.kicktodo.agents.sim-time-poor",
+              "agentId": "vendor.openwop-app.kicktodo.agents.sim-time-poor",
               "task": {
                 "type": "variable",
                 "variableName": "planBrief"
@@ -379,12 +379,12 @@
           },
           {
             "id": "sim-skeptic",
-            "typeId": "local.openwop-app.agent-runner",
+            "typeId": "local.openwop-app.agent-runner@1.0.0",
             "config": {
               "offerTools": []
             },
             "inputs": {
-              "agentId": "feature.kicktodo.agents.sim-skeptic",
+              "agentId": "vendor.openwop-app.kicktodo.agents.sim-skeptic",
               "task": {
                 "type": "variable",
                 "variableName": "planEvidenceBrief"
@@ -394,21 +394,21 @@
           },
           {
             "id": "sim-collect",
-            "typeId": "feature.kicktodo.nodes.sim-collect",
+            "typeId": "feature.kicktodo.nodes.sim-collect@1.0.0",
             "inputs": {
               "candidateId": "{{params.candidateId}}"
             }
           },
           {
             "id": "submit",
-            "typeId": "feature.kicktodo.nodes.submit-publication",
+            "typeId": "feature.kicktodo.nodes.submit-publication@1.0.0",
             "inputs": {
               "candidateId": "{{params.candidateId}}"
             }
           },
           {
             "id": "gate-reject",
-            "typeId": "core.fail",
+            "typeId": "core.fail@1.0.0",
             "config": {
               "code": "outline_rejected",
               "message": "The challenge outline was rejected — the factory run stops here."
@@ -689,7 +689,7 @@
     },
     {
       "chainId": "openwop-app.kicktodo.lesson-batch",
-      "version": "1.2.0",
+      "version": "1.2.1",
       "label": "Lesson batch (Challenge Factory child)",
       "description": "Builds one checkpoint of a challenge’s lessons. Internal — dispatched by the Challenge Factory, not run on its own.",
       "internal": true,
@@ -736,7 +736,7 @@
         "nodes": [
           {
             "id": "lesson-batch-build",
-            "typeId": "feature.kicktodo.nodes.lesson-batch-build",
+            "typeId": "feature.kicktodo.nodes.lesson-batch-build@1.0.0",
             "inputs": {
               "candidateId": "{{params.candidateId}}",
               "authorSubject": "{{params.authorSubject}}",

@@ -60,7 +60,7 @@ describe('the production IMAGE ships the isolation worker', () => {
     // `scripts/build.mjs` writes `lib/packIsolationWorker.mjs` (pinned by
     // `pack-isolation-build-wiring.test.ts`). This is the other half: that the
     // directory it lands in actually reaches the runtime image.
-    expect(dockerfile).toMatch(/COPY --from=builder \/app\/lib \.\/lib/);
+    expect(dockerfile).toMatch(/COPY (--chown=node:node )?--from=builder \/app\/lib \.\/lib/);
   });
 
   it('the runtime stage installs PRODUCTION deps only — so the dev lane cannot be what production uses', () => {

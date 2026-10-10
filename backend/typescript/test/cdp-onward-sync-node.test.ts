@@ -31,7 +31,7 @@ describe('CDP W1.1 prepare-onward node contract', () => {
     const surface = {
       prepareOnward: async ({ syncId, records }: { syncId: string; records: unknown[] }) => ({
         envelopes: [envelope],
-        peerIngestUrl: 'https://peer.example/v1/host/openwop-app/trigger-bridge/ingest',
+        peerIngestUrl: 'https://peer.example/host/openwop-app/trigger-bridge/ingest',
         count: records.length,
         dropped: 0,
         connectionId: 'conn:peer',
@@ -43,7 +43,7 @@ describe('CDP W1.1 prepare-onward node contract', () => {
     expect(out.outputs!.count).toBe(1);
     expect(out.outputs!.envelopes).toEqual([envelope]);
     expect(out.outputs!.onwardBody).toEqual(envelope); // the FIRST envelope, for the http.fetch body
-    expect(out.outputs!.peerIngestUrl).toBe('https://peer.example/v1/host/openwop-app/trigger-bridge/ingest');
+    expect(out.outputs!.peerIngestUrl).toBe('https://peer.example/host/openwop-app/trigger-bridge/ingest');
     expect(out.outputs!.connectionId).toBe('conn:peer');
   });
 
@@ -86,7 +86,7 @@ describe('CDP W1.1 prepare-onward over the REAL surface (flag gate)', () => {
     const sync = await createDestinationSync({
       tenantId: TENANT, name: 'Peer CDP', destinationKind: 'openwop-host', sourceObject: 'contact',
       fieldMap: [{ from: 'email', to: 'email_address' }],
-      connectionId: 'conn:peer', peerIngestUrl: 'https://peer.example/v1/host/openwop-app/trigger-bridge/ingest',
+      connectionId: 'conn:peer', peerIngestUrl: 'https://peer.example/host/openwop-app/trigger-bridge/ingest',
     });
     return sync.syncId;
   }
@@ -113,7 +113,7 @@ describe('CDP W1.1 prepare-onward over the REAL surface (flag gate)', () => {
     }, surface));
     expect(out.status).toBe('success');
     expect(out.outputs!.dropped).toBe(1);
-    expect(out.outputs!.peerIngestUrl).toBe('https://peer.example/v1/host/openwop-app/trigger-bridge/ingest');
+    expect(out.outputs!.peerIngestUrl).toBe('https://peer.example/host/openwop-app/trigger-bridge/ingest');
     // onwardBody = the first labelled envelope — the exact JSON the http.fetch node POSTs.
     expect(out.outputs!.onwardBody).toMatchObject({
       permittedPurposes: ['analytics', 'marketing'], // re-emitted label on the body we POST

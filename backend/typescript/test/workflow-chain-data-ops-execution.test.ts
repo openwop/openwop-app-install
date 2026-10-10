@@ -152,7 +152,7 @@ let n = 0;
 async function ownerOrg(): Promise<{ owner: Client; tenantId: string }> {
   const tenantId = `org:dataopschain-${Date.now()}-${n++}`;
   const owner = client();
-  const r = await owner.post('/v1/host/openwop-app/test/login', { email: `dataopschain-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await owner.post('/host/openwop-app/test/login', { email: `dataopschain-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return { owner, tenantId };
 }
@@ -161,7 +161,7 @@ interface RunSnapshot { status: string; error?: { code: string; message: string 
 async function pollRun(owner: Client, runId: string): Promise<RunSnapshot> {
   let snap: RunSnapshot = { status: 'pending' };
   for (let i = 0; i < 80; i++) {
-    const r = await owner.get(`/v1/runs/${runId}`);
+    const r = await owner.get(`/runs/${runId}`);
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     snap = r.body as RunSnapshot;
     if (snap.status === 'completed' || snap.status === 'failed' || snap.status === 'cancelled' || snap.status.startsWith('waiting')) break;
@@ -172,7 +172,7 @@ async function pollRun(owner: Client, runId: string): Promise<RunSnapshot> {
 
 interface BundleEvent { type?: string; nodeId?: string; payload?: Record<string, unknown> }
 async function bundleEvents(owner: Client, runId: string): Promise<BundleEvent[]> {
-  const b = await owner.get(`/v1/runs/${runId}/debug-bundle`);
+  const b = await owner.get(`/runs/${runId}/debug-bundle`);
   expect(b.status, JSON.stringify(b.body)).toBe(200);
   return (b.body.events as BundleEvent[]) ?? [];
 }
@@ -196,7 +196,7 @@ describe('data-ops.rollup — real reads, honest missing-credential failure (fan
     const expanded = expandChain(found!.chain, { params });
     registerWorkflow(expanded);
 
-    const create = await owner.post('/v1/runs', { workflowId: expanded.workflowId, inputs: params });
+    const create = await owner.post('/runs', { workflowId: expanded.workflowId, inputs: params });
     expect(create.status, JSON.stringify(create.body)).toBe(201);
     const runId = create.body.runId as string;
 
@@ -209,7 +209,7 @@ describe('data-ops.rollup — real reads, honest missing-credential failure (fan
       // credential-less test tenant fails one step LATER and honestly:
       // `byok_required` — configure a key — instead of naming a provider that
       // never existed.
-    expect(snap.error?.code).toBe('byok_required');
+    expect(snap.error?.code).toBe('openwop-app.byok_required');
 
     const events = await bundleEvents(owner, runId);
     // Both fan-in sources completed with the REAL seeded data — proving the
@@ -232,7 +232,7 @@ describe('data-ops.content-router — real conditional routing (ADR 0201, param-
     const params = { value, routeField: 'priority' };
     const expanded = expandChain(found!.chain, { params });
     registerWorkflow(expanded);
-    const create = await owner.post('/v1/runs', { workflowId: expanded.workflowId, inputs: params });
+    const create = await owner.post('/runs', { workflowId: expanded.workflowId, inputs: params });
     expect(create.status, JSON.stringify(create.body)).toBe(201);
     const runId = create.body.runId as string;
     const snap = await pollRun(owner, runId);

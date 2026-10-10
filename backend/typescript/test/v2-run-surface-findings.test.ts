@@ -36,10 +36,10 @@ async function req(method: string, path: string, headers: Record<string, string>
   return { status: res.status, json, text };
 }
 async function createDone(extra: Record<string, unknown> = {}, headers: Record<string, string> = V2): Promise<string> {
-  const r = await req('POST', headers['OpenWOP-Version'] ? '/runs' : '/v1/runs', headers, { workflowId: 'conformance-noop', inputs: {}, ...extra });
+  const r = await req('POST', '/runs', headers, { workflowId: 'conformance-noop', inputs: {}, ...extra });
   expect(r.status, r.text.slice(0, 200)).toBe(201);
   const id = r.json.runId as string;
-  for (let i = 0; i < 50; i++) { const s = await req('GET', headers['OpenWOP-Version'] ? `/runs/${encodeURIComponent(id)}` : `/v1/runs/${id}`, headers); if (['completed', 'failed'].includes(s.json?.status)) break; await new Promise((r) => setTimeout(r, 20)); }
+  for (let i = 0; i < 50; i++) { const s = await req('GET', `/runs/${encodeURIComponent(id)}`, headers); if (['completed', 'failed'].includes(s.json?.status)) break; await new Promise((r) => setTimeout(r, 20)); }
   return id;
 }
 
@@ -90,13 +90,7 @@ describe('3. tags / metadata: limits enforced, both surfaced unchanged', () => {
     expect(s.json.tags).toEqual(tags);
     expect(s.json.metadata).toEqual(metadata);
   });
-  it('…and on the 1.x snapshot too (the v1 schema carries both)', async () => {
-    const tags = ['v1-tag']; const metadata = { a: 1 };
-    const id = await createDone({ tags, metadata }, {});
-    const s = await req('GET', `/v1/runs/${id}`);
-    expect(s.json.tags).toEqual(tags);
-    expect(s.json.metadata).toEqual(metadata);
-  });
+  // ADR 0812 P3c-0 — the 1.x snapshot leg was deleted with major 1 (the major-2 leg above carries the same assertion).
   it('the snapshot metadata never leaks the host bag (engineVersion lives on its own axis)', async () => {
     const id = await createDone({ metadata: { a: 1 } });
     const s = await req('GET', `/runs/${encodeURIComponent(id)}`, V2);
@@ -111,9 +105,5 @@ describe('4. cancel on a terminal run', () => {
     expect(r.status, r.text.slice(0, 120)).toBe(409);
     expect(r.json?.error).toBe('run_terminal');
   });
-  it('1.x keeps its idempotent 200 (untouched)', async () => {
-    const id = await createDone({}, {});
-    const r = await req('POST', `/v1/runs/${id}/cancel`, {}, {});
-    expect(r.status).toBe(200);
-  });
+  // ADR 0812 P3c-0 — the 1.x idempotent-200 cancel leg was deleted with major 1.
 });

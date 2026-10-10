@@ -3,6 +3,11 @@
  * words for the user. The server's sentence is developer material: it goes to
  * `console.warn` and never to the toast. The HTTP status is what the UI can
  * name in the user's language.
+ *
+ * Sabotage that turns it red (wave-4 /grade-tests probes, 6/6 witnessed): a
+ * status mapping returning null; the 5xx range narrowed to 500; the
+ * console.warn dropped; the caller's fallback key ignored; `revertedErr`
+ * dropping the reason; a non-transport error mapped to a status sentence.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import i18n from '../../../i18n/index.js';

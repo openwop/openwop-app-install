@@ -1,7 +1,7 @@
 /**
  * ADR 0553 P2 — the `mcp-2026-07-28` codec, host-as-server.
  *
- * Drives the REAL mount (`POST /v1/host/openwop-app/mcp`) over HTTP, because
+ * Drives the REAL mount (`POST /host/openwop-app/mcp`) over HTTP, because
  * every rule RFC 0153 §B states is about the boundary between the headers and
  * the body — a test that called `dispatchCurrent` directly would be free to
  * make the two agree by construction and would prove nothing about the door.
@@ -48,7 +48,7 @@ import {
 let BASE: string;
 let server: http.Server;
 
-const MCP = '/v1/host/openwop-app/mcp';
+const MCP = '/host/openwop-app/mcp';
 const TOOL = `mrtr_probe_${Date.now()}`;
 let rpcId = 0;
 /**
@@ -76,7 +76,7 @@ beforeAll(async () => {
   });
   // The MRTR fixture: expose a tool whose backing node asks for input. Same
   // shape the conformance suite registers (`mcp-mrtr-roundtrip.test.ts`).
-  const reg = await fetch(`${BASE}/v1/host/openwop-app/workflows`, {
+  const reg = await fetch(`${BASE}/host/openwop-app/workflows`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
@@ -96,6 +96,17 @@ beforeAll(async () => {
     }),
   });
   expect([200, 201], `workflow registration failed: ${await reg.clone().text()}`).toContain(reg.status);
+  // ADR 0788 D1 — the MCP registry is tenant-scoped: a workspace tool is visible
+  // only in the workspace that OWNS it. The registration above minted an
+  // anonymous session (its own `anon:` workspace), so every MCP leg below must
+  // carry THAT session. This file used to register in one anonymous workspace
+  // and call from another, which only worked because the registry leaked every
+  // tenant's tools to every caller (`MCPWF-1`).
+  for (const ck of getSetCookies(reg.headers)) {
+    const m = /(__session=[^;]+)/.exec(ck);
+    if (m?.[1]) cookie = m[1];
+  }
+  expect(cookie, 'the registration must mint the session the MCP legs act in').toBeTruthy();
 });
 
 afterAll(async () => {
@@ -419,9 +430,11 @@ describe('RFC 0199 §D.2(d) — no form mode for a nested or sensitive schema', 
   const SECRET = `mrtr_secret_${Date.now()}`;
 
   async function registerAsk(tool: string, requestedSchema: Record<string, unknown>): Promise<void> {
-    const reg = await fetch(`${BASE}/v1/host/openwop-app/workflows`, {
+    // ADR 0788 D1 — registered in the SAME session the MCP legs act in: a
+    // workspace tool is visible only in the workspace that owns it.
+    const reg = await fetch(`${BASE}/host/openwop-app/workflows`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
       body: JSON.stringify({
         workflowId: `mcp.mrtr.${tool}`,
         nodes: [

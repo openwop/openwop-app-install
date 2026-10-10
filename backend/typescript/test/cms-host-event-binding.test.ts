@@ -23,6 +23,7 @@ import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import type { Storage } from '../src/storage/storage.js';
 import type { RunRecord } from '../src/types.js';
+import { bareRunId } from './support/bareRunId.js';
 
 let BASE: string;
 let server: http.Server;
@@ -70,14 +71,14 @@ let n = 0;
 async function ownerOrg(): Promise<{ owner: Client; orgId: string; tenantId: string }> {
   const tenantId = `org:cmsbind-${Date.now()}-${n++}`;
   const owner = client();
-  const r = await owner.post('/v1/host/openwop-app/test/login', { email: `cmsbind-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await owner.post('/host/openwop-app/test/login', { email: `cmsbind-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status).toBe(201);
   return { owner, orgId: org.body.orgId, tenantId };
 }
-const u = (orgId: string, s = ''): string => `/v1/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${s}`;
-const BINDINGS = '/v1/host/openwop-app/host-events/bindings';
+const u = (orgId: string, s = ''): string => `/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${s}`;
+const BINDINGS = '/host/openwop-app/host-events/bindings';
 
 describe('host.cms.page.* rides the ADR 0208 dispatcher (ADR 0592 §4)', () => {
   it('a binding on host.cms.page.published starts the bound workflow when a page publishes', async () => {
@@ -108,7 +109,7 @@ describe('host.cms.page.* rides the ADR 0208 dispatcher (ADR 0592 §4)', () => {
 
   it('the reroute delivers each webhook exactly ONCE (no double delivery through the dispatcher leg)', async () => {
     const { owner, orgId, tenantId } = await ownerOrg();
-    const sub = await owner.post('/v1/webhooks', { url: 'https://hooks.example.test/cms-once', events: ['host.cms.page.published'], tenantId });
+    const sub = await owner.post('/webhooks', { url: 'https://hooks.example.test/cms-once', events: ['host.cms.page.published'], tenantId });
     expect(sub.status, JSON.stringify(sub.body)).toBe(201);
 
     const created = await owner.post(u(orgId, '/pages'), { title: 'Once', sections: [] });
@@ -120,7 +121,7 @@ describe('host.cms.page.* rides the ADR 0208 dispatcher (ADR 0592 §4)', () => {
     for (let i = 0; i < 40; i++) {
       const claimed = await storage.claimDueWebhookDeliveries(`once-worker-${i}`, Date.now() + 1, 5000, 50);
       for (const d of claimed) {
-        if (d.subscriptionId === sub.body.webhookId && d.eventType === 'host.cms.page.published' && d.payload.includes(created.body.pageId)) {
+        if (d.subscriptionId === bareRunId(sub.body.webhookId) && d.eventType === 'openwop-app.cms.page-published' && d.payload.includes(created.body.pageId)) {
           mine.push(d.deliveryId);
         }
       }
@@ -129,7 +130,7 @@ describe('host.cms.page.* rides the ADR 0208 dispatcher (ADR 0592 §4)', () => {
         await new Promise((r) => setTimeout(r, 100));
         const extra = await storage.claimDueWebhookDeliveries('once-worker-final', Date.now() + 1, 5000, 50);
         for (const d of extra) {
-          if (d.subscriptionId === sub.body.webhookId && d.eventType === 'host.cms.page.published' && d.payload.includes(created.body.pageId)) {
+          if (d.subscriptionId === bareRunId(sub.body.webhookId) && d.eventType === 'openwop-app.cms.page-published' && d.payload.includes(created.body.pageId)) {
             mine.push(d.deliveryId);
           }
         }

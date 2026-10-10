@@ -1,7 +1,7 @@
 /**
  * CFP-1 (CHAT-FIRST-PORT-AUDIT #1) — the CMS agents' REAL conversational tools.
  *
- * The `feature.cms.agents` pack (localizer + content-editor, ADR 0204 C6)
+ * The `vendor.openwop-app.cms.agents` pack (localizer + content-editor, ADR 0204 C6)
  * allowlisted `openwop:feature.cms.nodes.<verb>` — WORKFLOW-node typeIds, which
  * the live dispatch lanes (`conversationToolLoop` / `agentRunnerNode`) intersect
  * against `builtinAgentToolIds()` and silently DROP (they are not registered
@@ -111,6 +111,7 @@ export function registerCmsAgentTools(): void {
   // ── Reads (workspace:read; FAIL EMPTY without an acting user) ─────────────
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: CMS_GET_PAGE_TOOL_ID,
       description:
@@ -144,6 +145,7 @@ export function registerCmsAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: CMS_LIST_PAGES_TOOL_ID,
       description:
@@ -170,6 +172,7 @@ export function registerCmsAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     // ADR 0604 review H4 — the READ-BEFORE-WRITE body for CMS editing, and its
     // `sections[]` is the closed set of legal `sectionId`s the WRITE tool
     // enforces: `cms.update-section-draft` requires a `sectionId` and
@@ -214,6 +217,7 @@ export function registerCmsAgentTools(): void {
   // ── Generative draft: translate a section (workspace:write + localization) ─
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: CMS_TRANSLATE_SECTION_TOOL_ID,
       description:
@@ -280,6 +284,7 @@ export function registerCmsAgentTools(): void {
   // ── Governed writes (workspace:write; DRAFT + SUBMIT only, never publish) ──
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: CMS_UPDATE_SECTION_DRAFT_TOOL_ID,
       description:
@@ -325,6 +330,7 @@ export function registerCmsAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: CMS_SUBMIT_PAGE_TOOL_ID,
       description:

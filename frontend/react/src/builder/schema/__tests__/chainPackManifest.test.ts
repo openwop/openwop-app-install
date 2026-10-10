@@ -31,8 +31,12 @@ vi.mock('../../palette/catalogRegistry.js', () => ({
   resolvableTypeIds: () => [],
 }));
 
-import { buildChainPackManifest } from '../chainPackManifest.js';
+import { buildChainPackManifest as buildPinned, ChainExportVersionError, CHAIN_EXPORT_ENGINES } from '../chainPackManifest.js';
 import type { SavedWorkflow, BuilderNode } from '../workflow.js';
+
+/** Every type installed at 1.0.0 — the ADR 0525 suites below are about params,
+ *  lengths and names, not versions; the ADR 0766 suite at the end owns those. */
+const buildChainPackManifest = (snap: SavedWorkflow) => buildPinned(snap, () => '1.0.0');
 
 const REPO = join(import.meta.dirname, '..', '..', '..', '..', '..', '..');
 
@@ -170,5 +174,37 @@ describe('the pack name survives hostile workflow names', () => {
     expect(m.name, `slug escaped the manifest name pattern: ${m.name}`)
       .toMatch(/^(core|vendor|community|private)\.[a-z][a-z0-9_-]*(\.[a-z][a-zA-Z0-9_-]*)+$/);
     expect(m.name.length, `slug exceeds maxLength 256: ${m.name.length}`).toBeLessThanOrEqual(256);
+    // ADR 0766 — a pinned export is judged by the v2 schema, whose chainId is
+    // `^[A-Za-z0-9._~:-]{1,128}$` (ids.schema.json). A 216-char chainId loaded on
+    // v1 and is refused on v2.
+    expect(m.chains[0]!.chainId).toMatch(/^[A-Za-z0-9._~:-]{1,128}$/);
+  });
+});
+
+describe('ADR 0766 (NP-V2-8) — an export is publishable under RFC 0177', () => {
+  it('pins EVERY node reference to the installed version the host reported', () => {
+    const versions: Record<string, string> = { 'core.noop': '1.4.2', 'core.delay': '2.0.1' };
+    const m = buildPinned(wf([node('a'), node('b', { kind: 'core.delay' })]), (t) => versions[t]);
+    const refs = m.chains[0]!.dag.nodes.map((n) => n.typeId);
+    expect(refs.length).toBe(2);
+    for (const ref of refs) expect(ref, `unpinned reference: ${ref}`).toMatch(/^[a-z][a-zA-Z0-9._-]*@\d+\.\d+\.\d+$/);
+    expect(refs).toContain('core.noop@1.4.2');
+  });
+
+  it('declares the v2 engine range with an explicit upper bound — not `^1.0.0`', () => {
+    const m = buildChainPackManifest(wf([node('a')]));
+    expect(m.engines.openwop).toBe(CHAIN_EXPORT_ENGINES);
+    expect(m.engines.openwop).toMatch(/^>=\d+(\.\d+){0,2} <\d+\.0\.0$/);
+  });
+
+  it('REFUSES to emit a manifest when a node version is unknown, naming the types', () => {
+    let caught: unknown;
+    try {
+      buildPinned(wf([node('a'), node('b', { kind: 'core.delay' })]), (t) => (t === 'core.noop' ? '1.0.0' : undefined));
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(ChainExportVersionError);
+    expect((caught as ChainExportVersionError).typeIds).toEqual(['core.delay']);
   });
 });

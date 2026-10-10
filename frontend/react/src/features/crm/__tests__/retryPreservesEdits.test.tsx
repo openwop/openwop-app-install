@@ -16,34 +16,61 @@
  *    first test, so the second asserts the read actually re-issues.
  *  - "the page-level Retry DOES re-read the company": the split must not leave
  *    the failed-COMPANY card retrying nothing.
+ *
+ * Sabotage-witnessed (wave-4 /grade-tests, w4g5-rp-*): the deals Retry wired
+ * to `loadCompany(); loadDeals()` reds the first two cases, a Retry wired to
+ * nothing reds them too, the `deals === null` skeleton branch removed reds
+ * HIGH-1, and the page card's Retry wired to `loadDeals` reds the last case.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 
-const api = vi.hoisted(() => ({ getCompany: vi.fn(), listDeals: vi.fn(), listActivities: vi.fn() }));
+type OrgApi = typeof import('../crmOrgClient.js');
+const api = vi.hoisted(() => ({
+  getCompany: vi.fn<OrgApi['getCompany']>(),
+  listDeals: vi.fn<OrgApi['listDeals']>(),
+  listActivities: vi.fn<OrgApi['listActivities']>(),
+}));
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 vi.mock('../crmOrgClient.js', async (orig) => {
   const actual = await orig<Record<string, unknown>>();
   return { ...actual, getCompany: api.getCompany, listDeals: api.listDeals, listActivities: api.listActivities };
 });
 
-const access = vi.hoisted(() => ({ useFeatureAccess: vi.fn() }));
+const access = vi.hoisted(() => ({
+  useFeatureAccess: vi.fn<typeof import('../../../featureToggles/FeatureAccessContext.js')['useFeatureAccess']>(),
+}));
 vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
   useFeatureAccess: access.useFeatureAccess,
 }));
 
 import { CompanyDetailPage } from '../CompanyDetailPage.js';
+import type { Company, Deal } from '../crmOrgClient.js';
 
-const COMPANY = { companyId: 'c1', orgId: 'o1', name: 'Acme Co', tags: [] };
+const COMPANY: Company = { companyId: 'c1', name: 'Acme Co', tags: [] };
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   access.useFeatureAccess.mockReturnValue(makeFeatureAccess({ enabled: true, loading: false }));
   api.getCompany.mockResolvedValue(COMPANY);
   api.listActivities.mockResolvedValue([]);
+  // Every request this page makes is mocked; a REAL one is the bug. Moved here from
+  // companyDealsHonesty.test.tsx (deleted in wave-4 /grade-tests as redundant with this
+  // file). The unmocked ActivityTimeline read once failed after the test ended and its
+  // late console output landed during worker teardown, failing whole merge trains with
+  // `EnvironmentTeardownError: Closing rpc while "onUserConsoleLog" was pending`.
+  // Installed AFTER the reset above so the reset cannot wipe it.
+  vi.stubGlobal('fetch', vi.fn<typeof fetch>(() => Promise.reject(new Error('unmocked network call'))));
 });
-afterEach(cleanup);
+afterEach(() => {
+  try {
+    cleanup();
+    expect(globalThis.fetch, 'the page made a real network request').not.toHaveBeenCalled();
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
 
 function view(): void {
   render(
@@ -88,8 +115,8 @@ describe('CRM-UX-9 — the deals Retry does not reset the company form', () => {
     // false SALES claim — on FIRST load, and again for the whole retry window
     // (the retry clears `dealsFailed` synchronously). Held here by a promise
     // the test settles.
-    let land!: (v: unknown[]) => void;
-    api.listDeals.mockReturnValueOnce(new Promise((res) => { land = res; }));
+    let land!: (v: Deal[]) => void;
+    api.listDeals.mockReturnValueOnce(new Promise<Deal[]>((res) => { land = res; }));
     view();
     await screen.findByDisplayValue('Acme Co');
     expect(screen.queryByText('No deals reference this company yet.')).toBeNull();

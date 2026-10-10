@@ -13,6 +13,7 @@
  * emitted verbatim (the CMS stores plain text/markdown-subset — no HTML to
  * escape), never wrapped in invented formatting.
  */
+import { isInternalHref } from '../../host/internalHref.js';
 import type { Section } from '../cms/cmsService.js';
 import { vendorPublicBase } from '../featureRoute.js';
 
@@ -53,7 +54,10 @@ export function sectionMarkdown(section: Section, baseUrl: string): string | nul
     }
     case 'cta': {
       const label = str(d.label);
-      const url = str(d.url);
+      // ADR 0836 D7 — re-checked at this exit too (it relied on the write-time
+      // `safeLink` alone), with the same predicates as the HTML renderer.
+      const raw = str(d.url).trim();
+      const url = isInternalHref(raw) || /^(https?:|mailto:)/i.test(raw) ? raw : '';
       return `${head()}${str(d.subheading) ? `${str(d.subheading)}\n\n` : ''}${label && url ? `[${label}](${url})` : ''}`.trim();
     }
     case 'columns': {
@@ -113,6 +117,25 @@ export function sectionMarkdown(section: Section, baseUrl: string): string | nul
         const byline = [it.name, it.role].filter(Boolean).join(', ');
         return `> ${it.quote}${byline ? `\n>\n> — ${byline}` : ''}`;
       }).join('\n\n')}`;
+    }
+    case 'video': {
+      // ADR 0843 — the film's title + length, its description, and followable
+      // links (the file, YouTube when authored). https-only, re-checked here.
+      const https = (v: unknown): string => (/^https:\/\//i.test(str(v).trim()) ? str(v).trim() : '');
+      const title = str(d.title);
+      const length = str(d.length);
+      const lede = str(d.lede);
+      const links = [
+        https(d.src) ? `[Watch the video](${https(d.src)})` : '',
+        https(d.youtubeUrl) ? `[Watch on YouTube](${https(d.youtubeUrl)})` : '',
+      ].filter(Boolean);
+      return [
+        head().trim(),
+        lede,
+        title ? `**${title}**${length ? ` (${length})` : ''}` : '',
+        str(d.description),
+        links.join(' · '),
+      ].filter(Boolean).join('\n\n');
     }
     case 'fields': {
       // ADR 0748 — flat named scalars (a protocol-authored section).

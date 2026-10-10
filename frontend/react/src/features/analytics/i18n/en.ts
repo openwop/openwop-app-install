@@ -53,6 +53,8 @@ export const messages = {
   // ADR 0569 — daily uniques (cookieless)
   figureVisitors: 'Daily uniques',
   visitorsDisclosure: 'Daily uniques are cookieless: a salted visitor hash that rotates every UTC day, so no cross-day identity exists and a multi-day figure is the sum of each day\u2019s uniques. Counting began {{since}}.',
+  // ANL-UX-23 / ADR 0857 — every figure is consent-filtered while consent management is on
+  consentFilterNote: 'Consent management is on: a visitor is counted only if their analytics consent allows it, so these figures exclude everyone who declined.',
   figurePageviews: 'Pageviews',
   figureConversions: 'Conversions',
 
@@ -117,4 +119,8 @@ export const messages = {
   navColRoute: 'Route',
   navColSource: 'Source',
   navColCount: 'Count',
+  // ADR 0768 D5 — the Pocket assistant; its agent reads only orgs the caller can read.
+  pocketTitle: 'Insights assistant',
+  pocketScope: 'analytics for organizations you can read',
+  pocketHint: 'Ask what changed, e.g. "why did conversions drop last week?"',
 } as const;

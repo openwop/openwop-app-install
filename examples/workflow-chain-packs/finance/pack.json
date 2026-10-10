@@ -1,16 +1,16 @@
 {
   "name": "core.openwop.workflows.finance",
-  "version": "1.1.6",
+  "version": "1.1.9",
   "kind": "workflow-chain",
   "description": "Real-work workflow pack (RFC 0013, ADR 0149) — the Finance cluster: Invoice → AP Processing, Month-End Close Checklist, and Expense/Budget Approval + anomaly detection. Reasons with core.ai.chatCompletion; recommends ERP actions (validation + posting) provider-agnostically via core.openwop.connectors.erp-action (NetSuite when connected); every posting/reimbursement runs through a threshold core.chat.approvalGate. All tenant-specific values are run parameters (replay-deterministic). Resolves on hosts shipping the http + ai + chat + kb + integration packs. Published under core.openwop.workflows.* (openwop-team key).",
   "author": "openwop",
   "license": "Apache-2.0",
-  "engines": { "openwop": ">=1.0.0" },
+  "engines": { "openwop": ">=1.0.0 <3.0.0" },
   "keywords": ["Finance"],
   "chains": [
     {
       "chainId": "finance.invoice-ap",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "label": "Invoice → AP Processing",
       "description": "Extract invoice line items, validate against the PO/ledger in the ERP (provider-agnostic), run a threshold-based approval, then post the invoice and send a payment notification.",
       "parameters": {
@@ -29,15 +29,15 @@
       "capabilities": ["side-effectful"],
       "dag": {
         "nodes": [
-          { "id": "extract", "typeId": "core.ai.chatCompletion", "name": "Extract line items", "position": { "x": 0, "y": 0 }, "config": { "systemPrompt": "Extract vendor, line items, amounts, and totals from the invoice. Invoice: {{params.invoiceText}}",
+          { "id": "extract", "typeId": "core.ai.chatCompletion@1.0.0", "name": "Extract line items", "position": { "x": 0, "y": 0 }, "config": { "systemPrompt": "Extract vendor, line items, amounts, and totals from the invoice. Invoice: {{params.invoiceText}}",
             "provider": "{{params.provider}}",
             "model": "{{params.model}}"
           }, "inputs": {} },
-          { "id": "validate", "typeId": "core.openwop.connectors.erp-action", "name": "Validate vs PO (ERP)", "position": { "x": 320, "y": 0 }, "config": { "action": "match-po" }, "inputs": {} },
-          { "id": "approve", "typeId": "core.chat.approvalGate", "name": "Threshold approval", "position": { "x": 640, "y": 0 }, "config": { "title": "Approve posting this invoice to the ERP", "artifactType": "erp.invoice", "actions": ["approve", "reject"] }, "inputs": {} },
-          { "id": "gate-reject", "typeId": "core.flow.noop", "name": "Rejected — nothing posted", "position": { "x": 960, "y": 160 }, "config": {}, "inputs": {} },
-          { "id": "post", "typeId": "core.openwop.connectors.erp-action", "name": "Post invoice (ERP)", "position": { "x": 960, "y": 0 }, "config": { "action": "post-bill", "baseUrl": "{{params.erpBaseUrl}}", "vendorId": "{{params.vendorId}}", "amount": "{{params.billAmount}}" }, "inputs": {} },
-          { "id": "notify", "typeId": "feature.notifications.nodes.notify", "name": "Payment notice", "position": { "x": 1240, "y": 0 }, "config": { "audience": "tenant" }, "inputs": { "title": "Invoice → AP Processing" } }
+          { "id": "validate", "typeId": "core.openwop.connectors.erp-action@1.0.0", "name": "Validate vs PO (ERP)", "position": { "x": 320, "y": 0 }, "config": { "action": "match-po" }, "inputs": {} },
+          { "id": "approve", "typeId": "core.chat.approvalGate@1.1.0", "name": "Threshold approval", "position": { "x": 640, "y": 0 }, "config": { "title": "Approve posting this invoice to the ERP", "artifactType": "erp.invoice", "actions": ["approve", "reject"] }, "inputs": {} },
+          { "id": "gate-reject", "typeId": "core.flow.noop@1.0.0", "name": "Rejected — nothing posted", "position": { "x": 960, "y": 160 }, "config": {}, "inputs": {} },
+          { "id": "post", "typeId": "core.openwop.connectors.erp-action@1.0.0", "name": "Post invoice (ERP)", "position": { "x": 960, "y": 0 }, "config": { "action": "post-bill", "baseUrl": "{{params.erpBaseUrl}}", "vendorId": "{{params.vendorId}}", "amount": "{{params.billAmount}}" }, "inputs": {} },
+          { "id": "notify", "typeId": "feature.notifications.nodes.notify@1.0.0", "name": "Payment notice", "position": { "x": 1240, "y": 0 }, "config": { "audience": "tenant" }, "inputs": { "title": "Invoice → AP Processing" } }
         ],
         "edges": [
           { "from": "extract", "to": "validate" },
@@ -51,7 +51,7 @@
     },
     {
       "chainId": "finance.month-end-close",
-      "version": "1.0.2",
+      "version": "1.0.4",
       "label": "Month-End Close Checklist",
       "description": "Orchestrate the close: build the task checklist, collect supporting docs from the knowledge base, draft variance notes, chase missing approvals, then produce a close-readiness report.",
       "parameters": {
@@ -70,22 +70,22 @@
       "capabilities": ["side-effectful"],
       "dag": {
         "nodes": [
-          { "id": "checklist", "typeId": "core.ai.chatCompletion", "name": "Close checklist", "position": { "x": 0, "y": 0 }, "config": { "systemPrompt": "Build the month-end close checklist for {{params.period}} across teams, with owners and dependencies.",
+          { "id": "checklist", "typeId": "core.ai.chatCompletion@1.0.0", "name": "Close checklist", "position": { "x": 0, "y": 0 }, "config": { "systemPrompt": "Build the month-end close checklist for {{params.period}} across teams, with owners and dependencies.",
             "provider": "{{params.provider}}",
             "model": "{{params.model}}"
           }, "inputs": {} },
-          { "id": "docs", "typeId": "feature.kb.nodes.rag", "name": "Collect supporting docs", "position": { "x": 0, "y": 140 }, "config": {}, "inputs": { "query": "{{params.query}}", "orgId": "{{params.orgId}}", "collectionId": "{{params.collectionId}}" } },
-          { "id": "variance", "typeId": "core.ai.chatCompletion", "name": "Draft variance notes", "position": { "x": 320, "y": 70 }, "config": { "systemPrompt": "Draft variance commentary for {{params.period}} from the checklist status and supporting docs; flag missing items.",
+          { "id": "docs", "typeId": "feature.kb.nodes.rag@1.0.0", "name": "Collect supporting docs", "position": { "x": 0, "y": 140 }, "config": {}, "inputs": { "query": "{{params.query}}", "orgId": "{{params.orgId}}", "collectionId": "{{params.collectionId}}" } },
+          { "id": "variance", "typeId": "core.ai.chatCompletion@1.0.0", "name": "Draft variance notes", "position": { "x": 320, "y": 70 }, "config": { "systemPrompt": "Draft variance commentary for {{params.period}} from the checklist status and supporting docs; flag missing items.",
             "provider": "{{params.provider}}",
             "model": "{{params.model}}"
           }, "inputs": {} },
-          { "id": "chase", "typeId": "core.chat.approvalGate", "name": "Chase approvals", "position": { "x": 640, "y": 70 }, "config": {}, "inputs": {} },
-          { "id": "report", "typeId": "feature.notifications.nodes.notify", "name": "Close-readiness report", "position": { "x": 960, "y": 70 }, "config": { "audience": "tenant" }, "inputs": { "title": "Month-End Close Checklist" } }
+          { "id": "chase", "typeId": "core.chat.approvalGate@1.1.0", "name": "Chase approvals", "position": { "x": 640, "y": 70 }, "config": {}, "inputs": {} },
+          { "id": "report", "typeId": "feature.notifications.nodes.notify@1.0.0", "name": "Close-readiness report", "position": { "x": 960, "y": 70 }, "config": { "audience": "tenant" }, "inputs": { "title": "Month-End Close Checklist" } }
         ],
         "edges": [
           { "from": "checklist", "to": "variance.checklist" },
           { "from": "docs", "to": "variance.docs" },
-          { "from": "variance", "to": "chase" },
+          { "from": "variance.content", "to": "chase.artifact" },
           { "from": "chase.decision", "to": "report.message" }
         ]
       },
@@ -93,7 +93,7 @@
     },
     {
       "chainId": "finance.expense-approval",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "label": "Expense / Budget Approval + Anomaly Detection",
       "description": "Check an expense against policy, run a duplicate/anomaly check, route through a threshold approval chain, then reimburse via the ERP and flag outliers.",
       "parameters": {
@@ -112,14 +112,14 @@
       "capabilities": ["side-effectful"],
       "dag": {
         "nodes": [
-          { "id": "check", "typeId": "core.ai.chatCompletion", "name": "Policy + anomaly check", "position": { "x": 0, "y": 0 }, "config": { "systemPrompt": "Assess the expense against policy and detect duplicates/anomalies. Expense: {{params.expenseContext}}",
+          { "id": "check", "typeId": "core.ai.chatCompletion@1.0.0", "name": "Policy + anomaly check", "position": { "x": 0, "y": 0 }, "config": { "systemPrompt": "Assess the expense against policy and detect duplicates/anomalies. Expense: {{params.expenseContext}}",
             "provider": "{{params.provider}}",
             "model": "{{params.model}}"
           }, "inputs": {} },
-          { "id": "approve", "typeId": "core.chat.approvalGate", "name": "Threshold approval", "position": { "x": 320, "y": 0 }, "config": { "title": "Approve reimbursing this expense via the ERP", "artifactType": "erp.expense", "actions": ["approve", "reject"] }, "inputs": {} },
-          { "id": "gate-reject", "typeId": "core.flow.noop", "name": "Rejected — no reimbursement", "position": { "x": 640, "y": 160 }, "config": {}, "inputs": {} },
-          { "id": "reimburse", "typeId": "core.openwop.connectors.erp-action", "name": "Reimburse (ERP)", "position": { "x": 640, "y": 0 }, "config": { "action": "create-expense-report", "baseUrl": "{{params.erpBaseUrl}}", "employeeId": "{{params.employeeId}}", "amount": "{{params.expenseAmount}}" }, "inputs": {} },
-          { "id": "flag", "typeId": "feature.notifications.nodes.notify", "name": "Flag outliers", "position": { "x": 960, "y": 0 }, "config": { "audience": "tenant" }, "inputs": { "title": "Expense / Budget Approval + Anomaly Detection" } }
+          { "id": "approve", "typeId": "core.chat.approvalGate@1.1.0", "name": "Threshold approval", "position": { "x": 320, "y": 0 }, "config": { "title": "Approve reimbursing this expense via the ERP", "artifactType": "erp.expense", "actions": ["approve", "reject"] }, "inputs": {} },
+          { "id": "gate-reject", "typeId": "core.flow.noop@1.0.0", "name": "Rejected — no reimbursement", "position": { "x": 640, "y": 160 }, "config": {}, "inputs": {} },
+          { "id": "reimburse", "typeId": "core.openwop.connectors.erp-action@1.0.0", "name": "Reimburse (ERP)", "position": { "x": 640, "y": 0 }, "config": { "action": "create-expense-report", "baseUrl": "{{params.erpBaseUrl}}", "employeeId": "{{params.employeeId}}", "amount": "{{params.expenseAmount}}" }, "inputs": {} },
+          { "id": "flag", "typeId": "feature.notifications.nodes.notify@1.0.0", "name": "Flag outliers", "position": { "x": 960, "y": 0 }, "config": { "audience": "tenant" }, "inputs": { "title": "Expense / Budget Approval + Anomaly Detection" } }
         ],
         "edges": [
           { "from": "check", "to": "approve.artifact" },

@@ -1,7 +1,7 @@
 /**
  * Prioritization Analyst chat tools (CFP-1 / ADR 0058 §chat-drivability, the ADR
  * 0308 D2 deliverable-tool seam) — the REAL conversational tools the
- * `feature.priority-matrix.agents.prioritization-analyst` pack allowlists.
+ * `vendor.openwop-app.priority-matrix.agents.prioritization-analyst` pack allowlists.
  *
  * The founding defect (CHAT-FIRST-PORT-AUDIT #1): the pack allowlisted
  * `openwop:feature.priority-matrix.nodes.*` — node typeIds NO host registrant
@@ -36,16 +36,15 @@ import { releaseIgnition, claimIgnition, recordIgnitionRun, ignitionKey } from '
 // PMX-14 (ADR 0590) — the shared kit helpers replace this module's former
 // byte-identical local re-declarations (toolError/ok/str).
 import { resolveFeatureToggle, toolOk as ok, toolError, str, type ToolResult } from '../../host/agentToolKit.js';
-// PMX-14 — the routes' OWN predicate (the CRM `orgScopeGranted` pattern): one
-// predicate, imported, so route and tool can no longer drift independently.
-import { orgScopeGranted } from './routes.js';
+// PMX-14 → ADR 0842 D1 — the ONE list-access module the routes and the workflow surface
+// also import, so the three lanes cannot drift independently.
+import { orgScopeGranted, listProjectReadable as projectReadableFor, listAccessLevel } from './listAccess.js';
 import type { Scope } from '../../host/accessControlService.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import {
   listLists, getList, listRankedIdeas, submitIdea, setIdeaScore, getScheduleStatus, createPlanningSession,
 } from './priorityMatrixService.js';
 import type { PriorityList } from './types.js';
-import { resolveSubjectAccess, levelSatisfies } from '../../host/subjectAccess.js';
 
 export const PM_LIST_LISTS_TOOL_ID = 'openwop:priority-matrix.list-lists';
 export const PM_RANKED_IDEAS_TOOL_ID = 'openwop:priority-matrix.list-ranked-ideas';
@@ -75,23 +74,23 @@ async function loadListForWrite(scope: BundleScope, listId: string | undefined):
   if (!actingUserId) return toolError('acting_user_required', 'Ideas can only be captured or scored from a human-initiated turn.');
   if (!listId) return toolError('validation_error', '`listId` is required.');
   const list = await getList(scope.tenantId, listId);
-  if (!list || !(await hasOrgScope(scope.tenantId, actingUserId, list.orgId, 'workspace:read'))) {
+  // ADR 0842 D4 — the route's rule, including the project gate the route applies to
+  // WRITES too (it used to be applied only on the read tools, so a project the seam
+  // answers 'none' for was refused by the route and written through by the tool).
+  const level = list ? await listAccessLevel(scope.tenantId, list, actingUserId) : 'none';
+  if (!list || level === 'none') {
     return toolError('not_found', `Priority list '${listId}' not found in this workspace.`);
   }
-  if (!(await hasOrgScope(scope.tenantId, actingUserId, list.orgId, 'workspace:write'))) {
+  if (level !== 'write') {
     return toolError('forbidden_scope', 'The user does not have write access to that list\'s organization.');
   }
   return { list, actingUserId };
 }
 
-/** ADR 0610 D3′ / CPC-14 — a project-bound list is membership-scoped; the org gate
- *  is not sufficient. Consult the ONE subjectAccess seam (the SAME predicate the
- *  REST `loadListScoped` uses — ADR 0308/0610 D2: the routes and the agent tools
- *  must not drift). Null ⇒ not membership-scoped ⇒ org gate stands. */
+/** ADR 0610 D3′ / CPC-14 — a project-bound list is membership-scoped (ADR 0842 D1: the
+ *  shared `listAccess` rule, the SAME one the REST `loadListScoped` uses). */
 async function listProjectReadable(scope: BundleScope, list: PriorityList): Promise<boolean> {
-  if (!list.projectId) return true;
-  const level = await resolveSubjectAccess(scope.tenantId, { kind: 'project', id: list.projectId }, scope.actingUserId);
-  return level === null || levelSatisfies(level, 'read');
+  return projectReadableFor(scope.tenantId, list, scope.actingUserId);
 }
 
 /** A list loaded for a READ tool: fail EMPTY (null) without an acting user or on
@@ -108,6 +107,7 @@ export function registerPriorityMatrixAgentTools(): void {
   // ── READ: the workspace's readable priority lists (with their criteria). ──
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     // ADR 0604 (TOCC-2) — closed world: an elided enum/id list here makes the
     // model author against a catalog that is not this host's.
     schemaCarrying: true,
@@ -144,6 +144,7 @@ export function registerPriorityMatrixAgentTools(): void {
   // ── READ: a list's ideas ranked by computed weighted priority. ───────────
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     // ADR 0604 (TOCC-2) — closed world: an elided enum/id list here makes the
     // model author against a catalog that is not this host's.
     schemaCarrying: true,
@@ -195,6 +196,7 @@ export function registerPriorityMatrixAgentTools(): void {
   // ── READ: per-idea schedule status + a list rollup (ahead/behind). ───────
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: PM_SCHEDULE_STATUS_TOOL_ID,
       description:
@@ -219,6 +221,7 @@ export function registerPriorityMatrixAgentTools(): void {
   // ── ACTION: capture a new idea into a list (lands in the New status). ────
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: PM_SUBMIT_IDEA_TOOL_ID,
       description:
@@ -278,12 +281,14 @@ export function registerPriorityMatrixAgentTools(): void {
   // ── ACTION: score an idea against the list's weighted criteria. ──────────
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: PM_SCORE_IDEA_TOOL_ID,
       description:
         'Score one idea against the list\'s weighted criteria — pass `scores` as a map of criterionId → 1..10 (get the '
-        + 'criterion ids from list-lists). In a multi-voter list this records YOUR cast vote. Pass `listId`, `cardId`, '
-        + 'and `scores`. Returns the new computed priority.',
+        + 'criterion ids from list-lists). The map is MERGED into the idea\'s existing scores: criteria you name are set, '
+        + 'criteria you omit keep their current value (this tool cannot clear a score). In a multi-voter list this '
+        + 'records YOUR cast vote. Pass `listId`, `cardId`, and `scores`. Returns the new computed priority.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -339,6 +344,7 @@ export function registerPriorityMatrixAgentTools(): void {
   // ── ACTION: generate a planning-session agenda from a list's top ideas. ──
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: PM_GENERATE_AGENDA_TOOL_ID,
       description:

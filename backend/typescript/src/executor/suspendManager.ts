@@ -58,8 +58,16 @@ export function getSuspendManager() {
        *  ruling #2 makes a fork inherit the original deadline. The token is still
        *  fresh; its expiry is capped at that inherited deadline. */
       createdAt?: string;
+      /** Insert the row ALREADY RESOLVED (a replay fork's DERIVED gate,
+       *  `forkReplayResolutions.ts`). It is never open, so no human path can
+       *  decide it, and — needing no human — it raises no notification and is
+       *  not counted as a created-then-waiting interrupt. */
+      resolved?: { value: unknown; at: string };
+      /** A caller-chosen id (the derived row's is deterministic, so a
+       *  redelivery finds it — `getInterruptByNode` sees open rows only). */
+      interruptId?: string;
     }): Promise<InterruptRecord> {
-      const interruptId = randomBytes(16).toString('hex');
+      const interruptId = input.interruptId ?? randomBytes(16).toString('hex');
       // `spec/v2/core/identity.md` §4 (RFC 0170 §E.1) — `ow2.<alg>.<kid>.
       // <payload>.<mac>`. The `payload` is the same 256-bit random credential
       // this host has always minted (the random value IS the credential —
@@ -86,8 +94,10 @@ export function getSuspendManager() {
         createdAt: new Date(createdMs).toISOString(),
         // RFC 0093 §B.1 — every signed token carries an expiry.
         expiresAt: mintExpiresAt(now, data, createdMs),
+        ...(input.resolved ? { resolvedAt: input.resolved.at, resolvedValue: input.resolved.value } : {}),
       };
       await b.insertInterrupt(record);
+      if (input.resolved) return record;
       // ADR 0556 P1 — the denominator for the age histogram below. Emitted
       // AFTER the row is durable: an interrupt that failed to persist never
       // existed, and counting it would make "created minus resolved" report a

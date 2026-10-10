@@ -18,7 +18,7 @@ import type { Express, Request, Response } from 'express';
 import { SEAM_ROWS } from '../host/effectSeamManifest.js';
 import { buildCommit } from '../host/buildInfo.js';
 
-export const EFFECT_SEAMS_PATH = '/v1/host/effect-seams';
+export const EFFECT_SEAMS_PATH = '/host/effect-seams';
 
 /**
  * The address the `replay.effectSeamsManifest` facet must carry.

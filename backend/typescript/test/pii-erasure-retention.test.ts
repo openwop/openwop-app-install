@@ -13,25 +13,33 @@
  * strategy.record and insights.talentSnapshot are DELIBERATE non-registrations
  * (documented stances in their services) — no tests assert their absence beyond the
  * fan-out not touching them here.
+ *
+ * INCIDENT WITNESS (WF-TWIN-3, `host/subjectErasure.ts` eraseSubjectUnderRequest):
+ * the tenant-guard case below is what caught a candidate fix that also erased in
+ * the subject's HOME tenant — a cross-tenant destructive escalation driven by a
+ * caller-supplied key. Sabotage-witnessed (/grade-tests wave 9, `w9g4-pr-*`):
+ * dropping `userEraser`'s tenant check, its scrub, the ledger purger's
+ * classification guard, or `purgeRowsByAge`'s tenant / strict-cutoff filter each
+ * turns its case red.
+ *
+ * COST: every subject here registers at MODULE LOAD (`usersService`
+ * `registerSubjectEraser(userEraser)` + the email resolver; `ledgerStore`
+ * `registerRetentionPurger`) and every store is a DurableCollection, so the file
+ * needs a storage handle, not an app. It used to boot `createApp()` + listen on a
+ * port and never make an HTTP call.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { Server } from 'node:http';
-import { createApp } from '../src/index.js';
+import { beforeAll, describe, expect, it } from 'vitest';
+import { openStorage } from '../src/storage/index.js';
+import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { createUser, getUser } from '../src/features/users/usersService.js';
 import { deleteSubject } from '../src/features/consent/consentService.js';
 import { saveLedger, getLedger } from '../src/features/intent-ledger/ledgerStore.js';
 import { purgeRetained } from '../src/host/retentionPurger.js';
 import type { IntentLedger } from '../src/features/intent-ledger/types.js';
 
-let server: Server;
-
 beforeAll(async () => {
-  process.env.OPENWOP_STORAGE_DSN = 'memory://';
-  process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
-  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => res()); });
+  initHostExtPersistence(await openStorage('memory://'));
 });
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 const iso = (daysAgo: number) => new Date(Date.now() - daysAgo * 86_400_000).toISOString();
 
@@ -86,7 +94,7 @@ describe('intentLedger.entry retention purger', () => {
     const results = await purgeRetained('t-ret', 'confidential-pii', iso(90));
     const mine = results.find((r) => r.feature === 'intent-ledger');
     expect(mine?.ok).toBe(true);
-    expect(mine?.deleted).toBeGreaterThanOrEqual(1);
+    expect(mine?.deleted).toBe(1); // exactly conv-old — conv-new and the bystander stay
 
     expect(await getLedger('t-ret', 'conv-old')).toBeNull(); // aged out
     expect(await getLedger('t-ret', 'conv-new')).not.toBeNull(); // retained

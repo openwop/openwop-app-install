@@ -31,7 +31,7 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-const SEAM = '/v1/host/sample/ai/call-transcriber';
+const SEAM = '/host/sample/ai/call-transcriber';
 const post = (body: unknown) => fetch(`${BASE}${SEAM}`, { method: 'POST', headers: H, body: JSON.stringify(body) });
 
 describe('RFC 0055 media-asset-url-tenant-scoped — callTranscriber tenant binding', () => {
@@ -49,7 +49,9 @@ describe('RFC 0055 media-asset-url-tenant-scoped — callTranscriber tenant bind
     // FLAT, so the code is `error` itself.
     const body = await res.json() as { finalText?: unknown; events?: unknown };
     assertFlatErrorEnvelope(body, 'foreign-tenant transcriber refusal');
-    expect(errorCodeOf(body)).toBe('invalid_request');
+    // ADR 0812 P3c-0 — the sample seam is a major-2 path: the host code travels
+    // vendor-namespaced (`v2ErrorCode`). Same refusal, same 400.
+    expect(errorCodeOf(body)).toBe('openwop-app.invalid_request');
     // Crucially: NO transcript / events leaked for the foreign asset.
     expect(body.finalText).toBeUndefined();
     expect(body.events).toBeUndefined();

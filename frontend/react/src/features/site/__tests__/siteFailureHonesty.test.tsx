@@ -39,6 +39,9 @@ vi.mock('../blogClient.js', async (importOriginal) => ({
   fetchBlog: () => fetchBlog(),
   blogFeedUrl: () => 'https://example.test/feed.xml',
 }));
+// ADR 0860 — the consent banner and posture read are covered by visitorConsent.test.tsx.
+vi.mock('../visitorConsent.js', () => ({ consentTokenFor: () => undefined, loadPosture: async () => null }));
+vi.mock('../VisitorConsentBanner.js', () => ({ VisitorConsentBanner: () => null }));
 vi.mock('../visitorBeacon.js', () => ({
   getVisitorKey: () => null,
   sendExperimentPageview: () => {},
@@ -76,7 +79,9 @@ const LARGE_CARD_CATALOG: Section[] = Array.from({ length: 4 }, (_, index) => ({
  * assertions below went VACUOUS, passing for any render because nothing emitted the
  * old string. Deriving it keeps both halves honest across future copy changes.
  */
-const DEFAULT_HERO = en.heroHeading;
+// The heading may carry *emphasis* markers (CMS heading syntax); the page
+// renders them as <em>, so match the accessible name without them.
+const DEFAULT_HERO = en.heroHeading.replace(/\*/g, '');
 
 function LocationProbe(): JSX.Element {
   const loc = useLocation();
@@ -96,7 +101,7 @@ describe('FrontPage surface="slug" — an honest deep link (R2-G1)', () => {
     render(<MemoryRouter><FrontPage orgId="org-1" slug="nope" surface="slug" /></MemoryRouter>);
     await screen.findByRole('heading', { name: 'Page not found' });
     expect(screen.getByRole('link', { name: /home page/i })).toBeTruthy();
-    expect(screen.queryByText(DEFAULT_HERO)).toBeNull();
+    expect(screen.queryByRole('heading', { name: DEFAULT_HERO })).toBeNull();
   });
 
   it('renders a designed error state with a WORKING retry — never "not found"', async () => {
@@ -104,7 +109,7 @@ describe('FrontPage surface="slug" — an honest deep link (R2-G1)', () => {
     render(<MemoryRouter><FrontPage orgId="org-1" slug="real-page" surface="slug" /></MemoryRouter>);
     await screen.findByRole('heading', { name: /couldn’t load this page/i });
     expect(screen.queryByText('Page not found')).toBeNull();
-    expect(screen.queryByText(DEFAULT_HERO)).toBeNull();
+    expect(screen.queryByRole('heading', { name: DEFAULT_HERO })).toBeNull();
 
     pageResult.mockResolvedValueOnce({ status: 'ok', page: page('real-page') });
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
@@ -127,7 +132,7 @@ describe('FrontPage surface="slug" — an honest deep link (R2-G1)', () => {
     pageResult.mockResolvedValue({ status: 'ok', page: page('empty-page', []) });
     render(<MemoryRouter><FrontPage orgId="org-1" slug="empty-page" surface="slug" /></MemoryRouter>);
     await screen.findByRole('heading', { name: 'Title of empty-page' });
-    expect(screen.queryByText(DEFAULT_HERO)).toBeNull();
+    expect(screen.queryByRole('heading', { name: DEFAULT_HERO })).toBeNull();
   });
 });
 
@@ -143,33 +148,35 @@ describe('FrontPage surface="root" — ADR 0027 never blank (the positive case)'
   it('falls back to the default page when nothing is published', async () => {
     pageResult.mockResolvedValue({ status: 'notFound' });
     render(<MemoryRouter><FrontPage orgId="org-1" slug="home" surface="root" /></MemoryRouter>);
-    await screen.findByText(DEFAULT_HERO);
+    await screen.findByRole('heading', { name: DEFAULT_HERO });
     expect(screen.queryByText('Page not found')).toBeNull();
   });
 
   it('falls back to the default page when the read FAILS (root is never an error page)', async () => {
     pageResult.mockResolvedValue({ status: 'error' });
     render(<MemoryRouter><FrontPage orgId="org-1" slug="home" surface="root" /></MemoryRouter>);
-    await screen.findByText(DEFAULT_HERO);
+    await screen.findByRole('heading', { name: DEFAULT_HERO });
     expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
   });
 
-  it('demo-gates the openwop.dev CTA and the paper link on the fallback page (SITE-R2-5 / ADR 0196)', async () => {
+  it('demo-gates the showcase content on the fallback page: openwop.dev CTA, intro film, evidence (SITE-R2-5 / ADR 0196, ADR 0762)', async () => {
     // Asserted by DESTINATION, not label: the gate is about where a white-label
-    // visitor can be sent, and a copy edit must not silently void this test.
-    const showcaseLinks = (): Element[] => [...document.querySelectorAll('a[href^="https://openwop.dev"], a[href*="zenodo"]')];
+    // visitor can be sent (or what it loads from openwop.dev), and a copy edit
+    // must not silently void this test.
+    const showcase = (): Element[] => [...document.querySelectorAll('a[href^="https://openwop.dev"], video[src^="https://openwop.dev"], .fp-stats')];
     pageResult.mockResolvedValue({ status: 'notFound' });
     demoMode = false;
     const first = render(<MemoryRouter><FrontPage orgId="org-1" slug="home" surface="root" /></MemoryRouter>);
-    await screen.findByText(DEFAULT_HERO);
-    expect(showcaseLinks()).toHaveLength(0);
+    await screen.findByRole('heading', { name: DEFAULT_HERO });
+    expect(showcase()).toHaveLength(0);
     first.unmount();
 
     demoMode = true;
-    render(<MemoryRouter><FrontPage orgId="org-1" slug="home" surface="root" /></MemoryRouter>);
-    await screen.findByText(DEFAULT_HERO);
+    const { container } = render(<MemoryRouter><FrontPage orgId="org-1" slug="home" surface="root" /></MemoryRouter>);
+    await screen.findByRole('heading', { name: DEFAULT_HERO });
     expect(screen.getByRole('link', { name: /read the protocol/i }).getAttribute('href')).toBe('https://openwop.dev');
-    expect(screen.getByRole('link', { name: /the paper/i }).getAttribute('href')).toContain('zenodo');
+    expect(container.querySelector('video')?.getAttribute('src')).toMatch(/^https:\/\/openwop\.dev\//);
+    expect(container.querySelector('.fp-stats')).toBeTruthy();
   });
 });
 

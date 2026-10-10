@@ -210,6 +210,14 @@ to the last owner.
    and it duplicates what the epoch gives for the cases we have (all
    revocations here are per-USER, not per-session). Revisit only if a
    per-device "sign out this device" surface is asked for.
+
+   > **CORRECTED 2026-10-05 (ADR 0833 D3).** "All revocations here are
+   > per-USER" missed the commonest one, which is logout. A copied cookie kept
+   > working after "Sign out", because logout only cleared this browser's
+   > cookie. ADR 0833 revokes per session FAMILY. It keeps this alternative's
+   > objection to a registry: there is no write per mint and no extra read per
+   > request. The family list rides on the user row the epoch check already
+   > reads.
 3. **OIDC back-channel logout / SAML Single Logout.** Out of scope: those end
    the IdP session, not this host's cookie; the IdP-driven SCIM deactivation is
    already the trigger we act on. Compose later, do not substitute.
@@ -323,3 +331,17 @@ to the last owner.
   `resolveSessionSubjectByPersonalTenant` (pointer → row, else the
   deterministic principal id; never `getUserByPrincipal`, whose legacy fallback
   is a full scan on the request path).
+
+> **Correction (2026-10-05) — the liveness check failed OPEN for a subject-less
+> user-tier cookie.** `assertSessionSubjectLive` returned `undefined` (no check)
+> for `tier: 'user'` with no `userId`. The unbound lane needs a `subject`, and the
+> code skipped it rather than refusing when the subject was absent. No mint site
+> produces that shape: `mintUserSessionCookieValue` carries a `userId`;
+> `issueSubjectSession`, the OIDC upgrade and break-glass carry a `subject`. So only
+> a forged cookie (one needing `OPENWOP_SESSION_SECRET`) reached it. It then passed
+> every erased / disabled / epoch check, and `GET /users/me` even upserted a durable
+> user row for its `session:<sid>` principal. Found while verifying ADR 0814 live: a
+> hand-signed session for the owner's tenant, made with the owner's go-ahead, was
+> accepted with no row lookup. The fix fails closed (`401 session_revoked`, cookie
+> cleared). `auth-session-epoch.test.ts` case (xiii) pins it, and sabotage-proves
+> it: with the fix reverted, that case is 200 with a created row.

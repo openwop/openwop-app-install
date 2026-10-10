@@ -71,15 +71,15 @@ function client(): Client {
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b) };
 }
 
-const NB = '/v1/host/openwop-app/notebooks';
+const NB = '/host/openwop-app/notebooks';
 
 async function ownerWithNotebook(who: string): Promise<{ c: Client; tenantId: string; notebookId: string }> {
   const c = client();
-  const login = await c.post('/v1/host/openwop-app/test/login', { email: `${who}-${Date.now()}-${n++}@acme.test` });
+  const login = await c.post('/host/openwop-app/test/login', { email: `${who}-${Date.now()}-${n++}@acme.test` });
   expect(login.status, JSON.stringify(login.body)).toBe(201);
   const tenantId = login.body.tenantId ?? login.body.user?.tenantId;
   expect(typeof tenantId, JSON.stringify(login.body)).toBe('string');
-  const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   const nb = await c.post(NB, { name: `Trust ${n}`, orgId: org.body.orgId });
   expect(nb.status, JSON.stringify(nb.body)).toBe(201);
   return { c, tenantId, notebookId: nb.body.notebook.id };

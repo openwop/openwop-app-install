@@ -99,6 +99,10 @@ export interface NodeCatalogEntry {
    *  manifest. Absent for host-local nodes. Used by the palette to render
    *  collapsible pack sub-sections. */
   packName?: string;
+  /** The version of this node type INSTALLED on the connected host (from the
+   *  server catalog). Absent for static-only entries the host has not reported.
+   *  ADR 0766 — the chain-pack export pins every reference to it. */
+  version?: string;
   /** Host surfaces the node's runtime needs (e.g. `host.kvStorage`).
    *  Absent or empty for pure data/control/flow nodes. */
   requiresHostSurfaces?: readonly string[];
@@ -211,6 +215,25 @@ export const NODE_CATALOG: readonly NodeCatalogEntry[] = [
     ],
   },
   {
+    // ADR 0785 P5/D7 — an IN-TREE node (no pack manifest: a pack would ship an
+    // index.mjs that could overwrite the registered executor). Without this row the
+    // palette showed it as a bare "Task" with no form.
+    kind: 'claude-code.task',
+    typeId: 'claude-code.task',
+    label: 'Ask Claude Code',
+    description: 'Hands a coding task to your own Claude Code, on a device you have allowed to take workflow tasks, and waits for its result. It works in the folder the companion was started in and may change files there.',
+    category: 'ai',
+    badge: 'CC',
+    accent: 'var(--clay)',
+    inputs: [{ name: 'in', type: 'any' }],
+    outputs: [{ name: 'out', type: 'any' }],
+    configFields: [
+      { key: 'prompt', label: 'Task', kind: 'text', defaultValue: '', help: 'What Claude Code should do, in plain language. An upstream value named prompt overrides it.' },
+      { key: 'maxTurns', label: 'Max turns', kind: 'number', defaultValue: 30, help: 'Upper bound on Claude Code\'s steps for this task (max 100).' },
+      { key: 'deadlineMinutes', label: 'Deadline (minutes)', kind: 'number', defaultValue: 30, help: 'Stops waiting after this long (max 120). A task cut off mid-way ends as maybe_executed and is never retried automatically.' },
+    ],
+  },
+  {
     kind: 'ui.walkthrough.checkpoint',
     typeId: 'ui.walkthrough.checkpoint',
     label: 'Walkthrough checkpoint',
@@ -313,7 +336,7 @@ export const NODE_CATALOG: readonly NodeCatalogEntry[] = [
         kind: 'number',
         defaultValue: 1,
         min: 1,
-        help: '1 = single sign-off. >1 = quorum: that many distinct eligible approvers must approve (ADR 0070).',
+        help: '1 = single sign-off. >1 = quorum: that many distinct eligible approvers must approve.',
       },
       {
         key: 'rejectionPolicy',

@@ -1,9 +1,13 @@
 /**
  * Recurring / scheduled agent chats (ADR 0125, backlog B16). Binds an agent +
  * cadence + prompt to a conversation; the recurring tick enqueues a chat-turn
- * through the EXISTING scheduler daemon (ADR 0025 / RFC 0052). A
- * `scheduled-agent-chats` toggle, off by default, bucketed per TENANT (a B2B
- * automation surface).
+ * through the EXISTING scheduler daemon (ADR 0025 / RFC 0052).
+ *
+ * Toggle: `scheduled-agent-chats`, default ON, per TENANT. ADR 0820 §8.2
+ * restored it (it had graduated to always-on) so the feature can be sold in the
+ * Agents bundle. It gates the routes and both agent tools, and every scheduler
+ * job this feature registers carries `featureId`, so the daemon skips its fires
+ * while the feature is refused (ADR 0599 §6; non-destructive — re-enabling resumes).
  *
  * @see docs/adr/0125-recurring-scheduled-agent-chats.md
  */
@@ -16,6 +20,7 @@ import { onRosterMemberDeleted } from '../../host/rosterLifecycle.js';
 import { registerScheduledFollowupTool, registerScheduledRecurringTool } from './agentTools.js';
 import { registerAgentTurnFallback } from '../../host/heartbeatService.js';
 import { SCHEDULED_CHAT_TURN_WORKFLOW_ID, SCHEDULED_CHAT_CREDENTIAL_REF } from './scheduledChatTurnWorkflow.js';
+import { SCHEDULED_AGENT_CHATS_TOGGLE } from './scheduledChatService.js';
 import { createLogger } from '../../observability/logger.js';
 
 const log = createLogger('features.scheduled-agent-chats');
@@ -52,5 +57,14 @@ export const scheduledAgentChatsFeature: BackendFeature = {
         .catch((err) => log.warn('scheduled_post_cleanup_failed', { channelId: evt.channelId, agentId: evt.agentId, error: String(err) }));
     }).catch((err) => log.warn('channel_membership_subscribe_failed', { error: String(err) }));
   },
-  // No toggleDefault → always-on (ADR 0010/0024 graduation; toggle removed, gates open).
+  toggleDefault: {
+    id: SCHEDULED_AGENT_CHATS_TOGGLE,
+    label: 'Scheduled agent chats',
+    description:
+      'Recurring and one-off agent chats on a schedule — an agent posts into a conversation or channel on its cadence, and agents can schedule follow-ups from chat. Turn OFF to pause every schedule (they resume when turned back ON).',
+    category: 'Agents',
+    status: 'on',
+    bucketUnit: 'tenant',
+    salt: 'scheduled-agent-chats',
+  },
 };

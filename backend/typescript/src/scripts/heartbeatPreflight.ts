@@ -41,7 +41,7 @@ import {
   resolveHeartbeatAdminConfig,
   agentTurnFallback,
 } from '../host/heartbeatService.js';
-import { listBoardsForSubject, listCards } from '../host/kanbanService.js';
+import { listBoardsForSubject, listCards, todoColumnOf, workingColumnOf } from '../host/kanbanService.js';
 import { resolveConnectionReadiness } from '../host/connectionReadiness.js';
 import { resolveAgentPolicy } from '../host/agentPolicyResolver.js';
 import { getAgentProfile } from '../host/agentProfileService.js';
@@ -105,9 +105,13 @@ async function main(): Promise<void> {
       const autonomy = autonomyOf(entry);
       const boards = await listBoardsForSubject(tenantId, { kind: 'agent', id: entry.rosterId });
       for (const board of boards) {
-        const todo = board.columns.find((c) => c.id === 'todo' || c.name.toLowerCase() === 'to do');
-        if (!todo) continue;
-        const cards = (await listCards(board.id)).filter((c) => c.columnId === todo.id);
+        // ADR 0774 — mirror the pick exactly: the lane resolvers, the refusal
+        // of a board with no in-progress lane, and WorkItem cards left to the
+        // ADR 0738 dispatcher. The arm-the-loop report must not count cards
+        // the loop will refuse (grade-code KSCD-7).
+        const todo = todoColumnOf(board);
+        if (!todo || !workingColumnOf(board)) continue;
+        const cards = (await listCards(board.id)).filter((c) => c.columnId === todo.id && !c.workItemId);
         for (const card of cards) {
           // Mirror runHeartbeatOnce: armed = card/column workflow; else the D2 bare
           // fallback (ALWAYS proposes — safe). Skip unarmed cards when no fallback.

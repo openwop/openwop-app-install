@@ -58,6 +58,8 @@ describe('channel agent dispatch (FU-5)', () => {
     });
     // System-fired: no acting user is threaded onto the run.
     expect('actingUserId' in input).toBe(false);
+    // ADR 0832 D3 — the poster bounds the turn's orgs as a NARROWING subject only.
+    expect((input as { orgScopeSubject?: unknown }).orgScopeSubject).toBe('user:poster');
   });
 
   it('does NOT dispatch for a system/agent path (no authorUserId) — the no-loop guard', async () => {

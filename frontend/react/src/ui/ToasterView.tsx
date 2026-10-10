@@ -30,6 +30,11 @@ export function ToastCard({ item, onDismiss }: { item: ToastItem; onDismiss: (e:
     <div className={`toast alert ${item.variant}`}>
       <span className="toast-icon" aria-hidden><VariantIcon variant={item.variant} /></span>
       <span className="toast-message">{item.message}</span>
+      {item.action ? (
+        <Button variant="secondary" size="sm" className="toast-action" onClick={() => { item.action?.run(); dismiss(item.id); }}>
+          {item.action.label}
+        </Button>
+      ) : null}
       <button type="button" className="toast-close" aria-label={i18n.t('ui:toastDismiss')} onClick={onDismiss}>
         <XIcon size={13} />
       </button>

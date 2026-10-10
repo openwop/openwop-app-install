@@ -45,7 +45,7 @@ import { providerIdempotencyKey } from '../host/providerIdempotencyKey.js';
 import { runWithEffectContext } from '../host/runEffectContext.js';
 import { sendError } from '../middleware/errorEnvelope.js';
 
-export const EFFECT_TRANSPORT_RETRY_PATH = '/v1/host/sample/test/idempotency/effect-retry';
+export const EFFECT_TRANSPORT_RETRY_PATH = '/host/sample/test/idempotency/effect-retry';
 
 /** Attempts the fixture must observe: the original plus one forced retry. */
 const TRANSPORT_ATTEMPTS = 2;
@@ -166,6 +166,10 @@ export function registerEffectTransportRetrySeam(app: Express, deps: { storage: 
           { runId, nodeId, attempt, invocationId },
           // Content-free of provider payloads, per the projection's contract.
           { seam: 'http.outbound', attempt, status: observed[attempt - 1] },
+          // The key this attempt put on the wire — the SAME `key` both
+          // requests carried. The ledger reports it as `providerKey`, and the
+          // suite (2.42.5+) checks it against what its own receiver recorded.
+          { presentedKey: key },
         );
       }
 

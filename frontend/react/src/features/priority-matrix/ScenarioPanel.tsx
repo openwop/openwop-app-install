@@ -24,15 +24,20 @@ import {
 } from './priorityMatrixClient.js';
 import type { StrategyRefLite } from '../strategy/StrategyAlignment.js';
 
-export function ScenarioPanel({ listId, sessionId, strategyRefs, onError }: {
+export function ScenarioPanel({ listId, sessionId, strategyRefs, onError, readOnly = false }: {
   listId: string;
   sessionId: string;
   /** cardId → aligned strategies (for the FE-composition coverage overlay). */
   strategyRefs: Map<string, StrategyRefLite[]>;
   onError: (m: string) => void;
+  /** PM4UX-1 (ADR 0842 D9) — readers compare scenarios; they are offered no write. */
+  readOnly?: boolean;
 }): JSX.Element {
   const { t } = useTranslation('priority-matrix');
   const [scenarios, setScenarios] = useState<ResolvedScenario[] | null>(null);
+  /** PM4UX-5 — a FAILED load is its own state: it used to leave `scenarios` null, so the
+   *  panel said "Loading…" forever while the error landed in a banner far above. */
+  const [loadFailed, setLoadFailed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [name, setName] = useState('');
   const [topN, setTopN] = useState('5');
@@ -49,9 +54,13 @@ export function ScenarioPanel({ listId, sessionId, strategyRefs, onError }: {
   useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
 
   const refresh = useCallback(async () => {
-    try { const rows = await listScenarios(listId, sessionId); if (mountedRef.current) setScenarios(rows); }
-    catch (e) { if (mountedRef.current) onError(e instanceof Error ? e.message : t('scenarioLoadFailed')); }
-  }, [listId, sessionId, onError, t]);
+    try { setLoadFailed(false); const rows = await listScenarios(listId, sessionId); if (mountedRef.current) setScenarios(rows); }
+    catch (e) {
+      if (!mountedRef.current) return;
+      console.warn('[priority-matrix] scenario load failed:', e instanceof Error ? e.message : e);
+      setLoadFailed(true);
+    }
+  }, [listId, sessionId]);
   useEffect(() => { void refresh(); }, [refresh]);
   // A session switch invalidates the compare selectors (they hold the old
   // session's scenario ids) and any shown result (FE#4).
@@ -118,15 +127,21 @@ export function ScenarioPanel({ listId, sessionId, strategyRefs, onError }: {
         <p className="muted u-fs-12 u-m-0">{t('scenariosLede')}</p>
       </div>
 
-      <div className="surface-form surface-card u-py-2">
+      {readOnly ? null : <div className="surface-form surface-card u-py-2">
         <TextField label={t('scenarioName')} value={name} onChange={(e) => setName(e.target.value)} className="u-flex-1" />
         <TextField label={t('scenarioTopN')} value={topN} onChange={(e) => setTopN(e.target.value)} inputMode="numeric" />
         <TextField label={t('scenarioMaxItems')} value={maxItems} onChange={(e) => setMaxItems(e.target.value)} inputMode="numeric" />
         <TextField label={t('scenarioMaxBudget')} value={maxBudget} onChange={(e) => setMaxBudget(e.target.value)} inputMode="decimal" />
         <Button variant="primary" size="sm" disabled={busy || !name.trim()} onClick={() => void add()}><PlusIcon size={13} /> {t('scenarioAdd')}</Button>
-      </div>
+      </div>}
 
-      {scenarios === null ? (
+      {scenarios !== null && loadFailed ? (
+        // A REFRESH failed after a good load: the list below may be stale — say so.
+        <Notice variant="warning" announce={t('scenarioLoadFailed')}>{t('scenarioLoadFailed')} <Button variant="link" onClick={() => void refresh()}>{t('common:retry')}</Button></Notice>
+      ) : null}
+      {scenarios === null && loadFailed ? (
+        <StateCard announce icon={<FlagIcon />} title={t('scenarioLoadFailed')} action={<Button variant="secondary" size="sm" onClick={() => void refresh()}>{t('common:retry')}</Button>} />
+      ) : scenarios === null ? (
         <p className="muted u-fs-12" role="status">{t('common:loading')}</p>
       ) : scenarios.length === 0 ? (
         <StateCard icon={<FlagIcon />} title={t('scenariosEmpty')} body={t('scenariosEmptyBody')} />
@@ -146,8 +161,8 @@ export function ScenarioPanel({ listId, sessionId, strategyRefs, onError }: {
                 <span className="chip chip--accent u-fs-11">{t('scenarioAbove', { count: s.aboveLine.length, formattedCount: formatNumber(s.aboveLine.length) })}</span>
                 {s.belowLine.length > 0 ? <span className="chip chip--muted u-fs-11">{t('scenarioBelow', { count: s.belowLine.length, formattedCount: formatNumber(s.belowLine.length) })}</span> : null}
                 {s.totalEstimatedValue > 0 ? <span className="chip chip--muted u-fs-11">{t('scenarioTotal', { value: formatNumber(s.totalEstimatedValue) })}</span> : null}
-                {!s.planOfRecord && s.approvalStatus !== 'rejected' ? <Button variant="quiet" size="sm" className="u-ml-auto" disabled={busy} onClick={() => void select(s.scenarioId)}>{t('scenarioSelect')}</Button> : null}
-                {s.proposedBy === 'agent' && s.approvalStatus === 'pending' ? <Button variant="quiet" size="sm" disabled={busy} onClick={() => void rejectProposal(s.scenarioId)}>{t('scenarioRejectAction')}</Button> : null}
+                {!readOnly && !s.planOfRecord && s.approvalStatus !== 'rejected' ? <Button variant="quiet" size="sm" className="u-ml-auto" disabled={busy} onClick={() => void select(s.scenarioId)}>{t('scenarioSelect')}</Button> : null}
+                {!readOnly && s.proposedBy === 'agent' && s.approvalStatus === 'pending' ? <Button variant="quiet" size="sm" disabled={busy} onClick={() => void rejectProposal(s.scenarioId)}>{t('scenarioRejectAction')}</Button> : null}
               </div>
               {s.belowLine.length > 0 ? (
                 <p className="muted u-fs-12 u-m-0">{t('scenarioDropped', { titles: s.belowLine.map((x) => x.title).join(', ') })}</p>

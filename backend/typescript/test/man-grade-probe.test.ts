@@ -42,8 +42,8 @@ function client() {
   return { get: (p: string) => call('GET', p), put: (p: string, b?: unknown) => call('PUT', p, b), post: (p: string, b?: unknown) => call('POST', p, b) };
 }
 let n = 0;
-const login = async (tenantId: string) => { const c = client(); await c.post('/v1/host/openwop-app/test/login', { email: `manp-${Date.now()}-${n++}@probe.test`, tenantId }); return c; };
-const RUNS = '/v1/host/openwop-app/manual-tests/runs';
+const login = async (tenantId: string) => { const c = client(); await c.post('/host/openwop-app/test/login', { email: `manp-${Date.now()}-${n++}@probe.test`, tenantId }); return c; };
+const RUNS = '/host/openwop-app/manual-tests/runs';
 
 describe('Manual tests — cross-tenant run isolation (by execution)', () => {
   it('MANP-1: tenant A cannot read tenant B\'s run for the same suite key', async () => {

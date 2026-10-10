@@ -1,6 +1,6 @@
 /**
  * Workflow Architect chat tools (CFP-1 repair; ADR 0308 D2 seam) — the REAL
- * grounding + governed-write tools behind the `feature.workflow-author.agents`
+ * grounding + governed-write tools behind the `vendor.openwop-app.workflow-author.agents`
  * pack's Workflow Architect persona.
  *
  * Born of the CHAT-FIRST-PORT-AUDIT #1 finding (docs/chat-first-port/
@@ -63,6 +63,8 @@ import { parseFieldContract, PRESERVABLE_FIELDS } from '../../host/preserveDropp
 import { createLogger } from '../../observability/logger.js';
 import { OpenwopError } from '../../types.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
+import { revisionHashOf } from '../../host/definitionHash.js';
+import { assertModelWorkflowWrite } from '../../host/workflowWriteAuthority.js';
 
 const wfaLog = createLogger('workflow-author.agent-tools');
 import {
@@ -86,6 +88,8 @@ function toolError(error: string, message: string, extra?: Record<string, unknow
   return { content: JSON.stringify({ error, message, ...(extra ?? {}) }), isError: true };
 }
 
+import { CATALOG_SEARCH_DEFAULT_LIMIT, CATALOG_SEARCH_MAX_LIMIT, CATALOG_SEARCH_MAX_TYPE_IDS, searchAuthoringCatalog, selectExcluded } from './catalogSearch.js';
+
 const str = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
 
 export function registerWorkflowAuthorAgentTools(): void {
@@ -96,24 +100,42 @@ export function registerWorkflowAuthorAgentTools(): void {
   registerFeatureAgentTool({
     // TRUSTED: returns the CLOSED-WORLD node catalog — host-authored vocabulary.
     contentTrust: 'trusted',
+    effect: 'read',
     // ADR 0604 (TOCC-2) — closed world: an elided enum/id list here makes the
     // model author against a catalog that is not this host's.
     schemaCarrying: true,
     def: {
       name: WORKFLOW_AUTHOR_DRAFT_TOOL_ID,
       description:
-        'Begin a draft: returns the CLOSED-WORLD node catalog — every legal building block with its label, '
-        + 'category, and config/input/output schemas — that your WorkflowDefinition must be composed from, plus the '
-        + 'list of nodes withheld from this workspace (with reasons). The catalog is the law: NEVER use a `typeId` it '
-        + 'does not list (an unknown typeId fails at run time). Call this BEFORE authoring, then compose an ACYCLIC '
-        + 'node/edge graph — a cycle is REFUSED by both `validate` and `persist`; a single connected graph is '
-        + 'PREFERRED but not required, and disconnected components run fine — then `validate` it and `persist` it. '
-        + 'Returns { nodes, excluded }.',
-      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+        'Search the CLOSED-WORLD node catalog for the building blocks you need. Pass `query` — what the step '
+        + 'should DO, in a few words ("send email", "branch on a value", "create CRM contact", "manual trigger") — '
+        + 'and get the best-matching node types, each with its label, category and config/input/output schemas; '
+        + 'pass `typeIds` to fetch exact types you already know. The catalog has hundreds of types and returns only '
+        + 'the matches, never the whole list. When nothing it returns is MADE for the ask it says `noDedicatedMatch` '
+        + 'and lists `generalBlocks` (an AI classify/transform/structured-output step, an If): build the step from one '
+        + 'of those instead of searching again — at most two searches per kind of step. With no '
+        + 'query and no typeIds you get only the category counts. The catalog is the law: NEVER use a `typeId` it '
+        + 'has not returned to you (`validate` and `persist` refuse an unknown one). Also returns `excluded`: the '
+        + 'nodes withheld from this workspace that this ask names or matches, with reasons (ALL of them on an '
+        + 'empty read or a search with no matches), and `excludedTotal`. Compose an ACYCLIC node/edge graph — a cycle is '
+        + 'REFUSED by both `validate` and `persist`; a single connected graph is PREFERRED but not required — then '
+        + '`validate` it and `persist` it. Returns { nodes, matched, total, excluded, excludedTotal, unknownTypeIds?, categories?, noDedicatedMatch?, generalBlocks?, hint? }.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'What the step should do, in a few words.' },
+          typeIds: { type: 'array', items: { type: 'string' }, maxItems: CATALOG_SEARCH_MAX_TYPE_IDS, description: 'Exact node typeIds to fetch.' },
+          limit: { type: 'integer', minimum: 1, maximum: CATALOG_SEARCH_MAX_LIMIT, description: `How many matches to return (default ${CATALOG_SEARCH_DEFAULT_LIMIT}).` },
+        },
+        additionalProperties: false,
+      },
     },
-    async run(_input, scope: BundleScope) {
+    async run(input, scope: BundleScope) {
       const catalog = buildAuthoringCatalog({ disabledPacks: await resolveDisabledPacks(scope.tenantId) });
-      return { content: JSON.stringify({ nodes: catalog.nodes, excluded: catalog.excluded }) };
+      const typeIds = Array.isArray(input.typeIds) ? input.typeIds.filter((t): t is string => typeof t === 'string') : undefined;
+      const search = { query: str(input.query), typeIds, limit: typeof input.limit === 'number' ? input.limit : undefined };
+      const found = searchAuthoringCatalog(catalog.nodes, search);
+      return { content: JSON.stringify({ ...found, ...selectExcluded(catalog.excluded, search, found) }) };
     },
   });
 
@@ -126,6 +148,7 @@ export function registerWorkflowAuthorAgentTools(): void {
   // PACK-authored strings. Do not "fix" the inconsistency by matching the siblings.
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     // ADR 0604 (TOCC-2) — closed world: an elided enum/id list here makes the
     // model author against a catalog that is not this host's.
     schemaCarrying: true,
@@ -157,7 +180,8 @@ export function registerWorkflowAuthorAgentTools(): void {
         return { content: JSON.stringify({ workflows: await listAuthoredWorkflows({ tenantId: scope.tenantId }) }) };
       }
       const got = await readAuthoredWorkflow(workflowId, { tenantId: scope.tenantId });
-      return { content: JSON.stringify(got) };
+      // ADR 0773 D8 — the revision `persist` must be given to overwrite this workflow.
+      return { content: JSON.stringify(got.found ? { ...got, revision: revisionHashOf(got.definition) } : got) };
     },
   });
 
@@ -165,6 +189,7 @@ export function registerWorkflowAuthorAgentTools(): void {
   registerFeatureAgentTool({
     // TRUSTED: verdicts over the model's OWN draft; echoes no stored text.
     contentTrust: 'trusted',
+    effect: 'read',
     def: {
       name: WORKFLOW_AUTHOR_VALIDATE_TOOL_ID,
       description:
@@ -196,12 +221,15 @@ export function registerWorkflowAuthorAgentTools(): void {
   registerFeatureAgentTool({
     // TRUSTED: host-minted id + ack.
     contentTrust: 'trusted',
+    effect: 'write',
     def: {
       name: WORKFLOW_AUTHOR_PERSIST_TOOL_ID,
       description:
         'Validate AND register a candidate WorkflowDefinition through the shared validator + registry, so it becomes '
         + 'runnable and can be opened on the builder canvas. Pass the full definition as `definition`. Returns '
-        + '{ workflowId, nodeCount, url }. On a validation error the call fails with the closed-world defects — fix '
+        + '{ workflowId, nodeCount, url } — and, when it overwrote an existing workflow, { previousRevision, unchanged, '
+        + 'changes, inHistory } so you can tell the user what changed. Needs edit access to the workspace (a Viewer is '
+        + 'refused with `forbidden_scope`). On a validation error the call fails with the closed-world defects — fix '
         + 'them and call again. NEVER persist a definition you have not validated. The graph MUST be acyclic; a cycle '
         + 'is refused here as well as by `validate`. After persisting, summarize the workflow for the user and give '
         + 'them its name and the returned `url` — it is READY TO OPEN, not already open, and nothing navigates on '
@@ -217,6 +245,10 @@ export function registerWorkflowAuthorAgentTools(): void {
         type: 'object',
         properties: {
           definition: { type: 'object', description: 'The validated WorkflowDefinition to register.' },
+          baseRevision: {
+            type: 'string',
+            description: 'REQUIRED when overwriting an existing workflow: the `revision` that `get` returned. Omit only when creating a new workflowId.',
+          },
           clearFields: {
             type: 'array',
             // The enum is the SSoT array, never a hand-copy — a model told about
@@ -236,6 +268,15 @@ export function registerWorkflowAuthorAgentTools(): void {
       if (!scope.actingUserId) {
         return toolError('acting_user_required', 'A workflow can only be registered from a human-initiated turn.');
       }
+      // ADR 0822 D1 — the builder's write authority (ADR 0770 D1), asked BEFORE
+      // the definition is read: a Viewer the REST save refuses must not reach the
+      // same registry through the Architect.
+      try {
+        await assertModelWorkflowWrite(scope);
+      } catch (err) {
+        if (err instanceof OpenwopError) return toolError(err.code, err.message, err.details ?? undefined);
+        return toolFailLog(wfaLog, 'openwop:workflow-author', err);
+      }
       const definition = input.definition;
       if (!definition || typeof definition !== 'object') {
         return toolError('validation_error', 'Pass the WorkflowDefinition to register as `definition` (an object).');
@@ -246,8 +287,11 @@ export function registerWorkflowAuthorAgentTools(): void {
       // a protection it was never granted).
       const declaredFields = parseFieldContract(input.clearFields);
       try {
+        const baseRevision = str(input.baseRevision);
         const out = await persistAuthoredWorkflow(definition, {
           tenantId: scope.tenantId,
+          ...(baseRevision ? { baseRevision } : {}),
+          requireBaseRevision: true,
           ...(declaredFields ? { declaredFields } : {}),
         });
         return {
@@ -274,7 +318,30 @@ export function registerWorkflowAuthorAgentTools(): void {
             // (`agent.toolReturned` carries no result payload). Telling the model
             // to assert a hand-off the product does not perform is the
             // "a model is being lied to" class, relayed straight to the user.
-            note: 'Workflow registered. Tell the user its name and give them this `url` — it is READY TO OPEN on the builder canvas. Do NOT say it is already open; nothing navigates for them.',
+            // ADR 0822 D4 — on an overwrite, WHAT changed and whether the way back
+            // is really there. Absent on a create (never "0 changes" about a
+            // workflow that did not exist).
+            ...(out.overwrite
+              ? {
+                previousRevision: out.overwrite.previousRevision,
+                unchanged: out.overwrite.unchanged,
+                changes: out.overwrite.changes,
+                inHistory: out.overwrite.inHistory,
+              }
+              : {}),
+            note: out.overwrite
+              ? (out.overwrite.unchanged
+                ? 'Nothing changed: the definition you sent is identical to the saved one. Tell the user so plainly. '
+                : 'Workflow updated. Tell the user, in plain words, what changed — name steps by their `label`, never their id: '
+                  + '`changes` lists steps added, removed and edited, connections added and removed, and other workflow fields '
+                  + '(`workflowFieldsChanged`, e.g. its name or variables). ')
+                + 'Give them this `url` — it is READY TO OPEN on the builder canvas; do NOT say it is already open. '
+                + (out.overwrite.unchanged
+                  ? ''
+                  : out.overwrite.inHistory
+                    ? 'Tell them the previous version is kept in the builder\'s version History (under the Share menu), so they can restore it.'
+                    : 'Do NOT promise they can restore the previous version: the host could not confirm it is in History.')
+              : 'Workflow registered. Tell the user its name and give them this `url` — it is READY TO OPEN on the builder canvas. Do NOT say it is already open; nothing navigates for them.',
           }),
         };
       } catch (err) {

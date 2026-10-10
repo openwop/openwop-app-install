@@ -41,9 +41,9 @@ describe('build-meta packaging contract', () => {
 
   it('the Dockerfile COPYs the directory, not the (gitignored) file', () => {
     const dockerfile = read('Dockerfile');
-    expect(dockerfile).toMatch(/^COPY build-meta \.\/build-meta$/m);
+    expect(dockerfile).toMatch(/^COPY (--chown=node:node )?build-meta \.\/build-meta$/m);
     // COPYing the file directly would fail the build on a clean clone.
-    expect(dockerfile).not.toMatch(/COPY build-meta\/commit\.txt/);
+    expect(dockerfile).not.toMatch(/COPY (--chown=\S+ )?build-meta\/commit\.txt/);
   });
 
   it('THE TRIPWIRE: EVERY gitignored stamp needs a .gcloudignore negation, or it never uploads', () => {

@@ -36,7 +36,7 @@ describe('ADR 0679 D1 — the servable writers are served', () => {
   });
 
   it('leg 3: the pack and the two changed nodes moved version together', () => {
-    expect(PACK.version).toBe('1.1.0');
+    expect(PACK.version).toBe('1.1.1');
     const by = new Map(PACK.nodes.map((n) => [n.typeId, n]));
     expect(by.get(P + 'mix')?.version).toBe('1.3.0');
     expect(by.get(P + 'synthesize')?.version).toBe('1.2.0');

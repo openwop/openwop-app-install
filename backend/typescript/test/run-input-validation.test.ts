@@ -42,7 +42,7 @@ const INPUT_SCHEMA = {
 } as const;
 
 async function register(workflowId: string, extra: Record<string, unknown> = {}): Promise<void> {
-  const r = await jsonFetch('/v1/host/openwop-app/workflows', {
+  const r = await jsonFetch('/host/openwop-app/workflows', {
     method: 'POST',
     body: JSON.stringify({ workflowId, nodes: [{ nodeId: 'hook', typeId: 'core.trigger.webhook' }], edges: [], ...extra }),
   });
@@ -50,7 +50,7 @@ async function register(workflowId: string, extra: Record<string, unknown> = {})
 }
 
 async function createRun(workflowId: string, inputs: unknown): Promise<{ status: number; body: { runId?: string; error?: { code?: string; details?: { errors?: unknown[] } }; code?: string; details?: { errors?: unknown[] } } }> {
-  return jsonFetch(`/v1/runs`, { method: 'POST', body: JSON.stringify({ workflowId, inputs, tenantId: 'default' }) });
+  return jsonFetch(`/runs`, { method: 'POST', body: JSON.stringify({ workflowId, inputs, tenantId: 'default' }) });
 }
 
 // ADR 0434 — `run-input-forms` graduated to always-on (it shipped as an explicit

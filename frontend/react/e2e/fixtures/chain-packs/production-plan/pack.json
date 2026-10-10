@@ -43,7 +43,7 @@
         "nodes": [
           {
             "id": "plan-generate",
-            "typeId": "feature.production.nodes.plan-generate",
+            "typeId": "feature.production.nodes.plan-generate@1.0.0",
             "inputs": {
               "orgId": "{{params.orgId}}",
               "channels": "{{params.channels}}",

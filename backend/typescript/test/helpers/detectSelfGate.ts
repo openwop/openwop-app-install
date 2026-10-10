@@ -54,7 +54,11 @@ export function detectRequestSubjectSelfGate(
     if (ts.isImportDeclaration(node) && node.importClause?.namedBindings && ts.isNamedImports(node.importClause.namedBindings)) {
       for (const el of node.importClause.namedBindings.elements) {
         const imported = (el.propertyName ?? el.name).text;
-        if (imported === 'resolveOne') resolveOneLocalNames.add(el.name.text);
+        // ADR 0819 §1 — `resolveOne` is now the ACCESS resolver (toggle + plan),
+        // so a self-gate through it IS paywalled. The bypass symbol is the pure
+        // toggle read, `resolveToggle`; both are tracked so the crm/csm proof
+        // (which moved to `resolveToggle`) and any older shape are still seen.
+        if (imported === 'resolveOne' || imported === 'resolveToggle') resolveOneLocalNames.add(el.name.text);
       }
     }
     if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {

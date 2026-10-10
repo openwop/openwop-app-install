@@ -21,6 +21,11 @@ export interface ConnectionRevokedEvent {
   connectionId: string;
   /** The provider id of the revoked connection (consumers may filter on it). */
   provider?: string;
+  /** ADR 0780 D4 — WHY it was revoked, when that changes what a consumer tells
+   *  its user. `subject-erased`: a DSAR removed the owner's credential, so
+   *  "reconnect to resume" is not an exit (the owner is gone). Absent = the
+   *  ordinary revoke. */
+  cause?: 'subject-erased';
 }
 
 type ConnectionRevokedHandler = (e: ConnectionRevokedEvent) => Promise<void>;

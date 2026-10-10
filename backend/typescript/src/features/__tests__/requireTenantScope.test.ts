@@ -43,8 +43,12 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   await __resetAccessStores();
-  await createMember({ orgId: 'org-a', tenantId: TENANT, displayName: 'Ed', subject: EDITOR, roles: ['editor'] });
-  await createMember({ orgId: 'org-a', tenantId: TENANT, displayName: 'Ad', subject: ADMIN, roles: ['admin'] });
+  // ADR 0815 D1b — in a `ws:` workspace tenant-wide authority is the ROOT
+  // membership (`orgId === tenantId`, the shape `createWorkspace` makes). These
+  // rows used to sit in a sub-org of a root-less `ws:` tenant, a shape nobody can
+  // be IN; the gate's behaviour under test is unchanged.
+  await createMember({ orgId: TENANT, tenantId: TENANT, displayName: 'Ed', subject: EDITOR, roles: ['editor'] });
+  await createMember({ orgId: TENANT, tenantId: TENANT, displayName: 'Ad', subject: ADMIN, roles: ['admin'] });
 });
 
 describe('requireTenantScope', () => {

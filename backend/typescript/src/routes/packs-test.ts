@@ -30,7 +30,6 @@
  * @see spec/v1/node-packs.md §"Test-mode registry namespace"
  */
 
-import { V1_PATH_PREFIX } from '../middleware/protocolVersion.js';
 import { requireNonAnonymousPrincipal } from '../middleware/auth.js';
 import { gunzipSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
@@ -367,7 +366,7 @@ export function registerPackTestRoutes(app: Express): void {
     return;
   }
   log.warn(
-    'packs-test namespace ENABLED — /v1/packs-test/* is reachable. ' +
+    'packs-test namespace ENABLED — /packs-test/* is reachable. ' +
     'Catalog is isolated from /v1/packs/* but NEVER expose this in production.',
   );
 
@@ -384,9 +383,10 @@ export function registerPackTestRoutes(app: Express): void {
   // enabled on a production-posture deployment (the RFC 0199 witness side
   // revision), where an anonymous reset/publish/delete must not be reachable.
   const guard = requireNonAnonymousPrincipal('the packs-test namespace');
-  app.use(`${V1_PATH_PREFIX}/packs-test`, (req, res, next) => (req.method === 'GET' || req.method === 'HEAD' ? next() : guard(req, res, next)));
+  // On the unversioned path, the only spelling that reaches a route (ADR 0812).
+  app.use('/packs-test', (req, res, next) => (req.method === 'GET' || req.method === 'HEAD' ? next() : guard(req, res, next)));
 
-  app.post('/v1/packs-test/reset', (_req, res) => {
+  app.post('/packs-test/reset', (_req, res) => {
     const cleared = testCatalog.size;
     testCatalog.clear();
     res.status(200).json({ cleared });
@@ -394,7 +394,7 @@ export function registerPackTestRoutes(app: Express): void {
 
   // PUT /v1/packs-test/{name}/-/{version}.tgz
   app.put(
-    /^\/v1\/packs-test\/([^/]+)\/-\/([^/]+)\.tgz$/,
+    /^\/packs-test\/([^/]+)\/-\/([^/]+)\.tgz$/,
     rawBody,
     async (req: Request, res: Response, next: NextFunction) => {
       try {
@@ -478,7 +478,7 @@ export function registerPackTestRoutes(app: Express): void {
   );
 
   // GET /v1/packs-test/{name}/-/{version}.tgz
-  app.get(/^\/v1\/packs-test\/([^/]+)\/-\/([^/]+)\.tgz$/, (req, res, next) => {
+  app.get(/^\/packs-test\/([^/]+)\/-\/([^/]+)\.tgz$/, (req, res, next) => {
     try {
       const params = req.params as Record<string, string>;
       const name = decodeURIComponent(params['0'] ?? '');
@@ -502,7 +502,7 @@ export function registerPackTestRoutes(app: Express): void {
   });
 
   // DELETE /v1/packs-test/{name}/-/{version}
-  app.delete(/^\/v1\/packs-test\/([^/]+)\/-\/([^/]+)$/, (req, res, next) => {
+  app.delete(/^\/packs-test\/([^/]+)\/-\/([^/]+)$/, (req, res, next) => {
     try {
       const params = req.params as Record<string, string>;
       const name = decodeURIComponent(params['0'] ?? '');
@@ -536,7 +536,7 @@ export function registerPackTestRoutes(app: Express): void {
   });
 
   // GET /v1/packs-test/{name}/-/{version}.sig
-  app.get(/^\/v1\/packs-test\/([^/]+)\/-\/([^/]+)\.sig$/, (req, res, next) => {
+  app.get(/^\/packs-test\/([^/]+)\/-\/([^/]+)\.sig$/, (req, res, next) => {
     try {
       const params = req.params as Record<string, string>;
       const name = decodeURIComponent(params['0'] ?? '');

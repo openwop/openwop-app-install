@@ -45,12 +45,7 @@ describe('a malformed JSON body answers in the error envelope with the version h
     const r = await post('/runs', '{', { 'OpenWOP-Version': '2' });
     expect(r.ver).toBe('2.0');
   });
-  it('3. the /v1 mount answers the same shape under 1.x', async () => {
-    const r = await post('/v1/runs', '{');
-    expect(r.status).toBe(400);
-    expect(r.json?.error).toBe('validation_error');
-    expect(r.ver).toMatch(/^1\./);
-  });
+  // ADR 0812 P3c-0 — leg 3 (the /v1 mount's 1.x answer) was deleted with major 1.
   it('4. a well-formed body is untouched by the handler (201 on the same route)', async () => {
     const r = await post('/runs', JSON.stringify({ workflowId: 'conformance-noop', inputs: {} }), { 'OpenWOP-Version': '2' });
     expect(r.status, r.text.slice(0, 200)).toBe(201);

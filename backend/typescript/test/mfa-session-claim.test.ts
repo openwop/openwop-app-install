@@ -9,10 +9,20 @@
  *     follow-ups (dropped Authorization header) keep it;
  *   - a workspace switch re-issues the cookie WITHOUT losing the mark;
  *   - a token without the claim yields false (fail-closed default);
- *   - an unauthenticated caller is refused (no durable identity).
+ *   - an unauthenticated caller is refused (no durable identity);
+ *   - GRADE SEC-C17a: the vault reveal step-up passes on a FRESH `auth_time`
+ *     and fails closed on a stale one;
+ *   - ADR 0389 § Correction: the factor bind/unbind notice writes an audit row,
+ *     is closed-world, and is NOT an authorization input.
  *
  * The host never handles factor material — enrollment is client↔Firebase; the
  * middleware only reads the verifier's attestation claim.
+ *
+ * Sabotage that turns it red: `auth.ts`
+ * `const mfaVerified = typeof secondFactor === 'string' && secondFactor.length > 0;`
+ * → `= false;` reds the claim cases; `workspaces.ts` dropping
+ * `mfa: req.mfaVerified,` from the switch re-mint reds "a switch does not lose it"
+ * (only this file catches that one — `tenant-require-mfa` re-promotes over a bearer).
  *
  * @see docs/adr/0389-account-security-and-secrets-depth.md (Phase 1)
  */
@@ -24,8 +34,6 @@ import { createSign, generateKeyPairSync, type KeyObject } from 'node:crypto';
 import express from 'express';
 import { createApp } from '../src/index.js';
 import { _resetOidcVerifier } from '../src/middleware/auth.js';
-import { saveConfig } from '../src/host/featureToggles/service.js';
-import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 
 function b64url(buf: Buffer | string): string {
   return Buffer.from(buf).toString('base64').replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
@@ -74,8 +82,6 @@ beforeAll(async () => {
 
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
-  const def = getToggleDefault('users');
-  if (def) await saveConfig({ ...def, status: 'on' }, 'test');
 });
 
 afterAll(async () => {
@@ -85,7 +91,17 @@ afterAll(async () => {
   for (const k of ['OPENWOP_OIDC_ISSUER', 'OPENWOP_OIDC_AUDIENCE', 'OPENWOP_OIDC_JWKS_URL']) delete process.env[k];
 });
 
-interface Res<T = any> { status: number; body: T }
+/** The union of the response bodies this file reads. */
+interface Body {
+  error?: string;
+  details?: { reason?: string };
+  mfaSessionVerified?: boolean;
+  source?: string;
+  workspaceId?: string;
+  personal?: string;
+  value?: string;
+}
+interface Res { status: number; body: Body }
 /** A cookie-jar client whose bearer can be attached or DROPPED per call — the
  *  cookie-only shape is the whole point of the persisted mark. */
 function client(): {
@@ -110,13 +126,13 @@ function client(): {
       const m = /(__session=[^;]+)/.exec(sc);
       if (m) cookie = m[1];
     }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const out = res.status === 204 ? {} : ((await res.json().catch(() => ({}))) as Body);
     return { status: res.status, body: out };
   };
   return { get: (p, t) => call('GET', p, t), post: (p, t, b) => call('POST', p, t, b) };
 }
 
-const SECURITY = '/v1/host/openwop-app/users/me/security';
+const SECURITY = '/host/openwop-app/users/me/security';
 
 describe('ADR 0389 P1 — second-factor session mark', () => {
   it('bearer with the claim → mfaSessionVerified true (authoritative, pre-bind)', async () => {
@@ -131,7 +147,7 @@ describe('ADR 0389 P1 — second-factor session mark', () => {
   it('bind persists the mark; cookie-only follow-ups keep it; a switch does not lose it', async () => {
     const c = client();
     const token = mint('fb-uid-mfa-2', 'totp');
-    const bind = await c.post('/v1/host/openwop-app/users/auth/oidc/bind', token);
+    const bind = await c.post('/host/openwop-app/users/auth/oidc/bind', token);
     expect(bind.status, JSON.stringify(bind.body)).toBe(200);
 
     // Dropped Authorization header (SPA token-cache race / EventSource): the
@@ -141,9 +157,9 @@ describe('ADR 0389 P1 — second-factor session mark', () => {
     expect(cookieOnly.body.mfaSessionVerified).toBe(true);
 
     // A workspace switch re-issues the session cookie — the mark must survive.
-    const ws = await c.post('/v1/host/openwop-app/workspaces', token, { name: 'MFA switch ws' });
+    const ws = await c.post('/host/openwop-app/workspaces', token, { name: 'MFA switch ws' });
     expect(ws.status, JSON.stringify(ws.body)).toBe(201);
-    const sw = await c.post(`/v1/host/openwop-app/workspaces/${ws.body.workspaceId}/switch`);
+    const sw = await c.post(`/host/openwop-app/workspaces/${ws.body.workspaceId}/switch`);
     expect(sw.status, JSON.stringify(sw.body)).toBe(200);
     const afterSwitch = await c.get(SECURITY);
     expect(afterSwitch.body.mfaSessionVerified).toBe(true);
@@ -156,7 +172,7 @@ describe('ADR 0389 P1 — second-factor session mark', () => {
     expect(bearer.status).toBe(200);
     expect(bearer.body.mfaSessionVerified).toBe(false);
 
-    const bind = await c.post('/v1/host/openwop-app/users/auth/oidc/bind', token);
+    const bind = await c.post('/host/openwop-app/users/auth/oidc/bind', token);
     expect(bind.status).toBe(200);
     const cookieOnly = await c.get(SECURITY);
     expect(cookieOnly.status).toBe(200);
@@ -169,22 +185,22 @@ describe('ADR 0389 P1 — second-factor session mark', () => {
     const nowS = Math.floor(Date.now() / 1000);
     const fresh = mint('fb-uid-stepup-1', undefined, nowS - 10);
     // Become a tenant superadmin for the caller's personal tenant.
-    const who = await c.get('/v1/host/openwop-app/me/workspaces', fresh);
-    const personal = (who.body as { personal: string }).personal;
+    const who = await c.get('/host/openwop-app/me/workspaces', fresh);
+    const personal = who.body.personal!;
     process.env.OPENWOP_SUPERADMIN_TENANTS = personal;
     try {
       // Host bucket: the signed-in tenant's KMS path isn't configured in this
       // env; the step-up gate under test is scope-independent.
       await setSecret('stepup-secret', 'the-value');
-      const ok = await c.post('/v1/host/openwop-app/vault/secrets/stepup-secret/reveal', fresh, { scope: 'host' });
+      const ok = await c.post('/host/openwop-app/vault/secrets/stepup-secret/reveal', fresh, { scope: 'host' });
       expect(ok.status, JSON.stringify(ok.body)).toBe(200);
-      expect((ok.body as { value: string }).value).toBe('the-value');
+      expect(ok.body.value).toBe('the-value');
 
       // A token whose sign-in is older than the window fails closed.
       const stale = mint('fb-uid-stepup-1', undefined, nowS - 3600);
-      const refused = await c.post('/v1/host/openwop-app/vault/secrets/stepup-secret/reveal', stale, { scope: 'host' });
+      const refused = await c.post('/host/openwop-app/vault/secrets/stepup-secret/reveal', stale, { scope: 'host' });
       expect(refused.status).toBe(403);
-      expect(JSON.stringify(refused.body)).toContain('stepup_required');
+      expect(refused.body.details?.reason).toBe('stepup_required');
     } finally {
       delete process.env.OPENWOP_SUPERADMIN_TENANTS;
     }
@@ -193,19 +209,20 @@ describe('ADR 0389 P1 — second-factor session mark', () => {
   it('unauthenticated caller is refused (no durable identity)', async () => {
     const c = client();
     const res = await c.get(SECURITY);
-    expect([401, 403]).toContain(res.status);
+    expect(res.status, JSON.stringify(res.body)).toBe(401);
+    expect(res.body.error).toBe('sign_in_required');
   });
 });
 
 describe('ADR 0389 § Correction — the authenticator bind/unbind notice', () => {
-  const FACTOR_EVENT = '/v1/host/openwop-app/users/me/security/factor-event';
+  const FACTOR_EVENT = '/host/openwop-app/users/me/security/factor-event';
 
   it('records a bind for the caller and writes a tamper-evident audit row', async () => {
     const c = client();
     const token = mint('fb-uid-bind-1', 'totp');
-    await c.post('/v1/host/openwop-app/users/auth/oidc/bind', token);
-    const who = await c.get('/v1/host/openwop-app/me/workspaces', token);
-    const tenantId = (who.body as { personal: string }).personal;
+    await c.post('/host/openwop-app/users/auth/oidc/bind', token);
+    const who = await c.get('/host/openwop-app/me/workspaces', token);
+    const tenantId = who.body.personal!;
 
     const res = await c.post(FACTOR_EVENT, token, { event: 'bound', factorCount: 1 });
     expect(res.status, JSON.stringify(res.body)).toBe(202);
@@ -218,14 +235,16 @@ describe('ADR 0389 § Correction — the authenticator bind/unbind notice', () =
   it('rejects an unknown event kind (closed world) and refuses anonymous callers', async () => {
     const c = client();
     const token = mint('fb-uid-bind-2', 'totp');
-    await c.post('/v1/host/openwop-app/users/auth/oidc/bind', token);
+    await c.post('/host/openwop-app/users/auth/oidc/bind', token);
     const bad = await c.post(FACTOR_EVENT, token, { event: 'hacked' });
     expect(bad.status).toBe(422);
+    expect(bad.body.error).toBe('validation_error');
 
     // No credential at all → never 202.
     const anon = client();
     const nobody = await anon.post(FACTOR_EVENT, undefined, { event: 'bound' });
-    expect(nobody.status).not.toBe(202);
+    expect(nobody.status, JSON.stringify(nobody.body)).toBe(401);
+    expect(nobody.body.error).toBe('sign_in_required');
   });
 
   it('is NOT an authorization input — asserting `bound` never marks the session verified', async () => {
@@ -233,7 +252,7 @@ describe('ADR 0389 § Correction — the authenticator bind/unbind notice', () =
     // can flip mfaSessionVerified. A client-asserted bind must not.
     const c = client();
     const token = mint('fb-uid-bind-3'); // NO second-factor claim
-    await c.post('/v1/host/openwop-app/users/auth/oidc/bind', token);
+    await c.post('/host/openwop-app/users/auth/oidc/bind', token);
     expect((await c.get(SECURITY)).body.mfaSessionVerified).toBe(false);
 
     const res = await c.post(FACTOR_EVENT, token, { event: 'bound', factorCount: 1 });

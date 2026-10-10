@@ -61,7 +61,7 @@ const clean = {
 describe('portability — export/import seam (RFC 0098)', () => {
   it('export is refs-only: no literal credential values', async () => {
     const { status, body } = await api<{ bundleVersion: string; items: Array<{ payload: Record<string, unknown> }> }>(
-      '/v1/host/openwop-app/export',
+      '/host/openwop-app/export',
     );
     expect(status).toBe(200);
     expect(body.bundleVersion).toBe('1');
@@ -71,13 +71,13 @@ describe('portability — export/import seam (RFC 0098)', () => {
   });
 
   it('import of a bundle with a literal credential value is rejected 422 (even on dryRun)', async () => {
-    const res = await api('/v1/host/openwop-app/import?dryRun=true', { method: 'POST', body: JSON.stringify({ bundle: leaky }) });
+    const res = await api('/host/openwop-app/import?dryRun=true', { method: 'POST', body: JSON.stringify({ bundle: leaky }) });
     expect(res.status).toBe(422);
   });
 
   it('clean dryRun returns a plan and makes zero writes', async () => {
     const res = await api<{ dryRun: boolean; itemCount: number; order: string[] }>(
-      '/v1/host/openwop-app/import?dryRun=true',
+      '/host/openwop-app/import?dryRun=true',
       { method: 'POST', body: JSON.stringify({ bundle: clean }) },
     );
     expect(res.status).toBe(200);
@@ -96,17 +96,17 @@ describe('portability — export/import seam (RFC 0098)', () => {
         { kind: 'pack', ref: 'b', dependsOn: ['a'], payload: {} },
       ],
     };
-    const res = await api('/v1/host/openwop-app/import?dryRun=true', { method: 'POST', body: JSON.stringify({ bundle: cyclic }) });
+    const res = await api('/host/openwop-app/import?dryRun=true', { method: 'POST', body: JSON.stringify({ bundle: cyclic }) });
     expect(res.status).toBe(422);
   });
 
   it('apply (non-dryRun) without scope is denied 403', async () => {
-    const res = await api('/v1/host/openwop-app/import', { method: 'POST', body: JSON.stringify({ bundle: clean }) });
+    const res = await api('/host/openwop-app/import', { method: 'POST', body: JSON.stringify({ bundle: clean }) });
     expect(res.status).toBe(403);
   });
 
   it('apply of a leaky bundle is 422 before the scope check', async () => {
-    const res = await api('/v1/host/openwop-app/import', { method: 'POST', body: JSON.stringify({ bundle: leaky }) });
+    const res = await api('/host/openwop-app/import', { method: 'POST', body: JSON.stringify({ bundle: leaky }) });
     expect(res.status).toBe(422);
   });
 });

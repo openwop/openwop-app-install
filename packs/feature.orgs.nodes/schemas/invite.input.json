@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/feature.orgs.nodes/1.0.0/invite.input.json",
+  "$id": "https://packs.openwop.dev/feature.orgs.nodes/1.0.1/invite.input.json",
   "title": "OrgsInviteInput",
   "description": "Runtime values, each winning over its config counterpart: `email`, `role`, `orgId`. Any other inbound port (the approval gate's `approved`/`decision` on the default port) is ignored. Never the token: the surface never returns it.",
   "type": "object",

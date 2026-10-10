@@ -29,7 +29,7 @@ import { upsertFromPrincipal } from '../src/features/users/usersService.js';
 let BASE: string;
 let server: http.Server;
 
-const CB = '/v1/host/openwop-app/kicktodo/creator';
+const CB = '/host/openwop-app/kicktodo/creator';
 const FACTORY_ID = 'openwop-app.kicktodo.challenge-factory';
 
 interface AuthorRead {
@@ -60,7 +60,7 @@ function client() {
   return {
     get: (p: string) => send('GET', p),
     login: async (subject: string, tenantId: string) => {
-      const res = await send('POST', '/v1/host/openwop-app/test/login', { subject, tenantId });
+      const res = await send('POST', '/host/openwop-app/test/login', { subject, tenantId });
       expect([200, 201]).toContain(res.status);
     },
   };
@@ -96,7 +96,7 @@ describe('ADR 0461 — the author read provisions eagerly and reports the roster
     const res = await creator.get(`${CB}/author`);
     expect(res.status).toBe(200);
     const body = await res.json() as AuthorRead;
-    expect(body.agentId).toBe('feature.kicktodo.agents.challenge-author');
+    expect(body.agentId).toBe('vendor.openwop-app.kicktodo.agents.challenge-author');
     expect(body.rosterId).toBe('host:challenge-author');
     expect(body.label).toBe('Challenge Author');
     // ADR 0461 OQ1 — the provisioning saga pins autonomy to 'review'.

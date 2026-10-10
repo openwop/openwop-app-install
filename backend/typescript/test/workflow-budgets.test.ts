@@ -26,7 +26,7 @@ describe('workflow budgets (ADR 0482, sqlite memory app)', () => {
   let server: http.Server;
   let BASE: string;
   const TOKEN = 'dev-token';
-  const API = '/v1/host/openwop-app/workflows';
+  const API = '/host/openwop-app/workflows';
   const TENANT = 'default';
   const WF_CAP = 'budget-wf-cap';
   const WF_ALERT = 'budget-wf-alert';
@@ -240,12 +240,12 @@ describe('workflow budgets (ADR 0482, sqlite memory app)', () => {
       expect((await call('PUT', `${API}/${WF_CAP}/budget`, { dailyUsd: 0.5, hardCap: true })).status).toBe(200);
       // Under budget: runs proceed.
       expect(await workflowBudgetExhausted(TENANT, WF_CAP)).toBe(false);
-      const ok = await call<{ runId: string }>('POST', '/v1/runs', { workflowId: WF_CAP, inputs: {} });
+      const ok = await call<{ runId: string }>('POST', '/runs', { workflowId: WF_CAP, inputs: {} });
       expect(ok.status).toBe(201);
       // Exhaust it.
       await recordWorkflowSpend(TENANT, WF_CAP, 0.6);
       expect(await workflowBudgetExhausted(TENANT, WF_CAP)).toBe(true);
-      const blocked = await call<{ error: string; details?: { reason?: string; workflowId?: string } }>('POST', '/v1/runs', { workflowId: WF_CAP, inputs: {} });
+      const blocked = await call<{ error: string; details?: { reason?: string; workflowId?: string } }>('POST', '/runs', { workflowId: WF_CAP, inputs: {} });
       expect(blocked.status).toBe(429);
       expect(blocked.body.error).toBe('rate_limited');
       expect(blocked.body.details?.reason).toBe('workflow_budget_exhausted');
@@ -255,7 +255,7 @@ describe('workflow budgets (ADR 0482, sqlite memory app)', () => {
     it('soft budgets (hardCap false) never block', async () => {
       expect((await call('PUT', `${API}/${WF_CAP}/budget`, { dailyUsd: 0.5, hardCap: false })).status).toBe(200);
       expect(await workflowBudgetExhausted(TENANT, WF_CAP)).toBe(false);
-      expect((await call('POST', '/v1/runs', { workflowId: WF_CAP, inputs: {} })).status).toBe(201);
+      expect((await call('POST', '/runs', { workflowId: WF_CAP, inputs: {} })).status).toBe(201);
       // Restore the hard cap for the following lanes.
       expect((await call('PUT', `${API}/${WF_CAP}/budget`, { dailyUsd: 0.5, hardCap: true })).status).toBe(200);
     });
@@ -265,7 +265,7 @@ describe('workflow budgets (ADR 0482, sqlite memory app)', () => {
       __budgetReadsForTests.budget = async () => { throw new Error('budget store down'); };
       try {
         expect(await workflowBudgetExhausted(TENANT, WF_CAP)).toBe(false);
-        expect((await call('POST', '/v1/runs', { workflowId: WF_CAP, inputs: {} })).status).toBe(201);
+        expect((await call('POST', '/runs', { workflowId: WF_CAP, inputs: {} })).status).toBe(201);
       } finally {
         __budgetReadsForTests.budget = orig;
       }
@@ -275,7 +275,7 @@ describe('workflow budgets (ADR 0482, sqlite memory app)', () => {
 
     it('the debug lane stays unblocked while the cap bites (diagnostic spend)', async () => {
       expect(await workflowBudgetExhausted(TENANT, WF_CAP)).toBe(true);
-      expect((await call('POST', '/v1/runs', { workflowId: WF_CAP, inputs: {} })).status).toBe(429);
+      expect((await call('POST', '/runs', { workflowId: WF_CAP, inputs: {} })).status).toBe(429);
       // The ADR 0475 debug run — from the first node, no pins needed.
       const dbg = await call<{ runId?: string }>('POST', `${API}/${WF_CAP}/debug-run`, { fromNodeId: 'a' });
       expect([200, 201, 202]).toContain(dbg.status);
@@ -298,16 +298,16 @@ describe('workflow budgets (ADR 0482, sqlite memory app)', () => {
 
   it('the run snapshot surfaces the stamped costUsd (host-written metadata only)', async () => {
     expect((await call('PUT', `${API}/${WF_ROUTES}/budget`, { dailyUsd: null })).status).toBe(200);
-    const created = await call<{ runId: string }>('POST', '/v1/runs', { workflowId: WF_ROUTES, inputs: {} });
+    const created = await call<{ runId: string }>('POST', '/runs', { workflowId: WF_ROUTES, inputs: {} });
     expect(created.status).toBe(201);
     for (let i = 0; i < 200; i += 1) {
-      const r = await call<{ status: string }>('GET', `/v1/runs/${created.body.runId}`);
+      const r = await call<{ status: string }>('GET', `/runs/${created.body.runId}`);
       if (r.body.status && !['pending', 'running'].includes(r.body.status)) break;
       await new Promise((res) => setTimeout(res, 25));
     }
     // core.noop emits no provider.usage — the additive fields stay ABSENT
     // (never zero-filled), which is the §6 fallback contract the FE relies on.
-    const snap = await call<{ costUsd?: number; costByNode?: Record<string, number> }>('GET', `/v1/runs/${created.body.runId}`);
+    const snap = await call<{ costUsd?: number; costByNode?: Record<string, number> }>('GET', `/runs/${created.body.runId}`);
     expect(snap.body.costUsd).toBeUndefined();
     expect(snap.body.costByNode).toBeUndefined();
   });

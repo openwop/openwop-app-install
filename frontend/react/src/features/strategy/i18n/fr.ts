@@ -116,6 +116,10 @@ export const messages = {
   discardBody: 'Cet onglet contient des modifications non enregistrées. Les quitter maintenant les abandonne définitivement.',
   discardConfirm: 'Abandonner les modifications',
   autoRevertedNotice: 'Enregistré — mais modifier {{fields}} sur une stratégie active la repasse en Brouillon : elle doit être approuvée à nouveau pour redevenir active.',
+  staleWrite: "Quelqu’un d’autre a modifié cette stratégie pendant votre édition, votre modification n’a donc pas été enregistrée. Vos modifications restent à l’écran ; rechargez pour voir la dernière version (elles seront perdues).",
+  reloadLatest: "Recharger la dernière version",
+  toastActivationSubmitted: "Soumise pour approbation. Elle deviendra active une fois approuvée par une autre personne.",
+  fieldPeriod: "Période",
   activationWithdrawnNotice: 'Enregistré — mais cette modification a changé un contenu en attente d’approbation d’activation, donc cette revue a été retirée. Soumettez à nouveau l’activation une fois le plan finalisé.',
   autoRevertedAndWithdrawnNotice: 'Enregistré — mais modifier {{fields}} sur une stratégie active la repasse en Brouillon : elle doit être approuvée à nouveau pour redevenir active. Cette modification a aussi changé un contenu en attente d’approbation d’activation, donc cette revue a été retirée.',
 
@@ -142,6 +146,18 @@ export const messages = {
 
   // Alignment
   alignmentLede: 'Reliez les projets et priorités qui concrétisent cette stratégie. Les liens que vous pouvez consulter sont affichés ; ceux qui sont illisibles sont masqués.',
+  // ADR 0852 D4 — the linked projects' team ledgers
+  ledgerRollupTitle: 'Registres d’équipe',
+  ledgerRollupLede: 'À quoi sert chaque projet lié en ce moment, d’après son registre d’équipe. Les modifications se font sur le projet.',
+  ledgerRollupLoading: 'Chargement des registres d’équipe…',
+  ledgerRollupFailed: 'Les registres d’équipe n’ont pas pu être chargés.',
+  ledgerRollupNone: 'Aucun des projets liés ne vous est visible.',
+  ledgerRollupVersion: 'version {{version}}',
+  ledgerRollupOpenQuestions_one: '{{count}} question ouverte',
+  ledgerRollupOpenQuestions_other: '{{count}} questions ouvertes',
+  ledgerRollupPending_one: '{{count}} modification en attente',
+  ledgerRollupPending_other: '{{count}} modifications en attente',
+  ledgerRollupNoLedger: 'pas encore de registre d’équipe',
   noLinks: 'Aucun lien pour le moment.',
   'linkKind_project': 'Projet',
   'linkKind_priority-list': 'Liste de priorités',

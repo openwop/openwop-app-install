@@ -26,7 +26,7 @@ let server: http.Server;
 const H = { authorization: 'Bearer dev-token', 'content-type': 'application/json' };
 const post = (path: string, body?: unknown) => fetch(`${BASE}${path}`, { method: 'POST', headers: H, body: body === undefined ? undefined : JSON.stringify(body) });
 const del = (path: string) => fetch(`${BASE}${path}`, { method: 'DELETE', headers: H });
-const SESS = '/v1/host/openwop-app/voice/session';
+const SESS = '/host/openwop-app/voice/session'; // ADR 0812 P3b: a migrated family
 const b64 = (n: number, fill = 0x61) => Buffer.alloc(n, fill).toString('base64');
 
 async function setVoice(status: 'on' | 'off'): Promise<void> {

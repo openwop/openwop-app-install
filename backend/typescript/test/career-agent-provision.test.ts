@@ -16,7 +16,7 @@ import { __resetHostExtPersistence, initHostExtPersistence } from '../src/host/h
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
 
 const TENANT = 'user:t-career';
-const PACK = join(process.cwd(), '..', '..', 'packs', 'feature.career-agent.agents');
+const PACK = join(process.cwd(), '..', '..', 'packs', 'vendor.openwop-app.career-agent.agents');
 
 describe('ADR 0543 P1 — provisioning', () => {
   beforeEach(() => { __resetHostExtPersistence(); initHostExtPersistence(openSqliteStorage(':memory:')); });
@@ -89,7 +89,11 @@ describe('ADR 0543 D2 — the persona is DATA, not source', () => {
       agents: Array<{ agentId: string; systemPromptRef: string; toolAllowlist: string[] }>;
     };
     const agent = manifest.agents[0]!;
-    expect(agent.agentId).toBe('career-agent');
+    // ADR 0763 — the id was the bare `career-agent`, which broke the loader's
+    // pack-prefix rule (RFC 0003 §B), so the agent had NEVER loaded. It must now
+    // live under its own pack's namespace.
+    expect(agent.agentId).toBe('vendor.openwop-app.career-agent.agents.default');
+    expect(agent.agentId.startsWith(`${(manifest as unknown as { name: string }).name}.`), 'agentId must extend its pack name or the loader refuses it').toBe(true);
     expect(readFileSync(join(PACK, agent.systemPromptRef), 'utf8').length).toBeGreaterThan(200);
 
     // The allowlist is PER AGENT, so declaring job-search tools here cannot

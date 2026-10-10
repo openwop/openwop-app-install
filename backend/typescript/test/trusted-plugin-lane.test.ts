@@ -50,7 +50,7 @@ let saveToggle: (status: 'on' | 'off') => Promise<void>;
 const H = { authorization: 'Bearer dev-token' };
 
 const trustedUrl = () =>
-  `${BASE}/v1/host/openwop-app/ui-plugin/trusted/${encodeURIComponent(PACK_NAME)}/plugins/${PLUGIN_ID}/entry.mjs`;
+  `${BASE}/host/openwop-app/ui-plugin/trusted/${encodeURIComponent(PACK_NAME)}/plugins/${PLUGIN_ID}/entry.mjs`;
 
 beforeAll(async () => {
   // ── fixture pack (must exist BEFORE the app module loads: PACKS_DIR is bound at import) ──
@@ -106,7 +106,7 @@ describe('ADR 0367 P2 — trusted serve lane', () => {
   it('toggle OFF (the default): trusted serve is a uniform 404 and /packs labels community', async () => {
     await saveToggle('off');
     expect((await fetch(trustedUrl(), { headers: H })).status).toBe(404);
-    const list = await (await fetch(`${BASE}/v1/host/openwop-app/ui-plugin/packs`, { headers: H })).json() as { plugins: { packName: string; tier?: string; trustedEntryPath?: string }[] };
+    const list = await (await fetch(`${BASE}/host/openwop-app/ui-plugin/packs`, { headers: H })).json() as { plugins: { packName: string; tier?: string; trustedEntryPath?: string }[] };
     const pl = list.plugins.find((p) => p.packName === PACK_NAME);
     expect(pl?.tier).toBe('community');
     expect(pl?.trustedEntryPath).toBeUndefined();
@@ -120,7 +120,7 @@ describe('ADR 0367 P2 — trusted serve lane', () => {
     expect(res.headers.get('x-content-type-options')).toBe('nosniff');
     expect(await res.text()).toBe(MODULE_SRC);
 
-    const list = await (await fetch(`${BASE}/v1/host/openwop-app/ui-plugin/packs`, { headers: H })).json() as { plugins: { packName: string; tier?: string; trustedEntryPath?: string }[] };
+    const list = await (await fetch(`${BASE}/host/openwop-app/ui-plugin/packs`, { headers: H })).json() as { plugins: { packName: string; tier?: string; trustedEntryPath?: string }[] };
     const pl = list.plugins.find((p) => p.packName === PACK_NAME);
     expect(pl?.tier).toBe('trusted');
     expect(pl?.trustedEntryPath).toContain('/trusted/');
@@ -161,7 +161,7 @@ describe('ADR 0367 P2 — trusted serve lane', () => {
 
   it('unknown pack/plugin → uniform 404 (no existence leak)', async () => {
     await saveToggle('on');
-    const res = await fetch(`${BASE}/v1/host/openwop-app/ui-plugin/trusted/nope/plugins/none/entry.mjs`, { headers: H });
+    const res = await fetch(`${BASE}/host/openwop-app/ui-plugin/trusted/nope/plugins/none/entry.mjs`, { headers: H });
     expect(res.status).toBe(404);
   });
 });

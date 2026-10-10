@@ -42,7 +42,7 @@ const TENANT = 'e2e-collab';
 const PROJECT_NAME = `E2E Collab ${Date.now()}`;
 const AGENT_ID = 'core.openwop.agents.brief-writer'; // an installable demo agent
 
-const api = '/v1/host/openwop-app';
+const api = '/host/openwop-app';
 
 interface LoginResponse { user: { userId: string } }
 

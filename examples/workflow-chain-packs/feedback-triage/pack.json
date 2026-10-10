@@ -1,12 +1,12 @@
 {
   "name": "core.openwop.workflows.feedback-triage",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "kind": "workflow-chain",
   "description": "Feedback-triage chains (RFC 0013): turn raw inbound feedback into classified, routed, actionable items. A form submission is classified and (on approval) filed as a follow-up task; a batch is themed into a weekly digest. Replay-deterministic.",
   "author": "openwop",
   "license": "Apache-2.0",
   "engines": {
-    "openwop": ">=1.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "keywords": [
     "Feedback triage"
@@ -14,7 +14,7 @@
   "chains": [
     {
       "chainId": "feedback-triage.classify-and-route",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "label": "Feedback → Classify → Task",
       "description": "Every feedback form submission is classified (theme, sentiment, severity) by AI; a human confirms, and a CRM follow-up task is filed with the classification.",
       "parameters": {
@@ -43,7 +43,7 @@
         "nodes": [
           {
             "id": "form",
-            "typeId": "core.trigger.form",
+            "typeId": "core.trigger.form@1.0.0",
             "name": "Feedback submitted",
             "position": {
               "x": 0,
@@ -54,7 +54,7 @@
           },
           {
             "id": "classify",
-            "typeId": "core.ai.chatCompletion",
+            "typeId": "core.ai.chatCompletion@1.0.0",
             "name": "Classify feedback",
             "position": {
               "x": 280,
@@ -69,7 +69,7 @@
           },
           {
             "id": "gate",
-            "typeId": "core.chat.approvalGate",
+            "typeId": "core.chat.approvalGate@1.1.0",
             "name": "Confirm routing",
             "position": {
               "x": 560,
@@ -83,7 +83,7 @@
           },
           {
             "id": "gate-reject",
-            "typeId": "core.flow.noop",
+            "typeId": "core.flow.noop@1.0.0",
             "name": "Rejected — no task filed",
             "position": {
               "x": 840,
@@ -94,7 +94,7 @@
           },
           {
             "id": "task",
-            "typeId": "feature.crm.nodes.create-task",
+            "typeId": "feature.crm.nodes.create-task@1.0.0",
             "name": "File follow-up task",
             "position": {
               "x": 840,
@@ -137,7 +137,7 @@
     },
     {
       "chainId": "feedback-triage.weekly-themes",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "Weekly Feedback → Theme Digest",
       "description": "A scheduled roll-up that clusters the week's feedback into the top recurring themes with representative quotes, then posts the digest as an in-app notification.",
       "parameters": {
@@ -155,7 +155,7 @@
         "nodes": [
           {
             "id": "cron",
-            "typeId": "core.trigger.schedule",
+            "typeId": "core.trigger.schedule@1.0.0",
             "name": "Weekly",
             "position": {
               "x": 0,
@@ -168,7 +168,7 @@
           },
           {
             "id": "theme",
-            "typeId": "core.ai.chatCompletion",
+            "typeId": "core.ai.chatCompletion@1.0.0",
             "name": "Cluster themes",
             "position": {
               "x": 280,
@@ -183,7 +183,7 @@
           },
           {
             "id": "notify",
-            "typeId": "feature.notifications.nodes.notify",
+            "typeId": "feature.notifications.nodes.notify@1.0.0",
             "name": "Post digest",
             "position": {
               "x": 560,

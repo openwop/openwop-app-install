@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.market-intel-shift-detect/1.0.0/shift-detect.output.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.market-intel-shift-detect/1.0.1/shift-detect.output.json",
   "title": "MarketIntelShiftDetectOutput",
   "type": "object",
   "required": ["alert"],

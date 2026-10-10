@@ -76,6 +76,8 @@ vi.mock('../cmsClient.js', () => {
     listSharedSectionPages: vi.fn(async () => []),
     listLocaleGrants: vi.fn(async () => []), putLocaleGrant: vi.fn(),
     setLocalePublish: vi.fn(),
+    getTranslationStatus: vi.fn(async () => ({ locales: [], sections: {}, counts: {} })),
+    confirmTranslationSource: vi.fn(),
   };
 });
 
@@ -88,6 +90,8 @@ vi.mock('../../sharing/sharingClient.js', () => ({
   createLink: vi.fn(), listLinks: vi.fn(async () => []), revokeLink: vi.fn(),
   sharedPageUrl: (token: string) => `/shared/${token}`,
 }));
+// The Page tab reads and writes the page's search and social record.
+vi.mock('../../publishing/publishingClient.js', () => ({ getSeo: vi.fn(async () => null), putSeo: vi.fn(async (_o: string, _p: string, seo: unknown) => seo) }));
 vi.mock('../../site/siteConfigClient.js', () => ({
   getSiteConfig: vi.fn(async () => { throw new Error('forbidden'); }),
   putSiteConfig: vi.fn(),
@@ -151,7 +155,8 @@ describe('translator surface — granted (narrowed editor)', () => {
     expect(screen.queryByRole('button', { name: /^submit$/i })).toBeNull();
     expect(screen.queryByRole('button', { name: /^publish$/i })).toBeNull();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Editor' }));
+    // A translator opens a section in place like anyone else; the card is narrowed.
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit “Hi”' }));
     // Locale tabs: base + the GRANTED locale only — fr is configured for the
     // org but outside the grant, so it must not render as a tab.
     await waitFor(() => expect(screen.getByRole('tab', { name: /english.*base/i })).toBeTruthy());
@@ -166,7 +171,11 @@ describe('translator surface — granted (narrowed editor)', () => {
     // the ancestor fieldset disables everything inside it (HTML semantics).
     expect((heading.closest('fieldset') as HTMLFieldSetElement | null)?.disabled).toBe(true);
 
-    // No section-structure controls, no add-section, no history/schedule panels.
+    // No section-structure controls, no add-section, no Page tab, no history/schedule panels.
+    expect(screen.queryByRole('button', { name: /^Move .*up$/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Delete/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Drag to reorder/ })).toBeNull();
+    expect(screen.queryByRole('tab', { name: 'Page' })).toBeNull();
     expect(screen.queryByRole('button', { name: /move up/i })).toBeNull();
     expect(screen.queryByRole('button', { name: /remove section/i })).toBeNull();
     expect(screen.queryByLabelText(/add section/i)).toBeNull();
@@ -178,7 +187,11 @@ describe('translator surface — granted (narrowed editor)', () => {
     seams.myGrant = { subject: 'u2', locales: ['es'], updatedAt: '2026-01-01T00:00:00Z' };
     renderTranslator('/cms/translate/o1/p1');
     await waitFor(() => expect(screen.getByText(/\/landing · v3/)).toBeTruthy());
-    fireEvent.click(screen.getByRole('button', { name: 'Editor' }));
+    // Save appears once there is something to save: edit the granted overlay.
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit “Hi”' }));
+    fireEvent.click(await screen.findByRole('tab', { name: /español/i }));
+    const editable = screen.getAllByRole('textbox').find((el) => !(el.closest('fieldset') as HTMLFieldSetElement | null)?.disabled) as HTMLInputElement;
+    fireEvent.change(editable, { target: { value: 'Hola' } });
     await waitFor(() => expect(screen.getByRole('button', { name: /^save$/i })).toBeTruthy());
     fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
     await waitFor(() => expect(seams.savedBodies.length).toBe(1));
@@ -198,8 +211,8 @@ describe('translator surface — granted (narrowed editor)', () => {
     seams.myGrant = { subject: 'u2', locales: ['es'], updatedAt: '2026-01-01T00:00:00Z' };
     renderTranslator('/cms/translate/o1/p1');
     await waitFor(() => expect(screen.getByText(/\/landing · v3/)).toBeTruthy());
-    fireEvent.click(screen.getByRole('button', { name: 'Editor' }));
-    await waitFor(() => expect(screen.getByRole('button', { name: /^save$/i })).toBeTruthy());
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit “Hi”' }));
+    await waitFor(() => expect(screen.getByRole('tab', { name: /english.*base/i })).toBeTruthy());
     // The page TITLE input (value 'Landing Page') and the tags input must not render.
     expect(screen.queryByDisplayValue('Landing Page')).toBeNull();
     expect(screen.queryByPlaceholderText(/add tag/i)).toBeNull();

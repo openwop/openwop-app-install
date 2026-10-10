@@ -3,8 +3,8 @@
 Multi-agent research crew — 4 specialists bundled in one pack. Planner orchestrates; Retriever gathers; Critic reviews; Writer synthesizes.
 
 | Pack name | `core.openwop.agents.research-crew` |
-| Version | `1.0.0` |
-| Engine | OpenWOP `>=1.1.0 <2.0.0` |
+| Version | `1.0.1` |
+| Engine | OpenWOP `>=1.1.0 <3.0.0` |
 | Agents | 4 (planner / retriever / critic / writer) |
 | Required host capabilities | `aiProviders`, `host.agentRuntime`, `openwop.agents.memoryBackends ≥ longTerm` |
 | License | Apache-2.0 |

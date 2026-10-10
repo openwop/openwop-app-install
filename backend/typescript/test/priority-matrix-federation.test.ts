@@ -255,15 +255,15 @@ describe('federation — fan-out cache (ADR 0061 #3)', () => {
 describe('federation — route RBAC', () => {
   it('a plain member cannot add a peer (superadmin only); federated read with no peers is local-only', async () => {
     const c = client();
-    const login = await c.post('/v1/host/openwop-app/test/login', { email: `fed-${Date.now()}-${n++}@acme.test` });
+    const login = await c.post('/host/openwop-app/test/login', { email: `fed-${Date.now()}-${n++}@acme.test` });
     expect(login.status).toBe(201);
     // Non-superadmin add → 403.
-    const add = await c.post('/v1/host/openwop-app/priority-matrix/peers', { label: 'X', baseUrl: 'https://x.example.test' });
+    const add = await c.post('/host/openwop-app/priority-matrix/peers', { label: 'X', baseUrl: 'https://x.example.test' });
     expect(add.status).toBe(403);
     // Peer list is empty + readable.
-    expect((await c.get('/v1/host/openwop-app/priority-matrix/peers')).body.peers).toEqual([]);
+    expect((await c.get('/host/openwop-app/priority-matrix/peers')).body.peers).toEqual([]);
     // Federated portfolio with no peers == local-only (here: no lists ⇒ empty, no peer errors).
-    const fed = await c.get('/v1/host/openwop-app/priority-matrix/portfolio/federated');
+    const fed = await c.get('/host/openwop-app/priority-matrix/portfolio/federated');
     expect(fed.status).toBe(200);
     expect(fed.body.peers).toEqual([]);
     expect(Array.isArray(fed.body.items)).toBe(true);
@@ -272,9 +272,9 @@ describe('federation — route RBAC', () => {
   it('a member sets their OWN peer credential (204) but not the tenant-shared one (403, superadmin)', async () => {
     const tenantId = `org:cred-${Date.now()}-${n++}`;
     const c = client();
-    expect((await c.post('/v1/host/openwop-app/test/login', { email: `cred-${Date.now()}-${n++}@acme.test`, tenantId })).status).toBe(201);
+    expect((await c.post('/host/openwop-app/test/login', { email: `cred-${Date.now()}-${n++}@acme.test`, tenantId })).status).toBe(201);
     const peer = await addPeer(tenantId, 'admin', { label: 'East', baseUrl: 'https://east.example.test' });
-    const url = `/v1/host/openwop-app/priority-matrix/peers/${encodeURIComponent(peer.id)}/credential`;
+    const url = `/host/openwop-app/priority-matrix/peers/${encodeURIComponent(peer.id)}/credential`;
     expect((await c.put(url, { token: 'mine', scope: 'user' })).status).toBe(204);   // own cred (c1)
     expect((await c.put(url, { token: 'shared', scope: 'tenant' })).status).toBe(403); // tenant cred = superadmin
   });

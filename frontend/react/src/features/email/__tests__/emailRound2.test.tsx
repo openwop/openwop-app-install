@@ -9,38 +9,45 @@
  *    as one; a failed estimate degrades to the countless copy.
  *  - EM-G3: the test-send modal posts the address; success closes it.
  *  - EM-SP-9/10: agent-drafted chip; localized skip reasons.
+ *
+ * Sabotage-witnessed (/grade-tests wave 9, `w9g4-r2-*`). The "successful read"
+ * positive case used to assert the INPUT only, and stayed green with Save forced
+ * disabled (`w9g4-r2-save-positive-VACUOUS`); it now asserts the Save button its
+ * title names. Mocks are typed against the real client, so a fixture that drifts
+ * from `EngagementStats` / `Campaign` / `SendLog` fails `tsc` (the engagement
+ * fixtures were missing `unsubscribesUnenforced`).
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import type { Campaign } from '../emailClient.js';
+import type * as EC from '../emailClient.js';
+import type { Campaign, EngagementStats } from '../emailClient.js';
 
-const listCampaigns = vi.fn();
-const listTemplates = vi.fn();
-const listSegments = vi.fn();
-const getEmailSettings = vi.fn();
-const putEmailSettings = vi.fn();
-const getSegmentEstimate = vi.fn();
-const sendCampaign = vi.fn();
-const sendTestEmail = vi.fn();
-import type { SendLog } from '../emailClient.js';
-const listSends = vi.fn(async (..._a: unknown[]): Promise<SendLog[]> => []);
-const getEngagement = vi.fn();
+const listCampaigns = vi.fn<typeof EC.listCampaigns>();
+const listTemplates = vi.fn<typeof EC.listTemplates>();
+const listSegments = vi.fn<typeof EC.listSegments>();
+const getEmailSettings = vi.fn<typeof EC.getEmailSettings>();
+const putEmailSettings = vi.fn<typeof EC.putEmailSettings>();
+const getSegmentEstimate = vi.fn<typeof EC.getSegmentEstimate>();
+const sendCampaign = vi.fn<typeof EC.sendCampaign>();
+const sendTestEmail = vi.fn<typeof EC.sendTestEmail>();
+const listSends = vi.fn<typeof EC.listSends>(async () => []);
+const getEngagement = vi.fn<typeof EC.getEngagement>();
 const confirmFn = vi.fn();
 
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 vi.mock('../emailClient.js', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
-  listCampaigns: (...a: unknown[]) => listCampaigns(...a),
-  listTemplates: (...a: unknown[]) => listTemplates(...a),
-  listSegments: (...a: unknown[]) => listSegments(...a),
-  getEmailSettings: (...a: unknown[]) => getEmailSettings(...a),
-  putEmailSettings: (...a: unknown[]) => putEmailSettings(...a),
-  getSegmentEstimate: (...a: unknown[]) => getSegmentEstimate(...a),
-  sendCampaign: (...a: unknown[]) => sendCampaign(...a),
-  sendTestEmail: (...a: unknown[]) => sendTestEmail(...a),
-  listSends: (...a: unknown[]) => listSends(...a),
-  getEngagement: (...a: unknown[]) => getEngagement(...a),
+  listCampaigns: (...a: Parameters<typeof EC.listCampaigns>) => listCampaigns(...a),
+  listTemplates: (...a: Parameters<typeof EC.listTemplates>) => listTemplates(...a),
+  listSegments: (...a: Parameters<typeof EC.listSegments>) => listSegments(...a),
+  getEmailSettings: (...a: Parameters<typeof EC.getEmailSettings>) => getEmailSettings(...a),
+  putEmailSettings: (...a: Parameters<typeof EC.putEmailSettings>) => putEmailSettings(...a),
+  getSegmentEstimate: (...a: Parameters<typeof EC.getSegmentEstimate>) => getSegmentEstimate(...a),
+  sendCampaign: (...a: Parameters<typeof EC.sendCampaign>) => sendCampaign(...a),
+  sendTestEmail: (...a: Parameters<typeof EC.sendTestEmail>) => sendTestEmail(...a),
+  listSends: (...a: Parameters<typeof EC.listSends>) => listSends(...a),
+  getEngagement: (...a: Parameters<typeof EC.getEngagement>) => getEngagement(...a),
   listOrgs: async () => [{ orgId: 'org:1', name: 'Acme' }],
   // FLAKE FIX — this was UNMOCKED, so the real `getProviderStatus` ran a live
   // fetch in jsdom, rejected, and rendered a SECOND "Retry" (the provider-status
@@ -64,17 +71,22 @@ const { EmailPage } = await import('../EmailPage.js');
 const campaign = (over: Partial<Campaign> = {}): Campaign => ({
   campaignId: 'c1', orgId: 'org:1', templateId: 'tpl1',
   audience: { stage: 'lead' }, status: 'draft', createdAt: '2026-08-09T00:00:00Z', updatedAt: '', ...over,
-} as Campaign);
+});
 
 const renderPage = () => render(<MemoryRouter><EmailPage /></MemoryRouter>);
 
 beforeEach(() => {
+  // mockReset, not clearAllMocks alone: clearAllMocks KEEPS implementations, so a
+  // rejection set by one case (estimate / engagement / test send) leaked into the next.
   vi.clearAllMocks();
+  getSegmentEstimate.mockReset();
+  getEngagement.mockReset();
+  sendTestEmail.mockReset();
   listTemplates.mockResolvedValue([{ templateId: 'tpl1', orgId: 'org:1', name: 'Welcome', subject: 's', body: 'b', createdAt: '', updatedAt: '' }]);
   listCampaigns.mockResolvedValue([]);
   listSegments.mockResolvedValue([]);
   getEmailSettings.mockResolvedValue({ senderAddress: 'ops@acme.dev', configured: true });
-  sendCampaign.mockResolvedValue({ status: 'sent', stats: { sent: 1, failed: 0, skipped: 0 } });
+  sendCampaign.mockResolvedValue({ ...campaign({ status: 'sent' }), stats: { sent: 1, failed: 0, skipped: 0 } });
 });
 afterEach(cleanup);
 
@@ -107,6 +119,33 @@ describe('EM-SP-5 — a failed settings read blocks the save that would unset co
     renderPage();
     await waitFor(() => expect(screen.queryByText(/haven.t loaded yet/i)).toBeNull());
     expect((screen.getByDisplayValue('ops@acme.dev') as HTMLInputElement).disabled).toBe(false);
+    // The claim is the SAVE: the input alone stayed green with Save forced disabled.
+    expect((screen.getByRole('button', { name: /save sender/i }) as HTMLButtonElement).disabled).toBe(false);
+  });
+});
+
+describe('ADR 0848 D4 — the sender is an admin setting: an editor sees it read-only, with the reason', () => {
+  it('canEdit:false makes the field read-only (still focusable, so the reason is read) and disables save', async () => {
+    getEmailSettings.mockResolvedValue({ senderAddress: 'ops@acme.dev', configured: true, canEdit: false });
+    renderPage();
+    const input = await screen.findByDisplayValue('ops@acme.dev') as HTMLInputElement;
+    await waitFor(() => expect(input.readOnly).toBe(true));
+    expect(input.disabled).toBe(false); // disabled would drop it from the Tab order and the hint would never be heard
+    expect(screen.getByText(/only workspace admins can change the sender address/i)).toBeTruthy();
+    expect(input.getAttribute('aria-describedby')).toBe('email-sender-admin-only');
+    const save = screen.getByRole('button', { name: /save sender/i }) as HTMLButtonElement;
+    expect(save.disabled).toBe(true);
+    fireEvent.click(save);
+    expect(putEmailSettings).not.toHaveBeenCalled();
+  });
+
+  it('canEdit:true (an admin) keeps the field editable and shows no hint', async () => {
+    getEmailSettings.mockResolvedValue({ senderAddress: 'ops@acme.dev', configured: true, canEdit: true });
+    renderPage();
+    const input = await screen.findByDisplayValue('ops@acme.dev') as HTMLInputElement;
+    await waitFor(() => expect(input.disabled).toBe(false));
+    expect(input.readOnly).toBe(false);
+    expect(screen.queryByText(/only workspace admins/i)).toBeNull();
   });
 });
 
@@ -158,12 +197,30 @@ describe('EM-G3 — the test-send modal', () => {
     fireEvent.click(screen.getByRole('button', { name: /send test email/i }));
     await waitFor(() => expect(sendTestEmail).toHaveBeenCalledWith('org:1', 'c1', 'me@tester.dev'));
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
-    expect(dialog).toBeDefined();
+    expect(dialog.isConnected, 'the dialog that was open is the one that closed').toBe(false);
+  });
+});
+
+describe('ADR 0848 D5 — a metered test send says how long to wait, INSIDE the dialog', () => {
+  it('a 429 renders a localized wait in the modal and keeps it open; the next attempt clears it', async () => {
+    const { TestSendRateLimitedError } = await import('../emailClient.js');
+    listCampaigns.mockResolvedValue([campaign()]);
+    sendTestEmail.mockRejectedValueOnce(new TestSendRateLimitedError(300));
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: /send test of/i }));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.change(screen.getByLabelText(/send to/i), { target: { value: 'me@tester.dev' } });
+    fireEvent.click(screen.getByRole('button', { name: /send test email/i }));
+    await waitFor(() => expect(dialog.textContent ?? '').toMatch(/too many test sends — try again in 5 min/i));
+    expect(screen.getByRole('dialog')).toBeTruthy();
+    sendTestEmail.mockResolvedValueOnce(undefined);
+    fireEvent.click(screen.getByRole('button', { name: /send test email/i }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
   });
 });
 
 describe('EM-G3 — test-send failure polarity', () => {
-  it('a failed test send toasts the error and the modal STAYS OPEN', async () => {
+  it('a failed test send shows the error IN the dialog and the modal STAYS OPEN', async () => {
     listCampaigns.mockResolvedValue([campaign()]);
     sendTestEmail.mockRejectedValue(new Error('Configure the sender address before test-sending.'));
     renderPage();
@@ -172,8 +229,11 @@ describe('EM-G3 — test-send failure polarity', () => {
     fireEvent.change(screen.getByLabelText(/send to/i), { target: { value: 'me@tester.dev' } });
     fireEvent.click(screen.getByRole('button', { name: /send test email/i }));
     await waitFor(() => expect(sendTestEmail).toHaveBeenCalled());
-    // The modal must not close on failure — the user retries or cancels.
-    expect(screen.getByRole('dialog')).toBeTruthy();
+    // ADR 0848 D5 — the refusal renders INSIDE the dialog (focus is trapped there;
+    // a toast outside it can auto-dismiss unseen), and the modal does not close.
+    const dialog = screen.getByRole('dialog');
+    await waitFor(() => expect(dialog.textContent ?? '').toContain('Configure the sender address before test-sending.'));
+    expect(screen.getByRole('dialog')).toBe(dialog);
   });
 });
 
@@ -202,7 +262,7 @@ describe('EM-SP-9/10 — visibility', () => {
 });
 
 describe('R3 EM-SP-7 — the engagement lane gets its FIRST consumer', () => {
-  const stats = { clicks: 5, uniqueClicks: 3, unsubscribes: 1, opens: 9, uniqueOpens: 4 };
+  const stats: EngagementStats = { clicks: 5, uniqueClicks: 3, unsubscribes: 1, opens: 9, uniqueOpens: 4, unsubscribesUnenforced: 0 };
 
   it('opens the panel, shows unique/total stats + the pixel under-count caveat + events', async () => {
     listCampaigns.mockResolvedValue([campaign({ status: 'sent' })]);
@@ -232,7 +292,7 @@ describe('R3 EM-SP-7 — the engagement lane gets its FIRST consumer', () => {
 
   it('zero events on a successful read IS the designed empty state (paired polarity)', async () => {
     listCampaigns.mockResolvedValue([campaign({ status: 'sent' })]);
-    getEngagement.mockResolvedValue({ stats: { clicks: 0, uniqueClicks: 0, unsubscribes: 0, opens: 0, uniqueOpens: 0 }, events: [] });
+    getEngagement.mockResolvedValue({ stats: { clicks: 0, uniqueClicks: 0, unsubscribes: 0, opens: 0, uniqueOpens: 0, unsubscribesUnenforced: 0 }, events: [] });
     renderPage();
     await screen.findAllByText('Welcome');
     fireEvent.click(screen.getByRole('button', { name: 'Engagement' }));

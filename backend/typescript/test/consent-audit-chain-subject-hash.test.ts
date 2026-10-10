@@ -5,6 +5,10 @@
  * STOP lane writes `normalizeWaNumber(from)`). Two legs: a behavioural one over the real
  * chain, and a source scan of every `appendAudit(` site under `features/consent` so the
  * next writer cannot reintroduce the field. Born red on both against the 2026-09-11 tree.
+ *
+ * Sabotage-witnessed (/grade-tests wave 9): writing `subjectKey: rec.subjectKey` into either
+ * `appendAudit` site (recordConsent or mergeConsentCategories) turns BOTH legs red; hashing a
+ * different input on the merge site turns leg 1's same-hash assertion red.
  */
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';

@@ -56,6 +56,9 @@ describe('toRunInputs', () => {
 describe('humanizeVariableName', () => {
   it('spaces camelCase / snake / kebab and sentence-cases', () => {
     expect(humanizeVariableName('attendeeCompanyId')).toBe('Attendee company id');
+    // The exact names a chat refusal showed raw on production (2026-10-02).
+    expect(humanizeVariableName('lighthouse_lead_triage_a64874f5f94a_senderEmail')).toBe('Sender email');
+    expect(humanizeVariableName('lighthouse_lead_triage_a64874f5f94a_recipientEmail')).toBe('Recipient email');
     expect(humanizeVariableName('meeting_context')).toBe('Meeting context');
     expect(humanizeVariableName('time-min')).toBe('Time min');
     expect(humanizeVariableName('topic')).toBe('Topic');

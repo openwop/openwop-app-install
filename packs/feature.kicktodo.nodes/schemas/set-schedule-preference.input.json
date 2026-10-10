@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.kicktodo.nodes/1.30.3/set-schedule-preference.input.json",
+  "type": "object",
+  "properties": {
+    "enrollmentId": {
+      "type": "string"
+    },
+    "ownerSubject": {
+      "type": "string"
+    },
+    "daypart": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "enrollmentId",
+    "ownerSubject"
+  ]
+}

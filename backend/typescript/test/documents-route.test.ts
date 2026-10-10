@@ -50,7 +50,7 @@ function client(): Client {
 let n = 0;
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
 async function signup(c: Client, opts: { tenantId?: string } = {}): Promise<{ userId: string }> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail('doc'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
+  const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail('doc'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
@@ -60,7 +60,7 @@ async function ownerWithOrg(): Promise<{ owner: Client; orgId: string; tenantId:
   const owner = client();
   const tenantId = `org:test-${Date.now()}-${n++}`;
   await signup(owner, { tenantId });
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return { owner, orgId: org.body.orgId, tenantId };
 }
@@ -70,14 +70,14 @@ async function ownerWithMember(role: string): Promise<{ owner: Client; member: C
   await signup(owner, { tenantId });
   const member = client();
   const memberUser = await signup(member, { tenantId });
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   const orgId = org.body.orgId;
-  const add = await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: [role] });
+  const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: [role] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
   return { owner, member, orgId };
 }
-const D = (orgId: string, suffix = ''): string => `/v1/host/openwop-app/documents/orgs/${encodeURIComponent(orgId)}${suffix}`;
+const D = (orgId: string, suffix = ''): string => `/host/openwop-app/documents/orgs/${encodeURIComponent(orgId)}${suffix}`;
 
 describe('documents — toggle gating', () => {
   it('404s when the documents toggle is off', async () => {
@@ -168,7 +168,7 @@ describe('documents — promote to rich document (ADR 0350 Phase 3)', () => {
 });
 
 describe('documents — locate by bare documentId (ADR 0350 DOCS-2)', () => {
-  const L = (documentId: string): string => `/v1/host/openwop-app/documents/locate/${encodeURIComponent(documentId)}`;
+  const L = (documentId: string): string => `/host/openwop-app/documents/locate/${encodeURIComponent(documentId)}`;
 
   it('resolves the org for a member (one point lookup) and 404s uniformly otherwise', async () => {
     const { owner, orgId, tenantId } = await ownerWithOrg();
@@ -249,7 +249,7 @@ describe('documents — sharing resolver is approved/final-only', () => {
     const id = created.body.documentId;
     await owner.post(D(orgId, `/documents/${id}/versions`), { content: '# Agenda\n- Item 1' });
 
-    const mintBase = `/v1/host/openwop-app/sharing/orgs/${encodeURIComponent(orgId)}/links`;
+    const mintBase = `/host/openwop-app/sharing/orgs/${encodeURIComponent(orgId)}/links`;
     // Draft ⇒ resource not shareable ⇒ mint 404s (no leak).
     const draftMint = await owner.post(mintBase, { resourceType: 'document', resourceId: id });
     expect(draftMint.status).toBe(404);
@@ -261,15 +261,15 @@ describe('documents — sharing resolver is approved/final-only', () => {
     const token = mint.body.token;
 
     const pub = client();
-    const shared = await pub.get(`/v1/host/openwop-app/shared/${encodeURIComponent(token)}`);
+    const shared = await pub.get(`/host/openwop-app/shared/${encodeURIComponent(token)}`);
     expect(shared.status, JSON.stringify(shared.body)).toBe(200);
     expect(shared.body.resource.content).toContain('# Agenda');
 
     // Revert to draft ⇒ BOTH the content AND the social card go dark (the card
     // must not keep leaking the title once the document is no longer shareable).
     await owner.patch(D(orgId, `/documents/${id}`), { status: 'draft' });
-    expect((await pub.get(`/v1/host/openwop-app/shared/${encodeURIComponent(token)}`)).status).toBe(404);
-    expect((await pub.get(`/v1/host/openwop-app/shared/${encodeURIComponent(token)}/card`)).status).toBe(404);
+    expect((await pub.get(`/host/openwop-app/shared/${encodeURIComponent(token)}`)).status).toBe(404);
+    expect((await pub.get(`/host/openwop-app/shared/${encodeURIComponent(token)}/card`)).status).toBe(404);
   });
 });
 
@@ -296,6 +296,8 @@ describe('documents — status state machine', () => {
     const { owner, orgId } = await ownerWithOrg();
     const created = await owner.post(D(orgId, '/documents'), { title: 'Brief', kind: 'epic-brief' });
     const id = created.body.documentId;
+    // ADR 0838 D2 — approval pins a version, so the document needs content.
+    expect((await owner.post(D(orgId, `/documents/${id}/versions`), { content: '# Brief' })).status).toBe(201);
     // draft → final is not a legal transition (must pass through approved).
     const bad = await owner.patch(D(orgId, `/documents/${id}`), { status: 'final' });
     expect(bad.status, JSON.stringify(bad.body)).toBe(409);
@@ -318,7 +320,7 @@ describe('documents — canvas-sources picker (ADR 0314)', () => {
     const tenantId = `org:test-${Date.now()}-${n++}`;
     const owner = client();
     await signup(owner, { tenantId });
-    const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+    const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
     expect(org.status).toBe(201);
     const orgId = org.body.orgId;
 
@@ -348,7 +350,7 @@ describe('documents — canvas delete (ADR 0319 — Canvases folded in)', () => 
     const tenantId = `org:cdel-${Date.now()}-${n++}`;
     const owner = client();
     await signup(owner, { tenantId });
-    const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+    const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
     const orgId = org.body.orgId;
 
     const canvas = await createCanvasForTenant(tenantId, { canvasTypeId: 'canvas.drawing', name: 'Doomed', initialState: { shapes: [] } });
@@ -394,7 +396,7 @@ describe('documents — materialize from canvas (ADR 0056)', () => {
     const tenantId = `org:c2d-${Date.now()}-${n++}`;
     const c = client();
     await signup(c, { tenantId });
-    const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+    const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
     const orgId = org.body.orgId;
     await __putCanvasForTest({ canvasId: 'canvas:t1', tenantId, canvasTypeId: 'canvas.brief', name: 'Q3 Brief', state: { content: '# Brief\n\nGoals and scope.' } });
 

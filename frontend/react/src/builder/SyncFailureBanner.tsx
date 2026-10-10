@@ -13,17 +13,60 @@
  * really is unsaved, and hiding that is the bug we are fixing.
  */
 
+import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useBuilderStore } from './store/builderStore.js';
+import { useBuilderStore, overwriteWithCanvas } from './store/builderStore.js';
+import { HEAD_MOVED_REASON, loadWorkflowWithHead } from './persistence/backendStore.js';
 import { Notice } from '../ui/Notice.js';
+import { Button } from '../ui/Button.js';
+import { toast } from '../ui/toast.js';
 
 export function SyncFailureBanner(): JSX.Element | null {
   const { t } = useTranslation('builder');
   const syncState = useBuilderStore((s) => s.syncState);
   const status = useBuilderStore((s) => s.syncFailureStatus);
   const reason = useBuilderStore((s) => s.syncFailureReason);
+  const workflowId = useBuilderStore((s) => s.workflowId);
+  const [busy, setBusy] = useState(false);
 
   if (syncState !== 'failed') return null;
+
+  // ADR 0770 D5 — a 409 `workflow_head_moved`: another tab, device or person
+  // saved this workflow after it was opened here. The old behaviour was to
+  // overwrite their version silently. Nothing is lost either way (this
+  // browser's cache holds the canvas), so offer the two honest choices.
+  if (status === 409 && reason === HEAD_MOVED_REASON) {
+    const reload = async (): Promise<void> => {
+      if (!workflowId) return;
+      setBusy(true);
+      try {
+        const { workflow: latest, headRevision } = await loadWorkflowWithHead(workflowId);
+        if (latest) {
+          useBuilderStore.getState().loadFromSaved(latest);
+          useBuilderStore.getState().setBaseRevision(headRevision);
+        }
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : String(err));
+      } finally {
+        setBusy(false);
+      }
+    };
+    const message = `${t('syncConflictTitle')} ${t('syncConflictBody')}`;
+    return (
+      <Notice variant="warning" announce={message}>
+        <strong>{t('syncConflictTitle')}</strong>
+        <p className="u-fs-13 u-mt-4">{t('syncConflictBody')}</p>
+        <div className="action-bar u-mt-2">
+          <Button variant="primary" size="sm" disabled={busy} onClick={() => { void reload(); }}>
+            {t('syncConflictReload')}
+          </Button>
+          <Button variant="quiet" size="sm" disabled={busy} onClick={() => overwriteWithCanvas()}>
+            {t('syncConflictKeepMine')}
+          </Button>
+        </div>
+      </Notice>
+    );
+  }
 
   // ADR 0481 (ux-H1 + code-M6) — a 409 `workflow_room_live` is a STATE, not a
   // fault: the workflow saves through a live multiplayer session this browser
@@ -46,8 +89,11 @@ export function SyncFailureBanner(): JSX.Element | null {
 
   // Distinct guidance per cause — "try again" is useless advice for an expired
   // session, and "sign in" is wrong for a rate limit.
+  // ADR 0770 D1 — a viewer's save is refused `forbidden_scope`: signing in again
+  // would not help, and saying so would send them in a loop.
   const detail =
-    status === 401 || status === 403 ? t('syncFailedAuth')
+    status === 403 && reason === 'forbidden_scope' ? t('syncFailedReadOnly')
+    : status === 401 || status === 403 ? t('syncFailedAuth')
       : status === 429 ? t('syncFailedRateLimited')
         : t('syncFailedServer');
 

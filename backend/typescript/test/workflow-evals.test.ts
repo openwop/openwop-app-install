@@ -13,7 +13,7 @@ describe('workflow evaluations (ADR 0477, sqlite memory app)', () => {
   let server: http.Server;
   let BASE: string;
   const TOKEN = 'dev-token';
-  const API = '/v1/host/openwop-app/workflows';
+  const API = '/host/openwop-app/workflows';
   const WF = 'eval-wf-chain';       // a → b (noop)
   const WF_FAIL = 'eval-wf-fail';   // boom (core.fail)
   const WF_GATE = 'eval-wf-gate';   // transient draft for the promote gate
@@ -256,7 +256,7 @@ describe('workflow evaluations (ADR 0477, sqlite memory app)', () => {
   describe('the evals-green promote gate', () => {
     async function settle(runId: string): Promise<string> {
       for (let i = 0; i < 200; i += 1) {
-        const r = await call<{ status: string }>('GET', `/v1/runs/${runId}`);
+        const r = await call<{ status: string }>('GET', `/runs/${runId}`);
         if (r.body.status && !['pending', 'running'].includes(r.body.status)) return r.body.status;
         await new Promise((res) => setTimeout(res, 25));
       }
@@ -265,7 +265,7 @@ describe('workflow evaluations (ADR 0477, sqlite memory app)', () => {
 
     it('failing → 409 evals_failing; green → promote; head-move → stale 409; re-green → promote', async () => {
       // Green-run gate first (the pre-existing OQ5 gate).
-      const seed = await call<{ runId: string }>('POST', '/v1/runs', { workflowId: WF_GATE, inputs: {} });
+      const seed = await call<{ runId: string }>('POST', '/runs', { workflowId: WF_GATE, inputs: {} });
       expect(await settle(seed.body.runId)).toBe('completed');
 
       // A required set that FAILS.

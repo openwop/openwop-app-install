@@ -7,17 +7,31 @@
  * server refuses (409) a removal that would strand a deal, so a page that
  * guessed zero would disable nothing, promise safety, and hand the user a
  * transport error instead of an answer.
+ *
+ * Also pinned: HIGH-1 (no "No pipelines yet" during a retry), MEDIUM-1 (a
+ * territory-filtered zero is a lower bound; the server's 409 is translated),
+ * MEDIUM-2 (blanking an existing stage is a validation error, not a delete),
+ * LOW-5/6 (refusals name their exit; counts pluralize), CRM-UX-14.
+ *
+ * Sabotage that turns it red (wave-4 /grade-tests probes, 11/11 witnessed):
+ * a failed read written as `[]`; the delete gate forced open; the blank-stage
+ * guard or the added-blank filter removed; `parseFloat` for the probability;
+ * the raw 409 string toasted; the stageId dropped from the patch; reorder a
+ * no-op; the no-stages refusal removed.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor, fireEvent, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
+// Type-only (erased at runtime, so it does not race `vi.mock`).
+import type * as OrgClient from '../crmOrgClient.js';
+import type { Pipeline } from '../crmOrgClient.js';
 
 const api = vi.hoisted(() => ({
-  listPipelines: vi.fn(),
-  listDeals: vi.fn(),
-  createPipeline: vi.fn(),
-  updatePipeline: vi.fn(),
-  deletePipeline: vi.fn(),
+  listPipelines: vi.fn<typeof OrgClient.listPipelines>(),
+  listDeals: vi.fn<typeof OrgClient.listDeals>(),
+  createPipeline: vi.fn<typeof OrgClient.createPipeline>(),
+  updatePipeline: vi.fn<typeof OrgClient.updatePipeline>(),
+  deletePipeline: vi.fn<typeof OrgClient.deletePipeline>(),
 }));
 vi.mock('../crmOrgClient.js', async (orig) => {
   const actual = await orig<Record<string, unknown>>();
@@ -45,7 +59,7 @@ import { PipelinesPage } from '../PipelinesPage.js';
 import { CrmRequestError } from '../crmOrgClient.js';
 import i18n from '../../../i18n/index.js';
 
-const PIPELINE = {
+const PIPELINE: Pipeline = {
   pipelineId: 'p1',
   name: 'Sales',
   stages: [
@@ -55,17 +69,21 @@ const PIPELINE = {
 };
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  // resetAllMocks (not clear): a case's `deletePipeline.mockRejectedValue` or
+  // console.warn implementation must not leak into the next case.
+  vi.resetAllMocks();
   access.useFeatureAccess.mockReturnValue(makeFeatureAccess({ enabled: true, loading: false }));
   api.listPipelines.mockResolvedValue([PIPELINE]);
   api.listDeals.mockResolvedValue([]);
-  api.updatePipeline.mockImplementation(async (_o: string, _p: string, patch: { name?: string; stages?: Array<{ stageId?: string; name: string; probability: number }> }) => ({
+  api.createPipeline.mockImplementation(async (_o, input) => ({ pipelineId: 'p-new', name: input.name, stages: [] }));
+  api.deletePipeline.mockResolvedValue(undefined);
+  api.updatePipeline.mockImplementation(async (_o, _p, patch) => ({
     ...PIPELINE,
     name: patch.name ?? PIPELINE.name,
     stages: (patch.stages ?? []).map((s, i) => ({ stageId: s.stageId ?? `new${i}`, name: s.name, probability: s.probability })),
   }));
 });
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 function view(search = '?org=o1'): void {
   render(
@@ -109,7 +127,7 @@ describe('CRM-UX-2 — pipelines editor: designed states', () => {
     view();
     await screen.findByText('Could not load this');
 
-    const inflight = deferred<typeof PIPELINE[]>();
+    const inflight = deferred<Pipeline[]>();
     api.listPipelines.mockReturnValueOnce(inflight.promise);
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
 
@@ -160,8 +178,8 @@ describe('CRM-UX-2 — pipelines editor: writes', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(api.updatePipeline).toHaveBeenCalled());
     const [, , patch] = api.updatePipeline.mock.calls[0]!;
-    expect(patch.stages[0]).toEqual({ stageId: 's1', name: 'Discovery', probability: 25 });
-    expect(patch.stages[1]).toEqual({ stageId: 's2', name: 'Won', probability: 90 });
+    expect(patch.stages![0]).toEqual({ stageId: 's1', name: 'Discovery', probability: 25 });
+    expect(patch.stages![1]).toEqual({ stageId: 's2', name: 'Won', probability: 90 });
   });
 
   it('reorders stages — the array order IS the board column order', async () => {
@@ -170,7 +188,7 @@ describe('CRM-UX-2 — pipelines editor: writes', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(api.updatePipeline).toHaveBeenCalled());
     const [, , patch] = api.updatePipeline.mock.calls[0]!;
-    expect(patch.stages.map((s: { name: string }) => s.name)).toEqual(['Won', 'New']);
+    expect(patch.stages!.map((s) => s.name)).toEqual(['Won', 'New']);
   });
 
   it('an EMPTY probability box saves as 0, not NaN', async () => {
@@ -184,7 +202,7 @@ describe('CRM-UX-2 — pipelines editor: writes', () => {
     fireEvent.change(await screen.findByLabelText('Win % for New'), { target: { value: '' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(api.updatePipeline).toHaveBeenCalled());
-    expect(api.updatePipeline.mock.calls[0]![2].stages[0].probability).toBe(0);
+    expect(api.updatePipeline.mock.calls[0]![2].stages![0]!.probability).toBe(0);
   });
 
   it('the probability field constrains its own range (0–100, whole numbers)', async () => {
@@ -221,7 +239,7 @@ describe('CRM-UX-2 — pipelines editor: writes', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Add stage' }));
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(api.updatePipeline).toHaveBeenCalled());
-    expect(api.updatePipeline.mock.calls[0]![2].stages.map((s: { name: string }) => s.name)).toEqual(['New', 'Won']);
+    expect(api.updatePipeline.mock.calls[0]![2].stages!.map((s) => s.name)).toEqual(['New', 'Won']);
     expect(toastError).not.toHaveBeenCalled();
   });
 
@@ -326,22 +344,20 @@ describe('MEDIUM-1 — the deals read is territory-filtered, so a zero is a LOWE
     expect(await screen.findByText(/A removal you are allowed to try can still be refused/)).toBeTruthy();
   });
 
-  it('a positive count is still trusted: a lower bound above zero blocks the removal', async () => {
-    api.listDeals.mockResolvedValue([{ dealId: 'd1', title: 'X', pipelineId: 'p1', stageId: 's1' }]);
-    view();
-    expect(((await screen.findByRole('button', { name: 'Delete' })) as HTMLButtonElement).disabled).toBe(true);
-  });
+  // "a positive count is still trusted" was CUT (wave-4 /grade-tests g4): it was
+  // the first assertion of 'blocks the pipeline delete and names the count AND
+  // the way out' above, same fixture, same `Delete.disabled === true`; probe
+  // w4g4-pp-delete-unblocked reddened both.
 
   it('the server’s 409 on DELETE is translated, not handed over as wire English', async () => {
     api.listDeals.mockResolvedValue([]); // a zero this viewer cannot back
     api.deletePipeline.mockRejectedValue(new CrmRequestError('Pipeline still has deals — move or delete them first.', 409));
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
     view();
     fireEvent.click(await screen.findByRole('button', { name: 'Delete' }));
     await waitFor(() => expect(toastError).toHaveBeenCalled());
     expect(toastError).toHaveBeenCalledWith(expect.stringContaining('outside your territory'));
     expect(toastError).not.toHaveBeenCalledWith(expect.stringContaining('Pipeline still has deals'));
-    confirmSpy.mockRestore();
   });
 
   it('the server’s 409 on a dropped STAGE is translated too', async () => {
@@ -363,13 +379,12 @@ describe('MEDIUM-1 — the deals read is territory-filtered, so a zero is a LOWE
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     api.listDeals.mockResolvedValue([]);
     api.deletePipeline.mockRejectedValue(new CrmRequestError('deletePipeline returned 500', 500));
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
     view();
     fireEvent.click(await screen.findByRole('button', { name: 'Delete' }));
     await waitFor(() => expect(toastError).toHaveBeenCalled());
     const msg = toastError.mock.calls[0]![0] as string;
     expect(msg).toBe(i18n.t('crm:httpServerError'));
     expect(msg).not.toContain('returned 500');
-    confirmSpy.mockRestore();
   });
 });

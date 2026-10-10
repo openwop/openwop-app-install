@@ -10,7 +10,7 @@ import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { makeMockDeployAdapter } from '../src/features/app-builder/deploy/adapter.js';
-import { startDeploy, rollbackDeploy, getDeployment, parseEnvKeys } from '../src/features/app-builder/deploy/deployService.js';
+import { startDeploy, rollbackDeploy, getDeployment, parseEnvKeys, namespacedServiceName } from '../src/features/app-builder/deploy/deployService.js';
 
 let server: http.Server;
 const T = 'tenant-deploy-1';
@@ -39,7 +39,9 @@ describe('deploy records', () => {
     const adapter = makeMockDeployAdapter();
     const first = await startDeploy(adapter, BASE);
     expect(first.status).toBe('deployed');
-    expect(first.revision).toBe('my-app-rev-1');
+    // ADR 0835 D1 — the provider sees the namespaced name, never the caller's.
+    expect(first.cloudRunService).toBe(namespacedServiceName(T, 'org-1', 'my-app'));
+    expect(first.revision).toBe(`${first.cloudRunService}-rev-1`);
     expect(adapter.calls.deploy).toBe(1);
     const again = await startDeploy(adapter, BASE);
     expect(again.deployKey).toBe(first.deployKey);
@@ -54,9 +56,10 @@ describe('deploy records', () => {
     const adapter = makeMockDeployAdapter();
     const a = await startDeploy(adapter, { ...BASE, service: 'roll-app', image: 'img:v1' });
     await startDeploy(adapter, { ...BASE, service: 'roll-app', image: 'img:v2' });
-    const rolled = await rollbackDeploy(adapter, T, a.deployKey, 'roll-app-rev-1');
+    const rev1 = `${a.cloudRunService}-rev-1`;
+    const rolled = await rollbackDeploy(adapter, T, a.deployKey, rev1);
     expect(rolled.status).toBe('rolled-back');
-    expect(rolled.revision).toBe('roll-app-rev-1');
+    expect(rolled.revision).toBe(rev1);
     await expect(rollbackDeploy(adapter, T, a.deployKey, 'ghost-rev')).rejects.toMatchObject({ code: 'invalid_request' });
   });
 

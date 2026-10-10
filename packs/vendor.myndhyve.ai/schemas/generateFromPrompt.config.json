@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.ai/1.0.0/generateFromPrompt.config.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.ai/1.0.2/generateFromPrompt.config.json",
   "title": "GenerateFromPromptConfig",
   "type": "object",
   "required": ["systemPrompt", "envelopeType"],

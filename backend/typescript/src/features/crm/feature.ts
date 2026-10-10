@@ -24,13 +24,17 @@ import { registerCrmOrgRoutes } from './orgRoutes.js';
 import { registerCrmBookingRoutes } from './bookingRoutes.js';
 import { registerCrmSignRoutes } from './signRoutes.js';
 import { registerGmailSyncRoutes } from './gmailSyncRoutes.js';
-import { buildCrmSurface } from './surface.js';
+import { buildCrmSurface, CRM_SURFACE_POLICY } from './surface.js';
 import { registerCrmApprovalHandlers } from './contactMergeApproval.js';
 import { registerCrmFormsSink } from './formsSubmissionSink.js';
 import { registerCrmAgentTools } from './agentTools.js';
 import { onConnectionRevoked, onConnectionStatusChanged } from '../../host/connectionLifecycle.js';
-import { markGmailSyncsNeedsReconsent, pauseGmailSyncsForRevokedConnection, resumeGmailSyncsForReconsentedConnection } from './gmailSyncService.js';
+import { markGmailSyncsNeedsReconsent, pauseGmailSyncsForRevokedConnection, registerGmailSyncWorkflowFeature, resumeGmailSyncsForReconsentedConnection } from './gmailSyncService.js';
 import { registerCrmErasure } from './erasure.js';
+import { registerChainBackedWorkflow } from '../../host/chainBackedWorkflows.js';
+import { CRM_TRIAGE_WORKFLOW_ID } from './triageDispatch.js';
+import { registerFeatureDataExporter } from '../../host/featureDataExport.js';
+import { exportCrmData } from './dataExport.js';
 
 export const crmFeature: BackendFeature = {
   id: 'crm',
@@ -44,6 +48,7 @@ export const crmFeature: BackendFeature = {
   // them would be vacuous; only the toggleable targets belong here.
   recommends: ['commerce', 'documents'],
   registerRoutes: (deps) => {
+    registerGmailSyncWorkflowFeature(); // ADR 0820 §7 / G6
     registerCrmRoutes(deps); // preserved tenant-scoped contacts + triage (ADR 0001 §4)
     registerCrmOrgRoutes(deps); // org-scoped companies/deals/pipelines + RBAC (ADR 0008)
     registerCrmBookingRoutes(deps); // public booking links + slot claim (ADR 0402 §a)
@@ -53,6 +58,12 @@ export const crmFeature: BackendFeature = {
     registerCrmFormsSink(); // ADR 0330 §D1 — the `crm-contact` forms submission sink (crm → forms)
     registerCrmAgentTools(); // CFP-1 — sales-ops + segment-author chat tools over ctx.features.crm (ADR 0308 D2)
     registerCrmErasure(); // CRM-2 — ADR 0464 subject eraser + the email→contactId key resolver
+    registerFeatureDataExporter('crm', exportCrmData); // ADR 0820 §7 — read-only export, served after a plan lapse
+    // ADR 0837 D7 — the Triage action's workflow, SAME-ID chain-backed (the
+    // career.campaign precedent): the route launches it by this stable id on every
+    // instance, and the chain stays gallery-visible (a from-chain copy is editable,
+    // under its own id the button does not launch).
+    registerChainBackedWorkflow(CRM_TRIAGE_WORKFLOW_ID, { featureId: 'crm' });
     // ADR 0285 — pause (never delete) gmail syncs when their connection is
     // revoked; the status path also disables the scheduler job.
     onConnectionRevoked('crm-gmail-sync', async ({ tenantId, connectionId }) => {
@@ -69,8 +80,9 @@ export const crmFeature: BackendFeature = {
     });
   },
   // Face 2 (ADR 0014 Phase 4): `ctx.features.crm` — the second reference surface,
-  // proving the FeatureModule pattern generalizes. Read-only org-scoped CRM reads.
-  surface: { id: 'crm', build: buildCrmSurface },
+  // proving the FeatureModule pattern generalizes. ADR 0837 D2 — the writers ask
+  // what their HTTP doors ask (see CRM_SURFACE_POLICY).
+  surface: { id: 'crm', build: buildCrmSurface, orgPolicy: CRM_SURFACE_POLICY },
   toggleDefault: {
     id: 'crm',
     label: 'CRM',
@@ -83,7 +95,7 @@ export const crmFeature: BackendFeature = {
       {
         key: 'basic',
         weight: 50,
-        bindings: [{ slot: 'crm.triage', ref: { kind: 'node', name: 'feature.crm.nodes.triage', version: '1.0.0' } }],
+        bindings: [{ slot: 'crm.triage', ref: { kind: 'node', name: 'feature.crm.nodes.triage', version: '1.1.0' } }],
       },
       {
         key: 'enriched',
@@ -93,10 +105,10 @@ export const crmFeature: BackendFeature = {
     ],
   },
   requiredPacks: [
-    { name: 'feature.crm.nodes', version: '1.10.0' }, // v1.10.0 — ADR 0627 D1/D5: 13 write nodes role:"side-effect" + schemas, gmail-sync connection pin + typed outcomes; v1.9.0 ADR 0265 CDP-C persist-segment
+    { name: 'feature.crm.nodes', version: '1.11.0' }, // v1.11.0 — ADR 0837 D7: get-contact + record-triage, triage 1.1.0 takes the run's variant; v1.10.0 — ADR 0627 D1/D5: 13 write nodes role:"side-effect" + schemas, gmail-sync connection pin + typed outcomes; v1.9.0 ADR 0265 CDP-C persist-segment
 
     // Audit CRMGAP-FE-1b: the sales-ops agent must survive a requiredPacks-
     // filtered install (the CSM feature declares both packs; mirror it).
-    { name: 'feature.crm.agents', version: '1.1.1' }, // v1.1.1 — CFP-1 real sales-ops + segment-author chat tools; v1.1.0 ADR 0265 CDP-C segment-author persona
+    { name: 'vendor.openwop-app.crm.agents', version: '1.1.2' }, // v1.1.1 — CFP-1 real sales-ops + segment-author chat tools; v1.1.0 ADR 0265 CDP-C segment-author persona
   ],
 };

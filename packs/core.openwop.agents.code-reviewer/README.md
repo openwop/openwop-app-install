@@ -3,8 +3,8 @@
 Code review agent. Reviews diffs or files for correctness, security, style, and design issues. Cites file:line for every finding. Severity-classifies findings.
 
 | Pack name | `core.openwop.agents.code-reviewer` |
-| Version | `1.0.0` |
-| Engine | OpenWOP `>=1.1.0 <2.0.0` |
+| Version | `1.0.2` |
+| Engine | OpenWOP `>=1.1.0 <3.0.0` |
 | Runtime | `language: remote` |
 | Agents | 1 |
 | Required host capabilities | `aiProviders`, `host.agentRuntime`, `host.fs` (for `openwop:core.files.read`) |

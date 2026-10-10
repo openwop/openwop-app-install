@@ -119,3 +119,5 @@ build-meta/corpus-suite.txt
 # exists to prevent — and would let a reviewer edit a profile list in a PR.
 build-meta/certification-bundle.json
 build-meta/conformance-claims.json
+# ADR 0782 / NP-V2 Track C — which checkout + session made this build (upload-only forensics).
+build-meta/deployer.json

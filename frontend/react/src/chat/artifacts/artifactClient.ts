@@ -66,6 +66,13 @@ export interface ArtifactPage { artifacts: ArtifactProjection[]; nextCursor?: st
 
 /** ADR 0083 — the Library: a bounded, cursor-paginated page of every artifact the caller can
  *  see, across sources, newest first (ART-1 — caps the payload instead of shipping all rows). */
+/** ADR 0768 follow-up P2 — ONE run's artifacts (a filter over the Library, never
+ *  wider), each with the node that produced it. Backs "open in the Workbench". */
+export async function listRunArtifacts(runId: string): Promise<Array<ArtifactProjection & { runNodeId: string }>> {
+  const res = await http<{ artifacts: Array<ArtifactProjection & { runNodeId: string }> }>(`${BASE}?runId=${encodeURIComponent(runId)}`);
+  return res.artifacts;
+}
+
 export async function listArtifacts(opts: { limit?: number; cursor?: string } = {}): Promise<ArtifactPage> {
   const q = new URLSearchParams();
   if (opts.limit != null) q.set('limit', String(opts.limit));

@@ -49,7 +49,7 @@ export const canvasPacksFeature: BackendFeature = {
     // `orgs` cannot collide with the per-type base paths below — their next
     // segment always matches `canvas.<slug>` (the loader's strict id regex).
     const servedTypes: { canvasTypeId: string; title: string }[] = [];
-    deps.app.get('/v1/host/openwop-app/canvas-packs/orgs/:orgId/types', async (req, res, next) => {
+    deps.app.get('/host/openwop-app/canvas-packs/orgs/:orgId/types', async (req, res, next) => {
       try {
         await authorizeOrgScope(req, { toggleId: 'canvas-packs', label: 'Canvas Packs' }, 'workspace:read');
         res.json({ types: servedTypes });
@@ -76,7 +76,7 @@ export const canvasPacksFeature: BackendFeature = {
       const editor = packType.editor;
       servedTypes.push({ canvasTypeId: packType.canvasTypeId, title: at.title });
       registerCanvasEditorRoutes(deps, {
-        basePath: `/v1/host/openwop-app/canvas-packs/${packType.canvasTypeId}`,
+        basePath: `/host/openwop-app/canvas-packs/${packType.canvasTypeId}`,
         feature: { toggleId: 'canvas-packs', label: 'Canvas Packs' },
         canvasTypeId: packType.canvasTypeId,
         editorHints: editor,
@@ -102,7 +102,7 @@ export const canvasPacksFeature: BackendFeature = {
     id: 'canvas-packs',
     label: 'Canvas Packs',
     description:
-      'Serve full-screen generic editors for canvas types declared by installed artifact-type packs (the `x-openwop-app.canvas` vendor extension): element lists with pack-defined adders and property fields, undo/redo, and version history — over an editable `host.canvas` working copy validated by the pack’s own artifact schema. One toggle gates all pack editors. Data-only packs — never executable code. OFF by default.',
+      'Serve full-screen generic editors for canvas types declared by installed artifact-type packs (the `x-openwop-app.canvas` vendor extension): element lists with pack-defined adders and property fields, undo/redo, and version history — over an editable `host.canvas` working copy validated by the pack’s own artifact schema. One toggle gates all pack editors. Data-only packs — never executable code.',
     category: 'Canvases',
     status: 'off',
     bucketUnit: 'tenant',

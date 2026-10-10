@@ -19,7 +19,7 @@ import { getBoardByHandle, ensureBoardChat } from '../../features/advisory-board
 import { getProject } from '../../features/projects/projectsClient.js';
 import { listRoster } from '../../agents/rosterClient.js';
 import { planBoardroomTurns, orderConveneCohort } from './boardroomCadence.js';
-import { detectBoardMention, type AgentMentionEntry } from '../lib/agentMentions.js';
+import { detectBoardMention, resolveAgentEntriesById, type AgentMentionEntry } from '../lib/agentMentions.js';
 import { formatNumber } from '../../i18n/format.js';
 import type { TFunction } from 'i18next';
 import type { BoardroomCadence } from './useBoardroomCadence.js';
@@ -72,9 +72,13 @@ export async function runProjectConvene(topic: string, deps: ConveneDeps): Promi
     // non-member for — the moderator invariant defeated by a substitution, not by a
     // bypass.
     let moderatorResolved = false;
+    const resolved = await resolveAgentEntriesById(
+      cohortRosterIds.map((id) => agentIdByRoster.get(id)).filter((id): id is string => typeof id === 'string'),
+      agentEntries,
+    );
     for (const rosterId of cohortRosterIds) {
       const agentId = agentIdByRoster.get(rosterId);
-      const entry = agentId ? agentEntries.find((e) => e.agentId === agentId) : undefined;
+      const entry = agentId ? resolved.get(agentId) : undefined;
       if (entry) {
         const routed = activeAgents.activateAgent(entry);
         chairAgentId ??= routed;
@@ -174,9 +178,15 @@ export function buildBoardInterceptor(deps: ConveneDeps): SubmitInterceptor {
       let moderatorResolved = false;
       const cohortAgentRefs: string[] = [];
       const activatedAgentIds: string[] = [];
+      // The advisors' ids are known exactly (the roster's `agentRef`); resolve them
+      // against the inventory, not just the picker's list (see resolveAgentEntriesById).
+      const resolved = await resolveAgentEntriesById(
+        cohort.map((id) => agentIdByRoster.get(id)).filter((id): id is string => typeof id === 'string'),
+        agentEntries,
+      );
       for (const rosterId of cohort) {
         const agentId = agentIdByRoster.get(rosterId);
-        const entry = agentId ? agentEntries.find((e) => e.agentId === agentId) : undefined;
+        const entry = agentId ? resolved.get(agentId) : undefined;
         if (entry) {
           const routed = activeAgents.activateAgent(entry);
           if (!chairAgentId) chairAgentId = routed;
@@ -217,6 +227,17 @@ export function buildBoardInterceptor(deps: ConveneDeps): SubmitInterceptor {
           board.turnPolicy,
         );
         if (plan.length > 0) cadenceStart(plan, config, boardMatch.trailing?.trim() || text, boardMatch.handle);
+      }
+      if (activated < cohort.length) {
+        // Say WHICH half is missing, where a developer can read it: a roster row
+        // with no agent behind it is a data problem; an agent id the inventory
+        // does not list is a visibility one. The user-facing line stays plain.
+        console.warn('[convene] unresolved board advisors', {
+          board: boardMatch.handle,
+          noRosterRow: cohort.filter((id) => !agentIdByRoster.has(id)),
+          rosterRowWithoutAgent: cohort.filter((id) => agentIdByRoster.has(id) && !agentIdByRoster.get(id)),
+          agentNotInInventory: cohort.map((id) => agentIdByRoster.get(id)).filter((id): id is string => typeof id === 'string' && !resolved.has(id)),
+        });
       }
       if (activated === 0) {
         emitSystem(t('chat:conveneBoardNoAdvisors', { handle: boardMatch.handle }));

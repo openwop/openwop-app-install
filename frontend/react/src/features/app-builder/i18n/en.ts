@@ -80,7 +80,7 @@ export const messages = {
   publishFailed: 'Publish failed.',
   publishClose: 'Close',
   exportWarningsTitle: 'What the export left out',
-  exportWarningsIntro: 'The download started, but {{count}} part(s) of this app could not be expressed in {{target}} and are missing from the generated source.',
+  exportWarningsIntro: 'The download started, but {{count}} part(s) of this app could not be carried into {{target}} exactly — each is listed below: skipped, or exported with its default value.',
   syncLoadFailedTitle: 'Could not read the repository binding',
   syncLoadFailedBody: 'So this canvas may or may not already be bound. Binding from here would mint a new webhook secret and break an existing GitHub webhook — retry the read first.',
   syncRetry: 'Retry',

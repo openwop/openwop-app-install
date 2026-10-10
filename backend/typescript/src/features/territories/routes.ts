@@ -44,7 +44,7 @@ const authorize = (req: Request, scope: Scope) => authorizeOrgScope(req, { toggl
 
 export function registerTerritoryRoutes(deps: RouteDeps): void {
   const { app } = deps;
-  const BASE = '/v1/host/openwop-app/territories/orgs/:orgId';
+  const BASE = '/host/openwop-app/territories/orgs/:orgId';
 
   // ── Territory types ──
   app.get(`${BASE}/types`, async (req, res, next) => {

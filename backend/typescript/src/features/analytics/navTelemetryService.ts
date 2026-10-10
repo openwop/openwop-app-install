@@ -28,6 +28,7 @@
  * Pinned by `test/nav-telemetry-teardown-mechanism.test.ts`.
  */
 import { DurableCollection } from '../../host/hostExtPersistence.js';
+import { registerRetentionPurger, purgeRowsByAge } from '../../host/retentionPurger.js';
 
 export const NAV_SOURCES = [
   'sidebar', 'palette', 'hub', 'breadcrumb', 'deep-link', 'in-app-link', 'admin-rail',
@@ -49,9 +50,13 @@ interface NavCountRow {
   count: number;
 }
 
+/** The row key — ONE definition, used by the collection and by the purger.
+ *  The collection's key fn names `r.tenantId` inline on purpose: the teardown
+ *  reachability ratchet reads that text to prove the key is tenant-prefixed. */
+const navKeyOf = (tenantId: string, r: Pick<NavCountRow, 'week' | 'source' | 'route'>): string => `${tenantId}::${r.week}::${r.source}::${r.route}`;
 const counts = new DurableCollection<NavCountRow>(
   'analytics:nav-counts',
-  (r) => `${r.tenantId}::${r.week}::${r.source}::${r.route}`,
+  (r) => navKeyOf(r.tenantId, r),
 );
 
 /** ISO-8601 week label for a date (UTC). */
@@ -63,6 +68,35 @@ export function isoWeek(d: Date): string {
   const week = Math.ceil((((date.getTime() - yearStart.getTime()) / 86400000) + 1) / 7);
   return `${date.getUTCFullYear()}-W${String(week).padStart(2, '0')}`;
 }
+
+/** ADR 0857 D4 — the exclusive END of an ISO week label (`YYYY-Www` → the
+ *  following Monday 00:00Z), or undefined for a malformed label. Anchored on
+ *  4 January of the ISO year — the date ISO 8601 guarantees is in week 1 — so a
+ *  week 1 that starts in the previous calendar year (2020-W01 = 2019-12-30)
+ *  comes out right. A row is purged only once its WHOLE week is older than the
+ *  cutoff, which errs toward retention. */
+export function isoWeekEnd(week: string): string | undefined {
+  const m = /^(\d{4})-W(\d{2})$/.exec(week);
+  if (!m) return undefined;
+  const jan4 = Date.UTC(Number(m[1]), 0, 4);
+  const dow = new Date(jan4).getUTCDay() || 7;
+  const week1Monday = jan4 - (dow - 1) * 86_400_000;
+  return new Date(week1Monday + Number(m[2]) * 7 * 86_400_000).toISOString();
+}
+
+// ADR 0857 D4 (was ANLWF-12) — weekly rows accumulated forever (`navReport`
+// reads 6). Counts-only aggregates hold no individual data ⇒ `internal`. A
+// malformed week label carries no age, so it is never deleted on a guess.
+registerRetentionPurger({
+  feature: 'analytics-nav-counts',
+  async purge(tenantId, classification, cutoffIso) {
+    if (!tenantId || classification !== 'internal') return 0;
+    const rows = (await counts.listByPrefix(`${tenantId}::`)).filter((r) => isoWeekEnd(r.week) !== undefined);
+    return purgeRowsByAge('analytics-nav-counts', rows, tenantId, cutoffIso,
+      (r) => ({ tenantId: r.tenantId, updatedAt: isoWeekEnd(r.week)!, id: navKeyOf(r.tenantId, r) }),
+      (id) => counts.delete(id));
+  },
+});
 
 export type RecordNavResult = 'recorded' | 'invalid' | 'capped';
 

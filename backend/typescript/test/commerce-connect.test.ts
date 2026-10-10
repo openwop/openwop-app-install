@@ -42,7 +42,7 @@ function client(): Client {
 }
 
 async function login(c: Client): Promise<{ userId: string; tenantId: string }> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `cc-${Date.now()}-${n++}@acme.test` });
+  const r = await c.post('/host/openwop-app/test/login', { email: `cc-${Date.now()}-${n++}@acme.test` });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return { userId: r.body.user.userId, tenantId: r.body.user.tenantId ?? r.body.tenantId };
 }
@@ -54,7 +54,7 @@ async function disableToggle(): Promise<void> {
   await saveConfig({ id: 'commerce-connect', label: 'Commerce Connect (seller marketplace)', description: 'test', category: 'Admin', status: 'off', bucketUnit: 'tenant', salt: 'commerce-connect' }, 'test');
 }
 
-const CC = '/v1/host/openwop-app/commerce-connect';
+const CC = '/host/openwop-app/commerce-connect';
 
 describe('commerce-connect routes — toggle gate + demo onboarding', () => {
   it('404s every route while the toggle is off (backend authority)', async () => {
@@ -181,7 +181,7 @@ describe('billing webhook — Connect branch + dual-secret verification', () => 
     // not_configured. That IS the fail-closed contract; assert it here, and the
     // signature/dispatch logic is covered by the unit layers above.
     const body = JSON.stringify({ id: 'evt_http_1', type: 'account.updated', account: 'acct_x', data: { object: {} } });
-    const res = await fetch(`${BASE}/v1/host/openwop-app/billing/webhook`, {
+    const res = await fetch(`${BASE}/host/openwop-app/billing/webhook`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'stripe-signature': sign('whsec_connect', body, Date.now()) },
       body,

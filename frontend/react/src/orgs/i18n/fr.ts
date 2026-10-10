@@ -21,7 +21,7 @@ export const messages = {
   workspaceCreateFailed: "L'espace de travail n'a pas pu être créé.",
   newOrgPlaceholder: 'Nom de la nouvelle organisation',
   newOrgAriaLabel: 'Nom de la nouvelle organisation',
-  createOrgRequiresScope: 'Nécessite host:org:manage',
+  createOrgRequiresScope: 'Seuls les propriétaires de l’espace de travail peuvent créer des organisations',
   noOrgsTitle: 'Aucune organisation pour le moment',
   noOrgsBody: 'Créez-en une pour ajouter des équipes et des membres.',
   deleteOrgAriaLabel: 'Supprimer {{name}}',
@@ -32,7 +32,7 @@ export const messages = {
 
   // OrgDetailPanel — "View as" lens
   viewAsLabel: 'Afficher en tant que',
-  viewAsOwnerOption: 'Propriétaire (vous) — accès complet',
+  viewAsOwnerOption: 'Vous — votre propre accès',
   viewAsRoleGroupLabel: 'Prévisualiser un rôle (interface uniquement)',
   viewAsRoleOption: 'En tant que {{name}}',
   viewAsMemberGroupLabel: 'Afficher en tant que membre (appliqué)',
@@ -206,4 +206,21 @@ export const messages = {
   // ADR 0622 D5 — le renvoi a échoué mais l’invitation PRÉCÉDENTE reste valable
   inviteDeliveryFailedPriorValid: 'L’envoi de l’e-mail a échoué — une invitation antérieure pour cette adresse est peut-être encore valable ; rien n’y a été modifié. Réessayez dans un instant.',
   inviteUndeliverablePriorValid: 'Cette invitation n’a pas pu être envoyée — cette organisation n’a pas d’expéditeur e-mail ou votre connexion e-mail est indisponible. Une invitation antérieure pour cette adresse est peut-être encore valable ; rien n’y a été modifié. Configurez un expéditeur sur la page E-mail et réessayez.',
+  // ADR 0815 — owner-tier locks, typed refusals, and what removing a member does
+  confirmRemoveMemberBody: 'Il quitte l’espace de travail maintenant. Ses clés d’API cessent de fonctionner, les invitations en attente qu’il a envoyées sont annulées et les planifications exécutées en son nom sont mises en pause. Vous pouvez reprendre la plupart de ces planifications, et vous en devenez alors le propriétaire.',
+  removeMemberConfirm: 'Retirer le membre',
+  memberRemoved: '{{name}} a été retiré',
+  ownerRowLocked: 'Seul un propriétaire peut modifier ou retirer un propriétaire',
+  ownerRowsLockedNote: 'Seul un autre propriétaire peut modifier ou retirer un propriétaire.',
+  ownerGroupLocked: 'Ce groupe accorde l’accès propriétaire : seul un propriétaire peut le modifier',
+  errorOwnerTier: 'Seul un propriétaire peut faire cela.',
+  errorLastOwner: 'C’est le dernier propriétaire de l’espace de travail. Nommez d’abord un autre propriétaire, puis réessayez.',
+  errorIdentityLocked: 'L’identité de connexion d’un membre de l’espace de travail ne peut pas être modifiée directement. Retirez-le et envoyez une nouvelle invitation.',
+  errorIdentityTaken: 'Cette identité est déjà membre de cette organisation.',
+  errorTransferToSelf: 'Choisissez un autre membre à qui transférer la propriété.',
+  confirmRemoveSubOrgMemberBody: 'Il perd l’accès à cette organisation, et les invitations en attente qu’il y a envoyées sont annulées. Son appartenance à l’espace de travail n’est pas modifiée.',
+  confirmRemoveMemberBodyNeutral: 'Il perd l’accès à cette organisation, et les invitations en attente qu’il y a envoyées sont annulées. S’il s’agissait de sa dernière appartenance ici, ses clés d’API cessent aussi de fonctionner et les planifications exécutées en son nom sont mises en pause.',
+  ownerGroupsLockedNote: 'Seul un propriétaire peut modifier les groupes qui accordent l’accès propriétaire.',
+  errorCreateOrgOwnerRequired: 'Seul un propriétaire peut créer une organisation ici. Demandez à un propriétaire d’une organisation existante de vous nommer propriétaire, puis réessayez.',
+  errorForbiddenScope: 'Vous n’avez pas l’autorisation de faire cela dans cette organisation. Demandez à un propriétaire ou à un administrateur de l’espace de travail.',
 } as const;

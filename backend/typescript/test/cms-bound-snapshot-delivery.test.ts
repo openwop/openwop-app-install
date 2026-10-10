@@ -82,13 +82,13 @@ let n = 0;
 async function ownerOrg(): Promise<{ c: Client; orgId: string }> {
   const tenantId = `org:snap-${Date.now()}-${n++}`;
   const c = client();
-  const login = await c.post('/v1/host/openwop-app/test/login', { email: `snap-${Date.now()}-${n++}@acme.test`, tenantId });
+  const login = await c.post('/host/openwop-app/test/login', { email: `snap-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(login.status, JSON.stringify(login.body)).toBe(201);
-  const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return { c, orgId: org.body.orgId as string };
 }
-const cms = (orgId: string, s = ''): string => `/v1/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${s}`;
+const cms = (orgId: string, s = ''): string => `/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${s}`;
 const exps = (orgId: string, pageId: string, s = ''): string => cms(orgId, `/pages/${encodeURIComponent(pageId)}/experiments${s}`);
 
 /** The anonymous variant read — a visitor key bucketed onto `candidate`. */
@@ -100,7 +100,7 @@ async function publicVariantRead(orgId: string, slug: string, exp: any, acceptLa
   }
   expect(vk, 'a visitor key must bucket onto the candidate variant').toBeTruthy();
   const res = await fetch(
-    `${BASE}/v1/host/openwop-app/public/${encodeURIComponent(orgId)}/pages/${encodeURIComponent(slug)}?vk=${vk}`,
+    `${BASE}/host/openwop-app/public/${encodeURIComponent(orgId)}/pages/${encodeURIComponent(slug)}?vk=${vk}`,
     { headers: { 'accept-language': acceptLanguage } },
   );
   return { status: res.status, headers: res.headers, body: await res.json().catch(() => undefined) };
@@ -194,7 +194,7 @@ describe('F1a — a shared section referenced ONLY by a bound snapshot is an ung
     // was created (this lane bypassed the inbox entirely).
     const after = await publicVariantRead(orgId, slug, exp);
     expect(after.body.sections.find((s: any) => s.type === 'cta')?.data.url).toBe('/agents');
-    const pending = await c.get('/v1/host/openwop-app/approvals?status=pending');
+    const pending = await c.get('/host/openwop-app/approvals?status=pending');
     expect((pending.body.items as any[]).filter((a) => a.kind === 'content-publish')).toHaveLength(0);
   });
 
@@ -342,7 +342,7 @@ describe('CMSA-12 (cross-tenant half) — an entity section may only name its OW
 
   it('the page OWN tenant is still accepted — the guard is a tenant check, not a ban', async () => {
     const { c, orgId } = await ownerOrg();
-    const me = await c.get('/v1/host/openwop-app/orgs');
+    const me = await c.get('/host/openwop-app/orgs');
     const tenantId = (me.body.orgs as any[]).find((o) => o.orgId === orgId)?.tenantId;
     expect(tenantId, 'the org row must expose its tenant').toBeTruthy();
     const ok = await c.post(cms(orgId, '/pages'), {

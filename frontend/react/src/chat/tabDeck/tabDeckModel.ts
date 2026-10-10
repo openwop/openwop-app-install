@@ -29,6 +29,11 @@ export interface DeckTab {
    *  real label at first paint, before the backend conversation list loads (vs flashing
    *  "New chat"). Undefined for a never-titled / brand-new tab. */
   lastTitle?: string;
+  /** ADR 0785 D5 — a NON-conversation tab kind registered in `tabKindRegistry`
+   *  (e.g. `claude-code`). Absent = a conversation tab, so every deck persisted
+   *  before this field existed restores unchanged. The id is still `sessionId`
+   *  (a tab id); for a kind tab it names no conversation. */
+  kind?: string;
 }
 
 export interface TabDeckState {
@@ -52,7 +57,7 @@ export const emptyTabDeck: TabDeckState = { tabs: [], activeSessionId: null, seq
 const NO_PROTECTED: ReadonlySet<string> = new Set<string>();
 
 export type TabDeckAction =
-  | { type: 'open'; sessionId: string; protectedIds?: ReadonlySet<string>; maxTabs?: number }
+  | { type: 'open'; sessionId: string; protectedIds?: ReadonlySet<string>; maxTabs?: number; kind?: string }
   | { type: 'close'; sessionId: string }
   | { type: 'focus'; sessionId: string }
   | { type: 'reorder'; fromSessionId: string; toIndex: number }
@@ -111,13 +116,14 @@ function openTab(
   sessionId: string,
   protectedIds: ReadonlySet<string>,
   maxTabs: number,
+  kind?: string,
 ): TabDeckState {
   if (state.tabs.some((t) => t.sessionId === sessionId)) return focusTab(state, sessionId); // dedupe
   const victim = selectEvictionVictim(state, { maxTabs, protectedIds });
   const base = victim ? closeTab(state, victim.sessionId) : state;
   const nextSeq = base.seq + 1;
   return {
-    tabs: [...base.tabs, { sessionId, pinned: false, lastActiveSeq: nextSeq }],
+    tabs: [...base.tabs, { sessionId, pinned: false, lastActiveSeq: nextSeq, ...(kind ? { kind } : {}) }],
     activeSessionId: sessionId,
     seq: nextSeq,
   };
@@ -181,7 +187,7 @@ function setTitle(state: TabDeckState, sessionId: string, title: string): TabDec
 export function tabDeckReducer(state: TabDeckState, action: TabDeckAction): TabDeckState {
   switch (action.type) {
     case 'open':
-      return openTab(state, action.sessionId, action.protectedIds ?? NO_PROTECTED, action.maxTabs ?? MAX_TABS_DEFAULT);
+      return openTab(state, action.sessionId, action.protectedIds ?? NO_PROTECTED, action.maxTabs ?? MAX_TABS_DEFAULT, action.kind);
     case 'focus':
       return focusTab(state, action.sessionId);
     case 'close':

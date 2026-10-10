@@ -19,7 +19,7 @@ import type { BYOKActiveConfig } from '../byok/lib/useBYOKConfig.js';
 import type { ChatSession } from './hooks/useChatSession.js';
 import { messageText } from './types.js';
 import { formatUsd, sessionCostUsd } from './lib/cost.js';
-import { HashIcon, MenuIcon, MoreHorizontalIcon, SettingsIcon, UsersIcon } from '../ui/icons/index.js';
+import { HashIcon, MenuIcon, MoreHorizontalIcon, PanelRightIcon, SettingsIcon, UsersIcon } from '../ui/icons/index.js';
 import { Avatar } from '../ui/Avatar.js';
 import { Menu, type MenuEntry } from '../ui/Menu.js';
 import { IntentLedgerButton } from '../intentLedger/IntentLedgerPanel.js';
@@ -60,6 +60,11 @@ interface Props {
    *  the rail toggle so the user sees pending work without opening
    *  the rail. */
   railBadgeCount?: number;
+  /** ADR 0768 P2 — the right-hand Workbench (runs + artifacts). The toggle
+   *  renders only when a handler is supplied (i.e. there is something to show). */
+  onToggleWorkbench?: () => void;
+  workbenchOpen?: boolean;
+  workbenchBadgeCount?: number;
   /** ADR 0154 Phase 2 — open the channel-settings dialog. Set only when the
    *  active conversation is a channel; renders a settings control in the header. */
   onOpenChannelDetails?: () => void;
@@ -98,6 +103,9 @@ export function ChatHeader({
   onToggleRail,
   railOpen,
   railBadgeCount = 0,
+  onToggleWorkbench,
+  workbenchOpen = false,
+  workbenchBadgeCount = 0,
   onOpenChannelDetails,
   channelContext,
   onToggleMembers,
@@ -137,9 +145,9 @@ export function ChatHeader({
             aria-label={railOpen ? t('closeChatTools') : t('openChatTools')}
             aria-pressed={railOpen}
             title={t('chatToolsTitle')}
-            variant="secondary" className="chathdr-rail-btn"
+            variant="quiet" className="chathdr-rail-btn"
           >
-            <MenuIcon size={14} />
+            <MenuIcon size={16} />
             {railBadgeCount > 0 && (
               <span className="chathdr-badge">{railBadgeCount}</span>
             )}
@@ -200,7 +208,7 @@ export function ChatHeader({
         )}
         {totalCost > 0 && (
           <span
-            className="status-badge u-fs-11"
+            className="chathdr-cost"
             title={t('totalSessionCost', { cost: formatUsd(totalCost) })}
           >
             {t('sessionCostLabel', { cost: formatUsd(totalCost) })}
@@ -218,6 +226,19 @@ export function ChatHeader({
         {onOpenChannelDetails && (
           <Button variant="secondary" className="chathdr-more-btn" onClick={onOpenChannelDetails} aria-label={t('channelSettingsAria')} title={t('channelSettingsAria')}>
             <SettingsIcon size={15} />
+          </Button>
+        )}
+        {onToggleWorkbench && (
+          <Button
+            variant="secondary"
+            className="chathdr-rail-btn"
+            onClick={onToggleWorkbench}
+            aria-label={workbenchOpen ? t('workbenchHide') : t('workbenchShow')}
+            aria-pressed={workbenchOpen}
+            title={t('workbenchEyebrow')}
+          >
+            <PanelRightIcon size={14} />
+            {workbenchBadgeCount > 0 && <span className="chathdr-badge">{workbenchBadgeCount}</span>}
           </Button>
         )}
         {hasTurns && (

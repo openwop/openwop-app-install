@@ -85,14 +85,17 @@ export function ProjectWorkflowsTab({ projectId, workflows, canWrite, onSaved }:
     setError(null);
     setLastRun(null);
     // Read the declared run-input contract; if the workflow asks for inputs, collect
-    // them first. A fetch failure (e.g. a built-in role template with no stored def)
-    // degrades to a plain run rather than blocking.
+    // them first. "No stored definition" (a built-in role template) is a 404, which the
+    // client already answers with no inputs. Any OTHER failure used to be swallowed into
+    // `[]` too — starting a workflow WITHOUT inputs it may require. A read we could not do
+    // now stops the run and says so (grade-ux row 25, I-W1).
     let variables: RunVariable[] = [];
     setRunning(workflowId);
     try {
       variables = await getWorkflowRunInputs(workflowId);
     } catch {
-      variables = [];
+      setError(t('runInputsUnreadable'));
+      return;
     } finally {
       setRunning(null);
     }
@@ -109,7 +112,7 @@ export function ProjectWorkflowsTab({ projectId, workflows, canWrite, onSaved }:
 
   return (
     <div>
-      {error && !runPrompt ? <Notice variant="error">{error}</Notice> : null}
+      {error && !runPrompt ? <Notice variant="error" announce={error}>{error}</Notice> : null}
       {lastRun ? (
         <Notice variant="success" announce={t('runStarted', { name: workflowName(lastRun.workflowId) })}>
           {t('runStarted', { name: workflowName(lastRun.workflowId) })}{' '}

@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.workflows.insights-suite",
-  "version": "1.3.1",
+  "version": "1.3.2",
   "kind": "workflow-chain",
   "description": "Insights & Drafting meta-workflows as an RFC 0013 chain pack (migrated from the deprecated ADR 0082/0072 builtins, ADR 0472 Phase 2). Three real source\u2192analysis\u2192LLM\u2192draft\u2192notify pipelines over BYOK-connected sources. chainIds keep the original `openwop-app.insights.*` ids so scheduler/trigger ignition + replay are unchanged; the chains are also gallery-editable. 1.2.0 (ADR 0599 \u00a75): each hard-required value is a chain PARAMETER bound as a WHOLE-VALUE `{{params.X}}` on a top-level node `inputs` entry, and data edges are port-qualified on BOTH sides. NOTIFY AUDIENCE (1.3.0 ADR 0600 \u00a75; STATED in 1.3.1 \u00a7Correction 6): `self` resolves from the run's ACTING USER and refuses fail-closed without one, so a scheduled/webhook fire of `talent-prep` or `anniversary-draft` loses its completion notification \u2014 deliberate, since the alternative broadcasts a colleague's 9-box score or recognition draft workspace-wide. `weekly-variance` keeps `tenant`: no declared PII, and its only lane is the scheduler.",
   "keywords": [
@@ -9,12 +9,12 @@
     "Finance"
   ],
   "engines": {
-    "openwop": ">=1.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "chains": [
     {
       "chainId": "openwop-app.insights.weekly-variance",
-      "version": "1.2.0",
+      "version": "1.2.1",
       "label": "Weekly variance (Actual vs Plan)",
       "description": "Pull financials \u2192 compute variance \u2192 human red-team \u2192 notify. (1.1.0: the input-less render step was removed \u2014 WF-DOC-3. 1.2.0: `sql` is a declared parameter bound into the query node \u2014 ADR 0599 \u00a75; the query\u2192compute edge is port-qualified so the variance node receives `rows`, not the BigQuery envelope.)",
       "parameters": {
@@ -43,7 +43,7 @@
         "nodes": [
           {
             "id": "query",
-            "typeId": "core.bigquery.query",
+            "typeId": "core.bigquery.query@1.0.0",
             "name": "Query financials",
             "inputs": {
               "projectId": "{{params.projectId}}",
@@ -52,7 +52,7 @@
           },
           {
             "id": "compute",
-            "typeId": "feature.insights-suite.nodes.variance-compute",
+            "typeId": "feature.insights-suite.nodes.variance-compute@1.2.0",
             "name": "Compute variance",
             "inputs": {
               "businessUnit": "{{params.businessUnit}}"
@@ -60,7 +60,7 @@
           },
           {
             "id": "redteam",
-            "typeId": "core.approvalGate",
+            "typeId": "core.approvalGate@1.0.0",
             "name": "Variance red-team",
             "config": {
               "title": "Variance red-team",
@@ -70,7 +70,7 @@
           },
           {
             "id": "notify",
-            "typeId": "feature.notifications.nodes.notify",
+            "typeId": "feature.notifications.nodes.notify@1.0.0",
             "name": "Notify",
             "config": {
               "audience": "tenant"
@@ -101,7 +101,7 @@
     },
     {
       "chainId": "openwop-app.insights.anniversary-draft",
-      "version": "1.2.0",
+      "version": "1.2.1",
       "label": "Work-anniversary recognition draft",
       "description": "Pull milestones \u2192 retrieve voice exemplars \u2192 LLM drafts \u2192 email DRAFT (never sends) \u2192 approval \u2192 notify. (1.1.0 \u2014 ADR 0599 \u00a75: `workdayBaseUrl`, `exemplarQuery`, `recipient` and `draftSubject` are declared parameters bound into the nodes that hard-require them; the generate\u2192emailDraft edge is port-qualified `content`\u2192`body`, because the LLM emits `content` and the draft node reads `body` \u2014 supplying only the recipient would have created an EMPTY draft and reported it a success.) 1.2.0 \u2014 ADR 0600 \u00a75: notifies at `audience:\"self\"` rather than telling the whole workspace a recognition draft was made about a named colleague and linking them to it.",
       "parameters": {
@@ -149,7 +149,7 @@
         "nodes": [
           {
             "id": "milestones",
-            "typeId": "core.workday.query",
+            "typeId": "core.workday.query@1.0.0",
             "name": "Milestones",
             "config": {
               "resource": "serviceDates"
@@ -161,7 +161,7 @@
           },
           {
             "id": "retrieve",
-            "typeId": "knowledge.retrieve",
+            "typeId": "knowledge.retrieve@1.0.0",
             "name": "Retrieve exemplars",
             "inputs": {
               "query": "{{params.exemplarQuery}}"
@@ -169,7 +169,7 @@
           },
           {
             "id": "generate",
-            "typeId": "core.ai.chatCompletion",
+            "typeId": "core.ai.chatCompletion@1.0.0",
             "name": "Draft recognition",
             "config": {
               "provider": "anthropic",
@@ -183,7 +183,7 @@
           },
           {
             "id": "emailDraft",
-            "typeId": "core.email.draft",
+            "typeId": "core.email.draft@1.0.0",
             "name": "Email draft (never sends)",
             "inputs": {
               "to": "{{params.recipient}}",
@@ -192,7 +192,7 @@
           },
           {
             "id": "approve",
-            "typeId": "core.approvalGate",
+            "typeId": "core.approvalGate@1.0.0",
             "name": "Approve draft",
             "config": {
               "title": "Approve draft",
@@ -202,7 +202,7 @@
           },
           {
             "id": "notify",
-            "typeId": "feature.notifications.nodes.notify",
+            "typeId": "feature.notifications.nodes.notify@1.0.0",
             "name": "Notify",
             "config": {
               "audience": "self"
@@ -243,7 +243,7 @@
     },
     {
       "chainId": "openwop-app.insights.talent-prep",
-      "version": "1.2.0",
+      "version": "1.2.1",
       "label": "Talent readiness prep",
       "description": "Pull performance data \u2192 9-box readiness score \u2192 notify. (1.1.0 \u2014 ADR 0599 \u00a75: `workdayBaseUrl` is a declared parameter bound into the pull node, and the pull\u2192score edge is port-qualified so the score node receives the review `rows` it derives ratings from rather than the Workday envelope. 1.2.0 \u2014 ADR 0600 \u00a75: notifies at `audience:\"self\"` rather than broadcasting a link to a named person's 9-box score workspace-wide, and the score\u2192notify edge is port-qualified `score.label \u2192 notify.message` so the notification body is no longer empty \u2014 the two are one decision, since a body is only safe once the audience is one person.)",
       "parameters": {
@@ -268,7 +268,7 @@
         "nodes": [
           {
             "id": "pull",
-            "typeId": "core.workday.query",
+            "typeId": "core.workday.query@1.0.0",
             "name": "Pull performance",
             "config": {
               "resource": "performanceReviews"
@@ -279,7 +279,7 @@
           },
           {
             "id": "score",
-            "typeId": "feature.insights-suite.nodes.talent-score",
+            "typeId": "feature.insights-suite.nodes.talent-score@1.2.0",
             "name": "Talent score",
             "inputs": {
               "subjectId": "{{params.subjectId}}"
@@ -287,7 +287,7 @@
           },
           {
             "id": "notify",
-            "typeId": "feature.notifications.nodes.notify",
+            "typeId": "feature.notifications.nodes.notify@1.0.0",
             "name": "Notify",
             "config": {
               "audience": "self"

@@ -31,6 +31,9 @@ const reasonsOf = async (storage: Awaited<ReturnType<typeof openStorage>>, runId
   (await storage.listEvents(runId)).filter((e) => e.type === 'authorization.decided').map((e) => (e.payload as { reason: string }).reason);
 
 describe('ADR 0469 Phase D — rate-limit-session-cap auto-write', () => {
+  // ADR 0834 D1 — the anonymous lane now builds the capability firewall, which reads the
+  // tenant posture from host-ext persistence (production always has it).
+  beforeAll(async () => { initHostExtPersistence(await openStorage('memory://')); });
   it('AUTO-EXECUTES the write inline (not held) when the cap allows — audited anon-write-auto-allowed', async () => {
     const storage = await openStorage('memory://');
     const captured = { round2: [] as AiToolCallRequest['messages'] };

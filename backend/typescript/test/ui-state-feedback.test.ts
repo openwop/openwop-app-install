@@ -38,11 +38,11 @@ function client(): Client {
 
 let n = 0;
 async function signup(c: Client, tenantId: string): Promise<void> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `ui-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await c.post('/host/openwop-app/test/login', { email: `ui-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
 }
 
-const UI = '/v1/host/openwop-app/ui-state';
+const UI = '/host/openwop-app/ui-state';
 
 describe('ui-state — caller-scoped durable display prefs', () => {
   it('PUTs + GETs the caller’s own rows; a second user never sees them', async () => {
@@ -79,32 +79,32 @@ describe('message feedback — per-user, visibility-gated', () => {
     const tenantId = `org:fb-${Date.now()}-${n++}`;
     const alice = client(); await signup(alice, tenantId);
     // A session owned by alice is visible to her.
-    const session = await alice.post('/v1/host/openwop-app/chat/sessions', { title: 'Chat' });
+    const session = await alice.post('/host/openwop-app/chat/sessions', { title: 'Chat' });
     const conversationId = session.body.sessionId;
 
-    const post = await alice.post('/v1/host/openwop-app/chat/messages/m1/feedback', { conversationId, rating: 'up', reason: 'great answer' });
+    const post = await alice.post('/host/openwop-app/chat/messages/m1/feedback', { conversationId, rating: 'up', reason: 'great answer' });
     expect(post.status).toBe(200);
     expect(post.body.rating).toBe('up');
 
-    const got = await alice.get(`/v1/host/openwop-app/chat/messages/m1/feedback?conversationId=${conversationId}`);
+    const got = await alice.get(`/host/openwop-app/chat/messages/m1/feedback?conversationId=${conversationId}`);
     expect(got.body.feedback.rating).toBe('up');
     expect(got.body.feedback.reason).toBe('great answer');
 
     // Re-rate overwrites (idempotent per user), not a second row.
-    await alice.post('/v1/host/openwop-app/chat/messages/m1/feedback', { conversationId, rating: 'down' });
-    expect((await alice.get(`/v1/host/openwop-app/chat/messages/m1/feedback?conversationId=${conversationId}`)).body.feedback.rating).toBe('down');
+    await alice.post('/host/openwop-app/chat/messages/m1/feedback', { conversationId, rating: 'down' });
+    expect((await alice.get(`/host/openwop-app/chat/messages/m1/feedback?conversationId=${conversationId}`)).body.feedback.rating).toBe('down');
   });
 
   it('rejects feedback on a conversation the caller cannot see (404)', async () => {
     const alice = client(); await signup(alice, `org:fb-${Date.now()}-${n++}`);
-    const r = await alice.post('/v1/host/openwop-app/chat/messages/m1/feedback', { conversationId: 'someone-elses-session', rating: 'up' });
+    const r = await alice.post('/host/openwop-app/chat/messages/m1/feedback', { conversationId: 'someone-elses-session', rating: 'up' });
     expect(r.status).toBe(404);
   });
 
   it('validates the rating vocabulary (400)', async () => {
     const alice = client(); await signup(alice, `org:fb-${Date.now()}-${n++}`);
-    const session = await alice.post('/v1/host/openwop-app/chat/sessions', { title: 'Chat' });
-    const r = await alice.post('/v1/host/openwop-app/chat/messages/m1/feedback', { conversationId: session.body.sessionId, rating: 'love-it' });
+    const session = await alice.post('/host/openwop-app/chat/sessions', { title: 'Chat' });
+    const r = await alice.post('/host/openwop-app/chat/messages/m1/feedback', { conversationId: session.body.sessionId, rating: 'love-it' });
     expect(r.status).toBe(400);
   });
 });

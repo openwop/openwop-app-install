@@ -9,7 +9,11 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useBuilderStore, type NodeRunStatus } from './store/builderStore.js';
-import { ChevronDownIcon, ChevronUpIcon } from '../ui/icons/index.js';
+import { ChevronDownIcon, ChevronUpIcon, MessageCircleIcon } from '../ui/icons/index.js';
+import { Button } from '../ui/Button.js';
+import { useFeatureAccess } from '../featureToggles/FeatureAccessContext.js';
+import { BUILDER_PAIR_TOGGLE } from './pair/InspectorPair.js';
+import { RUN_STEP_CITE_MIME, usePairStore } from './pair/pairStore.js';
 import { formatTime } from '../i18n/format.js';
 
 const STATUS_LABEL: Record<NodeRunStatus, string> = {
@@ -35,6 +39,7 @@ export function RunDrawer(): JSX.Element | null {
   const overlay = useBuilderStore((s) => s.overlay);
   const nodes = useBuilderStore((s) => s.nodes);
   const [open, setOpen] = useState(false);
+  const { enabled: pairEnabled } = useFeatureAccess(BUILDER_PAIR_TOGGLE);
   if (!overlay) return null;
 
   const rows = Object.entries(overlay.nodeDetail);
@@ -69,6 +74,22 @@ export function RunDrawer(): JSX.Element | null {
               <span className={`status-badge ${d.status === 'suspended' ? 'running' : d.status}`}>{t(STATUS_LABEL[d.status])}</span>
               <span className="builder-run-drawer__node">{nameOf(builderId)}</span>
               <span className="builder-run-drawer__at">{formatTime(d.at)}</span>
+              {/* P11 — cite this run step in the Pair chat: drag it onto the
+                  composer, or click (the keyboard path). Attaches the run too. */}
+              {pairEnabled ? (
+                <Button
+                  variant="quiet"
+                  size="sm"
+                  className="builder-run-drawer__cite"
+                  draggable
+                  aria-label={t('pairCiteRunStep', { name: nameOf(builderId) })}
+                  title={t('pairCiteRunStep', { name: nameOf(builderId) })}
+                  onDragStart={(e) => { e.dataTransfer.setData(RUN_STEP_CITE_MIME, JSON.stringify({ nodeId: builderId, runId: overlay.runId })); e.dataTransfer.effectAllowed = 'copy'; }}
+                  onClick={() => usePairStore.getState().citeRunStep(builderId, overlay.runId)}
+                >
+                  <MessageCircleIcon size={12} aria-hidden />
+                </Button>
+              ) : null}
               {d.payload !== undefined ? (
                 <details className="builder-run-drawer__payload">
                   <summary>{t('runDrawerPayload')}</summary>

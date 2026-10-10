@@ -23,6 +23,7 @@ import { createLogger } from '../observability/logger.js';
 import { issueUserSession } from '../middleware/auth.js';
 import { upsertFromPrincipal, sessionEpochOf } from '../features/users/usersService.js';
 import { ensurePersonalWorkspace, getWorkspace } from '../host/accessControlService.js';
+import { deploymentMarker } from '../host/oidcTrustGuard.js';
 
 const log = createLogger('routes.authTestSeam');
 
@@ -30,19 +31,41 @@ function shortHash(s: string): string {
   return createHash('sha256').update(s).digest('hex').slice(0, 32);
 }
 
+/**
+ * ADR 0833 D8 — this seam mints a session for ANY subject, so a deployment must
+ * never serve it, whatever its env says. "Deployment" is ADR 0754's
+ * `deploymentMarker()` (a managed-platform marker, the enterprise posture, or a
+ * Postgres control plane); every CI, e2e and release-conformance boot is
+ * `memory://` with no marker, so none of them is affected. No escape hatch —
+ * the ADR 0745 D4 posture: a test seam on an internet-facing host is a forged
+ * identity, not a test. `main()` refuses to boot on it; the registration below
+ * refuses as well, so an embedder that skips `main()` is covered.
+ */
+export function testAuthSeamStartupError(env: NodeJS.ProcessEnv = process.env): string | null {
+  if (env.OPENWOP_TEST_AUTH_ENABLED !== 'true') return null;
+  const deployed = deploymentMarker(env);
+  if (!deployed) return null;
+  return `ADR 0833 D8 — ${deployed} must never enable OPENWOP_TEST_AUTH_ENABLED: its /test/login mints a session for any subject.`;
+}
+
 export function registerAuthTestSeamRoutes(app: Express): void {
   if (process.env.OPENWOP_TEST_AUTH_ENABLED !== 'true') {
     log.info('auth test seam disabled (set OPENWOP_TEST_AUTH_ENABLED=true to enable)');
     return;
   }
-  log.warn('auth test seam ENABLED — /v1/host/openwop-app/test/login mints sessions. NEVER enable in a real deploy.');
+  const deployedError = testAuthSeamStartupError();
+  if (deployedError) {
+    log.error('auth_test_seam_refused', { error: deployedError });
+    return;
+  }
+  log.warn('auth test seam ENABLED — /host/openwop-app/test/login mints sessions. NEVER enable in a real deploy.');
 
   // POST /v1/host/openwop-app/test/login
   //   { email?, displayName?, tenantId?, subject? }
   // Derives a stable subject from `email` (so re-login is idempotent, like real
   // auth) unless one is given; the home `tenantId` defaults to the subject's
   // deterministic personal tenant — pass an explicit one to make co-tenant users.
-  app.post('/v1/host/openwop-app/test/login', async (req, res, next) => {
+  app.post('/host/openwop-app/test/login', async (req, res, next) => {
     try {
       const body = (req.body ?? {}) as {
         email?: string; displayName?: string; tenantId?: string; subject?: string;
@@ -115,7 +138,7 @@ export function registerAuthTestSeamRoutes(app: Express): void {
       // site — was written and MEASURED NOT TO CHANGE THE OUTCOME, so it was
       // dropped rather than shipped as unverified code. Assert refusal as
       // `>= 400`, not a specific code, until someone makes 403 actually reachable.
-      issueUserSession(res, { userId: user.userId, tenantId, personalTenant, subject, epoch: sessionEpochOf(user) });
+      issueUserSession(res, { userId: user.userId, tenantId, personalTenant, subject, epoch: sessionEpochOf(user), freshAuth: true });
       res.status(201).json({ user });
     } catch (err) {
       next(err);

@@ -12,8 +12,8 @@ import { getSetCookies } from './headerCookies.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 
-const CH = '/v1/host/openwop-app/channels';
-const SESS = '/v1/host/openwop-app/chat/sessions';
+const CH = '/host/openwop-app/channels';
+const SESS = '/host/openwop-app/chat/sessions';
 
 let BASE: string;
 let server: http.Server;
@@ -45,7 +45,7 @@ type Client = ReturnType<typeof client>;
 const TENANT = `t-adr0195-${Date.now()}`;
 async function login(name: string): Promise<{ c: Client; userId: string }> {
   const c = client();
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `adr0195-${name}-${Date.now()}-${n++}@acme.test`, displayName: `${name} P`, tenantId: TENANT });
+  const r = await c.post('/host/openwop-app/test/login', { email: `adr0195-${name}-${Date.now()}-${n++}@acme.test`, displayName: `${name} P`, tenantId: TENANT });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return { c, userId: r.body.user.userId as string };
 }

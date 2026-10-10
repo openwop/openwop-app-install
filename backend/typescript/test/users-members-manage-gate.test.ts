@@ -11,6 +11,23 @@
  * subject (the kicktodo-authz-http precedent). Both polarities are asserted:
  * an ADMIN member is allowed, an EDITOR member (a real co-tenant WITHOUT the
  * manage scope) is refused 403, and a NON-member is refused.
+ *
+ * Every refusal asserts the CODE (`forbidden_scope` — the scope gate, not some
+ * other 403) AND that the target row is unchanged afterwards, read back by an
+ * admin; every allowed create asserts where the row landed.
+ *
+ * Sabotage that turns it red (`src/features/users/routes.ts` unless noted):
+ * `requireSignedIn(req);` removed from the list read (USERS-8); the POST's
+ * `requireTenantScope(…'host:members:manage')` removed (EDITOR create);
+ * the lifecycle loop's scope gate removed (EDITOR + SAML-member disable); the
+ * lifecycle audit `actor` no longer the caller's bound `userId` (USERS-5 F5 —
+ * on a cookie session `req.principal.principalId` IS that userId, so swapping
+ * the two is not a break). The implicit-owner decision for these routes is
+ * `requireTenantScope` → `host/accessControlService.ts` `assertTenantScope`'s
+ * `ctx.personalTenant === tenantId && isPersonalTenantId(tenantId)` line (NOT
+ * `requestSubject.ts` `isOwnPersonalWorkspace`, which only picks the email
+ * provenance here): dropping its `isPersonalTenantId` half reds USERS-19,
+ * deleting the line reds the personal-owner POSITIVE.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Server } from 'node:http';
@@ -19,10 +36,11 @@ import { createApp } from '../src/index.js';
 import { createWorkspace, createMember, ensurePersonalWorkspace } from '../src/host/accessControlService.js';
 import { userIdFor } from '../src/features/users/usersService.js';
 import { listChain } from '../src/host/auditChainService.js';
+import { getSetCookies } from './headerCookies.js';
 
 let server: Server;
 let BASE = '';
-const USERS = '/v1/host/openwop-app/users/users';
+const USERS = '/host/openwop-app/users/users';
 
 let WS = '';
 const ADMIN = 'oidc:um-admin';
@@ -37,13 +55,29 @@ const OUTSIDER = 'oidc:um-outsider';
  *  collapsed `personalTenant === tenantId` cookie is byte-for-byte the shape the
  *  SAML ACS mints (`routes/authSamlSso.ts`, `personalTenant: s.tenantId`). */
 async function login(subject: string, tenantId: string, sharedWorkspace = true): Promise<string> {
-  const res = await fetch(`${BASE}/v1/host/openwop-app/test/login`, {
+  const res = await fetch(`${BASE}/host/openwop-app/test/login`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ subject, tenantId, displayName: subject, sharedWorkspace }),
   });
   expect(res.status, 'test seam must mint a session').toBeLessThan(300);
-  return (res.headers.get('set-cookie') ?? '').split(';')[0] ?? '';
+  const session = getSetCookies(res.headers).map((c) => /(__session=[^;]+)/.exec(c)?.[1]).find(Boolean);
+  expect(session, 'the seam set a __session cookie').toBeTruthy();
+  return session!;
+}
+
+/** A refusal FROM THE SCOPE GATE: 403 with `error: forbidden_scope`. */
+async function expectScopeRefusal(res: Response): Promise<void> {
+  expect(res.status).toBe(403);
+  expect(((await res.json()) as { error?: string }).error).toBe('forbidden_scope');
+}
+
+interface UserRow { userId: string; tenantId: string; status: string; displayName?: string; principalId: string }
+/** The target as an admin reads it back — the "nothing changed" half of a refusal. */
+async function readAs(cookie: string, userId: string): Promise<UserRow> {
+  const res = await call(cookie, 'GET', `${USERS}/${encodeURIComponent(userId)}`);
+  expect(res.status).toBe(200);
+  return (await res.json()) as UserRow;
 }
 
 const call = async (cookie: string, method: string, path: string, body?: unknown): Promise<Response> =>
@@ -76,6 +110,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
   delete process.env.OPENWOP_TEST_AUTH_ENABLED;
+  delete process.env.OPENWOP_SESSION_SECRET;
 });
 
 describe('USERS-8 — the read routes refuse anonymous sessions (revert-visible)', () => {
@@ -105,13 +140,19 @@ describe('USERS-4 — host:members:manage gates over HTTP, in a REAL shared work
   it('an ADMIN member may create a durable user (allowed-with)', async () => {
     const cookie = await login(ADMIN, WS);
     const res = await call(cookie, 'POST', USERS, { principalId: 'oidc:um-target-created' });
-    expect(res.status, await res.text().catch(() => '')).toBe(201);
+    const text = await res.text();
+    expect(res.status, text).toBe(201);
+    const created = JSON.parse(text) as UserRow;
+    expect(created.tenantId).toBe(WS);
+    expect((await readAs(cookie, created.userId)).principalId).toBe('oidc:um-target-created');
   });
 
   it('an EDITOR member is REFUSED user creation — 403 from the scope gate itself', async () => {
     const cookie = await login(EDITOR, WS);
     const res = await call(cookie, 'POST', USERS, { principalId: 'oidc:um-nope' });
-    expect(res.status).toBe(403);
+    await expectScopeRefusal(res);
+    const list = (await (await call(await login(ADMIN, WS), 'GET', USERS)).json()) as { users: UserRow[] };
+    expect(list.users.some((u) => u.principalId === 'oidc:um-nope')).toBe(false);
   });
 
   it('an EDITOR member is REFUSED lifecycle + patch + delete on another user', async () => {
@@ -121,9 +162,13 @@ describe('USERS-4 — host:members:manage gates over HTTP, in a REAL shared work
     const { userId } = (await created.json()) as { userId: string };
 
     const editor = await login(EDITOR, WS);
-    expect((await call(editor, 'POST', `${USERS}/${encodeURIComponent(userId)}/disable`)).status).toBe(403);
-    expect((await call(editor, 'PATCH', `${USERS}/${encodeURIComponent(userId)}`, { displayName: 'x' })).status).toBe(403);
-    expect((await call(editor, 'DELETE', `${USERS}/${encodeURIComponent(userId)}`)).status).toBe(403);
+    await expectScopeRefusal(await call(editor, 'POST', `${USERS}/${encodeURIComponent(userId)}/disable`));
+    await expectScopeRefusal(await call(editor, 'PATCH', `${USERS}/${encodeURIComponent(userId)}`, { displayName: 'x' }));
+    await expectScopeRefusal(await call(editor, 'DELETE', `${USERS}/${encodeURIComponent(userId)}`));
+    // Nothing landed: still active, not renamed, not deleted.
+    const after = await readAs(admin, userId);
+    expect(after.status).toBe('active');
+    expect(after.displayName).toBeUndefined();
   });
 
   it('a NON-member never reaches the WORKSPACE — bounced to their personal tenant, where WS rows are invisible', async () => {
@@ -164,17 +209,17 @@ describe('USERS-4 — host:members:manage gates over HTTP, in a REAL shared work
     expect((await call(admin, 'POST', `${USERS}/${encodeURIComponent(userId)}/enable`)).status).toBe(200);
     expect((await call(admin, 'DELETE', `${USERS}/${encodeURIComponent(userId)}`)).status).toBe(204);
 
-    const chain = await listChain(WS);
-    const kinds = chain.map((e) => e.kind);
-    expect(kinds).toContain('users.lifecycle.disable');
-    expect(kinds).toContain('users.lifecycle.enable');
-    expect(kinds).toContain('users.lifecycle.delete');
+    // THIS user's rows only, in order — not "some row of that kind exists".
+    const chain = (await listChain(WS)).filter((e) => (e.payload as { userId?: string }).userId === userId);
+    expect(chain.map((e) => e.kind)).toEqual(['users.lifecycle.create', 'users.lifecycle.disable', 'users.lifecycle.enable', 'users.lifecycle.delete']);
     const disable = chain.find((e) => e.kind === 'users.lifecycle.disable')!;
     expect(disable.payload.userId).toBe(userId);
     expect(disable.payload.status).toBe('disabled');
-    // F5: the actor is the OPAQUE bound id, never a principalId (a SAML email
-    // NameID would be PII on the exportable chain).
-    expect(disable.payload.actor).toMatch(/^user:/);
+    // F5: the actor is the caller's OPAQUE bound id — exactly the ADMIN's
+    // durable userId — never a principalId (a SAML email NameID would be PII on
+    // the exportable chain) and never the `'unknown'` fallback.
+    expect(disable.payload.actor).toBe(userIdFor(WS, ADMIN));
+    for (const row of chain) expect(row.payload.actor).toBe(userIdFor(WS, ADMIN));
     // Ids only — the audit row must never carry PII (email / display name).
     expect(disable.payload).not.toHaveProperty('email');
     expect(disable.payload).not.toHaveProperty('displayName');
@@ -227,24 +272,32 @@ describe('USERS-19 — a SAML-shaped session (personal === active, non-personal 
 
       it('a plain member with NO owner membership is REFUSED create / disable / PATCH / delete (403 forbidden_scope)', async () => {
         const cookie = await login(MEMBER, SAML_TENANT, false);
-        const created = await call(cookie, 'POST', USERS, { principalId: 'saml:nope' });
-        expect(created.status).toBe(403);
-        expect(((await created.json()) as { error?: string }).error).toBe('forbidden_scope');
-        expect((await call(cookie, 'POST', `${USERS}/${encodeURIComponent(targetId)}/disable`)).status).toBe(403);
-        expect((await call(cookie, 'PATCH', `${USERS}/${encodeURIComponent(targetId)}`, { displayName: 'x' })).status).toBe(403);
-        expect((await call(cookie, 'DELETE', `${USERS}/${encodeURIComponent(targetId)}`)).status).toBe(403);
+        const before = await readAs(await login(SAML_ADMIN, SAML_TENANT, false), targetId);
+        await expectScopeRefusal(await call(cookie, 'POST', USERS, { principalId: 'saml:nope' }));
+        await expectScopeRefusal(await call(cookie, 'POST', `${USERS}/${encodeURIComponent(targetId)}/disable`));
+        await expectScopeRefusal(await call(cookie, 'PATCH', `${USERS}/${encodeURIComponent(targetId)}`, { displayName: 'x' }));
+        await expectScopeRefusal(await call(cookie, 'DELETE', `${USERS}/${encodeURIComponent(targetId)}`));
+        const after = await readAs(await login(SAML_ADMIN, SAML_TENANT, false), targetId);
+        expect(after.status).toBe(before.status);
+        expect(after.displayName).toBe(before.displayName);
       });
 
       it('an ADMIN member of the same tenant still passes (201 / 200) — membership, not ownership', async () => {
         const admin = await login(SAML_ADMIN, SAML_TENANT, false);
         const created = await call(admin, 'POST', USERS, { principalId: `saml:admin-made-${SAML_TENANT}` });
         expect(created.status).toBe(201);
+        expect(((await created.json()) as UserRow).tenantId).toBe(SAML_TENANT);
         expect((await call(admin, 'POST', `${USERS}/${encodeURIComponent(targetId)}/disable`)).status).toBe(200);
         expect((await call(admin, 'PATCH', `${USERS}/${encodeURIComponent(targetId)}`, { displayName: 'renamed' })).status).toBe(200);
+        const after = await readAs(admin, targetId);
+        expect(after.status).toBe('disabled');
+        expect(after.displayName).toBe('renamed');
       });
     });
   }
 
+  // Guards `assertTenantScope`'s implicit-personal-owner line (reached through
+  // `requireTenantScope`): with NO membership row, nothing else can admit this caller.
   it('POSITIVE: a `user:` personal owner with NO membership row still passes (the short-circuit is kept for personal shapes)', async () => {
     const PERSONAL = 'user:solo-usersr19';
     // Found the personal workspace under a different subject so the seam seeds
@@ -254,7 +307,9 @@ describe('USERS-19 — a SAML-shaped session (personal === active, non-personal 
     const created = await call(cookie, 'POST', USERS, { principalId: 'oidc:solo-made' });
     const text = await created.text();
     expect(created.status, text).toBe(201);
-    const { userId } = JSON.parse(text) as { userId: string };
+    const { userId, tenantId } = JSON.parse(text) as UserRow;
+    expect(tenantId).toBe(PERSONAL);
     expect((await call(cookie, 'PATCH', `${USERS}/${encodeURIComponent(userId)}`, { displayName: 'mine' })).status).toBe(200);
+    expect((await readAs(cookie, userId)).displayName).toBe('mine');
   });
 });

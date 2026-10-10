@@ -14,14 +14,17 @@
  * @see docs/adr/0012-publishing-seo.md · docs/adr/0027-cms-front-page-and-always-on-content.md
  */
 
-import { isProtocolClient, v2MountedRootPrefixes } from '../../middleware/protocolVersion.js';
+import { isProtocolClient, isVendorPath, v2MountedRootPrefixes } from '../../middleware/protocolVersion.js';
 import { readFile } from 'node:fs/promises';
-import type { NextFunction, Request, Response } from 'express';
+import type { Express, NextFunction, Request, Response } from 'express';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { createLogger } from '../../observability/logger.js';
 import { throttleLog } from '../../observability/logSampler.js';
 import { publicBaseUrl } from '../featureRoute.js';
-import { requireCmsScope } from '../cms/cmsScope.js';
+import { getOrg } from '../../host/accessControlService.js';
+import { consentTokenHeaderOf, visitorConsentContextOf, type VisitorConsentContext } from '../consent/visitorConsent.js';
+import { requireCmsScope, requireLiveTier } from '../cms/cmsScope.js';
+import { isLiveTierPage } from '../cms/cmsService.js';
 import {
   isBotUserAgent,
   prerenderBlogIndex,
@@ -38,6 +41,7 @@ import {
   publicPageBySlug,
   putSeo,
   robotsTxt,
+  rootRobotsTxt,
   sitemapXml,
   negotiatePublicLocale,
 } from './publishingService.js';
@@ -57,7 +61,7 @@ export function registerPublishingRoutes(deps: RouteDeps): void {
   };
 
   // ── authed: per-page SEO metadata ──
-  const SEO = '/v1/host/openwop-app/publishing/orgs/:orgId/pages/:pageId/seo';
+  const SEO = '/host/openwop-app/publishing/orgs/:orgId/pages/:pageId/seo';
 
   app.get(SEO, async (req, res, next) => {
     try {
@@ -70,12 +74,19 @@ export function registerPublishingRoutes(deps: RouteDeps): void {
     try {
       const { user, orgId, tenantId } = await requireCmsScope(req, 'workspace:write');
       const body = (req.body ?? {}) as Record<string, unknown>;
-      res.json({ seo: await putSeo(tenantId, orgId, req.params.pageId, user.userId, body) });
+      // ADR 0836 D6 — a live (or scheduled) page's title, description, og image,
+      // `noindex` and canonical URL are what its readers and crawlers get: the
+      // admin tier, as for the page body, whatever the approval-gate setting.
+      res.json({
+        seo: await putSeo(tenantId, orgId, req.params.pageId, user.userId, body, {
+          authorize: async (page) => { if (isLiveTierPage(page)) await requireLiveTier(req); },
+        }),
+      });
     } catch (err) { next(err); }
   });
 
   // ── public: the published site (NO auth; org→tenant; toggle-gated) ──
-  const PUB = '/v1/host/openwop-app/public/:orgId';
+  const PUB = '/host/openwop-app/public/:orgId';
 
   // ADR 0486 — the public-site NAV list (published pages, slug + title) so the
   // public shell menu can reach EVERY published page. Registered before
@@ -100,7 +111,7 @@ export function registerPublishingRoutes(deps: RouteDeps): void {
       const md = pageMarkdown(page, publicBaseUrl(req));
       if (md === null) { sendError(res, 404, 'not_found', 'That page has no Markdown rendering.'); return; }
       res.setHeader('Content-Language', locale);
-      res.setHeader('Vary', 'Accept-Language, Accept-Encoding');
+      res.vary('Accept-Language, Accept-Encoding');
       // R2R-3 — authored text verbatim on a public boundary: declare + pin the
       // type (the ui-plugins nosniff precedent; markdown renders inert anyway).
       res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -113,10 +124,23 @@ export function registerPublishingRoutes(deps: RouteDeps): void {
       // ADR 0236 (D1) — optional `?vk=` visitor key (the analytics beacon
       // sessionKey) opts this read into consent-gated experiment assignment.
       // Absent/oversized ⇒ exactly the plain published page.
-      const vk = typeof req.query.vk === 'string' ? req.query.vk : undefined;
-      const { page, locale } = await publicPageBySlug(req.params.orgId, req.params.slug, publicBaseUrl(req), req.headers['accept-language'], vk);
+      let vk = typeof req.query.vk === 'string' ? req.query.vk : undefined;
+      // ADR 0860 D3 — the visitor's consent token (a header, never the query: a
+      // URL lands in request logs) and region, for the experiment decision. A
+      // public PAGE never fails on a bad token: it serves without an experiment,
+      // exactly what a visitor without consent gets (the ADR 0849 D4 posture).
+      const token = consentTokenHeaderOf(req);
+      const org = vk ? await getOrg(req.params.orgId) : null;
+      let visitorConsent: VisitorConsentContext | undefined;
+      if (org) {
+        try { visitorConsent = visitorConsentContextOf(req, org.tenantId, token); }
+        catch { vk = undefined; }
+      }
+      const { page, locale } = await publicPageBySlug(req.params.orgId, req.params.slug, publicBaseUrl(req), req.headers['accept-language'], vk, visitorConsent);
+      // Architect L3 — a per-visitor answer must never be stored by a shared cache.
+      if (vk || token !== undefined) res.setHeader('Cache-Control', 'private, no-store');
       res.setHeader('Content-Language', locale);
-      res.setHeader('Vary', 'Accept-Language, Accept-Encoding');
+      res.vary('Accept-Language, Accept-Encoding');
       res.json(page);
     } catch (err) { next(err); }
   });
@@ -170,7 +194,7 @@ export function registerPublishingRoutes(deps: RouteDeps): void {
       // the locale actually USED, never an echo of the request.
       const { posts, locale } = await listPublicBlog(req.params.orgId, filter, req.headers['accept-language'] ?? null);
       res.setHeader('Content-Language', locale);
-      res.setHeader('Vary', 'Accept-Language, Accept-Encoding');
+      res.vary('Accept-Language, Accept-Encoding');
       res.json({ posts });
     } catch (err) { next(err); }
   });
@@ -209,7 +233,7 @@ export function registerPublishingRoutes(deps: RouteDeps): void {
       }
       logDoc('prerender_served');
       res.setHeader('Content-Language', out.locale);
-      res.setHeader('Vary', 'Accept-Language, Accept-Encoding');
+      res.vary('Accept-Language, Accept-Encoding');
       res.setHeader('Cache-Control', `public, max-age=${prerenderTtlSeconds()}`);
       res.type('html').send(out.html);
     } catch (err) { next(err); }
@@ -241,7 +265,7 @@ export function registerPublishingRoutes(deps: RouteDeps): void {
       // from the same negotiation, so the header and the document now agree.
       const blogLocale = await negotiatePublicLocale(req.params.orgId, req.headers['accept-language'] ?? null);
       if (blogLocale) res.setHeader('Content-Language', blogLocale);
-      res.setHeader('Vary', 'Accept-Language, Accept-Encoding');
+      res.vary('Accept-Language, Accept-Encoding');
       res.setHeader('Cache-Control', `public, max-age=${prerenderTtlSeconds()}`);
       res.type('html').send(html);
     } catch (err) { next(err); }
@@ -255,7 +279,7 @@ export function registerPublishingRoutes(deps: RouteDeps): void {
       try {
         // Bot vs human differ at the same URL — Vary is mandatory (a shared
         // cache must never serve the bot document to a human or vice versa).
-        res.setHeader('Vary', 'User-Agent, Accept-Language, Accept-Encoding');
+        res.vary('User-Agent, Accept-Language, Accept-Encoding');
         const siteOrg = process.env.OPENWOP_PUBLIC_SITE_ORG_ID?.trim();
         const wantBot = !prerenderDisabled() && siteOrg && isBotUserAgent(req.headers['user-agent']);
         if (wantBot) {
@@ -293,35 +317,29 @@ export function registerPublishingRoutes(deps: RouteDeps): void {
 
   app.get('/', documentHandler(() => 'home'));
 
-  // ── ADR 0631 — the major-2 path space and the SPA share the origin's roots ──
-  // Hosting routes every `spec/v2/path-manifest.json` root to this backend
-  // (it cannot key on a request header). A request naming a major never
-  // reaches here — the negotiator rewrote it onto `/v1` before any router. A
-  // HEADERLESS request on one of these roots is therefore either a browser
-  // navigating to an SPA page (`/agents/:id`, `/runs/:id` — the two roots the
-  // SPA owns; the rest render the SPA's own 404) or a client that forgot the
-  // header. The client keeps today's JSON 404 (a shell would be a lie to a
-  // program); the browser gets the shell this feature already serves for `/`.
-  // ONE shell owner (this file), ONE root list (the negotiator's derivation).
-  // `no-store` because a CDN that served one branch to the other's client
-  // would break both, and the Firebase CDN has been observed stripping Vary.
-  const v2Roots = v2MountedRootPrefixes();
-  app.get(v2Roots.flatMap((r) => [r, `${r}/*`]), async (req: Request, res: Response, next: NextFunction) => {
+  // ADR 0812 P3b — the shared-root SPA shell moved to `registerSharedRootShell`
+  // below, which `registerAllRoutes` mounts BEFORE every route module.
+  app.get('/p/:slug', documentHandler((req) => req.params.slug as string));
+
+  // ── ADR 0824 D4 — the ROOT robots.txt + sitemap.xml doors ──
+  // Crawlers only ever ask the origin root. Hosting used to fall these through
+  // to the SPA catch-all (`index.html` as text/html), so the real generators
+  // above were unreachable at the paths anyone reads. Same configured site org
+  // as the `/` + `/p/:slug` doors and the `/llms.txt` door.
+  app.get('/robots.txt', (req, res) => {
+    const siteOrg = process.env.OPENWOP_PUBLIC_SITE_ORG_ID?.trim();
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    res.type('text/plain').send(rootRobotsTxt(publicBaseUrl(req), Boolean(siteOrg)));
+  });
+
+  app.get('/sitemap.xml', async (req, res, next) => {
     try {
-      // ADR 0646 — ONE predicate decides whose request this is, shared with
-      // the negotiator. It used to be restated here as two lines; two copies
-      // of an authorization-adjacent decision drift, and the negotiator now
-      // withholds the version header on exactly the branch this serves.
-      if (isProtocolClient(req)) { next(); return; }
-      const shell = await spaShellHtml();
-      if (shell === null) { next(); return; }
-      res.vary('Accept');
-      res.setHeader('Cache-Control', 'no-store');
-      logDoc('human_shell_v2_root');
-      res.type('html').send(shell);
+      const siteOrg = process.env.OPENWOP_PUBLIC_SITE_ORG_ID?.trim();
+      if (!siteOrg) { sendError(res, 404, 'not_found', 'No public site is configured on this host.'); return; }
+      res.setHeader('Cache-Control', 'public, max-age=3600');
+      res.type('application/xml').send(await sitemapXml(siteOrg, publicBaseUrl(req)));
     } catch (err) { next(err); }
   });
-  app.get('/p/:slug', documentHandler((req) => req.params.slug as string));
 }
 
 /** The SPA shell for human document requests on the platform origin (Phase 4).
@@ -542,4 +560,69 @@ export function __resetShellCacheForTests(): void {
   shellEtag = null; // the validator must reset with the body it belongs to
   shellFetchedAt = 0;
   shellRefreshing = null;
+}
+
+/**
+ * ADR 0812 P3b — the SPA shell on the shared v2 roots, mounted FIRST.
+ *
+ * Until the routing flip, the negotiator rewrote every protocol client's request to
+ * `/v1…`, so a protocol handler could never answer a bare `/runs/<id>` and the shell
+ * (registered late, in this feature) was the only thing at the bare root. The
+ * rewrite is gone and protocol routes register unversioned, so WHO answers a bare
+ * shared-root GET is now decided by registration order. This handler is mounted
+ * before every route module, so a browser navigation gets the shell, and it passes
+ * a protocol client and a vendor path straight through (`next()`). Pinned by
+ * `test/adr0812-p3b-shell-vs-protocol.test.ts` (step 1), whose API leg becomes live
+ * here.
+ */
+export function registerSharedRootShell(app: Express): void {
+  const logDoc = (outcome: string): void => {
+    const t = throttleLog(`publishing_doc_${outcome}`);
+    if (t.emit) log.info('publishing_doc_serve', { outcome, suppressed: t.suppressed });
+  };
+  // ── ADR 0631 — the major-2 path space and the SPA share the origin's roots ──
+  // Hosting routes every `spec/v2/path-manifest.json` root to this backend
+  // (it cannot key on a request header). A request naming a major never
+  // reaches here: it is passed through below (ADR 0812 P3b; until then the negotiator
+  // rewrote it onto `/v1` before any router). A
+  // HEADERLESS request on one of these roots is therefore either a browser
+  // navigating to an SPA page (`/agents/:id`, `/runs/:id` — the two roots the
+  // SPA owns; the rest render the SPA's own 404) or a client that forgot the
+  // header. The client keeps today's JSON 404 (a shell would be a lie to a
+  // program); the browser gets the shell this feature already serves for `/`.
+  // ONE shell owner (this file), ONE root list (the negotiator's derivation).
+  // `no-store` because a CDN that served one branch to the other's client
+  // would break both, and the Firebase CDN has been observed stripping Vary.
+  const v2Roots = v2MountedRootPrefixes();
+  // ADR 0812 P3b — ONE anchored regex with NO capture groups, not `[r, r/*]`. This
+  // handler now runs FIRST, and Express decodes a route's captured params during
+  // MATCHING: a `/runs/*` wildcard turned a malformed escape (`/runs/x/artifacts/%E0`)
+  // into a 500 before this handler could pass it on (the artifact route answers it
+  // 404). With nothing captured, nothing is decoded.
+  const esc = (r: string): string => r.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const sharedRoots = new RegExp(`^(?:${v2Roots.map(esc).join('|')})(?:/.*)?$`);
+  app.get(sharedRoots, async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      // ADR 0646 — ONE predicate decides whose request this is, shared with
+      // the negotiator. It used to be restated here as two lines; two copies
+      // of an authorization-adjacent decision drift, and the negotiator now
+      // withholds the version header on exactly the branch this serves.
+      if (isProtocolClient(req)) { next(); return; }
+      // ADR 0812 P3b — a request that ARRIVED on `/v1` (the served-v1 shim stripped it
+      // onto this root) is never the SPA's: a versioned path names the API (ADR 0631).
+      if (/^(?:\/api)?\/v1(?=\/|$)/.test(req.originalUrl)) { next(); return; }
+      // ADR 0812 P3b — `/host` is a shared root, so this is mounted on `/host/*`.
+      // A vendor path (`/host/<org>/…`) is never the SPA's: an asset `<img>`,
+      // `embed.js`, the OAuth callback, a prerendered page. Until P3b the vendor
+      // rewrite kept those away from here; a MIGRATED vendor family is no longer
+      // rewritten, so the exclusion has to be explicit.
+      if (isVendorPath(req.path)) { next(); return; }
+      const shell = await spaShellHtml();
+      if (shell === null) { next(); return; }
+      res.vary('Accept');
+      res.setHeader('Cache-Control', 'no-store');
+      logDoc('human_shell_v2_root');
+      res.type('html').send(shell);
+    } catch (err) { next(err); }
+  });
 }

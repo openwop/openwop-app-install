@@ -30,6 +30,7 @@ import { render, cleanup, screen, waitFor } from '@testing-library/react';
 const api = vi.hoisted(() => ({
   listOrgs: vi.fn(),
   getPolicy: vi.fn(),
+  getAccess: vi.fn(async () => ({ canManage: true })), // ADR 0849 D1 — an admin by default
   listRecords: vi.fn(),
   getSubject: vi.fn(),
 }));
@@ -48,7 +49,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   api.getPolicy.mockResolvedValue({ policy: { tenantId: 't', regulatedRegions: ['EU'], defaultMode: 'opt-in' }, legalHold: null });
   api.listRecords.mockResolvedValue([]);
-  api.getSubject.mockResolvedValue(null);
+  api.getSubject.mockResolvedValue({ record: null, erased: false });
 });
 afterEach(cleanup);
 

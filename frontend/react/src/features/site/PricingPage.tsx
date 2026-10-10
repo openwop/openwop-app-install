@@ -16,10 +16,24 @@ import { RenderSections } from '../cms/SectionRenderer.js';
 import { SYSTEM_SITE_ORG, type Section } from '../cms/cmsClient.js';
 import { fetchPublicPageResult, type PublicPage } from './siteClient.js';
 import { applySeo } from './siteSeo.js';
+import type { FaqItem } from './pricingFaq.js';
+import { useFormat } from '../../i18n/useFormat.js';
 
-/** The bare fallback section shown when no `pricing` CMS page is authored yet. */
-function fallbackSections(heading: string, eyebrow: string, blurb: string): Section[] {
-  return [{ sectionId: 'pricing-fallback', type: 'pricing', data: { heading, eyebrow, blurb } }];
+/** The bare fallback section shown when no `pricing` CMS page is authored yet.
+ *  `contactUrl` gives an unpriced plan (Enterprise) a real "Contact us" — the
+ *  host-site `support` page, which an operator can override by authoring the
+ *  `pricing` page with its own `contactUrl`. */
+const FALLBACK_CONTACT_URL = '/p/support';
+function fallbackSections(heading: string, eyebrow: string, blurb: string, faq: { eyebrow: string; heading: string; items: FaqItem[]; support: { heading: string; lede: string; label: string } } | null): Section[] {
+  const sections: Section[] = [{ sectionId: 'pricing-fallback', type: 'pricing', data: { heading, eyebrow, blurb, contactUrl: FALLBACK_CONTACT_URL } }];
+  // ADR 0820 §7 — the FAQ rides the ordinary `faq` section type (the block an
+  // operator can author too), and the support CTA is a plain `cta` section: FAQ
+  // answers are plain text by design, so the link lives here, not in an answer.
+  if (faq && faq.items.length > 0) {
+    sections.push({ sectionId: 'pricing-fallback-faq', type: 'faq', data: { eyebrow: faq.eyebrow, heading: faq.heading, items: faq.items } });
+    sections.push({ sectionId: 'pricing-fallback-support', type: 'cta', data: { heading: faq.support.heading, subheading: faq.support.lede, label: faq.support.label, url: FALLBACK_CONTACT_URL } });
+  }
+  return sections;
 }
 
 export function PricingPage(): JSX.Element {
@@ -31,6 +45,11 @@ export function PricingPage(): JSX.Element {
   const [degraded, setDegraded] = useState(false);
   const [done, setDone] = useState(false);
   const [attempt, setAttempt] = useState(0);
+  const fmt = useFormat();
+  // ADR 0820 §7 — the fallback FAQ's items, built from the live pricing read.
+  // Only fetched when the fallback is actually shown (an authored page wins).
+  const [faqItems, setFaqItems] = useState<FaqItem[] | null>(null);
+  const fallback = done && !(page && page.sections.length > 0);
 
   useEffect(() => {
     let live = true;
@@ -52,13 +71,30 @@ export function PricingPage(): JSX.Element {
     return () => { live = false; for (const u of undos.reverse()) u(); };
   }, [t, attempt]);
 
+  useEffect(() => {
+    if (!fallback) { setFaqItems(null); return; }
+    let live = true;
+    // A failed bundle read only hides the "sold separately" sentence (null);
+    // a failed pricing read hides the FAQ — the tier grid already says why.
+    // Dynamic import: keeps the FAQ builder + the shared pricing client out of
+    // the entry chunk's preload map for this lazy route (entry budget).
+    void import('./pricingFaq.js')
+      .then((m) => m.loadPricingFaq(t, (xs) => fmt.list(xs)))
+      .then((items) => { if (live) setFaqItems(items); })
+      .catch(() => { if (live) setFaqItems(null); });
+    return () => { live = false; };
+  }, [fallback, t, fmt]);
+
   // A11Y-1 — a labeled status region like the inner section's (discoverable;
   // role=status mounted with content is not reliably spoken on insertion).
   if (!done) return <div className="cms-public-page"><div className="u-p-4" role="status" aria-label={t('common:loading')}><Skeleton /></div></div>;
 
   const sections = page && page.sections.length > 0
     ? page.sections
-    : fallbackSections(t('pricingHeading'), t('pricingEyebrow'), t('pricingBlurb'));
+    : fallbackSections(t('pricingHeading'), t('pricingEyebrow'), t('pricingBlurb'), faqItems ? {
+      eyebrow: t('pricingFaqEyebrow'), heading: t('pricingFaqHeading'), items: faqItems,
+      support: { heading: t('pricingSupportHeading'), lede: t('pricingSupportLede'), label: t('pricingSupportLabel') },
+    } : null);
   const hasHero = sections.some((section) => section.type === 'hero');
 
   return (

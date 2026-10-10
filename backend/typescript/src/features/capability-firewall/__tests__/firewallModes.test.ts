@@ -47,11 +47,18 @@ describe('firewall modes (ADR 0397 P3)', () => {
     expect(hook.evaluate([], READ).decision).toBe('allow');
   });
 
-  it('enforce + require-approval: an unmatched action is held; bypass downgrades it to allow', () => {
+  // ADR 0834 D2 — this case used to assert bypass downgrades the enforce default to
+  // allow. The enforce default is the ADMIN's ask (`policy` origin), not the user's own
+  // safe-mode ask, so the user's bypass no longer skips it; only an approval does.
+  it('enforce + require-approval: an unmatched action is held — and bypass does NOT skip the admin\'s ask', () => {
     const enforce = buildFirewallHook({ rules: [], mode: 'enforce', defaultDenyVerdict: 'require-approval', unknownToolPolicy: 'skip' });
-    expect(enforce.evaluate([], READ).decision).toBe('require-approval');
+    expect(enforce.evaluate([], READ)).toMatchObject({ decision: 'require-approval', origin: 'policy' });
     const bypass = buildFirewallHook({ rules: [], mode: 'enforce', defaultDenyVerdict: 'require-approval', unknownToolPolicy: 'skip', bypassApproval: true });
-    expect(bypass.evaluate([], READ).decision).toBe('allow');
+    expect(bypass.evaluate([], READ).decision).toBe('require-approval');
+    const approved = buildFirewallHook({ rules: [], mode: 'enforce', defaultDenyVerdict: 'require-approval', unknownToolPolicy: 'skip', approvedTools: new Set([READ]) });
+    expect(approved.evaluate([], READ).decision).toBe('allow');
+    const baselineOnly = buildFirewallHook({ rules: [], mode: 'enforce', defaultDenyVerdict: 'require-approval', unknownToolPolicy: 'skip', approvedBaselineTools: new Set([READ]) });
+    expect(baselineOnly.evaluate([], READ).decision).toBe('require-approval');
   });
 
   it('enforce + deny: bypass does NOT downgrade a hard deny', () => {

@@ -10,6 +10,7 @@
  * today); a chassis export-menu seam is the recorded follow-up once a second
  * consumer (CAD) appears.
  */
+import { canonicalAssetPath } from '../client/assetServePath.js';
 
 /** Serialize a cleaned standalone copy of a live scene SVG: classed elements
  *  (editor chrome) removed, explicit pixel width/height set from the viewBox
@@ -107,13 +108,13 @@ export async function copyPngToClipboard(blob: Blob): Promise<boolean> {
  * minus that image).
  */
 export async function inlineSvgImageHrefs(svgText: string): Promise<{ text: string; unresolved: number }> {
-  const HREF_RE = /(<image\b[^>]*\bhref=")((?:\/v1)?\/host\/openwop-app\/assets\/[A-Za-z0-9_-]{1,512})(")/g;
+  const HREF_RE = /(<image\b[^>]*\bhref=")((?:\/v[0-9]+)?\/host\/openwop-app\/assets\/[A-Za-z0-9_-]{1,512})(")/g;
   const hrefs = [...new Set([...svgText.matchAll(HREF_RE)].map((m) => m[2]).filter((h): h is string => !!h))];
   if (hrefs.length === 0) return { text: svgText, unresolved: 0 };
   const dataUris = new Map<string, string>();
   await Promise.all(hrefs.map(async (href) => {
     try {
-      const res = await fetch(href);
+      const res = await fetch(canonicalAssetPath(href));
       if (!res.ok) return;
       // arrayBuffer + btoa (not FileReader) — realm-independent, so the same
       // code path runs in the browser and under test.

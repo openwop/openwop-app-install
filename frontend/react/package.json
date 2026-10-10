@@ -1,15 +1,15 @@
 {
   "name": "@openwop/app-web",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
-  "description": "OpenWOP application frontend \u2014 React SPA consuming @openwop/openwop.",
+  "description": "OpenWOP application frontend — React SPA consuming @openwop/openwop.",
   "engines": {
     "node": ">=22 <25"
   },
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && node scripts/check-build-chain-split.mjs && node scripts/gen-event-codemap.mjs --check && node scripts/check-prompt-ref-defaults.mjs && node scripts/check-brand-resolver.mjs && node scripts/check-default-logo-parity.mjs && node scripts/check-css-tokens.mjs && node scripts/check-tsx-color-literals.mjs && node scripts/check-theme-stock.mjs && node scripts/check-dtcg-parity.mjs && node scripts/check-legacy-aliases.mjs && node scripts/check-typography-literals.mjs && node scripts/check-breakpoints.mjs && node scripts/check-admin-css-ownership.mjs && node scripts/check-unwrapped-buttons.mjs && node scripts/check-inline-styles.mjs && node scripts/check-spacing-literals.mjs && node scripts/check-failed-read-sentinels.mjs && node scripts/check-silent-write-failures.mjs && node scripts/check-live-regions.mjs && node scripts/check-failure-card-announce.mjs && node scripts/check-failure-card-recovery.mjs && node scripts/check-notice-announce.mjs && node scripts/check-aria-prohibited.mjs && node scripts/check-classnames.mjs && node scripts/check-orphan-classes.mjs && node scripts/check-i18n.mjs && node scripts/check-nav-destination-orphans.mjs && node scripts/check-hosting-wire-rewrites.cjs && vite build && node scripts/write-build-info.mjs && node scripts/check-built-css.mjs && node scripts/check-bundle-budget.mjs && node scripts/check-csp-script-hash.mjs",
+    "build": "tsc --noEmit && node scripts/check-build-chain-split.mjs && node scripts/gen-event-codemap.mjs --check && node scripts/check-prompt-ref-defaults.mjs && node scripts/check-brand-resolver.mjs && node scripts/check-default-logo-parity.mjs && node scripts/check-css-tokens.mjs && node scripts/check-tsx-color-literals.mjs && node scripts/check-color-mix-space.mjs && node scripts/check-theme-stock.mjs && node scripts/check-dtcg-parity.mjs && node scripts/gen-design-tokens.mjs --check && node scripts/check-legacy-aliases.mjs && node scripts/check-typography-literals.mjs && node scripts/check-breakpoints.mjs && node scripts/check-admin-css-ownership.mjs && node scripts/check-unwrapped-buttons.mjs && node scripts/check-inline-styles.mjs && node scripts/check-spacing-literals.mjs && node scripts/check-failed-read-sentinels.mjs && node scripts/check-silent-write-failures.mjs && node scripts/check-live-regions.mjs && node scripts/check-failure-card-announce.mjs && node scripts/check-failure-card-recovery.mjs && node scripts/check-notice-announce.mjs && node scripts/check-aria-prohibited.mjs && node scripts/check-classnames.mjs && node scripts/check-orphan-classes.mjs && node scripts/check-i18n.mjs && node scripts/check-nav-destination-orphans.mjs && node scripts/check-hosting-wire-rewrites.cjs && vite build && node scripts/write-build-info.mjs && node scripts/check-built-css.mjs && node scripts/check-bundle-budget.mjs && node scripts/check-csp-script-hash.mjs",
     "preview": "vite preview",
     "check:bundle-budget": "node scripts/check-bundle-budget.mjs",
     "typecheck": "tsc --noEmit",
@@ -40,6 +40,7 @@
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
+    "@dnd-kit/sortable": "^8.0.0",
     "@opentelemetry/api": "^1.9.0",
     "@opentelemetry/context-zone": "^2.8.0",
     "@opentelemetry/exporter-trace-otlp-http": "^0.219.0",
@@ -47,8 +48,7 @@
     "@opentelemetry/resources": "^2.8.0",
     "@opentelemetry/sdk-trace-web": "^2.8.0",
     "@opentelemetry/semantic-conventions": "^1.28.0",
-    "@openwop/openwop": "2.0.0",
-    "@openwop/openwop-v1": "npm:@openwop/openwop@1.9.0",
+    "@openwop/openwop": "2.4.0",
     "@tiptap/core": "^3.31.3",
     "@tiptap/extension-image": "^3.31.3",
     "@tiptap/extension-placeholder": "^3.31.3",
@@ -60,6 +60,8 @@
     "@tiptap/react": "^3.31.3",
     "@tiptap/starter-kit": "^3.31.3",
     "@tiptap/suggestion": "^3.31.3",
+    "@xterm/addon-fit": "0.10.0",
+    "@xterm/xterm": "5.5.0",
     "@xyflow/react": "^12.10.2",
     "firebase": "^12.13.0",
     "i18next": "^25.10.10",

@@ -8,6 +8,7 @@
  * bullets/quote/attribution/notes + one image region on the `image` layout.
  * The Phase-3 block model will extend this module, not fork it.
  */
+import { assetTokenFromUrl as anyAssetToken } from '../../../host/assetServePath.js';
 
 export type SlideLayoutId = 'title' | 'title-bullets' | 'section' | 'quote' | 'image' | 'blank' | 'blocks';
 
@@ -101,15 +102,11 @@ export function themeOf(theme: unknown): SlideThemePalette {
   return SLIDE_THEMES[typeof theme === 'string' ? theme : 'default'] ?? SLIDE_THEMES['default']!;
 }
 
-/** The host asset-serve path prefix — the ONLY image source whose bytes the
- *  exporters embed (resolved internally, zero network — the ADR 0328 §5 SSRF
- *  posture). Everything else renders as a linked-image placeholder. */
-export const ASSET_SERVE_PREFIX = '/v1/host/openwop-app/assets/';
-
+/** A host asset-serve URL is the ONLY image source whose bytes the exporters
+ *  embed (resolved internally, zero network — the ADR 0328 §5 SSRF posture).
+ *  Everything else renders as a linked-image placeholder. Recognition is owned
+ *  by `host/assetServePath.ts` (any `/v<N>` or none — stored decks carry `/v1`). */
 export function assetTokenFromUrl(url: unknown): string | null {
-  if (typeof url !== 'string') return null;
-  const idx = url.indexOf(ASSET_SERVE_PREFIX);
-  if (idx === -1) return null;
-  const token = url.slice(idx + ASSET_SERVE_PREFIX.length).split(/[?#]/)[0] ?? '';
-  return /^[A-Za-z0-9_-]{8,}$/.test(token) ? token : null;
+  const token = anyAssetToken(url);
+  return token !== null && /^[A-Za-z0-9_-]{8,}$/.test(token) ? token : null;
 }

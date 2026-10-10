@@ -172,7 +172,7 @@ describe('(C) simulation verdicts — closed-world normalization (persona-tagged
   });
 
   it('parity with the sim-verdict pack schema — accepts a schema-valid verdict VERBATIM, derives block from a block finding', async () => {
-    const schemaPath = new URL('../../../packs/feature.kicktodo.agents/schemas/sim-verdict.schema.json', import.meta.url);
+    const schemaPath = new URL('../../../packs/vendor.openwop-app.kicktodo.agents/schemas/sim-verdict.schema.json', import.meta.url);
     const schema = JSON.parse(readFileSync(schemaPath, 'utf8'));
     const { default: Ajv2020 } = (await import('ajv/dist/2020.js')) as { default: new (o?: unknown) => { compile: (s: unknown) => (v: unknown) => boolean } };
     const validate = new Ajv2020({ strict: false }).compile(schema);

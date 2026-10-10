@@ -94,6 +94,30 @@ describe('v2Wire — the one seam between the major-2 wire and the v1-shaped SPA
     expect(normalizeErrorCode('other-org.something')).toBe('other-org.something');
   });
 
+  it('openwop#1698: restores this host\'s failure codes on run.failed / node.failed / snapshot error objects', () => {
+    const wire = {
+      status: 'failed',
+      error: { code: 'capability_not_provided', message: 'm', details: { hostCode: 'host_capability_missing' } },
+      events: [
+        { type: 'node.failed', payload: { nodeId: 'n', error: { code: 'openwop-app.empty_completion', message: 'm' } } },
+        { type: 'run.failed', payload: { error: { code: 'validation_error', message: 'm', details: { field: 'x', hostCode: 'invalid_config' } } } },
+        { type: 'run.failed', payload: { error: { code: 'approval_rejected', message: 'm' } } },
+        { type: 'run.failed', payload: { error: { code: 'myndhyve.foreign', message: 'm' } } },
+      ],
+    };
+    const out = unbindRunIds(wire) as typeof wire;
+    // Aliased: the host code comes back, and the hostCode carrier is removed.
+    expect(out.error).toEqual({ code: 'host_capability_missing', message: 'm' });
+    // Namespaced: the prefix is stripped, so `errorClassify` still matches.
+    expect(out.events[0]!.payload.error.code).toBe('empty_completion');
+    expect(out.events[1]!.payload.error).toEqual({ code: 'invalid_config', message: 'm', details: { field: 'x' } });
+    // Registered and foreign-vendor codes pass through untouched.
+    expect(out.events[2]!.payload.error.code).toBe('approval_rejected');
+    expect(out.events[3]!.payload.error.code).toBe('myndhyve.foreign');
+    // An HTTP envelope's `error` is a STRING, not an object: left for errorEnvelope.ts.
+    expect(unbindRunIds({ error: 'openwop-app.x', message: 'm' })).toEqual({ error: 'openwop-app.x', message: 'm' });
+  });
+
   it('treats the v2 not_found alias and both v1 spellings as not-found', () => {
     for (const c of ['not_found', 'run_not_found', 'workflow_not_found']) expect(isNotFoundCode(c)).toBe(true);
     expect(isNotFoundCode('forbidden')).toBe(false);
@@ -134,6 +158,8 @@ describe('v2Wire — the one seam between the major-2 wire and the v1-shaped SPA
     expect(projectBoundId('acme/r-1')).toBe('acme~2Fr-1');
     // A bound id the wire returned with a projected tenant reads as bound and unbinds to the bare opaque.
     expect(fromWireRunId('user~3A0123456789abcdef0123456789abcdef/bbbbbbbbbbbbbbbbbbbb')).toBe('bbbbbbbbbbbbbbbbbbbb');
+    // ADR 0814 — the wire tenant is now grammar-clean (`u-<hash>`).
+    expect(fromWireRunId('u-0123456789abcdef0123456789abcdef/bbbbbbbbbbbbbbbbbbbb')).toBe('bbbbbbbbbbbbbbbbbbbb');
   });
 
   it('restores a host-only interrupt kind carried as `custom` + boxed spelling (ADR 0725)', () => {

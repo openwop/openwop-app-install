@@ -9,7 +9,7 @@ import { describe, it, expect, vi } from 'vitest';
 
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (k: string) => k }) }));
 vi.mock('../ModelSwitcher.js', () => ({ ModelSwitcher: () => null }));
-vi.mock('../../conversationTools/CapabilityScopePanel.js', () => ({ CapabilityScopeButton: () => null }));
+vi.mock('../../conversationTools/ConversationToolsControl.js', () => ({ default: () => null }));
 
 import { useComposerModifiers } from '../hooks/useComposerModifiers.js';
 

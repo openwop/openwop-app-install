@@ -30,6 +30,17 @@ A release SHOULD be marked a required stop only when at least one holds:
 
 ## Version log
 
+### v0.3.0 — 2026-10-09
+- **Required stop:** no.
+- **Schema:** sqlite 49 / postgres 47 · **App migrations:** 22.
+- Two weeks since v0.2.0 (1,549 commits, ADRs 0759–0867). **OpenWOP v1 is
+  removed** — `/v1/*` answers `410` and the host speaks only v2; move integrations
+  to the unversioned v2 paths first. Rolling-safe (additive columns only). Also
+  breaking: chain packs must pin nodes exactly; registry packs must be v2-signed.
+  New: `OPENWOP_TRUSTED_PROXY_CIDRS` for public-address proxies; scale-out hosts
+  need shared `OPENWOP_SURFACE_*` backends to advertise storage families.
+- [CHANGELOG §0.3.0](./CHANGELOG.md#030--2026-10-09)
+
 ### v0.2.0 — 2026-09-27
 - **Required stop:** no.
 - **Schema:** sqlite 48 / postgres 46 · **App migrations:** 21.

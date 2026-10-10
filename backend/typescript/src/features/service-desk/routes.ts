@@ -15,7 +15,7 @@ import { mintPublicIntakeKey, publicIntakeKeys } from './widgetRoutes.js';
 import { sendError } from '../../middleware/errorEnvelope.js';
 
 const FEATURE = { toggleId: 'service-desk', label: 'Service desk' };
-const ORG = '/v1/host/openwop-app/service-desk/orgs/:orgId';
+const ORG = '/host/openwop-app/service-desk/orgs/:orgId';
 type Scope = 'workspace:read' | 'workspace:write' | 'host:members:manage';
 
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');

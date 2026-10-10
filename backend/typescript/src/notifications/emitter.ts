@@ -19,7 +19,7 @@
  * uses against the same Cloud Run service.
  */
 
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import type { Storage } from '../storage/storage.js';
 import type { NotificationRecord } from '../types.js';
 import { pushNotification, pushNotificationsBatch } from './webPush.js';
@@ -33,6 +33,7 @@ import {
 } from '../host/effectEscapeLedger.js';
 import { getInvocationLog } from '../executor/invocationLog.js';
 import { createLogger } from '../observability/logger.js';
+import { materialiseRecipients } from './audience.js';
 
 const log = createLogger('notifications.emitter');
 
@@ -82,6 +83,61 @@ function buildRecord(input: RecordInput): NotificationRecord {
     metadata: input.metadata,
     createdAt: input.createdAt ?? new Date().toISOString(),
   };
+}
+
+/**
+ * ADR 0816 D1 — a record materialised per person carries `metadata.audience`
+ * (`tenant` | `role:<r>`). The addressed-only delivery lanes (Teams cards,
+ * approval email) skip it: broadcasts and role notices never reached them, and
+ * materialising must not silently widen delivery.
+ */
+export function isMaterialisedNotice(record: Pick<NotificationRecord, 'metadata'>): boolean {
+  const a = (record.metadata as { audience?: unknown } | undefined)?.audience;
+  return typeof a === 'string' && (a === 'tenant' || a.startsWith('role:'));
+}
+
+const sha = (v: string): string => createHash('sha256').update(v).digest('hex');
+
+/**
+ * ADR 0816 D1 — in a shared workspace, a broadcast or role-addressed notice is
+ * ONE ROW PER PERSON, decided here once, so every delivery lane (inbox, SSE,
+ * Web Push) and every state change (read / archive / delete) is per person by
+ * construction. Anything else — an addressed record, a personal or memberless
+ * tenant — keeps its single row.
+ *
+ * Ids are DETERMINISTIC per recipient (`<base>.<sha256(subject)[:16]>`), with
+ * `<base>` the caller's id, else derived from the RFC 0150 effect identity, so a
+ * re-execution after a partial crash re-derives the same ids and the caller's
+ * insert-if-absent skips what already landed. Only an emit with no run context
+ * (no identity) gets a random base — and it has no redelivery to collide with.
+ */
+async function materialise(input: RecordInput, identity: EffectIdentity | null): Promise<NotificationRecord[]> {
+  if (input.recipientUserId) return [buildRecord(input)];
+  let recipients: string[] | null;
+  try {
+    recipients = await materialiseRecipients(input.tenantId, input.recipientRole);
+  } catch (err) {
+    // Membership unreadable: keep today's single row. The push lane refuses an
+    // unaddressed role row on its own (webPush.ts), so this degrades to the
+    // pre-0816 inbox behaviour rather than to a wider audience.
+    log.error('ADR 0816: notice audience unresolvable — kept as one shared row', {
+      tenantId: input.tenantId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    recipients = null;
+  }
+  if (!recipients || recipients.length === 0) return [buildRecord(input)];
+  const base = input.notificationId
+    ?? (identity ? sha(`${identity.runId}|${identity.nodeId}|${identity.invocationId}`).slice(0, 32) : randomBytes(16).toString('hex'));
+  const createdAt = input.createdAt ?? new Date().toISOString();
+  const audience = input.recipientRole ? `role:${input.recipientRole}` : 'tenant';
+  return recipients.map((subject) => buildRecord({
+    ...input,
+    notificationId: `${base}.${sha(subject).slice(0, 16)}`,
+    recipientUserId: subject,
+    createdAt,
+    metadata: { ...(input.metadata ?? {}), audience },
+  }));
 }
 
 /** Fan a record out to every live SSE subscriber. A subscriber throwing must
@@ -196,6 +252,54 @@ async function writeNotificationMemo(identity: EffectIdentity, record: Notificat
   }
 }
 
+/**
+ * Everything that happens to a durable row after it lands: SSE fan-out, Web Push,
+ * and the addressed-only Teams / email lanes. Each lane is best-effort and
+ * isolated — none may break the emit.
+ */
+function deliverDownstream(b: Storage, record: NotificationRecord, opts: { push?: boolean } = {}): void {
+  fanOut(record);
+  // Fan out to the tenant's Web Push subscriptions (the recipient's devices for
+  // an addressed row). Best-effort + concurrent — push delivery latency must not
+  // block the emit return. `pushNotification` swallows per-sub errors and
+  // prunes 404/410 endpoints on its own; PRV-6: the outer `.catch` guarantees a
+  // whole-promise rejection (e.g. the subscription storage read failing) can
+  // never surface as an unhandled rejection.
+  if (opts.push !== false) {
+    void pushNotification(b, record).catch((err: unknown) => {
+      log.warn('web-push fanout failed', {
+        notificationId: record.notificationId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }
+  // ADR 0816 D1 — a materialised broadcast/role row never reached Teams or email
+  // before it was materialised; it does not start now.
+  if (isMaterialisedNotice(record)) return;
+  // ADR 0198 Phase B — best-effort Teams adaptive-card delivery for
+  // addressed action-needed notifications (sent via the RECIPIENT's own
+  // microsoft365 connection; silent no-op without a delivery pref).
+  // Same isolation contract as webPush: never breaks the insert.
+  void deliverTeamsApprovalCard(b, record).catch((err: unknown) => {
+    log.warn('teams approval-card delivery failed', {
+      notificationId: record.notificationId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  });
+  // ADR 0478 §2 — best-effort email delivery for ADDRESSED action-needed
+  // notifications (opt-in pref; interrupt-backed records are handled by
+  // the token lane in notify.ts — this sibling skips them). Same
+  // isolation contract as Teams: never breaks the insert.
+  try {
+    deliverEmailForNotificationRecord(record);
+  } catch (err) {
+    log.warn('email approval delivery failed', {
+      notificationId: record.notificationId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
 export function getNotificationEmitter() {
   if (!backend) throw new Error('Notification backend not installed');
   const b = backend;
@@ -284,42 +388,47 @@ export function getNotificationEmitter() {
         }
       }
       if (identity) await recordDurableEffectEscapeAt(identity);
-      const record = buildRecord(input);
-      await b.insertNotification(record);
-      if (identity) await writeNotificationMemo(identity, record);
-      fanOut(record);
-      // Fan out to every Web Push subscription owned by the tenant.
-      // Best-effort + concurrent — push delivery latency must not
-      // block the emit return. `pushNotification` swallows per-sub
-      // errors and prunes 404/410 endpoints on its own; PRV-6: the outer
-      // `.catch` guarantees a whole-promise rejection (e.g. the subscription
-      // storage read failing) can never surface as an unhandled rejection.
-      void pushNotification(b, record).catch((err: unknown) => {
-        log.warn('web-push fanout failed', {
-          notificationId: record.notificationId,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      });
-      // ADR 0198 Phase B — best-effort Teams adaptive-card delivery for
-      // addressed action-needed notifications (sent via the RECIPIENT's own
-      // microsoft365 connection; silent no-op without a delivery pref).
-      // Same isolation contract as webPush: never breaks the insert.
-      void deliverTeamsApprovalCard(b, record).catch((err: unknown) => {
-        log.warn('teams approval-card delivery failed', {
-          notificationId: record.notificationId,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      });
-      // ADR 0478 §2 — best-effort email delivery for ADDRESSED action-needed
-      // notifications (opt-in pref; interrupt-backed records are handled by
-      // the token lane in notify.ts — this sibling skips them). Same
-      // isolation contract as Teams: never breaks the insert.
-      try {
-        deliverEmailForNotificationRecord(record);
-      } catch (err) {
-        log.warn('email approval delivery failed', {
-          notificationId: record.notificationId,
-          error: err instanceof Error ? err.message : String(err),
+      const records = await materialise(input, identity);
+      const record = records[0]!;
+      if (!isMaterialisedNotice(record)) {
+        // The single-row path is unchanged: an insert failure propagates to the
+        // caller exactly as before (a stable caller-supplied id relies on it).
+        await b.insertNotification(record);
+        if (identity) await writeNotificationMemo(identity, record);
+        deliverDownstream(b, record);
+        return record;
+      }
+      // ADR 0816 D1 — one logical effect, N per-person rows (N may be 1).
+      // Insert-if-absent, because a partial earlier attempt may already have
+      // landed some of these deterministic ids; per-row isolation, because one
+      // failure must not drop the rest of the team.
+      const inserted: NotificationRecord[] = [];
+      let present = 0;
+      for (const r of records) {
+        try {
+          if (await b.getNotification(r.notificationId)) { present++; continue; }
+          await b.insertNotification(r);
+          inserted.push(r);
+          present++;
+        } catch (err) {
+          log.warn('notification insert failed (materialised)', {
+            notificationId: r.notificationId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+      // Nothing landed: an error, never a success — the single-row path throws
+      // here too, and a caller (the notify node) must not report `emitted`.
+      if (present === 0) throw new Error(`notification fan-out failed: 0 of ${records.length} rows written`);
+      // The memo is what makes a redelivery a no-op, so it is written ONLY when
+      // every row is durable. A partial fan-out leaves no memo: the next
+      // delivery re-derives the same ids and fills in exactly the missing ones.
+      if (identity && present === records.length) await writeNotificationMemo(identity, record);
+      for (const r of inserted) deliverDownstream(b, r, { push: false });
+      if (inserted.length > 0) {
+        // One subscription-table read for the whole fan-out, not one per person.
+        void pushNotificationsBatch(b, inserted).catch((err: unknown) => {
+          log.warn('web-push batch fanout failed', { count: inserted.length, error: err instanceof Error ? err.message : String(err) });
         });
       }
       return record;

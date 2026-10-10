@@ -17,7 +17,7 @@ import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { tenantOf } from '../featureRoute.js';
 import { listRuns, getRun, saveRun } from './manualTestsService.js';
 
-const BASE = '/v1/host/openwop-app/manual-tests';
+const BASE = '/host/openwop-app/manual-tests';
 
 /** The authenticated caller's subject (matches the ADR 0071 uiState convention). */
 function subjectOf(req: Request): string {

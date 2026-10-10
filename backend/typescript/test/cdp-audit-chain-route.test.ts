@@ -1,6 +1,6 @@
 /**
  * CDP-F audit-chain verify route (ADR 0301) —
- *   GET /v1/host/openwop-app/cdp/audit-chain/verify
+ *   GET /host/openwop-app/cdp/audit-chain/verify
  * Toggle-gated (cdp OFF ⇒ 404), admin-gated (a non-admin acting member ⇒ 403),
  * tenant-scoped: reports the tenant's chain intact / brokenAt.
  */
@@ -42,12 +42,12 @@ function client() {
 let n = 0;
 async function ownerOn(tenantId: string) {
   const c = client();
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `ac-${Date.now()}-${n++}@a.test`, tenantId });
+  const r = await c.post('/host/openwop-app/test/login', { email: `ac-${Date.now()}-${n++}@a.test`, tenantId });
   expect(r.status).toBe(201);
   return c;
 }
 const setToggle = async (id: string, s: 'on' | 'off') => { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status: s }, 'test'); };
-const VERIFY = '/v1/host/openwop-app/cdp/audit-chain/verify';
+const VERIFY = '/host/openwop-app/cdp/audit-chain/verify';
 
 describe('CDP-F audit-chain verify route', () => {
   it('is toggle-gated (cdp OFF ⇒ 404)', async () => {

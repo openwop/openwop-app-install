@@ -62,8 +62,8 @@ import { sendError } from '../middleware/errorEnvelope.js';
 const log = createLogger('routes.workload-identity-seam');
 
 const SEAM_PATHS = [
-  '/v1/host/openwop-app/test/workload-identity',
-  '/v1/host/sample/test/workload-identity',
+  '/host/openwop-app/test/workload-identity',
+  '/host/sample/test/workload-identity',
 ] as const;
 
 /** §20: a 4xx carries a closed reason code and `retriable: false`. The envelope

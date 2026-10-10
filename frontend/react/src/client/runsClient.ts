@@ -1,23 +1,17 @@
 /**
  * Thin run-lifecycle client. Wraps `OpenwopClient` from `@openwop/openwop`
- * (major 2) for the protocol surfaces the UI needs, and the pinned 1.x client
- * (`@openwop/openwop-v1`) for the two reads that have no major-2 home.
+ * (major 2) for the protocol surfaces the UI needs.
  *
- * ADR 0647 — TWO CLIENTS DURING THE OVERLAP, ONE SEAM.
- *   - `client` speaks major 2: unversioned path keys + `OpenWOP-Version: 2.0` on
- *     every request. Every result passes through `unbindRunIds` (`v2Wire.ts`)
- *     so the rest of the app keeps the bare run ids it was written against.
- *   - `v1Client` speaks major 1 for exactly ONE thing now:
- *     `discovery.capabilities()`. 14 modules read the v1 document's shape
- *     (`caps.auth.profiles`, `caps.feedback.supported`, `demoMode`, …) and the
- *     v2 root is a different, CLOSED document. C.3 retired this client on the
- *     strength of C.3a advertising five families at major 2; that was not
- *     enough, and the correction note on `getCapabilities` records exactly which
- *     reads have no v2 home yet. `runs.debugBundle()` has moved for good — C.1
- *     gave it a host-extension twin, and `path-manifest.json` names no v2
- *     debug-bundle operation.
- *   `deleteRun`, `listMyRuns` and `setRunPinned` are host surfaces with no v2
- *   operation either; they stay raw fetches on `/v1/...`.
+ * ADR 0647 — ONE CLIENT, ONE SEAM. `client` speaks major 2: unversioned path
+ * keys + `OpenWOP-Version: 2.0` on every request. Every result passes through
+ * `unbindRunIds` (`v2Wire.ts`) so the rest of the app keeps the bare run ids it
+ * was written against. Discovery is read at major 2 too and re-expressed in the
+ * shape the consumers read by `capabilitiesV2Adapter.ts` (the v1 client that
+ * used to serve it is gone; see the note on `getCapabilities`).
+ *   `listMyRuns` reads the RFC 0182 `GET /runs` at major 2. `deleteRun`,
+ *   `setRunPinned`, `getDebugBundle` and `listWorkflowRunCosts` are host
+ *   surfaces with no v2 operation (or, for the last, no v2 field); they stay
+ *   raw fetches on the host routes.
  *
  * If these wrappers prove broadly useful, promote them to a published
  * `@openwop/openwop-browser` package per the analysis plan §6.1.
@@ -32,11 +26,7 @@ import type {
   PollEventsResponse,
   RunSnapshot,
 } from '@openwop/openwop';
-// ADR 0730 C.3, CORRECTED — `v1Client` is back, for `discovery.capabilities()`
-// ONLY. `runs.debugBundle()` stays on the host-extension twin (C.1), which is
-// verified and has no v2 path. See the correction note on `getCapabilities`.
-import { OpenwopClient as OpenwopV1Client } from '@openwop/openwop-v1';
-import type { Capabilities, DebugBundle } from '@openwop/openwop-v1';
+import { adaptV2Capabilities, type HostCapabilities } from './capabilitiesV2Adapter.js';
 import { toClientEvent } from './eventVocabulary.js';
 import { unbindRunIds, bindRunId, resetWireTenant, VENDOR_BASE } from './v2Wire.js';
 import { listMyWorkspaces } from './workspaceClient.js';
@@ -99,9 +89,6 @@ const sdkOptions = {
 };
 /** Major 2 — the protocol client. */
 export const client = new OpenwopClient({ ...sdkOptions, major: 2 });
-/** Major 1, for the discovery read only (see `getCapabilities`). */
-const v1Client = new OpenwopV1Client(sdkOptions);
-/** Major 1 — discovery + debug bundle only (see the header). */
 
 export interface RunListItem {
   runId: string;
@@ -122,8 +109,8 @@ export interface RunListItem {
 // `Cache-Control: max-age=300` (not a permanent pin — per A-3), and drop it on
 // an auth/tenant change via the documented `setCurrentIdToken` seam.
 const CAPS_TTL_MS = 300_000;
-let capsCache: { value: Capabilities & Record<string, unknown>; at: number } | null = null;
-let capsInFlight: Promise<Capabilities & Record<string, unknown>> | null = null;
+let capsCache: { value: HostCapabilities; at: number } | null = null;
+let capsInFlight: Promise<HostCapabilities> | null = null;
 // Generation guard: bumped on every clear (auth/tenant change) so a fetch that
 // was already in flight when the tenant changed does NOT write the prior
 // tenant's capabilities into the cache (review finding — mid-flight race).
@@ -140,39 +127,27 @@ onAuthChange(resetWireTenant);
 /** identity.md §5 — a run id leaves for the major-2 wire tenant-bound (ADR 0647 § Correction). */
 export const bound = (runId: string): Promise<string> => bindRunId(runId, listMyWorkspaces);
 
-export async function getCapabilities(): Promise<Capabilities & Record<string, unknown>> {
+export async function getCapabilities(): Promise<HostCapabilities> {
   if (capsCache && Date.now() - capsCache.at < CAPS_TTL_MS) return capsCache.value;
   if (capsInFlight) return capsInFlight;
   const generation = capsGeneration;
   capsInFlight = (async () => {
     try {
-      // CORRECTED 2026-09-18 — this read was moved to the v2 root by C.3 and is
-      // moved BACK. The comment this replaced said C.3a had given "the families
-      // the SPA reads" a v2 home. It gave FIVE of them one. The rest are still
-      // v1-only, and MEASURED against the served v2 document:
+      // CORRECTED 2026-09-18, then RE-MOVED 2026-09-28. C.3 moved this read to
+      // the v2 root with the consumers still reading v1 paths, and shipped five
+      // silent UI regressions (each consumer fails into a `catch` that renders
+      // nothing). It was moved back to v1 and the gaps named: demoMode and
+      // hostSurfaces live in `extensions`, v2 drops every `supported` flag, and
+      // `memory` / `envelopes` / `aiProviders.input` had no v2 family yet.
       //
-      //   demoMode                          -> extensions[openwop-app.host]
-      //   capabilities.hostSurfaces         -> extensions[openwop-app.host-surfaces]
-      //   capabilities.modelCapabilities    -> root.modelCapabilities
-      //   capabilities.aiProviders.input    -> ABSENT
-      //   capabilities.memory.attribution   -> ABSENT (no `memory` family at all)
-      //   envelopes.tierOneSubsetCompliance -> ABSENT (no `envelopes` family at all)
-      //   feedback.supported                -> v2 dropped `supported` from every facet
-      //
-      // The code being replaced had ALREADY warned about this in as many words —
-      // "14 modules read the v1 document's shape … and the v2 root is a
-      // different, closed document" — and C.3 overrode that warning with a
-      // partial migration. It shipped five silent UI regressions that every unit
-      // test, both conformance lanes and 16k backend tests passed over; only a
-      // browser found them, because each consumer's failure mode is a `catch`
-      // that renders nothing.
-      //
-      // The v2 ADVERTS from C.3a stay — they are additive and correct, and they
-      // are what a v2 client reads. What is not yet true is that this SPA can
-      // read the v2 document INSTEAD of the v1 one. That needs every consumer
-      // re-derived against the v2 shape, plus the two missing families, and it
-      // is tracked separately rather than half-done here.
-      const value = (await v1Client.discovery.capabilities()) as Capabilities & Record<string, unknown>;
+      // Those families exist at major 2 now, and the shape difference is owned
+      // in ONE place, `adaptV2Capabilities`, instead of in fourteen consumers.
+      // What makes this move different from C.3 is the gate, not the intent:
+      // `test/discovery-v2-adapter-parity.test.ts` (backend) serves BOTH
+      // majors from one host and asserts every consumer-read path comes out of
+      // the adapter with the value v1 gave it. A new consumer read belongs in
+      // that test's path list.
+      const value = adaptV2Capabilities(await client.discovery.capabilities());
       // Only cache if no clear() happened while this request was in flight.
       if (generation === capsGeneration) capsCache = { value, at: Date.now() };
       return value;
@@ -232,6 +207,21 @@ export async function setRunPinned(runId: string, pinned: boolean): Promise<bool
   return ((await res.json()) as { pinned?: boolean }).pinned === true;
 }
 
+export interface RunRetention { pinned: boolean; removalAt?: string }
+
+/** Read a run's retention pin and sweep deadline (ADR 0812 — host-extension
+ *  `GET /host/openwop-app/runs/{runId}/pin`). The major-2 RunSnapshot is closed
+ *  and carries neither field, so `getRun` can never answer these. */
+export async function getRunRetention(runId: string): Promise<RunRetention> {
+  const res = await fetch(`${config.baseUrl}/host/openwop-app/runs/${encodeURIComponent(runId)}/pin`, {
+    headers: authedHeaders(),
+    credentials: config.authMode === 'cookie' ? 'include' : 'same-origin',
+  });
+  if (!res.ok) throw new ApiError({ status: res.status, statusText: res.statusText, url: res.url, message: `Retention read failed (${res.status})` });
+  const body = (await res.json()) as { pinned?: boolean; removalAt?: string };
+  return { pinned: body.pinned === true, ...(body.removalAt ? { removalAt: body.removalAt } : {}) };
+}
+
 /** Fetch the debug bundle for a run per `spec/v1/debug-bundle.md`.
  *  Routes through the published SDK's `client.runs.debugBundle()`
  *  (parity row SDK-4, closed 2026-05-15 — see `sdk/PARITY.md`).
@@ -239,12 +229,24 @@ export async function setRunPinned(runId: string, pinned: boolean): Promise<bool
  *  `capabilities.debugBundle.supported: true`; we throw a typed error
  *  in that case so the calling button can surface a "not supported"
  *  message instead of saving a `null.json` file. */
+/** The debug-bundle document, served by the host-extension twin (ADR 0730 C.1). */
+export interface DebugBundle {
+  bundleVersion: string;
+  generatedAt: string;
+  host: { name?: string; version?: string; vendor?: string };
+  run: Record<string, unknown>;
+  events: ReadonlyArray<Record<string, unknown>>;
+  redactionApplied: boolean;
+  redactionMode: 'mask' | 'omit' | 'hash' | 'passthrough';
+  truncated?: boolean;
+  truncatedReason?: string;
+  [key: string]: unknown;
+}
+
 export async function getDebugBundle(runId: string): Promise<DebugBundle> {
   // ADR 0730 C.1 — the HOST-EXTENSION twin, not the v1 SDK client. The operation
   // has no v2 path (absent from the 43-path manifest), so `/host/openwop-app/…`
-  // is its home through the overlap and after it; reaching it through
-  // `v1Client` would have kept a v1 protocol dependency alive for a surface the
-  // v2 wire never adopted. The bare run id is correct here: host-extension
+  // is its home through the overlap and after it. The bare run id is correct here: host-extension
   // routes run in the v1 dialect (RFC 0181), so no tenant binding applies.
   const res = await fetch(
     `${config.baseUrl}${VENDOR_BASE}/runs/${encodeURIComponent(runId)}/debug-bundle`,
@@ -276,15 +278,57 @@ export async function pollEvents(runId: string, lastSequence = 0): Promise<PollE
  * need to pass a tenantId. Returns at most `limit` rows (default 50).
  */
 export async function listMyRuns(opts: { status?: string; workflowId?: string; limit?: number; signal?: AbortSignal } = {}): Promise<RunListItem[]> {
-  const params = new URLSearchParams();
-  if (opts.status) params.set('status', opts.status);
-  // ADR 0482 review M2 — server-side workflow filter so "this workflow's
-  // latest run" never depends on the tenant's global recent-runs page.
-  if (opts.workflowId) params.set('workflowId', opts.workflowId);
-  if (opts.limit) params.set('limit', String(opts.limit));
-  const query = params.toString();
-  const url = `${config.baseUrl}${VENDOR_BASE}/runs${query ? `?${query}` : ''}`;
-  const headers = authedHeaders({ accept: 'application/json' });
+  // RFC 0182 — the normative `GET /runs` at major 2. It used to read the host
+  // alias, which ADR 0654 kept only because major 2 had no list operation then.
+  //
+  // A RAW fetch, not `client.runs.list()`, for one reason: the SDK method takes
+  // no AbortSignal, and the signal is load-bearing here (GAP-ANALYSIS E15: an
+  // unmounted tile must cancel its read rather than burn the per-IP budget).
+  // The wire is identical: unversioned path, `OpenWOP-Version: 2.0`, and every
+  // row passes `unbindRunIds` like every other major-2 result.
+  //
+  // v2 pages are clamped to `runList.maxPageSize` (100) and chained by an
+  // opaque `nextCursor`, where the alias returned up to 200 at once. The runs
+  // page grows its limit by 20 per "load more" without bound, so this walks
+  // the cursor until it has `limit` rows or the list ends.
+  //
+  // Rows carry no `costByNode`: that is a host-extension stamp the closed v2
+  // snapshot does not admit. Its one reader uses `listWorkflowRunCosts` below.
+  const want = opts.limit ?? 50;
+  const rows: RunListItem[] = [];
+  let cursor: string | undefined;
+  do {
+    const params = new URLSearchParams();
+    if (opts.status) params.set('status', opts.status);
+    // ADR 0482 review M2 — server-side workflow filter so "this workflow's
+    // latest run" never depends on the tenant's global recent-runs page.
+    if (opts.workflowId) params.set('workflowId', opts.workflowId);
+    params.set('limit', String(Math.min(want - rows.length, RUN_LIST_PAGE_MAX)));
+    if (cursor) params.set('cursor', cursor);
+    const body = await readRunList(`${config.baseUrl}/runs?${params.toString()}`, { 'OpenWOP-Version': '2.0' }, opts.signal);
+    rows.push(...unbindRunIds((body as { runs: RunListItem[] }).runs));
+    cursor = typeof (body as { nextCursor?: unknown }).nextCursor === 'string' ? (body as { nextCursor: string }).nextCursor : undefined;
+  } while (cursor && rows.length < want);
+  return rows.slice(0, want);
+}
+
+/** `runList.maxPageSize` as this host advertises it; a page request above it is clamped anyway. */
+const RUN_LIST_PAGE_MAX = 100;
+
+/**
+ * ADR 0482 §6 — the terminal per-node cost stamp, for the builder's cost paint.
+ * A HOST-EXTENSION read on purpose: `costByNode` is not a v2 snapshot field, so
+ * the normative list cannot carry it, and moving this caller to `listMyRuns`
+ * would make the paint silently vanish (the ADR 0730 C.3 failure class).
+ */
+export async function listWorkflowRunCosts(workflowId: string, limit = 25): Promise<RunListItem[]> {
+  const params = new URLSearchParams({ workflowId, limit: String(limit) });
+  const body = await readRunList(`${config.baseUrl}${VENDOR_BASE}/runs?${params.toString()}`, {});
+  return (body as { runs: RunListItem[] }).runs;
+}
+
+async function readRunList(url: string, extra: Record<string, string>, signal?: AbortSignal): Promise<unknown> {
+  const headers = authedHeaders({ accept: 'application/json', ...extra });
   const includeCreds = config.authMode === 'cookie' || Boolean(headers.authorization);
   const res = await fetch(url, {
     method: 'GET',
@@ -293,16 +337,15 @@ export async function listMyRuns(opts: { status?: string; workflowId?: string; l
     // AbortSignal threaded from the caller's effect cleanup (GAP-ANALYSIS E15)
     // so an in-flight read is cancelled on unmount rather than completing and
     // burning the per-IP budget.
-    ...(opts.signal ? { signal: opts.signal } : {}),
+    ...(signal ? { signal } : {}),
   });
   if (!res.ok) {
     throw new ApiError({ status: res.status, statusText: res.statusText, url: res.url, message: `listMyRuns failed: ${res.status} ${res.statusText}` });
   }
-  // Host-extension endpoint (`/host/openwop-app/*`) the SDK does not wrap —
-  // validate the list shape before the cast (A-2 / E4).
+  // Validate the list shape before the cast (A-2 / E4).
   const body: unknown = await res.json();
   assertArrayField(body, 'runs', 'listMyRuns response');
-  return (body as { runs: RunListItem[] }).runs;
+  return body;
 }
 
 export interface MemoryEntry {

@@ -140,7 +140,7 @@ describe('RFC 0200 §A — the protected-resource metadata URL', () => {
     const req = (originalUrl: string): Request =>
       ({ originalUrl, url: originalUrl, get: (h: string) => (h.toLowerCase() === 'host' ? 'app.openwop.dev' : undefined), protocol: 'https' } as unknown as Request);
     expect(apiPathPrefixOf(req('/api/v1/runs'))).toBe('/api');
-    expect(apiPathPrefixOf(req('/v1/runs'))).toBe('');
+    expect(apiPathPrefixOf(req('/runs'))).toBe('');
     expect(resourceIdentifier(req('/api/v1/runs'), '/api')).toBe('https://app.openwop.dev/api');
   });
 });
@@ -148,7 +148,7 @@ describe('RFC 0200 §A — the protected-resource metadata URL', () => {
 describe('RFC 0200 §B — the challenge', () => {
   const headers: Record<string, string> = {};
   const res = { setHeader: (k: string, v: string) => { headers[k] = v; } } as unknown as Response;
-  const req = { originalUrl: '/v1/runs', url: '/v1/runs', get: (h: string) => (h.toLowerCase() === 'host' ? 'app.openwop.dev' : undefined), protocol: 'https' } as unknown as Request;
+  const req = { originalUrl: '/runs', url: '/runs', get: (h: string) => (h.toLowerCase() === 'host' ? 'app.openwop.dev' : undefined), protocol: 'https' } as unknown as Request;
   beforeEach(() => { for (const k of Object.keys(headers)) delete headers[k]; });
 
   it('a refusal with NO credential presented names Bearer and the metadata, and carries NO error', () => {
@@ -266,8 +266,8 @@ describe('RFC 0200 §A — served (HTTP, bearer-only posture)', () => {
     // No `OpenWOP-Version: 2` on a `/v1/` path: that pairing is a
     // `protocol_version_mismatch` 400 which never reaches auth (measured).
     const body = JSON.stringify({ workflowId: 'noop' });
-    const none = await fetch(`${app.base}/v1/runs`, { method: 'POST', headers: { 'content-type': 'application/json' }, body });
-    const bad = await fetch(`${app.base}/v1/runs`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer not-a-real-token' }, body });
+    const none = await fetch(`${app.base}/runs`, { method: 'POST', headers: { 'content-type': 'application/json' }, body });
+    const bad = await fetch(`${app.base}/runs`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer not-a-real-token' }, body });
     for (const [label, res, wantError] of [['no credential', none, false], ['refused bearer', bad, true]] as const) {
       // NO skip path: a non-401 fails. An earlier cut guarded with `continue` and passed
       // while both legs returned 400, asserting nothing.
@@ -293,7 +293,7 @@ describe('RFC 0210 §B — the lifetime refusal is terminal even where a fallthr
   it('answers 401 with the REGISTERED code credential_lifetime_exceeded', async () => {
     const now = Math.floor(Date.now() / 1000);
     const token = mint({ iss: ISS, aud: AUD, sub: 'subject-1', iat: now - 2 * MARGIN, exp: now + W - MARGIN });
-    const r = await fetch(`${app.base}/v1/runs`, {
+    const r = await fetch(`${app.base}/runs`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
       body: JSON.stringify({ workflowId: 'noop' }),
@@ -308,7 +308,7 @@ describe('RFC 0210 §B — the lifetime refusal is terminal even where a fallthr
     // Without this the leg above is satisfied by a host that refuses every token.
     const now = Math.floor(Date.now() / 1000);
     const token = mint({ iss: ISS, aud: AUD, sub: 'subject-1', iat: now, exp: now + W - MARGIN });
-    const r = await fetch(`${app.base}/v1/runs`, {
+    const r = await fetch(`${app.base}/runs`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
       body: JSON.stringify({ workflowId: 'noop' }),
@@ -329,7 +329,7 @@ describe('RFC 0200 §D — audience_mismatch in the COOKIE-ENABLED posture (prod
   it('a verified token for ANOTHER relying party, with no session, is 401 audience_mismatch', async () => {
     const now = Math.floor(Date.now() / 1000);
     const token = mint({ iss: ISS, aud: 'some-other-relying-party', sub: 'subject-aud', iat: now - 5, exp: now + 300 });
-    const r = await fetch(`${app.base}/v1/runs`, {
+    const r = await fetch(`${app.base}/runs`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
       body: JSON.stringify({ workflowId: 'noop' }),
@@ -343,7 +343,7 @@ describe('RFC 0200 §D — audience_mismatch in the COOKIE-ENABLED posture (prod
   it('a same-audience token is still admitted (the control)', async () => {
     const now = Math.floor(Date.now() / 1000);
     const token = mint({ iss: ISS, aud: AUD, sub: 'subject-aud-ok', iat: now - 5, exp: now + 300 });
-    const r = await fetch(`${app.base}/v1/runs`, {
+    const r = await fetch(`${app.base}/runs`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
       body: JSON.stringify({ workflowId: 'noop' }),

@@ -81,5 +81,5 @@ export const messages = {
   colActor: 'Par',
 
   confirmApplyTitle: 'Appliquer cet instantané à la config en direct ?',
-  confirmApplyBody: 'Cela ÉCRASE la configuration en direct de l’espace avec l’instantané {{hash}}. Les bascules de fonctionnalités absentes de l’instantané sont effacées. Les pointeurs de publication et les épingles de workflows sont en application seule : les entrées absentes de l’instantané conservent leur valeur en direct actuelle (la dérive montrera l’écart).',
+  confirmApplyBody: 'Cela ÉCRASE la configuration en direct de l’espace avec l’instantané {{hash}}. Les pointeurs de publication et les épingles de workflows sont en application seule : les entrées absentes de l’instantané conservent leur valeur en direct actuelle (la dérive montrera l’écart). Les bascules de fonctionnalités sont gérées par l’opérateur de l’hôte et ne font pas partie des instantanés.',
 } as const;

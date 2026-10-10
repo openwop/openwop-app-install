@@ -1,0 +1,31 @@
+{
+  "name": "vendor.openwop-app.comments.agents",
+  "version": "1.0.2",
+  "kind": "node",
+  "description": "Comments feature agent pack — a reviewer agent that reads a CMS page / KB collection and posts review comments via the openwop:comments.list / openwop:comments.post chat tools. Tool-allowlisted to those two only; it posts comments (which notify a human over the existing inbox), it does not edit the resource.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "comments", "agent", "reviewer", "collaboration"],
+  "engines": { "openwop": ">=1.1.0 <3.0.0" },
+  "peerDependencies": {
+    "aiProviders": "supported",
+    "agents.manifestRuntime": "supported"
+  },
+  "agents": [
+    {
+      "agentId": "vendor.openwop-app.comments.agents.reviewer",
+      "persona": "GENERAL",
+      "label": "Content Reviewer",
+      "description": "Reviews a CMS page or KB collection and posts review comments (clarity, accuracy, gaps) via openwop:comments.post, so a human is notified of the review over the existing inbox. Reads the existing thread first (openwop:comments.list) to avoid duplicate notes. Posts comments only — it does NOT edit the resource (no resource-write tool in its allowlist, by design).",
+      "modelClass": "general",
+      "systemPromptRef": "prompts/comments-reviewer.md",
+      "toolAllowlist": [
+        "openwop:comments.list",
+        "openwop:comments.post"
+      ],
+      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
+      "confidence": { "defaultThreshold": 0.6 }
+    }
+  ],
+  "runtime": { "language": "remote", "entry": "pack.json" }
+}

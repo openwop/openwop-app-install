@@ -14,7 +14,7 @@ import { OpenwopError } from '../../types.js';
 
 export function registerPromptLibraryRoutes(deps: RouteDeps): void {
   const { app } = deps;
-  const BASE = '/v1/host/openwop-app/prompts/orgs/:orgId/entries';
+  const BASE = '/host/openwop-app/prompts/orgs/:orgId/entries';
 
   app.get(BASE, async (req, res, next) => {
     try {

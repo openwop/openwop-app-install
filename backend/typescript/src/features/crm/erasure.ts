@@ -236,9 +236,10 @@ export async function eraseCrmSubject(tenantId: string, subjectKey: string): Pro
     const byId = !!b.contactId && chainIds.has(b.contactId);
     const byAddress = !!b.inviteeEmail && values.has(normalizeIdentifierValue('email', b.inviteeEmail));
     if (!byId && !byAddress) continue;
-    if (b.inviteeName === ERASED_VALUE && b.inviteeEmail === ERASED_VALUE && b.inviteeNote === undefined) continue;
+    if (b.inviteeName === ERASED_VALUE && b.inviteeEmail === ERASED_VALUE && b.inviteeNote === undefined && b.cancelReason === undefined) continue;
     const next: Booking = { ...b, inviteeName: ERASED_VALUE, inviteeEmail: ERASED_VALUE, updatedAt: new Date().toISOString() };
     delete next.inviteeNote;
+    delete next.cancelReason; // ADR 0837 D4
     await bookings.put(next);
     touched += 1;
   }
@@ -396,7 +397,7 @@ export function registerCrmErasure(): void {
   // text that may name people; do NOT declare opaque ids (`contactId`,
   // `signerId`), which the comments feature already settled as not-PII.
   // `crm.contact` is declared by `contactsService` itself and is not repeated.
-  declarePiiFields('crm:booking', ['inviteeName', 'inviteeEmail', 'inviteeNote']);
+  declarePiiFields('crm:booking', ['inviteeName', 'inviteeEmail', 'inviteeNote', 'cancelReason']);
   declarePiiFields('crm:sign-request', ['signers', 'requestedBy']);
   declarePiiFields('crm:signature-record', ['typedName']);
   declarePiiFields('crm:suppression', ['email', 'note']);

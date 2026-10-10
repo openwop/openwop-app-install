@@ -3,7 +3,7 @@
  * the same `ScheduledJob` rows as `GET /scheduler/jobs`, and it must apply the
  * SAME subject gate.
  *
- * Before this fix `GET /v1/host/openwop-app/export?kinds=schedule` called
+ * Before this fix `GET /host/openwop-app/export?kinds=schedule` called
  * `buildExportBundle(tenantOf(req))` with no scope check at all, and its `schedule`
  * slice was `listJobs(tenantId)` verbatim (`portabilityService.ts`). So a co-tenant
  * with ZERO org scopes — the exact caller the D1 scheduler-door fix (`CPC-1`) turns
@@ -62,8 +62,8 @@ function client(): Client {
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b), del: (p) => call('DELETE', p) };
 }
 
-const P = '/v1/host/openwop-app/projects';
-const EXPORT = '/v1/host/openwop-app/export?kinds=schedule';
+const P = '/host/openwop-app/projects';
+const EXPORT = '/host/openwop-app/export?kinds=schedule';
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
 /** The jobIds carried by an export bundle's `schedule` items. */
 const exportedJobIds = (r: Res): string[] =>
@@ -76,8 +76,8 @@ async function scenario(visibility: 'org' | 'private' = 'private') {
   await resetScheduling();
   const tenantId = `org:export-${Date.now()}-${n++}`;
   const owner = client();
-  await owner.post('/v1/host/openwop-app/test/login', { email: uniqEmail('exp-owner'), tenantId });
-  const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'PrivCo' })).body.orgId;
+  await owner.post('/host/openwop-app/test/login', { email: uniqEmail('exp-owner'), tenantId });
+  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'PrivCo' })).body.orgId;
   const projectId = (await owner.post(P, { orgId, name: 'Secret' })).body.id;
   const created = await owner.post(`${P}/${projectId}/schedules`, { cronExpr: '0 9 * * *', workflowId: 'wf.demo' });
   expect(created.status, JSON.stringify(created.body)).toBe(201);
@@ -87,7 +87,7 @@ async function scenario(visibility: 'org' | 'private' = 'private') {
     expect((await owner.patch(`${P}/${projectId}/visibility`, { visibility: 'private' })).body.visibility).toBe('private');
   }
   const stranger = client();
-  await stranger.post('/v1/host/openwop-app/test/login', { email: uniqEmail('exp-stranger'), tenantId });
+  await stranger.post('/host/openwop-app/test/login', { email: uniqEmail('exp-stranger'), tenantId });
   return { tenantId, orgId, projectId, jobId, owner, stranger };
 }
 
@@ -117,7 +117,7 @@ describe('portability export — the schedule slice is subject-gated, matching t
   it('a read-only project MEMBER still exports it — READ suffices, same as the list door', async () => {
     const { tenantId, orgId, projectId, jobId, owner } = await scenario();
     const viewer = client();
-    const viewerId = (await viewer.post('/v1/host/openwop-app/test/login', { email: uniqEmail('exp-viewer'), tenantId })).body.user.userId;
+    const viewerId = (await viewer.post('/host/openwop-app/test/login', { email: uniqEmail('exp-viewer'), tenantId })).body.user.userId;
     await createMember({ tenantId, orgId, subject: viewerId, displayName: 'V', roles: ['viewer'] });
     expect((await owner.post(`${P}/${projectId}/members`, { ref: `user:${viewerId}`, role: 'observer' })).status).toBe(201);
     // Membership grants READ on a private project; READ is all export needs.

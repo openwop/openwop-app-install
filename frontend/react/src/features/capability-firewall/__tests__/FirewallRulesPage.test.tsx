@@ -153,11 +153,17 @@ describe('FirewallRulesPage (ADR 0135 clarity redesign)', () => {
   });
 
   // ADR 0397 Phase 3 — the enforcement-posture (mode) selector.
-  it('switches to enforce mode and persists the posture', async () => {
+  it('switches to enforce mode and persists the posture — only after a confirm (FW2-UX-6)', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValueOnce(false).mockReturnValueOnce(true);
     render(<FirewallRulesPage />);
     const posture = await screen.findByRole('region', { name: 'Enforcement posture' });
+    // Declined: nothing is saved (arrow-keying past enforce no longer turns it on).
+    fireEvent.click(within(posture).getByRole('radio', { name: /Enforce/ }));
+    await waitFor(() => expect(confirmSpy).toHaveBeenCalledTimes(1));
+    expect(mockSet).not.toHaveBeenCalled();
     fireEvent.click(within(posture).getByRole('radio', { name: /Enforce/ }));
     await waitFor(() => expect(mockSet).toHaveBeenCalledTimes(1));
+    confirmSpy.mockRestore();
     expect(mockSet.mock.calls[0][3]).toMatchObject({ mode: 'enforce' });
     // The deny-verdict control appears once enforce is active.
     expect(await within(posture).findByLabelText('An unmatched action should')).toBeTruthy();

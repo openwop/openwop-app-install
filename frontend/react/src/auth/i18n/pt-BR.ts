@@ -122,6 +122,7 @@ export const messages = {
   // ADR 0621 D5 — motivo exibido no modal de login após um encerramento forçado da sessão
   sessionRefused_account_disabled: 'Sua conta foi desativada por um administrador, então sua sessão foi encerrada. Fale com o administrador do seu espaço de trabalho para recuperar o acesso.',
   sessionRefused_account_erased: 'Sua conta foi removida, então sua sessão foi encerrada. Ela não pode mais ser usada para entrar.',
-  sessionRefused_session_revoked: 'Sua sessão foi encerrada em todos os dispositivos. Entre de novo para continuar.',
+  sessionRefused_session_revoked: 'Você foi desconectado. Entre novamente para continuar.',
+  sessionRefused_session_expired: 'Sua sessão terminou, então você foi desconectado. Entre novamente para continuar.',
   sessionRefused_self_revoked: 'Você saiu de todos os dispositivos, incluindo este. Entre de novo para continuar.',
 } as const;

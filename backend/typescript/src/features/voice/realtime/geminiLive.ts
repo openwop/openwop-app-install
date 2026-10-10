@@ -14,7 +14,7 @@
  */
 import type { CreateRealtimeSessionInput, RealtimeProvider, RealtimeSessionConfig } from './types.js';
 import { RealtimeProviderError } from './types.js';
-import { toGeminiSchema } from '../../../providers/dispatchProviderTools.js';
+import { toGeminiFunctionDeclaration } from '../../../providers/geminiSchema.js';
 
 const GEMINI_BASE = (process.env.GEMINI_BASE_URL ?? 'https://generativelanguage.googleapis.com').replace(/\/$/, '');
 const DEFAULT_MODEL = 'gemini-3.1-flash-live-preview'; // the docs' current Live-API model (RT-7); admins can override via config.model
@@ -46,7 +46,13 @@ export function buildGeminiConstraint(model: string, instructions: string, tools
   // Names arrive #578-sanitized from resolveAgentToolDecls; the parameter schemas are
   // projected onto Gemini's accepted OpenAPI subset (additionalProperties/$schema/… are
   // rejected wholesale otherwise — the same #578 class as the names).
-  const functionDeclarations = tools.map((t) => ({ name: t.name, description: t.description, parameters: toGeminiSchema(t.parameters) }));
+  // One converter (providers/geminiSchema.ts) for this constraint AND the client setup.
+  // The schema VALUES matter as much as the keywords: the 2026-10-08 `1007: Request
+  // contains an invalid argument.` session carried the ADR 0315 baseline tool
+  // `walkthroughs.register-draft` with `steps.items: {type:'object'}` and no properties —
+  // the one value in the default tool set outside Gemini's Schema subset (not confirmed
+  // against Google live). test/gemini-live-setup-schema.test.ts guards the class.
+  const functionDeclarations = tools.map(toGeminiFunctionDeclaration);
   return {
     uses: 1,
     bidiGenerateContentSetup: {
@@ -74,7 +80,7 @@ export const geminiLiveProvider: RealtimeProvider = {
     // "additionalProperties" at 'setup.tools[0].function_declarations[N].parameters'`) if a
     // parameter schema carries a non-OpenAPI keyword. So hand the browser Gemini-projected
     // tool schemas — the same subset the token constraint (buildGeminiConstraint) uses.
-    const geminiTools = input.tools.map((t) => ({ ...t, parameters: toGeminiSchema(t.parameters) as Record<string, unknown> }));
+    const geminiTools = input.tools.map(toGeminiFunctionDeclaration);
 
     if (process.env.OPENWOP_VOICE_MOCK === 'true') {
       return {

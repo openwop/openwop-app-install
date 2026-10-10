@@ -28,7 +28,7 @@
  *    lockout is exactly the scenario break-glass exists for.
  */
 
-import type { Express, Request } from 'express';
+import type { Express } from 'express';
 import { randomBytes, scrypt as scryptCb, scryptSync, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 
@@ -42,9 +42,10 @@ import {
   signSession,
   setSessionCookie,
   base64urlEncode,
-  type SessionPayload,
+  buildSessionPayload,
 } from '../middleware/cookieSession.js';
 import { createLogger } from '../observability/logger.js';
+import { clientIp } from '../host/clientIp.js';
 
 const log = createLogger('routes.breakGlass');
 
@@ -61,17 +62,6 @@ const burns = new DurableCollection<BurnMarker>('security:breakglass-burn', (b) 
 // module's factories are path-specific, so a tiny local window beats exporting
 // a general one for a single cold route).
 const attemptTimes = new Map<string, number[]>();
-
-function clientIp(req: Request): string {
-  // GRADE-PASS 2026-07-17 (SEC-C3): the FIRST x-forwarded-for hop is client-
-  // supplied and freely rotatable — a spoofing caller could sidestep the
-  // window AND grow the map unboundedly. Behind Cloud Run/one trusted proxy
-  // the RIGHTMOST entry is the proxy-appended peer address; fall back to the
-  // socket.
-  const fwd = req.header('x-forwarded-for');
-  const hops = fwd ? fwd.split(',').map((h) => h.trim()).filter(Boolean) : [];
-  return (hops.length > 0 ? hops[hops.length - 1] : req.socket.remoteAddress) ?? 'unknown';
-}
 
 function enabled(): boolean {
   return process.env.OPENWOP_BREAKGLASS_ENABLED === 'true';
@@ -152,7 +142,7 @@ export function registerBreakGlassRoutes(app: Express): void {
       log.error('reserved_tenant_configured', { envName, detail: "'host-admin' is the reserved wildcard-admin audit chain — configuring it as a real tenant would let tenant teardown destroy that chain." });
     }
   }
-  app.post('/v1/host/openwop-app/auth/break-glass', async (req, res, next) => {
+  app.post('/host/openwop-app/auth/break-glass', async (req, res, next) => {
     try {
       // Disabled ⇒ indistinguishable from a route that doesn't exist.
       if (!enabled()) {
@@ -200,9 +190,11 @@ export function registerBreakGlassRoutes(app: Express): void {
 
       // Mint the short-TTL, non-refreshing superadmin-tenant session. The
       // subject is a fresh opaque break-glass principal (never a durable user).
-      const nowS = Math.floor(now / 1000);
+      // ADR 0833 D2 — through the ONE payload builder (a fresh authentication
+      // with a 10-minute TTL); every later re-mint inherits `noRefresh` and this
+      // `exp` as its ceiling.
       const sid = base64urlEncode(randomBytes(18));
-      const session: SessionPayload = {
+      const session = buildSessionPayload({
         sid,
         tenantId,
         tier: 'user',
@@ -214,9 +206,7 @@ export function registerBreakGlassRoutes(app: Express): void {
         // omission is intentional, not an oversight.
         personalTenant: tenantId,
         noRefresh: true, // the 10-minute window is HARD (grade-pass SEC-C2)
-        iat: nowS,
-        exp: nowS + SESSION_TTL_S,
-      };
+      }, { freshAuth: true, ttlSeconds: SESSION_TTL_S });
       // GRADE-PASS 2026-07-17 (SEC-C16): the SUCCESS audit is fail-closed —
       // the burn CAS just proved storage is up, so an unchainable login is
       // refused rather than granted invisibly. (Denial audits stay

@@ -8,8 +8,8 @@
  * Until now this property rested on static mechanics (executor.ts serves
  * recorded outcomes only for side-effecting nodes; agent-runner is
  * unclassified). This drives it end-to-end through the REAL stack: the
- * catalog's `openwop-app.agent-mention` workflow → POST /v1/runs → the real
- * executor → the real `resolveBorrowedRecall` → `POST /v1/runs/:id:fork`
+ * catalog's `openwop-app.agent-mention` workflow → POST /runs → the real
+ * executor → the real `resolveBorrowedRecall` → `POST /runs/:id:fork`
  * (mode=replay), with the deterministic `mock` provider (test-seam-gated).
  *
  * Three behavioural legs, each observable without reading source:
@@ -46,6 +46,7 @@ import { createRosterEntry } from '../src/host/rosterService.js';
 import { __clearAgentIdentityCache } from '../src/host/agentIdentity.js';
 import { programMock, lastReceivedMessages } from '../src/providers/dispatchMock.js';
 import { __hostExtStorage } from '../src/host/hostExtPersistence.js';
+import { bareRunId } from './support/bareRunId.js';
 
 let BASE: string;
 let server: http.Server;
@@ -82,16 +83,16 @@ function client(): Client {
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), put: (p, b) => call('PUT', p, b), del: (p) => call('DELETE', p) };
 }
 
-const twin = (id: string): string => `/v1/host/openwop-app/agents/${encodeURIComponent(id)}/twin`;
-const GRANTS = '/v1/host/openwop-app/profiles/me/twin-grants';
-const MEM = '/v1/host/openwop-app/profiles/me/memory';
+const twin = (id: string): string => `/host/openwop-app/agents/${encodeURIComponent(id)}/twin`;
+const GRANTS = '/host/openwop-app/profiles/me/twin-grants';
+const MEM = '/host/openwop-app/profiles/me/memory';
 const OWNER_FACT = 'cc finance on vendor contracts';
 
 /** Poll the run to a terminal state (the executor runs in-process, async). */
 async function waitTerminal(c: Client, runId: string, timeoutMs = 20_000): Promise<string> {
   const t0 = Date.now();
   for (;;) {
-    const r = await c.get(`/v1/runs/${encodeURIComponent(runId)}`);
+    const r = await c.get(`/runs/${encodeURIComponent(runId)}`);
     const status = r.body?.status as string | undefined;
     if (status && ['completed', 'failed', 'cancelled'].includes(status)) return status;
     if (Date.now() - t0 > timeoutMs) throw new Error(`run ${runId} not terminal after ${timeoutMs}ms (last: ${status})`);
@@ -105,9 +106,9 @@ describe('PROBE-RCL-2 — grant → run → revoke → :fork re-resolves recall 
   it('the fork after revocation composes NO borrowed content; the fork before it re-executes and serves deterministically', async () => {
     const tenantId = `org:twf-${Date.now()}-${n++}`;
     const admin = client();
-    await admin.post('/v1/host/openwop-app/test/login', { email: `twf-admin-${Date.now()}-${n++}@acme.test`, tenantId });
+    await admin.post('/host/openwop-app/test/login', { email: `twf-admin-${Date.now()}-${n++}@acme.test`, tenantId });
     const member = client();
-    const m = await member.post('/v1/host/openwop-app/test/login', { email: `twf-member-${Date.now()}-${n++}@acme.test`, tenantId });
+    const m = await member.post('/host/openwop-app/test/login', { email: `twf-member-${Date.now()}-${n++}@acme.test`, tenantId });
     const memberId = m.body.user.userId as string;
 
     // A registered manifest agent + roster entry (packs are not mounted here).
@@ -127,19 +128,19 @@ describe('PROBE-RCL-2 — grant → run → revoke → :fork re-resolves recall 
 
     const okRowsFor = async (runId: string): Promise<number> =>
       (await __hostExtStorage()!.listAudit({ actionPrefix: 'twin.recall', limit: 500 }))
-        .filter((r) => r.resource === `user:${memberId}` && r.outcome === 'ok' && (r.payload as { runId?: unknown }).runId === runId).length;
+        .filter((r) => r.resource === `user:${memberId}` && r.outcome === 'ok' && (r.payload as { runId?: unknown }).runId === bareRunId(runId)).length;
 
     // ── Leg 1: the SOURCE run (created by the OWNER ⇒ actingUserId = owner). ──
     programMock('run', [{ content: 'SOURCE-ANSWER' }]); // exactly ONE entry — exhausted after this run
-    const created = await member.post('/v1/runs', {
+    const created = await member.post('/runs', {
       workflowId: 'openwop-app.agent-mention',
       // The REGISTRY id (dispatch resolves the manifest by it); the node's
       // reverse roster scan maps it to `rosterId` = the twin-link key.
-      inputs: { agentId: 'probe.twin.fork-aide', task: 'summarize vendor contract finance practice', provider: 'mock', model: 'mock-1' },
+      inputs: { agentId: 'probe.twin.fork-aide', task: 'summarize vendor contract finance practice', provider: 'mock', model: 'mock-1', offerTools: [] },
       // ADR 0458 P2 confinement: a ZERO-tool surface ⇒ single completion — the
       // mock provider has no tool-calling capability, and tools are not what
-      // this witness is about.
-      configurable: { offerTools: [] },
+      // this witness is about. Carried in `inputs` (which `resolveParams` reads
+      // first): major 2's `configurable` is closed and versioned (ADR 0812 P2b).
     });
     expect([200, 201, 202], JSON.stringify(created.body)).toContain(created.status);
     const sourceRunId = created.body.runId as string;
@@ -150,7 +151,7 @@ describe('PROBE-RCL-2 — grant → run → revoke → :fork re-resolves recall 
     expect(await okRowsFor(sourceRunId), 'the source recall is audited under its runId').toBe(1);
 
     // ── Leg 2: fork with the grant INTACT (forked BY the owner). ──
-    const fork1 = await member.post(`/v1/runs/${encodeURIComponent(sourceRunId)}:fork`, { fromSeq: 0, mode: 'replay' });
+    const fork1 = await member.post(`/runs/${encodeURIComponent(sourceRunId)}:fork`, { fromSeq: 0, mode: 'replay' });
     expect(fork1.status, JSON.stringify(fork1.body)).toBe(201);
     const fork1Id = fork1.body.runId as string;
     expect(await waitTerminal(member, fork1Id)).toBe('completed');
@@ -164,7 +165,7 @@ describe('PROBE-RCL-2 — grant → run → revoke → :fork re-resolves recall 
     // invocation log. (The previous `promptOf()` equality was
     // non-discriminating: an unexhausted queue serving a live call on the
     // same prompt would also have left the last-seen prompt byte-identical.)
-    const fork1Events = await member.get(`/v1/runs/${encodeURIComponent(fork1Id)}/events/poll?fromSeq=0&limit=500`);
+    const fork1Events = await member.get(`/runs/${encodeURIComponent(fork1Id)}/events/poll?fromSeq=0&limit=500`);
     expect(fork1Events.status).toBe(200);
     expect(
       JSON.stringify(fork1Events.body.events),
@@ -176,7 +177,7 @@ describe('PROBE-RCL-2 — grant → run → revoke → :fork re-resolves recall 
 
     // ── Leg 3: REVOKE, then fork again. ──
     expect((await member.del(`${GRANTS}/${encodeURIComponent(rosterId)}`)).body.removed).toBe(true);
-    const fork2 = await member.post(`/v1/runs/${encodeURIComponent(sourceRunId)}:fork`, { fromSeq: 0, mode: 'replay' });
+    const fork2 = await member.post(`/runs/${encodeURIComponent(sourceRunId)}:fork`, { fromSeq: 0, mode: 'replay' });
     expect(fork2.status, JSON.stringify(fork2.body)).toBe(201);
     const fork2Id = fork2.body.runId as string;
     // Revocation DEGRADES recall — it must not fail the fork.

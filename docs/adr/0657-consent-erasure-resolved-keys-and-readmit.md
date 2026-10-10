@@ -105,6 +105,11 @@ inside a route `catch` (caller table in the assessment).
 steward manifest and `sideEffectFloor.generated.ts` move in lockstep;
 `consent-node-replay.test.ts` pins the five sibling legs plus the fork leg.
 
+> **CORRECTED 2026-10-09 (/grade-tests wave 9):** the feature-pin leg (leg 5) was removed from
+> `consent-node-replay.test.ts` as redundant: `test/pack-pin-parity.test.ts` asserts every feature
+> pin against `pack.json` corpus-wide and went red under the same sabotage (probe
+> `w9g3-nr-feature-pin-cover`). The file now pins legs 1–4 and 6; the pin is still guarded.
+
 ### D4 — the public capture never mints on an empty body, and has a per-org budget (`CNWF-5`)
 
 `POST /public-consent/:orgId`: a body with no `categories` object or an empty one is a

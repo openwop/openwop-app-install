@@ -1,0 +1,20 @@
+{
+  "$comment": "ADR 0808 — ONE case table for both evaluators of a form field's `when`: the server's (mapEdgeCondition + evaluateCondition, read by backend/typescript/test/adr0808-form-conditional-visibility.test.ts) and the public renderer's (deriveFields.visibleFields, read by deriveFields.when.test.ts). A row the two disagree on is a field a visitor sees but the server judges hidden, or the reverse.",
+  "cases": [
+    { "when": { "type": "equals", "left": "fields.a", "right": "x" }, "a": "x", "shown": true },
+    { "when": { "type": "equals", "left": "fields.a", "right": "x" }, "a": "y", "shown": false },
+    { "when": { "type": "equals", "left": "fields.a", "right": "x" }, "a": null, "shown": false },
+    { "when": { "type": "equals", "left": "fields.a", "right": 3 }, "a": "3", "shown": false },
+    { "when": { "type": "equals", "left": "fields.a", "right": true }, "a": true, "shown": true },
+    { "when": { "type": "notEquals", "left": "fields.a", "right": "x" }, "a": "y", "shown": true },
+    { "when": { "type": "notEquals", "left": "fields.a", "right": "x" }, "a": null, "shown": true },
+    { "when": { "type": "contains", "left": "fields.a", "right": "ell" }, "a": "hello", "shown": true },
+    { "when": { "type": "contains", "left": "fields.a", "right": "zz" }, "a": "hello", "shown": false },
+    { "when": { "type": "contains", "left": "fields.a", "right": "x" }, "a": true, "shown": false },
+    { "when": { "type": "truthy", "left": "fields.a" }, "a": "v", "shown": true },
+    { "when": { "type": "truthy", "left": "fields.a" }, "a": "", "shown": false },
+    { "when": { "type": "truthy", "left": "fields.a" }, "a": false, "shown": false },
+    { "when": { "type": "falsy", "left": "fields.a" }, "a": null, "shown": true },
+    { "when": { "type": "falsy", "left": "fields.a" }, "a": "v", "shown": false }
+  ]
+}

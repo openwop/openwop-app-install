@@ -42,6 +42,7 @@ const optStr = (v: unknown): string | undefined => (typeof v === 'string' && v.t
 export function registerChatExportAgentTools(): void {
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: CONVERSATIONS_EXPORT_DOCUMENT_TOOL_ID,
       description:

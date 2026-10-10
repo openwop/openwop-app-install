@@ -24,7 +24,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 
 const SUPER_TENANT = 'org:test-attest-super';
-const OPS = '/v1/host/openwop-app/operations';
+const OPS = '/host/openwop-app/operations';
 
 let BASE: string;
 let server: http.Server;
@@ -67,7 +67,7 @@ function client() {
 let n = 0;
 async function login(tenantId: string) {
   const c = client();
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `att-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await c.post('/host/openwop-app/test/login', { email: `att-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return c;
 }

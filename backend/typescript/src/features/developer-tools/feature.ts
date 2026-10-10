@@ -36,7 +36,7 @@ export const developerToolsFeature: BackendFeature = {
       + 'The network inspector shows RAW request and response bodies for this browser session — anything the app sends or receives. '
       + 'Headers are never captured and credential-NAMED JSON fields are scrubbed best-effort, but ordinary payloads and returned '
       + 'records (customer data, documents, model output) are shown as-is, so enable it only for people who may see that data. '
-      + 'OFF for a clean install; the public demo defaults ON. Showcase CONTENT is governed separately by demo mode (ADR 0196).',
+      + 'Showcase content is governed separately by demo mode.',
     category: 'Platform',
     status: demoMode() ? 'on' : 'off',
     bucketUnit: 'tenant',

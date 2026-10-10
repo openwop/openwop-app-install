@@ -5,10 +5,28 @@
  * is deleted at accept time), so the store only accrues expired-never-accepted rows. The
  * registration ages on `expiresAt` with a 30-day grace. Importing the service triggers its
  * module-load registration; the test seeds rows over the real collection and drives the sweep.
+ *
+ * Also pinned here:
+ *   - WF-ORGINV-1 — the PRODUCT hash-index collection is index-free (read from the
+ *     collection registry BEFORE this file constructs any handle over it), it ages
+ *     out in lockstep with the invite, and the kvAgeOut registration-time tripwire
+ *     warns on an unacknowledged tenant-indexed collection; the sweep deletes
+ *     THROUGH the collection so no `hostextidx:` marker strands.
+ *   - review F2 — app migration 17 drops the indexed-era hashidx markers + the
+ *     backfill sentinel, and nothing else; idempotent.
+ *
+ * Clock: a fixed NOW is passed to the sweep explicitly — clock-shift safe.
+ *
+ * Sabotage that turns it red (grade-tests wave 2, probes `g2-ttl-*`): the invite
+ * TTL changed (5 → grace case + lockstep; 35 → the exact-policy pin); the hashidx
+ * TTL drifted from the invite's; `tenantOf` re-added to the PRODUCT hash index;
+ * the grace cutoff dropped; the tripwire disabled or not muted by `acceptIndexed`;
+ * the sweep deleting raw kv instead of via the collection; migration 17 scanning
+ * too broad a prefix or keeping the sentinel.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
-import { initHostExtPersistence, DurableCollection } from '../src/host/hostExtPersistence.js';
+import { initHostExtPersistence, DurableCollection, hostExtCollectionForPrefix } from '../src/host/hostExtPersistence.js';
 import { __runKvAgeOutOnce, __listKvAgeOutForTest, registerKvAgeOut } from '../src/host/kvAgeOut.js';
 import type { Storage } from '../src/storage/storage.js';
 
@@ -29,17 +47,25 @@ beforeEach(async () => {
 });
 
 describe('IDN-3 — orgs:invite kvAgeOut', () => {
-  it('registers the orgs:invite store on the size-hygiene lane', () => {
-    const reg = __listKvAgeOutForTest().find((r) => r.id === 'orgs:invite');
-    expect(reg).toMatchObject({ prefix: 'hostext:orgs:invite:', ttlDays: 30, timestampField: 'expiresAt' });
-  });
+  // (The former "registers the orgs:invite store on the size-hygiene lane" case is
+  // folded into the lockstep case below — grade-tests wave 2.)
 
   it('registers the hash index in lockstep, and (WF-ORGINV-1) its rows write NO tenant-index markers', async () => {
-    const reg = __listKvAgeOutForTest().find((r) => r.id === 'orgs:invite-hashidx');
-    expect(reg).toMatchObject({ prefix: 'hostext:orgs:invite-hashidx:', ttlDays: 30, timestampField: 'expiresAt' });
+    // FIRST, before this file constructs any handle over the namespace: the
+    // collection registry is last-construction-wins, so only here does it hold
+    // the PRODUCT collection (`invitationsService.ts`). A test-side handle below
+    // would otherwise be the thing asserted index-free.
+    expect(hostExtCollectionForPrefix('hostext:orgs:invite-hashidx:'), 'the PRODUCT hash index must be index-free').toMatchObject({ indexed: false });
 
-    // The collection is INDEX-FREE now — a put mints no `hostextidx:` marker,
-    // so a daemon age-out has nothing to strand.
+    // Both stores registered on the size-hygiene lane, the index in LOCKSTEP with
+    // its invite (same field + TTL), and the invite at its documented 30-day grace.
+    const inv = __listKvAgeOutForTest().find((r) => r.id === 'orgs:invite');
+    const reg = __listKvAgeOutForTest().find((r) => r.id === 'orgs:invite-hashidx');
+    expect(inv).toMatchObject({ prefix: 'hostext:orgs:invite:', ttlDays: 30, timestampField: 'expiresAt' });
+    expect(reg).toMatchObject({ prefix: 'hostext:orgs:invite-hashidx:' });
+    expect({ ttlDays: reg!.ttlDays, timestampField: reg!.timestampField }).toEqual({ ttlDays: inv!.ttlDays, timestampField: inv!.timestampField });
+
+    // A put mints no `hostextidx:` marker, so a daemon age-out has nothing to strand.
     const idx = new DurableCollection<{ key: string; inviteId: string; tenantId: string; expiresAt: string }>('orgs:invite-hashidx', (r) => r.key);
     await idx.put({ key: 'h1', inviteId: 'inv:1', tenantId: 't', expiresAt: at(-40) });
     expect((await storage.kvList('hostextidx:orgs:invite-hashidx:')).length).toBe(0);

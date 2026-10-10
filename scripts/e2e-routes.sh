@@ -48,9 +48,10 @@ fi
 BE_PID=""; WEB_PID=""
 
 cleanup() {
-  # `npm run dev` spawns Vite as a CHILD, so kill the wrapper's children first, then it.
-  [ -n "$WEB_PID" ] && pkill -P "$WEB_PID" 2>/dev/null || true
-  [ -n "$WEB_PID" ] && kill "$WEB_PID" 2>/dev/null || true
+  # `npm run dev` spawns Vite as a GRANDCHILD or deeper (subshell → npm → [sh -c]
+  # → vite), so kill the whole tree. `pkill -P` reached only direct children and
+  # leaked Vite on Linux (ADR 0863; see gate_kill_tree).
+  [ -n "$WEB_PID" ] && gate_kill_tree "$WEB_PID"
   #
   # THE BACKEND IGNORES SIGTERM, so `kill` alone LEAKS IT. Its handler stops the
   # daemons and drains the storage pool but never closes the HTTP server and
@@ -134,8 +135,7 @@ while :; do
   fi
   # Ours did not bind, or someone else holds the port. Either way this attempt is
   # dead: tear down only what THIS attempt started, then try a different port.
-  pkill -P "$WEB_PID" 2>/dev/null || true
-  kill "$WEB_PID" 2>/dev/null || true
+  gate_kill_tree "$WEB_PID"
   WEB_PID=""
   if [ "$web_attempt" -ge 3 ] || [ -n "${OPENWOP_E2E_WEB_PORT:-}" ]; then
     # A PINNED port is never relocated — if you named it, you meant it.

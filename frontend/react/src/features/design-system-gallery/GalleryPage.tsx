@@ -35,6 +35,9 @@ import { Tooltip } from '../../ui/Tooltip.js';
 import { ToastCard } from '../../ui/ToasterView.js';
 import { AlertIcon, CheckIcon, ChevronDownIcon, SearchIcon, SettingsIcon, ShieldIcon, UserIcon, WorkflowIcon } from '../../ui/icons/index.js';
 import { NavRailItemContent, NavRailSection } from '../../chrome/NavRailPrimitives.js';
+import { EnvelopeEventsTimeline } from '../../chat/EnvelopeEventsTimeline.js';
+import { RunStepBar } from '../../chat/WorkflowRunBubble.js';
+import type { ChatMessage } from '../../chat/types.js';
 
 /** Deterministic fixture rows for the table specimen. */
 interface FixtureRow { id: string; name: string; status: string; count: number }
@@ -50,6 +53,41 @@ const TABLE_COLS: DataColumn<FixtureRow>[] = [
 ];
 
 const SPARK_POINTS = [2, 5, 3, 8, 6, 9, 4, 7, 10, 8];
+
+/* ADR 0768 follow-up C3/C4 — chat rows that only appear when a real model call
+ * goes wrong (a retry, a cut-off, a refusal, a model swap) or while a run is
+ * mid-flight. Nobody could look at them without a misbehaving provider, so they
+ * shipped unseen. Rendered here from fixtures so the a11y and contrast lanes
+ * that already walk this page cover them in light and dark. */
+const AT = '2026-10-01T00:00:00.000Z';
+const RECOVERY_EVENTS: NonNullable<ChatMessage['envelopeEvents']> = {
+  retries: [{ nodeId: 'draft', attempt: 2, reason: 'schema-violation', previousError: 'steps[1].name: expected string, received number', at: AT }],
+  retriesExhausted: [{ nodeId: 'draft', totalAttempts: 3, finalReason: 'schema-violation', finalError: 'steps: required', at: AT }],
+  refusals: [{ nodeId: 'draft', provider: 'anthropic', model: 'claude-opus-5-5', refusalText: 'I can’t help with that request.', safetyCategory: 'policy', at: AT }],
+  truncations: [{ nodeId: 'draft', provider: 'anthropic', model: 'claude-opus-5-5', stopReason: 'max_tokens', partialPayloadAvailable: true, outputTokenCount: 4096, at: AT }],
+  nlCoercions: [{ nodeId: 'draft', originalEnvelopeType: 'plan.propose', at: AT }],
+  recoveries: [{ nodeId: 'draft', path: 'steps[3]', byteOffset: 1820, at: AT }],
+  capabilitySubstitutions: [{ nodeId: 'review', originalProvider: 'anthropic', originalModel: 'claude-opus-5-5', fallbackProvider: 'anthropic', fallbackModel: 'claude-sonnet-5-5', missingCapabilities: ['vision'], at: AT }],
+  capabilitiesInsufficient: [{ nodeId: 'review', provider: 'minimax', model: 'MiniMax-M3', missingCapabilities: ['vision'], at: AT }],
+};
+type RunState = NonNullable<ChatMessage['workflowRun']>;
+function runFixture(over: Partial<RunState>): RunState {
+  return {
+    slug: 'launch-plan', workflowName: 'Launch plan', workflowId: '', runId: null, status: 'running',
+    totalNodes: 5, completedNodeIds: [], failedNodeIds: [], nodeOutputs: {}, startedAt: AT, ...over,
+  } as RunState;
+}
+const RUN_FIXTURES: { id: string; run: RunState; waiting: boolean }[] = [
+  { id: 'active', run: runFixture({ completedNodeIds: ['a', 'b'] }), waiting: false },
+  { id: 'waiting', run: runFixture({ completedNodeIds: ['a', 'b', 'c', 'd'] }), waiting: true },
+  { id: 'failed', run: runFixture({ status: 'failed', completedNodeIds: ['a'], failedNodeIds: ['b'] }), waiting: false },
+  { id: 'done', run: runFixture({ status: 'completed', completedNodeIds: ['a', 'b', 'c', 'd', 'e'] }), waiting: false },
+];
+
+/** The film colour tokens, by suffix (`--video-<k>`), and the rule blocks the
+ *  Video section renders (`video<K>` + `video<K>Body` catalog keys). */
+const VIDEO_SWATCHES = ['stage', 'stage-text', 'stage-muted', 'stage-rule', 'card', 'card-text', 'card-muted', 'card-faint', 'accent', 'accent-on-stage', 'accent-on-card'] as const;
+const VIDEO_RULES = ['Audience', 'Story', 'Voice', 'Type', 'Motion', 'Sound', 'Honesty', 'Access'] as const;
 
 function Section({ id, title, children }: { id: string; title: string; children: React.ReactNode }): JSX.Element {
   return (
@@ -238,10 +276,11 @@ export function GalleryPage(): JSX.Element {
 
       <Section id="figures" title={t('figures')}>
         {/* INTERACTIVE with one tile active. A static band never renders
-            `.figure-tile--active`, so its selected rail had NO snapshot coverage
+            `.figure-tile--active`, so its selected state had NO snapshot coverage
             — which is how a 14px corner radius on a 3px-wide bar shipped
-            unnoticed (fixed 2026-08-08). `activeKey` + `onToggle` put the
-            selected state in the visual contract. */}
+            unnoticed (fixed 2026-08-08; the bar itself was retired for an ink
+            ring on 2026-10-08). `activeKey` + `onToggle` put the selected
+            state in the visual contract. */}
         <KeyFigureBand
           ariaLabel={t('figuresLabel')}
           activeKey={figureKey}
@@ -281,6 +320,56 @@ export function GalleryPage(): JSX.Element {
           onChange={setTab}
         />
         <div id="gallery-tabs-panel" role="tabpanel" className="u-fs-13 muted">{t('tabsPanel', { tab })}</div>
+      </Section>
+
+      <Section id="chat-recovery" title={t('chatRecovery')}>
+        <EnvelopeEventsTimeline envelopeEvents={RECOVERY_EVENTS} onReconfigure={() => undefined} />
+      </Section>
+
+      <Section id="chat-run-steps" title={t('chatRunSteps')}>
+        {RUN_FIXTURES.map((f) => <RunStepBar key={f.id} run={f.run} waiting={f.waiting} />)}
+      </Section>
+
+      {/* The film identity (DESIGN.md §6.1). Documentation only — static frames,
+          no player: the films are rendered in openwop-site from the tokens
+          published at /design-tokens.json. */}
+      <Section id="video" title={t('video')}>
+        <p className="u-m-0">{t('videoPromise')}</p>
+        <div className="dsg-video-frames">
+          <figure className="u-m-0 u-grid u-gap-1">
+            <div className="dsg-video-frame"><div className="dsg-video-frame__in">
+              <p className="dsg-video-open">{t('videoOpenLine1')}<br /><em>{t('videoOpenLine2')}</em></p>
+            </div></div>
+            <figcaption className="u-fs-12 muted">{t('videoOpenCaption')}</figcaption>
+          </figure>
+          <figure className="u-m-0 u-grid u-gap-1">
+            <div className="dsg-video-frame"><div className="dsg-video-frame__in">
+              <p className="dsg-video-label">{t('videoSceneLabel')}</p>
+              <p className="dsg-video-title">{t('videoSceneTitle')}</p>
+              <p className="dsg-video-body">{t('videoSceneBody')}</p>
+            </div></div>
+            <figcaption className="u-fs-12 muted">{t('videoSceneCaption')}</figcaption>
+          </figure>
+          <figure className="u-m-0 u-grid u-gap-1">
+            <div className="dsg-video-frame dsg-video-frame--card"><div className="dsg-video-frame__in">
+              <p className="dsg-video-end">{t('videoEndLine1')} <em>{t('videoEndLine2')}</em></p>
+              <p className="dsg-video-end-sub">{t('videoEndSub')}</p>
+              <p className="dsg-video-end-url">openwop.dev</p>
+            </div></div>
+            <figcaption className="u-fs-12 muted">{t('videoEndCaption')}</figcaption>
+          </figure>
+        </div>
+        <ul className="dsg-video-swatches" aria-label={t('videoColours')}>
+          {VIDEO_SWATCHES.map((k) => (
+            <li key={k}><span className={`dsg-video-swatch dsg-video-swatch--${k}`} aria-hidden /><code className="u-fs-11">--video-{k}</code></li>
+          ))}
+        </ul>
+        <dl className="dsg-video-rules">
+          {VIDEO_RULES.map((k) => (
+            <div key={k}><dt>{t(`video${k}`)}</dt><dd>{t(`video${k}Body`)}</dd></div>
+          ))}
+        </dl>
+        <p className="u-m-0 u-fs-12 muted">{t('videoTokens')} <a href="/design-tokens.json"><code>/design-tokens.json</code></a> · <a href="/design-tokens.css"><code>/design-tokens.css</code></a></p>
       </Section>
 
       <Section id="toasts" title={t('toasts')}>

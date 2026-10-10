@@ -11,10 +11,19 @@ import { builtinAgentToolIds, createAgentToolProvider } from '../src/host/agentT
 import { wasmPath } from '../src/host/wasiSandbox.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
+import { registerToggleDefault } from '../src/host/featureToggles/registry.js';
+import { codeExecFeature } from '../src/features/code-exec/feature.js';
 
 const TOOL_ID = 'openwop:feature.code-exec.nodes.run';
 
-beforeAll(async () => { initHostExtPersistence(await openStorage('memory://')); }); // budget store
+beforeAll(async () => {
+  initHostExtPersistence(await openStorage('memory://')); // budget store
+  // ADR 0820 §8.2 — the runner's `code-exec` access gate reads this toggle. Without
+  // it every execution is `feature_disabled`. That went unseen because the WASI arm
+  // below SKIPS when the wasm asset is absent (every plain local checkout), and the
+  // first run to sync the asset was the ADR 0863 Linux pilot.
+  registerToggleDefault(codeExecFeature.toggleDefault!);
+});
 
 beforeEach(() => {
   delete process.env.OPENWOP_CODE_EXEC_ENDPOINT;

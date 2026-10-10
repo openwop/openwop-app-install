@@ -60,7 +60,7 @@ describe('CFP-1 — registration + pack allowlist honesty', () => {
   it('every toolAllowlist entry in the assistant.agents pack resolves to a real chat tool', () => {
     const universe = new Set(builtinAgentToolIds());
     const manifest = JSON.parse(
-      readFileSync(new URL('../../../packs/feature.assistant.agents/pack.json', import.meta.url), 'utf8'),
+      readFileSync(new URL('../../../packs/vendor.openwop-app.assistant.agents/pack.json', import.meta.url), 'utf8'),
     ) as { agents: { toolAllowlist: string[] }[] };
     const unresolved: string[] = [];
     for (const agent of manifest.agents) {
@@ -71,7 +71,7 @@ describe('CFP-1 — registration + pack allowlist honesty', () => {
 
   it('the pruned node-typeId + egress ids are gone from every allowlist', () => {
     const manifest = JSON.parse(
-      readFileSync(new URL('../../../packs/feature.assistant.agents/pack.json', import.meta.url), 'utf8'),
+      readFileSync(new URL('../../../packs/vendor.openwop-app.assistant.agents/pack.json', import.meta.url), 'utf8'),
     ) as { agents: { toolAllowlist: string[] }[] };
     const all = manifest.agents.flatMap((a) => a.toolAllowlist);
     for (const gone of [

@@ -134,3 +134,24 @@ after this has been deployed long enough that the count has stopped growing.
 | 2 | 171 occurrences / 43 files — backend, SPA, packs, docs |
 | 3 | `schemas/` reverted; the corpus tree is not ours |
 | 4 | backend 6 files / 47 tests · frontend build green · 757 files / 5333 tests |
+
+> **CORRECTED 2026-10-01 — the rename was writer-only, and the old rows broke
+> the major-2 read.** This ADR renamed five events at the writer and left the
+> rows already on disk under their old spellings (the table above counted them:
+> 967 / 275 / 17 / 12 / 2). A conversation is one long-lived run, so every
+> conversation started before 2026-09-14 still holds them in an era-2 log. None
+> is a codemap row and none carries a vendor prefix, so once the major-2 reader
+> refused unmapped types (ADR 0687), reading such a log answered `500
+> event_type_unmapped` — seen live as "No response" in a chat with an agent
+> whose conversation predated the rename.
+>
+> Fixed at the reader: `storage/eventEra.ts` `HOST_LEGACY_READ_ROWS` maps each
+> old spelling to its registered `openwop-app.*` vendor type on the major-2 read
+> of an era-2 log, and nowhere else. It is deliberately NOT a
+> `HOST_VENDOR_ROWS` entry: those are bidirectional and would store an era-2
+> write of the vendor name back under the old spelling. Proved per reader (poll,
+> SSE, fork) in `test/adr0682-legacy-host-types-readable.test.ts`; an unknown
+> type is still refused. The lesson is the one this ADR's own correction above
+> already drew for the SPA matchers: a writer-only rename strands every row
+> written before it.
+

@@ -34,6 +34,21 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
+# Contention FIRST, before anything else runs. Since 2026-09-28 this gate WAITS
+# by default behind any live suite from another checkout of this repo, under an
+# atomic claim (see `scripts/preflight-suite.sh --help`). It waits by `exec`ing
+# INTO preflight-suite.sh, which execs back here when clear (or after the
+# OPENWOP_CI_WAIT_MAX_MIN cap, under a DEBT-3 banner; OPENWOP_CI_NO_WAIT=1 skips
+# it). The exec is the point: while waiting, this process is NOT `scripts/ci.sh`,
+# so another session's detector — this version or the previous one — cannot
+# mistake a WAITING gate for a running suite. The first version waited inside
+# this script and two waiting gates deadlocked on each other's argv.
+if [ -z "${OPENWOP_CI_PREFLIGHT_DONE:-}" ]; then
+  # The gate's path travels in the ENVIRONMENT, not argv: an argv holding
+  # `…/scripts/ci.sh` would match the detector's pattern all over again.
+  OPENWOP_CI_EXEC_TARGET="$ROOT/scripts/ci.sh" exec bash "$ROOT/scripts/preflight-suite.sh" --ci-exec "$@"
+fi
+
 # ── H101: the gate must be able to say WHICH TREE it tested ──────────────────
 # A gate run reads the working tree continuously — backend `tsc` builds it early,
 # vitest reads `src/` throughout, the frontend build reads it again minutes later.
@@ -78,7 +93,10 @@ ledger_append() { # ledger_append <path> <outcome>
     "$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)" "$2" \
     >> "$1" 2>/dev/null || true
 }
-step() { printf '\n\033[1m▶ %s\033[0m\n' "$*"; }
+# Every step banner carries the gate's elapsed time (ADR 0863), so a log answers
+# "where did the time go" without anyone having to re-run with timestamps.
+CI_T0=$(date +%s)
+step() { printf '\n\033[1m▶ %s\033[0m \033[2m[+%ss]\033[0m\n' "$*" "$(( $(date +%s) - CI_T0 ))"; }
 skip() { printf '\n\033[2m↷ skipped %s\033[0m\n' "$*"; }
 
 # ── DEBT-3: make a load-induced red run SELF-DIAGNOSING ────────────────────────
@@ -119,14 +137,52 @@ ci_load_note() { # printed on FAILURE only — a green run needs no excuse
   # worktree, two of my own orphaned jobs) drove this 10-core box to load 144.
   bash "$ROOT/scripts/preflight-suite.sh" 2>/dev/null || true
 }
-trap 'rc=$?; [ "$rc" -ne 0 ] && ci_load_note; exit $rc' EXIT
+# The claim preflight-suite.sh took for this pid (above) is RELEASED however this gate
+# ends — pass, fail, or Ctrl-C/TERM. MEASURED: bash already runs the EXIT trap
+# when TERM kills this script (removing the TERM line below leaves the self-test
+# green), so the INT/TERM lines are explicit belt-and-braces, not load-bearing.
+# ── Background lanes (ADR 0863 D6) ────────────────────────────────────────────
+# A lane that mostly WAITS, or uses one core, runs beside a CPU-heavy lane
+# instead of in front of it. `bg_lane_start <name> <fn>` runs <fn> in the
+# background with its output in a temp log; `bg_lane_join <name>` waits, replays
+# the log whole (so the gate log reads as if it ran in line) and fails the gate
+# with the lane's exit code. Every live lane is killed with its whole subtree on
+# any exit, so a red or interrupted gate never leaves a suite running behind it.
+# OPENWOP_CI_SERIAL_LANES=1 runs each lane in line at its start point instead.
+# Plain variables, not arrays: macOS ships bash 3.2.
+# shellcheck source=lib/gate-ports.sh
+. "$ROOT/scripts/lib/gate-ports.sh"
+BG_LANES=""   # space-separated name:pid:log
+bg_lane_start() { # bg_lane_start <name> <fn>
+  local name="$1" fn="$2" log
+  if [ "${OPENWOP_CI_SERIAL_LANES:-0}" = 1 ]; then "$fn"; return; fi
+  log="$(mktemp "${TMPDIR:-/tmp}/owp-ci-lane-$name.XXXXXX")"
+  ( "$fn" ) > "$log" 2>&1 < /dev/null &
+  BG_LANES="$BG_LANES $name:$!:$log"
+  echo "  running in the background: $name (pid $!, log $log)"
+}
+bg_lane_join() { # bg_lane_join <name>
+  local e pid log rc=0 rest=""
+  for e in $BG_LANES; do
+    if [ "${e%%:*}" = "$1" ]; then pid="${e#*:}"; log="${pid#*:}"; pid="${pid%%:*}"
+    else rest="$rest $e"; fi
+  done
+  [ -n "${pid:-}" ] || return 0   # serial mode: it already ran in line
+  wait "$pid" || rc=$?
+  BG_LANES="$rest"
+  cat "$log"; rm -f "$log"
+  [ "$rc" -eq 0 ] || { echo "background lane '$1' FAILED (exit $rc)"; exit "$rc"; }
+}
+bg_lanes_kill() {
+  local e pid
+  for e in $BG_LANES; do pid="${e#*:}"; gate_kill_tree "${pid%%:*}"; rm -f "${pid#*:}"; done
+  BG_LANES=""
+}
+trap 'rc=$?; bg_lanes_kill; bash "$ROOT/scripts/preflight-suite.sh" --release >/dev/null 2>&1; [ "$rc" -ne 0 ] && ci_load_note; exit $rc' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-# Contention advisory, BEFORE the ~20 minutes of work rather than after it. This
-# only reports (always exit 0) — the decision to serialise stays the operator's.
-# A parallel session's suite is invisible from inside this one unless something
-# looks, and that invisibility is why three separate flake hypotheses were each
-# tested without holding the controlling variable.
-bash "$ROOT/scripts/preflight-suite.sh" || true
+# (The contention wait ran at the top of this script — see there.)
 
 # Fail early with a clear message if deps aren't installed. We don't auto-install
 # — that's the dev's choice.
@@ -204,7 +260,7 @@ for d in backend/typescript frontend/react; do
   # question the guards above cannot: could a CLEAN machine install this
   # committed lockfile? That is what the Docker builder and every fresh clone
   # do, so a red here is a broken build that simply has not happened yet.
-  lockcheck_log="$(mktemp -t openwop-ci-lockcheck)"
+  lockcheck_log="$(mktemp "${TMPDIR:-/tmp}/openwop-ci-lockcheck.XXXXXX")"
   if ! ( cd "$ROOT/$d" && npm ci --dry-run --no-audit --no-fund ) >"$lockcheck_log" 2>&1; then
     echo "error: $d/package-lock.json is NOT INSTALLABLE — 'npm ci' would fail on a clean" >&2
     echo "       machine. This is exactly what the Docker builder runs, so this is a" >&2
@@ -273,6 +329,11 @@ node "$ROOT/scripts/check-metric-labels.mjs"
 # (the ADR 0533 correction) each shipped a replay that re-fired a real effect.
 step "side-effect floor: manifest roles declared + snapshot current (replay.md req 4)"
 node "$ROOT/scripts/gen-side-effect-floor.mjs" --check
+
+# openwop#1763 `cors-preflight-admits` — the preflight allow-list's spec half is
+# GENERATED from the pinned OpenAPI (both majors); a stale snapshot fails here.
+step "cors preflight: allow-list spec half matches the pinned OpenAPI"
+node "$ROOT/scripts/gen-cors-request-headers.mjs" --check
 
 # ADR 0572 P2 — the served-set ratchet. Per the steward's ruling (#999), a typeId
 # is discharged only by SERVING the source run's recorded outcome; a guarded-seam
@@ -373,17 +434,75 @@ step "gate tooling: the gate's own port/process helpers (GATE-5)"
 # found only by running the failure case, so those probes are assertions now.
 bash "$ROOT/scripts/test-gate-tooling.sh"
 
-step "deploy gates: preflight + verify actually refuse (ADR 0518 / ADR 0530)"
-# Pure shell + fixture repos + a local stub, so it costs ~2s and needs no build.
+step "deploy gates + contention detector: started in the BACKGROUND, joined after backend vitest (ADR 0863 D6)"
+# The deploy-gate suite: pure shell + fixture repos + a local stub, needing no build.
 # These two scripts are the last thing between a stale worktree and production;
 # an untested guard is a guard nobody should trust. The suite is written around
 # failure modes that HAVE happened (deploying a worktree behind origin/main) or
 # would silently defeat the guard if they regressed (an unstamped deploy reading
 # as a pass; a broken backend locking the operator out of the fix).
-bash "$ROOT/scripts/test-deploy-gates.sh"
+#
+# ADR 0863 D6 — why these run beside the backend lane instead of before it.
+# MEASURED on the 2026-10-08 gate log: they were 148 s of a 3,128 s gate, run
+# serially, and they are mostly WAITING — test-preflight-suite.sh is ~50 arms of
+# fixed 2–4 s polls (190 s wall for 56 s CPU at load 66), test-deploy-gates.sh
+# 101 s wall for 65 s CPU. Spread over a 30-minute vitest lane that CPU is noise,
+# and the wall time disappears. They need no build and touch only their own temp
+# fixtures, dynamically picked ports and fake worktrees (the preflight harness
+# already tolerates a real suite running beside it — it asserts on SETS, and
+# skips its one clear-path arm when it cannot be observed). The cost is latency:
+# a red here is reported after backend vitest rather than before it. Their
+# output is replayed whole at the join, so the log reads as it did serially.
+# OPENWOP_CI_SERIAL_LANES=1 restores the old in-line order for every such lane.
+run_selftests() {
+  set -e
+  echo "▶ deploy gates: preflight + verify actually refuse (ADR 0518 / ADR 0530)"
+  bash "$ROOT/scripts/test-deploy-gates.sh"
+  node --test --test-concurrency=1 "$ROOT/scripts/test-owned-deploy.mjs"
+  echo
+  echo "▶ guard: the contention detector actually fires (preflight-suite)"
+  bash "$ROOT/scripts/test-preflight-suite.sh"
+}
+bg_lane_start selftests run_selftests
 
-step "guard: the contention detector actually fires (preflight-suite)"
-bash "$ROOT/scripts/test-preflight-suite.sh"
+step "frontend: lint + build + unit-test types — BACKGROUND, joined before backend vitest (ADR 0863 D7)"
+# ADR 0863 D7 — the backend preamble below (typecheck, distributions, esbuild
+# build, the shutdown and e2e-wiring probes) is ~2 minutes of mostly ONE busy
+# core. These three frontend steps (~125–170 s: two single-threaded tsc passes,
+# eslint, a vite build) need nothing it produces: the default distribution
+# writes no file (gen-distribution.mjs `prebuild` is a no-op for it, and
+# vite.config.ts derives the registry in memory). So they use the idle cores
+# now instead of running after backend vitest. They are joined BEFORE backend
+# vitest, not after it: a frontend lint or type error still fails the gate in
+# its first minutes, and backend vitest — which keeps all 7 workers busy — never
+# shares the box with them.
+# The three also run beside EACH OTHER. MEASURED one after another: 181 s here,
+# while the preamble finished at +98 s, so backend vitest waited ~100 s for them.
+# None writes what another reads (no tsc pass is incremental; lint writes
+# nothing), so the lane takes roughly the build's ~80 s.
+run_frontend_static() ( # a subshell: the serial fallback must not leave ci.sh in frontend/react
+  local dir rc=0 n p p1 p2 p3
+  dir="$(mktemp -d "${TMPDIR:-/tmp}/owp-ci-fe-static.XXXXXX")"
+  trap 'rm -rf "$dir"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  cd "$ROOT/frontend/react" || return 1
+  fe_static_one() { # fe_static_one <log> <title> <npm args...>
+    local log="$1" title="$2"; shift 2
+    { echo "▶ frontend: $title"; npm "$@"; } > "$log" 2>&1 < /dev/null
+  }
+  fe_static_one "$dir/1" "lint (eslint, zero warnings)" run lint -- --max-warnings=0 & p1=$!
+  fe_static_one "$dir/2" "build (tsc + token/CSS checks + vite + bundle budget)" run build & p2=$!
+  fe_static_one "$dir/3" "unit-test types (shrink-only ratchet — tests are excluded from the build's tsc)" run check:test-types & p3=$!
+  for n in 1 2 3; do
+    eval "p=\$p$n"
+    if wait "$p"; then :; else rc=$?; echo "frontend static step $n FAILED (exit $rc)" >> "$dir/$n"; fi
+    cat "$dir/$n"; echo
+  done
+  rm -rf "$dir"
+  return "$rc"
+)
+bg_lane_start frontend-static run_frontend_static
 
 step "backend: typecheck (tsc --noEmit)"
 # ADR 0550 P0 — THE BUILD BELOW DOES NOT TYPECHECK. `npm run build` is an
@@ -440,6 +559,12 @@ step "e2e-routes wiring: ONE Vite, handed to Playwright (GATE-6)"
 # exactly how a guard that refused its own server reached main. Stub Playwright,
 # no browser.
 bash "$ROOT/scripts/test-e2e-routes-wiring.sh"
+# The /update-cli gap measure: non-vacuous, counts composed CLI paths, refuses a
+# missing CLI checkout (reads source only; ~1 s).
+bash "$ROOT/scripts/test-cli-route-coverage.sh"
+
+step "frontend: lint + build + unit-test types — background result (ADR 0863 D7)"
+bg_lane_join frontend-static
 
 step "backend: vitest (OPENWOP_SKIP_TESTCONTAINERS=1, as in CI)"
 # ADR 0702 — the event-payload recorder rides ALONG with this run. The samples
@@ -447,8 +572,11 @@ step "backend: vitest (OPENWOP_SKIP_TESTCONTAINERS=1, as in CI)"
 # comparison per append, hoisted to module load and off unless the var is set.
 # Building a second lane to produce the same events would have cost 20 minutes
 # and measured slightly different code.
-OPENWOP_PAYLOAD_AUDIT_DIR="$(mktemp -d -t owp-payload-audit)"
+OPENWOP_PAYLOAD_AUDIT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/owp-payload-audit.XXXXXX")"
 ( cd "$ROOT/backend/typescript" && OPENWOP_SKIP_TESTCONTAINERS=1 OPENWOP_PAYLOAD_AUDIT="$OPENWOP_PAYLOAD_AUDIT_DIR" npm run test )
+
+step "deploy gates + contention detector: background result (ADR 0863 D6)"
+bg_lane_join selftests
 
 # ADR 0702 — do the persisted event payloads validate against the corpus `$def`
 # the codemap names for each type?
@@ -481,41 +609,24 @@ fi
 # times — so the status is captured from PIPESTATUS and re-raised explicitly.
 [ "$pa_rc" -eq 0 ] || { echo "event-payload ratchet FAILED (exit $pa_rc)"; exit "$pa_rc"; }
 
-# The quarantine is EMPTY as of 2026-08-13 (ADR 0550 P1 burn-down): all ten
-# entries were harness non-determinism, not host non-conformance. The label no
-# longer says "quarantined set excluded" because nothing is excluded, and a step
-# named for something it does not do is the same defect class this repo keeps
-# finding. `conformance/run.ts` still honours the list if one is ever re-added.
-step "backend: conformance (full suite — ADR 0550 P1 quarantine is empty)"
-# Until now `test:conformance` was in NO gate at all, while the harness header
-# claimed CI gated on it. Behind that absence the suite drifted red: 31 failures
-# across 11 files on main when first measured (2026-08-11, 3373372b6).
-#
-# The known-failing scenarios are quarantined by name in
-# `backend/typescript/conformance/quarantine.json` (shrink-only, each with a
-# reason) so the REST of the suite can be a real blocking gate — a NEW
-# conformance failure can no longer land silently. ~2 minutes.
-#
-# See the real state, quarantine included:
+# ADR 0812 P3c — the TARGET MAJOR 1 lane that used to run here is gone with
+# major 1. It ran the full suite at major 1, where every `v2-*` scenario records
+# `inapplicable` (#3644). The major-2 lane below is now the ONE conformance gate:
+# it runs the same suite at major 2 and ratchets it BOTH ways against an explicit
+# known-red list. An unlisted red fails, and so does a listed file that has gone
+# green (a stale entry is a lie about the wire). `conformance/quarantine.json` is
+# still honoured if an entry is ever re-added; see the real state with
 #   ( cd backend/typescript && OPENWOP_CONFORMANCE_NO_QUARANTINE=1 npm run test:conformance )
-( cd "$ROOT/backend/typescript" && npm run test:conformance )
-# #3644 / ADR 0631 — the lane above runs at TARGET MAJOR 1 only, so every
-# `v2-*` scenario records `inapplicable` there and the major-2 wire was never
-# EXECUTED by this gate (measured 2026-09-05: 57 files honestly skipped). This
-# second lane runs the same suite at major 2 and ratchets it BOTH ways against
-# an explicit known-red list — an unlisted red fails, a listed file that has
-# gone green fails too (a stale entry is a lie about the wire).
-step "backend: conformance at TARGET MAJOR 2 (ratchet — scripts/conformance-v2-known-red.txt)"
-( cd "$ROOT" && bash scripts/check-conformance-major2.sh )
-
-step "frontend: lint (eslint, zero warnings)"
-( cd "$ROOT/frontend/react" && npm run lint -- --max-warnings=0 )
-
-step "frontend: build (tsc + token/CSS checks + vite + bundle budget)"
-( cd "$ROOT/frontend/react" && npm run build )
-
-step "frontend: unit-test types (shrink-only ratchet — tests are excluded from the build's tsc)"
-( cd "$ROOT/frontend/react" && npm run check:test-types )
+step "backend: conformance at TARGET MAJOR 2 (ratchet — scripts/conformance-v2-known-red.txt) — BACKGROUND, joined before the date-bomb sweep (ADR 0863 D6)"
+# ADR 0863 D6 — this lane runs `--no-file-parallelism`: one scenario file at a
+# time against one in-process host, so it holds about ONE core for ~5 minutes
+# (312 s on the 2026-10-08 gate). The frontend lane below is ~9 minutes of
+# work that needs nothing from it, so it runs beside that lane. Its host picks
+# its own port (conformance/port.js) and runs from src/ via tsx, so nothing the
+# frontend lane builds or boots can reach it. It is joined BEFORE the date-bomb
+# sweep, the one frontend step already known to red under load (see there).
+run_conformance_m2() { cd "$ROOT" && bash scripts/check-conformance-major2.sh; }
+bg_lane_start conformance-m2 run_conformance_m2
 
 step "frontend: live-fetch allowlist (shrink-only — ADR 0661)"
 node "$ROOT/scripts/check-live-fetch-allowlist.mjs"
@@ -527,7 +638,7 @@ step "frontend: vitest"
 # ADR 0661 phase 2 — WITNESS every allowlisted live fetch during the suite we are
 # already running, so the stale-entry check below costs no extra run. The guard
 # appends one line per allowed call; the checker aggregates after.
-LIVE_FETCH_AUDIT="$(mktemp -t owp-live-fetch-audit)"
+LIVE_FETCH_AUDIT="$(mktemp "${TMPDIR:-/tmp}/owp-live-fetch-audit.XXXXXX")"
 ( cd "$ROOT/frontend/react" && OPENWOP_LIVE_FETCH_AUDIT="$LIVE_FETCH_AUDIT" npm run test )
 
 step "frontend: live-fetch allowlist has no STALE entries (ADR 0661 phase 2)"
@@ -765,7 +876,7 @@ if [ "$e2e_run" = "1" ]; then
     # could be answered by something else that appeared on the port meanwhile.
     if [ -n "$E2E_BE_PID" ] && ! kill -0 "$E2E_BE_PID" 2>/dev/null; then break; fi
     code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
-      http://127.0.0.1:"$E2E_PORT_BE"/v1/host/openwop-app/test/login \
+      http://127.0.0.1:"$E2E_PORT_BE"/host/openwop-app/test/login \
       -H 'content-type: application/json' \
       -d '{"email":"ready@ci.local","tenantId":"ci-readiness"}' || true)
     if [ "$code" = "201" ]; then e2e_ready=1; break; fi
@@ -963,8 +1074,53 @@ done
 # So the lane built to catch this class was present, correct, and OFF while the
 # exact defect it was built for recurred in the exact file that motivated it.
 # An opt-in gate for a recurring class is a gate whose default is the failure.
+step "backend: conformance at TARGET MAJOR 2 — background result (ADR 0863 D6)"
+bg_lane_join conformance-m2
+
 step "frontend: date-bomb sweep (clock advanced ${OPENWOP_CLOCKSHIFT_DAYS:-365} days)"
-( cd "$ROOT/frontend/react" && OPENWOP_CI_CLOCKSHIFT=1 npm run test )
+# CONFIRM A RED IN ISOLATION (2026-09-29). This second full run of the suite reds
+# 1-2 files on unrelated diffs — MEASURED five times, five different files (e.g.
+# `CanvasPresentPage.test.tsx`, `e2eLaneWiring.test.ts`), each passing ALONE under
+# the same shift and passing un-shifted earlier in the same gate. That is
+# cross-file interference inside a 840-file parallel run, not a date bomb, and it
+# made `npm run ci` red on work that could not have caused it.
+#
+# A real date bomb is a property of ONE test and fires deterministically when run
+# alone under the shifted clock. So a red here is re-run file-by-file, isolated,
+# under the SAME shift, and the gate fails if any file fails again — detection
+# is preserved; only interference is filtered. It stays FAIL-CLOSED when no
+# failing file can be named (a crash) or when more than 5 files fail (a mass
+# failure is not interference).
+# The X's must END the template. BSD mktemp (macOS) only substitutes a trailing
+# run, so `…XXXXXX.json` was created LITERALLY under that name: every gate on
+# the machine shared one file, and a run killed mid-sweep left it behind, after
+# which every later gate died here with "mkstemp failed … File exists" — green
+# through 3,700 test files and red on a temp name (seen 2026-10-01).
+SWEEP_JSON="$(mktemp "${TMPDIR:-/tmp}/owp-clockshift-sweep.XXXXXX")"
+if ! ( cd "$ROOT/frontend/react" && OPENWOP_CI_CLOCKSHIFT=1 npm run test -- --reporter=default --reporter=json --outputFile="$SWEEP_JSON" ); then
+  sweep_failed="$(node -e '
+    const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+    const root = process.argv[2] + "/";
+    for (const t of r.testResults ?? []) if (t.status === "failed") console.log(t.name.startsWith(root) ? t.name.slice(root.length) : t.name);
+  ' "$SWEEP_JSON" "$ROOT/frontend/react" 2>/dev/null || true)"
+  sweep_n="$(printf '%s' "$sweep_failed" | grep -c . || true)"
+  if [ "$sweep_n" -eq 0 ] || [ "$sweep_n" -gt 5 ]; then
+    echo "date-bomb sweep: ${sweep_n} failing file(s) identified — not confirmable in isolation; failing closed." >&2
+    rm -f "$SWEEP_JSON"; exit 1
+  fi
+  echo "date-bomb sweep: ${sweep_n} file(s) red in the parallel run — confirming each ALONE under the same clock shift:"
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    if ( cd "$ROOT/frontend/react" && OPENWOP_CI_CLOCKSHIFT=1 node node_modules/vitest/vitest.mjs run "$f" > /dev/null 2>&1 ); then
+      echo "  interference (passes alone under the shift): $f"
+    else
+      echo "  CONFIRMED date-bomb / deterministic failure: $f" >&2
+      ( cd "$ROOT/frontend/react" && OPENWOP_CI_CLOCKSHIFT=1 node node_modules/vitest/vitest.mjs run "$f" ) || true
+      rm -f "$SWEEP_JSON"; exit 1
+    fi
+  done <<< "$sweep_failed"
+fi
+rm -f "$SWEEP_JSON"
 
 # NON-VACUITY FLOOR, and it runs unconditionally BECAUSE the sweep above now
 # does. A sweep that runs and asserts nothing is the next failure in this

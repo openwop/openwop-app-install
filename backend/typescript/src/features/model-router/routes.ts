@@ -4,21 +4,24 @@
  * The dispatch stage (Phase 3) reads this; toggle gates it.
  */
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
-import { requireOrgScope } from '../featureRoute.js';
+import { authorizeOrgScope } from '../featureRoute.js';
+
+/** ADR 0820 §8.2 — the config routes gate on toggle + plan (`authorizeOrgScope`). */
+const FEATURE = { toggleId: 'model-router', label: 'Model router' } as const;
 import { getRouterConfig, setRouterConfig, setRouterEnabled } from './configService.js';
 
 
 export function registerModelRouterRoutes(deps: RouteDeps): void {
   const { app } = deps;
-  const BASE = '/v1/host/openwop-app/model-router/orgs/:orgId/config';
+  const BASE = '/host/openwop-app/model-router/orgs/:orgId/config';
 
   app.get(BASE, async (req, res, next) => {
-    try { const { orgId, tenantId } = await requireOrgScope(req, 'workspace:read'); res.json({ config: await getRouterConfig(tenantId, orgId) }); } catch (err) { next(err); }
+    try { const { orgId, tenantId } = await authorizeOrgScope(req, FEATURE, 'workspace:read'); res.json({ config: await getRouterConfig(tenantId, orgId) }); } catch (err) { next(err); }
   });
   app.put(BASE, async (req, res, next) => {
-    try { const { user, orgId, tenantId } = await requireOrgScope(req, 'workspace:write'); res.json({ config: await setRouterConfig(tenantId, orgId, user.userId, req.body) }); } catch (err) { next(err); }
+    try { const { user, orgId, tenantId } = await authorizeOrgScope(req, FEATURE, 'workspace:write'); res.json({ config: await setRouterConfig(tenantId, orgId, user.userId, req.body) }); } catch (err) { next(err); }
   });
   app.post(`${BASE}/enable`, async (req, res, next) => {
-    try { const { user, orgId, tenantId } = await requireOrgScope(req, 'workspace:write'); const enabled = (req.body as { enabled?: unknown })?.enabled !== false; res.json({ config: await setRouterEnabled(tenantId, orgId, user.userId, enabled) }); } catch (err) { next(err); }
+    try { const { user, orgId, tenantId } = await authorizeOrgScope(req, FEATURE, 'workspace:write'); const enabled = (req.body as { enabled?: unknown })?.enabled !== false; res.json({ config: await setRouterEnabled(tenantId, orgId, user.userId, enabled) }); } catch (err) { next(err); }
   });
 }

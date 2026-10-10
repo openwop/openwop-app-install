@@ -13,6 +13,7 @@
  * @see docs/adr/0038-per-agent-knowledge-memory.md
  */
 
+import { agentStorageId } from '../executor/agentIdAliases.js';
 import { subjectMemoryScope, createSubjectMemoryPort, countSubjectMemoryByTag } from './subjectMemory.js';
 import { personSubject } from './subject.js';
 import type { AgentProfile } from '../types.js';
@@ -59,7 +60,8 @@ export function __resetPerUserNoActorWarnDedupe(): void {
 /** Stable per-agent memory namespace within a tenant — `agent:<id>`, the agent
  *  specialization of `subjectMemoryScope`. */
 export function agentMemoryScope(agentId: string): string {
-  return subjectMemoryScope({ kind: 'agent', id: agentId });
+  // ADR 0763 — one namespace per agent across both spellings of its id.
+  return subjectMemoryScope({ kind: 'agent', id: agentStorageId(agentId) });
 }
 
 /**

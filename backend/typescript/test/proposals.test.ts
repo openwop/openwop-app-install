@@ -62,7 +62,7 @@ async function api<T = unknown>(path: string, init: RequestInit = {}): Promise<{
 describe('proposals — reviewable-learning seam (RFC 0096)', () => {
   it('GET /proposals seeds a non-vacuous demo draft', async () => {
     const { status, body } = await api<{ proposals: Array<{ id: string; state: string }> }>(
-      '/v1/host/openwop-app/proposals?state=draft',
+      '/host/openwop-app/proposals?state=draft',
     );
     expect(status).toBe(200);
     expect(body.proposals.length).toBeGreaterThan(0);
@@ -70,20 +70,20 @@ describe('proposals — reviewable-learning seam (RFC 0096)', () => {
   });
 
   it('apply without the packs:publish scope is denied 403 and installs nothing', async () => {
-    const list = await api<{ proposals: Array<{ id: string }> }>('/v1/host/openwop-app/proposals?state=draft');
+    const list = await api<{ proposals: Array<{ id: string }> }>('/host/openwop-app/proposals?state=draft');
     const id = list.body.proposals[0]!.id;
-    const res = await api(`/v1/host/openwop-app/proposals/${id}/apply`, { method: 'POST', body: '{}' });
+    const res = await api(`/host/openwop-app/proposals/${id}/apply`, { method: 'POST', body: '{}' });
     expect(res.status).toBe(403);
     // Still a draft — nothing installed.
-    const after = await api<{ state: string; activation?: unknown }>(`/v1/host/openwop-app/proposals/${id}`);
+    const after = await api<{ state: string; activation?: unknown }>(`/host/openwop-app/proposals/${id}`);
     expect(after.body.state).toBe('draft');
     expect(after.body.activation).toBeUndefined();
   });
 
   it('revise MUST NOT activate (no state→applied)', async () => {
-    const list = await api<{ proposals: Array<{ id: string }> }>('/v1/host/openwop-app/proposals?state=draft');
+    const list = await api<{ proposals: Array<{ id: string }> }>('/host/openwop-app/proposals?state=draft');
     const id = list.body.proposals[0]!.id;
-    const res = await api<{ state: string }>(`/v1/host/openwop-app/proposals/${id}`, {
+    const res = await api<{ state: string }>(`/host/openwop-app/proposals/${id}`, {
       method: 'PATCH',
       body: JSON.stringify({ rationale: 'sharper' }),
     });

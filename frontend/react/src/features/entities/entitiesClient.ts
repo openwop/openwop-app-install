@@ -59,6 +59,8 @@ export interface EntityRow {
 
 export interface Taxonomy {
   taxonomyId: string;
+  /** '' = the workspace root namespace; else a project id (ADR 0847). */
+  projectId?: string;
   name: string;
   displayName: string;
 }
@@ -107,6 +109,28 @@ export async function listEntityTypes(): Promise<EntityType[]> {
   return (await asJson<{ types: EntityType[] }>(res, 'listEntityTypes')).types;
 }
 
+/** ADR 0847 (`ENT3UX-2`) — what the signed-in viewer may do in the workspace root,
+ *  computed server-side by the same gate the write routes run. */
+export interface EntitiesViewer {
+  canWrite: boolean;
+  canManageTypes: boolean;
+}
+
+/** The types list plus the viewer's capabilities. An older backend sends no `viewer`;
+ *  then everything is offered and the server still refuses what it must. */
+export async function listEntityTypesForViewer(): Promise<{ types: EntityType[]; viewer: EntitiesViewer }> {
+  const res = await fetch(`${base}/types`, fetchOpts({ headers: authedHeaders() }));
+  const body = await asJson<{ types: EntityType[]; viewer?: EntitiesViewer }>(res, 'listEntityTypes');
+  return { types: body.types, viewer: body.viewer ?? { canWrite: true, canManageTypes: true } };
+}
+
+/** ADR 0407 — the anonymous delivery endpoint for a public type, as an absolute URL
+ *  (the base may be the relative `/api` rewrite). */
+export function publicEntitiesUrl(tenantId: string, typeName: string): string {
+  const path = `${config.baseUrl}/host/openwop-app/public-entities/${encodeURIComponent(tenantId)}/types/${encodeURIComponent(typeName)}/entities`;
+  return new URL(path, window.location.origin).toString();
+}
+
 export async function createEntityType(input: {
   name: string;
   displayName?: string;
@@ -119,7 +143,7 @@ export async function createEntityType(input: {
 
 export async function updateEntityType(
   name: string,
-  patch: { displayName?: string; description?: string | null; fields?: EntityFieldSpec[]; status?: 'draft' | 'published'; publicRead?: boolean },
+  patch: { displayName?: string; description?: string | null; fields?: Array<Omit<EntityFieldSpec, 'label'> & { label?: string }>; status?: 'draft' | 'published'; publicRead?: boolean },
 ): Promise<EntityType> {
   const res = await fetch(
     `${base}/types/${encodeURIComponent(name)}`,

@@ -3,8 +3,11 @@
  * pre-persist check on the PUBLIC submit, registered by another feature or an
  * operator extension (CAPTCHA/turnstile providers are future registrants —
  * the seam ships with none). Guards run AFTER the honeypot and BEFORE
- * validation; any `deny` short-circuits with the honeypot's bot posture
- * (silent 200, no row) so the endpoint never becomes a spam oracle.
+ * validation; a `deny` takes the honeypot's posture. CORRECTED (ADR 0850 D8):
+ * this said "silent 200, no row". Since ADR 0584 that posture is QUARANTINE —
+ * the row is stored as `flagged: 'guard'`, delivered nowhere, and answered with
+ * the same 201 a clean submit gets (so the endpoint is still no spam oracle);
+ * an operator can release it (ADR 0850 D3).
  * Fail-open on a thrown guard: an anti-spam outage must never drop leads.
  */
 

@@ -1,11 +1,12 @@
 {
   "name": "feature.promotions.nodes",
-  "version": "1.0.0",
+  "version": "1.0.1",
+  "kind": "node",
   "description": "Promotions feature node pack (MERCH-B chat-drivability) — nodes over the ctx.features.promotions surface. `list-active` lists live promotions; `apply-preview` previews the discount on a hypothetical cart; `create` authors a promotion but — because promotions MOVE MONEY — an agent-authored promotion lands PROPOSED (active:false), a human activates it (the strategy/CDP 'agent proposes, human confirms' firewall). All role:'action' (recorded → replay-safe).",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "promotions", "commerce", "loss-leader", "discount"],
-  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "engines": { "openwop": ">=1.0.0 <3.0.0" },
   "nodes": [
     {
       "typeId": "feature.promotions.nodes.list-active",

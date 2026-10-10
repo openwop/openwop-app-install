@@ -127,7 +127,12 @@ export function createKnowledgeSurface(scope: BundleScope): KnowledgeSurface {
         // `BundleScope.actingUserId` documents. `ctx.knowledge` is the lane
         // every workflow run and every agent chat turn retrieves through, and
         // it carried NO caller at all before this.
-        const real = await backend.retrieve(scope.tenantId, args, { ...(scope.actingUserId ? { subject: scope.actingUserId } : {}) });
+        // ADR 0832 D3 — and the member who caused an actorless run, for the org
+        // filter only (`SubjectCaller.orgScopeSubject`), never as the subject.
+        const real = await backend.retrieve(scope.tenantId, args, {
+          ...(scope.actingUserId ? { subject: scope.actingUserId } : {}),
+          ...(scope.orgScopeSubject ? { orgScopeSubject: scope.orgScopeSubject } : {}),
+        });
         if (real !== null) return real;
       }
       // LEAK-10: the seeded demo corpus is a SHOWCASE affordance. Outside demo

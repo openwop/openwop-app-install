@@ -40,7 +40,7 @@ async function api<T = Record<string, unknown>>(path: string, init: RequestInit 
 async function waitSettled(runId: string): Promise<void> {
   for (let i = 0; i < 80; i++) {
     await new Promise((r) => setTimeout(r, 20));
-    const s = (await api<{ status: string }>(`/v1/runs/${runId}`)).body.status;
+    const s = (await api<{ status: string }>(`/runs/${runId}`)).body.status;
     if (s.startsWith('waiting') || ['completed', 'failed', 'cancelled'].includes(s)) return;
   }
 }
@@ -59,16 +59,16 @@ function turnValidator(): (doc: unknown) => { ok: boolean; errors: string } {
 describe('ADR 0755 (WIT-ART-2) — the fallback agent turn', () => {
   it('carries speakerId and validates against the closed v2 turn def', async () => {
     const workflowId = 'adr0755.fallback.speaker';
-    await api('/v1/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({ workflowId, nodes: [{ nodeId: 'gate', typeId: 'core.conversationGate', config: { prompt: 'x' } }], edges: [] }) });
-    const runId = (await api<{ runId: string }>('/v1/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs: { provider: 'mock', model: 'mock-1' }, tenantId: '_anon' }) })).body.runId;
+    await api('/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({ workflowId, nodes: [{ nodeId: 'gate', typeId: 'core.conversationGate', config: { prompt: 'x' } }], edges: [] }) });
+    const runId = (await api<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs: { provider: 'mock', model: 'mock-1' }, tenantId: '_anon' }) })).body.runId;
     await waitSettled(runId);
     programMock('', [{ content: 'Ship on Tuesday.' }]);
-    const ex = await api(`/v1/runs/${runId}/interrupts/gate`, {
+    const ex = await api(`/runs/${runId}/interrupts/gate`, {
       method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: 'what do you think?' } } }),
     });
     expect(ex.status, JSON.stringify(ex.body).slice(0, 300)).toBe(200);
     await waitSettled(runId);
-    const events = (await api<{ events?: Array<{ type?: string; payload?: Record<string, unknown> }> }>(`/v1/runs/${runId}/debug-bundle`)).body.events ?? [];
+    const events = (await api<{ events?: Array<{ type?: string; payload?: Record<string, unknown> }> }>(`/runs/${runId}/debug-bundle`)).body.events ?? [];
     const agent = events
       .filter((e) => e.type === 'conversation.exchanged')
       .map((e) => e.payload!['turn'] as Record<string, unknown>)

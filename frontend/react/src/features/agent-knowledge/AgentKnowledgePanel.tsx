@@ -35,8 +35,11 @@ import {
   type BoundCollection,
   type RetrieveResult,
   type Org,
+  AgentKnowledgeRequestError,
 } from './agentKnowledgeClient.js';
 import { Notice } from '../../ui/Notice.js';
+import { loadErrorMessage } from '../../client/loadErrorMessage.js';
+import type { TFunction } from 'i18next';
 import { StateCard } from '../../ui/StateCard.js';
 import { Field, TextField, SelectField } from '../../ui/Field.js';
 import {
@@ -75,13 +78,13 @@ export function AgentKnowledgePanel({ rosterId, persona }: { rosterId: string; p
         setView(v);
         setOrgs(o);
       } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+        if (!cancelled) setError(knowledgeErrorMessage(t, err));
       } finally {
         if (!cancelled) setLoading(false);
       }
     })();
     return () => { cancelled = true; };
-  }, [rosterId]);
+  }, [rosterId, t]); // `t` is stable per language; the error sentence is built with it
 
   const run = async (fn: () => Promise<void>, ok: string): Promise<void> => {
     setError(null);
@@ -91,7 +94,7 @@ export function AgentKnowledgePanel({ rosterId, persona }: { rosterId: string; p
       await refresh();
       setNotice(ok);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(knowledgeErrorMessage(t, err));
     }
   };
 
@@ -99,11 +102,12 @@ export function AgentKnowledgePanel({ rosterId, persona }: { rosterId: string; p
 
   return (
     <div className="u-grid u-gap-4 agentknowledge-root">
-      {/* KB-UX-9 (closed 2026-09-03) — see the sibling note in
-          `knowledge/SubjectKnowledgePanel.tsx`. `error` here is a raw
-          `err.message` (`:78`, `:94`), so the announced text is a `t()`
-          sentence and the wire string stays visible rather than spoken. */}
-      {error ? <Notice variant="error" announce={t('errorAnnounce')}>{error}</Notice> : null}
+      {/* KB-UX-9 (closed 2026-09-03) — `error` used to be a raw `err.message`,
+          so a fixed `errorAnnounce` sentence was spoken and the wire string only
+          shown. KB2UX-3 made `error` a localized sentence
+          (`knowledgeErrorMessage`), so it is now safe to speak the sentence
+          itself — the reason, not "the details are on screen". */}
+      {error ? <Notice variant="error" announce={error}>{error}</Notice> : null}
       {notice ? <Notice variant="success" announce={notice}>{notice}</Notice> : null}
 
       <p className="muted u-fs-13 u-m-0">
@@ -130,6 +134,19 @@ export function AgentKnowledgePanel({ rosterId, persona }: { rosterId: string; p
       <RetrieveSection rosterId={rosterId} persona={persona} />
     </div>
   );
+}
+
+/**
+ * KB2UX-3 — the one place a failed agent-knowledge call becomes words. A managed
+ * collection (an advisor's Strategy KB, ADR 0830 D4) gets its own sentence,
+ * because the generic "the server rejected that input" would send the user
+ * hunting for a typo; everything else is the shared status → `common:error_*`
+ * mapping. The server's English goes to the console, never the screen.
+ */
+function knowledgeErrorMessage(t: TFunction, err: unknown): string {
+  if (err instanceof Error) console.warn('[agent-knowledge] action failed:', err.message);
+  if (err instanceof AgentKnowledgeRequestError && err.managed) return t('agent-knowledge:managedReadOnly');
+  return loadErrorMessage(t, err);
 }
 
 /* ───────────────────────────── documents ───────────────────────────── */
@@ -371,7 +388,7 @@ function RetrieveSection({ rosterId, persona }: { rosterId: string; persona: str
           setResult(null);
           void retrieve(rosterId, query.trim())
             .then(setResult)
-            .catch((e2) => { setResult(null); setErr(e2 instanceof Error ? e2.message : String(e2)); })
+            .catch((e2) => { setResult(null); setErr(knowledgeErrorMessage(t, e2)); })
             .finally(() => setBusy(false));
         }}
       >

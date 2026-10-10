@@ -22,7 +22,9 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { handleTablistKeyDown } from '../../ui/rovingTabs.js';
 import { IconButton } from '../../ui/IconButton.js';
-import { PlusIcon, XIcon, PinIcon, MonitorIcon, MenuIcon } from '../../ui/icons/index.js';
+import { PlusIcon, XIcon, PinIcon, MonitorIcon, MenuIcon, PanelRightIcon } from '../../ui/icons/index.js';
+import { Menu } from '../../ui/Menu.js';
+import { Button } from '../../ui/Button.js';
 import { computeDropIndex } from './dropIndex.js';
 
 export const tabButtonId = (sid: string): string => `tab-${sid}`;
@@ -41,14 +43,22 @@ export interface TabStripProps {
   onReorder: (fromSid: string, toIndex: number) => void;
   onSetPinned: (sid: string, pinned: boolean) => void;
   onNewTab: () => void;
+  /** ADR 0785 D5 — registered non-conversation tab kinds the caller may open. When
+   *  non-empty the new-tab button becomes a menu: "New chat" first, then these. */
+  newTabKinds?: readonly { kind: string; label: string }[];
+  onNewTabOfKind?: (kind: string) => void;
   /** Toggle the shared Conversations + Workflow + Reviews rail (ADR 0140 amend). The
    *  persistent Conversations list in that rail replaced the old library launcher —
    *  browsing existing conversations is the rail's Conversations mode. */
   onToggleRail?: () => void;
   /** Whether the rail is currently open — drives the toggle's pressed state. */
   railOpen?: boolean;
-  /** Combined runs + pending-reviews count — a small badge on the rail toggle. */
+  /** Pending-reviews count — a small badge on the rail toggle. */
   railBadgeCount?: number;
+  /** ADR 0768 P2 — toggle the right-hand Workbench (runs + artifacts). */
+  onToggleWorkbench?: () => void;
+  workbenchOpen?: boolean;
+  workbenchBadgeCount?: number;
   /** P5 forward-compat: a per-tab status slot (unread dot / blocked indicator). */
   renderStatus?: (sid: string) => ReactNode;
   /** Tabs awaiting a HITL interrupt (ADR 0140 G5) — drives the off-screen edge cue when a
@@ -66,7 +76,7 @@ export interface TabStripProps {
 }
 
 export function TabStrip({
-  tabs, activeSessionId, titleFor, onFocus, onClose, onReorder, onSetPinned, onNewTab, onToggleRail, railOpen, railBadgeCount, renderStatus, blockedSids, onPopOut, canPopOut, onRename,
+  tabs, activeSessionId, titleFor, onFocus, onClose, onReorder, onSetPinned, onNewTab, newTabKinds, onNewTabOfKind, onToggleRail, railOpen, railBadgeCount, onToggleWorkbench, workbenchOpen, workbenchBadgeCount, renderStatus, blockedSids, onPopOut, canPopOut, onRename,
 }: TabStripProps): JSX.Element {
   const { t } = useTranslation('chat');
   // Inline tab rename (ADR 0140 follow-up). Mirrors the conversations-rail edit UX:
@@ -318,16 +328,44 @@ export function TabStrip({
       {/* Right cluster — the new-chat action. Browsing existing conversations moved to
           the persistent Conversations rail (ADR 0140 amend), so the launcher is retired.
           This sits OUTSIDE the scroll region so it stays reachable as tabs overflow. */}
-      <button
-        type="button"
-        className="tabdeck-launcher"
-        onClick={onNewTab}
-        aria-keyshortcuts="Alt+N"
-        title={t('multiTabNewTabAria')}
-      >
-        <PlusIcon size={14} />
-        <span>{t('newChat')}</span>
-      </button>
+      {newTabKinds && newTabKinds.length > 0 && onNewTabOfKind ? (
+        <Menu
+          label={t('multiTabNewTabMenu')}
+          triggerClassName="tabdeck-launcher"
+          triggerTitle={t('multiTabNewTabAria')}
+          triggerContent={<><PlusIcon size={14} /><span>{t('newChat')}</span></>}
+          items={[
+            { id: 'chat', label: t('newChat'), onSelect: onNewTab },
+            ...newTabKinds.map((k) => ({ id: `kind-${k.kind}`, label: k.label, onSelect: () => onNewTabOfKind(k.kind) })),
+          ]}
+        />
+      ) : (
+        <button
+          type="button"
+          className="tabdeck-launcher"
+          onClick={onNewTab}
+          aria-keyshortcuts="Alt+N"
+          title={t('multiTabNewTabAria')}
+        >
+          <PlusIcon size={14} />
+          <span>{t('newChat')}</span>
+        </button>
+      )}
+      {onToggleWorkbench ? (
+        <Button
+          variant="quiet"
+          className={`tabdeck-launcher tabdeck-launcher--icon${workbenchOpen ? ' is-active' : ''}`}
+          onClick={onToggleWorkbench}
+          aria-pressed={!!workbenchOpen}
+          aria-label={workbenchOpen ? t('workbenchHide') : t('workbenchShow')}
+          title={t('workbenchEyebrow')}
+        >
+          <PanelRightIcon size={16} />
+          {workbenchBadgeCount && workbenchBadgeCount > 0 ? (
+            <span className="tabdeck-launcher__badge">{workbenchBadgeCount}</span>
+          ) : null}
+        </Button>
+      ) : null}
     </div>
   );
 }

@@ -17,7 +17,9 @@
  */
 
 import { useTranslation } from 'react-i18next';
+import { isOwnedWorkflow } from './lib/workflowMentions.js';
 import { Link } from 'react-router-dom';
+import { runDetailPath, useCanOpenRunDetail } from './runDetailAccess.js';
 import { STATUS_COLORS, STATUS_LABEL_KEYS } from './workflowProgress/StepList.js';
 import { formatElapsed } from './workflowProgress/formatters.js';
 import { formatNumber } from '../i18n/format.js';
@@ -36,8 +38,52 @@ interface Props {
   isFocusedInPanel?: boolean;
 }
 
+type StepSegment = 'done' | 'failed' | 'waiting' | 'active' | 'todo';
+
+/** Above this many steps the bar stops being readable as segments, so the
+ *  bubble keeps only the "n/total" hint. */
+const MAX_STEP_SEGMENTS = 12;
+
+/** ADR 0768 follow-up C3 — one segment per step. The bubble knows COUNTS, not
+ *  the graph order, so the bar fills left to right by count: done, failed, then
+ *  the one step in hand (dashed when it is waiting on the user), then the rest. */
+export function stepSegments(run: NonNullable<ChatMessage['workflowRun']>, isSuspended: boolean): StepSegment[] {
+  const total = run.totalNodes;
+  if (total <= 0 || total > MAX_STEP_SEGMENTS) return [];
+  const done = Math.min(run.completedNodeIds.length, total);
+  const failed = Math.min(run.failedNodeIds.length, total - done);
+  const inHand = (run.status === 'running' || run.status === 'pending') && done + failed < total ? 1 : 0;
+  const out: StepSegment[] = [];
+  for (let i = 0; i < done; i += 1) out.push('done');
+  for (let i = 0; i < failed; i += 1) out.push('failed');
+  if (inHand) out.push(isSuspended ? 'waiting' : 'active');
+  while (out.length < total) out.push('todo');
+  return out;
+}
+
+/** The step bar alone — the bubble renders it, and the design-system gallery
+ *  renders it from fixtures so it can be looked at without a live run. */
+export function RunStepBar({ run, waiting }: { run: NonNullable<ChatMessage['workflowRun']>; waiting: boolean }): JSX.Element | null {
+  const { t } = useTranslation('chat');
+  const segments = stepSegments(run, waiting);
+  if (segments.length === 0) return null;
+  const done = Math.min(run.completedNodeIds.length, run.totalNodes);
+  return (
+    <div
+      className="wfrunbubble-steps"
+      role="img"
+      aria-label={t('runStepBarAria', { done: formatNumber(done), total: formatNumber(run.totalNodes) })}
+    >
+      {segments.map((kind, i) => (
+        <span key={i} className={`wfrunbubble-step wfrunbubble-step--${kind}`} />
+      ))}
+    </div>
+  );
+}
+
 export function WorkflowRunBubble({ message, onOpenProgress, isFocusedInPanel }: Props): JSX.Element | null {
   const { t } = useTranslation('chat');
+  const canOpenRun = useCanOpenRunDetail();
   const run = message.workflowRun;
   if (!run) return null;
 
@@ -54,7 +100,6 @@ export function WorkflowRunBubble({ message, onOpenProgress, isFocusedInPanel }:
         className={run.status === 'running' ? 'workflow-run-bubble workflow-run-bubble--live wfrunbubble-box' : 'workflow-run-bubble wfrunbubble-box'}
       >
         <div className="u-flex u-items-center u-gap-2 u-wrap">
-          <span className="u-fw-600 u-fs-13">{run.workflowName}</span>
           <span className="wfrunbubble-status-pill" style={{
             color: STATUS_COLORS[run.status],
             border: `1px solid ${STATUS_COLORS[run.status]}`,
@@ -65,6 +110,8 @@ export function WorkflowRunBubble({ message, onOpenProgress, isFocusedInPanel }:
           }}>
             {t(STATUS_LABEL_KEYS[run.status])}
           </span>
+          {/* DESIGN.md §4.5 rule 17 — status leads the row, the name follows. */}
+          <span className="u-fw-600 u-text-sm">{run.workflowName}</span>
           <span className="muted u-fs-11">{progressHint}</span>
           {isSuspended && (
             <span className="wfrunbubble-awaiting">
@@ -82,20 +129,24 @@ export function WorkflowRunBubble({ message, onOpenProgress, isFocusedInPanel }:
               >
                 {isFocusedInPanel ? t('showingInPanel') : t('viewProgress')}
               </button>
-            ) : (
-              <span className="muted u-fs-12">{t('viewProgress')}</span>
-            )}
+            ) : null /* ADR 0764 (CHATWF-9) — a surface with no progress panel (the
+                 embedded chat, a plain tab) used to render "View progress →" as
+                 inert text that looked like a link and did nothing. */}
           </span>
         </div>
+
+        <RunStepBar run={run} waiting={isSuspended} />
 
         <div className="muted u-mt-1 u-fs-11 u-o-75 u-flex u-wrap u-gap-1-5 u-items-baseline">
           {run.slug && <code>/{run.slug}</code>}
           {run.runId && !run.runUnavailable && (
             <>
               {run.slug && <span>·</span>}
-              <Link to={`/runs/${run.runId}`} title={t('openRunDetail')}>
-                run {run.runId.slice(0, 12)}
-              </Link>
+              {canOpenRun ? (
+                <Link to={runDetailPath(run.runId)} title={t('openRunDetail')}>
+                  {t('runIdShort', { id: run.runId.slice(0, 12) })}
+                </Link>
+              ) : <span>{t('runIdShort', { id: run.runId.slice(0, 12) })}</span>}
             </>
           )}
           {run.runId && run.runUnavailable && (
@@ -105,15 +156,15 @@ export function WorkflowRunBubble({ message, onOpenProgress, isFocusedInPanel }:
                   muted hint so the user understands why action buttons
                   below are disabled. */}
               <span title={t('runRecordUnavailableTitle')}>
-                run {run.runId.slice(0, 12)}
+                {t('runIdShort', { id: run.runId.slice(0, 12) })}
               </span>
             </>
           )}
-          {run.workflowId && run.workflowId.startsWith('wf_') && (
+          {isOwnedWorkflow(run.workflowId) && (
             <>
               <span>·</span>
               <Link to={`/builder/${run.workflowId}`} title={t('openWorkflowInBuilder')}>
-                open in builder →
+                {t('openInBuilderLink')}
               </Link>
             </>
           )}
@@ -136,6 +187,26 @@ export function WorkflowRunBubble({ message, onOpenProgress, isFocusedInPanel }:
               {run.error.message}
               <span className="muted u-fs-11 u-ml-1">({run.error.code})</span>
             </Notice>
+          </div>
+        )}
+
+        {/* ADR 0764 D4 (CHATWF-6) — the two states that used to lie: a stream
+            that gave up (bubble said "running" forever) and a cancel request that
+            failed (bubble said the RUN failed). Warning, not error: neither is a
+            fact about the run itself. */}
+        {run.streamLost && run.status !== 'completed' && run.status !== 'failed' && run.status !== 'cancelled' && (
+          <div className="u-mt-1-5">
+            <Notice variant="warning">
+              {t('workflowStreamLost')}
+              {run.runId && !run.runUnavailable && canOpenRun && (
+                <> <Link to={runDetailPath(run.runId)}>{t('openRunDetail')}</Link></>
+              )}
+            </Notice>
+          </div>
+        )}
+        {run.cancelError && run.status !== 'completed' && run.status !== 'failed' && run.status !== 'cancelled' && (
+          <div className="u-mt-1-5">
+            <Notice variant="warning">{t('workflowCancelFailed', { message: run.cancelError })}</Notice>
           </div>
         )}
 

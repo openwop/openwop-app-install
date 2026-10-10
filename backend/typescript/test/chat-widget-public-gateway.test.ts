@@ -16,7 +16,7 @@ beforeAll(async () => {
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
-  const w = await provisionWidget('t-widget', 'org-w', 'admin', { agentId: 'feature.code-exec.agents.default', allowedDomains: ['acme.com'] });
+  const w = await provisionWidget('t-widget', 'org-w', 'admin', { agentId: 'vendor.openwop-app.code-exec.agents.default', allowedDomains: ['acme.com'] });
   TOKEN = w.token;
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
@@ -27,24 +27,24 @@ const post = (path: string, body: unknown, headers: Record<string, string> = {})
 
 describe('public widget gateway', () => {
   it('serves the PUBLIC config to an allowed origin (no token/tenant leaked)', async () => {
-    const res = await get(`/v1/host/openwop-app/public/widget/config?token=${TOKEN}`, { origin: 'https://app.acme.com' });
+    const res = await get(`/host/openwop-app/public/widget/config?token=${TOKEN}`, { origin: 'https://app.acme.com' });
     expect(res.status).toBe(200);
     const body = await res.json() as Record<string, unknown>;
-    expect(body.agentId).toBe('feature.code-exec.agents.default');
+    expect(body.agentId).toBe('vendor.openwop-app.code-exec.agents.default');
     expect(body.token).toBeUndefined();   // no credential leak
     expect(body.tenantId).toBeUndefined(); // no tenant leak
   });
 
   it('403s an origin NOT on the allowlist (default-deny)', async () => {
-    expect((await get(`/v1/host/openwop-app/public/widget/config?token=${TOKEN}`, { origin: 'https://evil.com' })).status).toBe(403);
+    expect((await get(`/host/openwop-app/public/widget/config?token=${TOKEN}`, { origin: 'https://evil.com' })).status).toBe(403);
   });
 
   it('403s with no Origin/Referer (default-deny)', async () => {
-    expect((await get(`/v1/host/openwop-app/public/widget/config?token=${TOKEN}`)).status).toBe(403);
+    expect((await get(`/host/openwop-app/public/widget/config?token=${TOKEN}`)).status).toBe(403);
   });
 
   it('404s an unknown token (uniform — no existence oracle)', async () => {
-    expect((await get('/v1/host/openwop-app/public/widget/config?token=wgt_nope', { origin: 'https://acme.com' })).status).toBe(404);
+    expect((await get('/host/openwop-app/public/widget/config?token=wgt_nope', { origin: 'https://acme.com' })).status).toBe(404);
   });
 
   // PUB-1: the embed runs on arbitrary customer domains, so the public endpoints must
@@ -53,12 +53,12 @@ describe('public widget gateway', () => {
   it('PUB-1: reflects an arbitrary origin (non-credentialed) even with an explicit CORS allowlist', async () => {
     process.env.OPENWOP_CORS_ORIGINS = 'https://only-this.example.com'; // does NOT include acme
     try {
-      const res = await get(`/v1/host/openwop-app/public/widget/config?token=${TOKEN}`, { origin: 'https://app.acme.com' });
+      const res = await get(`/host/openwop-app/public/widget/config?token=${TOKEN}`, { origin: 'https://app.acme.com' });
       expect(res.status).toBe(200);
       expect(res.headers.get('access-control-allow-origin')).toBe('https://app.acme.com'); // reflected, not blocked
       expect(res.headers.get('access-control-allow-credentials')).toBeNull();              // NEVER credentials on a public endpoint
       // The JSON POST preflight (OPTIONS) is also granted so the browser's preflight succeeds.
-      const pre = await fetch(`${BASE}/v1/host/openwop-app/public/widget/message`, {
+      const pre = await fetch(`${BASE}/host/openwop-app/public/widget/message`, {
         method: 'OPTIONS', headers: { origin: 'https://app.acme.com', 'access-control-request-method': 'POST' },
       });
       expect(pre.status).toBe(204);
@@ -73,7 +73,7 @@ describe('public widget gateway', () => {
 // fire BEFORE any LLM call (so no managed key is needed): unknown token → 404, bad
 // origin → 403, bad input → 400/413, caps exceeded → 429.
 describe('public widget dispatch (POST /widget/message) — fail-closed gates', () => {
-  const MSG = '/v1/host/openwop-app/public/widget/message';
+  const MSG = '/host/openwop-app/public/widget/message';
 
   it('404s an unknown token (uniform)', async () => {
     expect((await post(MSG, { token: 'wgt_nope', message: 'hi' }, { origin: 'https://acme.com' })).status).toBe(404);
@@ -97,7 +97,7 @@ describe('public widget dispatch (POST /widget/message) — fail-closed gates', 
   });
 
   it('429s when the per-session turn cap is exhausted (caps gate fires before dispatch)', async () => {
-    const capped = await provisionWidget('t-widget', 'org-w', 'admin', { agentId: 'feature.code-exec.agents.default', allowedDomains: ['acme.com'], caps: { maxTurnsPerSession: 1 } });
+    const capped = await provisionWidget('t-widget', 'org-w', 'admin', { agentId: 'vendor.openwop-app.code-exec.agents.default', allowedDomains: ['acme.com'], caps: { maxTurnsPerSession: 1 } });
     // First turn consumes the cap — `checkWidgetTurn` increments BEFORE dispatch, so
     // the count sticks regardless of the (keyless) LLM outcome.
     await post(MSG, { token: capped.token, message: 'hi', sessionId: 's-cap' }, { origin: 'https://acme.com' });
@@ -112,13 +112,13 @@ describe('public widget dispatch (POST /widget/message) — fail-closed gates', 
 // (no innerHTML → XSS-safe on the host page), and no secret baked in.
 describe('public widget embed.js (Phase 3)', () => {
   it('serves vanilla JS with the JS content-type + cache header', async () => {
-    const res = await get('/v1/host/openwop-app/public/widget/embed.js');
+    const res = await get('/host/openwop-app/public/widget/embed.js');
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type') ?? '').toMatch(/javascript/);
     expect(res.headers.get('cache-control') ?? '').toMatch(/max-age/);
   });
   it('is XSS-safe (textContent, never innerHTML) + wires the 2b/2d endpoints + no baked secret', async () => {
-    const js = await (await get('/v1/host/openwop-app/public/widget/embed.js')).text();
+    const js = await (await get('/host/openwop-app/public/widget/embed.js')).text();
     expect(js).toContain('textContent');
     expect(js).not.toContain('innerHTML');
     expect(js).toContain('/widget/message');

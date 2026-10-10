@@ -22,6 +22,11 @@
  * / re-consent) or is the control that a naive deny-by-default cure would break
  * (ARM B). Sabotage-probed by deleting the `isErasureTombstoned` branch in
  * `isAllowed` — see the commit message.
+ *
+ * Re-witnessed (/grade-tests wave 9): the tombstone branch, deleteSubject's own
+ * tombstone write, the opt-out default, `necessary`, a raw key on the tombstone row,
+ * the fold's `subject_erased` catch and readmit's delete each red their cases.
+ * CEILING: the D10 entry barrier is a double guard with the post-write re-check.
  */
 
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -160,6 +165,11 @@ describe('CONS-1 — erasure must not re-consent the subject', () => {
  * with no record falls back to the permissive policy default. That is the same
  * "a bookkeeping operation may narrow a permission, never widen one" rule the
  * fold's own MOST-RESTRICTIVE-WINS docblock states.
+ *
+ * > CORRECTED (ADR 0657 D7/D10; recorded by /grade-tests wave 9): the premise of the
+ * > first paragraph is retired. NO consent write clears a tombstone any more — the
+ * > tombstone is a write BARRIER (D10) and `readmitSubject` is the only clearer (D7).
+ * > The cases below assert that current rule; the paragraph is kept for its reasoning.
  */
 describe('review F8 — a bookkeeping write must not erase an objection marker', () => {
   it('foldConsentOnMerge leaves the survivor\'s tombstone standing', async () => {
@@ -172,6 +182,7 @@ describe('review F8 — a bookkeeping write must not erase an objection marker',
     // ADR 0657 D10 — the survivor is erased, so the barrier refuses the carry-over write:
     // the fold reports `false` (nothing written) instead of landing a row on an erased subject.
     expect(await foldConsentOnMerge('tF8', 'crm:src', 'crm:survivor')).toBe(false);
+    expect(await getConsent('tF8', 'crm:survivor'), 'the refused fold lands no row').toBeNull();
 
     // The marker survives the merge…
     expect(await isErasureTombstoned('tF8', 'crm:survivor'), 'a CRM merge is not an act of consent').toBe(true);

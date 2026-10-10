@@ -52,18 +52,18 @@ const anon = () => client(); // no login — the public surface
 
 async function marketer(): Promise<{ user: ReturnType<typeof client>; orgId: string; tenantId: string }> {
   const user = client();
-  const login = await user.post('/v1/host/openwop-app/test/login', { email: `fp2-${Date.now()}-${n++}@acme.test` });
-  const org = await user.post('/v1/host/openwop-app/orgs', { name: 'Funnel Co' });
+  const login = await user.post('/host/openwop-app/test/login', { email: `fp2-${Date.now()}-${n++}@acme.test` });
+  const org = await user.post('/host/openwop-app/orgs', { name: 'Funnel Co' });
   return { user, orgId: org.body.orgId, tenantId: login.body.user?.tenantId ?? '' };
 }
 
-const authed = (orgId: string, suffix = ''): string => `/v1/host/openwop-app/funnels/orgs/${encodeURIComponent(orgId)}/funnels${suffix}`;
-const pub = (orgId: string, suffix = ''): string => `/v1/host/openwop-app/public/${encodeURIComponent(orgId)}/funnels${suffix}`;
+const authed = (orgId: string, suffix = ''): string => `/host/openwop-app/funnels/orgs/${encodeURIComponent(orgId)}/funnels${suffix}`;
+const pub = (orgId: string, suffix = ''): string => `/host/openwop-app/public/${encodeURIComponent(orgId)}/funnels${suffix}`;
 
 async function publishedPage(user: ReturnType<typeof client>, orgId: string, title: string): Promise<{ pageId: string; slug: string }> {
-  const created = await user.post(`/v1/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages`, { title });
+  const created = await user.post(`/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages`, { title });
   expect(created.status).toBe(201);
-  const pub2 = await user.post(`/v1/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages/${created.body.pageId}/publish`);
+  const pub2 = await user.post(`/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages/${created.body.pageId}/publish`);
   expect(pub2.status).toBe(200);
   return { pageId: created.body.pageId, slug: created.body.slug };
 }
@@ -154,12 +154,12 @@ describe('funnels Phase 2 — public serving over HTTP', () => {
     await user.post(authed(orgId, `/${funnelId}/publish`));
 
     // unpublish the ENTRY page → the step is unavailable (tolerate-on-read)
-    const unpub = await user.post(`/v1/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages/${pages.landing.pageId}/unpublish`);
+    const unpub = await user.post(`/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages/${pages.landing.pageId}/unpublish`);
     expect(unpub.status).toBe(200);
     expect((await v.get(pub(orgId, '/live-path'))).status).toBe(404);
     // the offer step (still published) stays reachable by deep-link
     expect((await v.get(pub(orgId, '/live-path/steps/1'))).status).toBe(200);
-    await user.post(`/v1/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages/${pages.landing.pageId}/publish`);
+    await user.post(`/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages/${pages.landing.pageId}/publish`);
 
     // toggle off → uniform 404 on the public surface
     const d = getToggleDefault('funnels');

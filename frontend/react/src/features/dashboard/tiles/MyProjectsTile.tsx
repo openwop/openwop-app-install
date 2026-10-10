@@ -19,7 +19,7 @@ export default function MyProjectsTile({ compact }: DashboardTileProps): JSX.Ele
   const rows = (data ?? []).slice(0, compact ? 4 : 8).map((p) => ({
     key: p.id,
     label: p.name,
-    to: '/projects',
+    to: `/projects/${encodeURIComponent(p.id)}`, // the project itself, not the gallery
     meta: p.workflows.length > 0 ? t('projectWorkflows', { n: p.workflows.length }) : undefined,
   }));
   if (rows.length === 0) return <p className="dash-tile__state muted">{t('projectsEmpty')}</p>;

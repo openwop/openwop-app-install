@@ -78,3 +78,18 @@ describe('sharePolicy facet — both gates', () => {
     expect(v.warnings.some((w) => w.path === 'sharePolicy.perSource.ghost')).toBe(true);
   });
 });
+
+describe('ADR 0835 AB2-CD-3 — the public projection is an allowlist', () => {
+  it('drops models, unknown top-level keys and extra data-source keys', () => {
+    const doc = state({
+      models: [{ id: 'Customer', fields: [{ name: 'ssn', type: 'string' }] }],
+      internalNotes: 'pricing strategy — do not publish',
+      sharePolicy: { sampleData: 'include' },
+    }) as Record<string, unknown>;
+    doc.dataSources = [{ id: 'customers', name: 'Customers', fields: ['name'], rows: [{ name: 'A' }], connectionSecretRef: 'byok:crm' }];
+    const out = projectAppForShare(doc);
+    expect(out).not.toHaveProperty('models');
+    expect(out).not.toHaveProperty('internalNotes');
+    expect(out.dataSources).toEqual([{ id: 'customers', name: 'Customers', fields: ['name'], rows: [{ name: 'A' }] }]);
+  });
+});

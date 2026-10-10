@@ -2,8 +2,11 @@
  * Interactive artifacts canvas (ADR 0128, backlog B). Live HTML/React/Mermaid/chart
  * artifacts in the EXISTING chat artifact workbench (ADR 0069) — NOT a new surface.
  * Phase 1 registers the artifact TYPES (no renderer yet — the CSP-sandboxed canvas
- * is Phase 2). An `interactive-artifacts` toggle, off by default, per tenant (the
- * sandbox is load-bearing, so it ships gated).
+ * is Phase 2).
+ *
+ * ALWAYS-ON (ADR 0820 §8.6 / core-audit M8 correction): the `interactive-artifacts` toggle this header
+ * used to describe was removed when the feature graduated (ADR 0134 / 2026-06-24);
+ * there is no per-tenant switch. Gating is RBAC and visibility only.
  *
  * @see docs/adr/0128-interactive-artifacts-canvas.md
  */
@@ -21,8 +24,8 @@ export const interactiveArtifactsFeature: BackendFeature = {
   // producer, which now surfaces `artifactTypeId`), driven through the existing
   // chat by the Visualizer agent (ADR 0058) — no new chat surface.
   requiredPacks: [
-    { name: 'feature.interactive-artifacts.nodes', version: '1.0.0' },
-    { name: 'feature.interactive-artifacts.agents', version: '1.0.1' },
+    { name: 'feature.interactive-artifacts.nodes', version: '1.0.1' },
+    { name: 'vendor.openwop-app.interactive-artifacts.agents', version: '1.0.2' },
   ],
   // No toggleDefault → always-on (ADR 0010/0024 graduation; toggle removed, gates open).
 };

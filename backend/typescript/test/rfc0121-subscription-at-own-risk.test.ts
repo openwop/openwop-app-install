@@ -58,7 +58,7 @@ afterEach(async () => {
   await clearAllSecrets();
 });
 
-const BIND = '/v1/host/openwop-app/credentials/bind';
+const BIND = '/host/openwop-app/credentials/bind';
 const post = (path: string, body: unknown) => fetch(`${BASE}${path}`, { method: 'POST', headers: H, body: JSON.stringify(body) });
 
 function errCode(json: unknown): string | undefined {
@@ -70,40 +70,60 @@ function errCode(json: unknown): string | undefined {
   return undefined;
 }
 
-async function authModes(): Promise<{ byok: string[]; authModes: Record<string, string[]> }> {
-  const doc = await (await fetch(`${BASE}/.well-known/openwop`, { headers: H })).json() as {
-    aiProviders?: { byok?: string[]; authModes?: Record<string, string[]> };
+/**
+ * ADR 0812 P3c-0 — the advert read on the v2 document. v2's `aiProviders` family carries
+ * the `providers` list and a FLAT mode vocabulary; the per-provider subscription detail
+ * the v1 `authModes` map held rides the host's `openwop-app.ai-providers` extension
+ * (`subscriptionProviders`). The v1 `byok` list has no v2 field: the §B.7 force-include
+ * is read from `advertisedProviderAuthModes()`, the single source v1 emitted and run
+ * admission still reads.
+ */
+async function advert(): Promise<{ providers: string[]; modes: string[]; subscriptionProviders: string[] }> {
+  const doc = await (await fetch(`${BASE}/.well-known/openwop`, { headers: { ...H, 'OpenWOP-Version': '2' } })).json() as {
+    aiProviders?: { providers?: string[]; authModes?: string[] };
+    extensions?: { 'openwop-app.ai-providers'?: { subscriptionProviders?: string[] } };
   };
-  return { byok: doc.aiProviders?.byok ?? [], authModes: doc.aiProviders?.authModes ?? {} };
+  return {
+    providers: doc.aiProviders?.providers ?? [],
+    modes: doc.aiProviders?.authModes ?? [],
+    subscriptionProviders: doc.extensions?.['openwop-app.ai-providers']?.subscriptionProviders ?? [],
+  };
 }
 
 describe('RFC 0121 AT-OWN-RISK — discovery advertisement (two-gate)', () => {
   it('stays DARK by default (both gates off) — the public-demo posture', async () => {
-    const { authModes: modes } = await authModes();
-    for (const m of Object.values(modes)) expect(m).not.toContain('subscription');
+    const { modes, subscriptionProviders } = await advert();
+    expect(modes).not.toContain('subscription');
+    expect(subscriptionProviders).toEqual([]);
   });
 
   it('stays DARK when only OPENWOP_SUBSCRIPTION_PROVIDERS is set (no at-own-risk acceptance)', async () => {
     process.env.OPENWOP_SUBSCRIPTION_PROVIDERS = 'openai';
-    const { authModes: modes } = await authModes();
-    for (const m of Object.values(modes)) expect(m).not.toContain('subscription');
+    const { modes, subscriptionProviders } = await advert();
+    expect(modes).not.toContain('subscription');
+    expect(subscriptionProviders).toEqual([]);
   });
 
   it('stays DARK when only the at-own-risk flag is set (no provider list)', async () => {
     process.env.OPENWOP_SUBSCRIPTION_AT_OWN_RISK = 'true';
-    const { authModes: modes } = await authModes();
-    for (const m of Object.values(modes)) expect(m).not.toContain('subscription');
+    const { modes, subscriptionProviders } = await advert();
+    expect(modes).not.toContain('subscription');
+    expect(subscriptionProviders).toEqual([]);
   });
 
   it('advertises subscription for a configured provider when BOTH gates are on, and §B.7 force-includes it in byok', async () => {
     process.env.OPENWOP_SUBSCRIPTION_AT_OWN_RISK = 'true';
     process.env.OPENWOP_SUBSCRIPTION_PROVIDERS = 'openai';
-    const { byok, authModes: modes } = await authModes();
-    expect(modes.openai).toContain('subscription');
-    expect(modes.openai).toContain('apiKey');
-    expect(byok).toContain('openai'); // §B.7 force-include
+    const { modes, subscriptionProviders } = await advert();
+    expect(subscriptionProviders).toEqual(['openai']);
+    expect(modes).toContain('subscription');
+    expect(modes).toContain('apiKey');
+    const { advertisedProviderAuthModes } = await import('../src/aiProviders/aiProvidersHost.js');
+    const src = advertisedProviderAuthModes();
+    expect(src.authModes.openai).toEqual(['apiKey', 'subscription']);
+    expect(src.byok).toContain('openai'); // §B.7 force-include
     // Non-configured providers stay apiKey-only.
-    expect(modes.anthropic).toEqual(['apiKey']);
+    expect(src.authModes.anthropic).toEqual(['apiKey']);
   });
 });
 
@@ -126,7 +146,7 @@ describe('RFC 0121 AT-OWN-RISK — bind seam consent gate (ADR 0180)', () => {
     // covered by the 401/scope-rail cases). Explicit `user:` tenant so we can assert
     // exactly where it landed.
     const OWNER = 'user:rfc0121-owner';
-    const login = await fetch(`${BASE}/v1/host/openwop-app/test/login`, {
+    const login = await fetch(`${BASE}/host/openwop-app/test/login`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ email: 'rfc0121-owner@x.test', tenantId: OWNER }),
     });
@@ -196,15 +216,15 @@ describe('ADR 0756 — anthropic + google are prohibited on the at-own-risk path
   it('discovery never advertises subscription for anthropic or google, even with BOTH gates on', async () => {
     process.env.OPENWOP_SUBSCRIPTION_AT_OWN_RISK = 'true';
     process.env.OPENWOP_SUBSCRIPTION_PROVIDERS = 'anthropic,google,openai';
-    const { authModes: modes } = await authModes();
-    expect(modes.anthropic ?? []).not.toContain('subscription');
-    expect(modes.google ?? []).not.toContain('subscription');
-    expect(modes.openai).toContain('subscription'); // the permitted one still lights
+    const { subscriptionProviders } = await advert();
+    expect(subscriptionProviders).not.toContain('anthropic');
+    expect(subscriptionProviders).not.toContain('google');
+    expect(subscriptionProviders).toContain('openai'); // the permitted one still lights
   });
 
   it('a value-bearing bind for anthropic is refused credential_forbidden EVEN WITH consent, and stores nothing', async () => {
     const OWNER = 'user:rfc0121-prohibited';
-    const login = await fetch(`${BASE}/v1/host/openwop-app/test/login`, {
+    const login = await fetch(`${BASE}/host/openwop-app/test/login`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ email: 'rfc0121-prohibited@x.test', tenantId: OWNER }),
     });
@@ -242,23 +262,26 @@ describe('ADR 0757 — GitHub Copilot (the cleared provider) on the booted host'
   };
 
   it('is dark by default', async () => {
-    const { byok, authModes: modes } = await authModes();
-    expect(byok).not.toContain('github.copilot');
-    expect(modes['github.copilot']).toBeUndefined();
+    const { providers, subscriptionProviders } = await advert();
+    expect(providers).not.toContain('github.copilot');
+    expect(subscriptionProviders).not.toContain('github.copilot');
   });
 
   it('when configured: in supported, in byok (§B.7), authModes subscription-ONLY, every authModes key ⊆ supported', async () => {
     configure();
     try {
-      const doc = await (await fetch(`${BASE}/.well-known/openwop`, { headers: H })).json() as {
-        aiProviders?: { supported?: string[]; byok?: string[]; authModes?: Record<string, string[]> };
-      };
-      const ai = doc.aiProviders ?? {};
-      expect(ai.supported).toContain('github.copilot');
-      expect(ai.byok).toContain('github.copilot');
-      expect(ai.authModes?.['github.copilot']).toEqual(['subscription']);
-      for (const k of Object.keys(ai.authModes ?? {})) expect(ai.supported).toContain(k);
-      for (const k of ai.byok ?? []) expect(ai.supported).toContain(k);
+      // ADR 0812 P3c-0 — v2 spelling (see `advert()`): `providers` replaces v1 `supported`.
+      const { providers, modes, subscriptionProviders } = await advert();
+      expect(providers).toContain('github.copilot');
+      expect(subscriptionProviders).toContain('github.copilot');
+      expect(modes).toContain('subscription');
+      const { advertisedProviderAuthModes } = await import('../src/aiProviders/aiProvidersHost.js');
+      const src = advertisedProviderAuthModes();
+      expect(src.byok).toContain('github.copilot'); // §B.7
+      expect(src.authModes['github.copilot']).toEqual(['subscription']);
+      for (const k of Object.keys(src.authModes)) expect(providers).toContain(k);
+      for (const k of src.byok) expect(providers).toContain(k);
+      for (const k of subscriptionProviders) expect(providers).toContain(k);
     } finally {
       unconfigure();
     }
@@ -291,7 +314,7 @@ describe('ADR 0757 — GitHub Copilot (the cleared provider) on the booted host'
   });
 
   it('authorize: 404 when not configured; a caller without a personal user: tenant is refused', async () => {
-    const url = `${BASE}/v1/host/openwop-app/subscription/github.copilot/authorize`;
+    const url = `${BASE}/host/openwop-app/subscription/github.copilot/authorize`;
     const dark = await fetch(url, { method: 'POST', headers: H, body: '{}' });
     expect(dark.status).toBe(404);
     configure();

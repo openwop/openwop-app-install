@@ -15,6 +15,10 @@ export type NotificationType =
   | 'system.alert'
   // ADR 0214 / NOTIF-1 — an agent posted to a channel the user is a member of.
   | 'chat.channel_post'
+  // ADR 0859 D3 — the CMS editorial review: a page is waiting (to its org's
+  // managers) and a review was decided (to the people who submitted it).
+  | 'approval.content-review-requested'
+  | 'approval.content-review-decided'
   // ADR 0074 — a transient review-status cache hint (NOT an inbox row).
   // Delivered over the same SSE stream via the emitter's non-persisted
   // `signal()` path; the notification store routes it to the review-status
@@ -74,6 +78,8 @@ export const KNOWN_TYPES: readonly NotificationType[] = [
   'workflow.completed',
   'system.alert',
   'chat.channel_post',
+  'approval.content-review-requested',
+  'approval.content-review-decided',
 ] as const;
 
 /** i18n key for each well-known type's human label, surfaced in the prefs UI.
@@ -90,6 +96,8 @@ export const TYPE_LABEL_KEYS: Record<string, string> = {
   // Comments feature (ADR 0021) — additive, fallback-protected; no core-union edit.
   'comment.added':            'notifications:typeCommentAdded',
   'comment.reply':            'notifications:typeCommentReply',
+  'approval.content-review-requested': 'notifications:typeReviewRequested',
+  'approval.content-review-decided':   'notifications:typeReviewDecided',
 };
 
 /** Per-type preference row. Each known type carries its own switch

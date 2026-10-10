@@ -99,7 +99,7 @@ describe('COS-14 — /reviews surfaces the ADR 0027 safety signals for an assist
     });
     await setPendingActionApproval(TENANT, action.actionId, approval.approvalId);
     // The approver edits the draft — the frozen enqueue summary must not remain.
-    await editPendingAction(TENANT, action.actionId, { draft: 'Edited body facing the approver again' });
+    await editPendingAction(TENANT, action.actionId, { draft: 'Edited body facing the approver again' }, () => true);
 
     const review = await getReview(storage, { tenantId: TENANT }, `approval:${approval.approvalId}`);
     expect(review).toBeTruthy();

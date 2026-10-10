@@ -4,6 +4,10 @@
  * system type (never anonymously served), the full Company round-trips via
  * ext.company with queryable scalars in values, the merge CAS works over the
  * kernel, and the legacy→kernel migration is id-preserving + idempotent.
+ *
+ * Sabotage-witnessed (w4 grade-tests): `neverPublic: false` on the system type,
+ * dropping the org check in `getCompany`, dropping `org_id` from the kernel
+ * values, or a CAS that always succeeds each red their own case.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { initHostExtPersistence, DurableCollection } from '../src/host/hostExtPersistence.js';
@@ -70,7 +74,7 @@ describe('ADR 0409 Phase 2 — crm.company on the kernel', () => {
       createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-02T00:00:00.000Z',
     });
     const first = await migrateCompaniesToKernel();
-    expect(first.migrated).toBeGreaterThanOrEqual(1);
+    expect(first.migrated).toBe(1); // exactly the one legacy row — never an over-count
     const again = await migrateCompaniesToKernel();
     expect(again.migrated).toBe(0);
     const got = await getCompany('tenant-legacy', 'org-legacy', 'cmp:legacy-1');

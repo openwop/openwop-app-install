@@ -7,8 +7,14 @@
  *
  * `samlValidate` (the @node-saml XML-DSig validation) is mocked — the crypto is
  * vetted upstream and exercised elsewhere; what THIS test pins is the host's
- * own decision AFTER a valid assertion: active → session cookie + redirect,
- * disabled → 403 canonical envelope, NO cookie.
+ * own decision AFTER a valid assertion: active → session cookie (decoded: bound
+ * to the provisioned user + the SAML tenant) + redirect, disabled → 403
+ * canonical envelope, NO cookie. Every case provisions its OWN subject, so no
+ * case depends on another having run.
+ *
+ * Sabotage that turns it red: `authSamlSso.ts` `if (user.status !== 'active') {`
+ * → `if (false) {` (DISABLED + re-enable cases); `if (linkedDenied) {` →
+ * `if (false) {` (USERS-13 case).
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import express, { type Express } from 'express';
@@ -22,6 +28,7 @@ import { errorEnvelopeMiddleware } from '../src/middleware/errorEnvelope.js';
 import { registerSamlSsoRoutes } from '../src/routes/authSamlSso.js';
 import { __resetUsersStore, getUserByPrincipal, setUserStatus, upsertFromPrincipal } from '../src/features/users/usersService.js';
 import { denyLinkedSubject, clearLinkedSubjectDeny } from '../src/host/auth/subjectLinkService.js';
+import { verifySession } from '../src/middleware/cookieSession.js';
 
 // Mutable per-test identity the mocked validator returns (hoisted so the mock
 // factory may reference it safely).
@@ -43,6 +50,7 @@ vi.mock('../src/host/auth/samlSso.js', async (importOriginal) => {
 });
 
 const TENANT = 'acme-corp';
+const SAVED_SESSION_SECRET = process.env.OPENWOP_SESSION_SECRET;
 const dir = mkdtempSync(join(tmpdir(), 'owop-saml-disabled-'));
 let server: http.Server;
 let BASE: string;
@@ -51,7 +59,7 @@ beforeAll(async () => {
   process.env.OPENWOP_SAML_IDP_SSO_URL = 'https://example.okta.com/app/abc/sso/saml';
   process.env.OPENWOP_SAML_IDP_CERT = 'MIIBdummybase64certbodywithoutpemheaders0000000000';
   process.env.OPENWOP_SAML_SP_ENTITY_ID = 'https://app.openwop.dev/saml';
-  process.env.OPENWOP_SAML_ACS_URL = 'https://app.openwop.dev/api/v1/host/openwop-app/auth/saml/sso/acs';
+  process.env.OPENWOP_SAML_ACS_URL = 'https://app.openwop.dev/api/host/openwop-app/auth/saml/sso/acs';
   process.env.OPENWOP_SAML_TENANT = TENANT;
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
 
@@ -74,6 +82,8 @@ afterAll(async () => {
   for (const k of ['OPENWOP_SAML_IDP_SSO_URL', 'OPENWOP_SAML_IDP_CERT', 'OPENWOP_SAML_SP_ENTITY_ID', 'OPENWOP_SAML_ACS_URL', 'OPENWOP_SAML_TENANT']) {
     delete process.env[k];
   }
+  if (SAVED_SESSION_SECRET === undefined) delete process.env.OPENWOP_SESSION_SECRET;
+  else process.env.OPENWOP_SESSION_SECRET = SAVED_SESSION_SECRET;
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -81,8 +91,14 @@ beforeEach(() => {
   mockState.nameId = 'nameid-active';
 });
 
+/** The decoded `__session` cookie the response set, or null when none was set. */
+function sessionOf(res: Response): ReturnType<typeof verifySession> {
+  const m = /__session=([^;]+)/.exec(res.headers.get('set-cookie') ?? '');
+  return m ? verifySession(m[1]!) : null;
+}
+
 async function postAcs(relayState = '/dash'): Promise<Response> {
-  return fetch(`${BASE}/v1/host/openwop-app/auth/saml/sso/acs`, {
+  return fetch(`${BASE}/host/openwop-app/auth/saml/sso/acs`, {
     method: 'POST',
     redirect: 'manual',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -96,11 +112,14 @@ describe('USERS-1 — SAML ACS refuses a disabled user before minting a session'
     const res = await postAcs('/dash');
     expect(res.status).toBe(302);
     expect(res.headers.get('location')).toBe('/dash');
-    expect(res.headers.get('set-cookie') ?? '').toMatch(/__session=[^;]/);
-    // The lane provisioned the durable user.
+    // The lane provisioned the durable user …
     const user = await getUserByPrincipal(TENANT, 'saml:nameid-active');
     expect(user).not.toBeNull();
     expect(user!.status).toBe('active');
+    // … and the session it minted is bound to THAT user in the SAML tenant.
+    const session = sessionOf(res);
+    expect(session?.userId).toBe(user!.userId);
+    expect(session?.personalTenant).toBe(TENANT);
   });
 
   it('DISABLED polarity: a valid assertion for a disabled user → 403 canonical envelope, NO cookie', async () => {
@@ -120,15 +139,16 @@ describe('USERS-1 — SAML ACS refuses a disabled user before minting a session'
   });
 
   it('re-enable restores the SAML login (both polarities, same subject)', async () => {
-    mockState.nameId = 'nameid-disabled';
-    const user = await getUserByPrincipal(TENANT, 'saml:nameid-disabled');
-    expect(user).not.toBeNull();
-    await setUserStatus(user!.userId, 'active', { reason: 'admin' });
+    mockState.nameId = 'nameid-rehire';
+    const user = await upsertFromPrincipal({ tenantId: TENANT, principalId: 'saml:nameid-rehire', source: 'saml' });
+    await setUserStatus(user.userId, 'disabled', { reason: 'admin' });
+    expect((await postAcs('/back')).status).toBe(403); // refused while disabled
 
+    await setUserStatus(user.userId, 'active', { reason: 'admin' });
     const res = await postAcs('/back');
     expect(res.status).toBe(302);
     expect(res.headers.get('location')).toBe('/back');
-    expect(res.headers.get('set-cookie') ?? '').toMatch(/__session=[^;]/);
+    expect(sessionOf(res)?.userId).toBe(user.userId);
   });
 });
 
@@ -150,9 +170,15 @@ describe('USERS-13 / RFC 0159 §A.3 — the PRODUCTION ACS refuses a SCIM-denied
     const ok = await postAcs('/dash');
     expect(ok.status).toBe(302);
     expect(ok.headers.get('location')).toBe('/dash');
-    expect(ok.headers.get('set-cookie') ?? '').toMatch(/__session=[^;]/);
+    const rehired = await getUserByPrincipal(TENANT, 'saml:nameid-linked-leaver');
+    expect(sessionOf(ok)?.userId).toBe(rehired!.userId);
   });
 
+  // DOCUMENTED RESIDUAL, not a desired behavior: the ACS consults the deny under
+  // OPENWOP_SAML_TENANT only, so a misaligned SCIM realm lets the leaver in. The
+  // operator MUST align the realms (RFC 0159 "same-tenant link", ADR 0613/0623),
+  // and discovery withholds `subjectLinking` while they are misaligned. This case
+  // pins the residual so a change to it is a deliberate, visible decision.
   it('a deny written under a DIFFERENT realm (misaligned OPENWOP_SCIM_TENANT) is invisible to the ACS — the misalignment USERS-13 names', async () => {
     mockState.nameId = 'nameid-misaligned';
     await denyLinkedSubject('scim', 'nameid-misaligned'); // the DEFAULT scim realm, ≠ TENANT

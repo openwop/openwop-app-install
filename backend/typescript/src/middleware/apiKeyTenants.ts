@@ -20,6 +20,33 @@ export function authIsEnforced(): boolean {
 }
 
 
+/** True when the operator configured the key map (`OPENWOP_API_KEYS` or
+ *  `OPENWOP_API_KEY`). False means `readKeyTenants` is serving the built-in
+ *  `dev-token` fallback, a PUBLIC string, which ADR 0771 must not reward. */
+export function apiKeysConfigured(): boolean {
+  return Boolean(process.env.OPENWOP_API_KEYS ?? process.env.OPENWOP_API_KEY);
+}
+
+const warnedTenants = new Set<string>();
+
+/**
+ * ADR 0814's configuration rule, restated here because this module is a leaf (see
+ * the header): the canonical one is `host/v2Ids.ts` `wireTenantViolation`, and
+ * `adr0814-wire-tenant.test.ts` pins that the two agree. A tenant parsed here can
+ * never contain `:` (the key splits on the last colon), so the only failures are
+ * a reserved prefix and a non-clean value too long to hex-encode within 128.
+ */
+export function configuredTenantViolation(tenant: string): string | null {
+  if (tenant === '*') return null;
+  if (/^[uwox]-/.test(tenant)) {
+    return `tenant '${tenant}' starts with a prefix reserved for the wire tenantId (u-/w-/o-/x-, ADR 0814)`;
+  }
+  if (!/^[A-Za-z0-9._-]{1,128}$/.test(tenant) && 2 + 2 * Buffer.byteLength(tenant, 'utf8') > 128) {
+    return `tenant '${tenant}' has no grammar-clean wire tenantId (over 128 characters once mapped, ADR 0814)`;
+  }
+  return null;
+}
+
 export function readKeyTenants(): ReadonlyMap<string, readonly string[]> {
   const multi = process.env.OPENWOP_API_KEYS;
   const single = process.env.OPENWOP_API_KEY;
@@ -56,6 +83,18 @@ export function readKeyTenants(): ReadonlyMap<string, readonly string[]> {
     const key = trimmed.slice(0, sep).trim();
     const tenant = trimmed.slice(sep + 1).trim();
     if (key.length === 0) continue;
+    // ADR 0814 — a configured tenant must have a grammar-clean, unambiguous wire
+    // tenantId. A key whose tenant would collide with the reserved wire prefixes
+    // is REFUSED (fail closed: that key authenticates nothing), never silently
+    // re-mapped onto another tenant's id space.
+    const violation = tenant.length > 0 ? configuredTenantViolation(tenant) : null;
+    if (violation !== null) {
+      if (!warnedTenants.has(tenant)) {
+        warnedTenants.add(tenant);
+        console.error(`[apiKeyTenants] OPENWOP_API_KEYS entry refused: ${violation}`);
+      }
+      continue;
+    }
     // An empty tenant (`"k1:"`) is a configuration mistake, not a request for
     // the wildcard — scope it rather than silently widening it.
     out.set(key, [tenant.length > 0 ? tenant : DEFAULT_API_KEY_TENANT]);

@@ -232,7 +232,7 @@ export type SimPersona = 'newcomer' | 'time-poor' | 'skeptic';
 export type SimVerdict = 'pass' | 'flag' | 'block';
 export type SimFindingSeverity = 'note' | 'flag' | 'block';
 
-/** One structured finding — matches `feature.kicktodo.agents/schemas/sim-verdict`
+/** One structured finding — matches `vendor.openwop-app.kicktodo.agents/schemas/sim-verdict`
  *  `findings[]` (the sim personas' model-facing SSoT). */
 export interface SimFinding {
   severity: SimFindingSeverity;

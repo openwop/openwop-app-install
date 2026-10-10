@@ -25,6 +25,7 @@ const toRow = (s: ProjectSchedule): SubjectScheduleRow => ({
   ...(s.lastSkippedAt !== undefined ? { lastSkippedAt: s.lastSkippedAt } : {}),
   ...(s.lastSkipReason !== undefined ? { lastSkipReason: s.lastSkipReason } : {}),
   ...(s.nextFireAt !== undefined ? { nextFireAt: s.nextFireAt } : {}),
+  ...(s.planLapsed !== undefined ? { planLapsed: s.planLapsed } : {}),
 });
 
 export function ProjectSchedulesTab({ projectId, workflows, canWrite }: { projectId: string; workflows: string[]; canWrite: boolean }): JSX.Element {

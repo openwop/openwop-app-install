@@ -25,6 +25,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { optionId, useReportActiveOption, type ComboboxWiring } from './lib/comboboxWiring.js';
 import { Trans, useTranslation } from 'react-i18next';
 import {
   filterAgentMentions,
@@ -33,6 +34,8 @@ import {
 } from './lib/agentMentions.js';
 
 interface Props {
+  /** Combobox wiring to the composer textarea (grade-ux CHATUX-1). */
+  combobox?: ComboboxWiring;
   text: string;
   cursorPos: number;
   onPick: (newText: string, newCursorPos: number) => void;
@@ -77,6 +80,7 @@ export function AgentMentionAutocomplete({
   onPick,
   onDismiss,
   entriesOverride,
+  combobox,
 }: Props): JSX.Element | null {
   const { t } = useTranslation('chat');
   // Unconditional hook call; the fetch is skipped when the caller supplies its
@@ -96,6 +100,7 @@ export function AgentMentionAutocomplete({
   useEffect(() => {
     setSelectedIdx(0);
   }, [query, mention?.atPos]);
+  useReportActiveOption(combobox, !!mention && !isLoading && !error, matches.length, selectedIdx);
 
   const apply = useCallback(
     (picked: AgentMentionEntry): void => {
@@ -188,19 +193,21 @@ export function AgentMentionAutocomplete({
     <div
       ref={listRef}
       role="listbox"
+      id={combobox?.listboxId}
       aria-label={t('agentMentionsAria')}
       className="mentionac-listbox"
     >
       {matches.map((entry, i) => (
         <AgentRow
           key={entry.agentId}
+          id={optionId(combobox?.listboxId ?? 'mentionac', i)}
           entry={entry}
           selected={i === selectedIdx}
           onClick={() => apply(entry)}
           onHover={() => setSelectedIdx(i)}
         />
       ))}
-      <div className="mentionac-tip">
+      <div className="mentionac-tip" aria-hidden="true">
         {t('agentMentionTip')}
       </div>
     </div>
@@ -219,11 +226,10 @@ function EmptyPanel({
   return (
     <div
       ref={listRef}
-      className="mentionac-empty"
-      style={{
-        border: `1px solid ${tone === 'error' ? 'var(--color-danger)' : 'var(--rule)'}`,
-        color: tone === 'error' ? 'var(--color-danger)' : 'var(--ink-3)',
-      }}
+      className={tone === 'error' ? 'mentionac-empty mentionac-empty--error' : 'mentionac-empty'}
+      // Announced: the list's loading / error / empty state replaced the options,
+      // and a screen-reader user otherwise hears nothing change (grade-ux CHATUX-4).
+      role={tone === 'error' ? 'alert' : 'status'}
     >
       {children}
     </div>
@@ -231,11 +237,13 @@ function EmptyPanel({
 }
 
 function AgentRow({
+  id,
   entry,
   selected,
   onClick,
   onHover,
 }: {
+  id: string;
   entry: AgentMentionEntry;
   selected: boolean;
   onClick: () => void;
@@ -243,13 +251,15 @@ function AgentRow({
 }): JSX.Element {
   return (
     <div
+      id={id}
       role="option"
       aria-selected={selected}
       onClick={onClick}
+      // Focus stays in the composer (aria-activedescendant), so this rarely fires;
+      // it keeps the pointer handler paired with a keyboard one (jsx-a11y).
       onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } }}
       onMouseEnter={onHover}
       className="mentionac-row"
-      style={{ background: selected ? 'var(--paper-2)' : 'transparent' }}
     >
       <div className="u-flex u-items-center u-gap-2 u-wrap">
         <code className="u-fw-600 u-fs-12">@{entry.slug}</code>

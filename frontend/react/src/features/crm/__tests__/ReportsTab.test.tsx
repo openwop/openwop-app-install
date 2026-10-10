@@ -2,14 +2,24 @@
  * ReportsTab (ADR 0210 §4 / C6) — the ONE `/reports/pipeline` fetch renders
  * the key-figure totals, the weighted-pipeline table, and the aging empty
  * state; asserts no fan-out (getPipelineReport called exactly once per
- * pipeline selection).
+ * pipeline selection). Also CRM-UX-13 (a failed read is the canonical
+ * announced card; ONE Retry re-reads both reads) and R2 CC-SP-3 (currency-
+ * grouped sums, never a blind cross-currency total; the mixed-currency caveat
+ * shows only for >1 currency).
+ *
+ * Sabotage that turns it red (wave-4 /grade-tests probes): the `pipelines ===
+ * null` / `pipelinesFailed` report guard removed; Retry wired to the report
+ * read only; the blind sum rendered; the caveat shown for one currency (this
+ * leg was vacuous until wave 4 — it read the SKELETON of the second render)
+ * or never.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/react';
+import { render, screen, cleanup, waitFor, fireEvent, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import type { PipelineReport } from '../crmReportsClient.js';
+import type * as OrgClient from '../crmOrgClient.js';
 
-const listPipelines = vi.hoisted(() => vi.fn(async () => [
+const listPipelines = vi.hoisted(() => vi.fn<typeof OrgClient.listPipelines>(async () => [
   { pipelineId: 'p1', name: 'Sales', stages: [{ stageId: 's1', name: 'New', probability: 10 }] },
 ]));
 vi.mock('../crmOrgClient.js', () => ({
@@ -36,10 +46,11 @@ import { ReportsTab } from '../ReportsTab.js';
 const renderTab = (orgId = 'o1') => render(<MemoryRouter><ReportsTab orgId={orgId} /></MemoryRouter>);
 
 beforeEach(() => {
-  listPipelines.mockClear();
-  getPipelineReport.mockClear();
+  // resetAllMocks restores each `vi.fn(impl)` default (Vitest 4) AND drops any
+  // unconsumed `*Once` a failing case left behind.
+  vi.resetAllMocks();
 });
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe('ReportsTab', () => {
   it('fetches the report exactly once and renders the key-figure totals', async () => {
@@ -50,14 +61,19 @@ describe('ReportsTab', () => {
     expect(screen.getByText('8')).toBeTruthy(); // wonCount
     expect(screen.getByText('4')).toBeTruthy(); // lostCount
     expect(screen.getByText('67%')).toBeTruthy(); // winRate formatted
+    // …and STILL exactly once after the report rendered (the waitFor above
+    // passes the first instant the count is 1; a later re-fetch lands after it).
+    expect(getPipelineReport).toHaveBeenCalledTimes(1);
   });
 
   it('renders the weighted-pipeline table rows', async () => {
     renderTab();
-    await waitFor(() => expect(screen.getAllByText('New').length).toBeGreaterThan(0));
-    // Appears once in the weighted-pipeline table and once in the funnel row label.
-    expect(screen.getAllByText('New').length).toBe(2);
-    expect(screen.getAllByText('Qualified').length).toBe(2);
+    const table = await screen.findByRole('table', { name: 'Weighted pipeline' });
+    // Each stage row with its weighted figure (weightedSum 500 / 800).
+    expect(within(table).getByText('New')).toBeTruthy();
+    expect(within(table).getByText('Qualified')).toBeTruthy();
+    expect(within(table).getByText('500')).toBeTruthy();
+    expect(within(table).getByText('800')).toBeTruthy();
   });
 
   it('shows the aging empty state when aging is empty', async () => {
@@ -173,8 +189,12 @@ describe('R2 CC-SP-3 — currency-grouped sums reach the table (review F2)', () 
     unmount();
     getPipelineReport.mockResolvedValueOnce({ ...base, currencies: ['USD'] });
     renderTab();
-    await waitFor(() => expect(getPipelineReport).toHaveBeenCalled());
-    await waitFor(() => expect(screen.queryByText(/mixed currencies/i)).toBeNull());
+    // Wait for the SECOND report to actually render before asserting absence:
+    // the old `waitFor(called)` passed on the first render's call and the
+    // `queryByText` null passed on the second render's skeleton.
+    await waitFor(() => expect(getPipelineReport).toHaveBeenCalledTimes(2));
+    await screen.findByRole('table', { name: 'Weighted pipeline' });
+    expect(screen.queryByText(/mixed currencies/i)).toBeNull();
   });
 });
 

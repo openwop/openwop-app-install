@@ -1,7 +1,7 @@
 /**
  * Server-side typed-section → SEMANTIC HTML renderer (ADR 0384 Phase 1).
  *
- * Renders the seven CMS `SectionType`s as crawler-facing semantic HTML —
+ * Renders the CMS `SectionType`s as crawler-facing semantic HTML —
  * headings, paragraphs, links, lists, `<img alt>` — NOT the designed `.fp-*`
  * layout (crawlers index content and meta, not CSS). The frontend
  * `SectionRenderer.tsx` remains the human renderer; the two CANNOT share code
@@ -16,6 +16,7 @@
  *
  * Mirrored semantics (same grammar, same predicates as SectionRenderer.tsx):
  *   - inline markdown: `**bold**` `*italic*` `` `code` `` `[label](url)`;
+ *   - prose blocks (ADR 0813): `### ` subheading, `- `/`1. ` lists, `> ` quote;
  *   - link safety: http(s)/mailto external, single-leading-slash internal;
  *     an unsafe link degrades to its plain-text label;
  *   - every interpolated string is HTML-escaped — no raw HTML pass-through.
@@ -32,9 +33,11 @@
  * null — the prerender path falls back to serving the SPA shell (honest-off,
  * never a broken document).
  */
+import { isInternalHref } from '../../host/internalHref.js';
 import type { Section } from '../cms/cmsService.js';
 import type { ResolvedContentSection } from '../../host/contentDataSources.js';
 import { vendorPublicBase } from '../featureRoute.js';
+import { headingEmphasisHtml, stripHeadingEmphasis } from './headingEmphasis.js';
 
 /** HTML-escape an untrusted string for text/attribute positions. */
 export function escapeHtml(s: string): string {
@@ -46,9 +49,11 @@ export function escapeHtml(s: string): string {
     .replace(/'/g, '&#39;');
 }
 
-/** Same predicates as SectionRenderer.tsx — keep in lockstep (golden-pinned). */
+/** Same predicates as SectionRenderer.tsx — keep in lockstep (golden-pinned).
+ *  ADR 0836 D7 — `isInternal` is the ONE shared predicate (`host/internalHref.ts`),
+ *  re-checked at this exit: a stored `"/\t/evil.com"` passed the old regex. */
 const isSafeHref = (url: string): boolean => /^(https?:|mailto:)/i.test(url.trim());
-const isInternal = (url: string): boolean => /^\/(?![/\\])/.test(url.trim());
+const isInternal = (url: string): boolean => isInternalHref(url.trim());
 
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
 const pad2 = (n: number): string => String(n).padStart(2, '0');
@@ -80,13 +85,30 @@ export function inlineMarkdownHtml(text: string): string {
   return out;
 }
 
-/** Blank-line-separated text → `<p>` paragraphs with inline markdown. */
+const HEADING_RE = /^###\s+/;
+const BULLET_RE = /^[-*]\s+/;
+const NUMBERED_RE = /^\d{1,3}[.)]\s+/;
+const QUOTE_RE = /^>\s?/;
+
+/** ADR 0813 — blank-line-separated prose blocks with inline markdown. The same
+ *  block grammar as the frontend `proseBlocks.ts`: a lone `### ` line → `<h3>`;
+ *  every line `- `/`* ` → `<ul>`, `1. `/`1) ` → `<ol>`, `> ` → `<blockquote>`;
+ *  anything else → `<p>`. */
 function paragraphsHtml(text: string): string {
+  const items = (lines: string[], re: RegExp): string =>
+    lines.map((l) => `<li>${inlineMarkdownHtml(l.replace(re, ''))}</li>`).join('');
   return text
     .split(/\n{2,}/)
     .map((p) => p.trim())
     .filter(Boolean)
-    .map((p) => `<p>${inlineMarkdownHtml(p)}</p>`)
+    .map((block) => {
+      const lines = block.split('\n').map((l) => l.trim()).filter(Boolean);
+      if (lines.length === 1 && HEADING_RE.test(block)) return `<h3>${inlineMarkdownHtml(block.replace(HEADING_RE, ''))}</h3>`;
+      if (lines.every((l) => BULLET_RE.test(l))) return `<ul>${items(lines, BULLET_RE)}</ul>`;
+      if (lines.every((l) => NUMBERED_RE.test(l))) return `<ol>${items(lines, NUMBERED_RE)}</ol>`;
+      if (lines.every((l) => QUOTE_RE.test(l))) return `<blockquote>${inlineMarkdownHtml(lines.map((l) => l.replace(QUOTE_RE, '')).join(' '))}</blockquote>`;
+      return `<p>${inlineMarkdownHtml(block)}</p>`;
+    })
     .join('\n');
 }
 
@@ -140,13 +162,13 @@ export function sectionHtml(section: Section, opts: SectionHtmlOptions): string 
   // collide first-wins on both sides — identical behaviour, documented.
   const head = (level: 2 | 3 = 2): string =>
     (eyebrow ? `<p>${escapeHtml(eyebrow)}</p>\n` : '') +
-    (heading ? `<h${level} id="${escapeHtml(headingSlug(heading))}">${escapeHtml(heading)}</h${level}>\n` : '');
+    (heading ? `<h${level} id="${escapeHtml(headingSlug(stripHeadingEmphasis(heading)))}">${headingEmphasisHtml(heading)}</h${level}>\n` : '');
 
   switch (section.type) {
     case 'hero': {
       const parts: string[] = ['<header>'];
       if (eyebrow) parts.push(`<p>${escapeHtml(eyebrow)}</p>`);
-      parts.push(`<h1>${escapeHtml(heading)}</h1>`);
+      parts.push(`<h1>${headingEmphasisHtml(heading)}</h1>`);
       const sub = str(d.subheading);
       if (sub) parts.push(`<p>${inlineMarkdownHtml(sub)}</p>`);
       const ctas = [anchorHtml(str(d.ctaLabel), str(d.ctaUrl)), anchorHtml(str(d.ctaLabel2), str(d.ctaUrl2))].filter(Boolean);
@@ -214,7 +236,7 @@ export function sectionHtml(section: Section, opts: SectionHtmlOptions): string 
     // followable storefront link (read-only, no cart — ADR 0384 table).
     case 'productGrid': {
       const storeOrgId = str(d.storeOrgId);
-      const link = storeOrgId ? `<p><a href="/store/${encodeURIComponent(storeOrgId)}">${escapeHtml(heading || 'Store')}</a></p>\n` : '';
+      const link = storeOrgId ? `<p><a href="/store/${encodeURIComponent(storeOrgId)}">${escapeHtml(stripHeadingEmphasis(heading) || 'Store')}</a></p>\n` : '';
       return `<section>\n${head()}${link}</section>`;
     }
 
@@ -310,6 +332,36 @@ export function sectionHtml(section: Section, opts: SectionHtmlOptions): string 
         return `<figure><blockquote><p>${escapeHtml(it.quote)}</p></blockquote>${byline ? `<figcaption>${escapeHtml(byline)}</figcaption>` : ''}</figure>`;
       }).join('\n');
       return `<section>\n${head()}${body}\n</section>`;
+    }
+
+    // ADR 0843 — a narrated film. Crawlers cannot play a <video>, so the
+    // section renders what they CAN index: the poster as an <img>, the title,
+    // the description, and followable links to the file (plus YouTube and the
+    // captions track when authored). URLs were https-checked at write time and
+    // are re-checked at this exit (the ADR 0836 D7 rule); one that fails is
+    // simply not linked. The VideoObject JSON-LD rides jsonLdBlocks.
+    case 'video': {
+      const https = (v: unknown): string => (/^https:\/\//i.test(str(v).trim()) ? str(v).trim() : '');
+      const src = https(d.src);
+      const poster = https(d.poster);
+      const captions = https(d.captions);
+      const youtube = https(d.youtubeUrl);
+      const title = str(d.title);
+      const description = str(d.description);
+      const length = str(d.length);
+      const lede = str(d.lede);
+      const links = [
+        src ? `<a href="${escapeHtml(src)}" rel="noopener noreferrer">Watch the video${length ? ` (${escapeHtml(length)})` : ''}</a>` : '',
+        youtube ? `<a href="${escapeHtml(youtube)}" rel="noopener noreferrer">Watch on YouTube</a>` : '',
+        captions ? `<a href="${escapeHtml(captions)}" rel="noopener noreferrer">Captions (WebVTT)</a>` : '',
+      ].filter(Boolean);
+      const cap = [
+        title ? `<p><strong>${escapeHtml(title)}</strong></p>` : '',
+        description ? `<p>${escapeHtml(description)}</p>` : '',
+        links.length > 0 ? `<p>${links.join(' ')}</p>` : '',
+      ].filter(Boolean).join('\n');
+      const img = poster ? `<img src="${escapeHtml(poster)}" alt="${escapeHtml(title)}" width="1920" height="1080">\n` : '';
+      return `<section>\n${head()}${lede ? `<p>${inlineMarkdownHtml(lede)}</p>\n` : ''}<figure>\n${img}${cap ? `<figcaption>\n${cap}\n</figcaption>\n` : ''}</figure>\n</section>`;
     }
 
     // ADR 0748 — a protocol-authored `fields` section: flat named scalars, every

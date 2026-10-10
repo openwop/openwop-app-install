@@ -23,6 +23,7 @@
  * @see docs/adr/0035-async-durable-a2a-tasks.md
  */
 
+import { createHash } from 'node:crypto';
 import type { RunStatus } from '../types.js';
 import { DurableCollection } from './hostExtPersistence.js';
 import { assertEgressUrlAllowed, EgressUrlRejectedError } from './webhookEgressGuard.js';
@@ -300,8 +301,18 @@ interface A2aMessageClaim {
 }
 const messageClaims = new DurableCollection<A2aMessageClaim>('a2a:msgclaim', (c) => c.claimKey);
 
-function claimKeyFor(tenantId: string, principalId: string, messageId: string): string {
-  return `${tenantId}\u0000${principalId}\u0000${messageId}`;
+/**
+ * The claim's storage key: a SHA-256 of the NUL-joined triple, never the raw
+ * join. The raw join put `0x00` INTO the key, and Postgres text columns reject
+ * that byte, so on a Postgres-backed host every A2A 1.0 `SendMessage` failed
+ * with `-32603 invalid byte sequence for encoding "UTF8": 0x00`. MEASURED on
+ * app.openwop.dev (suite 2.43.1 major-1 cut, 2026-09-28). The memory and SQLite
+ * stores accept the byte, which is why no local test caught it. The NUL
+ * separator is kept INSIDE the digest, so distinct triples cannot collide by
+ * concatenation (`a` + `bc` vs `ab` + `c`). Exported for its test.
+ */
+export function claimKeyFor(tenantId: string, principalId: string, messageId: string): string {
+  return createHash('sha256').update(`${tenantId}\u0000${principalId}\u0000${messageId}`).digest('hex');
 }
 
 /** The task a previous `SendMessage` with this identity opened, if any. */

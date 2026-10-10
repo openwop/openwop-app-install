@@ -2,7 +2,7 @@
  * Territory Planner chat tools (CFP-1 repair — CHAT-FIRST-PORT-AUDIT finding #1;
  * D9 field-sales port map row 1 "RIDES").
  *
- * The `feature.territories.agents` Territory Planner used to allowlist raw node
+ * The `vendor.openwop-app.territories.agents` Territory Planner used to allowlist raw node
  * typeIds (`openwop:feature.territories.nodes.list-models`, …) that NO host
  * registrant projects into a conversational tool — so `resolveAgentTools`
  * silently dropped every one and the persona loaded toothless. These register the
@@ -95,6 +95,7 @@ export function registerTerritoryAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: TERRITORIES_LIST_MODELS_TOOL_ID,
       description: "List the org's territory models (planning/active/archived) with the currently-active model id. Read-only. Start here to ground any territory question.",
@@ -110,6 +111,7 @@ export function registerTerritoryAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: TERRITORIES_ACTIVE_MODEL_TOOL_ID,
       description: "The org's currently-active territory model id (the model driving CRM record visibility and quota rollup), or null if none is active. Read-only.",
@@ -125,6 +127,7 @@ export function registerTerritoryAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: TERRITORIES_LIST_TERRITORIES_TOOL_ID,
       description: "The territory hierarchy (regions/divisions/territories) for one model. Read-only. Pass the `modelId` from list-models.",
@@ -142,6 +145,7 @@ export function registerTerritoryAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: TERRITORIES_LIST_RULES_TOOL_ID,
       description: "The filter-based auto-assignment rules for one territory model. Read-only. Pass the `modelId` from list-models.",
@@ -159,6 +163,7 @@ export function registerTerritoryAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: TERRITORIES_LIST_QUOTAS_TOOL_ID,
       description: "Per-territory quotas for one model, optionally for a single period (YYYY-Qn or YYYY-MM). Read-only. Pass the `modelId` from list-models.",
@@ -176,6 +181,7 @@ export function registerTerritoryAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: TERRITORIES_PREVIEW_TOOL_ID,
       description: "Dry-run a model's assignment rules: what would this model assign, with no writes. Use to evaluate a re-org scenario before proposing it. Read-only. Pass the `modelId` from list-models.",
@@ -193,6 +199,7 @@ export function registerTerritoryAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: TERRITORIES_ATTAINMENT_TOOL_ID,
       // R2 TER2-B1 — the model reads these rows as facts, so the description must

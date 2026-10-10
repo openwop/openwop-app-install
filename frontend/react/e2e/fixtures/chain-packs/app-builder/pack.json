@@ -33,7 +33,7 @@
         "nodes": [
           {
             "id": "intake",
-            "typeId": "core.ai.chatCompletion",
+            "typeId": "core.ai.chatCompletion@1.0.0",
             "name": "Intake",
             "position": {
               "x": -240,
@@ -51,7 +51,7 @@
           },
           {
             "id": "clarify",
-            "typeId": "core.clarificationGate",
+            "typeId": "core.clarificationGate@1.0.0",
             "name": "Clarify",
             "position": {
               "x": -120,
@@ -68,7 +68,7 @@
           },
           {
             "id": "prd",
-            "typeId": "core.ai.chatCompletion",
+            "typeId": "core.ai.chatCompletion@1.0.0",
             "name": "PRD",
             "position": {
               "x": 0,
@@ -86,7 +86,7 @@
           },
           {
             "id": "research",
-            "typeId": "feature.app-builder.nodes.research",
+            "typeId": "feature.app-builder.nodes.research@1.0.0",
             "name": "Product research",
             "position": {
               "x": 260,
@@ -103,7 +103,7 @@
           },
           {
             "id": "plan",
-            "typeId": "core.ai.chatCompletion",
+            "typeId": "core.ai.chatCompletion@1.0.0",
             "name": "Screen-flow plan",
             "position": {
               "x": 520,
@@ -119,7 +119,7 @@
           },
           {
             "id": "render",
-            "typeId": "feature.app-builder.nodes.render",
+            "typeId": "feature.app-builder.nodes.render@1.0.0",
             "name": "Render app design",
             "position": {
               "x": 780,
@@ -130,7 +130,7 @@
           },
           {
             "id": "deepen",
-            "typeId": "feature.app-builder.nodes.deepen",
+            "typeId": "feature.app-builder.nodes.deepen@1.0.0",
             "name": "Deepen thin screens",
             "position": {
               "x": 1040,
@@ -145,7 +145,7 @@
           },
           {
             "id": "audit",
-            "typeId": "feature.app-builder.nodes.audit",
+            "typeId": "feature.app-builder.nodes.audit@1.0.0",
             "name": "Quality audit",
             "position": {
               "x": 1300,
@@ -156,7 +156,7 @@
           },
           {
             "id": "review",
-            "typeId": "core.approvalGate",
+            "typeId": "core.approvalGate@1.0.0",
             "name": "Review the app design",
             "position": {
               "x": 1560,
@@ -171,7 +171,7 @@
           },
           {
             "id": "auditRecord",
-            "typeId": "feature.app-builder.nodes.capture",
+            "typeId": "feature.app-builder.nodes.capture@1.0.0",
             "name": "Typed audit record",
             "position": {
               "x": 1560,
@@ -294,7 +294,7 @@
         "nodes": [
           {
             "id": "repair",
-            "typeId": "feature.app-builder.nodes.repair",
+            "typeId": "feature.app-builder.nodes.repair@1.0.0",
             "name": "Repair candidate",
             "position": {
               "x": 0,
@@ -312,7 +312,7 @@
           },
           {
             "id": "audit",
-            "typeId": "feature.app-builder.nodes.audit",
+            "typeId": "feature.app-builder.nodes.audit@1.0.0",
             "name": "Re-audit",
             "position": {
               "x": 260,
@@ -323,7 +323,7 @@
           },
           {
             "id": "review",
-            "typeId": "core.approvalGate",
+            "typeId": "core.approvalGate@1.0.0",
             "name": "Review the repair",
             "position": {
               "x": 520,
@@ -338,7 +338,7 @@
           },
           {
             "id": "apply",
-            "typeId": "feature.app-builder.nodes.apply-repair",
+            "typeId": "feature.app-builder.nodes.apply-repair@1.0.1",
             "name": "Apply approved repair",
             "position": {
               "x": 780,
@@ -420,7 +420,7 @@
         "nodes": [
           {
             "id": "propose",
-            "typeId": "feature.app-builder.nodes.propose-kanban-work",
+            "typeId": "feature.app-builder.nodes.propose-kanban-work@1.0.0",
             "name": "Propose app work",
             "position": { "x": 0, "y": 0 },
             "config": {},
@@ -432,7 +432,7 @@
           },
           {
             "id": "review",
-            "typeId": "core.approvalGate",
+            "typeId": "core.approvalGate@1.0.0",
             "name": "Review the work plan",
             "position": { "x": 300, "y": 0 },
             "config": {
@@ -444,7 +444,7 @@
           },
           {
             "id": "materialize",
-            "typeId": "core.openwop.kanban.work-items.materialize",
+            "typeId": "core.openwop.kanban.work-items.materialize@1.1.1",
             "name": "Create reusable work items",
             "position": { "x": 600, "y": 0 },
             "config": { "requireApproval": true },

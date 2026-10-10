@@ -1,6 +1,6 @@
 /**
  * A2APeerPanel — the honest not-yet-available state for A2A peer discovery,
- * paired with `McpToolsPanel` on `/capabilities`.
+ * on `/capabilities` (the MCP card moved to Access → AI clients, ADR 0788).
  *
  * ADR 0196 re-grade (ADM-2/DEMO-12): this panel previously rendered internal
  * spec/handoff document paths (`spec/v1/a2a-integration.md`,

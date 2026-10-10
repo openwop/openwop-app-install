@@ -22,7 +22,7 @@ const DEMO_SECRET = 'demo-ucp-merchant-token'; // a placeholder demo credential 
  *  deploy's own public URL; defaults to a loopback dev route (which also needs
  *  `OPENWOP_WEBHOOK_ALLOW_PRIVATE=true` for the buyer to egress to it). */
 function merchantUrl(): string {
-  return process.env.OPENWOP_UCP_REF_MERCHANT_URL ?? 'http://127.0.0.1:8080/v1/host/openwop-app/dev/ucp-merchant/mcp';
+  return process.env.OPENWOP_UCP_REF_MERCHANT_URL ?? 'http://127.0.0.1:8080/host/openwop-app/dev/ucp-merchant/mcp';
 }
 
 function registerRefProvider(): void {

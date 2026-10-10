@@ -43,7 +43,7 @@ function client() {
     get: (p: string) => send('GET', p),
     post: (p: string, b?: unknown) => send('POST', p, b),
     login: async (subject: string, tenantId: string) => {
-      const res = await send('POST', '/v1/host/openwop-app/test/login', { subject, tenantId });
+      const res = await send('POST', '/host/openwop-app/test/login', { subject, tenantId });
       expect([200, 201]).toContain(res.status);
       // USERS-19 (ADR 0617 D2): a deployment-named tenant is NOT a personal
       // shape, so the collapsed `personalTenant === tenantId` cookie no longer
@@ -58,7 +58,7 @@ function client() {
   };
 }
 
-const B = '/v1/host/openwop-app/kicktodo/creator';
+const B = '/host/openwop-app/kicktodo/creator';
 const TENANT = 'tenant-kt-creator';
 
 beforeAll(async () => {

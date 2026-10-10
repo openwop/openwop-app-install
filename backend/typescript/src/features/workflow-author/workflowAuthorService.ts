@@ -15,11 +15,13 @@
 
 import { OpenwopError } from '../../types.js';
 import type { WorkflowDefinition } from '../../executor/types.js';
-import { buildNodeCatalog, findUnknownTypeIds, type CatalogNode } from '../../host/nodeCatalogBuilder.js';
+import { buildNodeCatalog, findSinglePortEdgeViolations, findUnknownTypeIds, type CatalogNode } from '../../host/nodeCatalogBuilder.js';
 import { validateWorkflowDefinition, findWorkflowCycleError } from '../../host/workflowDefinitionValidation.js';
 import { assertNoDisabledPacks } from '../../host/packEnablement.js';
-import { registerWorkflowDurable, getRegisteredWorkflowAsync, listRegisteredWorkflows } from '../../host/workflowsRegistry.js';
-import { recordRevision } from '../../host/workflowRevisions.js';
+import { registerWorkflowDurable, getRegisteredWorkflowAsync, listRegisteredWorkflows, readRegisteredWorkflowFresh, registerWorkflowIfUnchanged } from '../../host/workflowsRegistry.js';
+import { revisionHashOf } from '../../host/definitionHash.js';
+import { recordRevision, getRevision } from '../../host/workflowRevisions.js';
+import { canonicalize } from '../../host/auditChainService.js';
 import { workflowRoomLive } from '../../host/collab/workflowCollabResource.js';
 import { lifecycleOf, withHostLifecycle, catalogVisible } from '../../host/workflowLifecycle.js';
 import { preserveDroppedFields, type PreservableField } from '../../host/preserveDroppedFields.js';
@@ -31,7 +33,9 @@ import {
   isBuiltinWorkflowId,
   isAuthoredByOtherTenant,
   authoredWorkflowIds,
+  isSharedWorkflowId,
 } from '../../host/workflowOwnership.js';
+import { isServerMintedWorkflowId, workflowIdOrigin } from '../../host/workflowId.js';
 import { createLogger } from '../../observability/logger.js';
 
 const log = createLogger('workflow-author');
@@ -44,7 +48,8 @@ const AUTHORED_VIA = 'workflow-author';
 /** A node as offered to the authoring brain — the legal building block menu. */
 export interface AuthorCatalogNode {
   typeId: string;
-  version: string;
+  /** Absent when the host knows no version (never an empty or invented one). */
+  version?: string;
   label: string;
   description: string;
   category: string;
@@ -52,6 +57,11 @@ export interface AuthorCatalogNode {
   configSchema?: unknown;
   inputSchema?: unknown;
   outputSchema?: unknown;
+  /** ADR 0782 — `single`: the builder draws ONE input port for this node, so an
+   *  edge into it must carry no `targetInput` (a named-field edge would be
+   *  invisible on the canvas). Its required inputs come from the upstream node's
+   *  output keys or from config. */
+  ports?: 'single';
 }
 
 export interface AuthoringCatalog {
@@ -105,7 +115,7 @@ export function buildAuthoringCatalog(opts?: { disabledPacks?: Set<string> }): A
 function toAuthorNode(n: CatalogNode): AuthorCatalogNode {
   return {
     typeId: n.typeId,
-    version: n.version,
+    ...(n.version ? { version: n.version } : {}),
     label: n.label,
     description: n.description,
     category: n.category,
@@ -113,6 +123,7 @@ function toAuthorNode(n: CatalogNode): AuthorCatalogNode {
     ...(n.configSchema !== undefined ? { configSchema: n.configSchema } : {}),
     ...(n.inputSchema !== undefined ? { inputSchema: n.inputSchema } : {}),
     ...(n.outputSchema !== undefined ? { outputSchema: n.outputSchema } : {}),
+    ...(n.ports === 'single' ? { ports: 'single' as const } : {}),
   };
 }
 
@@ -160,6 +171,10 @@ export function validateAuthoredWorkflow(raw: unknown): DraftValidation {
       errors: [`${cycle}. A WorkflowDefinition MUST be acyclic — remove the edge that closes the loop.`],
     };
   }
+  // ADR 0782 — the prompt's rule 8 is enforced, not just stated (the ADR 0596
+  // lesson: a MUST nothing checks is a lie). Same helper as persist.
+  const singlePort = findSinglePortEdgeViolations(def);
+  if (singlePort.length > 0) return { ok: false, errors: singlePort };
   return { ok: true, errors: [] };
 }
 
@@ -211,8 +226,25 @@ export async function persistAuthoredWorkflow(
      * the SAME predicate — one owner, two call sites, never a second rule.
      */
     declaredFields?: ReadonlySet<PreservableField>;
+    /**
+     * ADR 0773 D8 (closes ADR 0770 `WBWF-17` for this lane) — the revision the
+     * caller read (`get` returns it). REQUIRED to overwrite an EXISTING owned
+     * workflow: the write is a compare-and-swap against the stored head, so an
+     * agent can no longer last-writer-wins over the user's own canvas edits.
+     * Ignored when creating a new workflow.
+     */
+    baseRevision?: string;
+    /**
+     * ADR 0773 D8 — refuse an overwrite that carries no `baseRevision`. Set by
+     * the chat-time `persist` tool (whose sibling `get` returns the revision).
+     * NOT set by the meta-workflow's node surface, which has no read step to
+     * learn one from: that lane keeps last-writer-wins and is recorded as still
+     * open in ADR 0773 (Corrections). A supplied revision is CAS-checked on
+     * every lane.
+     */
+    requireBaseRevision?: boolean;
   },
-): Promise<{ workflowId: string; nodeCount: number; preservedFields?: PreservableField[] }> {
+): Promise<{ workflowId: string; nodeCount: number; preservedFields?: PreservableField[]; overwrite?: OverwriteDisclosure }> {
   const def = validateWorkflowDefinition(raw); // structural + RFC 0022 §C gate (throws)
   const unknown = findUnknownTypeIds(def);
   if (unknown.length > 0) {
@@ -236,6 +268,10 @@ export async function persistAuthoredWorkflow(
       400,
       { workflowId: def.workflowId, reason: 'cycle_detected' },
     );
+  }
+  const singlePortOnWrite = findSinglePortEdgeViolations(def);
+  if (singlePortOnWrite.length > 0) {
+    throw new OpenwopError('validation_error', singlePortOnWrite.join(' '), 400, { workflowId: def.workflowId, reason: 'single_port_target_input' });
   }
   const { tenantId } = opts;
   // ADR 0595 §Correction 4 — the ADR 0194 P3 tenant curation, on the MODEL door.
@@ -271,6 +307,49 @@ export async function persistAuthoredWorkflow(
       );
     }
   }
+  // ADR 0789 — a SHARED definition (a seeded `wf.seed.*` / showcase row) is one
+  // row every seeded tenant runs, so the model door never writes it, owned or
+  // not, and never mints a fresh id in a shared namespace. The builder's REST
+  // lane forks on save; this lane refuses with a typed reason the agent relays.
+  // After the built-in / foreign checks above, so those keep their own reasons.
+  if (isSharedWorkflowId(def.workflowId)) {
+    throw new OpenwopError(
+      'conflict',
+      `Workflow id '${def.workflowId}' is a shared template definition and cannot be written. Author it under a new workflowId.`,
+      409,
+      { workflowId: def.workflowId, reason: 'shared_workflow' },
+    );
+  }
+  // ADR 0822 D3 — the ADR 0794 rule the REST lane has had: a model lane is never
+  // the FIRST writer of a server-minted origin (`copy`/`fork`/`sub`/`cadence`).
+  // `sub` and `cadence` ids are derived from a tenant id alone, so a free one is
+  // pre-squattable by any OTHER tenant — whose graph the victim's sub-chain
+  // parent or cron would later execute with the victim's credentials. And those
+  // two deterministic origins are refused even when OWNED (architect H1): a
+  // squat that predates the guard survives as co-ownership (the victim's
+  // instantiation co-owns the row), so "owners may write" would keep a model
+  // door open into the victim's child. They are host-minted infrastructure
+  // children; a person edits one on the canvas. The random origins stay
+  // writable by their owner ("change the workflow I copied" is the common ask).
+  // After the shared-id check (so `wf.seed.*` keeps its own reason) and before
+  // the transient cap (a refused squat never spends budget).
+  const origin = workflowIdOrigin(def.workflowId);
+  if (origin === 'sub' || origin === 'cadence') {
+    throw new OpenwopError(
+      'conflict',
+      `Workflow id '${def.workflowId}' is a host-minted ${origin === 'sub' ? 'sub-chain child' : 'scheduled cadence'} id; the AI author never writes one. Author it under a new workflowId, or edit it on the builder canvas.`,
+      409,
+      { workflowId: def.workflowId, reason: 'deterministic_workflow_id' },
+    );
+  }
+  if (!ownsIt && isServerMintedWorkflowId(def.workflowId)) {
+    throw new OpenwopError(
+      'conflict',
+      `Workflow id '${def.workflowId}' is in a namespace only the host mints. Author it under a new workflowId.`,
+      409,
+      { workflowId: def.workflowId, reason: 'server_minted_workflow_id' },
+    );
+  }
   // ADR 0481 (code-review H3) — D2: while a collab room lives, the room is
   // the head's ONLY writer. Typed refusal the agent can relay honestly.
   if (await workflowRoomLive(def.workflowId)) {
@@ -284,6 +363,27 @@ export async function persistAuthoredWorkflow(
   // existence oracle. A non-owner cannot reach here anyway (the guards above),
   // so this is defence in depth, not the gate.
   const previous = ownsIt ? await getRegisteredWorkflowAsync(def.workflowId) : null;
+  // ADR 0773 D8 — an overwrite is a CAS against the head the caller read.
+  const casBase = previous && (opts.baseRevision || opts.requireBaseRevision) ? await readRegisteredWorkflowFresh(def.workflowId) : null;
+  if (casBase?.def) {
+    const headRevision = revisionHashOf(casBase.def);
+    if (!opts.baseRevision) {
+      throw new OpenwopError(
+        'conflict',
+        `Workflow '${def.workflowId}' already exists. Read it with \`get\` first and pass its \`revision\` as \`baseRevision\`, so you never overwrite edits you have not seen.`,
+        409,
+        { workflowId: def.workflowId, reason: 'base_revision_required', revision: headRevision },
+      );
+    }
+    if (opts.baseRevision !== headRevision) {
+      throw new OpenwopError(
+        'conflict',
+        `Workflow '${def.workflowId}' changed since you read it. Call \`get\` again, re-apply your change to the new definition, and persist with the new \`revision\`.`,
+        409,
+        { workflowId: def.workflowId, reason: 'workflow_head_moved', revision: headRevision },
+      );
+    }
+  }
 
   // 1. PRESERVE (ADR 0524, reversing its §Exemptions carve-out for this lane —
   //    see ADR 0595 §"The exemption this reverses"). By DEFAULT no
@@ -373,6 +473,20 @@ export async function persistAuthoredWorkflow(
   //    Ownership-first inverts the failure: a lost def write leaves an ownership
   //    row pointing at nothing — invisible (the registry listing never sees it),
   //    harmless, and re-writable by its owner on retry.
+  // ADR 0773 D8 — the overwrite swaps only if the head is still the one the
+  // precondition read; ownership is recorded AFTER a won swap, so a lost race
+  // leaves no trace. A new workflow keeps the durable register below.
+  if (casBase?.def) {
+    const won = await registerWorkflowIfUnchanged(defToPersist, casBase.raw);
+    if (!won) {
+      throw new OpenwopError(
+        'conflict',
+        `Workflow '${def.workflowId}' changed while you were saving. Call \`get\` again and re-apply your change.`,
+        409,
+        { workflowId: def.workflowId, reason: 'workflow_head_moved' },
+      );
+    }
+  }
   await recordOwnership(tenantId, def.workflowId, {
     ...(name !== undefined ? { name } : {}),
     // ADR 0596 — denormalized onto the row the scoped list actually projects
@@ -388,11 +502,16 @@ export async function persistAuthoredWorkflow(
   //    told the user "it is open in the builder". The sibling compose lane fixed
   //    exactly this (`host/workflowComposeTool.ts` `registerTransientDraft`,
   //    ADR 0473 D5); this matches that shape rather than inventing a second one.
-  await registerWorkflowDurable(defToPersist);
+  if (!casBase?.def) await registerWorkflowDurable(defToPersist);
   // 5. ADR 0474 — append the content revision beside ownership (history).
   //    MUST be `defToPersist`: the revision store is content-addressed, so
   //    recording the pre-merge `def` would hash content that was never the head.
-  await recordRevision(tenantId, defToPersist);
+  // ADR 0822 D4 — attributed, so the builder's History says the AI wrote it.
+  await recordRevision(tenantId, defToPersist, { createdBy: AUTHORED_VIA });
+  // ADR 0822 D4 — on an OVERWRITE, say what changed and whether the way back is
+  // really there. Both sides are what the CAS verified and what was stored —
+  // never the cached `previous`, never the model's raw candidate.
+  const overwrite = casBase?.def ? await disclosureOf(casBase.def, defToPersist) : undefined;
   log.info('workflow_author_persisted', {
     workflowId: def.workflowId,
     nodeCount: defToPersist.nodes.length,
@@ -406,6 +525,112 @@ export async function persistAuthoredWorkflow(
     // wearing the costume of a fix. The tool relays this to the model, which
     // relays it to the user.
     ...(preservation.preserved.length > 0 ? { preservedFields: preservation.preserved } : {}),
+    ...(overwrite ? { overwrite } : {}),
+  };
+}
+
+/**
+ * ADR 0822 D4 — what an overwrite changed, for the model to tell the person.
+ * Absent on a create (a workflow that did not exist has no "0 changes").
+ */
+export interface OverwriteDisclosure {
+  /** The head the CAS swapped out — by construction the caller's `baseRevision`. */
+  previousRevision: string;
+  /** The revision now stored. Equal to `previousRevision` ⇒ nothing changed. */
+  revision: string;
+  /** True iff the stored content is identical — decided by the revision hash,
+   *  never by the lists below being empty (grade-code WFAC-18: a rename or a
+   *  `variables` edit leaves every list empty and is still a change). */
+  unchanged: boolean;
+  changes: {
+    /** Steps, each named the way the person sees it (`name`, else its typeId). */
+    nodesAdded: ChangedStep[];
+    nodesRemoved: ChangedStep[];
+    nodesChanged: ChangedStep[];
+    edgesAdded: number;
+    edgesRemoved: number;
+    /** Top-level definition fields that changed outside nodes/edges (the
+     *  workflow's `metadata` name/description, `variables`, `settings`, …).
+     *  Lifecycle is excluded — it is host-stamped, never the author's edit. */
+    workflowFieldsChanged: string[];
+  };
+  /** Whether the previous revision is in the revision store, so the builder's
+   *  History can restore it. `recordRevision` is best-effort, heads older than
+   *  ADR 0474 have no row and pruning keeps 50 — so this is read, not assumed. */
+  inHistory: boolean;
+}
+
+export interface ChangedStep { nodeId: string; label: string }
+
+/** Canonical node form for "did it change": `revisionHashOf`'s reading — canvas
+ *  `position` is layout, not content, so a drag is not reported as an edit. */
+function nodeKey(n: WorkflowDefinition['nodes'][number]): string {
+  const { position: _position, ...rest } = n as typeof n & { position?: unknown };
+  return canonicalize(rest);
+}
+
+/** An edge's content without its id: re-authoring a graph re-mints edge ids, and
+ *  "the same wire under a new id" is not a change a person cares about. */
+function edgeKey(e: NonNullable<WorkflowDefinition['edges']>[number]): string {
+  const { edgeId: _edgeId, ...rest } = e as typeof e & { edgeId?: unknown };
+  return canonicalize(rest);
+}
+
+/** Top-level keys whose canonical value differs, nodes/edges excluded (reported
+ *  above) and `metadata` split one level so "name" reads as `metadata.name`. The
+ *  host-stamped `metadata.lifecycle` / `metadata.authoring` are not the author's
+ *  edit and are left out. */
+function topLevelChanges(before: WorkflowDefinition, after: WorkflowDefinition): string[] {
+  const HOST_OWNED_META = new Set(['lifecycle', 'authoring']);
+  const out: string[] = [];
+  const b = before as unknown as Record<string, unknown>;
+  const a = after as unknown as Record<string, unknown>;
+  for (const k of [...new Set([...Object.keys(b), ...Object.keys(a)])].sort()) {
+    if (k === 'nodes' || k === 'edges') continue;
+    if (k === 'metadata') {
+      const bm = (b.metadata ?? {}) as Record<string, unknown>;
+      const am = (a.metadata ?? {}) as Record<string, unknown>;
+      for (const mk of [...new Set([...Object.keys(bm), ...Object.keys(am)])].sort()) {
+        if (HOST_OWNED_META.has(mk)) continue;
+        if (canonicalize(bm[mk] ?? null) !== canonicalize(am[mk] ?? null)) out.push(`metadata.${mk}`);
+      }
+      continue;
+    }
+    if (canonicalize(b[k] ?? null) !== canonicalize(a[k] ?? null)) out.push(k);
+  }
+  return out;
+}
+
+async function disclosureOf(before: WorkflowDefinition, after: WorkflowDefinition): Promise<OverwriteDisclosure> {
+  const was = new Map(before.nodes.map((n) => [n.nodeId, nodeKey(n)]));
+  const now = new Map(after.nodes.map((n) => [n.nodeId, nodeKey(n)]));
+  const step = (n: WorkflowDefinition['nodes'][number]): ChangedStep => ({
+    nodeId: n.nodeId,
+    label: typeof (n as { name?: unknown }).name === 'string' && (n as { name: string }).name.trim() ? (n as { name: string }).name : n.typeId,
+  });
+  const nodesAdded = after.nodes.filter((n) => !was.has(n.nodeId)).map(step);
+  const nodesRemoved = before.nodes.filter((n) => !now.has(n.nodeId)).map(step);
+  const nodesChanged = after.nodes.filter((n) => was.has(n.nodeId) && was.get(n.nodeId) !== now.get(n.nodeId)).map(step);
+  // Multiset difference — two identical wires are two wires.
+  const tally = (edges: WorkflowDefinition['edges']) => {
+    const m = new Map<string, number>();
+    for (const e of edges ?? []) m.set(edgeKey(e), (m.get(edgeKey(e)) ?? 0) + 1);
+    return m;
+  };
+  const eb = tally(before.edges);
+  const ea = tally(after.edges);
+  let edgesAdded = 0;
+  let edgesRemoved = 0;
+  for (const [k, n] of ea) edgesAdded += Math.max(0, n - (eb.get(k) ?? 0));
+  for (const [k, n] of eb) edgesRemoved += Math.max(0, n - (ea.get(k) ?? 0));
+  const previousRevision = revisionHashOf(before);
+  const revision = revisionHashOf(after);
+  return {
+    previousRevision,
+    revision,
+    unchanged: previousRevision === revision,
+    changes: { nodesAdded, nodesRemoved, nodesChanged, edgesAdded, edgesRemoved, workflowFieldsChanged: topLevelChanges(before, after) },
+    inHistory: Boolean(await getRevision(before.workflowId, previousRevision).catch(() => null)),
   };
 }
 

@@ -207,7 +207,7 @@ export const messages = {
   companyAdded: 'Company added.',
   dealAdded: 'Deal added.',
   taskAdded: 'Task added.',
-  triageStarted: 'Triage started — variant {{variant}} (run {{runId}}…).',
+  triageStarted: 'Triage started — the priority appears under Last triage when the run finishes.',
   triageVariantDefault: 'default',
 
   // Toasts / errors
@@ -270,7 +270,8 @@ export const messages = {
   agingEmptyTitle: 'Nothing at risk',
   agingEmptyBody: 'Every open deal here has recent activity — nothing has gone stale.',
   snapshotsTitle: 'Trend',
-  snapshotsEmpty: 'Trend needs at least two weekly snapshots — check back after the next snapshot run.',
+  snapshotsEmpty: 'Trend needs at least two weekly snapshots. Snapshots are taken only where the workspace operator has turned them on.',
+  snapshotsWithheld: 'The weekly trend covers the whole org, including deals outside your territories, so only org-wide viewers see it. Ask a workspace admin if you need it.',
 
   // Gmail sync (ADR 0252 P3)
   tabGmailSync: 'Gmail sync',
@@ -600,4 +601,38 @@ export const messages = {
   customFieldsEditHint: 'Saving replaces this contact’s whole custom-field set with what is shown here.',
   customFieldsSaved: 'Fields saved.',
   fieldRequiredLabel: '{{label}} (required)',
+  // ADR 0768 D5 — the Pocket assistant; its agent reads only orgs the caller can read.
+  pocketTitle: 'Sales assistant',
+  pocketScope: 'CRM records in organizations you can read',
+  pocketHint: 'Ask about deals, companies or tasks, e.g. "which deals close this month?"',
+  // ADR 0837 D8 — the activity loop (next task per deal, overdue marker, close the loop).
+  nextActivity: 'Next: {{title}}',
+  noNextActivity: 'No next activity',
+  rottingActivity: 'Overdue: {{title}}',
+  dueToday: 'due today',
+  dueTomorrow: 'due tomorrow',
+  dueInDays_one: 'due in {{count}} day',
+  dueInDays_other: 'due in {{count}} days',
+  overdueDays_one: '{{count}} day overdue',
+  overdueDays_other: '{{count}} days overdue',
+  dueUndated: 'no due date',
+  markTaskDone: 'Mark done',
+  markTaskDoneLabel: 'Mark “{{title}}” done',
+  taskMarkedDone: '“{{title}}” marked done.',
+  taskMarkDoneFailed: 'Could not mark the task done.',
+  scheduleNextOffer: 'No next activity on this deal. Schedule one?',
+  // ADR 0837 D7 — the recorded triage result.
+  triageResult: '{{priority}} priority · score {{score}}',
+  triagePriority_low: 'Low',
+  triagePriority_normal: 'Normal',
+  triagePriority_high: 'High',
+  // ADR 0837 D4 — a visitor's cancellation reason now lives on the booking.
+  bookingCancelReason: 'Cancelled: {{reason}}',
+  colNextActivity: 'Next activity',
+  triagePending: 'Scoring…',
+  triageRunFailed: 'Triage did not finish — open the run for details.',
+  triageFailedChip: 'Triage failed',
+  triageVariant_basic: 'Basic',
+  triageVariant_enriched: 'Enriched',
+  accessCheckFailed: "Couldn't confirm your permissions for this organization, so editing is hidden.",
 } as const;

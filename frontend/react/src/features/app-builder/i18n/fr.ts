@@ -75,7 +75,7 @@ export const messages = {
   publishFailed: 'Échec de la publication.',
   publishClose: 'Fermer',
   exportWarningsTitle: 'Ce que l’export a laissé de côté',
-  exportWarningsIntro: 'Le téléchargement a démarré, mais {{count}} partie(s) de cette app n’ont pas pu être exprimées en {{target}} et manquent dans le code généré.',
+  exportWarningsIntro: 'Le téléchargement a démarré, mais {{count}} partie(s) de cette app n’ont pas pu être reprises telles quelles en {{target}} — chacune est listée ci-dessous : ignorée, ou exportée avec sa valeur par défaut.',
   syncLoadFailedTitle: 'Impossible de lire la liaison au dépôt',
   syncLoadFailedBody: 'On ne sait donc pas si ce canevas est déjà lié. Lier depuis ici génèrerait un nouveau secret de webhook et casserait un webhook GitHub existant — réessayez d’abord la lecture.',
   syncRetry: 'Réessayer',

@@ -23,6 +23,7 @@ import { composeKnowledgeForSubject, resolveAgentKnowledgeRetrieve, composeAgent
 import { getBorrowedRecallResolver } from './twinRecallSurface.js';
 import { createAgentMemoryPort } from './agentMemoryAdapter.js';
 import { resolveSubjectAccess } from './subjectAccess.js';
+import { collectChatSubjectContextBlocks } from './chatSubjectContextProviders.js';
 import { resolveBoardContextResult, resolveBoardConveneRefusal } from './boardContextResolver.js';
 import { getUser } from '../features/users/usersService.js';
 import { getProfile } from '../features/profiles/profilesService.js';
@@ -212,7 +213,7 @@ export async function composeChatContext(tenantId: string, input: ComposeChatCon
   // agent's own binding) — run them concurrently: each is a KB retrieval on the
   // per-turn hot path, and serializing them doubled the worst-case latency.
   const seed = (seedText ?? '').trim();
-  const [knowledgeBlock, agentKnowledgeBlock, borrowedRecallBlock, boardContextBlock] = await Promise.all([
+  const [knowledgeBlock, agentKnowledgeBlock, borrowedRecallBlock, boardContextBlock, subjectContextBlock] = await Promise.all([
     // ADR 0084 Phase 2 — owner-subject KB grounding with the IDOR guard: resolve
     // the CALLER's access to a membership-scoped subject before composing; 'none'
     // composes nothing (no leak). Best-effort — a failure never breaks the turn.
@@ -357,11 +358,25 @@ export async function composeChatContext(tenantId: string, input: ComposeChatCon
       }
       return block ?? '';
     })(),
+    // ADR 0831 — feature-owned blocks for the conversation's OWNER subject (a
+    // project chat ⇒ its team intent ledger). Per turn and per caller, like the
+    // board leg above: a provider composes nothing the caller cannot read.
+    (async (): Promise<string> => {
+      // ADR 0852 D5 — a channel bound to a project reads that project's blocks.
+      const bound = convMeta?.channel?.boundProjectId;
+      const subject = convMeta?.ownerSubject ?? (bound ? { kind: 'project' as const, id: bound } : undefined);
+      if (!subject) return '';
+      const { blocks, failed } = await collectChatSubjectContextBlocks({ tenantId, ownerSubject: subject, callerUserId, ...(convMeta?.ownerSubject ? {} : { viaChannelBinding: true }) });
+      for (const id of failed) degraded.push(`subject_context:${id}`);
+      return blocks.join('\n\n');
+    })(),
   ]);
   // The knowledge blocks are self-framed/fenced; concatenate those present, in a
   // fixed order: conversation-owner grounding first (it frames the room), the
   // agent's own corpus second, borrowed owner-corpus (fenced/untrusted) last.
-  const combinedKnowledge = [knowledgeBlock, agentKnowledgeBlock, borrowedRecallBlock].filter((b) => b.length > 0).join('\n\n');
+  // The owner's subject context (e.g. the team ledger: what this work is for) leads, then the knowledge blocks.
+  const combinedKnowledge = [subjectContextBlock, knowledgeBlock, agentKnowledgeBlock, borrowedRecallBlock].filter((b) => b.length > 0).join('\n\n');
+  const genericKnowledge = [subjectContextBlock, knowledgeBlock].filter((b) => b.length > 0).join('\n\n');
 
   // Temporal grounding (this session): the CHAT scaffold is composed fresh per
   // turn and never fed the replay-anchor hash (that's the workflow-node path in
@@ -376,7 +391,7 @@ export async function composeChatContext(tenantId: string, input: ComposeChatCon
   const injectedContextBlock = boardContextBlock || undefined;
   const scaffold = agent && agent.systemPrompt && tenantOk
     ? composeAgentSystemPrompt({ persona: agent.persona, role: agent.label, systemPrompt: agent.systemPrompt, userName, addressName, today, injectedContextBlock, ...(combinedKnowledge ? { knowledgeBlock: combinedKnowledge } : {}) })
-    : composeGenericScaffold({ userName, addressName, today, injectedContextBlock, knowledgeBlock });
+    : composeGenericScaffold({ userName, addressName, today, injectedContextBlock, knowledgeBlock: genericKnowledge });
   // ADR 0308 D1 — every composed scaffold (agent-scoped AND generic; text AND
   // voice, which composes through this same owner) carries the anti-fabrication
   // contract. One owner, no per-surface copies.

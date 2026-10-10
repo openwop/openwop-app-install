@@ -79,16 +79,29 @@ FROM node:22-slim@sha256:20b3a9e4bdfe6ee8cc7b14cc360fca2fb6d06f671e06aeb36feaa83
 
 WORKDIR /app
 
+# Run as the unprivileged built-in `node` user (uid 1000) rather than root
+# (CC-1). The boot path writes to the app tree — bootstrap/mountLocalPacks.ts
+# symlinks packs into the runtime pack dir, and the default sqlite DSN creates
+# ./data — so everything below must be owned by `node`, or those writes EACCES.
+#
+# ADR 0863: ownership is set AS the files land (USER node + COPY --chown), never
+# with a trailing `RUN chown -R node:node /app`. That trailing chown rewrote every
+# file into a second full-size layer, roughly doubling node_modules in the image
+# (a slower push at deploy, a slower pull at every cold start) for an identical
+# result.
+RUN chown node:node /app
+USER node
+
 # Re-install production deps only. better-sqlite3 ships a prebuilt binary
 # for node22 on linux-x64; the postinstall picks it up without rebuild.
-COPY backend/typescript/package.json backend/typescript/package-lock.json* ./
+COPY --chown=node:node backend/typescript/package.json backend/typescript/package-lock.json* ./
 RUN npm ci --omit=dev
 
 # Bundle (./lib/index.js) + shared provider catalog. catalog.ts resolves
 # `../providers.json` relative to `lib/`, so providers.json must land at
 # `/app/providers.json` (sibling of lib/, parent of lib/index.js).
-COPY --from=builder /app/lib ./lib
-COPY providers.json ./providers.json
+COPY --chown=node:node --from=builder /app/lib ./lib
+COPY --chown=node:node providers.json ./providers.json
 
 # Conformance fixtures, vendored at `conformance-fixtures/` (kept in sync from
 # the canonical `conformance/fixtures/` via `scripts/sync-fixtures.sh`). Used by
@@ -110,7 +123,7 @@ ARG INCLUDE_CONFORMANCE_FIXTURES=true
 
 # COPY can't be conditional on a build arg; the `conformance-fixtures` dir is
 # always in the build context, so we conditionally REMOVE it post-COPY.
-COPY conformance-fixtures ./conformance-fixtures
+COPY --chown=node:node conformance-fixtures ./conformance-fixtures
 RUN if [ "$INCLUDE_CONFORMANCE_FIXTURES" != "true" ]; then \
       rm -rf ./conformance-fixtures; \
     fi
@@ -126,7 +139,7 @@ RUN if [ "$INCLUDE_CONFORMANCE_FIXTURES" != "true" ]; then \
 # locateRepoSchemasDir(__dirname, ...)` constants in
 # `envelopeAcceptor.ts` and `promptPackLoader.ts` throw and the
 # revision fails to start.
-COPY schemas ./schemas
+COPY --chown=node:node schemas ./schemas
 
 # Local-mount pack source. `bootstrap/mountLocalPacks.ts` symlinks
 # `core.openwop.*` and `vendor.*` packs into the runtime pack dir at
@@ -142,12 +155,12 @@ COPY schemas ./schemas
 # canonical source is outside this build context). Run sync-packs.sh
 # before `gcloud run deploy` when pack manifests change. Same pattern
 # as `schemas/` + `conformance-fixtures/` above.
-COPY packs ./packs
+COPY --chown=node:node packs ./packs
 
 # Vendored bundle catalog (ADR 0366 P3): the marketplace's read-only
 # feature-bundles endpoint serves `distributions/bundles.json` at runtime —
 # absence degrades gracefully (the endpoint reports no catalog).
-COPY distributions ./distributions
+COPY --chown=node:node distributions ./distributions
 
 # In-tree workflow-chain packs (RFC 0013). The app-builder feature registers its
 # design/repair chain at BOOT and hard-requires
@@ -158,14 +171,14 @@ COPY distributions ./distributions
 # COPY the container exits(1) at boot ("design_chain_registration_failed"). Lands
 # them at `/app/examples/workflow-chain-packs/` (sibling of `lib/`) so the upward
 # walk resolves. Same vendoring pattern as `schemas/` + `packs/` above.
-COPY examples/workflow-chain-packs ./examples/workflow-chain-packs
+COPY --chown=node:node examples/workflow-chain-packs ./examples/workflow-chain-packs
 
 # In-tree connection packs (RFC 0095). `defaultConnectionPackRoots()` reads
 # `<repo>/examples/connection-packs` as a default seam root — without this COPY a
 # deployed container registers only the BUILTIN providers, so pack-only providers
 # (e.g. `cohere-rerank`, the KB external reranker — ADR 0351 KB-8) silently can't
 # be connected in production. Same vendoring pattern as workflow-chain-packs above.
-COPY examples/connection-packs ./examples/connection-packs
+COPY --chown=node:node examples/connection-packs ./examples/connection-packs
 
 # Deploy provenance (ADR 0518 correction). `build-meta/commit.txt` is written by
 # `scripts/write-build-commit.mjs` before the source upload and read at runtime by
@@ -190,27 +203,21 @@ COPY examples/connection-packs ./examples/connection-packs
 # watch: the gitignored file persists there, so skipping the writer bakes the
 # previous deploy's SHA instead. `scripts/preflight-deploy.sh` Gate 4 is what
 # catches that; this COPY cannot.
-COPY build-meta ./build-meta
+COPY --chown=node:node build-meta ./build-meta
 
 # CPython-WASI runtime (ADR 0146 Phase 4a) — OPTIONAL, needed ONLY when an operator sets
 # `OPENWOP_CODE_EXEC_RUNTIME=wasi`. Run `scripts/sync-pythonwasm.sh` before `gcloud run deploy`
 # to populate `backend/typescript/vendor/python-3.12.0.wasm` (SHA-256-pinned, gitignored). The
 # tracked `.gitkeep` keeps this COPY a no-op on builds that don't enable the in-process runtime.
-COPY backend/typescript/vendor ./vendor
+COPY --chown=node:node backend/typescript/vendor ./vendor
 
 ENV NODE_ENV=production
 ENV PORT=8080
 
 EXPOSE 8080
 
-# Run as the unprivileged built-in `node` user (uid 1000) rather than root
-# (CC-1). The boot path writes to the app tree — bootstrap/mountLocalPacks.ts
-# symlinks packs into the runtime pack dir, and the default sqlite DSN creates
-# ./data — so chown the tree to `node` first; otherwise those writes EACCES.
 # (Hardening: the base image is digest-pinned above — FROM node:22-slim@sha256:…
 #  — for reproducible builds. Refresh the digest when bumping the base: pull the
 #  tag and copy the registry's docker-content-digest into both FROM lines.)
-RUN chown -R node:node /app
-USER node
 
 CMD ["node", "lib/index.js"]

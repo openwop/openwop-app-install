@@ -469,6 +469,7 @@ async function makeStorage(): Promise<Storage> {
     pruneWebhookDeliveries: async () => 0,
     incrementManagedUsage: async () => {},
     getManagedUsage: async () => ({ inputTokens: 0, outputTokens: 0 }),
+    sumManagedUsageForTenant: async () => ({ inputTokens: 0, outputTokens: 0 }),
     deleteManagedUsageForTenant: async () => 0,
     deleteMediaUsageForTenant: async () => 0,
     incrementMediaUsage: async () => {},

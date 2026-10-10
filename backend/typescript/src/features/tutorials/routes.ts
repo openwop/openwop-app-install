@@ -26,7 +26,7 @@ export function registerTutorialsRoutes(app: Express): void {
   /** The tenant's tutorial library. `degraded` tells the client the kernel was
    *  unreachable so it can say "shipped copy, not editable here" instead of
    *  implying these are the tenant's own rows. */
-  app.get('/v1/host/openwop-app/tutorials', (req, res, next) => {
+  app.get('/host/openwop-app/tutorials', (req, res, next) => {
     void (async () => {
       try {
         const { tutorials, degraded } = await listTutorials(tenantOf(req));
@@ -54,7 +54,7 @@ export function registerTutorialsRoutes(app: Express): void {
    * client to keep using its localStorage copy rather than showing an empty
    * server state as if it were the truth.
    */
-  app.get('/v1/host/openwop-app/tutorials/progress', (req, res, next) => {
+  app.get('/host/openwop-app/tutorials/progress', (req, res, next) => {
     void (async () => {
       try {
         // §Correction (grade-data `GEN-1`/`TUT-5`): `callerSubject` is NOT the
@@ -75,7 +75,7 @@ export function registerTutorialsRoutes(app: Express): void {
 
   /** Upsert one tutorial's completed steps. The subject is SERVER-stamped — a
    *  client cannot write another member's progress by supplying a userId. */
-  app.post('/v1/host/openwop-app/tutorials/progress', (req, res, next) => {
+  app.post('/host/openwop-app/tutorials/progress', (req, res, next) => {
     void (async () => {
       try {
         // Durable subjects only — see the GET's correction note. Writing a row
@@ -116,7 +116,7 @@ export function registerTutorialsRoutes(app: Express): void {
 
   /** One tutorial in full. 404 only when NO kernel row AND no seed matches — a
    *  kernel failure degrades to the seed rather than surfacing as not-found. */
-  app.get('/v1/host/openwop-app/tutorials/:slug', (req, res, next) => {
+  app.get('/host/openwop-app/tutorials/:slug', (req, res, next) => {
     void (async () => {
       try {
         const tutorial = await getTutorial(tenantOf(req), req.params.slug);

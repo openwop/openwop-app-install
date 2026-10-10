@@ -4,6 +4,10 @@
  * list), proving an inpaint mask is authorable with no pointer at all.
  * (Canvas compositing itself is untestable under jsdom — the pure helper +
  * interaction contract are the testable surface.)
+ *
+ * Sabotage: drop the clamp → "clamps overshoot"; drop the 1-px floor → "never
+ * emits a zero-size"; ignore the typed inputs in `addDraftRect` (always the
+ * 25/25/50/50 default) → the keyboard case; a no-op remove → the keyboard case.
  */
 import { describe, it, expect } from 'vitest';
 import { maskRectToPixels } from '../EditImageDialog.js';
@@ -25,14 +29,15 @@ describe('maskRectToPixels — pure percent→pixel clamp', () => {
     expect(maskRectToPixels({ x: Number.NaN, y: 0, w: 10, h: 10 }, 100, 100)).toEqual({ x: 0, y: 0, w: 10, h: 10 });
   });
   it('never emits a zero-size pixel rect for a tiny-but-real percent', () => {
-    expect(maskRectToPixels({ x: 0, y: 0, w: 0.5, h: 0.5 }, 100, 100)).toEqual({ x: 0, y: 0, w: 1, h: 1 });
+    // 0.4% of 100 px rounds to 0 — only the 1-px floor keeps it a real region.
+    // (0.5 would round UP to 1 on its own and prove nothing.)
+    expect(maskRectToPixels({ x: 0, y: 0, w: 0.4, h: 0.4 }, 100, 100)).toEqual({ x: 0, y: 0, w: 1, h: 1 });
   });
 });
 
 // ── The keyboard interaction contract ────────────────────────────────────────
 import { render, cleanup, fireEvent } from '@testing-library/react';
 import { afterEach } from 'vitest';
-import { createRef } from 'react';
 import { I18nextProvider } from 'react-i18next';
 import i18n from '../../../i18n/index.js';
 import { MaskPainterForTest } from '../EditImageDialog.js';
@@ -41,10 +46,9 @@ afterEach(cleanup);
 
 describe('rectangle mode — the keyboard path (UXB-1)', () => {
   it('mode chip → numeric inputs → add → listed region with a remove button', () => {
-    const ref = createRef<{ exportMask(m: 'mask-white' | 'mask-alpha'): string | undefined }>();
-    const { getByRole, getAllByRole, queryByRole } = render(
+    const { getByRole, queryByRole } = render(
       <I18nextProvider i18n={i18n}>
-        <MaskPainterForTest ref={ref} imageUrl="/host/openwop-app/assets/tok_x" />
+        <MaskPainterForTest imageUrl="/host/openwop-app/assets/tok_x" />
       </I18nextProvider>,
     );
     // Switch to rectangle mode via the chip (keyboard: Tab + Enter on a button).
@@ -57,10 +61,11 @@ describe('rectangle mode — the keyboard path (UXB-1)', () => {
     fireEvent.click(getByRole('button', { name: 'Add region' }));
     // The region lists with an accessible remove.
     const list = getByRole('list', { name: 'Mask regions' });
-    expect(list.textContent).toContain('Region 1');
+    // The TYPED values became the region — not the 25/25/50/50 draft default.
+    expect(list.textContent).toContain('Region 1: 10%, 25% · 30×50%');
     const remove = getByRole('button', { name: 'Remove region 1' });
     fireEvent.click(remove);
     expect(queryByRole('list', { name: 'Mask regions' })).toBeNull();
-    expect(getAllByRole('button', { name: /Brush|Rectangle/ }).length).toBe(2);
+    expect(queryByRole('button', { name: 'Remove region 1' })).toBeNull();
   });
 });

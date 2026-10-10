@@ -29,7 +29,7 @@ import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { getRosterEntry } from '../../host/rosterService.js';
 import { getAgentProfile } from '../../host/agentProfileService.js';
 import { resolveAgentPolicy } from '../../host/agentPolicyResolver.js';
-import { resolveEffectiveAccess, type Scope } from '../../host/accessControlService.js';
+import { assertRunOrgScope, resolveEffectiveAccess, type Scope } from '../../host/accessControlService.js';
 import { requireString, requireTenantScope as requireTenantScopeUnion } from '../featureRoute.js';
 import {
   getAgentKnowledge,
@@ -114,7 +114,7 @@ function orgOf(req: Request): string {
 
 export function registerAgentKnowledgeRoutes(deps: RouteDeps): void {
   const { app } = deps;
-  const BASE = '/v1/host/openwop-app/agents/:id/knowledge';
+  const BASE = '/host/openwop-app/agents/:id/knowledge';
 
   // ── view ──
   app.get(BASE, async (req, res, next) => {
@@ -144,7 +144,14 @@ export function registerAgentKnowledgeRoutes(deps: RouteDeps): void {
       const collectionId = requireString((req.body ?? {})?.collectionId, 'collectionId');
       // ADR 0643 R3 (Blocker 2) — the BIND door resolves the binder against the
       // collection's subject; a non-member cannot launder a bound corpus into a grant.
-      await bindCollection(tenantOf(req), id, collectionId, { subject: actingUserOf(req) });
+      // ADR 0830 D2 (S3) — and against the collection's ORG: the KB door's predicate
+      // (`assertOrgScope`, through its run-lane form so a personal or `anon:` sandbox
+      // keeps its implicit owner) for the same subject this route's tenant gate used.
+      // The projects and profile bind doors already did this; this one never did.
+      const binder = actingUserOf(req);
+      if (!binder) throw new OpenwopError('forbidden_scope', 'Missing required scope: workspace:read', 403, { requiredScope: 'workspace:read' });
+      await bindCollection(tenantOf(req), id, collectionId, { subject: binder },
+        (orgId) => assertRunOrgScope(tenantOf(req), binder, orgId, 'workspace:read'));
       res.status(201).json(await getAgentKnowledge(tenantOf(req), id, { subject: actingUserOf(req) }));
     } catch (err) { next(err); }
   });

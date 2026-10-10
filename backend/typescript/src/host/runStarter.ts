@@ -27,7 +27,9 @@ import { recordRunAttribution } from './agentRunActivityIndex.js';
 import { insertRunWithStartContext } from './runInsert.js';
 import { stripReservedRunMetadata } from './runDispatch.js';
 import { workflowBudgetExhausted } from './workflowBudgets.js';
+import { reservePlanRun } from './planRunLimit.js';
 import { seedRunVariables } from './variablesRuntime.js';
+import { assertEffectAllowed } from './runEffectContext.js';
 import { createLogger } from '../observability/logger.js';
 
 const log = createLogger('host.runStarter');
@@ -69,6 +71,11 @@ export async function startWorkflowRun(
     /** ADR 0474 P1b — 'draft' runs the head (the composed-proposal approve:
      *  the hash it verified IS the head's); default resolves published-when-present. */
     launch?: 'draft' | 'published';
+    /** ADR 0832 D3 — the member who CAUSED this run when it acts for nobody (a
+     *  channel poster, the kanban Run clicker, a trigger's author, an approver).
+     *  Stamped onto the reserved `run.metadata.orgScopeSubject` after the strip;
+     *  it narrows which orgs the run's surfaces may reach and grants nothing. */
+    orgScopeSubject?: string;
   },
 ): Promise<string | null> {
   const { storage, hostSuite } = deps;
@@ -83,6 +90,14 @@ export async function startWorkflowRun(
       return existing.runId;
     }
   }
+  // ADR 0764 D3 — starting a run is an outbound effect. Placed AFTER the
+  // deterministic-runId early return (re-presenting a bound id resolves to the
+  // existing run, which fires nothing) and BEFORE any write. Outside a node
+  // execution this is a no-op; inside a replay fork a re-fired start — an agent
+  // tool re-issued from the invocation log — is refused instead of starting a
+  // duplicate real run. The agent loop surfaces the refusal as a tool error
+  // carrying `replay_source_missing`; it does not fail the node.
+  assertEffectAllowed('dispatch', `run-start ${input.workflowId}`);
   // ADR 0474 P1b — every starter-driven launch (schedules, heartbeats, agent
   // dispatch, approved proposals) is a PRODUCTION launch: published-when-present.
   const wf = await resolveLaunchWorkflow(hostSuite.workflowCatalog, input.tenantId, input.workflowId, { launch: input.launch ?? 'published' });
@@ -111,6 +126,12 @@ export async function startWorkflowRun(
       { workflowId: input.workflowId, reason: 'workflow_budget_exhausted' },
     );
   }
+  // ADR 0821 D6 / P5 — the plan's monthly run limit. Deliberately AFTER the
+  // launch-definition resolve, the hash check and the budget cap (the ADR 0823
+  // ordering requirement): a foreign, missing or refused workflow must never
+  // consume a run. Exempt service tenants and unlimited plans count nothing.
+  // A failed insert below releases the reservation.
+  const reservation = await reservePlanRun(input.tenantId);
   const runId = input.runId ?? randomUUID();
   const now = new Date().toISOString();
   const run: RunRecord = {
@@ -123,7 +144,11 @@ export async function startWorkflowRun(
     // ADR 0476 (review L1) — the reserved-key spoof guard was anchored only
     // at buildRunRecord; every current startWorkflowRun caller host-composes
     // metadata, but the strip HERE keeps that true for future callers.
-    metadata: { ...stripReservedRunMetadata(input.metadata), launchResolved: wf.launchResolved },
+    metadata: {
+      ...stripReservedRunMetadata(input.metadata),
+      launchResolved: wf.launchResolved,
+      ...(input.orgScopeSubject ? { orgScopeSubject: input.orgScopeSubject } : {}),
+    },
     configurable: input.configurable ?? {},
     createdAt: now,
     updatedAt: now,
@@ -140,6 +165,9 @@ export async function startWorkflowRun(
   try {
     await insertRunWithStartContext(storage, run, { definition: wf.definition, enqueueDispatch: true });
   } catch (err) {
+    // ADR 0821 P5 — this run never landed (or a peer's identical run did, which
+    // that peer already counted): give the reserved unit back.
+    await reservation.release();
     // Two workers can observe an expired Kanban/work-source lease at the same
     // time. The deterministic primary key is the final arbiter: when another
     // worker won the insert race, return its run without emitting a second

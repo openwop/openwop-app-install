@@ -77,6 +77,9 @@
          `VITE_BRAND_*` env (defaults in src/brand/defaults.ts). See
          WHITE-LABEL.md — do not hard-code brand values here. -->
     <title>{{BRAND_TITLE}}</title>
+    <!-- ADR 0824 D6 — the shell's description until a public page applies its own
+         (siteSeo.applySeo upserts this same element and restores it on unmount). -->
+    <meta name="description" content="{{BRAND_DESCRIPTION}}" />
     <link rel="icon" type="image/svg+xml" href="{{BRAND_FAVICON}}" />
     <!-- PWA install + mobile chrome. The manifest is emitted at build time by
          the `openwop-brand-html` Vite plugin (name/theme-color/icon from

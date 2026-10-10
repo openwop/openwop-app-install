@@ -32,6 +32,7 @@ export function registerAccessibilityAgentTools(): void {
   registerFeatureAgentTool({
     // TRUSTED: NO storage read — grades the caller-supplied model; returns issue kinds + WCAG criteria (enums).
     contentTrust: 'trusted',
+    effect: 'read',
     def: {
       name: ACCESSIBILITY_CHECK_TOOL_ID,
       description:
@@ -59,6 +60,7 @@ export function registerAccessibilityAgentTools(): void {
   registerFeatureAgentTool({
     // TRUSTED: returns a freshly generated alt-text string, not stored user text.
     contentTrust: 'trusted',
+    effect: 'read',
     def: {
       name: ACCESSIBILITY_ALT_TEXT_TOOL_ID,
       description:

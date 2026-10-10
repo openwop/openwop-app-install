@@ -1,6 +1,7 @@
 {
   "name": "feature.cad.nodes",
-  "version": "1.6.0",
+  "version": "1.6.1",
+  "kind": "node",
   "description": "CAD canvas producer node pack. The `render` node emits a typed `canvas.cad` artifact — a constrained parametric model { name?, units?, solids[] } of primitive solids — that flows through the run-output producer and renders inline in the chat artifact workbench as an orthographic SVG projection. Constrained typed JSON, never executable code; pure transform; replay-safe. ADR 0388 P1 adds mesh interchange: mesh-import (canonical STL bytes -> content-addressed host mesh asset + canvas.cad payload) and mesh-export (model -> STL/GLB capability URL) over ctx.features.cad.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
@@ -12,7 +13,7 @@
     "parametric"
   ],
   "engines": {
-    "openwop": ">=1.0.0 <2.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "nodes": [
     {
@@ -20,7 +21,7 @@
       "version": "1.2.0",
       "label": "Render CAD model",
       "description": "Emit a `canvas.cad` artifact. Inputs: { model } (or `source` JSON) = { name?, units?, solids: [{ kind, x?, y?, z?, width?, height?, depth?, radius?, length?, color?, label?, rotation?, materialId?, metallic?, roughness? }] }. Every listed field is PRESERVED — this node's normalizer used to drop rotation/metallic/roughness silently. kind ∈ box|cylinder|sphere|cone|mesh (mesh carries assetRef -> a stored mesh asset + optional scale). Output: a typed canvas.cad artifact. Pure transform.",
-      "category": "transform",
+      "category": "data",
       "role": "action"
     },
     {
@@ -44,7 +45,7 @@
       "version": "1.0.0",
       "label": "CAD BOM Generate",
       "description": "Deterministically project a canvas.cad model ({ model }) into a canvas.cad.bom bill of materials (identical parts rolled up; exact parametric volume/area; mesh volume flagged approximate) over ctx.features.cad. Outputs { bom, csv, artifact }. Computed, never model-authored; typed failure on unknown kinds.",
-      "category": "transform",
+      "category": "data",
       "role": "action"
     },
     {
@@ -52,7 +53,7 @@
       "version": "1.0.0",
       "label": "CAD Dimension Suggest",
       "description": "Deterministically propose annotated dimensions for un-dimensioned solids of a canvas.cad model ({ model }) over ctx.features.cad — per kind, the primary defining dimensions (values are always DERIVED from geometry at read time, never stored). Outputs { dimensions }. The agent applies them via render; proposals are closed-world validated on save.",
-      "category": "transform",
+      "category": "data",
       "role": "action"
     },
     {
@@ -60,7 +61,7 @@
       "version": "1.0.0",
       "label": "CAD Sketch Solve",
       "description": "Run the DETERMINISTIC 2D sketch constraint solver ({ sketch: { points, segments, constraints } }) over ctx.features.cad — fixed iteration order/tolerance, no clock/RNG, so a replayed run reproduces byte-identical coordinates. Outputs { points, iterations, residual, diagnostics (well/under/over-constrained, freeDof, conflicting) }. Non-convergence and invalid refs are typed failures.",
-      "category": "transform",
+      "category": "data",
       "role": "action"
     },
     {
@@ -68,7 +69,7 @@
       "version": "1.0.0",
       "label": "CAD Material Recommend",
       "description": "Deterministically suggest a LIBRARY material per solid of a canvas.cad model ({ model }) from fixed label/kind rules over ctx.features.cad. Outputs { suggestions: [{solid, materialId, current}], library }. Assignment is closed-world by materialId — never free material JSON.",
-      "category": "transform",
+      "category": "data",
       "role": "action"
     }
   ],

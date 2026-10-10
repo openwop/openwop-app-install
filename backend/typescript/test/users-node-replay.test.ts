@@ -24,6 +24,19 @@
  * served the recorded outcome — the target STAYS active and no second
  * `host.users.user.deactivated` leaves the emitter. (`comments-node-replay`
  * deliberately stops short of this — its live probe is `PROBE-CMNT-3`.)
+ *
+ * Sabotage that turns it red: `"role": "side-effect"` → `"action"` in
+ * `packs/feature.users.nodes/pack.json` (leg 1); the users entry deleted from
+ * `SIDE_EFFECTING_TYPE_PATTERNS` (leg 2); `isSideEffectingNode` returning false
+ * for `feature.users.*` (predicate + the behavioural fork, which then re-disables
+ * the target); the `requiredPacks` version drifted from the manifest; a PII
+ * property added to an output schema.
+ *
+ * WAITS. Emits need no wait (`emitHostEvent` calls `deliverWebhooks` in its
+ * first synchronous segment, inside the node's own status write). The only
+ * wait is `settleRun`, a bounded poll for a TERMINAL run status over HTTP — a
+ * condition, not a sleep; its 25 ms poll interval is the recorded ceiling of
+ * driving a real run through `createApp`.
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -121,17 +134,24 @@ describe('BEHAVIOURAL (review SHOULD-1) — a replay :fork is served the recorde
   let BASE = '';
   let cookie = '';
   const delivered: HostEventEnvelope[] = [];
-  const TENANT = `org:u617-replay-${Date.now()}`;
-  const call = async (method: string, path: string, body?: unknown): Promise<{ status: number; body: any }> => {
+  const TENANT = 'org:u617-replay'; // fixed: one createApp per file, nothing collides
+  interface RunBody {
+    runId?: string;
+    status?: string;
+    error?: unknown;
+    events?: Array<{ type: string; nodeId?: string; payload?: { outputs?: Record<string, unknown> } }>;
+  }
+  const call = async (method: string, path: string, body?: unknown): Promise<{ status: number; body: RunBody }> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    return { status: res.status, body: await res.json().catch(() => undefined) };
+    const parsed: unknown = await res.json().catch(() => ({}));
+    return { status: res.status, body: (parsed ?? {}) as RunBody };
   };
   /** Terminal status, with the run's error folded in so a red names the cause. */
   const settleRun = async (runId: string): Promise<string> => {
-    let snap: { status?: string; error?: unknown } = {};
+    let snap: RunBody = {};
     for (let i = 0; i < 200; i++) {
-      snap = (await call('GET', `/v1/runs/${runId}`)).body ?? snap;
+      snap = (await call('GET', `/runs/${runId}`)).body;
       if (['completed', 'failed', 'cancelled'].includes(snap.status ?? '')) break;
       await new Promise((r) => setTimeout(r, 25));
     }
@@ -164,40 +184,37 @@ describe('BEHAVIOURAL (review SHOULD-1) — a replay :fork is served the recorde
   it('live run disables the target (one deactivated event); after a re-enable, the replay fork leaves it ACTIVE and emits nothing', async () => {
     // The first login into an explicit, absent workspace FOUNDS and OWNS it —
     // the owner holds host:members:manage, so the node's authority check passes.
-    const login = await call('POST', '/v1/host/openwop-app/test/login', { email: 'replay-owner@acme.test', tenantId: TENANT });
+    const login = await call('POST', '/host/openwop-app/test/login', { email: 'replay-owner@acme.test', tenantId: TENANT });
     expect(login.status).toBe(201);
     const target = await createUser({ tenantId: TENANT, principalId: 'oidc:u617-replay-target', source: 'manual' }, { silent: true });
 
     const workflowId = 'users.replay.deactivate';
     registerWorkflow({ workflowId, nodes: [{ nodeId: 'n1', typeId: 'feature.users.nodes.deactivate', config: { userId: target.userId } }], edges: [] });
-    const create = await call('POST', '/v1/runs', { workflowId, inputs: {} });
+    const create = await call('POST', '/runs', { workflowId, inputs: {} });
     expect(create.status, JSON.stringify(create.body)).toBe(201);
     const runId = create.body.runId as string;
     expect(await settleRun(runId)).toBe('completed');
     const afterLive = (await getUser(target.userId))!;
     expect(afterLive.status).toBe('disabled');
     expect(sessionEpochOf(afterLive)).toBe(1);
-    await new Promise((r) => setTimeout(r, 15));
     expect(ofType('host.users.user.deactivated')).toHaveLength(1);
     expect(ofType('host.users.user.deactivated')[0]!.payload).toMatchObject({ userId: target.userId, reason: 'workflow' });
 
     // Re-enable, then fork in replay mode: the side-effect node must be SERVED
     // its recorded outcome, never re-executed against live identity.
     await setUserStatus(target.userId, 'active', { reason: 'admin' });
-    await new Promise((r) => setTimeout(r, 15));
     const before = delivered.length;
-    const fork = await call('POST', `/v1/runs/${runId}:fork`, { mode: 'replay' });
+    const fork = await call('POST', `/runs/${runId}:fork`, { mode: 'replay' });
     expect(fork.status, JSON.stringify(fork.body)).toBe(201);
     expect(await settleRun(fork.body.runId as string)).toBe('completed');
     const afterFork = (await getUser(target.userId))!;
     expect(afterFork.status).toBe('active');
     expect(sessionEpochOf(afterFork)).toBe(1); // no second epoch bump either
-    await new Promise((r) => setTimeout(r, 15));
     expect(delivered.length).toBe(before);
     expect(ofType('host.users.user.deactivated')).toHaveLength(1);
     // The fork's node completed WITH the recorded (disabled) outputs.
-    const bundle = await call('GET', `/v1/runs/${fork.body.runId}/debug-bundle`);
-    const done = ((bundle.body?.events as Array<{ type: string; nodeId?: string; payload?: { outputs?: Record<string, unknown> } }>) ?? []).find((e) => e.type === 'node.completed' && e.nodeId === 'n1');
+    const bundle = await call('GET', `/runs/${fork.body.runId}/debug-bundle`);
+    const done = (bundle.body.events ?? []).find((e) => e.type === 'node.completed' && e.nodeId === 'n1');
     expect(done?.payload?.outputs).toEqual({ userId: target.userId, status: 'disabled' });
   });
 });

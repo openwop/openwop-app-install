@@ -61,6 +61,42 @@ export const MCP_LEGACY_PROFILE = 'mcp-2025-06-18-legacy';
 export const MCP_PROFILES: readonly string[] = [MCP_CURRENT_PROFILE, MCP_LEGACY_PROFILE];
 
 /**
+ * ADR 0858 P4 — the v2 `mcp.profiles[]`. `interop.md` §"Legacy profiles are
+ * absent": the item pattern `^mcp-[0-9]{4}-[0-9]{2}-[0-9]{2}$` admits no
+ * `-legacy` suffix, so `mcp-2025-06-18-legacy` is never advertised at v2. The
+ * legacy REVISION stays in `revisions[]` while it is served (it is the floor).
+ */
+export function mcpV2Profiles(): string[] {
+  return MCP_PROFILES.filter((p) => !p.endsWith('-legacy'));
+}
+
+/**
+ * ADR 0858 P4 — `mcp.minimumRevision`: the oldest revision this host serves
+ * (`MCP_SUPPORTED_VERSIONS` is newest-first). Below it, `interop.md` §"The
+ * floor" makes negotiation fail closed with `interop_version_unsupported`.
+ */
+export function mcpMinimumRevision(): McpProtocolVersion {
+  return MCP_SUPPORTED_VERSIONS[MCP_SUPPORTED_VERSIONS.length - 1]!;
+}
+
+/**
+ * ADR 0858 P4 — `mcp.refreshedAt` (`spec/v2/facets/mcp.schema.json`:
+ * `{type: string, format: date}`), the date the served revision set was last
+ * RE-EVALUATED against upstream (`interop.md` §"The refresh SLA": at most every
+ * 90 days).
+ *
+ * 2026-10-07 REVIEW: `2026-07-28` + `2025-06-18` checked against the corpus's
+ * upstream pin, `spec/v2/interop-map.json` `pins.mcp` (revision 2026-07-28, map
+ * updated 2026-09-23). 2026-07-28 is the current revision; the legacy one is
+ * kept until `MCP_LEGACY_PROFILE_SUNSET`. Not checked against the live upstream
+ * revision list.
+ *
+ * `test/adr0858-interop-refreshed-at.test.ts` reds 90 days after this date, ON
+ * PURPOSE.
+ */
+export const MCP_VERSIONS_REFRESHED_AT = '2026-10-07';
+
+/**
  * RFC 0153 §A — the closed `features[]` set, and a MUST for a current-profile
  * host: `server-discover`, `mrtr`, `cacheable-lists` are MUSTs of the upstream
  * revision, so a host claiming the profile without them is not implementing it.

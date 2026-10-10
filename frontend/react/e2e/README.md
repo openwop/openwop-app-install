@@ -65,6 +65,15 @@ fight, and the page under assertion sees whichever landed last — measured, as
 opposite results on consecutive runs. `devtools-gate.spec.ts` is
 `mode: 'serial'` for this reason and restores the prior value in `afterAll`.
 
+`mode: 'serial'` only orders tests INSIDE one file — every other spec still runs
+beside it and reads the same row. Flipping a toggle's GLOBAL status therefore
+changes what unrelated specs render (`pair-canvas.spec.ts` turning `builder-pair`
+on made the builder open on Pair instead of Inspect, and
+`preset-inputs-clickthrough` CT-E1/2/4 went red on main, 2026-09-29). Prefer a
+per-tenant override for the test's own personal tenant
+(`tenantOverrides[<tenantId>]`) and remove it in `afterAll`; write the global
+status only when the test is genuinely about the global default.
+
 ### 5. axe only flags what it RENDERS
 
 A green a11y run does **not** mean the app is clean — it means the rendered

@@ -7,6 +7,11 @@
  * Semantics (ADR 0176): balance is checked BEFORE the managed daily-cap — a tenant with
  * purchased credit is not blocked by the free-tier cap (their balance covers usage); on
  * consumption the balance is drawn down first, the daily-cap remains the operator backstop.
+ *
+ * > CORRECTED 2026-10-05 (ADR 0821 D2) — "drawn down FIRST" is no longer true. The
+ * > balance is the LAST payer: free daily allowance → plan monthly allowance →
+ * > balance (`host/managedCredits.ts` `drawCredits`). It is consulted only once the
+ * > free allowance is spent, and a call inside the free allowance draws nothing (G1).
  */
 
 export interface ManagedBalanceProvider {
@@ -29,9 +34,11 @@ export async function managedBalanceAvailable(tenantId: string): Promise<number>
   try { return await provider.available(tenantId); } catch { return 0; }
 }
 
-/** Draw down consumed tokens from the tenant's balance (no-op when unwired). */
-export async function managedBalanceDraw(tenantId: string, tokens: number): Promise<void> {
-  if (!provider || tokens <= 0) return;
-  try { await provider.draw(tenantId, tokens); } catch { /* best-effort — never break a call */ }
+/** Draw down consumed tokens from the tenant's balance (no-op when unwired).
+ *  Returns the tokens actually drawn (0 when unwired / on error) so the caller
+ *  can attribute what was charged (ADR 0821 D4). */
+export async function managedBalanceDraw(tenantId: string, tokens: number): Promise<number> {
+  if (!provider || tokens <= 0) return 0;
+  try { return await provider.draw(tenantId, tokens); } catch { return 0; /* best-effort — never break a call */ }
 }
 

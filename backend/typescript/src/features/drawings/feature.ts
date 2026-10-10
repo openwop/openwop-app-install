@@ -27,14 +27,14 @@ export const drawingsFeature: BackendFeature = {
     id: 'drawings',
     label: 'Drawings',
     description:
-      'Vector illustrations and diagrams — generate them with the AI chat (the Illustrator agent emits a structured drawing rendered inline as safe SVG) AND create/edit them full-screen: a shape list with per-kind adders (rectangle, circle, ellipse, line, polyline, polygon, text), direct-manipulation move/resize/rotate, numeric geometry and paint, undo/redo, and version history. Constrained typed JSON, never executable code or raw markup. ON by default.',
+      'Vector illustrations and diagrams — generate them with the AI chat (the Illustrator agent emits a structured drawing rendered inline as safe SVG) AND create/edit them full-screen: a shape list with per-kind adders (rectangle, circle, ellipse, line, polyline, polygon, text), direct-manipulation move/resize/rotate, numeric geometry and paint, undo/redo, and version history. Constrained typed JSON, never executable code or raw markup.',
     category: 'Documents',
     status: 'on',
     bucketUnit: 'tenant',
     salt: 'drawings',
   },
   requiredPacks: [
-    { name: 'feature.drawings.nodes', version: '1.0.0' },
-    { name: 'feature.drawings.agents', version: '1.0.1' },
+    { name: 'feature.drawings.nodes', version: '1.0.1' },
+    { name: 'vendor.openwop-app.drawings.agents', version: '1.0.3' },
   ],
 };

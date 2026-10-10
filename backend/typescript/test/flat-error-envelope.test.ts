@@ -19,8 +19,8 @@
  * "the envelope is flat" from "one function that emits a flat envelope exists".
  *
  * The routes below are a deliberate cross-section of the converted surfaces
- * rather than all of them: a canonical endpoint (`/v1/runs` residency
- * admission), a spec-canonical `/v1/host/sample/*` seam (runner, workload
+ * rather than all of them: a canonical endpoint (`/runs` residency
+ * admission), a spec-canonical `/host/sample/*` seam (runner, workload
  * identity, memory compaction, anon surface), an app host-extension product
  * route (voice), and an interop refusal that carries `details.retriable` +
  * `details.protocol` (a2a / mcp). Whole-surface coverage is the ratchet's job
@@ -39,7 +39,9 @@ import { assertFlatErrorEnvelope, detailOf, errorCodeOf, retriableOf } from './h
 
 let BASE: string;
 let server: http.Server;
-const H = { authorization: 'Bearer dev-token', 'content-type': 'application/json' };
+// ADR 0812 — major 2 named explicitly, so a seam's refusal code is the v2 spelling
+// whichever way the header-less default falls (v2 vendor-namespaces host-own codes).
+const H = { authorization: 'Bearer dev-token', 'content-type': 'application/json', 'OpenWOP-Version': '2' };
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -106,32 +108,32 @@ const REFUSALS: ReadonlyArray<{
 }> = [
   {
     name: 'runner seam — dispatch validation (routes/runnerSeam.ts)',
-    path: '/v1/host/sample/runner/dispatch',
+    path: '/host/sample/runner/dispatch',
     body: { subject: '', runId: '', stepId: '' },
     expectCode: 'validation_error',
   },
   {
     name: 'workload-identity seam — refusal (routes/workloadIdentitySeam.ts)',
-    path: '/v1/host/sample/test/workload-identity/resolve',
+    path: '/host/sample/test/workload-identity/resolve',
     body: { identity: { scheme: 'spiffe', subject: 'spiffe://example/x', token: 'eyJhbGciOiJIUzI1NiJ9.a.b' } },
   },
   {
     name: 'memory-compaction seam — missing memoryRef (routes/memoryCompactionSeam.ts)',
-    path: '/v1/test/memory/seed',
+    path: '/test/memory/seed',
     body: {},
-    expectCode: 'invalid_argument',
+    expectCode: 'openwop-app.invalid_argument',
   },
   {
     name: 'test seam — prompt/compose missing templateId (routes/testSeam.ts)',
-    path: '/v1/host/openwop-app/prompt/compose',
+    path: '/host/openwop-app/prompt/compose',
     body: {},
     expectCode: 'invalid_argument',
   },
   {
     name: 'agents — TTS missing text (routes/agents.ts)',
-    path: '/v1/host/sample/ai/call-speech-synthesizer',
+    path: '/host/sample/ai/call-speech-synthesizer',
     body: { voiceId: 'v1' },
-    expectCode: 'invalid_request',
+    expectCode: 'openwop-app.invalid_request',
   },
 ];
 
@@ -160,7 +162,7 @@ describe('H27 — converted routes emit the canonical FLAT error envelope', () =
     // the flag-off refusal and never reaches the unknown-surface branch, so the
     // leg would pass while testing a different line. (Caught by sabotage S2 —
     // dropping `message` from the unknown-surface branch left this leg green.)
-    const res = await post('/v1/host/sample/anon-surface/dispatch', { surface: 'no-such-surface', tool: 'x' });
+    const res = await post('/host/sample/anon-surface/dispatch', { surface: 'no-such-surface', tool: 'x' });
     expect(res.status).toBe(404);
     const env = assertFlatErrorEnvelope(res.body, 'anon-surface dispatch');
     expect(env.error).toBe('not_found');
@@ -168,7 +170,7 @@ describe('H27 — converted routes emit the canonical FLAT error envelope', () =
   });
 
   it('an interop refusal puts `retriable` under `details`, never at top level and never inside `error`', async () => {
-    const res = await post('/v1/host/sample/mcp/invoke', {
+    const res = await post('/host/sample/mcp/invoke', {
       serverUrl: 'http://127.0.0.1:1/never',
       requestVersion: '1999-01-01',
     });
@@ -188,7 +190,7 @@ describe('H27 — converted routes emit the canonical FLAT error envelope', () =
     // localization path" is a claim, and a helper that quietly skipped it would
     // ship a Portuguese-speaking operator an English validation message with
     // every other envelope localized around it.
-    const res = await fetch(`${BASE}/v1/host/sample/runner/dispatch`, {
+    const res = await fetch(`${BASE}/host/sample/runner/dispatch`, {
       method: 'POST',
       headers: { ...H, 'accept-language': 'pt-BR' },
       body: JSON.stringify({}),
@@ -202,10 +204,10 @@ describe('H27 — converted routes emit the canonical FLAT error envelope', () =
 
   it('a THROWN OpenwopError and an INLINE refusal produce the same envelope shape', async () => {
     // The whole point of routing inline sites through `sendError`: there is ONE
-    // shape, whichever path produced it. `/v1/runs` with no workflowId throws;
+    // shape, whichever path produced it. `/runs` with no workflowId throws;
     // the runner seam answers inline.
-    const thrown = await post('/v1/runs', {});
-    const inline = await post('/v1/host/sample/runner/dispatch', {});
+    const thrown = await post('/runs', {});
+    const inline = await post('/host/sample/runner/dispatch', {});
     expect(thrown.status).toBeGreaterThanOrEqual(400);
     expect(inline.status).toBeGreaterThanOrEqual(400);
     const a = assertFlatErrorEnvelope(thrown.body, 'thrown');

@@ -14,6 +14,7 @@ import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
+import { bareRunId } from './support/bareRunId.js';
 
 let server: http.Server;
 let BASE: string;
@@ -58,7 +59,7 @@ interface OpenInterruptBody {
 
 describe('openwop-app.a2ui-clarify (ADR 0051 Phase 3 producer)', () => {
   it('suspends with a catalog-valid A2UI surface, then resumes to completion', async () => {
-    const create = await jsonFetch<{ runId: string }>('/v1/runs', {
+    const create = await jsonFetch<{ runId: string }>('/runs', {
       method: 'POST',
       body: JSON.stringify({ workflowId: 'openwop-app.a2ui-clarify', inputs: {} }),
     });
@@ -69,7 +70,7 @@ describe('openwop-app.a2ui-clarify (ADR 0051 Phase 3 producer)', () => {
     let open: NonNullable<OpenInterruptBody['interrupts']> = [];
     for (let i = 0; i < 40; i++) {
       await new Promise((r) => setTimeout(r, 50));
-      const list = await jsonFetch<OpenInterruptBody>(`/v1/host/openwop-app/runs/${runId}/interrupts`);
+      const list = await jsonFetch<OpenInterruptBody>(`/host/openwop-app/runs/${bareRunId(runId)}/interrupts`);
       open = list.body.interrupts ?? [];
       if (open.length > 0) break;
     }
@@ -93,7 +94,7 @@ describe('openwop-app.a2ui-clarify (ADR 0051 Phase 3 producer)', () => {
 
     // Resolve with the collected form values; the run resumes and completes.
     // Raw fetch (status only) — the resume endpoint may answer 204/empty.
-    const resolve = await fetch(`${BASE}/v1/runs/${runId}/interrupts/${it0.nodeId}`, {
+    const resolve = await fetch(`${BASE}/runs/${runId}/interrupts/${it0.nodeId}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
       body: JSON.stringify({ resumeValue: { action: 'confirm', date: '2026-07-01', duration: '60', reminder: true } }),
@@ -103,7 +104,7 @@ describe('openwop-app.a2ui-clarify (ADR 0051 Phase 3 producer)', () => {
     let finalStatus = 'unknown';
     for (let i = 0; i < 40; i++) {
       await new Promise((r) => setTimeout(r, 50));
-      const snap = await jsonFetch<{ status: string }>(`/v1/runs/${runId}`);
+      const snap = await jsonFetch<{ status: string }>(`/runs/${runId}`);
       finalStatus = snap.body.status;
       if (['completed', 'failed', 'cancelled'].includes(finalStatus)) break;
     }

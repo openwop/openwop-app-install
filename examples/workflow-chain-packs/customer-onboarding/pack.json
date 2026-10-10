@@ -1,12 +1,12 @@
 {
   "name": "core.openwop.workflows.customer-onboarding",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "kind": "workflow-chain",
   "description": "Customer-onboarding chains (RFC 0013): the post-sale first-mile — a warm welcome, a personalized kickoff checklist, and a scheduled 30-day health check. All external sends sit behind a human approval gate; tenant values are run parameters (replay-deterministic).",
   "author": "openwop",
   "license": "Apache-2.0",
   "engines": {
-    "openwop": ">=1.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "keywords": [
     "Customer onboarding"
@@ -14,7 +14,7 @@
   "chains": [
     {
       "chainId": "onboarding.welcome-sequence",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "New Customer → Welcome Email",
       "description": "A new customer signs up (webhook) and gets a warm, personalized welcome email drafted from their signup details — reviewed by a human before it sends.",
       "parameters": {
@@ -47,7 +47,7 @@
         "nodes": [
           {
             "id": "signup",
-            "typeId": "core.trigger.webhook",
+            "typeId": "core.trigger.webhook@1.0.0",
             "name": "New signup",
             "position": {
               "x": 0,
@@ -60,7 +60,7 @@
           },
           {
             "id": "draft",
-            "typeId": "core.ai.chatCompletion",
+            "typeId": "core.ai.chatCompletion@1.0.0",
             "name": "Draft welcome",
             "position": {
               "x": 280,
@@ -75,7 +75,7 @@
           },
           {
             "id": "gate",
-            "typeId": "core.chat.approvalGate",
+            "typeId": "core.chat.approvalGate@1.1.0",
             "name": "Review welcome",
             "position": {
               "x": 560,
@@ -90,7 +90,7 @@
           },
           {
             "id": "gate-reject",
-            "typeId": "core.flow.noop",
+            "typeId": "core.flow.noop@1.0.0",
             "name": "Rejected — no welcome sent",
             "position": {
               "x": 840,
@@ -101,7 +101,7 @@
           },
           {
             "id": "send",
-            "typeId": "core.openwop.integration.email-send",
+            "typeId": "core.openwop.integration.email-send@1.0.0",
             "name": "Send welcome",
             "position": {
               "x": 840,
@@ -146,7 +146,7 @@
     },
     {
       "chainId": "onboarding.kickoff-checklist",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "Kickoff → Personalized Checklist",
       "description": "Turns a new account's context into a tailored onboarding checklist and posts it to the team as an in-app notification so the CSM can act on it.",
       "parameters": {
@@ -169,7 +169,7 @@
         "nodes": [
           {
             "id": "start",
-            "typeId": "core.trigger.event",
+            "typeId": "core.trigger.event@1.0.0",
             "name": "Account created",
             "position": {
               "x": 0,
@@ -182,7 +182,7 @@
           },
           {
             "id": "plan",
-            "typeId": "core.ai.chatCompletion",
+            "typeId": "core.ai.chatCompletion@1.0.0",
             "name": "Build checklist",
             "position": {
               "x": 280,
@@ -197,7 +197,7 @@
           },
           {
             "id": "notify",
-            "typeId": "feature.notifications.nodes.notify",
+            "typeId": "feature.notifications.nodes.notify@1.0.0",
             "name": "Notify CSM",
             "position": {
               "x": 560,
@@ -227,7 +227,7 @@
     },
     {
       "chainId": "onboarding.health-check-30d",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "30-Day Check-In (Scheduled)",
       "description": "A scheduled check-in that drafts a personalized 30-day health-check email — reviewed by a human — asking how the rollout is going and offering help.",
       "parameters": {
@@ -255,7 +255,7 @@
         "nodes": [
           {
             "id": "cron",
-            "typeId": "core.trigger.schedule",
+            "typeId": "core.trigger.schedule@1.0.0",
             "name": "Every 30 days",
             "position": {
               "x": 0,
@@ -268,7 +268,7 @@
           },
           {
             "id": "draft",
-            "typeId": "core.ai.chatCompletion",
+            "typeId": "core.ai.chatCompletion@1.0.0",
             "name": "Draft check-in",
             "position": {
               "x": 280,
@@ -283,7 +283,7 @@
           },
           {
             "id": "gate",
-            "typeId": "core.chat.approvalGate",
+            "typeId": "core.chat.approvalGate@1.1.0",
             "name": "Review check-in",
             "position": {
               "x": 560,
@@ -298,7 +298,7 @@
           },
           {
             "id": "gate-reject",
-            "typeId": "core.flow.noop",
+            "typeId": "core.flow.noop@1.0.0",
             "name": "Rejected — no check-in sent",
             "position": {
               "x": 840,
@@ -309,7 +309,7 @@
           },
           {
             "id": "send",
-            "typeId": "core.openwop.integration.email-send",
+            "typeId": "core.openwop.integration.email-send@1.0.0",
             "name": "Send check-in",
             "position": {
               "x": 840,

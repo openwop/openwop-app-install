@@ -21,6 +21,7 @@ import type { Principal } from '../types.js';
 import { OpenwopError } from '../types.js';
 import type { WorkflowDefinition } from '../executor/types.js';
 import { getNodeRegistry } from '../executor/nodeRegistry.js';
+import { buildGraph, topologicalOrder } from '../executor/scheduler.js';
 import { getRegisteredWorkflowAsync } from './workflowsRegistry.js';
 import { getChainBackedWorkflow } from './chainBackedWorkflows.js';
 import { getExampleWorkflow } from './exampleWorkflows.js';
@@ -28,7 +29,9 @@ import { getWorkflowTemplate } from './workflowTemplates.js';
 import { createConnectorInvoker } from './connectorInvoker.js';
 import { AGENT_MENTION_WORKFLOW_ID, agentMentionWorkflowDefinition } from './agentMentionWorkflows.js';
 import { conformanceNodesEnabled } from '../bootstrap/conformanceMockAgent.js';
+import { SUPERVISOR_CALLS_LIVE_MODEL } from '../bootstrap/nodes.js';
 import { implementedMemoryActions } from '../bootstrap/conformanceMemoryProbe.js';
+import { CONFORMANCE_STORAGE_PROBE_TYPE_ID } from '../bootstrap/conformanceStorageProbe.js';
 
 /**
  * Load conformance fixtures from the in-tree `conformance/fixtures/`
@@ -161,8 +164,15 @@ function fixtureNeedsConformanceNodes(def: WorkflowDefinition): boolean {
   // other (`core.conformance.x` does not START WITH `conformance.`), so a single
   // `includes()` would be the wrong instrument — it would also match an unrelated
   // typeId that merely contains the word.
+  //
+  // ADR 0858 (2026-10-08): `core.conformance.storage-probe` is the one reserved
+  // id NOT behind that switch — it calls only the run tenant's own storage, so it
+  // has its own (`storageProbeEnabled()`), and whether it resolves is what
+  // decides its fixture, via the resolvability check in `fixtureIsAdvertisable`.
   return (def.nodes ?? []).some(
-    (n) => n.typeId.startsWith('core.conformance.') || n.typeId.startsWith('conformance.'),
+    (n) =>
+      n.typeId !== CONFORMANCE_STORAGE_PROBE_TYPE_ID &&
+      (n.typeId.startsWith('core.conformance.') || n.typeId.startsWith('conformance.')),
   );
 }
 
@@ -214,6 +224,34 @@ function fixtureNeedsUnimplementedMemoryAction(def: WorkflowDefinition): boolean
 }
 
 /**
+ * The executor's OWN graph check, run on the fixture: `executeRun` builds the
+ * same graph and orders it, and a graph that fails fails the run at start
+ * (`cycle_detected`) before any node executes. Such a fixture must not be
+ * advertised: `fixtures[]` claims the host RUNS it, and the suite reads an
+ * advertised fixture that dies on dispatch as a host defect (`blocked`), where
+ * an unadvertised one is honestly `inapplicable`.
+ *
+ * Found by `conformance-approval-reject-loopback` (suite 2.43.1, openwop#1697):
+ * a `revise → gate` loopback bounded by `settings.maxLoopbackIterations`. This
+ * scheduler admits a cycle only through a `core.dispatch` /
+ * `core.orchestrator.supervisor` endpoint (RFC 0022) and does not implement
+ * `maxLoopbackIterations`, so the run failed 3 ms after creation and the leg
+ * reported `blocked`. Bounded loopback belongs with the per-visit interrupt key
+ * (interrupt.md §Re-entry, openwop#1745); until it lands, not advertising is
+ * the true statement. A fixture with no `edges` runs as an implicit linear
+ * chain (`withImplicitEdges`), which cannot cycle.
+ */
+export function fixtureGraphRefused(def: WorkflowDefinition): boolean {
+  if (!Array.isArray(def.edges) || def.edges.length === 0) return false;
+  try {
+    topologicalOrder(def, buildGraph(def));
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+/**
  * The fixture ids a node's config hands to the executor as a CHILD workflow
  * (`core.subWorkflow` / `core.dispatch` carry it as `config.workflowId`). Only
  * ids that are themselves loaded fixtures count — a child resolved from the
@@ -262,11 +300,36 @@ function fixtureIsAdvertisable(
   if (!def) return false;
   if (!enabled && fixtureNeedsConformanceNodes(def)) return false;
   if (fixtureNeedsUnimplementedMemoryAction(def)) return false;
+  if (fixtureGraphRefused(def)) return false;
   if (!(def.nodes ?? []).every((n) => isResolvable(n.typeId))) return false;
   return childFixtureIds(def).every((child) => fixtureIsAdvertisable(child, enabled, isResolvable, seen));
 }
 
-export function listLoadedConformanceFixtures(): readonly string[] {
+/**
+ * Fixtures the corpus catalog says a host may advertise ONLY when its
+ * `core.orchestrator.supervisor` runs a live model (ADR 0858 P3).
+ *
+ * `conformance/fixtures.md` row `conformance-context-budget-live`: "A host whose
+ * supervisor has no live model MUST NOT advertise this fixture" (the fixture
+ * itself carries `metadata.tags: ["live-model"]`). The catalog states it in
+ * prose, so it is held here; `test/adr0858-live-model-fixture-advert.test.ts`
+ * derives the set back from the vendored fixtures (every `live-model`-tagged
+ * fixture with a supervisor node) so a new corpus fixture cannot slip past it.
+ *
+ * Advertising it with this host's mock supervisor was a false `fixtures[]`
+ * claim: the run completes with no model turn, so `v2-provider-usage-emission`
+ * read "no provider.usage" as a providerUsage defect.
+ */
+export const FIXTURES_REQUIRING_LIVE_MODEL_SUPERVISOR: ReadonlySet<string> = new Set([
+  'conformance-context-budget-live',
+]);
+
+/** Whether a fixture's live-model requirement is met. Pure; the fact is passed in for tests. */
+export function liveModelSupervisorRequirementMet(id: string, supervisorCallsLiveModel: boolean = SUPERVISOR_CALLS_LIVE_MODEL): boolean {
+  return supervisorCallsLiveModel || !FIXTURES_REQUIRING_LIVE_MODEL_SUPERVISOR.has(id);
+}
+
+export function listLoadedConformanceFixtures(supervisorCallsLiveModel: boolean = SUPERVISOR_CALLS_LIVE_MODEL): readonly string[] {
   const enabled = conformanceNodesEnabled();
   const registry = getNodeRegistry();
   const memo = new Map<string, boolean>();
@@ -281,6 +344,8 @@ export function listLoadedConformanceFixtures(): readonly string[] {
     // is advertised only while `oauth` is, with the suite's `synthetic` provider —
     // otherwise its node would run with no credential gate and prove nothing.
     if (id === 'conformance-credential' && !oauthAdvertisementSnapshot().providers.some((p) => p.id === 'synthetic')) continue;
+    // ADR 0858 P3 — a live-model fixture is withheld while the supervisor is a mock.
+    if (!liveModelSupervisorRequirementMet(id, supervisorCallsLiveModel)) continue;
     if (fixtureIsAdvertisable(id, enabled, isResolvable)) advertised.push(id);
     else reportWithheldFixture(id, isResolvable);
   }
@@ -298,6 +363,13 @@ export function listLoadedConformanceFixtures(): readonly string[] {
 const reportedWithheld = new Set<string>();
 function reportWithheldFixture(id: string, isResolvable: (typeId: string) => boolean): void {
   const def = conformanceFixtures.get(id);
+  if (def && fixtureGraphRefused(def)) {
+    const key = `${id}|graph`;
+    if (reportedWithheld.has(key)) return;
+    reportedWithheld.add(key);
+    log.info('conformance_fixture_withheld', { fixtureId: id, reason: 'graph_refused_by_executor' });
+    return;
+  }
   const blocking = [...new Set((def?.nodes ?? []).map((n) => n.typeId).filter((t) => !isResolvable(t)))].sort();
   if (blocking.length === 0) return;
   const key = `${id}|${blocking.join(',')}`;

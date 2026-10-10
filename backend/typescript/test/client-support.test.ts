@@ -10,7 +10,7 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from '../src/index.js';
 
-describe('GET /v1/host/openwop-app/client-support (ADR 0413)', () => {
+describe('GET /host/openwop-app/client-support (ADR 0413)', () => {
   let server: http.Server;
   let base: string;
 
@@ -28,7 +28,7 @@ describe('GET /v1/host/openwop-app/client-support (ADR 0413)', () => {
   });
 
   const get = async (qs: string): Promise<{ status: number; body: Record<string, unknown> }> => {
-    const res = await fetch(`${base}/v1/host/openwop-app/client-support${qs}`);
+    const res = await fetch(`${base}/host/openwop-app/client-support${qs}`);
     return { status: res.status, body: (await res.json()) as Record<string, unknown> };
   };
 
@@ -74,7 +74,7 @@ describe('GET /v1/host/openwop-app/client-support (ADR 0413)', () => {
 
   it('reads the build + platform from headers too', async () => {
     process.env.OPENWOP_MIN_CLIENT_BUILD_ANDROID = '7';
-    const res = await fetch(`${base}/v1/host/openwop-app/client-support`, {
+    const res = await fetch(`${base}/host/openwop-app/client-support`, {
       headers: { 'x-openwop-client-build': '4', 'x-openwop-client-platform': 'android' },
     });
     expect(await res.json()).toMatchObject({ platform: 'android', minBuild: 7, build: 4, supported: false });

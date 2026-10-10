@@ -21,7 +21,6 @@ import { useTranslation } from 'react-i18next';
 import { useFeatureAccess } from '../featureToggles/FeatureAccessContext.js';
 import { featureFor } from './features.js';
 import { consumeNavSource } from './navSource.js';
-import { config, fetchOpts, authedHeaders } from '../client/config.js';
 import { XIcon } from '../ui/icons/index.js';
 import { IconButton } from '../ui/IconButton.js';
 
@@ -40,14 +39,9 @@ export function NavTelemetry(): JSX.Element | null {
     // toggle flip; only post when the surface is on.
     const source = consumeNavSource();
     if (!enabled) return;
-    const route = featureFor(location.pathname)?.path;
-    if (!route) return; // unmatched routes (404s etc.) are not evidence
-    void fetch(`${config.baseUrl}/host/openwop-app/analytics/nav`, fetchOpts({
-      method: 'POST',
-      headers: { 'content-type': 'application/json', ...authedHeaders() },
-      keepalive: true,
-      body: JSON.stringify({ route, source }),
-    })).catch(() => undefined); // measurement never breaks the page
+    // ONE lazy module posts this nav count (unmatched routes are not evidence;
+    // it skips them) and runs the strategy §8 paywall funnel for the page view.
+    void import('../featureToggles/paywallBeacon.js').then((m) => { m.view(featureFor(location.pathname)?.path, source); }, () => undefined);
   }, [location.pathname, enabled]);
 
   if (!enabled || dismissed) return null;

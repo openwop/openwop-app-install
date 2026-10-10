@@ -5,6 +5,11 @@
  * feature pin equals the manifest version, the one consumer chain expands
  * byte-identically, and a missing `orgId` is a TYPED refusal at the surface, never
  * success-with-empty (the ANLWF-2 class ADR 0651 D2 closed for analytics).
+ *
+ * Sabotage-witnessed (grade-tests w9): `role:"action"` in pack.json reds leg 1; adding an
+ * id to MANIFEST_FAST_PATH_SERVED reds legs 2–3, to the floor reds leg 2; a matching
+ * SIDE_EFFECTING_TYPE_PATTERNS entry reds leg 3; a stale pin reds leg 4; a random field
+ * in `expandedFrom` reds leg 5; coercing any surface `orgId` to '' reds leg 6.
  */
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -54,14 +59,15 @@ describe('ADR 0655 D4 — feature.email.nodes are honest reads', () => {
     expect(a).toContain('feature.email.nodes.render');
   });
   it('leg 6 (D4): a missing orgId is a TYPED refusal at the surface, never success-with-empty', async () => {
-    const surface = buildEmailSurface({ tenantId: 'tEmailNodes' }) as unknown as {
-      listTemplates: (a: Record<string, unknown>) => Promise<unknown>;
-      getTemplate: (a: Record<string, unknown>) => Promise<unknown>;
-      render: (a: Record<string, unknown>) => Promise<unknown>;
-    };
-    for (const [name, fn] of [['listTemplates', surface.listTemplates], ['getTemplate', surface.getTemplate], ['render', surface.render]] as const) {
-      await expect(fn({}), `${name}({}) must refuse`).rejects.toMatchObject({ code: 'validation_error' });
-      await expect(fn({ orgId: '' }), `${name}({orgId:''}) must refuse`).rejects.toMatchObject({ code: 'validation_error' });
+    const surface = buildEmailSurface({ tenantId: 'tEmailNodes' });
+    // templateId is SUPPLIED so the orgId check is the only refusal on the path — without it,
+    // getTemplate/render refused on the missing templateId and the orgId leg could not fail
+    // (grade-tests w9 probes nr-org-get / nr-org-render were vacuous).
+    for (const name of ['listTemplates', 'getTemplate', 'render'] as const) {
+      const fn = surface[name];
+      expect(fn, `${name} is on the surface`).toBeTypeOf('function');
+      await expect(fn!({ templateId: 't1' }), `${name}({templateId}) without orgId must refuse`).rejects.toMatchObject({ code: 'validation_error' });
+      await expect(fn!({ orgId: '', templateId: 't1' }), `${name}({orgId:''}) must refuse`).rejects.toMatchObject({ code: 'validation_error' });
     }
   });
 });

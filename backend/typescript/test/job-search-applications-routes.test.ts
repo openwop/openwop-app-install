@@ -12,7 +12,7 @@ import type { Server } from 'node:http';
 import { createApp } from '../src/index.js';
 import { enableTenantOverride } from '../src/host/featureToggles/service.js';
 
-const BASE_PATH = '/v1/host/openwop-app/job-search';
+const BASE_PATH = '/host/openwop-app/job-search';
 
 let server: Server;
 let BASE: string;
@@ -20,7 +20,7 @@ let BASE: string;
 /** Two separate tenants, established through the test-login seam so each gets a
  *  real principal + cookie rather than a forged header. */
 async function login(email: string, tenantId?: string): Promise<{ cookie: string; orgId: string; tenantId: string }> {
-  const res = await fetch(`${BASE}/v1/host/openwop-app/test/login`, {
+  const res = await fetch(`${BASE}/host/openwop-app/test/login`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(tenantId ? { email, tenantId } : { email }),
@@ -28,7 +28,7 @@ async function login(email: string, tenantId?: string): Promise<{ cookie: string
   if (res.status !== 201 && res.status !== 200) throw new Error(`login ${res.status}: ${await res.text()}`);
   const cookie = (res.headers.getSetCookie?.() ?? []).map((c) => c.split(';')[0]).join('; ');
   const body = (await res.json()) as { tenantId?: string; user?: { tenantId?: string } };
-  const orgs = await (await fetch(`${BASE}/v1/host/openwop-app/orgs`, { headers: { cookie } })).json() as { orgs?: Array<{ orgId: string }> };
+  const orgs = await (await fetch(`${BASE}/host/openwop-app/orgs`, { headers: { cookie } })).json() as { orgs?: Array<{ orgId: string }> };
   return { cookie, orgId: orgs.orgs?.[0]?.orgId ?? '', tenantId: tenantId ?? body.tenantId ?? body.user?.tenantId ?? '' };
 }
 
@@ -190,7 +190,7 @@ describe('JSUX-FUN-2 (R3) — the funnel bundle composes the three reads under o
     // A NON-EMPTY draft, or the parity is vacuous: with nothing seeded, both
     // sides are [] and a bundle that fabricates an empty drafts array probes
     // GREEN (measured — the first version of this test did exactly that).
-    const me = await (await fetch(`${BASE}/v1/host/openwop-app/test/login`, {
+    const me = await (await fetch(`${BASE}/host/openwop-app/test/login`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ email: 'jobsearch-bundle@e2e.test', tenantId }),
     })).json() as { user?: { userId?: string } };

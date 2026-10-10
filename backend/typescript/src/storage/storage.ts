@@ -437,6 +437,14 @@ export interface Storage {
    */
   listEvents(runId: string, opts?: { fromSeq?: number; limit?: number; contract?: 1 | 2 }): Promise<readonly EventRecord[]>;
   /**
+   * RFC 0194 §A — the terminal event type that CLOSED this run's log
+   * (`run.completed` | `run.failed` | `run.cancelled`), or null while it is
+   * open. The same indexed question `appendEvent` asks before a forward append,
+   * exposed so a recovery path can ask it BEFORE writing anything. OPTIONAL:
+   * a caller without it falls back to catching `RunLogClosedError`.
+   */
+  runLogClosedBy?(runId: string): Promise<string | null>;
+  /**
    * ADR 0754 — the FIRST event of `type` in `runId`'s log whose top-level
    * `payload[payloadKey]` equals `payloadValue`, found by the DATABASE in one
    * round-trip over the existing `(run_id, sequence)` index — never by paging the
@@ -466,7 +474,32 @@ export interface Storage {
   /** All UNRESOLVED interrupts across runs (oldest first, up to `limit`).
    *  Backs the RFC 0093 §D approval-gate timeout sweep
    *  (`executor/approvalGateTimeout.ts`). */
-  listOpenInterruptsAll(limit: number): Promise<readonly InterruptRecord[]>;
+  /**
+   * Open interrupts across all runs, `limit` at a time, oldest first.
+   * `after` is a keyset cursor `(createdAt, interruptId)` for paging, and
+   * `newestFirst` returns the most recent instead. A single fixed window is not
+   * enough for a sweep: interrupts that never expire pile up at the front of an
+   * oldest-first window, and past `limit` of them nothing newer is ever reached
+   * (see `executor/openInterruptSweep.ts`).
+   */
+  listOpenInterruptsAll(
+    limit: number,
+    opts?: { after?: { createdAt: string; interruptId: string }; newestFirst?: boolean },
+  ): Promise<readonly InterruptRecord[]>;
+  /** UNRESOLVED interrupts whose run belongs to `tenantId` (oldest first, up to
+   *  `limit`), in ONE query. Backs the review inbox, which used to scan every
+   *  tenant's open interrupts and fetch each one's run to discard it: ~500
+   *  sequential reads per page load on a 4-connection pool, which starved the
+   *  whole backend in prod (2026-09-28). Optional so storage fakes need not
+   *  implement it; absent ⇒ the caller falls back to the global scan. */
+  listOpenInterruptsForTenant?(tenantId: string, limit: number): Promise<readonly InterruptRecord[]>;
+  /** ADR 0778 D8 — the runs named by `runIds`, in ONE query (missing ids are
+   *  simply absent; order unspecified). The review inbox read the distinct runs
+   *  of its interrupt page one `getRun` at a time, sequentially — up to 500
+   *  reads per page on a 4-connection pool, re-reading rows its own JOIN had
+   *  just touched. Optional so storage fakes need not implement it; absent ⇒
+   *  the caller falls back to per-id `getRun`. */
+  getRunsByIds?(runIds: readonly string[]): Promise<readonly RunRecord[]>;
 
   // ── webhooks ──
   insertWebhook(record: WebhookSubscriptionRecord): Promise<void>;
@@ -790,7 +823,15 @@ export interface Storage {
   getInvocation(key: { runId: string; nodeId: string; attempt: number; invocationId: string }): Promise<unknown | null>;
   /** Retry-stable read — the newest recorded outcome for this logical effect. */
   getLatestInvocation(key: { runId: string; nodeId: string; invocationId: string }): Promise<unknown | null>;
-  putInvocation(key: { runId: string; nodeId: string; attempt: number; invocationId: string }, result: unknown): Promise<void>;
+  putInvocation(
+    key: { runId: string; nodeId: string; attempt: number; invocationId: string },
+    result: unknown,
+    /** RFC 0173 §C.2 — the idempotency key this attempt PRESENTED to the
+     *  provider, when the caller put one on the wire. Recorded so the effect
+     *  ledger can report it as `providerKey`; an update that omits it keeps the
+     *  value already stored rather than clearing it. */
+    opts?: { presentedKey?: string },
+  ): Promise<void>;
 
   /**
    * ADR 0618 — the ATOMIC CLAIM the Layer-2 effect guard must be.
@@ -891,6 +932,8 @@ export interface Storage {
      *  and not the migrations is how the first draft of this query shipped a
      *  statement against a column that had not existed for months. */
     invocationId: string;
+    /** The key the attempt presented on the wire, when one was recorded. */
+    presentedKey?: string;
     completed: boolean;
     at: string;
   }>>;
@@ -1013,6 +1056,22 @@ export interface Storage {
     tenantId: string,
     providerId: string,
     dateUtc: string,
+  ): Promise<{ inputTokens: number; outputTokens: number }>;
+  /**
+   * ADR 0821 D2 (architect #6) — the SUM of a tenant's managed usage on a UTC day
+   * across its OWN row and every row matched by `alsoLike` (its participants'
+   * per-subject buckets). Read-only; the per-tenant daily ceiling
+   * (`OPENWOP_MANAGED_TENANT_DAILY_TOKEN_CAP`) is the only caller, and it is only
+   * asked for multi-principal tenants while that ceiling is configured, so the
+   * per-call hot path is unchanged by default. The pattern comes from
+   * `usageBucketMatchersForTenant`, the same matcher teardown uses, and is never
+   * interpreted here.
+   */
+  sumManagedUsageForTenant(
+    tenantId: string,
+    providerId: string,
+    dateUtc: string,
+    alsoLike: UsageLikeMatcher,
   ): Promise<{ inputTokens: number; outputTokens: number }>;
   /**
    * An additional SQL `LIKE` match for usage rows a tenant OWNS but is not keyed
@@ -1440,6 +1499,21 @@ export interface Storage {
    * `kvList` (complete, just slower) where a backend lacks it.
    */
   kvListContaining?(keyPrefix: string, needle: string): Promise<ReadonlyArray<{ key: string; value: string }>>;
+  /**
+   * ADR 0868 — one PAGE of `kvList`: at most `limit` rows under `keyPrefix`
+   * whose key is strictly greater than `after`, in BYTE order of the UTF-8 key
+   * (Postgres `~<~` / SQLite BINARY), so a cursor taken from one page resumes
+   * exactly on the next. The database reads only the page (an ordered index
+   * scan), where `kvList` returns every row under the prefix, values included.
+   * OPTIONAL: `durableStore.listPage` falls back to `kvList` (complete, unbounded).
+   */
+  kvListPage?(
+    keyPrefix: string,
+    opts: { after?: string; limit: number },
+  ): Promise<ReadonlyArray<{ key: string; value: string }>>;
+  /** ADR 0868 — the number of keys under `keyPrefix`, counted in the database
+   *  (no values transferred). OPTIONAL: falls back to `kvList(...).length`. */
+  kvCount?(keyPrefix: string): Promise<number>;
   /** Delete one key. Returns true if a row existed. */
   kvDelete(key: string): Promise<boolean>;
   /** Atomically set `key` to `next` iff its current stored value equals

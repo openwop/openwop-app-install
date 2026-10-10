@@ -25,6 +25,14 @@
  * BORN-RED, both of them, on `5cb15bcc1`: with the gate reverted the non-member
  * run reads the verbatim chunk text of a private project's corpus.
  *
+ * SABOTAGE-WITNESSED (/grade-tests wave 6): returning `col` from `readableCollection`
+ * for a bound row reds the search/rag, SYSTEM-run and service-verb legs; dropping
+ * `filterReadable`'s bound-row filter reds the listing + both ctx.knowledge legs;
+ * `tenantRetrieve` answering `null` for a refused caller reds the honest-EMPTY leg.
+ * CEILING: the SYSTEM-run leg (`{}` caller) is a DOUBLE guard — `subjectReadAllowed`
+ * refuses an absent subject AND `projectsService.levelFor` (ADR 0839 D1) returns
+ * `'none'` for one — so removing either alone stays green by design.
+ *
  * @see docs/adr/0643-kb-reindex-orchestration-write-surface-lifecycle-events.md (D2 precondition)
  */
 
@@ -54,7 +62,7 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+interface Res<T = unknown> { status: number; body: T }
 interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; patch: (p: string, b?: unknown) => Promise<Res> }
 function client(): Client {
   let cookie = '';
@@ -67,7 +75,7 @@ function client(): Client {
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b) };
 }
 
-const P = '/v1/host/openwop-app/projects';
+const P = '/host/openwop-app/projects';
 const SECRET = 'ACQUIRE ACME FOR 40M. Board only.';
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
 
@@ -76,18 +84,18 @@ const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.tes
 async function fixture() {
   const tenantId = `org:kbc1-${Date.now()}-${n++}`;
   const owner = client();
-  const ownerId: string = (await owner.post('/v1/host/openwop-app/test/login', { email: uniqEmail('kbc1-owner'), tenantId })).body.user.userId;
-  const orgId: string = (await owner.post('/v1/host/openwop-app/orgs', { name: 'PrivCo' })).body.orgId;
-  const projectId: string = (await owner.post(P, { orgId, name: 'Secret' })).body.id;
+  const ownerId = ((await owner.post('/host/openwop-app/test/login', { email: uniqEmail('kbc1-owner'), tenantId })).body as { user: { userId: string } }).user.userId;
+  const orgId = ((await owner.post('/host/openwop-app/orgs', { name: 'PrivCo' })).body as { orgId: string }).orgId;
+  const projectId = ((await owner.post(P, { orgId, name: 'Secret' })).body as { id: string }).id;
   const col = await owner.post(`${P}/${projectId}/knowledge/collections`, { orgId, name: 'Secret notes' });
   expect(col.status, JSON.stringify(col.body)).toBe(201);
-  const collectionId: string = col.body.collectionId;
+  const collectionId = (col.body as { collectionId: string }).collectionId;
   const ing = await owner.post(`${P}/${projectId}/knowledge/collections/${collectionId}/documents`, { orgId, title: 'Merger plan', text: SECRET });
   expect(ing.status, JSON.stringify(ing.body)).toBe(201);
-  expect((await owner.patch(`${P}/${projectId}/visibility`, { visibility: 'private' })).body.visibility).toBe('private');
+  expect(((await owner.patch(`${P}/${projectId}/visibility`, { visibility: 'private' })).body as { visibility: string }).visibility).toBe('private');
 
   const viewer = client();
-  const viewerId: string = (await viewer.post('/v1/host/openwop-app/test/login', { email: uniqEmail('kbc1-viewer'), tenantId })).body.user.userId;
+  const viewerId = ((await viewer.post('/host/openwop-app/test/login', { email: uniqEmail('kbc1-viewer'), tenantId })).body as { user: { userId: string } }).user.userId;
   await createMember({ tenantId, orgId, subject: viewerId, displayName: 'V', roles: ['viewer'] });
   return { tenantId, orgId, projectId, collectionId, ownerId, viewerId };
 }
@@ -131,7 +139,6 @@ describe('KBC-1 — a workflow run cannot read a project-bound corpus it is not 
   it('an ORDINARY org collection is untouched — the gate bites only on a bound row', async () => {
     const { tenantId, orgId, viewerId } = await fixture();
     const kb = runBundle(tenantId, viewerId).features.kb!;
-    const plain = await kb.listCollections!({ orgId });
     // The viewer creates an ordinary org collection through the KB service face
     // used by every non-project lane, and can read it back in the same run.
     const { createCollection, ingestDocument } = await import('../src/features/kb/kbService.js');
@@ -139,7 +146,8 @@ describe('KBC-1 — a workflow run cannot read a project-bound corpus it is not 
     await ingestDocument(tenantId, orgId, viewerId, col.collectionId, { title: 'PTO', text: 'Paid time off accrues monthly.' });
     const hits = (await kb.search!({ orgId, collectionId: col.collectionId, query: 'time off' })).results as unknown[];
     expect(hits.length).toBeGreaterThan(0);
-    expect((plain.collections as unknown[]).length).toBeGreaterThanOrEqual(0);
+    // …and LISTS it back: the bound-row filter does not drop an unbound row.
+    expect(((await kb.listCollections!({ orgId })).collections as Array<{ collectionId: string }>).map((c) => c.collectionId)).toContain(col.collectionId);
   });
 });
 

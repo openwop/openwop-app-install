@@ -3,8 +3,8 @@
 DevOps 3-agent crew. Planner decomposes operational goals into safe steps; Executor runs them; Verifier confirms.
 
 | Pack name | `core.openwop.agents.devops-crew` |
-| Version | `1.0.0` |
-| Engine | OpenWOP `>=1.1.0 <2.0.0` |
+| Version | `1.0.2` |
+| Engine | OpenWOP `>=1.1.0 <3.0.0` |
 | Agents | 3 (planner / executor / verifier) |
 | Required host capabilities | `aiProviders`, `host.agentRuntime`, `host.fs`, `host.queueBus` |
 | License | Apache-2.0 |

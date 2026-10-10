@@ -152,7 +152,11 @@ export function fromCanonicalDefinition(input: unknown): DeserializeResult {
 
   rawNodes.forEach((n, i) => {
     const id = n.id ?? n.nodeId;
-    const typeId = n.typeId;
+    // ADR 0766 — a v2 definition may carry an exact node pin (`typeId@1.2.3`;
+    // the v2 ids grammar admits it). The builder, like the host (backend
+    // `host/chainPinRule.ts`, the rule's one owner), keys every lookup on the
+    // BARE id, so the pin is dropped here rather than failing the import.
+    const typeId = typeof n.typeId === 'string' ? n.typeId.replace(/@[0-9]+\.[0-9]+\.[0-9]+$/, '') : n.typeId;
     if (!id || !typeId) {
       throw new CanonicalParseError(i18n.t('builder:errNodeMissingIdOrTypeId', { index: i }));
     }

@@ -18,16 +18,27 @@
  * instant is rendered to local fields via `Intl`). Absent a timezone, fields are
  * evaluated in UTC (the fast path).
  *
- * Anything that fails to parse yields `null` from `computeNextFire` — the daemon
- * logs and skips such a job rather than crashing the sweep.
+ * Anything that fails to parse — including an unknown time zone — yields `null`
+ * from `computeNextFire`; it never throws, so a stored bad zone cannot wedge a
+ * job after its fire claim (ADR 0787 D6).
  *
  * @see RFCS/0052-scheduling-and-time-based-triggers.md §B
  */
 
 const MINUTE_MS = 60_000;
-/** Hard cap on the forward search — mirrors the advertised maxFutureHorizon.
- *  A cron with no match inside this window (a misconfiguration) yields null. */
-const SEARCH_HORIZON_MS = 30 * 24 * 60 * 60 * 1000 + MINUTE_MS;
+
+/** The farthest-future a run may be scheduled — the ONE source for the advertised
+ *  `capabilities.scheduling.maxFutureHorizon` (ADR 0787 D6). 366 days covers
+ *  yearly, quarterly and 31st-of-month cadences, which the previous 30-day cap
+ *  accepted at registration and then silently killed on their first long gap. */
+export const MAX_FUTURE_HORIZON_DAYS = 366;
+export const MAX_FUTURE_HORIZON_MS = MAX_FUTURE_HORIZON_DAYS * 24 * 60 * 60 * 1000;
+export const MAX_FUTURE_HORIZON_ISO = `P${MAX_FUTURE_HORIZON_DAYS}D`;
+
+/** Hard cap on the forward search — the advertised horizon. A cron with no match
+ *  inside this window yields null, and an ENABLED job with such a cadence is
+ *  refused at write (`schedule_horizon_exceeded`, RFC 0052 §B.3). */
+const SEARCH_HORIZON_MS = MAX_FUTURE_HORIZON_MS + MINUTE_MS;
 
 interface CronFields {
   minute: Set<number>;
@@ -164,19 +175,29 @@ function wallClockUtc(ms: number): WallClock {
   };
 }
 
-function matches(wc: WallClock, c: CronFields): boolean {
-  if (!c.minute.has(wc.minute)) return false;
-  if (!c.hour.has(wc.hour)) return false;
+function dayMatches(wc: WallClock, c: CronFields): boolean {
   if (!c.month.has(wc.month)) return false;
-  // Standard cron day matching: if both DOM and DOW are restricted, a match on
-  // EITHER is sufficient (union); if only one is restricted, it must match; if
-  // neither is restricted, any day matches.
   const domOk = c.dom.has(wc.day);
   const dowOk = c.dow.has(wc.dow);
   if (c.domRestricted && c.dowRestricted) return domOk || dowOk;
   if (c.domRestricted) return domOk;
   if (c.dowRestricted) return dowOk;
   return true;
+}
+
+function matches(wc: WallClock, c: CronFields): boolean {
+  return c.minute.has(wc.minute) && c.hour.has(wc.hour) && dayMatches(wc, c);
+}
+
+/** Is `timeZone` an IANA zone this runtime resolves? */
+export function isValidTimeZone(timeZone: string): boolean {
+  if (timeZone.length === 0) return false;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -191,15 +212,38 @@ function matches(wc: WallClock, c: CronFields): boolean {
 export function computeNextFire(cronExpr: string, afterMs: number, timezone?: string): number | null {
   const c = parseCron(cronExpr);
   if (!c) return null;
-  // Build the timezone formatter ONCE (construction is heavy; the loop can run
-  // tens of thousands of minutes for a sparse cron).
+  if (timezone !== undefined && !isValidTimeZone(timezone)) return null;
+  // Build the timezone formatter ONCE (construction is heavy).
   const dtf = timezone ? tzFormatter(timezone) : null;
+  const wallAt = (ms: number): WallClock => (dtf ? wallClockInTz(ms, dtf) : wallClockUtc(ms));
   // Start at the next whole minute strictly after `afterMs`.
   let candidate = Math.floor(afterMs / MINUTE_MS) * MINUTE_MS + MINUTE_MS;
   const limit = afterMs + SEARCH_HORIZON_MS;
   while (candidate <= limit) {
-    const wc = dtf ? wallClockInTz(candidate, dtf) : wallClockUtc(candidate);
+    const wc = wallAt(candidate);
     if (matches(wc, c)) return candidate;
+    // ADR 0787 D6 — SEARCH, not scan. A whole local day (wrong day/month) or the
+    // rest of a local hour (wrong hour) cannot match, so jump to its end. Every
+    // jump is VERIFIED: the wall clock at the target must be exactly the local
+    // boundary we aimed for. If the zone's offset changed inside the jump (a DST
+    // day; Antarctica/Troll moves 2 h, Lord_Howe 30 min) it will not be, and we
+    // fall back to minute steps from here — so a matching minute is never jumped
+    // over. A year now costs a few hundred evaluations instead of 525k, which is
+    // what lets the horizon be 366 days.
+    const dayWrong = !dayMatches(wc, c);
+    const hourWrong = !dayWrong && !c.hour.has(wc.hour);
+    // Right day and right hour, wrong minute: step — only a whole wrong hour or
+    // day is safe to leap.
+    const skip = dayWrong ? (24 - wc.hour) * 60 - wc.minute : hourWrong ? 60 - wc.minute : 1;
+    if (skip > 1) {
+      const target = candidate + skip * MINUTE_MS;
+      const t = wallAt(target);
+      const landed = dayWrong ? t.hour === 0 && t.minute === 0 : t.minute === 0 && t.hour === (wc.hour + 1) % 24;
+      if (landed) {
+        candidate = target;
+        continue;
+      }
+    }
     candidate += MINUTE_MS;
   }
   return null;

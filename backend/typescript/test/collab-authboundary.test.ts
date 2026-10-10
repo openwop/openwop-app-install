@@ -51,7 +51,7 @@ let n = 0;
 /** Log in a fresh tenant, returning its cookie + tenantId. */
 async function login(): Promise<{ cookie: string; tenantId: string }> {
   const tenantId = `org:collab-${Date.now()}-${n++}`;
-  const res = await fetch(`${BASE}/v1/host/openwop-app/test/login`, {
+  const res = await fetch(`${BASE}/host/openwop-app/test/login`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ email: `collab-${Date.now()}-${n++}@acme.test`, tenantId }),
   });
@@ -62,7 +62,7 @@ async function login(): Promise<{ cookie: string; tenantId: string }> {
 }
 
 interface Result { open: boolean; status?: number }
-function connect(canvasId: string, headers: Record<string, string>, query = '', root = '/v1/host/openwop-app'): Promise<Result> {
+function connect(canvasId: string, headers: Record<string, string>, query = '', root = '/host/openwop-app'): Promise<Result> {
   return new Promise((resolve) => {
     const ws = new WebSocket(`${WSBASE}${root}/canvas-collab/${encodeURIComponent(canvasId)}${query}`, { headers });
     const done = (r: Result) => { try { ws.terminate(); } catch { /* ignore */ } resolve(r); };
@@ -180,7 +180,7 @@ describe('collab-capable type registry parity (ADR 0359 Phase 5)', () => {
 
 describe('collab WS ticket auth (ADR 0359 correction — cross-origin prod posture)', () => {
   async function mintTicket(cookie: string, canvasId: string): Promise<{ status: number; ticket?: string }> {
-    const res = await fetch(`${BASE}/v1/host/openwop-app/canvas-collab/${encodeURIComponent(canvasId)}/ticket`, {
+    const res = await fetch(`${BASE}/host/openwop-app/canvas-collab/${encodeURIComponent(canvasId)}/ticket`, {
       method: 'POST', headers: { cookie },
     });
     if (!res.ok) return { status: res.status };
@@ -247,7 +247,7 @@ describe('collab WS ticket auth (ADR 0359 correction — cross-origin prod postu
     // cookie it is garbage (the middleware falls back to a fresh ANON session,
     // so over HTTP the probe surfaces as the uniform 404, never the tenant's).
     expect(verifySession(minted.ticket!)).toBeNull();
-    const res = await fetch(`${BASE}/v1/host/openwop-app/canvas-collab/${encodeURIComponent(canvasId)}/ticket`, {
+    const res = await fetch(`${BASE}/host/openwop-app/canvas-collab/${encodeURIComponent(canvasId)}/ticket`, {
       method: 'POST', headers: { cookie: `__session=${encodeURIComponent(minted.ticket!)}` },
     });
     expect(res.status).toBe(404);

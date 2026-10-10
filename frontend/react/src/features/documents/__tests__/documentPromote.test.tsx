@@ -24,6 +24,8 @@ vi.mock('../documentsClient.js', async (importOriginal) => {
 });
 
 const canvas = vi.hoisted(() => ({ createCanvas: vi.fn(), saveCanvas: vi.fn() }));
+// ADR 0838 — the detail page reads the caller's scopes to offer only allowed writes.
+vi.mock('../../../client/accessClient.js', async (importOriginal) => ({ ...(await importOriginal<typeof import('../../../client/accessClient.js')>()), getEffectiveAccess: async () => ({ roles: [], scopes: ['workspace:read', 'workspace:write', 'host:members:manage'], basis: 'member' }) }));
 vi.mock('../../../canvas/canvasClient.js', async (importOriginal) => {
   const orig = await importOriginal<typeof import('../../../canvas/canvasClient.js')>();
   return { ...orig, createCanvasClient: () => ({ createCanvas: canvas.createCanvas, saveCanvas: canvas.saveCanvas }) };

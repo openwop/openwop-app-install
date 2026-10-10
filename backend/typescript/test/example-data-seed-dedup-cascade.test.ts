@@ -52,14 +52,14 @@ async function api<T = unknown>(path: string, init: RequestInit = {}): Promise<{
   const text = await res.text();
   return { status: res.status, body: (text.length ? JSON.parse(text) : null) as T };
 }
-const roster = async (): Promise<RosterEntry[]> => (await api<{ roster: RosterEntry[] }>('/v1/host/openwop-app/roster')).body.roster;
+const roster = async (): Promise<RosterEntry[]> => (await api<{ roster: RosterEntry[] }>('/host/openwop-app/roster')).body.roster;
 
 describe('demo-seed dedup + roster-delete cascade', () => {
   it('concurrent first seeds create exactly one set of personas (no duplicates)', async () => {
     // Two silent seeds fire at once (two tabs / a fast reload / two instances).
     const [a, b] = await Promise.all([
-      api<{ seeded: boolean }>('/v1/host/openwop-app/example-data/seed', { method: 'POST', body: '{}' }),
-      api<{ seeded: boolean }>('/v1/host/openwop-app/example-data/seed', { method: 'POST', body: '{}' }),
+      api<{ seeded: boolean }>('/host/openwop-app/example-data/seed', { method: 'POST', body: '{}' }),
+      api<{ seeded: boolean }>('/host/openwop-app/example-data/seed', { method: 'POST', body: '{}' }),
     ]);
     expect(a.status).toBe(200);
     expect(b.status).toBe(200);
@@ -82,7 +82,7 @@ describe('demo-seed dedup + roster-delete cascade', () => {
     expect((await getChart(TENANT))!.members.some((m) => m.rosterId === idris.rosterId)).toBe(true);
     expect((await hostExtStorage().listUserAgents(TENANT)).some((ua) => ua.agentId === idris.agentRef.agentId)).toBe(true);
 
-    const del = await api(`/v1/host/openwop-app/roster/${idris.rosterId}`, { method: 'DELETE' });
+    const del = await api(`/host/openwop-app/roster/${idris.rosterId}`, { method: 'DELETE' });
     expect(del.status).toBe(204);
 
     // Everything the member owned is gone — nothing orphaned on its rosterId.
@@ -95,12 +95,12 @@ describe('demo-seed dedup + roster-delete cascade', () => {
 
   it('silent reseed does NOT resurrect the deleted agent; heal restores it', async () => {
     // Plain auto-seed on a known tenant respects the deletion.
-    await api('/v1/host/openwop-app/example-data/seed', { method: 'POST', body: '{}' });
+    await api('/host/openwop-app/example-data/seed', { method: 'POST', body: '{}' });
     expect((await roster()).some((r) => r.persona === 'Idris')).toBe(false);
     expect((await roster()).length).toBe(9);
 
     // Explicit "Load demo data" puts it back.
-    const heal = await api('/v1/host/openwop-app/example-data/seed', { method: 'POST', body: JSON.stringify({ heal: true }) });
+    const heal = await api('/host/openwop-app/example-data/seed', { method: 'POST', body: JSON.stringify({ heal: true }) });
     expect(heal.status).toBe(200);
     const after = await roster();
     expect(after.some((r) => r.persona === 'Idris')).toBe(true);

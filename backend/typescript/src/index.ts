@@ -15,29 +15,35 @@ import express, { type Express } from 'express';
 import { createTracer, shutdownTracer } from './observability/tracer.js';
 import { createMetrics, shutdownMetrics } from './observability/metrics.js';
 import { createLogger } from './observability/logger.js';
+import { startEventLoopLagProbe } from './observability/saturationProbe.js';
 import { APP_VERSION } from './version.js';
 import { recordAppVersion } from './host/appVersion.js';
+import { startBackgroundAppJobs } from './host/appMigrations.js';
+import { tryDurableStorage } from './host/durable/durableStore.js';
 import { logWebhookEgressPosture } from './host/webhookEgressGuard.js';
 import { initHostExtPersistence } from './host/hostExtPersistence.js';
 import { loadPackTombstones } from './host/packTombstones.js';
-import { loadPackRevocations } from './host/packRevocations.js';
+import { loadPackRevocations, startPackRevocationRefresh } from './host/packRevocations.js';
 import { logIsolationMemoryBudgetAtBoot } from './host/isolation/childProcessAdapter.js';
 import { isEntryModule } from './host/entryModule.js';
 import { traceContextMiddleware } from './middleware/traceContext.js';
 import { httpMetricsMiddleware } from './middleware/httpMetrics.js';
-import { authMiddleware, sessionSecretConfigError } from './middleware/auth.js';
+import { authMiddleware, isPublicPath, sessionSecretConfigError } from './middleware/auth.js';
 import { workloadIdentityMiddleware } from './middleware/workloadIdentity.js';
 import { wireAuthorityRunStamping } from './host/authorityContext.js';
-import { ipRateLimitMiddleware } from './middleware/rateLimit.js';
+import { apiKeyRateLimitMiddleware, ipRateLimitMiddleware } from './middleware/rateLimit.js';
 import { a2aInterfaceErrorsMiddleware } from './middleware/a2aInterfaceErrors.js';
 import { corsMiddleware } from './middleware/cors.js';
 import { csrfOriginGuard } from './middleware/csrf.js';
+import { keyVendorGate } from './middleware/keyVendorGate.js';
 import { customDomainMiddleware } from './middleware/customDomain.js';
-import { protocolVersionMiddleware } from './middleware/protocolVersion.js';
+import { protocolVersionMiddleware, retiredVendorTwinPath } from './middleware/protocolVersion.js';
+import { mountScopedBodyParsers } from './middleware/scopedBodyParsers.js';
 import { registerConformanceSeamAlias } from './routes/conformanceSeams.js';
 import { bodyParseErrorHandler } from './middleware/bodyParseError.js';
 import { v2IdentityMiddleware } from './middleware/v2Identity.js';
 import { attachCollabWebSocket } from './host/collab/collabServer.js';
+import { attachRegisteredUpgradeHandlers } from './host/upgradeRegistry.js';
 import { errorEnvelopeMiddleware } from './middleware/errorEnvelope.js';
 import { isSessionAuthorityRegistered } from './host/sessionAuthority.js';
 import { subjectLinkRealmAlignment } from './host/auth/subjectLinkService.js';
@@ -55,12 +61,16 @@ import { setDefaultWorkspaceTargets } from './host/workspaceJoinLedger.js';
 import { ensureRegistryPacksInstalled } from './bootstrap/installRegistryPacks.js';
 import { featurePackRefs, featureDefaultOrgs } from './features/index.js';
 import { ensureLocalPacksMounted } from './bootstrap/mountLocalPacks.js';
+import { recordChainPackLoad } from './host/chainPackLoadStatus.js';
 import { loadPromptPacks, defaultPromptPackRoots } from './host/promptPackLoader.js';
 import { loadConnectionPacks, defaultConnectionPackRoots } from './features/connections/connectionPackLoader.js';
+import { installConformanceProviderFixtures } from './features/connections/providerRegistryRead.js';
+import { isOAuthCallbackTwin } from './features/connections/oauthFlow.js';
 import { loadWorkflowChainPacks, defaultWorkflowChainPackRoots } from './host/workflowChainPackLoader.js';
 import { loadCanvasContentPacks, defaultCanvasContentPackRoots } from './host/canvasContentPackLoader.js';
 import { loadFormContentPacks, defaultFormContentPackRoots } from './host/formContentPackLoader.js';
 import { registerHostSurfacesV2Extension, seedDefaultHostSurfaces } from './bootstrap/hostSurfaceRegistry.js';
+import { registerExtFamilyRecords } from './host/extFamilyRecords.js';
 import { registerAiProvidersV2Extension } from './routes/discovery.js';
 import { seedHostArtifactTypes } from './host/artifactTypes.js';
 import { loadArtifactTypePacks, defaultArtifactTypePackRoots } from './host/artifactTypePackLoader.js';
@@ -69,10 +79,12 @@ import { withinBootBudget } from './host/bootBudget.js';
 import { demoMode } from './host/demoMode.js';
 import { initInMemorySurfaces } from './host/inMemorySurfaces.js';
 import { initDurableSurfaces } from './host/durable/durableKv.js';
-import { registerS3BlobAdapter } from './host/blob/s3Blob.js';
+import { registerS3BlobAdapter, verifyS3BlobBackend } from './host/blob/s3Blob.js';
+import { registerGcsBlobAdapter, verifyGcsBlobBackend } from './host/blob/gcsBlob.js';
 import { registerOpenSearchAdapter } from './host/search/openSearchSearch.js';
-import { registerPgVectorAdapter } from './host/vector/pgVectorVector.js';
-import { registerPgSqlAdapter } from './host/sql/pgSql.js';
+import { registerPgVectorAdapter, verifyPgVectorBackend } from './host/vector/pgVectorVector.js';
+import { registerPgSqlAdapter, verifyPgSqlBackend } from './host/sql/pgSql.js';
+import { processLocalStorageFamilies } from './host/storageFamilyAdvert.js';
 import { setChatStorage } from './host/chatSurface.js';
 import { setKanbanTriggerDeliveryDeps } from './host/kanbanTriggerDelivery.js';
 import { setWarehouseLoadStorage } from './features/destination-sync/warehouseLoadService.js';
@@ -92,10 +104,11 @@ import { startConnectionsRefreshDaemon } from './features/connections/refreshDae
 // is deleted. `backfillKnowledgeSyncJobs` migrates pre-existing sources once at boot.
 import { startTimerSweepDaemon } from './host/timerSweepDaemon.js';
 import { startSegmentEntryDaemon } from './features/cdp/segmentEntryDaemon.js';
-import { resolveAndResume } from './routes/interrupts.js';
+import { timerResumeContinuation } from './routes/interrupts.js';
 import { startWorkGraphDaemon } from './features/ambient-work-graph/workGraphSweep.js';
 import { backfillKnowledgeSyncJobs } from './features/knowledge-sync/knowledgeSyncService.js';
 import { startCrmSnapshotDaemon } from './features/crm/snapshotDaemon.js';
+import { startFunnelWeeklySummaryDaemon, weeklySummaryEnabled } from './features/billing/funnelWeeklySummary.js';
 import { startVerifierSampleDaemon } from './features/kicktodo-metrics/verifierSampleDaemon.js';
 import { listCrmOrgScopes } from './features/crm/crmEntitiesService.js';
 import { startRetentionSweepDaemon, idempotencyTtlDays } from './host/retentionSweepDaemon.js';
@@ -109,6 +122,7 @@ import { bootstrapKmsFromEnv } from './byok/kmsEncryption.js';
 import { readDeployPosture, enterprisePostureStartupError } from './host/deployPosture.js';
 import { workspaceReadinessStartupError, workspaceReadinessWarning } from './host/workspaceReadiness.js';
 import { oidcTrustRootStartupError } from './host/oidcTrustGuard.js';
+import { testAuthSeamStartupError } from './routes/authTestSeam.js';
 import {
   bootstrapManagedProvider,
   configureManagedProvider,
@@ -119,6 +133,7 @@ import { getGovernancePolicy } from './host/governanceService.js';
 import { markOwnProcess } from './host/processIdentity.js';
 import { dirname, resolve as resolvePath } from 'node:path';
 import { registerAllRoutes } from './routes/registerAllRoutes.js';
+import { resolveTenantWorkflow } from './host/resolveLaunchDefinition.js';
 
 const log = createLogger('workflow-engine');
 
@@ -325,6 +340,8 @@ export async function createApp(config: AppConfig): Promise<Express> {
   // the seed so the record's function sees the real registry, and it reads it
   // live at each discovery read (adapters flip `supported` later in this boot).
   registerHostSurfacesV2Extension();
+  // ADR 0765 — extensions["openwop-app.<family>"] for the v2 ext families this backend executes.
+  registerExtFamilyRecords();
   // ADR 0730 C.3a — the per-provider subscription map the corpus `aiProviders`
   // family cannot carry (its `authModes` is a flat vocabulary).
   registerAiProvidersV2Extension();
@@ -347,6 +364,9 @@ export async function createApp(config: AppConfig): Promise<Express> {
   // real presigned URLs, direct-to-bucket. Fails fast at boot if selected but
   // unconfigured. See host/blob/s3Blob.ts.
   registerS3BlobAdapter();
+  // host.blob over Google Cloud Storage, keyless (OPENWOP_SURFACE_BLOB=gcs;
+  // ADR 0867 phase 2b). See host/blob/gcsBlob.ts.
+  registerGcsBlobAdapter();
   // Optional scale engines: real full-text (OPENWOP_SURFACE_SEARCH=opensearch)
   // and vector (OPENWOP_SURFACE_VECTOR=pgvector). Each registers its adapter and
   // fails fast at boot if selected-but-unconfigured. See host/search, host/vector.
@@ -384,6 +404,13 @@ export async function createApp(config: AppConfig): Promise<Express> {
   const { setSubWorkflowDispatcher } = await import('./executor/subWorkflowDispatcher.js');
   const { executeRun } = await import('./executor/executor.js');
   setSubWorkflowDispatcher({ storage, hostSuite, executeRun: executeRun as never });
+  // RFC 0223 — a timed-out approval gate fails its NODE through the same
+  // resume seam as every other resolution, so its failure is routable.
+  // Late-bound for the same reason: the timeout sweep owns no catalog.
+  const { setRejectedGateRouter } = await import('./executor/approvalGateTimeout.js');
+  const { dispatchGateResume } = await import('./routes/interrupts.js');
+  setRejectedGateRouter((interrupt, rejection) =>
+    dispatchGateResume(storage, hostSuite, interrupt, { action: 'reject', reason: 'timeout' }, rejection));
   // ADR 0554 P2 — the compensation unwind needs a SUB-RUN's definition to read
   // its RFC 0151 §B declarations, and the workflow catalog lives on the host
   // suite rather than on Storage. Late-bound here for the same reason the
@@ -391,7 +418,7 @@ export async function createApp(config: AppConfig): Promise<Express> {
   const { setCompensationDefinitionResolver, registerCompensationApprovalEligibility } =
     await import('./host/compensationRuntime.js');
   setCompensationDefinitionResolver(
-    async (child) => (await hostSuite.workflowCatalog.getWorkflow(child.workflowId))?.definition ?? null,
+    async (child) => (await resolveTenantWorkflow(hostSuite.workflowCatalog, child.tenantId, child.workflowId))?.definition ?? null,
   );
   // RFC 0151 §E separation of duties, at the ONE decision choke every decide
   // path funnels through. Registered at boot, not lazily on the first unwind —
@@ -402,7 +429,7 @@ export async function createApp(config: AppConfig): Promise<Express> {
   const { setCanvasInvokeDispatcher } = await import('./host/canvasSurface.js');
   setCanvasInvokeDispatcher({
     storage,
-    getWorkflow: (workflowId) => hostSuite.workflowCatalog.getWorkflow(workflowId),
+    getWorkflow: (tenantId, workflowId) => resolveTenantWorkflow(hostSuite.workflowCatalog, tenantId, workflowId),
     executeRun: executeRun as never,
   });
   ensureSuspendManagerInstalled(storage);
@@ -428,6 +455,9 @@ export async function createApp(config: AppConfig): Promise<Express> {
   // line stays above the mount. (Distinct from tombstones above — a tombstoned
   // pack still runs; a revoked one never does. See packRevocations.ts.)
   const revocationCount = await loadPackRevocations();
+  // ADR 0826 D5 — a revocation written on another instance reaches this one
+  // within one tick (process-wide, idempotent, unref'd).
+  startPackRevocationRefresh();
   if (revocationCount > 0) {
     log.warn('pack revocations active — these packs will not dispatch', { count: revocationCount });
   }
@@ -544,6 +574,10 @@ export async function createApp(config: AppConfig): Promise<Express> {
       packs: connectionPackResults.installed.map((r) => ({ name: r.pack, provider: r.providerId, version: r.version, overrodeBuiltin: r.overrodeBuiltin })),
     });
   }
+  // RFC 0233 §D — the conformance fixture pair (first pack, then its rival for
+  // the same bare id), installed through the normal install path BEFORE any
+  // request is served, and ONLY when the operator opts in.
+  installConformanceProviderFixtures();
   if (connectionPackResults.errors.length > 0) {
     // A rejected pack is skipped, not fatal — surface it so the operator notices.
     log.error('connection_packs_rejected', {
@@ -556,6 +590,7 @@ export async function createApp(config: AppConfig): Promise<Express> {
   // become available for edit-time expansion; a chain is expanded once (frozen)
   // and persisted via the existing builder registry to run. No new catalog source.
   const chainPackResults = loadWorkflowChainPacks({ roots: defaultWorkflowChainPackRoots() });
+  recordChainPackLoad(chainPackResults);
   if (chainPackResults.installed.length > 0) {
     log.info('workflow_chain_packs_loaded', {
       count: chainPackResults.installed.length,
@@ -570,6 +605,13 @@ export async function createApp(config: AppConfig): Promise<Express> {
   }
 
   const app = express();
+  // Paths are CASE-SENSITIVE. Express matches routes case-insensitively by
+  // default while every path predicate in this host (the public-path list, the
+  // credential-less `401`, the vendor gate) compares exactly — so `/V1/runs`
+  // reached the `/v1/runs` handler having skipped the rules written for it.
+  // MEASURED on production 2026-10-01: credential-less `POST /v1/runs` → 401,
+  // `POST /V1/runs` → the handler. One spelling routes; the rest are 404.
+  app.set('case sensitive routing', true);
 
   // Firebase Hosting → Cloud Run rewrite preserves the `/api` source
   // prefix when proxying (e.g. browser hits `/api/v1/runs`, backend
@@ -598,7 +640,15 @@ export async function createApp(config: AppConfig): Promise<Express> {
   // the body parser, auth, the rate limiter) writes on the A2A 1.0 interface
   // URL, and re-renders it as a JSON-RPC error on the same status.
   app.use(a2aInterfaceErrorsMiddleware());
-  app.use(protocolVersionMiddleware());
+  // ADR 0806 — the addresses outsiders hold: the unauthenticated vendor set,
+  // plus the OAuth callback a provider redirects the browser to.
+  app.use(protocolVersionMiddleware({
+    heldByThirdParties: (p) => {
+      // `p` is the INBOUND `/v1…` path; only a vendor twin is ever forwarded.
+      const twin = retiredVendorTwinPath(p);
+      return (twin !== null && isPublicPath(twin)) || isOAuthCallbackTwin(p);
+    },
+  }));
 
   // RFC 0168 §C.1 — the v2 address of the conformance seam surface, mounted
   // beside the negotiator because it is the same KIND of thing: an address
@@ -610,114 +660,11 @@ export async function createApp(config: AppConfig): Promise<Express> {
   // so a seam caller meets the same auth guard a v1 caller does.
   registerConformanceSeamAlias(app);
 
-  // Higher-limit JSON parser for /v1/packs/* publish payloads. MUST
-  // register before the global 1mb parser; body-parser is no-op when
-  // req._body is set, so registration order is precedence order.
-  app.use('/v1/packs', express.json({ limit: '50mb' }));
-  // Chat-attachment uploads (base64) ride a scoped parser sized to the
-  // 8mb-base64 store cap in routes/mediaAssets.ts. Registered before the
-  // global 1mb parser; body-parser is a no-op once req._body is set, so
-  // registration order is precedence order.
-  app.use('/v1/host/openwop-app/media', express.json({ limit: '12mb' }));
-  // ADR 0334 4b-3 — DOCX import carries a base64 .docx (~10mb cap enforced in the
-  // route); the default 1mb parser would reject it. Scoped to document-editor so
-  // the larger limit doesn't widen every route.
-  app.use('/v1/host/openwop-app/document-editor', express.json({ limit: '12mb' }));
-  // Inbound provider webhooks (ADR 0024 §6) need the EXACT raw bytes to verify a
-  // provider HMAC, so this scoped parser stashes them on `req.rawBody` before the
-  // global parser consumes the stream. Registered first; body-parser no-ops once
-  // req._body is set, so this wins for the inbound prefix.
-  app.use('/v1/host/openwop-app/connections-inbound', express.json({
-    limit: '256kb',
-    verify: (req, _res, buf) => {
-      (req as import('express').Request).rawBody = Buffer.from(buf);
-    },
-  }));
-  // ADR 0394 — Twilio (WhatsApp BSP) delivers `application/x-www-form-urlencoded`,
-  // which the json parser above skips; same raw-bytes capture, same prefix.
-  app.use('/v1/host/openwop-app/connections-inbound', express.urlencoded({
-    extended: false,
-    limit: '256kb',
-    verify: (req, _res, buf) => {
-      (req as import('express').Request).rawBody = Buffer.from(buf);
-    },
-  }));
-  // App-builder inbound sync webhook (ADR 0393 Phase 2) — GitHub signs the EXACT
-  // raw body (X-Hub-Signature-256), so it needs the same raw-bytes capture.
-  // 1mb: a push payload carries a commits[] array (GitHub truncates at 2048,
-  // we only read head_commit/ref/after, but the envelope must parse).
-  app.use('/v1/host/openwop-app/app-builder-sync/webhook', express.json({
-    limit: '1mb',
-    verify: (req, _res, buf) => {
-      (req as import('express').Request).rawBody = Buffer.from(buf);
-    },
-  }));
-  // Stripe billing webhook (ADR 0176) — Stripe signs the EXACT raw body, so it needs
-  // the same raw-bytes capture. Scoped to the public webhook path only.
-  app.use('/v1/host/openwop-app/billing/webhook', express.json({
-    limit: '256kb',
-    verify: (req, _res, buf) => {
-      (req as import('express').Request).rawBody = Buffer.from(buf);
-    },
-  }));
-  // Commerce Stripe webhook (ADR 0177 deferred P3) — same raw-body capture.
-  app.use('/v1/host/openwop-app/commerce/webhook', express.json({
-    limit: '256kb',
-    verify: (req, _res, buf) => {
-      (req as import('express').Request).rawBody = Buffer.from(buf);
-    },
-  }));
-  // Email bounce/complaint webhook (ADR 0241) — the provider (SendGrid/Postmark)
-  // signs the EXACT raw body, so capture it before the global parser. 2mb bounds
-  // a provider event batch (the route also caps event count).
-  app.use('/v1/host/openwop-app/public-email/events', express.json({
-    limit: '2mb',
-    verify: (req, _res, buf) => {
-      (req as import('express').Request).rawBody = Buffer.from(buf);
-    },
-  }));
-  // Notebooks audio/video SOURCE upload (ADR 0085) carries base64-encoded media
-  // up to the ~32 MiB decoded transcription cap. 32 MiB decoded is ≈ 42.7 MB of
-  // base64, so the body limit is 48mb — comfortably above the cap so the route's
-  // own decoded-size 413 guard is REACHABLE (not co-incident with this parser
-  // limit, the way an under-sized cap becomes dead code). Scoped to the
-  // `/sources/audio` sub-route only — every other notebook route keeps the small
-  // global limit. Registered before the global parser; body-parser no-ops once
-  // req._body is set, so registration order is precedence order.
-  const notebooksAudioJson = express.json({ limit: '48mb' });
-  app.use('/v1/host/openwop-app/notebooks', (req, res, next) =>
-    req.method === 'POST' && /\/sources\/audio$/.test(req.path) ? notebooksAudioJson(req, res, next) : next(),
-  );
-  // KB FILE UPLOAD (text/PDF/DOCX → extracted text): document/source-ingest POSTs
-  // carry base64 file bytes up to the ~32 MiB decoded ingest cap (≈42.7 MB base64),
-  // so they get the same 48mb parser as audio. Scoped to the ingest endpoints only
-  // (paths ending `/documents` or `/sources`); every other route keeps the 1mb
-  // global limit. Registered before the global parser (body-parser no-ops once
-  // req._body is set, so order = precedence).
-  const fileUploadJson = express.json({ limit: '48mb' });
-  app.use('/v1/host/openwop-app', (req, res, next) =>
-    req.method === 'POST' && /\/(documents|sources)$/.test(req.path) ? fileUploadJson(req, res, next) : next(),
-  );
-  // CDP-G batch/CSV import (ADR 0298) — a CSV body up to the route's 10k-row hard
-  // cap can exceed the 1mb global limit, which would 413 BEFORE the cap is reached
-  // (making the cap dead code). An 8mb parser keeps the row-count cap the binding
-  // guard. Scoped to the single import route; registered before the global parser
-  // (body-parser no-ops once req._body is set, so order = precedence).
-  app.use('/v1/host/openwop-app/cdp/collect/import', express.json({ limit: '8mb' }));
-  // Canvas editor docs (ADR 0333 grade pass DATA-D1/CODE-D2) — the drawing
-  // schema legally holds far more than 1mb (2000 shapes × 600-point spines);
-  // ~60 full ink strokes crosses the global limit and every save 413s BEFORE
-  // the schema cap binds, stranding unsaved work. An 8mb parser on the canvas
-  // editor families keeps the schema the binding guard. Scoped + registered
-  // before the global parser (body-parser no-ops once req._body is set).
-  app.use([
-    '/v1/host/openwop-app/drawings',
-    '/v1/host/openwop-app/cad',
-    '/v1/host/openwop-app/slides',
-    '/v1/host/openwop-app/campaign-studio',
-    '/v1/host/openwop-app/app-builder',
-    '/v1/host/openwop-app/canvas-packs',
-  ], express.json({ limit: '8mb' }));
+  // ADR 0812 P3a — the scoped parsers (larger limits, raw-body capture for signed
+  // webhooks) live in one module, mounted on BOTH path spellings so they survive
+  // the routing flip. MUST precede the global 1mb parser below: body-parser is a
+  // no-op once req._body is set, so registration order is precedence order.
+  mountScopedBodyParsers(app);
   app.use(express.json({ limit: '1mb' }));
   app.use(bodyParseErrorHandler());
 
@@ -762,6 +709,9 @@ export async function createApp(config: AppConfig): Promise<Express> {
   // BEFORE every route, because §A requires the identity to be resolved to a
   // principal *before* authorization rather than by whichever handler looks.
   // No-op for a request that presents no workload credential.
+  // ADR 0795 D2 — an `owk_` key reaches a vendor route only through a declared
+  // workspace scope. AFTER auth (it reads the principal), BEFORE every route.
+  app.use(keyVendorGate());
   app.use(workloadIdentityMiddleware());
   // v2 charter Phase 4 (P4-D) — the major-2 identity gate: the tenant segment of
   // a tenant-bound run id and the `Idempotency-Key` grammar
@@ -787,6 +737,8 @@ export async function createApp(config: AppConfig): Promise<Express> {
   // run-quota is mounted directly on POST /v1/runs in routes/runs.ts
   // (it needs the principal to scope by session).
   app.use(ipRateLimitMiddleware());
+  // ADR 0798 — and one bucket per self-service API key, on top of the per-IP ones.
+  app.use(apiKeyRateLimitMiddleware());
 
   // API-4: stream-safe per-request timeout. Bounds non-streaming requests
   // (SSE routes flush headers first, so it no-ops on them); the canonical
@@ -906,6 +858,13 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  // ADR 0833 D8 — nor does it ever serve the any-subject test-login seam.
+  const testSeamError = testAuthSeamStartupError();
+  if (testSeamError) {
+    log.error('startup_config_error', { error: testSeamError });
+    process.exit(1);
+  }
+
   const workspaceError = workspaceReadinessStartupError(config.storageDsn);
   if (workspaceError) {
     log.error('startup_config_error', { error: workspaceError });
@@ -930,6 +889,32 @@ async function main(): Promise<void> {
   }
 
   const app = await createApp(config);
+
+  // ADR 0867 — a selected storage ENGINE must work before this process takes
+  // traffic. Each check is a no-op unless its backend is selected; a failure
+  // exits here, so the revision fails its startup probe and never serves.
+  try {
+    await verifyPgSqlBackend();
+    await verifyPgVectorBackend();
+    await verifyS3BlobBackend();
+    await verifyGcsBlobBackend();
+  } catch (err) {
+    log.error('storage_engine_boot_check_failed', { error: err instanceof Error ? err.message : String(err) });
+    process.exit(1);
+  }
+  // ADR 0867 D2 — say which storage families this scale-out host withholds
+  // because their backend is process-local, and how to make each shared.
+  const withheld = processLocalStorageFamilies();
+  if (withheld.length > 0) {
+    log.warn('storage_families_withheld_process_local', {
+      families: withheld,
+      fix: 'OPENWOP_SURFACE_BACKEND=durable (Postgres Storage) + OPENWOP_SURFACE_SQL=postgres; OPENWOP_SURFACE_BLOB=gcs|s3; or OPENWOP_INSTANCE_TOPOLOGY=single when pinned to one instance',
+    });
+  }
+  // EVID-3 — log when the event loop is held (one synchronous stretch stalls
+  // every request and every background worker, and nothing recorded it).
+  // Entry-point only, so tests that call createApp() never start it.
+  const loopLagProbe = startEventLoopLagProbe();
 
   // Background workers (server-only): drain the durable webhook-delivery queue,
   // and re-dispatch runs orphaned by a crashed instance. Both lease their work
@@ -1014,7 +999,7 @@ async function main(): Promise<void> {
   // "wait N days then send" journeys; CAS-guarded fire-once across the fleet.
   const timerSweepDaemon = startTimerSweepDaemon({
     storage,
-    resume: (interrupt) => resolveAndResume(storage, hostSuite, interrupt.interruptId, { elapsed: true, reason: 'timer' }),
+    resume: timerResumeContinuation(storage, hostSuite), // ADR 0778 C1 — preclaimed
   });
   // ADR 0267 / CDP-E — segment-entered trigger: diff watched-segment membership
   // and emit `crm.segment.entered` per newly-entered contact (fires bound journeys
@@ -1029,6 +1014,12 @@ async function main(): Promise<void> {
   // the other opt-in sweep daemons above).
   const crmSnapshotDaemon = process.env.OPENWOP_CRM_SNAPSHOT_ENABLED === 'true'
     ? startCrmSnapshotDaemon({ storage }, listCrmOrgScopes)
+    : null;
+  // ADR 0820 §7 (funnel digest) — the operator's weekly paywall-funnel notice
+  // (env-gated `OPENWOP_BILLING_FUNNEL_WEEKLY_SUMMARY`, default OFF; the pass
+  // re-checks it, and claims one slot per ISO week fleet-wide).
+  const funnelWeeklySummaryDaemon = weeklySummaryEnabled()
+    ? startFunnelWeeklySummaryDaemon({ storage })
     : null;
   // ADR 0432 P3 (chat-first-port G9) — the verifier-sample igniter: monthly,
   // mint a deterministic sample of goal verdicts as `metrics-verifier-sample`
@@ -1075,6 +1066,7 @@ async function main(): Promise<void> {
       // are allowed to finish; `closeAllConnections()` below is the backstop.
       server.close();
 
+      loopLagProbe.stop();
       webhookWorker.stop();
       runSweeper.stop();
       kanbanWorkItemDaemon.stop();
@@ -1086,6 +1078,7 @@ async function main(): Promise<void> {
       segmentEntryDaemon.stop();
       workGraphDaemon?.stop();
       crmSnapshotDaemon?.stop();
+      funnelWeeklySummaryDaemon?.stop();
       verifierSampleDaemon?.stop();
       // Flush buffered OTel spans before exit (DATA-4). Best-effort; don't
       // block shutdown if the exporter is wedged.
@@ -1176,11 +1169,18 @@ async function main(): Promise<void> {
 
   const server = app.listen(config.port, () => {
     log.info('workflow-engine listening', { port: config.port });
+    // ADR 0789 §Correction — once-per-install work proportional to data volume
+    // runs HERE, after the port is bound, never inside `createApp` (whose app
+    // migrations are awaited before readiness). Fire-and-forget by design.
+    const storage = tryDurableStorage();
+    if (storage) void startBackgroundAppJobs(storage);
   });
   // ADR 0335 Phase 1 — attach the collaboration WebSocket to the http.Server
   // (createApp returns Express and doesn't expose the Server). Dormant until the
   // `realtime-collab` toggle is enabled for a tenant; auth-on-connect only.
   attachCollabWebSocket(server);
+  // ADR 0785 P2 — upgrade paths features register (core never imports them).
+  attachRegisteredUpgradeHandlers(server);
 }
 
 // Only run main() when this file is the entry point (not when imported

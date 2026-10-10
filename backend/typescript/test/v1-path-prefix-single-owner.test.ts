@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { V1_PATH_PREFIX, v1 } from '../src/middleware/protocolVersion.js';
+import { V1_PATH_PREFIX } from '../src/middleware/protocolVersion.js';
 
 /**
  * ADR 0649 — the major-1 path prefix has ONE owner.
@@ -30,8 +30,6 @@ function* tsFiles(dir: string): Generator<string> {
 describe('ADR 0649 — one owner for the v1 path prefix', () => {
   it('spells the prefix once, and isV1Path derives from it', () => {
     expect(V1_PATH_PREFIX).toBe('/v1');
-    expect(v1('/runs')).toBe('/v1/runs');
-    expect(v1('/runs/:runId/events')).toBe('/v1/runs/:runId/events');
   });
 
   it('no protocol route registration hard-codes /v1/ (host-extension and seam routes exempt)', () => {

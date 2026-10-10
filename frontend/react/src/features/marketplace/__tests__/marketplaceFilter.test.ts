@@ -1,3 +1,14 @@
+/**
+ * The Marketplace browse surface's faceted filter (ADR 0022; ADR 0763 for the
+ * `vendor.openwop-app.<feature>.*` scope `domainOf` folds back to its feature).
+ * Facets compose (AND), search reads name/title/description/author, and a facet
+ * only offers values that exist in the loaded catalog.
+ *
+ * Sabotage-witnessed (/grade-tests wave 10): status precedence swap, dropping the
+ * vendor-scope fold, the empty-vendor filter, the facet sort, the vendor facet, and
+ * each search field (author, title, description) each red a case below; dropping
+ * any one facet from `anyFilterActive` reds its loop.
+ */
 import { describe, it, expect } from 'vitest';
 import type { Listing } from '../marketplaceClient';
 import {
@@ -5,15 +16,15 @@ import {
 } from '../marketplaceFilter';
 
 const L = (p: Partial<Listing> & Pick<Listing, 'packName' | 'category'>): Listing => ({
-  version: '1.0.0', title: p.packName, installed: false, ...p,
-} as Listing);
+  version: '1.0.0', title: p.packName, installed: false, origin: 'registry', ...p,
+});
 
 const CATALOG: Listing[] = [
-  L({ packName: 'feature.crm.nodes', category: 'Node pack', author: 'openwop-team', installed: true }),
-  L({ packName: 'feature.crm.agents', category: 'Skill', author: 'openwop-team' }),
+  L({ packName: 'feature.crm.nodes', title: 'Customer Graph', category: 'Node pack', author: 'openwop-team', installed: true }),
+  L({ packName: 'vendor.openwop-app.crm.agents', category: 'Skill', author: 'openwop-team' }),
   L({ packName: 'feature.commerce.nodes', category: 'Node pack', author: 'acme', installed: true }),
   L({ packName: 'core.openwop.agents.code-reviewer', category: 'Skill', author: 'openwop-team' }),
-  L({ packName: 'feature.legacy.nodes', category: 'Node pack', author: 'acme', tombstoned: true }),
+  L({ packName: 'feature.legacy.nodes', description: 'Ledger sync', category: 'Node pack', author: 'acme', tombstoned: true }),
 ];
 
 describe('domainOf', () => {
@@ -65,13 +76,18 @@ describe('applyFilters', () => {
     expect(applyFilters(CATALOG, { ...EMPTY_FILTERS, query: 'commerce' }).map((l) => l.packName)).toEqual(['feature.commerce.nodes']);
     // author-only match (the term appears in no name/title)
     expect(applyFilters(CATALOG, { ...EMPTY_FILTERS, query: 'acme' })).toHaveLength(2);
+    // title-only match (the term is in no packName/description/author)
+    expect(applyFilters(CATALOG, { ...EMPTY_FILTERS, query: 'graph' }).map((l) => l.packName)).toEqual(['feature.crm.nodes']);
+    // description-only match, case-insensitive
+    expect(applyFilters(CATALOG, { ...EMPTY_FILTERS, query: 'LEDGER' }).map((l) => l.packName)).toEqual(['feature.legacy.nodes']);
   });
 });
 
 describe('anyFilterActive', () => {
   it('is false only when every facet + search is empty', () => {
     expect(anyFilterActive(EMPTY_FILTERS)).toBe(false);
-    expect(anyFilterActive({ ...EMPTY_FILTERS, status: 'installed' })).toBe(true);
-    expect(anyFilterActive({ ...EMPTY_FILTERS, query: 'x' })).toBe(true);
+    for (const k of ['query', 'type', 'domain', 'vendor', 'status'] as const) {
+      expect(anyFilterActive({ ...EMPTY_FILTERS, [k]: 'installed' }), k).toBe(true);
+    }
   });
 });

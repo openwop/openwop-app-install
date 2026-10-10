@@ -19,14 +19,19 @@ import { registerAppBuilderAgentTools } from './agentTools.js';
 import { registerAppBuilderCanvasRetention } from './canvasRetention.js';
 import { registerSyncBindingCleanup, registerAppBuilderErasure } from './syncBinding.js';
 import { registerAppBuilderMcpNodes } from './mcpControlNodes.js';
+import { registerFeatureDataExporter } from '../../host/featureDataExport.js';
+import { exportAppBuilderData } from './dataExport.js';
 
 export const appBuilderFeature: BackendFeature = {
   id: 'app-builder',
   // ADR 0173 Phase 2 — the first `ctx.features['app-builder']` surface: `export`.
-  surface: { id: 'app-builder', build: buildAppBuilderSurface },
+  // ADR 0835 D1 — the seam floor checks the deploy scope in the named org (the
+  // surface re-checks it, plus the cases the floor skips).
+  surface: { id: 'app-builder', build: buildAppBuilderSurface, orgPolicy: { methodScopes: { deployApp: 'host:app-deploy:manage' } } },
   // Install the artifact type + the closed-world component catalog (the single
   // source for the agent prompt, the palette, and validation) + the editor routes.
   registerRoutes: (deps) => {
+    registerFeatureDataExporter('app-builder', exportAppBuilderData); // ADR 0820 §7 — read-only export, served after a plan lapse
     registerAppBuilderArtifactType();
     registerAppBuilderComponents();
     // ADR 0346 4a — `app-builder.design` registers FROM the workflows chain
@@ -50,7 +55,7 @@ export const appBuilderFeature: BackendFeature = {
       id: 'code-export',
       label: 'Code Export',
       description:
-        'Export an App Builder design as downloadable framework-native source — React+Tailwind, React+styled-components, Vue+Tailwind, or HTML/CSS. Generated server-side (secret-scrubbed, size-capped) and delivered as a ZIP via a capability-token download. ON by default.',
+        'Export an App Builder design as downloadable framework-native source — React+Tailwind, React+styled-components, Vue+Tailwind, or HTML/CSS. Generated server-side (secret-scrubbed, size-capped) and delivered as a ZIP via a capability-token download.',
       category: 'Canvases',
       status: 'on',
       bucketUnit: 'tenant',
@@ -62,7 +67,7 @@ export const appBuilderFeature: BackendFeature = {
       id: 'code-publish',
       label: 'Code Publish (GitHub)',
       description:
-        'Publish an App Builder design as a GitHub repository — create-only content pushes through the governed `github` connection (fine-grained PAT, write scope consented per user; the token never reaches the browser or any workflow node). Requires Code Export-style generation; ON by default.',
+        'Publish an App Builder design as a GitHub repository — create-only content pushes through the governed `github` connection (fine-grained PAT, write scope consented per user; the token never reaches the browser or any workflow node). Requires Code Export-style generation.',
       category: 'Canvases',
       status: 'on',
       bucketUnit: 'tenant',
@@ -74,7 +79,7 @@ export const appBuilderFeature: BackendFeature = {
       id: 'code-sync',
       label: 'Code Sync (GitHub)',
       description:
-        'Two-way GitHub sync for App Builder designs — an admin binds a canvas to one repo branch; saves push a single [openwop-sync] commit (app.model.json + regenerated source), and pushes to the branch sync the model back into the builder. OFF by default: the inbound webhook mutates tenant state.',
+        'Two-way GitHub sync for App Builder designs — an admin binds a canvas to one repo branch; saves push a single [openwop-sync] commit (app.model.json + regenerated source), and pushes to the branch sync the model back into the builder. The inbound webhook mutates tenant state.',
       category: 'Canvases',
       status: 'off',
       bucketUnit: 'tenant',
@@ -98,7 +103,7 @@ export const appBuilderFeature: BackendFeature = {
     id: 'app-builder',
     label: 'App Builder',
     description:
-      'Design multi-screen apps with the AI chat: the App Architect agent emits a structured app design (screens, a component tree per screen, and the connectors between them) that renders inline in chat and opens full-screen for drag-and-drop editing. Components come from a closed host catalog — constrained typed JSON, never executable code. ON by default.',
+      'Design multi-screen apps with the AI chat: the App Architect agent emits a structured app design (screens, a component tree per screen, and the connectors between them) that renders inline in chat and opens full-screen for drag-and-drop editing. Components come from a closed host catalog — constrained typed JSON, never executable code.',
     category: 'Canvases',
     status: 'on',
     bucketUnit: 'tenant',
@@ -109,7 +114,7 @@ export const appBuilderFeature: BackendFeature = {
       id: 'app-builder.deploy',
       label: 'Governed app deployment',
       description:
-        'Deploy exported apps to the operator-configured provider (Cloud Run, ADR 0424) through the approval-gated deploy verbs. Requires operator provider configuration (OPENWOP_APP_DEPLOY_PROVIDER) and stays honest-off without it. A sub-capability of App Builder.',
+        'Deploy exported apps to the operator\'s Cloud Run project from a workflow\'s deploy node. Workspace admins and owners only. The host names each service owa-… and acts on nothing else. Stays off (501) until the operator sets OPENWOP_APP_DEPLOY_PROVIDER, OPENWOP_APP_DEPLOY_IMAGE_PREFIXES and OPENWOP_APP_DEPLOY_RUNTIME_SA. A sub-capability of App Builder.',
       category: 'Studio',
       status: 'off',
       bucketUnit: 'tenant',
@@ -117,8 +122,8 @@ export const appBuilderFeature: BackendFeature = {
     },
   ],
   requiredPacks: [
-    { name: 'feature.app-builder.nodes', version: '1.9.0' }, // 1.9.0 adds the canvas-to-generic-Kanban proposal adapter; core Kanban still owns materialization
-    { name: 'feature.app-builder.agents', version: '1.3.1' }, // ADR 0358 C tool-first prompt; 1.3.1 adds nav-container guidance (5b exemplar pass)
+    { name: 'feature.app-builder.nodes', version: '1.9.3' }, // 1.9.3: apply-repair refuses an unapproved candidate, deploy-app fails a refused deploy (ADR 0835 D1/D5). 1.9.1: node versions on capture/repair/apply-repair (ADR 0766 P2). 1.9.0 adds the canvas-to-generic-Kanban proposal adapter; core Kanban still owns materialization
+    { name: 'vendor.openwop-app.app-builder.agents', version: '1.3.2' }, // ADR 0358 C tool-first prompt; 1.3.1 adds nav-container guidance (5b exemplar pass)
     { name: 'feature.app-builder.artifact-types', version: '1.1.1' }, // ADR 0346 4c/4d — app.research + app.audit (types ship WITH producers)
   ],
   // ADR 0305 Phase F — the PRD → plan → render → per-screen-review design chain

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/core.openwop.obs/1.0.0/alert-fire.input.json",
+  "$id": "https://packs.openwop.dev/core.openwop.obs/1.0.1/alert-fire.input.json",
   "title": "AlertFireInput",
   "type": "object",
   "required": [

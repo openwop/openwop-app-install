@@ -21,7 +21,7 @@ import { createWorkspace, createMember } from '../src/host/accessControlService.
 import { putProposal, getProposal } from '../src/features/proposals/proposalsService.js';
 import type { Proposal } from '../src/features/proposals/types.js';
 
-const P = '/v1/host/openwop-app/proposals';
+const P = '/host/openwop-app/proposals';
 let server: http.Server;
 let ORIGIN = '';
 let WS = '';
@@ -40,7 +40,7 @@ async function loginTo(tenantId: string, who: string): Promise<C> {
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
     return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
   };
-  const r = await call('POST', '/v1/host/openwop-app/test/login', { email: `${who}-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await call('POST', '/host/openwop-app/test/login', { email: `${who}-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return {
     userId: r.body.user.userId,

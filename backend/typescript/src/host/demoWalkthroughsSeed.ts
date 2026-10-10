@@ -33,8 +33,9 @@
  */
 
 import type { WorkflowDefinition } from '../executor/types.js';
-import { registerWorkflow, getRegisteredWorkflow, deleteRegisteredWorkflow } from './workflowsRegistry.js';
-import { recordOwnership, getOwned, removeOwnership, isAuthoredByAnyTenant } from './workflowOwnership.js';
+import { registerWorkflow, getRegisteredWorkflow } from './workflowsRegistry.js';
+import { recordOwnership, getOwned, removeOwnership } from './workflowOwnership.js';
+import { forkedSharedIds } from './sharedWorkflowFork.js';
 import { lifecycleOf, withLifecycle } from './workflowLifecycle.js';
 import {
   CAMPAIGN_STUDIO_WALKTHROUGH_ID,
@@ -126,7 +127,9 @@ export async function countDemoWalkthroughs(tenantId: string): Promise<number> {
 export async function seedDemoWalkthroughs(tenantId: string): Promise<{ created: number; details: Record<string, unknown> }> {
   let created = 0;
   const seeded: string[] = [];
+  const forked = await forkedSharedIds(tenantId); // ADR 0789 — see seedZeroConfigWorkflows
   for (const def of DEMO_WALKTHROUGHS) {
+    if (forked.has(def.workflowId)) continue;
     try {
       const registered = getRegisteredWorkflow(def.workflowId);
       if (!registered) registerWorkflow(def);
@@ -145,15 +148,16 @@ export async function seedDemoWalkthroughs(tenantId: string): Promise<{ created:
 
 /**
  * Drop this tenant's ownership of the canonical demo walkthroughs. The global
- * registry def is removed only once NO tenant owns it any more — another
- * tenant's seeded copy (and the replay of its historical runs) must survive
- * this tenant's clear.
+ * registry def is never removed (§Correction ADR 0789: it used to be once NO
+ * tenant owned it, which forked tenants' runs still replay against).
  */
 export async function clearDemoWalkthroughs(tenantId: string): Promise<{ cleared: number; details: Record<string, unknown> }> {
   let cleared = 0;
   for (const def of DEMO_WALKTHROUGHS) {
     if (await removeOwnership(tenantId, def.workflowId)) cleared += 1;
-    if (!(await isAuthoredByAnyTenant(def.workflowId))) deleteRegisteredWorkflow(def.workflowId);
+    // ADR 0789 — never delete the SHARED row, even once nobody owns it: a tenant
+    // that forked (or was retracted) still has runs stamped with this id, and the
+    // registry's deletion cascade would take every tenant's revisions with it.
   }
   return { cleared, details: { walkthroughIds: DEMO_WALKTHROUGHS.map((d) => d.workflowId) } };
 }

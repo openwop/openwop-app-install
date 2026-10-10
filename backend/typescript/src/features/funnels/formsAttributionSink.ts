@@ -19,9 +19,10 @@
  * variant table needs a visitor, exactly like an unconsented `/next`).
  */
 
-import { resolveOne } from '../../host/featureToggles/service.js';
+import { resolveToggle } from '../../host/featureToggles/service.js';
 import { collectEvent } from '../cdp/collectService.js';
 import { isAllowed } from '../consent/consentService.js';
+import { visitorAnalyticsAllowed } from '../consent/visitorConsent.js';
 import { createLogger } from '../../observability/logger.js';
 import { registerSubmissionSink } from '../forms/submissionSinks.js';
 import { getFunnel, publicFunnelStep } from './funnelsService.js';
@@ -32,13 +33,14 @@ const log = createLogger('funnels.formsSink');
 export function registerFunnelsFormsSink(): void {
   registerSubmissionSink({
     id: 'funnel-attribution',
-    async onSubmission(_form, submission) {
+    async onSubmission(_form, submission, capture) {
       const ctx = submission.meta.context;
       const funnelId = ctx?.funnelId;
       const stepId = ctx?.stepId;
       if (!funnelId || !stepId) return undefined; // the common, non-funnel case
       try {
-        const toggle = await resolveOne('funnels', { tenantId: submission.tenantId });
+        // ADR 0819 §1 opt-out — a PUBLIC lane (tenant from the resource): ADR 0419 never paywalls a shopper/visitor on the operator's plan.
+        const toggle = await resolveToggle('funnels', { tenantId: submission.tenantId });
         if (!toggle || !toggle.enabled) return undefined;
         // Tenant/org come from the SUBMISSION (authoritative), never the context.
         const funnel = await getFunnel(submission.tenantId, submission.orgId, funnelId);
@@ -52,7 +54,19 @@ export function registerFunnelsFormsSink(): void {
         const rawVisitor = typeof ctx?.visitor === 'string' ? ctx.visitor : '';
         let visitor = '';
         if (rawVisitor) {
-          try { visitor = (await isAllowed(submission.tenantId, rawVisitor, 'analytics')) ? rawVisitor : ''; } catch { visitor = ''; }
+          // ADR 0860 D3 (architect B1) — a live submit hands the visitor's token
+          // subject + region through the transient capture, so this is the SAME
+          // decision the funnel routes make. No capture (a release, a seed) keeps
+          // the legacy subject-only decision.
+          try {
+            const vc = capture?.visitorConsent;
+            const ok = vc === null
+              ? false // a refused token is a refusal, never a fall-back (grade-code M1)
+              : vc
+                ? await visitorAnalyticsAllowed(submission.tenantId, rawVisitor, vc)
+                : await isAllowed(submission.tenantId, rawVisitor, 'analytics');
+            visitor = ok ? rawVisitor : '';
+          } catch { visitor = ''; }
         }
         // Same sticky-variant stamp `/next` emits — re-derived deterministically.
         const served = visitor ? await publicFunnelStep(submission.tenantId, submission.orgId, funnel, ix, visitor) : null;

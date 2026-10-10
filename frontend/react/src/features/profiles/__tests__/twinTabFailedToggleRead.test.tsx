@@ -9,13 +9,22 @@
  * check" state with a retry through the context's one reload path.
  *
  * Three arms, because the tri-state is the fix: failed ≠ loading ≠ enabled.
+ *
+ * The all-access mock FOLLOWS the per-feature arm (no fixture that contradicts
+ * itself), and both live regions are reset in `beforeEach` so "announced" is
+ * this case's announcement. Sabotage-witnessed (/grade-tests wave 3, `w3g3-tw-*`):
+ * dropping the tab on a failed read, rendering the failure as loading or as the
+ * dashboard, a dead retry, an unannounced failure card, a loading arm rendered as
+ * the failure, and an enabled arm that renders nothing each turn a named case red.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, act, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { makeFeatureAccess, type FeatureAccessResult } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 
-const { getMyProfile, reload } = vi.hoisted(() => ({ getMyProfile: vi.fn(), reload: vi.fn() }));
+import type { Profile } from '../profilesClient.js';
+
+const { getMyProfile, reload } = vi.hoisted(() => ({ getMyProfile: vi.fn<() => Promise<Profile>>(), reload: vi.fn<() => void>() }));
 let twinAccess: FeatureAccessResult;
 vi.mock('../profilesClient.js', async (orig) => ({
   ...(await orig<typeof import('../profilesClient.js')>()),
@@ -24,7 +33,7 @@ vi.mock('../profilesClient.js', async (orig) => ({
 vi.mock('../../../featureToggles/FeatureAccessContext.js', async (orig) => ({
   ...(await orig<typeof import('../../../featureToggles/FeatureAccessContext.js')>()),
   useFeatureAccess: () => twinAccess,
-  useAllFeatureAccess: () => ({ byId: {}, allowedFeatures: '*' as const, loading: false, resolutionFailed: true, reload }),
+  useAllFeatureAccess: () => ({ byId: {}, allowedFeatures: '*' as const, loading: twinAccess.loading, resolutionFailed: twinAccess.resolutionFailed, reload }),
 }));
 // Composed tabs are other features' surfaces — stubbed, same as profilePageStates.
 vi.mock('../../connections/ConnectionsManager.js', () => ({ ConnectionsManager: () => null }));
@@ -41,22 +50,27 @@ vi.mock('../../../kanban/kanbanClient.js', () => ({ getPersonalBoard: vi.fn() })
 vi.mock('../../users/usersClient.js', () => ({ updateMyDisplayName: vi.fn() }));
 
 import { ProfilePage } from '../ProfilePage.js';
+import { GlobalLiveRegion, announce } from '../../../ui/announce.js';
 
-const PROFILE = {
+const PROFILE: Profile = {
   userId: 'u1', tenantId: 't1', displayName: 'Ada Lovelace',
   skills: [], equipment: [], interests: [], workflows: [],
   portfolioAssetTokens: [], pinnedAgentIds: [],
   completeness: 40, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
 };
 
+const polite = (): string => document.querySelector('[data-owp-live="polite"]')?.textContent ?? '';
+
 const mount = async (): Promise<void> => {
-  render(<MemoryRouter initialEntries={['/profile?tab=twin']}><ProfilePage /></MemoryRouter>);
+  render(<MemoryRouter initialEntries={['/profile?tab=twin']}><GlobalLiveRegion /><ProfilePage /></MemoryRouter>);
   await act(async () => {});
 };
 
 afterEach(cleanup);
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
+  announce('');
+  announce('', { assertive: true });
   getMyProfile.mockResolvedValue(PROFILE);
   twinAccess = makeFeatureAccess({ enabled: false, resolutionFailed: true });
 });
@@ -66,6 +80,8 @@ describe('?tab=twin after a FAILED assignments read', () => {
     await mount();
     expect(screen.getByRole('tab', { name: /who can recall my memory/i })).toBeTruthy();
     expect(document.body.textContent).toContain('Could not check whether twin recall is enabled here');
+    // ANNOUNCED — a consent surface's failure is spoken, not only painted.
+    expect(polite()).toContain('Could not check whether twin recall is enabled here');
     // Not the loading fiction, and not the dashboard (which would imply an answer).
     expect(document.body.textContent).not.toContain('THE-GRANTS-DASHBOARD');
   });
@@ -79,8 +95,10 @@ describe('?tab=twin after a FAILED assignments read', () => {
   it('a merely LOADING toggle still renders the loading state, not the failure', async () => {
     twinAccess = makeFeatureAccess({ enabled: false, loading: true });
     await mount();
+    // The tab stays while resolving (half of the tri-state) …
+    expect(screen.getByRole('tab', { name: /who can recall my memory/i })).toBeTruthy();
     expect(document.body.textContent).not.toContain('Could not check');
-    expect(document.body.textContent).toContain('Loading');
+    expect(document.body.textContent).toContain('Loading…');
   });
 
   it('an ENABLED toggle renders the dashboard (the failure branch did not eat it)', async () => {

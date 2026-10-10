@@ -22,6 +22,15 @@ A visitor id is personal-data machinery. The three shapes:
 1. **Cookie / localStorage id** — durable cross-day identity ⇒ consent
    banners (GDPR/ePrivacy), a compliance burden pushed onto every
    white-label operator's public pages. REJECTED.
+
+   > **CORRECTED 2026-10-07 (ADR 0857 D5): rejected for the visitor DIMENSION only.
+   > The page as shipped does write one.** The first-party renderer writes a durable
+   > `vk-<uuid>` into `localStorage['owp:vk']` on every public page load, before any
+   > consent check (`frontend/react/src/features/site/visitorBeacon.ts:19-33`,
+   > `FrontPage.tsx:165`). It sends that value as `?vk=` (experiment assignment) and
+   > as the beacon `sessionKey`. The hash this ADR adopts is cookieless. The
+   > first-party page is not "no cookie, no localStorage". Whether to gate that
+   > write on consent is ADR 0857 product decision 2.
 2. **Raw IP+UA fingerprint stored per event** — server-side PII retention on
    an anonymous surface. REJECTED.
 3. **Daily-rotating salted hash (the Plausible/Fathom shape)** —

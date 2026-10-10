@@ -131,6 +131,34 @@ describe('RFC 0058 — runTimeoutMs (run-duration bound)', () => {
     }
   });
 
+  // Corpus steward, suite 2.45.15 witness wave (`runs.run-timeout-breach`,
+  // `v2-run-execution-bounds`): under major 2 the bounds live in the CLOSED
+  // `run` section, `configurable: { version: 1, run: { runTimeoutMs } }`. The
+  // executor read only the v1 flat key, so this run stayed `running`.
+  it('v2 closed shape: configurable.run.runTimeoutMs breaches the same way', async () => {
+    const run = await newRun('wf.timeout.v2', { version: 1, run: { runTimeoutMs: 20 } });
+    const result = await executeRun(storage, run, oneNode('wf.timeout.v2', 'test.slow'));
+    expect(result.status).toBe('failed');
+    const events = await storage.listEvents(run.runId);
+    expect((events.find((e) => e.type === 'cap.breached')!.payload as { kind?: string; limit?: number }))
+      .toMatchObject({ kind: 'run-duration', limit: 20 });
+    expect((events.find((e) => e.type === 'run.failed')!.payload as { error: { code: string } }).error.code).toBe('run_timeout');
+  });
+
+  it('v2 closed shape: configurable.run.recursionLimit caps node executions', async () => {
+    const run = await newRun('wf.recursion.v2', { version: 1, run: { recursionLimit: 1 } });
+    const twoNodes: WorkflowDefinition = {
+      workflowId: 'wf.recursion.v2',
+      nodes: [{ nodeId: 'a', typeId: 'test.fast' }, { nodeId: 'b', typeId: 'test.fast' }],
+      edges: [{ from: 'a', to: 'b' }],
+    } as unknown as WorkflowDefinition;
+    const result = await executeRun(storage, run, twoNodes);
+    expect(result.status).toBe('failed');
+    const events = await storage.listEvents(run.runId);
+    expect((events.find((e) => e.type === 'cap.breached')!.payload as { kind?: string }).kind).toBe('node-executions');
+    expect((events.find((e) => e.type === 'run.failed')!.payload as { error: { code: string } }).error.code).toBe('recursion_limit_exceeded');
+  });
+
   it('does not breach when the run finishes within runTimeoutMs', async () => {
     const run = await newRun('wf.ok', { runTimeoutMs: 60_000 });
     const result = await executeRun(storage, run, oneNode('wf.ok', 'test.fast'));

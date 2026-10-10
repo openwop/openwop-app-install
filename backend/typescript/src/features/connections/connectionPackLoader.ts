@@ -34,15 +34,80 @@ import { locateRepoSchemasDir } from '../../host/_repoPath.js';
 import { isParkedPackDirName } from '../../bootstrap/mountLocalPacks.js';
 import { semverGte } from '../../util/semver.js';
 import { verifyMcpReachOnRegistration } from './oauthFlow.js';
+import { rangeAdmitsMajor } from '../../host/packManifestV2Gate.js';
 import {
   registerProvider,
   listProviders,
+  getProvider,
+  providerPackOwner,
+  recordProviderRefusal,
   type ProviderManifest,
   type ScopeGroup,
   type CredentialKind,
 } from './providerRegistry.js';
 
 const log = createLogger('connection-pack-loader');
+
+/** RFC 0233 §B.5 — record a §Provider identity refusal for the registry read. */
+function noteRefusal(packName: string, err: OpenwopError): void {
+  if (err.code !== 'connection_provider_conflict' && err.code !== 'connection_provider_unresolved') return;
+  const d = (err.details ?? {}) as { provider?: unknown; definedBy?: unknown };
+  if (typeof d.provider !== 'string') return;
+  recordProviderRefusal({
+    packName,
+    providerId: d.provider,
+    code: err.code,
+    // Every conflict names its holder (the schema requires it): the v2 refusal
+    // carries `definedBy`; the v1 precedence refusal does not, so read the owner
+    // map, where a missing owner means the built-in holds the id.
+    ...(err.code === 'connection_provider_conflict'
+      ? { heldBy: typeof d.definedBy === 'string' ? d.definedBy : (providerPackOwner(d.provider) ?? 'builtin') }
+      : {}),
+  });
+}
+
+/**
+ * Provider identity at registration — ONE rule both install paths call
+ * (boot `loadConnectionPacks` and the seam `installConnectionPackManifest`).
+ *
+ * - **A v2-only pack** (its `engines.openwop` range does not admit major 1):
+ *   `connection-packs.md` §"Provider identity" (RFC 0177 §D.1, ADR 0809). A
+ *   bare `provider.id` is unique per host, and "version-based precedence is
+ *   gone": if ANY definition already holds the id — a built-in, or another
+ *   pack — the later registration is refused `connection_provider_conflict`.
+ *   Re-registering the SAME pack is not a second definition.
+ * - **Any other pack**: v1 §B.6, unchanged — the built-in is a version floor,
+ *   and two packs resolve by SemVer (>= wins). A pack that admits both majors
+ *   keeps this, so nothing installed today changes behaviour.
+ *
+ * Throws the refusal; returns normally when the registration may proceed.
+ */
+function assertProviderIdentity(manifest: ConnectionPackManifest, prevVersion: string | undefined): void {
+  const { id } = manifest.provider;
+  const range = (manifest as { engines?: { openwop?: unknown } }).engines?.openwop;
+  const v2Only = typeof range === 'string' && !rangeAdmitsMajor(range, 1) && rangeAdmitsMajor(range, 2);
+  if (v2Only) {
+    const owner = providerPackOwner(id);
+    const held = getProvider(id) !== null && owner !== manifest.name;
+    if (held) {
+      throw new OpenwopError(
+        'connection_provider_conflict',
+        `Connection pack '${manifest.name}' declares provider '${id}', which ${owner ? `pack '${owner}'` : 'a built-in'} already defines. A provider id is unique per host and the later registration is refused (RFC 0177 §D.1); name a pack's definition with the qualified form '<packName>#${id}'.`,
+        409,
+        { provider: id, ...(owner ? { definedBy: owner } : { definedBy: 'builtin' }) },
+      );
+    }
+    return;
+  }
+  if (prevVersion !== undefined && !semverGte(manifest.version, prevVersion)) {
+    throw new OpenwopError(
+      'connection_provider_conflict',
+      `Connection pack '${manifest.name}' declares provider '${id}' v${manifest.version}, which does not supersede the already-installed v${prevVersion} (RFC 0095 §B.6).`,
+      409,
+      { provider: id, installed: prevVersion, incoming: manifest.version },
+    );
+  }
+}
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SCHEMAS_DIR = locateRepoSchemasDir(__dirname, 'connection-pack-manifest.schema.json');
@@ -272,20 +337,13 @@ export function loadConnectionPacks(opts: { roots: string[] }): ConnectionPackLo
         const { id } = manifest.provider;
         const version = manifest.version;
 
-        // §B.6 precedence.
+        // §B.6 precedence (v1) / §D.1 refusal (v2-only) — the one shared rule.
         const prevInstalled = installedVersions.get(id);
-        if (prevInstalled !== undefined && !semverGte(version, prevInstalled)) {
-          throw new OpenwopError(
-            'connection_provider_conflict',
-            `Connection pack '${packName}' declares provider '${id}' v${version}, which does not supersede the already-installed v${prevInstalled} (RFC 0095 §B.6).`,
-            409,
-            { provider: id, installed: prevInstalled, incoming: version },
-          );
-        }
+        assertProviderIdentity(manifest, prevInstalled);
         const overrodeBuiltin = builtinIds.has(id) && prevInstalled === undefined;
 
         const registered = toProviderManifest(manifest.provider);
-        registerProvider(registered);
+        registerProvider(registered, { packName: manifest.name });
         verifyMcpReachOnRegistration(registered); // RFC 0199 §B.4
         installedVersions.set(id, version);
         installed.push({ pack: packName, providerId: id, version, overrodeBuiltin });
@@ -293,6 +351,7 @@ export function loadConnectionPacks(opts: { roots: string[] }): ConnectionPackLo
       } catch (err) {
         // Isolate the failure to THIS pack — log loud, collect, continue.
         if (err instanceof OpenwopError) {
+          noteRefusal(packName, err);
           errors.push({ pack: packName, code: err.code, message: err.message, ...(err.details ? { details: err.details } : {}) });
           log.error('rejected connection pack', { pack: packName, code: err.code, message: err.message });
         } else {
@@ -374,22 +433,16 @@ export function installConnectionPackManifest(raw: unknown): SeamInstallOutcome 
     const { id } = manifest.provider;
     const version = manifest.version;
     const prev = seamInstalledVersions.get(id);
-    if (prev !== undefined && !semverGte(version, prev)) {
-      throw new OpenwopError(
-        'connection_provider_conflict',
-        `Connection pack '${packName}' declares provider '${id}' v${version}, which does not supersede the already-installed v${prev} (RFC 0095 §B.6).`,
-        409,
-        { provider: id, installed: prev, incoming: version },
-      );
-    }
+    assertProviderIdentity(manifest, prev);
     const registered = toProviderManifest(manifest.provider);
-    registerProvider(registered);
+    registerProvider(registered, { packName: manifest.name });
     verifyMcpReachOnRegistration(registered); // RFC 0199 §B.4
     seamInstalledVersions.set(id, version);
     log.info('seam-installed connection pack', { pack: packName, provider: id, version });
     return { installed: true };
   } catch (err) {
     if (err instanceof OpenwopError) {
+      noteRefusal(packName, err);
       return {
         installed: false,
         errors: [{ pack: packName, code: err.code, message: err.message, ...(err.details ? { details: err.details } : {}) }],
@@ -411,6 +464,13 @@ export interface SeamResolveOutcome {
  *  exercise the installed-vs-built-in SemVer §11 precedence rule without
  *  depending on which providers this deployment happens to build in. */
 export function seamResolveProvider(provider: string, simulateBuiltinVersion?: string): SeamResolveOutcome {
+  // ADR 0809 — the qualified form resolves ONLY to the named pack's definition.
+  if (provider.includes('#')) {
+    const bare = provider.slice(provider.indexOf('#') + 1);
+    if (getProvider(provider) === null) return { resolved: false, code: 'connection_provider_unresolved' };
+    const v = seamInstalledVersions.get(bare);
+    return { resolved: true, source: 'pack', ...(v !== undefined ? { version: v } : {}) };
+  }
   const installedVersion = seamInstalledVersions.get(provider);
   if (simulateBuiltinVersion !== undefined) {
     if (installedVersion === undefined) {

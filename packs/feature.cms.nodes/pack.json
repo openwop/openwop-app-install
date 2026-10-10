@@ -1,12 +1,23 @@
 {
   "name": "feature.cms.nodes",
-  "version": "1.5.0",
-  "description": "CMS feature node pack (write verbs C6) — workflow nodes over the `ctx.features.cms` surface shipped by the CMS feature. Reads: `get-page` (published page resolved for a target locale, exact → language-family → base) and `list-pages`. Generative: `translate-section` (sparse per-locale overlay via the run-scoped ctx.callAI). Governed writes: `update-section-draft` (DRAFT-only section patch, sanitized like an editor save) and `submit-page` (the SAME approval-gate composition as the editor submit — a node can draft and submit but NEVER publish). Reads are role:action (outputs recorded; replay/fork read the recorded result). The three WRITERS are role:side-effect (ADR 0668 D5): `update-section-draft` and `submit-page` mutate the pages store and are replay-SERVED; `translate-section` also writes and is additionally NON-DETERMINISTIC (it calls the model), so the generator holds it back from the served set as an ai-invocation-log and it re-executes on replay by design — RFC 0041 §B divergence injection depends on that, and the ADR 0326 invocation log is its discharge. Overlays are sanitized on persist.",
+  "version": "1.5.1",
+  "description": "CMS feature node pack (write verbs C6) — workflow nodes over the `ctx.features.cms` surface shipped by the CMS feature. Reads: `get-page` (published page resolved for a target locale, exact → language-family → base) and `list-pages`. Generative: `translate-section` (sparse per-locale overlay via the run-scoped ctx.callAI). Governed writes: `update-section-draft` (DRAFT-only section patch, sanitized like an editor save) and `submit-page` (the SAME approval-gate composition as the editor submit — a node can draft and submit but NEVER publish). Reads are role:action (outputs recorded; replay/fork read the recorded result). The three WRITERS are role:side-effect (ADR 0668 D5): `update-section-draft` and `submit-page` mutate the pages store and are replay-SERVED; `translate-section` also writes and is additionally NON-DETERMINISTIC (it calls the model), so the generator holds it back from the served set as an ai-invocation-log and it re-executes on replay by design — RFC 0041 §B divergence injection depends on…",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
-  "keywords": ["feature", "cms", "content", "localization", "i18n", "rfc-0103"],
-  "engines": { "openwop": ">=1.1.0 <2.0.0" },
-  "peerDependencies": { "aiProviders": "supported" },
+  "keywords": [
+    "feature",
+    "cms",
+    "content",
+    "localization",
+    "i18n",
+    "rfc-0103"
+  ],
+  "engines": {
+    "openwop": ">=1.1.0 <3.0.0"
+  },
+  "peerDependencies": {
+    "aiProviders": "supported"
+  },
   "nodes": [
     {
       "typeId": "feature.cms.nodes.get-page",
@@ -57,5 +68,11 @@
       "role": "side-effect"
     }
   ],
-  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+  "runtime": {
+    "language": "javascript",
+    "format": "esm",
+    "entry": "./index.mjs",
+    "minRuntimeVersion": "node>=20"
+  },
+  "kind": "node"
 }

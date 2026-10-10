@@ -35,7 +35,7 @@ beforeAll(async () => {
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   for (const id of ['users', 'commerce', 'commerce-ucp-buyer', 'connections']) { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status: 'on' }, 'test'); }
   // Point the seeded merchant provider at THIS app's own dev route (the buyer shops it over loopback).
-  process.env.OPENWOP_UCP_REF_MERCHANT_URL = `${BASE}/v1/host/openwop-app/dev/ucp-merchant/mcp`;
+  process.env.OPENWOP_UCP_REF_MERCHANT_URL = `${BASE}/host/openwop-app/dev/ucp-merchant/mcp`;
 });
 afterAll(async () => {
   delete process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE; delete process.env.OPENWOP_UCP_REF_MERCHANT_ENABLED;
@@ -56,13 +56,13 @@ function client() {
 }
 async function shopOwner(): Promise<{ owner: ReturnType<typeof client>; orgId: string; tenantId: string }> {
   const owner = client();
-  const r = await owner.post('/v1/host/openwop-app/test/login', { email: `ref-${Date.now()}-${n++}@acme.test` });
+  const r = await owner.post('/host/openwop-app/test/login', { email: `ref-${Date.now()}-${n++}@acme.test` });
   const tenantId: string = r.body.user?.tenantId ?? '';
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Buyer Shop' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Buyer Shop' });
   await seedUcpReferenceMerchant(tenantId); // registers the provider (→ this app's route) + a workspace connection
   return { owner, orgId: org.body.orgId, tenantId };
 }
-const buyer = (orgId: string, s = ''): string => `/v1/host/openwop-app/commerce/orgs/${encodeURIComponent(orgId)}/ucp-buyer${s}`;
+const buyer = (orgId: string, s = ''): string => `/host/openwop-app/commerce/orgs/${encodeURIComponent(orgId)}/ucp-buyer${s}`;
 
 describe('ADR 0260 — reference UCP-over-MCP merchant', () => {
   it('the buyer validates the full ucp.<op> convention against the reference merchant', async () => {
@@ -114,7 +114,7 @@ describe('ADR 0260 — reference UCP-over-MCP merchant', () => {
 
   it('the seeder registers a workspace connection + the catalog, idempotently', async () => {
     const owner = client();
-    const r = await owner.post('/v1/host/openwop-app/test/login', { email: `refseed-${Date.now()}-${n++}@acme.test` });
+    const r = await owner.post('/host/openwop-app/test/login', { email: `refseed-${Date.now()}-${n++}@acme.test` });
     const tenantId: string = r.body.user?.tenantId ?? '';
     const first = await seedUcpReferenceMerchant(tenantId);
     expect(first.created).toBe(1);

@@ -61,7 +61,7 @@ describe('privileged routes reach the shared privileged gate (KTFULL-B1/B2/B14/B
       expect(handlerSource(route), `${key} must use the privileged gate`).toContain('authoringGate');
     }
     // The participant catalog read stays open to members.
-    const catalog = byPath.get(`get ${'/v1/host/openwop-app/kicktodo'}/challenges`);
+    const catalog = byPath.get(`get ${'/host/openwop-app/kicktodo'}/challenges`);
     expect(catalog && handlerSource(catalog)).not.toContain('authoringGate');
   });
 
@@ -97,13 +97,13 @@ describe('privileged routes reach the shared privileged gate (KTFULL-B1/B2/B14/B
 
   it('community: moderation acts are privileged while participant review writing is not', () => {
     const byPath = new Map(KICKTODO_COMMUNITY_ROUTES.map((r) => [`${r.method} ${r.path}`, r]));
-    for (const key of ['post /v1/host/openwop-app/kicktodo/community/reviews/resolve-flag',
-                       'post /v1/host/openwop-app/kicktodo/community/profile/decide']) {
+    for (const key of ['post /host/openwop-app/kicktodo/community/reviews/resolve-flag',
+                       'post /host/openwop-app/kicktodo/community/profile/decide']) {
       const route = byPath.get(key);
       expect(route, `${key} should exist`).toBeTruthy();
       expect(handlerSource(route!), `${key} must be moderator-gated`).toContain('requireKicktodoManage');
     }
-    const write = byPath.get('post /v1/host/openwop-app/kicktodo/community/reviews');
+    const write = byPath.get('post /host/openwop-app/kicktodo/community/reviews');
     expect(write && handlerSource(write)).not.toContain('requireKicktodoManage'); // proven buyers write reviews
   });
 });

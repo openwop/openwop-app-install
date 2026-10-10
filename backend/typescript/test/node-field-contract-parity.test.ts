@@ -241,10 +241,18 @@ describe('the three node-field writers declare the same contract', () => {
     expect(read, 'the builder emits a field its own reader drops — lost on the next save').toEqual(emitted);
   });
 
-  it('the producer emits exactly what the validator accepts', () => {
+  it('the producer emits exactly what the validator accepts, minus the builder layout', () => {
     // If expandChain emitted a field the validator drops, every chain-instantiated
     // workflow would lose it on the very first POST.
-    expect([...producer].sort()).toEqual([...ingest].sort());
+    //
+    // ADR 0770 D4 — ONE deliberate, named exception: the builder's authoring
+    // layout (`name`, `position`). Chain packs carry both on fragment nodes, but
+    // emitting them from expansion would move the hash of every chain-expanded and
+    // chain-backed definition — and every run's `definitionRevision` pin with it.
+    // A template is auto-laid-out on first open, then persists (ADR 0770 P3 owns
+    // carrying pack layout). Listed, not hidden: a new field still fails here.
+    const BUILDER_LAYOUT = new Set(['name', 'position']);
+    expect([...producer].sort()).toEqual([...ingest].filter((f) => !BUILDER_LAYOUT.has(f)).sort());
   });
 
   it('the builder emits every field the host validator accepts', () => {
@@ -275,8 +283,10 @@ describe('the three node-field writers declare the same contract', () => {
     // 2026-08-16. `compensation` had in fact been accepted since #3274 — it was
     // invisible to this parser until the shorthand matcher above was added, so
     // this pin was silently one field short of the truth.
+    // `name` + `position` (ADR 0770 D4) joined on 2026-09-28: the builder's layout,
+    // dropped here until then, so every reopen re-gridded the canvas.
     expect([...ingest].sort()).toEqual([
-      'compensation', 'config', 'inputs', 'irreversibleEffect', 'nodeId', 'outputRole', 'typeId',
+      'compensation', 'config', 'inputs', 'irreversibleEffect', 'name', 'nodeId', 'outputRole', 'position', 'typeId',
     ]);
   });
 });

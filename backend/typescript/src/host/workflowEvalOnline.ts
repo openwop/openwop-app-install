@@ -19,6 +19,12 @@
  *    no assertion detail strings (the erasure-exempt contract).
  *  - Increments are CAS-looped; persistent contention drops the increment
  *    and logs (best-effort observability counts, disclosed in the ADR).
+ *  - ADR 0820 §8.2 — the `llm-judge` is the part that SPENDS (a headless model
+ *    call per scored run, managed-key-first), so it rides the `evals` feature's
+ *    access gate (toggle + plan; the feature is sold in the Governance bundle).
+ *    Refused ⇒ the judge is SKIPPED and counted (`judgeSkipped`), exactly like
+ *    the daily cap: never a fake pass, never a failure. Deterministic online
+ *    assertions are workflow-builder core and keep scoring whatever the plan.
  */
 
 import { DurableCollection } from './hostExtPersistence.js';
@@ -28,6 +34,13 @@ import type { RunRecord } from '../types.js';
 import { listEvalSets, type WorkflowEvalSet } from './workflowEvalSets.js';
 import { collectRunEvidence, evaluateAssertions, type EvalJudge } from './workflowEvalRunner.js';
 import { tenantEvalJudge } from './workflowEvalJudge.js';
+import { resolveOne } from './featureToggles/service.js';
+
+/** ADR 0820 §8.2 — may this tenant spend an online LLM judge? (`evals` toggle +
+ *  plan, fail-closed.) */
+async function judgeFeatureAllowed(tenantId: string): Promise<boolean> {
+  return (await resolveOne('evals', { tenantId }).catch(() => null))?.enabled === true;
+}
 
 const log = createLogger('host.workflowEvalOnline');
 
@@ -260,7 +273,9 @@ export async function scoreOnlineEvalsOnTerminal(storage: Storage, runId: string
           // Validation guarantees online.judge === true when judge assertions
           // exist (code-review H2) — the skip reasons left are the daily cap
           // and a non-completed run (no spend to grade absent output).
-          if (run.status === 'completed' && (await reserveJudgeSlot(run.tenantId, day))) {
+          // ADR 0820 §8.2 — the feature gate is asked BEFORE the cap slot, so a
+          // refused tenant never burns a slot it cannot use.
+          if (run.status === 'completed' && (await judgeFeatureAllowed(run.tenantId)) && (await reserveJudgeSlot(run.tenantId, day))) {
             judge = tenantEvalJudge(run.tenantId);
             judged = true;
           } else {
@@ -270,6 +285,7 @@ export async function scoreOnlineEvalsOnTerminal(storage: Storage, runId: string
             // trend signal exactly when the feature was used most (and
             // contradicting ADR 0480 §4's own SKIP wording). Coverage loss
             // is disclosed by `judgeSkipped`, never faked as quality loss.
+            // The same holds for a judge the `evals` feature refuses.
             judgeSkipped = true;
             scored = deterministic;
           }

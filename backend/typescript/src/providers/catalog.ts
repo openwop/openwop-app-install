@@ -24,6 +24,11 @@ interface ProviderModel {
   capabilities: readonly string[];
   cost?: { input: number; output: number };
   recommended?: boolean;
+  /** Anthropic models whose thinking is ADAPTIVE AND ALWAYS ON (Claude Opus 5.5,
+   *  Fable 5.1). They reject a manual `thinking: {type:"enabled", budget_tokens}`
+   *  AND `{type:"disabled"}` with a 400; the documented request omits `thinking`
+   *  (equivalent to `{type:"adaptive"}`). Read through `isAdaptiveThinkingOnly`. */
+  adaptiveThinkingOnly?: boolean;
   /** Does this model do NATIVE web search? Present in providers.json but was
    *  absent from this type, so the SSoT and the type disagreed. Read through
    *  `host/webSearchCapability.ts`, never inline. */
@@ -147,6 +152,15 @@ export function getClassDefault(providerId: string, modelClass: string): string 
   const id = (defaults as Record<string, unknown>)[modelClass];
   if (typeof id !== 'string' || id.length === 0) return null;
   return p.models.some((m) => m.id === id) ? id : null;
+}
+
+/** True when the catalog marks this model's thinking as adaptive-and-always-on
+ *  (see `ProviderModel.adaptiveThinkingOnly`). An id the catalog does not list
+ *  (a user-typed custom model) answers false; the Anthropic dispatcher backs that
+ *  case with a one-shot retry on the documented 400. */
+export function isAdaptiveThinkingOnly(providerId: string, modelId: string): boolean {
+  const p = getProviderConfig(providerId);
+  return p?.models.some((m) => m.id === modelId && m.adaptiveThinkingOnly === true) ?? false;
 }
 
 export function getDefaultModel(providerId: string): string {

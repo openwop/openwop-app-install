@@ -121,6 +121,10 @@ export const messages = {
   discardBody: 'This tab has edits that have not been saved. Leaving now discards them — there is no way to get them back.',
   discardConfirm: 'Discard changes',
   autoRevertedNotice: 'Saved — but editing {{fields}} on an active strategy returns it to Draft, so it needs approving again before it counts as active.',
+  staleWrite: "Someone else changed this strategy while you were editing, so your change was not saved. Your edits are still on screen; reload to see the latest version (this discards them).",
+  reloadLatest: "Reload latest",
+  toastActivationSubmitted: "Submitted for approval. It becomes active once another approver signs off.",
+  fieldPeriod: "Period",
   activationWithdrawnNotice: 'Saved — but this edit changed content that was awaiting activation approval, so that review was withdrawn. Submit the activation again once the plan is final.',
   autoRevertedAndWithdrawnNotice: 'Saved — but editing {{fields}} on an active strategy returns it to Draft, so it needs approving again before it counts as active. This edit also changed content that was awaiting activation approval, so that review was withdrawn.',
 
@@ -147,6 +151,18 @@ export const messages = {
 
   // Alignment
   alignmentLede: 'Link the projects and priorities that deliver this strategy. Links you can read are shown; unreadable ones are hidden.',
+  // ADR 0852 D4 — the linked projects' team ledgers
+  ledgerRollupTitle: 'Team ledgers',
+  ledgerRollupLede: 'What each linked project is for right now, from its team ledger. Changes are made on the project.',
+  ledgerRollupLoading: 'Loading the team ledgers…',
+  ledgerRollupFailed: 'The team ledgers could not be loaded.',
+  ledgerRollupNone: 'None of the linked projects is visible to you.',
+  ledgerRollupVersion: 'version {{version}}',
+  ledgerRollupOpenQuestions_one: '{{count}} open question',
+  ledgerRollupOpenQuestions_other: '{{count}} open questions',
+  ledgerRollupPending_one: '{{count}} change waiting',
+  ledgerRollupPending_other: '{{count}} changes waiting',
+  ledgerRollupNoLedger: 'no team ledger yet',
   noLinks: 'No links yet.',
   'linkKind_project': 'Project',
   'linkKind_priority-list': 'Priority list',

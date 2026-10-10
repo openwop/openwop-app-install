@@ -88,7 +88,7 @@ describe('era-2 event-log seed seam (RFC 0176)', () => {
     const local = await new Promise<Server>((r) => { const srv = app.listen(0, '127.0.0.1', () => r(srv)); });
     try {
       const port = (local.address() as AddressInfo).port;
-      const res = await fetch(`http://127.0.0.1:${port}/v1/host/sample/event-log/seed`, {
+      const res = await fetch(`http://127.0.0.1:${port}/host/sample/event-log/seed`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ eventLogSchemaVersion: 2, status: 'completed', events: V1_EVENTS }),
       });

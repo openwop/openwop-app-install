@@ -52,6 +52,7 @@ export const messages = {
   privacy_analyticsOptOut: 'Opt out of product analytics',
   privacy_crashReportsOptOut: 'Opt out of crash reports',
   privacy_recentFilesOptOut: 'Do not track my recent files',
+  privacyNavTelemetry: "We count which features members use, in aggregate, to improve the product.",
   privacySaved: 'Privacy preferences saved.',
   privacySaveFailed: 'Could not save the preference.',
   panelSecurity: 'Two-factor authentication',

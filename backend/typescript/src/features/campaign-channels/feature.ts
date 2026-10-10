@@ -14,6 +14,8 @@
  */
 
 import type { BackendFeature } from '../types.js';
+import { CHANNEL_WORKFLOWS } from './channelWorkflows.js';
+import { registerWorkflowsFeature } from '../../host/workflowFeatureGate.js';
 import { registerCampaignChannelsAgentTools } from './agentTools.js';
 
 export const campaignChannelsFeature: BackendFeature = {
@@ -23,17 +25,20 @@ export const campaignChannelsFeature: BackendFeature = {
   // surfaces (ADR 0058). CFP-1 (ADR 0308 D2): register the generator's real
   // tools here (the run-starter deps ride the closure).
   registerRoutes: (deps) => {
+    // ADR 0820 §7 / G6 — this feature OWNS its chain-backed workflows (registered
+    // in `features/index.ts`): every launch resolves 'campaign-channels' (toggle + plan).
+    registerWorkflowsFeature(CHANNEL_WORKFLOWS.map((w) => w.workflowId), 'campaign-channels');
     registerCampaignChannelsAgentTools({ storage: deps.storage, hostSuite: deps.hostSuite });
   },
   requiredPacks: [
-    { name: 'feature.campaign-channels.nodes', version: '1.12.0' },
-    { name: 'feature.campaign-channels.agents', version: '1.2.0' },
+    { name: 'feature.campaign-channels.nodes', version: '1.12.1' },
+    { name: 'vendor.openwop-app.campaign-channels.agents', version: '1.2.1' },
   ],
   toggleDefault: {
     id: 'campaign-channels',
     label: 'Campaign Channels',
     description:
-      'Turn a campaign brief\'s messaging kernel into channel deliverables — landing page, ad variants, email sequence, creative briefs, and social posts — each grounded in your knowledge base (with citations), echoing the kernel, and scored for content quality + brand compliance. The third layer of Campaign Studio. OFF by default.',
+      'Turn a campaign brief\'s messaging kernel into channel deliverables — landing page, ad variants, email sequence, creative briefs, and social posts — each grounded in your knowledge base (with citations), echoing the kernel, and scored for content quality + brand compliance. The third layer of Campaign Studio.',
     category: 'Marketing',
     status: 'off',
     bucketUnit: 'tenant',

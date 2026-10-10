@@ -28,10 +28,12 @@ import type { Express, NextFunction, Request, RequestHandler, Response } from 'e
 import { requireNonAnonymousPrincipal } from '../middleware/auth.js';
 import type { Storage } from '../storage/storage.js';
 import { makeMcpClient, McpError, type McpElicitResult } from '../host/mcpClient.js';
-import { MCP_CURRENT_VERSION, MCP_SUPPORTED_VERSIONS } from '../host/mcpProfile.js';
+import { MCP_CURRENT_VERSION, MCP_SUPPORTED_VERSIONS, mcpMinimumRevision } from '../host/mcpProfile.js';
+import { recordNegotiationDecided } from '../host/negotiationDecided.js';
+import { plantNegotiationAuditRun } from './negotiationAuditRun.js';
 import { traceContextFromHeaders } from '../host/traceContext.js';
 import { createLogger } from '../observability/logger.js';
-import { sendError } from '../middleware/errorEnvelope.js';
+import { sendError, sendErrorWithMintedIds } from '../middleware/errorEnvelope.js';
 
 const log = createLogger('routes.mcpInvokeSeam');
 
@@ -47,6 +49,7 @@ interface InvokeBody {
   clientCapabilities?: unknown;
   elicitationAnswer?: unknown;
   scenario?: unknown;
+  authenticated?: unknown;
 }
 
 export function registerMcpInvokeSeamRoutes(app: Express, deps: Deps): void {
@@ -78,13 +81,27 @@ export function registerMcpInvokeSeamRoutes(app: Express, deps: Deps): void {
       // union), and pretending otherwise would be a seam that lies: the honest
       // answer is the same canonical envelope the real refusal produces.
       const requested = typeof body.requestVersion === 'string' ? body.requestVersion : undefined;
+      // ADR 0858 P4 — the run whose log the client's `negotiation.decided` lands
+      // on (`routes/negotiationAuditRun.ts`), named in every answer below.
+      const tenantId = (req as Request & { tenantId?: string }).tenantId ?? 'default';
+      const audit = await plantNegotiationAuditRun(deps.storage, tenantId);
       if (requested !== undefined && !(MCP_SUPPORTED_VERSIONS as readonly string[]).includes(requested)) {
-        sendError(
+        // Refused before the client is built, so the outcome is recorded here,
+        // through the same builder the client uses.
+        await recordNegotiationDecided(audit.record, {
+          protocol: 'mcp',
+          outcome: 'refused',
+          reason: requested < mcpMinimumRevision() ? 'below-floor' : 'unsupported',
+          floor: mcpMinimumRevision(),
+          peerUrl: serverUrl,
+        });
+        sendErrorWithMintedIds(
           res,
           400,
           'interop_version_unsupported',
           `MCP revision ${requested} is not supported by this host`,
           { retriable: false, protocol: 'mcp', requested, supported: [...MCP_SUPPORTED_VERSIONS] },
+          { runId: audit.wireRunId },
         );
         return;
       }
@@ -92,8 +109,13 @@ export function registerMcpInvokeSeamRoutes(app: Express, deps: Deps): void {
       const seamTrace = traceContextFromHeaders((n) => req.header(n) ?? undefined);
       const client = makeMcpClient({
         storage: deps.storage,
-        tenantId: (req as Request & { tenantId?: string }).tenantId ?? 'default',
+        tenantId,
         directEndpoint: { url: serverUrl },
+        onNegotiationDecided: audit.record,
+        // `interop.md` §Authentication — the seam caller IS authenticated (the
+        // route refuses anonymous principals); `authenticated: false` asks the
+        // client to treat the exchange as unauthenticated, as the suite does.
+        ...(body.authenticated === false ? { authenticated: false } : {}),
         // RFC 0207 §A — the seam drives the REAL client, so it must also supply
         // the one thing the production path gets from the run row: the trace
         // context to continue. Here it is the seam request's own `traceparent`,
@@ -131,12 +153,13 @@ export function registerMcpInvokeSeamRoutes(app: Express, deps: Deps): void {
       } catch (err) {
         if (err instanceof McpError && err.code === 'interop_version_unsupported') {
           const details = err.details ?? {};
-          sendError(
+          sendErrorWithMintedIds(
             res,
             400,
             'interop_version_unsupported',
             err.message,
             { retriable: false, protocol: 'mcp', ...details },
+            { runId: audit.wireRunId },
           );
           return;
         }
@@ -155,6 +178,7 @@ export function registerMcpInvokeSeamRoutes(app: Express, deps: Deps): void {
       const leaked = Object.keys(invoked).filter((k) => !CLOSED_RESULT_KEYS.has(k));
 
       const out: Record<string, unknown> = {
+        runId: audit.wireRunId,
         negotiatedVersion: invoked.negotiatedVersion,
         toolResult: invoked.result,
         isError: invoked.isError,
@@ -185,7 +209,7 @@ export function registerMcpInvokeSeamRoutes(app: Express, deps: Deps): void {
   // outbound request to a caller-supplied URL. A door that is guarded under one
   // of its two names is not guarded. Same predicate, applied here, to both.
   const guard: RequestHandler = requireNonAnonymousPrincipal('the openwop-app MCP invoke seam');
-  app.post('/v1/host/openwop-app/mcp/invoke', guard, handler);
-  app.post('/v1/host/sample/mcp/invoke', guard, handler);
+  app.post('/host/openwop-app/mcp/invoke', guard, handler);
+  app.post('/host/sample/mcp/invoke', guard, handler);
   log.info('mcp invoke seam mounted', { currentRevision: MCP_CURRENT_VERSION });
 }

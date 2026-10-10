@@ -34,6 +34,7 @@ import { authorizeOrgScope, requireString, optionalString } from '../featureRout
 import type { Scope } from '../../host/accessControlService.js';
 import type { User } from '../users/usersService.js';
 import { getCompany } from '../crm/crmEntitiesService.js';
+import { featureAccessRefusal } from '../../host/workflowFeatureGate.js';
 import {
   createVendor,
   deleteVendor,
@@ -55,8 +56,10 @@ import { backfillProductionKb, indexVendor, removeVendor } from './productionKno
 import { canSeeVendorPricing, redactVendorPricing } from './vendorRedaction.js';
 
 const TOGGLE_ID = 'production';
+/** ADR 0820 §7 / G11 — the feature whose data a `companyId` reference reads. */
+const COMPANY_REF_FEATURE = 'crm';
 
-interface Ctx {
+export interface Ctx {
   user: User;
   orgId: string;
   tenantId: string;
@@ -65,9 +68,25 @@ interface Ctx {
 const authorize = (req: Request, scope: Scope): Promise<Ctx> => authorizeOrgScope(req, { toggleId: TOGGLE_ID, label: 'Production Intelligence' }, scope);
 
 /** Validate an optional CRM company reference IDOR-safely (same tenant+org). */
-async function resolveCompanyRef(ctx: Ctx, raw: unknown): Promise<string | undefined> {
+export async function resolveCompanyRef(ctx: Ctx, raw: unknown): Promise<string | undefined> {
   const companyId = optionalString(raw);
   if (!companyId) return undefined;
+  // ADR 0820 §7 / G11 — linking a vendor to a CRM company reads crm data, so the
+  // tenant must be able to use `crm` (toggle + plan). Clearing a link (null) and
+  // every vendor field that is not a CRM reference stay core to Production.
+  const refusal = await featureAccessRefusal(COMPANY_REF_FEATURE, ctx.tenantId, { userId: ctx.user.userId });
+  if (refusal) {
+    throw new OpenwopError(
+      'forbidden',
+      refusal === 'plan'
+        ? 'Linking a CRM company needs CRM, which is not included in this workspace\'s plan.'
+        : refusal === 'unresolved'
+          ? 'Linking a CRM company needs CRM, which could not be checked right now. Try again shortly.'
+          : 'Linking a CRM company needs CRM, which is not enabled for this workspace.',
+      403,
+      { feature: COMPANY_REF_FEATURE, field: 'companyId', reason: refusal === 'plan' ? 'not_entitled' : refusal === 'unresolved' ? 'feature_unavailable' : 'feature_disabled' },
+    );
+  }
   const company = await getCompany(ctx.tenantId, ctx.orgId, companyId);
   if (!company) {
     throw new OpenwopError('validation_error', 'companyId does not reference a company in this org.', 400, { field: 'companyId' });
@@ -86,7 +105,7 @@ function canSeePricing(req: import('express').Request, orgId: string): Promise<b
 
 export function registerProductionRoutes(deps: RouteDeps): void {
   const { app } = deps;
-  const BASE = '/v1/host/openwop-app/production/orgs/:orgId';
+  const BASE = '/host/openwop-app/production/orgs/:orgId';
 
   // ── Vendors ──
   app.get(`${BASE}/vendors`, async (req, res, next) => {

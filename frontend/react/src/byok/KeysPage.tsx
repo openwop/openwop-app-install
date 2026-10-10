@@ -19,6 +19,7 @@
 import { Button } from '../ui/Button.js';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 import { deleteKey, getActiveConfig, listStoredRefs, storeKey } from './lib/byokClient.js';
 import { duplicateKeysNotice } from './lib/duplicateKeysNotice.js';
 import { PROVIDERS, type ProviderConfig } from './lib/providers.js';
@@ -40,6 +41,8 @@ import {
 import { KeyFigureBand, type KeyFigureItem } from '../ui/KeyFigure.js';
 import { GlobeIcon, KeyIcon, PlusIcon, RotateCwIcon, TrashIcon } from '../ui/icons/index.js';
 import { CredentialList, type CredentialEntry } from './CredentialViews.js';
+import { byokErrorMessage, deleteConflictOf, useByokWriteAccess, type DeleteConflict } from './lib/byokWriteAccess.js';
+import { confirm } from '../ui/confirm.js';
 import { SubscriptionCredentialCard } from './SubscriptionCredentialCard.js';
 
 /** The bare credentialRef the host's web-research surface resolves for a
@@ -73,6 +76,8 @@ export function KeysPage(): JSX.Element {
   // Pending destructive-confirm target (credentialRef) for the <Modal>.
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
+  // ADR 0779 D7 — offer only the writes the server would accept.
+  const canManage = useByokWriteAccess();
   // Most-recently-stored masked view, keyed by credentialRef. The BE's
   // POST /host/openwop-app/byok/secrets returns `{ credentialRef, masked }`
   // but the LIST endpoint only returns refs. Persisting the masked
@@ -102,13 +107,13 @@ export function KeysPage(): JSX.Element {
       setRefsUnreadable(false);
       setRefs(list);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(byokErrorMessage(t, err));
       // The page-level error is shown, but the voice card gets the empty array
       // too — flag it so it does not read that as "your configured key is gone".
       setRefsUnreadable(true);
       setRefs([]);
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => { void refresh(); }, [refresh]);
 
@@ -145,13 +150,19 @@ export function KeysPage(): JSX.Element {
   const webSearchConfigured = (refs ?? []).includes(WEB_SEARCH_REF);
   const totalKeys = entries.length;
   const loading = refs === null;
+  // ADR 0779 D7 (grade-ux BYOKUX-4) — a failed read is NOT an empty store. The
+  // page used to show the error AND "No API keys yet / Add your first key", the
+  // web-search form as unconfigured, and the AI-default "add a key first" — an
+  // invitation to overwrite keys that exist. Everything that reads `refs` waits
+  // for a read that succeeded.
+  const readOk = !loading && !refsUnreadable;
 
   // "Stats are filters": a tile per provider that has ≥1 key (plus a
   // Total tile), and clicking a tile narrows the sections below to that
   // provider. Total acts as the "clear filter" tile.
   const figures = useMemo<KeyFigureItem[]>(() => {
     const tiles: KeyFigureItem[] = [
-      { key: '__all__', label: t('totalKeys'), value: totalKeys, glyph: <KeyIcon size={13} /> },
+      { key: '__all__', label: t('totalKeys'), value: totalKeys },
     ];
     for (const p of byokProviders) {
       const count = grouped.get(p.id)?.length ?? 0;
@@ -177,24 +188,62 @@ export function KeysPage(): JSX.Element {
     setPendingDelete(ref);
   }
 
+  function closeDelete(): void {
+    if (deleting) return;
+    setPendingDelete(null);
+  }
+
+  function forget(ref: string): void {
+    setMaskedByRef((prev) => {
+      const next = { ...prev };
+      delete next[ref];
+      return next;
+    });
+  }
+
   async function confirmDelete(): Promise<void> {
     const ref = pendingDelete;
     if (!ref) return;
     setDeleting(true);
+    let conflict: DeleteConflict | null = null;
     try {
       await deleteKey(ref);
-      setMaskedByRef((prev) => {
-        const next = { ...prev };
-        delete next[ref];
-        return next;
-      });
-      setPendingDelete(null);
+      forget(ref);
       await refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-      setPendingDelete(null);
+      conflict = deleteConflictOf(err);
+      if (!conflict) setError(byokErrorMessage(t, err));
     } finally {
       setDeleting(false);
+      setPendingDelete(null);
+    }
+    if (conflict) await offerForcedDelete(ref, conflict);
+  }
+
+  /** ADR 0779 D7 — the server refused the delete (live references, an index it
+   *  could not check, or another lifecycle's namespace). The override is a
+   *  SEPARATE danger confirmation — the shared `confirm()` the vault uses — never
+   *  a button that replaces the one the user just pressed (a repeated Enter or a
+   *  resting pointer would fire it unread). The dialog names what breaks. */
+  async function offerForcedDelete(ref: string, c: DeleteConflict): Promise<void> {
+    const forced = await confirm({
+      title: deleteConflictText(c, t),
+      body: (
+        <>
+          {c.references.length > 0 && <ul>{c.references.map((r) => <li key={r}>{r}</li>)}</ul>}
+          <p className="u-mb-0">{t('deleteAnywayHint')}</p>
+        </>
+      ),
+      danger: true,
+      confirmLabel: t('deleteAnyway'),
+    });
+    if (!forced) return;
+    try {
+      await deleteKey(ref, { force: true });
+      forget(ref);
+      await refresh();
+    } catch (err) {
+      setError(byokErrorMessage(t, err));
     }
   }
 
@@ -217,7 +266,10 @@ export function KeysPage(): JSX.Element {
         </Button>
       </div>
 
-      {error && <Notice variant="error">{error}</Notice>}
+      {error && <Notice variant="error" announce={error}>{error}</Notice>}
+      {/* Ambient state, not an event: plain text, so it is not announced on
+          every visit (DESIGN §4.6 reserves announcing for failures). */}
+      {!canManage && <p className="muted">{t('readOnlyNotice')}</p>}
 
       {!loading && totalKeys > 0 && (
         <KeyFigureBand
@@ -230,7 +282,8 @@ export function KeysPage(): JSX.Element {
 
       <div className="page-stack">
         {loading && (
-          <div className="surface-card">
+          <div className="surface-card" aria-busy="true">
+            <span className="sr-only">{t('common:loading')}</span>
             <SkeletonRows rows={3} columns={['40%', '30%', '15%']} />
           </div>
         )}
@@ -239,22 +292,22 @@ export function KeysPage(): JSX.Element {
             once the CTA is clicked: the provider sections below then render the
             add form (previously `adding` mounted nothing at zero keys — the
             "Add your first key" button was a visible no-op). */}
-        {!loading && totalKeys === 0 && adding === null && (
+        {readOk && totalKeys === 0 && adding === null && (
           <div className="surface-card">
             <StateCard
               icon={<KeyIcon size={28} />}
               title={t('noKeysTitle')}
-              body={t('noKeysBody')}
-              action={
+              body={canManage ? t('noKeysBody') : t('readOnlyNotice')}
+              {...(canManage ? { action: (
                 <Button variant="primary" onClick={() => setAdding(byokProviders[0]?.id ?? null)}>
                   <span className="u-iflex u-gap-1"><PlusIcon size={15} aria-hidden /> {t('addFirstKey')}</span>
                 </Button>
-              }
+              ) } : {})}
             />
           </div>
         )}
 
-        {!loading && (totalKeys > 0 || adding !== null) && visibleProviders
+        {readOk && (totalKeys > 0 || adding !== null) && visibleProviders
           .filter((p) => totalKeys > 0 || adding === p.id)
           .map((p) => {
           const list = grouped.get(p.id) ?? [];
@@ -277,7 +330,7 @@ export function KeysPage(): JSX.Element {
                     </span>
                   )}
                 </div>
-                {!isAdding && (
+                {!isAdding && canManage && (
                   <IconButton
                     label={t('addProviderKey', { provider: p.label })}
                     className="secondary"
@@ -314,13 +367,13 @@ export function KeysPage(): JSX.Element {
                 list={list}
                 viewMode={viewMode}
                 caption={t('storedProviderKeys', { provider: p.label })}
-                onDelete={requestDelete}
+                {...(canManage ? { onDelete: requestDelete } : {})}
                 empty={
                   <StateCard
                     icon={<KeyIcon size={24} />}
                     title={t('noProviderKeysTitle', { provider: p.label })}
                     body={t('noProviderKeysBody')}
-                    {...(isAdding ? {} : { action: (
+                    {...(isAdding || !canManage ? {} : { action: (
                       <Button variant="primary" onClick={() => setAdding(p.id)}>
                         <span className="u-iflex u-gap-1"><PlusIcon size={15} aria-hidden /> {t('addAKey')}</span>
                       </Button>
@@ -334,8 +387,8 @@ export function KeysPage(): JSX.Element {
 
         {/* Web search (optional) — a host-tool fallback for tiers/providers
             without native grounding (ADR 0101). Backs `resolveSecret('web-search')`. */}
-        {!loading && (
-          <WebSearchKeyCard configured={webSearchConfigured} onChanged={refresh} />
+        {readOk && (
+          <WebSearchKeyCard configured={webSearchConfigured} onChanged={refresh} canManage={canManage} />
         )}
 
         {/* RFC 0121 AT-OWN-RISK subscription credential (ADR 0180). Self-hides
@@ -361,7 +414,7 @@ export function KeysPage(): JSX.Element {
               list={legacy}
               viewMode={viewMode}
               caption={t('unscopedKeysCaption')}
-              onDelete={requestDelete}
+              {...(canManage ? { onDelete: requestDelete } : {})}
               empty={null}
             />
           </div>
@@ -377,14 +430,14 @@ export function KeysPage(): JSX.Element {
       )}
 
       {pendingDelete && (
-        <Modal label={t('deleteKeyModalLabel')} onClose={() => { if (!deleting) setPendingDelete(null); }}>
+        <Modal label={t('deleteKeyModalLabel')} onClose={closeDelete}>
           <h2 className="u-mt-0">{t('deleteThisKeyTitle')}</h2>
           <p>
             {t('deleteThisKeyBodyBefore')} <code>{pendingDelete}</code>{' '}
             {t('deleteThisKeyBodyAfter')}
           </p>
           <div className="action-bar u-justify-end">
-            <Button variant="secondary" onClick={() => setPendingDelete(null)} disabled={deleting}>
+            <Button variant="secondary" onClick={closeDelete} disabled={deleting}>
               {t('common:cancel')}
             </Button>
             <Button variant="danger" onClick={() => { void confirmDelete(); }} disabled={deleting}>
@@ -393,7 +446,7 @@ export function KeysPage(): JSX.Element {
           </div>
         </Modal>
       )}
-      {refs !== null ? <AiDefaultCard refs={refs} /> : null}
+      {readOk && refs !== null ? <AiDefaultCard refs={refs} /> : null}
       {embedded ? null : <CompatEndpointsCard />}
     </section>
   );
@@ -403,24 +456,30 @@ export function KeysPage(): JSX.Element {
  *  Tavily / etc.) is NOT an LLM provider, so it gets a dedicated card and stores
  *  under the bare ref `web-search` that the host resolves. Only needed for the
  *  host-tool fallback — providers with NATIVE grounding use their own LLM key. */
-export function WebSearchKeyCard({ configured, onChanged }: { configured: boolean; onChanged: () => void | Promise<void> }): JSX.Element {
+export function WebSearchKeyCard({ configured, onChanged, canManage = true }: { configured: boolean; onChanged: () => void | Promise<void>; canManage?: boolean }): JSX.Element {
   const { t } = useTranslation('byok');
   const [value, setValue] = useState('');
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState(false);
-  const showForm = !configured || editing;
+  // ADR 0779 D7 — a failed save/remove used to be an unhandled rejection: the
+  // button re-enabled and nothing said why.
+  const [err, setErr] = useState<string | null>(null);
+  const showForm = canManage && (!configured || editing);
   const save = useCallback(async () => {
     const v = value.trim();
     if (!v) return;
-    setBusy(true);
+    setBusy(true); setErr(null);
     try { await storeKey(WEB_SEARCH_REF, v); setValue(''); setEditing(false); await onChanged(); }
+    catch (e) { setErr(byokErrorMessage(t, e)); }
     finally { setBusy(false); }
-  }, [value, onChanged]);
+  }, [value, onChanged, t]);
   const remove = useCallback(async () => {
-    setBusy(true);
+    if (!(await confirm({ title: t('webSearchRemoveTitle'), body: t('webSearchRemoveBody'), danger: true, confirmLabel: t('common:remove') }))) return;
+    setBusy(true); setErr(null);
     try { await deleteKey(WEB_SEARCH_REF); await onChanged(); }
+    catch (e) { setErr(byokErrorMessage(t, e)); }
     finally { setBusy(false); }
-  }, [onChanged]);
+  }, [onChanged, t]);
   return (
     <div className="surface-card">
       <div className="keys-provider-head action-bar u-justify-between">
@@ -428,13 +487,14 @@ export function WebSearchKeyCard({ configured, onChanged }: { configured: boolea
           <span className="chip chip--accent"><span className="u-iflex u-gap-1"><GlobeIcon size={14} aria-hidden /> {t('webSearch.title')}</span></span>
           {configured && <span className="muted">{t('webSearch.configured')}</span>}
         </div>
-        {configured && !editing && (
+        {configured && !editing && canManage && (
           <Button variant="secondary" onClick={() => { void remove(); }} disabled={busy}>
             <span className="u-iflex u-gap-1"><TrashIcon size={14} aria-hidden /> {t('common:remove')}</span>
           </Button>
         )}
       </div>
       <p className="muted">{t('webSearch.body')}</p>
+      {err && <Notice variant="error">{err}</Notice>}
       {showForm && (
         <div className="form-row">
           <TextField
@@ -514,7 +574,7 @@ function AddKeyForm({
       const stored = await storeKey(credentialRef, value.trim());
       await onSaved(stored.credentialRef, stored.masked);
     } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
+      setErr(byokErrorMessage(t, e));
     } finally {
       setSaving(false);
     }
@@ -560,4 +620,12 @@ function AddKeyForm({
       </div>
     </div>
   );
+}
+
+/** ADR 0779 D7 — say which refusal it was: another lifecycle's key, an index the
+ *  server could not check, or named consumers (listed under this line). */
+function deleteConflictText(c: DeleteConflict, t: TFunction<'byok'>): string {
+  if (c.owner) return t('deleteBlockedOwner', { owner: c.owner });
+  if (!c.referencesKnown) return t('deleteBlockedUnknown');
+  return t('deleteBlockedReferences');
 }

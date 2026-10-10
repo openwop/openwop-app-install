@@ -24,6 +24,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import { deleteUserAgent, getAgent, type AgentEntry } from '../client/agentsClient.js';
 import { ArrowLeftIcon, CheckIcon, CircleIcon } from '../ui/icons/index.js';
 import { formatNumber } from '../i18n/format.js';
+import { writeErrorMessage } from './agentWriteAccess.js';
 
 interface State {
   agent: AgentEntry | null;
@@ -111,7 +112,7 @@ function AgentDetail({ agent }: { agent: AgentEntry }): JSX.Element {
       await deleteUserAgent(agent.agentId);
       navigate('/agents/templates');
     } catch (err) {
-      setDeleteError(err instanceof Error ? err.message : String(err));
+      setDeleteError(writeErrorMessage(err, t('common:error_forbidden')));
       setIsDeleting(false);
     }
   }

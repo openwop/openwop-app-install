@@ -24,7 +24,7 @@ export const customDomainsFeature: BackendFeature = {
   toggleDefault: {
     id: 'custom-domains',
     label: 'Custom domains',
-    description: 'Serve published pages, funnels, and the storefront on your own hostname (Funnel B / ADR 0295).',
+    description: 'Serve published pages, funnels, and the storefront on your own hostname.',
     category: 'Marketing',
     status: 'off',
     bucketUnit: 'tenant',

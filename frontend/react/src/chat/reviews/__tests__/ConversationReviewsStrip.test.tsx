@@ -4,6 +4,7 @@
  * re-render the fresh live view), and on success.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+vi.mock('../ReviewHandoff.js', () => ({ ReviewHandoff: () => null })); // own tests: reviewHandoff.test.tsx
 import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import type { ReviewRequest } from '../reviewClient.js';
@@ -51,8 +52,9 @@ describe('ConversationReviewsStrip (ADR 0473)', () => {
     decideReview.mockRejectedValue(new MockReviewRequestError('conflict: changed', 'conflict', 409, 'proposal_stale'));
     render(<MemoryRouter><ConversationReviewsStrip conversationId="conv-strip" isSending={false} /></MemoryRouter>);
     fireEvent.click(await screen.findByRole('button', { name: /Approve & run/ }));
-    // load() ran once on mount and AGAIN in the finally after the failure.
-    await waitFor(() => expect(listReviews).toHaveBeenCalledTimes(2));
+    // load() ran once on mount and AGAIN in the finally after the failure
+    // (the shared store also re-reads its own list on a failed decide).
+    await waitFor(() => expect(listReviews.mock.calls.length).toBeGreaterThanOrEqual(2));
     // The card surfaced the localized stale error rather than swallowing it.
     expect(await screen.findByText(/draft changed since you reviewed/i)).toBeTruthy();
   });

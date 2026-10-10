@@ -27,21 +27,20 @@
  * template" (which keeps its intentional random-id fresh copy).
  */
 import { listChains, expandChain, loadWorkflowChainPacks, defaultWorkflowChainPackRoots } from './workflowChainPackLoader.js';
-import { registerWorkflowDurable, getRegisteredWorkflowAsync } from './workflowsRegistry.js';
-import { recordRevision, HOST_REVISION_TENANT } from './workflowRevisions.js';
+import { registerWorkflowDurable, getRegisteredWorkflowStrict } from './workflowsRegistry.js';
+import { recordRevision, HOST_REVISION_TENANT, listRevisions } from './workflowRevisions.js';
 import type { Storage } from '../storage/storage.js';
 import type { WorkflowDefinition } from '../executor/types.js';
-import { recordOwnership, getOwned } from './workflowOwnership.js';
+import { recordOwnership, getOwned, allOwnershipByWorkflow, removeOwnership } from './workflowOwnership.js';
+import { revisionHashOf } from './definitionHash.js';
+import { forkedSharedIds } from './sharedWorkflowFork.js';
 import { createLogger } from '../observability/logger.js';
 
 const log = createLogger('seed-workflows');
 
-/** Deterministic owned-workflow id for a seeded zero-config chain. The `seed.`
- *  infix distinguishes it from a user's random-id "Use template" copy. */
-export function seedWorkflowId(chainId: string): string {
-  const slug = chainId.replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, '');
-  return `wf.seed.${slug}`;
-}
+// ADR 0794 — the seeded id is minted by the one mint module; re-exported for its callers.
+export { seedWorkflowId } from './workflowId.js';
+import { seedWorkflowId } from './workflowId.js';
 
 /** ADR 0507 — a chain carrying `x-openwop-sensitive` is the ONE input that makes
  *  deferred expansion produce different node ids than expansion-time (sensitive
@@ -69,15 +68,25 @@ function isZeroConfig(parameters: Record<string, unknown>): boolean {
  */
 export async function seedZeroConfigWorkflows(tenantId: string): Promise<{ seeded: number }> {
   let seeded = 0;
+  // ADR 0789 — a tenant that edited a seeded workflow holds its own fork; handing
+  // the shared one back would list "X" beside the tenant's edited "X".
+  const forked = await forkedSharedIds(tenantId);
   for (const { chain } of listChains()) {
     // RFC 0135 — a composition-only chain is never seeded as a directly-runnable
     // owned workflow (it would re-enter the ownership index the gallery omits it from).
     // Retro note: marking a PREVIOUSLY-seeded zero-config chain internal strands the
     // wf.seed rows already-minted for existing tenants — re-seed skips, it does not
-    // retract. Vacuous today (no shipped internal chain is zero-config).
+    // retract. NOT vacuous since ADR 0788 D3: four zero-config MCP projection
+    // chains became internal, so tenants seeded before it keep their
+    // `wf.seed.*` copies as owned dashboard workflows. They are inert for MCP
+    // (the registry never exposes a public-namespace id). Retracted by ADR 0789's
+    // post-listen `internal-seed-retract` background job (ADR 0788 § Deferred is
+    // marked closed; prod ran 503/503) — a FUTURE chain made internal needs the
+    // same treatment, since this loop still only skips.
     if (chain.internal === true) continue;
     if (!isZeroConfig(chain.parameters)) continue;
     const workflowId = seedWorkflowId(chain.chainId);
+    if (forked.has(workflowId)) continue;
     try {
       // Register the shared global def once (register-if-missing — the
       // workflowAuthorSeed pattern). Zero-config expansion is pure, so every
@@ -97,7 +106,11 @@ export async function seedZeroConfigWorkflows(tenantId: string): Promise<{ seede
       //
       // The async read hits durable storage and re-populates the cache, so an
       // already-seeded definition is left exactly as it is.
-      let def = await getRegisteredWorkflowAsync(workflowId);
+      //
+      // SEEDRM-1 — and it is the STRICT read: a storage error throws into the
+      // per-chain catch (skip + warn) instead of reading as "absent" and
+      // re-registering over the row every tenant shares.
+      let def = await getRegisteredWorkflowStrict(workflowId);
       if (!def) {
         // ADR 0507 — seed in RFC 0124 DEFERRED mode. `expandChain(chain, {})`
         // froze every param that had no default to `undefined`, and 9 of the 52
@@ -188,7 +201,7 @@ export async function reseedChainWorkflowsDeferred(): Promise<{ examined: number
     examined += 1;
     const workflowId = seedWorkflowId(chain.chainId);
     try {
-      const existing = await getRegisteredWorkflowAsync(workflowId);
+      const existing = await getRegisteredWorkflowStrict(workflowId);
       // Never MINT here. A definition that was never seeded on this install is
       // the seeder's job on next tenant seed; creating it now would seed rows for
       // chains this host may never have offered.
@@ -452,7 +465,7 @@ export async function retargetSeededNotifyNodes(_storage: Storage): Promise<Noti
     out.examined += 1;
     const workflowId = seedWorkflowId(chain.chainId);
     try {
-      const existing = await getRegisteredWorkflowAsync(workflowId);
+      const existing = await getRegisteredWorkflowStrict(workflowId);
       // Never MINT — a chain never seeded on this install is the seeder's job.
       if (!existing) { out.absent += 1; continue; }
       const stale = (existing.nodes ?? []).filter(
@@ -505,7 +518,7 @@ export async function retargetSeededNotifyNodes(_storage: Storage): Promise<Noti
       // can ever exist for these ids and the branch was unreachable outside its
       // own mock. Rebasing on the re-read narrows the window to the two awaits
       // below and PRESERVES a concurrent save instead of clobbering it.
-      const latest = await getRegisteredWorkflowAsync(workflowId);
+      const latest = await getRegisteredWorkflowStrict(workflowId);
       if (!latest || !(latest.nodes ?? []).some((n) => n.typeId === RETIRED_NOTIFY_TYPE)) {
         out.skippedConcurrentEdit += 1;
         continue;
@@ -552,4 +565,104 @@ export async function retargetSeededNotifyNodes(_storage: Storage): Promise<Noti
     });
   }
   return out;
+}
+
+/** Result of the ADR 0789 retract of seeded copies of now-INTERNAL chains. */
+export interface InternalSeedRetractResult {
+  /** Seed ids whose originating chain is internal + zero-config (the population). */
+  internalSeedIds: number;
+  /** Ownership rows examined across those ids. */
+  examined: number;
+  retracted: number;
+  /** Kept: this tenant saved an edit of it (a non-pristine revision it authored). */
+  keptEdited: number;
+  /** Kept: a schedule of this tenant fires it — retracting would hide a live job's target. */
+  keptScheduled: number;
+  /** Internal chains whose expansion threw — no pristine hash, so never retracted. */
+  skippedUnexpandable: number;
+  failed: number;
+}
+
+/**
+ * ADR 0789 (ADR 0788 § Deferred) — retract the `wf.seed.*` ownership rows minted
+ * for chains that have since become RFC 0135 `internal` (the four zero-config MCP
+ * projection chains). Re-seeding skips internal chains but never retracts, so
+ * every tenant seeded before ADR 0788 still lists them as dashboard workflows.
+ *
+ * NON-DESTRUCTIVE: removes OWNERSHIP only. The definition and its revisions stay,
+ * so every run stamped with the id still replays. A tenant whose own revision of
+ * the id differs from the pristine seed (it saved an edit, before ADR 0789 made
+ * that a fork) keeps its row, as does one with a schedule firing it. Idempotent: a
+ * retracted row no longer exists to match.
+ *
+ * The population is derived from the chain corpus (loaded here if the boot order
+ * has not yet — the migration-14 trap), and reported, so a vacuous run is visible.
+ */
+export async function retractInternalSeedOwnership(
+  opts: { yieldEvery?: number } = {},
+): Promise<InternalSeedRetractResult> {
+  const r: InternalSeedRetractResult = { internalSeedIds: 0, examined: 0, retracted: 0, keptEdited: 0, keptScheduled: 0, skippedUnexpandable: 0, failed: 0 };
+  if (listChains().length === 0) loadWorkflowChainPacks({ roots: defaultWorkflowChainPackRoots() });
+  const pristine = new Map<string, string>();
+  for (const { chain } of listChains()) {
+    if (chain.internal !== true || !isZeroConfig(chain.parameters)) continue;
+    const workflowId = seedWorkflowId(chain.chainId);
+    try {
+      const expanded = expandChain(chain, { deferred: true });
+      const name = (typeof expanded.metadata?.name === 'string' && expanded.metadata.name.trim()) ? expanded.metadata.name : chain.label;
+      pristine.set(workflowId, revisionHashOf({ ...expanded, workflowId, metadata: { ...expanded.metadata, name } }));
+    } catch (err) {
+      // Expansion failed: there is no pristine content to tell an edit from the
+      // seed, so this id is left alone entirely — every owner kept, the safe side.
+      r.skippedUnexpandable += 1;
+      log.warn('retract_internal_seed_unexpandable', { chainId: chain.chainId, error: String(err) });
+    }
+  }
+  r.internalSeedIds = pristine.size + r.skippedUnexpandable;
+  if (pristine.size === 0) return r;
+  // Dynamic: the scheduler registers a fork hook at module load, and the seeder
+  // is imported by lanes (and test mocks) that must not pull the scheduler in.
+  const { listJobs } = await import('./schedulingService.js');
+  // §Correction (ADR 0789, the failed 2026-09-30 deploy): this called
+  // `hasJobForWorkflow(tenant, id)` PER OWNERSHIP ROW, and that is a full scan of
+  // every tenant's scheduler jobs (`listJobs` → `jobs.list()`). ~1,000 rows × a
+  // full job scan ran at ~0.4 rows/s in production. ONE scan, indexed here.
+  const scheduled = new Set(
+    (await listJobs()).filter((j) => typeof j.workflowId === 'string').map((j) => `${j.tenantId}\u0000${j.workflowId}`),
+  );
+  const yieldEvery = Math.max(1, opts.yieldEvery ?? 50);
+  let sinceYield = 0;
+  const owners = await allOwnershipByWorkflow();
+  for (const [workflowId, pristineHash] of pristine) {
+    const tenants = owners.get(workflowId) ?? [];
+    if (tenants.length === 0) continue;
+    // A revision is an EDIT when its content is not the pristine seed. An older
+    // seed expansion also reads as an edit — over-keeping, never over-retracting
+    // (and the seeder records its revision under the FIRST seeding tenant, so that
+    // tenant is kept whenever the expansion has drifted since).
+    //
+    // Only schedules keep a row among the reference kinds: a retracted row's
+    // definition still resolves (it is never deleted), so a card, trigger or
+    // roster entry naming it keeps working; only the dashboard listing goes.
+    const editors = new Set((await listRevisions(workflowId)).filter((rev) => rev.revisionHash !== pristineHash).map((rev) => rev.tenantId));
+    for (const tenantId of tenants) {
+      r.examined += 1;
+      try {
+        if (editors.has(tenantId)) { r.keptEdited += 1; continue; }
+        if (scheduled.has(`${tenantId}\u0000${workflowId}`)) { r.keptScheduled += 1; continue; }
+        if (await removeOwnership(tenantId, workflowId)) r.retracted += 1;
+      } catch (err) {
+        r.failed += 1;
+        log.warn('retract_internal_seed_failed', { tenantId, workflowId, error: String(err) });
+      }
+      // Batched: yield the event loop so a long retract never starves request
+      // handling on the instance running it (it runs AFTER listen — ADR 0789).
+      sinceYield += 1;
+      if (sinceYield >= yieldEvery) {
+        sinceYield = 0;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+    }
+  }
+  return r;
 }

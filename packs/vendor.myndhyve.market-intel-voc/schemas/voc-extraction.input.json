@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.market-intel-voc/1.0.0/voc-extraction.input.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.market-intel-voc/1.0.2/voc-extraction.input.json",
   "title": "MarketIntelVocExtractionInput",
   "type": "object",
   "required": ["content", "icpContext", "productContext"],

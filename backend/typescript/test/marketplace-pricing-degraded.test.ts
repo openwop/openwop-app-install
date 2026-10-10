@@ -6,6 +6,10 @@
  * money-signalled surface. The enrichment posture (never a gate) stands; the
  * failure is now DISCLOSED (`degraded`) so the route can add `pricingDegraded`
  * and the client can say "pricing unavailable", never "everything is free".
+ *
+ * Sabotage witnesses (wave 10): the catch reporting `degraded:false`, a healthy
+ * provider reporting `degraded:true`, or the no-provider path reporting
+ * `degraded:true` — each turns its case red.
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { resolveListingPricing, setListingPricingProvider } from '../src/features/marketplace/listingPricingHook.js';
@@ -21,7 +25,7 @@ describe('MKT2-M1 — a failed pricing enrichment is disclosed, never silent fre
   });
 
   it('a healthy provider is NOT degraded; no provider is NOT degraded (enrichment absent ≠ failed)', async () => {
-    setListingPricingProvider(async () => ({ 'pack.a': { kind: 'external-link', url: 'https://x' } } as never));
+    setListingPricingProvider(async () => ({ 'pack.a': { lane: 'external-link', externalPaymentUrl: 'https://x.example/pay' } }));
     const healthy = await resolveListingPricing(['pack.a'], 'tenant-1');
     expect(healthy.degraded).toBe(false);
     expect(Object.keys(healthy.pricing)).toContain('pack.a');

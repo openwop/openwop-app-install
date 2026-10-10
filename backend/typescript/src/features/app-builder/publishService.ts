@@ -19,7 +19,9 @@ import type { ExportTarget } from './export/generators.js';
 
 const API = 'https://api.github.com';
 const MAX_PUBLISH_FILES = 200;
-export const REPO_NAME_RE = /^[A-Za-z0-9._-]{1,100}$/;
+// ADR 0835 D6 — `.` and `..` are GitHub-legal characters but not repo names:
+// spliced into `/repos/<owner>/<repo>/…`, URL normalization re-targets the call.
+export const REPO_NAME_RE = /^(?!\.{1,2}$)[A-Za-z0-9._-]{1,100}$/;
 
 const log = createLogger('features.app-builder.publish');
 

@@ -141,6 +141,22 @@
  *      "cannot also be an eraser without recursing" claim was false) moved to
  *      `EXPECTED_COVERED`. The 2-hop closure the entry above says this host does
  *      not run now runs (ADR 0657 D12 / CONS-11, bounded to two hops).
+ *
+ *  +1 (2026-09-29, ADR 0780 D4 / `CONNWF-4`):
+ *    + `eraseSubjectConnections` — `connections:connection` sat in RECORDED_DEBT as
+ *      "needs a decision" (delete vs re-attribute, for fear of breaking a shared
+ *      integration). That fear applies to org/workspace rows, which carry no
+ *      `userId`; a USER-scoped row is only ever selected for its owner, so the
+ *      eraser revokes those (and the subject's in-flight grants) in the tenant
+ *      the DSAR names. Rows in OTHER shared workspaces are not reached (`CONNWF-16`).
+ */
+/*
+ *  +1 (2026-10-06, ADR 0834 D6):
+ *    + `eraseConversationToolApprovalsSubject` — `conversation-tools:approval` names
+ *      the approver (`resolvedBy`) and now stores a held call's arguments while it is
+ *      pending. The approver is redacted; arguments are cleared on decision and the
+ *      rows go with a deleted conversation (a conversation id is not a subject key —
+ *      the intent ledger's stated residual applies to a still-pending row).
  */
 export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
   'commentsEraser',
@@ -148,15 +164,20 @@ export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
   'emailEraser',
   'eraseAgentDraftStashForSubject',
   'eraseApprovalDelegations',
+  'eraseApprovalHandoffSubject',
   'eraseApprovals',
   'eraseAssistantSubject',
+  'eraseBuilderPairSubject',
   'eraseCalendarMcpForSubject',
   'eraseCdpCollectedEvents',
+  'eraseClaudeCodeSubjectKey',
+  'eraseDeveloperKeysForSubject',
   'eraseCmsSubject',
   'eraseCommerce',
   'eraseCommerceConnectSubject',
   'eraseCommunitySubject',
   'eraseCompensation',
+  'eraseConversationToolApprovalsSubject',
   'eraseCreatorSubject',
   'eraseCrmSubject',
   'eraseCsmSubject',
@@ -188,6 +209,7 @@ export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
   'eraseSubjectAnswers',
   'eraseSubjectApplyGrants',
   'eraseSubjectAttestations',
+  'eraseSubjectConnections',
   'eraseSubjectCampaignDays',
   'eraseSubjectCanvas',
   'eraseSubjectConversations',
@@ -228,7 +250,9 @@ export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
   // over §7's durability and why that does not weaken the ban control.
   'eraseSubjectWorkspaceJoins',
   'eraseSubjectWorkflowRevisions',
+  'eraseSuggestionSubject',
   'eraseSyncBindingSubject',
+  'eraseTeamLedgerSubject',
   'eraseTeamsDelivery',
   'eraseTutorialProgressForSubject',
   'eraseWalkthroughProgressForSubject',

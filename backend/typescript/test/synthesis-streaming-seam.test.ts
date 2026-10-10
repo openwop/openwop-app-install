@@ -5,7 +5,6 @@
  * resolves the whole-file Promise AND emits `voice.synthesis_chunk` METADATA-ONLY
  * run-events (seq / mimeType / durationMs / url — bytes off the log, the C2/G8
  * budget rule). Asserts:
- *   - the host advertises aiProviders.realtimeVoice.synthesis === "streaming";
  *   - stream:true → 200 with the audio result + voice.synthesis_chunk events that
  *     carry a url and NO inline base64;
  *   - the no-stream call is byte-for-byte the RFC 0105 roundtrip (no events).
@@ -34,20 +33,14 @@ afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
 });
 
-const PATH = '/v1/host/openwop-app/ai/call-speech-synthesizer';
+const PATH = '/host/openwop-app/ai/call-speech-synthesizer';
 const post = (body: unknown) => fetch(`${BASE}${PATH}`, { method: 'POST', headers: H, body: JSON.stringify(body) });
 
 type Chunk = { type: string; payload: Record<string, unknown> };
 
 describe('RFC 0106 §C — streaming synthesis arm (ADR 0109 P3)', () => {
-  it('advertises aiProviders.realtimeVoice.synthesis === "streaming"', async () => {
-    const doc = await (await fetch(`${BASE}/.well-known/openwop`, { headers: H })).json() as {
-      aiProviders?: { realtimeVoice?: { synthesis?: unknown }; speechSynthesis?: unknown };
-    };
-    expect(doc.aiProviders?.realtimeVoice?.synthesis).toBe('streaming');
-    // §C closure: synthesis streaming requires speechSynthesis supported.
-    expect(doc.aiProviders?.speechSynthesis).toBe('supported');
-  });
+  // ADR 0812 P3c-0 — the v1-document advert leg (`realtimeVoice.synthesis` + `speechSynthesis`)
+  // was deleted: both v2 seats are unfilled here (whd7-v2-projection-parity KNOWN_UNPROJECTED).
 
   it('stream:true → resolves the whole-file result AND emits voice.synthesis_chunk metadata-only', async () => {
     const res = await post({ text: 'Welcome to the weekly digest.', voiceId: 'host:narrator', stream: true });

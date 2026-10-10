@@ -21,12 +21,13 @@ import { resolveRegistry, templateFor, expandEndpoint, legacyPathsEnabled, type 
 import { PROTOCOL_VERSION_V2 } from '../middleware/protocolVersion.js';
 import { createHash, createPublicKey, verify as verifySig } from 'node:crypto';
 import {
+  cpSync,
   existsSync,
   mkdirSync,
   readFileSync,
   readdirSync,
   rmSync,
-  statSync,
+  lstatSync,
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
@@ -37,7 +38,15 @@ import { createLogger } from '../observability/logger.js';
 import { isTombstoned } from '../host/packTombstones.js';
 import { assertCanonicalManifest } from './canonicalManifestGate.js';
 import { assertKeyPermittedForPack } from '../host/packSignature.js';
-import { verifyContentHashes } from './packContentDigest.js';
+import {
+  assertClosedWorldPackTree,
+  INSTALL_MARKER_FILE,
+  INSTALLED_PACK_FILES,
+  INSTALLED_PACK_SUBDIRS,
+  packContentDigest,
+  verifyInstallMarker,
+} from './packContentDigest.js';
+import { invalidatePackTrustVerdict } from '../host/packTrust.js';
 import { checkPackManifestForMajor } from '../host/packManifestV2Gate.js';
 
 const log = createLogger('packs.registryInstaller');
@@ -45,7 +54,7 @@ const log = createLogger('packs.registryInstaller');
 const DEFAULT_REGISTRY = 'https://packs.openwop.dev';
 /** This host serves major 2, so it reads the tree a major-2 host must read (ADR 0663). */
 const HOST_PROTOCOL_MAJOR = Number(PROTOCOL_VERSION_V2.split('.')[0]);
-const MARKER = '.openwop-installed.json';
+const MARKER = INSTALL_MARKER_FILE;
 
 export interface InstallTarget {
   name: string;
@@ -128,16 +137,21 @@ interface InstallMarker {
   /** SHA-256 hex digest of each load-bearing file in the install
    *  dir. Re-verified by `verifyInstalledPack()` on every load. */
   contentHashes: Record<string, string>;
+  /** ADR 0826 D3 — `packContentDigest` of the WHOLE installed tree (prompts/,
+   *  schemas/, keys/ included), so an edit or addition anywhere is a tamper. */
+  contentDigest: string;
 }
 
-/** Files copied from a verified install. Anything outside this set
- *  (READMEs, LICENSEs, CHANGELOGs) is skipped to keep the install dir
- *  free of files that aren't load-bearing. */
-const ALLOWED_FILES = new Set(['pack.json', 'index.mjs']);
-// `prompts` added for RFC 0070 / RFC 0003 §C: agent manifests carry
-// `systemPromptRef` (e.g. `prompts/supervisor.md`) which the AgentRegistry
-// loader resolves from the installed pack dir at load time.
-const ALLOWED_SUBDIRS = new Set(['schemas', 'keys', 'prompts']);
+/** Files + subdirs copied from a verified install. Anything outside these sets
+ *  (READMEs, LICENSEs, CHANGELOGs) is skipped to keep the install dir free of
+ *  files that aren't load-bearing. ONE list (ADR 0826): `verifyInstallMarker`
+ *  judges an installed tree against the same sets. */
+const ALLOWED_FILES = INSTALLED_PACK_FILES;
+const ALLOWED_SUBDIRS = INSTALLED_PACK_SUBDIRS;
+
+/** ADR 0826 D4 — a signing key id is joined onto a keys dir and a URL template,
+ *  so it must be a bare token (the manifest is registry-served, not trusted). */
+const KEY_ID_RE = /^[A-Za-z0-9._-]+$/;
 
 export async function installPackFromRegistry(
   target: InstallTarget,
@@ -235,6 +249,9 @@ export async function installPackFromRegistry(
   // ADR 0713 — the tree the manifest was fetched from decides the signing shape.
   // The legacy constructed paths are `/v1/…`, so they read as v1.
   const keyRef = manifestSigningKeyId(manifest.signing, resolution.ok ? resolution.resolved.tree : 'v1');
+  if (!KEY_ID_RE.test(keyRef) || keyRef === '.' || keyRef === '..') {
+    throw new Error('pack_signature_unverifiable: the manifest names a malformed signing key id');
+  }
   const publicKeyPem = await resolvePublicKey(keyRef, opts.trustedKeysDir, urlFor);
 
   // 5. Fetch the signature and verify Ed25519 against the pack.json
@@ -309,6 +326,9 @@ export async function installPackFromRegistry(
     if (!packRoot) {
       throw new Error('extracted_archive_missing_pack_json');
     }
+    // ADR 0826 D2 — closed world, BEFORE anything reaches destDir: a pack gets
+    // only the bytes it ships. A symlink here was a DATA-only pack's host-file read.
+    assertClosedWorldPackTree(packRoot);
     if (existsSync(destDir)) {
       rmSync(destDir, { recursive: true, force: true });
     }
@@ -348,8 +368,12 @@ export async function installPackFromRegistry(
       'pack.json': packJsonSha,
       ...(indexMjsSha ? { 'index.mjs': indexMjsSha } : {}),
     },
+    contentDigest: packContentDigest(destDir),
   };
   writeFileSync(join(destDir, MARKER), JSON.stringify(marker, null, 2));
+  // ADR 0826 /architect A4 — a verdict cached for this dir before the (re)install
+  // would otherwise outlive the bytes it judged.
+  invalidatePackTrustVerdict(destDir);
 
   log.info('pack installed and verified', {
     name: manifest.name,
@@ -428,7 +452,8 @@ function findPackRoot(stageDir: string): string | null {
   // Common: single wrapper directory (npm `package/`, or `<name>-<version>/`).
   const entries = readdirSync(stageDir).filter((e) => {
     const full = join(stageDir, e);
-    return statSync(full).isDirectory();
+    // lstat: a wrapper that is a SYMLINK must never become the pack root (ADR 0826 D2).
+    return lstatSync(full).isDirectory();
   });
   for (const e of entries) {
     if (existsSync(join(stageDir, e, 'pack.json'))) {
@@ -452,13 +477,10 @@ function copyAllowlistedFiles(from: string, to: string): void {
       continue;
     }
     if (entry.isDirectory() && ALLOWED_SUBDIRS.has(entry.name)) {
-      const subFrom = join(from, entry.name);
-      const subTo = join(to, entry.name);
-      mkdirSync(subTo, { recursive: true });
-      const r = spawnSync('cp', ['-R', `${subFrom}/.`, subTo], { encoding: 'utf-8' });
-      if (r.status !== 0) {
-        throw new Error(`copy_subdir_failed: ${entry.name}: ${r.stderr ?? ''}`);
-      }
+      // ADR 0826 D2 — no subprocess `cp -R` (it kept symlinks); the tree was
+      // already proven link-free by `assertClosedWorldPackTree`, and this copy
+      // never dereferences regardless.
+      cpSync(join(from, entry.name), join(to, entry.name), { recursive: true, dereference: false, verbatimSymlinks: true });
     }
   }
 }
@@ -488,14 +510,11 @@ export function verifyInstalledPack(packDir: string): string | null {
   } catch {
     return 'marker_invalid_json';
   }
-  if (!marker.contentHashes || typeof marker.contentHashes !== 'object') {
-    return 'marker_missing_content_hashes';
-  }
-  // ADR 0555 P0 — one hasher, not two. `host/packTrust.ts` re-verifies these
-  // same hashes to decide `operator-trusted`, and two implementations of "does
-  // this file still hash to what the marker says" would drift into disagreeing
-  // about whether an install is tampered.
-  return verifyContentHashes(packDir, marker.contentHashes);
+  // ADR 0555 P0 / ADR 0826 D3 — one verifier, not two. `host/packTrust.ts` calls
+  // the same `verifyInstallMarker` to decide `operator-trusted`, and two
+  // implementations of "does this tree still match its marker" would drift into
+  // disagreeing about whether an install is tampered.
+  return verifyInstallMarker(packDir, marker).failure;
 }
 
 /**

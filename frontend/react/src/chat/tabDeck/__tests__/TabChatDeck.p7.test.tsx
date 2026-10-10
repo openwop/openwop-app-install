@@ -5,9 +5,23 @@ import { saveTabDeck } from '../tabDeckPersistence.js';
 
 /** ADR 0140 P7 — deep-link, keyboard shortcuts, and the library picker. */
 
-vi.mock('../TabSession.js', () => ({
-  TabSession: ({ sessionId, scopeAgentId }: { sessionId: string; scopeAgentId?: string }) => <div data-testid="tabsession" data-sid={sessionId} data-scope={scopeAgentId ?? ''} />,
-}));
+// `rekeyOnMount` stands in for useSessionPersistence's mount-404 recovery: a
+// deck-minted tab has no BE row, so its first history read 404s and the session
+// re-keys to a fresh id. Off by default; the re-key test turns it on.
+const rekey = vi.hoisted(() => ({ on: false, done: new Set<string>() }));
+vi.mock('../TabSession.js', async () => {
+  const { useEffect } = await import('react');
+  return {
+    TabSession: ({ sessionId, scopeAgentId, onSessionIdChange }: { sessionId: string; scopeAgentId?: string; onSessionIdChange?: (oldId: string, newId: string) => void }) => {
+      useEffect(() => {
+        if (!rekey.on || rekey.done.has(sessionId) || sessionId.startsWith('rekeyed-')) return;
+        rekey.done.add(sessionId);
+        onSessionIdChange?.(sessionId, `rekeyed-${sessionId}`);
+      }, [sessionId, onSessionIdChange]);
+      return <div data-testid="tabsession" data-sid={sessionId} data-scope={scopeAgentId ?? ''} />;
+    },
+  };
+});
 // messageCount > 0 — the rail hides empty conversations that aren't open as tabs.
 let sessionsState = { sessions: [{ sessionId: 'a', title: 'Alpha', messageCount: 2 }, { sessionId: 'b', title: 'Beta', messageCount: 5 }], isLoading: false, error: null as string | null };
 const removeSpy = vi.fn(() => Promise.resolve());
@@ -38,6 +52,8 @@ beforeEach(() => {
   sessionsState = { sessions: [{ sessionId: 'a', title: 'Alpha', messageCount: 2 }, { sessionId: 'b', title: 'Beta', messageCount: 5 }], isLoading: false, error: null };
   removeSpy.mockClear();
   renameSpy.mockClear();
+  rekey.on = false;
+  rekey.done.clear();
 });
 afterEach(() => cleanup()); // unmount + tear down any open modal portal between tests
 
@@ -57,6 +73,14 @@ describe('TabChatDeck P7 — deep-link', () => {
     await act(async () => { renderDeck('/?agent=code-reviewer'); });
     const scoped = screen.getAllByTestId('tabsession').find((el) => el.getAttribute('data-scope') === 'code-reviewer');
     expect(scoped).toBeTruthy(); // a tab carries the agent scope
+  });
+
+  it('?agent=<id> keeps its scope when the new tab re-keys to the BE-minted session id', async () => {
+    rekey.on = true;
+    await act(async () => { renderDeck('/?agent=code-reviewer'); });
+    const scoped = screen.getAllByTestId('tabsession').filter((el) => el.getAttribute('data-scope') === 'code-reviewer');
+    expect(scoped).toHaveLength(1);
+    expect(scoped[0]!.getAttribute('data-sid')).toMatch(/^rekeyed-/); // the scope followed the re-key
   });
 });
 

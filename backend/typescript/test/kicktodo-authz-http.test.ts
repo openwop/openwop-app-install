@@ -92,7 +92,7 @@ type Method = 'GET' | 'POST' | 'PATCH' | 'DELETE';
  *              (ADR 0458 grade-pass B1; the challenge-outline canvas type). */
 type Row = { method: Method; path: string; family: 'array' | 'inline' | 'chassis'; body?: unknown };
 
-const K = '/v1/host/openwop-app/kicktodo';
+const K = '/host/openwop-app/kicktodo'; // ADR 0812 P3b: a migrated family
 const OUTLINE_ORG = `${CHALLENGE_OUTLINE_BASE_PATH}/orgs/:orgId`;
 
 const A = (method: Method, p: string, body?: unknown): Row => ({ method, path: p, family: 'array', ...(body !== undefined ? { body } : {}) });
@@ -295,7 +295,7 @@ const TOGGLES = ['kicktodo-accountability', 'kicktodo-community', 'kicktodo-comm
 
 /** Log in through the test seam and return the session cookie. */
 async function login(subject: string, tenantId: string): Promise<string> {
-  const res = await fetch(`${BASE}/v1/host/openwop-app/test/login`, {
+  const res = await fetch(`${BASE}/host/openwop-app/test/login`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     // `sharedWorkspace: true` — WS is somebody else's workspace that this caller
@@ -337,7 +337,7 @@ const cookies: Record<string, string> = {};
  * production path is the honest fixture for a route that stacks both gates.
  */
 async function loginViaSwitch(subject: string, roles: string[]): Promise<string> {
-  const res = await fetch(`${BASE}/v1/host/openwop-app/test/login`, {
+  const res = await fetch(`${BASE}/host/openwop-app/test/login`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ subject, displayName: subject }), // NO tenantId: personal tenant, as OIDC leaves you
@@ -346,7 +346,7 @@ async function loginViaSwitch(subject: string, roles: string[]): Promise<string>
   const personalCookie = (res.headers.get('set-cookie') ?? '').split(';')[0] ?? '';
   const { user } = (await res.json()) as { user: { userId: string } };
   await createMember({ orgId: WS, tenantId: WS, displayName: subject, subject: user.userId, roles });
-  const sw = await fetch(`${BASE}/v1/host/openwop-app/workspaces/${encodeURIComponent(WS)}/switch`, {
+  const sw = await fetch(`${BASE}/host/openwop-app/workspaces/${encodeURIComponent(WS)}/switch`, {
     method: 'POST', headers: { cookie: personalCookie },
   });
   expect(sw.status, `switch into WS must succeed: ${await sw.clone().text()}`).toBe(200);

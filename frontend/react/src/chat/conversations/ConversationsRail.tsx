@@ -19,7 +19,7 @@
  */
 
 import { Button } from '../../ui/Button.js';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { searchChatConversations, type ChatSessionHeader, type ConversationSearchHit } from '../../client/chatSessionsClient.js';
 import {
@@ -31,6 +31,7 @@ import {
   type ConversationSection,
 } from './conversationGroups.js';
 import {
+  AlertIcon,
   BellIcon,
   BellOffIcon,
   BotIcon,
@@ -44,7 +45,6 @@ import {
 } from '../../ui/icons/index.js';
 import { LeftRailPanelHeader } from '../leftRail/LeftRailPanelHeader.js';
 import { Notice } from '../../ui/Notice.js';
-import { StateCard } from '../../ui/StateCard.js';
 import { confirm } from '../../ui/confirm.js';
 
 interface Props {
@@ -78,6 +78,14 @@ interface Props {
   mutedIds?: ReadonlySet<string>;
   /** Mute/unmute a channel/group row. Present ⇒ the row action renders. */
   onToggleMute?: (sessionId: string) => void;
+  /** ADR 0768 P3 — live state for conversations whose messages this client HOLDS
+   *  (the deck's open tabs). A closed conversation reports nothing: the server
+   *  list carries no run/interrupt state, and the row never guesses. */
+  liveStatusFor?: (sessionId: string) => 'blocked' | 'running' | null;
+  /** Sections contributed by registered deck tab kinds (ADR 0785 D5 follow-on),
+   *  rendered after the conversation sections. The rail stays feature-agnostic:
+   *  the deck decides which kinds are visible and hands over rendered nodes. */
+  extraSections?: ReactNode;
   onClose: () => void;
 }
 
@@ -111,8 +119,10 @@ export function ConversationsRail({
   onCreateChannel,
   onBrowseChannels,
   mutedIds,
+  liveStatusFor,
   onToggleMute,
   selectionEcho,
+  extraSections,
   onClose,
 }: Props): JSX.Element {
   const { t } = useTranslation('chat');
@@ -130,6 +140,13 @@ export function ConversationsRail({
   };
 
   const grouped = useMemo(() => groupConversations(conversations, query), [conversations, query]);
+  // Conversations blocked on the caller (an approval, a question) — pulled to
+  // the top in "Needs you", in the rail's existing recency order.
+  const needsYou = useMemo(
+    () => SECTION_ORDER.flatMap((sec) => grouped[sec]).filter((c) => liveStatusFor?.(c.sessionId) === 'blocked'),
+    [grouped, liveStatusFor],
+  );
+  const needsYouIds = useMemo(() => new Set(needsYou.map((c) => c.sessionId)), [needsYou]);
   const headingId = 'conversations-rail-heading';
 
   // ADR 0112 — server-side message FULL-TEXT search, layered over the client-side
@@ -150,10 +167,18 @@ export function ConversationsRail({
     return () => { cancelled = true; clearTimeout(handle); };
   }, [query]);
 
+  // grade-ux CHATUX-11 — a failed rename/delete used to go to the console only, so
+  // the row simply snapped back (or stayed) with no word to the user.
+  const [actionError, setActionError] = useState<string | null>(null);
+
   async function commitRename(sessionId: string): Promise<void> {
     const trimmed = renameDraft.trim();
     if (!trimmed) { setRenamingId(null); return; }
-    try { await onRename(sessionId, trimmed); } catch (e) { console.error('rename failed', e); }
+    setActionError(null);
+    try { await onRename(sessionId, trimmed); } catch (e) {
+      console.error('rename failed', e);
+      setActionError(t('renameConversationFailed'));
+    }
     setRenamingId(null);
   }
 
@@ -167,8 +192,33 @@ export function ConversationsRail({
       confirmLabel: t('common:delete'),
     });
     if (!ok) return;
-    try { await onDelete(sessionId); } catch (e) { console.error('delete failed', e); }
+    setActionError(null);
+    try { await onDelete(sessionId); } catch (e) {
+      console.error('delete failed', e);
+      setActionError(t('deleteConversationFailed'));
+    }
   }
+
+  const renderRow = (c: ChatSessionHeader): JSX.Element => (
+    <ConversationRow
+      key={c.sessionId}
+      conversation={c}
+      isActive={c.sessionId === activeSessionId}
+      unread={c.sessionId !== activeSessionId && isUnread(c)}
+      muted={mutedIds?.has(c.sessionId) ?? false}
+      liveStatus={liveStatusFor?.(c.sessionId) ?? null}
+      justOpened={c.sessionId === pulsingId}
+      {...(onToggleMute && (c.type === 'channel' || c.type === 'group') ? { onToggleMute: () => onToggleMute(c.sessionId) } : {})}
+      isRenaming={renamingId === c.sessionId}
+      renameDraft={renameDraft}
+      onRenameDraftChange={setRenameDraft}
+      onSelect={() => selectWithPulse(c.sessionId)}
+      onStartRename={() => { setRenameDraft(c.title); setRenamingId(c.sessionId); }}
+      onCommitRename={() => { void commitRename(c.sessionId); }}
+      onCancelRename={() => setRenamingId(null)}
+      onRequestDelete={() => { void requestDelete(c.sessionId); }}
+    />
+  );
 
   return (
     // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions
@@ -236,6 +286,11 @@ export function ConversationsRail({
       )}
 
       <div className="u-flex-1 u-overflow-y-auto u-pad-4x0">
+        {actionError && (
+          <div className="u-m-2">
+            <Notice variant="error" announce={actionError}>{actionError}</Notice>
+          </div>
+        )}
         {isLoading && <div className="muted u-p-3 u-fs-12">{t('common:loading')}</div>}
         {error && (
           <div className="u-m-2">
@@ -250,19 +305,31 @@ export function ConversationsRail({
           </div>
         )}
         {!isLoading && !error && conversations.length === 0 && (
-          <StateCard
-            icon={<MessageSquareIcon size={20} />}
-            title={t('noConversationsYet')}
-            body={t('noConversationsBody')}
-            action={(
-              <button type="button" className="sesshist-dialog-btn" onClick={onNewChat}>
-                {t('newChat')}
-              </button>
-            )}
-          />
+          // DESIGN.md §4.5 rule 15 — an empty list is one line, not a dashed
+          // "nothing yet" card. The rail has no other New chat control, so the
+          // action stays on the row.
+          <div className="u-flex u-items-center u-gap-2 u-p-3 u-fs-12">
+            <span className="muted u-flex-1">{t('noConversationsYet')}</span>
+            <Button variant="secondary" className="sesshist-mini-btn" onClick={onNewChat}>
+              {t('newChat')}
+            </Button>
+          </div>
         )}
+        {/* DESIGN.md §4.5 rules 1 + 18 — what is blocked on the person leads the
+            rail, ahead of the type sections (it used to sit only in a sub-line
+            of a row that could be anywhere in the list). Those rows MOVE here;
+            they are not duplicated below, so Tab order meets each once. */}
+        {needsYou.length > 0 ? (
+          <section aria-label={t('sectionNeedsYou')}>
+            <h3 className="muted sesshist-group-head u-flex u-items-center u-gap-1-5">
+              <span aria-hidden className="u-iflex"><AlertIcon size={12} /></span>
+              {t('sectionNeedsYou')}
+            </h3>
+            <ul className="u-list-none u-m-0 u-p-0">{needsYou.map(renderRow)}</ul>
+          </section>
+        ) : null}
         {SECTION_ORDER.map((section) => {
-          const items = grouped[section];
+          const items = grouped[section].filter((c) => !needsYouIds.has(c.sessionId));
           // The Channels header renders even when empty (so the "+" can mint the
           // first channel); every other empty section collapses.
           const isChannelsSection = section === 'Channels';
@@ -315,29 +382,12 @@ export function ConversationsRail({
                 </div>
               ) : null}
               <ul className="u-list-none u-m-0 u-p-0">
-                {items.map((c) => (
-                  <ConversationRow
-                    key={c.sessionId}
-                    conversation={c}
-                    isActive={c.sessionId === activeSessionId}
-                    unread={c.sessionId !== activeSessionId && isUnread(c)}
-                    muted={mutedIds?.has(c.sessionId) ?? false}
-                    justOpened={c.sessionId === pulsingId}
-                    {...(onToggleMute && (c.type === 'channel' || c.type === 'group') ? { onToggleMute: () => onToggleMute(c.sessionId) } : {})}
-                    isRenaming={renamingId === c.sessionId}
-                    renameDraft={renameDraft}
-                    onRenameDraftChange={setRenameDraft}
-                    onSelect={() => selectWithPulse(c.sessionId)}
-                    onStartRename={() => { setRenameDraft(c.title); setRenamingId(c.sessionId); }}
-                    onCommitRename={() => { void commitRename(c.sessionId); }}
-                    onCancelRename={() => setRenamingId(null)}
-                    onRequestDelete={() => { void requestDelete(c.sessionId); }}
-                  />
-                ))}
+                {items.map(renderRow)}
               </ul>
             </section>
           );
         })}
+        {extraSections}
       </div>
     </aside>
   );
@@ -348,6 +398,7 @@ function ConversationRow({
   isActive,
   unread,
   muted,
+  liveStatus,
   justOpened,
   onToggleMute,
   isRenaming,
@@ -364,6 +415,8 @@ function ConversationRow({
   unread: boolean;
   /** ADR 0192 D7 — dimmed row, counters suppressed (dot only). */
   muted: boolean;
+  /** ADR 0768 P3 — "needs you" / "running", when the client knows it. */
+  liveStatus: 'blocked' | 'running' | null;
   /** One-shot open-continuity cue — brightens for ~450ms after selection. */
   justOpened?: boolean;
   onToggleMute?: () => void;
@@ -457,6 +510,13 @@ function ConversationRow({
               )}
             </div>
             <div className="muted sesshist-row-count">
+              {liveStatus ? (
+                <span className="conversations-live-status u-iflex u-items-center u-gap-1">
+                  <span className="conversations-live-dot" data-kind={liveStatus} aria-hidden="true" />
+                  {liveStatus === 'blocked' ? t('liveStatusBlocked') : t('liveStatusRunning')}
+                  {' · '}
+                </span>
+              ) : null}
               {memberCount > 0 && <span>{t('participants', { count: memberCount })} · </span>}
               {t('messages', { count: conversation.messageCount })}
             </div>

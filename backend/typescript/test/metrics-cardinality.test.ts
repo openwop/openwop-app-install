@@ -87,17 +87,17 @@ describe('ADR 0556 P0 — the guard refuses unbounded labels', () => {
     // The negative control. Without it, a guard that dropped EVERYTHING would
     // satisfy every assertion above.
     const s = spec('openwop.http.server.duration');
-    const legal = { route: '/v1/runs/:runId', method: 'GET', status_class: '2xx' };
+    const legal = { route: '/runs/:runId', method: 'GET', status_class: '2xx' };
     expect(guardAttributes(s, legal)).toEqual(legal);
     expect(labelViolations().size).toBe(0);
   });
 
   it('the route TEMPLATE is legal while the resolved path is not', () => {
-    // `route: '/v1/runs/:runId'` is one series; `path: '/v1/runs/run_abc'` is one
+    // `route: '/runs/:runId'` is one series; `path: '/runs/run_abc'` is one
     // series PER RUN. The distinction is the whole point, so it is pinned.
     const s = spec('openwop.http.server.duration');
-    const out = guardAttributes(s, { route: '/v1/runs/:runId', path: '/v1/runs/run_abc' });
-    expect(out).toEqual({ route: '/v1/runs/:runId' });
+    const out = guardAttributes(s, { route: '/runs/:runId', path: '/runs/run_abc' });
+    expect(out).toEqual({ route: '/runs/:runId' });
     expect(labelViolations().get('openwop.http.server.duration:path')).toBe(1);
   });
 });

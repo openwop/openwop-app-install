@@ -1,11 +1,12 @@
 {
   "name": "feature.code-exec.nodes",
-  "version": "1.1.0",
+  "version": "1.1.1",
+  "kind": "node",
   "description": "Sandboxed code-execution feature node pack. The `run` node executes a code snippet in an EXTERNAL sandbox via ctx.runSandboxedCode. Capability-honest: when no sandbox adapter is wired (the default), it throws `capability_not_provided`. Action node — its output is recorded; replay/fork read the recorded result rather than re-executing.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "code-exec", "sandbox", "interpreter"],
-  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "engines": { "openwop": ">=1.0.0 <3.0.0" },
   "nodes": [
     {
       "typeId": "feature.code-exec.nodes.run",

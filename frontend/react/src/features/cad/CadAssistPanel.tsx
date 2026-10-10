@@ -22,8 +22,8 @@ const EmbeddedChatPanel = lazy(() =>
   import('../../chat/EmbeddedChatPanel.js').then((m) => ({ default: m.EmbeddedChatPanel })),
 );
 
-/** The ONE CAD agent (feature.cad.agents pack) — never a new persona. */
-export const CAD_MODELER_AGENT_ID = 'feature.cad.agents.default';
+/** The ONE CAD agent (vendor.openwop-app.cad.agents pack) — never a new persona. */
+export const CAD_MODELER_AGENT_ID = 'vendor.openwop-app.cad.agents.default';
 
 function CadAssistWelcome({ canvasId, onPick }: { canvasId: string; onPick: (text: string) => void }): JSX.Element {
   const { t } = useTranslation('cad');
@@ -62,6 +62,11 @@ export function CadAssistPanel({ canvasId, onClose }: { canvasId: string; onClos
       <Suspense fallback={<div className="muted u-fs-13 u-p-3">{t('assistLoading')}</div>}>
         <EmbeddedChatPanel
           agentId={CAD_MODELER_AGENT_ID}
+          // ADR 0768 honest scope as the FALLBACK, ADR 0777 binding on top: the
+          // Modeler is bound to THIS model, and the label says "this model" only
+          // once the server verified the caller may read it.
+          contextLabel={t('assistCanSee')}
+          focus={{ kind: 'canvas', id: canvasId, label: t('assistCanSeeThis') }}
           renderEmptyState={(onPick) => <CadAssistWelcome canvasId={canvasId} onPick={onPick} />}
         />
       </Suspense>

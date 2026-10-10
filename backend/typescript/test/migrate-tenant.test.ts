@@ -1,12 +1,28 @@
 /**
- * Anon → user migration route tests (P3.5).
+ * Anon → user migration route tests (P3.5; ADR 0003 Phase 4c, ADR 0015,
+ * ADR 0434 Phase 2). The route the SPA's `auth/migrateTenant.ts` POSTs to.
  *
- * Verifies POST /v1/host/openwop-app/migrate-tenant:
- *   - Reassigns runs + workflows from anon tenant to user tenant
- *   - Migrates ephemeral BYOK secrets when KMS is configured
- *   - Expires the anon cookie after success
- *   - Is idempotent (re-call returns zeros, no errors)
- *   - Refuses unauthenticated callers
+ * Verifies POST /host/openwop-app/migrate-tenant:
+ *   - refuses a caller with no OIDC bearer (401 `unauthenticated`);
+ *   - answers `migrated:false` when there is no anon cookie to adopt;
+ *   - moves the anon tenant's runs INTO the caller's PERSONAL tenant (ADR 0015)
+ *     — asserted against the exact destination, not just a `user:` prefix;
+ *   - moves ephemeral BYOK secrets into that tenant when KMS is configured —
+ *     asserted at the DESTINATION (readable there, same value), not only by the
+ *     counter and the drained source, which stayed green with the write removed;
+ *   - PRESERVES the promoted user-tier session cookie (ADR 0434 P2 overturned
+ *     the old "expire the anon cookie" behaviour — see the last case).
+ *
+ * The destination tenant is read from the promoted cookie the same response
+ * carries (the auth middleware stamps the personal tenant there), so a fold into
+ * any OTHER tenant is caught. The `workflows` column is not exercised: no
+ * `Storage` method writes that table, so it cannot be seeded through the
+ * interface; the per-table fold is covered by `storage-adapter-parity.test.ts`.
+ *
+ * Sabotage that turns it red: drop the `user:` guard on `personalTenantOf`
+ * (case 1); drop the `reassignTenant` call (case 3); remove the destination
+ * `setSecret` in `migrateEphemeralSecretsToTenant` (case 4); append a
+ * `Max-Age=0` session cookie in the route (case 5).
  *
  * Uses the same synthetic OIDC issuer as auth-oidc.test.ts so the
  * test exercises the real OIDC verification path.
@@ -29,6 +45,7 @@ import {
   configureSecretResolver,
   setSecret,
   listSecretRefs,
+  resolveSecret,
   clearCache,
 } from '../src/byok/secretResolver.js';
 import {
@@ -161,21 +178,39 @@ async function callMigrate(token: string, cookieValue?: string): Promise<Respons
     'content-type': 'application/json',
   };
   if (cookieValue) headers.cookie = `${COOKIE_NAME}=${cookieValue}`;
-  return fetch(`http://127.0.0.1:${appPort}/v1/host/openwop-app/migrate-tenant`, {
+  return fetch(`http://127.0.0.1:${appPort}/host/openwop-app/migrate-tenant`, {
     method: 'POST',
     headers,
     body: '{}',
   });
 }
 
+/** The session cookie this response sets, decoded — throws if there is none. */
+function sessionCookieOf(res: Response): { tier?: string; tenantId?: string } {
+  const setCookie = res.headers.get('set-cookie');
+  const raw = setCookie ? /(?:^|[;,\s])__session=([^;]+)/.exec(setCookie)?.[1] : undefined;
+  if (!raw) throw new Error('no __session cookie in the Set-Cookie header');
+  return JSON.parse(
+    Buffer.from(raw.split('.')[0]!.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'),
+  ) as { tier?: string; tenantId?: string };
+}
+
+/** The caller's personal (destination) tenant, as stamped on the promoted cookie. */
+function destinationTenantOf(res: Response): string {
+  const tenantId = sessionCookieOf(res).tenantId;
+  if (!tenantId || !tenantId.startsWith('user:')) throw new Error(`no user-tier destination tenant: ${String(tenantId)}`);
+  return tenantId;
+}
+
 describe('P3.5 anon → user migration', () => {
   it('refuses callers without an OIDC bearer', async () => {
-    const res = await fetch(`http://127.0.0.1:${appPort}/v1/host/openwop-app/migrate-tenant`, {
+    const res = await fetch(`http://127.0.0.1:${appPort}/host/openwop-app/migrate-tenant`, {
       method: 'POST',
       headers: { cookie: `${COOKIE_NAME}=${mintAnonCookie('test-sid-x')}`, 'content-type': 'application/json' },
       body: '{}',
     });
     expect(res.status).toBe(401);
+    expect(((await res.json()) as { error: string }).error).toBe('unauthenticated');
   });
 
   it('returns migrated:false when no anon cookie is present', async () => {
@@ -211,13 +246,15 @@ describe('P3.5 anon → user migration', () => {
     expect(body.migrated).toBe(true);
     expect(body.runs).toBe(2);
 
-    // After migration, neither run is owned by the anon tenant.
+    // After migration, neither run is owned by the anon tenant…
     const anonRuns = await storage.listRuns({ tenantId: anonTenantId });
     expect(anonRuns).toHaveLength(0);
-    // And both runs are visible under the user tenant.
-    const r1 = await storage.getRun('r-1');
-    expect(r1!.tenantId).toMatch(/^user:/);
-    expect(r1!.tenantId).not.toBe(anonTenantId);
+    // …and both are owned by EXACTLY the caller's personal tenant.
+    const userTenantId = destinationTenantOf(res);
+    expect((await storage.getRun('r-1'))?.tenantId).toBe(userTenantId);
+    expect((await storage.getRun('r-2'))?.tenantId).toBe(userTenantId);
+    const userRunIds = (await storage.listRuns({ tenantId: userTenantId })).map((r) => r.runId).sort();
+    expect(userRunIds).toEqual(['r-1', 'r-2']);
   });
 
   it('migrates ephemeral BYOK secrets when KMS is configured', async () => {
@@ -234,8 +271,12 @@ describe('P3.5 anon → user migration', () => {
     expect(body.secrets).toBe(1);
     expect(body.secretsFailed).toBe(0);
 
-    // Anon bucket is empty post-migration.
+    // Anon bucket is empty post-migration…
     expect(await listSecretRefs({ tenantId: anonTenantId })).toEqual([]);
+    // …and the secret LANDED in the caller's personal tenant, value intact.
+    const userTenantId = destinationTenantOf(res);
+    expect(await listSecretRefs({ tenantId: userTenantId })).toEqual(['OPENAI_API_KEY']);
+    expect(await resolveSecret('OPENAI_API_KEY', { tenantId: userTenantId })).toBe('sk-anon-value');
   });
 
   // ADR 0434 Phase 2 — DELIBERATELY OVERTURNED. This asserted that a successful
@@ -268,11 +309,7 @@ describe('P3.5 anon → user migration', () => {
     // Decode the payload and assert the promotion actually happened: a
     // surviving ANON cookie would satisfy "not a deletion" while leaving the
     // device exactly as un-promoted as no cookie at all.
-    const raw = /(?:^|[;,\s])__session=([^;]+)/.exec(setCookie!)?.[1];
-    expect(raw, 'no __session cookie in the Set-Cookie header').toBeTruthy();
-    const payload = JSON.parse(
-      Buffer.from(raw!.split('.')[0]!.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'),
-    ) as { tier?: string; tenantId?: string };
+    const payload = sessionCookieOf(res);
     expect(payload.tier, 'the surviving cookie must be USER-tier — an anon one is not a promotion').toBe('user');
     expect(payload.tenantId, 'and it must name the user tenant').toMatch(/^user:/);
   });

@@ -630,15 +630,25 @@ export async function updateSyncSource(
  * reason on `lastError`, and re-connecting is a resume. The sync daemon only
  * runs `active` sources, so retries stop. Idempotent.
  */
-export async function pauseSourcesForRevokedConnection(tenantId: string, connectionId: string, now: string): Promise<number> {
+export async function pauseSourcesForRevokedConnection(
+  tenantId: string,
+  connectionId: string,
+  now: string,
+  /** ADR 0780 D4 — `subject-erased`: the revoke IS a DSAR, so the honest reason
+   *  is `creator-erased` (its exit is "re-bind", not "reconnect"). Without it the
+   *  fan-out's order decided the reason: when the connections eraser ran before
+   *  `eraseKnowledgeSyncSubject`, the source was left saying "reconnect to resume"
+   *  for a creator who no longer exists — a reconnect the tombstoned `createdBy`
+   *  then refuses. */
+  cause?: 'subject-erased',
+): Promise<number> {
   let paused = 0;
   for (const s of (await sources.listByPrefix(`${tenantId}:`)).filter((x) => x.connectionId === connectionId && x.status === 'active')) {
     // ADR 0605 Tier 6 — mark WHY, so the UI can offer "Reconnect" instead of a
     // Resume button that cannot work.
-    await setSyncStatus(tenantId, s.id, 'paused', now, {
-      lastError: 'Connection revoked — reconnect to resume syncing.',
-      pausedReason: 'connection-revoked',
-    });
+    await setSyncStatus(tenantId, s.id, 'paused', now, cause === 'subject-erased'
+      ? { lastError: ERASED_CREATOR_MESSAGE, pausedReason: 'creator-erased' }
+      : { lastError: 'Connection revoked — reconnect to resume syncing.', pausedReason: 'connection-revoked' });
     paused += 1;
   }
   return paused;

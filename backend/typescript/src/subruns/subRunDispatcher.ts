@@ -1,7 +1,7 @@
 /**
  * Sub-run dispatcher used by the chat responder when an LLM tool call
- * invokes a saved workflow. Posts to `/v1/runs` on this same host and
- * polls the snapshot endpoint until the run reaches a terminal status
+ * invokes a saved workflow. Posts to `/runs` on this same host over the
+ * newest wire it serves and polls the snapshot endpoint until the run reaches a terminal status
  * (completed / failed / cancelled) or the budget elapses. Interrupts
  * count as "pending" — the budget is exhausted, the LLM gets a stub
  * tool_result, and the human can resume from /runs/:id.
@@ -10,18 +10,26 @@
  * (importing executeRun + plumbing storage / hostSuite into nodes via
  * a new singleton) is intrusive enough that we defer it until there's
  * a non-sample driver for it.
+ *
+ * NEWEST MAJOR, NEVER A VERSIONED PREFIX (ADR 0669). The unversioned paths
+ * plus `selfCallHeaders()` (derived from `protocolVersions()`) keep this working
+ * across every retirement. The old `/v1/runs` self-call would have failed every
+ * sub-workflow on the v1 cut. `test/adr0669-self-calls-survive-cut.test.ts`
+ * drives this dispatcher against a real host on both sides of the cut.
  */
 
 import { createLogger } from '../observability/logger.js';
 import { assertEffectAllowed } from '../host/runEffectContext.js';
+import { selfCallHeaders } from '../middleware/protocolVersion.js';
 
 const log = createLogger('subRunDispatcher');
 
 const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 const POLL_INTERVAL_MS = 250;
 
+
 /**
- * Resolve the bearer the dispatcher presents on the internal `/v1/runs`
+ * Resolve the bearer the dispatcher presents on the internal `/runs`
  * round-trip. Precedence:
  *   1. `OPENWOP_INTERNAL_TOKEN` — an explicit service-principal token.
  *   2. A configured API key (`OPENWOP_API_KEYS` / `OPENWOP_API_KEY`) — the
@@ -108,9 +116,10 @@ export async function dispatchSubRun(req: SubRunRequest): Promise<SubRunResult> 
   // instead of presenting a guessable literal — see resolveInternalToken).
   const token = resolveInternalToken();
 
-  const createRes = await fetch(`${baseUrl}/v1/runs`, {
+  const createRes = await fetch(`${baseUrl}/runs`, {
     method: 'POST',
     headers: {
+      ...selfCallHeaders(),
       'content-type': 'application/json',
       authorization: `Bearer ${token}`,
     },
@@ -119,7 +128,7 @@ export async function dispatchSubRun(req: SubRunRequest): Promise<SubRunResult> 
       tenantId: req.tenantId,
       ...(req.scopeId ? { scopeId: req.scopeId } : {}),
       inputs: req.inputs,
-      // ADR 0133 — parent-run linkage in the child's run.metadata (POST /v1/runs
+      // ADR 0133 — parent-run linkage in the child's run.metadata (POST /runs
       // spreads body.metadata). Only emitted when present, so the create body is
       // unchanged for callers that don't link.
       ...((req.parentRunId || req.delegatedBy)
@@ -146,8 +155,8 @@ export async function dispatchSubRun(req: SubRunRequest): Promise<SubRunResult> 
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
     let snap: RunSnapshot;
     try {
-      const res = await fetch(`${baseUrl}/v1/runs/${runId}`, {
-        headers: { authorization: `Bearer ${token}` },
+      const res = await fetch(`${baseUrl}/runs/${encodeURIComponent(runId)}`, {
+        headers: { ...selfCallHeaders(), authorization: `Bearer ${token}` },
       });
       if (!res.ok) continue;
       snap = (await res.json()) as RunSnapshot;
@@ -159,8 +168,8 @@ export async function dispatchSubRun(req: SubRunRequest): Promise<SubRunResult> 
     if (snap.status === 'completed') {
       // Fetch the final run.completed event to recover the output.
       try {
-        const evRes = await fetch(`${baseUrl}/v1/runs/${runId}/events/poll?limit=1000`, {
-          headers: { authorization: `Bearer ${token}` },
+        const evRes = await fetch(`${baseUrl}/runs/${encodeURIComponent(runId)}/events/poll?limit=1000`, {
+          headers: { ...selfCallHeaders(), authorization: `Bearer ${token}` },
         });
         if (evRes.ok) {
           const body = (await evRes.json()) as { events: Array<{ type: string; payload: Record<string, unknown> }> };

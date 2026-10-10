@@ -8,6 +8,7 @@
  * @see ../../../backend/typescript/src/routes/featureToggles.ts
  */
 import { authedHeaders, config, fetchOpts } from './config.js';
+import { readErrorDetail, readErrorMessage } from './errorEnvelope.js';
 
 export type FeatureToggleStatus = 'on' | 'off' | 'beta';
 export type BucketUnit = 'user' | 'tenant';
@@ -46,6 +47,23 @@ export interface ToggleConfig {
   /** The compiled default changed UNDER the pin — a code-default flip is a
    *  no-op while the row exists; revert or re-save to acknowledge. */
   defaultDrift?: boolean;
+  /** ADR 0819 §3 — the kill switch: OFF for everyone, ahead of overrides. */
+  killed?: boolean;
+  /** ADR 0819 §5 — the optimistic-concurrency token from the last read (`null`
+   *  = no stored row). Echoed on save so a stale edit is a 409, not an overwrite. */
+  revision?: string | null;
+}
+
+/** One audited change to a toggle (ADR 0819 §4). The payload is a SHAPE of
+ *  the admin choices — never cohort or tenant ids. */
+export interface ToggleChange {
+  at: string;
+  action: 'feature-toggle.saved' | 'feature-toggle.reverted' | 'feature-toggle.tenant-enabled' | string;
+  principalId?: string;
+  payload: {
+    before?: { status: FeatureToggleStatus; killed: boolean; betaCohortSize: number; tenantOverrideCount: number } | null;
+    after?: { status: FeatureToggleStatus; killed: boolean; betaCohortSize: number; tenantOverrideCount: number } | null;
+  };
 }
 
 export interface ResolvedAssignment {
@@ -59,16 +77,28 @@ export interface ResolvedAssignment {
 const base = `${config.baseUrl}/host/openwop-app/feature-toggles`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 
+/** A failed toggle-admin call. `reason` carries the server's machine reason
+ *  (ADR 0819 §5: `revision_conflict` when the row moved since it was read). */
+export class ToggleAdminError extends Error {
+  constructor(message: string, readonly status: number, readonly reason?: string) {
+    super(message);
+    this.name = 'ToggleAdminError';
+  }
+}
+
 async function asJson<T>(res: Response, ctx: string): Promise<T> {
   if (!res.ok) {
     let detail = '';
+    let reason: string | undefined;
     try {
-      const body = (await res.json()) as { error?: { message?: string }; message?: string };
-      detail = body?.error?.message ?? body?.message ?? '';
+      const body: unknown = await res.json();
+      detail = readErrorMessage(body) ?? '';
+      const r = readErrorDetail(body, 'reason');
+      reason = typeof r === 'string' ? r : undefined;
     } catch {
       /* non-JSON error body */
     }
-    throw new Error(detail || `${ctx} returned ${res.status}`);
+    throw new ToggleAdminError(detail || `${ctx} returned ${res.status}`, res.status, reason);
   }
   return (await res.json()) as T;
 }
@@ -135,8 +165,15 @@ export async function saveToggleConfig(id: string, input: Omit<ToggleConfig, 'id
 
 /** Revert a toggle to its code default: deletes the stored admin override
  *  (architect 2026-07-13, finding 2 — formerly psql row surgery). */
-export async function deleteToggleConfig(id: string): Promise<ToggleConfig> {
-  const res = await fetch(`${config.baseUrl}/host/openwop-app/feature-toggles/admin/configs/${encodeURIComponent(id)}`, fetchOpts({ method: 'DELETE', headers: authedHeaders() }));
-  if (!res.ok) throw new Error(`delete_toggle_${res.status}`);
-  return (await res.json()) as ToggleConfig;
+export async function deleteToggleConfig(id: string, revision?: string | null): Promise<ToggleConfig> {
+  // ADR 0819 §5 — the revision precondition; a stale revert is a 409.
+  const q = revision !== undefined ? `?revision=${encodeURIComponent(revision ?? 'null')}` : '';
+  const res = await fetch(`${config.baseUrl}/host/openwop-app/feature-toggles/admin/configs/${encodeURIComponent(id)}${q}`, fetchOpts({ method: 'DELETE', headers: authedHeaders() }));
+  return asJson<ToggleConfig>(res, 'deleteToggleConfig');
+}
+
+/** Admin: a toggle's audited change history, newest first (ADR 0819 §4). */
+export async function listToggleHistory(id: string): Promise<ToggleChange[]> {
+  const res = await fetch(`${base}/admin/configs/${encodeURIComponent(id)}/history`, fetchOpts({ headers: authedHeaders() }));
+  return (await asJson<{ changes: ToggleChange[] }>(res, 'listToggleHistory')).changes;
 }

@@ -15,7 +15,7 @@ import { callerSubject } from '../../host/requestSubject.js';
 import { OpenwopError } from '../../types.js';
 import { getExtractionGrant, setExtractionGrant } from './grantService.js';
 
-const PATH = '/v1/host/openwop-app/profiles/me/memory-extraction';
+const PATH = '/host/openwop-app/profiles/me/memory-extraction';
 
 export function registerMemoryExtractRoutes(deps: RouteDeps): void {
   const { app } = deps;

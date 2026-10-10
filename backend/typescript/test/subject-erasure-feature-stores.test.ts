@@ -390,6 +390,11 @@ const EXPECTED_COVERED = new Set([
   // on a userId key; the users feature's userId→email resolver makes the
   // email key reachable from the users erase route.
   'orgs:invite',
+  // ADR 0780 D4 (`CONNWF-4`) — moved out of RECORDED_DEBT: `eraseSubjectConnections`
+  // revokes the subject's USER-scoped rows (org/workspace rows carry no userId and
+  // are only ever used by grant, never as the subject) in the DSAR's tenant. Rows
+  // in OTHER shared workspaces are not reached — `CONNWF-16`.
+  'connections:connection',
 ]);
 
 /**
@@ -398,7 +403,6 @@ const EXPECTED_COVERED = new Set([
  * promise to cover, and the ceiling below stops the list growing quietly.
  */
 const RECORDED_DEBT = new Map<string, string>([
-  ['connections:connection', 'OAuth connection rows carry the connecting userId alongside tokens. Erasure needs a decision the audit did not settle: whether to delete the connection (breaking a workspace-shared integration another member relies on) or re-attribute it. Reclaimed today only by tenant teardown.'],
   ['notifications:prefs', 'Per-user notification preferences. Safe to delete on erasure; simply has no eraser yet.'],
   ['settings:user-prefs', 'Per-user settings. Safe to delete on erasure; simply has no eraser yet.'],
   ['computer-use:session', 'FOUND BY the R3 subjectId widening (the territories-deferral M2 class): durable session rows carry applyContext.subjectId (the job-search subject whose campaign drove the session) + createdBy, with no TTL, no purger and no eraser. Erasure needs a decision: sessions are also audit evidence for automated submissions (ADR 0541), so redact-the-subject vs delete needs the computer-use owner. Until then reclaimed only by tenant teardown.'],
@@ -468,7 +472,6 @@ const ACTOR_ATTRIBUTED_DEBT = new Map<string, string>([
   ['chatwidget:config', 'A public chat-widget configuration (`createdBy` + a minted token). The widget must keep working when its author leaves, so this is re-attribute-or-transfer, not delete.'],
   ['creative-briefs:render', 'A render job/output row carrying its requester. Short-lived in practice but has no TTL, so it is debt rather than exempt.'],
   ['creative-video:job', 'A video job row carrying its requester. Same shape as creative-briefs:render.'],
-  ['devkey:record', 'An API KEY row (`createdBy` is also the visibility predicate — `listApiKeys` filters non-admins to their own). This one is NOT re-attribution: erasing the person should plausibly REVOKE the key, which is a security decision the developer-keys owner must make, not a default this widening should pick.'],
   ['discovery:collection', 'Merchandising collection authored by a member; org storefront config.'],
   ['discovery:merch-rule', 'Merchandising rule authored by a member; org storefront config.'],
   ['funnels:funnel', 'A funnel definition — org config authored by a member.'],
@@ -1501,19 +1504,26 @@ describe('ADR 0464 — feature-owned subject-bearing stores', () => {
 
     // BLIND SPOTS, stated rather than implied — and this is the honest answer to
     // "does the fix make the stores visible to the gate, or merely add erasers
-    // it cannot count?" FIVE of eight are now counted. THREE are not, and no
-    // widening of a field NAME can reach them: `Project` declares no subject
-    // field of any shape, and `CommitmentIndexRow` is `{ixId, commitmentId}`.
+    // it cannot count?" FIVE of seven are now counted. TWO are not, and no
+    // widening of a field NAME can reach them: `CommitmentIndexRow` is
+    // `{ixId, commitmentId}`. (An eighth, `assistant:project`, is RETIRED —
+    // ADR 0820 §8 item 4, 0 prod rows MEASURED 2026-10-05 — pinned below.)
     // They read as covered ONLY by feature-directory inference, which is exactly
     // the mechanism that produced a false clean bill for `commerce:cart` — so
     // the eraser must SAY it leaves them alone and why, and that sentence is
     // asserted rather than the ledger's silence.
     for (const ns of ['assistant:project', 'assistant:commitment:by-tenant', 'assistant:commitment:by-status']) {
+      // `assistant:project` is absent because the store no longer exists (below);
+      // the two index stores because no field name can reach them.
       expect(stores.has(ns), `${ns}: still invisible to this gate — see the comment above`).toBe(false);
     }
     const src = readFileSync(join(FEATURES_ROOT, 'assistant', 'erasure.ts'), 'utf8');
     expect(/DELIBERATELY NOT ERASED/.test(src), 'the non-erasure decisions must be stated in the eraser').toBe(true);
-    expect(/assistant:project/.test(src)).toBe(true);
+    // The retirement is stated in the eraser, and no source file declares the store.
+    expect(/`assistant:project` — RETIRED/.test(src), 'the eraser must say the project store is retired').toBe(true);
+    for (const f of ['assistantService.ts', 'erasure.ts']) {
+      expect(/new DurableCollection<\w+>\('assistant:project'/.test(readFileSync(join(FEATURES_ROOT, 'assistant', f), 'utf8')), `${f} must not re-declare the retired store`).toBe(false);
+    }
     expect(/assistant:commitment:by-tenant/.test(src)).toBe(true);
 
     // The per-store SPLIT is the substance of this change, so each of the three

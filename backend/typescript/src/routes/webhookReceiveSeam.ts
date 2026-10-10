@@ -27,7 +27,7 @@ import type { Express, Request, Response, NextFunction } from 'express';
 import { verifyWebhookV1 } from '../host/webhookSignature.js';
 import { sendError } from '../middleware/errorEnvelope.js';
 
-export const WEBHOOK_RECEIVE_PATH = '/v1/host/sample/webhooks/receive';
+export const WEBHOOK_RECEIVE_PATH = '/host/sample/webhooks/receive';
 
 /** Closed-world validation against `api/seams-v2.yaml`. */
 export function validateReceiveBody(

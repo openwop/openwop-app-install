@@ -1,6 +1,7 @@
 {
   "name": "feature.computer-use.nodes",
-  "version": "1.0.1",
+  "version": "1.0.2",
+  "kind": "node",
   "description": "Computer-use browser-agent nodes (ADR 0418) over ctx.features['computer-use']: `task` starts/resumes a provider-hosted browser session and runs the risk-tiered loop until completion or a commit-class action halts it awaiting approval; compose core.approvalGate then `decide` to record the human verdict and resume; `status` reads the session. Fail-closed origin allowlist, per-tenant daily session budget, recorded trajectories (replay never re-drives a browser). role:action.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
@@ -12,7 +13,7 @@
     "hitl"
   ],
   "engines": {
-    "openwop": ">=1.0.0 <2.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "nodes": [
     {

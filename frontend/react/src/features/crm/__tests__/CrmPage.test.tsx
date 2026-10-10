@@ -5,16 +5,37 @@
  * enabled → renders fetched data — plus the Phase-A honesty fixes: the deals
  * pipeline picker (list filtered by the SELECTED pipeline), the company
  * search box (?q=), and the triage "View run" provenance link.
+ *
+ * Also pinned here: CRM-UX-4 (failed reads are the canonical announced card +
+ * Retry, never an empty state), HIGH-1 (no "No … yet" during a retry), CRM-UX-12
+ * / LOW-8 (create forms gated on the defs/pipelines they need), CRM-UX-16 (focus
+ * lands on the title after a record delete), CRMGAP-FE-9 (agent deep-link,
+ * board columnFooter) and ADR 0768 D5 (the Pocket's agent + honest scope).
+ *
+ * Sabotage that turns it red (wave-4 /grade-tests probes, 20 witnessed): e.g.
+ * the access-loading branch dropped; the title focus or its `focusTitle` guard
+ * removed; any failed-read catch writing `[]` instead of UNKNOWN; either create
+ * gate losing its failure flag; the segment filter or `?q=` dropped.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/react';
+
+// ADR 0768 D5 — stub the Pocket so the page test reads WHICH agent and WHAT scope it mounts.
+vi.mock('../../../chat/ChatPocket.js', () => ({
+  ChatPocket: ({ agentId, contextLabel }: { agentId: string; contextLabel?: unknown }) => (
+    <div data-testid="pocket" data-agent={agentId}>{contextLabel as string}</div>
+  ),
+}));
+import { act, render, screen, cleanup, waitFor, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 // Type-only (erased at runtime, so it does not race `vi.mock` below). Typing the
 // hoisted mocks against the REAL client types is what makes a fixture that drifts
 // from the client a TYPE error here rather than a green test asserting a shape the
 // app no longer returns.
+import type * as CrmClient from '../crmClient.js';
+import type * as OrgClient from '../crmOrgClient.js';
 import type { Contact } from '../crmClient.js';
 import type { Deal, Pipeline, Task } from '../crmOrgClient.js';
+import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 
 /** A contact FIXTURE: the identifying trio every test sets, plus any real `Contact`
  *  field a test needs. Server-owned fields (`tenantId`, `createdAt`, `updatedAt`)
@@ -33,15 +54,15 @@ vi.mock('react-router-dom', async () => {
 });
 
 // CRMGAP-FE-9 (board path): mocking KanbanBoardView tests OUR wiring — the
-// props DealsTab hands it (board/cards/columnFooter/onMoveCard) — rather than
-// dnd-kit's own drag machinery (no prior DnD-simulation precedent in this
-// repo, and CRM stage ids don't match `columnLaneKind`'s lane vocabulary, so
-// the card's contextual "move" button never renders for a real board here).
+// board/cards/columnFooter props DealsTab hands it. The onMoveCard → moveDeal
+// round-trip is NOT re-asserted here: dealsBoardKeyboard.test.tsx drives it
+// through the REAL KanbanBoardView ("Space → ArrowRight once → Space calls
+// moveDeal…"), and probe w4g4-cp-board-move-DBK showed it red under the same
+// break that reddened the old simulated-move half of the board case below.
 vi.mock('../../../kanban/KanbanBoardView.js', () => ({
   KanbanBoardView: (props: {
     board: { columns: { id: string; name: string }[] };
     cards: { id: string; columnId: string }[];
-    onMoveCard: (cardId: string, toColumnId: string) => void;
     columnFooter?: (col: { id: string }, cards: { id: string; columnId: string }[]) => JSX.Element | null;
   }) => {
     return (
@@ -55,21 +76,24 @@ vi.mock('../../../kanban/KanbanBoardView.js', () => ({
             </div>
           );
         })}
-        <button type="button" onClick={() => props.onMoveCard('d1', 's2')}>Simulate move</button>
       </div>
     );
   },
 }));
 
-const access = vi.hoisted(() => ({ value: { enabled: false, loading: false, variant: undefined as string | undefined } }));
+// The REAL hook's return type (makeFeatureAccess), never a hand-rolled subset.
+const access = vi.hoisted(() => ({ useFeatureAccess: vi.fn() }));
 vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
-  useFeatureAccess: () => access.value,
+  useFeatureAccess: access.useFeatureAccess,
 }));
-const triageContact = vi.hoisted(() => vi.fn(async () => ({ runId: 'run-abc-123', variant: 'basic', workflowId: 'wf1', bindings: {} })));
+const setAccess = (over: { enabled: boolean; loading?: boolean }): void => {
+  access.useFeatureAccess.mockReturnValue(makeFeatureAccess({ loading: false, ...over }));
+};
+const triageContact = vi.hoisted(() => vi.fn<typeof CrmClient.triageContact>(async () => ({ runId: 'run-abc-123', variant: 'basic', workflowId: 'wf1', bindings: {} })));
 const listContacts = vi.hoisted(() => vi.fn(async (): Promise<ContactFixture[]> => [{ contactId: 'c1', name: 'Ada Lovelace', stage: 'lead' }]));
-const listSegments = vi.hoisted(() => vi.fn(async () => [] as Array<{ segmentId: string; name: string; filters: unknown[] }>));
+const listSegments = vi.hoisted(() => vi.fn<typeof CrmClient.listSegments>(async () => []));
 const listSegmentMembers = vi.hoisted(() => vi.fn(async (): Promise<ContactFixture[]> => []));
-const listContactFields = vi.hoisted(() => vi.fn(async () => [] as Array<{ defId: string; key: string; label: string; type: string; required: boolean; createdAt: string }>));
+const listContactFields = vi.hoisted(() => vi.fn<typeof CrmClient.listContactFields>(async () => []));
 vi.mock('../crmClient.js', () => ({
   CONTACT_STAGES: ['lead', 'qualified', 'customer', 'churned'],
   listContacts,
@@ -88,23 +112,22 @@ vi.mock('../crmClient.js', () => ({
   deleteContactField: vi.fn(),
 }));
 const listDeals = vi.hoisted(() => vi.fn(async (): Promise<Deal[]> => []));
-const listCompanies = vi.hoisted(() => vi.fn(async () => [] as Array<{ companyId: string; name: string; domain?: string; tags: string[] }>));
+const listCompanies = vi.hoisted(() => vi.fn<typeof OrgClient.listCompanies>(async () => []));
 const listPipelines = vi.hoisted(() => vi.fn(async (): Promise<Pipeline[]> => [
   { pipelineId: 'p1', name: 'Sales', stages: [{ stageId: 's1', name: 'New', probability: 10 }] },
   { pipelineId: 'p2', name: 'Renewals', stages: [{ stageId: 's2', name: 'Due', probability: 50 }] },
 ]));
-const moveDeal = vi.hoisted(() => vi.fn(async (_orgId: string, dealId: string, stageId: string) => ({ dealId, stageId })));
 const listTasks = vi.hoisted(() => vi.fn(async (): Promise<Task[]> => []));
 vi.mock('../crmOrgClient.js', () => ({
   TASK_STATUSES: ['open', 'doing', 'done'],
-  listOrgs: vi.fn(async () => [{ orgId: 'o1', name: 'Org One' }]),
+  listOrgs: vi.fn<typeof OrgClient.listOrgs>(async () => [{ orgId: 'o1', name: 'Org One' }]),
   listCompanies,
   listDeals,
   listTasks,
   listPipelines,
   createCompany: vi.fn(), createDeal: vi.fn(), createTask: vi.fn(),
   deleteCompany: vi.fn(), deleteDeal: vi.fn(), deleteTask: vi.fn(),
-  moveDeal, setTaskStatus: vi.fn(),
+  moveDeal: vi.fn(), setTaskStatus: vi.fn(),
 }));
 
 import { CrmPage } from '../CrmPage.js';
@@ -112,39 +135,36 @@ import { CrmPage } from '../CrmPage.js';
 const renderPage = () => render(<MemoryRouter><CrmPage /></MemoryRouter>);
 
 beforeEach(() => {
-  navigateSpy.mockClear();
-  moveDeal.mockClear();
-  access.value = { enabled: false, loading: false, variant: undefined };
-  listDeals.mockClear(); listCompanies.mockClear(); triageContact.mockClear();
-  listPipelines.mockClear();
-  listTasks.mockReset();
-  listTasks.mockResolvedValue([]);
-  listContacts.mockReset();
-  listContacts.mockResolvedValue([{ contactId: 'c1', name: 'Ada Lovelace', stage: 'lead' }]);
-  listSegments.mockReset();
-  listSegments.mockResolvedValue([{ segmentId: 'seg1', name: 'Qualified leads', filters: [] }]);
-  listSegmentMembers.mockReset();
+  // resetAllMocks (not clear): an unconsumed `*Once` or a case-level
+  // `mockResolvedValue` must not leak into the next case. Vitest 4 restores
+  // each `vi.fn(impl)` original, so the hoisted defaults above survive.
+  vi.resetAllMocks();
+  setAccess({ enabled: false });
+  listSegments.mockResolvedValue([{ segmentId: 'seg1', name: 'Qualified leads', filters: [], createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' }]);
   listSegmentMembers.mockResolvedValue([{ contactId: 'c1' }]);
 });
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe('CrmPage access gate', () => {
   it('renders a skeleton while access is loading (neither gate copy nor content)', () => {
-    access.value = { enabled: false, loading: true, variant: undefined };
-    renderPage();
-    // While loading we show neither the "not enabled" gate nor the CRM content.
+    setAccess({ enabled: false, loading: true });
+    const { container } = renderPage();
+    // While loading we show neither the "not enabled" gate nor the CRM content…
     expect(screen.queryByText(/not enabled/i)).toBeNull();
     expect(screen.queryByText('CRM')).toBeNull();
+    // …and the skeleton IS there (a blank render must not pass). `Skeleton` is
+    // `aria-hidden` with no role or text, so its class is the only handle.
+    expect(container.querySelector('.skeleton')).not.toBeNull();
   });
 
   it('shows the "not enabled" StateCard when the feature is off (server-gated)', () => {
-    access.value = { enabled: false, loading: false, variant: undefined };
+    setAccess({ enabled: false });
     renderPage();
     expect(screen.getByText(/CRM is not enabled/i)).toBeTruthy();
   });
 
   it('renders the CRM page + fetched contacts when enabled', async () => {
-    access.value = { enabled: true, loading: false, variant: undefined };
+    setAccess({ enabled: true });
     renderPage();
     // The header renders immediately…
     expect(screen.getAllByText('CRM').length).toBeGreaterThan(0);
@@ -155,7 +175,7 @@ describe('CrmPage access gate', () => {
 
 describe('CrmPage Phase-A fixes', () => {
   it('deals: shows the pipeline picker for >1 pipelines and filters by the selected one', async () => {
-    access.value = { enabled: true, loading: false, variant: undefined };
+    setAccess({ enabled: true });
     renderPage();
     fireEvent.click(await screen.findByRole('tab', { name: 'Deals' }));
     // Initial load filters by the FIRST pipeline (not an unfiltered list).
@@ -166,7 +186,7 @@ describe('CrmPage Phase-A fixes', () => {
   });
 
   it('companies: the search box passes q to listCompanies (debounced)', async () => {
-    access.value = { enabled: true, loading: false, variant: undefined };
+    setAccess({ enabled: true });
     // >3 companies — the filterbar search is gated on the unfiltered total.
     listCompanies.mockResolvedValue([1, 2, 3, 4].map((i) => ({ companyId: `co${i}`, name: `Co ${i}`, tags: [] })));
     renderPage();
@@ -177,7 +197,7 @@ describe('CrmPage Phase-A fixes', () => {
   });
 
   it('contacts: the segment select fetches its live members and filters the visible list', async () => {
-    access.value = { enabled: true, loading: false, variant: undefined };
+    setAccess({ enabled: true });
     listContacts.mockResolvedValue([
       { contactId: 'c1', name: 'Ada Lovelace', stage: 'lead' },
       { contactId: 'c2', name: 'Bob Builder', stage: 'qualified' },
@@ -195,7 +215,7 @@ describe('CrmPage Phase-A fixes', () => {
   });
 
   it('contacts: triage persists a lastTriage stamp surfaced as a View run link', async () => {
-    access.value = { enabled: true, loading: false, variant: undefined };
+    setAccess({ enabled: true });
     renderPage();
     await waitFor(() => expect(screen.getByText('Ada Lovelace')).toBeTruthy());
     // After triage the reload returns the persisted stamp (B3a).
@@ -211,14 +231,14 @@ describe('CrmPage Phase-A fixes', () => {
 
 describe('CrmPage Phase-B fixes (CRMGAP-FE-9)', () => {
   it('pins the "Ask the sales agent" deep-link target', async () => {
-    access.value = { enabled: true, loading: false, variant: undefined };
+    setAccess({ enabled: true });
     renderPage();
     fireEvent.click(await screen.findByRole('button', { name: 'Ask the sales agent' }));
-    expect(navigateSpy).toHaveBeenCalledWith('/?agent=feature.crm.agents.sales-ops');
+    expect(navigateSpy).toHaveBeenCalledWith('/?agent=vendor.openwop-app.crm.agents.sales-ops');
   });
 
-  it('deals board: renders columns with the columnFooter meta and wires onMoveCard to moveDeal', async () => {
-    access.value = { enabled: true, loading: false, variant: undefined };
+  it('deals board: renders columns with the columnFooter meta (count + amount sum per column)', async () => {
+    setAccess({ enabled: true });
     listPipelines.mockResolvedValueOnce([
       { pipelineId: 'p1', name: 'Sales', stages: [
         { stageId: 's1', name: 'New', probability: 10 },
@@ -226,23 +246,24 @@ describe('CrmPage Phase-B fixes (CRMGAP-FE-9)', () => {
       ] },
     ]);
     listDeals.mockResolvedValueOnce([
-      { dealId: 'd1', title: 'Globex expansion', pipelineId: 'p1', stageId: 's1', amount: 1000, status: 'open' as const },
-      { dealId: 'd2', title: 'Initech renewal', pipelineId: 'p1', stageId: 's2', amount: 2000, status: 'open' as const },
+      { dealId: 'd1', title: 'Globex expansion', pipelineId: 'p1', stageId: 's1', amount: 1000, status: 'open' },
+      { dealId: 'd2', title: 'Initech renewal', pipelineId: 'p1', stageId: 's2', amount: 2000, status: 'open' },
     ]);
     renderPage();
     fireEvent.click(await screen.findByRole('tab', { name: 'Deals' }));
     await waitFor(() => expect(screen.getByTestId('kanban-board-mock')).toBeTruthy());
 
     // columnFooter renders each column's card count + amount sum (ADR 0008 board rollup).
-    await waitFor(() => expect(screen.getByTestId('col-s1').textContent).toContain('1 deals'));
+    // The count is matched plural-AGNOSTICALLY on purpose. This used to assert
+    // the literal '1 deals': `boardColumnMeta` has no `_one`/`_other` forms, so
+    // a one-card column reads "1 deals" — the LOW-6 defect PipelinesPage fixed
+    // for its own strings. Pinning it would block that fix; asserting "1 deal"
+    // would fail today (BLOCKED-ON-PRODUCT, wave-4 /grade-tests g4). The claim
+    // here is the count and the sum, which both forms carry.
+    await waitFor(() => expect(screen.getByTestId('col-s1').textContent).toMatch(/1 deals? · /));
     expect(screen.getByTestId('col-s1').textContent).toContain('1,000');
-    expect(screen.getByTestId('col-s2').textContent).toContain('1 deals');
+    expect(screen.getByTestId('col-s2').textContent).toMatch(/1 deals? · /);
     expect(screen.getByTestId('col-s2').textContent).toContain('2,000');
-
-    // Our wiring: KanbanBoardView's onMoveCard prop is DealsTab's moveFromBoard,
-    // which round-trips through moveDeal (not a bespoke handler).
-    fireEvent.click(screen.getByRole('button', { name: 'Simulate move' }));
-    await waitFor(() => expect(moveDeal).toHaveBeenCalledWith('o1', 'd1', 's2'));
   });
 });
 
@@ -257,7 +278,7 @@ describe('CrmPage UX audit fixes', () => {
   // the page must land focus on its title (deferred a tick, because App.tsx
   // moves focus to <main> on every pathname change in its own, later effect).
   it('arriving with state.focusTitle moves focus to the page title', async () => {
-    access.value = { enabled: true, loading: false, variant: undefined };
+    setAccess({ enabled: true });
     render(
       <MemoryRouter initialEntries={[{ pathname: '/crm', search: '?tab=deals', state: { focusTitle: true } }]}>
         <CrmPage />
@@ -271,18 +292,21 @@ describe('CrmPage UX audit fixes', () => {
   });
 
   it('arriving WITHOUT that state leaves focus alone (no unsolicited focus jump on an ordinary visit)', async () => {
-    access.value = { enabled: true, loading: false, variant: undefined };
+    setAccess({ enabled: true });
     render(<MemoryRouter initialEntries={['/crm?tab=deals']}><CrmPage /></MemoryRouter>);
     const title = await screen.findByRole('heading', { level: 1, name: 'CRM' });
-    await new Promise((r) => setTimeout(r, 5));
+    // The focus jump is deferred by a 0-ms timer; a 0-ms timer queued AFTER it
+    // runs after it (FIFO), so this waits exactly past the jump — no fixed sleep.
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     expect(document.activeElement).not.toBe(title);
+    expect(navigateSpy).not.toHaveBeenCalled();
   });
 
   const FAILED_TITLE = 'Could not load this';
   const FAILED_BODY = 'The list could not be read, so we cannot say what is here. Retry, or reload the page.';
 
   it('contacts: a failed read is the canonical announced card + Retry, never the misleading empty state', async () => {
-    access.value = { enabled: true, loading: false, variant: undefined };
+    setAccess({ enabled: true });
     listContacts.mockReset();
     listContacts.mockRejectedValueOnce(new Error('contacts boom'));
     renderPage();
@@ -312,7 +336,7 @@ describe('CrmPage UX audit fixes', () => {
     //
     // `await waitFor(calls > before)` cannot see this window at all: it only
     // proves a request went out. A promise the TEST settles can.
-    access.value = { enabled: true, loading: false, variant: undefined };
+    setAccess({ enabled: true });
     listContacts.mockReset();
     listContacts.mockRejectedValueOnce(new Error('contacts boom'));
     renderPage();
@@ -331,7 +355,7 @@ describe('CrmPage UX audit fixes', () => {
   });
 
   it('companies: a failed read is the canonical announced card + Retry, never the misleading empty state', async () => {
-    access.value = { enabled: true, loading: false, variant: undefined };
+    setAccess({ enabled: true });
     listCompanies.mockRejectedValueOnce(new Error('companies boom'));
     renderPage();
     fireEvent.click(await screen.findByRole('tab', { name: 'Companies' }));
@@ -346,7 +370,7 @@ describe('CrmPage UX audit fixes', () => {
   });
 
   it('tasks: a failed read is the canonical announced card + Retry, never the misleading empty state', async () => {
-    access.value = { enabled: true, loading: false, variant: undefined };
+    setAccess({ enabled: true });
     listTasks.mockRejectedValueOnce(new Error('tasks boom'));
     renderPage();
     fireEvent.click(await screen.findByRole('tab', { name: 'Tasks' }));
@@ -361,7 +385,7 @@ describe('CrmPage UX audit fixes', () => {
   });
 
   it('deals: a pipeline load failure is the canonical announced card + Retry, never "No deals yet"', async () => {
-    access.value = { enabled: true, loading: false, variant: undefined };
+    setAccess({ enabled: true });
     listPipelines.mockRejectedValueOnce(new Error('pipelines boom'));
     renderPage();
     fireEvent.click(await screen.findByRole('tab', { name: 'Deals' }));
@@ -385,7 +409,7 @@ describe('CrmPage UX audit fixes', () => {
     // (The pipelines-read failure is the same defect but is masked: replacing
     // `pipelines` re-mints `load`, whose effect nulls `rows` on the way past.
     // Choosing the read that is NOT masked is what makes this test discriminate.)
-    access.value = { enabled: true, loading: false, variant: undefined };
+    setAccess({ enabled: true });
     listDeals.mockRejectedValueOnce(new Error('deals boom'));
     renderPage();
     fireEvent.click(await screen.findByRole('tab', { name: 'Deals' }));
@@ -405,13 +429,17 @@ describe('CrmPage UX audit fixes', () => {
   });
 
   it('deals: CRM-UX-12 — a pipelines-load failure DISABLES the create form and names why', async () => {
-    access.value = { enabled: true, loading: false, variant: undefined };
+    setAccess({ enabled: true });
     listPipelines.mockRejectedValueOnce(new Error('pipelines boom'));
     renderPage();
     fireEvent.click(await screen.findByRole('tab', { name: 'Deals' }));
     await screen.findByText('Could not load this');
     // Before: the form stayed fully enabled, so "Add deal" posted with no
     // pipelineId while the surface below said the read failed.
+    // A title is typed FIRST: with an empty title the button is disabled by
+    // `!title.trim()` alone, which made this assertion unable to fail (probe
+    // w4g4-cp-deals-gate stayed green with the pipelines gate removed).
+    fireEvent.change(screen.getByPlaceholderText('Q3 expansion'), { target: { value: 'New deal' } });
     const submit = screen.getByRole('button', { name: 'Add deal' }) as HTMLButtonElement;
     expect(submit.disabled).toBe(true);
     expect(screen.getByText(/nowhere to be filed/)).toBeTruthy();
@@ -421,7 +449,7 @@ describe('CrmPage UX audit fixes', () => {
     // The discriminator for the test above: `error` is set by BOTH reads, so a
     // gate written off `error` would wrongly block creation when only the list
     // read failed — the deal itself is perfectly fileable.
-    access.value = { enabled: true, loading: false, variant: undefined };
+    setAccess({ enabled: true });
     listDeals.mockRejectedValueOnce(new Error('deals boom'));
     renderPage();
     fireEvent.click(await screen.findByRole('tab', { name: 'Deals' }));
@@ -436,7 +464,7 @@ describe('CrmPage UX audit fixes', () => {
     // The mirror of the deals gate above, which this tab was missing: without
     // the defs the form renders no custom inputs at all, so a REQUIRED custom
     // field comes back as a server 400 the user has no way to act on.
-    access.value = { enabled: true, loading: false, variant: undefined };
+    setAccess({ enabled: true });
     listContactFields.mockRejectedValueOnce(new Error('fields boom'));
     renderPage();
     expect(await screen.findByText('Contact fields didn’t load')).toBeTruthy();
@@ -446,9 +474,25 @@ describe('CrmPage UX audit fixes', () => {
   });
 
   it('contacts: a SUCCESSFUL field-defs read leaves Add contact usable (the discriminator)', async () => {
-    access.value = { enabled: true, loading: false, variant: undefined };
+    setAccess({ enabled: true });
     renderPage();
     fireEvent.change(await screen.findByLabelText('Name'), { target: { value: 'New person' } });
     expect((screen.getByRole('button', { name: 'Add contact' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+});
+
+describe('ADR 0768 D5 — the feature assistant Pocket', () => {
+  it('mounts this feature\'s agent with an honest scope (orgs the caller can read)', async () => {
+    setAccess({ enabled: true });
+    renderPage();
+    const pocket = await screen.findByTestId('pocket');
+    expect(pocket.getAttribute('data-agent')).toBe('vendor.openwop-app.crm.agents.sales-ops');
+    expect(pocket.textContent).toBe('CRM records in organizations you can read');
+  });
+  it('no Pocket while the feature is disabled', async () => {
+    setAccess({ enabled: false });
+    renderPage();
+    expect(await screen.findByText(/CRM is not enabled/i)).toBeTruthy();
+    expect(screen.queryByTestId('pocket')).toBeNull();
   });
 });

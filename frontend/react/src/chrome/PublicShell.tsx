@@ -115,15 +115,19 @@ function usePublicNav(): { groups: NavGroup[]; flat: NavLink[]; primary: NavLink
   const product: NavLink[] = [
     { to: '/p/features', label: t('navFeatures') },
     { to: '/p/compare', label: t('navCompare') },
+    // The white-label page is seeded only on the OpenWOP showcase (demo mode),
+    // so it is curated only when it is actually published — a white-label
+    // install never shows a link to it.
+    ...(published.some((l) => l.to === '/p/white-label') ? [{ to: '/p/white-label', label: t('navWhiteLabel') }] : []),
     { to: '/pricing', label: t('navPricing') },
     { to: '/blog', label: t('navBlog') },
     ...(hasDocs ? [{ to: '/docs', label: t('navDocs') }] : []),
   ];
   // Slugs already surfaced above — dropped from the dynamic group so nothing
-  // lists twice. `home` is the brand link; `features`/`compare` are the curated
-  // `/p/:slug` entries; `pricing`/`blog`/`docs` are the reserved route names (a
+  // lists twice. `home` is the brand link; `features`/`compare`/`white-label` are
+  // the curated `/p/:slug` entries; `pricing`/`blog`/`docs` are the reserved route names (a
   // CMS page slugged the same would otherwise read as a confusing duplicate).
-  const curatedSlugs = new Set(['home', 'features', 'compare', 'pricing', 'blog', 'docs']);
+  const curatedSlugs = new Set(['home', 'features', 'compare', 'white-label', 'pricing', 'blog', 'docs']);
   const morePages = published.filter((l) => !curatedSlugs.has(l.to.replace(/^\/p\//, '')));
 
   const groups: NavGroup[] = [

@@ -561,9 +561,42 @@
             "host-managed"
           ],
           "description": "Resolution mode. v1.x supports only `host-managed` (clients reference stored secrets via opaque ids); reserved for future modes."
+        },
+        "runSecrets": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "maxEntries"
+          ],
+          "properties": {
+            "maxEntries": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "The most `{ ref, value }` entries one `createRun` may carry in `runSecrets`."
+            }
+          },
+          "description": "RFC 0229 — the host accepts run-supplied secrets: a top-level `runSecrets` array of `{ ref, value }` on `createRun`, each `ref` in the reserved `run:` namespace, resolvable only by the run that supplied it. Absent means `createRun` does not accept `runSecrets`, and a client MUST NOT send it. A host advertising it MUST also list `run` in `scopes`, MUST execute the node type `core.secret.witness`, and MUST advertise the fixture `openwop-secrets-run-witness`."
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "runSecrets"
+            ]
+          },
+          "then": {
+            "properties": {
+              "scopes": {
+                "contains": {
+                  "const": "run"
+                }
+              }
+            }
+          }
+        }
+      ]
     },
     "connections": {
       "type": "object",
@@ -2888,9 +2921,37 @@
               },
               "description": "Which source-authenticity checks the host performs. An advertised check MUST actually be performed (RFC 0099 §F.3 / UQ1)."
             },
+            "inboundSigning": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": { "type": "string", "enum": ["standard-webhooks-1"] },
+              "description": "RFC 0230. Sender-facing ingest schemes this host implements for `webhook` subscriptions. `standard-webhooks-1`: a sender signs the raw body with the Standard Webhooks headers under the secret returned once at registration; the signature authenticates it (no OpenWOP credential on `ingestUrl`), `webhook-id` is the inbound identity dedup keys on, and the ingest answers 202 delivered / 200 duplicate / 401 signature_invalid / 409 subscription_not_active."
+            },
             "registrationEndpoint": {
               "type": "boolean",
               "description": "`true` ⇒ the host serves `POST /v1/trigger-subscriptions` (RFC 0099 §F.2) for portable external-event subscription creation."
+            }
+          }
+        },
+        "deadLetter": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "retentionDays",
+            "maxPageSize"
+          ],
+          "description": "RFC 0232 §A (additive). The trigger DELIVERY dead-letter sink, advertised only by a host that serves `GET /v1/trigger-subscriptions/{subscriptionId}/dead-letters` (`listTriggerDeadLetters`). A dead-lettered trigger delivery started no run, so it is on no run's log; this read is where the host's content-free record of it is visible (`trigger-bridge.md` §C). **Distinct from the top-level `deadLetter` family (RFC 0053), which is the RUN sink**, and from `webhooks.deadLetter` (RFC 0188), which holds OUTBOUND deliveries.",
+          "properties": {
+            "retentionDays": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "How long a dead-lettered delivery stays readable. Observable: a record's `expiresAt − deadLetteredAt` matches it."
+            },
+            "maxPageSize": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "description": "The ceiling the host clamps `limit` to."
             }
           }
         }
@@ -2986,6 +3047,22 @@
             "advisory"
           ],
           "description": "`hard`: exhaustion emits `cap.breached` + stops the run. `advisory`: emits the events but MUST NOT stop the run (honest advertisement of observe-only)."
+        },
+        "onExhaustion": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "fail",
+              "interrupt"
+            ]
+          },
+          "contains": {
+            "const": "fail"
+          },
+          "description": "RFC 0231. The `BudgetPolicy.onExhaustion` values the host serves under `enforce: \"hard\"`. Exact when present. Absent: both. A value not listed is refused `422 capability_not_provided` at create, never applied as another behaviour and never ignored. A consumer ignores it under `enforce: \"advisory\"`."
         },
         "scopes": {
           "type": "array",

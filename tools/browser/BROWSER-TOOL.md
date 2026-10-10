@@ -23,7 +23,7 @@ A thin bash wrapper that acts as the single interface for all browser commands.
 1. Checks if a server is already running by reading `.browser-state.json` and hitting the `/health` endpoint
 2. If running, sends the command as an HTTP POST body to `http://127.0.0.1:{port}/command` with a Bearer token
 3. If not running, starts `server.mjs` as a background process (`nohup`), waits up to 15 seconds for it to become healthy, then sends the command
-4. On the very first run, checks if Playwright's Chromium binary is installed and runs `npx playwright install chromium` if needed
+4. On the very first run, checks that the repo's pinned Playwright (root `node_modules`) has its Chromium executable and installs it with that pinned CLI and `PLAYWRIGHT_SKIP_BROWSER_GC=1` if needed. With no root `node_modules` it refuses rather than running a bare `npx playwright install`, which garbage-collects the shared browser cache other checkouts depend on
 
 **Key implementation details:**
 
@@ -76,7 +76,7 @@ All errors are rewritten to be actionable for an AI agent:
 
 | Condition | Response |
 |-----------|----------|
-| Browser binary missing | Suggests `npx playwright install chromium` |
+| Browser binary missing | Suggests `npm ci` at the root, then the pinned CLI install with `PLAYWRIGHT_SKIP_BROWSER_GC=1` |
 | Element not found | Suggests `snapshot -i` to list elements |
 | Timeout | Reports what timed out |
 | Stale ref | Suggests re-running `snapshot` |
@@ -225,7 +225,7 @@ Invoke with `/browser <task description>`, e.g., `/browser validate the campaign
 
 - **Node.js v22+** (already installed)
 - **Playwright v1.49+** with Chromium (already installed as `@playwright/test@1.57.0`)
-- Chromium browser binary: auto-installed on first run via `npx playwright install chromium`
+- Chromium browser binary: auto-installed on first run via the root's pinned Playwright CLI (never a bare `npx`)
 
 ## Extending
 

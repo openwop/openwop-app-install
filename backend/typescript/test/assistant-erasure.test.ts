@@ -23,22 +23,20 @@ import {
   getCommitment,
   getMeeting,
   getPendingAction,
-  getProject,
   listCommitments,
   listDecisions,
   listStakeholders,
   logDecision,
   recordMeeting,
-  updateProject,
   upsertCommitmentBySource,
   upsertStakeholder,
-  createProject,
   projectCommitmentToBoard,
   type SourceRef,
 } from '../src/features/assistant/assistantService.js';
 import { createBoard, deleteCard, getCard, __resetKanbanStore } from '../src/host/kanbanService.js';
-import { enqueueActionWithApproval, decideActionViaApproval } from '../src/features/assistant/actionApproval.js';
+import { enqueueActionWithApproval, decideActionViaApproval, contentHashOf } from '../src/features/assistant/actionApproval.js';
 import { eraseAssistantSubject, ERASED_VALUE } from '../src/features/assistant/erasure.js';
+import { getApproval } from '../src/host/approvalService.js';
 import { eraseSubject } from '../src/host/subjectErasure.js';
 
 const TENANT = 'default';
@@ -62,18 +60,15 @@ beforeEach(async () => {
 });
 
 describe('COS-1 — what erasure means, per store', () => {
-  it('stakeholder: the row is DELETED and its id leaves every project (the row IS the person)', async () => {
+  it('stakeholder: the row is DELETED (the row IS the person)', async () => {
     const mine = await upsertStakeholder(TENANT, { person: { kind: 'email', address: SUBJECT_EMAIL }, importance: 90, notes: 'Prefers Tuesday calls.' });
     const other = await upsertStakeholder(TENANT, { person: { kind: 'email', address: 'sam@example.com' }, importance: 40 });
-    const project = await createProject(TENANT, { name: 'Q3 launch' });
-    await updateProject(TENANT, project.projectId, { stakeholderIds: [mine.stakeholderId, other.stakeholderId] });
 
     await eraseAssistantSubject(TENANT, SUBJECT_EMAIL);
 
     const left = await listStakeholders(TENANT);
     expect(left.map((s) => s.stakeholderId)).toEqual([other.stakeholderId]);
-    // The cascade: a dangling id would resolve to null on every project read.
-    expect((await getProject(TENANT, project.projectId))?.stakeholderIds).toEqual([other.stakeholderId]);
+    expect(left.some((s) => s.stakeholderId === mine.stakeholderId)).toBe(false);
   });
 
   /**
@@ -336,7 +331,14 @@ describe('COS-1 — what erasure means, per store', () => {
     });
     await eraseAssistantSubject(TENANT, SUBJECT_EMAIL);
 
-    await decideActionViaApproval(TENANT, action.approvalId!, 'approved', { decidedByUserId: 'u-approver' });
+    // ADR 0862 — the approver echoes the hash of the card they saw (pre-erasure). The erased
+    // row no longer matches it, so the decide is refused 409 rather than silently landing —
+    // and the cancel holds either way.
+    await expect(decideActionViaApproval(TENANT, action.approvalId!, 'approved', { decidedByUserId: 'u-approver', expectedContentHash: contentHashOf(action) }))
+      .rejects.toMatchObject({ httpStatus: 409 });
+    // …refused BEFORE the CAS: the approval is not consumed over an action that can never
+    // run, so a reject can still close it honestly (grade-code).
+    expect((await getApproval(action.approvalId!))?.status).toBe('pending');
 
     const after = await getPendingAction(TENANT, action.actionId);
     expect(after!.status, 'the erasure cancel must not be undoable by a later approval').toBe('rejected');
@@ -389,7 +391,7 @@ describe('COS-1 — the eraser contract', () => {
   });
 
   it('the erasure handles are byte-identical to the service handles (two declarations, one behaviour)', () => {
-    // `erasure.ts` re-declares the six namespaces (the crm/erasure.ts precedent).
+    // `erasure.ts` re-declares the five namespaces (the crm/erasure.ts precedent).
     // A drift in the key or tenant function there would silently erase nothing —
     // the collection would simply address different rows.
     const root = join(__dirname, '..', 'src', 'features', 'assistant');
@@ -398,7 +400,7 @@ describe('COS-1 — the eraser contract', () => {
         .map((m) => `${m[1]}|${m[2]!.replace(/\s+/g, ' ').trim()}`)
         .sort();
     const service = decls('assistantService.ts').filter((d) => !d.startsWith('assistant:commitment:by-'));
-    expect(service.length, 'six entity stores — a zero here would make this vacuous').toBe(6);
+    expect(service.length, 'five entity stores (assistant:project retired, ADR 0820 §8 item 4) — a zero here would make this vacuous').toBe(5);
     expect(decls('erasure.ts')).toEqual(service);
   });
 });

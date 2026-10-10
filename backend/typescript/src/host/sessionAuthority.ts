@@ -29,6 +29,10 @@ export interface SessionSubjectState {
    *  epoch is `session_revoked`. Missing on legacy rows ⇒ the registrar
    *  normalises to 0. */
   sessionEpoch: number;
+  /** ADR 0833 D3 — the session FAMILIES this user signed out (logout), still
+   *  inside their bound. Carried on the row the request already reads, so the
+   *  refusal costs no extra read. */
+  revokedFamilies?: readonly string[];
 }
 
 /** `null` ⇒ no durable row exists for `userId` (erased) — `account_erased`. */

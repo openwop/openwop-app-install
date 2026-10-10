@@ -53,7 +53,16 @@ function ensureAssistant(ctx) {
   return a;
 }
 
-const I = (ctx) => ctx.inputs ?? {};
+// ADR 0862 D5 (`WF-COS-11`) — config merged UNDER inputs. RFC 0013 Path A freezes a
+// chain's params into node `config`, and every node here is a builder-palette primitive,
+// so a value set in node config (`description`, `commitmentId`, …) used to read as
+// missing and fail `validation_error`. Inputs still win: a wired edge overrides config.
+const I = (ctx) => ({ ...(ctx.config ?? {}), ...(ctx.inputs ?? {}) });
+// …EXCEPT the three nodes that read their inputs as ONE upstream envelope (ingest reads
+// the fetch result's `{status, body}`, prepare reads `{action}` else the whole input,
+// confirm reads the send's `{status}`). Merging config into those would let a config key
+// masquerade as part of the provider response, so they keep the raw inputs.
+const RAW = (ctx) => ctx.inputs ?? {};
 const hashOf = (text) => createHash('sha256').update(text).digest('hex').slice(0, 32);
 const str = (v) => (typeof v === 'string' ? v : '');
 const numOr = (v, d) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
@@ -500,9 +509,48 @@ export async function enqueueAction(ctx) {
  * sources once deploy-gated Google MCP + agent dispatch are live; this node is
  * the deterministic, replayable floor.
  */
+/**
+ * Name WHY the provider refused, from Google's own error body, so the run, its
+ * notification and its recovery hint can say what to do. This used to throw one
+ * `upstream_unavailable` for every status with "the credential may have expired",
+ * which is wrong for the common case: an expired Google token is a 401, while a
+ * 403 means the token is VALID but lacks the Calendar/Drive scope (or the API is
+ * disabled for the OAuth project). Classified into the notification layer as the
+ * generic "Something went wrong", it re-notified every tick with no way to fix it.
+ *
+ * Only Google's machine REASON identifier is echoed (it must match
+ * `[A-Za-z_]+`), never its human `message` or any other body text, so nothing a
+ * provider echoes back can reach a run error or a notification.
+ */
+function providerRejection(httpStatus, body, sourceKind) {
+  const service = sourceKind === 'drive' ? 'Drive' : 'Calendar';
+  const err = body && typeof body === 'object' && body.error && typeof body.error === 'object' ? body.error : {};
+  const candidates = [
+    ...(Array.isArray(err.details) ? err.details.map((d) => d && d.reason) : []),
+    ...(Array.isArray(err.errors) ? err.errors.map((e) => e && e.reason) : []),
+    err.status,
+  ].filter((x) => typeof x === 'string' && /^[A-Za-z_]{1,64}$/.test(x));
+  const reason = candidates[0];
+  const has = (...names) => candidates.some((c) => names.includes(c));
+  const tag = reason ? `HTTP ${httpStatus}, ${reason}` : `HTTP ${httpStatus}`;
+  if (httpStatus === 401 || has('authError', 'UNAUTHENTICATED')) {
+    return { code: 'connection_reauth_required', message: `Google ${service} rejected the connection's sign-in (${tag}) — reconnect Google in Connections` };
+  }
+  if (has('insufficientPermissions', 'ACCESS_TOKEN_SCOPE_INSUFFICIENT')) {
+    return { code: 'connection_scope_missing', message: `Google is connected without ${service} access (${tag}) — reconnect Google in Connections and grant ${service} (read)` };
+  }
+  if (has('accessNotConfigured', 'SERVICE_DISABLED')) {
+    return { code: 'provider_api_disabled', message: `The Google ${service} API is disabled for this app's Google Cloud project (${tag}) — an administrator must enable it` };
+  }
+  if (httpStatus === 403) {
+    return { code: 'connection_forbidden', message: `Google ${service} refused the connected account (${tag}) — check the Google connection in Connections` };
+  }
+  return { code: 'upstream_unavailable', message: `Google ${service} could not be read (${tag}) — it will be retried on the next run` };
+}
+
 export async function ingestCommitments(ctx) {
   const a = ensureAssistant(ctx);
-  const i = I(ctx);
+  const i = RAW(ctx);
   const cfg = ctx.config ?? {};
   const sourceKind = cfg.sourceKind === 'drive' ? 'drive' : 'calendar';
   const cap = Math.max(1, numOr(cfg.maxItemsPerTick, 25));
@@ -524,7 +572,8 @@ export async function ingestCommitments(ctx) {
       throw Object.assign(new Error(`assistant ingest could not reach the provider: ${str(i.networkError)}`), { code: 'upstream_unavailable' });
     }
     if (Number.isFinite(httpStatus) && (httpStatus === 0 || httpStatus >= 400)) {
-      throw Object.assign(new Error(`assistant ingest failed upstream (HTTP ${httpStatus}) — the credential may have expired`), { code: 'upstream_unavailable' });
+      const r = providerRejection(httpStatus, body, sourceKind);
+      throw Object.assign(new Error(r.message), { code: r.code });
     }
   }
   const listed = sourceKind === 'calendar' ? body?.items : body?.files;
@@ -581,7 +630,7 @@ export async function ingestCommitments(ctx) {
  * (ADR 0024 Phase C/D). Deterministic — replay reproduces the same request.
  */
 export async function prepareActionRequest(ctx) {
-  const i = I(ctx);
+  const i = RAW(ctx);
   const action = i && typeof i === 'object' && i.action && typeof i.action === 'object' ? i.action : i;
   const kind = str(action?.kind);
   const payload = action?.payload && typeof action.payload === 'object' ? action.payload : {};
@@ -633,7 +682,7 @@ export async function prepareActionRequest(ctx) {
  * what flips the action to `failed` honestly.
  */
 export async function confirmActionSend(ctx) {
-  const i = I(ctx);
+  const i = RAW(ctx);
   const status = typeof i.status === 'number' ? i.status : 0;
   if (status >= 200 && status < 300) {
     return { status: 'success', outputs: { providerStatus: status } };
@@ -652,18 +701,6 @@ export async function confirmActionSend(ctx) {
 //    entry, so a replay/fork RE-QUERIES the graph and sees its state at replay
 //    time. That is correct for a read and is why they stay `role:"action"`.
 //    Thin wrappers over ctx.features.assistant.
-export async function listProjects(ctx) {
-  const a = ensureAssistant(ctx);
-  const out = await a.listProjects({});
-  return { status: 'success', outputs: { projects: out.projects ?? [] } };
-}
-
-export async function getProject(ctx) {
-  const a = ensureAssistant(ctx);
-  const out = await a.getProject({ projectId: str(I(ctx).projectId) });
-  return { status: 'success', outputs: { project: out.project ?? null } };
-}
-
 export async function listCommitments(ctx) {
   const a = ensureAssistant(ctx);
   const i = I(ctx);
@@ -781,8 +818,6 @@ export const nodes = {
   'feature.assistant.nodes.ingest-commitments': ingestCommitments,
   'feature.assistant.nodes.prepare-action-request': prepareActionRequest,
   'feature.assistant.nodes.confirm-action-send': confirmActionSend,
-  'feature.assistant.nodes.list-projects': listProjects,
-  'feature.assistant.nodes.get-project': getProject,
   'feature.assistant.nodes.list-commitments': listCommitments,
   'feature.assistant.nodes.list-decisions': listDecisions,
   'feature.assistant.nodes.get-meeting': getMeeting,

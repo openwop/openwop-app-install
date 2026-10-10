@@ -24,6 +24,21 @@ export const messages = {
   couldNotStart: 'Não foi possível iniciar {{label}}.',
   connectionHealthy: '{{name}} está saudável.',
   connectionNeedsReconnect: '{{name}} precisa se reconectar.',
+  // ADR 0780 — write authority, row scope, reconnect, status labels
+  changedElsewhere: "Esta conexão foi alterada em outro lugar. Atualize e tente novamente.",
+  revoked: "{{name}} revogada.",
+  readOnlyNotice: "Você pode ver as conexões deste espaço de trabalho, mas não tem permissão para conectar novas contas aqui. Você ainda pode revogar as suas.",
+  reconnect: "Reconectar",
+  reconnectLabel: "Reconectar {{name}}",
+  accountLine: "Conta: {{account}}",
+  sharingWorkspace: "Espaço de trabalho",
+  managedByAdmin: "Gerenciada por um administrador",
+  status_active: "Ativa",
+  'status_needs-reconsent': "Precisa reconectar",
+  status_expired: "Expirada",
+  status_revoked: "Revogada",
+  providerNotAllowed: "Este provedor não é permitido neste espaço de trabalho — um administrador define a lista de permissões em Governança.",
+  noConnectionsBodyReadOnly: "Nada foi conectado aqui ainda. Peça a um administrador ou editor do espaço de trabalho para conectar uma conta.",
 
   // OAuth consent card
   connectWithConsent: 'Conectar com consentimento',
@@ -80,6 +95,8 @@ export const messages = {
   callbackInvalidState: 'A sessão de consentimento expirou — tente novamente.',
   callbackMissingParams: 'A resposta do provedor estava incompleta — tente novamente.',
   callbackExchangeFailed: 'Não foi possível concluir a troca de token. Tente novamente.',
+  callbackSubjectMismatch: "Você entrou com uma conta diferente da que iniciou esta conexão. Entre com essa conta e tente novamente.",
+  callbackIssMismatch: "Não foi possível verificar a resposta do provedor, então nada foi salvo. Tente novamente.",
   callbackGenericError: 'Não foi possível conectar {{provider}}.',
 
   // Governance panel
@@ -203,6 +220,8 @@ export const messages = {
   vaultDeleteConfirm: 'Excluir o segredo {{ref}}?',
   vaultDeleteReferencedTitle: 'Este segredo está em uso',
   vaultDeleteReferencedBody: 'Referências ativas: {{refs}}. Excluí-lo vai quebrá-las.',
+  vaultDeleteUnverifiedTitle: "Não foi possível verificar o que usa este segredo",
+  vaultDeleteUnverifiedBody: "O servidor não conseguiu verificar o que usa este segredo. Excluí-lo mesmo assim pode quebrar algo que ainda o usa.",
   vaultDeleteAnyway: 'Excluir mesmo assim',
   vaultAddRefLabel: 'Referência da credencial',
   vaultAddValueLabel: 'Valor',
@@ -217,4 +236,18 @@ export const messages = {
   requireMfaTitle: 'Exigência de dois fatores',
   requireMfaLabel: 'Exigir autenticação de dois fatores para este espaço de trabalho',
   requireMfaHint: 'Membros cuja sessão não verificou um segundo fator são recusados até se inscreverem (Configurações → Segurança) e entrarem novamente. Membros de SSO cumprem isso pelo provedor de identidade. Chaves de API (credenciais de máquina) são isentas — rotacione-as se isso importar para seu espaço de trabalho.',
+  // ADR 0783 D1 — a connection as a workflow data source
+  dataSourceAction: "Fonte de dados",
+  dataSourceLabel: "Fonte de dados de {{name}}",
+  dataSourceLine: "Fonte de dados: {{url}}",
+  dataSourceTitle: "Fonte de dados — {{name}}",
+  dataSourceHint: "Os fluxos de trabalho deste espaço podem ler da API desta conexão, e gravar nela, pelos nós REST e GraphQL do Data Integration. Defina a URL base que eles chamam: as requisições ficam dentro dela, em um dos hosts de API do provedor.",
+  dataSourceBaseUrl: "URL base",
+  dataSourcePlaceholder: "https://example.service-now.com/api/now",
+  dataSourceSave: "Salvar",
+  dataSourceClear: "Deixar de usar como fonte de dados",
+  dataSourceSaved: "{{name}} agora é uma fonte de dados.",
+  dataSourceCleared: "{{name}} não é mais uma fonte de dados.",
+  dataSourceInvalid: "Essa URL base não é permitida para esta conexão.",
+  dataSourceFailed: "Não foi possível salvar a fonte de dados. Tente novamente.",
 } as const;

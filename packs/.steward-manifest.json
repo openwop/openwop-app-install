@@ -17,144 +17,144 @@
       "digest": "e07e960ea60a149e46a513e27d1842e4f22bbf2a85f7d2025560d68650b23d7e"
     },
     "core.openwop.a2a": {
-      "version": "1.1.0",
+      "version": "1.1.1",
       "files": 55,
-      "digest": "384a24eee10f1044d8ebae8956c1765f57d1c4a8fc7edfcbfa3703209c4a7238"
+      "digest": "d5a59c435cc67870192b87062262979b095461678c61ee5f89504c635df8789c"
     },
     "core.openwop.agent-examples": {
-      "version": "1.1.0",
+      "version": "1.1.2",
       "files": 9,
-      "digest": "e8344fc44de2882f72b823b0e2aa92c437678255e2b75e5756ebbe8c74c92d17"
+      "digest": "53b8d83a9f5c216f197c83549413b3ff02ba90d202001450db26b7b3ebe52ee1"
     },
     "core.openwop.agents": {
-      "version": "1.0.1",
+      "version": "1.0.2",
       "files": 40,
-      "digest": "c15c5ea578f25ef0cee4e524f44ed81d7506faf84206cfac017ad2ac55c839b3"
+      "digest": "1c03a53e00bc1a30e9b71931ca0e6e6a531bce4810fbf601935e2114c0973c11"
     },
     "core.openwop.agents.api-designer": {
-      "version": "1.0.1",
+      "version": "1.0.2",
       "files": 6,
-      "digest": "a7ca62d3d6aec7134f06d8127824f5ad7340f04e76b55d0ea9a12f7dc8d361a7"
+      "digest": "0c6c507e374f9b1dfd10b18b257f0f398cd798cecf0fbb1d682178ac0a037ee0"
     },
     "core.openwop.agents.audit-summarizer": {
-      "version": "1.0.0",
+      "version": "1.0.1",
       "files": 6,
-      "digest": "ad1e0fa2e81d1b3677886e12503cfbf16fe2021a4482f93c7b71e1329ac40397"
+      "digest": "be6cdd432d17506b95aec04ddd401f5ff35ed6da60951815bac11a8789b8a751"
     },
     "core.openwop.agents.classifier": {
-      "version": "1.0.0",
+      "version": "1.0.1",
       "files": 6,
-      "digest": "0da0ba52f764f92deca85c6f290c6bda0ea5ee23094b676043f9ff99ed0f89de"
+      "digest": "98268bd5bad0f1b93d58f351b3f95f70c4ac18985ff99299a784174fa51601e7"
     },
     "core.openwop.agents.code-reviewer": {
-      "version": "1.0.1",
+      "version": "1.0.2",
       "files": 6,
-      "digest": "2aeccf11ca86099aef5910c6a5bad67dcbf5a09da6ad7de971e75dd399986749"
+      "digest": "c49e5eab22c0b399738adfbe8379830c7262cfeb48eed2ceb60cad312637bbd8"
     },
     "core.openwop.agents.deep-research": {
-      "version": "1.0.4",
+      "version": "1.0.5",
       "files": 6,
-      "digest": "59f4a07a9a76bc020038a1395ab608d8eb66c6c0eb7a8c453ec079afa5de6e6c"
+      "digest": "b5c51386f4db9f2ea450fc3fa2dc27a4c2e1788aef42abe98cd07f1dd06dd3a1"
     },
     "core.openwop.agents.devops-crew": {
-      "version": "1.0.1",
+      "version": "1.0.2",
       "files": 12,
-      "digest": "7dc850a796e0c161e8178af4ff486d2f56c82fd4e7e40a3042a6f4efe8764a01"
+      "digest": "88c3999d144b6be1c9be964ad2020fd916f60717e696d9119032d260187eb7fc"
     },
     "core.openwop.agents.doc-writer": {
-      "version": "1.0.1",
+      "version": "1.0.2",
       "files": 6,
-      "digest": "7bf241e1c9e713abacc8d3c8fc9aa3ae44dab39276d2e70c5007748562146a66"
+      "digest": "9649bec469d26c12d3ae23331aaf767eb515108b7121a9571cbab870c21c255d"
     },
     "core.openwop.agents.document-author": {
-      "version": "1.0.1",
+      "version": "1.0.2",
       "files": 6,
-      "digest": "5375a4a3a6ea6240c0ea1f02eb1fbaab1f48f61afcaaf2512ddb08a47d060d91"
+      "digest": "63f0e7c8ebd91bf3a444e6887cc375affe5ea5d9747d4340613eba263d1e0d9c"
     },
     "core.openwop.agents.expense-categorizer": {
-      "version": "1.0.0",
+      "version": "1.0.1",
       "files": 6,
-      "digest": "3a625c92f2c6e375027252b9c0ebc2a4cee0e676ce1d6f944446fd0470082647"
+      "digest": "9108453f76917b6c49530a13cd5be5c9c5ca02010f91f2ef3bc6f4846f66d195"
     },
     "core.openwop.agents.frontend-designer": {
-      "version": "1.0.1",
+      "version": "1.0.2",
       "files": 6,
-      "digest": "9e2a773c001f0b2903aa43ad2321fa68a7c8b80895f8f8c0e220fe92bb172fbb"
+      "digest": "b17f6b323fd754d261b0d01e348fd1daf5cd6a57f35fbc7fe73fd739035ddf50"
     },
     "core.openwop.agents.git-author": {
-      "version": "1.0.0",
+      "version": "1.0.2",
       "files": 6,
-      "digest": "ae741a89e8b338e62f761d4b4346eea0a33c24479927cc552144c51144d80d7b"
+      "digest": "74d361e324f3152aebf9dfcc1af657d1fdae6f587c3145e0934bbdee619588df"
     },
     "core.openwop.agents.invoice-extractor": {
-      "version": "1.0.1",
+      "version": "1.0.2",
       "files": 6,
-      "digest": "14e61bfd3f8d5b5aee55db73e3cacb647e7b0c8a2310838ad2680400b3080d10"
+      "digest": "55a9d583e1161faea7206698b9dc87a56c53cacd13e3f698bb3174585cb4ad4f"
     },
     "core.openwop.agents.lead-concierge": {
-      "version": "1.0.0",
+      "version": "1.0.1",
       "files": 2,
-      "digest": "22cd832a5ca57a8fe0cde731f87688b5b2b863f0790feaa75eab46fa4f3f1f00"
+      "digest": "ee38ada4493191976aa31ceba8b5962a0d95a6a5b37fc721804b544ee4c8808d"
     },
     "core.openwop.agents.long-doc-summarizer": {
-      "version": "1.0.0",
-      "files": 6,
-      "digest": "5778e9738e75b2b175fe83014fdc660abbc313d0616166c1b7c3f7f9817ffbfd"
-    },
-    "core.openwop.agents.policy-reviewer": {
-      "version": "1.0.0",
-      "files": 6,
-      "digest": "318f72f1840358e7cad72d8da8a3bb83c459e25a969a53ddced4b346e42ade53"
-    },
-    "core.openwop.agents.react": {
-      "version": "1.0.3",
-      "files": 6,
-      "digest": "fe2f1893fb6ff84e2329d76942beeb085588249d4fbe43a68da2065f47959a0b"
-    },
-    "core.openwop.agents.research-crew": {
-      "version": "1.0.0",
-      "files": 15,
-      "digest": "b1de23f090b147e26545dd57ccdeec3bcc2375591b8f761617a676af88330c82"
-    },
-    "core.openwop.agents.sales-coach": {
-      "version": "1.0.0",
-      "files": 6,
-      "digest": "8639fc006119d8c235b95c8b6a020e5f156022a0b0578271e87ad4b236c788f5"
-    },
-    "core.openwop.agents.sdr": {
-      "version": "1.0.0",
-      "files": 6,
-      "digest": "7521f98bce591cccf7df6708af7cbb85fdc734b42bc741496e65d8f9dc5a8acb"
-    },
-    "core.openwop.agents.structured-extractor": {
-      "version": "1.0.0",
-      "files": 6,
-      "digest": "6a971256fd5c2687bb5169391346be6b566a69fecb1c5867dd3451236bc31446"
-    },
-    "core.openwop.agents.supervisor": {
-      "version": "1.0.3",
-      "files": 6,
-      "digest": "c87c3a0524e3a5b65c88267f97ebba94fd0ac280745ed2c8768aa173094aa89e"
-    },
-    "core.openwop.agents.support-crew": {
-      "version": "1.0.0",
-      "files": 12,
-      "digest": "15435c4b232afa50c3d6167af39a30379c194bda4dfea49f25c0fe0c90d1a0e9"
-    },
-    "core.openwop.agents.support-resolver": {
-      "version": "1.0.0",
-      "files": 6,
-      "digest": "7377a3a0cd1a6e6251630ff515b425407fe2365e383215b8c0b90470ac320e7c"
-    },
-    "core.openwop.agents.support-triage": {
-      "version": "1.0.0",
-      "files": 6,
-      "digest": "0faa087e85980c1a81d50821759e946b3c3117d53b2e6c3c74a26b402396843b"
-    },
-    "core.openwop.agents.test-author": {
       "version": "1.0.1",
       "files": 6,
-      "digest": "e194bc22f50e6241cf020a1093098e7cdda61db74999bb4a29ff39342203062f"
+      "digest": "2c28158f533fdac09414be0db255042b37f9000c8bf1e852fe8f846a31728bb9"
+    },
+    "core.openwop.agents.policy-reviewer": {
+      "version": "1.0.2",
+      "files": 6,
+      "digest": "10304b0c35aa1fb3f82b58bf8020713e4d93ed31a798b2ac5207f22914947836"
+    },
+    "core.openwop.agents.react": {
+      "version": "1.0.4",
+      "files": 6,
+      "digest": "6f994c388ca3c94d0c5302d2665022da92ee8cc452e0d04fc054b9d64e0db7b2"
+    },
+    "core.openwop.agents.research-crew": {
+      "version": "1.0.1",
+      "files": 15,
+      "digest": "9d574b890b450039fda6402400c22acc9e50bb296ae6aaa8d5e532017005e519"
+    },
+    "core.openwop.agents.sales-coach": {
+      "version": "1.0.1",
+      "files": 6,
+      "digest": "55f14c4ccf0cf063c2d30aa59e39bb4baf27a5974c93641c2d6496435bc7c6cb"
+    },
+    "core.openwop.agents.sdr": {
+      "version": "1.0.2",
+      "files": 6,
+      "digest": "fd0ddccba750cab28020861cf492d1b06a042b3e58812ea522385e8b230a9b34"
+    },
+    "core.openwop.agents.structured-extractor": {
+      "version": "1.0.2",
+      "files": 6,
+      "digest": "c7221e94e7e9ba13623a104b75edea069033afd62b5c94a1534c6e4f26b5e4e3"
+    },
+    "core.openwop.agents.supervisor": {
+      "version": "1.0.4",
+      "files": 6,
+      "digest": "7df3fa0bd88bb0a00df1e40e729fd6662a260daba332a1ffa991caa0cb535bcc"
+    },
+    "core.openwop.agents.support-crew": {
+      "version": "1.0.1",
+      "files": 12,
+      "digest": "ff8c842f842f12190310bac2feb0b91010e3dffa46f1874cc4299162be219d3d"
+    },
+    "core.openwop.agents.support-resolver": {
+      "version": "1.0.2",
+      "files": 6,
+      "digest": "ce5d3ab65641e9e3d363edf30fb5524ac7844e9f556c4b0f2fa05dc61f5ef0dc"
+    },
+    "core.openwop.agents.support-triage": {
+      "version": "1.0.1",
+      "files": 6,
+      "digest": "1de8b30cd03ae5ce46adc5b01820e5452a2e860f2200bfd084c937cec4dd34d4"
+    },
+    "core.openwop.agents.test-author": {
+      "version": "1.0.2",
+      "files": 6,
+      "digest": "2d7826db1630a13a566dfbffd81542dc6fe0caab95d579ac8edc784902871d3f"
     },
     "core.openwop.ai": {
       "version": "1.4.1",
@@ -167,34 +167,34 @@
       "digest": "f8cc8cb35e3e989574096457e0815736361dfda5d77a8964443d58f5961cbe6e"
     },
     "core.openwop.crypto": {
-      "version": "1.0.4",
+      "version": "1.0.5",
       "files": 43,
-      "digest": "2c8899b0ff632b3ee1805eb9e55b3a68c622766657bf821bc5ed27db665cf063"
+      "digest": "a859fc819f765229e5e99fa3bb6e2b4854e63b056600569bd11af7d0b4bcd636"
     },
     "core.openwop.data": {
-      "version": "1.2.1",
+      "version": "1.2.2",
       "files": 118,
-      "digest": "94877383df0304c9b58db90457dde541677566c5931a74c8515bf2312f14b702"
+      "digest": "6c69f544d628eaa7dc5a1977bcc6340c8c171cd2dbed9be3bace67a6e575384a"
     },
     "core.openwop.db": {
-      "version": "1.0.0",
+      "version": "1.0.1",
       "files": 40,
-      "digest": "6d33c3e4559ca1b7bf88f4ee855ea679aaf8c04127abfd0e85e41acea1714a0b"
+      "digest": "1e74f7ae4b8e7af8d18e37ee5f3c76b7a1efdb54bf5af541aabf41a2e0fb671b"
     },
     "core.openwop.examples": {
-      "version": "1.0.1",
+      "version": "1.0.3",
       "files": 13,
-      "digest": "107e04cf3601d2d84dd42dc3f46764b22c14bc91c30576a1e19834929f340a55"
+      "digest": "a6ab4a2654dec9497766ce560fa71d72580ae0b9cc65f357d496b49d2adfa971"
     },
     "core.openwop.files": {
-      "version": "1.0.0",
+      "version": "1.0.1",
       "files": 61,
-      "digest": "df474f21eab67ef84c5b57a79f8bb37074e86a4f7e57a837dd1be6a61403abec"
+      "digest": "dec32c5ef807b9fa271db932dc91cda7f8e589bd0ed502242152df7baa956524"
     },
     "core.openwop.flow": {
-      "version": "1.1.0",
+      "version": "1.1.3",
       "files": 79,
-      "digest": "17721b2128c4cf6012598b8895ce8e70959ebc5ba861af82ef2d90afd037480e"
+      "digest": "a3135a80973338f9b62d5b1b922db94b9df4374d8f5864540ca5ac4af41988fb"
     },
     "core.openwop.forms.starters": {
       "version": "1.0.0",
@@ -202,9 +202,9 @@
       "digest": "c7602d4a8b2c1506611cd0bbe5a8f7264f8e706f6fac652b441f887cc4fed846"
     },
     "core.openwop.hitl": {
-      "version": "1.0.0",
+      "version": "1.0.1",
       "files": 13,
-      "digest": "91d6206d5de43ab7ee2b3e28a02b462cfc6847b66525693eabb030068f932731"
+      "digest": "eca8d095e675b1b42bae9b81d4d146ac2350c43dcdd0e1ef585fb9d2c9135223"
     },
     "core.openwop.http": {
       "version": "2.1.1",
@@ -217,9 +217,9 @@
       "digest": "672e7f1231b913f974c7798cf1bf52fffa0e1ec074ce9c5ae6eba35a8ceffcc2"
     },
     "core.openwop.kanban-work-items": {
-      "version": "1.1.0",
+      "version": "1.1.2",
       "files": 6,
-      "digest": "1e8bd33952afc8ba10623b9d1b3826c58d90c8a165c734a8c3563d84d0704c49"
+      "digest": "5a65b14e6ffa470158ec6de4dd853c6036f58d2f86d47e0335fa42a28e4e8cfc"
     },
     "core.openwop.mcp": {
       "version": "1.1.3",
@@ -227,84 +227,64 @@
       "digest": "9af7396b57023f2aac52d8919d29cb42ed9082a707490fcf6093100ccb643706"
     },
     "core.openwop.messaging": {
-      "version": "1.0.0",
+      "version": "1.0.1",
       "files": 25,
-      "digest": "ac574dc4e7ae51961a7dd65a8eb81e776dab8e55d229214c68cb6f3382956f8f"
+      "digest": "04273d0eab47dba548fbbe1a66c75314cb730e75cd5ccc904bd6de75abc8a55b"
     },
     "core.openwop.obs": {
-      "version": "1.0.0",
+      "version": "1.0.1",
       "files": 25,
-      "digest": "07cfeed204b1ba455bd4f1e573dc7873babf3ff7cefd2884cd7aaeddd63759b4"
+      "digest": "b00d7b9e7ac646e8d442e7f6a8190cd97d8b232dadc14cad385587f7f418f9bb"
     },
     "core.openwop.rag": {
-      "version": "1.0.2",
+      "version": "1.0.3",
       "files": 43,
-      "digest": "5260b99140040d43bfe42233933645e2b3a8e1c9c20bef9524437e0656e35954"
+      "digest": "3916abdbe74eb1fae0a9bcd41333c46778f0e7bd38c73645909b961d3622c7c6"
     },
     "core.openwop.skills-bridge": {
-      "version": "1.0.0",
+      "version": "1.0.2",
       "files": 10,
-      "digest": "d99f78be12c79dc51825f59b09c7fdd4d81a9ead6e86716c3dec776e15fd1e79"
+      "digest": "5cccb6e46c0c59aef2619ee1e1387438c896d93b61ba8f92740fbdedcf1e1f84"
     },
     "core.openwop.storage": {
-      "version": "1.1.0",
+      "version": "1.1.1",
       "files": 64,
-      "digest": "41976a4d9fda3497750b942ae819769490e3d68c310bdd1bb7e0c152d8a04f89"
+      "digest": "27ac02a399e52ee59f84c2c256676daedf45d6b656d64ce089f7514c7de8e4c8"
     },
     "core.openwop.triggers": {
-      "version": "1.1.0",
+      "version": "1.1.2",
       "files": 52,
-      "digest": "1993b11fb06887c796465a58a716310eabe2f1ff97b8e585bed1bfa198eb58f7"
+      "digest": "fc622ae09cabe555a6d8e78fcbd6fa44547d73cbc9e0b246fb14c15ca40a868e"
     },
     "core.openwop.web-search": {
-      "version": "1.1.0",
+      "version": "1.1.1",
       "files": 7,
-      "digest": "b12f0bad9020ea7dc969533cf6c07c90363293d0e67b15ab21d537f039b52d8d"
-    },
-    "feature.accessibility.agents": {
-      "version": "1.0.0",
-      "files": 2,
-      "digest": "f2d5e8716bd2c6870ce9624d4f91ea854eb4fdb0feae30eabbaaf36a841fa2af"
+      "digest": "f306825706110357ede9c87be9712e3488e7c58b9dcce02e4ed155750d4c0f7c"
     },
     "feature.accessibility.nodes": {
-      "version": "1.0.0",
-      "files": 2,
-      "digest": "0ef0a38009d46de0565ae9786d9aeb2a30a8c97a57475f89e03f1c176a612f3e"
-    },
-    "feature.advisory-board.nodes": {
-      "version": "1.0.0",
-      "files": 2,
-      "digest": "77dec06707a25a5cfdbab97b27151938c7377333fa33eec50aa9b520c3eb73ac"
-    },
-    "feature.agent-author.agents": {
-      "version": "1.1.0",
-      "files": 2,
-      "digest": "19b792d578795b420780b6b4ea1eeef00345d562c7707573b1982a349bbb744c"
-    },
-    "feature.agent-author.nodes": {
-      "version": "1.1.0",
-      "files": 9,
-      "digest": "4615ea661d2215d6978366970ea069b1a38056ede13442035a5dd17e72f59c1a"
-    },
-    "feature.agent-knowledge.nodes": {
-      "version": "1.5.0",
-      "files": 2,
-      "digest": "594353fd6648b3dba6cd3b3a69ea3570fe82692f7db04ab6dffeaa9b6d12f0f9"
-    },
-    "feature.analytics.agents": {
       "version": "1.0.1",
       "files": 2,
-      "digest": "5fd078f22ee7d31a0fafe2717c1856ebfb8ff9383bc8cd6eba1d7ebc5f866bbf"
+      "digest": "3fd5638142dfdd57b386863f47c41cc4288730f34bd99dce72a0e7b4ad611d39"
+    },
+    "feature.advisory-board.nodes": {
+      "version": "1.0.1",
+      "files": 2,
+      "digest": "8a435ac6e4e28f6e0b7c4a3645723dfc5493c2c2c8224a99dcc2079e899b7e3c"
+    },
+    "feature.agent-author.nodes": {
+      "version": "1.1.1",
+      "files": 9,
+      "digest": "31d5cc2fa8972c935712a8e1d8a8af0e25423fbd51d6a797561a360d2dfb7012"
+    },
+    "feature.agent-knowledge.nodes": {
+      "version": "1.5.1",
+      "files": 3,
+      "digest": "f7c2409f7fd63a3c16ca3594ff12c1cd379e1706bb1337fbba153378c2bf7401"
     },
     "feature.analytics.nodes": {
-      "version": "1.1.1",
+      "version": "1.1.2",
       "files": 2,
-      "digest": "200721b11c7f72a7dff8776919e0bc5c2afac803ea4d609e1eb915b6cbde8ca8"
-    },
-    "feature.app-builder.agents": {
-      "version": "1.3.1",
-      "files": 2,
-      "digest": "574031420fc3a37a92a446a5fdb8f1bb8f1daced6cd47a306c3943ef303de327"
+      "digest": "d5ed609c301542ecbf33f6bab901457664958d8bde43a6fd6111475ad2fcafb7"
     },
     "feature.app-builder.artifact-types": {
       "version": "1.1.1",
@@ -312,49 +292,29 @@
       "digest": "096e9a47959f1c000a82571822539ed5c1349d734ff3556e4b4f47a424699745"
     },
     "feature.app-builder.nodes": {
-      "version": "1.9.0",
-      "files": 2,
-      "digest": "83d32232608fdeebe305a421b043c158c110bbe5c02ac70f65fc17181cbf5445"
-    },
-    "feature.assistant.agents": {
-      "version": "1.0.3",
-      "files": 4,
-      "digest": "1d947bc4c09c8f71b3dfd09ddd3f50f6a8c269ee83af4d0052a8a1a156dd19a0"
+      "version": "1.9.3",
+      "files": 8,
+      "digest": "0357ed1bdb42c4fed29d2ad58ba24998941eee557ea0d242c9402e0f26f36bd6"
     },
     "feature.assistant.nodes": {
-      "version": "1.4.2",
+      "version": "2.0.1",
       "files": 2,
-      "digest": "b7a402c15b69ac93e113107623a2e7b63ef99b340d57c6783d1e421f6c39c1be"
+      "digest": "a35555fd5c73c219756d7cda6cdea1db976649d83952da6c02a95ccf2113156f"
     },
     "feature.bi.nodes": {
-      "version": "1.0.0",
-      "files": 2,
-      "digest": "a3b89ad6d7abc12fc43b61d754021ad67ab6b6ecbc6f4981ce7532b64d6896fc"
-    },
-    "feature.brand.agents": {
       "version": "1.0.1",
       "files": 2,
-      "digest": "5b7f19c28f2c503bd8f2af1bf7ff105f40ac29dd281ce9fea96cde61c0313acb"
+      "digest": "7c024530cb17f4e46af45ed22fa905505ba318d1fcd2220cf2398834b8862b40"
     },
     "feature.brand.nodes": {
-      "version": "1.2.0",
+      "version": "1.2.1",
       "files": 2,
-      "digest": "b6396e900a09a63bf6be3a097436a7a46a070376ea2b2d2863ea9abcbfa70131"
-    },
-    "feature.cad.agents": {
-      "version": "1.5.1",
-      "files": 2,
-      "digest": "831a349b4dc74b00e0d7aa1377f72fc1f1a304a1fbbff00d38b1c20f633e9edf"
+      "digest": "9f65806b9857a4cd742a840da0dc005f0779070ffbc779d78efcef4a30ca9b02"
     },
     "feature.cad.nodes": {
-      "version": "1.6.0",
+      "version": "1.6.1",
       "files": 2,
-      "digest": "edbe204e760160d22b2c87c198f775d634ec643dfe4921d93684d3788d689670"
-    },
-    "feature.campaign-brief.agents": {
-      "version": "1.3.1",
-      "files": 2,
-      "digest": "4a7f2dd3c30f86a7d77ca2468fd7eccbe73c6ae7233ce9310eb71bdf9f0724c9"
+      "digest": "de337885ef410e4593b5518cac7014eb2b57946f306ecbacd5567947c7a0e749"
     },
     "feature.campaign-brief.artifact-types": {
       "version": "1.0.0",
@@ -362,694 +322,734 @@
       "digest": "3f3dcee36f596797314bf9a514d1663016d992051e7d38d3f7893bb795fc9410"
     },
     "feature.campaign-brief.nodes": {
-      "version": "1.5.0",
+      "version": "1.5.2",
       "files": 2,
-      "digest": "d1985f30af6e944a232ce3196875099a765fbb9f5007e7b2826d2992f9db8c74"
-    },
-    "feature.campaign-channels.agents": {
-      "version": "1.2.0",
-      "files": 2,
-      "digest": "80c7e108899ab527974a4357ad8cf189d196ca42c236ee8e3c0678a9a84fc8ec"
+      "digest": "33e67a6510cafd6db6144b9a5047f3f4d8869041f680076ae8d41925fd677152"
     },
     "feature.campaign-channels.nodes": {
-      "version": "1.12.0",
+      "version": "1.12.1",
       "files": 3,
-      "digest": "19bc29b90da22255347a5597e659fb5542439188126261b735521b35e054c00d"
+      "digest": "4474be71b9cab2a15417baaa4f8ed67c6046269265575f2c3b759e56ef38ea55"
     },
     "feature.campaign-connectors.nodes": {
-      "version": "1.2.0",
-      "files": 2,
-      "digest": "18811b58d0c759e2989ab0be66547e9112dce751a1d4db02d6cecee410d8b6e0"
-    },
-    "feature.campaign-intel.agents": {
       "version": "1.2.1",
       "files": 2,
-      "digest": "1f820eb318fcb63f7c0ad185e36763867c07721cd32120208a0703cdeed00d84"
+      "digest": "2159daec9029c3ae33fb5d120d78fb82515c15aa304d38d0e85412dd7792b6e5"
     },
     "feature.campaign-intel.nodes": {
-      "version": "1.1.1",
+      "version": "1.1.2",
       "files": 2,
-      "digest": "881d5880eefb2f0730196ba3ed19e755fcd72140f9eee4fd6d8076bb22ecd12e"
+      "digest": "e5d9ad9eeda9de4ae4c896c7364d4ea30d0343f0d3399c6cbd4033c5d6a54896"
     },
     "feature.campaign-journeys.nodes": {
-      "version": "1.3.0",
+      "version": "1.3.1",
       "files": 2,
-      "digest": "15d692b39c925ac1c7c70f863d6f9b9371c5935390ff2f1ecc576356f9db663c"
-    },
-    "feature.campaign-orchestration.agents": {
-      "version": "1.2.0",
-      "files": 2,
-      "digest": "25d01619168ffad4aef341b8e6998944268bafb10a7f4141acff2d8782821bf5"
+      "digest": "1cd4b7ccdfb0b23056375fec3d33f77bfb0823a01f4c887e645ce308d0d20d93"
     },
     "feature.campaign-orchestration.nodes": {
-      "version": "1.1.2",
+      "version": "1.1.3",
       "files": 2,
-      "digest": "4a2f7d9f41280566cc41c44b3f318a232a892a2a0c16e88feb95b572a5a20902"
-    },
-    "feature.campaign-studio.agents": {
-      "version": "1.0.2",
-      "files": 2,
-      "digest": "7db52bfe039dadbd23ff6720ad87bb590e3ccf39a7346beac0b3ec2874860888"
+      "digest": "ccc040233b626b986022e179636abef4cbbcce0cc66e9185d3e5f5b6fcb85b4c"
     },
     "feature.campaign-studio.nodes": {
-      "version": "1.0.1",
+      "version": "1.0.2",
       "files": 2,
-      "digest": "dbd0a68053de62cfe24f6c7c56a71c20724852c44acb55dac2a592f9b18189c1"
-    },
-    "feature.career-agent.agents": {
-      "version": "1.0.0",
-      "files": 2,
-      "digest": "d5f8bd43ac16c83eeb77aa59384c7393f704994aeb1e74ac58db1858787a18da"
+      "digest": "21e9bbcf9373f7c002bacb5b535b6cf330103e76cf6fb99fc21ab5bfeb31d293"
     },
     "feature.cdp.nodes": {
-      "version": "1.1.0",
-      "files": 2,
-      "digest": "84685122d39f2ab7b726e2745890216a0cbd383c90901dbdd12051a3e54928d7"
-    },
-    "feature.cms.agents": {
       "version": "1.1.1",
-      "files": 3,
-      "digest": "df6320f9e9dbbe4af8de8f7d7df26d40d82376076aaaa2cd9f93e0584a362cd9"
+      "files": 2,
+      "digest": "ab9c90185997b9c01f593800f365f95269a18cba5fc77c45efb16c2a2e9e8ac5"
     },
     "feature.cms.nodes": {
-      "version": "1.5.0",
-      "files": 2,
-      "digest": "52dc5379af516edb975b878dd9b24a1265132c3c0b7a240bf28fb5153dfcec52"
-    },
-    "feature.code-exec.agents": {
-      "version": "1.0.0",
-      "files": 4,
-      "digest": "19e217163c746e494d04a17f8687598aef86e347654f774dcc549745fba35dc3"
+      "version": "1.5.1",
+      "files": 3,
+      "digest": "301e7436127fb7128a70db4743aa5847f46f481ea96d061a585f323b76a37918"
     },
     "feature.code-exec.nodes": {
-      "version": "1.1.0",
+      "version": "1.1.1",
       "files": 2,
-      "digest": "8506ab70252f9cf877328c7494e7dec5cf1cd8fee2f5e4fe644345acc4e5c790"
-    },
-    "feature.comments.agents": {
-      "version": "1.0.1",
-      "files": 2,
-      "digest": "81af96c06f6c776cb92e65168fc2c5c7e4bff957b0f6613f87e07323bbb6eda4"
+      "digest": "3c5e8882798f78ce43b5dc9e92c2c5e6dadcbe7396db9f0177a5e037bc285fd0"
     },
     "feature.comments.nodes": {
-      "version": "1.1.0",
+      "version": "1.1.1",
       "files": 2,
-      "digest": "f5dd958e680102e1b4fddea94394a7dd32df5fce37a3667eb39fe937503afb24"
+      "digest": "2b1edd5609146e82a54f4328449e63f4b4ffd69261cb7ea08959b8bf7cabd52f"
     },
     "feature.commerce-connect.nodes": {
-      "version": "1.0.1",
+      "version": "1.0.2",
       "files": 2,
-      "digest": "7cb35d56cf6abc8733c3d1c90c7b2536439fd9ea8e085f6e801b2b6a867cadf2"
-    },
-    "feature.commerce.agents": {
-      "version": "1.2.1",
-      "files": 2,
-      "digest": "0782d98a23b9e88bc958d98eb16f8e32cbe544cc7ee9bef9eba2722c9ed7dcab"
-    },
-    "feature.commerce.buyer.agents": {
-      "version": "1.0.3",
-      "files": 2,
-      "digest": "6313c4c8f1f539808f001a5c37e8e14f06bb6a6ae187a6f67834ee84b3c6ff4b"
+      "digest": "fcc40301b35a0ac4343b55e88ff8f6a8bbb3e35b8cfb4db7a596f864f81a75ed"
     },
     "feature.commerce.buyer.nodes": {
-      "version": "1.1.2",
+      "version": "1.1.3",
       "files": 2,
-      "digest": "b8284565c20c4b80b3a62c2647a2e2d1415de9112f2b75eff644a83110f4c707"
+      "digest": "083ab3b6a559705cdeb3fc3421d30b561aab6b6d0f3b8e968ef2528ebd057031"
     },
     "feature.commerce.nodes": {
-      "version": "1.3.1",
+      "version": "1.3.2",
       "files": 2,
-      "digest": "5bd216c7e39ae6beca1d071f95e7eee49eb82f7a2018709b1264a36fa44b11e8"
-    },
-    "feature.computer-use.agents": {
-      "version": "1.0.1",
-      "files": 2,
-      "digest": "3d95784dcc9d6a71595d7c0daff72bc90041dcd865e6e749c76d18651fe5ba0c"
+      "digest": "dc2309cf63660c7b222aa1c751e025f9d5e66f74a77e44c96edb27ffd085f886"
     },
     "feature.computer-use.nodes": {
-      "version": "1.0.1",
+      "version": "1.0.2",
       "files": 2,
-      "digest": "daee1431760eb4798477cfb0d40706c120a9017b1cf6c069160ad6b07be81dee"
+      "digest": "baf5bf101ef82353a2bf62a050b69e8d78021c2805bc964031c78be367f92c13"
     },
     "feature.consent.nodes": {
-      "version": "1.2.0",
+      "version": "1.2.1",
       "files": 2,
-      "digest": "e7da2f585925567311868b963d151d8ecdb3693991f62080f2289a4f7e6fe497"
+      "digest": "c8b9db9fe456597d016ec1dc35d39c864b590d89c23197408dab4af8f77f8647"
     },
     "feature.creative-briefs.nodes": {
-      "version": "1.2.0",
+      "version": "1.2.1",
       "files": 2,
-      "digest": "e8b838d1b32b76108b3db7411a01ee3c8a80d95160dbdf239d59f3751458dcd0"
+      "digest": "eb28fd3961480edcaf1dd16ac2b847470e160fbe6803a18288c455487b7e4c26"
     },
     "feature.creative-video.nodes": {
-      "version": "1.1.0",
-      "files": 2,
-      "digest": "1a8643a5b611a58f0da39cc47b16c464cf5583cd237b04e323315ef7fe6cdbff"
-    },
-    "feature.crm.agents": {
       "version": "1.1.1",
-      "files": 3,
-      "digest": "91f02b2aac181058e5c3e59cfc0c6ca039f1180d897850ed0d36e0e58f453906"
+      "files": 2,
+      "digest": "69f61451eb85477a71067e8db3a7ba25581dd69745d60ad2445a89ece7535613"
     },
     "feature.crm.nodes": {
-      "version": "1.10.0",
-      "files": 28,
-      "digest": "95859d2f5c4df50c8de0c77b130bcc3855e3ebb759fcd2dd46af48849931093f"
-    },
-    "feature.csm.agents": {
-      "version": "1.2.0",
-      "files": 2,
-      "digest": "adc680685b10404fce2301ed665bc23d0a2fbfdbd618e13d18b519d727148338"
+      "version": "1.11.0",
+      "files": 33,
+      "digest": "bb93f76130fec7090b44bb8611eae1c9dc5175f79e308a3912ab2d0d9647ba04"
     },
     "feature.csm.nodes": {
-      "version": "1.4.0",
+      "version": "1.4.1",
       "files": 2,
-      "digest": "8f2fa5564d89d11955408105c52fac467c4496ecc3c7300d1c212a1672ebd35a"
-    },
-    "feature.dealers.agents": {
-      "version": "1.0.2",
-      "files": 2,
-      "digest": "37226eb152079dff41727b3a542ec53dd51ec3e8e6ee61f013a355173ddd13b2"
+      "digest": "96b4102a10f476579d59e452ed6a12d52a041b020bd6cbf3a3dc1c570ddb0000"
     },
     "feature.dealers.nodes": {
-      "version": "1.0.0",
+      "version": "1.0.1",
       "files": 2,
-      "digest": "2a187810609abaf016e6e84183f17ebab00ee585a435cf22d0b81357a094172c"
+      "digest": "5f6099a3e3debb65f981a334ab75242adc4f43ae5bcbacc6fa7ebd06a2c040f8"
     },
     "feature.destination-sync.nodes": {
-      "version": "1.0.0",
+      "version": "1.0.1",
       "files": 2,
-      "digest": "4d1fa2bd285bfa4024093c933e6695d650a1afedafc74fa4ed9085b70f76f9a6"
-    },
-    "feature.discovery.agents": {
-      "version": "1.0.2",
-      "files": 2,
-      "digest": "497aff7ea4f51bcf561f351912d3747debc641c1661cac8b5b135545627cc87d"
+      "digest": "b230801f8fcabc873945d0b565cd312e87d8cba18e5d04a62bc2645dc4a0dec8"
     },
     "feature.discovery.nodes": {
-      "version": "1.0.0",
+      "version": "1.0.1",
       "files": 2,
-      "digest": "baaeca335bca29662b99a1cd2a451f5af6852079258af0517774267b8ab195e1"
+      "digest": "6c5ecb36d423b32395c1e638bb03b0b4b53dddfca449e775e64d366b70718432"
     },
     "feature.docs.nodes": {
-      "version": "1.0.0",
+      "version": "1.0.1",
       "files": 2,
-      "digest": "d164fce4bf1c5c652db78abdc50c650d33b47a36473786e74449af73593937bf"
-    },
-    "feature.documents.agents": {
-      "version": "1.0.2",
-      "files": 3,
-      "digest": "5df8c34e25d6a61a8724b4ce93483c0116df636565040b838c73ff1d859f926d"
+      "digest": "dfa42c415d0bae7e7ca2485562b1d9f9a41af834f5c422aeed3661be66724bf4"
     },
     "feature.documents.nodes": {
-      "version": "1.3.1",
+      "version": "1.3.3",
       "files": 2,
-      "digest": "9f15e54aed017195b596855ed4a1d08edf57cb5d579c0e42afd6a3c700058ccf"
-    },
-    "feature.drawings.agents": {
-      "version": "1.0.1",
-      "files": 2,
-      "digest": "6a247985b046e730113d094bedcb0035988489563dc23b1371ecb6e222b2a05e"
+      "digest": "24a31c78818b2188af4a07e73d9cd92059cdd5899f47b1201fdd8972fcf96188"
     },
     "feature.drawings.nodes": {
-      "version": "1.0.0",
-      "files": 2,
-      "digest": "88542f6ea357df5fbad3a9b07f8dd657b7f6149a9a2593a91b3e9388c823a4af"
-    },
-    "feature.email.agents": {
       "version": "1.0.1",
       "files": 2,
-      "digest": "417e703809e5f3d553aa709da5e46d83b84d96da1954d669a54763540c8029da"
+      "digest": "6bb08d7d6a0cb612ba3ed21aa0bb90782c927565ba7d960191b9e9a46b7e449f"
     },
     "feature.email.nodes": {
-      "version": "1.2.0",
+      "version": "1.2.1",
       "files": 2,
-      "digest": "057b677532d429e7735015b0875e67e823fa014c96d32c6e9be34761ff89b011"
+      "digest": "7c1aefd917fe56003abd324b5aadac6bbfddb9afc990a082055b6a8b9554256a"
     },
     "feature.entities.nodes": {
-      "version": "1.1.0",
-      "files": 2,
-      "digest": "fb68a94f15e2d3ca4f588920fd75ccfde1be356640c21456d7aedeabc27f01aa"
-    },
-    "feature.forms.agents": {
       "version": "1.1.1",
       "files": 2,
-      "digest": "8f0acf682a9506ec5a49235bba15f36bdbfee5a81664b2c8def2f7b219faec38"
+      "digest": "de958ce50be66f2289faa42d3f405473cd2423339979ef8481fba83e06b227bd"
     },
     "feature.forms.nodes": {
-      "version": "1.2.0",
+      "version": "1.2.1",
       "files": 2,
-      "digest": "b1aa73bc39e810433fabbe8492fb0c88e0f0012d234f516b40b0423b825d520c"
-    },
-    "feature.funnels.agents": {
-      "version": "1.0.1",
-      "files": 2,
-      "digest": "a4e5c813b1979f7d02df08a8badb3fe400a31ac6e34e7c64ab94ea9cdbfd62b8"
+      "digest": "29e1b6fa4e15e344314911a8d4c04993030cef7b1e79c32586072c9a2616951a"
     },
     "feature.funnels.nodes": {
-      "version": "1.0.0",
-      "files": 2,
-      "digest": "08ead75fd296e17a1444c9106dec0f4f034585eea1245b76aa47e5ce606cc6d6"
-    },
-    "feature.image-gen.agents": {
       "version": "1.0.1",
-      "files": 4,
-      "digest": "2aa550ca00a51113bb7c526fd33db800c3f66a792582fc5b286350fd8bca20f8"
-    },
-    "feature.insights-suite.agents": {
-      "version": "1.1.1",
-      "files": 4,
-      "digest": "c24013cac33daa9ef4fe4b5c87bcb88c3de4528f2d6a5a61d4f8057d421ac34c"
+      "files": 2,
+      "digest": "8d95ca453de7489a97ec68796d7bf768452a653bb8121cb399e95c6ff34ad4d5"
     },
     "feature.insights-suite.nodes": {
-      "version": "1.2.0",
+      "version": "1.2.1",
       "files": 2,
-      "digest": "4f427bf27de7275d5789da401e147071fab542560fcf7a9c017f67eba68fe233"
-    },
-    "feature.interactive-artifacts.agents": {
-      "version": "1.0.1",
-      "files": 2,
-      "digest": "a644b3960725351b4daf4e6d816192ee27740e06949bde99d1a514ade9c0b919"
+      "digest": "27c22aef2e9a1a2fd666be28324068068653471804ceb7257b017dc2d9981770"
     },
     "feature.interactive-artifacts.nodes": {
-      "version": "1.0.0",
+      "version": "1.0.1",
       "files": 2,
-      "digest": "5797417dad4aa4ab4b657216c09510540b9afc3643a78e985875bfefaa3f6b59"
+      "digest": "1e472b194cb5875a9a2c296073d714d08347e1be7c085e43ce86e09264e550a8"
     },
     "feature.job-search.nodes": {
-      "version": "1.1.0",
+      "version": "1.1.1",
       "files": 2,
-      "digest": "a19ef2124aa988daff80953d3043f5b817e70cc5d9d38842b15a3c626e6adc99"
-    },
-    "feature.kb.agents": {
-      "version": "1.0.1",
-      "files": 2,
-      "digest": "3cd16d32fa71f228de416b914804b5c3bb28e62b217de831b756443cbee6cfe2"
+      "digest": "a9eb636f5cfad883d0968e34414d5dc9c7d06475780dbfcd0b9f5458d322dd1c"
     },
     "feature.kb.nodes": {
-      "version": "1.2.0",
-      "files": 10,
-      "digest": "e98c54883bbdf2d9f67f58a410a17dbf40b4c5925fbd6ddfe78425fcd8036bcb"
-    },
-    "feature.kicktodo.agents": {
-      "version": "1.9.0",
-      "files": 14,
-      "digest": "cf6e0bb1c11dbaa0c875aeebde11694b3dbdeffccedf9bdf3a09e700ec5ada1f"
+      "version": "1.2.1",
+      "files": 11,
+      "digest": "c506fc002f0dfa84a69b8758cd7c62d316f5e337d15b241159391cfddac7a5ea"
     },
     "feature.kicktodo.nodes": {
-      "version": "1.30.0",
-      "files": 2,
-      "digest": "d88c129929981efbc8a1abf71328820b05351b3363366863a8abe7c4a68bb657"
+      "version": "1.30.3",
+      "files": 41,
+      "digest": "ee1fb0c8660e3863c0d82d1f6b25c6f5c2e86f77755ea989d9ebdcd41a9c939f"
     },
     "feature.knowledge-sync.nodes": {
-      "version": "1.0.0",
-      "files": 2,
-      "digest": "8d843455b4f5020c53f04c87611a6fafe080fedfd2bf7b4b54ff2995c9ee6ec3"
-    },
-    "feature.marketplace.agents": {
       "version": "1.0.1",
       "files": 2,
-      "digest": "e6ae5ba5290894a4d16f382f173b31c21f6ee6efc9df96ca088f69e5109f0609"
+      "digest": "6d50608f59dfe2fc66369ecfda4ca4135f81f5abbc0dbbe3e83aaabff575f27e"
     },
     "feature.marketplace.nodes": {
-      "version": "1.1.0",
+      "version": "1.1.1",
       "files": 2,
-      "digest": "ddc491a2da9128d087b3073cddf6159d52f002b88497e80a0390d88718ec100a"
+      "digest": "895c7172e125e1a7eda88234b418f3093ee8f886a4d67524dd41a207388624ea"
     },
     "feature.media.nodes": {
-      "version": "1.0.0",
-      "files": 2,
-      "digest": "fa632b2510b0da4167df3b93fc360e9041124f79f9bef596185c2abbf83d0152"
-    },
-    "feature.notebooks.agents": {
       "version": "1.0.1",
       "files": 2,
-      "digest": "23aad53aee22a4fc51e606ea86aa9414d6c11e3785cd9d49f85635aa7e8ce065"
+      "digest": "bed91ac9e392acc9469a52c206c38633175f790dc34d214a589a8cb161f4e1d8"
     },
     "feature.notebooks.nodes": {
-      "version": "1.1.0",
+      "version": "1.1.1",
       "files": 2,
-      "digest": "09149aeebe749878caf2127456e97c0932a6f9fdec06c4222d8bea97ac811a05"
+      "digest": "766509c76a0076920812a7dbefc0c1ccd25f2643ff524a7f82c14ecab8ae8358"
     },
     "feature.notifications.nodes": {
-      "version": "1.0.0",
+      "version": "1.0.1",
       "files": 5,
-      "digest": "4c7ce9e4adc5ee7c76c0d05fc9c0775b87d987e53451b09b024f9150b96b56b2"
+      "digest": "940c60e90964864ed3f02508f4865a152e63794a84dc6afdac5d82db7cd7e3b6"
     },
     "feature.orgs.nodes": {
-      "version": "1.0.0",
-      "files": 12,
-      "digest": "a1709a04d2b07bd1d896ca5885636f03dccd3e09a8dcd6686f35d81a9f9832c6"
-    },
-    "feature.podcasts.agents": {
       "version": "1.0.1",
-      "files": 2,
-      "digest": "e177afa511eec5021da5473698a5ab84b576b9b0f3540ee6292aeff6c8c22a5a"
+      "files": 12,
+      "digest": "3e7a5c01c1b007cd21afc0a320891b77a80cafce1f9442bcbf3855fc4a5ccb65"
     },
     "feature.podcasts.nodes": {
-      "version": "1.1.0",
-      "files": 2,
-      "digest": "391b12ac477eaccb9b3e662860ff4e3cbe078564aaba6cb98fe84263875fbbcf"
-    },
-    "feature.priority-matrix.agents": {
-      "version": "1.0.1",
-      "files": 2,
-      "digest": "ddc3c883d5abeb42d08685c9ce7a7b1bb0db6edba8d049dd9b42cbf19325a796"
+      "version": "1.1.1",
+      "files": 3,
+      "digest": "13f1e17d8a549a8dc5c2c6a98dcf8c5143fe84b2a58f1415fc3201d1aae8a8e6"
     },
     "feature.priority-matrix.nodes": {
-      "version": "1.5.0",
+      "version": "1.5.1",
       "files": 2,
-      "digest": "ec6e7c64b7560ee1924c0b613c3869f450baf5471a95d2b1d721c6417eb24ec7"
-    },
-    "feature.production.agents": {
-      "version": "1.0.1",
-      "files": 2,
-      "digest": "322d4088c0ffc3b20122ab0c985ba8f9023715a92921d2d25045ba67c55966de"
+      "digest": "88e45fe5032c23b93d01b0cd303fc1803028b944eee9dd078d4a70579c3065aa"
     },
     "feature.production.nodes": {
-      "version": "1.1.1",
+      "version": "1.1.2",
       "files": 2,
-      "digest": "54011c4eae43706e0b9c35c4a29c5f48ba4b7c3122d47f409f409e2ee619e9f9"
+      "digest": "33e2dab35880031d985485ec22ce923182598127c9cc568debb06d34b4683018"
     },
     "feature.profiles.nodes": {
-      "version": "1.1.0",
+      "version": "1.1.1",
       "files": 5,
-      "digest": "5f84be73df177bef1d4b1ee45c4594825528cfc48208bb4a220680eb9b599342"
-    },
-    "feature.promotions.agents": {
-      "version": "1.0.1",
-      "files": 2,
-      "digest": "104eaa4cf9ec21088be43b98b6b5fe62268897ed55295ff20714ada98a95061b"
+      "digest": "fc5806d6c21fb4e2f0becbd0b2e1deca70dad0bcf4bdd303d540033c059ab8e0"
     },
     "feature.promotions.nodes": {
-      "version": "1.0.0",
+      "version": "1.0.1",
       "files": 2,
-      "digest": "7141b59f72f232bca83d5d98ed93c1ac54c670427745138cbbfdb744ae787942"
+      "digest": "650cb2975558231e9cf2959f3fa0b5a26879c7394628bd22da4e8424dcc937b9"
     },
     "feature.prompts.nodes": {
-      "version": "1.1.0",
+      "version": "1.1.1",
       "files": 2,
-      "digest": "6e7afa3d9cbc6d5ca013ce86d7b5730d2a4837e66bc613dbc6310935230871b2"
-    },
-    "feature.recommendations.agents": {
-      "version": "1.0.1",
-      "files": 2,
-      "digest": "1de1ddf87a343e995cb6bd9a561c3dbbc69766147f68c6a5fc64e6e17717c6cf"
+      "digest": "8f24637130961f5ac6bc37da894d547b71d3c0e216ef4d1aa582b6c7d52c333d"
     },
     "feature.recommendations.nodes": {
-      "version": "1.0.0",
-      "files": 2,
-      "digest": "abc115b117ece9282702b5226c1c287c3b9bef7180fb5501ca6c1be98d74e992"
-    },
-    "feature.sales-commissions.agents": {
       "version": "1.0.1",
       "files": 2,
-      "digest": "6593a85013336816e7a2ddd70a89377b1328108a9698bf956aadc3f8ba9c9f33"
+      "digest": "fc568f352e5334ba59628c3e79a9ae447c521f4022ebc3d4fd57839e6ce13874"
     },
     "feature.sales-commissions.nodes": {
-      "version": "1.1.0",
+      "version": "1.2.0",
       "files": 2,
-      "digest": "250efbd6f5969c1781bf5c4f42596be579583fcd91a70d2f0498591c3f64a1fe"
-    },
-    "feature.service-desk.agents": {
-      "version": "1.0.0",
-      "files": 2,
-      "digest": "e4e951a7af5747998e4641c78516c8a159232f69931421c09e59dc008d4f919b"
+      "digest": "97feb3423190702869ace20b014bc59eb253627a213d31e3970bda8598ac9fa4"
     },
     "feature.service-desk.nodes": {
-      "version": "1.0.0",
+      "version": "1.0.1",
       "files": 2,
-      "digest": "fe2e8cb0e7028acff9001b71aa0d5f62c59ab870e127d00bb921c57f046d636c"
-    },
-    "feature.slides.agents": {
-      "version": "1.1.1",
-      "files": 2,
-      "digest": "12d339d8d2a12d02236b2913b84784316ad0a349205b6b24159d96750f8823ce"
+      "digest": "61cbc5a186dc9bb6fda98d53d555397a74606e3f88a94eb0e768299ff5ac0128"
     },
     "feature.slides.nodes": {
-      "version": "1.1.1",
+      "version": "1.1.3",
       "files": 2,
-      "digest": "58368a3752ae63cf173a50b7fe53087edf54e5c629fab7307fffa3a48911404b"
-    },
-    "feature.strategy.agents": {
-      "version": "1.0.1",
-      "files": 2,
-      "digest": "0b9f236d34d6950fbab861a1e8fc48b437986962822f620e54f886525c45161f"
+      "digest": "93198d6b1f23e49f1ab33225aa77eb2c3048ae7b6f034553eec22372b63e3926"
     },
     "feature.strategy.nodes": {
-      "version": "1.3.0",
+      "version": "1.3.2",
       "files": 2,
-      "digest": "a232dc8b3f9ee35df079e05041984e13ff82e9887fbcaa032cf6f69cee246de2"
-    },
-    "feature.territories.agents": {
-      "version": "1.0.2",
-      "files": 2,
-      "digest": "0695736e50b103acc14bc2f0f5ad44967a48ece0d04803dea554eaefc543250c"
+      "digest": "abbd39efaff6231394781f3f1157c819e5cfb5976410b4bcb36a602113fdfc8b"
     },
     "feature.territories.nodes": {
-      "version": "1.2.0",
+      "version": "1.2.1",
       "files": 2,
-      "digest": "18cbb2f7526b91b07addd1502f2d77a13309f3504818b3bd3656ef407bd19296"
+      "digest": "0adbac0ec5a17d56fc45e998452ca2cfb2402a8e277f81aa83a1d7f5df1585bd"
     },
     "feature.tool-output-compaction.nodes": {
-      "version": "1.2.0",
+      "version": "1.2.1",
       "files": 3,
-      "digest": "9d653424cfc4e0d250c5c2c2a8e25b3a075b7116acd7dd3a3f5cf51e1fb0d3b1"
-    },
-    "feature.tutorials.agents": {
-      "version": "1.0.0",
-      "files": 2,
-      "digest": "2d8dfa84f672316266d1cbd23300a59323da7ea1f8bcdf73da1c2290c0775327"
+      "digest": "8684dc7e04d0a27c4a67cdfd7c0eed95abe800e6a3a8f5241ef8dda7be68fd60"
     },
     "feature.users.nodes": {
-      "version": "1.0.1",
+      "version": "1.0.2",
       "files": 9,
-      "digest": "fb2466c341bb0fdfdb753dbacdfdecdbf23558c5e77803d0045d7a188ffd03ab"
-    },
-    "feature.voice.agents": {
-      "version": "1.0.0",
-      "files": 2,
-      "digest": "c584a4cfcba059362aeaf7623af93f6ed84ccf496f7e9d8b8b5e595d601911ce"
+      "digest": "7d4d5548eb728de1d6f9d773955c350baab3982de9c10ff4712e9ca24eef231d"
     },
     "feature.walkthroughs.nodes": {
-      "version": "1.0.0",
+      "version": "1.0.1",
       "files": 2,
-      "digest": "c41b2dc0a1d7c05c510d6fa1a4dbb6a5bb15d96a2a3f51cab7ff7bcce98f17c5"
+      "digest": "39b378c661c32d9ad16b3b366980a06c009e0bb72cd9bfc73e0bcf5c8884dac0"
     },
     "feature.webinars.nodes": {
-      "version": "1.0.1",
+      "version": "1.0.2",
       "files": 2,
-      "digest": "d4650a195ad9b0542b579cbbb31633bc3b0ffbc0ffcd0d8ae894503fffbd746d"
-    },
-    "feature.whatsapp.agents": {
-      "version": "1.0.0",
-      "files": 2,
-      "digest": "f37941ea6bed615f199184f64b10cd16afe1233c0e82c91d0cb825856257f757"
+      "digest": "84219b6f7b5c993faea8fc853175324a6a230f7b33ee770d59ddd38aac2ee244"
     },
     "feature.whatsapp.nodes": {
-      "version": "1.0.0",
+      "version": "1.0.1",
       "files": 2,
-      "digest": "2f3fc6ac13ba47da68bee6aa6867414948e8965adc5bee2305c220d24072e1c5"
+      "digest": "ceba92b81a95fc5f6cdd4077f38f3a2216a310bbfb231bc83a5885d1f00b2474"
     },
     "feature.work-selection.nodes": {
-      "version": "1.0.0",
+      "version": "1.0.1",
       "files": 2,
-      "digest": "9f355279272f76dec19237585ff4a26daf782b49638d848b50c544c28867f5a8"
-    },
-    "feature.workflow-author.agents": {
-      "version": "1.1.1",
-      "files": 2,
-      "digest": "3b8b56a15e3194156627e6515f144a8d0e674c17354909ba3a4cd24e0831c4aa"
+      "digest": "9db6d2f7b752713eb529cda3bb9cc7f70f4592d565192ba68884f0c08fe56298"
     },
     "feature.workflow-author.nodes": {
-      "version": "1.0.4",
+      "version": "1.0.6",
       "files": 6,
-      "digest": "478239a876ec445f5efdda2c55d5fb1013175df30d62a13e1eebc8b84b1e4a42"
+      "digest": "f24aad5ec7bec34b2590d2f5c3429eedc48103a25de8629cf506d48cb2e4d40c"
     },
     "vendor.myndhyve.ads-copy-generate": {
-      "version": "1.0.0",
+      "version": "1.0.2",
       "files": 7,
-      "digest": "88e8cbb4a466e8d41c2e53e8036ceb7deabe06758108603ca06a669c75bc15ae"
+      "digest": "d19be157859becbff776c4dcd494ca805d7651232a1386e67777f29cab18f8dc"
     },
     "vendor.myndhyve.ads-creative-validate": {
-      "version": "1.0.0",
+      "version": "1.0.2",
       "files": 7,
-      "digest": "587fc0c5126e09015eb585ff252f480c2eb80fbcf1338cf41069df5e666e2a5e"
+      "digest": "6c6e88a9a45884b08bf96c042a7ff268fffc5b7c13ce41fab187f35d42307a21"
     },
     "vendor.myndhyve.ads-crew": {
-      "version": "1.0.1",
+      "version": "1.0.2",
       "files": 6,
-      "digest": "4e83205e4e2e2aab38a3164ef3d5b198a3668124dac471fbbf0eabb40ccbb235"
+      "digest": "ce5b282a71b9ac34309b1f994de5aa75aa2f2d3769881fb02eb70075390baa3e"
     },
     "vendor.myndhyve.ads-export": {
-      "version": "1.0.0",
+      "version": "1.0.2",
       "files": 7,
-      "digest": "a3d7d265d286b776850c02f0b2ef8e816c0a4a2311d56b8d9189ef88b1f7b7aa"
+      "digest": "cbb897f3ab97b44b5f9efa0da6b2b4bae7a24caa45ea08508257a07c2a0d780a"
     },
     "vendor.myndhyve.ads-image-generate": {
-      "version": "1.0.0",
+      "version": "1.0.2",
       "files": 7,
-      "digest": "fc1eada204fa0e6c23188a738d76c0e55372ace256ad304177098b9ef85be0c9"
+      "digest": "9c7846682da0305b8ab8d7fe04abe4b6b48f7a522d9c6f952f00f6768775690e"
     },
     "vendor.myndhyve.ads-metrics-import": {
-      "version": "1.0.0",
+      "version": "1.0.2",
       "files": 7,
-      "digest": "1c23982410b20304f68afc31ba99251d0c799282baf53f10d1ff1f60238705ee"
+      "digest": "9845a48ced2854d3c422649c1e431f058b8e86c7ebf39a2bcba9a79789dc2782"
     },
     "vendor.myndhyve.ads-platforms": {
-      "version": "1.0.0",
+      "version": "1.0.2",
       "files": 7,
-      "digest": "135edbf20cb17d3d68348f3c4f141114e61506a9592d26c7614f7e867c5547d4"
+      "digest": "060b50cb7d097570e6d7b78c359370f89d5192015fa234bed88fa0214de5280a"
     },
     "vendor.myndhyve.ads-policy": {
-      "version": "1.0.0",
+      "version": "1.0.2",
       "files": 7,
-      "digest": "6350e9d26eacc1956542448b0354eeb7c005cf17998cab71f5f5260955d820ae"
+      "digest": "c14ff81c55e837b653e2a298b1824dfd47c7a7f9aa0644664d5e24105762a101"
     },
     "vendor.myndhyve.ads-publish-google": {
-      "version": "1.0.0",
+      "version": "1.0.3",
       "files": 7,
-      "digest": "d0143c7626042a30ef0b725f6b3068858c17505fa4ece49ea6b8da756d9c8e20"
+      "digest": "130a7746b366abec0de8c9bab7e3fb4d681a7e8052fc367106bc823275964a4b"
     },
     "vendor.myndhyve.ads-publish-meta": {
-      "version": "1.0.0",
+      "version": "1.0.3",
       "files": 7,
-      "digest": "df6caf23bbf8857f3e82958d35fdca28549dafa3c3af4e28ef8a077661d8b5ed"
+      "digest": "d8a925912be3f3f9f21255bee451f7bbbf95239229a7aa1120224088b36c9f77"
     },
     "vendor.myndhyve.ads-publish-tiktok": {
-      "version": "1.0.0",
+      "version": "1.0.3",
       "files": 7,
-      "digest": "422a4bda0461f72bbaba25768b5919279a372a583f3c6f8c970c0fc1df93cccb"
+      "digest": "897547bf0cccc2f54c06cb0ceb52f80b45f0353b8df18f3fbb8afdf650d1e437"
     },
     "vendor.myndhyve.ads-tools": {
-      "version": "1.0.0",
+      "version": "1.0.2",
       "files": 10,
-      "digest": "2be812bb777870f43817bbe99f0bd0174fb2b71c8dbc6fdfaea913b4cc6b655f"
+      "digest": "ad15e9854210ae151943ff8e6af8e158e712560bf0626bde87de11573a35f27c"
     },
     "vendor.myndhyve.ads-video-generate": {
-      "version": "1.0.0",
+      "version": "1.0.2",
       "files": 7,
-      "digest": "7a49d4d7c15d115687b682f2b331e04f80d52da835ac8a29fd8ebec0030ba010"
+      "digest": "f66c4b29d2627997ea65d832ae588f9666c3f2ca7d12c2a82e494ea1c871c777"
     },
     "vendor.myndhyve.agent-orchestration": {
-      "version": "1.0.0",
+      "version": "1.0.3",
       "files": 40,
-      "digest": "99d5a558b09c5dddf372610b1197b8f11321d6b962a9c4d8039b9b5bd2f79403"
+      "digest": "3db46b693ab14710c26335adf037417fdb71c22eb61a4fecfebe37c819d4db4d"
     },
     "vendor.myndhyve.ai": {
-      "version": "1.0.0",
+      "version": "1.0.2",
       "files": 13,
-      "digest": "c51a41cfb41a46f56e26a709d7df15a4a2eb6622509262fb829120cae4107471"
+      "digest": "193bc9ee657acb2aa4f7485c06b1fa2f8f0367816b561487cbf6a8b7107a0634"
     },
     "vendor.myndhyve.brand": {
-      "version": "1.1.0",
+      "version": "1.1.2",
       "files": 46,
-      "digest": "f5b95c5dcac0794495c12141a4db6136bb4db0efd07c9ce82fe4ce1a7fd996e4"
+      "digest": "780e8fd331c5e7b305429429d1328ac406be1178e85b1ace3d0d58946cee87f5"
     },
     "vendor.myndhyve.canvas": {
-      "version": "1.0.0",
+      "version": "1.0.2",
       "files": 16,
-      "digest": "4e78197262233d978577ba35491afcddd6904adaaedf004adae633adcaf955c5"
+      "digest": "41a77b7930d4e593e368ebdc337a8d205a7b28a334211e39c8e5a0a66b584dca"
     },
     "vendor.myndhyve.chat": {
-      "version": "1.3.0",
+      "version": "1.3.1",
       "files": 22,
-      "digest": "e3d658d1b8b54d3fa4356a33776f4724c4429ce953dcfe1d76c0467c50e7bc86"
+      "digest": "5d559dc13cf84e8b8f6f48756dd5387619b1bb523e4d20a2bd9b5de55d013b0b"
     },
     "vendor.myndhyve.data-integration": {
-      "version": "1.0.0",
+      "version": "1.0.2",
       "files": 28,
-      "digest": "713aa197cc926b5ca0bea68c35622aa61833167f24083a7ba48329a4f72906b1"
+      "digest": "6deffac3e07b02b0888c4bfaf6adc210ab1cf76718556a05c8bad2a1b3243ab8"
     },
     "vendor.myndhyve.entities": {
-      "version": "1.0.1",
+      "version": "1.0.2",
       "files": 19,
-      "digest": "7586433a21b15e387f3b40a4bdc3492aae5d58dc2289c591ff0bf49f8eb24692"
+      "digest": "9420daaf657bc142b5a065a44e2545f9caafd70280c6d702c9dc7214620e7258"
     },
     "vendor.myndhyve.kanban": {
-      "version": "1.0.1",
+      "version": "1.0.2",
       "files": 25,
-      "digest": "32cc41871fafe9f13662056fb34e4cd8c36213df55d4ed01f0535d5370201d0b"
+      "digest": "fe9e630f1432c0c9434096129a92afc1b8ab686f75d222bf26f5599d951c04b8"
     },
     "vendor.myndhyve.knowledge-tools": {
-      "version": "1.0.0",
+      "version": "1.0.3",
       "files": 10,
-      "digest": "5a565dd5d07df290ac684da5da0349de4af20ac82b8c8563902af1ba470271d8"
+      "digest": "e845390e016a29691559fb7cc26e0e006e900a44637151378ee4923ba11fd440"
     },
     "vendor.myndhyve.landing-page": {
-      "version": "1.0.0",
+      "version": "1.0.2",
       "files": 25,
-      "digest": "04a010ef087889afd14684caeed975984cfcf3d24bd64f2c25483a53d7695a95"
+      "digest": "5d54545493e72d25e3b24402895d14e8468a2e74a3b4f9a64cecd48d8ba9a85b"
     },
     "vendor.myndhyve.launch-studio": {
-      "version": "1.0.0",
+      "version": "1.0.2",
       "files": 10,
-      "digest": "b1f0e088c47f614a0ea9572147e7bb73a84bac55dc86a1470c1fc61e1a846a9a"
+      "digest": "7acf234b35a960680e93960db1b903d13fee33ba5216dc746a1f56bf5e27e418"
     },
     "vendor.myndhyve.market-intel-ad-angles": {
-      "version": "1.0.0",
+      "version": "1.0.2",
       "files": 7,
-      "digest": "b1bf2dadfbb88fda45ddbbbcd05c424e4a7ac2c6b9aec3051eee039809f7eec5"
+      "digest": "023593c04ee10070a251b62f9e992d5b00a7534a81fa7d7fb9764e0172947553"
     },
     "vendor.myndhyve.market-intel-audience-targeting": {
-      "version": "1.0.0",
+      "version": "1.0.2",
       "files": 7,
-      "digest": "3bb4b688dfc71de4ced8d746040f18fd6da807770fa5fa11eedceeb3bda6b4a2"
+      "digest": "f935d0c7b3bf2d04d33032542c9d1966482831fb28040a8c1bf1a1174d291b4b"
     },
     "vendor.myndhyve.market-intel-community-rank": {
-      "version": "1.0.0",
+      "version": "1.0.2",
       "files": 7,
-      "digest": "730ec9ad38489419b3321c23a4c89a66ba914580ed2dff146cb49f71fd32a169"
+      "digest": "426e7855e26f6ada08c5344b7514f740b9da1cca2f3b4b15877be5b8db26f1cf"
     },
     "vendor.myndhyve.market-intel-content-extraction": {
-      "version": "1.0.0",
+      "version": "1.0.2",
       "files": 7,
-      "digest": "c56d0ca5b7a8c13a67ce8220e95bda5e1d5a8a0ecf9cc7f8ac507feccaa2b77a"
+      "digest": "2dc683a7bd6ba6babfde9ed6fb64662abcf0cca735a230f48a344da54575deeb"
     },
     "vendor.myndhyve.market-intel-crew": {
-      "version": "1.0.1",
+      "version": "1.0.3",
       "files": 6,
-      "digest": "cc49bcc398628df6dfeb14508abe425f3586a24abb5c114aab060728a3c187ef"
+      "digest": "df5f9a0b9599dd08d4ada53cc58b8798b06efe417bd24c0bec446421715a9d70"
     },
     "vendor.myndhyve.market-intel-discovery": {
-      "version": "1.0.0",
+      "version": "1.0.2",
       "files": 7,
-      "digest": "cfee2c6f69f547de117f442a99a9babaed5a8ffb5549d55a0784d6ceb07ac42c"
+      "digest": "57158134988133eacb027d9bd32a090af1ac407b5a7fc1114e6878a9d1c06f42"
     },
     "vendor.myndhyve.market-intel-opportunity-scoring": {
-      "version": "1.0.0",
+      "version": "1.0.2",
       "files": 7,
-      "digest": "66b20e9e930c143c82ee54e5963c279c41967fd4443047c5b79c3c1fe1d10e73"
+      "digest": "5415ca5160f1653efa875a68ebf86348b322ec0144063e758599ef3c65acc287"
     },
     "vendor.myndhyve.market-intel-query-builder": {
-      "version": "1.0.0",
+      "version": "1.0.2",
       "files": 7,
-      "digest": "505a508555eff2f1cd9f01e9a036eeaccefba33fc7eeb8c8f17bc43c61d02740"
+      "digest": "0e5733ba04b5497e6195b255143c3b6b9e08b12c29c87e793e6c244a03eb8672"
     },
     "vendor.myndhyve.market-intel-shift-detect": {
-      "version": "1.0.0",
+      "version": "1.0.1",
       "files": 5,
-      "digest": "c129cdb9176c74b7028a224785b35a4a75bc4dac0782a33d94a55959429f0209"
+      "digest": "732c8a4021355143f5205a74b459663e97acf01dde217fa76097431440574474"
     },
     "vendor.myndhyve.market-intel-thread-triage": {
-      "version": "1.0.0",
+      "version": "1.0.2",
       "files": 7,
-      "digest": "9d2ec5195860d13627b14740db3e1a2366b8a8ea36dfc6601eb07cf8292aaf30"
+      "digest": "ee9559b2d08ffae5a4cf62ded10692ff83e128e74ef91d6f2dd5c0796c98d58f"
     },
     "vendor.myndhyve.market-intel-voc": {
-      "version": "1.0.0",
+      "version": "1.0.2",
       "files": 7,
-      "digest": "60941d9094d407f05f49abf1da9f82b481114127b5d210ca43cb0b4d3976d1e0"
+      "digest": "5eb55e7afb412eefa94f300c7314f5239b64c2668c13e9b2e453383ac28162ba"
     },
     "vendor.myndhyve.web-research": {
-      "version": "1.0.0",
+      "version": "1.0.2",
       "files": 16,
-      "digest": "861dcfbb4e7de75ec357ecd4e245d2e34583c7eea534c7a0437c0eb938cffda9"
+      "digest": "281ed7fe1c572f751945a54ab4bbcc0df7a450b66e2ac89dcc412e1d5f692249"
     },
     "vendor.myndhyve.wop-refinement": {
-      "version": "1.0.0",
+      "version": "1.0.2",
       "files": 7,
-      "digest": "557155649493b471636e9eebe3c4efc416eaabbd8d8b864363fe1271e84902e2"
+      "digest": "71b4cb2ee39c81c3388a6c60e18a2517a47529635fea6947eb0bc7231a4d4eba"
+    },
+    "vendor.openwop-app.accessibility.agents": {
+      "version": "1.0.1",
+      "files": 2,
+      "digest": "3c25633615ef7337477b39c8d3d3018f67c9784fd77a8d2f1273d92bc08b8beb"
+    },
+    "vendor.openwop-app.agent-author.agents": {
+      "version": "1.1.1",
+      "files": 2,
+      "digest": "ff487860ad248bf8d8ee64c56a525b4b1146644a3e91776a28ba38df2123a612"
+    },
+    "vendor.openwop-app.analytics.agents": {
+      "version": "1.0.2",
+      "files": 2,
+      "digest": "d9e3eb6e2eee39aefb407e238b920b73ed5f10f7f81dae8d32cdda3c37daa7b0"
+    },
+    "vendor.openwop-app.app-builder.agents": {
+      "version": "1.3.2",
+      "files": 2,
+      "digest": "96a00101b6ff1f6c22823d1bb2e5feb62ae5cfc7a1e5c8e9601805aeec2d79b5"
+    },
+    "vendor.openwop-app.assistant.agents": {
+      "version": "1.0.5",
+      "files": 4,
+      "digest": "99fc7ca289fcf04d4e6a384749c9a692790870a01bb6a8a4bc4d84605aafd8d6"
+    },
+    "vendor.openwop-app.brand.agents": {
+      "version": "1.0.2",
+      "files": 2,
+      "digest": "f24dee6a8c29700f81fc576077340972d302d535bd6d15b97d03209a76f54ce2"
+    },
+    "vendor.openwop-app.cad.agents": {
+      "version": "1.5.2",
+      "files": 2,
+      "digest": "744c68d48b3dc2fa77abc838eb984d145f6cc50837b23eb9b71eaac681d53449"
+    },
+    "vendor.openwop-app.campaign-brief.agents": {
+      "version": "1.3.2",
+      "files": 2,
+      "digest": "c649bf8dba15887795dc3d41575293f41914b79303d5a7048b8cfcbc01f55acc"
+    },
+    "vendor.openwop-app.campaign-channels.agents": {
+      "version": "1.2.1",
+      "files": 2,
+      "digest": "128ccae828b91be0273a5d961abcc1022c345e75e65d4987daa02b6e3650d289"
+    },
+    "vendor.openwop-app.campaign-intel.agents": {
+      "version": "1.2.2",
+      "files": 2,
+      "digest": "3c80c2d225d8210bf4e5f49c6497a273d540c6a9535acb67dae56e823ae95ec7"
+    },
+    "vendor.openwop-app.campaign-orchestration.agents": {
+      "version": "1.2.1",
+      "files": 2,
+      "digest": "4c4ab3eaf8cdf0258a42285e121292c6a084ac6aaa04f6f36517cc10b01add8b"
+    },
+    "vendor.openwop-app.campaign-studio.agents": {
+      "version": "1.0.3",
+      "files": 2,
+      "digest": "667ccb12de393c94f095a93b6014d271137fa6ddaa16b366e214180e88ba2195"
+    },
+    "vendor.openwop-app.career-agent.agents": {
+      "version": "1.0.1",
+      "files": 2,
+      "digest": "c35dd7b3dbceed98772818f92fc7f2e95a0bb2264c2163217c8ffeb3ad23f93d"
+    },
+    "vendor.openwop-app.cms.agents": {
+      "version": "1.1.2",
+      "files": 3,
+      "digest": "7f5048564cac0162caa19a14a3bc810d21cd5301b0ce5fede29324ab35cc1415"
+    },
+    "vendor.openwop-app.code-exec.agents": {
+      "version": "1.0.1",
+      "files": 4,
+      "digest": "cb65eedf105001e258913db1fdfb32f5966fa0d92675e57bdc57bf0cbb02ca4c"
+    },
+    "vendor.openwop-app.comments.agents": {
+      "version": "1.0.2",
+      "files": 2,
+      "digest": "3ed2d1ba5a34030d6e6efdab8ca71e997293ef3ff570f02342b573cdbf9a4cf0"
+    },
+    "vendor.openwop-app.commerce.agents": {
+      "version": "1.2.2",
+      "files": 2,
+      "digest": "2626df821177ad267b7e57f36201d9bd06a9d2ff37a81c35f8553324307c352d"
+    },
+    "vendor.openwop-app.commerce.buyer.agents": {
+      "version": "1.0.4",
+      "files": 2,
+      "digest": "0aea998d04e0328f2ee9f1f6692f7cf12b331e6f88132156b3c5d1e58bcb0fd2"
+    },
+    "vendor.openwop-app.computer-use.agents": {
+      "version": "1.0.2",
+      "files": 2,
+      "digest": "7a68fb560ec466cfa1943cb2d6477883e4d7b455fd0ac4fd824fedb1aa3101cd"
+    },
+    "vendor.openwop-app.crm.agents": {
+      "version": "1.1.2",
+      "files": 3,
+      "digest": "dbdfcc15c926127fbf3d285ecb2129e7bef5c8484cb69a822d1dba50c0edb30f"
+    },
+    "vendor.openwop-app.csm.agents": {
+      "version": "1.2.1",
+      "files": 2,
+      "digest": "4f35bed52754af91a53b484c4f9378bf81032785346f942c805205e50296380b"
+    },
+    "vendor.openwop-app.dealers.agents": {
+      "version": "1.0.3",
+      "files": 2,
+      "digest": "bf2f4525d127e2af4ef7b72273bd5c93d634fddc25e53e8c36e8643162fa47c6"
+    },
+    "vendor.openwop-app.discovery.agents": {
+      "version": "1.0.3",
+      "files": 2,
+      "digest": "dcaf1ec24c2373bcd0a850aca65529aa9750e79585b77a5903f33dba30f2d86b"
+    },
+    "vendor.openwop-app.documents.agents": {
+      "version": "1.1.0",
+      "files": 3,
+      "digest": "ffa58bcbfea65023309c17ca19c0e76a7849b0b44532c594fc6375a2f22b5aba"
+    },
+    "vendor.openwop-app.drawings.agents": {
+      "version": "1.0.3",
+      "files": 2,
+      "digest": "07c7397f1b3d33aa5b6bcf770912de983b2fe0f1b3d99a345dbba0ff6a877d4e"
+    },
+    "vendor.openwop-app.email.agents": {
+      "version": "1.0.2",
+      "files": 2,
+      "digest": "18c28383214890677685cbf57611dd506a2616f3264a07b715385a99bdecf5e4"
+    },
+    "vendor.openwop-app.forms.agents": {
+      "version": "1.1.2",
+      "files": 2,
+      "digest": "6ecf2f05f11c02ad80818e1af1e4a711df156294f42a4ac494dfa4b987e7b788"
+    },
+    "vendor.openwop-app.funnels.agents": {
+      "version": "1.0.2",
+      "files": 2,
+      "digest": "0cf9fb62984d515462ebf946edc3a0f96bc184f74ff8b24604954b37c07d9590"
+    },
+    "vendor.openwop-app.image-gen.agents": {
+      "version": "1.0.2",
+      "files": 4,
+      "digest": "be3770a19d16e6cea79535bb89691cb5d1b1afddf4ab78438638e4215ffa7803"
+    },
+    "vendor.openwop-app.insights-suite.agents": {
+      "version": "1.1.2",
+      "files": 4,
+      "digest": "d811a747de6fc77d60532506bc402b2a2dedd498aa576aed1587540175031a9a"
+    },
+    "vendor.openwop-app.interactive-artifacts.agents": {
+      "version": "1.0.2",
+      "files": 2,
+      "digest": "006f4d730ee80264d07e285e9fbf6f393e525bad17871f8b2a48ea0e31a7d6d1"
+    },
+    "vendor.openwop-app.kb.agents": {
+      "version": "1.0.2",
+      "files": 2,
+      "digest": "c7fdefc157cad470d8bcb562713fc610bb5eaf0bb27b934ac9b36efb621d354b"
+    },
+    "vendor.openwop-app.kicktodo.agents": {
+      "version": "1.9.1",
+      "files": 15,
+      "digest": "b383ee7a081fc912010d209cdd937040e7a4a161ca32eb1c9c7b06109b38c5fc"
+    },
+    "vendor.openwop-app.marketplace.agents": {
+      "version": "1.0.3",
+      "files": 2,
+      "digest": "0d73e2658eab2ae4827e2c366b133de47c29c2d22e9e518c235ff9ccdaa3bdbc"
+    },
+    "vendor.openwop-app.notebooks.agents": {
+      "version": "1.0.2",
+      "files": 2,
+      "digest": "20e49608b6f1c5ab280736e25abc811982f55c6bd541d7f72b7b63a8790ff9c6"
+    },
+    "vendor.openwop-app.podcasts.agents": {
+      "version": "1.0.2",
+      "files": 2,
+      "digest": "8a35ae751757d2a4fc5be48a8b03f1c5ebf2e2d29fc36437dcdf3a6ba15de389"
+    },
+    "vendor.openwop-app.priority-matrix.agents": {
+      "version": "1.0.2",
+      "files": 2,
+      "digest": "fe9ccd346dbf640555b6a1d68528d348235fcfaba7221a42ae13b01da0c6f4df"
+    },
+    "vendor.openwop-app.production.agents": {
+      "version": "1.0.2",
+      "files": 2,
+      "digest": "bb8fbe1cd69699350a4cba87ba6fb226c745304a2929f834f8fb233fbd171b07"
+    },
+    "vendor.openwop-app.promotions.agents": {
+      "version": "1.0.2",
+      "files": 2,
+      "digest": "cf62ff55d55a65bdd80eb3a548bbfe49eb7c2fb8b58b53034d5b0bdfd3bc05f8"
+    },
+    "vendor.openwop-app.recommendations.agents": {
+      "version": "1.0.2",
+      "files": 2,
+      "digest": "2705d8dd7915573796b5b98eff5cb2db46214390640752c71fd50783ce9383e3"
+    },
+    "vendor.openwop-app.sales-commissions.agents": {
+      "version": "1.0.3",
+      "files": 2,
+      "digest": "764bf9ae56a973cc3370bdbc7f319238290b42ae2e516eb9005d2b137239faac"
+    },
+    "vendor.openwop-app.service-desk.agents": {
+      "version": "1.0.1",
+      "files": 2,
+      "digest": "f2d614e798f75be42b235ffa0fb83bacacf68058892c4696cb4a7107565c186c"
+    },
+    "vendor.openwop-app.slides.agents": {
+      "version": "1.1.2",
+      "files": 2,
+      "digest": "fa766154bfbb06dc5516eae0faa6035be2a1746e1259ced469108c5087dc36b6"
+    },
+    "vendor.openwop-app.strategy.agents": {
+      "version": "1.0.2",
+      "files": 2,
+      "digest": "bb062aa0f837fca2e285aef90bd9722be6fe84abef933f8e4a9ed53c4c019705"
+    },
+    "vendor.openwop-app.territories.agents": {
+      "version": "1.0.3",
+      "files": 2,
+      "digest": "50c1884da495d485d9f117baa1b05e83584e943ddcd12d21006d40bb86251be8"
+    },
+    "vendor.openwop-app.tutorials.agents": {
+      "version": "1.0.1",
+      "files": 2,
+      "digest": "fb39daa56aede9b709666d42bfcec8292a6dc91f10476cf7a79e1b7ee56b5cfc"
+    },
+    "vendor.openwop-app.voice.agents": {
+      "version": "1.0.1",
+      "files": 2,
+      "digest": "01e8fc5e592dd9ef53ce1791205093f1ee2cc8304b794685af64eb5170649114"
+    },
+    "vendor.openwop-app.whatsapp.agents": {
+      "version": "1.0.1",
+      "files": 2,
+      "digest": "c905562bdc987343b39c3f1881cbf37202f9c7a7023f41c7a317cbefb67895a3"
+    },
+    "vendor.openwop-app.workflow-author.agents": {
+      "version": "1.3.8",
+      "files": 2,
+      "digest": "0cd64d9529edc238029f0837a12ffdcf795f96ce02ae62de651b308a89649bdc"
     },
     "vendor.openwop.app-builder.kits": {
       "version": "1.1.0",

@@ -104,6 +104,20 @@ export function AvatarEditor({
     setZoom(1);
   }
 
+  // Grade-ux ARUX-15 — a failed REMOVE must surface like a failed save; the
+  // unguarded `void onSave(null)` became an unhandled rejection with no UI once
+  // the page started rethrowing failed saves into the editor.
+  async function onRemoveClick(): Promise<void> {
+    setSaving(true);
+    setLocalError(null);
+    try {
+      await onSave(null);
+    } catch (err) {
+      setLocalError(err instanceof Error ? err.message : t('avatarErrorProcess'));
+      setSaving(false);
+    }
+  }
+
   async function onSaveClick(): Promise<void> {
     if (!imageSrc || !croppedAreaPixels) return;
     setSaving(true);
@@ -210,7 +224,7 @@ export function AvatarEditor({
               {currentAvatarUrl ? (
                 <Button
                   variant="danger" className="u-iflex u-items-center u-gap-1-5"
-                  onClick={() => void onSave(null)}
+                  onClick={() => void onRemoveClick()}
                   disabled={saving}
                 >
                   <TrashIcon size={13} /> {t('avatarRemovePhoto')}

@@ -23,7 +23,7 @@ export const documentEditorFeature: BackendFeature = {
     id: 'document-editor',
     label: 'Documents (rich text)',
     description:
-      'A rich-text document editor — headings, styled text, lists, and quotes in a WYSIWYG flow, edited full-screen through the shared canvas chassis (undo/redo, autosave with version history). Stored as structured document JSON, never executable code or raw markup. Distinct from the markdown Documents store; single-writer in v1 (real-time co-editing is a later program). OFF by default.',
+      'A rich-text document editor — headings, styled text, lists, and quotes in a WYSIWYG flow, edited full-screen through the shared canvas chassis (undo/redo, autosave with version history). Stored as structured document JSON, never executable code or raw markup. Distinct from the markdown Documents store; single-writer in v1 (real-time co-editing is a later program).',
     category: 'Documents',
     status: 'off',
     bucketUnit: 'tenant',

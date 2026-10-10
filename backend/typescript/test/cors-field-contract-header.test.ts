@@ -46,12 +46,14 @@ function preflight(origin = ORIGIN): Record<string, string> {
     // which is the correct outcome for a stub that does not match its subject.
     const req = {
       method: 'OPTIONS',
-      path: '/v1/host/openwop-app/workflows',
+      path: '/host/openwop-app/workflows',
       headers: { origin },
       header: (n: string) => (n.toLowerCase() === 'origin' ? origin : undefined),
     } as unknown as Request;
     const res = {
       set: (k: string, v: string) => { headers[k.toLowerCase()] = v; return res; },
+      // Express's res.vary APPENDS; the CORS middleware uses it (Vary is append-only).
+      vary: (f: string) => { const have = (headers['vary'] ?? '').split(',').map((x) => x.trim()).filter(Boolean); if (!have.includes(f)) have.push(f); headers['vary'] = have.join(', '); return res; },
       status: () => res,
       send: () => res,
       end: () => res,
@@ -79,6 +81,14 @@ describe('CORS preflight admits the custom headers the SPA sends', () => {
       allowed,
       `${FIELD_CONTRACT_HEADER} is not admitted by the preflight — cross-origin builder saves will be blocked`,
     ).toContain(FIELD_CONTRACT_HEADER.toLowerCase());
+  });
+
+  it('admits If-Match, the builder save precondition (ADR 0770 D5)', () => {
+    // Not CORS-safelisted and not `x-openwop-*`, so the generator below cannot
+    // see it: pinned by name, like the negotiation header.
+    const allowed = (preflight()['access-control-allow-headers'] ?? '').toLowerCase();
+    expect(allowed.split(',').map((h) => h.trim())).toContain('if-match');
+    expect((preflight()['access-control-expose-headers'] ?? '').toLowerCase()).toContain('etag');
   });
 
   it('still admits the pre-existing headers', () => {
@@ -128,6 +138,37 @@ describe('CORS preflight admits the custom headers the SPA sends', () => {
       allowed.split(',').map((h) => h.trim()),
       'the SPA speaks major 2; without this every cross-origin v2 request is blocked by the browser',
     ).toContain(VERSION_RESPONSE_HEADER.toLowerCase());
+  });
+
+  /**
+   * THE THIRD GENERATOR, for headers the SDK sends and the SPA never spells.
+   *
+   * `OpenWOP-Version` was a named leg above because the SPA-source walk below
+   * cannot see an SDK-sent header. Pinning it by name left the next SDK header
+   * just as invisible: `OpenWOP-Client-Version` (RFC 0219, SDK 2.5.0) was about
+   * to repeat the outage, and `OpenWOP-Dedup` already could. So this reads the
+   * request headers straight out of the SDK the browser runs (`client.js`, the
+   * frontend's install first, else the backend's copy of the same package) and
+   * requires the preflight to admit each one. Webhook signing helpers are
+   * server-to-server, never browser requests, and live in other files.
+   */
+  it('GENERATOR: every OpenWOP-* request header the installed SDK client sends is admitted', () => {
+    const candidates = [
+      resolve(__dirname, '../../../frontend/react/node_modules/@openwop/openwop/dist/client.js'),
+      resolve(__dirname, '../node_modules/@openwop/openwop/dist/client.js'),
+    ];
+    const file = candidates.find((f) => { try { return statSync(f).isFile(); } catch { return false; } });
+    expect(file, `no installed SDK client found at ${candidates.join(' or ')}`).toBeTruthy();
+    const src = readFileSync(file!, 'utf8');
+    const sent = new Set([...src.matchAll(/['"`](OpenWOP-[A-Za-z-]+)['"`]/g)].map((m) => m[1]!.toLowerCase()));
+    expect(sent.size, 'no OpenWOP-* header literal found — the SDK moved, and this leg would be vacuous').toBeGreaterThan(0);
+    const allowed = (preflight()['access-control-allow-headers'] ?? '').toLowerCase().split(',').map((h) => h.trim());
+    for (const h of sent) expect(allowed, `the SDK sends ${h}; a cross-origin request carrying it fails preflight`).toContain(h);
+  });
+
+  it('admits OpenWOP-Client-Version before the SPA takes SDK 2.5.0 (RFC 0219)', () => {
+    const allowed = (preflight()['access-control-allow-headers'] ?? '').toLowerCase().split(',').map((h) => h.trim());
+    expect(allowed).toContain('openwop-client-version');
   });
 
   it('GENERATOR: every custom x-openwop-* request header the SPA sends is admitted', () => {

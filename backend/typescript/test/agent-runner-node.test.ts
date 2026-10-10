@@ -70,7 +70,7 @@ describe('agent-runner node — ADR 0458 P2 sim confinement + structured result'
   });
 
   /** A sim persona shape: EMPTY manifest allowlist (like the real
-   *  feature.kicktodo.agents.sim-*), a structured verdict return schema. */
+   *  vendor.openwop-app.kicktodo.agents.sim-*), a structured verdict return schema. */
   function registerSim(): void {
     const agent: ResolvedAgentManifest = {
       agentId: 'test.sim-newcomer',

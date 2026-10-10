@@ -34,7 +34,7 @@ async function tryResolveUser(req: Request): Promise<User | null> {
 
 export function registerNavigationSettingsRoutes(deps: RouteDeps): void {
   const { app } = deps;
-  const BASE = '/v1/host/openwop-app/menu-config';
+  const BASE = '/host/openwop-app/menu-config';
 
   app.get(BASE, async (req, res, next) => {
     try {

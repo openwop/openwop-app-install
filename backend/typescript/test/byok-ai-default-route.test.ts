@@ -13,7 +13,7 @@ import { createApp } from '../src/index.js';
 let server: Server;
 let BASE = '';
 let n = 0;
-const AID = '/v1/host/openwop-app/byok/ai-default';
+const AID = '/host/openwop-app/byok/ai-default';
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -37,7 +37,7 @@ function client() {
   };
   return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b), put: (p: string, b?: unknown) => call('PUT', p, b), del: (p: string) => call('DELETE', p) };
 }
-async function loggedIn(who: string) { const c = client(); await c.post('/v1/host/openwop-app/test/login', { email: `${who}-${Date.now()}-${n++}@acme.test` }); return c; }
+async function loggedIn(who: string) { const c = client(); await c.post('/host/openwop-app/test/login', { email: `${who}-${Date.now()}-${n++}@acme.test` }); return c; }
 
 describe('/byok/ai-default route (ADR 0110)', () => {
   it('GET returns null when no default is set', async () => {

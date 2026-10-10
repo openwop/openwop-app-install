@@ -5,6 +5,14 @@
  * the content is gone the delete proceeds and cascades the access scaffolding.
  * Also: CRM-5's csm consumer — deleting a CRM company scrubs `crmRef` off csm
  * accounts (the account + health history survive).
+ *
+ * Sabotage that turns it red (each witnessed by /grade-tests probe):
+ *  - `if (businessRows > 0)` refusal dropped                      → blocks while business rows exist
+ *  - the guard counts deleteOrg's OWN access-* scaffolding        → … proceeds once emptied
+ *  - the csm scrub matching any ref, not this company             → bystander ref intact
+ *
+ * CEILING: the CRM-5 half registers a COPY of the csm consumer; boot wiring
+ * (`csmFeature.registerRoutes`) is not asserted here — see the grade-code note.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
@@ -18,10 +26,11 @@ const T = 'org-guard-t1';
 
 beforeAll(async () => {
   initHostExtPersistence(await openStorage('memory://'));
-  // The csm feature registers this at app boot; this service-level suite
-  // registers the SAME keyed consumer explicitly.
-  onCrmRecordDeleted('csm', async ({ tenantId, entity, recordId }) => {
-    if (entity === 'company') await scrubCrmRefsForDeletedCompany(tenantId, recordId);
+  // A COPY of the consumer `csmFeature.registerRoutes` registers at app boot
+  // (`src/features/csm/feature.ts`) — keep it in sync, including the CSM-13
+  // `orgId` pass-through. Same key, so a boot registration would be deduped.
+  onCrmRecordDeleted('csm', async ({ tenantId, entity, recordId, orgId }) => {
+    if (entity === 'company') await scrubCrmRefsForDeletedCompany(tenantId, recordId, orgId);
   });
 });
 

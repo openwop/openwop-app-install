@@ -900,9 +900,25 @@ export async function compensationStatusForRuns(
   tenantId: string,
   runIds: readonly string[],
 ): Promise<Map<string, CompensationStatus>> {
+  const out = new Map<string, CompensationStatus>();
+  for (const [id, list] of await obligationsAccountableTo(tenantId, runIds)) out.set(id, foldCompensationStatus(list));
+  return out;
+}
+
+/**
+ * The obligations each run is ACCOUNTABLE for — a root its whole tree, a sub-run
+ * its own rows — in `reverse-completion` order. The one bucketing both the
+ * snapshot's `compensationStatus` and the v2 compensation projection
+ * (`host/compensationProjection.ts`, ADR 0807) read, so the two cannot disagree
+ * about which rows a run owes.
+ */
+export async function obligationsAccountableTo(
+  tenantId: string,
+  runIds: readonly string[],
+): Promise<Map<string, CompensationObligation[]>> {
   const buckets = new Map<string, CompensationObligation[]>();
   for (const id of runIds) if (!buckets.has(id)) buckets.set(id, []);
-  if (buckets.size === 0) return new Map();
+  if (buckets.size === 0) return buckets;
 
   // `listByPrefix`, not `list()`. Row ids are `${tenantId}::${inverseActionId}`,
   // so a storage-level prefix scan is BOUNDED to this tenant's slice — which
@@ -931,10 +947,12 @@ export async function compensationStatusForRuns(
     buckets.get(root)?.push(r);
     if (r.runId !== root) buckets.get(r.runId)?.push(r);
   }
-
-  const out = new Map<string, CompensationStatus>();
-  for (const [id, list] of buckets) out.set(id, foldCompensationStatus(list));
-  return out;
+  for (const list of buckets.values()) {
+    list.sort((a, b) =>
+      b.compensationOrdinal - a.compensationOrdinal ||
+      (a.committedAt < b.committedAt ? 1 : a.committedAt > b.committedAt ? -1 : 0));
+  }
+  return buckets;
 }
 
 /**
@@ -952,7 +970,7 @@ export async function markPlanRequested(tenantId: string, rootRunId: string, at:
   }
 }
 
-function foldCompensationStatus(list: readonly CompensationObligation[]): CompensationStatus {
+export function foldCompensationStatus(list: readonly CompensationObligation[]): CompensationStatus {
   if (list.length === 0) return 'none';
 
   // §D, first row of the table: `none` = "No `compensation.requested` has been

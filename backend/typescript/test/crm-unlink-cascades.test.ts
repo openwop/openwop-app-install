@@ -7,7 +7,11 @@
  * Every case asserts BOTH halves: the dangling pointer is GONE and the row
  * REMAINS (a cascade-delete would satisfy a pointer-gone assertion alone).
  * SABOTAGE: remove the `deal` handling from `tasks-crm-unlink` (e.g. return
- * early when `entity === 'deal'`) → "delete a deal" goes red.
+ * early when `entity === 'deal'`) → "delete a deal" goes red. Wave-4 grade-tests
+ * probes also redden: skip the pointer delete in tasks/activities, delete the
+ * task instead of unlinking it, skip deals' companyId unlink, or drop the tasks
+ * handler's org filter (the ORG-scoped case, via a deliberate cross-org id
+ * collision).
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -88,9 +92,15 @@ describe('ADR 0627 D7 — unlink-and-keep on the record-deleted seam', () => {
   it('company/deal unlinks are ORG-scoped; a contact unlink is tenant-wide', async () => {
     const a = await seed(ORG);
     const b = await seed(OTHER_ORG);
-    // Deleting org-1's company must not touch org-2's rows even if ids collided —
-    // they don't, but the handler filters on orgId regardless (defense in depth).
+    // Deleting org-1's company must not touch org-2's rows even if ids collided.
+    // Real ids never collide, so force one: an org-2 task that carries org-1's
+    // companyId (permissive validators — the link check is not the claim here).
+    // Without the handler's orgId filter this row would be unlinked.
+    const anyLink = { validateDeal: async () => true, validateCompany: async () => true, validateContact: async () => true };
+    const collided = await createTask({ tenantId: T, orgId: OTHER_ORG, title: 'Collided', companyId: a.company.companyId, createdBy: 'u1', validators: anyLink });
     await deleteCompany(T, ORG, a.company.companyId);
+    expect((await getTask(T, ORG, a.task.taskId))!.companyId, 'precondition: the in-org row WAS unlinked').toBeUndefined();
+    expect((await getTask(T, OTHER_ORG, collided.taskId))!.companyId, 'another org\'s row with the same id is untouched').toBe(a.company.companyId);
     expect((await getTask(T, OTHER_ORG, b.task.taskId))!.companyId).toBe(b.company.companyId);
     // A contact is the tenant rolodex: deleting it unlinks in EVERY org.
     const shared = await createContact({ tenantId: T, name: 'Shared', email: 'shared@acme.test' });

@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.app-builder.nodes/1.9.3/repair.input.json",
+  "type": "object",
+  "properties": {
+    "canvasId": {
+      "description": "The canvas to repair."
+    },
+    "instructions": {
+      "description": "What to repair \u2014 finding codes or a description."
+    }
+  }
+}

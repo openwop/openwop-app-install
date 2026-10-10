@@ -23,6 +23,7 @@ import { SubjectKnowledgePanel, type SubjectKnowledgeClient } from '../../knowle
 import { ProjectSchedulesTab } from './ProjectSchedulesTab.js';
 import { ProjectWorkflowsTab } from './ProjectWorkflowsTab.js';
 import { ProjectOverviewTab } from './ProjectOverviewTab.js';
+import { ProjectLedgerTab } from './ProjectLedgerTab.js';
 // ADR 0079 Phase 4 — strategy alignment is composed from the strategy feature
 // (one-directional import; the strategy package never imports projects).
 import { ProjectStrategyChips } from '../strategy/StrategyAlignment.js';
@@ -35,16 +36,17 @@ import { ProjectPodcastPanel } from '../podcasts/PodcastStudioPage.js';
 import { classifyHttpError } from '../../client/classifyHttpError.js';
 import { loadErrorMessage } from '../../client/loadErrorMessage.js';
 import { toast } from '../../ui/toast.js';
-import { formatNumber } from '../../i18n/format.js';
-import { getProject, deleteProject, listMemory, addMemory, deleteMemory, type Project } from './projectsClient.js';
+import { formatList, formatNumber } from '../../i18n/format.js';
+import { setProjectFacet, getProject, deleteProject, getDeletePreview, listMemory, addMemory, deleteMemory, type Project, type ProjectDependentCounts } from './projectsClient.js';
 import {
   getProjectKnowledge, listOrgs, createCollection, unbindCollection, ingestText, deleteDocument, retrieve,
 } from './projectKnowledgeClient.js';
 
-type Tab = 'overview' | 'members' | 'chat' | 'board' | 'memory' | 'knowledge' | 'sources' | 'podcast' | 'workflows' | 'schedules';
+type Tab = 'overview' | 'ledger' | 'members' | 'chat' | 'board' | 'memory' | 'knowledge' | 'sources' | 'podcast' | 'workflows' | 'schedules';
 
 const TAB_LABEL_KEYS: Record<Tab, string> = {
   overview: 'tabOverview',
+  ledger: 'tabLedger',
   members: 'tabMembers',
   chat: 'tabChat',
   board: 'tabBoard',
@@ -81,7 +83,7 @@ export function ProjectDetailPage(): JSX.Element {
   const notebooksEnabled = useFeatureAccess('notebooks').enabled;
   const podcastsEnabled = useFeatureAccess('podcasts').enabled;
   const TABS: readonly Tab[] = [
-    'overview', 'members', 'chat', 'board', 'memory', 'knowledge',
+    'overview', 'ledger', 'members', 'chat', 'board', 'memory', 'knowledge',
     ...(notebooksEnabled ? ['sources' as const] : []),
     ...(podcastsEnabled ? ['podcast' as const] : []),
     'workflows', 'schedules',
@@ -140,7 +142,32 @@ export function ProjectDetailPage(): JSX.Element {
     retrieve: (query) => retrieve(projectId, query),
   }), [projectId]);
 
+  /** ADR 0839 D2 — the non-zero dependent counts as localized phrases. */
+  const dependentItems = (c: ProjectDependentCounts): string[] => [
+    c.canvases ? t('dependentCanvases', { count: c.canvases, n: formatNumber(c.canvases) }) : '',
+    c.documents ? t('dependentDocuments', { count: c.documents, n: formatNumber(c.documents) }) : '',
+    c.entities ? t('dependentEntities', { count: c.entities, n: formatNumber(c.entities) }) : '',
+    c.priorityLists ? t('dependentPriorityLists', { count: c.priorityLists, n: formatNumber(c.priorityLists) }) : '',
+    c.teamLedger ? t('dependentTeamLedger') : '',
+  ].filter(Boolean);
+
+  // ADR 0839 / grade-ux B1 — the delete now waits on a preview read BEFORE its confirm,
+  // and the confirm is app-shell-mounted (it survives navigation). Without a guard, a
+  // second click during either wait asked "Delete X?" again — once even AFTER X was gone
+  // and the page had navigated away. One delete at a time, and the button says which
+  // step it is on.
+  const [deleting, setDeleting] = useState<'checking' | 'deleting' | null>(null);
+  const [labelBusy, setLabelBusy] = useState(false);
+  const deletingRef = useRef(false);
+
   const onDelete = async (): Promise<void> => {
+    if (deletingRef.current) return;
+    deletingRef.current = true;
+    setDeleting('checking');
+    try { await runDelete(); } finally { deletingRef.current = false; setDeleting(null); }
+  };
+
+  const runDelete = async (): Promise<void> => {
     // PROJ-UX-5 — the confirm NAMES the blast radius (board, memory, schedules,
     // the chat's full history — and, when the delete will erase one, the whole
     // ingested source corpus) instead of the generic "cannot be undone".
@@ -154,7 +181,19 @@ export function ProjectDetailPage(): JSX.Element {
     // computed by the server from the SAME predicate the eraser acts on, so the
     // consent and the consequence cannot drift apart again.
     const cascade = project?.deletesCorpus === true ? t('deleteCascadeBodyNotebook') : t('deleteCascadeBody');
-    if (!(await confirm({ title: t('deleteProjectConfirm', { name: project?.name ?? projectId }), body: `${cascade} ${t('common:cannotBeUndone')}`, danger: true, confirmLabel: t('common:delete') }))) return;
+    // ADR 0839 D2 — the delete now also takes what OTHER features keep under the project
+    // (canvases, documents, priority lists, the team ledger). Name them before the person
+    // commits. A failed count is said as such — never rendered as "nothing else".
+    let dependents: string;
+    try {
+      const items = dependentItems(await getDeletePreview(projectId));
+      dependents = items.length > 0 ? t('deleteDependents', { items: formatList(items) }) : '';
+    } catch {
+      dependents = t('deleteDependentsUnknown');
+    }
+    const body = [cascade, dependents, t('common:cannotBeUndone')].filter(Boolean).join(' ');
+    if (!(await confirm({ title: t('deleteProjectConfirm', { name: project?.name ?? projectId }), body, danger: true, confirmLabel: t('common:delete') }))) return;
+    setDeleting('deleting');
     setActionError(null);
     try {
       // PROJ-UX-5 — the backend's receipt finally gets a reader: surface the
@@ -165,7 +204,12 @@ export function ProjectDetailPage(): JSX.Element {
         memory: formatNumber(receipt.memoryEntriesCleared ?? 0),
         schedules: formatNumber(receipt.schedulesCleared ?? 0),
       });
-      toast.success(receipt.notebookCorpusDeleted ? `${summary} ${t('deleteReceiptCorpus')}` : summary);
+      const removed = dependentItems(receipt.dependentsDeleted ?? {});
+      toast.success([
+        summary,
+        receipt.notebookCorpusDeleted ? t('deleteReceiptCorpus') : '',
+        removed.length > 0 ? t('deleteReceiptDependents', { items: formatList(removed) }) : '',
+      ].filter(Boolean).join(' '));
       navigate('/projects');
     }
     catch (e) { setActionError(`${t('deleteProjectError')} ${loadErrorMessage(t, e)}`); }
@@ -179,6 +223,12 @@ export function ProjectDetailPage(): JSX.Element {
   // so write affordances are hidden rather than shown-then-403. The backend
   // remains the authority on every write route.
   const canWrite = project.canWrite === true;
+  const toggleFeature = async (): Promise<void> => {
+    setLabelBusy(true); setActionError(null);
+    try { setProject(await setProjectFacet(project.id, project.facet === 'feature' ? null : 'feature')); }
+    catch { setActionError(t('facetSaveFailed')); }
+    finally { setLabelBusy(false); }
+  };
 
   return (
     <div>
@@ -186,7 +236,19 @@ export function ProjectDetailPage(): JSX.Element {
         eyebrow={t('detailEyebrow')}
         title={project.name}
         lede={t('detailLede')}
-        actions={canWrite ? <Button variant="danger" onClick={() => void onDelete()}><TrashIcon size={14} /> {t('common:delete')}</Button> : undefined}
+        actions={canWrite ? (
+          <>
+            {/* ADR 0852 D3 — the feature label (a notebook / campaign project keeps its own). */}
+            {project.facet !== 'notebook' && project.facet !== 'campaign' ? (
+              <Button variant="secondary" disabled={labelBusy} aria-pressed={project.facet === 'feature'} onClick={() => void toggleFeature()}>
+                {project.facet === 'feature' ? t('facetUnmarkFeature') : t('facetMarkFeature')}
+              </Button>
+            ) : null}
+            <Button variant="danger" disabled={deleting !== null} aria-busy={deleting !== null} onClick={() => void onDelete()}>
+              <TrashIcon size={14} /> {deleting === 'checking' ? t('deleteChecking') : deleting === 'deleting' ? t('deleteInProgress') : t('common:delete')}
+            </Button>
+          </>
+        ) : undefined}
       />
 
       {/* PRJ2-M3 — an action that failed is reported IN the page it failed on,
@@ -214,12 +276,14 @@ export function ProjectDetailPage(): JSX.Element {
               toggle-gated; renders nothing when off or unaligned). */}
           <ProjectStrategyChips projectId={project.id} />
         </>
+      ) : tab === 'ledger' ? (
+        <ProjectLedgerTab project={project} canWrite={canWrite} />
       ) : tab === 'members' ? (
         <ProjectMembersTab project={project} canWrite={canWrite} onSaved={setProject} />
       ) : tab === 'chat' ? (
         <ProjectChatTab project={project} canWrite={canWrite} onSaved={setProject} />
       ) : tab === 'board' ? (
-        <AgentBoardPanel boardId={project.boardId} persona={project.name} />
+        <AgentBoardPanel boardId={project.boardId} persona={project.name} readOnly={!canWrite} />
       ) : tab === 'memory' ? (
         <MemoryBrowser
           list={list}
@@ -246,7 +310,7 @@ export function ProjectDetailPage(): JSX.Element {
       ) : tab === 'sources' ? (
         // ADR 0084 correction — the notebook surface (sources, context levels,
         // audio/YouTube ingest, transformations, grounded Ask) scoped to this project.
-        <ProjectSourcesPanel projectId={projectId} />
+        <ProjectSourcesPanel projectId={projectId} readOnly={!canWrite} />
       ) : tab === 'podcast' ? (
         // ADR 0086 — generate a multi-speaker audio overview of THIS project.
         <ProjectPodcastPanel orgId={project.orgId} projectId={projectId} />

@@ -51,11 +51,12 @@ describe('ADR 0470 P1 — the anon write tier lands a REAL write (§N3 closed)',
     expect(contact).toBeTruthy();
     expect(contact?.leadSource).toBe('anon-widget');
     expect(contact?.name).toBe('Jane Doe');
-    // The tool succeeded (no fail-closed floor) and echoed the opaque contactId, NOT PII.
+    // The tool succeeded (no fail-closed floor). ADR 0837 D4: it echoes NO
+    // contactId (the same answer for captured / known / erased — no oracle) and no PII.
     const round2 = JSON.stringify(captured.round2);
     expect(round2).toContain('success');
     expect(round2).not.toContain('acting_user_required');
-    expect(round2).toContain(contact!.contactId);
+    expect(round2).not.toContain(contact!.contactId);
     expect(round2).not.toContain('jane@example.com'); // no-PII-echo boundary
   });
 

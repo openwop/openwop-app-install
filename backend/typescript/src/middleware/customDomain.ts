@@ -16,28 +16,19 @@
  */
 import type { NextFunction, Request, Response } from 'express';
 import { resolveCustomHost } from '../host/customDomains.js';
+import { ownerPublicRuntimeLapsed } from '../host/publicLapse.js';
 import { sendError } from './errorEnvelope.js';
-import { vendorTwin } from './protocolVersion.js';
+import { vendorPath } from './protocolVersion.js';
 
 /** Org-bound public prefixes servable on a custom domain. `public-forms` is
  *  deliberately absent in v1: its path carries no orgId to pin (recorded in
  *  ADR 0295).
  *
- *  DERIVED through `vendorTwin` (ADR 0654), not written as literals. RFC 0181
- *  makes `/host/openwop-app/…` the canonical vendor root and `/v1/host/…` the
- *  twin that *"retires atomically with `/v1`"* (`versioning.md` §5). A hardcoded
- *  `/v1/…` here would pin custom-domain routing to a prefix scheduled for
- *  removal, and the December flip inverts the rewrite — so the literal would
- *  survive the flip pointing at a path that no longer resolves.
- *
- *  It also keeps the v1-reliance ratchet honest in the right direction: that
- *  check counts versioned-vendor-prefix LITERALS, so deriving removes counts
- *  rather than freezing them at a baseline. (Deliberately not spelling the
- *  prefix out here — a comment that quotes it is itself counted, which would
- *  make this file report reliance it does not have.) */
+ *  Derived through `vendorPath` (the canonical RFC 0181 root), never written as
+ *  literals (ADR 0654 / ADR 0812). */
 const PUBLIC_ORG_PREFIXES = [
-  `${vendorTwin('/public')}/`,
-  `${vendorTwin('/public-store')}/`,
+  `${vendorPath('/public')}/`,
+  `${vendorPath('/public-store')}/`,
 ];
 
 /** Decode one URL path segment; null on a malformed escape (→ not a document). */
@@ -60,7 +51,7 @@ function seg(raw: string | undefined): string | null {
  *   /pod/:show/:episode     → the podcast EPISODE prerender
  */
 function documentRewrite(path: string, orgId: string): string | null {
-  const base = `${vendorTwin('/public')}/${encodeURIComponent(orgId)}`;
+  const base = `${vendorPath('/public')}/${encodeURIComponent(orgId)}`;
   const page = (slug: string): string => `${base}/prerender/${encodeURIComponent(slug)}`;
 
   if (path === '/') return page('home');
@@ -85,7 +76,9 @@ function documentRewrite(path: string, orgId: string): string | null {
 }
 
 /** Extract the `:orgId` segment right after a matched prefix. */
-function orgFromPath(path: string): string | null {
+function orgFromPath(rawPath: string): string | null {
+  // A missed prefix fails CLOSED (the custom domain 404s), never open.
+  const path = rawPath;
   for (const prefix of PUBLIC_ORG_PREFIXES) {
     if (path.startsWith(prefix)) {
       const seg = path.slice(prefix.length).split('/', 1)[0] ?? '';
@@ -126,6 +119,17 @@ export function customDomainMiddleware() {
         // H27-b — `detail` was a NEW TOP-LEVEL key (`additionalProperties: false`
         // forbids it) carrying what is simply the envelope's `message`.
         sendError(res, 429, 'rate_limited', 'This site is receiving too many requests. Try again shortly.');
+        return;
+      }
+      // ADR 0820 §7 (G9) — hosting a customer domain IS the custom-domains product, so the
+      // OWNER's lapse past the public grace window stops serving on the bound host with the
+      // same uniform 404 a wrong-org path gets. Off unless OPENWOP_BILLING_PUBLIC_LAPSE_GRACE_DAYS
+      // is set (then a synchronous env read only); when set, the verdict is cached per
+      // (feature, tenant) for a minute, i.e. per bound host. A billing fault SERVES. The
+      // `custom-domains` TOGGLE is deliberately not read here: serving never consulted it, and
+      // adding it is a separate behaviour change.
+      if (await ownerPublicRuntimeLapsed('custom-domains', bound.tenantId)) {
+        sendError(res, 404, 'not_found', 'Not found.');
         return;
       }
       // ADR 0384/0390/0391 — DOCUMENT paths on a bound host (`/`, `/p/:slug`,

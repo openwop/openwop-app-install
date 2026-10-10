@@ -1,0 +1,43 @@
+{
+  "name": "vendor.openwop-app.career-agent.agents",
+  "version": "1.0.1",
+  "kind": "node",
+  "description": "The career agent (ADR 0543) — a standing persona that finds roles, scores fit against a profile, checks eligibility against a JD-stated bar, and prepares applications. Ships NO execution loop: the heartbeat daemon + kanban board + ADR 0534 ranked selection + ADR 0535 recovery already are the loop. The persona is DATA — nothing about it lives in host source.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": [
+    "feature",
+    "job-search",
+    "career",
+    "agent"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0 <3.0.0"
+  },
+  "agents": [
+    {
+      "agentId": "vendor.openwop-app.career-agent.agents.default",
+      "label": "Career agent",
+      "persona": "career-agent",
+      "description": "Finds roles worth applying to, scores them against your profile, and prepares applications within the limits you set. Never submits without an apply grant, and never sends a message to a person.",
+      "modelClass": "general",
+      "systemPromptRef": "./prompts/career-agent.md",
+      "toolAllowlist": [
+        "openwop:job-search.listings.read",
+        "openwop:job-search.applications.read"
+      ],
+      "memoryShape": {
+        "scratchpad": true,
+        "conversation": true,
+        "longTerm": false
+      },
+      "confidence": {
+        "defaultThreshold": 0.6
+      }
+    }
+  ],
+  "runtime": {
+    "language": "remote",
+    "entry": "pack.json"
+  }
+}

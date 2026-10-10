@@ -82,7 +82,7 @@ describe('v2 capability root', () => {
     // refusal would leave the advert standing and the host claiming a MUST it
     // answers 501 to — exactly the state this file exists to prevent, and one
     // that no assertion on the discovery document alone can see.
-    const create = await fetch(`${base}/v1/runs`, {
+    const create = await fetch(`${base}/runs`, {
       method: 'POST',
       headers: { ...AUTH, 'content-type': 'application/json' },
       body: JSON.stringify({ workflowId: 'conformance-multi-node' }),
@@ -96,12 +96,12 @@ describe('v2 capability root', () => {
     // parsing the stream's own `: open` heartbeat comment. Poll the run instead.
     const { runId } = await create.json() as { runId: string };
     for (let i = 0; i < 60; i++) {
-      const r = await fetch(`${base}/v1/runs/${encodeURIComponent(runId)}`, { headers: AUTH });
+      const r = await fetch(`${base}/runs/${encodeURIComponent(runId)}`, { headers: AUTH });
       const st = r.status === 200 ? ((await r.json() as { status?: string }).status ?? '') : '';
       if (st === 'completed' || st === 'failed') break;
       await new Promise((res) => setTimeout(res, 50));
     }
-    const fork = await fetch(`${base}/v1/runs/${encodeURIComponent(runId)}:fork`, {
+    const fork = await fetch(`${base}/runs/${encodeURIComponent(runId)}:fork`, {
       method: 'POST',
       headers: { ...AUTH, 'content-type': 'application/json' },
       body: JSON.stringify({ mode: 'replay', fromSeq: 1 }),

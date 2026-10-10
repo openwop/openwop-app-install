@@ -1,17 +1,26 @@
 {
   "name": "vendor.myndhyve.data-integration",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "MyndHyve data-integration pack. 7 nodes for fetching from typed data sources (REST / GraphQL / A2A / MCP), transforming results, applying bindings to UI templates, and managing run-scoped variables. Routes through ctx.dataIntegration.* host adapter.",
   "author": "MyndHyve",
   "license": "Apache-2.0",
   "homepage": "https://myndhyve.ai/packs/data-integration",
   "repository": "https://github.com/openwop/openwop",
-  "keywords": ["vendor", "myndhyve", "data", "integration", "rest", "graphql", "a2a", "mcp"],
+  "keywords": [
+    "vendor",
+    "myndhyve",
+    "data",
+    "integration",
+    "rest",
+    "graphql",
+    "a2a",
+    "mcp"
+  ],
   "engines": {
-    "openwop": ">=1.0.0 <2.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "peerDependencies": {
-    "host.dataIntegration": "supported"
+    "dataIntegration": "supported"
   },
   "nodes": [
     {
@@ -21,7 +30,10 @@
       "description": "Fetches structured data from a configured REST source. Higher-level than core.openwop.http.fetch — knows about the source's auth, pagination, response shape. Routes through ctx.dataIntegration.fetchRest.",
       "category": "data",
       "role": "side-effect",
-      "capabilities": ["cacheable", "side-effectful"],
+      "capabilities": [
+        "cacheable",
+        "side-effectful"
+      ],
       "configSchemaRef": "schemas/source.rest.config.json",
       "inputSchemaRef": "schemas/source.rest.input.json",
       "outputSchemaRef": "schemas/source.rest.output.json"
@@ -33,7 +45,10 @@
       "description": "Queries a configured GraphQL endpoint. Returns `data` + `errors` per the GraphQL response shape.",
       "category": "data",
       "role": "side-effect",
-      "capabilities": ["cacheable", "side-effectful"],
+      "capabilities": [
+        "cacheable",
+        "side-effectful"
+      ],
       "configSchemaRef": "schemas/source.graphql.config.json",
       "inputSchemaRef": "schemas/source.graphql.input.json",
       "outputSchemaRef": "schemas/source.graphql.output.json"
@@ -45,7 +60,10 @@
       "description": "Queries a registered A2A peer agent per spec/v1/a2a-integration.md. Sends a typed task, awaits the peer's response.",
       "category": "data",
       "role": "side-effect",
-      "capabilities": ["cacheable", "side-effectful"],
+      "capabilities": [
+        "cacheable",
+        "side-effectful"
+      ],
       "configSchemaRef": "schemas/source.a2a.config.json",
       "inputSchemaRef": "schemas/source.a2a.input.json",
       "outputSchemaRef": "schemas/source.a2a.output.json"
@@ -57,7 +75,10 @@
       "description": "Fetches from an MCP resource OR invokes an MCP tool (host-defined which). Higher-level than core.openwop.mcp.{readResource, invokeTool} — knows the source's intent (data vs action).",
       "category": "data",
       "role": "side-effect",
-      "capabilities": ["cacheable", "side-effectful"],
+      "capabilities": [
+        "cacheable",
+        "side-effectful"
+      ],
       "configSchemaRef": "schemas/source.mcp.config.json",
       "inputSchemaRef": "schemas/source.mcp.input.json",
       "outputSchemaRef": "schemas/source.mcp.output.json"
@@ -69,7 +90,10 @@
       "description": "Applies a host-defined transform expression (jq-style, JSONata, host-extension) to input data. Routes through ctx.dataIntegration.transform — host owns the expression engine. Side-effectful (host call) + cacheable (deterministic given inputs).",
       "category": "data",
       "role": "side-effect",
-      "capabilities": ["cacheable", "side-effectful"],
+      "capabilities": [
+        "cacheable",
+        "side-effectful"
+      ],
       "configSchemaRef": "schemas/transform.config.json",
       "inputSchemaRef": "schemas/transform.input.json",
       "outputSchemaRef": "schemas/transform.output.json"
@@ -81,7 +105,10 @@
       "description": "Computes a derived run-scoped variable from existing variables + inputs via the host's expression engine (ctx.dataIntegration.computeVariable). Side-effectful (host call) + cacheable.",
       "category": "data",
       "role": "side-effect",
-      "capabilities": ["cacheable", "side-effectful"],
+      "capabilities": [
+        "cacheable",
+        "side-effectful"
+      ],
       "configSchemaRef": "schemas/variable.compute.config.json",
       "inputSchemaRef": "schemas/variable.compute.input.json",
       "outputSchemaRef": "schemas/variable.compute.output.json"
@@ -93,7 +120,10 @@
       "description": "Reads a run-scoped variable by name. Side-effectful + cacheable (variables can change mid-run).",
       "category": "data",
       "role": "side-effect",
-      "capabilities": ["cacheable", "side-effectful"],
+      "capabilities": [
+        "cacheable",
+        "side-effectful"
+      ],
       "configSchemaRef": "schemas/variable.fetch.config.json",
       "inputSchemaRef": "schemas/variable.fetch.input.json",
       "outputSchemaRef": "schemas/variable.fetch.output.json"
@@ -105,7 +135,10 @@
       "description": "Applies a variable value to a canvas target. Routes through host.dataIntegration.applyBinding({targetType, targetPath, value, transform?, fallback?, canvasId?}) with updateMode (immediate | batched) + preserveUndo config. Returns the prior value so workflow authors can roll back if needed.",
       "category": "data",
       "role": "side-effect",
-      "capabilities": ["cacheable", "side-effectful"],
+      "capabilities": [
+        "cacheable",
+        "side-effectful"
+      ],
       "configSchemaRef": "schemas/binding.apply.config.json",
       "inputSchemaRef": "schemas/binding.apply.input.json",
       "outputSchemaRef": "schemas/binding.apply.output.json"
@@ -116,5 +149,6 @@
     "format": "esm",
     "entry": "./index.mjs",
     "minRuntimeVersion": "node>=20"
-  }
+  },
+  "kind": "node"
 }

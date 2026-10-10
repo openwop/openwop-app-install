@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.market-intel-content-extraction/1.0.0/content-extraction.config.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.market-intel-content-extraction/1.0.2/content-extraction.config.json",
   "title": "MarketIntelContentExtractionConfig",
   "type": "object",
   "properties": {

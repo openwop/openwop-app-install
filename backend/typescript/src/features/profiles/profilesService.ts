@@ -15,6 +15,8 @@
  */
 
 import { DurableCollection } from '../../host/hostExtPersistence.js';
+import { onWorkflowForked } from '../../host/workflowsRegistry.js';
+import { casRepoint, repointList } from '../../host/forkRepoint.js';
 import { OpenwopError } from '../../types.js';
 import { scrubSecretShaped } from '../../host/redactSecrets.js';
 import { safeUrl } from '../../host/boundedStrings.js';
@@ -812,3 +814,16 @@ registerExternalByteRefProvider(async (tenantId) => {
 export async function __resetProfiles(): Promise<void> {
   await store.__clear();
 }
+
+// ADR 0789 — a member's showcased workflows follow this tenant's fork.
+onWorkflowForked('profiles:profile', async (tenantId, from, to) => {
+  let n = 0;
+  for (const p of await store.listForTenantIndexed(tenantId)) {
+    if (!(p.workflows ?? []).includes(from)) continue;
+    if (await casRepoint(store, p.userId, (row) => {
+      const next = row.tenantId === tenantId ? repointList(row.workflows, from, to) : null;
+      return next ? { ...row, workflows: next } : null;
+    })) n += 1;
+  }
+  return n;
+});

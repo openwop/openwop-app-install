@@ -117,6 +117,7 @@ export const messages = {
   deleteUserBody: 'Esto borra de forma permanente la cuenta de {{name}} y todos los registros guardados bajo ella: perfil, memorias, flujos de trabajo, ejecuciones y credenciales almacenadas. No se puede deshacer.',
   selfLockoutRefused: 'No puedes desactivar, cerrar la sesión ni eliminar tu propia cuenta desde aquí; pide a otro administrador que lo haga.',
   legalHoldRefused: 'Este espacio de trabajo está bajo retención legal, así que los datos de usuario no se pueden borrar. Levanta la retención y vuelve a intentarlo.',
+  ownerRequiredRefused: 'Solo un propietario de este espacio de trabajo puede desactivar, cerrar la sesión o eliminar a otro propietario. Pide a un propietario que lo haga.',
   addRequired: 'Introduce un id de principal.',
   addInvalidPrincipal: 'Un id de principal es un solo token sin espacios, p. ej. oidc:sub-123.',
   addDuplicate: 'Ya existe un usuario con este id de principal.',

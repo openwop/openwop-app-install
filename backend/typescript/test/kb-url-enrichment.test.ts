@@ -6,6 +6,10 @@
  *    section heading matches the query ranks (the embedded text carries the
  *    heading path) while the stored hit text stays RAW;
  *  - config validation for the enrichment knob.
+ *
+ * SABOTAGE-WITNESSED (/grade-tests wave 6): dropping the http(s) scheme check, the
+ * non-text ⇒ untrusted fence, the knob validation, `enrichmentOf` (forced `off`), or
+ * storing the enriched text as the hit text each reds its case.
  */
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -63,15 +67,21 @@ describe('heading-path enrichment (ADR 0351 P4)', () => {
       .rejects.toMatchObject({ httpStatus: 400 });
     await setRetrievalConfig(T, ORG, col.collectionId, 'u1', { enrichment: 'heading-path' });
 
-    // The chunk body never mentions "pricing" — only its section heading does.
-    // With heading-path enrichment the EMBEDDED text carries the heading, so a
-    // pricing query densely matches the chunk; the returned hit text stays raw.
-    await ingestDocument(T, ORG, 'u1', col.collectionId, {
-      title: 'Contract', text: '# Pricing terms\nThe monthly fee is fixed for the first year and reviewed annually thereafter.',
-    });
-    const { hits, embedding } = await searchDetailed(T, ORG, col.collectionId, 'pricing terms contract', 3);
-    expect(embedding.mode).toBe('local');
-    expect(hits.length).toBeGreaterThan(0);
-    expect(hits[0]!.text.startsWith('[')).toBe(false); // stored text raw (no prefix leak)
+    // The SAME document in an enrichment-OFF control collection. Since ADR 0398 the
+    // heading line rides in the chunk body, so only the document TITLE ("Contract") is
+    // enrichment-only: the enriched EMBEDDING carries `[Contract > Pricing terms]`, so a
+    // dense `contract` query scores it strictly higher than the plain twin. (A one-doc
+    // `hits.length > 0` check passed with enrichment forced off — MEASURED, wave 6.)
+    const plain = await createCollection(T, ORG, 'u1', { name: 'E-off' });
+    const doc = { title: 'Contract', text: '# Pricing terms\nThe monthly fee is fixed for the first year and reviewed annually thereafter.' };
+    await ingestDocument(T, ORG, 'u1', col.collectionId, doc);
+    await ingestDocument(T, ORG, 'u1', plain.collectionId, doc);
+    const enriched = await searchDetailed(T, ORG, col.collectionId, 'contract', 3, 'dense');
+    const control = await searchDetailed(T, ORG, plain.collectionId, 'contract', 3, 'dense');
+    expect(enriched.embedding.mode).toBe('local');
+    expect(enriched.hits[0]!.score, 'the enriched embedding carries the title/heading path').toBeGreaterThan(control.hits[0]!.score);
+    // …while the STORED hit text stays raw in both (no prefix leak).
+    expect(enriched.hits[0]!.text).toBe(doc.text);
+    expect(control.hits[0]!.text).toBe(doc.text);
   });
 });

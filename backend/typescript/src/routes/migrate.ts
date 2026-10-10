@@ -34,8 +34,8 @@
  */
 
 import type { Express, Request } from 'express';
-import { createHmac, timingSafeEqual } from 'node:crypto';
 import { OpenwopError } from '../types.js';
+import { COOKIE_NAME, readCookie, verifySession, type SessionPayload } from '../middleware/cookieSession.js';
 import { createLogger } from '../observability/logger.js';
 import type { Storage } from '../storage/storage.js';
 import {
@@ -47,67 +47,17 @@ import { dedupePersonasBeforeAdopt } from '../host/adoptDedup.js';
 
 const log = createLogger('routes.migrate');
 
-// Mirrors middleware/auth.ts — Firebase Hosting strips every cookie
-// except `__session`, so the demo's auth cookie is `__session`.
-// Override via OPENWOP_SESSION_COOKIE_NAME for non-Hosting deploys.
-const COOKIE_NAME = process.env.OPENWOP_SESSION_COOKIE_NAME || '__session';
-
-interface SessionPayload {
-  sid: string;
-  tenantId: string;
-  tier: 'anon' | 'user';
-  iat: number;
-  exp: number;
-}
-
-function base64urlDecode(s: string): Buffer {
-  let pad = s.replace(/-/g, '+').replace(/_/g, '/');
-  while (pad.length % 4 !== 0) pad += '=';
-  return Buffer.from(pad, 'base64');
-}
-
-function readCookie(header: string | undefined, name: string): string | undefined {
-  if (!header) return undefined;
-  for (const part of header.split(';')) {
-    const eq = part.indexOf('=');
-    if (eq <= 0) continue;
-    if (part.slice(0, eq).trim() !== name) continue;
-    return part.slice(eq + 1).trim();
-  }
-  return undefined;
-}
-
-function sessionSecret(): string {
-  const s = process.env.OPENWOP_SESSION_SECRET;
-  if (s && s.length >= 32) return s;
-  // The auth middleware caches a dev fallback under this env key.
-  return process.env._OPENWOP_DEV_SESSION_SECRET ?? '';
-}
-
+/** The anon sandbox cookie, if this request carries a valid one. ADR 0833 D1 —
+ *  through the SHARED cookie verifier: this file used to hand-roll its own copy
+ *  of the HMAC check (and its own secret resolution), a second verifier the
+ *  hardening of the first could never reach. */
 function verifyAnonSessionCookie(req: Request): SessionPayload | null {
   const raw = readCookie(req.header('cookie'), COOKIE_NAME);
-  if (!raw) return null;
-  const dot = raw.indexOf('.');
-  if (dot <= 0 || dot === raw.length - 1) return null;
-  const payloadB64 = raw.slice(0, dot);
-  const sigB64 = raw.slice(dot + 1);
-  const secret = sessionSecret();
-  if (!secret) return null;
-  const expected = createHmac('sha256', secret).update(payloadB64).digest();
-  let provided: Buffer;
-  try { provided = base64urlDecode(sigB64); } catch { return null; }
-  if (expected.length !== provided.length) return null;
-  if (!timingSafeEqual(expected, provided)) return null;
-  let payload: SessionPayload;
-  try { payload = JSON.parse(base64urlDecode(payloadB64).toString('utf8')) as SessionPayload; }
-  catch { return null; }
-  const now = Math.floor(Date.now() / 1000);
-  if (typeof payload.exp !== 'number' || payload.exp < now) return null;
-  return payload;
+  return raw ? verifySession(raw) : null;
 }
 
 export function registerMigrateRoute(app: Express, deps: { storage: Storage }): void {
-  app.post('/v1/host/openwop-app/migrate-tenant', async (req, res, next) => {
+  app.post('/host/openwop-app/migrate-tenant', async (req, res, next) => {
     try {
       // ADR 0015: migrate the anon sandbox into the caller's PERSONAL tenant —
       // NOT `req.tenantId`, which is the active workspace and may be a shared

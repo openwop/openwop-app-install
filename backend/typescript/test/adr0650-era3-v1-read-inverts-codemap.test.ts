@@ -34,7 +34,7 @@ const V2 = { 'OpenWOP-Version': '2' };
 const types = (r: { json: any }): string[] => (r.json.events as Array<{ type: string }>).map((e) => e.type);
 
 describe('era-3 log read on the v1 wire inverts the codemap', () => {
-  it('a renamed type stored in its v2 spelling reads as the v1 spelling on /v1, and as v2 on the major-2 read', async () => {
+  it('a renamed type stored in its v2 spelling reads as v2 on the major-2 read', async () => {
     // An IN-FLIGHT run: the seeded types include forward execution
     // (`run.resume-started`, `interrupt.requested`), which RFC 0194 refuses at
     // the store behind a terminal event. `conformance-noop` completes at once;
@@ -47,21 +47,14 @@ describe('era-3 log read on the v1 wire inverts the codemap', () => {
     await storage.appendEvent({ eventId: randomUUID(), runId: bare, type: 'run.resume-started', payload: {}, timestamp: new Date().toISOString() });
     await storage.appendEvent({ eventId: randomUUID(), runId: bare, type: 'replay.diverged-at-refusal', payload: { sourceRunId: bare, atSequence: 1 }, timestamp: new Date().toISOString() });
 
-    const v1 = await req('GET', `/v1/runs/${bare}/events/poll`);
-    expect(v1.status, v1.text.slice(0, 160)).toBe(200);
-    expect(types(v1), 'v1 wire: the INVERSE codemap spelling').toEqual(expect.arrayContaining(['run.resuming', 'replay.divergedAtRefusal']));
-    expect(types(v1)).not.toEqual(expect.arrayContaining(['run.resume-started']));
-
-    // Corpus ruling (bus `e972`, `persistence.md` 2.4.0): a type with NO codemap
-    // row passes through in its v2 spelling — a host MUST NOT drop it and MUST
-    // NOT refuse the read for it. v1 `type` is an open string a v1 consumer
-    // tolerates (COMPATIBILITY §2.1).
+    // ADR 0812 P3c-0: the two /v1 legs (the inverse-codemap spelling on the v1
+    // wire, and the v2-only type passing through it) were deleted with major 1;
+    // the major-2 read of the same era-3 log is what remains.
     await storage.appendEvent({ eventId: randomUUID(), runId: bare, type: 'interrupt.requested', payload: { kind: 'custom', key: 'k', data: { customKind: 'x' } }, timestamp: new Date().toISOString() });
-    const v1b = await req('GET', `/v1/runs/${bare}/events/poll`);
-    expect(types(v1b), 'a v2-only type passes through, present and unrenamed').toContain('interrupt.requested');
 
     const v2 = await req('GET', `/runs/${projectBoundId(bound)}/events/poll`, V2);
     expect(v2.status, v2.text.slice(0, 160)).toBe(200);
-    expect(types(v2), 'major-2 wire: the v2 spelling, untouched').toEqual(expect.arrayContaining(['run.resume-started', 'replay.diverged-at-refusal']));
+    expect(types(v2), 'major-2 wire: the v2 spelling, untouched').toEqual(expect.arrayContaining(['run.resume-started', 'replay.diverged-at-refusal', 'interrupt.requested']));
+    expect(types(v2), 'major-2 wire: never the v1 spelling').not.toEqual(expect.arrayContaining(['run.resuming']));
   });
 });

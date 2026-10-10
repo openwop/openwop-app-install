@@ -30,9 +30,9 @@ afterAll(async () => { await new Promise<void>((res) => server.close(() => res()
 
 const j = async <T>(res: Response): Promise<T> => (await res.json()) as T;
 const ab = (method: string, body?: unknown) =>
-  fetch(`${BASE}/v1/host/openwop-app/app-brand`, { method, headers: ADMIN, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
+  fetch(`${BASE}/host/openwop-app/app-brand`, { method, headers: ADMIN, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
 const publicBrand = (headers: Record<string, string> = {}) =>
-  fetch(`${BASE}/v1/host/openwop-app/public-brand`, { headers });
+  fetch(`${BASE}/host/openwop-app/public-brand`, { headers });
 
 async function normalClient(): Promise<(m: string, p: string, b?: unknown) => Promise<Response>> {
   let cookie = '';
@@ -41,7 +41,7 @@ async function normalClient(): Promise<(m: string, p: string, b?: unknown) => Pr
     for (const ck of getSetCookies(res.headers) as string[]) { const m2 = /(__session=[^;]+)/.exec(ck); if (m2) cookie = m2[1]; }
     return res;
   };
-  const login = await call('POST', '/v1/host/openwop-app/test/login', { email: `ab-${n++}@x.test` });
+  const login = await call('POST', '/host/openwop-app/test/login', { email: `ab-${n++}@x.test` });
   expect(login.status).toBe(201);
   return call;
 }
@@ -88,17 +88,17 @@ describe('app-brand — superadmin authority', () => {
 
   it('forbids a non-superadmin (403) on read and write', async () => {
     const call = await normalClient();
-    expect((await call('GET', '/v1/host/openwop-app/app-brand')).status).toBe(403);
-    expect((await call('PUT', '/v1/host/openwop-app/app-brand', { identity: { productName: 'Hijack' } })).status).toBe(403);
+    expect((await call('GET', '/host/openwop-app/app-brand')).status).toBe(403);
+    expect((await call('PUT', '/host/openwop-app/app-brand', { identity: { productName: 'Hijack' } })).status).toBe(403);
   });
 });
 
 describe('app-brand — isolation (reserved brand only)', () => {
   it('a tenant marketing brand is never reachable as the app brand', async () => {
     const call = await normalClient();
-    const org = await j<{ orgId: string }>(await (await call('POST', '/v1/host/openwop-app/orgs', { name: 'Acme' })));
+    const org = await j<{ orgId: string }>(await (await call('POST', '/host/openwop-app/orgs', { name: 'Acme' })));
     // create a tenant brand WITH an identity — it must stay inert (never drive the chrome)
-    const created = await call('POST', '/v1/host/openwop-app/brand/brands', {
+    const created = await call('POST', '/host/openwop-app/brand/brands', {
       orgId: org.orgId, name: 'Tenant', identity: { productName: 'TENANT-SHOULD-NOT-LEAK' },
     });
     expect(created.status).toBe(201);
@@ -106,6 +106,6 @@ describe('app-brand — isolation (reserved brand only)', () => {
     const pub = await j<{ identity: { productName?: string } }>(await publicBrand());
     expect(pub.identity.productName).not.toBe('TENANT-SHOULD-NOT-LEAK');
     // and a normal user cannot reach the reserved brand id through the tenant routes
-    expect((await call('GET', '/v1/host/openwop-app/brand/brands/brand:host-app')).status).toBe(404);
+    expect((await call('GET', '/host/openwop-app/brand/brands/brand:host-app')).status).toBe(404);
   });
 });

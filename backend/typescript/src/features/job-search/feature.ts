@@ -34,10 +34,13 @@ import { buildJobSearchSurface } from './surface.js';
 import { registerChainBackedWorkflow } from '../../host/chainBackedWorkflows.js';
 import { CAREER_CAMPAIGN_CARD_WORKFLOW_ID } from './agent/provision.js';
 import { registerJobSearchCrmCascade } from './lifecycle/crmCascade.js';
+import { registerFeatureDataExporter } from '../../host/featureDataExport.js';
+import { exportJobSearchData } from './dataExport.js';
 
 export const jobSearchFeature: BackendFeature = {
   id: JOB_SEARCH_TOGGLE,
   registerRoutes: (deps) => {
+    registerFeatureDataExporter(JOB_SEARCH_TOGGLE, exportJobSearchData); // ADR 0820 §7 — read-only export, served after a plan lapse
     registerJobSearchAgentTools();
     // JS-RI-1 — deal-deletion cascade (ADR 0283 seam): follow-ups, drafts and
     // digests die with their deal instead of orphaning into funnel joins.
@@ -54,7 +57,7 @@ export const jobSearchFeature: BackendFeature = {
     // passes the id straight to `startWorkflowRun`); a from-chain mint would
     // give each tenant a different id no card could know in advance. Same-id
     // registration keeps it gallery-editable AND card-runnable (ADR 0472 P4).
-    registerChainBackedWorkflow(CAREER_CAMPAIGN_CARD_WORKFLOW_ID);
+    registerChainBackedWorkflow(CAREER_CAMPAIGN_CARD_WORKFLOW_ID, { featureId: JOB_SEARCH_TOGGLE }); // ADR 0820 §7 / G6
   },
   // ADR 0539 D1 — an application IS a CRM deal (pipeline, stage history, reports,
   // merge, timeline). Without CRM the vertical has no pipeline at all, which is
@@ -69,10 +72,10 @@ export const jobSearchFeature: BackendFeature = {
   surface: { id: JOB_SEARCH_TOGGLE, build: buildJobSearchSurface },
   // ADR 0540 P4 — the pack now exists, so it is declared.
   requiredPacks: [
-    { name: 'feature.job-search.nodes', version: '1.1.0' },
+    { name: 'feature.job-search.nodes', version: '1.1.1' },
     // ADR 0543 P1 — the career persona is DATA. Nothing about it lives in host
     // source, and the heartbeat needs no change to run it.
-    { name: 'feature.career-agent.agents', version: '1.0.0' },
+    { name: 'vendor.openwop-app.career-agent.agents', version: '1.0.1' },
   ],
   toggleDefault: {
     id: JOB_SEARCH_TOGGLE,

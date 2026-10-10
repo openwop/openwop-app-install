@@ -19,6 +19,11 @@
  * is the property that stops the two drifting apart. What is NOT proven here is that
  * a live pgvector executes the DELETE — that is the same residual the adapter has
  * carried since it shipped, and it is named rather than implied.
+ *
+ * SABOTAGE-WITNESSED (/grade-tests wave 6): skipping the memory purger's drop, widening
+ * it to every tenant, removing the falsy-tenant guard, counting a throwing backend as
+ * run, renaming the column to `tenant_id`, or renaming either registration each reds
+ * its case.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { mkdtempSync } from 'node:fs';
@@ -33,7 +38,7 @@ import {
   registerVectorTenantPurger,
 } from '../src/host/vector/vectorTenantPurge.js';
 import { purgeTenantSql, deleteSql } from '../src/host/vector/pgVectorVector.js';
-import { collectionNamespace, createCollection, ingestDocument, search } from '../src/features/kb/kbService.js';
+import { collectionNamespace, createCollection, getCollection, ingestDocument, search } from '../src/features/kb/kbService.js';
 
 const SECRET = 'Termination letter for employee 44120, effective immediately, code RRV-9033.';
 
@@ -59,7 +64,8 @@ describe('KB-2 — the vector mirror is reachable by tenant teardown', () => {
     const before = await search(tenantId, orgId, col.collectionId, 'termination code RRV-9033', 10, 'dense');
     expect(before.some((h) => h.text.includes('RRV-9033'))).toBe(true);
 
-    const ns = collectionNamespace({ collectionId: col.collectionId, orgId } as never);
+    // The namespace the product actually writes (it folds `activeSignature` when set).
+    const ns = collectionNamespace((await getCollection(tenantId, orgId, col.collectionId))!);
     const vector = buildHostSurfaceBundle({ tenantId }).db.vector;
     const seeded = await vector.query({ namespace: ns, vector: new Array(256).fill(0.01), topK: 50 });
     expect((seeded.matches as unknown[]).length).toBeGreaterThan(0);
@@ -88,7 +94,7 @@ describe('KB-2 — the vector mirror is reachable by tenant teardown', () => {
 
     await purgeTenantVectors(drop);
 
-    const keptNs = collectionNamespace({ collectionId: kept.collectionId, orgId } as never);
+    const keptNs = collectionNamespace((await getCollection(keep, orgId, kept.collectionId))!);
     const still = await buildHostSurfaceBundle({ tenantId: keep }).db.vector.query({ namespace: keptNs, vector: new Array(256).fill(0.01), topK: 50 });
     expect((still.matches as unknown[]).length).toBeGreaterThan(0);
   });

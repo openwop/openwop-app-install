@@ -15,7 +15,7 @@ import { getUserPrefs, putUserPrefs, getUserByokUsage, type PersonalBudgetPref, 
 import { describeOwnManagedUsage } from '../../providers/managedProvider.js';
 import type { ReasoningDirectiveStrength } from '../../host/envelopeDirective.js';
 
-const BASE = '/v1/host/openwop-app/settings/prefs';
+const BASE = '/host/openwop-app/settings/prefs';
 const STRENGTHS = new Set<ReasoningDirectiveStrength>(['off', 'advisory', 'mandatory']);
 const MAX_DAILY_TOKEN_CAP = 1_000_000_000;
 

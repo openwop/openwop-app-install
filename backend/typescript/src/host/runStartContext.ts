@@ -45,6 +45,13 @@ export interface RunStartContext {
    * per contributor, never applied by this module.
    */
   derivedFromRun?: boolean;
+  /**
+   * ADR 0831 P2 — the metadata being stamped, READ-ONLY. A contributor that
+   * derives a decision from host-written blocks (the `kanban` / `schedule`
+   * attribution) reads them here. Caller-supplied keys can sit in this object
+   * too, so a contributor MUST NOT treat any key here as authorization.
+   */
+  metadata?: Readonly<Record<string, unknown>>;
 }
 
 /**

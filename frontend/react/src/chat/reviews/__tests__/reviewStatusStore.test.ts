@@ -44,7 +44,7 @@ function review(id: string, extra: Partial<ReviewRequest> = {}): ReviewRequest {
 beforeEach(() => {
   listReviews.mockReset();
   decideReview.mockReset();
-  useReviewStatusStore.setState({ reviews: [], statusById: {}, loading: false, error: null, initialized: false, _busCleanup: null, _refcount: 0 });
+  useReviewStatusStore.setState({ reviews: [], statusById: {}, loading: false, error: null, errorCause: null, failureById: {}, initialized: false, _busCleanup: null, _refcount: 0 });
 });
 
 describe('reviewStatusStore — signal frames', () => {
@@ -103,16 +103,36 @@ describe('reviewStatusStore — decide', () => {
   it('optimistically drops the review and resolves on success', async () => {
     useReviewStatusStore.setState({ reviews: [review('interrupt:a'), review('interrupt:b')] });
     decideReview.mockResolvedValue({ reviewId: 'interrupt:a', status: 'resolved' });
-    await s().decide('interrupt:a', 'approve');
+    await expect(s().decide('interrupt:a', 'approve')).resolves.toBe('recorded');
     expect(s().reviews.map((r) => r.reviewId)).toEqual(['interrupt:b']);
     expect(s().statusById['interrupt:a']?.status).toBe('approved');
   });
 
-  it('treats a 409 (already resolved) as success — keeps the optimistic drop', async () => {
+  it('a 409 (already resolved) keeps the optimistic drop and says so — not "recorded" (ADR 0778 APUX-2)', async () => {
     useReviewStatusStore.setState({ reviews: [review('interrupt:a')] });
-    decideReview.mockRejectedValue(new Error('conflict: HTTP 409'));
-    await expect(s().decide('interrupt:a', 'approve')).resolves.toBeUndefined();
+    decideReview.mockRejectedValue(new MockReviewRequestError('interrupt_already_resolved: Review already resolved.', 'interrupt_already_resolved', 409));
+    await expect(s().decide('interrupt:a', 'approve')).resolves.toBe('already-resolved');
     expect(s().reviews).toHaveLength(0);
+  });
+
+  it('a non-409 error whose TEXT says "conflict" is a failure, not a resolved review (was: message regex)', async () => {
+    useReviewStatusStore.setState({ reviews: [review('interrupt:a')] });
+    listReviews.mockResolvedValue([review('interrupt:a')]);
+    decideReview.mockRejectedValue(new MockReviewRequestError('validation_error: resolve value conflicts with schema', 'validation_error', 400));
+    await expect(s().decide('interrupt:a', 'approve')).rejects.toThrow('conflicts');
+    expect(s().reviews.map((r) => r.reviewId)).toEqual(['interrupt:a']);
+  });
+
+  it('a failed decision is kept per review, so the REMOUNTED card can show it; a retry clears it (APUX-1)', async () => {
+    useReviewStatusStore.setState({ reviews: [review('interrupt:a')] });
+    listReviews.mockResolvedValue([review('interrupt:a')]);
+    const refused = new MockReviewRequestError('forbidden_scope: Missing required scope: approvals:respond', 'forbidden_scope', 403);
+    decideReview.mockRejectedValue(refused);
+    await expect(s().decide('interrupt:a', 'approve')).rejects.toBe(refused);
+    expect(s().failureById['interrupt:a']).toBe(refused);
+    decideReview.mockResolvedValue({ reviewId: 'interrupt:a', status: 'resolved' });
+    await s().decide('interrupt:a', 'approve');
+    expect(s().failureById['interrupt:a']).toBeUndefined();
   });
 
   it('restores the review and rethrows on a non-409 failure', async () => {
@@ -168,10 +188,58 @@ describe('reviewStatusStore — ADR 0473 still-pending 409s (review F1)', () => 
     expect(s().statusById['approval:cw-1']).toBeUndefined();
   });
 
-  it('a classic already-resolved 409 (no reason) stays treat-as-success', async () => {
+  it('ADR 0862 — an assistant `action_changed` 409 is still pending too: restored, not dropped', async () => {
+    useReviewStatusStore.setState({ reviews: [review('approval:act-1')] });
+    listReviews.mockResolvedValue([review('approval:act-1')]);
+    decideReview.mockRejectedValue(new MockReviewRequestError('conflict: This action changed', 'conflict', 409, 'action_changed'));
+    await expect(s().decide('approval:act-1', 'approve', {})).rejects.toThrow(/action changed/);
+    expect(s().reviews.map((r) => r.reviewId)).toContain('approval:act-1');
+  });
+
+  it('a classic already-resolved 409 (no reason) keeps the drop and reports already-resolved', async () => {
     useReviewStatusStore.setState({ reviews: [review('approval:cw-2')] });
     decideReview.mockRejectedValue(new MockReviewRequestError('conflict: Approval already approved.', 'conflict', 409));
-    await expect(s().decide('approval:cw-2', 'approve', {})).resolves.toBeUndefined();
+    await expect(s().decide('approval:cw-2', 'approve', {})).resolves.toBe('already-resolved');
     expect(s().reviews.map((r) => r.reviewId)).not.toContain('approval:cw-2');
+  });
+});
+
+describe('ADR 0776 — waiting on you, per conversation', () => {
+  it('groups the ONE inbox by conversation', async () => {
+    const { renderHook } = await import('@testing-library/react');
+    const { useReviewCountsByConversation } = await import('../reviewStatusStore.js');
+    useReviewStatusStore.setState({ reviews: [review('a', { conversationId: 'c1' }), review('b', { conversationId: 'c1' }), review('c', { conversationId: 'c2' }), review('d')] });
+    const { result } = renderHook(() => useReviewCountsByConversation());
+    expect(Object.fromEntries(result.current)).toEqual({ c1: 2, c2: 1 });
+  });
+
+  it('re-reads the inbox when a frame names a PENDING review it has never seen (frames never add)', async () => {
+    vi.useFakeTimers();
+    try {
+      listReviews.mockResolvedValue([review('new-1', { conversationId: 'c9' })]);
+      useReviewStatusStore.setState({ reviews: [], statusById: {} });
+      const before = listReviews.mock.calls.length;
+      s()._applySignal({ metadata: { reviewId: 'new-1', status: 'pending' } } as never);
+      s()._applySignal({ metadata: { reviewId: 'new-2', status: 'pending' } } as never); // debounced into ONE read
+      await vi.advanceTimersByTimeAsync(500);
+      expect(listReviews.mock.calls.length - before).toBe(1);
+      expect(s().reviews.map((r) => r.reviewId)).toEqual(['new-1']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does NOT re-read for a terminal frame or an already-known pending review', async () => {
+    vi.useFakeTimers();
+    try {
+      useReviewStatusStore.setState({ reviews: [review('known')], statusById: {} });
+      const before = listReviews.mock.calls.length;
+      s()._applySignal({ metadata: { reviewId: 'known', status: 'pending' } } as never);
+      s()._applySignal({ metadata: { reviewId: 'gone', status: 'approved' } } as never);
+      await vi.advanceTimersByTimeAsync(500);
+      expect(listReviews.mock.calls.length - before).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

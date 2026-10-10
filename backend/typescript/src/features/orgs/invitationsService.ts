@@ -33,7 +33,7 @@ import type { Storage } from '../../storage/storage.js';
 import type { HostEventOrigin } from '../../host/hostEventDispatcher.js';
 import { registerSubjectEraser } from '../../host/subjectErasure.js';
 import { getEmailSettings } from '../email/emailService.js';
-import { effectiveEmailProvenance, type User } from '../users/usersService.js';
+import { isEmailVouched, type User } from '../users/usersService.js';
 import { deliverInviteEmail, type InviteDeliveryOutcome } from './inviteDelivery.js';
 import { invitationAccepted, invitationCreated, invitationDeclined, type SupersededStatus } from './emit.js';
 
@@ -60,6 +60,11 @@ export interface OrgInvitation {
    *  email can name the inviter — the recipient's primary phishing check. */
   createdBy?: string;
   createdByName?: string;
+  /** ADR 0815 D4 — the inviter's MEMBER ROW in this org at mint, when they had
+   *  one. The removal cascade matches on it, so an inviter whose row is spelled
+   *  `oidc:` while `createdBy` is canonical `user:` is still found without
+   *  aliasing the two strings. Absent on older rows and on the workflow lane. */
+  createdByMemberId?: string;
   /** ADR 0564 — a recipient-side terminal state the inviter can SEE. Absent =
    *  pending (the older-wire default). A declined row keeps its token-hash index
    *  until age-out so an accept replay stays a uniform failure. */
@@ -150,7 +155,7 @@ async function supersedePriorInvitations(orgId: string, email: string, exceptInv
 }
 
 export async function createInvitation(
-  input: { tenantId: string; orgId: string; email: string; role: unknown; createdBy?: string; createdByName?: string },
+  input: { tenantId: string; orgId: string; email: string; role: unknown; createdBy?: string; createdByName?: string; createdByMemberId?: string },
   /** ADR 0622 D5 — `replace: false` mints WITHOUT touching prior (org, email)
    *  rows; the composition owner `createInvitationAndDeliver` supersedes them
    *  itself only once delivery is known to have succeeded. Default `true` keeps
@@ -185,6 +190,7 @@ export async function createInvitation(
     createdAt: now,
     ...(input.createdBy ? { createdBy: input.createdBy } : {}),
     ...(input.createdByName ? { createdByName: input.createdByName } : {}),
+    ...(input.createdByMemberId ? { createdByMemberId: input.createdByMemberId } : {}),
   };
   // ORGINV-5 — INDEX ROW FIRST. A crash between the two puts then leaves an
   // index row whose invite is missing — which verify already treats as a
@@ -206,6 +212,7 @@ export interface CreateAndDeliverInput {
   actingUserId: string | undefined;
   createdBy?: string;
   createdByName?: string;
+  createdByMemberId?: string;
   /** The deploy's public origin for the accept link (`publicBaseUrl(req)` on
    *  the route; `OPENWOP_PUBLIC_BASE_URL` on the surface — never relative). */
   baseUrl: string;
@@ -273,6 +280,7 @@ export async function createInvitationAndDeliver(input: CreateAndDeliverInput): 
       role: input.role,
       ...(input.createdBy ? { createdBy: input.createdBy } : {}),
       ...(input.createdByName ? { createdByName: input.createdByName } : {}),
+      ...(input.createdByMemberId ? { createdByMemberId: input.createdByMemberId } : {}),
     },
     { replace: false },
   );
@@ -349,6 +357,33 @@ export async function revokeInvitation(tenantId: string, orgId: string, inviteId
   await inviteHashIndex.delete(inv.tokenHash);
 }
 
+/**
+ * ADR 0815 D4 — the member-authority-lost cascade: every PENDING invite in this
+ * org minted by the relationship that just lost `host:members:manage` (removed,
+ * or demoted below it) is deleted, row then index — `revokeInvitation`'s order.
+ * An invite is a delegation of its inviter's authority and must not outlive it:
+ * a removed admin's invite stayed redeemable (MEASURED). Matched by the member
+ * row stamped at mint, else by the exact `createdBy` string — never by aliasing
+ * one spelling to another (principals are not issuer-qualified). Declined rows
+ * are already dead and are left to age out.
+ */
+export async function revokePendingInvitesBy(
+  tenantId: string,
+  orgId: string,
+  inviter: { subject: string; memberIds: readonly string[] },
+): Promise<number> {
+  const ids = new Set(inviter.memberIds);
+  let n = 0;
+  for (const inv of await invites.list()) {
+    if (inv.tenantId !== tenantId || inv.orgId !== orgId || invitationStatusOf(inv) !== 'pending') continue;
+    const mine = (inv.createdByMemberId !== undefined && ids.has(inv.createdByMemberId)) || inv.createdBy === inviter.subject;
+    if (!mine) continue;
+    if (await invites.delete(inv.inviteId)) n += 1;
+    await inviteHashIndex.delete(inv.tokenHash);
+  }
+  return n;
+}
+
 /** What a token-holder is shown BEFORE they accept (UX_UPGRADE-invitations
  *  IN-G1). Deliberately small: the org they'd be joining, the role they'd get,
  *  and the address the invite was issued to — all facts the recipient already
@@ -415,7 +450,7 @@ function assertEmailOwnership(inv: OrgInvitation, user: User): void {
   if (user.email.trim().toLowerCase() !== inv.email) {
     throw new InviteError('forbidden', 'This invitation was issued to a different email.');
   }
-  if (effectiveEmailProvenance(user) === 'self') {
+  if (!isEmailVouched(user)) {
     throw new InviteError(
       'forbidden',
       'This invitation was issued to an email address your account set for itself, which is not verified. Sign in through your identity provider so your verified address is used, or contact the person who invited you.',

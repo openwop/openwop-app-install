@@ -178,7 +178,7 @@ describe('ADR 0419 — priced ⟹ gated (structural)', () => {
     // RBAC-gated feature. The request-subject check remains the entitlement-specific
     // guard; between the two, a feature that gates on RBAC but skips the choke is the
     // known residual, covered by the behavioural test, not this tripwire.
-    const GATE_HELPERS = /requireFeatureEnabled|authorizeOrgScope|requireEntitledFeature|requireOrgScope|requireTenantScope|requireKicktodoManage|resolveOne/;
+    const GATE_HELPERS = /requireFeatureEnabled|authorizeOrgScope|requireEntitledFeature|requireOrgScope|requireTenantScope|requireKicktodoManage|resolveOne|resolveToggle/;
     const GATE_FACTORIES = ['registerCanvasEditorRoutes'];
     // Matches `app.<verb>(` and the factory's `d.app.<verb>(`. A feature registering
     // on a passed-in sub-router (`router.get(`) would be missed — but no bundle

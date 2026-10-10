@@ -33,6 +33,8 @@ import type { Section } from '../cms/cmsClient.js';
 import { fetchPublicPageResult, type PublicPage } from './siteClient.js';
 import { applySeo } from './siteSeo.js';
 import { getVisitorKey, sendExperimentPageview } from './visitorBeacon.js';
+import { consentTokenFor, loadPosture } from './visitorConsent.js';
+import { VisitorConsentBanner } from './VisitorConsentBanner.js';
 import { reportWebVitals } from './webVitalsBeacon.js';
 import { CatalogView, hasLargeCatalog } from './CatalogView.js';
 import { EditThisPageLink } from './EditThisPageLink.js';
@@ -45,9 +47,9 @@ import { PublicHeaderActions, PublicMenuActions } from '../../chrome/PublicShell
  * the same typed-section model as a CMS page, so it renders identically and a
  * superadmin can later replace it by pointing the front page at a CMS `home` page.
  *
- * It tells one story, in order: the run is where AI work now happens (hero +
- * the run ledger) → why that matters → what history says about standardizing
- * it → what an open run guarantees → the evidence → what you can do here today.
+ * It tells one story, in order (ADR 0762): what you can build here (hero + the
+ * intro film) → prompts to start from → four things to try, each drawn → the
+ * app's own conformance evidence → why the run should be open → start.
  * The operator-publishable CMS twin lives at docs/site/front-page-story.sections.json.
  *
  * Built per call (not a module-level const) so its localized copy resolves against
@@ -61,34 +63,29 @@ import { PublicHeaderActions, PublicMenuActions } from '../../chrome/PublicShell
 const PRIMARY_CTA_URL = '/chat';
 
 function buildDefaultSections(demo: boolean): Section[] {
+  const t = (k: string): string => i18n.t(`site:${k}`);
   return [
     { sectionId: 'd-hero', type: 'hero', data: {
-      visual: 'run',
-      heading: i18n.t('site:heroHeading'),
-      subheading: i18n.t('site:heroSubheading'),
-      ctaLabel: i18n.t('site:heroCtaLabel'), ctaUrl: PRIMARY_CTA_URL,
-      ...(demo ? { ctaLabel2: i18n.t('site:heroCtaLabel2'), ctaUrl2: 'https://openwop.dev' } : {}),
+      // ADR 0762 — the intro film is demo-only (SectionRenderer gates it too);
+      // a white-label fallback keeps the run ledger.
+      visual: demo ? 'film' : 'run',
+      eyebrow: t('heroEyebrow'),
+      heading: t('heroHeading'),
+      subheading: t('heroSubheading'),
+      ctaLabel: t('heroCtaLabel'), ctaUrl: PRIMARY_CTA_URL,
+      ...(demo ? { ctaLabel2: t('heroCtaLabel2'), ctaUrl2: 'https://openwop.dev' } : {}),
     } },
-    { sectionId: 'd-shift', type: 'richText', data: { heading: i18n.t('site:shiftHeading'), text: i18n.t('site:shiftText') } },
-    { sectionId: 'd-history', type: 'richText', data: { heading: i18n.t('site:historyHeading'), text: i18n.t('site:historyText') } },
-    { sectionId: 'd-open', type: 'columns', data: { heading: i18n.t('site:openHeading'), layout: 'rows', columns: [
-      { title: i18n.t('site:openLeaveTitle'), text: i18n.t('site:openLeaveText') },
-      { title: i18n.t('site:openSeeTitle'), text: i18n.t('site:openSeeText') },
-      { title: i18n.t('site:openDecideTitle'), text: i18n.t('site:openDecideText') },
-      { title: i18n.t('site:openBoundTitle'), text: i18n.t('site:openBoundText') },
-      { title: i18n.t('site:openReplayTitle'), text: i18n.t('site:openReplayText') },
-    ] } },
-    { sectionId: 'd-proof', type: 'richText', data: {
-      heading: i18n.t('site:proofHeading'),
-      text: demo ? `${i18n.t('site:proofText')}\n\n${i18n.t('site:proofPaperLink')}` : i18n.t('site:proofText'),
-    } },
-    { sectionId: 'd-try', type: 'columns', data: { heading: i18n.t('site:tryHeading'), layout: 'steps', columns: [
-      { title: i18n.t('site:tryBuildTitle'), text: i18n.t('site:tryBuildText') },
-      { title: i18n.t('site:tryRunTitle'), text: i18n.t('site:tryRunText') },
-      { title: i18n.t('site:tryDecideTitle'), text: i18n.t('site:tryDecideText') },
-      { title: i18n.t('site:tryReplayTitle'), text: i18n.t('site:tryReplayText') },
-    ] } },
-    { sectionId: 'd-cta', type: 'cta', data: { heading: i18n.t('site:ctaHeading'), subheading: i18n.t('site:ctaSubheading'), label: i18n.t('site:ctaLabel'), url: PRIMARY_CTA_URL } },
+    { sectionId: 'd-prompts', type: 'columns', data: { heading: t('promptsHeading'), lede: t('promptsLede'), layout: 'prompts',
+      columns: [1, 2, 3, 4, 5, 6].map((i) => ({ title: t(`prompt${i}Tag`), text: t(`prompt${i}Text`), href: PRIMARY_CTA_URL })) } },
+    { sectionId: 'd-try', type: 'columns', data: { eyebrow: t('divesEyebrow'), heading: t('divesHeading'), layout: 'dives',
+      columns: (['canvas', 'ledger', 'approval', 'fork'] as const).map((icon, i) => ({ title: t(`dive${i + 1}Title`), text: t(`dive${i + 1}Text`), icon })) } },
+    // The conformance figures describe THIS app's signed bundle — showcase
+    // evidence, so a white-label fallback omits them (ADR 0196 Gate A).
+    ...(demo ? [{ sectionId: 'd-evidence', type: 'columns' as const, data: {
+      eyebrow: t('evidenceEyebrow'), heading: t('evidenceHeading'), lede: t('evidenceLede'), layout: 'stats',
+      columns: ['296', '0', '3', '44'].map((value, i) => ({ title: value, text: t(`evidence${i + 1}Label`) })) } }] : []),
+    { sectionId: 'd-shift', type: 'richText', data: { heading: t('shiftHeading'), text: t('shiftText') } },
+    { sectionId: 'd-cta', type: 'cta', data: { heading: t('ctaHeading'), subheading: t('ctaSubheading'), label: t('ctaLabel'), url: PRIMARY_CTA_URL } },
   ];
 }
 
@@ -167,8 +164,12 @@ export function FrontPage({ orgId, slug, surface, embed }: { orgId: string; slug
     // ADR 0236 (D1): send the anonymous visitor key so a RUNNING page
     // experiment can assign a variant (consent enforced server-side — no
     // consent/key ⇒ the plain published page, byte-identical to before).
-    const vk = getVisitorKey();
-    void fetchPublicPageResult(orgId, slug, vk).then((r) => {
+    // ADR 0860 D5 — the key exists only when the visitor's decision allows it
+    // (a recorded choice, or an already-loaded posture). A first visit with no
+    // choice reads the page WITHOUT a key, never waiting on the posture request.
+    const vk = getVisitorKey(orgId);
+    const consentToken = consentTokenFor(orgId);
+    void fetchPublicPageResult(orgId, slug, vk, consentToken).then((r) => {
       if (!live) return;
       if (r.status === 'ok') {
         // A renamed slug answers with the page's CURRENT slug — canonicalize the
@@ -197,7 +198,9 @@ export function FrontPage({ orgId, slug, surface, embed }: { orgId: string; slug
         if (r.page.experiment && vk) sendExperimentPageview(orgId, vk, r.page.experiment);
         // ADR 0018 CWV fold-in — report real-user Core Web Vitals for this public
         // page (consent enforced server-side at the beacon, like the pageview).
+        // ADR 0860 D5 — or as soon as the posture/choice allows it.
         if (vk) reportWebVitals(orgId, vk);
+        else void loadPosture(orgId).then(() => { const k = live ? getVisitorKey(orgId) : null; if (k) reportWebVitals(orgId, k); });
         return;
       }
       if (surface === 'root') {
@@ -303,6 +306,8 @@ export function FrontPage({ orgId, slug, surface, embed }: { orgId: string; slug
           ? <CatalogView sections={sections} />
           : <RenderSections sections={sections} mode="public" />}
       </Suspense>
+      {/* ADR 0860 D6 — after the content, so it never precedes the page in Tab order. */}
+      {orgId ? <VisitorConsentBanner orgId={orgId} /> : null}
     </div>
   );
 }

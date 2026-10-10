@@ -1,10 +1,20 @@
 /**
- * UX_UPGRADE-forms — the public fill upgrades (F-G1/F-G2/F-G3).
+ * ADR 0331 §D1 (the ONE public fill renderer) — the UX_UPGRADE-forms upgrades
+ * (F-G1 help text, F-G2 inline-validation timing, F-G3 error summary, F-G5
+ * save-and-resume), the R2 round-2 fixes (F1 number fields, F2/F3 failure
+ * honesty, F4 consent, F5 attribution, F7 submit-another), and the ADR 0584
+ * witnesses: FORM-UX-1 (no thank-you without a stored submission id),
+ * FORM-UX-3 (a draft never bleeds to the next visitor on a shared device),
+ * FORM-DRAFT-1 (a sibling form's mount never wipes this visit's draft) and
+ * FORM-429-1 (the 429 copy is true of both causes and names neither).
  *
- * These pin BEHAVIOUR, and specifically the TIMING rule, which is the whole
- * point of inline validation: a field is judged when you LEAVE it, never while
- * you are still typing into it for the first time — and once judged, it is
- * re-judged as you type so the error clears the moment it's fixed.
+ * The TIMING rule is the point of inline validation: a field is judged when you
+ * LEAVE it, never while you are still typing into it for the first time — and
+ * once judged, it is re-judged as you type so the error clears the moment it's
+ * fixed. Sabotages that turn this file red (grade-tests wave 8): dropping the
+ * `touched` gate in `onValue`, the blur `revalidate`, the summary's field order,
+ * the 429/400/transient mapping, `pruneStaleDrafts`' doomed sweep, the TTL, the
+ * success-path draft removal, the fresh `clientKey`, the id-less-2xx refusal.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -18,9 +28,15 @@ import { PublicFormRenderer } from '../render/PublicFormRenderer.js';
 // bleed as a known behaviour it had to work around, which is as close to a
 // written-down defect as it gets. The draft is now scoped to a per-VISIT key
 // (`sessionStorage`, one tab) and expires, so the cross-visitor case is closed
-// by construction; the clear stays because tests inside ONE file share a visit
-// by design, and the resume tests below depend on that being deterministic.
-afterEach(() => localStorage.clear());
+// by construction.
+//
+// grade-tests wave 8 — every case now OWNS its visit. Two cases used to read
+// the visit id "by now", i.e. as minted by an EARLIER case's render, so they
+// went red when run alone or shuffled. Seeding it makes each case
+// self-contained; `visitKey()` returns an existing value unchanged.
+const VISIT = 'v-test-visit';
+beforeEach(() => sessionStorage.setItem('owp-form-visit', VISIT));
+afterEach(() => { localStorage.clear(); sessionStorage.clear(); });
 
 const SCHEMA = {
   formId: 'form:1',
@@ -36,7 +52,7 @@ const ok = (body: unknown, status = 200): Response =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 
 function mockFetch(): void {
-  vi.stubGlobal('fetch', vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) =>
+  vi.stubGlobal('fetch', vi.fn<typeof fetch>(async (_url, init) =>
     (init?.method === 'POST' ? ok({ ok: true, submissionId: 'sub:1' }, 201) : ok(SCHEMA))));
 }
 
@@ -152,7 +168,7 @@ describe('public form — number fields submit (F1, round-2 BLOCKER)', () => {
   beforeEach(() => {
     posted = null;
     vi.restoreAllMocks();
-    vi.stubGlobal('fetch', vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async (_url, init) => {
       if (init?.method === 'POST') { posted = JSON.parse(String(init.body)); return ok({ ok: true, submissionId: 'sub:n' }, 201); }
       return ok(NUM_SCHEMA);
     }));
@@ -175,13 +191,12 @@ describe('public form — number fields submit (F1, round-2 BLOCKER)', () => {
     expect((posted as { values: Record<string, unknown> }).values.guests).toBe('2');
   });
 
-  it('a non-numeric answer still fails honestly on blur (the coercion is judgement-only)', async () => {
-    render(<PublicFormRenderer formId="form:n" />);
-    const box = await screen.findByLabelText(/guests/i);
-    fireEvent.change(box, { target: { value: 'two' } });
-    fireEvent.blur(box);
-    await waitFor(() => expect(box.getAttribute('aria-invalid')).toBe('true'));
-  });
+  // grade-tests wave 8 — "a non-numeric answer still fails honestly" was CUT
+  // from here: jsdom (like a browser) sanitizes a non-numeric value on
+  // <input type="number"> to '', so the case only ever exercised the EMPTY
+  // required path — sabotaging the coercion left it green (probe
+  // w8g3-pu-nonnum). The claim lives where it can fail: deriveFields.test.ts,
+  // 'a non-numeric string fails as errNumber (the coercion is judgement-only)'.
 });
 
 describe('public form — failure honesty (R2 F2/F3)', () => {
@@ -189,20 +204,17 @@ describe('public form — failure honesty (R2 F2/F3)', () => {
 
   const stubLoad = (responses: Array<Response | Error>) => {
     let i = 0;
-    vi.stubGlobal('fetch', vi.fn(async () => {
-      const r = responses[Math.min(i, responses.length - 1)];
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async () => {
+      const r = responses[Math.min(i, responses.length - 1)]!;
       i += 1;
       if (r instanceof Error) throw r;
       return r;
     }));
   };
 
-  it('a 404 keeps the uniform "unavailable" posture (the positive case)', async () => {
-    stubLoad([ok({ error: 'not_found' }, 404)]);
-    const { container } = render(<PublicFormRenderer formId="form:1" renderUnavailable={() => <p>gone</p>} />);
-    await screen.findByText('gone');
-    expect(container.querySelector('form')).toBeNull();
-  });
+  // The 404 positive case lives in PublicFormRenderer.test.tsx ('renders the
+  // unavailable slot on 404, never the form') — the duplicate here was cut in
+  // grade-tests wave 8 after the same sabotage (404 → loadFailed) reddened both.
 
   it('a 500 renders the load-failed state with a WORKING retry — never "the link is out of date", never nothing', async () => {
     stubLoad([ok({ boom: 1 }, 500), ok(SCHEMA)]);
@@ -216,7 +228,7 @@ describe('public form — failure honesty (R2 F2/F3)', () => {
   it('submit failures say what retrying can fix: 429 = capacity, 400 = rejected — answers preserved', async () => {
     let post = 0;
     const postCodes = [429, 400];
-    vi.stubGlobal('fetch', vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async (_url, init) => {
       if (init?.method === 'POST') { const c = postCodes[Math.min(post, 1)]; post += 1; return ok({ error: 'x' }, c); }
       return ok(SCHEMA);
     }));
@@ -240,10 +252,8 @@ describe('public form — failure honesty (R2 F2/F3)', () => {
   });
 
   it('a NETWORK failure on submit keeps the generic try-again copy (the transient leg)', async () => {
-    let first = true;
-    vi.stubGlobal('fetch', vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async (_url, init) => {
       if (init?.method === 'POST') { throw new TypeError('Failed to fetch'); }
-      if (first) { first = false; return ok(SCHEMA); }
       return ok(SCHEMA);
     }));
     render(<PublicFormRenderer formId="form:1" />);
@@ -251,7 +261,10 @@ describe('public form — failure honesty (R2 F2/F3)', () => {
     fireEvent.change(screen.getByLabelText(/email/i), { target: { value: 'a@b.co' } });
     fireEvent.click(screen.getByRole('button', { name: /submit|send/i }));
     await screen.findByText(/please try again/i);
-    expect(screen.queryByText(/no longer accepting/i)).toBeNull();
+    // Neither the capacity (429) nor the rejected (400) copy. This used to match
+    // /no longer accepting/, a sentence FORM-429-1 retired — a negative
+    // assertion on copy that no longer exists anywhere could not fail.
+    expect(screen.queryByText(/isn’t accepting submissions|couldn’t be accepted/i)).toBeNull();
   });
 
   it('an over-long answer is named AT THE FIELD before submit (the 5k server mirror)', async () => {
@@ -277,7 +290,7 @@ describe('public form — consent + attribution (R2 F4/F5)', () => {
   beforeEach(() => {
     posted = null;
     vi.restoreAllMocks();
-    vi.stubGlobal('fetch', vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async (_url, init) => {
       if (init?.method === 'POST') { posted = JSON.parse(String(init.body)); return ok({ ok: true, submissionId: 'sub:c' }, 201); }
       return ok(CONSENT_SCHEMA);
     }));
@@ -301,6 +314,8 @@ describe('public form — consent + attribution (R2 F4/F5)', () => {
 
   it('the submit body carries referrer + utm page metadata (the dark attribution lane, lit)', async () => {
     // jsdom: document.referrer is '' by default — stub it; utm rides the URL.
+    // An OWN property shadows jsdom's prototype getter; deleting it in `finally`
+    // restores the default, so no later case submits this referrer.
     Object.defineProperty(document, 'referrer', { value: 'https://social.example/post/1', configurable: true });
     window.history.pushState({}, '', '/f/form:c?utm_source=news&utm_campaign=aug&other=x');
     try {
@@ -312,6 +327,7 @@ describe('public form — consent + attribution (R2 F4/F5)', () => {
       expect(posted!.referrer).toBe('https://social.example/post/1');
       expect(posted!.utm).toEqual({ utm_source: 'news', utm_campaign: 'aug' });
     } finally {
+      Reflect.deleteProperty(document, 'referrer');
       window.history.pushState({}, '', '/');
     }
   });
@@ -322,7 +338,7 @@ describe('public form — resume + submit-another (R2 F-G5/F7/F8)', () => {
   beforeEach(() => {
     posts = [];
     vi.restoreAllMocks();
-    vi.stubGlobal('fetch', vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async (_url, init) => {
       if (init?.method === 'POST') { posts.push(JSON.parse(String(init.body))); return ok({ ok: true, submissionId: `sub:${posts.length}` }, 201); }
       return ok(SCHEMA);
     }));
@@ -347,9 +363,14 @@ describe('public form — resume + submit-another (R2 F-G5/F7/F8)', () => {
     render(<PublicFormRenderer formId="form:1" />);
     fireEvent.change(await screen.findByLabelText(/name/i), { target: { value: 'Ada' } });
     fireEvent.change(screen.getByLabelText(/email/i), { target: { value: 'a@b.co' } });
+    // The draft EXISTS before submit — so the null below is the success path
+    // removing it. (This used to read the legacy UNSCOPED key, which the
+    // renderer never writes: it could not fail — probe w8g3-pu-success-clear.)
+    const draftKey = `owp-form-draft:form:1:${VISIT}`;
+    expect(localStorage.getItem(draftKey)).not.toBeNull();
     fireEvent.click(screen.getByRole('button', { name: /submit|send/i }));
     const another = await screen.findByRole('button', { name: /another response/i });
-    expect(localStorage.getItem('owp-form-draft:form:1')).toBeNull(); // draft cleared
+    expect(localStorage.getItem(draftKey)).toBeNull(); // draft cleared
 
     fireEvent.click(another);
     fireEvent.change(await screen.findByLabelText(/name/i), { target: { value: 'Grace' } });
@@ -384,7 +405,7 @@ describe('public form — resume + submit-another (R2 F-G5/F7/F8)', () => {
    * re-opens the whole defect the moment any surface produces one.
    */
   it('FORM-UX-1: a 2xx WITHOUT a submissionId is a FAILURE — no thank-you, no advance', async () => {
-    vi.stubGlobal('fetch', vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) =>
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async (_url, init) =>
       (init?.method === 'POST' ? ok({ ok: true }, 200) : ok(SCHEMA))));
     const onSubmitted = vi.fn();
     render(<PublicFormRenderer formId="form:1" onSubmitted={onSubmitted} />);
@@ -392,8 +413,10 @@ describe('public form — resume + submit-another (R2 F-G5/F7/F8)', () => {
     fireEvent.change(screen.getByLabelText(/email/i), { target: { value: 'a@b.co' } });
     fireEvent.click(screen.getByRole('button', { name: /submit|send/i }));
 
-    // The respondent is TOLD it did not go through…
-    expect(await screen.findByText(/couldn’t|could not|rejected|went wrong/i)).toBeTruthy();
+    // The respondent is TOLD it did not go through — the REJECTED copy, which is
+    // what the renderer sets for an id-less 2xx. (The old /…|went wrong/ also
+    // matched the generic transient copy, i.e. passed in the wrong state.)
+    expect(await screen.findByText(/couldn’t be accepted/i)).toBeTruthy();
     // …the success view never rendered…
     expect(screen.queryByRole('button', { name: /another response/i })).toBeNull();
     // …and the embedding surface (a funnel step) did NOT advance.
@@ -402,7 +425,7 @@ describe('public form — resume + submit-another (R2 F-G5/F7/F8)', () => {
 
   it('FORM-UX-1: a real submissionId still advances the embedding surface', async () => {
     // The other half, so the assertion above cannot pass by never advancing.
-    vi.stubGlobal('fetch', vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) =>
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async (_url, init) =>
       (init?.method === 'POST' ? ok({ ok: true, submissionId: 'sub:real' }, 201) : ok(SCHEMA))));
     const onSubmitted = vi.fn();
     render(<PublicFormRenderer formId="form:1" onSubmitted={onSubmitted} />);
@@ -436,10 +459,8 @@ describe('public form — resume + submit-another (R2 F-G5/F7/F8)', () => {
   it('FORM-UX-3: a draft older than the TTL is dropped', async () => {
     // Same visit, but stale: a kiosk tab nobody closed is the case visit-scoping
     // alone does not cover, which is why the TTL is not redundant with it.
-    const visit = sessionStorage.getItem('owp-form-visit');
-    expect(visit, 'the renderer must have minted a visit key by now').toBeTruthy();
     localStorage.setItem(
-      `owp-form-draft:form:1:${visit}`,
+      `owp-form-draft:form:1:${VISIT}`,
       JSON.stringify({ savedAt: Date.now() - (31 * 60 * 1000), values: { name: 'Stale Person' } }),
     );
     render(<PublicFormRenderer formId="form:1" />);
@@ -447,16 +468,11 @@ describe('public form — resume + submit-another (R2 F-G5/F7/F8)', () => {
     expect((name as HTMLInputElement).value).toBe('');
   });
 
-  it('FORM-UX-3: a fresh draft from THIS visit still resumes (the feature is not just switched off)', async () => {
-    const first = render(<PublicFormRenderer formId="form:1" />);
-    fireEvent.change(await screen.findByLabelText(/name/i), { target: { value: 'Ada' } });
-    first.unmount();
-
-    render(<PublicFormRenderer formId="form:1" />);
-    const name = await screen.findByLabelText(/name/i);
-    expect((name as HTMLInputElement).value, 'save-and-resume must still work within one visit').toBe('Ada');
-    expect(screen.getByText(/only in this browser/i)).toBeTruthy();
-  });
+  // 'FORM-UX-3: a fresh draft from THIS visit still resumes' was cut in
+  // grade-tests wave 8 — step for step the resume half of 'typed answers
+  // survive a reload…' above, which the same sabotage (no restore) reddens.
+  // That case is the "the feature is not just switched off" control for the two
+  // FORM-UX-3 refusals around it.
 
   /**
    * FORM-DRAFT-1 (ADR 0584 §Correction) — THE REGRESSION THE FORM-UX-3 FIX
@@ -471,7 +487,7 @@ describe('public form — resume + submit-another (R2 F-G5/F7/F8)', () => {
    */
   it('FORM-DRAFT-1: mounting a SECOND form does not destroy the first form’s draft from this visit', async () => {
     const OTHER = { ...SCHEMA, formId: 'form:2', title: 'Step two' };
-    vi.stubGlobal('fetch', vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>(async (url, init) => {
       if (init?.method === 'POST') return ok({ ok: true, submissionId: 'sub:1' }, 201);
       return ok(String(url).includes('form%3A2') || String(url).includes('form:2') ? OTHER : SCHEMA);
     }));
@@ -499,15 +515,13 @@ describe('public form — resume + submit-another (R2 F-G5/F7/F8)', () => {
     localStorage.setItem('owp-form-draft:form:1:v-someone-else', JSON.stringify({ savedAt: Date.now(), values: { name: 'Stranger' } }));
     localStorage.setItem('owp-form-draft:form:9:v-someone-else', JSON.stringify({ savedAt: Date.now(), values: { name: 'Stranger' } }));
     // …and this one is THIS visit's, but past the TTL.
-    const visit = sessionStorage.getItem('owp-form-visit');
-    expect(visit).toBeTruthy();
-    localStorage.setItem(`owp-form-draft:form:7:${visit}`, JSON.stringify({ savedAt: Date.now() - (31 * 60 * 1000), values: { name: 'Stale' } }));
+    localStorage.setItem(`owp-form-draft:form:7:${VISIT}`, JSON.stringify({ savedAt: Date.now() - (31 * 60 * 1000), values: { name: 'Stale' } }));
 
     render(<PublicFormRenderer formId="form:1" />);
     await screen.findByLabelText(/name/i);
     expect(localStorage.getItem('owp-form-draft:form:1:v-someone-else')).toBeNull();
     expect(localStorage.getItem('owp-form-draft:form:9:v-someone-else')).toBeNull();
-    expect(localStorage.getItem(`owp-form-draft:form:7:${visit}`), 'the TTL now applies to EVERY key of this visit, not just the current form’s').toBeNull();
+    expect(localStorage.getItem(`owp-form-draft:form:7:${VISIT}`), 'the TTL now applies to EVERY key of this visit, not just the current form’s').toBeNull();
   });
 });
 

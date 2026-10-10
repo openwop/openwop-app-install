@@ -7,8 +7,11 @@
  *   GET  /:workforceId/metrics   aggregate telemetry for the caller's tenant
  *   GET  /:workforceId/governance graduated-autonomy timeline + governance posture
  *
- * VENDOR-NEUTRAL: no external-framework branding. Read-only in EP0 (the entity
- * is seeded; authoring CRUD lands in a later slice). Metrics aggregate from the
+ *   PATCH /:workforceId           the CALLER'S TENANT's cutover status (ADR 0775 D2)
+ *   PATCH /:workforceId/migration the caller's tenant's migration journey
+ * VENDOR-NEUTRAL: no external-framework branding. The entity itself is seeded
+ * and shared; every write is tenant state behind `requireTenantWrite` (ADR 0775
+ * D1). Metrics aggregate from the
  * caller's runs alone (cost + cycle time are stashed in run metadata by the
  * generator), so this is a single `listRuns` read — no per-run event fan-out.
  *
@@ -38,6 +41,7 @@ import {
 import { MIGRATION_STAGE_KEYS, type MigrationStageKey, type StageStatus } from '../host/migrationJourney.js';
 import { evalSuiteEnabled, runWorkforceLiveShadowEval } from '../host/workforceEval.js';
 import { demoMode } from '../host/demoMode.js';
+import { requireTenantWrite } from '../features/featureRoute.js';
 
 const WORKFORCE_STATUSES: readonly WorkforceStatus[] = ['shadow', 'piloting', 'production'];
 
@@ -116,17 +120,17 @@ async function dashboardRuns(
 }
 
 export function registerWorkforceRoutes(app: Express, deps: Deps): void {
-  app.get('/v1/host/openwop-app/workforces', async (_req, res, next) => {
+  app.get('/host/openwop-app/workforces', async (req, res, next) => {
     try {
-      res.json({ workforces: await listWorkforces() });
+      res.json({ workforces: await listWorkforces(tenantOf(req)) });
     } catch (err) {
       next(err);
     }
   });
 
-  app.get('/v1/host/openwop-app/workforces/:workforceId', async (req, res, next) => {
+  app.get('/host/openwop-app/workforces/:workforceId', async (req, res, next) => {
     try {
-      const wf = await getWorkforce(req.params.workforceId);
+      const wf = await getWorkforce(tenantOf(req), req.params.workforceId);
       if (!wf) {
         throw new OpenwopError('not_found', `Workforce \`${req.params.workforceId}\` not found.`, 404, {
           workforceId: req.params.workforceId,
@@ -138,9 +142,9 @@ export function registerWorkforceRoutes(app: Express, deps: Deps): void {
     }
   });
 
-  app.get('/v1/host/openwop-app/workforces/:workforceId/metrics', async (req, res, next) => {
+  app.get('/host/openwop-app/workforces/:workforceId/metrics', async (req, res, next) => {
     try {
-      const wf = await getWorkforce(req.params.workforceId);
+      const wf = await getWorkforce(tenantOf(req), req.params.workforceId);
       if (!wf) {
         throw new OpenwopError('not_found', `Workforce \`${req.params.workforceId}\` not found.`, 404, {
           workforceId: req.params.workforceId,
@@ -154,9 +158,9 @@ export function registerWorkforceRoutes(app: Express, deps: Deps): void {
     }
   });
 
-  app.get('/v1/host/openwop-app/workforces/:workforceId/governance', async (req, res, next) => {
+  app.get('/host/openwop-app/workforces/:workforceId/governance', async (req, res, next) => {
     try {
-      const wf = await getWorkforce(req.params.workforceId);
+      const wf = await getWorkforce(tenantOf(req), req.params.workforceId);
       if (!wf) {
         throw new OpenwopError('not_found', `Workforce \`${req.params.workforceId}\` not found.`, 404, {
           workforceId: req.params.workforceId,
@@ -177,15 +181,16 @@ export function registerWorkforceRoutes(app: Express, deps: Deps): void {
   // the agent having graduated to bounded-autonomous (currentTier === 'auto'),
   // so cutover is evidence-based, not a toggle. Rollback to shadow/piloting is
   // ALWAYS allowed (the kill-switch is always available).
-  app.patch('/v1/host/openwop-app/workforces/:workforceId', async (req, res, next) => {
+  app.patch('/host/openwop-app/workforces/:workforceId', async (req, res, next) => {
     try {
+      await requireTenantWrite(req); // ADR 0775 D1
       const status = (req.body as { status?: unknown } | undefined)?.status;
       if (typeof status !== 'string' || !WORKFORCE_STATUSES.includes(status as WorkforceStatus)) {
         throw new OpenwopError('validation_error', `Field \`status\` must be one of: ${WORKFORCE_STATUSES.join(', ')}.`, 400, {
           field: 'status',
         });
       }
-      const wf = await getWorkforce(req.params.workforceId);
+      const wf = await getWorkforce(tenantOf(req), req.params.workforceId);
       if (!wf) {
         throw new OpenwopError('not_found', `Workforce \`${req.params.workforceId}\` not found.`, 404, {
           workforceId: req.params.workforceId,
@@ -205,7 +210,7 @@ export function registerWorkforceRoutes(app: Express, deps: Deps): void {
           );
         }
       }
-      const updated = await setWorkforceStatus(req.params.workforceId, status as WorkforceStatus);
+      const updated = await setWorkforceStatus(tenantOf(req), req.params.workforceId, status as WorkforceStatus);
       res.json(updated);
     } catch (err) {
       next(err);
@@ -213,9 +218,9 @@ export function registerWorkforceRoutes(app: Express, deps: Deps): void {
   });
 
   // MG-0 — Workflow Migration journey state (per workforce).
-  app.get('/v1/host/openwop-app/workforces/:workforceId/migration', async (req, res, next) => {
+  app.get('/host/openwop-app/workforces/:workforceId/migration', async (req, res, next) => {
     try {
-      const wf = await getWorkforce(req.params.workforceId);
+      const wf = await getWorkforce(tenantOf(req), req.params.workforceId);
       if (!wf) {
         throw new OpenwopError('not_found', `Workforce \`${req.params.workforceId}\` not found.`, 404, {
           workforceId: req.params.workforceId,
@@ -227,9 +232,10 @@ export function registerWorkforceRoutes(app: Express, deps: Deps): void {
     }
   });
 
-  app.patch('/v1/host/openwop-app/workforces/:workforceId/migration', async (req, res, next) => {
+  app.patch('/host/openwop-app/workforces/:workforceId/migration', async (req, res, next) => {
     try {
-      const wf = await getWorkforce(req.params.workforceId);
+      await requireTenantWrite(req); // ADR 0775 D1
+      const wf = await getWorkforce(tenantOf(req), req.params.workforceId);
       if (!wf) {
         throw new OpenwopError('not_found', `Workforce \`${req.params.workforceId}\` not found.`, 404, {
           workforceId: req.params.workforceId,
@@ -243,9 +249,9 @@ export function registerWorkforceRoutes(app: Express, deps: Deps): void {
 
   // GA-2 — cross-run trace/audit search by correlationId / batchId / runId /
   // outcome / status. Single listRuns read; pure metadata search.
-  app.get('/v1/host/openwop-app/workforces/:workforceId/trace', async (req, res, next) => {
+  app.get('/host/openwop-app/workforces/:workforceId/trace', async (req, res, next) => {
     try {
-      const wf = await getWorkforce(req.params.workforceId);
+      const wf = await getWorkforce(tenantOf(req), req.params.workforceId);
       if (!wf) {
         throw new OpenwopError('not_found', `Workforce \`${req.params.workforceId}\` not found.`, 404, {
           workforceId: req.params.workforceId,
@@ -262,9 +268,9 @@ export function registerWorkforceRoutes(app: Express, deps: Deps): void {
   // MG-5 — "Shadow & Prove": a host-ext stand-in for RFC 0081's `live-shadow`
   // EvalSummary (NOT a bespoke shadow surface — see workforceService). The
   // canonical surface is RFC 0081 + the RFC 0082 promotion gate.
-  app.get('/v1/host/openwop-app/workforces/:workforceId/shadow', async (req, res, next) => {
+  app.get('/host/openwop-app/workforces/:workforceId/shadow', async (req, res, next) => {
     try {
-      const wf = await getWorkforce(req.params.workforceId);
+      const wf = await getWorkforce(tenantOf(req), req.params.workforceId);
       if (!wf) {
         throw new OpenwopError('not_found', `Workforce \`${req.params.workforceId}\` not found.`, 404, {
           workforceId: req.params.workforceId,
@@ -281,8 +287,9 @@ export function registerWorkforceRoutes(app: Express, deps: Deps): void {
   // supervisor agent over the embedded suite, returning a real EvalSummary (vs
   // the runs-derived `/shadow` stand-in). GATED on the host advertising the eval
   // capability, so the disabled default stays honest (RFC 0031).
-  app.post('/v1/host/openwop-app/workforces/:workforceId/eval', async (req, res, next) => {
+  app.post('/host/openwop-app/workforces/:workforceId/eval', async (req, res, next) => {
     try {
+      await requireTenantWrite(req); // ADR 0775 D1
       if (!evalSuiteEnabled()) {
         throw new OpenwopError(
           'host_capability_missing',
@@ -291,7 +298,7 @@ export function registerWorkforceRoutes(app: Express, deps: Deps): void {
           { capability: 'agents.evalSuite' },
         );
       }
-      const wf = await getWorkforce(req.params.workforceId);
+      const wf = await getWorkforce(tenantOf(req), req.params.workforceId);
       if (!wf) {
         throw new OpenwopError('not_found', `Workforce \`${req.params.workforceId}\` not found.`, 404, {
           workforceId: req.params.workforceId,

@@ -90,5 +90,5 @@ export const messages = {
   colActor: 'By',
 
   confirmApplyTitle: 'Apply this snapshot to live config?',
-  confirmApplyBody: 'This OVERWRITES the workspace’s live configuration with snapshot {{hash}}. Feature toggles not in the snapshot are cleared. Publish pointers and workflow pins are apply-only: entries missing from the snapshot keep their current live value (drift will show the difference).',
+  confirmApplyBody: 'This OVERWRITES the workspace’s live configuration with snapshot {{hash}}. Publish pointers and workflow pins are apply-only: entries missing from the snapshot keep their current live value (drift will show the difference). Feature toggles are managed by the host operator and are not part of snapshots.',
 } as const;

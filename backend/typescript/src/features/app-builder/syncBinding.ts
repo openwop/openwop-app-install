@@ -43,6 +43,9 @@ export interface SyncBinding {
   sealedWebhookSecret: string;
   boundBy: string;
   boundAt: string;
+  /** ADR 0835 AB2-CD-4 — the org the binding admin bound it in; the inbound
+   *  webhook's credential is that org's. Absent on bindings made before it. */
+  orgId?: string;
 }
 
 /** The read projection — never carries the secret. */
@@ -104,7 +107,7 @@ export async function openBindingWebhookSecret(binding: SyncBinding): Promise<st
 export async function createSyncBinding(
   tenantId: string,
   canvasId: string,
-  args: { owner: string; repo: string; branch: string; target: ExportTarget; boundBy: string },
+  args: { owner: string; repo: string; branch: string; target: ExportTarget; boundBy: string; orgId?: string },
 ): Promise<{ view: SyncBindingView; webhookSecret: string }> {
   if (!GH_OWNER_RE.test(args.owner)) {
     throw new OpenwopError('validation_error', '`owner` must be a valid GitHub login.', 400, { field: 'owner' });
@@ -112,7 +115,10 @@ export async function createSyncBinding(
   if (!REPO_NAME_RE.test(args.repo)) {
     throw new OpenwopError('validation_error', 'Repository name must be 1-100 chars of letters, digits, ".", "_", "-".', 400, { field: 'repo' });
   }
-  if (!GH_BRANCH_RE.test(args.branch) || args.branch.includes('..') || args.branch.startsWith('/') || args.branch.endsWith('/')) {
+  // ADR 0835 AB2-CD-8 — a `.`-led segment (`./x`, `a/./b`, `.x`) is not a git
+  // ref, and `.`/`..` segments are re-targeted by URL normalization when the
+  // branch is spliced into a GitHub API path.
+  if (!GH_BRANCH_RE.test(args.branch) || args.branch.includes('..') || args.branch.startsWith('/') || args.branch.endsWith('/') || args.branch.split('/').some((seg) => seg === '' || seg.startsWith('.'))) {
     throw new OpenwopError('validation_error', '`branch` is not a valid branch name.', 400, { field: 'branch' });
   }
   const webhookSecret = randomBytes(32).toString('hex');
@@ -128,6 +134,7 @@ export async function createSyncBinding(
     sealedWebhookSecret: await sealWebhookSecret(webhookSecret),
     boundBy: args.boundBy,
     boundAt: new Date().toISOString(),
+    ...(args.orgId ? { orgId: args.orgId } : {}),
   };
   // GRADE-DATA 2026-07-17 — CAS insert (create-iff-absent), not check-then-put:
   // two concurrent binds previously both passed the 409 check, and the loser's

@@ -33,7 +33,7 @@ export const kicktodoCommunityFeature: BackendFeature = {
     id: 'kicktodo-community',
     label: 'KickTodo Community',
     description:
-      'Creator profiles (approval-gated), proof-gated challenge reviews, counts-only creator analytics (ADR 0426).',
+      'Creator profiles (approval-gated), proof-gated challenge reviews, counts-only creator analytics.',
     category: 'KickTodo',
     status: 'off',
     bucketUnit: 'tenant',
@@ -51,6 +51,6 @@ export const kicktodoCommunityFeature: BackendFeature = {
   // is the composition consequence ADR 0439 §1 describes. It rides the parity
   // ratchet with the other undeclared edges.
   dependsOn: ['kicktodo-core'],
-  requiredPacks: [{ name: 'feature.kicktodo.nodes', version: '1.30.0' }],
+  requiredPacks: [{ name: 'feature.kicktodo.nodes', version: '1.30.3' }],
   surface: { id: 'kicktodo-community', build: buildKicktodoCommunitySurface }, // ADR 0426 P5
 };

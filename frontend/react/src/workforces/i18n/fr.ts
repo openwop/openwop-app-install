@@ -71,6 +71,7 @@ export const messages = {
   proveFirstMid: ', il doit d’abord faire ses preuves',
   proveFirstOverride: '— un humain intervient encore sur',
   proveFirstOverrideTail: 'des exécutions',
+  viewerReadOnly: 'Vous pouvez consulter cette équipe. Modifier sa migration ou sa bascule nécessite un accès en modification à cet espace de travail — demandez à un administrateur.',
   showcaseReadOnly:
     'Données de démonstration — les contrôles d’autonomie sont en lecture seule ici. Lancez votre propre effectif pour le gérer.',
   advanceTo: 'Passer à {{label}} →',

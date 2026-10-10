@@ -138,7 +138,7 @@ export function RunOpsPanel({ runId, events }: Props) {
             <ul className="u-fs-12 u-mt-1-5">
               {result.anomalies.map((a) => (
                 <li key={a.atSeq}>
-                  {t('opsAnomalySeqPrefix', { seq: formatNumber(a.atSeq) })} <code>{a.expectedPrevHash.slice(0, 12)}…</code>{t('opsAnomalyGot')}<code>{a.actualPrevHash.slice(0, 12)}…</code>
+                  {t('opsAnomalySeqPrefix', { seq: formatNumber(a.atSeq) })} <code>{shortHash(a.expectedPrevHash)}</code>{t('opsAnomalyGot')}<code>{shortHash(a.actualPrevHash)}</code>
                 </li>
               ))}
             </ul>
@@ -159,4 +159,11 @@ export function RunOpsPanel({ runId, events }: Props) {
       )}
     </div>
   );
+}
+
+/** A chain hash for display. SDK 2.4.0 types both hashes nullable: they are
+ *  `chain-break`-only, and `null` at the genesis entry. `null` is shown as a
+ *  literal, because it is a real value on the wire rather than a missing one. */
+function shortHash(h: string | null | undefined): string {
+  return typeof h === 'string' ? `${h.slice(0, 12)}…` : 'null';
 }

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.knowledge-tools/1.0.0/augment-prompt.output.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.knowledge-tools/1.0.3/augment-prompt.output.json",
   "title": "KnowledgeAugmentPromptOutput",
   "type": "object",
   "required": ["augmentedUserMessage", "citations", "chunks", "sources", "hasResults", "success"],

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/feature.crm.nodes/1.10.0/update-contact-stage.output.json",
+  "$id": "https://packs.openwop.dev/feature.crm.nodes/1.11.0/update-contact-stage.output.json",
   "title": "CrmUpdateContactStageOutput",
   "description": "The contact after the stage write. A tombstoned or foreign-tenant contact is a typed `not_found` failure. A refusal at the surface (tenant guard, link validation, cap, tombstone) is a TYPED node failure, never a success with an empty entity.",
   "type": "object",

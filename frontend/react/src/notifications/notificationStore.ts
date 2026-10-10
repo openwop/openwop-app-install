@@ -48,11 +48,17 @@ import { announce } from '../ui/announce.js';
 import i18n from '../i18n/index.js';
 import { publishReviewSignal } from './signalBus.js';
 import {
+  currentPushBinding,
   disablePush as disablePushApi,
   enablePush as enablePushApi,
-  getCurrentSubscription,
   getPushConfig,
+  PushSubscribeError,
 } from './pushSubscription.js';
+
+/** The browser's IANA zone, or undefined where `Intl` cannot say. */
+function browserTimeZone(): string | undefined {
+  try { return Intl.DateTimeFormat().resolvedOptions().timeZone || undefined; } catch { return undefined; }
+}
 import type { Notification, NotificationPreferences, NotificationStatus } from './types.js';
 import {
   isNativeShell,
@@ -94,7 +100,12 @@ interface NotificationStoreState {
    *    'available'   — supported + BE configured, not subscribed
    *    'subscribed'  — supported + subscribed (events arrive via SW)
    *    'unknown'     — not yet probed (initial render) */
-  pushStatus: 'unsupported' | 'disabled' | 'available' | 'subscribed' | 'unknown';
+  /** ADR 0816 — `elsewhere`: this browser's push is bound to another account or
+   *  workspace; `refused`: the server will not push to this browser's push
+   *  service; `taken`: the endpoint belongs to another account's device. */
+  pushStatus: 'unsupported' | 'disabled' | 'available' | 'subscribed' | 'elsewhere' | 'refused' | 'taken' | 'unknown';
+  /** A push enable/disable is in flight (one at a time — a double click must not subscribe twice). */
+  pushBusy: boolean;
   /** Per-user notification preferences (item 5+6). Loaded from
    *  localStorage at store-creation time; persisted to localStorage on
    *  every `updatePreferences` call. */
@@ -104,6 +115,11 @@ interface NotificationStoreState {
    *  local blob instead of adopting the server copy while this is set, so an
    *  offline edit isn't silently clobbered on reconnect (ADR 0010 Phase 2). */
   preferencesUnsynced: boolean;
+  /** ADR 0816 NTFUX-4 — the last durable save of a SIGNED-IN caller's prefs
+   *  failed (not merely in flight; an anonymous caller's 401 is not a failure —
+   *  it has no durable prefs). The server applies prefs to background push, so
+   *  the prefs view states it. */
+  preferencesSaveFailed: boolean;
   /** When true, the preferences subdrawer is open inside the panel. */
   preferencesOpen: boolean;
   error: string | null;
@@ -342,8 +358,10 @@ export const useNotificationStore = create<NotificationStore>((set, get) => ({
   connectionStatus: 'disconnected',
   desktopPermission: readDesktopPermission(),
   pushStatus: 'unknown',
+  pushBusy: false,
   preferences: loadPreferences(),
   preferencesUnsynced: getPreferencesDirty(),
+  preferencesSaveFailed: false,
   preferencesOpen: false,
   error: null,
   _sseCleanup: null,
@@ -609,14 +627,18 @@ export const useNotificationStore = create<NotificationStore>((set, get) => ({
         set({ pushStatus: 'disabled' });
         return;
       }
-      const sub = await getCurrentSubscription();
-      set({ pushStatus: sub ? 'subscribed' : 'available' });
+      // ADR 0816 NTFUX-3 — judged against the caller's OWN device rows, not the
+      // browser alone: a browser subscription may push to another account.
+      const binding = await currentPushBinding();
+      set({ pushStatus: binding === 'here' ? 'subscribed' : binding === 'elsewhere' ? 'elsewhere' : 'available' });
     } catch {
       set({ pushStatus: 'unknown' });
     }
   },
 
   async enablePush() {
+    if (get().pushBusy) return false;
+    set({ pushBusy: true });
     try {
       const cfg = await getPushConfig();
       if (!cfg.enabled || !cfg.vapidPublicKey) {
@@ -627,21 +649,43 @@ export const useNotificationStore = create<NotificationStore>((set, get) => ({
       set({ pushStatus: 'subscribed' });
       return true;
     } catch (err) {
-      set({ error: err instanceof Error ? err.message : String(err) });
+      // ADR 0816 D3 — a typed refusal is a STATE with its own copy beside the
+      // button, not a retryable generic error: retrying can never succeed.
+      if (err instanceof PushSubscribeError && err.reason === 'push_endpoint_refused') {
+        set({ pushStatus: 'refused' });
+      } else if (err instanceof PushSubscribeError && err.reason === 'push_endpoint_taken') {
+        set({ pushStatus: 'taken' });
+      } else {
+        set({ error: err instanceof Error ? err.message : String(err) });
+      }
       return false;
+    } finally {
+      set({ pushBusy: false });
     }
   },
 
   async disablePush() {
+    if (get().pushBusy) return;
+    set({ pushBusy: true });
     try {
       await disablePushApi();
       set({ pushStatus: 'available' });
     } catch (err) {
       set({ error: err instanceof Error ? err.message : String(err) });
+    } finally {
+      set({ pushBusy: false });
     }
   },
 
-  updatePreferences(next) {
+  updatePreferences(requested) {
+    // ADR 0816 NTFUX-1 — an enabled quiet-hours window is only enforceable on
+    // the server (device push) with a zone, so EVERY save of one carries it, not
+    // only a quiet-hours edit; otherwise a window saved before zones existed
+    // stays silently unenforced on the phone.
+    const tz = requested.quietHours.enabled && !requested.quietHours.timezone ? browserTimeZone() : undefined;
+    const next: NotificationPreferences = tz
+      ? { ...requested, quietHours: { ...requested.quietHours, timezone: tz } }
+      : requested;
     // Optimistic: update state + the local cache synchronously so the panel
     // and the desktop-toast predicate react immediately.
     set({ preferences: next });
@@ -664,13 +708,14 @@ export const useNotificationStore = create<NotificationStore>((set, get) => ({
         // user may have toggled again before this PUT resolved).
         if (get().preferences === next) {
           setPreferencesDirty(false);
-          set({ preferencesUnsynced: false });
+          set({ preferencesUnsynced: false, preferencesSaveFailed: false });
         }
       })
       .catch((err) => {
         // Stays dirty (set above) — an anonymous caller's PUT 401s and a
         // signed-in user's offline write retries on reconnect.
-        set({ error: err instanceof Error ? err.message : String(err) });
+        const message = err instanceof Error ? err.message : String(err);
+        set({ error: message, preferencesSaveFailed: !message.endsWith('→ 401') });
       });
   },
 
@@ -691,7 +736,7 @@ export const useNotificationStore = create<NotificationStore>((set, get) => ({
         await putPreferencesRemote(local);
         if (get().preferences === local) {
           setPreferencesDirty(false);
-          set({ preferencesUnsynced: false });
+          set({ preferencesUnsynced: false, preferencesSaveFailed: false });
         }
       } catch {
         // Still can't reach the server (anon/offline) — keep the local copy

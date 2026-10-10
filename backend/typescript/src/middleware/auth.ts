@@ -48,16 +48,21 @@
  * @see plans/openwop-app-deployment-plan.md (P0.2)
  */
 
-import type { RequestHandler } from 'express';
-import { isProtocolClient, negotiatedMajor, v1 } from './protocolVersion.js';
+import type { Request as ExpressRequest, RequestHandler } from 'express';
+import { isProtocolClient, isProtocolRequest, vendorPath } from './protocolVersion.js';
+import { SIGNED_INGEST_ROOT } from '../host/signedIngestRoot.js';
 import { readKeyTenants } from './apiKeyTenants.js';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import type { Principal } from '../types.js';
 import { createLogger } from '../observability/logger.js';
 import { noteTenantActivity } from '../routes/admin.js';
-import { isWorkspaceMember } from '../host/accessControlService.js';
+import { delegationIssuerIsLive, isWorkspaceMember } from '../host/accessControlService.js';
 import { tenantRequiresMfa } from '../host/governanceService.js';
 import { isRevokedApiKey, verifyApiKey } from '../features/developer-keys/apiKeyService.js';
+import { tenantKeysDisabled } from '../features/developer-keys/tenantKeyPolicyCache.js';
+import { CLI_LOGIN_PATHS, LEAKED_KEYS_PATH } from '../features/developer-keys/paths.js';
+import { clientIp } from '../host/clientIp.js';
+import { keyAuthorityRefuses, keyPolicyMode, registerOperatorIssuerCheck, reportKeyPolicy } from '../host/delegatedSubject.js';
 import { OpenwopError } from '../types.js';
 import { resolveSessionSubject, resolveSessionSubjectByPersonalTenant } from '../host/sessionAuthority.js';
 import { isPersonalTenantId } from '../host/requestSubject.js';
@@ -98,6 +103,12 @@ declare module 'express-serve-static-core' {
      *  onto the new cookie and survive the revoke. Absent when the session has
      *  no durable row (anon, never-bound, break-glass, api-key). */
     sessionEpoch?: number;
+    /** ADR 0833 D2/D3 — the VERIFIED user-tier cookie this request's identity
+     *  rides on (cookie branch, or the same-identity cookie on the bearer
+     *  branch), after the live-session check. A route that re-mints passes it
+     *  as the mint's `source` (a re-mint never widens it); logout revokes its
+     *  family. Absent for anon, API-key and cookieless bearer requests. */
+    cookieSession?: SessionPayload;
     /** True when the caller presented NO credential and this host minted an
      *  identity for them (ADR 0015 anon sessions). Set from `session.tier`, so
      *  it covers a returning anon cookie as well as a fresh mint.
@@ -154,18 +165,34 @@ declare module 'express-serve-static-core' {
  *  Without these, a cookie pinned to a requireMfa workspace is a full lockout
  *  (even logout would 401). */
 const MFA_GATE_EXEMPT_PREFIXES = [
-  '/v1/host/openwop-app/users/auth',
-  '/v1/host/openwop-app/users/me/security',
-  '/v1/host/openwop-app/me/workspaces',
+  '/host/openwop-app/users/auth',
+  '/host/openwop-app/users/me/security',
+  '/host/openwop-app/me/workspaces',
 ];
 /** The one workspaces route a refused session needs: switching BACK. Bare
  *  startsWith('/workspaces') also exempted CREATE (grade-pass SEC-C10). */
-const MFA_GATE_SWITCH_RE = /^\/v1\/host\/openwop-app\/workspaces\/[^/]+\/switch$/;
+const MFA_GATE_SWITCH_RE = /^\/host\/openwop-app\/workspaces\/[^/]+\/switch$/;
 /** Segment-boundary match (the isPublicPath idiom) — plain startsWith would
  *  also exempt any future '/…securityX' sibling (grade-pass SEC-C10). */
-function isMfaGateExempt(path: string): boolean {
+// A missed exemption fails CLOSED: an MFA-refused user could not even sign out.
+function isMfaGateExempt(rawPath: string): boolean {
+  const path = rawPath;
   if (MFA_GATE_SWITCH_RE.test(path)) return true;
   return MFA_GATE_EXEMPT_PREFIXES.some((p) => path === p || path.startsWith(`${p}/`));
+}
+
+/** True when `activeTenant` requires a second factor this session did not
+ *  verify. The ONE decision, shared by the HTTP gate below and the
+ *  `resolveLiveCookieSession` lanes (ADR 0833 D1 — a socket answers it too). */
+async function mfaGap(activeTenant: string, personalTenant: string | undefined, mfaVerified: boolean): Promise<boolean> {
+  // USERS-19 (review SHOULD-3): "active === personal" only means "one human, the
+  // enrollment path must stay reachable" when the personal tenant has a personal
+  // SHAPE. A SAML session's `personalTenant` IS `OPENWOP_SAML_TENANT` (a shared,
+  // deployment-named tenant), so without the shape gate that tenant's `requireMfa`
+  // policy was never enforced on the sessions that live there.
+  if (activeTenant === personalTenant && isPersonalTenantId(personalTenant)) return false;
+  if (mfaVerified) return false;
+  return tenantRequiresMfa(activeTenant);
 }
 
 async function refuseIfMfaRequired(
@@ -174,15 +201,8 @@ async function refuseIfMfaRequired(
   activeTenant: string,
   personalTenant: string | undefined,
 ): Promise<boolean> {
-  // USERS-19 (review SHOULD-3): "active === personal" only means "one human, the
-  // enrollment path must stay reachable" when the personal tenant has a personal
-  // SHAPE. A SAML session's `personalTenant` IS `OPENWOP_SAML_TENANT` (a shared,
-  // deployment-named tenant), so without the shape gate that tenant's `requireMfa`
-  // policy was never enforced on the sessions that live there.
-  if (activeTenant === personalTenant && isPersonalTenantId(personalTenant)) return false;
-  if (req.mfaVerified === true) return false;
   if (isMfaGateExempt(req.path)) return false;
-  if (!(await tenantRequiresMfa(activeTenant))) return false;
+  if (!(await mfaGap(activeTenant, personalTenant, req.mfaVerified === true))) return false;
   res.status(401).json({
     error: 'unauthenticated',
     message: 'This workspace requires two-factor authentication. Enroll an authenticator app in Settings → Security, sign in again, and retry.',
@@ -192,6 +212,11 @@ async function refuseIfMfaRequired(
 }
 
 export const PUBLIC_PATH_PREFIXES = [
+  // ADR 0785 P1 — the Claude Code companion's device-code start + poll. It has
+  // no identity until paired (that is what these two routes produce); it holds
+  // only a hashed device code, is operator-gated (404 when off), rate-limited per
+  // IP, and expires in ten minutes. Nothing else under /claude-code is public.
+  vendorPath('/claude-code/pair/device'),
   // ADR 0421 P1 — the tokenized KickTodo calendar feed: the token IS the
   // capability (hashed at rest, revocable); the route 404s uniformly and
   // exposes titles+day numbers only. Auth-bypassed like the other public
@@ -207,14 +232,14 @@ export const PUBLIC_PATH_PREFIXES = [
   // fail-closed bearer rejection 401s the hop before the route can answer. The
   // route mounts ONLY under OPENWOP_UCP_REF_MERCHANT_ENABLED (never a real
   // deploy) and serves demo catalog data; money safety lives in the buyer.
-  '/v1/host/openwop-app/dev/ucp-merchant/mcp',
+  '/host/openwop-app/dev/ucp-merchant/mcp',
   // RFC 0132 (Draft) — the anonymous-actor conformance witness seam
   // (GET/POST /v1/host/sample/anon-surface/*). Unauthenticated BY CONSTRUCTION —
   // an anonymous public surface has no credential (the RFC's whole point); the
   // handlers 404 unless OPENWOP_ANON_ACTOR_ENABLED, so this exposes nothing when
   // off. The production widget path is separately public under
   // /v1/host/openwop-app/public and stays there.
-  '/v1/host/sample/anon-surface',
+  '/host/sample/anon-surface',
   '/health',
   '/readiness',
   '/.well-known/openwop',
@@ -239,15 +264,18 @@ export const PUBLIC_PATH_PREFIXES = [
   // routes 404 unless the image carries the stamp, so this exposes nothing when
   // absent, and RFC 0148 §E + the emitter's scrub keep credentials out of the
   // evidence itself.
-  '/v1/host/openwop-app/conformance',
+  '/host/openwop-app/conformance',
   '/schemas/artifacts', // ADR 0055 — public artifact-type JSON Schemas (RFC 0075)
-  v1('/openapi.json'),
-  v1('/packs'),
-  v1('/interrupts'),
+  '/openapi.json',
+  // v1 end-of-support (2026-10-04) — the same read-only, public installed-pack
+  // reads at the host's vendor address, which survives the v1 cut (the `/v1`
+  // Registry HTTP API above retires with v1). `openwop catalog` reads these.
+  vendorPath('/packs'),
+  '/interrupts',
   // ADR 0478 §2 — the decide-by-email confirm page fronting POST /v1/interrupts/:token.
   // Same trust model as /v1/interrupts: the RFC 0093 token IS the authorization
   // (guest approvers have no session); GET renders a form and never mutates.
-  '/v1/host/openwop-app/interrupt-action',
+  '/host/openwop-app/interrupt-action',
   // `/v1/content` is deliberately NOT here (ADR 0748). It used to be, which made
   // the whole subtree auth-less and CSRF-exempt — harmless while it held one
   // anonymous GET, and an open write surface the moment the RFC 0103 §D admin
@@ -257,12 +285,22 @@ export const PUBLIC_PATH_PREFIXES = [
   // browser-driven ACS form-POST, and the SP metadata are all PRE-AUTH (the user
   // has no session yet — the ACS is what MINTS it). The assertion's XML signature
   // is the credential, validated by `host/auth/samlSso`. 404s when SAML is unconfigured.
-  '/v1/host/openwop-app/auth/saml/sso',
+  '/host/openwop-app/auth/saml/sso',
   // Break-glass operator login (ADR 0389 P3): the scrypt-verified token in the
   // body IS the credential (SAML-ACS precedent). Must bypass the global layer —
   // a hardened posture 401ing the locked-out operator is exactly the scenario
   // break-glass exists for. 404s unless OPENWOP_BREAKGLASS_ENABLED=true.
-  '/v1/host/openwop-app/auth/break-glass',
+  '/host/openwop-app/auth/break-glass',
+  // ADR 0798 D8 — report a leaked API key. The full secret in the body IS the
+  // credential (whoever holds it could use the key; this only lets them revoke
+  // it), so a secret scanner with no account can call it. POST only; the rest
+  // of `/developer-keys` stays authenticated — this is an exact path, and
+  // `isPublicPath` matches a prefix only at a segment boundary.
+  LEAKED_KEYS_PATH,
+  // ADR 0799 — CLI sign-in: the CLI starts and polls with no credential (the
+  // device code it holds is one, kept only as a hash). Approving is NOT here.
+  CLI_LOGIN_PATHS.start,
+  CLI_LOGIN_PATHS.poll,
   // SCIM 2.0 provisioning (RFC 0050 §B): the IdP's SCIM client (Okta / Azure AD)
   // POSTs to /scim/v2/{Users,Groups} with the IdP SCIM bearer — NOT a session
   // cookie or an OPENWOP_API_KEY. Each route does its OWN constant-time bearer
@@ -280,23 +318,23 @@ export const PUBLIC_PATH_PREFIXES = [
   // /v1/interrupts/{token}), so embeddable <img src> URLs work without a
   // bearer/cookie. The store path (POST /v1/host/openwop-app/media/put) is NOT
   // under this prefix and stays authenticated.
-  '/v1/host/openwop-app/assets',
+  '/host/openwop-app/assets',
   // ADR 0328 P4 present-mode phone remote: the stateless HMAC capability token
   // in the path IS the credential (mintable only behind the canvas factory's
   // org gate); every route under it 404s uniformly on a bad/expired token.
-  '/v1/host/openwop-app/present',
+  '/host/openwop-app/present',
   // Demo messaging relay device-loop (heartbeat/inbound/outbound/ack) is
   // authed by the per-device token in the `x-openwop-device-token` header
   // — the device token is the credential, like /v1/interrupts/{token}. The
   // operator endpoints (register/activate/revoke/enqueue, connectors,
   // sessions) are NOT under /device and stay bearer-authed.
-  '/v1/host/openwop-app/messaging/device',
+  '/host/openwop-app/messaging/device',
   // Admin endpoints do their own constant-time check against
   // OPENWOP_ADMIN_TOKEN (separate from OPENWOP_API_KEYS so the
   // session/bearer paths can't confuse the two). Bypassing the
   // session-cookie auth path here lets Cloud Scheduler hit the
   // cleanup cron with just the Bearer admin token.
-  '/v1/host/openwop-app/admin',
+  '/host/openwop-app/admin',
   // ADR 0012 Publishing & SEO: the PUBLIC published-site surface
   // (GET /v1/host/openwop-app/public/{orgId}/{pages/:slug,sitemap.xml,robots.txt,
   // feed.rss}). Intentionally unauthenticated — published content is public by
@@ -305,14 +343,14 @@ export const PUBLIC_PATH_PREFIXES = [
   // toggle + served published-only (drafts never resolve). The authoring +
   // SEO-write surface lives under /v1/host/openwop-app/publishing/* and stays
   // authorizeOrgScope-gated, NOT under this prefix.
-  '/v1/host/openwop-app/public',
+  '/host/openwop-app/public',
   // ADR 0407 D2 — the anonymous entity read (entity-backed CMS sections + the
   // headless delivery surface). Opt-in TWICE server-side: the tenant's
   // `entities` toggle AND the type's `publicRead` flag (a type-admin op); the
   // route serves published types' LIVE entries only, via a projection that
   // strips actor subjects. A sibling prefix, NOT nested under the authed
   // /entities namespace (the `public-forms` ≠ `forms` rule below).
-  '/v1/host/openwop-app/public-entities',
+  '/host/openwop-app/public-entities',
   // ADR 0544 D3 attestation verification: an EMPLOYER who received an
   // application resolves a bearer token to the claims it carries. Anonymous by
   // definition — the verifier is a stranger we have no relationship with, so
@@ -320,7 +358,7 @@ export const PUBLIC_PATH_PREFIXES = [
   // would tell us who is checking. A SIBLING prefix, not nested under the authed
   // /job-search namespace (the `public-forms` ≠ `forms` rule below). Unknown,
   // revoked and cross-tenant are one uniform 404.
-  '/v1/host/openwop-app/public-attestations',
+  '/host/openwop-app/public-attestations',
   // ADR 0384 crawler prerender: the platform-origin DOCUMENT paths (`/` exact +
   // `/p/:slug`) are served by the publishing feature once the Firebase Hosting
   // document-rewrite is flipped (DEPLOY.md). Anonymous by definition — the same
@@ -330,21 +368,29 @@ export const PUBLIC_PATH_PREFIXES = [
   // `//`-prefixed path, independent of any upstream path-normalization behavior.
   '/',
   '/p',
+  // ADR 0824 D4/D5 — the ROOT crawler/agent doors: `/llms.txt` (docs routes)
+  // and `/robots.txt` + `/sitemap.xml` (publishing routes). Exact paths, no
+  // credential, the same published-only content as the `/public` prefix
+  // above. `/llms.txt` was hosting-rewritten here but missing from this list,
+  // so the live door answered every agent with a 401.
+  '/llms.txt',
+  '/robots.txt',
+  '/sitemap.xml',
   // ADR 0281 — the dealer PARTNER PORTAL. The capability token in the path IS the
   // credential (the Sharing pattern): tenant/org/dealer resolve FROM the token,
   // never the request; a bad token 404s uniformly. Rides the global per-IP rate
   // limit + bounded payloads. Registers no session.
-  '/v1/host/openwop-app/partner',
+  '/host/openwop-app/partner',
   // ADR 0027 Site config: the PUBLIC front-page pointer the anonymous SPA reads
   // at '/' (GET /v1/host/openwop-app/public-site-config → { enabled, orgId, slug }).
   // Exposes only already-public ids; the superadmin WRITE is /v1/host/openwop-app/site-config.
-  '/v1/host/openwop-app/public-site-config',
+  '/host/openwop-app/public-site-config',
   // ADR 0170 App brand: the PUBLIC white-label identity (logo/colors/fonts/title/
   // theme) the anonymous SPA applies before login (it renders on the public shell +
   // gate). GET /v1/host/openwop-app/public-brand → { identity } for the reserved app
   // brand ONLY (no id param; identity subset — no voice/governance/secret data). The
   // superadmin WRITE is /v1/host/openwop-app/app-brand.
-  '/v1/host/openwop-app/public-brand',
+  '/host/openwop-app/public-brand',
   // ADR 0013 Sharing: the PUBLIC share-link resolve surface
   // (GET /v1/host/openwop-app/shared/{token}[/card]). Unauthenticated by design — the
   // 32-byte base64url token IS the credential (like /v1/interrupts/{token} and
@@ -362,7 +408,7 @@ export const PUBLIC_PATH_PREFIXES = [
   // The management surface lives under /v1/host/openwop-app/sharing/* and stays
   // authorizeOrgScope-gated — note `shared` ≠ `sharing`, so this prefix does NOT
   // match it.
-  '/v1/host/openwop-app/shared',
+  '/host/openwop-app/shared',
   // Forms (ADR 0017) — the PUBLIC render + submit surface
   // (GET /v1/host/openwop-app/public-forms/{formId}, POST …/submit). Unauthenticated
   // by design — a published form is public-by-intent. Tenant comes from the form,
@@ -370,39 +416,39 @@ export const PUBLIC_PATH_PREFIXES = [
   // missing forms 404. The management surface lives under /v1/host/openwop-app/forms/*
   // and stays authorizeOrgScope-gated — `public-forms` ≠ `forms`, so this prefix
   // does NOT match it.
-  '/v1/host/openwop-app/public-forms',
+  '/host/openwop-app/public-forms',
   // Booking links (ADR 0402) — the PUBLIC self-serve scheduler + slot claim + the
   // manage (reschedule/cancel) surface. Unauthenticated by design; tenant comes
   // from the resolved booking link (never the request), gated on the link-tenant's
   // `crm` toggle + published-only, uniform 404. The manage routes authorize by the
   // sharing `booking_manage` capability TOKEN. `public-book` ≠ `crm`/`book`, so
   // this prefix does NOT shadow the authed `…/crm/*` management surface.
-  '/v1/host/openwop-app/public-book',
+  '/host/openwop-app/public-book',
   // E-signature (ADR 0402 §b) — the PUBLIC signing surface. The signer authorizes
   // by the emailed sharing `sign_request` capability token (possession = identity,
   // the commerce-quote precedent); tenant from the resolved request, gated on the
   // link-tenant's `crm` toggle, uniform 404. `public-sign` ≠ `crm`, so this prefix
   // does NOT shadow the authed `…/crm/*` management surface.
-  '/v1/host/openwop-app/public-sign',
+  '/host/openwop-app/public-sign',
   // Consent (ADR 0020) — the PUBLIC record/read surface
   // (POST /v1/host/openwop-app/public-consent/{orgId}, GET …/{orgId}/{subjectKey}).
   // Unauthenticated by design — a visitor records consent before any auth. Tenant
   // comes from the org, gated on the org-tenant's `consent` toggle. The management
   // surface lives under /v1/host/openwop-app/consent/* and stays authorizeOrgScope-gated
   // — `public-consent` ≠ `consent`, so this prefix does NOT match it.
-  '/v1/host/openwop-app/public-consent',
+  '/host/openwop-app/public-consent',
   // Analytics (ADR 0018) — the PUBLIC beacon
   // (POST /v1/host/openwop-app/public-analytics/{orgId}/collect). Unauthenticated by
   // design — a visitor's page/event hit. Tenant comes from the org, gated on the
   // org-tenant's `analytics` toggle AND consent (ADR 0020). The reporting surface
   // lives under /v1/host/openwop-app/analytics/* and stays authorizeOrgScope-gated —
   // `public-analytics` ≠ `analytics`, so this prefix does NOT match it.
-  '/v1/host/openwop-app/public-analytics',
+  '/host/openwop-app/public-analytics',
   // Email engagement redirects + unsubscribe (ADR 0218): followed by recipients'
   // mail clients — no session exists. Opaque single-purpose tokens; the handlers
   // only 302 to a stored URL or flip an unsubscribe. `public-email` ≠ `email`,
   // so the authed feature prefix stays gated.
-  '/v1/host/openwop-app/public-email',
+  '/host/openwop-app/public-email',
   // App-builder inbound sync webhook (ADR 0393 Phase 2) — the PUBLIC GitHub-push
   // ingest (POST /v1/host/openwop-app/app-builder-sync/webhook/{webhookId}).
   // Unauthenticated by design — the GitHub HMAC signature over the raw body IS
@@ -410,7 +456,15 @@ export const PUBLIC_PATH_PREFIXES = [
   // from the stored binding. The editor/binding surface lives under
   // /v1/host/openwop-app/app-builder/* and stays authorizeOrgScope-gated —
   // `app-builder-sync` ≠ `app-builder`, so this prefix does NOT match it.
-  '/v1/host/openwop-app/app-builder-sync/webhook',
+  '/host/openwop-app/app-builder-sync/webhook',
+  // ADR 0793 / RFC 0230 — the SIGNED inbound-webhook ingest
+  // (POST /host/openwop-app/trigger-ingest/{subscriptionId}). Unauthenticated by
+  // design: the Standard Webhooks signature over the raw body IS the credential
+  // (verified against the subscription's sealed `whsec_` secret); tenant comes
+  // from the stored subscription. 404 unless OPENWOP_TRIGGER_INBOUND_SIGNING=true.
+  // The subscription-management surface `/v1/trigger-subscriptions*` stays
+  // credential-gated; `trigger-ingest` shares no prefix with it.
+  SIGNED_INGEST_ROOT,
   // Connections inbound webhooks (ADR 0024 §6) — the PUBLIC provider-push ingest
   // (POST /v1/host/openwop-app/connections-inbound/{connectionId}). Unauthenticated by
   // design — the provider HMAC signature IS the credential (verified against the
@@ -419,7 +473,7 @@ export const PUBLIC_PATH_PREFIXES = [
   // auth + admin-gated (org-shared connections need `host:connections:manage`;
   // it is no longer feature-toggle-gated — ADR 0024 § Correction) —
   // `connections-inbound` ≠ `connections`, so this prefix does NOT match it.
-  '/v1/host/openwop-app/connections-inbound',
+  '/host/openwop-app/connections-inbound',
   // Stripe billing webhook (ADR 0176) — the PUBLIC provider-push ingest
   // (POST /v1/host/openwop-app/billing/webhook). Unauthenticated by design — Stripe's
   // signature over the raw body IS the credential (verified against the host webhook
@@ -427,23 +481,23 @@ export const PUBLIC_PATH_PREFIXES = [
   // authoring/read surface `/v1/host/openwop-app/billing/*` stays auth-gated —
   // `billing/webhook` is the ONLY public billing path (exact-or-deeper match, and
   // `/billing/subscription` etc. do NOT start with `/billing/webhook`).
-  '/v1/host/openwop-app/billing/webhook',
+  '/host/openwop-app/billing/webhook',
   // Public storefront (ADR 0177 Phase 3) — read-only active-product listing, org in the
   // URL, tenant host-resolved. Unauthenticated + published-only (like public-forms).
   // The authoring surface `/v1/host/openwop-app/commerce/*` stays auth-gated;
   // `public-store` ≠ `commerce`, so this prefix does NOT match it.
-  '/v1/host/openwop-app/public-store',
-  '/v1/host/openwop-app/public-recommendations',
-  '/v1/host/openwop-app/public-discovery',
+  '/host/openwop-app/public-store',
+  '/host/openwop-app/public-recommendations',
+  '/host/openwop-app/public-discovery',
   // Commerce Stripe webhook (ADR 0177 deferred P3) — PUBLIC provider-push; Stripe's
   // signature over the raw body IS the credential; tenant/order from the event metadata.
   // `commerce/webhook` ≠ `commerce`, so this does NOT match the authed commerce surface.
-  '/v1/host/openwop-app/commerce/webhook',
+  '/host/openwop-app/commerce/webhook',
   // UCP server adapter (ADR 0178) — PUBLIC agentic-commerce surface; external AI agents
   // discover the catalog + transact. Tenant from the merchant-org in the path; the
   // `commerce-ucp` toggle gates it; cart/checkout writes need an OAuth bearer + scope.
   // `commerce/ucp` ≠ `commerce/orgs`, so the authed admin UCP routes stay auth-gated.
-  '/v1/host/openwop-app/commerce/ucp',
+  '/host/openwop-app/commerce/ucp',
 ];
 
 // Firebase Hosting strips every cookie except `__session` from
@@ -457,7 +511,6 @@ export const PUBLIC_PATH_PREFIXES = [
 // (health readiness, SAML/SCIM/password routes) import from here.
 import {
   COOKIE_NAME,
-  COOKIE_TTL_SECONDS,
   REFRESH_THRESHOLD_SECONDS,
   signSession,
   verifySession,
@@ -467,7 +520,10 @@ import {
   sessionSecretConfigError,
   issueUserSession,
   clearSessionCookie,
-  base64urlEncode,
+  buildSessionPayload,
+  refreshSessionPayload,
+  familyOf,
+  endedUserSession,
   type SessionPayload,
 } from './cookieSession.js';
 export { sessionSecretConfigError, issueUserSession, clearSessionCookie };
@@ -475,6 +531,79 @@ export { sessionSecretConfigError, issueUserSession, clearSessionCookie };
 /** True when `path` is a PUBLIC (pre-auth) surface — the same match the auth
  *  middleware uses to bypass. Exported so the CSRF guard exempts the exact same
  *  set (the public embed/webhook POST surfaces are cross-origin BY DESIGN). */
+// ADR 0795 D6 — an operator-issued delegation is the tenant's own only while
+// the env key that issued it is still configured (`bearer:<first 8 chars>`).
+// ADR 0822 (WFAC-17) — with a `tenantId`, the key must ALSO be configured for
+// that tenant (or `*`): a run actor carries no delegation row to bind it.
+registerOperatorIssuerCheck((issuer, tenantId) => {
+  const prefix = issuer.slice('bearer:'.length);
+  if (prefix.length === 0) return false;
+  for (const [key, tenants] of readKeyTenants()) {
+    if (key.slice(0, 8) !== prefix) continue;
+    if (tenantId === undefined || tenants.includes(tenantId) || tenants.includes('*')) return true;
+  }
+  return false;
+});
+
+/**
+ * ADR 0795 D6 — cached for a minute per key: the answer is a membership read
+ * (three full collection lists on a shared workspace), and member removal
+ * REVOKES the issuer's keys outright, so this is the backstop, not the switch.
+ */
+const issuerLiveCache = new Map<string, { live: boolean; at: number }>();
+const ISSUER_LIVE_TTL_MS = 60_000;
+async function issuerStillLive(keyId: string, tenantId: string): Promise<boolean> {
+  const now = Date.now();
+  const hit = issuerLiveCache.get(keyId);
+  if (hit && now - hit.at < ISSUER_LIVE_TTL_MS) return hit.live;
+  let live: boolean;
+  try {
+    live = await delegationIssuerIsLive(tenantId, `apikey:${keyId}`);
+  } catch (err) {
+    // A store error is not an answer. Refuse THIS request and cache nothing, so
+    // a blip neither admits the key nor keeps it out for a minute.
+    log.error('issuer liveness read failed — refusing this request', { keyId, error: err instanceof Error ? err.message : String(err) });
+    return false;
+  }
+  if (issuerLiveCache.size > 5000) issuerLiveCache.clear();
+  issuerLiveCache.set(keyId, { live, at: now });
+  return live;
+}
+
+/**
+ * ADR 0795 D6 for a lane that verifies a key WITHOUT this middleware (the
+ * Claude Code device websocket). True when the key must be refused.
+ */
+export async function apiKeyIssuerRefused(keyId: string, tenantId: string): Promise<boolean> {
+  if (await issuerStillLive(keyId, tenantId)) return false;
+  return keyAuthorityRefuses('issuer-not-live', keyId, { tenantId });
+}
+
+/** Test seam: forget cached issuer answers. */
+export function resetIssuerLiveCacheForTests(): void {
+  issuerLiveCache.clear();
+}
+
+/** A GET on a run's event stream — the one request `EventSource` makes, which
+ *  cannot carry an Authorization header. */
+function isRunEventsStream(req: ExpressRequest): boolean {
+  // Anchored on the canonical protocol path: a vendor route that merely ENDS
+  // in `/runs/<x>/events` is not the stream.
+  return req.method === 'GET' && RUN_EVENTS_STREAM.test(req.path);
+}
+const RUN_EVENTS_STREAM = /^\/runs\/[^/]+\/events$/;
+
+/** A GET on a run's event stream carrying a `?streamToken=` capability. */
+export function carriesRunStreamToken(req: ExpressRequest): boolean {
+  return req.method === 'GET'
+    && typeof req.query?.streamToken === 'string'
+    && /\/runs\/[^/]+\/events$/.test(req.path);
+}
+
+// This one predicate also feeds the CSRF exemption and the ADR 0806 forwarder
+// (`heldByThirdParties` in `index.ts`, which strips the inbound `/v1` twin with
+// `retiredVendorTwinPath` before asking), so all three move together. It is only
+// ever handed an unversioned path (ADR 0812 P3c).
 export function isPublicPath(path: string): boolean {
   // The `p !== '/'` guard keeps a `/` prefix from matching every path via `'//'`.
   return PUBLIC_PATH_PREFIXES.some((p) => path === p || (p !== '/' && path.startsWith(p + '/')));
@@ -489,7 +618,7 @@ export function isPublicPath(path: string): boolean {
  * are admin writes that must never ride this carve-out.
  */
 export function isCredentialOptionalRead(method: string, path: string): boolean {
-  return (method === 'GET' || method === 'HEAD') && /^\/v1\/content\/pages\/[^/]+$/.test(path);
+  return (method === 'GET' || method === 'HEAD') && /^\/content\/pages\/[^/]+$/.test(path);
 }
 
 /**
@@ -624,11 +753,13 @@ function personalTenantForSubject(subject: string | undefined): string | undefin
  */
 export function issueSubjectSession(
   res: import('express').Response,
-  opts: { subject: string; tenantId: string; personalTenant?: string; mfa?: boolean; epoch?: number },
+  opts: { subject: string; tenantId: string; personalTenant?: string; mfa?: boolean; epoch?: number; source: SessionPayload | undefined },
 ): void {
-  const now = Math.floor(Date.now() / 1000);
-  const session: SessionPayload = {
-    sid: base64urlEncode(randomBytes(18)),
+  // ADR 0833 D2 — `source` is the verified cookie being replaced: a re-mint
+  // inherits its family, `authAt` and (break-glass) its `noRefresh` + `exp`
+  // ceiling. It used to set `exp = now + 24h` and drop `noRefresh`, so a
+  // 10-minute break-glass session became a sliding 24h cookie via one switch.
+  const session = buildSessionPayload({
     tenantId: opts.tenantId,
     tier: 'user',
     subject: opts.subject,
@@ -640,9 +771,7 @@ export function issueSubjectSession(
     // (the value the middleware validated on THIS request, `req.sessionEpoch`),
     // so "sign out everywhere" ends an unbound session as well.
     ...(typeof opts.epoch === 'number' ? { epoch: opts.epoch } : {}),
-    iat: now,
-    exp: now + COOKIE_TTL_SECONDS,
-  };
+  }, { source: opts.source ?? null });
   setSessionCookie(res, signSession(session));
 }
 
@@ -686,13 +815,6 @@ function noteOidcFallthrough(reason: string): void {
       configuredAudience: cfg?.audience ?? null,
     });
   }
-}
-
-/** Test affordance — reset the fall-through tracker so unit tests get
- *  a clean window between assertions. */
-export function _resetFallthroughTracker(): void {
-  fallthroughTimestamps = [];
-  lastFallthroughAlarmAt = 0;
 }
 
 /** The session's INTRINSIC personal tenant — persisted on the payload, else
@@ -742,8 +864,16 @@ export interface SessionLiveness { epoch: number }
 export async function assertSessionSubjectLive(session: SessionPayload): Promise<SessionLiveness | undefined> {
   if (session.tier !== 'user') return undefined;
   if (typeof session.userId !== 'string') {
+    // ADR 0621 correction (2026-10-05): every user-tier mint carries a `userId`
+    // (`mintUserSessionCookieValue`) or a `subject` (`issueSubjectSession`, the
+    // OIDC upgrade, break-glass). One with NEITHER is not a session this host
+    // issued, and returning `undefined` here skipped the erased / disabled /
+    // epoch checks for it entirely. Fail closed.
+    if (!session.subject) {
+      throw new OpenwopError('session_revoked', 'This session was signed out. Sign in again.', 401, {});
+    }
     const personalTenant = personalTenantOfSession(session);
-    if (!session.subject || !personalTenant.startsWith('user:')) return undefined;
+    if (!personalTenant.startsWith('user:')) return undefined;
     return assertPersonalSubjectLive(personalTenant, session.subject, { session });
   }
   let state: Awaited<ReturnType<typeof resolveSessionSubject>>;
@@ -761,7 +891,67 @@ export async function assertSessionSubjectLive(session: SessionPayload): Promise
   if ((session.epoch ?? 0) !== state.sessionEpoch) {
     throw new OpenwopError('session_revoked', 'This session was signed out. Sign in again.', 401, {});
   }
+  refuseRevokedFamily(session, state.revokedFamilies);
   return { epoch: session.epoch ?? 0 };
+}
+
+/** ADR 0833 D3 (review H1) — how stale a cookie's `authAt` may be before a
+ *  verified bearer re-stamps it. */
+const REAUTH_RESTAMP_SECONDS = 86_400;
+
+/** What {@link resolveLiveCookieSession} answers. */
+export interface LiveCookieSession {
+  session: SessionPayload;
+  /** The RBAC subject (`userId`, else the opaque `subject`); absent for anon. */
+  subject?: string;
+  personalTenant: string;
+  /** `session.tenantId`, or the personal tenant when the caller is no longer a
+   *  member of the shared workspace the cookie names. */
+  activeTenant: string;
+  /** True when the membership re-check moved the caller off `session.tenantId`. */
+  repinned: boolean;
+  /** True when the active tenant requires a second factor this session lacks. */
+  mfaGap: boolean;
+}
+
+/**
+ * ADR 0833 D1 — the cookie-session decision for every lane that is NOT the HTTP
+ * middleware (the collab WebSocket upgrade). The same four questions in the
+ * same order: signature/expiry, the live-session authority (disabled / erased /
+ * epoch / revoked family — THROWS the typed refusal), shared-workspace
+ * membership, and the active tenant's MFA policy. A lane that called bare
+ * `verifySession` admitted a removed, disabled or signed-out member until the
+ * cookie's `exp` (S1). `null` ⇒ no valid cookie.
+ */
+export async function resolveLiveCookieSession(raw: string | undefined): Promise<LiveCookieSession | null> {
+  if (!raw) return null;
+  const session = verifySession(raw);
+  if (!session) return null;
+  await assertSessionSubjectLive(session);
+  const subject = session.userId ?? session.subject;
+  const personalTenant = personalTenantOfSession(session);
+  let activeTenant = session.tenantId;
+  let repinned = false;
+  if (subject && activeTenant !== personalTenant && !(await isWorkspaceMember(subject, activeTenant))) {
+    activeTenant = personalTenant;
+    repinned = true;
+  }
+  return {
+    session,
+    ...(subject ? { subject } : {}),
+    personalTenant,
+    activeTenant,
+    repinned,
+    mfaGap: session.tier === 'user' && (await mfaGap(activeTenant, personalTenant, session.mfa === true)),
+  };
+}
+
+/** ADR 0833 D3 — a signed-out session FAMILY is refused on the read the
+ *  request already paid for (the durable row carries the list). */
+function refuseRevokedFamily(session: SessionPayload, revoked: readonly string[] | undefined): void {
+  if (revoked && revoked.includes(familyOf(session))) {
+    throw new OpenwopError('session_revoked', 'This session was signed out. Sign in again.', 401, {});
+  }
 }
 
 /**
@@ -796,6 +986,7 @@ async function assertPersonalSubjectLive(
   if (opts.session && (opts.session.epoch ?? 0) !== state.sessionEpoch) {
     throw new OpenwopError('session_revoked', 'This session was signed out. Sign in again.', 401, {});
   }
+  if (opts.session) refuseRevokedFamily(opts.session, state.revokedFamilies);
   return { epoch: state.sessionEpoch };
 }
 
@@ -858,11 +1049,8 @@ export function authMiddleware(): RequestHandler {
     // risked drift if the verification logic ever diverged between
     // the two sites. Skip entirely in `cookiesDisabled` mode — there
     // are no cookies to read.
-    const cookieSession = (() => {
-      if (cookiesDisabled) return null;
-      const raw = readCookie(req.header('cookie'), COOKIE_NAME);
-      return raw ? verifySession(raw) : null;
-    })();
+    const rawCookie = cookiesDisabled ? undefined : readCookie(req.header('cookie'), COOKIE_NAME);
+    const cookieSession = rawCookie ? verifySession(rawCookie) : null;
 
     // ADR 0748 — the one OPTIONALLY-authenticated read. With no credential at all
     // it passes through with no principal (the system-site lane, exactly the old
@@ -893,6 +1081,23 @@ export function authMiddleware(): RequestHandler {
       bearerToken = header.slice('bearer '.length).trim();
     } else if (typeof req.query.apiKey === 'string' && req.query.apiKey.trim().length > 0) {
       bearerToken = req.query.apiKey.trim();
+      // ADR 0795 D5 — a self-service key travels in a header. A URL reaches
+      // request logs, proxies and browser history, and unlike an operator's env
+      // key this one belongs to a person. The one caller that cannot set a
+      // header is `EventSource`, so the run-events stream keeps the query form.
+      if (bearerToken.startsWith('owk_') && !isRunEventsStream(req)) {
+        const mode = keyPolicyMode('OPENWOP_KEY_QUERY_PARAM');
+        if (mode === 'report') {
+          reportKeyPolicy('query-param', 'unverified', { method: req.method, family: req.path.split('/').slice(0, 4).join('/') });
+        } else if (mode === 'enforce') {
+          setBearerChallenge(req, res, { presented: true });
+          res.status(401).json({
+            error: 'unauthenticated',
+            message: 'Send an API key in the Authorization header (Bearer), not in the URL. Only the run-events stream accepts ?apiKey=.',
+          });
+          return;
+        }
+      }
     }
     if (bearerToken) {
       // Try the API-key allow-list first (cheap, sync). API keys are
@@ -940,7 +1145,29 @@ export function authMiddleware(): RequestHandler {
       // `owk_` token authenticates nobody and falls through to the reject path.
       // Only `owk_` bearers pay the store lookup (env keys + JWTs skip it).
       if (bearerToken.startsWith('owk_')) {
-        const key = await verifyApiKey(bearerToken);
+        const callerIp = clientIp(req);
+        const key = await verifyApiKey(bearerToken, Date.now(), { ip: callerIp, ...(req.header('user-agent') ? { userAgent: req.header('user-agent')! } : {}) });
+        // ADR 0798 — keys turned off for the workspace is the workspace's own
+        // explicit choice, so it does not wait on a `report` switch.
+        if (key && (await tenantKeysDisabled(key.tenantId))) {
+          log.warn('api key refused', { keyId: key.keyId, reason: 'keys_disabled' });
+          setBearerChallenge(req, res, { presented: true });
+          res.status(401).json({ error: 'unauthenticated', message: 'API keys are turned off for this workspace.' });
+          return;
+        }
+        // ADR 0795 D6 — a key stops when its issuer does. Checked HERE so it
+        // holds on every lane, including the protocol lane with RFC 0049
+        // enforcement off, which otherwise never asks who issued the key.
+        if (key && (await apiKeyIssuerRefused(key.keyId, key.tenantId))) {
+          {
+            setBearerChallenge(req, res, { presented: true });
+            res.status(401).json({
+              error: isProtocolRequest(req) ? 'credential_revoked' : 'unauthenticated',
+              message: 'The person who created this API key no longer has access to this workspace.',
+            });
+            return;
+          }
+        }
         if (key) {
           // ADR 0601 — an `owk_` key is a DELEGATION, so carry who delegated it.
           // `key.createdBy` is the canonical RBAC subject of the person who
@@ -965,7 +1192,7 @@ export function authMiddleware(): RequestHandler {
           setBearerChallenge(req, res, { presented: true });
           // The CODE is the v2 contract's; a v1 caller keeps the `unauthenticated`
           // it has always received for this key (no v1 error-code change).
-          res.status(401).json({ error: negotiatedMajor(req) === 2 ? 'credential_revoked' : 'unauthenticated', message: 'This API key was revoked.' });
+          res.status(401).json({ error: isProtocolRequest(req) ? 'credential_revoked' : 'unauthenticated', message: 'This API key was revoked.' });
           return;
         }
         // fall through — an invalid scoped key is treated like any bad bearer
@@ -1035,16 +1262,18 @@ export function authMiddleware(): RequestHandler {
           // canonical read never creates. The epoch it returns is what the
           // promotion mint stamps, so "sign out everywhere" covers this lane.
           let validatedEpoch: number | undefined;
+          // ADR 0833 D2/D3 — the same-identity user-tier cookie riding along
+          // (bound or unbound), once it has passed the live check below. It is
+          // the promotion's `source` (the family carries over) and what logout
+          // revokes. A cookie for another identity is never a source.
+          const sameIdentityCookie =
+            cookieSession?.tier === 'user' && cookieSession.personalTenant === personalTenant ? cookieSession : undefined;
           try {
             if (boundUserId && cookieSession) {
               validatedEpoch = (await assertSessionSubjectLive(cookieSession))?.epoch;
             } else {
               const unboundCookie =
-                cookieSession?.tier === 'user'
-                && cookieSession.personalTenant === personalTenant
-                && cookieSession.userId === undefined
-                  ? cookieSession
-                  : undefined;
+                sameIdentityCookie && sameIdentityCookie.userId === undefined ? sameIdentityCookie : undefined;
               validatedEpoch = (await assertPersonalSubjectLive(personalTenant, subject, { session: unboundCookie }))?.epoch;
             }
           } catch (err: unknown) {
@@ -1052,6 +1281,7 @@ export function authMiddleware(): RequestHandler {
             return;
           }
           req.sessionEpoch = validatedEpoch;
+          if (sameIdentityCookie) req.cookieSession = sameIdentityCookie;
           // The ACTIVE workspace defaults to the personal tenant, but honors a
           // previously-switched workspace recorded on a matching user-tier cookie.
           // Defense-in-depth (ADR 0015): when that workspace is SHARED (≠ the
@@ -1098,12 +1328,17 @@ export function authMiddleware(): RequestHandler {
           // that drops the Authorization header (SPA token-cache race,
           // EventSource without `?apiKey=`) would fall back to a still-anon
           // cookie and land as anon. No-op on the steady-state hot path.
+          const nowS = Math.floor(Date.now() / 1000);
           if (!cookiesDisabled
             && (!cookieSession
               || cookieSession.tier !== 'user'
               || cookieSession.subject !== subject
               || cookieSession.tenantId !== active
               || cookieSession.userId !== boundUserId
+              // ADR 0833 D3 (review H1) — a verified bearer is a fresh IdP
+              // authentication: re-stamp `authAt` daily, so a user whose IdP
+              // still vouches for them never reaches the absolute cap.
+              || (cookieSession.authAt ?? 0) < nowS - REAUTH_RESTAMP_SECONDS
               // ADR 0389 P1: sync the second-factor mark to the bearer claim —
               // promote when the claim appears; demote only when a NEWER
               // single-factor sign-in replaces an MFA one (grade-pass SEC-G3:
@@ -1112,10 +1347,11 @@ export function authMiddleware(): RequestHandler {
               || (!mfaVerified && cookieSession.mfa === true
                   && (bearerSignInS === undefined || bearerSignInS >= cookieSession.iat)))
           ) {
-            const sid = base64urlEncode(randomBytes(18));
-            const now = Math.floor(Date.now() / 1000);
-            const upgraded: SessionPayload = {
-              sid, tenantId: active, tier: 'user', subject, personalTenant,
+            // ADR 0833 D2/D3 — through the ONE builder: a fresh authentication
+            // (`authAt` = now) that keeps the same-identity cookie's family, so a
+            // logout still reaches a cookie copied before this re-mint.
+            const upgraded = buildSessionPayload({
+              tenantId: active, tier: 'user', subject, personalTenant,
               // Preserve the bound durable userId across re-mints (e.g. a switch),
               // else the canonical subject would silently revert to oidc:<sub>.
               // ADR 0621 D1 (c): the ONLY `userId` this mint can carry is the one
@@ -1128,8 +1364,7 @@ export function authMiddleware(): RequestHandler {
                 ? { userId: boundUserId, ...(typeof cookieSession.epoch === 'number' ? { epoch: cookieSession.epoch } : {}) }
                 : validatedEpoch !== undefined ? { epoch: validatedEpoch } : {}),
               ...(mfaVerified || (cookieSession?.mfa === true && bearerSignInS !== undefined && bearerSignInS < cookieSession.iat) ? { mfa: true } : {}),
-              iat: now, exp: now + COOKIE_TTL_SECONDS,
-            };
+            }, { source: sameIdentityCookie ?? null, freshAuth: true });
             setSessionCookie(res, signSession(upgraded));
           }
           next();
@@ -1276,6 +1511,21 @@ export function authMiddleware(): RequestHandler {
         });
         return;
       }
+      // ADR 0833 D3 (grade-ux `USERS2-UX-2`) — a SIGNED-IN session that has
+      // ended (its `exp`, or the absolute lifetime) is told so, never silently
+      // swapped for a fresh anonymous tenant: the header would keep showing the
+      // account while every write landed in a throwaway sandbox. The SPA treats
+      // `details.reason: 'session_expired'` as a sign-out with a reason. Not a
+      // new error code — the envelope's `unauthenticated`, with a reason.
+      if (rawCookie && endedUserSession(rawCookie)) {
+        clearSessionCookie(res);
+        res.status(401).json({
+          error: 'unauthenticated',
+          message: 'Your session has ended. Sign in again to continue.',
+          details: { reason: 'session_expired' },
+        });
+        return;
+      }
       // RFC 0200 §B.1 / ADR 0750 — on the MAJOR-2 wire a request that presents NO
       // credential (no bearer, no api key, no session cookie) is refused `401` with
       // a `Bearer resource_metadata=…` challenge and NO error code, before any
@@ -1296,7 +1546,26 @@ export function authMiddleware(): RequestHandler {
       // defaults to major 2, so without this guard a first-visit browser would get
       // this JSON 401 instead of the SPA shell (caught by the ADR 0669 retirement
       // rehearsal, `test/adr0669-v1-retirement-rehearsal.test.ts`).
-      if (negotiatedMajor(req) === 2 && isProtocolClient(req)) {
+      //
+      // MAJOR 1 TOO (ADR 0750 major-1 extension). ADR 0745 recorded the major-1
+      // mint as a residual "outside RFC 0200's MUST" and said that if v1's own
+      // `auth.md` §3 missing-credential rule were ever measured against the
+      // cookie posture, it belonged in THIS predicate. It was: the v1 floor
+      // `openwop.floor.auth` (a major-1 run create, no credential → MUST 401) failed
+      // on production's b29427fef and 2273db9c6 cuts with `201`, because this
+      // line minted a session and admitted the call. Scoped to the protocol
+      // operations v2 also serves (`isV1ProtocolOperationPath`): the vendor
+      // `/host/openwop-app` space — where the SPA bootstraps its session — still
+      // mints, as do the `/host/sample` seams. The SPA makes no major-1 protocol
+      // calls (all protocol traffic is major 2 through `sdkFetch`).
+      //
+      // A run-scoped `?streamToken=` on the run-events stream IS a presented
+      // credential: a capability minted same-origin for the cross-origin SSE base,
+      // where the session cookie cannot follow (`host/runStreamToken.ts`,
+      // `frontend/react/src/client/streamsClient.ts`). The route validates it
+      // (`loadReadableRun`); refusing here as "no credential" would 401 every
+      // cookie-mode viewer's live run stream on either major.
+      if (isProtocolClient(req) && !carriesRunStreamToken(req) && isProtocolRequest(req)) {
         setBearerChallenge(req, res, { presented: false });
         res.status(401).json({
           error: 'unauthenticated',
@@ -1322,12 +1591,14 @@ export function authMiddleware(): RequestHandler {
       // Sliding-window refresh: if the cookie is past the refresh
       // threshold, reissue it. NEVER for `noRefresh` sessions (break-glass —
       // grade-pass SEC-C2: extending a 10-minute emergency session to 24h).
+      // ADR 0833 D3 — the refresh keeps the family and `authAt`, and never
+      // slides `exp` past `authAt` + the absolute lifetime.
       const now = Math.floor(Date.now() / 1000);
       if (!session.noRefresh && session.exp - now < REFRESH_THRESHOLD_SECONDS) {
-        session.iat = now;
-        session.exp = now + COOKIE_TTL_SECONDS;
+        session = refreshSessionPayload(session);
         setSessionCookie(res, signSession(session));
       }
+      if (session.tier === 'user') req.cookieSession = session;
     }
     // ADR 0003: a session bound to a durable user presents the STABLE, opaque
     // `user:<userId>` principal (RFC 0048 — non-PII). An OIDC-promoted session

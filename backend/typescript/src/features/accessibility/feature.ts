@@ -32,14 +32,14 @@ export const accessibilityFeature: BackendFeature = {
   // generateAltText (write). Auto-advertised at /.well-known as host.sample.accessibility.
   surface: { id: 'accessibility', build: buildAccessibilitySurface },
   requiredPacks: [
-    { name: 'feature.accessibility.nodes', version: '1.0.0' },
-    { name: 'feature.accessibility.agents', version: '1.0.0' },
+    { name: 'feature.accessibility.nodes', version: '1.0.1' },
+    { name: 'vendor.openwop-app.accessibility.agents', version: '1.0.1' },
   ],
   toggleDefault: {
     id: 'accessibility',
     label: 'Accessibility',
     description:
-      'Authored-content accessibility: AI-generated alt text for image assets (Media), a shared authored-content a11y checker (missing alt, heading order, low-contrast on authored colors) surfaced in the CMS / documents / app-builder editors, and an Accessibility Reviewer agent driven from the AI chat. Composes the existing vision, contrast, and a11y-issue seams — no live-DOM auditor. OFF by default.',
+      'Authored-content accessibility: AI-generated alt text for image assets (Media), a shared authored-content a11y checker (missing alt, heading order, low-contrast on authored colors) surfaced in the CMS / documents / app-builder editors, and an Accessibility Reviewer agent driven from the AI chat. Composes the existing vision, contrast, and a11y-issue seams — no live-DOM auditor.',
     category: 'Content',
     status: 'off',
     bucketUnit: 'tenant',

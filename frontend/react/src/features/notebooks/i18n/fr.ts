@@ -4,6 +4,9 @@
 export const messages = {
   // Textes d’erreur — partagés par les panneaux ci-dessous.
   loadFailed: 'Échec du chargement.',
+  sourcesNoneReadOnlyTitle: 'Aucune source pour l’instant',
+  sourcesNoneReadOnlyBody: 'Une personne disposant d’un accès en modification à ce projet peut ajouter des sources ici.',
+  sourcesReadOnlyNote: 'Vous pouvez lire ces sources. Les ajouter ou les modifier nécessite un accès en modification.',
   // NBU-2 / NBU-5 (ADR 0601) — chaque panneau signale son propre échec de lecture.
   retry: 'Réessayer',
   sourcesFailedTitle: 'Impossible de charger vos sources',

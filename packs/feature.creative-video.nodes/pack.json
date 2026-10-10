@@ -1,11 +1,12 @@
 {
   "name": "feature.creative-video.nodes",
-  "version": "1.1.0",
+  "version": "1.1.1",
+  "kind": "node",
   "description": "AI video node pack (ADR 0404) — `generate` (avatar script→MP4 via the HeyGen-class provider), `text-to-video` (frontier text→video, ADR 0404 §P4, behind the creative-video.t2v sub-toggle), and `status`. All ride the Connections broker (async submit→poll→download→media asset; ADR 0106 cost-metered; replay-safe — the asset id is the recorded output, never a regenerate). Over ctx.features['creative-video']; adapterOnly consumer of the heygen + runway providers.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "creative-video", "heygen", "runway", "ai", "media"],
-  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "engines": { "openwop": ">=1.0.0 <3.0.0" },
   "nodes": [
     {
       "typeId": "feature.creative-video.nodes.generate",

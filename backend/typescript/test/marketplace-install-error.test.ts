@@ -1,3 +1,14 @@
+/**
+ * ADR 0826 D4 — `translateInstallError` (the ONE install lane's error mapping,
+ * re-exported from `marketplace/routes.ts`). A registry failure must reach the
+ * operator as an actionable canonical error, never a bare 500: an unpublished
+ * pack is a 404, a registry outage a retry-later 502, a verification failure a 422.
+ *
+ * Sabotage witnesses (wave 10): disabling the 404 / outage / integrity branch,
+ * a 500 fallback, or dropping the OpenwopError passthrough — each turns its case red.
+ * The outage case asserts the branch's OWN wording: the fallback also answers
+ * `runner_unavailable`/502, so code+status alone could not see the branch go.
+ */
 import { describe, it, expect } from 'vitest';
 import { translateInstallError } from '../src/features/marketplace/routes.js';
 import { OpenwopError } from '../src/types.js';
@@ -20,6 +31,8 @@ describe('translateInstallError', () => {
       const e = translateInstallError(new Error(m), NAME, VER);
       expect(e.code).toBe('runner_unavailable');
       expect(e.httpStatus).toBe(502);
+      expect(e.message, 'the outage branch says retry later').toContain('unavailable right now');
+      expect(e.message, 'not the raw low-level reason').not.toContain('_fetch_failed');
     }
   });
 
@@ -33,6 +46,7 @@ describe('translateInstallError', () => {
 
   it('an unknown failure is mapped to a clear 502, never a bare 500', () => {
     const e = translateInstallError(new Error('boom'), NAME, VER);
+    expect(e.code).toBe('runner_unavailable');
     expect(e.httpStatus).toBe(502);
     expect(e.message).toContain('boom');
   });

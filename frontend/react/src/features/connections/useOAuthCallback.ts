@@ -17,6 +17,10 @@ const OAUTH_ERROR_KEY = {
   invalid_state: 'callbackInvalidState',
   missing_params: 'callbackMissingParams',
   exchange_failed: 'callbackExchangeFailed',
+  // ADR 0780 (grade-ux `CONNUX-8`) — the server emits these too; the subject
+  // mismatch in particular needs its own sentence (sign in as the right account).
+  subject_mismatch: 'callbackSubjectMismatch',
+  iss_mismatch: 'callbackIssMismatch',
 } as const;
 
 export function useOAuthCallbackToast(): void {

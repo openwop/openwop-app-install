@@ -5,6 +5,13 @@
  * builder + SSE parser); only the Gemini HTTP call is intercepted. Proves the image/audio
  * bytes actually reach the provider as multimodal `inlineData`, the response flows back into
  * the KB document, the binary-upload trust fence holds, and the no-provider path 422s.
+ *
+ * NOT a live suite: no skip condition, nothing leaves the process (the gated live twin is
+ * `live-gemini-media.test.ts`). Unlike `kb-file-upload.test.ts`, which mocks
+ * `resolveHeadlessAi`, this drives the real resolver and request builder.
+ * The no-provider case pins the MESSAGE and the absence of a provider call: the
+ * media→text `catch` maps EVERY dispatch failure to 422, so a bare 422 cannot tell
+ * "no provider" from "a provider call failed". Probes w5g2-e2e-*.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync } from 'node:fs';
@@ -26,6 +33,7 @@ interface GeminiBody { contents: Array<{ role: string; parts: GeminiPart[] }> }
 
 const realFetch = global.fetch;
 let lastGoogleBody: GeminiBody | null = null;
+let googleCalls = 0;
 
 /** A minimal SSE response Gemini's stream parser accepts (one candidate text part). */
 function sseResponse(text: string): Response {
@@ -49,9 +57,11 @@ beforeEach(async () => {
   await clearAllSecrets();
   await clearHeadlessAiDefault(T);
   lastGoogleBody = null;
+  googleCalls = 0;
   const mock = vi.fn(async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]): Promise<Response> => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     if (url.includes('generativelanguage.googleapis.com')) {
+      googleCalls += 1;
       lastGoogleBody = JSON.parse(String(init?.body)) as GeminiBody;
       return sseResponse('INVOICE TOTAL 4242 USD');
     }
@@ -104,6 +114,7 @@ describe('media → text end-to-end (real stack, only the network mocked)', () =
     const col = await createCollection(T, ORG, 'tester', { name: 'E2Eno' });
     await expect(ingestDocument(T, ORG, 'tester', col.collectionId, {
       title: 's.png', contentBase64: Buffer.from([1, 2, 3, 4]).toString('base64'), contentType: 'image/png',
-    })).rejects.toMatchObject({ httpStatus: 422 });
+    })).rejects.toMatchObject({ httpStatus: 422, message: expect.stringMatching(/No vision-capable AI provider/) });
+    expect(googleCalls, 'no provider request was made').toBe(0);
   });
 });

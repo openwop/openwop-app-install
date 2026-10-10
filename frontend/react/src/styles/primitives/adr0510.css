@@ -151,3 +151,70 @@
     background: var(--paper-2);
   }
 }
+
+/* ── Vertical tabs + hub split (ui/Tabs orientation="vertical") ───────────
+ * A console with many sections (the Access Hub's eight) reads as a side menu
+ * clustered by group, not a wrapping strip. Selection keeps BOTH non-hue
+ * channels the horizontal tab uses (weight + a bar, here on the inline-start
+ * edge) so it survives forced-colours and colour-blind readers. */
+.tabs--vertical { flex-direction: column; flex-wrap: nowrap; gap: 2px; border-bottom: 0; margin-bottom: 0; }
+.tabs--vertical .tab {
+  text-align: start;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 0;
+  margin-bottom: 0;
+  border-inline-start: 2px solid transparent;
+  /* Logical corners: the bar sits on the inline-start edge, so the rounding is
+   * on the end edge in either direction (RTL included). */
+  border-radius: 0;
+  border-start-end-radius: var(--radius);
+  border-end-end-radius: var(--radius);
+}
+.tabs--vertical .tab:hover { background: var(--paper-2); }
+.tabs--vertical .tab[aria-selected="true"] { background: var(--clay-soft); border-inline-start-color: var(--clay); }
+.tabs--vertical .tab:focus-visible { border-radius: 0; border-start-end-radius: var(--radius); border-end-end-radius: var(--radius); }
+/* Cluster label (aria-hidden — a tablist may own only tabs). */
+.tabs__group {
+  font-family: var(--mono);
+  font-size: var(--text-eyebrow);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  padding: var(--space-3) var(--space-3) var(--space-1);
+}
+.tabs__group:first-child { padding-top: 0; }
+.tabs:not(.tabs--vertical) .tabs__group { display: none; }
+/* Status after a tab's label (TabItem.meta, ADR 0864): mono and muted so the
+ * label still leads; amber only when something needs the user. In the side
+ * menu it sits at the row's end. */
+.tab__meta {
+  font-family: var(--mono);
+  font-size: var(--text-eyebrow);
+  font-weight: var(--weight-body);
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  margin-inline-start: var(--space-2);
+}
+.tab__meta--attention { color: var(--color-warning-text); font-weight: var(--weight-emphasis); }
+.tabs--vertical .tab { display: flex; align-items: baseline; }
+.tabs--vertical .tab__meta { margin-inline-start: auto; padding-inline-start: var(--space-2); }
+
+/* The console splits into menu + panel only when ITS OWN width allows: it
+ * sits inside the admin shell's rail (and the app sidebar), so a viewport
+ * breakpoint would misjudge the room. Below that it falls back to the
+ * familiar wrapping strip. Range syntax, so the two queries meet exactly at
+ * 760px with no fractional gap (the governed vocabulary, DESIGN.md §4). */
+.hub-split { container-type: inline-size; }
+.hub-split__grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-4); align-items: start; }
+@container (width >= 760px) {
+  .hub-split__grid { grid-template-columns: 200px minmax(0, 1fr); gap: var(--space-5); }
+  .hub-split__rail { position: sticky; top: var(--space-4); }
+}
+@container (width < 760px) {
+  .hub-split .tabs--vertical { flex-direction: row; flex-wrap: wrap; gap: var(--space-1); row-gap: var(--space-2); border-bottom: 1px solid var(--rule); }
+  .hub-split .tabs--vertical .tab { border-inline-start: 0; border-radius: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; background: none; }
+  .hub-split .tabs--vertical .tab[aria-selected="true"] { border-bottom-color: var(--clay); }
+  .hub-split .tabs--vertical .tab:focus-visible { border-radius: var(--radius) var(--radius) 0 0; }
+  .hub-split .tabs__group { display: none; }
+}

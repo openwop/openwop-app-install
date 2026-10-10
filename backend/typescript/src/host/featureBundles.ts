@@ -14,15 +14,20 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { locateRepoSchemasDir } from './_repoPath.js';
 
-export interface RawBundle { label?: string; features: string[] }
+/** `group` (ADR 0820 §7 UI) — the store goal-group this bundle is shown under;
+ *  one of the catalog's `groups`. Optional; validated by `gen-distribution --check`. */
+export interface RawBundle { label?: string; group?: string; features: string[] }
 export interface RawBundleCatalog {
   core: string[];
+  /** ADR 0820 §7 UI — the ordered store goal-group ids (empty when undeclared). */
+  groups: string[];
   bundles: Record<string, RawBundle>;
 }
 
 interface BundlesFile {
   core?: unknown;
-  bundles?: Record<string, { label?: unknown; features?: unknown }>;
+  groups?: unknown;
+  bundles?: Record<string, { label?: unknown; group?: unknown; features?: unknown }>;
 }
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -58,10 +63,11 @@ function loadBundleCatalog(): RawBundleCatalog | null {
   for (const [id, def] of Object.entries(parsed.bundles ?? {})) {
     bundles[id] = {
       ...(typeof def.label === 'string' ? { label: def.label } : {}),
+      ...(typeof def.group === 'string' ? { group: def.group } : {}),
       features: stringArray(def.features),
     };
   }
-  return { core: stringArray(parsed.core), bundles };
+  return { core: stringArray(parsed.core), groups: stringArray(parsed.groups), bundles };
 }
 
 /** Parse `distributions/bundles.json` (memoized per process), or `null` when the
@@ -86,6 +92,16 @@ export function isSellableBundleFeature(featureId: string): boolean {
     bundledSet = new Set(cat ? Object.values(cat.bundles).flatMap((b) => b.features) : []);
   }
   return bundledSet.has(featureId);
+}
+
+/** The bundle that sells `featureId`, or `undefined` for a core/standalone feature
+ *  (strategy §8 funnel attribution). Well-defined: `gen-distribution --check`
+ *  refuses an id listed in two places, so a feature has at most one bundle. */
+export function bundleOfFeature(featureId: string): string | undefined {
+  const cat = readBundleCatalog();
+  if (!cat) return undefined;
+  for (const [id, b] of Object.entries(cat.bundles)) if (b.features.includes(featureId)) return id;
+  return undefined;
 }
 
 /** The feature ids in a bundle (empty when the bundle is unknown / no catalog). */

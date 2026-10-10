@@ -9,6 +9,7 @@ import type { AddressInfo } from 'node:net';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { getSetCookies } from './headerCookies.js';
 import { createApp } from '../src/index.js';
+import { bareRunId } from './support/bareRunId.js';
 
 let BASE: string;
 let server: http.Server;
@@ -37,7 +38,7 @@ function client() {
 
 async function waitFor(c: ReturnType<typeof client>, runId: string, pred: (s: string) => boolean): Promise<Record<string, unknown>> {
   for (let i = 0; i < 60; i++) {
-    const r = await c.get(`/v1/runs/${runId}`);
+    const r = await c.get(`/runs/${runId}`);
     if (pred(r.body.status as string)) return r.body;
     if (r.body.status === 'failed') throw new Error(`run failed: ${JSON.stringify(r.body.error)}`);
     await new Promise((res) => setTimeout(res, 100));
@@ -48,10 +49,10 @@ async function waitFor(c: ReturnType<typeof client>, runId: string, pred: (s: st
 describe('guided-tour nodes (ADR 0368 P1)', () => {
   it('a two-step tour suspends per step with the player payload; resolving advances; the run completes', async () => { // legacy ui.tour.* typeids exercise the ADR 0376 replay alias
     const c = client();
-    expect((await c.post('/v1/host/openwop-app/test/login', { email: `gt-${Date.now()}-${n++}@acme.test` })).status).toBe(201);
+    expect((await c.post('/host/openwop-app/test/login', { email: `gt-${Date.now()}-${n++}@acme.test` })).status).toBe(201);
 
     const workflowId = `tour-demo-${Date.now()}`;
-    const reg = await c.post('/v1/host/openwop-app/workflows', {
+    const reg = await c.post('/host/openwop-app/workflows', {
       workflowId,
       metadata: { lifecycle: { transient: true, generatedBy: 'guided-tours-test' } },
       nodes: [
@@ -62,13 +63,13 @@ describe('guided-tour nodes (ADR 0368 P1)', () => {
     });
     expect(reg.status, JSON.stringify(reg.body)).toBe(201);
 
-    const create = await c.post('/v1/runs', { workflowId, inputs: {} });
+    const create = await c.post('/runs', { workflowId, inputs: {} });
     expect(create.status, JSON.stringify(create.body)).toBe(201);
     const runId = create.body.runId as string;
 
     // Step 1 suspends: waiting with a tour-step interrupt carrying the payload.
     await waitFor(c, runId, (s) => s.startsWith('waiting'));
-    let ints = await c.get(`/v1/host/openwop-app/runs/${runId}/interrupts`);
+    let ints = await c.get(`/host/openwop-app/runs/${bareRunId(runId)}/interrupts`);
     let open = (ints.body.interrupts as Array<Record<string, unknown>>).filter((i) => !i.resolvedAt);
     expect(open).toHaveLength(1);
     expect(open[0]!.kind).toBe('walkthrough-step');
@@ -76,18 +77,18 @@ describe('guided-tour nodes (ADR 0368 P1)', () => {
     expect((open[0]!.data as Record<string, unknown>).hitl).toBe(false);
 
     // The player's resolve path: resolve-by-run+node.
-    const r1 = await c.post(`/v1/runs/${runId}/interrupts/${open[0]!.nodeId as string}`, { resumeValue: { acked: true, actionId: 'demo.first.click' } });
+    const r1 = await c.post(`/runs/${runId}/interrupts/${open[0]!.nodeId as string}`, { resumeValue: { acked: true, actionId: 'demo.first.click' } });
     expect(r1.status, JSON.stringify(r1.body)).toBe(200);
 
     // Step 2 (HITL) suspends with the hitl payload.
     await waitFor(c, runId, (s) => s.startsWith('waiting'));
-    ints = await c.get(`/v1/host/openwop-app/runs/${runId}/interrupts`);
+    ints = await c.get(`/host/openwop-app/runs/${bareRunId(runId)}/interrupts`);
     open = (ints.body.interrupts as Array<Record<string, unknown>>).filter((i) => !i.resolvedAt);
     expect(open).toHaveLength(1);
     expect((open[0]!.data as Record<string, unknown>).actionId).toBe('demo.upload.file');
     expect((open[0]!.data as Record<string, unknown>).hitl).toEqual({ prompt: 'Pick any file' });
 
-    const r2 = await c.post(`/v1/runs/${runId}/interrupts/${open[0]!.nodeId as string}`, { resumeValue: { acked: true, hitlValue: { mediaRef: 'media:abc' } } });
+    const r2 = await c.post(`/runs/${runId}/interrupts/${open[0]!.nodeId as string}`, { resumeValue: { acked: true, hitlValue: { mediaRef: 'media:abc' } } });
     expect(r2.status, JSON.stringify(r2.body)).toBe(200);
 
     await waitFor(c, runId, (s) => s === 'completed');
@@ -95,31 +96,31 @@ describe('guided-tour nodes (ADR 0368 P1)', () => {
 
   it('a checkpoint suspends with its declaration; a missing actionId fails the step node honestly', async () => {
     const c = client();
-    expect((await c.post('/v1/host/openwop-app/test/login', { email: `gt-${Date.now()}-${n++}@acme.test` })).status).toBe(201);
+    expect((await c.post('/host/openwop-app/test/login', { email: `gt-${Date.now()}-${n++}@acme.test` })).status).toBe(201);
 
     const workflowId = `tour-cp-${Date.now()}`;
-    expect((await c.post('/v1/host/openwop-app/workflows', {
+    expect((await c.post('/host/openwop-app/workflows', {
       workflowId,
       metadata: { lifecycle: { transient: true, generatedBy: 'guided-tours-test' } },
       nodes: [{ nodeId: 'cp', typeId: 'ui.tour.checkpoint', config: { expect: 'demo.brief-exists' } }],
     })).status).toBe(201);
-    const create = await c.post('/v1/runs', { workflowId, inputs: {} });
+    const create = await c.post('/runs', { workflowId, inputs: {} });
     const runId = create.body.runId as string;
     await waitFor(c, runId, (s) => s.startsWith('waiting'));
-    const ints = await c.get(`/v1/host/openwop-app/runs/${runId}/interrupts`);
+    const ints = await c.get(`/host/openwop-app/runs/${bareRunId(runId)}/interrupts`);
     const open = (ints.body.interrupts as Array<Record<string, unknown>>).filter((i) => !i.resolvedAt);
     expect((open[0]!.data as Record<string, unknown>).checkpoint).toBe('demo.brief-exists');
 
     // Missing actionId → the node FAILS (config error), never a silent hang.
     const badId = `tour-bad-${Date.now()}`;
-    expect((await c.post('/v1/host/openwop-app/workflows', {
+    expect((await c.post('/host/openwop-app/workflows', {
       workflowId: badId,
       metadata: { lifecycle: { transient: true, generatedBy: 'guided-tours-test' } },
       nodes: [{ nodeId: 'x', typeId: 'ui.tour.step', config: {} }],
     })).status).toBe(201);
-    const bad = await c.post('/v1/runs', { workflowId: badId, inputs: {} });
+    const bad = await c.post('/runs', { workflowId: badId, inputs: {} });
     for (let i = 0; i < 60; i++) {
-      const r = await c.get(`/v1/runs/${bad.body.runId as string}`);
+      const r = await c.get(`/runs/${bad.body.runId as string}`);
       if (r.body.status === 'failed') return;
       await new Promise((res) => setTimeout(res, 100));
     }

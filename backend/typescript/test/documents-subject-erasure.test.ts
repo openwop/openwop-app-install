@@ -93,6 +93,8 @@ describe('DOC2-B1 — erasure reaches documents, and anonymizes rather than dele
     // `patch.status` was undefined, and the call silently changed nothing. Tests
     // are excluded from tsconfig, so nothing typechecked it; `check-test-types`
     // would have caught it at CI, and the precondition below caught it here.
+    // ADR 0838 D2 — approval pins a version, so the document needs content first.
+    await addVersion(TENANT, ORG, doc.documentId, { content: 'owned text', producedBy: { kind: 'user', id: OTHER } });
     await updateDocument(TENANT, ORG, doc.documentId, OTHER, { status: 'approved' });
 
     // PRECONDITION, asserted rather than assumed. The first version of this test
@@ -113,6 +115,9 @@ describe('DOC2-B1 — erasure reaches documents, and anonymizes rather than dele
       SHAREABLE_STATUSES.includes(after!.status),
       'and it is no longer publicly shareable',
     ).toBe(false);
+    // ADR 0838 D2 — leaving the shareable statuses clears the approval pin.
+    expect(before?.approvedVersionId, 'the pin existed').toBeTruthy();
+    expect(after?.approvedVersionId, 'and is cleared with the demotion').toBeUndefined();
   });
 
   it('leaves ANOTHER subject\'s documents completely untouched (the negative control)', async () => {

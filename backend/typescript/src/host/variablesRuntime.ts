@@ -26,6 +26,7 @@
 
 import { tryDurableStorage } from './durable/durableStore.js';
 import { createLogger } from '../observability/logger.js';
+import { stripKnownRunSecrets } from '../byok/ephemeralRunSecrets.js';
 
 const log = createLogger('host.variablesRuntime');
 
@@ -46,7 +47,12 @@ function persistBag(runId: string): void {
   if (!storage) return;
   const bag = runVariables.get(runId);
   const obj = bag ? Object.fromEntries(bag.entries()) : {};
-  void storage.kvSet(key(runId), JSON.stringify(obj)).catch((err) => {
+  // ADR 0779 D4 (grade-code BYOKCD-2) — a node can `ctx.variables.set` a value
+  // that carries a key it was handed; the bag is persisted, so it gets the same
+  // known-run-secret scrub as the scheduler snapshot (JSON first, so the walker
+  // sees exactly what was always written). The in-memory bag keeps the value.
+  const persisted = stripKnownRunSecrets(JSON.parse(JSON.stringify(obj)) as unknown);
+  void storage.kvSet(key(runId), JSON.stringify(persisted)).catch((err) => {
     log.warn('run_variables_persist_failed', { runId, error: err instanceof Error ? err.message : String(err) });
   });
 }

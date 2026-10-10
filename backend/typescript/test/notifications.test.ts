@@ -4,7 +4,7 @@
  * Covers:
  *   1. Storage round-trip (insert → list → mark-read → archive → delete)
  *      against the sqlite memory backend.
- *   2. REST routes mounted under `/v1/host/openwop-app/notifications/*` —
+ *   2. REST routes mounted under `/host/openwop-app/notifications/*` —
  *      includes the tenant-ownership regression that PR #146 missed
  *      (mutateStatus didn't check tenancy, so a leaked id could mutate
  *      another tenant's row).
@@ -235,9 +235,9 @@ describe('storage: notification round-trip (sqlite memory)', () => {
   });
 });
 
-describe('routes: /v1/host/openwop-app/notifications', () => {
+describe('routes: /host/openwop-app/notifications', () => {
   it('lists notifications for the caller and returns an empty list when none exist', async () => {
-    const r = await jsonFetch<ListResponse>('/v1/host/openwop-app/notifications');
+    const r = await jsonFetch<ListResponse>('/host/openwop-app/notifications');
     expect(r.status).toBe(200);
     expect(Array.isArray(r.body.notifications)).toBe(true);
   });
@@ -256,20 +256,20 @@ describe('routes: /v1/host/openwop-app/notifications', () => {
     expect(n.status).toBe('unread');
 
     const read = await jsonFetch<NotificationRecord>(
-      `/v1/host/openwop-app/notifications/${n.notificationId}/read`,
+      `/host/openwop-app/notifications/${n.notificationId}/read`,
       { method: 'POST' },
     );
     expect(read.status).toBe(200);
     expect(read.body.status).toBe('read');
 
     const archived = await jsonFetch<NotificationRecord>(
-      `/v1/host/openwop-app/notifications/${n.notificationId}/archive`,
+      `/host/openwop-app/notifications/${n.notificationId}/archive`,
       { method: 'POST' },
     );
     expect(archived.body.status).toBe('archived');
 
     const del = await jsonFetch<{ deleted: boolean }>(
-      `/v1/host/openwop-app/notifications/${n.notificationId}`,
+      `/host/openwop-app/notifications/${n.notificationId}`,
       { method: 'DELETE' },
     );
     expect(del.body.deleted).toBe(true);
@@ -277,7 +277,7 @@ describe('routes: /v1/host/openwop-app/notifications', () => {
 
   it('mark-read returns 404 for an unknown id', async () => {
     const r = await jsonFetch<{ error: string }>(
-      `/v1/host/openwop-app/notifications/does-not-exist/read`,
+      `/host/openwop-app/notifications/does-not-exist/read`,
       { method: 'POST' },
     );
     expect(r.status).toBe(404);

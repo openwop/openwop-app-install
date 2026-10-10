@@ -1,14 +1,21 @@
 {
   "name": "vendor.myndhyve.ads-copy-generate",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "MyndHyve ads.copy.generate — AI-powered multi-variant ad copy generation with per-placement adaptation (truncation to caller-supplied text limits). Routes the AI call through ctx.callAI; replaces the source PlatformSpecRegistry read with caller-supplied inputs.placementTextLimits (resolve upstream from vendor.myndhyve.ads-platforms OR host.adPlatformSpecs).",
   "author": "MyndHyve",
   "license": "Apache-2.0",
   "homepage": "https://myndhyve.ai/packs/ads-copy-generate",
   "repository": "https://github.com/openwop/openwop",
-  "keywords": ["vendor", "myndhyve", "ads", "copy", "generation", "ai"],
+  "keywords": [
+    "vendor",
+    "myndhyve",
+    "ads",
+    "copy",
+    "generation",
+    "ai"
+  ],
   "engines": {
-    "openwop": ">=1.0.0 <2.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "peerDependencies": {
     "aiProviders": "supported"
@@ -18,7 +25,9 @@
     "format": "esm",
     "entry": "./index.mjs",
     "minRuntimeVersion": "node>=20",
-    "requires": ["crypto"]
+    "requires": [
+      "crypto"
+    ]
   },
   "nodes": [
     {
@@ -28,10 +37,13 @@
       "description": "Generate N multi-angle ad-copy variants (default 3, max 10) from a brief + placement list. Returns variants with platform-adapted text (truncation when inputs.placementTextLimits is supplied). Falls back to a single-variant heuristic when the AI returns unparseable content.",
       "category": "data",
       "role": "action",
-      "capabilities": ["side-effectful"],
+      "capabilities": [
+        "side-effectful"
+      ],
       "configSchemaRef": "schemas/copy-generate.config.json",
       "inputSchemaRef": "schemas/copy-generate.input.json",
       "outputSchemaRef": "schemas/copy-generate.output.json"
     }
-  ]
+  ],
+  "kind": "node"
 }

@@ -31,6 +31,7 @@ import {
   type WorkforceStatus,
 } from '../client/workforcesClient.js';
 import { formatPercent } from '../i18n/format.js';
+import { useAgentWriteAccess, writeErrorMessage } from '../agents/agentWriteAccess.js';
 
 const STAGES: { key: MigrationStageKey; titleKey: string; blurbKey: string; rfcGated?: boolean }[] = [
   { key: 'target', titleKey: 'stageTargetTitle', blurbKey: 'stageTargetBlurb' },
@@ -59,6 +60,10 @@ export function MigrationWizardPage(): JSX.Element {
   const [active, setActive] = useState(0);
   const [busy, setBusy] = useState(false);
   const [stageError, setStageError] = useState<string | null>(null);
+  // ADR 0775 D1 (grade-ux ARUX-5) — every stage save, the eval and the
+  // cut-over need `workspace:write`. A viewer can read the journey; the write
+  // controls are disabled and say why, instead of failing after a typed form.
+  const readOnly = !useAgentWriteAccess();
 
   const runEval = async (): Promise<void> => {
     setEvalState('running');
@@ -111,7 +116,7 @@ export function MigrationWizardPage(): JSX.Element {
       setJourney(updated);
       if (advance) setActive((a) => Math.min(a + 1, STAGES.length - 1));
     } catch (e: unknown) {
-      setStageError(e instanceof Error ? e.message : String(e));
+      setStageError(writeErrorMessage(e, t('common:error_forbidden')));
     } finally {
       setBusy(false);
     }
@@ -147,6 +152,7 @@ export function MigrationWizardPage(): JSX.Element {
         lede={t('migrationLede')}
         actions={back}
       />
+      {readOnly ? <Notice variant="info">{t('viewerReadOnly')}</Notice> : null}
 
       {/* Stepper */}
       <div className="action-bar u-gap-1-5 u-wrap u-mb-4">
@@ -176,7 +182,7 @@ export function MigrationWizardPage(): JSX.Element {
               <textarea value={target.targetOutcome} onChange={(e) => setTarget({ ...target, targetOutcome: e.target.value })} rows={2} className="u-block u-w-full" />
             </label>
             <div className="action-bar">
-              <Button variant="primary" disabled={busy || !target.workflowId} onClick={() => void save({ target, stageStatus: { target: 'done' } })}>{t('saveAndContinue')}</Button>
+              <Button variant="primary" disabled={readOnly || busy || !target.workflowId} onClick={() => void save({ target, stageStatus: { target: 'done' } })}>{t('saveAndContinue')}</Button>
             </div>
           </div>
         ) : null}
@@ -196,7 +202,7 @@ export function MigrationWizardPage(): JSX.Element {
                 </li>
               ))}
             </ul>
-            <Button variant="primary" disabled={busy} onClick={() => void markDone('assess')}>{t('markAssessed')}</Button>
+            <Button variant="primary" disabled={readOnly || busy} onClick={() => void markDone('assess')}>{t('markAssessed')}</Button>
           </div>
         ) : null}
 
@@ -206,7 +212,7 @@ export function MigrationWizardPage(): JSX.Element {
             <label>{t('sensitivity')}<input value={dataManifest.sensitivity} onChange={(e) => setDataManifest({ ...dataManifest, sensitivity: e.target.value })} placeholder={t('sensitivityPlaceholder')} className="u-block u-w-full" /></label>
             <label>{t('approvalModel')}<input value={dataManifest.approvalModel} onChange={(e) => setDataManifest({ ...dataManifest, approvalModel: e.target.value })} placeholder={t('approvalModelPlaceholder')} className="u-block u-w-full" /></label>
             <div className="action-bar">
-              <Button variant="primary" disabled={busy} onClick={() => void save({ dataManifest, stageStatus: { 'map-data': 'done' } })}>{t('saveAndContinue')}</Button>
+              <Button variant="primary" disabled={readOnly || busy} onClick={() => void save({ dataManifest, stageStatus: { 'map-data': 'done' } })}>{t('saveAndContinue')}</Button>
             </div>
           </div>
         ) : null}
@@ -218,7 +224,7 @@ export function MigrationWizardPage(): JSX.Element {
               {wf.decisionBoundaries.auto.map((n) => <span key={n} className="chip chip--success">{t('boundaryAuto', { node: n })}</span>)}
               {wf.decisionBoundaries.review.map((n) => <span key={n} className="chip chip--warning">{t('boundaryReview', { node: n })}</span>)}
             </div>
-            <Button variant="primary" disabled={busy} onClick={() => void save({ boundaries: wf.decisionBoundaries, stageStatus: { 'map-boundaries': 'done' } })}>{t('confirmBoundaries')}</Button>
+            <Button variant="primary" disabled={readOnly || busy} onClick={() => void save({ boundaries: wf.decisionBoundaries, stageStatus: { 'map-boundaries': 'done' } })}>{t('confirmBoundaries')}</Button>
           </div>
         ) : null}
 
@@ -232,7 +238,7 @@ export function MigrationWizardPage(): JSX.Element {
             <div className="surface-card u-p-3 u-mb-3">
               <div className="action-bar u-justify-between u-gap-3 u-wrap">
                 <strong className="u-fs-14">{t('runLiveShadowEval')}</strong>
-                <Button variant="primary" disabled={evalState === 'running'} onClick={() => void runEval()}>
+                <Button variant="primary" disabled={readOnly || evalState === 'running'} onClick={() => void runEval()}>
                   {evalState === 'running' ? t('evalRunning') : evalResult ? t('evalReRun') : t('evalRun')}
                 </Button>
               </div>
@@ -289,7 +295,7 @@ export function MigrationWizardPage(): JSX.Element {
               return (
                 <Button
                   variant="primary" className="u-mt-2"
-                  disabled={busy || !proven}
+                  disabled={readOnly || busy || !proven}
                   title={!proven ? t('markProvenGatedTitle') : undefined}
                   onClick={() => void markDone('shadow-prove')}
                 >
@@ -310,13 +316,13 @@ export function MigrationWizardPage(): JSX.Element {
                   <Button
                     key={s}
                     variant="primary"
-                    disabled={busy || gatedOut}
+                    disabled={readOnly || busy || gatedOut}
                     title={gatedOut ? t('cutOverGatedTitle') : undefined}
                     onClick={() => {
                       setBusy(true); setStageError(null);
                       updateWorkforceStatus(workforceId, s as WorkforceStatus)
                         .then((u) => { setWf(u); if (u.status === 'production') void markDone('cut-over', false); })
-                        .catch((e: unknown) => setStageError(e instanceof Error ? e.message : String(e)))
+                        .catch((e: unknown) => setStageError(writeErrorMessage(e, t('common:error_forbidden'))))
                         .finally(() => setBusy(false));
                     }}
                   ><ArrowRightIcon size={13} /> {t('cutOverTo', { status: s })}</Button>
@@ -329,7 +335,7 @@ export function MigrationWizardPage(): JSX.Element {
           </div>
         ) : null}
 
-        {stageError ? <Notice variant="error">{stageError}</Notice> : null}
+        {stageError ? <Notice variant="error" announce={stageError}>{stageError}</Notice> : null}
 
         <div className="action-bar u-mt-4 u-justify-between">
           <Button variant="primary" disabled={active === 0} onClick={() => setActive((a) => Math.max(a - 1, 0))}><ArrowLeftIcon size={13} /> {t('stepperBack')}</Button>

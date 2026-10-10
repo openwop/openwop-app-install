@@ -56,13 +56,13 @@ async function raw(path: string): Promise<{ status: number; text: string }> {
 async function ownerOrg(): Promise<{ owner: Client; orgId: string }> {
   const tenantId = `org:docs-${Date.now()}-${n++}`;
   const owner = client();
-  const login = await owner.post('/v1/host/openwop-app/test/login', { email: `docs-${Date.now()}-${n++}@acme.test`, tenantId });
+  const login = await owner.post('/host/openwop-app/test/login', { email: `docs-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(login.status, JSON.stringify(login.body)).toBe(201);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return { owner, orgId: org.body.orgId };
 }
-const cms = (orgId: string, s = ''): string => `/v1/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${s}`;
+const cms = (orgId: string, s = ''): string => `/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${s}`;
 
 async function publishPage(owner: Client, orgId: string, body: Record<string, unknown>): Promise<{ pageId: string; slug: string }> {
   const create = await owner.post(cms(orgId, '/pages'), body);
@@ -86,19 +86,19 @@ describe('ADR 0392 Phase 1 — docs collection + public tier + SEO exclusion', (
     expect(draftDoc.status).toBe(201);
 
     // nav tree: published docs only, ordered by docsNav (10 before 20), marketing absent
-    const nav = await client().get(`/v1/host/openwop-app/public/${encodeURIComponent(orgId)}/docs`);
+    const nav = await client().get(`/host/openwop-app/public/${encodeURIComponent(orgId)}/docs`);
     expect(nav.status).toBe(200);
     expect(nav.body.docs.map((d: { slug: string }) => d.slug)).toEqual([docA.slug, docB.slug]);
 
     // sitemap EXCLUDES docs, INCLUDES the marketing page
-    const sitemap = await raw(`/v1/host/openwop-app/public/${encodeURIComponent(orgId)}/sitemap.xml`);
+    const sitemap = await raw(`/host/openwop-app/public/${encodeURIComponent(orgId)}/sitemap.xml`);
     expect(sitemap.status).toBe(200);
     expect(sitemap.text).toContain(marketing.slug);
     expect(sitemap.text).not.toContain(docA.slug);
     expect(sitemap.text).not.toContain(docB.slug);
 
     // but the doc IS served at its public slug (docs are public)
-    const served = await client().get(`/v1/host/openwop-app/public/${encodeURIComponent(orgId)}/pages/${encodeURIComponent(docA.slug)}`);
+    const served = await client().get(`/host/openwop-app/public/${encodeURIComponent(orgId)}/pages/${encodeURIComponent(docA.slug)}`);
     expect(served.status).toBe(200);
   });
 
@@ -108,7 +108,7 @@ describe('ADR 0392 Phase 1 — docs collection + public tier + SEO exclusion', (
     const { owner, orgId } = await ownerOrg();
     const doc = await publishPage(owner, orgId, { title: 'Fresh Guide', slug: 'fresh-guide', collection: 'docs', docsNav: '10', sections: [{ type: 'hero', data: { heading: 'Fresh' } }] });
 
-    const navUrl = `/v1/host/openwop-app/public/${encodeURIComponent(orgId)}/docs`;
+    const navUrl = `/host/openwop-app/public/${encodeURIComponent(orgId)}/docs`;
     const before = (await client().get(navUrl)).body.docs.find((d: { slug: string }) => d.slug === doc.slug);
     expect(String(before.updatedAt)).toMatch(/\dT/);
 
@@ -122,7 +122,7 @@ describe('ADR 0392 Phase 1 — docs collection + public tier + SEO exclusion', (
   it('the docs nav 404s when the docs toggle is OFF', async () => {
     const { orgId } = await ownerOrg();
     await setDocs('off');
-    const nav = await client().get(`/v1/host/openwop-app/public/${encodeURIComponent(orgId)}/docs`);
+    const nav = await client().get(`/host/openwop-app/public/${encodeURIComponent(orgId)}/docs`);
     expect(nav.status).toBe(404);
     await setDocs('on');
   });

@@ -1,11 +1,12 @@
 {
   "name": "feature.funnels.nodes",
-  "version": "1.0.0",
+  "version": "1.0.1",
+  "kind": "node",
   "description": "Funnels feature node pack (Funnel A chat-drivability) — nodes over the ctx.features.funnels surface. Reads: `list` / `get` / `step-stats` (per-step views/completions/revenue totals). Writes: `create` and `set-steps` author DRAFT state only — publishing a funnel changes a PUBLIC surface, so it is never exposed to agents ('agent proposes, human disposes'; the promotions firewall). All role:'action' (recorded → replay-safe).",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "funnels", "marketing", "conversion", "landing-pages"],
-  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "engines": { "openwop": ">=1.0.0 <3.0.0" },
   "nodes": [
     {
       "typeId": "feature.funnels.nodes.list",

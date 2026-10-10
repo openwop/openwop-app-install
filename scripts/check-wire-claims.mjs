@@ -268,8 +268,29 @@ if (!ctype.includes('json')) {
 const doc = await res.json();
 const caps = doc.capabilities ?? doc;
 
+// A host that has RETIRED v1 (ADR 0669; every host since ADR 0812) serves only the
+// major-2 representation, so the header-less read above returns the v2 document.
+// Two of this file's claims are v1-ROOT fields that the v2 capabilities schema
+// does not define at all: `contractProvenance` and `replay.sideEffectSuppression`
+// (v2 `replay` is a family record). Found on the 2026-10-04 cut of
+// app.openwop.dev: both read as MISSING/STALE on a healthy deploy. (The claims
+// arms need no change: the claims route is served unversioned after the cut,
+// and the v2 schema keeps `conformance.certificationBundleUrl`, at the root,
+// where `caps` already lands on a document with no nested `capabilities`.) The
+// prescribed remedy ("deploy the backend") could never clear them, which is the
+// same false diagnosis the a2a arm below was fixed for.
+// The predicate is the advertised version list, never an assumption: a document
+// without `protocolVersions` keeps the v1 behaviour.
+const V2_ONLY = Array.isArray(doc.protocolVersions)
+  && doc.protocolVersions.length > 0
+  && !doc.protocolVersions.some((v) => String(v).startsWith('1.'));
+// Both fields were DELETED at v2 (RFC 0169 §A.5; spec/v2/core/capabilities.md
+// §Deleted fields). Provenance now rides the signed v3 bundle's `host.build` and
+// `suite.version`, which the origin-mode arm below verifies.
+const NOT_IN_V2 = `N/A      (v2-only host: protocolVersions ${JSON.stringify(doc.protocolVersions)}; deleted at v2, capabilities.md §Deleted fields)`;
+
 const checks = [
-  ['replay.sideEffectSuppression', caps.replay?.sideEffectSuppression, SUPPRESSION],
+  ['replay.sideEffectSuppression', caps.replay?.sideEffectSuppression, SUPPRESSION, { v1Only: true }],
   ['a2a.protocolVersions', JSON.stringify(caps.a2a?.protocolVersions), JSON.stringify(A2A)],
   ['a2a.preferredVersion', caps.a2a?.preferredVersion, A2A[0]],
   ['mcp.protocolVersions', JSON.stringify(caps.mcp?.protocolVersions), JSON.stringify(MCP)],
@@ -279,7 +300,9 @@ const checks = [
 // failure — the generic comparison would read `undefined` vs a version as an
 // ordinary mismatch and print a diagnosis that misses the point entirely.
 let failed = 0;
-if (SUITE) {
+if (V2_ONLY) {
+  console.log(`  ${'contractProvenance.suiteVersion'.padEnd(30)} ${NOT_IN_V2}`);
+} else if (SUITE) {
   // ROOT, not `caps`. `capabilities.schema.json` puts `contractProvenance` at the
   // document root beside `protocolVersion` — the schema has no nested
   // `capabilities` object at all — while this host nests `replay`/`a2a`/`mcp`
@@ -347,6 +370,12 @@ if (ORIGIN_MODE) {
     ];
     for (const [major, pointer] of roots) {
       const label = `certification bundle (major ${major})`.padEnd(30);
+      if (major === 1 && V2_ONLY) {
+        // The header-less read IS the v2 document here; checking it as major 1
+        // would verify the major-2 pointer against major-1 expectations.
+        console.log(`  ${label} N/A      (v1 retired: the host serves no major-1 root)`);
+        continue;
+      }
       if (pointer === UNREADABLE) {
         console.log(`  ${label} BROKEN   the major-2 discovery root did not answer JSON`);
         failed++;
@@ -378,7 +407,7 @@ if (ORIGIN_MODE) {
     // In origin mode the host publishes no separate claims document (ADR 0735,
     // 2026-09-21 record). A 200 here means the image's pre-deploy claims — the
     // artifact origin mode exists to withdraw — are still being served.
-    const cRes = await fetch(`${base}/v1/host/openwop-app/conformance/claims?cb=${Date.now()}`, { redirect: 'follow' }).catch(() => null);
+    const cRes = await fetch(`${base}/host/openwop-app/conformance/claims?cb=${Date.now()}`, { redirect: 'follow' }).catch(() => null);
     if (cRes && cRes.status === 404) {
       console.log(`  ${'conformance claims document'.padEnd(30)} OK       withheld in origin mode (404)`);
     } else {
@@ -399,7 +428,7 @@ if (ORIGIN_MODE) {
     console.log(`  ${'conformance.certificationBundleUrl'.padEnd(30)} OK       ${liveUrl}`);
   }
 
-  const claimsRes = await fetch(`${base}/v1/host/openwop-app/conformance/claims?cb=${Date.now()}`, { redirect: 'follow' });
+  const claimsRes = await fetch(`${base}/host/openwop-app/conformance/claims?cb=${Date.now()}`, { redirect: 'follow' });
   const claimsType = claimsRes.headers.get('content-type') ?? '';
   if (!claimsType.includes('json')) {
     console.log(`  ${'conformance claims document'.padEnd(30)} STALE    ${claimsRes.status} ${claimsType} — not a claims document`);
@@ -598,7 +627,11 @@ if (caps.a2a?.supported === true) {
   console.log(`  ${'a2a agent card (deployed)'.padEnd(30)} SKIP     (a2a not advertised in this posture)`);
 }
 
-for (const [name, live, expected] of checks) {
+for (const [name, live, expected, opts] of checks) {
+  if (opts?.v1Only && V2_ONLY) {
+    console.log(`  ${name.padEnd(30)} ${NOT_IN_V2}`);
+    continue;
+  }
   // `mcp` is env-gated off in some postures; an absent slot is not a stale claim.
   if (name.startsWith('mcp.') && caps.mcp?.supported !== true) {
     console.log(`  ${name.padEnd(30)} SKIP     (mcp not advertised in this posture)`);

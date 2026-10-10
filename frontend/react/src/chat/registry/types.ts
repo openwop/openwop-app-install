@@ -42,6 +42,10 @@ export interface CardProps {
   onAction: (actionId: string, payload?: unknown) => Promise<void>;
   /** Loading state set by the parent during in-flight action. */
   isLoading?: boolean;
+  /** Move focus into the card's field on mount (default true — a new gate in
+   *  the chat feed). A host that renders cards in a LIST (the review inbox)
+   *  passes false, or every mount would steal focus. */
+  autoFocus?: boolean;
 }
 
 export type CardActionHandler = (

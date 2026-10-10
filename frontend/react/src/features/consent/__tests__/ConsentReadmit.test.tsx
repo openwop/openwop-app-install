@@ -6,11 +6,17 @@
  * public re-subscribe path, so a person who asked to be forgotten and later
  * asks to return had NO route back — not through a form, not through the
  * preference page, not through the console. This pins the console's control:
- * where it appears (a completed erasure; a lookup that found no record — the
- * wire cannot distinguish "never seen" from "tombstoned"), what it demands (a
+ * where it appears (a completed erasure — including the zero-row one; and, since
+ * ADR 0849 D3, a lookup that reports the subject ERASED — never a plain "no record"
+ * lookup, which case 4 pins), what it demands (a
  * ≥ 20-char attestation AND the typed subject key), what it sends, and how each
  * of the three answers is rendered: re-admitted (durable, announced),
  * `not_erased` (information, never an error), refused (inside the dialog).
+ *
+ * Sabotage-witnessed (/grade-tests w9): treating an erased lookup as "none", dropping
+ * the receipt's door or adding one to a no-record lookup, either dialog gate, the
+ * outcome's announce / silent re-read / re-read / focus, the not_erased toast, or the
+ * 403 / validation_error branches — each reds a case below.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor, fireEvent, act } from '@testing-library/react';
@@ -29,6 +35,7 @@ vi.mock('../consentClient.js', async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
   listOrgs: vi.fn(async () => [{ orgId: 'org-1', name: 'Acme' }]),
   getPolicy: vi.fn(async () => ({ policy: { tenantId: 't', regulatedRegions: [], defaultMode: 'opt-in' }, legalHold: null })),
+  getAccess: vi.fn(async () => ({ canManage: true })), // ADR 0849 D1 — an admin by default
   listRecords: vi.fn(async () => []),
   getSubject: (...a: unknown[]) => getSubject(...a),
   deleteSubject: vi.fn(async () => eraseResult),
@@ -58,7 +65,7 @@ async function openFromLookup(key = 'erased-1'): Promise<void> {
   const input = await mount();
   type(input, key);
   click(/look up/i);
-  await screen.findByText(/no consent record for that subject/i);
+  await screen.findByText(/^erased on /i);
   click(/re-admit subject/i);
   await screen.findByRole('dialog');
 }
@@ -73,7 +80,7 @@ function fillAndSubmit(key = 'erased-1', attestation = ATTESTATION): void {
 beforeEach(() => {
   eraseResult = { ok: true, consentRecord: true, erasure: { total: 4, failed: 0, keysResolved: 2 } };
   readmitAnswer = { readmitted: true, subjectKey: 'erased-1' };
-  getSubject.mockImplementation(async () => null);
+  getSubject.mockImplementation(async () => ({ record: null, erased: true, erasedAt: '2026-09-01T10:00:00.000Z' }));
   readmitSubject.mockReset();
   readmitSubject.mockImplementation(async () => { if (readmitAnswer instanceof Error) throw readmitAnswer; return readmitAnswer; });
   toastInfo.mockClear(); toastSuccess.mockClear(); toastError.mockClear();
@@ -81,11 +88,12 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('where the door back is offered', () => {
-  it('a lookup that found NO record offers Re-admit (the wire cannot tell tombstoned from never-seen)', async () => {
+  it('ADR 0849 D3 — a lookup of an ERASED subject says so, with the date, and offers Re-admit', async () => {
     const input = await mount();
     type(input, 'erased-1');
     click(/look up/i);
-    await screen.findByText(/no consent record for that subject/i);
+    await screen.findByText(/^erased on /i);
+    expect(screen.queryByText(/no consent record for that subject/i), 'erased is not "never recorded"').toBeNull();
     expect(screen.getByRole('button', { name: /re-admit subject/i })).toBeTruthy();
     // …and the hint says what it does NOT do.
     expect(screen.getByText(/no consent is granted until they opt in again/i)).toBeTruthy();
@@ -109,8 +117,17 @@ describe('where the door back is offered', () => {
     expect(screen.queryByRole('button', { name: /re-admit subject/i })).toBeNull();
   });
 
+  it('ADR 0849 D3 — a never-recorded, never-erased subject offers no Re-admit (there is no block to lift)', async () => {
+    getSubject.mockImplementation(async () => ({ record: null, erased: false }));
+    const input = await mount();
+    type(input, 'never-seen');
+    click(/look up/i);
+    await screen.findByText(/no consent record for that subject/i);
+    expect(screen.queryByRole('button', { name: /re-admit subject/i })).toBeNull();
+  });
+
   it('a lookup that FOUND a record offers no Re-admit (a live record is not a tombstone)', async () => {
-    getSubject.mockImplementation(async () => ({ subjectKey: 'alive', categories: { necessary: true, analytics: true, marketing: false }, ts: '2026-08-01T00:00:00.000Z' }));
+    getSubject.mockImplementation(async () => ({ record: { subjectKey: 'alive', categories: { necessary: true, analytics: true, marketing: false }, ts: '2026-08-01T00:00:00.000Z' }, erased: false }));
     const input = await mount();
     type(input, 'alive');
     click(/look up/i);
@@ -166,6 +183,22 @@ describe('the three answers', () => {
     expect(toastSuccess).not.toHaveBeenCalled();
   });
 
+  it('CN2UX-2 — after a re-admit the erased panel is re-read, never left contradicting the outcome', async () => {
+    await openFromLookup();
+    getSubject.mockImplementation(async () => ({ record: null, erased: false }));
+    fillAndSubmit();
+    await screen.findByText(/re-admitted .*erased-1/i);
+    await waitFor(() => expect(screen.queryByText(/^erased on /i)).toBeNull());
+    expect(screen.queryByRole('button', { name: /re-admit subject/i }), 'no door back to a door already used').toBeNull();
+    expect(currentAnnouncements().polite, 'the re-read is silent; the Notice is the voice').toMatch(/re-admitted/i);
+    // N1 — the button the dialog returned focus to is gone; the outcome takes focus.
+    await waitFor(() => {
+      expect(document.activeElement, 'focus never falls to <body>').not.toBe(document.body);
+      expect(document.activeElement?.getAttribute('tabindex')).toBe('-1');
+      expect(document.activeElement?.textContent ?? '').toMatch(/^re-admitted/i);
+    });
+  });
+
   it('not_erased: information, not an error — no alert role, no error toast', async () => {
     readmitAnswer = { readmitted: false, reason: 'not_erased' };
     await openFromLookup();
@@ -196,7 +229,11 @@ describe('the three answers', () => {
     readmitAnswer = new ConsentApiError(400, 'validation_error', 'attestation too short', {});
     await openFromLookup();
     fillAndSubmit();
-    await waitFor(() => expect(screen.getByRole('dialog').textContent).toMatch(/at least 20 characters/i));
+    // The ERROR sentence, not the always-present "N of at least 20 characters" hint —
+    // matching /at least 20 characters/ alone passed with the code branch removed
+    // (/grade-tests w9 probe ra-400: the hint satisfied it).
+    await waitFor(() => expect(screen.getByRole('dialog').textContent).toMatch(/the statement must be at least 20 characters/i));
+    expect(screen.getByRole('dialog').textContent).not.toMatch(/attestation too short/);
     cleanup();
 
     readmitAnswer = new ConsentApiError(500, 'internal', 'Storage unavailable.', {});

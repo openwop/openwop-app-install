@@ -187,10 +187,12 @@ describe('ADR 0712 — create + fork refuse a ref the run may not use (HTTP)', (
     await setSecret(credentialRef, `value-for-${credentialRef}`, { tenantId: RUN_TENANT });
   }
 
-  async function createV1(configurable: Record<string, unknown>): Promise<{ status: number; code: string; runId?: string }> {
-    const res = await fetch(`${base}/v1/runs`, {
-      method: 'POST', headers: AUTH,
-      body: JSON.stringify({ workflowId: 'openwop-app.uppercase', inputs: { message: 'adr0712' }, configurable }),
+  /** ADR 0812 P3c-0 — was `createV1` (`POST /v1/runs`); now the major-2 create,
+   *  the field inside the closed versioned `configurable`. Returns the BOUND id. */
+  async function create(configurable: Record<string, unknown>): Promise<{ status: number; code: string; runId?: string }> {
+    const res = await fetch(`${base}/runs`, {
+      method: 'POST', headers: V2,
+      body: JSON.stringify({ workflowId: 'openwop-app.uppercase', inputs: { message: 'adr0712' }, configurable: { version: 1, ...configurable } }),
     });
     const body = await res.json() as { runId?: string; error?: unknown; code?: unknown };
     return { status: res.status, code: errorCode(body), ...(body.runId ? { runId: body.runId } : {}) };
@@ -202,15 +204,35 @@ describe('ADR 0712 — create + fork refuse a ref the run may not use (HTTP)', (
       : String(body.code ?? '');
   }
 
-  it('the check reads the SAME list discovery advertises as aiProviders.byok', async () => {
-    const res = await fetch(`${base}/.well-known/openwop`);
-    const doc = await res.json() as { aiProviders?: { byok?: string[] } };
-    expect(doc.aiProviders?.byok).toEqual(advertisedByokProviders());
+  // ADR 0812 P3c-0 — these two legs read `aiProviders.byok` / the per-provider
+  // `authModes` MAP off the v1 discovery document. The v2 family carries neither
+  // (`byok` is in whd7's KNOWN_UNPROJECTED ledger; `authModes` is a flat mode
+  // vocabulary), so they now assert what the v2 record does say: every provider
+  // run admission accepts is an advertised `apiKey` provider.
+  it('the check reads a list the v2 discovery document advertises under apiKey', async () => {
+    const res = await fetch(`${base}/.well-known/openwop`, { headers: { 'OpenWOP-Version': '2' } });
+    const doc = await res.json() as { aiProviders?: { providers?: string[]; authModes?: string[] } };
+    expect(advertisedByokProviders().length).toBeGreaterThan(0);
+    expect(doc.aiProviders?.providers).toEqual(expect.arrayContaining(advertisedByokProviders()));
+    expect(doc.aiProviders?.authModes).toContain('apiKey');
   });
 
-  it('accepts a ref of an advertised provider stored in the caller\'s own vault (v1)', async () => {
+  it('accepts a ref of an advertised provider stored in the caller\'s own vault', async () => {
     await storeKey('byok:google');
-    const res = await createV1({ ai: { credentialRef: 'byok:google' } });
+    const res = await create({ ai: { credentialRef: 'byok:google' } });
+    expect(res.status).toBe(201);
+  });
+
+  it('advertises MiniMax BYOK and accepts its tenant-owned run key', async () => {
+    const doc = await (await fetch(`${base}/.well-known/openwop`, { headers: { 'OpenWOP-Version': '2' } })).json() as { aiProviders: { providers: string[]; authModes: string[] } };
+    expect(doc.aiProviders.providers).toContain('minimax');
+    expect(advertisedByokProviders()).toContain('minimax');
+    expect(doc.aiProviders.authModes).toContain('apiKey');
+    await storeKey('minimax:showcase');
+    const res = await fetch(`${base}/runs`, {
+      method: 'POST', headers: V2,
+      body: JSON.stringify({ workflowId: 'openwop-app.uppercase', inputs: { message: 'credential admission test' }, configurable: { version: 1, ai: { credentialRef: 'minimax:showcase' } } }),
+    });
     expect(res.status).toBe(201);
   });
 
@@ -225,8 +247,8 @@ describe('ADR 0712 — create + fork refuse a ref the run may not use (HTTP)', (
 
   it('refuses another tenant\'s key exactly like a key that does not exist — no existence probe', async () => {
     await setSecret('openai:other-tenant-only', 'sk-other', { tenantId: 'adr0712-other-tenant' });
-    const foreign = await createV1({ ai: { credentialRef: 'openai:other-tenant-only' } });
-    const missing = await createV1({ ai: { credentialRef: 'openai:never-stored' } });
+    const foreign = await create({ ai: { credentialRef: 'openai:other-tenant-only' } });
+    const missing = await create({ ai: { credentialRef: 'openai:never-stored' } });
     expect(foreign.status).toBe(403);
     expect(foreign.code).toContain('credential_forbidden');
     expect(missing.status).toBe(403);
@@ -235,25 +257,25 @@ describe('ADR 0712 — create + fork refuse a ref the run may not use (HTTP)', (
 
   it('refuses a stored key whose name carries no advertised provider', async () => {
     await storeKey('my-key');
-    const res = await createV1({ ai: { credentialRef: 'my-key' } });
+    const res = await create({ ai: { credentialRef: 'my-key' } });
     expect(res.status).toBe(403);
     expect(res.code).toContain('credential_forbidden');
   });
 
   it('refuses a managed ref and an empty ref — neither is a BYOK credential', async () => {
-    expect((await createV1({ ai: { credentialRef: 'managed:openwop-free' } })).status).toBe(403);
-    expect((await createV1({ ai: { credentialRef: '' } })).status).toBe(403);
+    expect((await create({ ai: { credentialRef: 'managed:openwop-free' } })).status).toBe(403);
+    expect((await create({ ai: { credentialRef: '' } })).status).toBe(403);
   });
 
   it('checks a branch fork\'s overlay the same way, and the ref never reaches the event stream', async () => {
     await storeKey('google:fork-src');
-    const created = await createV1({ ai: { credentialRef: 'google:fork-src' } });
+    const created = await create({ ai: { credentialRef: 'google:fork-src' } });
     expect(created.status).toBe(201);
     const runId = created.runId!;
     // Let the uppercase run finish so a fork point exists.
     let events: unknown[] = [];
     for (let i = 0; i < 40; i++) {
-      const poll = await fetch(`${base}/v1/runs/${encodeURIComponent(runId)}/events/poll?lastSequence=0&timeout=1`, { headers: AUTH });
+      const poll = await fetch(`${base}/runs/${encodeURIComponent(runId)}/events/poll?lastSequence=0&timeout=1`, { headers: V2 });
       const body = await poll.json() as { events?: unknown[]; isComplete?: boolean };
       events = body.events ?? events;
       if (body.isComplete) break;
@@ -261,8 +283,8 @@ describe('ADR 0712 — create + fork refuse a ref the run may not use (HTTP)', (
     expect(events.length, 'the run must have produced events or the echo assertion is vacuous').toBeGreaterThan(0);
     expect(JSON.stringify(events)).not.toContain('google:fork-src');
 
-    const fork = async (overlay: Record<string, unknown>): Promise<number> => (await fetch(`${base}/v1/runs/${encodeURIComponent(runId)}:fork`, {
-      method: 'POST', headers: AUTH, body: JSON.stringify({ mode: 'branch', fromSeq: 0, runOptionsOverlay: overlay }),
+    const fork = async (overlay: Record<string, unknown>): Promise<number> => (await fetch(`${base}/runs/${encodeURIComponent(runId)}:fork`, {
+      method: 'POST', headers: V2, body: JSON.stringify({ mode: 'branch', fromSeq: 0, runOptionsOverlay: overlay }),
     })).status;
     expect(await fork({ ai: { credentialRef: 'openai:other-tenant-only' } })).toBe(403);
     expect(await fork({ ai: { credentialRef: 'google:fork-src' } })).not.toBe(403);

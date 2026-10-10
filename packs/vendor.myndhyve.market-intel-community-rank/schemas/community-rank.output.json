@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.market-intel-community-rank/1.0.0/community-rank.output.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.market-intel-community-rank/1.0.2/community-rank.output.json",
   "title": "MarketIntelCommunityRankOutput",
   "type": "object",
   "required": ["selectedCommunities", "rejectedCommunities", "platformCoverage", "summary", "warnings", "selectedCount", "success"],

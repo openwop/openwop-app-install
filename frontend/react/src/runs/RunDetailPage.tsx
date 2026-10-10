@@ -1,9 +1,9 @@
 import { Button } from '../ui/Button.js';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { scrollBehavior } from '../ui/motion.js';
 import { useParams, useNavigate, useSearchParams, Link } from 'react-router-dom';
 import type { RunSnapshot, RunEventDoc, StreamMode } from '@openwop/openwop';
-import { cancelRun, deleteRun, forkRun, getDebugBundle, getRun, pollEvents, setRunPinned } from '../client/runsClient.js';
+import { cancelRun, deleteRun, forkRun, getDebugBundle, getRun, getRunRetention, pollEvents, setRunPinned, type RunRetention } from '../client/runsClient.js';
 import { subscribeToRun } from '../client/streamsClient.js';
 import { listOpenInterrupts, type OpenInterrupt } from '../client/interruptsClient.js';
 import { listAnnotations, type Annotation } from '../client/feedbackClient.js';
@@ -33,6 +33,8 @@ import { formatDateTime } from '../i18n/format.js';
 import { useTranslation } from 'react-i18next';
 import { confirm } from '../ui/confirm.js';
 import { isInterruptResolvedEvent } from '../chat/lib/interruptResolvedEvent';
+import { readHandoffNote } from './handoffNote.js';
+import { HandoffNoteCard } from './HandoffNoteCard.js';
 
 /**
  * ADR 0655 D10 — the email egress refusal codes the run page explains (see
@@ -57,7 +59,21 @@ function fmtTime(iso?: string): string {
   return iso ? formatDateTime(iso) : '—';
 }
 
+/**
+ * ADR 0772 (`RRUX-1`) — keyed by `runId`. Every piece of state below belonged to
+ * ONE run, and an in-app link to another run (the fork's source, a parent, a
+ * redrive origin) re-used the mounted page: the previous run's snapshot, events,
+ * open interrupt and playhead stayed on screen under the new URL until the new
+ * reads resolved — and forever if they failed — while Cancel and Delete already
+ * acted on the NEW id. A key remounts the view, so no field can be forgotten by
+ * a hand-written reset.
+ */
 export function RunDetailPage() {
+  const { runId = '' } = useParams();
+  return <RunDetailView key={runId} />;
+}
+
+function RunDetailView() {
   const { t } = useTranslation('runs');
   const { t: tCommon } = useTranslation('common');
   const { runId = '' } = useParams();
@@ -70,6 +86,17 @@ export function RunDetailPage() {
   // ADR 0474 — the revision pin chip (fail-soft; absent for legacy runs).
   const [revisionInfo, setRevisionInfo] = useState<RunRevisionInfo | null>(null);
   useEffect(() => { if (runId) void getRunRevision(runId).then(setRevisionInfo).catch(() => {}); }, [runId]);
+  // ADR 0812 — the retention pin + sweep deadline come from the host read: the
+  // major-2 snapshot carries neither, so reading them off it made "Unpin"
+  // unreachable. Re-read when the run turns terminal (the deadline is stamped
+  // then). A failed read is its own state ('failed'), never folded into "not
+  // pinned": the toggle is disabled and no notice is shown while it is unknown.
+  const [retentionRead, setRetentionRead] = useState<RunRetention | 'loading' | 'failed'>('loading');
+  const retention = typeof retentionRead === 'object' ? retentionRead : null;
+  const runTerminal = snapshot ? ['completed', 'failed', 'cancelled'].includes(snapshot.status) : false;
+  useEffect(() => {
+    if (runId && runTerminal) void getRunRetention(runId).then(setRetentionRead).catch(() => setRetentionRead('failed'));
+  }, [runId, runTerminal]);
   const [events, setEvents] = useState<RunEventDoc[]>([]);
   // ADR 0600 §1 (`ISU-24`) — the event views branch on `events.length === 0` to
   // render "No events yet", a positive claim about the RUN. `[]` is also what a
@@ -234,23 +261,29 @@ export function RunDetailPage() {
     return () => sub.close();
   }, [runId, refreshInterrupts, streamMode, t]);
 
+  // ADR 0772 (`RRUX-4`) — cancel is irreversible (a cancelled run cannot be
+  // resumed), so it asks first, and is disabled while the request is in flight.
+  const [cancelBusy, setCancelBusy] = useState(false);
   async function onCancel() {
-    if (!runId) return;
+    if (!runId || cancelBusy) return;
+    if (!(await confirm({ title: t('cancelRunConfirmTitle'), body: t('cancelRunConfirmBody'), danger: true, confirmLabel: t('cancelRun') }))) return;
+    setCancelBusy(true);
     try {
       await cancelRun(runId, 'cancelled from run detail');
       const snap = await getRun(runId);
       setSnapshot(snap);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCancelBusy(false);
     }
   }
 
   async function onTogglePin() {
-    if (!runId || !snapshot) return;
-    const next = !(snapshot as RunSnapshot & { pinned?: boolean }).pinned;
+    if (!runId || !retention) return;
     try {
-      await setRunPinned(runId, next);
-      setSnapshot(await getRun(runId));
+      const pinned = await setRunPinned(runId, !retention.pinned);
+      setRetentionRead({ ...retention, pinned });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -291,8 +324,22 @@ export function RunDetailPage() {
     setLoadNonce((n) => n + 1);
   }, []);
 
+  // ADR 0772 (`RRUX-3`) — one fork per click. There was no in-flight guard, so a
+  // second click (or a confirm accepted twice) created a SECOND branch, and each
+  // branch re-fires every side effect after `seq`. A ref, not state: the guard
+  // must hold before React re-renders.
+  const forkInFlight = useRef(false);
   async function onForkFrom(seq: number) {
-    if (!runId) return;
+    if (!runId || forkInFlight.current) return;
+    forkInFlight.current = true;
+    // Released only when this click did NOT start a navigation (declined, or the
+    // fork failed). After a successful fork the page is leaving — assigning
+    // `location.href` only STARTS the load — so a click in that window must not
+    // open a second branch (grade-code M1).
+    if (!(await forkOnce(seq))) forkInFlight.current = false;
+  }
+  /** Returns true when a fork was created and navigation to it has started. */
+  async function forkOnce(seq: number): Promise<boolean> {
     // `replay.md` §`branch`: a branch fork RE-EXECUTES side-effecting nodes live
     // for sequences >= fromSeq, so "branching past an already-executed payment
     // or notification will perform it again. This is by design" — and the same
@@ -313,15 +360,17 @@ export function RunDetailPage() {
         confirmLabel: t('forkBranchConfirmAction'),
       }))
     ) {
-      return;
+      return false;
     }
     try {
       const res = await forkRun(runId, { fromSeq: seq, mode: 'branch' });
       // Carry the source run as a back-reference (RFC 0056 §D) so the forked
       // run's page can link back to where the fork was motivated.
       window.location.href = `/runs/${res.runId}?from=${encodeURIComponent(res.sourceRunId)}`;
+      return true;
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+      return false;
     }
   }
 
@@ -332,6 +381,14 @@ export function RunDetailPage() {
       ? formatDuration(Date.parse(snapshot.completedAt) - Date.parse(snapshot.startedAt))
       : null;
   const isTerminal = snapshot ? ['completed', 'failed', 'cancelled'].includes(snapshot.status) : false;
+
+  // ADR 0829 P3 — the note that explains an OPEN escalation rides the
+  // `node.suspended` row that opened it (matched by interruptId); a child run's
+  // own note was stamped on its metadata when it was dispatched.
+  const escalationNote = activeInterrupt
+    ? readHandoffNote(events.find((e) => e.type === 'node.suspended' && (e.payload as { interruptId?: unknown } | undefined)?.interruptId === activeInterrupt.interruptId)?.payload)
+    : null;
+  const receivedNote = readHandoffNote(snapshot?.metadata);
 
   return (
     <section data-walkthrough="runs.page" aria-labelledby="rundetail-heading">
@@ -481,15 +538,14 @@ export function RunDetailPage() {
         )}
 
         {(() => {
-          const snap = snapshot as (RunSnapshot & { pinned?: boolean; removalAt?: string }) | null;
-          if (!snap || !isTerminal) return null;
-          if (snap.pinned) return <Notice variant="info">{t('retentionPinned')}</Notice>;
-          if (snap.removalAt) return <Notice variant="info">{t('retentionNote', { date: fmtTime(snap.removalAt) })}</Notice>;
+          if (!retention || !isTerminal) return null;
+          if (retention.pinned) return <Notice variant="info">{t('retentionPinned')}</Notice>;
+          if (retention.removalAt) return <Notice variant="info">{t('retentionNote', { date: fmtTime(retention.removalAt) })}</Notice>;
           return null;
         })()}
 
         <div className="action-bar">
-          <Button variant="secondary" onClick={onCancel} disabled={!snapshot || isTerminal}>
+          <Button variant="secondary" onClick={onCancel} disabled={!snapshot || isTerminal || cancelBusy} aria-busy={cancelBusy}>
             {t('cancelRun')}
           </Button>
           {/* Grade-ux #4 — cancelled runs debug too (a cancel mid-flight is
@@ -507,10 +563,11 @@ export function RunDetailPage() {
             <Button
               variant="secondary"
               onClick={onTogglePin}
-              aria-pressed={Boolean((snapshot as RunSnapshot & { pinned?: boolean } | null)?.pinned)}
+              disabled={!retention}
+              aria-pressed={Boolean(retention?.pinned)}
               title={t('retentionPinTitle')}
             >
-              {(snapshot as RunSnapshot & { pinned?: boolean } | null)?.pinned ? t('retentionUnpin') : t('retentionPin')}
+              {retention?.pinned ? t('retentionUnpin') : t('retentionPin')}
             </Button>
           ) : null}
           <Button
@@ -538,6 +595,8 @@ export function RunDetailPage() {
         </div>
       </div>
 
+      {receivedNote && <HandoffNoteCard note={receivedNote} title={t('handoffNoteReceivedTitle')} headingLevel={2} />}
+      {escalationNote && <HandoffNoteCard note={escalationNote} title={t('handoffNoteEscalationTitle')} headingLevel={2} />}
       <RenderInterrupt
         runId={runId}
         active={activeInterrupt}
@@ -554,7 +613,7 @@ export function RunDetailPage() {
         annotationsUnavailable={annotationsFailed}
         eventsUnavailable={eventsRead === 'failed'}
       />
-      <RunProvenancePanel events={events} snapshot={snapshot} />
+      <RunProvenancePanel events={events} snapshot={snapshot} openInterruptKind={activeInterrupt?.kind} />
       <RunFeedback runId={runId} onRecorded={refreshAnnotations} />
       {/* ADR 0482 §6 — the terminal costByNode stamp rides the snapshot; the
           panel falls back to the loaded provider.usage events pre-stamp. */}

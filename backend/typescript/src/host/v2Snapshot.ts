@@ -27,6 +27,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { locateRepoSchemasDir } from './_repoPath.js';
+import { projectV2ErrorObject } from '../middleware/protocolVersion.js';
 
 let cached: ReadonlySet<string> | undefined;
 
@@ -55,10 +56,13 @@ export function resetV2SnapshotFieldsCache(): void {
 /** Drop every key the closed v2 `RunSnapshot` does not declare. */
 export function closeV2Snapshot<T extends object>(snapshot: T): T {
   const fields = v2SnapshotFields();
-  if (fields === null) return snapshot;
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(snapshot)) {
-    if (fields.has(k)) out[k] = v;
+    if (fields === null || fields.has(k)) out[k] = v;
   }
+  // openwop#1698 (errors.md §The registry) — the snapshot's `error.code` is
+  // registered or a vendor code, the same rule as `run.failed`. Idempotent, so
+  // a route that closes an already-closed snapshot re-spells nothing.
+  if ('error' in out) out['error'] = projectV2ErrorObject(out['error']);
   return out as T;
 }

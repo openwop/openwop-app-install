@@ -239,8 +239,8 @@ describe('the served component catalog is the FE contract (drift-pin)', () => {
 describe('the outline routes are privileged authoring-family routes (per convention)', () => {
   it('ensure + apply are in the creator route table and reach the shared gate', () => {
     const keys = KICKTODO_CREATOR_ROUTES.map((r) => `${r.method} ${r.path}`);
-    expect(keys).toContain('post /v1/host/openwop-app/kicktodo/creator/candidates/:id/outline');
-    expect(keys).toContain('post /v1/host/openwop-app/kicktodo/creator/candidates/:id/outline/apply');
+    expect(keys).toContain('post /host/openwop-app/kicktodo/creator/candidates/:id/outline');
+    expect(keys).toContain('post /host/openwop-app/kicktodo/creator/candidates/:id/outline/apply');
     for (const suffix of ['/candidates/:id/outline', '/candidates/:id/outline/apply']) {
       const route = KICKTODO_CREATOR_ROUTES.find((r) => r.method === 'post' && r.path.endsWith(suffix))!;
       expect(String(route.handler), `${suffix} must reach requireKicktodoManage via gate`).toContain('gate');

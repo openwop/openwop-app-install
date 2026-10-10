@@ -25,15 +25,15 @@ export const serviceDeskFeature: BackendFeature = {
   },
   surface: { id: 'service-desk', build: buildServiceDeskSurface },
   requiredPacks: [
-    { name: 'feature.service-desk.nodes', version: '1.0.0' },
-    { name: 'feature.service-desk.agents', version: '1.0.0' },
+    { name: 'feature.service-desk.nodes', version: '1.0.1' },
+    { name: 'vendor.openwop-app.service-desk.agents', version: '1.0.1' },
   ],
   toggleDefault: {
     id: 'service-desk',
     label: 'Service desk',
     description:
-      'Omnichannel support tickets over your existing channels — WhatsApp and form intake attach to CRM contacts, agents draft replies through the approval inbox, and SLA clocks alert through notifications (ADR 0422).',
-    category: 'CRM',
+      'Omnichannel support tickets over your existing channels — WhatsApp and form intake attach to CRM contacts, agents draft replies through the approval inbox, and SLA clocks alert through notifications.',
+    category: 'Support', // ADR 0820 §8.2 — sold in the Support bundle
     status: 'off',
     bucketUnit: 'tenant',
     salt: 'service-desk',
@@ -44,7 +44,7 @@ export const serviceDeskFeature: BackendFeature = {
       label: 'Public widget ticketing',
       description:
         'Let anonymous visitors open and continue support tickets from an embedded widget via the public intake key — HMAC visitor sessions, internal notes never exposed, fail-closed without configuration. A sub-capability of Service desk; OFF until you deliberately publish the intake key.',
-      category: 'CRM',
+      category: 'Support', // ADR 0820 §8.2 — sold in the Support bundle
       status: 'off',
       bucketUnit: 'tenant',
       salt: 'service-desk-widget',

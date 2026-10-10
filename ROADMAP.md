@@ -150,6 +150,8 @@ Each feature, when its turn comes, follows the same lifecycle. This roadmap only
 | 0489 | **Adaptive walkthroughs — `already-satisfied` checkpoint + anchor coverage ratchet** — widens the checkpoint verdict from pass/fail to pass/**already-satisfied**/fail so a learner who has already done the work skips ahead with narration instead of hitting a redundant step or a **cancelled run** (today a failed checkpoint CANCELS). Adds the **anchor coverage ratchet** (nav-entry screens must expose `data-walkthrough` on page root + primary action; NO-GROWTH exemption list with reasons; proven red by sabotage) — the 31-anchor bottleneck that deferred ADR 0378's instrumentation sweep. Recorder emits `registerWalkthroughAction` stubs from Tier-2 `describe`. Host-ext, **no RFC** (node `config` is opaque to the wire; no new node type). | extends `walkthroughs` (unchanged, tenant, ON) | 0368, 0376, 0378, 0472, 0435 | reuses walkthrough packs | 🟢 Done (ADR 0489 P1–P5, 2026-07-25) | net-new (architecture deep-dive 2026-07-25) |
 | 0488 | **Interactive tutorials — narrative in the content kernel + the tutorial↔chain binding** — ends the last hard-coded in-tree content registry (the ADR 0072 anti-pattern wearing a tutorials hat): the narrative moves to a `tutorials.lesson` system type in the **entities content kernel** (ADR 0408 — NOT cms; a tutorial is not a page), structured content rides a registered `tutorial-doc` extension kind, and the `localizable` flags make ADR 0406 overlays POSSIBLE (ADR 0490's content-localization follow-on stays OPEN — no overlay is written or read back yet). Each narrative step binds `run:{chainId,nodeId}` to an RFC 0013 walkthrough chain; **phase-granular sub-chains** give per-phase "Show me". Seed = **degraded-mode floor** when `entities` is OFF, so the reader is never toggle-gated. Server-side progress (walkthrough store discipline + own subject eraser); contextual "Teach me this"; **Tutor delegate** projection. Host-ext, **no RFC** — narrative deliberately NOT in the chain manifest (that would be normative wire). | — (always-on, access-hub posture — no toggle; composes `entities`) | 0490, 0386, 0408, 0406, 0368, 0378, 0472, 0435, 0308, 0473 | `feature.tutorials.agents` (new, P6) | 🟡 P0–P7 shipped 2026-07-25/26 (kernel lane repaired + chains registered post-grade); tenant EDIT + locale read-back still open | net-new (maintainer direction 2026-07-25 + `/architect` pass) |
 | 0473 | **Composed-workflow proposals — propose → review → approve-to-run** (closes the ADR 0369 §6 intent gap): a `openwop:workflows.propose` core agent tool registers a transient draft + a `composed-workflow` `PendingApproval` (structurally CANNOT execute — no run-start dependency); the registered decide handler does hash-integrity check → CAS → `startWorkflowRun` (approve) or archive-with-note (reject); chat review card (kind renderer on the ADR 0068/0311 in-conversation reviews projection) with 4 verbs + per-node risk badges + validation evidence + staleness re-pin; builder proposal banner on `/builder/:id`; Workflow Architect pack grant; `compose-and-run` repositioned as the explicitly-granted autonomous lane; Phase 5 = read-only-class scoped auto-approval (operator-set, audited). Host-ext, **no new RFC** (approval kinds are host-local; NO new envelope kind). | — (core seam; default-deny grants are the switch) | 0369, 0072, 0068, 0311, 0469, 0104, 0315, 0163, 0371 | `feature.workflow-author.agents` (version bump — Architect gains propose) | 🟢 Done (ADR 0473 implemented Phases 1–5, 2026-07-23 — PRs #2440/#2442/#2443/#2445 + P5) | net-new (in-conversation PRD 2026-07-15, intent restated 2026-07-23) |
+| 0773 | **Builder Pair Canvas — the AI edits the workflow on the sheet, you keep what it drew** (EXTENDS the core builder + ADR 0072 workflow author; composes ADR 0768 Dock density, 0764 run digests, 0770 CAS, 0481 collab, 0582 gates): the builder's right rail becomes Pair \| Inspect joined by the selection. The Architect reads the live draft + selection through `read-canvas` (flush-on-send via a new chat `beforeSend` seam) and returns a `WorkflowEditSuggestion` (typed ops, preimages, server-minted ids) through `suggest-edits`, which NEVER writes the workflow. Ghost layer on the sheet, J/K review, keep = one undo step through the ordinary CAS autosave, per-op conflict check, auto-keep only for config-on-selection and never near a gate. Retires the Create-with-AI drawer at P5. Host-extension, **no RFC** | `builder-pair` (OFF, `tenant`) | 0072, 0768, 0770, 0764 | — (chat-time tools `openwop:feature.builder-pair.nodes.{read-canvas,suggest-edits}`, allowlisted on the Workflow Architect agent pack) | 🟢 P1–P4 implemented, P5 partial · 🔵 P6–P10 gap closure planned (toggle OFF; graduation at P10) | — (net-new, design canvas) |
+| 0785 | **Claude Code in the app — paired local agent host, terminal tab, runner the heartbeat can dispatch to** (composes ADR 0140 deck, 0270 developer keys, 0025 §4 one approval store, 0534/0535/0543 the ONE loop; amends 0539 D4; supersedes 0756 in part, for this path only, at the user's own risk): a `clients/agent-host` companion runs the user's own `claude` in a PTY and connects OUT (no localhost listener, no CSP change); a Claude Code tab in the chat deck + a drawer on builder/app-builder/run pages; Claude Code reaches this host over the existing MCP mount (tools as a chain pack); its permission prompts become `PendingApproval` cards; chain steps / kanban cards dispatch to it as RFC 0122 tool-dispatch steps. Host-extension + Accepted RFC 0122, **no new RFC** | `claude-code` (OFF, `user`; operator gate `OPENWOP_CLAUDE_CODE_AT_OWN_RISK`) | 0140, 0270, 0025, 0534, 0535, 0543, 0122(RFC) | `feature.claude-code.nodes`, `feature.claude-code.mcp-tools` (chain pack) | 🟢 Accepted · P1–P5 implemented (pairing, terminal tab, MCP tools, permission cards, app-dispatched tasks; double-gated OFF) · operator switch gated on the P1 residue + Q2 | — (net-new) |
 
 > **ADR-0003 (Canonical identity & session binding) was inserted** as a
 > foundational refinement of ADR-0002 — it makes `User.userId` the one subject
@@ -830,3 +832,229 @@ The app may claim a specific OpenWOP profile only when the release artifact and
 the deployed revision both have unexpired, machine-verifiable evidence for that
 profile. “OpenWOP compatible”, “production grade”, “multi-region safe” and
 “best in class” are not umbrella synonyms for partial or test-seam coverage.
+
+---
+
+## Collaborative orchestration program (ADRs 0829, 0831, 0852–0856)
+
+This program closes the gap between what the app does today and the
+"1000 micro interactions" model: a feature or campaign is a shared
+understanding that people and agents rebuild through many small handoffs, so the
+orchestrator's job is to keep that understanding coherent, not only to route
+tasks. It is a net-new program, not a MyndHyve port. The four rows are the
+items the blog draft marks as "Direction" (not shipped); the fifth gap it names,
+independent certification, is protocol-side and lives in the `openwop` ROADMAP.
+
+**What already exists and must be reused (no parallel stores):** team channels
+with agent members and @mention dispatch (ADR 0126,
+`features/channels/`), the per-conversation Intent Ledger and its
+authorized-vs-completed reckoning (ADR 0136, `features/intent-ledger/`),
+decision records (ADR 0233), inbound Slack/Discord/Telegram that start runs or
+resume open interrupts (ADR 0175), HITL approvals and clarifications (ADR 0075),
+the run handoff map (`frontend/react/src/runs/RunHandoffMap.tsx`), and the
+meeting-ops templates (`tmpl.meeting-ops.*` in `host/workflowTemplates.ts`).
+
+| Order | Item | What it adds | Extends | Wire / RFC gate | Status |
+|---|---|---|---|---|---|
+| 1 | **Structured handoffs** ([ADR 0829](docs/adr/0829-structured-handoff-record.md)) | Every transfer of work carries five fields: intent, decisions made, open questions, what was tried, confidence | `core.dispatch` loop, ADR 0075 interrupts, `RunHandoffMap` | Host extension first (`openwop-` prefixed keys, which the v2 event schema already admits); upstream RFC once the shape is proven | ✅ Shipped, always on (no toggle, 2026-10-07), incl. approval handoffs and channel cards; upstream RFC waits on its evidence bar |
+| 2 | **Team intent ledger** ([ADR 0831](docs/adr/0831-team-intent-ledger.md)) | A ledger scoped to a feature or campaign, shared by everyone on it, that agents read before acting and that decisions write back to | ADR 0136 ledger, ADR 0233 decision records, ADR 0126 channels | Host extension; no wire change | ✅ Shipped, always on (no toggle, 2026-10-07): projects, campaigns (linked project), features (labelled projects), channel and strategy views ([ADR 0852](docs/adr/0852-project-as-collaboration-container.md)) |
+| 3 | **Decision capture from informal channels** ([ADR 0853](docs/adr/0853-decision-capture.md)) | Decisions made in channel threads, Slack, and meeting notes land in the team ledger with a link to where they were made | ADR 0126, ADR 0175, `tmpl.meeting-ops.*` | Host extension; no wire change | 🟡 Shipped except the watching suggester (draft #4558, blocked on its eval); meeting templates do not yet report decisions |
+| 4 | **Drift detection and re-sync checkpoints** ([ADR 0855](docs/adr/0855-drift-detection-and-resync.md)) | Flags work that has moved away from the recorded intent and calls a realignment when enough change piles up | ADR 0136 P4 reckoning, item 2 | Host extension; advisory only | 🟡 Re-sync shipped; drift check built (draft #4564, blocked on its eval); PR diffs need a GitHub read connection |
+
+### 1. Structured handoffs
+
+**Intent.** When work moves from one participant to another, the receiver
+should not have to reconstruct why it looks the way it does. Today
+`agent.handoff` records only who passed to whom and an optional free-text
+reason, and a human picking up an escalation sees the run but not a summary of
+it.
+
+**Build.**
+- A `HandoffRecord` with `intent` (one or two sentences), `decisions[]` (each
+  with who decided and a link to its source), `openQuestions[]`, `tried[]`
+  (approaches attempted and why they were dropped), and `confidence` (0 to 1,
+  plus a short basis).
+- Emit it on agent-to-agent handoffs (as `openwop-handoff` on the
+  `agent.handoff` payload), on agent-to-human escalations (attached to the
+  clarification or approval interrupt), and on human-to-human reassignment of
+  a card or approval.
+- Agents produce the record from their own run context; a human handoff gets a
+  prefilled draft the person edits before sending.
+- Show it in `RunHandoffMap`, on interrupt cards, and as a channel card when the
+  handoff crosses to a person.
+
+**Done when.** A reviewer who picks up an escalated run in a channel can act
+without opening the event log, and the record survives `:fork` and replay
+unchanged (stamped, never recomputed).
+
+> **CORRECTED 2026-10-05 (ADR 0829).** Two statements above did not match the
+> code. (1) There is no production `agent.handoff` emission to extend: only
+> `bootstrap/conformanceMockAgent.ts` emits it. The real supervisor → worker
+> transfer is the `core.dispatch` loop, which ADR 0829 makes emit
+> `agent.handoff` when the worker resolves to an agent. (2) The record cannot be
+> "attached to the clarification or approval interrupt": `interrupt.requested`
+> and every per-kind `data` def are closed with no extension hatch. An
+> escalation's record rides `node.suspended` (hatched) instead, and the missing
+> field on the interrupt request goes to the upstream RFC.
+
+**Upstream.** Once two real workflows use it for 30 days without shape changes,
+propose an RFC to give `agent.handoff` an optional structured `context` (RFC
+0002 originally sketched a free-form `context` field that v2 does not carry).
+
+**Status 2026-10-07 — shipped.** ADR 0829 P1–P4 are on `main`, the
+feature is always on with no toggle (2026-10-07), and the browser lane
+`frontend/react/e2e/handoff-ledger.spec.ts` covers the card note (#4487). The
+items left open earlier the same day are closed:
+- **Confidence on a person's note** — the card handoff dialog asks for low /
+  medium / high (#4528).
+- **Approval handoffs** — "Ask someone else to decide" on one approval, only to
+  a person already eligible to decide it; a handoff never grants authority
+  ([ADR 0854](docs/adr/0854-approval-handoffs-and-handoff-cards.md) P1, #4563).
+- **Channel card** — one card in the project's chat and bound channels when a
+  handoff reaches a person (ADR 0854 P2, #4559).
+
+Still open: the **upstream RFC (ADR 0829 P5)**, which waits on two real
+workflows using the record for 30 days without shape changes. Usage evidence
+toward that bar is now measured from real records (superadmin
+`/structured-handoffs/evidence`, #4535).
+
+### 2. Team intent ledger
+
+**Intent.** ADR 0136 gives one conversation a mission contract. Real work spans
+many conversations, runs, and people. The team ledger is the single living
+record of what the feature or campaign is now, why, and what changed.
+
+**Build.**
+- A ledger entity bound to a project, feature, or campaign (not a conversation),
+  with: a current intent statement, scope, success criteria, a decision log
+  (reusing ADR 0233 decision records, never a second store), open questions,
+  and an append-only change log of deltas with author and source.
+- **Read before act:** agents working on a bound run receive the current
+  ledger snapshot in context, and the snapshot version is stamped in
+  `run.metadata` so replay is deterministic.
+- **Write back:** resolved approvals and clarifications, handoff records (item
+  1), and confirmed decisions (item 3) append deltas. Agents may propose a
+  delta; a named owner accepts it.
+- Per-mission ledgers (ADR 0136) inside the bound scope inherit its
+  constraints and can only narrow them.
+- A ledger panel in the project, campaign, and channel views, showing the
+  current state and what changed since you last looked.
+
+**Done when.** A new participant can read one page and know the current
+intent, the last five decisions and why, and the open questions; and every
+agent run on the feature shows which ledger version it acted on.
+
+> **CORRECTED 2026-10-05 (ADR 0831).** For a project, the "current intent
+> statement" and success criteria are the project CHARTER's `goal` and
+> `objectives` (ADR 0054), which already existed; the ledger versions them
+> rather than holding a second goal. The ledger adds the version, the change
+> log, decision references, open questions and scope. P1 binds to projects only;
+> features and campaigns wait until a project has used it.
+
+**Status 2026-10-07 — shipped.** ADR 0831 P1–P4 are on `main`, the
+feature is always on with no toggle (2026-10-07), and handoff notes propose their
+new open questions as ledger deltas (#4500). The items left open earlier the
+same day:
+- **Feature and campaign scope** — decided in
+  [ADR 0852](docs/adr/0852-project-as-collaboration-container.md): the project
+  stays the one collaboration container, so there is no second ledger kind. A
+  campaign gets a linked project created with it (#4538), a feature is a project
+  labelled as one (#4544), and a strategy initiative rolls up its linked
+  projects' ledgers (#4541).
+- **Ledger panel in campaign and channel views** — the campaign page shows its
+  project's ledger (#4539); a channel can be bound to a project and shows its
+  ledger (#4540).
+- **Approvals and clarifications as write-back sources** — a resolved approval
+  becomes a decision suggestion, and an answer to one of the ledger's open
+  questions proposes closing it; the owner decides (ADR 0853 D5, #4555).
+- **Confirmed decisions as write-back** — delivered by item 3 below.
+- **Per-mission ledgers inherit the team ledger (ADR 0831 D6)** — rebuilt as an
+  optional tool policy on the team ledger that can only take tools away or put
+  a person in front of them, enforced in the project's chats and bound channels
+  after a security review
+  ([ADR 0856](docs/adr/0856-team-ledger-tool-policy.md), #4562). Not done: a
+  mission ledger drafted in a project chat is not yet pre-filled from the team
+  ledger (the policy applies at the tool gate either way).
+- Also shipped: the ledger rides into project chat context (#4530), and "what
+  changed since you last looked" is kept on the server (#4532).
+
+Still open: **protocol evidence (ADR 0831 P5)**, which waits on real use;
+measured at superadmin `/team-ledger/evidence` (#4535).
+
+### 3. Decision capture from informal channels
+
+**Intent.** Most decisions are made in chat and meetings, not in tickets. If
+they never reach the ledger, the agents work from stale intent.
+
+**Build.**
+- A "Record as decision" action on any channel message (including messages that
+  arrived through ADR 0175 Slack/Discord/Telegram), which opens a prefilled
+  decision entry linked to the message.
+- An agent that watches bound channels and suggests "this looks like a
+  decision". A person always confirms; nothing is written silently.
+- Meeting-ops templates (action extraction, post-meeting follow-up) write
+  their extracted decisions as proposed ledger deltas.
+- Out of scope for this item: a live meeting bot.
+
+**Done when.** A decision made in a channel thread reaches the ledger and the
+agents on the next run within one confirmation step, with a link back to the
+original message.
+
+**Status 2026-10-07 — shipped except the watching agent.**
+[ADR 0853](docs/adr/0853-decision-capture.md):
+- **Record as decision** on any chat or channel message opens a prefilled
+  decision linked to the message; the owner can accept it in the same step
+  (#4552).
+- **Possible decisions** on the Ledger tab collect what automatic sources
+  noticed; nothing is a decision until a person records it (#4554). Sources:
+  inbound `decision:` messages on a project-linked Slack / Discord / Telegram /
+  WhatsApp connection (#4556), resolved approvals and clarifications (#4555),
+  and any project run whose output reports `decisions` (#4557).
+
+Still open:
+- **The watching suggester** ("this looks like a decision") is built but held as
+  draft #4558 until its eval meets precision ≥ 0.8 and recall ≥ 0.5 against a
+  real model (`scripts/eval-decision-suggester.mts`; needs a provider key).
+- **Meeting-ops templates** do not yet return `decisions`, so meeting notes
+  reach the ledger only once a template reports them through the #4557 contract.
+
+### 4. Drift detection and re-sync checkpoints
+
+**Intent.** When the work and the recorded intent disagree, the team needs to
+know whether that was a decision or a mistake. Today nothing tells them.
+
+**Build.**
+- A drift check that compares produced artifacts (PR diffs, generated assets,
+  campaign copy) against the ledger and classifies each difference as
+  **explained** (linked to a decision entry) or **unexplained**.
+- Unexplained drift posts a card in the bound channel to the owner of the
+  affected decision, with "accept as a decision" and "send back" actions.
+- A re-sync checkpoint fires when unreviewed deltas pass a configurable
+  threshold, posting a short "what changed" summary and asking the named roles
+  to confirm the current intent.
+- Advisory only: it never blocks a run. It reuses the ADR 0136 P4 reckoning
+  pattern (pure, projected over runs and events).
+
+**Done when.** In a seeded SDLC scenario, a change made without a recorded
+decision is flagged to its owner, and a change that cites a decision is not.
+
+**Status 2026-10-07 — re-sync shipped; the drift check is built and gated.**
+[ADR 0855](docs/adr/0855-drift-detection-and-resync.md):
+- **Re-sync checkpoint** — when a project's members fall 5 accepted changes
+  behind, or 10 proposals wait, the project chat gets one "what changed" summary,
+  at most once a day (#4560).
+- **Drift check** — after a project run, compares what it produced with the
+  ledger at the version it acted on; a difference is explained only if it cites
+  a decision really on the ledger. Unexplained ones become possible decisions
+  the owner can record, dismiss with a reason, or send back to whoever started
+  the run. Held as draft #4564 until its eval (seeded launch scenario: flag ≥ 0.9
+  of undecided changes, ≤ 0.1 false flags) runs against a real model.
+- **PR diffs** (ADR 0855 P5) need a GitHub read connection the app does not
+  have; GitHub publishing is write-only today.
+
+### Sequencing
+
+Items 1 and 2 can start in parallel. Item 3 depends on item 2 (it writes to the
+ledger). Item 4 depends on items 2 and 3, since drift is measured against a
+ledger that captures real decisions. Each item gets its own ADR, authored with
+`/architect` before implementation, following the per-feature workflow above.

@@ -65,10 +65,35 @@ export async function isVisibleToAsync(
   meta: ConversationMeta | null,
   tenantId: string,
   userId: string | undefined,
+  /** ADR 0839 D1 — the caller as `req.userId ?? principalId`, the spelling every other
+   *  HTTP door hands the subject seam. Only the seam reads it, and only when `userId` is
+   *  absent: an anonymous demo session or an `owk_` key has no canonical user but IS a
+   *  principal the seam can resolve (the key through its issuer). Without it the seam,
+   *  which now refuses an absent caller, would lock a demo visitor out of their own
+   *  project's chat. The participant/owner rule below still sees only `userId`. */
+  principal?: string,
 ): Promise<boolean> {
   if (meta?.ownerSubject) {
-    const level = await resolveSubjectAccess(tenantId, meta.ownerSubject, userId);
+    const level = await resolveSubjectAccess(tenantId, meta.ownerSubject, userId ?? principal);
     if (level !== null) return levelSatisfies(level, 'read');
   }
   return isVisibleTo(meta, userId);
+}
+
+/** ADR 0834 D3 — authority over a conversation's tool asks (the bypass switch, an
+ *  approval) is held by the principal the tools ACT AS, and by no one else. Visibility
+ *  is not enough: a participant can read and post, but tools run as the run's
+ *  `actingUserId` (the owner), so a participant's bypass or approval would spend the
+ *  owner's authority.
+ *
+ *  Both sides MUST use the `req.userId ?? principalId` derivation — the one
+ *  `routes/runs.ts` stamps as `actingUserId` and `chatSessions` stamps as
+ *  `ownerUserId`. The canonical `resolveCallerUser(req).userId` is a DIFFERENT key on
+ *  personal-tenant bearer lanes (the two-identity-keys trap); comparing it here would
+ *  refuse the owner or, worse, match the wrong human. No principal on either side ⇒
+ *  no authority (fail-safe). */
+export function toolAuthorityHolds(callerPrincipal: string | undefined, actingPrincipal: string | undefined): boolean {
+  return typeof callerPrincipal === 'string' && callerPrincipal.length > 0
+    && typeof actingPrincipal === 'string' && actingPrincipal.length > 0
+    && callerPrincipal === actingPrincipal;
 }

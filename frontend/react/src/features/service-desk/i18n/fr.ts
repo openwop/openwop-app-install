@@ -46,10 +46,14 @@ export const messages = {
   sending: "Envoi\u2026",
   emptyTitle: "Pas encore de tickets",
   emptyBody: "Configurez l'entr\u00e9e ci-dessous ou cr\u00e9ez des tickets depuis WhatsApp, les formulaires ou l'API.",
-  intakeUnconfigured: "L'entr\u00e9e n'est pas configur\u00e9e \u2014 les messages WhatsApp et formulaires entrants ne deviennent pas des tickets.",
+  intakeUnconfigured: "L'entr\u00e9e n'est pas configur\u00e9e \u2014 les messages WhatsApp entrants ne deviennent pas des tickets. Les formulaires cr\u00e9ent des tickets d'eux-m\u00eames quand l'option \u00ab Cr\u00e9er un ticket de support \u00bb est activ\u00e9e.",
   intakeEnable: "Router l'entr\u00e9e vers cette organisation",
   intakeCheckFailed: "Impossible de vérifier si la réception entrante est configurée pour cet espace de travail.",
   intakeRecheck: "Vérifier à nouveau",
   threadStale: "Impossible de charger la conversation complète — vous voyez le résumé de la file, qui peut omettre des messages récents.",
   threadRetry: "Recharger la conversation",
+  // ADR 0768 D5 — the Pocket assistant; its agent reads only orgs the caller can read.
+  pocketTitle: 'Assistant support',
+  pocketScope: 'les tickets des organisations que vous pouvez consulter',
+  pocketHint: 'Posez une question sur les tickets ou faites rédiger une réponse. Les brouillons attendent une approbation avant tout envoi.',
 };

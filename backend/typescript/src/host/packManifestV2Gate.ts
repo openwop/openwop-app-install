@@ -1,5 +1,6 @@
 
 import { declaration } from './specDeclaration.js';
+import { chainPinFindings, describePinFinding } from './chainPinRule.js';
 
 /**
  * RFC 0177 §A.1 / §B.1 — the two install-time refusals `spec/v2/core/packs.md`
@@ -28,51 +29,19 @@ export type PackManifestRefusal =
   | { code: 'pack_peer_dependency_undefined'; message: string }
   | { code: 'validation_error'; message: string };
 
-/** Exact SemVer, including the optional prerelease/build suffixes. */
-const EXACT_SEMVER_RE = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
-
+/**
+ * RFC 0177 §E.1 exact pins — delegated to the ONE rule owner (ADR 0766), which the
+ * vendored/operator chain loader and expansion also call. That module also reads
+ * `compensation.nodeTypeId`, which this gate used to skip.
+ */
 function workflowChainPinRefusal(manifest: Record<string, unknown>): PackManifestRefusal | null {
   if (manifest['kind'] !== 'workflow-chain') return null;
   const chains = manifest['chains'];
   if (!Array.isArray(chains)) return null; // structural schema validation owns this shape
-
   for (const chain of chains) {
     if (chain === null || typeof chain !== 'object' || Array.isArray(chain)) continue;
-    const c = chain as Record<string, unknown>;
-    const dag = c['dag'];
-    const nodes = dag !== null && typeof dag === 'object' && !Array.isArray(dag)
-      ? (dag as Record<string, unknown>)['nodes']
-      : undefined;
-    if (Array.isArray(nodes)) {
-      for (const node of nodes) {
-        if (node === null || typeof node !== 'object' || Array.isArray(node)) continue;
-        const typeId = (node as Record<string, unknown>)['typeId'];
-        if (typeof typeId !== 'string') continue;
-        const at = typeId.lastIndexOf('@');
-        const version = at > 0 ? typeId.slice(at + 1) : '';
-        if (!EXACT_SEMVER_RE.test(version)) {
-          return {
-            code: 'validation_error',
-            message: `workflow-chain node typeId "${typeId}" MUST end in an exact SemVer pin (for example @1.0.0); ranges and unpinned references are forbidden (spec/v2/core/workflow-chain-packs.md §"Exact pins")`,
-          };
-        }
-      }
-    }
-
-    const subChains = c['subChains'];
-    if (!Array.isArray(subChains)) continue;
-    for (const subChain of subChains) {
-      if (subChain === null || typeof subChain !== 'object' || Array.isArray(subChain)) continue;
-      const ref = (subChain as Record<string, unknown>)['ref'];
-      if (ref === null || typeof ref !== 'object' || Array.isArray(ref)) continue;
-      const version = (ref as Record<string, unknown>)['version'];
-      if (typeof version === 'string' && !EXACT_SEMVER_RE.test(version)) {
-        return {
-          code: 'validation_error',
-          message: `workflow-chain external sub-chain version "${version}" MUST be an exact SemVer pin; ranges are forbidden (spec/v2/core/workflow-chain-packs.md §"Exact pins")`,
-        };
-      }
-    }
+    const first = chainPinFindings(chain as Record<string, unknown>)[0];
+    if (first) return { code: 'validation_error', message: describePinFinding(first) };
   }
   return null;
 }

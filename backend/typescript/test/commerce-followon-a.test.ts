@@ -39,11 +39,11 @@ function client() {
 }
 async function shopOwner(): Promise<{ owner: ReturnType<typeof client>; orgId: string; tenantId: string }> {
   const owner = client();
-  const r = await owner.post('/v1/host/openwop-app/test/login', { email: `fa-${Date.now()}-${n++}@acme.test` });
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Shop' });
+  const r = await owner.post('/host/openwop-app/test/login', { email: `fa-${Date.now()}-${n++}@acme.test` });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Shop' });
   return { owner, orgId: org.body.orgId, tenantId: r.body.user?.tenantId ?? '' };
 }
-const c = (orgId: string, s = ''): string => `/v1/host/openwop-app/commerce/orgs/${encodeURIComponent(orgId)}${s}`;
+const c = (orgId: string, s = ''): string => `/host/openwop-app/commerce/orgs/${encodeURIComponent(orgId)}${s}`;
 
 describe('Group A — per-currency top products', () => {
   it('buckets top-product revenue per currency (single-currency revenue, own symbol)', async () => {
@@ -68,15 +68,15 @@ describe('Group A — configurable Deal-on-paid pipeline', () => {
   it('lands the won Deal on the operator-configured pipeline + stage', async () => {
     const { owner, orgId, tenantId } = await shopOwner();
     // Create a bespoke pipeline with a known stage.
-    const pipe = await owner.post(`/v1/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}/pipelines`, { name: 'Commerce Wins', stages: [{ name: 'Closed Won', probability: 100 }] });
+    const pipe = await owner.post(`/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}/pipelines`, { name: 'Commerce Wins', stages: [{ name: 'Closed Won', probability: 100 }] });
     const pipelineId = pipe.body.pipelineId;
     const stageId = pipe.body.stages[0].stageId;
     await setGovernancePolicy(tenantId, { commerce: { dealOnPaid: true, dealOnPaidPipelineId: pipelineId, dealOnPaidStageId: stageId } }, 'test');
-    const contact = await owner.post('/v1/host/openwop-app/crm/contacts', { name: 'Buyer', email: `buy-${n++}@x.test` });
+    const contact = await owner.post('/host/openwop-app/crm/contacts', { name: 'Buyer', email: `buy-${n++}@x.test` });
     const p = await owner.post(c(orgId, '/products'), { type: 'digital', name: 'Guide', price: 30, currency: 'USD' });
     const o = await owner.post(c(orgId, '/orders'), { contactId: contact.body.contactId, lines: [{ productId: p.body.productId, quantity: 1 }] });
     await owner.post(c(orgId, `/orders/${encodeURIComponent(o.body.orderId)}/pay`), { paymentIntentId: 'demo:pi' });
-    const deals = (await owner.get(`/v1/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}/deals`)).body.deals as any[];
+    const deals = (await owner.get(`/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}/deals`)).body.deals as any[];
     const linked = deals.filter((d) => d.contactId === contact.body.contactId);
     expect(linked).toHaveLength(1);
     expect(linked[0].pipelineId).toBe(pipelineId);

@@ -6,7 +6,7 @@
  * can map an `@-mention` in the user's prompt onto the matching tool.
  *
  * Tool names MUST match Anthropic's `^[a-zA-Z0-9_-]{1,64}$` constraint;
- * `workflowMentions.sanitizeToolName` enforces that.
+ * `builder/persistence/workflowId.ts` `workflowToolName` enforces that.
  */
 
 import i18n from '../../i18n/index.js';

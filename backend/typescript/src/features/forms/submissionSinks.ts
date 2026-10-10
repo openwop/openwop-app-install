@@ -22,6 +22,7 @@
 
 import { createLogger } from '../../observability/logger.js';
 import type { FormDef, Submission } from './formsService.js';
+import type { VisitorConsentContext } from '../analytics/consentGate.js';
 
 const log = createLogger('forms.submissionSinks');
 
@@ -29,15 +30,28 @@ export interface SubmissionSinkResult {
   /** Set when the sink linked the submission to a CRM contact. First
    *  marker-returning sink wins (ADR 0330 open question — single slot v1). */
   contactId?: string;
+  /** ADR 0860 D7 — the sink CREATED `contactId` (not an attach to an existing
+   *  contact). Honoured only together with this sink's own `contactId`. */
+  contactCreated?: true;
   /** A recorded (non-fatal) failure marker, e.g. `contact_create_failed`. */
   error?: string;
+}
+
+/** ADR 0860 D3 — TRANSIENT request context handed to the sinks of a live submit.
+ *  Never persisted (it never enters `meta`). Absent on a quarantine release or a
+ *  seeded submission, which have no visitor request. */
+export interface SubmissionCapture {
+  /** The visitor's resolved consent context, or `null` when the request carried a
+   *  token the server refused — which every sink must treat as NOT consented
+   *  (never as "no context", which falls back to the legacy decision). */
+  visitorConsent?: VisitorConsentContext | null;
 }
 
 export interface SubmissionSink {
   /** Stable id, e.g. `crm-contact`, `funnel-attribution`. Re-registering an
    *  id replaces the prior sink (idempotent boot). */
   id: string;
-  onSubmission(form: FormDef, submission: Submission): Promise<SubmissionSinkResult | undefined>;
+  onSubmission(form: FormDef, submission: Submission, capture?: SubmissionCapture): Promise<SubmissionSinkResult | undefined>;
 }
 
 const sinks: SubmissionSink[] = [];
@@ -59,12 +73,17 @@ export function clearSubmissionSinksForTest(): void {
  * sink logs and contributes nothing. Returns whether any marker was applied
  * so the caller knows to re-persist.
  */
-export async function runSubmissionSinks(form: FormDef, submission: Submission): Promise<boolean> {
+export async function runSubmissionSinks(form: FormDef, submission: Submission, capture?: SubmissionCapture): Promise<boolean> {
   let changed = false;
   for (const sink of sinks) {
     try {
-      const res = await sink.onSubmission(form, submission);
-      if (res?.contactId && !submission.contactId) { submission.contactId = res.contactId; changed = true; }
+      const res = await sink.onSubmission(form, submission, capture);
+      if (res?.contactId && !submission.contactId) {
+        submission.contactId = res.contactId;
+        // ADR 0860 D7 — only in the branch that adopts THIS sink's contactId.
+        if (res.contactCreated) submission.contactCreated = true;
+        changed = true;
+      }
       if (res?.error && !submission.error) { submission.error = res.error; changed = true; }
     } catch (err) {
       log.warn('submission sink failed', { sink: sink.id, formId: form.formId, error: err instanceof Error ? err.message : String(err) });

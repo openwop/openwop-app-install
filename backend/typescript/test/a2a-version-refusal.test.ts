@@ -27,7 +27,7 @@ import { A2A_SUPPORTED_VERSIONS } from '../src/host/a2aProfile.js';
 let server: http.Server;
 let BASE: string;
 const TOKEN = 'dev-token';
-const PATH = '/v1/host/openwop-app/a2a';
+const PATH = '/host/openwop-app/a2a';
 
 interface RpcBody {
   jsonrpc?: string;

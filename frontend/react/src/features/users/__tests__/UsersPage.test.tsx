@@ -1,20 +1,35 @@
 /**
- * UsersPage — ADR 0621 D5/D7 row-action designed states (USERS-UX-11/12/14/15/16).
+ * UsersPage — ADR 0621 D5/D7 row-action designed states (USERS-UX-11/12/14/15/16,
+ * ADR 0833 D6 / USERS2-UX-1).
  *
- * The users client + the SSO panel are mocked; `confirm()` falls back to
- * `window.confirm` because no `ConfirmRoot` is mounted here, so the gate is
- * observable as a spy: the client must be called ONLY after the user confirms.
+ * Guards: the caller's own row carries no lockout actions; Disable / Sign out
+ * everywhere / Delete are confirm-gated (the client is called ONLY after the
+ * user confirms); the server's coded refusals (`self_lockout`, `owner_required`,
+ * `legal_hold`, `validation_error`) render as designed, localized states — never
+ * the raw server prose, never a generic toast.
+ *
+ * Observation seams: `confirm()` falls back to `window.confirm` because no
+ * `ConfirmRoot` is mounted, so the gate is a spy. A `<Notice>`'s variant is
+ * observed through the shared announcer — `error` announces ASSERTIVELY, every
+ * other variant POLITELY (`ui/Notice.tsx`) — not through its CSS class. The
+ * `<Toaster>` IS mounted, so a raw-message leak through the toast fallback is
+ * visible to the absence assertions.
+ *
+ * Sabotage that turns it red (one per claim): drop the own-row guard; rename a
+ * refusal code in `surfaceFailure`; flip a refusal's `variant`; bypass a
+ * `confirm(...)`; drop the duplicate-principal precheck.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import type * as UsersClient from '../usersClient.js';
 
 const mocks = vi.hoisted(() => ({
-  getMe: vi.fn(),
-  listUsers: vi.fn(),
-  setUserEnabled: vi.fn(),
-  deleteUser: vi.fn(),
-  revokeUserSessions: vi.fn(),
-  createUser: vi.fn(),
+  getMe: vi.fn<typeof UsersClient.getMe>(),
+  listUsers: vi.fn<typeof UsersClient.listUsers>(),
+  setUserEnabled: vi.fn<typeof UsersClient.setUserEnabled>(),
+  deleteUser: vi.fn<typeof UsersClient.deleteUser>(),
+  revokeUserSessions: vi.fn<typeof UsersClient.revokeUserSessions>(),
+  createUser: vi.fn<typeof UsersClient.createUser>(),
 }));
 
 vi.mock('../usersClient.js', async (importActual) => {
@@ -24,16 +39,19 @@ vi.mock('../usersClient.js', async (importActual) => {
 vi.mock('../SsoPanel.js', () => ({ SsoPanel: () => null }));
 
 import { UsersPage } from '../UsersPage.js';
-import { UsersApiError } from '../usersClient.js';
+import { UsersApiError, type User } from '../usersClient.js';
 import { currentAnnouncements } from '../../../ui/announce.js';
+import { Toaster, dismiss, getToasts } from '../../../ui/toast.js';
 
-const me = {
+const me: User = {
   userId: 'u-me', tenantId: 't1', principalId: 'oidc:me', email: 'me@example.com', displayName: 'Ada Admin',
   groups: [], source: 'oidc', status: 'active', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
-} as const;
-const other = { ...me, userId: 'u-bob', principalId: 'oidc:bob', email: 'bob@example.com', displayName: 'Bob Builder' } as const;
+};
+const other: User = { ...me, userId: 'u-bob', principalId: 'oidc:bob', email: 'bob@example.com', displayName: 'Bob Builder' };
 
 beforeEach(() => {
+  // Toasts are module state (an error toast persists until dismissed).
+  for (const t of getToasts()) dismiss(t.id);
   vi.restoreAllMocks();
   vi.clearAllMocks();
   mocks.getMe.mockResolvedValue(me);
@@ -45,7 +63,7 @@ beforeEach(() => {
 });
 
 async function renderPage(): Promise<void> {
-  render(<UsersPage />);
+  render(<><UsersPage /><Toaster /></>);
   await waitFor(() => expect(screen.getByRole('button', { name: 'Disable Bob Builder' })).toBeTruthy());
 }
 
@@ -68,9 +86,24 @@ describe('UsersPage — own row (USERS-UX-14 / ADR 0621 D7)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Disable Bob Builder' }));
     // `<Notice announce>` delegates to the shared announcer instead of carrying
     // its own live region (one region per message) — assert BOTH halves.
-    const notice = await screen.findByText(/your own account from here/);
-    expect(notice.closest('.alert')?.className).toMatch(/\berror\b/);
+    // An ERROR notice announces assertively (the variant, observed as behavior).
+    await screen.findByText(/your own account from here/);
     expect(currentAnnouncements().assertive).toMatch(/your own account from here/);
+    expect(screen.queryByText(/nope/)).toBeNull();
+  });
+
+  // ADR 0833 D6 / grade-ux USERS2-UX-1 — `owner_required` rides on a generic
+  // `forbidden`; without the details read it fell to a toast telling an ADMIN
+  // to "ask an admin".
+  it('renders a server 403 owner_required as a designed, announced notice — not a generic toast', async () => {
+    mocks.setUserEnabled.mockRejectedValue(new UsersApiError('nope', 403, { error: 'forbidden', message: 'nope', details: { code: 'owner_required' } }));
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    await renderPage();
+    fireEvent.click(screen.getByRole('button', { name: 'Disable Bob Builder' }));
+    await screen.findByText(/Only an owner of this workspace/);
+    // A WARNING notice: announced politely, never on the assertive channel.
+    expect(currentAnnouncements().polite).toMatch(/Only an owner of this workspace/);
+    expect(currentAnnouncements().assertive).not.toMatch(/Only an owner of this workspace/);
     expect(screen.queryByText(/nope/)).toBeNull();
   });
 });
@@ -96,7 +129,7 @@ describe('UsersPage — Disable is confirm-gated (USERS-UX-12)', () => {
   it('Enable needs no confirm', async () => {
     mocks.listUsers.mockResolvedValue([me, { ...other, status: 'disabled' }]);
     const confirmSpy = vi.spyOn(window, 'confirm');
-    render(<UsersPage />);
+    render(<><UsersPage /><Toaster /></>);
     fireEvent.click(await screen.findByRole('button', { name: 'Enable Bob Builder' }));
     await waitFor(() => expect(mocks.setUserEnabled).toHaveBeenCalledWith('u-bob', true));
     expect(confirmSpy).not.toHaveBeenCalled();
@@ -126,8 +159,10 @@ describe('UsersPage — Delete (USERS-UX-15)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Delete Bob Builder' }));
     await waitFor(() => expect(mocks.deleteUser).toHaveBeenCalledWith('u-bob'));
     expect(confirmSpy.mock.calls[0]?.[0]).toBe('Delete user "Bob Builder"?');
-    const notice = await screen.findByText(/under legal hold, so user data cannot be erased/);
-    expect(notice).toBeTruthy();
+    await screen.findByText(/under legal hold, so user data cannot be erased/);
+    // A WARNING notice: announced politely, never on the assertive channel.
+    expect(currentAnnouncements().polite).toMatch(/under legal hold, so user data cannot be erased/);
+    expect(currentAnnouncements().assertive).not.toMatch(/under legal hold, so user data cannot be erased/);
     // The raw server prose never reaches the page.
     expect(screen.queryByText(/legal hold \(audit\)/)).toBeNull();
   });

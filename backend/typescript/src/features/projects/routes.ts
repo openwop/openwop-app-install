@@ -10,6 +10,7 @@
  *   GET    /:id                  one project (+ board id)            [workspace:read]
  *   PATCH  /:id                  rename / set workflows              [workspace:write]
  *   DELETE /:id                  delete + cascade (board, memory)    [workspace:write]
+ *   GET    /:id/delete-preview   counts a delete takes (ADR 0839)    [workspace:write]
  *   GET/POST/DELETE /:id/memory  the project's memory                [read / write]
  *   GET    /:id/knowledge        the project's bound docs + notes    [workspace:read]
  *   POST   /:id/knowledge/retrieve   read-only corpus search         [workspace:read]
@@ -42,7 +43,7 @@ import { addSubjectNote, listSubjectNotes, removeSubjectNote } from '../../host/
 import { listAllTenantCollections } from '../kb/kbService.js';
 import {
   createProject, getProject, updateProject, deleteProject, projectSubject,
-  resolveProjectAccess, listVisibleProjects, addProjectMember, removeProjectMember, setProjectVisibility,
+  resolveProjectAccess, listVisibleProjects, addProjectMember, removeProjectMember, setProjectVisibility, setProjectFacet,
   notebookCorpusToDelete, orderProjectAgentCohort, type Project,
 } from './projectsService.js';
 import { MAX_MULTI_PARTY_PARTICIPANTS } from '../../host/multiPartyConversation.js';
@@ -54,6 +55,7 @@ import {
   projectShareableKbProvider,
 } from './projectKnowledgeService.js';
 import { registerShareableKb } from '../../host/shareableKb.js';
+import { countSubjectDependents } from '../../host/subjectDependents.js';
 import {
   listProjectSchedules, createProjectSchedule, updateProjectSchedule, deleteProjectSchedule,
 } from './projectScheduleService.js';
@@ -134,7 +136,7 @@ const view = (tenantId: string) => async (
 
 export function registerProjectsRoutes(deps: RouteDeps): void {
   const { app } = deps;
-  const BASE = '/v1/host/openwop-app/projects';
+  const BASE = '/host/openwop-app/projects';
   registerShareableKb(projectShareableKbProvider); // ADR 0100 D2 — board can share project KBs
 
   app.get(BASE, async (req, res, next) => {
@@ -161,7 +163,7 @@ export function registerProjectsRoutes(deps: RouteDeps): void {
     try {
       const orgId = requireString((req.body ?? {})?.orgId, 'orgId');
       await requireOrgScope(req, orgId, 'workspace:write');
-      const project = await createProject(tenantOf(req), orgId, (req.body ?? {}) as { name?: unknown });
+      const project = await createProject(tenantOf(req), orgId, (req.body ?? {}) as { name?: unknown }, actingUserOf(req)); // ADR 0839 D5
       res.status(201).json(await view(tenantOf(req))(project.id, actingUserOf(req)));
     } catch (err) { next(err); }
   });
@@ -177,8 +179,18 @@ export function registerProjectsRoutes(deps: RouteDeps): void {
     try {
       const project = await requireProject(req, 'workspace:write');
       const { id } = project;
-      await updateProject(tenantOf(req), id, (req.body ?? {}) as { name?: unknown; workflows?: unknown; charter?: unknown; moderatorRosterId?: unknown; turnPolicy?: unknown });
+      await updateProject(tenantOf(req), id, (req.body ?? {}) as { name?: unknown; workflows?: unknown; charter?: unknown; moderatorRosterId?: unknown; turnPolicy?: unknown }, { ...(actingUserOf(req) ? { actor: actingUserOf(req) } : {}), origin: 'direct' });
       res.json(await view(tenantOf(req))(id, actingUserOf(req)));
+    } catch (err) { next(err); }
+  });
+
+  // ADR 0839 D2 — what a delete would take with it from OTHER features (canvases,
+  // priority lists, the team ledger, documents), so the confirm can name it before
+  // the person commits. Gated exactly like DELETE: only someone who can delete may ask.
+  app.get(`${BASE}/:id/delete-preview`, async (req, res, next) => {
+    try {
+      const { id } = await requireProject(req, 'workspace:write');
+      res.json({ dependents: await countSubjectDependents(tenantOf(req), projectSubject(id)) });
     } catch (err) { next(err); }
   });
 
@@ -415,6 +427,25 @@ export function registerProjectsRoutes(deps: RouteDeps): void {
     try {
       const { id } = await requireProject(req, 'workspace:write');
       await setProjectVisibility(tenantOf(req), id, (req.body ?? {})?.visibility);
+      res.json(await view(tenantOf(req))(id, actingUserOf(req)));
+    } catch (err) { next(err); }
+  });
+
+  // ADR 0852 D3 — label a project as a FEATURE (a label only: a feature IS a
+  // project). `null` clears it. A notebook or a campaign's project keeps the
+  // facet it was created with (409); only `'feature'` is settable here.
+  app.put(`${BASE}/:id/facet`, async (req, res, next) => {
+    try {
+      const { id } = await requireProject(req, 'workspace:write');
+      const raw = (req.body ?? {})?.facet;
+      if (raw !== 'feature' && raw !== null) {
+        throw new OpenwopError('validation_error', '`facet` must be `feature`, or null to clear it.', 400, { field: 'facet' });
+      }
+      const current = await getProject(tenantOf(req), id);
+      if (current?.facet === 'notebook' || current?.facet === 'campaign') {
+        throw new OpenwopError('conflict', `This project is a ${current.facet}; that label cannot be changed here.`, 409, { field: 'facet', facet: current.facet });
+      }
+      await setProjectFacet(tenantOf(req), id, raw === null ? undefined : 'feature');
       res.json(await view(tenantOf(req))(id, actingUserOf(req)));
     } catch (err) { next(err); }
   });

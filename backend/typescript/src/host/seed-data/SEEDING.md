@@ -16,7 +16,7 @@ host-extension stores.
 
 | File | Seeds | Consumed by |
 |---|---|---|
-| `exampleAgents.json` | The five example personas (roster entries), each with a role, board cards, schedules, and an org-chart position | `../exampleDataSeed.ts` → `seedDemoAgents()` |
+| `exampleAgents.json` | The ten example personas (roster entries: the eight work twins plus Iris and Ezra, ADR 0032), each with a role, board cards, schedules, and an org-chart position | `../exampleDataSeed.ts` → `seedDemoAgents()` |
 | `workforces.json` | The five governed workforces (purpose/policy, agent cluster, decision boundaries). Each carries an optional `historyRunCount` — when `> 0` the workforce ships that many synthetic runs (telemetry + the graduation curve); when absent/0 it's a stand-up template with no sample history. | `../workforceService.ts` → `seedWorkforceEntities()` + `seedWorkforceHistory()` |
 | `featurePages.json` | The public, **host-global** "Features" CMS page (ADR 0027) documenting every feature the app offers — grouped feature entries (name + tagline + `appPath`, optional add-on flag) plus hero/intro/CTA copy. Authored in the typed-section model and published at **`/p/features`**. | `../featuresPage.ts` → `ensureFeaturesPage()` |
 

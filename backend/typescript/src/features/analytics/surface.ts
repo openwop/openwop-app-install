@@ -1,21 +1,14 @@
 /**
  * Analytics workflow surface (ADR 0014) — `ctx.features.analytics`, a THIN
  * read-only adapter over `analyticsService` (a run can read a metric to gate a
- * branch). Tenant from the run scope; org-scoped reads project out internal
- * columns. Read-only in v1 — `track` (write) + `conversion-forward` are Phase 2/3.
+ * branch). Tenant from the run scope; org-scoped reads project through
+ * `toEventView` (ADR 0857 D2), the same allowlist the route uses. Read-only in v1 — `track` (write) + `conversion-forward` are Phase 2/3.
  */
 
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import type { FeatureSurface } from '../../host/featureSurfaces.js';
 import { requireString } from '../featureRoute.js';
-import { summarizeForReport, listEvents } from './analyticsService.js';
-
-const INTERNAL = new Set(['tenantId']);
-function project(o: object): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(o)) if (!INTERNAL.has(k)) out[k] = v;
-  return out;
-}
+import { summarizeForReport, listEvents, toEventView } from './analyticsService.js';
 
 export function buildAnalyticsSurface(scope: BundleScope): FeatureSurface {
   const tenantId = scope.tenantId;
@@ -27,7 +20,10 @@ export function buildAnalyticsSurface(scope: BundleScope): FeatureSurface {
     summary: async (args) => ({ summary: (await summarizeForReport(tenantId, requireString(args.orgId, 'orgId'))).summary }),
     events: async (args) => {
       const evs = await listEvents(tenantId, requireString(args.orgId, 'orgId'), 50);
-      return { events: evs.map(project) };
+      // ADR 0857 D2 — the route's declared shape, from the ONE projector. This
+      // used to strip only `tenantId`, so `visitorHash`/`clickIds`/`owx`/the
+      // experiment stamp reached every run after ANL-15 removed them from HTTP.
+      return { events: evs.map(toEventView) };
     },
   };
 }

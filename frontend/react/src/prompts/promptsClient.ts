@@ -47,15 +47,11 @@ export function clearPromptsSupportCache(): void { cachedSupport = null; }
 async function hostSupportsPrompts(): Promise<boolean> {
   if (cachedSupport !== null) return cachedSupport;
   try {
-    // Routes through the SDK's `client.discovery.capabilities()` per
-    // `sdk/PARITY.md` (Discovery row, always-on helper). The SDK handles
-    // auth headers + cookie credentials + the response-shape contract.
+    // `getCapabilities()` reads v2 and restates presence as `supported: true`
+    // (`capabilitiesV2Adapter.ts`), so this v1-shaped read stays correct.
     const caps = (await getCapabilities()) as {
       capabilities?: { prompts?: { supported?: boolean } };
     };
-    // REVERTED from the v2 presence test (ADR 0730 C.3). `getCapabilities()`
-    // reads the v1 document again — see the correction note in `runsClient.ts` —
-    // so the v1 shape is the one that is actually served here.
     cachedSupport = caps?.capabilities?.prompts?.supported === true;
   } catch {
     cachedSupport = false;

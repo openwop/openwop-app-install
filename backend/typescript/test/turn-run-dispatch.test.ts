@@ -122,6 +122,7 @@ describe('scope wiring — onRunDispatched reaches the tool (ADR 0324 composer)'
     let seen: unknown;
     registerFeatureAgentTool({
       contentTrust: 'trusted',
+      effect: 'read', // test probe (ADR 0784)
       def: { name: 'openwop:test.run-dispatch-probe', description: 'probe', inputSchema: { type: 'object' } },
       run: async (_input, scope: { onRunDispatched?: TurnRunDispatchSink }) => {
         seen = scope.onRunDispatched;
@@ -142,6 +143,7 @@ describe('scope wiring — onRunDispatched reaches the tool (ADR 0324 composer)'
     let seen: unknown = 'unset';
     registerFeatureAgentTool({
       contentTrust: 'trusted',
+      effect: 'read', // test probe (ADR 0784)
       def: { name: 'openwop:test.run-dispatch-probe-2', description: 'probe', inputSchema: { type: 'object' } },
       run: async (_input, scope: { onRunDispatched?: TurnRunDispatchSink }) => {
         seen = scope.onRunDispatched;

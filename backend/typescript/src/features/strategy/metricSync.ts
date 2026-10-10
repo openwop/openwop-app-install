@@ -23,6 +23,7 @@
  * (strategyService already imports projects + priority-matrix services).
  */
 import { createLogger } from '../../observability/logger.js';
+import { tenantMayUseFeature } from '../../host/tenantFeatureGate.js';
 import { quantizeMajor } from '../../host/currencyUnits.js';
 import { listDeals } from '../crm/crmEntitiesService.js';
 import { summarize } from '../analytics/analyticsService.js';
@@ -38,9 +39,25 @@ export interface MetricSyncResult {
   skipped: Array<{ strategyId: string; krId: string; reason: string }>;
 }
 
-async function readSource(tenantId: string, kr: StrategyKeyResult): Promise<{ value?: number; reason?: string }> {
+/**
+ * ADR 0820 §7 / G11 — the feature that OWNS each embedded source's data. A KR
+ * sync reads crm/analytics/commerce rows directly, so a tenant that may not use
+ * the source feature (toggle off, or the plan excludes its bundle) gets a SKIP
+ * for that KR: a refused source contributes nothing, and never a confirmed 0.
+ */
+export const METRIC_SOURCE_FEATURE: Readonly<Record<string, string>> = {
+  'crm-deal-total': 'crm',
+  'analytics-conversions': 'analytics',
+  'commerce-revenue': 'commerce',
+};
+
+async function readSource(tenantId: string, kr: StrategyKeyResult, mayUse: (featureId: string) => Promise<boolean>): Promise<{ value?: number; reason?: string }> {
   const src = kr.measure?.source;
   if (!src) return { reason: 'no_source' };
+  const sourceFeature = METRIC_SOURCE_FEATURE[src.kind];
+  if (sourceFeature && !(await mayUse(sourceFeature))) {
+    return { reason: `source_feature_unavailable: this KR reads ${sourceFeature} data, which this workspace's plan or settings do not include` };
+  }
   try {
     if (src.kind === 'crm-deal-total') {
       const deals = await listDeals(tenantId, src.orgId);
@@ -117,15 +134,47 @@ async function readSource(tenantId: string, kr: StrategyKeyResult): Promise<{ va
 }
 
 /** Sync every sourced KR across the tenant's ACTIVE shared strategies. */
-export async function syncSourcedKrs(tenantId: string, actor: string): Promise<MetricSyncResult> {
+export async function syncSourcedKrs(
+  tenantId: string,
+  actor: string,
+  /** ADR 0845 D1 — a human-started run's row access. Absent ⇒ the tenant-trusted
+   *  system sync (the cadence), unchanged. */
+  runAccess?: {
+    canWrite: (s: Strategy) => Promise<boolean>;
+    canRead: (s: Strategy) => Promise<boolean>;
+    /** ADR 0845 D8 — a human-started run reads a source org only if its starter can. */
+    canReadSourceOrg: (orgId: string) => Promise<boolean>;
+  },
+): Promise<MetricSyncResult> {
   const out: MetricSyncResult = { synced: [], skipped: [] };
+  // One toggle + entitlement read per source feature per sync (memoized).
+  const checks = new Map<string, Promise<boolean>>();
+  const mayUse = (featureId: string): Promise<boolean> => {
+    let hit = checks.get(featureId);
+    if (!hit) { hit = tenantMayUseFeature(featureId, tenantId); checks.set(featureId, hit); }
+    return hit;
+  };
   const strategies = (await listStrategies(tenantId, { includeArchived: false }))
     .filter((s: Strategy) => s.scope !== 'user' && s.status === 'active');
   for (const s of strategies) {
+    if (runAccess && !(await runAccess.canWrite(s))) {
+      // Readable-but-unwritable: say so (the run output IS the sync-health view).
+      // Unreadable: not this run's business — omitted, as every read verb does.
+      if (await runAccess.canRead(s)) {
+        for (const o of s.objectives) for (const kr of o.keyResults) {
+          if (kr.measure?.source) out.skipped.push({ strategyId: s.id, krId: kr.id, reason: 'not_writable' });
+        }
+      }
+      continue;
+    }
     for (const o of s.objectives) {
       for (const kr of o.keyResults) {
         if (!kr.measure?.source) continue;
-        const read = await readSource(tenantId, kr);
+        if (runAccess && !(await runAccess.canReadSourceOrg(kr.measure.source.orgId))) {
+          out.skipped.push({ strategyId: s.id, krId: kr.id, reason: 'source_not_readable' });
+          continue;
+        }
+        const read = await readSource(tenantId, kr, mayUse);
         if (read.value === undefined) {
           out.skipped.push({ strategyId: s.id, krId: kr.id, reason: read.reason ?? 'unknown' });
           continue;

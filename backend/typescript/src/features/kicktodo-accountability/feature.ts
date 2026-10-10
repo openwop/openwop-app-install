@@ -27,7 +27,7 @@ export const kicktodoAccountabilityFeature: BackendFeature = {
     id: 'kicktodo-accountability',
     label: 'KickTodo Accountability',
     description:
-      'Partner/circle/cohort/coach accountability: scope-explicit grants, shared circle conversations, immediate revocation (ADR 0419).',
+      'Partner/circle/cohort/coach accountability: scope-explicit grants, shared circle conversations, immediate revocation.',
     category: 'KickTodo',
     status: 'off',
     bucketUnit: 'tenant',
@@ -36,7 +36,7 @@ export const kicktodoAccountabilityFeature: BackendFeature = {
   dependsOn: ['kicktodo-core'],
   surface: { id: 'kicktodo-accountability', build: buildKicktodoAccountabilitySurface },
   requiredPacks: [
-    { name: 'feature.kicktodo.nodes', version: '1.30.0' },
-    { name: 'feature.kicktodo.agents', version: '1.9.0' },
+    { name: 'feature.kicktodo.nodes', version: '1.30.3' },
+    { name: 'vendor.openwop-app.kicktodo.agents', version: '1.9.1' },
   ],
 };

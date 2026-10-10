@@ -62,6 +62,20 @@
         }
       },
       {
+        "source": "/robots.txt",
+        "run": {
+          "serviceId": "openwop-app-backend",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/sitemap.xml",
+        "run": {
+          "serviceId": "openwop-app-backend",
+          "region": "us-central1"
+        }
+      },
+      {
         "source": "/agents",
         "run": {
           "serviceId": "openwop-app-backend",
@@ -161,6 +175,20 @@
       },
       {
         "source": "/prompts:render",
+        "run": {
+          "serviceId": "openwop-app-backend",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/connection-providers",
+        "run": {
+          "serviceId": "openwop-app-backend",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/connection-providers/**",
         "run": {
           "serviceId": "openwop-app-backend",
           "region": "us-central1"
@@ -270,16 +298,55 @@
           },
           {
             "key": "Content-Security-Policy",
-            "value": "default-src 'self'; connect-src 'self' https://*.run.app https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://packs.openwop.dev https://openwop.dev wss://generativelanguage.googleapis.com; media-src 'self' data: blob:; frame-src 'self' https://apis.google.com https://accounts.google.com https://*.firebaseapp.com; img-src 'self' data: blob: https://openwop.dev https://*.googleusercontent.com https://avatars.githubusercontent.com; font-src 'self' data: https://fonts.gstatic.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; script-src 'self' https://apis.google.com 'sha256-xaVS4T+p/HdK+b1MWA67YdBJ4IPqA5m6wG7UEXKwtAc='; base-uri 'self'; object-src 'none'; frame-ancestors 'none'"
+            "value": "default-src 'self'; connect-src 'self' https://*.run.app wss://*.run.app https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://packs.openwop.dev https://openwop.dev wss://generativelanguage.googleapis.com; media-src 'self' data: blob: https://openwop.dev; frame-src 'self' https://apis.google.com https://accounts.google.com https://*.firebaseapp.com; img-src 'self' data: blob: https://openwop.dev https://*.googleusercontent.com https://avatars.githubusercontent.com; font-src 'self' data: https://fonts.gstatic.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; script-src 'self' https://apis.google.com 'sha256-xaVS4T+p/HdK+b1MWA67YdBJ4IPqA5m6wG7UEXKwtAc='; base-uri 'self'; object-src 'none'; frame-ancestors 'none'"
           }
         ]
       },
       {
-        "source": "/api/v1/host/openwop-app/ui-plugin/packs/**/entry",
+        "source": "/api/host/openwop-app/ui-plugin/packs/**/entry",
         "headers": [
           {
             "key": "Content-Security-Policy",
             "value": "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src data: blob:"
+          },
+          {
+            "key": "X-Content-Type-Options",
+            "value": "nosniff"
+          }
+        ]
+      },
+      {
+        "source": "/api/host/ui-plugins/**/frame",
+        "headers": [
+          {
+            "key": "Content-Security-Policy",
+            "value": "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src data: blob:"
+          },
+          {
+            "key": "X-Content-Type-Options",
+            "value": "nosniff"
+          }
+        ]
+      },
+      {
+        "source": "/host/ui-plugins/**/frame",
+        "headers": [
+          {
+            "key": "Content-Security-Policy",
+            "value": "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src data: blob:"
+          },
+          {
+            "key": "X-Content-Type-Options",
+            "value": "nosniff"
+          }
+        ]
+      },
+      {
+        "source": "/api/host/openwop-app/ui-plugin/isolation-probe",
+        "headers": [
+          {
+            "key": "Content-Security-Policy",
+            "value": "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src data: blob:"
           },
           {
             "key": "X-Content-Type-Options",

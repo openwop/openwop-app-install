@@ -12,6 +12,7 @@
 import { describe, it, expect } from 'vitest';
 import { APPROVAL_KINDS, getRegisteredApprovalRedactorKinds } from '../src/host/approvalService.js';
 import { registerKicktodoAccountabilityCompliance } from '../src/features/kicktodo-accountability/compliance.js';
+import { registerClaudeCodeApprovalPolicy } from '../src/features/claude-code/approvalPolicy.js';
 
 describe('approval redactor completeness (APPR-5)', () => {
   it('every PendingApproval kind has a registered subject redactor', () => {
@@ -19,6 +20,7 @@ describe('approval redactor completeness (APPR-5)', () => {
     // boot, not at approvalService module load) — register it as production does.
     // Idempotent: the handlers are module-level constants that dedupe by reference.
     registerKicktodoAccountabilityCompliance();
+    registerClaudeCodeApprovalPolicy(); // ADR 0785 P4 — feature-owned, like kicktodo's
 
     const registered = new Set(getRegisteredApprovalRedactorKinds());
     const missing = APPROVAL_KINDS.filter((kind) => !registered.has(kind));

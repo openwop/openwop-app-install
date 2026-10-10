@@ -26,7 +26,7 @@ export const campaignsFeature: BackendFeature = {
     id: 'campaigns',
     label: 'Campaign Studio console',
     description:
-      'One console for the Campaign Studio chain — Briefs, Campaigns, Performance, and Intelligence in a single tabbed destination (ADR 0200). OFF ⇒ each appears as its own Marketing nav item; ON ⇒ they collapse into this console. (Distinct from the in-chat Campaign Studio canvas, ADR 0153.)',
+      'One console for the Campaign Studio chain — Briefs, Campaigns, Performance, and Intelligence in a single tabbed destination. OFF ⇒ each appears as its own Marketing nav item; ON ⇒ they collapse into this console. (Distinct from the in-chat Campaign Studio canvas.)',
     category: 'Marketing',
     status: 'off',
     bucketUnit: 'tenant',

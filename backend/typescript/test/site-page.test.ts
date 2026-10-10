@@ -38,12 +38,12 @@ afterAll(async () => { await new Promise<void>((res) => server.close(() => res()
 const j = async <T>(res: Response): Promise<T> => (await res.json()) as T;
 /** Super-admin (wildcard bearer) drives the CMS route family on the reserved org. */
 const cms = (method: string, path: string, body?: unknown) =>
-  fetch(`${BASE}/v1/host/openwop-app/cms/orgs/host-site${path}`, {
+  fetch(`${BASE}/host/openwop-app/cms/orgs/host-site${path}`, {
     method, headers: ADMIN, ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
   });
-const publicHome = () => fetch(`${BASE}/v1/host/openwop-app/public/host-site/pages/home`);
+const publicHome = () => fetch(`${BASE}/host/openwop-app/public/host-site/pages/home`);
 const seo = (method: string, pageId: string, body?: unknown) =>
-  fetch(`${BASE}/v1/host/openwop-app/publishing/orgs/host-site/pages/${encodeURIComponent(pageId)}/seo`, {
+  fetch(`${BASE}/host/openwop-app/publishing/orgs/host-site/pages/${encodeURIComponent(pageId)}/seo`, {
     method, headers: ADMIN, ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
   });
 const homeId = async (): Promise<string> => {
@@ -65,7 +65,7 @@ async function normalClient(): Promise<(method: string, path: string, body?: unk
     for (const ck of sc as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
     return res;
   };
-  const login = await call('POST', '/v1/host/openwop-app/test/login', { email: `sp-${n++}@x.test` });
+  const login = await call('POST', '/host/openwop-app/test/login', { email: `sp-${n++}@x.test` });
   expect(login.status).toBe(201);
   return call;
 }
@@ -145,10 +145,10 @@ describe('system home page — authority + isolation', () => {
     const call = await normalClient();
     // requireCmsScope: a non-superadmin gets the same 404 any foreign org yields,
     // so the reserved org's editability stays invisible in the CMS namespace.
-    expect((await call('GET', '/v1/host/openwop-app/cms/orgs/host-site/pages')).status).toBe(404);
-    expect((await call('POST', '/v1/host/openwop-app/cms/orgs/host-site/pages', { title: 'X' })).status).toBe(404);
+    expect((await call('GET', '/host/openwop-app/cms/orgs/host-site/pages')).status).toBe(404);
+    expect((await call('POST', '/host/openwop-app/cms/orgs/host-site/pages', { title: 'X' })).status).toBe(404);
     const pageId = await homeId();
-    expect((await call('GET', `/v1/host/openwop-app/publishing/orgs/host-site/pages/${encodeURIComponent(pageId)}/seo`)).status).toBe(404);
-    expect((await call('PUT', `/v1/host/openwop-app/publishing/orgs/host-site/pages/${encodeURIComponent(pageId)}/seo`, { metaTitle: 'X' })).status).toBe(404);
+    expect((await call('GET', `/host/openwop-app/publishing/orgs/host-site/pages/${encodeURIComponent(pageId)}/seo`)).status).toBe(404);
+    expect((await call('PUT', `/host/openwop-app/publishing/orgs/host-site/pages/${encodeURIComponent(pageId)}/seo`, { metaTitle: 'X' })).status).toBe(404);
   });
 });

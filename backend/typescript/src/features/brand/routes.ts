@@ -141,7 +141,7 @@ async function readableBrands(req: Request, orgId?: string): Promise<Brand[]> {
 
 export function registerBrandRoutes(deps: RouteDeps): void {
   const { app } = deps;
-  const BASE = '/v1/host/openwop-app/brand';
+  const BASE = '/host/openwop-app/brand';
 
   // ── static channel vocabulary (any authenticated member) ──
   app.get(`${BASE}/channels`, (_req, res) => {

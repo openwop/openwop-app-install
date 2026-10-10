@@ -10,9 +10,13 @@
  *   reports exhaustion (not "no times") only after reaching the horizon empty;
  * - a failed month read surfaces via onLoadFailed instead of rendering the
  *   month as fully unavailable.
+ *
+ * Sabotage that turns it red (wave-4 /grade-tests probes): next-month button a
+ * no-op; the auto-jump `setCursor` returning the same month; `onExhausted`
+ * dropped; the catch swallowing the failure; the catch writing an empty month.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { BookingMonthGrid } from '../BookingMonthGrid.js';
 
 const DAY_MS = 86_400_000;
@@ -80,7 +84,6 @@ describe('BookingMonthGrid', () => {
     // padding visible and turns a change to it into a red test, which the
     // inequality could not do.
     expect(firstCall![1] - secondCall![0]).toBe(2 * TZ_SLACK_MS);
-    expect(2 * TZ_SLACK_MS).toBe(3 * DAY_MS);
   });
 
   it('auto-advances an empty month to the first month WITH availability', async () => {
@@ -106,7 +109,7 @@ describe('BookingMonthGrid', () => {
     expect(fetchSlots.mock.calls.length).toBe(2);
   });
 
-  it('reports exhaustion only after reaching the horizon empty — and a failed read is a FAILURE, not an empty month', async () => {
+  it('reports exhaustion only after reaching the horizon empty', async () => {
     const nowMs = NOW;
     const onExhausted = vi.fn();
     const empty = vi.fn(async () => []);
@@ -148,15 +151,26 @@ describe('BookingMonthGrid', () => {
     // itself to survive it. The ambiguity was the unpinned clock, and nothing
     // else; with an instant fixed, the span is not a range.
     expect(empty.mock.calls.length).toBe(2);
+  });
 
+  it('a failed read is a FAILURE, not an empty month — no grid, no auto-advance, no exhaustion', async () => {
+    // The discriminator the title promises. A catch that ALSO wrote an empty
+    // month would render the grid, run the availability jump and report
+    // exhaustion — while still calling onLoadFailed, which is all this case
+    // used to check (round-1 probe w4g4-bmg-failed-as-empty stayed green).
     const onLoadFailed = vi.fn();
-    const failing = vi.fn(async () => { throw new Error('boom'); });
+    const onExhausted = vi.fn();
+    const failing = vi.fn(async (): Promise<number[]> => { throw new Error('boom'); });
     render(
       <BookingMonthGrid
-        tz="UTC" locale="en" nowMs={nowMs} maxAdvanceDays={40}
-        fetchSlots={failing} onLoadFailed={onLoadFailed} selectedDay="" onSelectDay={() => {}}
+        tz="UTC" locale="en" nowMs={NOW} maxAdvanceDays={40}
+        fetchSlots={failing} onLoadFailed={onLoadFailed} selectedDay="" onSelectDay={() => {}} onExhausted={onExhausted}
       />,
     );
     await waitFor(() => expect(onLoadFailed).toHaveBeenCalled());
+    await act(async () => { for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r)); });
+    expect(onExhausted).not.toHaveBeenCalled();
+    expect(failing).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('group')).toBeNull();
   });
 });

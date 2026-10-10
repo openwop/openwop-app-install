@@ -12,6 +12,7 @@
 
 import { createLogger } from '../observability/logger.js';
 import { getRunArtifact } from './runArtifactStore.js';
+import { OpenwopError } from '../types.js';
 import { createCanvasForTenant, type CanvasRecordView } from './canvasSurface.js';
 import type { Subject } from './subject.js';
 
@@ -25,7 +26,18 @@ const log = createLogger('host.canvasFromArtifact');
 export async function seedCanvasFromArtifact(
   tenantId: string,
   artifactKey: string,
-  opts?: { ownerSubject?: Subject; projectId?: string },
+  opts?: {
+    ownerSubject?: Subject;
+    projectId?: string;
+    /** ADR 0835 D3 — the canvas type the caller's door owns. An artifact of
+     *  another type is absent to that door (null): without the pin, the slides
+     *  route seeded an app-builder canvas past app-builder's own gates. */
+    canvasTypeId?: string;
+    /** ADR 0835 D3 — the type's save validator. A run artifact is model output;
+     *  its schema leaves component props open, so this is the closed-world
+     *  check that keeps it from becoming durable state the editor would refuse. */
+    validate?: (state: Record<string, unknown>) => { errors: { path: string; message: string }[] };
+  },
 ): Promise<CanvasRecordView | null> {
   const record = await getRunArtifact(artifactKey);
   // Cross-tenant / absent ⇒ null (no existence leak).
@@ -35,6 +47,10 @@ export async function seedCanvasFromArtifact(
     log.debug('seed_skip_non_canvas', { artifactKey, artifactTypeId: canvasTypeId ?? null });
     return null;
   }
+  if (opts?.canvasTypeId && canvasTypeId !== opts.canvasTypeId) {
+    log.debug('seed_skip_type_mismatch', { artifactKey, artifactTypeId: canvasTypeId, expected: opts.canvasTypeId });
+    return null;
+  }
   let initialState: Record<string, unknown>;
   try {
     const parsed: unknown = JSON.parse(record.content);
@@ -42,6 +58,14 @@ export async function seedCanvasFromArtifact(
     initialState = parsed as Record<string, unknown>;
   } catch {
     return null;
+  }
+
+  if (opts?.validate) {
+    const errors = opts.validate(initialState).errors;
+    if (errors.length) {
+      log.warn('seed_rejected_by_validator', { artifactKey, canvasTypeId, errorCount: errors.length, first: errors[0]!.message });
+      throw new OpenwopError('validation_error', `this artifact is not a valid ${canvasTypeId} document: ${errors[0]!.message}`, 422, { errors });
+    }
   }
 
   // Idempotency: a deterministic key derived from the artifact key, so re-opening

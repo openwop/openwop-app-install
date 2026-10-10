@@ -9,6 +9,7 @@
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import type { FeatureSurface } from '../../host/featureSurfaces.js';
 import {
+  assertAgentAuthorWrite,
   buildAgentAuthorCatalog,
   validateAgentDraft,
   persistAgentDraft,
@@ -32,7 +33,12 @@ export function buildAgentAuthorSurface(scope: BundleScope): FeatureSurface {
     /** Validate AND create through the SHARED wizard path (`createRosterEntry`
      *  — deterministic id, duplicate-409, CAS). The agent lands DISABLED for
      *  human review-and-enable in its workspace. */
-    persistDraft: async (args) => persistAgentDraft((args ?? {}).draft, { tenantId: scope.tenantId }),
+    persistDraft: async (args) => {
+      // ADR 0775 D7 (architect B1) — the route's write authority, and a human:
+      // a headless run can no longer create roster agents.
+      await assertAgentAuthorWrite(scope);
+      return persistAgentDraft((args ?? {}).draft, { tenantId: scope.tenantId });
+    },
 
     /** OQ1 draft mode: validate, then STASH for the wizard prefill instead of
      *  creating. Requires an acting user (the stash is subject-keyed) — a

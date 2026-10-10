@@ -20,6 +20,7 @@ import { ViewToggle, useViewMode } from '../../ui/ViewToggle.js';
 import { TextField } from '../../ui/Field.js';
 import { toast } from '../../ui/toast.js';
 import { BriefcaseIcon } from '../../ui/icons/index.js';
+import { NextActivity } from './NextActivity.js';
 import {
   createDeal,
   listCompanies,
@@ -201,6 +202,12 @@ export function DealsTab({ orgId }: Props): JSX.Element {
     // `revertedErr`: say "reverted", not just "failed".
     void moveDeal(orgId, dealId, toStageId).then(load).catch((e) => { revertedErr(e); load(); });
   }, [orgId, load]);
+  // ADR 0837 D8 — each card's next activity (or the explicit "none" / overdue marker).
+  const dealById = useMemo(() => new Map((rows ?? []).map((d) => [d.dealId, d])), [rows]);
+  const cardExtra = useCallback((card: KanbanCard) => {
+    const d = dealById.get(card.id);
+    return d ? <NextActivity deal={d} /> : null;
+  }, [dealById]);
   const columnFooter = useCallback((_col: { id: string }, cards: KanbanCard[]) => {
     // R2 CC-SP-3 — never one blind total across currencies.
     const colDeals = (rows ?? []).filter((d) => cards.some((c) => c.id === d.dealId));
@@ -234,6 +241,8 @@ export function DealsTab({ orgId }: Props): JSX.Element {
     { key: 'stage', header: t('colStage'), render: (d) => (
       <DealStageSelect orgId={orgId} deal={d} stages={pipeline?.stages ?? []} onMoved={load} />
     ) },
+    // ADR 0837 D8 — the next activity is a column of the table view too.
+    { key: 'next', header: t('colNextActivity'), render: (d) => (d.status === 'won' || d.status === 'lost' ? <span className="muted">—</span> : <NextActivity deal={d} />) },
     // Rule 12 — delete moved OFF the collection cell to the deal's detail page.
   ], [orgId, pipeline, load, t]);
 
@@ -320,7 +329,7 @@ export function DealsTab({ orgId }: Props): JSX.Element {
           );
         if (viewMode === 'grid' && board) {
           return rows === null ? <SkeletonRows rows={3} columns={[180, 180, 180]} /> : (visibleDeals ?? []).length === 0 ? emptyState : (
-            <KanbanBoardView board={board} cards={boardCards} onMoveCard={moveFromBoard} columnFooter={columnFooter} />
+            <KanbanBoardView board={board} cards={boardCards} onMoveCard={moveFromBoard} columnFooter={columnFooter} cardExtra={cardExtra} />
           );
         }
         return (

@@ -19,15 +19,17 @@ import type { EntityRecord, EntityTypeRecord } from '../entities/entitiesService
 import { getEntityType, listSystemEntities, queryEntities } from '../entities/entitiesService.js';
 import type { FieldSpec } from '../../host/customFields/index.js';
 import {
-  AGGREGATES, METRIC_FILTER_OPS, KERNEL_METRIC_TYPES, TIME_BUCKETS,
+  AGGREGATES, METRIC_FILTER_OPS, KERNEL_METRIC_TYPES, KERNEL_METRIC_ROW_FILTER, TIME_BUCKETS,
+  type KernelMetricType,
   type Aggregate, type MetricDef, type MetricFilter, type MetricSeriesPoint,
   type RunMetricParams, type RunMetricResult, type TimeBucket,
 } from './metricTypes.js';
 import { listStoredMetrics, getStoredMetric, metrics as metricStore } from './metricStore.js';
 import { systemMetricsFor, isSystemMetricId } from './systemMetrics.js';
+import { filterVisibleCrmKernelRows } from '../../host/crmRecordVisibility.js';
 
 /** Aggregation reads at most this many rows; results carry no silent cap — a
- *  truncated run is reported via `totalRows` vs the fetched ceiling. */
+ *  truncated run is reported via `truncated` (the fetch hit this ceiling). */
 const MAX_ROWS = 5000;
 /** Grouped output is capped WELL under the chart renderer's 1000-point cap. */
 const MAX_GROUPS = 100;
@@ -220,7 +222,16 @@ function bucketKey(iso: string, bucket: TimeBucket): string {
 
 /** Run a metric with bounded caller params (the ONLY run-time inputs a model
  *  or route may pass — never a filter AST). */
-export async function runMetric(tenantId: string, metricId: string, params: RunMetricParams): Promise<RunMetricResult> {
+export async function runMetric(
+  tenantId: string,
+  metricId: string,
+  params: RunMetricParams,
+  /** ADR 0846 D2 — who the rows are read AS. REQUIRED, so no caller can reach the
+   *  aggregate without deciding: a human caller passes their id and gets only rows
+   *  the owning feature would show them; `undefined` is a system read (unfiltered,
+   *  the `filterVisibleCrmRecords` contract). */
+  viewer: string | undefined,
+): Promise<RunMetricResult> {
   const metric = await getMetric(tenantId, metricId);
   if (!metric) throw new OpenwopError('not_found', 'Metric not found.', 404, { metricId });
   // Param validation FIRST — a bad request is a 422 even when the tenant has
@@ -251,6 +262,13 @@ export async function runMetric(tenantId: string, metricId: string, params: RunM
   if (params.orgId && type.fields.some((f) => f.key === 'org_id')) {
     rows = rows.filter((r) => r.values.org_id === params.orgId);
   }
+  // ADR 0846 D2 — the row-level read filter of the owning feature, per the closed table.
+  if (KERNEL_METRIC_ROW_FILTER[type.name as KernelMetricType] === 'crm-visibility') {
+    rows = await filterVisibleCrmKernelRows({ tenantId, typeName: type.name, callerSubject: viewer, rows });
+  }
+  // ADR 0846 grade-code H1 — `totalRows` counts only what this caller may see in
+  // this org; the pre-filter count would leak the tenant-wide row count.
+  const totalRows = rows.length;
   for (const f of metric.filters ?? []) rows = rows.filter((r) => matches(r.values, f));
   if (metric.timeField && (params.since || params.until)) {
     const tf = metric.timeField;
@@ -299,7 +317,7 @@ export async function runMetric(tenantId: string, metricId: string, params: RunM
 
   return {
     metricId, title: metric.title, aggregate: metric.aggregate, entityType: metric.entityType,
-    points, totalRows: totalFetched,
+    points, totalRows, truncated: totalFetched >= MAX_ROWS,
     ...(groupBy ? { groupedBy: groupBy } : {}),
     ...(params.bucket ? { bucket: params.bucket } : {}),
   };

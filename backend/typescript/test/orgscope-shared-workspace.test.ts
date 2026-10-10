@@ -84,29 +84,29 @@ function client() {
 
 let n = 0;
 const ORG_SCOPED = (orgId: string): string =>
-  `/v1/host/openwop-app/forms/orgs/${encodeURIComponent(orgId)}/forms`;
+  `/host/openwop-app/forms/orgs/${encodeURIComponent(orgId)}/forms`;
 
 /** Sign in the production way — no `tenantId` override, so the caller lands in their
  *  own `user:` personal tenant exactly as Firebase OIDC would leave them. */
 async function signIn(c: ReturnType<typeof client>): Promise<void> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `os-${Date.now()}-${n++}@acme.test` });
+  const r = await c.post('/host/openwop-app/test/login', { email: `os-${Date.now()}-${n++}@acme.test` });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
 }
 
 /** A REAL `ws:` shared workspace, created + owned + switched into through the routes.
  *  The switch is what makes active !== personal, which is the whole point. */
 async function sharedWorkspace(c: ReturnType<typeof client>): Promise<string> {
-  const ws = await c.post('/v1/host/openwop-app/workspaces', { name: `WS ${n++}` });
+  const ws = await c.post('/host/openwop-app/workspaces', { name: `WS ${n++}` });
   expect(ws.status, JSON.stringify(ws.body)).toBe(201);
   expect(ws.body.workspaceId, 'must be a real shared workspace, not a personal tenant').toMatch(/^ws:/);
-  const sw = await c.post(`/v1/host/openwop-app/workspaces/${encodeURIComponent(ws.body.workspaceId)}/switch`);
+  const sw = await c.post(`/host/openwop-app/workspaces/${encodeURIComponent(ws.body.workspaceId)}/switch`);
   expect(sw.status, JSON.stringify(sw.body)).toBe(200);
   expect(sw.body.active).toBe(ws.body.workspaceId);
   return ws.body.workspaceId;
 }
 
 async function createOrg(c: ReturnType<typeof client>): Promise<string> {
-  const org = await c.post('/v1/host/openwop-app/orgs', { name: `Org ${n++}` });
+  const org = await c.post('/host/openwop-app/orgs', { name: `Org ${n++}` });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   const orgId = org.body.org?.orgId ?? org.body.orgId;
   expect(orgId, 'org creation must yield an id').toBeTruthy();
@@ -226,14 +226,14 @@ describe('ADR 0508 — org-scoped features inside a real shared workspace', () =
     await sharedWorkspace(c);
     const orgId = await createOrg(c);
 
-    const doc = await c.post(`/v1/host/openwop-app/documents/orgs/${encodeURIComponent(orgId)}/documents`, {
+    const doc = await c.post(`/host/openwop-app/documents/orgs/${encodeURIComponent(orgId)}/documents`, {
       title: 'Locate me', kind: 'doc', format: 'markdown',
     });
     expect(doc.status, JSON.stringify(doc.body)).toBe(201);
     const documentId = doc.body.documentId ?? doc.body.document?.documentId;
     expect(documentId, 'document creation must yield an id').toBeTruthy();
 
-    const located = await c.get(`/v1/host/openwop-app/documents/locate/${encodeURIComponent(documentId)}`);
+    const located = await c.get(`/host/openwop-app/documents/locate/${encodeURIComponent(documentId)}`);
     expect(
       located.status,
       `a document created in this workspace must be locatable from it; got ${located.status} ${JSON.stringify(located.body)}`,

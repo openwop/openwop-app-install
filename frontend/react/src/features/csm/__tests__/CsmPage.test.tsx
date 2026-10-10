@@ -4,114 +4,111 @@
  * name as a Link into /crm/companies/:id, an unlinked account shows "Not
  * linked" — and the healthFactors breakdown + "computed <relative time>"
  * stamp when present.
+ *
+ * Sabotage-witnessed (w7 grade-tests): `if (csm.enabled) load()` → `load()`
+ * reds the not-enabled leg; dropping the `Set` dedupe of crmRef orgs reds the
+ * batching leg; ignoring `?health=` reds the deep-link leg (ADR 0582 §14).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import type * as C from '../csmClient.js';
+import type { Account } from '../csmClient.js';
+import { makeFeatureAccess, type FeatureAccessResult } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 
-const access = vi.hoisted(() => ({ value: { enabled: false, loading: false, variant: undefined as string | undefined } }));
-vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
-  useFeatureAccess: () => access.value,
+// Read lazily at call time, so the module-scope binding is initialised first.
+let accessValue: FeatureAccessResult = makeFeatureAccess();
+vi.mock('../../../featureToggles/FeatureAccessContext.js', async (orig) => ({
+  ...(await orig<typeof import('../../../featureToggles/FeatureAccessContext.js')>()),
+  useFeatureAccess: () => accessValue,
 }));
 
-const listAccounts = vi.hoisted(() => vi.fn(async () => [] as unknown[]));
-const listOrgs = vi.hoisted(() => vi.fn(async () => [{ orgId: 'org-1', name: 'Org One' }]));
-const listCrmCompanies = vi.hoisted(() => vi.fn(async () => [{ companyId: 'cmp:1', name: 'Acme Corp' }]));
-vi.mock('../csmClient.js', () => ({
-  listAccounts,
-  listOrgs,
-  listCrmCompanies,
-  createAccount: vi.fn(),
-  deleteAccount: vi.fn(),
-  updateAccount: vi.fn(),
+const api = vi.hoisted(() => ({
+  listAccounts: vi.fn<typeof C.listAccounts>(),
+  listOrgs: vi.fn<typeof C.listOrgs>(),
+  listCrmCompanies: vi.fn<typeof C.listCrmCompanies>(),
+  createAccount: vi.fn<typeof C.createAccount>(),
+  deleteAccount: vi.fn<typeof C.deleteAccount>(),
+  updateAccount: vi.fn<typeof C.updateAccount>(),
+}));
+// Partial mock: every fetching export is replaced, and the REAL
+// `CsmRequestError` survives for the page's `instanceof` map (CSMWF-11).
+vi.mock('../csmClient.js', async (orig) => ({
+  ...(await orig<typeof import('../csmClient.js')>()),
+  ...api,
 }));
 
 import { CsmPage } from '../CsmPage.js';
 
+const acct = (over: Partial<Account> & Pick<Account, 'accountId' | 'name'>): Account => ({
+  tenantId: 't1', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', ...over,
+});
+
 const renderPage = () => render(<MemoryRouter><CsmPage /></MemoryRouter>);
 
 beforeEach(() => {
-  access.value = { enabled: false, loading: false, variant: undefined };
-  listAccounts.mockClear();
-  listOrgs.mockClear();
-  listCrmCompanies.mockClear();
+  vi.resetAllMocks();
+  accessValue = makeFeatureAccess({ enabled: false });
+  api.listAccounts.mockResolvedValue([]);
+  api.listOrgs.mockResolvedValue([{ orgId: 'org-1', name: 'Org One' }]);
+  api.listCrmCompanies.mockResolvedValue([
+    { companyId: 'cmp:1', name: 'Acme Corp' },
+    { companyId: 'cmp:2', name: 'Globex' },
+  ]);
 });
 afterEach(() => cleanup());
 
 describe('CsmPage — access gate', () => {
   it('renders a skeleton while loading', () => {
-    access.value = { enabled: false, loading: true, variant: undefined };
+    accessValue = makeFeatureAccess({ enabled: false, loading: true });
     const { container } = renderPage();
-    expect(container.querySelector('.skeleton, [class*="skeleton"]')).toBeTruthy();
+    expect(container.querySelector('.skeleton, [class*="skeleton"]')).not.toBeNull();
+    // Loading is not the disabled state.
+    expect(screen.queryByText('CSM is not enabled')).toBeNull();
   });
 
   it('shows the not-enabled StateCard when disabled — the FE is never the authority gate', async () => {
-    access.value = { enabled: false, loading: false, variant: undefined };
     renderPage();
     expect(await screen.findByText('CSM is not enabled')).toBeTruthy();
-    expect(listAccounts).not.toHaveBeenCalled();
-  });
-
-  it('loads accounts once enabled', async () => {
-    access.value = { enabled: true, loading: false, variant: undefined };
-    renderPage();
-    await waitFor(() => expect(listAccounts).toHaveBeenCalled());
+    expect(api.listAccounts).not.toHaveBeenCalled();
   });
 });
 
 describe('CsmPage — ADR 0212 crmRef + healthFactors display', () => {
   beforeEach(() => {
-    access.value = { enabled: true, loading: false, variant: undefined };
+    accessValue = makeFeatureAccess();
   });
 
   it('shows the linked company name as a Link for an account with crmRef', async () => {
-    listAccounts.mockResolvedValueOnce([
-      {
-        accountId: 'csm:1',
-        tenantId: 't1',
-        name: 'Linked Co Account',
-        healthScore: 80,
-        crmRef: { orgId: 'org-1', companyId: 'cmp:1' },
-        createdAt: '2026-01-01T00:00:00.000Z',
-        updatedAt: '2026-01-01T00:00:00.000Z',
-      },
+    api.listAccounts.mockResolvedValueOnce([
+      acct({ accountId: 'csm:1', name: 'Linked Co Account', healthScore: 80, crmRef: { orgId: 'org-1', companyId: 'cmp:1' } }),
+      acct({ accountId: 'csm:4', name: 'Second Linked Account', healthScore: 75, crmRef: { orgId: 'org-1', companyId: 'cmp:2' } }),
     ]);
     renderPage();
     const link = await screen.findByRole('link', { name: 'Acme Corp' });
     expect(link.getAttribute('href')).toBe('/crm/companies/cmp%3A1?org=org-1');
-    await waitFor(() => expect(listCrmCompanies).toHaveBeenCalledWith('org-1'));
-    // Batched — ONE call per distinct org, not per row.
-    expect(listCrmCompanies).toHaveBeenCalledTimes(1);
+    expect(await screen.findByRole('link', { name: 'Globex' })).toBeTruthy();
+    expect(api.listCrmCompanies).toHaveBeenCalledWith('org-1');
+    // Batched — ONE call per distinct org, not per row (two rows share org-1).
+    expect(api.listCrmCompanies).toHaveBeenCalledTimes(1);
   });
 
   it('shows "Not linked" for an account with no crmRef', async () => {
-    listAccounts.mockResolvedValueOnce([
-      {
-        accountId: 'csm:2',
-        tenantId: 't1',
-        name: 'Unlinked Account',
-        healthScore: 50,
-        createdAt: '2026-01-01T00:00:00.000Z',
-        updatedAt: '2026-01-01T00:00:00.000Z',
-      },
-    ]);
+    api.listAccounts.mockResolvedValueOnce([acct({ accountId: 'csm:2', name: 'Unlinked Account', healthScore: 50 })]);
     renderPage();
     expect(await screen.findByText('Not linked')).toBeTruthy();
-    expect(listCrmCompanies).not.toHaveBeenCalled();
+    expect(api.listCrmCompanies).not.toHaveBeenCalled();
   });
 
   it('shows the healthFactors breakdown + a computed-at stamp when present', async () => {
-    listAccounts.mockResolvedValueOnce([
-      {
+    api.listAccounts.mockResolvedValueOnce([
+      acct({
         accountId: 'csm:3',
-        tenantId: 't1',
         name: 'Computed Account',
         healthScore: 62,
         healthFactors: [{ factor: 'openDeals', weight: 8, value: 2 }],
         healthComputedAt: new Date(Date.now() - 60_000).toISOString(),
-        createdAt: '2026-01-01T00:00:00.000Z',
-        updatedAt: '2026-01-01T00:00:00.000Z',
-      },
+      }),
     ]);
     renderPage();
     expect(await screen.findByText('1 factor')).toBeTruthy();
@@ -133,10 +130,10 @@ describe('CsmPage — the ?health= deep link is honoured', () => {
     render(<MemoryRouter initialEntries={[path]}><CsmPage /></MemoryRouter>);
 
   beforeEach(() => {
-    access.value = { enabled: true, loading: false, variant: undefined };
-    listAccounts.mockImplementation(async () => [
-      { accountId: 'a1', name: 'Unmeasured Co', orgId: 'org-1' },              // no healthScore ⇒ unscored
-      { accountId: 'a2', name: 'Healthy Co', orgId: 'org-1', healthScore: 95 },
+    accessValue = makeFeatureAccess();
+    api.listAccounts.mockResolvedValue([
+      acct({ accountId: 'a1', name: 'Unmeasured Co' }),              // no healthScore ⇒ unscored
+      acct({ accountId: 'a2', name: 'Healthy Co', healthScore: 95 }),
     ]);
   });
 

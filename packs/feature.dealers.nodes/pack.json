@@ -1,11 +1,12 @@
 {
   "name": "feature.dealers.nodes",
-  "version": "1.0.0",
+  "version": "1.0.1",
+  "kind": "node",
   "description": "Dealer Network node pack — three READ nodes over the ctx.features.dealers surface: list dealers, list outlets, list deal registrations. PLUS one GOVERNED WRITE node: approve-registration, which enforces the run OWNER's host:dealers:manage scope (system runs denied) and is kept OUT of the advisory agent's allowlist. NOTE (CFP-1 / D9): the app's actual governed registration write rides the SHARED reviews approval gate (kind: dealer-registration) — no built-in workflow ignites this node; it stays a composable catalog entry for a builder-authored chain. All nodes are role:\"action\", tenant+org-guarded (CTI-1); tenantId comes from the run scope, never node args.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "dealers", "prm", "channel", "crm"],
-  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "engines": { "openwop": ">=1.0.0 <3.0.0" },
   "nodes": [
     {
       "typeId": "feature.dealers.nodes.list-dealers",

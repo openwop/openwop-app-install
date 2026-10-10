@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.market-intel-discovery/1.0.0/ai-discovery.input.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.market-intel-discovery/1.0.2/ai-discovery.input.json",
   "title": "MarketIntelAiDiscoveryInput",
   "type": "object",
   "required": ["topic"],

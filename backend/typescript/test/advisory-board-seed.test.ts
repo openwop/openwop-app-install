@@ -15,7 +15,9 @@ import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { __hostExtStorage } from '../src/host/hostExtPersistence.js';
-import { seedAdvisoryBoards, countAdvisors, clearAdvisoryBoards } from '../src/host/advisoryBoardSeed.js';
+import { seedAdvisoryBoards, countAdvisors, clearAdvisoryBoards, mergeDuplicateSeededAdvisors } from '../src/host/advisoryBoardSeed.js';
+import { createRosterEntry, listRoster } from '../src/host/rosterService.js';
+import { createBoard } from '../src/features/advisory-board/service.js';
 import { exampleDataStatus } from '../src/host/exampleDataSeeders.js';
 import { listBoards } from '../src/features/advisory-board/service.js';
 import { resolveAgentKnowledgeRetrieve } from '../src/host/agentKnowledgeComposition.js';
@@ -55,9 +57,9 @@ function client() {
 async function ownerTenant(): Promise<{ tenantId: string; userId: string }> {
   const tenantId = `org:seed-${Date.now()}-${n++}`;
   const c = client();
-  const login = await c.post('/v1/host/openwop-app/test/login', { email: `seed-${Date.now()}-${n++}@acme.test`, tenantId });
+  const login = await c.post('/host/openwop-app/test/login', { email: `seed-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(login.status, JSON.stringify(login.body)).toBe(201);
-  const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status).toBe(201);
   return { tenantId, userId: login.body.user.userId };
 }
@@ -128,5 +130,86 @@ describe('advisory-board seed', () => {
     expect(r.skippedToggleOff).toBe(true);
     expect(r.advisorsCreated).toBe(0);
     if (d) await saveConfig({ ...d, status: 'on' }, 'test');
+  });
+});
+
+describe('duplicate seeded advisors are merged on heal', () => {
+  // Seen on production 2026-10-02: the board editor listed all eight advisors
+  // TWICE, and convening a board found none of them. A reseed before the seeder
+  // matched the legacy agent-id form minted a second roster row per advisor.
+  const advisorRows = async (tenantId: string) =>
+    (await listRoster(tenantId)).filter((e) => e.agentRef.agentId.includes('advisor-'));
+
+  /** Reproduce the legacy state: a twin row per advisor on the tenant-scoped id.
+   *  Planted as RAW rows — `createRosterEntry` refuses a second member with the
+   *  same persona today, which is exactly why these can only be old data. */
+  async function plantLegacyTwins(tenantId: string): Promise<string[]> {
+    const twins: string[] = [];
+    for (const row of await advisorRows(tenantId)) {
+      const slug = row.agentRef.agentId.replace('user.advisor-', '');
+      const rosterId = `${row.rosterId}-legacy`;
+      const twin = { ...row, rosterId, agentRef: { ...row.agentRef, agentId: `user.${tenantId}.advisor-${slug}` }, createdAt: new Date(Date.parse(row.createdAt) - 60_000).toISOString() };
+      await __hostExtStorage()!.kvSet(`hostext:roster:${tenantId}:${rosterId}`, JSON.stringify(twin));
+      twins.push(rosterId);
+    }
+    return twins;
+  }
+
+  it('leaves ONE row per advisor and keeps every board seat', async () => {
+    const { tenantId } = await ownerTenant();
+    await seedAdvisoryBoards(tenantId, __hostExtStorage()!);
+    const originals = (await advisorRows(tenantId)).map((r) => r.rosterId);
+    const twins = await plantLegacyTwins(tenantId);
+    expect((await advisorRows(tenantId)).length).toBe(originals.length * 2);
+
+    // A user board seated on the TWIN rows — the case that could lose its seats.
+    const orgId = (await listBoards(tenantId, undefined))[0]!.orgId;
+    await createBoard(tenantId, orgId, 'user-1', { name: 'Directors', handle: 'directors', advisors: twins.slice(0, 4), visibility: 'shared', personaKind: 'original' });
+
+    const result = await seedAdvisoryBoards(tenantId, __hostExtStorage()!, { heal: true });
+    expect(result.duplicatesMerged).toBe(originals.length);
+
+    const after = await advisorRows(tenantId);
+    expect(after.length).toBe(originals.length);
+    expect(new Set(after.map((r) => r.persona)).size).toBe(originals.length);
+
+    const live = new Set(after.map((r) => r.rosterId));
+    for (const b of await listBoards(tenantId, undefined)) {
+      expect(b.advisors.length, `${b.handle} lost a seat`).toBe(4);
+      for (const id of b.advisors) expect(live.has(id), `${b.handle} seats a deleted row`).toBe(true);
+      expect(new Set(b.advisors).size, `${b.handle} seats an advisor twice`).toBe(b.advisors.length);
+    }
+  });
+
+  it('is a no-op on a clean tenant, and only runs on the heal path', async () => {
+    const { tenantId } = await ownerTenant();
+    await seedAdvisoryBoards(tenantId, __hostExtStorage()!);
+    expect(await mergeDuplicateSeededAdvisors(tenantId, __hostExtStorage()!)).toBe(0);
+    const before = (await advisorRows(tenantId)).length;
+    await plantLegacyTwins(tenantId);
+    const plain = await seedAdvisoryBoards(tenantId, __hostExtStorage()!);
+    expect(plain.duplicatesMerged).toBeUndefined();
+    expect((await advisorRows(tenantId)).length).toBe(before * 2); // an ordinary seed deletes nothing
+  });
+
+  it('recognises a seeded twin under an agent id form it has never seen, by its content', async () => {
+    const { tenantId } = await ownerTenant();
+    await seedAdvisoryBoards(tenantId, __hostExtStorage()!);
+    const row = (await advisorRows(tenantId))[0]!;
+    const twin = { ...row, rosterId: `${row.rosterId}-odd`, agentRef: { ...row.agentRef, agentId: 'user.something-else-entirely' } };
+    await __hostExtStorage()!.kvSet(`hostext:roster:${tenantId}:${twin.rosterId}`, JSON.stringify(twin));
+    expect(await mergeDuplicateSeededAdvisors(tenantId, __hostExtStorage()!)).toBe(1);
+    expect((await listRoster(tenantId)).filter((e) => e.persona === row.persona).length).toBe(1);
+  });
+
+  it('never touches an advisor the user authored', async () => {
+    const { tenantId } = await ownerTenant();
+    await seedAdvisoryBoards(tenantId, __hostExtStorage()!);
+    const own = await createRosterEntry({
+      tenantId, persona: 'My Own Advisor', agentRef: { agentId: 'user.my-own-advisor', version: '1.0.0' },
+      label: 'mine', description: 'authored by the user', autonomyLevel: 'review', roleKey: 'advisor',
+    });
+    expect(await mergeDuplicateSeededAdvisors(tenantId, __hostExtStorage()!)).toBe(0);
+    expect((await listRoster(tenantId)).some((e) => e.rosterId === own.rosterId)).toBe(true);
   });
 });

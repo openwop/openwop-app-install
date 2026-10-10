@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.kicktodo.nodes/1.30.3/create-candidate.input.json",
+  "type": "object",
+  "properties": {
+    "createdBy": {
+      "type": "string"
+    },
+    "topic": {
+      "type": "string"
+    },
+    "audience": {
+      "type": "string"
+    },
+    "transformation": {
+      "type": "string"
+    },
+    "durationDaysTarget": {
+      "type": "number"
+    },
+    "dailyMinutesTarget": {
+      "type": "number"
+    }
+  },
+  "required": [
+    "topic",
+    "audience",
+    "transformation"
+  ]
+}

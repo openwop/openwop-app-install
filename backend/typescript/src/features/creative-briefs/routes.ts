@@ -27,12 +27,14 @@ import { listTemplates } from './render/templates.js';
 import type { CreativeBrief } from './types.js';
 import { buildRunRecord, dispatchRunInBackground } from '../../host/runDispatch.js';
 import { insertRunWithStartContext } from '../../host/runInsert.js';
+import { withRunLimit } from '../../host/runLimitSeam.js';
 import { seedRunVariables } from '../../host/variablesRuntime.js';
 import { reserveConcurrentSlot } from '../../middleware/rateLimit.js';
 import { CREATIVE_BRIEFS_REEL_ID } from './reelWorkflow.js';
+import { runLinks } from '../../middleware/protocolVersion.js';
 
 const FEATURE = { toggleId: 'creative-briefs', label: 'Creative Briefs' };
-const ORG = '/v1/host/openwop-app/creative-briefs/orgs/:orgId';
+const ORG = '/host/openwop-app/creative-briefs/orgs/:orgId';
 
 type Scope = 'workspace:read' | 'workspace:write' | 'host:members:manage';
 
@@ -302,14 +304,15 @@ export function registerCreativeBriefsRoutes(deps: RouteDeps): void {
         owner: ownerStampFromRequest(req),
       });
       // ADR 0551 P1 — `enqueueDispatch`: the 202 below promises a start.
-      await insertRunWithStartContext(storage, run, { definition: wf.definition, enqueueDispatch: true });
+      // ADR 0821 P5 follow-up — the plan's monthly run limit (a no-op until wired).
+      await withRunLimit(tenantId, () => insertRunWithStartContext(storage, run, { definition: wf.definition, enqueueDispatch: true }));
       seedRunVariables(run.runId, wf.definition.variables, inputs);
       reserveConcurrentSlot(req, run.runId);
       res.status(202).json({
         runId: run.runId,
         status: 'pending',
-        statusUrl: `${req.protocol}://${req.get('host')}/v1/runs/${run.runId}`,
-        eventsUrl: `${req.protocol}://${req.get('host')}/v1/runs/${run.runId}/events`,
+        // ADR 0669: links follow the cut (`runLinks`), never a `/v1` literal.
+        ...runLinks(`${req.protocol}://${req.get('host')}`, run.runId, run.tenantId),
       });
       dispatchRunInBackground({ storage, run, definition: wf.definition, hostSuite });
     } catch (err) { next(err); }

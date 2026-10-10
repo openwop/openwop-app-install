@@ -28,7 +28,7 @@ import { addSubjectNote, listSubjectNotes, removeSubjectNote, countRecallOnlyEnt
 
 export function registerProfileMemoryRoutes(deps: RouteDeps): void {
   const { app } = deps;
-  const BASE = '/v1/host/openwop-app/profiles/me/memory';
+  const BASE = '/host/openwop-app/profiles/me/memory';
 
   const selfSubject = (userId: string): MemorySubject => ({ kind: 'user', id: userId });
 

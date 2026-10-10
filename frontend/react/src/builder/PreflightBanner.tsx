@@ -10,6 +10,7 @@ import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import { useBuilderStore } from './store/builderStore.js';
 import { beginOAuth } from '../features/connections/connectionsClient.js';
+import { classifyHttpError } from '../client/classifyHttpError.js';
 import type { PreflightIssue, LimitIssue } from './builderShellHelpers.js';
 
 /** A connection the graph names that the caller has no ACTIVE row for
@@ -40,8 +41,9 @@ export function PreflightBanner({ preflight, onCancel, onRunAnyway }: PreflightB
       // Come back to this canvas after consent (same-origin relative path).
       const url = await beginOAuth(providerId, window.location.pathname);
       window.location.href = url;
-    } catch {
-      setConnectError(t('preRunConnectError'));
+    } catch (err) {
+      // ADR 0780 D1 — a Viewer's refusal is not "configure it under Access".
+      setConnectError(classifyHttpError(err).kind === 'forbidden' ? t('common:error_forbidden') : t('preRunConnectError'));
       setConnecting(null);
     }
   }

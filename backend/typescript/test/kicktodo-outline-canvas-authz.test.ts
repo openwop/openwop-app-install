@@ -76,9 +76,9 @@ async function call(cookie: string, method: string, path: string, body?: unknown
   return { status: res.status, body: out };
 }
 
-const OUT = (rest: string): string => `/v1/host/openwop-app/challenge-outline/orgs/${encodeURIComponent(TENANT)}${rest}`;
-const AB = (rest: string): string => `/v1/host/openwop-app/app-builder/orgs/${encodeURIComponent(TENANT)}${rest}`;
-const TICKET = (canvasId: string): string => `/v1/host/openwop-app/canvas-collab/${encodeURIComponent(canvasId)}/ticket`;
+const OUT = (rest: string): string => `/host/openwop-app/challenge-outline/orgs/${encodeURIComponent(TENANT)}${rest}`;
+const AB = (rest: string): string => `/host/openwop-app/app-builder/orgs/${encodeURIComponent(TENANT)}${rest}`;
+const TICKET = (canvasId: string): string => `/host/openwop-app/canvas-collab/${encodeURIComponent(canvasId)}/ticket`;
 
 function skeleton(): Record<string, unknown> {
   return { meta: { title: 'T', promise: 'P', audience: 'A', durationDays: 7, dailyMinutesBudget: 15 }, outcomes: [], achievements: [], frames: [{ id: 'outline', name: 'T', days: [] }] };

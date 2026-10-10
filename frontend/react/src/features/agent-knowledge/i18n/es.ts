@@ -36,7 +36,7 @@ export const messages = {
   unbind: 'Desvincular',
   unbindConfirm: '¿Desvincular "{{name}}" de este agente? La colección en sí se conserva.',
   externalUnverified: 'Externo · sin verificar',
-  externalUnverifiedTitle: 'Importado de una fuente externa (p. ej. Google Drive o un disparador). Se trata como no fiable — se aísla cuando el agente lo lee, nunca se sigue como instrucciones (ADR 0038 §C).',
+  externalUnverifiedTitle: 'Importado de una fuente externa (p. ej. Google Drive o un disparador). Se trata como no fiable — se aísla cuando el agente lo lee, nunca se sigue como instrucciones.',
   chunkCount_one: '· {{count}} fragmento',
   chunkCount_other: '· {{count}} fragmentos',
   removeDocumentLabel: 'Eliminar {{title}}',
@@ -75,7 +75,7 @@ export const messages = {
   retrieve: 'Recuperar',
   retrieveNoteChip: 'nota',
   retrieveExternalChip: 'externo',
-  retrieveExternalTitle: 'Contenido externo no fiable — se aísla cuando el agente lo lee (ADR 0038 §C).',
+  retrieveExternalTitle: 'Contenido externo no fiable — se aísla cuando el agente lo lee.',
   retrieveNoMatches: 'Sin coincidencias — añada documentos o notas arriba.',
 
   // Memory tab (ADR 0041)
@@ -90,5 +90,6 @@ export const messages = {
   retrievePartialSources: 'Sin buscar: {{sources}}',
   retrieveSource_kb: 'documentos',
   retrieveSource_memory: 'notas',
-  errorAnnounce: 'El panel de conocimiento del agente informó de un problema; los detalles están en pantalla.',
+  // KB2UX-3 — ADR 0830 D4: a managed collection refuses writes from this panel.
+  managedReadOnly: 'Otra función mantiene sincronizada esta colección, así que sus documentos son de solo lectura aquí. Cámbialos en su origen.',
 } as const;

@@ -8,9 +8,17 @@
  * provider/model unchanged. The dispatch-site override + the `run.metadata.modelRoute`
  * replay stamp are Phase 3b (the call-site wiring); this keeps the resolution
  * testable and decoupled from the dispatch hot path.
+ *
+ * ADR 0820 §8.2 — the feature is sellable (Governance bundle), and this resolver
+ * sits inside every chat turn of three core modules. So a refusal DEGRADES, it
+ * never errors: with `model-router` refused for the tenant (toggle off, plan
+ * refusal, or an unreadable entitlement — `resolveOne` fails closed), no route is
+ * resolved and the caller keeps the run's own model. A route ALREADY stamped on a
+ * run is read by `effectiveModelTarget` and is not re-judged here (replay-safe).
  */
 import { probeProviderCapabilities } from '../../host/modelCapabilityProbe.js';
 import { getRouterConfig } from './configService.js';
+import { resolveOne } from '../../host/featureToggles/service.js';
 import { isRoutableProvider } from './routableProviders.js';
 import { routeTurn, type RouteDecision, type RouteState, type TurnFeatures } from './routeTurn.js';
 import { createLogger } from '../../observability/logger.js';
@@ -24,6 +32,13 @@ export async function resolveModelRoute(
   now: number,
   state?: RouteState,
 ): Promise<RouteDecision | null> {
+  // ADR 0820 §8.2 — degrade, never refuse (see the header). The read is caught so a
+  // toggle-store fault can never break a turn either.
+  const access = await resolveOne('model-router', { tenantId }).catch(() => null);
+  if (access?.enabled !== true) {
+    if (access?.blockedBy) log.debug('model_route_feature_refused', { tenantId, blockedBy: access.blockedBy });
+    return null;
+  }
   const stored = await getRouterConfig(tenantId, orgId);
   if (!stored || !stored.enabled) return null; // off → caller keeps the explicit provider/model
   const decision = routeTurn(features, stored.config, probeProviderCapabilities, now, state);

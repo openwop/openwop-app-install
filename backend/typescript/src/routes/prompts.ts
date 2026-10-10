@@ -11,7 +11,7 @@
  */
 
 import type { Express, Request, Response } from 'express';
-import { v1 } from '../middleware/protocolVersion.js';
+import { advertisedPath } from '../middleware/protocolVersion.js';
 import {
   createUserTemplate,
   deleteUserTemplate,
@@ -34,8 +34,20 @@ import { isWorkspaceMember } from '../host/accessControlService.js';
 // exact echo-user-input-back path the scrub exists for. Two functions with one
 // name is also how a reader concludes the host has one emitter when it has two.
 import { sendError } from '../middleware/errorEnvelope.js';
+import { ifNoneMatchSatisfied } from '../host/restTransport.js';
 import { requireKeyLaneScope, type KeyLaneExtensionScope } from '../host/protocolAuthorization.js';
 import { OpenwopError } from '../types.js';
+import { sendUnadvertised, type UnadvertisedGate } from '../host/unadvertised.js';
+
+/** ADR 0781 — v2 answers 404 `not_found`; v1 keeps 501 `capability_not_provided`. */
+const PROMPTS_ENDPOINTS_OFF: UnadvertisedGate = {
+  family: 'prompts',
+  message: 'capabilities.prompts.endpointsSupported is false',
+};
+const PROMPTS_LIBRARY_READONLY: UnadvertisedGate = {
+  family: 'prompts', facet: 'mutableLibrary',
+  message: 'capabilities.prompts.mutableLibrary is false',
+};
 
 
 /** Parse a stringy PromptRef `prompt:templateId[@version]` into its
@@ -141,10 +153,10 @@ export function registerPromptRoutes(app: Express, deps: { capability: PromptsCa
   const { capability } = deps;
 
   // ── GET /v1/prompts ───────────────────────────────────────────
-  app.get(v1('/prompts'), async (req, res) => {
+  app.get('/prompts', async (req, res) => {
     if (refusedKeyScope(req, res, 'prompts:read')) return; // scope above capability, as every other gate (ADR 0755)
     if (!capability.endpointsSupported) {
-      sendError(res, 501, 'capability_not_provided', 'capabilities.prompts.endpointsSupported is false');
+      sendUnadvertised(req, res, PROMPTS_ENDPOINTS_OFF);
       return;
     }
     if (await refusedNonMemberWorkspace(req, res)) return;
@@ -168,14 +180,14 @@ export function registerPromptRoutes(app: Express, deps: { capability: PromptsCa
   });
 
   // ── POST /v1/prompts ──────────────────────────────────────────
-  app.post(v1('/prompts'), async (req, res) => {
+  app.post('/prompts', async (req, res) => {
     if (refusedKeyScope(req, res, 'prompts:write')) return; // scope above capability, as every other gate (ADR 0755)
     if (!capability.endpointsSupported) {
-      sendError(res, 501, 'capability_not_provided', 'capabilities.prompts.endpointsSupported is false');
+      sendUnadvertised(req, res, PROMPTS_ENDPOINTS_OFF);
       return;
     }
     if (!capability.mutableLibrary) {
-      sendError(res, 501, 'capability_not_provided', 'capabilities.prompts.mutableLibrary is false');
+      sendUnadvertised(req, res, PROMPTS_LIBRARY_READONLY);
       return;
     }
     if (await refusedNonMemberWorkspace(req, res)) return;
@@ -190,16 +202,18 @@ export function registerPromptRoutes(app: Express, deps: { capability: PromptsCa
       sendError(res, status, `prompt_create_${result.code}`, result.message);
       return;
     }
-    res.setHeader('Location', `/v1/prompts/${encodeURIComponent(body.templateId)}?version=${encodeURIComponent(result.locationVersion)}`);
+    // ADR 0812 P3b — the address follows the negotiated major and retirement (it
+    // was a hard-coded `/v1`, which a retired host answers 410).
+    res.setHeader('Location', `${advertisedPath(`/prompts/${encodeURIComponent(body.templateId)}`) ?? `/prompts/${encodeURIComponent(body.templateId)}`}?version=${encodeURIComponent(result.locationVersion)}`);
     res.setHeader('ETag', `"${result.etag.slice(0, 16)}"`);
     res.status(201).end();
   });
 
   // ── GET /v1/prompts/{templateId} ──────────────────────────────
-  app.get(v1('/prompts/:templateId'), async (req, res) => {
+  app.get('/prompts/:templateId', async (req, res) => {
     if (refusedKeyScope(req, res, 'prompts:read')) return; // scope above capability, as every other gate (ADR 0755)
     if (!capability.endpointsSupported) {
-      sendError(res, 501, 'capability_not_provided', 'capabilities.prompts.endpointsSupported is false');
+      sendUnadvertised(req, res, PROMPTS_ENDPOINTS_OFF);
       return;
     }
     if (await refusedNonMemberWorkspace(req, res)) return;
@@ -219,12 +233,15 @@ export function registerPromptRoutes(app: Express, deps: { capability: PromptsCa
       return;
     }
     const tag = `"${found.etag.slice(0, 16)}"`;
-    const ifNoneMatch = req.header('If-None-Match');
-    if (ifNoneMatch && ifNoneMatch === tag) {
+    // RFC 9110 §13.1.2 through the shared helper (the discovery + run routes'):
+    // a strict `===` missed a `W/`-weakened echo (a compressing front door
+    // weakens a strong tag) and any list, so revalidation answered 200. The
+    // validator rides the 304 too (RFC 9110 §15.4.5).
+    res.setHeader('ETag', tag);
+    if (ifNoneMatchSatisfied(req, tag)) {
       res.status(304).end();
       return;
     }
-    res.setHeader('ETag', tag);
     // Pinned-version requests get immutable caching; latest-version
     // requests get short max-age.
     if (version) {
@@ -236,14 +253,14 @@ export function registerPromptRoutes(app: Express, deps: { capability: PromptsCa
   });
 
   // ── PUT /v1/prompts/{templateId} ──────────────────────────────
-  app.put(v1('/prompts/:templateId'), async (req, res) => {
+  app.put('/prompts/:templateId', async (req, res) => {
     if (refusedKeyScope(req, res, 'prompts:write')) return; // scope above capability, as every other gate (ADR 0755)
     if (!capability.endpointsSupported) {
-      sendError(res, 501, 'capability_not_provided', 'capabilities.prompts.endpointsSupported is false');
+      sendUnadvertised(req, res, PROMPTS_ENDPOINTS_OFF);
       return;
     }
     if (!capability.mutableLibrary) {
-      sendError(res, 501, 'capability_not_provided', 'capabilities.prompts.mutableLibrary is false');
+      sendUnadvertised(req, res, PROMPTS_LIBRARY_READONLY);
       return;
     }
     if (await refusedNonMemberWorkspace(req, res)) return;
@@ -259,14 +276,14 @@ export function registerPromptRoutes(app: Express, deps: { capability: PromptsCa
   });
 
   // ── DELETE /v1/prompts/{templateId} ───────────────────────────
-  app.delete(v1('/prompts/:templateId'), async (req, res) => {
+  app.delete('/prompts/:templateId', async (req, res) => {
     if (refusedKeyScope(req, res, 'prompts:write')) return; // scope above capability, as every other gate (ADR 0755)
     if (!capability.endpointsSupported) {
-      sendError(res, 501, 'capability_not_provided', 'capabilities.prompts.endpointsSupported is false');
+      sendUnadvertised(req, res, PROMPTS_ENDPOINTS_OFF);
       return;
     }
     if (!capability.mutableLibrary) {
-      sendError(res, 501, 'capability_not_provided', 'capabilities.prompts.mutableLibrary is false');
+      sendUnadvertised(req, res, PROMPTS_LIBRARY_READONLY);
       return;
     }
     if (await refusedNonMemberWorkspace(req, res)) return;
@@ -282,10 +299,10 @@ export function registerPromptRoutes(app: Express, deps: { capability: PromptsCa
   // ── POST /v1/prompts:render ───────────────────────────────────
   // Note: Express collapses `:` into a path parameter in some
   // configurations; we register the literal path explicitly.
-  app.post(v1('/prompts:render'), async (req, res) => {
+  app.post('/prompts:render', async (req, res) => {
     if (refusedKeyScope(req, res, 'prompts:read')) return; // scope above capability, as every other gate (ADR 0755)
     if (!capability.endpointsSupported) {
-      sendError(res, 501, 'capability_not_provided', 'capabilities.prompts.endpointsSupported is false');
+      sendUnadvertised(req, res, PROMPTS_ENDPOINTS_OFF);
       return;
     }
     if (await refusedNonMemberWorkspace(req, res)) return;

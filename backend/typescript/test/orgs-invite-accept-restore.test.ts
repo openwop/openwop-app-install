@@ -5,6 +5,11 @@
  * reads `invalid_invite`, and the admin has no Resend surface (it renders on
  * still-existing rows only). The service must RESTORE both rows, log the
  * dedicated event, and rethrow — so a retry of the same token can succeed.
+ *
+ * Sabotage that turns it red (grade-tests wave 2, probes `g2-rst-*`): drop the
+ * hash-index restore (preview no longer resolves), drop the invite-row restore
+ * (`listInvitations` is empty), or replace the rethrow with another error (the
+ * `/db down/` surface).
  */
 
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';

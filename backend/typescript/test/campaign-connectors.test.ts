@@ -143,14 +143,14 @@ describe('campaign-connectors — routes + sync node', () => {
 
   it('imports a CSV and projects KPI over HTTP', async () => {
     const c = client();
-    expect((await c.post('/v1/host/openwop-app/test/login', { email: `cc-${Date.now()}-${n++}@acme.test` })).status).toBe(201);
-    const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+    expect((await c.post('/host/openwop-app/test/login', { email: `cc-${Date.now()}-${n++}@acme.test` })).status).toBe(201);
+    const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
     const orgId = org.body.orgId;
     const csv = 'Platform,Campaign,Day,Cost,Impr.,Clicks,Conversions,Revenue\nMeta,Promo,2026-02-01,200,4000,100,10,1000';
-    const imp = await c.post('/v1/host/openwop-app/campaign-connectors/import', { orgId, csv });
+    const imp = await c.post('/host/openwop-app/campaign-connectors/import', { orgId, csv });
     expect(imp.status, JSON.stringify(imp.body)).toBe(201);
     expect(imp.body.imported).toBe(1);
-    const kpi = await c.get(`/v1/host/openwop-app/campaign-connectors/kpi?orgId=${orgId}`);
+    const kpi = await c.get(`/host/openwop-app/campaign-connectors/kpi?orgId=${orgId}`);
     expect(kpi.body.totals.spend).toBe(200);
     expect(kpi.body.byPlatform[0].platform).toBe('meta');
   });

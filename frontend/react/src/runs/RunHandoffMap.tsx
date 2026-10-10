@@ -13,15 +13,23 @@
  *   - `core.workflowChain.confidence-escalated` (RFC 0039/0044)
  *                                             low-confidence escalation marker
  *
+ * ADR 0829 — a handoff or escalation that carried a structured handoff note
+ * (`openwop-handoff` on `agent.handoff`, or on the `node.suspended` an
+ * escalation produced) renders as a disclosure button; the note opens below the
+ * strip in the shared `HandoffNoteCard`.
+ *
  * Renders nothing when a run has no orchestration events (single-agent
  * / no-handoff runs).
  */
 
-import { useMemo } from 'react';
+import { useId, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { RunEventDoc } from '@openwop/openwop';
 import i18n from '../i18n/index.js';
 import { formatPercent } from '../i18n/format.js';
+import { readHandoffNote, type HandoffNote } from './handoffNote.js';
+import { HandoffNoteCard } from './HandoffNoteCard.js';
+import { Button } from '../ui/Button.js';
 
 interface Props {
   events: readonly RunEventDoc[];
@@ -34,6 +42,8 @@ interface Chip {
   sublabel?: string;
   color: string;
   emphasize?: boolean;
+  /** ADR 0829 — the structured handoff note this transfer carried, if any. */
+  note?: HandoffNote;
 }
 
 const PHASE_COLOR: Record<string, string> = {
@@ -66,11 +76,13 @@ function buildChips(events: readonly RunEventDoc[]): Chip[] {
         // Tolerate canonical (fromAgentId/toAgentId) and variant (from/to).
         const from = (p.fromAgentId ?? p.from) as string | undefined;
         const to = (p.toAgentId ?? p.to) as string | undefined;
+        const note = readHandoffNote(p);
         chips.push({
           seq: ev.sequence, kind: 'handoff',
           label: `${from ?? '?'} → ${to ?? '?'}`,
           ...(typeof p.reason === 'string' ? { sublabel: p.reason as string } : {}),
           color: 'var(--color-info-text)',
+          ...(note ? { note } : {}),
         });
         break;
       }
@@ -106,6 +118,15 @@ function buildChips(events: readonly RunEventDoc[]): Chip[] {
           emphasize: true,
         });
         break;
+      case 'node.suspended': {
+        // ADR 0829 — the escalation's note rides `node.suspended`; attach it to the
+        // escalation chip the same node produced (the nearest one before it).
+        const note = readHandoffNote(p);
+        if (!note) break;
+        const esc = [...chips].reverse().find((c) => c.kind === 'escalation' && !c.note);
+        if (esc) esc.note = note;
+        break;
+      }
       default:
         break;
     }
@@ -116,7 +137,10 @@ function buildChips(events: readonly RunEventDoc[]): Chip[] {
 export function RunHandoffMap({ events }: Props) {
   const { t } = useTranslation('runs');
   const chips = useMemo(() => buildChips(events), [events]);
+  const [openSeq, setOpenSeq] = useState<number | null>(null);
+  const noteId = useId();
   if (chips.length === 0) return null;
+  const open = chips.find((c) => c.seq === openSeq && c.note);
   return (
     <div className="card">
       <h2>{t('multiAgentHandoffs')}</h2>
@@ -124,18 +148,36 @@ export function RunHandoffMap({ events }: Props) {
         {chips.map((chip, i) => (
           <div className="handoff-chip-wrap" key={`${chip.seq}-${i}`}>
             {i > 0 && <span className="handoff-arrow" aria-hidden>→</span>}
-            <div
-              className={`handoff-chip${chip.emphasize ? ' handoff-chip-emphasize' : ''}`}
-              style={{ borderColor: chip.color }}
-              title={`#${chip.seq} ${chip.kind}`}
-            >
-              <span className="handoff-chip-dot" style={{ background: chip.color }} aria-hidden />
-              <span className="handoff-chip-label">{chip.label}</span>
-              {chip.sublabel && <span className="muted handoff-chip-sub">{chip.sublabel}</span>}
-            </div>
+            {chip.note ? (
+              <Button
+                variant="quiet"
+                size="sm"
+                className={`handoff-chip handoff-chip--button${chip.emphasize ? ' handoff-chip-emphasize' : ''}`}
+                style={{ borderColor: chip.color }}
+                aria-expanded={openSeq === chip.seq}
+                aria-controls={noteId}
+                onClick={() => setOpenSeq(openSeq === chip.seq ? null : chip.seq)}
+              >
+                <span className="handoff-chip-dot" style={{ background: chip.color }} aria-hidden />
+                <span className="handoff-chip-label">{chip.label}</span>
+                {chip.sublabel && <span className="muted handoff-chip-sub">{chip.sublabel}</span>}
+                <span className="handoff-chip-note-tag">{t('handoffNoteShow')}</span>
+              </Button>
+            ) : (
+              <div
+                className={`handoff-chip${chip.emphasize ? ' handoff-chip-emphasize' : ''}`}
+                style={{ borderColor: chip.color }}
+                title={`#${chip.seq} ${chip.kind}`}
+              >
+                <span className="handoff-chip-dot" style={{ background: chip.color }} aria-hidden />
+                <span className="handoff-chip-label">{chip.label}</span>
+                {chip.sublabel && <span className="muted handoff-chip-sub">{chip.sublabel}</span>}
+              </div>
+            )}
           </div>
         ))}
       </div>
+      {open?.note && <HandoffNoteCard id={noteId} note={open.note} title={t('handoffNoteTitle', { label: open.label })} />}
     </div>
   );
 }

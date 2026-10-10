@@ -40,7 +40,8 @@ import { isOwnPersonalWorkspace } from '../../host/requestSubject.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { createLogger } from '../../observability/logger.js';
 import { tenantOf, requireTenantScope } from '../featureRoute.js';
-import { requireSignedIn, resolveCallerUser } from './usersGuards.js';
+import { actingHumanUserId, assertMayActOnUser, requireSignedIn, resolveCallerUser } from './usersGuards.js';
+import { notifySubjectErased } from '../../host/delegatedSubject.js';
 import { userErased } from './emit.js';
 import { clearSessionCookie } from '../../middleware/auth.js';
 import {
@@ -67,14 +68,9 @@ import {
  * principal) cannot be the target row, so its `sign_in_required` is "not self".
  */
 async function refuseSelfLockout(req: Request, target: User, action: string): Promise<void> {
-  let callerId = req.userId;
-  if (callerId === undefined) {
-    try {
-      callerId = (await resolveCallerUser(req)).userId;
-    } catch (err: unknown) {
-      if (!(err instanceof OpenwopError && err.code === 'sign_in_required')) throw err;
-    }
-  }
+  // ADR 0833 D9 — one acting-human resolver; it also covers the caller's own
+  // API key, which used to read as "not self".
+  const callerId = await actingHumanUserId(req);
   if (callerId !== undefined && callerId === target.userId) {
     throw new OpenwopError(
       'self_lockout',
@@ -119,6 +115,21 @@ function parseGroups(value: unknown): string[] | undefined {
   return value as string[];
 }
 
+/**
+ * ADR 0833 (grade-code `USERS2-CD-1`) — an admin-created row names an IdP
+ * principal, never another identity's canonical or delegated spelling. A row
+ * whose `principalId` is someone's `user:<id>` (or an `apikey:`/`session:`/
+ * `breakglass:`/`bearer:` subject) impersonates that identity to every lane
+ * that matches on principal strings.
+ */
+const NON_IDP_PRINCIPAL = /^(user|apikey|session|breakglass|bearer|agent):/;
+function requireIdpPrincipal(value: string): string {
+  if (NON_IDP_PRINCIPAL.test(value)) {
+    throw new OpenwopError('validation_error', 'Field `principalId` must be an identity-provider subject (e.g. `oidc:…`, `saml:…`, `scim:…`), not a host identity.', 400, { field: 'principalId' });
+  }
+  return value;
+}
+
 function parseSource(value: unknown): UserSource | undefined {
   if (value === undefined) return undefined;
   if (typeof value === 'string' && (USER_SOURCES as readonly string[]).includes(value)) return value as UserSource;
@@ -133,7 +144,7 @@ export function registerUsersRoutes(deps: RouteDeps): void {
 
   // The reconciliation seam: durable record for the authenticated caller.
   // Fail-closed — a disabled user is denied (finding H5).
-  app.get('/v1/host/openwop-app/users/me', async (req, res, next) => {
+  app.get('/host/openwop-app/users/me', async (req, res, next) => {
     try {
       // ADR 0003: resolve the ONE canonical durable user. A bound session
       // (`req.userId`, after login) resolves by id; an anon session is refused
@@ -152,7 +163,7 @@ export function registerUsersRoutes(deps: RouteDeps): void {
   // Self-serve: update the CALLER's own mutable identity (display name). Distinct
   // from the admin PATCH /users/:id — this resolves the caller and edits only
   // their own record, so a user can set their name from their profile page.
-  app.patch('/v1/host/openwop-app/users/me', async (req, res, next) => {
+  app.patch('/host/openwop-app/users/me', async (req, res, next) => {
     try {
       const user = await resolveCallerUser(req);
       if (user.status !== 'active') {
@@ -168,7 +179,7 @@ export function registerUsersRoutes(deps: RouteDeps): void {
     }
   });
 
-  app.get('/v1/host/openwop-app/users/users', async (req, res, next) => {
+  app.get('/host/openwop-app/users/users', async (req, res, next) => {
     try {
       // USERS-8 — symmetry with the mutating routes: durable identity records
       // (emails, display names, IdP groups) are not anonymous-readable. Every
@@ -180,7 +191,7 @@ export function registerUsersRoutes(deps: RouteDeps): void {
     }
   });
 
-  app.post('/v1/host/openwop-app/users/users', async (req, res, next) => {
+  app.post('/host/openwop-app/users/users', async (req, res, next) => {
     try {
       requireSignedIn(req); // anon sessions can't create durable users / grant groups (finding #4)
       // (2026-07 vuln-scan M6) Provisioning durable identities + granting groups is a
@@ -190,7 +201,7 @@ export function registerUsersRoutes(deps: RouteDeps): void {
       const body = (req.body ?? {}) as Record<string, unknown>;
       const user = await createUser({
         tenantId: tenantOf(req),
-        principalId: requireString(body.principalId, 'principalId'),
+        principalId: requireIdpPrincipal(requireString(body.principalId, 'principalId')),
         groups: parseGroups(body.groups) ?? [],
         source: parseSource(body.source) ?? 'manual',
         // ADR 0622 D7 review S1 — provenance is THIS lane's, never the body's
@@ -220,7 +231,7 @@ export function registerUsersRoutes(deps: RouteDeps): void {
     }
   });
 
-  app.get('/v1/host/openwop-app/users/users/:id', async (req, res, next) => {
+  app.get('/host/openwop-app/users/users/:id', async (req, res, next) => {
     try {
       requireSignedIn(req); // USERS-8 — same boundary as the list read
       const user = await getUser(req.params.id);
@@ -233,7 +244,7 @@ export function registerUsersRoutes(deps: RouteDeps): void {
     }
   });
 
-  app.patch('/v1/host/openwop-app/users/users/:id', async (req, res, next) => {
+  app.patch('/host/openwop-app/users/users/:id', async (req, res, next) => {
     try {
       requireSignedIn(req);
       // (2026-07 vuln-scan M6) The admin PATCH edits ANOTHER user's record incl. the
@@ -256,7 +267,9 @@ export function registerUsersRoutes(deps: RouteDeps): void {
       // the person), is `'self'` — unverified, and refused by the invitation
       // accept/decline gates. A shared-workspace manager editing ANOTHER
       // member's row vouches for it: `'admin'`.
-      const selfAsserted = req.userId === req.params.id || isOwnPersonalWorkspace(req);
+      // ADR 0833 D9 — through the acting-human resolver, so an admin's own API
+      // key cannot vouch (`'admin'`) for the admin's own address.
+      const selfAsserted = (await actingHumanUserId(req)) === req.params.id || isOwnPersonalWorkspace(req);
       const updated = await updateUser(req.params.id, {
         ...patch,
         ...(patch.email ? { emailProvenance: selfAsserted ? 'self' as const : 'admin' as const } : {}),
@@ -279,7 +292,7 @@ export function registerUsersRoutes(deps: RouteDeps): void {
 
   // Lifecycle — disable (fail-closed control) / enable.
   for (const [verb, status] of [['disable', 'disabled'], ['enable', 'active']] as const) {
-    app.post(`/v1/host/openwop-app/users/users/:id/${verb}`, async (req, res, next) => {
+    app.post(`/host/openwop-app/users/users/:id/${verb}`, async (req, res, next) => {
       try {
         requireSignedIn(req);
         // (2026-07 vuln-scan M6) Disabling a user is a fail-closed lockout — a
@@ -290,7 +303,11 @@ export function registerUsersRoutes(deps: RouteDeps): void {
           throw new OpenwopError('not_found', 'User not found.', 404, { userId: req.params.id });
         }
         // ADR 0621 D7 — disabling yourself ends YOUR session on the next request.
-        if (status === 'disabled') await refuseSelfLockout(req, existing, 'disable');
+        if (status === 'disabled') {
+          await refuseSelfLockout(req, existing, 'disable');
+          // ADR 0833 D6 — an admin cannot lock out an owner.
+          await assertMayActOnUser(tenantOf(req), req.principal?.principalId, existing, 'disable');
+        }
         // ADR 0621 D2 — `setUserStatus(…, 'disabled')` bumps the session epoch in
         // the same atomic write, so the disabled account's LIVE sessions end now.
         // ADR 0617 D1 — `reason: 'admin'` is explicit, never inferred from the
@@ -317,7 +334,7 @@ export function registerUsersRoutes(deps: RouteDeps): void {
     });
   }
 
-  app.delete('/v1/host/openwop-app/users/users/:id', async (req, res, next) => {
+  app.delete('/host/openwop-app/users/users/:id', async (req, res, next) => {
     try {
       requireSignedIn(req);
       // (2026-07 vuln-scan M6) Deleting a durable identity is a tenant-management op.
@@ -329,6 +346,7 @@ export function registerUsersRoutes(deps: RouteDeps): void {
       }
       // ADR 0621 D7 — erasing yourself is a self-lockout; use a peer admin.
       await refuseSelfLockout(req, existing, 'delete');
+      await assertMayActOnUser(tenantOf(req), req.principal?.principalId, existing, 'delete');
       // PROF-2 — cascade the subject's PII with the identity. Deleting only the
       // user left the profile row (bio/location) readable by-id with `owner`
       // null, and its Team Portfolio KB doc searchable. Review F5: this is the
@@ -358,7 +376,12 @@ export function registerUsersRoutes(deps: RouteDeps): void {
       // where the row still exists (and as `account_erased` once it is gone).
       // Ordered first so a partial fan-out (which refuses below and stays
       // retryable) never leaves a signed-in session on a half-erased subject.
-      await bumpSessionEpoch(req.params.id);
+      // ADR 0833 D7 (grade-code `USERS2-CD-6`) — and DISABLE the row in the same
+      // atomic write: with only the epoch bumped, a still-valid IdP bearer could
+      // re-promote an active row and mint a key between the revocation below and
+      // `deleteUser`, and that key would survive the delete. A refused (retryable)
+      // fan-out therefore leaves the account disabled, which is the safe side.
+      await bumpSessionEpoch(req.params.id, (row) => ({ ...row, status: 'disabled' }));
       const { removeProfileStrict } = await import('../profiles/profilesKnowledgeService.js');
       await removeProfileStrict(tenantOf(req), req.params.id);
       const { eraseSubject } = await import('../../host/subjectErasure.js');
@@ -371,6 +394,13 @@ export function registerUsersRoutes(deps: RouteDeps): void {
           { failedFeatures: erasure.failedFeatures },
         );
       }
+      // ADR 0833 D7 — revoke everything the account DELEGATED, in every tenant,
+      // before the row goes: its `owk_` keys in other shared workspaces kept
+      // authenticating (issuer liveness reads a missing row as a seed actor),
+      // and a re-provisioned account re-creates the same id. Fail-closed and
+      // ordered before `deleteUser`, so a failure leaves the delete retryable.
+      // The bare principal matches only in the HOME tenant (`USERS2-CD-1`).
+      await notifySubjectErased({ userId: existing.userId, principalId: existing.principalId, homeTenant: existing.tenantId });
       // ADR 0621 rev. 2 (review BLOCKER-1, erase family) — leave a TOMBSTONE:
       // pin the personal tenant's canonical pointer to this row BEFORE deleting
       // it, so the dangling pointer makes the unbound-lane session read AND the
@@ -404,7 +434,7 @@ export function registerUsersRoutes(deps: RouteDeps): void {
   // request (D2). Gated by the SAME predicate as disable/enable; D7 refuses the
   // caller's own row (use `/me/sessions/revoke` for that). Audit row ids-only,
   // like the lifecycle routes.
-  app.post('/v1/host/openwop-app/users/users/:id/sessions/revoke', async (req, res, next) => {
+  app.post('/host/openwop-app/users/users/:id/sessions/revoke', async (req, res, next) => {
     try {
       requireSignedIn(req);
       await requireTenantScope(req, 'host:members:manage');
@@ -413,6 +443,7 @@ export function registerUsersRoutes(deps: RouteDeps): void {
         throw new OpenwopError('not_found', 'User not found.', 404, { userId: req.params.id });
       }
       await refuseSelfLockout(req, existing, 'revoke the sessions of');
+      await assertMayActOnUser(tenantOf(req), req.principal?.principalId, existing, 'sign out');
       const updated = await bumpSessionEpoch(req.params.id);
       if (!updated) throw new OpenwopError('not_found', 'User not found.', 404, { userId: req.params.id });
       log.info('user_sessions_revoked', { userId: req.params.id });
@@ -434,7 +465,7 @@ export function registerUsersRoutes(deps: RouteDeps): void {
   // on its very next request anyway, so it is signed out honestly here rather
   // than one request later with a surprising 401. (The SPA re-authenticates
   // from its IdP token; the bind re-stamps the new epoch.)
-  app.post('/v1/host/openwop-app/users/me/sessions/revoke', async (req, res, next) => {
+  app.post('/host/openwop-app/users/me/sessions/revoke', async (req, res, next) => {
     try {
       const user = await resolveCallerUser(req);
       const updated = await bumpSessionEpoch(user.userId);

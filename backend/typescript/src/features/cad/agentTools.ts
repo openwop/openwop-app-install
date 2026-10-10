@@ -37,7 +37,8 @@ import { resolveFeatureToggle } from '../../host/agentToolKit.js';
 import { listOrgs, resolveEffectiveAccess } from '../../host/accessControlService.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { getNodeRegistry } from '../../executor/nodeRegistry.js';
-import { createCanvasForTenant, getCanvasForTenant, updateCanvasForTenant } from '../../host/canvasSurface.js';
+import { createCanvasForTenant, updateCanvasForTenant, getCanvasForCaller } from '../../host/canvasSurface.js';
+import { resolveFocusedId } from '../../host/conversationFocus.js';
 import { validateCadDoc, CAD_SOLID_KINDS } from './validateCadDoc.js';
 
 export const CAD_GET_DESIGN_TOOL_ID = 'openwop:cad.get-design';
@@ -130,6 +131,7 @@ export function registerCadAgentTools(): void {
   // ── The canvas-state read path: the model READS the current model. ────────
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     // ADR 0604 (TOCC-2) — closed world: an elided enum/id list here makes the
     // model author against a catalog that is not this host's.
     schemaCarrying: true,
@@ -142,10 +144,10 @@ export function registerCadAgentTools(): void {
       inputSchema: {
         type: 'object',
         properties: {
-          canvasId: { type: 'string', description: 'The CAD canvas id (from a render result or the user).' },
+          canvasId: { type: 'string', description: 'The CAD canvas id (from a render result or the user). Omit it to read the model the user has open beside this chat, when there is one.' },
           orgId: { type: 'string', description: 'Organization id — only needed when the workspace has more than one organization.' },
         },
-        required: ['canvasId'],
+        required: [],
       },
     },
     async run(input, scope) {
@@ -158,9 +160,11 @@ export function registerCadAgentTools(): void {
       if (!scope.actingUserId) return { content: JSON.stringify({ model: null }) };
       const gate = await resolveOrgScope(scope, str(input.orgId), 'workspace:read');
       if ('content' in gate) return gate;
-      const canvasId = str(input.canvasId);
-      if (!canvasId) return toolError('validation_error', '`canvasId` is required.');
-      const canvas = await getCanvasForTenant(scope.tenantId, canvasId);
+      // ADR 0777 — an explicit id wins; otherwise the model open beside this
+      // embedded chat. Either way the SAME read predicate applies below.
+      const canvasId = await resolveFocusedId(scope, 'canvas', str(input.canvasId));
+      if (!canvasId) return toolError('validation_error', '`canvasId` is required (no model is open beside this chat).');
+      const canvas = await getCanvasForCaller(scope.tenantId, canvasId, { subject: scope.actingUserId });
       if (!canvas || canvas.canvasTypeId !== CAD_CANVAS_TYPE) {
         return toolError('not_found', `CAD model '${canvasId}' not found in this workspace.`);
       }
@@ -178,6 +182,7 @@ export function registerCadAgentTools(): void {
   // ── The deliverable path: normalize → validate → persist → real reference. ─
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: CAD_RENDER_TOOL_ID,
       description:
@@ -219,7 +224,7 @@ export function registerCadAgentTools(): void {
       if (canvasId) {
         // Type-pinned load (the editor's F4 rule): a wrong-type canvas is a
         // uniform not_found — the agent can never overwrite another type.
-        const existing = await getCanvasForTenant(scope.tenantId, canvasId);
+        const existing = await getCanvasForCaller(scope.tenantId, canvasId, { subject: scope.actingUserId });
         if (!existing || existing.canvasTypeId !== CAD_CANVAS_TYPE) {
           return toolError('not_found', `CAD model '${canvasId}' not found in this workspace.`);
         }

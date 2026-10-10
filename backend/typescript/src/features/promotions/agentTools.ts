@@ -2,7 +2,7 @@
  * CFP-1 (CHAT-FIRST-PORT-AUDIT #1, unit E8 / MERCH-B) — the Promotions Manager's
  * REAL conversational tools.
  *
- * The `feature.promotions.agents` pack allowlisted node typeIds no provider
+ * The `vendor.openwop-app.promotions.agents` pack allowlisted node typeIds no provider
  * projects into chat, so every tool was silently dropped at dispatch (a toothless
  * persona). These `registerFeatureAgentTool` builtins register one wrapper per
  * capability over the SAME service fns the REST routes call (`promotionsService`
@@ -79,6 +79,7 @@ function fromServiceError(e: unknown): { content: string; isError: true } {
 export function registerPromotionsAgentTools(): void {
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: PROMOTIONS_LIST_TOOL_ID,
       description:
@@ -102,6 +103,7 @@ export function registerPromotionsAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: PROMOTIONS_APPLY_PREVIEW_TOOL_ID,
       description:
@@ -151,6 +153,7 @@ export function registerPromotionsAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: PROMOTIONS_DRAFT_TOOL_ID,
       description:

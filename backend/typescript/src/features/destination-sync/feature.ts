@@ -5,6 +5,8 @@
  * specialist (ADR 0262 ruling #3).
  */
 import type { BackendFeature } from '../types.js';
+import { ONWARD_SYNC_WORKFLOWS } from './onwardSyncWorkflow.js';
+import { registerWorkflowsFeature } from '../../host/workflowFeatureGate.js';
 import { registerDestinationSyncRoutes } from './routes.js';
 import { buildDestinationSyncSurface } from './surface.js';
 import { registerDestinationSyncAgentTools } from './agentTools.js';
@@ -12,6 +14,9 @@ import { registerDestinationSyncAgentTools } from './agentTools.js';
 export const destinationSyncFeature: BackendFeature = {
   id: 'destination-sync',
   registerRoutes: (deps) => {
+    // ADR 0820 §7 / G6 — this feature OWNS its chain-backed workflows (registered
+    // in `features/index.ts`): every launch resolves 'destination-sync' (toggle + plan).
+    registerWorkflowsFeature(ONWARD_SYNC_WORKFLOWS.map((w) => w.workflowId), 'destination-sync');
     registerDestinationSyncRoutes(deps);
     // CHAT-FIRST-PORT-AUDIT D7 — register the chat lane that ignites the onward
     // egress (openwop-host workflow + governed warehouse load) from the one chat.
@@ -21,7 +26,7 @@ export const destinationSyncFeature: BackendFeature = {
   toggleDefault: {
     id: 'destination-sync',
     label: 'Destination Sync',
-    description: 'Map + sync customer data to downstream destinations with CDC (ADR 0266).',
+    description: 'Map + sync customer data to downstream destinations with CDC.',
     category: 'Customer Data Platform',
     status: 'off',
     bucketUnit: 'tenant',
@@ -33,5 +38,5 @@ export const destinationSyncFeature: BackendFeature = {
   dependsOn: ['cdp'],
   // Egress needs a BYOK Connection; purpose-propagation on onward sync needs Consent.
   recommends: ['connections', 'consent'],
-  requiredPacks: [{ name: 'feature.destination-sync.nodes', version: '1.0.0' }],
+  requiredPacks: [{ name: 'feature.destination-sync.nodes', version: '1.0.1' }],
 };

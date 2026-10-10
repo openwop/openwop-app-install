@@ -1,12 +1,12 @@
 {
   "name": "core.openwop.workflows.meeting-ops",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "kind": "workflow-chain",
   "description": "Meeting-ops chains (RFC 0013): less time in and around meetings — an agenda from a stated goal, and notes turned into owned action items. In-app and draft sinks only; replay-deterministic.",
   "author": "openwop",
   "license": "Apache-2.0",
   "engines": {
-    "openwop": ">=1.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "keywords": [
     "Meeting ops"
@@ -14,7 +14,7 @@
   "chains": [
     {
       "chainId": "meeting.agenda-prep",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "Goal → Meeting Agenda",
       "description": "Turns a one-line meeting goal into a tight, time-boxed agenda and posts it to the team as an in-app notification.",
       "parameters": {
@@ -37,7 +37,7 @@
         "nodes": [
           {
             "id": "start",
-            "typeId": "core.trigger.event",
+            "typeId": "core.trigger.event@1.0.0",
             "name": "Meeting scheduled",
             "position": {
               "x": 0,
@@ -50,7 +50,7 @@
           },
           {
             "id": "agenda",
-            "typeId": "core.ai.chatCompletion",
+            "typeId": "core.ai.chatCompletion@1.0.0",
             "name": "Build agenda",
             "position": {
               "x": 280,
@@ -65,7 +65,7 @@
           },
           {
             "id": "notify",
-            "typeId": "feature.notifications.nodes.notify",
+            "typeId": "feature.notifications.nodes.notify@1.0.0",
             "name": "Share agenda",
             "position": {
               "x": 560,
@@ -95,7 +95,7 @@
     },
     {
       "chainId": "meeting.notes-to-actions",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "label": "Notes → Owned Action Items",
       "description": "Debriefs raw meeting notes into decisions and action items; a human confirms, and each action becomes a tracked task.",
       "parameters": {
@@ -120,7 +120,7 @@
         "nodes": [
           {
             "id": "start",
-            "typeId": "core.trigger.event",
+            "typeId": "core.trigger.event@1.0.0",
             "name": "Notes submitted",
             "position": {
               "x": 0,
@@ -133,7 +133,7 @@
           },
           {
             "id": "debrief",
-            "typeId": "core.ai.chatCompletion",
+            "typeId": "core.ai.chatCompletion@1.0.0",
             "name": "Extract decisions + actions",
             "position": {
               "x": 280,
@@ -148,7 +148,7 @@
           },
           {
             "id": "gate",
-            "typeId": "core.chat.approvalGate",
+            "typeId": "core.chat.approvalGate@1.1.0",
             "name": "Confirm actions",
             "position": {
               "x": 560,
@@ -162,7 +162,7 @@
           },
           {
             "id": "gate-reject",
-            "typeId": "core.flow.noop",
+            "typeId": "core.flow.noop@1.0.0",
             "name": "Rejected — no tasks filed",
             "position": {
               "x": 840,
@@ -173,7 +173,7 @@
           },
           {
             "id": "task",
-            "typeId": "feature.crm.nodes.create-task",
+            "typeId": "feature.crm.nodes.create-task@1.0.0",
             "name": "File action task",
             "position": {
               "x": 840,

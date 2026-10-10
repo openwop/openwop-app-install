@@ -43,15 +43,15 @@ function client() {
   return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b), patch: (p: string, b?: unknown) => call('PATCH', p, b) };
 }
 
-const AB = (orgId: string, rest: string): string => `/v1/host/openwop-app/app-builder/orgs/${encodeURIComponent(orgId)}${rest}`;
+const AB = (orgId: string, rest: string): string => `/host/openwop-app/app-builder/orgs/${encodeURIComponent(orgId)}${rest}`;
 
 describe('the golden journey (ADR 0342 §Phase 8 / OP-07)', () => {
   it('blank → comprehensive doc → kits → export(preflight+openapi+lineage) → history → sanitized share', async () => {
     // 1. Sign in + org.
     const user = client();
-    const login = await user.post('/v1/host/openwop-app/test/login', { email: `gj-${Date.now()}@acme.test`, tenantId: `org:gj-${Date.now()}` });
+    const login = await user.post('/host/openwop-app/test/login', { email: `gj-${Date.now()}@acme.test`, tenantId: `org:gj-${Date.now()}` });
     expect(login.status, JSON.stringify(login.body)).toBe(201);
-    const org = await user.post('/v1/host/openwop-app/orgs', { name: 'Golden' });
+    const org = await user.post('/host/openwop-app/orgs', { name: 'Golden' });
     const orgId = org.body.orgId as string;
 
     // 2. A blank app-builder canvas (the ADR 0314 creation path).
@@ -116,9 +116,9 @@ describe('the golden journey (ADR 0342 §Phase 8 / OP-07)', () => {
     expect((versions.body.versions ?? versions.body ?? []).length).toBeGreaterThan(0);
 
     // 8. The public share serves the SANITIZED projection (ADR 0345 3a).
-    const link = await user.post(`/v1/host/openwop-app/sharing/orgs/${encodeURIComponent(orgId)}/links`, { resourceType: 'app_builder_canvas', resourceId: canvasId });
+    const link = await user.post(`/host/openwop-app/sharing/orgs/${encodeURIComponent(orgId)}/links`, { resourceType: 'app_builder_canvas', resourceId: canvasId });
     expect(link.status, JSON.stringify(link.body)).toBe(201);
-    const shared = await fetch(`${BASE}/v1/host/openwop-app/shared/${link.body.token}`);
+    const shared = await fetch(`${BASE}/host/openwop-app/shared/${link.body.token}`);
     expect(shared.status).toBe(200);
     const sharedBody = await shared.json() as { resource: { app: Record<string, unknown> } };
     const app = sharedBody.resource.app;

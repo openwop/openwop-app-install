@@ -93,7 +93,10 @@ export async function rekeyLegacyMemberSubjects(tenantId: string): Promise<Subje
       continue;
     }
 
-    const moved = await rekeyMemberSubject(legacySubject, canonical);
+    // CE-15 — the human was resolved IN `tenantId`; another tenant's member under
+    // the same string may be someone else (per-tenant SCIM/SAML IdPs), so only
+    // this tenant's rows move.
+    const moved = await rekeyMemberSubject(legacySubject, canonical, { tenantId });
     if (moved > 0) {
       rekeyed += 1;
     } else {

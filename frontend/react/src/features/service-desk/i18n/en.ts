@@ -46,10 +46,14 @@ export const messages = {
   sending: "Sending\u2026",
   emptyTitle: "No tickets yet",
   emptyBody: "Configure intake below or create tickets from WhatsApp, forms, or the API.",
-  intakeUnconfigured: "Intake is not configured \u2014 inbound WhatsApp and form messages are not being ticketed for this workspace.",
+  intakeUnconfigured: "Intake is not configured \u2014 inbound WhatsApp messages are not being ticketed for this workspace. Forms file tickets on their own when a form turns on \u201cCreate a support ticket\u201d.",
   intakeEnable: "File intake into this org",
   intakeCheckFailed: "Could not check whether inbound intake is configured for this workspace.",
   intakeRecheck: "Check again",
   threadStale: "Could not load the full conversation — you are seeing the summary from the queue, which may be missing recent messages.",
   threadRetry: "Reload the thread",
+  // ADR 0768 D5 — the Pocket assistant; its agent reads only orgs the caller can read.
+  pocketTitle: 'Support assistant',
+  pocketScope: 'tickets in organizations you can read',
+  pocketHint: 'Ask about tickets or get a reply drafted. Drafts wait for approval before anything is sent.',
 };

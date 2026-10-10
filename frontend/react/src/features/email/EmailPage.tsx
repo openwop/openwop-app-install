@@ -29,7 +29,7 @@ import { useFeatureAccess } from '../../featureToggles/FeatureAccessContext.js';
 import { GlobeIcon, LockIcon, PlusIcon, SaveIcon, SendIcon, TrashIcon, SparklesIcon } from '../../ui/icons/index.js';
 import {
   createCampaign, createTemplate, deleteCampaign, listCampaigns, listOrgs, listSegments,
-  listSends, listTemplates, sendCampaign, sendTestEmail, getEmailSettings, putEmailSettings, getSegmentEstimate, getEngagement, CONTACT_STAGES, type EmailBodyFormat,
+  listSends, listTemplates, sendCampaign, sendTestEmail, TestSendRateLimitedError, getEmailSettings, putEmailSettings, getSegmentEstimate, getEngagement, CONTACT_STAGES, type EmailBodyFormat,
   type Campaign, type ContactStage, type EmailSegment, type EmailTemplate, type Org, type SendLog,
 } from './emailClient.js';
 import { TemplateCard, TemplateRow } from './EmailTemplateViews.js';
@@ -138,11 +138,16 @@ export function EmailPage(): JSX.Element {
   // One click from destroying config; the save is blocked until a read lands.
   const [senderLoaded, setSenderLoaded] = useState(false);
   const [senderFailed, setSenderFailed] = useState(false);
+  // ADR 0848 D4 — the sender is an admin setting; an editor sees it read-only.
+  const [senderCanEdit, setSenderCanEdit] = useState(true);
   // Which campaign is mid-dispatch — a batched send is up to ~50 sequential
   // HTTP sends; the active button must show progress, not read as frozen.
   const [sendingId, setSendingId] = useState('');
   // R2 EM-G3 — the test-send modal target (one field on the shared Modal).
   const [testSendFor, setTestSendFor] = useState<Campaign | null>(null);
+  // ADR 0848 D5 — a refusal the user must act on stays INSIDE the dialog (focus is
+  // trapped there; a toast outside it can auto-dismiss unseen).
+  const [testSendError, setTestSendError] = useState<string | null>(null);
 
   // Saved segments (ADR 0211 §2) — tenant-scoped (no org). Fetched LAZILY
   // (CRMGAP-FE-6, not on mount) the first time either becomes true: the
@@ -202,7 +207,7 @@ export function EmailPage(): JSX.Element {
     setSenderFailed(false);
     setSender(''); // review F5 — never show the previous org's address in a form that can't save
     void getEmailSettings(org)
-      .then((s) => { if (!fresh()) return; setSender(s.senderAddress); setSenderConfigured(s.configured); setSenderLoaded(true); })
+      .then((s) => { if (!fresh()) return; setSender(s.senderAddress); setSenderConfigured(s.configured); setSenderCanEdit(s.canEdit !== false); setSenderLoaded(true); })
       .catch(() => { if (fresh()) { setSenderConfigured(null); setSenderFailed(true); } });
     setProviderStatus(null);
     void getProviderStatus(org).then((p) => { if (fresh()) setProviderStatus(p); }).catch(() => { if (fresh()) setProviderStatus('error'); });
@@ -413,7 +418,7 @@ export function EmailPage(): JSX.Element {
         icon={<GlobeIcon />}
       >
         <>
-          {senderConfigured === false ? <Notice variant="info" announce={t('senderUnconfiguredNotice')}>{t('senderUnconfiguredNotice')}</Notice> : null}
+          {senderConfigured === false ? <Notice variant="info" announce={t(senderCanEdit ? 'senderUnconfiguredNotice' : 'senderUnconfiguredAskAdmin')}>{t(senderCanEdit ? 'senderUnconfiguredNotice' : 'senderUnconfiguredAskAdmin')}</Notice> : null}
 
           {/* EM-UX-27 — a FAILED provider-status read renders a failed state
               with retry, never absence: "unknown" must not look like "not
@@ -450,8 +455,9 @@ export function EmailPage(): JSX.Element {
 
           <div className="surface-card u-p-4 surface-form">
             <label className="u-grid u-gap-1"><span className="u-label-sm">{t('senderLabel')}</span>
-              <input type="email" value={sender} onChange={(e) => setSender(e.target.value)} placeholder={t('senderPlaceholder')} disabled={!senderLoaded} />
+              <input type="email" value={sender} onChange={(e) => setSender(e.target.value)} placeholder={t('senderPlaceholder')} disabled={!senderLoaded} readOnly={!senderCanEdit} aria-readonly={!senderCanEdit || undefined} aria-describedby={senderLoaded && !senderCanEdit ? 'email-sender-admin-only' : undefined} />
             </label>
+            {senderLoaded && !senderCanEdit ? <p id="email-sender-admin-only" className="muted u-fs-12 u-m-0">{t('senderAdminOnly')}</p> : null}
             {senderFailed ? (
               // Review F5 — a FAILED read must not dress as eternal loading.
               // EM-UX-9 — and it must be HEARD: announced politely (it appears
@@ -464,7 +470,7 @@ export function EmailPage(): JSX.Element {
                 action={<Button variant="quiet" size="sm" type="button" onClick={() => load(orgId)}>{t('common:retry')}</Button>}
               />
             ) : !senderLoaded ? <p className="muted u-fs-12 u-m-0">{t('senderReadPending')}</p> : null}
-            <Button variant="primary" disabled={senderBusy || !senderLoaded} onClick={() => void saveSender()}><SaveIcon /> {t('senderSave')}</Button>
+            <Button variant="primary" disabled={senderBusy || !senderLoaded || !senderCanEdit} aria-describedby={senderLoaded && !senderCanEdit ? 'email-sender-admin-only' : undefined} onClick={() => void saveSender()}><SaveIcon /> {t('senderSave')}</Button>
           </div>
 
           <div className="surface-card u-p-4 surface-form">
@@ -776,13 +782,19 @@ export function EmailPage(): JSX.Element {
       {testSendFor ? (
         <TestSendModal
           campaignName={tplName(testSendFor.templateId)}
-          onClose={() => setTestSendFor(null)}
+          error={testSendError}
+          onClose={() => { setTestSendFor(null); setTestSendError(null); }}
           onSubmit={async (to) => {
+            setTestSendError(null);
             try {
               await sendTestEmail(orgId, testSendFor.campaignId, to);
               setTestSendFor(null);
               toast.success(t('testSendOk', { to }));
-            } catch (e) { toast.error(e instanceof Error ? e.message : t('testSendFailed')); }
+            } catch (e) {
+              setTestSendError(e instanceof TestSendRateLimitedError
+                ? t('testSendRateLimited', { minutes: Math.ceil(e.retryAfterSeconds / 60) })
+                : e instanceof Error ? e.message : t('testSendFailed'));
+            }
           }}
         />
       ) : null}
@@ -792,14 +804,14 @@ export function EmailPage(): JSX.Element {
 
 /** R2 EM-G3 — one address field on the shared Modal; the send is marked
  *  ([Test] subject), token-honest, and never touches the campaign's ledger. */
-function TestSendModal({ campaignName, onClose, onSubmit }: {
-  campaignName: string; onClose: () => void; onSubmit: (to: string) => void | Promise<void>;
+function TestSendModal({ campaignName, error, onClose, onSubmit }: {
+  campaignName: string; error?: string | null; onClose: () => void; onSubmit: (to: string) => void | Promise<void>;
 }): JSX.Element {
   const { t } = useTranslation('email');
   const [to, setTo] = useState('');
   const [busy, setBusy] = useState(false);
   return (
-    <Modal label={t('testSendTitle', { name: campaignName })} onClose={() => { if (!busy) onClose(); }}>
+    <Modal label={t('testSendTitle', { name: campaignName })} onClose={() => { if (!busy) onClose(); }} {...(error ? { error, errorAnnounce: error } : {})}>
       <form className="u-grid u-gap-3" onSubmit={(e) => { e.preventDefault(); if (busy || !to.trim()) return; setBusy(true); void Promise.resolve(onSubmit(to.trim())).finally(() => setBusy(false)); }}>
         <h2 className="u-fs-16 u-m-0">{t('testSendTitle', { name: campaignName })}</h2>
         <p className="muted u-fs-12 u-m-0">{t('testSendHint')}</p>

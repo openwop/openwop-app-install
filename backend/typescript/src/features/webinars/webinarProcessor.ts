@@ -21,6 +21,7 @@ import { createActivity, getActivity, makeLinkValidators } from '../crm/crmEntit
 import { ensureContactWithOutcome } from '../crm/contactsService.js';
 import { crmMutated } from '../crm/emit.js';
 import { upsertMarketingEvent } from './entities/marketingEvent.js';
+import { tenantMayUseFeature } from '../../host/tenantFeatureGate.js';
 
 const log = createLogger('webinars.processor');
 
@@ -154,11 +155,19 @@ export async function ingestWebinarEvent(tenantId: string, orgId: string, connec
   }
 }
 
+/** ADR 0820 §7 / G10 — the toggle the Zoom observer's work belongs to. */
+export const WEBINARS_FEATURE_ID = 'webinars';
+
 /** The inbound-webhook OBSERVER registered on the shared connections seam. Resolves
  *  the org from the connection, normalizes the Zoom body, and ingests it. */
 export async function onVerifiedWebinarWebhook(event: { tenantId: string; connectionId: string; body: Record<string, unknown>; now: number }): Promise<void> {
   const ev = normalizeZoomEvent(event.body);
   if (!ev) return; // event type we don't track — safe no-op
+  // ADR 0820 §7 / G10 — ingesting registrants/attendees into CRM IS the webinars
+  // product, so a tenant that may not use `webinars` (toggle off, or a lapsed
+  // plan) is skipped silently. The provider still gets its ACK: the inbound
+  // route answers before observers, and an observer never fails the delivery.
+  if (!(await tenantMayUseFeature(WEBINARS_FEATURE_ID, event.tenantId))) return;
   const orgId = await resolveOrg(event.tenantId, event.connectionId);
   if (!orgId) {
     log.warn('webinar webhook dropped — connection has no org', { connectionId: event.connectionId });

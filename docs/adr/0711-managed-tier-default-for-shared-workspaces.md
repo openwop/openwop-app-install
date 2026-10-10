@@ -2,6 +2,16 @@
 
 Status: **Accepted — BYOK write gating (C + C′) implemented** 2026-09-17
 
+**Reporting correction (2026-10-08, ADR 0517 follow-up):** when the host requires
+anonymous managed-tier callers to sign in, `active-config` reports
+`signInRequired` for both a defaulted managed binding and a stored managed
+binding. Being stored does not bypass `prepareManagedDispatch`'s sign-in gate.
+GET and successful PUT share that predicate; own-key bindings remain exempt.
+This changes the host-extension report only, preserving dispatch and BYOK write
+authority. The SPA presents the warning before send and consumes the updated
+server verdict after a binding change. Each mounted conversation notice owns
+its heading ID, including the keep-alive tab deck.
+
 ## Context
 
 A participant's chat surfaces (`EmbeddedChatPanel`, `/guide`) gate on the

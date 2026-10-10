@@ -57,7 +57,7 @@ const VALID_CAMPAIGN = {
 };
 
 describe('CFP-1 — the agents pack rides the real registered tools', () => {
-  const packDir = new URL('../../../packs/feature.campaign-studio.agents/', import.meta.url);
+  const packDir = new URL('../../../packs/vendor.openwop-app.campaign-studio.agents/', import.meta.url);
   const manifest = JSON.parse(readFileSync(new URL('pack.json', packDir), 'utf8')) as {
     agents: { toolAllowlist: string[]; systemPromptRef: string }[];
   };
@@ -207,12 +207,12 @@ describe('CFP-1 — render tool: gates, repair-loop errors, persistence', () => 
   });
 
   it('stamps producedBy provenance metadata (agent when agentProfileId, else user); owner stays the human', async () => {
-    const p = provider({ actingUserId: 'u-1', agentProfileId: 'feature.campaign-studio.agents.default', runId: 'run-prov' });
+    const p = provider({ actingUserId: 'u-1', agentProfileId: 'vendor.openwop-app.campaign-studio.agents.default', runId: 'run-prov' });
     const created = JSON.parse((await p.executeTool({ name: CAMPAIGN_STUDIO_RENDER_TOOL_ID, input: { campaign: { ...VALID_CAMPAIGN, name: 'Provenance' } } })).content) as { canvasId: string };
     const canvas = await getCanvasForTenant(TENANT, created.canvasId);
     expect(canvas?.ownerSubject).toEqual({ kind: 'user', id: 'u-1' });
     const meta = canvas?.metadata as { producedBy?: { kind: string; id: string }; runId?: string } | undefined;
-    expect(meta?.producedBy).toEqual({ kind: 'agent', id: 'feature.campaign-studio.agents.default' });
+    expect(meta?.producedBy).toEqual({ kind: 'agent', id: 'vendor.openwop-app.campaign-studio.agents.default' });
     expect(meta?.runId).toBe('run-prov');
   });
 });

@@ -1,12 +1,12 @@
 {
   "name": "core.openwop.workflows.weekly-digest",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "kind": "workflow-chain",
   "description": "Weekly-digest chains (RFC 0013): scheduled roundups that keep a team informed without a meeting — a research digest on a watched topic, and a team status roll-up. In-app + gated-send sinks; replay-deterministic.",
   "author": "openwop",
   "license": "Apache-2.0",
   "engines": {
-    "openwop": ">=1.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "keywords": [
     "Weekly digest"
@@ -14,7 +14,7 @@
   "chains": [
     {
       "chainId": "digest.topic-watch",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "label": "Weekly Topic Watch → Digest",
       "description": "A scheduled research digest: searches a watched topic, summarizes what's new with sources, and posts an in-app notification.",
       "parameters": {
@@ -37,7 +37,7 @@
         "nodes": [
           {
             "id": "cron",
-            "typeId": "core.trigger.schedule",
+            "typeId": "core.trigger.schedule@1.0.0",
             "name": "Weekly",
             "position": {
               "x": 0,
@@ -50,7 +50,7 @@
           },
           {
             "id": "search",
-            "typeId": "core.web.search",
+            "typeId": "core.web.search@1.0.0",
             "name": "Search topic",
             "position": {
               "x": 280,
@@ -61,7 +61,7 @@
           },
           {
             "id": "digest",
-            "typeId": "core.ai.chatCompletion",
+            "typeId": "core.ai.chatCompletion@1.0.0",
             "name": "Write digest",
             "position": {
               "x": 560,
@@ -76,7 +76,7 @@
           },
           {
             "id": "notify",
-            "typeId": "feature.notifications.nodes.notify",
+            "typeId": "feature.notifications.nodes.notify@1.0.0",
             "name": "Post digest",
             "position": {
               "x": 840,
@@ -110,7 +110,7 @@
     },
     {
       "chainId": "digest.team-status",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "label": "Weekly Team Status → Roll-Up",
       "description": "Rolls a week of status updates into a concise leadership summary (wins, risks, asks) and sends it to the channel after a human review.",
       "parameters": {
@@ -131,7 +131,7 @@
         "nodes": [
           {
             "id": "cron",
-            "typeId": "core.trigger.schedule",
+            "typeId": "core.trigger.schedule@1.0.0",
             "name": "Weekly",
             "position": {
               "x": 0,
@@ -144,7 +144,7 @@
           },
           {
             "id": "rollup",
-            "typeId": "core.ai.chatCompletion",
+            "typeId": "core.ai.chatCompletion@1.0.0",
             "name": "Roll up status",
             "position": {
               "x": 280,
@@ -159,7 +159,7 @@
           },
           {
             "id": "gate",
-            "typeId": "core.chat.approvalGate",
+            "typeId": "core.chat.approvalGate@1.1.0",
             "name": "Review roll-up",
             "position": {
               "x": 560,
@@ -173,7 +173,7 @@
           },
           {
             "id": "gate-reject",
-            "typeId": "core.flow.noop",
+            "typeId": "core.flow.noop@1.0.0",
             "name": "Rejected — not posted",
             "position": {
               "x": 840,
@@ -184,7 +184,7 @@
           },
           {
             "id": "slack",
-            "typeId": "core.openwop.integration.slack-message",
+            "typeId": "core.openwop.integration.slack-message@1.0.0",
             "name": "Post roll-up",
             "position": {
               "x": 840,

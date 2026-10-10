@@ -622,12 +622,21 @@ export const SUITES: TestSuite[] = [
   },
   {
     key: 'consent', feature: 'Consent', route: '/consent', description: 'Region-aware consent + data-subject (GDPR).',
-    toggle: offVia('consent'), updatedAt: AT, sourceCommit: SHA, sourceFiles: ['frontend/react/src/features/consent'],
+    toggle: offVia('consent'), updatedAt: '2026-10-07', sourceCommit: '948e1d0f6', sourceFiles: ['frontend/react/src/features/consent'],
     cases: [
       { id: 'CONSENT-00', title: 'Enable Consent', priority: 'P0', blocker: true, preconditions: ['Admin'],
         steps: [{ action: 'Turn the "consent" toggle ON and reload', expect: 'Consent appears in the nav and /consent loads' }] },
       { id: 'CONSENT-01', title: 'Consent records render', priority: 'P1', preconditions: ['Consent enabled'],
         steps: [{ action: 'Open /consent', expect: 'Region-aware consent + data-subject request tooling render' }] },
+      // ADR 0849 D1/D6 — the regime, the ledger and the per-subject lookup are admin-tier.
+      { id: 'CONSENT-02', title: 'A non-admin sees the regime read-only', priority: 'P1', preconditions: ['Consent enabled', 'Signed in as an Editor (not Admin) of a shared workspace'],
+        steps: [{ action: 'Open /consent', expect: 'The policy fields are disabled with a note that only workspace admins change it; no subject lookup, no Erase, and the records list is replaced by an admins-only note' }] },
+      // ADR 0849 D3 — the lookup proves consent and reports erasure.
+      { id: 'CONSENT-03', title: 'Lookup shows consent history and erasure', priority: 'P1', preconditions: ['Consent enabled', 'Admin', 'A subject who opted in, then changed a channel'],
+        steps: [
+          { action: 'Look up the subject', expect: 'A "Consent history" list shows each change newest first, with date, how it was captured and what was granted or withdrawn' },
+          { action: 'Erase the subject, then look them up again', expect: 'The lookup says "Erased on <date>" and offers Re-admit — never "No consent record"' },
+        ] },
     ],
   },
   {
@@ -1104,7 +1113,7 @@ export const SUITES: TestSuite[] = [
     cases: [ { id: 'NAVS-01', title: 'Reorder nav', priority: 'P3', preconditions: ['Admin'],
       steps: [ { action: 'Open /menu-settings, hide a destination and reorder another', expect: 'The sidebar reflects the change and persists across reload' } ] } ] },
   { key: 'context-economy', feature: 'Context Economy', route: '/', description: 'Host-internal context/token economy (admin-visible).',
-    toggle: offVia('context-economy'), updatedAt: '2026-07-01', sourceCommit: 'e1a37bb2', sourceFiles: ['backend/typescript/src/features/context-economy'],
+    toggle: offVia('context-economy'), updatedAt: '2026-07-01', sourceCommit: 'e1a37bb2', sourceFiles: ['backend/typescript/src/routes/featureToggles.ts'],
     cases: [ { id: 'CECON-01', title: 'Economy applies', priority: 'P3', preconditions: ['context-economy enabled'],
       steps: [ { action: 'Run a long conversation and observe context handling', expect: 'Context is economized per policy; no truncation error surfaces to the user' } ] } ] },
   // ADR 0604 (TOCU-3) — REWRITTEN. The single P3 case here was unfalsifiable:
@@ -1639,7 +1648,7 @@ export const SUITES: TestSuite[] = [
       { id: 'CFP-03', title: 'CSM "Ask health insights" — grounded in the account book', priority: 'P1', blocker: false,
         preconditions: ['csm toggle ON', 'At least one customer-success account with health state on /csm'],
         steps: [
-          { action: 'On /csm, press "Ask health insights" in the page header', expect: 'The main chat opens at /?agent=feature.csm.agents.health-insights with the seeded at-risk-accounts prompt' },
+          { action: 'On /csm, press "Ask health insights" in the page header', expect: 'The main chat opens at /?agent=vendor.openwop-app.csm.agents.health-insights with the seeded at-risk-accounts prompt' },
           { action: 'Send it and compare the reply against /csm', expect: 'The named accounts and health states MATCH the page — the agent read the account book via its tools (grounded), it did not hallucinate a portfolio' },
         ] },
       { id: 'CFP-04', title: 'Territory model activate/archive is submitted for review, never applied directly', priority: 'P1', blocker: false,
@@ -1737,7 +1746,7 @@ export const SUITES: TestSuite[] = [
       { id: 'WFV-05', title: 'ADR 0479 — published pins snapshot/apply as an environments domain (apply-only)', priority: 'P1',
         preconditions: ['environments toggle ON (/feature-toggles — the pins domain rides the Environments page)', 'Admin; ≥1 published workflow'],
         steps: [
-          { action: 'On /environments press "Snapshot current config", then "Preview diff" in the Promote wizard (or "Apply to live" on a snapshot)', expect: 'The per-domain breakdown lists "Published workflow pins" beside "Feature toggles" and "Publish pointers"' },
+          { action: 'On /environments press "Snapshot current config", then "Preview diff" in the Promote wizard (or "Apply to live" on a snapshot)', expect: 'The per-domain breakdown lists "Published workflow pins" beside "Publish pointers" (feature toggles are operator state and are not snapshotted — ADR 0819 §2)' },
           { action: 'Publish a different revision of one workflow, then apply the older snapshot and re-read the diff line', expect: 'The pins domain restores APPLY-ONLY: removed entries render as "kept (not in snapshot — apply never clears)" — a workflow absent from the snapshot keeps its live pin; a foreign/pruned revision fails NAMED (listing workflowIds), never silently' },
         ] },
     ],

@@ -1,6 +1,7 @@
 {
   "name": "feature.users.nodes",
-  "version": "1.0.1",
+  "version": "1.0.2",
+  "kind": "node",
   "description": "Users feature node pack (ADR 0617 D2) — the host-account lifecycle over the ctx.features.users surface. deactivate disables THIS workspace's own durable account (ends its live sessions, ADR 0621) and reactivate re-enables one. Both are side-effects gated on the run's acting user holding host:members:manage in the run's tenant — the same predicate the /users admin routes use; a system run (schedule, webhook, host-event-started) fails closed. Ids-only inputs and outputs. The offboarding step people-hr.offboarding's `deprovision-host` composes.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
@@ -12,7 +13,7 @@
     "lifecycle"
   ],
   "engines": {
-    "openwop": ">=1.0.0 <2.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "nodes": [
     {

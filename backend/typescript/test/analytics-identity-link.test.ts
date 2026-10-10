@@ -19,6 +19,7 @@ import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { linkSession, contactForSession, eraseSubjectLinks, sessionsForContact } from '../src/features/analytics/identityLinkService.js';
 import { DurableCollection } from '../src/host/hostExtPersistence.js';
+import { findContactByEmail } from '../src/features/crm/contactsService.js';
 import { deleteSubject } from '../src/features/consent/consentService.js';
 import { instrumentBody, deleteSubjectEngagement, claimClickTokenForSession } from '../src/features/email/engagementService.js';
 import { recordEvent } from '../src/features/analytics/analyticsService.js';
@@ -40,10 +41,12 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+interface Res<T = unknown> { status: number; body: T }
+interface OrgBody { orgId: string }
+interface FormBody { formId: string }
 function client(initialCookie = '') {
   let cookie = initialCookie;
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
@@ -52,10 +55,15 @@ function client(initialCookie = '') {
     const h = res.headers as { getSetCookie?: () => string[] };
     const sc = typeof h.getSetCookie === 'function' ? h.getSetCookie() : [];
     for (const c of sc) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    // JSON boundary: the caller names the response shape it reads (`Res<T>`).
+    const out = (res.status === 204 ? undefined : await res.json().catch(() => undefined)) as T;
     return { status: res.status, body: out };
   };
-  return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b), patch: (p: string, b?: unknown) => call('PATCH', p, b) };
+  return {
+    get: <T = unknown>(p: string) => call<T>('GET', p),
+    post: <T = unknown>(p: string, b?: unknown) => call<T>('POST', p, b),
+    patch: <T = unknown>(p: string, b?: unknown) => call<T>('PATCH', p, b),
+  };
 }
 const pub = client();
 let n = 0;
@@ -65,7 +73,7 @@ async function ownerWithOrg(tenantId: string): Promise<{ owner: ReturnType<typeo
   const owner = client();
   const su = await owner.post('/host/openwop-app/test/login', { email: `idlink-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(su.status, JSON.stringify(su.body)).toBe(201);
-  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post<OrgBody>('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return { owner, orgId: org.body.orgId };
 }
@@ -81,6 +89,9 @@ describe('ADR 0226 — link table (deterministic only)', () => {
     await linkSession(T, 'sess-1', 'ct-b', 'email-click');
     expect(await contactForSession(T, 'sess-1')).toBe('ct-b');
     // Tenant isolation: the same session key under another tenant is unlinked.
+    // DOUBLE GUARD, stated: the row key carries the tenant AND `contactForSession`
+    // re-checks `row.tenantId` — a key that dropped the tenant stays green here and
+    // is caught by the erasure cases (prefix scans), probe w8g2-idl-tenant-key.
     expect(await contactForSession('user:idlink-other', 'sess-1')).toBeNull();
     // Empty inputs are inert no-ops (best-effort writers).
     expect(await linkSession(T, '', 'ct-a', 'form-submit')).toBeNull();
@@ -119,7 +130,10 @@ describe('ADR 0226 — link table (deterministic only)', () => {
     await peer.put({ key: `${T8}::sess-peer`, tenantId: T8, sessionKey: 'sess-peer', contactId: 'ct-8', source: 'form-submit', at: new Date().toISOString() });
     // The STALE read still cannot see it — the defect is real, not hypothetical.
     expect(await sessionsForContact(T8, 'ct-8')).toEqual(['sess-primed']);
-    // The FRESH read (what the resolver now uses) does.
+    // The FRESH read (what the resolver now uses) does — this line is the mechanism
+    // witness. The end-to-end erase below is a DOUBLE PATH, stated: the resolver's
+    // sibling hop (sess-primed → ct-8 → sessionsForContact fresh) also reaches the peer
+    // session, so staling only the direct hop stays green (probe w8g2-idl-resolver-fresh).
     expect((await sessionsForContact(T8, 'ct-8', { fresh: true })).sort()).toEqual(['sess-peer', 'sess-primed']);
     // …and end-to-end: erasing the CONTACT reaches the peer-written session's
     // analytics rows, which the stale closure would have left behind.
@@ -142,7 +156,7 @@ describe('ADR 0226 — form-submit writer', () => {
   };
   const makePublishedForm = async (tenantId: string): Promise<string> => {
     const { owner, orgId } = await ownerWithOrg(tenantId);
-    const form = (await owner.post(`/host/openwop-app/forms/orgs/${orgId}/forms`, FORM)).body;
+    const form = (await owner.post<FormBody>(`/host/openwop-app/forms/orgs/${orgId}/forms`, FORM)).body;
     const pubd = await owner.patch(`/host/openwop-app/forms/orgs/${orgId}/forms/${form.formId}/status`, { status: 'published' });
     expect(pubd.status, JSON.stringify(pubd.body)).toBe(200);
     return form.formId;
@@ -156,7 +170,10 @@ describe('ADR 0226 — form-submit writer', () => {
     });
     expect(sub.status, JSON.stringify(sub.body)).toBe(201);
     const contactId = await contactForSession(FT, 'sess-form-1');
-    expect(contactId).toBeTruthy();
+    // The link names THE contact this submit created, not merely some contact.
+    const ada = await findContactByEmail(FT, 'ada-link@example.com');
+    expect(ada, 'precondition: the submit created the contact').toBeTruthy();
+    expect(contactId).toBe(ada!.contactId);
     // No sessionKey ⇒ no link (and no error) — purely additive.
     const plain = await pub.post(`/host/openwop-app/public-forms/${formId}/submit`, { values: { name: 'Bea', email: 'bea-link@example.com' } });
     expect(plain.status).toBe(201);
@@ -252,6 +269,10 @@ describe('ADR 0226 — email-click (owx) beacon writer', () => {
     expect(await contactForSession(AT, 's-cross')).toBeNull();
   });
 
+  // CEILING, stated (grade-tests w8): an unknown token resolves to null without
+  // throwing, so the best-effort catch is never exercised here; this pins "unknown
+  // token ⇒ 201 + no link", and the link leg is live only against a resolver that
+  // invents a contact.
   it('a bogus owx is inert (best-effort — the beacon write never fails)', async () => {
     const BT3 = 'user:idlink-bogus';
     const { orgId } = await ownerWithOrg(BT3);

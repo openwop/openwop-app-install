@@ -1,0 +1,7 @@
+# feature.podcasts.nodes
+
+## Full description
+
+_Moved from `pack.json` `description`, which the v2 manifest schema caps at 1024 characters._
+
+Multi-speaker podcast generation pipeline — workflow nodes that compose existing seams into the `podcasts.generate` built-in workflow. `select-content` grounds on a notebook's sources via ctx.features.notebooks; `outline` and `transcript` draft the script with ctx.callAI and persist versioned Documents (ctx.features.documents); `synthesize` voices each dialogue turn via ctx.callSpeechSynthesizer into per-turn audio clips; `mix` assembles the ordered clip list onto the episode (ctx.features.podcasts.recordEpisodeResult). The only run input is episodeId — each node resolves the episode/episodeProfile/speakerProfile config authoritatively from ctx.features.podcasts. Replay posture (ADR 0679, corrected): `mix` and `synthesize` declare `side-effectful` and ARE replay-served. `outline`/`transcript` reach ctx.callAI, so they are held out of the served set by design (their model call is discharged by the invocation log) and their Documents are minted at a content-derived deterministic id instead. `role:"action"` on its own confers NO replay guarantee — the previous wording claimed it did, and named the synthesizer, which was the node least protected. Every node reports failure TYPED (never `status:'success'` with an empty payload) and writes the reason onto the episode's `error` field; the two model-calling nodes each carry exactly ONE bounded, error-fed repair (ADR 0603).

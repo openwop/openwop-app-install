@@ -53,20 +53,20 @@ function client(): Client {
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b), del: (p) => call('DELETE', p) };
 }
 
-const P = '/v1/host/openwop-app/projects';
-const DOC = (orgId: string): string => `/v1/host/openwop-app/documents/orgs/${encodeURIComponent(orgId)}/documents`;
-const CANVAS = (orgId: string): string => `/v1/host/openwop-app/app-builder/orgs/${encodeURIComponent(orgId)}/canvases`;
-const ARTIFACT = (artifactId: string): string => `/v1/host/openwop-app/artifacts/${encodeURIComponent(artifactId)}`;
-const PM = '/v1/host/openwop-app/priority-matrix';
-const RANKING = (boardId: string): string => `/v1/host/openwop-app/work-selection/boards/${encodeURIComponent(boardId)}/ranking`;
+const P = '/host/openwop-app/projects';
+const DOC = (orgId: string): string => `/host/openwop-app/documents/orgs/${encodeURIComponent(orgId)}/documents`;
+const CANVAS = (orgId: string): string => `/host/openwop-app/app-builder/orgs/${encodeURIComponent(orgId)}/canvases`;
+const ARTIFACT = (artifactId: string): string => `/host/openwop-app/artifacts/${encodeURIComponent(artifactId)}`;
+const PM = '/host/openwop-app/priority-matrix';
+const RANKING = (boardId: string): string => `/host/openwop-app/work-selection/boards/${encodeURIComponent(boardId)}/ranking`;
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
 
 /** Owner + a PRIVATE project + a project-owned document. */
 async function privateProjectDoc(visibility: 'private' | 'org' = 'private') {
   const tenantId = `org:adr0610-${Date.now()}-${n++}`;
   const owner = client();
-  await owner.post('/v1/host/openwop-app/test/login', { email: uniqEmail('own'), tenantId });
-  const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'PrivCo' })).body.orgId;
+  await owner.post('/host/openwop-app/test/login', { email: uniqEmail('own'), tenantId });
+  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'PrivCo' })).body.orgId;
   const projectId = (await owner.post(P, { orgId, name: 'Secret' })).body.id;
   const create = await owner.post(DOC(orgId), {
     title: 'Merger plan', kind: 'note', format: 'markdown',
@@ -81,7 +81,7 @@ async function privateProjectDoc(visibility: 'private' | 'org' = 'private') {
 /** A real org VIEWER (workspace:read) of the same org who is NOT a project member. */
 async function orgViewer(tenantId: string, orgId: string): Promise<Client & { userId: string }> {
   const viewer = client();
-  const viewerId = (await viewer.post('/v1/host/openwop-app/test/login', { email: uniqEmail('view'), tenantId })).body.user.userId;
+  const viewerId = (await viewer.post('/host/openwop-app/test/login', { email: uniqEmail('view'), tenantId })).body.user.userId;
   await createMember({ tenantId, orgId, subject: viewerId, displayName: 'V', roles: ['viewer'] });
   return Object.assign(viewer, { userId: viewerId as string });
 }
@@ -142,10 +142,10 @@ describe("ADR 0610 D3' — a private project's document is not readable by a non
     const viewer = await orgViewer(tenantId, orgId);
     const aid = `document:${documentId}`;
     // Owner control: the doc IS in the owner's Library (non-vacuous).
-    const ownerLib = await owner.get('/v1/host/openwop-app/artifacts');
+    const ownerLib = await owner.get('/host/openwop-app/artifacts');
     expect(JSON.stringify(ownerLib.body.artifacts ?? [])).toContain(aid);
     // Non-member: NOT enumerated.
-    const viewerLib = await viewer.get('/v1/host/openwop-app/artifacts');
+    const viewerLib = await viewer.get('/host/openwop-app/artifacts');
     expect(JSON.stringify(viewerLib.body.artifacts ?? [])).not.toContain(aid);
     expect(JSON.stringify(viewerLib.body.artifacts ?? [])).not.toContain('Merger plan');
   });
@@ -155,8 +155,8 @@ describe("ADR 0610 D3' — a private project's document is not readable by a non
 async function privateProjectCanvas(visibility: 'private' | 'org' = 'private') {
   const tenantId = `org:adr0610c-${Date.now()}-${n++}`;
   const owner = client();
-  await owner.post('/v1/host/openwop-app/test/login', { email: uniqEmail('cown'), tenantId });
-  const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'PrivCo' })).body.orgId;
+  await owner.post('/host/openwop-app/test/login', { email: uniqEmail('cown'), tenantId });
+  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'PrivCo' })).body.orgId;
   const projectId = (await owner.post(P, { orgId, name: 'Secret' })).body.id;
   const canvas = await createCanvasForTenant(tenantId, {
     canvasTypeId: 'canvas.app-builder', name: 'Secret app',
@@ -200,8 +200,8 @@ describe("ADR 0610 D3' — a private project's canvas is not readable by a non-m
 async function privateProjectList(visibility: 'private' | 'org' = 'private') {
   const tenantId = `org:adr0610p-${Date.now()}-${n++}`;
   const owner = client();
-  await owner.post('/v1/host/openwop-app/test/login', { email: uniqEmail('pown'), tenantId });
-  const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'PrivCo' })).body.orgId;
+  await owner.post('/host/openwop-app/test/login', { email: uniqEmail('pown'), tenantId });
+  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'PrivCo' })).body.orgId;
   const projectId = (await owner.post(P, { orgId, name: 'Secret' })).body.id;
   const created = await owner.post(`${PM}/lists`, { orgId, projectId, name: 'Secret backlog' });
   expect(created.status, JSON.stringify(created.body)).toBe(201);

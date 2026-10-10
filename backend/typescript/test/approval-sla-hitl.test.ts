@@ -9,6 +9,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
+import { bareRunId } from './support/bareRunId.js';
 
 describe('HITL completion (ADR 0478, sqlite memory app)', () => {
   let server: http.Server;
@@ -21,7 +22,7 @@ describe('HITL completion (ADR 0478, sqlite memory app)', () => {
     process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
     const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
     await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
-    expect((await call('POST', '/v1/host/openwop-app/workflows', {
+    expect((await call('POST', '/host/openwop-app/workflows', {
       workflowId: WF_GATE,
       nodes: [{ nodeId: 'gate', typeId: 'core.approvalGate', config: { prompt: 'Ship it?' } }],
       edges: [],
@@ -51,17 +52,17 @@ describe('HITL completion (ADR 0478, sqlite memory app)', () => {
       // route 403s (the accessControl fail-closed default, covered by its
       // own suite). The assertion below pins that the route goes THROUGH
       // the scope resolver (a 401 without a principal; 200 as demo-owner).
-      const noAuth = await fetch(`${BASE}/v1/host/openwop-app/approvals/sla-policy`, {
+      const noAuth = await fetch(`${BASE}/host/openwop-app/approvals/sla-policy`, {
         method: 'PUT', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ enabled: true, remindAfterMs: 60000 }),
       });
       expect([401, 403]).toContain(noAuth.status);
-      const put = await call('PUT', '/v1/host/openwop-app/approvals/sla-policy', {
+      const put = await call('PUT', '/host/openwop-app/approvals/sla-policy', {
         enabled: true, remindAfterMs: 60000,
       });
       expect(put.status).toBe(200); // demo-owner semantics
       // Reads stay member-level.
-      expect((await call('GET', '/v1/host/openwop-app/approvals/sla-policy')).status).toBe(200);
+      expect((await call('GET', '/host/openwop-app/approvals/sla-policy')).status).toBe(200);
       // Reset for later suites.
       const { setApprovalSlaPolicy } = await import('../src/host/approvalSla.js');
       await setApprovalSlaPolicy({ tenantId: 'default', enabled: false });
@@ -138,10 +139,10 @@ describe('HITL completion (ADR 0478, sqlite memory app)', () => {
 
   describe('email pref routes', () => {
     it('round-trips the recipient pref; validates the address', async () => {
-      expect((await call('PUT', '/v1/host/openwop-app/approvals/email-pref', { email: 'not-an-email', enabled: true })).status).toBe(400);
-      const put = await call<{ email: string; enabled: boolean }>('PUT', '/v1/host/openwop-app/approvals/email-pref', { email: 'me@example.com', enabled: true });
+      expect((await call('PUT', '/host/openwop-app/approvals/email-pref', { email: 'not-an-email', enabled: true })).status).toBe(400);
+      const put = await call<{ email: string; enabled: boolean }>('PUT', '/host/openwop-app/approvals/email-pref', { email: 'me@example.com', enabled: true });
       expect(put.status).toBe(200);
-      const get = await call<{ email?: string; enabled: boolean }>('GET', '/v1/host/openwop-app/approvals/email-pref');
+      const get = await call<{ email?: string; enabled: boolean }>('GET', '/host/openwop-app/approvals/email-pref');
       expect(get.body.email).toBe('me@example.com');
       expect(get.body.enabled).toBe(true);
     });
@@ -150,7 +151,7 @@ describe('HITL completion (ADR 0478, sqlite memory app)', () => {
   describe('decide-by-email confirm page (RFC 0093 token path)', () => {
     async function settle(runId: string, until: (s: string) => boolean): Promise<string> {
       for (let i = 0; i < 200; i += 1) {
-        const r = await call<{ status: string }>('GET', `/v1/runs/${runId}`);
+        const r = await call<{ status: string }>('GET', `/runs/${runId}`);
         if (r.body.status && until(r.body.status)) return r.body.status;
         await new Promise((res) => setTimeout(res, 25));
       }
@@ -158,22 +159,22 @@ describe('HITL completion (ADR 0478, sqlite memory app)', () => {
     }
 
     it('GET renders a form and NEVER mutates; POST resolves the real gate', async () => {
-      const run = await call<{ runId: string }>('POST', '/v1/runs', { workflowId: WF_GATE, inputs: {} });
+      const run = await call<{ runId: string }>('POST', '/runs', { workflowId: WF_GATE, inputs: {} });
       expect(run.status).toBe(201);
       expect(await settle(run.body.runId, (s) => s.startsWith('waiting'))).toContain('waiting');
 
-      const list = await call<{ interrupts: Array<{ token: string }> }>('GET', `/v1/host/openwop-app/runs/${run.body.runId}/interrupts`);
+      const list = await call<{ interrupts: Array<{ token: string }> }>('GET', `/host/openwop-app/runs/${bareRunId(run.body.runId)}/interrupts`);
       const token = list.body.interrupts[0]!.token;
       expect(token).toBeTruthy();
 
       // GET: a form, and the gate is STILL open afterwards (no mutation).
-      const page = await call('GET', `/v1/host/openwop-app/interrupt-action?token=${encodeURIComponent(token)}&action=approve`);
+      const page = await call('GET', `/host/openwop-app/interrupt-action?token=${encodeURIComponent(token)}&action=approve`);
       expect(page.status).toBe(200);
       expect(page.text).toContain('<form');
-      expect((await call<{ status: string }>('GET', `/v1/runs/${run.body.runId}`)).body.status).toContain('waiting');
+      expect((await call<{ status: string }>('GET', `/runs/${run.body.runId}`)).body.status).toContain('waiting');
 
       // POST (urlencoded, as the form submits): resolves the gate.
-      const res = await fetch(`${BASE}/v1/host/openwop-app/interrupt-action`, {
+      const res = await fetch(`${BASE}/host/openwop-app/interrupt-action`, {
         method: 'POST',
         headers: { 'content-type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({ token, action: 'approve', voter: '', comment: 'from email' }).toString(),
@@ -184,7 +185,7 @@ describe('HITL completion (ADR 0478, sqlite memory app)', () => {
 
     it('a QUORUM gate is never resolved by one emailed click (review HIGH-1 regression)', async () => {
       const WF_Q = 'hitl-wf-quorum';
-      expect((await call('POST', '/v1/host/openwop-app/workflows', {
+      expect((await call('POST', '/host/openwop-app/workflows', {
         workflowId: WF_Q,
         nodes: [{ nodeId: 'gate', typeId: 'core.approvalGate', config: {
           prompt: 'Two of you must agree.', requiredApprovals: 2,
@@ -193,9 +194,9 @@ describe('HITL completion (ADR 0478, sqlite memory app)', () => {
         edges: [],
         metadata: { name: WF_Q, lifecycle: { transient: true, generatedBy: 'test' } },
       })).status).toBe(201);
-      const run = await call<{ runId: string }>('POST', '/v1/runs', { workflowId: WF_Q, inputs: {} });
+      const run = await call<{ runId: string }>('POST', '/runs', { workflowId: WF_Q, inputs: {} });
       expect(await settle(run.body.runId, (s) => s.startsWith('waiting'))).toContain('waiting');
-      const list = await call<{ interrupts: Array<{ token: string }> }>('GET', `/v1/host/openwop-app/runs/${run.body.runId}/interrupts`);
+      const list = await call<{ interrupts: Array<{ token: string }> }>('GET', `/host/openwop-app/runs/${bareRunId(run.body.runId)}/interrupts`);
       const token = list.body.interrupts[0]!.token;
 
       // Grade-code H1 — every voter claim must carry the per-recipient HMAC
@@ -206,33 +207,33 @@ describe('HITL completion (ADR 0478, sqlite memory app)', () => {
       const { signVoterBinding } = await import('../src/host/interruptVoterBinding.js');
 
       // A voter claim WITHOUT its binding is refused outright (404 posture).
-      const forged = await fetch(`${BASE}/v1/host/openwop-app/interrupt-action`, {
+      const forged = await fetch(`${BASE}/host/openwop-app/interrupt-action`, {
         method: 'POST',
         headers: { 'content-type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({ token, action: 'approve', voter: 'appr-a' }).toString(),
       });
       expect(forged.status).toBe(404);
       // ...and appr-a's binding can never cast appr-b's vote.
-      const crossed = await fetch(`${BASE}/v1/host/openwop-app/interrupt-action`, {
+      const crossed = await fetch(`${BASE}/host/openwop-app/interrupt-action`, {
         method: 'POST',
         headers: { 'content-type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({ token, action: 'approve', voter: 'appr-b', sig: signVoterBinding(token, 'appr-a') }).toString(),
       });
       expect(crossed.status).toBe(404);
-      expect((await call<{ status: string }>('GET', `/v1/runs/${run.body.runId}`)).body.status).toContain('waiting');
+      expect((await call<{ status: string }>('GET', `/runs/${run.body.runId}`)).body.status).toContain('waiting');
 
       // ONE properly-bound emailed approve = ONE vote, never a full resolve.
-      const one = await fetch(`${BASE}/v1/host/openwop-app/interrupt-action`, {
+      const one = await fetch(`${BASE}/host/openwop-app/interrupt-action`, {
         method: 'POST',
         headers: { 'content-type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({ token, action: 'approve', voter: 'appr-a', sig: signVoterBinding(token, 'appr-a') }).toString(),
       });
       expect(one.status).toBe(200);
       await new Promise((res) => setTimeout(res, 200));
-      expect((await call<{ status: string }>('GET', `/v1/runs/${run.body.runId}`)).body.status).toContain('waiting');
+      expect((await call<{ status: string }>('GET', `/runs/${run.body.runId}`)).body.status).toContain('waiting');
 
       // The second DISTINCT bound identity meets quorum and resolves the gate.
-      const two = await fetch(`${BASE}/v1/host/openwop-app/interrupt-action`, {
+      const two = await fetch(`${BASE}/host/openwop-app/interrupt-action`, {
         method: 'POST',
         headers: { 'content-type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({ token, action: 'approve', voter: 'appr-b', sig: signVoterBinding(token, 'appr-b') }).toString(),
@@ -242,7 +243,7 @@ describe('HITL completion (ADR 0478, sqlite memory app)', () => {
     });
 
     it('an unknown token is a 404; a garbage token never renders a form', async () => {
-      const bad = await call('GET', '/v1/host/openwop-app/interrupt-action?token=nope&action=approve');
+      const bad = await call('GET', '/host/openwop-app/interrupt-action?token=nope&action=approve');
       expect(bad.status).toBe(404);
       expect(bad.text ?? '').not.toContain('<form');
     });

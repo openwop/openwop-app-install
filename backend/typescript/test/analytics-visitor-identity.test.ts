@@ -21,13 +21,12 @@
 
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import type { Request } from 'express';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
-import { __resetAnalyticsStore, countDailyUniques, listEvents } from '../src/features/analytics/analyticsService.js';
-import { ensureDailySalt, visitorHashFor, __peekSaltForTest, __resetVisitorSalts, __sweepExpiredSaltsForTest, SALT_TTL_DAYS } from '../src/features/analytics/visitorIdentity.js';
+import { __resetAnalyticsStore, countDailyUniques, listEvents, type AnalyticsEventView, type AnalyticsSummary, type TrendPoint } from '../src/features/analytics/analyticsService.js';
+import { ensureDailySalt, __peekSaltForTest, __resetVisitorSalts, __sweepExpiredSaltsForTest, SALT_TTL_DAYS } from '../src/features/analytics/visitorIdentity.js';
 import { __listKvAgeOutForTest, __runKvAgeOutOnce } from '../src/host/kvAgeOut.js';
 import { __hostExtStorage } from '../src/host/hostExtPersistence.js';
 
@@ -48,10 +47,15 @@ beforeAll(async () => {
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 afterEach(async () => { await __resetAnalyticsStore(); });
 
-interface Res<T = any> { status: number; body: T }
+interface Res<T = unknown> { status: number; body: T }
+interface LoginBody { user?: { tenantId?: string }; tenantId?: string }
+interface OrgBody { orgId: string; tenantId?: string }
+interface SummaryBody { summary: AnalyticsSummary }
+interface EventsBody { events: AnalyticsEventView[] }
+interface TrendBody { trend: TrendPoint[] }
 function client(initialCookie = '') {
   let cookie = initialCookie;
-  const call = async (method: string, path: string, body?: unknown, headers?: Record<string, string>): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown, headers?: Record<string, string>): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}), ...(headers ?? {}) },
@@ -60,21 +64,22 @@ function client(initialCookie = '') {
     const h = res.headers as { getSetCookie?: () => string[] };
     const sc = typeof h.getSetCookie === 'function' ? h.getSetCookie() : [];
     for (const c of sc) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    // JSON boundary: the caller names the response shape it reads (`Res<T>`).
+    const out = (res.status === 204 ? undefined : await res.json().catch(() => undefined)) as T;
     return { status: res.status, body: out };
   };
   return {
-    get: (p: string) => call('GET', p),
-    post: (p: string, b?: unknown, hd?: Record<string, string>) => call('POST', p, b, hd),
+    get: <T = unknown>(p: string) => call<T>('GET', p),
+    post: <T = unknown>(p: string, b?: unknown, hd?: Record<string, string>) => call<T>('POST', p, b, hd),
   };
 }
 const pub = client();
 let n = 0;
 async function ownerWithOrg(): Promise<{ owner: ReturnType<typeof client>; orgId: string; tenantId: string }> {
   const owner = client();
-  const su = await owner.post('/v1/host/openwop-app/test/login', { email: `vid-${Date.now()}-${n++}@acme.test` });
+  const su = await owner.post<LoginBody>('/host/openwop-app/test/login', { email: `vid-${Date.now()}-${n++}@acme.test` });
   expect(su.status, JSON.stringify(su.body)).toBe(201);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post<OrgBody>('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   const tenantId = String(org.body.tenantId ?? su.body.user?.tenantId ?? su.body.tenantId ?? '');
   expect(tenantId, 'the org row carries its tenant — needed to read the STORED row').toBeTruthy();
@@ -87,64 +92,70 @@ const setToggle = async (id: string, status: 'on' | 'off'): Promise<void> => {
 const IP_SENTINEL = '203.0.113.77'; // TEST-NET-3 — never a real client
 const UA_SENTINEL = 'ADR0569-UA-Sentinel/1.0';
 const beacon = (orgId: string, body: Record<string, unknown>, ua = UA_SENTINEL, ip = IP_SENTINEL) =>
-  pub.post(`/v1/host/openwop-app/public-analytics/${orgId}/collect`, body, { 'x-forwarded-for': ip, 'user-agent': ua });
+  pub.post(`/host/openwop-app/public-analytics/${orgId}/collect`, body, { 'x-forwarded-for': ip, 'user-agent': ua });
 
 describe('ADR 0569 — visitor identity at ingest', () => {
   it('same IP+UA on one day = ONE daily unique; a different UA = a second', async () => {
     const { owner, orgId } = await ownerWithOrg();
     expect((await beacon(orgId, { type: 'pageview', path: '/a' })).status).toBe(201);
     expect((await beacon(orgId, { type: 'pageview', path: '/b' })).status).toBe(201);
-    let sum = await owner.get(`/v1/host/openwop-app/analytics/orgs/${orgId}/summary`);
+    let sum = await owner.get<SummaryBody>(`/host/openwop-app/analytics/orgs/${orgId}/summary`);
     expect(sum.body.summary.uniqueVisitors).toBe(1);
     expect(typeof sum.body.summary.uniqueVisitorsSince).toBe('string');
 
     expect((await beacon(orgId, { type: 'pageview', path: '/c' }, 'Other-Agent/2.0')).status).toBe(201);
-    sum = await owner.get(`/v1/host/openwop-app/analytics/orgs/${orgId}/summary`);
+    sum = await owner.get<SummaryBody>(`/host/openwop-app/analytics/orgs/${orgId}/summary`);
     expect(sum.body.summary.uniqueVisitors).toBe(2);
   });
 
   it('a client-supplied visitorHash is IGNORED — the hash is server-computed only', async () => {
-    const { owner, orgId } = await ownerWithOrg();
+    const { owner, orgId, tenantId } = await ownerWithOrg();
     // An attacker inflating uniques would send a fresh hash per hit.
     expect((await beacon(orgId, { type: 'pageview', path: '/x', visitorHash: 'attacker-hash-1' })).status).toBe(201);
     expect((await beacon(orgId, { type: 'pageview', path: '/y', visitorHash: 'attacker-hash-2' })).status).toBe(201);
-    const sum = await owner.get(`/v1/host/openwop-app/analytics/orgs/${orgId}/summary`);
+    const sum = await owner.get<SummaryBody>(`/host/openwop-app/analytics/orgs/${orgId}/summary`);
     expect(sum.body.summary.uniqueVisitors).toBe(1); // same IP+UA ⇒ still ONE visitor
-    const evs = await owner.get(`/v1/host/openwop-app/analytics/orgs/${orgId}/events`);
-    expect(JSON.stringify(evs.body)).not.toContain('attacker-hash');
+    // Read the STORED rows: the events response is projected through `toEventView`
+    // (ANL-15), which never serves `visitorHash`, so a response-text check could not fail.
+    const stored = await listEvents(tenantId, orgId, 10);
+    expect(stored).toHaveLength(2);
+    expect(JSON.stringify(stored), 'a client hash must never reach the store').not.toContain('attacker-hash');
   });
 
   it('the trend carries per-day uniques (today ≥ 1 after a hashed hit)', async () => {
     const { owner, orgId } = await ownerWithOrg();
     expect((await beacon(orgId, { type: 'pageview', path: '/t' })).status).toBe(201);
-    const trend = await owner.get(`/v1/host/openwop-app/analytics/orgs/${orgId}/trend?days=7`);
+    const trend = await owner.get<TrendBody>(`/host/openwop-app/analytics/orgs/${orgId}/trend?days=7`);
     const today = new Date().toISOString().slice(0, 10);
-    const point = (trend.body.trend as { day: string; uniques: number }[]).find((p) => p.day === today);
+    const point = trend.body.trend.find((p) => p.day === today);
     expect(point?.uniques).toBe(1);
   });
 
   it('toggle OFF ⇒ counts only: no visitorHash on rows, no uniqueVisitors on the summary', async () => {
-    const { owner, orgId } = await ownerWithOrg();
+    const { owner, orgId, tenantId } = await ownerWithOrg();
     await setToggle('analytics-visitor-identity', 'off');
     try {
       // The client-supplied hash rides the OFF path too — the window where a
       // body-read regression would actually land (with the toggle ON the
       // server hash always wins, so only THIS polarity can catch it).
       expect((await beacon(orgId, { type: 'pageview', path: '/off', visitorHash: 'attacker-hash-3' })).status).toBe(201);
-      const sum = await owner.get(`/v1/host/openwop-app/analytics/orgs/${orgId}/summary`);
+      const sum = await owner.get<SummaryBody>(`/host/openwop-app/analytics/orgs/${orgId}/summary`);
       expect(sum.body.summary.total).toBe(1); // the event IS recorded (counts only)
       expect(sum.body.summary.uniqueVisitors).toBeUndefined();
-      const evs = await owner.get(`/v1/host/openwop-app/analytics/orgs/${orgId}/events`);
-      expect(JSON.stringify(evs.body)).not.toContain('visitorHash');
+      // The STORED row, not the projected response (which never serves the hash).
+      const stored = await listEvents(tenantId, orgId, 10);
+      expect(stored).toHaveLength(1);
+      expect(stored[0]!.visitorHash, 'OFF ⇒ no visitor dimension on the persisted row').toBeUndefined();
     } finally { await setToggle('analytics-visitor-identity', 'on'); }
   });
 
   it('the raw IP/UA sentinels are NEVER persisted or served', async () => {
     const { owner, orgId, tenantId } = await ownerWithOrg();
     expect((await beacon(orgId, { type: 'pageview', path: '/pii' })).status).toBe(201);
-    const evs = await owner.get(`/v1/host/openwop-app/analytics/orgs/${orgId}/events`);
-    const sum = await owner.get(`/v1/host/openwop-app/analytics/orgs/${orgId}/summary`);
-    for (const payload of [JSON.stringify(evs.body), JSON.stringify(sum.body)]) {
+    const evs = await owner.get<EventsBody>(`/host/openwop-app/analytics/orgs/${orgId}/events`);
+    const sum = await owner.get<SummaryBody>(`/host/openwop-app/analytics/orgs/${orgId}/summary`);
+    // Persisted AND served: the stored row (every column, projected or not) plus both responses.
+    for (const payload of [JSON.stringify(await listEvents(tenantId, orgId, 10)), JSON.stringify(evs.body), JSON.stringify(sum.body)]) {
       expect(payload).not.toContain(IP_SENTINEL);
       expect(payload).not.toContain(UA_SENTINEL);
     }
@@ -158,39 +169,60 @@ describe('ADR 0569 — visitor identity at ingest', () => {
   });
 
   it('NEVER-LOGGED tripwire: the day salt reaches no console output and no response', async () => {
+    // Two blind spots closed (grade-tests w8): the app's structured logger writes with
+    // `process.stdout.write` (observability/logger.ts), not `console.*`, so both
+    // streams are captured too; and today's salt is RESET first, so the beacon below
+    // MINTS under the spies — without it an earlier case's mint meant this case only
+    // ever observed the read-existing path.
+    await __resetVisitorSalts();
     const captured: string[] = [];
     const spies = (['log', 'info', 'warn', 'error', 'debug'] as const).map((m) =>
       vi.spyOn(console, m).mockImplementation((...args: unknown[]) => { captured.push(args.map(String).join(' ')); }));
+    const capture = (chunk: unknown): boolean => { captured.push(String(chunk)); return true; };
+    const streamSpies = [
+      vi.spyOn(process.stdout, 'write').mockImplementation(capture),
+      vi.spyOn(process.stderr, 'write').mockImplementation(capture),
+    ];
     try {
       const { owner, orgId } = await ownerWithOrg();
+      // BOTH salt paths run under the spies: the first beacon MINTS (salts were reset
+      // above), the second READS the existing row. Before this the case exercised only
+      // one of them, so a log line on the other could never turn it red.
       expect((await beacon(orgId, { type: 'pageview', path: '/salt' })).status).toBe(201);
+      expect((await beacon(orgId, { type: 'pageview', path: '/salt-again' })).status).toBe(201);
       const salt = await __peekSaltForTest();
-      expect(salt).toBeTruthy(); // the mint happened
-      const evs = await owner.get(`/v1/host/openwop-app/analytics/orgs/${orgId}/events`);
-      const sum = await owner.get(`/v1/host/openwop-app/analytics/orgs/${orgId}/summary`);
+      expect(salt).toBeTruthy(); // the mint happened (under the spies)
+      const evs = await owner.get<EventsBody>(`/host/openwop-app/analytics/orgs/${orgId}/events`);
+      const sum = await owner.get<SummaryBody>(`/host/openwop-app/analytics/orgs/${orgId}/summary`);
       for (const line of captured) expect(line).not.toContain(salt!);
       expect(JSON.stringify(evs.body)).not.toContain(salt!);
       expect(JSON.stringify(sum.body)).not.toContain(salt!);
-    } finally { spies.forEach((s) => s.mockRestore()); }
+    } finally { spies.forEach((s) => s.mockRestore()); streamSpies.forEach((s) => s.mockRestore()); }
   });
 
   it('rotation: a new UTC day mints a NEW salt, deletes the prior row, and the same visitor hashes differently', async () => {
+    // Driven through the REAL beacon (a real express Request) on two faked UTC days —
+    // this used to call `visitorHashFor` with an `as unknown as Request` fake.
+    const { orgId, tenantId } = await ownerWithOrg();
     await __resetVisitorSalts();
     const day1 = Date.UTC(2026, 7, 20, 12);
     const day2 = day1 + 86_400_000;
-    const fakeReq = {
-      header: (name: string) => (name.toLowerCase() === 'x-forwarded-for' ? IP_SENTINEL : name.toLowerCase() === 'user-agent' ? UA_SENTINEL : undefined),
-      socket: { remoteAddress: IP_SENTINEL },
-    } as unknown as Request;
-    const salt1 = await ensureDailySalt(day1);
-    const h1 = await visitorHashFor('t1', 'org1', fakeReq, day1);
-    const salt2 = await ensureDailySalt(day2);
-    const h2 = await visitorHashFor('t1', 'org1', fakeReq, day2);
-    expect(salt1).not.toBe(salt2);
-    expect(h1).toBeTruthy();
-    expect(h1).not.toBe(h2); // cross-day unlinkability
-    expect(await __peekSaltForTest(day1)).toBeNull(); // prior salt DISCARDED
-    expect(await __peekSaltForTest(day2)).toBe(salt2);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(day1);
+      expect((await beacon(orgId, { type: 'pageview', path: '/d1' })).status).toBe(201);
+      const salt1 = await __peekSaltForTest(day1);
+      vi.setSystemTime(day2);
+      expect((await beacon(orgId, { type: 'pageview', path: '/d2' })).status).toBe(201);
+      const salt2 = await __peekSaltForTest(day2);
+      expect(salt1).toBeTruthy();
+      expect(salt1).not.toBe(salt2);
+      expect(await __peekSaltForTest(day1)).toBeNull(); // prior salt DISCARDED
+      const byPath = new Map((await listEvents(tenantId, orgId, 10)).map((e) => [e.path, e.visitorHash]));
+      expect(byPath.get('/d1')).toBeTruthy();
+      expect(byPath.get('/d2')).toBeTruthy();
+      expect(byPath.get('/d1'), 'same IP+UA on two days ⇒ two unlinkable hashes').not.toBe(byPath.get('/d2'));
+    } finally { vi.useRealTimers(); }
   });
 
   it('ANL-1 — a TRAFFIC GAP does not orphan a salt: the next mint reclaims EVERY past day', async () => {

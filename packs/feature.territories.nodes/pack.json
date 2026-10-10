@@ -1,11 +1,12 @@
 {
   "name": "feature.territories.nodes",
-  "version": "1.2.0",
+  "version": "1.2.1",
+  "kind": "node",
   "description": "Sales Territory Management node pack — seven READ nodes over the ctx.features.territories surface: list territory models (+ the active model), list a model's territories (hierarchy), list its assignment rules and quotas, dry-run a model's assignment preview, and compute per-territory attainment (weighted pipeline vs quota, rolled up the hierarchy, with per-rep splits). PLUS two GOVERNED WRITE nodes (A5 — v1.1.0): activate-model and set-quota, which enforce the run OWNER's scope (host:territories:manage / workspace:write; system runs denied) and are kept OUT of the advisory agent's allowlist. NOTE (CFP-1 / D9): the app drives the governed model activation/archival through the SHARED reviews approval gate (kind: territory-model-transition), not a direct agent tool call — no built-in workflow ignites these nodes; they stay composable catalog entries for a builder-authored chain. All nodes are role:\"action\", tenant+org-guarded (CTI-1); tenantId comes from the run scope, never node args.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "territories", "sales", "quota", "attainment", "crm"],
-  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "engines": { "openwop": ">=1.0.0 <3.0.0" },
   "nodes": [
     {
       "typeId": "feature.territories.nodes.list-models",

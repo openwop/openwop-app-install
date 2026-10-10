@@ -24,6 +24,7 @@
  * whether the lane reaches it (ADR 0502, paid for twice in this repo).
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { revisionHashOf } from '../src/host/definitionHash.js';
 import { ensureNodesRegistered } from '../src/bootstrap/nodes.js';
 import {
   persistAuthoredWorkflow,
@@ -44,15 +45,24 @@ import { pruneAbandonedAnonTenants } from '../src/host/retentionSweepDaemon.js';
 import type { Storage } from '../src/storage/storage.js';
 import type { RunRecord } from '../src/types.js';
 import type { WorkflowDefinition } from '../src/executor/types.js';
+import { createMember, createOrg } from '../src/host/accessControlService.js';
 
 const T = 'ws-wfa-integrity';
 let storage: Storage;
+
+/** ADR 0822 D1 — every model write lane now carries the builder's
+ *  `workspace:write` authority, so the acting user here is an Editor. */
+async function grantEditor(tenantId: string, subject: string): Promise<void> {
+  await createOrg({ tenantId, orgId: tenantId, name: 'Root', createdBy: 'test' }).catch(() => undefined);
+  await createMember({ tenantId, orgId: tenantId, subject, displayName: subject, roles: ['editor'] });
+}
 
 beforeAll(async () => {
   ensureNodesRegistered();
   storage = await openStorage('memory://');
   initHostExtPersistence(storage);
   setDurableStorage(storage); // `wfreg:` rows must actually land
+  await grantEditor(T, 'u-1');
 });
 afterAll(() => {
   setDurableStorage(null);
@@ -600,7 +610,8 @@ describe('W8 — an explicit clear is representable and honoured on the author l
     // Omitting it alone is a LOSS signal — preserved, and disclosed.
     const kept = await provider.executeTool({
       name: 'openwop:feature.workflow-author.nodes.persist',
-      input: { definition: withoutComp(id) },
+      // ADR 0773 D8 — the tool lane overwrites only the revision it read.
+      input: { definition: withoutComp(id), baseRevision: revisionHashOf(await head(id)) },
     });
     expect(JSON.parse(kept.content).preservedFields).toContain('compensation');
     expect((await head(id)).nodes.find((n) => n.nodeId === 'b')?.compensation).toBeDefined();
@@ -608,7 +619,7 @@ describe('W8 — an explicit clear is representable and honoured on the author l
     // Declaring it is a DELETE signal — honoured, and NOT reported as preserved.
     const cleared = await provider.executeTool({
       name: 'openwop:feature.workflow-author.nodes.persist',
-      input: { definition: withoutComp(id), clearFields: ['compensation'] },
+      input: { definition: withoutComp(id), clearFields: ['compensation'], baseRevision: revisionHashOf(await head(id)) },
     });
     expect(cleared.isError).toBeFalsy();
     expect(JSON.parse(cleared.content).preservedFields, 'nothing was preserved — it was cleared')
@@ -629,7 +640,8 @@ describe('W8 — an explicit clear is representable and honoured on the author l
     const id = 'authored.w8-surface-clear';
     await surface.persistDraft?.({ definition: withComp(id) });
     expect((await head(id)).nodes.find((n) => n.nodeId === 'b')?.compensation).toBeDefined();
-    const out = await surface.persistDraft?.({ definition: withoutComp(id), clearFields: ['compensation'] });
+    // ADR 0773 G-10c — the surface overwrites only with the revision it read.
+    const out = await surface.persistDraft?.({ definition: withoutComp(id), clearFields: ['compensation'], baseRevision: revisionHashOf(await head(id)) } as never);
     expect((out as { preservedFields?: unknown }).preservedFields).toBeUndefined();
     expect((await head(id)).nodes.find((n) => n.nodeId === 'b')?.compensation).toBeUndefined();
   });
@@ -643,7 +655,8 @@ describe('W8 — an explicit clear is representable and honoured on the author l
     await provider.executeTool({ name: 'openwop:feature.workflow-author.nodes.persist', input: { definition: withComp(id) } });
     const kept = await provider.executeTool({
       name: 'openwop:feature.workflow-author.nodes.persist',
-      input: { definition: withoutComp(id) },
+      // ADR 0773 D8 — the tool lane overwrites only the revision it read.
+      input: { definition: withoutComp(id), baseRevision: revisionHashOf(await head(id)) },
     });
     expect(JSON.parse(kept.content).preservedNote, 'the note must name `clearFields`, the only mechanism that works')
       .toMatch(/clearFields/);
@@ -680,7 +693,8 @@ describe('W9 — `preservedFields` crosses every seam from the merge to the read
     const surface = buildWorkflowAuthorSurface({ tenantId: T, actingUserId: 'u-1' } as never);
     const id = 'authored.w9-surface';
     await surface.persistDraft?.({ definition: withComp(id) });
-    const out = await surface.persistDraft?.({ definition: withoutComp(id) });
+    // ADR 0773 G-10c — an overwrite on this lane carries the revision it read.
+    const out = await surface.persistDraft?.({ definition: withoutComp(id), baseRevision: revisionHashOf(await head(id)) } as never);
     expect((out as { preservedFields?: string[] }).preservedFields).toContain('compensation');
   });
 
@@ -707,9 +721,14 @@ describe('W9 — `preservedFields` crosses every seam from the merge to the read
 
     const id = 'authored.w9-node';
     await runNode(withComp(id));
-    const out = await runNode(withoutComp(id));
-    expect(out.status).toBe('success');
-    expect(out.outputs?.preservedFields, 'the node relays the disclosure into the run outputs').toContain('compensation');
+    // ADR 0773 G-10c — the NODE lane is create-only: it has no read step, so an
+    // overwrite without the revision it read is refused (was last-writer-wins,
+    // ADR 0770 `WBWF-17`). The disclosure relay is then witnessed through the
+    // surface a revision-carrying caller uses.
+    const refused = await runNode(withoutComp(id)).catch(() => ({ status: 'threw' }));
+    expect(refused.status).not.toBe('success');
+    const relayed = await surface.persistDraft?.({ definition: withoutComp(id), baseRevision: revisionHashOf(await head(id)) } as never);
+    expect((relayed as { preservedFields?: string[] }).preservedFields, 'the surface relays the disclosure').toContain('compensation');
   });
 
   it('SEAM 4 — the agent tool relays it with an instruction the model can act on', async () => {
@@ -721,7 +740,8 @@ describe('W9 — `preservedFields` crosses every seam from the merge to the read
     await provider.executeTool({ name: 'openwop:feature.workflow-author.nodes.persist', input: { definition: withComp(id) } });
     const out = await provider.executeTool({
       name: 'openwop:feature.workflow-author.nodes.persist',
-      input: { definition: withoutComp(id) },
+      // ADR 0773 D8 — the tool lane overwrites only the revision it read.
+      input: { definition: withoutComp(id), baseRevision: revisionHashOf(await head(id)) },
     });
     const body = JSON.parse(out.content);
     expect(body.preservedFields).toContain('compensation');

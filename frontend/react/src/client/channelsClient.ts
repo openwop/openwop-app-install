@@ -19,7 +19,7 @@ async function http<T>(path: string, init: RequestInit = {}): Promise<T> {
   return body as T;
 }
 
-export interface ChannelDescriptor { name: string; description?: string; visibility: 'public' | 'private'; archived?: boolean }
+export interface ChannelDescriptor { name: string; description?: string; visibility: 'public' | 'private'; archived?: boolean; /** ADR 0852 D5 */ boundProjectId?: string }
 export interface ChannelSummary { conversationId: string; channel?: ChannelDescriptor }
 export interface ChannelMember { subjectRef: string; role: 'owner' | 'member'; addedAt?: string }
 /** ADR 0192 D2 — a roster row with the display identity RESOLVED server-side
@@ -106,6 +106,11 @@ export async function renameChannel(channelId: string, name: string): Promise<Ch
 /** Set/clear a channel's description (owner-only; empty string clears) — ADR 0192 D4. */
 export async function updateChannelDescription(channelId: string, description: string): Promise<ChannelSummary> {
   return (await http<{ channel: ChannelSummary }>(`${BASE}/${encodeURIComponent(channelId)}`, { method: 'PATCH', body: JSON.stringify({ description }) })).channel;
+}
+
+/** ADR 0852 D5 — bind the channel to an org-visible project (`null` unbinds). Owner-only, with edit access to the project. */
+export async function setChannelProject(channelId: string, projectId: string | null): Promise<ChannelSummary> {
+  return (await http<{ channel: ChannelSummary }>(`${BASE}/${encodeURIComponent(channelId)}/project`, { method: 'PUT', body: JSON.stringify({ projectId }) })).channel;
 }
 
 /** Archive a channel (owner-only). Backend returns 204; `http` tolerates the empty body. */

@@ -20,6 +20,7 @@ import { attachCollabWebSocket, __resetCollabConns } from '../src/host/collab/co
 import { __resetCollabRooms, __stopCollabLeaseHeartbeat, __stopCollabUpdateSweep } from '../src/host/collab/collabRoom.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
+import { createMember } from '../src/host/accessControlService.js';
 
 const ORIGIN = 'http://localhost:9989';
 let BASE: string; let WSBASE: string; let server: http.Server;
@@ -44,7 +45,7 @@ let n = 0;
 interface Session { cookie: string; tenantId: string }
 async function login(): Promise<Session> {
   const tenantId = `org:wfcollab-${Date.now()}-${n++}`;
-  const res = await fetch(`${BASE}/v1/host/openwop-app/test/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: `wfc-${Date.now()}-${n++}@a.test`, tenantId }) });
+  const res = await fetch(`${BASE}/host/openwop-app/test/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: `wfc-${Date.now()}-${n++}@a.test`, tenantId }) });
   let cookie = '';
   for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
   return { cookie, tenantId };
@@ -77,7 +78,7 @@ function toBytes(d: RawData): Uint8Array { return Array.isArray(d) ? Buffer.conc
 function client(ticket: string, workflowId: string): { doc: Y.Doc; ws: WebSocket; awarenessFrames: number[] } {
   const doc = new Y.Doc();
   const awarenessFrames: number[] = [];
-  const ws = new WebSocket(`${WSBASE}/v1/host/openwop-app/workflow-collab/${workflowId}?ticket=${encodeURIComponent(ticket)}`, { headers: { origin: ORIGIN } });
+  const ws = new WebSocket(`${WSBASE}/host/openwop-app/workflow-collab/${workflowId}?ticket=${encodeURIComponent(ticket)}`, { headers: { origin: ORIGIN } });
   ws.on('open', () => { const e = encoding.createEncoder(); encoding.writeVarUint(e, 0); writeSyncStep1(e, doc); ws.send(encoding.toUint8Array(e)); });
   ws.on('message', (data) => {
     const dec = decoding.createDecoder(toBytes(data));
@@ -113,10 +114,10 @@ describe('workflow collab canary (ADR 0481 / Gate B)', () => {
   it('two clients converge live over the real transport; REST locks; teardown derives the head', async () => {
     const s = await login();
     const wfId = `wfc-live-${Date.now()}`;
-    expect((await api(s, 'POST', '/v1/host/openwop-app/workflows', def(wfId, 'v1'))).status).toBe(201);
+    expect((await api(s, 'POST', '/host/openwop-app/workflows', def(wfId, 'v1'))).status).toBe(201);
 
-    const t1 = await api<{ ticket: string }>(s, 'POST', `/v1/host/openwop-app/workflow-collab/${wfId}/ticket`);
-    const t2 = await api<{ ticket: string }>(s, 'POST', `/v1/host/openwop-app/workflow-collab/${wfId}/ticket`);
+    const t1 = await api<{ ticket: string }>(s, 'POST', `/host/openwop-app/workflow-collab/${wfId}/ticket`);
+    const t2 = await api<{ ticket: string }>(s, 'POST', `/host/openwop-app/workflow-collab/${wfId}/ticket`);
     expect(t1.status).toBe(200);
 
     const a = client(t1.body.ticket, wfId);
@@ -130,7 +131,7 @@ describe('workflow collab canary (ADR 0481 / Gate B)', () => {
     expect(await waitFor(() => a.doc.getMap('doc').get('defaultInputs') === '{"x":1}')).toBe(true);
 
     // D2 lock: while the room lives, REST saves/rollback/lifecycle 409.
-    const blocked = await api<{ details?: { reason?: string } }>(s, 'POST', '/v1/host/openwop-app/workflows', def(wfId, 'clobber'));
+    const blocked = await api<{ details?: { reason?: string } }>(s, 'POST', '/host/openwop-app/workflows', def(wfId, 'clobber'));
     expect(blocked.status).toBe(409);
     expect(JSON.stringify(blocked.body)).toContain('workflow_room_live');
 
@@ -145,8 +146,8 @@ describe('workflow collab canary (ADR 0481 / Gate B)', () => {
     // Evict's flush + force-derive are async — POLL the head (no fixed sleep).
     const head = await (async () => {
       for (let i = 0; i < 100; i += 1) {
-        const r = await api<{ workflows?: Array<{ workflowId: string; name?: string }> }>(s, 'GET', '/v1/host/openwop-app/workflows');
-        const got = await fetch(`${BASE}/v1/workflows/${encodeURIComponent(wfId)}`, { headers: { cookie: s.cookie } });
+        const r = await api<{ workflows?: Array<{ workflowId: string; name?: string }> }>(s, 'GET', '/host/openwop-app/workflows');
+        const got = await fetch(`${BASE}/workflows/${encodeURIComponent(wfId)}`, { headers: { cookie: s.cookie } });
         if (got.status === 200) {
           const j = await got.json() as { metadata?: { name?: string } };
           if (j.metadata?.name === 'WF from-collab') return j;
@@ -162,7 +163,7 @@ describe('workflow collab canary (ADR 0481 / Gate B)', () => {
     // lease deletion is part of the async evict).
     const after = await (async () => {
       for (let i = 0; i < 100; i += 1) {
-        const r = await api(s, 'POST', '/v1/host/openwop-app/workflows', def(wfId, 'post-session'));
+        const r = await api(s, 'POST', '/host/openwop-app/workflows', def(wfId, 'post-session'));
         if (r.status === 201) return r.status;
         await sleep(30);
       }
@@ -174,9 +175,9 @@ describe('workflow collab canary (ADR 0481 / Gate B)', () => {
   it('awareness relays between the two clients (presence transport)', async () => {
     const s = await login();
     const wfId = `wfc-aware-${Date.now()}`;
-    expect((await api(s, 'POST', '/v1/host/openwop-app/workflows', def(wfId, 'v1'))).status).toBe(201);
-    const t1 = await api<{ ticket: string }>(s, 'POST', `/v1/host/openwop-app/workflow-collab/${wfId}/ticket`);
-    const t2 = await api<{ ticket: string }>(s, 'POST', `/v1/host/openwop-app/workflow-collab/${wfId}/ticket`);
+    expect((await api(s, 'POST', '/host/openwop-app/workflows', def(wfId, 'v1'))).status).toBe(201);
+    const t1 = await api<{ ticket: string }>(s, 'POST', `/host/openwop-app/workflow-collab/${wfId}/ticket`);
+    const t2 = await api<{ ticket: string }>(s, 'POST', `/host/openwop-app/workflow-collab/${wfId}/ticket`);
     const a = client(t1.body.ticket, wfId);
     const b = client(t2.body.ticket, wfId);
     await Promise.all([opened(a.ws), opened(b.ws)]);
@@ -195,17 +196,17 @@ describe('workflow collab canary (ADR 0481 / Gate B)', () => {
   it('DELETE is room-locked (code-review H2) and the seed claim dies with the workflow (H1)', async () => {
     const s = await login();
     const wfId = `wfc-del-${Date.now()}`;
-    expect((await api(s, 'POST', '/v1/host/openwop-app/workflows', def(wfId, 'v1'))).status).toBe(201);
-    const t = await api<{ ticket: string }>(s, 'POST', `/v1/host/openwop-app/workflow-collab/${wfId}/ticket`);
+    expect((await api(s, 'POST', '/host/openwop-app/workflows', def(wfId, 'v1'))).status).toBe(201);
+    const t = await api<{ ticket: string }>(s, 'POST', `/host/openwop-app/workflow-collab/${wfId}/ticket`);
 
     // Win the seed claim, join a room.
-    const claim1 = await api<{ seed: boolean }>(s, 'POST', `/v1/host/openwop-app/workflow-collab/${wfId}/claim-seed`);
+    const claim1 = await api<{ seed: boolean }>(s, 'POST', `/host/openwop-app/workflow-collab/${wfId}/claim-seed`);
     expect(claim1.body.seed).toBe(true);
     const a = client(t.body.ticket, wfId);
     await opened(a.ws);
 
     // DELETE under the live room → 409 workflow_room_live (H2).
-    const del = await api(s, 'DELETE', `/v1/host/openwop-app/workflows/${wfId}`);
+    const del = await api(s, 'DELETE', `/host/openwop-app/workflows/${wfId}`);
     expect(del.status).toBe(409);
     expect(JSON.stringify(del.body)).toContain('workflow_room_live');
 
@@ -213,7 +214,7 @@ describe('workflow collab canary (ADR 0481 / Gate B)', () => {
     // After leave, delete succeeds (poll the async evict releasing the lease).
     let deleted = 0;
     for (let i = 0; i < 100; i += 1) {
-      const r = await api(s, 'DELETE', `/v1/host/openwop-app/workflows/${wfId}`);
+      const r = await api(s, 'DELETE', `/host/openwop-app/workflows/${wfId}`);
       if (r.status === 200) { deleted = r.status; break; }
       await sleep(30);
     }
@@ -221,10 +222,10 @@ describe('workflow collab canary (ADR 0481 / Gate B)', () => {
 
     // H1 — recreate the SAME id: the seed claim must have died with the
     // workflow, so the fresh room's election is winnable again.
-    expect((await api(s, 'POST', '/v1/host/openwop-app/workflows', def(wfId, 'v2'))).status).toBe(201);
+    expect((await api(s, 'POST', '/host/openwop-app/workflows', def(wfId, 'v2'))).status).toBe(201);
     let seedAgain = false;
     for (let i = 0; i < 100; i += 1) {
-      const claim2 = await api<{ seed: boolean }>(s, 'POST', `/v1/host/openwop-app/workflow-collab/${wfId}/claim-seed`);
+      const claim2 = await api<{ seed: boolean }>(s, 'POST', `/host/openwop-app/workflow-collab/${wfId}/claim-seed`);
       if (claim2.body?.seed === true) { seedAgain = true; break; }
       await sleep(30);
     }
@@ -235,18 +236,44 @@ describe('workflow collab canary (ADR 0481 / Gate B)', () => {
     const s = await login();
     const other = await login();
     const wfId = `wfc-own-${Date.now()}`;
-    expect((await api(s, 'POST', '/v1/host/openwop-app/workflows', def(wfId, 'v1'))).status).toBe(201);
+    expect((await api(s, 'POST', '/host/openwop-app/workflows', def(wfId, 'v1'))).status).toBe(201);
 
-    expect((await api(other, 'POST', `/v1/host/openwop-app/workflow-collab/${wfId}/ticket`)).status).toBe(404); // foreign
-    expect((await api(s, 'POST', '/v1/host/openwop-app/workflow-collab/tmpl.anything/ticket')).status).toBe(404); // reserved
-    expect((await api(s, 'POST', '/v1/host/openwop-app/workflow-collab/never-registered/ticket')).status).toBe(404); // unknown
+    expect((await api(other, 'POST', `/host/openwop-app/workflow-collab/${wfId}/ticket`)).status).toBe(404); // foreign
+    expect((await api(s, 'POST', '/host/openwop-app/workflow-collab/tmpl.anything/ticket')).status).toBe(404); // reserved
+    expect((await api(s, 'POST', '/host/openwop-app/workflow-collab/never-registered/ticket')).status).toBe(404); // unknown
 
     const d = getToggleDefault('workflow-collab');
     if (d) await saveConfig({ ...d, status: 'off' }, 'test');
     try {
-      expect((await api(s, 'POST', `/v1/host/openwop-app/workflow-collab/${wfId}/ticket`)).status).toBe(404); // resource toggle off
+      expect((await api(s, 'POST', `/host/openwop-app/workflow-collab/${wfId}/ticket`)).status).toBe(404); // resource toggle off
     } finally {
       if (d) await saveConfig({ ...d, status: 'on' }, 'test');
     }
+  });
+
+  // ADR 0770 D1 (grade-code WBCD-3) — a room's derive registers the head, so
+  // joining is a WRITE. The ticket lane is gated where tickets are minted; the
+  // same-origin COOKIE upgrade reached the room with no scope check at all.
+  it('a VIEWER is refused the cookie-auth socket upgrade; the owner is not', async () => {
+    const owner = await login();
+    const wfId = `wfc-viewer-${Date.now()}`;
+    expect((await api(owner, 'POST', '/host/openwop-app/workflows', def(wfId, 'v1'))).status).toBe(201);
+    const res = await fetch(`${BASE}/host/openwop-app/test/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: `wfc-viewer-${Date.now()}@a.test`, tenantId: owner.tenantId, sharedWorkspace: true }),
+    });
+    const { user } = (await res.json()) as { user: { userId: string } };
+    let viewerCookie = '';
+    for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) viewerCookie = m[1]!; }
+    await createMember({ tenantId: owner.tenantId, orgId: owner.tenantId, subject: user.userId, displayName: 'Viewer', roles: ['viewer'] });
+
+    const byCookie = (cookie: string) => new WebSocket(`${WSBASE}/host/openwop-app/workflow-collab/${wfId}`, { headers: { origin: ORIGIN, cookie } });
+    const viewerWs = byCookie(viewerCookie);
+    await expect(opened(viewerWs)).rejects.toThrow(/upgrade rejected: 403/);
+    // Positive control: the same lane, the owner's cookie — so the 403 above is
+    // the scope gate, not a lane that refuses everyone.
+    const ownerWs = byCookie(owner.cookie);
+    await opened(ownerWs);
+    await closed(ownerWs);
   });
 });

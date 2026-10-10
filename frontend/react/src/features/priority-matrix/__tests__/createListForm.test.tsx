@@ -34,6 +34,11 @@ vi.mock('../priorityMatrixClient.js', async (orig) => ({
   listPeers: vi.fn(async () => []),
 }));
 vi.mock('../../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
+const getEffectiveAccess = vi.fn();
+vi.mock('../../../client/accessClient.js', async (orig) => ({
+  ...(await orig<Record<string, unknown>>()),
+  getEffectiveAccess: (o?: unknown) => getEffectiveAccess(o),
+}));
 
 import { PriorityMatrixPage } from '../PriorityMatrixPage.js';
 
@@ -55,7 +60,8 @@ const scoringOptions = (): string[] => {
 };
 
 beforeEach(() => {
-  listOrgs.mockReset(); listProjects.mockReset(); listPresets.mockReset(); listLists.mockReset();
+  listOrgs.mockReset(); listProjects.mockReset(); listPresets.mockReset(); listLists.mockReset(); getEffectiveAccess.mockReset();
+  getEffectiveAccess.mockResolvedValue({ roles: ['editor'], scopes: ['workspace:read', 'workspace:write'], basis: 'member' });
   listOrgs.mockResolvedValue([{ orgId: 'org-1', name: 'Acme' }]);
   listProjects.mockResolvedValue([]);
   listPresets.mockResolvedValue([preset('weighted'), preset('wsjf'), preset('rice'), preset('ice'), preset('value-effort')]);
@@ -116,5 +122,25 @@ describe('PM-G2: the scoring model is driven by the fetched presets', () => {
     // The two ids that are NOT acronyms do get prose.
     expect(labels).not.toContain('value-effort');
     expect(labels).not.toContain('weighted');
+  });
+});
+
+describe('PM4UX-1 (ADR 0842 D9): a list is offered only where it can be created', () => {
+  it('a read-only member is not offered "New list" (it could only end in a 403)', async () => {
+    getEffectiveAccess.mockResolvedValue({ roles: ['viewer'], scopes: ['workspace:read'], basis: 'member' });
+    render(<MemoryRouter><PriorityMatrixPage /></MemoryRouter>);
+    await waitFor(() => expect(getEffectiveAccess).toHaveBeenCalledWith({ orgId: 'org-1' }));
+    await screen.findByText('Q3 ideas');
+    await waitFor(() => expect(screen.queryByRole('button', { name: /new list/i })).toBeNull());
+  });
+
+  it('the create form offers only the workspaces the caller can write in', async () => {
+    listOrgs.mockResolvedValue([{ orgId: 'org-1', name: 'Acme' }, { orgId: 'org-2', name: 'Beta' }]);
+    getEffectiveAccess.mockImplementation(async (o: { orgId: string }) => ({ roles: [], scopes: o.orgId === 'org-1' ? ['workspace:read', 'workspace:write'] : ['workspace:read'], basis: 'member' }));
+    await view();
+    await waitFor(() => {
+      const ws = screen.getByLabelText(/workspace/i) as HTMLSelectElement;
+      expect(Array.from(ws.options).map((o) => o.textContent)).not.toContain('Beta');
+    });
   });
 });

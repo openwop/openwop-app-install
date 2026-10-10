@@ -50,6 +50,7 @@ import { resolveSessionSubject } from '../../host/sessionAuthority.js';
 import type { HostEventOrigin } from '../../host/hostEventDispatcher.js';
 import { surfaceStr as str, type FeatureSurface } from '../../host/featureSurfaces.js';
 import { getUser, setUserStatus, type User, type UserStatus } from './usersService.js';
+import { assertMayActOnUser } from './usersGuards.js';
 
 const MANAGE = 'host:members:manage' as const;
 
@@ -110,6 +111,9 @@ export function buildUsersSurface(scope: BundleScope): FeatureSurface {
     if (status === 'disabled' && target.userId === actor) {
       throw new OpenwopError('self_lockout', 'A workflow cannot disable the account of the user who started it. Ask another administrator.', 409, { action: 'deactivate', userId: target.userId });
     }
+    // ADR 0833 D6 (`UAUWF-8`) — the SAME rank rule as the route: a run whose
+    // acting user is an admin cannot lock out an owner.
+    if (status === 'disabled') await assertMayActOnUser(tenantId, actor, target, 'deactivate');
     const updated = await setUserStatus(target.userId, status, { reason: 'workflow', origin });
     if (!updated) throw new OpenwopError('not_found', 'User not found.', 404, { userId: target.userId });
     return { userId: updated.userId, status: updated.status };

@@ -10,7 +10,9 @@
  */
 
 import { authedHeaders, config, fetchOpts } from '../client/config.js';
+import { apiErrorFrom } from '../client/errorEnvelope.js';
 import { cachedRead } from '../client/requestCache.js';
+import { client } from '../client/runsClient.js';
 
 export interface RosterAgentRef {
   agentId: string;
@@ -137,21 +139,19 @@ export async function getAgentProfile(rosterId: string): Promise<AgentProfile | 
  *  persisted profile, including the derived enforced `autonomy.level`. */
 export async function putAgentProfile(rosterId: string, input: AgentProfileInput): Promise<AgentProfile> {
   const res = await fetch(profileUrl(rosterId), fetchOpts({ method: 'PUT', headers: jsonHeaders(), body: JSON.stringify(input) }));
-  if (!res.ok) {
-    let detail = `${res.status}`;
-    try {
-      const body = (await res.json()) as { message?: string };
-      if (body.message) detail = body.message;
-    } catch { /* ignore */ }
-    throw new Error(`putAgentProfile failed: ${detail}`);
-  }
+  // ADR 0775 D1 — a typed `ApiError` (status + the server's message) so a
+  // refusal is classified by STATUS, never by sniffing the message text.
+  if (!res.ok) throw await apiErrorFrom(res, `putAgentProfile failed (${res.status})`);
   return (await res.json()) as AgentProfile;
 }
 
 export interface OrgRole { roleId: string; name: string }
 export interface OrgDepartment { departmentId: string; name: string; parentDepartmentId: string | null; roles: OrgRole[] }
 export interface OrgMember { rosterId: string; departmentId: string; roleId: string; reportsTo: string | null }
-export interface OrgChart { tenantId: string; departments: OrgDepartment[]; members: OrgMember[]; updatedAt: string | null }
+/** The chart the page renders. `tenantId` is the wire's `owner.tenantId`;
+ *  `updatedAt` is only on the host-extension write's response (the normative
+ *  read does not carry it). */
+export interface OrgChart { tenantId: string; departments: OrgDepartment[]; members: OrgMember[]; updatedAt?: string | null }
 export interface ResponsibilityView { department: OrgDepartment; members: OrgMember[]; responsibilities: string[] }
 
 const rosterBase = `${config.baseUrl}/host/openwop-app/roster`;
@@ -208,26 +208,62 @@ export async function deleteRosterEntry(rosterId: string): Promise<void> {
   if (!res.ok) throw new Error(`deleteRosterEntry returned ${res.status}`);
 }
 
-/** "Load demo data" — idempotently seed the built-in demo domains for the
- *  caller's tenant. A no-op when the tenant already has those demo rows. */
-export async function seedExampleAgents(opts: { heal?: boolean } = {}): Promise<{
+export interface SeedExampleAgentsResult {
   seeded: boolean;
   agents: number;
   domains?: string[];
   healed?: { boards: number; schedules: number; orgChart: boolean };
-}> {
-  const res = await fetch(`${config.baseUrl}/host/openwop-app/example-data/seed`, fetchOpts({
+}
+
+/** "Load demo data" — idempotently seed the built-in demo domains for the
+ *  caller's tenant. A no-op when the tenant already has those demo rows.
+ *
+ *  Streamed (#4239): the full reseed runs 90–170 s in prod and the `/api`
+ *  rewrite cuts at 60 s, so this goes to the direct backend URL (the
+ *  `sseBaseUrl` bypass `/run` already uses) and asks for NDJSON — keepalive
+ *  lines, then one `result` (or `error`) line. */
+export async function seedExampleAgents(opts: { heal?: boolean } = {}): Promise<SeedExampleAgentsResult> {
+  const res = await fetch(`${config.sseBaseUrl}/host/openwop-app/example-data/seed`, fetchOpts({
     method: 'POST',
-    headers: jsonHeaders(),
+    headers: { ...jsonHeaders(), accept: 'application/x-ndjson' },
     // heal:true = explicit restore (the "Load demo data" buttons); the silent
     // auto-seed on page entry sends {} so it never resurrects deletions.
     body: JSON.stringify(opts.heal ? { heal: true } : {}),
   }));
-  if (!res.ok) throw new Error(`seedExampleAgents returned ${res.status}`);
-  return (await res.json()) as {
-    seeded: boolean; agents: number; domains?: string[];
-    healed?: { boards: number; schedules: number; orgChart: boolean };
+  if (!res.ok) throw await apiErrorFrom(res, `seedExampleAgents returned ${res.status}`);
+  return readSeedStream(res);
+}
+
+/** The terminal line of a streamed seed. A non-NDJSON 200 (a host without the
+ *  stream mode) is read as the plain JSON body. Never resolves without a
+ *  `result`: an `error` line or a stream that ends early is a thrown error. */
+export async function readSeedStream(res: Response): Promise<SeedExampleAgentsResult> {
+  if (!(res.headers.get('content-type') ?? '').includes('application/x-ndjson') || !res.body) {
+    return (await res.json()) as SeedExampleAgentsResult;
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let outcome: { result: SeedExampleAgentsResult } | { error: string } | null = null;
+  const take = (line: string): void => {
+    if (!line.trim()) return;
+    let evt: { type?: string; result?: SeedExampleAgentsResult; message?: string };
+    try { evt = JSON.parse(line) as typeof evt; } catch { return; }
+    if (evt.type === 'result' && evt.result) outcome = { result: evt.result };
+    else if (evt.type === 'error') outcome = { error: evt.message ?? 'The demo seed failed.' };
   };
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let nl = buffer.indexOf('\n');
+    while (nl !== -1) { take(buffer.slice(0, nl)); buffer = buffer.slice(nl + 1); nl = buffer.indexOf('\n'); }
+  }
+  take(buffer);
+  const done = outcome as { result: SeedExampleAgentsResult } | { error: string } | null;
+  if (!done) throw new Error('The demo seed stream ended without a result.');
+  if ('error' in done) throw new Error(done.error);
+  return done.result;
 }
 
 export interface HeartbeatResult {
@@ -339,27 +375,26 @@ export async function getFleetActivity(
   return { items: body.items, truncated: body.truncated ?? false };
 }
 
+/** RFC 0087 §D — the NORMATIVE read at major 2 (`GET /agents/org-chart`),
+ *  through the SDK. It used to read the host-extension alias. The SDK answers
+ *  `null` for a 404 (the read is unadvertised); that stays an error here, as
+ *  the alias's non-ok did, so the page's failed-read state still renders. */
 export async function getOrgChart(): Promise<OrgChart> {
-  const res = await fetch(orgBase, fetchOpts({ headers: authedHeaders() }));
-  if (!res.ok) throw new Error(`getOrgChart returned ${res.status}`);
-  return (await res.json()) as OrgChart;
+  const chart = await client.agents.getOrgChart();
+  if (!chart) throw new Error('getOrgChart returned 404');
+  return { tenantId: chart.owner.tenantId, departments: chart.departments as OrgDepartment[], members: chart.members as OrgMember[] };
 }
 
 export async function putOrgChart(input: { departments: OrgDepartment[]; members: OrgMember[] }): Promise<OrgChart> {
   const res = await fetch(orgBase, fetchOpts({ method: 'PUT', headers: jsonHeaders(), body: JSON.stringify(input) }));
-  if (!res.ok) {
-    let detail = `${res.status}`;
-    try {
-      const body = (await res.json()) as { message?: string };
-      if (body.message) detail = body.message;
-    } catch { /* ignore */ }
-    throw new Error(`putOrgChart failed: ${detail}`);
-  }
+  // ADR 0775 D1 — a typed `ApiError` (status + the server's message) so a
+  // refusal is classified by STATUS, never by sniffing the message text.
+  if (!res.ok) throw await apiErrorFrom(res, `putOrgChart failed (${res.status})`);
   return (await res.json()) as OrgChart;
 }
 
 export async function getDepartmentRollup(departmentId: string): Promise<ResponsibilityView> {
-  const res = await fetch(`${orgBase}/${encodeURIComponent(departmentId)}`, fetchOpts({ headers: authedHeaders() }));
-  if (!res.ok) throw new Error(`getDepartmentRollup returned ${res.status}`);
-  return (await res.json()) as ResponsibilityView;
+  const view = await client.agents.getOrgChartDepartment(departmentId);
+  if (!view) throw new Error('getDepartmentRollup returned 404');
+  return view as ResponsibilityView;
 }

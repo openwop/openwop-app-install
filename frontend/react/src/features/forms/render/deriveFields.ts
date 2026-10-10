@@ -26,6 +26,51 @@ export interface PublicFormField {
   min?: number;
   max?: number;
   step?: number;
+  /** ADR 0808 — conditional visibility: the workflow edge-condition grammar over
+   *  `fields.<key>` of an earlier field (the server validates it at authoring). */
+  when?: FieldWhen;
+}
+
+/** ADR 0808 — the edge-condition operators this host evaluates (it refuses
+ *  `expression` / `regex` when a form is authored, so none reaches here). */
+export interface FieldWhen {
+  type: 'equals' | 'notEquals' | 'contains' | 'truthy' | 'falsy';
+  left: string;
+  right?: unknown;
+}
+
+/** The verdict for one condition. MIRRORS the server's `evaluateCondition`
+ *  (`executor/scheduler.ts`) over `mapEdgeCondition` exactly — JSON equality,
+ *  JS truthiness, string-includes / array-some for `contains` — so the visitor
+ *  sees the same fields the server will judge. Pinned case-for-case against
+ *  the server by `deriveFields.when.test.ts` and `adr0808-…test.ts`. */
+function holds(when: FieldWhen, seen: Record<string, unknown>): boolean {
+  const key = when.left.startsWith('fields.') ? when.left.slice('fields.'.length) : when.left;
+  const v = seen[key];
+  switch (when.type) {
+    case 'equals': return JSON.stringify(v) === JSON.stringify(when.right);
+    case 'notEquals': return JSON.stringify(v) !== JSON.stringify(when.right);
+    case 'truthy': return Boolean(v);
+    case 'falsy': return !v;
+    case 'contains':
+      if (typeof v === 'string') return v.includes(String(when.right));
+      if (Array.isArray(v)) return v.some((x) => JSON.stringify(x) === JSON.stringify(when.right));
+      return false;
+    default: return false;
+  }
+}
+
+/** The fields a visitor can see given `values`, in authored order. A hidden
+ *  controller hides its dependents: it is judged on visible values only. */
+export function visibleFields<F extends { key: string; when?: FieldWhen }>(fields: readonly F[], values: Record<string, unknown>): F[] {
+  const seen: Record<string, unknown> = {};
+  const out: F[] = [];
+  for (const f of fields) {
+    if (f.when && !holds(f.when, seen)) continue;
+    out.push(f);
+    if (values[f.key] !== undefined) seen[f.key] = values[f.key];
+  }
+  return out;
 }
 
 // `number` maps to the engine's EXISTING `number` FieldKind (`formEngine.ts:25`)

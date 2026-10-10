@@ -147,9 +147,9 @@ function client(initialCookie = '') {
 let n = 0;
 async function ownerWithOrg(): Promise<{ owner: ReturnType<typeof client>; orgId: string }> {
   const owner = client();
-  const su = await owner.post('/v1/host/openwop-app/test/login', { email: `pv-${Date.now()}-${n++}@acme.test` });
+  const su = await owner.post('/host/openwop-app/test/login', { email: `pv-${Date.now()}-${n++}@acme.test` });
   expect(su.status, JSON.stringify(su.body)).toBe(201);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return { owner, orgId: org.body.orgId };
 }
@@ -157,7 +157,7 @@ async function ownerWithOrg(): Promise<{ owner: ReturnType<typeof client>; orgId
 describe('purpose-vocab HTTP routes', () => {
   it('GET seeds; POST adds; DELETE removes; PUT flips strict (RBAC)', async () => {
     const { owner, orgId } = await ownerWithOrg();
-    const B = `/v1/host/openwop-app/consent/orgs/${orgId}/purpose-vocab`;
+    const B = `/host/openwop-app/consent/orgs/${orgId}/purpose-vocab`;
     const seeded = await owner.get(B);
     expect(seeded.status, JSON.stringify(seeded.body)).toBe(200);
     expect(seeded.body.purposes).toEqual(expect.arrayContaining([...PURPOSE_VOCAB_SEED]));
@@ -171,7 +171,7 @@ describe('purpose-vocab HTTP routes', () => {
 
   it('public consent capture: non-strict warns; strict rejects (400)', async () => {
     const { owner, orgId } = await ownerWithOrg();
-    const PUB = `/v1/host/openwop-app/public-consent/${orgId}`;
+    const PUB = `/host/openwop-app/public-consent/${orgId}`;
     // non-strict (default): unknown purpose accepted, surfaced as a warning
     // CONS-2 — the public lane mints its own `visitor:` subject; a caller-chosen
     // `subjectKey` is refused (it was an anonymous forgery vector).
@@ -179,7 +179,7 @@ describe('purpose-vocab HTTP routes', () => {
     expect(warn.status, JSON.stringify(warn.body)).toBe(201);
     expect(warn.body.unknownPurposes).toEqual(['mystery']);
     // flip strict on, then the same capture is rejected 400
-    await owner.put(`/v1/host/openwop-app/consent/orgs/${orgId}/purpose-vocab/strict`, { strict: true });
+    await owner.put(`/host/openwop-app/consent/orgs/${orgId}/purpose-vocab/strict`, { strict: true });
     const rej = await client().post(PUB, { categories: {}, purposes: ['mystery'] });
     expect(rej.status).toBe(400);
     expect(rej.body.error).toBe('validation_error');

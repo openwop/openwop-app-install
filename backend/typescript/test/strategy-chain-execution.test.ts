@@ -126,8 +126,8 @@ let n = 0;
 async function ownerOrg(): Promise<{ owner: ReturnType<typeof client>; orgId: string; tenantId: string }> {
   const tenantId = `org:schx-${Date.now()}-${n++}`;
   const owner = client();
-  expect((await owner.post('/v1/host/openwop-app/test/login', { email: `schx-${Date.now()}-${n++}@acme.test`, tenantId })).status).toBe(201);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  expect((await owner.post('/host/openwop-app/test/login', { email: `schx-${Date.now()}-${n++}@acme.test`, tenantId })).status).toBe(201);
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status).toBe(201);
   return { owner, orgId: org.body.orgId, tenantId };
 }
@@ -197,14 +197,14 @@ async function inbox(tenantId: string) {
 
 /** A measured, active strategy with one sourced KR (crm-deal-total) and one unsourced. */
 async function activeMeasuredStrategy(owner: ReturnType<typeof client>, orgId: string): Promise<string> {
-  const s = (await owner.post('/v1/host/openwop-app/strategy', {
+  const s = (await owner.post('/host/openwop-app/strategy', {
     orgId, title: 'Chain plan',
     objectives: [{ title: 'Grow', keyResults: [
       { title: 'Sourced ARR', measure: { kind: 'currency', baseline: 0, target: 100, source: { kind: 'crm-deal-total', orgId } } },
       { title: 'Unsourced NPS', measure: { kind: 'numeric', baseline: 0, target: 60 } },
     ] }],
   })).body;
-  await owner.patch(`/v1/host/openwop-app/strategy/${s.id}`, { status: 'active' });
+  await owner.patch(`/host/openwop-app/strategy/${s.id}`, { status: 'active' });
   return s.id;
 }
 
@@ -229,8 +229,8 @@ describe('strategy chains — end-to-end execution (STRAT-A1)', () => {
     const sid = await activeMeasuredStrategy(owner, orgId);
     // Two paid CRM deals ⇒ commerce/crm revenue the sync reads.
     for (const amount of [40, 30]) {
-      const pipe = (await owner.post(`/v1/host/openwop-app/crm/orgs/${orgId}/pipelines`, { name: `P${amount}` })).body;
-      await owner.post(`/v1/host/openwop-app/crm/orgs/${orgId}/deals`, { title: `D${amount}`, amount, pipelineId: pipe.pipelineId, stageId: pipe.stages?.[0]?.stageId });
+      const pipe = (await owner.post(`/host/openwop-app/crm/orgs/${orgId}/pipelines`, { name: `P${amount}` })).body;
+      await owner.post(`/host/openwop-app/crm/orgs/${orgId}/deals`, { title: `D${amount}`, amount, pipelineId: pipe.pipelineId, stageId: pipe.stages?.[0]?.stageId });
     }
 
     const results = await runChain('strategy.metric-sync', {}, tenantId);
@@ -327,18 +327,18 @@ describe('the cadence lane registers a RUNNABLE definition (wiring, not mechanis
 
     // A chain with an unsatisfied REQUIRED param must fail at SAVE time — the
     // human act with a caller to fail loudly at — never silently every night.
-    const blind = await owner.put('/v1/host/openwop-app/strategy/cadence', {
+    const blind = await owner.put('/host/openwop-app/strategy/cadence', {
       boardPack: { enabled: true, cron: '0 8 * * 1' },
     });
     expect(blind.status, JSON.stringify(blind.body)).toBe(400);
 
-    const ok = await owner.put('/v1/host/openwop-app/strategy/cadence', {
+    const ok = await owner.put('/host/openwop-app/strategy/cadence', {
       boardPack: { enabled: true, cron: '0 8 * * 1', params: { orgId } },
     });
     expect(ok.status, JSON.stringify(ok.body)).toBe(200);
 
     const slug = (await import('node:crypto')).createHash('sha256').update(tenantId).digest('hex').slice(0, 10);
-    const def = await getRegisteredWorkflowAsync(`wf.strategy-board-pack.cadence-${slug}`);
+    const def = await getRegisteredWorkflowAsync(`wf.cadence.strategy-board-pack.${slug}`);
     expect(def, 'the cadence lane registered nothing to fire').toBeTruthy();
 
     const results = await runDefinition(def!, tenantId);
@@ -372,12 +372,12 @@ describe('the cadence lane registers a RUNNABLE definition (wiring, not mechanis
   it('weekly-checkin needs no params and its registered definition runs clean', async () => {
     const { owner, orgId, tenantId } = await ownerOrg();
     await activeMeasuredStrategy(owner, orgId);
-    const ok = await owner.put('/v1/host/openwop-app/strategy/cadence', {
+    const ok = await owner.put('/host/openwop-app/strategy/cadence', {
       weeklyCheckin: { enabled: true, cron: '0 9 * * 1' },
     });
     expect(ok.status, JSON.stringify(ok.body)).toBe(200);
     const slug = (await import('node:crypto')).createHash('sha256').update(tenantId).digest('hex').slice(0, 10);
-    const def = await getRegisteredWorkflowAsync(`wf.strategy-weekly-checkin.cadence-${slug}`);
+    const def = await getRegisteredWorkflowAsync(`wf.cadence.strategy-weekly-checkin.${slug}`);
     expect(def).toBeTruthy();
     const results = await runDefinition(def!, tenantId);
     expect(results.deliver?.outputs.emitted).toBe(true);
@@ -447,24 +447,24 @@ describe('ADR 0597 §Correction 2 — a refused cadence PUT persists NOTHING', (
 
     // weeklyCheckin is satisfiable and is processed FIRST; boardPack needs an
     // `orgId` nothing supplies and throws. One PUT, two entries, 400.
-    const refused = await owner.put('/v1/host/openwop-app/strategy/cadence', {
+    const refused = await owner.put('/host/openwop-app/strategy/cadence', {
       weeklyCheckin: { enabled: true, cron: '0 9 * * 1' },
       boardPack: { enabled: true, cron: '0 8 * * 1' },
     });
     expect(refused.status, JSON.stringify(refused.body)).toBe(400);
 
     // 1. The config the caller was told was REJECTED must not be readable back.
-    const readBack = await owner.get('/v1/host/openwop-app/strategy/cadence');
+    const readBack = await owner.get('/host/openwop-app/strategy/cadence');
     expect(readBack.status).toBe(200);
     expect(readBack.body.config, 'a refused PUT persisted the schedule it refused').toBeNull();
     expect(await cadenceOf(tenantId), 'the durable row survived the refusal').toBeNull();
 
     // 2. Nothing was half-reconciled for the entry that came BEFORE the failure.
-    expect(await getRegisteredWorkflowAsync(`wf.strategy-weekly-checkin.cadence-${slug}`),
+    expect(await getRegisteredWorkflowAsync(`wf.cadence.strategy-weekly-checkin.${slug}`),
       'a 400 still registered a workflow for the entry processed first').toBeFalsy();
     const { listOwned } = await import('../src/host/workflowOwnership.js');
     expect((await listOwned(tenantId)).map((o) => o.workflowId),
-      'a 400 still published the workflow into the builder gallery').not.toContain(`wf.strategy-weekly-checkin.cadence-${slug}`);
+      'a 400 still published the workflow into the builder gallery').not.toContain(`wf.cadence.strategy-weekly-checkin.${slug}`);
     expect((await jobsOf(tenantId)).map((j) => j.jobId),
       'a 400 still registered a live cron job').toEqual([]);
   });
@@ -483,7 +483,7 @@ describe('ADR 0597 §Correction 2 — a refused cadence PUT persists NOTHING', (
   it('a cadence job carries NO acting-user attribution — the premise §Correction 1 relies on', async () => {
     const { owner, tenantId } = await ownerOrg();
     const slug = await slugOf(tenantId);
-    expect((await owner.put('/v1/host/openwop-app/strategy/cadence', {
+    expect((await owner.put('/host/openwop-app/strategy/cadence', {
       weeklyCheckin: { enabled: true, cron: '0 9 * * 1' },
     })).status).toBe(200);
 
@@ -511,12 +511,12 @@ describe('ADR 0597 §Correction 2 — a refused cadence PUT persists NOTHING', (
     const squatted = `strategy-cadence:weeklyCheckin:${slug}`;
     expect((await registerJob({ jobId: squatted, tenantId: 'org:someone-else', cronExpr: '0 3 * * *' })).ok).toBe(true);
 
-    const refused = await owner.put('/v1/host/openwop-app/strategy/cadence', {
+    const refused = await owner.put('/host/openwop-app/strategy/cadence', {
       weeklyCheckin: { enabled: true, cron: '0 9 * * 1' },
     });
     expect(refused.status, JSON.stringify(refused.body)).toBe(409);
     expect(await cadenceOf(tenantId), 'a refused PUT persisted the config anyway').toBeNull();
-    expect(await getRegisteredWorkflowAsync(`wf.strategy-weekly-checkin.cadence-${slug}`)).toBeFalsy();
+    expect(await getRegisteredWorkflowAsync(`wf.cadence.strategy-weekly-checkin.${slug}`)).toBeFalsy();
     const { getJob } = await import('../src/host/schedulingService.js');
     expect((await getJob(squatted))?.tenantId, "the other tenant's job was overwritten").toBe('org:someone-else');
   });
@@ -524,14 +524,14 @@ describe('ADR 0597 §Correction 2 — a refused cadence PUT persists NOTHING', (
   it('MATCHED POSITIVE CONTROL — the same two entries, both satisfiable, DO all get built', async () => {
     const { owner, orgId, tenantId } = await ownerOrg();
     const slug = await slugOf(tenantId);
-    const ok = await owner.put('/v1/host/openwop-app/strategy/cadence', {
+    const ok = await owner.put('/host/openwop-app/strategy/cadence', {
       weeklyCheckin: { enabled: true, cron: '0 9 * * 1' },
       boardPack: { enabled: true, cron: '0 8 * * 1', params: { orgId } },
     });
     expect(ok.status, JSON.stringify(ok.body)).toBe(200);
     expect((await cadenceOf(tenantId))?.boardPack?.enabled).toBe(true);
-    expect(await getRegisteredWorkflowAsync(`wf.strategy-weekly-checkin.cadence-${slug}`)).toBeTruthy();
-    expect(await getRegisteredWorkflowAsync(`wf.strategy-board-pack.cadence-${slug}`)).toBeTruthy();
+    expect(await getRegisteredWorkflowAsync(`wf.cadence.strategy-weekly-checkin.${slug}`)).toBeTruthy();
+    expect(await getRegisteredWorkflowAsync(`wf.cadence.strategy-board-pack.${slug}`)).toBeTruthy();
     expect((await jobsOf(tenantId)).map((j) => j.jobId).sort())
       .toEqual([`strategy-cadence:boardPack:${slug}`, `strategy-cadence:weeklyCheckin:${slug}`]);
   });

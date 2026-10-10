@@ -271,6 +271,11 @@ export function evaluateCondition(
 
 const TERMINAL: ReadonlySet<NodeState> = new Set(['completed', 'failed', 'skipped']);
 
+/** The edge's id in either spelling — host `edgeId` or the canonical wire `id`. */
+function edgeSortKey(e: EdgeDef): string {
+  return e.edgeId ?? (e as EdgeDef & { id?: string }).id ?? '';
+}
+
 export function evaluateTrigger(
   nodeId: string,
   graph: SchedulerGraph,
@@ -309,8 +314,14 @@ export function evaluateTrigger(
 
   // Pick the triggerRule from the first edge (by edgeId) — incoming edges
   // to the same target SHOULD agree on the rule, but we don't enforce.
+  //
+  // ADR 0772 D4 (`RRWF-5`) — keyed `edgeId ?? id`: the validator accepts the
+  // canonical wire field `id` and never copies it into `edgeId`, so a fan-in
+  // posted in the canonical shape threw a TypeError here (`undefined.localeCompare`)
+  // and failed the run. The comparator only runs with ≥2 incoming edges, which is
+  // why a linear workflow never saw it.
   const rule: TriggerRule =
-    [...ins].sort((a, b) => a.edgeId.localeCompare(b.edgeId))[0]?.triggerRule ?? 'all_success';
+    [...ins].sort((a, b) => edgeSortKey(a).localeCompare(edgeSortKey(b)))[0]?.triggerRule ?? 'all_success';
 
   switch (rule) {
     case 'all_success':

@@ -5,9 +5,14 @@
  * verifies the run's debug bundle carries that event referenced BY URL
  * (never inlined) and that the served URL resolves — closing the §C loop
  * (produce → store → serve → debug bundle) the rails were built for.
+ *
+ * Breaks if the node stops emitting `media.image`, inlines the binary in the
+ * payload, emits a URL that is not the host serve path, or stores bytes other
+ * than the ones it references (sabotage probes w5g2-emit-*). The run must reach
+ * `completed` — a failed run that happened to emit would not satisfy this.
  */
 
-import { describe, expect, it, beforeAll, afterAll } from 'vitest';
+import { describe, expect, it, beforeAll, afterAll, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
@@ -43,13 +48,15 @@ async function jsonFetch<T = unknown>(path: string, init: RequestInit = {}): Pro
   return { status: res.status, body: (await res.json()) as T };
 }
 
-interface MediaPayload { url?: string; bytes?: number; base64?: string }
+interface MediaPayload { url?: string; bytes?: number; base64?: string; mimeType?: string; alt?: string }
+
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 interface BundleBody { events?: { type?: string; payload?: MediaPayload }[] }
 
 describe('media-emit demo node (RFC 0055 §C producer)', () => {
   it('emits a media.image referenced by URL in the run debug bundle, and the URL resolves', async () => {
     // Register the image-emit node as a one-node workflow.
-    const reg = await jsonFetch('/v1/host/openwop-app/workflows', {
+    const reg = await jsonFetch('/host/openwop-app/workflows', {
       method: 'POST',
       body: JSON.stringify({
         workflowId: 'openwop-app.image',
@@ -59,20 +66,22 @@ describe('media-emit demo node (RFC 0055 §C producer)', () => {
     });
     expect([200, 201]).toContain(reg.status);
 
-    const create = await jsonFetch<{ runId: string }>('/v1/runs', {
+    const create = await jsonFetch<{ runId: string }>('/runs', {
       method: 'POST',
       body: JSON.stringify({ workflowId: 'openwop-app.image', inputs: {} }),
     });
     expect(create.status).toBe(201);
     const { runId } = create.body;
 
-    for (let i = 0; i < 20; i++) {
-      await new Promise((r) => setTimeout(r, 50));
-      const snap = await jsonFetch<{ status: string }>(`/v1/runs/${runId}`);
-      if (['completed', 'failed', 'cancelled'].includes(snap.body.status)) break;
-    }
+    // Wait on the real condition (a terminal run status), not a fixed sleep.
+    const snap = await vi.waitFor(async () => {
+      const s = await jsonFetch<{ status: string }>(`/runs/${runId}`);
+      if (!['completed', 'failed', 'cancelled'].includes(s.body.status)) throw new Error(`run still ${s.body.status}`);
+      return s;
+    }, { timeout: 5000, interval: 25 });
+    expect(snap.body.status).toBe('completed');
 
-    const bundle = await jsonFetch<BundleBody>(`/v1/runs/${runId}/debug-bundle`);
+    const bundle = await jsonFetch<BundleBody>(`/runs/${runId}/debug-bundle`);
     expect(bundle.status).toBe(200);
     const mediaEvents = (bundle.body.events ?? []).filter((e) => typeof e.type === 'string' && e.type.startsWith('media.'));
     expect(mediaEvents.length, 'debug bundle MUST carry the emitted media.image event').toBeGreaterThanOrEqual(1);
@@ -80,11 +89,16 @@ describe('media-emit demo node (RFC 0055 §C producer)', () => {
     // RFC 0055 §C rule 3: referenced by URL, never inlined.
     expect(typeof ev.payload?.url).toBe('string');
     expect(ev.payload?.base64, 'media.image MUST NOT inline the binary').toBeUndefined();
-    expect(ev.payload?.url).toMatch(/^\/v1\/host\/openwop-app\/assets\//);
+    expect(ev.payload?.url).toMatch(/^\/host\/openwop-app\/assets\//);
+    expect(ev.payload).toMatchObject({ mimeType: 'image/png', alt: expect.any(String) });
 
     // The served URL resolves (public, token-authed).
     const served = await fetch(`${BASE}${ev.payload!.url}`);
     expect(served.status).toBe(200);
     expect(served.headers.get('content-type')).toBe('image/png');
+    // …and serves exactly the bytes the event references (a PNG of the advertised size).
+    const bytes = Buffer.from(await served.arrayBuffer());
+    expect(bytes.length).toBe(ev.payload!.bytes);
+    expect(bytes.subarray(0, 8).equals(PNG_SIGNATURE)).toBe(true);
   });
 });

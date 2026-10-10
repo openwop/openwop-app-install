@@ -11,13 +11,14 @@ gated claim phrase. The SPA fallback (`buildDefaultSections` in
 `features/site/FrontPage.tsx`, copy in `features/site/i18n/*.ts`) tells the same
 story, and `scripts/check-default-page-drift.mjs` pins its hero to the seed's.
 
-The story runs: thesis + the run ledger → why the run matters → the BPMN/SMTP
-history lesson → five guarantees of an open run → the paper's two-host result
-and one honest caveat → what you can do in the app today → closing CTA.
+The story runs (ADR 0762): what you can build here, with the intro film → six
+example prompts to start from → four things to do in your first ten minutes,
+each drawn → the app's own conformance evidence → why the run should be open →
+closing CTA.
 
 ## Do you need to publish it at all?
 
-Usually not. The seed refreshes the live home page on deploy (`SEED_VERSION` 7)
+Usually not. The seed refreshes the live home page on deploy (`SEED_VERSION` 9)
 **only while that page has never been human-edited**, i.e. while its
 `updatedBy` is still `system`. A human edit freezes the page and the seed never
 touches it again.
@@ -40,8 +41,8 @@ curl -s -H "Authorization: Bearer $SUPERADMIN_TOKEN" \
 
 ## Before you publish
 
-**Deploy the code first.** The page uses the hero visual `run` and the columns
-layout `rows`. An older backend quietly rewrites them: `visual` is dropped, so
+**Deploy the code first.** The page uses the hero visual `film` and the columns
+layouts `prompts`, `dives` and `stats` (with a heading). An older backend quietly rewrites them: `visual` is dropped, so
 the page falls back to the workflow schematic, and `layout` becomes `cards`.
 An older frontend can't draw either one.
 
@@ -80,11 +81,14 @@ settings. If it isn't, French visitors get the English base.
 
 ## Demo-only links
 
-This file links to `https://openwop.dev` (hero secondary CTA) and to the
-OpenWOP paper. That is correct for app.openwop.dev. **Do not publish it
+This file links to `https://openwop.dev` (hero secondary CTA), plays the
+intro film hosted there (hero visual `film`), and quotes app.openwop.dev's own
+conformance figures (`sec:story-evidence`). That is correct for app.openwop.dev.
+The film renders only in demo mode; anywhere else the hero falls back to the
+run ledger. **Do not publish it
 unchanged on a white-label install** (ADR 0196 Gate A). There, remove
-`ctaLabel2`/`ctaUrl2` from the hero and its overlays, and remove the last
-paragraph of the `sec:story-proof` text. The SPA fallback already does this
+`ctaLabel2`/`ctaUrl2` from the hero and its overlays, and remove the
+`sec:story-evidence` section. The SPA fallback already does this
 through `useDemoMode()`. The seed does **not** demo-gate these links, and
 neither did the previous seed. An install that seeds the system site gets them
 on an unedited home page, and that is not a change this branch introduces.

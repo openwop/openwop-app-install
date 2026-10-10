@@ -1,6 +1,7 @@
 {
   "name": "feature.cdp.nodes",
-  "version": "1.1.0",
+  "version": "1.1.1",
+  "kind": "node",
   "description": "CDP feature node pack \u2014 the identity-resolution read over ctx.features.cdp (ADR CDP-A): a golden-record lookup by identifier so a workflow can branch on a resolved contact. Tenant-guarded; internal columns projected out. role:action (recorded) so replay/fork read the recorded result.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
@@ -11,7 +12,7 @@
     "golden-record"
   ],
   "engines": {
-    "openwop": ">=1.0.0 <2.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "nodes": [
     {

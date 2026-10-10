@@ -6,6 +6,22 @@
  * the personal tenant stays exempt (the enrollment path must be reachable),
  * and the escape routes (logout / switch-back / workspace list / own security
  * read) stay open so a refused session is never a full lockout.
+ *
+ * The personal-tenant exemption is exercised for real: the personal tenant is
+ * itself given `requireMfa`, and a single-factor session there still passes
+ * (the enrollment path must be reachable).
+ *
+ * The remaining three cases guard the governance-policy MERGE that carries
+ * `requireMfa` (ADR 0389 P4's admin surface): the superadmin PUT round-trips
+ * set/clear and preserves omitted fields, GRADE SEC-C1 (the byok-chat-budget PUT
+ * used to WIPE `requireMfa`, silently disabling enforcement) and GRADE SEC-C12
+ * (a `requireMfa`-only PUT must not clear retention / the provider allowlist).
+ *
+ * Sabotage that turns it red: `auth.ts`
+ * `if (activeTenant === personalTenant && isPersonalTenantId(personalTenant)) return false;`
+ * deleted reds the first case at the personal-tenant leg;
+ * `if (isMfaGateExempt(req.path)) return false;` → `if (true) return false;`
+ * reds it at the refusal leg.
  */
 
 import http from 'node:http';
@@ -71,7 +87,13 @@ afterAll(async () => {
   for (const k of ['OPENWOP_OIDC_ISSUER', 'OPENWOP_OIDC_AUDIENCE', 'OPENWOP_OIDC_JWKS_URL']) delete process.env[k];
 });
 
-interface Res<T = unknown> { status: number; body: T }
+interface Body {
+  error?: string;
+  details?: { reason?: string; settingsUrl?: string };
+  workspaceId?: string;
+  personal?: string;
+}
+interface Res { status: number; body: Body }
 function client(): {
   get: (p: string, token?: string) => Promise<Res>;
   post: (p: string, token?: string, b?: unknown) => Promise<Res>;
@@ -94,7 +116,7 @@ function client(): {
       const m = /(__session=[^;]+)/.exec(sc);
       if (m) cookie = m[1]!;
     }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const out = res.status === 204 ? {} : ((await res.json().catch(() => ({}))) as Body);
     return { status: res.status, body: out };
   };
   return { get: (p, t) => call('GET', p, t), post: (p, t, b) => call('POST', p, t, b) };
@@ -105,52 +127,60 @@ describe('ADR 0389 P4 — tenant requireMfa', () => {
     // Single-factor user: bind, create a shared workspace, switch into it.
     const c = client();
     const noMfa = mint('fb-uid-p4-1');
-    expect((await c.post('/v1/host/openwop-app/users/auth/oidc/bind', noMfa)).status).toBe(200);
-    const ws = await c.post('/v1/host/openwop-app/workspaces', noMfa, { name: 'MFA-required ws' });
+    expect((await c.post('/host/openwop-app/users/auth/oidc/bind', noMfa)).status).toBe(200);
+    const ws = await c.post('/host/openwop-app/workspaces', noMfa, { name: 'MFA-required ws' });
     expect(ws.status, JSON.stringify(ws.body)).toBe(201);
-    const wsId = (ws.body as { workspaceId: string }).workspaceId;
-    expect((await c.post(`/v1/host/openwop-app/workspaces/${wsId}/switch`, noMfa)).status).toBe(200);
+    const wsId = ws.body.workspaceId!;
+    expect((await c.post(`/host/openwop-app/workspaces/${wsId}/switch`, noMfa)).status).toBe(200);
 
     // Pre-policy: in-workspace reads work.
-    expect((await c.get('/v1/host/openwop-app/users/me', noMfa)).status).toBe(200);
+    expect((await c.get('/host/openwop-app/users/me', noMfa)).status).toBe(200);
 
     // Flip the policy (service-level — the superadmin PUT is covered elsewhere).
     await setGovernancePolicy(wsId, { requireMfa: true });
     __resetMfaCache();
 
     // Single-factor session now refused, with the enrollment deep-link.
-    const refused = await c.get('/v1/host/openwop-app/users/me', noMfa);
+    const refused = await c.get('/host/openwop-app/users/me', noMfa);
     expect(refused.status).toBe(401);
-    expect(JSON.stringify(refused.body)).toContain('mfa_required');
-    expect(JSON.stringify(refused.body)).toContain('/settings#security');
+    expect(refused.body.error).toBe('unauthenticated');
+    expect(refused.body.details?.reason).toBe('mfa_required');
+    expect(refused.body.details?.settingsUrl).toBe('/settings#security');
 
     // Cookie-only requests are refused the same way (no bearer).
-    expect((await c.get('/v1/host/openwop-app/users/me')).status).toBe(401);
+    const cookieOnly = await c.get('/host/openwop-app/users/me');
+    expect(cookieOnly.status).toBe(401);
+    expect(cookieOnly.body.details?.reason).toBe('mfa_required');
 
     // ESCAPE ROUTES stay open for the refused session: list workspaces, read
     // own security posture, switch BACK to personal, then logout.
-    expect((await c.get('/v1/host/openwop-app/me/workspaces', noMfa)).status).toBe(200);
-    expect((await c.get('/v1/host/openwop-app/users/me/security', noMfa)).status).toBe(200);
-    const who = await c.get('/v1/host/openwop-app/me/workspaces', noMfa);
-    const personal = (who.body as { personal: string }).personal;
-    expect((await c.post(`/v1/host/openwop-app/workspaces/${personal}/switch`, noMfa)).status).toBe(200);
+    expect((await c.get('/host/openwop-app/me/workspaces', noMfa)).status).toBe(200);
+    expect((await c.get('/host/openwop-app/users/me/security', noMfa)).status).toBe(200);
+    const who = await c.get('/host/openwop-app/me/workspaces', noMfa);
+    const personal = who.body.personal!;
+    expect((await c.post(`/host/openwop-app/workspaces/${personal}/switch`, noMfa)).status).toBe(200);
 
-    // PERSONAL tenant exempt — normal operation resumes after switching back.
-    expect((await c.get('/v1/host/openwop-app/users/me', noMfa)).status).toBe(200);
+    // PERSONAL tenant exempt — even when the personal tenant ITSELF carries
+    // requireMfa, a single-factor session there passes (the enrollment path
+    // must stay reachable). Without the policy this leg would be vacuous.
+    await setGovernancePolicy(personal, { requireMfa: true });
+    __resetMfaCache();
+    const home = await c.get('/host/openwop-app/users/me', noMfa);
+    expect(home.status, JSON.stringify(home.body)).toBe(200);
 
     // An MFA-verified session (the claim) passes in the requireMfa workspace.
     const mfaTok = mint('fb-uid-p4-1', 'totp');
-    expect((await c.post(`/v1/host/openwop-app/workspaces/${wsId}/switch`, mfaTok)).status).toBe(200);
-    const ok = await c.get('/v1/host/openwop-app/users/me', mfaTok);
+    expect((await c.post(`/host/openwop-app/workspaces/${wsId}/switch`, mfaTok)).status).toBe(200);
+    const ok = await c.get('/host/openwop-app/users/me', mfaTok);
     expect(ok.status, JSON.stringify(ok.body)).toBe(200);
 
     // ...and the MFA mark persists on the cookie for cookie-only requests.
-    expect((await c.get('/v1/host/openwop-app/users/me')).status).toBe(200);
+    expect((await c.get('/host/openwop-app/users/me')).status).toBe(200);
   });
 
   it('superadmin PUT round-trips requireMfa (set + clear) and preserves other fields', async () => {
     const admin = { authorization: 'Bearer dev-token', 'content-type': 'application/json' };
-    const put = await fetch(`${BASE}/v1/host/openwop-app/governance/policy`, {
+    const put = await fetch(`${BASE}/host/openwop-app/governance/policy`, {
       method: 'PUT', headers: admin, body: JSON.stringify({ requireMfa: true, providerAllowlist: ['google'] }),
     });
     expect(put.status).toBe(200);
@@ -159,11 +189,11 @@ describe('ADR 0389 P4 — tenant requireMfa', () => {
     expect(policy1.providerAllowlist).toEqual(['google']);
 
     // Omitting the field PRESERVES it; explicit null clears it.
-    const keep = await fetch(`${BASE}/v1/host/openwop-app/governance/policy`, {
+    const keep = await fetch(`${BASE}/host/openwop-app/governance/policy`, {
       method: 'PUT', headers: admin, body: JSON.stringify({ providerAllowlist: ['google'] }),
     });
     expect((((await keep.json()) as { policy: { requireMfa?: boolean } }).policy).requireMfa).toBe(true);
-    const clear = await fetch(`${BASE}/v1/host/openwop-app/governance/policy`, {
+    const clear = await fetch(`${BASE}/host/openwop-app/governance/policy`, {
       method: 'PUT', headers: admin, body: JSON.stringify({ requireMfa: null }),
     });
     expect((((await clear.json()) as { policy: { requireMfa?: boolean } }).policy).requireMfa).toBeUndefined();
@@ -171,36 +201,36 @@ describe('ADR 0389 P4 — tenant requireMfa', () => {
 
   it('GRADE SEC-C1: the byok-chat-budget PUT preserves requireMfa (the wipe that shipped)', async () => {
     const admin = { authorization: 'Bearer dev-token', 'content-type': 'application/json' };
-    await fetch(`${BASE}/v1/host/openwop-app/governance/policy`, {
+    await fetch(`${BASE}/host/openwop-app/governance/policy`, {
       method: 'PUT', headers: admin, body: JSON.stringify({ requireMfa: true }),
     });
-    const budget = await fetch(`${BASE}/v1/host/openwop-app/governance/byok-chat-budget`, {
+    const budget = await fetch(`${BASE}/host/openwop-app/governance/byok-chat-budget`, {
       method: 'PUT', headers: admin, body: JSON.stringify({ dailyTokenCap: 1000 }),
     });
     expect(budget.status).toBe(200);
-    const after = await fetch(`${BASE}/v1/host/openwop-app/governance/policy`, { headers: admin });
+    const after = await fetch(`${BASE}/host/openwop-app/governance/policy`, { headers: admin });
     const policy = ((await after.json()) as { policy: { requireMfa?: boolean } }).policy;
     expect(policy.requireMfa).toBe(true);
   });
 
   it('GRADE SEC-C12: a requireMfa-only PUT preserves retention + allowlist (omission ≠ clear)', async () => {
     const admin = { authorization: 'Bearer dev-token', 'content-type': 'application/json' };
-    await fetch(`${BASE}/v1/host/openwop-app/governance/policy`, {
+    await fetch(`${BASE}/host/openwop-app/governance/policy`, {
       method: 'PUT', headers: admin,
       body: JSON.stringify({ providerAllowlist: ['google'], retention: { internalDays: 30 } }),
     });
-    await fetch(`${BASE}/v1/host/openwop-app/governance/policy`, {
+    await fetch(`${BASE}/host/openwop-app/governance/policy`, {
       method: 'PUT', headers: admin, body: JSON.stringify({ requireMfa: true }),
     });
-    const after = await fetch(`${BASE}/v1/host/openwop-app/governance/policy`, { headers: admin });
+    const after = await fetch(`${BASE}/host/openwop-app/governance/policy`, { headers: admin });
     const policy = ((await after.json()) as { policy: { providerAllowlist?: string[]; retention?: { internalDays?: number } } }).policy;
     expect(policy.providerAllowlist).toEqual(['google']);
     expect(policy.retention?.internalDays).toBe(30);
     // Explicit null still clears the allowlist.
-    await fetch(`${BASE}/v1/host/openwop-app/governance/policy`, {
+    await fetch(`${BASE}/host/openwop-app/governance/policy`, {
       method: 'PUT', headers: admin, body: JSON.stringify({ providerAllowlist: null }),
     });
-    const cleared = await fetch(`${BASE}/v1/host/openwop-app/governance/policy`, { headers: admin });
+    const cleared = await fetch(`${BASE}/host/openwop-app/governance/policy`, { headers: admin });
     expect((((await cleared.json()) as { policy: { providerAllowlist?: string[] } }).policy).providerAllowlist).toBeUndefined();
   });
 });

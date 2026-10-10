@@ -16,15 +16,21 @@
  * once-per-worker (env persists across files in a worker; `process.pid` is
  * stable within one). An explicit OPENWOP_PACK_DIR (CI/dev) is respected.
  */
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, utimesSync } from 'node:fs';
 import { afterAll } from 'vitest';
+import { PACK_DIRS_ROOT, sweepDeadPackDirs } from './sweepPackDirs';
 
 if (!process.env.OPENWOP_PACK_DIR) {
-  const dir = join(tmpdir(), 'owp-test-packs', `w${process.pid}`);
+  const dir = join(PACK_DIRS_ROOT, `w${process.pid}`);
   mkdirSync(dir, { recursive: true });
+  // Touch it: a recycled pid can inherit a dead worker's old tree, and the
+  // sweep's idle gate must then see it as in use (sweepPackDirs.ts).
+  const now = new Date();
+  utimesSync(dir, now, now);
   process.env.OPENWOP_PACK_DIR = dir;
+  // Trees are never removed by their own worker — see sweepPackDirs.ts.
+  sweepDeadPackDirs();
 }
 
 // ── Tripwire: a test file must not leak OPENWOP_PACK_DIR to its worker ────────

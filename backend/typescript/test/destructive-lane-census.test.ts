@@ -76,8 +76,8 @@ type Consult =
   | { mode: 'exempt'; reason: string; pin: Pin }
   | { mode: 'exempt-unpinned'; reason: string }; // MUST start with 'GAP: ' — asserted in (d)
 
-const ACCOUNT_TEARDOWN = 'routes/account.ts#DELETE /v1/host/openwop-app/account';
-const USERS_ERASE = 'features/users/routes.ts#DELETE /v1/host/openwop-app/users/users/:id';
+const ACCOUNT_TEARDOWN = 'routes/account.ts#DELETE /host/openwop-app/account'; // ADR 0812 P3b: migrated
+const USERS_ERASE = 'features/users/routes.ts#DELETE /host/openwop-app/users/users/:id';
 const HOSTEXT_PURGE = 'host/hostExtPersistence.ts#purgeTenantHostExt';
 const RETENTION_PURGE = 'host/retentionPurger.ts#purgeRetained';
 
@@ -218,6 +218,7 @@ const HOLD_CONSULT: Record<string, Consult> = {
 
   // ── state transitions that DELETE nothing ────────────────────────────────
   'executor/approvalGateTimeout.ts#sweepExpiredApprovalGates': { mode: 'exempt', reason: 'times out due approval gates (writes an interrupt resolution); deletes no row', pin: { kind: 'no-delete-token' } },
+  'features/claude-code/tasks.ts#sweepExpiredTasks': { mode: 'exempt', reason: 'expires an overdue dispatched task (a status CAS + a run resume as maybe_executed); deletes no row', pin: { kind: 'no-delete-token' } },
   'features/commerce/commerceService.ts#sweepExpiredReservations': { mode: 'exempt', reason: 'pending→canceled order transition; the due-index row is derived state cleared via `clearReservationDue`', pin: { kind: 'no-delete-token' } },
   'host/collab/collabRoom.ts#__runCollabHeartbeatOnce': { mode: 'exempt', reason: 'lease refresh + flush retry for in-process rooms; durable state is PUT, never deleted', pin: { kind: 'no-delete-token' } },
 };

@@ -1,6 +1,7 @@
 {
   "name": "feature.profiles.nodes",
-  "version": "1.1.0",
+  "version": "1.1.1",
+  "kind": "node",
   "description": "Profiles feature node pack — reads over ctx.features.profiles (ADR 0172 / ADR 0624): list/get the tenant's profiles (read-only projections) so a workflow can branch or personalize on profile data. get takes { userId } and answers { profile, found } (an empty id is a typed validation_error failure; a real-id miss is found:false). Tenant-guarded; role:action (recorded).",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
@@ -10,7 +11,7 @@
     "identity-adjacent"
   ],
   "engines": {
-    "openwop": ">=1.0.0 <2.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "nodes": [
     {

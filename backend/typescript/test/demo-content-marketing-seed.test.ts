@@ -80,4 +80,70 @@ describe('demo-content-marketing seeder', () => {
     const third = await seedDemoContentMarketing(tenantId);
     expect(third.created).toBeGreaterThan(20);
   });
+
+  // ADR 0838 D1 — the seeder used the SAME `doc:demo-cm-<slug>` (and email
+  // `tpl:`/`cmp:`) ids in every tenant, over stores keyed by id alone, so the
+  // second tenant to seed took the first tenant's rows. RED on `764883b6c`:
+  // tenant A was left with 0 of its 12 documents.
+  it('two tenants seeded in turn each keep their own documents and email rows', async () => {
+    const { listOrgs } = await import('../src/host/accessControlService.js');
+    const owned = async (t: string) => {
+      const o = (await listOrgs(t))[0]!.orgId;
+      return {
+        docs: (await listDocuments(t, o)).filter((d) => d.createdBy === 'demo:content-marketing').length,
+        tpls: (await listTemplates(t, o)).filter((x) => x.createdBy === 'demo:content-marketing').length,
+        cmps: (await listCampaigns(t, o)).filter((x) => x.createdBy === 'demo:content-marketing').length,
+      };
+    };
+    for (const t of ['demo-cm-two-a', 'demo-cm-two-b']) {
+      await seedDemoPeople(t);
+      await seedDemoMedia(t);
+      await seedDemoCrm(t);
+      await seedDemoContentMarketing(t);
+    }
+    expect(await owned('demo-cm-two-a')).toEqual({ docs: 12, tpls: 8, cmps: 6 });
+    expect(await owned('demo-cm-two-b')).toEqual({ docs: 12, tpls: 8, cmps: 6 });
+  });
+
+  // ADR 0838 — the ids changed, so a tenant seeded BEFORE the change holds its
+  // rows under the legacy `doc:demo-cm-<slug>` / `cmp:demo-cm-<slug>` ids. An
+  // explicit re-seed must treat those as "already seeded", never mint a second
+  // demo library beside them (the seed-on-visit duplication class, #1896).
+  it('a tenant holding the LEGACY-id rows gets no duplicates on re-seed', async () => {
+    const t = 'demo-cm-legacy';
+    const { listOrgs } = await import('../src/host/accessControlService.js');
+    const { createDocument, deleteDocument } = await import('../src/features/documents/documentsService.js');
+    const { createCampaign, deleteCampaign } = await import('../src/features/email/emailService.js');
+    await seedDemoPeople(t);
+    await seedDemoMedia(t);
+    await seedDemoCrm(t);
+    await seedDemoContentMarketing(t);
+    const o = (await listOrgs(t))[0]!.orgId;
+    const ACTOR = 'demo:content-marketing';
+    // Rewrite the seeded rows to the pre-ADR 0838 ids (what prod tenants hold).
+    for (const d of (await listDocuments(t, o)).filter((x) => x.createdBy === ACTOR)) {
+      const legacy = d.documentId.replace(/^doc:demo-cm-[0-9a-f]{10}-/, 'doc:demo-cm-');
+      expect(legacy).not.toBe(d.documentId);
+      await deleteDocument(t, o, d.documentId);
+      await createDocument({ tenantId: t, orgId: o, title: d.title, kind: d.kind, format: d.format, createdBy: ACTOR, documentId: legacy, provenance: { producedBy: { kind: 'user', id: ACTOR } } });
+    }
+    for (const c of (await listCampaigns(t, o)).filter((x) => x.createdBy === ACTOR)) {
+      const legacy = c.campaignId.replace(/^cmp:demo-cm-[0-9a-f]{10}-/, 'cmp:demo-cm-');
+      expect(legacy).not.toBe(c.campaignId);
+      await deleteCampaign(t, o, c.campaignId);
+      await createCampaign({ tenantId: t, orgId: o, templateId: c.templateId, ...(c.audience.segmentId ? { segmentId: c.audience.segmentId } : { stage: c.audience.stage ?? 'lead' }), createdBy: ACTOR, campaignId: legacy });
+    }
+    const before = {
+      docs: (await listDocuments(t, o)).filter((d) => d.createdBy === ACTOR).length,
+      tpls: (await listTemplates(t, o)).filter((x) => x.createdBy === ACTOR).length,
+      cmps: (await listCampaigns(t, o)).filter((x) => x.createdBy === ACTOR).length,
+    };
+    expect(before).toEqual({ docs: 12, tpls: 8, cmps: 6 });
+    await seedDemoContentMarketing(t);
+    expect({
+      docs: (await listDocuments(t, o)).filter((d) => d.createdBy === ACTOR).length,
+      tpls: (await listTemplates(t, o)).filter((x) => x.createdBy === ACTOR).length,
+      cmps: (await listCampaigns(t, o)).filter((x) => x.createdBy === ACTOR).length,
+    }).toEqual(before);
+  });
 });

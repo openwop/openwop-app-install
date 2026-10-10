@@ -36,7 +36,7 @@ const log = createLogger('kicktodo.replan');
 const DAYPARTS = new Set(['morning', 'afternoon', 'evening']);
 
 /** One revision command — the discriminated union that mirrors, field-for-field,
- *  the `oneOf` in `feature.kicktodo.agents/schemas/plan-revision.schema.json`. */
+ *  the `oneOf` in `vendor.openwop-app.kicktodo.agents/schemas/plan-revision.schema.json`. */
 export type RevisionCommand =
   | { lane: 'schedule'; daypart: 'morning' | 'afternoon' | 'evening' | null }
   | { lane: 'substitute'; cardId: string; alternativeId: string }

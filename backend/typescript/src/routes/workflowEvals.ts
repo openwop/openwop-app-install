@@ -42,7 +42,7 @@ async function loadOwnedHead(req: Request, workflowId: string): Promise<Workflow
 }
 
 export function registerWorkflowEvalRoutes(app: Express, deps: { storage: Storage; hostSuite: HostAdapterSuite }): void {
-  const BASE = '/v1/host/openwop-app/workflows/:workflowId';
+  const BASE = '/host/openwop-app/workflows/:workflowId';
 
   app.get(`${BASE}/eval-sets`, async (req, res, next) => {
     try {

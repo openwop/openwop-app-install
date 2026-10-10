@@ -190,6 +190,13 @@ export function registerSubjectKeyResolver(fn: SubjectKeyResolver): void {
   if (!resolvers.includes(fn)) resolvers.push(fn);
 }
 
+/** The registered resolvers, by function name — the ADR 0857 tripwire reads it:
+ *  analytics' session-key grammar is safe only while no OTHER resolver's
+ *  identity space mints grammar-legal keys, so a new resolver must re-check it. */
+export function registeredSubjectKeyResolverNames(): string[] {
+  return resolvers.map((r) => r.name || '<anonymous>');
+}
+
 
 /** Expand a subject to the set of its linked keys via every registered resolver, best-effort.
  *  The bare `subjectKey` is always included, even if every resolver fails.

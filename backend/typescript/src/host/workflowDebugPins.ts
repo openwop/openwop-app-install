@@ -17,7 +17,8 @@
 import { DurableCollection } from './hostExtPersistence.js';
 import { stripSecretsFromPersisted } from '../byok/ephemeralRunSecrets.js';
 import { sanitizeFreeTextDeep } from '../byok/textRedaction.js';
-import { onWorkflowDeleted } from './workflowsRegistry.js';
+import { onWorkflowDeleted, onWorkflowForked } from './workflowsRegistry.js';
+import { moveKeyedRows } from './forkRepoint.js';
 import { registerSubjectEraser } from './subjectErasure.js';
 import { subjectKeyForms } from './subjectErasureRedaction.js';
 import { OpenwopError } from '../types.js';
@@ -130,3 +131,10 @@ export async function eraseSubjectDebugPins(tenantId: string, subjectKey: string
 export function registerDebugPinErasure(): void {
   registerSubjectEraser(eraseSubjectDebugPins);
 }
+
+// ADR 0789 — the fork keeps the shared definition's node ids, so the tenant's
+// pinned node outputs stay meaningful on it and move with the edit.
+onWorkflowForked('workflow:debug-pin', async (tenantId, from, to) => {
+  const rows = (await store.listByPrefix(prefixOf(tenantId, from))).filter((r) => r.workflowId === from && r.tenantId === tenantId);
+  return moveKeyedRows(store, rows, (r) => r.key, (r) => ({ ...r, workflowId: to, key: keyOf(tenantId, to, r.nodeId) }));
+});

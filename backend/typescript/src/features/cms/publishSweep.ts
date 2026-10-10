@@ -20,6 +20,7 @@
 import { hostExtStorage } from '../../host/hostExtPersistence.js';
 import { runUnderWorkerContract } from '../../storage/eventEraAdapter.js';
 import { createLogger } from '../../observability/logger.js';
+import { OpenwopError } from '../../types.js';
 import { rejectPendingApprovalForPage } from '../../host/approvalService.js';
 import { clearScheduledPublish, clearScheduledUnpublish, listScheduledDuePages, listScheduledDueUnpublishPages, transitionPage } from './cmsService.js';
 import { isApprovalGateOn } from './contentApproval.js';
@@ -42,7 +43,8 @@ export async function processScheduledPublishes(nowMs: number = Date.now()): Pro
     // set-time) — `updatedAt` changes on every schedule write, so cancelling
     // and re-scheduling the SAME timestamp still gets a fresh claim (review
     // finding: a time-only key would never re-fire).
-    const claim = await storage.claimOnce(`${CLAIM_KEY_PREFIX}${page.pageId}:${page.scheduledPublishAt}:${page.updatedAt}`, new Date(nowMs).toISOString());
+    // ADR 0836 D4 — tenant-qualified (page ids are per tenant; encoded, no NUL).
+    const claim = await storage.claimOnce(`${CLAIM_KEY_PREFIX}${encodeURIComponent(page.tenantId)}/${encodeURIComponent(page.pageId)}:${page.scheduledPublishAt}:${page.updatedAt}`, new Date(nowMs).toISOString());
     if (!claim.claimed) continue;
     try {
       // ADR 0204 C2b window-elapsed rule: if the page's WHOLE embargo window
@@ -62,7 +64,16 @@ export async function processScheduledPublishes(nowMs: number = Date.now()): Pro
         await clearScheduledPublish(page.tenantId, page.orgId, page.pageId, SCHEDULED_PUBLISH_ACTOR, 'approval-gate-on');
         continue;
       }
-      await transitionPage(page.tenantId, page.orgId, page.pageId, 'publish', SCHEDULED_PUBLISH_ACTOR);
+      // ADR 0836 D3 — publish ONLY the version the schedule was set against. Edits
+      // through `updatePage` already cancel or re-pin at edit time; this pin is the
+      // backstop for any version bump that lane did not see. A schedule set before
+      // ADR 0836 carries no pin and fires as it always did (logged, so the legacy
+      // population is visible until it drains).
+      if (page.scheduledPublishVersion === undefined) {
+        log.info('scheduled_publish_unpinned', { tenantId: page.tenantId, pageId: page.pageId });
+      }
+      await transitionPage(page.tenantId, page.orgId, page.pageId, 'publish', SCHEDULED_PUBLISH_ACTOR,
+        page.scheduledPublishVersion !== undefined ? { expectedVersion: page.scheduledPublishVersion } : undefined);
       // ADR 0672 D2 (`CMSAWF-12`) — the FOURTH row-stranding producer. `setScheduledPublish`
       // permits an `in_review` page, so a scheduled publish can fire while a review row is
       // still pending. Four sibling producers already closed their row (deletePage,
@@ -80,9 +91,23 @@ export async function processScheduledPublishes(nowMs: number = Date.now()): Pro
       // 409 (page moved out of a publishable status) or storage hiccup: the
       // schedule stays; the next tick re-claims under a NEW time only if
       // re-scheduled — so log loudly and clear to avoid a retry storm on a
-      // permanently unpublishable page.
-      log.warn('scheduled publish failed', { pageId: page.pageId, error: err instanceof Error ? err.message : String(err) });
-      await clearScheduledPublish(page.tenantId, page.orgId, page.pageId, SCHEDULED_PUBLISH_ACTOR, 'publish-failed').catch(() => undefined);
+      // permanently unpublishable page. ADR 0836 names WHY in the audit row:
+      // content that moved past its pin, or a `[TODO …]` blocker, is not a fault.
+      const conflict = err instanceof OpenwopError && err.code === 'conflict';
+      // A CAS race with an unrelated write (no version move) is not "the content
+      // changed": leave the schedule. The racing write moved `updatedAt`, so the
+      // next tick claims under a new key and retries.
+      if (conflict && page.scheduledPublishVersion !== undefined && (err as OpenwopError).details?.currentVersion === page.scheduledPublishVersion) {
+        log.info('scheduled publish raced; retrying next tick', { pageId: page.pageId });
+        continue;
+      }
+      const reason = conflict
+        ? 'content-changed'
+        : err instanceof OpenwopError && err.details?.reason === 'publish_blocked'
+          ? 'publish-blocked'
+          : 'publish-failed';
+      log.warn('scheduled publish failed', { pageId: page.pageId, reason, error: err instanceof Error ? err.message : String(err) });
+      await clearScheduledPublish(page.tenantId, page.orgId, page.pageId, SCHEDULED_PUBLISH_ACTOR, reason).catch(() => undefined);
     }
   }
 }
@@ -97,7 +122,7 @@ export async function processScheduledUnpublishes(nowMs: number = Date.now()): P
   const storage = hostExtStorage();
   const due = await listScheduledDueUnpublishPages(new Date(nowMs).toISOString());
   for (const page of due) {
-    const claim = await storage.claimOnce(`${UNPUBLISH_CLAIM_KEY_PREFIX}${page.pageId}:${page.scheduledUnpublishAt}:${page.updatedAt}`, new Date(nowMs).toISOString());
+    const claim = await storage.claimOnce(`${UNPUBLISH_CLAIM_KEY_PREFIX}${encodeURIComponent(page.tenantId)}/${encodeURIComponent(page.pageId)}:${page.scheduledUnpublishAt}:${page.updatedAt}`, new Date(nowMs).toISOString());
     if (!claim.claimed) continue;
     try {
       // transitionPage consumes scheduledUnpublishAt on leaving `published`;
@@ -113,6 +138,13 @@ export async function processScheduledUnpublishes(nowMs: number = Date.now()): P
 export interface CmsPublishSweepDaemon { stop(): void }
 
 let started: CmsPublishSweepDaemon | null = null;
+
+/** ADR 0859 D7 (`CMSLWF-7`) — whether the sweep daemon is running in this process.
+ *  The witness that boot actually starts it: every sweep test drove the tick
+ *  function directly, so a deleted `startCmsPublishSweep()` call stayed green. */
+export function isCmsPublishSweepRunning(): boolean {
+  return started !== null;
+}
 
 /** Start the sweep once per process (idempotent — feature registration may run
  *  in tests that build multiple apps). */

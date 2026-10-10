@@ -69,6 +69,8 @@ vi.mock('../cmsClient.js', async (importOriginal) => {
     listSharedSectionPages: vi.fn(async () => []),
     listLocaleGrants: vi.fn(async () => []), putLocaleGrant: vi.fn(),
     setLocalePublish: vi.fn(),
+    getTranslationStatus: vi.fn(async () => ({ locales: [], sections: {}, counts: {} })),
+    confirmTranslationSource: vi.fn(),
   };
 });
 vi.mock('../../media/mediaClient.js', () => ({
@@ -78,6 +80,8 @@ vi.mock('../../sharing/sharingClient.js', () => ({
   createLink: vi.fn(), listLinks: vi.fn(async () => []), revokeLink: vi.fn(),
   sharedPageUrl: (token: string) => `/shared/${token}`,
 }));
+// The Page tab reads and writes the page's search and social record.
+vi.mock('../../publishing/publishingClient.js', () => ({ getSeo: vi.fn(async () => null), putSeo: vi.fn(async (_o: string, _p: string, seo: unknown) => seo) }));
 vi.mock('../../site/siteConfigClient.js', () => ({
   getSiteConfig: vi.fn(async () => { throw new Error('forbidden'); }),
   putSiteConfig: vi.fn(), invalidateFrontPage: vi.fn(),
@@ -123,8 +127,8 @@ describe('failed language-settings read (CMSLU-6)', () => {
     expect(screen.getByText(/language settings could not be read/i)).toBeTruthy();
     // Tabs stay hidden (we don't invent locales) — but the claim is "unknown",
     // never "monolingual".
-    fireEvent.click(screen.getByRole('button', { name: 'Editor' }));
-    expect(screen.queryByRole('tab')).toBeNull();
+    // The only tabs are the editor's own modes: no locale tabs.
+    expect(screen.queryAllByRole('tab').map((el) => el.textContent)).toEqual(['Edit', 'Preview', 'Page']);
   });
 
   it('renders NO notice when the read succeeds (the notice is failure-scoped)', async () => {
@@ -141,7 +145,7 @@ describe('in-app dirty guard (CMSLU-2)', () => {
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
     renderDetail();
     await waitFor(() => expect(screen.getByText(/\/landing · v3/)).toBeTruthy());
-    fireEvent.click(screen.getByRole('button', { name: 'Editor' }));
+    fireEvent.click(screen.getByRole('tab', { name: 'Page' }));
     // Dirty the page (title edit).
     fireEvent.change(screen.getByDisplayValue('Landing Page'), { target: { value: 'Landing Page!' } });
     fireEvent.click(screen.getByRole('button', { name: /back to pages/i }));

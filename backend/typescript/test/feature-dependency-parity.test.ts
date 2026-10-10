@@ -276,6 +276,14 @@ describe('ADR 0439 — feature dependency graph integrity', () => {
     // `deleteSubject` regardless of the `consent` toggle — a lock would be fiction,
     // and a consent-off tenant must not lose CRM. The read is fail-safe: an
     // unreadable store records `suppression_unreadable`, never a created contact.
-    ).toBeLessThanOrEqual(97);
+    // 97 → 98 (ADR 0864 D2, 2026-10-09): `access-hub → voice`. The `/access`
+    // summary reports the Voice section's on/off by calling the SAME reader its
+    // `/voice/realtime/capability` route uses (`readRealtimeProvider`), so the
+    // count can never disagree with the panel — the edge is the point of D2.
+    // Deliberately left UNDECLARED for the standing reason: `dependsOn` is a
+    // disable-LOCK, and access-hub is always on. With voice OFF the reader's own
+    // `requireFeatureEnabled` refuses and the summary OMITS the section (never
+    // reports it), pinned by `access-hub-summary-route.test.ts`'s omission legs.
+    ).toBeLessThanOrEqual(98);
   });
 });

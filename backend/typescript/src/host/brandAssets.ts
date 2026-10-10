@@ -25,6 +25,7 @@
  */
 import { DurableCollection } from './hostExtPersistence.js';
 import { storeMediaAsset, deleteMediaAsset } from './inMemorySurfaces.js';
+import { MIME_SIGNATURES } from './allowedUploadMime.js';
 
 export const HOST_BRAND_TENANT = 'host:brand';
 
@@ -39,15 +40,11 @@ const DURABLE_TTL_SECONDS = 100 * 365 * 24 * 60 * 60;
 interface BrandAssetSlotRow { slot: BrandAssetSlot; token: string }
 const slots = new DurableCollection<BrandAssetSlotRow>('brand:asset-slot', (r) => r.slot);
 
-/** Declared type → its magic-byte signature check. SVG is deliberately absent. */
-const SNIFFERS: Record<string, (b: Buffer) => boolean> = {
-  'image/png': (b) => b.length > 8 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47,
-  'image/jpeg': (b) => b.length > 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff,
-  'image/gif': (b) => b.length > 6 && b.subarray(0, 4).toString('latin1') === 'GIF8',
-  'image/webp': (b) => b.length > 12 && b.subarray(0, 4).toString('latin1') === 'RIFF' && b.subarray(8, 12).toString('latin1') === 'WEBP',
-  'image/x-icon': (b) => b.length > 4 && b[0] === 0x00 && b[1] === 0x00 && b[2] === 0x01 && b[3] === 0x00,
-  'image/vnd.microsoft.icon': (b) => b.length > 4 && b[0] === 0x00 && b[1] === 0x00 && b[2] === 0x01 && b[3] === 0x00,
-};
+/** Declared type → its magic-byte signature check: the shared map's raster
+ *  entries (PDF is not a brand asset). SVG is deliberately absent. */
+const SNIFFERS: Record<string, (b: Buffer) => boolean> = Object.fromEntries(
+  Object.entries(MIME_SIGNATURES).filter(([type]) => type.startsWith('image/')),
+);
 
 export type PublishFailure =
   | { kind: 'unsupported_type'; message: string }

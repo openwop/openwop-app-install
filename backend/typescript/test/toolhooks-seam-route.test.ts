@@ -1,10 +1,10 @@
 /**
  * RFC 0064 §F — the tool-hooks invoke seam is served at the CANONICAL conformance
- * namespace `/v1/host/sample/toolhooks/invoke`, so the published
+ * namespace `/host/sample/toolhooks/invoke`, so the published
  * `tool-hooks-failure-honesty` scenario (and the other `tool-hooks-*` scenarios)
  * WITNESS this host instead of 404 → soft-skip. Booted host, real HTTP — this is
  * the guard that WFAU-4's §F wire claim is not silently unwitnessed because the
- * seam sits at the vendor path the suite never hits. The `/v1/host/openwop-app/*`
+ * seam sits at the vendor path the suite never hits. The `/host/openwop-app/*`
  * alias is asserted equivalent (same handler).
  */
 
@@ -32,8 +32,8 @@ afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
 });
 
-const SAMPLE = '/v1/host/sample/toolhooks/invoke';
-const VENDOR = '/v1/host/openwop-app/toolhooks/invoke';
+const SAMPLE = '/host/sample/toolhooks/invoke';
+const VENDOR = '/host/openwop-app/toolhooks/invoke';
 const post = (path: string, body: unknown) => fetch(`${BASE}${path}`, { method: 'POST', headers: H, body: JSON.stringify(body) });
 
 type SeamResponse = {
@@ -42,7 +42,7 @@ type SeamResponse = {
 };
 
 describe('RFC 0064 §F — toolhooks seam is reachable at the canonical /sample/ path', () => {
-  it('the CANONICAL /v1/host/sample/toolhooks/invoke path exists (NOT a 404 soft-skip)', async () => {
+  it('the CANONICAL /host/sample/toolhooks/invoke path exists (NOT a 404 soft-skip)', async () => {
     const r = await post(SAMPLE, { principal: 'user:a', toolName: 'search' });
     expect(r.status).not.toBe(404); // the whole point: the conformance suite must reach this
   });
@@ -77,7 +77,7 @@ describe('RFC 0064 §F — toolhooks seam is reachable at the canonical /sample/
     expect(body.error?.code).toBe('forbidden'); // HTTP-level gate code
   });
 
-  it('the vendor /v1/host/openwop-app/ alias serves the SAME handler', async () => {
+  it('the vendor /host/openwop-app/ alias serves the SAME handler', async () => {
     const r = await post(VENDOR, { principal: 'user:a', toolName: 'search', simulateToolError: true });
     expect(r.status).toBe(200);
     const body = await r.json() as SeamResponse;

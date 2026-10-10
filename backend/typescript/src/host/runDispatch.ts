@@ -21,6 +21,7 @@ import type { HostAdapterSuite } from './index.js';
 import { executeRun, emitTerminalFailure } from '../executor/executor.js';
 import { getEventLog } from '../executor/eventLog.js';
 import { createLogger } from '../observability/logger.js';
+import { ATTRIBUTION_KEYS } from './agentRunActivityIndex.js';
 import { unwindOnDispatchTerminal } from './compensationRuntime.js';
 
 const log = createLogger('run-dispatch');
@@ -63,7 +64,38 @@ const log = createLogger('run-dispatch');
 // re-parent this host's cross-host calls onto a trace the caller chose while
 // the observability stack reported it as the one the request arrived on. It is
 // stamped host-side from the request's own `traceparent` header, or not at all.
-const RESERVED_RUN_METADATA_KEYS = ['definitionRevision', 'definitionResolvedFrom', 'launchResolved', 'costUsd', 'costTokens', 'costByNode', 'debug', 'eval', 'redriveOf', 'onlineEvalScored', 'compaction', 'personalTenant', 'owner', 'traceContext'] as const;
+// `teamLedger` (ADR 0831 P2) is the frozen team-ledger version a run acts on.
+// Run-start contributors never overwrite an existing key, so a client-supplied
+// value would WIN and pin the run to a version (or a ledger) of the caller's
+// choosing. Only the contributor may write it.
+// `orgScopeSubject` (ADR 0832 D3) is reserved although it only NARROWS: it names
+// whose org memberships bound an actorless run, so a caller who could set it
+// would choose that bound. It is stamped from `startWorkflowRun`'s explicit
+// parameter (or the sub-workflow dispatcher, from the parent row), or not at all.
+const RESERVED_RUN_METADATA_KEYS = ['definitionRevision', 'definitionResolvedFrom', 'launchResolved', 'costUsd', 'costTokens', 'costByNode', 'debug', 'eval', 'redriveOf', 'onlineEvalScored', 'compaction', 'personalTenant', 'owner', 'traceContext', 'nodePinMismatches', 'teamLedger', 'orgScopeSubject'] as const;
+/**
+ * The run-attribution blocks (`heartbeat`/`schedule`/`kanban`/`approval`) are
+ * host-written: the scheduler, the kanban trigger, the heartbeat and approval
+ * claims compose them and reach `buildRunRecord`/`startWorkflowRun` WITH them,
+ * so they cannot sit in `RESERVED_RUN_METADATA_KEYS` (that strip runs on host
+ * paths too). What must not happen is a CALLER supplying one: `POST /runs`
+ * spread request metadata into the run, and `recordRunAttribution` then indexed
+ * it under any agent's roster id (and ADR 0831's team-ledger stamp derives its
+ * project binding from these blocks). Apply this where caller metadata enters —
+ * the scheduler route's `clientMetadata` is the same rule for jobs.
+ */
+/** ADR 0852 D2 — campaign attribution, written by the campaign agent tools and
+ *  read by the run → project binding; never accepted from a caller. Not part of
+ *  `ATTRIBUTION_KEYS`, which also drives the agent-activity index. */
+const CAMPAIGN_ATTRIBUTION_KEYS = ['campaignOrchestration', 'campaignChannel'] as const;
+
+export function stripCallerAttribution(metadata: Record<string, unknown>): Record<string, unknown> {
+  const out = { ...metadata };
+  for (const k of ATTRIBUTION_KEYS) delete out[k];
+  for (const k of CAMPAIGN_ATTRIBUTION_KEYS) delete out[k];
+  return out;
+}
+
 export function stripReservedRunMetadata(metadata: Record<string, unknown> | undefined): Record<string, unknown> {
   if (!metadata) return {};
   const out = { ...metadata };

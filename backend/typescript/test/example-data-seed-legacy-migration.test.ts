@@ -48,7 +48,7 @@ afterAll(async () => {
 });
 
 async function seed(body: unknown = {}): Promise<{ status: number; body: { healed?: { prunedLegacy: number } } }> {
-  const res = await fetch(`${BASE}/v1/host/openwop-app/example-data/seed`, {
+  const res = await fetch(`${BASE}/host/openwop-app/example-data/seed`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
     body: JSON.stringify(body),

@@ -21,6 +21,8 @@
  *   - drop the gate on DELETE /secrets/:ref     → leg 3 only
  *   - drop the gate on PUT /active-config       → leg 4 only
  *   - drop the gate on DELETE /active-config    → leg 5 only
+ *   - drop the gate on PUT /ai-default          → leg 5b only (ADR 0779 D1)
+ *   - drop the gate on DELETE /ai-default       → leg 5c only (ADR 0779 D1)
  *   - drop the `if (force)` audit append        → leg 7 only
  *   - move the audit inside a `!force` branch   → leg 7 only
  *   - gate the READ route too                   → leg 6 only
@@ -33,7 +35,7 @@ import { createWorkspace, createMember } from '../src/host/accessControlService.
 import { userIdFor } from '../src/features/users/usersService.js';
 import { listChain } from '../src/host/auditChainService.js';
 
-const B = '/v1/host/openwop-app/byok';
+const B = '/host/openwop-app/byok';
 let server: Server;
 let BASE = '';
 let WS = '';
@@ -41,7 +43,7 @@ const ADMIN = 'oidc:byok-admin';
 const EDITOR = 'oidc:byok-editor';
 
 async function login(subject: string, tenantId: string): Promise<string> {
-  const res = await fetch(`${BASE}/v1/host/openwop-app/test/login`, {
+  const res = await fetch(`${BASE}/host/openwop-app/test/login`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ subject, tenantId, displayName: subject, sharedWorkspace: true }),
@@ -88,6 +90,10 @@ describe('ADR 0711 — BYOK writes are admin-class in a shared workspace', () =>
     ['leg 3', 'DELETE', `${B}/secrets/adr0711-probe`],
     ['leg 4', 'PUT',    `${B}/active-config`, { provider: 'anthropic', model: 'claude-opus-5', credentialRef: 'adr0711-probe' }],
     ['leg 5', 'DELETE', `${B}/active-config`],
+    // ADR 0779 D1 — the two writes ADR 0711 missed (any member could rebind the
+    // workspace's headless-AI default).
+    ['leg 5b', 'PUT',   `${B}/ai-default`,    { provider: 'google', model: 'gemini-2.0-flash', credentialRef: 'adr0711-probe' }],
+    ['leg 5c', 'DELETE', `${B}/ai-default`],
   ];
 
   for (const [leg, method, path, body] of WRITES) {

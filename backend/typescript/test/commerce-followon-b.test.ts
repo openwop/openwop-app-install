@@ -79,11 +79,11 @@ function client() {
 }
 async function shopOwner(): Promise<{ owner: ReturnType<typeof client>; orgId: string; tenantId: string }> {
   const owner = client();
-  const r = await owner.post('/v1/host/openwop-app/test/login', { email: `fb-${Date.now()}-${n++}@acme.test` });
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Shop' });
+  const r = await owner.post('/host/openwop-app/test/login', { email: `fb-${Date.now()}-${n++}@acme.test` });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Shop' });
   return { owner, orgId: org.body.orgId, tenantId: r.body.user?.tenantId ?? '' };
 }
-const c = (orgId: string, s = ''): string => `/v1/host/openwop-app/commerce/orgs/${encodeURIComponent(orgId)}${s}`;
+const c = (orgId: string, s = ''): string => `/host/openwop-app/commerce/orgs/${encodeURIComponent(orgId)}${s}`;
 const SHIP_TO = { line1: '1 Main', city: 'Town', region: 'CA', postalCode: '94016', country: 'US' };
 
 describe('Group B — parcel model + shipping depth', () => {
@@ -106,7 +106,7 @@ describe('Group B — parcel model + shipping depth', () => {
 
   it('a configured carrier + shipFrom + weighed cart ⇒ the cheapest live rate', async () => {
     const { owner, orgId, tenantId } = await shopOwner();
-    const conn = await owner.post('/v1/host/openwop-app/connections', { provider: 'shippo', kind: 'api_key', secret: 'shippo-test-key', scope: 'user', displayName: 'Shippo' });
+    const conn = await owner.post('/host/openwop-app/connections', { provider: 'shippo', kind: 'api_key', secret: 'shippo-test-key', scope: 'user', displayName: 'Shippo' });
     expect(conn.status).toBe(201);
     await setGovernancePolicy(tenantId, { commerce: { flatShippingMinor: 800, shipFrom: { postalCode: '10001', country: 'US', region: 'NY' } } }, 'test');
     process.env.OPENWOP_COMMERCE_PROVIDER_BASE = CARRIER_URL;
@@ -117,7 +117,7 @@ describe('Group B — parcel model + shipping depth', () => {
 
   it('a carrier error falls back to the flat rate (never blocks the sale)', async () => {
     const { owner, orgId, tenantId } = await shopOwner();
-    await owner.post('/v1/host/openwop-app/connections', { provider: 'shippo', kind: 'api_key', secret: 'shippo-test-key', scope: 'user', displayName: 'Shippo' });
+    await owner.post('/host/openwop-app/connections', { provider: 'shippo', kind: 'api_key', secret: 'shippo-test-key', scope: 'user', displayName: 'Shippo' });
     await setGovernancePolicy(tenantId, { commerce: { flatShippingMinor: 800, shipFrom: { postalCode: '10001', country: 'US' } } }, 'test');
     process.env.OPENWOP_COMMERCE_PROVIDER_BASE = CARRIER_URL;
     carrierMode = 'error';
@@ -129,7 +129,7 @@ describe('Group B — parcel model + shipping depth', () => {
 
   it('ignores carrier rates in a DIFFERENT currency than the order (never mis-bills)', async () => {
     const { owner, orgId, tenantId } = await shopOwner();
-    await owner.post('/v1/host/openwop-app/connections', { provider: 'shippo', kind: 'api_key', secret: 'shippo-test-key', scope: 'user', displayName: 'Shippo' });
+    await owner.post('/host/openwop-app/connections', { provider: 'shippo', kind: 'api_key', secret: 'shippo-test-key', scope: 'user', displayName: 'Shippo' });
     await setGovernancePolicy(tenantId, { commerce: { flatShippingMinor: 800, shipFrom: { postalCode: '10001', country: 'US' } } }, 'test');
     process.env.OPENWOP_COMMERCE_PROVIDER_BASE = CARRIER_URL;
     carrierMode = 'foreign'; // carrier returns EUR rates
@@ -141,7 +141,7 @@ describe('Group B — parcel model + shipping depth', () => {
   it('EasyPost mapper: cheapest rate billed, Basic auth (trailing colon), grams→ounces', async () => {
     const { owner, orgId, tenantId } = await shopOwner();
     // ONLY an easypost connection (no shippo) — else the shippo→easypost cascade would pick shippo.
-    const conn = await owner.post('/v1/host/openwop-app/connections', { provider: 'easypost', kind: 'api_key', secret: 'easypost-test-key', scope: 'user', displayName: 'EasyPost' });
+    const conn = await owner.post('/host/openwop-app/connections', { provider: 'easypost', kind: 'api_key', secret: 'easypost-test-key', scope: 'user', displayName: 'EasyPost' });
     expect(conn.status).toBe(201);
     await setGovernancePolicy(tenantId, { commerce: { flatShippingMinor: 800, shipFrom: { postalCode: '10001', country: 'US', region: 'NY' } } }, 'test');
     process.env.OPENWOP_COMMERCE_PROVIDER_BASE = CARRIER_URL;
@@ -158,7 +158,7 @@ describe('Group B — parcel model + shipping depth', () => {
 
   it('an EasyPost carrier error falls back to the flat rate (never blocks the sale)', async () => {
     const { owner, orgId, tenantId } = await shopOwner();
-    await owner.post('/v1/host/openwop-app/connections', { provider: 'easypost', kind: 'api_key', secret: 'easypost-test-key', scope: 'user', displayName: 'EasyPost' });
+    await owner.post('/host/openwop-app/connections', { provider: 'easypost', kind: 'api_key', secret: 'easypost-test-key', scope: 'user', displayName: 'EasyPost' });
     await setGovernancePolicy(tenantId, { commerce: { flatShippingMinor: 800, shipFrom: { postalCode: '10001', country: 'US' } } }, 'test');
     process.env.OPENWOP_COMMERCE_PROVIDER_BASE = CARRIER_URL;
     carrierMode = 'error'; // EasyPost /v2/shipments returns 500 ⇒ postJson null ⇒ flat
@@ -170,7 +170,7 @@ describe('Group B — parcel model + shipping depth', () => {
 
   it('EasyPost foreign-currency rates ⇒ flat fallback (never mis-bills)', async () => {
     const { owner, orgId, tenantId } = await shopOwner();
-    await owner.post('/v1/host/openwop-app/connections', { provider: 'easypost', kind: 'api_key', secret: 'easypost-test-key', scope: 'user', displayName: 'EasyPost' });
+    await owner.post('/host/openwop-app/connections', { provider: 'easypost', kind: 'api_key', secret: 'easypost-test-key', scope: 'user', displayName: 'EasyPost' });
     await setGovernancePolicy(tenantId, { commerce: { flatShippingMinor: 800, shipFrom: { postalCode: '10001', country: 'US' } } }, 'test');
     process.env.OPENWOP_COMMERCE_PROVIDER_BASE = CARRIER_URL;
     carrierMode = 'foreign';
@@ -181,7 +181,7 @@ describe('Group B — parcel model + shipping depth', () => {
 
   it('an unweighed physical line ⇒ no rate-shopping (flat)', async () => {
     const { owner, orgId, tenantId } = await shopOwner();
-    await owner.post('/v1/host/openwop-app/connections', { provider: 'shippo', kind: 'api_key', secret: 'shippo-test-key', scope: 'user', displayName: 'Shippo' });
+    await owner.post('/host/openwop-app/connections', { provider: 'shippo', kind: 'api_key', secret: 'shippo-test-key', scope: 'user', displayName: 'Shippo' });
     await setGovernancePolicy(tenantId, { commerce: { flatShippingMinor: 800, shipFrom: { postalCode: '10001', country: 'US' } } }, 'test');
     process.env.OPENWOP_COMMERCE_PROVIDER_BASE = CARRIER_URL;
     const weighed = await owner.post(c(orgId, '/products'), { type: 'physical', name: 'W', price: 10, currency: 'USD', inventory: 5, weightGrams: 200 });

@@ -45,15 +45,15 @@ function client() {
 
 async function marketer(): Promise<{ user: ReturnType<typeof client>; orgId: string }> {
   const user = client();
-  await user.post('/v1/host/openwop-app/test/login', { email: `fun-${Date.now()}-${n++}@acme.test` });
-  const org = await user.post('/v1/host/openwop-app/orgs', { name: 'Funnel Co' });
+  await user.post('/host/openwop-app/test/login', { email: `fun-${Date.now()}-${n++}@acme.test` });
+  const org = await user.post('/host/openwop-app/orgs', { name: 'Funnel Co' });
   return { user, orgId: org.body.orgId };
 }
 
-const f = (orgId: string, suffix = ''): string => `/v1/host/openwop-app/funnels/orgs/${encodeURIComponent(orgId)}/funnels${suffix}`;
+const f = (orgId: string, suffix = ''): string => `/host/openwop-app/funnels/orgs/${encodeURIComponent(orgId)}/funnels${suffix}`;
 
 async function makePage(user: ReturnType<typeof client>, orgId: string, title: string): Promise<string> {
-  const r = await user.post(`/v1/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages`, { title });
+  const r = await user.post(`/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages`, { title });
   expect(r.status).toBe(201);
   return r.body.pageId; // cms create returns the page object directly
 }
@@ -111,7 +111,7 @@ describe('funnels Phase 1 — entity + lifecycle over HTTP', () => {
 
     const pageId = await makePage(user, orgId, 'Doomed');
     const withStep = await user.post(f(orgId), { name: 'Doomed funnel', steps: [{ kind: 'landing', pageId }] });
-    const delPage = await user.del(`/v1/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages/${pageId}`);
+    const delPage = await user.del(`/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages/${pageId}`);
     expect(delPage.status).toBe(204);
     expect((await user.post(f(orgId, `/${withStep.body.funnel.funnelId}/publish`))).status).toBe(400);
   });

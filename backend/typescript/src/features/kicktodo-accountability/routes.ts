@@ -48,7 +48,7 @@ import {
 } from './cohortService.js';
 import { resolveCircleByOpaqueId } from './circleService.js';
 
-export const KICKTODO_CIRCLES_PREFIX = '/v1/host/openwop-app/kicktodo/circles';
+export const KICKTODO_CIRCLES_PREFIX = '/host/openwop-app/kicktodo/circles';
 
 type Handler = (req: Request, res: Response) => Promise<void>;
 
@@ -340,7 +340,7 @@ export const KICKTODO_CIRCLES_ROUTES: ReadonlyArray<{ method: 'get' | 'post'; pa
   {
     // ADR 0419 P3 — the coach console (cross-workspace caseload; live grants).
     method: 'get',
-    path: '/v1/host/openwop-app/kicktodo/coach/caseload',
+    path: '/host/openwop-app/kicktodo/coach/caseload',
     handler: async (req, res) => {
       await gate(req);
       res.json({ caseload: await coachCaseload(subjectOf(req)) });
@@ -392,7 +392,7 @@ export const KICKTODO_CIRCLES_ROUTES: ReadonlyArray<{ method: 'get' | 'post'; pa
   {
     // The PARTICIPANT lists + resolves proposals for their own enrollment.
     method: 'get',
-    path: '/v1/host/openwop-app/kicktodo/enrollments/:enrollmentId/proposals',
+    path: '/host/openwop-app/kicktodo/enrollments/:enrollmentId/proposals',
     handler: async (req, res) => {
       await gate(req);
       const e = await getEnrollment(tenantOf(req), req.params.enrollmentId);
@@ -406,7 +406,7 @@ export const KICKTODO_CIRCLES_ROUTES: ReadonlyArray<{ method: 'get' | 'post'; pa
     // as a proposal that cannot execute, so a compare describes something real. Shipping
     // this earlier would have made the false promise more convincing, not less.
     method: 'get',
-    path: '/v1/host/openwop-app/kicktodo/enrollments/:enrollmentId/proposals/:proposalId/preview',
+    path: '/host/openwop-app/kicktodo/enrollments/:enrollmentId/proposals/:proposalId/preview',
     handler: async (req, res) => {
       await gate(req);
       try {
@@ -418,7 +418,7 @@ export const KICKTODO_CIRCLES_ROUTES: ReadonlyArray<{ method: 'get' | 'post'; pa
   },
   {
     method: 'post',
-    path: '/v1/host/openwop-app/kicktodo/enrollments/:enrollmentId/proposals/:proposalId',
+    path: '/host/openwop-app/kicktodo/enrollments/:enrollmentId/proposals/:proposalId',
     handler: async (req, res) => {
       await gate(req);
       const b = (req.body ?? {}) as Record<string, unknown>;

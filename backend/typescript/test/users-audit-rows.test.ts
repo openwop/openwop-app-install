@@ -7,6 +7,16 @@
  *     deactivate-user → `users.lifecycle.disable|enable` with `actor: 'scim'`.
  * Every row is asserted to carry NO email / userName / principalId / value —
  * the exportable chain must never hold a SAML email NameID or a display name.
+ *
+ * Why: the ADR 0301 chain is exportable (ADR 0416) — a lifecycle write missing
+ * from it is an untraceable identity change, and a PII value on it is a leak
+ * that cannot be scrubbed from a tamper-evident log. Sabotage that turns it red:
+ *   - `features/users/routes.ts` create row gains `email: user.email` → the
+ *     ids-only check on the create row;
+ *   - the PATCH `changed` filter dropped → `changed` lists `email` too;
+ *   - `routes/authScim.ts` PATCH/DELETE audits `!active` → kinds sequence;
+ *   - the seam's `if (created) await auditScimCreate` made unconditional →
+ *     a second create row on the repeat provision.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -20,13 +30,19 @@ const SCIM_BEARER = 'scim-audit-bearer-0123456789abcdef';
 let BASE = '';
 let server: http.Server;
 
-async function call(method: string, path: string, opts: { body?: unknown; bearer?: string; cookie?: string } = {}): Promise<{ status: number; body: any; headers: Headers }> {
+/** The JSON bodies this file reads: flat ids, plus the seam's `principal`. */
+interface Body {
+  [k: string]: unknown;
+  principal?: { userId: string; tenantId: string; displayName?: string };
+}
+async function call(method: string, path: string, opts: { body?: unknown; bearer?: string; cookie?: string } = {}): Promise<{ status: number; body: Body; headers: Headers }> {
   const res = await fetch(`${BASE}${path}`, {
     method,
     headers: { 'content-type': 'application/json', ...(opts.bearer ? { authorization: `Bearer ${opts.bearer}` } : {}), ...(opts.cookie ? { cookie: opts.cookie } : {}) },
     ...(opts.body !== undefined ? { body: JSON.stringify(opts.body) } : {}),
   });
-  return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined), headers: res.headers };
+  const parsed: unknown = res.status === 204 ? {} : await res.json().catch(() => ({}));
+  return { status: res.status, body: (parsed ?? {}) as Body, headers: res.headers };
 }
 const FORBIDDEN = /email|userName|principalId|displayName|nameId/i;
 function assertIdsOnly(payload: Record<string, unknown>): void {
@@ -46,22 +62,22 @@ beforeAll(async () => {
 });
 afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
-  for (const k of ['OPENWOP_TEST_AUTH_ENABLED', 'OPENWOP_SCIM_BEARER', 'OPENWOP_SCIM_TENANT']) delete process.env[k];
+  for (const k of ['OPENWOP_TEST_AUTH_ENABLED', 'OPENWOP_SCIM_BEARER', 'OPENWOP_SCIM_TENANT', 'OPENWOP_STORAGE_DSN', 'OPENWOP_SESSION_SECRET']) delete process.env[k];
 });
 
 describe('USERS-16 — admin create + PATCH are on the chain, ids-only', () => {
   it('create → users.lifecycle.create; PATCH → users.lifecycle.patch with changed field NAMES only', async () => {
-    const login = await call('POST', '/v1/host/openwop-app/test/login', { body: { subject: 'oidc:audit-admin', displayName: 'Audit Admin' } });
+    const login = await call('POST', '/host/openwop-app/test/login', { body: { subject: 'oidc:audit-admin', displayName: 'Audit Admin' } });
     expect(login.status).toBe(201);
     const cookie = (getSetCookies(login.headers) as string[]).map((c) => /(__session=[^;]+)/.exec(c)?.[1]).find(Boolean)!;
-    const me = await call('GET', '/v1/host/openwop-app/users/me', { cookie });
+    const me = await call('GET', '/host/openwop-app/users/me', { cookie });
     const tenantId = me.body.tenantId as string;
     const actor = me.body.userId as string;
 
-    const created = await call('POST', '/v1/host/openwop-app/users/users', { cookie, body: { principalId: 'scim:target@acme.test', email: 'target@acme.test', displayName: 'Audit Target', groups: ['eng'] } });
+    const created = await call('POST', '/host/openwop-app/users/users', { cookie, body: { principalId: 'scim:target@acme.test', email: 'target@acme.test', displayName: 'Audit Target', groups: ['eng'] } });
     expect(created.status).toBe(201);
     const userId = created.body.userId as string;
-    const patched = await call('PATCH', `/v1/host/openwop-app/users/users/${encodeURIComponent(userId)}`, { cookie, body: { displayName: 'Audit Target 2', groups: ['eng', 'admins'] } });
+    const patched = await call('PATCH', `/host/openwop-app/users/users/${encodeURIComponent(userId)}`, { cookie, body: { displayName: 'Audit Target 2', groups: ['eng', 'admins'] } });
     expect(patched.status).toBe(200);
 
     const chain = await listChain(tenantId);
@@ -102,7 +118,7 @@ describe('USERS-16 — the IdP-driven joiner + leaver are on the chain with acto
   it('the conformance seam `create-user` op appends the same ids-only create row (review NIT-1)', async () => {
     process.env.OPENWOP_TEST_SCIM_URL = 'http://scim.test.invalid';
     try {
-      const login = await call('POST', '/v1/host/openwop-app/test/login', { body: { subject: 'oidc:audit-seam-admin', displayName: 'Seam Admin' } });
+      const login = await call('POST', '/host/openwop-app/test/login', { body: { subject: 'oidc:audit-seam-admin', displayName: 'Seam Admin' } });
       expect(login.status).toBe(201);
       const cookie = (getSetCookies(login.headers) as string[]).map((c) => /(__session=[^;]+)/.exec(c)?.[1]).find(Boolean)!;
       // With OPENWOP_SCIM_BEARER configured the seam honours the bearer too; the
@@ -111,15 +127,15 @@ describe('USERS-16 — the IdP-driven joiner + leaver are on the chain with acto
       // This call was the repo's only sender of the legacy nested `user:{}` form,
       // and its `displayName` was the reason that form could not be dropped.
       const body = { scimUrl: 'http://scim.test.invalid', op: 'create-user', userName: 'seam.joiner@acme.test', displayName: 'Audit Target' };
-      const seam = await call('POST', '/v1/host/openwop-app/auth/scim/provision', { cookie, bearer: SCIM_BEARER, body });
+      const seam = await call('POST', '/host/openwop-app/auth/scim/provision', { cookie, bearer: SCIM_BEARER, body });
       expect(seam.status, JSON.stringify(seam.body)).toBe(201);
       // The lift is load-bearing, so assert it rather than assuming: if `displayName`
       // stopped being read from the top level it would silently fall back to the
       // DEFAULT_SCIM_USER value and every other assertion here would still pass.
-      expect(seam.body.principal.displayName).toBe('Audit Target');
-      const userId = seam.body.principal.userId as string;
-      const tenantId = seam.body.principal.tenantId as string;
-      const again = await call('POST', '/v1/host/openwop-app/auth/scim/provision', { cookie, bearer: SCIM_BEARER, body });
+      expect(seam.body.principal?.displayName).toBe('Audit Target');
+      const userId = seam.body.principal!.userId;
+      const tenantId = seam.body.principal!.tenantId;
+      const again = await call('POST', '/host/openwop-app/auth/scim/provision', { cookie, bearer: SCIM_BEARER, body });
       expect(again.status).toBe(201);
       const rows = (await listChain(tenantId)).filter((e) => e.kind === 'users.lifecycle.create' && (e.payload as { userId?: string }).userId === userId);
       expect(rows).toHaveLength(1);

@@ -10,7 +10,9 @@ export type PackStatus = 'installed' | 'available' | 'removed';
 
 /** The pack's domain segment (`feature.crm.nodes` → `crm`) — the "category" facet. */
 export const domainOf = (packName: string): string => {
-  const parts = packName.split('.');
+  // ADR 0763 — this host's own feature packs moved from `feature.<f>.*` to
+  // `vendor.openwop-app.<f>.*`; their facet is still the FEATURE, not the org.
+  const parts = (packName.startsWith('vendor.openwop-app.') ? packName.slice('vendor.openwop-app.'.length - 1).replace(/^\./, 'feature.') : packName).split('.');
   return (parts.length >= 2 ? parts[1] : parts[0]) || packName;
 };
 

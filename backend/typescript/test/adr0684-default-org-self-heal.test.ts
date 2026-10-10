@@ -14,6 +14,12 @@
  * `getWorkspace` still returns null — half-working instead of cleanly broken.
  * Caught by checking `app.openwop.dev` before deploying, which already had the
  * org provisioned.
+ *
+ * Sabotage that turns it red (each witnessed by /grade-tests probe):
+ *  - `ensureWorkspaceRootOrg` skips on org id alone (the original defect) → rebinds / reports the repair
+ *  - the `unchanged` exit removed (rewrite every boot)                    → HEALTHY org is left alone
+ *  - the repair cascades (`deleteOrg` instead of `orgs.delete`)          → member rows left in place
+ *  - the `isWorkspaceRootPair` guard dropped                              → REFUSES to "ensure"
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { ensureFeatureDefaultOrgs, type FeatureDefaultOrg } from '../src/host/featureDefaultOrgs.js';

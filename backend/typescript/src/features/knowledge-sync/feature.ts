@@ -36,8 +36,8 @@ export const knowledgeSyncFeature: BackendFeature = {
     registerKnowledgeSyncRoutes(deps);
     // ADR 0285 — pause (never delete) this feature's sources when their
     // connection is revoked; the scheduled run skips paused sources (surface status check + the job disabled), so retries stop.
-    onConnectionRevoked('knowledge-sync', async ({ tenantId, connectionId }) => {
-      await pauseSourcesForRevokedConnection(tenantId, connectionId, new Date().toISOString());
+    onConnectionRevoked('knowledge-sync', async ({ tenantId, connectionId, cause }) => {
+      await pauseSourcesForRevokedConnection(tenantId, connectionId, new Date().toISOString(), cause);
     });
     // ADR 0605 Tier 2 (`KSWF-6`) — tenant-TEARDOWN pre-hook for the `SyncFileState`
     // diff cursors, which are keyed `<sourceId>:<fileId>` and so carry no tenant in
@@ -78,7 +78,7 @@ export const knowledgeSyncFeature: BackendFeature = {
     // the single most consequential of the four doc-rot sites in `KSC-13` because
     // it is the only one rendered to a customer. Say what turning this ON does.
     description:
-      'Scheduled diff-sync of an external drive folder (Google Drive, OneDrive, SharePoint, Dropbox or Box, via a Connection) into a KB collection (ADR 0107). One-way (drive → KB), content untrusted-fenced, SSRF-guarded egress. Once a source is added it syncs on its own cadence (15m / hourly / daily) with no further action — each pass fetches changed files over paid egress and DELETES KB documents whose source file was removed or renamed, including documents uploaded to that collection by hand. New external-egress surface — OFF by default, opt-in per tenant.',
+      'Scheduled diff-sync of an external drive folder (Google Drive, OneDrive, SharePoint, Dropbox or Box, via a Connection) into a KB collection. One-way (drive → KB), content untrusted-fenced, SSRF-guarded egress. Once a source is added it syncs on its own cadence (15m / hourly / daily) with no further action — each pass fetches changed files over paid egress and DELETES KB documents whose source file was removed or renamed, including documents uploaded to that collection by hand. External egress, opt-in per tenant.',
     category: 'Content',
     status: 'off',
     bucketUnit: 'tenant',

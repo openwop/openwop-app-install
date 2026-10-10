@@ -14,6 +14,9 @@ import { createContext, useContext } from 'react';
 export interface FormEmbed {
   /** Opaque submission provenance (bounded server-side — ADR 0332). */
   context?: Record<string, string>;
+  /** ADR 0860 D3 — the visitor's consent-lane token, sent as the submit body's
+   *  `consentToken` (NEVER inside `context`, which is persisted). */
+  consentToken?: string;
   /** Fired ONLY with a real submission id (ADR 0584 / FORM-UX-1): an id is the
    *  only proof the server stored anything, so an embedding surface must never
    *  advance off a submission that does not exist. */

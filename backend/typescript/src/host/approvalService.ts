@@ -26,6 +26,7 @@ import { registerSubjectEraser } from './subjectErasure.js';
 import { subjectKeyForms } from './subjectErasureRedaction.js';
 import { registerRetentionPurger, purgeRowsByAge, type PurgeOutcome } from './retentionPurger.js';
 import { createLogger } from '../observability/logger.js';
+import { OpenwopError } from '../types.js';
 
 const auditLog = createLogger('host.approvalService');
 
@@ -61,6 +62,7 @@ export const APPROVAL_KINDS = [
   'anon-surface-write',
   'composed-workflow',
   'compensation-action',
+  'claude-code-permission',
 ] as const;
 export type ApprovalKind = (typeof APPROVAL_KINDS)[number];
 
@@ -111,6 +113,13 @@ export interface PendingApproval {
    *  material fingerprint so a re-submitted identical change reuses the row and a
    *  material edit supersedes it. SAME queue + inbox + CAS resolve (ADR 0025 §4). */
   commerceListing?: { packName: string; sellerTenantId: string; lane: string; version: string };
+  /** ADR 0785 P4 — when `kind: 'claude-code-permission'`, a permission prompt from
+   *  the user's own Claude Code (a headless task routed it here through
+   *  `--permission-prompt-tool`). The decision IS the whole act: the waiting MCP
+   *  tool reads the decided row and answers Claude Code allow/deny. Visible to and
+   *  decidable by ONLY the device's human (`policy.approverRefs[0]`). The input is
+   *  summarised and digested, never stored wholesale (it may carry secrets). */
+  claudeCodePermission?: { deviceId: string; deviceLabel: string; tool: string; summary: string; inputDigest: string };
   /** ADR 0554 P2 / RFC 0151 §E — when `kind: 'compensation-action'`, this
    *  approval gates ONE inverse effect the host is about to fire while
    *  unwinding a failed run. `rosterId`/`persona` carry a host marker (no agent
@@ -291,6 +300,21 @@ export interface PendingApproval {
    *  OVERWROTE the disclosure: the same unreviewed machine drafts, now
    *  presented as provenance-clean. Derived state cannot decay that way. */
   aiDraftedLocales?: string[];
+  /** ADR 0859 D3 — `content-publish` only: everyone who submitted this review cycle
+   *  (a UNION across resubmits, never overwritten — an overwrite let a second
+   *  person's resubmit erase the first submitter and with it the separation-of-duties
+   *  check). Subject ids, erased by the `content-publish` redactor. */
+  submitters?: string[];
+  /** ADR 0859 D4 (code grade CMSA2CD-1) — members who CAUSED an actorless run that
+   *  submitted this review (a channel poster, a schedule's author). Counted by the
+   *  separation-of-duties check ONLY — never told anything, because the causing
+   *  member is not the run's actor (ADR 0832 D3). Unioned like `submitters`. */
+  submitterCauses?: string[];
+  /** ADR 0859 D5 (ADR 0594 D1) — `content-publish` only: the page's sections that
+   *  resolve LIVE at read time (a registered content-section resolver), so the
+   *  reviewer is told their approval does not freeze what those sections show.
+   *  Derived at queue AND repin time, like `aiDraftedLocales`. */
+  liveReferenceSections?: Array<{ sectionId: string; type: string }>;
   /** Campaign gap plan §5B B3 — when `kind: 'campaign-spend'`, this approval
    *  gates a live ad-platform spend action (dispatch or budget-set) that met the
    *  tenant's `adSpend.approvalThresholdMinor`. `rosterId`/`persona`/`workflowId`
@@ -340,6 +364,19 @@ export interface PendingApproval {
    *  to hold "approve what you see". Absent on rows queued before ADR 0597 —
    *  every one of those was queued from `draft`. */
   strategyFromStatus?: string;
+  /** ADR 0845 D2 — what the approver is shown and what the approval binds to: the
+   *  strategy's protected content plus where it lives (`orgId`, `scope`), frozen at
+   *  queue time from the row the submission wrote. Opaque to core; the strategy
+   *  feature owns its shape (`activationApproval.StrategyActivationBinding`). */
+  strategySnapshot?: Record<string, unknown>;
+  /** ADR 0845 D2 — sha256 over the canonical JSON of `strategySnapshot`. The decide
+   *  handler refuses when the live strategy no longer hashes to it. Absent on rows
+   *  queued before ADR 0845 (status-only legacy compare). */
+  strategyContentDigest?: string;
+  /** ADR 0845 D5 — the CANONICAL submitter (a delegated key's issuer, else the
+   *  subject). The decide handler refuses self-approval when another approver
+   *  exists. Absent on legacy rows. A data subject: redacted on erasure. */
+  strategyRequestedBy?: string;
   /** The board card the proposal originated from (the "cited source"). */
   boardId?: string;
   cardId?: string;
@@ -512,6 +549,35 @@ export async function createAssistantActionApproval(input: {
 }
 
 /**
+ * ADR 0785 P4 — file a Claude Code permission prompt as an approval in the ONE
+ * queue (ADR 0025 §4). `ownerSubject` is the device's human: the sole approver
+ * and the visibility key (the `kicktodo-plan-proposal` audience shape).
+ * `workflowId` is empty, as for the other non-run kinds.
+ */
+export async function createClaudeCodePermissionApproval(input: {
+  tenantId: string;
+  ownerSubject: string;
+  permission: NonNullable<PendingApproval['claudeCodePermission']>;
+}): Promise<PendingApproval> {
+  const approval: PendingApproval = {
+    approvalId: `appr:${randomUUID()}`,
+    tenantId: input.tenantId,
+    rosterId: '',
+    persona: 'Claude Code',
+    workflowId: '',
+    kind: 'claude-code-permission',
+    proposal: input.permission.summary.slice(0, 500), // already "<tool> — <detail>"
+    claudeCodePermission: input.permission,
+    policy: { requiredApprovals: 1, approverRefs: [input.ownerSubject] },
+    status: 'pending',
+    createdAt: nowIso(),
+  };
+  await approvals.put(approval);
+  await indexApproval(approval);
+  return approval;
+}
+
+/**
  * The assistant-action decision handler, registered by the assistant FEATURE
  * at boot (core owns the hook; the feature depends on core, never the
  * reverse — the `connectionInjection`/`featureSurfaces` discipline). The
@@ -528,7 +594,8 @@ export type AssistantActionApprovalHandler = (
   tenantId: string,
   approvalId: string,
   outcome: 'approved' | 'rejected',
-  opts: { decidedByUserId?: string; note?: string },
+  /** ADR 0862 D1 — the content hash the approver's card displayed; required on approve. */
+  opts: { decidedByUserId?: string; note?: string; expectedContentHash?: string },
 ) => Promise<AssistantActionDecision | null>;
 
 let actionApprovalHandler: AssistantActionApprovalHandler | null = null;
@@ -552,7 +619,19 @@ export function getAssistantActionApprovalHandler(): AssistantActionApprovalHand
 export type AssistantActionProjector = (
   tenantId: string,
   actionId: string,
+  /** ADR 0862 (grade-code) — WHO is reading. The card carries the drafted outbound body,
+   *  its recipients and the event it will send; the feature withholds those from a reader
+   *  without its write authority (COS-11: "a viewer must not read a draft they cannot
+   *  send"). The two request-level exits are threaded, because the predicate is a
+   *  `(tenant, subject)` function that cannot see them. Absent ⇒ an internal caller. */
+  viewer?: AssistantActionViewer,
 ) => Promise<Record<string, unknown> | null>;
+
+export interface AssistantActionViewer {
+  subject?: string;
+  isOperator?: boolean;
+  isPersonalOwner?: boolean;
+}
 
 let actionProjector: AssistantActionProjector | null = null;
 
@@ -999,12 +1078,19 @@ async function applyApprovalRedactorsForSubject(
     let changed = false;
 
     // Id-field match → redact this row's ids + declared text.
-    const fieldHit = (v: unknown): boolean => typeof v === 'string' && forms.has(v);
+    // ADR 0859 D3 — an id field may be a LIST of subjects (`submitters`): it hits when
+    // any element does, and only the matching elements are replaced.
+    const fieldHit = (v: unknown): boolean => (typeof v === 'string' && forms.has(v))
+      || (Array.isArray(v) && v.some((x) => typeof x === 'string' && forms.has(x)));
+    const redactId = (v: unknown): unknown => (Array.isArray(v)
+      ? v.map((x) => (typeof x === 'string' && forms.has(x) ? ERASED_SUBJECT_SENTINEL : x))
+      : ERASED_SUBJECT_SENTINEL);
     const idMatched = redactor.idFields.some((p) => fieldHit(getPath(a, p)));
     if (idMatched) {
       if (!redactor.preserveMatchedIds) {
         for (const p of redactor.idFields) {
-          if (fieldHit(getPath(next, p))) { next = setPath(next, p, ERASED_SUBJECT_SENTINEL); changed = true; }
+          const cur = getPath(next, p);
+          if (fieldHit(cur)) { next = setPath(next, p, redactId(cur)); changed = true; }
         }
       }
       for (const p of redactor.textFields) {
@@ -1115,9 +1201,15 @@ registerApprovalRedactor('connect-seller', { idFields: ['connectSeller.submitted
 // records (contact-merge — erased by the CRM feature per its retention
 // precedent) or tenant refs (page/order/strategy ids); the proposing agent's
 // `rosterId` (run-proposal) is agent identity handled by `deleteApprovalsForRoster`.
-for (const k of ['assistant-action', 'run-proposal', 'content-publish', 'contact-merge', 'campaign-spend', 'commerce-spend', 'warehouse-load', 'strategy-activation'] as const) {
+for (const k of ['assistant-action', 'run-proposal', 'contact-merge', 'campaign-spend', 'commerce-spend', 'warehouse-load'] as const) {
   registerApprovalRedactor(k, { idFields: [], textFields: [] });
 }
+// ADR 0859 D3 — a content-publish row now records who SUBMITTED it (separation of
+// duties + the decision notice). A subject list, so the walk redacts per element.
+registerApprovalRedactor('content-publish', { idFields: ['submitters', 'submitterCauses'], textFields: [] });
+// ADR 0845 D5 — a strategy activation now records its SUBMITTER (a subject id) for the
+// separation-of-duties check; it is erased like every other subject ref.
+registerApprovalRedactor('strategy-activation', { idFields: ['strategyRequestedBy'], textFields: [] });
 // ADR 0473 — composed-workflow: the proposer is an AGENT (agentProfileId — not a
 // data subject), but the PROPOSAL originates from a human conversation:
 // `composedWorkflow.proposedByUserId` records that acting user (grade-data H1
@@ -1345,9 +1437,36 @@ export async function createContentApproval(input: {
    * in `test/approval-quorum-cms-lanes.test.ts`.
    */
   policy?: ApprovalPolicy;
+  /** ADR 0859 D3 — who submitted (see `PendingApproval.submitters`). */
+  submitters?: string[];
+  /** ADR 0859 D4 — see `PendingApproval.submitterCauses`. */
+  submitterCauses?: string[];
+  /** ADR 0859 D5 — see `PendingApproval.liveReferenceSections`. */
+  liveReferenceSections?: Array<{ sectionId: string; type: string }>;
+  /** ADR 0859 D2 — a DETERMINISTIC id for this review cycle. Given, the row is
+   *  created with `compareAndSwap(null, …)` and a lost race returns the winner's
+   *  row with `created: false` (use `createContentApprovalOnce` to see that). */
+  approvalId?: string;
 }): Promise<PendingApproval> {
+  return (await createContentApprovalOnce(input)).approval;
+}
+
+/**
+ * ADR 0859 D2 (`CMSA2WF-2`) — `createContentApproval` that reports whether THIS call
+ * created the row. With a caller-supplied `approvalId` the create is a storage CAS, so
+ * two submits racing on one page — on one instance or two — converge on ONE row; the
+ * loser gets the winner's row back (`created: false`) and the caller repins it. It is
+ * the anon-surface-write creator's shape (deterministic id + `compareAndSwap(null)`),
+ * which this kind had been deferring since `CMSAWF-5`.
+ *
+ * The loser re-indexes the winner's row: indexing is idempotent, and a crash between
+ * the winner's CAS and its index would otherwise leave a row no status read can find.
+ */
+export async function createContentApprovalOnce(
+  input: Parameters<typeof createContentApproval>[0],
+): Promise<{ approval: PendingApproval; created: boolean }> {
   const approval: PendingApproval = {
-    approvalId: `appr:${randomUUID()}`,
+    approvalId: input.approvalId ?? `appr:${randomUUID()}`,
     tenantId: input.tenantId,
     rosterId: '',
     persona: '',
@@ -1358,14 +1477,30 @@ export async function createContentApproval(input: {
     pageTitle: input.pageTitle,
     ...(input.pageVersion !== undefined ? { pageVersion: input.pageVersion } : {}),
     ...(input.aiDraftedLocales && input.aiDraftedLocales.length > 0 ? { aiDraftedLocales: input.aiDraftedLocales } : {}),
+    ...(input.submitters && input.submitters.length > 0 ? { submitters: [...new Set(input.submitters)] } : {}),
+    ...(input.submitterCauses && input.submitterCauses.length > 0 ? { submitterCauses: [...new Set(input.submitterCauses)] } : {}),
+    ...(input.liveReferenceSections && input.liveReferenceSections.length > 0 ? { liveReferenceSections: input.liveReferenceSections } : {}),
     proposal: input.proposal,
     ...(input.policy ? { policy: input.policy } : {}),
     status: 'pending',
     createdAt: nowIso(),
   };
-  await approvals.put(approval);
-  await indexApproval(approval);
-  return approval;
+  if (input.approvalId === undefined) {
+    await approvals.put(approval);
+    await indexApproval(approval);
+    return { approval, created: true };
+  }
+  if (await approvals.compareAndSwap(null, approval)) {
+    await indexApproval(approval);
+    return { approval, created: true };
+  }
+  const winner = await approvals.get(input.approvalId);
+  if (!winner) throw new OpenwopError('conflict', 'Could not create the review (concurrent write).', 409, { approvalId: input.approvalId });
+  // Only a still-PENDING winner is re-indexed: one decided in the window already moved
+  // its own index entry, and re-writing `pending` here would strand a stale one
+  // (code grade CMSA2CD-8).
+  if (winner.status === 'pending') await indexApproval(winner);
+  return { approval: winner, created: false };
 }
 
 /**
@@ -1649,6 +1784,10 @@ export async function createStrategyActivationApproval(input: {
   strategyTitle: string;
   /** ADR 0597 §3 — the status the strategy held when the gate intercepted. */
   strategyFromStatus?: string;
+  /** ADR 0845 D2/D5 — the binding shown on the card, its digest, and the submitter. */
+  strategySnapshot?: Record<string, unknown>;
+  strategyContentDigest?: string;
+  strategyRequestedBy?: string;
   proposal: string;
   /** Multi-approver / quorum policy (ADR 0070). Omit for the single-decision gate. */
   policy?: ApprovalPolicy;
@@ -1664,6 +1803,9 @@ export async function createStrategyActivationApproval(input: {
     strategyId: input.strategyId,
     strategyTitle: input.strategyTitle,
     ...(input.strategyFromStatus ? { strategyFromStatus: input.strategyFromStatus } : {}),
+    ...(input.strategySnapshot ? { strategySnapshot: input.strategySnapshot } : {}),
+    ...(input.strategyContentDigest ? { strategyContentDigest: input.strategyContentDigest } : {}),
+    ...(input.strategyRequestedBy ? { strategyRequestedBy: input.strategyRequestedBy } : {}),
     proposal: input.proposal,
     ...(input.policy ? { policy: input.policy } : {}),
     status: 'pending',
@@ -2192,7 +2334,15 @@ export async function findLatestContentApprovalForPage(tenantId: string, pageId:
  */
 export async function repinContentApproval(
   approvalId: string,
-  patch: { pageTitle?: string; pageVersion?: number; proposal?: string; aiDraftedLocales?: string[] },
+  patch: {
+    pageTitle?: string; pageVersion?: number; proposal?: string; aiDraftedLocales?: string[];
+    /** ADR 0859 D3 — UNIONED into the row's submitters, never replacing them. */
+    submitters?: string[];
+    /** ADR 0859 D4 — UNIONED like `submitters`. */
+    submitterCauses?: string[];
+    /** ADR 0859 D5 — REPLACES the disclosure (clears it when `[]`), like `aiDraftedLocales`. */
+    liveReferenceSections?: Array<{ sectionId: string; type: string }>;
+  },
 ): Promise<PendingApproval | null> {
   return withApprovalLock(approvalId, async () => {
   const cur = await approvals.get(approvalId);
@@ -2209,6 +2359,16 @@ export async function repinContentApproval(
   if (patch.aiDraftedLocales !== undefined) {
     if (patch.aiDraftedLocales.length > 0) next.aiDraftedLocales = patch.aiDraftedLocales;
     else delete next.aiDraftedLocales;
+  }
+  if (patch.liveReferenceSections !== undefined) {
+    if (patch.liveReferenceSections.length > 0) next.liveReferenceSections = patch.liveReferenceSections;
+    else delete next.liveReferenceSections;
+  }
+  if (patch.submitters && patch.submitters.length > 0) {
+    next.submitters = [...new Set([...(cur.submitters ?? []), ...patch.submitters])];
+  }
+  if (patch.submitterCauses && patch.submitterCauses.length > 0) {
+    next.submitterCauses = [...new Set([...(cur.submitterCauses ?? []), ...patch.submitterCauses])];
   }
   // ADR 0672 D4 (`CMSAWF-13`) — the pending check above is check-then-act, and this used
   // to `put()` blind: no CAS, and OUTSIDE `withApprovalLock`, while this function's own
@@ -2310,6 +2470,11 @@ export function resolveApproval(
       // -bounded shape).
       ...(outcome.decidedBy ? { decidedBy: outcome.decidedBy } : {}),
     };
+    // ADR 0845 STR3CD-4 — a strategy activation's content snapshot exists for the
+    // approver to READ while the row is pending (it can be large: 50 objectives × 30
+    // KRs). A resolved row keeps the digest it was bound to; the copy of the plan
+    // itself is dropped so closed rows do not accumulate it.
+    if (next.kind === 'strategy-activation') delete next.strategySnapshot;
     // Atomic: swap only if the row is still exactly the pending one we read.
     const swapped = await approvals.compareAndSwap(approval, next);
     if (!swapped) {
@@ -2505,19 +2670,54 @@ export async function deleteApprovalsForRoster(tenantId: string, rosterId: strin
 }
 
 const RESOLVED_RETENTION = 100;
+/** ADR 0859 D6 — how many pages may keep their newest review past `RESOLVED_RETENTION`. */
+const PAGE_REVIEW_RETENTION = 500;
 
 /** Keep only the most-recent `keep` resolved approvals for a tenant; delete the
- *  rest. Pending approvals are never pruned. */
+ *  rest. Pending approvals are never pruned.
+ *
+ *  ADR 0859 D6 (`CMSA2WF-4`) — EXCEPT the newest resolved `content-publish` row of each
+ *  page. `GET …/pages/:id/review` reads that row to tell the author what happened to
+ *  their submission, and the cap is tenant-wide across every kind, so on a busy tenant
+ *  a rejection's reason vanished before its author read it. One row per reviewed page
+ *  is the bound; `deleteResolvedContentApprovalsForPage` drops them with the page. */
 async function pruneResolved(tenantId: string, keep = RESOLVED_RETENTION): Promise<void> {
   const resolved = (
     await Promise.all([listApprovals(tenantId, 'approved'), listApprovals(tenantId, 'rejected')])
   )
     .flat()
     .sort((a, b) => (b.resolvedAt ?? b.createdAt).localeCompare(a.resolvedAt ?? a.createdAt));
+  // Bounded (code grade CMSA2CD-2): at most PAGE_REVIEW_RETENTION pages keep a row
+  // beyond the cap, newest first — otherwise a tenant's resolved set grew with every
+  // page ever reviewed, and every resolve, review read and page delete scans it.
+  const latestPerPage = new Set<string>();
+  const seenPages = new Set<string>();
+  for (const a of resolved) {
+    if (latestPerPage.size >= PAGE_REVIEW_RETENTION) break;
+    if (a.kind !== 'content-publish' || !a.pageId || seenPages.has(a.pageId)) continue;
+    seenPages.add(a.pageId);
+    latestPerPage.add(a.approvalId);
+  }
   for (const stale of resolved.slice(keep)) {
+    if (latestPerPage.has(stale.approvalId)) continue;
     await approvals.delete(stale.approvalId);
     await approvalsByTenantStatus.delete(approvalIxId(tenantId, stale.status, stale.approvalId));
   }
+}
+
+/** ADR 0859 D6 — a deleted page keeps no review rows. Called by the CMS page delete
+ *  AFTER it has closed the page's pending row (the closure is on the governance chain,
+ *  which is the durable audit; these rows only served the page's own review read).
+ *  Returns how many rows went. */
+export async function deleteResolvedContentApprovalsForPage(tenantId: string, pageId: string): Promise<number> {
+  let removed = 0;
+  for (const a of await listApprovals(tenantId)) {
+    if (a.kind !== 'content-publish' || a.pageId !== pageId || a.status === 'pending') continue;
+    await approvals.delete(a.approvalId);
+    await approvalsByTenantStatus.delete(approvalIxId(tenantId, a.status, a.approvalId));
+    removed += 1;
+  }
+  return removed;
 }
 
 /** Test-only: drop all approvals. */

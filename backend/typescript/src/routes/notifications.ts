@@ -37,11 +37,37 @@ import {
 } from '../types.js';
 import { getNotificationEmitter } from '../notifications/emitter.js';
 import { openSseChannel } from '../host/sseChannel.js';
-import { listWorkspacesForSubject } from '../host/accessControlService.js';
+import { isWorkspaceRootPair, onMemberAuthorityLost } from '../host/accessControlService.js';
+import { subjectKeyForms } from '../host/subjectErasureRedaction.js';
+import { isCurrentNotificationAudience, notificationSubject, subjectNotificationRoles } from '../notifications/audience.js';
 
 const VALID_STATUSES: readonly NotificationStatus[] = ['unread', 'read', 'archived'];
 
-const BASE = '/v1/host/openwop-app/notifications';
+const BASE = '/host/openwop-app/notifications';
+
+/** ADR 0816 D4 — how stale a stream's membership reading may get. */
+const PRESENCE_RECHECK_MS = 30_000;
+
+/** ADR 0816 D4 — this instance's open streams, by `${tenantId}\u0000${subject}`,
+ *  so a removal ends them at once here (other instances: the 30 s recheck). */
+const openStreams = new Map<string, Set<() => void>>();
+const streamKey = (tenantId: string, subject: string): string => `${tenantId}\u0000${subject}`;
+
+let removalHookInstalled = false;
+function installStreamRemovalHook(): void {
+  if (removalHookInstalled) return;
+  removalHookInstalled = true;
+  onMemberAuthorityLost('notifications.open-streams', async (lost) => {
+    if (lost.reason !== 'removed' || !isWorkspaceRootPair(lost.orgId, lost.tenantId)) return 0;
+    let closed = 0;
+    for (const form of subjectKeyForms(lost.subject).forms) {
+      const closers = openStreams.get(streamKey(lost.tenantId, form));
+      if (!closers) continue;
+      for (const close of [...closers]) { close(); closed++; }
+    }
+    return closed;
+  });
+}
 
 interface Deps {
   storage: Storage;
@@ -49,6 +75,7 @@ interface Deps {
 
 export function registerNotificationRoutes(app: Express, deps: Deps): void {
   const { storage } = deps;
+  installStreamRemovalHook();
 
   app.get(BASE, async (req, res, next) => {
     try {
@@ -97,20 +124,56 @@ export function registerNotificationRoutes(app: Express, deps: Deps): void {
       // ADR 0050 Phase 3 — resolve the subscriber's roles ONCE (not per-event) so a
       // role-addressed notification only streams to a member who holds the role.
       const roles = recipient ? await callerTenantRoles(req) : [];
+      // ADR 0816 D4 — a stream in a shared workspace re-checks that its subject
+      // is still a member, at most every PRESENCE_RECHECK_MS while frames flow,
+      // and ends when they are gone. Rows materialised after a removal are
+      // already addressed to others (D1); this covers transient `signal()`
+      // frames and pre-0816 shared rows, on every instance.
+      let presenceCheckedAt = Date.now();
+      let presenceChecking = false;
+      const recheckPresence = (): void => {
+        if (presenceChecking || tenantId === undefined || isWildcard) return;
+        if (Date.now() - presenceCheckedAt < PRESENCE_RECHECK_MS) return;
+        presenceChecking = true;
+        void isCurrentNotificationAudience(tenantId, recipient)
+          .then((present) => {
+            presenceCheckedAt = Date.now();
+            if (!present) channel.close();
+          })
+          .catch(() => { /* unreadable membership: keep the stream; retry on the next frame */ })
+          .finally(() => { presenceChecking = false; });
+      };
       const unsubscribe = getNotificationEmitter().subscribe((n) => {
         if (channel.closed) return;
+        recheckPresence();
         // Anon (no tenant, not the wildcard admin) gets heartbeats only — never
         // another tenant's rows (the header contract; also closes the role/addressed
         // leak to an unauthenticated stream).
         if (tenantId === undefined && !isWildcard) return;
         if (tenantId !== undefined && n.tenantId !== tenantId) return;
         if (n.recipientUserId && recipient && n.recipientUserId !== recipient) return;
-        if (n.recipientRole && recipient && !roles.includes(n.recipientRole)) return;
+        // An addressed row (incl. an ADR 0816 materialised role row) is judged by
+        // its addressee alone; only an UNADDRESSED role row needs the role check.
+        if (!n.recipientUserId && n.recipientRole && recipient && !roles.includes(n.recipientRole)) return;
         res.write(`event: notification\n`);
         res.write(`data: ${JSON.stringify(projectNotification(n))}\n\n`);
       });
 
-      channel.onClose(() => unsubscribe());
+      const key = tenantId !== undefined && recipient ? streamKey(tenantId, recipient) : null;
+      const close = (): void => channel.close();
+      if (key) {
+        const set = openStreams.get(key) ?? new Set<() => void>();
+        set.add(close);
+        openStreams.set(key, set);
+      }
+      channel.onClose(() => {
+        unsubscribe();
+        if (key) {
+          const set = openStreams.get(key);
+          set?.delete(close);
+          if (set && set.size === 0) openStreams.delete(key);
+        }
+      });
     } catch (err) {
       next(err);
     }
@@ -291,28 +354,24 @@ function resolveTenantFromReq(req: Request): string | undefined {
 }
 
 /**
- * ADR 0050 — the acting user whose inbox view this is. A wildcard principal
- * (admin / conformance harness) gets `undefined` → the unfiltered tenant view
- * (addressed + broadcast for everyone). A normal user gets their own id →
- * their addressed rows + tenant broadcasts. When no user id is resolvable
- * (a tenanted service principal), it stays `undefined` → today's tenant-wide
- * behavior, unchanged.
+ * ADR 0050 — the acting subject whose inbox view this is. A wildcard principal
+ * (admin / conformance harness) gets `undefined` → the unfiltered tenant view.
+ * ADR 0816 D0 — ONE helper decides it for every lane (list, SSE, mutate, push):
+ * in a shared workspace it is the principal the member was ADMITTED under, so an
+ * unbound OIDC member (no `req.userId`) no longer reads the unfiltered view.
  */
 function recipientFilter(req: Request): string | undefined {
-  const tenants = req.principal?.tenants ?? [];
-  if (tenants.includes('*')) return undefined;
-  return req.userId ?? undefined;
+  return notificationSubject(req);
 }
 
 /** ADR 0050 Phase 3 — the caller's workspace-root (tenant) RBAC roles (ADR 0006/0015),
- *  used to resolve role-addressed notifications. Empty when there's no resolvable user
- *  or tenant (default-deny). */
+ *  used to resolve role-addressed notifications, expanded by ADR 0816 D2 (an owner
+ *  is an operator). Empty when there's no resolvable subject or tenant (default-deny). */
 async function callerTenantRoles(req: Request): Promise<string[]> {
-  const subject = req.userId;
+  const subject = notificationSubject(req);
   const tenantId = req.tenantId;
   if (!subject || !tenantId) return [];
-  const workspaces = await listWorkspacesForSubject(subject);
-  return workspaces.find((w) => w.orgId === tenantId)?.roles ?? [];
+  return subjectNotificationRoles(tenantId, subject);
 }
 
 async function assertTenantOwnership(req: Request, record: NotificationRecord): Promise<void> {
@@ -323,11 +382,13 @@ async function assertTenantOwnership(req: Request, record: NotificationRecord): 
     // another tenant member can't mutate it. Broadcasts (no recipientUserId)
     // stay tenant-mutable as before. When the caller has no resolvable user id
     // we fall back to the tenant check (pre-0050 behavior).
-    if (record.recipientUserId && req.userId && record.recipientUserId !== req.userId) {
+    // ADR 0816 D0 — keyed on the one notification subject.
+    const subject = notificationSubject(req);
+    if (record.recipientUserId && subject && record.recipientUserId !== subject) {
       throw new OpenwopError('not_found', 'notification not found', 404);
     }
     // ADR 0050 Phase 3 — a role-addressed row is mutable only by a role-holder.
-    if (record.recipientRole && req.userId && !(await callerTenantRoles(req)).includes(record.recipientRole)) {
+    if (!record.recipientUserId && record.recipientRole && subject && !(await callerTenantRoles(req)).includes(record.recipientRole)) {
       throw new OpenwopError('not_found', 'notification not found', 404);
     }
     return;

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.ads-platforms/1.0.0/platform-specs.output.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.ads-platforms/1.0.2/platform-specs.output.json",
   "title": "AdsPlatformSpecsOutput",
   "type": "object",
   "required": ["specSet", "specCount", "success"],

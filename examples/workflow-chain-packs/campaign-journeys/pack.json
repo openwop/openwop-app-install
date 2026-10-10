@@ -1,12 +1,12 @@
 {
   "name": "core.openwop.workflows.campaign-journeys",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "kind": "workflow-chain",
   "description": "Contact-level lifecycle journeys as RFC 0013 chains on the ONE engine (ADR 0222 / campaign gap plan C6) — NOT a journey engine. Trigger with an ADR 0208 host-event binding (e.g. host.crm.contact.created → Welcome Series), guard with the enrollment + eligibility verbs (one run per contact per journey; every send behind consent + suppression), wait with core.flow.wait, send with the existing email node, log with the CRM activity verb. Enrollment state is the run itself — monitor in Runs, reset re-enrollment via the campaign-journeys API.",
   "author": "openwop",
   "license": "Apache-2.0",
   "engines": {
-    "openwop": ">=1.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "keywords": [
     "Marketing",
@@ -16,7 +16,7 @@
   "chains": [
     {
       "chainId": "campaign-journeys.welcome-series",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "Welcome Series (2-step)",
       "description": "New contact → welcome email → wait a day → follow-up email. ONE sign-off gate covers BOTH sends, and covering both is structural rather than a promise: the welcome send is reachable ONLY through `recheck`, which runs solely on the gate's `truthy approved` edge, so a rejection skips the welcome, which skips the wait, the re-check and the follow-up in turn (WF-EM-3 — the follow-up deliberately carries no second gate; a day-later interrupt would strand the run and contradict the hands-off operation this gate advertises). The RECIPIENT ADDRESS never rides the gate: the approver SEES it (`gate1.email` is the gate's read-only artifact), but the address BOUND to the send comes from `recheck` — a second `feature.campaign-journeys.nodes.eligibility` evaluation downstream of the approval — so an approver cannot redirect the mail by editing the artifact, and consent + suppression are re-evaluated at the moment of approval rather than whenever the gate was raised. The day-2 re-check is that same compliance gate one wait later: it FAILS on revoked consent or a suppression added during the wait, and a failed upstream blocks the follow-up. Bind it to host.crm.contact.created (the contact rides the event payload), or run it manually with a contactId. The enrollment guard makes redelivered events harmless; every send passes consent + suppression first.",
       "parameters": {
@@ -59,7 +59,7 @@
         "nodes": [
           {
             "id": "trigger",
-            "typeId": "core.trigger.event",
+            "typeId": "core.trigger.event@1.0.0",
             "name": "Contact event",
             "position": {
               "x": 0,
@@ -72,7 +72,7 @@
           },
           {
             "id": "enroll",
-            "typeId": "feature.campaign-journeys.nodes.enroll",
+            "typeId": "feature.campaign-journeys.nodes.enroll@1.0.0",
             "name": "Enrollment guard",
             "position": {
               "x": 220,
@@ -86,7 +86,7 @@
           },
           {
             "id": "gate1",
-            "typeId": "feature.campaign-journeys.nodes.eligibility",
+            "typeId": "feature.campaign-journeys.nodes.eligibility@1.0.0",
             "name": "Eligibility (consent + suppression)",
             "position": {
               "x": 440,
@@ -99,7 +99,7 @@
           },
           {
             "id": "signoff",
-            "typeId": "core.chat.approvalGate",
+            "typeId": "core.chat.approvalGate@1.1.0",
             "name": "Approve the series",
             "position": {
               "x": 550,
@@ -115,7 +115,7 @@
           },
           {
             "id": "recheck",
-            "typeId": "feature.campaign-journeys.nodes.eligibility",
+            "typeId": "feature.campaign-journeys.nodes.eligibility@1.0.0",
             "name": "Re-check eligibility, resolve the address",
             "position": {
               "x": 660,
@@ -128,7 +128,7 @@
           },
           {
             "id": "series-declined",
-            "typeId": "core.flow.noop",
+            "typeId": "core.flow.noop@1.0.0",
             "name": "Declined — no email sent",
             "position": {
               "x": 660,
@@ -139,7 +139,7 @@
           },
           {
             "id": "welcome",
-            "typeId": "core.openwop.integration.email-send",
+            "typeId": "core.openwop.integration.email-send@1.0.0",
             "name": "Welcome email",
             "position": {
               "x": 660,
@@ -155,7 +155,7 @@
           },
           {
             "id": "wait",
-            "typeId": "core.flow.wait",
+            "typeId": "core.flow.wait@1.0.0",
             "name": "Wait one day",
             "position": {
               "x": 880,
@@ -169,7 +169,7 @@
           },
           {
             "id": "gate2",
-            "typeId": "feature.campaign-journeys.nodes.eligibility",
+            "typeId": "feature.campaign-journeys.nodes.eligibility@1.0.0",
             "name": "Re-check eligibility",
             "position": {
               "x": 1100,
@@ -182,7 +182,7 @@
           },
           {
             "id": "followup",
-            "typeId": "core.openwop.integration.email-send",
+            "typeId": "core.openwop.integration.email-send@1.0.0",
             "name": "Follow-up email",
             "position": {
               "x": 1320,
@@ -247,7 +247,7 @@
     },
     {
       "chainId": "campaign-journeys.re-engage-contact",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "Re-engage a Contact",
       "description": "One quiet contact → human sign-off → re-engagement email + a CRM follow-up task. The RECIPIENT ADDRESS never rides the gate: the approver sees `gate.email` as a read-only artifact, but the address bound to the send comes from `recheck`, a second eligibility evaluation downstream of the approval — so an approver cannot redirect the mail by editing the artifact, and consent + suppression are re-evaluated at the moment of approval. Rejecting skips `recheck`, which skips the send and the task in turn. Run it manually, from the Strategist in chat, or bind it to an event carrying a contactId. Segment-wide sweeps are the recorded follow-on (they need per-member fan-out).",
       "parameters": {
@@ -283,7 +283,7 @@
         "nodes": [
           {
             "id": "enroll",
-            "typeId": "feature.campaign-journeys.nodes.enroll",
+            "typeId": "feature.campaign-journeys.nodes.enroll@1.0.0",
             "name": "Enrollment guard",
             "position": {
               "x": 0,
@@ -297,7 +297,7 @@
           },
           {
             "id": "gate",
-            "typeId": "feature.campaign-journeys.nodes.eligibility",
+            "typeId": "feature.campaign-journeys.nodes.eligibility@1.0.0",
             "name": "Eligibility (consent + suppression)",
             "position": {
               "x": 220,
@@ -310,7 +310,7 @@
           },
           {
             "id": "signoff",
-            "typeId": "core.chat.approvalGate",
+            "typeId": "core.chat.approvalGate@1.1.0",
             "name": "Approve the outreach",
             "position": {
               "x": 440,
@@ -326,7 +326,7 @@
           },
           {
             "id": "recheck",
-            "typeId": "feature.campaign-journeys.nodes.eligibility",
+            "typeId": "feature.campaign-journeys.nodes.eligibility@1.0.0",
             "name": "Re-check eligibility, resolve the address",
             "position": {
               "x": 660,
@@ -339,7 +339,7 @@
           },
           {
             "id": "gate-reject",
-            "typeId": "core.flow.noop",
+            "typeId": "core.flow.noop@1.0.0",
             "name": "Declined — no email sent",
             "position": {
               "x": 660,
@@ -350,7 +350,7 @@
           },
           {
             "id": "send",
-            "typeId": "core.openwop.integration.email-send",
+            "typeId": "core.openwop.integration.email-send@1.0.0",
             "name": "Re-engagement email",
             "position": {
               "x": 660,
@@ -366,7 +366,7 @@
           },
           {
             "id": "task",
-            "typeId": "feature.crm.nodes.create-task",
+            "typeId": "feature.crm.nodes.create-task@1.0.0",
             "name": "Follow-up task",
             "position": {
               "x": 880,
@@ -417,7 +417,7 @@
     },
     {
       "chainId": "campaign-journeys.segment-winback",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "Segment Winback (per-member fan-out)",
       "description": "One quiet SEGMENT → resolve its members (capped) → a data-driven supervisor fans ONE re-engagement child workflow out over every member, each child receiving its OWN contactId (RFC 0126 per-item input on core.dispatch, ADR 0255). This is the segment-wide sweep the single-contact `re-engage-contact` chain deferred (its own description: 'Segment-wide sweeps are the recorded follow-on — they need per-member fan-out'). WIRING: install `campaign-journeys.re-engage-contact` FIRST in DEFERRED mode (`POST /workflows/from-chain {chainId, deferred:true}`) so each fanned child binds its own contactId + shared params per run rather than a frozen one, then pass that returned workflowId as `childWorkflowId`. Every per-member child still runs the full enroll-guard + consent/suppression + sign-off + send + follow-up-task path; idempotent by the child enroll-CAS, so a re-swept segment never double-sends. Bounded by the segment-members cap (5000) and the host fan-out cap. Run it with a `segmentId` (the segment rides the run inputs).",
       "parameters": {
@@ -460,7 +460,7 @@
         "nodes": [
           {
             "id": "segment",
-            "typeId": "feature.campaign-journeys.nodes.segment-members",
+            "typeId": "feature.campaign-journeys.nodes.segment-members@1.0.0",
             "name": "Resolve segment members",
             "position": {
               "x": 0,
@@ -471,7 +471,7 @@
           },
           {
             "id": "plan",
-            "typeId": "feature.campaign-journeys.nodes.segment-winback-plan",
+            "typeId": "feature.campaign-journeys.nodes.segment-winback-plan@1.0.0",
             "name": "Winback supervisor (per-member fan-out plan)",
             "position": {
               "x": 240,
@@ -488,7 +488,7 @@
           },
           {
             "id": "dispatch",
-            "typeId": "core.dispatch",
+            "typeId": "core.dispatch@1.0.0",
             "name": "Fan out one re-engage child per member",
             "position": {
               "x": 480,

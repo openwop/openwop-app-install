@@ -14,7 +14,7 @@ import { PROMOTION_TYPES } from '../promotionsService.js';
 
 describe('promotions-manager prompt ↔ PROMOTION_TYPES parity (XCH-PROMO-1)', () => {
   const here = dirname(fileURLToPath(import.meta.url));
-  const promptPath = join(here, '../../../../../../packs/feature.promotions.agents/prompts/promotions-manager.md');
+  const promptPath = join(here, '../../../../../../packs/vendor.openwop-app.promotions.agents/prompts/promotions-manager.md');
   const prompt = readFileSync(promptPath, 'utf8');
 
   it('names every promotion type as a backtick-quoted bullet', () => {

@@ -8,33 +8,43 @@
  * `aria-describedby` → the message (`PipelinesPage` used it in this same
  * feature); these tests pin that the core forms do too, and that focus MOVES
  * to the failed field. No request goes out.
+ *
+ * Sabotage-witnessed (wave-4 /grade-tests, w4g5-ffe-*): dropping the
+ * `setAmountError` mark or the `amountRef` focus in DealsTab / DealDetailPage,
+ * the amount input's clear-on-type, the currency-without-amount mark, the
+ * email mark, the required custom-field marks, or the edit modal's focus each
+ * turns its case red.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
-import type { ContactFieldDef } from '../crmClient.js';
+import type { ContactFieldDef, Contact } from '../crmClient.js';
+import type { Deal, Pipeline } from '../crmOrgClient.js';
+
+type OrgApi = typeof import('../crmOrgClient.js');
+type CrmApi = typeof import('../crmClient.js');
 
 const org = vi.hoisted(() => ({
-  listCompanies: vi.fn(),
-  listDeals: vi.fn(),
-  listPipelines: vi.fn(),
-  createDeal: vi.fn(),
-  getDeal: vi.fn(),
-  getCompany: vi.fn(),
-  updateDeal: vi.fn(),
-  listActivities: vi.fn(async () => []),
-  listTasks: vi.fn(async () => []),
+  listCompanies: vi.fn<OrgApi['listCompanies']>(),
+  listDeals: vi.fn<OrgApi['listDeals']>(),
+  listPipelines: vi.fn<OrgApi['listPipelines']>(),
+  createDeal: vi.fn<OrgApi['createDeal']>(),
+  getDeal: vi.fn<OrgApi['getDeal']>(),
+  getCompany: vi.fn<OrgApi['getCompany']>(),
+  updateDeal: vi.fn<OrgApi['updateDeal']>(),
+  listActivities: vi.fn<OrgApi['listActivities']>(async () => []),
+  listTasks: vi.fn<OrgApi['listTasks']>(async () => []),
 }));
 vi.mock('../crmOrgClient.js', async (orig) => {
   const actual = await orig<Record<string, unknown>>();
   return { ...actual, ...org };
 });
 const crm = vi.hoisted(() => ({
-  listContacts: vi.fn(),
-  listSegments: vi.fn(async () => []),
-  listContactFields: vi.fn(),
-  createContact: vi.fn(),
-  updateContactFields: vi.fn(),
+  listContacts: vi.fn<CrmApi['listContacts']>(),
+  listSegments: vi.fn<CrmApi['listSegments']>(async () => []),
+  listContactFields: vi.fn<CrmApi['listContactFields']>(),
+  createContact: vi.fn<CrmApi['createContact']>(),
+  updateContactFields: vi.fn<CrmApi['updateContactFields']>(),
 }));
 vi.mock('../crmClient.js', async (orig) => {
   const actual = await orig<Record<string, unknown>>();
@@ -50,7 +60,7 @@ vi.mock('../../../orgs/orgMembers.js', () => ({
   loadOrgMembers: vi.fn(async () => []),
   invalidateOrgMembers: vi.fn(),
 }));
-const toastError = vi.hoisted(() => vi.fn());
+const toastError = vi.hoisted(() => vi.fn<(message: string) => void>());
 vi.mock('../../../ui/toast.js', async (orig) => {
   const actual = await orig<{ toast: Record<string, unknown> }>();
   return { ...actual, toast: { ...actual.toast, error: toastError } };
@@ -60,8 +70,8 @@ import { DealsTab } from '../DealsTab.js';
 import { DealDetailPage } from '../DealDetailPage.js';
 import { ContactsTab } from '../ContactsTab.js';
 
-const PIPELINE = { pipelineId: 'p1', name: 'Sales', stages: [{ stageId: 's1', name: 'New', probability: 10 }] };
-const DEAL = { dealId: 'd1', title: 'Globex expansion', pipelineId: 'p1', stageId: 's1', amount: 5000, currency: 'USD', status: 'open' as const };
+const PIPELINE: Pipeline = { pipelineId: 'p1', name: 'Sales', stages: [{ stageId: 's1', name: 'New', probability: 10 }] };
+const DEAL: Deal = { dealId: 'd1', title: 'Globex expansion', pipelineId: 'p1', stageId: 's1', amount: 5000, currency: 'USD', status: 'open' };
 
 /** The field's `aria-describedby` must resolve to an element carrying the message. */
 function expectAttached(input: HTMLElement, message: RegExp): void {
@@ -74,13 +84,13 @@ function expectAttached(input: HTMLElement, message: RegExp): void {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   window.localStorage.clear();
   org.listPipelines.mockResolvedValue([PIPELINE]);
   org.listDeals.mockResolvedValue([]);
   org.listCompanies.mockResolvedValue([]);
   org.getDeal.mockResolvedValue(DEAL);
-  org.getCompany.mockResolvedValue(null);
+  // DEAL has no companyId, so getCompany is never read.
   crm.listContacts.mockResolvedValue([]);
   crm.listContactFields.mockResolvedValue([]);
 });
@@ -151,7 +161,7 @@ describe('ContactsTab required custom fields (CRM-UX-15)', () => {
   const DEFS: ContactFieldDef[] = [
     { defId: 'f1', key: 'tier', label: 'Tier', type: 'enum', required: false, options: ['Bronze', 'Gold'], createdAt: '2026-01-01T00:00:00Z' },
     { defId: 'f2', key: 'seats', label: 'Seats', type: 'number', required: true, createdAt: '2026-01-01T00:00:00Z' },
-  ] as ContactFieldDef[];
+  ];
 
   it('Add contact with a required field empty: THAT input is aria-invalid + focused; no createContact', async () => {
     crm.listContactFields.mockResolvedValue(DEFS);
@@ -168,7 +178,8 @@ describe('ContactsTab required custom fields (CRM-UX-15)', () => {
 
   it('the edit modal: saving with the required field cleared marks + focuses it inside the modal; no PATCH', async () => {
     crm.listContactFields.mockResolvedValue(DEFS);
-    crm.listContacts.mockResolvedValue([{ contactId: 'c1', name: 'Ada Devine', stage: 'lead', customFields: { seats: 4 } }]);
+    const ADA: Contact = { contactId: 'c1', tenantId: 't1', name: 'Ada Devine', stage: 'lead', customFields: { seats: 4 }, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' };
+    crm.listContacts.mockResolvedValue([ADA]);
     render(<MemoryRouter><ContactsTab /></MemoryRouter>);
     fireEvent.click(await screen.findByRole('button', { name: 'Edit Ada Devine’s custom fields' }));
     const dialog = await screen.findByRole('dialog');

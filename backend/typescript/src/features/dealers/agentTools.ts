@@ -2,7 +2,7 @@
  * Channel Manager chat tools (CFP-1 repair — CHAT-FIRST-PORT-AUDIT finding #1;
  * D9 field-sales port map row 1 "RIDES").
  *
- * The `feature.dealers.agents` Channel Manager used to allowlist raw node typeIds
+ * The `vendor.openwop-app.dealers.agents` Channel Manager used to allowlist raw node typeIds
  * (`openwop:feature.dealers.nodes.list-dealers`, …) that NO host registrant
  * projects into a conversational tool — silently dropped, persona toothless.
  * These register the READ surface the advisory agent needs, over the SAME entity
@@ -41,6 +41,7 @@ export function registerDealerAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: DEALERS_LIST_DEALERS_TOOL_ID,
       description: "List the org's dealers (channel partners over CRM companies), optionally filtered by `territoryId` or `status`. Read-only.",
@@ -57,6 +58,7 @@ export function registerDealerAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: DEALERS_LIST_OUTLETS_TOOL_ID,
       description: "List the org's retail outlets (store-location records), optionally filtered to one dealer via `dealerId`. Read-only.",
@@ -73,6 +75,7 @@ export function registerDealerAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: DEALERS_LIST_REGISTRATIONS_TOOL_ID,
       // R2 DLR2-M5 — "the governed admin route" has not existed since CFP-1 demolished

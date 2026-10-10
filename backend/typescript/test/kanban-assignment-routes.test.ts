@@ -60,23 +60,23 @@ function client() {
 
 let n = 0;
 async function signup(c: ReturnType<typeof client>): Promise<{ userId: string }> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `kb-${Date.now()}-${n++}@acme.test` });
+  const r = await c.post('/host/openwop-app/test/login', { email: `kb-${Date.now()}-${n++}@acme.test` });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
 
-const K = '/v1/host/openwop-app/kanban';
+const K = '/host/openwop-app/kanban';
 
 describe('ADR 0049 routes — shared workspace assignment', () => {
   it('assign → addressed inbox + mirror for the assignee only; non-member rejected', async () => {
     const owner = client();
     await signup(owner);
-    const ws = (await owner.post('/v1/host/openwop-app/workspaces', { name: 'Acme' })).body.workspaceId;
-    await owner.post(`/v1/host/openwop-app/workspaces/${encodeURIComponent(ws)}/switch`);
+    const ws = (await owner.post('/host/openwop-app/workspaces', { name: 'Acme' })).body.workspaceId;
+    await owner.post(`/host/openwop-app/workspaces/${encodeURIComponent(ws)}/switch`);
 
     const bob = client();
     const b = await signup(bob);
-    const add = await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(ws)}/members`, { displayName: 'Bob', subject: b.userId, roles: ['editor'] });
+    const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(ws)}/members`, { displayName: 'Bob', subject: b.userId, roles: ['editor'] });
     expect(add.status, JSON.stringify(add.body)).toBe(201);
 
     const board = (await owner.post(`${K}/boards`, { name: 'Launch' })).body;
@@ -91,29 +91,29 @@ describe('ADR 0049 routes — shared workspace assignment', () => {
     expect(ok.status, JSON.stringify(ok.body)).toBe(200);
 
     // Bob switches in and sees the card on his mirror + an addressed notification.
-    await bob.post(`/v1/host/openwop-app/workspaces/${encodeURIComponent(ws)}/switch`);
+    await bob.post(`/host/openwop-app/workspaces/${encodeURIComponent(ws)}/switch`);
     const mine = await bob.get(`${K}/assigned`);
     expect(mine.status, JSON.stringify(mine.body)).toBe(200);
     expect(mine.body.cards.map((c: any) => c.id)).toContain(card.id);
     expect(mine.body.cards.find((c: any) => c.id === card.id).boardName).toBe('Launch');
 
-    const bobInbox = await bob.get('/v1/host/openwop-app/notifications');
+    const bobInbox = await bob.get('/host/openwop-app/notifications');
     const assigned = bobInbox.body.notifications.filter((x: any) => x.type === 'task.assigned');
     expect(assigned).toHaveLength(1);
 
     // The owner does NOT see Bob's addressed notification (per-recipient privacy).
-    const ownerInbox = await owner.get('/v1/host/openwop-app/notifications');
+    const ownerInbox = await owner.get('/host/openwop-app/notifications');
     expect(ownerInbox.body.notifications.filter((x: any) => x.type === 'task.assigned')).toHaveLength(0);
   });
 
   it('completing the card (incl. legacy name-match terminal lane) withdraws the inbox item', async () => {
     const owner = client();
     await signup(owner);
-    const ws = (await owner.post('/v1/host/openwop-app/workspaces', { name: 'Acme2' })).body.workspaceId;
-    await owner.post(`/v1/host/openwop-app/workspaces/${encodeURIComponent(ws)}/switch`);
+    const ws = (await owner.post('/host/openwop-app/workspaces', { name: 'Acme2' })).body.workspaceId;
+    await owner.post(`/host/openwop-app/workspaces/${encodeURIComponent(ws)}/switch`);
     const bob = client();
     const b = await signup(bob);
-    await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(ws)}/members`, { displayName: 'Bob', subject: b.userId, roles: ['editor'] });
+    await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(ws)}/members`, { displayName: 'Bob', subject: b.userId, roles: ['editor'] });
 
     // Custom columns with NO `terminal` flag — the last/"shipped" lane is a
     // legacy fallback terminal (review fix #2).
@@ -121,31 +121,31 @@ describe('ADR 0049 routes — shared workspace assignment', () => {
     const card = (await owner.post(`${K}/boards/${board.id}/cards`, { title: 'Task', columnId: 'backlog' })).body;
     await owner.post(`${K}/cards/${card.id}/assign`, { assigneeId: b.userId });
 
-    await bob.post(`/v1/host/openwop-app/workspaces/${encodeURIComponent(ws)}/switch`);
-    expect((await bob.get('/v1/host/openwop-app/notifications')).body.notifications.filter((x: any) => x.type === 'task.assigned' && x.status === 'unread')).toHaveLength(1);
+    await bob.post(`/host/openwop-app/workspaces/${encodeURIComponent(ws)}/switch`);
+    expect((await bob.get('/host/openwop-app/notifications')).body.notifications.filter((x: any) => x.type === 'task.assigned' && x.status === 'unread')).toHaveLength(1);
 
     // Move to the fallback-terminal column → completion withdraws Bob's item.
     const moved = await owner.patch(`${K}/cards/${card.id}`, { columnId: 'shipped' });
     expect(moved.status).toBe(200);
     expect(moved.body.card.completedAt).toBeTruthy();
-    const after = await bob.get('/v1/host/openwop-app/notifications');
+    const after = await bob.get('/host/openwop-app/notifications');
     expect(after.body.notifications.filter((x: any) => x.type === 'task.assigned')).toHaveLength(0); // archived → out of the default view
   });
 
   it('role-addressed card surfaces in a holder mirror and can be claimed', async () => {
     const owner = client();
     await signup(owner);
-    const ws = (await owner.post('/v1/host/openwop-app/workspaces', { name: 'Acme3' })).body.workspaceId;
-    await owner.post(`/v1/host/openwop-app/workspaces/${encodeURIComponent(ws)}/switch`);
+    const ws = (await owner.post('/host/openwop-app/workspaces', { name: 'Acme3' })).body.workspaceId;
+    await owner.post(`/host/openwop-app/workspaces/${encodeURIComponent(ws)}/switch`);
     const bob = client();
     const b = await signup(bob);
-    await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(ws)}/members`, { displayName: 'Bob', subject: b.userId, roles: ['editor'] });
+    await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(ws)}/members`, { displayName: 'Bob', subject: b.userId, roles: ['editor'] });
 
     const board = (await owner.post(`${K}/boards`, { name: 'Roleboard' })).body;
     const card = (await owner.post(`${K}/boards/${board.id}/cards`, { title: 'Anyone editor', columnId: 'todo' })).body;
     expect((await owner.post(`${K}/cards/${card.id}/assign`, { assigneeRole: 'editor' })).status).toBe(200);
 
-    await bob.post(`/v1/host/openwop-app/workspaces/${encodeURIComponent(ws)}/switch`);
+    await bob.post(`/host/openwop-app/workspaces/${encodeURIComponent(ws)}/switch`);
     const mine = await bob.get(`${K}/assigned`);
     expect(mine.body.cards.map((c: any) => c.id)).toContain(card.id); // surfaces via the 'editor' role
 

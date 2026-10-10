@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.data-integration/1.0.0/source.a2a.config.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.data-integration/1.0.2/source.a2a.config.json",
   "title": "DataSourceA2AConfig",
   "type": "object",
   "required": ["peerId", "taskType"],

@@ -30,14 +30,14 @@ export const cadFeature: BackendFeature = {
     id: 'cad',
     label: 'CAD',
     description:
-      'Parametric 3D models — generate them with the AI chat (the CAD Modeler agent emits a structured model rendered inline as an orthographic projection) AND create/edit them full-screen: a solid list with per-kind adders (box, cylinder, sphere, cone), on-canvas move/resize/rotate, numeric dimensions, undo/redo, and version history. Constrained typed JSON, never executable code. ON by default.',
+      'Parametric 3D models — generate them with the AI chat (the CAD Modeler agent emits a structured model rendered inline as an orthographic projection) AND create/edit them full-screen: a solid list with per-kind adders (box, cylinder, sphere, cone), on-canvas move/resize/rotate, numeric dimensions, undo/redo, and version history. Constrained typed JSON, never executable code.',
     category: 'Documents',
     status: 'on',
     bucketUnit: 'tenant',
     salt: 'cad',
   },
   requiredPacks: [
-    { name: 'feature.cad.nodes', version: '1.6.0' }, // R2 CAD2-B1 — render preserves rotation/metallic/roughness
-    { name: 'feature.cad.agents', version: '1.5.1' }, // ADR 0388 P5 — +materials allowlist/prompt
+    { name: 'feature.cad.nodes', version: '1.6.1' }, // R2 CAD2-B1 — render preserves rotation/metallic/roughness
+    { name: 'vendor.openwop-app.cad.agents', version: '1.5.2' }, // ADR 0388 P5 — +materials allowlist/prompt
   ],
 };

@@ -2,7 +2,11 @@
  * Team channels / real-time messaging (ADR 0126, backlog B18). A channel is a new
  * conversation `type:'channel'` over the existing conversation store — NOT a second
  * chat system. v1 local-host, presence-free (presence/typing/receipts + cross-host
- * are RFC-gated). A `channels` toggle, off by default, per tenant.
+ * are RFC-gated).
+ *
+ * ALWAYS-ON (ADR 0820 §8.6 / core-audit M8 correction): the `channels` toggle this header
+ * used to describe was removed when the feature graduated (ADR 0134 / 2026-06-24);
+ * there is no per-tenant switch. Gating is RBAC and visibility only.
  *
  * @see docs/adr/0126-team-channels-realtime-messaging.md
  * @see docs/adr/0192-channels-ux-identity-parity.md

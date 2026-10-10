@@ -22,6 +22,10 @@ import { createLogger } from '../../observability/logger.js';
 import { emitHostEvent } from '../../host/hostEventDispatcher.js';
 import { mergeConsentCategories } from '../consent/consentService.js';
 import { normalizeWaNumber } from './whatsappService.js';
+import { tenantMayUseFeature } from '../../host/tenantFeatureGate.js';
+
+/** ADR 0820 §7 / G10 — the toggle inbound workflow dispatch belongs to. */
+export const WHATSAPP_FEATURE_ID = 'whatsapp';
 
 const log = createLogger('features.whatsapp.compliance');
 
@@ -60,6 +64,12 @@ export async function revokeAttestation(tenantId: string): Promise<boolean> {
  * has not attested for. Fail-closed.
  */
 export async function whatsappDispatchAllowed(tenantId: string): Promise<{ allow: true } | { allow: false; reason: string }> {
+  // ADR 0820 §7 / G10 — firing a workflow off an inbound message IS the paid
+  // product, so the tenant must be able to use `whatsapp` (toggle + plan). The
+  // message is still ACKED, and the STOP/START keyword ladder + the 24h window
+  // ledger run in the OBSERVERS, which stay ungated (Meta compliance: an opt-out
+  // must apply immediately, plan or no plan).
+  if (!(await tenantMayUseFeature(WHATSAPP_FEATURE_ID, tenantId))) return { allow: false, reason: 'feature_unavailable' };
   const attestation = await attestations.get(tenantId);
   if (attestation) return { allow: true };
   return { allow: false, reason: 'no_train_attestation_missing' };

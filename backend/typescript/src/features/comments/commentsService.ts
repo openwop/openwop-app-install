@@ -13,6 +13,7 @@
 import { randomUUID } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { OpenwopError } from '../../types.js';
+import { resolveOne } from '../../host/featureToggles/service.js';
 import { type SubjectCaller, subjectReadAllowed } from '../../host/subjectAccess.js';
 import { cleanString } from '../../host/boundedStrings.js';
 import { declarePiiFields } from '../../host/dataClassification.js';
@@ -70,6 +71,15 @@ interface CommentTarget {
   validate(tenantId: string, orgId: string, resourceId: string, caller?: SubjectCaller): Promise<{ title: string; ownerId: string } | null>;
 }
 
+/** `resolveOne('priority-matrix')` for the `priority_idea` target (toggle + plan, ADR 0819). */
+async function priorityMatrixAllowed(tenantId: string, caller: SubjectCaller | undefined): Promise<boolean> {
+  try {
+    return Boolean((await resolveOne('priority-matrix', { tenantId, ...(caller?.subject ? { userId: caller.subject } : {}) }))?.enabled);
+  } catch {
+    return false;
+  }
+}
+
 const TARGETS: Record<ResourceType, CommentTarget> = {
   // ADR 0353 P4 — threaded review comments on a creative brief.
   creative_brief: {
@@ -107,11 +117,22 @@ const TARGETS: Record<ResourceType, CommentTarget> = {
   // the LIST's tenant + org (the aggregate root — the ADR 0021 "one map entry"
   // extension contract); the card lives on the list's kanban board.
   priority_idea: {
-    async validate(tenantId, orgId, resourceId) {
+    async validate(tenantId, orgId, resourceId, caller) {
       const [listId, cardId] = resourceId.split('#');
       if (!listId || !cardId) return null;
+      // ADR 0820 §8.1 (core-audit §2b.6(iii)) — the idea and its list are
+      // priority-matrix data (Planning & Strategy), read here under the `comments`
+      // gate. A tenant refused `priority-matrix` gets NOT FOUND — the uniform `null`
+      // every lane maps to its own refusal — never a throw. Fail-closed on a resolver error.
+      if (!(await priorityMatrixAllowed(tenantId, caller))) return null;
       const list = await getPriorityList(tenantId, listId);
       if (!list || list.orgId !== orgId) return null;
+      // ADR 0842 D8 — a project-bound list is membership-scoped (ADR 0610 D3′). This
+      // validator checked tenant + org only and ignored the caller it is handed, so a
+      // non-member org viewer could open a thread on a PRIVATE project's idea and got the
+      // idea's title as the target. The KBC-1 rule: `preAuthorized` passes, an absent
+      // subject is refused, `null` from the seam falls through.
+      if (list.projectId && !(await subjectReadAllowed(tenantId, { kind: 'project', id: list.projectId }, caller))) return null;
       const idea = (await listRankedIdeas(tenantId, listId)).find((r) => r.card.id === cardId);
       return idea ? { title: idea.card.title, ownerId: idea.card.createdBy ?? list.createdBy } : null;
     },

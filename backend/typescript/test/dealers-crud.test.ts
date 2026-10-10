@@ -41,15 +41,15 @@ let n = 0;
 async function scenario(memberRole: string): Promise<{ owner: Client; member: Client; orgId: string; companyId: string }> {
   const tenantId = `org:dealer-${Date.now()}-${n++}`;
   const owner = client();
-  await owner.post('/v1/host/openwop-app/test/login', { email: `o-${Date.now()}-${n++}@acme.test`, tenantId });
+  await owner.post('/host/openwop-app/test/login', { email: `o-${Date.now()}-${n++}@acme.test`, tenantId });
   const member = client();
-  const memberId = (await member.post('/v1/host/openwop-app/test/login', { email: `m-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId;
-  const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
-  await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberId, roles: [memberRole] });
-  const companyId = (await owner.post(`/v1/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}/companies`, { name: 'Dealer Co' })).body.companyId;
+  const memberId = (await member.post('/host/openwop-app/test/login', { email: `m-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId;
+  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
+  await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberId, roles: [memberRole] });
+  const companyId = (await owner.post(`/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}/companies`, { name: 'Dealer Co' })).body.companyId;
   return { owner, member, orgId, companyId };
 }
-const B = (orgId: string): string => `/v1/host/openwop-app/dealers/orgs/${encodeURIComponent(orgId)}`;
+const B = (orgId: string): string => `/host/openwop-app/dealers/orgs/${encodeURIComponent(orgId)}`;
 
 describe('dealers — toggle gating', () => {
   it('404s when off, works when on', async () => {

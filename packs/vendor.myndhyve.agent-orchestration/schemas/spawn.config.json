@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.agent-orchestration/1.0.0/spawn.config.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.agent-orchestration/1.0.3/spawn.config.json",
   "title": "AgentSpawnConfig",
   "type": "object",
   "required": ["agentRef"],

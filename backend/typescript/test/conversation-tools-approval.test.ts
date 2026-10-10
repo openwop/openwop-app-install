@@ -12,6 +12,9 @@ import {
   recordToolApprovalRequested,
   resolveToolApproval,
   listToolApprovals,
+  approvedToolSets,
+  eraseConversationToolApprovalsSubject,
+  deleteToolApprovalsForConversation,
 } from '../src/features/conversation-tools/approvalLedger.js';
 import type { AiToolCallRequest, AiToolCallResult } from '../src/executor/types.js';
 
@@ -42,7 +45,9 @@ describe('runChatToolLoop require-approval (ADR 0132 P3)', () => {
       { callAIWithTools: scripted('email.send'), executeTool },
     );
     expect(executed).not.toContain('email.send');        // NOT executed
-    expect(res.pendingApprovals).toEqual([{ toolName: 'email.send', callId: '1', input: { to: 'x' } }]);
+    // ADR 0834 D2 (FW2-CD-5) — a scope ask is the owner's own, user-level (`baseline`):
+    // approving it must not satisfy a later workspace/platform ask on the same tool.
+    expect(res.pendingApprovals).toEqual([{ toolName: 'email.send', callId: '1', input: { to: 'x' }, origin: 'baseline' }]);
   });
 
   it('an enabled, non-approval call still executes (no pending)', async () => {
@@ -88,5 +93,69 @@ describe('approval ledger', () => {
 
     // tenant/conversation scoping
     expect(await listToolApprovals('t', 'conv2')).toHaveLength(0);
+  });
+});
+
+describe('approval ledger — ADR 0834 D2/D6', () => {
+  beforeAll(async () => { initHostExtPersistence(await openStorage('memory://')); });
+
+  it('an approval answers an ask: no pending row ⇒ refused (nothing approvable in advance)', async () => {
+    expect(await resolveToolApproval('t', 'pre', 'code.run', 'approved', 'owner')).toEqual({ ok: false, reason: 'no_pending_approval' });
+    expect(await listToolApprovals('t', 'pre')).toHaveLength(0);
+  });
+
+  it('stores the held arguments (scrubbed) while pending and clears them on decision', async () => {
+    await recordToolApprovalRequested('t', 'args', 'http.fetch', { origin: 'baseline', input: { url: 'https://x.example', token: 'sk-ant-api03-SECRETSECRETSECRETSECRET' } });
+    const [pending] = await listToolApprovals('t', 'args');
+    expect(pending?.requestedInput).toContain('https://x.example');
+    expect(pending?.requestedInput).not.toContain('SECRETSECRETSECRET');
+    const out = await resolveToolApproval('t', 'args', 'http.fetch', 'approved', 'owner', pending!.requestedAt);
+    expect(out.ok).toBe(true);
+    const [decided] = await listToolApprovals('t', 'args');
+    expect(decided?.requestedInput).toBeUndefined();
+  });
+
+  it('compare-and-set: approving a row that moved since it was shown is refused', async () => {
+    await recordToolApprovalRequested('t', 'cas', 'http.fetch', { input: { url: 'a' } });
+    const [shown] = await listToolApprovals('t', 'cas');
+    await new Promise((r) => setTimeout(r, 5));
+    await recordToolApprovalRequested('t', 'cas', 'http.fetch', { input: { url: 'b' } }); // the agent re-asked
+    expect(await resolveToolApproval('t', 'cas', 'http.fetch', 'approved', 'owner', shown!.requestedAt)).toEqual({ ok: false, reason: 'approval_changed' });
+  });
+
+  it('a policy ask RE-OPENS a tool approved only for the baseline; a baseline ask does not', async () => {
+    await recordToolApprovalRequested('t', 'esc', 'x.send', { origin: 'baseline' });
+    await resolveToolApproval('t', 'esc', 'x.send', 'approved', 'owner');
+    await recordToolApprovalRequested('t', 'esc', 'x.send', { origin: 'baseline' });
+    expect((await listToolApprovals('t', 'esc'))[0]).toMatchObject({ status: 'approved', origin: 'baseline' });
+    await recordToolApprovalRequested('t', 'esc', 'x.send', { origin: 'policy' });
+    expect((await listToolApprovals('t', 'esc'))[0]).toMatchObject({ status: 'pending', origin: 'policy' });
+  });
+
+  it('approvedToolSets: policy rows satisfy any ask; baseline and legacy rows only the baseline', () => {
+    const rows = [
+      { tenantId: 't', conversationId: 'c', toolName: 'p', status: 'approved' as const, requestedAt: '', origin: 'policy' as const },
+      { tenantId: 't', conversationId: 'c', toolName: 'b', status: 'approved' as const, requestedAt: '', origin: 'baseline' as const },
+      { tenantId: 't', conversationId: 'c', toolName: 'legacy', status: 'approved' as const, requestedAt: '' },
+      { tenantId: 't', conversationId: 'c', toolName: 'd', status: 'denied' as const, requestedAt: '', origin: 'policy' as const },
+    ];
+    const sets = approvedToolSets(rows);
+    expect([...sets.approvedTools]).toEqual(['p']);
+    expect([...sets.approvedBaselineTools].sort()).toEqual(['b', 'legacy']);
+  });
+
+  it('the DSAR eraser redacts the approver and keeps the decision', async () => {
+    await recordToolApprovalRequested('t-er', 'c', 'x.send');
+    await resolveToolApproval('t-er', 'c', 'x.send', 'approved', 'alice');
+    await eraseConversationToolApprovalsSubject('t-er', 'alice');
+    const [row] = await listToolApprovals('t-er', 'c');
+    expect(row?.status).toBe('approved');
+    expect(row?.resolvedBy).not.toBe('alice');
+  });
+
+  it('a deleted conversation takes its approvals with it', async () => {
+    await recordToolApprovalRequested('t-del', 'gone', 'x.send', { input: { a: 1 } });
+    await deleteToolApprovalsForConversation('t-del', 'gone');
+    expect(await listToolApprovals('t-del', 'gone')).toHaveLength(0);
   });
 });

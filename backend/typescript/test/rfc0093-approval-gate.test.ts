@@ -37,6 +37,8 @@ import {
 } from '../src/routes/interrupts.js';
 import type { WorkflowDefinition } from '../src/executor/types.js';
 import type { InterruptRecord, RunRecord } from '../src/types.js';
+import { assertRejectTail } from './support/interruptResolvedDef.js';
+import { installRejectedGateRouter } from './support/rejectedGateRouter.js';
 
 const storage = await openStorage('memory://');
 setEventLogBackend(storage);
@@ -49,18 +51,22 @@ const baseSuite = createHostAdapterSuite({ storage });
 // Recording audit sink: Storage has no audit READ surface, so the §D.2
 // audit-entry assertions capture through the sink (which still forwards to
 // the real persistence path).
-const auditEntries: Array<{ principalId?: string; action: string; resource?: string }> = [];
+const auditEntries: Array<{ principalId?: string; action: string; resource?: string; payload?: Record<string, unknown> }> = [];
 const hostSuite: typeof baseSuite = {
   ...baseSuite,
   auditSink: {
     record(input) {
-      auditEntries.push({ principalId: input.principalId, action: input.action, resource: input.resource });
+      auditEntries.push({ principalId: input.principalId, action: input.action, resource: input.resource, payload: input.payload as Record<string, unknown> | undefined });
       baseSuite.auditSink.record(input);
     },
   },
 };
 
 const WORKFLOW_ID = 'wf.rfc0093-gate';
+
+// RFC 0223 — the timeout routes its failure through the scheduler; index.ts
+// installs this router at boot, and these tests drive the module directly.
+installRejectedGateRouter(storage, hostSuite);
 
 beforeAll(() => {
   getNodeRegistry().register({
@@ -156,8 +162,14 @@ describe('rfc0093 §D.1 — gate timeout ⇒ auto-reject', () => {
     expect(resolved!.payload).toMatchObject({
       interruptId: gate.interruptId,
       decision: 'rejected',
+      // openwop#1692 — the record-only action a timer branch mints; no human
+      // resolved it, so no `resolvedBy`.
+      action: 'timeout',
       reason: 'timeout',
     });
+    expect(resolved!.payload).not.toHaveProperty('resolvedBy');
+    // openwop#1692 — resolved → node.failed → run.failed, naming the gate node.
+    assertRejectTail(events, gate.nodeId);
 
     // Fail closed: the run failed, never auto-approved.
     const finalRun = await storage.getRun(run.runId);
@@ -258,16 +270,18 @@ describe('rfc0093 §D.2 — quorum override semantics', () => {
     const events = await storage.listEvents(run.runId);
     const overridden = events.find((e) => e.type === 'approval.overridden');
     expect(overridden).toBeDefined();
-    expect(overridden!.payload).toMatchObject({
+    // The CLOSED v1 shape (interrupt-profiles.md:95): exactly {gateId, principal, reason}.
+    expect(overridden!.payload).toEqual({
+      gateId: gate.interruptId,
       principal: 'principal-owner',
       reason: 'emergency change window',
-      bypassedQuorum: true,
     });
 
-    // Audit-log entry written (RFC 0009/0010 requirement on the override path).
-    expect(
-      auditEntries.some((a) => a.action === 'approval.override' && a.resource === `interrupt:${gate.interruptId}`),
-    ).toBe(true);
+    // Audit-log entry written (RFC 0009/0010 requirement on the override path),
+    // carrying the detail the wire shape cannot: whether quorum was bypassed.
+    const audit = auditEntries.find((a) => a.action === 'approval.override' && a.resource === `interrupt:${gate.interruptId}`);
+    expect(audit).toBeDefined();
+    expect(audit!.payload).toMatchObject({ interruptId: gate.interruptId, bypassedQuorum: true });
   });
 
   it('default (flag absent) — an override grant counts as ONE quorum vote', async () => {
@@ -290,7 +304,9 @@ describe('rfc0093 §D.2 — quorum override semantics', () => {
     const events = await storage.listEvents(run.runId);
     const overridden = events.find((e) => e.type === 'approval.overridden');
     expect(overridden).toBeDefined();
-    expect(overridden!.payload).toMatchObject({ bypassedQuorum: false });
+    expect(overridden!.payload).toEqual({ gateId: gate.interruptId, principal: 'principal-owner', reason: 'expedite' });
+    expect(auditEntries.filter((a) => a.action === 'approval.override' && a.resource === `interrupt:${gate.interruptId}`).at(-1)!.payload)
+      .toMatchObject({ bypassedQuorum: false });
 
     // A second ordinary grant tips the quorum.
     await __resolveAndResumeForTests(storage, hostSuite, gate.interruptId, { action: 'accept', voter: 'peer' });
@@ -328,5 +344,34 @@ describe('rfc0093 §D.2 — quorum override semantics', () => {
     expect((await storage.getInterrupt(gate.interruptId))?.resolvedAt).toBeUndefined();
     const events = await storage.listEvents(run.runId);
     expect(events.some((e) => e.type === 'approval.overridden')).toBe(false);
+  });
+});
+
+describe('rfc0093 §D — the periodic sweep cannot starve behind interrupts that never expire', () => {
+  // prod rev 00782: the sweep read the 200 OLDEST open interrupts every tick, so a
+  // backlog of never-expiring ones hid every newer gate forever. RFC 0223's
+  // timeout rows passed here (small table) and failed on the prod database.
+  it('a due gate is reached whether it is the newest or buried mid-backlog', async () => {
+    const { _resetSweepCursors } = await import('../src/executor/openInterruptSweep.js');
+    _resetSweepCursors();
+    const run = await seedRun();
+    const t0 = Date.parse('2020-01-01T00:00:00Z');
+    const at = (ms: number) => new Date(t0 + ms).toISOString();
+    for (let i = 0; i < 300; i++) await seedGate(run.runId, {}, { kind: 'clarification', createdAt: at(i) });
+    const buried = await seedGate(run.runId, { timeoutMs: 1 }, { createdAt: at(300) });
+    for (let i = 0; i < 150; i++) await seedGate(run.runId, {}, { kind: 'clarification', createdAt: at(301 + i) });
+    const newest = await seedGate(run.runId, { timeoutMs: 1 }, { createdAt: new Date(Date.now() - 1_000).toISOString() });
+
+    // The scenario is real: neither legacy window can see the buried gate.
+    expect((await storage.listOpenInterruptsAll(200)).map((i) => i.interruptId)).not.toContain(buried.interruptId);
+    expect((await storage.listOpenInterruptsAll(100, { newestFirst: true })).map((i) => i.interruptId)).not.toContain(buried.interruptId);
+
+    await sweepExpiredApprovalGates(storage);
+    expect((await storage.getInterrupt(newest.interruptId))?.resolvedAt, 'the newest due gate fires on the FIRST tick').toBeTruthy();
+
+    let ticks = 1;
+    while (!(await storage.getInterrupt(buried.interruptId))?.resolvedAt && ticks < 5) { await sweepExpiredApprovalGates(storage); ticks++; }
+    expect((await storage.getInterrupt(buried.interruptId))?.resolvedAt, `the buried gate was never reached in ${ticks} ticks`).toBeTruthy();
+    expect(ticks, 'every open interrupt is inspected within ⌈open / 200⌉ ticks').toBeLessThanOrEqual(3);
   });
 });

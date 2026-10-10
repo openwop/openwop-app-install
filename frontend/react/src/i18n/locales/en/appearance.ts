@@ -56,7 +56,7 @@ export const messages = {
   documentTitleLabel: 'Document title',
   logoHeading: 'Logo',
   logoUrlLabel: 'Logo / mark URL',
-  logoUrlHelp: 'An https URL, a /relative path, or a data:image URI. Upload arrives with Media (ADR 0007).',
+  logoUrlHelp: 'An https URL, a /relative path, or a data:image URI. Upload arrives with Media.',
   faviconLabel: 'Favicon URL',
   advancedSummary: 'Advanced — token override (JSON)',
   advancedHint: 'Export the current theme inputs, or paste a theme JSON to apply. Per-token overrides go under <1>override.light</1> / <3>override.dark</3> (allowlisted tokens only — others are dropped on save).',

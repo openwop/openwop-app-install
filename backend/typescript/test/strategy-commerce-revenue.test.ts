@@ -25,8 +25,8 @@ beforeAll(async () => {
 afterAll(async () => { await closeApp(); });
 
 const client = (): Client => makeClient(() => BASE);
-const S = '/v1/host/openwop-app/strategy';
-const c = (orgId: string, suffix = ''): string => `/v1/host/openwop-app/commerce/orgs/${encodeURIComponent(orgId)}${suffix}`;
+const S = '/host/openwop-app/strategy';
+const c = (orgId: string, suffix = ''): string => `/host/openwop-app/commerce/orgs/${encodeURIComponent(orgId)}${suffix}`;
 
 async function orderPaid(owner: Client, orgId: string, price: number, currency = 'USD'): Promise<string> {
   const p = await owner.post(c(orgId, '/products'), { type: 'digital', name: 'Guide', price, currency });
@@ -40,8 +40,8 @@ async function orderPaid(owner: Client, orgId: string, price: number, currency =
 async function setup(query?: string): Promise<{ owner: Client; orgId: string; tenantId: string }> {
   const tenantId = `org:pk-${Date.now()}-${n++}`;
   const owner = client();
-  expect((await owner.post('/v1/host/openwop-app/test/login', { email: uniqEmail('pk'), tenantId })).status).toBe(201);
-  const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'Shop' })).body.orgId;
+  expect((await owner.post('/host/openwop-app/test/login', { email: uniqEmail('pk'), tenantId })).status).toBe(201);
+  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Shop' })).body.orgId;
   const source = { kind: 'commerce-revenue', orgId, ...(query ? { query } : {}) };
   const s = (await owner.post(S, {
     orgId, title: 'Revenue plan', scope: 'org',

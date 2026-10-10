@@ -2,7 +2,7 @@
  * CFP-1 repair — the Workflow Architect's chat tools resolve and behave.
  *
  * The bug (CHAT-FIRST-PORT-AUDIT #1, docs/chat-first-port/b1-workflow-author.md):
- * the `feature.workflow-author.agents` pack allowlisted node typeIds that NO host
+ * the `vendor.openwop-app.workflow-author.agents` pack allowlisted node typeIds that NO host
  * registrant provided, so `compileAgentTools` silently dropped them and the
  * Architect ran in the ONE chat with zero tools. This asserts the four tools now
  * REGISTER into the builtin surface (so the allowlist resolves) and behave: the
@@ -19,6 +19,7 @@ import { readFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
+import { createMember, createOrg } from '../src/host/accessControlService.js';
 import { createAgentToolProvider, builtinAgentToolIds } from '../src/host/agentToolProvider.js';
 import { registerWorkflow } from '../src/host/workflowsRegistry.js';
 import { buildWorkflowAuthorSurface } from '../src/features/workflow-author/surface.js';
@@ -34,11 +35,21 @@ const TENANT = 'default';
 const USER = 'u-1';
 
 let server: http.Server;
+/** ADR 0822 D1 — every model write lane now carries the builder's
+ *  `workspace:write` authority, so the acting user here is an Editor. */
+async function grantEditor(tenantId: string, subject: string): Promise<void> {
+  await createOrg({ tenantId, orgId: tenantId, name: 'Root', createdBy: 'test' }).catch(() => undefined);
+  await createMember({ tenantId, orgId: tenantId, subject, displayName: subject, roles: ['editor'] });
+}
+
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { void (server.address() as AddressInfo); res(); }); });
+  await grantEditor(TENANT, USER);
+  await grantEditor('ws-owner-a', 'u-owner');
+  await grantEditor('ws-intruder-b', 'u-owner');
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
@@ -54,7 +65,7 @@ const noopWorkflow = (id: string) => ({
 });
 
 describe('CFP-1 — the agents pack allowlist resolves to the four registered tools', () => {
-  const packDir = new URL('../../../packs/feature.workflow-author.agents/', import.meta.url);
+  const packDir = new URL('../../../packs/vendor.openwop-app.workflow-author.agents/', import.meta.url);
   const manifest = JSON.parse(readFileSync(new URL('pack.json', packDir), 'utf8')) as {
     agents: { toolAllowlist: string[]; systemPromptRef: string }[];
   };
@@ -79,14 +90,42 @@ describe('CFP-1 — the agents pack allowlist resolves to the four registered to
   });
 });
 
-describe('CFP-1 — draft: the closed-world catalog read', () => {
-  it('returns the node catalog (nodes + excluded), no acting user needed (public menu)', async () => {
-    const out = await provider().executeTool({ name: WORKFLOW_AUTHOR_DRAFT_TOOL_ID, input: {} });
+describe('CFP-1 — draft: the closed-world catalog read, BY SEARCH (ADR 0791)', () => {
+  type Draft = { nodes: { typeId: string; configSchema?: unknown; inputSchema?: unknown }[]; matched: number; total: number; excluded: unknown[]; unknownTypeIds?: string[]; categories?: Record<string, number> };
+  const draft = async (input: Record<string, unknown>): Promise<{ parsed: Draft; bytes: number }> => {
+    const out = await provider().executeTool({ name: WORKFLOW_AUTHOR_DRAFT_TOOL_ID, input });
     expect(out.isError).toBeFalsy();
-    const parsed = JSON.parse(out.content) as { nodes: { typeId: string }[]; excluded: unknown[] };
-    expect(Array.isArray(parsed.nodes)).toBe(true);
-    expect(parsed.nodes.length).toBeGreaterThan(0);
-    expect(parsed.nodes.some((n) => n.typeId === 'core.noop')).toBe(true);
+    return { parsed: JSON.parse(out.content) as Draft, bytes: out.content.length };
+  };
+
+  it('an empty read returns what exists (category counts), not the whole catalog — no acting user needed', async () => {
+    const { parsed } = await draft({});
+    expect(parsed.nodes).toEqual([]);
+    expect(parsed.total).toBeGreaterThan(0);
+    expect(Object.values(parsed.categories ?? {}).reduce((a, b) => a + b, 0)).toBe(parsed.total);
+    expect(Array.isArray(parsed.excluded)).toBe(true);
+  });
+
+  it('a query returns the matching node types, each with its full schemas', async () => {
+    const { parsed } = await draft({ query: 'noop' });
+    const noop = parsed.nodes.find((n) => n.typeId === 'core.noop');
+    expect(noop, 'core.noop not found for "noop"').toBeDefined();
+    expect(parsed.nodes.length).toBeLessThanOrEqual(10);
+    expect(parsed.matched).toBeGreaterThanOrEqual(parsed.nodes.length);
+  });
+
+  it('typeIds fetch exact types and report the ones this catalog does not list', async () => {
+    const { parsed } = await draft({ typeIds: ['core.noop', 'core.not-a-real-type'] });
+    expect(parsed.nodes.map((n) => n.typeId)).toEqual(['core.noop']);
+    expect(parsed.unknownTypeIds).toEqual(['core.not-a-real-type']);
+  });
+
+  it('never returns the whole catalog: a broad query stays within the max-limit budget', async () => {
+    // The regression this guards: the whole catalog is ~232k tokens (~880 KB) —
+    // one read blew the managed tier's 50k daily cap (ADR 0773 G-10b).
+    const { parsed, bytes } = await draft({ query: 'core data flow integration trigger', limit: 1000 });
+    expect(parsed.nodes.length).toBeLessThanOrEqual(25);
+    expect(bytes, 'a search result approached the size of the whole catalog').toBeLessThan(200_000);
   });
 });
 

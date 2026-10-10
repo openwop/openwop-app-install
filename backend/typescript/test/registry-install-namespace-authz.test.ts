@@ -13,6 +13,12 @@
  * registry serves, so step 4 is the only thing separating publisher namespaces.
  *
  * No network: `globalThis.fetch` is stubbed and the installer already takes `registry`.
+ *
+ * Sabotage witnesses (wave 10): namespace check disabled → `refuses a key…` red; a
+ * missing key falling back to another entry → `a key absent…` red; prefix match
+ * without the dot → `dot boundary` red; the D3 re-hash disabled → `SECOND root
+ * pack.json` red; the namespace check's catch failing OPEN → `UNREACHABLE` red
+ * (only with legacy paths on — see that case).
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createHash, generateKeyPairSync, sign as edSign } from 'node:crypto';
@@ -29,6 +35,7 @@ const { publicKey, privateKey } = generateKeyPairSync('ed25519');
 const PUB_PEM = publicKey.export({ type: 'spki', format: 'pem' }).toString();
 
 let workdir: string;
+let tarSeq = 0;
 let packDir: string;
 const realFetch = globalThis.fetch;
 
@@ -36,7 +43,7 @@ const realFetch = globalThis.fetch;
 function tarball(files: Record<string, string>): Buffer {
   const src = mkdtempSync(join(workdir, 'src-'));
   for (const [name, body] of Object.entries(files)) writeFileSync(join(src, name), body);
-  const out = join(workdir, `t-${Math.random().toString(16).slice(2)}.tar`);
+  const out = join(workdir, `t-${++tarSeq}.tar`);
   const r = spawnSync('tar', ['-cf', out, '-C', src, ...Object.keys(files)]);
   expect(r.status, 'the fixture tar must build — otherwise every leg here is vacuous').toBe(0);
   return gzipSync(readFileSync(out));
@@ -64,13 +71,13 @@ function serve(opts: {
   const integrity = `sha256-${createHash('sha256').update(opts.tgz).digest('base64')}`;
   globalThis.fetch = (async (url: string | URL) => {
     const u = String(url);
-    const ok = (body: string | Uint8Array, type = 'application/json'): Response =>
-      new Response(body as unknown as string, { status: 200, headers: { 'content-type': type } });
+    const ok = (body: string | ArrayBuffer, type = 'application/json'): Response =>
+      new Response(body, { status: 200, headers: { 'content-type': type } });
     if (u.endsWith('.json') && u.includes('/v1/packs/')) {
       return ok(JSON.stringify({ name: opts.name, version: opts.version, integrity, signing: { method: 'ed25519', publicKeyRef: opts.keyId } }));
     }
-    if (u.endsWith('.tgz')) return ok(new Uint8Array(opts.tgz), 'application/gzip');
-    if (u.endsWith('.sig')) return ok(new Uint8Array(sig), 'application/octet-stream');
+    if (u.endsWith('.tgz')) return ok(new Uint8Array(opts.tgz).buffer, 'application/gzip');
+    if (u.endsWith('.sig')) return ok(new Uint8Array(sig).buffer, 'application/octet-stream');
     if (u.endsWith('/keys/' + opts.keyId + '.pub')) return ok(PUB_PEM, 'text/plain');
     if (u.endsWith('/.well-known/openwop-registry.json')) {
       if (opts.wellKnownStatus && opts.wellKnownStatus !== 200) return new Response('nope', { status: opts.wellKnownStatus });
@@ -142,8 +149,21 @@ describe('ADR 0660 D1 — the registry must AUTHORIZE the key for the pack names
 
     // The whole point: a check that degrades to "allow" when the network hiccups is
     // not a check — it is the original defect with a nondeterministic trigger.
-    await expect(install('acme.widgets')).rejects.toThrow(/pack_registry_unreachable/);
-    expect(existsSync(join(packDir, 'acme.widgets'))).toBe(false);
+    //
+    // Legacy constructed paths ON, deliberately: since ADR 0663 the installer
+    // resolves its endpoints through the SAME discovery document first, and with
+    // legacy paths off THAT upstream guard throws `pack_registry_unreachable` at
+    // the manifest step — the namespace check was never reached, so a fail-OPEN
+    // catch in it stayed green (wave-10 probe, measured vacuous). With legacy
+    // paths the manifest/tarball/sig/key fetches succeed against the stub, and the
+    // namespace check's own discovery read is the only thing left to refuse.
+    process.env.OPENWOP_REGISTRY_LEGACY_V1_PATHS = 'true';
+    try {
+      await expect(install('acme.widgets')).rejects.toThrow(/pack_registry_unreachable/);
+      expect(existsSync(join(packDir, 'acme.widgets'))).toBe(false);
+    } finally {
+      delete process.env.OPENWOP_REGISTRY_LEGACY_V1_PATHS;
+    }
   });
 
   it('a namespace prefix must respect the dot boundary (acme.* does not admit acmecorp.*)', async () => {
@@ -155,25 +175,60 @@ describe('ADR 0660 D1 — the registry must AUTHORIZE the key for the pack names
   });
 });
 
+/** A tarball with TWO root entries both named `pack.json`, in order: benign then
+ *  hostile. Returns the gzip bytes and the benign (signed) manifest. */
+function duplicatePackJsonTarball(version: string): { tgz: Buffer; benign: string } {
+  const benign = packJson('acme.widgets', version, 'acme-key');
+  const hostile = packJson('acme.widgets', version, 'acme-key').replace('"fixture"', '"HOSTILE"');
+  const src = mkdtempSync(join(workdir, 'dup-'));
+  mkdirSync(join(src, 'a')); mkdirSync(join(src, 'b'));
+  writeFileSync(join(src, 'a', 'pack.json'), benign);
+  writeFileSync(join(src, 'b', 'pack.json'), hostile);
+  writeFileSync(join(src, 'index.mjs'), 'export default {}');
+  const out = join(workdir, `dup-${++tarSeq}.tar`);
+  const r = spawnSync('tar', ['-cf', out, '-C', join(src, 'a'), 'pack.json', '-C', join(src, 'b'), 'pack.json', '-C', src, 'index.mjs']);
+  expect(r.status, 'the duplicate-entry fixture must build').toBe(0);
+  return { tgz: gzipSync(readFileSync(out)), benign };
+}
+
 describe('ADR 0660 D3 — verify one artifact, install another', () => {
   it('refuses a tarball whose SECOND root pack.json overwrites the one that was verified', async () => {
     // `extractPackJsonFromTarball` reads the FIRST entry; `tar -xzf` lets the LAST win on
     // disk. So signature + canonical-manifest gate both validate bytes that never land.
-    const benign = packJson('acme.widgets', '1.0.0', 'acme-key');
-    const hostile = packJson('acme.widgets', '1.0.0', 'acme-key').replace('"fixture"', '"HOSTILE"');
-    const src = mkdtempSync(join(workdir, 'dup-'));
-    mkdirSync(join(src, 'a')); mkdirSync(join(src, 'b'));
-    writeFileSync(join(src, 'a', 'pack.json'), benign);
-    writeFileSync(join(src, 'b', 'pack.json'), hostile);
-    writeFileSync(join(src, 'index.mjs'), 'export default {}');
-    const out = join(workdir, 'dup.tar');
-    // Two entries BOTH named `pack.json` at the root, in order: benign then hostile.
-    const r = spawnSync('tar', ['-cf', out, '-C', join(src, 'a'), 'pack.json', '-C', join(src, 'b'), 'pack.json', '-C', src, 'index.mjs']);
-    expect(r.status, 'the duplicate-entry fixture must build').toBe(0);
-    const tgz = gzipSync(readFileSync(out));
-
+    const { tgz, benign } = duplicatePackJsonTarball('1.0.0');
     serve({ name: 'acme.widgets', version: '1.0.0', keyId: 'acme-key', tgz, signedBytes: Buffer.from(benign) });
 
     await expect(install('acme.widgets')).rejects.toThrow(/pack_integrity_mismatch/);
+  });
+
+  /**
+   * BLOCKED-ON-PRODUCT (grade-tests wave 10, g3) — `it.fails` asserts the CORRECT
+   * behaviour and is EXPECTED to fail until the installer is fixed.
+   *
+   * Defect: in `packs/registryInstaller.ts` the D3 re-hash runs AFTER
+   * `rmSync(destDir)` + `mkdirSync(destDir)` + `copyAllowlistedFiles(packRoot, destDir)`,
+   * and the surrounding `finally` cleans only `stageDir`. So a REFUSED tarball
+   * (a) leaves its HOSTILE `pack.json` + an unmarked `index.mjs` at
+   * `<packDir>/<name>` — where `nodeCatalogBuilder` scans every dir holding a
+   * `pack.json` — and (b) has already destroyed the previously good install.
+   * Fix: stage → verify the re-hash → only then swap into `destDir` (or roll back).
+   * When this goes GREEN-as-failing (i.e. `it.fails` reports a failure), the
+   * product is fixed: flip it to `it`.
+   */
+  it.fails('BLOCKED-ON-PRODUCT: a refused duplicate-pack.json tarball leaves the prior install intact and lands nothing', async () => {
+    // A good prior install at 0.9.0 (a different version, so the idempotency
+    // marker does not short-circuit the second install).
+    const prior = packJson('acme.widgets', '0.9.0', 'acme-key');
+    serve({ name: 'acme.widgets', version: '0.9.0', keyId: 'acme-key', tgz: tarball({ 'pack.json': prior, 'index.mjs': 'export default {}' }), signedBytes: Buffer.from(prior) });
+    expect(await install('acme.widgets', '0.9.0')).toEqual({ installed: true });
+
+    const { tgz, benign } = duplicatePackJsonTarball('1.0.0');
+    serve({ name: 'acme.widgets', version: '1.0.0', keyId: 'acme-key', tgz, signedBytes: Buffer.from(benign) });
+    await expect(install('acme.widgets')).rejects.toThrow(/pack_integrity_mismatch/);
+
+    // The correct outcome: the refused bytes never land, and the prior install survives.
+    const onDisk = readFileSync(join(packDir, 'acme.widgets', 'pack.json'), 'utf-8');
+    expect(onDisk).not.toContain('HOSTILE');
+    expect(onDisk).toBe(prior);
   });
 });

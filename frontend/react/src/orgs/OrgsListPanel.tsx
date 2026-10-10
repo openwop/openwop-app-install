@@ -49,8 +49,10 @@ export function OrgsListPanel({
       <h2 className="u-fs-16">{t('orgsHeading')}</h2>
       <form onSubmit={onCreateOrg} className="action-bar u-mb-3">
         <input value={orgName} onChange={(e) => setOrgName(e.target.value)} placeholder={t('newOrgPlaceholder')} aria-label={t('newOrgAriaLabel')} />
-        <Button variant="primary" type="submit" disabled={!orgName.trim() || !can('host:org:manage')} title={can('host:org:manage') ? undefined : t('createOrgRequiresScope')}>{t('common:create')}</Button>
+        <Button variant="primary" type="submit" disabled={!orgName.trim() || !can('host:org:manage')} aria-describedby={can('host:org:manage') ? undefined : 'create-org-reason'}>{t('common:create')}</Button>
       </form>
+      {/* ADR 0815 D6 — the reason is visible, not a tooltip on a disabled button. */}
+      {can('host:org:manage') ? null : <p id="create-org-reason" className="members-muted u-mb-3">{t('createOrgRequiresScope')}</p>}
       {orgs.length === 0 ? (
         <StateCard icon={<BriefcaseIcon size={32} />} title={t('noOrgsTitle')} body={t('noOrgsBody')} />
       ) : (

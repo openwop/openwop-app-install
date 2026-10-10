@@ -24,13 +24,13 @@ export interface CredentialEntry {
   masked?: string;
 }
 
-export function CredentialCard({ entry: e, onDelete }: { entry: CredentialEntry; onDelete: (ref: string) => void }): JSX.Element {
+export function CredentialCard({ entry: e, onDelete }: { entry: CredentialEntry; onDelete?: (ref: string) => void }): JSX.Element {
   const { t } = useTranslation('byok');
   return (
     <div className="surface-card u-flex u-flex-col u-gap-2">
       <div className="u-flex u-items-start u-justify-between u-gap-2">
         <code className="keys-list-item-ref">{e.ref}</code>
-        <IconButton label={t('deleteRefLabel', { ref: e.ref })} icon={<TrashIcon size={15} />} onClick={() => onDelete(e.ref)} />
+        {onDelete ? <IconButton label={t('deleteRefLabel', { ref: e.ref })} icon={<TrashIcon size={15} />} onClick={() => onDelete(e.ref)} /> : null}
       </div>
       {e.masked ? (
         <span className="muted u-fs-12" title={t('maskedRenderingTitle')}>{e.masked}</span>
@@ -43,19 +43,20 @@ export function CredentialCard({ entry: e, onDelete }: { entry: CredentialEntry;
 
 /** Renders a provider's credentials as a card grid (Grid) or the sortable
  *  DataTable (List/Table) — the two views of the same rows, sharing the same
- *  ref/masked/delete shape so they never diverge. */
+ *  ref/masked/delete shape so they never diverge. No `onDelete` (ADR 0779 D7 —
+ *  the caller cannot manage keys here) renders no delete control at all. */
 export function CredentialList({ list, viewMode, caption, onDelete, empty }: {
   list: CredentialEntry[];
   viewMode: 'grid' | 'list';
   caption: string;
-  onDelete: (ref: string) => void;
+  onDelete?: (ref: string) => void;
   empty: ReactNode;
 }): JSX.Element {
   const { t } = useTranslation('byok');
   if (viewMode === 'grid') {
     return list.length === 0 ? <>{empty}</> : (
       <div className="card-grid">
-        {list.map((e) => <CredentialCard key={e.ref} entry={e} onDelete={onDelete} />)}
+        {list.map((e) => <CredentialCard key={e.ref} entry={e} {...(onDelete ? { onDelete } : {})} />)}
       </div>
     );
   }
@@ -65,10 +66,10 @@ export function CredentialList({ list, viewMode, caption, onDelete, empty }: {
       key: 'masked', header: t('maskedValueColumn'), cellClassName: 'muted',
       render: (e) => e.masked ? <span title={t('maskedRenderingTitle')}>{e.masked}</span> : <span className="muted">—</span>,
     },
-    {
-      key: 'actions', header: '', align: 'right', width: '64px',
-      render: (e) => <IconButton label={t('deleteRefLabel', { ref: e.ref })} icon={<TrashIcon size={15} />} onClick={() => onDelete(e.ref)} />,
-    },
+    ...(onDelete ? [{
+      key: 'actions', header: '', align: 'right' as const, width: '64px',
+      render: (e: CredentialEntry) => <IconButton label={t('deleteRefLabel', { ref: e.ref })} icon={<TrashIcon size={15} />} onClick={() => onDelete(e.ref)} />,
+    }] : []),
   ];
   return <DataTable columns={columns} rows={list} rowKey={(e) => e.ref} density="compact" caption={caption} initialSort={{ key: 'ref', dir: 'asc' }} empty={empty} />;
 }

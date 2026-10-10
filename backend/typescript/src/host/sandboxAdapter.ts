@@ -19,16 +19,21 @@
  * echoed in an error (§D-style scrub).
  */
 import { fetch as undiciFetch } from 'undici';
+import { resolveOne } from './featureToggles/service.js';
 import { isDeniedWebhookHost, webhookEgressDispatcher, webhookPrivateEgressAllowed } from './webhookEgressGuard.js';
 import { createLogger } from '../observability/logger.js';
 import { classifySandboxError, recordSandboxExecution, type SandboxRuntime } from '../observability/metricSeams.js';
 import type { SandboxExecRequest, SandboxExecResult } from '../executor/types.js';
 import { checkCodeExecBudget, recordCodeExec } from './codeExecBudget.js';
+import { meterPlatformUnits } from './managedCredits.js';
 import { runWasiSandboxedCode, wasiRuntimeEnabled, wasiAllowedLanguages } from './wasiSandbox.js';
 import { runE2bSandboxedCode } from './sandboxAdapters/e2bAdapter.js';
 import { recordAuthorityAction } from './authorityContext.js';
 
 const log = createLogger('host.sandbox');
+
+/** The code-exec feature's toggle id (`features/code-exec/feature.ts`). */
+const CODE_EXEC_TOGGLE = 'code-exec';
 
 export const MAX_CODE_BYTES = 200_000;
 export const MAX_STDIN_BYTES = 200_000; // CXE-5: cap stdin like code (was forwarded uncapped)
@@ -234,6 +239,17 @@ export function createSandboxRunner(tenantId?: string): ((req: SandboxExecReques
   // ADR 0114 Phase 5 — gate each run on the tenant's daily exec budget; record on
   // success. Over budget ⇒ `resource_exhausted` (no execution, no charge).
   return async (req: SandboxExecRequest): Promise<SandboxExecResult> => {
+    // ADR 0820 §8.2 — the `code-exec` ACCESS gate (toggle + plan; the feature is sold
+    // in the Developer bundle). Here, in the one runner both lanes share (the
+    // executor's `ctx.runSandboxedCode` and the chat code tool), so no lane can skip
+    // it. Checked per execution, not when the runner is built, so a plan change
+    // lands on the next call. Fail-closed: an unreadable answer refuses, and a
+    // refusal neither executes nor counts against the budget.
+    const access = await resolveOne(CODE_EXEC_TOGGLE, { tenantId }).catch(() => null);
+    if (access?.enabled !== true) {
+      log.info('code_exec_feature_refused', { tenantId, blockedBy: access?.blockedBy ?? 'off' });
+      throw Object.assign(new Error('code execution is not enabled for this workspace.'), { code: 'feature_disabled' });
+    }
     const day = new Date().toISOString().slice(0, 10);
     const budget = await checkCodeExecBudget(tenantId, day);
     if (!budget.allowed) {
@@ -246,8 +262,13 @@ export function createSandboxRunner(tenantId?: string): ((req: SandboxExecReques
       recordSandboxExecution(resolved.runtime, 'resource_exhausted');
       throw Object.assign(new Error(`code execution daily budget reached (${budget.used}/${budget.max}).`), { code: 'resource_exhausted' });
     }
+    const startedAt = Date.now();
     const result = await exec(req);
     await recordCodeExec(tenantId, day);
+    // ADR 0821 D3 — every runtime here is platform-paid (E2B / Code-API on the
+    // operator's key, WASI on the host's CPU): meter whole seconds beside the
+    // daily exec budget (no draw while `codeExecSecond` has no rate).
+    await meterPlatformUnits({ tenantId, unit: 'codeExecSecond', quantity: Math.max(1, Math.ceil((Date.now() - startedAt) / 1000)), featureId: 'code-exec' });
     return result;
   };
 }

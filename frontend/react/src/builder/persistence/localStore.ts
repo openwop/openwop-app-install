@@ -6,6 +6,7 @@
 
 import type { SavedWorkflow } from '../schema/workflow.js';
 import i18n from '../../i18n/index.js';
+import { blankWorkflowId, dupWorkflowId } from './workflowId.js';
 import {
   STORAGE_KEYS, getStorageSubject, readRaw, scopedSpec, writeScoped,
   type ScopedEnvelope,
@@ -154,8 +155,14 @@ export function deleteSavedWorkflow(id: string): void {
   writeIndex(idx);
 }
 
+/** ADR 0794 — a builder workflow's id comes from the one mint. */
 export function newWorkflowId(): string {
-  return `wf_${crypto.randomUUID().slice(0, 8)}`;
+  return blankWorkflowId();
+}
+
+/** The id for a duplicate of one of the user's own workflows. */
+export function duplicateWorkflowId(): string {
+  return dupWorkflowId();
 }
 
 export function renameSavedWorkflow(id: string, name: string): void {
@@ -173,7 +180,7 @@ export function duplicateSavedWorkflow(id: string): SavedWorkflow | undefined {
   const now = new Date().toISOString();
   const copy: SavedWorkflow = {
     ...src,
-    id: newWorkflowId(),
+    id: duplicateWorkflowId(),
     name: i18n.t('builder:workflowNameSuffixCopy', { name: src.name }),
     createdAt: now,
     updatedAt: now,

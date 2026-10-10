@@ -13,10 +13,11 @@
 import type { BackendFeature } from '../types.js';
 import { registerDocumentsRoutes } from './routes.js';
 import { registerArtifactRoutes } from './artifactRoutes.js';
-import { buildDocumentsSurface } from './surface.js';
+import { buildDocumentsSurface, DOCUMENTS_SURFACE_POLICY } from './surface.js';
 import { setLaunchStudioDocumentResolver } from '../../host/launchStudioSurface.js';
 import { onCanvasDeleted } from '../../host/canvasLifecycle.js';
-import { getDocumentByIdForTenant, clearPromotedCanvasRefs } from './documentsService.js';
+import { getDocumentByIdForTenant, clearPromotedCanvasRefs, listDocumentsOwnedBy, deleteDocument } from './documentsService.js';
+import { registerSubjectDependent } from '../../host/subjectDependents.js';
 import { registerDocumentsAgentTools } from './agentTools.js';
 import { registerDocumentsErasure } from './erasure.js';
 
@@ -32,6 +33,21 @@ export const documentsFeature: BackendFeature = {
     // module side effect) so it is greppable from the feature definition and a
     // test can assert it was wired, not merely that the handler exists.
     registerDocumentsErasure();
+    // ADR 0839 D2 — a document OWNED by a project goes with the project, through the
+    // one full delete (versions, rendered bytes, share links, retention hold). Its read
+    // gate asks the project, so once the project is gone the document is unreachable to
+    // everyone. Matched inside the tenant on the exact owner Subject, deleted with the
+    // row's own org.
+    registerSubjectDependent('project', 'documents', {
+      count: async (tenantId, subject) => (await listDocumentsOwnedBy(tenantId, subject)).length,
+      purge: async (tenantId, subject) => {
+        let n = 0;
+        for (const d of await listDocumentsOwnedBy(tenantId, subject)) {
+          if (await deleteDocument(tenantId, d.orgId, d.documentId)) n += 1;
+        }
+        return n;
+      },
+    });
     // ADR 0069 — the chat artifact workbench: a type-neutral read/diff projection
     // over the SAME documents data (no second store), gated on this toggle.
     registerArtifactRoutes(deps);
@@ -50,7 +66,8 @@ export const documentsFeature: BackendFeature = {
       await clearPromotedCanvasRefs(tenantId, canvasId);
     });
   },
-  surface: { id: 'documents', build: buildDocumentsSurface },
+  // ADR 0838 D3 — writers at the HTTP doors' write tier (`DOCWF2-3`).
+  surface: { id: 'documents', build: buildDocumentsSurface, orgPolicy: DOCUMENTS_SURFACE_POLICY },
   toggleDefault: {
     id: 'documents',
     label: 'Documents & Templates',
@@ -61,7 +78,7 @@ export const documentsFeature: BackendFeature = {
     salt: 'documents',
   },
   requiredPacks: [
-    { name: 'feature.documents.nodes', version: '1.3.1' }, // 1.3.1 = review F3: prose corrected — resume/replay converges, a :fork deliberately mints its own document (1.3.0 = WF-DOC-1/-4: deterministic generate ids; generate-from-template + render declared role:"side-effect"; 1.2.0 = ADR 0400 export formats)
-    { name: 'feature.documents.agents', version: '1.0.2' },
+    { name: 'feature.documents.nodes', version: '1.3.3' }, // 1.3.3 = ADR 0838 DOCWF2-6: generate-from-template prose no longer claims a :fork converges; 1.3.1 = review F3: prose corrected — resume/replay converges, a :fork deliberately mints its own document (1.3.0 = WF-DOC-1/-4: deterministic generate ids; generate-from-template + render declared role:"side-effect"; 1.2.0 = ADR 0400 export formats)
+    { name: 'vendor.openwop-app.documents.agents', version: '1.1.0' }, // 1.1.0 = ADR 0838 D5: document-author allowlists openwop:documents.revise
   ],
 };

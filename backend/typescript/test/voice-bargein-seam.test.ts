@@ -26,20 +26,15 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-const APP_PATH = '/v1/host/openwop-app/voice/barge-in';
-const SAMPLE_PATH = '/v1/host/sample/voice/barge-in';
+const APP_PATH = '/host/openwop-app/voice/barge-in';
+const SAMPLE_PATH = '/host/sample/voice/barge-in';
 const post = (path: string, body: unknown) => fetch(`${BASE}${path}`, { method: 'POST', headers: H, body: JSON.stringify(body) });
 
 type Ev = { type: string; payload: Record<string, unknown> };
 
 describe('RFC 0106 §D/§F — barge-in lifecycle (ADR 0109 P4)', () => {
-  it('advertises realtimeVoice.turnDetection === "semantic" + bargeIn === "supported"', async () => {
-    const doc = await (await fetch(`${BASE}/.well-known/openwop`, { headers: H })).json() as {
-      aiProviders?: { realtimeVoice?: { turnDetection?: unknown; bargeIn?: unknown } };
-    };
-    expect(doc.aiProviders?.realtimeVoice?.turnDetection).toBe('semantic');
-    expect(doc.aiProviders?.realtimeVoice?.bargeIn).toBe('supported');
-  });
+  // ADR 0812 P3c-0 — the v1-document advert leg (`realtimeVoice.turnDetection` / `bargeIn`)
+  // was deleted: v2's `realtimeVoice` seat is unfilled here (whd7-v2-projection-parity KNOWN_UNPROJECTED).
 
   it('is mounted under BOTH path prefixes', async () => {
     for (const p of [APP_PATH, SAMPLE_PATH]) {

@@ -92,7 +92,7 @@ describe('routes (superadmin, HTTP)', () => {
   let server: http.Server;
   let BASE: string;
   let storage: Storage;
-  const PATH = '/v1/host/openwop-app/runtime-posture';
+  const PATH = '/host/openwop-app/runtime-posture';
   const admin = { authorization: 'Bearer dev-token', 'content-type': 'application/json' };
   const realFetch = globalThis.fetch;
 
@@ -169,7 +169,7 @@ describe('routes (superadmin, HTTP)', () => {
 describe('ADR 0742 defect 2 — the 403 hint names only doors this deployment HAS', () => {
   // MEASURED on rev 00737-vkq by a peer session: the old hint offered "the admin
   // bearer key". OPENWOP_ADMIN_TOKEN bypasses session auth only under
-  // /v1/host/openwop-app/admin, so it 401s here, and every configured key is
+  // /host/openwop-app/admin, so it 401s here, and every configured key is
   // tenant-scoped (ADR 0561), so each 403s. The allowlist was the only real door.
   const keys = process.env.OPENWOP_API_KEYS;
   const single = process.env.OPENWOP_API_KEY;

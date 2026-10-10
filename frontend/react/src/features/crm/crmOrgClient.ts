@@ -44,6 +44,9 @@ export interface Deal {
   owner?: string;
   closeDate?: string;
   status?: DealStatus;
+  /** ADR 0837 D8 — the earliest open task on the deal; `null` = none scheduled.
+   *  Absent only on a response from an older backend. */
+  nextTask?: { taskId: string; title: string; dueDate: string | null } | null;
 }
 export const ACTIVITY_KINDS = ['note', 'call', 'email', 'meeting'] as const;
 export type ActivityKind = (typeof ACTIVITY_KINDS)[number];

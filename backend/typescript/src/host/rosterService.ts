@@ -30,8 +30,11 @@
  * @see src/host/kanbanService.ts — the board surface a roster member owns
  */
 
+import { randomUUID } from 'node:crypto';
 import { OpenwopError } from '../types.js';
 import { DurableCollection } from './hostExtPersistence.js';
+import { onWorkflowForked } from './workflowsRegistry.js';
+import { casRepoint, repointList } from './forkRepoint.js';
 
 /** The manifest/deployment a roster member instantiates (a trimmed
  *  AgentRef — RFC 0002). `version` XOR `channel` per RFC 0082 §A. */
@@ -162,6 +165,25 @@ export function autonomyOf(entry: RosterEntry): 'auto' | 'guided' | 'review' {
 const rosterKey = (tenantId: string, rosterId: string): string => `${tenantId}:${rosterId}`;
 const roster = new DurableCollection<RosterEntry>('roster', (e) => rosterKey(e.tenantId, e.rosterId));
 
+/**
+ * EVID-5 (heartbeat half; the schedule daemon's change-token pattern) — a one-row "roster changed"
+ * token, so the heartbeat daemon can skip re-listing every tenant's roster on
+ * each 30 s tick when nothing changed. Every successful roster write sets the
+ * row FIRST and the token SECOND; the daemon reads the token FIRST and lists
+ * SECOND, so a reader that sees an old token can only re-list late (bounded by
+ * its backstop), never miss a change it already observed.
+ */
+interface RosterVersion { id: string; token: string }
+const rosterVersion = new DurableCollection<RosterVersion>('roster-version', (v) => v.id);
+const ROSTER_VERSION_ID = 'v';
+async function bumpRosterVersion(): Promise<void> {
+  await rosterVersion.put({ id: ROSTER_VERSION_ID, token: randomUUID() });
+}
+/** The current roster-change token, or null before the first write. */
+export async function readRosterVersion(): Promise<string | null> {
+  return (await rosterVersion.get(ROSTER_VERSION_ID))?.token ?? null;
+}
+
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -223,6 +245,7 @@ export async function createRosterEntry(input: {
   if (!(await roster.compareAndSwap(null, entry))) {
     throw new OpenwopError('conflict', `A roster member for persona "${input.persona}" already exists.`, 409, { rosterId });
   }
+  await bumpRosterVersion();
   return entry;
 }
 
@@ -313,6 +336,7 @@ export async function updateRosterEntry(
   }
   entry.updatedAt = nowIso();
   await roster.put(entry);
+  await bumpRosterVersion();
   return entry;
 }
 
@@ -325,15 +349,34 @@ export async function recordHeartbeat(tenantId: string, rosterId: string): Promi
   if (!entry) return null;
   entry.lastHeartbeatAt = nowIso();
   await roster.put(entry);
+  await bumpRosterVersion();
   return entry;
 }
 
 export async function deleteRosterEntry(tenantId: string, rosterId: string): Promise<boolean> {
   // ADR 0379 P2 — the tenant-qualified key IS the scope (no read needed).
-  return roster.delete(rosterKey(tenantId, rosterId));
+  const deleted = await roster.delete(rosterKey(tenantId, rosterId));
+  if (deleted) await bumpRosterVersion();
+  return deleted;
 }
 
 /** Test-only: drop all roster entries. */
 export async function __resetRosterStore(): Promise<void> {
   await roster.__clear();
+  await rosterVersion.__clear();
 }
+
+// ADR 0789 — a roster member's standing portfolio follows this tenant's fork of a
+// shared workflow (the member owns "the workflow", which is now the tenant's copy).
+onWorkflowForked('roster', async (tenantId, from, to) => {
+  let n = 0;
+  for (const e of await roster.listByPrefix(`${tenantId}:`)) {
+    if (e.tenantId !== tenantId || !e.workflows.includes(from)) continue;
+    if (await casRepoint(roster, rosterKey(e.tenantId, e.rosterId), (r) => {
+      const next = repointList(r.workflows, from, to);
+      return next ? { ...r, workflows: next, updatedAt: nowIso() } : null;
+    })) n += 1;
+  }
+  if (n > 0) await bumpRosterVersion();
+  return n;
+});

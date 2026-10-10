@@ -19,15 +19,18 @@
  */
 
 import type { Request } from 'express';
-import { resolve } from 'node:path';
 import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
-import { authorizeOrgScope, requireFeatureEnabled, requireString, optionalString } from '../featureRoute.js';
+import { authorizeOrgScope, requireFeatureEnabled, requireString, optionalString, requireTenantWrite, callerHoldsTenantScope } from '../featureRoute.js';
 import { resolveListingPricing } from './listingPricingHook.js';
-import { requireSuperadmin } from '../../host/superadmin.js';
+import { requireSuperadmin, isSuperadmin } from '../../host/superadmin.js';
 import { resolveCallerUser } from '../users/usersGuards.js';
 import { resolveEffectiveAccess } from '../../host/accessControlService.js';
-import { installPackFromRegistry, resolveDefaultPackDir, isSafePackName } from '../../packs/registryInstaller.js';
+import { resolveDefaultPackDir, isSafePackName } from '../../packs/registryInstaller.js';
+import { assertInstallable, installFromConfiguredRegistry, translateInstallError, PACK_SEMVER_RE } from '../../packs/installLane.js';
+import { listPackRevocations, revokePack, unrevokePack, REVOKE_ALL_VERSIONS } from '../../host/packRevocations.js';
+import { BACKEND_FEATURES } from '../index.js';
+import { callerSubject } from '../../host/requestSubject.js';
 import { createLogger } from '../../observability/logger.js';
 import { listListings, getListing } from './listingService.js';
 import { listReviews, ratingSummary, upsertReview, deleteReview } from './reviewService.js';
@@ -43,32 +46,9 @@ import { certifyConnectionPack } from './certService.js';
 
 const log = createLogger('features.marketplace');
 
-/**
- * Translate the registry-installer's low-level failures (raw `Error`s, by design)
- * into clear, actionable canonical errors. Without this a pack that simply isn't
- * published to the registry (a 404 manifest fetch) surfaces as a bare 500
- * "unexpected error" — the operator can't tell a missing pack from a real fault.
- */
-export function translateInstallError(err: unknown, packName: string, version: string): OpenwopError {
-  if (err instanceof OpenwopError) return err;
-  const msg = err instanceof Error ? err.message : String(err);
-  const details = { packName, version };
-  if (/^manifest_fetch_failed \(404\)/.test(msg)) {
-    return new OpenwopError(
-      'not_found',
-      `"${packName}@${version}" isn't published to the pack registry, so it can't be installed. A first-party pack vendored in the image must also be published to packs.openwop.dev before it is installable.`,
-      404,
-      details,
-    );
-  }
-  if (/^(manifest|tarball|signature)_fetch_failed/.test(msg)) {
-    return new OpenwopError('runner_unavailable', `The pack registry is unavailable right now — couldn't install "${packName}". Try again shortly.`, 502, details);
-  }
-  if (/(integrity_mismatch|signature_invalid|signature_unverifiable|unsupported_integrity)/.test(msg)) {
-    return new OpenwopError('validation_error', `"${packName}" failed signature or integrity verification and was not installed.`, 422, details);
-  }
-  return new OpenwopError('runner_unavailable', `Couldn't install "${packName}": ${msg}`, 502, details);
-}
+/** ADR 0826 D4 — moved to the ONE install lane (`packs/installLane.ts`); re-exported
+ *  so its existing callers and test keep their import. */
+export { translateInstallError };
 
 /** Validate a `:packName` param for a filesystem-touching route (ADR 0194 review
  *  hardening): a non-empty, path-safe pack name. Defense-in-depth so the purge
@@ -122,13 +102,37 @@ function packTypeIds(packDir: string): PackManifestRead {
   }
 }
 const FEATURE = { toggleId: 'marketplace', label: 'Marketplace' };
-const BASE = '/v1/host/openwop-app/marketplace';
+
+/** Feature ids whose `requiredPacks` pin `packName` at ANY version — what a
+ *  revocation of it takes down (ADR 0826 /architect A6). */
+function featuresRequiring(packName: string): string[] {
+  return BACKEND_FEATURES.filter((f) => (f.requiredPacks ?? []).some((r) => r.name === packName)).map((f) => f.id).sort();
+}
+const BASE = '/host/openwop-app/marketplace';
 const ORG = `${BASE}/orgs/:orgId`;
 type Scope = 'workspace:read' | 'workspace:write';
+
+/**
+ * ADR 0826 D1 — what THIS caller may do, computed by the same predicates the
+ * write routes enforce (`requireTenantWrite` / `requireSuperadmin`), so the UI
+ * never offers a control the server refuses.
+ */
+async function viewerCapabilities(req: Request): Promise<{ canCurate: boolean; canAdminister: boolean }> {
+  return {
+    canCurate: await callerHoldsTenantScope(req, tenantOf(req), 'workspace:write'),
+    canAdminister: isSuperadmin(req),
+  };
+}
 
 export function registerMarketplaceRoutes(deps: RouteDeps): void {
   const { app } = deps;
   const authz = (req: Request, scope: Scope) => authorizeOrgScope(req, FEATURE, scope);
+  /** ADR 0826 D5 — revocations land in the durable audit log. Best-effort: the
+   *  revocation has already taken effect, so an audit-store failure is logged,
+   *  never turned into a 500 that reads as "not revoked". */
+  const auditRevocation = (action: string, by: string, packName: string, version: string, payload: Record<string, unknown>): Promise<void> =>
+    deps.storage.appendAudit({ timestamp: new Date().toISOString(), principalId: by, action, resource: `pack:${packName}@${version}`, outcome: 'success', payload })
+      .catch((err: unknown) => log.error('marketplace_revocation_audit_failed', { packName, version, error: err instanceof Error ? err.message : String(err) }));
 
   // ── Phase 1: browse listings (toggle + authenticated caller) ──
   // Listings are a host-GLOBAL projection (installed pack set is process-global),
@@ -146,6 +150,7 @@ export function registerMarketplaceRoutes(deps: RouteDeps): void {
         // MKT2-M1 — additive: a failed pricing enrichment is DISCLOSED, so the
         // client can say "pricing unavailable" instead of rendering paid as free.
         ...(degraded ? { pricingDegraded: true } : {}),
+        viewer: await viewerCapabilities(req),
       });
     } catch (err) { next(err); }
   });
@@ -175,8 +180,9 @@ export function registerMarketplaceRoutes(deps: RouteDeps): void {
   });
 
   // ── ADR 0194 Phase 3: per-tenant pack enablement (availability curation) ──
-  // Workspace-scoped self-service, the BYOK-keys trust class: any authenticated
-  // member curates their OWN workspace's authoring availability. Tenant id comes
+  // Workspace-scoped curation: reading is any member; WRITING is `workspace:write`
+  // in the active tenant (ADR 0826 D1 — a Viewer in a shared `ws:` workspace used
+  // to get 200 and disable a pack for everyone). Tenant id comes
   // ONLY from the request (never the body) — IDOR-clean by construction. Toggles
   // + RBAC stay the behavior authority; this hides packs from AUTHORING surfaces
   // (palette, new registration, AI author) — runs/replay never consult it.
@@ -185,7 +191,7 @@ export function registerMarketplaceRoutes(deps: RouteDeps): void {
       await requireFeatureEnabled(req, FEATURE.toggleId, FEATURE.label);
       await resolveCallerUser(req);
       const disabled = await disabledPacks(tenantOf(req));
-      res.json({ disabled: [...disabled].sort() });
+      res.json({ disabled: [...disabled].sort(), viewer: await viewerCapabilities(req) });
     } catch (err) { next(err); }
   });
 
@@ -193,6 +199,7 @@ export function registerMarketplaceRoutes(deps: RouteDeps): void {
     try {
       await requireFeatureEnabled(req, FEATURE.toggleId, FEATURE.label);
       const user = await resolveCallerUser(req);
+      await requireTenantWrite(req);
       const packName = safePackName(req.params.packName);
       if (!getListing(packName)) {
         throw new OpenwopError('not_found', 'No such pack.', 404, { packName });
@@ -309,6 +316,64 @@ export function registerMarketplaceRoutes(deps: RouteDeps): void {
     } catch (err) { next(err); }
   });
 
+  // ── ADR 0826 D5: pack REVOCATION — the kill switch (SUPERADMIN, NOT toggle-gated) ──
+  // ADR 0555 built the store and its enforcement; nothing could WRITE to it. A
+  // revocation stops a version executing on every instance within one refresh
+  // tick (`startPackRevocationRefresh`), refuses its (re)install, and breaks
+  // replay of runs that used it — deliberately (ADR 0555). Deliberately NOT
+  // behind the `marketplace` toggle: the ADR 0575 operator-remediation class — a
+  // kill switch must not vanish because a feature (or an incident) turned it off.
+  // Distinct from tombstone (removal from authoring; still runs).
+  app.get(`${BASE}/revocations`, async (req, res, next) => {
+    try {
+      requireSuperadmin(req, 'Pack revocations');
+      const rows = await listPackRevocations();
+      res.json({ revocations: rows.sort((a, b) => b.revokedAt.localeCompare(a.revokedAt)) });
+    } catch (err) { next(err); }
+  });
+
+  app.post(`${BASE}/packs/:packName/revocations`, async (req, res, next) => {
+    try {
+      requireSuperadmin(req, 'Pack revocation');
+      const packName = safePackName(req.params.packName);
+      const body = (req.body ?? {}) as { version?: unknown; reason?: unknown };
+      const version = typeof body.version === 'string' ? body.version : '';
+      if (version !== REVOKE_ALL_VERSIONS && !PACK_SEMVER_RE.test(version)) {
+        throw new OpenwopError('validation_error', '`version` must be a SemVer string, or "*" for every version.', 400, { field: 'version' });
+      }
+      const reason = typeof body.reason === 'string' ? body.reason.trim() : '';
+      if (reason.length === 0 || reason.length > 500) {
+        throw new OpenwopError('validation_error', 'A reason (1–500 characters) is required — it is what the next operator reads.', 400, { field: 'reason' });
+      }
+      const by = callerSubject(req) ?? 'superadmin';
+      const row = await revokePack({ packName, version, by, reason });
+      // /architect A6 — the blast radius, stated: the features that pin this pack
+      // stop working. Not refused (a compromised core pack must be killable).
+      const requiredBy = featuresRequiring(packName);
+      log.warn('marketplace_pack_revoked', { packName, version, by, reason, requiredBy });
+      // A security action outlives its log line: the durable audit log (ADR 0028).
+      await auditRevocation('marketplace.pack.revoked', by, packName, version, { reason, requiredBy });
+      res.status(201).json({ revocation: row, requiredBy });
+    } catch (err) { next(err); }
+  });
+
+  app.delete(`${BASE}/packs/:packName/revocations/:version`, async (req, res, next) => {
+    try {
+      requireSuperadmin(req, 'Pack revocation');
+      const packName = safePackName(req.params.packName);
+      const version = String(req.params.version);
+      if (version !== REVOKE_ALL_VERSIONS && !PACK_SEMVER_RE.test(version)) {
+        throw new OpenwopError('validation_error', '`version` must be a SemVer string, or "*".', 400, { field: 'version' });
+      }
+      const existed = await unrevokePack(packName, version);
+      if (!existed) throw new OpenwopError('not_found', 'No such revocation.', 404, { packName, version });
+      const by = callerSubject(req) ?? 'superadmin';
+      log.warn('marketplace_pack_unrevoked', { packName, version, by });
+      await auditRevocation('marketplace.pack.unrevoked', by, packName, version, {});
+      res.status(204).end();
+    } catch (err) { next(err); }
+  });
+
   // ── Phase 2: install (toggle + SUPERADMIN; delegates to registryInstaller) ──
   // Install mutates PROCESS-GLOBAL pack state — a privileged, host:*-scoped action
   // (ADR §"Privileged install, fail-closed"), not a plain org member. Signed-only:
@@ -317,30 +382,16 @@ export function registerMarketplaceRoutes(deps: RouteDeps): void {
     try {
       await requireFeatureEnabled(req, FEATURE.toggleId, FEATURE.label);
       requireSuperadmin(req, 'Marketplace install');
-      // ADR 0194 P4: a removed (tombstoned) pack must be restored explicitly
-      // before it can be installed again — install never silently un-removes.
-      {
-        const name = (req.body as { packName?: unknown } | undefined)?.packName;
-        if (typeof name === 'string' && isTombstoned(name)) {
-          throw new OpenwopError('conflict', 'Pack is removed from this host. Restore it first.', 409, { packName: name });
-        }
-      }
+      // ADR 0826 D4 — the ONE install lane: path-safe name, SemVer version,
+      // tombstone (restore first — install never silently un-removes, ADR 0194 P4),
+      // revoked version; then the configured registry with every failure mapped.
       const body = (req.body ?? {}) as { packName?: unknown; version?: unknown };
-      const packName = safePackName(body.packName); // install writes join(packDir, name) — keep it path-safe
-      const version = requireString(body.version, 'version');
-
-      const packDir = resolveDefaultPackDir();
-      const registry = process.env.OPENWOP_REGISTRY_URL;
-      const trustedKeysDir = resolve('../../../registry/keys');
+      const { name: packName, version } = assertInstallable({ name: body.packName, version: body.version });
       let result;
       try {
-        result = await installPackFromRegistry(
-          { name: packName, version },
-          { packDir, ...(registry ? { registry } : {}), trustedKeysDir },
-        );
-      } catch (installErr) {
-        const mapped = translateInstallError(installErr, packName, version);
-        log.warn('marketplace_install_failed', { packName, version, code: mapped.code, reason: installErr instanceof Error ? installErr.message : String(installErr) });
+        result = await installFromConfiguredRegistry({ name: packName, version });
+      } catch (mapped) {
+        log.warn('marketplace_install_failed', { packName, version, code: mapped instanceof OpenwopError ? mapped.code : 'unknown' });
         throw mapped;
       }
       log.info('marketplace_install_completed', { packName, version, installed: result.installed });

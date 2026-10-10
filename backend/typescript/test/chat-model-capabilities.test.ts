@@ -19,7 +19,7 @@ afterAll(async () => { await new Promise<void>((res) => server.close(() => res()
 
 describe('GET /chat/model-capabilities', () => {
   it('projects per-provider capabilities', async () => {
-    const res = await fetch(`${BASE}/v1/host/openwop-app/chat/model-capabilities`, { headers: { authorization: 'Bearer dev-token' } });
+    const res = await fetch(`${BASE}/host/openwop-app/chat/model-capabilities`, { headers: { authorization: 'Bearer dev-token' } });
     expect(res.status).toBe(200);
     const body = await res.json() as { providers: Array<{ provider: string; capabilities: string[] }> };
     expect(Array.isArray(body.providers)).toBe(true);

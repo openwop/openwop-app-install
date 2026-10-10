@@ -57,23 +57,23 @@ async function loginTo(tenantId: string, who: string): Promise<Client> {
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
     return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
   };
-  const r = await call('POST', '/v1/host/openwop-app/test/login', { email: `${who}-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await call('POST', '/host/openwop-app/test/login', { email: `${who}-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return { cookie, userId: r.body.user.userId, get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b) };
 }
 
 async function mintTicket(cookie: string, canvasId: string): Promise<{ status: number; ticket?: string }> {
-  const res = await fetch(`${BASE}/v1/host/openwop-app/canvas-collab/${encodeURIComponent(canvasId)}/ticket`, { method: 'POST', headers: { cookie } });
+  const res = await fetch(`${BASE}/host/openwop-app/canvas-collab/${encodeURIComponent(canvasId)}/ticket`, { method: 'POST', headers: { cookie } });
   if (!res.ok) return { status: res.status };
   return { status: res.status, ticket: ((await res.json()) as { ticket: string }).ticket };
 }
 async function claimSeed(cookie: string, canvasId: string): Promise<number> {
-  const res = await fetch(`${BASE}/v1/host/openwop-app/canvas-collab/${encodeURIComponent(canvasId)}/claim-seed`, { method: 'POST', headers: { cookie } });
+  const res = await fetch(`${BASE}/host/openwop-app/canvas-collab/${encodeURIComponent(canvasId)}/claim-seed`, { method: 'POST', headers: { cookie } });
   return res.status;
 }
 function connect(canvasId: string, headers: Record<string, string>, query = ''): Promise<{ open: boolean; status?: number }> {
   return new Promise((resolve) => {
-    const ws = new WebSocket(`${WSBASE}/v1/host/openwop-app/canvas-collab/${encodeURIComponent(canvasId)}${query}`, { headers });
+    const ws = new WebSocket(`${WSBASE}/host/openwop-app/canvas-collab/${encodeURIComponent(canvasId)}${query}`, { headers });
     const done = (r: { open: boolean; status?: number }) => { try { ws.terminate(); } catch { /* ignore */ } resolve(r); };
     ws.on('open', () => done({ open: true }));
     ws.on('unexpected-response', (_req, res) => done({ open: false, status: res.statusCode }));
@@ -81,14 +81,14 @@ function connect(canvasId: string, headers: Record<string, string>, query = ''):
   });
 }
 
-const P = '/v1/host/openwop-app/projects';
+const P = '/host/openwop-app/projects';
 
 /** Owner A (a project member of a PRIVATE project) + a project-owned canvas.document,
  *  in a tenant shared with a non-member B. */
 async function privateProjectCanvas() {
   const tenantId = `org:slc1-${Date.now()}-${n++}`;
   const a = await loginTo(tenantId, 'owner');
-  const orgId = (await a.post('/v1/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
+  const orgId = (await a.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
   const projectId = (await a.post(P, { orgId, name: 'Secret' })).body.id;
   expect((await a.patch(`${P}/${projectId}/visibility`, { visibility: 'private' })).body.visibility).toBe('private');
   const canvas = await createCanvasForTenant(tenantId, {

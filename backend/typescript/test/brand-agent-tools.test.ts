@@ -1,5 +1,5 @@
 /**
- * CFP-1 — the Brand Steward's chat tools (feature.brand.agents). Before this the
+ * CFP-1 — the Brand Steward's chat tools (vendor.openwop-app.brand.agents). Before this the
  * pack allowlisted raw `feature.brand.nodes.*` typeIds that project into NO
  * conversational tool, so the Steward resolved zero tools. These tests boot the
  * REAL app (the ADR 0308 registration seam) and assert the three read tools
@@ -53,7 +53,7 @@ describe('CFP-1 — brand agent tools register + resolve', () => {
   });
 
   it('the pack allowlist is exactly the three registered tool ids', () => {
-    const packDir = new URL('../../../packs/feature.brand.agents/', import.meta.url);
+    const packDir = new URL('../../../packs/vendor.openwop-app.brand.agents/', import.meta.url);
     const manifest = JSON.parse(readFileSync(new URL('pack.json', packDir), 'utf8')) as { agents: { toolAllowlist: string[] }[] };
     expect([...manifest.agents[0]!.toolAllowlist].sort()).toEqual([...ALL_IDS].sort());
     // Every allowlist entry is offerable at dispatch (the CFP-1 tripwire, locally).

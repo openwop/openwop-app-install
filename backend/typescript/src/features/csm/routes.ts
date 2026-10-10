@@ -27,7 +27,7 @@
 import type { Request } from 'express';
 import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
-import { resolveOne } from '../../host/featureToggles/service.js';
+import { resolveToggle } from '../../host/featureToggles/service.js';
 import type { ToggleSubject } from '../../host/featureToggles/types.js';
 import { checkEntitlement } from '../../host/entitlementSeam.js';
 import type { Scope } from '../../host/accessControlService.js';
@@ -52,7 +52,8 @@ function subjectOf(req: Request): ToggleSubject {
  * the same "off ⇒ indistinguishable from absent" property the feature already had.
  */
 async function requireEnabled(req: Request, scope: Scope): Promise<void> {
-  const assignment = await resolveOne(TOGGLE_ID, subjectOf(req));
+  // ADR 0819 §1 opt-out — this route applies the plan itself (`checkEntitlement`) to keep its distinct 403.
+  const assignment = await resolveToggle(TOGGLE_ID, subjectOf(req));
   if (!assignment || !assignment.enabled) {
     throw new OpenwopError('not_found', 'CSM is not enabled for this tenant.', 404, { feature: TOGGLE_ID });
   }
@@ -145,7 +146,7 @@ function parseCrmRef(value: unknown): CrmRef | null | undefined {
 export function registerCsmRoutes(deps: RouteDeps): void {
   const { app } = deps;
 
-  app.get('/v1/host/openwop-app/csm/accounts', async (req, res, next) => {
+  app.get('/host/openwop-app/csm/accounts', async (req, res, next) => {
     try {
       await requireEnabled(req, 'workspace:read');
       res.json({ accounts: await listAccounts(tenantOf(req)) });
@@ -154,7 +155,7 @@ export function registerCsmRoutes(deps: RouteDeps): void {
     }
   });
 
-  app.post('/v1/host/openwop-app/csm/accounts', async (req, res, next) => {
+  app.post('/host/openwop-app/csm/accounts', async (req, res, next) => {
     try {
       await requireEnabled(req, 'workspace:write');
       const body = (req.body ?? {}) as { name?: unknown; healthScore?: unknown; crmRef?: unknown; renewalDate?: unknown; arr?: unknown; arrCurrency?: unknown; owner?: unknown };
@@ -181,7 +182,7 @@ export function registerCsmRoutes(deps: RouteDeps): void {
     }
   });
 
-  app.patch('/v1/host/openwop-app/csm/accounts/:id', async (req, res, next) => {
+  app.patch('/host/openwop-app/csm/accounts/:id', async (req, res, next) => {
     try {
       await requireEnabled(req, 'workspace:write');
       const existing = await getAccount(req.params.id);
@@ -223,7 +224,7 @@ export function registerCsmRoutes(deps: RouteDeps): void {
     }
   });
 
-  app.delete('/v1/host/openwop-app/csm/accounts/:id', async (req, res, next) => {
+  app.delete('/host/openwop-app/csm/accounts/:id', async (req, res, next) => {
     try {
       await requireEnabled(req, 'workspace:write');
       const existing = await getAccount(req.params.id);

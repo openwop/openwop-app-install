@@ -6,6 +6,11 @@
  *    clears the tombstone so the next public opt-in lands;
  *  - the public capture never mints a token on an empty body (400) and answers 429 once
  *    the per-org budget is spent.
+ *
+ * Sabotage-witnessed (/grade-tests wave 9): dropping the admin check on DELETE or on
+ * readmit, the attestation floor, the `not_erased` reason, readmit's delete, the
+ * empty-body refusal, the budget and its Retry-After each red their case. Every case
+ * seeds its own subject, so the file passes alone and shuffled.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -17,7 +22,7 @@ import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { signSession, COOKIE_TTL_SECONDS } from '../src/middleware/cookieSession.js';
 import { createWorkspace, createMember } from '../src/host/accessControlService.js';
 import { upsertFromPrincipal } from '../src/features/users/usersService.js';
-import { recordConsent, isErasureTombstoned, getConsent } from '../src/features/consent/consentService.js';
+import { recordConsent, mergeConsentCategories, isErasureTombstoned, getConsent } from '../src/features/consent/consentService.js';
 import { __resetOrgCaptureBudgetForTests } from '../src/features/consent/routes.js';
 
 let BASE = '';
@@ -35,15 +40,20 @@ const seat = async (principalId: string, roles: string[]): Promise<string> => {
   await createMember({ tenantId: ws, orgId: ws, subject: user.userId, displayName: principalId, roles });
   return craftCookie(user.userId, ws, `ws:home-${principalId}`);
 };
-const call = async (method: string, path: string, cookie: string | null, body?: unknown): Promise<{ status: number; body: any; headers: Headers }> => {
+/** Every response this file reads, at the shape the routes send. */
+interface Body {
+  error?: string; ok?: boolean; consentRecord?: boolean; subjectToken?: string;
+  readmitted?: boolean; tombstonesCleared?: number; reason?: string; subjectKey?: string;
+}
+const call = async (method: string, path: string, cookie: string | null, body?: unknown): Promise<{ status: number; body: Body; headers: Headers }> => {
   const res = await fetch(`${BASE}${path}`, {
     method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
   });
   const text = await res.text();
-  return { status: res.status, body: text ? JSON.parse(text) : null, headers: res.headers };
+  return { status: res.status, body: (text ? JSON.parse(text) : {}) as Body, headers: res.headers };
 };
-const ORG = () => `/v1/host/openwop-app/consent/orgs/${ws}`;
-const PUB = () => `/v1/host/openwop-app/public-consent/${ws}`;
+const ORG = () => `/host/openwop-app/consent/orgs/${ws}`;
+const PUB = () => `/host/openwop-app/public-consent/${ws}`;
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -72,33 +82,45 @@ describe('D6 — ONE authority for both erase doors', () => {
     expect(re.body.error).toBe('forbidden_scope');
   });
   it('an ADMIN erases (200) and the receipt is honest; a second erase is a repeat, not a flip', async () => {
-    const del = await call('DELETE', `${ORG()}/subjects/victim`, adminCookie);
+    // Self-seeded (wave 9): this case used to erase the record the EDITOR case wrote,
+    // so it failed alone or reordered.
+    await recordConsent({ tenantId: ws, subjectKey: 'victim-admin', categories: { marketing: true }, source: 'test' });
+    const del = await call('DELETE', `${ORG()}/subjects/victim-admin`, adminCookie);
     expect(del.status).toBe(200);
     expect(del.body.ok).toBe(true);
     expect(del.body.consentRecord).toBe(true);
-    expect(await isErasureTombstoned(ws, 'victim')).toBe(true);
-    const again = await call('DELETE', `${ORG()}/subjects/victim`, adminCookie);
+    expect(await isErasureTombstoned(ws, 'victim-admin')).toBe(true);
+    const again = await call('DELETE', `${ORG()}/subjects/victim-admin`, adminCookie);
     expect(again.status).toBe(200);
+    expect(again.body.ok, 'a repeat is still a clean erasure').toBe(true);
     expect(again.body.consentRecord).toBe(false);
+    expect(await isErasureTombstoned(ws, 'victim-admin'), 'the repeat never lifts the tombstone').toBe(true);
   });
 });
 
 describe('D7 — the readmit door', () => {
   it('short attestation ⇒ 400; not erased ⇒ 200 informational; erased ⇒ cleared, and the next public opt-in LANDS', async () => {
-    const short = await call('POST', `${ORG()}/subjects/victim/readmit`, adminCookie, { attestation: 'too short' });
+    // Self-seeded (wave 9): erase this case's own subject through the admin door.
+    await recordConsent({ tenantId: ws, subjectKey: 'victim-readmit', categories: { marketing: true }, source: 'test' });
+    expect((await call('DELETE', `${ORG()}/subjects/victim-readmit`, adminCookie)).status).toBe(200);
+    const short = await call('POST', `${ORG()}/subjects/victim-readmit/readmit`, adminCookie, { attestation: 'too short' });
     expect(short.status).toBe(400);
     expect(short.body.error).toBe('validation_error');
-    expect(await isErasureTombstoned(ws, 'victim'), 'a refused readmit clears nothing').toBe(true);
+    expect(await isErasureTombstoned(ws, 'victim-readmit'), 'a refused readmit clears nothing').toBe(true);
 
     const none = await call('POST', `${ORG()}/subjects/never-erased/readmit`, adminCookie, { attestation: 'This person was never erased; probing the door.' });
     expect(none.status).toBe(200);
     expect(none.body).toMatchObject({ ok: true, readmitted: false, tombstonesCleared: 0, reason: 'not_erased' });
 
-    const ok = await call('POST', `${ORG()}/subjects/victim/readmit`, adminCookie, { attestation: 'The subject emailed support asking to hear from us again.' });
+    const ok = await call('POST', `${ORG()}/subjects/victim-readmit/readmit`, adminCookie, { attestation: 'The subject emailed support asking to hear from us again.' });
     expect(ok.status).toBe(200);
-    expect(ok.body).toMatchObject({ ok: true, readmitted: true, tombstonesCleared: 1, subjectKey: 'victim' });
-    expect(await isErasureTombstoned(ws, 'victim')).toBe(false);
-    expect(await getConsent(ws, 'victim'), 'readmit granted nothing').toBeNull();
+    expect(ok.body).toMatchObject({ ok: true, readmitted: true, tombstonesCleared: 1, subjectKey: 'victim-readmit' });
+    expect(await isErasureTombstoned(ws, 'victim-readmit')).toBe(false);
+    expect(await getConsent(ws, 'victim-readmit'), 'readmit granted nothing').toBeNull();
+    // …and the title's last clause: the subject's next affirmative opt-in now LANDS
+    // (before the readmit the D10 barrier refused it).
+    await mergeConsentCategories({ tenantId: ws, subjectKey: 'victim-readmit', categories: { marketing: true }, source: 'public:test' });
+    expect((await getConsent(ws, 'victim-readmit'))?.categories.marketing).toBe(true);
   });
 });
 
@@ -123,7 +145,7 @@ describe('D4 — the public capture', () => {
       const third = await call('POST', PUB(), null, { categories: { marketing: true } });
       expect(third.status).toBe(429);
       expect(third.headers.get('retry-after')).toBe('60');
-      expect((await call('POST', `/v1/host/openwop-app/public-consent/ws:does-not-exist`, null, { categories: { marketing: true } })).status).toBe(404);
+      expect((await call('POST', `/host/openwop-app/public-consent/ws:does-not-exist`, null, { categories: { marketing: true } })).status).toBe(404);
     } finally {
       delete process.env.OPENWOP_CONSENT_CAPTURE_ORG_REQS_PER_MIN;
       __resetOrgCaptureBudgetForTests();

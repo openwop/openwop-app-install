@@ -12,11 +12,13 @@
  *
  * Both origins are asserted in every case. A fixture carrying only `local`
  * would pass against a component hard-coded to say "Bundled".
+ *
+ * Sabotage-witnessed (/grade-tests wave 10): dropping the `local` arm of the
+ * status chip, or `l.origin === 'local'` from Install's `disabled`, reds case 1;
+ * disabling Install everywhere reds case 2; relabelling the installed chip reds case 3.
  */
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
-
-vi.mock('../marketplaceClient.js', () => ({}));
 
 import { ListingCard } from '../MarketplaceViews.js';
 import type { Listing } from '../marketplaceClient.js';
@@ -77,7 +79,10 @@ describe('MKT2-B2 — a bundled pack is not described as missing', () => {
 
   it('an INSTALLED registry pack is unchanged by any of this', () => {
     show({ ...base, packName: 'vendor.example.pack', origin: 'registry', installed: true });
-    expect(screen.getAllByText(/installed/i).length).toBeGreaterThan(0);
+    // The chip AND the (disabled) Install button both read "Installed" — counting
+    // both keeps the chip honest; a bare /installed/i matched the button alone.
+    expect(screen.getAllByText(/^Installed$/)).toHaveLength(2);
+    expect((screen.getByRole('button', { name: /^installed$/i }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.queryByText(/not installed/i)).toBeNull();
     expect(screen.queryByText(/^Bundled$/)).toBeNull();
   });

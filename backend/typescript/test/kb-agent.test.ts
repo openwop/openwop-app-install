@@ -1,5 +1,5 @@
 /**
- * feature.kb.agents — a feature-bound manifest agent (ADR 0014 Phase 3). Proves
+ * vendor.openwop-app.kb.agents — a feature-bound manifest agent (ADR 0014 Phase 3). Proves
  * the KB feature ships an agent that the host loads at boot (RFC 0003 agents[]),
  * tool-allowlisted to the feature's own workflow nodes (ctx.features.kb via
  * feature.kb.nodes). The first agent bound to a feature surface.
@@ -20,9 +20,9 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-describe('feature.kb.agents.researcher', () => {
+describe('vendor.openwop-app.kb.agents.researcher', () => {
   it('is loaded into the agent registry at boot', async () => {
-    const agent = await getAgentRegistry().resolve('feature.kb.agents.researcher');
+    const agent = await getAgentRegistry().resolve('vendor.openwop-app.kb.agents.researcher');
     expect(agent).not.toBeNull();
     expect(agent!.persona).toBe('RESEARCH');
     expect(agent!.modelClass).toBe('research');
@@ -31,8 +31,8 @@ describe('feature.kb.agents.researcher', () => {
   });
 
   it('is tool-allowlisted to the KB search + core RAG retriever tools', async () => {
-    const agent = await getAgentRegistry().resolve('feature.kb.agents.researcher');
-    const allow = (agent!.toolAllowlist ?? []) as string[];
+    const agent = await getAgentRegistry().resolve('vendor.openwop-app.kb.agents.researcher');
+    const allow = agent!.toolAllowlist ?? [];
     // CFP-1: the dead `feature.kb.nodes.*` node typeIds (no provider projected
     // them) are replaced by the REAL registered agent tools — the KB
     // knowledge-base search plus the two core RAG retrievers the researcher

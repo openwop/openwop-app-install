@@ -32,8 +32,8 @@ import { setLessonMedia } from '../src/features/kicktodo-creator/lessonAssembly.
 let BASE: string;
 let server: http.Server;
 
-const CB = '/v1/host/openwop-app/kicktodo/creator';
-const KB = '/v1/host/openwop-app/kicktodo';
+const CB = '/host/openwop-app/kicktodo/creator';
+const KB = '/host/openwop-app/kicktodo';
 const TENANT = 'tenant-kt-honesty';
 
 function client() {
@@ -67,7 +67,7 @@ function client() {
       // (`ensurePersonalWorkspace` seeds the owner row idempotently — the same
       // call the seam makes for a tenant's FIRST login.)
       await ensurePersonalWorkspace({ tenantId, ownerSubject: userIdFor(tenantId, subject), name: `Test workspace ${tenantId}` });
-      const res = await send('POST', '/v1/host/openwop-app/test/login', { subject, tenantId });
+      const res = await send('POST', '/host/openwop-app/test/login', { subject, tenantId });
       expect([200, 201]).toContain(res.status);
     },
   };

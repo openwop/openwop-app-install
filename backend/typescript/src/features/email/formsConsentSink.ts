@@ -11,23 +11,43 @@
  * Unchecked/absent is a silent skip, NEVER an opt-out. No marker returned.
  */
 
-import { resolveOne } from '../../host/featureToggles/service.js';
+import { resolveToggle } from '../../host/featureToggles/service.js';
 import { createLogger } from '../../observability/logger.js';
 import { registerSubmissionSink } from '../forms/submissionSinks.js';
-import { mergeConsentCategories, isErasureTombstoned } from '../consent/consentService.js';
+import { mergeConsentCategories, isErasureTombstoned, getConsent } from '../consent/consentService.js';
+import type { FormDef, Submission } from '../forms/formsService.js';
 
 const log = createLogger('email.formsConsentSink');
+
+/**
+ * ADR 0850 D2 — the opt-in this submission's tick speaks to, as the visitor saw
+ * it. The capture-time snapshot governs; a row written before the snapshot
+ * existed falls back to the live form ONLY at capture (when the live form IS what
+ * the visitor saw), and records nothing on a later release. A REQUIRED opt-in is
+ * never consent: it was a condition of submitting (GDPR Art. 7(4)).
+ */
+function optInOf(form: FormDef, submission: Submission): { field: string; required: boolean } | null {
+  if (submission.optIn) return submission.optIn;
+  if (submission.releasedAt || !form.emailOptInField) return null;
+  const f = form.fields.find((x) => x.key === form.emailOptInField);
+  return f ? { field: f.key, required: f.required } : null;
+}
 
 /** Register the `email-consent` sink. Called once from email's boot path. */
 export function registerEmailFormsConsentSink(): void {
   registerSubmissionSink({
     id: 'email-consent',
     async onSubmission(form, submission) {
-      const field = form.emailOptInField;
-      if (!field || submission.values[field] !== true) return undefined; // explicit grants only
+      const optIn = optInOf(form, submission);
+      if (!optIn || submission.values[optIn.field] !== true) return undefined; // explicit grants only
+      if (optIn.required) {
+        log.info('forms_consent_skipped_required', { formId: form.formId });
+        return undefined;
+      }
       if (!submission.contactId) return undefined; // no linked contact ⇒ no consent subject
       try {
-        const toggle = await resolveOne('email', { tenantId: submission.tenantId });
+        // ADR 0819 §1 opt-out — a PUBLIC lane (tenant from the resource): ADR 0419 never paywalls a shopper/visitor on the operator's plan.
+        const toggle = await resolveToggle('email', { tenantId: submission.tenantId });
         if (!toggle || !toggle.enabled) return undefined;
         // ADR 0655 D7 (EMWF-11 / review S4) — an ERASED subject's checkbox on a public form
         // is not fresh consent (the same rule as the D3 preference page). Checked FIRST:
@@ -35,6 +55,15 @@ export function registerEmailFormsConsentSink(): void {
         // tombstone is consulted only on the no-record branch. Skip + log, never write.
         if (await isErasureTombstoned(submission.tenantId, submission.contactId)) {
           log.info('forms_consent_skipped_erased', { formId: form.formId });
+          return undefined;
+        }
+        // ADR 0850 D2 — no re-grant over a later change. A record written after the
+        // tick (an unsubscribe, a preference-centre change) is newer evidence of what
+        // this person wants; a tick replayed later — a released held row — must not
+        // overwrite it.
+        const current = await getConsent(submission.tenantId, submission.contactId);
+        if (current && current.ts > submission.createdAt) {
+          log.info('forms_consent_skipped_newer_record', { formId: form.formId });
           return undefined;
         }
         // CONS-3 — MERGE the two categories this checkbox actually speaks to.
@@ -50,9 +79,15 @@ export function registerEmailFormsConsentSink(): void {
         await mergeConsentCategories({
           tenantId: submission.tenantId,
           subjectKey: submission.contactId,
-          categories: { marketing: true, 'marketing.email': true },
+          // ADR 0849 D7 (architect H5) — an EMAIL checkbox grants EMAIL. It also used to
+          // set the `marketing` umbrella, and `isAllowed` falls back to the umbrella for
+          // any channel without a recorded specific — so ticking it opened SMS, push and
+          // ad-audience targeting too. The specific alone governs email.
+          categories: { 'marketing.email': true },
           legalBasis: 'consent',
-          source: `form-optin:${form.formId}`,
+          // ADR 0850 D2 — the receipt names the submission: its `createdAt` and its
+          // `optIn` snapshot are the time and the wording of the tick.
+          source: `form-optin:${form.formId}:${submission.submissionId}`,
         });
       } catch (err) {
         // Fail-soft by seam contract — a consent hiccup never fails the capture.

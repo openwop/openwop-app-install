@@ -1,8 +1,11 @@
 /**
  * Conversation export + import (ADR 0119, backlog B9). Read-only transcript
  * rendering (markdown/JSON) over the existing chat store — no new transcript store.
- * Phase 2 ships the export route over the Phase-1 renderer. A `chat-export` toggle,
- * off by default, per tenant.
+ * Phase 2 ships the export route over the Phase-1 renderer.
+ *
+ * ALWAYS-ON (ADR 0820 §8.6 / core-audit M8 correction): the `chat-export` toggle this header
+ * used to describe was removed when the feature graduated (ADR 0134 / 2026-06-24);
+ * there is no per-tenant switch. Gating is RBAC and visibility only.
  *
  * @see docs/adr/0119-conversation-export-import.md
  */

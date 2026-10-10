@@ -7,8 +7,15 @@
  * answered `true` for an erased subject, and a record out-ranked a tombstone; (D7)
  * readmit did not exist — `clearErasureTombstone` fired only from consent writes;
  * (D10) a write on a tombstoned subject landed and CLEARED the tombstone.
+ *
+ * Sabotage-witnessed (/grade-tests wave 9): every leg reds under its own probe
+ * (eraser tombstone/delete/rowsTouched/group id, repeat reason + erasedAt, tombstone
+ * precedence, the empty-key skip, readmit group/attestation, both folds, the D10
+ * belt). CEILING: the D10 ENTRY barrier is a double guard with the post-write
+ * re-check — removing either alone still rejects `subject_erased`; the belt is the
+ * leg the D10 case witnesses.
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import { DurableCollection, initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
@@ -23,7 +30,7 @@ import { consentFeature } from '../src/features/consent/feature.js';
 import { registerConsentErasure, consentSubjectEraser } from '../src/features/consent/erasure.js';
 import {
   recordConsent, mergeConsentCategories, getConsent, isAllowed, deleteSubject, readmitSubject, setPolicy,
-  isErasureTombstoned, tombstoneKeyForms, __resetConsentStore,
+  isErasureTombstoned, tombstoneKeyForms, writeErasureTombstone, getErasureStatus, __resetConsentStore,
 } from '../src/features/consent/consentService.js';
 
 interface RawRecord { tenantId: string; subjectKey: string; categories: Record<string, boolean>; source: string; ts: string }
@@ -57,7 +64,7 @@ describe('D1 — every resolved key is deleted AND tombstoned, from both doors',
     const out = await deleteSubject(T, 'alice@x.test');
     expect(out.consentRecord).toBe(true);
     expect(out.erasure.failed).toBe(0);
-    expect(out.erasure.keysResolved).toBeGreaterThanOrEqual(1);
+    expect(out.erasure.keysResolved, 'the requested email + the resolved contact').toBe(2);
     expect(await getConsent(T, 'crm:c123'), 'the RESOLVED key\'s record is gone').toBeNull();
     expect(await isErasureTombstoned(T, 'crm:c123'), 'and tombstoned').toBe(true);
     expect(await isAllowed(T, 'crm:c123', 'marketing'), 'so the audience lane cannot read a stale grant').toBe(false);
@@ -84,18 +91,30 @@ describe('D1 — every resolved key is deleted AND tombstoned, from both doors',
 
   it('idempotent: a second DSAR deletes nothing, keeps the original erasedAt, and records a REPEAT (never flips the first receipt)', async () => {
     await recordConsent({ tenantId: T, subjectKey: 'twice', categories: { marketing: true }, source: 'test' });
-    const first = await deleteSubject(T, 'twice');
-    expect(first.consentRecord).toBe(true);
-    const second = await deleteSubject(T, 'twice');
-    expect(second.consentRecord).toBe(false);
-    expect(second.erasure.failed).toBe(0);
-    type P = { reason?: string; repeat?: boolean; priorErasedAt?: string }; // `detail` is SPREAD into the payload
-    const rows = (await listGovernanceDecisions(T, { kind: 'retention' })).map((d) => d.payload as P).filter((p) => (p.reason ?? '').startsWith('erasure'));
-    expect(rows.map((p) => p.reason)).toContain('erasure_repeat_no_data_found');
-    expect(rows.some((p) => p.reason === 'erasure_complete' || p.reason === 'erasure_no_data_found'), 'the first receipt stands').toBe(true);
-    const repeat = rows.find((p) => p.reason === 'erasure_repeat_no_data_found')!;
-    expect(repeat.repeat).toBe(true);
-    expect(typeof repeat.priorErasedAt).toBe('string');
+    // A fixed, then advanced, clock: the two DSARs must be distinguishable in time, or
+    // "keeps the ORIGINAL erasedAt" could not fail.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2026-03-01T10:00:00.000Z'));
+      const first = await deleteSubject(T, 'twice');
+      expect(first.consentRecord).toBe(true);
+      const firstErasedAt = (await getErasureStatus(T, 'twice'))!.erasedAt;
+      expect(firstErasedAt).toBe('2026-03-01T10:00:00.000Z');
+      vi.setSystemTime(new Date('2026-03-01T11:00:00.000Z'));
+      const second = await deleteSubject(T, 'twice');
+      expect(second.consentRecord).toBe(false);
+      expect(second.erasure.failed).toBe(0);
+      expect((await getErasureStatus(T, 'twice'))!.erasedAt, 'the repeat never re-stamps the tombstone').toBe(firstErasedAt);
+      type P = { reason?: string; repeat?: boolean; priorErasedAt?: string }; // `detail` is SPREAD into the payload
+      const rows = (await listGovernanceDecisions(T, { kind: 'retention' })).map((d) => d.payload as P).filter((p) => (p.reason ?? '').startsWith('erasure'));
+      expect(rows.map((p) => p.reason)).toContain('erasure_repeat_no_data_found');
+      expect(rows.some((p) => p.reason === 'erasure_complete' || p.reason === 'erasure_no_data_found'), 'the first receipt stands').toBe(true);
+      const repeat = rows.find((p) => p.reason === 'erasure_repeat_no_data_found')!;
+      expect(repeat.repeat).toBe(true);
+      expect(repeat.priorErasedAt, 'the repeat cites the FIRST erasure').toBe(firstErasedAt);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -115,6 +134,10 @@ describe('D2 — the tombstone out-ranks the toggle AND any record', () => {
     expect(await isAllowed(T, 'ghost', 'marketing')).toBe(false);
   });
   it('an empty key is never tombstoned and never reads the store', async () => {
+    // A stray tombstone for `''` (any writer that ever erased an empty key) must not
+    // deny the analytics beacon's `''` subject: the empty key skips the tombstone read.
+    // Without the planted row this case could not fail (nothing tombstones `''`).
+    await writeErasureTombstone(T, '');
     await toggle(false);
     expect(await isAllowed(T, '', 'analytics')).toBe(true);
   });

@@ -19,6 +19,9 @@ let base: string;
 let provider: Server;
 let providerUrl: string;
 let seenKeys: string[] = [];
+/** Drop the connection, unanswered, on this many arrivals — suite 2.42.5's receiver
+ *  (`lib/effect-receiver.ts` `failFirst`) cuts the FIRST attempt this way. */
+let cutNext = 0;
 
 const AUTH = { Authorization: 'Bearer dev-token', 'Content-Type': 'application/json' };
 
@@ -30,6 +33,7 @@ beforeAll(async () => {
   provider = await new Promise<Server>((r) => {
     const s = http.createServer((req, res) => {
       seenKeys.push(String(req.headers['idempotency-key'] ?? ''));
+      if (cutNext > 0) { cutNext -= 1; req.socket.destroy(); return; }
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end('{"ok":true}');
     });
@@ -94,8 +98,31 @@ describe('forceEffectTransportRetry presents ONE identity across BOTH transport 
     ).toContain(effectId);
     // The ledger is the suite's cross-retry witness: it must SHOW both attempts of
     // the one effect (suite 2.41.0 `v2-effect-identity-business-key` retry leg).
-    const rows = (body.effects as Array<{ effectId: string; attempt?: number }>).filter((e) => e.effectId === effectId);
+    const rows = (body.effects as Array<{ effectId: string; attempt?: number; providerKey?: string }>).filter((e) => e.effectId === effectId);
     expect(rows.map((r) => r.attempt).sort(), 'one ledger row per transport attempt').toEqual([1, 2]);
+    // Suite 2.42.5: every attempt row MUST record the key it presented, and that
+    // key MUST be the one the provider received — a ledger that disagrees with the
+    // wire is not a witness.
+    for (const r of rows) {
+      expect(r.providerKey, `attempt ${String(r.attempt)} must report the key it presented`).toBe(seenKeys[0]);
+    }
+  });
+
+  it('a first attempt whose connection is CUT is retried under the SAME key, and the ledger reports the wire key', async () => {
+    // Suite 2.42.5 (RFC 0173 retry leg) records the Idempotency-Key and then
+    // destroys the first connection — a genuine transport failure, not a status.
+    cutNext = 1;
+    const { status, json } = await drive({ providerUrl });
+    expect(status, `seam answered ${status}: ${JSON.stringify(json)}`).toBe(201);
+    expect(seenKeys.length, 'the cut attempt and its retry both reach the provider').toBe(2);
+    expect(new Set(seenKeys).size, 'one effect, one key on the wire — even across a transport failure').toBe(1);
+
+    const proj = await fetch(`${base}/runs/${encodeURIComponent(String(json?.runId))}/effects`, {
+      headers: { ...AUTH, 'OpenWOP-Version': '2' },
+    });
+    const body = await proj.json() as { effects: Array<{ effectId: string; providerKey?: string }> };
+    const keys = body.effects.filter((e) => e.effectId === json?.effectId).map((e) => e.providerKey);
+    expect(keys, 'both attempt rows report the key the provider actually saw').toEqual([seenKeys[0], seenKeys[0]]);
   });
 
   it('a malformed providerUrl is a typed 400, never a success with no effect', async () => {

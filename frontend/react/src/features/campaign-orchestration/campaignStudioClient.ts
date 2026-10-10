@@ -19,6 +19,8 @@ export interface MarketingCampaign {
   brandId?: string; personaIds: string[]; kbCollectionId?: string; channels: string[];
   kernel?: MessagingKernel; status: CampaignStatus; version?: number; createdBy: string; createdAt: string; updatedAt: string;
   budget?: CampaignBudget; parentCampaignId?: string;
+  /** ADR 0852 D1 — the linked project (single-campaign reads only). */
+  projectId?: string;
 }
 /** One row of the adapter's fork-stable ad dispatch ledger (campaign gap plan §5B B5). */
 export interface AdDispatch {
@@ -57,6 +59,14 @@ export async function finalizeBrief(briefId: string): Promise<MarketingCampaign>
 export async function updateCampaign(id: string, patch: { name?: string; status?: CampaignStatus }): Promise<MarketingCampaign> {
   return (await asJson<{ campaign: MarketingCampaign }>(await fetch(`${base}/campaigns/${encodeURIComponent(id)}`, fetchOpts({ method: 'PATCH', headers: jsonHeaders(), body: JSON.stringify(patch) })), 'updateCampaign')).campaign;
 }
+/** ADR 0852 — one campaign, with its linked `projectId` when it has one. */
+export async function getCampaign(id: string): Promise<MarketingCampaign> {
+  return (await asJson<{ campaign: MarketingCampaign }>(await fetch(`${base}/campaigns/${encodeURIComponent(id)}`, fetchOpts({ headers: authedHeaders() })), 'getCampaign')).campaign;
+}
+/** ADR 0852 D1 — create-or-return the campaign's linked project (needs write). */
+export async function ensureCampaignProject(id: string): Promise<string> {
+  return (await asJson<{ projectId: string }>(await fetch(`${base}/campaigns/${encodeURIComponent(id)}/project`, fetchOpts({ method: 'POST', headers: jsonHeaders() })), 'ensureCampaignProject')).projectId;
+}
 export async function deleteCampaign(id: string): Promise<void> {
   await asJson<{ deleted: boolean }>(await fetch(`${base}/campaigns/${encodeURIComponent(id)}`, fetchOpts({ method: 'DELETE', headers: authedHeaders() })), 'deleteCampaign');
 }
@@ -76,4 +86,4 @@ export async function listOrgs(): Promise<OrgRef[]> {
 
 export const CAMPAIGN_STATUSES: ReadonlyArray<CampaignStatus> = ['draft', 'active', 'paused', 'completed', 'archived'];
 /** The Campaign Strategist agent the chat deep-link scopes to (ADR 0058). */
-export const CAMPAIGN_STRATEGIST_AGENT = 'feature.campaign-orchestration.agents.campaign-strategist';
+export const CAMPAIGN_STRATEGIST_AGENT = 'vendor.openwop-app.campaign-orchestration.agents.campaign-strategist';

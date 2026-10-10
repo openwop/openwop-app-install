@@ -43,7 +43,7 @@ export const analyticsFeature: BackendFeature = {
     // at all (counts only) and the reporting page adapts.
     id: 'analytics-visitor-identity',
     label: 'Analytics visitor identity (cookieless)',
-    description: 'ADR 0569 — daily uniques via a daily-rotating salted hash computed at ingest (no cookie, no stored IP/UA, no cross-day identity). Turn OFF to store event counts only, with no visitor dimension.',
+    description: 'Daily unique visitors via a daily-rotating salted hash (no cookie, no stored IP/UA, no cross-day identity). Turn OFF to store event counts only, with no visitor dimension.',
     category: 'CRM',
     status: 'on',
     bucketUnit: 'tenant',
@@ -51,7 +51,7 @@ export const analyticsFeature: BackendFeature = {
   }, {
     id: 'workspace-nav-telemetry',
     label: 'Workspace navigation telemetry',
-    description: 'ADR 0512 — anonymous, counts-only navigation aggregates (destination × menu source) for THIS workspace, as evidence for information-architecture decisions. No individual activity is stored; members see a disclosure while on. Default OFF.',
+    description: 'Anonymous, counts-only navigation totals (destination × menu source) for this workspace, to guide menu and layout decisions. No individual activity is stored; members see a notice while it is on.',
     category: 'CRM',
     status: 'off',
     bucketUnit: 'tenant',
@@ -67,8 +67,8 @@ export const analyticsFeature: BackendFeature = {
     salt: 'analytics',
   },
   requiredPacks: [
-    { name: 'feature.analytics.nodes', version: '1.1.1' }, // WF-ANL-1 config+inputs merge
-    { name: 'feature.analytics.agents', version: '1.0.1' }, // CFP-1 real query tool
+    { name: 'feature.analytics.nodes', version: '1.1.2' }, // WF-ANL-1 config+inputs merge
+    { name: 'vendor.openwop-app.analytics.agents', version: '1.0.2' }, // CFP-1 real query tool
   ],
   // ADR 0194 Phase 5 — a SOFT dependency (advisory, not a lock): analytics works
   // better with Consent present, since the public beacon is consent-gated ONLY with Consent present (ADR 0020; permissive without it — ADR 0651 D4)

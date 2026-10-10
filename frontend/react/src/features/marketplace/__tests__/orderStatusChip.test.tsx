@@ -8,6 +8,11 @@
  * Born red pre-fix: `listMyOrders` did not exist, `MarketplacePage` never read the
  * caller's orders, and PricingChip had no pending/failed state — the payment chips
  * below rendered nothing and Buy was always enabled.
+ *
+ * Re-witnessed (/grade-tests wave 10): `disabled={busy}` (drop the pending gate),
+ * the pending chip branch, the `failed` status mapping and the post-demo `load()`
+ * each red their case; dropping the page's `listMyOrders().catch` reds the
+ * unreadable-orders case (the read now actually rejects).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, waitFor, fireEvent } from '@testing-library/react';
@@ -101,9 +106,12 @@ describe('MKT-UX-5 — a pending/failed order is distinguishable on the card', (
   });
 
   it('an unreadable order list fabricates no state (empty ⇒ no payment chip)', async () => {
-    api.listMyOrders.mockResolvedValue({ purchases: [], sales: [] }); // the client returns [] on a read failure
+    // The orders read REJECTS: the page's own catch must answer "no orders" and must
+    // not gate the catalog on it (a rejected orders read is not a failed listings read).
+    api.listMyOrders.mockRejectedValue(new Error('orders down'));
     at();
     await waitFor(() => expect(screen.getByText('vendor.paid.nodes')).toBeTruthy());
+    expect(screen.queryByText(/listings could not be loaded/i)).toBeNull();
     expect(screen.queryByText(/payment pending/i)).toBeNull();
     expect(screen.queryByText(/payment failed/i)).toBeNull();
   });

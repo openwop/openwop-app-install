@@ -6,6 +6,7 @@
  */
 
 import { authedHeaders, config, fetchOpts } from '../../client/config.js';
+import { ApiError } from '../../client/requestJson.js';
 
 export interface ProjectSchedule {
   jobId: string;
@@ -19,6 +20,8 @@ export interface ProjectSchedule {
   /** WF-PRJ-2 — a fire that consumed its slot and produced no run. */
   lastSkippedAt?: string;
   lastSkipReason?: string;
+  /** ADR 0820 §7 — computed per read while the plan refuses the owning feature. */
+  planLapsed?: { featureId: string };
   nextFireAt?: number;
   createdAt?: string;
 }
@@ -26,8 +29,17 @@ export interface ProjectSchedule {
 const baseFor = (projectId: string): string => `${config.baseUrl}/host/openwop-app/projects/${encodeURIComponent(projectId)}/schedules`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 
+/** ADR 0787 — a structured `ApiError` carrying the server's body, so the panel
+ *  can say "no permission" for a 403 and the server's sentence for a 400. */
+async function failure(res: Response, ctx: string): Promise<ApiError> {
+  let body: unknown;
+  try { body = await res.json(); } catch { body = undefined; }
+  const said = body && typeof body === 'object' ? (body as { message?: unknown }).message : undefined;
+  return new ApiError({ status: res.status, statusText: res.statusText, url: res.url, body, message: typeof said === 'string' && said.length > 0 ? said : `${ctx} failed (${res.status})` });
+}
+
 async function asJson<T>(res: Response, ctx: string): Promise<T> {
-  if (!res.ok) throw new Error(`${ctx} failed (${res.status})`);
+  if (!res.ok) throw await failure(res, ctx);
   return res.json() as Promise<T>;
 }
 
@@ -45,5 +57,5 @@ export async function updateSchedule(projectId: string, jobId: string, patch: { 
 
 export async function deleteSchedule(projectId: string, jobId: string): Promise<void> {
   const res = await fetch(`${baseFor(projectId)}/${encodeURIComponent(jobId)}`, fetchOpts({ method: 'DELETE', headers: authedHeaders() }));
-  if (!res.ok) throw new Error(`deleteSchedule failed (${res.status})`);
+  if (!res.ok) throw await failure(res, 'deleteSchedule');
 }

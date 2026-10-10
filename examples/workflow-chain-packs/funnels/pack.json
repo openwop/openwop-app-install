@@ -1,16 +1,16 @@
 {
   "name": "core.openwop.workflows.funnels",
-  "version": "1.0.1",
+  "version": "1.0.3",
   "kind": "workflow-chain",
   "description": "Funnel optimization chains (ADR 0294 / Funnel A, Phase 6) — read-only analysis over the funnels feature nodes: per-step stats in, a grounded optimization proposal out. Proposals only: publishing, step edits, and experiment starts remain human actions in the Funnels page.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
-  "engines": { "openwop": ">=1.1.0 <2.0.0" },
+  "engines": { "openwop": ">=1.1.0 <3.0.0" },
   "keywords": ["funnels", "optimization", "conversion", "marketing"],
   "chains": [
     {
       "chainId": "funnels.optimize-step",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "Funnel Step Optimization Proposal",
       "description": "Reads a funnel's definition and per-step stats, identifies the weakest step (honest about small samples), and produces a grounded optimization proposal: what to change on that step's page, and the 50/50 challenger experiment a human should start in the Funnels page. Read-only — no drafts are written, nothing is published.",
       "parameters": {
@@ -30,7 +30,7 @@
         "nodes": [
           {
             "id": "funnel",
-            "typeId": "feature.funnels.nodes.get",
+            "typeId": "feature.funnels.nodes.get@1.0.0",
             "name": "Read the funnel",
             "position": { "x": 0, "y": 0 },
             "config": {},
@@ -38,7 +38,7 @@
           },
           {
             "id": "stats",
-            "typeId": "feature.funnels.nodes.step-stats",
+            "typeId": "feature.funnels.nodes.step-stats@1.0.0",
             "name": "Read per-step stats",
             "position": { "x": 0, "y": 160 },
             "config": {},
@@ -46,7 +46,7 @@
           },
           {
             "id": "propose",
-            "typeId": "core.ai.chatCompletion",
+            "typeId": "core.ai.chatCompletion@1.0.0",
             "name": "Draft the optimization proposal",
             "position": { "x": 320, "y": 80 },
             "config": {

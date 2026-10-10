@@ -6,7 +6,7 @@
  * but a node whose execution IS an external effect — an HTTP call, an email,
  * an A2A send — must never fire again during a "deterministic" replay. The
  * executor short-circuits nodes this module classifies by reproducing the
- * SOURCE run's recorded outcome for the same (nodeId, attempt) from the
+ * SOURCE run's recorded outcome for the same (nodeId, execution ordinal — ADR 0772 D2) from the
  * source event log; a flagged node the source never reached fails CLOSED
  * (`replay_source_missing`) — a replay never creates a NEW side effect.
  *
@@ -276,30 +276,96 @@ export interface SourceNodeOutcome {
 }
 
 /**
- * Fold a source run's events into `nodeId → ordered terminal outcomes`
- * (a retried node has one entry per attempt — ADR 0326 P3a fidelity: the
- * replay's attempt N reproduces the source's Nth outcome).
+ * ADR 0772 D2 — the node's EXECUTION ORDINAL, one rule for the log fold and for
+ * the live executor, so the two cannot disagree.
+ *
+ * replay.md §Suppression rule 2 keys a replayed side-effecting node's outcome on
+ * `(sourceRunId, nodeId, n)`, `n` counting the node's executions through this
+ * one, including retries, later visits and a fork's inherited prefix. This host
+ * used to key it on the per-body retry attempt into a POSITIONAL list of terminal
+ * events, which the retry counter resetting on every resume, and a mid-sequence
+ * fork restarting at 1, both mis-indexed (`RRWF-3`).
+ *
+ * THE RULE IS AN OPEN-EXECUTION FOLD: `n = 1 + the node's terminal outcomes so
+ * far`. A `node.started` opens an execution only when none is open; a start
+ * while one is open (a reinvoke resume after `node.suspended`, a start after an
+ * `immediate`-pause cut, a lost lease, or a fork boundary) CONTINUES it — the
+ * same execution, re-entered (interrupt.md §Re-entry: "a replay or recovery of
+ * the same execution MUST re-derive the same key"). A terminal closes the open
+ * execution; a terminal with no open execution (a pre-start refusal writes
+ * `node.failed` with no `node.started`) is an orphan and is ignored. The first
+ * draft counted every start except a post-suspend one, and the ADR's architect
+ * pass showed it failing replays closed where the source COMPLETED.
  */
-export function indexSourceOutcomes(events: ReadonlyArray<{ type: string; nodeId?: string; payload: unknown }>): Map<string, SourceNodeOutcome[]> {
-  const byNode = new Map<string, SourceNodeOutcome[]>();
-  for (const ev of events) {
-    if (!ev.nodeId) continue;
-    const p = (ev.payload ?? {}) as { outputs?: unknown; error?: { code?: string; message?: string } };
-    if (ev.type === 'node.completed') {
-      const list = byNode.get(ev.nodeId) ?? [];
-      list.push({
-        kind: 'completed',
-        outputs: (p.outputs && typeof p.outputs === 'object' && !Array.isArray(p.outputs) ? p.outputs : { output: p.outputs }) as Record<string, unknown>,
-      });
-      byNode.set(ev.nodeId, list);
-    } else if (ev.type === 'node.failed') {
-      const list = byNode.get(ev.nodeId) ?? [];
-      list.push({
-        kind: 'failed',
-        error: { code: p.error?.code ?? 'internal_error', message: p.error?.message ?? 'failed in the source run' },
-      });
-      byNode.set(ev.nodeId, list);
-    }
+export class ExecutionOrdinals {
+  private readonly closed = new Map<string, number>();
+  private readonly opened = new Map<string, number>();
+
+  /** The ordinal of the execution this `node.started` belongs to. */
+  start(nodeId: string): number {
+    const open = this.opened.get(nodeId);
+    if (open !== undefined) return open;
+    const n = (this.closed.get(nodeId) ?? 0) + 1;
+    this.opened.set(nodeId, n);
+    return n;
   }
+
+  /** Close the open execution; returns its ordinal, or `undefined` for an orphan. */
+  terminal(nodeId: string): number | undefined {
+    const open = this.opened.get(nodeId);
+    if (open === undefined) return undefined;
+    this.opened.delete(nodeId);
+    this.closed.set(nodeId, open);
+    return open;
+  }
+
+  /** How many executions of `nodeId` this log has STARTED (open or closed). */
+  highest(nodeId: string): number {
+    return this.opened.get(nodeId) ?? this.closed.get(nodeId) ?? 0;
+  }
+
+  /** Fold a log (oldest first). `onTerminal` sees each non-orphan terminal event. */
+  static fold(
+    events: ReadonlyArray<{ type: string; nodeId?: string; payload: unknown }>,
+    onTerminal?: (ev: { type: string; nodeId?: string; payload: unknown }, nodeId: string, n: number) => void,
+  ): ExecutionOrdinals {
+    const ord = new ExecutionOrdinals();
+    for (const ev of events) {
+      if (!ev.nodeId) continue;
+      if (ev.type === 'node.started') ord.start(ev.nodeId);
+      else if (ev.type === 'node.completed' || ev.type === 'node.failed') {
+        const n = ord.terminal(ev.nodeId);
+        if (n !== undefined && onTerminal) onTerminal(ev, ev.nodeId, n);
+      }
+    }
+    return ord;
+  }
+}
+
+/** `nodeId → (execution ordinal → recorded terminal outcome)`. */
+export type SourceOutcomeIndex = Map<string, Map<number, SourceNodeOutcome>>;
+
+/**
+ * Fold a source run's events into `nodeId → (n → terminal outcome)` by the
+ * ADR 0772 D2 execution ordinal. An execution with no terminal event (cut,
+ * cancelled, still running) has no entry, so replay fails it closed (rule 3).
+ */
+export function indexSourceOutcomes(events: ReadonlyArray<{ type: string; nodeId?: string; payload: unknown }>): SourceOutcomeIndex {
+  const byNode: SourceOutcomeIndex = new Map();
+  ExecutionOrdinals.fold(events, (ev, nodeId, n) => {
+    const p = (ev.payload ?? {}) as { outputs?: unknown; error?: { code?: string; message?: string } };
+    const outcome: SourceNodeOutcome = ev.type === 'node.completed'
+      ? {
+          kind: 'completed',
+          outputs: (p.outputs && typeof p.outputs === 'object' && !Array.isArray(p.outputs) ? p.outputs : { output: p.outputs }) as Record<string, unknown>,
+        }
+      : {
+          kind: 'failed',
+          error: { code: p.error?.code ?? 'internal_error', message: p.error?.message ?? 'failed in the source run' },
+        };
+    let perNode = byNode.get(nodeId);
+    if (!perNode) { perNode = new Map(); byNode.set(nodeId, perNode); }
+    perNode.set(n, outcome);
+  });
   return byNode;
 }

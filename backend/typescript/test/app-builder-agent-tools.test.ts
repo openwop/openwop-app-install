@@ -60,7 +60,7 @@ const VALID_APP = {
 };
 
 describe('ADR 0358 Phase C — the agents pack rides the real tools (no hand-copied catalog)', () => {
-  const packDir = new URL('../../../packs/feature.app-builder.agents/', import.meta.url);
+  const packDir = new URL('../../../packs/vendor.openwop-app.app-builder.agents/', import.meta.url);
   const manifest = JSON.parse(readFileSync(new URL('pack.json', packDir), 'utf8')) as {
     agents: { toolAllowlist: string[]; systemPromptRef: string }[];
   };
@@ -197,12 +197,12 @@ describe('ADR 0358 — render tool: gates, repair-loop errors, persistence', () 
   // Grade pass XCH-DATA-1 — agent provenance survives on the canvas row (the
   // documents `producedBy` precedent); the OWNER stays the human (ADR 0045).
   it('stamps producedBy provenance metadata (agent when agentProfileId, else user)', async () => {
-    const p = createAgentToolProvider({ tenantId: TENANT, actingUserId: 'u-1', agentProfileId: 'feature.app-builder.agents.default', runId: 'run-prov' });
+    const p = createAgentToolProvider({ tenantId: TENANT, actingUserId: 'u-1', agentProfileId: 'vendor.openwop-app.app-builder.agents.default', runId: 'run-prov' });
     const created = JSON.parse((await p.executeTool({ name: APP_BUILDER_RENDER_TOOL_ID, input: { app: { ...VALID_APP, name: 'Provenance App' } } })).content) as { canvasId: string };
     const canvas = await getCanvasForTenant(TENANT, created.canvasId);
     expect(canvas?.ownerSubject).toEqual({ kind: 'user', id: 'u-1' });
     const meta = canvas?.metadata as { producedBy?: { kind: string; id: string }; runId?: string } | undefined;
-    expect(meta?.producedBy).toEqual({ kind: 'agent', id: 'feature.app-builder.agents.default' });
+    expect(meta?.producedBy).toEqual({ kind: 'agent', id: 'vendor.openwop-app.app-builder.agents.default' });
     expect(meta?.runId).toBe('run-prov');
   });
 });

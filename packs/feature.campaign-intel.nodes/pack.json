@@ -1,6 +1,7 @@
 {
   "name": "feature.campaign-intel.nodes",
-  "version": "1.1.1",
+  "version": "1.1.2",
+  "kind": "node",
   "description": "Campaign Intelligence node pack \u2014 `budget-optimize` (heuristic marginal-ROAS reallocation over the performance store, plus an optional ctx.callAI scenario narrative) and `forecast` (creative-fatigue detection + outcome projection). Over ctx.features['campaign-intel']. The natural-language analysis the Campaign Intelligence Analyst calls.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
@@ -12,7 +13,7 @@
     "marketing"
   ],
   "engines": {
-    "openwop": ">=1.0.0 <2.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "nodes": [
     {
@@ -34,14 +35,14 @@
       "capabilities": []
     },
     {
-      "typeId": "feature.campaign-intel.nodes.attribution",
+      "typeId": "feature.campaign-intel.nodes.attribution", "category": "data",
       "version": "1.0.0",
       "role": "read",
       "label": "Attribution Report",
       "description": "Last-click attribution join (ADR 0219): performance-store spend/revenue x analytics conversions matched on the C8 utm_campaign key, plus per-email-campaign engagement \u2014 every number with lineage. Inputs: { orgId }."
     },
     {
-      "typeId": "feature.campaign-intel.nodes.pacing-check",
+      "typeId": "feature.campaign-intel.nodes.pacing-check", "category": "data",
       "version": "1.0.0",
       "role": "action",
       "label": "Budget Pacing Check",

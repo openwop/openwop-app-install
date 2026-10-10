@@ -14,11 +14,15 @@
  *  - CONS-UX-32  the erase confirm demands the subject key be TYPED.
  *  - CONS-UX-33  a 409 `legal_hold` refusal is a durable state on the page that
  *                survives the policy re-read FAILING.
+ *
+ * Sabotage-witnessed (/grade-tests w9) per claim. One honest ceiling: the second-click
+ * guard in `doErase` (`if (erasing) return`) is unreachable from a click because
+ * `Button loading` also disables the control — the busy case witnesses that outer guard.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor, fireEvent, act } from '@testing-library/react';
 import type { SubjectErasureResult } from '../consentClient.js';
-import { currentAnnouncements } from '../../../ui/announce.js';
+import { announce, currentAnnouncements } from '../../../ui/announce.js';
 
 let eraseResult: SubjectErasureResult;
 const deleteSubject = vi.fn();
@@ -30,8 +34,9 @@ vi.mock('../consentClient.js', async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
   listOrgs: vi.fn(async () => [{ orgId: 'org-1', name: 'Acme' }]),
   getPolicy: (...a: unknown[]) => getPolicy(...a),
+  getAccess: vi.fn(async () => ({ canManage: true })), // ADR 0849 D1 — an admin by default
   listRecords: vi.fn(async () => []),
-  getSubject: vi.fn(async () => null),
+  getSubject: vi.fn(async () => ({ record: null, erased: false })),
   deleteSubject: (...a: unknown[]) => deleteSubject(...a),
 }));
 vi.mock('../../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: (m: string) => toastError(m), info: vi.fn(), warning: vi.fn() } }));
@@ -61,6 +66,9 @@ beforeEach(() => {
   confirmFn.mockReset();
   confirmFn.mockImplementation(async () => true);
   toastError.mockClear();
+  // The live-region values are module state: reset them so no case's announcement
+  // assertion can be satisfied by an EARLIER case's (order/shuffle independence).
+  announce(''); announce('', { assertive: true });
 });
 afterEach(cleanup);
 
@@ -153,6 +161,7 @@ describe('CONS-UX-29 / CONS-UX-5 — busy states, and the receipt outlives its o
     deleteSubject.mockImplementation(() => new Promise<SubjectErasureResult>((r) => { resolve = r; }));
     retry.focus();
     expect(document.activeElement).toBe(retry);
+    const spokenBefore = currentAnnouncements().polite;
     fireEvent.click(retry);
     await waitFor(() => expect(retry.getAttribute('aria-busy')).toBe('true'));
 
@@ -166,8 +175,11 @@ describe('CONS-UX-29 / CONS-UX-5 — busy states, and the receipt outlives its o
     await waitFor(() => expect(retryAfter.getAttribute('aria-busy')).toBeNull());
     // Focus is back on the control the operator was using.
     await waitFor(() => expect(document.activeElement).toBe(retryAfter));
-    // …and the replacement receipt was spoken even though its text is identical.
-    expect(currentAnnouncements().polite).toMatch(/partial erasure of "subj-42"/i);
+    // …and the replacement receipt was spoken even though its text is identical: the
+    // live-region value must CHANGE (the repeat marker), not merely still match.
+    const spokenAfter = currentAnnouncements().polite;
+    expect(spokenAfter).toMatch(/partial erasure of "subj-42"/i);
+    expect(spokenAfter, 'an identical outcome must still be RE-announced').not.toBe(spokenBefore);
   });
 });
 

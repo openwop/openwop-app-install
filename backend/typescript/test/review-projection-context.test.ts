@@ -62,3 +62,20 @@ describe('interruptToReview — approval context enrichment', () => {
     expect(r.artifactId).toBe('document:doc-1');
   });
 });
+
+describe('interruptToReview — the conversation it belongs to (ADR 0776)', () => {
+  it('stamps conversationId from the run\'s chatSessionId (every chat-dispatched run carries it)', () => {
+    const r = interruptToReview(interrupt({ prompt: 'Approve' }), run({ metadata: { chatSessionId: 'sess-42' } }));
+    expect(r.conversationId).toBe('sess-42');
+  });
+
+  it('falls back to the interrupt data\'s explicit conversationId', () => {
+    const r = interruptToReview(interrupt({ prompt: 'Approve', conversationId: 'sess-from-node' }), run());
+    expect(r.conversationId).toBe('sess-from-node');
+  });
+
+  it('is absent (never invented) when neither carries one', () => {
+    const r = interruptToReview(interrupt({ prompt: 'Approve' }), run());
+    expect('conversationId' in r).toBe(false);
+  });
+});

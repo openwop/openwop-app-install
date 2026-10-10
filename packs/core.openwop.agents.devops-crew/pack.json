@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.agents.devops-crew",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "DevOps crew. Planner decomposes a runbook into safe ordered steps → executor performs http step actions (fs / queue / crypto steps run through the enclosing workflow's nodes, not conversational tools) → verifier confirms desired state via read-only http checks.",
   "author": "OpenWOP Working Group",
   "license": "Apache-2.0",
@@ -16,13 +16,13 @@
     "pattern"
   ],
   "engines": {
-    "openwop": ">=1.1.0 <2.0.0"
+    "openwop": ">=1.1.0 <3.0.0"
   },
   "peerDependencies": {
     "aiProviders": "supported",
-    "host.agentRuntime": "supported",
-    "host.fs": "supported",
-    "host.queueBus": "supported"
+    "agentRuntime": "supported",
+    "fs": "supported",
+    "queueBus": "supported"
   },
   "agents": [
     {
@@ -96,5 +96,6 @@
   "runtime": {
     "language": "remote",
     "entry": "pack.json"
-  }
+  },
+  "kind": "node"
 }

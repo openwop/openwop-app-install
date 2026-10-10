@@ -189,13 +189,13 @@ describe('HTTP end-to-end — admin-gated config + unauthenticated signed public
   let connId: string;
 
   it('the owner configures inbound on a streams connection (admin-gated authorizeManage passes)', async () => {
-    const created = await jf<{ connectionId: string; provider: string }>('/v1/host/openwop-app/connections', {
+    const created = await jf<{ connectionId: string; provider: string }>('/host/openwop-app/connections', {
       method: 'POST',
       body: JSON.stringify({ provider: STREAM_PROVIDER, kind: 'api_key', secret: 'broker-http', scope: 'user', displayName: 'Prod Kafka' }),
     });
     expect(created.status).toBe(201);
     connId = created.body.connectionId;
-    const cfg = await jf('/v1/host/openwop-app/connections/' + connId + '/inbound', {
+    const cfg = await jf('/host/openwop-app/connections/' + connId + '/inbound', {
       method: 'PUT',
       body: JSON.stringify({ workflowId: WORKFLOW, signingSecret: SIGNING, source: 'stream' }),
     });
@@ -207,7 +207,7 @@ describe('HTTP end-to-end — admin-gated config + unauthenticated signed public
     const raw = JSON.stringify({ source: 'stream', stream: { topic: 'http-events', partition: 4, offset: '31', message: { hi: 1 } } });
     const s = signPush(raw, now);
     // NB: no Authorization header — the broker signature IS the credential.
-    const res = await fetch(`${BASE}/v1/host/openwop-app/connections-inbound/${connId}`, {
+    const res = await fetch(`${BASE}/host/openwop-app/connections-inbound/${connId}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-openwop-stream-signature': s.streamSignature, 'x-openwop-stream-timestamp': s.streamTimestamp },
       body: raw,
@@ -218,7 +218,7 @@ describe('HTTP end-to-end — admin-gated config + unauthenticated signed public
   it('a bad-signature push to the public route → 401', async () => {
     const now = Date.now();
     const raw = JSON.stringify({ source: 'stream', stream: { topic: 'http-events', partition: 4, offset: '32', message: {} } });
-    const res = await fetch(`${BASE}/v1/host/openwop-app/connections-inbound/${connId}`, {
+    const res = await fetch(`${BASE}/host/openwop-app/connections-inbound/${connId}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-openwop-stream-signature': 'sha256=bad', 'x-openwop-stream-timestamp': String(Math.floor(now / 1000)) },
       body: raw,

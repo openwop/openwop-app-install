@@ -17,9 +17,9 @@
       },
       "dag": {
         "nodes": [
-          { "id": "draft", "typeId": "feature.workflow-author.nodes.draft", "name": "Draft", "inputs": { "intent": "{{params.intent}}" } },
-          { "id": "validate", "typeId": "feature.workflow-author.nodes.validate", "name": "Validate" },
-          { "id": "persist", "typeId": "feature.workflow-author.nodes.persist", "name": "Persist" }
+          { "id": "draft", "typeId": "feature.workflow-author.nodes.draft@1.0.1", "name": "Draft", "inputs": { "intent": "{{params.intent}}" } },
+          { "id": "validate", "typeId": "feature.workflow-author.nodes.validate@1.0.1", "name": "Validate" },
+          { "id": "persist", "typeId": "feature.workflow-author.nodes.persist@1.0.1", "name": "Persist" }
         ],
         "edges": [
           { "from": "draft", "to": "validate", "triggerRule": "all_success" },

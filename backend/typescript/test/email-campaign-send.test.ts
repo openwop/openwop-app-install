@@ -12,6 +12,14 @@
  *    status 'sending' + accumulated stats; exhausted ⇒ 'sent'
  *  - end-to-end through the route against a mock SendGrid: per-recipient
  *    rendering, from-address, Bearer key from the brokered Connection
+ *
+ * Sabotage-witnessed (w9 grade-tests): dropping the generation from the adapter
+ * idempotency key (EM-1), randomising it (same-generation adapter dedup), removing the
+ * per-campaign send lock, writing a terminal row on an unreadable suppression store
+ * (B5), dropping 'skipped' from the terminal set (EM-SP-2), dropping the generation
+ * filter on the exclusion set (F2), accumulating instead of deriving stats (EM-SP-1),
+ * the segment-deleted 409, the genuine-suppression skip, and the already-sent guard
+ * each turn a case red.
  */
 
 import http from 'node:http';
@@ -21,7 +29,7 @@ import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import {
-  __resetEmailStore, createTemplate, createCampaign, sendCampaign, sendTestEmail, listSends, setSenderAddress,
+  __resetEmailStore, createTemplate, createCampaign, sendCampaign, sendTestEmail, listSends, setSenderAddress, deleteSubjectSends,
 } from '../src/features/email/emailService.js';
 import { createContact, __resetCrmStore } from '../src/features/crm/contactsService.js';
 import { __resetConsentStore } from '../src/features/consent/consentService.js';
@@ -43,6 +51,8 @@ let sgStatus = 202;
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
+  // ADR 0848 D7a — a campaign send now REFUSES without a public link base (no unsubscribe link ⇒ no send).
+  process.env.OPENWOP_EMAIL_LINK_BASE_URL = 'https://app.example';
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
   process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE = 'true'; // the mock SendGrid is on 127.0.0.1
@@ -73,72 +83,83 @@ afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
 });
 
-interface Res<T = any> { status: number; body: T }
+interface Res<T> { status: number; body: T }
+/** Response bodies this suite reads (typed per call — no `any` reaches an assertion). */
+type SendBody = { status: string; stats: { sent: number; failed: number; skipped: number }; error?: string };
+type SettingsBody = { senderAddress: string; configured: boolean; error?: string };
+type ErrorBody = { error?: string };
 function client(initialCookie = '') {
   let cookie = initialCookie;
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     const h = res.headers as { getSetCookie?: () => string[] };
     for (const c of (typeof h.getSetCookie === 'function' ? h.getSetCookie() : [])) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    const parsed: unknown = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    // The one JSON boundary (the csm-authz-http precedent); every read site names its body type.
+    return { status: res.status, body: parsed as T };
   };
   return {
-    get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b),
-    put: (p: string, b?: unknown) => call('PUT', p, b),
+    get: <T = ErrorBody>(p: string) => call<T>('GET', p), post: <T = ErrorBody>(p: string, b?: unknown) => call<T>('POST', p, b),
+    put: <T = ErrorBody>(p: string, b?: unknown) => call<T>('PUT', p, b),
   };
 }
 
 let n = 0;
 async function ownerWithOrg(): Promise<{ owner: ReturnType<typeof client>; orgId: string; tenantId: string; userId: string }> {
   const owner = client();
-  const login = await owner.post('/v1/host/openwop-app/test/login', { email: `cs-${Date.now()}-${n++}@acme.test` });
+  const login = await owner.post<{ user: { tenantId: string; userId: string } }>('/host/openwop-app/test/login', { email: `cs-${Date.now()}-${n++}@acme.test` });
   expect(login.status).toBe(201);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
-  const u = login.body.user as { tenantId: string; userId: string };
+  const u = login.body.user;
   return { owner, orgId: org.body.orgId, tenantId: u.tenantId, userId: u.userId };
 }
 
-const E = (orgId: string) => `/v1/host/openwop-app/email/orgs/${orgId}`;
+const E = (orgId: string) => `/host/openwop-app/email/orgs/${orgId}`;
 
 describe('Email settings — sender identity (per-org, explicit)', () => {
   it('GET starts unconfigured; PUT validates + persists; empty unsets', async () => {
     const { owner, orgId } = await ownerWithOrg();
-    const before = await owner.get(`${E(orgId)}/settings`);
+    const before = await owner.get<SettingsBody>(`${E(orgId)}/settings`);
     expect(before.status).toBe(200);
     expect(before.body).toMatchObject({ senderAddress: '', configured: false });
 
     expect((await owner.put(`${E(orgId)}/settings`, { senderAddress: 'not-an-email' })).status).toBe(400);
 
-    const set = await owner.put(`${E(orgId)}/settings`, { senderAddress: 'news@acme.test' });
+    const set = await owner.put<SettingsBody>(`${E(orgId)}/settings`, { senderAddress: 'news@acme.test' });
     expect(set.status).toBe(200);
     expect(set.body).toMatchObject({ senderAddress: 'news@acme.test', configured: true });
 
-    const unset = await owner.put(`${E(orgId)}/settings`, { senderAddress: '' });
+    const unset = await owner.put<SettingsBody>(`${E(orgId)}/settings`, { senderAddress: '' });
     expect(unset.body).toMatchObject({ senderAddress: '', configured: false });
   });
 
   it('cross-tenant settings access 404s (IDOR)', async () => {
     const a = await ownerWithOrg();
     const b = await ownerWithOrg();
-    expect((await b.owner.get(`${E(a.orgId)}/settings`)).status).toBe(404);
-    expect((await b.owner.put(`${E(a.orgId)}/settings`, { senderAddress: 'x@y.com' })).status).toBe(404);
+    const read = await b.owner.get(`${E(a.orgId)}/settings`);
+    expect(read.status).toBe(404);
+    expect(read.body.error).toBe('not_found');
+    const write = await b.owner.put(`${E(a.orgId)}/settings`, { senderAddress: 'x@y.com' });
+    expect(write.status).toBe(404);
+    expect(write.body.error).toBe('not_found');
+    // The refused write did not land: A's sender is still unconfigured.
+    expect((await a.owner.get<SettingsBody>(`${E(a.orgId)}/settings`)).body).toMatchObject({ senderAddress: '', configured: false });
   });
 });
 
 describe('Honest-failure ordering on /send', () => {
   it('no sender address → 501 capability_not_provided; sender but no connection → 409 credential_required', async () => {
     const { owner, orgId } = await ownerWithOrg();
-    const tpl = await owner.post(`${E(orgId)}/templates`, { name: 'T', subject: 'S', body: 'B' });
-    const cmp = await owner.post(`${E(orgId)}/campaigns`, { templateId: tpl.body.templateId });
+    const tpl = await owner.post<{ templateId: string }>(`${E(orgId)}/templates`, { name: 'T', subject: 'S', body: 'B' });
+    const cmp = await owner.post<{ campaignId: string }>(`${E(orgId)}/campaigns`, { templateId: tpl.body.templateId });
 
-    const noSender = await owner.post(`${E(orgId)}/campaigns/${cmp.body.campaignId}/send`);
+    const noSender = await owner.post<SendBody>(`${E(orgId)}/campaigns/${cmp.body.campaignId}/send`);
     expect(noSender.status).toBe(501);
     expect(noSender.body.error).toBe('capability_not_provided');
 
     await owner.put(`${E(orgId)}/settings`, { senderAddress: 'news@acme.test' });
-    const noConn = await owner.post(`${E(orgId)}/campaigns/${cmp.body.campaignId}/send`);
+    const noConn = await owner.post<SendBody>(`${E(orgId)}/campaigns/${cmp.body.campaignId}/send`);
     expect(noConn.status).toBe(409);
     expect(noConn.body.error).toBe('credential_required');
   });
@@ -153,9 +174,9 @@ describe('End-to-end route send via the brokered SendGrid spine', () => {
     await createContact({ tenantId, name: 'Alice', email: 'alice@x.com', company: 'Acme', stage: 'lead' });
     await createContact({ tenantId, name: 'NoMail', stage: 'lead' }); // skipped
 
-    const tpl = await owner.post(`${E(orgId)}/templates`, { name: 'W', subject: 'Hi {{contact.name}}', body: 'Hello {{contact.name}}' });
-    const cmp = await owner.post(`${E(orgId)}/campaigns`, { templateId: tpl.body.templateId });
-    const sent = await owner.post(`${E(orgId)}/campaigns/${cmp.body.campaignId}/send`);
+    const tpl = await owner.post<{ templateId: string }>(`${E(orgId)}/templates`, { name: 'W', subject: 'Hi {{contact.name}}', body: 'Hello {{contact.name}}' });
+    const cmp = await owner.post<{ campaignId: string }>(`${E(orgId)}/campaigns`, { templateId: tpl.body.templateId });
+    const sent = await owner.post<SendBody>(`${E(orgId)}/campaigns/${cmp.body.campaignId}/send`);
     expect(sent.status, JSON.stringify(sent.body)).toBe(200);
     expect(sent.body.status).toBe('sent');
     expect(sent.body.stats).toMatchObject({ sent: 1, failed: 0, skipped: 1 });
@@ -192,21 +213,21 @@ describe('End-to-end route send via the brokered SendGrid spine', () => {
     await owner.put(`${E(orgId)}/settings`, { senderAddress: 'news@acme.test' });
     await createContact({ tenantId, name: 'Rita', email: 'rita@x.com', stage: 'lead' });
 
-    const tpl = await owner.post(`${E(orgId)}/templates`, { name: 'R', subject: 'S', body: 'B' });
-    const cmp = await owner.post(`${E(orgId)}/campaigns`, { templateId: tpl.body.templateId });
+    const tpl = await owner.post<{ templateId: string }>(`${E(orgId)}/templates`, { name: 'R', subject: 'S', body: 'B' });
+    const cmp = await owner.post<{ campaignId: string }>(`${E(orgId)}/campaigns`, { templateId: tpl.body.templateId });
 
-    const first = await owner.post(`${E(orgId)}/campaigns/${cmp.body.campaignId}/send`);
+    const first = await owner.post<SendBody>(`${E(orgId)}/campaigns/${cmp.body.campaignId}/send`);
     expect(first.status, JSON.stringify(first.body)).toBe(200);
     expect(first.body.stats).toMatchObject({ sent: 1 });
     expect(sgRequests, 'the first send must reach the provider').toHaveLength(1);
 
     // Without `resend` the ledger correctly refuses — that guard is what forces
     // the operator to ask for a re-delivery explicitly, and it must still hold.
-    const noFlag = await owner.post(`${E(orgId)}/campaigns/${cmp.body.campaignId}/send`);
+    const noFlag = await owner.post<SendBody>(`${E(orgId)}/campaigns/${cmp.body.campaignId}/send`);
     expect(noFlag.status).toBe(409);
     expect(sgRequests, 'a 409 must not dispatch anything').toHaveLength(1);
 
-    const again = await owner.post(`${E(orgId)}/campaigns/${cmp.body.campaignId}/send`, { resend: true });
+    const again = await owner.post<SendBody>(`${E(orgId)}/campaigns/${cmp.body.campaignId}/send`, { resend: true });
     expect(again.status, JSON.stringify(again.body)).toBe(200);
     expect(again.body.stats).toMatchObject({ sent: 1 });
     // THE assertion. Pre-fix this was still 1: the UI reported `Sent 1` and a
@@ -225,11 +246,11 @@ describe('End-to-end route send via the brokered SendGrid spine', () => {
     const { owner, orgId, tenantId, userId } = await ownerWithOrg();
     await createSecretConnection({ tenantId, provider: 'sendgrid', kind: 'api_key', secret: 'SG.dedup-key', scope: 'user', userId });
     await owner.put(`${E(orgId)}/settings`, { senderAddress: 'news@acme.test' });
-    await createContact({ tenantId, name: 'Dee', email: 'dee@x.com', stage: 'lead' });
-    await createContact({ tenantId, name: 'Eli', email: 'eli@x.com', stage: 'lead' });
+    const dee = await createContact({ tenantId, name: 'Dee', email: 'dee@x.com', stage: 'lead' });
+    const eli = await createContact({ tenantId, name: 'Eli', email: 'eli@x.com', stage: 'lead' });
 
-    const tpl = await owner.post(`${E(orgId)}/templates`, { name: 'D', subject: 'S', body: 'B' });
-    const cmp = await owner.post(`${E(orgId)}/campaigns`, { templateId: tpl.body.templateId });
+    const tpl = await owner.post<{ templateId: string }>(`${E(orgId)}/templates`, { name: 'D', subject: 'S', body: 'B' });
+    const cmp = await owner.post<{ campaignId: string }>(`${E(orgId)}/campaigns`, { templateId: tpl.body.templateId });
     // The REAL brokered provider — the exact object the route builds — so the
     // adapter + ledger stay in the path. Called directly only because the route
     // exposes no `limit`, and a limit is the only way to reach a CONTINUATION,
@@ -239,13 +260,25 @@ describe('End-to-end route send via the brokered SendGrid spine', () => {
     });
     const p1 = await sendCampaign(tenantId, orgId, cmp.body.campaignId, { provider, limit: 1 });
     expect(p1!.status).toBe('sending');
+    expect(sgRequests).toHaveLength(1);
+    // Simulate a crash AFTER the provider accepted the first contact but BEFORE the
+    // campaign ledger row landed: drop that contact's send-log. Without this the
+    // campaign's own ledger excludes it from the continuation and the adapter dedup is
+    // never reached (w9 probe `cs-samegen-adapter` stayed green with the generation key
+    // randomised). Which contact went first is the audience order — read it, don't assume it.
+    const firstSent = (await listSends(tenantId, cmp.body.campaignId)).find((r) => r.status === 'sent')!;
+    const firstEmail = firstSent.contactId === dee.contactId ? 'dee@x.com' : 'eli@x.com';
+    expect([dee.contactId, eli.contactId]).toContain(firstSent.contactId);
+    expect((await deleteSubjectSends(tenantId, firstSent.contactId)).removed).toBe(1);
     // The continuation carries NO resend flag, so it stays in generation 0
-    // alongside the first pass.
+    // alongside the first pass — the first contact is re-dispatched and the adapter
+    // ledger must answer it from the recorded send.
     const p2 = await sendCampaign(tenantId, orgId, cmp.body.campaignId, { provider, limit: 5 });
     expect(p2!.status).toBe('sent');
     // Two contacts, one generation ⇒ exactly two provider calls, never three.
     expect(sgRequests).toHaveLength(2);
     const to = sgRequests.map((r) => JSON.stringify(r.body)).join(' ');
+    expect(to.split(firstEmail).length - 1, 'the re-dispatched contact reached the provider exactly once').toBe(1);
     expect(to).toContain('dee@x.com');
     expect(to).toContain('eli@x.com');
   });
@@ -257,12 +290,15 @@ describe('End-to-end route send via the brokered SendGrid spine', () => {
     await owner.put(`${E(orgId)}/settings`, { senderAddress: 'news@acme.test' });
     await createContact({ tenantId, name: 'A', email: 'a@x.com', stage: 'lead' });
 
-    const tpl = await owner.post(`${E(orgId)}/templates`, { name: 'W', subject: 'S', body: 'B' });
-    const cmp = await owner.post(`${E(orgId)}/campaigns`, { templateId: tpl.body.templateId });
-    const sent = await owner.post(`${E(orgId)}/campaigns/${cmp.body.campaignId}/send`);
-    expect(sent.status).toBe(200);
-    expect(sent.body.stats).toMatchObject({ sent: 0, failed: 1 });
-    sgStatus = 202;
+    const tpl = await owner.post<{ templateId: string }>(`${E(orgId)}/templates`, { name: 'W', subject: 'S', body: 'B' });
+    const cmp = await owner.post<{ campaignId: string }>(`${E(orgId)}/campaigns`, { templateId: tpl.body.templateId });
+    try {
+      const sent = await owner.post<SendBody>(`${E(orgId)}/campaigns/${cmp.body.campaignId}/send`);
+      expect(sent.status).toBe(200);
+      expect(sent.body.stats).toMatchObject({ sent: 0, failed: 1 });
+      // A failed pass is retryable, never terminal: the campaign stays 'sending'.
+      expect(sent.body.status).toBe('sending');
+    } finally { sgStatus = 202; }
   });
 });
 
@@ -465,9 +501,9 @@ describe('campaign provider fallback — postmark-only user', () => {
     await owner.put(`${E(orgId)}/settings`, { senderAddress: 'news@acme.test' });
     await createContact({ tenantId, name: 'Pia', email: 'pia@x.com', stage: 'lead' });
 
-    const tpl = await owner.post(`${E(orgId)}/templates`, { name: 'P', subject: 'Hi {{contact.name}}', body: 'Hello' });
-    const cmp = await owner.post(`${E(orgId)}/campaigns`, { templateId: tpl.body.templateId });
-    const sent = await owner.post(`${E(orgId)}/campaigns/${cmp.body.campaignId}/send`);
+    const tpl = await owner.post<{ templateId: string }>(`${E(orgId)}/templates`, { name: 'P', subject: 'Hi {{contact.name}}', body: 'Hello' });
+    const cmp = await owner.post<{ campaignId: string }>(`${E(orgId)}/campaigns`, { templateId: tpl.body.templateId });
+    const sent = await owner.post<SendBody>(`${E(orgId)}/campaigns/${cmp.body.campaignId}/send`);
     expect(sent.status, JSON.stringify(sent.body)).toBe(200);
     expect(sent.body.status).toBe('sent');
     expect(sent.body.stats).toMatchObject({ sent: 1, failed: 0 });
@@ -673,3 +709,5 @@ describe('B5 — an unreadable suppression store refuses the send WITHOUT a term
     expect((blipped as { reason: string }).reason).toBe('suppression_unreadable');
   });
 });
+
+afterAll(() => { delete process.env.OPENWOP_EMAIL_LINK_BASE_URL; });

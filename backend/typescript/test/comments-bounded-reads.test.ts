@@ -16,6 +16,14 @@
  * the key space actually read. A whole-collection read is recognisable by SHAPE
  * (`hostext:<name>:` with nothing after it), so the rule needs no allowlist —
  * which is precisely how the CRM version of this gate walked past a live offender.
+ *
+ * SABOTAGE (witnessed, /grade-tests wave 10): swapping `rowsForTenant` for
+ * `comments.list()` in listThread / deleteComment / deleteSubjectComments reds cases
+ * 1–3 (case 3 also on the count — the other tenant's rows get erased). Dropping
+ * either empty-tenant guard (`listThread`'s `!tenantId` or `rowsForTenant`'s) reds
+ * case 5, which records EVERY storage call: the return value alone could not see it,
+ * because a resolver handed `''` and an index scan of tenant `''` both still answer
+ * "nothing".
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -63,6 +71,21 @@ async function recordListPrefixes(fn: () => Promise<void>): Promise<string[]> {
         return async (prefix: string) => { seen.push(prefix); return (target as Storage).kvList(prefix); };
       }
       return Reflect.get(target, prop, receiver);
+    },
+  }) as Storage);
+  try { await fn(); } finally { initHostExtPersistence(real); }
+  return seen;
+}
+
+/** Record the NAME of every storage method called while `fn` runs — for the
+ *  fail-closed claim, where the right answer is "storage was never touched". */
+async function recordStorageCalls(fn: () => Promise<void>): Promise<string[]> {
+  const seen: string[] = [];
+  initHostExtPersistence(new Proxy(real, {
+    get(target, prop, receiver) {
+      const v: unknown = Reflect.get(target, prop, receiver);
+      if (typeof v !== 'function') return v;
+      return (...args: unknown[]) => { seen.push(String(prop)); return (v as (...a: unknown[]) => unknown).apply(target, args); };
     },
   }) as Storage);
   try { await fn(); } finally { initHostExtPersistence(real); }
@@ -150,7 +173,13 @@ describe('CMNT-3 — comment reads are tenant-bounded', () => {
     // ADR 0659 D1 — `null`, not `[]`: an unscoped read is a refusal. The guard runs BEFORE
     // the target resolver, which would otherwise hand an empty tenantId to another
     // feature's store (this assertion caught exactly that regression).
-    expect(await listThread('', 'o1', 'cms_page', 'anything', PREAUTHORIZED_CALLER)).toBeNull();
-    expect(await deleteSubjectComments('', 'A')).toBe(0);
+    const readCalls = await recordStorageCalls(async () => {
+      expect(await listThread('', 'o1', 'cms_page', 'anything', PREAUTHORIZED_CALLER)).toBeNull();
+    });
+    expect(readCalls, 'an unscoped listThread must touch NO storage — not a resolver, not the index').toEqual([]);
+    const eraseCalls = await recordStorageCalls(async () => {
+      expect(await deleteSubjectComments('', 'A')).toBe(0);
+    });
+    expect(eraseCalls, 'an unscoped erasure must touch NO storage — not even a tenant-\'\' index scan').toEqual([]);
   });
 });

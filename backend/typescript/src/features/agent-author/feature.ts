@@ -35,14 +35,14 @@ export const agentAuthorFeature: BackendFeature = {
   toggleDefault: {
     id: 'agent-author',
     label: 'Agent Author (describe-to-create)',
-    description: 'Create roster agents from a natural-language description in the AI chat. Created agents land disabled pending review (ADR 0514).',
+    description: 'Create roster agents from a natural-language description in the AI chat. Created agents start disabled until reviewed.',
     category: 'Agents',
     status: 'off',
     bucketUnit: 'tenant',
     salt: 'agent-author',
   },
   requiredPacks: [
-    { name: 'feature.agent-author.nodes', version: '1.1.0' },
-    { name: 'feature.agent-author.agents', version: '1.1.0' },
+    { name: 'feature.agent-author.nodes', version: '1.1.1' },
+    { name: 'vendor.openwop-app.agent-author.agents', version: '1.1.1' },
   ],
 };

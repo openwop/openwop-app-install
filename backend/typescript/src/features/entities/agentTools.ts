@@ -11,6 +11,9 @@
  *   (never compacted).
  * - Both tools fail EMPTY without an acting user (the projects-tool
  *   precedent) and scope every read to the run's tenant.
+ * - ADR 0847 D1 (closes `ENT2WF-4`) — they share the routes' predicate: the acting
+ *   user's tenant-level `workspace:read` (the routes' own resolver) AND the project
+ *   namespace rule, through `namespaceAccess.ts`. A refused namespace reads as absent.
  */
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
 import { resolveFeatureToggle } from '../../host/agentToolKit.js';
@@ -20,6 +23,7 @@ import { resolveLocalizedValues } from '../../host/i18n/index.js';
 import { getEntityType, listEntityTypes, queryEntities } from './entitiesService.js';
 import { entityLocaleContext } from './common.js';
 import { projectType } from './surface.js';
+import { filterRunReadable, runCallerAllows } from './namespaceAccess.js';
 
 export const ENTITIES_DESCRIBE_TYPE_TOOL_ID = 'openwop:entities.describe-type';
 export const ENTITIES_QUERY_TOOL_ID = 'openwop:entities.query';
@@ -32,6 +36,7 @@ async function entitiesEnabled(scope: BundleScope): Promise<boolean> {
 export function registerEntitiesAgentTools(): void {
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     // ADR 0604 (TOCC-2) — closed world: an elided enum/id list here makes the
     // model author against a catalog that is not this host's.
     schemaCarrying: true,
@@ -59,6 +64,7 @@ export function registerEntitiesAgentTools(): void {
       }
       const args = (input ?? {}) as { typeName?: unknown; projectId?: unknown };
       const projectId = typeof args.projectId === 'string' && args.projectId ? args.projectId : undefined;
+      const caller = { kind: 'person' as const, subject: scope.actingUserId };
       // ADR 0406 — the workspace's content-locale context rides along so a
       // model knows WHICH locales overlays may target (SSoT: the same
       // entityLocaleContext the surface/routes resolve; never hand-copied).
@@ -70,16 +76,18 @@ export function registerEntitiesAgentTools(): void {
       // façade-owned; the generic chat tools never describe/expose them (their
       // per-org RBAC would be bypassed).
       if (typeof args.typeName === 'string' && args.typeName) {
-        const type = await getEntityType(scope.tenantId, projectId, args.typeName);
+        const readable = await runCallerAllows(scope.tenantId, caller, projectId, 'read');
+        const type = readable ? await getEntityType(scope.tenantId, projectId, args.typeName) : null;
         return { content: JSON.stringify({ type: type && !type.system ? projectType(type) : null, localization }) };
       }
-      const types = (await listEntityTypes(scope.tenantId, projectId)).filter((t) => !t.system);
+      const types = await filterRunReadable(scope.tenantId, caller, (await listEntityTypes(scope.tenantId, projectId)).filter((t) => !t.system));
       return { content: JSON.stringify({ types: types.map(projectType), localization }) };
     },
   });
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: ENTITIES_QUERY_TOOL_ID,
       description:
@@ -124,7 +132,7 @@ export function registerEntitiesAgentTools(): void {
       const projectId0 = typeof args.projectId === 'string' && args.projectId ? args.projectId : undefined;
       const typeName0 = typeof args.typeName === 'string' ? args.typeName : '';
       const t0 = await getEntityType(scope.tenantId, projectId0, typeName0);
-      if (t0?.system) {
+      if (t0?.system || !(await runCallerAllows(scope.tenantId, { kind: 'person', subject: scope.actingUserId }, projectId0, 'read'))) {
         return { content: JSON.stringify({ entities: [], note: 'unknown type' }) };
       }
       try {

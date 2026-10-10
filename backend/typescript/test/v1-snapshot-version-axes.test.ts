@@ -32,17 +32,19 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });
 async function call(method: string, path: string, body?: unknown) {
-  const res = await fetch(`${base}${path}`, { method, headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
+  const res = await fetch(`${base}${path}`, { method, headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json', 'OpenWOP-Version': '2' }, body: body === undefined ? undefined : JSON.stringify(body) });
   return { status: res.status, json: (await res.json().catch(() => undefined)) as any };
 }
 
 describe('v1 snapshot carries both version axes (version-negotiation.md §Stamping)', () => {
-  it('a freshly created run reads back on /v1 with eventLogSchemaVersion >= 2 and a numeric engineVersion', async () => {
-    const c = await call('POST', '/v1/runs', { workflowId: 'conformance-noop', input: {} });
-    expect(c.status).toBe(201);
-    const snap = await call('GET', `/v1/runs/${c.json.runId}`);
+  // ADR 0812 P3c-0 — the v1 read leg is replaced by the same assertions on the
+  // major-2 read (the only snapshot this host serves after the cut).
+  it('a freshly created run reads back under major 2 with eventLogSchemaVersion >= 2 and a numeric engineVersion', async () => {
+    const c = await call('POST', '/runs', { workflowId: 'conformance-noop', inputs: {} });
+    expect(c.status, JSON.stringify(c.json)).toBe(201);
+    const snap = await call('GET', `/runs/${encodeURIComponent(c.json.runId)}`);
     expect(snap.status).toBe(200);
-    expect(typeof snap.json.eventLogSchemaVersion, 'era key present on the v1 read').toBe('number');
+    expect(typeof snap.json.eventLogSchemaVersion, 'era key present on the read').toBe('number');
     expect(snap.json.eventLogSchemaVersion, 'a run minted now is not legacy').toBeGreaterThanOrEqual(2);
     expect(typeof snap.json.engineVersion, 'engineVersion stamped at write time').toBe('number');
     expect(snap.json.engineVersion).toBe(CURRENT_ENGINE_VERSION);

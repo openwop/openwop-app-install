@@ -5,6 +5,12 @@
  * territory assignment must be pruned when its CRM deal/company is deleted via
  * the real DELETE routes — plus seam-contract units (keyed re-registration,
  * best-effort error isolation, fire-count).
+ *
+ * SABOTAGE (wave-4 grade-tests probes): drop the territories handler's
+ * `pruneAssignmentsForRecord`, or either `fireCrmRecordDeleted` call in
+ * deals.ts / companies.ts → the matching route case is red; stack instead of
+ * overwrite a keyed slot, rethrow a handler error, or count a FAILED handler in
+ * the returned total → the seam-contract case is red.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -15,6 +21,7 @@ import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { listAssignmentsForModel } from '../src/features/territories/entities/assignment.js';
 import { onCrmRecordDeleted, fireCrmRecordDeleted } from '../src/host/crmRecordLifecycle.js';
+import type { Pipeline } from '../src/features/crm/entities/pipelines.js';
 import { transitionModelViaReview } from './territoryReview.js';
 
 let BASE: string;
@@ -31,41 +38,46 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
-interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res> }
+interface Res<T = unknown> { status: number; body: T }
+// The JSON boundary is untyped; each call site names the body shape it reads.
+interface Client {
+  get: <T = unknown>(p: string) => Promise<Res<T>>;
+  post: <T = unknown>(p: string, b?: unknown) => Promise<Res<T>>;
+  del: (p: string) => Promise<Res>;
+}
 function client(): Client {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T,>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
     const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    return { status: res.status, body: out as T };
   };
-  return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), del: (p) => call('DELETE', p) };
+  return { get: <T,>(p: string) => call<T>('GET', p), post: <T,>(p: string, b?: unknown) => call<T>('POST', p, b), del: (p) => call('DELETE', p) };
 }
 
 let n = 0;
 async function admin(): Promise<{ owner: Client; orgId: string; tenantId: string }> {
   const tenantId = `org:crl-${Date.now()}-${n++}`;
   const owner = client();
-  await owner.post('/v1/host/openwop-app/test/login', { email: `o-${Date.now()}-${n++}@acme.test`, tenantId });
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  await owner.post('/host/openwop-app/test/login', { email: `o-${Date.now()}-${n++}@acme.test`, tenantId });
+  const org = await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return { owner, orgId: org.body.orgId, tenantId };
 }
-const t = (orgId: string): string => `/v1/host/openwop-app/territories/orgs/${encodeURIComponent(orgId)}`;
-const crm = (orgId: string): string => `/v1/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}`;
+const t = (orgId: string): string => `/host/openwop-app/territories/orgs/${encodeURIComponent(orgId)}`;
+const crm = (orgId: string): string => `/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}`;
 
 describe('ADR 0283 — CRM deletion prunes territory assignments', () => {
   it('deal delete via the real route drops its materialized assignment (other assignments intact)', async () => {
     const { owner, orgId, tenantId } = await admin();
-    const pipe = (await owner.get(`${crm(orgId)}/pipelines`)).body.pipelines[0];
-    const stageId = pipe.stages[0].stageId;
-    const big = (await owner.post(`${crm(orgId)}/deals`, { title: 'Big', amount: 5000, pipelineId: pipe.pipelineId, stageId })).body;
-    const big2 = (await owner.post(`${crm(orgId)}/deals`, { title: 'Big2', amount: 7000, pipelineId: pipe.pipelineId, stageId })).body;
+    const pipe = (await owner.get<{ pipelines: Pipeline[] }>(`${crm(orgId)}/pipelines`)).body.pipelines[0]!;
+    const stageId = pipe.stages[0]!.stageId;
+    const big = (await owner.post<{ dealId: string }>(`${crm(orgId)}/deals`, { title: 'Big', amount: 5000, pipelineId: pipe.pipelineId, stageId })).body;
+    const big2 = (await owner.post<{ dealId: string }>(`${crm(orgId)}/deals`, { title: 'Big2', amount: 7000, pipelineId: pipe.pipelineId, stageId })).body;
 
-    const modelId = (await owner.post(`${t(orgId)}/models`, { name: 'Plan' })).body.modelId;
-    const west = (await owner.post(`${t(orgId)}/models/${modelId}/territories`, { name: 'West' })).body;
+    const modelId = (await owner.post<{ modelId: string }>(`${t(orgId)}/models`, { name: 'Plan' })).body.modelId;
+    const west = (await owner.post<{ territoryId: string }>(`${t(orgId)}/models/${modelId}/territories`, { name: 'West' })).body;
     await owner.post(`${t(orgId)}/models/${modelId}/rules`, { target: 'deal', territoryId: west.territoryId, filter: { field: 'amount', op: 'gte', value: 1000 } });
     expect((await transitionModelViaReview(owner, t(orgId), modelId)).status).toBe(200);
 
@@ -83,9 +95,9 @@ describe('ADR 0283 — CRM deletion prunes territory assignments', () => {
 
   it('company delete prunes its assignment too', async () => {
     const { owner, orgId, tenantId } = await admin();
-    const co = (await owner.post(`${crm(orgId)}/companies`, { name: 'AcmeCo', domain: 'acme.test' })).body;
-    const modelId = (await owner.post(`${t(orgId)}/models`, { name: 'Plan' })).body.modelId;
-    const named = (await owner.post(`${t(orgId)}/models/${modelId}/territories`, { name: 'Named' })).body;
+    const co = (await owner.post<{ companyId: string }>(`${crm(orgId)}/companies`, { name: 'AcmeCo', domain: 'acme.test' })).body;
+    const modelId = (await owner.post<{ modelId: string }>(`${t(orgId)}/models`, { name: 'Plan' })).body.modelId;
+    const named = (await owner.post<{ territoryId: string }>(`${t(orgId)}/models/${modelId}/territories`, { name: 'Named' })).body;
     await owner.post(`${t(orgId)}/models/${modelId}/rules`, { target: 'company', territoryId: named.territoryId, filter: { field: 'domain', op: 'contains', value: 'acme' } });
     await transitionModelViaReview(owner, t(orgId), modelId);
 
@@ -99,6 +111,9 @@ describe('ADR 0283 — CRM deletion prunes territory assignments', () => {
 describe('seam contract', () => {
   it('keyed registration overwrites (no duplicate handlers); errors are isolated; count returned', async () => {
     const calls: string[] = [];
+    // The app-booted handlers (territories, unlink consumers, …) also run on this
+    // fire; measure them first so the count below is EXACT, not a floor.
+    const base = await fireCrmRecordDeleted({ tenantId: 't-x', entity: 'contact', recordId: 'c-0' });
     onCrmRecordDeleted('test-a', async () => { calls.push('a-old'); });
     onCrmRecordDeleted('test-a', async () => { calls.push('a-new'); }); // overwrites the slot
     onCrmRecordDeleted('test-boom', async () => { throw new Error('boom'); });
@@ -106,10 +121,9 @@ describe('seam contract', () => {
 
     const ran = await fireCrmRecordDeleted({ tenantId: 't-x', entity: 'contact', recordId: 'c-1' });
     expect(calls).not.toContain('a-old'); // keyed slot was overwritten
-    expect(calls).toContain('a-new');
+    expect(calls.filter((c) => c === 'a-new')).toHaveLength(1);
     expect(calls).toContain('b'); // the throwing handler did not block b
-    // ran counts SUCCESSFUL handlers only (boom excluded); >= 2 because the
-    // app-booted territories handler may also be registered in this process.
-    expect(ran).toBeGreaterThanOrEqual(2);
+    // ran counts SUCCESSFUL handlers only: the app's own + a-new + b (boom excluded).
+    expect(ran).toBe(base + 2);
   });
 });

@@ -67,7 +67,7 @@ function client() {
 type Client = ReturnType<typeof client>;
 
 async function signIn(c: Client, email: string): Promise<string> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email });
+  const r = await c.post('/host/openwop-app/test/login', { email });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user.userId as string;
 }
@@ -75,28 +75,28 @@ async function signIn(c: Client, email: string): Promise<string> {
 /** A REAL `ws:` shared workspace, created + owned + switched into through the
  *  routes. The switch is what makes active !== personal. */
 async function sharedWorkspace(c: Client): Promise<string> {
-  const ws = await c.post('/v1/host/openwop-app/workspaces', { name: `Twin WS ${n++}` });
+  const ws = await c.post('/host/openwop-app/workspaces', { name: `Twin WS ${n++}` });
   expect(ws.status, JSON.stringify(ws.body)).toBe(201);
   expect(ws.body.workspaceId, 'must be a real shared workspace, not a personal tenant').toMatch(/^ws:/);
-  const sw = await c.post(`/v1/host/openwop-app/workspaces/${encodeURIComponent(ws.body.workspaceId)}/switch`);
+  const sw = await c.post(`/host/openwop-app/workspaces/${encodeURIComponent(ws.body.workspaceId)}/switch`);
   expect(sw.status, JSON.stringify(sw.body)).toBe(200);
   return ws.body.workspaceId as string;
 }
 
 async function joinAsMember(owner: Client, ws: string, joiner: Client, email: string, role: string): Promise<string> {
-  const invite = await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(ws)}/invites`, { email, role });
+  const invite = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(ws)}/invites`, { email, role });
   expect(invite.status, JSON.stringify(invite.body)).toBe(201);
   const userId = await signIn(joiner, email);
-  const accepted = await joiner.post('/v1/host/openwop-app/orgs/invitations/accept', { token: invite.body.token });
+  const accepted = await joiner.post('/host/openwop-app/orgs/invitations/accept', { token: invite.body.token });
   expect(accepted.status, JSON.stringify(accepted.body)).toBe(201);
-  const sw = await joiner.post(`/v1/host/openwop-app/workspaces/${encodeURIComponent(ws)}/switch`);
+  const sw = await joiner.post(`/host/openwop-app/workspaces/${encodeURIComponent(ws)}/switch`);
   expect(sw.status, JSON.stringify(sw.body)).toBe(200);
   return userId;
 }
 
-const twin = (id: string): string => `/v1/host/openwop-app/agents/${encodeURIComponent(id)}/twin`;
-const GRANTS = '/v1/host/openwop-app/profiles/me/twin-grants';
-const MEM = '/v1/host/openwop-app/profiles/me/memory';
+const twin = (id: string): string => `/host/openwop-app/agents/${encodeURIComponent(id)}/twin`;
+const GRANTS = '/host/openwop-app/profiles/me/twin-grants';
+const MEM = '/host/openwop-app/profiles/me/memory';
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -128,7 +128,7 @@ async function wsFixture(): Promise<{ owner: Client; member: Client; memberId: s
   const memberId = await joinAsMember(owner, ws, member, `tw-ws-member-${n++}@acme.test`, 'editor');
   const memberHome = (await getUser(memberId))!.tenantId;
   expect(memberHome, 'the fixture is worthless unless HOME really differs from ACTIVE').not.toBe(ws);
-  const r = await owner.post('/v1/host/openwop-app/roster', { persona: 'Aide', agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
+  const r = await owner.post('/host/openwop-app/roster', { persona: 'Aide', agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return { owner, member, memberId, memberHome, ws, rosterId: r.body.rosterId };
 }
@@ -176,7 +176,7 @@ describe('WF-TWIN-1 — the consent grant is issuable inside a shared workspace'
     const ws = await sharedWorkspace(owner);
     const viewer = client();
     const viewerId = await joinAsMember(owner, ws, viewer, `tw-ws-viewer-${n++}@acme.test`, 'viewer');
-    const r = await owner.post('/v1/host/openwop-app/roster', { persona: 'Aide', agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
+    const r = await owner.post('/host/openwop-app/roster', { persona: 'Aide', agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
     expect(r.status).toBe(201);
     const res = await viewer.put(twin(r.body.rosterId), { userId: viewerId });
     expect(res.status, JSON.stringify(res.body)).toBe(403);
@@ -239,7 +239,7 @@ describe('WF-TWIN-3 — a DSAR from a shared workspace reaches the subject\'s pe
     expect((await listSubjectNotes(memberHome, { kind: 'user', id: memberId })).length).toBe(1);
 
     const del = await owner.del(
-      `/v1/host/openwop-app/consent/orgs/${encodeURIComponent(ws)}/subjects/${encodeURIComponent(memberId)}`,
+      `/host/openwop-app/consent/orgs/${encodeURIComponent(ws)}/subjects/${encodeURIComponent(memberId)}`,
     );
     expect(del.status, JSON.stringify(del.body)).toBe(200);
 
@@ -269,7 +269,7 @@ describe('WF-TWIN-3 — a DSAR from a shared workspace reaches the subject\'s pe
     expect((await listSubjectNotes(home, { kind: 'user', id: userId })).length).toBe(1);
 
     const del = await c.del(
-      `/v1/host/openwop-app/consent/orgs/${encodeURIComponent(home)}/subjects/${encodeURIComponent(userId)}`,
+      `/host/openwop-app/consent/orgs/${encodeURIComponent(home)}/subjects/${encodeURIComponent(userId)}`,
     );
     expect(del.status, JSON.stringify(del.body)).toBe(200);
     expect(await listSubjectNotes(home, { kind: 'user', id: userId })).toEqual([]);
@@ -280,7 +280,7 @@ describe('WF-TWIN-3 — a DSAR from a shared workspace reaches the subject\'s pe
   it('a fan-out that reaches NOTHING is not recorded as erasure_complete', async () => {
     const { owner, ws } = await wsFixture();
     const del = await owner.del(
-      `/v1/host/openwop-app/consent/orgs/${encodeURIComponent(ws)}/subjects/${encodeURIComponent('user:nobody-at-all')}`,
+      `/host/openwop-app/consent/orgs/${encodeURIComponent(ws)}/subjects/${encodeURIComponent('user:nobody-at-all')}`,
     );
     expect(del.status, JSON.stringify(del.body)).toBe(200);
     // Nothing FAILED — so the request is still `allow`/`ok`. But nothing was

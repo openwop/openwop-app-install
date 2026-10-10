@@ -1,5 +1,6 @@
 /**
- * ADR 0627 D1 — the 13 `feature.crm.nodes` WRITE nodes must never re-execute on
+ * ADR 0627 D1 — the 14 `feature.crm.nodes` WRITE nodes (13 + ADR 0837's
+ * record-triage) must never re-execute on
  * a `mode:'replay'` fork. The `users-node-replay.test.ts` shape.
  *
  * WHY (CRMWF-1): at 1.9.0 the 13 write nodes were `role:"action"` with no
@@ -12,8 +13,10 @@
  * classification is the guard, and this file asserts the guard on every leg.
  *
  * Legs:
- *   1. the manifest declares `side-effect` + `side-effectful` for all 13 (and
- *      ONLY those: the 9 reads stay `action`, the 4 pure nodes `pure`);
+ *   1. the manifest declares `side-effect` + `side-effectful` for all 14 (and
+ *      ONLY those: the 10 reads stay `action`, the 4 pure nodes `pure`), and
+ *      EVERY manifest node is in exactly one of those lists (+ gmail-sync) — a
+ *      partition, not a literal node count or version that churns per bump;
  *   2. the derived floor holds them AND the fast path SERVES them (membership
  *      alone is undischarged — ADR 0572);
  *   3. `isSideEffectingNode` — the exact predicate `executor.ts` branches on —
@@ -32,13 +35,18 @@
  * — the fork re-executes `create-task` under its own runId and a second row
  * appears. Verified by flipping the role back (the sabotage pass in the ADR's
  * P3 record).
+ *
+ * Re-witnessed by grade-tests w4: create-task's manifest role flipped to
+ * `action`, update-contact-stage dropped from the generated floor, the
+ * predicate skipping `feature.crm.*`, an open output schema, a stale `$id`
+ * version, and a feature pin off the manifest version each turn a case red.
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 // `index.js` FIRST (see users-node-replay.test.ts — feature-module import order).
 import { createApp } from '../src/index.js';
 import { MANIFEST_SIDE_EFFECT_FLOOR, MANIFEST_FAST_PATH_SERVED } from '../src/executor/sideEffectFloor.generated.js';
@@ -49,11 +57,12 @@ import { registerWorkflow } from '../src/host/workflowsRegistry.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { getSetCookies } from './headerCookies.js';
+import { bareRunId } from './support/bareRunId.js';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '../../..');
 const PACK_DIR = join(REPO, 'packs/feature.crm.nodes');
 
-/** The 13 write nodes ADR 0627 D1 classifies. */
+/** The 14 write nodes ADR 0627 D1 classifies (13 + ADR 0837 D7's record-triage). */
 export const CRM_WRITE_NODES = [
   'feature.crm.nodes.create-contact',
   'feature.crm.nodes.update-contact-stage',
@@ -68,6 +77,7 @@ export const CRM_WRITE_NODES = [
   'feature.crm.nodes.persist-segment',
   'feature.crm.nodes.booking-create-link',
   'feature.crm.nodes.sign-request',
+  'feature.crm.nodes.record-triage', // ADR 0837 D7
 ] as const;
 const READ_NODES = [
   'feature.crm.nodes.list-companies',
@@ -79,8 +89,10 @@ const READ_NODES = [
   'feature.crm.nodes.list-segment-members',
   'feature.crm.nodes.booking-list',
   'feature.crm.nodes.sign-status',
+  'feature.crm.nodes.get-contact', // ADR 0837 D7
 ] as const;
 const PURE_NODES = ['feature.crm.nodes.triage', 'feature.crm.nodes.triage-enriched', 'feature.crm.nodes.segment-vocabulary', 'feature.crm.nodes.validate-segment'] as const;
+const GMAIL_SYNC = 'feature.crm.nodes.gmail-sync'; // side-effect since 1.4.0, classified on its own (ADR 0252)
 
 interface Manifest {
   name: string;
@@ -90,10 +102,16 @@ interface Manifest {
 const manifest = JSON.parse(readFileSync(join(PACK_DIR, 'pack.json'), 'utf8')) as Manifest;
 const byId = new Map(manifest.nodes.map((n) => [n.typeId, n]));
 
-describe('ADR 0627 D1 — the 13 CRM write nodes are classified, on every leg', () => {
-  it('the manifest names exactly 27 nodes: 13 side-effect writes, 9 action reads, 4 pure (+ gmail-sync, side-effect since 1.4.0)', () => {
-    expect(manifest.nodes).toHaveLength(27);
-    expect(manifest.version).toBe('1.10.0');
+describe('ADR 0627 D1 — the 14 CRM write nodes are classified, on every leg', () => {
+  it('every manifest node is classified exactly once: 14 side-effect writes, 10 action reads, 4 pure (+ gmail-sync, side-effect since 1.4.0) — ADR 0837 D7 added record-triage + get-contact', () => {
+    // A PARTITION: every manifest node is classified exactly once. (This was a
+    // literal `29` + version `'1.11.0'` — numbers that churned on every pack
+    // bump and could not catch an unclassified new node that replaced another.)
+    const lists: readonly (readonly string[])[] = [CRM_WRITE_NODES, READ_NODES, PURE_NODES, [GMAIL_SYNC]];
+    const classified = lists.flat();
+    expect(new Set(classified).size, 'a node is listed in two classifications').toBe(classified.length);
+    expect(manifest.nodes.map((n) => n.typeId).filter((id) => !classified.includes(id)), 'unclassified manifest nodes').toEqual([]);
+    expect(classified.filter((id) => !byId.has(id)), 'classified ids missing from the manifest').toEqual([]);
     for (const id of CRM_WRITE_NODES) {
       const node = byId.get(id);
       expect(node, `${id} not found in the manifest — this test would pass vacuously`).toBeTruthy();
@@ -105,10 +123,10 @@ describe('ADR 0627 D1 — the 13 CRM write nodes are classified, on every leg', 
       expect(byId.get(id)?.capabilities ?? [], id).not.toContain('side-effectful');
     }
     for (const id of PURE_NODES) expect(byId.get(id)?.role, id).toBe('pure');
-    expect(byId.get('feature.crm.nodes.gmail-sync')?.capabilities).toContain('side-effectful');
+    expect(byId.get(GMAIL_SYNC)?.capabilities).toContain('side-effectful');
   });
 
-  it('the derived floor holds all 13 AND the fast path SERVES all 13 (membership alone is undischarged)', () => {
+  it('the derived floor holds all 14 AND the fast path SERVES all 14 (membership alone is undischarged)', () => {
     for (const id of CRM_WRITE_NODES) {
       expect(MANIFEST_SIDE_EFFECT_FLOOR.has(id), `${id} not in the derived floor`).toBe(true);
       expect(MANIFEST_FAST_PATH_SERVED.has(id), `${id} held but NOT served — undischarged`).toBe(true);
@@ -118,13 +136,13 @@ describe('ADR 0627 D1 — the 13 CRM write nodes are classified, on every leg', 
     for (const id of READ_NODES) expect(MANIFEST_SIDE_EFFECT_FLOOR.has(id), `${id} is a read`).toBe(false);
   });
 
-  it('isSideEffectingNode — the exact predicate executor.ts branches on — returns true for all 13 and false for the reads', () => {
+  it('isSideEffectingNode — the exact predicate executor.ts branches on — returns true for all 14 and false for the reads', () => {
     for (const id of CRM_WRITE_NODES) expect(isSideEffectingNode(id, null), id).toBe(true);
     for (const id of READ_NODES) expect(isSideEffectingNode(id, null), id).toBe(false);
   });
 });
 
-describe('ADR 0627 D1 — pack shape: ADR 0525 schemas on the 13 writes; the feature pin', () => {
+describe('ADR 0627 D1 — pack shape: ADR 0525 schemas on the 14 writes; the feature pin', () => {
   it('every write node declares input + output refs resolving to files with the <pack>/<version>/<file> $id', () => {
     for (const id of CRM_WRITE_NODES) {
       const node = byId.get(id)!;
@@ -163,18 +181,20 @@ describe('BEHAVIOURAL — a replay :fork of create-task is served the recorded o
   let BASE = '';
   let cookie = '';
   const TENANT = `org:crm625-replay-${Date.now()}`;
-  const call = async (method: string, path: string, body?: unknown): Promise<{ status: number; body: any }> => {
+  interface Body { runId: string; status: string; error: unknown; orgId: string; events: Array<{ type: string; nodeId?: string; payload?: { outputs?: { success?: boolean; task?: { taskId?: string; title?: string } } } }> }
+  const call = async (method: string, path: string, body?: unknown): Promise<{ status: number; body: Body }> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    return { status: res.status, body: await res.json().catch(() => undefined) };
+    return { status: res.status, body: (await res.json().catch(() => undefined)) as Body }; // json() is untyped: the one boundary narrowing
   };
   const settleRun = async (runId: string): Promise<string> => {
+    // A run-settle wait has no hook to await (the executor runs detached): poll
+    // the run snapshot until it is terminal — the honest ceiling, not a sleep.
     let snap: { status?: string; error?: unknown } = {};
-    for (let i = 0; i < 200; i++) {
-      snap = (await call('GET', `/v1/runs/${runId}`)).body ?? snap;
-      if (['completed', 'failed', 'cancelled'].includes(snap.status ?? '')) break;
-      await new Promise((r) => setTimeout(r, 25));
-    }
+    await vi.waitFor(async () => {
+      snap = (await call('GET', `/runs/${runId}`)).body ?? snap;
+      expect(['completed', 'failed', 'cancelled']).toContain(snap.status ?? '');
+    }, { timeout: 5000, interval: 25 });
     return snap.status === 'completed' ? 'completed' : `${snap.status}:${JSON.stringify(snap.error)}`;
   };
 
@@ -192,9 +212,9 @@ describe('BEHAVIOURAL — a replay :fork of create-task is served the recorded o
   afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
   it('live run → ONE task keyed task:<runId>:n1; replay fork → still ONE task, and the fork completed with the SOURCE outputs', async () => {
-    const login = await call('POST', '/v1/host/openwop-app/test/login', { email: 'crm625-replay-owner@acme.test', tenantId: TENANT });
+    const login = await call('POST', '/host/openwop-app/test/login', { email: 'crm625-replay-owner@acme.test', tenantId: TENANT });
     expect(login.status, JSON.stringify(login.body)).toBe(201);
-    const org = await call('POST', '/v1/host/openwop-app/orgs', { name: 'Acme' });
+    const org = await call('POST', '/host/openwop-app/orgs', { name: 'Acme' });
     expect(org.status, JSON.stringify(org.body)).toBe(201);
     const orgId = org.body.orgId as string;
 
@@ -202,32 +222,32 @@ describe('BEHAVIOURAL — a replay :fork of create-task is served the recorded o
     const title = 'Follow up with the replay-witness lead';
     registerWorkflow({ workflowId, nodes: [{ nodeId: 'n1', typeId: 'feature.crm.nodes.create-task', config: { orgId, title } }], edges: [] });
 
-    const create = await call('POST', '/v1/runs', { workflowId, inputs: {} });
+    const create = await call('POST', '/runs', { workflowId, inputs: {} });
     expect(create.status, JSON.stringify(create.body)).toBe(201);
     const runId = create.body.runId as string;
     expect(await settleRun(runId)).toBe('completed');
 
     const afterLive = await listTasks(TENANT, orgId);
-    expect(afterLive.map((t) => t.taskId)).toEqual([`task:${runId}:n1`]);
+    expect(afterLive.map((t) => t.taskId)).toEqual([`task:${bareRunId(runId)}:n1`]);
 
     // The fork runs under its OWN runId — so `idFor` alone would mint
     // `task:<forkRunId>:n1`. Only the side-effect classification (the fast path
     // serving the recorded outcome) keeps the count at one.
-    const fork = await call('POST', `/v1/runs/${runId}:fork`, { mode: 'replay' });
+    const fork = await call('POST', `/runs/${runId}:fork`, { mode: 'replay' });
     expect(fork.status, JSON.stringify(fork.body)).toBe(201);
     const forkRunId = fork.body.runId as string;
     expect(forkRunId).not.toBe(runId);
     expect(await settleRun(forkRunId)).toBe('completed');
 
     const afterFork = await listTasks(TENANT, orgId);
-    expect(afterFork.map((t) => t.taskId), 'a replay fork re-executed create-task — the classification is not guarding it').toEqual([`task:${runId}:n1`]);
+    expect(afterFork.map((t) => t.taskId), 'a replay fork re-executed create-task — the classification is not guarding it').toEqual([`task:${bareRunId(runId)}:n1`]);
 
     // The fork's node completed WITH the recorded outputs: the SOURCE run's id.
-    const bundle = await call('GET', `/v1/runs/${forkRunId}/debug-bundle`);
-    const done = ((bundle.body?.events as Array<{ type: string; nodeId?: string; payload?: { outputs?: { success?: boolean; task?: { taskId?: string; title?: string } } } }>) ?? [])
+    const bundle = await call('GET', `/host/openwop-app/runs/${bareRunId(forkRunId)}/debug-bundle`);
+    const done = (bundle.body?.events ?? [])
       .find((e) => e.type === 'node.completed' && e.nodeId === 'n1');
     expect(done?.payload?.outputs?.success).toBe(true);
-    expect(done?.payload?.outputs?.task?.taskId).toBe(`task:${runId}:n1`);
+    expect(done?.payload?.outputs?.task?.taskId).toBe(`task:${bareRunId(runId)}:n1`);
     expect(done?.payload?.outputs?.task?.title).toBe(title);
   });
 });

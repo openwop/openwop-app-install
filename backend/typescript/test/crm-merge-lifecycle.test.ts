@@ -19,6 +19,11 @@
  * Every case asserts the OUTCOME (`isAllowed` / the pending audience the sender
  * computes), never merely that a handler ran. A handler-ran assertion would have
  * passed against a handler that moved nothing.
+ *
+ * Sabotage-witnessed (grade-tests w4): the fold made latest-wins, an absent
+ * channel folded in as a denial, the consent merge handler unregistered, the
+ * `mergedFrom` stamp dropped, and the ledger relink's tenant boundary removed
+ * each turn the matching case red.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -32,7 +37,7 @@ import {
   recordConsent, getConsent, isAllowed, __resetConsentStore,
 } from '../src/features/consent/consentService.js';
 import { listSends, __resetEmailStore } from '../src/features/email/emailService.js';
-import { __hostExtStorage } from '../src/host/hostExtPersistence.js';
+import { DurableCollection } from '../src/host/hostExtPersistence.js';
 
 const T = 'crm-merge-lifecycle-tenant';
 let server: http.Server;
@@ -55,15 +60,17 @@ beforeAll(async () => {
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 afterEach(async () => { await __resetCrmStore(); await __resetConsentStore(); await __resetEmailStore(); });
 
-/** Write a send-log row directly — the shape `sendCampaign` writes for a delivered
- *  recipient. Going through a full campaign send would need a provider and adds
- *  nothing: the property under test is the LEDGER's contact key. */
+/** Write a send-log row the way the email feature's own collection does — the
+ *  shape `sendCampaign` writes for a delivered recipient, through the same
+ *  `email:sendlog` collection (row + tenant-index marker). Going through a full
+ *  campaign send would need a provider and adds nothing: the property under test
+ *  is the LEDGER's contact key. (It used to `kvSet` the raw row, skipping the
+ *  marker, and only read back because `__resetEmailStore` cleared the backfill
+ *  sentinel between cases.) */
+interface SendLogRow { sendId: string; tenantId: string; campaignId: string; contactId: string; status: string; ts: string }
+const sendLogs = new DurableCollection<SendLogRow>('email:sendlog', (s) => s.sendId, undefined, (s) => s.tenantId);
 async function writeSendLog(tenantId: string, campaignId: string, contactId: string, sendId: string): Promise<void> {
-  const storage = __hostExtStorage();
-  if (!storage) throw new Error('host-ext storage must be initialized');
-  await storage.kvSet(`hostext:email:sendlog:${sendId}`, JSON.stringify({
-    sendId, tenantId, campaignId, contactId, status: 'sent', ts: new Date().toISOString(),
-  }));
+  await sendLogs.put({ sendId, tenantId, campaignId, contactId, status: 'sent', ts: new Date().toISOString() });
 }
 
 async function twoContacts(): Promise<{ survivorId: string; sourceId: string }> {

@@ -34,30 +34,30 @@ function client() {
   return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b) };
 }
 let n = 0;
-async function owner() { const c = client(); const r = await c.post('/v1/host/openwop-app/test/login', { email: `ai-${Date.now()}-${n++}@a.test`, tenantId: `org:ai-${Date.now()}-${n++}` }); expect(r.status).toBe(201); return c; }
+async function owner() { const c = client(); const r = await c.post('/host/openwop-app/test/login', { email: `ai-${Date.now()}-${n++}@a.test`, tenantId: `org:ai-${Date.now()}-${n++}` }); expect(r.status).toBe(201); return c; }
 const enable = async (id: string) => { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status: 'on' }, 'test'); };
 
 describe('CDP-C audience insights', () => {
   it('estimate, insights, and overlap over live membership', async () => {
     await enable('crm');
     const c = await owner();
-    await c.post('/v1/host/openwop-app/crm/contacts', { name: 'C1', email: 'c1@x.test', stage: 'customer' });
-    await c.post('/v1/host/openwop-app/crm/contacts', { name: 'C2', email: 'c2@x.test', stage: 'customer' });
-    await c.post('/v1/host/openwop-app/crm/contacts', { name: 'L1', stage: 'lead' }); // no email
+    await c.post('/host/openwop-app/crm/contacts', { name: 'C1', email: 'c1@x.test', stage: 'customer' });
+    await c.post('/host/openwop-app/crm/contacts', { name: 'C2', email: 'c2@x.test', stage: 'customer' });
+    await c.post('/host/openwop-app/crm/contacts', { name: 'L1', stage: 'lead' }); // no email
 
-    const customers = (await c.post('/v1/host/openwop-app/crm/segments', { name: 'customers', filters: [{ field: 'stage', op: 'eq', value: 'customer' }] })).body;
-    const all = (await c.post('/v1/host/openwop-app/crm/segments', { name: 'all', filters: [] })).body;
+    const customers = (await c.post('/host/openwop-app/crm/segments', { name: 'customers', filters: [{ field: 'stage', op: 'eq', value: 'customer' }] })).body;
+    const all = (await c.post('/host/openwop-app/crm/segments', { name: 'all', filters: [] })).body;
 
-    const est = await c.get(`/v1/host/openwop-app/crm/segments/${customers.segmentId}/estimate`);
+    const est = await c.get(`/host/openwop-app/crm/segments/${customers.segmentId}/estimate`);
     expect(est.body.size).toBe(2);
 
-    const ins = await c.get(`/v1/host/openwop-app/crm/segments/${customers.segmentId}/insights`);
+    const ins = await c.get(`/host/openwop-app/crm/segments/${customers.segmentId}/insights`);
     expect(ins.body.size).toBe(2);
     expect(ins.body.byStage.customer).toBe(2);
     expect(ins.body.withEmail).toBe(2);
     expect(ins.body.avgPropensity).toBeGreaterThan(0);
 
-    const overlap = await c.get(`/v1/host/openwop-app/crm/segments-overlap?a=${customers.segmentId}&b=${all.segmentId}`);
+    const overlap = await c.get(`/host/openwop-app/crm/segments-overlap?a=${customers.segmentId}&b=${all.segmentId}`);
     expect(overlap.body).toEqual({ sizeA: 2, sizeB: 3, intersection: 2 });
   });
 });

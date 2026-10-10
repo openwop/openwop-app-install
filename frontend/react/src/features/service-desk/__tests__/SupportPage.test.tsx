@@ -14,6 +14,13 @@
  * code, so every server sentence was replaced by a status line.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
+
+// ADR 0768 D5 — stub the Pocket so the page test reads WHICH agent and WHAT scope it mounts.
+vi.mock('../../../chat/ChatPocket.js', () => ({
+  ChatPocket: ({ agentId, contextLabel }: { agentId: string; contextLabel?: unknown }) => (
+    <div data-testid="pocket" data-agent={agentId}>{contextLabel as string}</div>
+  ),
+}));
 import { render, screen, cleanup, act, fireEvent } from '@testing-library/react';
 
 const { listSupportTickets, getSupportTicket, getIntakeConfig, setIntakeOrg, listOrgs } = vi.hoisted(() => ({
@@ -104,5 +111,14 @@ describe('SD-G3 — the client keeps the server sentence', () => {
     await expect(postTicketMessage('o1', 't1', 'hi', 'outbound'))
       .rejects.toThrow('This ticket is closed — reopen it before replying.');
     vi.unstubAllGlobals();
+  });
+});
+
+describe('ADR 0768 D5 — the feature assistant Pocket', () => {
+  it('mounts this feature\'s agent with an honest scope (orgs the caller can read)', async () => {
+    render(<SupportPage />);
+    const pocket = await screen.findByTestId('pocket');
+    expect(pocket.getAttribute('data-agent')).toBe('vendor.openwop-app.service-desk.agents.support');
+    expect(pocket.textContent).toBe('tickets in organizations you can read');
   });
 });

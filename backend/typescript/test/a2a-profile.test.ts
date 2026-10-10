@@ -147,7 +147,7 @@ describe('ADR 0552 P0/P2 — the Agent Card does not re-hard-code the version', 
   it('P2 — the 0.3 card keeps its own shape and its own version', () => {
     const card = buildA2aCard03('https://h.test') as Record<string, unknown>;
     expect(card.protocolVersion).toBe('0.3');
-    expect(card.url).toBe('https://h.test/v1/host/openwop-app/a2a');
+    expect(card.url).toBe('https://h.test/host/openwop-app/a2a');
     expect(card.supportedInterfaces).toBeUndefined();
   });
 });

@@ -53,7 +53,7 @@ describe('ADR 0440 P2 — fork after an edit removed a recorded node', () => {
 
   it('the edit is ACCEPTED and the fork still resolves the new shape', async () => {
     // 1. A two-node workflow.
-    const created = await api('/v1/host/openwop-app/workflows', {
+    const created = await api('/host/openwop-app/workflows', {
       method: 'POST',
       body: JSON.stringify({
         workflowId: WF,
@@ -68,14 +68,14 @@ describe('ADR 0440 P2 — fork after an edit removed a recorded node', () => {
     expect(created.status, JSON.stringify(created.body)).toBe(201);
 
     // 2. Run it, so the definition is REFERENCED and events record both nodes.
-    const run = await api('/v1/runs', { method: 'POST', body: JSON.stringify({ workflowId: WF, inputs: {} }) });
+    const run = await api('/runs', { method: 'POST', body: JSON.stringify({ workflowId: WF, inputs: {} }) });
     expect(run.status, JSON.stringify(run.body)).toBe(201);
     const runId = (run.body?.runId ?? (run.body?.run as { runId?: string } | undefined)?.runId) as string;
     expect(runId).toBeTruthy();
 
     // 3. Edit it the way the builder would: drop `second`. THIS is the write
     //    P2 proposed to refuse.
-    const edited = await api('/v1/host/openwop-app/workflows', {
+    const edited = await api('/host/openwop-app/workflows', {
       method: 'POST',
       body: JSON.stringify({
         workflowId: WF,
@@ -90,12 +90,12 @@ describe('ADR 0440 P2 — fork after an edit removed a recorded node', () => {
     ).toBe(201);
 
     // 4. The definition still resolves, in its new shape.
-    const def = await api(`/v1/workflows/${WF}`);
+    const def = await api(`/workflows/${WF}`);
     expect(def.status).toBe(200);
     expect((def.body?.nodes as Array<{ nodeId: string }>).map((n) => n.nodeId)).toEqual(['first']);
 
     // 5. And the historical run is still readable — the edit did not orphan it.
-    const readBack = await api(`/v1/runs/${runId}`);
+    const readBack = await api(`/runs/${runId}`);
     expect(readBack.status).toBe(200);
     expect(readBack.body?.workflowId).toBe(WF);
 
@@ -112,13 +112,13 @@ describe('ADR 0440 P2 — fork after an edit removed a recorded node', () => {
       nodes: [{ nodeId: 'only', typeId: 'core.noop', config: {} }],
       edges: [],
     };
-    expect((await api('/v1/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify(body) })).status).toBe(201);
-    const run = await api('/v1/runs', { method: 'POST', body: JSON.stringify({ workflowId: WF2, inputs: {} }) });
+    expect((await api('/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify(body) })).status).toBe(201);
+    const run = await api('/runs', { method: 'POST', body: JSON.stringify({ workflowId: WF2, inputs: {} }) });
     expect(run.status).toBe(201);
 
     // A rename — the overwhelmingly common autosave. No node dropped, so no
     // disclosure AND no run probe (the probe is gated on the id set shrinking).
-    const renamed = await api('/v1/host/openwop-app/workflows', {
+    const renamed = await api('/host/openwop-app/workflows', {
       method: 'POST',
       body: JSON.stringify({ ...body, metadata: { name: 'Renamed' } }),
     });
@@ -139,8 +139,8 @@ describe('ADR 0440 P2 — fork after an edit removed a recorded node', () => {
       nodes: [{ nodeId: 'ran', typeId: 'core.noop', config: {} }],
       edges: [],
     };
-    expect((await api('/v1/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify(base) })).status).toBe(201);
-    expect((await api('/v1/runs', { method: 'POST', body: JSON.stringify({ workflowId: WF4, inputs: {} }) })).status).toBe(201);
+    expect((await api('/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify(base) })).status).toBe(201);
+    expect((await api('/runs', { method: 'POST', body: JSON.stringify({ workflowId: WF4, inputs: {} }) })).status).toBe(201);
 
     // Add a node AFTER the run, then remove it. No run ever recorded it.
     const withExtra = {
@@ -148,8 +148,8 @@ describe('ADR 0440 P2 — fork after an edit removed a recorded node', () => {
       nodes: [...base.nodes, { nodeId: 'never-ran', typeId: 'core.noop', config: {} }],
       edges: [{ edgeId: 'e1', sourceNodeId: 'ran', targetNodeId: 'never-ran' }],
     };
-    expect((await api('/v1/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify(withExtra) })).status).toBe(201);
-    const removed = await api('/v1/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify(base) });
+    expect((await api('/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify(withExtra) })).status).toBe(201);
+    const removed = await api('/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify(base) });
     expect(removed.status).toBe(201);
     expect(
       removed.body?.removedReferencedNodeIds,
@@ -168,10 +168,10 @@ describe('ADR 0440 P2 — fork after an edit removed a recorded node', () => {
       ],
       edges: [{ edgeId: 'e1', sourceNodeId: 'a', targetNodeId: 'b' }],
     };
-    expect((await api('/v1/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify(two) })).status).toBe(201);
+    expect((await api('/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify(two) })).status).toBe(201);
 
     // No runs reference it, so dropping a node costs nothing and must be silent.
-    const trimmed = await api('/v1/host/openwop-app/workflows', {
+    const trimmed = await api('/host/openwop-app/workflows', {
       method: 'POST',
       body: JSON.stringify({ ...two, nodes: [two.nodes[0]], edges: [] }),
     });

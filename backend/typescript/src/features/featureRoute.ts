@@ -8,12 +8,14 @@
 import type { Request } from 'express';
 import { OpenwopError } from '../types.js';
 import { requestOrigin } from '../host/requestOrigin.js';
-import { resolveOne } from '../host/featureToggles/service.js';
+import { resolveToggle } from '../host/featureToggles/service.js';
+import { isListedSuperadmin } from '../host/superadmin.js';
 import { isSellableBundleFeature } from '../host/featureBundles.js';
 import { checkEntitlement } from '../host/entitlementSeam.js';
 import type { ResolvedAssignment, ToggleSubject } from '../host/featureToggles/types.js';
 import { assertOrgScope, assertTenantScope, resolveSubjectScopesUnion, type Scope } from '../host/accessControlService.js';
 import { callerSubject, isOwnPersonalWorkspace, personalTenantOf } from '../host/requestSubject.js';
+import { credentialScopesIn, keyDeclarationPermits } from '../host/protocolAuthorization.js';
 import { resolveCallerUser } from './users/usersGuards.js';
 import type { User } from './users/usersService.js';
 import { VENDOR_ROOT } from '../middleware/protocolVersion.js';
@@ -27,7 +29,20 @@ export function tenantOf(req: Request): string {
 export function toggleSubjectOf(req: Request): ToggleSubject {
   const subject: ToggleSubject = { tenantId: tenantOf(req) };
   if (req.principal?.principalId) subject.userId = req.principal.principalId;
+  // ADR 0819 §1 — the listed operator keeps every feature in any workspace they
+  // act in (the person-level exemption `requireEntitledFeature` already grants),
+  // so a lane resolving through `resolveOne` with this subject does not paywall them.
+  if (isListedSuperadmin(req)) subject.planExempt = true;
   return subject;
+}
+
+/** ADR 0820 §7 / G6 — the launch subject for the owning-feature run-start gate:
+ *  the caller's user + operator plan exemption, WITHOUT the tenant (a launch
+ *  names its own target tenant, which may differ from `req.tenantId` for an
+ *  operator). */
+export function launchSubjectOf(req: Request): Omit<ToggleSubject, 'tenantId'> {
+  const { tenantId: _tenant, ...rest } = toggleSubjectOf(req);
+  return rest;
 }
 
 /**
@@ -36,7 +51,10 @@ export function toggleSubjectOf(req: Request): ToggleSubject {
  * the feature in the error message.
  */
 export async function requireFeatureEnabled(req: Request, toggleId: string, label: string): Promise<ResolvedAssignment> {
-  const assignment = await resolveOne(toggleId, toggleSubjectOf(req));
+  // ADR 0819 §1 — the TOGGLE only here: the plan is checked just below through
+  // `checkEntitlement`, which keeps this route's distinct 403 (the FE renders it
+  // as the upgrade lock) instead of the 404 an access-resolved "off" would give.
+  const assignment = await resolveToggle(toggleId, toggleSubjectOf(req));
   if (!assignment || !assignment.enabled) {
     throw new OpenwopError('not_found', `${label} is not enabled for this tenant.`, 404, { feature: toggleId });
   }
@@ -303,4 +321,62 @@ export async function requireTenantScope(req: Request, scope: Scope): Promise<vo
     personalTenant: personalTenantOf(req),
     wildcardOperator: req.principal?.tenants?.includes('*') === true,
   });
+}
+
+/**
+ * Every spelling of the caller an authority check must try (ADR 0774 D5, moved
+ * here by ADR 0775 D1 so kanban and the agent routes share ONE copy). This app
+ * has two spellings of one human in play: an unbound OIDC bearer presents the
+ * legacy `oidc:<sub>` principal, and the canonical identity is `user:<userId>`
+ * (ADR 0003). MEASURED: BOTH key real memberships — a shared workspace created
+ * by an unbound OIDC caller records its OWNER as `oidc:<sub>`, while the
+ * personal workspace's owner is keyed `user:<userId>`. So checking only the
+ * canonical spelling refuses that owner, and checking only the raw principal
+ * refuses an editor added by canonical id. A person (`auth.kind === 'subject'`)
+ * is therefore judged by the UNION of both, the canonical one resolved exactly
+ * as `requireOrgScope` resolves it. Credentials (env / `owk_` keys) are read by
+ * provenance and have one spelling.
+ */
+export async function callerSubjectSpellings(req: Request): Promise<string[]> {
+  const raw = callerSubject(req);
+  if (req.principal?.auth?.kind !== 'subject') return raw ? [raw] : [];
+  let canonical: string | undefined;
+  try {
+    canonical = (await resolveCallerUser(req)).userId;
+  } catch {
+    canonical = undefined;
+  }
+  return [...new Set([canonical, raw].filter((s): s is string => Boolean(s)))];
+}
+
+/**
+ * ADR 0775 D1 (from ADR 0774 D5) — does this caller hold `scope` in `tenantId`?
+ * Unlike {@link requireTenantScope} it reads a credential by PROVENANCE and a
+ * person by BOTH identity spellings. In order:
+ *  - the wildcard operator principal: yes;
+ *  - an `owk_` key whose declaration excludes `scope`: no, always (a key
+ *    narrowing its own delegation can only remove authority);
+ *  - the caller's OWN personal workspace (`isOwnPersonalWorkspace`, ownership —
+ *    not the tenant's shape): yes;
+ *  - otherwise `credentialScopesIn` for some spelling of the caller.
+ */
+export async function callerHoldsTenantScope(req: Request, tenantId: string, scope: Scope): Promise<boolean> {
+  const principal = req.principal;
+  if (principal?.tenants?.includes('*')) return true;
+  const auth = principal?.auth;
+  if (auth?.kind === 'api-key' && !keyDeclarationPermits(auth.scopes, scope)) return false;
+  if (isOwnPersonalWorkspace(req) && tenantId === tenantOf(req)) return true;
+  if (!principal) return false;
+  for (const subject of await callerSubjectSpellings(req)) {
+    if ((await credentialScopesIn(principal, tenantId, subject)).includes(scope)) return true;
+  }
+  return false;
+}
+
+/** ADR 0775 D1 — the throwing wrapper every agent-area write calls first: 403
+ *  `forbidden_scope` unless the caller holds `workspace:write` in `tenantId`
+ *  (default: the caller's active tenant). */
+export async function requireTenantWrite(req: Request, tenantId: string = tenantOf(req)): Promise<void> {
+  if (await callerHoldsTenantScope(req, tenantId, 'workspace:write')) return;
+  throw new OpenwopError('forbidden_scope', 'Missing required scope: workspace:write', 403, { requiredScope: 'workspace:write' });
 }

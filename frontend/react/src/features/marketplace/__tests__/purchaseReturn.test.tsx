@@ -22,6 +22,11 @@
  * The receipt must be built from the ORDER and never from optimism: fulfilment
  * rides the webhook, so `pending` is the honest arrival state, and an order we
  * cannot READ must not be reported as a failed purchase.
+ *
+ * Sabotage-witnessed (/grade-tests wave 10): blanking the pending receipt's pack,
+ * dropping the post-return `load()`, toasting an unreadable order as failed,
+ * mis-keying the `failed`/`cancelled` branches, defaulting an absent `?purchase` to
+ * success, and restoring the old `live && https` conjunction each red their case.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, waitFor } from '@testing-library/react';
@@ -33,6 +38,8 @@ const api = vi.hoisted(() => ({
   listOrgs: vi.fn(),
   getPurchaseOrder: vi.fn(),
   purchaseListing: vi.fn(),
+  // ADR 0661 — the page reads the caller's orders on every load (MKT-UX-5).
+  listMyOrders: vi.fn(),
 }));
 const toasts = vi.hoisted(() => ({ success: vi.fn(), info: vi.fn(), error: vi.fn() }));
 vi.mock('../marketplaceClient.js', async (orig) => {
@@ -55,12 +62,19 @@ vi.mock('../../../client/useEffectiveAccess.js', async (importOriginal) => ({
   useEffectiveAccess: () => ({ roles: ['editor'], scopes: ['workspace:read', 'workspace:write'], basis: 'member' }),
 }));
 
+import type { Listing } from '../marketplaceClient.js';
 import { MarketplacePage } from '../MarketplacePage.js';
 
 const ORDER = {
   orderId: 'cco_abc', packName: 'vendor.acme.nodes', amountMajorUnits: 99,
   currency: 'usd', applicationFeeMajorUnits: 12, status: 'pending' as const,
   mode: 'live' as const, createdAt: '2026-01-01T00:00:00Z',
+};
+
+const PAID: Listing = {
+  packName: 'vendor.paid.nodes', version: '1.0.0', title: 'Paid Pack', category: 'nodes',
+  installed: false, origin: 'registry',
+  pricing: { lane: 'native-paid', priceMajorUnits: 99, currency: 'usd', purchasable: true },
 };
 
 const at = (search: string) => render(
@@ -72,6 +86,7 @@ beforeEach(() => {
   api.listListings.mockResolvedValue({ listings: [], pricingDegraded: false });
   api.fetchDisabledPacks.mockResolvedValue([]);
   api.listOrgs.mockResolvedValue([]);
+  api.listMyOrders.mockResolvedValue({ purchases: [], sales: [] });
 });
 afterEach(cleanup);
 
@@ -84,16 +99,20 @@ describe('MKT-UX-2 — a buyer returning from Stripe gets a receipt, on the page
     await waitFor(() => expect(toasts.success).toHaveBeenCalled());
     const msg = String(toasts.success.mock.calls[0]?.[0]);
     expect(msg, 'the receipt must name the pack').toContain('vendor.acme.nodes');
-    expect(msg, 'and the money — the whole point of a receipt').toMatch(/99/);
+    expect(msg, 'and the money — the whole point of a receipt').toContain('$99.00');
     // Pending is the HONEST arrival state: fulfilment rides the webhook.
     expect(msg).toMatch(/confirm/i);
   });
 
   it('re-reads the catalog so a webhook that already landed shows as purchased', async () => {
     api.getPurchaseOrder.mockResolvedValue({ ...ORDER, status: 'paid' });
+    // Mount reads the catalog before the webhook landed; the re-read sees it.
+    api.listListings
+      .mockResolvedValueOnce({ listings: [PAID], pricingDegraded: false })
+      .mockResolvedValue({ listings: [{ ...PAID, pricing: { ...PAID.pricing!, purchased: true } }], pricingDegraded: false });
     at('?purchase=success&order=cco_abc');
-    // Once on mount, once after the return is handled.
-    await waitFor(() => expect(api.listListings.mock.calls.length).toBeGreaterThan(1));
+    expect(await screen.findByText('Purchased')).toBeTruthy();
+    expect(api.listListings).toHaveBeenCalledTimes(2);
   });
 
   it('an UNREADABLE order is not reported as a failed purchase', async () => {
@@ -130,11 +149,6 @@ describe('MKT-UX-2 — a buyer returning from Stripe gets a receipt, on the page
 });
 
 describe('MKT-UX-9 — a LIVE mode with an unusable url no longer claims "no real charge"', () => {
-  const PAID = {
-    packName: 'vendor.paid.nodes', version: '1.0.0', title: 'Paid Pack', category: 'nodes',
-    installed: false, origin: 'registry' as const,
-    pricing: { lane: 'native-paid' as const, priceMajorUnits: 99, currency: 'usd', purchasable: true },
-  };
 
   it('reports that we could NOT open checkout, instead of the demo sentence', async () => {
     api.listListings.mockResolvedValue({ listings: [PAID], pricingDegraded: false });

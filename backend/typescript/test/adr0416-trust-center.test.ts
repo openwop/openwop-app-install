@@ -38,7 +38,7 @@ function client() {
     raw,
     get: (path: string) => raw('GET', path),
     login: async () => {
-      const r = await raw('POST', '/v1/host/openwop-app/test/login', { email: `trust-${Date.now()}-${n++}@acme.test` });
+      const r = await raw('POST', '/host/openwop-app/test/login', { email: `trust-${Date.now()}-${n++}@acme.test` });
       expect([200, 201]).toContain(r.status);
       const { user } = JSON.parse(r.text) as { user: { tenantId: string } };
       return { tenantId: user.tenantId };
@@ -79,7 +79,7 @@ describe('ADR 0416 P1 — trust-center page seed', () => {
 });
 
 describe('ADR 0416 P2 — tenant audit-chain export', () => {
-  const EXPORT = '/v1/host/openwop-app/governance/audit/export';
+  const EXPORT = '/host/openwop-app/governance/audit/export';
 
   it('an anonymous visitor sees ONLY their own (empty) anon-workspace chain — never another tenant', async () => {
     // The tenant-level gate's documented authority (featureRoute.ts): the caller

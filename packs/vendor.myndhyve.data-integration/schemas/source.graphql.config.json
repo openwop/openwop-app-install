@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.data-integration/1.0.0/source.graphql.config.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.data-integration/1.0.2/source.graphql.config.json",
   "title": "DataSourceGraphQLConfig",
   "type": "object",
   "required": ["sourceId", "operation"],

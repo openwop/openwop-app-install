@@ -35,7 +35,7 @@ function client() {
   return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b) };
 }
 let n = 0;
-async function owner() { const c = client(); const r = await c.post('/v1/host/openwop-app/test/login', { email: `g-${Date.now()}-${n++}@a.test`, tenantId: `org:g-${Date.now()}-${n++}` }); expect(r.status).toBe(201); return c; }
+async function owner() { const c = client(); const r = await c.post('/host/openwop-app/test/login', { email: `g-${Date.now()}-${n++}@a.test`, tenantId: `org:g-${Date.now()}-${n++}` }); expect(r.status).toBe(201); return c; }
 const setToggle = async (id: string, s: 'on' | 'off') => { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status: s }, 'test'); };
 
 const ORDER_SCHEMA = { type: 'object', required: ['orderId', 'amount'], properties: { orderId: { type: 'string' }, amount: { type: 'number' } } };
@@ -44,31 +44,31 @@ describe('CDP-G event schema registry', () => {
   it('registers, validates conforming/non-conforming payloads, and versions', async () => {
     await setToggle('cdp', 'on');
     const c = await owner();
-    const reg = await c.post('/v1/host/openwop-app/cdp/event-schemas', { eventType: 'order.created', schema: ORDER_SCHEMA });
+    const reg = await c.post('/host/openwop-app/cdp/event-schemas', { eventType: 'order.created', schema: ORDER_SCHEMA });
     expect(reg.status, JSON.stringify(reg.body)).toBe(201);
     expect(reg.body.version).toBe(1);
 
-    const good = await c.post('/v1/host/openwop-app/cdp/event-schemas/order.created/validate', { payload: { orderId: 'o1', amount: 5 } });
+    const good = await c.post('/host/openwop-app/cdp/event-schemas/order.created/validate', { payload: { orderId: 'o1', amount: 5 } });
     expect(good.status).toBe(200);
     expect(good.body.valid).toBe(true);
     expect(good.body.hasSchema).toBe(true);
 
-    const bad = await c.post('/v1/host/openwop-app/cdp/event-schemas/order.created/validate', { payload: { orderId: 'o1' } });
+    const bad = await c.post('/host/openwop-app/cdp/event-schemas/order.created/validate', { payload: { orderId: 'o1' } });
     expect(bad.status).toBe(422);
     expect(bad.body.valid).toBe(false);
     expect(bad.body.errors.length).toBeGreaterThan(0);
 
     // re-register → version 2; list surfaces the latest
-    const reg2 = await c.post('/v1/host/openwop-app/cdp/event-schemas', { eventType: 'order.created', schema: ORDER_SCHEMA });
+    const reg2 = await c.post('/host/openwop-app/cdp/event-schemas', { eventType: 'order.created', schema: ORDER_SCHEMA });
     expect(reg2.body.version).toBe(2);
-    const list = await c.get('/v1/host/openwop-app/cdp/event-schemas');
+    const list = await c.get('/host/openwop-app/cdp/event-schemas');
     expect(list.body.schemas.find((s: any) => s.eventType === 'order.created').version).toBe(2);
   });
 
   it('an unregistered event type passes (no contract ⇒ no rejection)', async () => {
     await setToggle('cdp', 'on');
     const c = await owner();
-    const r = await c.post('/v1/host/openwop-app/cdp/event-schemas/never.registered/validate', { payload: { anything: true } });
+    const r = await c.post('/host/openwop-app/cdp/event-schemas/never.registered/validate', { payload: { anything: true } });
     expect(r.status).toBe(200);
     expect(r.body).toEqual({ valid: true, hasSchema: false });
   });
@@ -76,14 +76,14 @@ describe('CDP-G event schema registry', () => {
   it('rejects a non-object schema at registration', async () => {
     await setToggle('cdp', 'on');
     const c = await owner();
-    const r = await c.post('/v1/host/openwop-app/cdp/event-schemas', { eventType: 'bad', schema: 'not-a-schema' });
+    const r = await c.post('/host/openwop-app/cdp/event-schemas', { eventType: 'bad', schema: 'not-a-schema' });
     expect(r.status).toBe(400);
   });
 
   it('is toggle-gated (cdp OFF ⇒ 404)', async () => {
     await setToggle('cdp', 'off');
     const c = await owner();
-    expect((await c.get('/v1/host/openwop-app/cdp/event-schemas')).status).toBe(404);
+    expect((await c.get('/host/openwop-app/cdp/event-schemas')).status).toBe(404);
     await setToggle('cdp', 'on');
   });
 

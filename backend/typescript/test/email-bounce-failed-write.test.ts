@@ -3,6 +3,8 @@
  * (`failed`) by the service and answered 503 by the route, so the provider redelivers.
  * It used to be swallowed into a `200 {received:true}` — "received" over a bounce
  * that never suppressed. Born red on the pre-ADR shape.
+ * Sabotage-witnessed (w9 grade-tests): not counting the failure in `ingestBounceWebhook`
+ * reds both cases; answering 200 regardless of `failed` reds the route case.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import http from 'node:http';
@@ -50,7 +52,7 @@ describe('EM-8 — a failed suppression write is counted and redelivered', () =>
 
   it('route: a batch with a failed write answers 503 (redeliver), a clean batch 200', async () => {
     const cfg = await setWebhookConfig({ tenantId: T, orgId: 'o1', provider: 'postmark', verificationSecret: 'user:pass' });
-    const url = `${BASE}/v1/host/openwop-app/public-email/events/${encodeURIComponent(cfg.webhookId)}`;
+    const url = `${BASE}/host/openwop-app/public-email/events/${encodeURIComponent(cfg.webhookId)}`;
     const post = (body: unknown) => fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', authorization: basic('user:pass') }, body: JSON.stringify(body) });
     const bad = await post([{ RecordType: 'Bounce', Type: 'HardBounce', Email: 'kvdown2@ex.com' }]);
     expect(bad.status).toBe(503);

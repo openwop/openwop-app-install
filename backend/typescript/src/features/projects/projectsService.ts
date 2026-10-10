@@ -18,6 +18,8 @@ import { assertNoRetentionHold } from '../../host/retentionHold.js';
 import { purgeNamespaceVectors } from '../../host/vector/vectorTenantPurge.js';
 import { createLogger } from '../../observability/logger.js';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
+import { onWorkflowForked } from '../../host/workflowsRegistry.js';
+import { casRepoint, repointList } from '../../host/forkRepoint.js';
 import { notifyShareableKbSourceChanged } from '../../host/shareableKb.js';
 import { OpenwopError } from '../../types.js';
 import { cleanString, cleanOpaqueToken } from '../../host/boundedStrings.js';
@@ -35,6 +37,7 @@ import { parseTurnPolicy, type TurnPolicy } from '../../host/turnPolicy.js';
 import type { AccessLevel } from '../../host/subjectAccess.js';
 import { subjectScope, type Subject } from '../../host/subject.js';
 import { registerSubjectEraser } from '../../host/subjectErasure.js';
+import { purgeSubjectDependents } from '../../host/subjectDependents.js';
 import { subjectKeyForms, ERASED_USER_REF } from '../../host/subjectErasureRedaction.js';
 
 
@@ -42,6 +45,7 @@ const log = createLogger('features.projects');
 /** ADR 0054 D1 — the project's definition (a single optional sub-object). */
 export interface ProjectMilestone { id: string; title: string; dueDate?: string; done: boolean }
 export type ProjectStatus = 'planning' | 'active' | 'paused' | 'done' | 'archived';
+export type ProjectFacet = 'notebook' | 'campaign' | 'feature';
 export type ProjectHealth = 'on-track' | 'at-risk' | 'off-track';
 export interface ProjectCharter {
   goal?: string;            // the one-line outcome
@@ -69,8 +73,10 @@ export interface Project {
   /** ADR 0084 — an optional sub-type marker. A project with `facet:'notebook'` IS
    *  a Research Notebook (the notebooks feature is a project + a bound KB collection
    *  + subject memory — no parallel container). Absent ⇒ a plain project. Purely
-   *  additive: every existing project path is unchanged when it is undefined. */
-  facet?: 'notebook';
+   *  additive: every existing project path is unchanged when it is undefined.
+   *  ADR 0852 — `'campaign'`: the linked project of a campaign (D1); `'feature'`: a
+   *  label only (D3, a feature IS a project). */
+  facet?: ProjectFacet;
   /** R3 — the KB collection the NOTEBOOK SURFACE provisioned exclusively for this
    *  project (createNotebook / ensureNotebookForProject). Deleting the notebook may
    *  delete THIS collection and no other: the binding list's position 0 is not a
@@ -91,6 +97,10 @@ export interface Project {
    *  cadence (the chat is a plain group conversation). */
   moderatorRosterId?: string;
   turnPolicy?: TurnPolicy;
+  /** ADR 0839 D5 — who created it (the acting user's id, or a seeder's actor).
+   *  Absent on rows created before the field existed. Personal data: the DSAR
+   *  eraser redacts it. */
+  createdBy?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -158,7 +168,8 @@ function refuseSecretShaped(raw: unknown, field: string): void {
 }
 
 /** Validate + cap a charter patch, dropping unknown/empty fields (full replace). */
-function parseCharter(input: unknown): ProjectCharter {
+/** Exported for ADR 0831: the team ledger validates `goal`/`objectives` with the charter's own rules. */
+export function parseCharter(input: unknown): ProjectCharter {
   const raw = (input ?? {}) as Record<string, unknown>;
   const out: ProjectCharter = {};
   refuseSecretShaped(raw.goal, 'charter.goal');
@@ -231,9 +242,10 @@ export function notebookCorpusToDelete(p: Project): string | undefined {
 /** R3 — stamp the surface-provisioned notebook collection on the row (see the
  *  `notebookCollectionId` doc above). Notebook-surface use only. */
 export async function setNotebookCollectionId(tenantId: string, id: string, collectionId: string): Promise<void> {
-  const p = await store.get(id);
-  if (!p || p.tenantId !== tenantId) return;
-  await store.put({ ...p, notebookCollectionId: collectionId, updatedAt: nowIso() });
+  // A project gone meanwhile stays a silent no-op, as before the CAS.
+  await mutateProject(tenantId, id, async (p) => ({ ...p, notebookCollectionId: collectionId, updatedAt: nowIso() })).catch((err: unknown) => {
+    if (!(err instanceof OpenwopError && err.code === 'not_found')) throw err;
+  });
 }
 
 /** The project as a memory/board Subject. */
@@ -242,7 +254,7 @@ export const projectSubject = (id: string): Subject => ({ kind: 'project', id })
 function nowIso(): string { return new Date().toISOString(); }
 
 /** Create a project + provision its board (idempotent board). Org-scoped. */
-export async function createProject(tenantId: string, orgId: string, input: { name?: unknown; facet?: 'notebook' }): Promise<Project> {
+export async function createProject(tenantId: string, orgId: string, input: { name?: unknown; facet?: ProjectFacet }, createdBy?: string): Promise<Project> {
   // PRJC-6 — `name` joins the R3 typed-refusal discipline: `cleanString` would
   // scrub a secret-shaped name to `[REDACTED:secret-shaped]` on a 200.
   refuseSecretShaped(input.name, 'name');
@@ -255,7 +267,7 @@ export async function createProject(tenantId: string, orgId: string, input: { na
   }
   const id = `project-${randomUUID().slice(0, 12)}`;
   const ts = nowIso();
-  const project: Project = { id, tenantId, orgId, name, workflows: [], members: [], visibility: 'org', createdAt: ts, updatedAt: ts, ...(input.facet ? { facet: input.facet } : {}) };
+  const project: Project = { id, tenantId, orgId, name, workflows: [], members: [], visibility: 'org', ...(createdBy ? { createdBy } : {}), createdAt: ts, updatedAt: ts, ...(input.facet ? { facet: input.facet } : {}) };
   await store.put(project);
   await ensureSubjectBoard(tenantId, projectSubject(id), `${name} board`);
   return project;
@@ -267,6 +279,27 @@ export async function getProject(tenantId: string, id: string): Promise<Project 
   return p && p.tenantId === tenantId ? p : null;
 }
 
+/** ADR 0839 D4 — the ONE write path for an existing project row.
+ *
+ * Every writer used to read the row, change a copy and `put` it. Two members
+ * added at once lost one of them, and an edit that read before a delete and
+ * wrote after it brought the deleted row back, with its board and memory
+ * already gone. This reads, applies `fn`, and swaps only if the stored row is
+ * still the one read (`compareAndSwap` byte-matches the object `get` returned,
+ * so `fn`'s input must never be the expected value it hands back). A row that
+ * is gone, or belongs to another tenant, is a 404 — never re-created. Bounded
+ * retries; exhausted contention is a retryable 409. */
+const MUTATE_ATTEMPTS = 5;
+export async function mutateProject(tenantId: string, id: string, fn: (current: Project) => Promise<Project>): Promise<{ before: Project; after: Project }> {
+  for (let attempt = 0; attempt < MUTATE_ATTEMPTS; attempt += 1) {
+    const current = await store.get(id);
+    if (!current || current.tenantId !== tenantId) throw new OpenwopError('not_found', 'Project not found.', 404, { id });
+    const next = await fn(structuredClone(current));
+    if (await store.compareAndSwap(current, next)) return { before: current, after: next };
+  }
+  throw new OpenwopError('conflict', 'The project changed while saving — try again.', 409, { id, contended: true });
+}
+
 export async function listProjects(tenantId: string): Promise<Project[]> {
   // PRJC-2 — bounded per-tenant read via the tenant index (the filter stays as a
   // guard against a stale marker whose row was re-tenanted; it is cheap).
@@ -275,86 +308,124 @@ export async function listProjects(tenantId: string): Promise<Project[]> {
 
 /** Rename / set workflows / set the charter. Tenant-scoped. (Charter is a full
  *  replace: PATCH `{ charter: {...} }` overwrites; `{ charter: null }` clears.) */
-export async function updateProject(tenantId: string, id: string, patch: { name?: unknown; workflows?: unknown; charter?: unknown; moderatorRosterId?: unknown; turnPolicy?: unknown }): Promise<Project> {
-  const current = await getProject(tenantId, id);
-  if (!current) throw new OpenwopError('not_found', 'Project not found.', 404, { id });
-  const next: Project = { ...current, updatedAt: nowIso() };
-  if ('name' in patch && patch.name !== undefined) {
-    refuseSecretShaped(patch.name, 'name'); // PRJC-6 — same discipline as create
-    const name = cleanString(patch.name, 120);
-    if (!name) throw new OpenwopError('validation_error', 'Field `name` must be a non-empty string.', 400, { field: 'name' });
-    next.name = name;
-  }
-  if ('workflows' in patch && patch.workflows !== undefined) {
-    if (!Array.isArray(patch.workflows) || patch.workflows.some((w) => typeof w !== 'string')) {
-      throw new OpenwopError('validation_error', 'Field `workflows` must be an array of workflow ids.', 400, { field: 'workflows' });
+/**
+ * ADR 0831 — a charter-change listener seam. The team intent ledger versions the
+ * charter's `goal`/`objectives` without the projects package importing it: it
+ * registers here at boot. Called after a successful write that changed the
+ * charter. `origin: 'ledger'` marks a write the ledger itself made (applying an
+ * accepted delta), so a listener does not record it twice. Listeners are
+ * fail-soft — a throw is logged and never fails the project write.
+ */
+export interface CharterChange {
+  tenantId: string;
+  projectId: string;
+  before: ProjectCharter | undefined;
+  after: ProjectCharter | undefined;
+  actor?: string;
+  origin: 'direct' | 'ledger';
+}
+const charterListeners: Array<(c: CharterChange) => Promise<void>> = [];
+export function onProjectCharterChanged(fn: (c: CharterChange) => Promise<void>): void {
+  charterListeners.push(fn);
+}
+
+export async function updateProject(
+  tenantId: string,
+  id: string,
+  patch: { name?: unknown; workflows?: unknown; charter?: unknown; moderatorRosterId?: unknown; turnPolicy?: unknown },
+  /** ADR 0831 — who made the change and through which path (for charter listeners). */
+  source: { actor?: string; origin?: 'direct' | 'ledger' } = {},
+): Promise<Project> {
+  // ADR 0839 D4 — validated and applied inside the CAS; a row deleted meanwhile is a 404.
+  const { before: current, after: next } = await mutateProject(tenantId, id, async (current) => {
+    const next: Project = { ...current, updatedAt: nowIso() };
+    if ('name' in patch && patch.name !== undefined) {
+      refuseSecretShaped(patch.name, 'name'); // PRJC-6 — same discipline as create
+      const name = cleanString(patch.name, 120);
+      if (!name) throw new OpenwopError('validation_error', 'Field `name` must be a non-empty string.', 400, { field: 'name' });
+      next.name = name;
     }
-    // PRJC-7 — bounded + element-validated, by TYPED REFUSAL rather than the
-    // silent slice/rewrite `cleanString` alone would do: these are IDS, and an
-    // id the server mutates is an id left dangling (the feature's own caps
-    // discipline — MAX_MEMBERS 100, MAX_MILESTONES 50 — finally applied here).
-    //
-    // Adversarial-review F1 — ids ride `cleanOpaqueToken` (charset-validated,
-    // NOT secret-scrubbed), never the free-TEXT scrub oracle: `scrubSecretShaped`'s
-    // `[A-Za-z0-9_-]{40,}` blob arm is not broken by hyphens, so validating via
-    // `cleanString` rejected the platform's OWN `agent-wf-<uuid>` ids (45 chars,
-    // minted at `workflowComposeTool.ts`) — a portfolio containing one could
-    // never be PATCHed again. Same class as the CMS serve-token destruction that
-    // motivated `cleanOpaqueToken` (ADR 0206); ids are never rendered as free
-    // text, so the paste-a-credential threat model does not apply.
-    const ids = patch.workflows as string[];
-    if (ids.length > MAX_ASSIGNED_WORKFLOWS) {
-      throw new OpenwopError('validation_error', `Field \`workflows\` holds ${ids.length} ids — the maximum is ${MAX_ASSIGNED_WORKFLOWS}.`, 400, { field: 'workflows', cap: MAX_ASSIGNED_WORKFLOWS });
-    }
-    const cleaned = ids.map((w) => cleanOpaqueToken(w, MAX_WORKFLOW_ID_LENGTH));
-    const bad = cleaned.findIndex((c) => !c);
-    if (bad >= 0) {
-      throw new OpenwopError('validation_error', `\`workflows[${bad}]\` is not a valid workflow id (empty, longer than ${MAX_WORKFLOW_ID_LENGTH} characters, or not id-shaped — letters, digits, \`.\`, \`_\`, \`:\`, \`-\`).`, 400, { field: 'workflows', index: bad });
-    }
-    next.workflows = cleaned;
-  }
-  if ('charter' in patch && patch.charter !== undefined) {
-    if (patch.charter === null) delete next.charter;
-    else {
-      const charter = parseCharter(patch.charter);
-      if (Object.keys(charter).length) next.charter = charter; else delete next.charter;
-    }
-  }
-  // ADR 0054 D6 — the group-chat cadence. `turnPolicy` rides the shared validator
-  // (clamped for cost); `moderatorRosterId` MUST be a project AGENT member (the
-  // chair speaks in the room, so it has to be IN the room — `members[]` stays the
-  // single source of truth for who is on the project). `null` clears either.
-  if ('turnPolicy' in patch && patch.turnPolicy !== undefined) {
-    if (patch.turnPolicy === null) delete next.turnPolicy;
-    else next.turnPolicy = parseTurnPolicy(patch.turnPolicy);
-  }
-  if ('moderatorRosterId' in patch && patch.moderatorRosterId !== undefined) {
-    if (patch.moderatorRosterId === null) {
-      delete next.moderatorRosterId;
-    } else {
-      const modId = cleanString(patch.moderatorRosterId, 200);
-      if (!modId) throw new OpenwopError('validation_error', '`moderatorRosterId` must be a non-empty roster id.', 400, { field: 'moderatorRosterId' });
-      const entry = await getRosterEntry(tenantId, modId);
-      if (!entry) throw new OpenwopError('not_found', 'Moderator not found in this workspace.', 404, { moderatorRosterId: modId });
-      // This member check races a concurrent member removal, but that's benign: the
-      // convene consumer re-validates `moderator ∈ members` and `removeProjectMember`
-      // clears the moderator on removal.
-      //
-      // ADR 0608 D9 (`CPWF-4`) — CORRECTED 2026-08-24. This used to say the consumer
-      // "falls back to no chair". It did not: `chairAgentId ??= routed`
-      // (`chat/conversations/convene.ts`) promoted whichever agent resolved FIRST,
-      // and the chair both frames and synthesizes — so a dropped moderator silently
-      // handed the seat to advisor #2. The false sentence sat in the file that owns
-      // the invariant, which is why nobody checked the consumer. The consumer now
-      // REFUSES the convene with a typed system line; this comment describes what it
-      // does, not what it was assumed to do.
-      if (!(next.members ?? []).some((m) => m.ref === `agent:${modId}`)) {
-        throw new OpenwopError('validation_error', 'The moderator MUST be a project agent member — add it on the Members tab first.', 422, { moderatorRosterId: modId });
+    if ('workflows' in patch && patch.workflows !== undefined) {
+      if (!Array.isArray(patch.workflows) || patch.workflows.some((w) => typeof w !== 'string')) {
+        throw new OpenwopError('validation_error', 'Field `workflows` must be an array of workflow ids.', 400, { field: 'workflows' });
       }
-      next.moderatorRosterId = modId;
+      // PRJC-7 — bounded + element-validated, by TYPED REFUSAL rather than the
+      // silent slice/rewrite `cleanString` alone would do: these are IDS, and an
+      // id the server mutates is an id left dangling (the feature's own caps
+      // discipline — MAX_MEMBERS 100, MAX_MILESTONES 50 — finally applied here).
+      //
+      // Adversarial-review F1 — ids ride `cleanOpaqueToken` (charset-validated,
+      // NOT secret-scrubbed), never the free-TEXT scrub oracle: `scrubSecretShaped`'s
+      // `[A-Za-z0-9_-]{40,}` blob arm is not broken by hyphens, so validating via
+      // `cleanString` rejected the platform's OWN `agent-wf-<uuid>` ids (45 chars,
+      // minted at `workflowComposeTool.ts`) — a portfolio containing one could
+      // never be PATCHed again. Same class as the CMS serve-token destruction that
+      // motivated `cleanOpaqueToken` (ADR 0206); ids are never rendered as free
+      // text, so the paste-a-credential threat model does not apply.
+      const ids = patch.workflows as string[];
+      if (ids.length > MAX_ASSIGNED_WORKFLOWS) {
+        throw new OpenwopError('validation_error', `Field \`workflows\` holds ${ids.length} ids — the maximum is ${MAX_ASSIGNED_WORKFLOWS}.`, 400, { field: 'workflows', cap: MAX_ASSIGNED_WORKFLOWS });
+      }
+      const cleaned = ids.map((w) => cleanOpaqueToken(w, MAX_WORKFLOW_ID_LENGTH));
+      const bad = cleaned.findIndex((c) => !c);
+      if (bad >= 0) {
+        throw new OpenwopError('validation_error', `\`workflows[${bad}]\` is not a valid workflow id (empty, longer than ${MAX_WORKFLOW_ID_LENGTH} characters, or not id-shaped — letters, digits, \`.\`, \`_\`, \`:\`, \`-\`).`, 400, { field: 'workflows', index: bad });
+      }
+      next.workflows = cleaned;
+    }
+    if ('charter' in patch && patch.charter !== undefined) {
+      if (patch.charter === null) delete next.charter;
+      else {
+        const charter = parseCharter(patch.charter);
+        if (Object.keys(charter).length) next.charter = charter; else delete next.charter;
+      }
+    }
+    // ADR 0054 D6 — the group-chat cadence. `turnPolicy` rides the shared validator
+    // (clamped for cost); `moderatorRosterId` MUST be a project AGENT member (the
+    // chair speaks in the room, so it has to be IN the room — `members[]` stays the
+    // single source of truth for who is on the project). `null` clears either.
+    if ('turnPolicy' in patch && patch.turnPolicy !== undefined) {
+      if (patch.turnPolicy === null) delete next.turnPolicy;
+      else next.turnPolicy = parseTurnPolicy(patch.turnPolicy);
+    }
+    if ('moderatorRosterId' in patch && patch.moderatorRosterId !== undefined) {
+      if (patch.moderatorRosterId === null) {
+        delete next.moderatorRosterId;
+      } else {
+        const modId = cleanString(patch.moderatorRosterId, 200);
+        if (!modId) throw new OpenwopError('validation_error', '`moderatorRosterId` must be a non-empty roster id.', 400, { field: 'moderatorRosterId' });
+        const entry = await getRosterEntry(tenantId, modId);
+        if (!entry) throw new OpenwopError('not_found', 'Moderator not found in this workspace.', 404, { moderatorRosterId: modId });
+        // ADR 0839 D4 — CORRECTED: this check used to race a concurrent member removal.
+        // It now reads the same row the compare-and-swap writes, so a removal that lands
+        // in between fails the swap and the retry re-checks. (The convene consumer still
+        // re-validates `moderator ∈ members` as defence in depth.)
+        //
+        // ADR 0608 D9 (`CPWF-4`) — CORRECTED 2026-08-24. This used to say the consumer
+        // "falls back to no chair". It did not: `chairAgentId ??= routed`
+        // (`chat/conversations/convene.ts`) promoted whichever agent resolved FIRST,
+        // and the chair both frames and synthesizes — so a dropped moderator silently
+        // handed the seat to advisor #2. The false sentence sat in the file that owns
+        // the invariant, which is why nobody checked the consumer. The consumer now
+        // REFUSES the convene with a typed system line; this comment describes what it
+        // does, not what it was assumed to do.
+        if (!(next.members ?? []).some((m) => m.ref === `agent:${modId}`)) {
+          throw new OpenwopError('validation_error', 'The moderator MUST be a project agent member — add it on the Members tab first.', 422, { moderatorRosterId: modId });
+        }
+        next.moderatorRosterId = modId;
+      }
+    }
+    return next;
+  });
+  if (JSON.stringify(current.charter ?? null) !== JSON.stringify(next.charter ?? null)) {
+    for (const fn of charterListeners) {
+      try {
+        await fn({ tenantId, projectId: id, before: current.charter, after: next.charter, ...(source.actor ? { actor: source.actor } : {}), origin: source.origin ?? 'direct' });
+      } catch (err) {
+        log.warn('project_charter_listener_failed', { tenantId, projectId: id, error: err instanceof Error ? err.message : String(err) });
+      }
     }
   }
-  await store.put(next);
   return next;
 }
 
@@ -368,6 +439,15 @@ const userMemberRef = (userId: string): string => `user:${userId}`;
  *  copy of the predicate (the RBAC composition the three-lane pass verified
  *  strong). */
 function levelFor(p: Project, access: EffectiveAccess, callerSubject: string | undefined): AccessLevel {
+  // ADR 0839 D1 (`PRJ3WF-1`, was `CPC-6`) — an ABSENT caller is nobody, not the owner.
+  // `resolveEffectiveAccess` answers a missing subject with the tenant-owner arm, which is
+  // right for an internal org-scope call and wrong here: on this resolver the absent
+  // subject arrives from an `owk_` key the interrupts lane could not name, an unbound OIDC
+  // session, a run with no acting user, or a hard-coded `undefined`. It resolved to
+  // `'write'` on a PRIVATE project for all of them. Refused here, before `access` is read,
+  // so every path through this rule — the per-id door, the list scan, the context block —
+  // fails closed. (KBC-1's `subjectReadAllowed` states the same rule for the KB lane.)
+  if (callerSubject === undefined) return 'none';
   if (access.scopes.includes('workspace:write')) return 'write';
   const visibility = p.visibility ?? 'org';
   if (visibility === 'org' && access.scopes.includes('workspace:read')) return 'read';
@@ -436,35 +516,53 @@ export async function addProjectMember(tenantId: string, projectId: string, ref:
     const entry = await getRosterEntry(tenantId, id);
     if (!entry) throw new OpenwopError('validation_error', 'That agent is not in this workspace’s roster.', 400, { ref: r });
   }
-  const members = (current.members ?? []).filter((x) => x.ref !== r);
-  if (members.length >= MAX_MEMBERS) throw new OpenwopError('validation_error', `This project already has the maximum ${MAX_MEMBERS} members.`, 400, { cap: MAX_MEMBERS });
-  members.push({ ref: r, role: projectRole, addedAt: nowIso() });
-  const next: Project = { ...current, members, updatedAt: nowIso() };
-  await store.put(next);
-  return next;
+  // ADR 0839 D4 — the read-modify-write is a CAS: two concurrent adds both land.
+  return (await mutateProject(tenantId, projectId, async (row) => {
+    const members = (row.members ?? []).filter((x) => x.ref !== r);
+    if (members.length >= MAX_MEMBERS) throw new OpenwopError('validation_error', `This project already has the maximum ${MAX_MEMBERS} members.`, 400, { cap: MAX_MEMBERS });
+    members.push({ ref: r, role: projectRole, addedAt: nowIso() });
+    return { ...row, members, updatedAt: nowIso() };
+  })).after;
 }
 
 /** Remove a member (descriptive only — never revokes org authority). */
 export async function removeProjectMember(tenantId: string, projectId: string, ref: string): Promise<Project> {
-  const current = await getProject(tenantId, projectId);
-  if (!current) throw new OpenwopError('not_found', 'Project not found.', 404, { id: projectId });
-  const next: Project = { ...current, members: (current.members ?? []).filter((m) => m.ref !== ref), updatedAt: nowIso() };
-  // ADR 0054 D6 — keep `moderatorRosterId ∈ members`: removing the moderator agent
-  // clears the now-stale chair (else it would point outside the room).
-  if (current.moderatorRosterId && ref === `agent:${current.moderatorRosterId}`) delete next.moderatorRosterId;
-  await store.put(next);
-  return next;
+  return (await mutateProject(tenantId, projectId, async (current) => {
+    const next: Project = { ...current, members: (current.members ?? []).filter((m) => m.ref !== ref), updatedAt: nowIso() };
+    // ADR 0054 D6 — keep `moderatorRosterId ∈ members`: removing the moderator agent
+    // clears the now-stale chair (else it would point outside the room).
+    if (current.moderatorRosterId && ref === `agent:${current.moderatorRosterId}`) delete next.moderatorRosterId;
+    return next;
+  })).after;
+}
+
+/** ADR 0852 — set or clear a project's facet (a campaign's project loses
+ *  `'campaign'` when the campaign is deleted, which lifts its visibility lock).
+ *  `'notebook'` is never set or cleared here: a notebook's facet is its identity. */
+export async function setProjectFacet(tenantId: string, projectId: string, facet: Exclude<ProjectFacet, 'notebook'> | undefined): Promise<Project> {
+  const { after } = await mutateProject(tenantId, projectId, async (row) => {
+    if (row.facet === 'notebook') throw new OpenwopError('conflict', 'A notebook stays a notebook.', 409, { field: 'facet' });
+    const next: Project = { ...row, updatedAt: nowIso() };
+    if (facet) next.facet = facet; else delete next.facet;
+    return next;
+  });
+  return after;
 }
 
 /** Set the project's read-visibility (ADR 0054 D5). */
 export async function setProjectVisibility(tenantId: string, projectId: string, visibility: unknown): Promise<Project> {
-  const current = await getProject(tenantId, projectId);
-  if (!current) throw new OpenwopError('not_found', 'Project not found.', 404, { id: projectId });
   if (visibility !== 'org' && visibility !== 'private') {
     throw new OpenwopError('validation_error', '`visibility` must be `org` or `private`.', 400, { field: 'visibility' });
   }
-  const next: Project = { ...current, visibility, updatedAt: nowIso() };
-  await store.put(next);
+  const { before, after: next } = await mutateProject(tenantId, projectId, async (row) => {
+    // ADR 0852 D1 — a campaign's project stays visible to the workspace: the
+    // campaign is org-readable, and a private project behind it would make the
+    // two access rules disagree about the same work.
+    if (visibility === 'private' && row.facet === 'campaign') {
+      throw new OpenwopError('conflict', "A campaign's project stays visible to the workspace while the campaign exists.", 409, { field: 'visibility', facet: 'campaign' });
+    }
+    return { ...row, visibility, updatedAt: nowIso() };
+  });
   // ADR 0608 D5 (`CPC-3`) — the carve-out that keeps a `private` project's KB out
   // of an advisory board was applied at SHARE TIME ONLY. Nothing re-ran it, so
   // `org` -> `private` left every advisor still bound to the collection —
@@ -474,17 +572,17 @@ export async function setProjectVisibility(tenantId: string, projectId: string, 
   // (the reconciler re-resolves through the provider and must see the new state),
   // and only when the value actually moved. Fault-isolated inside the seam: a
   // visibility flip must land even if a board is unreachable.
-  if ((current.visibility ?? 'org') !== visibility) {
-    await notifyShareableKbSourceChanged(tenantId, current.orgId, 'project');
+  if ((before.visibility ?? 'org') !== visibility) {
+    await notifyShareableKbSourceChanged(tenantId, before.orgId, 'project');
   }
   return next;
 }
 
 /** Delete a project + cascade its owned surfaces (board + memory + knowledge
  *  binding + schedules). Returns the cleanup counts. Tenant-scoped fail-closed. */
-export async function deleteProject(tenantId: string, id: string): Promise<{ deleted: boolean; memoryEntriesCleared: number; schedulesCleared: number }> {
+export async function deleteProject(tenantId: string, id: string): Promise<{ deleted: boolean; memoryEntriesCleared: number; schedulesCleared: number; dependentsDeleted: Record<string, number> }> {
   const current = await getProject(tenantId, id);
-  if (!current) return { deleted: false, memoryEntriesCleared: 0, schedulesCleared: 0 };
+  if (!current) return { deleted: false, memoryEntriesCleared: 0, schedulesCleared: 0, dependentsDeleted: {} };
   // `PRJWF-1` — assert the retention hold BEFORE anything is destroyed.
   //
   // This cascade destroys NINE kinds of durable state: the kanban board and its cards, every
@@ -504,6 +602,12 @@ export async function deleteProject(tenantId: string, id: string): Promise<{ del
   // consult, so extracting it would make the lane unverifiable by the instrument that now
   // tracks it.
   await assertNoRetentionHold(tenantId);
+  // ADR 0839 D2 (`PRJ3WF-2`) — rows OTHER features own under this project (canvases,
+  // priority lists + their boards, the team ledger, documents). Every door to them asks
+  // the project for access, so after the row delete they were refused to everyone and
+  // only tenant teardown removed them. Purged FIRST, and a failure propagates: the
+  // project (and its Delete button) must survive so a retry can finish the job.
+  const dependentsDeleted = await purgeSubjectDependents(tenantId, projectSubject(id));
   // Board first (so its cards are unreachable), then schedules (so they stop
   // firing), then memory + knowledge binding, then the record. (The bound KB
   // collections are shared — not deleted.)
@@ -566,7 +670,22 @@ export async function deleteProject(tenantId: string, id: string): Promise<{ del
   // `host/conversationCascade.ts`; a caller that cannot run the whole cascade
   // must run none of it.
   await store.delete(id);
-  return { deleted: true, memoryEntriesCleared, schedulesCleared };
+  // ADR 0839 D3 (`PRJ3WF-3`) — the second half of the double-check with
+  // `createProjectSchedule`: a create that landed between the listing above and the
+  // row delete is caught here (and a create that lands after this re-list re-reads the
+  // row, finds it gone, and removes its own job). Either way no job outlives its owner.
+  const lateJobs = await listJobsForSubject(tenantId, projectSubject(id));
+  for (const j of lateJobs) await deleteJob(j.jobId);
+  // ADR 0839 D2 — the same second look for dependents: a canvas / list / document created
+  // between the purge above and the row delete would otherwise be stranded. Best-effort —
+  // the row is already gone, so a throw here can no longer keep the delete retryable; it
+  // is logged (inside the seam) and counted, never silent.
+  try {
+    for (const [k, n] of Object.entries(await purgeSubjectDependents(tenantId, projectSubject(id)))) {
+      dependentsDeleted[k] = (dependentsDeleted[k] ?? 0) + n;
+    }
+  } catch { /* logged by the seam with the dependent's key */ }
+  return { deleted: true, memoryEntriesCleared, schedulesCleared: schedulesCleared + lateJobs.length, dependentsDeleted };
 }
 
 /**
@@ -651,20 +770,36 @@ export async function eraseSubjectProjects(tenantId: string, subjectKey: string)
   // prefix/substring match.
   const matchesSubject = (ref: string): boolean =>
     forms.has(ref) || (ref.startsWith('user:user:') && forms.has(ref.slice('user:'.length)));
-  let rowsTouched = 0;
-  for (const p of await store.list()) {
-    if (p.tenantId !== tenantId) continue;
-    const members = p.members ?? [];
+  /** The redacted row, or null when it holds nothing of this subject. */
+  const redact = (p: Project): Project | null => {
     let changed = false;
-    const redacted = members.map((m) => {
+    const redacted = (p.members ?? []).map((m) => {
       if (m.ref.startsWith('user:') && m.ref !== ERASED_USER_REF && matchesSubject(m.ref)) {
         changed = true; return { ...m, ref: ERASED_USER_REF };
       }
       return m;
     });
-    if (!changed) continue;
-    rowsTouched += 1; // F5 — count ROWS (the unit the report claims), not refs
-    await store.put({ ...p, members: redacted, updatedAt: nowIso() });
+    // ADR 0839 D5 — the creator stamp is the same person's id (`User.userId`, itself
+    // `user:<hash>`), so it matches the stored-form arm directly.
+    const eraseCreator = p.createdBy !== undefined && p.createdBy !== ERASED_USER_REF && matchesSubject(p.createdBy);
+    if (!changed && !eraseCreator) return null;
+    return { ...p, members: redacted, ...(eraseCreator ? { createdBy: ERASED_USER_REF } : {}), updatedAt: nowIso() };
+  };
+  let rowsTouched = 0;
+  for (const p of await store.list()) {
+    if (p.tenantId !== tenantId || redact(p) === null) continue;
+    // ADR 0839 D4 — through the CAS: a blind put here could resurrect a project deleted
+    // since the scan, or drop a member added since. A row gone meanwhile has nothing left
+    // to erase, and a row redacted meanwhile is not counted twice.
+    let changed = false;
+    await mutateProject(tenantId, p.id, async (row) => {
+      const next = redact(row);
+      changed = next !== null;
+      return next ?? row;
+    }).catch((err: unknown) => {
+      if (!(err instanceof OpenwopError && err.code === 'not_found')) throw err;
+    });
+    if (changed) rowsTouched += 1; // F5 — count ROWS (the unit the report claims), not refs
   }
   return { rowsTouched };
 }
@@ -675,3 +810,17 @@ export async function eraseSubjectProjects(tenantId: string, subjectKey: string)
 export function registerProjectsErasure(): void {
   registerSubjectEraser(eraseSubjectProjects);
 }
+
+// ADR 0789 — a project's assigned workflows follow this tenant's fork of a
+// shared workflow.
+onWorkflowForked('projects', async (tenantId, from, to) => {
+  let n = 0;
+  for (const p of await store.listForTenantIndexed(tenantId)) {
+    if (!p.workflows.includes(from)) continue;
+    if (await casRepoint(store, p.id, (row) => {
+      const next = row.tenantId === tenantId ? repointList(row.workflows, from, to) : null;
+      return next ? { ...row, workflows: next, updatedAt: new Date().toISOString() } : null;
+    })) n += 1;
+  }
+  return n;
+});

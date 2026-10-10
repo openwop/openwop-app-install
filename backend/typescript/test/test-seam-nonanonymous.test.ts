@@ -47,7 +47,7 @@ async function bootWithSeam(): Promise<string> {
  *  guarding only the product spelling would leave an open door beside a shut
  *  one. That is the failure mode this list exists to make impossible. */
 const SEAM_PATHS = [
-  '/v1/host/openwop-app/test/mock-ai/last-dispatch-budget?nodeId=probe',
+  '/host/openwop-app/test/mock-ai/last-dispatch-budget?nodeId=probe',
   '/v1/host/sample/test/mock-ai/last-dispatch-budget?nodeId=probe',
 ];
 
@@ -71,7 +71,7 @@ describe('an enabled test seam refuses anonymous callers', () => {
     // by `nodeId`, and node ids are published in the chain packs. This is the
     // call that made the open seam a determinism hole rather than an info leak.
     const base = await bootWithSeam();
-    const res = await fetch(`${base}/v1/host/openwop-app/test/mock-ai/program`, {
+    const res = await fetch(`${base}/host/openwop-app/test/mock-ai/program`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ nodeId: 'probe-node', program: [{ content: 'staged' }] }),
@@ -87,7 +87,7 @@ describe('an enabled test seam refuses anonymous callers', () => {
     // Without this, "no 200s" would also pass on a host that had simply broken
     // the seam, and the conformance harness would be locked out.
     const base = await bootWithSeam();
-    const res = await fetch(`${base}/v1/host/openwop-app/test/mock-ai/last-dispatch-budget?nodeId=probe`, {
+    const res = await fetch(`${base}/host/openwop-app/test/mock-ai/last-dispatch-budget?nodeId=probe`, {
       headers: { authorization: 'Bearer dev-token' },
     });
     expect(res.status).toBe(200);

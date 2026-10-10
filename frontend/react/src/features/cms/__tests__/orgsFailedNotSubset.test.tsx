@@ -31,6 +31,8 @@ vi.mock('../cmsClient.js', async (orig) => ({
 }));
 // `getSiteConfig` lives in the SITE feature, not cms — mocking it on cmsClient
 // would silently do nothing and the site-admin arm would test the wrong path.
+// The Page tab reads and writes the page's search and social record.
+vi.mock('../../publishing/publishingClient.js', () => ({ getSeo: vi.fn(async () => null), putSeo: vi.fn(async (_o: string, _p: string, seo: unknown) => seo) }));
 vi.mock('../../site/siteConfigClient.js', async (orig) => ({
   ...(await orig<typeof import('../../site/siteConfigClient.js')>()),
   getSiteConfig,

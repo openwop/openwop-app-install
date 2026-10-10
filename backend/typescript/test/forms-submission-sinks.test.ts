@@ -1,9 +1,17 @@
 /**
  * Submission-sink seam (ADR 0330 §D1) — unit coverage for the inversion seam
  * that decoupled forms from CRM: registration is replace-by-id (idempotent
- * boot), sinks run post-persist with first-marker-wins merging, a thrown sink
- * is fail-soft (capture never fails), and `recordSubmission` re-persists only
- * when a sink contributed a marker.
+ * boot), sinks run post-persist with first-marker-wins merging (and the markers
+ * land on the persisted row), a thrown sink is fail-soft (capture never fails),
+ * and `runSubmissionSinks` reports whether any marker was applied — the bit
+ * `deliver` gates its marker write on.
+ *
+ * Sabotage-witnessed (grade-tests w8, probes w8g1-ss-*): appending instead of
+ * replacing by id, last-marker-wins, dropping the persisted contactId, rethrowing a
+ * sink error, and an always-true `changed` each turn a case red. "no registered
+ * sinks: persists exactly once" was cut as redundant with forms-service
+ * "recordSubmission (createToContact:false) appends…" (probes ss/svc-noSinks-dup
+ * red-red).
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -36,9 +44,9 @@ async function makeForm() {
 }
 
 describe('forms submission sinks (ADR 0330)', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     initHostExtPersistence(openSqliteStorage(':memory:'));
-    __resetFormsStore();
+    await __resetFormsStore();
     clearSubmissionSinksForTest();
   });
   afterEach(() => clearSubmissionSinksForTest());
@@ -71,15 +79,6 @@ describe('forms submission sinks (ADR 0330)', () => {
     const sub = await recordSubmission(form, { name: 'A' }, {});
     expect(sub.error).toBeUndefined();
     expect(ran).toEqual(['after']);
-    const rows = await listSubmissions(TENANT, ORG, form.formId);
-    expect(rows).toHaveLength(1);
-  });
-
-  it('no registered sinks: submission persists exactly once with no markers', async () => {
-    const form = await makeForm();
-    const sub = await recordSubmission(form, { name: 'A' }, {});
-    expect(sub.contactId).toBeUndefined();
-    expect(sub.error).toBeUndefined();
     const rows = await listSubmissions(TENANT, ORG, form.formId);
     expect(rows).toHaveLength(1);
   });

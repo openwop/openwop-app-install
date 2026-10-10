@@ -11,6 +11,8 @@
 import { randomUUID } from 'node:crypto';
 import { insertRunWithStartContext } from './runInsert.js';
 import { resolveLaunchWorkflow } from './resolveLaunchDefinition.js';
+import { WorkflowFeatureRefusedError } from './workflowFeatureGate.js';
+import { withRunLimit } from './runLimitSeam.js';
 import type { RunRecord } from '../types.js';
 import type { HostAdapterSuite } from './index.js';
 import type { Storage } from '../storage/storage.js';
@@ -65,7 +67,18 @@ export async function startKanbanTriggerRun(
   trigger: KanbanTriggerDirective,
 ): Promise<StartedKanbanTrigger | null> {
   const { storage, hostSuite } = deps;
-  const wf = await resolveLaunchWorkflow(hostSuite.workflowCatalog, tenantId, trigger.workflowId);
+  // ADR 0820 §7 / G6 — a feature-refused workflow behaves like a dangling
+  // trigger here (null, the card move stands); the refusal is logged.
+  let wf: Awaited<ReturnType<typeof resolveLaunchWorkflow>>;
+  try {
+    wf = await resolveLaunchWorkflow(hostSuite.workflowCatalog, tenantId, trigger.workflowId);
+  } catch (err) {
+    if (err instanceof WorkflowFeatureRefusedError) {
+      log.info('kanban_trigger_feature_refused', { workflowId: trigger.workflowId, featureId: err.featureId, blockedBy: err.blockedBy });
+      return null;
+    }
+    throw err;
+  }
   if (!wf) {
     log.warn('kanban_trigger_workflow_not_found', {
       workflowId: trigger.workflowId,
@@ -128,7 +141,7 @@ export async function startKanbanTriggerRun(
         createdAt: now,
         updatedAt: now,
       };
-      await insertRunWithStartContext(storage, run, { definition: wf.definition });
+      await withRunLimit(tenantId, () => insertRunWithStartContext(storage, run, { definition: wf.definition }));
       await recordRunAttribution(storage, run);
       await getEventLog().append({ runId, type: 'openwop-app.kanban.card-moved', payload: attribution });
       setImmediate(() => {

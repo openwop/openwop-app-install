@@ -15,6 +15,16 @@ import { createHash } from 'node:crypto';
 export const LOCAL_EMBEDDING_MODEL = 'local-hash-v1';
 export const DEFAULT_EMBEDDING_DIMS = 256;
 
+/** The width every `host.db.vector` writer must embed at. pgvector columns are
+ *  fixed-width (`OPENWOP_VECTOR_PG_DIM`, enforced per upsert/query), so one
+ *  deployment has one width; other backends take any width and use the default.
+ *  ADR 0867: moved here from `kbService.ts` so the product index and subject
+ *  memory, which hard-coded `DEFAULT_EMBEDDING_DIMS`, cannot drift from it. */
+export function effectiveEmbedDims(): number {
+  const v = Number(process.env.OPENWOP_VECTOR_PG_DIM);
+  return Number.isFinite(v) && v > 0 ? Math.floor(v) : DEFAULT_EMBEDDING_DIMS;
+}
+
 const STOP = new Set(['the', 'a', 'an', 'and', 'or', 'to', 'of', 'in', 'is', 'are', 'be', 'for', 'on', 'by', 'with', 'as', 'at', 'it']);
 
 function tokenize(text: string): string[] {

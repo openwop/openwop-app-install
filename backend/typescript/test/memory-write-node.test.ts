@@ -60,7 +60,7 @@ interface MemoryListBody { memoryRef: string; entries: MemoryEntry[] }
 
 describe('memory-write demo node (RFC 0057 node-attributed producer)', () => {
   it('emits a node-attributed, content-free memory.written whose memoryId resolves in the ledger', async () => {
-    const reg = await jsonFetch('/v1/host/openwop-app/workflows', {
+    const reg = await jsonFetch('/host/openwop-app/workflows', {
       method: 'POST',
       body: JSON.stringify({
         workflowId: 'openwop-app.memwrite',
@@ -70,7 +70,7 @@ describe('memory-write demo node (RFC 0057 node-attributed producer)', () => {
     });
     expect([200, 201]).toContain(reg.status);
 
-    const create = await jsonFetch<{ runId: string }>('/v1/runs', {
+    const create = await jsonFetch<{ runId: string }>('/runs', {
       method: 'POST',
       body: JSON.stringify({ workflowId: 'openwop-app.memwrite', inputs: {} }),
     });
@@ -79,11 +79,11 @@ describe('memory-write demo node (RFC 0057 node-attributed producer)', () => {
 
     for (let i = 0; i < 20; i++) {
       await new Promise((r) => setTimeout(r, 50));
-      const snap = await jsonFetch<{ status: string }>(`/v1/runs/${runId}`);
+      const snap = await jsonFetch<{ status: string }>(`/runs/${runId}`);
       if (['completed', 'failed', 'cancelled'].includes(snap.body.status)) break;
     }
 
-    const bundle = await jsonFetch<BundleBody>(`/v1/runs/${runId}/debug-bundle`);
+    const bundle = await jsonFetch<BundleBody>(`/runs/${runId}/debug-bundle`);
     expect(bundle.status).toBe(200);
     const writes = (bundle.body.events ?? []).filter((e) => e.type === 'memory.written');
     // Two writes: the node-attributed one (nodeId 'mem') + the host session-end
@@ -97,7 +97,7 @@ describe('memory-write demo node (RFC 0057 node-attributed producer)', () => {
     expect(nodeWrite!.payload?.content, 'memory.written MUST be content-free').toBeUndefined();
 
     // The memoryId resolves via the read-side, tagged with the writing node.
-    const mem = await jsonFetch<MemoryListBody>('/v1/host/openwop-app/memory');
+    const mem = await jsonFetch<MemoryListBody>('/host/openwop-app/memory');
     expect(mem.status).toBe(200);
     const entry = mem.body.entries.find((e) => e.id === nodeWrite!.payload!.memoryId);
     expect(entry, 'the attributed memoryId MUST resolve in the ledger').toBeDefined();

@@ -17,7 +17,7 @@ import { requireFeatureEnabled } from '../featureRoute.js';
 import { readBoardRanking } from './agentTools.js';
 import { WORK_SELECTION_TOGGLE } from './service.js';
 
-const BASE = '/v1/host/openwop-app/work-selection';
+const BASE = '/host/openwop-app/work-selection';
 
 export function registerWorkSelectionRoutes(deps: RouteDeps): void {
   const { app } = deps;

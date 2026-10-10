@@ -491,7 +491,7 @@ function parseCommandString(input) {
 function wrapError(err) {
   const m = err.message || String(err);
   if (m.includes('browserType.launch'))
-    return `Error: Browser not installed. Run:  npx playwright install chromium\n${m}`;
+    return `Error: Browser not installed. Run:  npm ci (repo root), then: PLAYWRIGHT_SKIP_BROWSER_GC=1 node node_modules/playwright/cli.js install chromium\n${m}`;
   if (m.includes('not found') || m.includes('no element'))
     return `Error: Element not found. Run "snapshot -i" to see interactive elements.\n${m}`;
   if (m.includes('Timeout') || m.includes('timeout'))

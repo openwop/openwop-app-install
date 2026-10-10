@@ -12,7 +12,7 @@ import { CAD_SOLID_KINDS } from '../validateCadDoc.js';
 
 describe('cad-modeler prompt ↔ validateCadDoc solid-kind parity (XCH-CAD-1)', () => {
   const here = dirname(fileURLToPath(import.meta.url));
-  const promptPath = join(here, '../../../../../../packs/feature.cad.agents/prompts/cad-modeler.md');
+  const promptPath = join(here, '../../../../../../packs/vendor.openwop-app.cad.agents/prompts/cad-modeler.md');
   const prompt = readFileSync(promptPath, 'utf8');
 
   it('names every solid kind as a backtick-quoted token', () => {

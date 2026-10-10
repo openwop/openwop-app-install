@@ -68,9 +68,12 @@
  * spec/v1/capabilities.md §3 + a `Retry-After` header.
  */
 
+import { createHash } from 'node:crypto';
 import type { Request, RequestHandler } from 'express';
+import { apiKeysConfigured } from './apiKeyTenants.js';
 import { createLogger } from '../observability/logger.js';
 import { onRunTerminal } from '../executor/runLifecycle.js';
+import { clientIp, isDirectLoopback } from '../host/clientIp.js';
 
 const log = createLogger('middleware.rateLimit');
 
@@ -85,6 +88,11 @@ interface Limits {
   /** MCP-1 (ADR 0087 OQ-2) — per-principal budget for inbound MCP `tools/call`,
    *  layered on the per-IP floor. Defaults to the per-IP request budget. */
   mcpPrincipalReqsPerMin: number;
+  /** ADR 0771 — write budget per OPERATOR-CONFIGURED key, replacing the per-IP
+   *  write bucket for that caller only. */
+  keyWriteReqsPerMin: number;
+  keyRunsPerDay: number;
+  keyConcurrent: number;
 }
 
 /** Which specific limiter fired — carried in `details.reason` and mapped to the
@@ -96,7 +104,11 @@ type RateLimitReason =
   | 'session_runs_per_day'
   | 'session_concurrent'
   | 'ip_runs_per_day'
-  | 'mcp_principal_rate';
+  | 'mcp_principal_rate'
+  | 'key_write_rate'
+  | 'api_key_rate'
+  | 'key_runs_per_day'
+  | 'key_concurrent';
 
 /** ADR 0395 — the operator system-health panel reads the EFFECTIVE limits
  *  (config, not counters); read-only, superadmin-gated at the route. */
@@ -131,6 +143,15 @@ function loadLimits(): Limits {
     // affordance; the MCP per-principal budget has its own env and must not shift
     // under it (MCP-1).
     mcpPrincipalReqsPerMin: n('OPENWOP_MCP_PRINCIPAL_REQS_PER_MIN', 60),
+    // ADR 0771. Tied to `forced`, unlike MCP: the harness that induces the
+    // canonical 429 IS an operator-key caller, so a keyed bucket that ignored
+    // FORCE would make `rate-limit-envelope` unable to ever see its 429.
+    keyWriteReqsPerMin: forced ? 3 : n('OPENWOP_RATELIMIT_KEY_WRITE_REQS_PER_MIN', 600),
+    // ADR 0771 addendum. NOT tied to `forced`: FORCE induces the REQUEST-rate
+    // 429, and no per-day run quota has ever shifted under it.
+    keyRunsPerDay: n('OPENWOP_RATELIMIT_KEY_RUNS_PER_DAY', 5000),
+    // ADR 0771 addendum 2. Not tied to `forced`, same as the day budget.
+    keyConcurrent: n('OPENWOP_RATELIMIT_KEY_CONCURRENT', 50),
   };
 }
 
@@ -150,6 +171,13 @@ const RATE_LIMIT_SCOPE: Record<RateLimitReason, 'tenant' | 'route' | 'global' | 
   session_concurrent: 'tenant',
   // Per authenticated MCP principal (subject-scoped, like the per-session buckets).
   mcp_principal_rate: 'tenant',
+  // ADR 0771 — per operator-configured key.
+  key_write_rate: 'key',
+  api_key_rate: 'key',
+  // ADR 0771 addendum — the day's run budget of one operator-configured key.
+  key_runs_per_day: 'key',
+  // ADR 0771 addendum 2 — in-flight runs of one operator-configured key.
+  key_concurrent: 'key',
 };
 
 // ── State (all maps reset per process / cold start) ──
@@ -158,6 +186,10 @@ const RATE_LIMIT_SCOPE: Record<RateLimitReason, 'tenant' | 'route' | 'global' | 
 const ipReqTimes = new Map<string, number[]>();
 /** ADR 0640 — the READ tier's window, keyed the same way. */
 const ipReadTimes = new Map<string, number[]>();
+/** ADR 0771 — write timestamps per operator-configured key (keyed by token digest). */
+const keyWriteTimes = new Map<string, number[]>();
+/** ADR 0771 addendum — runs started today per operator-configured key. */
+const keyRunCountsDay = new Map<string, { day: number; count: number }>();
 /** MCP-1 — sliding-window per-principal `tools/call` timestamps (ms). */
 const mcpPrincipalReqTimes = new Map<string, number[]>();
 const sessionRunTimesMin = new Map<string, number[]>();
@@ -180,17 +212,6 @@ function pruneWindow(times: number[], windowMs: number, now: number): number[] {
   return i === 0 ? times : times.slice(i);
 }
 
-/**
- * True only for a genuine direct loopback connection (no proxy hop). Requires
- * the absence of X-Forwarded-For — behind a trusted L7 proxy real traffic
- * always carries XFF, so this can't be reached by spoofing the header. Used to
- * exempt the messaging bridge's self-fetches from the per-IP limiter.
- */
-function isLoopbackSelf(req: Request): boolean {
-  if (req.header('x-forwarded-for')) return false;
-  const addr = req.socket.remoteAddress ?? '';
-  return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
-}
 
 /**
  * The host's long-lived SSE GET endpoints — a single persistent connection,
@@ -212,14 +233,16 @@ function isLoopbackSelf(req: Request): boolean {
  * burned budget and a reconnect storm self-perpetuated its own 429s — the
  * exact feedback loop this exemption exists to prevent.
  */
+// Matched on the unversioned path, the only spelling that reaches here (ADR 0812).
+// A missed one is an availability bug: every open stream would burn the per-IP budget into a 429 reconnect loop.
 const SSE_STREAM_PATHS: readonly RegExp[] = [
-  /^\/v1\/host\/openwop-app\/notifications\/stream$/,
-  /^\/v1\/host\/openwop-app\/kanban\/boards\/[^/]+\/events$/,
-  /^\/v1\/runs\/[^/]+\/events$/,
-  /^\/v1\/host\/openwop-app\/channels\/[^/]+\/stream$/,
-  /^\/v1\/host\/openwop-app\/channels\/[^/]+\/presence$/,
-  /^\/v1\/host\/openwop-app\/voice\/realtime\/messages\/stream$/,
-  /^\/v1\/host\/openwop-app\/present\/[^/]+\/events$/,
+  /^\/host\/openwop-app\/notifications\/stream$/,
+  /^\/host\/openwop-app\/kanban\/boards\/[^/]+\/events$/,
+  /^\/runs\/[^/]+\/events$/,
+  /^\/host\/openwop-app\/channels\/[^/]+\/stream$/,
+  /^\/host\/openwop-app\/channels\/[^/]+\/presence$/,
+  /^\/host\/openwop-app\/voice\/realtime\/messages\/stream$/,
+  /^\/host\/openwop-app\/present\/[^/]+\/events$/,
 ];
 
 /**
@@ -266,20 +289,6 @@ export function isLongLivedSseStream(req: Request): boolean {
   return SSE_STREAM_PATHS.some((re) => re.test(req.path));
 }
 
-function clientIp(req: Request): string {
-  // Honor X-Forwarded-For when running behind Cloud Run's HTTP load
-  // balancer; first hop in the chain is the client. Fall back to
-  // socket.remoteAddress for direct/test runs. NEVER trust this
-  // header on a network where clients can spoof it; behind a single
-  // trusted L7 proxy it's the canonical source.
-  const xff = req.header('x-forwarded-for');
-  if (xff) {
-    const first = xff.split(',')[0] ?? xff;
-    return first.trim();
-  }
-  return req.socket.remoteAddress ?? 'unknown';
-}
-
 function sessionKey(req: Request): string {
   // Falls back to IP if no session cookie (e.g., bearer-authed). This
   // lets us still enforce per-IP run quotas on the bearer path.
@@ -293,6 +302,10 @@ function rejectRateLimited(
   retryAfterSeconds: number,
 ): void {
   res.set('Retry-After', String(Math.max(1, Math.ceil(retryAfterSeconds))));
+  // Which limiter fired, next to the 429 in the logs. The request log carries
+  // only the status, so a 2026-09-29 major-1 429 had to be attributed by
+  // elimination. Route and reason only: no principal, no token.
+  log.info('rate_limited', { reason, scope: RATE_LIMIT_SCOPE[reason], method: res.req?.method, path: res.req?.path });
   res.status(429).json({
     error: 'rate_limited',
     message: 'Request denied by rate limit. Try again later.',
@@ -350,6 +363,25 @@ function isDiscoveryRead(req: Request): boolean {
 // ── Public middleware ──
 
 /** Global per-IP request bucket. Mount before route handlers. */
+/**
+ * ADR 0771 — the bucket id for a caller entitled to the keyed write budget, or
+ * `null`. Entitled means BOTH:
+ *  - the request was authenticated as `env-key`, which only `authMiddleware`
+ *    sets, and only for a bearer found in the operator's key map; and
+ *  - that map is operator-CONFIGURED. The built-in `dev-token` fallback of an
+ *    unenforced deployment is a public string, so it gets no keyed budget
+ *    (review HIGH-1).
+ * Keyed on a digest of the full token, not on `principalId`, which is the first
+ * 8 characters and would merge two keys that share a prefix (review HIGH-2).
+ * This middleware runs after `authMiddleware` (index.ts), so the principal is
+ * verified. Moved before auth, it would read nothing and fall back to the IP.
+ */
+function configuredKeyBucketId(req: Request): string | null {
+  const p = (req as { principal?: { auth?: { kind?: string }; token?: string } }).principal;
+  if (p?.auth?.kind !== 'env-key' || !p.token || !apiKeysConfigured()) return null;
+  return `k:${createHash('sha256').update(p.token).digest('hex').slice(0, 24)}`;
+}
+
 export function ipRateLimitMiddleware(): RequestHandler {
   return (req, res, next) => {
     if (process.env.OPENWOP_RATELIMIT_DISABLED === 'true') { next(); return; }
@@ -359,7 +391,7 @@ export function ipRateLimitMiddleware(): RequestHandler {
     // proxy (Cloud Run) real traffic always carries XFF, so a spoofed
     // `X-Forwarded-For: 127.0.0.1` can't bypass — only a direct loopback
     // connection qualifies. Opt out with OPENWOP_RATELIMIT_TRUST_LOOPBACK=false.
-    if (process.env.OPENWOP_RATELIMIT_TRUST_LOOPBACK !== 'false' && isLoopbackSelf(req)) {
+    if (process.env.OPENWOP_RATELIMIT_TRUST_LOOPBACK !== 'false' && isDirectLoopback(req)) {
       next();
       return;
     }
@@ -403,21 +435,63 @@ export function ipRateLimitMiddleware(): RequestHandler {
     // write bucket keeps the tight budget the limiter was built for.
     const isRead = req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS';
     const limit = isRead ? limits.ipReadReqsPerMin : limits.ipReqsPerMin;
-    if (limit === 0) { next(); return; }
-    const store = isRead ? ipReadTimes : ipReqTimes;
-    const reason: RateLimitReason = isRead ? 'ip_read_rate' : 'ip_request_rate';
-    const ip = clientIp(req);
+    // ADR 0771 — an OPERATOR-CONFIGURED key's writes draw from its own bucket,
+    // not the per-IP one. A certification run is one client from one IP doing
+    // many writes, and the IP bucket was measuring our throttle instead of the
+    // wire. Reads, and every other caller, are untouched.
+    const keyId = !isRead ? configuredKeyBucketId(req) : null;
+    const store = keyId ? keyWriteTimes : isRead ? ipReadTimes : ipReqTimes;
+    const reason: RateLimitReason = keyId ? 'key_write_rate' : isRead ? 'ip_read_rate' : 'ip_request_rate';
+    const effectiveLimit = keyId ? limits.keyWriteReqsPerMin : limit;
+    if (effectiveLimit === 0) { next(); return; }
+    const bucket = keyId ?? clientIp(req);
     const now = Date.now();
-    const times = pruneWindow(store.get(ip) ?? [], 60_000, now);
-    if (times.length >= limit) {
+    const times = pruneWindow(store.get(bucket) ?? [], 60_000, now);
+    if (times.length >= effectiveLimit) {
       const oldest = times[0]!;
       const retryIn = (oldest + 60_000 - now) / 1000;
-      log.warn('ip rate limit hit', { ip, tier: isRead ? 'read' : 'write', recentReqs: times.length, limit });
+      log.warn('ip rate limit hit', { ...(keyId ? { key: keyId } : { ip: bucket }), tier: keyId ? 'key-write' : isRead ? 'read' : 'write', recentReqs: times.length, limit: effectiveLimit });
       rejectRateLimited(res, reason, retryIn);
       return;
     }
     times.push(now);
-    store.set(ip, times);
+    store.set(bucket, times);
+    next();
+  };
+}
+
+/**
+ * ADR 0798 (`KEY-8`) — one bucket per self-service key.
+ *
+ * The per-IP buckets above cannot see a key at all: a leaked `owk_` key used
+ * from many addresses is never throttled as ONE caller, and a key cannot be
+ * slowed without slowing everyone behind the same NAT. This counts every
+ * request a key makes, reads and writes together, against
+ * `OPENWOP_RATELIMIT_APIKEY_REQS_PER_MIN` (default 600; 0 turns it off). It is
+ * IN ADDITION to the per-IP buckets, never instead of them. Operator env keys
+ * have their own budget (`configuredKeyBucketId`) and are not counted here.
+ * Mount after `ipRateLimitMiddleware`.
+ */
+const apiKeyReqTimes = new Map<string, number[]>();
+export function apiKeyRateLimitMiddleware(): RequestHandler {
+  return (req, res, next) => {
+    if (process.env.OPENWOP_RATELIMIT_DISABLED === 'true') { next(); return; }
+    const p = (req as { principal?: { auth?: { kind?: string }; principalId?: string } }).principal;
+    if (p?.auth?.kind !== 'api-key' || !p.principalId) { next(); return; }
+    if (isLongLivedSseStream(req)) { next(); return; }
+    const raw = Number(process.env.OPENWOP_RATELIMIT_APIKEY_REQS_PER_MIN);
+    const limit = Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 600;
+    if (limit === 0) { next(); return; }
+    const now = Date.now();
+    const times = pruneWindow(apiKeyReqTimes.get(p.principalId) ?? [], 60_000, now);
+    if (times.length >= limit) {
+      log.warn('api key rate limit hit', { key: p.principalId, recentReqs: times.length, limit });
+      rejectRateLimited(res, 'api_key_rate', (times[0]! + 60_000 - now) / 1000);
+      return;
+    }
+    times.push(now);
+    if (apiKeyReqTimes.size > 20_000) apiKeyReqTimes.clear();
+    apiKeyReqTimes.set(p.principalId, times);
     next();
   };
 }
@@ -443,8 +517,27 @@ export function runQuotaMiddleware(): RequestHandler {
       }
     }
 
-    // Daily total check (session OR IP path)
-    if (isSession && limits.sessionRunsPerDay > 0) {
+    // ADR 0771 addendum: an OPERATOR-CONFIGURED key (the same predicate as the
+    // keyed write bucket) counts its day's runs on its OWN budget instead of
+    // its tenant's session quota. A certification cut starts hundreds of runs.
+    // MEASURED 2026-09-29: the conformance key hit `session_runs_per_day`
+    // (500) and 108 of 110 non-pass rows in the c3d06c29 bundle were that
+    // 429. Every other caller, and the per-minute and concurrency caps, are
+    // unchanged.
+    const keyId = configuredKeyBucketId(req);
+
+    // Daily total check (keyed, session OR IP path)
+    if (keyId) {
+      if (limits.keyRunsPerDay > 0) {
+        const bucket = keyRunCountsDay.get(keyId);
+        const count = bucket && bucket.day === today ? bucket.count : 0;
+        if (count >= limits.keyRunsPerDay) {
+          const retryIn = ((today + 1) * 86_400 - Math.floor(now / 1000));
+          rejectRateLimited(res, 'key_runs_per_day', retryIn);
+          return;
+        }
+      }
+    } else if (isSession && limits.sessionRunsPerDay > 0) {
       const bucket = sessionRunCountsDay.get(key);
       const count = bucket && bucket.day === today ? bucket.count : 0;
       if (count >= limits.sessionRunsPerDay) {
@@ -462,14 +555,21 @@ export function runQuotaMiddleware(): RequestHandler {
       }
     }
 
-    // Concurrent check (session only)
-    if (isSession && limits.sessionConcurrent > 0) {
-      const inflight = (sessionInflightRuns.get(key) ?? []).filter((r) => now - r.startedAtMs < 60_000);
-      if (inflight.length >= limits.sessionConcurrent) {
-        rejectRateLimited(res, 'session_concurrent', 10);
+    // Concurrent check. ADR 0771 addendum 2: an operator-configured key's
+    // in-flight runs are their own slot bucket (keyed on the token digest),
+    // not its tenant's 5. MEASURED 2026-09-29: the b29427fef major-1 cut had
+    // every 429 inside one 8 s burst at ~18 creates/min, which failed the
+    // replay-fork FLOOR row when earlier scenarios left runs non-terminal.
+    // Sessions keep `sessionConcurrent`.
+    const slotKey = keyId ?? key;
+    const concurrentCap = keyId ? limits.keyConcurrent : isSession ? limits.sessionConcurrent : 0;
+    if (concurrentCap > 0) {
+      const inflight = (sessionInflightRuns.get(slotKey) ?? []).filter((r) => now - r.startedAtMs < 60_000);
+      if (inflight.length >= concurrentCap) {
+        rejectRateLimited(res, keyId ? 'key_concurrent' : 'session_concurrent', 10);
         return;
       }
-      sessionInflightRuns.set(key, inflight);
+      sessionInflightRuns.set(slotKey, inflight);
     }
 
     // ─── Reserve counters (commit on response 2xx; release on error)
@@ -490,7 +590,13 @@ export function runQuotaMiddleware(): RequestHandler {
         sessionRunTimesMin.set(key, times);
       }
       // Commit daily counter
-      if (isSession && limits.sessionRunsPerDay > 0) {
+      if (keyId) {
+        if (limits.keyRunsPerDay > 0) {
+          const bucket = keyRunCountsDay.get(keyId);
+          if (bucket && bucket.day === today) bucket.count += units;
+          else keyRunCountsDay.set(keyId, { day: today, count: units });
+        }
+      } else if (isSession && limits.sessionRunsPerDay > 0) {
         const bucket = sessionRunCountsDay.get(key);
         if (bucket && bucket.day === today) bucket.count += units;
         else sessionRunCountsDay.set(key, { day: today, count: units });
@@ -508,7 +614,7 @@ export function runQuotaMiddleware(): RequestHandler {
     });
     // Stash the session key on the request so the route handler can
     // call reserveConcurrentSlot with the real runId once it's created.
-    (req as Request & { _sessionKey?: string })._sessionKey = key;
+    (req as Request & { _sessionKey?: string })._sessionKey = slotKey;
     next();
   };
 }
@@ -549,6 +655,8 @@ export function reserveConcurrentSlot(req: Request, runId: string): () => void {
 export function _resetRateLimitState(): void {
   ipReqTimes.clear();
   ipReadTimes.clear();
+  keyWriteTimes.clear();
+  keyRunCountsDay.clear();
   mcpPrincipalReqTimes.clear();
   sessionRunTimesMin.clear();
   sessionRunCountsDay.clear();

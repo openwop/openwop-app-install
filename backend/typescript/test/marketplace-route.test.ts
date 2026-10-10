@@ -5,6 +5,12 @@
  * cross-tenant/cross-org IDOR + author-only delete, toggle-off 404 (backend
  * authority), the ctx.features.marketplace surface (read-only, install excluded) +
  * the search node, and the well-known advertisement.
+ *
+ * Sabotage witnesses (wave 10): dropping the install superadmin or toggle gate,
+ * the listings toggle gate, the org-scope authz (IDOR), the phantom-pack gate,
+ * the rating bound, the upsert dedupe, the org filter, the delete author/IDOR
+ * guards, the average, exposing `install` on the surface, a search that matches
+ * nothing, or a node reporting `total: 0` — each turns its case red.
  */
 
 import http from 'node:http';
@@ -21,6 +27,8 @@ vi.mock('../src/packs/registryInstaller.js', async (orig) => {
 });
 
 import { createApp } from '../src/index.js';
+import { BACKEND_FEATURES } from '../src/features/index.js';
+import { registeredFeatureSurfaceIds } from '../src/host/featureSurfaces.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import {
@@ -43,14 +51,20 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+// Bodies are typed per route below — no `any` (wave 10 fixture honesty).
+interface Listing { packName: string }
+interface ReviewBody { reviewId: string; rating: number; authorId: string }
+interface ReviewList { reviews: ReviewBody[]; summary: { count: number; average: number | null } }
+interface ErrBody { error?: { code?: string } }
+type Body = { orgId?: string; listings?: Listing[]; installed?: boolean } & Partial<ReviewBody> & Partial<ReviewList> & ErrBody;
+interface Res { status: number; body: Body }
 function client(initialCookie = '') {
   let cookie = initialCookie;
   const call = async (method: string, path: string, body?: unknown, extraHeaders: Record<string, string> = {}): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}), ...extraHeaders }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     const h = res.headers as { getSetCookie?: () => string[] };
     for (const c of (typeof h.getSetCookie === 'function' ? h.getSetCookie() : [])) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const out = (res.status === 204 ? {} : await res.json().catch(() => ({}))) as Body;
     return { status: res.status, body: out };
   };
   return {
@@ -65,36 +79,39 @@ let n = 0;
 async function ownerWithOrg(): Promise<{ owner: ReturnType<typeof client>; orgId: string }> {
   const owner = client();
   const tenantId = `t-mkt-${n++}`;
-  expect((await owner.post('/v1/host/openwop-app/test/login', { email: `mkt-${n}@acme.test`, tenantId })).status).toBe(201);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  expect((await owner.post('/host/openwop-app/test/login', { email: `mkt-${n}@acme.test`, tenantId })).status).toBe(201);
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
-  return { owner, orgId: org.body.orgId };
+  return { owner, orgId: org.body.orgId! };
 }
 const enable = async (status: 'on' | 'off'): Promise<void> => { const d = getToggleDefault('marketplace'); if (d) await saveConfig({ ...d, status }, 'test'); };
 
 describe('Marketplace: registration + advertisement', () => {
   it('is registered + advertises ctx.features.marketplace', async () => {
-    const { BACKEND_FEATURES } = await import('../src/features/index.js');
     expect(BACKEND_FEATURES.some((f) => f.id === 'marketplace')).toBe(true);
-    expect((await pub.get('/.well-known/openwop')).body.hostExtensions?.featureSurfaces).toContain('host.sample.marketplace');
+    // ADR 0812 P3c-0 — the v1 document's `hostExtensions.featureSurfaces` list retired with
+    // major 1; the surface registry it was derived from replaces it.
+    expect(registeredFeatureSurfaceIds()).toContain('marketplace');
   });
 });
 
 describe('Marketplace: browse listings (toggle-gated)', () => {
   it('an authenticated caller browses; the projection includes the feature packs', async () => {
     const { owner } = await ownerWithOrg();
-    const r = await owner.get('/v1/host/openwop-app/marketplace/listings');
+    const r = await owner.get('/host/openwop-app/marketplace/listings');
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     expect(Array.isArray(r.body.listings)).toBe(true);
     // The mounted feature.marketplace.* packs should appear in the catalog.
-    expect(r.body.listings.some((l: { packName: string }) => l.packName.startsWith('feature.'))).toBe(true);
+    expect(r.body.listings!.some((l) => l.packName.startsWith('feature.'))).toBe(true);
   });
 
   it('toggle OFF ⇒ 404 (backend authority)', async () => {
     const { owner } = await ownerWithOrg();
+    // Positive control: the SAME caller reads it while ON, so the 404 below is the toggle.
+    expect((await owner.get('/host/openwop-app/marketplace/listings')).status).toBe(200);
     try {
       await enable('off');
-      expect((await owner.get('/v1/host/openwop-app/marketplace/listings')).status).toBe(404);
+      expect((await owner.get('/host/openwop-app/marketplace/listings')).status).toBe(404);
     } finally { await enable('on'); }
   });
 });
@@ -104,14 +121,14 @@ describe('Marketplace: install (toggle + SUPERADMIN, delegates to registryInstal
 
   it('a non-superadmin org owner is 403 (fail-closed; never reaches the installer)', async () => {
     const { owner } = await ownerWithOrg();
-    const r = await owner.post('/v1/host/openwop-app/marketplace/install', { packName: 'feature.crm.nodes', version: '1.0.0' });
+    const r = await owner.post('/host/openwop-app/marketplace/install', { packName: 'feature.crm.nodes', version: '1.0.0' });
     expect(r.status).toBe(403);
     expect(installSpy).not.toHaveBeenCalled();
   });
 
   it('a superadmin (wildcard bearer) reaches + delegates to installPackFromRegistry', async () => {
     // The default `dev-token` API key authenticates as tenants:['*'] → superadmin.
-    const r = await pub.post('/v1/host/openwop-app/marketplace/install',
+    const r = await pub.post('/host/openwop-app/marketplace/install',
       { packName: 'feature.crm.nodes', version: '1.0.0' },
       { authorization: 'Bearer dev-token' });
     expect(r.status, JSON.stringify(r.body)).toBe(200);
@@ -121,7 +138,7 @@ describe('Marketplace: install (toggle + SUPERADMIN, delegates to registryInstal
   });
 
   it('missing packName/version 400s before delegating', async () => {
-    const r = await pub.post('/v1/host/openwop-app/marketplace/install', { packName: 'x' }, { authorization: 'Bearer dev-token' });
+    const r = await pub.post('/host/openwop-app/marketplace/install', { packName: 'x' }, { authorization: 'Bearer dev-token' });
     expect(r.status).toBe(400);
     expect(installSpy).not.toHaveBeenCalled();
   });
@@ -129,7 +146,7 @@ describe('Marketplace: install (toggle + SUPERADMIN, delegates to registryInstal
   it('install is toggle-gated too (OFF ⇒ 404, before the superadmin check)', async () => {
     try {
       await enable('off');
-      const r = await pub.post('/v1/host/openwop-app/marketplace/install', { packName: 'feature.crm.nodes', version: '1.0.0' }, { authorization: 'Bearer dev-token' });
+      const r = await pub.post('/host/openwop-app/marketplace/install', { packName: 'feature.crm.nodes', version: '1.0.0' }, { authorization: 'Bearer dev-token' });
       expect(r.status).toBe(404);
       expect(installSpy).not.toHaveBeenCalled();
     } finally { await enable('on'); }
@@ -138,7 +155,7 @@ describe('Marketplace: install (toggle + SUPERADMIN, delegates to registryInstal
 
 describe('Marketplace: reviews CRUD (RBAC) + IDOR + aggregate', () => {
   const PACK = 'feature.crm.nodes'; // a pack present in the mounted catalog
-  const reviewsUrl = (orgId: string) => `/v1/host/openwop-app/marketplace/orgs/${orgId}/listings/${PACK}/reviews`;
+  const reviewsUrl = (orgId: string) => `/host/openwop-app/marketplace/orgs/${orgId}/listings/${PACK}/reviews`;
 
   it('owner posts a review, lists it, aggregate reflects it; a re-post UPDATES (no dup)', async () => {
     const { owner, orgId } = await ownerWithOrg();
@@ -152,8 +169,8 @@ describe('Marketplace: reviews CRUD (RBAC) + IDOR + aggregate', () => {
 
     const list = await owner.get(reviewsUrl(orgId));
     expect(list.body.reviews).toHaveLength(1);
-    expect(list.body.summary.count).toBe(1);
-    expect(list.body.summary.average).toBe(5);
+    expect(list.body.summary!.count).toBe(1);
+    expect(list.body.summary!.average).toBe(5);
   });
 
   it('rating out of [1,5] or non-integer 400s', async () => {
@@ -166,15 +183,24 @@ describe('Marketplace: reviews CRUD (RBAC) + IDOR + aggregate', () => {
 
   it('reviewing a phantom pack 404s', async () => {
     const { owner, orgId } = await ownerWithOrg();
-    const r = await owner.post(`/v1/host/openwop-app/marketplace/orgs/${orgId}/listings/no.such.pack/reviews`, { rating: 5 });
+    const r = await owner.post(`/host/openwop-app/marketplace/orgs/${orgId}/listings/no.such.pack/reviews`, { rating: 5 });
     expect(r.status).toBe(404);
   });
 
   it('cross-tenant access 404s (IDOR — org not in caller’s tenant)', async () => {
     const a = await ownerWithOrg();
     const b = await ownerWithOrg();
+    // Positive control: A can write + read its own org's reviews, so B's 404 is the
+    // tenant boundary, not a missing org or pack.
+    const own = await a.owner.post(reviewsUrl(a.orgId), { rating: 4 });
+    expect(own.status, JSON.stringify(own.body)).toBe(201);
     expect((await b.owner.get(reviewsUrl(a.orgId))).status).toBe(404);
-    expect((await b.owner.post(reviewsUrl(a.orgId), { rating: 5 })).status).toBe(404);
+    expect((await b.owner.post(reviewsUrl(a.orgId), { rating: 1 })).status).toBe(404);
+    // …and B's refused write did not land in A's org.
+    const after = await a.owner.get(reviewsUrl(a.orgId));
+    expect(after.status).toBe(200);
+    expect(after.body.reviews!.map((r) => r.rating)).toEqual([4]);
+    expect(after.body.reviews![0]?.reviewId).toBe(own.body.reviewId);
   });
 
   it('author can delete own review; aggregate empties', async () => {
@@ -183,7 +209,7 @@ describe('Marketplace: reviews CRUD (RBAC) + IDOR + aggregate', () => {
     expect((await owner.del(`${reviewsUrl(orgId)}/${c.body.reviewId}`)).status).toBe(204);
     const list = await owner.get(reviewsUrl(orgId));
     expect(list.body.reviews).toHaveLength(0);
-    expect(list.body.summary.average).toBeNull();
+    expect(list.body.summary!.average).toBeNull();
   });
 
   it('toggle OFF ⇒ reviews 404 (backend authority)', async () => {
@@ -230,8 +256,6 @@ describe('Marketplace: reviewService unit (tenant+org isolation, upsert, delete-
 describe('Marketplace: ctx.features.marketplace surface (read-only; install excluded)', () => {
   it('listings/search are present; install is NOT a surface method', async () => {
     const surf = buildMarketplaceSurface({ tenantId: 't1', runId: 'run-1' });
-    expect(typeof surf.listings).toBe('function');
-    expect(typeof surf.search).toBe('function');
     expect((surf as Record<string, unknown>).install).toBeUndefined(); // privileged — never a node-reachable op
 
     const all = (await surf.listings({})) as { listings: Array<{ packName: string }> };
@@ -242,7 +266,10 @@ describe('Marketplace: ctx.features.marketplace surface (read-only; install excl
     // contract), and that search actually narrows the full set.
     type Hit = { packName: string; title?: string; description?: string; category?: string };
     const hits = (await surf.search({ query: 'marketplace' })) as { listings: Hit[] };
-    expect(hits.listings.length).toBeLessThanOrEqual(all.listings.length);
+    // It finds something (the mounted feature.marketplace.nodes) AND narrows — a search
+    // that matched nothing satisfied the old `<=` + `every` pair (wave 10 probe).
+    expect(hits.listings.length).toBeGreaterThan(0);
+    expect(hits.listings.length).toBeLessThan(all.listings.length);
     expect(hits.listings.every((l) => /marketplace/i.test(`${l.packName} ${l.title ?? ''} ${l.description ?? ''} ${l.category ?? ''}`))).toBe(true);
   });
 
@@ -252,6 +279,9 @@ describe('Marketplace: ctx.features.marketplace surface (read-only; install excl
     const ctx = (inputs: Record<string, unknown>) => ({ features: { marketplace: surf }, inputs });
     const r = await mod.nodes['feature.marketplace.nodes.search'](ctx({ query: '' }));
     expect(r.status).toBe('success');
-    expect(typeof r.outputs?.total).toBe('number');
+    // `total` is the surface's own count — `typeof number` passed on `total: 0`.
+    const expected = ((await surf.search({ query: '' })) as { listings: unknown[] }).listings.length;
+    expect(expected).toBeGreaterThan(0);
+    expect(r.outputs?.total).toBe(expected);
   });
 });

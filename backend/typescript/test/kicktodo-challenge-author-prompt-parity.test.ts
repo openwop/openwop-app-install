@@ -15,9 +15,9 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const REPO = join(import.meta.dirname, '..', '..', '..');
-const AGENTS_PACK_DIR = join(REPO, 'packs/feature.kicktodo.agents');
+const AGENTS_PACK_DIR = join(REPO, 'packs/vendor.openwop-app.kicktodo.agents');
 
-const AGENT_ID = 'feature.kicktodo.agents.challenge-author';
+const AGENT_ID = 'vendor.openwop-app.kicktodo.agents.challenge-author';
 const ALLOWED_TOOL_IDS = ['openwop:kicktodo.candidates', 'openwop:kicktodo.factory.run'];
 const ID_RE = /openwop:[A-Za-z0-9._-]+/g;
 

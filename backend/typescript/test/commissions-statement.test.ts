@@ -70,19 +70,19 @@ let n = 0;
 async function scenario(): Promise<{ admin: Client; rep: Client; rep2: Client; orgId: string; repId: string; rep2Id: string }> {
   const tenantId = `org:comms-${Date.now()}-${n++}`;
   const admin = client();
-  await admin.post('/v1/host/openwop-app/test/login', { email: `a-${Date.now()}-${n++}@acme.test`, tenantId });
+  await admin.post('/host/openwop-app/test/login', { email: `a-${Date.now()}-${n++}@acme.test`, tenantId });
   const rep = client();
-  const repId = (await rep.post('/v1/host/openwop-app/test/login', { email: `r-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId;
+  const repId = (await rep.post('/host/openwop-app/test/login', { email: `r-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId;
   const rep2 = client();
-  const rep2Id = (await rep2.post('/v1/host/openwop-app/test/login', { email: `r2-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId;
-  const orgId = (await admin.post('/v1/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
+  const rep2Id = (await rep2.post('/host/openwop-app/test/login', { email: `r2-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId;
+  const orgId = (await admin.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
   for (const [subject, who] of [[repId, 'rep'], [rep2Id, 'rep2']] as const) {
-    await admin.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: who, subject, roles: ['editor'] });
+    await admin.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: who, subject, roles: ['editor'] });
   }
   return { admin, rep, rep2, orgId, repId, rep2Id };
 }
-const cbase = (orgId: string): string => `/v1/host/openwop-app/commissions/orgs/${encodeURIComponent(orgId)}`;
-const crm = (orgId: string): string => `/v1/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}`;
+const cbase = (orgId: string): string => `/host/openwop-app/commissions/orgs/${encodeURIComponent(orgId)}`;
+const crm = (orgId: string): string => `/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}`;
 
 async function wonDeal(admin: Client, orgId: string, title: string, amount: number, owner: string, closeDate: string): Promise<void> {
   const d = await admin.post(`${crm(orgId)}/deals`, { title, amount, owner, closeDate, status: 'won' });
@@ -98,7 +98,7 @@ async function wonDeal(admin: Client, orgId: string, title: string, amount: numb
 async function approveStatementViaReview(c: Client, B: string, statementId: string): Promise<Res> {
   const submit = await c.post(`${B}/statements/${encodeURIComponent(statementId)}/approve`);
   if (submit.status !== 202) return submit;
-  return c.post(`/v1/host/openwop-app/reviews/approval:${submit.body.review.approvalId}/actions/approve`);
+  return c.post(`/host/openwop-app/reviews/approval:${submit.body.review.approvalId}/actions/approve`);
 }
 
 describe('commissions — statement computation + subject-scoped reads', () => {
@@ -176,7 +176,7 @@ describe('commissions — statement computation + subject-scoped reads', () => {
     const submit = await admin.post(`${S}/approve`);
     expect(submit.status, JSON.stringify(submit.body)).toBe(202);
     expect((await admin.get(S)).body.status).toBe('draft'); // not applied until the gate resolves
-    const decide = await admin.post(`/v1/host/openwop-app/reviews/approval:${submit.body.review.approvalId}/actions/approve`);
+    const decide = await admin.post(`/host/openwop-app/reviews/approval:${submit.body.review.approvalId}/actions/approve`);
     expect(decide.status, JSON.stringify(decide.body)).toBe(200);
     expect(decide.body.status).toBe('approved');
     // The applied effect: statement approved + approver stamped, through the gate.

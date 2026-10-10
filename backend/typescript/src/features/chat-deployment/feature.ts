@@ -19,8 +19,8 @@ export const chatDeploymentFeature: BackendFeature = {
     id: 'chat-deployment',
     label: 'Chat deployment console',
     description:
-      'One console for putting the AI chat to work without someone in the seat — scheduled runs + the public website widget (ADR 0145).',
-    category: 'Admin',
+      'One console for putting the AI chat to work without someone in the seat — scheduled runs + the public website widget.',
+    category: 'Support', // ADR 0820 §8.2 — sold in the Support bundle
     status: 'off',
     bucketUnit: 'tenant',
     salt: 'chat-deployment',

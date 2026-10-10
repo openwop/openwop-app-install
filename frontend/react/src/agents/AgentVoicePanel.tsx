@@ -20,6 +20,7 @@ import { listStoredRefs } from '../byok/lib/byokClient.js';
 import { Notice } from '../ui/Notice.js';
 import { SelectField, TextField } from '../ui/Field.js';
 import { MicIcon } from '../ui/icons/index.js';
+import { writeErrorMessage } from './agentWriteAccess.js';
 
 /** Providers whose key is BYOK (no managed host key) — they need a credentialRef. */
 const BYOK_PROVIDERS = new Set(['elevenlabs', 'openai', 'google']);
@@ -130,7 +131,7 @@ export function AgentVoicePanel({ rosterId }: { rosterId: string }): JSX.Element
       setProfile(saved);
       setNotice(t('voiceSaved'));
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(writeErrorMessage(err, t('common:error_forbidden')));
     } finally {
       setBusy(false);
     }

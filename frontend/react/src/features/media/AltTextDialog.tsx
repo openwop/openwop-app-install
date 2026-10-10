@@ -16,6 +16,7 @@ import { SparklesIcon, SaveIcon } from '../../ui/icons/index.js';
 import { announce } from '../../ui/announce.js';
 import { formatNumber } from '../../i18n/format.js';
 import { generateAltText, updateAsset, absoluteServeUrl, type MediaAsset, type MediaAltTextSource } from './mediaClient.js';
+import { assetAlt } from './MediaViews.js';
 
 const MAX_ALT = 250;
 
@@ -85,7 +86,7 @@ export function AltTextDialog({
       <div className="u-grid u-gap-3">
         {asset.contentType.startsWith('image/') ? (
           <div className="media-thumb">
-            <img src={absoluteServeUrl(asset.serveUrl)} alt={asset.altText || asset.name} className="media-thumb-img" />
+            <img src={absoluteServeUrl(asset.serveUrl)} alt={assetAlt(asset)} className="media-thumb-img" />
           </div>
         ) : null}
 

@@ -14,6 +14,13 @@
  * which is why the defect shipped. Every case below is RED on `origin/main`:
  * the outcome was a bare `true`, the route always answered 200 with the done
  * page, and `EngagementStats` had no `unsubscribesUnenforced` field at all.
+ *
+ * Re-witnessed (grade-tests w9, 14 sabotages): dropping either `unenforced.push`, gating
+ * the suppression write on a clean consent leg, never re-stamping a retried row, a
+ * constant `unsubscribesUnenforced`, an unknown token reported `revoked`, a 200/done page
+ * over a partial outcome, a GET that unsubscribes, a 200 over a failed preference overlay,
+ * a bare `{ marketing:false }` opt-out on either lane, a merge that drops the stored
+ * `legalBasis`, and a partial submit that revokes whatsapp each red their case.
  */
 
 import http from 'node:http';
@@ -89,7 +96,7 @@ async function mintUnsub(campaignId: string, contactId: string, email: string): 
   return mintToken({ tenantId: T, campaignId, contactId, kind: 'unsubscribe', email });
 }
 const unsubUrl = (token: string): string =>
-  `${BASE}/v1/host/openwop-app/public-email/u/${encodeURIComponent(token)}`;
+  `${BASE}/host/openwop-app/public-email/u/${encodeURIComponent(token)}`;
 
 describe('EM-2 — recordUnsubscribe reports what actually persisted', () => {
   it('returns revoked only when BOTH send-stopping writes land', async () => {
@@ -215,6 +222,10 @@ describe('EM-UX-1 — the public page never claims an unsubscribe that did not l
   it('an unknown token still 404s — a failure is not a bad link', async () => {
     const res = await fetch(unsubUrl('tok:nope'), { method: 'POST' });
     expect(res.status).toBe(404);
+    const html = await res.text();
+    expect(html).toContain('We do not recognise this unsubscribe link.');
+    expect(html).not.toContain(FAILED_CLAIM); // a bad link is not reported as a failed write
+    expect(html).not.toContain(DONE_CLAIM);
   });
 
   it('GET still renders the scanner-safe confirm form and mutates nothing', async () => {
@@ -233,7 +244,7 @@ describe('EM-2 — the preference center all-off path is honest too', () => {
   it('a failed suppression overlay renders the partial state, not "saved"', async () => {
     const tok = await mintToken({ tenantId: T, campaignId: 'cmp-pc', contactId: 'ct-pc', kind: 'preferences', email: 'pc@example.com' });
     suppressionFails = true;
-    const res = await fetch(`${BASE}/v1/host/openwop-app/public-email/p/${encodeURIComponent(tok)}`, {
+    const res = await fetch(`${BASE}/host/openwop-app/public-email/p/${encodeURIComponent(tok)}`, {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
       body: '', // every channel off = a full opt-out
@@ -246,7 +257,7 @@ describe('EM-2 — the preference center all-off path is honest too', () => {
 
   it('a landed overlay still renders the saved state', async () => {
     const tok = await mintToken({ tenantId: T, campaignId: 'cmp-pc2', contactId: 'ct-pc2', kind: 'preferences', email: 'pc2@example.com' });
-    const res = await fetch(`${BASE}/v1/host/openwop-app/public-email/p/${encodeURIComponent(tok)}`, {
+    const res = await fetch(`${BASE}/host/openwop-app/public-email/p/${encodeURIComponent(tok)}`, {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
       body: '',
@@ -337,7 +348,7 @@ describe('review F4 — the public opt-out lanes preserve lawful-basis evidence 
     });
 
     const tok = await mintToken({ tenantId: T, campaignId: 'cmp-f4b', contactId: 'ct-f4b', kind: 'preferences', email: 'f4b@example.com' });
-    const res = await fetch(`${BASE}/v1/host/openwop-app/public-email/p/${encodeURIComponent(tok)}`, {
+    const res = await fetch(`${BASE}/host/openwop-app/public-email/p/${encodeURIComponent(tok)}`, {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
       body: '', // every box unticked = a full marketing opt-out
@@ -371,7 +382,7 @@ describe('review F4 — the public opt-out lanes preserve lawful-basis evidence 
     });
 
     const tok = await mintToken({ tenantId: T, campaignId: 'cmp-f4c', contactId: 'ct-f4c', kind: 'preferences', email: 'f4c@example.com' });
-    const res = await fetch(`${BASE}/v1/host/openwop-app/public-email/p/${encodeURIComponent(tok)}`, {
+    const res = await fetch(`${BASE}/host/openwop-app/public-email/p/${encodeURIComponent(tok)}`, {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
       body: 'email=on',

@@ -75,7 +75,7 @@ export const messages = {
   publishFailed: 'Error al publicar.',
   publishClose: 'Cerrar',
   exportWarningsTitle: 'Lo que la exportación omitió',
-  exportWarningsIntro: 'La descarga comenzó, pero {{count}} parte(s) de esta app no se pudieron expresar en {{target}} y faltan en el código generado.',
+  exportWarningsIntro: 'La descarga comenzó, pero {{count}} parte(s) de esta app no se pudieron llevar a {{target}} con exactitud — cada una aparece abajo: omitida o exportada con su valor predeterminado.',
   syncLoadFailedTitle: 'No se pudo leer el vínculo con el repositorio',
   syncLoadFailedBody: 'Por eso no se sabe si este lienzo ya está vinculado. Vincular desde aquí generaría un nuevo secreto de webhook y rompería un webhook de GitHub existente: reintenta la lectura primero.',
   syncRetry: 'Reintentar',

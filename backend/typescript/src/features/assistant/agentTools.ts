@@ -63,6 +63,7 @@ export function registerAssistantAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: ASSISTANT_LIST_COMMITMENTS_TOOL_ID,
       description:
@@ -73,7 +74,7 @@ export function registerAssistantAgentTools(): void {
         type: 'object',
         properties: {
           status: { type: 'string', description: 'Optional filter: open | done | dropped.' },
-          projectId: { type: 'string', description: 'Optional: only commitments linked to this project.' },
+          projectId: { type: 'string', description: 'Optional: only commitments linked to this project (a workspace project id from openwop:projects.list).' },
         },
         additionalProperties: false,
       },
@@ -90,6 +91,7 @@ export function registerAssistantAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: ASSISTANT_LIST_PENDING_ACTIONS_TOOL_ID,
       description:
@@ -112,6 +114,7 @@ export function registerAssistantAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: ASSISTANT_COMPOSE_BRIEFING_TOOL_ID,
       description:
@@ -153,6 +156,7 @@ export function registerAssistantAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: ASSISTANT_UPSERT_COMMITMENT_TOOL_ID,
       description:
@@ -176,7 +180,7 @@ export function registerAssistantAgentTools(): void {
           },
           dueAt: { type: 'string', description: 'Optional ISO-8601 due date.' },
           confidence: { type: 'number', minimum: 0, maximum: 1, description: 'Optional extraction confidence 0..1.' },
-          projectId: { type: 'string', description: 'Optional project to link the commitment to.' },
+          projectId: { type: 'string', description: 'Optional workspace project to link the commitment to (an id from openwop:projects.list).' },
         },
         required: ['description'],
         additionalProperties: false,
@@ -203,6 +207,7 @@ export function registerAssistantAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: ASSISTANT_POPULATE_BOARD_TOOL_ID,
       description:
@@ -239,6 +244,7 @@ export function registerAssistantAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: ASSISTANT_ENQUEUE_ACTION_TOOL_ID,
       description:

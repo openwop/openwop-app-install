@@ -19,6 +19,8 @@ import { disableInboundForRevokedConnection, purgeInboundSession } from './inbou
 import { unpair } from './messagingOutbound.js';
 import { purgeTenantConnectionChildren } from './tenantTeardown.js';
 import { registerTenantPurgeHook } from '../../host/hostExtPersistence.js';
+import { registerSubjectEraser } from '../../host/subjectErasure.js';
+import { eraseSubjectConnections } from './connectionsService.js';
 
 // Connections graduated off its feature toggle on 2026-06-11 (ADR 0024
 // § Correction): it is a permanent admin surface, always-on, so it registers
@@ -59,5 +61,9 @@ export const connectionsFeature: BackendFeature = {
     // With the revoke consumer above ensuring no orphans exist, this reaches
     // every one of the tenant's rows.
     registerTenantPurgeHook('connections', purgeTenantConnectionChildren);
+    // ADR 0780 D4 — a DSAR revokes the subject's USER-scoped connections (and
+    // their in-flight grants) in the tenant it names; see the eraser for why
+    // org/workspace rows are out of scope and what it does not reach.
+    registerSubjectEraser(eraseSubjectConnections);
   },
 };

@@ -84,7 +84,7 @@ describe('RFC 0133 §1.3 — co-registration', () => {
   const parent = chain({
     chainId: 'factory',
     dag: { nodes: [{ id: 'build', typeId: 'core.subWorkflow', config: { subChainRef: 'lesson-batch' } }], edges: [] },
-    subChains: [{ ref: { packName: 'p', chainId: 'lesson-batch', version: '1' } }],
+    subChains: [{ ref: { packName: 'p', chainId: 'lesson-batch', version: '1.0.0' } }],
   });
   const mkDeps = (supported = true) => {
     const registered: WorkflowDefinition[] = [];
@@ -103,7 +103,7 @@ describe('RFC 0133 §1.3 — co-registration', () => {
     const { definition, registeredChildIds } = await coRegisterSubChains(parent, { params: {}, tenantId: 't1' }, deps);
     expect(registeredChildIds).toHaveLength(1);
     const childId = registeredChildIds[0]!;
-    expect(childId).toMatch(/^wf\.lesson-batch\.sc-[0-9a-f]{12}$/);
+    expect(childId).toMatch(/^wf\.sub\.lesson-batch\.[0-9a-f]{12}$/);
     // Child was registered + owned (before the parent, which the ROUTE registers).
     expect(registered.map((d) => d.workflowId)).toEqual([childId]);
     expect(owned).toEqual([childId]);
@@ -160,7 +160,7 @@ describe('RFC 0133 §1.3 — co-registration', () => {
 describe('RFC 0133 §1.3 — deterministic tenant-scoped child id', () => {
   it('mintChildWorkflowId is keyed on exactly (tenantId, childChainId, version)', () => {
     const base = mintChildWorkflowId('t1', 'lesson-batch', '1.0.0');
-    expect(base).toMatch(/^wf\.lesson-batch\.sc-[0-9a-f]{12}$/);
+    expect(base).toMatch(/^wf\.sub\.lesson-batch\.[0-9a-f]{12}$/);
     expect(mintChildWorkflowId('t1', 'lesson-batch', '1.0.0')).toBe(base); // deterministic
     expect(mintChildWorkflowId('t2', 'lesson-batch', '1.0.0')).not.toBe(base); // tenant-scoped
     expect(mintChildWorkflowId('t1', 'lesson-batch', '2.0.0')).not.toBe(base); // version-pinned
@@ -175,7 +175,7 @@ describe('RFC 0133 §1.3 — depth bound (sub_chain_max_depth_exceeded)', () => 
     const linkChain = (n: number): WorkflowChain => chain({
       chainId: `link-${n}`,
       dag: { nodes: [{ id: 'd', typeId: 'core.subWorkflow', config: { subChainRef: `link-${n + 1}` } }], edges: [] },
-      subChains: [{ ref: { packName: 'p', chainId: `link-${n + 1}`, version: '1' } }],
+      subChains: [{ ref: { packName: 'p', chainId: `link-${n + 1}`, version: '1.0.0' } }],
     });
     const registered: WorkflowDefinition[] = [];
     const deps: SubChainDeps = {

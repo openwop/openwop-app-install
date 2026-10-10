@@ -19,6 +19,8 @@ export const messages = {
   loading: 'Loading editor…',
   loadError: 'Could not load this canvas.',
   notAvailable: 'This canvas isn’t available — it may have been deleted, belong to another workspace, or its feature may be disabled.',
+  invalidArtifact: 'This design can’t be opened in the editor: it uses components or values outside the catalog. Ask the assistant to regenerate it.',
+  invalidArtifactDetail: 'What was refused',
   noOrg: 'No workspace available.',
   retry: 'Retry',
   liveConnecting: 'Starting the live session…',

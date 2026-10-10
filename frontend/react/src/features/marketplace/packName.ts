@@ -26,6 +26,9 @@ const titleWord = (w: string): string =>
 export function prettyPackName(packName: string): string {
   const parts = packName.split('.').filter(Boolean);
   let i = 0;
+  // ADR 0763 — `vendor.openwop-app.<feature>.*` is this host's own feature scope
+  // (formerly `feature.*`): skip the vendor + org pair like any namespace prefix.
+  if (parts[0] === 'vendor' && parts[1] === 'openwop-app' && parts.length > 3) i = 2;
   while (i < parts.length - 1 && NS_PREFIX.has(parts[i] ?? '')) i++;
   if (i < parts.length - 1 && KIND.has(parts[i] ?? '')) i++;
   const words = parts.slice(i).flatMap((p) => p.split(/[-_]/)).filter(Boolean).map(titleWord);

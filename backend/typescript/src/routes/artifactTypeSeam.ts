@@ -139,7 +139,7 @@ function registeredProjection(ids: readonly string[]): Array<Record<string, unkn
 }
 
 export function registerArtifactTypeSeamRoutes(app: Express, deps?: RunProduceDeps): void {
-  app.post('/v1/host/sample/artifacttypes/install', (req: Request, res: Response, next: NextFunction) => {
+  app.post('/host/sample/artifacttypes/install', (req: Request, res: Response, next: NextFunction) => {
     try {
       if (!seamEnabled()) { sendError(res, 404, 'not_found', 'The artifact-type conformance seam is not enabled on this host.'); return; }
       const { manifest, schemas } = (req.body ?? {}) as InstallBody;
@@ -232,7 +232,7 @@ export function registerArtifactTypeSeamRoutes(app: Express, deps?: RunProduceDe
     } catch (err) { next(err); }
   });
 
-  app.post('/v1/host/sample/artifacttypes/produce', async (req: Request, res: Response, next: NextFunction) => {
+  app.post('/host/sample/artifacttypes/produce', async (req: Request, res: Response, next: NextFunction) => {
     try {
       if (!seamEnabled()) { sendError(res, 404, 'not_found', 'The artifact-type conformance seam is not enabled on this host.'); return; }
       const { artifactTypeId, payload } = (req.body ?? {}) as { artifactTypeId?: unknown; payload?: unknown };
@@ -315,7 +315,7 @@ export function registerArtifactTypeSeamRoutes(app: Express, deps?: RunProduceDe
   // NOT emit, and no leg here would notice. That is why `store` is advertised
   // per-type for the emitting types only, and why a global `store: true` would
   // be a false claim on this host.
-  app.post('/v1/host/sample/artifacttypes/runproduce', async (req: Request, res: Response, next: NextFunction) => {
+  app.post('/host/sample/artifacttypes/runproduce', async (req: Request, res: Response, next: NextFunction) => {
     try {
       if (!seamEnabled() || !deps) { sendError(res, 404, 'not_found', 'The artifact-type conformance seam is not enabled on this host.'); return; }
       const { artifactTypeId } = (req.body ?? {}) as { artifactTypeId?: unknown };

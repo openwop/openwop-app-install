@@ -93,8 +93,33 @@ else
   ok "gate_assert_port_owned_by refuses when nothing is listening"
 fi
 
-pkill -P "$WEB_PID" 2>/dev/null; kill "$WEB_PID" 2>/dev/null
+gate_kill_tree "$WEB_PID"
 kill "$OCCUPANT" 2>/dev/null
+
+# ── gate_kill_tree reaches the WHOLE subtree (ADR 0863) ──────────────────────
+# Shaped like `npm run dev` on Linux: subshell → bash → sh -c → the long-lived
+# leaf. Here `pkill -P` would reach only the bash and leave the leaf running, which
+# is the Vite leak the ADR 0863 Linux pilot found.
+( bash -c 'sh -c "sleep 300; :" ; :' ) &
+KT_ROOT=$!
+KT_LEAF=""
+for _ in $(seq 1 40); do
+  KT_LEAF="$(gate_tree_pids "$KT_ROOT" | head -1)"
+  [ -n "$KT_LEAF" ] && [ "$KT_LEAF" != "$KT_ROOT" ] && ps -o command= -p "$KT_LEAF" 2>/dev/null | grep -q 'sleep 300' && break
+  sleep 0.1
+done
+if [ -z "$KT_LEAF" ] || [ "$KT_LEAF" = "$KT_ROOT" ]; then
+  bad "gate_tree_pids found no descendant of the test tree (the fixture is broken)"
+else
+  gate_kill_tree "$KT_ROOT"
+  for _ in $(seq 1 30); do kill -0 "$KT_LEAF" 2>/dev/null || break; sleep 0.1; done
+  if kill -0 "$KT_LEAF" 2>/dev/null; then
+    bad "gate_kill_tree left the GRANDCHILD alive (pid $KT_LEAF)"; kill "$KT_LEAF" 2>/dev/null
+  else
+    ok "gate_kill_tree kills a grandchild that pkill -P would miss"
+  fi
+fi
+wait "$KT_ROOT" 2>/dev/null
 
 # ── ADR numbering (DEBT-4) ────────────────────────────────────────────────────
 # `--next` must return MAX + 1, never the first GAP. The first implementation
@@ -662,6 +687,49 @@ check "$(m2 killed.log)" "1" "major-2 ratchet FAILS a watchdog-killed partial ru
 check "$(m2 green.log)" "0" "  ...and still PASSES a complete green run (the refusal is not a blanket fail)"
 check "$(m2 red.log)" "1" "  ...and still FAILS a complete run with an unlisted red"
 rm -rf "$M2T"
+
+echo "== check-audit: one exception must not waive a package's OTHER advisories =="
+AUD="$(mktemp -d)"
+# One package, TWO root advisories (the @grpc/grpc-js shape of 2026-09-30).
+cat > "$AUD/backend__typescript.json" <<'JSON'
+{"vulnerabilities":{"pkg-x":{"severity":"high","via":[{"source":1,"url":"https://github.com/advisories/GHSA-aaaa-aaaa-aaaa"},{"source":2,"url":"https://github.com/advisories/GHSA-bbbb-bbbb-bbbb"}]}}}
+JSON
+echo '{"vulnerabilities":{}}' > "$AUD/frontend__react.json"
+ex() { # $1 = space-separated advisories to except
+  python3 - "$AUD/ex.json" $1 <<'PY'
+import json,sys
+out=[{"advisory":a,"package":"pkg-x","workspace":"backend/typescript","severity":"high","why":["fixture"],"reachability":["fixture"],"revisitAfter":"2999-01-01","removeWhen":"fixture","owner":"fixture","mitigation":"fixture"} for a in sys.argv[2:]]
+json.dump({"exceptions":out},open(sys.argv[1],"w"))
+PY
+}
+aud() { OPENWOP_AUDIT_REPORTS_DIR="$AUD" OPENWOP_AUDIT_EXCEPTIONS="$AUD/ex.json" node "$ROOT/scripts/check-audit.mjs" >"$AUD/out" 2>&1; echo $?; }
+ex "GHSA-aaaa-aaaa-aaaa"
+check "$(aud)" "1" "check-audit FAILS when only ONE of a package's two advisories is excepted (it used to pass)"
+grep -q "GHSA-bbbb-bbbb-bbbb" "$AUD/out" && ok "  ...and names the UNCOVERED advisory" || bad "  ...and names the UNCOVERED advisory"
+ex "GHSA-aaaa-aaaa-aaaa GHSA-bbbb-bbbb-bbbb"
+check "$(aud)" "0" "  ...and PASSES when both are excepted, with neither read as STALE"
+rm -rf "$AUD"
+
+echo "== merge-train lock (one train per shared worktree) =="
+TL="$(mktemp -d)"; LK="$TL/train.lock"
+claim() { bash -c ". '$ROOT/scripts/lib/train-lock.sh'; claim_train_lock '$LK' '$1'; echo rc=\$?; $2" 2>"$TL/err"; }
+out="$(claim '#1' 'head -1 "'"$LK"'/owner"')"
+check "$(printf '%s' "$out" | grep -c '^rc=0')" "1" "a fresh claim wins and records its owner"
+[ ! -d "$LK" ] && ok "  ...and the lock is gone when its holder exits" || bad "  ...and the lock is gone when its holder exits"
+sleep 30 & HOLDER=$!
+mkdir "$LK"; printf '%s\n%s\n%s\n' "$HOLDER" "#9 #10" "2026-10-05T00:00:00Z" > "$LK/owner"
+out="$(claim '#2' 'true')"
+check "$(printf '%s' "$out" | grep -c '^rc=1')" "1" "a LIVE holder refuses a second train (it used to check out over it)"
+grep -q "pid $HOLDER, PRs #9 #10" "$TL/err" && ok "  ...and names the holder's pid and PRs" || bad "  ...and names the holder's pid and PRs"
+[ "$(head -1 "$LK/owner")" = "$HOLDER" ] && ok "  ...and leaves the holder's lock untouched" || bad "  ...and leaves the holder's lock untouched"
+kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null || true
+out="$(claim '#3' 'true')"
+check "$(printf '%s' "$out" | grep -c '^rc=0')" "1" "a DEAD holder's lock is stale and reclaimed"
+grep -q "reclaiming a stale lock" "$TL/err" && ok "  ...and says so" || bad "  ...and says so"
+mkdir "$LK"; printf 'garbage\n' > "$LK/owner"
+out="$(claim '#4' 'true')"
+check "$(printf '%s' "$out" | grep -c '^rc=0')" "1" "an unreadable owner is treated as stale, not as a permanent block"
+rm -rf "$TL"
 
 echo "== gate tooling: $PASS passed, $FAIL failed =="
 [ "$FAIL" -eq 0 ] || exit 1

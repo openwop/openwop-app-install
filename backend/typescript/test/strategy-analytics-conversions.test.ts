@@ -23,13 +23,13 @@ beforeAll(async () => {
 });
 afterAll(async () => { await closeApp(); });
 
-const S = '/v1/host/openwop-app/strategy';
+const S = '/host/openwop-app/strategy';
 
 async function setup(): Promise<{ owner: Client; orgId: string; tenantId: string }> {
   const tenantId = `org:ac-${Date.now()}-${n++}`;
   const owner = makeClient(() => BASE);
-  expect((await owner.post('/v1/host/openwop-app/test/login', { email: uniqEmail('ac'), tenantId })).status).toBe(201);
-  const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'Site' })).body.orgId;
+  expect((await owner.post('/host/openwop-app/test/login', { email: uniqEmail('ac'), tenantId })).status).toBe(201);
+  const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Site' })).body.orgId;
   const s = (await owner.post(S, {
     orgId, title: 'Conversion plan', scope: 'org',
     objectives: [{ title: 'Convert', weight: 1, keyResults: [{ title: 'Conversions', weight: 1, measure: { kind: 'numeric', baseline: 0, target: 100, source: { kind: 'analytics-conversions', orgId } } }] }],

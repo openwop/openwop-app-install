@@ -20,8 +20,12 @@ import {
 } from './canvasEditorClient.js';
 
 const OWNER_RE = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/;
-const REPO_RE = /^[A-Za-z0-9._-]{1,100}$/;
+// Mirrors the server REPO_NAME_RE (ADR 0835 D6: `.` and `..` are refused).
+const REPO_RE = /^(?!\.{1,2}$)[A-Za-z0-9._-]{1,100}$/;
 const BRANCH_RE = /^[A-Za-z0-9._/-]{1,200}$/;
+/** Mirrors the server branch rule (ADR 0835 AB2-CD-8): no `..`, no leading or
+ *  trailing `/`, no empty or `.`-led segment. */
+const branchOk = (b: string): boolean => BRANCH_RE.test(b) && !b.includes('..') && b.split('/').every((seg) => seg !== '' && !seg.startsWith('.'));
 
 export function SyncModal({ orgId, canvasId, onClose }: {
   orgId: string;
@@ -65,7 +69,7 @@ export function SyncModal({ orgId, canvasId, onClose }: {
     return () => { alive = false; };
   }, [orgId, canvasId, reloadNonce]);
 
-  const valid = OWNER_RE.test(owner) && REPO_RE.test(repo) && BRANCH_RE.test(branch) && !branch.includes('..');
+  const valid = OWNER_RE.test(owner) && REPO_RE.test(repo) && branchOk(branch);
 
   const onBind = async (): Promise<void> => {
     if (!valid) return;
@@ -174,8 +178,8 @@ export function SyncModal({ orgId, canvasId, onClose }: {
           </div>
           <div className="cv-editor__field">
             <label htmlFor="sync-branch" className="cv-editor__field-label">{t('syncBranchLabel')}</label>
-            <input id="sync-branch" type="text" className="cv-editor__input" value={branch} aria-invalid={branch.length > 0 && !(BRANCH_RE.test(branch) && !branch.includes('..'))} aria-describedby="sync-branch-err" onChange={(e) => setBranch(e.target.value)} />
-            <span id="sync-branch-err" role="alert" className="cv-editor__field-error">{branch && !(BRANCH_RE.test(branch) && !branch.includes('..')) ? t('syncBranchInvalid') : ''}</span>
+            <input id="sync-branch" type="text" className="cv-editor__input" value={branch} aria-invalid={branch.length > 0 && !branchOk(branch)} aria-describedby="sync-branch-err" onChange={(e) => setBranch(e.target.value)} />
+            <span id="sync-branch-err" role="alert" className="cv-editor__field-error">{branch && !branchOk(branch) ? t('syncBranchInvalid') : ''}</span>
           </div>
           <div className="cv-editor__field">
             <label htmlFor="sync-target" className="cv-editor__field-label">{t('exportTarget')}</label>

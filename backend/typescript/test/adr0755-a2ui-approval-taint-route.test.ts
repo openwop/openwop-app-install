@@ -1,7 +1,7 @@
 /**
  * ADR 0755 (WIT-A2UI-5, WIT-A2UI-4) — the RFC 0209 §C.12 approval block, driven
  * through the REAL choke points rather than `nodeHasUntrustedSurface` alone:
- *   - `POST /v1/runs/{runId}/interrupts/{nodeId}` answers 403
+ *   - `POST /runs/{runId}/interrupts/{nodeId}` answers 403
  *     `untrusted_content_blocks_approval` and leaves the interrupt OPEN;
  *   - the MCP `resumeInterrupt` refuses BEFORE its claim (a refusal after the
  *     claim would strand the interrupt: consumed, never resumed);
@@ -12,6 +12,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
+import { toWireRunId } from '../src/host/v2Ids.js';
 import type { Storage } from '../src/storage/storage.js';
 import type { InterruptRecord, RunRecord } from '../src/types.js';
 import { admitA2uiSurface, A2UI_V09_CATALOG_ID } from '../src/host/a2uiSurfaceAdmission.js';
@@ -45,7 +46,9 @@ async function seedApproval(tainted: boolean): Promise<{ run: RunRecord; interru
   const n = ++seq;
   const run: RunRecord = {
     runId: `run-adr0755-a2ui-${n}-${Math.random().toString(36).slice(2)}`,
-    workflowId: 'wf-adr0755', tenantId: 'demo', status: 'waiting-approval',
+    // The caller's own tenant (`dev-token` acts in `default`): the major-2 path
+    // takes the run id tenant-bound, and a foreign segment is id_tenant_mismatch.
+    workflowId: 'wf-adr0755', tenantId: 'default', status: 'waiting-approval',
     inputs: {}, metadata: {}, configurable: {}, createdAt: now, updatedAt: now,
   };
   await storage.insertRun(run);
@@ -66,9 +69,9 @@ async function seedApproval(tainted: boolean): Promise<{ run: RunRecord; interru
 }
 
 const resolve = (runId: string): Promise<Response> =>
-  fetch(`${BASE}/v1/runs/${encodeURIComponent(runId)}/interrupts/gate`, {
+  fetch(`${BASE}/runs/${encodeURIComponent(toWireRunId(runId, 'default'))}/interrupts/gate`, {
     method: 'POST',
-    headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+    headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json', 'OpenWOP-Version': '2' },
     body: JSON.stringify({ resumeValue: { action: 'approve' } }),
   });
 
@@ -77,7 +80,7 @@ describe('an approval bound to a tainted v0.9 surface cannot be resolved', () =>
     const { run } = await seedApproval(true);
     const res = await resolve(run.runId);
     expect(res.status).toBe(403);
-    expect(((await res.json()) as { error: string }).error).toBe('untrusted_content_blocks_approval');
+    expect(((await res.json()) as { error: string }).error).toBe('openwop-app.untrusted_content_blocks_approval');
     expect(await storage.getInterruptByNode(run.runId, 'gate'), 'refused BEFORE resolve — nothing stranded').toBeTruthy();
   });
 
@@ -85,7 +88,7 @@ describe('an approval bound to a tainted v0.9 surface cannot be resolved', () =>
     const { run } = await seedApproval(false);
     const res = await resolve(run.runId);
     const body = (await res.json()) as { error?: string };
-    expect(body.error).not.toBe('untrusted_content_blocks_approval');
+    expect(body.error).not.toBe('openwop-app.untrusted_content_blocks_approval');
   });
 
   it('the MCP resume refuses before its claim', async () => {
@@ -101,7 +104,7 @@ describe('an approval bound to a tainted v0.9 surface cannot be resolved', () =>
     try {
       const res = await resolve(run.runId);
       const body = (await res.json()) as { error?: string };
-      expect(body.error).not.toBe('untrusted_content_blocks_approval');
+      expect(body.error).not.toBe('openwop-app.untrusted_content_blocks_approval');
     } finally {
       process.env.OPENWOP_TEST_SEAM_ENABLED = 'true';
     }

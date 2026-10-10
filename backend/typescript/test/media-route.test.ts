@@ -4,6 +4,13 @@
  * + asset upload/serve/search/usage, the re-home-on-collection-delete behavior,
  * and the workspace:read/write authority (owner writes; a viewer member is
  * read-only; a non-member is fail-closed).
+ *
+ * Breaks if a write route drops to workspace:read, collection delete stops
+ * re-homing, tags stop normalizing, the uncategorized/search filters or usage
+ * count break, base64 validation goes, or a foreign collection stops being a
+ * 404 (probes w5g2-rt-*). The html/svg 415 is a DOUBLE guard — the route's
+ * allowlist check AND `storableContentType` (which re-checks the allowlist) —
+ * so removing either alone stays green by design.
  */
 
 import http from 'node:http';
@@ -35,18 +42,23 @@ afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
 });
 
-interface Res<T = any> { status: number; body: T }
+interface Res<T> { status: number; body: T }
+interface ApiErr { error?: string; message?: string }
+interface AssetView { assetId: string; name: string; sizeBytes: number; tags: string[]; serveUrl: string; collectionId?: string; usageCount: number; lastUsedAt?: string }
+interface AssetsBody { assets: AssetView[] }
+interface CollectionView { collectionId: string; name: string }
+interface CollectionsBody { collections: CollectionView[] }
 interface Client {
-  get: (p: string) => Promise<Res>;
-  post: (p: string, b?: unknown) => Promise<Res>;
-  patch: (p: string, b?: unknown) => Promise<Res>;
-  del: (p: string) => Promise<Res>;
+  get: <T = ApiErr>(p: string) => Promise<Res<T>>;
+  post: <T = ApiErr>(p: string, b?: unknown) => Promise<Res<T>>;
+  patch: <T = ApiErr>(p: string, b?: unknown) => Promise<Res<T>>;
+  del: <T = ApiErr>(p: string) => Promise<Res<T>>;
   raw: (p: string) => Promise<{ status: number; contentType: string | null }>;
   snapshot: () => string;
 }
 function client(initialCookie = ''): Client {
   let cookie = initialCookie;
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
@@ -58,13 +70,13 @@ function client(initialCookie = ''): Client {
       if (m) cookie = m[1];
     }
     const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    return { status: res.status, body: out as T };
   };
   return {
-    get: (p) => call('GET', p),
-    post: (p, b) => call('POST', p, b),
-    patch: (p, b) => call('PATCH', p, b),
-    del: (p) => call('DELETE', p),
+    get: <T>(p: string) => call<T>('GET', p),
+    post: <T>(p: string, b?: unknown) => call<T>('POST', p, b),
+    patch: <T>(p: string, b?: unknown) => call<T>('PATCH', p, b),
+    del: <T>(p: string) => call<T>('DELETE', p),
     raw: async (p) => {
       const res = await fetch(`${BASE}${p}`, { headers: cookie ? { cookie } : {} });
       return { status: res.status, contentType: res.headers.get('content-type') };
@@ -78,7 +90,7 @@ const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.tes
 // ADR 0026: real sign-in is Firebase OIDC; tests mint an authenticated user via
 // the env-gated auth test seam. Pass a shared `tenantId` to make co-tenant users.
 async function signup(c: Client, opts: { tenantId?: string } = {}): Promise<{ userId: string }> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail('m'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
+  const r = await c.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: uniqEmail('m'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
@@ -92,14 +104,14 @@ async function ownerWithViewer(): Promise<{ owner: Client; viewer: Client; viewe
   await signup(owner, { tenantId });
   const viewer = client();
   const viewerUser = await signup(viewer, { tenantId });
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   const orgId = org.body.orgId;
-  const add = await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'Viewer', subject: viewerUser.userId, roles: ['viewer'] });
+  const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'Viewer', subject: viewerUser.userId, roles: ['viewer'] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
   return { owner, viewer, viewerId: viewerUser.userId, orgId };
 }
-const m = (orgId: string, suffix = ''): string => `/v1/host/openwop-app/media/orgs/${encodeURIComponent(orgId)}${suffix}`;
+const m = (orgId: string, suffix = ''): string => `/host/openwop-app/media/orgs/${encodeURIComponent(orgId)}${suffix}`;
 
 describe('media library — always-on (ADR 0027)', () => {
   it('has no media toggle in the catalog and serves regardless', async () => {
@@ -107,7 +119,7 @@ describe('media library — always-on (ADR 0027)', () => {
     // off. A member with workspace:read reads its surface unconditionally.
     expect(getToggleDefault('media')).toBeNull();
     const { owner, orgId } = await ownerWithViewer();
-    const r = await owner.get(m(orgId, '/collections'));
+    const r = await owner.get<CollectionsBody>(m(orgId, '/collections'));
     expect(r.status).toBe(200);
   });
 });
@@ -117,18 +129,18 @@ describe('media library — collections + assets (owner = workspace:write)', () 
     const { owner, orgId } = await ownerWithViewer();
 
     // Collection.
-    const col = await owner.post(m(orgId, '/collections'), { name: 'Brand' });
+    const col = await owner.post<CollectionView>(m(orgId, '/collections'), { name: 'Brand' });
     expect(col.status, JSON.stringify(col.body)).toBe(201);
     const collectionId = col.body.collectionId;
-    expect((await owner.get(m(orgId, '/collections'))).body.collections).toHaveLength(1);
+    expect((await owner.get<CollectionsBody>(m(orgId, '/collections'))).body.collections).toHaveLength(1);
 
     // Upload an asset into the collection.
-    const up = await owner.post(m(orgId, '/assets'), { contentBase64: PNG_1x1, contentType: 'image/png', name: 'logo.png', collectionId, tags: ['Logo', 'logo'] });
+    const up = await owner.post<AssetView>(m(orgId, '/assets'), { contentBase64: PNG_1x1, contentType: 'image/png', name: 'logo.png', collectionId, tags: ['Logo', 'logo'] });
     expect(up.status, JSON.stringify(up.body)).toBe(201);
     const assetId = up.body.assetId;
     expect(up.body.sizeBytes).toBeGreaterThan(0);
     expect(up.body.tags).toEqual(['logo']); // deduped + lowercased
-    expect(up.body.serveUrl).toContain('/v1/host/openwop-app/assets/');
+    expect(up.body.serveUrl).toContain('/host/openwop-app/assets/'); expect(up.body.serveUrl.startsWith('/v1')).toBe(false);
 
     // The serve URL streams the bytes (capability token, public).
     const served = await owner.raw(up.body.serveUrl);
@@ -136,36 +148,37 @@ describe('media library — collections + assets (owner = workspace:write)', () 
     expect(served.contentType).toContain('image/png');
 
     // Search by tag + by name substring.
-    expect((await owner.get(m(orgId, '/assets?tag=logo'))).body.assets).toHaveLength(1);
-    expect((await owner.get(m(orgId, '/assets?q=log'))).body.assets).toHaveLength(1);
-    expect((await owner.get(m(orgId, '/assets?q=nope'))).body.assets).toHaveLength(0);
-    expect((await owner.get(m(orgId, `/assets?collectionId=${encodeURIComponent(collectionId)}`))).body.assets).toHaveLength(1);
+    expect((await owner.get<AssetsBody>(m(orgId, '/assets?tag=logo'))).body.assets).toHaveLength(1);
+    expect((await owner.get<AssetsBody>(m(orgId, '/assets?q=log'))).body.assets).toHaveLength(1);
+    expect((await owner.get<AssetsBody>(m(orgId, '/assets?q=nope'))).body.assets).toHaveLength(0);
+    expect((await owner.get<AssetsBody>(m(orgId, `/assets?collectionId=${encodeURIComponent(collectionId)}`))).body.assets).toHaveLength(1);
 
     // Rename + retag.
-    const patched = await owner.patch(m(orgId, `/assets/${encodeURIComponent(assetId)}`), { name: 'wordmark.png', tags: ['brand'] });
+    const patched = await owner.patch<AssetView>(m(orgId, `/assets/${encodeURIComponent(assetId)}`), { name: 'wordmark.png', tags: ['brand'] });
     expect(patched.body.name).toBe('wordmark.png');
     expect(patched.body.tags).toEqual(['brand']);
 
     // Usage tracking.
-    const used = await owner.post(m(orgId, `/assets/${encodeURIComponent(assetId)}/use`));
+    const used = await owner.post<AssetView>(m(orgId, `/assets/${encodeURIComponent(assetId)}/use`));
     expect(used.body.usageCount).toBe(1);
     expect(used.body.lastUsedAt).toBeTruthy();
 
     // Deleting the collection re-homes the asset to uncategorized (not orphaned).
-    const delCol = await owner.del(m(orgId, `/collections/${encodeURIComponent(collectionId)}`));
+    const delCol = await owner.del<{ deleted: { rehomed: number } }>(m(orgId, `/collections/${encodeURIComponent(collectionId)}`));
     expect(delCol.body.deleted.rehomed).toBe(1);
-    const afterCol = await owner.get(m(orgId, `/assets/${encodeURIComponent(assetId)}`));
+    const afterCol = await owner.get<AssetView>(m(orgId, `/assets/${encodeURIComponent(assetId)}`));
     expect(afterCol.body.collectionId).toBeUndefined();
 
     // Delete the asset.
     expect((await owner.del(m(orgId, `/assets/${encodeURIComponent(assetId)}`))).status).toBe(204);
-    expect((await owner.get(m(orgId, '/assets'))).body.assets).toHaveLength(0);
+    expect((await owner.get<AssetsBody>(m(orgId, '/assets'))).body.assets).toHaveLength(0);
   });
 
   it('rejects an upload into a foreign collection (404)', async () => {
     const { owner, orgId } = await ownerWithViewer();
     const up = await owner.post(m(orgId, '/assets'), { contentBase64: PNG_1x1, contentType: 'image/png', name: 'x.png', collectionId: 'mcol:does-not-exist' });
     expect(up.status).toBe(404);
+    expect(up.body.error).toBe('not_found');
   });
 });
 
@@ -175,7 +188,7 @@ describe('media library — RBAC authority', () => {
     await owner.post(m(orgId, '/collections'), { name: 'Shared' });
 
     // Viewer (workspace:read) can list.
-    const read = await viewer.get(m(orgId, '/collections'));
+    const read = await viewer.get<CollectionsBody>(m(orgId, '/collections'));
     expect(read.status, JSON.stringify(read.body)).toBe(200);
     expect(read.body.collections).toHaveLength(1);
 
@@ -193,8 +206,10 @@ describe('media library — RBAC authority', () => {
     await signup(stranger); // fresh anon tenant
     const r = await stranger.get(m(orgId, '/collections'));
     expect(r.status).toBe(404);
+    expect(r.body.error).toBe('not_found');
     const w = await stranger.post(m(orgId, '/collections'), { name: 'x' });
     expect(w.status).toBe(404);
+    expect(w.body.error).toBe('not_found');
   });
 });
 
@@ -216,9 +231,9 @@ describe('media library — followup hardening', () => {
     await signup(owner, { tenantId });
     const bob = client();
     const bobUser = await signup(bob, { tenantId });
-    const orgA = (await owner.post('/v1/host/openwop-app/orgs', { name: 'A' })).body.orgId;
-    const orgB = (await owner.post('/v1/host/openwop-app/orgs', { name: 'B' })).body.orgId;
-    const add = await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'Bob', subject: bobUser.userId, roles: ['editor'] });
+    const orgA = (await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'A' })).body.orgId;
+    const orgB = (await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'B' })).body.orgId;
+    const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'Bob', subject: bobUser.userId, roles: ['editor'] });
     expect(add.status, JSON.stringify(add.body)).toBe(201);
 
     // Editor of A (not owner) holds workspace:write → can create in A.
@@ -235,10 +250,10 @@ describe('media library — followup hardening', () => {
 
   it('uncategorized filter is applied server-side (?collectionId=none)', async () => {
     const { owner, orgId } = await ownerWithViewer();
-    const col = (await owner.post(m(orgId, '/collections'), { name: 'C' })).body.collectionId;
+    const col = (await owner.post<CollectionView>(m(orgId, '/collections'), { name: 'C' })).body.collectionId;
     await owner.post(m(orgId, '/assets'), { contentBase64: PNG_1x1, contentType: 'image/png', name: 'in.png', collectionId: col });
     await owner.post(m(orgId, '/assets'), { contentBase64: PNG_1x1, contentType: 'image/png', name: 'out.png' });
-    const uncat = await owner.get(m(orgId, '/assets?collectionId=none'));
+    const uncat = await owner.get<AssetsBody>(m(orgId, '/assets?collectionId=none'));
     expect(uncat.body.assets).toHaveLength(1);
     expect(uncat.body.assets[0].name).toBe('out.png');
   });

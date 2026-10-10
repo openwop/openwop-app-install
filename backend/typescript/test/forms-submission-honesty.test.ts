@@ -10,6 +10,17 @@
  *  - FORM-3: the at-most-once guard is atomic, so CONCURRENT same-key submits
  *    produce ONE row and ONE set of sink effects. This is the case the existing
  *    sequential FRMB-IDEM pin structurally cannot see.
+ *
+ * Sabotage-witnessed (grade-tests w8, probes w8g1-sh-*): the quarantine-budget refusal
+ * and its `droppedCount`, metering clean leads against that budget, an open UTM copy
+ * loop, an uncapped referrer, the claim CAS (now via a sink-run COUNT), every erasure
+ * leg (values, meta, case-fold, email-only matching), the occupancy credit and its
+ * bucket, the delete guard, and `isSubmissionHeld`'s tenant check each turn a case red.
+ * Double guard recorded: the counter's floor at 0 is unreachable from a route — a
+ * second delete finds no row, so nothing is credited (probe sh-floor green).
+ * The FORM-QUAR-1 surface pair that lived here was cut as redundant with
+ * forms-intake-chain-execution's FORM-QUAR-1 cases (surface + node; probes
+ * sh/ice-quar-surface and sh/ice-quar-clean red-red).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -32,13 +43,22 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res { status: number; body: any }
+/** The response fields these cases read. */
+type Row = {
+  submissionId: string; flagged?: string; contactId?: string;
+  values: Record<string, string | number | boolean>; meta: { referrer?: string; utm?: Record<string, string> };
+};
+type Body = {
+  orgId?: string; formId?: string; tenantId?: string; submissionId?: string; user?: { tenantId?: string };
+  submissions?: Row[]; flaggedCount?: number; droppedCount?: number; contacts?: Array<{ email?: string }>;
+};
+interface Res { status: number; body: Body }
 function client() {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const out = res.status === 204 ? {} : ((await res.json().catch(() => ({}))) as Body);
     return { status: res.status, body: out };
   };
   return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b), patch: (p: string, b?: unknown) => call('PATCH', p, b), del: (p: string) => call('DELETE', p) };
@@ -51,18 +71,18 @@ const FIELDS = [
 
 async function fixture(createToContact = false): Promise<{ user: ReturnType<typeof client>; tenantId: string; orgId: string; formId: string; F: string }> {
   const user = client();
-  await user.post('/v1/host/openwop-app/test/login', { email: `fsh-${Date.now()}-${n++}@acme.test` });
-  const me = await user.get('/v1/host/openwop-app/users/me');
-  const org = await user.post('/v1/host/openwop-app/orgs', { name: 'Honest Co' });
-  const orgId: string = org.body.orgId;
-  const form = await user.post(`/v1/host/openwop-app/forms/orgs/${orgId}/forms`, { title: 'Contact', fields: FIELDS, createToContact });
-  const formId: string = form.body.formId;
-  await user.patch(`/v1/host/openwop-app/forms/orgs/${orgId}/forms/${formId}/status`, { status: 'published' });
-  return { user, tenantId: me.body?.user?.tenantId ?? me.body?.tenantId, orgId, formId, F: `/v1/host/openwop-app/forms/orgs/${orgId}/forms/${formId}` };
+  await user.post('/host/openwop-app/test/login', { email: `fsh-${Date.now()}-${n++}@acme.test` });
+  const me = await user.get('/host/openwop-app/users/me');
+  const org = await user.post('/host/openwop-app/orgs', { name: 'Honest Co' });
+  const orgId = org.body.orgId!;
+  const form = await user.post(`/host/openwop-app/forms/orgs/${orgId}/forms`, { title: 'Contact', fields: FIELDS, createToContact });
+  const formId = form.body.formId!;
+  await user.patch(`/host/openwop-app/forms/orgs/${orgId}/forms/${formId}/status`, { status: 'published' });
+  return { user, tenantId: (me.body.user?.tenantId ?? me.body.tenantId)!, orgId, formId, F: `/host/openwop-app/forms/orgs/${orgId}/forms/${formId}` };
 }
 
 const submit = (formId: string, body: Record<string, unknown>) =>
-  client().post(`/v1/host/openwop-app/public-forms/${encodeURIComponent(formId)}/submit`, body);
+  client().post(`/host/openwop-app/public-forms/${encodeURIComponent(formId)}/submit`, body);
 
 describe('FORM-UX-1 — an abuse-control trip is quarantined, never silently destroyed', () => {
   it('a GUARD denial stores the row, skips the sinks, and is counted', async () => {
@@ -76,9 +96,9 @@ describe('FORM-UX-1 — an abuse-control trip is quarantined, never silently des
       expect(typeof r.body.submissionId).toBe('string');
       const page = (await user.get(`${F}/submissions?limit=50`)).body;
       expect(page.submissions).toHaveLength(1);
-      expect(page.submissions[0].flagged).toBe('guard');
+      expect(page.submissions![0]!.flagged).toBe('guard');
       // The whole point of quarantine: STORED, but nothing moved downstream.
-      expect(page.submissions[0].contactId).toBeUndefined();
+      expect(page.submissions![0]!.contactId).toBeUndefined();
       expect(page.flaggedCount).toBe(1);
       expect(page.droppedCount).toBe(0);
     } finally { clearSubmitGuardsForTest(); }
@@ -88,7 +108,7 @@ describe('FORM-UX-1 — an abuse-control trip is quarantined, never silently des
     const { __setSubmissionCountForTests, MAX_FLAGGED_PER_FORM } = await import('../src/features/forms/formsService.js');
     const { user, F, formId } = await fixture();
     const form = (await user.get(F)).body;
-    await __setSubmissionCountForTests(formId, form.tenantId ?? (await user.get(`${F}`)).body.tenantId, 0, MAX_FLAGGED_PER_FORM);
+    await __setSubmissionCountForTests(formId, form.tenantId!, 0, MAX_FLAGGED_PER_FORM);
     const r = await submit(formId, { values: { name: 'Bot', email: 'b@x.com', _hp_ref: 'x' } });
     // A refusal the respondent can SEE. The old code answered 200 {ok:true}.
     expect(r.status).toBe(429);
@@ -102,7 +122,7 @@ describe('FORM-UX-1 — an abuse-control trip is quarantined, never silently des
     const { __setSubmissionCountForTests, MAX_FLAGGED_PER_FORM } = await import('../src/features/forms/formsService.js');
     const { user, F, formId } = await fixture();
     const stored = (await user.get(F)).body;
-    await __setSubmissionCountForTests(formId, stored.tenantId, 0, MAX_FLAGGED_PER_FORM);
+    await __setSubmissionCountForTests(formId, stored.tenantId!, 0, MAX_FLAGGED_PER_FORM);
     // The flagged budget is exhausted (above) yet a REAL lead still lands.
     const clean = await submit(formId, { values: { name: 'Ada', email: 'ada@x.com' } });
     expect(clean.status).toBe(201);
@@ -125,10 +145,10 @@ describe('FORM-2 — public `meta` is bounded like its sibling `context`', () =>
         arbitrary_key: 'payload',
       },
     });
-    const row = (await user.get(`${F}/submissions?limit=50`)).body.submissions[0];
-    expect(Object.keys(row.meta.utm).sort()).toEqual(['utm_campaign', 'utm_source']);
-    expect(row.meta.utm.utm_source.length).toBe(1_024);
-    expect(row.meta.referrer.length).toBe(1_024);
+    const row = (await user.get(`${F}/submissions?limit=50`)).body.submissions![0]!;
+    expect(Object.keys(row.meta.utm ?? {}).sort()).toEqual(['utm_campaign', 'utm_source']);
+    expect(row.meta.utm?.utm_source?.length).toBe(1_024);
+    expect(row.meta.referrer?.length).toBe(1_024);
   });
 
   it('a hostile key COUNT cannot grow the row (the open Object.entries loop is gone)', async () => {
@@ -136,7 +156,7 @@ describe('FORM-2 — public `meta` is bounded like its sibling `context`', () =>
     const utm: Record<string, string> = {};
     for (let i = 0; i < 500; i += 1) utm[`utm_${i}`] = 'v';
     await submit(formId, { values: { name: 'Ada', email: 'ada2@x.com' }, utm });
-    const row = (await user.get(`${F}/submissions?limit=50`)).body.submissions[0];
+    const row = (await user.get(`${F}/submissions?limit=50`)).body.submissions![0]!;
     expect(row.meta.utm).toBeUndefined(); // not one of the 500 survived
   });
 });
@@ -152,16 +172,24 @@ describe('FORM-3 — the at-most-once guard is ATOMIC (the case the sequential p
    * callers past `submissions.get()` before any of them writes, which IS the
    * window the defect lives in.
    *
-   * NON-VACUITY, MEASURED: with `compareAndSwap(null, submission)` reverted to
-   * `submissions.put(submission)` this test goes RED — 3 rows, 3 sink runs.
+   * NON-VACUITY. This used to read "with `compareAndSwap(null, submission)`
+   * reverted to `submissions.put(submission)` this test goes RED — 3 rows, 3 sink
+   * runs". The ROWS half was false: same-key submits derive the SAME submissionId,
+   * so three puts are one row; and the contact count cannot move either, because a
+   * repeat address ATTACHES (ADR 0627 D6). grade-tests w8 measured it GREEN with the
+   * CAS reverted (probe w8g1-sh-cas). The claim is now asserted where the defect
+   * lives — a counting sink sees THREE runs under the revert, one with the claim.
    */
   it('CONCURRENT same-key submits produce ONE row and run the sinks ONCE', async () => {
     const { getForm, recordSubmission, listSubmissions } = await import('../src/features/forms/formsService.js');
+    const { registerSubmissionSink } = await import('../src/features/forms/submissionSinks.js');
     const { user, F, orgId, formId } = await fixture(true); // CRM destination ON
-    const tenantId = (await user.get(F)).body.tenantId;
+    const tenantId = (await user.get(F)).body.tenantId!;
     const form = await getForm(tenantId, orgId, formId);
     expect(form, 'the fixture must resolve — otherwise every assertion below is hollow').toBeTruthy();
 
+    let sinkRuns = 0;
+    registerSubmissionSink({ id: 'zz-sh-form3-count', async onSubmission(f) { if (f.formId === formId) sinkRuns += 1; return undefined; } });
     const clientKey = `ck-${Date.now()}`;
     const values = { name: 'Grace', email: 'grace@x.com' };
     // The real scenario: a double-click on a slow connection. Under the old
@@ -178,10 +206,8 @@ describe('FORM-3 — the at-most-once guard is ATOMIC (the case the sequential p
 
     const rows = await listSubmissions(tenantId, orgId, formId);
     expect(rows).toHaveLength(1);
-    // ONE contact, not three — the sinks ran exactly once.
-    const contacts = (await user.get('/v1/host/openwop-app/crm/contacts')).body;
-    const matching = (contacts.contacts ?? []).filter((c: { email?: string }) => c.email === 'grace@x.com');
-    expect(matching).toHaveLength(1);
+    // The sinks ran exactly ONCE — no duplicate contact/ticket/consent write.
+    expect(sinkRuns).toBe(1);
   });
 });
 
@@ -194,13 +220,13 @@ describe('FORM-1 — a DSAR reaches a respondent who never became a contact', ()
       referrer: 'https://ref.example/a',
       utm: { utm_source: 'news' },
     });
-    const before = (await user.get(`${F}/submissions?limit=50`)).body.submissions[0];
+    const before = (await user.get(`${F}/submissions?limit=50`)).body.submissions![0]!;
     expect(before.contactId).toBeUndefined(); // nothing else could have reached it
-    const tenantId = (await user.get(F)).body.tenantId;
+    const tenantId = (await user.get(F)).body.tenantId!;
 
     // Case-folded, exact-match — the address the person actually typed.
     await eraseFormsSubject(tenantId, 'rosalind@x.com');
-    const after = (await user.get(`${F}/submissions?limit=50`)).body.submissions[0];
+    const after = (await user.get(`${F}/submissions?limit=50`)).body.submissions![0]!;
     expect(after.submissionId).toBe(before.submissionId); // the row SURVIVES
     expect(after.values.name).toBe(ERASED_VALUE);
     expect(after.values.email).toBe(ERASED_VALUE);
@@ -210,7 +236,7 @@ describe('FORM-1 — a DSAR reaches a respondent who never became a contact', ()
 
     // Idempotent — the seam invokes an eraser once per LINKED key.
     await eraseFormsSubject(tenantId, 'rosalind@x.com');
-    const again = (await user.get(`${F}/submissions?limit=50`)).body.submissions[0];
+    const again = (await user.get(`${F}/submissions?limit=50`)).body.submissions![0]!;
     expect(again.values.name).toBe(ERASED_VALUE);
   });
 
@@ -218,11 +244,11 @@ describe('FORM-1 — a DSAR reaches a respondent who never became a contact', ()
     const { eraseFormsSubject, ERASED_VALUE } = await import('../src/features/forms/erasure.js');
     const { user, F, formId } = await fixture();
     await submit(formId, { values: { name: 'Alan', email: 'alan@x.com' } });
-    const tenantId = (await user.get(F)).body.tenantId;
+    const tenantId = (await user.get(F)).body.tenantId!;
     // Not email-shaped ⇒ the values leg must not fire, even though 'Alan' is a
     // value in the row. A substring or fuzzy match here would erase strangers.
     await eraseFormsSubject(tenantId, 'Alan');
-    const row = (await user.get(`${F}/submissions?limit=50`)).body.submissions[0];
+    const row = (await user.get(`${F}/submissions?limit=50`)).body.submissions![0]!;
     expect(row.values.name).not.toBe(ERASED_VALUE);
   });
 });
@@ -238,7 +264,7 @@ describe('FORM-BUDGET-1 — the quarantine budget is OCCUPANCY, so the recovery 
     const { __setSubmissionCountForTests, submissionStatsOf, MAX_FLAGGED_PER_FORM } = await import('../src/features/forms/formsService.js');
     const { purgeRetained } = await import('../src/host/retentionPurger.js');
     const { user, F, formId } = await fixture();
-    const tenantId = (await user.get(F)).body.tenantId;
+    const tenantId = (await user.get(F)).body.tenantId!;
 
     // One trip below the budget, so the NEXT one is stored…
     await __setSubmissionCountForTests(formId, tenantId, 0, MAX_FLAGGED_PER_FORM - 1);
@@ -265,7 +291,7 @@ describe('FORM-BUDGET-1 — the quarantine budget is OCCUPANCY, so the recovery 
     const { user, F, formId } = await fixture();
     await submit(formId, { values: { name: 'Bot', email: 'bot@x.com', _hp_ref: 'x' } });
     await submit(formId, { values: { name: 'Ada', email: 'ada-clean@x.com' } });
-    const held = (await user.get(`${F}/submissions?limit=50`)).body.submissions.find((s: any) => s.flagged);
+    const held = (await user.get(`${F}/submissions?limit=50`)).body.submissions!.find((s) => s.flagged)!;
     expect((await submissionStatsOf(formId)).flaggedCount).toBe(1);
 
     expect((await user.del(`${F}/submissions/${held.submissionId}`)).status).toBe(204);
@@ -273,53 +299,26 @@ describe('FORM-BUDGET-1 — the quarantine budget is OCCUPANCY, so the recovery 
     expect(stats.flaggedCount).toBe(0);
     // The CLEAN row's own counter is untouched — the two buckets never bleed.
     expect(stats.count).toBe(1);
-    const rows = (await user.get(`${F}/submissions?limit=50`)).body.submissions;
+    const rows = (await user.get(`${F}/submissions?limit=50`)).body.submissions!;
     expect(rows).toHaveLength(1);
-    expect(rows[0].flagged).toBeUndefined();
+    expect(rows[0]!.flagged).toBeUndefined();
   });
 
-  it('the delete is tenant+org+form-guarded and never goes negative', async () => {
+  it('the delete is tenant+org+form-guarded, and a second delete is a uniform 404 that credits nothing', async () => {
     const { submissionStatsOf } = await import('../src/features/forms/formsService.js');
     const { user, F, formId } = await fixture();
     const other = await fixture();
     await submit(formId, { values: { name: 'Bot', email: 'b2@x.com', _hp_ref: 'x' } });
-    const held = (await user.get(`${F}/submissions?limit=50`)).body.submissions[0];
+    const held = (await user.get(`${F}/submissions?limit=50`)).body.submissions![0]!;
 
     // Another workspace's operator cannot reach it (uniform 404, not a probe).
     expect((await other.user.del(`${other.F}/submissions/${held.submissionId}`)).status).toBe(404);
     expect((await submissionStatsOf(formId)).flaggedCount).toBe(1);
-    // The same delete twice: the second is a 404, and the counter floors at 0.
+    // The same delete twice: the second is a 404 and credits nothing (the counter's own
+    // clamp at 0 is a second guard no route reaches — there is no row to credit).
     expect((await user.del(`${F}/submissions/${held.submissionId}`)).status).toBe(204);
     expect((await user.del(`${F}/submissions/${held.submissionId}`)).status).toBe(404);
     expect((await submissionStatsOf(formId)).flaggedCount).toBe(0);
-  });
-});
-
-describe('FORM-QUAR-1 — a held submission is refused by the workflow surface, not merely un-announced', () => {
-  it('the surface returns `flagged`, so `get-submission` can decline to file it', async () => {
-    const { buildFormsSurface } = await import('../src/features/forms/surface.js');
-    const { user, F, formId, orgId } = await fixture();
-    await submit(formId, { values: { name: 'Bot', email: 'surf@x.com', _hp_ref: 'x' } });
-    const tenantId = (await user.get(F)).body.tenantId;
-    const held = (await user.get(`${F}/submissions?limit=50`)).body.submissions[0];
-
-    const surface = buildFormsSurface({ tenantId } as never);
-    const out = await surface.getSubmission!({ orgId, formId, submissionId: held.submissionId });
-    expect(out.found).toBe(true);
-    // The bit the node branches on. Without it the ONLY thing keeping a held
-    // lead out of priority-matrix intake was that the host event never fires —
-    // an absence a tenant undoes by binding the chain to another trigger.
-    expect(out.flagged).toBe('honeypot');
-  });
-
-  it('a CLEAN submission still carries no `flagged` key (the marker means something)', async () => {
-    const { buildFormsSurface } = await import('../src/features/forms/surface.js');
-    const { user, F, formId, orgId } = await fixture();
-    await submit(formId, { values: { name: 'Ada', email: 'clean-surf@x.com' } });
-    const tenantId = (await user.get(F)).body.tenantId;
-    const row = (await user.get(`${F}/submissions?limit=50`)).body.submissions[0];
-    const out = await buildFormsSurface({ tenantId } as never).getSubmission!({ orgId, formId, submissionId: row.submissionId });
-    expect(out.flagged).toBeUndefined();
   });
 });
 
@@ -329,10 +328,10 @@ describe('FORM-FUNNEL-1 — a quarantined submission fires no funnel-completion 
     const { user, F, formId } = await fixture();
     await submit(formId, { values: { name: 'Bot', email: 'fn@x.com', _hp_ref: 'x' } });
     await submit(formId, { values: { name: 'Ada', email: 'fn-clean@x.com' } });
-    const tenantId = (await user.get(F)).body.tenantId;
-    const rows = (await user.get(`${F}/submissions?limit=50`)).body.submissions;
-    const held = rows.find((s: any) => s.flagged);
-    const clean = rows.find((s: any) => !s.flagged);
+    const tenantId = (await user.get(F)).body.tenantId!;
+    const rows = (await user.get(`${F}/submissions?limit=50`)).body.submissions!;
+    const held = rows.find((s) => s.flagged)!;
+    const clean = rows.find((s) => !s.flagged)!;
 
     expect(await isSubmissionHeld(tenantId, held.submissionId)).toBe(true);
     // A clean row must NOT withhold its completion — that would silently zero a

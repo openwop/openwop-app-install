@@ -6,7 +6,7 @@
  * persisted whatever it was given, and the executor's run-summary write embeds
  * a slice of the run's OUTPUT — so a run whose output carried a BYOK-resolved
  * value persisted that value verbatim into a memory entry that
- * `GET /v1/host/openwop-app/memory` then served back. That is the exact
+ * `GET /host/openwop-app/memory` then served back. That is the exact
  * condition SR-1 exists to forbid, and it was reachable with no fixture
  * involved.
  *

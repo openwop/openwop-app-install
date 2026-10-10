@@ -1,16 +1,33 @@
 /**
- * UX_UPGRADE-invitations ROUND 2 — InvitesSection's FIRST tests (XIN-4).
- * The inviter side was a zero-test surface; these pin the R2 honesty fixes:
- *  - a failed list read is NOT "no pending invites" (warning + retry);
- *  - the 422 undeliverable refusal renders operator-actionable copy, never
- *    the raw API string;
- *  - an expired row is labelled, not left looking pending.
+ * InvitesSection — the inviter side of org invitations (ADR 0004 UI). Began as
+ * UX_UPGRADE-invitations ROUND 2's first tests (XIN-4; tracker
+ * docs/steward/UX_UPGRADE-invitations.md). Guards:
+ *  - R2 IN-SP-7: a failed list read is NOT "no pending invites" (warning + retry),
+ *    and an expired row is labelled, not left looking pending;
+ *  - R2 IN-SP-1 / review F1/F4: refusals render actionable copy (422
+ *    undeliverable, 400 invalid_email), never the raw API string;
+ *  - review F5: expiry is judged on the live clock, not serialization time;
+ *  - ORGINV-UX-1/2/3/7/9/10: designed loading/empty states, confirm-gated Resend,
+ *    stale-banner retirement, assertive failure announcements + aria-invalid,
+ *    inviter + relative expiry, Button `loading`;
+ *  - ADR 0564 D4 (declined rows visible) and ADR 0622 D5 (prior invite still valid).
+ *
+ * The clock is PINNED (`vi.setSystemTime`, Date only) so the relative fixtures
+ * mean one instant under the clock-shift lane too.
+ *
+ * Sabotage that turns it red: making the list read's catch `setInvites([])`
+ * reds the IN-SP-7 failed-read case; dropping `|| Date.parse(expiresAt) <
+ * Date.now()` reds the F5 + expired cases; removing `announce={error}` from the
+ * failure Notice reds ORGINV-UX-7 (a)/(c′).
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, act, fireEvent } from '@testing-library/react';
+import type * as InvitesClient from '../invitesClient.js';
 
 const { listInvites, createInvite, revokeInvite } = vi.hoisted(() => ({
-  listInvites: vi.fn(), createInvite: vi.fn(), revokeInvite: vi.fn(),
+  listInvites: vi.fn<typeof InvitesClient.listInvites>(),
+  createInvite: vi.fn<typeof InvitesClient.createInvite>(),
+  revokeInvite: vi.fn<typeof InvitesClient.revokeInvite>(),
 }));
 vi.mock('../invitesClient.js', async (orig) => ({
   ...(await orig<typeof import('../invitesClient.js')>()),
@@ -29,7 +46,16 @@ import { InvitesSection } from '../InvitesSection.js';
 import { GlobalLiveRegion } from '../../ui/announce.js';
 import { formatDateTime } from '../../i18n/format.js';
 
-const INVITE = { inviteId: 'inv1', email: 'bob@acme.test', role: 'editor', expiresAt: new Date(Date.now() + 86_400_000).toISOString() };
+/** The pinned instant every relative fixture is measured from. */
+const NOW = Date.parse('2026-06-01T12:00:00.000Z');
+const DAY = 86_400_000;
+const iso = (offsetMs: number): string => new Date(NOW + offsetMs).toISOString();
+const INVITE: InvitesClient.OrgInvite = {
+  inviteId: 'inv1', orgId: 'org:1', email: 'bob@acme.test', role: 'editor',
+  expiresAt: iso(DAY), createdAt: iso(-6 * DAY),
+};
+const LAPSED = iso(-60_000);
+const SENT = { invite: INVITE, delivery: 'sent' as const };
 
 /** The app-shell ASSERTIVE region (ADR 0363) — what a failed action sounds like.
  *  `ui/Notice.tsx:18` disclaims the inline role=alert, so this is the witness.
@@ -46,9 +72,12 @@ const mount = async (): Promise<void> => {
   await act(async () => {});
 };
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.useRealTimers(); });
 beforeEach(() => {
-  vi.clearAllMocks();
+  // Date only — findBy*/waitFor keep their real timers.
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(NOW);
+  vi.resetAllMocks();
   listInvites.mockResolvedValue([INVITE]);
   confirmMock.mockResolvedValue(true);
 });
@@ -64,7 +93,7 @@ describe('R2 IN-SP-7 — the inviter list tells the truth', () => {
   });
 
   it('an EXPIRED row is labelled, not left looking pending', async () => {
-    listInvites.mockResolvedValue([{ ...INVITE, expiresAt: new Date(Date.now() - 60_000).toISOString() }]);
+    listInvites.mockResolvedValue([{ ...INVITE, expiresAt: LAPSED }]);
     await mount();
     await screen.findByText('bob@acme.test');
     expect(screen.getByText(/expired/i)).toBeTruthy();
@@ -137,10 +166,12 @@ describe('ORGINV-UX-7 — inviter-side action feedback reaches assistive tech', 
     }));
     await mount();
     const input = screen.getByLabelText(/email/i);
+    const before = assertive();
     fireEvent.change(input, { target: { value: 'new@acme.test' } });
     fireEvent.click(screen.getByRole('button', { name: /send invite/i }));
     await screen.findByText(/set one up on the email page/i);
     expect(input.getAttribute('aria-invalid')).toBeNull();
+    expect(assertive()).not.toBe(before);
     expect(assertive()).toContain('couldn’t be delivered');
   });
 
@@ -169,7 +200,7 @@ describe('ORGINV-UX-7 — inviter-side action feedback reaches assistive tech', 
 
 describe('ORGINV-UX-9 — a pending row says WHO invited and WHEN it lapses, relatively', () => {
   it('surfaces createdByName from the wire and renders expiry as <time dateTime> with relative phrasing', async () => {
-    const expiresAt = new Date(Date.now() + 3 * 86_400_000).toISOString();
+    const expiresAt = iso(3 * DAY);
     listInvites.mockResolvedValue([{ ...INVITE, expiresAt, createdByName: 'Ana Silva' }]);
     await mount();
     const container = document.body;
@@ -191,8 +222,8 @@ describe('ORGINV-UX-9 — a pending row says WHO invited and WHEN it lapses, rel
 
 describe('ORGINV-UX-10 — the submit uses Button loading (aria-busy), keeping its name', () => {
   it('in flight: aria-busy + disabled, the label is still "Send invite" (no "Inviting…" rename)', async () => {
-    let resolveCreate: (v: { delivery: 'sent' }) => void = () => {};
-    createInvite.mockReturnValue(new Promise((res) => { resolveCreate = res; }));
+    let resolveCreate: (v: typeof SENT) => void = () => {};
+    createInvite.mockReturnValue(new Promise<typeof SENT>((res) => { resolveCreate = res; }));
     await mount();
     fireEvent.change(screen.getByLabelText(/email/i), { target: { value: 'new@acme.test' } });
     const btn = screen.getByRole('button', { name: /send invite/i }) as HTMLButtonElement;
@@ -202,14 +233,14 @@ describe('ORGINV-UX-10 — the submit uses Button loading (aria-busy), keeping i
     expect(btn.disabled).toBe(true);
     expect(screen.getByRole('button', { name: /send invite/i })).toBe(btn);
     expect(screen.queryByRole('button', { name: /inviting/i })).toBeNull();
-    await act(async () => { resolveCreate({ delivery: 'sent' }); });
+    await act(async () => { resolveCreate(SENT); });
     expect(btn.getAttribute('aria-busy')).toBeNull();
   });
 });
 
 describe('review F5 — expiry is live, not serialization-time', () => {
   it('a row the server marked expired:false that has since lapsed still shows Expired + Resend', async () => {
-    listInvites.mockResolvedValue([{ ...INVITE, expired: false, expiresAt: new Date(Date.now() - 60_000).toISOString() }]);
+    listInvites.mockResolvedValue([{ ...INVITE, expired: false, expiresAt: LAPSED }]);
     await mount();
     await screen.findByText('bob@acme.test');
     expect(screen.getByText(/expired/i)).toBeTruthy();
@@ -219,8 +250,8 @@ describe('review F5 — expiry is live, not serialization-time', () => {
 
 describe('ORGINV-UX-1 — loading and true-empty are designed states, never "render nothing"', () => {
   it('shows a loading placeholder while the list read is in flight (a misread here invites a link-killing re-send)', async () => {
-    let resolveList: (v: typeof INVITE[]) => void = () => {};
-    listInvites.mockReturnValue(new Promise((res) => { resolveList = res; }));
+    let resolveList: (v: InvitesClient.OrgInvite[]) => void = () => {};
+    listInvites.mockReturnValue(new Promise<InvitesClient.OrgInvite[]>((res) => { resolveList = res; }));
     await mount();
     expect(screen.getByText(/loading pending invitations/i)).toBeTruthy();
     expect(screen.queryByText(/no pending invitations/i)).toBeNull(); // loading is NOT "empty"
@@ -239,8 +270,8 @@ describe('ORGINV-UX-1 — loading and true-empty are designed states, never "ren
 
 describe('ORGINV-UX-2 — an expired row offers a one-click Resend with the replace-at-mint consequence stated', () => {
   it('resends via createInvite with the SAME email + role after a confirm that names the consequence', async () => {
-    listInvites.mockResolvedValue([{ ...INVITE, expiresAt: new Date(Date.now() - 60_000).toISOString() }]);
-    createInvite.mockResolvedValue({ delivery: 'sent' });
+    listInvites.mockResolvedValue([{ ...INVITE, expiresAt: LAPSED }]);
+    createInvite.mockResolvedValue(SENT);
     await mount();
     fireEvent.click(screen.getByRole('button', { name: /resend/i }));
     await act(async () => {});
@@ -249,11 +280,11 @@ describe('ORGINV-UX-2 — an expired row offers a one-click Resend with the repl
       body: expect.stringMatching(/stops working/i),
     }));
     expect(createInvite).toHaveBeenCalledWith('org:1', 'bob@acme.test', 'editor');
-    expect(toastSuccess).toHaveBeenCalled();
+    expect(toastSuccess).toHaveBeenCalledWith('Invitation emailed to bob@acme.test.');
   });
 
   it('a declined confirm resends nothing', async () => {
-    listInvites.mockResolvedValue([{ ...INVITE, expiresAt: new Date(Date.now() - 60_000).toISOString() }]);
+    listInvites.mockResolvedValue([{ ...INVITE, expiresAt: LAPSED }]);
     confirmMock.mockResolvedValue(false);
     await mount();
     fireEvent.click(screen.getByRole('button', { name: /resend/i }));
@@ -284,8 +315,8 @@ describe('ORGINV-UX-3 — a successful action retires the stale failure banner',
   });
 
   it('a failed create then a SUCCESSFUL resend clears it too', async () => {
-    listInvites.mockResolvedValue([{ ...INVITE, expiresAt: new Date(Date.now() - 60_000).toISOString() }]);
-    createInvite.mockRejectedValueOnce(new Error('boom')).mockResolvedValueOnce({ delivery: 'sent' });
+    listInvites.mockResolvedValue([{ ...INVITE, expiresAt: LAPSED }]);
+    createInvite.mockRejectedValueOnce(new Error('boom')).mockResolvedValueOnce(SENT);
     await mount();
     fireEvent.change(screen.getByLabelText(/email/i), { target: { value: 'new@acme.test' } });
     // "Send invite" exactly — /send/i would also match the row's Resend button.
@@ -299,12 +330,12 @@ describe('ORGINV-UX-3 — a successful action retires the stale failure banner',
 });
 
 describe('ADR 0564 D4 — a declined invitation is VISIBLE to the inviter', () => {
-  const declinedAt = new Date(Date.now() - 2 * 86_400_000).toISOString();
+  const declinedAt = iso(-2 * DAY);
   const DECLINED = { ...INVITE, status: 'declined' as const, declinedAt };
 
   it('renders a labelled Declined chip carrying declinedAt in its title, outranking Expired, with Revoke AND Resend', async () => {
     // Also expired — the decline is the more informative fact and wins.
-    listInvites.mockResolvedValue([{ ...DECLINED, expiresAt: new Date(Date.now() - 60_000).toISOString() }]);
+    listInvites.mockResolvedValue([{ ...DECLINED, expiresAt: LAPSED }]);
     await mount();
     await screen.findByText('bob@acme.test');
     const chip = screen.getByText(/^declined$/i);
@@ -321,7 +352,7 @@ describe('ADR 0564 D4 — a declined invitation is VISIBLE to the inviter', () =
 
   it('Resend on a declined row says the recipient declined the previous one, then mints as usual', async () => {
     listInvites.mockResolvedValue([DECLINED]);
-    createInvite.mockResolvedValue({ delivery: 'sent' });
+    createInvite.mockResolvedValue(SENT);
     await mount();
     fireEvent.click(screen.getByRole('button', { name: /resend/i }));
     await act(async () => {});
@@ -333,8 +364,8 @@ describe('ADR 0564 D4 — a declined invitation is VISIBLE to the inviter', () =
   });
 
   it('a pending row keeps the plain Resend copy (no false "they declined")', async () => {
-    listInvites.mockResolvedValue([{ ...INVITE, expiresAt: new Date(Date.now() - 60_000).toISOString() }]);
-    createInvite.mockResolvedValue({ delivery: 'sent' });
+    listInvites.mockResolvedValue([{ ...INVITE, expiresAt: LAPSED }]);
+    createInvite.mockResolvedValue(SENT);
     await mount();
     fireEvent.click(screen.getByRole('button', { name: /resend/i }));
     await act(async () => {});
@@ -348,10 +379,12 @@ describe('ADR 0622 D5 — a failed re-invite says the EARLIER invitation is stil
       status: 422, body: { details: { reason: 'delivery_failed', cause: 'send_failed', priorInviteStillValid: true } },
     }));
     await mount();
+    const before = assertive();
     fireEvent.change(screen.getByLabelText(/email/i), { target: { value: 'bob@acme.test' } });
     fireEvent.click(screen.getByRole('button', { name: /send invite/i }));
     await screen.findByText(/earlier invitation for this address may still be valid/i);
     expect(screen.queryByText(/nothing was kept/i)).toBeNull();
+    expect(assertive()).not.toBe(before);
     expect(assertive()).toContain('may still be valid');
   });
 

@@ -1,5 +1,7 @@
 /**
- * MPL-6 / MPL-13 / MPL-16 — the tail of the marketplace batch.
+ * MPL-6 / MPL-16 — the tail of the marketplace batch. (MPL-13 is described below
+ * for context but is NOT covered by this file — wave 10 found it covered nowhere;
+ * recorded as a grade-code row.)
  *
  * MPL-6. The free lane's ownership claim was ungated AND irreversible: for
  * `lane:'free'` `upsertPaidListing` sets no `approvalState`, so
@@ -9,7 +11,7 @@
  * therefore an invisible, permanent claim on the name: the real publisher got a
  * 409 forever and no operator ever saw it queued.
  *
- * MPL-13. `agentTools.project()` dropped `pricing`, so the Marketplace
+ * MPL-13 (NOT TESTED HERE). `agentTools.project()` dropped `pricing`, so the Marketplace
  * Recommender described a $99 pack and a free one in the same words — while `GET
  * /listings` had always annotated it and the SPA client type had always carried it.
  *
@@ -17,6 +19,11 @@
  * `listingPricingFor` and `createCheckout` both drop a non-`active` row, while
  * `listPaidListings` filtered on APPROVAL alone and returned suspended and
  * tombstoned rows to every viewer.
+ *
+ * Sabotage witnesses (wave 10): dropping the cross-seller 409, the owner check
+ * (404-not-403), the dissolved-row 409, the approval withdrawal, or the delete
+ * itself; making release tombstone; dropping or closing the lifecycle filter —
+ * each turns its case red.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -54,6 +61,7 @@ describe('MPL-6 — a claimed pack name is RELEASABLE by its seller', () => {
     // BEFORE this change that was the end of the story from the seller side.
     await releaseOwnListing(SQUATTER, 'vendor.contested.nodes');
 
+    expect(await listOwnListings(SQUATTER), 'the release removed the row, not just the claim').toHaveLength(0);
     const now = await upsertPaidListing(SELLER, { packName: 'vendor.contested.nodes', lane: 'free' });
     expect(now.sellerTenantId).toBe(SELLER);
   });

@@ -1,6 +1,6 @@
 {
   "_comment": "ADR 0052 §D2/§D7 — machine-readable release manifest and the single source of truth for REQUIRED UPGRADE STOPS. /cut-app-release PREPENDS each immutable vX.Y.Z release into `releases` (newest first) and sets `latest`. An upgrade tool reads `releases` to compute which required stops sit between a customer's current version and the target. `latest` names the newest stable (the moving alias the /install/ download points at). The per-entry field shape is documented in `_releaseShape` — that is a SCHEMA EXAMPLE, never a real release; do not parse it as one.",
-  "latest": "0.2.0",
+  "latest": "0.3.0",
   "_releaseShape": {
     "version": "X.Y.Z",
     "date": "YYYY-MM-DD",
@@ -15,6 +15,25 @@
     "notes": "CHANGELOG.md#xyz"
   },
   "releases": [
+    {
+      "version": "0.3.0",
+      "date": "2026-10-09",
+      "requiredStop": false,
+      "requiredStopReason": null,
+      "schemaVersion": {
+        "sqlite": 49,
+        "postgres": 47
+      },
+      "appMigrationVersion": 22,
+      "breakingConfig": [
+        "OpenWOP v1 removed: /v1/* answers 410 (public read twins 308), discovery advertises only 2.0; OPENWOP_V1_RETIRED no longer exists (ADR 0812)",
+        "Chain packs must pin every node reference exactly (typeId@x.y.z) or they are refused at load (ADR 0766)",
+        "Registry packs must be signed for the v2 tree (ed25519-canonical-json) with engines admitting <3.0.0",
+        "OPENWOP_TRUSTED_PROXY_CIDRS (new) — set it when a public-address proxy other than Google's front end fronts the backend (ADR 0851)",
+        "Scale-out hosts withhold memory-backed storage families; select OPENWOP_SURFACE_* shared backends (ADR 0867)"
+      ],
+      "notes": "CHANGELOG.md#030--2026-10-09"
+    },
     {
       "version": "0.2.0",
       "date": "2026-09-27",

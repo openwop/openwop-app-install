@@ -28,7 +28,7 @@
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { ensureNodesRegistered } from '../src/bootstrap/nodes.js';
+import { ensureNodesRegistered, SUPERVISOR_CALLS_LIVE_MODEL } from '../src/bootstrap/nodes.js';
 import { getNodeRegistry } from '../src/executor/nodeRegistry.js';
 import type { NodeContext } from '../src/executor/types.js';
 import { createApp } from '../src/index.js';
@@ -96,7 +96,11 @@ describe('RFC 0111 — contextBudget is withheld while the orchestrator is a moc
     };
     const out = await supervisor.execute(ctx);
 
-    expect(modelTurnAttempted, 'RFC 0111 §Scope — a supervisor that runs real model turns changes the advert decision').toBe(false);
+    // ADR 0858 P3 — tied to the ONE fact (`SUPERVISOR_CALLS_LIVE_MODEL`, nodes.ts),
+    // which also gates the live-model fixtures in `fixtures[]`. A supervisor that
+    // starts calling a model reds here until that fact is flipped deliberately.
+    expect(modelTurnAttempted, 'SUPERVISOR_CALLS_LIVE_MODEL must match whether the supervisor reaches callAI (RFC 0111 §Scope + ADR 0858 P3)').toBe(SUPERVISOR_CALLS_LIVE_MODEL);
+    expect(SUPERVISOR_CALLS_LIVE_MODEL, 'RFC 0111 §Scope — a supervisor that runs real model turns changes the advert decision').toBe(false);
     expect(out.status).toBe('success');
     if (out.status !== 'success') return; // narrows the NodeOutcome union
     // Byte-identical echo of config input: the plan came from config, not from a model.

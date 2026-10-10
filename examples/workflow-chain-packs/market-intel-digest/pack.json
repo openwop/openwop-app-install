@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.workflows.market-intel",
-  "version": "1.1.2",
+  "version": "1.1.3",
   "kind": "workflow-chain",
   "description": "Real-work workflow pack (RFC 0013, ADR 0149/0150 + ADR 0174). Market-intelligence digest + a SHIFT digest (research the current period, then diff against the prior run via market-intel.shift-detect → an in-voice shift summary) authored entirely over PUBLISHED node packs (vendor.myndhyve.market-intel-* + core.openwop.ai), so they expand + run on any conformant host. Published under the `core.openwop.workflows.*` namespace (openwop-team signing key); the registry adds `signing` at publish time.",
   "author": "openwop",
@@ -10,7 +10,7 @@
   "chains": [
     {
       "chainId": "market-intel.digest",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "Competitive / market-intel digest",
       "description": "Discover sources for a topic, extract voice-of-customer signals, score opportunities, then synthesize a digest with recommended actions. Portable: every node is a published typeId.",
       "parameters": {
@@ -29,7 +29,7 @@
         "nodes": [
           {
             "id": "discover",
-            "typeId": "market-intel.ai-discovery",
+            "typeId": "market-intel.ai-discovery@1.0.0",
             "name": "Discover sources",
             "position": { "x": 0, "y": 0 },
             "config": { "query": "{{params.topic}}" },
@@ -37,7 +37,7 @@
           },
           {
             "id": "voc",
-            "typeId": "market-intel.voc-extraction",
+            "typeId": "market-intel.voc-extraction@1.0.0",
             "name": "Extract voice-of-customer",
             "position": { "x": 260, "y": 0 },
             "config": {},
@@ -45,7 +45,7 @@
           },
           {
             "id": "score",
-            "typeId": "market-intel.opportunity-scoring",
+            "typeId": "market-intel.opportunity-scoring@1.0.0",
             "name": "Score opportunities",
             "position": { "x": 520, "y": 0 },
             "config": {},
@@ -53,7 +53,7 @@
           },
           {
             "id": "synthesize",
-            "typeId": "core.ai.chatCompletion",
+            "typeId": "core.ai.chatCompletion@1.0.0",
             "name": "Synthesize digest",
             "position": { "x": 780, "y": 0 },
             "config": {
@@ -76,7 +76,7 @@
     },
     {
       "chainId": "market-intel.shift-digest",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "Market-intel SHIFT digest (vs prior run)",
       "description": "Research the current period (discover → voc → score), diff it against the PRIOR run's synthesized records/angles via market-intel.shift-detect, then synthesize a concise shift digest (what's new / resolved / intensifying + angle-score moves). Schedule it (RFC 0052) to get a recurring shift watch. Portable: every node is a published typeId.",
       "parameters": {
@@ -93,11 +93,11 @@
       "capabilities": ["side-effectful"],
       "dag": {
         "nodes": [
-          { "id": "discover", "typeId": "market-intel.ai-discovery", "name": "Discover sources", "position": { "x": 0, "y": 0 }, "config": { "query": "{{params.topic}}" }, "inputs": {} },
-          { "id": "voc", "typeId": "market-intel.voc-extraction", "name": "Extract voice-of-customer", "position": { "x": 260, "y": 0 }, "config": {}, "inputs": {} },
-          { "id": "score", "typeId": "market-intel.opportunity-scoring", "name": "Score opportunities", "position": { "x": 520, "y": 0 }, "config": {}, "inputs": {} },
-          { "id": "shift", "typeId": "market-intel.shift-detect", "name": "Detect market shift", "position": { "x": 780, "y": 0 }, "config": { "previous": "{{params.previous}}" }, "inputs": {} },
-          { "id": "synthesize", "typeId": "core.ai.chatCompletion", "name": "Synthesize shift digest", "position": { "x": 1040, "y": 0 }, "config": { "systemPrompt": "You are a market analyst. Given the detected market shift (new / resolved / intensifying pain points and angle-score deltas) for the topic \"{{params.topic}}\", write a concise SHIFT digest: what changed since the last run and the recommended next actions. If no material shift was detected, say so plainly.",
+          { "id": "discover", "typeId": "market-intel.ai-discovery@1.0.0", "name": "Discover sources", "position": { "x": 0, "y": 0 }, "config": { "query": "{{params.topic}}" }, "inputs": {} },
+          { "id": "voc", "typeId": "market-intel.voc-extraction@1.0.0", "name": "Extract voice-of-customer", "position": { "x": 260, "y": 0 }, "config": {}, "inputs": {} },
+          { "id": "score", "typeId": "market-intel.opportunity-scoring@1.0.0", "name": "Score opportunities", "position": { "x": 520, "y": 0 }, "config": {}, "inputs": {} },
+          { "id": "shift", "typeId": "market-intel.shift-detect@1.0.0", "name": "Detect market shift", "position": { "x": 780, "y": 0 }, "config": { "previous": "{{params.previous}}" }, "inputs": {} },
+          { "id": "synthesize", "typeId": "core.ai.chatCompletion@1.0.0", "name": "Synthesize shift digest", "position": { "x": 1040, "y": 0 }, "config": { "systemPrompt": "You are a market analyst. Given the detected market shift (new / resolved / intensifying pain points and angle-score deltas) for the topic \"{{params.topic}}\", write a concise SHIFT digest: what changed since the last run and the recommended next actions. If no material shift was detected, say so plainly.",
             "provider": "{{params.provider}}",
             "model": "{{params.model}}"
           }, "inputs": {} }

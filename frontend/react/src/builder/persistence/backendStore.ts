@@ -16,6 +16,7 @@
  */
 
 import { assertSynced, authedHeaders, config, fetchOpts, isOfflineError } from '../../client/config.js';
+import i18n from '../../i18n/index.js';
 import { getWorkflowDefinitionRaw } from '../../client/workflowsClient.js';
 import { listWorkflowSummaries } from '../../workflows/workflowsClient.js';
 import { serializeWorkflow } from '../schema/serialize.js';
@@ -66,15 +67,28 @@ export interface ChainTemplate {
    *  lacks + the connection bindings the chain names. Caller connection status
    *  joins client-side (TemplatePreflightModal). */
   requirements?: {
+    /** Node types this host does not have at all. */
     missingNodeTypeIds: string[];
+    /** ADR 0766 D3 — nodes the host HAS, but not at the version the template
+     *  pinned (grade-ux U-1). Optional: an older backend omits it. */
+    pinMismatches?: PinMismatch[];
     connections: Array<{ ref: string; providerId: string; providerInstalled: boolean }>;
     /** Human-approval gates in the chain — the pre-flight trust line (P12/F2). */
     approvalGateCount?: number;
+    /** How many steps the chain draws (ADR 0773 P11). Optional: an older backend omits it. */
+    nodeCount?: number;
     /** Toggle-gated `ctx.features.<id>` surfaces the chain reads (ADR 0191
      *  Phase 2). Always-on features are omitted by the host. Caller enablement
      *  joins client-side (TemplatePreflightModal, via useAllFeatureAccess). */
     requiredFeatures?: Array<{ id: string; label: string }>;
   };
+}
+/** A node the template pinned that this host has at another version. */
+export interface PinMismatch {
+  typeId: string;
+  label: string;
+  pinned: string;
+  installed: string;
 }
 export interface ChainParamSpec {
   type?: string;
@@ -122,12 +136,66 @@ export async function listWorkflows(opts: { includeArchived?: boolean } = {}): P
   }
 }
 
+/** ADR 0770 D6 — the backend REFUSED the definition read (any status: 401,
+ *  403, 429, 5xx, or an HTML rewrite the SDK reports as `invalid_json`). The
+ *  workflow may well exist; the caller must NOT treat this as "not found" and
+ *  mint a blank canvas under its id — the first autosave would overwrite it. */
+export class LoadRefusedError extends Error {
+  constructor() {
+    super(i18n.t('builder:loadRefused'));
+    this.name = 'LoadRefusedError';
+  }
+}
+
+/** ADR 0770 D6 — genuinely offline AND this device holds no copy. Distinct from
+ *  not-found for the same reason as {@link LoadRefusedError}. */
+export class LoadOfflineError extends Error {
+  constructor() {
+    super(i18n.t('builder:loadOffline'));
+    this.name = 'LoadOfflineError';
+  }
+}
+
 /** Load a full definition (backend-first, then the local draft cache).
- *  Throws `CanonicalParseError` when the backend HAS the definition but the
- *  builder can't materialize it (unknown node typeIds, zero nodes) — callers
- *  surface that instead of silently blank-minting over a real definition.
- *  Network failures still degrade to the local cache. */
+ *
+ *  Returns `null` ONLY on an authoritative not-found (the server answered and
+ *  holds no such definition, and this device has no draft) — the one case where
+ *  a blank canvas under this id is correct. Throws `CanonicalParseError` when
+ *  the backend HAS the definition but the builder can't materialize it,
+ *  `LoadRefusedError` when the read was refused, and `LoadOfflineError` when
+ *  offline with no local copy. Only a genuine transport failure (`isOfflineError`)
+ *  degrades to the local cache.
+ *
+ *  ADR 0770 D6 (`WBWF-5`) — every non-parse error used to fall through to the
+ *  local cache or `null`, and `BuilderTab` turned `null` into a blank canvas
+ *  under the EXISTING id: a 401/429/5xx on a device without a local copy opened
+ *  an empty canvas, and the first edit's autosave overwrote the real workflow. */
 export async function loadWorkflow(id: string): Promise<SavedWorkflow | null> {
+  return (await loadWorkflowWithHead(id)).workflow;
+}
+
+/** The definition and its head revision from ONE server read (grade-code
+ *  WBCD-1). An owned workflow is read through `GET …/workflows/:id/head`, which
+ *  reads storage fresh and returns both; anything else (a public template, a
+ *  never-saved id) falls back to the by-id read with no revision, so its first
+ *  save carries no precondition. Taking the content from the by-id read (a
+ *  per-instance cache server-side) and the base from `/head` separately let a
+ *  STALE canvas carry a CURRENT base — which the precondition then waved through. */
+async function readDefinitionWithHead(id: string): Promise<{ def: unknown; headRevision?: string } | null> {
+  const res = await fetch(`${LIST_URL}/${encodeURIComponent(id)}/head`, fetchOpts({ headers: authedHeaders() }));
+  if (res.ok) {
+    const body = (await res.json()) as { definition?: unknown; revision?: unknown };
+    return { def: body.definition, ...(typeof body.revision === 'string' ? { headRevision: body.revision } : {}) };
+  }
+  if (res.status !== 404) await assertSynced(res); // a refusal — typed, never "not found"
+  const def = await getWorkflowDefinitionRaw(id);
+  return def ? { def } : null;
+}
+
+/** {@link loadWorkflow}, plus the head revision the canvas edits against (the
+ *  save's `If-Match` base — ADR 0770 D5). Same error contract. */
+export async function loadWorkflowWithHead(id: string): Promise<{ workflow: SavedWorkflow | null; headRevision?: string }> {
+  let headRevision: string | undefined;
   try {
     // Pack-declared typeIds resolve through the dynamic catalog. Deserializing
     // before it settles made every pack-instantiated template open as a blank
@@ -138,7 +206,9 @@ export async function loadWorkflow(id: string): Promise<SavedWorkflow | null> {
     // ADR 0730 C.4 — the shared major-2 definition read. A not-found yields
     // `null` and a transport failure throws; both land on the local cache
     // below, which is what the old `if (res.ok)` fall-through did.
-    const def = (await getWorkflowDefinitionRaw(id)) as ({ name?: unknown; metadata?: Record<string, unknown> & { name?: unknown; lifecycle?: { transient?: boolean; generatedBy?: string } } } | null);
+    const read = await readDefinitionWithHead(id);
+    headRevision = read?.headRevision;
+    const def = (read?.def ?? null) as ({ name?: unknown; metadata?: Record<string, unknown> & { name?: unknown; lifecycle?: { transient?: boolean; generatedBy?: string } } } | null);
     if (def) {
       const d = fromCanonicalDefinition(def);
       const now = new Date().toISOString();
@@ -158,7 +228,7 @@ export async function loadWorkflow(id: string): Promise<SavedWorkflow | null> {
           name = (await listWorkflowSummaries()).find((w) => w.workflowId === id)?.name ?? '';
         } catch { /* summaries unreadable — fall through to the id */ }
       }
-      return {
+      const workflow: SavedWorkflow = {
         id,
         name: name || id,
         version: local?.version ?? '1.0.0',
@@ -186,12 +256,17 @@ export async function loadWorkflow(id: string): Promise<SavedWorkflow | null> {
           ? { metadata: stripBuilderOwnedKeys(def.metadata) }
           : {}),
       };
+      return { workflow, ...(headRevision ? { headRevision } : {}) };
     }
   } catch (err) {
     if (err instanceof CanonicalParseError) throw err; // a real definition we can't open — surface it
-    /* network: fall through to local */
+    if (!isOfflineError(err)) throw new LoadRefusedError();
+    const local = getSavedWorkflow(id);
+    if (local) return { workflow: local }; // offline: this device's copy is the honest fallback
+    throw new LoadOfflineError();
   }
-  return getSavedWorkflow(id) ?? null;
+  // Authoritative not-found: a never-synced local draft, else genuinely new.
+  return { workflow: getSavedWorkflow(id) ?? null };
 }
 
 /**
@@ -206,22 +281,55 @@ export async function loadWorkflow(id: string): Promise<SavedWorkflow | null> {
  */
 export interface SaveOutcome {
   removedReferencedNodeIds?: string[];
+  /** ADR 0770 D5 — the head as persisted; the next save's `If-Match` base.
+   *  Absent when offline (nothing reached the server). */
+  revision?: string;
+  /** ADR 0789 — the id the server PERSISTED under. Differs from the saved id only
+   *  when this was a shared (seeded) workflow: the server forks an edit onto the
+   *  tenant's own id and never writes the shared one, so the caller must adopt it. */
+  workflowId?: string;
+  /** ADR 0789 — the shared id this save forked away from (set only on a fork). */
+  forkedFrom?: string;
+  /** ADR 0789 — the fork landed, but some linked items (schedules, cards, …)
+   *  could not be re-pointed and still reference the original. */
+  repointFailed?: boolean;
 }
+
+/** ADR 0770 D5 — the 409 reason a stale `If-Match` earns. */
+export const HEAD_MOVED_REASON = 'workflow_head_moved';
 
 /** Save (write-through): backend ownership index + local cache. Best-effort on
  *  the backend (the local cache is always written so work is never lost; R-D). */
-export async function saveWorkflow(wf: SavedWorkflow): Promise<SaveOutcome> {
+export async function saveWorkflow(
+  wf: SavedWorkflow,
+  opts: {
+    /** ADR 0770 D5 — the head this edit was made against. A server head that
+     *  moved since is refused 409 `workflow_head_moved` instead of overwritten. */
+    baseRevision?: string;
+    /** ADR 0770 D6 — `pagehide` flush: the request must outlive the page. */
+    keepalive?: boolean;
+    /** ADR 0789 — the canvas is unchanged since load (a shared workflow's save
+     *  is then a same-id no-op instead of a fork). */
+    pristine?: boolean;
+  } = {},
+): Promise<SaveOutcome> {
   upsertSavedWorkflow(wf); // local cache first — durable regardless of network
   try {
     const def = serializeWorkflow(wf);
     const res = await fetch(LIST_URL, fetchOpts({
       method: 'POST',
+      ...(opts.keepalive ? { keepalive: true } : {}),
       // ADR 0524 Phase E0 — the builder store DOES model node `inputs`,
       // `variables` and `configurableSchema`, so it declares them: an omission
       // from here is a real deletion, not a bundle that cannot serialize them.
       // Only lanes whose SOURCE models the fields may send this — see
       // `fieldContract.ts`; the localStorage-sourced lanes must not.
-      headers: authedHeaders({ 'content-type': 'application/json', ...fieldContractHeader() }),
+      headers: authedHeaders({
+        'content-type': 'application/json',
+        ...fieldContractHeader(),
+        ...(opts.baseRevision ? { 'if-match': `"${opts.baseRevision}"` } : {}),
+        ...(opts.pristine ? { 'x-openwop-canvas-pristine': '1' } : {}),
+      }),
       // ADR 0369 — the lifecycle MUST round-trip: an autosave that dropped the
       // flag would silently promote the draft on the backend.
       body: JSON.stringify({ ...def, metadata: definitionMetadataFor(wf) }),
@@ -235,11 +343,26 @@ export async function saveWorkflow(wf: SavedWorkflow): Promise<SaveOutcome> {
     // ADR 0440 P2 — the server reports (never refuses) a save that dropped
     // nodes a run had recorded, so the builder can tell the author their run
     // history no longer maps to those steps.
-    const body = (await res.json().catch(() => undefined)) as { removedReferencedNodeIds?: unknown } | undefined;
+    const body = (await res.json().catch(() => undefined)) as { removedReferencedNodeIds?: unknown; revision?: unknown; workflowId?: unknown; forkedFrom?: unknown; repointFailed?: unknown } | undefined;
     const removed = body?.removedReferencedNodeIds;
-    if (Array.isArray(removed) && removed.every((v): v is string => typeof v === 'string') && removed.length > 0) {
-      return { removedReferencedNodeIds: removed };
+    const revision = typeof body?.revision === 'string' ? body.revision : undefined;
+    const forkedFrom = typeof body?.forkedFrom === 'string' ? body.forkedFrom : undefined;
+    const persistedId = typeof body?.workflowId === 'string' ? body.workflowId : undefined;
+    if (forkedFrom && persistedId && persistedId !== wf.id) {
+      // ADR 0789 — re-key the local cache: the shared id is no longer this
+      // tenant's, and a cached copy under it would resurrect it on the next sync.
+      deleteSavedWorkflow(wf.id);
+      upsertSavedWorkflow({ ...wf, id: persistedId });
     }
+    return {
+      ...(persistedId ? { workflowId: persistedId } : {}),
+      ...(forkedFrom ? { forkedFrom } : {}),
+      ...(Array.isArray(body?.repointFailed) && body.repointFailed.length > 0 ? { repointFailed: true } : {}),
+      ...(Array.isArray(removed) && removed.every((v): v is string => typeof v === 'string') && removed.length > 0
+        ? { removedReferencedNodeIds: removed }
+        : {}),
+      ...(revision ? { revision } : {}),
+    };
   } catch (err) {
     if (!isOfflineError(err)) throw err;
     /* genuinely offline: the local cache holds it; a later save syncs it */
@@ -266,15 +389,15 @@ export async function removeWorkflow(id: string): Promise<void> {
   deleteSavedWorkflow(id);
 }
 
-/** List installed workflow-chain pack templates (host-global, authed). Empty on error. */
+/** List installed workflow-chain pack templates (host-global, authed).
+ *
+ *  ADR 0770 D8 — THROWS on failure. It used to return `[]` on any error, so a
+ *  401/5xx rendered the gallery's "no templates installed" empty state — a
+ *  false statement about the host, with no way to retry. */
 export async function listChainTemplates(): Promise<ChainTemplate[]> {
-  try {
-    const res = await fetch(CHAINS_URL, fetchOpts({ headers: authedHeaders() }));
-    if (!res.ok) throw new Error(`chains_${res.status}`);
-    return ((await res.json()) as { chains: ChainTemplate[] }).chains;
-  } catch {
-    return [];
-  }
+  const res = await fetch(CHAINS_URL, fetchOpts({ headers: authedHeaders() }));
+  await assertSynced(res);
+  return ((await res.json()) as { chains: ChainTemplate[] }).chains;
 }
 
 export interface InstallPackResult {
@@ -302,32 +425,47 @@ export async function installChainPack(name: string, version: string): Promise<I
   return res.json() as Promise<InstallPackResult>;
 }
 
-/** Instantiate a chain template into a fresh owned workflow ("Use template"). */
+/** What a "Use template" instantiation reports back. */
+export interface InstantiateResult {
+  workflowId: string;
+  nodeCount: number;
+  subChainWorkflowIds?: string[];
+  /** ADR 0770 D3 — sub-chain children this workspace had EDITED, bound as-is. */
+  reusedSubChainWorkflowIds?: string[];
+  /** Node types this host does not have at all. */
+  warnings?: string[];
+  /** Nodes installed at a version other than the template pinned (ADR 0766 D3). */
+  pinMismatches?: PinMismatch[];
+  incompleteNodes?: Array<{ nodeId: string; typeId: string; missing: string[] }>;
+}
+
+/** Instantiate a chain template into a fresh owned workflow ("Use template").
+ *  Throws `SyncFailureError` (status + domain reason) so the caller can tell a
+ *  view-only member (`forbidden_scope`) from a disabled pack from a fault. */
 export async function instantiateChain(
   chainId: string,
   params?: Record<string, unknown>,
-): Promise<{ workflowId: string; nodeCount: number; subChainWorkflowIds?: string[]; warnings?: string[]; incompleteNodes?: Array<{ nodeId: string; typeId: string; missing: string[] }> }> {
+): Promise<InstantiateResult> {
   const res = await fetch(FROM_CHAIN_URL, fetchOpts({
     method: 'POST',
     headers: authedHeaders({ 'content-type': 'application/json' }),
     body: JSON.stringify({ chainId, ...(params ? { params } : {}) }),
   }));
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`instantiate_failed_${res.status}: ${text.slice(0, 200)}`);
-  }
-  return res.json() as Promise<{ workflowId: string; nodeCount: number; subChainWorkflowIds?: string[]; warnings?: string[]; incompleteNodes?: Array<{ nodeId: string; typeId: string; missing: string[] }> }>;
+  await assertSynced(res);
+  return res.json() as Promise<InstantiateResult>;
 }
 
 /** True when the host DERIVED this template's requirements and they are empty —
- *  no connection bindings, no uninstalled node types (day-1 UX P6: the gallery
+ *  no connection bindings, no uninstalled node types, no node installed at a
+ *  version other than the one it pinned (day-1 UX P6: the gallery
  *  "Start here" promise). Distinct from the preload predicate below ("no
  *  required params" = instantiable blind); absent requirements (older backend)
  *  honestly reads false, never overpromises. */
 export function runsWithZeroConnections(c: ChainTemplate): boolean {
   return c.requirements != null
     && c.requirements.connections.length === 0
-    && c.requirements.missingNodeTypeIds.length === 0;
+    && c.requirements.missingNodeTypeIds.length === 0
+    && (c.requirements.pinMismatches ?? []).length === 0;
 }
 
 const MIGRATED_KEY = 'openwop-app.builder.migratedToBackend';

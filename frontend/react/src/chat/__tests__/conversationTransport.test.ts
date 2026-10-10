@@ -37,7 +37,8 @@ describe('turnsToBubbles', () => {
     ]);
     expect(bubbles).toEqual([
       { id: 'c:1:user', role: 'user', content: 'hi @devon' },
-      { id: 'c:2:agent', role: 'assistant', content: 'Hey!', agentPersona: 'a:devon' },
+      // ADR 0768 P3 — reply time from the wire `ts`; this fixture stamps both turns alike.
+      { id: 'c:2:agent', role: 'assistant', content: 'Hey!', agentPersona: 'a:devon', replyMs: 0 },
     ]);
   });
 

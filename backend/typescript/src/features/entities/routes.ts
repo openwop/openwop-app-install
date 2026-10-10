@@ -13,10 +13,14 @@
  * cross-tenant/unknown rows → 404 (no existence leak — service-side guards).
  */
 import type { Request } from 'express';
+import { delegationIssuerScopes, getMember } from '../../host/accessControlService.js';
+import { keyAuthorityRefuses } from '../../host/delegatedSubject.js';
 import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
-import { resolveEffectiveAccess, resolveTenantLevelScopes, type Scope, ACT_AS_HEADER } from '../../host/accessControlService.js';
+import { resolveEffectiveAccess, resolveTenantLevelScopes, type Scope } from '../../host/accessControlService.js';
+import { actingMemberId, narrowToCaller } from '../../host/actingAccess.js';
 import { entityLocaleContext } from './common.js';
+import { filterReadableNamespaces, namespaceAllows } from './namespaceAccess.js';
 import { readPublicEntities, readPublicEntity, resolveEntityPublicLocale } from './publicRead.js';
 import { requireFeatureEnabled, requireString, optionalString, tenantOf } from '../featureRoute.js';
 import { verifyApiKey } from '../developer-keys/apiKeyService.js';
@@ -53,7 +57,7 @@ import {
 } from './taxonomyService.js';
 
 const TOGGLE = { toggleId: 'entities', label: 'Entities' };
-const BASE = '/v1/host/openwop-app/entities';
+const BASE = '/host/openwop-app/entities';
 
 /** ADR 0406 D7 — the localization opt-in. OFF ⇒ overlay writes REJECT (never a
  *  silent drop) and delivery serves base values with no negotiation. */
@@ -83,6 +87,24 @@ interface EntitiesAuth {
   tenantId: string;
   /** `apikey` callers face the publish gate (ADR 0386 matrix row 7/8). */
   via: 'session' | 'apikey';
+  /** ADR 0847 D1 — every subject the namespace rule must admit: the session caller
+   *  (+ the acting member under act-as), or the key's ISSUER. List routes filter by it. */
+  subjects: Array<string | undefined>;
+  /** Session callers only — the resolved tenant-level scopes (act-as narrowed), so a
+   *  read can tell the UI what this viewer may do (ADR 0847 / `ENT3UX-2`). */
+  scopes?: Scope[];
+}
+
+/** ADR 0847 D1 — a project namespace the caller cannot read is a 404 (indistinguishable
+ *  from absent); one they can read but not write is a 403 (the project feature's split). */
+async function requireNamespace(tenantId: string, projectId: string | undefined, subjects: Array<string | undefined>, scope: Scope): Promise<void> {
+  if (!projectId) return;
+  if (!(await namespaceAllows(tenantId, projectId, subjects, 'read'))) {
+    throw new OpenwopError('not_found', 'Not found.', 404, {});
+  }
+  if (scope !== 'workspace:read' && !(await namespaceAllows(tenantId, projectId, subjects, 'write'))) {
+    throw new OpenwopError('forbidden_scope', 'You can read this project but not change it.', 403, { requiredScope: scope });
+  }
 }
 
 /** The ADR 0386 scope-grammar target for a type: `<typeName>` at tenant root,
@@ -114,9 +136,14 @@ async function requireEntitiesScope(
   scope: Scope,
   opts?: { type?: { name: string; projectId: string | undefined } },
 ): Promise<EntitiesAuth> {
+  // ADR 0847 review A5 — the namespace comes from the request on EVERY route: the
+  // taxonomy, term and relationship routes carry `projectId` without `opts.type`.
+  const projectId = opts?.type ? opts.type.projectId : projectOf(req);
   const bearer = req.header('authorization');
-  if (bearer?.startsWith('Bearer owk_')) {
-    const key = await verifyApiKey(bearer.slice('Bearer '.length).trim());
+  // Scheme matched case-insensitively, as the auth middleware does: `bearer owk_…`
+  // authenticated there and fell through to the SESSION path here.
+  if (bearer !== undefined && /^bearer\s+owk_/i.test(bearer)) {
+    const key = await verifyApiKey(bearer.replace(/^bearer\s+/i, '').trim());
     if (!key) throw new OpenwopError('unauthenticated', 'Invalid or expired API key.', 401, {});
     // Toggle authority is per-TENANT for a key caller — resolve with the key's tenant.
     const assignment = await resolveOne(TOGGLE.toggleId, { tenantId: key.tenantId });
@@ -131,6 +158,19 @@ async function requireEntitiesScope(
         ...(target !== null ? { target } : {}),
       });
     }
+    // ADR 0795 D1 — the `entities:` grammar says what the key DECLARED. It must
+    // not grant what its issuer lacks: any member could mint `entities:admin`
+    // and reach the admin tier on declaration alone.
+    if (!(await delegationIssuerScopes(key.tenantId, key.createdBy)).includes(scope)
+      && keyAuthorityRefuses('entities-issuer', key.keyId, { requiredScope: scope })) {
+      throw new OpenwopError('forbidden_scope', 'The person who created this API key does not hold the access this needs.', 403, {
+        requiredScope: scope,
+        code: 'key_issuer_lacks_scope',
+      });
+    }
+    // ADR 0847 D1 — the key may not reach a namespace its ISSUER cannot (ADR 0795's
+    // posture, extended from scopes to project visibility).
+    await requireNamespace(key.tenantId, projectId, [key.createdBy], scope);
     // Publish gate (ADR 0386): a draft type is a 404 to a key caller —
     // indistinguishable from absent. Session callers see drafts (authoring).
     if (opts?.type) {
@@ -139,7 +179,7 @@ async function requireEntitiesScope(
         throw new OpenwopError('not_found', 'Entity type not found.', 404, { typeName: opts.type.name });
       }
     }
-    return { subject: `apikey:${key.keyId}`, tenantId: key.tenantId, via: 'apikey' };
+    return { subject: `apikey:${key.keyId}`, tenantId: key.tenantId, via: 'apikey', subjects: [key.createdBy] };
   }
   await requireFeatureEnabled(req, TOGGLE.toggleId, TOGGLE.label);
   const subject = callerSubjectOf(req);
@@ -147,7 +187,7 @@ async function requireEntitiesScope(
     throw new OpenwopError('unauthenticated', 'Entities requires an authenticated principal.', 401, {});
   }
   const tenantId = tenantOf(req);
-  const actingMember = req.header(ACT_AS_HEADER);
+  const actingMember = actingMemberId(req);
   // ADR 0731 — resolve the SESSION caller, and resolve them with the TENANT-LEVEL
   // resolver. This used to pass `{}` when there was no X-Act-As header, and with
   // neither `memberId` nor `subject` `resolveEffectiveAccess` returns
@@ -160,12 +200,24 @@ async function requireEntitiesScope(
   // docblock says so). `resolveTenantLevelScopes` = that union PLUS the ADR 0372
   // exit: a single-principal tenant (anon sandbox / personal) is its own owner;
   // a SHARED `ws:` workspace fails closed, which is the escalation being fixed.
-  const access = actingMember
-    ? await resolveEffectiveAccess(tenantId, { memberId: actingMember.trim() })
-    : await resolveTenantLevelScopes(tenantId, subject);
+  // ADR 0797 (CE-8) — and under act-as, the named member's access NARROWED to
+  // the caller's own (it was the named member's alone).
+  const own = await resolveTenantLevelScopes(tenantId, subject);
+  const access = actingMember !== undefined
+    ? narrowToCaller({ roles: [], scopes: own.scopes, basis: own.basis }, await resolveEffectiveAccess(tenantId, { memberId: actingMember }))
+    : own;
   if (!access.scopes.includes(scope)) {
     throw new OpenwopError('forbidden_scope', `Missing required scope: ${scope}`, 403, { requiredScope: scope });
   }
+  // ADR 0847 D1 (review A3) — under act-as the namespace rule must admit BOTH people
+  // (ADR 0797: act-as is the intersection). An acting member with no principal, or
+  // from another tenant, contributes an absent subject, which the rule refuses.
+  const subjects: Array<string | undefined> = [subject];
+  if (actingMember !== undefined) {
+    const member = await getMember(actingMember);
+    subjects.push(member && member.tenantId === tenantId && member.subject ? member.subject : undefined);
+  }
+  await requireNamespace(tenantId, projectId, subjects, scope);
   // ADR 0409 — SYSTEM types (cms.page, crm.company/deal, commerce.product) are
   // INVISIBLE to the generic user-facing entities API: they are managed only by
   // their owning FAÇADE, whose per-org RBAC would otherwise be bypassed by a
@@ -174,11 +226,16 @@ async function requireEntitiesScope(
     const type = await getEntityType(tenantId, opts.type.projectId, opts.type.name);
     if (type?.system) throw new OpenwopError('not_found', 'Entity type not found.', 404, { typeName: opts.type.name });
   }
-  return { subject, tenantId, via: 'session' };
+  return { subject, tenantId, via: 'session', subjects, scopes: access.scopes };
 }
 
+/** The ONE namespace a request names — the gate checks it and every route hands the
+ *  SAME value to the service (ADR 0847, grade-code `ENT3CD-1`: four authoring routes
+ *  passed `body.projectId` while the gate read this, and `?projectId=` — an empty
+ *  query string, which `??` never falls through — made the gate see the root while
+ *  the type was created in a private project). An empty value is no value. */
 const projectOf = (req: Request): string | undefined =>
-  optionalString((req.query.projectId as unknown) ?? (req.body as { projectId?: unknown } | undefined)?.projectId);
+  optionalString(req.query.projectId) ?? optionalString((req.body as { projectId?: unknown } | undefined)?.projectId);
 
 export function registerEntitiesRoutes({ app }: RouteDeps): void {
   // ADR 0406 — the editor's locale context (ONE resolver: entityLocaleContext,
@@ -196,10 +253,17 @@ export function registerEntitiesRoutes({ app }: RouteDeps): void {
     try {
       const auth = await requireEntitiesScope(req, 'workspace:read');
       // ADR 0409 — SYSTEM types are invisible to the generic API (façade-owned).
-      const types = (await listEntityTypes(auth.tenantId, projectOf(req))).filter((t) => !t.system);
+      // ADR 0847 D1 — an unscoped list spans every namespace: drop the ones the caller
+      // cannot read (a scoped list already passed the gate).
+      const types = await filterReadableNamespaces(auth.tenantId, (await listEntityTypes(auth.tenantId, projectOf(req))).filter((t) => !t.system), auth.subjects);
       // Draft schemas are authoring state — key callers (even entities:admin)
       // see only the published catalog (the publish gate, applied to the list).
-      res.json({ types: auth.via === 'apikey' ? types.filter((t) => t.status === 'published') : types });
+      res.json({
+        types: auth.via === 'apikey' ? types.filter((t) => t.status === 'published') : types,
+        // ADR 0847 (`ENT3UX-2`) — what THIS viewer may do in the workspace root, computed
+        // by the same gate the write routes run, so the page offers only what will work.
+        ...(auth.scopes ? { viewer: { canWrite: auth.scopes.includes('workspace:write'), canManageTypes: auth.scopes.includes('host:members:manage') } } : {}),
+      });
     } catch (err) { next(err); }
   });
 
@@ -211,7 +275,7 @@ export function registerEntitiesRoutes({ app }: RouteDeps): void {
       };
       const rec = await createEntityType({
         tenantId,
-        projectId: optionalString(body.projectId),
+        projectId: projectOf(req),
         name: requireString(body.name, 'name'),
         displayName: optionalString(body.displayName) ?? requireString(body.name, 'name'),
         ...(optionalString(body.description) !== undefined ? { description: optionalString(body.description) } : {}),
@@ -418,8 +482,8 @@ export function registerEntitiesRoutes({ app }: RouteDeps): void {
   // ---- Taxonomies + terms (ADR 0386 Phase 2; type-admin tier) ----
   app.get(`${BASE}/taxonomies`, async (req, res, next) => {
     try {
-      const { tenantId } = await requireEntitiesScope(req, 'workspace:read');
-      res.json({ taxonomies: await listTaxonomies(tenantId, projectOf(req)) });
+      const { tenantId, subjects } = await requireEntitiesScope(req, 'workspace:read');
+      res.json({ taxonomies: await filterReadableNamespaces(tenantId, await listTaxonomies(tenantId, projectOf(req)), subjects) });
     } catch (err) { next(err); }
   });
 
@@ -429,7 +493,7 @@ export function registerEntitiesRoutes({ app }: RouteDeps): void {
       const body = (req.body ?? {}) as { name?: unknown; displayName?: unknown; projectId?: unknown };
       const rec = await createTaxonomy({
         tenantId,
-        projectId: optionalString(body.projectId),
+        projectId: projectOf(req),
         name: requireString(body.name, 'name'),
         ...(optionalString(body.displayName) !== undefined ? { displayName: optionalString(body.displayName) } : {}),
       });
@@ -459,7 +523,7 @@ export function registerEntitiesRoutes({ app }: RouteDeps): void {
       const body = (req.body ?? {}) as { slug?: unknown; label?: unknown; parentId?: unknown; projectId?: unknown };
       const rec = await createTerm({
         tenantId,
-        projectId: optionalString(body.projectId),
+        projectId: projectOf(req),
         taxonomyName: req.params.name,
         slug: requireString(body.slug, 'slug'),
         ...(optionalString(body.label) !== undefined ? { label: optionalString(body.label) } : {}),
@@ -524,8 +588,8 @@ export function registerEntitiesRoutes({ app }: RouteDeps): void {
   // ---- Relationships (ADR 0386 Phase 2; type-admin tier) ----
   app.get(`${BASE}/relationships`, async (req, res, next) => {
     try {
-      const { tenantId } = await requireEntitiesScope(req, 'workspace:read');
-      res.json({ relationships: await listRelationships(tenantId, projectOf(req)) });
+      const { tenantId, subjects } = await requireEntitiesScope(req, 'workspace:read');
+      res.json({ relationships: await filterReadableNamespaces(tenantId, await listRelationships(tenantId, projectOf(req)), subjects) });
     } catch (err) { next(err); }
   });
 
@@ -537,7 +601,7 @@ export function registerEntitiesRoutes({ app }: RouteDeps): void {
       };
       const rec = await createRelationship({
         tenantId,
-        projectId: optionalString(body.projectId),
+        projectId: projectOf(req),
         fromTypeName: requireString(body.fromTypeName, 'fromTypeName'),
         toTypeName: requireString(body.toTypeName, 'toTypeName'),
         ...(optionalString(body.cardinality) !== undefined ? { cardinality: optionalString(body.cardinality) } : {}),
@@ -570,7 +634,7 @@ export function registerEntitiesRoutes({ app }: RouteDeps): void {
   // tenant probe — indistinguishable, no existence leak. Responses are the
   // `toPublicEntity` projection ONLY (no actor subjects, no storage internals),
   // and draft entries are excluded before pagination.
-  const PUBLIC_BASE = '/v1/host/openwop-app/public-entities';
+  const PUBLIC_BASE = '/host/openwop-app/public-entities';
   const publicNotFound = (): OpenwopError => new OpenwopError('not_found', 'Not found.', 404, {});
 
   /** Locale from the request (route-only): explicit `?locale=` wins, else
@@ -611,7 +675,7 @@ export function registerEntitiesRoutes({ app }: RouteDeps): void {
         ...(optionalString(req.query.cursor) !== undefined ? { cursor: optionalString(req.query.cursor) } : {}),
         ...(loc ? { locale: loc } : {}),
       });
-      if (loc) { res.set('Content-Language', loc.negotiated); res.set('Vary', 'Accept-Language'); }
+      if (loc) { res.set('Content-Language', loc.negotiated); res.vary('Accept-Language'); }
       res.json(result);
     } catch (err) { next(err); }
   });
@@ -628,7 +692,7 @@ export function registerEntitiesRoutes({ app }: RouteDeps): void {
         ...(loc ? { locale: loc } : {}),
       });
       if (!entity) throw publicNotFound();
-      if (loc) { res.set('Content-Language', loc.negotiated); res.set('Vary', 'Accept-Language'); }
+      if (loc) { res.set('Content-Language', loc.negotiated); res.vary('Accept-Language'); }
       res.json(entity);
     } catch (err) { next(err); }
   });

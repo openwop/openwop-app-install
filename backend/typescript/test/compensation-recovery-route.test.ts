@@ -20,6 +20,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
+import { bareRunId } from './support/bareRunId.js';
 
 let BASE: string;
 let server: http.Server;
@@ -85,7 +86,7 @@ let n = 0;
  * which is the thing these tests are about.
  */
 async function signup(c: Client, tenantId: string, shared: boolean, email: string): Promise<string> {
-  const r = await c.post('/v1/host/openwop-app/test/login', {
+  const r = await c.post('/host/openwop-app/test/login', {
     email, tenantId, ...(shared ? { sharedWorkspace: true } : {}),
   });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
@@ -133,7 +134,7 @@ async function orgWith(roles: readonly string[]): Promise<{
   await signup(founder, tenantId, false, `cmp-f-${Date.now()}-${n++}@acme.test`);
 
   // The workspace-root org the seam founded. NOT a new one — see (2) above.
-  const orgs = await founder.get('/v1/host/openwop-app/orgs');
+  const orgs = await founder.get('/host/openwop-app/orgs');
   expect(orgs.status, JSON.stringify(orgs.body)).toBe(200);
   const wsOrgId = (orgs.body.orgs as Array<{ orgId: string }>)
     .find((o) => o.orgId === tenantId)?.orgId;
@@ -145,7 +146,7 @@ async function orgWith(roles: readonly string[]): Promise<{
     const email = `cmp-${role}-${Date.now()}-${n++}@acme.test`;
     const uid = await signup(c, tenantId, true, email);
     const add = await founder.post(
-      `/v1/host/openwop-app/orgs/${encodeURIComponent(wsOrgId!)}/members`,
+      `/host/openwop-app/orgs/${encodeURIComponent(wsOrgId!)}/members`,
       { displayName: role, subject: uid, roles: [role] },
     );
     expect(add.status, JSON.stringify(add.body)).toBe(201);
@@ -157,19 +158,19 @@ async function orgWith(roles: readonly string[]): Promise<{
   // A real run in this tenant, so the routes reach their authorization checks
   // rather than short-circuiting on a missing run.
   const workflowId = `cmp.route.${n++}`;
-  await founder.post('/v1/host/openwop-app/workflows', {
+  await founder.post('/host/openwop-app/workflows', {
     workflowId,
     nodes: [{ nodeId: 'noop', typeId: 'core.echo', config: {} }],
     edges: [],
   });
-  const create = await founder.post('/v1/runs', { workflowId });
+  const create = await founder.post('/runs', { workflowId });
   expect(create.status, JSON.stringify(create.body)).toBe(201);
 
   return { founder, members, runId: create.body.runId as string, tenantId };
 }
 
 const readPath = (runId: string) =>
-  `/v1/host/openwop-app/operations/runs/${encodeURIComponent(runId)}/compensation`;
+  `/host/openwop-app/operations/runs/${encodeURIComponent(bareRunId(runId))}/compensation`;
 const actionPath = (runId: string) => `${readPath(runId)}/actions`;
 
 describe('ADR 0554 P3 — the scope ladder AT THE WIRE', () => {
@@ -342,7 +343,7 @@ describe('ADR 0554 P3 — the read model', () => {
     const { founder, runId } = await orgWith([]);
     const r = await founder.get(readPath(runId));
     expect(r.status, JSON.stringify(r.body)).toBe(200);
-    expect(r.body.runId).toBe(runId);
+    expect(r.body.runId).toBe(bareRunId(runId));
     expect(r.body.obligations).toEqual([]);
     // `none` is a real answer, not an absence — and the panel needs it to tell
     // "owed nothing" from "the read failed".

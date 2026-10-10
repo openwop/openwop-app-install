@@ -61,12 +61,12 @@ function withHost(method: string, path: string, host: string): Promise<{ status:
 
 async function marketer(): Promise<{ user: ReturnType<typeof client>; orgId: string; tenantId: string }> {
   const user = client();
-  const login = await user.post('/v1/host/openwop-app/test/login', { email: `cd-${Date.now()}-${n++}@acme.test` });
-  const org = await user.post('/v1/host/openwop-app/orgs', { name: 'Domain Co' });
+  const login = await user.post('/host/openwop-app/test/login', { email: `cd-${Date.now()}-${n++}@acme.test` });
+  const org = await user.post('/host/openwop-app/orgs', { name: 'Domain Co' });
   return { user, orgId: org.body.orgId, tenantId: login.body.user?.tenantId ?? '' };
 }
 
-const mgmt = (orgId: string, sfx = ''): string => `/v1/host/openwop-app/custom-domains/orgs/${encodeURIComponent(orgId)}/domains${sfx}`;
+const mgmt = (orgId: string, sfx = ''): string => `/host/openwop-app/custom-domains/orgs/${encodeURIComponent(orgId)}/domains${sfx}`;
 
 describe('ADR 0295 — lifecycle + uniqueness (service, injected resolver)', () => {
   it('add → pending; TXT match → live; clean negative → failed; resolver noise keeps live', async () => {
@@ -152,8 +152,8 @@ describe('ADR 0295 — the host guard over HTTP', () => {
     await __resetCustomDomains();
     const { user, orgId, tenantId } = await marketer();
     // a published page so the happy path returns real content
-    const page = await user.post(`/v1/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages`, { title: 'Domain Home' });
-    await user.post(`/v1/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages/${page.body.pageId}/publish`);
+    const page = await user.post(`/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages`, { title: 'Domain Home' });
+    await user.post(`/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages/${page.body.pageId}/publish`);
 
     const added = await addDomain({ tenantId, orgId, createdBy: 'u', hostname: 'site.acme.test' });
     await verifyDomain(tenantId, orgId, 'site.acme.test', async () => [[added.verificationToken]]);
@@ -161,17 +161,17 @@ describe('ADR 0295 — the host guard over HTTP', () => {
     expect(await resolveCustomHost('site.acme.test')).toEqual({ tenantId, orgId });
 
     // ✓ own-org public page read serves
-    const ok = await withHost('GET', `/v1/host/openwop-app/public/${encodeURIComponent(orgId)}/pages/${encodeURIComponent(page.body.slug)}`, 'site.acme.test');
+    const ok = await withHost('GET', `/host/openwop-app/public/${encodeURIComponent(orgId)}/pages/${encodeURIComponent(page.body.slug)}`, 'site.acme.test');
     expect(ok.status).toBe(200);
     expect(ok.body).toContain('Domain Home');
 
     // ✗ another org's public path — uniform 404
-    const cross = await withHost('GET', `/v1/host/openwop-app/public/other-org/pages/${encodeURIComponent(page.body.slug)}`, 'site.acme.test');
+    const cross = await withHost('GET', `/host/openwop-app/public/other-org/pages/${encodeURIComponent(page.body.slug)}`, 'site.acme.test');
     expect(cross.status).toBe(404);
 
     // ✗ the authed app + protocol surface never serve on a customer domain
-    expect((await withHost('GET', '/v1/host/openwop-app/orgs', 'site.acme.test')).status).toBe(404);
-    expect((await withHost('GET', '/v1/runs', 'site.acme.test')).status).toBe(404);
+    expect((await withHost('GET', '/host/openwop-app/orgs', 'site.acme.test')).status).toBe(404);
+    expect((await withHost('GET', '/runs', 'site.acme.test')).status).toBe(404);
     expect((await withHost('GET', '/.well-known/openwop', 'site.acme.test')).status).toBe(404);
 
     // ✓ the platform origin passes through untouched (401/200-class, not the guard's 404)
@@ -199,12 +199,12 @@ describe('ADR 0295 P3 — per-domain rate limit', () => {
     try {
       await __resetCustomDomains();
       const { user, orgId, tenantId } = await marketer();
-      const page = await user.post(`/v1/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages`, { title: 'RL Home' });
-      await user.post(`/v1/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages/${page.body.pageId}/publish`);
+      const page = await user.post(`/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages`, { title: 'RL Home' });
+      await user.post(`/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages/${page.body.pageId}/publish`);
       const added = await addDomain({ tenantId, orgId, createdBy: 'u', hostname: 'busy.acme.test' });
       await verifyDomain(tenantId, orgId, 'busy.acme.test', async () => [[added.verificationToken]]);
       invalidateHostCache();
-      const path = `/v1/host/openwop-app/public/${encodeURIComponent(orgId)}/pages/${encodeURIComponent(page.body.slug)}`;
+      const path = `/host/openwop-app/public/${encodeURIComponent(orgId)}/pages/${encodeURIComponent(page.body.slug)}`;
       const statuses: number[] = [];
       for (let i = 0; i < 5; i++) statuses.push((await withHost('GET', path, 'busy.acme.test')).status);
       expect(statuses.filter((s) => s === 429).length).toBeGreaterThan(0);

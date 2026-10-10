@@ -10,6 +10,13 @@
  * can't: the anonymous submitter's values are re-fetched under authz and land
  * as an idea on the OWNER-configured list, and a form with NO intake binding
  * cleanly no-ops (the conditional edge).
+ *
+ * Sabotage-witnessed (grade-tests w8, probes w8g1-ice-*): not emitting the host event,
+ * dropping the intake binding / the `flagged` key from the surface, blanking the node's
+ * `sourceSubmissionId`, removing the `all_complete` rule or the port qualification on
+ * `file → done`, and re-shaping the `refuse` branch each turn a case red.
+ * Ceilings: the run-settle polls (`waitForRun`, the WF-FORM-2 loop) have no hook to
+ * await, and an end-to-end chain run needs `createApp`.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -23,6 +30,8 @@ import { registerWorkflow } from '../src/host/workflowsRegistry.js';
 import { createHostEventBinding } from '../src/host/hostEventDispatcher.js';
 import type { Storage } from '../src/storage/storage.js';
 import type { RunRecord } from '../src/types.js';
+import { bareRunId } from './support/bareRunId.js';
+import { toWireRunId } from '../src/host/v2Ids.js';
 
 let BASE: string;
 let server: http.Server;
@@ -43,14 +52,22 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+/** The response fields these cases read. */
+type Body = {
+  user?: { userId: string }; orgId?: string; id?: string; formId?: string; submissionId?: string; runId?: string;
+  ideas?: Array<{ card: { id: string; title: string } }>;
+  intake?: { sourceChannel?: string; sourceSubmissionId?: string };
+  submissions?: Array<{ submissionId: string; flagged?: string }>;
+  events?: Array<Record<string, unknown>>;
+};
+interface Res { status: number; body: Body }
 interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; patch: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res> }
 function client(): Client {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const out = res.status === 204 ? {} : ((await res.json().catch(() => ({}))) as Body);
     return { status: res.status, body: out };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b), del: (p) => call('DELETE', p) };
@@ -60,15 +77,23 @@ let n = 0;
 async function ownerOrg(): Promise<{ owner: Client; orgId: string; tenantId: string }> {
   const tenantId = `org:formschain-${Date.now()}-${n++}`;
   const owner = client();
-  expect((await owner.post('/v1/host/openwop-app/test/login', { email: `fc-${Date.now()}-${n++}@acme.test`, tenantId })).status).toBe(201);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const login = await owner.post('/host/openwop-app/test/login', { email: `fc-${Date.now()}-${n++}@acme.test`, tenantId });
+  expect(login.status).toBe(201);
+  bindingAuthor.set(tenantId, login.body.user!.userId);
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
-  return { owner, orgId: org.body.orgId, tenantId };
+  return { owner, orgId: org.body.orgId!, tenantId };
 }
 
-const PM = '/v1/host/openwop-app/priority-matrix';
-const forg = (orgId: string, s = ''): string => `/v1/host/openwop-app/forms/orgs/${encodeURIComponent(orgId)}${s}`;
-const pub = (formId: string): string => `/v1/host/openwop-app/public-forms/${encodeURIComponent(formId)}/submit`;
+/** ADR 0832 D3 — a trigger fire is bounded by the orgs of whoever armed it, so
+ *  the binding is authored by the org's owner, as `POST …/host-events/bindings`
+ *  stamps it on the cookie lane (`createdBy: principalOf(req)`). It used to be
+ *  the literal `'test'`, a subject in no org, which the seam floor now refuses. */
+const bindingAuthor = new Map<string, string>();
+
+const PM = '/host/openwop-app/priority-matrix';
+const forg = (orgId: string, s = ''): string => `/host/openwop-app/forms/orgs/${encodeURIComponent(orgId)}${s}`;
+const pub = (formId: string): string => `/host/openwop-app/public-forms/${encodeURIComponent(formId)}/submit`;
 
 /** Register + bind the bridge chain to this tenant. */
 async function bindChain(tenantId: string): Promise<string> {
@@ -76,7 +101,7 @@ async function bindChain(tenantId: string): Promise<string> {
   expect(found, 'forms-intake.route-submission must load at boot').toBeTruthy();
   const expanded = expandChain(found!.chain, { params: {} });
   registerWorkflow(expanded);
-  const binding = await createHostEventBinding({ tenantId, eventType: 'host.forms.submission.created', workflowId: expanded.workflowId, createdBy: 'test' });
+  const binding = await createHostEventBinding({ tenantId, eventType: 'host.forms.submission.created', workflowId: expanded.workflowId, createdBy: bindingAuthor.get(tenantId)! });
   return binding.bindingId;
 }
 
@@ -95,8 +120,10 @@ async function waitForRun(tenantId: string, bindingId: string): Promise<RunRecor
  *  output field, and asserting against the whole record would pass on any
  *  incidental mention of the id; this reads the one map the port-qualified edge
  *  is supposed to fill. */
-async function terminalOutput(owner: Client, runId: string): Promise<unknown> {
-  const events = (await owner.get(`/v1/runs/${runId}/events/poll`)).body as { events?: Array<Record<string, unknown>> };
+async function terminalOutput(owner: Client, run: RunRecord): Promise<unknown> {
+  // The stored run id is bare; the v2 protocol path takes the tenant-BOUND id.
+  const wireId = encodeURIComponent(toWireRunId(run.runId, run.tenantId));
+  const events = (await owner.get(`/runs/${wireId}/events/poll`)).body;
   const done = (events.events ?? []).filter((e) => String(e.type ?? '').includes('node')
     && String(JSON.stringify(e)).includes('_done'));
   return done.map((e) => (e.payload as { outputs?: unknown } | undefined)?.outputs ?? (e as { outputs?: unknown }).outputs);
@@ -105,7 +132,7 @@ async function terminalOutput(owner: Client, runId: string): Promise<unknown> {
 describe('forms-intake.route-submission — end-to-end (ADR 0246)', () => {
   it('a bound form files a public submission as an idea on the owner-configured list', async () => {
     const { owner, orgId, tenantId } = await ownerOrg();
-    const listId = (await owner.post(`${PM}/lists`, { orgId, name: 'Feature requests' })).body.id as string;
+    const listId = (await owner.post(`${PM}/lists`, { orgId, name: 'Feature requests' })).body.id!;
     expect(listId).toBeTruthy();
 
     // Owner creates + publishes a form BOUND to that list (title ← `summary`).
@@ -115,7 +142,7 @@ describe('forms-intake.route-submission — end-to-end (ADR 0246)', () => {
       intakeBinding: { listId, titleField: 'summary', notesField: 'detail' },
     });
     expect(form.status, JSON.stringify(form.body)).toBe(201);
-    const formId = form.body.formId as string;
+    const formId = form.body.formId!;
     expect((await owner.patch(forg(orgId, `/forms/${formId}/status`), { status: 'published' })).status).toBe(200);
 
     const bindingId = await bindChain(tenantId);
@@ -123,30 +150,30 @@ describe('forms-intake.route-submission — end-to-end (ADR 0246)', () => {
     // The anonymous public submit — the ONLY thing the submitter controls.
     const sub = await client().post(pub(formId), { values: { summary: 'Dark mode please', detail: 'Easier on the eyes at night.' } });
     expect(sub.status, JSON.stringify(sub.body)).toBe(201);
-    const submissionId = sub.body.submissionId as string;
+    const submissionId = sub.body.submissionId!;
 
     const run = await waitForRun(tenantId, bindingId);
     expect(run?.status, `run did not complete: ${JSON.stringify(run)}`).toBe('completed');
 
     // The idea landed on the OWNER-configured list, titled from the bound field.
-    const ideas = (await owner.get(`${PM}/lists/${listId}/ideas`)).body.ideas as Array<{ card: { id: string; title: string } }>;
+    const ideas = (await owner.get(`${PM}/lists/${listId}/ideas`)).body.ideas!;
     const filed = ideas.find((r) => r.card.title === 'Dark mode please');
     expect(filed, JSON.stringify(ideas)).toBeTruthy();
 
     // ADR 0247 OQ-5 — the idea's intake overlay carries the form provenance.
-    const intake = (await owner.get(`${PM}/lists/${listId}/ideas/${filed!.card.id}/intake`)).body.intake as { sourceChannel?: string; sourceSubmissionId?: string };
+    const intake = (await owner.get(`${PM}/lists/${listId}/ideas/${filed!.card.id}/intake`)).body.intake;
     expect(intake?.sourceChannel).toBe('form');
     expect(intake?.sourceSubmissionId).toBe(submissionId);
   });
 
   it('a deleted bound list still CAPTURES the submission AND completes the run cleanly (ADR 0247 OQ-2, RFC 0125)', async () => {
     const { owner, orgId, tenantId } = await ownerOrg();
-    const listId = (await owner.post(`${PM}/lists`, { orgId, name: 'Doomed list' })).body.id as string;
+    const listId = (await owner.post(`${PM}/lists`, { orgId, name: 'Doomed list' })).body.id!;
     const form = await owner.post(forg(orgId, '/forms'), {
       title: 'Request', fields: [{ key: 'summary', label: 'Summary', type: 'text', required: true }],
       intakeBinding: { listId, titleField: 'summary' },
     });
-    const formId = form.body.formId as string;
+    const formId = form.body.formId!;
     expect((await owner.patch(forg(orgId, `/forms/${formId}/status`), { status: 'published' })).status).toBe(200);
     const bindingId = await bindChain(tenantId);
 
@@ -157,7 +184,7 @@ describe('forms-intake.route-submission — end-to-end (ADR 0246)', () => {
     // emit) — the lead is never lost, even though routing can't file it.
     const sub = await client().post(pub(formId), { values: { summary: 'orphaned' } });
     expect(sub.status).toBe(201);
-    const subs = (await owner.get(forg(orgId, `/forms/${formId}/submissions`))).body.submissions as unknown[];
+    const subs = (await owner.get(forg(orgId, `/forms/${formId}/submissions`))).body.submissions!;
     expect(subs.length).toBe(1);
 
     // submit-idea 404s on the deleted list — but the chain's `done` terminal is
@@ -172,11 +199,11 @@ describe('forms-intake.route-submission — end-to-end (ADR 0246)', () => {
 
   it('a form with NO intake binding cleanly no-ops (run completes, files nothing)', async () => {
     const { owner, orgId, tenantId } = await ownerOrg();
-    const listId = (await owner.post(`${PM}/lists`, { orgId, name: 'Unbound list' })).body.id as string;
+    const listId = (await owner.post(`${PM}/lists`, { orgId, name: 'Unbound list' })).body.id!;
     const form = await owner.post(forg(orgId, '/forms'), {
       title: 'Contact us', fields: [{ key: 'msg', label: 'Message', type: 'textarea', required: true }],
     });
-    const formId = form.body.formId as string;
+    const formId = form.body.formId!;
     expect((await owner.patch(forg(orgId, `/forms/${formId}/status`), { status: 'published' })).status).toBe(200);
     const bindingId = await bindChain(tenantId);
 
@@ -184,20 +211,20 @@ describe('forms-intake.route-submission — end-to-end (ADR 0246)', () => {
     const run = await waitForRun(tenantId, bindingId);
     expect(run?.status, `run did not complete: ${JSON.stringify(run)}`).toBe('completed');
     // No idea filed anywhere on the (unbound) list.
-    const ideas = (await owner.get(`${PM}/lists/${listId}/ideas`)).body.ideas as unknown[];
+    const ideas = (await owner.get(`${PM}/lists/${listId}/ideas`)).body.ideas!;
     expect(ideas.length).toBe(0);
   });
 
   it('a blank OPTIONAL title field falls back to the form title — run completes, not fails (grade-code BE#2)', async () => {
     const { owner, orgId, tenantId } = await ownerOrg();
-    const listId = (await owner.post(`${PM}/lists`, { orgId, name: 'Feedback' })).body.id as string;
+    const listId = (await owner.post(`${PM}/lists`, { orgId, name: 'Feedback' })).body.id!;
     // titleField bound to an OPTIONAL field; the submitter leaves it blank.
     const form = await owner.post(forg(orgId, '/forms'), {
       title: 'Beta feedback',
       fields: [{ key: 'headline', label: 'Headline', type: 'text', required: false }, { key: 'body', label: 'Body', type: 'textarea', required: true }],
       intakeBinding: { listId, titleField: 'headline', notesField: 'body' },
     });
-    const formId = form.body.formId as string;
+    const formId = form.body.formId!;
     expect((await owner.patch(forg(orgId, `/forms/${formId}/status`), { status: 'published' })).status).toBe(200);
     const bindingId = await bindChain(tenantId);
 
@@ -205,7 +232,7 @@ describe('forms-intake.route-submission — end-to-end (ADR 0246)', () => {
     const run = await waitForRun(tenantId, bindingId);
     // Before BE#2 this failed (submit-idea 400 on empty title). Now it completes.
     expect(run?.status, `run did not complete: ${JSON.stringify(run)}`).toBe('completed');
-    const ideas = (await owner.get(`${PM}/lists/${listId}/ideas`)).body.ideas as Array<{ card: { title: string } }>;
+    const ideas = (await owner.get(`${PM}/lists/${listId}/ideas`)).body.ideas!;
     expect(ideas.some((r) => r.card.title === 'Beta feedback'), JSON.stringify(ideas)).toBe(true);
   });
 
@@ -224,20 +251,19 @@ describe('forms-intake.route-submission — end-to-end (ADR 0246)', () => {
    */
   it('WF-FORM-1: a filed run carries the card id in its output, and a DEGRADED run does not', async () => {
     const { owner, orgId, tenantId } = await ownerOrg();
-    const listId = (await owner.post(`${PM}/lists`, { orgId, name: 'Reachable output' })).body.id as string;
+    const listId = (await owner.post(`${PM}/lists`, { orgId, name: 'Reachable output' })).body.id!;
     const form = await owner.post(forg(orgId, '/forms'), {
       title: 'Ideas', fields: [{ key: 'summary', label: 'Summary', type: 'text', required: true }],
       intakeBinding: { listId, titleField: 'summary' },
     });
-    const formId = form.body.formId as string;
+    const formId = form.body.formId!;
     expect((await owner.patch(forg(orgId, `/forms/${formId}/status`), { status: 'published' })).status).toBe(200);
     const bindingId = await bindChain(tenantId);
 
     expect((await client().post(pub(formId), { values: { summary: 'Reachable at last' } })).status).toBe(201);
     const run = await waitForRun(tenantId, bindingId);
     expect(run?.status).toBe('completed');
-    const runId = run!.runId;
-    const filed = (await owner.get(`${PM}/lists/${listId}/ideas`)).body.ideas as Array<{ card: { id: string } }>;
+    const filed = (await owner.get(`${PM}/lists/${listId}/ideas`)).body.ideas!;
     expect(filed).toHaveLength(1);
     const cardId = filed[0]!.card.id;
     // The whole point: the run's OUTPUT names the card it filed. Before this
@@ -246,17 +272,17 @@ describe('forms-intake.route-submission — end-to-end (ADR 0246)', () => {
     // Read the TERMINAL's own outputs off the run event log: `done` is the
     // `outputRole:'primary'` node, so what it emits IS the run's aggregate
     // output and its `role:'deliverable'` artifact.
-    const doneOutput = await terminalOutput(owner, runId);
+    const doneOutput = await terminalOutput(owner, run!);
     expect(JSON.stringify(doneOutput), `done emitted ${JSON.stringify(doneOutput)}`).toContain(cardId);
 
     // …and the degrade path is now DISTINGUISHABLE: same chain, deleted list.
     const gone = await ownerOrg();
-    const goneList = (await gone.owner.post(`${PM}/lists`, { orgId: gone.orgId, name: 'Doomed' })).body.id as string;
+    const goneList = (await gone.owner.post(`${PM}/lists`, { orgId: gone.orgId, name: 'Doomed' })).body.id!;
     const goneForm = await gone.owner.post(forg(gone.orgId, '/forms'), {
       title: 'Ideas', fields: [{ key: 'summary', label: 'Summary', type: 'text', required: true }],
       intakeBinding: { listId: goneList, titleField: 'summary' },
     });
-    const goneFormId = goneForm.body.formId as string;
+    const goneFormId = goneForm.body.formId!;
     expect((await gone.owner.patch(forg(gone.orgId, `/forms/${goneFormId}/status`), { status: 'published' })).status).toBe(200);
     const goneBinding = await bindChain(gone.tenantId);
     expect((await gone.owner.del(`${PM}/lists/${encodeURIComponent(goneList)}`)).status).toBe(204);
@@ -273,7 +299,7 @@ describe('forms-intake.route-submission — end-to-end (ADR 0246)', () => {
     // degrade path that bag is absent altogether (the array is `[undefined]`) — a
     // stronger fact than `{value: undefined}`, and discriminating against the filed
     // run above, whose bag carries the card id at :250.
-    const outs = (await terminalOutput(gone.owner, degraded!.runId)) as Array<{ value?: unknown } | undefined>;
+    const outs = (await terminalOutput(gone.owner, degraded!)) as Array<{ value?: unknown } | undefined>;
     expect(outs.length, 'the terminal node must have completed — an empty read is not a witness').toBeGreaterThan(0);
     expect(outs[0]?.value, 'degrade: done must emit NO value — not another tenant\'s id, not a card').toBeUndefined();
   });
@@ -295,12 +321,12 @@ describe('forms-intake.route-submission — end-to-end (ADR 0246)', () => {
     const expanded = expandChain(found!.chain, { params: {} });
     registerWorkflow(expanded);
     // Exactly what the `/` picker does: create a run with no trigger payload.
-    const created = await owner.post('/v1/runs', { workflowId: expanded.workflowId });
+    const created = await owner.post('/runs', { workflowId: expanded.workflowId });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
-    const runId = created.body.runId as string;
+    const runId = created.body.runId!;
     let run: RunRecord | undefined;
     for (let i = 0; i < 120; i++) {
-      run = (await storage.listRuns({ tenantId, limit: 50 })).find((r) => r.runId === runId);
+      run = (await storage.listRuns({ tenantId, limit: 50 })).find((r) => r.runId === bareRunId(runId));
       if (run && run.status !== 'pending' && run.status !== 'running') break;
       await new Promise((res) => setTimeout(res, 25));
     }
@@ -322,10 +348,8 @@ describe('forms-intake.route-submission — end-to-end (ADR 0246)', () => {
    * pack, so the routing is what is pinned.
    */
   it('WF-FORM-5: no two branch conditions off `get` can be satisfied by one output map', () => {
-    const chain = getChain('forms-intake.route-submission')!.chain as unknown as {
-      dag: { edges: Array<{ from: string; to: string; condition?: { type: string; left?: string; right?: string } }> };
-    };
-    const branches = chain.dag.edges.filter((e) => e.from === 'get' && e.condition);
+    const chain = getChain('forms-intake.route-submission')!.chain;
+    const branches = (chain.dag.edges ?? []).filter((e) => e.from === 'get' && e.condition);
     expect(branches.map((b) => b.to).sort()).toEqual(['file', 'refuse', 'skip']);
 
     // Every branch switches on the SAME single field with `equals`, so at most
@@ -356,25 +380,25 @@ describe('forms-intake.route-submission — end-to-end (ADR 0246)', () => {
    */
   it('FORM-QUAR-1: `get-submission` answers willFile:no / route:skip for a held submission', async () => {
     const { owner, orgId, tenantId } = await ownerOrg();
-    const listId = (await owner.post(`${PM}/lists`, { orgId, name: 'Should stay empty' })).body.id as string;
+    const listId = (await owner.post(`${PM}/lists`, { orgId, name: 'Should stay empty' })).body.id!;
     const form = await owner.post(forg(orgId, '/forms'), {
       title: 'Ideas', fields: [{ key: 'summary', label: 'Summary', type: 'text', required: true }],
       intakeBinding: { listId, titleField: 'summary' },
     });
-    const formId = form.body.formId as string;
+    const formId = form.body.formId!;
     expect((await owner.patch(forg(orgId, `/forms/${formId}/status`), { status: 'published' })).status).toBe(200);
 
     // A honeypot trip on a form that IS bound — the case where the only thing
     // between a bot and the owner's intake board was the un-fired event.
     expect((await client().post(pub(formId), { values: { summary: 'buy pills', _hp_ref: 'x' } })).status).toBe(201);
-    const held = (await owner.get(forg(orgId, `/forms/${formId}/submissions`))).body.submissions[0] as { submissionId: string; flagged?: string };
+    const held = (await owner.get(forg(orgId, `/forms/${formId}/submissions`))).body.submissions![0]!;
     expect(held.flagged).toBe('honeypot');
 
     const { buildFormsSurface } = await import('../src/features/forms/surface.js');
     // Through the pack's exported node MAP — the same lookup the resolver does,
     // and the shape `test/feature-packs.d.ts` declares.
     const node = (await import('../../../packs/feature.forms.nodes/index.mjs')).nodes['feature.forms.nodes.get-submission']!;
-    const surface = buildFormsSurface({ tenantId } as never);
+    const surface = buildFormsSurface({ tenantId });
     const out = await node({
       features: { forms: surface },
       inputs: { orgId, formId, submissionId: held.submissionId },
@@ -389,22 +413,22 @@ describe('forms-intake.route-submission — end-to-end (ADR 0246)', () => {
 
   it('FORM-QUAR-1: a CLEAN submission on the same bound form still files (the guard is not a blanket)', async () => {
     const { owner, orgId, tenantId } = await ownerOrg();
-    const listId = (await owner.post(`${PM}/lists`, { orgId, name: 'Real intake' })).body.id as string;
+    const listId = (await owner.post(`${PM}/lists`, { orgId, name: 'Real intake' })).body.id!;
     const form = await owner.post(forg(orgId, '/forms'), {
       title: 'Ideas', fields: [{ key: 'summary', label: 'Summary', type: 'text', required: true }],
       intakeBinding: { listId, titleField: 'summary' },
     });
-    const formId = form.body.formId as string;
+    const formId = form.body.formId!;
     expect((await owner.patch(forg(orgId, `/forms/${formId}/status`), { status: 'published' })).status).toBe(200);
     expect((await client().post(pub(formId), { values: { summary: 'a real request' } })).status).toBe(201);
-    const row = (await owner.get(forg(orgId, `/forms/${formId}/submissions`))).body.submissions[0] as { submissionId: string };
+    const row = (await owner.get(forg(orgId, `/forms/${formId}/submissions`))).body.submissions![0]!;
 
     const { buildFormsSurface } = await import('../src/features/forms/surface.js');
     // Through the pack's exported node MAP — the same lookup the resolver does,
     // and the shape `test/feature-packs.d.ts` declares.
     const node = (await import('../../../packs/feature.forms.nodes/index.mjs')).nodes['feature.forms.nodes.get-submission']!;
     const out = await node({
-      features: { forms: buildFormsSurface({ tenantId } as never) },
+      features: { forms: buildFormsSurface({ tenantId }) },
       inputs: { orgId, formId, submissionId: row.submissionId },
     });
     expect(out.outputs!.willFile).toBe('yes');

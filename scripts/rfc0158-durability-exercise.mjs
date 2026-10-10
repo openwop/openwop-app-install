@@ -16,7 +16,7 @@
  *
  * WHAT EACH CASE ESTABLISHES, and why they are not the same test:
  *
- *   accept    — kill immediately after `POST /v1/runs` returns 201. This probes
+ *   accept    — kill immediately after `POST /runs` returns 201. This probes
  *               §A durable acceptance: the run row and its dispatch-outbox row
  *               commit together (`routes/runs.ts:480`), so the work is owed
  *               before any executor touches it. Recovery here rides the OUTBOX
@@ -96,7 +96,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function api(path, init = {}) {
   return fetch(`${BASE}${path}`, {
     ...init,
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${API_KEY}`, ...(init.headers ?? {}) },
+    // Major 2 is the only contract (ADR 0812): unversioned paths, the version named.
+    headers: { 'content-type': 'application/json', 'openwop-version': '2', authorization: `Bearer ${API_KEY}`, ...(init.headers ?? {}) },
   });
 }
 
@@ -136,7 +137,7 @@ function kill(instance) {
 }
 
 async function statusOf(runId) {
-  const r = await api(`/v1/runs/${encodeURIComponent(runId)}`);
+  const r = await api(`/runs/${encodeURIComponent(runId)}`);
   if (!r.ok) return null;
   return (await r.json()).status ?? null;
 }
@@ -150,7 +151,8 @@ async function statusOf(runId) {
  * the resuming instance writes a SECOND `run.started` for the same run id.
  */
 async function eventsOf(runId) {
-  const r = await api(`/v1/runs/${encodeURIComponent(runId)}/events/poll?fromSeq=0&limit=1000`);
+  // `afterSequence` is exclusive; -1 reads from the first event (events.md §Poll).
+  const r = await api(`/runs/${encodeURIComponent(runId)}/events/poll?afterSequence=-1&limit=1000`);
   if (!r.ok) return null;
   return (await r.json()).events ?? [];
 }
@@ -174,7 +176,7 @@ async function eventsOrThrow(runId, what) {
   const evs = await eventsOf(runId);
   if (evs === null) {
     throw new Error(
-      `${what}: GET /v1/runs/{id}/events/poll failed. This read establishes the pre-kill sequence `
+      `${what}: GET /runs/{id}/events/poll failed. This read establishes the pre-kill sequence `
       + 'high-water mark; treating it as an empty log would make the resumption matcher select a '
       + 'pre-kill event and report a fabricated (negative) recovery interval.',
     );
@@ -256,11 +258,11 @@ async function main() {
 
   const first = await boot('first');
 
-  const create = await api('/v1/runs', {
+  const create = await api('/runs', {
     method: 'POST',
     body: JSON.stringify({ workflowId: 'conformance-delay', inputs: { delayMs: CASE === 'execution' ? 30_000 : 1_000 } }),
   });
-  if (create.status !== 201) throw new Error(`POST /v1/runs -> ${create.status}: ${(await create.text()).slice(0, 300)}`);
+  if (create.status !== 201) throw new Error(`POST /runs -> ${create.status}: ${(await create.text()).slice(0, 300)}`);
   const runId = (await create.json()).runId;
   console.log(`  accepted run ${runId} (HTTP 201)`);
 

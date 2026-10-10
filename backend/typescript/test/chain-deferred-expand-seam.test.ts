@@ -1,5 +1,5 @@
 /**
- * RFC 0124 (WCP4) — the `/v1/host/sample/chain/deferred-expand` conformance witness
+ * RFC 0124 (WCP4) — the `/host/sample/chain/deferred-expand` conformance witness
  * seam (drives the `workflow-chain-deferred-parameters.test.ts` gated host legs
  * NON-VACUOUSLY). Asserts the seam returns the scenario's exact contract so the
  * published legs can't pass by soft-skipping on a 404.
@@ -16,12 +16,14 @@ import { createApp } from '../src/index.js';
 let server: http.Server;
 let BASE: string;
 const TOKEN = 'dev-token';
-const PATH = '/v1/host/sample/chain/deferred-expand';
+const PATH = '/host/sample/chain/deferred-expand';
 
 async function post(body: unknown): Promise<{ status: number; body: Record<string, unknown> }> {
   const res = await fetch(`${BASE}${PATH}`, {
     method: 'POST',
-    headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+    // ADR 0812 — major 2 named explicitly: the unversioned seam path's header-less
+    // default follows v1 retirement, and v2 vendor-namespaces host-own error codes.
+    headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json', 'OpenWOP-Version': '2' },
     body: JSON.stringify(body),
   });
   let b: Record<string, unknown> = {};
@@ -63,10 +65,10 @@ describe('RFC 0124 deferred-expand witness seam (behavioral, non-vacuous)', () =
     expect(JSON.stringify(body)).not.toContain('conformance-plaintext-'); // provisioned secret value
   });
 
-  it('unknown conformance chainId → 404 chain_not_found', async () => {
+  it('unknown conformance chainId → 404 openwop-app.chain_not_found', async () => {
     const { status, body } = await post({ chainId: 'conformance.nope' });
     expect(status).toBe(404);
-    expect(body.error).toBe('chain_not_found');
+    expect(body.error).toBe('openwop-app.chain_not_found');
   });
 
   // RFC 0136 B1 — inline-chain deferred expansion returns variables[] with format

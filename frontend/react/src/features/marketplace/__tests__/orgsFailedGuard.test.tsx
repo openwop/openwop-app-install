@@ -26,6 +26,14 @@
  * endless skeleton that was actually rendering. `HG-1` closed that: the arm now
  * pins the real zero-workspace state AND the absence of the skeleton, which is
  * the half that makes it a guard rather than a description.
+ *
+ * Sabotage-witnessed (/grade-tests wave 10): the panel head's null-summary guard,
+ * `OrgSelectionState`'s failed / empty branches, the page's `failedBody`, the
+ * `postReview(orgId, …)` argument order and the healthy empty-reviews branch each
+ * red their case. Two guards are DOUBLE and cannot be witnessed alone (honest
+ * ceiling): `listReviews` is gated both by the effect's `if (orgId)` and `load`'s
+ * `if (!org)`, and the submit button's `!orgId` is masked by the wrapper having
+ * already removed the form in every orgless state driven here.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, waitFor, act, fireEvent } from '@testing-library/react';
@@ -46,24 +54,38 @@ const api = vi.hoisted(() => ({
   // `orgId` is a review row keyed on no organization.
   postReview: vi.fn(),
   deleteReview: vi.fn(),
+  // ADR 0661 — the page reads the caller's orders on every load (MKT-UX-5).
+  listMyOrders: vi.fn(),
+}));
+// ADR 0661 — `ui/OrgSelectionState` reads effective access (the "ask an admin"
+// line); unmocked, that is a live fetch from this unit test.
+const ACCESS = vi.hoisted((): EffectiveAccess => ({ roles: ['member'], scopes: ['workspace:read', 'workspace:write'], basis: 'member' }));
+vi.mock('../../../client/useEffectiveAccess.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../client/useEffectiveAccess.js')>()),
+  useEffectiveAccess: () => ACCESS,
+  useEffectiveAccessState: () => ({ access: ACCESS, resolved: true }),
 }));
 vi.mock('../marketplaceClient.js', async (importOriginal) => {
   const orig = await importOriginal<Record<string, unknown>>();
   return { ...orig, ...api };
 });
 
+import type { EffectiveAccess } from '../../../client/accessClient.js';
+import type { Listing, Org } from '../marketplaceClient.js';
 import { MarketplacePage } from '../MarketplacePage.js';
 
 const PACK = 'community.demo.pack';
+const LISTING: Listing = { packName: PACK, version: '1.0.0', title: 'Demo', category: 'node', installed: true, origin: 'registry' };
 
 beforeEach(() => {
   vi.clearAllMocks();
   api.listListings.mockResolvedValue({
-    listings: [{ packName: PACK, version: '1.0.0', title: 'Demo', category: 'node', installed: true }],
+    listings: [LISTING],
     pricingDegraded: false,
   });
   api.fetchDisabledPacks.mockResolvedValue([]);
   api.listReviews.mockResolvedValue({ reviews: [], summary: { packName: PACK, count: 0, average: null } });
+  api.listMyOrders.mockResolvedValue({ purchases: [], sales: [] });
 });
 afterEach(cleanup);
 
@@ -137,11 +159,15 @@ describe('marketplace reviews — failed workspace read is not "no reviews"', ()
     // `postReview('', …)` — an actionable control with no workspace to write to.
     expect(screen.queryByRole('button', { name: 'Submit review' })).toBeNull();
     // ORG-HON-2 — the regression pin for the bug this page already had. The
-    // control's ABSENCE is the current fix, but the fix that matters is that no
-    // review is ever posted against an empty organization id, and that survives a
-    // refactor which brings the control back under a different label. There is
-    // nothing to click, so the whole rating form is checked for absence and the
-    // client function is asserted un-called.
+    // control's ABSENCE is the current fix, and it is what this asserts: the whole
+    // rating form is checked for absence and the client function un-called.
+    // CORRECTED (/grade-tests wave 10): this used to claim the pin "survives a
+    // refactor which brings the control back under a different label". It does
+    // not — `attemptReviewWrite` finds the control by the label 'Submit review',
+    // and `ReviewsPanel.submit()` has no `if (!orgId) return` of its own, so a
+    // relabelled control is never clicked and nothing in the handler would stop
+    // `postReview('', …)`. BLOCKED-ON-PRODUCT: a falsifiable version needs a
+    // handler-level org guard in `submit()` (filed to grade-code).
     expect(screen.queryByRole('radiogroup', { name: 'Your rating' })).toBeNull();
     expect(screen.queryAllByRole('radio')).toHaveLength(0);
     await attemptReviewWrite();
@@ -166,7 +192,8 @@ describe('marketplace reviews — failed workspace read is not "no reviews"', ()
     expect(screen.queryByRole('button', { name: 'Submit review' })).toBeNull();
     expect(screen.queryByRole('radiogroup', { name: 'Your rating' })).toBeNull();
     expect(screen.queryAllByRole('radio')).toHaveLength(0);
-    // The handler guard survives a refactor that brings the control back.
+    // Absence of the write, not a handler guard: there is none (BLOCKED-ON-PRODUCT,
+    // see ORG-HON-2 above) — this holds because the form is gone.
     await attemptReviewWrite();
     expect(api.postReview).not.toHaveBeenCalled();
   });
@@ -182,14 +209,20 @@ describe('marketplace reviews — failed workspace read is not "no reviews"', ()
     // Without this, the two `postReview` assertions above could pass because the
     // rating form is broken for every user, which is a different bug wearing the
     // same green.
-    // DELIBERATELY SLOW: the org read resolves a tick late, so the gap between "the
-    // Submit button exists" and "an org is selected" is always open rather than open
-    // only on a loaded machine. That turns an order-dependent flake into a deterministic
-    // guard — MEASURED: with the old button-only wait this delay fails the leg every
-    // run; with the wait below it passes every run.
-    api.listOrgs.mockImplementation(() => new Promise((r) => setTimeout(() => r([{ orgId: 'o1', name: 'Acme' }]), 40)));
+    // DELIBERATELY HELD OPEN: the org read resolves only after the Submit button has
+    // rendered, so the gap between "the Submit button exists" and "an org is selected"
+    // is always open rather than open only on a loaded machine. That turns an
+    // order-dependent flake into a deterministic guard — MEASURED: with the old
+    // button-only wait the delayed read fails the leg every run; with the wait below
+    // it passes every run.
+    // Held open by a manual deferred (was a 40 ms timer): the Submit button renders
+    // while the org read is IN FLIGHT, and the read resolves only once it has.
+    let release!: (orgs: Org[]) => void;
+    api.listOrgs.mockReturnValue(new Promise<Org[]>((r) => { release = r; }));
     api.postReview.mockResolvedValue({ reviewId: 'r1', authorId: 'u1', rating: 5, createdAt: '2026-01-01T00:00:00Z' });
     view();
+    await screen.findByRole('button', { name: 'Submit review' });
+    await act(async () => { release([{ orgId: 'o1', name: 'Acme' }]); });
     // Wait for the ORG-RESOLVED state, not merely for the button. `postReview` is called
     // with the selected org (`calls[0][0] === 'o1'`), so the gesture depends on
     // `listOrgs` having resolved — but the Submit button renders BEFORE that. Waiting on

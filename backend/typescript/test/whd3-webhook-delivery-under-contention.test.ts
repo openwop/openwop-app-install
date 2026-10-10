@@ -47,6 +47,7 @@ import type { Express } from 'express';
 import { createApp } from '../src/index.js';
 import { startWebhookDeliveryWorker, type WebhookDeliveryWorker } from '../src/host/webhookDeliveryWorker.js';
 import type { Storage } from '../src/storage/storage.js';
+import { bareRunId } from './support/bareRunId.js';
 
 /** Dead subscribers. With the healthy one this is exactly `CLAIM_BATCH` (5), so
  *  all of them share ONE claimed batch — the unit WHD-1 was about. */
@@ -147,9 +148,9 @@ afterAll(async () => {
 });
 
 async function subscribe(url: string): Promise<string> {
-  const res = await fetch(`${base}/v1/webhooks`, {
+  const res = await fetch(`${base}/webhooks`, {
     method: 'POST',
-    headers: { ...AUTH, 'OpenWOP-Version': '1.1' },
+    headers: AUTH,
     body: JSON.stringify({ url, events: ['run.completed'] }),
   });
   const body = await res.json() as { subscriptionId?: string; subscription?: { subscriptionId?: string } };
@@ -159,12 +160,12 @@ async function subscribe(url: string): Promise<string> {
 }
 
 async function runToCompletion(): Promise<string> {
-  const created = await fetch(`${base}/v1/runs`, { method: 'POST', headers: AUTH, body: JSON.stringify({ workflowId: 'conformance-noop' }) });
+  const created = await fetch(`${base}/runs`, { method: 'POST', headers: AUTH, body: JSON.stringify({ workflowId: 'conformance-noop' }) });
   const body = await created.json() as { runId?: string };
   if (created.status >= 300 || !body.runId) throw new Error(`POST /v1/runs answered ${created.status}: ${JSON.stringify(body).slice(0, 200)}`);
   let status = '';
   for (let i = 0; i < 200 && status !== 'completed'; i += 1) {
-    const snap = await (await fetch(`${base}/v1/runs/${body.runId}`, { headers: AUTH })).json() as { status?: string };
+    const snap = await (await fetch(`${base}/runs/${body.runId}`, { headers: AUTH })).json() as { status?: string };
     status = snap.status ?? '';
     if (status === 'failed' || status === 'cancelled') throw new Error(`the run ended ${status}, not completed — nothing downstream of it is meaningful`);
     if (status !== 'completed') await new Promise((r) => setTimeout(r, 25));
@@ -200,10 +201,12 @@ describe('WHD-3 — webhook delivery for a real run, under real queue contention
 
     // It is the REAL run's terminal event, signed — not some other delivery.
     const delivery = landed[0]!;
-    const event = JSON.parse(delivery.body) as { type?: string; runId?: string };
-    expect(event.type).toBe('run.completed');
-    expect(event.runId).toBe(runId);
-    expect(delivery.headers['x-openwop-signature'], 'a delivery without the signature is not the production path').toMatch(/^sha256=[0-9a-f]{64}$/);
+    // A major-2 subscription: the body is `{ runId, workspaceId?, event }` with the run
+    // id tenant-bound, and the signature rides `OpenWOP-Signature` (webhooks.md §Delivery).
+    const body = JSON.parse(delivery.body) as { runId?: string; event?: { type?: string } };
+    expect(body.event?.type).toBe('run.completed');
+    expect(body.runId).toBe(runId);
+    expect(delivery.headers['openwop-signature'], 'a delivery without the signature is not the production path').toMatch(/^sha256=[0-9a-f]{64}$/);
 
     // THE CONTENTION LEG. A concurrent batch opens all five requests together,
     // so the dead ones are already in flight; the short wait only absorbs the
@@ -220,9 +223,10 @@ describe('WHD-3 — webhook delivery for a real run, under real queue contention
 
     // And the queue agrees with the wire: one row per subscriber, the healthy
     // one terminal, the dead ones still owed.
-    const healthyRows = await storage.listWebhookDeliveries({ subscriptionIds: [healthyId], limit: 5 });
+    // Storage keys a subscription by its bare id; the v2 register returned it bound.
+    const healthyRows = await storage.listWebhookDeliveries({ subscriptionIds: [bareRunId(healthyId)], limit: 5 });
     expect(healthyRows.map((r) => r.status)).toEqual(['delivered']);
-    const deadRows = await storage.listWebhookDeliveries({ subscriptionIds: deadIds, limit: 20 });
+    const deadRows = await storage.listWebhookDeliveries({ subscriptionIds: deadIds.map(bareRunId), limit: 20 });
     expect(deadRows.map((r) => r.status)).toEqual(Array.from({ length: DEAD_SUBSCRIBERS }, () => 'pending'));
 
     // Recorded so a slow drift toward the bound is visible in the log long

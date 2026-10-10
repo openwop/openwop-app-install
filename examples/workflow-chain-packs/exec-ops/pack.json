@@ -1,16 +1,16 @@
 {
   "name": "core.openwop.workflows.exec-ops",
-  "version": "1.3.0",
+  "version": "1.3.2",
   "kind": "workflow-chain",
   "description": "Real-work workflow pack (RFC 0013, ADR 0149). The Executive / Chief-of-Staff cluster: Daily Executive Briefing, Meeting Prep & Attendee Dossier, and Board / Investor Update Pack. Reasons with core.ai.chatCompletion over real tenant data (feature.crm / feature.analytics) and, where a workflow touches an external system, binds a connection pack via core.openwop.http.openapi-call (connectionRef) — so a configured connection runs live and an unconfigured one surfaces a connect prompt rather than failing. Every external send is gated by core.chat.approvalGate; the read-only briefing is ungated. All tenant-specific values are run parameters (replay-deterministic). Resolves fully on hosts that ship the feature + http/mcp + chat packs (the OpenWOP reference app); the connection bindings are configured by the operator under Access & data → Connections.",
   "author": "openwop",
   "license": "Apache-2.0",
-  "engines": { "openwop": ">=1.0.0" },
+  "engines": { "openwop": ">=1.0.0 <3.0.0" },
   "keywords": ["Executive"],
   "chains": [
     {
       "chainId": "exec-ops.daily-briefing",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "Daily Executive Briefing",
       "description": "Synthesize a daily briefing from the pipeline, usage analytics, and open tasks: priorities, revenue deltas, risks, blockers, and next actions. Read-only digest — no external send, so no approval gate. Pair with a scheduled trigger (e.g. 06:30 local) registered by the operator.",
       "parameters": {
@@ -27,14 +27,14 @@
       "capabilities": ["side-effectful"],
       "dag": {
         "nodes": [
-          { "id": "pipeline", "typeId": "feature.crm.nodes.list-deals", "name": "Pipeline", "position": { "x": 0, "y": 0 }, "config": { "orgId": "{{params.orgId}}" }, "inputs": {} },
-          { "id": "metrics", "typeId": "feature.analytics.nodes.query", "name": "Usage analytics", "position": { "x": 0, "y": 140 }, "config": { "orgId": "{{params.orgId}}" }, "inputs": {} },
-          { "id": "tasks", "typeId": "feature.crm.nodes.list-tasks", "name": "Open tasks", "position": { "x": 0, "y": 280 }, "config": { "orgId": "{{params.orgId}}" }, "inputs": {} },
-          { "id": "brief", "typeId": "core.ai.chatCompletion", "name": "Synthesize briefing", "position": { "x": 320, "y": 140 }, "config": { "systemPrompt": "You are a chief of staff. From the pipeline, usage analytics, and open tasks, produce a concise daily executive briefing emphasizing {{params.focusAreas}}: today's priorities, revenue deltas, risks, blockers, and recommended next actions.",
+          { "id": "pipeline", "typeId": "feature.crm.nodes.list-deals@1.0.0", "name": "Pipeline", "position": { "x": 0, "y": 0 }, "config": { "orgId": "{{params.orgId}}" }, "inputs": {} },
+          { "id": "metrics", "typeId": "feature.analytics.nodes.query@1.0.0", "name": "Usage analytics", "position": { "x": 0, "y": 140 }, "config": { "orgId": "{{params.orgId}}" }, "inputs": {} },
+          { "id": "tasks", "typeId": "feature.crm.nodes.list-tasks@1.0.0", "name": "Open tasks", "position": { "x": 0, "y": 280 }, "config": { "orgId": "{{params.orgId}}" }, "inputs": {} },
+          { "id": "brief", "typeId": "core.ai.chatCompletion@1.0.0", "name": "Synthesize briefing", "position": { "x": 320, "y": 140 }, "config": { "systemPrompt": "You are a chief of staff. From the pipeline, usage analytics, and open tasks, produce a concise daily executive briefing emphasizing {{params.focusAreas}}: today's priorities, revenue deltas, risks, blockers, and recommended next actions.",
             "provider": "{{params.provider}}",
             "model": "{{params.model}}"
           }, "inputs": {} },
-          { "id": "deliver", "typeId": "feature.notifications.nodes.notify", "name": "Deliver briefing", "position": { "x": 600, "y": 140 }, "config": { "audience": "tenant" }, "inputs": { "title": "Daily Executive Briefing" } }
+          { "id": "deliver", "typeId": "feature.notifications.nodes.notify@1.0.0", "name": "Deliver briefing", "position": { "x": 600, "y": 140 }, "config": { "audience": "tenant" }, "inputs": { "title": "Daily Executive Briefing" } }
         ],
         "edges": [
           { "from": "pipeline", "to": "brief.pipeline" },
@@ -49,7 +49,7 @@
     },
     {
       "chainId": "exec-ops.meeting-prep",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "Meeting Prep & Attendee Dossier",
       "description": "Ahead of a meeting, read the upcoming calendar events (whichever calendar the user connected — Google or Microsoft 365) and the attendee's company profile, then synthesize a dossier with an agenda and suggested objectives. Pair with a scheduled trigger N hours before the event.",
       "parameters": {
@@ -68,13 +68,13 @@
       "capabilities": ["side-effectful"],
       "dag": {
         "nodes": [
-          { "id": "calendar", "typeId": "core.openwop.connectors.calendar-list-events", "name": "Read upcoming calendar events", "position": { "x": 0, "y": 0 }, "config": { "maxResults": 10, "timeMin": "{{params.timeMin}}" }, "inputs": {} },
-          { "id": "company", "typeId": "feature.crm.nodes.get-company", "name": "Get attendee company", "position": { "x": 0, "y": 160 }, "config": { "orgId": "{{params.orgId}}", "companyId": "{{params.attendeeCompanyId}}" }, "inputs": {} },
-          { "id": "dossier", "typeId": "core.ai.chatCompletion", "name": "Write dossier + agenda", "position": { "x": 320, "y": 80 }, "config": { "systemPrompt": "You are an executive assistant. Using the upcoming calendar event and the attendee company profile, write a meeting dossier: who/what/why, a proposed agenda, and 3 suggested objectives. Context: {{params.meetingContext}}",
+          { "id": "calendar", "typeId": "core.openwop.connectors.calendar-list-events@1.0.0", "name": "Read upcoming calendar events", "position": { "x": 0, "y": 0 }, "config": { "maxResults": 10, "timeMin": "{{params.timeMin}}" }, "inputs": {} },
+          { "id": "company", "typeId": "feature.crm.nodes.get-company@1.0.0", "name": "Get attendee company", "position": { "x": 0, "y": 160 }, "config": { "orgId": "{{params.orgId}}", "companyId": "{{params.attendeeCompanyId}}" }, "inputs": {} },
+          { "id": "dossier", "typeId": "core.ai.chatCompletion@1.0.0", "name": "Write dossier + agenda", "position": { "x": 320, "y": 80 }, "config": { "systemPrompt": "You are an executive assistant. Using the upcoming calendar event and the attendee company profile, write a meeting dossier: who/what/why, a proposed agenda, and 3 suggested objectives. Context: {{params.meetingContext}}",
             "provider": "{{params.provider}}",
             "model": "{{params.model}}"
           }, "inputs": {} },
-          { "id": "deliver", "typeId": "feature.notifications.nodes.notify", "name": "Send to organizer", "position": { "x": 600, "y": 80 }, "config": { "audience": "tenant" }, "inputs": { "title": "Meeting Prep & Attendee Dossier" } }
+          { "id": "deliver", "typeId": "feature.notifications.nodes.notify@1.0.0", "name": "Send to organizer", "position": { "x": 600, "y": 80 }, "config": { "audience": "tenant" }, "inputs": { "title": "Meeting Prep & Attendee Dossier" } }
         ],
         "edges": [
           { "from": "calendar", "to": "dossier.calendar" },
@@ -88,7 +88,7 @@
     },
     {
       "chainId": "exec-ops.board-update",
-      "version": "1.2.0",
+      "version": "1.2.1",
       "label": "Board / Investor Update Pack",
       "description": "Assemble a monthly board/investor update: pull KPIs (analytics), pipeline (CRM), and finance figures (provider-agnostic ERP), draft a narrative with variance commentary, gate it for exec review, then deliver ONLY on approval \u2014 the distribute step takes its body from the gate on a `truthy approved` edge, so a rejected pack is not sent. Pair with a monthly scheduled trigger.",
       "parameters": {
@@ -106,16 +106,16 @@
       "capabilities": ["side-effectful"],
       "dag": {
         "nodes": [
-          { "id": "kpis", "typeId": "feature.analytics.nodes.query", "name": "KPIs", "position": { "x": 0, "y": 0 }, "config": { "orgId": "{{params.orgId}}" }, "inputs": {} },
-          { "id": "pipeline", "typeId": "feature.crm.nodes.list-deals", "name": "Pipeline", "position": { "x": 0, "y": 140 }, "config": { "orgId": "{{params.orgId}}" }, "inputs": {} },
-          { "id": "finance", "typeId": "core.openwop.connectors.erp-action", "name": "Finance figures (ERP)", "position": { "x": 0, "y": 280 }, "config": { "action": "get-financial-summary", "period": "{{params.period}}" }, "inputs": {} },
-          { "id": "draft", "typeId": "core.ai.chatCompletion", "name": "Draft narrative + variance", "position": { "x": 320, "y": 140 }, "config": { "systemPrompt": "You are a finance/strategy lead. For {{params.period}}, draft a board/investor update for {{params.audience}}: KPIs, pipeline, finance figures, narrative, and variance vs prior period with commentary.",
+          { "id": "kpis", "typeId": "feature.analytics.nodes.query@1.0.0", "name": "KPIs", "position": { "x": 0, "y": 0 }, "config": { "orgId": "{{params.orgId}}" }, "inputs": {} },
+          { "id": "pipeline", "typeId": "feature.crm.nodes.list-deals@1.0.0", "name": "Pipeline", "position": { "x": 0, "y": 140 }, "config": { "orgId": "{{params.orgId}}" }, "inputs": {} },
+          { "id": "finance", "typeId": "core.openwop.connectors.erp-action@1.0.0", "name": "Finance figures (ERP)", "position": { "x": 0, "y": 280 }, "config": { "action": "get-financial-summary", "period": "{{params.period}}" }, "inputs": {} },
+          { "id": "draft", "typeId": "core.ai.chatCompletion@1.0.0", "name": "Draft narrative + variance", "position": { "x": 320, "y": 140 }, "config": { "systemPrompt": "You are a finance/strategy lead. For {{params.period}}, draft a board/investor update for {{params.audience}}: KPIs, pipeline, finance figures, narrative, and variance vs prior period with commentary.",
             "provider": "{{params.provider}}",
             "model": "{{params.model}}"
           }, "inputs": {} },
-          { "id": "review", "typeId": "core.chat.approvalGate", "name": "Exec review", "position": { "x": 600, "y": 140 }, "config": { "actions": ["approve", "reject"] }, "inputs": {} },
-          { "id": "gate-reject", "typeId": "core.flow.noop", "name": "Rejected — the board pack is not distributed", "position": { "x": 960, "y": 160 }, "config": {}, "inputs": {} },
-          { "id": "deliver", "typeId": "feature.notifications.nodes.notify", "name": "Distribute pack", "position": { "x": 880, "y": 140 }, "config": { "audience": "tenant" }, "inputs": { "title": "Board / Investor Update Pack" } }
+          { "id": "review", "typeId": "core.chat.approvalGate@1.1.0", "name": "Exec review", "position": { "x": 600, "y": 140 }, "config": { "actions": ["approve", "reject"] }, "inputs": {} },
+          { "id": "gate-reject", "typeId": "core.flow.noop@1.0.0", "name": "Rejected — the board pack is not distributed", "position": { "x": 960, "y": 160 }, "config": {}, "inputs": {} },
+          { "id": "deliver", "typeId": "feature.notifications.nodes.notify@1.0.0", "name": "Distribute pack", "position": { "x": 880, "y": 140 }, "config": { "audience": "tenant" }, "inputs": { "title": "Board / Investor Update Pack" } }
         ],
         "edges": [
           { "from": "kpis", "to": "draft.kpis" },

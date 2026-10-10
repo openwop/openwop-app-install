@@ -24,7 +24,7 @@ export const salesMapsFeature: BackendFeature = {
   toggleDefault: {
     id: 'sales-maps',
     label: 'Dynamic Sales Maps',
-    description: 'Geographic visualization — territory choropleth coloured by attainment (ADR 0272) + dealer/outlet pins (ADR 0281). CSP-safe bundled-GeoJSON SVG map with a mandatory data-table fallback.',
+    description: 'Geographic visualization — territory choropleth coloured by attainment + dealer/outlet pins. CSP-safe bundled-GeoJSON SVG map with a mandatory data-table fallback.',
     category: 'Sales',
     status: 'off',
     bucketUnit: 'tenant',

@@ -12,6 +12,7 @@ import { resolveOne } from '../../host/featureToggles/service.js';
 import { AGGREGATES, TIME_BUCKETS } from './metricTypes.js';
 import { projectBiCatalog } from './surface.js';
 import { runMetric } from './biService.js';
+import { resolveReadOrgScope } from '../../host/agentToolKit.js';
 
 export const BI_LIST_METRICS_TOOL_ID = 'openwop:bi.list-metrics';
 export const BI_RUN_METRIC_TOOL_ID = 'openwop:bi.run-metric';
@@ -24,6 +25,7 @@ async function biEnabled(tenantId: string, userId?: string): Promise<boolean> {
 export function registerBiAgentTools(): void {
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     // ADR 0604 review H4 — a CLOSED CATALOG OF LEGAL IDS whose sibling enforces
     // membership: `bi.run-metric` resolves `metricId` and returns a TYPED
     // not-found for anything not in this list. Its own description calls it
@@ -52,6 +54,7 @@ export function registerBiAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: BI_RUN_METRIC_TOOL_ID,
       description:
@@ -76,14 +79,20 @@ export function registerBiAgentTools(): void {
       if (!scope.actingUserId || !(await biEnabled(scope.tenantId, scope.actingUserId))) {
         return { content: JSON.stringify({ result: null, note: 'BI metrics unavailable for this workspace/run' }) };
       }
+      // BI-SCOPE-1 — the SAME org gate the route applies (`authorizeOrgScope`,
+      // routes.ts), via its tool-lane twin. A missing orgId must never reach
+      // `runMetric` as '' (which it reads as "no org filter").
+      const gate = await resolveReadOrgScope(scope, { featureId: 'bi', featureLabel: 'BI' }, typeof input.orgId === 'string' && input.orgId ? input.orgId : undefined);
+      if (gate.kind === 'error') return gate.result;
+      if (gate.kind === 'empty') return { content: JSON.stringify({ result: null, note: gate.note }) };
       try {
         const result = await runMetric(scope.tenantId, String(input.metricId ?? ''), {
-          orgId: String(input.orgId ?? ''),
+          orgId: gate.orgId,
           ...(typeof input.groupBy === 'string' && input.groupBy ? { groupBy: input.groupBy } : {}),
           ...(typeof input.since === 'string' && input.since ? { since: input.since } : {}),
           ...(typeof input.until === 'string' && input.until ? { until: input.until } : {}),
           ...(typeof input.bucket === 'string' && input.bucket ? { bucket: input.bucket as (typeof TIME_BUCKETS)[number] } : {}),
-        });
+        }, scope.actingUserId); // ADR 0846 D2 — read as the acting user (refused above when absent)
         return { content: JSON.stringify({ result }) };
       } catch (err) {
         // A typed validation/not-found error is USEFUL model feedback (the one

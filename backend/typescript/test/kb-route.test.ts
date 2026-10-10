@@ -4,6 +4,19 @@
  * document CRUD, ingest (pasted text + Media-asset token), semantic search with
  * citations, the RAG augment endpoint, and the three-tier RBAC (viewer searches,
  * editor/owner ingests, cross-tenant fail-closed).
+ *
+ * Ids: ADR 0011 (KB), ADR 0113 (per-collection retrieval config), DEBT-2
+ * (tenant-bounded listings). Sabotage witnesses (grade-tests wave 6): reversed dense
+ * ranking, an echoed media token, a `workspace:read` ingest or retrieval PATCH, search
+ * ignoring the configured mode, a no-op collection delete or one that leaves its
+ * document rows, an unbounded listing scan, and an unvalidated mode each turn the
+ * matching case red.
+ *
+ * CORRECTED (wave 6): the retrieval case used to send the viewer's write as a POST to
+ * a PATCH-only route — a 404 that `.not.toBe(200)` accepted whether or not the write
+ * gate existed — and its "search honors it" leg ran over a one-document collection
+ * that ranks the same in every mode. The always-on "toggle gating" case (a bare 200
+ * every other case implies) and its no-op `enableKb` helper (`kb` has no toggle) are cut.
  */
 
 import http from 'node:http';
@@ -13,6 +26,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
+import { __hostExtStorage } from '../src/host/hostExtPersistence.js';
 
 let BASE: string;
 let server: http.Server;
@@ -24,25 +38,34 @@ beforeAll(async () => {
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
-  for (const id of ['users', 'kb']) {
+  for (const id of ['users']) {
     const d = getToggleDefault(id);
     if (d) await saveConfig({ ...d, status: 'on' }, 'test');
   }
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
-interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res>; snapshot: () => string }
+interface Res<T = unknown> { status: number; body: T }
+interface Client {
+  get: <T = unknown>(p: string) => Promise<Res<T>>;
+  post: <T = unknown>(p: string, b?: unknown) => Promise<Res<T>>;
+  del: (p: string) => Promise<Res>;
+  snapshot: () => string;
+}
+// Wire shapes the cases read (only the fields asserted).
+type Col = { collectionId: string; documentCount: number; retrievalConfig?: { mode?: string } };
+type Doc = { documentId: string; chunkCount: number; source: unknown };
+type SearchRes = { results: Array<{ documentId: string; score: number; title: string }>; rerank?: unknown };
 function client(initialCookie = ''): Client {
   let cookie = initialCookie;
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T,>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     const sc = getSetCookies(res.headers);
     for (const ck of sc as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    const out: T = await res.text().then((t) => { try { return t ? JSON.parse(t) : undefined; } catch { return undefined; } }); // the wire boundary (no body ⇒ undefined)
     return { status: res.status, body: out };
   };
-  return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), del: (p) => call('DELETE', p), snapshot: () => cookie };
+  return { get: <T,>(p: string) => call<T>('GET', p), post: <T,>(p: string, b?: unknown) => call<T>('POST', p, b), del: (p) => call('DELETE', p), snapshot: () => cookie };
 }
 
 let n = 0;
@@ -50,13 +73,11 @@ const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.tes
 // ADR 0026: real sign-in is Firebase OIDC; tests mint an authenticated user via
 // the env-gated auth test seam. Pass a shared `tenantId` to make co-tenant users.
 async function signup(c: Client, opts: { tenantId?: string } = {}): Promise<{ userId: string }> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail('kb'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
+  const r = await c.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: uniqEmail('kb'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
-const enableKb = async (status: 'on' | 'off'): Promise<void> => { const d = getToggleDefault('kb'); if (d) await saveConfig({ ...d, status }, 'test'); };
-
-async function ownerWithMember(role: string): Promise<{ owner: Client; member: Client; orgId: string }> {
+async function ownerWithMember(role: string): Promise<{ owner: Client; member: Client; orgId: string; tenantId: string }> {
   // Co-tenant owner + member: mint each into one shared explicit tenantId, each
   // in its own client (org-RBAC requires org.tenantId === caller.user.tenantId).
   const tenantId = `org:test-${Date.now()}-${n++}`;
@@ -64,44 +85,36 @@ async function ownerWithMember(role: string): Promise<{ owner: Client; member: C
   await signup(owner, { tenantId });
   const member = client();
   const memberUser = await signup(member, { tenantId });
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   const orgId = org.body.orgId;
-  const add = await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: [role] });
+  const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: [role] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
-  return { owner, member, orgId };
+  return { owner, member, orgId, tenantId };
 }
-const u = (orgId: string, suffix = ''): string => `/v1/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}${suffix}`;
+const u = (orgId: string, suffix = ''): string => `/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}${suffix}`;
 
 const FELINE = 'Feline companions: cats groom themselves with their tongue and purr when content. A kitten is a young cat that loves to play and pounce.';
 const DB = 'Relational databases use B-tree indexes to speed up SQL query execution and JOIN operations across large tables.';
 
-describe('kb — toggle gating', () => {
-  it('serves without a toggle (always-on)', async () => {
-    const { owner, orgId } = await ownerWithMember('viewer');
-    expect((await owner.get(u(orgId, '/collections'))).status).toBe(200);
-  });
-});
-
 describe('kb — collections + ingest + search', () => {
   it('creates a collection, ingests text, and ranks the relevant doc first', async () => {
-    await enableKb('on');
     const { owner, orgId } = await ownerWithMember('viewer');
-    const col = await owner.post(u(orgId, '/collections'), { name: 'Handbook' });
+    const col = await owner.post<Col>(u(orgId, '/collections'), { name: 'Handbook' });
     expect(col.status, JSON.stringify(col.body)).toBe(201);
     const cid = col.body.collectionId;
 
-    const dA = await owner.post(u(orgId, `/collections/${cid}/documents`), { title: 'Cats', text: FELINE });
-    const dB = await owner.post(u(orgId, `/collections/${cid}/documents`), { title: 'Databases', text: DB });
+    const dA = await owner.post<Doc>(u(orgId, `/collections/${cid}/documents`), { title: 'Cats', text: FELINE });
+    const dB = await owner.post<Doc>(u(orgId, `/collections/${cid}/documents`), { title: 'Databases', text: DB });
     expect(dA.status, JSON.stringify(dA.body)).toBe(201);
     expect(dB.status).toBe(201);
     expect(dA.body.chunkCount).toBeGreaterThan(0);
 
     // The collection's counts reflect the two docs.
-    const got = await owner.get(u(orgId, `/collections/${cid}`));
+    const got = await owner.get<Col>(u(orgId, `/collections/${cid}`));
     expect(got.body.documentCount).toBe(2);
 
-    const search = await owner.post(u(orgId, `/collections/${cid}/search`), { query: 'how do cats groom and purr', topK: 3 });
+    const search = await owner.post<SearchRes>(u(orgId, `/collections/${cid}/search`), { query: 'how do cats groom and purr', topK: 3 });
     expect(search.status, JSON.stringify(search.body)).toBe(200);
     expect(search.body.results.length).toBeGreaterThan(0);
     // Lexical-overlap embedder ⇒ the feline doc outranks the database doc.
@@ -111,9 +124,9 @@ describe('kb — collections + ingest + search', () => {
 
   it('rag endpoint returns citations + an augmented prompt grounded in the context', async () => {
     const { owner, orgId } = await ownerWithMember('viewer');
-    const cid = (await owner.post(u(orgId, '/collections'), { name: 'KB' })).body.collectionId;
+    const cid = (await owner.post<Col>(u(orgId, '/collections'), { name: 'KB' })).body.collectionId;
     await owner.post(u(orgId, `/collections/${cid}/documents`), { title: 'Cats', text: FELINE });
-    const rag = await owner.post(u(orgId, `/collections/${cid}/rag`), { query: 'what do kittens do' });
+    const rag = await owner.post<{ citations: Array<{ title: string }>; augmentedPrompt: string }>(u(orgId, `/collections/${cid}/rag`), { query: 'what do kittens do' });
     expect(rag.status, JSON.stringify(rag.body)).toBe(200);
     expect(rag.body.citations.length).toBeGreaterThan(0);
     expect(rag.body.citations[0].title).toBe('Cats');
@@ -123,8 +136,8 @@ describe('kb — collections + ingest + search', () => {
 
   it('empty collection search returns [] (never an error)', async () => {
     const { owner, orgId } = await ownerWithMember('viewer');
-    const cid = (await owner.post(u(orgId, '/collections'), { name: 'Empty' })).body.collectionId;
-    const search = await owner.post(u(orgId, `/collections/${cid}/search`), { query: 'anything' });
+    const cid = (await owner.post<Col>(u(orgId, '/collections'), { name: 'Empty' })).body.collectionId;
+    const search = await owner.post<SearchRes>(u(orgId, `/collections/${cid}/search`), { query: 'anything' });
     expect(search.status).toBe(200);
     expect(search.body.results).toEqual([]);
   });
@@ -133,9 +146,9 @@ describe('kb — collections + ingest + search', () => {
 describe('kb — Media-token source', () => {
   it('ingests a text/plain Media asset by token, and 415s a binary asset', async () => {
     const { owner, orgId } = await ownerWithMember('viewer');
-    const cid = (await owner.post(u(orgId, '/collections'), { name: 'Docs' })).body.collectionId;
+    const cid = (await owner.post<Col>(u(orgId, '/collections'), { name: 'Docs' })).body.collectionId;
 
-    const upload = await owner.post('/v1/host/openwop-app/media/upload', {
+    const upload = await owner.post<{ token: string }>('/host/openwop-app/media/upload', {
       contentBase64: Buffer.from(FELINE, 'utf8').toString('base64'),
       contentType: 'text/plain',
       name: 'cats.txt',
@@ -143,19 +156,20 @@ describe('kb — Media-token source', () => {
     expect(upload.status, JSON.stringify(upload.body)).toBe(201);
     const token = upload.body.token;
 
-    const doc = await owner.post(u(orgId, `/collections/${cid}/documents`), { mediaToken: token });
+    const doc = await owner.post<Doc>(u(orgId, `/collections/${cid}/documents`), { mediaToken: token });
     expect(doc.status, JSON.stringify(doc.body)).toBe(201);
     // The capability token is NOT stored/echoed (it's a credential); provenance
     // is the kind only.
     expect(doc.body.source).toEqual({ kind: 'media' });
     expect(JSON.stringify(doc.body)).not.toContain(token);
 
-    const search = await owner.post(u(orgId, `/collections/${cid}/search`), { query: 'cats purr' });
+    const search = await owner.post<SearchRes>(u(orgId, `/collections/${cid}/search`), { query: 'cats purr' });
     expect(search.body.results[0].documentId).toBe(doc.body.documentId);
 
     // A binary asset can't be text-extracted → 415.
-    const png = await owner.post('/v1/host/openwop-app/media/upload', {
-      contentBase64: Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString('base64'),
+    const png = await owner.post<{ token: string }>('/host/openwop-app/media/upload', {
+      // A real 1×1 PNG: the upload checks the bytes ARE a PNG (ADR 0818 §2).
+      contentBase64: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
       contentType: 'image/png',
       name: 'x.png',
     });
@@ -168,15 +182,21 @@ describe('kb — Media-token source', () => {
 describe('kb — RBAC + tenant isolation', () => {
   it('viewer searches but cannot ingest (403); a cross-tenant stranger is fail-closed (404)', async () => {
     const { owner, member, orgId } = await ownerWithMember('viewer');
-    const cid = (await owner.post(u(orgId, '/collections'), { name: 'KB' })).body.collectionId;
+    const cid = (await owner.post<Col>(u(orgId, '/collections'), { name: 'KB' })).body.collectionId;
     await owner.post(u(orgId, `/collections/${cid}/documents`), { title: 'Cats', text: FELINE });
 
     // Viewer (workspace:read) can search…
-    expect((await member.post(u(orgId, `/collections/${cid}/search`), { query: 'cats' })).status).toBe(200);
+    const viewerSearch = await member.post<SearchRes>(u(orgId, `/collections/${cid}/search`), { query: 'cats' });
+    expect(viewerSearch.status).toBe(200);
+    expect(viewerSearch.body.results.length).toBeGreaterThan(0);
     // …but cannot ingest (needs workspace:write).
     expect((await member.post(u(orgId, `/collections/${cid}/documents`), { text: 'x' })).status).toBe(403);
     // …and cannot create a collection.
     expect((await member.post(u(orgId, '/collections'), { name: 'Nope' })).status).toBe(403);
+    // …and neither refused write landed.
+    expect((await owner.get<Col>(u(orgId, `/collections/${cid}`))).body.documentCount).toBe(1);
+    const names = (await owner.get<{ collections: Array<{ name: string }> }>(u(orgId, '/collections'))).body.collections.map((c) => c.name);
+    expect(names).not.toContain('Nope');
 
     // A different tenant's user is not a member of this org → 404 (IDOR guard).
     const stranger = client();
@@ -188,49 +208,56 @@ describe('kb — RBAC + tenant isolation', () => {
 
 describe('kb — delete cascades', () => {
   it('deleting a collection removes its documents and search 404s', async () => {
-    const { owner, orgId } = await ownerWithMember('viewer');
-    const cid = (await owner.post(u(orgId, '/collections'), { name: 'Temp' })).body.collectionId;
-    const doc = await owner.post(u(orgId, `/collections/${cid}/documents`), { title: 'Cats', text: FELINE });
+    const { owner, orgId, tenantId } = await ownerWithMember('viewer');
+    const cid = (await owner.post<Col>(u(orgId, '/collections'), { name: 'Temp' })).body.collectionId;
+    const doc = await owner.post<Doc>(u(orgId, `/collections/${cid}/documents`), { title: 'Cats', text: FELINE });
+    const docKey = `hostext:kb:document:${tenantId}:${orgId}:${doc.body.documentId}`;
+    expect(await __hostExtStorage()!.kvGet(docKey), 'precondition: the durable document row exists').not.toBeNull();
     expect((await owner.del(u(orgId, `/collections/${cid}`))).status).toBe(204);
     expect((await owner.get(u(orgId, `/collections/${cid}`))).status).toBe(404);
     expect((await owner.post(u(orgId, `/collections/${cid}/search`), { query: 'cats' })).status).toBe(404);
-    expect((await owner.get(u(orgId, `/collections/${cid}/documents/${doc.body.documentId}`))).status).toBe(404);
+    // The HTTP door 404s a document of a deleted collection whether or not the row
+    // survived (the collection gate answers first), so the cascade is read from storage.
+    expect(await __hostExtStorage()!.kvGet(docKey), 'the collection delete must remove its document rows').toBeNull();
   });
 });
 
 describe('kb — ADR 0113 per-collection retrieval config', () => {
   it('PATCH /retrieval sets the mode (write-gated) and search honors it', async () => {
     const { owner, member, orgId } = await ownerWithMember('viewer');
-    const cid = (await owner.post(u(orgId, '/collections'), { name: 'Retr' })).body.collectionId;
+    const cid = (await owner.post<Col>(u(orgId, '/collections'), { name: 'Retr' })).body.collectionId;
     await owner.post(u(orgId, `/collections/${cid}/documents`), { title: 'Tickets', text: 'Reference ZX-4471 covers the migration runbook in detail.' });
 
-    // A viewer (workspace:read) cannot change retrieval config.
-    expect((await member.post(u(orgId, `/collections/${cid}/retrieval`), {})).status).not.toBe(200);
+    // A viewer (workspace:read) cannot change retrieval config — through the REAL verb.
+    expect((await fetchPatch(member, u(orgId, `/collections/${cid}/retrieval`), { mode: 'hybrid' })).status).toBe(403);
+    expect((await owner.get<Col>(u(orgId, `/collections/${cid}`))).body.retrievalConfig?.mode, 'the refused write did not land').toBeUndefined();
 
-    // Owner sets hybrid; config persists.
-    const patched = await fetchPatch(owner, u(orgId, `/collections/${cid}/retrieval`), { mode: 'hybrid' });
+    // Owner sets hybrid+rerank; config persists.
+    const patched = await fetchPatch<{ collection: Col }>(owner, u(orgId, `/collections/${cid}/retrieval`), { mode: 'hybrid+rerank' });
     expect(patched.status, JSON.stringify(patched.body)).toBe(200);
-    expect(patched.body.collection.retrievalConfig.mode).toBe('hybrid');
+    expect(patched.body.collection.retrievalConfig?.mode).toBe('hybrid+rerank');
 
-    // The configured mode is honored by search (exact-ID recall via the lexical channel).
-    const s = await owner.post(u(orgId, `/collections/${cid}/search`), { query: 'ZX-4471' });
+    // The configured mode is honored by search: only a hybrid+rerank search carries the
+    // `rerank` label, so its presence is direct evidence the stored config was used.
+    const s = await owner.post<SearchRes>(u(orgId, `/collections/${cid}/search`), { query: 'ZX-4471' });
     expect(s.status).toBe(200);
+    expect(s.body.rerank).toEqual({ requested: 'local', applied: 'local' });
     expect(s.body.results[0]?.title).toBe('Tickets');
   });
 
   it('rejects an invalid mode', async () => {
     const { owner, orgId } = await ownerWithMember('viewer');
-    const cid = (await owner.post(u(orgId, '/collections'), { name: 'Bad' })).body.collectionId;
+    const cid = (await owner.post<Col>(u(orgId, '/collections'), { name: 'Bad' })).body.collectionId;
     const r = await fetchPatch(owner, u(orgId, `/collections/${cid}/retrieval`), { mode: 'nonsense' });
     expect(r.status).toBe(400);
   });
 });
 
 // PATCH helper (the test Client only exposes get/post/del).
-async function fetchPatch(c: Client, path: string, body: unknown): Promise<Res> {
+async function fetchPatch<T = unknown>(c: Client, path: string, body: unknown): Promise<Res<T>> {
   const cookie = c.snapshot();
   const res = await fetch(`${BASE}${path}`, { method: 'PATCH', headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, body: JSON.stringify(body) });
-  const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+  const out: T = await res.text().then((t) => { try { return t ? JSON.parse(t) : undefined; } catch { return undefined; } });
   return { status: res.status, body: out };
 }
 
@@ -244,7 +271,7 @@ describe('kb — DEBT-2 tenant-bounded listings', () => {
     const c = client();
     const tenantId = `debt2-kb-${Date.now()}-${n++}`;
     await signup(c, { tenantId });
-    const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+    const org = await c.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' });
     expect(org.status).toBe(201);
     return { c, orgId: org.body.orgId, tenantId };
   };
@@ -252,21 +279,21 @@ describe('kb — DEBT-2 tenant-bounded listings', () => {
   it('collection + document listings are tenant-blind', async () => {
     const a = await tenantOwner();
     const b = await tenantOwner();
-    const colA = await a.c.post(u(a.orgId, '/collections'), { name: 'A-only' });
+    const colA = await a.c.post<Col>(u(a.orgId, '/collections'), { name: 'A-only' });
     expect(colA.status, JSON.stringify(colA.body)).toBe(201);
     await a.c.post(u(a.orgId, `/collections/${colA.body.collectionId}/documents`), { title: 'A doc', text: 'alpha content only for tenant A' });
-    const colB = await b.c.post(u(b.orgId, '/collections'), { name: 'B-only' });
+    const colB = await b.c.post<Col>(u(b.orgId, '/collections'), { name: 'B-only' });
     expect(colB.status).toBe(201);
     // Tenant B lists ONLY its own collection — never tenant A's.
-    const listB = await b.c.get(u(b.orgId, '/collections'));
+    const listB = await b.c.get<{ collections: Array<{ name: string }> }>(u(b.orgId, '/collections'));
     expect(listB.status).toBe(200);
-    const namesB = listB.body.collections.map((c: any) => c.name);
+    const namesB = listB.body.collections.map((c) => c.name);
     expect(namesB).toContain('B-only');
     expect(namesB).not.toContain('A-only');
     // Tenant A's document listing holds exactly its own doc.
-    const docsA = await a.c.get(u(a.orgId, `/collections/${colA.body.collectionId}/documents`));
+    const docsA = await a.c.get<{ documents: Array<{ title: string }> }>(u(a.orgId, `/collections/${colA.body.collectionId}/documents`));
     expect(docsA.status).toBe(200);
-    expect(docsA.body.documents.map((d: any) => d.title)).toEqual(['A doc']);
+    expect(docsA.body.documents.map((d) => d.title)).toEqual(['A doc']);
     // Tenant B cannot enumerate tenant A's collection's documents at all (fail-closed).
     const cross = await b.c.get(u(b.orgId, `/collections/${colA.body.collectionId}/documents`));
     expect(cross.status).toBe(404);

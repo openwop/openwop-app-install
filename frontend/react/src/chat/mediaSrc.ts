@@ -10,6 +10,7 @@
  */
 
 import { config } from '../client/config.js';
+import { ASSET_SERVE_PATH_RE, canonicalAssetPath } from '../client/assetServePath.js';
 
 /** Resolve a media part to a renderable src: host-served URL (RFC 0055 §C
  *  preferred) or an inline data URI. Returns null when neither is present.
@@ -25,11 +26,13 @@ import { config } from '../client/config.js';
 export function mediaSrc(mimeType: string, url?: string, dataBase64?: string): string | null {
   if (url) {
     const u = url.trim();
-    if (/^(https?|blob):/i.test(u)) return u;
+    // Stored content may carry a versioned serve path that 410s after the
+    // ADR 0669 cut, so canonicalise before use (`client/assetServePath.ts`).
+    if (/^(https?|blob):/i.test(u)) return canonicalAssetPath(u);
     // Same-origin host media-asset path. Match the exact token shape (32 random
     // bytes, base64url — no `/` or `.`) so a crafted LLM-emitted `url` can't
     // smuggle a traversal segment past the prefix check.
-    if (/^(?:\/v1)?\/host\/openwop-app\/assets\/[A-Za-z0-9_-]+$/.test(u)) return `${config.baseUrl}${u}`;
+    if (ASSET_SERVE_PATH_RE.test(u)) return `${config.baseUrl}${canonicalAssetPath(u)}`;
     return null;
   }
   if (dataBase64) return `data:${mimeType};base64,${dataBase64}`;

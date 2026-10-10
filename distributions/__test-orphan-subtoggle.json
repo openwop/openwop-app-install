@@ -1,0 +1,5 @@
+{
+  "name": "__test-orphan-subtoggle",
+  "description": "TEST FIXTURE (ADR 0820 §4): an include-mode manifest naming the sub-toggle `code-export` without its parent `app-builder` — gen-distribution must refuse it, because the build would sell a capability it does not ship.",
+  "features": ["code-export"]
+}

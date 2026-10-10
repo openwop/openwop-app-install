@@ -82,7 +82,7 @@ import { __resetCommerceConnect } from '../src/features/commerce-connect/stores.
 let server: Server;
 let BASE = '';
 let WS = '';
-const B = '/v1/host/openwop-app/commerce-connect';
+const B = '/host/openwop-app/commerce-connect';
 
 interface Res<T = any> { status: number; body: T }
 
@@ -99,7 +99,7 @@ const cookie = (c: string): Record<string, string> => ({ cookie: c });
 
 /** Personal sign-in → membership under the HOME userId → switch into WS. */
 async function member(subject: string, roles: string[]): Promise<string> {
-  const res = await fetch(`${BASE}/v1/host/openwop-app/test/login`, {
+  const res = await fetch(`${BASE}/host/openwop-app/test/login`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ subject, displayName: subject }),
   });
@@ -107,7 +107,7 @@ async function member(subject: string, roles: string[]): Promise<string> {
   const personal = (res.headers.get('set-cookie') ?? '').split(';')[0] ?? '';
   const { user } = (await res.json()) as { user: { userId: string } };
   await createMember({ orgId: WS, tenantId: WS, displayName: subject, subject: user.userId, roles });
-  const sw = await fetch(`${BASE}/v1/host/openwop-app/workspaces/${encodeURIComponent(WS)}/switch`, {
+  const sw = await fetch(`${BASE}/host/openwop-app/workspaces/${encodeURIComponent(WS)}/switch`, {
     method: 'POST', headers: { cookie: personal },
   });
   expect(sw.status, `switch into WS must succeed: ${await sw.clone().text()}`).toBe(200);
@@ -116,7 +116,7 @@ async function member(subject: string, roles: string[]): Promise<string> {
 
 /** Signed in, active in WS, but holding NO member row there. */
 async function outsiderSession(subject: string): Promise<string> {
-  const res = await fetch(`${BASE}/v1/host/openwop-app/test/login`, {
+  const res = await fetch(`${BASE}/host/openwop-app/test/login`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ subject, tenantId: WS, displayName: subject, sharedWorkspace: true }),
   });

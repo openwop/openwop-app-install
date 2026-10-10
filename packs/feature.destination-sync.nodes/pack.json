@@ -1,14 +1,17 @@
 {
   "name": "feature.destination-sync.nodes",
-  "version": "1.0.0",
-  "kind": "nodes",
+  "version": "1.0.1",
+  "kind": "node",
   "description": "Destination Sync (CDP-D) — the `prepare` verb over ctx.features['destination-sync']: CDC-filter a record set against the sync's watermark and field-map each into destination payloads (advancing the cursor), so a downstream core.openwop.http.fetch (fanned out per payload) does the SSRF-guarded egress. No bespoke sender — egress rides the existing http node (ruling #3).",
   "author": "openwop",
   "license": "Apache-2.0",
-  "engines": { "openwop": ">=1.0.0" },
+  "engines": {
+    "openwop": ">=1.0.0 <3.0.0"
+  },
   "nodes": [
     {
       "typeId": "feature.destination-sync.nodes.prepare",
+      "category": "data",
       "version": "1.0.0",
       "role": "read",
       "label": "Destination Sync Prepare",
@@ -16,6 +19,7 @@
     },
     {
       "typeId": "feature.destination-sync.nodes.prepare-onward",
+      "category": "data",
       "version": "1.0.0",
       "role": "read",
       "label": "Destination Sync Prepare Onward (OpenWOP host)",
@@ -23,10 +27,17 @@
     },
     {
       "typeId": "feature.destination-sync.nodes.warehouse-load",
+      "category": "integration",
       "version": "1.0.0",
       "role": "action",
       "label": "Destination Sync Warehouse Load (reverse-ETL BigQuery)",
       "description": "ADR 0292 / CDP-D §6 — for a 'warehouse' sync, run the GOVERNED reverse-ETL BigQuery tabledata.insertAll over ctx.features['destination-sync'].warehouseLoad. Gated by actionPolicyOf('warehouse.load') (default approval-required, fail-closed): disabled → refuse; draft-only → dry-run the rows that WOULD load (loaded:0); approval-required/unset → mint-or-consult a warehouse-load approval and insert ONLY when approved. Deterministic per-row insertId dedups a replay/:fork. Surfaces the gate verdict as the node status (loaded | requires_approval | draft_run | disabled | no_connection | failed). Outputs carry counts + per-row failure reasons — NEVER row bodies (subject data) or credentials. Inputs: { syncId, records }."
     }
-  ]
+  ],
+  "runtime": {
+    "language": "javascript",
+    "format": "esm",
+    "entry": "./index.mjs",
+    "minRuntimeVersion": "node>=20"
+  }
 }

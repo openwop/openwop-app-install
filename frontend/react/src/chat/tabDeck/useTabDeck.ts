@@ -23,7 +23,7 @@ export interface UseTabDeckResult {
   activeSessionId: string | null;
   /** Open (or focus, if already open) a conversation as a tab. `protectedIds` =
    *  the currently-streaming sessions, which must not be evicted. */
-  openTab: (sessionId: string, protectedIds?: ReadonlySet<string>) => void;
+  openTab: (sessionId: string, protectedIds?: ReadonlySet<string>, kind?: string) => void;
   closeTab: (sessionId: string) => void;
   focusTab: (sessionId: string) => void;
   /** Move `fromSessionId` to `toIndex` (final index in the post-removal order). */
@@ -33,7 +33,8 @@ export interface UseTabDeckResult {
   rekeyTab: (fromSessionId: string, toSessionId: string) => void;
   /** Cache a tab's last-known title so it persists + restores (ADR 0140 G4). */
   setTitle: (sessionId: string, title: string) => void;
-  /** The tab ids present at restore (from persistence), for the deck's dead-tab prune.
+  /** The CONVERSATION tab ids present at restore (from persistence), for the deck's
+   *  dead-tab prune and mount gate. Kind tabs are excluded — they name no conversation.
    *  Empty when not persisted / fresh. */
   restoredSessionIds: readonly string[];
 }
@@ -65,7 +66,12 @@ export function useTabDeck(
   const stateRef = useRef(state);
   stateRef.current = state;
   // The restored id set is captured once (first render holds the restored state).
-  const restoredIdsRef = useRef<readonly string[]>(state.tabs.map((t) => t.sessionId));
+  // CONVERSATION tabs only: the deck gates their mount on, and prunes them against,
+  // the conversation list. A kind tab (ADR 0785 D5, e.g. `claude-code`) is never in
+  // that list, so counting it here closed every restored Claude Code tab on the next
+  // visit to the chat — and the close ran the kind's `onClose`, which STOPS the
+  // session on the user's machine (observed 2026-10-05, the first prod session).
+  const restoredIdsRef = useRef<readonly string[]>(state.tabs.filter((t) => !t.kind).map((t) => t.sessionId));
 
   // Persist (ADR 0140 P6): debounced trailing save (~400ms) so a focus/open burst writes
   // once; flush immediately on pagehide (reload/close) and on unmount (toggle off / nav).
@@ -81,7 +87,7 @@ export function useTabDeck(
     return () => { window.removeEventListener('pagehide', flush); flush(); };
   }, [persistSubject]);
 
-  const openTab = useCallback((sessionId: string, protectedIds?: ReadonlySet<string>) => {
+  const openTab = useCallback((sessionId: string, protectedIds?: ReadonlySet<string>, kind?: string) => {
     const victim = selectEvictionVictim(stateRef.current, { maxTabs, ...(protectedIds ? { protectedIds } : {}) });
     if (victim) {
       // No silent truncation (ADR 0140): tell the deck so it can surface a toast in prod,
@@ -93,7 +99,7 @@ export function useTabDeck(
         );
       }
     }
-    dispatch({ type: 'open', sessionId, ...(protectedIds ? { protectedIds } : {}), maxTabs });
+    dispatch({ type: 'open', sessionId, ...(protectedIds ? { protectedIds } : {}), maxTabs, ...(kind ? { kind } : {}) });
   }, [maxTabs]);
 
   const closeTab = useCallback((sessionId: string) => dispatch({ type: 'close', sessionId }), []);

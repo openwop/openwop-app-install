@@ -48,18 +48,18 @@ function client(): Client {
 
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
 async function signup(c: Client, tenantId: string): Promise<{ userId: string }> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail('sk'), tenantId });
+  const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail('sk'), tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
 const enableToggle = async (id: string): Promise<void> => { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status: 'on' }, 'test'); };
 
-const S = '/v1/host/openwop-app/strategy';
+const S = '/host/openwop-app/strategy';
 const freshTenant = (): string => `org:sk-${Date.now()}-${n++}`;
 async function ownerWithOrg(): Promise<{ owner: Client; orgId: string }> {
   const owner = client();
   await signup(owner, freshTenant());
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return { owner, orgId: org.body.orgId };
 }
@@ -67,7 +67,7 @@ async function ownerWithOrg(): Promise<{ owner: Client; orgId: string }> {
 /** The managed 'Strategy KB' doc ids for an org (empty if the collection absent). */
 async function kbDocIds(owner: Client, orgId: string): Promise<string[]> {
   const colId = `mgd-strategy-${orgId}`;
-  const docs = await owner.get(`/v1/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections/${encodeURIComponent(colId)}/documents`);
+  const docs = await owner.get(`/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections/${encodeURIComponent(colId)}/documents`);
   if (docs.status !== 200) return [];
   return (docs.body.documents as Array<{ documentId: string }>).map((d) => d.documentId);
 }
@@ -79,7 +79,7 @@ describe('ADR 0100 P1 — strategy indexes into the managed Strategy KB', () => 
     expect(created.status, JSON.stringify(created.body)).toBe(201);
 
     expect(await kbDocIds(owner, orgId)).toEqual([created.body.id]);
-    const cols = await owner.get(`/v1/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections`);
+    const cols = await owner.get(`/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections`);
     const managed = (cols.body.collections as Array<any>).find((c) => c.collectionId === `mgd-strategy-${orgId}`);
     expect(managed?.managed).toBe('strategy');
     expect(managed?.name).toBe('Strategy KB');
@@ -123,7 +123,7 @@ describe('ADR 0100 P1 — managed collection is read-only via the KB routes', ()
     const { owner, orgId } = await ownerWithOrg();
     await owner.post(S, { orgId, title: 'Seed' }); // creates the managed collection
     const colId = `mgd-strategy-${orgId}`;
-    const base = `/v1/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections/${encodeURIComponent(colId)}`;
+    const base = `/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections/${encodeURIComponent(colId)}`;
 
     const ingest = await owner.post(`${base}/documents`, { title: 'manual', text: 'should be rejected' });
     expect(ingest.status).toBe(400);

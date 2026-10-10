@@ -1,6 +1,6 @@
 # ADR 0730 — Phase C: the surfaces with no v2 home get one
 
-Status: implemented — C.1, C.2, C.3a and C.4 shipped; **C.3b REVERTED** (see the correction below)
+Status: implemented — C.1, C.2, C.3a and C.4 shipped; C.3b reverted, then **re-landed through an adapter 2026-09-28** (see the last section)
 Date: 2026-09-18
 Relates to: ADR 0642 (v1 EOS 2026-12-04), ADR 0647 (SPA v2 seam), ADR 0654 (run-list/delete/events-token → host-ext), ADR 0652 / RFC 0181 (the vendor path namespace), ADR 0723 / 0726 (bound ids), `spec/v2/core/versioning.md`, `spec/v2/core/capabilities.md` §3.2/§4.
 
@@ -308,3 +308,42 @@ Emit `memory` and `envelopes` at major 2; re-derive the seven consumer reads
 against their measured v2 homes; and gate each on a browser-level test, because
 this failure class is invisible to unit tests by construction. Half-migrated was
 the worst available state, which is why this is a revert and not a patch.
+
+## C.3b re-landed, 2026-09-28: one adapter, and a parity gate
+
+"What remains" above has been done, with one substitution in the gate.
+
+- **The families exist.** `memory`, `envelopes` and `aiProviders.input` are
+  served at major 2 now (measured on the served document before starting).
+- **The consumer reads are re-derived in ONE place, not seven.**
+  `frontend/react/src/client/capabilitiesV2Adapter.ts` reads the v2 root and
+  restates it in the v1 shape every consumer already reads. It bridges three
+  differences, each measured against both served documents: presence becomes
+  `supported: true` (and absence stays absent, never `false`); `demoMode` and
+  `hostSurfaces` come back out of their `openwop-app.*` extensions; and
+  `auth.profiles` is re-derived from `auth.lanes`. The consumers are unchanged,
+  which is the point. C.3 regressed because fourteen files each had to be right.
+  `v1Client` and the `@openwop/openwop-v1` dependency are deleted.
+- **The gate is a served-document parity test, not one browser test per
+  consumer.** `backend/typescript/test/discovery-v2-adapter-parity.test.ts`
+  boots the host, fetches BOTH majors, and for every consumer-read path asserts
+  `adapt(v2) == v1`. It does this in three configurations: default; SAML + SCIM
+  with combined subject linking and demo mode; and SAML + SCIM without a shared
+  trust root. This catches the C.3 failure class directly: the regressions were
+  present-but-different values, which a browser only shows one page at a time.
+  **Sabotage-proven:** mis-mapping `demoMode` reds its row, and it only does so
+  because a config serves `true`. Before that config was added, the row passed
+  vacuously, since every config served `false`. The post-deploy smoke still
+  loads the affected pages in a browser.
+- **The gate found a real v2 over-claim.** When SAML and SCIM were both
+  configured without the combined subject-linking contract, v1 withdrew
+  `openwop-auth-scim` per RFC 0164, but the v2 `scim` lane was still pushed from
+  the raw predicate. Both now derive from `advertisedAuthProfiles()`. The v2
+  wire changes only in that misconfigured case, and toward under-claiming.
+- **Deliberate differences, each asserted on its own.**
+  - `capabilities.limits` was always `undefined` under v1, which serves `limits`
+    at the root only. As a result, the builder's host-limits banner never
+    rendered. The adapter now fills it from the root value.
+  - `capabilities.envelopes.reliability` and `capabilities.profiles` are not
+    advertised at major 2. Only the wire-diagnostics `CapabilitiesPanel` reads
+    them, and it now shows a dash.

@@ -111,6 +111,7 @@ export async function resolveStrategyTimeline(
           l.listId,
           (id) => getList(tenantId, id),
           canReadOrg,
+          { tenantId, callerSubject }, // ADR 0842 D10
         );
         if (!list || !readable) continue;
         const status = await getScheduleStatus(tenantId, l.listId);

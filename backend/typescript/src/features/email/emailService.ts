@@ -6,20 +6,21 @@
  * consent via the ONE `consentService.isAllowed` helper (ADR 0020).
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { registerRetentionPurger, purgeRowsByAge } from '../../host/retentionPurger.js';
 import { declarePiiFields } from '../../host/dataClassification.js';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
+import { insertOwnedOrConflict } from '../../host/ownedInsert.js';
 import { OpenwopError } from '../../types.js';
 import { listContacts, type Contact, type ContactStage } from '../crm/contactsService.js';
 import { isAllowed } from '../consent/consentService.js';
 import { registerSubjectEraser } from '../../host/subjectErasure.js';
 import { onCrmRecordMerged, onCrmRecordUnmerged } from '../../host/crmRecordLifecycle.js';
-import { resolveOne } from '../../host/featureToggles/service.js';
+import { resolveToggle } from '../../host/featureToggles/service.js';
 import { createActivity, getActivity } from '../crm/crmEntitiesService.js';
 import { getSegment, resolveSegmentMembers } from '../crm/segmentsService.js';
 import { suppressionBlocksSend } from '../crm/suppressionService.js';
-import { instrumentBody, mintToken, renderHtmlBody, deleteSubjectEngagement } from './engagementService.js';
+import { instrumentBodyWithUnsubscribe, mintToken, renderHtmlBody, deleteSubjectEngagement } from './engagementService.js';
 import { deleteSubjectBounceCounts } from './bounceWebhooks.js';
 import { renderMarkdownBody } from './safeMarkdown.js';
 import { createLogger } from '../../observability/logger.js';
@@ -72,8 +73,13 @@ export interface SendLog { sendId: string; tenantId: string; campaignId: string;
   mergedFrom?: string;
 }
 
-const templates = new DurableCollection<EmailTemplate>('email:template', (t) => t.templateId);
-const campaigns = new DurableCollection<Campaign>('email:campaign', (c) => c.campaignId);
+// ADR 0848 D1 — both arm the TENANT SECONDARY INDEX (`tenantOf`), so the list reads
+// below are a bounded scan of one tenant instead of `list()`'s sweep of every tenant.
+// Rows are NOT re-keyed: still keyed by id alone, which is why every create goes
+// through `insertOwnedOrConflict` (an id another workspace holds is a 409, never a put).
+// `ensureTenantIndex` backfills legacy rows on the first indexed read — no migration.
+const templates = new DurableCollection<EmailTemplate>('email:template', (t) => t.templateId, undefined, (t) => t.tenantId);
+const campaigns = new DurableCollection<Campaign>('email:campaign', (c) => c.campaignId, undefined, (c) => c.tenantId);
 // CRM-11 fold-in (B4) — `tenantOf` arms the `hostextidx:` TENANT SECONDARY INDEX,
 // so every read below is a bounded scan of ONE tenant's ledger instead of
 // `list()`'s cross-tenant sweep of the whole collection. The primary rows are not
@@ -149,6 +155,10 @@ export interface EmailMessage {
   /** ADR 0402 — optional attachments (e.g. a booking's `.ics` calendar invite).
    *  The console stub ignores them; a brokered provider carries them. */
   attachments?: { filename: string; content: string; contentType: string }[];
+  /** ADR 0848 D7 — RFC 8058 one-click unsubscribe: the SAME `/u/:token` URL the
+   *  footer carries. A brokered provider turns it into the `List-Unsubscribe` +
+   *  `List-Unsubscribe-Post` header pair; absent on test and transactional sends. */
+  listUnsubscribe?: { url: string };
 }
 export interface EmailProvider { id: string; send(msg: EmailMessage): Promise<void> }
 /** The `'console'` id is the sentinel for "no real transport configured". LEAK-1:
@@ -182,79 +192,146 @@ export function emailTransportConfigured(): boolean {
   return activeProvider().id !== CONSOLE_PROVIDER_ID;
 }
 
-function interpolate(s: string, vars: { name: string; email: string; company: string }): string {
+/**
+ * ADR 0848 D6 — contact DATA never becomes a LINK or a header line.
+ *
+ * `interpolate` runs BEFORE `instrumentBody` mints click tokens and before both HTML
+ * renderers autolink, so a contact whose name (or company, or even "email" — CRM does
+ * not validate its shape, and the forms regex accepts `https://evil.example/x@a.co`)
+ * carried a URL was delivered a tracked `/c` link on the tenant's own domain that
+ * 302'd to the attacker; a Markdown template rendered `[Verify](https://evil)` in a
+ * name as a disguised anchor. Contacts are minted from PUBLIC form submissions.
+ * Escaping was already correct — markup never got through; the defect was promotion
+ * from text to link. Applied to every interpolated value (real send, test send's
+ * literal tokens aside, the render node); template-authored text is untouched.
+ *
+ *  - C0 controls (CR/LF included) and DEL are removed: a value can never start a
+ *    header line in the subject (providers sanitise today; we no longer rely on it);
+ *  - `scheme://` → `scheme:\u200B//` and `mailto:` → `mailto\u200B:` — no linkifier we
+ *    own (nor most mail clients') recognises it; the visible text is unchanged;
+ *  - `[` / `]` → their full-width forms, so `[text](url)` cannot form a Markdown link.
+ * A bare domain (`www.evil.example`) is still autolinked by some mail clients — a
+ * stated residue (ADR 0848 M8), not a link this host mints.
+ */
+export function neutralizeContactValue(v: string, opts: { markdown?: boolean } = {}): string {
+  const out = v
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/([a-z][a-z0-9+.-]*):\/\//gi, '$1:\u200B//')
+    .replace(/mailto:/gi, (m) => `${m.slice(0, 6)}\u200B:`);
+  // Brackets can only form a link in a MARKDOWN body; elsewhere "Q&A [beta]" stays as typed.
+  return opts.markdown ? out.replace(/\[/g, '\uFF3B').replace(/\]/g, '\uFF3D') : out;
+}
+
+function interpolate(s: string, raw: { name: string; email: string; company: string }, opts: { markdown?: boolean } = {}): string {
+  const vars = { name: neutralizeContactValue(raw.name, opts), email: neutralizeContactValue(raw.email, opts), company: neutralizeContactValue(raw.company, opts) };
   return s.replace(/\{\{\s*contact\.(name|email|company)\s*\}\}/g, (_m, k: string) => (k === 'name' ? vars.name : k === 'email' ? vars.email : vars.company));
 }
 
 // ── templates ──
 export async function listTemplates(tenantId: string, orgId: string): Promise<EmailTemplate[]> {
-  return (await templates.list()).filter((t) => t.tenantId === tenantId && t.orgId === orgId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  // ADR 0848 D1/H2 — indexed, and STILL filtered: an index marker is not proof of tenancy.
+  return (await templates.listForTenantIndexed(tenantId)).filter((t) => t.tenantId === tenantId && t.orgId === orgId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 export async function getTemplate(tenantId: string, orgId: string, templateId: string): Promise<EmailTemplate | null> {
   const t = await templates.get(templateId);
   return t && t.tenantId === tenantId && t.orgId === orgId ? t : null;
 }
+/** ADR 0848 D1 — the owner predicate both email stores share: same (tenant, org). */
+const ownedBy = (tenantId: string, orgId: string) => (row: { tenantId: string; orgId: string }): boolean =>
+  row.tenantId === tenantId && row.orgId === orgId;
+
 export async function createTemplate(input: { tenantId: string; orgId: string; name: string; subject: string; body: string; format?: EmailBodyFormat; createdBy: string; templateId?: string }): Promise<EmailTemplate> {
-  // Idempotent on a caller-supplied deterministic id (mirrors cmsService.createPage's
-  // pageId short-circuit) so a replay/fork of a publish node never duplicates a template.
-  if (input.templateId) {
-    const prior = await getTemplate(input.tenantId, input.orgId, input.templateId);
-    if (prior) return prior;
-  }
-  const now = new Date().toISOString();
-  const t: EmailTemplate = {
-    templateId: input.templateId ?? `tpl:${randomUUID()}`,
-    tenantId: input.tenantId, orgId: input.orgId,
-    name: input.name, subject: input.subject, body: input.body,
-    ...(input.format === 'markdown' ? { format: 'markdown' as const } : {}),
-    createdBy: input.createdBy, createdAt: now, updatedAt: now,
-  };
-  await templates.put(t);
-  return t;
+  // Idempotent on a caller-supplied deterministic id, so a replay/fork of a publish node
+  // never duplicates a template — but ONLY onto a row this (tenant, org) owns. #4485:
+  // the old short-circuit read through the FILTERED getter, so another workspace's row
+  // read as absent and the blind put below took it. ADR 0848 D1.
+  const templateId = input.templateId ?? `tpl:${randomUUID()}`;
+  const { row } = await insertOwnedOrConflict(templates, templateId, ownedBy(input.tenantId, input.orgId), () => {
+    const now = new Date().toISOString();
+    return {
+      templateId,
+      tenantId: input.tenantId, orgId: input.orgId,
+      name: input.name, subject: input.subject, body: input.body,
+      ...(input.format === 'markdown' ? { format: 'markdown' as const } : {}),
+      createdBy: input.createdBy, createdAt: now, updatedAt: now,
+    };
+  });
+  return row;
 }
 export async function updateTemplate(tenantId: string, orgId: string, templateId: string, patch: { name?: string; subject?: string; body?: string; format?: EmailBodyFormat }): Promise<EmailTemplate | null> {
-  const existing = await getTemplate(tenantId, orgId, templateId);
-  if (!existing) return null;
-  const next: EmailTemplate = { ...existing, ...patch, updatedAt: new Date().toISOString() };
-  await templates.put(next);
-  return next;
+  // ADR 0848 M6 — a CAS, not a read-then-put: a blind put after a concurrent delete
+  // resurrected the row, and an id freed by that delete could be written over.
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const existing = await getTemplate(tenantId, orgId, templateId);
+    if (!existing) return null;
+    const next: EmailTemplate = { ...existing, ...patch, updatedAt: new Date().toISOString() };
+    if (await templates.compareAndSwap(existing, next)) return next;
+  }
+  throw new OpenwopError('conflict', 'Could not update the template (too many concurrent writes).', 409, { templateId });
 }
 export async function deleteTemplate(tenantId: string, orgId: string, templateId: string): Promise<boolean> {
   const existing = await getTemplate(tenantId, orgId, templateId);
   return existing ? templates.delete(templateId) : false;
 }
 
+/**
+ * ADR 0848 D1 — the id a deterministic draft writer (the run surface's
+ * `createDraftCampaign`, the copywriter agent's save-draft) should use.
+ *
+ * Their legacy ids (`tpl:<idemBase>:email-N`, `tpl:agent:<run>:<hash>`) are not
+ * tenant-qualified, and `publish-email-sequence`'s `idemBase` hashes only the subject
+ * lines — two tenants publishing the same sequence collided with no attacker present.
+ * Under D1 the second would now get a 409, so new ids carry a short hash of
+ * (tenant, org). The legacy id is still REUSED when — and only when — this workspace
+ * already owns it, so a replay of a run from before this change converges on its own
+ * rows. The probe is read-only (architect review H3): a legacy id held by someone else,
+ * or absent, falls through to the qualified id; it is never created or contested.
+ */
+export async function draftRowId(kind: 'template' | 'campaign', tenantId: string, orgId: string, prefix: string, rest: string): Promise<string> {
+  const legacyId = `${prefix}${rest}`;
+  const owned = kind === 'template' ? await getTemplate(tenantId, orgId, legacyId) : await getCampaign(tenantId, orgId, legacyId);
+  if (owned) return legacyId;
+  const h = createHash('sha256').update(`${tenantId}\u0000${orgId}`).digest('hex').slice(0, 10);
+  return `${prefix}${h}:${rest}`;
+}
+
 // ── campaigns ──
 export async function listCampaigns(tenantId: string, orgId: string): Promise<Campaign[]> {
-  return (await campaigns.list()).filter((c) => c.tenantId === tenantId && c.orgId === orgId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  return (await campaigns.listForTenantIndexed(tenantId)).filter((c) => c.tenantId === tenantId && c.orgId === orgId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 export async function getCampaign(tenantId: string, orgId: string, campaignId: string): Promise<Campaign | null> {
   const c = await campaigns.get(campaignId);
   return c && c.tenantId === tenantId && c.orgId === orgId ? c : null;
 }
 export async function createCampaign(input: { tenantId: string; orgId: string; templateId: string; stage?: ContactStage; segmentId?: string; createdBy: string; campaignId?: string; sourceBriefId?: string }): Promise<Campaign> {
-  // Idempotent on a caller-supplied deterministic id — a re-run/fork of a publish
-  // node returns the existing campaign instead of minting a duplicate (replay-safe).
-  if (input.campaignId) {
-    const prior = await getCampaign(input.tenantId, input.orgId, input.campaignId);
-    if (prior) return prior;
-  }
-  // `stage` and `segmentId` are mutually exclusive audience filters (ADR 0211 §2) —
-  // email remains the audience OWNER, CRM owns the filter definition.
-  if (input.stage && input.segmentId) {
-    throw new OpenwopError('validation_error', '`stage` and `segmentId` are mutually exclusive audience filters.', 400, { field: 'audience' });
-  }
-  if (input.segmentId && !(await getSegment(input.tenantId, input.segmentId))) {
-    throw new OpenwopError('validation_error', 'Unknown segmentId for this tenant.', 400, { field: 'segmentId', segmentId: input.segmentId });
-  }
-  const now = new Date().toISOString();
-  const c: Campaign = {
-    campaignId: input.campaignId ?? `cmp:${randomUUID()}`, tenantId: input.tenantId, orgId: input.orgId, templateId: input.templateId,
-    audience: { ...(input.stage ? { stage: input.stage } : {}), ...(input.segmentId ? { segmentId: input.segmentId } : {}) },
-    status: 'draft', ...(input.sourceBriefId ? { sourceBriefId: input.sourceBriefId } : {}), createdBy: input.createdBy, createdAt: now, updatedAt: now,
-  };
-  await campaigns.put(c);
-  return c;
+  // Idempotent on a caller-supplied deterministic id — a re-run/fork of a publish node
+  // returns the existing campaign instead of minting a duplicate (replay-safe) — onto a
+  // row this (tenant, org) OWNS only (ADR 0848 D1, #4485). The validation below runs on
+  // the CREATE branch only, so a replay still converges after its segment was deleted.
+  const campaignId = input.campaignId ?? `cmp:${randomUUID()}`;
+  const { row } = await insertOwnedOrConflict(campaigns, campaignId, ownedBy(input.tenantId, input.orgId), async () => {
+    // `stage` and `segmentId` are mutually exclusive audience filters (ADR 0211 §2) —
+    // email remains the audience OWNER, CRM owns the filter definition.
+    if (input.stage && input.segmentId) {
+      throw new OpenwopError('validation_error', '`stage` and `segmentId` are mutually exclusive audience filters.', 400, { field: 'audience' });
+    }
+    if (input.segmentId && !(await getSegment(input.tenantId, input.segmentId))) {
+      throw new OpenwopError('validation_error', 'Unknown segmentId for this tenant.', 400, { field: 'segmentId', segmentId: input.segmentId });
+    }
+    // ADR 0848 D1 — the template must be this (tenant, org)'s. The HTTP route checked
+    // it; the service — the exit every caller shares — did not.
+    if (!(await getTemplate(input.tenantId, input.orgId, input.templateId))) {
+      throw new OpenwopError('validation_error', 'Unknown templateId for this workspace.', 400, { field: 'templateId', templateId: input.templateId });
+    }
+    const now = new Date().toISOString();
+    return {
+      campaignId, tenantId: input.tenantId, orgId: input.orgId, templateId: input.templateId,
+      audience: { ...(input.stage ? { stage: input.stage } : {}), ...(input.segmentId ? { segmentId: input.segmentId } : {}) },
+      status: 'draft' as const, ...(input.sourceBriefId ? { sourceBriefId: input.sourceBriefId } : {}), createdBy: input.createdBy, createdAt: now, updatedAt: now,
+    };
+  });
+  return row;
 }
 export async function deleteCampaign(tenantId: string, orgId: string, campaignId: string): Promise<boolean> {
   const existing = await getCampaign(tenantId, orgId, campaignId);
@@ -482,6 +559,27 @@ async function sendCampaignSerialized(
     );
   }
 
+  // C4 (ADR 0218): engagement instrumentation needs an ABSOLUTE, browser-reachable
+  // backend base for the tracked-link + unsubscribe routes.
+  //
+  // ADR 0848 D7a — and without one there is NO unsubscribe link: `instrumentBody` (and
+  // with it the EM-19 refusal) only ran inside `if (linkBase)`, so a deployment with no
+  // public base shipped marketing mail with no opt-out at all, and no RFC 8058 header
+  // could be built. That used to be called "honest degradation"; a marketing send with
+  // no way to leave the list is non-compliant, so it is refused before any dispatch.
+  // `||` over trimmed values, not `??`: an EMPTY env var must fall through to the next,
+  // or `OPENWOP_EMAIL_LINK_BASE_URL=''` would hide a valid public base and 501 every send.
+  const linkBase = [process.env.OPENWOP_EMAIL_LINK_BASE_URL, process.env.OPENWOP_OAUTH_CALLBACK_BASE_URL, process.env.OPENWOP_PUBLIC_BASE_URL]
+    .map((v) => (v ?? '').trim()).find((v) => v !== '')?.replace(/\/+$/, '') ?? '';
+  if (!linkBase) {
+    throw new OpenwopError(
+      'capability_not_provided',
+      'This deployment has no public base URL, so campaign emails could not carry an unsubscribe link. Set OPENWOP_PUBLIC_BASE_URL (or OPENWOP_EMAIL_LINK_BASE_URL) to send campaigns.',
+      501,
+      { campaignId, field: 'linkBase' },
+    );
+  }
+
   let audience: Contact[];
   if (campaign.audience.segmentId) {
     try {
@@ -533,12 +631,6 @@ async function sendCampaignSerialized(
   // into `stats` transiently for the per-pass failure check.
   const stats: CampaignStats = { sent: 0, failed: 0, skipped: 0 };
 
-  // C4 (ADR 0218): engagement instrumentation needs an ABSOLUTE, browser-
-  // reachable backend base for the tracked-link + unsubscribe routes. Resolve
-  // once per pass; absent ⇒ send untracked (delivery beats tracking — honest
-  // degradation, logged).
-  const linkBase = (process.env.OPENWOP_EMAIL_LINK_BASE_URL ?? process.env.OPENWOP_OAUTH_CALLBACK_BASE_URL ?? process.env.OPENWOP_PUBLIC_BASE_URL ?? '').trim().replace(/\/+$/, '');
-
   // ADR 0267 / CDP-E — frequency governor config, read once per invocation.
   const { max: freqCap, windowDays: freqWindowDays } = emailFrequencyCap();
   const freqWindowStartIso = new Date(Date.now() - freqWindowDays * 86_400_000).toISOString();
@@ -585,10 +677,12 @@ async function sendCampaignSerialized(
     }
     const vars = { name: contact.name, email: contact.email, company: contact.company ?? '' };
     try {
-      let body = interpolate(template.body, vars);
+      // ADR 0848 D7a — `linkBase` is guaranteed above, so every message is instrumented
+      // and carries its unsubscribe link (or the send is refused inside, EM-19).
+      const instrumented = await instrumentBodyWithUnsubscribe(interpolate(template.body, vars, { markdown: template.format === 'markdown' }), linkBase, { tenantId, campaignId, contactId: contact.contactId, email: contact.email });
+      const body = instrumented.body;
       let html: string | undefined;
-      if (linkBase) {
-        body = await instrumentBody(body, linkBase, { tenantId, campaignId, contactId: contact.contactId, email: contact.email });
+      {
         // ADR 0242: multipart — render the instrumented body as the HTML part
         // with an open-tracking pixel. Best-effort: a mint/render failure leaves
         // a text-only send (delivery beats tracking).
@@ -608,6 +702,8 @@ async function sendCampaignSerialized(
         body,
         ...(html ? { html } : {}),
         from,
+        // ADR 0848 D7 — RFC 8058 one-click: the footer's own `/u/:token`, as a header.
+        listUnsubscribe: { url: instrumented.unsubscribeUrl },
         // EM-1/EM-UX-3 — the GENERATION is load-bearing, and its absence made a
         // resend deliver NOTHING while reporting full success for the whole
         // ledger TTL (`OPENWOP_EMAIL_LEDGER_TTL_DAYS`, default 30 days).
@@ -662,15 +758,28 @@ async function sendCampaignSerialized(
     else if (row.status === 'skipped') derived.skipped += 1;
     else derived.failed += 1;
   }
-  const next: Campaign = { ...campaign, status: exhausted ? 'sent' : 'sending', stats: derived, ...(generation ? { sendGeneration: generation } : {}), updatedAt: new Date().toISOString() };
-  await campaigns.put(next);
-  return next;
+  // ADR 0848 M6 — a CAS onto the CURRENT row, not a blind put of the copy read at the
+  // start of the pass: a campaign deleted mid-send was resurrected by that put. A lost
+  // race re-reads and re-applies only what this pass owns (status, stats, generation);
+  // a row that is gone stays gone.
+  let current: Campaign | null = campaign;
+  for (let attempt = 0; attempt < 4 && current; attempt++) {
+    const next: Campaign = { ...current, status: exhausted ? 'sent' : 'sending', stats: derived, ...(generation ? { sendGeneration: generation } : {}), updatedAt: new Date().toISOString() };
+    if (await campaigns.compareAndSwap(current, next)) return next;
+    current = await getCampaign(tenantId, orgId, campaignId);
+  }
+  if (!current) {
+    // The pass DID dispatch (the ledger records it); only the campaign row is gone. A
+    // `null` would read as "never existed" (404) after mail went out — say what happened.
+    throw new OpenwopError('conflict', 'The campaign was deleted while it was sending; the emails already dispatched in this pass were sent.', 409, { campaignId, reason: 'deleted_during_send' });
+  }
+  throw new OpenwopError('conflict', 'Could not record the send result (too many concurrent writes); re-run to continue.', 409, { campaignId });
 }
 
 /** Render a template with a contact's fields (pure — used by the render node). */
 export function renderTemplate(template: EmailTemplate, vars: { name?: string; email?: string; company?: string }): { subject: string; body: string } {
   const v = { name: vars.name ?? '', email: vars.email ?? '', company: vars.company ?? '' };
-  return { subject: interpolate(template.subject, v), body: interpolate(template.body, v) };
+  return { subject: interpolate(template.subject, v), body: interpolate(template.body, v, { markdown: template.format === 'markdown' }) };
 }
 
 /** GDPR data-subject erasure: delete every send-log for a (tenant, subjectKey). A
@@ -798,7 +907,8 @@ async function restoreSendLogsOnUnmerge(tenantId: string, sourceContactId: strin
  */
 async function emailFeatureLive(tenantId: string): Promise<boolean> {
   try {
-    return (await resolveOne('email', { tenantId }))?.enabled !== false;
+    // ADR 0819 §1 opt-out — money/compliance truth: this must apply whatever the tenant's plan.
+    return (await resolveToggle('email', { tenantId }))?.enabled !== false;
   } catch {
     return true;
   }

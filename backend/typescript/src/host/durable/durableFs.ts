@@ -10,7 +10,7 @@
  */
 
 import type { BundleScope, FsSurface } from '../inMemorySurfaces.js';
-import { requireDurableStorage } from './durableStore.js';
+import { listPage, requireDurableStorage, scanPrefix } from './durableStore.js';
 
 /** Normalize a user path INTO the tenant sandbox; reject anything that escapes.
  *  Returns a clean, posix, leading-slash-free relative path ('' === root). */
@@ -66,7 +66,7 @@ export function createDurableFs(scope: BundleScope): FsSurface {
       let deleted = await storage().kvDelete(fileKey(p));
       // Recursive: also remove any children under `<path>/`.
       const childPrefix = `${fileKey(p)}/`;
-      for (const row of await storage().kvList(childPrefix)) {
+      for await (const row of scanPrefix(childPrefix, { op: 'fs.delete' })) {
         if (await storage().kvDelete(row.key)) deleted = true;
       }
       return { deleted };
@@ -80,7 +80,8 @@ export function createDurableFs(scope: BundleScope): FsSurface {
         return { found: true, size: e.size, isFile: true, isDirectory: false, mtimeMs: e.mtimeMs };
       }
       // Directory if any descendant exists.
-      const children = await storage().kvList(`${fileKey(p)}/`);
+      // ADR 0868: one row answers "has a descendant".
+      const children = await listPage(`${fileKey(p)}/`, { limit: 1 });
       if (p !== '' && children.length > 0) {
         return { found: true, size: 0, isFile: false, isDirectory: true, mtimeMs: 0 };
       }
@@ -90,10 +91,11 @@ export function createDurableFs(scope: BundleScope): FsSurface {
     async list({ path }) {
       const base = normPath(path ?? '.');
       const listPrefix = base === '' ? root : `${root}${base}/`;
-      const rows = await storage().kvList(listPrefix);
+      // Walks every descendant (a directory listing has no page in the
+      // contract), in batches; `surface_scan_heavy` reports a large tree.
       const files = new Set<string>();
       const dirs = new Set<string>();
-      for (const row of rows) {
+      for await (const row of scanPrefix(listPrefix, { op: 'fs.list' })) {
         const rest = row.key.slice(listPrefix.length); // path relative to `base`
         if (rest === '') continue;
         const slash = rest.indexOf('/');

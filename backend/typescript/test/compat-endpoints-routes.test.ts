@@ -40,11 +40,11 @@ function client() {
 const uniqEmail = (who: string) => `${who}-${Date.now()}-${n++}@acme.test`;
 async function ownerWithOrg(who: string) {
   const c = client();
-  await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail(who) });
-  const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  await c.post('/host/openwop-app/test/login', { email: uniqEmail(who) });
+  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   return { c, orgId: org.body.orgId as string };
 }
-const CE = '/v1/host/openwop-app/compat-endpoints';
+const CE = '/host/openwop-app/compat-endpoints';
 
 describe('compat-endpoints routes (RFC 0108 / ADR 0121)', () => {
   it('create → list → delete round-trips for an org owner', async () => {

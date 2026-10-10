@@ -54,7 +54,7 @@ afterAll(async () => { __stopCollabLeaseHeartbeat(); __stopCollabUpdateSweep(); 
 let n = 0;
 async function login(): Promise<{ cookie: string; tenantId: string }> {
   const tenantId = `org:derive-${Date.now()}-${n++}`;
-  const res = await fetch(`${BASE}/v1/host/openwop-app/test/login`, {
+  const res = await fetch(`${BASE}/host/openwop-app/test/login`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ email: `derive-${Date.now()}-${n++}@acme.test`, tenantId }),
   });
@@ -75,7 +75,7 @@ const RELAY = Symbol('t');
 /** A minimal Yjs sync client mirroring the server protocol. */
 function client(cookie: string, canvasId: string): { doc: Y.Doc; ws: WebSocket; opened: Promise<void> } {
   const doc = new Y.Doc();
-  const ws = new WebSocket(`${WSBASE}/v1/host/openwop-app/canvas-collab/${canvasId}`, { headers: { cookie, origin: ORIGIN } });
+  const ws = new WebSocket(`${WSBASE}/host/openwop-app/canvas-collab/${canvasId}`, { headers: { cookie, origin: ORIGIN } });
   const opened = new Promise<void>((res, rej) => { ws.on('open', () => res()); ws.on('error', rej); });
   ws.on('open', () => { const e = encoding.createEncoder(); encoding.writeVarUint(e, 0); writeSyncStep1(e, doc); ws.send(encoding.toUint8Array(e)); });
   ws.on('message', (data) => { const dec = decoding.createDecoder(toBytes(data)); if (decoding.readVarUint(dec) !== 0) return; const e = encoding.createEncoder(); encoding.writeVarUint(e, 0); readSyncMessage(dec, e, doc, RELAY); if (encoding.length(e) > 1) ws.send(encoding.toUint8Array(e)); });
@@ -334,7 +334,7 @@ describe('grade-pass code findings (CODE-1/3/7)', () => {
 
   it('CODE-7: the _debug surface is superadmin-only (403 for a normal member)', async () => {
     const { cookie } = await login();
-    const res = await fetch(`${BASE}/v1/host/openwop-app/canvas-collab/_debug`, { headers: { cookie } });
+    const res = await fetch(`${BASE}/host/openwop-app/canvas-collab/_debug`, { headers: { cookie } });
     expect(res.status).toBe(403);
   });
 });

@@ -71,6 +71,11 @@
  * precedent: an owner names the field, the eraser matches only that one), which
  * is a forms-owner decision and not a default this change may pick.
  *
+ * `releasedBy` (ADR 0850 D3) is likewise KEPT: it is the OPERATOR's opaque
+ * `User.userId`, not the respondent's, and is the audit of who moved a held lead
+ * into delivery — the `createdBy` posture below. It is projected out of every
+ * read the agent or a run sees (`SUB_INTERNAL`).
+ *
  * WHAT THIS DELIBERATELY DOES NOT ERASE, stated here rather than left implicit
  * (the `crm:suppression` precedent — an unstated omission is how a whole feature
  * package went unnoticed). `forms:def` — the form DEFINITION — carries
@@ -90,14 +95,14 @@
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { registerSubjectEraser } from '../../host/subjectErasure.js';
 import { createLogger } from '../../observability/logger.js';
-import type { Submission } from './formsService.js';
+import { patchSubmission, ERASED_SUBMISSION_VALUE, type Submission } from './formsService.js';
 
 const log = createLogger('features.forms.erasure');
 
 /** What an erased answer becomes. Not `''` — an empty answer reads as "they
  *  left it blank", which is a different fact from "erased on request". Mirrors
  *  `crm/erasure.ts`'s `ERASED_VALUE`. */
-export const ERASED_VALUE = 'erased:subject';
+export const ERASED_VALUE = ERASED_SUBMISSION_VALUE;
 
 // The SAME namespace + key function as the owning service — this module reads and
 // writes the same rows. Declared here rather than exported from `formsService` so
@@ -130,17 +135,33 @@ export async function eraseFormsSubject(tenantId: string, subjectKey: string): P
       && Object.values(s.values ?? {}).some((v) => typeof v === 'string' && fold(v) === key);
     if (!byContact && !bySession && !byValue) continue;
 
-    const values = Object.fromEntries(Object.keys(s.values ?? {}).map((k) => [k, ERASED_VALUE]));
-    const alreadyErased = Object.values(s.values ?? {}).every((v) => v === ERASED_VALUE);
-    const metaEmpty = Object.keys(s.meta ?? {}).length === 0;
-    if (alreadyErased && metaEmpty) continue; // idempotent — nothing left to do
-
     // `contactId` is KEPT: it is an opaque pointer at a CRM row that
     // `crm/erasure.ts` anonymizes in the same fan-out, and dropping it here
     // would break the org's record of where the enquiry was routed while
     // erasing nothing (the same reasoning that keeps `crm:suppression`'s key).
-    await submissions.put({ ...s, values, meta: {} });
-    touched += 1;
+    //
+    // ADR 0850 D4 — applied to the CURRENT row through `patchSubmission`, never a
+    // `put` of the listed one: a marker write landing between the listing and
+    // this write must not restore the values, and a row deleted meanwhile must
+    // not be re-created. Running out of attempts THROWS, so the fan-out reports
+    // a failed erasure rather than a `rowsTouched` that silently missed a row.
+    // `erasedAt` is the marker a release refuses on (D3).
+    //
+    // Counted from the RESULT, not a flag set inside `fn` (grade-code FRM2CD-6): a
+    // flag set on an attempt whose swap then lost would count a write that never
+    // landed. `patchSubmission` returns the very object `fn` built only when that
+    // swap landed, so identity with the LAST object built is the proof of a write.
+    let lastBuilt: Submission | null = null;
+    const written = await patchSubmission(s.submissionId, (cur) => {
+      lastBuilt = null;
+      const alreadyErased = Object.values(cur.values ?? {}).every((v) => v === ERASED_VALUE);
+      const metaEmpty = Object.keys(cur.meta ?? {}).length === 0;
+      if (alreadyErased && metaEmpty && cur.erasedAt) return null; // idempotent — nothing left to do
+      const values = Object.fromEntries(Object.keys(cur.values ?? {}).map((k) => [k, ERASED_VALUE]));
+      lastBuilt = { ...cur, values, meta: {}, erasedAt: cur.erasedAt ?? new Date().toISOString() };
+      return lastBuilt;
+    });
+    if (written !== null && written === lastBuilt) touched += 1;
   }
 
   // Logged because a silent erasure is indistinguishable from one that never ran

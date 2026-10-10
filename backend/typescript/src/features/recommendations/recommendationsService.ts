@@ -24,6 +24,7 @@ import type { CriteriaSet } from '../priority-matrix/types.js';
 import { listProducts, getProduct, listOrders, type Product } from '../commerce/commerceService.js';
 import { resolveSegmentMembers } from '../crm/segmentsService.js';
 import { createLogger } from '../../observability/logger.js';
+import { tenantFeatureCheck } from '../../host/tenantFeatureGate.js';
 
 const log = createLogger('recommendations');
 
@@ -210,6 +211,9 @@ export async function rebuildAffinity(tenantId: string, orgId: string): Promise<
   return { written, removed };
 }
 
+/** ADR 0820 §7 / G10 — the toggle the affinity rebuild's compute belongs to. */
+export const RECOMMENDATIONS_FEATURE_ID = 'recommendations';
+
 /** Rebuild affinity (daemon tick) for every org with an ACTIVE placement — the
  *  only orgs whose cache is ever read. Bounded by the placement count; the single
  *  cross-tenant scan (`placements.list()`) is daemon-only, never a request path. */
@@ -217,8 +221,12 @@ export async function rebuildAllAffinity(): Promise<number> {
   const pairs = new Set<string>();
   for (const p of await placements.list()) if (p.active) pairs.add(`${p.tenantId}::${p.orgId}`);
   let total = 0;
+  // ADR 0820 §7 / G10 — compute spend only for tenants that may use
+  // `recommendations` (toggle + plan); a lapsed tenant is skipped silently.
+  const mayUse = tenantFeatureCheck(RECOMMENDATIONS_FEATURE_ID);
   for (const pair of pairs) {
     const [tenantId, orgId] = pair.split('::');
+    if (!(await mayUse(tenantId!))) continue;
     total += (await rebuildAffinity(tenantId!, orgId!)).written;
   }
   return total;

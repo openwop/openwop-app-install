@@ -63,11 +63,11 @@ function client() {
 }
 async function shop(): Promise<{ owner: ReturnType<typeof client>; orgId: string; tenantId: string }> {
   const owner = client();
-  const r = await owner.post('/v1/host/openwop-app/test/login', { email: `hd-${Date.now()}-${n++}@x.test` });
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Shop' });
+  const r = await owner.post('/host/openwop-app/test/login', { email: `hd-${Date.now()}-${n++}@x.test` });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Shop' });
   return { owner, orgId: org.body.orgId, tenantId: r.body.user?.tenantId ?? '' };
 }
-const c = (o: string, s = ''): string => `/v1/host/openwop-app/commerce/orgs/${encodeURIComponent(o)}${s}`;
+const c = (o: string, s = ''): string => `/host/openwop-app/commerce/orgs/${encodeURIComponent(o)}${s}`;
 async function paidOrder(owner: ReturnType<typeof client>, orgId: string, price = 10): Promise<string> {
   const p = await owner.post(c(orgId, '/products'), { type: 'physical', name: `P${n++}`, price, currency: 'USD', inventory: 20 });
   const o = await owner.post(c(orgId, '/orders'), { lines: [{ productId: p.body.productId, quantity: 1 }] });
@@ -140,7 +140,7 @@ describe('I3 — spend gate fails closed on a policy read error', () => {
 });
 
 describe('B8/B9 — UCP buyer cap + timeout', () => {
-  const buy = (o: string, s = ''): string => `/v1/host/openwop-app/commerce/orgs/${encodeURIComponent(o)}/ucp-buyer${s}`;
+  const buy = (o: string, s = ''): string => `/host/openwop-app/commerce/orgs/${encodeURIComponent(o)}/ucp-buyer${s}`;
   async function approvedDraft(owner: ReturnType<typeof client>, orgId: string, tenantId: string, unitMinor: number): Promise<string> {
     const d = await owner.post(buy(orgId, '/purchases'), { merchantUrl: MERCHANT_URL, intent: 'buy', maxAmountMinor: unitMinor * 2, currency: 'USD', lines: [{ externalProductId: 'x', name: 'X', quantity: 1, unitPriceMinor: unitMinor }] });
     const pid: string = d.body.purchaseId;

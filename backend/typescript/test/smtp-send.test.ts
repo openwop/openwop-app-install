@@ -7,6 +7,7 @@
  * so no socket is opened.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import net from 'node:net';
 import { createApp } from '../src/index.js';
 import type { Storage } from '../src/storage/storage.js';
 import { sendViaSmtp } from '../src/host/smtpSend.js';
@@ -18,8 +19,8 @@ const blob = (over: Record<string, unknown> = {}): string =>
   JSON.stringify({ host: '127.0.0.1', port: 587, secure: false, user: 'mailer@x.com', pass: 's3cret-pw', ...over });
 
 describe('SMTP transport + adapter dispatch (ADR 0201)', () => {
-  it('the REAL nodemailer transport accepts our SmtpDialOptions subset (v9 runtime pin — no dial)', async () => {
-    // Dependency-bump pin (nodemailer 6→9): createTransport validates options
+  it('the REAL nodemailer transport accepts our SmtpDialOptions subset (v10 runtime pin — no dial)', async () => {
+    // Dependency-bump pin (nodemailer 6→9→10): createTransport validates options
     // at construction without opening a socket; sendMail is never called.
     const { default: nodemailer } = await import('nodemailer');
     const opts: SmtpDialOptions = {
@@ -39,6 +40,79 @@ describe('SMTP transport + adapter dispatch (ADR 0201)', () => {
     // smtpEgress pinned-IP SNI pattern — smtpSend.ts's load-bearing comment).
     expect((transporter.options as { servername?: string }).servername).toBe('smtp.example.com');
     transporter.close();
+  });
+
+  // nodemailer 9→10 (a major, on the live send path): the REAL transport against
+  // a local plaintext SMTP stub, so the protocol exchange is exercised without a
+  // real server. The stub advertises AUTH and (optionally) never STARTTLS, and
+  // records every command it receives.
+  async function smtpStub(opts: { starttls: boolean }): Promise<{ port: number; seen: string[]; data: string[]; close: () => Promise<void> }> {
+    const seen: string[] = [];
+    const data: string[] = [];
+    const server = net.createServer((sock) => {
+      let inData = false;
+      let buf = '';
+      sock.write('220 stub ESMTP\r\n');
+      sock.on('data', (chunk) => {
+        buf += chunk.toString('utf8');
+        let i;
+        while ((i = buf.indexOf('\r\n')) >= 0) {
+          const line = buf.slice(0, i); buf = buf.slice(i + 2);
+          if (inData) {
+            if (line === '.') { inData = false; sock.write('250 2.0.0 queued as stub-1\r\n'); } else data.push(line);
+            continue;
+          }
+          seen.push(line);
+          const verb = line.split(' ')[0]!.toUpperCase();
+          if (verb === 'EHLO') sock.write(`250-stub${opts.starttls ? '\r\n250-STARTTLS' : ''}\r\n250 AUTH PLAIN LOGIN\r\n`);
+          else if (verb === 'AUTH') sock.write('235 2.7.0 ok\r\n');
+          else if (verb === 'MAIL' || verb === 'RCPT') sock.write('250 ok\r\n');
+          else if (verb === 'DATA') { inData = true; sock.write('354 go\r\n'); }
+          else if (verb === 'QUIT') { sock.write('221 bye\r\n'); sock.end(); }
+          else sock.write('502 no\r\n');
+        }
+      });
+      sock.on('error', () => {});
+    });
+    await new Promise<void>((res) => server.listen(0, '127.0.0.1', () => res()));
+    return { port: (server.address() as net.AddressInfo).port, seen, data, close: () => new Promise<void>((res) => server.close(() => res())) };
+  }
+
+  it('v10 REAL transport: requireTLS (our 587 posture) refuses a server with no STARTTLS — no AUTH, no MAIL is ever sent', async () => {
+    const { default: nodemailer } = await import('nodemailer');
+    const stub = await smtpStub({ starttls: false });
+    try {
+      const opts: SmtpDialOptions = { host: '127.0.0.1', port: stub.port, secure: false, requireTLS: true, auth: { user: 'u', pass: 'p' }, connectionTimeout: 3000, greetingTimeout: 3000, socketTimeout: 3000 };
+      const t = nodemailer.createTransport(opts);
+      await expect(t.sendMail({ from: 'a@x.com', to: 'b@y.com', subject: 's', text: 't' })).rejects.toThrow();
+      expect(stub.seen.some((l) => /^AUTH\b/i.test(l)), `credentials crossed a plaintext link: ${stub.seen.join(' | ')}`).toBe(false);
+      expect(stub.seen.some((l) => /^MAIL\b/i.test(l))).toBe(false);
+      t.close();
+    } finally { await stub.close(); }
+  });
+
+  it('v10 REAL transport: AUTH + our full message shape reach the server (cc/bcc envelope, replyTo, html, messageId)', async () => {
+    // Plaintext + requireTLS:false ONLY because a local stub has no certificate;
+    // sendViaSmtp never builds this (it forces requireTLS on secure:false). What is
+    // under test is v10's AUTH exchange and message composition on our SmtpMessage.
+    const { default: nodemailer } = await import('nodemailer');
+    const stub = await smtpStub({ starttls: false });
+    try {
+      const t = nodemailer.createTransport({ host: '127.0.0.1', port: stub.port, secure: false, requireTLS: false, ignoreTLS: true, auth: { user: 'mailer@x.com', pass: 's3cret-pw' }, connectionTimeout: 3000, greetingTimeout: 3000, socketTimeout: 3000 });
+      const msg: SmtpMessage = { from: 'a@x.com', to: ['b@y.com'], cc: 'c@y.com', bcc: ['d@y.com'], subject: 'hello v10', text: 'plain body', html: '<p>html body</p>', replyTo: 'r@x.com' };
+      const info = await t.sendMail(msg);
+      expect(typeof info.messageId).toBe('string');
+      expect(stub.seen.some((l) => /^AUTH (PLAIN|LOGIN)/i.test(l))).toBe(true);
+      const rcpts = stub.seen.filter((l) => /^RCPT TO:/i.test(l)).join(' ');
+      for (const r of ['b@y.com', 'c@y.com', 'd@y.com']) expect(rcpts).toContain(r);
+      const body = stub.data.join('\n');
+      expect(body).toMatch(/^Subject: hello v10$/m);
+      expect(body).toMatch(/^Reply-To: r@x\.com$/m);
+      expect(body).not.toMatch(/^Bcc:/m); // bcc is envelope-only
+      expect(body).toContain('plain body');
+      expect(body).toContain('<p>html body</p>');
+      t.close();
+    } finally { await stub.close(); }
   });
 
   let storage: Storage;

@@ -2,7 +2,7 @@
  * CFP-1 (CHAT-FIRST-PORT-AUDIT #1, unit E8 / MERCH-C) — the Discovery Curator's
  * REAL conversational tools.
  *
- * The agent pack (`feature.discovery.agents`) allowlisted node typeIds that no
+ * The agent pack (`vendor.openwop-app.discovery.agents`) allowlisted node typeIds that no
  * provider projects into chat, so at dispatch every tool was silently dropped
  * (agentDispatch resolveAgentTools) — a persona that loads, answers, and can do
  * nothing. These `registerFeatureAgentTool` builtins fix that: one thin wrapper
@@ -92,6 +92,7 @@ function fromServiceError(e: unknown): { content: string; isError: true } {
 export function registerDiscoveryAgentTools(): void {
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read', // ADR 0784: a derived-index refresh is not a user-visible change
     def: {
       name: DISCOVERY_SEARCH_TOOL_ID,
       description:
@@ -123,6 +124,7 @@ export function registerDiscoveryAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: DISCOVERY_LIST_COLLECTIONS_TOOL_ID,
       description:
@@ -151,6 +153,7 @@ export function registerDiscoveryAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: DISCOVERY_LIST_RULES_TOOL_ID,
       description:
@@ -175,6 +178,7 @@ export function registerDiscoveryAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: DISCOVERY_CREATE_COLLECTION_TOOL_ID,
       description:
@@ -233,6 +237,7 @@ export function registerDiscoveryAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: DISCOVERY_CREATE_RULE_TOOL_ID,
       description:

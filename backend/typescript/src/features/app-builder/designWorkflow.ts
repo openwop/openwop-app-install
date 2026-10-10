@@ -136,7 +136,7 @@ export function registerDesignChainWorkflow(): void {
     log.error('design_chain_registration_failed', { error: err instanceof Error ? err.message : String(err) });
     return;
   }
-  registerChainBackedWorkflow(APP_BUILDER_DESIGN_WORKFLOW_ID, { postProcess: appBuilderPostProcess });
-  registerChainBackedWorkflow(APP_BUILDER_REPAIR_WORKFLOW_ID, { postProcess: appBuilderPostProcess });
-  registerChainBackedWorkflow(APP_BUILDER_PLAN_TO_KANBAN_WORKFLOW_ID, { postProcess: appBuilderPostProcess });
+  registerChainBackedWorkflow(APP_BUILDER_DESIGN_WORKFLOW_ID, { postProcess: appBuilderPostProcess, featureId: 'app-builder' }); // ADR 0820 §7 / G6
+  registerChainBackedWorkflow(APP_BUILDER_REPAIR_WORKFLOW_ID, { postProcess: appBuilderPostProcess, featureId: 'app-builder' });
+  registerChainBackedWorkflow(APP_BUILDER_PLAN_TO_KANBAN_WORKFLOW_ID, { postProcess: appBuilderPostProcess, featureId: 'app-builder' });
 }

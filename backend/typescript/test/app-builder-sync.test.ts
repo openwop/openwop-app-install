@@ -51,18 +51,18 @@ const setSyncToggle = async (status: 'on' | 'off'): Promise<void> => {
 };
 
 const STATE = { name: 'S', screens: [{ id: 'home', name: 'Home', isInitial: true, components: [{ type: 'text', props: { text: 'x' } }] }] };
-const AB = (orgId: string) => `/v1/host/openwop-app/app-builder/orgs/${encodeURIComponent(orgId)}`;
+const AB = (orgId: string) => `/host/openwop-app/app-builder/orgs/${encodeURIComponent(orgId)}`;
 const BIND = { owner: 'octo', repo: 'my-app', branch: 'main', target: 'html-css' };
 
 async function ownerEditorCanvas(): Promise<{ owner: Client; editor: Client; orgId: string; canvasId: string }> {
   const tenantId = `org:test-ab-sync-${Date.now()}-${n++}`;
   const owner = client();
-  await owner.post('/v1/host/openwop-app/test/login', { email: `own-${Date.now()}-${n++}@acme.test`, tenantId });
+  await owner.post('/host/openwop-app/test/login', { email: `own-${Date.now()}-${n++}@acme.test`, tenantId });
   const editor = client();
-  const editorUser = (await editor.post('/v1/host/openwop-app/test/login', { email: `ed-${Date.now()}-${n++}@acme.test`, tenantId })).body.user;
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const editorUser = (await editor.post('/host/openwop-app/test/login', { email: `ed-${Date.now()}-${n++}@acme.test`, tenantId })).body.user;
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
-  const add = await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(org.body.orgId)}/members`, { displayName: 'Ed', subject: editorUser.userId, roles: ['editor'] });
+  const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(org.body.orgId)}/members`, { displayName: 'Ed', subject: editorUser.userId, roles: ['editor'] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
   const canvas = await createCanvasForTenant(tenantId, { canvasTypeId: 'canvas.app-builder', name: 'S', initialState: STATE });
   return { owner, editor, orgId: org.body.orgId, canvasId: canvas.canvasId };

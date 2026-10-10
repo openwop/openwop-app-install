@@ -36,6 +36,7 @@ import { AgentDetailsEditor } from './AgentDetailsEditor.js';
 import { Notice } from '../ui/Notice.js';
 import { StateCard } from '../ui/StateCard.js';
 import { Markdown } from '../ui/Markdown.js';
+import { useAgentWriteAccess, writeErrorMessage } from './agentWriteAccess.js';
 
 /** Human label for an agent's RESOLVED autonomous-heartbeat cadence (ms) — pass
  *  `heartbeat.effectiveIntervalMs` (ADR 0313), which folds in the host default;
@@ -73,6 +74,9 @@ export function AgentWorkspacePage(): JSX.Element {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // ADR 0775 D1 (grade-ux ARUX-2) — pause / delete / check-now / edit details /
+  // photo need `workspace:write`; a viewer is not offered them.
+  const canWrite = useAgentWriteAccess();
   const [editingAvatar, setEditingAvatar] = useState(false);
   const [editingDetails, setEditingDetails] = useState(false);
   // Bumped on board-affecting actions (Check now) so the embedded board refetches.
@@ -180,7 +184,7 @@ export function AgentWorkspacePage(): JSX.Element {
       setBoardRefresh((n) => n + 1); // make the Board tab reflect the moved card immediately
       if (result.picked) setTab('board');
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(writeErrorMessage(err, t('common:error_forbidden')));
     } finally {
       setBusy(false);
     }
@@ -192,7 +196,7 @@ export function AgentWorkspacePage(): JSX.Element {
       await updateRosterEntry(view.entry.rosterId, { enabled: !view.entry.enabled });
       await refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(writeErrorMessage(err, t('common:error_forbidden')));
     }
   };
 
@@ -212,7 +216,7 @@ export function AgentWorkspacePage(): JSX.Element {
       window.dispatchEvent(new Event('openwop:pinned-chat-agents-changed'));
       navigate('/agents');
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(writeErrorMessage(err, t('common:error_forbidden')));
       setBusy(false); // stay on the page so the user can retry; on success we navigate away
     }
   };
@@ -239,7 +243,10 @@ export function AgentWorkspacePage(): JSX.Element {
       setNotice(avatarUrl ? t('wsAvatarUpdated', { persona: view.entry.persona }) : t('wsAvatarRemoved', { persona: view.entry.persona }));
     } catch (err) {
       // Keep the editor open so the user can retry / shrink an oversized image.
-      setError(err instanceof Error ? err.message : String(err));
+      // Grade-ux ARUX-2 — RETHROW so the editor's own error line shows it: the
+      // page Notice renders BEHIND the modal, and swallowing here made the
+      // editor treat a failed save as success.
+      throw new Error(writeErrorMessage(err, t('common:error_forbidden')));
     }
   };
 
@@ -267,17 +274,19 @@ export function AgentWorkspacePage(): JSX.Element {
 
       {/* Header */}
       <div className="agentws-header">
-        <AgentAvatar persona={entry.persona} avatarUrl={entry.avatarUrl} roleTheme={theme} size={48} onEdit={() => setEditingAvatar(true)} />
+        <AgentAvatar persona={entry.persona} avatarUrl={entry.avatarUrl} roleTheme={theme} size={48} onEdit={canWrite ? () => setEditingAvatar(true) : undefined} />
         <div className="u-flex-1 u-minw-200">
           <h1 className="u-m-0 u-flex u-items-center u-gap-2 u-wrap">
             {entry.persona}
-            <Button
-              variant="secondary" size="sm" className="u-iflex u-items-center u-gap-1"
-              onClick={() => setEditingDetails(true)}
-              title={t('wsEditDetailsTitle', { persona: entry.persona })}
-            >
-              <PencilIcon size={13} /> {t('wsEditDetails')}
-            </Button>
+            {canWrite ? (
+              <Button
+                variant="secondary" size="sm" className="u-iflex u-items-center u-gap-1"
+                onClick={() => setEditingDetails(true)}
+                title={t('wsEditDetailsTitle', { persona: entry.persona })}
+              >
+                <PencilIcon size={13} /> {t('wsEditDetails')}
+              </Button>
+            ) : null}
           </h1>
           <div className="muted">{entry.label ?? t('agent')}</div>
         </div>
@@ -332,25 +341,29 @@ export function AgentWorkspacePage(): JSX.Element {
       </div>
 
       <div className="action-bar u-mb-3 u-items-center">
-        <Button variant="primary"
-          onClick={() => void onCheckNow()}
-          disabled={busy || !entry.enabled}
-          title={t('wsCheckNowTitle', { persona: entry.persona })}
-        >
-          {busy ? t('wsChecking') : t('wsCheckNow')}
-        </Button>
+        {canWrite ? (
+          <Button variant="primary"
+            onClick={() => void onCheckNow()}
+            disabled={busy || !entry.enabled}
+            title={t('wsCheckNowTitle', { persona: entry.persona })}
+          >
+            {busy ? t('wsChecking') : t('wsCheckNow')}
+          </Button>
+        ) : null}
         <Button variant="secondary" onClick={() => setTab('board')}>{t('wsAddTask')}</Button>
         <Button variant="secondary" onClick={() => setTab('workflows')}>{t('wsRunWorkflow')}</Button>
-        <Button variant="secondary" onClick={() => void onTogglePause()}>{entry.enabled ? t('wsPause') : t('wsResume')}</Button>
+        {canWrite ? <Button variant="secondary" onClick={() => void onTogglePause()}>{entry.enabled ? t('wsPause') : t('wsResume')}</Button> : null}
         <Button variant="secondary" onClick={() => setTab('instructions')}>{t('wsInstructions')}</Button>
-        <Button
-          variant="danger"
-          onClick={() => void onDelete()}
-          disabled={busy}
-          title={t('wsDeleteTitle', { persona: entry.persona })}
-        >
-          {t('wsDelete')}
-        </Button>
+        {canWrite ? (
+          <Button
+            variant="danger"
+            onClick={() => void onDelete()}
+            disabled={busy}
+            title={t('wsDeleteTitle', { persona: entry.persona })}
+          >
+            {t('wsDelete')}
+          </Button>
+        ) : null}
         <span className="muted u-fs-12">
           {entry.lastHeartbeatAt
             ? t('wsLastChecked', { when: relativeTime(entry.lastHeartbeatAt) })
@@ -386,7 +399,7 @@ export function AgentWorkspacePage(): JSX.Element {
         ))}
       </div>
 
-      {tab === 'overview' ? <OverviewTab view={view} onGoto={setTab} onCheckNow={() => void onCheckNow()} busy={busy} /> : null}
+      {tab === 'overview' ? <OverviewTab view={view} onGoto={setTab} onCheckNow={canWrite ? () => void onCheckNow() : undefined} busy={busy} /> : null}
       {tab === 'workflows' ? <AgentWorkflowPortfolioPanel entry={entry} jobs={view.jobs} board={view.board} onChanged={() => void refresh()} /> : null}
       {tab === 'board' ? (view.board ? <AgentBoardPanel boardId={view.board.id} persona={entry.persona} avatarUrl={entry.avatarUrl} roleTheme={theme} workflows={entry.workflows} refreshSignal={boardRefresh} onChanged={() => void refresh()} /> : <NoBoard persona={entry.persona} />) : null}
       {tab === 'schedules' ? <AgentSchedulesPanel entry={entry} /> : null}
@@ -530,7 +543,7 @@ function PriorityPanel({
 }: {
   view: AgentView;
   onGoto: (t: TabKey) => void;
-  onCheckNow: () => void;
+  onCheckNow: (() => void) | undefined;
   busy: boolean;
 }): JSX.Element {
   const { t } = useTranslation('agents');
@@ -557,9 +570,11 @@ function PriorityPanel({
                 {topTodo.title}
                 {topTodo.priority === 'high' ? <span className="chip chip--danger agentws-high-chip">{t('wsHigh')}</span> : null}
               </div>
-              <Button variant="primary" size="sm" className="u-mt-1-5" onClick={onCheckNow} disabled={busy || !entry.enabled}>
-                {busy ? t('wsChecking') : t('wsPickUpNow')}
-              </Button>
+              {onCheckNow ? (
+                <Button variant="primary" size="sm" className="u-mt-1-5" onClick={onCheckNow} disabled={busy || !entry.enabled}>
+                  {busy ? t('wsChecking') : t('wsPickUpNow')}
+                </Button>
+              ) : null}
             </>
           ) : (
             <div className="muted u-fs-13">{t('wsNoPendingTasks')} <Button variant="secondary" size="sm" onClick={() => onGoto('board')}>{t('wsAddATask')}</Button></div>
@@ -592,7 +607,7 @@ function PriorityPanel({
   );
 }
 
-function OverviewTab({ view, onGoto, onCheckNow, busy }: { view: AgentView; onGoto: (t: TabKey) => void; onCheckNow: () => void; busy: boolean }): JSX.Element {
+function OverviewTab({ view, onGoto, onCheckNow, busy }: { view: AgentView; onGoto: (t: TabKey) => void; onCheckNow: (() => void) | undefined; busy: boolean }): JSX.Element {
   const { t } = useTranslation('agents');
   const { entry, laneCounts, nextSchedule } = view;
   return (

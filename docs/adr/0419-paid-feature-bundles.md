@@ -112,6 +112,17 @@ Sell bundles as **platform→tenant entitlements** on the billing rail.
    Other sellable bundles (marketing/cdp/…) gate their features the same way
    before being priced.
 
+   > **CORRECTED 2026-10-05 (ADR 0819 §1) — "ONE universal choke" was true for
+   > HTTP routes only.** Chat agent tools, `ctx.features` workflow nodes, the
+   > collab socket, MCP projections, schedules, triggers and chat-recall sources
+   > never pass through `requireFeatureEnabled`. They resolved the toggle alone,
+   > so `priced ⟹ gated` held on the route and failed on every other lane. This
+   > was proved RED: a narrowed-plan tenant got 403 from `GET /strategy`, while
+   > `openwop:strategy.list-strategies` and `ctx.features['priority-matrix']`
+   > served it. ADR 0819 moves the check into `resolveOne` itself, so every lane
+   > is paywalled by default. The public-caller exemption below survives as an
+   > explicit, ratchet-listed `resolveToggle` opt-out.
+
    **§Correction (2026-07-19) — the CENTRAL gate (Option D) replaces the
    per-feature grind.** The R2 code showed the honest way to gate the *remaining*
    ~40 bundle features is NOT ~40 per-feature edits. `authorizeOrgScope` calls
@@ -262,6 +273,66 @@ Sell bundles as **platform→tenant entitlements** on the billing rail.
    deep-link locked-state (a bookmarked URL still hits the backend 403) remains
    the recorded follow-on.
 
+   > **IMPLEMENTATION NOTE 2026-10-06 (§8 follow-on — the locked state names its
+   > bundle; ADR 0820 §7; branch `feat/locked-feature-upgrade-prompts`).** "This
+   > feature needs an upgrade" → the bare store is replaced by a specific prompt.
+   > - **Which bundle** is DATA: the catalog's feature → bundle membership
+   >   (`bundles.json`, via `/marketplace/feature-bundles`), never a UI map. Price,
+   >   value line and buyability come from `/billing/bundles` (`purchasable`,
+   >   `priceDisplay`, `cadences`); a plan line comes from `/public/pricing` through
+   >   the store's own `cheaperPlanFor`, so it shows only when a paid plan covering
+   >   the bundle is cheaper than the bundles it includes and every figure parses.
+   >   All three reads are cached per session (`features/marketplace/lockedUpsell.ts`);
+   >   a failed read is not cached.
+   > - **The prompt** (`features/marketplace/LockedUpgradePrompt.tsx`, rendered by
+   >   `LockedState`): bundle name, blurb, monthly price with the yearly one
+   >   underneath, "Add {bundle} · $X/mo" → `/marketplace/bundles?bundle=<id>`
+   >   (opens the detail drawer, never checkout), and "Or get it with {plan}" →
+   >   `?view=compare`. A viewer without `host:billing:manage` reads "Ask a workspace
+   >   admin to add {bundle}" with no buy CTA. A bundle that is not `purchasable`
+   >   gets honest copy and no price or CTA. A feature in no bundle keeps the old
+   >   generic copy.
+   > - **Deep links:** the follow-on above is closed by the EXISTING mapping, not a
+   >   per-page one. A page whose read gets the plan 403 re-resolves entitlements
+   >   (UI-ENT-1b, `client/entitlementRefresh`), `EntitlementGuard` swaps in the lazy
+   >   `LockedState`, and that is where the prompt lives. Limit: only `requestJson`
+   >   reads reach that seam (raw `fetch` call sites still show their own error), and
+   >   the guard locks on the ROUTE's owner feature, so a 403 for a different
+   >   feature's endpoint is not turned into this prompt.
+   > - **Nav:** the entry-chunk Sidebar and Agents row link a locked item to
+   >   `/marketplace/bundles?feature=<id>`; the store resolves that from the catalog to
+   >   the bundle that sells it and replaces it with `?bundle=<id>` (the drawer opens),
+   >   or drops it when no bundle sells the feature. Their tooltip stays the generic
+   >   "Locked — unlock in the feature store": naming the bundle there would need a
+   >   lookup in the entry chunk (measured below). The lazily-loaded ⌘K palette, admin
+   >   rail, admin overview and chat `@@` picker use `featureToggles/lockedTargets.ts`:
+   >   the first time a locked item renders it loads the feature → bundle lookup
+   >   through the `LockedState` chunk (one catalog read per session), then links
+   >   straight to `?bundle=<id>` and labels the lock "Locked — unlock with {bundle}"
+   >   (lazy `marketplace` namespace).
+   > - **Telemetry:** the existing UI-ENT-1 events gain `bundle`
+   >   (`app.entitlement.locked_view`, and `app.entitlement.upsell_click` with
+   >   `target: 'bundle' | 'compare'`). No new event names or pipeline. Nav clicks
+   >   emit nothing new (that would cost entry-chunk bytes).
+   > - **Bundle budget (measured with `npm run build` on the merged tip, main at
+   >   `c790b4127`):** the entry chunk's headroom went 222 → 167 B (+55 B gzip), and the
+   >   shared `i18n` chunk's went 348 → 391 B (+43 B). The first cut of this change cost
+   >   the entry +183 B and was rejected in review. Two findings drove the redesign:
+   >   - Vite lists a lazy chunk's static dependencies in the ENTRY chunk's preload
+   >     map. So `LockedState` statically imports only what the entry already holds,
+   >     and reaches the marketplace modules through a second dynamic hop
+   >     (`features/marketplace/LockedUpgradePrompt`).
+   >   - Any bundle lookup in the Sidebar cost about 150 B. Hence the `?feature=` link.
+   >   The shell `chrome:lockedFeatureBody`, `chrome:lockedFeatureCta` and `ui:cmdkLocked`
+   >   keys no longer render and were removed. The new copy is all in `marketplace`.
+   >   `featureToggles/__tests__/lockedTargetsEntrySplit.test.ts` pins the import shape.
+   > Witnesses: `features/marketplace/__tests__/lockedUpsell.test.ts`,
+   > `featureToggles/__tests__/{LockedState,deepLinkPlan403}.test.tsx`,
+   > `ui/__tests__/CommandPalette.locked.test.tsx`, `chrome/__tests__/Sidebar.lock.test.tsx`,
+   > `features/marketplace/__tests__/BundleShopPage.test.tsx` (`?feature=`),
+   > `chat/__tests__/boardsLocked.test.tsx` (12 tests red against the pre-change
+   > components).
+
 ## Evaluation-matrix notes
 
 - **Feature-package/toggle:** extends `billing` + `marketplace`; the store rides
@@ -316,3 +387,85 @@ is the wrong lane — that is `commerce-connect` (ADR 0385, Stripe Connect), and
 this ADR would be superseded. If no bundle is ever priced
 (`OPENWOP_BILLING_BUNDLE_PRICES` empty), the store shows nothing for sale and the
 reference host is byte-identical to today — nothing is lost.
+
+## Correction note — ADR 0786 (2026-09-29)
+
+§4 "the entitlement flips only on the verified paid event" was not what the code did:
+a bundle grant was `active` for every `customer.subscription.*` event that was not a
+`.deleted`, so `incomplete` (3-D Secure pending), `unpaid` and `incomplete_expired`
+subscriptions granted, and a late `.updated` after `.deleted` re-granted a cancelled
+bundle. One-time bundles fulfilled on `checkout.session.completed` without reading
+`payment_status`. ADR 0786 D2/D4 put the grant on the plan's entitled-status predicate
+(`active | trialing`), remember ended subscription ids, and fulfil one-time purchases
+only when Stripe reports them paid. §"Evaluation-matrix notes" said buying is a
+billing-admin/owner action and anon tenants cannot buy; neither was enforced until
+ADR 0786 D5 (`host:billing:manage`).
+
+> **CORRECTED 2026-10-01 — the operator was paywalled on their own host, and a
+> locked feature read as a failure.** Two defects, one screenshot: the host's
+> superadmin typed `@@` in chat and saw "Couldn't load boards: Your plan (free)
+> does not include this feature..".
+>
+> 1. **The entitlement gate asked only what the TENANT had bought.** The
+>    operator — the tenant in `OPENWOP_SUPERADMIN_TENANTS` — is on the free plan
+>    like anyone who has not checked out, so every sellable feature was locked
+>    for them. The paywall sells features to customers; it does not lock the
+>    operator out. Now: `resolveEntitlements` answers `'*'` for a listed tenant,
+>    `requireEntitledFeature` passes a listed superadmin in ANY workspace
+>    (superadmin follows the person), and `GET …/billing/entitlements` agrees so
+>    the SPA locks nothing. The plan is still reported truthfully (`free`).
+>    **Allowlist only** (`host/superadmin.ts` `isListedSuperadmin`): not
+>    `OPENWOP_FEATURE_TOGGLES_DEV_OPEN`, which makes every caller a superadmin
+>    and would un-paywall everyone, and not a wildcard bearer. `priced ⟹ gated`
+>    is unchanged for every other tenant —
+>    `test/entitlement-superadmin-unrestricted.test.ts` uses an ordinary tenant
+>    on the same narrowed plan as its control.
+> 2. **The `@@` picker treated the 403 as a load error.** It fetched the board
+>    list, was refused, and rendered the server's sentence inside "Couldn't load
+>    boards: {{error}}." (hence the doubled period). The picker now reads
+>    `useFeatureAccess('advisory-board').locked`, shows the locked state with a
+>    link to the bundles, and does not ask for a list it will be refused; the
+>    `@@` button is not offered while locked.
+
+
+> **EXTENDED 2026-10-05 — the plan ladder and revenue mechanics (ADR 0820 §5 / §7,
+> phases P3 + P5).** Six operator knobs, every one defaulting to the behaviour above:
+>
+> 1. **Plans reference bundles.** A `PLAN_FEATURES` entry `"bundle:<id>"` expands to
+>    that bundle's features (`host/featureBundles`), so a `bundles.json` change no
+>    longer drifts a plan list. An unknown bundle is ignored with a `log.warn` —
+>    never a widened plan. Parsed once per raw env value and memoized.
+> 2. **Standalone bundles** (`OPENWOP_BILLING_STANDALONE_BUNDLES`, a JSON array) are
+>    never granted by a plan, whether named by `bundle:`, by a literal feature id, or
+>    through an unrestricted (`'*'`/absent) plan while plans ARE configured — that plan
+>    becomes "every bundle feature except the standalone ones". With no plan config at
+>    all the host stays unrestricted.
+> 3. **The store never sells what the plan grants.** `GET …/billing/bundles` adds
+>    `includedInPlan` (the PLAN alone covers every feature; the operator bypass and
+>    bundle grants never count) and `cadences`. A checkout of a plan-covered bundle is
+>    a 409 `bundle_included_in_plan` on both checkout routes. `owned` stays purchase
+>    truth (ADR 0820 §5 said "marks it owned"; a separate flag keeps "you paid" and
+>    "your plan has it" distinguishable).
+> 4. **Trials:** `OPENWOP_BILLING_TRIAL_DAYS={"plan:pro":14,"bundle:crm":7}` sets
+>    Checkout `subscription_data[trial_period_days]`, for a workspace that never had
+>    that subscription (no cancel-and-resubscribe trials). `trialing` already entitles.
+> 5. **Past-due grace:** `OPENWOP_BILLING_PAST_DUE_GRACE_DAYS` (default 0). The webhook
+>    records `pastDueSince` on the plan row and on a bundle grant at the transition (a
+>    repeat `past_due` event never restarts it; leaving `past_due` drops it).
+>    `isEntitledStatus` stays the ONE predicate, now grace-aware with an injectable
+>    clock. A grant's stored `status` remains the grace-free derivation; the window is
+>    applied at read time (`isGrantEntitled`), since it is a function of time.
+>    Supersession checks pass no `pastDueSince`, so `past_due` never displaces a
+>    subscription. A row that went `past_due` before this shipped has no recorded
+>    transition and gets NO grace until its next event (fail-closed).
+> 6. **Annual cadence:** a bundle checkout body may carry `cadence:'month'|'year'`;
+>    the server resolves the price from `OPENWOP_BILLING_BUNDLE_PRICE_CADENCE`
+>    (`{"price_x":"year"}`, unlisted = month). The client still never names a price.
+>    Plans get the same by `POST …/billing/checkout {plan, cadence}` (the `priceId`
+>    body still works) via `OPENWOP_BILLING_PLAN_PRICE_CADENCE`. The store offers a
+>    yearly Buy only when `BUNDLE_DISPLAY` carries `priceAnnual` (MKT-UX-6: no money
+>    action without its amount).
+>
+> `scripts/check-billing-config.mjs` checks all of it (README § "Sell paid feature
+> bundles"). Tests: `test/billing-plan-ladder.test.ts` (14/19 red before the change),
+> `test/check-billing-config.test.ts` (7/7 red against the pre-0820 checker).

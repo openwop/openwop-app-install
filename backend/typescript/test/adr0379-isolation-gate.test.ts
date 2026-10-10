@@ -296,12 +296,12 @@ describe('ADR 0379 P1 — route boundary: uniform 404, no existence oracle', () 
     const foreign = AGENT('t-foreign', 'secret-agent');
     await storage.insertUserAgent(foreign);
 
-    const patch = await call(`/v1/host/openwop-app/agents/${foreign.agentId}`, {
+    const patch = await call(`/host/openwop-app/agents/${foreign.agentId}`, {
       method: 'PATCH', body: JSON.stringify({ systemPrompt: 'stolen' }),
     });
     expect(patch.status).toBe(404);
 
-    const del = await call(`/v1/host/openwop-app/agents/${foreign.agentId}`, { method: 'DELETE' });
+    const del = await call(`/host/openwop-app/agents/${foreign.agentId}`, { method: 'DELETE' });
     expect(del.status).toBe(404);
 
     // Untouched.
@@ -311,11 +311,11 @@ describe('ADR 0379 P1 — route boundary: uniform 404, no existence oracle', () 
   it("GET/PATCH/DELETE another tenant's roster member → 404; row survives", async () => {
     const foreign = await createRosterEntry({ tenantId: 't-foreign', persona: 'Covert', agentRef: { agentId: 'p.k.covert' } });
 
-    expect((await call(`/v1/host/openwop-app/roster/${foreign.rosterId}`)).status).toBe(404);
-    expect((await call(`/v1/host/openwop-app/roster/${foreign.rosterId}`, {
+    expect((await call(`/host/openwop-app/roster/${foreign.rosterId}`)).status).toBe(404);
+    expect((await call(`/host/openwop-app/roster/${foreign.rosterId}`, {
       method: 'PATCH', body: JSON.stringify({ persona: 'stolen' }),
     })).status).toBe(404);
-    expect((await call(`/v1/host/openwop-app/roster/${foreign.rosterId}`, { method: 'DELETE' })).status).toBe(404);
+    expect((await call(`/host/openwop-app/roster/${foreign.rosterId}`, { method: 'DELETE' })).status).toBe(404);
 
     expect((await getRosterEntry('t-foreign', foreign.rosterId))?.persona).toBe('Covert');
   });

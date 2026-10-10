@@ -95,6 +95,10 @@ SHOULD), and every `0200.*` row is a major-2 scenario. So no second predicate is
 for #4106; if v1's own `auth.md` missing-credential rule is ever measured against the
 cookie posture, it belongs in ADR 0750's predicate, not beside it.
 
+> **CORRECTED 2026-09-30:** it was measured, and it now lives there. The v1 floor
+> `openwop.floor.auth` failed on production cuts. ADR 0750 § "Extension — major-1
+> protocol operations" extends the predicate, so this residual is closed.
+
 ### D2 — a key's declared scopes narrow it, always; publish exactly the enforced set
 
 - `requireProtocolScope` refuses an `api-key` principal whose declared `scopes` are

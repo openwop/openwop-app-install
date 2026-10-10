@@ -2,6 +2,15 @@
  * ADR 0402 §a — booking slot math + ICS + the CAS claim (pure/unit level).
  * The tz math is the riskiest core (DST correctness); the claim is the
  * double-book gate. Both are exercised here without booting the app.
+ *
+ * Sabotage-witnessed (w4 grade-tests): dropping the round-trip check in
+ * `wallClockToUtc` reds the spring-gap case; a fixed -4h offset reds the winter
+ * case; dropping `padAfter` from the claimed interval reds the buffer case;
+ * ignoring minNotice / maxAdvance reds the window case; CAS → put in
+ * `claimBooking` reds first-claim; skipping the idempotency / cancelled branches
+ * reds replay / re-claim. The route's sequential double-book 409 (crm-booking)
+ * is guarded FIRST by live availability (`isOfferedSlot`) — this file is where
+ * the CAS itself is witnessed.
  */
 
 import { describe, expect, it, beforeEach } from 'vitest';
@@ -124,6 +133,7 @@ describe('entities/bookings — atomic claim (double-book gate)', () => {
     await __clearBookings();
   });
 
+  const L1 = { bookingLinkId: 'booking-link:L1', tenantId: 't1' };
   const mkRow = (slotMs: number, overrides: Partial<Booking> = {}): Booking => ({
     bookingId: bookingIdFor('booking-link:L1', slotMs),
     tenantId: 't1', orgId: 'o1', bookingLinkId: 'booking-link:L1',
@@ -138,24 +148,24 @@ describe('entities/bookings — atomic claim (double-book gate)', () => {
     expect(first.outcome).toBe('claimed');
     const second = await claimBooking(mkRow(1000, { idempotencyKey: 'k2', inviteeEmail: 'bob@x.test' }));
     expect(second.outcome).toBe('slot_taken');
-    expect(await listBookingsForLink('booking-link:L1')).toHaveLength(1);
+    expect(await listBookingsForLink(L1)).toHaveLength(1);
   });
 
   it('a retry with the same idempotency key replays the same booking', async () => {
     await claimBooking(mkRow(2000, { idempotencyKey: 'same' }));
     const replay = await claimBooking(mkRow(2000, { idempotencyKey: 'same' }));
     expect(replay.outcome).toBe('replayed');
-    expect(await listBookingsForLink('booking-link:L1')).toHaveLength(1);
+    expect(await listBookingsForLink(L1)).toHaveLength(1);
   });
 
   it('a cancelled slot can be re-claimed', async () => {
     await claimBooking(mkRow(3000, { idempotencyKey: 'k1' }));
-    const rows = await listBookingsForLink('booking-link:L1');
+    const rows = await listBookingsForLink(L1);
     const cancelled = { ...rows[0]!, status: 'cancelled' as const };
     const { putBooking } = await import('../src/features/crm/entities/bookings.js');
     await putBooking(cancelled);
     const reclaim = await claimBooking(mkRow(3000, { idempotencyKey: 'k2', inviteeEmail: 'new@x.test' }));
     expect(reclaim.outcome).toBe('claimed');
-    expect((await listBookingsForLink('booking-link:L1'))[0]!.inviteeEmail).toBe('new@x.test');
+    expect((await listBookingsForLink(L1))[0]!.inviteeEmail).toBe('new@x.test');
   });
 });

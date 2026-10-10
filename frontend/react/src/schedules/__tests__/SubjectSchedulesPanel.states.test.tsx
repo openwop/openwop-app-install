@@ -119,3 +119,119 @@ describe('SubjectSchedulesPanel — a dead schedule is visible (GEN-PRJ-1)', () 
     expect(screen.queryByText(/did not run/i)).toBeNull();
   });
 });
+
+/**
+ * ADR 0787 — the panel against the new backend contract (`SCTUX-2/3/5/8`).
+ */
+describe('SubjectSchedulesPanel — ADR 0787 contract', () => {
+  const base: SubjectScheduleRow = { jobId: 'j1', cronExpr: '0 9 * * *', enabled: true, workflowId: 'wf-1', nextFireAt: Date.now() + 3_600_000 };
+  function renderWith(rows: SubjectScheduleRow[], client: Partial<SubjectSchedulesClient>, workflows = ['wf-1', 'wf-2']): SubjectSchedulesClient {
+    const full: SubjectSchedulesClient = {
+      list: async () => rows,
+      create: vi.fn(async () => undefined),
+      update: vi.fn(async () => undefined),
+      remove: vi.fn(async () => undefined),
+      ...client,
+    };
+    render(
+      <MemoryRouter>
+        <SubjectSchedulesPanel client={full} workflows={workflows} copy={{ emptyBody: EMPTY_SENTINEL, helper: 'helper', noWorkflowsHint: 'no-workflows' }} />
+      </MemoryRouter>,
+    );
+    return full;
+  }
+
+  it('Run now says WHY no run started — never "no workflow bound" for a skip (SCTUX-2)', async () => {
+    renderWith([base], { trigger: vi.fn(async () => ({ skipped: 'budget' })) });
+    const run = await screen.findByRole('button', { name: /run now/i });
+    run.click();
+    await waitFor(() => expect(screen.getByText(/autonomous-run budget/i)).toBeTruthy());
+    expect(screen.queryByText(/no workflow bound/i)).toBeNull();
+  });
+
+  it('a cadence with no further slot says so — not "did not run", not "didn’t parse" (SCTUX-3)', async () => {
+    const { nextFireAt: _drop, ...noNext } = base;
+    void _drop;
+    renderWith([{ ...noNext, cronExpr: '0 0 29 2 *', lastSkippedAt: new Date().toISOString(), lastSkipReason: 'no-next-fire' }], {});
+    await waitFor(() => expect(screen.getByText(/no future time matches this cadence/i)).toBeTruthy());
+    expect(screen.queryByText(/did not run/i)).toBeNull();
+    expect(screen.queryByText(/didn.t parse/i)).toBeNull();
+  });
+
+  it('feature-disabled is a known reason, not "unrecognized" (SCTUX-3)', async () => {
+    renderWith([{ ...base, lastSkippedAt: new Date().toISOString(), lastSkipReason: 'feature-disabled' }], {});
+    await waitFor(() => expect(screen.getByText(/turned off for this workspace/i)).toBeTruthy());
+    expect(screen.queryByText(/does not recognize it/i)).toBeNull();
+  });
+
+  it('ADR 0820 §7 — a plan-lapsed job reads "Paused — plan lapsed" with a store link and no next-run promise', async () => {
+    renderWith([{ ...base, lastSkippedAt: new Date().toISOString(), lastSkipReason: 'plan-lapsed', planLapsed: { featureId: 'crm' } }], {});
+    await waitFor(() => expect(screen.getByText(/paused — plan lapsed/i)).toBeTruthy());
+    expect(screen.getByText(/resumes by itself/i)).toBeTruthy();
+    expect(screen.getByRole('link', { name: /see plans/i }).getAttribute('href')).toBe('/marketplace/bundles?feature=crm');
+    expect(screen.queryByText(/^active$/i)).toBeNull();
+    expect(screen.queryByText(/next run/i)).toBeNull();
+  });
+
+  it('ADR 0820 §7 — once the server stops reporting the lapse (re-granted), the row is Active again with no lapse copy (control)', async () => {
+    renderWith([{ ...base, lastSkippedAt: new Date().toISOString(), lastSkipReason: 'plan-lapsed' }], {});
+    await waitFor(() => expect(screen.getByText(/^active$/i)).toBeTruthy());
+    expect(screen.queryByText(/paused — plan lapsed/i)).toBeNull();
+    // The recorded skip is still a KNOWN reason, never "unrecognized".
+    expect(screen.getByText(/your plan no longer includes/i)).toBeTruthy();
+    expect(screen.queryByText(/does not recognize it/i)).toBeNull();
+  });
+
+  it('an edit that changes only the workflow sends ONLY the workflow — a custom cadence and its zone survive (SCTUX-5)', async () => {
+    const update = vi.fn(async () => undefined);
+    renderWith([{ ...base, cronExpr: '0 8 * * *', timezone: 'Europe/Paris' }], { update });
+    (await screen.findByRole('button', { name: /edit/i })).click();
+    const { fireEvent } = await import('@testing-library/react');
+    await waitFor(() => expect(document.querySelector('.agentsched-edit-row')).not.toBeNull());
+    const row = document.querySelector('.agentsched-edit-row')!;
+    const [wfSelect, cadenceSelect] = Array.from(row.querySelectorAll('select'));
+    // The untouched cadence select holds "Keep current", not a preset.
+    expect((cadenceSelect as HTMLSelectElement).value).toBe('keep');
+    fireEvent.change(wfSelect!, { target: { value: 'wf-2' } });
+    fireEvent.click(await screen.findByRole('button', { name: /save changes/i }));
+    await waitFor(() => expect(update).toHaveBeenCalledTimes(1));
+    const [, patch] = update.mock.calls[0] as unknown as [string, Record<string, unknown>];
+    expect(patch).toEqual({ workflowId: 'wf-2' });
+  });
+
+  it('a double click fires Run now ONCE (SCTUX-8)', async () => {
+    let release!: () => void;
+    const trigger = vi.fn(() => new Promise<{ runId?: string }>((r) => { release = () => r({ runId: 'run-1' }); }));
+    renderWith([base], { trigger });
+    const run = await screen.findByRole('button', { name: /run now/i });
+    run.click();
+    run.click();
+    release();
+    await waitFor(() => expect(screen.getByText(/view run/i)).toBeTruthy());
+    expect(trigger).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('ADR 0815 D4 (grade-ux ORGUX-4) — a job paused because its member left', () => {
+  const row: SubjectScheduleRow = { jobId: 'j1', cronExpr: '0 9 * * *', workflowId: 'wf-1', enabled: false, pausedReason: 'acting_member_removed' };
+  it('is labelled, cannot be run now, and resuming asks before it re-owns', async () => {
+    const confirmSpy = vi.spyOn(await import('../../ui/confirm.js'), 'confirm').mockResolvedValue(false);
+    const client: SubjectSchedulesClient = {
+      list: vi.fn(async () => [row]) as SubjectSchedulesClient['list'],
+      create: vi.fn(async () => undefined),
+      update: vi.fn(async () => undefined),
+      remove: vi.fn(async () => undefined),
+      trigger: vi.fn(async () => ({})) as NonNullable<SubjectSchedulesClient['trigger']>,
+    };
+    render(
+      <MemoryRouter>
+        <SubjectSchedulesPanel client={client} workflows={['wf-1']} copy={{ emptyBody: EMPTY_SENTINEL, helper: 'helper', noWorkflowsHint: 'no-workflows' }} />
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.getByText(/Paused — the person it ran as left/)).toBeTruthy());
+    expect((screen.getByRole('button', { name: /Run now/i }) as HTMLButtonElement).disabled).toBe(true);
+    screen.getByRole('button', { name: /Resume/i }).click();
+    await waitFor(() => expect(confirmSpy).toHaveBeenCalled());
+    expect(client.update).not.toHaveBeenCalled(); // declined → nothing re-owned
+  });
+});

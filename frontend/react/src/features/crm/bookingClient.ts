@@ -40,6 +40,8 @@ export interface Booking {
   inviteeName: string;
   inviteeEmail: string;
   inviteeNote?: string;
+  /** ADR 0837 D4 — the visitor's cancellation reason (kept on the booking, not the timeline). */
+  cancelReason?: string;
   contactId?: string;
   createdAt: string;
 }

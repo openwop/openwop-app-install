@@ -1,14 +1,14 @@
 {
   "name": "core.openwop.workflows.workflow-author",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "kind": "workflow-chain",
   "description": "The AI workflow-author meta-workflow (draft → validate → persist), migrated from the deprecated builtin `openwop-app.workflow-author` (ADR 0472 P4). chainId keeps the original id so the Create-with-AI route ignition + replay resolve unchanged; also a gallery-editable chain.",
   "keywords": ["Workflows", "AI"],
-  "engines": { "openwop": ">=1.0.0" },
+  "engines": { "openwop": ">=1.0.0 <3.0.0" },
   "chains": [
     {
       "chainId": "openwop-app.workflow-author",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "Author a workflow with AI",
       "description": "Draft a workflow from intent, validate it, and persist the validated definition.",
       "parameters": {
@@ -17,9 +17,9 @@
       },
       "dag": {
         "nodes": [
-          { "id": "draft", "typeId": "feature.workflow-author.nodes.draft", "name": "Draft", "inputs": { "intent": "{{params.intent}}" } },
-          { "id": "validate", "typeId": "feature.workflow-author.nodes.validate", "name": "Validate" },
-          { "id": "persist", "typeId": "feature.workflow-author.nodes.persist", "name": "Persist" }
+          { "id": "draft", "typeId": "feature.workflow-author.nodes.draft@1.0.1", "name": "Draft", "inputs": { "intent": "{{params.intent}}" } },
+          { "id": "validate", "typeId": "feature.workflow-author.nodes.validate@1.0.1", "name": "Validate" },
+          { "id": "persist", "typeId": "feature.workflow-author.nodes.persist@1.0.1", "name": "Persist" }
         ],
         "edges": [
           { "from": "draft", "to": "validate", "triggerRule": "all_success" },

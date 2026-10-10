@@ -35,7 +35,7 @@ function DocumentChips({ doc, projectName }: { doc: DocumentRecord; projectName?
   const { t } = useTranslation('documents');
   return (
     <>
-      <span className={`chip ${statusChipClass(doc.status)}`}>{doc.status}</span>
+      <span className={`chip ${statusChipClass(doc.status)}`}>{t(`status_${doc.status}`)}</span>
       <span className="chip chip--muted">{doc.kind}</span>
       {/* ADR 0314/0316 — a project-owned document says so, naming the project
           when the page resolved it (falls back to the generic label). */}

@@ -95,15 +95,15 @@ export const computerUseFeature: BackendFeature = {
     registerComputerUseAgentTools();
   },
   requiredPacks: [
-    { name: 'feature.computer-use.nodes', version: '1.0.1' },
-    { name: 'feature.computer-use.agents', version: '1.0.1' }, // CFP-1 status read tool; task/decide pruned to the governed run path
+    { name: 'feature.computer-use.nodes', version: '1.0.2' },
+    { name: 'vendor.openwop-app.computer-use.agents', version: '1.0.2' }, // CFP-1 status read tool; task/decide pruned to the governed run path
   ],
   surface: { id: 'computer-use', build: buildComputerUseSurface },
   toggleDefault: {
     id: 'computer-use',
     label: 'Computer-use browser agents',
     description:
-      'Agent-driven browser sessions via provider computer-use APIs — risk-tiered human approval on every commit-class action, fail-closed origin allowlist, recorded replay-safe trajectories, per-tenant daily session budget (ADR 0418).',
+      'Agent-driven browser sessions via provider computer-use APIs — risk-tiered human approval on every commit-class action, fail-closed origin allowlist, recorded replay-safe trajectories, per-tenant daily session budget.',
     category: 'Agents',
     status: 'off',
     bucketUnit: 'tenant',

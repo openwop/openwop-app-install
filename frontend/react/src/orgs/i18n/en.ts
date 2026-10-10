@@ -21,7 +21,7 @@ export const messages = {
   workspaceCreateFailed: 'The workspace could not be created.',
   newOrgPlaceholder: 'New organization name',
   newOrgAriaLabel: 'New organization name',
-  createOrgRequiresScope: 'Requires host:org:manage',
+  createOrgRequiresScope: 'Only workspace owners can create organizations',
   noOrgsTitle: 'No organizations yet',
   noOrgsBody: 'Create one to add teams and members.',
   deleteOrgAriaLabel: 'Delete {{name}}',
@@ -32,7 +32,7 @@ export const messages = {
 
   // OrgDetailPanel — "View as" lens
   viewAsLabel: 'View as',
-  viewAsOwnerOption: 'Owner (you) — full access',
+  viewAsOwnerOption: 'You — your own access',
   viewAsRoleGroupLabel: 'Preview a role (UI only)',
   viewAsRoleOption: 'As {{name}}',
   viewAsMemberGroupLabel: 'View as member (enforced)',
@@ -206,4 +206,21 @@ export const messages = {
   // ADR 0622 D5 — the re-invite failed but the EARLIER invitation is still valid
   inviteDeliveryFailedPriorValid: 'Email delivery failed — an earlier invitation for this address may still be valid; nothing about it was changed. Try again in a moment.',
   inviteUndeliverablePriorValid: 'This invitation couldn’t be delivered — this organization has no email sender or your email connection is unavailable. An earlier invitation for this address may still be valid; nothing about it was changed. Set a sender up on the Email page and try again.',
+  // ADR 0815 — owner-tier locks, typed refusals, and what removing a member does
+  confirmRemoveMemberBody: 'They leave the workspace now. Their API keys stop working, invitations they sent that are still pending are cancelled, and schedules that run as them are paused. You can resume most of those schedules, which makes you their owner.',
+  removeMemberConfirm: 'Remove member',
+  memberRemoved: 'Removed {{name}}',
+  ownerRowLocked: 'Only an owner can change or remove an owner',
+  ownerRowsLockedNote: 'Owners can only be changed or removed by another owner.',
+  ownerGroupLocked: 'This group grants owner access, so only an owner can change it',
+  errorOwnerTier: 'Only an owner can do that.',
+  errorLastOwner: 'This is the workspace’s last owner. Make someone else an owner first, then try again.',
+  errorIdentityLocked: 'A workspace member’s sign-in identity can’t be changed in place. Remove them and send a new invitation instead.',
+  errorIdentityTaken: 'That identity is already a member of this organization.',
+  errorTransferToSelf: 'Choose another member to hand ownership to.',
+  confirmRemoveSubOrgMemberBody: 'They lose access to this organization, and invitations to it that they sent and are still pending are cancelled. Their workspace membership is not affected.',
+  confirmRemoveMemberBodyNeutral: 'They lose access to this organization, and invitations to it that they sent and are still pending are cancelled. If this was their last membership here, their API keys also stop working and schedules that run as them are paused.',
+  ownerGroupsLockedNote: 'Groups that grant owner access can only be changed by an owner.',
+  errorCreateOrgOwnerRequired: 'Only an owner can create an organization here. Ask an owner of an existing organization to make you an owner, then try again.',
+  errorForbiddenScope: 'You don’t have permission to do that in this organization. Ask a workspace owner or admin.',
 } as const;

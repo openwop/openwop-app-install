@@ -96,20 +96,20 @@ async function applyOp(
 }
 
 export function registerWorkspaceRoutes(app: Express, storage: Storage): void {
-  app.get('/v1/host/workspace/files', async (req, res, next) => {
+  app.get('/host/workspace/files', async (req, res, next) => {
     const prefix = typeof req.query.prefix === 'string' ? req.query.prefix : undefined;
     try {
       await applyOp(storage, res, ownerOf(req), { kind: 'list', ...(prefix !== undefined ? { prefix } : {}) });
     } catch (err) { next(err); }
   });
 
-  app.get('/v1/host/workspace/files/:path', async (req, res, next) => {
+  app.get('/host/workspace/files/:path', async (req, res, next) => {
     try {
       await applyOp(storage, res, ownerOf(req), { kind: 'get', path: req.params.path });
     } catch (err) { next(err); }
   });
 
-  app.put('/v1/host/workspace/files/:path', async (req, res, next) => {
+  app.put('/host/workspace/files/:path', async (req, res, next) => {
     const body = (req.body ?? {}) as { content?: unknown; contentType?: unknown };
     if (typeof body.content !== 'string') {
       sendError(res, 400, 'validation_error', 'content (string) required');
@@ -127,13 +127,13 @@ export function registerWorkspaceRoutes(app: Express, storage: Storage): void {
     } catch (err) { next(err); }
   });
 
-  app.delete('/v1/host/workspace/files/:path', async (req, res, next) => {
+  app.delete('/host/workspace/files/:path', async (req, res, next) => {
     try {
       await applyOp(storage, res, ownerOf(req), { kind: 'delete', path: req.params.path });
     } catch (err) { next(err); }
   });
 
-  log.info('workspace CRUD routes registered (RFC 0059 §C: /v1/host/workspace/files)');
+  log.info('workspace CRUD routes registered (RFC 0059 §C: /host/workspace/files)');
 
   // RFC 0059 §E WCT-1 cross-owner seam — owner from the BODY so a single
   // conformance credential can drive distinct `{tenant, workspace}` pairs.
@@ -147,8 +147,8 @@ export function registerWorkspaceRoutes(app: Express, storage: Storage): void {
     log.info('workspace cross-owner seam disabled (set OPENWOP_TEST_SEAM_ENABLED=true to enable)');
     return;
   }
-  log.warn('workspace cross-owner seam ENABLED — /v1/host/openwop-app/workspace/op accepts a body-supplied owner. NEVER enable in production.');
-  app.post('/v1/host/openwop-app/workspace/op', async (req, res, next) => {
+  log.warn('workspace cross-owner seam ENABLED — /host/openwop-app/workspace/op accepts a body-supplied owner. NEVER enable in production.');
+  app.post('/host/openwop-app/workspace/op', async (req, res, next) => {
     const body = (req.body ?? {}) as {
       tenant?: unknown;
       workspace?: unknown;

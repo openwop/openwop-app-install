@@ -24,7 +24,7 @@
  */
 
 import { resolveOne } from './featureToggles/service.js';
-import type { ToggleSubject } from './featureToggles/types.js';
+import type { ResolvedAssignment, ToggleSubject } from './featureToggles/types.js';
 import type { BundleScope } from './inMemorySurfaces.js';
 import { listOrgs, resolveEffectiveAccess, type Scope } from './accessControlService.js';
 import type { Logger } from '../observability/logger.js';
@@ -58,12 +58,30 @@ export const str = (v: unknown): string | undefined => (typeof v === 'string' &&
  *  toggle resolves for the same principal the HTTP route would. Fail-closed:
  *  a resolver throw ⇒ `false` (feature treated as off). */
 export async function resolveFeatureToggle(featureId: string, scope: BundleScope): Promise<boolean> {
+  return Boolean((await resolveFeatureAccess(featureId, scope))?.enabled);
+}
+
+/** The full resolution behind {@link resolveFeatureToggle}: the toggle AND the
+ *  ADR 0419 plan (ADR 0819 §1 — `resolveOne` is the access resolver), so a
+ *  caller can tell the model WHY a feature is unavailable. Fail-closed: a
+ *  resolver throw ⇒ null. */
+export async function resolveFeatureAccess(featureId: string, scope: BundleScope): Promise<ResolvedAssignment | null> {
   const subject: ToggleSubject = {
     tenantId: scope.tenantId,
     ...(scope.actingUserId ? { userId: scope.actingUserId } : {}),
   };
-  const assignment = await resolveOne(featureId, subject).catch(() => null);
-  return Boolean(assignment?.enabled);
+  return resolveOne(featureId, subject).catch(() => null);
+}
+
+/** The typed refusal for an unavailable feature: `not_entitled` when the toggle
+ *  is on but the plan excludes it (ADR 0819 §1), `feature_unavailable` when the
+ *  plan could not be read (a fault, retryable), else `feature_disabled`. */
+export function featureUnavailable(assignment: ResolvedAssignment | null, featureLabel: string): ToolResult {
+  if (assignment?.blockedBy === 'plan') return toolError('not_entitled', `${featureLabel} is not included in this workspace's plan.`);
+  if (assignment?.blockedBy === 'unresolved') {
+    return toolError('feature_unavailable', `${featureLabel} could not be checked right now — tell the user to try again shortly.`);
+  }
+  return toolError('feature_disabled', `The ${featureLabel} feature is not enabled for this workspace.`);
 }
 
 /** Org-scope READ gate — the read-tool sibling of the routes' `authorizeOrgScope`
@@ -88,9 +106,8 @@ export async function resolveReadOrgScope(
 ): Promise<OrgReadResolve> {
   const requiredScope: Scope = opts.requiredScope ?? 'workspace:read';
   if (!scope.actingUserId) return { kind: 'empty', note: 'This tool only reads from a human-initiated turn.' };
-  if (!(await resolveFeatureToggle(opts.featureId, scope))) {
-    return { kind: 'error', result: toolError('feature_disabled', `The ${opts.featureLabel} feature is not enabled for this workspace.`) };
-  }
+  const feature = await resolveFeatureAccess(opts.featureId, scope);
+  if (!feature?.enabled) return { kind: 'error', result: featureUnavailable(feature, opts.featureLabel) };
   const orgs = await listOrgs(scope.tenantId);
   const orgId = orgIdInput ?? (orgs.length === 1 ? orgs[0]!.orgId : undefined);
   if (!orgId) return { kind: 'error', result: toolError('org_required', `This workspace has ${orgs.length} organizations — pass \`orgId\`.`) };
@@ -113,9 +130,8 @@ export async function resolveActionOrgScope(
   const requiredScope: Scope = opts.requiredScope ?? 'workspace:write';
   const actingUserId = scope.actingUserId;
   if (!actingUserId) return { error: toolError('acting_user_required', 'This tool needs a human-initiated turn.') };
-  if (!(await resolveFeatureToggle(opts.featureId, scope))) {
-    return { error: toolError('feature_disabled', `The ${opts.featureLabel} feature is not enabled for this workspace.`) };
-  }
+  const feature = await resolveFeatureAccess(opts.featureId, scope);
+  if (!feature?.enabled) return { error: featureUnavailable(feature, opts.featureLabel) };
   const orgs = await listOrgs(scope.tenantId);
   const orgId = orgIdInput ?? (orgs.length === 1 ? orgs[0]!.orgId : undefined);
   if (!orgId) return { error: toolError('org_required', `This workspace has ${orgs.length} organizations — pass \`orgId\`.`) };

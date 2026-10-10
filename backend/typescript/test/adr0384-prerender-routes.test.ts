@@ -65,7 +65,7 @@ function rawGet(path: string, headers: Record<string, string>): Promise<{ status
   });
 }
 
-const cms = (orgId: string, sfx = ''): string => `/v1/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${sfx}`;
+const cms = (orgId: string, sfx = ''): string => `/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${sfx}`;
 
 const HEADING = 'Prerender Test Heading';
 const SUBTEXT = 'A rich paragraph for crawlers.';
@@ -73,8 +73,8 @@ const SUBTEXT = 'A rich paragraph for crawlers.';
 /** An org with one PUBLISHED page (slug returned) + one DRAFT page. */
 async function siteOrg(): Promise<{ orgId: string; slug: string; draftSlug: string }> {
   const owner = client();
-  await owner.post('/v1/host/openwop-app/test/login', { email: `pre-${Date.now()}-${n++}@acme.test` });
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Prerender Co' });
+  await owner.post('/host/openwop-app/test/login', { email: `pre-${Date.now()}-${n++}@acme.test` });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Prerender Co' });
   const orgId = org.body.orgId as string;
   const page = await owner.post(cms(orgId, '/pages'), {
     title: 'Prerender Page',
@@ -92,7 +92,7 @@ async function siteOrg(): Promise<{ orgId: string; slug: string; draftSlug: stri
 }
 
 const prerenderPath = (orgId: string, slug: string): string =>
-  `/v1/host/openwop-app/public/${encodeURIComponent(orgId)}/prerender/${encodeURIComponent(slug)}`;
+  `/host/openwop-app/public/${encodeURIComponent(orgId)}/prerender/${encodeURIComponent(slug)}`;
 
 describe('ADR 0384 — prerender route (custom-domain door)', () => {
   it('serves a full HTML document: head from the projection, JSON-LD, semantic body', async () => {
@@ -115,7 +115,7 @@ describe('ADR 0384 — prerender route (custom-domain door)', () => {
     const { orgId, slug } = await siteOrg();
     const [html, json] = await Promise.all([
       rawGet(prerenderPath(orgId, slug), {}),
-      rawGet(`/v1/host/openwop-app/public/${encodeURIComponent(orgId)}/pages/${encodeURIComponent(slug)}`, {}),
+      rawGet(`/host/openwop-app/public/${encodeURIComponent(orgId)}/pages/${encodeURIComponent(slug)}`, {}),
     ]);
     const body = /<body>([\s\S]*)<\/body>/.exec(html.body)?.[1] ?? '';
     const texts = body.replace(/<[^>]+>/g, '\n').split('\n').map((s) => s.trim()).filter((s) => s.length > 3);
@@ -186,6 +186,6 @@ describe('ADR 0384 — custom-domain document rewrite', () => {
     // `/` maps to the published `home` slug — this org has none → uniform 404.
     expect((await rawGet('/', { host, 'user-agent': 'GPTBot/1.0' })).status).toBe(404);
     // The org-pinning invariant is untouched for API paths.
-    expect((await rawGet('/v1/host/openwop-app/public/other-org/pages/x', { host })).status).toBe(404);
+    expect((await rawGet('/host/openwop-app/public/other-org/pages/x', { host })).status).toBe(404);
   });
 });

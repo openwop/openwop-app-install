@@ -57,7 +57,7 @@ function client(): { get: (p: string) => Promise<{ status: number; body: any }>;
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), del: (p) => call('DELETE', p) };
 }
 
-const DRAFT_URL = '/v1/host/openwop-app/agent-author/draft';
+const DRAFT_URL = '/host/openwop-app/agent-author/draft';
 const VALID = { persona: 'Stash Nova', agentId: 'test.stash.backing' };
 
 describe('surface stashDraft — the validation gate', () => {
@@ -85,7 +85,7 @@ describe('routes — self-scoped', () => {
 
     const tenantId = `org:stash-${Date.now()}`;
     const c = client();
-    const login = await c.post('/v1/host/openwop-app/test/login', { email: `stash-${Date.now()}@acme.test`, tenantId });
+    const login = await c.post('/host/openwop-app/test/login', { email: `stash-${Date.now()}@acme.test`, tenantId });
     expect(login.status).toBe(201);
     const userId = login.body.user.userId as string;
 

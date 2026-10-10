@@ -1,5 +1,6 @@
 /**
- * UX_UPGRADE-forms ROUND 3 — F9 (deferred from R2 as "a model change").
+ * UX_UPGRADE-forms ROUND 3 — F9 (deferred from R2 as "a model change"), on the
+ * ADR 0516 `number` field type.
  *
  * Optional authored `min`/`max`/`step` on number fields, enforced at BOTH
  * levels the enumerate-the-class lesson demands: the AUTHORING sanitizer (a
@@ -8,20 +9,20 @@
  * typed 400s naming the bound). The step check is epsilon-tolerant on both
  * sides: 0.3/0.1 is 2.9999999999999996 in floats, and rejecting an
  * exact-looking value over binary representation is the engine lying.
+ *
+ * Sabotage-witnessed (grade-tests w8, probes w8g1-nc-*): not persisting `min`, dropping
+ * the `type === 'number'` gate, accepting `step: 0` or `min > max`, skipping the
+ * min/max submit checks, a naive `ratio % 1` step check, or counting steps from 0
+ * instead of `min` each turn a case red. Unit-level: only host-ext persistence is
+ * needed (it used to boot `createApp` + listen for this).
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import http from 'node:http';
-import { createApp } from '../src/index.js';
+import { describe, it, expect, beforeAll } from 'vitest';
+import { openSqliteStorage } from '../src/storage/sqlite/index.js';
+import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { createForm, validateValues, type FormDef } from '../src/features/forms/formsService.js';
 
 const TENANT = 'org:forms-r3';
-let server: http.Server;
-beforeAll(async () => {
-  process.env.OPENWOP_STORAGE_DSN = 'memory://';
-  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', res); });
-});
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
+beforeAll(() => { initHostExtPersistence(openSqliteStorage(':memory:')); });
 
 const mk = (fields: unknown): Promise<FormDef> =>
   createForm({ tenantId: TENANT, orgId: 'o1', title: 'T', fields, createdBy: 'u1' });

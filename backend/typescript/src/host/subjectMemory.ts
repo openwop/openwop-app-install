@@ -31,7 +31,7 @@ import type { AgentMemoryPort } from './agentDispatch.js';
 import { MEMORY_UNTRUSTED_TAG } from './agentDispatch.js';
 import { hasLegacyAutoExtractedPrefix, isUntrustedMemoryRow } from './memoryTrust.js';
 import { writeMemoryEntry, listMemoryEntries, removeMemoryEntry, clearMemoryScope, buildHostSurfaceBundle } from './inMemorySurfaces.js';
-import { embedText, DEFAULT_EMBEDDING_DIMS } from '../aiProviders/localEmbedding.js';
+import { embedText, effectiveEmbedDims } from '../aiProviders/localEmbedding.js';
 import { scrubSecretShaped } from './redactSecrets.js';
 import { DurableCollection } from './hostExtPersistence.js';
 import { type Subject, subjectScope, personSubject } from './subject.js';
@@ -113,7 +113,7 @@ async function persistAndIndex(
   try {
     await vector.upsert({
       namespace: scope,
-      items: [{ id: row.id, vector: embedText(content, DEFAULT_EMBEDDING_DIMS), metadata: { content, contentTrust: trustOf(opts.tags, content) } }],
+      items: [{ id: row.id, vector: embedText(content, effectiveEmbedDims()), metadata: { content, contentTrust: trustOf(opts.tags, content) } }],
     });
   } catch (err) {
     // ADR 0666 follow-up (`RCLWF-2`) — this was a BARE catch with no log, and the comment above
@@ -151,12 +151,12 @@ export function createSubjectMemoryPort(tenantId: string): AgentMemoryPort {
   return {
     async read(scope: string, query?: string): Promise<ReadonlyArray<{ content: string; contentTrust?: 'trusted' | 'untrusted' }>> {
       // RAG path: rank by embedding cosine similarity. Embed at the SAME dimension
-      // used on write (DEFAULT_EMBEDDING_DIMS) so cosine is valid.
+      // used on write (effectiveEmbedDims()) so cosine is valid.
       if (query && query.trim().length > 0) {
         try {
           const res = await vector.query({
             namespace: scope,
-            vector: embedText(query, DEFAULT_EMBEDDING_DIMS),
+            vector: embedText(query, effectiveEmbedDims()),
             topK: RAG_TOP_K,
           });
           const matches = (res.matches ?? []) as Array<{ metadata?: { content?: unknown; contentTrust?: unknown } }>;

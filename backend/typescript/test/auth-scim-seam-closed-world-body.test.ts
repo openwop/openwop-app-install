@@ -6,6 +6,12 @@
  * unrecognised key was silently dropped and the caller got 201 for a user they never
  * named. Witnessed over the real auth middleware + seam + error envelope, because a
  * 400-vs-201 is only observable at the HTTP boundary.
+ *
+ * Sabotage that turns it red (`authScim.ts`): `if (unknownKeys.length > 0) {` →
+ * `if (false) {` ⇒ the unknown-key cases 201; `if (typeof body !== 'object' ||
+ * Array.isArray(body)) {` → `if (false) {` ⇒ the non-object case answers the
+ * unknown-key 400 (`unknown: ['0']`) instead of the JSON-object refusal — which is
+ * why that case pins the message and the ABSENCE of `details.unknown`, not just 400.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import express, { type Express } from 'express';
@@ -23,11 +29,13 @@ import { __resetUsersStore } from '../src/features/users/usersService.js';
 import { __resetSubjectLinkStore } from '../src/host/auth/subjectLinkService.js';
 
 const dir = mkdtempSync(join(tmpdir(), 'owop-scim-closed-'));
+const ENV_KEYS = ['OPENWOP_SESSION_SECRET', 'OPENWOP_TEST_SCIM_URL', 'OPENWOP_SCIM_BEARER'] as const;
+const SAVED_ENV = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
 let server: http.Server;
 let port: number;
 
 const seam = (body: unknown): Promise<Response> =>
-  fetch(`http://127.0.0.1:${port}/v1/host/openwop-app/auth/scim/provision`, {
+  fetch(`http://127.0.0.1:${port}/host/openwop-app/auth/scim/provision`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
@@ -48,7 +56,10 @@ beforeAll(async () => {
 afterAll(async () => {
   await new Promise<void>((r) => server.close(() => r()));
   rmSync(dir, { recursive: true, force: true });
-  delete process.env.OPENWOP_TEST_SCIM_URL;
+  for (const k of ENV_KEYS) {
+    if (SAVED_ENV[k] === undefined) delete process.env[k];
+    else process.env[k] = SAVED_ENV[k];
+  }
 });
 beforeEach(async () => {
   __resetHostExtPersistence();
@@ -73,9 +84,12 @@ describe('CLNP-7 — closed-world body on the SCIM provision seam', () => {
     expect(json.details?.unknown).toEqual(unknown);
   });
 
-  it('a non-object body is 400', async () => {
+  it('a non-object body is 400 with the JSON-object refusal (not the unknown-key one)', async () => {
     const res = await seam(['create-user']);
     expect(res.status).toBe(400);
+    const json = (await res.json()) as { message?: string; details?: { unknown?: string[] } };
+    expect(json.message).toMatch(/MUST be a JSON object/);
+    expect(json.details?.unknown).toBeUndefined();
   });
 
   it('positive control: the conformance profile body `{scimUrl, op}` still provisions the default user', async () => {
@@ -89,5 +103,10 @@ describe('CLNP-7 — closed-world body on the SCIM provision seam', () => {
   it('positive control: every key the handler reads is accepted', async () => {
     const res = await seam({ scimUrl: 'x', op: 'create-user', userName: 'full@acme.test', email: 'full@acme.test', displayName: 'Full' });
     expect(res.status).toBe(201);
+    // …and every one of them was READ: the named user, not the default principal.
+    const json = (await res.json()) as { principal: { principalId: string; displayName?: string; email?: string } };
+    expect(json.principal.principalId).toBe('scim:full@acme.test');
+    expect(json.principal.displayName).toBe('Full');
+    expect(json.principal.email).toBe('full@acme.test');
   });
 });

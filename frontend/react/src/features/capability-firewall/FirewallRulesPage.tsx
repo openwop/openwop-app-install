@@ -255,6 +255,20 @@ export function FirewallRulesPage(): JSX.Element {
   const hasRecommended = list.some((r) => (r.when.anyOf ?? []).some((c) => classKey(c) === 'safetyTier:read')
     && (r.when.with ?? []).some((c) => classKey(c).startsWith('egress:host-')));
 
+  // FW2-UX-6 — a radio saves on change, and arrow keys move the selection, so a keyboard
+  // user stepping through the postures would switch the workspace to deny-by-default
+  // just by passing it. Enforce is confirmed first; the other two are log-only or today's
+  // behaviour and save as before.
+  const chooseMode = async (m: FirewallMode): Promise<void> => {
+    if (m === 'enforce' && !(await confirm({
+      title: t('modeEnforceConfirmTitle'),
+      body: t('modeEnforceConfirmBody'),
+      confirmLabel: t('modeEnforceConfirm'),
+      danger: true,
+    }))) return;
+    await save(rules ?? [], unknownPolicy, { mode: m });
+  };
+
   return (
     <div className="u-flex u-flex-col u-gap-3">
       {embedded ? null : <PageHeader eyebrow={t('eyebrow', { defaultValue: 'Access & data' })} title={t('title', { defaultValue: 'Capability firewall' })} lede={t('lede', { defaultValue: 'Require approval (or block) when an AI run combines risky steps — like reading data and then sending it off-host.' })} />}
@@ -291,7 +305,7 @@ export function FirewallRulesPage(): JSX.Element {
           <legend className="muted u-fs-11">{t('modeIntro', { defaultValue: 'Decide what happens to an action no rule matched. Start in shadow to see what deny-by-default would block before turning it on.' })}</legend>
           {(['default-allow', 'shadow', 'enforce'] as FirewallMode[]).map((m) => (
             <div key={m} className="u-flex u-items-start u-gap-2 u-fs-12">
-              <input id={`cf-mode-${m}`} type="radio" name="cf-mode" checked={mode === m} disabled={busy || loadFailed} onChange={() => void save(rules ?? [], unknownPolicy, { mode: m })} />
+              <input id={`cf-mode-${m}`} type="radio" name="cf-mode" checked={mode === m} disabled={busy || loadFailed} onChange={() => void chooseMode(m)} />
               <label htmlFor={`cf-mode-${m}`} className="u-flex u-flex-col">
                 <span className="u-fw-600">{t(`mode_${m}_label`, { defaultValue: m })}</span>
                 <span className="muted u-fs-11">{t(`mode_${m}_body`, { defaultValue: m })}</span>

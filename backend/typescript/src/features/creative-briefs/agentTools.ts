@@ -21,6 +21,7 @@ function toolError(error: string, message: string): { content: string; isError: 
 export function registerCreativeBriefsAgentTools(): void {
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: CREATIVE_BRIEFS_LIST_TOOL_ID,
       description:

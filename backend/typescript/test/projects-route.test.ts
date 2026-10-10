@@ -57,13 +57,13 @@ function client(): Client {
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
 async function ownerWithOrg(): Promise<{ c: Client; orgId: string }> {
   const c = client();
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail('pj') });
+  const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail('pj') });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   return { c, orgId: org.body.orgId };
 }
 
-const P = '/v1/host/openwop-app/projects';
+const P = '/host/openwop-app/projects';
 
 describe('projects — always-on (graduated off its toggle)', () => {
   it('serves a signed-in scoped caller with no toggle; an unscoped caller gets nothing', async () => {
@@ -154,15 +154,15 @@ describe('projects — RBAC + isolation', () => {
     // Owner creates a project in their org.
     const tenantId = `org:pjx-${Date.now()}-${n++}`;
     const owner = client();
-    await owner.post('/v1/host/openwop-app/test/login', { email: uniqEmail('pj-owner'), tenantId });
-    const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'Owned' })).body.orgId;
+    await owner.post('/host/openwop-app/test/login', { email: uniqEmail('pj-owner'), tenantId });
+    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Owned' })).body.orgId;
     const created = await owner.post(P, { orgId, name: 'Private proj' });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
     const id = created.body.id;
 
     // A co-tenant member with NO org membership (no workspace:read anywhere).
     const member = client();
-    await member.post('/v1/host/openwop-app/test/login', { email: uniqEmail('pj-member'), tenantId });
+    await member.post('/host/openwop-app/test/login', { email: uniqEmail('pj-member'), tenantId });
 
     // The list excludes it (org-scoped); GET → uniform 404 (no existence leak).
     expect((await member.get(P)).body.projects).toEqual([]);
@@ -202,15 +202,15 @@ describe('projects — knowledge (cited documents, generic subject binding)', ()
     // Unbind drops it from the view (the KB collection survives).
     expect((await c.del(`${P}/${id}/knowledge/bindings/${cid}`)).status).toBe(204);
     expect((await c.get(`${P}/${id}/knowledge`)).body.collections.length).toBe(0);
-    expect((await c.get(`/v1/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections/${cid}`)).status).toBe(200);
+    expect((await c.get(`/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections/${cid}`)).status).toBe(200);
   });
 
   it('a project VIEWER (workspace:read, no write) can READ knowledge but cannot bind/create-bind (mutation needs project write)', async () => {
     // Owner creates the project + a collection in the project's org.
     const tenantId = `org:pjv-${Date.now()}-${n++}`;
     const owner = client();
-    await owner.post('/v1/host/openwop-app/test/login', { email: uniqEmail('pjv-owner'), tenantId });
-    const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'ViewerCo' })).body.orgId;
+    await owner.post('/host/openwop-app/test/login', { email: uniqEmail('pjv-owner'), tenantId });
+    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'ViewerCo' })).body.orgId;
     const id = (await owner.post(P, { orgId, name: 'Guarded proj' })).body.id;
     const cid = (await owner.post(`${P}/${id}/knowledge/collections`, { orgId, name: 'Handbook' })).body.collectionId;
 
@@ -218,9 +218,9 @@ describe('projects — knowledge (cited documents, generic subject binding)', ()
     // Membership matches on the resolved `User.userId` (what the routes use as the
     // acting subject), so seed the member with the id the login returns.
     const viewer = client();
-    const vlogin = await viewer.post('/v1/host/openwop-app/test/login', { email: uniqEmail('pjv-viewer'), tenantId });
+    const vlogin = await viewer.post('/host/openwop-app/test/login', { email: uniqEmail('pjv-viewer'), tenantId });
     const viewerSubject = vlogin.body.user.userId as string;
-    const add = await owner.post(`/v1/host/openwop-app/orgs/${orgId}/members`, { displayName: 'Viewer', subject: viewerSubject, roles: ['viewer'] });
+    const add = await owner.post(`/host/openwop-app/orgs/${orgId}/members`, { displayName: 'Viewer', subject: viewerSubject, roles: ['viewer'] });
     expect(add.status, JSON.stringify(add.body)).toBe(201);
 
     // READ is allowed (workspace:read) ...
@@ -238,8 +238,8 @@ describe('projects — write-capability projection (ADR 0063)', () => {
   it('GET / list / create carry the caller\'s canWrite (org-writer true, viewer false), matching the gate', async () => {
     const tenantId = `org:pjw-${Date.now()}-${n++}`;
     const owner = client();
-    await owner.post('/v1/host/openwop-app/test/login', { email: uniqEmail('pjw-owner'), tenantId });
-    const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'WriteCo' })).body.orgId;
+    await owner.post('/host/openwop-app/test/login', { email: uniqEmail('pjw-owner'), tenantId });
+    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'WriteCo' })).body.orgId;
 
     // The creator is an org writer → canWrite on the create response, GET, and list.
     const created = await owner.post(P, { orgId, name: 'Gated proj' });
@@ -250,8 +250,8 @@ describe('projects — write-capability projection (ADR 0063)', () => {
 
     // A read-only org viewer can READ the project, but canWrite is false …
     const viewer = client();
-    const vlogin = await viewer.post('/v1/host/openwop-app/test/login', { email: uniqEmail('pjw-viewer'), tenantId });
-    await owner.post(`/v1/host/openwop-app/orgs/${orgId}/members`, { displayName: 'V', subject: vlogin.body.user.userId, roles: ['viewer'] });
+    const vlogin = await viewer.post('/host/openwop-app/test/login', { email: uniqEmail('pjw-viewer'), tenantId });
+    await owner.post(`/host/openwop-app/orgs/${orgId}/members`, { displayName: 'V', subject: vlogin.body.user.userId, roles: ['viewer'] });
     const vget = await viewer.get(`${P}/${id}`);
     expect(vget.status).toBe(200);
     expect(vget.body.canWrite).toBe(false);
@@ -316,15 +316,15 @@ describe('projects — schedules (the ONE scheduler, generic project owner)', ()
   });
 });
 
-const K = '/v1/host/openwop-app/kanban';
-const B = '/v1/host/openwop-app/kanban/boards';
+const K = '/host/openwop-app/kanban';
+const B = '/host/openwop-app/kanban/boards';
 
 describe('projects — board read-privacy (org-scoped board visibility, ADR 0046)', () => {
   it('a co-tenant non-member cannot see or list the project board (404 / dropped); the owner can', async () => {
     const tenantId = `org:pjb-${Date.now()}-${n++}`;
     const owner = client();
-    await owner.post('/v1/host/openwop-app/test/login', { email: uniqEmail('pjb-owner'), tenantId });
-    const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'BoardCo' })).body.orgId;
+    await owner.post('/host/openwop-app/test/login', { email: uniqEmail('pjb-owner'), tenantId });
+    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'BoardCo' })).body.orgId;
     const boardId = (await owner.post(P, { orgId, name: 'Board proj' })).body.boardId;
     expect(boardId).toBeTruthy();
 
@@ -334,7 +334,7 @@ describe('projects — board read-privacy (org-scoped board visibility, ADR 0046
     // A co-tenant member with NO org membership: 404 on the board (no card leak),
     // and it does NOT appear in their board list (was tenant-visible before ADR 0046).
     const member = client();
-    await member.post('/v1/host/openwop-app/test/login', { email: uniqEmail('pjb-member'), tenantId });
+    await member.post('/host/openwop-app/test/login', { email: uniqEmail('pjb-member'), tenantId });
     expect((await member.get(`${B}/${boardId}`)).status).toBe(404);
     expect((await member.get(B)).body.boards.some((b: { id: string }) => b.id === boardId)).toBe(false);
     expect((await member.get(`${B}?include=cards`)).body.boards.some((b: { id: string }) => b.id === boardId)).toBe(false);
@@ -343,13 +343,13 @@ describe('projects — board read-privacy (org-scoped board visibility, ADR 0046
   it('a project VIEWER reads the board but cannot mutate it (write needs org write)', async () => {
     const tenantId = `org:pjb2-${Date.now()}-${n++}`;
     const owner = client();
-    await owner.post('/v1/host/openwop-app/test/login', { email: uniqEmail('pjb2-owner'), tenantId });
-    const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'BoardCo2' })).body.orgId;
+    await owner.post('/host/openwop-app/test/login', { email: uniqEmail('pjb2-owner'), tenantId });
+    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'BoardCo2' })).body.orgId;
     const boardId = (await owner.post(P, { orgId, name: 'Board proj 2' })).body.boardId;
 
     const viewer = client();
-    const vlogin = await viewer.post('/v1/host/openwop-app/test/login', { email: uniqEmail('pjb2-viewer'), tenantId });
-    await owner.post(`/v1/host/openwop-app/orgs/${orgId}/members`, { displayName: 'V', subject: vlogin.body.user.userId, roles: ['viewer'] });
+    const vlogin = await viewer.post('/host/openwop-app/test/login', { email: uniqEmail('pjb2-viewer'), tenantId });
+    await owner.post(`/host/openwop-app/orgs/${orgId}/members`, { displayName: 'V', subject: vlogin.body.user.userId, roles: ['viewer'] });
 
     // READ (workspace:read): the viewer sees the board + it lists.
     expect((await viewer.get(`${B}/${boardId}`)).status).toBe(200);
@@ -365,8 +365,8 @@ describe('projects — board read-privacy (org-scoped board visibility, ADR 0046
   it('a co-tenant non-member cannot CLAIM a role-addressed card on a project board (org write required)', async () => {
     const tenantId = `org:pjc-${Date.now()}-${n++}`;
     const owner = client();
-    await owner.post('/v1/host/openwop-app/test/login', { email: uniqEmail('pjc-owner'), tenantId });
-    const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'ClaimCo' })).body.orgId;
+    await owner.post('/host/openwop-app/test/login', { email: uniqEmail('pjc-owner'), tenantId });
+    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'ClaimCo' })).body.orgId;
     const boardId = (await owner.post(P, { orgId, name: 'Claim proj' })).body.boardId;
 
     // Owner adds a card and role-addresses it (unclaimed: assigneeRole set, no assigneeId).
@@ -375,7 +375,7 @@ describe('projects — board read-privacy (org-scoped board visibility, ADR 0046
 
     // A co-tenant member with NO org membership can't claim it (was tenant-gated → leak).
     const member = client();
-    await member.post('/v1/host/openwop-app/test/login', { email: uniqEmail('pjc-member'), tenantId });
+    await member.post('/host/openwop-app/test/login', { email: uniqEmail('pjc-member'), tenantId });
     expect((await member.post(`${K}/cards/${cardId}/claim`, {})).status).toBe(404);
     // The org owner still can.
     expect((await owner.post(`${K}/cards/${cardId}/claim`, {})).status).toBe(200);
@@ -384,8 +384,8 @@ describe('projects — board read-privacy (org-scoped board visibility, ADR 0046
   it('a ROLE-addressed card on a project board is filtered from a non-org-member\'s /assigned inbox; a DIRECT assignee is kept', async () => {
     const tenantId = `org:pja-${Date.now()}-${n++}`;
     const owner = client();
-    await owner.post('/v1/host/openwop-app/test/login', { email: uniqEmail('pja-owner'), tenantId });
-    const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'InboxCo' })).body.orgId;
+    await owner.post('/host/openwop-app/test/login', { email: uniqEmail('pja-owner'), tenantId });
+    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'InboxCo' })).body.orgId;
     const boardId = (await owner.post(P, { orgId, name: 'Inbox proj' })).body.boardId;
     const firstCol = (await getBoard(boardId))!.columns[0]!.id;
 
@@ -394,7 +394,7 @@ describe('projects — board read-privacy (org-scoped board visibility, ADR 0046
     // level (the HTTP assign route validates workspace membership; we're testing
     // the /assigned route's org filter, not assignment).
     const member = client();
-    const memberSubject = (await member.post('/v1/host/openwop-app/test/login', { email: uniqEmail('pja-member'), tenantId })).body.user.userId as string;
+    const memberSubject = (await member.post('/host/openwop-app/test/login', { email: uniqEmail('pja-member'), tenantId })).body.user.userId as string;
     await createMember({ tenantId, orgId: tenantId, subject: memberSubject, displayName: 'M', roles: ['editor'] });
 
     // A role-addressed card (to `editor`) AND a card directly assigned to the member.
@@ -417,13 +417,13 @@ describe('projects — membership + visibility (ADR 0054 Phase 2)', () => {
   it('add/list/remove members: a stranger and an unknown agent are rejected', async () => {
     const tenantId = `org:pcm-${Date.now()}-${n++}`;
     const owner = client();
-    await owner.post('/v1/host/openwop-app/test/login', { email: uniqEmail('pcm-owner'), tenantId });
-    const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'CollabCo' })).body.orgId;
+    await owner.post('/host/openwop-app/test/login', { email: uniqEmail('pcm-owner'), tenantId });
+    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'CollabCo' })).body.orgId;
     const id = (await owner.post(P, { orgId, name: 'Crew' })).body.id;
 
     // A teammate who IS an org member can be added; a stranger (no membership) can't.
     const mate = client();
-    const mateId = (await mate.post('/v1/host/openwop-app/test/login', { email: uniqEmail('pcm-mate'), tenantId })).body.user.userId;
+    const mateId = (await mate.post('/host/openwop-app/test/login', { email: uniqEmail('pcm-mate'), tenantId })).body.user.userId;
     await createMember({ tenantId, orgId, subject: mateId, displayName: 'Mate', roles: ['editor'] });
     const add = await owner.post(`${P}/${id}/members`, { ref: `user:${mateId}`, role: 'contributor' });
     expect(add.status, JSON.stringify(add.body)).toBe(201);
@@ -440,14 +440,14 @@ describe('projects — membership + visibility (ADR 0054 Phase 2)', () => {
   it('a PRIVATE project is read-gated to members + org writers across ALL surfaces (board/memory/knowledge/schedules)', async () => {
     const tenantId = `org:pcv-${Date.now()}-${n++}`;
     const owner = client();
-    await owner.post('/v1/host/openwop-app/test/login', { email: uniqEmail('pcv-owner'), tenantId });
-    const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'PrivCo' })).body.orgId;
+    await owner.post('/host/openwop-app/test/login', { email: uniqEmail('pcv-owner'), tenantId });
+    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'PrivCo' })).body.orgId;
     const proj = (await owner.post(P, { orgId, name: 'Secret' })).body;
     const id = proj.id; const boardId = proj.boardId;
 
     // A co-tenant org VIEWER (workspace:read), NOT a project member.
     const viewer = client();
-    const viewerId = (await viewer.post('/v1/host/openwop-app/test/login', { email: uniqEmail('pcv-viewer'), tenantId })).body.user.userId;
+    const viewerId = (await viewer.post('/host/openwop-app/test/login', { email: uniqEmail('pcv-viewer'), tenantId })).body.user.userId;
     await createMember({ tenantId, orgId, subject: viewerId, displayName: 'V', roles: ['viewer'] });
 
     // While `org`-visible the viewer sees it.
@@ -505,17 +505,17 @@ describe('projects — group chat (ADR 0054 Phase 3)', () => {
   });
 
   it('the chat history is gated by project MEMBERSHIP, not participant identity (closes the cross-surface read leak)', async () => {
-    const CHAT = '/v1/host/openwop-app/chat/sessions';
+    const CHAT = '/host/openwop-app/chat/sessions';
     const tenantId = `org:pcc-${Date.now()}-${n++}`;
     const owner = client();
-    await owner.post('/v1/host/openwop-app/test/login', { email: uniqEmail('pcc-owner'), tenantId });
-    const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'WarCo' })).body.orgId;
+    await owner.post('/host/openwop-app/test/login', { email: uniqEmail('pcc-owner'), tenantId });
+    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'WarCo' })).body.orgId;
     const id = (await owner.post(P, { orgId, name: 'War room' })).body.id;
     const { sessionId } = (await owner.post(`${P}/${id}/chat`)).body;
 
     // A co-tenant org VIEWER (workspace:read), NOT the chat's owner/participant.
     const viewer = client();
-    const viewerId = (await viewer.post('/v1/host/openwop-app/test/login', { email: uniqEmail('pcc-viewer'), tenantId })).body.user.userId;
+    const viewerId = (await viewer.post('/host/openwop-app/test/login', { email: uniqEmail('pcc-viewer'), tenantId })).body.user.userId;
     await createMember({ tenantId, orgId, subject: viewerId, displayName: 'V', roles: ['viewer'] });
 
     // While `org`-visible the viewer reads the thread through the GENERIC chat route —
@@ -541,11 +541,11 @@ describe('projects — group chat (ADR 0054 Phase 3)', () => {
   });
 
   it('deleting the project destroys the chat — it does not merely UNLOCK it (PRJ2-M1)', async () => {
-    const CHAT = '/v1/host/openwop-app/chat/sessions';
+    const CHAT = '/host/openwop-app/chat/sessions';
     const tenantId = `org:pcx-${Date.now()}-${n++}`;
     const owner = client();
-    await owner.post('/v1/host/openwop-app/test/login', { email: uniqEmail('pcx-owner'), tenantId });
-    const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'WarCo' })).body.orgId;
+    await owner.post('/host/openwop-app/test/login', { email: uniqEmail('pcx-owner'), tenantId });
+    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'WarCo' })).body.orgId;
     const id = (await owner.post(P, { orgId, name: 'Private room' })).body.id;
     const { sessionId } = (await owner.post(`${P}/${id}/chat`)).body;
     await owner.post(`${CHAT}/${sessionId}/messages`, { messageId: `m-${n++}`, role: 'user', content: 'confidential' });
@@ -554,7 +554,7 @@ describe('projects — group chat (ADR 0054 Phase 3)', () => {
     // A co-tenant stranger: denied BEFORE the delete. This is the control that
     // makes the assertion after the delete mean something.
     const stranger = client();
-    await stranger.post('/v1/host/openwop-app/test/login', { email: uniqEmail('pcx-stranger'), tenantId });
+    await stranger.post('/host/openwop-app/test/login', { email: uniqEmail('pcx-stranger'), tenantId });
     expect((await stranger.get(`${CHAT}/${sessionId}/messages`)).status).toBe(404);
 
     const del = await owner.del(`${P}/${id}`);
@@ -580,7 +580,7 @@ describe('projects — chat cadence (ADR 0054 Phase 4 / D6)', () => {
     const id = (await c.post(P, { orgId, name: 'Cadence' })).body.id;
 
     // A roster agent added as a project AGENT member.
-    const rosterId = (await c.post('/v1/host/openwop-app/roster', { persona: 'Scout', agentRef: { agentId: 'core.openwop.agents.brief-writer' } })).body.rosterId;
+    const rosterId = (await c.post('/host/openwop-app/roster', { persona: 'Scout', agentRef: { agentId: 'core.openwop.agents.brief-writer' } })).body.rosterId;
     expect((await c.post(`${P}/${id}/members`, { ref: `agent:${rosterId}`, role: 'contributor' })).status).toBe(201);
 
     // turnPolicy rides the SHARED validator — rounds clamp to [1,3], order/synthesize default.
@@ -588,7 +588,7 @@ describe('projects — chat cadence (ADR 0054 Phase 4 / D6)', () => {
     expect(tp.turnPolicy).toEqual({ rounds: 3, order: 'round-robin', synthesize: true });
 
     // A valid in-tenant roster agent that is NOT a project member can't be the moderator (422, D6 §3).
-    const outsider = (await c.post('/v1/host/openwop-app/roster', { persona: 'Outsider', agentRef: { agentId: 'core.openwop.agents.brief-writer' } })).body.rosterId;
+    const outsider = (await c.post('/host/openwop-app/roster', { persona: 'Outsider', agentRef: { agentId: 'core.openwop.agents.brief-writer' } })).body.rosterId;
     expect((await c.patch(`${P}/${id}`, { moderatorRosterId: outsider })).status).toBe(422);
     // An unknown roster id → 404.
     expect((await c.patch(`${P}/${id}`, { moderatorRosterId: 'host:does-not-exist' })).status).toBe(404);
@@ -604,7 +604,7 @@ describe('projects — chat cadence (ADR 0054 Phase 4 / D6)', () => {
 
     // Write-gated: a co-tenant viewer (no write) can't set the cadence.
     const viewer = client();
-    const vId = (await viewer.post('/v1/host/openwop-app/test/login', { email: uniqEmail('pcad-viewer'), tenantId: (await c.get(`${P}/${id}`)).body.tenantId })).body.user.userId;
+    const vId = (await viewer.post('/host/openwop-app/test/login', { email: uniqEmail('pcad-viewer'), tenantId: (await c.get(`${P}/${id}`)).body.tenantId })).body.user.userId;
     await createMember({ tenantId: (await c.get(`${P}/${id}`)).body.tenantId, orgId, subject: vId, displayName: 'V', roles: ['viewer'] });
     expect((await viewer.patch(`${P}/${id}`, { turnPolicy: { rounds: 2 } })).status).toBe(403);
   });
@@ -628,7 +628,7 @@ describe('projects — group chat seats cap at the advertised multi-party ceilin
     for (let i = 1; i <= count; i++) {
       const persona = `Cap Agent ${Date.now()}-${n++}`;
       const agentId = `core.openwop.agents.cap-${Date.now()}-${n++}`;
-      const rosterId = (await c.post('/v1/host/openwop-app/roster', { persona, agentRef: { agentId } })).body.rosterId;
+      const rosterId = (await c.post('/host/openwop-app/roster', { persona, agentRef: { agentId } })).body.rosterId;
       const ref = `agent:${rosterId}`;
       expect((await c.post(`${P}/${id}/members`, { ref, role: 'contributor' })).status).toBe(201);
       out.push({ ref, rosterId, seatRef: `agent:${agentId}` });

@@ -23,7 +23,7 @@ import {
 
 describe('capability — read from the per-MODEL providers.json flag', () => {
   it('google models advertise native search', () => {
-    expect(modelSupportsNativeSearch('google', 'gemini-3.1-flash-lite')).toBe(true);
+    expect(modelSupportsNativeSearch('google', 'gemini-3.8-flash')).toBe(true);
   });
 
   it('anthropic/openai are OFF pending their live check (capability honesty)', () => {
@@ -42,11 +42,11 @@ describe('capability — read from the per-MODEL providers.json flag', () => {
 
 describe('suitability — the licensing gate', () => {
   it('THE POINT: google searches, but its links are ANSWER-ONLY (Grounding terms)', () => {
-    expect(modelSupportsNativeSearch('google', 'gemini-3.1-flash-lite')).toBe(true);
-    expect(nativeSearchSuitability('google', 'gemini-3.1-flash-lite')).toBe('answer-only');
+    expect(modelSupportsNativeSearch('google', 'gemini-3.8-flash')).toBe(true);
+    expect(nativeSearchSuitability('google', 'gemini-3.8-flash')).toBe('answer-only');
     // …so it satisfies a display-time ask but NOT a storable-citation ask.
-    expect(nativeSearchSatisfies('google', 'gemini-3.1-flash-lite', 'answer-only')).toBe(true);
-    expect(nativeSearchSatisfies('google', 'gemini-3.1-flash-lite', 'durable')).toBe(false);
+    expect(nativeSearchSatisfies('google', 'gemini-3.8-flash', 'answer-only')).toBe(true);
+    expect(nativeSearchSatisfies('google', 'gemini-3.8-flash', 'durable')).toBe(false);
   });
 
   it('a durable provider satisfies BOTH asks (once its capability flag is on)', () => {

@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.agents",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Agent composition primitives. Root agent.run + sub-nodes (tools, memory, parsers, model selector). Composes via expansion semantics and consumes host.aiProviders + host.agentRuntime.",
   "author": "OpenWOP Working Group",
   "license": "Apache-2.0",
@@ -15,7 +15,7 @@
     "tool-calling"
   ],
   "engines": {
-    "openwop": ">=1.0.0 <2.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "peerDependencies": {
     "aiProviders": "supported"
@@ -200,5 +200,6 @@
       "inputSchemaRef": "schemas/model-selector.input.json",
       "outputSchemaRef": "schemas/model-selector.output.json"
     }
-  ]
+  ],
+  "kind": "node"
 }

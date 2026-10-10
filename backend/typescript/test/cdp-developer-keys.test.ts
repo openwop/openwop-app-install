@@ -10,7 +10,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
-import { verifyApiKey } from '../src/features/developer-keys/apiKeyService.js';
+import { verifyApiKey, issueApiKey } from '../src/features/developer-keys/apiKeyService.js';
 import { createMember } from '../src/host/accessControlService.js';
 
 let BASE: string; let server: http.Server;
@@ -36,21 +36,21 @@ function client() {
   return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b), del: (p: string) => call('DELETE', p) };
 }
 let n = 0;
-async function owner() { const c = client(); const r = await c.post('/v1/host/openwop-app/test/login', { email: `h-${Date.now()}-${n++}@a.test`, tenantId: `org:h-${Date.now()}-${n++}` }); expect(r.status).toBe(201); return c; }
+async function owner() { const c = client(); const r = await c.post('/host/openwop-app/test/login', { email: `h-${Date.now()}-${n++}@a.test`, tenantId: `org:h-${Date.now()}-${n++}` }); expect(r.status).toBe(201); return c; }
 /** Log in an explicit (subject, tenant) so two principals can share a tenant. Returns the
  *  client + the canonical caller subject (req.userId === user.userId post-login). */
 async function loginAs(subject: string, tenantId: string) {
   const c = client();
-  const r = await c.post('/v1/host/openwop-app/test/login', { subject, tenantId, email: `${subject}@a.test` });
+  const r = await c.post('/host/openwop-app/test/login', { subject, tenantId, email: `${subject}@a.test` });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return { c, userId: r.body.user.userId as string };
 }
-const KEYS_PATH = '/v1/host/openwop-app/developer-keys';
+const KEYS_PATH = '/host/openwop-app/developer-keys';
 
 describe('CDP-H developer API keys', () => {
   it('issues a token once, verifies it, and never leaks the hash', async () => {
     const c = await owner();
-    const issued = await c.post('/v1/host/openwop-app/developer-keys', { name: 'ci', scopes: ['runs:create', 'manifest:read'] });
+    const issued = await c.post('/host/openwop-app/developer-keys', { name: 'ci', scopes: ['runs:create', 'manifest:read'] });
     expect(issued.status, JSON.stringify(issued.body)).toBe(201);
     const token = issued.body.token as string;
     expect(token.startsWith('owk_')).toBe(true);
@@ -60,7 +60,7 @@ describe('CDP-H developer API keys', () => {
     expect(v).toBeTruthy();
     expect(v!.scopes).toEqual(['runs:create', 'manifest:read']);
 
-    const list = await c.get('/v1/host/openwop-app/developer-keys');
+    const list = await c.get('/host/openwop-app/developer-keys');
     expect(list.body.keys.length).toBe(1);
     expect(list.body.keys[0].tokenHash).toBeUndefined();
   });
@@ -71,13 +71,18 @@ describe('CDP-H developer API keys', () => {
     expect(await verifyApiKey('not-even-prefixed')).toBeNull();
 
     // expired
-    const exp = await c.post('/v1/host/openwop-app/developer-keys', { name: 'exp', expiresAt: '2000-01-01T00:00:00.000Z' });
-    expect(await verifyApiKey(exp.body.token)).toBeNull();
+    // ADR 0795 D4 — the ROUTE refuses a past expiry outright; a row that is
+    // already past its expiry (minted through the service) still verifies null.
+    const past = await c.post('/host/openwop-app/developer-keys', { name: 'exp', scopes: ['runs:read'], expiresAt: '2000-01-01T00:00:00.000Z' });
+    expect(past.status).toBe(400);
+    expect(past.body.details?.code).toBe('expiry_in_past');
+    const exp = await issueApiKey({ tenantId: 'cdp-keys-expired', name: 'exp', createdBy: 'user:x', expiresAt: '2000-01-01T00:00:00.000Z' });
+    expect(await verifyApiKey(exp.token)).toBeNull();
 
     // revoked
-    const live = await c.post('/v1/host/openwop-app/developer-keys', { name: 'live' });
+    const live = await c.post('/host/openwop-app/developer-keys', { name: 'live', scopes: ['runs:read'] });
     expect(await verifyApiKey(live.body.token)).toBeTruthy();
-    const del = await c.del(`/v1/host/openwop-app/developer-keys/${live.body.key.keyId}`);
+    const del = await c.del(`/host/openwop-app/developer-keys/${live.body.key.keyId}`);
     expect(del.status).toBe(204);
     expect(await verifyApiKey(live.body.token)).toBeNull();
   });
@@ -105,7 +110,7 @@ describe('CDP-H developer API keys', () => {
     const bob = await loginAs(`oidc:bob-${Date.now()}`, T);
 
     // Alice self-issues a key (no role required — self-service)
-    const issued = await alice.c.post(KEYS_PATH, { name: 'alice-key' });
+    const issued = await alice.c.post(KEYS_PATH, { name: 'alice-key', scopes: ['runs:read'] });
     expect(issued.status, JSON.stringify(issued.body)).toBe(201);
     const aliceKeyId = issued.body.key.keyId as string;
     expect(issued.body.key.createdBy).toBe(alice.userId);

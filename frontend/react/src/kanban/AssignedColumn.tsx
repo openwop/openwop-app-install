@@ -14,6 +14,7 @@
  * away entirely (the parent renders nothing).
  */
 
+import { CardHandoffNote } from './CardHandoffNote.js';
 import { Button } from '../ui/Button.js';
 import { useEffect, useRef } from 'react';
 import { scrollBehavior } from '../ui/motion.js';
@@ -77,6 +78,7 @@ export function AssignedColumn({
               {card.assignmentReason ? (
                 <div className="muted u-fs-12 u-mt-1">{card.assignmentReason}</div>
               ) : null}
+              {card.handoff ? <CardHandoffNote handoff={card.handoff} /> : null}
               <div className="kb-card-foot">
                 {unclaimed ? (
                   <Button

@@ -13,8 +13,8 @@ import { getAgentRegistry } from '../src/executor/agentRegistry.js';
 import { nodes as nodePack } from '../../../packs/feature.priority-matrix.nodes/index.mjs';
 
 const REPO_ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..', '..');
-const AGENT_PACK = join(REPO_ROOT, 'packs', 'feature.priority-matrix.agents');
-const ASSISTANT_PACK = join(REPO_ROOT, 'packs', 'feature.assistant.agents');
+const AGENT_PACK = join(REPO_ROOT, 'packs', 'vendor.openwop-app.priority-matrix.agents');
+const ASSISTANT_PACK = join(REPO_ROOT, 'packs', 'vendor.openwop-app.assistant.agents');
 
 describe('feature.priority-matrix.nodes — node pack', () => {
   it('exports the eleven priority-matrix node fns (v1.3 adds the intake verbs, ADR 0232 §7)', () => {
@@ -80,14 +80,14 @@ describe('feature.priority-matrix.nodes — node pack', () => {
   });
 });
 
-describe('feature.priority-matrix.agents — agent pack manifest', () => {
+describe('vendor.openwop-app.priority-matrix.agents — agent pack manifest', () => {
   beforeEach(() => getAgentRegistry()._resetForTest());
 
   it('loads the prioritization-analyst with its prompt + tool allowlist', () => {
     const loaded = loadAgentsFromManifest(AGENT_PACK);
     expect(loaded.length).toBe(1);
     const a = loaded[0];
-    expect(a.agentId).toBe('feature.priority-matrix.agents.prioritization-analyst');
+    expect(a.agentId).toBe('vendor.openwop-app.priority-matrix.agents.prioritization-analyst');
     expect(a.systemPromptRef).toBe('prompts/prioritization-analyst.md');
     expect(a.systemPrompt.length).toBeGreaterThan(0);
     expect(a.toolAllowlist).toContain('openwop:priority-matrix.score-idea');
@@ -98,7 +98,7 @@ describe('feature.priority-matrix.agents — agent pack manifest', () => {
   // ADR 0103 Phase 2 — the Chief of Staff (Iris) can answer "are we behind schedule?"
   // because the schedule-status node is on her allowlist (the whole point of the wiring).
   it('grants the Chief of Staff the schedule-status node (ADR 0103)', () => {
-    const cos = loadAgentsFromManifest(ASSISTANT_PACK).find((x) => x.agentId === 'feature.assistant.agents.chief-of-staff');
+    const cos = loadAgentsFromManifest(ASSISTANT_PACK).find((x) => x.agentId === 'vendor.openwop-app.assistant.agents.chief-of-staff');
     expect(cos, 'chief-of-staff agent must load').toBeDefined();
     expect(cos?.toolAllowlist).toContain('openwop:priority-matrix.schedule-status');
   });

@@ -14,13 +14,13 @@ export const kicktodoMetricsFeature: BackendFeature = {
     id: 'kicktodo-metrics',
     label: 'KickTodo Metrics',
     description:
-      'PRD §15 outcome metrics (north star, activation, retention, recovery, factory quality) as counts-only computed-on-read projections with k≥5 withholding, plus sampled verifier FP/FN review (ADR 0432).',
+      'Outcome metrics (north star, activation, retention, recovery, factory quality) as counts-only computed-on-read projections with k≥5 withholding, plus sampled verifier FP/FN review.',
     category: 'KickTodo',
     status: 'off',
     bucketUnit: 'tenant',
     salt: 'kicktodo-metrics',
   },
   dependsOn: ['kicktodo-core', 'kicktodo-creator', 'goals'],
-  requiredPacks: [{ name: 'feature.kicktodo.nodes', version: '1.30.0' }],
+  requiredPacks: [{ name: 'feature.kicktodo.nodes', version: '1.30.3' }],
   surface: { id: 'kicktodo-metrics', build: buildKicktodoMetricsSurface },
 };

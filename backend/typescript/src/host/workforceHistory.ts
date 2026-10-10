@@ -24,6 +24,7 @@
  */
 
 import type { AnnotationRecord, EventRecord, RunRecord, RunStatus } from '../types.js';
+import { buildInterruptRequestedPayload } from '../executor/interruptRequestedPayload.js';
 
 /** An event ready to hand to `Storage.appendEvent` (which assigns `sequence`). */
 export type SeedEvent = Omit<EventRecord, 'sequence'>;
@@ -235,19 +236,28 @@ export function generateWorkforceHistory(opts: WorkforceHistoryOptions): Workfor
     // ADR 0722/0723 + corpus 2.3.2 — the fixture writes the SEATED shapes, not
     // host-private keys: `nodeStarted` requires `typeId`; `nodeSuspended` /
     // `interruptResolved` require `interruptId` (bound on the major-2 read);
-    // `approval.requested` IS `suspend-request` (`{kind, key, data: ApprovalData}`,
+    // `interrupt.requested` IS `suspend-request` (`{kind, key, data: ApprovalData}`,
     // no hatch) — the old `{prompt}` was the wrong MODEL, not an extra key;
     // `resolvedBy` is a Subject; `run.completed` seats results under `outputs`
     // and `run.failed` under `error`. Deterministic like everything else here.
     const typeIdOf = (node: string): string => `feature.workforce.nodes.${node.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase())}`;
     const interruptId = makeId('int', seed, i);
     const reviewer = { issuer: 'urn:openwop:legacy', subjectId: 'reviewer:demo', tenant: tenantId, lane: 'session', kind: 'user' } as const;
-    const approvalData = {
-      artifactId: makeId('inv', seed, i), artifactType: 'invoice',
-      title: 'Approve invoice posting over $5,000?',
-      description: 'Invoice matched and extracted; posting exceeds the auto-approve threshold.',
-      actions: ['accept', 'reject'],
-    };
+    // openwop#1742 — the approval gate records the protocol pair the executor
+    // itself emits (#4212 / ADR 0772 P2): `interrupt.requested` built by the SAME
+    // projector, then `interrupt.resolved`. The kind-specific `approval.requested`
+    // / `.granted` / `.overridden` it used to write carried the v2 shapes, which
+    // are INVALID on the v1 wire (v1 requires `gateId` + `principal`; the closed v2
+    // defs forbid them), so one payload could not be legal on both majors.
+    const requested = buildInterruptRequestedPayload({
+      runId, nodeId: 'invoice-post', kind: 'approval',
+      data: {
+        title: 'Approve invoice posting over $5,000?',
+        description: 'Invoice matched and extracted; posting exceeds the auto-approve threshold.',
+        actions: ['accept', 'reject'],
+      },
+      preview: { artifactId: makeId('inv', seed, i), artifactType: 'invoice' },
+    });
     ev('run.started', { workflowId, metadata: { workforceId, inputDigest: makeId('inp', seed, i), correlationId, batchId } });
 
     // extract + match always run and complete (auto-safe nodes)
@@ -282,22 +292,25 @@ export function generateWorkforceHistory(opts: WorkforceHistoryOptions): Workfor
         break;
       }
       case 'escalated': {
-        ev('node.suspended', { nodeId: postNode, interruptId, kind: 'approval', key: `${postNode}:approval`, reason: 'over-threshold' }, postNode);
-        ev('approval.requested', { kind: 'approval', key: `${postNode}:approval`, data: approvalData }, postNode);
+        ev('node.suspended', { nodeId: postNode, interruptId, kind: 'approval', key: requested.key, reason: 'over-threshold' }, postNode);
+        ev('interrupt.requested', requested, postNode);
         // `decision` is an ENUM as of corpus 2.2.0 (RFC 0183 §A.3, adopted in ADR 0705):
         // `granted | rejected | overridden`. `approve`/`reject` validated only while the
         // field was an open string. Mapping per `interrupt.md` §Backward-compat.
-        ev('approval.granted', { nodeId: postNode, interruptId, kind: 'approval', resolvedBy: reviewer, decision: 'granted', action: 'accept' }, postNode);
+        ev('interrupt.resolved', { nodeId: postNode, interruptId, kind: 'approval', resolvedBy: reviewer, decision: 'granted', action: 'accept' }, postNode);
         ev('node.completed', { nodeId: postNode }, postNode);
         ev('run.completed', { outputs: { outcome: 'cleared', escalated: true } });
         status = 'completed';
         break;
       }
       case 'overridden': {
-        ev('node.suspended', { nodeId: postNode, interruptId, kind: 'approval', key: `${postNode}:approval`, reason: 'over-threshold' }, postNode);
-        ev('approval.requested', { kind: 'approval', key: `${postNode}:approval`, data: approvalData }, postNode);
-        ev('approval.overridden', { nodeId: postNode, interruptId, kind: 'approval', resolvedBy: reviewer, decision: 'rejected', action: 'reject', reason: 'vendor not on master list' }, postNode);
-        ev('run.completed', { outputs: { outcome: 'held', overridden: true } });
+        ev('node.suspended', { nodeId: postNode, interruptId, kind: 'approval', key: requested.key, reason: 'over-threshold' }, postNode);
+        ev('interrupt.requested', requested, postNode);
+        // The reviewer REJECTED the agent's posting. No `reason`: that seat is the
+        // cause of a resolution WITHOUT a human (RFC 0186 §A.2), and a human decided
+        // this one. The human's reason is the run's output.
+        ev('interrupt.resolved', { nodeId: postNode, interruptId, kind: 'approval', resolvedBy: reviewer, decision: 'rejected', action: 'reject' }, postNode);
+        ev('run.completed', { outputs: { outcome: 'held', overridden: true, reason: 'vendor not on master list' } });
         status = 'completed';
         break;
       }
@@ -323,8 +336,8 @@ export function generateWorkforceHistory(opts: WorkforceHistoryOptions): Workfor
         break;
       }
       case 'open': {
-        ev('node.suspended', { nodeId: postNode, interruptId, kind: 'approval', key: `${postNode}:approval`, reason: 'over-threshold' }, postNode);
-        ev('approval.requested', { kind: 'approval', key: `${postNode}:approval`, data: approvalData }, postNode);
+        ev('node.suspended', { nodeId: postNode, interruptId, kind: 'approval', key: requested.key, reason: 'over-threshold' }, postNode);
+        ev('interrupt.requested', requested, postNode);
         status = 'waiting-approval';
         break;
       }

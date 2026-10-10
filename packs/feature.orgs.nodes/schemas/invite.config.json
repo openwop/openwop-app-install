@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/feature.orgs.nodes/1.0.0/invite.config.json",
+  "$id": "https://packs.openwop.dev/feature.orgs.nodes/1.0.1/invite.config.json",
   "title": "OrgsInviteConfig",
   "description": "Authoring-time configuration for one invitation. `email` is the chain-parameter position (`{{params.newHireEmail}}`, RFC 0013 Path A \u2014 frozen per instance); `role` and `orgId` are optional. Runtime inputs win on conflict (the merged-args idiom). Authorization is never configured here: it is the run's acting user holding host:members:manage in the target org (the SAME predicate the /orgs/:orgId/invites routes use), checked in the host surface.",
   "type": "object",

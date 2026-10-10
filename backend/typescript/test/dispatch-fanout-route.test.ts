@@ -2,10 +2,10 @@
  * RFC 0118 — the live parallel-fan-out witness over HTTP. Boots the real app with
  * OPENWOP_TEST_SEAM_ENABLED=true and proves the witness is non-vacuous against the fixed
  * conformance seam the pinned suite drives:
- *   - /.well-known/openwop advertises dispatch.fanOutSupported + "parallel" in fanOutPolicies
- *   - POST /v1/host/sample/dispatch/fanout (the canonical conformance path) joins a wait-all/
+ *   - the (v1) discovery document advertises dispatch.fanOutSupported + "parallel" in fanOutPolicies
+ *   - POST /host/sample/dispatch/fanout (the canonical conformance path) joins a wait-all/
  *     collect fan-out with joinOutcome:'satisfied', children[] of the right length, mergeOrder[]
- *   - the product path /v1/host/openwop-app/dispatch/fanout serves the same handler
+ *   - the product path /host/openwop-app/dispatch/fanout serves the same handler
  *
  * Mirrors conformance/src/scenarios/dispatch-fanout-parallel.test.ts (capability-gated).
  */
@@ -13,12 +13,13 @@ import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
+import { v1Advertisement } from './support/v1Advertisement.js';
 
 let BASE: string;
 let server: http.Server;
 const H = { authorization: 'Bearer dev-token', 'content-type': 'application/json' };
-const SAMPLE = () => `${BASE}/v1/host/sample/dispatch/fanout`;
-const PRODUCT = () => `${BASE}/v1/host/openwop-app/dispatch/fanout`;
+const SAMPLE = () => `${BASE}/host/sample/dispatch/fanout`;
+const PRODUCT = () => `${BASE}/host/openwop-app/dispatch/fanout`;
 const post = (url: string, body: unknown) => fetch(url, { method: 'POST', headers: H, body: JSON.stringify(body) });
 const waitAll = { nextWorkerIds: ['conformance.child.a', 'conformance.child.b', 'conformance.child.c'], config: { fanOutPolicy: 'parallel', joinPolicy: { mode: 'wait-all', onChildFailure: 'collect' } } };
 
@@ -36,7 +37,8 @@ afterAll(async () => {
 
 describe('RFC 0118 — live parallel-fan-out witness', () => {
   it('advertises dispatch.fanOutSupported + parallel at the discovery root', async () => {
-    const doc = await (await fetch(`${BASE}/.well-known/openwop`, { headers: H })).json() as {
+    // ADR 0812 — the v2 root has no `dispatch` record yet; the v1 claim is read from its builder.
+    const doc = await v1Advertisement() as {
       dispatch?: { supported?: boolean; fanOutSupported?: boolean; fanOutPolicies?: string[]; joinModes?: string[]; onChildFailureModes?: string[]; maxFanOut?: number; perItemInput?: boolean };
     };
     expect(doc.dispatch?.fanOutSupported).toBe(true);

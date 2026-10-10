@@ -14,6 +14,7 @@
  */
 
 import { Button } from '../ui/Button.js';
+import { Notice } from '../ui/Notice.js';
 import { Suspense, lazy } from 'react';
 import { useTranslation } from 'react-i18next';
 const EmailApprovalSection = lazy(() => import('./EmailApprovalSection.js').then((m) => ({ default: m.EmailApprovalSection })));
@@ -31,6 +32,7 @@ export function NotificationPreferencesPanel(): JSX.Element {
   const prefs = useNotificationStore((s) => s.preferences);
   const updatePreferences = useNotificationStore((s) => s.updatePreferences);
   const closePreferences = useNotificationStore((s) => s.closePreferences);
+  const saveFailed = useNotificationStore((s) => s.preferencesSaveFailed);
 
   const setGlobalMute = (globalMute: boolean): void =>
     updatePreferences({ ...prefs, globalMute });
@@ -77,6 +79,12 @@ export function NotificationPreferencesPanel(): JSX.Element {
         </Button>
         <h3 className="u-m-0 u-fs-14">{t('prefsHeading')}</h3>
       </header>
+
+      {/* ADR 0816 NTFUX-4 — the server now applies these to background push, so a
+          save that has not landed is a phone that keeps buzzing: say so here,
+          where the change was made (the panel's error block is hidden behind
+          this view). */}
+      {saveFailed && <Notice variant="warning" announce={t('prefsNotSaved')}>{t('prefsNotSaved')}</Notice>}
 
       {/* ADR 0478 §2 — email delivery of addressed approval requests (opt-in;
           lazy — the notification panel rides the entry chunk). */}

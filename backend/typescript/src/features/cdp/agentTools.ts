@@ -24,6 +24,7 @@ function toolError(error: string, message: string): { content: string; isError: 
 export function registerCdpAgentTools(): void {
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: CDP_IDENTITY_RESOLVE_TOOL_ID,
       description:

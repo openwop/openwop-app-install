@@ -29,7 +29,9 @@ export interface ConnectorsAdapter {
     extraHeaders?: Record<string, string>;
     /** ADR 0627 D5 — exact connection pin (see `ConnectorInvokeArgs.request.connectionId`). */
     connectionId?: string;
-  }): Promise<{ ok: boolean; status?: number; data?: unknown; error?: string }>;
+    /** Host-local cancellation; the broker still owns the network request. */
+    signal?: AbortSignal;
+  }): Promise<{ ok: boolean; status?: number; data?: unknown; error?: string; link?: string }>;
   /** Resolve the acting human's connected provider for a capability CATEGORY
    *  ("email-calendar" / "hr" / "ticketing" / …) — the Phase-2 capability binding
    *  (ADR 0186 capability-dispatch). Returns the provider id to hand back to

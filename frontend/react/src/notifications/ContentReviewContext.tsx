@@ -30,15 +30,16 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import type { PendingApproval } from '../agents/approvalsClient.js';
+import type { PendingApproval, StrategyActivationSnapshot as Snapshot } from '../agents/approvalsClient.js';
 import { Button } from '../ui/Button.js';
-import { CheckIcon, ExternalLinkIcon, SparklesIcon, XIcon } from '../ui/icons/index.js';
+import { CheckIcon, ExternalLinkIcon, InfoIcon, SparklesIcon, XIcon } from '../ui/icons/index.js';
 
 export function ContentReviewContext({ a }: { a: PendingApproval }): JSX.Element | null {
   const { t } = useTranslation('notifications');
   const canLink = Boolean(a.orgId && a.pageId);
   const hasAi = (a.aiDraftedLocales?.length ?? 0) > 0;
-  if (!canLink && !hasAi && typeof a.pageVersion !== 'number') return null;
+  const liveCount = a.liveReferenceSections?.length ?? 0;
+  if (!canLink && !hasAi && liveCount === 0 && typeof a.pageVersion !== 'number') return null;
   return (
     <div className="u-flex u-items-center u-gap-2 u-wrap u-fs-12">
       {canLink && (
@@ -72,6 +73,16 @@ export function ContentReviewContext({ a }: { a: PendingApproval }): JSX.Element
           <span className="sr-only"> — {t('approvalsAiDraftedTitle')}</span>
         </span>
       )}
+      {liveCount > 0 && (
+        // ADR 0859 D5 (ADR 0594 D1) — the condition ADR 0594 accepted the lane on:
+        // the reviewer is TOLD these sections keep changing after approval. The whole
+        // sentence is visible text, never a tooltip (review F7.1). Plain text, not a
+        // chip: a pill does not wrap, and the sentence overflows a phone-width card
+        // (UX grade CMSA2UX-9).
+        <span className="muted u-flex u-items-center u-gap-1">
+          <InfoIcon size={11} /> {t('approvalsLiveData', { count: liveCount })}
+        </span>
+      )}
     </div>
   );
 }
@@ -95,9 +106,14 @@ export function ApprovalDecideBar({
   busy,
   onApprove,
   onReject,
+  approveLabel,
+  rejectLabel,
 }: {
   busy: boolean;
   onApprove: () => void;
+  /** Kind-true verbs (ADR 0785 P4: approving a Claude Code prompt ALLOWS a tool). */
+  approveLabel?: string;
+  rejectLabel?: string;
   /** Returns `false` (or a promise of it) when the reject FAILED, so the reason
    *  step stays open with the typed text intact. */
   onReject: (note?: string) => void | boolean | Promise<void | boolean>;
@@ -160,11 +176,93 @@ export function ApprovalDecideBar({
   return (
     <span className="action-bar">
       <Button variant="primary" size="sm" disabled={busy} aria-busy={busy} onClick={onApprove}>
-        <CheckIcon size={13} /> {t('approveLabel')}
+        <CheckIcon size={13} /> {approveLabel ?? t('approveLabel')}
       </Button>
       <Button ref={rejectRef} variant="secondary" size="sm" disabled={busy} aria-busy={busy} onClick={() => setAsking(true)}>
-        <XIcon size={13} /> {t('rejectLabel')}
+        <XIcon size={13} /> {rejectLabel ?? t('rejectLabel')}
       </Button>
     </span>
+  );
+}
+
+/**
+ * ADR 0845 D6 — APPROVE WHAT YOU SEE, on the card. A `strategy-activation` approval
+ * binds to a digest of the strategy's protected content plus where it lives; the
+ * decide handler refuses if the live strategy no longer matches. The card used to say
+ * only `Activate strategy "X"`, so the approver signed off on objectives they were
+ * never shown.
+ *
+ * Rendered: period (label + dates), horizon, accountable executive, every objective
+ * and key result with its target and its metric source (the field that authorizes
+ * confirmed sync writes). NOT rendered here, and reachable through the "Open
+ * strategy" link: weights, the measure's baseline/direction, and the org/scope (the
+ * inbox only lists this row to approvers in that org). Long plans fold into a
+ * `<details>` so the decide bar stays reachable.
+ *
+ * Lives in this module (not its own file) so it rides the chunk both inboxes already
+ * share: a new shared chunk adds its name to the ENTRY chunk's preload map.
+ */
+
+/** Above this many objectives the list starts folded. */
+const OPEN_UP_TO = 5;
+
+export function StrategyActivationSnapshot({ strategyId, strategyTitle, snapshot }: { strategyId?: string | undefined; strategyTitle?: string | undefined; snapshot?: Snapshot | undefined }): JSX.Element | null {
+  const { t } = useTranslation('notifications');
+  const open = strategyId ? (
+    <Link to={`/strategy/${encodeURIComponent(strategyId)}`} aria-label={strategyTitle ? `${t('strategySnapshotOpen')}: ${strategyTitle}` : undefined}>
+      {t('strategySnapshotOpen')}
+    </Link>
+  ) : null;
+  if (!snapshot) {
+    // No snapshot: a legacy row (queued before ADR 0845), or a row re-opened after a
+    // failed decide (resolving drops the snapshot). Say so rather than render an empty
+    // list that reads as "no objectives"; the digest still binds the decision.
+    return strategyId ? <p className="u-m-0 u-fs-12 muted">{t('strategySnapshotLegacy')} {open}</p> : null;
+  }
+  const period = snapshot.period
+    ? [snapshot.period.label, [snapshot.period.startDate, snapshot.period.endDate].filter(Boolean).join(' – ')].filter(Boolean).join(' ')
+    : null;
+  const meta = [
+    period,
+    t('strategySnapshotHorizon', { horizon: snapshot.planningHorizon }),
+    snapshot.accountableExecutive ? t('strategySnapshotExecutive', { name: snapshot.accountableExecutive }) : null,
+  ].filter(Boolean).join(' · ');
+  const list = (
+    <ul className="u-m-0 u-grid u-gap-1">
+      {snapshot.objectives.map((o) => (
+        <li key={o.id}>
+          <strong>{o.title}</strong>
+          {o.keyResults.length > 0 && (
+            <ul className="u-m-0 u-fs-12">
+              {o.keyResults.map((k) => {
+                const target = k.target ?? (k.measure?.target !== undefined ? String(k.measure.target) : undefined);
+                const unit = k.unit ?? k.measure?.unit ?? '';
+                return (
+                  <li key={k.id}>
+                    {k.title}
+                    {target ? ` — ${t('strategySnapshotTarget', { target, unit }).trim()}` : ''}
+                    {k.measure?.source ? <span className="muted"> · {t('strategySnapshotSource', { kind: k.measure.source.kind })}</span> : null}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </li>
+      ))}
+    </ul>
+  );
+  return (
+    <div className="u-grid u-gap-1">
+      <p className="u-m-0 u-fs-12 muted">{meta}</p>
+      {snapshot.objectives.length === 0 ? (
+        <p className="u-m-0 u-fs-12 muted">{t('strategySnapshotNoObjectives')}</p>
+      ) : (
+        <details open={snapshot.objectives.length <= OPEN_UP_TO}>
+          <summary>{t('strategySnapshotLabel')} ({snapshot.objectives.length})</summary>
+          {list}
+        </details>
+      )}
+      {open}
+    </div>
   );
 }

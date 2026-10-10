@@ -24,7 +24,7 @@
 
 import { OpenwopError } from '../../types.js';
 import {
-  createContentApproval,
+  createContentApprovalOnce,
   getApproval,
   findPendingContentApprovalForPage,
   repinContentApproval,
@@ -33,10 +33,18 @@ import {
   registerContentApprovalHandler,
   type PendingApproval,
 } from '../../host/approvalService.js';
+import { createHash } from 'node:crypto';
 import { resolveOne } from '../../host/featureToggles/service.js';
-import { getOrg, resolveEffectiveAccess } from '../../host/accessControlService.js';
-import { getPage, transitionPage } from './cmsService.js';
+import { getOrg, hasDistinctScopeHolder, resolveEffectiveAccess } from '../../host/accessControlService.js';
+import { approvalRecipients } from '../../host/approvalAudience.js';
+import { canonicalDecider } from '../../host/delegatedSubject.js';
+import { hasContentSectionResolver } from '../../host/contentDataSources.js';
+import { getNotificationEmitter } from '../../notifications/emitter.js';
+import { createLogger } from '../../observability/logger.js';
+import { assertNoPublishBlockers, deliverableSectionsForPage, getPage, resolveSharedRefs, transitionPage, type Page } from './cmsService.js';
 import { SYSTEM_SITE_ORG, SYSTEM_SITE_TENANT } from '../../host/systemSite.js';
+
+const log = createLogger('cms.contentApproval');
 
 /**
  * ADR 0593 CORRECTION (adversarial review F1/F2) — THE live-content rule.
@@ -302,6 +310,15 @@ async function decideContentPublish(
         { reason: 'stale_review', approvedVersion: approval.pageVersion, currentVersion: live.version },
       );
     }
+    // ADR 0836 D9 — the publish blockers, BEFORE the CAS resolve, for the same
+    // reason as the pin above: `transitionPage('approve')` would refuse anyway,
+    // but only after the row was resolved, then reopened. Checked here the row
+    // simply stays pending.
+    assertNoPublishBlockers(live);
+    // ADR 0859 D4 — separation of duties, BEFORE the CAS so a refusal consumes
+    // nothing. Every decide lane (the page header, `/approvals/:id/claim`, `/reviews`,
+    // the inbox) reaches this handler through `KIND_DISPATCH`, so this is the one place.
+    await assertNotSelfApproval(tenantId, orgId, decidedBy, approval);
   }
 
   // CAS flip pending→resolved; `changed` gates the page transition so a losing
@@ -347,6 +364,9 @@ async function decideContentPublish(
     await reopenApproval(approvalId);
     return null; // page deleted between submit and decide → 404 (approval stays pending)
   }
+  // ADR 0859 D3 — the decision landed (row resolved AND page transitioned): tell the
+  // submitters. After the compensation branches, so a decide that was undone says nothing.
+  await notifyReviewDecided(lock.approval, outcome, decidedBy);
   return { approval: lock.approval, changed: true };
 }
 
@@ -367,6 +387,24 @@ export function registerContentApprovalGate(): void {
  */
 
 /**
+ * ADR 0859 D3 — what each caller of `queueContentApproval` must STATE rather than
+ * have inferred (review H3: it has five callers, and the decide route's lazy backfill
+ * would otherwise have made the deciding manager the "submitter" and paged the org
+ * mid-decide).
+ *  - `submittedBy` — the human waiting on this review (route: the user; run surface:
+ *    the run's subject; promote: the promoting admin). Absent ⇒ nobody recorded.
+ *  - `notify` — tell the org's managers a NEW review is waiting. False for the
+ *    backfill (it runs inside a decide) and the demo seed.
+ */
+export interface QueueContentApprovalOpts {
+  submittedBy?: string;
+  /** A member who CAUSED an actorless run that submitted (separation of duties only —
+   *  never notified; see `PendingApproval.submitterCauses`). */
+  causedBy?: string;
+  notify: boolean;
+}
+
+/**
  * ADR 0066 + chat-first-port C1 — queue the `content-publish` approval on a
  * submit-for-review, UNCONDITIONALLY (regardless of the `cms-approval-gate`
  * toggle). This is the ONE decision path: the in_review → approve/reject decision
@@ -379,15 +417,12 @@ export function registerContentApprovalGate(): void {
 export async function queueContentApproval(
   tenantId: string,
   orgId: string,
-  // ADR 0593 CORRECTION (review F8) — `sections` is REQUIRED. It was optional,
-  // while the repin below sent `aiDraftedLocales` unconditionally and `[]` means
-  // DELETE THE FIELD — so a future caller that omitted `sections` would silently
-  // erase an open row's machine-draft disclosure. That is precisely the defect
-  // CMSAU-4 closes, re-armed as a latent trap in its own fix. All four current
-  // callers pass a full `Page`, so requiring it costs nothing and removes the
-  // trap at the TYPE level rather than by convention.
-  page: { pageId: string; title: string; version?: number; sections: readonly { aiDrafted?: Record<string, string> }[] },
-  proposal?: string,
+  // ADR 0593 CORRECTION (review F8) — the full page is REQUIRED (it was a narrowed
+  // shape with optional `sections`, and `[]` means DELETE THE FIELD on a repin).
+  // ADR 0859 needs `createdAt` + `reviewCycle` for the row id too.
+  page: Page,
+  proposal: string | undefined,
+  opts: QueueContentApprovalOpts,
 ): Promise<void> {
   // ADR 0593 D4 (CMSAU-4) — DERIVE the machine-draft disclosure from the durable
   // per-section `aiDrafted` stamps (ADR 0592 §3) rather than from this submit's
@@ -397,6 +432,10 @@ export async function queueContentApproval(
   const aiDraftedLocales = [
     ...new Set(page.sections.flatMap((s) => Object.keys(s.aiDrafted ?? {}))),
   ].sort();
+  const liveReferenceSections = await liveReferenceSectionsOf(page);
+  const text = proposal ?? `Publish CMS page "${page.title}"`;
+  const submitters = opts.submittedBy ? [opts.submittedBy] : [];
+  const submitterCauses = opts.causedBy ? [opts.causedBy] : [];
   // CMS2-M1 fold-in — a RESUBMIT re-pins the open row rather than being dropped.
   // This used to `return` on any pending row, which was correct while the row
   // carried only a title; with a version pin it is what made an edited
@@ -404,25 +443,204 @@ export async function queueContentApproval(
   // exactly one open approval per page — the idempotency this guard exists for
   // is preserved; what changes is that the open row now tracks the content it
   // claims to be about.
+  const repin = (approvalId: string) => repinContentApproval(approvalId, {
+    pageTitle: page.title,
+    pageVersion: page.version,
+    aiDraftedLocales,
+    liveReferenceSections,
+    proposal: text,
+    submitters,
+    submitterCauses,
+  });
   const pending = await findPendingContentApprovalForPage(tenantId, page.pageId);
   if (pending) {
-    await repinContentApproval(pending.approvalId, {
-      pageTitle: page.title,
-      ...(typeof page.version === 'number' ? { pageVersion: page.version } : {}),
-      aiDraftedLocales,
-      proposal: proposal ?? `Publish CMS page "${page.title}"`,
-    });
+    await repin(pending.approvalId);
     return;
   }
-  await createContentApproval({
+  // Typed WITHOUT `policy` (code grade CMSA2CD-4): a quorum policy on this kind would
+  // make `evaluateQuorum` live and unwitnessed, and the source-scan ratchet cannot see
+  // into a literal built here and spread at the call. The type can.
+  const input: Omit<Parameters<typeof createContentApprovalOnce>[0], 'policy' | 'approvalId'> & { policy?: never } = {
     tenantId,
     orgId,
     pageId: page.pageId,
     pageTitle: page.title,
     // CMS2-M1 — freeze WHAT is being approved, not just its name. See the
     // staleness check in `decideContentPublish`.
-    ...(typeof page.version === 'number' ? { pageVersion: page.version } : {}),
+    pageVersion: page.version,
     ...(aiDraftedLocales.length > 0 ? { aiDraftedLocales } : {}),
-    proposal: proposal ?? `Publish CMS page "${page.title}"`,
-  });
+    ...(liveReferenceSections.length > 0 ? { liveReferenceSections } : {}),
+    ...(submitters.length > 0 ? { submitters } : {}),
+    ...(submitterCauses.length > 0 ? { submitterCauses } : {}),
+    proposal: text,
+  };
+  // ADR 0859 D2 (`CMSA2WF-2`) — the scan above is check-then-act: two submits on one
+  // page both found nothing and both created. With a review cycle the row's id is
+  // DETERMINISTIC and the create is a storage CAS, so the second submit gets the
+  // first one's row back and repins it. A legacy page (no cycle yet) keeps the old
+  // path until its next draft → submit.
+  const approvalId = typeof page.reviewCycle === 'number' ? reviewApprovalId(tenantId, page) : undefined;
+  let created = await createContentApprovalOnce({ ...input, ...(approvalId ? { approvalId } : {}) });
+  if (!created.created) {
+    const row = created.approval;
+    if (row.kind === 'content-publish' && row.tenantId === tenantId && row.pageId === page.pageId && row.status === 'pending') {
+      await repin(row.approvalId); // lost the race — the winner's row is this review
+      return;
+    }
+    // The id is held by a decided row or by something that is not this page's
+    // review (review M1/M2: never repin a row we cannot identify as ours). A fresh
+    // random id keeps the page decidable; the log says why.
+    log.warn('cms_review_id_taken', { tenantId, pageId: page.pageId, approvalId, heldBy: row.kind, status: row.status });
+    created = await createContentApprovalOnce(input);
+  }
+  if (opts.notify) await notifyReviewRequested(created.approval, opts.submittedBy);
+}
+
+/** ADR 0859 D2 — the review row's id for this page's current submission. JSON, not a
+ *  `:` join (tenant ids and node-chosen page ids both contain `:`); `createdAt`
+ *  because a deleted page re-created at the same id restarts its cycle. */
+export function reviewApprovalId(tenantId: string, page: Pick<Page, 'pageId' | 'createdAt' | 'reviewCycle'>): string {
+  const h = createHash('sha256').update(JSON.stringify([tenantId, page.pageId, page.createdAt, page.reviewCycle ?? 0])).digest('hex');
+  return `appr:cms:${h.slice(0, 40)}`;
+}
+
+/**
+ * ADR 0859 D5 (ADR 0594 D1) — the sections whose content is resolved LIVE at read
+ * time, which an approval therefore does not freeze. "Live" is defined by the
+ * content-section resolver registry rather than a list here, so a section type a
+ * feature adds later is disclosed without touching this code. Over the DELIVERABLE
+ * union with shared refs resolved: a shared section renders the shared row's type,
+ * so an `entityList` kept in a shared section would otherwise go undisclosed.
+ */
+export async function liveReferenceSectionsOf(page: Page): Promise<Array<{ sectionId: string; type: string }>> {
+  const delivered = await resolveSharedRefs({ ...page, sections: await deliverableSectionsForPage(page) });
+  const seen = new Set<string>();
+  const out: Array<{ sectionId: string; type: string }> = [];
+  for (const s of delivered.sections) {
+    if (!hasContentSectionResolver(s.type) || seen.has(s.sectionId)) continue;
+    seen.add(s.sectionId);
+    out.push({ sectionId: s.sectionId, type: s.type });
+  }
+  return out;
+}
+
+/**
+ * ADR 0859 D3 — tell the org's managers a NEW review is waiting. ADDRESSED ONLY,
+ * through the audience owner (`approvalRecipients`, ADR 0672 D1): the it.24 defect
+ * was exactly an unaddressed approval notice reaching every device in the tenant. If
+ * the owner names nobody, nobody is told here — the SLA rung owns the redacted
+ * fallback. The submitter is not told about their own submission. Best-effort and
+ * after the durable write: a notice that fails is logged, never thrown.
+ */
+async function notifyReviewRequested(approval: PendingApproval, submittedBy: string | undefined): Promise<void> {
+  try {
+    const { addressed, refs } = await approvalRecipients(approval.tenantId, approval);
+    if (!addressed) return;
+    const submitter = submittedBy ? await canonicalDecider(approval.tenantId, submittedBy) : null;
+    for (const ref of refs) {
+      if (submitter !== null && ref === submitter) continue;
+      await getNotificationEmitter().emit({
+        tenantId: approval.tenantId,
+        recipientUserId: ref,
+        type: 'approval.content-review-requested',
+        priority: 'normal',
+        title: `Review requested: ${approval.pageTitle ?? 'a page'}`,
+        message: 'A page was submitted for review and is waiting for an approver.',
+        // The PAGE, not the inbox: the reviewer reads what they are deciding, and the
+        // editor carries Approve / Reject for a manager (UX grade CMSA2UX-2 — the
+        // inbox deep link landed on the notification, not on the review).
+        ...(approval.orgId && approval.pageId ? { actionUrl: `/cms/p/${encodeURIComponent(approval.orgId)}/${encodeURIComponent(approval.pageId)}` } : {}),
+        metadata: { approvalId: approval.approvalId, kind: 'content-publish', pageId: approval.pageId ?? '' },
+      });
+    }
+  } catch (err) {
+    log.warn('cms_review_requested_notify_failed', { tenantId: approval.tenantId, approvalId: approval.approvalId, error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+/**
+ * ADR 0859 D3 — tell the people who submitted this review what happened. Only for a
+ * decision a PERSON made (the system closures say nothing — nobody decided). Only to
+ * submitters who can still write in the org (review L5: someone removed from the org
+ * must not keep receiving its titles), and never to the decider themselves. The
+ * reject REASON is not in the notice: notices fan out to push, and the reason is
+ * written for the author, behind the page's own `workspace:write` review read.
+ */
+async function notifyReviewDecided(approval: PendingApproval, outcome: 'approved' | 'rejected', decidedBy: string): Promise<void> {
+  try {
+    const decider = await canonicalDecider(approval.tenantId, decidedBy);
+    const orgId = approval.orgId ?? '';
+    for (const sub of approval.submitters ?? []) {
+      const who = await canonicalDecider(approval.tenantId, sub);
+      if (who === null || who === decider) continue;
+      const access = await resolveEffectiveAccess(approval.tenantId, { subject: who, orgId });
+      if (!access.scopes.includes('workspace:write')) continue;
+      await getNotificationEmitter().emit({
+        tenantId: approval.tenantId,
+        recipientUserId: who,
+        type: 'approval.content-review-decided',
+        priority: 'normal',
+        title: outcome === 'approved'
+          ? `Approved and published: ${approval.pageTitle ?? 'your page'}`
+          : `Changes requested: ${approval.pageTitle ?? 'your page'}`,
+        message: outcome === 'approved'
+          ? 'Your page was approved and is now live.'
+          : 'A reviewer sent your page back. Open it to read why.',
+        ...(orgId && approval.pageId ? { actionUrl: `/cms/p/${encodeURIComponent(orgId)}/${encodeURIComponent(approval.pageId)}` } : {}),
+        metadata: { approvalId: approval.approvalId, kind: 'content-publish', pageId: approval.pageId ?? '', outcome },
+      });
+    }
+  } catch (err) {
+    log.warn('cms_review_decided_notify_failed', { tenantId: approval.tenantId, approvalId: approval.approvalId, error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+/**
+ * ADR 0859 D4 — the submitter may not approve their own submission while someone else
+ * in the org can (ADR 0845 D5, the sibling `strategy-activation` gate, verbatim). Only
+ * while the editorial gate is in force: with it OFF an admin may publish directly, so
+ * refusing their self-approval would only push them to the bypass. A sole approver is
+ * never locked out (a one-admin workspace is the default state). A row with no recorded
+ * submitter — pre-ADR rows, the lazy backfill, an actorless run with no cause — is
+ * allowed and logged (the strategy precedent; refusing would count every manager as
+ * "distinct" and strand the page). An identity that cannot be canonicalised (an
+ * unresolvable delegated key) is treated as the submitter: fail closed.
+ *
+ * What it does NOT promise: that the approver did not WRITE the content. It compares
+ * submitters, not editors (ADR 0859 § Deferred).
+ *
+ * The ONE predicate: the decide handler refuses on it, and the page's review read
+ * reports it so the editor can show "waiting for another approver" instead of
+ * offering an Approve button that would 403.
+ */
+export async function selfApprovalBlocked(tenantId: string, orgId: string, decidedBy: string, approval: PendingApproval): Promise<boolean> {
+  if (approval.kind !== 'content-publish' || approval.status !== 'pending') return false;
+  if (!(await liveEditGateActive(tenantId, orgId))) return false;
+  // Causes count here and nowhere else (they narrow; they are never notified).
+  const submitters = [...(approval.submitters ?? []), ...(approval.submitterCauses ?? [])];
+  if (submitters.length === 0) {
+    log.warn('cms_review_unbound_submitter', { tenantId, approvalId: approval.approvalId });
+    return false;
+  }
+  const decider = await canonicalDecider(tenantId, decidedBy);
+  const subs = await Promise.all(submitters.map((s) => canonicalDecider(tenantId, s)));
+  const isSubmitter = decider === null || subs.some((s) => s === null || s === decider);
+  if (!isSubmitter) return false;
+  // "Someone else can approve" means someone who is neither the decider nor ANY
+  // submitter (code grade CMSA2CD-3): two admins who both submitted must not each be
+  // refused for the other. Unresolvable submitters are excluded in their raw form.
+  const others = submitters.map((s, i) => subs[i] ?? s);
+  return hasDistinctScopeHolder(tenantId, 'host:members:manage', decider ?? decidedBy, { orgId, alsoExclude: others });
+}
+
+/** The refusal form of `selfApprovalBlocked` — what the decide handler enforces. */
+async function assertNotSelfApproval(tenantId: string, orgId: string, decidedBy: string, approval: PendingApproval): Promise<void> {
+  if (await selfApprovalBlocked(tenantId, orgId, decidedBy, approval)) {
+    // Observable (code grade CMSA2CD-11): a refused self-approval writes no decision,
+    // so without this line repeated attempts would be invisible.
+    log.info('cms_review_self_approval_refused', { tenantId, approvalId: approval.approvalId, submitters: (approval.submitters?.length ?? 0) + (approval.submitterCauses?.length ?? 0) });
+    throw new OpenwopError('forbidden', 'You submitted this page for review, so someone else in the organization has to approve it.', 403, {
+      reason: 'separation-of-duties',
+    });
+  }
 }

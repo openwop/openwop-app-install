@@ -17,13 +17,13 @@ export interface Org { orgId: string; name: string }
 export { SYSTEM_SITE_ORG } from './siteOrg.js';
 export type PageStatus = 'draft' | 'in_review' | 'published' | 'archived';
 export const PAGE_STATUSES: readonly PageStatus[] = ['draft', 'in_review', 'published', 'archived'];
-export type SectionType = 'hero' | 'richText' | 'image' | 'cta' | 'columns' | 'productGrid' | 'form' | 'pricing' | 'entityList' | 'entityDetail' | 'comparison' | 'faq' | 'quotes' | 'fields';
+export type SectionType = 'hero' | 'richText' | 'image' | 'cta' | 'columns' | 'productGrid' | 'form' | 'pricing' | 'entityList' | 'entityDetail' | 'comparison' | 'faq' | 'quotes' | 'fields' | 'video';
 // The `comparison` matrix (ADR 0485) is HOST-AUTHORED (seeded via code), not built
 // through the visual editor — so it is a member of the type union (the renderer
 // handles it) but deliberately absent from the editor's add-section picker below.
 // `fields` (ADR 0748) is the same: created through the RFC 0103 content API,
 // editable here once it exists, not offered as a blank block.
-export const SECTION_TYPES: readonly SectionType[] = ['hero', 'richText', 'image', 'cta', 'columns', 'productGrid', 'form', 'pricing', 'entityList', 'entityDetail', 'faq', 'quotes'];
+export const SECTION_TYPES: readonly SectionType[] = ['hero', 'richText', 'image', 'cta', 'columns', 'productGrid', 'form', 'pricing', 'entityList', 'entityDetail', 'faq', 'quotes', 'video'];
 export interface Section {
   sectionId: string;
   type: SectionType;
@@ -37,6 +37,18 @@ export interface Section {
    *  was machine-drafted. Absent = human-authored (or a pre-fix row — no
    *  backfill). Cleared when a human edits the overlay. */
   aiDrafted?: Record<string, string>;
+  /** ADR 0861 D6 — server-owned translation-status stamp (opaque here; the
+   *  verdicts come from `getTranslationStatus`). */
+  sourceDigest?: Record<string, string>;
+}
+
+/** ADR 0861 D6 — one overlay's status: `outdated` = the base text it translates
+ *  changed since it was written; `unknown` = written before status existed. */
+export type TranslationStatus = 'missing' | 'current' | 'outdated' | 'unknown';
+export interface PageTranslationStatus {
+  locales: string[];
+  sections: Record<string, Record<string, TranslationStatus>>;
+  counts: Record<string, Record<TranslationStatus, number>>;
 }
 
 /** A reusable org-owned section pages inherit by reference (ADR 0204 C4). */
@@ -64,8 +76,17 @@ export interface Page {
   sections: Section[];
   /** Editor-facing labels for list filtering (ADR 0206 B3). */
   tags?: string[];
+  /** ADR 0391 — `'post'` lists the page on the public blog; absent = a page. */
+  kind?: 'page' | 'post';
+  /** ADR 0391 — the post byline principal (opaque). ADR 0813: the editor sends
+   *  `'me'` (the server resolves it to the caller) or `null` (clear). */
+  authorId?: string | null;
+  /** ADR 0391 — the post's primary category (slugified server-side). */
+  category?: string;
   /** One-shot scheduled publish time (ISO, ADR 0204 C2); absent when none. */
   scheduledPublishAt?: string;
+  /** ADR 0836 D3 — the version the scheduled publish will ship. */
+  scheduledPublishVersion?: number;
   scheduledUnpublishAt?: string;
   /** Per-locale publish state (ADR 0205 D2) — absent key = published with the
    *  page; 'draft' = withheld from delivery (falls back per RFC 0103). */
@@ -87,6 +108,10 @@ export interface PageVersion {
   snapshot: { title: string; slug: string; sections: Section[] };
   publishedAt: string;
   publishedBy: string;
+  /** Why the row exists. `'seed'` (ADR 0817): newer content from the code that
+   *  created the page, offered instead of overwriting a page a person edited;
+   *  Restore adopts it into the draft. */
+  origin?: 'publish' | 'submit' | 'seed';
 }
 /** Per-locale counts of AI-drafted overlays a submit produced (ADR 0064
  *  amendment — autoTranslateOnPublish). Absent when nothing was drafted. */
@@ -141,10 +166,18 @@ export function cmsErrorInfo(e: unknown): { key: string; options?: Record<string
       return e.details?.feature === 'cms-localization' ? { key: 'langNotEnabled' } : null;
     case 'forbidden_scope': {
       const granted = e.details?.grantedLocales;
-      return Array.isArray(granted) && granted.length > 0
-        ? { key: 'errTranslatorScope', options: { locales: granted.join(', ') } }
-        : { key: 'errForbidden' };
+      if (Array.isArray(granted) && granted.length > 0) return { key: 'errTranslatorScope', options: { locales: granted.join(', ') } };
+      // ADR 0836 D6 — a change to a live or scheduled page is admin tier. Keyed
+      // on the server's `reason`, not the scope: publish, schedule and grants are
+      // admin tier too, and are not "this page is live".
+      return e.details?.reason === 'live_tier' ? { key: 'errLiveTier' } : { key: 'errForbidden' };
     }
+    case 'forbidden':
+      // ADR 0859 D4 — the submitter's own Approve, refused while another manager can.
+      return e.details?.reason === 'separation-of-duties' ? { key: 'errSelfApproval' } : null;
+    case 'validation_error':
+      // ADR 0836 D9 — the server half of the publish checklist.
+      return e.details?.reason === 'publish_blocked' ? { key: 'errPublishBlocked' } : null;
     case 'host_capability_missing':
       return { key: 'translateUnavailable' };
     case 'translation_invalid':
@@ -221,7 +254,7 @@ export async function createPage(orgId: string, title: string): Promise<Page> {
  *  loaded `Page.version`). The editor ALWAYS sends it; a stale pin 409s with
  *  code `conflict` + `{currentVersion, expectedVersion}` instead of silently
  *  clobbering a sibling writer's locale overlays. */
-export async function savePage(orgId: string, pageId: string, patch: { title?: string; slug?: string; sections?: Section[]; tags?: string[]; expectedVersion?: number }): Promise<Page> {
+export async function savePage(orgId: string, pageId: string, patch: { title?: string; slug?: string; sections?: Section[]; tags?: string[]; kind?: 'page' | 'post'; authorId?: string | null; category?: string | null; expectedVersion?: number }): Promise<Page> {
   const res = await fetch(`${base(orgId)}/pages/${encodeURIComponent(pageId)}`, fetchOpts({ method: 'PATCH', headers: jsonHeaders(), body: JSON.stringify(patch) }));
   return asJson<Page>(res, 'savePage');
 }
@@ -255,6 +288,11 @@ export interface PageReview {
   note?: string;
   pageVersion?: number;
   aiDraftedLocales?: string[];
+  /** ADR 0859 D5 — sections that resolve live (an approval does not freeze them). */
+  liveReferenceSections?: Array<{ sectionId: string; type: string }>;
+  /** ADR 0859 D4 — the CALLER submitted this pending review and another manager can
+   *  approve it, so the server would refuse their Approve (`separation-of-duties`). */
+  awaitingAnotherApprover?: boolean;
 }
 export async function getPageReview(orgId: string, pageId: string): Promise<PageReview | null> {
   try {
@@ -270,8 +308,13 @@ export async function listVersions(orgId: string, pageId: string): Promise<PageV
   const res = await fetch(`${base(orgId)}/pages/${encodeURIComponent(pageId)}/versions`, fetchOpts({ headers: authedHeaders() }));
   return (await asJson<{ versions: PageVersion[] }>(res, 'listVersions')).versions;
 }
-export async function restoreVersion(orgId: string, pageId: string, versionId: string): Promise<Page> {
-  const res = await fetch(`${base(orgId)}/pages/${encodeURIComponent(pageId)}/restore/${encodeURIComponent(versionId)}`, fetchOpts({ method: 'POST', headers: authedHeaders() }));
+export async function restoreVersion(orgId: string, pageId: string, versionId: string, expectedVersion?: number): Promise<Page> {
+  // ADR 0836 D8 — pinned to the version the editor is looking at (409 otherwise).
+  const res = await fetch(`${base(orgId)}/pages/${encodeURIComponent(pageId)}/restore/${encodeURIComponent(versionId)}`, fetchOpts({
+    method: 'POST',
+    headers: authedHeaders({ 'content-type': 'application/json' }),
+    body: JSON.stringify(expectedVersion !== undefined ? { expectedVersion } : {}),
+  }));
   return asJson<Page>(res, 'restoreVersion');
 }
 
@@ -330,6 +373,22 @@ export async function setLocalePublish(orgId: string, pageId: string, locale: st
   return asJson<Page>(res, 'setLocalePublish');
 }
 
+// ── Translation status (ADR 0861 D6) ────────────────────────────────────────
+export async function getTranslationStatus(orgId: string, pageId: string): Promise<PageTranslationStatus> {
+  const res = await fetch(`${base(orgId)}/pages/${encodeURIComponent(pageId)}/translation-status`, fetchOpts({ headers: authedHeaders() }));
+  return asJson<PageTranslationStatus>(res, 'getTranslationStatus');
+}
+/** "Still accurate" — re-stamps one overlay's source without changing it. */
+export async function confirmTranslationSource(orgId: string, pageId: string, sectionId: string, locale: string, expectedVersion: number): Promise<Page> {
+  // `expectedVersion` = the version the editor HOLDS (CMSL2UX-1): a confirm must
+  // never land over a save this editor has not seen.
+  const res = await fetch(
+    `${base(orgId)}/pages/${encodeURIComponent(pageId)}/sections/${encodeURIComponent(sectionId)}/locales/${encodeURIComponent(locale)}/confirm-source`,
+    fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify({ expectedVersion }) }),
+  );
+  return asJson<Page>(res, 'confirmTranslationSource');
+}
+
 // ── Shared sections (ADR 0204 C4) ───────────────────────────────────────────
 export async function listSharedSections(orgId: string): Promise<SharedSection[]> {
   const res = await fetch(`${base(orgId)}/shared-sections`, fetchOpts({ headers: authedHeaders() }));
@@ -349,15 +408,25 @@ export async function deleteSharedSection(orgId: string, sharedSectionId: string
 }
 /** Pages referencing a shared section — the "impacted pages" list an editor
  *  sees BEFORE changing shared content. */
-export async function listSharedSectionPages(orgId: string, sharedSectionId: string): Promise<Array<{ pageId: string; title: string; slug: string; status: PageStatus }>> {
+export async function listSharedSectionPages(orgId: string, sharedSectionId: string): Promise<Array<{ pageId: string; title: string; slug: string; status: PageStatus; scheduledPublishAt?: string }>> {
   const res = await fetch(`${base(orgId)}/shared-sections/${encodeURIComponent(sharedSectionId)}/pages`, fetchOpts({ headers: authedHeaders() }));
-  return (await asJson<{ pages: Array<{ pageId: string; title: string; slug: string; status: PageStatus }> }>(res, 'listSharedSectionPages')).pages;
+  return (await asJson<{ pages: Array<{ pageId: string; title: string; slug: string; status: PageStatus; scheduledPublishAt?: string }> }>(res, 'listSharedSectionPages')).pages;
 }
 
 /** Translate a section's base data into a target locale (ADR 0064 Phase 3) via
  *  the managed provider. Returns the sanitized draft overlay to review before
  *  saving. Throws if translation is unavailable (managed provider not
  *  configured / capped) — the caller degrades to manual editing. */
+/** ADR 0828 phase 3 — rewrite one section's text with AI. Returns the proposed
+ *  data (links, media tokens and ids unchanged); nothing is saved. */
+export type RewriteAction = 'improve' | 'shorten' | 'expand' | 'friendlier' | 'formal' | 'fix' | 'custom';
+export async function rewriteSection(
+  orgId: string,
+  input: { sectionType: SectionType; data: Record<string, unknown>; action: RewriteAction; instruction?: string },
+): Promise<Record<string, unknown>> {
+  const res = await fetch(`${base(orgId)}/rewrite-section`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify(input) }));
+  return (await asJson<{ data: Record<string, unknown> }>(res, 'rewriteSection')).data;
+}
 export async function translateSection(
   orgId: string,
   input: { sectionType: SectionType; data: Record<string, unknown>; targetLocale: string },

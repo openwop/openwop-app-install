@@ -18,7 +18,10 @@ import { createLogger } from '../../observability/logger.js';
 import { getNotificationEmitter } from '../../notifications/emitter.js';
 import { activeProvider, emailTransportConfigured } from '../email/emailService.js';
 import { createActivity, makeLinkValidators } from './crmEntitiesService.js';
-import { ensureContact } from './contactsService.js';
+import { ensureContactWithOutcome } from './contactsService.js';
+
+/** ADR 0837 D4 — the capture block's "erased subject, skip quietly" exit. */
+const SKIP_CONTACT = Symbol('skip-contact');
 import { type BookingLink } from './entities/bookingLinks.js';
 import {
   type Booking,
@@ -27,10 +30,11 @@ import {
   countBookingsCreatedOn,
   getBookingById,
   listBookingsForLink,
-  deleteBookingsForLink,
+  deleteBookingsOfLink,
   putBooking,
 } from './entities/bookings.js';
-import { deleteBookingLink as svcDeleteBookingLink } from './entities/bookingLinks.js';
+import { deleteBookingLink as svcDeleteBookingLink, getBookingLink } from './entities/bookingLinks.js';
+import { resolveEffectiveAccess } from '../../host/accessControlService.js';
 import { generateSlots, type ClaimedSlot } from './bookingTime.js';
 import { buildIcs } from './ics.js';
 import { cleanString, optionalCleanString } from '../../host/boundedStrings.js';
@@ -96,7 +100,7 @@ export async function availableSlots(link: BookingLink, q: SlotQuery, nowMs: num
   if (!link.durations.includes(q.durationMin)) {
     throw new OpenwopError('validation_error', 'Requested duration is not offered for this link.', 400, { field: 'durationMin' });
   }
-  const claimedRows = await listBookingsForLink(link.bookingLinkId);
+  const claimedRows = await listBookingsForLink(link);
   const claimed: ClaimedSlot[] = claimedRows
     .filter((b) => b.status === 'confirmed')
     .map((b) => ({ startUtcMs: b.slotStartUtcMs, durationMin: b.durationMin }));
@@ -155,7 +159,7 @@ export interface ClaimOutput {
 async function mintManageToken(tenantId: string, orgId: string, bookingId: string): Promise<string | null> {
   try {
     const { createLink } = await import('../sharing/sharingService.js');
-    const link = await createLink(tenantId, orgId, 'system:crm-booking', { resourceType: 'booking_manage', resourceId: bookingId, expiresInDays: 365 });
+    const link = await createLink(tenantId, orgId, 'system:crm-booking', { resourceType: 'booking_manage', resourceId: bookingId, expiresInDays: 365 }, { lane: 'visitor', why: 'the booker manage link, minted for the public booker' });
     return link.token;
   } catch (err) {
     log.warn('booking manage-token mint failed', { bookingId, error: err instanceof Error ? err.message : String(err) });
@@ -227,7 +231,7 @@ export async function claimSlot(link: BookingLink, input: ClaimInput): Promise<C
   }
 
   // Per-link daily abuse cap (confirmed bookings created today, UTC).
-  const linkRows = await listBookingsForLink(link.bookingLinkId);
+  const linkRows = await listBookingsForLink(link);
   const todayPrefix = nowIso.slice(0, 10);
   if (countBookingsCreatedOn(linkRows, todayPrefix) >= dailyCap()) {
     throw new OpenwopError('rate_limited', 'This booking link has reached its daily limit. Please try again tomorrow.', 429, {});
@@ -281,14 +285,22 @@ export async function claimSlot(link: BookingLink, input: ClaimInput): Promise<C
     // N3 — through the ONE find-or-create seam: a concurrent create at the same
     // address is ADOPTED (the 409 → survivor map), never swallowed by the
     // best-effort catch below with the booking's contactId lost.
-    const contact = await ensureContact({ tenantId: link.tenantId, name: inviteeName, email: inviteeEmail, leadSource: 'booking', actor: 'system:crm-booking' });
+    const outcome = await ensureContactWithOutcome({ tenantId: link.tenantId, name: inviteeName, email: inviteeEmail, leadSource: 'booking', actor: 'system:crm-booking' });
+    // ADR 0837 D4 — an erased subject is served (the booking stands) but no CRM
+    // profile is rebuilt for them; nothing to log, it is the intended outcome.
+    if (outcome.erased) throw SKIP_CONTACT;
+    if (outcome.erasureUnreadable) throw new Error('erasure register unreadable — contact capture skipped'); // logged below (CRM2CD-4)
+    const contact = outcome.contact;
     if (!contact) throw new OpenwopError('validation_error', 'A valid email is required to book.', 400, { field: 'inviteeEmail' });
     finalized.contactId = contact.contactId;
     const activity = await createActivity({
       tenantId: link.tenantId,
       orgId: link.orgId,
       kind: 'meeting',
-      body: `Booked "${link.title}" via ${link.slug}${input.inviteeNote ? ` — ${cleanString(input.inviteeNote, 500, '')}` : ''}`,
+      // ADR 0837 D4 — the visitor's free-text note stays on the booking row
+      // (erasure scrubs it there); the timeline, which erasure keeps, says only
+      // what happened.
+      body: `Booked "${link.title}" via ${link.slug}`,
       contactId: contact.contactId,
       createdBy: 'system:crm-booking',
       createdAt: new Date(input.slotStartUtcMs).toISOString(),
@@ -297,7 +309,7 @@ export async function claimSlot(link: BookingLink, input: ClaimInput): Promise<C
     finalized.activityId = activity.activityId;
     await putBooking(finalized);
   } catch (err) {
-    log.warn('booking contact/activity capture failed', { bookingId, error: err instanceof Error ? err.message : String(err) });
+    if (err !== SKIP_CONTACT) log.warn('booking contact/activity capture failed', { bookingId, error: err instanceof Error ? err.message : String(err) });
   }
 
   const token = await mintManageToken(link.tenantId, link.orgId, bookingId);
@@ -358,13 +370,45 @@ async function sendConfirmationEmail(link: BookingLink, booking: Booking, ics: s
   }
 }
 
+/**
+ * ADR 0837 D6 — whose meeting a link books. An `ownerUserId` other than the
+ * caller must be a member who can READ the link's org: the public page shows
+ * that user's display name (a global `getUser`, so a foreign id would show
+ * another tenant's user) and booking notifications go to them. The caller's own
+ * id, and the surface's default owner, are not re-checked here — the route or
+ * the run already passed the org gate as that principal.
+ */
+export async function assertBookingOwnerEligible(tenantId: string, orgId: string, ownerUserId: string, callerId: string | undefined): Promise<void> {
+  if (ownerUserId === callerId) return;
+  const access = await resolveEffectiveAccess(tenantId, { subject: ownerUserId, orgId });
+  if (!access.scopes.includes('workspace:read')) {
+    throw new OpenwopError('validation_error', 'The booking link owner must be a member of this workspace.', 400, { field: 'ownerUserId' });
+  }
+}
+
 /** Delete a booking link AND cascade: remove its booking rows and revoke each
  *  booking's `booking_manage` capability token (else the rows orphan in the org
  *  list forever and the tokens linger until their 365-day expiry). */
 export async function deleteBookingLinkCascade(tenantId: string, orgId: string, bookingLinkId: string): Promise<boolean> {
-  const removed = await deleteBookingsForLink(bookingLinkId);
-  for (const b of removed) await revokeManageTokens(tenantId, b.bookingId);
-  return svcDeleteBookingLink(tenantId, orgId, bookingLinkId);
+  // ADR 0837 D1 — resolve under the caller's tenant + org FIRST; a miss touches
+  // nothing. Then delete the link (and its slug), which closes the public claim
+  // door, and only then sweep the bookings of THIS link (A8: a claim landing
+  // mid-cascade can no longer orphan a booking).
+  const link = await getBookingLink(tenantId, orgId, bookingLinkId);
+  if (!link) return false;
+  if (!(await svcDeleteBookingLink(tenantId, orgId, link.bookingLinkId))) return false;
+  // CRM2CD-6 — the link is already gone, so a retry would 404: the sweep is
+  // per-row best-effort (logged), never an exception that strands the rest.
+  let removed: Booking[] = [];
+  try { removed = await deleteBookingsOfLink(link); } catch (err) {
+    log.error('booking_link_cascade_sweep_failed', { bookingLinkId: link.bookingLinkId, error: err instanceof Error ? err.message : String(err) });
+  }
+  for (const b of removed) {
+    try { await revokeManageTokens(tenantId, b.bookingId); } catch (err) {
+      log.error('booking_link_cascade_revoke_failed', { bookingId: b.bookingId, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  return true;
 }
 
 // ── sharing resolver hooks (booking_manage capability token) ─────────────────
@@ -411,7 +455,11 @@ export async function cancelBooking(bookingId: string, nowMs: number, opts?: { r
   if (!resolved) return null;
   const { booking, link } = resolved;
   if (booking.status === 'cancelled') return booking;
-  const cancelled: Booking = { ...booking, status: 'cancelled', cancelledAt: new Date(nowMs).toISOString() };
+  const cancelled: Booking = {
+    ...booking, status: 'cancelled', cancelledAt: new Date(nowMs).toISOString(),
+    // ADR 0837 D4 — the reason is kept on the booking (erasure-scrubbed), not in the timeline.
+    ...(opts?.reason && opts.rescheduledToMs === undefined ? { cancelReason: opts.reason } : {}),
+  };
   await putBooking(cancelled);
   await revokeManageTokens(booking.tenantId, bookingId);
   // The meeting activity is append-only (a historical record that the meeting
@@ -432,7 +480,7 @@ export async function cancelBooking(bookingId: string, nowMs: number, opts?: { r
         // free text on an internal surface, sanitized+bounded at the route.
         body: opts?.rescheduledToMs !== undefined
           ? `Booking rescheduled: "${link.title}" (${new Date(booking.slotStartUtcMs).toISOString()} → ${new Date(opts.rescheduledToMs).toISOString()})`
-          : `Booking cancelled: "${link.title}" (${new Date(booking.slotStartUtcMs).toISOString()})${opts?.reason ? ` — visitor's note: "${opts.reason}"` : ''}`,
+          : `Booking cancelled: "${link.title}" (${new Date(booking.slotStartUtcMs).toISOString()})${opts?.reason ? ' — the visitor gave a reason, shown on the booking in the Booking tab' : ''}`,
         contactId: booking.contactId,
         createdBy: 'system:crm-booking',
         validators: makeLinkValidators(booking.tenantId, booking.orgId),

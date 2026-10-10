@@ -13,16 +13,34 @@
  * tests pin the four properties that matter, including the two that a naive
  * in-flight map gets wrong (a rejected read must not latch; an invalidation must
  * not be undone by a request already in the air).
+ *
+ * Gap: #3383 (the Collaboration / Comments batch — CommentsPanel's "ONE fetch per
+ * org" docblock was false); the invalidation half is CLNP-8 slot ownership
+ * (ff2e5fea8). The resolved-value cache hit is pinned by
+ * `orgMembersInvalidation.test.tsx` › "serves the cache inside the TTL and
+ * refetches after it", not here.
+ *
+ * Sabotage that turns it red: removing the `inFlight` lookup reds THE FIX; keying
+ * the lookup on anything but the org id reds "distinct orgs"; not clearing the
+ * slot in `finally` reds the rejected-read case; caching without the slot-ownership
+ * check (or a per-org invalidation that leaves the slot) reds the last case.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import type * as AccessClient from '../../client/accessClient.js';
+import type { OrgMember } from '../../client/accessClient.js';
 
-const api = vi.hoisted(() => ({ listMembers: vi.fn() }));
+const api = vi.hoisted(() => ({ listMembers: vi.fn<typeof AccessClient.listMembers>() }));
 vi.mock('../../client/accessClient.js', () => ({ listMembers: api.listMembers }));
-vi.mock('../../client/workspaceClient.js', () => ({ listMyWorkspaces: vi.fn(async () => ({ active: 'ws_active' })) }));
+vi.mock('../../client/workspaceClient.js', () => ({ listMyWorkspaces: vi.fn(async () => ({ active: 'ws_active', personal: 'user:me', workspaces: [] })) }));
 
 import { loadOrgMembers, invalidateOrgMembers } from '../orgMembers.js';
 
-const MEMBERS = [{ subject: 'user_1', displayName: 'Ada' }];
+/** A production-shaped member row. */
+const m = (subject: string, displayName: string, orgId = 'org_1'): OrgMember => ({
+  memberId: `mem_${subject}`, orgId, tenantId: 'ws_active', subject, displayName,
+  roles: ['viewer'], teamIds: [], createdAt: '2026-09-25T00:00:00.000Z', updatedAt: '2026-09-25T00:00:00.000Z',
+});
+const MEMBERS: OrgMember[] = [m('user_1', 'Ada')];
 
 /** A request whose settlement this test controls. */
 function deferred<T>() {
@@ -33,14 +51,14 @@ function deferred<T>() {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  api.listMembers.mockReset();
   invalidateOrgMembers();
 });
 afterEach(() => { invalidateOrgMembers(); });
 
 describe('loadOrgMembers — in-flight dedupe', () => {
   it('THE FIX: N concurrent callers for one org issue ONE request', async () => {
-    const d = deferred<typeof MEMBERS>();
+    const d = deferred<OrgMember[]>();
     api.listMembers.mockReturnValue(d.promise);
 
     // Five panels mounting in the same tick — the CommentsPanel shape.
@@ -55,20 +73,13 @@ describe('loadOrgMembers — in-flight dedupe', () => {
 
   it('distinct orgs are NOT collapsed into one request', async () => {
     // The guard against "fixing" fan-out by serving the wrong org's members.
-    api.listMembers.mockImplementation(async (id: string) => [{ subject: `member_of_${id}`, displayName: id }]);
+    api.listMembers.mockImplementation(async (id: string) => [m(`member_of_${id}`, id, id)]);
 
     const [a, b] = await Promise.all([loadOrgMembers('org_a'), loadOrgMembers('org_b')]);
 
     expect(api.listMembers).toHaveBeenCalledTimes(2);
     expect(a[0]!.subject).toBe('member_of_org_a');
     expect(b[0]!.subject).toBe('member_of_org_b');
-  });
-
-  it('after resolution the value cache still serves — no repeat request', async () => {
-    api.listMembers.mockResolvedValue(MEMBERS);
-    await loadOrgMembers('org_1');
-    await loadOrgMembers('org_1');
-    expect(api.listMembers).toHaveBeenCalledTimes(1);
   });
 
   it('a REJECTED read is not latched — the next call retries', async () => {
@@ -87,7 +98,7 @@ describe('loadOrgMembers — in-flight dedupe', () => {
     // `.then` from running, and it would write its PRE-invalidation list into the
     // cache — re-seating exactly the stale members the caller cleared (an invite
     // that "doesn't take" until a reload). Slot ownership prevents the write.
-    const first = deferred<typeof MEMBERS>();
+    const first = deferred<OrgMember[]>();
     api.listMembers.mockReturnValueOnce(first.promise);
 
     const inFlight = loadOrgMembers('org_1');
@@ -100,10 +111,10 @@ describe('loadOrgMembers — in-flight dedupe', () => {
     await vi.waitFor(() => expect(api.listMembers).toHaveBeenCalledTimes(1));
 
     invalidateOrgMembers('org_1');           // e.g. an invite just landed
-    first.resolve([{ subject: 'user_1', displayName: 'STALE' }]);
+    first.resolve([m('user_1', 'STALE')]);
     await inFlight;
 
-    const fresh = [{ subject: 'user_1', displayName: 'Ada' }, { subject: 'user_2', displayName: 'Grace' }];
+    const fresh = [m('user_1', 'Ada'), m('user_2', 'Grace')];
     api.listMembers.mockResolvedValueOnce(fresh);
 
     // Must REFETCH, and must not be served the pre-invalidation list.

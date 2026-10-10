@@ -17,7 +17,7 @@ import {
   listCommitments,
   upsertCommitmentBySource,
 } from '../src/features/assistant/assistantService.js';
-import { enqueueActionWithApproval, decideActionViaApproval } from '../src/features/assistant/actionApproval.js';
+import { enqueueActionWithApproval, decideActionViaApproval, contentHashOf } from '../src/features/assistant/actionApproval.js';
 import { buildAssistantHealth } from '../src/features/assistant/health.js';
 import { buildAssistantSurface } from '../src/features/assistant/surface.js';
 import { prioritize, PRIORITY_PROFILES } from '../src/features/assistant/prioritization.js';
@@ -119,7 +119,7 @@ describe('health snapshot', () => {
       kind: 'nudge', payload: {}, draft: 'nudge one',
       sourceRefs: [{ kind: 'gmail', externalId: 'g1', contentHash: 'h3', capturedAt: new Date().toISOString(), contentTrust: 'untrusted' }],
     });
-    await decideActionViaApproval(TENANT, a1.approvalId!, 'approved', { decidedByUserId: 'u1' });
+    await decideActionViaApproval(TENANT, a1.approvalId!, 'approved', { expectedContentHash: contentHashOf(a1), decidedByUserId: 'u1' });
     const a2 = await enqueueActionWithApproval(TENANT, { kind: 'nudge', payload: {}, draft: 'nudge two' });
     await decideActionViaApproval(TENANT, a2.approvalId!, 'rejected', {});
 

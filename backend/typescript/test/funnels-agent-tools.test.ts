@@ -56,7 +56,7 @@ describe('CFP-1 — the funnels agent tools register + the allowlist matches', (
   });
 
   it('the pack allowlist is EXACTLY the four registered ids (no dropped node typeIds)', () => {
-    const packDir = new URL('../../../packs/feature.funnels.agents/', import.meta.url);
+    const packDir = new URL('../../../packs/vendor.openwop-app.funnels.agents/', import.meta.url);
     const manifest = JSON.parse(readFileSync(new URL('pack.json', packDir), 'utf8')) as {
       agents: { toolAllowlist: string[] }[];
     };

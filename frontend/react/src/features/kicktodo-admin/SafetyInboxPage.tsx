@@ -21,6 +21,7 @@ import { InboxIcon, AlertIcon } from '../../ui/icons/index.js';
 import { ReviewCard } from '../../chat/reviews/ReviewCard.js';
 import { useReviewStatusStore, useReviewList } from '../../chat/reviews/reviewStatusStore.js';
 import { isKickTodoReviewKind } from './kicktodoReviewKinds.js';
+import { loadErrorMessage } from '../../client/loadErrorMessage.js';
 
 export function SafetyInboxPage(): JSX.Element {
   const { t } = useTranslation('kicktodo-admin');
@@ -28,6 +29,7 @@ export function SafetyInboxPage(): JSX.Element {
   const reviews = all.filter((r) => isKickTodoReviewKind(r.kind));
   const loading = useReviewStatusStore((s) => s.loading);
   const error = useReviewStatusStore((s) => s.error);
+  const errorCause = useReviewStatusStore((s) => s.errorCause);
   const initialized = useReviewStatusStore((s) => s.initialized);
   const connect = useReviewStatusStore((s) => s.connect);
   const disconnect = useReviewStatusStore((s) => s.disconnect);
@@ -43,8 +45,10 @@ export function SafetyInboxPage(): JSX.Element {
   }, [connect, disconnect]);
 
   const decide = async (reviewId: string, action: string, body: { value?: unknown; note?: string }): Promise<void> => {
-    await decideInStore(reviewId, action, body);
-    setNotice(t('decisionRecorded'));
+    setNotice(null);
+    // ADR 0778 (`APUX-19`) — a 409 is someone ELSE's decision: never "recorded".
+    const outcome = await decideInStore(reviewId, action, body);
+    setNotice(outcome === 'already-resolved' ? t('chat:reviewResolvedElsewhere') : t('decisionRecorded'));
   };
 
   return (
@@ -58,9 +62,13 @@ export function SafetyInboxPage(): JSX.Element {
           presents the queue + delegates the decision (§3.4 / B15). */}
       <Notice variant="info">{t('safetyAuthorityNote')}</Notice>
 
+      {/* Outside the list branch: deciding the LAST card empties the list
+          before the outcome is known (ADR 0778, closing review B1). */}
+      {notice ? <Notice variant="success" announce={notice}>{notice}</Notice> : null}
+
       {(!initialized || loading) && reviews.length === 0 && <StateCard loading title={t('safetyTitle')} />}
       {error && reviews.length === 0 && (
-        <StateCard announce icon={<AlertIcon aria-hidden />} title={t('safetyErrorTitle')} body={error}
+        <StateCard announce icon={<AlertIcon aria-hidden />} title={t('safetyErrorTitle')} body={loadErrorMessage(t, errorCause ?? error)}
           action={<Button variant="quiet" size="sm" onClick={() => void refresh()}>{t('retry')}</Button>} />
       )}
       {initialized && !loading && !error && reviews.length === 0 && (
@@ -69,7 +77,6 @@ export function SafetyInboxPage(): JSX.Element {
 
       {reviews.length > 0 && (
         <section className="review-inbox" aria-label={t('safetyTitle')}>
-          {notice ? <Notice variant="success" announce={notice}>{notice}</Notice> : null}
           <ul className="review-inbox__list">
             {reviews.map((r) => (
               <li key={r.reviewId}>

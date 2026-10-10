@@ -16,11 +16,14 @@ import { registerCreativeBriefsReelWorkflow } from './reelWorkflow.js';
 import { registerCreativeBriefsAgentTools } from './agentTools.js';
 import { buildCreativeBriefsSurface } from './surface.js';
 import { registerRenderMediaCascade } from './render/renderService.js';
+import { registerFeatureDataExporter } from '../../host/featureDataExport.js';
+import { exportCreativeBriefsData } from './dataExport.js';
 
 export const creativeBriefsFeature: BackendFeature = {
   id: 'creative-briefs',
-  requiredPacks: [{ name: 'feature.creative-briefs.nodes', version: '1.2.0' }], // NP-HOLE-CB-1; 1.1.0 = ADR 0399 render nodes; 1.2.0 = ADR 0411 P3 generate-reel
+  requiredPacks: [{ name: 'feature.creative-briefs.nodes', version: '1.2.1' }], // NP-HOLE-CB-1; 1.1.0 = ADR 0399 render nodes; 1.2.0 = ADR 0411 P3 generate-reel
   registerRoutes: (deps) => {
+    registerFeatureDataExporter('creative-briefs', exportCreativeBriefsData); // ADR 0820 §7 — read-only export, served after a plan lapse
     registerCreativeBriefsReelWorkflow(); // ADR 0472 P4 — reel migrated to a chain-backed workflow
     registerCreativeBriefsRoutes(deps);
     registerCreativeBriefsAgentTools(); // XCH-HOLE-7 (round 3) — openwop:creative-briefs.list (ADR 0308 seam)
@@ -31,7 +34,7 @@ export const creativeBriefsFeature: BackendFeature = {
     id: 'creative-briefs',
     label: 'Creative Briefs',
     description:
-      'Structured visual briefs for designers — scene, composition, camera and lighting notes, brand palette, platform specs, and 2–3 creative directions per asset, with version history, review→approve workflow, a mood board auto-assembled from your media library, and approved-only share links so an external designer can execute without an account. OFF by default.',
+      'Structured visual briefs for designers — scene, composition, camera and lighting notes, brand palette, platform specs, and 2–3 creative directions per asset, with version history, review→approve workflow, a mood board auto-assembled from your media library, and approved-only share links so an external designer can execute without an account.',
     category: 'Marketing',
     status: 'off',
     bucketUnit: 'tenant',

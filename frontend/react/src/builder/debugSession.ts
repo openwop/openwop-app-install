@@ -10,7 +10,7 @@
  * fall back to identity so pin STATE never becomes unreachable.
  */
 
-import { useBuilderStore, type DebugSession } from './store/builderStore.js';
+import { useBuilderStore, enqueueBuilderWrite, adoptForkedWorkflow, resolveForkAlias, isCanvasPristine, type DebugSession } from './store/builderStore.js';
 import { serializeWithIdMap, SerializeError } from './schema/serialize.js';
 import { registerWorkflow } from './persistence/registerClient.js';
 import { definitionMetadataFor } from './persistence/definitionMetadata.js';
@@ -99,14 +99,28 @@ export async function runFromNode(builderNodeId: string, mode: 'from-here' | 'on
   const s = useBuilderStore.getState();
   const snap = s.snapshot();
   const { definition, builderIdToBackend, backendIdToBuilder } = serializeWithIdMap(snap);
-  await registerWorkflow({ ...definition, metadata: definitionMetadataFor(snap) });
+  // ADR 0770 D5 — register against the loaded head, and adopt the new one.
+  const registered = await enqueueBuilderWrite(() => {
+    const base = useBuilderStore.getState().baseRevision;
+    const targetId = resolveForkAlias(definition.workflowId); // ADR 0789 — see BuilderShell's Run
+    return registerWorkflow({ ...definition, workflowId: targetId, metadata: definitionMetadataFor(snap) }, {
+      ...(base ? { baseRevision: base } : {}),
+      ...(targetId === definition.workflowId && isCanvasPristine(snap) ? { pristine: true } : {}),
+    });
+  });
+  if (registered.revision) useBuilderStore.getState().setBaseRevision(registered.revision);
+  // ADR 0789 — a seeded workflow's edit forked onto this tenant's own id: adopt
+  // it and debug THAT (the shared id still holds the unedited steps).
+  if (registered.forkedFrom && registered.workflowId !== definition.workflowId) {
+    adoptForkedWorkflow(definition.workflowId, registered.workflowId, registered.revision, (registered.repointFailed?.length ?? 0) > 0);
+  }
   let inputs: Record<string, unknown> | undefined;
   const raw = snap.defaultInputs?.trim();
   if (raw) {
     try { inputs = JSON.parse(raw) as Record<string, unknown>; } catch { inputs = undefined; }
   }
   const backendNodeId = builderIdToBackend[builderNodeId] ?? builderNodeId;
-  const started = await startDebugRun(s.workflowId, backendNodeId, mode, inputs);
+  const started = await startDebugRun(registered.workflowId, backendNodeId, mode, inputs);
   useBuilderStore.getState().startOverlay(started.runId, backendIdToBuilder);
   return started;
 }

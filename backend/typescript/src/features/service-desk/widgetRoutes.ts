@@ -17,7 +17,8 @@ import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Response } from 'express';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
-import { resolveOne } from '../../host/featureToggles/service.js';
+import { resolveToggle } from '../../host/featureToggles/service.js';
+import { ownerPublicRuntimeLapsed } from '../../host/publicLapse.js';
 import { getIntakeConfig } from './intake.js';
 import { createTicket, getTicket, ticketIdFor } from './tickets.js';
 import type { Ticket } from './ticketTypes.js';
@@ -88,16 +89,29 @@ function publicView(t: Ticket): Record<string, unknown> {
   };
 }
 
+/**
+ * ADR 0820 §8.2 / architect #5 — a VISITOR lane: the tenant comes from the intake
+ * key (the resource), never the caller. So it reads the two TOGGLES only
+ * (`resolveToggle`, ratchet-listed opt-outs), not `resolveOne`. Service desk is
+ * sold in the Support bundle; with `resolveOne` here an unpaid owner's widget
+ * would 404 its visitors, and an entitlement-read fault would 404 EVERY tenant's
+ * widget (the ADR 0819 A2 class). The ADR 0176 shopper exemption keeps visitors
+ * off the owner's plan; the owner's plan is enforced on the operator routes.
+ * The owner-lapse policy (ADR 0820 §7) is applied below via `ownerPublicRuntimeLapsed`.
+ */
 async function widgetEnabled(tenantId: string): Promise<boolean> {
-  const main = await resolveOne('service-desk', { tenantId }).catch(() => null);
+  const main = await resolveToggle('service-desk', { tenantId }).catch(() => null);
   if (main?.enabled !== true) return false;
-  const sub = await resolveOne('service-desk.widget', { tenantId }).catch(() => null);
-  return sub?.enabled === true;
+  const sub = await resolveToggle('service-desk.widget', { tenantId }).catch(() => null);
+  if (sub?.enabled !== true) return false;
+  // ADR 0820 §7 — the visitor lane reads the toggle only (resolveToggle, #4421); the owner's
+  // plan bites here, through the lapse policy (off unless the grace knob is set).
+  return !(await ownerPublicRuntimeLapsed('service-desk', tenantId));
 }
 
 export function registerServiceDeskWidgetRoutes(deps: RouteDeps): void {
   const { app } = deps;
-  const PUB = '/v1/host/openwop-app/public-service-desk/:intakeKey';
+  const PUB = '/host/openwop-app/public-service-desk/:intakeKey';
   const notFound = (res: Response): void => {
     sendError(res, 404, 'not_found', 'Not found.');
   };

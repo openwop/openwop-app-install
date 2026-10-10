@@ -86,7 +86,10 @@ describe('agent purchases — a failed org read is not an empty account', () => 
     api.listOrgs.mockResolvedValue([{ orgId: 'o1', name: 'Acme' }]);
     view();
     await waitFor(() => expect(api.listPurchases).toHaveBeenCalledWith('o1'));
-    expect(screen.getByText('No agent purchases yet')).toBeTruthy();
+    // findByText, not getByText: the waitFor above ends when the CALL is seen, and
+    // the empty state renders only after that promise resolves and React commits.
+    // A synchronous read raced that gap and went red under load on a gate.
+    expect(await screen.findByText('No agent purchases yet')).toBeTruthy();
     expect(screen.queryByText('Could not load your organizations')).toBeNull();
     expect(screen.queryByText('No organizations')).toBeNull();
   });

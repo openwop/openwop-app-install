@@ -13,7 +13,7 @@
  * ids linger but are filtered at query time (searchProducts intersects with the live set).
  */
 import { buildHostSurfaceBundle } from '../../host/inMemorySurfaces.js';
-import { embedText, DEFAULT_EMBEDDING_DIMS } from '../../aiProviders/localEmbedding.js';
+import { embedText, effectiveEmbedDims } from '../../aiProviders/localEmbedding.js';
 import { listProducts, type Product } from '../commerce/commerceService.js';
 
 const namespaceOf = (tenantId: string, orgId: string): string => `commerce:product:${tenantId}:${orgId}`;
@@ -59,7 +59,7 @@ export async function rebuildProductEmbeddings(tenantId: string, orgId: string):
   const vector = buildHostSurfaceBundle({ tenantId }).db.vector;
   await vector.upsert({
     namespace: namespaceOf(tenantId, orgId),
-    items: products.map((p) => ({ id: p.productId, vector: embedText(productText(p), DEFAULT_EMBEDDING_DIMS), metadata: { productId: p.productId } })),
+    items: products.map((p) => ({ id: p.productId, vector: embedText(productText(p), effectiveEmbedDims()), metadata: { productId: p.productId } })),
   });
   return products.length;
 }
@@ -71,7 +71,7 @@ export async function queryProductEmbeddings(tenantId: string, orgId: string, q:
   if (!q || !q.trim()) return [];
   try {
     const vector = buildHostSurfaceBundle({ tenantId }).db.vector;
-    const res = await vector.query({ namespace: namespaceOf(tenantId, orgId), vector: embedText(q, DEFAULT_EMBEDDING_DIMS), topK });
+    const res = await vector.query({ namespace: namespaceOf(tenantId, orgId), vector: embedText(q, effectiveEmbedDims()), topK });
     const matches = (res.matches ?? []) as Array<{ id?: unknown; metadata?: { productId?: unknown } }>;
     return matches.map((m) => String((m.metadata?.productId ?? m.id) ?? '')).filter(Boolean);
   } catch { return []; }

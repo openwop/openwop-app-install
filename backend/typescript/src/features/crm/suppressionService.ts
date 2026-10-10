@@ -59,7 +59,8 @@ interface SuppressionCount { key: string; count: number }
 // teardown reaches this count row (else it orphans — the RATCHET-BLINDSPOT class).
 const suppressionCounts = new DurableCollection<SuppressionCount>('crm:suppression-count', (c) => c.key, undefined, (c) => c.key);
 
-const actualCount = async (tenantId: string): Promise<number> => (await suppressions.listByPrefix(`${tenantId}::`)).length;
+// ADR 0837 (prefix sweep) — filtered on the row's tenant too: a prefix is not an identity.
+const actualCount = async (tenantId: string): Promise<number> => (await suppressions.listByPrefix(`${tenantId}::`)).filter((s) => s.tenantId === tenantId).length;
 
 /** O(1) after a one-time lazy seed from the real list. */
 async function fastCount(tenantId: string): Promise<number> {

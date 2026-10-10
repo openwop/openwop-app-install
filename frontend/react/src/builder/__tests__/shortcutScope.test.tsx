@@ -174,11 +174,17 @@ describe('every canvas verb in BuilderShell actually carries the gate', () => {
    */
   const UNGATED_BY_DESIGN = new Set([
     "'mod+z'", "'mod+shift+z'", "'mod+y'", "'mod+c'", "'mod+v'", "'mod+d'", "'/'",
+    // ADR 0773 — ⌘. only moves focus to the Pair composer (its own guard: the
+    // panel exists); it consumes no typed text, so it needs no canvas gate. (It
+    // still never fires inside a text field: the registry skips text contexts.)
+    "'mod+.'",
   ]);
 
   it('finds the entries at all (a broken regex would pass every assertion below)', () => {
     // 10 → 11 (R3): the flood-select combo template (mod+alt+shift+arrow) — gated.
-    expect(entries.length).toBe(11);
+    // 11 → 17 (ADR 0773): the suggestion-review verbs j/k/⌘⏎/⌘⌫/⇧⌘⏎ (gated) + ⌘. (exempt).
+    // 17 → 18 (ADR 0773 P11): Esc hides the review (gated like the other review verbs).
+    expect(entries.length).toBe(18);
     // …and the exempt list must not have drifted into naming combos that are gone.
     const combos = new Set(entries.map((e) => e.combo));
     const staleExemptions = [...UNGATED_BY_DESIGN].filter((c) => !combos.has(c));

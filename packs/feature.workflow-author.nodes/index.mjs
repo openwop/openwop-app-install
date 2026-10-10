@@ -110,7 +110,8 @@ const RESPONSE_SCHEMA = {
   },
 };
 
-function buildSystemPrompt(catalog) {
+/** Exported so the model-facing menu is testable (ADR 0782: `ports` must reach it). */
+export function buildSystemPrompt(catalog) {
   const menu = (catalog.nodes ?? []).map((n) => ({
     typeId: n.typeId,
     label: n.label,
@@ -119,6 +120,7 @@ function buildSystemPrompt(catalog) {
     ...(n.configSchema ? { configSchema: n.configSchema } : {}),
     ...(n.inputSchema ? { inputSchema: n.inputSchema } : {}),
     ...(n.outputSchema ? { outputSchema: n.outputSchema } : {}),
+    ...(n.ports === 'single' ? { ports: 'single' } : {}),
   }));
   return [
     'You are the OpenWOP Workflow Architect. You author a WorkflowDefinition (a directed acyclic graph of nodes + edges) that accomplishes the user\'s automation intent.',
@@ -138,6 +140,9 @@ function buildSystemPrompt(catalog) {
     '5. Every edge.sourceNodeId / targetNodeId MUST reference a declared nodeId. The graph MUST be ACYCLIC — a cycle is REJECTED (the only exception is an RFC 0022 dispatch-supervisor back-edge). Prefer a single connected graph; disconnected islands are allowed but rarely what the user meant.',
     '6. Use a single linear chain unless the intent genuinely needs fan-out/fan-in; on a fan-in node set an appropriate triggerRule.',
     '7. Mark the node that produces the final deliverable with outputRole:"primary".',
+    // ADR 0782 — a single-port node's edge with a `targetInput` routes at run time but is
+    // INVISIBLE on the builder canvas (it has no handle of that name).
+    '8. An edge into a node marked ports:"single" MUST NOT set targetInput (it would be rejected). That node reads its required inputSchema fields from the OUTPUT KEYS of its upstream node — so feed it from ONE upstream node that outputs those keys (a node with no incoming edge reads the run inputs instead). config does NOT supply inputs.',
     '',
     'Return ONLY the JSON WorkflowDefinition. No prose, no code fences.',
     '',

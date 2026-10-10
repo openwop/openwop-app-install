@@ -26,6 +26,7 @@
 import { Button } from '../ui/Button.js';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
+import { runDetailPath, useCanOpenRunDetail } from './runDetailAccess.js';
 import { useEffect, useMemo, useState } from 'react';
 import { getSavedWorkflow } from '../builder/persistence/localStore.js';
 import { formatElapsed } from './workflowProgress/formatters.js';
@@ -33,6 +34,7 @@ import { formatNumber } from '../i18n/format.js';
 import { AlertIcon, BanIcon, CheckIcon, ExternalLinkIcon } from '../ui/icons/index.js';
 import { announce } from '../ui/announce.js';
 import type { WorkflowRunState } from './types.js';
+import { RunArtifactCards, useRunArtifacts } from './RunArtifactCards.js';
 
 interface Props {
   run: WorkflowRunState;
@@ -40,9 +42,12 @@ interface Props {
    *  instead of relying on default in-page navigation. The handler
    *  receives the terminal node id + its output blob. */
   onPreviewArtifact?: (nodeId: string, output: unknown, label: string) => void;
+  /** ADR 0768 B3 — a surface with a Workbench passes this; a completed run then
+   *  lists its durable outputs as cards that open there. */
+  onOpenArtifact?: (a: { artifactId: string }) => void;
 }
 
-export function WorkflowCompletionCard({ run, onPreviewArtifact }: Props): JSX.Element | null {
+export function WorkflowCompletionCard({ run, onPreviewArtifact, onOpenArtifact }: Props): JSX.Element | null {
   // `t` is used below as the terminal-node loop variable (`terminals.map((t) => …)`),
   // so the translation hook is aliased to `translate` to avoid the name collision.
   const { t: translate } = useTranslation('chat');
@@ -55,6 +60,9 @@ export function WorkflowCompletionCard({ run, onPreviewArtifact }: Props): JSX.E
   // them is negligible.
   const { terminals, graphUnavailable } = useTerminalNodes(run);
   const elapsed = useElapsedSince(run.startedAt);
+  const canOpenRun = useCanOpenRunDetail();
+  const artifacts = useRunArtifacts(run.runId, run.status === 'completed' && !!onOpenArtifact && run.runUnavailable !== true);
+  const listed = artifacts.status === 'ready' ? artifacts.items : [];
 
   const isTerminal = run.status === 'completed' || run.status === 'failed' || run.status === 'cancelled';
   if (!isTerminal) return null;
@@ -105,11 +113,14 @@ export function WorkflowCompletionCard({ run, onPreviewArtifact }: Props): JSX.E
       <Meta items={[stepCount, elapsed]} />
       {/* ADR 0600 §4 — say WHY there is no output link, instead of leaving a
           bare "Open run" that reads as "this run produced nothing". */}
-      {graphUnavailable && (
+      {graphUnavailable && listed.length === 0 && (
         <div className="muted wfcomplete-error" data-testid="wfcomplete-graph-unavailable">
-          {translate('outputsNotOnThisDevice')}
+          {/* A member cannot open the admin-tier run page, so drop the
+              "Open the run" sentence rather than point at a missing link. */}
+          {translate(canOpenRun ? 'outputsNotOnThisDevice' : 'outputsNotOnThisDeviceNoRun')}
         </div>
       )}
+      {onOpenArtifact ? <RunArtifactCards items={listed} onOpen={onOpenArtifact} /> : null}
       <Actions>
         {terminals.length > 0
           ? terminals.map((t) => (
@@ -128,13 +139,13 @@ export function WorkflowCompletionCard({ run, onPreviewArtifact }: Props): JSX.E
                 >
                   {(t.isPrimary || terminals.length > 1) ? translate('viewLabeled', { label: t.label }) : translate('viewOutput')} →
                 </Button>
-                {run.runId && !unavailable && (
+                {run.runId && !unavailable && canOpenRun && (
                   // Deep-link companion to the modal-opening View button —
                   // opens /runs/:runId#node-:nodeId in a new tab so the user
                   // can inspect the artifact in the full run-detail surface
                   // (event log, agent trace, etc.) alongside the chat thread.
                   <a
-                    href={`/runs/${run.runId}#node-${encodeURIComponent(t.nodeId)}`}
+                    href={`${runDetailPath(run.runId)}#node-${encodeURIComponent(t.nodeId)}`}
                     target="_blank"
                     rel="noopener noreferrer"
                     title={translate('openInRunDetail')}
@@ -162,8 +173,11 @@ export function WorkflowCompletionCard({ run, onPreviewArtifact }: Props): JSX.E
  * run is still on the server, or a muted "(unavailable)" placeholder
  * when the orphan-detection probe set `runUnavailable: true`.
  */
-function OpenRunLink({ runId, unavailable }: { runId: string; unavailable: boolean }): JSX.Element {
+function OpenRunLink({ runId, unavailable }: { runId: string; unavailable: boolean }): JSX.Element | null {
   const { t: translate } = useTranslation('chat');
+  // A member cannot open the admin-tier run page (rule 17 / ADR 0844 D4), so
+  // "Open run" would be an action that ends on an access-denied screen.
+  const canOpenRun = useCanOpenRunDetail();
   if (unavailable) {
     return (
       <span
@@ -174,8 +188,9 @@ function OpenRunLink({ runId, unavailable }: { runId: string; unavailable: boole
       </span>
     );
   }
+  if (!canOpenRun) return null;
   return (
-    <Link to={`/runs/${runId}`} className="u-fs-12">
+    <Link to={runDetailPath(runId)} className="u-fs-12">
       {translate('openRun')}
     </Link>
   );
@@ -391,8 +406,9 @@ function CompletionShell({ tone, iconKind, title, children }: ShellProps): JSX.E
       aria-label={ariaLabel}
       className="wfcomplete-shell"
       style={{
-        background: `color-mix(in oklch, ${color} 8%, transparent)`,
-        border: `${borderWidth}px solid color-mix(in oklch, ${color} 40%, var(--rule))`,
+        // §3 rule 3 — status rides the hairline + icon + label, not a tinted fill.
+        background: 'var(--paper)',
+        border: `${borderWidth}px solid color-mix(in oklab, ${color} 40%, var(--rule))`,
       }}
     >
       <div className="u-flex u-items-center u-gap-2">

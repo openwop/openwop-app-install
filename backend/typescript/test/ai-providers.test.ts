@@ -20,7 +20,7 @@ import { describe, expect, it, beforeAll, afterAll, afterEach, vi } from 'vitest
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
-import { createAiProvidersAdapter, AiProviderError } from '../src/aiProviders/aiProvidersHost.js';
+import { createAiProvidersAdapter, AiProviderError, advertisedByokProviders } from '../src/aiProviders/aiProvidersHost.js';
 import { programMock, resetMockPrograms } from '../src/providers/dispatchMock.js';
 import type { AiProviderPolicy, ProviderPolicyResolver } from '../src/host/index.js';
 
@@ -47,24 +47,23 @@ afterAll(async () => {
 });
 
 describe('aiProviders: discovery advertisement', () => {
-  it('shape matches capabilities.md:126-163', async () => {
-    const r = await fetch(`${BASE}/.well-known/openwop`);
-    const body = (await r.json()) as { capabilities: { aiProviders: Record<string, unknown> } };
-    const ap = body.capabilities.aiProviders;
-    expect(ap, 'aiProviders block present').toBeTruthy();
-    expect(Array.isArray(ap.supported), 'aiProviders.supported is array').toBe(true);
-    expect(Array.isArray(ap.byok), 'aiProviders.byok is array (spec line 162)').toBe(true);
-    expect((ap.byok as string[]).every((p) => (ap.supported as string[]).includes(p)),
-      'byok ⊆ supported (spec line 162)').toBe(true);
-    expect(ap.policies, 'aiProviders.policies present').toBeTruthy();
-    const policies = ap.policies as { modes: string[]; scopes: string[]; errorCode: string };
-    expect(policies.modes).toContain('optional'); // required by profile openwop-provider-policy (profiles.md:132)
-    expect(policies.modes).toContain('disabled');
-    expect(policies.modes).toContain('required');
-    expect(policies.modes).toContain('restricted');
-    expect(policies.errorCode).toBe('provider_policy_denied');
-    expect(Array.isArray(policies.scopes), 'scopes is array').toBe(true);
-    expect((ap.toolCalling as { supported: boolean }).supported).toBe(true);
+  // ADR 0812 P3c-0 — this read the v1 document's `capabilities.aiProviders`
+  // (`supported`, `byok`, `policies`, `toolCalling`). The v2 family record
+  // carries `providers` + a flat `authModes` vocabulary; `byok` and `policies`
+  // have no v2 projection yet (whd7-v2-projection-parity KNOWN_UNPROJECTED), and
+  // the four policy-mode error codes are asserted against the adapter below.
+  it('the v2 family record is spec-shaped and names every BYOK provider under apiKey', async () => {
+    const r = await fetch(`${BASE}/.well-known/openwop`, { headers: { 'OpenWOP-Version': '2' } });
+    const body = (await r.json()) as { aiProviders: { status?: string; witness?: string; providers?: string[]; authModes?: string[]; supported?: unknown } };
+    const ap = body.aiProviders;
+    expect(ap, 'aiProviders family present').toBeTruthy();
+    expect(typeof ap.status).toBe('string');
+    expect(typeof ap.witness).toBe('string');
+    expect(ap.supported, 'presence is the advert at v2').toBeUndefined();
+    expect(Array.isArray(ap.providers), 'aiProviders.providers is array').toBe(true);
+    expect(advertisedByokProviders().length).toBeGreaterThan(0);
+    expect(ap.providers).toEqual(expect.arrayContaining(advertisedByokProviders()));
+    expect(ap.authModes).toContain('apiKey');
   });
 });
 
@@ -126,7 +125,9 @@ describe('aiProviders: error codes are canonical per host-capabilities.md:141-15
     ).rejects.toMatchObject({ code: 'provider_policy_denied' });
   });
 
-  it('model_not_allowed for restricted mode with empty allowlist (fail-closed per capabilities.md:285)', async () => {
+  // capabilities.md "Wire-format error": EVERY policy refusal carries the
+  // advertised `policies.errorCode`; the cause rides `details.reason`.
+  it('provider_policy_denied (reason model_not_allowed) for restricted mode with empty allowlist (fail-closed)', async () => {
     const scope = buildScope({
       secrets: { anthropic: 'sk-test' },
       policies: [{ provider: 'anthropic', mode: 'restricted', allowedModels: [] }],
@@ -138,10 +139,10 @@ describe('aiProviders: error codes are canonical per host-capabilities.md:141-15
         model: 'claude-3-5-sonnet-latest',
         messages: [{ role: 'user', content: 'hi' }],
       }),
-    ).rejects.toMatchObject({ code: 'model_not_allowed' });
+    ).rejects.toMatchObject({ code: 'provider_policy_denied', details: { reason: 'model_not_allowed', allowed: [] } });
   });
 
-  it('model_not_allowed for restricted miss with wildcard allowlist', async () => {
+  it('provider_policy_denied (reason model_not_allowed) for restricted miss with wildcard allowlist', async () => {
     const scope = buildScope({
       secrets: { anthropic: 'sk-test' },
       policies: [{ provider: 'anthropic', mode: 'restricted', allowedModels: ['claude-3-5-sonnet-*'] }],
@@ -153,7 +154,48 @@ describe('aiProviders: error codes are canonical per host-capabilities.md:141-15
         model: 'claude-3-haiku-20240307',
         messages: [{ role: 'user', content: 'hi' }],
       }),
-    ).rejects.toMatchObject({ code: 'model_not_allowed' });
+    ).rejects.toMatchObject({ code: 'provider_policy_denied', details: { reason: 'model_not_allowed' } });
+  });
+
+  it('provider_policy_denied (reason byok_required) for required mode with no credential', async () => {
+    const scope = buildScope({
+      secrets: {},
+      policies: [{ provider: 'anthropic', mode: 'required' }],
+    });
+    const adapter = createAiProvidersAdapter(scope);
+    await expect(
+      adapter.callAI({
+        provider: 'anthropic',
+        model: 'claude-3-5-sonnet-latest',
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    ).rejects.toMatchObject({ code: 'provider_policy_denied', details: { reason: 'byok_required' } });
+  });
+
+  it('required mode admits a call whose credential resolves (positive control)', async () => {
+    const scope = buildScope({
+      secrets: { anthropic: 'sk-test' },
+      policies: [{ provider: 'anthropic', mode: 'required' }],
+    });
+    const adapter = createAiProvidersAdapter(scope);
+    // The policy passing is witnessed by the call REACHING the provider.
+    let reachedProvider = false;
+    vi.stubGlobal('fetch', () => {
+      reachedProvider = true;
+      return Promise.reject(new Error('stubbed provider'));
+    });
+    try {
+      await adapter
+        .callAI({
+          provider: 'anthropic',
+          model: 'claude-3-5-sonnet-latest',
+          messages: [{ role: 'user', content: 'hi' }],
+        })
+        .catch(() => undefined);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(reachedProvider).toBe(true);
   });
 
   it('byok_required when no credential is available in any convention slot', async () => {

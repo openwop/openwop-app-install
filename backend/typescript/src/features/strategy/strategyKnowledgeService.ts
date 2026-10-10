@@ -26,7 +26,7 @@
 
 import { createLogger } from '../../observability/logger.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
-import { createCollection, deleteDocument, getCollection, getDocument, upsertDocument } from '../kb/kbService.js';
+import { createCollection, deleteDocument, getCollection, getDocument, upsertDocument, KB_MAINTENANCE_CALLER } from '../kb/kbService.js';
 import { kbMutated, type KbEmitOptions } from '../kb/emit.js'; // ADR 0643 D3 — silent per-row sweeps + ONE batch event
 import { type ShareableKbProvider } from '../../host/shareableKb.js';
 import { listStrategies } from './strategyService.js';
@@ -179,11 +179,13 @@ export async function backfillStrategyKb(tenantId: string, orgId: string): Promi
 export async function removeStrategy(tenantId: string, orgId: string, strategyId: string, emit: KbEmitOptions = {}): Promise<boolean> {
   try {
     const collectionId = collectionIdFor(orgId);
-    const col = await getCollection(tenantId, orgId, collectionId);
+    // G8 — the MAINTENANCE caller: a removal must see the row while the plan is lapsed,
+    // or a refused read would report a doc as provably gone while it still sits there.
+    const col = await getCollection(tenantId, orgId, collectionId, KB_MAINTENANCE_CALLER);
     if (!col) return true;
-    const doc = await getDocument(tenantId, orgId, collectionId, strategyId);
+    const doc = await getDocument(tenantId, orgId, collectionId, strategyId, KB_MAINTENANCE_CALLER);
     if (!doc) return true; // never indexed / already removed — idempotent
-    await deleteDocument(tenantId, orgId, collectionId, strategyId, undefined, emit);
+    await deleteDocument(tenantId, orgId, collectionId, strategyId, KB_MAINTENANCE_CALLER, emit);
     return true;
   } catch (err) {
     log.warn('strategy_kb_remove_failed', { strategyId, err: String(err) });

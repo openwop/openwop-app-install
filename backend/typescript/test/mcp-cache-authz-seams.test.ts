@@ -249,11 +249,14 @@ describe('H57 — Connection seams (connectionsService) invalidate the outbound 
     await warm('ada');
     // The peer instance re-consented: new token material under the same ref,
     // and the row's `updatedAt` moved. No signal reaches this process.
-    await setSecret(`connection:${conn.connectionId}`, JSON.stringify({ accessToken: 't2', tokenType: 'bearer', scopes: ['read'] }), { tenantId: T });
+    // ADR 0780 D3.1 — a real re-consent mints a new `generation` on BOTH the row
+    // and the material; a secret that disagrees with its row now fails closed, so
+    // the simulated peer write carries the shape production writes.
+    await setSecret(`connection:${conn.connectionId}`, JSON.stringify({ accessToken: 't2', tokenType: 'bearer', scopes: ['read'], generation: 'peer-g2' }), { tenantId: T });
     const raw = await storage.kvGet(connectionRowKey(conn.connectionId));
     expect(raw).not.toBeNull();
     const row = JSON.parse(raw!) as Connection;
-    await storage.kvSet(connectionRowKey(conn.connectionId), JSON.stringify({ ...row, updatedAt: new Date(Date.now() + 1000).toISOString() }));
+    await storage.kvSet(connectionRowKey(conn.connectionId), JSON.stringify({ ...row, generation: 'peer-g2', updatedAt: new Date(Date.now() + 1000).toISOString() }));
     expect((await getConnection(T, conn.connectionId))?.updatedAt).not.toBe(row.updatedAt);
     expect(_mcpClientCacheSize(), 'honest: nothing dropped it — the invalidator is process-local').toBe(1);
     await client('ada').listTools(PROVIDER);

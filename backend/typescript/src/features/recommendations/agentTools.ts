@@ -2,7 +2,7 @@
  * CFP-1 (CHAT-FIRST-PORT-AUDIT #1, unit E8 / MERCH-A) — the Merchandiser's REAL
  * conversational tools.
  *
- * The `feature.recommendations.agents` pack allowlisted node typeIds no provider
+ * The `vendor.openwop-app.recommendations.agents` pack allowlisted node typeIds no provider
  * projects into chat, so every tool was silently dropped at dispatch (a toothless
  * persona). These `registerFeatureAgentTool` builtins register one wrapper per
  * capability over the SAME service fns the REST routes call
@@ -76,6 +76,7 @@ function fromServiceError(e: unknown): { content: string; isError: true } {
 export function registerRecommendationsAgentTools(): void {
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: RECOMMENDATIONS_RESOLVE_TOOL_ID,
       description:
@@ -126,6 +127,7 @@ export function registerRecommendationsAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: RECOMMENDATIONS_LIST_PLACEMENTS_TOOL_ID,
       description:
@@ -154,6 +156,7 @@ export function registerRecommendationsAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: RECOMMENDATIONS_CREATE_PLACEMENT_TOOL_ID,
       description:

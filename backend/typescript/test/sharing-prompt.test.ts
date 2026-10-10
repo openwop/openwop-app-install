@@ -1,5 +1,15 @@
 /**
- * ADR 0116 Phase 2b — shareable prompt (sharing `prompt` resolver).
+ * ADR 0116 Phase 2b — shareable prompt (sharing `prompt` resolver), plus the
+ * SHWF-1 / ADR 0644 D1 mint-entitlement witness.
+ *
+ * Guards: the resolver serves the prompt's NAME and its `resolvePromptRef` BODY
+ * (and the card title); `validate` refuses to mint another member's PRIVATE
+ * prompt via `promptReadableBy`, with the MINTER threaded in as `caller.subject`;
+ * a missing prompt is a 404 at mint.
+ *
+ * Sabotage-witnessed (w7 /grade-tests): body forced to '' · card title replaced
+ * · the `promptReadableBy` refusal removed · `createLink` passing a different
+ * subject than the actor to `validate`.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { mkdtempSync } from 'node:fs';
@@ -9,9 +19,6 @@ import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
 import { createOrg } from '../src/host/accessControlService.js';
-import { saveConfig } from '../src/host/featureToggles/service.js';
-import { registerToggleDefault } from '../src/host/featureToggles/registry.js';
-import { sharingFeature } from '../src/features/sharing/feature.js';
 import { createLink, resolveShared, resolveSharedCard } from '../src/features/sharing/sharingService.js';
 import { createEntry } from '../src/features/prompts/promptLibraryService.js';
 import { createUserTemplate } from '../src/host/promptStore.js';
@@ -22,10 +29,8 @@ const ORG = 'org-shp';
 beforeAll(async () => {
   initInMemorySurfaces({ dataDir: mkdtempSync(join(tmpdir(), 'openwop-shareprompt-')) });
   initHostExtPersistence(await openStorage('memory://'));
-  if (sharingFeature.toggleDefault) {
-    registerToggleDefault(sharingFeature.toggleDefault);
-    await saveConfig({ ...sharingFeature.toggleDefault, status: 'on' }, 'test');
-  }
+  // No toggle setup: `sharing` is always-on (ADR 0434) and `prompts` declares no
+  // toggle, so the prompt resolver's `toggleId` is null (SHARE-1).
   await createOrg({ tenantId: T, createdBy: 'u1', name: 'Org', orgId: ORG });
   createUserTemplate({ templateId: 'tpl-shared', version: '1.0.0', kind: 'user', text: 'Summarize {{topic}} crisply', name: 'tpl-shared' });
 });

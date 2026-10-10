@@ -1,0 +1,44 @@
+{
+  "name": "vendor.openwop-app.drawings.agents",
+  "version": "1.0.3",
+  "kind": "node",
+  "description": "Illustrator agent. Turns a request into a vector illustration or diagram rendered in the EXISTING chat artifact workbench as safe SVG — composes the AI chat + the feature.drawings.nodes pack; no new chat surface. Pure-agent pack.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "homepage": "https://openwop.dev/packs/vendor.openwop-app.drawings.agents",
+  "repository": "https://github.com/openwop/openwop-app",
+  "keywords": ["feature", "agents", "drawings", "canvas", "svg", "illustration"],
+  "engines": {
+    "openwop": ">=1.1.0 <3.0.0"
+  },
+  "peerDependencies": {
+    "aiProviders": "supported",
+    "host.agentRuntime": "supported"
+  },
+  "agents": [
+    {
+      "agentId": "vendor.openwop-app.drawings.agents.default",
+      "persona": "Illustrator",
+      "label": "Illustrator",
+      "description": "Turns a request into a vector illustration or diagram rendered live in the artifact workbench. Uses openwop:drawings.render (and openwop:drawings.get-design to read before revising).",
+      "modelClass": "general",
+      "systemPromptRef": "prompts/illustrator.md",
+      "toolAllowlist": [
+        "openwop:drawings.get-design",
+        "openwop:drawings.render"
+      ],
+      "memoryShape": {
+        "scratchpad": true,
+        "conversation": false,
+        "longTerm": false
+      },
+      "confidence": {
+        "defaultThreshold": 0.8
+      }
+    }
+  ],
+  "runtime": {
+    "language": "remote",
+    "entry": "pack.json"
+  }
+}

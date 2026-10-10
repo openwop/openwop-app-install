@@ -15,7 +15,7 @@ import { surfaceStr as str, surfaceOptStr as optStr, type FeatureSurface } from 
 // ADR 0655 D4 (EMWF-4 — the ANLWF-2 class): a missing `orgId` is a typed refusal, never
 // a coerced `''` that lists nobody's templates as success-with-empty.
 import { requireString } from '../featureRoute.js';
-import { listTemplates, getTemplate, renderTemplate, createTemplate, createCampaign } from './emailService.js';
+import { listTemplates, getTemplate, renderTemplate, createTemplate, createCampaign, draftRowId } from './emailService.js';
 import { CONTACT_STAGES, type ContactStage } from '../crm/contactsService.js';
 
 /** First non-empty string in a possibly-mixed array (subject-line variants). */
@@ -53,8 +53,11 @@ export function buildEmailSurface(scope: BundleScope): FeatureSurface {
         const position = Number.isInteger(e.position) ? (e.position as number) : idx + 1;
         const subject = firstStr(e.subjectLines) || `${name} ${position}`;
         const body = str(e.body);
-        const tpl = await createTemplate({ tenantId, orgId, name: `${name} · Email ${position}`, subject, body, createdBy, templateId: `tpl:${base}:email-${position}` });
-        const cmp = await createCampaign({ tenantId, orgId, templateId: tpl.templateId, createdBy, campaignId: `cmp:${base}:email-${position}`, ...(stage ? { stage } : {}), ...(sourceBriefId ? { sourceBriefId } : {}) });
+        // ADR 0848 D1 — tenant-qualified ids (the legacy id only when this workspace owns it).
+        const templateId = await draftRowId('template', tenantId, orgId, 'tpl:', `${base}:email-${position}`);
+        const campaignId = await draftRowId('campaign', tenantId, orgId, 'cmp:', `${base}:email-${position}`);
+        const tpl = await createTemplate({ tenantId, orgId, name: `${name} · Email ${position}`, subject, body, createdBy, templateId });
+        const cmp = await createCampaign({ tenantId, orgId, templateId: tpl.templateId, createdBy, campaignId, ...(stage ? { stage } : {}), ...(sourceBriefId ? { sourceBriefId } : {}) });
         templateIds.push(tpl.templateId);
         campaignIds.push(cmp.campaignId);
       }

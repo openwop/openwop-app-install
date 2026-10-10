@@ -119,6 +119,29 @@ describe('classifyDispatchError — AiProviderError codes', () => {
   });
 });
 
+describe('classifyDispatchError — provider_policy_denied keeps its reason', () => {
+  // Every policy refusal carries one wire code; the guidance follows `reason`.
+  const denied = (reason?: string) =>
+    classifyDispatchError(new AiProviderError('provider_policy_denied', 'denied', reason ? { reason } : {}));
+
+  it('reason byok_required → auth / reconfigure (BYOK guidance)', () => {
+    expect(denied('byok_required')).toMatchObject({ category: 'auth', action: 'reconfigure' });
+    expect(denied('byok_required_but_unresolved')).toMatchObject({ category: 'auth' });
+    expect(denied('byok_required').userMessage).toMatch(/API key/);
+  });
+
+  it('reason model_not_allowed → config / reconfigure (pick another model)', () => {
+    const r = denied('model_not_allowed');
+    expect(r).toMatchObject({ category: 'config', action: 'reconfigure' });
+    expect(r.userMessage).toMatch(/model/);
+  });
+
+  it('reason provider_disabled (or none) → the generic policy message', () => {
+    expect(denied('provider_disabled').userMessage).toMatch(/denies this provider/);
+    expect(denied().userMessage).toMatch(/denies this provider/);
+  });
+});
+
 describe('classifyDispatchError — raw Error fallbacks', () => {
   it('raw <provider>_<status>: preamble — no AiProviderError wrap', () => {
     const r = classifyDispatchError(new Error('anthropic_429: Too many'));

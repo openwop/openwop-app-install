@@ -80,7 +80,7 @@ async function main(): Promise<void> {
 
   if (args.provision && !args.dryRun) {
     const p = await provisionDemoFeatures(tenantId, 'cli:seed-tenant');
-    process.stdout.write(`provisioned: enabled ${p.enabled.length}, already-on ${p.alreadyOn.length}, unknown ${p.unknown.length}\n`);
+    process.stdout.write(`provisioned: enabled ${p.enabled.length}, already-on ${p.alreadyOn.length}, killed ${p.killed.length}, plan-blocked ${p.planBlocked.length}, unknown ${p.unknown.length}\n`);
   }
 
   const result = await runExampleDataSeed(tenantId, storage, {

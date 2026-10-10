@@ -58,3 +58,40 @@ describe('ADR 0729 D1 — the submit gate', () => {
     expect(h.blocking(), 'switching to Edit-as-JSON is leaving the typed form on purpose').toBe(false);
   });
 });
+
+describe('ADR 0772 (RRUX-2) — what the form shows is what it sends', () => {
+  const withDefault = {
+    type: 'object',
+    properties: {
+      mode: { type: 'string', enum: ['fast', 'careful'], default: 'careful', title: 'Mode' },
+      note: { type: 'string', title: 'Note' },
+    },
+    required: ['mode'],
+  } as const;
+
+  it('a schema default the form displays is written into the raw payload submit posts', () => {
+    const writes: string[] = [];
+    render(<SchemaInputForm schema={withDefault as never} raw="{}" onRawChange={(r) => writes.push(r)} />);
+    expect(writes.length, 'the default must reach the payload, not just the screen').toBeGreaterThan(0);
+    expect(JSON.parse(writes[writes.length - 1]!)).toEqual({ mode: 'careful' });
+  });
+
+  it('a value the user already chose is never overwritten by the default', () => {
+    const writes: string[] = [];
+    render(<SchemaInputForm schema={withDefault as never} raw={JSON.stringify({ mode: 'fast' })} onRawChange={(r) => writes.push(r)} />);
+    // Either no write at all, or a write that keeps the user's value.
+    for (const w of writes) expect(JSON.parse(w)).toEqual({ mode: 'fast' });
+  });
+
+  it('keys the schema does not declare are KEPT — the JSON escape hatch may carry them', () => {
+    const writes: string[] = [];
+    render(<SchemaInputForm schema={withDefault as never} raw={JSON.stringify({ text: 'hello world' })} onRawChange={(r) => writes.push(r)} />);
+    expect(JSON.parse(writes[writes.length - 1]!)).toEqual({ text: 'hello world', mode: 'careful' });
+  });
+
+  it('text that does not parse (typed before the schema loaded) is never overwritten', () => {
+    const writes: string[] = [];
+    render(<SchemaInputForm schema={withDefault as never} raw={'{"mode": "fa'} onRawChange={(r) => writes.push(r)} />);
+    expect(writes).toEqual([]);
+  });
+});

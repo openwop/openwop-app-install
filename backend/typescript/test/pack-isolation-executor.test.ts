@@ -30,6 +30,7 @@ import { loadPackFromManifest } from '../src/packs/tarballLoader.js';
 import { getNodeRegistry } from '../src/executor/nodeRegistry.js';
 import { snapshotRunVariables } from '../src/host/variablesRuntime.js';
 import { __resetPackTrustCachesForTests } from '../src/host/packTrust.js';
+import { bareRunId } from './support/bareRunId.js';
 
 const PACK_NAME = 'community.test.isoe2e';
 const ECHO = `${PACK_NAME}.echo`;
@@ -53,23 +54,25 @@ async function settle(runId: string): Promise<string> {
   let status = 'pending';
   for (let i = 0; i < 160; i++) {
     await new Promise((r) => setTimeout(r, 25));
-    status = (await api<{ status: string }>(`/v1/runs/${runId}`)).body.status;
+    status = (await api<{ status: string }>(`/runs/${runId}`)).body.status;
     if (status.startsWith('waiting') || ['completed', 'failed', 'cancelled'].includes(status)) break;
   }
   return status;
 }
 
+// The HOST representation (debug bundle): host error codes keep their bare spelling
+// here, unlike the major-2 poll, which namespaces them (`openwop-app.<code>`).
 async function events(runId: string): Promise<RunEvent[]> {
-  return (await api<{ events?: RunEvent[] }>(`/v1/runs/${runId}/debug-bundle`)).body.events ?? [];
+  return (await api<{ events?: RunEvent[] }>(`/host/openwop-app/runs/${bareRunId(runId)}/debug-bundle`)).body.events ?? [];
 }
 
 /** Register a one-node workflow, run it, and wait for it to settle. */
 async function runNode(workflowId: string, typeId: string, inputs: Record<string, unknown> = {}) {
-  await api('/v1/host/openwop-app/workflows', {
+  await api('/host/openwop-app/workflows', {
     method: 'POST',
     body: JSON.stringify({ workflowId, nodes: [{ nodeId: 'n1', typeId }], edges: [] }),
   });
-  const create = await api<{ runId: string }>('/v1/runs', {
+  const create = await api<{ runId: string }>('/runs', {
     method: 'POST',
     body: JSON.stringify({ workflowId, inputs, tenantId: '_anon' }),
   });
@@ -192,7 +195,7 @@ describe('success, both placements', () => {
     // `variables.get` saw the pack's own `set` synchronously inside the worker…
     expect(outputs?.marker).toBe('set-by-pack');
     // …and the write-behind was applied host-side on the result CAS.
-    expect(snapshotRunVariables(runId)?.iso_marker).toBe('set-by-pack');
+    expect(snapshotRunVariables(bareRunId(runId))?.iso_marker).toBe('set-by-pack');
   }, 30_000);
 
   it('IN-PROCESS: identical behaviour, except `trustBoundary` is the run\'s own', async () => {
@@ -203,7 +206,7 @@ describe('success, both placements', () => {
     const outputs = log.find((e) => e.type === 'node.completed')?.payload?.outputs as Record<string, unknown> | undefined;
     expect(outputs?.tenant).toBe('_anon');
     expect(outputs?.trust).toBe('trusted');
-    expect(snapshotRunVariables(runId)?.iso_marker).toBe('set-by-pack');
+    expect(snapshotRunVariables(bareRunId(runId))?.iso_marker).toBe('set-by-pack');
   }, 30_000);
 });
 
@@ -232,7 +235,7 @@ describe('suspend/resume, both placements', () => {
     // A `suspended` RESULT ARM, not an error: the run PAUSES rather than fails.
     expect(status.startsWith('waiting'), `expected a waiting-* status, got '${status}'`).toBe(true);
 
-    const resolve = await api(`/v1/runs/${runId}/interrupts/n1`, {
+    const resolve = await api(`/runs/${runId}/interrupts/n1`, {
       method: 'POST',
       body: JSON.stringify({ resumeValue: { approved: true } }),
     });

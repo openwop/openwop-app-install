@@ -14,6 +14,7 @@
  *  - CO-SP-12: kernel-less briefs are listed but not selectable.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+vi.mock('../CampaignLedgerSection.js', () => ({ CampaignLedgerSection: () => null })); // own tests: campaignLedgerSection.test.tsx
 import { render, screen, cleanup, fireEvent, act, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import type { AdDispatch, BriefRef, MarketingCampaign, OrgRef } from '../campaignStudioClient.js';

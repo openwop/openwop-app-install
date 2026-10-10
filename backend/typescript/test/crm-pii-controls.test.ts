@@ -19,6 +19,13 @@
  *
  * Both polarities are asserted in each case: the control must FIRE, and it must
  * not fire when it should not.
+ *
+ * Sabotage-witnessed (grade-tests w4): the purger's raw `store.delete` (both
+ * CRM-3 halves), the classification gate, the strict `<` cutoff, the
+ * `'unreadable'` outcome, and a swallowing `.catch` on the primitive each turn
+ * a case red. Stated double guard: another tenant's suppression is held both by
+ * the tenant-prefixed KEY and by the row-tenant check, so breaking one alone
+ * stays green.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -66,7 +73,7 @@ describe('CRM-3 — the retention purger goes through deleteContact', () => {
     const results = await purgeRetained(T, 'confidential-pii', FUTURE);
     const crm = results.find((r) => r.feature === 'crm');
     expect(crm, 'the crm purger must be registered').toBeTruthy();
-    expect(crm!.deleted, 'the contact row itself is purged').toBeGreaterThanOrEqual(1);
+    expect(crm!.deleted, 'the contact row itself is purged (the only row — the store resets per case)').toBe(1);
 
     // THE assertion. Before the fix these still resolved: the purger deleted the
     // contact row and left the identifier index — whose key IS the address —
@@ -113,10 +120,11 @@ describe('CRM-3 — the retention purger goes through deleteContact', () => {
 });
 
 describe('CRM-4 — a suppression check that cannot read its store refuses the send', () => {
+  /** The real storage while a case has swapped in the broken one. */
+  let realStorage: Storage | undefined;
   afterEach(async () => {
     // Restore the real storage before clearing, or the clear itself would throw.
-    const real = (globalThis as { __crmRealStorage?: Storage }).__crmRealStorage;
-    if (real) { initHostExtPersistence(real); delete (globalThis as { __crmRealStorage?: Storage }).__crmRealStorage; }
+    if (realStorage) { initHostExtPersistence(realStorage); realStorage = undefined; }
     await __clearSuppressions();
   });
 
@@ -125,7 +133,7 @@ describe('CRM-4 — a suppression check that cannot read its store refuses the s
   function breakSuppressionReads(): void {
     const real = __hostExtStorage();
     if (!real) throw new Error('host-ext storage must be initialized');
-    (globalThis as { __crmRealStorage?: Storage }).__crmRealStorage = real;
+    realStorage = real;
     const broken: Storage = new Proxy(real, {
       get(target, prop, receiver) {
         if (prop === 'kvGet') {

@@ -14,17 +14,25 @@
  * These cases assert the migration's DISCRIMINATION, not that it runs. The decoy is
  * the point: a legitimately home-tenanted row must not move, or a repair for one
  * partition becomes a cross-tenant write into another.
+ *
+ * Sabotage-witnessed (grade-tests w4): dropping the "org is the row's own
+ * tenant" (decoy), `ws:` one-direction, org-missing, no-orgId and fresh-install
+ * guards, and dropping the NEW-slice marker write each turn a case red.
+ * Stated double guard: removing the OLD-slice marker delete stays green, because
+ * `listForTenantIndexed` also re-checks each row's tenant (ADR 0848 M2) — see
+ * the second case.
+ *
+ * Cost: the migration takes a `Storage` and reads raw KV, so this file opens a
+ * memory store directly instead of booting the app.
  */
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import http from 'node:http';
-import { createApp } from '../src/index.js';
-import { __hostExtStorage, DurableCollection } from '../src/host/hostExtPersistence.js';
+import { afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { DurableCollection, initHostExtPersistence } from '../src/host/hostExtPersistence.js';
+import { openStorage } from '../src/storage/index.js';
 import type { Storage } from '../src/storage/storage.js';
 import { retenantMisfiledCrmRows } from '../src/features/crm/orgScopeRetenant.js';
 
 const HOME = 'user:home-of-the-caller';
 const WS = 'ws:the-shared-workspace';
-let server: http.Server;
 let storage: Storage;
 
 /** Minimal shapes — the migration is namespace-driven and reads only
@@ -36,13 +44,9 @@ const orgs = new DurableCollection<OrgRow>('access-orgs', (o) => o.orgId, undefi
 const tasks = new DurableCollection<TaskRow>('crm:task', (t) => t.taskId, undefined, (t) => t.tenantId);
 
 beforeAll(async () => {
-  process.env.OPENWOP_STORAGE_DSN = 'memory://';
-  process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
-  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => res()); });
-  storage = __hostExtStorage()!;
+  storage = await openStorage('memory://');
+  initHostExtPersistence(storage);
 });
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 afterEach(async () => { await tasks.__clear(); await orgs.__clear(); });
 
 async function seedOrgs(): Promise<{ wsOrg: string; homeOrg: string }> {
@@ -66,16 +70,21 @@ describe('B3 — re-tenanting the misfiled CRM rows', () => {
     expect((await tasks.get('task:misfiled'))!.tenantId, 'the misfiled row moves to its org\'s owner').toBe(WS);
     expect((await tasks.get('task:legit'))!.tenantId, 'the decoy must NOT move — its org is genuinely its own').toBe(HOME);
     expect(r.rewritten).toBe(1);
-    expect(r.skippedCorrect).toBeGreaterThanOrEqual(1);
+    expect(r.skippedCorrect, 'exactly the decoy is adjudicated correct').toBe(1);
     expect(r.byNamespace['crm:task']).toBe(1);
     expect(r.failed).toBe(0);
   });
 
   it('the moved row becomes reachable in the WORKSPACE and unreachable in the home tenant', async () => {
-    // The whole point: a value-only rewrite that left the old `hostextidx:` marker
-    // behind would keep the home tenant reading the row through a stale marker —
-    // the defect surviving its own repair. `listForTenantIndexed` does NOT re-filter
-    // on the row's tenant, so this is a real hazard, not a hypothetical one.
+    // A value-only rewrite that left no NEW marker would hide the row from the
+    // workspace (asserted first). The old home-slice marker is removed by the
+    // migration too, but that half is DEFENSE IN DEPTH, not the sole witness:
+    // since ADR 0848 M2 `listForTenantIndexed` re-checks each row's tenant and
+    // drops a foreign row (and its stale marker) on read — so the "unreachable in
+    // the home tenant" assertion holds even with the migration's marker delete
+    // removed (probe w4g2-rt-marker-delete, a recorded double guard). (This
+    // comment used to say `listForTenantIndexed` does NOT re-filter — stale since
+    // ADR 0848.)
     const { wsOrg } = await seedOrgs();
     await tasks.put({ taskId: 'task:misfiled', tenantId: HOME, orgId: wsOrg, title: 'x' });
     expect((await tasks.listForTenantIndexed(HOME)).map((t) => t.taskId), 'precondition').toContain('task:misfiled');
@@ -145,7 +154,7 @@ describe('B3 — re-tenanting the misfiled CRM rows', () => {
     await contacts.put({ contactId: 'ct:1', tenantId: HOME, name: 'Ada' });
     const r = await retenantMisfiledCrmRows(storage);
     expect((await contacts.get('ct:1'))!.tenantId).toBe(HOME);
-    expect(r.skippedNoOrg).toBeGreaterThanOrEqual(1);
+    expect(r.skippedNoOrg, 'exactly the one tenant-scoped contact row').toBe(1);
     expect(r.rewritten).toBe(0);
     await contacts.__clear();
   });

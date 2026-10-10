@@ -2,12 +2,18 @@
  * CFP-1 (CHAT-FIRST-PORT-AUDIT #1) — the CRM sales-ops + segment-author and CSM
  * health-insights personas' REAL chat tools.
  *
- * The contract under test: every id the `feature.crm.agents` / `feature.csm.agents`
+ * The contract under test: every id the `vendor.openwop-app.crm.agents` / `vendor.openwop-app.csm.agents`
  * packs allowlist is OFFERABLE by the live tool provider (was silently dropped —
  * the personas ran with zero tools), and each tool is gated EXACTLY like its HTTP
  * route: toggle honesty, acting user (reads fail EMPTY, writes fail TYPED), and
  * the org RBAC predicate for the org-scoped CRM tools. Boots the REAL app (the
  * ADR 0308 D2 registration seam is what's under test).
+ *
+ * Sabotage-witnessed (w4 grade-tests): skipping `registerCrmAgentTools`, a read
+ * that errors instead of failing empty, a missing `org_required` / orgScope /
+ * toggle check, an untyped no-user write, an invalid segment draft reported as
+ * success, and each CSM leg (empty-without-user, CSMWF-1 scope, toggle) red
+ * their own case.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -29,6 +35,8 @@ import { CSM_HEALTH_READ_TOOL_ID } from '../src/features/csm/agentTools.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { createOrg } from '../src/host/accessControlService.js';
+import { listSegments } from '../src/features/crm/segmentsService.js';
+import { listActivities } from '../src/features/crm/entities/activities.js';
 
 const TENANT = 'default';
 const CRM_IDS = [
@@ -39,6 +47,8 @@ const CRM_IDS = [
 
 let server: http.Server;
 let orgId: string;
+// Restored in afterAll — `process.env` outlives this file inside its vitest worker.
+const priorDisableCookies = process.env.OPENWOP_AUTH_DISABLE_COOKIES;
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
@@ -48,7 +58,11 @@ beforeAll(async () => {
   const org = await createOrg({ tenantId: TENANT, createdBy: 'u-1', name: 'Acme', ownerSubject: 'u-1' });
   orgId = org.orgId;
 });
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
+afterAll(async () => {
+  await new Promise<void>((res) => server.close(() => res()));
+  if (priorDisableCookies === undefined) delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
+  else process.env.OPENWOP_AUTH_DISABLE_COOKIES = priorDisableCookies;
+});
 
 const setToggle = async (id: string, status: 'on' | 'off'): Promise<void> => {
   const d = getToggleDefault(id);
@@ -95,10 +109,13 @@ describe('CFP-1 — CRM sales-ops tools (org-scoped)', () => {
 
   it('toggle OFF ⇒ typed feature_disabled', async () => {
     await setToggle('crm', 'off');
-    const out = await provider({ actingUserId: 'u-1' }).executeTool({ name: CRM_LIST_COMPANIES_TOOL_ID, input: { orgId } });
-    expect(out.isError).toBe(true);
-    expect(parse(out).error).toBe('feature_disabled');
-    await setToggle('crm', 'on');
+    try {
+      const out = await provider({ actingUserId: 'u-1' }).executeTool({ name: CRM_LIST_COMPANIES_TOOL_ID, input: { orgId } });
+      expect(out.isError).toBe(true);
+      expect(parse(out).error).toBe('feature_disabled');
+    } finally {
+      await setToggle('crm', 'on'); // a red here must not cascade into the later cases
+    }
   });
 
   it('create-task WRITE fails TYPED (not empty) without an acting user', async () => {
@@ -115,6 +132,10 @@ describe('CFP-1 — CRM sales-ops tools (org-scoped)', () => {
     const act = await p.executeTool({ name: CRM_LOG_ACTIVITY_TOOL_ID, input: { orgId, kind: 'note', body: 'Called the buyer' } });
     expect(act.isError).toBeFalsy();
     expect(parse(act).success).toBe(true);
+    // …and both actually landed (a `success:true` over a dropped write would pass the lines above).
+    const tasks = await p.executeTool({ name: CRM_LIST_TASKS_TOOL_ID, input: { orgId } });
+    expect((parse(tasks).tasks as Array<{ title: string }>).map((t) => t.title)).toContain('Send proposal');
+    expect((await listActivities(TENANT, orgId)).map((a) => a.body)).toContain('Called the buyer');
   });
 });
 
@@ -122,6 +143,7 @@ describe('CFP-1 — CRM segment-author persist trio (tenant-scoped)', () => {
   beforeAll(async () => { await setToggle('crm', 'on'); });
 
   it('persist-segment refuses an invalid draft WITHOUT writing (closed-world gate)', async () => {
+    const before = (await listSegments(TENANT)).length;
     const out = await provider({ actingUserId: 'u-1', runId: 'r-seg' }).executeTool({
       name: CRM_PERSIST_SEGMENT_TOOL_ID,
       input: { name: 'Bad', filters: [{ field: 'not_a_real_field', op: 'eq', value: 'x' }] },
@@ -129,6 +151,7 @@ describe('CFP-1 — CRM segment-author persist trio (tenant-scoped)', () => {
     expect(out.isError).toBe(true);
     expect(parse(out).success).toBe(false);
     expect(Array.isArray(parse(out).errors)).toBe(true);
+    expect((await listSegments(TENANT)).length, 'the refused draft wrote nothing').toBe(before);
   });
 
   it('persist-segment saves a valid draft, then list-segment-members previews it', async () => {
@@ -182,9 +205,12 @@ describe('CFP-1 — CSM health-insights read tool (tenant-scoped)', () => {
 
   it('toggle OFF ⇒ typed feature_disabled', async () => {
     await setToggle('csm', 'off');
-    const out = await provider({ actingUserId: 'u-1' }).executeTool({ name: CSM_HEALTH_READ_TOOL_ID, input: {} });
-    expect(out.isError).toBe(true);
-    expect(parse(out).error).toBe('feature_disabled');
-    await setToggle('csm', 'on');
+    try {
+      const out = await provider({ actingUserId: 'u-1' }).executeTool({ name: CSM_HEALTH_READ_TOOL_ID, input: {} });
+      expect(out.isError).toBe(true);
+      expect(parse(out).error).toBe('feature_disabled');
+    } finally {
+      await setToggle('csm', 'on');
+    }
   });
 });

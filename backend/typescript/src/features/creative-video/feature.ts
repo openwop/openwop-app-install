@@ -19,13 +19,13 @@ export const creativeVideoFeature: BackendFeature = {
   id: 'creative-video',
   registerRoutes: (deps) => { registerVideoMediaCascade(); registerCreativeVideoRoutes(deps); },
   surface: { id: 'creative-video', build: buildCreativeVideoSurface },
-  requiredPacks: [{ name: 'feature.creative-video.nodes', version: '1.1.0' }],
+  requiredPacks: [{ name: 'feature.creative-video.nodes', version: '1.1.1' }],
   recommends: ['media', 'connections'],
   toggleDefault: {
     id: 'creative-video',
     label: 'AI Video',
     description:
-      'Generate avatar videos from a script or brief through an AI video provider (HeyGen-class) — the job runs async, the result lands as a provenance-stamped asset in your media library, and it composes into workflows and the chat. Cost-metered (the most expensive media kind) and OFF by default; connect the provider under Connections.',
+      'Generate avatar videos from a script or brief through an AI video provider (HeyGen-class) — the job runs async, the result lands as a provenance-stamped asset in your media library, and it composes into workflows and the chat. Cost-metered (the most expensive media kind); connect the provider under Connections.',
     category: 'Canvas',
     status: 'off',
     bucketUnit: 'tenant',
@@ -40,7 +40,7 @@ export const creativeVideoFeature: BackendFeature = {
       id: 'creative-video.t2v',
       label: 'Text-to-video (frontier)',
       description:
-        'Generate video directly from a text prompt with a frontier text-to-video model (Runway/Veo/Sora-class), through a governed provider connection. A sub-capability of AI Video: requires AI Video to be on as well. The most expensive generation — metered at a heavier weight against your daily video budget — so it is OFF by default. Connect the provider under Connections.',
+        'Generate video directly from a text prompt with a frontier text-to-video model (Runway/Veo/Sora-class), through a governed provider connection. A sub-capability of AI Video: requires AI Video to be on as well. The most expensive generation — metered at a heavier weight against your daily video budget. Connect the provider under Connections.',
       category: 'Canvas',
       status: 'off',
       bucketUnit: 'tenant',

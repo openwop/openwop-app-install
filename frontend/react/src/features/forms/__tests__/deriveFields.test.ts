@@ -3,6 +3,10 @@
  * mapping feeds the ONE ADR 0197 validation engine. Pins the kind mapping
  * (textarea validates as text — the recorded adaptation), required/email/enum
  * semantics matching the server's `validateValues`, and checkbox tolerance.
+ * Sabotages that redden it (grade-tests wave 8): mapping textarea off `text`,
+ * dropping the select options, the F1 number coercion, the F9 min/step/epsilon
+ * mirror, the per-field constraint fallback, and a required-only consent rule
+ * that judges optional checkboxes too.
  */
 import { describe, it, expect } from 'vitest';
 import { toDerivedFields, validatePublicValues, validatePublicField, type PublicFormField } from '../render/deriveFields.js';
@@ -34,6 +38,12 @@ describe('validatePublicValues', () => {
     expect(byName.email).toBe('errEmail');
     expect(byName.topic).toBe('errEnum');
   });
+
+  it('an optional checkbox may be false or absent (checkbox tolerance)', () => {
+    const rest = { name: 'A', email: 'a@x.com', topic: 'A' };
+    expect(validatePublicValues(FIELDS, { ...rest, agree: false })).toEqual([]);
+    expect(validatePublicValues(FIELDS, rest)).toEqual([]);
+  });
 });
 
 describe('F9 (round 3) — the client constraint mirror', () => {
@@ -54,6 +64,13 @@ describe('F9 (round 3) — the client constraint mirror', () => {
 
   it('an unconstrained number field never gains a constraint error (negative control)', () => {
     expect(validatePublicValues(numField(), { n: '-999999' })).toEqual([]);
+  });
+
+  it('a non-numeric string fails as errNumber (the coercion is judgement-only)', () => {
+    // Moved here from publicFormUpgrade.test.tsx (wave 8): through a real
+    // <input type="number"> a non-numeric answer arrives as '' and only the
+    // REQUIRED rule ever fired. The coercion must not turn 'two' into a number.
+    expect(validatePublicValues(numField(), { n: 'two' })).toEqual([{ name: 'n', key: 'errNumber' }]);
   });
 
   it('per-field revalidation carries the same mirror (the touched-field path)', () => {

@@ -4,6 +4,7 @@
  */
 export const messages = {
   openTitle: 'Escopo de ferramentas para esta conversa',
+  chipLabel: 'Acesso a ferramentas',
   heading: 'Escopo de ferramentas da conversa',
   blurb: 'Controle quais ferramentas do agente ele pode usar nesta conversa e quais exigem sua aprovação primeiro. Apenas restringe — nunca concede ferramentas além das permissões do agente.',
   pendingHeading: 'Aprovações pendentes',
@@ -28,4 +29,16 @@ export const messages = {
   loadFailed: 'Falha ao carregar o escopo de ferramentas.',
   decisionFailed: 'Falha ao registrar sua decisão.',
   saveFailed: 'Falha ao salvar o escopo de ferramentas.',
+  pendingChip_one: '{{count}} ação aguardando aprovação',
+  pendingChip_other: '{{count}} ações aguardando aprovação',
+  pendingChipAria: 'Revise as ações do agente que aguardam sua aprovação',
+  requestedWith: 'Solicitado com',
+  noArguments: 'Sem argumentos.',
+  grainNote: 'Aprovar libera esta ferramenta pelo resto da conversa, com os argumentos que o agente usar em seguida — não só a solicitação mostrada aqui.',
+  notOwnerNote: 'Só quem é dono da conversa pode aprovar.',
+  approvalChanged: 'Esta solicitação mudou ou já foi decidida. Revise novamente.',
+  approvedContinueHint: 'Aprovado. Peça ao agente para tentar de novo.',
+  continue: 'Continuar',
+  continueMessage: 'Aprovado — pode seguir.',
+  scopeReadOnlyNote: 'Só quem é dono da conversa pode mudar quais ferramentas o agente pode usar aqui.',
 };

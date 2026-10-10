@@ -6,7 +6,7 @@
  *      move-trigger logic — a move INTO a column that names a workflow
  *      returns a trigger directive; a same-column move does not; a
  *      card-level `workflowId` overrides the column default.
- *   2. The REST routes (`/v1/host/openwop-app/kanban/*`) against the sqlite
+ *   2. The REST routes (`/host/openwop-app/kanban/*`) against the sqlite
  *      memory backend: create board → add card → move card into the
  *      trigger column → a run is started (`triggeredRunId` returned) —
  *      plus tenant-scoped 404 on a foreign board.
@@ -342,8 +342,12 @@ describe('kanban routes (sqlite memory app)', () => {
   }
 
   it('advertises host.kanban in the discovery document', async () => {
-    const { body } = await jsonFetch<{ kanban?: { supported?: boolean } }>('/.well-known/openwop');
-    expect(body.kanban?.supported).toBe(true);
+    // ADR 0812 P3c-0 — v2 spelling: the root `kanban` record was v1-only; v2 carries
+    // the surface in the vendor `host-surfaces` extension.
+    type Surfaces = { extensions?: Record<string, { surfaces?: Array<{ name: string; supported?: boolean }> }> };
+    const { body } = await jsonFetch<Surfaces>('/.well-known/openwop', { headers: { 'OpenWOP-Version': '2' } });
+    const surfaces = body.extensions?.['openwop-app.host-surfaces']?.surfaces ?? [];
+    expect(surfaces.find((x) => x.name === 'host.kanban')?.supported).toBe(true);
   });
 
   it('round-trips board + card CRUD and starts a run on a trigger-column move', async () => {
@@ -355,19 +359,19 @@ describe('kanban routes (sqlite memory app)', () => {
 
     // Create a board whose To Do column fires that workflow.
     const created = await jsonFetch<{ id: string; columns: { id: string }[] }>(
-      '/v1/host/openwop-app/kanban/boards',
+      '/host/openwop-app/kanban/boards',
       { method: 'POST', body: JSON.stringify({ name: 'Sally — Marketing', triggerWorkflowId }) },
     );
     expect(created.status).toBe(201);
     const boardId = created.body.id;
 
     // It shows up in the list.
-    const list = await jsonFetch<{ boards: { id: string }[] }>('/v1/host/openwop-app/kanban/boards');
+    const list = await jsonFetch<{ boards: { id: string }[] }>('/host/openwop-app/kanban/boards');
     expect(list.body.boards.some((b) => b.id === boardId)).toBe(true);
 
     // Add a card to Doing.
     const card = await jsonFetch<{ id: string; columnId: string }>(
-      `/v1/host/openwop-app/kanban/boards/${boardId}/cards`,
+      `/host/openwop-app/kanban/boards/${boardId}/cards`,
       { method: 'POST', body: JSON.stringify({ title: 'Spring campaign', columnId: 'doing' }) },
     );
     expect(card.status).toBe(201);
@@ -375,7 +379,7 @@ describe('kanban routes (sqlite memory app)', () => {
 
     // Move it INTO To Do → starts a run.
     const moved = await jsonFetch<{ card: { columnId: string }; triggeredRunId: string | null }>(
-      `/v1/host/openwop-app/kanban/cards/${card.body.id}`,
+      `/host/openwop-app/kanban/cards/${card.body.id}`,
       { method: 'PATCH', body: JSON.stringify({ columnId: 'todo' }) },
     );
     expect(moved.status).toBe(200);
@@ -384,15 +388,15 @@ describe('kanban routes (sqlite memory app)', () => {
     expect((moved.body.triggeredRunId ?? '').length).toBeGreaterThan(0);
 
     // Delete the card, then the board.
-    expect((await jsonFetch(`/v1/host/openwop-app/kanban/cards/${card.body.id}`, { method: 'DELETE' })).status).toBe(204);
-    expect((await jsonFetch(`/v1/host/openwop-app/kanban/boards/${boardId}`, { method: 'DELETE' })).status).toBe(204);
+    expect((await jsonFetch(`/host/openwop-app/kanban/cards/${card.body.id}`, { method: 'DELETE' })).status).toBe(204);
+    expect((await jsonFetch(`/host/openwop-app/kanban/boards/${boardId}`, { method: 'DELETE' })).status).toBe(204);
   });
 
   it('projects redacted reusable WorkItems and manually dispatches through the normal workflow run path', async () => {
     const disco = await jsonFetch<{ fixtures?: string[] }>('/.well-known/openwop');
     const workflowId = disco.body.fixtures?.[0];
     expect(typeof workflowId).toBe('string');
-    const created = await jsonFetch<{ id: string; tenantId: string }>('/v1/host/openwop-app/kanban/boards', {
+    const created = await jsonFetch<{ id: string; tenantId: string }>('/host/openwop-app/kanban/boards', {
       method: 'POST', body: JSON.stringify({ name: 'Canvas-neutral work' }),
     });
     expect(created.status).toBe(201);
@@ -419,7 +423,7 @@ describe('kanban routes (sqlite memory app)', () => {
         scope?: { externalRef?: unknown };
         source?: { id?: unknown; revision?: unknown };
       }>;
-    }>(`/v1/host/openwop-app/kanban/boards/${created.body.id}`);
+    }>(`/host/openwop-app/kanban/boards/${created.body.id}`);
     expect(detail.status).toBe(200);
     expect(detail.body.workItems).toContainEqual(expect.objectContaining({
       workItemId,
@@ -434,7 +438,7 @@ describe('kanban routes (sqlite memory app)', () => {
     expect(projected.execution).not.toHaveProperty('claimToken');
 
     const started = await jsonFetch<{ runId: string; workItem: { execution: { status: string; runId?: string } } }>(
-      `/v1/host/openwop-app/kanban/boards/${created.body.id}/work-items/${workItemId}/run`,
+      `/host/openwop-app/kanban/boards/${created.body.id}/work-items/${workItemId}/run`,
       { method: 'POST' },
     );
     expect(started.status).toBe(202);
@@ -444,26 +448,26 @@ describe('kanban routes (sqlite memory app)', () => {
 
     // A direct aggregate id cannot escape its board boundary, even to another
     // board owned by the same caller.
-    const otherBoard = await jsonFetch<{ id: string }>('/v1/host/openwop-app/kanban/boards', {
+    const otherBoard = await jsonFetch<{ id: string }>('/host/openwop-app/kanban/boards', {
       method: 'POST', body: JSON.stringify({ name: 'Other board' }),
     });
     expect((await jsonFetch(
-      `/v1/host/openwop-app/kanban/boards/${otherBoard.body.id}/work-items/${workItemId}/run`,
+      `/host/openwop-app/kanban/boards/${otherBoard.body.id}/work-items/${workItemId}/run`,
       { method: 'POST' },
     )).status).toBe(404);
     await new Promise<void>((resolve) => setImmediate(resolve));
   });
 
   it('rejects an invalid combined card edit without persisting its otherwise-valid fields', async () => {
-    const created = await jsonFetch<{ id: string }>('/v1/host/openwop-app/kanban/boards', {
+    const created = await jsonFetch<{ id: string }>('/host/openwop-app/kanban/boards', {
       method: 'POST', body: JSON.stringify({ name: 'Atomic card command' }),
     });
     const card = await jsonFetch<{ id: string; title: string }>(
-      `/v1/host/openwop-app/kanban/boards/${created.body.id}/cards`,
+      `/host/openwop-app/kanban/boards/${created.body.id}/cards`,
       { method: 'POST', body: JSON.stringify({ title: 'Original title', columnId: 'todo' }) },
     );
     const invalid = await jsonFetch(
-      `/v1/host/openwop-app/kanban/cards/${card.body.id}`,
+      `/host/openwop-app/kanban/cards/${card.body.id}`,
       { method: 'PATCH', body: JSON.stringify({ title: 'Do not persist', columnId: 'missing-column' }) },
     );
     expect(invalid.status).toBe(400);
@@ -471,7 +475,7 @@ describe('kanban routes (sqlite memory app)', () => {
   });
 
   it('validates required fields', async () => {
-    const bad = await jsonFetch('/v1/host/openwop-app/kanban/boards', {
+    const bad = await jsonFetch('/host/openwop-app/kanban/boards', {
       method: 'POST',
       body: JSON.stringify({}),
     });
@@ -479,23 +483,23 @@ describe('kanban routes (sqlite memory app)', () => {
   });
 
   it('404s an unknown board', async () => {
-    const res = await jsonFetch('/v1/host/openwop-app/kanban/boards/board-does-not-exist');
+    const res = await jsonFetch('/host/openwop-app/kanban/boards/board-does-not-exist');
     expect(res.status).toBe(404);
   });
 
   it('the board SSE events endpoint 404s an unknown board (before opening a stream)', async () => {
-    const res = await jsonFetch('/v1/host/openwop-app/kanban/boards/board-nope/events');
+    const res = await jsonFetch('/host/openwop-app/kanban/boards/board-nope/events');
     expect(res.status).toBe(404);
   });
 
   it('opens a text/event-stream for an owned board and pushes board.changed on a card create', async () => {
-    const created = await jsonFetch<{ id: string }>('/v1/host/openwop-app/kanban/boards', {
+    const created = await jsonFetch<{ id: string }>('/host/openwop-app/kanban/boards', {
       method: 'POST',
       body: JSON.stringify({ name: 'SSE board' }),
     });
     const boardId = created.body.id;
     const ac = new AbortController();
-    const res = await fetch(`${BASE}/v1/host/openwop-app/kanban/boards/${boardId}/events`, {
+    const res = await fetch(`${BASE}/host/openwop-app/kanban/boards/${boardId}/events`, {
       headers: { authorization: `Bearer ${TOKEN}`, accept: 'text/event-stream' },
       signal: ac.signal,
     });
@@ -504,7 +508,7 @@ describe('kanban routes (sqlite memory app)', () => {
     const reader = res.body!.getReader();
     const decoder = new TextDecoder();
     // Trigger a change, then read until we see the board.changed event.
-    await jsonFetch(`/v1/host/openwop-app/kanban/boards/${boardId}/cards`, {
+    await jsonFetch(`/host/openwop-app/kanban/boards/${boardId}/cards`, {
       method: 'POST',
       body: JSON.stringify({ title: 'live', columnId: 'todo' }),
     });

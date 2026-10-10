@@ -18,7 +18,7 @@ import { authorizeOrgScope, requireString, optionalString, publicBaseUrl } from 
 import { getUser } from '../users/usersService.js';
 import { checkEntitlement } from '../../host/entitlementSeam.js';
 import { createLogger } from '../../observability/logger.js';
-import { resolveOne } from '../../host/featureToggles/service.js';
+import { resolveToggle } from '../../host/featureToggles/service.js';
 import {
   listBookingLinks, getBookingLink, createBookingLink, updateBookingLink,
   getPublishedBookingLinkBySlug, type BookingLink,
@@ -26,12 +26,12 @@ import {
 import { listBookings, type Booking } from './entities/bookings.js';
 import {
   availableSlots, claimSlot, publicLinkView, manageView, resolveManagedBooking,
-  cancelBooking, rescheduleBooking, bookingEnabled, deleteBookingLinkCascade,
+  cancelBooking, rescheduleBooking, bookingEnabled, deleteBookingLinkCascade, assertBookingOwnerEligible,
 } from './bookingService.js';
 
 const FEATURE = { toggleId: 'crm', label: 'CRM' };
-const ORG = '/v1/host/openwop-app/crm/orgs/:orgId';
-const PUB = '/v1/host/openwop-app/public-book';
+const ORG = '/host/openwop-app/crm/orgs/:orgId';
+const PUB = '/host/openwop-app/public-book';
 const HONEYPOT = '_hp_ref';
 const log = createLogger('crm.booking.routes');
 
@@ -60,10 +60,12 @@ export function registerCrmBookingRoutes(deps: RouteDeps): void {
     try {
       const { user, orgId, tenantId } = await authz(req, 'workspace:write');
       const body = (req.body ?? {}) as Record<string, unknown>;
+      const ownerUserId = optionalString(body.ownerUserId) ?? user.userId;
+      await assertBookingOwnerEligible(tenantId, orgId, ownerUserId, user.userId); // ADR 0837 D6
       const link = await createBookingLink({
         tenantId,
         orgId,
-        ownerUserId: optionalString(body.ownerUserId) ?? user.userId,
+        ownerUserId,
         title: requireString(body.title, 'title'),
         description: body.description,
         ...(body.status !== undefined ? { status: body.status as BookingLink['status'] } : {}),
@@ -127,7 +129,8 @@ export function registerCrmBookingRoutes(deps: RouteDeps): void {
     if (!bookingEnabled()) return notFound();
     const link = await getPublishedBookingLinkBySlug(slug);
     if (!link) return notFound();
-    const assignment = await resolveOne(FEATURE.toggleId, { tenantId: link.tenantId });
+    // ADR 0819 §1 opt-out — a PUBLIC lane (tenant from the resource): ADR 0419 never paywalls a shopper/visitor on the operator's plan.
+    const assignment = await resolveToggle(FEATURE.toggleId, { tenantId: link.tenantId });
     if (!assignment || !assignment.enabled) return notFound();
     return link;
   };
@@ -143,7 +146,8 @@ export function registerCrmBookingRoutes(deps: RouteDeps): void {
     const { resourceId } = await resolveActiveResource(token, 'booking_manage');
     const resolved = await resolveManagedBooking(resourceId);
     if (!resolved) throw bookingNotFound();
-    const assignment = await resolveOne(FEATURE.toggleId, { tenantId: resolved.booking.tenantId });
+    // ADR 0819 §1 opt-out — a PUBLIC lane (tenant from the resource): ADR 0419 never paywalls a shopper/visitor on the operator's plan.
+    const assignment = await resolveToggle(FEATURE.toggleId, { tenantId: resolved.booking.tenantId });
     if (!assignment || !assignment.enabled) throw bookingNotFound();
     return { resourceId, booking: resolved.booking, link: resolved.link };
   };

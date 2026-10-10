@@ -21,7 +21,7 @@ beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
-  const r = await fetch(`${BASE}/v1/host/openwop-app/public/widget/embed.js`);
+  const r = await fetch(`${BASE}/host/openwop-app/public/widget/embed.js`);
   expect(r.status).toBe(200);
   expect(r.headers.get('content-type')).toContain('javascript');
   embed = await r.text();

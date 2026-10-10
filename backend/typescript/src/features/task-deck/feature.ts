@@ -2,7 +2,10 @@
  * Run/task deck (ADR 0133) — a read-only projection over runs + delegated sub-runs,
  * bucketed pending/running/blocked/delegated/completed/failed. No new store, no
  * tasks table ([[no-parallel-architecture]]); a task is a view of an existing run.
- * A `task-deck` toggle, off by default, per tenant.
+ *
+ * ALWAYS-ON (ADR 0820 §8.6 / core-audit M8 correction): the `task-deck` toggle this header
+ * used to describe was removed when the feature graduated (ADR 0134 / 2026-06-24);
+ * there is no per-tenant switch. Gating is RBAC and visibility only.
  *
  * @see docs/adr/0133-run-task-deck.md
  */

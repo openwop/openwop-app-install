@@ -4,7 +4,7 @@
 export const messages = {
   eyebrow: 'Desenvolvedor',
   title: 'Plugins de UI',
-  lede: 'Carregue pacotes de plugins de front-end assinados e isolados (RFC 0117/0119).',
+  lede: 'Carregue pacotes de plugins de front-end assinados e isolados.',
 
   notEnabledTitle: 'Plugins de UI não está habilitado',
   notEnabledBody: 'Peça a um administrador para habilitar Plugins de UI para este tenant.',

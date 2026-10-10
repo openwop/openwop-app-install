@@ -12,10 +12,10 @@ import { formatNumber } from '../../i18n/format.js';
 import { ArrowDownIcon, ArrowUpIcon, ImageIcon, PlusIcon, TrashIcon } from '../../ui/icons/index.js';
 import { handleTablistKeyDown } from '../../ui/rovingTabs.js';
 import { FIELD_NAME_RE, FIELDS_MAX_KEYS } from './fieldsSection.js';
-import { SECTION_TYPES, type MediaAssetRef, type Section, type SectionType, type SharedSection } from './cmsClient.js';
+import { SECTION_TYPES, type MediaAssetRef, type Section, type SectionType, type SharedSection, type TranslationStatus } from './cmsClient.js';
 
 /** Name a BCP-47 tag in the reader's language (endonym fallback to the tag). */
-function localeLabel(tag: string): string {
+export function localeLabel(tag: string): string {
   try {
     return new Intl.DisplayNames([tag], { type: 'language' }).of(tag) ?? tag;
   } catch {
@@ -23,7 +23,7 @@ function localeLabel(tag: string): string {
   }
 }
 
-function blankSection(type: SectionType): Section {
+export function blankSection(type: SectionType): Section {
   const data: Record<string, unknown> =
     type === 'hero' ? { heading: '' }
       : type === 'richText' ? { text: '' }
@@ -32,7 +32,8 @@ function blankSection(type: SectionType): Section {
             : type === 'productGrid' ? { heading: '', storeOrgId: '', productIds: [] }
               : type === 'entityList' ? { heading: '', tenantId: '', typeName: '', titleField: '' }
                 : type === 'entityDetail' ? { heading: '', tenantId: '', typeName: '', entityId: '', titleField: '' }
-                  : { columns: [{ text: '' }] };
+                  : type === 'video' ? { title: '', description: '', src: '', poster: '', length: '' }
+                    : { columns: [{ text: '' }] };
   return { sectionId: `new:${Math.random().toString(36).slice(2)}`, type, data };
 }
 
@@ -78,13 +79,26 @@ function MediaTokenField({ value, assets, onChange, label, onPickMedia }: {
   );
 }
 
+/** The serif display heading, with the `*emphasis*` hint (headingEmphasis.tsx). */
+function HeadingField({ d, set }: { d: Record<string, unknown>; set: (k: string, v: unknown) => void }): JSX.Element {
+  const { t } = useTranslation('cms');
+  const hintId = useId();
+  return (
+    <label className="u-grid u-gap-1">
+      <span className="u-label-sm">{t('headingLabel')}</span>
+      <input value={str(d.heading)} onChange={(e) => set('heading', e.target.value)} aria-describedby={hintId} />
+      <span id={hintId} className="u-label-sm muted">{t('headingEmphasisHint')}</span>
+    </label>
+  );
+}
+
 /** A mono "eyebrow" + serif "heading" shared by marketing-block sections. */
 function HeadFields({ d, set }: { d: Record<string, unknown>; set: (k: string, v: unknown) => void }): JSX.Element {
   const { t } = useTranslation('cms');
   return (
     <>
       <label className="u-grid u-gap-1"><span className="u-label-sm">{t('eyebrowLabel')}</span><input value={str(d.eyebrow)} onChange={(e) => set('eyebrow', e.target.value)} placeholder={t('eyebrowPlaceholder')} /></label>
-      <label className="u-grid u-gap-1"><span className="u-label-sm">{t('headingLabel')}</span><input value={str(d.heading)} onChange={(e) => set('heading', e.target.value)} /></label>
+      <HeadingField d={d} set={set} />
     </>
   );
 }
@@ -225,7 +239,7 @@ function SectionFieldsBody({ section, assets, onChange, onPickMedia, baseData }:
       return (
         <div className="u-grid u-gap-2">
           <label className="u-grid u-gap-1"><span className="u-label-sm">{t('heroEyebrowLabel')}</span><input value={str(d.eyebrow)} onChange={(e) => set('eyebrow', e.target.value)} placeholder={t('heroEyebrowPlaceholder')} /></label>
-          <label className="u-grid u-gap-1"><span className="u-label-sm">{t('headingLabel')}</span><input value={str(d.heading)} onChange={(e) => set('heading', e.target.value)} /></label>
+          <HeadingField d={d} set={set} />
           <label className="u-grid u-gap-1"><span className="u-label-sm">{t('heroSubheadingLabel')}</span><textarea rows={2} value={str(d.subheading)} onChange={(e) => set('subheading', e.target.value)} /></label>
           <label className="u-grid u-gap-1">
             <span className="u-label-sm">{t('heroVisualLabel')}</span>
@@ -233,6 +247,7 @@ function SectionFieldsBody({ section, assets, onChange, onPickMedia, baseData }:
               <option value="workflow">{t('heroVisualWorkflow')}</option>
               <option value="journey">{t('heroVisualJourney')}</option>
               <option value="run">{t('heroVisualRun')}</option>
+              <option value="film">{t('heroVisualFilm')}</option>
               <option value="image">{t('heroVisualImage')}</option>
               <option value="none">{t('heroVisualNone')}</option>
             </select>
@@ -288,6 +303,8 @@ function SectionFieldsBody({ section, assets, onChange, onPickMedia, baseData }:
               <option value="steps">{t('layoutSteps')}</option>
               <option value="rows">{t('layoutRows')}</option>
               <option value="stats">{t('layoutStats')}</option>
+              <option value="prompts">{t('layoutPrompts')}</option>
+              <option value="dives">{t('layoutDives')}</option>
             </select>
           </label>
           {cols.map((c, i) => (
@@ -378,6 +395,7 @@ function SectionFieldsBody({ section, assets, onChange, onPickMedia, baseData }:
             <input aria-label={t('pricingCtaLabelAria')} value={str(d.ctaLabel)} onChange={(e) => set('ctaLabel', e.target.value)} placeholder={t('pricingCtaLabelPlaceholder')} />
             <input aria-label={t('pricingCtaUrlAria')} value={str(d.ctaUrl)} onChange={(e) => set('ctaUrl', e.target.value)} placeholder={t('pricingCtaUrlPlaceholder')} />
           </div>
+          <input aria-label={t('pricingContactUrlAria')} value={str(d.contactUrl)} onChange={(e) => set('contactUrl', e.target.value)} placeholder={t('pricingContactUrlPlaceholder')} />
         </div>
       );
     }
@@ -424,9 +442,47 @@ function SectionFieldsBody({ section, assets, onChange, onPickMedia, baseData }:
         </div>
       );
     }
+    case 'video':
+      return <VideoSectionFields d={d} set={set} />;
     default:
       return <span className="u-label-sm">{t('unknownSection')}</span>;
   }
+}
+
+/** ADR 0843 — a `video` section: the film's URLs (https only — the server
+ *  refuses anything else on save), its title, play-button length and the
+ *  screen-reader description that also feeds the page's VideoObject. */
+function VideoSectionFields({ d, set }: { d: Record<string, unknown>; set: (k: string, v: unknown) => void }): JSX.Element {
+  const { t } = useTranslation('cms');
+  const urlHintId = useId();
+  const descHintId = useId();
+  const url = (k: 'src' | 'poster' | 'captions' | 'youtubeUrl', label: string, placeholder: string): JSX.Element => (
+    <label className="u-grid u-gap-1">
+      <span className="u-label-sm">{label}</span>
+      <input type="url" inputMode="url" value={str(d[k])} onChange={(e) => set(k, e.target.value)} placeholder={placeholder} aria-describedby={urlHintId} />
+    </label>
+  );
+  return (
+    <div className="u-grid u-gap-2">
+      <HeadFields d={d} set={set} />
+      <label className="u-grid u-gap-1"><span className="u-label-sm">{t('videoLedeLabel')}</span><input value={str(d.lede)} onChange={(e) => set('lede', e.target.value)} /></label>
+      <label className="u-grid u-gap-1"><span className="u-label-sm">{t('videoTitleLabel')}</span><input value={str(d.title)} onChange={(e) => set('title', e.target.value)} /></label>
+      {url('src', t('videoSrcLabel'), 'https://…/film.mp4')}
+      {url('poster', t('videoPosterLabel'), 'https://…/poster.jpg')}
+      {url('captions', t('videoCaptionsLabel'), 'https://…/film.en.vtt')}
+      {url('youtubeUrl', t('videoYoutubeLabel'), 'https://www.youtube.com/watch?v=…')}
+      <span id={urlHintId} className="u-label-sm muted">{t('videoUrlHint')}</span>
+      <div className="u-grid u-gap-1 u-grid-2">
+        <label className="u-grid u-gap-1"><span className="u-label-sm">{t('videoLengthLabel')}</span><input value={str(d.length)} onChange={(e) => set('length', e.target.value)} placeholder="1:57" /></label>
+        <label className="u-grid u-gap-1"><span className="u-label-sm">{t('videoUploadDateLabel')}</span><input type="date" value={str(d.uploadDate)} onChange={(e) => set('uploadDate', e.target.value)} /></label>
+      </div>
+      <label className="u-grid u-gap-1">
+        <span className="u-label-sm">{t('videoDescriptionLabel')}</span>
+        <textarea rows={4} value={str(d.description)} onChange={(e) => set('description', e.target.value)} aria-describedby={descHintId} />
+        <span id={descHintId} className="u-label-sm muted">{t('videoDescriptionHint')}</span>
+      </label>
+    </div>
+  );
 }
 
 /** The built-in billing tier keys (ADR 0176) offered as pricing-section
@@ -791,7 +847,7 @@ function EntityTermPicker({ termId, onTerm }: { termId: string; onTerm: (v: stri
  * each other tab edits the SPARSE `section.localizations[locale]` overlay. A
  * dot marks a locale that has authored content; the base tag marks the source.
  */
-function LocaleTabs({ section, base, locales, active, onPick, localeState }: {
+function LocaleTabs({ section, base, locales, active, onPick, localeState, status }: {
   section: Section;
   base: string;
   locales: string[];
@@ -800,6 +856,8 @@ function LocaleTabs({ section, base, locales, active, onPick, localeState }: {
   /** Per-locale publish state (ADR 0205 D2) — a withheld locale is marked ON
    *  the tab (CMSUX-1), not only in the active tab's overlay row. */
   localeState?: Record<string, 'draft' | 'published'> | undefined;
+  /** ADR 0861 D6 — this section's per-locale translation status (saved state). */
+  status?: Record<string, TranslationStatus> | undefined;
 }): JSX.Element {
   const { t } = useTranslation('cms');
   return (
@@ -812,6 +870,7 @@ function LocaleTabs({ section, base, locales, active, onPick, localeState }: {
         // ADR 0592 §3 — machine-drafted + not yet human-edited (withheld wins
         // the accessible-name arm; the visible AI tag still renders).
         const aiDraft = loc !== base && authored && !!section.aiDrafted?.[loc];
+        const outdated = loc !== base && authored && status?.[loc] === 'outdated';
         return (
           <button
             key={loc}
@@ -827,6 +886,8 @@ function LocaleTabs({ section, base, locales, active, onPick, localeState }: {
                 ? t('localeTabBase', { locale: localeLabel(loc) })
                 : withheld
                   ? t('localeTabWithheld', { locale: localeLabel(loc) })
+                  : outdated
+                    ? t('localeTabOutdated', { locale: localeLabel(loc) })
                   : aiDraft
                     ? t('localeTabAiDraft', { locale: localeLabel(loc) })
                     : authored ? t('localeTabTranslated', { locale: localeLabel(loc) }) : t('localeTabNotTranslated', { locale: localeLabel(loc) })
@@ -838,6 +899,7 @@ function LocaleTabs({ section, base, locales, active, onPick, localeState }: {
             {loc === base ? <span className="cms-loc-base">{t('localeBaseTag')}</span> : null}
             {withheld ? <span className="cms-loc-base">{t('localeWithheldTag')}</span> : null}
             {aiDraft ? <span className="cms-loc-base">{t('aiDraftTag')}</span> : null}
+            {outdated ? <span className="cms-loc-base">{t('localeOutdatedTag')}</span> : null}
             {authored ? <span className="cms-loc-dot" aria-hidden /> : null}
           </button>
         );
@@ -846,7 +908,45 @@ function LocaleTabs({ section, base, locales, active, onPick, localeState }: {
   );
 }
 
-export function SectionsEditor({ sections, assets, onChange, baseLocale = 'en', locales, onTranslate, onPickMedia, sharedSections, sharedFailed, onSaveShared, localeState, onSetLocaleState, focusRequest, translatorMode }: {
+/** The add-section picker: every section type, plus the org's shared sections
+ *  as inherit-by-reference inserts (ADR 0204 C4). Used by the section editor
+ *  and by the page workspace's section list. */
+export function AddSectionControl({ sharedSections, onAdd }: {
+  sharedSections?: SharedSection[] | undefined;
+  onAdd: (section: Section) => void;
+}): JSX.Element {
+  const { t } = useTranslation('cms');
+  return (
+    <select
+      aria-label={t('addSectionAria')}
+      defaultValue=""
+      className="u-w-auto"
+      onChange={(e) => {
+        const v = e.target.value;
+        e.target.value = '';
+        if (!v) return;
+        if (v.startsWith('shared:')) {
+          const sharedSectionId = v.slice('shared:'.length);
+          const shared = (sharedSections ?? []).find((sh) => sh.sharedSectionId === sharedSectionId);
+          if (!shared) return;
+          onAdd({ sectionId: `new:${Math.random().toString(36).slice(2)}`, type: shared.type, data: {}, ref: { sharedSectionId } });
+          return;
+        }
+        onAdd(blankSection(v as SectionType));
+      }}
+    >
+      <option value="">{t('addSectionPlaceholder')}</option>
+      {SECTION_TYPES.map((st) => <option key={st} value={st}>{t(`sectionType_${st}`, { defaultValue: st })}</option>)}
+      {(sharedSections ?? []).length > 0 ? (
+        <optgroup label={t('addSharedGroup')}>
+          {(sharedSections ?? []).map((sh) => <option key={sh.sharedSectionId} value={`shared:${sh.sharedSectionId}`}>{sh.name}</option>)}
+        </optgroup>
+      ) : null}
+    </select>
+  );
+}
+
+export function SectionsEditor({ sections, assets, onChange, baseLocale = 'en', locales, onTranslate, onPickMedia, sharedSections, sharedFailed, onSaveShared, localeState, onSetLocaleState, translationStatus, onConfirmSource, focusRequest, translatorMode, structureElsewhere = false }: {
   sections: Section[];
   assets: MediaAssetRef[];
   onChange: (sections: Section[]) => void;
@@ -877,20 +977,33 @@ export function SectionsEditor({ sections, assets, onChange, baseLocale = 'en', 
   localeState?: Record<string, 'draft' | 'published'>;
   /** Flip a locale live/withheld (admin — the server enforces authority). */
   onSetLocaleState?: (locale: string, state: 'published' | 'draft') => void;
+  /** ADR 0861 D6 — per-section, per-locale translation status of the SAVED page
+   *  (sectionId → locale → status). Absent ⇒ no status UI. */
+  translationStatus?: Record<string, Record<string, TranslationStatus>> | undefined;
+  /** ADR 0861 D6 — "Mark up to date": re-stamp an outdated overlay's source. */
+  onConfirmSource?: ((sectionId: string, locale: string) => Promise<boolean>) | undefined;
   /** ADR 0592 §2 (CMSLU-1) — the translator surface's NARROWED presentation:
    *  base content renders read-only, section structure (add/move/remove/
    *  detach/save-as-shared) is hidden, overlay editing stays for the locales
    *  the parent passed in `locales` (already grant-filtered). Presentation
    *  only — the server's ADR 0205 D1 narrowing remains the authority. */
   translatorMode?: boolean;
+  /** The page workspace's section list owns order, removal and adding, so the
+   *  cards hide their move/remove buttons and the add control. */
+  structureElsewhere?: boolean;
 }): JSX.Element {
   const { t } = useTranslation('cms');
   const localeList = locales ?? [];
+  const showStructure = !translatorMode && !structureElsewhere;
   const localized = localeList.length > 1;
   // Active edit locale per section (default the base).
   const [activeLocale, setActiveLocale] = useState<Record<string, string>>({});
   // `sectionId:locale` currently being AI-translated (disables its button).
   const [translating, setTranslating] = useState<string | null>(null);
+  // ADR 0861 D6 (CMSL2UX-3) — `sectionId:locale` being confirmed: disables the
+  // button (no double write) and, on success, focus returns to the locale tab
+  // instead of dropping to <body> when the button unmounts.
+  const [confirming, setConfirming] = useState<string | null>(null);
 
   // Write the BASE data for section i.
   const patchData = (i: number, data: Record<string, unknown>): void =>
@@ -932,7 +1045,6 @@ export function SectionsEditor({ sections, assets, onChange, baseLocale = 'en', 
     onChange(next);
   };
   const remove = (i: number): void => onChange(sections.filter((_, j) => j !== i));
-  const add = (type: SectionType): void => onChange([...sections, blankSection(type)]);
 
   // Land a preview click-through (CMS-R2-1): scroll the requested card into
   // view, move focus to it (SR context + keyboard continuation), and flash it.
@@ -975,7 +1087,7 @@ export function SectionsEditor({ sections, assets, onChange, baseLocale = 'en', 
           return (
             <div key={s.sectionId} className="surface-card u-gap-2 u-p-3" data-section-id={s.sectionId} tabIndex={-1}>
               <div className="u-flex u-gap-1 u-items-center u-wrap">
-                <span className="chip chip--accent">{s.type}</span>
+                <span className="chip chip--accent">{t(`sectionType_${s.type}`, { defaultValue: s.type })}</span>
                 <span className="chip">{t('sharedChip')}</span>
                 <span className="u-label-sm">{shared ? shared.name : sharedFailed ? t('sharedUnavailable') : t('sharedMissing')}</span>
                 <span className="u-flex-1" />
@@ -987,7 +1099,7 @@ export function SectionsEditor({ sections, assets, onChange, baseLocale = 'en', 
                       : x)))}
                   >{t('sharedDetach')}</Button>
                 ) : null}
-                {!translatorMode ? (
+                {showStructure ? (
                   <>
                     <Button variant="quiet" onClick={() => move(i, -1)} aria-label={t('moveUp')}><ArrowUpIcon /></Button>
                     <Button variant="quiet" onClick={() => move(i, 1)} aria-label={t('moveDown')}><ArrowDownIcon /></Button>
@@ -1004,12 +1116,12 @@ export function SectionsEditor({ sections, assets, onChange, baseLocale = 'en', 
         return (
           <div key={s.sectionId} className="surface-card u-gap-2 u-p-3" data-section-id={s.sectionId} tabIndex={-1}>
             <div className="u-flex u-gap-1 u-items-center">
-              <span className="chip chip--accent">{s.type}</span>
+              <span className="chip chip--accent">{t(`sectionType_${s.type}`, { defaultValue: s.type })}</span>
               <span className="u-flex-1" />
               {onSaveShared && !translatorMode ? (
                 <Button variant="quiet" className="u-w-auto" onClick={() => onSaveShared(s)}>{t('saveAsShared')}</Button>
               ) : null}
-              {!translatorMode ? (
+              {showStructure ? (
                 <>
                   <Button variant="quiet" onClick={() => move(i, -1)} aria-label={t('moveUp')}><ArrowUpIcon /></Button>
                   <Button variant="quiet" onClick={() => move(i, 1)} aria-label={t('moveDown')}><ArrowDownIcon /></Button>
@@ -1026,6 +1138,7 @@ export function SectionsEditor({ sections, assets, onChange, baseLocale = 'en', 
                 active={active}
                 onPick={(loc) => setActiveLocale((m) => ({ ...m, [s.sectionId]: loc }))}
                 localeState={localeState}
+                status={translationStatus?.[s.sectionId]}
               />
             ) : null}
 
@@ -1040,7 +1153,31 @@ export function SectionsEditor({ sections, assets, onChange, baseLocale = 'en', 
                      model-provenance chip; editing the overlay clears it. */
                   <span className="chip chip--ai">{t('aiDraftChip')}</span>
                 ) : null}
+                {translationStatus?.[s.sectionId]?.[active] === 'outdated' && s.localizations?.[active] !== undefined ? (
+                  /* ADR 0861 D6 — the base text this overlay translates changed
+                     after it was written. Status as a word, never colour alone. */
+                  <span className="chip chip--warning" title={t('translationOutdatedHint')}>{t('translationOutdatedChip')}</span>
+                ) : null}
                 <span className="u-flex-1" />
+                {onConfirmSource && translationStatus?.[s.sectionId]?.[active] === 'outdated' && s.localizations?.[active] !== undefined ? (
+                  <Button
+                    variant="quiet" className="u-w-auto"
+                    disabled={confirming === `${s.sectionId}:${active}`}
+                    aria-label={t('confirmSourceActionAria', { locale: localeLabel(active) })}
+                    onClick={async (e) => {
+                      const key = `${s.sectionId}:${active}`;
+                      const card = (e.currentTarget as HTMLElement).closest('.cms-loc-overlay-note')?.parentElement;
+                      setConfirming(key);
+                      try {
+                        if (await onConfirmSource(s.sectionId, active)) {
+                          card?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')?.focus();
+                        }
+                      } finally {
+                        setConfirming((k) => (k === key ? null : k));
+                      }
+                    }}
+                  >{confirming === `${s.sectionId}:${active}` ? t('confirmSourcePending') : t('confirmSourceAction')}</Button>
+                ) : null}
                 {onSetLocaleState ? (
                   localeState?.[active] === 'draft' ? (
                     <Button variant="quiet" className="u-w-auto" onClick={() => onSetLocaleState(active, 'published')}>{t('localePublishAction')}</Button>
@@ -1101,37 +1238,11 @@ export function SectionsEditor({ sections, assets, onChange, baseLocale = 'en', 
           </div>
         );
       })}
-      {translatorMode ? null : (
-      <div className="action-bar">
-        <select
-          aria-label={t('addSectionAria')}
-          defaultValue=""
-          className="u-w-auto"
-          onChange={(e) => {
-            const v = e.target.value;
-            e.target.value = '';
-            if (!v) return;
-            if (v.startsWith('shared:')) {
-              // ADR 0204 C4 — insert an inherit-by-reference section.
-              const sharedSectionId = v.slice('shared:'.length);
-              const shared = (sharedSections ?? []).find((sh) => sh.sharedSectionId === sharedSectionId);
-              if (!shared) return;
-              onChange([...sections, { sectionId: `new:${Math.random().toString(36).slice(2)}`, type: shared.type, data: {}, ref: { sharedSectionId } }]);
-              return;
-            }
-            add(v as SectionType);
-          }}
-        >
-          <option value="">{t('addSectionPlaceholder')}</option>
-          {SECTION_TYPES.map((st) => <option key={st} value={st}>{t(`sectionType_${st}`, { defaultValue: st })}</option>)}
-          {(sharedSections ?? []).length > 0 ? (
-            <optgroup label={t('addSharedGroup')}>
-              {(sharedSections ?? []).map((sh) => <option key={sh.sharedSectionId} value={`shared:${sh.sharedSectionId}`}>{sh.name}</option>)}
-            </optgroup>
-          ) : null}
-        </select>
-      </div>
-      )}
+      {showStructure ? (
+        <div className="action-bar">
+          <AddSectionControl sharedSections={sharedSections} onAdd={(sec) => onChange([...sections, sec])} />
+        </div>
+      ) : null}
     </div>
   );
 }

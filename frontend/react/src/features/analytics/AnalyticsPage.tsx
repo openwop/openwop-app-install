@@ -5,6 +5,7 @@
  * sessions, pageviews, conversions) → top paths + UTM sources → recent events.
  * Read-only reporting over the authed surface; ingest is the public beacon.
  */
+import { ChatPocket } from '../../chat/ChatPocket.js';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Button } from '../../ui/Button.js';
 import { useTranslation } from 'react-i18next';
@@ -36,6 +37,10 @@ export function AnalyticsPage(): JSX.Element {
   const { t } = useTranslation('analytics');
   const f = useFormat();
   const access = useFeatureAccess('analytics');
+  // ANL-UX-23 / ADR 0857 — with consent management on, the beacon records only
+  // consented visitors (202, nothing stored, otherwise), so every figure below is
+  // a consent-filtered count. Say so rather than present it as all traffic.
+  const consentOn = useFeatureAccess('consent').enabled;
   // `.catch(() => setOrgs([]))` rendered the "No organizations — create one
   // first" instruction over a failed read, and left `orgId` '' so the page's
   // own read never started. Both facts, one value.
@@ -363,6 +368,7 @@ export function AnalyticsPage(): JSX.Element {
               {t('visitorsDisclosure', { since: summary.uniqueVisitorsSince ? f.date(summary.uniqueVisitorsSince) : '—' })}
             </p>
           ) : null}
+          {consentOn ? <p className="muted u-fs-12 u-m-0">{t('consentFilterNote')}</p> : null}
 
           <section className="surface-card u-flex u-flex-col u-gap-2">
             <h2 className="u-label-sm">{t('topPathsHeading')}</h2>
@@ -413,6 +419,14 @@ export function AnalyticsPage(): JSX.Element {
       )}
       </OrgSelectionState>
       <NavTelemetrySection />
+      {/* ADR 0768 D5 — the feature's assistant in a Pocket. Honest scope: the agent's
+          tools read every org the caller can read, not only the one on screen. */}
+      <ChatPocket
+        agentId="vendor.openwop-app.analytics.agents.insights"
+        title={t('pocketTitle')}
+        contextLabel={t('pocketScope')}
+        renderEmptyState={() => <p className="chat-pocket__hint">{t('pocketHint')}</p>}
+      />
     </div>
   );
 }

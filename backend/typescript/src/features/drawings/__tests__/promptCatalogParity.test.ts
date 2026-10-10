@@ -11,10 +11,11 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join, dirname } from 'node:path';
 import { DRAWING_SHAPE_KINDS } from '../validateDrawingDoc.js';
+import { ASSET_SERVE_PATH } from '../../../host/assetServePath.js';
 
 describe('illustrator prompt ↔ validateDrawingDoc shape-kind parity (XCH-DRAW-1)', () => {
   const here = dirname(fileURLToPath(import.meta.url));
-  const promptPath = join(here, '../../../../../../packs/feature.drawings.agents/prompts/illustrator.md');
+  const promptPath = join(here, '../../../../../../packs/vendor.openwop-app.drawings.agents/prompts/illustrator.md');
   const prompt = readFileSync(promptPath, 'utf8');
 
   it('names every validator kind as a `kind` bullet', () => {
@@ -23,6 +24,16 @@ describe('illustrator prompt ↔ validateDrawingDoc shape-kind parity (XCH-DRAW-
       // false-positive on the paint field, so require the quoted-token form.
       expect(prompt, `prompt must document shape kind '${kind}'`).toContain(`\`${kind}\``);
     }
+  });
+
+  it('names the image `src` address the host MINTS — unversioned, from its one owner (ADR 0669)', () => {
+    // The prompt taught `/v1/host/…/assets/<token>` for months after the mint
+    // stopped producing it. Pin the documented address to `ASSET_SERVE_PATH`
+    // so the next change to it fails here, and refuse any versioned spelling:
+    // a `/v<N>` address is one the model would be told to write and the host
+    // would only honour by redirect after that major retires.
+    expect(prompt).toContain(`\`${ASSET_SERVE_PATH}/<token>\``);
+    expect(prompt).not.toMatch(new RegExp(`/v[0-9]+${ASSET_SERVE_PATH}`));
   });
 
   it('documents the arrow head vocabulary', () => {

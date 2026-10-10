@@ -39,7 +39,7 @@ import {
   WebhookUnauthorizedError,
 } from './wearableWebhookService.js';
 
-export const KICKTODO_INTEGRATIONS_PREFIX = '/v1/host/openwop-app/kicktodo/integrations';
+export const KICKTODO_INTEGRATIONS_PREFIX = '/host/openwop-app/kicktodo/integrations';
 /** The PUBLIC feed path (PUBLIC_PATH_PREFIXES entry — auth-bypassed). */
 export const KICKTODO_FEED_PUBLIC_PREFIX = '/public/kicktodo/feed';
 /** ADR 0462 P2 — the PUBLIC wearable webhook path (PUBLIC_PATH_PREFIXES entry).

@@ -64,8 +64,9 @@ describe('generateWorkforceHistory', () => {
     expect(open.length).toBeGreaterThan(0);
     expect(h.stats.openApprovals).toBe(open.length);
     for (const r of open) {
-      expect(r.events.some((e) => e.type === 'approval.requested')).toBe(true);
-      expect(r.events.some((e) => e.type.startsWith('approval.granted'))).toBe(false);
+      // openwop#1742 — the protocol pair, not the v1-invalid kind-specific types.
+      expect(r.events.some((e) => e.type === 'interrupt.requested')).toBe(true);
+      expect(r.events.some((e) => e.type === 'interrupt.resolved')).toBe(false);
     }
   });
 
@@ -73,7 +74,7 @@ describe('generateWorkforceHistory', () => {
     const h = generateWorkforceHistory(BASE);
     const allowed = new Set(['granted', 'rejected', 'overridden']);
     const decisions = h.runs.flatMap((r) => r.events)
-      .filter((e) => e.type === 'approval.granted' || e.type === 'approval.overridden')
+      .filter((e) => e.type === 'interrupt.resolved')
       .map((e) => (e.payload as { decision?: unknown } | undefined)?.decision);
     expect(decisions.length).toBeGreaterThan(0);
     for (const d of decisions) expect(allowed.has(d as string)).toBe(true);
@@ -95,7 +96,7 @@ describe('generateWorkforceHistory', () => {
     // Measured per run, not conditioned on having an approval, so it tracks the
     // graduation curve robustly rather than amplifying small-sample noise.
     const overrideRate = (slice: typeof h.runs): number =>
-      slice.filter((r) => r.events.some((e) => e.type === 'approval.overridden')).length /
+      slice.filter((r) => (r.record.metadata as { outcome?: string } | undefined)?.outcome === 'overridden').length /
       Math.max(slice.length, 1);
     const early = overrideRate(h.runs.slice(0, third));
     const late = overrideRate(h.runs.slice(2 * third));

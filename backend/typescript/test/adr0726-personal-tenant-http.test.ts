@@ -19,7 +19,9 @@ import { projectBoundId } from '../src/host/boundIdProjection.js';
 
 const H = 'a'.repeat(32);
 const PERSONAL = `user:${H}`;
-const WIRE = `user~3A${H}`;
+// CORRECTED by ADR 0814: the wire tenant is `u-<hash>` (no `~`, identity.md §5).
+// ADR 0726's `user~3A<hash>` is still accepted on input (see the read below).
+const WIRE = `u-${H}`;
 let server: http.Server; let base = '';
 // A REAL user row: the verifier resolves the session against it, and a
 // personal tenant is implicitly owned only when `personalTenant === tenantId`.
@@ -58,6 +60,23 @@ describe('ADR 0726 — personal workspace on the major-2 wire', () => {
     expect(a.status, a.text.slice(0, 200)).toBe(200); expect(a.json.runId).toBe(bound);
     const b = await req('GET', `/runs/${encodeURIComponent(`${PERSONAL}/${opaque}`)}`, me);
     expect(b.status, 'raw spelling accepted through the overlap: ' + b.text.slice(0, 160)).toBe(200); expect(b.json.runId).toBe(bound);
+    // ADR 0814 — an id ADR 0726 already minted (`user~3A<hash>/<opaque>`) still
+    // resolves: §5 "ids already minted MUST still resolve".
+    const legacy = `user~3A${H}/${opaque}`;
+    const g = await req('GET', `/runs/${projectBoundId(legacy)}`, me);
+    expect(g.status, 'legacy ADR 0726 spelling: ' + g.text.slice(0, 160)).toBe(200); expect(g.json.runId).toBe(bound);
+    // #4382 — the spellings an SDK actually sends for an id ADR 0726 minted:
+    // `encodeURIComponent(user~3Ax/opaque)` = `user~3Ax%2Fopaque`, and the same
+    // path after a `%2F`-decoding proxy (Firebase's `/api` rewrite) splits it into
+    // two segments. Both 404'd: the `~` marker sent the segment down the
+    // projection branch, which never percent-decodes `%2F`, so it looked up
+    // `user:x%2Fopaque` as a bare id. Since ADR 0814 a NEW id (`u-x/opaque`)
+    // carries no `~`, so these legs must use the legacy spelling or they pass
+    // vacuously.
+    const d = await req('GET', `/runs/${encodeURIComponent(legacy)}`, me);
+    expect(d.status, 'legacy id, %2F separator: ' + d.text.slice(0, 160)).toBe(200); expect(d.json.runId).toBe(bound);
+    const e2 = await req('GET', `/runs/${legacy}`, me);
+    expect(e2.status, 'legacy id, proxy-decoded (two segments): ' + e2.text.slice(0, 160)).toBe(200); expect(e2.json.runId).toBe(bound);
     const other = await cookieFor(`user:${'b'.repeat(32)}`, 'oidc:other');
     const c = await req('GET', `/runs/${projectBoundId(bound)}`, other);
     expect(c.status).toBe(403); expect(c.json?.error).toBe('id_tenant_mismatch');

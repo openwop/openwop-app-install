@@ -20,6 +20,7 @@ import { contextEconomy } from '../host/contextEconomy.js';
 import { createLogger } from '../observability/logger.js';
 import { isLoopbackHttpUrl } from '../aiProviders/copilotSubscription.js';
 import { cacheableAnthropicSystem, extractAnthropicCacheTokens } from './promptCaching.js';
+import { isAdaptiveThinkingOnly } from './catalog.js';
 
 const log = createLogger('providers.dispatch');
 
@@ -296,10 +297,18 @@ async function dispatchAnthropic(req: DispatchRequest): Promise<DispatchResult> 
   //
   // Per https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking.
   // Regex matches the Claude 4 family today (claude-{opus,sonnet,haiku}-4*).
-  // When Claude 5+ ships, widen to `[4-9]` or replace with a
-  // `providers.json`-driven model-feature map.
+  //
+  // ADAPTIVE-ONLY MODELS (Claude Opus 5.5, Fable 5.1 — `adaptiveThinkingOnly`
+  // in providers.json) think on every request and REJECT the manual
+  // `{type:"enabled", budget_tokens}` shape with a 400 ("thinking.type.enabled is
+  // not supported for this model"). For them the request omits `thinking`, which
+  // the docs define as equivalent to `{type:"adaptive"}`; the output floor below
+  // still rises because the model spends output tokens thinking either way.
+  // https://platform.claude.com/docs/en/models/opus-5-5/whats-new-opus-5-5
+  const wantsThinking = (req.reasoningVerbosity ?? 'off') !== 'off';
+  const adaptiveOnly = isAdaptiveThinkingOnly('anthropic', req.model);
   const thinkingEnabled =
-    (req.reasoningVerbosity ?? 'off') !== 'off' && /^claude-(?:opus|sonnet|haiku)-[4-9]/.test(req.model);
+    wantsThinking && !adaptiveOnly && /^claude-(?:opus|sonnet|haiku)-[4-9]/.test(req.model);
   const thinkingBudget = 4000;
 
   // ADR 0148 A2 — cache the stable system-prompt prefix (this path carries no
@@ -314,7 +323,7 @@ async function dispatchAnthropic(req: DispatchRequest): Promise<DispatchResult> 
     req.cachePrefixScope,
   );
 
-  const res = await fetchWith429Retry(() => fetch('https://api.anthropic.com/v1/messages', {
+  const sendMessages = (withManualThinking: boolean) => fetchWith429Retry(() => fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
@@ -323,16 +332,32 @@ async function dispatchAnthropic(req: DispatchRequest): Promise<DispatchResult> 
     },
     body: JSON.stringify({
       model: req.model,
-      // Thinking budget consumes the same output-tokens bucket; raise
-      // the floor so visible text still has room when thinking is on.
-      max_tokens: req.maxTokens ?? (thinkingEnabled ? 8192 : 4096),
+      // Thinking consumes the same output-tokens bucket; raise the floor so
+      // visible text still has room — for an adaptive-only model too.
+      max_tokens: req.maxTokens ?? (withManualThinking || (wantsThinking && adaptiveOnly) ? 8192 : 4096),
       stream: true,
       ...(cachedSystem !== undefined ? { system: cachedSystem } : {}),
       messages: conversation.map((m) => ({ role: m.role, content: contentToAnthropicBlocks(m.content) })),
-      ...(thinkingEnabled ? { thinking: { type: 'enabled', budget_tokens: thinkingBudget } } : {}),
+      ...(withManualThinking ? { thinking: { type: 'enabled', budget_tokens: thinkingBudget } } : {}),
     }),
     ...(req.signal ? { signal: req.signal } : {}),
   }), req.signal);
+  let res = await sendMessages(thinkingEnabled);
+  if (!res.ok && thinkingEnabled && res.status === 400) {
+    // A model the catalog does not flag (a user-typed custom id, or a newer
+    // adaptive-only release) refuses the manual shape with a documented 400.
+    // Retry ONCE without `thinking` rather than failing the turn; any other 400
+    // is reported unchanged.
+    const body = await res.text().catch(() => '');
+    // The message sits inside a JSON string, so its quotes arrive escaped
+    // (`\"thinking.type.enabled\" is not supported`) — tolerate either form.
+    if (/thinking\.type\.enabled[\\"]* is not supported/.test(body)) {
+      log.warn('anthropic_manual_thinking_refused_retrying_adaptive', { model: req.model });
+      res = await sendMessages(false);
+    } else {
+      throw await providerHttpError('anthropic', { status: res.status, text: async () => body });
+    }
+  }
   if (!res.ok) {
     throw await providerHttpError('anthropic', res);
   }

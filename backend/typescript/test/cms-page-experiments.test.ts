@@ -14,7 +14,20 @@
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { getSetCookies } from './headerCookies.js';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+
+// ADR 0849 D4 — failure injection at the consent gate the page serve imports.
+let consentReadFails = false;
+vi.mock('../src/features/consent/consentService.js', async (orig) => {
+  const actual = await orig<typeof import('../src/features/consent/consentService.js')>();
+  return {
+    ...actual,
+    isAllowed: async (...args: Parameters<typeof actual.isAllowed>) => {
+      if (consentReadFails) throw new Error('consent store unavailable');
+      return actual.isAllowed(...args);
+    },
+  };
+});
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
@@ -74,16 +87,16 @@ let n = 0;
 async function ownerOrg(): Promise<{ owner: Client; orgId: string; tenantId: string }> {
   const tenantId = `org:px-${Date.now()}-${n++}`;
   const owner = client();
-  const r = await owner.post('/v1/host/openwop-app/test/login', { email: `px-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await owner.post('/host/openwop-app/test/login', { email: `px-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return { owner, orgId: org.body.orgId, tenantId };
 }
 
-const cms = (orgId: string, s = ''): string => `/v1/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${s}`;
+const cms = (orgId: string, s = ''): string => `/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${s}`;
 const exps = (orgId: string, pageId: string, s = ''): string => cms(orgId, `/pages/${encodeURIComponent(pageId)}/experiments${s}`);
-const pub = (orgId: string, s: string): string => `/v1/host/openwop-app/public/${encodeURIComponent(orgId)}${s}`;
+const pub = (orgId: string, s: string): string => `/host/openwop-app/public/${encodeURIComponent(orgId)}${s}`;
 
 /**
  * A page with TWO published snapshots: version 1 ("V1 Title") then the live
@@ -285,6 +298,21 @@ describe('public page read — consent-gated assignment seam', () => {
     } finally {
       await setToggle('consent', 'off');
     }
+  });
+
+  it('ADR 0849 D4 — an unreadable consent store serves the published page, never a 500', async () => {
+    const { owner, orgId } = await ownerOrg();
+    const { pageId, slug, v1 } = await pageWithHistory(owner, orgId);
+    const e = (await owner.post(exps(orgId, pageId), fiftyFifty(v1))).body;
+    await owner.post(exps(orgId, pageId, `/${e.experimentId}/start`));
+    const vkLegacy = visitorFor(e, 'legacy');
+    consentReadFails = true;
+    try {
+      const r = await client().get(pub(orgId, `/pages/${slug}?vk=${encodeURIComponent(vkLegacy)}`));
+      expect(r.status).toBe(200); // RED on `b634adc76`: 500
+      expect(r.body.experiment).toBeUndefined();
+      expect(r.body.title).toBe('V2 Title'); // the published page — no exposure
+    } finally { consentReadFails = false; }
   });
 });
 
@@ -532,7 +560,7 @@ describe('results — read-time projection over stamped events', () => {
     await owner.post(exps(orgId, pageId, `/${e.experimentId}/start`));
     const [key] = await keysOn(tenantId, orgId, pageId, 'control', 1, 'bx');
     const anon = client();
-    const base = `/v1/host/openwop-app/public-analytics/${encodeURIComponent(orgId)}/collect`;
+    const base = `/host/openwop-app/public-analytics/${encodeURIComponent(orgId)}/collect`;
     // Claims LEGACY for a session the assignment puts on CONTROL.
     expect((await anon.post(base, { type: 'pageview', path: '/x', sessionKey: key, experiment: { id: e.experimentId, variant: 'legacy' } })).status).toBe(201);
     // An id nothing owns → recorded, but with NO stamp.

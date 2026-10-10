@@ -68,7 +68,7 @@ import {
   type MemoryRow,
 } from '../host/inMemorySurfaces.js';
 import { registerRunSecret } from '../byok/ephemeralRunSecrets.js';
-import { conformanceNodesEnabled } from './conformanceMockAgent.js';
+import { CONFORMANCE_SECRET_REFS, conformanceNodesEnabled } from './conformanceMockAgent.js';
 import { createLogger } from '../observability/logger.js';
 import type { NodeContext, NodeOutcome } from '../executor/types.js';
 
@@ -152,6 +152,8 @@ async function resolveFirstSecret(
   const { resolveSecret } = await import('../byok/secretResolver.js');
   const seen = new Set<string>();
   for (const secretId of candidates) {
+    // Never resolve a caller-chosen ref: only the conformance canary refs.
+    if (!CONFORMANCE_SECRET_REFS.has(secretId)) continue;
     if (seen.has(secretId)) continue;
     seen.add(secretId);
     const value = await resolveSecret(secretId, { tenantId: ctx.tenantId });

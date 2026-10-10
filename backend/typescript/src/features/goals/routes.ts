@@ -86,7 +86,7 @@ export function registerGoalsRoutes(deps: RouteDeps): void {
     };
 
   app.get(
-    '/v1/host/openwop-app/goals',
+    '/host/openwop-app/goals',
     wrap(async (req, res) => {
       const tenant = tenantOf(req);
       await ensureDemoGoal(tenant);
@@ -96,7 +96,7 @@ export function registerGoalsRoutes(deps: RouteDeps): void {
   );
 
   app.get(
-    '/v1/host/openwop-app/goals/:id',
+    '/host/openwop-app/goals/:id',
     wrap(async (req, res) => {
       const g = await getGoal(tenantOf(req), paramId(req));
       if (!g) throw new OpenwopError('not_found', 'Goal not found.', 404);
@@ -106,7 +106,7 @@ export function registerGoalsRoutes(deps: RouteDeps): void {
 
   // Create — 422 when bounds are required but absent (goal-continuation-bounded).
   app.post(
-    '/v1/host/openwop-app/goals',
+    '/host/openwop-app/goals',
     wrap(async (req, res) => {
       try {
         const goal = await createGoal(parseCreate(req));
@@ -131,12 +131,12 @@ export function registerGoalsRoutes(deps: RouteDeps): void {
       throw err;
     }
   });
-  app.patch('/v1/host/openwop-app/goals/:id', update);
-  app.post('/v1/host/openwop-app/goals/:id', update);
+  app.patch('/host/openwop-app/goals/:id', update);
+  app.post('/host/openwop-app/goals/:id', update);
 
   for (const action of ['pause', 'resume', 'abandon'] as const) {
     app.post(
-      `/v1/host/openwop-app/goals/:id/${action}`,
+      `/host/openwop-app/goals/:id/${action}`,
       wrap(async (req, res) => {
         const g = await transitionGoal(tenantOf(req), paramId(req), action, callerSubject(req));
         if (!g) throw new OpenwopError('not_found', 'Goal not found.', 404);
@@ -147,7 +147,7 @@ export function registerGoalsRoutes(deps: RouteDeps): void {
 
   // ADR 0412 P1 — bind a contributing run (dedup append, CAS).
   app.post(
-    '/v1/host/openwop-app/goals/:id/runs',
+    '/host/openwop-app/goals/:id/runs',
     wrap(async (req, res) => {
       const body = (req.body ?? {}) as Record<string, unknown>;
       if (typeof body.runId !== 'string' || !ID_PATTERN.test(body.runId)) {
@@ -171,7 +171,7 @@ export function registerGoalsRoutes(deps: RouteDeps): void {
   // per goal firing the consumer-supplied checkpoint workflow. Pause/resume
   // toggle it; terminal transitions disarm it.
   app.post(
-    '/v1/host/openwop-app/goals/:id/arm',
+    '/host/openwop-app/goals/:id/arm',
     wrap(async (req, res) => {
       const body = (req.body ?? {}) as Record<string, unknown>;
       for (const field of ['workflowId', 'cronExpr'] as const) {
@@ -211,7 +211,7 @@ export function registerGoalsRoutes(deps: RouteDeps): void {
   // (a request body cannot carry a verdict). Fail-closed: missing verifier →
   // 409, broken verifier → 502, and neither transitions the goal.
   app.post(
-    '/v1/host/openwop-app/goals/:id/evaluate',
+    '/host/openwop-app/goals/:id/evaluate',
     wrap(async (req, res) => {
       const body = (req.body ?? {}) as Record<string, unknown>;
       for (const field of ['snapshotRef', 'snapshotHash'] as const) {

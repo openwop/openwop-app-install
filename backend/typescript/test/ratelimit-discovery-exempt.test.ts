@@ -91,7 +91,7 @@ describe('per-IP burst budget', () => {
     // it ever reaches the bucket. A control leg that sent no credentials would
     // measure the 401 path and report "not enforced" for a limiter that is working
     // perfectly — which is exactly what the first draft of this leg did.
-    const codes = await burst('/v1/workflows', 20, { headers: { Authorization: 'Bearer dev-token' } });
+    const codes = await burst('/workflows', 20, { headers: { Authorization: 'Bearer dev-token' } });
     expect(
       codes.some((c) => c === 429),
       'no request was throttled at a budget of 5 — the per-IP burst budget is not being enforced at all',

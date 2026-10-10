@@ -34,9 +34,23 @@ import {
   type MediaUsageRef,
   type Org,
 } from './mediaClient.js';
+import { getSiteConfig } from '../site/siteConfigClient.js';
+import { SYSTEM_SITE_ORG } from '../cms/siteOrg.js';
 
 const ALL = '__all__';
 const UNCATEGORIZED = 'none'; // matches the backend ?collectionId sentinel (server-side filter)
+
+/** ADR 0818 §5 — how long a delete waits on the usage read before it asks anyway (and says it could not check). */
+const USAGE_CHECK_TIMEOUT_MS = 8000;
+
+/** Every usage kind the server records, labelled; an unknown future kind gets a neutral label, never a wrong one. */
+const USAGE_KIND_KEYS: Record<MediaUsageRef['refKind'], string> = {
+  'cms-page': 'usedByKindCmsPage',
+  campaign: 'usedByKindCampaign',
+  'creative-brief': 'usedByKindCreativeBrief',
+  'creative-render': 'usedByKindCreativeRender',
+};
+const usageKindKey = (kind: string): string => USAGE_KIND_KEYS[kind as MediaUsageRef['refKind']] ?? 'usedByKindOther';
 
 export function MediaLibraryPage(): JSX.Element {
   const { t } = useTranslation('media');
@@ -60,6 +74,7 @@ export function MediaLibraryPage(): JSX.Element {
   const [busy, setBusy] = useState(false);
   const [usageRefs, setUsageRefs] = useState<MediaUsageRef[] | null>(null);
   const [usageFailed, setUsageFailed] = useState(false);
+  const [checkingUsageFor, setCheckingUsageFor] = useState<string | null>(null);
   const [altTextForId, setAltTextForId] = useState<string | null>(null); // ADR 0363 P1
   const altTextFor = useMemo(() => assets?.find((a) => a.assetId === altTextForId) ?? null, [assets, altTextForId]);
 
@@ -112,11 +127,30 @@ export function MediaLibraryPage(): JSX.Element {
       .then((o) => {
         setOrgs(o);
         setOrgsFailed(false);
-        setOrgId((cur) => (cur && o.some((x) => x.orgId === cur)) ? cur : (o[0]?.orgId ?? ''));
+        // A `?org=host-site` deep link is kept here; the site-admin probe below
+        // drops it for a caller who cannot reach the public-site scope.
+        setOrgId((cur) => (cur && (cur === SYSTEM_SITE_ORG || o.some((x) => x.orgId === cur))) ? cur : (o[0]?.orgId ?? ''));
       })
       .catch(() => setOrgsFailed(true));
   }, []);
   useEffect(() => { loadOrgs(); }, [loadOrgs]);
+  // The public site's images live in the reserved system-site org, the same
+  // scope the CMS edits as "Front page (public site)" (ADR 0027, ADR 0817).
+  // The super-admin-gated site-config read succeeds only for a site admin, so
+  // its result decides whether that scope is offered. null = still probing.
+  const [isSiteAdmin, setIsSiteAdmin] = useState<boolean | null>(null);
+  useEffect(() => {
+    void getSiteConfig().then(() => setIsSiteAdmin(true)).catch(() => setIsSiteAdmin(false));
+  }, []);
+  const pickerOrgs = useMemo<Org[] | null>(() => {
+    if (orgs === null) return null;
+    return isSiteAdmin ? [{ orgId: SYSTEM_SITE_ORG, name: t('frontPageScope') }, ...orgs] : orgs;
+  }, [orgs, isSiteAdmin, t]);
+  useEffect(() => {
+    if (isSiteAdmin === false && orgId === SYSTEM_SITE_ORG && orgs) selectOrg(orgs[0]?.orgId ?? '');
+    // A site admin with no workspace of their own still has the public site.
+    else if (isSiteAdmin && !orgId && orgs?.length === 0) selectOrg(SYSTEM_SITE_ORG);
+  }, [isSiteAdmin, orgId, orgs, selectOrg]);
   // Fetch the "used by" refs whenever the open asset changes (incl. a ?asset= deep link).
   useEffect(() => {
     if (!usageFor) { setUsageRefs(null); return; }
@@ -213,7 +247,27 @@ export function MediaLibraryPage(): JSX.Element {
 
   const removeAsset = useCallback(
     async (assetId: string, name: string) => {
-      if (!(await confirm({ title: t('deleteAssetConfirm'), danger: true, confirmLabel: t('common:delete') }))) return;
+      // ADR 0818 §5 — read the usage graph BEFORE asking, so the confirm names
+      // what will show a broken image. A failed or slow read says it could not
+      // check; it never implies the asset is unused. The trigger is busy meanwhile.
+      setCheckingUsageFor(assetId);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const usage = await Promise.race<MediaUsageRef[] | 'unknown'>([
+        listAssetUsage(orgId, assetId).then((refs) => refs, () => 'unknown' as const),
+        new Promise<'unknown'>((resolve) => { timer = setTimeout(() => resolve('unknown'), USAGE_CHECK_TIMEOUT_MS); }),
+      ]).finally(() => { clearTimeout(timer); setCheckingUsageFor(null); });
+      const body = usage === 'unknown'
+        ? <p>{t('deleteAssetUsageUnknown')}</p>
+        : usage.length > 0
+          ? (
+            <>
+              <p>{t('deleteAssetUsedBy', { count: usage.length })}</p>
+              <ul>{usage.slice(0, 5).map((r) => <li key={`${r.refKind}:${r.refId}`}>{t(usageKindKey(r.refKind))}: {r.refLabel}</li>)}</ul>
+              {usage.length > 5 ? <p>{t('deleteAssetUsedByMore', { count: usage.length - 5 })}</p> : null}
+            </>
+          )
+          : undefined;
+      if (!(await confirm({ title: t('deleteAssetConfirm', { name }), ...(body ? { body } : {}), danger: true, confirmLabel: t('common:delete') }))) return;
       try {
         await deleteAsset(orgId, assetId);
         setAssets((cur) => (cur ? cur.filter((a) => a.assetId !== assetId) : cur));
@@ -237,7 +291,7 @@ export function MediaLibraryPage(): JSX.Element {
       className="u-w-auto"
       aria-label={t('orgPickerLabel')}
     >
-      {(orgs ?? []).map((o) => (
+      {(pickerOrgs ?? []).map((o) => (
         <option key={o.orgId} value={o.orgId}>{o.name}</option>
       ))}
     </select>
@@ -245,14 +299,14 @@ export function MediaLibraryPage(): JSX.Element {
 
   return (
     <div data-walkthrough="media.page">
-      <PageHeader eyebrow={t('eyebrow')} title={t('title')} lede={t('lede')} actions={orgs && orgs.length > 0 ? orgActions : undefined} />
+      <PageHeader eyebrow={t('eyebrow')} title={t('title')} lede={t('lede')} actions={pickerOrgs && pickerOrgs.length > 0 ? orgActions : undefined} />
 
       {orgsFailed ? (
         <StateCard announce icon={<PackageIcon />} title={t('orgsFailedTitle')} body={t('orgsFailedBody')}
           action={<Button variant="secondary" onClick={loadOrgs}>{t('common:retry')}</Button>} />
-      ) : !orgs ? (
+      ) : !pickerOrgs ? (
         <Skeleton />
-      ) : orgs.length === 0 ? (
+      ) : pickerOrgs.length === 0 ? (
         <StateCard icon={<PackageIcon />} title={t('noOrgsTitle')} body={t('noOrgsBody')} />
       ) : (
         <div className="media-layout">
@@ -365,13 +419,13 @@ export function MediaLibraryPage(): JSX.Element {
             ) : viewMode === 'grid' ? (
               <div className="card-grid">
                 {assets.map((a) => (
-                  <MediaAssetCard key={a.assetId} asset={a} onDelete={() => void removeAsset(a.assetId, a.name)} onShowUsage={() => showUsage(a.assetId)} onEditAltText={() => setAltTextForId(a.assetId)} />
+                  <MediaAssetCard key={a.assetId} asset={a} onDelete={() => void removeAsset(a.assetId, a.name)} deleting={checkingUsageFor === a.assetId} onShowUsage={() => showUsage(a.assetId)} onEditAltText={() => setAltTextForId(a.assetId)} />
                 ))}
               </div>
             ) : (
               <div className="surface-card list-view">
                 {assets.map((a) => (
-                  <MediaAssetRow key={a.assetId} asset={a} onDelete={() => void removeAsset(a.assetId, a.name)} onShowUsage={() => showUsage(a.assetId)} onEditAltText={() => setAltTextForId(a.assetId)} />
+                  <MediaAssetRow key={a.assetId} asset={a} onDelete={() => void removeAsset(a.assetId, a.name)} deleting={checkingUsageFor === a.assetId} onShowUsage={() => showUsage(a.assetId)} onEditAltText={() => setAltTextForId(a.assetId)} />
                 ))}
               </div>
             )}
@@ -406,7 +460,7 @@ export function MediaLibraryPage(): JSX.Element {
               {usageRefs.map((r) => (
                 <div key={`${r.refKind}:${r.refId}`} className="u-flex u-gap-2 u-items-center">
                   <span className="chip chip--muted">
-                    {t(r.refKind === 'campaign' ? 'usedByKindCampaign' : r.refKind === 'creative-brief' ? 'usedByKindCreativeBrief' : 'usedByKindCmsPage')}
+                    {t(usageKindKey(r.refKind))}
                   </span>
                   <span>{r.refLabel}</span>
                 </div>

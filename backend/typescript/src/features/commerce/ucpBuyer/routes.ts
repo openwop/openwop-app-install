@@ -17,7 +17,7 @@ import {
 } from './ucpBuyerService.js';
 
 const FEATURE = { toggleId: 'commerce-ucp-buyer', label: 'UCP buyer' };
-const BASE = '/v1/host/openwop-app/commerce/orgs/:orgId/ucp-buyer';
+const BASE = '/host/openwop-app/commerce/orgs/:orgId/ucp-buyer';
 interface Ctx { user: User; orgId: string; tenantId: string }
 const authz = (req: Request, scope: Scope): Promise<Ctx> => authorizeOrgScope(req, FEATURE, scope);
 

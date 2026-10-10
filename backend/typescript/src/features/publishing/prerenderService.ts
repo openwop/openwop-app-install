@@ -19,13 +19,13 @@
 import type { Section } from '../cms/cmsService.js';
 // ADR 0406 Phase 1 — settings are core-owned now; importing the core module
 // directly removes the publishing→cms feature edge this line used to carry.
-import { getContentLanguageSettings } from '../../host/contentLocales.js';
 import { getOrg } from '../../host/accessControlService.js';
 import { publicPageBySlug, negotiatePublicLocale, listPublicBlog } from './publishingService.js';
 import { escapeHtml, pageBodyHtml } from './sectionHtml.js';
 import { resolveContentSection, isEssentialSectionType, type ResolvedContentSection } from '../../host/contentDataSources.js';
 import { TtlLruCache } from './publicReadCache.js';
-import { vendorPublicBase } from '../featureRoute.js';
+import { configuredPublicBaseUrl, vendorPublicBase } from '../featureRoute.js';
+import { systemSiteProfile } from '../../host/systemSiteProfile.js';
 
 // ─── bot detection (UA allowlist, env-extensible) ────────────────────────────
 
@@ -153,10 +153,66 @@ ${bodyInner}
 
 interface JsonLdInput {
   seo: HeadInput['seo'];
-  page: { title: string; updatedAt: string; slug: string; sections: Section[] };
+  page: { title: string; updatedAt: string; slug: string; sections: Section[]; kind?: 'post'; publishedAt?: string };
   locale: string;
   siteName?: string;
   baseUrl: string;
+  /** ADR 0824 D3 — Organization `sameAs` (absent ⇒ omitted). */
+  organizationSameAs?: string[];
+}
+
+/** ADR 0843 — a `video` section's `m:ss` length as an ISO 8601 duration
+ *  (`1:57` → `PT1M57S`, `0:45` → `PT45S`, `75:00` → `PT1H15M`). Null when the
+ *  length is not `m:ss`. */
+export function videoIsoDuration(length: string): string | null {
+  const m = /^(\d{1,3}):([0-5]\d)$/.exec(length.trim());
+  if (!m) return null;
+  const total = Number(m[1]) * 60 + Number(m[2]);
+  const h = Math.floor(total / 3600);
+  const min = Math.floor((total % 3600) / 60);
+  const sec = total % 60;
+  if (total === 0) return null;
+  return `PT${h ? `${h}H` : ''}${min ? `${min}M` : ''}${sec ? `${sec}S` : ''}`;
+}
+
+/** The player URL for a YouTube watch / short link (`embedUrl` names the
+ *  player, not the watch page); the given URL when no video id parses. */
+function youtubeEmbedUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    const id = u.hostname === 'youtu.be' ? u.pathname.slice(1) : u.searchParams.get('v') ?? '';
+    return /^[A-Za-z0-9_-]{6,20}$/.test(id) ? `https://www.youtube.com/embed/${id}` : url;
+  } catch {
+    return url;
+  }
+}
+
+/** ADR 0843 — schema.org VideoObject from one validated `video` section, or
+ *  null when a required field (name, description, thumbnailUrl, contentUrl)
+ *  is absent or not https. With a `youtubeUrl`, `url` is that watch page and
+ *  `embedUrl` its player. */
+export function videoObject(d: Record<string, unknown>): object | null {
+  const text = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');
+  const https = (v: unknown): string => (/^https:\/\//i.test(text(v)) ? text(v) : '');
+  const name = text(d.title);
+  const description = text(d.description);
+  const thumbnailUrl = https(d.poster);
+  const contentUrl = https(d.src);
+  if (!name || !description || !thumbnailUrl || !contentUrl) return null;
+  const duration = videoIsoDuration(text(d.length));
+  const youtube = https(d.youtubeUrl);
+  const uploadDate = text(d.uploadDate);
+  return {
+    '@context': 'https://schema.org',
+    '@type': 'VideoObject',
+    name,
+    description,
+    thumbnailUrl,
+    contentUrl,
+    ...(duration ? { duration } : {}),
+    ...(uploadDate ? { uploadDate } : {}),
+    ...(youtube ? { embedUrl: youtubeEmbedUrl(youtube), url: youtube } : {}),
+  };
 }
 
 /** Organization + WebSite + WebPage/Article + BreadcrumbList — plus FAQPage
@@ -187,17 +243,34 @@ export function jsonLdBlocks(input: JsonLdInput): object[] {
       })),
     });
   }
+  // ADR 0843 — one VideoObject per `video` section, from the SAME validated
+  // data the page renders (never fabricated: a section missing a required
+  // VideoObject field, or carrying a non-https URL, emits nothing).
+  for (const s of page.sections) {
+    if (s.type !== 'video') continue;
+    const v = videoObject(s.data as Record<string, unknown>);
+    if (v) blocks.push(v);
+  }
   if (siteName) {
-    blocks.push({ '@context': 'https://schema.org', '@type': 'Organization', name: siteName, url: baseUrl });
+    blocks.push({
+      '@context': 'https://schema.org', '@type': 'Organization', name: siteName, url: baseUrl,
+      ...(input.organizationSameAs && input.organizationSameAs.length > 0 ? { sameAs: input.organizationSameAs } : {}),
+    });
     blocks.push({ '@context': 'https://schema.org', '@type': 'WebSite', name: siteName, url: baseUrl });
   }
-  // Article when the page carries article semantics (hero + richText body).
-  const isArticle = page.sections.some((s) => s.type === 'hero') && page.sections.some((s) => s.type === 'richText');
+  // Article when the page carries article semantics (hero + richText body), or
+  // is a blog post (ADR 0813 — a post's title is post chrome, not a hero).
+  // ADR 0824 D3 — never the `home` page: it is served at `/` and is the site's
+  // front door, which is a WebPage whatever sections it happens to hold (the
+  // live home was typed Article because it has a hero and a richText block).
+  const isArticle = page.kind === 'post'
+    || (page.slug !== 'home' && page.sections.some((s) => s.type === 'hero') && page.sections.some((s) => s.type === 'richText'));
   blocks.push({
     '@context': 'https://schema.org',
     '@type': isArticle ? 'Article' : 'WebPage',
     headline: seo.title,
     description: seo.description,
+    ...(isArticle && page.publishedAt ? { datePublished: page.publishedAt } : {}),
     dateModified: page.updatedAt,
     inLanguage: locale,
     url: seo.canonicalUrl,
@@ -234,12 +307,17 @@ export async function prerenderPage(
   acceptLanguage: string | null | undefined,
   siteName?: string,
 ): Promise<PrerenderResult | null> {
-  const { page, locale } = await publicPageBySlug(orgId, slug, baseUrl, acceptLanguage ?? null, null);
+  const { page, locale, served } = await publicPageBySlug(orgId, slug, baseUrl, acceptLanguage ?? null, null);
 
   // og:site_name / JSON-LD Organization from the org record — never invented.
   // An operator-provided site name (env) overrides; absence omits the fields.
   // Resolved BEFORE the body so the tenant is available for entity resolution.
   let resolvedSiteName = siteName;
+  // ADR 0824 D3 — the reference deployment's self-description (null for every
+  // other org / a non-demo install, which then renders exactly as before).
+  // Precedence: operator env > the profile > the org record's name.
+  const profile = systemSiteProfile(orgId, page.slug, baseUrl, page.seo.description);
+  if (!resolvedSiteName && profile) resolvedSiteName = profile.siteName;
   let tenantId: string | undefined;
   try {
     const org = await getOrg(orgId);
@@ -276,23 +354,25 @@ export async function prerenderPage(
     ...(Object.keys(resolvedSections).length > 0 ? { resolvedSections } : {}),
   });
   if (body === null) return null; // unknown section type → SPA fallback
+  // ADR 0813 — a post's title is SPA post chrome (BlogPostPage's <h1>), not a
+  // section, so a crawler would otherwise get a body with no <h1>. A post that
+  // authors its own hero already has one.
+  const crawlerBody = page.kind === 'post' && !page.sections.some((s) => s.type === 'hero')
+    // ADR 0836 D7 — a replacer FUNCTION: a string replacement interprets `$'`,
+    // `` $` `` and `$&` in the (author-controlled) title as splice patterns.
+    ? body.replace('<main>\n', () => `<main>\n<header>\n<h1>${escapeHtml(page.title)}</h1>\n</header>\n`)
+    : body;
 
-  // hreflang alternates from the org's authored locales (ADR 0064). The
-  // negotiation is Accept-Language-driven (no per-locale URLs), so alternates
-  // point at the same canonical with x-default — emitted only when the org
-  // authors more than the base locale.
-  let alternates: Record<string, string> | undefined;
-  try {
-    if (tenantId) {
-      const langs = await getContentLanguageSettings(tenantId, orgId);
-      const all = [langs.baseLocale, ...langs.supportedLocales].filter(Boolean);
-      if (all.length > 1) {
-        alternates = Object.fromEntries([...all.map((l) => [l, page.seo.canonicalUrl] as const), ['x-default', page.seo.canonicalUrl] as const]);
-      }
-    }
-  } catch {
-    // Language settings are an enhancement — a read failure never blocks the render.
-  }
+  // hreflang alternates (ADR 0064). The negotiation is Accept-Language-driven (no
+  // per-locale URLs), so alternates point at the same canonical with x-default —
+  // emitted only when the page serves more than the base locale.
+  // ADR 0861 D5 (CMSL2WF-5) — the locales THIS page serves (`served`, from
+  // `localizePage` over the stored row), not every org locale: a withheld
+  // translation was advertised to crawlers that the page then refused to serve.
+  const all = served.filter(Boolean);
+  const alternates: Record<string, string> | undefined = all.length > 1
+    ? Object.fromEntries([...all.map((l) => [l, page.seo.canonicalUrl] as const), ['x-default', page.seo.canonicalUrl] as const])
+    : undefined;
 
   const html = buildHtmlDocument(
     {
@@ -301,7 +381,12 @@ export async function prerenderPage(
       ...(resolvedSiteName !== undefined ? { siteName: resolvedSiteName } : {}),
       ...(alternates !== undefined ? { alternates } : {}),
       jsonLd: [
-        ...jsonLdBlocks({ seo: page.seo, page, locale, ...(resolvedSiteName !== undefined ? { siteName: resolvedSiteName } : {}), baseUrl }),
+        ...jsonLdBlocks({
+          seo: page.seo, page, locale, baseUrl,
+          ...(resolvedSiteName !== undefined ? { siteName: resolvedSiteName } : {}),
+          ...(profile ? { organizationSameAs: profile.organizationSameAs } : {}),
+        }),
+        ...(profile?.pageBlocks ?? []),
         // ADR 0407 D3 — an ItemList per resolved entityList/entityDetail (the
         // SEO-valuable structured data for entity collections). Honest: only
         // resolved (public, live) items appear.
@@ -335,7 +420,7 @@ export async function prerenderPage(
         })),
       ],
     },
-    body,
+    crawlerBody,
   );
   return { html, locale, noindex: page.seo.noindex };
 }
@@ -373,6 +458,14 @@ export async function prerenderPageCached(
     // Render fresh and store nothing — degraded hit-rate, never wrong content.
     return prerenderPage(orgId, slug, baseUrl, acceptLanguage, siteName);
   }
+  // ADR 0836 D7 — `baseUrl` is bound into every absolute URL of the document
+  // (canonical, og, hreflang, JSON-LD, image src). It is stable only when it
+  // comes from configuration; without `OPENWOP_PUBLIC_BASE_URL` it is derived
+  // from `X-Forwarded-Host`, so caching it let one forged request serve its
+  // origin to every visitor for the TTL. Request-derived ⇒ render fresh, store
+  // nothing (the PUB2-B1 posture above). Keying on it instead would let forged
+  // hosts evict the whole LRU.
+  if (baseUrl !== configuredPublicBaseUrl()) return prerenderPage(orgId, slug, baseUrl, acceptLanguage, siteName);
   const key = `${orgId}\n${slug}\n${locale}`;
   const hit = prerenderHtmlCache.get(key);
   if (hit) return hit;

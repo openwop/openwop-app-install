@@ -8,17 +8,34 @@
  *    labeled with named levels (PROF-UX-1/2);
  *  - the portfolio section is REACHABLE (the client surface had zero TSX
  *    consumers — the ADR 0488 built-but-unreachable class) (PROF-UX-4).
+ *
+ * The announcer is MODULE state (`ui/announce.tsx`): both live regions are reset
+ * in `beforeEach`, so no case can pass on an earlier case's announcement.
+ * `addPortfolio` is mocked — the in-cap case used to fire a live fetch (ADR 0661).
+ * Sabotage-witnessed (/grade-tests wave 3, `w3g3-pp-*`): dropping the failed-read
+ * card's `announce`, its retry, the select/skill/meter/tablist names, the level
+ * names, the portfolio alt/remove names, the hours focus/clear/no-toast, the
+ * add-skill focus, the portfolio refusals/upload/seed, or the caption's top-two /
+ * raw-id fallback / absent-field guard each turns a named case red.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, act, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
-const { getMyProfile, uploadImage, updateMyProfile } = vi.hoisted(() => ({ getMyProfile: vi.fn(), uploadImage: vi.fn(), updateMyProfile: vi.fn() }));
+import type { Profile, ProfilePatch } from '../profilesClient.js';
+
+const { getMyProfile, uploadImage, updateMyProfile, addPortfolio } = vi.hoisted(() => ({
+  getMyProfile: vi.fn<() => Promise<Profile>>(),
+  uploadImage: vi.fn<(file: File) => Promise<string>>(),
+  updateMyProfile: vi.fn<(patch: ProfilePatch) => Promise<Profile>>(),
+  addPortfolio: vi.fn<(token: string) => Promise<Profile>>(),
+}));
 vi.mock('../profilesClient.js', async (orig) => ({
   ...(await orig<typeof import('../profilesClient.js')>()),
   getMyProfile,
   uploadImage,
   updateMyProfile,
+  addPortfolio,
 }));
 // The composed tabs are other features' surfaces (graded by their own
 // collections); stub them so this test exercises ONLY the profile-owned page.
@@ -38,12 +55,12 @@ vi.mock('../../users/usersClient.js', () => ({ updateMyDisplayName: vi.fn() }));
 import { COMPLETENESS_FIELD_KEY, ProfilePage } from '../ProfilePage.js';
 import { COMPLETENESS_FIELD_IDS } from '../profilesClient.js';
 import { messages as enMessages } from '../i18n/en.js';
-import { GlobalLiveRegion } from '../../../ui/announce.js';
+import { GlobalLiveRegion, announce } from '../../../ui/announce.js';
 import { MAX_UPLOAD_BYTES } from '../../../client/fileToBase64.js';
 
 /** Complete against the real shape — a thin fixture makes assertions fail for
  *  reasons unrelated to the defect (the teamDirectoryFailedRead lesson). */
-const PROFILE = {
+const PROFILE: Profile = {
   userId: 'u1', tenantId: 't1', displayName: 'Ada Lovelace',
   // ADR 0624 D7 — endorsements ride as `{ count, endorsedByMe, endorserUserIds }`.
   skills: [{ name: 'maths', proficiency: 3, endorsements: { count: 0, endorsedByMe: false, endorserUserIds: [] } }],
@@ -57,20 +74,35 @@ const mount = async (): Promise<void> => {
   await act(async () => {});
 };
 
+/** The shell's live regions BY NAME — `toast.error` speaks through the assertive
+ *  one (PROF-UX-20), `toast.success` and `StateCard announce` through the polite one. */
+const mountWithLive = async (): Promise<void> => {
+  render(<MemoryRouter><GlobalLiveRegion /><ProfilePage /></MemoryRouter>);
+  await act(async () => {});
+};
+const polite = (): string => document.querySelector('[data-owp-live="polite"]')?.textContent ?? '';
+const assertive = (): string => document.querySelector('[data-owp-live="assertive"]')?.textContent ?? '';
+
 afterEach(cleanup);
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
+  announce('');
+  announce('', { assertive: true });
   getMyProfile.mockResolvedValue(PROFILE);
 });
 
 describe('a failed profile read is a designed, retryable state (PROF-UX-3)', () => {
   it('renders the retry StateCard, not a skeleton and not the raw error', async () => {
     getMyProfile.mockRejectedValue(new Error('503 backend exploded'));
-    await mount();
+    await mountWithLive();
     expect(document.querySelector('.skeleton')).toBeNull();
     expect(document.body.textContent).toContain('Could not load your profile');
-    // No raw err.message on the page — the copy is the designed state's.
+    // ANNOUNCED — the card speaks its title through the shell's polite region.
+    expect(polite()).toContain('Could not load your profile');
+    // No raw err.message anywhere — not on the page, not toasted (the live
+    // regions are in the body, so this covers a raw `toast.error(err)` too).
     expect(document.body.textContent).not.toContain('503 backend exploded');
+    expect(assertive()).toBe('');
     expect(screen.getByRole('button', { name: 'Try again' })).toBeTruthy();
   });
 
@@ -116,14 +148,6 @@ describe('the portfolio section is reachable (PROF-UX-4)', () => {
     expect(meter.getAttribute('aria-valuenow')).toBe('40');
   });
 });
-
-/** The shell's live regions BY NAME — `toast.error` speaks through the assertive
- *  one (PROF-UX-20), `toast.success` through the polite one. */
-const mountWithLive = async (): Promise<void> => {
-  render(<MemoryRouter><GlobalLiveRegion /><ProfilePage /></MemoryRouter>);
-  await act(async () => {});
-};
-const assertive = (): string => document.querySelector('[data-owp-live="assertive"]')?.textContent ?? '';
 
 describe('the hours-range error is a FIELD error, not a toast (PROF-UX-12)', () => {
   it('attaches to the field: aria-invalid + aria-describedby + focus, and no save request', async () => {
@@ -182,7 +206,7 @@ describe('"Add skill" moves focus into the new row (PROF-UX-18)', () => {
     expect(inputs[1]!.value).toBe('');
   });
 
-  it('removing a row keeps the OTHER row intact (rows are keyed by id, not index)', async () => {
+  it('removing a row removes THAT row and keeps the other intact', async () => {
     await mount();
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Add skill' })); });
     const inputs = screen.getAllByRole('textbox', { name: 'Skill name' }) as HTMLInputElement[];
@@ -220,12 +244,19 @@ describe('portfolio refusals are localized and client-side (PROF-UX-13)', () => 
     expect(uploadImage).not.toHaveBeenCalled();
   });
 
-  it('an in-cap image goes through to the upload (the negative control)', async () => {
+  it('an in-cap image goes through to the upload and lands in the portfolio (the negative control)', async () => {
     uploadImage.mockResolvedValue('tok-new');
+    addPortfolio.mockResolvedValue({ ...PROFILE, portfolioAssetTokens: ['tok-portfolio-1', 'tok-new'] });
     await mountWithLive();
     const file = new File(['x'], 'ok.png', { type: 'image/png' });
     await act(async () => { fireEvent.change(portfolioInput(), { target: { files: [file] } }); });
-    expect(uploadImage).toHaveBeenCalledTimes(1);
+    expect(uploadImage).toHaveBeenCalledWith(file);
+    expect(addPortfolio).toHaveBeenCalledWith('tok-new');
+    // The observable outcome: the saved profile is re-seeded — two images, two removes.
+    expect(screen.getAllByRole('img', { name: 'Portfolio image' })).toHaveLength(2);
+    expect(screen.getByRole('button', { name: 'Remove portfolio image 2' })).toBeTruthy();
+    expect(polite()).toContain('Portfolio image added.');
+    expect(assertive()).toBe('');
   });
 });
 
@@ -249,10 +280,10 @@ describe('the completeness "what next" caption (PROF-UX-14; `completenessMissing
   });
 
   it('maps EVERY id in the backend contract to a catalog key that exists (no raw id can reach the caption)', () => {
-    // Exhaustive by construction (`Record<CompletenessFieldId, string>`), but the
-    // KEYS are strings — this pins that each one is a real `profiles` catalog key
-    // and that the caption nouns are bare (the form hint suffix never leaks).
-    expect(Object.keys(COMPLETENESS_FIELD_KEY).sort()).toEqual([...COMPLETENESS_FIELD_IDS].sort());
+    // Key-set exhaustiveness is the compiler's job (`Record<CompletenessFieldId,
+    // string>` object literal); this pins what tsc cannot — that each VALUE is a
+    // real `profiles` catalog key and that the caption nouns are bare (the form
+    // hint suffix never leaks).
     for (const id of COMPLETENESS_FIELD_IDS) {
       const key = COMPLETENESS_FIELD_KEY[id];
       const label = (enMessages as Record<string, string>)[key];

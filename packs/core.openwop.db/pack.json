@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.db",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Database adapter primitives — sql, nosql, search, vector. Each gated on its host capability (host.sql, host.nosql, host.searchIndex, host.vectorStore) per. Pack speaks no driver — delegates to ctx.db.*. Parametric SQL only (host enforces).",
   "author": "OpenWOP Working Group",
   "license": "Apache-2.0",
@@ -15,7 +15,7 @@
     "search"
   ],
   "engines": {
-    "openwop": ">=1.0.0 <2.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "runtime": {
     "language": "javascript",
@@ -204,5 +204,6 @@
       "inputSchemaRef": "schemas/vector-delete.input.json",
       "outputSchemaRef": "schemas/vector-delete.output.json"
     }
-  ]
+  ],
+  "kind": "node"
 }

@@ -1,6 +1,7 @@
 {
   "name": "feature.priority-matrix.nodes",
-  "version": "1.5.0",
+  "version": "1.5.1",
+  "kind": "node",
   "description": "Priority Matrix feature node pack — read + write nodes over the ctx.features['priority-matrix'] surface shipped by the Priority Matrix feature package. Lets a workflow (or a chat agent via the agent pack) capture ideas, score them, read the ranking, and generate a planning agenda.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
@@ -12,7 +13,7 @@
     "prioritization"
   ],
   "engines": {
-    "openwop": ">=1.0.0 <2.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "nodes": [
     {

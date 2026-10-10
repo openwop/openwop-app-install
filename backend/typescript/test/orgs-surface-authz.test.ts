@@ -1,11 +1,14 @@
 /**
  * ADR 0622 D2 — `ctx.features.orgs.{invite,listInvitations,revokeInvitation}`
  * authority, per LANE (the `users-surface-authz.test.ts` shape: no lane is
- * assumed unreachable), over the REAL app (`createApp` registers the ADR 0621
- * session authority + the surface) with the host-event dispatcher re-pointed
- * at FAKE fanout deps so every emit is observable, and a FAKE SendGrid endpoint
- * so the success lane is a REAL delivery through the acting user's brokered
- * connection.
+ * assumed unreachable). The claim is the SURFACE's decision and no case makes
+ * an HTTP call, so this runs at the SERVICE layer (no `createApp`): a memory
+ * storage + host-ext persistence, the secret resolver (the brokered connection
+ * stores its key through it), the users feature's REAL ADR 0621 session
+ * authority and the `orgs` toggle default registered exactly as boot does, the
+ * host-event dispatcher re-pointed at FAKE fanout deps so every emit is
+ * observable, and a FAKE SendGrid endpoint so the success lane is a REAL
+ * delivery through the acting user's brokered connection.
  *
  *   SYSTEM-RUN lane      → 403 `forbidden_scope` / `no_acting_user`; no row, no event;
  *   DISABLED-ACTOR lane  → 403 `acting_user_disabled`;
@@ -29,12 +32,44 @@
  *                          exist) — observed as the delivery decision, since a
  *                          `user:` tenant's secret needs KMS this harness lacks;
  *   plus the pack body's precedence (inputs → config) and typed refusals.
+ *
+ * The `orgs` toggle is ON for this file so a token PREVIEW is meaningful: the
+ * accept/preview path gates on the invite tenant's toggle, and with it off
+ * every preview fails `invalid_invite` — which made the "the old link is dead"
+ * checks unable to fail. Tokens are read off the fake provider's requests (the
+ * surface never returns one), with a live-token CONTROL beside each dead one.
+ *
+ * PERSONAL-OWNER: the root is founded under the owner's PRINCIPAL, not their
+ * userId, so no member row matches the acting user and the lane passes ONLY
+ * through the personal-owner short-circuit (seeding the userId as owner made
+ * it pass by membership, and the short-circuit went unwitnessed).
+ *
+ * Sabotage that turns it red (`src/features/orgs/surface.ts` unless noted):
+ * `if (!actingUserId)` → `if (false)`; the `startsWith('user:')` durability
+ * gate disabled; `!live || live.status !== 'active'` → `!live`; the disabled /
+ * erased reasons swapped; the `assertOrgScope(` call removed; the actor-derived
+ * `personalTenant` forced undefined; `accessControlService.ts` `assertOrgScope`
+ * dropping its tenant compare; `if (!baseUrl)` disabled; `invitationsService.ts`
+ * `EMAIL_RE` disabled, the D5 rollback disabled, or `{ replace: false }` →
+ * `true`; the `workflowId` / `chainId` origin spreads removed; `email` added to
+ * the list projection; an `invitationRevoked` emitted by the surface revoke;
+ * `packs/feature.orgs.nodes/index.mjs` value precedence inverted.
+ *
+ * BARRIER. `delivered` needs no wait (`emitHostEvent` calls `deliverWebhooks`
+ * before its first await, inside the surface call); `settle()` only drains the
+ * binding loop → `startRun`, a microtask chain over memory storage.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import type { Express } from 'express';
-import { createApp } from '../src/index.js';
+import { openStorage } from '../src/storage/index.js';
+import { initHostExtPersistence, __resetHostExtPersistence } from '../src/host/hostExtPersistence.js';
+import { registerSessionAuthority } from '../src/host/sessionAuthority.js';
+import { configureSecretResolver } from '../src/byok/secretResolver.js';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { usersSessionAuthority } from '../src/features/users/feature.js';
 import type { Storage } from '../src/storage/storage.js';
 import type { StartRunDeps } from '../src/host/runStarter.js';
 import { createMember, createOrg, ensurePersonalWorkspace } from '../src/host/accessControlService.js';
@@ -49,6 +84,9 @@ import {
 import { createUser, deleteUser, setUserStatus, type User } from '../src/features/users/usersService.js';
 import { buildOrgsSurface } from '../src/features/orgs/surface.js';
 import { listInvitations, previewInvitation } from '../src/features/orgs/invitationsService.js';
+import { saveConfig } from '../src/host/featureToggles/service.js';
+import { registerToggleDefault } from '../src/host/featureToggles/registry.js';
+import { orgsFeature } from '../src/features/orgs/feature.js';
 import { INVITATION_CREATED_EVENT, INVITATION_REVOKED_EVENT } from '../src/features/orgs/emit.js';
 import { OpenwopError } from '../src/types.js';
 
@@ -56,8 +94,6 @@ const orgsPack = await import(
   /* @vite-ignore */ new URL('../../../packs/feature.orgs.nodes/index.mjs', import.meta.url).href
 ) as { nodes: Record<string, (ctx: unknown) => Promise<{ status: string; outputs: Record<string, unknown> }>> };
 
-let server: http.Server;
-let app: Express;
 let storage: Storage;
 let sg: http.Server;
 let requests: Array<{ body: string }> = [];
@@ -70,7 +106,8 @@ let foreign: User;
 
 let delivered: HostEventEnvelope[];
 let startRunCalls: Array<{ tenantId: string; workflowId: string; metadata?: Record<string, unknown> }>;
-const settle = () => new Promise((r) => setTimeout(r, 15));
+/** Drain the fire-and-forget binding loop (see BARRIER) — no wall-clock sleep. */
+const settle = async (): Promise<void> => { for (let i = 0; i < 5; i++) await new Promise<void>((r) => setImmediate(r)); };
 const ofType = (t: string) => delivered.filter((e) => e.type === t);
 const BASE_URL = 'https://app.acme.test';
 
@@ -78,15 +115,22 @@ async function refuse(p: Promise<unknown>): Promise<OpenwopError> {
   try { await p; } catch (e) { if (e instanceof OpenwopError) return e; throw e; }
   throw new Error('expected a refusal, got success');
 }
+/** The accept-link token in the i-th real provider request (the surface never returns one). */
+function tokenOf(i: number): string {
+  const m = /invitations\/accept\?token=([A-Za-z0-9_.~%-]+)/.exec(requests[i]?.body ?? '');
+  if (!m) throw new Error(`no accept link in provider request ${i}`);
+  return decodeURIComponent(m[1]!);
+}
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
   process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE = 'true';
   delete process.env.OPENWOP_DEMO_MODE;
-  app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  storage = app.locals.storage as Storage;
-  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => res()); });
+  storage = await openStorage('memory://');
+  initHostExtPersistence(storage);
+  configureSecretResolver({ storage, dataDir: mkdtempSync(join(tmpdir(), 'orgs-surface-authz-')) });
+  registerSessionAuthority(usersSessionAuthority);
   await __resetConnectionsStore();
 
   sg = http.createServer((req, res) => {
@@ -101,8 +145,8 @@ beforeAll(async () => {
   // a `ws:`/`user:` tenant routes secret connections through KMS, which this
   // harness does not configure; the authority under test does not depend on
   // the tenant's shape (only the personal-owner lane does, and it is separate).
-  WS = `org:u622-ws-${Date.now()}`;
-  OTHER = `org:u622-other-${Date.now()}`;
+  WS = 'org:u622-ws'; // fixed: one app per file, nothing collides
+  OTHER = 'org:u622-other';
   await ensurePersonalWorkspace({ tenantId: WS, ownerSubject: 'oidc:u622-founder', name: 'ADR 0622 workspace' });
   await ensurePersonalWorkspace({ tenantId: OTHER, ownerSubject: 'oidc:u622-other-founder', name: 'Elsewhere' });
   ORG_B = (await createOrg({ tenantId: WS, createdBy: 'oidc:u622-founder', name: 'Org B (no admin seat)' })).orgId;
@@ -114,12 +158,16 @@ beforeAll(async () => {
   await createMember({ orgId: WS, tenantId: WS, displayName: 'Editor', subject: editor.userId, roles: ['editor'] });
   await setSenderAddress(WS, WS, 'invites@acme.test', 'test');
   await createSecretConnection({ tenantId: WS, provider: 'sendgrid', kind: 'api_key', secret: 'SG.orgs', scope: 'user', userId: admin.userId });
+  // Previews gate on the invite tenant's `orgs` toggle (see header).
+  // (Registered exactly as boot registers it from `orgsFeature.toggleDefault`.)
+  registerToggleDefault(orgsFeature.toggleDefault!);
+  await saveConfig({ ...orgsFeature.toggleDefault!, status: 'on' }, 'test');
 });
 afterAll(async () => {
   delete process.env.OPENWOP_SENDGRID_API_BASE;
   delete process.env.OPENWOP_PUBLIC_BASE_URL;
   await new Promise<void>((r) => sg.close(() => r()));
-  await new Promise<void>((res) => server.close(() => res()));
+  await storage.close(); __resetHostExtPersistence();
 });
 
 beforeEach(async () => {
@@ -326,7 +374,6 @@ describe('MANAGER lane — success: real delivery, ONE created with origin, ids-
   it('a re-invite of a LIVE (org, email) from a run supersedes only after delivery: created{superseded:true}, one row, the old token dead', async () => {
     const email = uniqEmail('again');
     const first = await asUser(admin.userId).invite({ email });
-    const firstRow = (await listInvitations(WS, WS)).find((i) => i.inviteId === first.inviteId)!;
     const second = await asUser(admin.userId).invite({ email, role: 'admin' });
     expect(second.inviteId).not.toBe(first.inviteId);
     expect((await listInvitations(WS, WS)).map((i) => i.inviteId)).toEqual([second.inviteId]);
@@ -336,7 +383,8 @@ describe('MANAGER lane — success: real delivery, ONE created with origin, ids-
     expect(evs[1]!.payload.previousStatus).toBe('pending');
     // Two REAL sends (two inviteIds ⇒ two send-once keys); the accept link of the first is dead.
     expect(requests).toHaveLength(2);
-    expect(firstRow.tokenHash).toBeTruthy();
+    await expect(previewInvitation(tokenOf(0))).rejects.toMatchObject({ code: 'invalid_invite' });
+    await expect(previewInvitation(tokenOf(1))).resolves.toMatchObject({ role: 'admin' }); // control: the live link previews
     await asUser(admin.userId).revokeInvitation({ inviteId: second.inviteId });
   });
 
@@ -345,7 +393,9 @@ describe('MANAGER lane — success: real delivery, ONE created with origin, ids-
     const owner = await createUser({ tenantId: home, principalId: 'oidc:u622-owner', source: 'oidc', email: 'owner@home.test' }, { silent: true });
     // No root org row yet → the org-existence check comes FIRST (uniform 404).
     expect((await refuse(asUser(owner.userId, home).invite({ email: uniqEmail('home') }))).httpStatus).toBe(404);
-    await ensurePersonalWorkspace({ tenantId: home, ownerSubject: owner.userId });
+    // Founded under the PRINCIPAL, not the userId: no member row matches the
+    // acting user, so authority can pass ONLY through the short-circuit.
+    await ensurePersonalWorkspace({ tenantId: home, ownerSubject: 'oidc:u622-owner' });
     await setSenderAddress(home, home, 'me@home.test', 'test');
     // AUTHORITY passes (the short-circuit) — what follows is the delivery
     // decision: a `user:` tenant's secret connection needs KMS, which this
@@ -355,9 +405,11 @@ describe('MANAGER lane — success: real delivery, ONE created with origin, ids-
     expect(err.httpStatus).toBe(422);
     expect(err.details).toMatchObject({ reason: 'undeliverable', cause: 'no_connection' });
     expect(await listInvitations(home, home)).toHaveLength(0);
-    // …but a user whose home tenant is NOT personal-shaped gets no such short-circuit
-    // in a workspace they are not seated in (USERS-19 applied to the run lane).
-    expect((await refuse(asUser(foreign.userId, OTHER).invite({ email: uniqEmail('x') }))).httpStatus).toBe(403);
+    // (A former negative half — a non-personal-home user refused in an unseated
+    // tenant — was cut: it is guarded twice (this surface's shape check AND
+    // `assertOrgScope`'s), so no single break reddens it, and it reds only when
+    // `assertOrgScope` is removed, where the EDITOR lane and the CROSS-ORG
+    // `foreign` line already go red.)
   });
 });
 
@@ -395,8 +447,9 @@ describe('the pack body — value precedence and the typed refusals', () => {
     const list = await orgsPack.nodes['feature.orgs.nodes.list-invitations']!(ctx({ inputs: {}, config: {} }));
     expect(list.outputs).toEqual({ orgId: WS, count: 1, invitations: [expect.objectContaining({ inviteId: minted.inviteId, status: 'pending' })] });
     expect(JSON.stringify(list.outputs)).not.toContain('@invitee.test');
+    await expect(previewInvitation(tokenOf(0))).resolves.toMatchObject({ role: 'viewer' }); // control: live before the revoke
     const rev = await orgsPack.nodes['feature.orgs.nodes.revoke-invitation']!(ctx({ inputs: { inviteId: minted.inviteId }, config: {} }));
     expect(rev.outputs).toEqual({ inviteId: minted.inviteId, orgId: WS, revoked: true });
-    await expect(previewInvitation('orginv_dead')).rejects.toMatchObject({ code: 'invalid_invite' });
+    await expect(previewInvitation(tokenOf(0))).rejects.toMatchObject({ code: 'invalid_invite' }); // the revoke killed the link
   });
 });

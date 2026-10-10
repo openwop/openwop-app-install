@@ -1,8 +1,8 @@
 /**
  * CFP-1 (CHAT-FIRST-PORT-AUDIT #1) — the commerce chat surfaces are now REAL.
  *
- * Before this port both `feature.commerce.agents.store-assistant` and
- * `feature.commerce.buyer.agents.procurement-concierge` allowlisted node typeIds
+ * Before this port both `vendor.openwop-app.commerce.agents.store-assistant` and
+ * `vendor.openwop-app.commerce.buyer.agents.procurement-concierge` allowlisted node typeIds
  * that nothing projected into the tool loop, so each agent dispatched with ZERO
  * callable tools. This boots the REAL app (the ADR 0308 registration seam under
  * test) and asserts: (1) every registered id is offerable + the pack allowlists
@@ -67,12 +67,12 @@ describe('CFP-1 — registration + allowlist parity (the missing "agents have to
   });
 
   it('the Store Assistant pack allowlist equals exactly the registered ids', () => {
-    const manifest = JSON.parse(readFileSync(new URL('../../../packs/feature.commerce.agents/pack.json', import.meta.url), 'utf8')) as { agents: { toolAllowlist: string[] }[] };
+    const manifest = JSON.parse(readFileSync(new URL('../../../packs/vendor.openwop-app.commerce.agents/pack.json', import.meta.url), 'utf8')) as { agents: { toolAllowlist: string[] }[] };
     expect([...manifest.agents[0]!.toolAllowlist].sort()).toEqual([...COMMERCE_STORE_TOOL_IDS].sort());
   });
 
   it('the Procurement Concierge pack allowlist equals exactly the registered ids', () => {
-    const manifest = JSON.parse(readFileSync(new URL('../../../packs/feature.commerce.buyer.agents/pack.json', import.meta.url), 'utf8')) as { agents: { toolAllowlist: string[] }[] };
+    const manifest = JSON.parse(readFileSync(new URL('../../../packs/vendor.openwop-app.commerce.buyer.agents/pack.json', import.meta.url), 'utf8')) as { agents: { toolAllowlist: string[] }[] };
     expect([...manifest.agents[0]!.toolAllowlist].sort()).toEqual([...COMMERCE_BUYER_TOOL_IDS].sort());
   });
 });

@@ -43,7 +43,7 @@ const SECONDARY = 'sample-conformance-token-secondary';
 const KEYS = `${PRIMARY}:*,${SECONDARY}:conformance-secondary`;
 
 async function toolsList(bearer: string): Promise<{ status: number; cacheScope?: string; tools?: unknown[] }> {
-  const res = await fetch(`${BASE}/v1/host/openwop-app/mcp`, {
+  const res = await fetch(`${BASE}/host/openwop-app/mcp`, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
@@ -118,7 +118,7 @@ describe('RFC 0153 §D — the cross-caller cache leg, driven locally', () => {
     // through a tenant-scoped route rather than by re-deriving the key table,
     // which would restate the premise instead of checking it.
     const whoami = async (bearer: string): Promise<string | undefined> => {
-      const res = await fetch(`${BASE}/v1/runs?limit=1`, { headers: { authorization: `Bearer ${bearer}` } });
+      const res = await fetch(`${BASE}/runs?limit=1`, { headers: { authorization: `Bearer ${bearer}` } });
       return res.headers.get('x-openwop-tenant') ?? undefined;
     };
     // Not every build echoes a tenant header; the load-bearing assertion is that

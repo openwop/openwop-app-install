@@ -141,7 +141,12 @@ export async function resolveBorrowedRecall(
   let on = false;
   let toggleUnreadable = false;
   try {
-    on = (await resolveOne(TOGGLE_ID, { tenantId, ...(ctx?.callerUserId ? { userId: ctx.callerUserId } : {}) }))?.enabled ?? false;
+    const access = await resolveOne(TOGGLE_ID, { tenantId, ...(ctx?.callerUserId ? { userId: ctx.callerUserId } : {}) });
+    // ADR 0819 §1 — `resolveOne` now also reads the plan, and turns an
+    // entitlement-read FAULT into `blockedBy:'unresolved'` rather than a throw.
+    // That is still a fault, not a clean "off", so it takes the D3 fault path.
+    if (access?.blockedBy === 'unresolved') throw new Error('entitlement read unresolved');
+    on = access?.enabled ?? false;
   } catch (err) {
     toggleUnreadable = true;
     log.warn('twin_recall_toggle_unreadable', {

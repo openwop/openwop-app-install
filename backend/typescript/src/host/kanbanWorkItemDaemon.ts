@@ -27,6 +27,7 @@ import type { Storage } from '../storage/storage.js';
 import { getInstanceId } from './instanceId.js';
 import { createLogger } from '../observability/logger.js';
 import { recordKanbanWorkItemDelivery } from '../observability/metricSeams.js';
+import { WorkflowFeatureRefusedError } from './workflowFeatureGate.js';
 
 const log = createLogger('host.kanbanWorkItemDaemon');
 const POLL_INTERVAL_MS = 5_000;
@@ -78,6 +79,22 @@ export async function sweepKanbanWorkItemOutbox(
       recordKanbanWorkItemDelivery('auto', 'started');
       started += 1;
     } catch (err) {
+      // ADR 0820 §7 / G6 — the work item's workflow belongs to a feature this
+      // tenant may not use (a lapsed plan, a toggle off). Not a transient fault:
+      // retrying until dead-letter would only repeat the refusal and warn each
+      // time. Fail the reservation with the honest reason and close the delivery.
+      if (err instanceof WorkflowFeatureRefusedError && reservation?.kind === 'started') {
+        await failWorkItemExecutionReservation(
+          delivery.entry.tenantId,
+          delivery.entry.workItemId,
+          reservation.runId,
+          `feature-refused: ${err.featureId} (${err.blockedBy})`,
+          now,
+        );
+        await completeWorkItemOutbox(delivery, now);
+        recordKanbanWorkItemDelivery('auto', 'not-eligible');
+        continue;
+      }
       const error = err instanceof Error ? err.message : String(err);
       const exhausted = delivery.entry.attempts >= MAX_OUTBOX_ATTEMPTS;
       await rescheduleWorkItemOutbox(delivery, {

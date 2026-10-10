@@ -81,7 +81,12 @@ const SRC = process.env.OPENWOP_GATE_SRC
 // ONLY via the form's submit, so a step whose form is deleted, unpublished or
 // toggled off was a dead end with no way out — the gate-with-no-exit shape.
 // A deliberate raise, not drift.
-const BASELINE = readGateBaseline('check-unwrapped-buttons', 'OPENWOP_UNWRAPPED_BUTTONS_BASELINE', 249);
+// 249 → 250 (2026-09-27, ADR 0762): the front page's intro-film play button
+// (`.fp-film__play`, SectionRenderer.tsx HeroFilm) — an overlay pill on the
+// poster that hands over to the native video controls. Public fp-system chrome
+// with its own treatment; `<Button variant>` would assert intent its CSS does
+// not have. A deliberate raise, not drift.
+const BASELINE = readGateBaseline('check-unwrapped-buttons', 'OPENWOP_UNWRAPPED_BUTTONS_BASELINE', 250);
 /** Migration debt. Ratchets to ZERO; its exit is the element-rule flip. */
 const VARIANT_BASELINE = readGateBaseline('check-unwrapped-buttons', 'OPENWOP_VARIANT_BUTTONS_BASELINE', 0);
 /** The variant vocabulary a raw button can carry. Bare (no className) counts too. */

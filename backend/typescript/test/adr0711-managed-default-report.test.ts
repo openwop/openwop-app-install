@@ -21,10 +21,10 @@ import { createApp } from '../src/index.js';
 
 let server: Server;
 let BASE = '';
-const AC = '/v1/host/openwop-app/byok/active-config';
+const AC = '/host/openwop-app/byok/active-config';
 
 async function login(): Promise<string> {
-  const res = await fetch(`${BASE}/v1/host/openwop-app/test/login`, {
+  const res = await fetch(`${BASE}/host/openwop-app/test/login`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ email: `optionb-${Date.now()}@acme.test` }),
@@ -66,7 +66,7 @@ describe('ADR 0711 option B — the effective default is reported, not invented'
 
     // Store a real binding and prove the SAME field flips. Without this the flag could be
     // hard-coded false and leg 1 would still pass.
-    expect((await call('/v1/host/openwop-app/byok/secrets', c, 'POST', { credentialRef: 'byok:google', value: 'AIza-optionb' })).status).toBe(201);
+    expect((await call('/host/openwop-app/byok/secrets', c, 'POST', { credentialRef: 'byok:google', value: 'AIza-optionb' })).status).toBe(201);
     const put = await call(AC, c, 'PUT', { provider: 'google', model: 'gemini-3.1-flash-lite', credentialRef: 'byok:google' });
     expect(put.status, await put.text()).toBe(200);
 

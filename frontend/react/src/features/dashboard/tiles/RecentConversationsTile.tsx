@@ -5,9 +5,10 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
-import { listChatSessions, type ChatSessionHeader } from '../../../client/chatSessionsClient.js';
+import type { ChatSessionHeader } from '../../../client/chatSessionsClient.js';
 import { SkeletonRows } from '../../../ui/Skeleton.js';
 import { formatRelativeTime } from '../../../i18n/format.js';
+import { readChatSessions } from '../sharedReads.js';
 import type { DashboardTileProps } from '../tileTypes.js';
 
 export default function RecentConversationsTile({ compact }: DashboardTileProps): JSX.Element {
@@ -17,7 +18,7 @@ export default function RecentConversationsTile({ compact }: DashboardTileProps)
 
   useEffect(() => {
     let live = true;
-    listChatSessions()
+    readChatSessions()
       .then((s) => { if (live) setSessions(s.slice(0, compact ? 4 : 8)); })
       .catch(() => { if (live) { setSessions([]); setError(true); } });
     return () => { live = false; };

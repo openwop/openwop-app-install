@@ -1,7 +1,7 @@
 /**
  * Strategy Analyst chat tools (CFP-1 / ADR 0080 §Phase C, the ADR 0308 D2
  * deliverable-tool seam) — the REAL conversational tools the
- * `feature.strategy.agents.strategy-analyst` pack allowlists.
+ * `vendor.openwop-app.strategy.agents.strategy-analyst` pack allowlists.
  *
  * The founding defect (CHAT-FIRST-PORT-AUDIT #1): the pack allowlisted
  * `openwop:feature.strategy.nodes.*` — node typeIds NO host registrant projects
@@ -98,6 +98,7 @@ export function registerStrategyAgentTools(): void {
   // ── READ: the workspace's shared strategies (compact refs). ──────────────
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: STRATEGY_LIST_TOOL_ID,
       description:
@@ -123,6 +124,7 @@ export function registerStrategyAgentTools(): void {
   // ── READ: one strategy, RESOLVED (objectives + linked execution + health). ──
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: STRATEGY_GET_TOOL_ID,
       description:
@@ -155,6 +157,7 @@ export function registerStrategyAgentTools(): void {
   // ── READ: the strategy context packet for a consumer ref. ────────────────
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: STRATEGY_CONTEXT_TOOL_ID,
       description:
@@ -197,6 +200,7 @@ export function registerStrategyAgentTools(): void {
   // ── READ: per-strategy health rollup over the readable portfolio. ────────
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: STRATEGY_HEALTH_TOOL_ID,
       description:
@@ -220,6 +224,7 @@ export function registerStrategyAgentTools(): void {
   //    read-only). Persists through the Documents owner (ADR 0308 / ADR 0080). ──
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: STRATEGY_BOARD_MEMO_TOOL_ID,
       description:

@@ -5,8 +5,14 @@
  * the honeypot inside `values` (the server contract), shows the form's
  * `submitMessage` on success, and renders the unavailable slot on 404 (no
  * draft-existence leak).
+ *
+ * Sabotages that redden it (grade-tests wave 8): dropping the honeypot from
+ * `values` or its visually-hidden wrapper, skipping the client-validation
+ * block, flipping the embed-context merge order, dropping either onSubmitted
+ * hook, mapping 404 to load-failed, or judging/sending `schema.fields` instead
+ * of the visible ones. This file is the home of the 404 positive case.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { PublicFormRenderer } from '../render/PublicFormRenderer.js';
 import { FormEmbedProvider } from '../render/embedContext.js';
@@ -22,8 +28,8 @@ const SCHEMA = {
   submitMessage: 'We will be in touch.',
 };
 
-function mockFetch(handlers: { get?: () => Response; post?: (body: unknown) => Response }): ReturnType<typeof vi.fn> {
-  const fn = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+function mockFetch(handlers: { get?: () => Response; post?: (body: unknown) => Response }): Mock<typeof fetch> {
+  const fn = vi.fn<typeof fetch>(async (_url, init) => {
     if (init?.method === 'POST') return handlers.post!(JSON.parse(String(init.body)));
     return handlers.get!();
   });
@@ -35,7 +41,9 @@ const ok = (body: unknown, status = 200): Response => new Response(JSON.stringif
 
 describe('PublicFormRenderer', () => {
   beforeEach(() => vi.restoreAllMocks());
-  afterEach(() => vi.unstubAllGlobals());
+  // The renderer writes a device draft on every keystroke; without this a case
+  // that types but does not submit would RESUME into the next case (wave 8).
+  afterEach(() => { vi.unstubAllGlobals(); localStorage.clear(); sessionStorage.clear(); });
 
   it('renders labeled fields + a visually-hidden honeypot, and submits with the honeypot inside values', async () => {
     let posted: { values?: Record<string, unknown> } = {};
@@ -99,5 +107,32 @@ describe('PublicFormRenderer', () => {
     render(<PublicFormRenderer formId="form:x" renderUnavailable={() => <div>gone</div>} />);
     await screen.findByText('gone');
     expect(screen.queryByRole('button')).toBeNull();
+  });
+
+  it('ADR 0808 — a field with `when` appears only when its condition holds, and a hidden one is never sent', async () => {
+    let posted: { values?: Record<string, unknown> } = {};
+    mockFetch({
+      get: () => ok({
+        ...SCHEMA,
+        fields: [
+          { key: 'shipping', label: 'Shipping', type: 'select', required: true, options: ['domestic', 'international'] },
+          { key: 'region', label: 'Region', type: 'text', required: true, when: { type: 'equals', left: 'fields.shipping', right: 'international' } },
+        ],
+      }),
+      post: (body) => { posted = body as { values?: Record<string, unknown> }; return ok({ ok: true, submissionId: 'sub:2' }, 201); },
+    });
+    render(<PublicFormRenderer formId="form:1" />);
+    await screen.findByText('Contact us');
+    expect(screen.queryByLabelText(/Region/)).toBeNull();
+    fireEvent.change(screen.getByLabelText(/Shipping/), { target: { value: 'international' } });
+    expect(await screen.findByLabelText(/Region/)).toBeTruthy();
+    fireEvent.change(screen.getByLabelText(/Region/), { target: { value: 'EU' } });
+    // Switch back: Region disappears, and its typed value must not ride along.
+    fireEvent.change(screen.getByLabelText(/Shipping/), { target: { value: 'domestic' } });
+    expect(screen.queryByLabelText(/Region/)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Submit' }));
+    await screen.findByText('We will be in touch.');
+    expect(posted.values?.shipping).toBe('domestic');
+    expect(posted.values).not.toHaveProperty('region');
   });
 });

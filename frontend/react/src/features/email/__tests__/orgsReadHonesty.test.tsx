@@ -1,6 +1,12 @@
 /**
  * EM-R2-1 (email round 2) — a failed orgs read must not render the no-orgs
  * claim (the session's recurring shape; both polarities pinned).
+ *
+ * What is pinned is EmailPage's WIRING into `ui/OrgSelectionState`: `orgsFailed`
+ * (failed ≠ empty), `failedBody` (the email consequence clause) and `emptyBody`.
+ * Sabotage-witnessed (/grade-tests wave 9, `w9g4-or-*`): passing `orgsFailed={false}`,
+ * dropping `failedBody`, or folding an empty answer into the failed branch each turn
+ * a case red.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen } from '@testing-library/react';
@@ -37,7 +43,10 @@ describe('EM-R2-1 — email orgs honesty', () => {
   it('TRUTHFUL empty: the real no-orgs state survives', async () => {
     api.listOrgs.mockResolvedValue([]);
     render(<MemoryRouter><EmailPage /></MemoryRouter>);
-    expect(await screen.findByText(/organization/i, { selector: '.state-card__title' })).toBeTruthy();
+    // EXACT title: `/organization/` alone also matched the FAILED title
+    // ("Could not load your organizations"), i.e. it passed in the wrong state.
+    expect(await screen.findByText('No organizations', { selector: '.state-card__title' })).toBeTruthy();
+    expect(screen.getByText(/email templates and campaigns belong to an organization/i)).toBeTruthy();
     expect(screen.queryByText('Could not load your organizations')).toBeNull();
   });
 });

@@ -32,6 +32,7 @@ import {
   type IdempotentEndpoint,
 } from '../host/idempotentResponse.js';
 import { idempotencyOutcomeOf, recordIdempotencyClaim } from '../observability/metricSeams.js';
+import { requireTenantWrite } from '../features/featureRoute.js';
 
 const log = createLogger('routes.userAgents');
 
@@ -67,7 +68,7 @@ interface Deps {
 }
 
 /** ADR 0549 P0 — this route's entry in the ledger's closed endpoint union. */
-const AGENTS_ENDPOINT: IdempotentEndpoint = 'POST:/v1/host/openwop-app/agents';
+const AGENTS_ENDPOINT: IdempotentEndpoint = 'POST:/v1/host/openwop-app/agents';  // ADR 0812 KEEP: the persisted idempotency-key namespace (see idempotentResponse.ts)
 
 /* ADR 0549 P0 — the local `idempotencyBodyHashes` Map and `hashRequestBody`
  * are gone, and so is the reasoning that kept them here: "Kept local to this
@@ -80,13 +81,14 @@ const AGENTS_ENDPOINT: IdempotentEndpoint = 'POST:/v1/host/openwop-app/agents';
 export function registerUserAgentRoutes(app: Express, deps: Deps): void {
   const { storage } = deps;
 
-  app.post('/v1/host/openwop-app/agents', async (req, res, next) => {
+  app.post('/host/openwop-app/agents', async (req, res, next) => {
     // ADR 0549 P1 — hoisted above the try so the `finally` can release a claim
     // this handler won but never committed.
     let heldClaimToken: string | undefined;
     let heldKey: string | undefined;
     let heldTenantId: string | undefined;
     try {
+      await requireTenantWrite(req); // ADR 0775 D1
       const tenantId = readTenantId(req);
       // Idempotency-Key handling per spec/v1/idempotency.md Layer 1.
       // The flow matches `routes/runs.ts` POST /v1/runs:
@@ -247,8 +249,9 @@ export function registerUserAgentRoutes(app: Express, deps: Deps): void {
   // mutable fields. `agentId`/`tenantId`/`createdAt` are immutable; persona is
   // immutable too (it derives the agentId). Pack-installed agents are NOT
   // editable here (different storage) — the UI forks them instead.
-  app.patch('/v1/host/openwop-app/agents/:agentId', async (req, res, next) => {
+  app.patch('/host/openwop-app/agents/:agentId', async (req, res, next) => {
     try {
+      await requireTenantWrite(req); // ADR 0775 D1
       const tenantId = readTenantId(req);
       const { agentId } = req.params;
       // ADR 0379 P1 — tenant is in the storage predicate: a cross-tenant id is
@@ -298,8 +301,9 @@ export function registerUserAgentRoutes(app: Express, deps: Deps): void {
     }
   });
 
-  app.delete('/v1/host/openwop-app/agents/:agentId', async (req, res, next) => {
+  app.delete('/host/openwop-app/agents/:agentId', async (req, res, next) => {
     try {
+      await requireTenantWrite(req); // ADR 0775 D1
       const tenantId = readTenantId(req);
       const { agentId } = req.params;
       // ADR 0379 P1 — tenant is in the storage predicate: a cross-tenant id is

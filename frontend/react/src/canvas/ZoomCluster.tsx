@@ -29,6 +29,9 @@ export interface ZoomClusterProps {
   hasSelection?: boolean | undefined;
   zoomInDisabled?: boolean | undefined;
   zoomOutDisabled?: boolean | undefined;
+  /** A surface-specific fit target (the builder's "Fit to suggestion"), shown
+   *  after the standard fit entries. Absent ⇒ no extra entry. */
+  extraFit?: { label: string; onSelect: () => void } | undefined;
 }
 
 const PRESETS = [50, 100, 200];
@@ -55,6 +58,7 @@ export function ZoomCluster(p: ZoomClusterProps): JSX.Element {
           disabled: !p.hasSelection,
         }]
       : []),
+    ...(p.extraFit ? [{ id: 'extra-fit', label: p.extraFit.label, onSelect: p.extraFit.onSelect }] : []),
   ];
   return (
     <div className="cv-viewport__chrome" role="group" aria-label={t('zoomControls')}>

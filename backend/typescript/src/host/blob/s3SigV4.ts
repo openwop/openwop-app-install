@@ -46,8 +46,11 @@ function amzDate(d: Date): { amzdate: string; datestamp: string } {
 export interface PresignOptions {
   method: 'GET' | 'PUT' | 'DELETE' | 'HEAD';
   bucket: string;
-  /** Object key (may contain `/`; encoded per-segment). */
+  /** Object key (may contain `/`; encoded per-segment). `''` addresses the
+   *  bucket itself (ListObjectsV2). */
   key: string;
+  /** Extra signed query parameters (e.g. `list-type=2`, `prefix`). */
+  query?: Record<string, string>;
   region: string;
   accessKeyId: string;
   secretAccessKey: string;
@@ -85,13 +88,14 @@ export function presignS3Url(opts: PresignOptions): string {
   let canonicalUri: string;
   if (opts.forcePathStyle) {
     host = baseHost;
-    canonicalUri = `/${awsUriEncode(opts.bucket, true)}/${encKey}`;
+    canonicalUri = opts.key === '' ? `/${awsUriEncode(opts.bucket, true)}` : `/${awsUriEncode(opts.bucket, true)}/${encKey}`;
   } else {
     host = `${opts.bucket}.${baseHost}`;
     canonicalUri = `/${encKey}`;
   }
 
   const params: Record<string, string> = {
+    ...(opts.query ?? {}),
     'X-Amz-Algorithm': algorithm,
     'X-Amz-Credential': `${opts.accessKeyId}/${credentialScope}`,
     'X-Amz-Date': amzdate,

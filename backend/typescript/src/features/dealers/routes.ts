@@ -17,7 +17,9 @@ import { authorizeOrgScope, publicBaseUrl } from '../featureRoute.js';
 import { createDealer, listDealers, getDealer, updateDealer, deleteDealer, createOutlet, listOutlets, getOutlet, updateOutlet, deleteOutlet } from './entities/dealer.js';
 import { mintPartnerToken, resolvePartnerToken, createRegistration, listRegistrations, repairUnqueuedRegistrations, deleteDealerPrmData } from './entities/registration.js';
 import { dealerMutated } from './emit.js';
-import { resolveOne } from '../../host/featureToggles/service.js';
+import { VENDOR_ROOT } from '../../middleware/protocolVersion.js';
+import { resolveToggle } from '../../host/featureToggles/service.js';
+import { ownerPublicRuntimeLapsed } from '../../host/publicLapse.js';
 import { OpenwopError } from '../../types.js';
 
 const TOGGLE_ID = 'dealers';
@@ -27,7 +29,7 @@ const optStr = (v: unknown): string | undefined => (typeof v === 'string' && v.l
 
 export function registerDealerRoutes(deps: RouteDeps): void {
   const { app } = deps;
-  const BASE = '/v1/host/openwop-app/dealers/orgs/:orgId';
+  const BASE = '/host/openwop-app/dealers/orgs/:orgId';
 
   // ── Dealers ──
   app.get(`${BASE}/dealers`, async (req, res, next) => {
@@ -124,7 +126,8 @@ export function registerDealerRoutes(deps: RouteDeps): void {
       const { user, orgId, tenantId } = await authorize(req, 'workspace:write');
       const t = await mintPartnerToken(tenantId, orgId, req.params.dealerId);
       dealerMutated({ entity: 'dealer', verb: 'portal-issued', tenantId, orgId, actor: user.userId, entityId: req.params.dealerId });
-      res.status(201).json({ token: t.token, url: `${publicBaseUrl(req)}/v1/host/openwop-app/partner/${t.token}` });
+      // The unversioned vendor path: an issued link must outlive the ADR 0669 cut.
+      res.status(201).json({ token: t.token, url: `${publicBaseUrl(req)}${VENDOR_ROOT}/partner/${t.token}` });
     } catch (err) { next(err); }
   });
 
@@ -175,7 +178,8 @@ export function registerDealerRoutes(deps: RouteDeps): void {
     // put into a beta by USER id would have a working console and dead partner links —
     // a silent divergence. There is no request user here (that is the point of a public
     // route), so the tenant is all there is; the divergence is named rather than hidden.
-    const assignment = await resolveOne(TOGGLE_ID, { tenantId });
+    // ADR 0819 §1 opt-out — a PUBLIC lane (tenant from the resource): ADR 0419 never paywalls a shopper/visitor on the operator's plan.
+    const assignment = await resolveToggle(TOGGLE_ID, { tenantId });
     // REVIEW B2 — the FIRST version threw `'Not found.'` while a bad token throws
     // `'Invalid partner link.'`, and the error envelope emits `message` verbatim. So the
     // two 404s were distinguishable: with the feature off, an outsider probing links got
@@ -183,8 +187,11 @@ export function registerDealerRoutes(deps: RouteDeps): void {
     // handed out in exactly the state the operator believes the surface is gone. The
     // shapes must be identical, not merely both 404.
     if (!assignment?.enabled) throw new OpenwopError('not_found', 'Invalid partner link.', 404, {});
+    // ADR 0820 §7 — the merchant's lapse past the public grace window (off unless the knob is
+    // set). The partner is never refused for their own state; the shape is the same uniform 404.
+    if (await ownerPublicRuntimeLapsed(TOGGLE_ID, tenantId)) throw new OpenwopError('not_found', 'Invalid partner link.', 404, {});
   };
-  app.get('/v1/host/openwop-app/partner/:token', async (req, res, next) => {
+  app.get('/host/openwop-app/partner/:token', async (req, res, next) => {
     try {
       const t = await resolvePartnerToken(req.params.token);
       await requirePartnerFeatureEnabled(t.tenantId);
@@ -201,7 +208,7 @@ export function registerDealerRoutes(deps: RouteDeps): void {
       });
     } catch (err) { next(err); }
   });
-  app.post('/v1/host/openwop-app/partner/:token/register', async (req, res, next) => {
+  app.post('/host/openwop-app/partner/:token/register', async (req, res, next) => {
     try {
       const t = await resolvePartnerToken(req.params.token);
       await requirePartnerFeatureEnabled(t.tenantId);

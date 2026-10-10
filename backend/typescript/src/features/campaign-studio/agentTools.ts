@@ -36,7 +36,8 @@ import { resolveOne } from '../../host/featureToggles/service.js';
 import { listOrgs, resolveEffectiveAccess } from '../../host/accessControlService.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { getNodeRegistry } from '../../executor/nodeRegistry.js';
-import { createCanvasForTenant, getCanvasForTenant, updateCanvasForTenant } from '../../host/canvasSurface.js';
+import { createCanvasForTenant, getCanvasForCaller, updateCanvasForTenant } from '../../host/canvasSurface.js';
+import type { SubjectCaller } from '../../host/subjectAccess.js';
 import { OpenwopError } from '../../types.js';
 import { validateCampaignDoc } from './validateCampaignDoc.js';
 
@@ -96,6 +97,9 @@ interface RenderCampaignArgs {
   producedBy: Record<string, unknown>;
   runId?: string | undefined;
   capturedBy: string;
+  /** Who is asking — an update may only touch a canvas this caller may read
+   *  (the shared canvas predicate; ADR 0610 D3′). */
+  caller: SubjectCaller;
 }
 
 type RenderCampaignResult =
@@ -176,7 +180,7 @@ async function renderCampaign(tenantId: string, args: RenderCampaignArgs): Promi
     if (!Number.isInteger(baseVersion) || baseVersion < 1) {
       return { ok: false, error: 'validation_error', message: 'Updating an existing campaign requires `baseVersion` — read it with the get-design tool first.' };
     }
-    const existing = await getCanvasForTenant(tenantId, args.canvasId);
+    const existing = await getCanvasForCaller(tenantId, args.canvasId, args.caller);
     if (!existing || existing.canvasTypeId !== CAMPAIGN_CANVAS_TYPE) {
       return { ok: false, error: 'not_found', message: `Campaign '${args.canvasId}' not found in this workspace.` };
     }
@@ -218,6 +222,7 @@ export function registerCampaignStudioAgentTools(): void {
   // ── The campaign-state read path: the model READS the current campaign. ──
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     // ADR 0604 (TOCC-2) — closed world: an elided enum/id list here makes the
     // model author against a catalog that is not this host's.
     schemaCarrying: true,
@@ -248,7 +253,7 @@ export function registerCampaignStudioAgentTools(): void {
       if ('content' in gate) return gate;
       const canvasId = str(input.canvasId);
       if (!canvasId) return toolError('validation_error', '`canvasId` is required.');
-      const canvas = await getCanvasForTenant(scope.tenantId, canvasId);
+      const canvas = await getCanvasForCaller(scope.tenantId, canvasId, { subject: scope.actingUserId });
       if (!canvas || canvas.canvasTypeId !== CAMPAIGN_CANVAS_TYPE) {
         return toolError('not_found', `Campaign '${canvasId}' not found in this workspace.`);
       }
@@ -266,6 +271,7 @@ export function registerCampaignStudioAgentTools(): void {
   // ── The deliverable path: normalize → validate → persist → real reference. ──
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: CAMPAIGN_STUDIO_RENDER_TOOL_ID,
       description:
@@ -307,6 +313,7 @@ export function registerCampaignStudioAgentTools(): void {
         producedBy,
         runId: scope.runId,
         capturedBy: gate.actingUserId,
+        caller: { subject: gate.actingUserId },
       });
       if (!result.ok) return toolError(result.error, result.message, result.extra);
       return {

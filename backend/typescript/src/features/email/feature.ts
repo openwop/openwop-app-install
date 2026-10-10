@@ -29,7 +29,10 @@ export const emailFeature: BackendFeature = {
   },
   // Face 2 (ADR 0014): `ctx.features.email` — a thin read surface (templates) that
   // backs the feature.email.nodes pack + the copywriter agent.
-  surface: { id: 'email', build: buildEmailSurface },
+  // ADR 0848 D2 — `createDraftCampaign` WRITES a template + a campaign; its HTTP twin is
+  // `workspace:write`, so the ADR 0832 floor holds a run to the same tier. The three
+  // reads keep the default `workspace:read`.
+  surface: { id: 'email', build: buildEmailSurface, orgPolicy: { methodScopes: { createDraftCampaign: 'workspace:write' } } },
   toggleDefault: {
     id: 'email',
     label: 'Email Marketing',
@@ -40,8 +43,8 @@ export const emailFeature: BackendFeature = {
     salt: 'email',
   },
   requiredPacks: [
-    { name: 'feature.email.nodes', version: '1.2.0' },
-    { name: 'feature.email.agents', version: '1.0.1' },
+    { name: 'feature.email.nodes', version: '1.2.1' },
+    { name: 'vendor.openwop-app.email.agents', version: '1.0.2' },
   ],
   // ADR 0194 — a hard dependency: campaigns resolve their audience live from CRM
   // contacts (`crmService`), so Email Marketing has no audience without CRM. The

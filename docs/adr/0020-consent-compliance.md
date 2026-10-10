@@ -184,3 +184,11 @@ to `packs.openwop.dev` (decoupled from toggle state for replay).
 | Verify | `tsc --noEmit` clean; full suite green apart from the known pre-existing pack/env failures (none consent-related) |
 | **Consumers** | the `isAllowed` helper is ready; **Analytics (0018)** + **Email (0019)** call it when built (Phase 2 "wire into 0018/0019" completes with those features) |
 | Frontend (Phase 3) | `frontend/react/src/features/consent/` — `ConsentPage` (org picker → policy config + records + data-subject GDPR lookup/erase) + `consentClient.ts` + `routes.tsx`; appended to `FRONTEND_FEATURES`. `npm run build` gate green |
+
+> **CORRECTED 2026-10-09 (/grade-tests wave 9):** the "Tests" row above lists six `consent-route.test.ts`
+> cases. Two were removed as redundant: the `isAllowed` semantics case (necessary / fail-closed /
+> opt-out) is asserted by `consent-dsar-ungated.test.ts` ("toggle ON is still fail-closed"),
+> `consent-channels.test.ts` (matrix) and `consent-erasure-tombstone.test.ts` (ARM A); the node smoke by
+> `consent-node-args.test.ts`'s CONTROL arms. The toggle-off case keeps only its public-route 404 half
+> (the permissive `isAllowed` half is `consent-dsar-ungated.test.ts` "toggle OFF is still permissive").
+> Each covering case went red under the same sabotage probe.

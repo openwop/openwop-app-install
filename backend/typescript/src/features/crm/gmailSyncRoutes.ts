@@ -41,7 +41,7 @@ async function requireCrmEntitled(req: Request): Promise<void> {
   await requireFeatureEnabled(req, TOGGLE.toggleId, TOGGLE.label);
   await checkEntitlement(req, TOGGLE_ID);
 }
-const BASE = '/v1/host/openwop-app/crm/gmail-sync';
+const BASE = '/host/openwop-app/crm/gmail-sync';
 
 /** Resolve a `:syncId` row THEN gate `scope` on its (discovered) org — the
  *  same "stage req.params.orgId, reuse the shared gate" pattern

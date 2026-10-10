@@ -75,7 +75,7 @@
  *    `{{params.orgId}}` into `config`) plus the two chains that bound nothing.
  *
  *    WHAT THOSE TWO ASSERTIONS DO **NOT** DISCRIMINATE, stated rather than
- *    left to be assumed: the three runs below create `/v1/runs` WITH
+ *    left to be assumed: the three runs below create `/runs` WITH
  *    `inputs: params`, and the scheduler seeds a root node's inputs from the
  *    run's — so `orgId` also arrives via `ctx.inputs` and a node reading ONLY
  *    `ctx.inputs` still passes them. MEASURED by sabotage. They discriminate a
@@ -137,19 +137,19 @@ let n = 0;
 async function ownerOrg(): Promise<{ owner: Client; orgId: string; tenantId: string }> {
   const tenantId = `org:execops-${Date.now()}-${n++}`;
   const owner = client();
-  const r = await owner.post('/v1/host/openwop-app/test/login', { email: `execops-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await owner.post('/host/openwop-app/test/login', { email: `execops-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return { owner, orgId: org.body.orgId, tenantId };
 }
-const c = (orgId: string, suffix = ''): string => `/v1/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}${suffix}`;
+const c = (orgId: string, suffix = ''): string => `/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}${suffix}`;
 
 interface RunSnapshot { status: string; error?: { code: string; message: string } }
 async function pollRun(owner: Client, runId: string): Promise<RunSnapshot> {
   let snap: RunSnapshot = { status: 'pending' };
   for (let i = 0; i < 80; i++) {
-    const r = await owner.get(`/v1/runs/${runId}`);
+    const r = await owner.get(`/runs/${encodeURIComponent(runId)}`);
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     snap = r.body as RunSnapshot;
     if (snap.status === 'completed' || snap.status === 'failed' || snap.status === 'cancelled' || snap.status.startsWith('waiting')) break;
@@ -160,7 +160,7 @@ async function pollRun(owner: Client, runId: string): Promise<RunSnapshot> {
 
 interface BundleEvent { type?: string; nodeId?: string; payload?: Record<string, unknown> }
 async function bundleEvents(owner: Client, runId: string): Promise<BundleEvent[]> {
-  const b = await owner.get(`/v1/runs/${runId}/debug-bundle`);
+  const b = await owner.get(`/runs/${encodeURIComponent(runId)}/debug-bundle`);
   expect(b.status, JSON.stringify(b.body)).toBe(200);
   return (b.body.events as BundleEvent[]) ?? [];
 }
@@ -187,7 +187,7 @@ describe('exec-ops.daily-briefing — real reads, honest missing-credential fail
     const expanded = expandChain(found!.chain, { params });
     registerWorkflow(expanded);
 
-    const create = await owner.post('/v1/runs', { workflowId: expanded.workflowId, inputs: params });
+    const create = await owner.post('/runs', { workflowId: expanded.workflowId, inputs: params });
     expect(create.status, JSON.stringify(create.body)).toBe(201);
     const runId = create.body.runId as string;
 
@@ -200,7 +200,7 @@ describe('exec-ops.daily-briefing — real reads, honest missing-credential fail
       // credential-less test tenant fails one step LATER and honestly:
       // `byok_required` — configure a key — instead of naming a provider that
       // never existed.
-    expect(snap.error?.code).toBe('byok_required');
+    expect(snap.error?.code).toBe('openwop-app.byok_required');
 
     const events = await bundleEvents(owner, runId);
     // BUG-2 fix proof: the pipeline/tasks reads are org-scoped and see the
@@ -225,7 +225,7 @@ describe('exec-ops.daily-briefing — real reads, honest missing-credential fail
 describe('WF-ANL-1 — RFC 0013 Path A: the org must reach the analytics node through CONFIG', () => {
   it('the frozen chain config carries the org when the run supplies NO inputs at all', async () => {
     // WHY THIS IS A SEPARATE TEST, and why the assertions above could not be it.
-    // The other runs in this file create `/v1/runs` WITH `inputs: params`, and
+    // The other runs in this file create `/runs` WITH `inputs: params`, and
     // the scheduler seeds a root node's inputs from the run's — so `orgId`
     // arrives via `ctx.inputs` and a node reading ONLY `ctx.inputs` still works.
     // RFC 0013 **Path A** — the `…/workflows/from-chain` default, and what a
@@ -246,7 +246,7 @@ describe('WF-ANL-1 — RFC 0013 Path A: the org must reach the analytics node th
     expect(found).toBeTruthy();
     const expanded = expandChain(found!.chain, { params: { orgId, focusAreas: 'pipeline risk' } });
     registerWorkflow(expanded);
-    const create = await owner.post('/v1/runs', { workflowId: expanded.workflowId, inputs: {} });
+    const create = await owner.post('/runs', { workflowId: expanded.workflowId, inputs: {} });
     expect(create.status, JSON.stringify(create.body)).toBe(201);
 
     const runId = create.body.runId as string;
@@ -273,7 +273,7 @@ describe('WF-ANL-1 — RFC 0013 Path A: the org must reach the analytics node th
     expect(found).toBeTruthy();
     const expanded = expandChain(found!.chain, { params: { period: '2026-06', audience: 'the board', orgId } });
     registerWorkflow(expanded);
-    const create = await owner.post('/v1/runs', { workflowId: expanded.workflowId, inputs: {} });
+    const create = await owner.post('/runs', { workflowId: expanded.workflowId, inputs: {} });
     expect(create.status, JSON.stringify(create.body)).toBe(201);
 
     const runId = create.body.runId as string;
@@ -298,13 +298,13 @@ describe('exec-ops.meeting-prep — real reads, honest missing-credential failur
     const expanded = expandChain(found!.chain, { params });
     registerWorkflow(expanded);
 
-    const create = await owner.post('/v1/runs', { workflowId: expanded.workflowId, inputs: params });
+    const create = await owner.post('/runs', { workflowId: expanded.workflowId, inputs: params });
     expect(create.status, JSON.stringify(create.body)).toBe(201);
     const runId = create.body.runId as string;
 
     const snap = await pollRun(owner, runId);
     expect(snap.status).toBe('failed');
-    expect(snap.error?.code).toBe('byok_required');
+    expect(snap.error?.code).toBe('openwop-app.byok_required');
 
     const events = await bundleEvents(owner, runId);
     expect(completedOutputs(events, 'company').company).toMatchObject({ companyId, name: 'Northwind' });
@@ -332,13 +332,13 @@ describe('exec-ops.board-update — real reads, honest missing-credential failur
     const expanded = expandChain(found!.chain, { params });
     registerWorkflow(expanded);
 
-    const create = await owner.post('/v1/runs', { workflowId: expanded.workflowId, inputs: params });
+    const create = await owner.post('/runs', { workflowId: expanded.workflowId, inputs: params });
     expect(create.status, JSON.stringify(create.body)).toBe(201);
     const runId = create.body.runId as string;
 
     const snap = await pollRun(owner, runId);
     expect(snap.status).toBe('failed');
-    expect(snap.error?.code).toBe('byok_required');
+    expect(snap.error?.code).toBe('openwop-app.byok_required');
 
     const events = await bundleEvents(owner, runId);
     // BUG-2 fix proof again, for board-update's own `pipeline` node.

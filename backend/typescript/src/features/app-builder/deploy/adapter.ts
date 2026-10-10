@@ -57,6 +57,45 @@ export function makeMockDeployAdapter(): DeployAdapter & { calls: { deploy: numb
 
 // ── Cloud Run (Admin API v2, metadata identity, brokered egress) ────────────
 
+/**
+ * ADR 0835 D1 — the exit guards. The adapter acts with the HOST's identity
+ * (`run.admin` on the operator's project), so it must refuse anything the
+ * namespace did not produce: without this, a deploy named `openwop-app-backend`
+ * fell through `POST` (exists) into `PATCH` and replaced the host. Checked in
+ * every verb, before any token is minted.
+ */
+const NAMESPACED_SERVICE_RE = /^owa-[0-9a-f]{12}-[a-z][a-z0-9-]{1,30}[a-z0-9]$/;
+
+export function assertNamespacedService(service: string): void {
+  if (!NAMESPACED_SERVICE_RE.test(service)) {
+    throw new OpenwopError('forbidden', 'The deploy adapter only acts on services the host namespaced (owa-…).', 403, { capability: 'app-deploy' });
+  }
+}
+
+/** The operator's image policy: comma-separated registry prefixes, each ending
+ *  in `/` (so `gcr.io/acme/` cannot be satisfied by `gcr.io/acme-evil/`).
+ *  Unset ⇒ the provider is not configured (honest 501), never "any image". */
+export function assertImageAllowed(image: string): void {
+  const prefixes = (process.env.OPENWOP_APP_DEPLOY_IMAGE_PREFIXES ?? '').split(',').map((p) => p.trim()).filter((p) => p.endsWith('/'));
+  if (!prefixes.length) {
+    throw new OpenwopError('capability_not_provided', 'Cloud Run deploys need OPENWOP_APP_DEPLOY_IMAGE_PREFIXES (the registries apps may be deployed from).', 501, { capability: 'app-deploy' });
+  }
+  if (/\s/.test(image) || !prefixes.some((p) => image.startsWith(p) && image.length > p.length)) {
+    throw new OpenwopError('forbidden', 'The image is not in a registry this host deploys from.', 403, { capability: 'app-deploy', field: 'image' });
+  }
+}
+
+/** The identity the deployed container runs as. Never the project's default
+ *  compute account: that one can mint project credentials from the metadata
+ *  server, so any allowed image would run as the project. */
+function runtimeServiceAccount(): string {
+  const sa = (process.env.OPENWOP_APP_DEPLOY_RUNTIME_SA ?? '').trim();
+  if (!sa) {
+    throw new OpenwopError('capability_not_provided', 'Cloud Run deploys need OPENWOP_APP_DEPLOY_RUNTIME_SA (a service account with no project roles).', 501, { capability: 'app-deploy' });
+  }
+  return sa;
+}
+
 function gcpConfig(): { project: string; region: string } {
   const project = process.env.OPENWOP_APP_DEPLOY_GCP_PROJECT ?? '';
   const region = process.env.OPENWOP_APP_DEPLOY_GCP_REGION ?? 'us-central1';
@@ -93,10 +132,14 @@ export function makeCloudRunAdapter(): DeployAdapter {
   };
   return {
     async deploy({ service, image, envKeys }) {
+      assertNamespacedService(service);
+      assertImageAllowed(image);
+      const serviceAccount = runtimeServiceAccount();
       // Create-or-patch the service with the given image; env carries SYMBOLIC
       // keys resolved from the service's own runtime env (never values here).
+      // PATCH can only reach a name the namespace produced (guard above).
       const spec = {
-        template: { containers: [{ image, env: envKeys.map((k) => ({ name: k, valueSource: undefined })) }] },
+        template: { serviceAccount, containers: [{ image, env: envKeys.map((k) => ({ name: k, valueSource: undefined })) }] },
       };
       const create = await call('POST', `/services?serviceId=${encodeURIComponent(service)}`, spec);
       const op = create.ok ? create : await call('PATCH', `/services/${encodeURIComponent(service)}`, spec);
@@ -107,12 +150,14 @@ export function makeCloudRunAdapter(): DeployAdapter {
       return { ok: true, value: { deploymentId: `${service}@${revision}`, url, revision } };
     },
     async rollback({ service, toRevision }) {
+      assertNamespacedService(service);
       const patch = await call('PATCH', `/services/${encodeURIComponent(service)}`, {
         traffic: [{ type: 'TRAFFIC_TARGET_ALLOCATION_TYPE_REVISION', revision: toRevision, percent: 100 }],
       });
       return patch.ok ? { ok: true, value: { revision: toRevision } } : patch;
     },
     async status(service) {
+      assertNamespacedService(service);
       const got = await call('GET', `/services/${encodeURIComponent(service)}`);
       if (!got.ok) return got;
       const v = got.value as { latestReadyRevision?: string; uri?: string; terminalCondition?: { state?: string } };

@@ -103,17 +103,17 @@ export function seedDefaultHostSurfaces(): void {
     { name: 'host.db.vector', supported: false, note: 'RFC 0018 §vector.' },
     { name: 'host.messaging', supported: false },
     { name: 'host.observability', supported: false, note: 'Wired implicitly via emit() — surface flag not yet honored.' },
-    { name: 'host.mcp', supported: process.env.OPENWOP_MCP_SERVER_ENABLED === 'true', implementation: 'workflow-engine', note: 'RFC 0020 (Active). Sample-host MCP server mount at /v1/host/openwop-app/mcp; advertise streamable-http transport. OFF by default — set OPENWOP_MCP_SERVER_ENABLED=true.' },
+    { name: 'host.mcp', supported: process.env.OPENWOP_MCP_SERVER_ENABLED === 'true', implementation: 'workflow-engine', note: 'RFC 0020 (Active). Sample-host MCP server mount at /host/openwop-app/mcp; advertise streamable-http transport. OFF by default — set OPENWOP_MCP_SERVER_ENABLED=true.' },
     { name: 'host.triggers', supported: true, implementation: 'workflow-engine', note: 'Trigger entry nodes (webhook/schedule/cron/email/mailhook/rss/form) surface the run-scoped ctx.triggerData payload; runs are started by the RFC 0083 trigger bridge, scheduler, and kanban paths. webhook-respond durably records the reply via ctx.respondToWebhook.' },
     { name: 'host.webResearch', supported: true, implementation: 'workflow-engine', note: 'For vendor.myndhyve.web-research. fetchBatch is real (concurrent HTTP fetch + readable-text extraction); search is provider-gated — live when a BYOK secret web-search or OPENWOP_WEBSEARCH_API_KEY is set (Brave-shaped, OPENWOP_WEBSEARCH_BASE_URL override), else an honest demo result; research composes the two.' },
     { name: 'host.launchStudio', supported: true, implementation: 'workflow-engine', note: 'Multi-canvas studio backbone for vendor.myndhyve.launch-studio. getStudio returns a seeded demo studio; buildProjectContext/resolveLinkedArtifacts are pure derivations; task dispatch composes ctx.kanban.' },
     { name: 'host.canvas', supported: true, implementation: 'workflow-engine', note: 'Durable versioned shared-canvas store for vendor.myndhyve.canvas. read/write/create are real (optimistic-concurrency, shallow/deep/replace merge, field projection); crossCanvasInvoke spawns a real child run (depth/cycle guard, awaitTerminal, circuit breaker).' },
-    { name: 'host.chat', supported: true, implementation: 'workflow-engine', note: 'Bridges vendor.myndhyve.chat to the demo chat store (the same /v1/host/openwop-app/chat tables the SPA reads). sendMessage/progressCard/updateCard run; the suspend-based gate nodes (phaseInputGate/approvalGate/clarificationGate) run via the ctx.suspend/ctx.interrupt primitive (re-invoke resume, interrupt.md).' },
+    { name: 'host.chat', supported: true, implementation: 'workflow-engine', note: 'Bridges vendor.myndhyve.chat to the demo chat store (the same /host/openwop-app/chat tables the SPA reads). sendMessage/progressCard/updateCard run; the suspend-based gate nodes (phaseInputGate/approvalGate/clarificationGate) run via the ctx.suspend/ctx.interrupt primitive (re-invoke resume, interrupt.md).' },
     { name: 'host.knowledge', supported: true, implementation: 'workflow-engine', note: 'Lexical RAG retrieval (token-frequency over a seeded demo corpus) for vendor.myndhyve.knowledge-tools. Real retrieve-with-citations; lexical not semantic (sample host ships no embedding model).' },
     { name: 'host.kanban', supported: true, implementation: 'workflow-engine', note: 'Bridges vendor.myndhyve.kanban to the durable core work-item store (kanbanService.ts) — boards/cards are reusable across canvases. boardReview/timelinePlan/resourceMonitor are genuinely computed; automation rejects until a durable workflow-binding implementation is configured.' },
     // A7 — the A2A advertisement flips honestly with the live server endpoint
     // (OPENWOP_A2A_SERVER_ENABLED). The CLIENT is always live; only the
-    // server-as-agent posture changes: with the env set, POST /v1/host/openwop-app/a2a
+    // server-as-agent posture changes: with the env set, POST /host/openwop-app/a2a
     // answers agent/getCard + message/send for real (handleA2aRequest), so the
     // demo-stub caveat is dropped.
     process.env.OPENWOP_A2A_SERVER_ENABLED === 'true'
@@ -130,13 +130,13 @@ export function seedDefaultHostSurfaces(): void {
                 // `streaming` is decoupled onto OPENWOP_A2A_STREAMING (default off →
                 // advertised false) — no conformance 1.34.0 resubscribe witness; the
                 // JSON-RPC server still serves resubscribe, it's just unadvertised.
-                'RFC 0076 §A + RFC 0100. A2A 0.3 JSON-RPC client AND a live server endpoint at POST /v1/host/openwop-app/a2a with DURABLE Tasks — message/send persists the projected A2ATaskState, tasks/get returns live state after disconnect, tasks/resubscribe re-attaches the update stream, and tasks/pushNotificationConfig/set registers an SSRF-guarded push (ADR 0035).'
-              : 'RFC 0076 §A. A2A 0.3 JSON-RPC client (discover/send/stream/tasks/pushConfig) AND a live server endpoint at POST /v1/host/openwop-app/a2a — agent/getCard + message/send route to a real manifest-agent dispatch (synchronous core; set OPENWOP_A2A_DURABLE_TASKS=true for durable Tasks per RFC 0100 / ADR 0035).',
+                'RFC 0076 §A + RFC 0100. A2A 0.3 JSON-RPC client AND a live server endpoint at POST /host/openwop-app/a2a with DURABLE Tasks — message/send persists the projected A2ATaskState, tasks/get returns live state after disconnect, tasks/resubscribe re-attaches the update stream, and tasks/pushNotificationConfig/set registers an SSRF-guarded push (ADR 0035).'
+              : 'RFC 0076 §A. A2A 0.3 JSON-RPC client (discover/send/stream/tasks/pushConfig) AND a live server endpoint at POST /host/openwop-app/a2a — agent/getCard + message/send route to a real manifest-agent dispatch (synchronous core; set OPENWOP_A2A_DURABLE_TASKS=true for durable Tasks per RFC 0100 / ADR 0035).',
         }
       : { name: 'host.a2a', supported: true, implementation: 'workflow-engine', note: 'RFC 0076 §A. A2A 0.3 JSON-RPC client from host/a2aSurface.ts — discover/send/stream/tasks/pushConfig against any peer A2A agent; wire state-form normalized to the pack vocabulary. Server-as-agent methods (publishAgentCard/emit*/pushSend) are demo stubs (set OPENWOP_A2A_SERVER_ENABLED=true for a live server endpoint).' },
     // These two are already advertised honestly elsewhere — pre-seed
     // them as supported so the UI doesn't show contradictory data.
-    { name: 'host.aiProviders', supported: true, implementation: 'workflow-engine', note: 'BYOK via /v1/host/openwop-app/byok/secrets.' },
+    { name: 'host.aiProviders', supported: true, implementation: 'workflow-engine', note: 'BYOK via /host/openwop-app/byok/secrets.' },
     { name: 'host.interrupts', supported: true, implementation: 'workflow-engine' },
     // ADR 0037 — the generic connector invoker. WIRED (delegates to the
     // Connections broker + brokered egress); per-provider reach is still

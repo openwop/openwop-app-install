@@ -1,7 +1,7 @@
 /**
  * CFP-1 (CHAT-FIRST-PORT-AUDIT #1) — the CMS agents' real conversational tools.
  *
- * The exchange contract under test: the `feature.cms.agents` localizer +
+ * The exchange contract under test: the `vendor.openwop-app.cms.agents` localizer +
  * content-editor allowlist `openwop:cms.<verb>` ids that RESOLVE at dispatch
  * (the allowlist-resolution tripwire's positive case), each gated exactly like
  * the HTTP editor path — reads FAIL EMPTY without an acting user, writes fail

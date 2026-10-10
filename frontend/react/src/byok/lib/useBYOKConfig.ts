@@ -162,6 +162,9 @@ export interface UseBYOKConfigResult {
    *  selection. Defaults to true, so an older server (which omits the field) and every
    *  cache-seeded first paint read as "chosen", which is the prior behaviour. */
   stored: boolean;
+  /** The binding is the free default, which this host refuses to a signed-out
+   *  visitor. The chat still renders (their own key works); it says so up front. */
+  signInRequired: boolean;
 }
 
 export function useBYOKConfig(): UseBYOKConfigResult {
@@ -199,6 +202,7 @@ export function useBYOKConfig(): UseBYOKConfigResult {
   const mounted = useRef(true);
   const refreshRef = useRef<((opts?: { background?: boolean }) => Promise<void>) | null>(null);
   const [stored, setStored] = useState(true);
+  const [signInRequired, setSignInRequired] = useState(false);
 
   const refresh = useCallback(async (opts?: { background?: boolean }) => {
     const background = opts?.background === true;
@@ -207,6 +211,7 @@ export function useBYOKConfig(): UseBYOKConfigResult {
       const [envelope, refs] = await Promise.all([getActiveConfig(), listStoredRefs()]);
       setStoredRefs(refs);
       setError(null);
+      setSignInRequired(envelope.signInRequired === true);
 
       // 1. The server has a binding it vouches for. Done — render it.
       if (envelope.config && envelope.valid) {
@@ -244,7 +249,8 @@ export function useBYOKConfig(): UseBYOKConfigResult {
           // load and never depends on this browser again.
           const healed: BYOKActiveConfig = { ...candidate, credentialRef: ref };
           try {
-            await putActiveConfig(healed);
+            const saved = await putActiveConfig(healed);
+            setSignInRequired(saved.signInRequired === true);
             setConfigState(healed);
             writeLs(healed);
             hadCachedConfig.current = true;
@@ -357,14 +363,18 @@ export function useBYOKConfig(): UseBYOKConfigResult {
       setStored(false);
       writeLs(null);
       setConfigState(null);
+      configRef.current = null;
       hadCachedConfig.current = false;
-      setStatus('needs-key');
-      await syncStoredRefs();
+      // ADR 0517 / ADR 0711: deleting a choice restores the server's effective
+      // default. Re-read its eligibility instead of assuming the user needs a key.
+      setStatus('loading');
+      await refresh();
       return;
     }
     // Server first: if it refuses the binding we must NOT paint a chat that
     // cannot dispatch. The throw propagates to the caller's error surface.
     const saved = await putActiveConfig(cfg);
+    setSignInRequired(saved.signInRequired === true);
     const persisted = (saved.config ?? cfg) as BYOKActiveConfig;
     // A binding the user just CHOSE is stored by definition. Without this the flag kept
     // whatever the last GET reported, so the path "managed default → Change → save your own
@@ -377,7 +387,7 @@ export function useBYOKConfig(): UseBYOKConfigResult {
     hadCachedConfig.current = true;
     setStatus('ready');
     await syncStoredRefs();
-  }, [syncStoredRefs]);
+  }, [refresh, syncStoredRefs]);
 
   return {
     config,
@@ -389,5 +399,6 @@ export function useBYOKConfig(): UseBYOKConfigResult {
     refresh,
     error,
     stored,
+    signInRequired,
   };
 }

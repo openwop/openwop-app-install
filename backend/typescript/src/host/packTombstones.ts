@@ -28,6 +28,7 @@
  * itself (ADR 0022: install is process-global).
  */
 
+import { packNameForms, packStorageName } from '../executor/agentIdAliases.js';
 import { DurableCollection } from './hostExtPersistence.js';
 
 export interface PackTombstone {
@@ -37,7 +38,9 @@ export interface PackTombstone {
   tombstonedBy: string;
 }
 
-const store = new DurableCollection<PackTombstone>('pack-tombstone', (r) => r.packName);
+// ADR 0763 — keyed by the storage spelling so a renamed agent pack shares one
+// tombstone with its pre-rename name.
+const store = new DurableCollection<PackTombstone>('pack-tombstone', (r) => packStorageName(r.packName));
 
 /** In-process cache so sync surfaces (catalog scan, packPresence) can consult
  *  tombstones without an await. Loaded at boot; refreshed on every mutation. */
@@ -46,7 +49,9 @@ let cached = new Set<string>();
 /** Load (or reload) the tombstone set from storage. Called at boot BEFORE the
  *  pack loaders, and after any mutation. */
 export async function loadPackTombstones(): Promise<Set<string>> {
-  cached = new Set((await store.list()).map((r) => r.packName));
+  // Both spellings are tombstoned (ADR 0763): a pack removed under its old name
+  // stays removed under the new one.
+  cached = new Set((await store.list()).flatMap((r) => [...packNameForms(r.packName)]));
   return cached;
 }
 
@@ -67,7 +72,7 @@ export async function tombstonePack(packName: string, by: string): Promise<void>
 
 /** Restore (idempotent). Returns whether a tombstone existed. Refreshes the cache. */
 export async function restorePack(packName: string): Promise<boolean> {
-  const existed = await store.delete(packName);
+  const existed = await store.delete(packStorageName(packName));
   await loadPackTombstones();
   return existed;
 }

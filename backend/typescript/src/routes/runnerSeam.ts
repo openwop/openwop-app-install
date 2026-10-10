@@ -104,8 +104,8 @@ export function registerRunnerSeamRoutes(app: Express): void {
     }
   };
 
-  app.post('/v1/host/openwop-app/runner/register', registerSeam);
-  app.post('/v1/host/sample/runner/register', registerSeam);
-  app.post('/v1/host/openwop-app/runner/dispatch', dispatchSeam);
-  app.post('/v1/host/sample/runner/dispatch', dispatchSeam);
+  app.post('/host/openwop-app/runner/register', registerSeam);
+  app.post('/host/sample/runner/register', registerSeam);
+  app.post('/host/openwop-app/runner/dispatch', dispatchSeam);
+  app.post('/host/sample/runner/dispatch', dispatchSeam);
 }

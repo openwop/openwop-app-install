@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/core.openwop.agents.support-resolver/1.0.0/support-resolver.task.schema.json",
+  "$id": "https://packs.openwop.dev/core.openwop.agents.support-resolver/1.0.2/support-resolver.task.schema.json",
   "title": "SupportResolverTask",
   "type": "object",
   "required": [

@@ -12,12 +12,50 @@
  * The other four surfaces in this cluster were checked and are SOUND — recorded
  * in the batch notes rather than here, because a test file is a bad place to
  * claim things about files it does not touch.
+ *
+ * Gap ids: #2670 (`1eb4749ac` — an error and a skeleton in the same frame),
+ * PROF-UX-11 (a failed read shows ONLY the announced card), PROF-UX-9/16/17 (the
+ * endorse chip: sr-only why, verified text, in-flight busy), ADR 0624 D7 (the
+ * chip reads the projected `endorsedByMe`, never "count > 0").
+ *
+ * The failed-state cases each carry a POSITIVE anchor (the failure card, no
+ * skeleton; after a retry, the row) — a bare negative also holds while the page
+ * is still LOADING, which is exactly where #2670 lived. Both live regions are
+ * module state and are reset in `beforeEach`. Sabotage-witnessed (/grade-tests
+ * wave 3, `w3g3-td-*`): a failure that stays loading / renders empty / renders
+ * the "fill them in" body / toasts the raw error, a dead retry, a sticky failure
+ * flag, a retry that drops the rows, an unannounced card, an endorse chip that is
+ * not disabled / not busy / never released / pressed from a non-zero count, and
+ * the removed sr-only texts each turn a named case red.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, act, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
-const { listProfiles, endorseSkill, unendorseSkill } = vi.hoisted(() => ({ listProfiles: vi.fn(), endorseSkill: vi.fn(), unendorseSkill: vi.fn() }));
+import type { Profile } from '../profilesClient.js';
+import type { MyIdentity } from '../useMyIdentity.js';
+
+const { listProfiles, endorseSkill, unendorseSkill, PROFILE } = vi.hoisted(() => {
+  /** Complete against the real shape — a thin fixture renders no row and every
+   *  assertion then fails for a reason unrelated to the defect.
+   *  `displayName`, NOT `preferredName` — the card reads the former and falls
+   *  back to "unnamed teammate". ADR 0624 D7 — endorsements ride as
+   *  `{ count, endorsedByMe, endorserUserIds }`. Hoisted so the identity mock
+   *  below can build the viewer's (complete) profile from it. */
+  const PROFILE: Profile = {
+    userId: 'u1', tenantId: 't1', displayName: 'Ada Lovelace', jobTitle: 'Engineer',
+    skills: [{ name: 'maths', proficiency: 5, endorsements: { count: 0, endorsedByMe: false, endorserUserIds: [] } }],
+    interests: ['looms'], equipment: [], workflows: [],
+    portfolioAssetTokens: [], pinnedAgentIds: [],
+    completeness: 40, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
+  };
+  return {
+    PROFILE,
+    listProfiles: vi.fn<() => Promise<Profile[]>>(),
+    endorseSkill: vi.fn<(userId: string, skill: string) => Promise<Profile>>(),
+    unendorseSkill: vi.fn<(userId: string, skill: string) => Promise<Profile>>(),
+  };
+});
 vi.mock('../profilesClient.js', async (orig) => ({
   ...(await orig<typeof import('../profilesClient.js')>()),
   listProfiles,
@@ -28,27 +66,11 @@ vi.mock('../profilesClient.js', async (orig) => ({
 // endorse chip is offered. `isMine` stays real — it is what the page reasons with.
 vi.mock('../useMyIdentity.js', async (orig) => ({
   ...(await orig<typeof import('../useMyIdentity.js')>()),
-  useMyIdentity: () => ({ status: 'known', userId: 'u2', profile: { userId: 'u2' } }),
+  useMyIdentity: (): MyIdentity => ({ status: 'known', userId: 'u2', profile: { ...PROFILE, userId: 'u2', displayName: 'Grace Hopper', skills: [] } }),
 }));
 
 import { TeamPage } from '../TeamPage.js';
-import { GlobalLiveRegion } from '../../../ui/announce.js';
-
-/** Complete against the real shape — a thin fixture renders no row and every
- *  assertion then fails for a reason unrelated to the defect. */
-const PROFILE = {
-  userId: 'u1', tenantId: 't1', displayName: 'Ada Lovelace', jobTitle: 'Engineer',
-  // `displayName`, NOT `preferredName` — the card reads the former (:24, :34) and
-  // falls back to "unnamed teammate", so the wrong field makes the row render
-  // anonymously and the positive assertion fail while the fix is fine.
-  // The ARRAY fields are what render reads with `.length` — omitting any one of
-  // them throws inside render, and every assertion then fails for a reason that
-  // has nothing to do with the defect.
-  // ADR 0624 D7 — endorsements ride as `{ count, endorsedByMe, endorserUserIds }`.
-  skills: [{ name: 'maths', proficiency: 5, endorsements: { count: 0, endorsedByMe: false, endorserUserIds: [] } }],
-  interests: ['looms'], equipment: [], workflows: [],
-  portfolioAssetTokens: [], pinnedAgentIds: [],
-};
+import { GlobalLiveRegion, announce } from '../../../ui/announce.js';
 
 const mount = async (): Promise<void> => {
   render(<MemoryRouter><TeamPage /></MemoryRouter>);
@@ -57,7 +79,9 @@ const mount = async (): Promise<void> => {
 
 afterEach(cleanup);
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
+  announce('');
+  announce('', { assertive: true });
   listProfiles.mockResolvedValue([PROFILE]);
 });
 
@@ -72,6 +96,11 @@ describe('a failed directory read is not an empty directory', () => {
   it('does not invite you to wait for teammates who did nothing wrong', async () => {
     listProfiles.mockRejectedValue(new Error('503'));
     await mount();
+    // Positive anchor first: the page is in its FAILED state (not still loading,
+    // where this negative would hold vacuously) …
+    expect(document.querySelector('.skeleton')).toBeNull();
+    expect(document.body.textContent).toContain('Could not load the team directory');
+    // … and that state does not tell you to wait for teammates.
     expect(document.body.textContent).not.toContain('Profiles appear here as teammates fill them in');
   });
 
@@ -82,6 +111,8 @@ describe('a failed directory read is not an empty directory', () => {
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Try again' })); });
     expect(listProfiles).toHaveBeenCalledTimes(2);
     expect(document.body.textContent).not.toContain('Could not load the team directory');
+    // The retried read LANDED — the row, not a skeleton that also lacks the error.
+    expect(document.body.textContent).toContain('Ada Lovelace');
   });
 
   it('a genuinely empty directory still says so', async () => {
@@ -120,7 +151,7 @@ describe('a failed read shows ONLY the announced designed card (PROF-UX-11)', ()
 
 describe('the endorse chip (PROF-UX-9 / 16 / 17)', () => {
   it('is busy + disabled while the endorsement is in flight, then released', async () => {
-    let resolveEndorse: (p: unknown) => void = () => {};
+    let resolveEndorse: (p: Profile) => void = () => {};
     endorseSkill.mockImplementation(() => new Promise((res) => { resolveEndorse = res; }));
     await mountWithLive();
     const chip = screen.getByRole('button', { name: /maths/ }) as HTMLButtonElement;
@@ -138,9 +169,12 @@ describe('the endorse chip (PROF-UX-9 / 16 / 17)', () => {
     expect(after.getAttribute('aria-pressed')).toBe('true');
   });
 
-  it('reads the pressed state from `endorsedByMe` and the count from `count` (ADR 0624 D7)', async () => {
-    // Three OTHER people endorsed it; the viewer (`u2`) did not. Before D7 the chip
-    // derived both from an id array — a count of 3 must NOT read as "pressed".
+  it('a non-zero count is not "pressed": pressed follows `endorsedByMe` (ADR 0624 D7)', async () => {
+    // Three OTHER people endorsed it; the viewer (`u2`) did not — a count of 3 must
+    // NOT read as "pressed". (Ceiling: the backend always projects
+    // `count = ids.length` and `endorsedByMe = ids.includes(viewer)`, so "reads the
+    // count from `count`" vs from `endorserUserIds.length` is not distinguishable
+    // with a production-shaped fixture — and is not claimed here.)
     listProfiles.mockResolvedValue([{ ...PROFILE, skills: [{ name: 'maths', proficiency: 5, endorsements: { count: 3, endorsedByMe: false, endorserUserIds: ['u3', 'u4', 'u5'] } }] }]);
     await mountWithLive();
     const chip = screen.getByRole('button', { name: /maths/ });

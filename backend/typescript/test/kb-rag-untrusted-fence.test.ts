@@ -19,6 +19,11 @@
  * RUNTIME STRING-KEYED surface, so pack- and MCP-mediated callers are invisible to
  * static grep; the fix is therefore placed inside `ragQuery` itself (the single
  * choke every one of them passes through) rather than at any enumerated call site.
+ *
+ * Sabotage witnesses (grade-tests wave 6): dropping the fence call reds cases 1, 2
+ * and 4; dropping `neutralizeUntrusted` on the title reds THE FILENAME; fencing every
+ * context reds the TRUSTED case; numbering after the split reds CITATION NUMBERING;
+ * building a context block for an empty result reds the last case.
  */
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -80,7 +85,6 @@ describe('KSC-4 — untrusted KB content is FENCED in the augmented prompt', () 
     expect(prompt).toContain('END_UNTRUSTED_CONTENT');
     // …and the REAL fence still closes the block last, so nothing the attacker
     // wrote escapes into trusted prompt territory.
-    expect(prompt.trimEnd().length).toBeGreaterThan(0);
     const lastRealEnd = prompt.lastIndexOf('END UNTRUSTED CONTENT');
     expect(lastRealEnd).toBeGreaterThan(prompt.indexOf('BEGIN UNTRUSTED CONTENT'));
     expect(prompt.slice(lastRealEnd)).not.toMatch(/ignore all previous instructions/i);

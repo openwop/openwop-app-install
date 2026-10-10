@@ -94,3 +94,36 @@ describe('ADR 0003 Phase 4d — rekeyLegacyMemberSubjects', () => {
     expect(second.skipped).toBe(3);
   });
 });
+
+/**
+ * CE-15 — the maintenance re-key resolves the human INSIDE one tenant, so it must
+ * only move that tenant's rows. `scim:` / `saml:` principals come from per-tenant
+ * IdPs: tenant B's `scim:jsmith` can be a different person from tenant A's, and an
+ * unscoped re-key handed B's membership and B's issued keys to A's jsmith.
+ */
+describe('CE-15 — rekeyLegacyMemberSubjects never touches another tenant', () => {
+  it("leaves tenant B's same-string member AND its issued keys alone", async () => {
+    const { issueApiKey, listApiKeys } = await import('../src/features/developer-keys/apiKeyService.js');
+    const A = 'tenant-ce15-a';
+    const B = 'tenant-ce15-b';
+    const shared = 'scim:jsmith';
+    // Only tenant A has a durable user for the string; tenant B's jsmith is someone else.
+    const aliceA = await createUser({ tenantId: A, principalId: shared, source: 'scim' });
+    for (const t of [A, B]) {
+      await createMember({ orgId: t, tenantId: t, subject: shared, displayName: 'J Smith', roles: ['admin'] });
+      await issueApiKey({ tenantId: t, name: `k-${t}`, createdBy: shared });
+    }
+
+    const result = await rekeyLegacyMemberSubjects(A);
+    expect(result.rekeyed).toBe(1);
+
+    // Tenant A moved to the resolved user.
+    expect((await listTenantMembers(A)).map((m) => m.subject)).toEqual([aliceA.userId]);
+    expect((await listApiKeys(A, { callerSubject: 'x', isAdmin: true })).map((k) => k.createdBy)).toEqual([aliceA.userId]);
+    // Tenant B is untouched: its member still answers to ITS jsmith, and A's user
+    // gained nothing there.
+    expect((await listTenantMembers(B)).map((m) => m.subject)).toEqual([shared]);
+    expect(await isWorkspaceMember(aliceA.userId, B)).toBe(false);
+    expect((await listApiKeys(B, { callerSubject: 'x', isAdmin: true })).map((k) => k.createdBy)).toEqual([shared]);
+  });
+});

@@ -13,6 +13,14 @@ describe('actionLabelKeyFor', () => {
     }
   });
 
+  it('labels a failure that links to Connections as the fix, not "View run"', () => {
+    expect(actionLabelKeyFor('workflow.failed', '/connections')).toBe('actionReconnect');
+    expect(actionLabelKeyFor('workflow.failed', '/connections?provider=google')).toBe('actionReconnect');
+    expect(actionLabelKeyFor('workflow.failed', '/runs/r-1')).toBe('actionViewRun');
+    expect(actionLabelKeyFor('workflow.failed', '/connectionsfoo')).toBe('actionViewRun');
+    expect(en).toHaveProperty('actionReconnect');
+  });
+
   it('maps the entity notification types to their specific verbs', () => {
     expect(actionLabelKeyFor('commerce.order.paid')).toBe('actionViewOrder');
     expect(actionLabelKeyFor('commerce.ucp-buyer.placed')).toBe('actionViewPurchase');

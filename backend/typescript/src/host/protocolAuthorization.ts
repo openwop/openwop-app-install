@@ -39,6 +39,7 @@ import {
 } from './accessControlService.js';
 import { callerSubject, tenantOf, isOwnPersonalWorkspace } from './requestSubject.js';
 import { createLogger } from '../observability/logger.js';
+import { keyDeclarationPermits } from './delegatedSubject.js';
 import { setBearerChallenge } from '../middleware/authChallenge.js';
 
 const log = createLogger('host.authorization');
@@ -108,7 +109,8 @@ export async function decideProtocolAuthorization(
  * ADR 0755 D1 adds `webhooks:manage` — the scope `rest-endpoints.md` names for
  * `/v1/webhooks` and `/v1/trigger-subscriptions`, gated there on both lanes.
  */
-export const ENFORCED_PROTOCOL_SCOPES = ['runs:create', 'runs:read', 'runs:cancel', 'artifacts:read', 'approvals:respond', 'webhooks:manage'] as const satisfies readonly Scope[];
+// `manifest:read` — RFC 0233's registry reads (`/connection-providers`).
+export const ENFORCED_PROTOCOL_SCOPES = ['runs:create', 'runs:read', 'runs:cancel', 'artifacts:read', 'approvals:respond', 'webhooks:manage', 'manifest:read'] as const satisfies readonly Scope[];
 export type EnforcedProtocolScope = (typeof ENFORCED_PROTOCOL_SCOPES)[number];
 
 /**
@@ -136,9 +138,7 @@ export const SCOPES_SUPPORTED: readonly string[] = [...ENFORCED_PROTOCOL_SCOPES,
  * mint (`apiKeyService.normalizeScopes`), and a key someone minted "all" must not
  * start 403ing on the day narrowing arrives.
  */
-export function keyDeclarationPermits(declared: readonly string[], scope: string): boolean {
-  return declared.length === 0 || declared.includes('*') || declared.includes(scope);
-}
+export { keyDeclarationPermits };
 
 /**
  * ADR 0601 C4 — WHERE a non-wildcard credential's authority comes from, read
@@ -180,6 +180,33 @@ export function credentialAuthority(principal: Principal, fallbackSubject: strin
  *  rather than by writing an owner scope list. */
 export async function tenantOwnerScopes(tenantId: string): Promise<readonly Scope[]> {
   return (await resolveEffectiveAccess(tenantId)).scopes;
+}
+
+/**
+ * ADR 0601 C4 — the scopes a non-wildcard credential holds in `tenantId`, read
+ * from its provenance: an `env-key` is the tenant's own principal; an `owk_` key
+ * holds its ISSUER's current scopes narrowed to what it declared; anything else
+ * holds its own subject's. A member resolves through the tenant-wide union; a
+ * non-member through `resolveEffectiveAccess`, which fails closed outside the
+ * single-principal demo sandbox. Shared by the MCP tool gate and the kanban
+ * board write gate (ADR 0774 D5) so the two cannot read one credential two ways.
+ */
+export async function credentialScopesIn(
+  principal: Principal,
+  tenantId: string,
+  fallbackSubject: string | undefined,
+): Promise<readonly Scope[]> {
+  const authority = credentialAuthority(principal, fallbackSubject);
+  if (authority.source === 'tenant-owner') return tenantOwnerScopes(tenantId);
+  const subject = authority.subject ?? fallbackSubject;
+  if (!subject) return [];
+  const union = await resolveSubjectScopesUnion(tenantId, subject);
+  const scopes = union.basis === 'member' ? union.scopes : (await resolveEffectiveAccess(tenantId, { subject })).scopes;
+  // An undeclared scope list means "undeclared", not "none" — every key issued
+  // before ADR 0601 carries `[]`. A key that DOES declare scopes is narrowed to
+  // them: strictly tighter, never looser (ADR 0755 D2: `'*'` is undeclared too).
+  const declared = authority.declaredScopes;
+  return declared ? scopes.filter((s) => keyDeclarationPermits(declared, s)) : scopes;
 }
 
 /** The key-lane refusal: true when the request carries an `owk_` key whose declared scopes exclude `scope`. */

@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.workflows.mcp-tool-projections",
-  "version": "1.0.1",
+  "version": "1.0.4",
   "kind": "workflow-chain",
   "description": "MCP tool-projection workflows (core.openwop.mcp.expose-tool → backing node), migrated from the deprecated builtinWorkflows seam (ADR 0472 P4). chainIds keep the original *.mcp.* ids; registered chain-backed with the EXACT original metadata (the ADR 0087 mcp gates) restored, and the MCP mount enumerates them.",
   "keywords": [
@@ -8,12 +8,13 @@
     "Tools"
   ],
   "engines": {
-    "openwop": ">=1.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "chains": [
     {
       "chainId": "commerce.ucp.mcp.catalog-search",
-      "version": "1.0.0",
+      "internal": true,
+      "version": "1.0.2",
       "label": "ucp-catalog-search",
       "description": "MCP tool projection ucp-catalog-search.",
       "parameters": {
@@ -37,7 +38,7 @@
         "nodes": [
           {
             "id": "expose",
-            "typeId": "core.openwop.mcp.expose-tool",
+            "typeId": "core.openwop.mcp.expose-tool@1.0.0",
             "config": {
               "name": "ucp-catalog-search",
               "description": "Browse a merchant’s UCP shopping catalog (name/price/availability). Inputs: { orgId, q? }.",
@@ -60,7 +61,7 @@
           },
           {
             "id": "backing",
-            "typeId": "feature.commerce.nodes.list-products",
+            "typeId": "feature.commerce.nodes.list-products@1.0.0",
             "inputs": {
               "orgId": "{{params.orgId}}",
               "q": "{{params.q}}"
@@ -78,7 +79,8 @@
     },
     {
       "chainId": "commerce.ucp.mcp.place-order",
-      "version": "1.0.0",
+      "internal": true,
+      "version": "1.0.2",
       "label": "ucp-place-order",
       "description": "MCP tool projection ucp-place-order.",
       "parameters": {
@@ -107,7 +109,7 @@
         "nodes": [
           {
             "id": "expose",
-            "typeId": "core.openwop.mcp.expose-tool",
+            "typeId": "core.openwop.mcp.expose-tool@1.0.0",
             "config": {
               "name": "ucp-place-order",
               "description": "Place an order against a merchant (demo-mode: creates a PENDING, unpaid order — no charge; payment is a separate step). Inputs: { orgId, lines:[{productId,quantity}], contactId? }.",
@@ -152,7 +154,7 @@
           },
           {
             "id": "backing",
-            "typeId": "feature.commerce.nodes.create-order",
+            "typeId": "feature.commerce.nodes.create-order@1.0.0",
             "inputs": {
               "orgId": "{{params.orgId}}",
               "lines": "{{params.lines}}",
@@ -171,7 +173,8 @@
     },
     {
       "chainId": "docs.mcp.docs_search",
-      "version": "1.0.1",
+      "internal": true,
+      "version": "1.0.3",
       "label": "docs_search",
       "description": "MCP tool projection docs_search.",
       "parameters": {
@@ -195,7 +198,7 @@
         "nodes": [
           {
             "id": "expose",
-            "typeId": "core.openwop.mcp.expose-tool",
+            "typeId": "core.openwop.mcp.expose-tool@1.0.0",
             "config": {
               "name": "docs_search",
               "description": "Search the published product documentation. Returns ranked hits with a title, snippet, public /docs URL, and relevance score.",
@@ -219,7 +222,7 @@
           },
           {
             "id": "backing",
-            "typeId": "feature.docs.nodes.search",
+            "typeId": "feature.docs.nodes.search@1.0.0",
             "inputs": {
               "query": "{{params.query}}",
               "limit": "{{params.limit}}"
@@ -237,7 +240,8 @@
     },
     {
       "chainId": "docs.mcp.docs_get",
-      "version": "1.0.1",
+      "internal": true,
+      "version": "1.0.3",
       "label": "docs_get",
       "description": "MCP tool projection docs_get.",
       "parameters": {
@@ -257,7 +261,7 @@
         "nodes": [
           {
             "id": "expose",
-            "typeId": "core.openwop.mcp.expose-tool",
+            "typeId": "core.openwop.mcp.expose-tool@1.0.0",
             "config": {
               "name": "docs_get",
               "description": "Fetch one published documentation page by its slug. Returns the title, full text, and public /docs URL.",
@@ -277,7 +281,7 @@
           },
           {
             "id": "backing",
-            "typeId": "feature.docs.nodes.get",
+            "typeId": "feature.docs.nodes.get@1.0.0",
             "inputs": {
               "slug": "{{params.slug}}"
             }
@@ -294,7 +298,8 @@
     },
     {
       "chainId": "notebooks.mcp.list",
-      "version": "1.0.0",
+      "internal": true,
+      "version": "1.0.2",
       "label": "notebook-list",
       "description": "MCP tool projection notebook-list.",
       "parameters": {
@@ -306,7 +311,7 @@
         "nodes": [
           {
             "id": "expose",
-            "typeId": "core.openwop.mcp.expose-tool",
+            "typeId": "core.openwop.mcp.expose-tool@1.0.0",
             "config": {
               "name": "notebook-list",
               "description": "List the research notebooks you can access in this workspace.",
@@ -319,7 +324,7 @@
           },
           {
             "id": "backing",
-            "typeId": "feature.notebooks.nodes.list-notebooks"
+            "typeId": "feature.notebooks.nodes.list-notebooks@1.0.0"
           }
         ],
         "edges": [
@@ -333,7 +338,8 @@
     },
     {
       "chainId": "notebooks.mcp.get",
-      "version": "1.0.0",
+      "internal": true,
+      "version": "1.0.2",
       "label": "notebook-get",
       "description": "MCP tool projection notebook-get.",
       "parameters": {
@@ -353,7 +359,7 @@
         "nodes": [
           {
             "id": "expose",
-            "typeId": "core.openwop.mcp.expose-tool",
+            "typeId": "core.openwop.mcp.expose-tool@1.0.0",
             "config": {
               "name": "notebook-get",
               "description": "Get one research notebook by id (name + bound collection).",
@@ -373,7 +379,7 @@
           },
           {
             "id": "backing",
-            "typeId": "feature.notebooks.nodes.get-notebook",
+            "typeId": "feature.notebooks.nodes.get-notebook@1.0.0",
             "inputs": {
               "notebookId": "{{params.notebookId}}"
             }
@@ -390,7 +396,8 @@
     },
     {
       "chainId": "notebooks.mcp.list-sources",
-      "version": "1.0.0",
+      "internal": true,
+      "version": "1.0.2",
       "label": "notebook-list-sources",
       "description": "MCP tool projection notebook-list-sources.",
       "parameters": {
@@ -410,7 +417,7 @@
         "nodes": [
           {
             "id": "expose",
-            "typeId": "core.openwop.mcp.expose-tool",
+            "typeId": "core.openwop.mcp.expose-tool@1.0.0",
             "config": {
               "name": "notebook-list-sources",
               "description": "List a notebook's sources (each with its per-source context level).",
@@ -430,7 +437,7 @@
           },
           {
             "id": "backing",
-            "typeId": "feature.notebooks.nodes.list-sources",
+            "typeId": "feature.notebooks.nodes.list-sources@1.0.0",
             "inputs": {
               "notebookId": "{{params.notebookId}}"
             }
@@ -447,7 +454,8 @@
     },
     {
       "chainId": "notebooks.mcp.list-notes",
-      "version": "1.0.0",
+      "internal": true,
+      "version": "1.0.2",
       "label": "notebook-list-notes",
       "description": "MCP tool projection notebook-list-notes.",
       "parameters": {
@@ -467,7 +475,7 @@
         "nodes": [
           {
             "id": "expose",
-            "typeId": "core.openwop.mcp.expose-tool",
+            "typeId": "core.openwop.mcp.expose-tool@1.0.0",
             "config": {
               "name": "notebook-list-notes",
               "description": "List a notebook's notes.",
@@ -487,7 +495,7 @@
           },
           {
             "id": "backing",
-            "typeId": "feature.notebooks.nodes.list-notes",
+            "typeId": "feature.notebooks.nodes.list-notes@1.0.0",
             "inputs": {
               "notebookId": "{{params.notebookId}}"
             }
@@ -504,7 +512,8 @@
     },
     {
       "chainId": "notebooks.mcp.search",
-      "version": "1.0.1",
+      "internal": true,
+      "version": "1.0.3",
       "label": "notebook-search",
       "description": "MCP tool projection notebook-search.",
       "parameters": {
@@ -533,7 +542,7 @@
         "nodes": [
           {
             "id": "expose",
-            "typeId": "core.openwop.mcp.expose-tool",
+            "typeId": "core.openwop.mcp.expose-tool@1.0.0",
             "config": {
               "name": "notebook-search",
               "description": "Semantic search over a notebook's sources — ranked hits + citations.",
@@ -562,7 +571,7 @@
           },
           {
             "id": "backing",
-            "typeId": "feature.notebooks.nodes.search",
+            "typeId": "feature.notebooks.nodes.search@1.0.0",
             "inputs": {
               "notebookId": "{{params.notebookId}}",
               "query": "{{params.query}}",
@@ -581,7 +590,8 @@
     },
     {
       "chainId": "notebooks.mcp.ask",
-      "version": "1.0.1",
+      "internal": true,
+      "version": "1.0.3",
       "label": "notebook-ask",
       "description": "MCP tool projection notebook-ask.",
       "parameters": {
@@ -610,7 +620,7 @@
         "nodes": [
           {
             "id": "expose",
-            "typeId": "core.openwop.mcp.expose-tool",
+            "typeId": "core.openwop.mcp.expose-tool@1.0.0",
             "config": {
               "name": "notebook-ask",
               "description": "Grounded retrieval over a notebook — returns a fenced, cited context block for your model to answer from.",
@@ -639,7 +649,7 @@
           },
           {
             "id": "backing",
-            "typeId": "feature.notebooks.nodes.ask",
+            "typeId": "feature.notebooks.nodes.ask@1.0.0",
             "inputs": {
               "notebookId": "{{params.notebookId}}",
               "query": "{{params.query}}",
@@ -658,7 +668,8 @@
     },
     {
       "chainId": "notebooks.mcp.add-source",
-      "version": "1.0.0",
+      "internal": true,
+      "version": "1.0.2",
       "label": "notebook-add-source",
       "description": "MCP tool projection notebook-add-source.",
       "parameters": {
@@ -687,7 +698,7 @@
         "nodes": [
           {
             "id": "expose",
-            "typeId": "core.openwop.mcp.expose-tool",
+            "typeId": "core.openwop.mcp.expose-tool@1.0.0",
             "config": {
               "name": "notebook-add-source",
               "description": "Add a text source to a notebook (requires human approval).",
@@ -714,7 +725,7 @@
           },
           {
             "id": "approval",
-            "typeId": "core.hitl.approval-request",
+            "typeId": "core.hitl.approval-request@1.0.0",
             "inputs": {
               "prompt": {
                 "type": "static",
@@ -724,7 +735,7 @@
           },
           {
             "id": "write",
-            "typeId": "feature.notebooks.nodes.mcp-add-source",
+            "typeId": "feature.notebooks.nodes.mcp-add-source@1.1.0",
             "inputs": {
               "notebookId": "{{params.notebookId}}",
               "title": "{{params.title}}",
@@ -748,7 +759,8 @@
     },
     {
       "chainId": "notebooks.mcp.create-note",
-      "version": "1.0.0",
+      "internal": true,
+      "version": "1.0.2",
       "label": "notebook-create-note",
       "description": "MCP tool projection notebook-create-note.",
       "parameters": {
@@ -773,7 +785,7 @@
         "nodes": [
           {
             "id": "expose",
-            "typeId": "core.openwop.mcp.expose-tool",
+            "typeId": "core.openwop.mcp.expose-tool@1.0.0",
             "config": {
               "name": "notebook-create-note",
               "description": "Add a note to a notebook (requires human approval).",
@@ -797,7 +809,7 @@
           },
           {
             "id": "approval",
-            "typeId": "core.hitl.approval-request",
+            "typeId": "core.hitl.approval-request@1.0.0",
             "inputs": {
               "prompt": {
                 "type": "static",
@@ -807,7 +819,7 @@
           },
           {
             "id": "write",
-            "typeId": "feature.notebooks.nodes.mcp-create-note",
+            "typeId": "feature.notebooks.nodes.mcp-create-note@1.1.0",
             "inputs": {
               "notebookId": "{{params.notebookId}}",
               "content": "{{params.content}}"
@@ -830,7 +842,8 @@
     },
     {
       "chainId": "app-builder.mcp.create-project",
-      "version": "1.0.0",
+      "internal": true,
+      "version": "1.0.2",
       "label": "app-builder-create-project",
       "description": "MCP tool projection app-builder-create-project.",
       "parameters": {
@@ -847,7 +860,7 @@
         "nodes": [
           {
             "id": "expose",
-            "typeId": "core.openwop.mcp.expose-tool",
+            "typeId": "core.openwop.mcp.expose-tool@1.0.0",
             "config": {
               "name": "app-builder-create-project",
               "description": "Create a blank App Builder project (a draft design canvas). Returns { canvasId, version, url }.",
@@ -865,7 +878,7 @@
           },
           {
             "id": "backing",
-            "typeId": "app-builder.mcp-node.create-project",
+            "typeId": "app-builder.mcp-node.create-project@1.0.0",
             "inputs": {
               "name": "{{params.name}}"
             }
@@ -882,7 +895,8 @@
     },
     {
       "chainId": "app-builder.mcp.open-project",
-      "version": "1.0.0",
+      "internal": true,
+      "version": "1.0.2",
       "label": "app-builder-open-project",
       "description": "MCP tool projection app-builder-open-project.",
       "parameters": {
@@ -899,7 +913,7 @@
         "nodes": [
           {
             "id": "expose",
-            "typeId": "core.openwop.mcp.expose-tool",
+            "typeId": "core.openwop.mcp.expose-tool@1.0.0",
             "config": {
               "name": "app-builder-open-project",
               "description": "Open an App Builder project by id (returns its canvasId + current version — the CAS basis), or omit canvasId to LIST the workspace’s projects.",
@@ -917,7 +931,7 @@
           },
           {
             "id": "backing",
-            "typeId": "app-builder.mcp-node.open-project",
+            "typeId": "app-builder.mcp-node.open-project@1.0.0",
             "inputs": {
               "canvasId": "{{params.canvasId}}"
             }
@@ -934,7 +948,8 @@
     },
     {
       "chainId": "app-builder.mcp.get-design",
-      "version": "1.0.0",
+      "internal": true,
+      "version": "1.0.2",
       "label": "app-builder-get-design",
       "description": "MCP tool projection app-builder-get-design.",
       "parameters": {
@@ -954,7 +969,7 @@
         "nodes": [
           {
             "id": "expose",
-            "typeId": "core.openwop.mcp.expose-tool",
+            "typeId": "core.openwop.mcp.expose-tool@1.0.0",
             "config": {
               "name": "app-builder-get-design",
               "description": "Read the CURRENT app design JSON (and its version) for an App Builder canvas. Call before modifying so you edit what actually exists; pass the returned version as baseVersion when rendering an update.",
@@ -975,7 +990,7 @@
           },
           {
             "id": "backing",
-            "typeId": "app-builder.mcp-node.get-design",
+            "typeId": "app-builder.mcp-node.get-design@1.0.0",
             "inputs": {
               "canvasId": "{{params.canvasId}}"
             }
@@ -992,7 +1007,8 @@
     },
     {
       "chainId": "app-builder.mcp.catalog",
-      "version": "1.0.0",
+      "internal": true,
+      "version": "1.0.2",
       "label": "app-builder-catalog",
       "description": "MCP tool projection app-builder-catalog.",
       "parameters": {
@@ -1004,7 +1020,7 @@
         "nodes": [
           {
             "id": "expose",
-            "typeId": "core.openwop.mcp.expose-tool",
+            "typeId": "core.openwop.mcp.expose-tool@1.0.0",
             "config": {
               "name": "app-builder-catalog",
               "description": "Get the CLOSED component catalog for app designs — every component type with its props, enums, defaults, and container child-constraints. Types outside this catalog are rejected.",
@@ -1017,7 +1033,7 @@
           },
           {
             "id": "backing",
-            "typeId": "app-builder.mcp-node.catalog"
+            "typeId": "app-builder.mcp-node.catalog@1.0.0"
           }
         ],
         "edges": [
@@ -1031,7 +1047,8 @@
     },
     {
       "chainId": "app-builder.mcp.render-design",
-      "version": "1.0.0",
+      "internal": true,
+      "version": "1.0.2",
       "label": "app-builder-render-design",
       "description": "MCP tool projection app-builder-render-design.",
       "parameters": {
@@ -1059,7 +1076,7 @@
         "nodes": [
           {
             "id": "expose",
-            "typeId": "core.openwop.mcp.expose-tool",
+            "typeId": "core.openwop.mcp.expose-tool@1.0.0",
             "config": {
               "name": "app-builder-render-design",
               "description": "Render a composed app design into a REAL App Builder canvas (normalize → closed-world validate → versioned persist). Pass the full design as `app` (component types come ONLY from the catalog tool). To update, pass canvasId + the baseVersion you read via get-design. Validation errors return as typed failures — fix and call again.",
@@ -1088,7 +1105,7 @@
           },
           {
             "id": "backing",
-            "typeId": "app-builder.mcp-node.render-design",
+            "typeId": "app-builder.mcp-node.render-design@1.0.0",
             "inputs": {
               "app": "{{params.app}}",
               "canvasId": "{{params.canvasId}}",
@@ -1107,7 +1124,8 @@
     },
     {
       "chainId": "app-builder.mcp.get-preview-url",
-      "version": "1.0.0",
+      "internal": true,
+      "version": "1.0.2",
       "label": "app-builder-get-preview-url",
       "description": "MCP tool projection app-builder-get-preview-url.",
       "parameters": {
@@ -1127,7 +1145,7 @@
         "nodes": [
           {
             "id": "expose",
-            "typeId": "core.openwop.mcp.expose-tool",
+            "typeId": "core.openwop.mcp.expose-tool@1.0.0",
             "config": {
               "name": "app-builder-get-preview-url",
               "description": "Get the editor + preview URLs for an App Builder project, with a SANITIZED design summary (share projection — no secrets, no data-source rows).",
@@ -1148,7 +1166,7 @@
           },
           {
             "id": "backing",
-            "typeId": "app-builder.mcp-node.get-preview-url",
+            "typeId": "app-builder.mcp-node.get-preview-url@1.0.0",
             "inputs": {
               "canvasId": "{{params.canvasId}}"
             }
@@ -1165,7 +1183,8 @@
     },
     {
       "chainId": "app-builder.mcp.resolve-paused-task",
-      "version": "1.0.0",
+      "internal": true,
+      "version": "1.0.2",
       "label": "app-builder-resolve-paused-task",
       "description": "MCP tool projection app-builder-resolve-paused-task.",
       "parameters": {
@@ -1189,7 +1208,7 @@
         "nodes": [
           {
             "id": "expose",
-            "typeId": "core.openwop.mcp.expose-tool",
+            "typeId": "core.openwop.mcp.expose-tool@1.0.0",
             "config": {
               "name": "app-builder-resolve-paused-task",
               "description": "Resolve a paused app-builder design-chain task (a per-screen review or clarification interrupt raised by YOUR build run). Only app-builder chain interrupts in this workspace can be resolved — never other workflows’ approvals.",
@@ -1214,10 +1233,303 @@
           },
           {
             "id": "backing",
-            "typeId": "app-builder.mcp-node.resolve-paused-task",
+            "typeId": "app-builder.mcp-node.resolve-paused-task@1.0.0",
             "inputs": {
               "interruptId": "{{params.interruptId}}",
               "value": "{{params.value}}"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "expose.handle",
+            "to": "backing._order",
+            "triggerRule": "all_success"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "claude-code.mcp.my-todos",
+      "version": "1.0.0",
+      "label": "claude-code-my-todos",
+      "description": "MCP tool projection claude-code-my-todos.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "expose",
+            "typeId": "core.openwop.mcp.expose-tool@1.0.0",
+            "config": {
+              "name": "claude-code-my-todos",
+              "description": "List the cards on YOUR personal board in this app (title, column, due date). Read-only.",
+              "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+              }
+            }
+          },
+          {
+            "id": "backing",
+            "typeId": "claude-code.mcp-node.my-todos@1.0.0"
+          }
+        ],
+        "edges": [
+          {
+            "from": "expose.handle",
+            "to": "backing._order",
+            "triggerRule": "all_success"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "claude-code.mcp.add-todo",
+      "version": "1.0.0",
+      "label": "claude-code-add-todo",
+      "description": "MCP tool projection claude-code-add-todo.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "Short, specific todo title."
+          },
+          "detail": {
+            "type": "string",
+            "description": "Optional self-contained context for whoever picks it up."
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "additionalProperties": false
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "expose",
+            "typeId": "core.openwop.mcp.expose-tool@1.0.0",
+            "config": {
+              "name": "claude-code-add-todo",
+              "description": "File a todo card in the To Do column of YOUR personal board in this app, visible to you there. Use it for work you are committing to but not doing now. Never auto-executed.",
+              "inputSchema": {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string",
+                    "description": "Short, specific todo title."
+                  },
+                  "detail": {
+                    "type": "string",
+                    "description": "Optional self-contained context for whoever picks it up."
+                  }
+                },
+                "required": [
+                  "title"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          {
+            "id": "backing",
+            "typeId": "claude-code.mcp-node.add-todo@1.0.0",
+            "inputs": {
+              "title": "{{params.title}}",
+              "detail": "{{params.detail}}"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "expose.handle",
+            "to": "backing._order",
+            "triggerRule": "all_success"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "claude-code.mcp.schema-lookup",
+      "version": "1.0.0",
+      "label": "claude-code-schema-lookup",
+      "description": "MCP tool projection claude-code-schema-lookup.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "node",
+              "canvas-component",
+              "artifact-type"
+            ],
+            "description": "Which schema family."
+          },
+          "names": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Node typeIds or artifact-type ids."
+          },
+          "canvasTypeId": {
+            "type": "string",
+            "description": "The canvas type (kind \"canvas-component\")."
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "additionalProperties": false
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "expose",
+            "typeId": "core.openwop.mcp.expose-tool@1.0.0",
+            "config": {
+              "name": "claude-code-schema-lookup",
+              "description": "Look up the schemas this app enforces, BEFORE authoring: workflow-node type schemas (kind \"node\", names[]), a canvas type's component catalog (kind \"canvas-component\", canvasTypeId), or artifact types (kind \"artifact-type\"). Read-only.",
+              "inputSchema": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "node",
+                      "canvas-component",
+                      "artifact-type"
+                    ],
+                    "description": "Which schema family."
+                  },
+                  "names": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Node typeIds or artifact-type ids."
+                  },
+                  "canvasTypeId": {
+                    "type": "string",
+                    "description": "The canvas type (kind \"canvas-component\")."
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          {
+            "id": "backing",
+            "typeId": "claude-code.mcp-node.schema-lookup@1.0.0",
+            "inputs": {
+              "kind": "{{params.kind}}",
+              "names": "{{params.names}}",
+              "canvasTypeId": "{{params.canvasTypeId}}"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "expose.handle",
+            "to": "backing._order",
+            "triggerRule": "all_success"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "claude-code.mcp.permission",
+      "version": "1.0.0",
+      "label": "claude-code-permission",
+      "description": "MCP tool projection claude-code-permission.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "tool_name": {
+            "type": "string",
+            "description": "The tool Claude Code wants to use."
+          },
+          "input": {
+            "type": "object",
+            "description": "The tool input Claude Code proposes."
+          },
+          "tool_use_id": {
+            "type": "string",
+            "description": "Claude Code's id for this tool use."
+          },
+          "on_timeout": {
+            "type": "string",
+            "enum": [
+              "deny",
+              "defer"
+            ],
+            "description": "deny (headless tasks) or defer (the interactive hook hands the prompt back to the terminal)."
+          }
+        },
+        "required": [
+          "tool_name",
+          "input"
+        ],
+        "additionalProperties": true
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "expose",
+            "typeId": "core.openwop.mcp.expose-tool@1.0.0",
+            "config": {
+              "name": "claude-code-permission",
+              "description": "Permission prompt tool for Claude Code headless tasks started by this app: asks the device owner in the app and returns allow or deny. Not for direct use.",
+              "inputSchema": {
+                "type": "object",
+                "properties": {
+                  "tool_name": {
+                    "type": "string",
+                    "description": "The tool Claude Code wants to use."
+                  },
+                  "input": {
+                    "type": "object",
+                    "description": "The tool input Claude Code proposes."
+                  },
+                  "tool_use_id": {
+                    "type": "string",
+                    "description": "Claude Code's id for this tool use."
+                  },
+                  "on_timeout": {
+                    "type": "string",
+                    "enum": [
+                      "deny",
+                      "defer"
+                    ],
+                    "description": "deny (headless tasks) or defer (the interactive hook hands the prompt back to the terminal)."
+                  }
+                },
+                "required": [
+                  "tool_name",
+                  "input"
+                ],
+                "additionalProperties": true
+              }
+            }
+          },
+          {
+            "id": "backing",
+            "typeId": "claude-code.mcp-node.permission@1.0.0",
+            "inputs": {
+              "tool_name": "{{params.tool_name}}",
+              "input": "{{params.input}}",
+              "tool_use_id": "{{params.tool_use_id}}",
+              "on_timeout": "{{params.on_timeout}}"
             }
           }
         ],

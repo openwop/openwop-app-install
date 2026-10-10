@@ -26,7 +26,8 @@
  *   completion guard (VP-R2-1) absorbs a re-advance without double counting.
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { isInternalHref } from '../../../lib/internalHref.js';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { config, fetchOpts } from '../../../client/config.js';
@@ -37,7 +38,8 @@ import { ArrowLeftIcon, CheckIcon, SearchIcon } from '../../../ui/icons/index.js
 import { RenderSections } from '../../cms/SectionRenderer.js';
 import type { Section } from '../../cms/cmsClient.js';
 import { fetchPublicPageResult } from '../../site/siteClient.js';
-import { getVisitorKey } from '../../site/visitorBeacon.js';
+import { getVisitorKey, consentTokenFor, useVisitorConsent } from '../../site/visitorConsent.js';
+import { VisitorConsentBanner } from '../../site/VisitorConsentBanner.js';
 import { FormEmbedProvider } from '../../forms/render/embedContext.js';
 
 interface ViewStep {
@@ -70,7 +72,7 @@ type ViewState =
 type CallResult = { status: 'ok'; payload: ViewPayload } | { status: 'notFound' } | { status: 'error' };
 
 /** An authored CTA URL is either an internal path or http(s) — never rendered otherwise. */
-const safeCtaUrl = (url: string): boolean => /^\/(?![/\\])/.test(url) || /^https?:\/\//i.test(url);
+const safeCtaUrl = (url: string): boolean => isInternalHref(url) || /^https?:\/\//i.test(url); // ADR 0836 D7
 
 export function FunnelViewerPage({ orgId, slug }: { orgId: string; slug: string }): JSX.Element {
   const { t } = useTranslation('funnels');
@@ -81,7 +83,21 @@ export function FunnelViewerPage({ orgId, slug }: { orgId: string; slug: string 
   // can do, so ANY failed load with a step on screen keeps it and offers retry.
   const [advanceFailed, setAdvanceFailed] = useState(false);
   const [loadAttempt, setLoadAttempt] = useState(0);
-  const vk = getVisitorKey();
+  // ADR 0860 D5 — the visitor key exists only once the visitor's decision allows
+  // it, and is read in an EFFECT (it may write storage), never during render. The
+  // ref feeds the loaders; the state feeds the embedded form's context. A decision
+  // that changes mid-funnel (the banner) applies from the next request on.
+  const consent = useVisitorConsent(orgId);
+  const vkRef = useRef<string | null>(null);
+  const [vk, setVk] = useState<string | null>(null);
+  useLayoutEffect(() => {
+    vkRef.current = getVisitorKey(orgId);
+    setVk(vkRef.current);
+  }, [orgId, consent.decision]);
+  const consentHeaders = useCallback((): Record<string, string> => {
+    const token = vkRef.current ? consentTokenFor(orgId) : undefined;
+    return token ? { 'x-openwop-consent-token': token } : {};
+  }, [orgId]);
   // FRMX-1 — the step lives in the URL (`?step=ix`): browser Back walks the
   // funnel (each advance pushes), refresh re-serves the CURRENT step, and a
   // step is deep-linkable. `?step` is a VIEW pointer only — completion events
@@ -106,14 +122,14 @@ export function FunnelViewerPage({ orgId, slug }: { orgId: string; slug: string 
 
   const call = useCallback(async (suffix: string): Promise<CallResult> => {
     try {
-      const r = await fetch(`${PUB(orgId)}/${encodeURIComponent(slug)}${suffix}`, fetchOpts({}));
+      const r = await fetch(`${PUB(orgId)}/${encodeURIComponent(slug)}${suffix}`, fetchOpts({ headers: consentHeaders() }));
       if (r.status === 404 || r.status === 410) return { status: 'notFound' };
       if (!r.ok) return { status: 'error' };
       return { status: 'ok', payload: (await r.json()) as ViewPayload };
     } catch {
       return { status: 'error' };
     }
-  }, [orgId, slug]);
+  }, [orgId, slug, consentHeaders]);
 
   /** Render a payload. `hasSession` = a step is on screen and must survive any
    *  failure (FN-R2-1). Returns true when something rendered. */
@@ -135,7 +151,7 @@ export function FunnelViewerPage({ orgId, slug }: { orgId: string; slug: string 
       setState({ kind: 'complete', funnelName: payload.funnel.name, cta });
       return true;
     }
-    const page = await fetchPublicPageResult(orgId, payload.step.pageSlug, vk);
+    const page = await fetchPublicPageResult(orgId, payload.step.pageSlug, vkRef.current, vkRef.current ? consentTokenFor(orgId) : undefined);
     if (isStale()) return false;
     if (page.status !== 'ok') {
       // FN-R2-1 — the round-1 lesson applied one layer down: a page-read blip
@@ -146,7 +162,7 @@ export function FunnelViewerPage({ orgId, slug }: { orgId: string; slug: string 
     }
     setState({ kind: 'step', payload, step: payload.step, sections: page.page.sections });
     return true;
-  }, [orgId, vk]);
+  }, [orgId]);
 
   useEffect(() => {
     // VP-R2-0 — a param advance() already rendered: swallow exactly once.
@@ -164,7 +180,8 @@ export function FunnelViewerPage({ orgId, slug }: { orgId: string; slug: string 
     setAdvanceFailed(false);
     const ix = stepParam !== null ? Number.parseInt(stepParam, 10) : NaN;
     const path = Number.isInteger(ix) && ix >= 0 ? `/steps/${ix}` : '';
-    void call(`${path}${vk ? `?vk=${encodeURIComponent(vk)}` : ''}`).then(async (r) => {
+    const key = vkRef.current;
+    void call(`${path}${key ? `?vk=${encodeURIComponent(key)}` : ''}`).then(async (r) => {
       if (gen !== navGen.current) return; // a newer navigation superseded this load
       // FN-R2-5 — a dead ?step deep link falls back to the ENTRY once instead
       // of dead-ending a funnel whose start is alive.
@@ -178,7 +195,7 @@ export function FunnelViewerPage({ orgId, slug }: { orgId: string; slug: string 
       if (rendered && hadStep) { window.scrollTo({ top: 0 }); stepRef.current?.focus(); }
     });
     // Back/forward + deep-link both land here via stepParam.
-  }, [call, show, vk, stepParam, loadAttempt, setSearchParams]);
+  }, [call, show, stepParam, loadAttempt, setSearchParams]);
 
   /**
    * ADR 0584 §Correction (FORM-FUNNEL-1) — `submissionId` rides the advance.
@@ -195,7 +212,8 @@ export function FunnelViewerPage({ orgId, slug }: { orgId: string; slug: string 
     setAdvanceFailed(false);
     const gen = ++navGen.current;
     try {
-      const q = new URLSearchParams({ from: fromStepId, ...(vk ? { vk } : {}), ...(submissionId ? { submission: submissionId } : {}) });
+      const key = vkRef.current;
+      const q = new URLSearchParams({ from: fromStepId, ...(key ? { vk: key } : {}), ...(submissionId ? { submission: submissionId } : {}) });
       const r = await call(`/next?${q.toString()}`);
       if (gen !== navGen.current) return; // Back was clicked mid-flight — it wins
       // FN-G4 — distinguish "this advance failed" from "this funnel is gone".
@@ -220,7 +238,7 @@ export function FunnelViewerPage({ orgId, slug }: { orgId: string; slug: string 
     } finally {
       setAdvancing(false);
     }
-  }, [call, show, vk, stepParam, setSearchParams]);
+  }, [call, show, stepParam, setSearchParams]);
 
   /** FN-G2 — an in-page Back. The step already lives in the URL, so this is a
    *  view-pointer move: it re-serves an EARLIER step and never completes one,
@@ -242,18 +260,24 @@ export function FunnelViewerPage({ orgId, slug }: { orgId: string; slug: string 
     return () => { document.title = prev; };
   }, [state]);
 
+  // ADR 0860 D6 — every state carries the choice, end states included (the footer
+  // control must not vanish when the funnel completes or fails to load).
+  const consentLayer = <VisitorConsentBanner orgId={orgId} />;
   if (state.kind === 'loading') return <div className="u-p-4" role="status" aria-label={t('common:loading')}><Skeleton /></div>;
   if (state.kind === 'unavailable') {
-    return <StateCard announce icon={<SearchIcon />} title={t('viewerUnavailableTitle')} body={t('viewerUnavailableBody')} />;
+    return <><StateCard announce icon={<SearchIcon />} title={t('viewerUnavailableTitle')} body={t('viewerUnavailableBody')} />{consentLayer}</>;
   }
   if (state.kind === 'loadFailed') {
     // FN-R2-4 — the read failed; the funnel may well exist. Never claim
     // "unpublished or out of date" for a network blip; offer a real retry.
     return (
-      <StateCard
-        announce icon={<SearchIcon />} title={t('viewerLoadFailedTitle')} body={t('viewerLoadFailedBody')}
-        action={<button type="button" className="fp-btn fp-btn--ghost" onClick={() => setLoadAttempt((n) => n + 1)}>{t('common:retry')}</button>}
-      />
+      <>
+        <StateCard
+          announce icon={<SearchIcon />} title={t('viewerLoadFailedTitle')} body={t('viewerLoadFailedBody')}
+          action={<button type="button" className="fp-btn fp-btn--ghost" onClick={() => setLoadAttempt((n) => n + 1)}>{t('common:retry')}</button>}
+        />
+        {consentLayer}
+      </>
     );
   }
   if (state.kind === 'complete') {
@@ -261,6 +285,7 @@ export function FunnelViewerPage({ orgId, slug }: { orgId: string; slug: string 
     // dead end when the operator authored a next step (exactly ONE CTA — the
     // single-CTA thank-you convention).
     return (
+      <>
       <StateCard
         announce icon={<CheckIcon />} title={t('viewerCompleteTitle', { name: state.funnelName })} body={t('viewerCompleteBody')}
         action={state.cta ? (
@@ -269,10 +294,13 @@ export function FunnelViewerPage({ orgId, slug }: { orgId: string; slug: string 
             : <a className="fp-btn fp-btn--primary" href={state.cta.url} rel="noopener noreferrer">{state.cta.label}</a>
         ) : undefined}
       />
+      {consentLayer}
+      </>
     );
   }
 
   const { payload, step, sections } = state;
+  const embedToken = consentTokenFor(orgId);
   const done = step.ix; // steps completed BEFORE this one
   const pct = payload.stepCount > 0 ? Math.round((done / payload.stepCount) * 100) : 0;
   // FN-G1/FN-G3 — a LABELLED stage, not a bare percentage: research is explicit
@@ -309,6 +337,9 @@ export function FunnelViewerPage({ orgId, slug }: { orgId: string; slug: string 
 
       <FormEmbedProvider value={{
         ...(step.formContext ? { context: { ...step.formContext, ...(vk ? { visitor: vk } : {}) } } : {}),
+        // ADR 0860 D3 (architect B1) — the token rides the submit body, never `context`
+        // (which is persisted), so the attribution sink decides like the routes do.
+        ...(vk && embedToken ? { consentToken: embedToken } : {}),
         // FORM-FUNNEL-1 — hand the id straight through: the server decides
         // whether this submission earns a completion event.
         onSubmitted: (submissionId) => { void advance(step.stepId, submissionId); },
@@ -356,6 +387,8 @@ export function FunnelViewerPage({ orgId, slug }: { orgId: string; slug: string 
           {advancing ? t('viewerAdvancing') : advanceFailed ? t('viewerRetry') : t('viewerContinue')}
         </button>
       </div>
+      {/* ADR 0860 D6 — this surface uses a visitor key, so it carries the choice. */}
+      {consentLayer}
     </div>
   );
 }

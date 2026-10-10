@@ -22,9 +22,9 @@ import { createApp } from '../src/index.js';
 import { getAgentRegistry } from '../src/executor/agentRegistry.js';
 import { CONVERSATION_TYPES } from '../src/host/conversationStore.js';
 
-const CH = '/v1/host/openwop-app/channels';
-const SESS = '/v1/host/openwop-app/chat/sessions';
-const PREFS = '/v1/host/openwop-app/notifications/preferences';
+const CH = '/host/openwop-app/channels';
+const SESS = '/host/openwop-app/chat/sessions';
+const PREFS = '/host/openwop-app/notifications/preferences';
 
 let BASE: string;
 let server: http.Server;
@@ -66,7 +66,7 @@ const TENANT = `t-adr0192-${Date.now()}`;
 
 async function login(name: string): Promise<{ c: Client; userId: string }> {
   const c = client();
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `adr0192-${name}-${Date.now()}-${n++}@acme.test`, displayName: `${name} Person`, tenantId: TENANT });
+  const r = await c.post('/host/openwop-app/test/login', { email: `adr0192-${name}-${Date.now()}-${n++}@acme.test`, displayName: `${name} Person`, tenantId: TENANT });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return { c, userId: r.body.user.userId as string };
 }

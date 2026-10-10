@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.web-research/1.0.0/synthesize.output.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.web-research/1.0.2/synthesize.output.json",
   "title": "SynthesizeOutput",
   "type": "object",
   "required": ["envelopeType", "payload", "sourceUrls"],

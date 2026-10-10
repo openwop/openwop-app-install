@@ -22,6 +22,7 @@
 
 import type { Express, Request, Response } from 'express';
 import { OpenwopError } from '../types.js';
+import { createLogger } from '../observability/logger.js';
 import type { HostAdapterSuite } from '../host/index.js';
 import type { Storage } from '../storage/storage.js';
 import { seedEverything } from '../host/seedEverything.js';
@@ -34,6 +35,8 @@ import { isSuperadmin, requireSuperadmin } from '../host/superadmin.js';
 import { getRosterEntry } from '../host/rosterService.js';
 import { runHeartbeatOnce } from '../host/heartbeatService.js';
 import { projectAgentActivity } from '../host/agentActivity.js';
+import { requireTenantWrite } from '../features/featureRoute.js';
+import { requireProtocolScope } from '../host/protocolAuthorization.js';
 
 interface Deps {
   storage: Storage;
@@ -84,14 +87,58 @@ async function streamSeed(
   if (!res.writableEnded) res.end();
 }
 
+const log = createLogger('routes.agentOps');
+
+/** Keepalive cadence for {@link streamOneShot}: well under every proxy idle
+ *  limit on the path (Cloud Run, the SPA's fetch, any intermediary). */
+const STREAM_KEEPALIVE_MS = 10_000;
+
+/** Run one long operation as an NDJSON stream: `{type:'keepalive'}` every
+ *  {@link STREAM_KEEPALIVE_MS}, then `{type:'result', result}` — or, if it
+ *  throws after the 200 is already on the wire, `{type:'error', code, message}`
+ *  (the client turns that line into a thrown error; it is never a success). */
+async function streamOneShot(res: Response, run: () => Promise<unknown>): Promise<void> {
+  res.status(200);
+  res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
+  const write = (obj: unknown): void => {
+    if (res.writableEnded) return;
+    try { res.write(`${JSON.stringify(obj)}\n`); } catch { /* client gone */ }
+  };
+  const tick = setInterval(() => write({ type: 'keepalive' }), STREAM_KEEPALIVE_MS);
+  try {
+    write({ type: 'result', result: await run() });
+  } catch (err) {
+    log.error('streamed seed failed after the 200 was sent', { error: err instanceof Error ? err.message : String(err) });
+    const code = err instanceof OpenwopError ? err.code : 'internal_error';
+    const message = err instanceof OpenwopError ? err.message : 'The seed failed. Check the server logs.';
+    write({ type: 'error', code, message });
+  } finally {
+    clearInterval(tick);
+    if (!res.writableEnded) res.end();
+  }
+}
+
 export function registerAgentOpsRoutes(app: Express, deps: Deps): void {
   // "Load demo data" — idempotent per-tenant seed across registered domains.
-  app.post('/v1/host/openwop-app/example-data/seed', async (req, res, next) => {
+  app.post('/host/openwop-app/example-data/seed', async (req, res, next) => {
     try {
+      await requireTenantWrite(req); // ADR 0775 D1
       // `heal: true` = the EXPLICIT "Load demo data" action — restores missing
       // boards/schedules/chart for existing personas. The silent auto-seed on
       // page entry omits it, so it can never resurrect deliberate deletions.
       const heal = (req.body as { heal?: unknown } | undefined)?.heal === true;
+      // #4239 — this full reseed runs 90–170 s in prod, and the Firebase `/api`
+      // rewrite cuts a request at 60 s, so the one-shot JSON answer 502'd while
+      // the seed kept going. Stream when asked (the SPA's path, over the direct
+      // `*.run.app` URL like `/run`): headers now, a keepalive line every 10 s,
+      // then ONE `result` line carrying the same body the JSON path returns.
+      if (wantsStream(req)) {
+        await streamOneShot(res, () => seedEverything(tenantOf(req), deps.storage, { heal }));
+        return;
+      }
       const result = await seedEverything(tenantOf(req), deps.storage, { heal });
       // The read-only `__showcase__` tenant that powers the always-on workforce
       // dashboards is seeded at server startup (self-healing; see index.ts
@@ -110,7 +157,7 @@ export function registerAgentOpsRoutes(app: Express, deps: Deps): void {
   // default, DUR-3/ADR 0195) so the dashboard can disclose "seeding disabled"
   // honestly instead of rendering a success-shaped no-op. Clearing existing
   // example data stays available either way (removal is never gated).
-  app.get('/v1/host/openwop-app/example-data/status', async (req, res, next) => {
+  app.get('/host/openwop-app/example-data/status', async (req, res, next) => {
     try {
       res.status(200).json({
         enabled: exampleDataSeedEnabled(),
@@ -128,8 +175,9 @@ export function registerAgentOpsRoutes(app: Express, deps: Deps): void {
   // Seed selected steps (all when none given). `dryRun` previews without writing.
   // Returns per-step results + a summary (created/skipped/errors), so the
   // dashboard can show exactly what each type did — no more silent omissions.
-  app.post('/v1/host/openwop-app/example-data/run', async (req, res, next) => {
+  app.post('/host/openwop-app/example-data/run', async (req, res, next) => {
     try {
+      await requireTenantWrite(req); // ADR 0775 D1
       const body = (req.body ?? {}) as { steps?: unknown; dryRun?: unknown };
       const steps = Array.isArray(body.steps) ? body.steps.filter((s): s is string => typeof s === 'string') : undefined;
       const dryRun = body.dryRun === true;
@@ -161,7 +209,7 @@ export function registerAgentOpsRoutes(app: Express, deps: Deps): void {
   // then runs the full seed so the previously-gated surfaces (CRM, commerce,
   // merchandising, CDP, territories, …) actually populate. The toggle flip lives
   // here, above the pure seeders — a seeder still never flips a toggle itself.
-  app.post('/v1/host/openwop-app/example-data/provision-demo', async (req, res, next) => {
+  app.post('/host/openwop-app/example-data/provision-demo', async (req, res, next) => {
     try {
       requireSuperadmin(req, 'Demo-tenant provisioning');
       const tenantId = tenantOf(req);
@@ -188,8 +236,9 @@ export function registerAgentOpsRoutes(app: Express, deps: Deps): void {
 
   // Clear selected steps (all when none given) — removes the canonical demo
   // entities only (never user-authored data). Confirmed in the UI.
-  app.post('/v1/host/openwop-app/example-data/clear', async (req, res, next) => {
+  app.post('/host/openwop-app/example-data/clear', async (req, res, next) => {
     try {
+      await requireTenantWrite(req); // ADR 0775 D1
       const body = (req.body ?? {}) as { steps?: unknown };
       const steps = Array.isArray(body.steps) ? body.steps.filter((s): s is string => typeof s === 'string') : undefined;
       const tenantId = tenantOf(req);
@@ -211,8 +260,9 @@ export function registerAgentOpsRoutes(app: Express, deps: Deps): void {
   });
 
   // Agent heartbeat "Check now" — claim the first eligible To Do card and run it.
-  app.post('/v1/host/openwop-app/roster/:rosterId/check', async (req, res, next) => {
+  app.post('/host/openwop-app/roster/:rosterId/check', async (req, res, next) => {
     try {
+      await requireTenantWrite(req); // ADR 0775 D1
       const tenantId = tenantOf(req);
       const entry = await getRosterEntry(tenantId, req.params.rosterId);
       if (!entry) {
@@ -236,8 +286,12 @@ export function registerAgentOpsRoutes(app: Express, deps: Deps): void {
   // pick-ups, schedule fires, board-card triggers), each with a real timestamp,
   // outcome, and links. Derived from the durable runs store, so it carries the
   // run status + completion time the board-state-derived fleet feed can't.
-  app.get('/v1/host/openwop-app/roster/:rosterId/activity', async (req, res, next) => {
+  app.get('/host/openwop-app/roster/:rosterId/activity', async (req, res, next) => {
     try {
+      // ADR 0846 D6 — this is run data (status, workflow, timing), so it takes the
+      // gate `GET /runs` takes: a key narrowed away from `runs:read`, or a member
+      // without it under enforcement, reads neither.
+      await requireProtocolScope(req, 'runs:read');
       const tenantId = tenantOf(req);
       const entry = await getRosterEntry(tenantId, req.params.rosterId);
       if (!entry) {
@@ -260,8 +314,9 @@ export function registerAgentOpsRoutes(app: Express, deps: Deps): void {
   // single timeline + a failures view (`?status=failed`). Backed by the
   // attribution index (no recent-run scan). Optional `?rosterId=` narrows to one
   // member without the path param.
-  app.get('/v1/host/openwop-app/fleet/activity', async (req, res, next) => {
+  app.get('/host/openwop-app/fleet/activity', async (req, res, next) => {
     try {
+      await requireProtocolScope(req, 'runs:read'); // ADR 0846 D6 — run data; the `GET /runs` gate
       const tenantId = tenantOf(req);
       const limit = Math.min(100, Math.max(1, Number.parseInt(String(req.query.limit ?? '50'), 10) || 50));
       const status = typeof req.query.status === 'string' ? req.query.status : undefined;

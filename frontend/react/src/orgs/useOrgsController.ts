@@ -5,9 +5,10 @@
  * panels it renders) consumes.
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { confirm } from '../ui/confirm.js';
+import { toast } from '../ui/toast.js';
 import { classifyHttpError } from '../client/classifyHttpError.js';
 import {
   type AccessRole,
@@ -39,7 +40,7 @@ import {
   updateMember,
 } from '../client/accessClient.js';
 import { invalidateOrgMembers } from './orgMembers.js';
-import { assignableRoleIdsFor, assignableScopesFor, isBuiltIn, roleLabelFor } from './orgsHelpers.js';
+import { assignableRoleIdsFor, assignableScopesFor, isBuiltIn, refusalKeyOf, roleLabelFor } from './orgsHelpers.js';
 
 /** Built-in role code → orgs-catalog display-label key (codes stay as wire data). */
 const BUILT_IN_ROLE_LABEL_KEY = {
@@ -49,9 +50,23 @@ const BUILT_IN_ROLE_LABEL_KEY = {
   owner: 'roleLabelOwner',
 } as const;
 
+/** ADR 0815 D6 — a membership-derived resolution is authoritative for the UI.
+ *  In a SHARED workspace (`ws:`, strictly membership-derived) "no membership in
+ *  this org" is authoritative too: nothing is offered, since the server refuses
+ *  all of it. Any other basis (the implicit personal owner, an operator, a
+ *  superadmin) is `null` = unknown, and the server decides. */
+const scopesOf = (ea: EffectiveAccess, tenantId: string | undefined): Set<string> | null => {
+  if (ea.superadmin === true) return null;
+  if (ea.basis === 'member') return new Set(ea.scopes);
+  return ea.basis === 'none' && tenantId?.startsWith('ws:') === true ? new Set() : null;
+};
+
 export function useOrgsController() {
   const { t } = useTranslation('orgs');
   const [orgs, setOrgs] = useState<Organization[]>([]);
+  const orgsRef = useRef(orgs);
+  orgsRef.current = orgs;
+  const orgsLoaded = orgs.length > 0;
   // R2 IN-SP-13 — honor a `?org=` deep link (the DocumentsPage convention) so
   // the invite-accept done state can land a new member IN the org they joined.
   const [selectedOrgId, setSelectedOrgId] = useState<string | null>(() => {
@@ -95,11 +110,24 @@ export function useOrgsController() {
   const [viewAs, setViewAs] = useState<string | null>(null);
   const [viewScopes, setViewScopes] = useState<Set<string>>(new Set());
 
+  // ADR 0815 (grade-ux ORGUX-1) — the caller's OWN access. The lens only ever
+  // NARROWS (the server enforces that too, D1), so "no lens" means "what YOU may
+  // do", never "full access": an admin used to be offered every owner-tier
+  // control and got a 403 on each. `null` = not membership-derived (the implicit
+  // personal owner, an operator, a superadmin) — the server decides.
+  const [ownScopes, setOwnScopes] = useState<Set<string> | null>(null);
+  const [rootScopes, setRootScopes] = useState<Set<string> | null>(null);
+
   // Memoized so the loaders below can depend on it without re-creating every
   // render (exhaustive-deps). `t` is stable in react-i18next, so `fail` is too.
   const fail = useCallback((err: unknown) => {
-    // Friendly transport copy (GAP-ANALYSIS E5): 429/offline render as
-    // recoverable guidance, not a raw `listX failed: 429`.
+    // ADR 0815 (ORGUX-2) — a typed refusal gets its own localized, actionable
+    // copy; everything else keeps the friendly transport copy (GAP-ANALYSIS E5).
+    const key = refusalKeyOf(err);
+    if (key) {
+      setError(t(key));
+      return;
+    }
     const c = classifyHttpError(err);
     setError(t('errorWithDetail', { title: c.title, detail: c.detail }));
   }, [t]);
@@ -109,6 +137,20 @@ export function useOrgsController() {
       const [o, r] = await Promise.all([listOrgs(), listRoles()]);
       setOrgs(o);
       setRoles(r);
+      // ORGUX-1 — creating an org inside a shared workspace is owner-tier at the
+      // workspace ROOT (ADR 0815 D1a); a tenant without a root is left to the server.
+      const root = o.find((org) => org.orgId === org.tenantId);
+      let rootLens: Set<string> | null = null;
+      if (root) {
+        try {
+          rootLens = scopesOf(await getEffectiveAccess({ orgId: root.orgId }), root.tenantId);
+        } catch {
+          // An unreadable resolution is UNKNOWN, not "no access": the controls stay
+          // offered and the server's refusal (typed, localized) is the answer.
+          rootLens = null;
+        }
+      }
+      setRootScopes(rootLens);
       setError(null);
     } catch (err) {
       fail(err);
@@ -149,7 +191,18 @@ export function useOrgsController() {
     setViewAs(null);
     setActingMember(null);
     setViewScopes(new Set());
-  }, [selectedOrgId]);
+    setOwnScopes(null);
+    if (!selectedOrgId) return;
+    let live = true;
+    // Read through a ref: a reload of the org list must not reset the lens. Re-run
+    // once the list first arrives (`orgsLoaded`), so a `?org=` deep link is not
+    // judged without its tenant.
+    const tenantId = orgsRef.current.find((o) => o.orgId === selectedOrgId)?.tenantId;
+    getEffectiveAccess({ orgId: selectedOrgId })
+      .then((ea) => { if (live) setOwnScopes(scopesOf(ea, tenantId)); })
+      .catch(() => { /* unknown ⇒ the server decides; the load error path owns the banner */ });
+    return () => { live = false; };
+  }, [selectedOrgId, orgsLoaded]);
 
   const selectedOrg = orgs.find((o) => o.orgId === selectedOrgId) ?? null;
 
@@ -163,7 +216,10 @@ export function useOrgsController() {
       await loadOrgs();
       setSelectedOrgId(org.orgId);
     } catch (err) {
-      fail(err);
+      // ADR 0815 D1a — in a shared tenant (a workspace, or the SAML tenant every
+      // SAML user shares) creating an org is owner-tier: say what to do about it.
+      if (refusalKeyOf(err) === 'errorOwnerTier') setError(t('errorCreateOrgOwnerRequired'));
+      else fail(err);
     }
   };
 
@@ -245,10 +301,22 @@ export function useOrgsController() {
 
   const onDeleteMember = async (m: OrgMember) => {
     if (!selectedOrgId) return;
-    if (!(await confirm({ title: t('confirmRemoveMember', { name: m.displayName }), danger: true }))) return;
+    // ORGUX-3 — say what ELSE happens (ADR 0815 D4): removal is not only the row.
+    if (!(await confirm({
+      title: t('confirmRemoveMember', { name: m.displayName }),
+      // Leaving the workspace ROOT is leaving: keys, invites, schedules. A sub-org
+      // removal takes down only that org's pending invites (ADR 0815 D4).
+      // In a root-less tenant (no `ws:` root) presence is ANY membership, so the
+      // copy cannot know whether this was their last one and says so.
+      body: t(!m.tenantId.startsWith('ws:') ? 'confirmRemoveMemberBodyNeutral'
+        : m.orgId === m.tenantId ? 'confirmRemoveMemberBody' : 'confirmRemoveSubOrgMemberBody'),
+      danger: true,
+      confirmLabel: t('removeMemberConfirm'),
+    }))) return;
     try {
       await deleteMember(selectedOrgId, m.memberId);
       invalidateOrgMembers(selectedOrgId); // CLNP-2(d) — pickers elsewhere must not keep the old list
+      toast.success(t('memberRemoved', { name: m.displayName }));
       await loadOrgDetail(selectedOrgId);
     } catch (err) {
       fail(err);
@@ -343,10 +411,18 @@ export function useOrgsController() {
   };
   /** Is the current lens (owner, an acted-as member, or a previewed role)
    *  allowed this scope? Owner (viewAs===null) ⇒ full access. */
-  const can = (scope: string): boolean => viewAs === null || viewScopes.has(scope);
+  const lens = (scope: string): boolean => viewAs === null || viewScopes.has(scope);
+  const can = (scope: string): boolean => lens(scope) && (ownScopes === null || ownScopes.has(scope));
+  /** Tenant-level actions (create / delete an org) — judged at the workspace root. */
+  const canTenant = (scope: string): boolean => lens(scope) && (rootScopes === null || rootScopes.has(scope));
+  /** ADR 0815 D2 — the owner tier (granting `owner`, touching an owner row or an
+   *  owner-carrying group) is owner-only; the panels judge rows with the same
+   *  `can('host:org:manage')`. */
+  const ownerTier = can('host:org:manage');
 
   // ── Role catalog helpers (built-in + custom) ──
-  const assignableRoleIds: string[] = assignableRoleIdsFor(customRoles);
+  // Without the owner tier, `owner` is not offered at all (the server refuses it).
+  const assignableRoleIds: string[] = assignableRoleIdsFor(customRoles).filter((id) => id !== 'owner' || ownerTier);
   const roleLabel = (id: string): string =>
     isBuiltIn(id) ? t(BUILT_IN_ROLE_LABEL_KEY[id]) : roleLabelFor(customRoles, id);
   const assignableScopes: string[] = assignableScopesFor(roles);
@@ -433,6 +509,7 @@ export function useOrgsController() {
     nameOfMember,
     changeView,
     can,
+    canTenant,
     assignableRoleIds,
     roleLabel,
     assignableScopes,

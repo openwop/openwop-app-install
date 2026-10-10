@@ -42,7 +42,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -76,6 +76,35 @@ if (!SHA_RE.test(sha)) {
 mkdirSync(OUT_DIR, { recursive: true });
 writeFileSync(OUT_FILE, `${sha}\n`, 'utf8');
 console.log(`✓ write-build-commit: build-meta/commit.txt → ${sha.slice(0, 12)}`);
+
+// ── Deployer attribution (2026-09-29) ────────────────────────────────────────
+// Two production builds landed unannounced on 2026-09-29 and the audit log could
+// not say who made them: every session deploys as the same account, through the
+// same agent. The uploaded source zip was the only evidence, and it named the
+// COMMIT but not the checkout. This file makes the next one traceable from the
+// upload alone. It is baked into the image as well as the source upload
+// (`.gcloudignore` negates build-meta/**; the Dockerfile COPYs it), but the backend
+// never reads or serves it — it reads only named build-meta files.
+//
+// Written ONLY for a deploy (`OPENWOP_STAMP_DEPLOYER=1`, set by deploy.sh).
+// Other callers — release-conformance.sh — DELETE any stale copy, so a
+// non-deploy run can never leave one labelling a build it did not make. The
+// session falls back to `CLAUDE_CODE_SESSION_ID` (every agent session has one),
+// because the recipe gives every session the SAME worktree path, so the checkout
+// name alone cannot tell two sessions apart (review of ADR 0782).
+const DEPLOYER_FILE = join(OUT_DIR, 'deployer.json');
+if (process.env.OPENWOP_STAMP_DEPLOYER === '1') {
+  writeFileSync(DEPLOYER_FILE, `${JSON.stringify({
+    checkout: basename(ROOT),
+    // A slug, never free text: this file is baked into the IMAGE and the source
+    // upload, so an operator must not be able to type anything else into it.
+    session: [process.env.OPENWOP_DEPLOY_SESSION, process.env.CLAUDE_CODE_SESSION_ID]
+      .find((v) => typeof v === 'string' && /^[A-Za-z0-9._-]{1,64}$/.test(v)) ?? null,
+    stampedAt: new Date().toISOString(),
+  })}\n`, 'utf8');
+} else if (existsSync(DEPLOYER_FILE)) {
+  rmSync(DEPLOYER_FILE);
+}
 
 // ── RFC 0146 `contractProvenance.suiteVersion` ─────────────────────────────
 // Which corpus revision this host's contract handling corresponds to. Stamped

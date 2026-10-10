@@ -33,7 +33,7 @@ describe('feature-toggle superadmin gate (fail-closed)', () => {
     await new Promise<void>((res) => server.close(() => res()));
   });
 
-  const adminPath = '/v1/host/openwop-app/feature-toggles/admin/configs';
+  const adminPath = '/host/openwop-app/feature-toggles/admin/configs';
 
   it('denies an authenticated non-superadmin (anon session) by default — 403', async () => {
     const res = await fetch(`${BASE}${adminPath}`); // no bearer ⇒ anon cookie session

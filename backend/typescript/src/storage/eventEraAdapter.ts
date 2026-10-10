@@ -76,12 +76,16 @@ export function runUnderContract<T>(contract: ContractMajor, fn: () => T): T {
  * here by falling through `currentContract()`'s `?? 1`: an ambient default that
  * no worker chose and no test could tell apart from a request that forgot to
  * negotiate. It is now a NAMED value every worker enters explicitly
- * (`runUnderWorkerContract(tick)`), so December's flip is one constant and the
- * set of readers it flips is enumerated by `test/worker-contract-explicit`.
+ * (`runUnderWorkerContract(tick)`), and the set of readers is enumerated by
+ * `test/worker-contract-explicit`.
  *
- * It is `1` today because every worker was written against the v1 vocabulary
- * the seat translates to under major 1; flipping it is a decision about those
- * readers, not about the wire (ADR 0642 § atomicity does not bind it).
+ * CORRECTED 2026-10-04 (ADR 0812 decision 1): this used to say "December's flip
+ * is one constant". It is NOT a wire contract and does not flip with v1
+ * retirement. app.openwop.dev retired v1 with it at `1`. `1` is the storage
+ * vocabulary every worker was written against. Under 2, the executor would read
+ * PROJECTED events and persist them into child logs (see `executeRun`, RFC 0041
+ * §C). Outbound bodies are shaped per destination (a webhook by its
+ * subscription's `protocolMajor`), never by this constant.
  */
 export const WORKER_CONTRACT: ContractMajor = 1;
 

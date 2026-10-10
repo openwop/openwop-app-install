@@ -28,7 +28,7 @@ cookie-auth + cookie-scoped-state + admin-cleanup loop works
 end-to-end.
 
 ```bash
-BASE="https://app.openwop.dev/api"
+BASE="https://app.openwop.dev/api"   # browser/cookie flows; protocol-only probes (e.g. If-None-Match → 304) use https://api.openwop.dev (ADR 0827)
 CJAR=/tmp/smoke-cookies.txt
 WFID="smoke-uc-$(date +%s)"   # UNIQUE per run — see the note on step 3
 rm -f $CJAR

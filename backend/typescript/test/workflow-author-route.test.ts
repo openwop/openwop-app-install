@@ -44,11 +44,11 @@ function client(): Client {
 }
 
 async function signup(c: Client): Promise<void> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `wa-${Date.now()}-${n++}@acme.test` });
+  const r = await c.post('/host/openwop-app/test/login', { email: `wa-${Date.now()}-${n++}@acme.test` });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
 }
-const CATALOG = '/v1/host/openwop-app/workflow-author/catalog';
-const DRAFT = '/v1/host/openwop-app/workflow-author/draft';
+const CATALOG = '/host/openwop-app/workflow-author/catalog';
+const DRAFT = '/host/openwop-app/workflow-author/draft';
 
 describe('workflow-author — always-on (no toggle)', () => {
   it('catalog + draft are reachable without enabling any feature flag', async () => {
@@ -99,7 +99,7 @@ describe('workflow-author — draft dispatch', () => {
 // the ownership store is only half the claim — the other half is that the list
 // the dashboard and the `/` picker actually read carries it.
 describe('WFAU-2 — provenance survives the wire, not just the ownership row', () => {
-  const LIST = '/v1/host/openwop-app/workflows';
+  const LIST = '/host/openwop-app/workflows';
   const noopDef = (id: string) => ({
     workflowId: id,
     nodes: [{ nodeId: 'n1', typeId: 'core.noop', outputRole: 'primary' as const }],
@@ -143,7 +143,7 @@ describe('node-catalog — extraction still serves the palette', () => {
   it('returns a non-empty node catalog including core.noop', async () => {
     const c = client();
     await signup(c);
-    const r = await c.get('/v1/host/openwop-app/node-catalog');
+    const r = await c.get('/host/openwop-app/node-catalog');
     expect(r.status).toBe(200);
     expect(Array.isArray(r.body.nodes)).toBe(true);
     expect(r.body.nodes.some((nd: { typeId: string }) => nd.typeId === 'core.noop')).toBe(true);

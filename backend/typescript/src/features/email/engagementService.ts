@@ -3,13 +3,18 @@
  * unsubscribes for campaign sends. Plain-text-honest v1:
  *
  *  - **Clicks**: at send time each URL in the rendered body is rewritten to
- *    `<base>/v1/host/openwop-app/public-email/c/<token>` (an opaque server-side
+ *    `<base>/v1/host/openwop-app/public-email/c/<token>` (an opaque server-side  // ADR 0812 KEEP: recognises /v1 links in email ALREADY SENT; they stay valid via the ADR 0806 forwarder
  *    token row — NO contact id or address ever rides a link). The public route
  *    records the click and 302s to the original URL.
  *  - **Unsubscribe**: every send gets an appended unsubscribe line in the BODY.
  *    Following it records the event, revokes marketing consent
  *    (`consentService.recordConsent` — the subject's choice), and adds a
  *    `crm:suppression` row (the operational overlay).
+ *    > CORRECTED 2026-10-07 (ADR 0848 D7): the paragraph below is now FALSE in its
+ *    > headline — campaign sends DO carry `List-Unsubscribe` + `List-Unsubscribe-Post`
+ *    > (`EmailSendArgs.listUnsubscribe`, mapped per provider in `host/emailAdapter.ts`),
+ *    > so `POST /public-email/u/:token` now has a machine caller too. Kept as written
+ *    > below because it explains why the field is closed-world, not a header map.
  *    **This host emits NO `List-Unsubscribe` / `List-Unsubscribe-Post` header**
  *    (review MEDIUM-4). This line used to say "`List-Unsubscribe` support
  *    upstream", which read as a claim that we do; `grep -rn 'List-Unsubscribe'`
@@ -287,6 +292,18 @@ export async function instrumentBody(
   base: string,
   mintArgs: { tenantId: string; campaignId: string; contactId: string; email: string },
 ): Promise<string> {
+  return (await instrumentBodyWithUnsubscribe(body, base, mintArgs)).body;
+}
+
+/** ADR 0848 D7 — `instrumentBody` plus the unsubscribe URL it appended, so the
+ *  campaign send can put the SAME token in the RFC 8058 `List-Unsubscribe` header.
+ *  A sibling, not a changed return type: `instrumentBody`'s string contract has
+ *  callers (architect review M5). */
+export async function instrumentBodyWithUnsubscribe(
+  body: string,
+  base: string,
+  mintArgs: { tenantId: string; campaignId: string; contactId: string; email: string },
+): Promise<{ body: string; unsubscribeUrl: string }> {
   // Longest-first (grade-code AUDIT-4): replacing a shorter URL before a longer
   // one that has it as a prefix would split the shorter out of the middle of
   // the longer and mangle it. Sort descending by length so each replacement is
@@ -295,7 +312,7 @@ export async function instrumentBody(
   let out = body;
   for (const url of urls) {
     // Already tracked in either spelling: bodies rendered before ADR 0656 carry the /v1 twin.
-    if (url.startsWith(`${vendorPublicBase(base)}/public-email/`) || url.startsWith(`${base}/v1/host/openwop-app/public-email/`)) continue;
+    if (url.startsWith(`${vendorPublicBase(base)}/public-email/`) || url.startsWith(`${base}/v1/host/openwop-app/public-email/`)) continue;  // ADR 0812 KEEP: recognises /v1 links in email ALREADY SENT; they stay valid via the ADR 0806 forwarder
     try {
       const token = await mintToken({ ...mintArgs, kind: 'click', url });
       out = out.split(url).join(`${vendorPublicBase(base)}/public-email/c/${encodeURIComponent(token)}`);
@@ -318,9 +335,11 @@ export async function instrumentBody(
   } catch (e) {
     log.warn('preferences token mint failed', { error: e instanceof Error ? e.message : String(e) });
   }
+  let unsubscribeUrl: string;
   try {
     const unsub = await mintToken({ ...mintArgs, kind: 'unsubscribe', ...(prefs ? { prefsToken: prefs } : {}) });
-    out += `\n\n--\nUnsubscribe: ${vendorPublicBase(base)}/public-email/u/${encodeURIComponent(unsub)}`;
+    unsubscribeUrl = `${vendorPublicBase(base)}/public-email/u/${encodeURIComponent(unsub)}`;
+    out += `\n\n--\nUnsubscribe: ${unsubscribeUrl}`;
   } catch (e) {
     // ADR 0655 D9 (EM-19) — a marketing email WITHOUT an unsubscribe line is
     // non-compliant, not a warning: the send is REFUSED (typed, retryable — the
@@ -331,7 +350,7 @@ export async function instrumentBody(
   if (prefs) {
     out += `\nPreferences: ${vendorPublicBase(base)}/public-email/p/${encodeURIComponent(prefs)}`;
   }
-  return out;
+  return { body: out, unsubscribeUrl };
 }
 
 const escapeHtml = (s: string): string =>
@@ -590,8 +609,23 @@ export async function deleteSubjectEngagement(tenantId: string, subjectKey: stri
   // the token is the row id and the subject fields are not prefixable, so that
   // needs its own keyspace — recorded as `DATA-EM-1` in `docs/steward/DATA-ASSESSMENT.md`,
   // not left as an unowned comment.
-  for (const row of await tokens.listForTenantIndexed(tenantId).catch(() => [])) {
+  // ADR 0848 D9 — an UNREAD store is a failure, never `removed: 0, failed: 0`: the old
+  // `.catch(() => [])` turned a storage outage into a green DSAR receipt over data that
+  // was never read (the ANL-2 lesson, one level up from the delete).
+  const tokenRows = await tokens.listForTenantIndexed(tenantId).catch((e) => {
+    failed += 1; log.error('engagement_token_read_failed', { tenantId, error: e instanceof Error ? e.message : String(e) }); return [] as EngagementToken[];
+  });
+  // ADR 0848 D9 (EMWF-13) — the contacts this ADDRESS was mailed as. Event rows carry
+  // only a `contactId`, so an erasure keyed by address deleted the tokens (the only
+  // address→contact link) and left the events behind whenever the resolver could not
+  // expand the address itself (the contact row gone, or its address changed since).
+  // Collected from ADDRESS matches only — never from a session match: a session is
+  // whoever clicked a link, and a forwarded newsletter's reader must not be able to
+  // erase the original recipient's history (architect review H4).
+  const addressContacts = new Set<string>();
+  for (const row of tokenRows) {
     if (row.tenantId !== tenantId) continue;
+    if ((row.email ?? '') === needle && row.contactId) addressContacts.add(row.contactId);
     // ANL-20 (grade-code 2026-09-10) — `claimedBySession` is an ANALYTICS session key
     // (ADR 0651 D1), and the ADR 0381 resolver erases in exactly that key space;
     // without this leg a DSAR by session deleted nothing here and the receipt was
@@ -604,8 +638,11 @@ export async function deleteSubjectEngagement(tenantId: string, subjectKey: stri
     try { await tokens.delete(row.token); removed += 1; }
     catch (e) { failed += 1; log.error('engagement_token_erase_failed', { tenantId, error: e instanceof Error ? e.message : String(e) }); }
   }
-  for (const row of await events.listByPrefix(`${tenantId}::`).catch(() => [])) {
-    if (row.contactId !== subjectKey) continue;
+  const eventRows = await events.listByPrefix(`${tenantId}::`).catch((e) => {
+    failed += 1; log.error('engagement_event_read_failed', { tenantId, error: e instanceof Error ? e.message : String(e) }); return [] as EngagementEvent[];
+  });
+  for (const row of eventRows) {
+    if (row.contactId !== subjectKey && !addressContacts.has(row.contactId)) continue;
     try { await events.delete(`${row.tenantId}::${row.id}`); removed += 1; }
     catch (e) { failed += 1; log.error('engagement_event_erase_failed', { tenantId, error: e instanceof Error ? e.message : String(e) }); }
   }

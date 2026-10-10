@@ -25,16 +25,24 @@
  * successful "none" never renders as a `role="status"` "Loading…" live region —
  * the a11y half of the defect, where a screen-reader user is told forever that
  * work is in progress over a read that already answered.
+ *
+ * Sabotage witnesses (grade-tests wave 8): the hook's `setOrgsFailed(true)` →
+ * `setOrgs([])`, dropping `OrgSelectionState`'s failed or empty branch, the
+ * wrong `failedBody` clause, and an un-gated load effect each red a case. Every
+ * client read (incl. `getTrend`) is mocked — no live fetch (ADR 0661 allowlist
+ * entry retired).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
+type Client = typeof import('../analyticsClient.js');
 const api = vi.hoisted(() => ({
-  listOrgs: vi.fn(),
-  getSummary: vi.fn(),
-  getEvents: vi.fn(),
-  getNavReport: vi.fn(),
+  listOrgs: vi.fn<Client['listOrgs']>(),
+  getSummary: vi.fn<Client['getSummary']>(),
+  getEvents: vi.fn<Client['getEvents']>(),
+  getTrend: vi.fn<Client['getTrend']>(),
+  getNavReport: vi.fn<Client['getNavReport']>(),
 }));
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 vi.mock('../analyticsClient.js', async (importOriginal) => {
@@ -51,7 +59,7 @@ vi.mock('../../../featureToggles/FeatureAccessContext.js', async (importOriginal
 import { AnalyticsPage } from '../AnalyticsPage.js';
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   // Id-sensitive: the page hosts TWO toggles — `analytics` and the default-OFF
   // `workspace-nav-telemetry` (ADR 0512), whose own failure line must not
   // contaminate these assertions.
@@ -59,9 +67,10 @@ beforeEach(() => {
   // ANL-UX-2 — `firstEventAt` is what tells the page the beacon has ever
   // reported. This fixture is a tenant that HAS traffic history but a quiet
   // 30-day window, which is the state the positive control below asserts.
-  api.getSummary.mockResolvedValue({ summary: { total: 0, sessions: 0, byType: { pageview: 0, event: 0, conversion: 0 }, topPaths: [], utmSources: [], vitals: [] }, comparison: null, firstEventAt: '2026-01-05T10:00:00.000Z' });
+  api.getSummary.mockResolvedValue({ summary: { total: 0, sessions: 0, byType: { pageview: 0, event: 0, conversion: 0 }, topPaths: [], utmSources: [], vitals: [] }, firstEventAt: '2026-01-05T10:00:00.000Z' });
   api.getEvents.mockResolvedValue([]);
-  api.getNavReport.mockResolvedValue({ rows: [] });
+  api.getTrend.mockResolvedValue([]);
+  api.getNavReport.mockResolvedValue({ weeks: [], rows: [] });
 });
 afterEach(cleanup);
 

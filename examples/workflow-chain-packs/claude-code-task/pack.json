@@ -1,0 +1,32 @@
+{
+  "name": "vendor.openwop-app.workflows.claude-code",
+  "version": "1.0.0",
+  "kind": "workflow-chain",
+  "description": "Hand a coding task to your own Claude Code from a workflow (ADR 0785). Requires the Claude Code feature and a paired device with workflow tasks allowed.",
+  "keywords": ["Claude Code", "coding", "developer"],
+  "engines": { "openwop": ">=1.0.0 <3.0.0" },
+  "chains": [
+    {
+      "chainId": "openwop-app.claude-code.ask",
+      "version": "1.0.0",
+      "label": "Ask Claude Code to make a change",
+      "description": "Sends one task to Claude Code on a device you have allowed to take workflow tasks, waits for it to finish, and returns its summary. Requires Claude Code: pair a device, then turn on Workflow tasks for it on the Claude Code page.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "prompt": {
+            "type": "string",
+            "description": "What Claude Code should do, in plain language.",
+            "default": "Run the test suite and summarize any failures."
+          }
+        }
+      },
+      "dag": {
+        "nodes": [
+          { "id": "ask", "typeId": "claude-code.task@1.0.0", "inputs": { "prompt": "{{params.prompt}}" } }
+        ]
+      }
+    }
+  ]
+}

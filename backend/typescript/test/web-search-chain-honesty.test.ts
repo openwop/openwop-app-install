@@ -21,8 +21,9 @@
  *     the STRONGER form — it does not depend on a model obeying an instruction.
  */
 import { describe, expect, it } from 'vitest';
-import { readFileSync, readdirSync, existsSync } from 'node:fs';
+import { readdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { readPackManifest } from './helpers/readPackManifest.js';
 
 const PACKS_DIR = join(import.meta.dirname, '../../../examples/workflow-chain-packs');
 
@@ -43,7 +44,7 @@ function loadChains(): Array<{ pack: string; chain: Chain }> {
   for (const dir of readdirSync(PACKS_DIR)) {
     const file = join(PACKS_DIR, dir, 'pack.json');
     if (!existsSync(file)) continue;
-    const doc = JSON.parse(readFileSync(file, 'utf8')) as { chains?: Chain[] };
+    const doc = readPackManifest<{ chains?: Chain[] }>(file);
     for (const chain of doc.chains ?? []) out.push({ pack: dir, chain });
   }
   return out;

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/core.openwop.triggers/1.1.0/event.config.json",
+  "$id": "https://packs.openwop.dev/core.openwop.triggers/1.1.2/event.config.json",
   "title": "EventTriggerConfig",
   "type": "object",
   "required": [
@@ -11,8 +11,8 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 256,
-      "pattern": "^[a-z][a-zA-Z0-9._-]*$",
-      "description": "Event name this workflow subscribes to (e.g., `'order.created'`, `'user.signup'`). Hosts route events with matching `name` to the registered workflow. Pattern follows the dot-separated convention used elsewhere in the spec."
+      "pattern": "^(\\{\\{[^{}]+\\}\\}|(?!openwop\\.)[a-z][a-z0-9]*(?:-[a-z0-9]+)*\\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:\\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*)?)$",
+      "description": "Event name this workflow subscribes to. MUST match the `events.md` \u00a7Types grammar: two or three dot-separated kebab-case segments, never `openwop.`-prefixed (that prefix is reserved for the protocol). A `{{params.<name>}}` placeholder is also accepted and is the CORRECT form for a reusable chain \u2014 the event belongs to the installing host, not to the pack. The previous pattern `^[a-z][a-zA-Z0-9._-]*$` admitted any number of segments and underscores, which is how `host.forms.submission.created` and `workflow.approval_needed` were published: names no conformant host may emit, on a trigger that then silently never fires."
     },
     "source": {
       "type": "string",

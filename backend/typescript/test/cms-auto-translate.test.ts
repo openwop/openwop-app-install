@@ -91,13 +91,13 @@ let n = 0;
 async function ownerOrg(): Promise<{ owner: Client; orgId: string; tenantId: string }> {
   const tenantId = `org:autoxl-${Date.now()}-${n++}`;
   const owner = client();
-  const r = await owner.post('/v1/host/openwop-app/test/login', { email: `axl-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await owner.post('/host/openwop-app/test/login', { email: `axl-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return { owner, orgId: org.body.orgId, tenantId };
 }
-const u = (orgId: string, suffix = ''): string => `/v1/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${suffix}`;
+const u = (orgId: string, suffix = ''): string => `/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${suffix}`;
 
 async function draftPage(owner: Client, orgId: string, sections: unknown[]): Promise<{ pageId: string }> {
   const created = await owner.post(u(orgId, '/pages'), { title: 'Home', sections });
@@ -146,7 +146,7 @@ describe('autoTranslateOnPublish — submit-time sweep', () => {
       expect(sub.status, JSON.stringify(sub.body)).toBe(200);
       expect(sub.body.autoTranslated).toEqual({ 'pt-BR': 1 });
 
-      const list = await owner.get('/v1/host/openwop-app/approvals?status=pending');
+      const list = await owner.get('/host/openwop-app/approvals?status=pending');
       const appr = (list.body.items as Array<{ pageId?: string; proposal: string }>).find((a) => a.pageId === pageId);
       expect(appr, 'submit must queue a content approval').toBeTruthy();
       expect(appr?.proposal).toMatch(/1 AI-drafted pt-BR overlay pending review/);

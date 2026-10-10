@@ -1,5 +1,5 @@
 /**
- * MG-6 cutover gate — PATCH /v1/host/openwop-app/workforces/:id status transitions,
+ * MG-6 cutover gate — PATCH /host/openwop-app/workforces/:id status transitions,
  * with the production gate (must graduate to bounded-autonomous first) and
  * always-available rollback.
  */
@@ -29,7 +29,7 @@ describe('workforce cutover gate', () => {
   });
 
   const patch = async (status: string): Promise<{ status: number; body: any }> => {
-    const r = await fetch(`${BASE}/v1/host/openwop-app/workforces/${encodeURIComponent(HERO)}`, {
+    const r = await fetch(`${BASE}/host/openwop-app/workforces/${encodeURIComponent(HERO)}`, {
       method: 'PATCH',
       headers: { 'content-type': 'application/json', authorization: 'Bearer dev-token' },
       body: JSON.stringify({ status }),

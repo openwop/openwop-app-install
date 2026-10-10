@@ -38,7 +38,7 @@ describe('S3 blob surface', () => {
     const { fetchFn } = makeFakeS3();
     const blob = blobFor('t1', fetchFn);
     const b64 = Buffer.from('hello world').toString('base64');
-    expect(await blob.put({ key: 'f.txt', contentBase64: b64, contentType: 'text/plain' })).toEqual({ ok: true, key: 'f.txt' });
+    expect(await blob.put({ key: 'f.txt', contentBase64: b64, contentType: 'text/plain' })).toEqual({ ok: true, key: 'f.txt', sizeBytes: 11 });
     const got = await blob.get({ key: 'f.txt' }) as { found: boolean; contentBase64: string; contentType?: string };
     expect(got.found).toBe(true);
     expect(Buffer.from(got.contentBase64, 'base64').toString()).toBe('hello world');

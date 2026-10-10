@@ -15,7 +15,8 @@ import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { authorizeOrgScope, requireString, optionalString, publicBaseUrl } from '../featureRoute.js';
 import { checkEntitlement } from '../../host/entitlementSeam.js';
-import { resolveOne } from '../../host/featureToggles/service.js';
+import { clientIp } from '../../host/clientIp.js';
+import { resolveToggle } from '../../host/featureToggles/service.js';
 import {
   requestSignature, getSignatureStatus, listSignatureRequests, voidSignRequest,
   resolveSigner, signPublicView, signRequest, declineSign, esignEnabled,
@@ -23,8 +24,8 @@ import {
 import { renderTarget } from './signTargets.js';
 
 const FEATURE = { toggleId: 'crm', label: 'CRM' };
-const ORG = '/v1/host/openwop-app/crm/orgs/:orgId';
-const PUB = '/v1/host/openwop-app/public-sign';
+const ORG = '/host/openwop-app/crm/orgs/:orgId';
+const PUB = '/host/openwop-app/public-sign';
 
 type Scope = 'workspace:read' | 'workspace:write';
 
@@ -67,6 +68,7 @@ export function registerCrmSignRoutes(deps: RouteDeps): void {
         target: { kind: requireString(target.kind, 'target.kind'), id: requireString(target.id, 'target.id') },
         signers,
         createdBy: user.userId,
+        reader: user.userId, // ADR 0838 D3 — a document target is read-gated for the requester
         ...(user.displayName || user.email ? { requestedBy: { ...(user.displayName ? { name: user.displayName } : {}), ...(user.email ? { email: user.email } : {}) } } : {}),
         baseUrl: publicBaseUrl(req),
         ...(optionalString(body.provider) ? { provider: optionalString(body.provider) } : {}),
@@ -105,7 +107,8 @@ export function registerCrmSignRoutes(deps: RouteDeps): void {
     if (!esignEnabled()) notFound();
     const { resolveActiveResource } = await import('../sharing/sharingService.js');
     const { tenantId, orgId, resourceId } = await resolveActiveResource(token, 'sign_request');
-    const assignment = await resolveOne(FEATURE.toggleId, { tenantId });
+    // ADR 0819 §1 opt-out — a PUBLIC lane (tenant from the resource): ADR 0419 never paywalls a shopper/visitor on the operator's plan.
+    const assignment = await resolveToggle(FEATURE.toggleId, { tenantId });
     if (!assignment || !assignment.enabled) notFound();
     return { resourceId, tenantId, orgId };
   };
@@ -133,7 +136,9 @@ export function registerCrmSignRoutes(deps: RouteDeps): void {
         resourceId,
         acknowledged: true,
         typedName: requireString(body.typedName, 'typedName'),
-        ip: req.ip ?? '0.0.0.0',
+        // ADR 0851 — `req.ip` was the front end's address (no `trust proxy`),
+        // so every signature's audit `ipHash` recorded Google, not the signer.
+        ip: clientIp(req),
         userAgent: req.header('user-agent') ?? '',
         nowMs: Date.now(),
         baseUrl: publicBaseUrl(req),

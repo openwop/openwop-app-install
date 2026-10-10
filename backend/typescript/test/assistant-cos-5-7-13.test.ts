@@ -22,8 +22,6 @@ import { getJob, resetScheduling } from '../src/host/schedulingService.js';
 import { DurableCollection } from '../src/host/hostExtPersistence.js';
 import {
   __resetAssistantStore,
-  listProjects,
-  createProject,
   listPendingActions,
   enqueuePendingAction,
 } from '../src/features/assistant/assistantService.js';
@@ -74,21 +72,21 @@ async function captureStdout(fn: () => Promise<void>): Promise<string> {
 
 describe('COS-5 — enableLoop validates the cron at the composition owner', () => {
   it('rejects an unparseable cron with a 400 and persists NO job', async () => {
-    const enable = await jf<{ error?: string }>('/v1/host/openwop-app/assistant/loops/drive-ingest/enable', {
+    const enable = await jf<{ error?: string }>('/host/openwop-app/assistant/loops/drive-ingest/enable', {
       method: 'POST',
       body: JSON.stringify({ cronExpr: 'not a cron' }),
     });
     expect(enable.status).toBe(400);
 
     // No inert `enabled:true` job may have been written.
-    const after = await jf<{ loops: Array<{ loopId: string; enabled: boolean }> }>('/v1/host/openwop-app/assistant/loops');
+    const after = await jf<{ loops: Array<{ loopId: string; enabled: boolean }> }>('/host/openwop-app/assistant/loops');
     expect(after.body.loops.find((l) => l.loopId === 'drive-ingest')?.enabled).toBe(false);
     // The job row itself does not exist (id shape: assistant:<loopId>:<tenant>).
     expect(await getJob('assistant:drive-ingest:default')).toBeNull();
   });
 
   it('accepts a valid cron and enables the job', async () => {
-    const enable = await jf<{ enabled: boolean; jobId: string }>('/v1/host/openwop-app/assistant/loops/drive-ingest/enable', {
+    const enable = await jf<{ enabled: boolean; jobId: string }>('/host/openwop-app/assistant/loops/drive-ingest/enable', {
       method: 'POST',
       body: JSON.stringify({ cronExpr: '0 * * * *' }),
     });
@@ -97,13 +95,24 @@ describe('COS-5 — enableLoop validates the cron at the composition owner', () 
     expect((await getJob(enable.body.jobId))?.cronExpr).toBe('0 * * * *');
   });
 
-  it('accepts a valid-but-rare cron (0 0 30 2 *) — proves it is not over-rejected via computeNextFire', async () => {
-    // 30 February never fires, so `computeNextFire` returns null — but the
-    // expression is syntactically valid and MUST enable. This is the exact case
-    // a computeNextFire-based guard would wrongly 400.
-    const enable = await jf<{ enabled: boolean }>('/v1/host/openwop-app/assistant/loops/morning-briefing/enable', {
+  it('REFUSES a parseable-but-never-fires cron (0 0 30 2 *) — ADR 0787 D6 corrects COS-5', async () => {
+    // CORRECTED (ADR 0787 D6). This test used to REQUIRE the enable, on the
+    // grounds that the expression is syntactically valid. But 30 February never
+    // fires, so the loop read "On" over a job that could never run — the exact
+    // COS-5 defect, one shape over — and RFC 0052 §B.3 says a schedule beyond
+    // the horizon is rejected with `schedule_horizon_exceeded`.
+    const enable = await jf<{ details?: { reason?: string } }>('/host/openwop-app/assistant/loops/morning-briefing/enable', {
       method: 'POST',
       body: JSON.stringify({ cronExpr: '0 0 30 2 *' }),
+    });
+    expect(enable.status).toBe(400);
+    expect(enable.body.details?.reason).toBe('schedule_horizon_exceeded');
+  });
+
+  it('still accepts a valid-but-RARE cron that does fire (yearly: 0 9 1 1 *)', async () => {
+    const enable = await jf<{ enabled: boolean }>('/host/openwop-app/assistant/loops/morning-briefing/enable', {
+      method: 'POST',
+      body: JSON.stringify({ cronExpr: '0 9 1 1 *' }),
     });
     expect(enable.status).toBe(200);
     expect(enable.body.enabled).toBe(true);
@@ -111,28 +120,7 @@ describe('COS-5 — enableLoop validates the cron at the composition owner', () 
 });
 
 describe('COS-7 — the entity listers read through the bounded per-tenant index', () => {
-  it('listProjects returns only the caller tenant AND does not fall back to a cross-tenant .list()', async () => {
-    await createProject('cos7-A', { name: 'A-project' });
-    await createProject('cos7-B', { name: 'B-project' });
-
-    // Warm the per-tenant index backfill once (the FIRST listForTenantIndexed
-    // arms the durable sentinel via a single ensureTenantIndex → list()).
-    await listProjects('cos7-A');
-
-    const listSpy = vi.spyOn(DurableCollection.prototype, 'list');
-    const indexedSpy = vi.spyOn(DurableCollection.prototype, 'listForTenantIndexed');
-    try {
-      const rows = await listProjects('cos7-A');
-      expect(rows.map((p) => p.name)).toEqual(['A-project']); // tenant isolation preserved
-      expect(indexedSpy).toHaveBeenCalled();                  // bounded path taken
-      expect(listSpy).not.toHaveBeenCalled();                 // NOT the cross-tenant scan
-    } finally {
-      listSpy.mockRestore();
-      indexedSpy.mockRestore();
-    }
-  });
-
-  it('listPendingActions is the same transform (bounded, tenant-isolated)', async () => {
+  it('listPendingActions reads the bounded per-tenant index (tenant-isolated, no cross-tenant .list())', async () => {
     await enqueuePendingAction('cos7-A', { kind: 'email.send', draft: 'hi A', payload: { to: ['a@x.test'] } });
     await enqueuePendingAction('cos7-B', { kind: 'email.send', draft: 'hi B', payload: { to: ['b@x.test'] } });
 

@@ -28,6 +28,8 @@ import { resolveAgentForTenant } from '../../host/agentVisibility.js';
 import { appendChatMessageLive, extractMessageText } from '../../host/chatMessageBus.js';
 import { publishChannelAgentRemoved } from '../../host/channelMembershipEvents.js';
 import { slugify, uniqueSlug } from '../../host/slug.js';
+import { notifyHumanChatMessage } from '../../host/humanChatMessageObservers.js';
+import { getProject, resolveProjectAccess } from '../projects/projectsService.js';
 import { resolveSubjectDisplays, type SubjectDisplay } from '../../host/subjectDisplay.js';
 
 export interface ChannelInput {
@@ -292,6 +294,31 @@ export async function setChannelDescription(tenantId: string, channelId: string,
   return next;
 }
 
+/**
+ * ADR 0852 D5 — bind this channel to a project (or unbind with `null`). The
+ * channel OWNER does it, and must hold WRITE on the project. Only an
+ * ORG-VISIBLE project can be bound: an agent's reply in a channel is read by
+ * every member, so grounding it in a private project's ledger would show that
+ * ledger to members who cannot open the project.
+ */
+export async function setChannelProject(tenantId: string, channelId: string, callerUserId: string | undefined, projectId: string | null): Promise<ConversationMeta> {
+  await assertChannelManage(tenantId, channelId, callerUserId);
+  if (projectId !== null) {
+    const project = await getProject(tenantId, projectId);
+    const access = project ? await resolveProjectAccess(tenantId, project.id, callerUserId) : 'none';
+    if (!project || access === 'none') throw new OpenwopError('not_found', 'Project not found.', 404, { projectId });
+    if (access !== 'write') {
+      throw new OpenwopError('forbidden', 'You need edit access to that project to bind a channel to it.', 403, { projectId });
+    }
+    if ((project.visibility ?? 'org') !== 'org') {
+      throw new OpenwopError('conflict', 'Only a project the whole workspace can see can be bound to a channel.', 409, { projectId, visibility: project.visibility });
+    }
+  }
+  const next = await setConversationChannel(tenantId, channelId, { boundProjectId: projectId ?? '' });
+  if (!next) throw new OpenwopError('not_found', 'Channel not found.', 404, { channelId });
+  return next;
+}
+
 /** ADR 0192 D2/D8 — a roster row with the display identity resolved server-side
  *  (raw subjectRefs never render as UI). */
 export interface ChannelRosterRow {
@@ -462,6 +489,8 @@ export async function postChannelMessage(tenantId: string, channelId: string, au
     messageId, sessionId: channelId, role: 'user', content: raw,
     meta: null, authorSubject: authorUserId ? userRef(authorUserId) : null, createdAt: new Date().toISOString(),
   }, tenantId);
+  // ADR 0853 D3 — a person's post, announced (an observer only enqueues).
+  if (text) await notifyHumanChatMessage({ tenantId, conversationId: channelId, messageRef: messageId, text, authorUserId });
   return { messageId, text };
 }
 

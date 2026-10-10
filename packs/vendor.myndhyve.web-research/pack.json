@@ -1,18 +1,25 @@
 {
   "name": "vendor.myndhyve.web-research",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "MyndHyve web-research pack — 4 nodes for the search → fetch → research → synthesize pipeline. webSearch + fetchUrls + researchWeb route through the host's webResearch adapter (search API + scraping policy + rate-limit + cache layer); synthesize composes results into a typed envelope via the AI envelope surface.",
   "author": "MyndHyve",
   "license": "Apache-2.0",
   "homepage": "https://myndhyve.ai/packs/web-research",
   "repository": "https://github.com/openwop/openwop",
-  "keywords": ["vendor", "myndhyve", "web-research", "search", "scraping", "synthesize"],
+  "keywords": [
+    "vendor",
+    "myndhyve",
+    "web-research",
+    "search",
+    "scraping",
+    "synthesize"
+  ],
   "engines": {
-    "openwop": ">=1.0.0 <2.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "peerDependencies": {
-    "host.webResearch": "supported",
-    "host.aiEnvelope": "supported"
+    "webResearch": "supported",
+    "aiEnvelope": "supported"
   },
   "nodes": [
     {
@@ -22,7 +29,10 @@
       "description": "Issues a search query through the host's search adapter (Google CSE / Bing / Brave / Perplexity / etc.). Returns top results with title + URL + snippet. Side-effectful (external call costs money + rate-limited) + cacheable (engine Layer-2 caches by query+filters).",
       "category": "integration",
       "role": "side-effect",
-      "capabilities": ["cacheable", "side-effectful"],
+      "capabilities": [
+        "cacheable",
+        "side-effectful"
+      ],
       "configSchemaRef": "schemas/webSearch.config.json",
       "inputSchemaRef": "schemas/webSearch.input.json",
       "outputSchemaRef": "schemas/webSearch.output.json"
@@ -34,7 +44,10 @@
       "description": "Fetches a batch of URLs concurrently with research-specific policy (robots.txt respect, content-type filtering, body size caps, readability extraction). Returns per-URL content + status + extracted text. Different from core.openwop.http.fetch — that's a single request with raw response; this is bulk scraping with extraction.",
       "category": "integration",
       "role": "side-effect",
-      "capabilities": ["cacheable", "side-effectful"],
+      "capabilities": [
+        "cacheable",
+        "side-effectful"
+      ],
       "configSchemaRef": "schemas/fetchUrls.config.json",
       "inputSchemaRef": "schemas/fetchUrls.input.json",
       "outputSchemaRef": "schemas/fetchUrls.output.json"
@@ -46,7 +59,10 @@
       "description": "End-to-end research operation: query → search → fetch top N results → extract → return citation-ready content. Higher-level than webSearch + fetchUrls; useful when workflow authors don't need to inspect intermediate results.",
       "category": "integration",
       "role": "side-effect",
-      "capabilities": ["cacheable", "side-effectful"],
+      "capabilities": [
+        "cacheable",
+        "side-effectful"
+      ],
       "configSchemaRef": "schemas/researchWeb.config.json",
       "inputSchemaRef": "schemas/researchWeb.input.json",
       "outputSchemaRef": "schemas/researchWeb.output.json"
@@ -58,7 +74,10 @@
       "description": "AI-synthesis step: takes research results (from webSearch + fetchUrls or researchWeb) and synthesizes a typed envelope (e.g., `research.summary`, `competitor.profile`). Pins citations to the source URLs. Routes through ctx.aiEnvelope.generate.",
       "category": "data",
       "role": "side-effect",
-      "capabilities": ["cacheable", "side-effectful"],
+      "capabilities": [
+        "cacheable",
+        "side-effectful"
+      ],
       "configSchemaRef": "schemas/synthesize.config.json",
       "inputSchemaRef": "schemas/synthesize.input.json",
       "outputSchemaRef": "schemas/synthesize.output.json"
@@ -69,5 +88,6 @@
     "format": "esm",
     "entry": "./index.mjs",
     "minRuntimeVersion": "node>=20"
-  }
+  },
+  "kind": "node"
 }

@@ -29,11 +29,20 @@
 import type { StartRunDeps } from './runStarter.js';
 import { runUnderWorkerContract } from '../storage/eventEraAdapter.js';
 import { startWorkflowRun } from './runStarter.js';
-import { listRoster, recordHeartbeat, autonomyOf, type RosterEntry } from './rosterService.js';
+import { getRosterEntry, listRoster, readRosterVersion, recordHeartbeat, autonomyOf, type RosterEntry } from './rosterService.js';
 import { resolveConnectionReadiness } from './connectionReadiness.js';
 import { resolveAgentPolicy } from './agentPolicyResolver.js';
 import { getAgentProfile } from './agentProfileService.js';
-import { listBoardsForSubject, listCards, moveCard, setCardLastRun, notifyBoardChanged, type KanbanCard } from './kanbanService.js';
+import {
+  listBoardsForSubject,
+  listCards,
+  notifyBoardChanged,
+  claimCardForRun,
+  releaseCardClaim,
+  todoColumnOf,
+  workingColumnOf,
+  type KanbanCard,
+} from './kanbanService.js';
 import { reconcileStrandedCards } from './cardRunRecovery.js';
 import { createApproval, hasPendingApprovalForCard } from './approvalService.js';
 import { emitEscalationNotifications } from './escalationNotify.js';
@@ -69,6 +78,10 @@ export interface HeartbeatResult {
     | 'no_runnable_workflow'
     | 'policy_denied'
     | 'awaiting_approval'
+    /** ADR 0774 D1 — the agent's board has a To Do lane but no in-progress
+     *  (`working`/`doing`) lane, so a pick could not be claimed and would be
+     *  started again on every pass. The loop refuses rather than repeat. */
+    | 'no_working_lane'
     | 'no_eligible_tasks';
   boardId?: string;
   cardId?: string;
@@ -109,15 +122,26 @@ export async function runHeartbeatOnce(deps: StartRunDeps, entry: RosterEntry): 
   let skipCause: HeartbeatResult['reason'] | undefined;
   const noteCause = (cause: NonNullable<HeartbeatResult['reason']>): void => {
     const rank: Record<string, number> = {
-      awaiting_approval: 4, policy_denied: 3, no_runnable_workflow: 2, empty_board: 1,
+      no_working_lane: 5, awaiting_approval: 4, policy_denied: 3, no_runnable_workflow: 2, empty_board: 1,
     };
     if (!skipCause || (rank[cause] ?? 0) > (rank[skipCause] ?? 0)) skipCause = cause;
   };
   if (boards.length === 0) return { picked: false, reason: 'no_boards', lastHeartbeatAt };
   for (const board of boards) {
-    const todoColumn = board.columns.find((c) => c.id === 'todo' || c.name.toLowerCase() === 'to do');
+    const todoColumn = todoColumnOf(board);
     if (!todoColumn) continue;
+    // ADR 0774 D1 — a pick is only safe when it can be CLAIMED by leaving To Do.
+    // Without an in-progress lane the card would stay in To Do after its run
+    // started (or its proposal was decided) and be picked again next pass.
+    const workingColumn = workingColumnOf(board);
     const allCards = await listCards(board.id);
+    if (!workingColumn) {
+      // Name the cause only when this board actually has work waiting: an
+      // agent's second, empty board must not mask its real board's reason
+      // (grade-code KSCD-10).
+      noteCause(allCards.some((c) => c.columnId === todoColumn.id && !c.workItemId) ? 'no_working_lane' : 'empty_board');
+      continue;
+    }
     // ADR 0535 D1a — reconcile BEFORE filtering to To Do. The P1 run-terminal
     // fan-out is in-process, so a run whose process died mid-terminal-emit
     // strands its card with nobody to hear it. This pass already holds every
@@ -139,7 +163,9 @@ export async function runHeartbeatOnce(deps: StartRunDeps, entry: RosterEntry): 
     // every board — the hot-path cost ADR 0534 D5 budgets against — to refresh
     // a list that is unchanged in the overwhelmingly common case.
     const boardCards = restored > 0 ? await listCards(board.id) : allCards;
-    const candidates = boardCards.filter((c) => c.columnId === todoColumn.id);
+    // ADR 0774 D2 (`KSTWF-15`) — a WorkItem-backed card belongs to the ADR 0738
+    // dispatcher; letting this loop start it too would run it on two engines.
+    const candidates = boardCards.filter((c) => c.columnId === todoColumn.id && !c.workItemId);
     // ADR 0534 P2 — rank the candidates when a compiler is registered. Absent,
     // throwing, or misbehaving ⇒ the literal pre-0534 order (insertion order),
     // never a degraded ranking.
@@ -246,37 +272,65 @@ export async function runHeartbeatOnce(deps: StartRunDeps, entry: RosterEntry): 
         };
       }
 
-      const runId = await startWorkflowRun(deps, {
+      // ADR 0774 D2 — CLAIM before starting. One CAS moves the card out of To Do
+      // and stamps a deterministic run id, conditioned on the card being where
+      // (and at the version) this pass saw it. A racing pass — the daemon on
+      // another instance, or a manual "Check now" — loses the CAS and moves on;
+      // it never starts a second run of the same card.
+      const claimed = await claimCardForRun({
+        card,
+        boardId: board.id,
         tenantId: entry.tenantId,
-        workflowId,
-        metadata: {
-          heartbeat: {
-            rosterId: entry.rosterId,
-            persona: entry.persona,
-            agentId: entry.agentRef.agentId,
-            boardId: board.id,
-            cardId: card.id,
-            source: 'heartbeat',
-          },
-          // ADR 0534 D3 — freeze WHY this card won at creation. `run.metadata` is
-          // replayed verbatim on `:fork`, so a forked run reproduces the original
-          // pick instead of re-ranking against a board that has since changed —
-          // re-ranking on fork would let a replay execute a DIFFERENT card, which
-          // breaks replay determinism outright. Absent when no compiler ranked
-          // (toggle off, or a fail-open), so the stamp never claims a decision
-          // that did not happen.
-          ...(workSelectionDecisionFor(card.id)
-            ? { workSelection: workSelectionStamp(card.id) }
-            : {}),
-        },
+        fromColumnId: todoColumn.id,
+        toColumnId: workingColumn.id,
       });
+      if (!claimed || !claimed.lastRunId) continue;
+      const claimRunId = claimed.lastRunId;
+      let runId: string | null = null;
+      try {
+        runId = await startWorkflowRun(deps, {
+          tenantId: entry.tenantId,
+          workflowId,
+          runId: claimRunId,
+          metadata: {
+            heartbeat: {
+              rosterId: entry.rosterId,
+              persona: entry.persona,
+              agentId: entry.agentRef.agentId,
+              boardId: board.id,
+              cardId: card.id,
+              source: 'heartbeat',
+            },
+            // ADR 0534 D3 — freeze WHY this card won at creation. `run.metadata` is
+            // replayed verbatim on `:fork`, so a forked run reproduces the original
+            // pick instead of re-ranking against a board that has since changed —
+            // re-ranking on fork would let a replay execute a DIFFERENT card, which
+            // breaks replay determinism outright. Absent when no compiler ranked
+            // (toggle off, or a fail-open), so the stamp never claims a decision
+            // that did not happen.
+            ...(workSelectionDecisionFor(card.id)
+              ? { workSelection: workSelectionStamp(card.id) }
+              : {}),
+          },
+        });
+      } finally {
+        // Nothing started (unresolvable workflow, a refusal, a throw): hand the
+        // card back to To Do. Guarded on this claim still owning the card, so a
+        // human who moved it meanwhile wins.
+        if (!runId) {
+          await releaseCardClaim({
+            cardId: card.id,
+            boardId: board.id,
+            tenantId: entry.tenantId,
+            runId: claimRunId,
+            workingColumnId: workingColumn.id,
+            toColumnId: todoColumn.id,
+          }).catch((err) => log.warn('pick claim release failed', {
+            cardId: card.id, error: err instanceof Error ? err.message : String(err),
+          }));
+        }
+      }
       if (!runId) continue;
-      await setCardLastRun(card.id, runId);
-      // Move the picked card to Working (no re-trigger — Working has no trigger
-      // workflow). Best-effort: a missing Working lane leaves the card in To Do
-      // with its run already started.
-      const working = board.columns.find((c) => c.id === 'working' || c.name.toLowerCase() === 'working');
-      if (working) await moveCard(card.id, working.id);
       notifyBoardChanged(board.id);
       return {
         picked: true,
@@ -528,20 +582,21 @@ export async function processDueHeartbeats(
   deps: StartRunDeps,
   listTenants: () => Promise<string[]>,
   now: number = Date.now(),
+  listEntries?: () => Promise<readonly RosterEntry[]>,
 ): Promise<number> {
   // ADR 0318 — resolve the host-wide admin override ONCE per pass (fail-open to
   // env). Threaded into every due-check + slot calc so the whole pass agrees.
   const admin = await resolveHeartbeatAdminConfig();
-  const tenants = await listTenants();
-  const dueEntries: RosterEntry[] = [];
-  for (const tenantId of tenants) {
-    for (const entry of await listRoster(tenantId)) {
-      if (isHeartbeatDue(entry, now, admin)) dueEntries.push(entry);
-    }
-  }
+  const candidates = listEntries ? await listEntries() : await listAllRosterEntries(listTenants);
+  const dueEntries = candidates.filter((entry) => isHeartbeatDue(entry, now, admin));
 
   let ran = 0;
-  for (const entry of dueEntries.slice(0, CHECK_BATCH)) {
+  for (const candidate of dueEntries.slice(0, CHECK_BATCH)) {
+    // EVID-5 — the candidate may come from a cached listing. Act only on the
+    // entry as stored NOW: re-read it, and skip it if it is gone or no longer
+    // due (another instance may have run it since the list was taken).
+    const entry = listEntries ? await getRosterEntry(candidate.tenantId, candidate.rosterId) : candidate;
+    if (!entry || !isHeartbeatDue(entry, now, admin)) continue;
     // Quantize to the interval so concurrent instances claim the same slot key.
     // ADR 0313 — the SAME effective cadence as the due check (never disagree).
     const interval = effectiveHeartbeatIntervalMs(entry, admin) || POLL_INTERVAL_MS;
@@ -596,6 +651,46 @@ export async function pruneStaleHeartbeatClaims(deps: StartRunDeps, now: number 
   }
 }
 
+/** Every roster entry across the tenants `listTenants` names. */
+async function listAllRosterEntries(listTenants: () => Promise<string[]>): Promise<RosterEntry[]> {
+  const all: RosterEntry[] = [];
+  for (const tenantId of await listTenants()) all.push(...(await listRoster(tenantId)));
+  return all;
+}
+
+/** How long the daemon trusts an unchanged roster listing before re-listing
+ *  anyway — covers a writer that bypasses the roster-change token. */
+export const ROSTER_RELIST_BACKSTOP_MS = 5 * 60_000;
+
+/**
+ * EVID-5 (heartbeat half; the same change-token pattern as the schedule daemon's) — the daemon used to list EVERY
+ * tenant's roster every 30 s on every instance, a full-collection scan plus one
+ * prefix scan per tenant, all day. Dueness is a function of the entry and the
+ * clock, so an unchanged roster needs no re-list: read the one-row change
+ * token, and re-list only when it moved or the backstop elapsed. The run itself
+ * still acts on a fresh read of the entry (`processDueHeartbeats`) and is fenced
+ * by the per-slot claim, so a stale listing can only delay a heartbeat by at
+ * most the backstop, never run one twice or run a deleted member.
+ */
+export function cachedRosterEntries(
+  listTenants: () => Promise<string[]>,
+  clock: () => number = Date.now,
+): () => Promise<readonly RosterEntry[]> {
+  let cache: RosterEntry[] | null = null;
+  let seenToken: string | null = null;
+  let listedAt = 0;
+  return async () => {
+    const token = await readRosterVersion(); // token FIRST, list SECOND
+    const now = clock();
+    if (cache === null || token !== seenToken || now - listedAt >= ROSTER_RELIST_BACKSTOP_MS) {
+      cache = await listAllRosterEntries(listTenants);
+      seenToken = token;
+      listedAt = now;
+    }
+    return cache;
+  };
+}
+
 export interface HeartbeatDaemon {
   stop(): void;
 }
@@ -606,11 +701,12 @@ export interface HeartbeatDaemon {
  */
 export function startHeartbeatDaemon(deps: StartRunDeps, listTenants: () => Promise<string[]>): HeartbeatDaemon {
   let running = false;
+  const entries = cachedRosterEntries(listTenants);
   const tick = async (): Promise<void> => {
     if (running) return;
     running = true;
     try {
-      await processDueHeartbeats(deps, listTenants);
+      await processDueHeartbeats(deps, listTenants, Date.now(), entries);
       await pruneStaleHeartbeatClaims(deps);
     } catch (err) {
       log.warn('heartbeat daemon tick error', { error: err instanceof Error ? err.message : String(err) });

@@ -60,6 +60,9 @@ function ProjectChips({ p, t }: { p: Project; t: TFunction }): JSX.Element {
       {status ? <span className={`chip ${STATUS_CHIP[status]}`}>{t(STATUS_KEY[status])}</span> : null}
       {health ? <span className={`chip ${HEALTH_CHIP[health]}`}>{t(HEALTH_KEY[health])}</span> : null}
       {p.visibility === 'private' ? <span className="chip chip--muted">{t('visibilityPrivate')}</span> : null}
+      {/* ADR 0852 — a feature is a project with a label; a campaign's project says whose it is. */}
+      {p.facet === 'feature' ? <span className="chip chip--accent">{t('facetFeature')}</span> : null}
+      {p.facet === 'campaign' ? <span className="chip chip--muted">{t('facetCampaign')}</span> : null}
     </>
   );
 }

@@ -1,18 +1,18 @@
 {
   "name": "core.openwop.workflows.podcasts",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "kind": "workflow-chain",
   "description": "Migrated from the deprecated builtin (ADR 0472 P4). chainId keeps the original id; outputRoles restored at registration.",
   "keywords": [
     "podcasts"
   ],
   "engines": {
-    "openwop": ">=1.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "chains": [
     {
       "chainId": "podcasts.generate",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "podcasts.generate",
       "description": "podcasts.generate workflow.",
       "parameters": {
@@ -32,35 +32,35 @@
         "nodes": [
           {
             "id": "select",
-            "typeId": "feature.podcasts.nodes.select-content",
+            "typeId": "feature.podcasts.nodes.select-content@1.1.0",
             "inputs": {
               "episodeId": "{{params.episodeId}}"
             }
           },
           {
             "id": "outline",
-            "typeId": "feature.podcasts.nodes.outline",
+            "typeId": "feature.podcasts.nodes.outline@1.1.0",
             "inputs": {
               "episodeId": "{{params.episodeId}}"
             }
           },
           {
             "id": "transcript",
-            "typeId": "feature.podcasts.nodes.transcript",
+            "typeId": "feature.podcasts.nodes.transcript@1.1.0",
             "inputs": {
               "episodeId": "{{params.episodeId}}"
             }
           },
           {
             "id": "synthesize",
-            "typeId": "feature.podcasts.nodes.synthesize",
+            "typeId": "feature.podcasts.nodes.synthesize@1.2.0",
             "inputs": {
               "episodeId": "{{params.episodeId}}"
             }
           },
           {
             "id": "mix",
-            "typeId": "feature.podcasts.nodes.mix",
+            "typeId": "feature.podcasts.nodes.mix@1.3.0",
             "inputs": {
               "episodeId": "{{params.episodeId}}"
             }

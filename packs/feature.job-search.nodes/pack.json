@@ -1,6 +1,7 @@
 {
   "name": "feature.job-search.nodes",
-  "version": "1.1.0",
+  "version": "1.1.1",
+  "kind": "node",
   "description": "Job-search node pack (ADR 0540) — score a posting's fit, check eligibility against a JD-stated bar, diff a proposed résumé rewrite for fabrication, and record an application's outcome. Deliberately has NO submit node: submitting is bounded by the ADR 0541 apply grant, and a node that could submit would route around the authority object that exists to bound it.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
@@ -13,7 +14,7 @@
     "agent"
   ],
   "engines": {
-    "openwop": ">=1.0.0 <2.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "nodes": [
     {

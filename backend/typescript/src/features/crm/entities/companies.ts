@@ -9,7 +9,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { DurableCollection } from '../../../host/hostExtPersistence.js';
-import { filterVisibleCrmRecords } from '../../../host/crmRecordVisibility.js';
+import { filterVisibleCrmRecords, registerCrmKernelProjection } from '../../../host/crmRecordVisibility.js';
 import { fireCrmRecordDeleted } from '../../../host/crmRecordLifecycle.js';
 import { OpenwopError } from '../../../types.js';
 import { MAX, MAX_PER_ORG_ENTITIES, assertUnderCap, cleanStr, cleanTags, nowIso, optStr } from './shared.js';
@@ -56,6 +56,15 @@ function companyToKernel(c: Company): { values: Record<string, unknown>; ext: Re
   };
 }
 const kernelToCompany = (rec: EntityRecord): Company => (rec.ext?.company as Company);
+// ADR 0846 D2 — a kernel reader (a BI metric over `crm.company`) filters each row
+// on the same domain record `listCompanies` hands the visibility resolver.
+registerCrmKernelProjection(CRM_COMPANY_TYPE, {
+  target: 'company',
+  project: (rec) => {
+    const c = rec.ext?.['company'] as Company | undefined;
+    return c && typeof c.companyId === 'string' && typeof c.orgId === 'string' ? { id: c.companyId, orgId: c.orgId, record: c } : null;
+  },
+});
 
 /** LEGACY store — retained READ-DARK for the migration + the historical
  *  APP_MIGRATION 4 backfill (which operates on legacy rows before the kernel

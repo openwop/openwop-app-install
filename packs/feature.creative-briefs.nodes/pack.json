@@ -1,6 +1,7 @@
 {
   "name": "feature.creative-briefs.nodes",
-  "version": "1.2.0",
+  "version": "1.2.1",
+  "kind": "node",
   "description": "Creative-briefs feature node pack — full ctx.features.creative-briefs surface: list/get reads, a create WRITE that calls the SAME service function the HTTP route calls (the CRM v1.4 write-node precedent), and the ADR 0399 ad-layout renderer: brief.render (one template) + brief.render-variants (template family fan-out), each a deterministic brief→composed-PNG projection stored as a hash-deduped Media asset with safe-zone warnings. Tenant+org-guarded; role:action (recorded, replay/fork-safe — the recorded mediaAssetId is read verbatim on replay). v1.2.0 adds generate-reel (ADR 0411 P3 — text-to-video via ctx.callVideoGenerator → durable Media asset → reel render; deterministic renderId for replay/fork idempotency).",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
@@ -11,7 +12,7 @@
     "creative"
   ],
   "engines": {
-    "openwop": ">=1.0.0 <2.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "nodes": [
     {

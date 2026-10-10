@@ -142,6 +142,10 @@ submission automatic, everything downstream becomes the product. Five gaps close
   the *user's own* Claude/Codex subscription on their laptop. This host is multi-tenant and
   BYOK; the equivalent is the existing run/heartbeat machinery. Porting a local companion
   would be a second execution model.
+  > **Correction (2026-09-29, ADR 0785):** amended. The PTY host is adopted, but as a
+  > **user-owned RFC 0122 runner and MCP client**, never as an executor: the run and the
+  > heartbeat stay the only execution model and loop. This bullet's objection to a
+  > second execution model stands, and ADR 0785 D1 is written to satisfy it.
 - **Its auth, retention, SSE, admin, analytics and push.** All have owners here; re-porting
   them is how you end up with two of everything.
 - **Self-promotion posts** (community "who wants to be hired" threads). Peripheral to

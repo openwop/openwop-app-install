@@ -32,7 +32,7 @@
 import type { Request } from 'express';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { OpenwopError } from '../../types.js';
-import { getArtifact, listArtifactsPage, listArtifactRevisions, getArtifactRevision, diffArtifact } from '../../host/artifactProjection.js';
+import { getArtifact, listArtifactsForRun, listArtifactsPage, listArtifactRevisions, getArtifactRevision, diffArtifact } from '../../host/artifactProjection.js';
 
 function tenantOf(req: Request): string {
   return (req as { tenantId?: string }).tenantId ?? 'default';
@@ -47,12 +47,22 @@ function requireSubject(req: Request): string {
 
 export function registerArtifactRoutes(deps: RouteDeps): void {
   const { app } = deps;
-  const BASE = '/v1/host/openwop-app/artifacts';
+  const BASE = '/host/openwop-app/artifacts';
 
   // ADR 0083 — the Library: every artifact the caller can see, across sources, newest
   // first. Registered BEFORE `/:artifactId` so the bare collection path isn't swallowed.
   app.get(BASE, async (req, res, next) => {
     try {
+      // ADR 0768 follow-up P2 — `?runId=` narrows the Library to ONE run's outputs
+      // (the chat's "open in the Workbench"). A filter, never a wider view: the
+      // same per-artifact gate as `/:artifactId`. Host-extension, so no wire
+      // change (a list under `/v1/runs/:id/artifacts` would be protocol surface).
+      if (typeof req.query.runId === 'string') {
+        const runId = req.query.runId.trim();
+        if (!runId || runId.length > 200) throw new OpenwopError('validation_error', '`runId` must be a non-empty run id.', 400, { field: 'runId' });
+        res.status(200).json({ artifacts: await listArtifactsForRun(tenantOf(req), requireSubject(req), runId) });
+        return;
+      }
       // ART-1 — bounded, cursor-paginated Library (response: `{ artifacts, nextCursor? }`;
       // `nextCursor` is additive — older clients ignore it and still get the first page).
       const limitRaw = Number(req.query.limit);

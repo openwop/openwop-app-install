@@ -46,7 +46,7 @@ import { getInvocationLog } from '../executor/invocationLog.js';
 import { toWireRunId } from '../host/v2Ids.js';
 import { sendError } from '../middleware/errorEnvelope.js';
 
-export const FIRE_EFFECT_SEAM_PATH = '/v1/host/sample/effect-seams/fire';
+export const FIRE_EFFECT_SEAM_PATH = '/host/sample/effect-seams/fire';
 /** The conformance-only node the seam's run executes. */
 export const FIRE_NODE_TYPE = 'conformance.effect-seam.fire';
 

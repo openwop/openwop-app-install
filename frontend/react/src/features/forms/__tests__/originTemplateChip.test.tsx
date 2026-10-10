@@ -7,23 +7,35 @@
  * so in the detail header, a hand-authored form claims nothing, and the
  * pack-authored identifier is bidi-ISOLATED (FSI/PDI) so a hostile pack name
  * cannot reorder the trusted copy around it (ADR 0516 §Provenance residual).
+ *
+ * Sabotages that redden it (grade-tests wave 8): rendering the pack identifier
+ * without `bidiIsolate`, dropping the template id from the title, or rendering a
+ * chip on a hand-authored form.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import type { FormDef } from '../formsClient.js';
-
-const client = vi.hoisted(() => ({
-  listOrgs: vi.fn(), listForms: vi.fn(), getForm: vi.fn(), createForm: vi.fn(),
-  updateForm: vi.fn(), deleteForm: vi.fn(), setFormStatus: vi.fn(),
-  listIntakeLists: vi.fn(), listSubmissionsPage: vi.fn(), listSubmissions: vi.fn(),
-  listFormTemplates: vi.fn(), createFormFromTemplate: vi.fn(),
-  publicFormUrl: (id: string) => `https://example.test/public-forms/${id}`,
-  hostedFormUrl: (id: string) => `https://example.test/f/${id}`,
-  FIELD_TYPES: ['text', 'email', 'textarea', 'select', 'checkbox'] as const,
-}));
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
-vi.mock('../formsClient.js', () => client);
+
+/**
+ * The ONE typed formsClient double (grade-tests wave 8): the REAL module is
+ * spread in — so `FormsRequestError`, `FIELD_TYPES` and the URL helpers are the
+ * shipped ones, not hand-kept copies that had drifted (no `number` type, no
+ * `reason` on the error) — and every network function is replaced by a
+ * `vi.fn` typed against the real signature, so a fixture that contradicts the
+ * client type is a compile error rather than a silent green.
+ */
+type FC = typeof import('../formsClient.js');
+const client = vi.hoisted(() => ({
+  listOrgs: vi.fn<FC['listOrgs']>(), listForms: vi.fn<FC['listForms']>(), getForm: vi.fn<FC['getForm']>(),
+  createForm: vi.fn<FC['createForm']>(), updateForm: vi.fn<FC['updateForm']>(), deleteForm: vi.fn<FC['deleteForm']>(),
+  setFormStatus: vi.fn<FC['setFormStatus']>(), listIntakeLists: vi.fn<FC['listIntakeLists']>(),
+  listSubmissionsPage: vi.fn<FC['listSubmissionsPage']>(), listSubmissions: vi.fn<FC['listSubmissions']>(),
+  deleteSubmission: vi.fn<FC['deleteSubmission']>(), releaseSubmission: vi.fn<FC['releaseSubmission']>(),
+  listFormTemplates: vi.fn<FC['listFormTemplates']>(), createFormFromTemplate: vi.fn<FC['createFormFromTemplate']>(),
+}));
+vi.mock('../formsClient.js', async (orig) => ({ ...(await orig<FC>()), ...client }));
 vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
   useFeatureAccess: () => makeFeatureAccess({ enabled: true, loading: false }),
 }));
@@ -44,10 +56,10 @@ const renderDetail = () => render(
 );
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   client.listOrgs.mockResolvedValue([{ orgId: 'o1', name: 'Org One' }]);
   client.listIntakeLists.mockResolvedValue([]);
-  client.listSubmissionsPage.mockResolvedValue({ submissions: [], nextCursor: null });
+  client.listSubmissionsPage.mockResolvedValue({ submissions: [], nextCursor: null, flaggedCount: 0, droppedCount: 0 });
   client.listSubmissions.mockResolvedValue([]);
 });
 
@@ -69,5 +81,7 @@ describe('DOCTPL-19 — the per-form origin chip', () => {
     renderDetail();
     await screen.findByDisplayValue('Contact Us');
     expect(screen.queryByText((text) => text.includes('⁨'))).toBeNull();
+    // No chip AT ALL — not merely no isolate (an un-isolated chip passed the line above).
+    expect(screen.queryByText(/From template/)).toBeNull();
   });
 });

@@ -102,13 +102,13 @@ export const commerceConnectFeature: BackendFeature = {
     // `scripts/check-pack-version-bump.mjs` exists to prevent. Every other
     // feature in the repo holds this invariant (measured: 113/113); nothing
     // enforces it mechanically yet.
-    { name: 'feature.commerce-connect.nodes', version: '1.0.1' },
+    { name: 'feature.commerce-connect.nodes', version: '1.0.2' },
   ],
   toggleDefault: {
     id: 'commerce-connect',
     label: 'Commerce Connect (seller marketplace)',
     description:
-      'Two-sided seller marketplace on Stripe Connect: Express seller onboarding, destination-charge purchases with a platform application fee, and paid marketplace listings. Rides billing’s Stripe key + webhook; demo-mode without a key. OFF by default.',
+      'Two-sided seller marketplace on Stripe Connect: Express seller onboarding, destination-charge purchases with a platform application fee, and paid marketplace listings. Rides billing’s Stripe key + webhook; demo-mode without a key.',
     category: 'Admin',
     status: 'off',
     bucketUnit: 'tenant',

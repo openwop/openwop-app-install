@@ -141,12 +141,12 @@ describe('ADR 0727 D3 — the chassis PATCH returns the warning (the hop the toa
   it('leg 3: saving a campaign with a dangling asset returns 200 AND the warning', async () => {
     const c = client();
     const tenantId = `org:test-csw-${Date.now()}-${n++}`;
-    expect((await c.post('/v1/host/openwop-app/test/login', { email: `csw-${Date.now()}-${n++}@acme.test`, tenantId })).status).toBe(201);
-    const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+    expect((await c.post('/host/openwop-app/test/login', { email: `csw-${Date.now()}-${n++}@acme.test`, tenantId })).status).toBe(201);
+    const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
     expect(org.status).toBe(201);
     const orgId = org.body.orgId as string;
 
-    const B = `/v1/host/openwop-app/campaign-studio/orgs/${encodeURIComponent(orgId)}`;
+    const B = `/host/openwop-app/campaign-studio/orgs/${encodeURIComponent(orgId)}`;
     const made = await c.post(`${B}/canvases`, { name: 'Spring launch' });
     expect(made.status, JSON.stringify(made.body).slice(0, 300)).toBe(201);
     const canvasId = made.body.canvasId as string;

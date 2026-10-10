@@ -39,7 +39,7 @@ const H = { authorization: 'Bearer dev-token', 'content-type': 'application/json
 const post = (p: string, b?: unknown) => fetch(`${BASE}${p}`, { method: 'POST', headers: H, body: b === undefined ? undefined : JSON.stringify(b) });
 const put = (p: string, b: unknown) => fetch(`${BASE}${p}`, { method: 'PUT', headers: H, body: JSON.stringify(b) });
 const get = (p: string) => fetch(`${BASE}${p}`, { headers: H });
-const RT = '/v1/host/openwop-app/voice/realtime';
+const RT = '/host/openwop-app/voice/realtime';
 const setVoice = (status: 'on' | 'off') => saveConfig({ ...voiceFeature.toggleDefault!, status }, 'test');
 
 beforeAll(async () => {
@@ -380,7 +380,7 @@ describe('ADR 0199 P1 — composed instructions (the RT-2 persona half, finally)
   it('a scoped agent session carries its authored persona + the spoken addendum, not the old placeholder', async () => {
     await setVoice('on');
     // A user-authored agent with a DISTINCTIVE prompt body.
-    const create = await post('/v1/host/openwop-app/agents', {
+    const create = await post('/host/openwop-app/agents', {
       persona: 'Vox Context Probe',
       label: 'Vox',
       modelClass: 'chat',
@@ -416,7 +416,7 @@ describe('ADR 0277 — agent identity normalization (rosterId ↔ agentId dualit
   it('a ROSTER-scoped session (the VoiceAgentPicker id form) composes the persona, not the generic scaffold', async () => {
     await setVoice('on');
     // The persona's registry projection (the chat-callable agent)…
-    const create = await post('/v1/host/openwop-app/agents', {
+    const create = await post('/host/openwop-app/agents', {
       persona: 'Marbury Advisor Probe',
       label: 'Marbury',
       modelClass: 'chat',

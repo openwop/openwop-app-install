@@ -6,8 +6,17 @@
  * embeddedChunks); the daily embed budget PAUSES the job (never half-embeds-and-lies); the
  * cutover flips the serving namespace atomically; and search still works post-cutover under
  * the new (pinned) model. Uses the headless-embedder test seam (no real credentials).
+ *
+ * Sabotage witnesses (grade-tests wave 6, 19 probes, all red on their named case): the
+ * cutover flip, the budget pause, the lease expiry and its two clocks/ceilings, the
+ * live-job guard, the drain's post-embed re-read, job identity (`startedAt`+`toSig`)
+ * and `gen` continuity, the fresh-`cutting-over` cancel refusal, the narrow-window orphan
+ * GC, the field-scoped cutover and hydrate CAS writes, the re-provision CAS insert, the
+ * eraser's collect-and-continue, the double-start guard, loud CAS exhaustion, the
+ * `driver` stamp, and the R5 landed-flip check. Fixed sleeps were replaced by a
+ * next-millisecond condition wait and a `vi.waitFor` on the delivered event.
  */
-import { describe, it, expect, beforeAll, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -16,8 +25,11 @@ import { initHostExtPersistence, __hostExtStorage } from '../src/host/hostExtPer
 import { openStorage } from '../src/storage/index.js';
 import { __setHeadlessEmbedderForTest } from '../src/host/headlessAi.js';
 import { checkEmbedBudget } from '../src/features/kb/embedBudget.js';
-import { collectionNamespace, createCollection, ingestDocument, deleteDocument, eraseSubjectKb, getDocument, search, setRetrievalConfig, startReindex, drainReindex, getReindexJob, cancelReindex, getCollection, _setCollectionCasInterferenceForTest } from '../src/features/kb/kbService.js';
+import { collectionNamespace, createCollection, ingestDocument, deleteDocument, eraseSubjectKb, getDocument, search, setRetrievalConfig, startReindex, drainReindex, getReindexJob, cancelReindex, getCollection, listAllTenantCollections, _setCollectionCasInterferenceForTest } from '../src/features/kb/kbService.js';
+import { PREAUTHORIZED_CALLER } from '../src/host/subjectAccess.js';
 import { initHostEventDispatcher, __resetHostEventDispatcher, type HostEventEnvelope } from '../src/host/hostEventDispatcher.js';
+import type { Storage } from '../src/storage/storage.js';
+import type { StartRunDeps } from '../src/host/runStarter.js';
 
 const tenantId = 'tenant-reindex';
 const orgId = 'org-reindex';
@@ -30,6 +42,22 @@ function fakeEmbedder(): void {
   }));
 }
 function hash(s: string): number { let h = 0; for (const c of s) h = (h * 31 + c.charCodeAt(0)) | 0; return h; }
+
+/** Wait for the wall clock to tick to the next millisecond — a CONDITION, not a fixed
+ *  sleep: `startedAt` is ms-resolution, and the identity cases need two distinct values. */
+function nextMillisecond(): void { const t0 = Date.now(); while (Date.now() === t0) { /* spins < 1 ms */ } }
+
+/** Proxy pass-through: every member the witness does not intercept, bound to the real store. */
+function bindThrough(t: Storage, prop: string | symbol, recv: unknown): unknown {
+  const v: unknown = Reflect.get(t, prop, recv);
+  return typeof v === 'function' ? v.bind(t) : v;
+}
+
+/** A typed host-event dispatcher fixture (no run starts: the KB events are the subject). */
+const dispatcherHostSuite: StartRunDeps['hostSuite'] = {
+  workflowCatalog: { getWorkflow: async () => null },
+  providerPolicyResolver: { resolveForRun: async () => [] },
+};
 
 async function newColWithDocs(name: string, n: number): Promise<string> {
   const col = await createCollection(tenantId, orgId, 'actor', { name });
@@ -107,9 +135,12 @@ describe('reindex machinery (ADR 0398 P3)', () => {
 
   it('enforces the hard chunk ceiling', async () => {
     process.env.OPENWOP_KB_REINDEX_MAX_CHUNKS = '1';
-    const cid = await newColWithDocs('Reindex-6', 3);
-    await expect(startReindex(tenantId, orgId, cid, { provider: 'openai' })).rejects.toMatchObject({ httpStatus: 400 });
-    delete process.env.OPENWOP_KB_REINDEX_MAX_CHUNKS;
+    try {
+      const cid = await newColWithDocs('Reindex-6', 3);
+      await expect(startReindex(tenantId, orgId, cid, { provider: 'openai' })).rejects.toMatchObject({ httpStatus: 400 });
+    } finally {
+      delete process.env.OPENWOP_KB_REINDEX_MAX_CHUNKS; // never leak a 1-chunk ceiling into later cases
+    }
   });
 
   // review fix — no concurrent document mutation while a reindex is building (would corrupt
@@ -119,7 +150,8 @@ describe('reindex machinery (ADR 0398 P3)', () => {
     await startReindex(tenantId, orgId, cid, { provider: 'openai' });
     await expect(ingestDocument(tenantId, orgId, 'actor', cid, { title: 'X', text: 'blocked' })).rejects.toMatchObject({ httpStatus: 409 });
     const docs = (await search(tenantId, orgId, cid, 'document', 5)).map((h) => h.documentId);
-    if (docs[0]) await expect(deleteDocument(tenantId, orgId, cid, docs[0])).rejects.toMatchObject({ httpStatus: 409 });
+    expect(docs[0], 'search must find a document to attempt the delete on').toBeTruthy();
+    await expect(deleteDocument(tenantId, orgId, cid, docs[0]!)).rejects.toMatchObject({ httpStatus: 409 });
     await drainReindex(tenantId, orgId, cid); // finish → job done
     await ingestDocument(tenantId, orgId, 'actor', cid, { title: 'Y', text: 'now allowed' }); // no throw
   });
@@ -344,20 +376,18 @@ describe('reindex machinery (ADR 0398 P3)', () => {
       let readParked!: () => void;
       const readIsParked = new Promise<void>((r) => { readParked = r; });
       const readGate = new Promise<void>((r) => { parkedRead = r; });
-      const proxied = new Proxy(real, {
-        get(t: never, prop: string) {
-          const v = (t as Record<string, unknown>)[prop];
-          if (typeof v !== 'function') return v;
+      const proxied = new Proxy<Storage>(real, {
+        get(t, prop, recv) {
           if (prop === 'kvGet') {
-            return async (key: string) => {
-              const out = await (v as (k: string) => Promise<string | null>).call(t, key);
+            return async (key: string): Promise<string | null> => {
+              const out = await t.kvGet(key);
               if (armed && key === jobKvKey) { armed = false; readParked(); await readGate; } // observe live, resolve late
               return out;
             };
           }
-          return (v as (...a: unknown[]) => unknown).bind(t);
+          return bindThrough(t, prop, recv);
         },
-      }) as unknown as Parameters<typeof initHostExtPersistence>[0];
+      });
 
       let entered!: () => void;
       let release!: () => void;
@@ -461,19 +491,17 @@ describe('reindex machinery (ADR 0398 P3)', () => {
         const n = notify; notify = null; n?.();
         await gate;
       };
-      const proxied = new Proxy(real, {
-        get(t: never, prop: string) {
-          const v = (t as Record<string, unknown>)[prop];
-          if (typeof v !== 'function') return v;
+      const proxied = new Proxy<Storage>(real, {
+        get(t, prop, recv) {
           if (prop === 'kvSet') {
-            return async (key: string, value: string) => { await park(key, 'set'); return (v as (k: string, x: string) => Promise<unknown>).call(t, key, value); };
+            return async (key: string, value: string): Promise<void> => { await park(key, 'set'); return t.kvSet(key, value); };
           }
           if (prop === 'kvCompareAndSwap') {
-            return async (key: string, expected: string | null, next: string) => { await park(key, 'cas'); return (v as (k: string, e: string | null, n: string) => Promise<unknown>).call(t, key, expected, next); };
+            return async (key: string, expected: string | null, next: string): ReturnType<Storage['kvCompareAndSwap']> => { await park(key, 'cas'); return t.kvCompareAndSwap(key, expected, next); };
           }
-          return (v as (...a: unknown[]) => unknown).bind(t);
+          return bindThrough(t, prop, recv);
         },
-      }) as unknown as Parameters<typeof initHostExtPersistence>[0];
+      });
       const waitForParks = async (n: number): Promise<void> => {
         while (parked.length < n) await new Promise<void>((r) => { notify = r; });
       };
@@ -566,7 +594,7 @@ describe('reindex machinery (ADR 0398 P3)', () => {
         // Everything below is an ordinary operator flow through production doors.
         await cancelReindex(tenantId, orgId, cid);
         await ingestDocument(tenantId, orgId, 'actor', cid, { title: 'Zebra', text: 'aardvark unique marker QQZZ for the new corpus' });
-        await new Promise((r) => setTimeout(r, 2)); // `startedAt` is ms-resolution — see the sub-ms sibling below
+        nextMillisecond(); // `startedAt` is ms-resolution — see the sub-ms sibling below
         const job2 = await startReindex(tenantId, orgId, cid, { provider: 'openai' });
         expect(job2.startedAt).not.toBe(job1.startedAt);
         expect(job2.embeddedChunks).toBe(0);
@@ -683,7 +711,7 @@ describe('reindex machinery (ADR 0398 P3)', () => {
         // The teardown D1b performs: the job row is removed outright, generation and all.
         const storage = __hostExtStorage()!;
         await storage.kvDelete(`hostext:kb:reindex:${tenantId}:${orgId}:${cid}`);
-        await new Promise((r) => setTimeout(r, 2));
+        nextMillisecond();
         const job2 = await startReindex(tenantId, orgId, cid, { provider: 'openai' }); // mints gen 1 again
 
         release();
@@ -789,7 +817,7 @@ describe('reindex machinery (ADR 0398 P3)', () => {
       const cid = await newColWithDocs('D1a-stale-restart', 2);
       const first = await startReindex(tenantId, orgId, cid, { provider: 'openai' });
       await ageJob(cid, 31 * MIN);
-      await new Promise((r) => setTimeout(r, 2)); // `startedAt` is ms-resolution; this test is faster
+      nextMillisecond(); // `startedAt` is ms-resolution; this test is faster
       const second = await startReindex(tenantId, orgId, cid, { provider: 'openai' });
       expect(second.startedAt).not.toBe(first.startedAt);
       expect(second.status).toBe('running');
@@ -849,10 +877,18 @@ describe('reindex machinery (ADR 0398 P3)', () => {
     it('a LIVE reindex blocks erasure with a named 409 and does NOT abandon the other collections', async () => {
       const subject = `erase-subject-${Date.now()}`;
       const orgB = 'org-reindex-b';
-      const locked = await createCollection(tenantId, orgId, subject, { name: 'Locked by a reindex' });
-      await ingestDocument(tenantId, orgId, subject, locked.collectionId, { title: 'Subject doc', text: 'body of the erasable document' }, { documentId: subject });
+      // ORDER IS LOAD-BEARING: the eraser scans newest-first, so `other` is created FIRST and
+      // `locked` a millisecond later — the blocked collection is reached BEFORE the unlocked
+      // one, and only a scan that continues past the 409 can erase `other`. (Created the other
+      // way round, `other` is erased before the block and the case cannot see an abandon.)
       const other = await createCollection(tenantId, orgB, subject, { name: 'Not locked' });
       await ingestDocument(tenantId, orgB, subject, other.collectionId, { title: 'Subject doc B', text: 'a second erasable document' }, { documentId: subject });
+      nextMillisecond();
+      const locked = await createCollection(tenantId, orgId, subject, { name: 'Locked by a reindex' });
+      await ingestDocument(tenantId, orgId, subject, locked.collectionId, { title: 'Subject doc', text: 'body of the erasable document' }, { documentId: subject });
+      const scan = (await listAllTenantCollections(tenantId, PREAUTHORIZED_CALLER)).map((c) => c.collectionId);
+      expect(scan, 'precondition: both collections are present in the actual scan').toEqual(expect.arrayContaining([locked.collectionId, other.collectionId]));
+      expect(scan.indexOf(locked.collectionId), 'precondition: the blocked collection is scanned before the unlocked one').toBeLessThan(scan.indexOf(other.collectionId));
       await startReindex(tenantId, orgId, locked.collectionId, { provider: 'openai' }); // live, fresh
 
       await expect(eraseSubjectKb(tenantId, subject)).rejects.toMatchObject({ httpStatus: 409 });
@@ -957,8 +993,8 @@ describe('ADR 0643 R3 review — Should 5 (CAS exhaustion is LOUD) and Should 7 
   it('Should 5 / R4 Should 1 — the CUTOVER under exhaustion goes `failed { reason: cutover-conflict }`, emits it, and never claims done', async () => {
     const delivered: HostEventEnvelope[] = [];
     initHostEventDispatcher({
-      storage: __hostExtStorage()! as never,
-      hostSuite: { workflowCatalog: { getWorkflow: async () => null } } as never,
+      storage: __hostExtStorage()!,
+      hostSuite: dispatcherHostSuite,
       deliverWebhooks: async (e) => { delivered.push(e); },
       startRun: async () => null,
     });
@@ -979,9 +1015,9 @@ describe('ADR 0643 R3 review — Should 5 (CAS exhaustion is LOUD) and Should 7 
       expect(out!.status, 'the row must say what happened').toBe('failed');
       expect(out!.error).toMatch(/cutting over/);
       expect(out!.embeddedChunks).toBe(out!.totalChunks); // it DID build; only the flip lost
-      await new Promise((r) => setTimeout(r, 25));
-      const failed = delivered.filter((e) => e.type === 'host.kb.reindex.failed' && e.tenantId === tenantId && e.payload.collectionId === cid);
-      expect(failed).toHaveLength(1);
+      const isFailed = (e: HostEventEnvelope): boolean => e.type === 'host.kb.reindex.failed' && e.tenantId === tenantId && e.payload.collectionId === cid;
+      await vi.waitFor(() => expect(delivered.filter(isFailed)).toHaveLength(1));
+      const failed = delivered.filter(isFailed);
       expect(failed[0]!.payload).toEqual({ orgId, collectionId: cid, reason: 'cutover-conflict' });
       expect(delivered.filter((e) => e.type === 'host.kb.reindex.completed' && e.payload.collectionId === cid)).toHaveLength(0);
       const col = (await getCollection(tenantId, orgId, cid))!;
@@ -1026,8 +1062,8 @@ describe('ADR 0643 R3 review — Should 5 (CAS exhaustion is LOUD) and Should 7 
 
     const events: HostEventEnvelope[] = [];
     initHostEventDispatcher({
-      storage: __hostExtStorage()! as never,
-      hostSuite: { workflowCatalog: { getWorkflow: async () => null } } as never,
+      storage: __hostExtStorage()!,
+      hostSuite: dispatcherHostSuite,
       deliverWebhooks: async (e) => { events.push(e); },
       startRun: async () => null,
     });

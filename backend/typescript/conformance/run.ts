@@ -62,7 +62,14 @@ const SECONDARY_API_KEY = `${API_KEY}-secondary`;
  *  cross-tenant read, the isolation blackbox). An env key pinned to one tenant:
  *  the primary key is the `*` operator, so its runs land outside this tenant. */
 const TENANT_B_API_KEY = `${API_KEY}-tenant-b`;
-const TENANT_B = 'conformance-tenant-b';
+// ADR 0814 — a NON-CLEAN tenant on purpose. Suite ≥ 2.45.23 also mints a run
+// under this credential in `0184.mint-no-tilde`, so a grammar-clean tenant here
+// would leave that leg green by construction (it never needs an escape). `@`
+// forces the `x-<hex>` wire row; a host that projected it would mint
+// `acme~40corp.example/…`. MEASURED 2026-10-06 against 2.45.23: identical per-file
+// results to `conformance-tenant-b` across all 17 tenant-B scenarios, and with
+// `toWireTenant` reverted to `projectBoundId` exactly that leg fails.
+const TENANT_B = 'acme@corp.example';
 
 /**
  * The honest advertise-or-opt-out ledger (ADR 0550).
@@ -496,6 +503,11 @@ async function main(): Promise<void> {
   //   the 401 to a 200/201.
   process.env.OPENWOP_RATELIMIT_DISABLED = 'true';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
+  // ADR 0812 P3c — major 1 is gone from this host, so major 2 is the only lane.
+  // The suite's `--target-major` follows `preferredVersion` (now `2.0`); naming
+  // it here as well applies the major-2 ledger (`major2UndeclaredFamilies`) on
+  // every run, not only when the caller remembered to set it.
+  process.env.OPENWOP_TARGET_MAJOR ??= '2';
   // Test seam needs enabling for envelope/accept, capability-toggle,
   // llm-prompt-wrap, and the variables mutation seam.
   process.env.OPENWOP_TEST_SEAM_ENABLED = 'true';
@@ -963,9 +975,19 @@ async function main(): Promise<void> {
   }
 
   const webhookStorage = app.locals.storage as Storage;
+  // The approval-gate timeout sweep rides the SAME production tick
+  // (`startWebhookDeliveryWorker` → `sweepExpiredApprovalGates`, RFC 0093 §D).
+  // Simulating the drain without it left a timed-out gate resolvable only by the
+  // lazy read path, so suite 2.43.1's RFC 0223 timeout legs (nobody reads the
+  // interrupt; the host's timer must resolve it) could never pass in-process.
+  // Production was never affected, because main() runs the real worker.
+  const { sweepExpiredApprovalGates } = await import('../src/executor/approvalGateTimeout.js');
   const webhookDrain = setInterval(() => {
     void processDueWebhookDeliveries(webhookStorage, 'webhook-conformance').catch(() => {
       /* fail-contained: a drain error must never crash the conformance host */
+    });
+    void sweepExpiredApprovalGates(webhookStorage).catch(() => {
+      /* fail-contained, as above */
     });
   }, 100);
   if (typeof webhookDrain.unref === 'function') webhookDrain.unref();

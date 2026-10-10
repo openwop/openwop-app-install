@@ -31,7 +31,7 @@ const MAX_IMPORT_BASE64 = Math.ceil((MAX_MESH_BYTES * 4) / 3) + 1024;
 
 export function registerCadEditorRoutes(deps: RouteDeps): void {
   registerCanvasEditorRoutes(deps, {
-    basePath: '/v1/host/openwop-app/cad',
+    basePath: '/host/openwop-app/cad',
     feature: CAD_FEATURE,
     canvasTypeId: 'canvas.cad',
     // ADR 0359 Phase 5 — collab-capable (both toggles enforced at the socket).

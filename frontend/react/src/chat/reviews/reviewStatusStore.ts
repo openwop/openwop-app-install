@@ -26,6 +26,7 @@
  * @see docs/adr/0074-live-review-status-sync.md
  */
 
+import { useMemo } from 'react';
 import { create } from 'zustand';
 import {
   listReviews,
@@ -64,6 +65,8 @@ interface ReviewSignalFrame {
   policy?: ReviewPolicy;
 }
 
+export type DecideOutcome = 'recorded' | 'already-resolved';
+
 interface ReviewStatusState {
   /** The pending inbox — full review objects for rendering lists/cards. */
   reviews: ReviewRequest[];
@@ -71,6 +74,13 @@ interface ReviewStatusState {
   statusById: Record<string, StatusEntry>;
   loading: boolean;
   error: string | null;
+  /** ADR 0778 (`APUX-5`) — the load failure itself, so the panel can localize
+   *  it (`error` is the raw server text, kept for existing readers). */
+  errorCause: unknown;
+  /** ADR 0778 (`APUX-1`) — the last failed decision per review, kept HERE
+   *  because the optimistic drop unmounts the card that made the call. Cleared
+   *  when that review is decided again. */
+  failureById: Record<string, unknown>;
   /** True after the first list read settles. Distinguishes a proven empty
    * inbox from the store's pre-hydration empty array. */
   initialized: boolean;
@@ -85,11 +95,17 @@ interface ReviewStatusState {
   disconnect: () => void;
   /** Re-hydrate the pending list from the server (reconcile after a gap). */
   refresh: () => Promise<void>;
-  /** Decide a review (optimistic: drop locally, then dispatch). 409 (already
-   *  resolved) is treated as success; a `proposal_stale`/`proposal_expired`
-   *  409 (ADR 0473 — the row REOPENED server-side) restores + rethrows; other
-   *  errors reconcile + rethrow. */
-  decide: (reviewId: string, action: string, body?: { value?: unknown; note?: string; expectedDefinitionHash?: string }) => Promise<void>;
+  /** Decide a review (optimistic: drop locally, then dispatch). Resolves
+   *  `'recorded'`, or `'already-resolved'` on a plain 409 (someone else decided
+   *  first — the drop stands, but it was not THIS decision); a
+   *  `proposal_stale`/`proposal_expired` 409 (ADR 0473 — the row REOPENED
+   *  server-side) restores + rethrows; other errors reconcile + rethrow. */
+  decide: (reviewId: string, action: string, body?: { value?: unknown; note?: string; expectedDefinitionHash?: string; expectedContentHash?: string }) => Promise<DecideOutcome>;
+  /** ADR 0778 (closing review I1) — hand a kept failure to the card that will
+   *  show it, ONCE: the card copies it into its own state and the entry goes,
+   *  so a later remount (reopening the tab) or a second surface showing the
+   *  same review does not announce it again. */
+  consumeFailure: (reviewId: string) => void;
   /** Apply a `review.updated` signal frame (also used by tests). */
   _applySignal: (frame: Notification) => void;
 }
@@ -130,11 +146,19 @@ function applyStatus(state: ReviewStatusState, entry: StatusEntry): Partial<Revi
   return { statusById, reviews };
 }
 
+let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+function scheduleRefresh(get: () => ReviewStatusState): void {
+  if (refreshTimer) return;
+  refreshTimer = setTimeout(() => { refreshTimer = null; void get().refresh(); }, 400);
+}
+
 export const useReviewStatusStore = create<ReviewStatusState>((set, get) => ({
   reviews: [],
   statusById: {},
   loading: false,
   error: null,
+  errorCause: null,
+  failureById: {},
   initialized: false,
   _busCleanup: null,
   _refcount: 0,
@@ -170,13 +194,21 @@ export const useReviewStatusStore = create<ReviewStatusState>((set, get) => ({
         const o = overrides[r.reviewId];
         return !(o && isTerminal(o.status));
       });
-      set({ reviews, loading: false, error: null, initialized: true });
+      // A kept failure for a review that has left the list can never be shown.
+      const live = new Set(reviews.map((r) => r.reviewId));
+      const failureById = Object.fromEntries(Object.entries(get().failureById).filter(([id]) => live.has(id)));
+      set({ reviews, loading: false, error: null, errorCause: null, failureById, initialized: true });
     } catch (err) {
-      set({ loading: false, error: err instanceof Error ? err.message : String(err), initialized: true });
+      set({ loading: false, error: err instanceof Error ? err.message : String(err), errorCause: err, initialized: true });
     }
   },
 
   async decide(reviewId, action, body = {}) {
+    // ADR 0778 (`APUX-1`) — a retry starts clean.
+    if (get().failureById[reviewId] !== undefined) {
+      const { [reviewId]: _cleared, ...others } = get().failureById;
+      set({ failureById: others });
+    }
     // Optimistic: drop the review from the pending inbox immediately.
     const prev = get().reviews;
     set(applyStatus(get(), { reviewId, status: action === 'reject' ? 'rejected' : 'approved' }));
@@ -184,21 +216,29 @@ export const useReviewStatusStore = create<ReviewStatusState>((set, get) => ({
       await decideReview(reviewId, action, body);
       // The authoritative reconcile arrives via the broadcast frame; nothing
       // more to do on success.
+      return 'recorded';
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
       // ADR 0473 (review F1) — a `proposal_stale`/`proposal_expired` 409 means
       // the row is STILL PENDING (the server reopened it): the optimistic drop
       // is WRONG. Restore + reconcile + rethrow so the card re-renders and
       // surfaces why. Only the classic already-resolved conflict stays a
       // treat-as-success.
       const reason = err instanceof ReviewRequestError ? err.reason : undefined;
-      const stillPending = reason === 'proposal_stale' || reason === 'proposal_expired';
+      // ADR 0862 — `action_changed`: an assistant action changed after this card rendered;
+      // the server refused BEFORE consuming (or reopened both rows), so it is pending too.
+      const stillPending = reason === 'proposal_stale' || reason === 'proposal_expired' || reason === 'action_changed';
       // 409 / already-resolved ⇒ someone else decided first. The optimistic
-      // drop is correct; treat as success (ADR 0068 stale-safe contract).
-      if (!stillPending && (/\b409\b/.test(msg) || /already[_-]?resolved|conflict/i.test(msg))) return;
+      // drop is correct (ADR 0068 stale-safe contract) — but it is NOT the
+      // caller's decision, so it is reported as such (`APUX-2`: the inbox said
+      // "Decision recorded" for a decision that was not). Keyed on the STATUS:
+      // the message regex this replaced matched any error mentioning "conflict".
+      if (!stillPending && err instanceof ReviewRequestError && err.httpStatus === 409) return 'already-resolved';
       // Any other failure: the decision didn't take. Restore + reconcile, then
-      // rethrow so the card can surface the error.
-      set({ reviews: prev });
+      // rethrow so the card can surface the error. The failure is ALSO kept
+      // here, keyed by review (`APUX-1`): the optimistic drop unmounted the
+      // card that made the call, so the restored card is a new instance and
+      // its caller's local error state is gone.
+      set({ reviews: prev, failureById: { ...get().failureById, [reviewId]: err } });
       const { [reviewId]: _dropped, ...rest } = get().statusById;
       set({ statusById: rest });
       void get().refresh();
@@ -206,11 +246,22 @@ export const useReviewStatusStore = create<ReviewStatusState>((set, get) => ({
     }
   },
 
+  consumeFailure(reviewId) {
+    if (get().failureById[reviewId] === undefined) return;
+    const { [reviewId]: _consumed, ...rest } = get().failureById;
+    set({ failureById: rest });
+  },
+
   _applySignal(frame) {
     const meta = (frame.metadata ?? {}) as ReviewSignalFrame;
     const reviewId = meta.reviewId;
     const status = meta.status;
     if (!reviewId || !status) return;
+    // ADR 0776 — a frame for a PENDING review this inbox has never seen means a
+    // new approval opened (frames only patch/evict, they never add). Re-read the
+    // inbox, debounced + single-flight, so "waiting on you" counts do not stay
+    // stale until the next navigation.
+    if (!isTerminal(status) && !get().reviews.some((r) => r.reviewId === reviewId)) scheduleRefresh(get);
     set(applyStatus(get(), {
       reviewId,
       status,
@@ -254,4 +305,19 @@ export function useReviewStatusByRunNode(runId: string | undefined, nodeId: stri
     const inList = s.reviews.find((r) => r.runId === runId && r.nodeId === nodeId);
     return inList?.status;
   });
+}
+
+/**
+ * ADR 0776 — pending reviews per conversation, from the ONE inbox (the same
+ * authorized list the Reviews tab shows — never a second counter). Keys are the
+ * `conversationId` the backend stamps from the run's `chatSessionId`. Memoized on
+ * the list identity so consumers do not re-render on unrelated store changes.
+ */
+export function useReviewCountsByConversation(): ReadonlyMap<string, number> {
+  const reviews = useReviewStatusStore((s) => s.reviews);
+  return useMemo(() => {
+    const m = new Map<string, number>();
+    for (const r of reviews) if (r.conversationId) m.set(r.conversationId, (m.get(r.conversationId) ?? 0) + 1);
+    return m;
+  }, [reviews]);
 }

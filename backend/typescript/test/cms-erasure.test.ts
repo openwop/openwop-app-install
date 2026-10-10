@@ -120,7 +120,7 @@ describe('ADR 0592 §8 — content-publish reviewer redaction (CMSLWF-9 a)', () 
 
     const page = await createPage({ tenantId: T, orgId: ORG, title: 'Reviewed page', createdBy: 'u-author' });
     await transitionPage(T, ORG, page.pageId, 'submit', 'u-author');
-    await queueContentApproval(T, ORG, page, 'Publish "Reviewed page"');
+    await queueContentApproval(T, ORG, page, 'Publish "Reviewed page"', { notify: false });
     const appr = await findPendingContentApprovalForPage(T, page.pageId);
     expect(appr, 'submit must queue a content approval').toBeTruthy();
 

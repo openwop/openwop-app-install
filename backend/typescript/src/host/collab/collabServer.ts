@@ -27,15 +27,16 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import type { Server, IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { base64urlDecode, base64urlEncode, readSessionSecret, verifySession } from '../../middleware/cookieSession.js';
-import { originPolicy } from '../../middleware/cors.js';
+import { base64urlDecode, base64urlEncode, readSessionSecret, readCookie, COOKIE_NAME } from '../../middleware/cookieSession.js';
+import { credentialedOriginAllowed, originPolicy } from '../../middleware/cors.js';
 import { getCanvasForTenant, type CanvasRecordView } from '../canvasSurface.js';
 import { resolveSubjectAccess, levelSatisfies } from '../subjectAccess.js';
 import { resolveCallerUser } from '../../features/users/usersGuards.js';
 import { resolveOne } from '../featureToggles/service.js';
 import { DurableCollection } from '../hostExtPersistence.js';
 import { requireFeatureEnabled, toggleSubjectOf } from '../../features/featureRoute.js';
-import { tenantOf } from '../requestSubject.js';
+import { tenantOf, isPersonalTenantId } from '../requestSubject.js';
+import { assertTenantScope } from '../accessControlService.js';
 import { OpenwopError } from '../../types.js';
 import { createLogger } from '../../observability/logger.js';
 import { joinCollabRoom, initCollabFanout, pruneCollabSnapshot, startCollabUpdateSweep, startCollabLeaseHeartbeat, hasLiveRoomGlobal, hasCollabSnapshot, applyExternalState, notifyExternalCanvasWrite, listLiveRooms, setSeedClaimRestorer } from './collabRoom.js';
@@ -47,18 +48,14 @@ import type { BackendFeature } from '../../features/types.js';
 const log = createLogger('host.collab');
 
 export const COLLAB_TOGGLE_ID = 'realtime-collab';
-const COOKIE_NAME = process.env.OPENWOP_SESSION_COOKIE_NAME || '__session';
 // The optional `/api` prefix mirrors the Express strip (index.ts) — a raw
 // upgrade BYPASSES that middleware, so proxied posture (Firebase `/api`
 // rewrite; the dev-server `/api` proxy) reaches here un-stripped (the
 // ADR 0359 Phase 7 e2e finding).
 //
-// `/v1` is OPTIONAL: ADR 0671 moved the SPA to the canonical, version-agnostic
-// `/host/<org>/…` root (RFC 0181). The Express negotiator rewrites that onto the
-// `/v1` twin, but a raw upgrade never reaches Express, so this matcher must take
-// both spellings itself. It took only `/v1` from #3796 until this fix, and every
-// SPA collab socket hung un-upgraded ("Reconnecting…"; collab.spec red).
-const PATH_RE = /^(?:\/api)?(?:\/v1)?\/host\/openwop-app\/(canvas-collab|workflow-collab)\/([^/?#]+)/;
+// The canonical, version-agnostic `/host/<org>/…` root only (RFC 0181, ADR 0671).
+// A `/v1` upgrade is refused 410 by `host/upgradeRegistry.ts` (ADR 0812 P3c).
+const PATH_RE = /^(?:\/api)?\/host\/openwop-app\/(canvas-collab|workflow-collab)\/([^/?#]+)/;
 /** Per-tenant concurrent-connection cap on this instance (flood guard).
  *  Env-tunable (ADR 0359 OQ-4, closed with the residuals pass) — six collab-
  *  capable types share the budget, so a busy tenant may legitimately need more.
@@ -187,7 +184,7 @@ export const collaborationFeature: BackendFeature = {
     // (lifecycle metadata only, never content). Superadmin, like the other
     // admin surfaces; per-instance by design (each instance reports its own
     // rooms; the lease store is the cross-instance view).
-    app.get('/v1/host/openwop-app/canvas-collab/_debug', (req, res, next) => {
+    app.get('/host/openwop-app/canvas-collab/_debug', (req, res, next) => {
       try {
         requireSuperadmin(req, 'The collaboration debug surface');
         res.json({ instanceRooms: listLiveRooms() });
@@ -201,7 +198,7 @@ export const collaborationFeature: BackendFeature = {
     // uniform gate chain as claim-seed; the response hands the caller a
     // short-lived, canvas+tenant-scoped upgrade credential for the direct
     // backend origin, where the app-origin session cookie cannot follow.
-    app.post('/v1/host/openwop-app/canvas-collab/:canvasId/ticket', (req, res, next) => {
+    app.post('/host/openwop-app/canvas-collab/:canvasId/ticket', (req, res, next) => {
       void (async () => {
         try {
           await requireFeatureEnabled(req, COLLAB_TOGGLE_ID, 'Real-time collaboration');
@@ -225,7 +222,7 @@ export const collaborationFeature: BackendFeature = {
         } catch (err) { next(err); }
       })();
     });
-    app.post('/v1/host/openwop-app/canvas-collab/:canvasId/claim-seed', (req, res, next) => {
+    app.post('/host/openwop-app/canvas-collab/:canvasId/claim-seed', (req, res, next) => {
       void (async () => {
         try {
           await requireFeatureEnabled(req, COLLAB_TOGGLE_ID, 'Real-time collaboration');
@@ -254,7 +251,7 @@ export const collaborationFeature: BackendFeature = {
     id: COLLAB_TOGGLE_ID,
     label: 'Real-time collaboration',
     description:
-      'Real-time multiplayer co-editing (Yjs CRDT) for collab-capable canvas types, behind a self-hosted WebSocket sync service. OFF by default — a cross-cutting infrastructure program (ADR 0335 transport, ADR 0359 chassis-core standardization); a type is live only when BOTH this toggle and the type’s own toggle are on.',
+      'Real-time multiplayer co-editing (Yjs CRDT) for collab-capable canvas types, behind a self-hosted WebSocket sync service. A type is live only when BOTH this toggle and the type’s own toggle are on.',
     category: 'Documents',
     status: 'off',
     bucketUnit: 'tenant',
@@ -306,16 +303,6 @@ export function verifyCollabTicket(ticket: string, canvasId: string, now: number
     if (typeof p.exp !== 'number' || p.exp < now) return reject('expired');
     return { tenantId: p.t, ...(typeof p.u === 'string' && p.u ? { principalId: p.u } : {}) };
   } catch { return reject('shape'); }
-}
-
-function readCookie(header: string | undefined, name: string): string | null {
-  if (!header) return null;
-  for (const part of header.split(';')) {
-    const eq = part.indexOf('=');
-    if (eq < 0) continue;
-    if (part.slice(0, eq).trim() === name) return decodeURIComponent(part.slice(eq + 1).trim());
-  }
-  return null;
 }
 
 /** Reject the upgrade with an HTTP status — never complete the handshake for an
@@ -373,13 +360,38 @@ async function authorizeAndUpgrade(
     // snapshots, seed claims, or ticket scopes.
     const roomId = kind === 'workflow-collab' ? `wf:${resourceId}` : resourceId;
     // 1. Origin (CSWSH). Browsers always send Origin on a WS handshake.
-    if (!originPolicy().allowed(req.headers.origin)) return deny(socket, 403, 'forbidden origin');
+    //    ADR 0833 D4 — the SAME credentialed-origin answer as the HTTP CSRF
+    //    guard (no allowlist + a cross-site cookie ⇒ same-origin only); an
+    //    absent Origin keeps `originPolicy`'s answer (a non-browser client).
+    //    Only the COOKIE lane is credential-ambient; a ticket lane keeps the
+    //    allowlist answer it always had (grade-code `USERS2-CD-4`).
+    const origin = req.headers.origin;
     // 2. Authn — a collab ticket (the cross-origin prod posture) or the same
     //    signed session cookie as HTTP (same-origin dev/proxy posture).
     //    Tickets verify against the NAMESPACED room id.
     const ticket = new URL(req.url ?? '', 'http://collab.invalid').searchParams.get('ticket');
     const ticketTenant = ticket ? verifyCollabTicket(ticket, roomId) : null;
-    const session = ticketTenant ?? verifySession(readCookie(req.headers.cookie, COOKIE_NAME) ?? '');
+    const originOk = ticketTenant || !origin ? originPolicy().allowed(origin) : credentialedOriginAllowed(origin, req);
+    if (!originOk) return deny(socket, 403, 'forbidden origin');
+    // ADR 0833 D1 — the cookie lane asks the SAME live-session questions as
+    // the HTTP middleware (disabled / erased / signed out / removed / MFA).
+    // It used to call bare `verifySession`, so all of those still opened the
+    // workspace's rooms — read AND write — until the cookie's `exp` (S1). A
+    // socket cannot be re-pinned like an HTTP request, so a re-pin is a 403.
+    let cookieSession: Awaited<ReturnType<typeof import('../../middleware/auth.js').resolveLiveCookieSession>> = null;
+    if (!ticketTenant) {
+      try {
+        // Lazy: a static import of `middleware/auth` from here closes an import
+        // cycle through the feature registry (BACKEND_FEATURES evaluated with an
+        // undefined entry — MEASURED on `strategy-cross-org.test.ts`).
+        cookieSession = await (await import('../../middleware/auth.js')).resolveLiveCookieSession(readCookie(req.headers.cookie, COOKIE_NAME));
+      } catch (err) {
+        const status = err instanceof OpenwopError ? err.httpStatus : 401;
+        return deny(socket, status === 503 ? 503 : 401, status === 503 ? 'session authority unavailable' : 'unauthenticated');
+      }
+      if (cookieSession && (cookieSession.repinned || cookieSession.mfaGap)) return deny(socket, 403, 'forbidden');
+    }
+    const session = ticketTenant ?? cookieSession?.session ?? null;
     if (!session) return deny(socket, 401, 'unauthenticated');
     // 3. Toggle gate (per tenant). OFF ⇒ the surface does not exist.
     const assignment = await resolveOne(COLLAB_TOGGLE_ID, { tenantId: session.tenantId });
@@ -391,6 +403,20 @@ async function authorizeAndUpgrade(
       const wfAssignment = await resolveOne(WORKFLOW_COLLAB_TOGGLE_ID, { tenantId: session.tenantId });
       if (!wfAssignment?.enabled) return deny(socket, 404, 'not found');
       if (!(await workflowCollabEligible(session.tenantId, resourceId))) return deny(socket, 404, 'not found');
+      // ADR 0770 D1 (grade-code WBCD-3) — a room's derive registers the head, so
+      // joining is a WRITE. The ticket lane is gated where the ticket is minted
+      // (`requireWorkflowWrite`); the same-origin COOKIE lane reached the room
+      // with no scope check, letting a viewer rewrite a workflow the REST verbs
+      // refuse them. A personal-shaped active tenant is the caller's own (auth
+      // re-pins a session to its personal tenant unless it is a member of the
+      // shared one), so only a shared tenant needs the membership check.
+      if (!ticketTenant && 'sid' in session && !isPersonalTenantId(session.tenantId)) {
+        try {
+          await assertTenantScope(session.tenantId, session.userId ?? session.subject, 'workspace:write');
+        } catch {
+          return deny(socket, 403, 'forbidden');
+        }
+      }
       const claimedW = (connsByTenant.get(session.tenantId) ?? 0) + 1;
       connsByTenant.set(session.tenantId, claimedW);
       if (claimedW > MAX_CONNS_PER_TENANT) {

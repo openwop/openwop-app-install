@@ -34,8 +34,9 @@ import { createLogger } from '../observability/logger.js';
 import { OpenwopError } from '../types.js';
 import { COPILOT_PROVIDER_ID, copilotOAuthClient, copilotSubscriptionConfigured } from '../aiProviders/copilotSubscription.js';
 import { storeSubscriptionCredential } from './subscriptionCredential.js';
-import { VENDOR_ROOT, vendorTwin } from '../middleware/protocolVersion.js';
+import { VENDOR_ROOT, vendorPath } from '../middleware/protocolVersion.js';
 import { assertSubscriptionStorageTenant } from './subscriptionCredentialScope.js';
+import { safeInAppPathOr } from '../host/safeRedirect.js';
 
 const log = createLogger('byok.copilotOAuth');
 
@@ -53,7 +54,7 @@ const COPILOT_CALLBACK_SUBPATH = `/subscription/${COPILOT_PROVIDER_ID}/callback`
  *  every future connect. The canonical root is rewritten onto the twin route. */
 export const COPILOT_CALLBACK_PATH = `${VENDOR_ROOT}${COPILOT_CALLBACK_SUBPATH}`;
 /** Where the route is REGISTERED through the overlap (ADR 0654 twin). */
-export const COPILOT_CALLBACK_ROUTE = vendorTwin(COPILOT_CALLBACK_SUBPATH);
+export const COPILOT_CALLBACK_ROUTE = vendorPath(COPILOT_CALLBACK_SUBPATH);
 
 interface PendingCopilotAuth {
   state: string;
@@ -70,8 +71,8 @@ const base64url = (buf: Buffer): string =>
   buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 
 function sanitizeReturnTo(raw: unknown): string {
-  if (typeof raw !== 'string' || !raw.startsWith('/') || raw.startsWith('//')) return '/keys';
-  return raw;
+  // ADR 0833 D5 — the shared predicate (this copy accepted `/\evil.com`).
+  return safeInAppPathOr(raw, '/keys');
 }
 
 export function copilotRedirectUri(reqOrigin: string): string {

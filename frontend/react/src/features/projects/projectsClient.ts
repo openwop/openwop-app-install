@@ -24,7 +24,7 @@ export interface Project { id: string; tenantId: string; orgId: string; name: st
    *  is NOT the "does deleting this erase a corpus" question — read
    *  `deletesCorpus` for that. `ensureNotebookForProject` (opening the Sources
    *  tab) provisions a corpus without ever setting `facet`. */
-  facet?: 'notebook';
+  facet?: 'notebook' | 'campaign' | 'feature';
   /** ADR 0601 § Corrections (HIGH-2) — does deleting this project ERASE its
    *  source corpus? Computed SERVER-SIDE from the same predicate the eraser acts
    *  on (`notebookCorpusToDelete`), so the confirm dialog and the delete cannot
@@ -104,6 +104,24 @@ export interface DeleteProjectReceipt {
   conversationsDeleted?: number;
   /** Notebook-facet only — the exclusively-provisioned source corpus. */
   notebookCorpusDeleted?: boolean;
+  /** ADR 0839 D2 — rows other features owned under the project, deleted with it. */
+  dependentsDeleted?: ProjectDependentCounts;
+}
+
+/** ADR 0839 D2 — per-feature counts of what a delete takes with it. Keys are the
+ *  server's registrants; an unknown key from a newer backend is ignored. */
+export interface ProjectDependentCounts {
+  canvases?: number;
+  documents?: number;
+  /** ADR 0847 D2 — the project's entities namespace: types + records + relationships + taxonomies + terms. */
+  entities?: number;
+  priorityLists?: number;
+  teamLedger?: number;
+}
+
+export async function getDeletePreview(id: string): Promise<ProjectDependentCounts> {
+  const body = await asJson<{ dependents: ProjectDependentCounts }>(await fetch(`${base}/${encodeURIComponent(id)}/delete-preview`, fetchOpts({ headers: authedHeaders() })), 'getDeletePreview');
+  return body.dependents;
 }
 
 export async function deleteProject(id: string): Promise<DeleteProjectReceipt> {
@@ -141,6 +159,11 @@ export async function removeProjectMember(id: string, ref: string): Promise<void
   const res = await fetch(`${base}/${encodeURIComponent(id)}/members/${encodeURIComponent(ref)}`, fetchOpts({ method: 'DELETE', headers: authedHeaders() }));
   if (!res.ok) throw new Error(`removeProjectMember failed (${res.status})`);
 }
+/** ADR 0852 D3 — label a project as a feature (`null` clears). A label only: a feature IS a project. */
+export async function setProjectFacet(id: string, facet: 'feature' | null): Promise<Project> {
+  return asJson<Project>(await fetch(`${base}/${encodeURIComponent(id)}/facet`, fetchOpts({ method: 'PUT', headers: jsonHeaders(), body: JSON.stringify({ facet }) })), 'setProjectFacet');
+}
+
 export async function setProjectVisibility(id: string, visibility: ProjectVisibility): Promise<Project> {
   return asJson<Project>(await fetch(`${base}/${encodeURIComponent(id)}/visibility`, fetchOpts({ method: 'PATCH', headers: jsonHeaders(), body: JSON.stringify({ visibility }) })), 'setProjectVisibility');
 }

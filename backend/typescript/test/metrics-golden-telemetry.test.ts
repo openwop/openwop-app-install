@@ -26,6 +26,7 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { bareRunId } from './support/bareRunId.js';
 import type { AddressInfo } from 'node:net';
 import type { Express } from 'express';
 import http from 'node:http';
@@ -139,14 +140,14 @@ async function settle(runId: string): Promise<string> {
   let status = 'pending';
   for (let i = 0; i < 160; i++) {
     await new Promise((r) => setTimeout(r, 25));
-    status = (await api<{ status: string }>(`/v1/runs/${runId}`)).body.status;
+    status = (await api<{ status: string }>(`/runs/${runId}`)).body.status;
     if (['completed', 'failed', 'cancelled', 'awaiting-input'].includes(status)) break;
   }
   return status;
 }
 
 async function defineWorkflow(workflowId: string, typeId: string): Promise<void> {
-  const res = await api('/v1/host/openwop-app/workflows', {
+  const res = await api('/host/openwop-app/workflows', {
     method: 'POST',
     body: JSON.stringify({ workflowId, nodes: [{ nodeId: 'n1', typeId }], edges: [] }),
   });
@@ -154,7 +155,7 @@ async function defineWorkflow(workflowId: string, typeId: string): Promise<void>
 }
 
 async function startRun(workflowId: string, headers: Record<string, string> = {}) {
-  return api<{ runId: string }>('/v1/runs', {
+  return api<{ runId: string }>('/runs', {
     method: 'POST',
     headers,
     body: JSON.stringify({ workflowId, inputs: {}, tenantId: '_anon' }),
@@ -204,7 +205,9 @@ describe('ADR 0556 P1 — SUCCESS: a run that completes', () => {
     // deliberately stays EXACT rather than becoming a partial match: it is the
     // test that would notice an unbounded label being added here, which is the
     // failure this whole metric family is guarded against.
-    expect(http2xx).toContainEqual({ route: '/v1/runs', method: 'POST', status_class: '2xx', stream: false });
+    // ADR 0812 P2b — the `route` label is the INTERNAL route key: a major-2 request is
+    // served by the `/v1` handler until P3 deletes it, so the label is unchanged here.
+    expect(http2xx).toContainEqual({ route: '/runs', method: 'POST', status_class: '2xx', stream: false });
 
     // THE assertion that matters. `GET /v1/runs/:runId` is one series; the
     // resolved path is one series PER RUN. Every recorded route must be a
@@ -214,7 +217,7 @@ describe('ADR 0556 P1 — SUCCESS: a run that completes', () => {
     for (const route of routes) {
       expect(route).not.toContain(created.body.runId);
     }
-    expect(routes).toContain('/v1/runs/:runId');
+    expect(routes).toContain('/runs/:runId'); // internal route key (see the note above)
   });
 });
 
@@ -276,7 +279,7 @@ describe('ADR 0556 P1 — REPLAY: a fork re-executing history', () => {
     expect(emissionsOf('openwop.effect.blocked')).toHaveLength(0);
 
     _resetMetricsForTest();
-    const fork = await api<{ runId: string }>(`/v1/runs/${live.body.runId}:fork`, {
+    const fork = await api<{ runId: string }>(`/runs/${live.body.runId}:fork`, {
       method: 'POST',
       body: JSON.stringify({ mode: 'replay' }),
     });
@@ -296,7 +299,7 @@ describe('ADR 0556 P1 — REPLAY: a fork re-executing history', () => {
     expect(await settle(live.body.runId)).toBe('failed');
 
     _resetMetricsForTest();
-    const fork = await api<{ runId: string }>(`/v1/runs/${live.body.runId}:fork`, {
+    const fork = await api<{ runId: string }>(`/runs/${live.body.runId}:fork`, {
       method: 'POST',
       body: JSON.stringify({ mode: 'replay' }),
     });
@@ -317,7 +320,7 @@ describe('ADR 0556 P1 — REPLAY: a fork re-executing history', () => {
     expect(emissionsOf('openwop.replay.node.served')).toHaveLength(0); // a live run serves nothing
 
     _resetMetricsForTest();
-    const fork = await api<{ runId: string }>(`/v1/runs/${live.body.runId}:fork`, {
+    const fork = await api<{ runId: string }>(`/runs/${live.body.runId}:fork`, {
       method: 'POST',
       body: JSON.stringify({ mode: 'replay' }),
     });
@@ -344,7 +347,7 @@ describe('ADR 0556 P1 — RECOVERY: a dead holder is reclaimed', () => {
     // claim and calling it recovery.
     const probe = await startRun('adr0556.recover');
     await settle(probe.body.runId);
-    const tenantId = (await storage.getRun(probe.body.runId))!.tenantId;
+    const tenantId = (await storage.getRun(bareRunId(probe.body.runId)))!.tenantId;
 
     const key = `golden-recover-${Date.now()}`;
     const body = { workflowId: 'adr0556.recover', inputs: {}, tenantId: '_anon' };
@@ -362,7 +365,7 @@ describe('ADR 0556 P1 — RECOVERY: a dead holder is reclaimed', () => {
     expect(seeded.outcome === 'claimed' && seeded.reclaimed).toBeUndefined(); // a FIRST claim
 
     _resetMetricsForTest();
-    const recovered = await api<{ runId: string }>('/v1/runs', {
+    const recovered = await api<{ runId: string }>('/runs', {
       method: 'POST',
       headers: { 'idempotency-key': key },
       body: JSON.stringify(body),

@@ -27,6 +27,7 @@ export function Modal({
   error,
   errorAnnounce,
   showClose = false,
+  describedBy,
 }: {
   onClose: () => void;
   /** Accessible name for the dialog (aria-label). */
@@ -53,6 +54,9 @@ export function Modal({
   /** OPT-IN labeled close (×) control in the top corner. Default false so the ~18
    *  existing consumers are unchanged (they dismiss via scrim/Escape). */
   showClose?: boolean;
+  /** ADR 0818 — the id of the element that DESCRIBES the dialog (its warning
+   *  text), so a screen reader speaks it on open, not only the name. */
+  describedBy?: string | undefined;
 }): JSX.Element {
   const { t } = useTranslation('common');
   const ref = useFocusTrap<HTMLDivElement>(true);
@@ -76,6 +80,7 @@ export function Modal({
           role="dialog"
           aria-modal="true"
           aria-label={label}
+          aria-describedby={describedBy}
           aria-busy={loading ? 'true' : undefined}
         >
           {showClose ? (

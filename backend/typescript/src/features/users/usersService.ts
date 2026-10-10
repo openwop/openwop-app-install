@@ -52,6 +52,17 @@ export type EmailProvenance = 'idp' | 'admin' | 'self';
  *  written without one. */
 export const effectiveEmailProvenance = (u: Pick<User, 'emailProvenance'>): EmailProvenance => u.emailProvenance ?? 'self';
 
+/**
+ * ADR 0833 D9 — is the row's email VOUCHED FOR (by the IdP or a workspace
+ * admin), not merely self-asserted? The ONE predicate behind every "verified
+ * email" decision: the invitation accept/decline gate and the profile's
+ * `emailVerified` flag, which used to derive it from `source` instead — so an
+ * OIDC user who typed someone else's address showed as verified.
+ */
+export function isEmailVouched(u: Pick<User, 'email' | 'emailProvenance'>): boolean {
+  return Boolean(u.email) && effectiveEmailProvenance(u) !== 'self';
+}
+
 export interface User {
   userId: string;
   tenantId: string;
@@ -103,6 +114,12 @@ export interface User {
    *  re-enabled user signs in again; old cookies stay dead by construction.
    *  Absent on legacy rows ⇒ 0. */
   sessionEpoch?: number;
+  /** ADR 0833 D3 — session FAMILIES signed out by logout, each kept until
+   *  `until` (epoch seconds) = revokedAt + the cookie TTL: a refresh cannot run
+   *  after the revocation, so no copy of that family can outlive the entry.
+   *  Bounded ({@link MAX_REVOKED_FAMILIES}); an overflow bumps the epoch
+   *  instead of evicting a live entry. Written only through the CAS loop. */
+  revokedFamilies?: Array<{ fid: string; until: number }>;
   createdAt: string;
   updatedAt: string;
 }
@@ -165,10 +182,51 @@ async function swapUserRow(
   // simply retry. Nothing was lost — no attempt fell back to a blind put.
   throw new OpenwopError(
     'conflict',
-    `The account's session epoch is being updated concurrently; retry.`,
+    `The account is being updated concurrently; retry.`,
     409,
     { retry: true, userId, attempts: EPOCH_CAS_ATTEMPTS },
   );
+}
+
+/** ADR 0833 D3 — the most live family revocations a row keeps before a logout
+ *  falls back to "sign out everywhere". */
+export const MAX_REVOKED_FAMILIES = 32;
+const REVOCATION_SLACK_SECONDS = 300;
+
+/** The families still inside their bound — what the session authority hands
+ *  the middleware. */
+export function liveRevokedFamilies(user: Pick<User, 'revokedFamilies'>, nowS = Math.floor(Date.now() / 1000)): string[] {
+  return (user.revokedFamilies ?? []).filter((e) => e.until > nowS).map((e) => e.fid);
+}
+
+/**
+ * ADR 0833 D3 — sign ONE session family out (logout). `until` bounds the entry
+ * by the cookie TTL (`ttlSeconds`). Expired entries are pruned on the same
+ * write; at {@link MAX_REVOKED_FAMILIES} live entries the epoch is bumped
+ * instead, which ends every session — never evicts a live entry, which would
+ * let a revoked copy back in. CAS-written: a concurrent login or disable can no
+ * longer drop the entry. `null` ⇒ no row.
+ */
+export async function revokeSessionFamily(
+  userId: string,
+  fid: string,
+  ttlSeconds: number,
+): Promise<'revoked' | 'signed-out-everywhere' | null> {
+  let outcome: 'revoked' | 'signed-out-everywhere' = 'revoked';
+  const row = await swapUserRow(userId, (r) => {
+    const nowS = Math.floor(Date.now() / 1000);
+    const live = (r.revokedFamilies ?? []).filter((e) => e.until > nowS && e.fid !== fid);
+    if (live.length >= MAX_REVOKED_FAMILIES) {
+      outcome = 'signed-out-everywhere';
+      // Every family minted under the old epoch is dead; the list restarts.
+      return { ...r, revokedFamilies: [], sessionEpoch: sessionEpochOf(r) + 1 };
+    }
+    outcome = 'revoked';
+    // + slack (grade-code `USERS2-CD-7`): a request already past the check when
+    // the logout lands may still refresh a copy; the slack outlives that copy.
+    return { ...r, revokedFamilies: [...live, { fid, until: nowS + ttlSeconds + REVOCATION_SLACK_SECONDS }] };
+  });
+  return row ? outcome : null;
 }
 
 /** Tenant's users, newest first. */
@@ -305,17 +363,30 @@ export async function upsertFromPrincipal(input: {
       ...(input.email !== undefined ? { emailProvenance: 'idp' as const } : {}),
     });
   }
-  const next: User = { ...existing, updatedAt: new Date().toISOString() };
-  // ADR 0622 D7 — an email on this lane was asserted by the identity provider
-  // (SAML ACS, SCIM re-provision, the OIDC/test-seam bind); never by the user.
-  if (input.email !== undefined) { next.email = input.email; next.emailProvenance = 'idp'; }
-  if (input.displayName !== undefined) next.displayName = input.displayName;
-  if (input.groups !== undefined) next.groups = input.groups;
-  if (input.source !== undefined) next.source = input.source;
-  // NOTE: status is intentionally NOT touched here — a disabled user staying
-  // signed in does not silently re-activate (fail-closed).
-  await store.put(next);
-  return next;
+  // ADR 0833 D3 (review B3) — CAS, never a blind `put`: a login racing a
+  // concurrent disable used to write back the pre-disable row (status AND
+  // epoch), leaving the account active and its sessions alive.
+  const written = await swapUserRow(existing.userId, (row) => {
+    // Nothing differs ⇒ no write (grade-code `USERS2-CD-3`): this runs on every
+    // SSO login and shared-tenant `/me`, and a needless swap can contend.
+    if ((input.email === undefined || (row.email === input.email && row.emailProvenance === 'idp'))
+      && (input.displayName === undefined || row.displayName === input.displayName)
+      && (input.groups === undefined || JSON.stringify(row.groups) === JSON.stringify(input.groups))
+      && (input.source === undefined || row.source === input.source)) return null;
+    const next: User = { ...row };
+    // ADR 0622 D7 — an email on this lane was asserted by the identity provider
+    // (SAML ACS, SCIM re-provision, the OIDC/test-seam bind); never by the user.
+    if (input.email !== undefined) { next.email = input.email; next.emailProvenance = 'idp'; }
+    if (input.displayName !== undefined) next.displayName = input.displayName;
+    if (input.groups !== undefined) next.groups = input.groups;
+    if (input.source !== undefined) next.source = input.source;
+    // NOTE: status is intentionally NOT touched here — a disabled user staying
+    // signed in does not silently re-activate (fail-closed).
+    return next;
+  });
+  // The row vanished between the read and the swap (a concurrent delete):
+  // re-run the creating path rather than resurrect it from a stale copy.
+  return written ?? upsertFromPrincipal(input);
 }
 
 /** Update mutable profile fields (admin/self path). Identity keys
@@ -329,9 +400,9 @@ export async function updateUser(
   userId: string,
   patch: { email?: string | null; displayName?: string | null; groups?: string[]; idpEntityId?: string; emailProvenance?: EmailProvenance },
 ): Promise<User | null> {
-  const existing = await store.get(userId);
-  if (!existing) return null;
-  const next: User = { ...existing, updatedAt: new Date().toISOString() };
+  // ADR 0833 D3 (review B3) — CAS, never a blind `put`.
+  return swapUserRow(userId, (existing) => {
+  const next: User = { ...existing };
   if (patch.groups !== undefined) next.groups = patch.groups;
   // RFC 0163 §B — backfill the SCIM trust-root entityID when a re-provision now
   // carries it and the record predates it. Never CLEARED here (a link that lost
@@ -345,8 +416,8 @@ export async function updateUser(
     if (patch.displayName === null || patch.displayName === '') delete next.displayName;
     else next.displayName = patch.displayName;
   }
-  await store.put(next);
   return next;
+  });
 }
 
 /**
@@ -418,13 +489,20 @@ export async function deleteUser(userId: string): Promise<boolean> {
 // idempotent (a second erasure finds nothing left to scrub).
 const userEraser = async (tenantId: string, subjectKey: string): Promise<{ rowsTouched: number }> => {
   if (!subjectKey) return { rowsTouched: 0 };
-  const existing = await store.get(subjectKey);
-  if (!existing || existing.tenantId !== tenantId) return { rowsTouched: 0 }; // fail-closed, tenant-scoped
-  if (existing.email === undefined && existing.displayName === undefined) return { rowsTouched: 0 };
-  const next: User = { ...existing, updatedAt: new Date().toISOString() };
-  delete next.email;
-  delete next.displayName;
-  await store.put(next);
+  let touched = false;
+  // ADR 0833 D3 (review B3) — CAS, never a blind `put`; the decision is taken
+  // on the row the write lands on.
+  await swapUserRow(subjectKey, (existing) => {
+    touched = false;
+    if (existing.tenantId !== tenantId) return null; // fail-closed, tenant-scoped
+    if (existing.email === undefined && existing.displayName === undefined) return null;
+    const next: User = { ...existing };
+    delete next.email;
+    delete next.displayName;
+    touched = true;
+    return next;
+  });
+  if (!touched) return { rowsTouched: 0 };
   // WF-TWIN-3 — REPORT. This is the one eraser that must touch a row in any real
   // subject deletion, so a zero here is the sharpest available signal that the
   // fan-out was handed a tenant the subject's data does not live in.
@@ -452,6 +530,37 @@ export async function usersEmailKeyResolver(tenantId: string, subjectKey: string
   return [user.email.trim().toLowerCase()];
 }
 registerSubjectKeyResolver(usersEmailKeyResolver);
+
+/**
+ * ADR 0787 D4 (`SCTWF-6`, as re-scoped by the ce review) — the legacy principal a
+ * user's OWN User row carries, for ONE eraser (the scheduler's) to match rows a
+ * pre-ADR-0003 session keyed `oidc:<sub>`. Deliberately NOT a registered subject-
+ * key resolver: principal ids are not issuer-qualified (`scim:jsmith` at two IdPs
+ * is one string), so widening EVERY eraser to the string would reach another
+ * person's rows (`CONNCD-15`); the other erasers wait for issuer-qualified
+ * principals.
+ *
+ * Returns the principal ONLY when all hold:
+ *  - the User row is `userId` itself (derived from the erased user's own row —
+ *    never a search of Users BY principal string);
+ *  - its tenant is `tenantId` (the home tenant the principal was minted in);
+ *  - it is the ONLY User row in that tenant claiming the principal. Legacy
+ *    randomUUID-era rows can duplicate a principal (`getUserByPrincipal` scan-
+ *    falls-back for exactly that reason); two claimants means the string does
+ *    not identify one person, so no alias — `ambiguous` says so, and the caller
+ *    logs it and leaves the rows for manual review.
+ */
+export async function legacyPrincipalOf(
+  tenantId: string,
+  userId: string,
+): Promise<{ principalId: string } | { ambiguous: true; principalId: string } | null> {
+  if (!tenantId || !userId) return null;
+  const user = await store.get(userId);
+  if (!user || user.userId !== userId || user.tenantId !== tenantId || !user.principalId || user.principalId === userId) return null;
+  const claimants = (await store.list()).filter((u) => u.tenantId === tenantId && u.principalId === user.principalId);
+  if (claimants.length > 1) return { ambiguous: true, principalId: user.principalId };
+  return { principalId: user.principalId };
+}
 
 
 /**
@@ -607,9 +716,10 @@ export async function resolveCanonicalUserForTenant(input: {
 export async function applyIdpEmail(user: User, verifiedEmail: string | undefined): Promise<User> {
   if (verifiedEmail === undefined) return user;
   if (user.email === verifiedEmail && user.emailProvenance === 'idp') return user;
-  const next: User = { ...user, email: verifiedEmail, emailProvenance: 'idp', updatedAt: new Date().toISOString() };
-  await store.put(next);
-  return next;
+  // ADR 0833 D3 (review B3) — CAS, never a blind `put` of the caller's copy.
+  const written = await swapUserRow(user.userId, (row) =>
+    row.email === verifiedEmail && row.emailProvenance === 'idp' ? null : { ...row, email: verifiedEmail, emailProvenance: 'idp' });
+  return written ?? user;
 }
 
 /**

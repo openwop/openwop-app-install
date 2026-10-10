@@ -5,34 +5,46 @@
  * PATCH routes, already exported to CSV, and already settable BY AN AI AGENT
  * (`crm.task.create` takes `dueDate`). Only the human UI could neither see nor
  * set one — so an agent could put a date on a task that no person could read.
+ *
+ * Gap ids: CRM-G1, CRM-R2-1/2 and XCC-5 in `docs/steward/UX_UPGRADE-crm-console.md`.
+ * Sabotage-witnessed (wave-4 /grade-tests, w4g5-td-*): the overdue rule losing
+ * its `done` exemption, its no-date guard, or its direction; undated tasks
+ * sorting first; a cleared date sent as '' instead of null; `dueDate` / `dealId`
+ * sent when empty; the due field not reset after create; and the deal column
+ * showing the raw id instead of the title each turn a case red.
+ *
+ * The clock is PINNED: `day()` and TasksTab's `todayKey()` both read it, so a
+ * midnight between fixture and render cannot move a date across "today".
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import i18n from '../../../i18n/index.js';
 import type { Task } from '../crmOrgClient.js';
 
-const listTasks = vi.fn();
-const createTask = vi.fn();
-const setTaskDueDate = vi.fn();
-const setTaskStatus = vi.fn();
-const deleteTask = vi.fn();
-const listDeals = vi.fn(async (..._a: unknown[]) => [{ dealId: 'd1', title: 'Globex expansion', stageId: 's1' }]);
+type OrgApi = typeof import('../crmOrgClient.js');
+const listTasks = vi.fn<OrgApi['listTasks']>();
+const createTask = vi.fn<OrgApi['createTask']>();
+const setTaskDueDate = vi.fn<OrgApi['setTaskDueDate']>();
+const setTaskStatus = vi.fn<OrgApi['setTaskStatus']>();
+const deleteTask = vi.fn<OrgApi['deleteTask']>();
+const listDeals = vi.fn<OrgApi['listDeals']>(async () => [{ dealId: 'd1', title: 'Globex expansion', pipelineId: 'p1', stageId: 's1' }]);
 vi.mock('../crmOrgClient.js', async (importOriginal) => ({
-  ...(await importOriginal<Record<string, unknown>>()),
-  listTasks: (...a: unknown[]) => listTasks(...a),
-  createTask: (...a: unknown[]) => createTask(...a),
-  setTaskDueDate: (...a: unknown[]) => setTaskDueDate(...a),
-  setTaskStatus: (...a: unknown[]) => setTaskStatus(...a),
-  deleteTask: (...a: unknown[]) => deleteTask(...a),
-  listDeals: (...a: unknown[]) => listDeals(...a),
+  ...(await importOriginal<OrgApi>()),
+  listTasks: (...a: Parameters<OrgApi['listTasks']>) => listTasks(...a),
+  createTask: (...a: Parameters<OrgApi['createTask']>) => createTask(...a),
+  setTaskDueDate: (...a: Parameters<OrgApi['setTaskDueDate']>) => setTaskDueDate(...a),
+  setTaskStatus: (...a: Parameters<OrgApi['setTaskStatus']>) => setTaskStatus(...a),
+  deleteTask: (...a: Parameters<OrgApi['deleteTask']>) => deleteTask(...a),
+  listDeals: (...a: Parameters<OrgApi['listDeals']>) => listDeals(...a),
 }));
 
 const { TasksTab } = await import('../TasksTab.js');
 
 const task = (id: string, title: string, over: Partial<Task> = {}): Task =>
-  ({ taskId: id, title, status: 'open', ...over } as Task);
+  ({ taskId: id, title, status: 'open', ...over });
 
-/** A date safely in the past / future regardless of when this runs. */
+/** A local calendar date `offset` days from the PINNED clock. */
 const day = (offset: number): string => {
   const d = new Date();
   d.setDate(d.getDate() + offset);
@@ -41,8 +53,13 @@ const day = (offset: number): string => {
 
 const renderTab = () => render(<MemoryRouter><TasksTab orgId="org:1" /></MemoryRouter>);
 
-beforeEach(() => vi.clearAllMocks());
-afterEach(cleanup);
+beforeEach(() => {
+  vi.resetAllMocks();
+  // `shouldAdvanceTime` so `findBy*` / `waitFor` polling still progresses.
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  vi.setSystemTime(new Date(2026, 5, 15, 12, 0, 0));
+});
+afterEach(() => { cleanup(); vi.useRealTimers(); });
 
 describe('CRM tasks — the due date a human could not see (CRM-G1)', () => {
   it('shows a due date an AGENT set, in an editable control', async () => {
@@ -55,23 +72,23 @@ describe('CRM tasks — the due date a human could not see (CRM-G1)', () => {
 
   it('flags an OVERDUE open task', async () => {
     listTasks.mockResolvedValue([task('t1', 'Call Ada', { dueDate: day(-2) })]);
-    const { container } = renderTab();
+    renderTab();
     await screen.findByText('Call Ada');
-    await waitFor(() => expect(container.querySelector('.chip--danger')).toBeTruthy());
+    expect(await screen.findByText(i18n.t('crm:overdue'))).toBeTruthy();
   });
 
   it('does NOT flag a past date on a DONE task — that is not a problem', async () => {
     listTasks.mockResolvedValue([task('t1', 'Call Ada', { dueDate: day(-2), status: 'done' })]);
-    const { container } = renderTab();
+    renderTab();
     await screen.findByText('Call Ada');
-    expect(container.querySelector('.chip--danger')).toBeNull();
+    expect(screen.queryByText(i18n.t('crm:overdue'))).toBeNull();
   });
 
   it('does not flag a task with no due date at all', async () => {
     listTasks.mockResolvedValue([task('t1', 'Call Ada')]);
-    const { container } = renderTab();
+    renderTab();
     await screen.findByText('Call Ada');
-    expect(container.querySelector('.chip--danger')).toBeNull();
+    expect(screen.queryByText(i18n.t('crm:overdue'))).toBeNull();
   });
 });
 

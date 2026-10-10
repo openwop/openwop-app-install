@@ -38,6 +38,9 @@ const SERVER_ROWS = [
   { typeId: 'ui.tour.step', version: '1.0.0', label: 'ui.tour.step', description: '', category: 'flow', source: 'local' as const },
   { typeId: 'conformance.secret.echo', version: '1.0.0', label: 'conformance.secret.echo', description: '', category: 'flow', source: 'local' as const },
   { typeId: 'app-builder.mcp-node.catalog', version: '1.0.0', label: 'app-builder.mcp-node.catalog', description: '', category: 'flow', source: 'local' as const },
+  { typeId: 'claude-code.mcp-node.add-todo', version: '1.0.0', label: 'claude-code.mcp-node.add-todo', description: '', category: 'flow', source: 'local' as const },
+  // ADR 0785 — an in-tree, AUTHORABLE node: visible, with the overlay's label + form.
+  { typeId: 'claude-code.task', version: '1.0.0', label: 'claude-code.task', description: '', category: 'flow', source: 'local' as const },
   // A pack row with real authored metadata.
   { typeId: 'core.openwop.http.fetch', version: '1.0.0', label: 'HTTP fetch', description: 'Fetch a URL', category: 'integration', source: 'pack' as const, packName: 'core.openwop.http' },
 ];
@@ -92,7 +95,7 @@ describe('ADR 0440 P3 — the palette stays CURATED', () => {
     const resolvable = reg.resolvableTypeIds();
     const hidden = resolvable.filter((t) => !visible.has(t));
     for (const t of hidden) {
-      const acknowledged = t in reg.PALETTE_EXCLUDED || t.startsWith('app-builder.mcp-node.');
+      const acknowledged = t in reg.PALETTE_EXCLUDED || reg.PALETTE_EXCLUDED_PREFIXES.some((p) => t.startsWith(p));
       expect(acknowledged, `${t} is hidden from the palette with no recorded reason — add it to PALETTE_EXCLUDED (with why) or stop hiding it`).toBe(true);
     }
     expect(hidden.length).toBeGreaterThan(0); // no vacuous pass
@@ -103,6 +106,14 @@ describe('ADR 0440 P3 — the palette stays CURATED', () => {
     expect(visible.has('ui.tour.step')).toBe(false);
     expect(visible.has('conformance.secret.echo')).toBe(false);
     expect(visible.has('app-builder.mcp-node.catalog')).toBe(false);
+    expect(visible.has('claude-code.mcp-node.add-todo')).toBe(false);
+  });
+
+  it('ADR 0785: claude-code.task is authorable — a real label, a description and a Task field, not a bare "Task"', () => {
+    const entry = reg.mergedCatalog().find((e) => e.typeId === 'claude-code.task');
+    expect(entry?.label).toBe('Ask Claude Code');
+    expect(entry?.description).toMatch(/allowed to take workflow tasks/);
+    expect(entry?.configFields?.map((f) => f.key)).toEqual(['prompt', 'maxTurns', 'deadlineMinutes']);
   });
 
   it('every PALETTE_EXCLUDED entry states a reason', () => {

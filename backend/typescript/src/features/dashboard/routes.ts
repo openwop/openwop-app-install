@@ -2,6 +2,8 @@
  * Dashboard layout routes (host-extension, ADR 0375 Phase 1).
  *   GET  /v1/host/openwop-app/dashboard/layout  — the caller's own layout (or null)
  *   PUT  /v1/host/openwop-app/dashboard/layout  — upsert the caller's own layout
+ *   GET  /v1/host/openwop-app/dashboard/my-runs — the caller's own recent runs,
+ *        slim (issue #4511; `runs:read`, see ownRuns.ts)
  *
  * SELF-SCOPED: the (tenant, subject) key is derived from the SESSION, never from
  * request input — IDOR-safe by construction (a caller can only ever name their
@@ -16,9 +18,12 @@ import type { Request } from 'express';
 import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { tenantOf } from '../featureRoute.js';
+import { requireProtocolScope } from '../../host/protocolAuthorization.js';
+import { isOwnPersonalWorkspace } from '../../host/requestSubject.js';
+import { listOwnRuns, OWN_RUNS_MAX } from './ownRuns.js';
 import { getBriefingConfig, putBriefingConfig, getLayout, putLayout, MAX_TILES, type DashboardTileLayout, type TileSize, getNote, putNote, MAX_NOTE_CHARS } from './dashboardService.js';
 
-const BASE = '/v1/host/openwop-app/dashboard';
+const BASE = '/host/openwop-app/dashboard';
 
 /** The acting subject: the canonical acting-user id, else the session principal.
  *  Fail-closed — a request with neither has no self to scope to. */
@@ -65,7 +70,31 @@ function parseTiles(body: unknown): DashboardTileLayout[] {
 }
 
 export function registerDashboardRoutes(deps: RouteDeps): void {
-  const { app } = deps;
+  const { app, storage } = deps;
+
+  // ── The caller's OWN recent runs, slim (issue #4511) — what the member-tier
+  //    home tiles read instead of the workspace-wide `GET /runs`. Same scope as
+  //    that route (`runs:read` in the active tenant), narrower answer: only runs
+  //    the session's subject started, five fields each. See ownRuns.ts.
+  app.get(`${BASE}/my-runs`, async (req, res, next) => {
+    try {
+      const subject = requireSubject(req);
+      await requireProtocolScope(req, 'runs:read');
+      const raw = req.query.limit;
+      let limit = OWN_RUNS_MAX;
+      if (raw !== undefined) {
+        const n = Number(raw);
+        if (typeof raw !== 'string' || !Number.isInteger(n) || n < 1) {
+          throw new OpenwopError('validation_error', '`limit` MUST be a positive integer.', 400, { field: 'limit' });
+        }
+        limit = Math.min(n, OWN_RUNS_MAX);
+      }
+      const out = await listOwnRuns(storage, { tenantId: tenantOf(req), subject, wholeTenant: isOwnPersonalWorkspace(req), limit });
+      res.status(200).json(out);
+    } catch (err) {
+      next(err);
+    }
+  });
 
   app.get(`${BASE}/layout`, async (req, res, next) => {
     try {

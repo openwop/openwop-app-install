@@ -15,14 +15,15 @@
  * @see docs/adr/0046-project-subject.md
  */
 
+import { withPlanLapse } from '../../host/schedulePlanLapse.js';
 import { randomUUID } from 'node:crypto';
 import { OpenwopError } from '../../types.js';
 import { cleanString } from '../../host/boundedStrings.js';
 import {
-  registerJob, listJobsForSubject, getJob, deleteJob, updateJob, scheduleSubject,
+  registerJob, listJobsForSubject, getJob, deleteJob, updateJob, scheduleSubject, ScheduleCadenceError,
   type ScheduledJob,
 } from '../../host/schedulingService.js';
-import { projectSubject } from './projectsService.js';
+import { getProject, projectSubject } from './projectsService.js';
 
 /** Soft per-project guard (read-then-write, not CAS) — a workspace limit, not a
  *  security boundary. */
@@ -43,6 +44,9 @@ export interface ProjectSchedule {
    *  `lastRunAt` empty, no reason) — the ADR 0491 "log the SURFACING" class. */
   lastSkippedAt?: string;
   lastSkipReason?: ScheduledJob['lastSkipReason'];
+  /** ADR 0820 §7 — set while the plan refuses the job's owning feature (computed
+   *  per read by `withPlanLapse`; the row itself holds no paused state). */
+  planLapsed?: { featureId: string };
   nextFireAt?: number;
   createdAt?: string;
 }
@@ -50,7 +54,7 @@ export interface ProjectSchedule {
 /** Project the durable job onto the safe, project-facing view (no tenant/owner
  *  internals, no free-form metadata — but EVERY outcome field the daemon
  *  records, so a dead schedule is visible; WF-PRJ-2). */
-function toView(j: ScheduledJob): ProjectSchedule {
+function toView(j: ScheduledJob & { planLapsed?: { featureId: string } }): ProjectSchedule {
   return {
     jobId: j.jobId,
     cronExpr: j.cronExpr,
@@ -61,13 +65,14 @@ function toView(j: ScheduledJob): ProjectSchedule {
     ...(j.lastRunId !== undefined ? { lastRunId: j.lastRunId } : {}),
     ...(j.lastSkippedAt !== undefined ? { lastSkippedAt: j.lastSkippedAt } : {}),
     ...(j.lastSkipReason !== undefined ? { lastSkipReason: j.lastSkipReason } : {}),
+    ...(j.planLapsed !== undefined ? { planLapsed: j.planLapsed } : {}),
     ...(j.nextFireAt !== undefined ? { nextFireAt: j.nextFireAt } : {}),
     ...(j.createdAt !== undefined ? { createdAt: j.createdAt } : {}),
   };
 }
 
 export async function listProjectSchedules(tenantId: string, projectId: string): Promise<ProjectSchedule[]> {
-  return (await listJobsForSubject(tenantId, projectSubject(projectId))).map(toView);
+  return (await withPlanLapse(await listJobsForSubject(tenantId, projectSubject(projectId)))).map(toView);
 }
 
 export async function createProjectSchedule(
@@ -95,7 +100,28 @@ export async function createProjectSchedule(
     ...(workflowId ? { workflowId } : {}),
     ...(timezone ? { timezone } : {}),
   });
-  if (!res.ok) throw new OpenwopError('validation_error', res.error.message, 400, { code: res.error.code });
+  if (!res.ok) {
+    // ADR 0787 (`SCTCD-7`) — the same refusal shapes as every other schedule door:
+    // a cadence refusal is the shared `ScheduleCadenceError` (400, `details.field`
+    // + `details.reason`); contention is a retryable 409, not a validation error.
+    const { code, message } = res.error;
+    if (code === 'invalid_cron' || code === 'invalid_timezone' || code === 'schedule_horizon_exceeded') {
+      throw new ScheduleCadenceError({ code, message });
+    }
+    if (code === 'write_contention') throw new OpenwopError('conflict', message, 409, { code });
+    throw new OpenwopError('validation_error', message, 400, { code });
+  }
+  // ADR 0839 D3 (`PRJ3WF-3`) — the create half of the double-check with `deleteProject`.
+  // The route authorized against a project that existed; a delete may have run since.
+  // Re-read AFTER the write: if the project is gone, remove the job this call just made.
+  // `deleteProject` re-lists owned jobs after its row delete, so whichever side runs
+  // second sees the other, and no job is left firing for an owner that no longer exists.
+  if (!(await getProject(tenantId, projectId))) {
+    // A failed cleanup must not replace the 404 the caller is owed; the delete's own
+    // re-list is the second chance at this job.
+    await deleteJob(res.job.jobId).catch(() => undefined);
+    throw new OpenwopError('not_found', 'Project not found.', 404, { id: projectId });
+  }
   return toView(res.job);
 }
 

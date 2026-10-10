@@ -21,6 +21,7 @@ import { Notice } from '../ui/Notice.js';
 import { AlertIcon, PlayIcon } from '../ui/icons/index.js';
 import type { ScheduledJob } from './scheduleClient.js';
 import type { KanbanBoard } from '../kanban/kanbanClient.js';
+import { writeErrorMessage } from './agentWriteAccess.js';
 
 export function AgentWorkflowPortfolioPanel({
   entry,
@@ -56,7 +57,7 @@ export function AgentWorkflowPortfolioPanel({
       await updateRosterEntry(entry.rosterId, { workflows });
       onChanged();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(writeErrorMessage(err, t('common:error_forbidden')));
     }
   };
 
@@ -85,7 +86,7 @@ export function AgentWorkflowPortfolioPanel({
       // budget sentence instead of the raw SDK message.
       setError(classifyHttpError(err).kind === 'budget-exhausted'
         ? t('common:errorBudgetExhausted')
-        : err instanceof Error ? err.message : String(err));
+        : writeErrorMessage(err, t('common:error_forbidden')));
     } finally {
       setRunning(null);
     }

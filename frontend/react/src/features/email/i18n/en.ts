@@ -154,6 +154,9 @@ export const messages = {
   senderPlaceholder: 'news@yourcompany.com',
   senderSave: 'Save sender',
   senderSaved: 'Sender address saved.',
+  senderAdminOnly: 'Only workspace admins can change the sender address.',
+  senderUnconfiguredAskAdmin: 'Campaigns can\'t send yet — a workspace admin needs to set the sender address.',
+  testSendRateLimited: 'Too many test sends — try again in {{minutes}} min.',
   senderUnconfiguredNotice: 'Campaigns can\'t send yet — set the verified sender address below (and connect SendGrid under Connections).',
 
   // Toasts / errors

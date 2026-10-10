@@ -13,15 +13,16 @@
       "apiKeyHelpText": "Your key stays in the sample server's sqlite-backed credential store (AES-256-GCM at rest). Production deployments swap this for a managed KMS.",
       "apiKeyConsoleUrl": "https://console.anthropic.com/settings/keys",
       "apiKeyPrefix": "sk-ant-",
-      "customModelPlaceholder": "claude-opus-5",
-      "customModelHelp": "e.g. a current model id like `claude-opus-5` / `claude-haiku-4-5-20251001`, or a beta release.",
+      "customModelPlaceholder": "claude-opus-5-5",
+      "customModelHelp": "e.g. a current model id like `claude-opus-5-5` / `claude-haiku-4-5-20251001`, or a beta release.",
       "_docsUrl": "https://platform.claude.com/docs/en/about-claude/models/overview",
       "_capabilityNote": "webSearch + audioInput deferred: Anthropic's web_search_20250305 tool requires custom stream-event handling (server_tool_use / web_search_tool_result blocks); audio input isn't yet in the public Messages API. Add when shipping Phase 4 v2.",
-      "classDefaults": { "reasoning": "claude-opus-5" },
+      "classDefaults": { "reasoning": "claude-opus-5-5", "quick": "claude-haiku-4-5" },
       "models": [
-        { "id": "claude-opus-5",     "label": "Claude Opus 5",     "contextWindow": 1000000, "capabilities": ["text", "tools", "vision"], "cost": { "input": 0.005, "output": 0.025 }, "recommended": true },
+        { "id": "claude-opus-5-5",   "label": "Claude Opus 5.5",   "contextWindow": 1000000, "capabilities": ["text", "tools", "vision"], "cost": { "input": 0.004, "output": 0.020 }, "recommended": true, "adaptiveThinkingOnly": true },
+        { "id": "claude-opus-5",     "label": "Claude Opus 5",     "contextWindow": 1000000, "capabilities": ["text", "tools", "vision"], "cost": { "input": 0.005, "output": 0.025 } },
         { "id": "claude-sonnet-5",   "label": "Claude Sonnet 5",   "contextWindow": 1000000, "capabilities": ["text", "tools", "vision"], "cost": { "input": 0.002, "output": 0.010 } },
-        { "id": "claude-fable-5-1",  "label": "Claude Fable 5.1",  "contextWindow": 1000000, "capabilities": ["text", "tools", "vision"], "cost": { "input": 0.010, "output": 0.050 } },
+        { "id": "claude-fable-5-1",  "label": "Claude Fable 5.1",  "contextWindow": 1000000, "capabilities": ["text", "tools", "vision"], "cost": { "input": 0.010, "output": 0.050 }, "adaptiveThinkingOnly": true },
         { "id": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6", "contextWindow": 1000000, "capabilities": ["text", "tools", "vision"], "cost": { "input": 0.003, "output": 0.015 } },
         { "id": "claude-opus-4-8",   "label": "Claude Opus 4.8",   "contextWindow": 1000000, "capabilities": ["text", "tools", "vision"], "cost": { "input": 0.005, "output": 0.025 } },
         { "id": "claude-haiku-4-5",  "label": "Claude Haiku 4.5",  "contextWindow": 200000,  "capabilities": ["text", "tools", "vision"], "cost": { "input": 0.001, "output": 0.005 } }
@@ -42,14 +43,14 @@
       "customModelHelp": "e.g. `gpt-5.4-nano`, a fine-tune `ft:gpt-5.4-mini:org:name:id`, or a preview.",
       "_docsUrl": "https://developers.openai.com/api/docs/models",
       "_capabilityNote": "webSearch + audioInput deferred: OpenAI's web_search_preview tool requires the Responses API (different endpoint + body shape than Chat Completions); audio input requires gpt-4o-audio-preview (separate model lineup). Add when shipping Phase 4 v2.",
-      "classDefaults": { "reasoning": "gpt-5.6-sol" },
+      "classDefaults": { "reasoning": "gpt-5.6-sol", "quick": "gpt-5.6-luna" },
       "models": [
         { "id": "gpt-5.6-terra", "label": "GPT-5.6 Terra", "contextWindow": 1050000, "capabilities": ["text", "tools", "vision"], "cost": { "input": 0.002,  "output": 0.012 }, "recommended": true },
         { "id": "gpt-5.6-sol",   "label": "GPT-5.6 Sol",   "contextWindow": 1050000, "capabilities": ["text", "tools", "vision"], "cost": { "input": 0.004,  "output": 0.020 } },
         { "id": "gpt-5.6-luna",  "label": "GPT-5.6 Luna",  "contextWindow": 1050000, "capabilities": ["text", "tools", "vision"], "cost": { "input": 0.0002, "output": 0.0012 } },
         { "id": "gpt-6-astra",   "label": "GPT-6 Astra",   "contextWindow": 1050000, "capabilities": ["text", "tools", "vision"], "cost": { "input": 0.010,  "output": 0.050 } },
-        { "id": "gpt-5.4",       "label": "GPT-5.4",       "contextWindow": 1000000, "capabilities": ["text", "tools", "vision"], "cost": { "input": 0.0025, "output": 0.015 } },
-        { "id": "gpt-5.5",       "label": "GPT-5.5",       "contextWindow": 1000000, "capabilities": ["text", "tools", "vision"], "cost": { "input": 0.005,  "output": 0.030 } },
+        { "id": "gpt-5.4",       "label": "GPT-5.4",       "contextWindow": 1050000, "capabilities": ["text", "tools", "vision"], "cost": { "input": 0.0025, "output": 0.015 } },
+        { "id": "gpt-5.5",       "label": "GPT-5.5",       "contextWindow": 1050000, "capabilities": ["text", "tools", "vision"], "cost": { "input": 0.005,  "output": 0.030 } },
         { "id": "gpt-5.4-mini",  "label": "GPT-5.4 mini",  "contextWindow": 400000,  "capabilities": ["text", "tools", "vision"], "cost": { "input": 0.00075, "output": 0.0045 } }
       ]
     },
@@ -68,13 +69,13 @@
       "customModelHelp": "e.g. `gemini-3.1-pro-preview` or any model id from the Gemini model catalog. Note: gemini-2.0-flash is deprecated and sunsets 2026-06-01 — don't use it.",
       "_docsUrl": "https://ai.google.dev/gemini-api/docs/models",
       "_notes": "Gemini 3.1 Flash-Lite is the recommended default (live-verified 2026-06-23: text + vision input). Flash-Lite avoids the reasoning-budget issue that can return empty completions when maxOutputTokens is exhausted by internal thinking. CORRECTED 2026-09-09: the gemini-3.x costs are no longer approximations — they are the published paid-tier prices (3.1 Flash-Lite $0.25/$1.50, 3.5 Flash $1.50/$9.00, 3.1 Pro $2.00/$12.00 at <=200k, 3.8 Flash $0.75/$3.75 PROMOTIONAL through 2026-12-31 then $1.50/$7.50, 3.5 Flash-Lite $0.30/$2.50 per MTok). The earlier mirrored-from-2.5 figures understated 3.1 Flash-Lite by 2.5x and 3.5 Flash by 5x. gemini-3-flash-preview is the one entry still carrying an approximation — it is not on the published pricing table. dispatchGoogle only sets thinkingBudget:0 for `2.5-` ids, so a low maxOutputTokens on a full 3.x flash/pro model could still return empty — the KB media path uses 8192 so it's unaffected. Gemini 3.1 Pro (preview) added Jun 2026. Recommended stays on 3.1 Flash-Lite rather than the newer 3.8 Flash for the reasoning-budget reason above, and because 3.1 Flash-Lite is both live-verified and cheaper.",
-      "classDefaults": { "reasoning": "gemini-2.5-pro" },
-      "_classDefaultsNote": "reasoning deliberately points at the GA pro model, NOT gemini-3.1-pro-preview: PREVIEW models carry tight per-key quotas, and the reasoning-class bump routes EVERY multi-agent/advisor turn there regardless of the tenant's selected model — a quota-starved preview default made whole advisory boards fail with provider 429s while plain chats (on the selected model) worked (2026-07-14 incident). Re-point to a 3.x pro id only once it reaches GA quotas.",
+      "classDefaults": { "reasoning": "gemini-3.8-flash", "quick": "gemini-3.5-flash-lite" },
+      "_classDefaultsNote": "2026-09-27: re-pointed gemini-2.5-pro → gemini-3.8-flash. Since 2026-09-18 Google limits every 2.5 model to keys that used it before (changelog), so a NEW BYOK key cannot call 2.5 Pro and the bump failed for it; no GA 3.x Pro exists, and gemini-3.8-flash is the GA model Google points new projects to. The GA-only rule below still holds. ORIGINAL: reasoning deliberately points at the GA pro model, NOT gemini-3.1-pro-preview: PREVIEW models carry tight per-key quotas, and the reasoning-class bump routes EVERY multi-agent/advisor turn there regardless of the tenant's selected model — a quota-starved preview default made whole advisory boards fail with provider 429s while plain chats (on the selected model) worked (2026-07-14 incident). Re-point to a 3.x pro id only once it reaches GA quotas.",
       "models": [
-        { "id": "gemini-3.1-flash-lite",  "label": "Gemini 3.1 Flash-Lite",   "contextWindow": 1000000, "capabilities": ["text", "tools", "vision"], "cost": { "input": 0.00025, "output": 0.0015 }, "webSearch": true, "audioInput": true, "recommended": true },
-        { "id": "gemini-3.8-flash",       "label": "Gemini 3.8 Flash",        "contextWindow": 1000000, "capabilities": ["text", "tools", "vision"], "cost": { "input": 0.00075, "output": 0.00375 }, "webSearch": true, "audioInput": true },
+        { "id": "gemini-3.8-flash",       "label": "Gemini 3.8 Flash",        "contextWindow": 1000000, "capabilities": ["text", "tools", "vision"], "cost": { "input": 0.00075, "output": 0.00375 }, "webSearch": true, "audioInput": true, "recommended": true },
+        { "id": "gemini-3.7-flash",       "label": "Gemini 3.7 Flash",        "contextWindow": 1000000, "capabilities": ["text", "tools", "vision"], "cost": { "input": 0.00075, "output": 0.00375 }, "webSearch": true, "audioInput": true },
+        { "id": "gemini-3.6-flash",       "label": "Gemini 3.6 Flash",        "contextWindow": 1000000, "capabilities": ["text", "tools", "vision"], "cost": { "input": 0.00075, "output": 0.00375 }, "webSearch": true, "audioInput": true },
         { "id": "gemini-3.5-flash-lite",  "label": "Gemini 3.5 Flash-Lite",   "contextWindow": 1000000, "capabilities": ["text", "tools", "vision"], "cost": { "input": 0.0003,  "output": 0.0025 }, "webSearch": true, "audioInput": true },
-        { "id": "gemini-3-flash-preview", "label": "Gemini 3 Flash (preview)", "contextWindow": 1000000, "capabilities": ["text", "tools", "vision"], "cost": { "input": 0.0003,  "output": 0.0025 }, "webSearch": true, "audioInput": true },
         { "id": "gemini-3.5-flash",       "label": "Gemini 3.5 Flash",        "contextWindow": 1000000, "capabilities": ["text", "tools", "vision"], "cost": { "input": 0.0015,  "output": 0.009 }, "webSearch": true, "audioInput": true },
         { "id": "gemini-3.1-pro-preview", "label": "Gemini 3.1 Pro (preview)", "contextWindow": 1000000, "capabilities": ["text", "tools", "vision"], "cost": { "input": 0.002,   "output": 0.012 }, "webSearch": true, "audioInput": true },
         { "id": "gemini-2.5-flash-lite", "label": "Gemini 2.5 Flash-Lite", "contextWindow": 1000000, "capabilities": ["text", "tools", "vision"], "cost": { "input": 0.0001,  "output": 0.0004 }, "webSearch": true, "audioInput": true },
@@ -97,11 +98,12 @@
       "classDefaults": { "reasoning": "MiniMax-M3" },
       "models": [
         {
-          "_comment": "MiniMax-M3 is the latest model on platform.minimax.io (1M context, frontier multimodal coding) and is the managed runtime default (MINIMAX_MODEL in managedProvider.ts). `cost` intentionally omitted — MiniMax has not published public per-token pricing for M3 yet; add it here once official pricing lands. The system-message de-dup in nodes.ts is provider-agnostic (single system message is valid everywhere), so the M2.7-era HTTP-400 workaround holds for M3.",
+          "_comment": "MiniMax-M3 is the latest model on platform.minimax.io (1M context, frontier multimodal coding) and is the managed runtime default (MINIMAX_MODEL in managedProvider.ts). `cost` is the pay-as-you-go Standard tier at ≤512K input tokens ($0.30/$1.20 per 1M; above 512K it doubles), platform.minimax.io/docs/guides/pricing-paygo, checked 2026-09-27. The system-message de-dup in nodes.ts is provider-agnostic (single system message is valid everywhere), so the M2.7-era HTTP-400 workaround holds for M3.",
           "id": "MiniMax-M3",
           "label": "MiniMax M3",
           "contextWindow": 1000000,
           "capabilities": ["text", "tools"],
+          "cost": { "input": 0.0003, "output": 0.0012 },
           "recommended": true
         },
         {
@@ -110,7 +112,7 @@
           "label": "MiniMax M2.7",
           "contextWindow": 205000,
           "capabilities": ["text", "tools"],
-          "cost": { "input": 0.00025, "output": 0.001 }
+          "cost": { "input": 0.0003, "output": 0.0012 }
         }
       ]
     },

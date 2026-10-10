@@ -29,14 +29,14 @@ beforeAll(async () => {
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 const publish = (body: unknown, headers: Record<string, string> = ADMIN) =>
-  fetch(`${BASE}/v1/host/openwop-app/app-brand/assets`, { method: 'POST', headers, body: JSON.stringify(body) });
+  fetch(`${BASE}/host/openwop-app/app-brand/assets`, { method: 'POST', headers, body: JSON.stringify(body) });
 
 describe('app-brand assets (ADR 0511)', () => {
   it('publishes a valid PNG and the copy serves ANONYMOUSLY', async () => {
     const res = await publish({ slot: 'mark', contentBase64: PNG_1PX, contentType: 'image/png' });
     expect(res.status).toBe(201);
     const { url } = (await res.json()) as { url: string };
-    expect(url).toMatch(/^\/v1\/host\/openwop-app\/assets\//);
+    expect(url).toMatch(/^\/host\/openwop-app\/assets\//);
     // The whole point: an anonymous visitor renders the public logo.
     const served = await fetch(`${BASE}${url}`);
     expect(served.status).toBe(200);
@@ -84,7 +84,7 @@ describe('app-brand assets (ADR 0511)', () => {
 
   it('is superadmin-only — a signed-in NON-superadmin is 403', async () => {
     let cookie = '';
-    const login = await fetch(`${BASE}/v1/host/openwop-app/test/login`, {
+    const login = await fetch(`${BASE}/host/openwop-app/test/login`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'assets-nonadmin@x.test' }),
     });
     expect(login.status).toBe(201);

@@ -6,18 +6,25 @@
  *     delivery row enqueued when a contact is created.
  *   - a binding from `host.crm.contact.created` to a real workflow starts a
  *     run stamped with `metadata.hostEvent` when a contact is created.
+ *
+ * The delivery-row and run-dispatch halves are asserted ONCE, inside the
+ * correlation case (which needs both): the two standalone cases that used to
+ * re-assert each half were cut (grade-tests w4 — the same sabotages red the
+ * correlation case). Sabotage-witnessed: a cross-tenant binding delete
+ * allowed, the host.* name gate dropped, the webhook fanout skipped, the run
+ * stamped with a different eventId, and the contact `created` emit removed.
  */
 
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { Express } from 'express';
 import { getSetCookies } from './headerCookies.js';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import type { Storage } from '../src/storage/storage.js';
-import type { RunRecord } from '../src/types.js';
+import { bareRunId } from './support/bareRunId.js';
 
 let BASE: string;
 let server: http.Server;
@@ -40,13 +47,19 @@ beforeAll(async () => {
   const wk = getToggleDefault('crm');
   if (wk) await saveConfig({ ...wk, status: 'on' }, 'test');
   const wellKnown = (await (await fetch(`${BASE}/.well-known/openwop`)).json()) as { fixtures?: string[] };
-  workflowId = wellKnown.fixtures?.[0] ?? 'openwop-app.uppercase';
+  const fixture = wellKnown.fixtures?.[0];
+  expect(fixture, 'the catalog must advertise a fixture workflow to bind').toBeTruthy();
+  workflowId = fixture!;
 });
 afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
 });
 
-interface Res<T = any> { status: number; body: T }
+interface Body {
+  error: string; eventType: string; bindingId: string; webhookId: string;
+  bindings: Array<{ bindingId: string }>; user: { userId: string };
+}
+interface Res<T = Body> { status: number; body: T }
 interface Client {
   get: (p: string) => Promise<Res>;
   post: (p: string, b?: unknown) => Promise<Res>;
@@ -66,7 +79,7 @@ function client(): Client {
       if (m) cookie = m[1];
     }
     const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    return { status: res.status, body: out as Body };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), del: (p) => call('DELETE', p) };
 }
@@ -75,12 +88,12 @@ let n = 0;
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
 async function signup(c: Client): Promise<{ userId: string; tenantId: string }> {
   const tenantId = `org:test-${Date.now()}-${n++}`;
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail('crmev'), tenantId });
+  const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail('crmev'), tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  return { userId: r.body.user.userId, tenantId };
+  return { userId: r.body.user!.userId, tenantId };
 }
 
-const BINDINGS = '/v1/host/openwop-app/host-events/bindings';
+const BINDINGS = '/host/openwop-app/host-events/bindings';
 
 describe('crm events — host-event bindings CRUD', () => {
   it('validates eventType, refuses an unresolvable workflow (422), and cross-tenant delete 404s', async () => {
@@ -90,51 +103,29 @@ describe('crm events — host-event bindings CRUD', () => {
     // Non-host.* eventType → 400.
     const badType = await a.post(BINDINGS, { eventType: 'run.completed', workflowId });
     expect(badType.status).toBe(400);
+    expect(badType.body.error).toBe('validation_error');
 
     // Unknown workflow → 422.
     const badWorkflow = await a.post(BINDINGS, { eventType: 'host.crm.contact.created', workflowId: 'nope.does-not-exist' });
     expect(badWorkflow.status).toBe(422);
+    expect(badWorkflow.body.error).toBe('workflow_not_found');
 
     // Valid → 201, listed.
     const created = await a.post(BINDINGS, { eventType: 'host.crm.contact.created', workflowId });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
     expect(created.body.eventType).toBe('host.crm.contact.created');
     const list = await a.get(BINDINGS);
-    expect(list.body.bindings.some((b: { bindingId: string }) => b.bindingId === created.body.bindingId)).toBe(true);
+    expect(list.body.bindings!.some((b) => b.bindingId === created.body.bindingId)).toBe(true);
 
     // A different tenant cannot see or delete it.
     const b = client();
     await signup(b);
     const foreignList = await b.get(BINDINGS);
-    expect(foreignList.body.bindings.some((x: { bindingId: string }) => x.bindingId === created.body.bindingId)).toBe(false);
+    expect(foreignList.body.bindings!.some((x) => x.bindingId === created.body.bindingId)).toBe(false);
     expect((await b.del(`${BINDINGS}/${created.body.bindingId}`)).status).toBe(404);
 
     // Owning tenant can delete it.
     expect((await a.del(`${BINDINGS}/${created.body.bindingId}`)).status).toBe(204);
-  });
-});
-
-describe('crm events — webhook fanout on contact create', () => {
-  it('enqueues a durable delivery row for a host.crm.contact.created subscriber', async () => {
-    const a = client();
-    await signup(a);
-
-    const sub = await a.post('/v1/webhooks', { url: 'https://example.com/openwop-test/crm-events', events: ['host.crm.contact.created'] });
-    expect(sub.status, JSON.stringify(sub.body)).toBe(201);
-
-    const contact = await a.post('/v1/host/openwop-app/crm/contacts', { name: 'Webhook Target' });
-    expect(contact.status, JSON.stringify(contact.body)).toBe(201);
-
-    // Fire-and-forget dispatch — poll briefly for the enqueued delivery row.
-    let found = false;
-    for (let i = 0; i < 40 && !found; i++) {
-      const claimed = await storage.claimDueWebhookDeliveries(`test-worker-${i}`, Date.now() + 1, 5000, 20);
-      if (claimed.some((d) => d.subscriptionId === sub.body.webhookId && d.eventType === 'host.crm.contact.created')) found = true;
-      else await new Promise((r) => setTimeout(r, 25));
-    }
-    expect(found).toBe(true);
-
-    await a.del(`/v1/webhooks/${sub.body.webhookId}`);
   });
 });
 
@@ -143,65 +134,40 @@ describe('crm events — webhook delivery ↔ triggered run correlation', () => 
     const a = client();
     const { tenantId } = await signup(a);
 
-    const sub = await a.post('/v1/webhooks', { url: 'https://example.com/openwop-test/crm-correlate', events: ['host.crm.contact.created'] });
+    const sub = await a.post('/webhooks', { url: 'https://example.com/openwop-test/crm-correlate', events: ['host.crm.contact.created'] });
     expect(sub.status, JSON.stringify(sub.body)).toBe(201);
     const binding = await a.post(BINDINGS, { eventType: 'host.crm.contact.created', workflowId });
     expect(binding.status, JSON.stringify(binding.body)).toBe(201);
 
-    const contact = await a.post('/v1/host/openwop-app/crm/contacts', { name: 'Correlate Target' });
+    const contact = await a.post('/host/openwop-app/crm/contacts', { name: 'Correlate Target' });
     expect(contact.status, JSON.stringify(contact.body)).toBe(201);
 
-    // Collect both halves of the same emit: the delivery row's body eventId…
+    // Collect both halves of the same emit: the durable delivery row enqueued
+    // for THIS subscription (the webhook fanout) and its body eventId…
     let deliveredEventId: string | undefined;
-    for (let i = 0; i < 40 && !deliveredEventId; i++) {
-      const claimed = await storage.claimDueWebhookDeliveries(`corr-worker-${i}`, Date.now() + 1, 5000, 20);
-      const row = claimed.find((d) => d.subscriptionId === sub.body.webhookId && d.eventType === 'host.crm.contact.created');
-      if (row) deliveredEventId = (JSON.parse(row.payload) as { eventId?: string }).eventId;
-      else await new Promise((r) => setTimeout(r, 25));
-    }
-    // …and the run the binding started.
+    let claim = 0;
+    await vi.waitFor(async () => {
+      const claimed = await storage.claimDueWebhookDeliveries(`corr-worker-${claim++}`, Date.now() + 1, 5000, 20);
+      const row = claimed.find((d) => d.subscriptionId === bareRunId(sub.body.webhookId!) && d.eventType === 'openwop-app.crm.contact-created');
+      if (row) deliveredEventId = (JSON.parse(row.payload) as { event?: { eventId?: string } }).event?.eventId; // major-2 body: { runId, event }
+      expect(deliveredEventId, 'a delivery row (carrying the dispatcher eventId) is enqueued for the subscriber').toBeTruthy();
+    }, { timeout: 2000, interval: 25 });
+    // …and the run the binding started (the bound workflow, stamped metadata.hostEvent).
     let runEventId: string | undefined;
-    for (let i = 0; i < 40 && !runEventId; i++) {
+    let runWorkflowId: string | undefined;
+    await vi.waitFor(async () => {
       const runs = await storage.listRuns({ tenantId, limit: 50 });
       const run = runs.find((r) => (r.metadata as { hostEvent?: { bindingId?: string } } | undefined)?.hostEvent?.bindingId === binding.body.bindingId);
       runEventId = (run?.metadata as { hostEvent?: { eventId?: string } } | undefined)?.hostEvent?.eventId;
-      if (!runEventId) await new Promise((r) => setTimeout(r, 25));
-    }
-
-    expect(deliveredEventId, 'delivered body carries the dispatcher eventId').toBeTruthy();
-    expect(runEventId, 'triggered run carries the dispatcher eventId').toBeTruthy();
+      runWorkflowId = run?.workflowId;
+      expect(runEventId, 'the binding started a run carrying the dispatcher eventId').toBeTruthy();
+    }, { timeout: 2000, interval: 25 });
+    expect(runWorkflowId, 'the run is the BOUND workflow').toBe(workflowId);
     // The correlation contract (ADR 0208 §1): ONE id across both fanouts.
     expect(deliveredEventId).toBe(runEventId);
     expect(deliveredEventId!.startsWith('hev:')).toBe(true);
 
-    await a.del(`/v1/webhooks/${sub.body.webhookId}`);
-    await a.del(`${BINDINGS}/${binding.body.bindingId}`);
-  });
-});
-
-describe('crm events — binding dispatches a run', () => {
-  it('a bound host.crm.contact.created binding starts a run stamped with metadata.hostEvent', async () => {
-    const a = client();
-    const { tenantId } = await signup(a);
-
-    const binding = await a.post(BINDINGS, { eventType: 'host.crm.contact.created', workflowId });
-    expect(binding.status, JSON.stringify(binding.body)).toBe(201);
-
-    const contact = await a.post('/v1/host/openwop-app/crm/contacts', { name: 'Run Target' });
-    expect(contact.status, JSON.stringify(contact.body)).toBe(201);
-
-    let matched: RunRecord | undefined;
-    for (let i = 0; i < 40 && !matched; i++) {
-      const runs = await storage.listRuns({ tenantId, limit: 50 });
-      matched = runs.find((r) => {
-        const meta = r.metadata as { hostEvent?: { bindingId?: string } } | undefined;
-        return meta?.hostEvent?.bindingId === binding.body.bindingId;
-      });
-      if (!matched) await new Promise((r) => setTimeout(r, 25));
-    }
-    expect(matched, 'expected a run stamped with metadata.hostEvent to appear').toBeTruthy();
-    expect(matched?.workflowId).toBe(workflowId);
-
+    await a.del(`/webhooks/${sub.body.webhookId}`);
     await a.del(`${BINDINGS}/${binding.body.bindingId}`);
   });
 });

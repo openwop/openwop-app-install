@@ -13,6 +13,8 @@ export const messages = {
   loading: 'Cargando el editor…',
   loadError: 'No se pudo cargar este lienzo.',
   notAvailable: 'Este lienzo no está disponible — puede haber sido eliminado, pertenecer a otro espacio o su función puede estar deshabilitada.',
+  invalidArtifact: 'Este diseño no se puede abrir en el editor: usa componentes o valores fuera del catálogo. Pide al asistente que lo vuelva a generar.',
+  invalidArtifactDetail: 'Qué se rechazó',
   noOrg: 'No hay ningún espacio de trabajo disponible.',
   retry: 'Reintentar',
   liveConnecting: 'Iniciando la sesión en vivo…',

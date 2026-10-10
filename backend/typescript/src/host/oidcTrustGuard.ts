@@ -85,7 +85,7 @@ function untrustworthyUrl(name: string, raw: string): string | null {
  * because the in-process conformance boot trusts the harness issuer by design.
  */
 /** Managed-platform markers — each set by its platform on every instance and by no local tool this repo runs. */
-const PLATFORM_MARKERS: ReadonlyArray<readonly [string, string]> = [
+export const PLATFORM_MARKERS: ReadonlyArray<readonly [string, string]> = [
   ['K_SERVICE', 'Cloud Run'],
   ['KUBERNETES_SERVICE_HOST', 'Kubernetes'],
   ['FLY_APP_NAME', 'Fly.io'],

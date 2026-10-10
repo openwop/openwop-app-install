@@ -16,13 +16,14 @@
  * precedent), keyed `${tenantId}:${agentId}` so a GLOBAL pack agent's override never
  * leaks across tenants. Unlike `resolveAgentToolPermissions`, there is deliberately
  * NO `host:`-only guard: the override MUST resolve for pack agentIds too (e.g.
- * `feature.assistant.agents.chief-of-staff`, which is exactly the first consumer —
+ * `vendor.openwop-app.assistant.agents.chief-of-staff`, which is exactly the first consumer —
  * granting the Chief of Staff a tool). Cross-tenant reads fail closed.
  *
  * @see docs/adr/0104-superadmin-agent-toolallowlist-editor.md
  * @see src/host/agentProfileService.ts — the sibling per-(tenant,agentId) tool policy
  */
 
+import { agentStorageId } from '../executor/agentIdAliases.js';
 import { DurableCollection } from './hostExtPersistence.js';
 
 export interface AgentToolAllowlistOverride {
@@ -44,7 +45,9 @@ const overrides = new DurableCollection<AgentToolAllowlistOverride>(
   (o) => o.overrideId,
 );
 
-const keyOf = (tenantId: string, agentId: string): string => `${tenantId}:${agentId}`;
+// ADR 0763 — keyed by the agent's STORAGE spelling, so an override written
+// under a legacy id still applies after the rename (and vice versa).
+const keyOf = (tenantId: string, agentId: string): string => `${tenantId}:${agentStorageId(agentId)}`;
 const nowIso = (): string => new Date().toISOString();
 
 /**

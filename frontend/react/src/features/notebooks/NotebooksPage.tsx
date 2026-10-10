@@ -29,7 +29,7 @@ import {
 } from '../../ui/icons/index.js';
 import { fileToBase64, inferContentType, KB_UPLOAD_ACCEPT, withinUploadCap, MAX_UPLOAD_MB } from '../../client/fileToBase64.js';
 import {
-  ensureNotebook,
+  ensureNotebook, getNotebook,
   listSources, addSource, addFileSource, addAudioSource, addYoutubeSource, setSourceContextLevel, summarizeSource, listNotes, addNote, searchNotebook, ensureNotebookChat,
   type NoteContentOrigin,
   listTransformationTemplates, applyTransformation, listTransformations,
@@ -1073,18 +1073,33 @@ function NotebookWorkspace({ notebook }: { notebook: Notebook }): JSX.Element {
  *  full notebook workspace (sources w/ context levels, audio/YouTube ingest,
  *  transformations, grounded Ask) scoped to this project. No back chrome — the
  *  project page owns the header. Toggle-gating is done by the host tab. */
-export function ProjectSourcesPanel({ projectId }: { projectId: string }): JSX.Element {
+/** `readOnly` (a project viewer, ADR 0839 grade-ux B2): READ the notebook instead of
+ *  `ensure`-ing it. `ensure` is a POST that provisions a corpus; a viewer opening the tab
+ *  used to fire it, get a 403, and see the raw "Missing required scope" text as a load
+ *  failure. A project with no sources yet is a designed empty state, not an error. */
+export function ProjectSourcesPanel({ projectId, readOnly = false }: { projectId: string; readOnly?: boolean }): JSX.Element {
   const { t } = useTranslation('notebooks');
   const [notebook, setNotebook] = useState<Notebook | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [none, setNone] = useState(false);
   useEffect(() => {
     let live = true;
-    void ensureNotebook(projectId)
+    void (readOnly ? getNotebook(projectId) : ensureNotebook(projectId))
       .then((nb) => { if (live) setNotebook(nb); })
-      .catch((err) => { if (live) setError(err instanceof Error ? err.message : String(err)); });
+      .catch((err: unknown) => {
+        if (!live) return;
+        if (readOnly && (err as { status?: number }).status === 404) setNone(true);
+        else setError(err instanceof Error ? err.message : String(err));
+      });
     return () => { live = false; };
-  }, [projectId]);
+  }, [projectId, readOnly]);
+  if (none) return <StateCard title={t('sourcesNoneReadOnlyTitle')} body={t('sourcesNoneReadOnlyBody')} />;
   if (error) return <StateCard announce title={t('loadFailed')} body={error} />;
   if (!notebook) return <Skeleton height={120} />;
-  return <NotebookWorkspace notebook={notebook} />;
+  return (
+    <>
+      {readOnly ? <p className="muted u-fs-12">{t('sourcesReadOnlyNote')}</p> : null}
+      <NotebookWorkspace notebook={notebook} />
+    </>
+  );
 }

@@ -52,7 +52,7 @@ export const marketplaceFeature: BackendFeature = {
     salt: 'marketplace',
   },
   requiredPacks: [
-    { name: 'feature.marketplace.nodes', version: '1.1.0' },
-    { name: 'feature.marketplace.agents', version: '1.0.1' }, // CFP-1 real search tool
+    { name: 'feature.marketplace.nodes', version: '1.1.1' },
+    { name: 'vendor.openwop-app.marketplace.agents', version: '1.0.3' }, // CFP-1 real search tool
   ],
 };

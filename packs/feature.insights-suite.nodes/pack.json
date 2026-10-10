@@ -1,11 +1,12 @@
 {
   "name": "feature.insights-suite.nodes",
-  "version": "1.2.0",
+  "version": "1.2.1",
+  "kind": "node",
   "description": "Insights & Drafting Agent Suite node pack — pure compute building blocks the suite's meta-workflows use. variance-compute (Actual-vs-Plan for store sales/margin/labor/shrink, flags off-plan metrics) and talent-score (9-box performance×potential readiness). No host surface, no external egress — deterministic math, replay-safe.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "insights-suite", "variance", "talent", "9-box"],
-  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "engines": { "openwop": ">=1.0.0 <3.0.0" },
   "nodes": [
     {
       "typeId": "feature.insights-suite.nodes.variance-compute",

@@ -5,15 +5,21 @@
  *   - grouped by reason (the cause) + a coarse source bucket from the actor;
  *   - counts + timestamps only, NO addresses (no PII in the summary);
  *   - surfaced via an authed route + a chat-drivable CRM node (no new dashboard).
+ *
+ * SABOTAGE (wave-4 grade-tests probes, each red): drop the soft-escalation
+ * bucket, invert the bySource order, stop tracking `newestAt`, null the node's
+ * `outputs.summary`, or drop the route's `requireEnabled` toggle gate.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { getSetCookies } from './headerCookies.js';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
-import { addSuppression, suppressionSummary, __clearSuppressions } from '../src/features/crm/suppressionService.js';
+import { addSuppression, listSuppressions, suppressionSummary, __clearSuppressions, type SuppressionSummary } from '../src/features/crm/suppressionService.js';
 
 type NodeFn = (ctx: unknown) => Promise<{ status: string; outputs?: Record<string, unknown> }>;
 
@@ -32,8 +38,10 @@ beforeAll(async () => {
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   const u = getToggleDefault('users');
   if (u) await saveConfig({ ...u, status: 'on' }, 'test');
-  // @ts-expect-error — untyped .mjs pack module (loaded the way the runtime does)
-  crmNodes = (await import('../../../packs/feature.crm.nodes/index.mjs')).nodes;
+  // The pack ships untyped .mjs (loaded the way the runtime does); the module's
+  // shape is named here rather than suppressed with a ts directive.
+  const packUrl = pathToFileURL(join(import.meta.dirname, '..', '..', '..', 'packs', 'feature.crm.nodes', 'index.mjs')).href;
+  crmNodes = ((await import(packUrl)) as { nodes: Record<string, NodeFn> }).nodes;
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
@@ -54,7 +62,8 @@ describe('ADR 0251 — suppression summary projection', () => {
     const bySource = Object.fromEntries(s.bySource.map((r) => [r.source, r.count]));
     expect(bySource).toEqual({ webhook: 2, 'soft-escalation': 1, campaign: 1, user: 1 });
     expect(s.bySource[0]).toEqual({ source: 'webhook', count: 2 }); // highest first
-    expect(s.newestAt).not.toBeNull();
+    // newestAt is the LATEST row's timestamp, not merely some timestamp.
+    expect(s.newestAt).toBe((await listSuppressions(T)).map((r) => r.at).sort().at(-1));
     expect(JSON.stringify(s)).not.toContain('@x.com'); // no addresses leak
   });
 
@@ -81,29 +90,35 @@ describe('ADR 0251 — suppression summary route (auth + toggle gate)', () => {
   };
 
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<{ status: number; body: any }> => {
+  // The JSON boundary is untyped; the cases read only `summary` or `error`.
+  type Body = { summary: SuppressionSummary; error?: string };
+  const call = async (method: string, path: string, body?: unknown): Promise<{ status: number; body: Body }> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const c of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    return { status: res.status, body: (res.status === 204 ? undefined : await res.json().catch(() => undefined)) as Body };
   };
 
   it('returns the grouped summary for the caller tenant; toggle-off is gated', async () => {
     await enableCrm('on');
-    const login = await call('POST', '/v1/host/openwop-app/test/login', { email: `sup-${Date.now()}@acme.test`, tenantId: `org:sup-${Date.now()}` });
+    const login = await call('POST', '/host/openwop-app/test/login', { email: `sup-${Date.now()}@acme.test`, tenantId: `org:sup-${Date.now()}` });
     expect(login.status).toBe(201);
 
-    await call('POST', '/v1/host/openwop-app/crm/suppressions', { email: 'one@acme.test', reason: 'bounced' });
-    await call('POST', '/v1/host/openwop-app/crm/suppressions', { email: 'two@acme.test', reason: 'manual' });
+    await call('POST', '/host/openwop-app/crm/suppressions', { email: 'one@acme.test', reason: 'bounced' });
+    await call('POST', '/host/openwop-app/crm/suppressions', { email: 'two@acme.test', reason: 'manual' });
 
-    const r = await call('GET', '/v1/host/openwop-app/crm/suppressions/summary');
+    const r = await call('GET', '/host/openwop-app/crm/suppressions/summary');
     expect(r.status).toBe(200);
     expect(r.body.summary.total).toBe(2);
     expect(r.body.summary.byReason.bounced).toBe(1);
     expect(r.body.summary.byReason.manual).toBe(1);
 
     await enableCrm('off');
-    const gated = await call('GET', '/v1/host/openwop-app/crm/suppressions/summary');
-    expect(gated.status).toBe(404);
-    await enableCrm('on');
+    try {
+      const gated = await call('GET', '/host/openwop-app/crm/suppressions/summary');
+      expect(gated.status).toBe(404);
+      expect(gated.body.error).toBe('not_found');
+    } finally {
+      await enableCrm('on');
+    }
   });
 });

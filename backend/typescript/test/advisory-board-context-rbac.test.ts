@@ -68,11 +68,11 @@ function client(): Client {
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b) };
 }
 
-const A = '/v1/host/openwop-app/advisors';
+const A = '/host/openwop-app/advisors';
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
 
 async function login(c: Client, tenantId: string): Promise<string> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail('abc'), tenantId });
+  const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail('abc'), tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user.userId as string;
 }
@@ -83,7 +83,7 @@ describe('ADVB-1 — the board planning-context block is re-resolved per CALLER'
     const curator = client();
     const curatorId = await login(curator, tenantId);
 
-    const org = await curator.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+    const org = await curator.post('/host/openwop-app/orgs', { name: 'Acme' });
     expect(org.status, JSON.stringify(org.body)).toBe(201);
     const orgId = org.body.orgId as string;
 
@@ -91,12 +91,12 @@ describe('ADVB-1 — the board planning-context block is re-resolved per CALLER'
     // `subject === createdBy`. This is one of exactly two shapes where org
     // `workspace:write` (what the snapshot gate narrows on) diverges from the
     // real read predicate.
-    const strategy = await curator.post('/v1/host/openwop-app/strategy', {
+    const strategy = await curator.post('/host/openwop-app/strategy', {
       orgId, scope: 'user', title: 'Nightjar', summary: SECRET_SUMMARY,
     });
     expect(strategy.status, JSON.stringify(strategy.body)).toBe(201);
 
-    const advisor = await curator.post('/v1/host/openwop-app/roster', { persona: 'Ada Lovelace', agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
+    const advisor = await curator.post('/host/openwop-app/roster', { persona: 'Ada Lovelace', agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
     expect(advisor.status, JSON.stringify(advisor.body)).toBe(201);
     const board = await curator.post(`${A}/boards`, {
       orgId, name: 'Founders', advisors: [advisor.body.rosterId], personaKind: 'historical', visibility: 'shared',
@@ -127,7 +127,7 @@ describe('ADVB-1 — the board planning-context block is re-resolved per CALLER'
     // `viewer` = read-only org membership — NOT `workspace:write`, so this
     // caller is exactly the one the GRADE-8 snapshot gate excluded from
     // curating and (before the fix) silently included in reading.
-    const added = await curator.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberId, roles: ['viewer'] });
+    const added = await curator.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberId, roles: ['viewer'] });
     expect([200, 201]).toContain(added.status);
     const joined = await member.post(`${A}/boards/${encodeURIComponent(boardId)}/chat`);
     expect(joined.status, JSON.stringify(joined.body)).toBe(200);
@@ -162,16 +162,16 @@ describe('M4 — a partially-resolved board context is reported, not served as c
     const tenantId = `org:m4-${Date.now()}-${n++}`;
     const c = client();
     const userId = await login(c, tenantId);
-    const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+    const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
     const orgId = org.body.orgId as string;
 
     const LIVE_SUMMARY = 'Nightingale — the surviving thesis';
-    const live = await c.post('/v1/host/openwop-app/strategy', { orgId, title: 'Live', summary: LIVE_SUMMARY });
-    const doomed = await c.post('/v1/host/openwop-app/strategy', { orgId, title: 'Doomed', summary: 'Vanishes' });
+    const live = await c.post('/host/openwop-app/strategy', { orgId, title: 'Live', summary: LIVE_SUMMARY });
+    const doomed = await c.post('/host/openwop-app/strategy', { orgId, title: 'Doomed', summary: 'Vanishes' });
     expect(live.status).toBe(201);
     expect(doomed.status).toBe(201);
 
-    const advisor = await c.post('/v1/host/openwop-app/roster', { persona: 'Ada Lovelace', agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
+    const advisor = await c.post('/host/openwop-app/roster', { persona: 'Ada Lovelace', agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
     const board = await c.post(`${A}/boards`, {
       orgId, name: 'Partial', advisors: [advisor.body.rosterId], personaKind: 'historical', visibility: 'shared',
       contextRefs: [{ kind: 'strategy', strategyId: live.body.id }, { kind: 'strategy', strategyId: doomed.body.id }],

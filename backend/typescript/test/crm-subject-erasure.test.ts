@@ -17,6 +17,23 @@
  *  - an email-keyed DSAR reaches CRM through the registered `SubjectKeyResolver`,
  *    resolving through the authoritative identifier index and never a heuristic
  *    match (which is what prevents over-erasure).
+ *
+ * SABOTAGE (wave-4 grade-tests probes, each red): keep `title` on the anonymized
+ * row; skip the ident-row delete; drop the booking by-ADDRESS match; keep the
+ * suppression `note`; skip the gmailsync delete; keep `typedName`; leave the
+ * merge-event `absorbedIdentifiers` raw.
+ *
+ * HONEST CEILINGS (probed vacuous, kept as outcome witnesses, not guard witnesses):
+ *  - "a blank tenant or subject erases nothing": the early `return` in
+ *    `eraseCrmSubject` is a DOUBLE GUARD — with it removed, `contact.tenantId !== ''`,
+ *    every `listForTenantIndexed('')` is empty and `contacts.get('')` is null, so
+ *    nothing is erased anyway. The case proves the outcome, not that one line.
+ *  - `resolveCrmSubjectKeys(T, 'not-an-address')`: a phone-typed lookup of a
+ *    non-phone string also resolves to nothing, so the key-type gate is not
+ *    observable through this arm.
+ *  - B2 repair (a) (ident-derived key-set) is redundant with repair (b) (leg order)
+ *    on every path below — run 1 fails before the contact row is anonymized — and
+ *    the "identifier index LAST" order needs a multi-line reorder to sabotage.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -43,6 +60,12 @@ let server: http.Server;
 const bookings = new DurableCollection<Booking>('crm:booking', (b) => b.bookingId, undefined, (b) => b.tenantId);
 const signRequests = new DurableCollection<SignRequest>('crm:sign-request', (r) => r.signRequestId, undefined, (r) => r.tenantId);
 const signatureRecords = new DurableCollection<SignatureRecord>('crm:signature-record', (r) => r.recordId, undefined, (r) => r.tenantId);
+// Cleared after every case so no case depends on another's leftovers (the merge
+// event, the identifier index and the gmail-sync rows are not reset by any seam).
+const mergeEvents = new DurableCollection<{ mergeEventId: string; tenantId: string }>('crm:merge-event', (e) => e.mergeEventId, undefined, (e) => e.tenantId);
+const idents = new DurableCollection<{ key: string; tenantId: string }>('cdp:contact-ident', (r) => r.key, undefined, (r) => r.tenantId);
+type GmailSyncRow = { syncId: string; tenantId: string; orgId: string; userId: string; connectionId: string; cadence: string; jobId: string; status: string; createdAt: string; updatedAt: string };
+const syncs = new DurableCollection<GmailSyncRow>('crm:gmailsync', (s) => `${s.tenantId}:${s.syncId}`);
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -57,6 +80,9 @@ afterEach(async () => {
   await bookings.__clear();
   await signRequests.__clear();
   await signatureRecords.__clear();
+  await mergeEvents.__clear();
+  await idents.__clear();
+  await syncs.__clear();
 });
 
 const EMAIL = 'erase-me@acme.test';
@@ -193,7 +219,7 @@ describe('CRM-2 — the downstream stores a "successful" erasure used to leave b
         { signerId: 's2', email: 'counterparty@acme.test', name: 'Counterparty', status: 'signed' },
       ],
       createdAt: 'x', updatedAt: 'x',
-    } as SignRequest);
+    });
     await signatureRecords.put({
       recordId: 'sr1:s1', tenantId: T, signRequestId: 'sr1', signerId: 's1', signedAt: 'x',
       ipHash: 'iph', userAgentHash: 'uah', contentHashAtSign: 'hash-abc', method: 'click-to-sign',
@@ -226,9 +252,6 @@ describe('CRM-2 — the downstream stores a "successful" erasure used to leave b
     // drag in the Connections broker and the scheduler; the property under test is
     // the ERASER's reach, and a seeded row exercises exactly that.
     const { listGmailSyncs } = await import('../src/features/crm/gmailSyncService.js');
-    const syncs = new DurableCollection<{ syncId: string; tenantId: string; orgId: string; userId: string; connectionId: string; cadence: string; jobId: string; status: string; createdAt: string; updatedAt: string }>(
-      'crm:gmailsync', (s) => `${s.tenantId}:${s.syncId}`,
-    );
     await syncs.put({
       syncId: 'gmailsync:erase-me', tenantId: T, orgId: 'org1', userId: 'user:erased-one',
       connectionId: 'conn-1', cadence: 'daily', jobId: 'gmailsync:gmailsync:erase-me',
@@ -250,7 +273,6 @@ describe('CRM-2 — the downstream stores a "successful" erasure used to leave b
       await listGmailSyncs(T, { userId: 'user:someone-else' }),
       "another user's mailbox sync must not be swept up",
     ).toHaveLength(1);
-    await syncs.__clear();
   });
 });
 
@@ -365,7 +387,7 @@ describe('CRM-2 / B2 — a RETRY after a partial failure must still erase', () =
       status: 'completed', createdBy: 'u1',
       signers: [{ signerId: 's1', email: EMAIL, name: 'Erase Me', status: 'signed' }],
       createdAt: 'x', updatedAt: 'x',
-    } as SignRequest);
+    });
     await addSuppression(T, EMAIL, 'complaint', 'user:admin@acme.test', 'asked to stop, per call with Jane');
     expect(contactId).toBeTruthy();
   }

@@ -30,14 +30,14 @@
  * it, and that guard matches the filename in ANY spelling, comments included.)
  *
  * Manifest census at generation time (747 distinct typeIds):
- *    320  action
- *    255  side-effect
+ *    319  action
+ *    256  side-effect
  *    111  pure
  *     36  read
  *     16  streaming-output
  *      9  gate
  *
- * Floor 327 = served 254 + held 73:
+ * Floor 328 = served 255 + held 73:
  *     28  held: ai-invocation-log
  *     20  held: ai-opaque-not-logged
  *     24  held: deferred-role-semantics
@@ -312,6 +312,7 @@ export const MANIFEST_SIDE_EFFECT_FLOOR: ReadonlySet<string> = new Set([
   'feature.crm.nodes.log-activity',
   'feature.crm.nodes.move-deal-stage',
   'feature.crm.nodes.persist-segment',
+  'feature.crm.nodes.record-triage',
   'feature.crm.nodes.sign-request',
   'feature.crm.nodes.update-contact-owner',
   'feature.crm.nodes.update-contact-stage',
@@ -592,6 +593,7 @@ export const MANIFEST_FAST_PATH_SERVED: ReadonlySet<string> = new Set([
   'feature.crm.nodes.log-activity',
   'feature.crm.nodes.move-deal-stage',
   'feature.crm.nodes.persist-segment',
+  'feature.crm.nodes.record-triage',
   'feature.crm.nodes.sign-request',
   'feature.crm.nodes.update-contact-owner',
   'feature.crm.nodes.update-contact-stage',
@@ -1018,13 +1020,11 @@ export const MANIFEST_DECLARED_TYPE_IDS: ReadonlySet<string> = new Set([
   'feature.assistant.nodes.confirm-action-send',
   'feature.assistant.nodes.enqueue-action',
   'feature.assistant.nodes.get-meeting',
-  'feature.assistant.nodes.get-project',
   'feature.assistant.nodes.ingest-commitments',
   'feature.assistant.nodes.list-commitments',
   'feature.assistant.nodes.list-decisions',
   'feature.assistant.nodes.list-meetings',
   'feature.assistant.nodes.list-pending-actions',
-  'feature.assistant.nodes.list-projects',
   'feature.assistant.nodes.list-stakeholders',
   'feature.assistant.nodes.log-decision',
   'feature.assistant.nodes.populate-board',
@@ -1146,6 +1146,7 @@ export const MANIFEST_DECLARED_TYPE_IDS: ReadonlySet<string> = new Set([
   'feature.crm.nodes.create-deal',
   'feature.crm.nodes.create-task',
   'feature.crm.nodes.get-company',
+  'feature.crm.nodes.get-contact',
   'feature.crm.nodes.get-deal',
   'feature.crm.nodes.gmail-sync',
   'feature.crm.nodes.list-companies',
@@ -1155,6 +1156,7 @@ export const MANIFEST_DECLARED_TYPE_IDS: ReadonlySet<string> = new Set([
   'feature.crm.nodes.log-activity',
   'feature.crm.nodes.move-deal-stage',
   'feature.crm.nodes.persist-segment',
+  'feature.crm.nodes.record-triage',
   'feature.crm.nodes.segment-vocabulary',
   'feature.crm.nodes.sign-request',
   'feature.crm.nodes.sign-status',

@@ -18,6 +18,8 @@ import { loadAgentsFromManifest } from '../packs/agentLoader.js';
 import { resolveDefaultPackDir } from '../packs/registryInstaller.js';
 import { isParkedPackDirName } from './mountLocalPacks.js';
 import { createLogger } from '../observability/logger.js';
+import { agentsCapability, stripSupported } from '../routes/discovery.js';
+import { storageFamilyFacets, v2AdvertisedStorageFamilies } from '../host/storageFamilyAdvert.js';
 import type { Storage } from '../storage/storage.js';
 
 const log = createLogger('bootstrap.agentPackResolver');
@@ -36,8 +38,51 @@ const PACK_DIR = resolveDefaultPackDir();
 // host_capability_missing. Honesty: we only list a capability whose host slot is
 // actually wired — see hostSurfaceRegistry `host.connectors` supported:true.
 const HOST_SATISFIED_CAPS = new Set<string>(['agents.manifestRuntime', 'aiProviders', 'host.connectors']);
-function hostSatisfies(cap: string): boolean {
-  return HOST_SATISFIED_CAPS.has(cap);
+
+/**
+ * NP-V2-7 — the v2 peer-dependency identifiers (a `spec/v2/declaration.json`
+ * family key, facets named in `peerDependenciesMeta.<family>.facets`) this host
+ * satisfies. The v1 keys above are the legacy spelling; since the P0 re-vendor
+ * the core agent packs declare the v2 spelling (`agentRuntime`, `agents` +
+ * `memoryBackends`), which the v1-only set could not read at all.
+ *
+ * The rule is the one `capabilities.md` §2 states for the wire: a family is
+ * satisfied iff this host ADVERTISES it on the v2 discovery document, and a
+ * facet iff that family's record carries it. MEASURED 2026-09-28: of the
+ * families agent packs ask for, the v2 document advertised `aiProviders` only;
+ * `agentRuntime`, `fs` and `queueBus` were not advertised (`queueBus` is since
+ * ADR 0858 P3), so claiming
+ * them here would be a dishonest satisfaction.
+ *
+ * CORRECTED 2026-09-28: `agents` IS advertised at v2 now (#4198 moved the v1
+ * block into `agentsCapability()`, one owner for both majors). The table this
+ * replaced was static and said "not advertised", so main went red the moment
+ * both landed; the parity test's own message said to widen it deliberately.
+ * It is a FUNCTION now, because the `agents` facets are conditional:
+ * `memoryBackends` exists only on durable memory, `proposals`/`goals` only
+ * behind their toggles. A static set would claim a facet the document may not
+ * carry. The facets are read from the same owner the advertisement is built
+ * from, with `supported` stripped as on the wire, so the two cannot disagree.
+ * `test/agent-peer-satisfaction-parity.test.ts` pins this to
+ * `buildV2Advertisement`.
+ */
+export function v2SatisfiedFamilies(): ReadonlyMap<string, ReadonlySet<string>> {
+  return new Map<string, ReadonlySet<string>>([
+    ['aiProviders', new Set<string>()],
+    ['agents', new Set(Object.keys(stripSupported(agentsCapability())))],
+    // ADR 0858 P3 — the storage families v2 advertises, from the same builder
+    // and the same list. A facet is satisfied only when its value is not `false`.
+    ...v2AdvertisedStorageFamilies().map((family): [string, ReadonlySet<string>] => [
+      family,
+      new Set(Object.entries(storageFamilyFacets()[family]).filter(([, v]) => v !== false).map(([k]) => k)),
+    ]),
+  ]);
+}
+
+export function hostSatisfies(cap: string, facets: readonly string[] = []): boolean {
+  if (HOST_SATISFIED_CAPS.has(cap) && facets.length === 0) return true;
+  const family = v2SatisfiedFamilies().get(cap);
+  return family !== undefined && facets.every((f) => family.has(f));
 }
 
 /** Eager-load every local pack's `agents[]` into the AgentRegistry. The §C

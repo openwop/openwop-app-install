@@ -1,0 +1,7 @@
+# feature.agent-knowledge.nodes
+
+## Full description
+
+_Moved from `pack.json` `description`, which the v2 manifest schema caps at 1024 characters._
+
+Agent-knowledge feature node pack — workflow nodes over the `ctx.features.agentKnowledge` surface. `retrieve` reads an agent's bound knowledge (cited KB chunks + private memory facts) for a query; it is `role:action` and read-only. `ingest` writes a cited document into a collection BOUND to the agent — the write path for trigger→workflow auto-ingest (webhook/email/form → workflow → this node) — and is `role:side-effect` + `side-effectful` (WF-AKM-1 / ADR 0587 §7). CORRECTION 2026-08-19 (WF-AKM-1): this description previously declared BOTH nodes `role:action` and derived a replay guarantee from that role. No such derivation exists — the executor does not branch on a node's role at all; only the side-effect-floor generator reads it, and it reads `side-effect`. `ingest` was consequently in none of MANIFEST_SIDE_EFFECT_FLOOR / MANIFEST_FAST_PATH_SERVED / SIDE_EFFECTING_TYPE_PATTERNS, so a `:fork` in replay mode re-executed it and wrote a SECOND document with a new id, a second chunk set and a second embedding pass. Full trail in ADR 0587 §7. READ-ONLY LINE (redrawn 2026-06-14): the agent's MEMORY/notes namespace (`MemoryAdapter`) stays read-only on the wire — this pack NEVER writes `ctx.memory`; `ingest` writes only the KB-DOCUMENT side (a host-extension feature store), which is a normal feature write and touches no normative wire contract.

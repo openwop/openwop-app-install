@@ -22,7 +22,10 @@
 
 import { registerChainBackedWorkflow } from '../../host/chainBackedWorkflows.js';
 import { stripAutoTerminalOutputRole } from './chainBackedShape.js';
-import { getJob, registerJob, setJobEnabled, type ScheduledJob } from '../../host/schedulingService.js';
+import { getJob, registerJob, setJobEnabled, updateJob, ScheduleCadenceError, type ScheduledJob, type ScheduleSkipReason } from '../../host/schedulingService.js';
+import { RECONNECT_CODES } from '../../notifications/notify.js';
+import { getNotificationEmitter } from '../../notifications/emitter.js';
+import type { RunTerminalStatus } from '../../executor/runLifecycle.js';
 import { ensureAssistantAgent } from './capability.js';
 import { parseCron } from '../../host/cronSchedule.js';
 import { OpenwopError } from '../../types.js';
@@ -129,23 +132,33 @@ export interface AssistantLoopStatus extends AssistantLoopDef {
    *  the reason. Rendered ALONGSIDE `lastRunAt`: without it the panel said
    *  "last run: just now" over a `/runs/<id>` link to a run from hours before. */
   lastSkippedAt?: string;
-  lastSkipReason?: 'budget' | 'workflow-unresolved' | 'dispatch-error' | 'feature-disabled';
+  lastSkipReason?: ScheduleSkipReason;
   /** ADR 0662 D3 — the OUTCOME of `lastRunId`, not merely that a run happened.
    *
    *  Without it the panel renders "last run: <time>" over a run that FAILED, which is the
    *  same lie `lastSkippedAt` was added to stop one level up: fixing the run half alone
    *  (an ingest that now fails honestly) would still leave this surface green. */
   lastRunStatus?: string;
+  /** ADR 0862 — WHY the last run failed (the run's typed `error.code`, e.g.
+   *  `connection_reauth_required`), so the panel can name the fix instead of only
+   *  saying "failed". A code, never the message: the message can carry provider text. */
+  lastRunErrorCode?: string;
+  /** ADR 0862 — set when the loop PAUSED ITSELF after repeated connection refusals
+   *  (`AUTH_PAUSE_AFTER` in a row): the code that did it and when. Cleared on re-enable. */
+  autoPausedCode?: string;
+  autoPausedAt?: string;
 }
 
 /** ADR 0662 D3 — read the run's own status. The scheduled-job row records THAT a run was
  *  dispatched, never how it ended, so the outcome has to come from the run. A run that can
  *  no longer be read yields nothing rather than a fabricated verdict. */
-async function lastRunStatusOf(runId: string | undefined): Promise<{ lastRunStatus?: string }> {
+async function lastRunStatusOf(runId: string | undefined): Promise<{ lastRunStatus?: string; lastRunErrorCode?: string }> {
   if (!runId) return {};
   try {
     const run = await hostExtStorage().getRun(runId);
-    return run?.status ? { lastRunStatus: run.status } : {};
+    if (!run?.status) return {};
+    const code = run.status === 'failed' && typeof run.error?.code === 'string' ? run.error.code : undefined;
+    return { lastRunStatus: run.status, ...(code !== undefined ? { lastRunErrorCode: code } : {}) };
   } catch {
     return {};
   }
@@ -165,6 +178,7 @@ export async function listLoopStatuses(tenantId: string): Promise<AssistantLoopS
         ...(job?.nextFireAt !== undefined ? { nextFireAt: job.nextFireAt } : {}),
         ...(job?.lastSkippedAt !== undefined ? { lastSkippedAt: job.lastSkippedAt } : {}),
         ...(job?.lastSkipReason !== undefined ? { lastSkipReason: job.lastSkipReason } : {}),
+        ...((h) => (h?.autoPausedCode && job?.enabled !== true ? { autoPausedCode: h.autoPausedCode, ...(h.autoPausedAt ? { autoPausedAt: h.autoPausedAt } : {}) } : {}))(loopHealthOf(job)),
       };
     }),
   );
@@ -181,16 +195,27 @@ export async function enableLoop(
   // (not only the route): `registerJob` stores an unparseable expr `enabled:true`
   // with no `nextFireAt`, so the panel reads "On" over a job that never fires.
   // Guard ONLY the cronExpr-provided branch — the re-enable-in-place path below
-  // touches no cadence and must stay unaffected. `parseCron` (not
-  // `computeNextFire`) is the right instrument: a syntactically-valid-but-never-
-  // fires expr like `0 0 30 2 *` parses fine and MUST be accepted.
+  // touches no cadence and must stay unaffected.
+  // CORRECTED (ADR 0787 D6): this used to add "a syntactically-valid-but-never-
+  // fires expr like `0 0 30 2 *` parses fine and MUST be accepted". That is the
+  // same "On over a job that never fires" defect COS-5 exists to stop, one shape
+  // over — and RFC 0052 §B.3 says a schedule beyond the horizon is REJECTED.
+  // `registerJob` now refuses it (`schedule_horizon_exceeded`), surfaced below.
   if (opts.cronExpr !== undefined && !parseCron(opts.cronExpr)) {
     throw new OpenwopError('validation_error', `Invalid cron expression: \`${opts.cronExpr}\`.`, 400, { loopId, cronExpr: opts.cronExpr });
   }
   const existing = await getJob(jobIdOf(tenantId, loopId));
-  if (existing && !opts.cronExpr) {
+  if (existing) {
     // Re-enable in place, preserving cadence + attribution.
-    const job = await setJobEnabled(existing.jobId, true);
+    // ADR 0862 — a person re-enabling is the "I fixed the connection" signal: the
+    // consecutive-refusal count and any auto-pause marker start over.
+    const job = await updateJob(existing.jobId, (current) => {
+      const health = loopHealthOf(current);
+      return { enabled: true, ...(opts.cronExpr !== undefined ? { cronExpr: opts.cronExpr, ...(opts.actingUserId !== undefined ? { actingUserId: opts.actingUserId } : {}) } : {}), mergeMetadata: { [LOOP_HEALTH_KEY]: {
+        observedRuns: health?.observedRuns ?? [],
+        ...(health?.observedThrough ? { observedThrough: health.observedThrough } : {}),
+      } } };
+    });
     log.info('assistant_loop_enabled', { tenantId, loopId, jobId: existing.jobId, reenabled: true });
     return job;
   }
@@ -223,7 +248,13 @@ export async function enableLoop(
     log.info('assistant_loop_enabled', { tenantId, loopId, jobId: result.job.jobId, cronExpr: result.job.cronExpr });
     return result.job;
   }
-  return null;
+  // A refused registration is NOT "no such loop" — returning null made the route
+  // answer 404 for a cadence the store had refused (ADR 0787 D6).
+  const { code, message } = result.error;
+  if (code === 'invalid_cron' || code === 'invalid_timezone' || code === 'schedule_horizon_exceeded') {
+    throw new ScheduleCadenceError({ code, message });
+  }
+  throw new OpenwopError('conflict', message, 409, { loopId, reason: code });
 }
 
 export async function disableLoop(tenantId: string, loopId: string): Promise<ScheduledJob | null> {
@@ -231,4 +262,105 @@ export async function disableLoop(tenantId: string, loopId: string): Promise<Sch
   const job = await setJobEnabled(jobIdOf(tenantId, loopId), false);
   if (job) log.info('assistant_loop_disabled', { tenantId, loopId, jobId: job.jobId });
   return job;
+}
+
+
+// ─── ADR 0862 — a loop stops burning runs on a connection it cannot use ─────
+//
+// MEASURED in production: from 2026-09-08 to 2026-09-29 the calendar and drive
+// loops failed 1,233 runs, every 30 minutes, on a Google 403 the node reported as
+// `upstream_unavailable` ("the credential may have expired"). c29aeacd6 made the
+// failure NAME itself (`connection_scope_missing` / `connection_reauth_required` /
+// `connection_forbidden`) and notify once a day — but a loop whose connection is
+// refused still fires every tick, forever, and every tick is a failed run.
+//
+// So: after `AUTH_PAUSE_AFTER` consecutive scheduled runs refused for a
+// reconnect-class reason, the loop PAUSES ITSELF and tells the person it acts as,
+// once. Re-enabling it (after reconnecting) clears the count. A run that fails for
+// any OTHER reason neither counts nor resets — a flaky upstream is not a dead
+// connection, and a success is the only evidence the connection works.
+export const AUTH_PAUSE_AFTER = 3;
+const LOOP_HEALTH_KEY = 'assistantLoopHealth';
+
+interface LoopHealth {
+  consecutiveAuthFailures?: number;
+  lastAuthCode?: string;
+  autoPausedCode?: string;
+  autoPausedAt?: string;
+  observedRuns?: Array<{ runId: string; key: string }>;
+  observedThrough?: string;
+}
+// Durable, bounded dedupe on the job row itself. Observations older than the
+// evicted high-water mark cannot rewrite current health (ADR 0862 D7 correction).
+const LOOP_OBSERVATION_LIMIT = 64;
+
+function loopHealthOf(job: ScheduledJob | null | undefined): LoopHealth | undefined {
+  const h = (job?.metadata as Record<string, unknown> | undefined)?.[LOOP_HEALTH_KEY];
+  return h && typeof h === 'object' ? (h as LoopHealth) : undefined;
+}
+
+/** The `onAnyRunTerminal` subscriber (registered at boot by `feature.ts`). Bounded:
+ *  one run read and at most one job write per terminal assistant-loop run. */
+export async function onLoopRunTerminal(runId: string, status: RunTerminalStatus): Promise<void> {
+  if (status === 'cancelled') return;
+  const run = await hostExtStorage().getRun(runId);
+  if (!run || run.status !== status || !run.workflowId.startsWith('assistant.loop.')) return;
+  // Forks retain schedule attribution for provenance; they are not new cron fires.
+  if (run.parentRunId !== undefined || run.forkMode !== undefined) return;
+  const schedule = run.metadata?.schedule as { jobId?: unknown; trigger?: unknown } | undefined;
+  const jobId = schedule?.jobId;
+  if (typeof jobId !== 'string' || schedule?.trigger !== 'cron') return;
+  const code = run.error?.code;
+  if (status !== 'completed' && (typeof code !== 'string' || !RECONNECT_CODES.has(code))) return;
+  const observationKey = `${run.createdAt}/${runId}`;
+  const at = new Date().toISOString();
+  let pauseWon = false;
+  const updated = await updateJob(jobId, (job) => {
+    // A retry must recompute the transition, never notify for a lost CAS attempt.
+    pauseWon = false;
+    if (job.tenantId !== run.tenantId || job.workflowId !== run.workflowId) return null;
+    const health = loopHealthOf(job) ?? {};
+    const observed = health.observedRuns ?? [];
+    if (observed.some((r) => r.runId === runId) || (health.observedThrough && observationKey <= health.observedThrough)) return null;
+    const nextObserved = [...observed, { runId, key: observationKey }].sort((a, b) => a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
+    let observedThrough = health.observedThrough;
+    while (nextObserved.length > LOOP_OBSERVATION_LIMIT) {
+      const retired = nextObserved.shift();
+      if (retired && (!observedThrough || retired.key > observedThrough)) observedThrough = retired.key;
+    }
+    const dedupe = { observedRuns: nextObserved, ...(observedThrough ? { observedThrough } : {}) };
+    if (status === 'completed') {
+      // A completed run cannot re-enable a manually or automatically paused job.
+      return { mergeMetadata: { [LOOP_HEALTH_KEY]: { ...health, ...dedupe, consecutiveAuthFailures: 0 } } };
+    }
+    const n = (health.consecutiveAuthFailures ?? 0) + 1;
+    pauseWon = n >= AUTH_PAUSE_AFTER && job.enabled;
+    const nextHealth: LoopHealth = {
+      ...health, ...dedupe, consecutiveAuthFailures: n, lastAuthCode: code,
+      ...(pauseWon ? { autoPausedCode: code, autoPausedAt: at } : {}),
+    };
+    return { ...(pauseWon ? { enabled: false } : {}), mergeMetadata: { [LOOP_HEALTH_KEY]: nextHealth } };
+  });
+  if (!updated || !pauseWon) return;
+  const job = updated;
+  const n = loopHealthOf(job)?.consecutiveAuthFailures ?? AUTH_PAUSE_AFTER;
+  const loop = ASSISTANT_LOOPS.find((l) => l.workflowId === run.workflowId);
+  log.warn('assistant_loop_auto_paused', { tenantId: run.tenantId, jobId, loopId: loop?.loopId, code, consecutive: n });
+  const actingUserId = (job.metadata as Record<string, unknown> | undefined)?.actingUserId;
+  try {
+    await getNotificationEmitter().emit({
+      tenantId: run.tenantId,
+      ...(typeof actingUserId === 'string' ? { recipientUserId: actingUserId } : {}),
+      type: 'workflow.failed',
+      priority: 'high',
+      title: 'A recurring task was paused',
+      message: `${loop?.label ?? run.workflowId} was refused by Google ${n} times in a row, so it has stopped running. Reconnect Google, then turn it back on under Recurring tasks.`,
+      runId,
+      workflowId: run.workflowId,
+      actionUrl: '/connections',
+      metadata: { assistantLoopAutoPaused: true, code, jobId },
+    });
+  } catch (err) {
+    log.warn('assistant_loop_auto_pause_notification_failed', { tenantId: run.tenantId, jobId, error: err instanceof Error ? err.message : String(err) });
+  }
 }

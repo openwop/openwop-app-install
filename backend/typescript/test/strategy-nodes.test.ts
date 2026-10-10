@@ -15,7 +15,7 @@ import { getAgentRegistry } from '../src/executor/agentRegistry.js';
 import { nodes } from '../../../packs/feature.strategy.nodes/index.mjs';
 
 const REPO_ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..', '..');
-const AGENT_PACK = join(REPO_ROOT, 'packs', 'feature.strategy.agents');
+const AGENT_PACK = join(REPO_ROOT, 'packs', 'vendor.openwop-app.strategy.agents');
 
 const strategySurface = {
   listStrategies: async () => ({ strategies: [{ id: 's1', title: 'North Star', scope: 'org', status: 'active', horizon: 'annual' }] }),
@@ -109,14 +109,14 @@ describe('feature.strategy.nodes', () => {
   });
 });
 
-describe('feature.strategy.agents — agent pack manifest', () => {
+describe('vendor.openwop-app.strategy.agents — agent pack manifest', () => {
   beforeEach(() => getAgentRegistry()._resetForTest());
 
   it('loads the strategy-analyst with its prompt + tool allowlist (memo node included)', () => {
     const loaded = loadAgentsFromManifest(AGENT_PACK);
     expect(loaded.length).toBe(1);
     const a = loaded[0];
-    expect(a.agentId).toBe('feature.strategy.agents.strategy-analyst');
+    expect(a.agentId).toBe('vendor.openwop-app.strategy.agents.strategy-analyst');
     expect(a.systemPromptRef).toBe('prompts/strategy-analyst.md');
     expect(a.systemPrompt.length).toBeGreaterThan(0);
     // tool-allowlisted to its OWN nodes only (read + the Documents-writing memo node).

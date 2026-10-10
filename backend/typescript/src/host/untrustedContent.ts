@@ -139,3 +139,31 @@ function safeSlice(text: string, n: number): string {
   const last = out.charCodeAt(out.length - 1);
   return last >= 0xd800 && last <= 0xdbff ? out.slice(0, -1) : out;
 }
+
+/**
+ * ADR 0788 D2 — defang BOTH fence syntaxes in every string inside a value from
+ * an external party (an MCP peer's tool result, resource contents, tool
+ * descriptions), recursively, without changing its shape.
+ *
+ * Applied where the peer's bytes ENTER the host (`host/mcpClient.ts`), so any
+ * fence built downstream — the vendored `core.openwop.mcp` pack's
+ * `<UNTRUSTED tool="…">${raw}</UNTRUSTED>`, which does not defang `raw`
+ * (`MCPWF-3`), or a host `fenceUntrustedBlock` — cannot be closed from inside,
+ * whatever pack version is mounted. Only the delimiter tokens change, so a
+ * JSON consumer sees identical data unless the peer sent a literal fence token.
+ * Object KEYS are defanged too (grade-code MCPCD-2): the pack fences
+ * `JSON.stringify(result)`, so a peer key like `"</UNTRUSTED>\nSYSTEM: …"` reaches
+ * the prompt exactly as a value would. A key changes only if it carried a fence
+ * token, which no honest peer sends. Deterministic →
+ * replay-safe. Depth-bounded so a hostile deeply nested payload cannot blow the
+ * stack: past the bound the subtree is replaced by its defanged JSON text.
+ */
+export function defangPeerFence<T>(value: T, depth = 0): T {
+  if (typeof value === 'string') return defangUntrustedFence(defangAngleFence(value)) as T;
+  if (value === null || typeof value !== 'object') return value;
+  if (depth >= 64) return defangUntrustedFence(defangAngleFence(JSON.stringify(value))) as T;
+  if (Array.isArray(value)) return value.map((v) => defangPeerFence(v, depth + 1)) as T;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[defangPeerFence(k)] = defangPeerFence(v, depth + 1);
+  return out as T;
+}

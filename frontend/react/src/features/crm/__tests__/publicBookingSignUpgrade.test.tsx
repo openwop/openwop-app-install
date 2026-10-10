@@ -6,27 +6,44 @@
  * host's zone to someone in another country is how cross-timezone bookings go
  * wrong), and a signer ends up holding a copy of what they signed, dated by the
  * SERVER, not by their own clock.
+ *
+ * Gap ids: B-G1 / B-G2 / S-G1 in `docs/steward/UX_UPGRADE-crm-public.md`.
+ * Sabotage-witnessed (wave-4 /grade-tests, w4g5-pb-* / w4g5-ps-*): the zone
+ * options ordered host-first, the switcher shown for a single zone, the name
+ * error never set, `signedAt` taken from the client clock, the copy offered
+ * without a server instant, and the copy offered after a DECLINE each turn a
+ * case red. (The declined case used to never decline — it asserted the
+ * pre-action page, which holds no link either, so it could not fail.)
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
+import type { PublicLinkView } from '../bookingClient.js';
+import type { SignPublicView } from '../signClient.js';
+
+type BookingApi = typeof import('../bookingClient.js');
+type SignApi = typeof import('../signClient.js');
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 
-const getPublicLink = vi.fn();
-const getPublicSlots = vi.fn();
-const claimSlot = vi.fn();
+const getPublicLink = vi.fn<BookingApi['getPublicLink']>();
+const getPublicSlots = vi.fn<BookingApi['getPublicSlots']>();
+const claimSlot = vi.fn<BookingApi['claimSlot']>();
 vi.mock('../bookingClient.js', () => ({
-  getPublicLink: (...a: unknown[]) => getPublicLink(...a),
-  getPublicSlots: (...a: unknown[]) => getPublicSlots(...a),
-  claimSlot: (...a: unknown[]) => claimSlot(...a),
+  getPublicLink: (...a: Parameters<BookingApi['getPublicLink']>) => getPublicLink(...a),
+  getPublicSlots: (...a: Parameters<BookingApi['getPublicSlots']>) => getPublicSlots(...a),
+  claimSlot: (...a: Parameters<BookingApi['claimSlot']>) => claimSlot(...a),
 }));
 
-const getSignView = vi.fn();
-const submitSignature = vi.fn();
-const declineSignature = vi.fn();
+const getSignView = vi.fn<SignApi['getSignView']>();
+const submitSignature = vi.fn<SignApi['submitSignature']>();
+const declineSignature = vi.fn<SignApi['declineSignature']>();
 vi.mock('../signClient.js', () => ({
-  getSignView: (...a: unknown[]) => getSignView(...a),
-  submitSignature: (...a: unknown[]) => submitSignature(...a),
-  declineSignature: (...a: unknown[]) => declineSignature(...a),
+  getSignView: (...a: Parameters<SignApi['getSignView']>) => getSignView(...a),
+  submitSignature: (...a: Parameters<SignApi['submitSignature']>) => submitSignature(...a),
+  declineSignature: (...a: Parameters<SignApi['declineSignature']>) => declineSignature(...a),
 }));
+
+// The decline path asks first (`ui/confirm`); answer yes.
+const confirmSpy = vi.hoisted(() => vi.fn<typeof import('../../../ui/confirm.js')['confirm']>());
+vi.mock('../../../ui/confirm.js', () => ({ confirm: confirmSpy }));
 
 const { PublicBookingPage } = await import('../PublicBookingPage.js');
 const { PublicSignPage } = await import('../PublicSignPage.js');
@@ -35,9 +52,9 @@ const { PublicSignPage } = await import('../PublicSignPage.js');
  *  12:00 in New York and 01:00 (next day) in Tokyo. */
 const SLOT = Date.UTC(2026, 7, 3, 16, 0, 0);
 
-const LINK = {
+const LINK: PublicLinkView = {
   slug: 'intro', title: 'Intro call', description: '', location: '',
-  timezone: 'America/New_York', durations: [30], maxAdvanceDays: 14,
+  timezone: 'America/New_York', durations: [30], minNoticeMin: 0, maxAdvanceDays: 14,
 };
 
 /** Pin the VISITOR's zone. Setting TZ is how the runtime actually reports a
@@ -87,7 +104,8 @@ function withVisitorZone(zone: string): void {
  * `shouldAdvanceTime` because `waitFor` polls on timers and would otherwise hang.
  */
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
+  confirmSpy.mockResolvedValue(true);
   vi.useFakeTimers({ shouldAdvanceTime: true });
   vi.setSystemTime(SLOT - 24 * 60 * 60 * 1000);
 });
@@ -97,7 +115,7 @@ describe('public booking — visitor timezone (B-G1)', () => {
   it('renders slots in the VISITOR’s zone by default and offers the host’s zone', async () => {
     withVisitorZone('Asia/Tokyo');
     getPublicLink.mockResolvedValue(LINK);
-    getPublicSlots.mockResolvedValue({ slots: [SLOT] });
+    getPublicSlots.mockResolvedValue({ slots: [SLOT], timezone: 'America/New_York' });
     render(<PublicBookingPage slug="intro" />);
 
     await screen.findByText('Intro call');
@@ -123,7 +141,7 @@ describe('public booking — visitor timezone (B-G1)', () => {
   it('shows NO switcher when the visitor is already in the host’s zone', async () => {
     withVisitorZone('America/New_York');
     getPublicLink.mockResolvedValue(LINK);
-    getPublicSlots.mockResolvedValue({ slots: [SLOT] });
+    getPublicSlots.mockResolvedValue({ slots: [SLOT], timezone: 'America/New_York' });
     render(<PublicBookingPage slug="intro" />);
     await screen.findByText('Intro call');
     expect(screen.queryByLabelText(/time zone/i)).toBeNull();
@@ -134,7 +152,7 @@ describe('public booking — per-field errors (B-G2)', () => {
   it('names WHICH detail is wrong instead of one combined message', async () => {
     withVisitorZone('America/New_York');
     getPublicLink.mockResolvedValue(LINK);
-    getPublicSlots.mockResolvedValue({ slots: [SLOT] });
+    getPublicSlots.mockResolvedValue({ slots: [SLOT], timezone: 'America/New_York' });
     render(<PublicBookingPage slug="intro" />);
     await screen.findByText('Intro call');
 
@@ -147,12 +165,13 @@ describe('public booking — per-field errors (B-G2)', () => {
     expect(screen.getByText(/enter your name/i)).toBeTruthy();
     // Both controls are individually marked, not just a banner.
     expect((await screen.findByLabelText(/email/i)).getAttribute('aria-invalid')).toBe('true');
+    expect(screen.getByLabelText(/your name/i).getAttribute('aria-invalid')).toBe('true');
     expect(claimSlot).not.toHaveBeenCalled();
   });
 });
 
 describe('public signing — the signer keeps a copy (S-G1)', () => {
-  const VIEW = {
+  const VIEW: SignPublicView = {
     signRequestId: 'sr:1', title: 'Service agreement', status: 'sent', signerId: 'sg:1',
     signerEmail: 'ada@example.test', signerStatus: 'pending', yourTurn: true,
     contentMarkdown: '## Terms\n\nYou agree to the thing.',
@@ -193,6 +212,10 @@ describe('public signing — the signer keeps a copy (S-G1)', () => {
     declineSignature.mockResolvedValue({ status: 'declined' });
     render(<PublicSignPage token="tok" />);
     await screen.findByText('Service agreement');
+    fireEvent.click(screen.getByRole('button', { name: 'Decline' }));
+    await waitFor(() => expect(declineSignature).toHaveBeenCalledWith('tok'));
+    // The page reached the DECLINED outcome — only then is "no link" a claim.
+    expect(await screen.findByText('Declined')).toBeTruthy();
     expect(screen.queryByRole('link', { name: /download a copy/i })).toBeNull();
   });
 });

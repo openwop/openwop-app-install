@@ -3,8 +3,8 @@
  */
 export const messages = {
   button: 'Tâches',
-  openTitle: 'Tableau des tâches',
-  heading: 'Tableau des tâches',
+  openTitle: 'Tableau des exécutions',
+  heading: 'Tableau des exécutions',
   blurb: 'Vos exécutions et le travail qui en est délégué : en attente, en cours, bloqué, délégué, terminé et échoué.',
   empty: 'Aucune tâche pour l’instant. Les exécutions que vous lancez (et le travail délégué) apparaîtront ici.',
   close: 'Fermer',
@@ -16,5 +16,5 @@ export const messages = {
   bucket_failed: 'Échoué',
   delegatedBy: 'Délégué par {{by}}',
   blockedReason: 'En attente : {{reason}}',
-  loadFailed: 'Impossible de charger le tableau des tâches.',
+  loadFailed: 'Impossible de charger le tableau des exécutions.',
 };

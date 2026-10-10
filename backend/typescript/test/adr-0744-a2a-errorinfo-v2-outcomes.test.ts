@@ -19,6 +19,7 @@ import http from 'node:http';
 import { createHash } from 'node:crypto';
 import type { Express } from 'express';
 import { createApp } from '../src/index.js';
+import { toWireRunId } from '../src/host/v2Ids.js';
 import type { Storage } from '../src/storage/storage.js';
 import type { InterruptRecord, RunRecord } from '../src/types.js';
 import { canonicalJSON as tsCanonicalJSON, witnessDigest as tsWitnessDigest } from '../src/host/certificationEvidence.js';
@@ -31,7 +32,7 @@ let server: http.Server;
 let BASE = '';
 let storage: Storage;
 const TOKEN = 'dev-token';
-const A2A_PATH = '/v1/host/openwop-app/a2a';
+const A2A_PATH = '/host/openwop-app/a2a';
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -120,7 +121,9 @@ async function seedSuspendedRun(status: RunRecord['status']): Promise<{ run: Run
   const run: RunRecord = {
     runId: `run-adr0744-${++seq}-${Math.random().toString(36).slice(2)}`,
     workflowId: 'wf-adr0744',
-    tenantId: 'demo',
+    // The caller's own tenant (`dev-token` acts in `default`): a major-2 path
+    // takes the run id tenant-bound, and a foreign segment is id_tenant_mismatch.
+    tenantId: 'default',
     status,
     inputs: {},
     metadata: {},
@@ -149,7 +152,7 @@ describe('ADR 0744 §2 — run-scoped resolve on a terminal run', () => {
     async (status) => {
       const { run } = await seedSuspendedRun(status);
       const res = await rawPost(
-        `/runs/${encodeURIComponent(run.runId)}/interrupts/gate`,
+        `/runs/${encodeURIComponent(toWireRunId(run.runId, run.tenantId))}/interrupts/gate`,
         JSON.stringify({ resumeValue: { answer: 'too-late' } }),
         { authorization: `Bearer ${TOKEN}`, 'openwop-version': '2' },
       );
@@ -173,7 +176,7 @@ describe('ADR 0744 §2 — run-scoped resolve on a terminal run', () => {
       await storage.updateRun(run.runId, { status });
       expect(await storage.getInterruptByNode(run.runId, 'gate'), 'precondition: no OPEN interrupt remains').toBeFalsy();
       const res = await rawPost(
-        `/runs/${encodeURIComponent(run.runId)}/interrupts/gate`,
+        `/runs/${encodeURIComponent(toWireRunId(run.runId, run.tenantId))}/interrupts/gate`,
         JSON.stringify({ resumeValue: { answer: 'again' } }),
         { authorization: `Bearer ${TOKEN}`, 'openwop-version': '2' },
       );
@@ -187,23 +190,15 @@ describe('ADR 0744 §2 — run-scoped resolve on a terminal run', () => {
     await storage.resolveInterrupt(interrupt.interruptId, { answer: 'yes' }, new Date().toISOString());
     await storage.updateRun(run.runId, { status: 'running' });
     const res = await rawPost(
-      `/runs/${encodeURIComponent(run.runId)}/interrupts/gate`,
+      `/runs/${encodeURIComponent(toWireRunId(run.runId, run.tenantId))}/interrupts/gate`,
       JSON.stringify({ resumeValue: { answer: 'again' } }),
       { authorization: `Bearer ${TOKEN}`, 'openwop-version': '2' },
     );
     expect(res.status, JSON.stringify(res.body)).toBe(404);
   });
 
-  it('major 1 keeps the 410 interrupt_gone it always answered on a cancelled run', async () => {
-    const { run } = await seedSuspendedRun('cancelled');
-    const res = await rawPost(
-      `/v1/runs/${encodeURIComponent(run.runId)}/interrupts/gate`,
-      JSON.stringify({ resumeValue: { answer: 'too-late' } }),
-      { authorization: `Bearer ${TOKEN}` },
-    );
-    expect(res.status).toBe(410);
-    expect(res.body['error']).toBe('interrupt_gone');
-  });
+  // ADR 0812 P3c-0: the "major 1 keeps the 410 interrupt_gone" control leg was
+  // deleted with major 1 itself; the major-2 409 legs above are what remains.
 });
 
 describe('ADR 0744 §3 — witness digest: code-unit order + relaxations, in both verifier copies', () => {

@@ -13,12 +13,19 @@
  * "always show the error" and stay green.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor, cleanup } from '@testing-library/react';
+import { render as rtlRender, screen, waitFor, cleanup } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
+import type { ReactElement } from 'react';
+// ADR 0786 — the page reads `?checkout=` now, so it renders inside a router.
+const render = (ui: ReactElement) => rtlRender(<MemoryRouter>{ui}</MemoryRouter>);
 
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
-vi.mock('../billingClient.js', () => ({
+vi.mock('../billingClient.js', async (orig) => ({
+  ...(await orig<Record<string, unknown>>()),
   getSubscription: vi.fn(), getBalance: vi.fn(), openPortal: vi.fn(),
   getEntitlements: vi.fn(), startCheckout: vi.fn(),
+  // ADR 0821 — the admin-only credit meter (pinned in BillingPage.aiCredits.test.tsx).
+  getAiCredits: vi.fn(async () => ({ freeDaily: null, monthly: null, balanceCredits: 0, windowDays: 30, topFeatures: [], otherCredits: 0 })),
 }));
 vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
   useFeatureAccess: () => makeFeatureAccess({ enabled: true, loading: false }),
@@ -27,6 +34,8 @@ vi.mock('../../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: vi.fn
 
 import { BillingPage } from '../BillingPage.js';
 import { getSubscription, getBalance } from '../billingClient.js';
+// ADR 0820 §7 — the "Your data" panel's read (its own tests: dataExport.test.tsx).
+vi.mock('../dataExportClient.js', () => ({ listExportableFeatures: vi.fn(async () => []), downloadFeatureExport: vi.fn() }));
 
 const mSub = vi.mocked(getSubscription);
 const mBal = vi.mocked(getBalance);
@@ -52,9 +61,11 @@ describe('BillingPage — a failed read makes no money claim', () => {
     // The two claims that used to be fabricated — checked FIRST:
     expect(screen.queryByText(/^Free$/)).toBeNull();
     expect(screen.queryByText('0')).toBeNull();
-    // Then that we say what happened, and surface the server's reason.
+    // Then that we say what happened — as a LOCALIZED classification. ADR 0786 /
+    // grade-ux BILLUX-9: this used to append the raw transport text (English in
+    // every locale, e.g. "subscription returned 500") after a translated sentence.
     expect(screen.getByText(/Could not load your plan or balance/i)).toBeTruthy();
-    expect(screen.getByText(/billing upstream 503/)).toBeTruthy();
+    expect(screen.queryByText(/billing upstream 503/)).toBeNull();
   });
 
   it('renders the real plan and balance when the read SUCCEEDS', async () => {

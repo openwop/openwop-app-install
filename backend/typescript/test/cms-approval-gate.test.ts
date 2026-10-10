@@ -16,7 +16,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
-import { getApproval, reopenApproval } from '../src/host/approvalService.js';
+import { createContentApproval, getApproval } from '../src/host/approvalService.js';
 import { AUDIT_KIND_GOVERNANCE_DECISION, listChain } from '../src/host/auditChainService.js';
 
 let BASE: string;
@@ -55,7 +55,7 @@ function client(): Client {
 
 let n = 0;
 async function signup(c: Client, tenantId: string): Promise<{ userId: string }> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `appr-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await c.post('/host/openwop-app/test/login', { email: `appr-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
@@ -65,14 +65,14 @@ async function ownerWithMember(role: string): Promise<{ owner: Client; member: C
   await signup(owner, tenantId);
   const member = client();
   const memberUser = await signup(member, tenantId);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   const orgId = org.body.orgId;
-  const add = await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: [role] });
+  const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: [role] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
   return { owner, member, orgId, tenantId };
 }
-const u = (orgId: string, s = ''): string => `/v1/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${s}`;
+const u = (orgId: string, s = ''): string => `/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${s}`;
 
 async function draft(owner: Client, orgId: string, title = 'Home'): Promise<string> {
   const r = await owner.post(u(orgId, '/pages'), { title, sections: [{ type: 'hero', data: { heading: 'Hi' } }] });
@@ -80,7 +80,7 @@ async function draft(owner: Client, orgId: string, title = 'Home'): Promise<stri
   return r.body.pageId as string;
 }
 async function pendingFor(c: Client, pageId: string): Promise<any> {
-  const list = await c.get('/v1/host/openwop-app/approvals?status=pending');
+  const list = await c.get('/host/openwop-app/approvals?status=pending');
   expect(list.status).toBe(200);
   return (list.body.items as any[]).find((a) => a.kind === 'content-publish' && a.pageId === pageId);
 }
@@ -127,7 +127,7 @@ describe('cms editorial approval — ONE decision path (submit always queues)', 
     const pageId = await draft(owner, orgId);
     await owner.post(u(orgId, `/pages/${pageId}/submit`));
     const appr = await pendingFor(owner, pageId);
-    const claim = await owner.post(`/v1/host/openwop-app/approvals/${appr.approvalId}/claim`);
+    const claim = await owner.post(`/host/openwop-app/approvals/${appr.approvalId}/claim`);
     expect(claim.status, JSON.stringify(claim.body)).toBe(200);
     expect(claim.body.status).toBe('approved');
     expect(await status(owner, orgId, pageId)).toBe('published');
@@ -150,7 +150,7 @@ describe('cms editorial approval — ONE decision path (submit always queues)', 
     const pageId = await draft(owner, orgId);
     await owner.post(u(orgId, `/pages/${pageId}/submit`));
     await owner.post(u(orgId, `/pages/${pageId}/submit`)); // re-submit 409s, no 2nd approval
-    const list = await owner.get('/v1/host/openwop-app/approvals?status=pending');
+    const list = await owner.get('/host/openwop-app/approvals?status=pending');
     const mine = (list.body.items as any[]).filter((a) => a.kind === 'content-publish' && a.pageId === pageId);
     expect(mine.length).toBe(1);
   });
@@ -169,7 +169,7 @@ describe('cms editorial approval — ONE decision path (submit always queues)', 
     const denied = await member.post(u(orgId, `/pages/${pageId}/approve`));
     expect(denied.status).toBe(403);
     // …and even with the id, the editor cannot decide it via the inbox.
-    const claim = await member.post(`/v1/host/openwop-app/approvals/${appr.approvalId}/claim`);
+    const claim = await member.post(`/host/openwop-app/approvals/${appr.approvalId}/claim`);
     expect(claim.status).toBe(403);
     expect(await status(owner, orgId, pageId)).toBe('in_review');
   });
@@ -224,10 +224,16 @@ describe('cms editorial approval — ONE decision path (submit always queues)', 
     // sitting there rejecting every click.
     expect(await pendingFor(owner, pageId)).toBeUndefined();
 
-    // …and a decide attempt against the now-resolved row is a clean, terminal
-    // refusal (the pre-existing already-resolved 409), not a 404-and-reopen.
-    const claim = await owner.post(`/v1/host/openwop-app/approvals/${appr.approvalId}/claim`);
-    expect(claim.status, JSON.stringify(claim.body)).toBe(409);
+    // …and a decide attempt is a clean, terminal refusal, never a reopen.
+    //
+    // ADR 0859 D6 — CORRECTED: this was the already-resolved 409. The delete now also
+    // removes the page's resolved review rows (pruning keeps the newest one per page so
+    // the author can read it, and a deleted page has no author left to read it — the
+    // closure itself is on the governance chain). So the row is GONE: the claim is a
+    // 404 and nothing comes back to life.
+    const claim = await owner.post(`/host/openwop-app/approvals/${appr.approvalId}/claim`);
+    expect(claim.status, JSON.stringify(claim.body)).toBe(404);
+    expect(await getApproval(appr.approvalId)).toBeNull();
     expect(await pendingFor(owner, pageId)).toBeUndefined();
   });
 
@@ -244,12 +250,17 @@ describe('cms editorial approval — ONE decision path (submit always queues)', 
     // Simulate a producer whose cascade failed: drop the page WITHOUT the
     // cascade (the raw service delete the route wraps is what carries it, so we
     // re-create the stranded shape by re-opening the row after the delete).
+    //
+    // ADR 0859 D6 — CORRECTED: the delete now removes the page's resolved rows, so
+    // there is nothing left to reopen. The stranded shape is re-created as the row a
+    // failed cascade leaves behind: a PENDING review for a page that no longer exists.
     expect((await owner.del(u(orgId, `/pages/${pageId}`))).status).toBe(204);
-    await reopenApproval(appr.approvalId);
+    const stranded = await createContentApproval({ tenantId, orgId, pageId, pageTitle: 'Stranded', pageVersion: 1, proposal: 'Publish' });
+    appr.approvalId = stranded.approvalId;
     expect((await getApproval(appr.approvalId))?.status).toBe('pending');
 
     const before = await governanceEntryCount(tenantId);
-    const first = await owner.post(`/v1/host/openwop-app/approvals/${appr.approvalId}/claim`);
+    const first = await owner.post(`/host/openwop-app/approvals/${appr.approvalId}/claim`);
     expect(first.status, JSON.stringify(first.body)).toBe(409);
     expect(first.body?.details?.reason).toBe('review_closed');
     const closed = await getApproval(appr.approvalId);
@@ -263,8 +274,8 @@ describe('cms editorial approval — ONE decision path (submit always queues)', 
     const afterFirst = await governanceEntryCount(tenantId);
     expect(afterFirst).toBe(before + 1);
     for (let i = 0; i < 3; i += 1) {
-      expect((await owner.post(`/v1/host/openwop-app/approvals/${appr.approvalId}/claim`)).status).toBe(409);
-      expect((await owner.post(`/v1/host/openwop-app/approvals/${appr.approvalId}/reject`)).status).toBe(409);
+      expect((await owner.post(`/host/openwop-app/approvals/${appr.approvalId}/claim`)).status).toBe(409);
+      expect((await owner.post(`/host/openwop-app/approvals/${appr.approvalId}/reject`)).status).toBe(409);
     }
     expect(await governanceEntryCount(tenantId)).toBe(afterFirst);
   });

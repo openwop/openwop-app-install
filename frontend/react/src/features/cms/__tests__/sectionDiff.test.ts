@@ -59,4 +59,14 @@ describe('diffSections', () => {
     expect(fields[0]!.from).toContain('"A"');
     expect(fields[0]!.to).toContain('"B"');
   });
+
+  it('pairByPosition pairs re-minted ids in order by type, and leaves real additions alone', () => {
+    const version = [hero('sec:new1', 'Seeded hi'), hero('sec:new2', 'Second')];
+    const draft = [hero('sec:a', 'Hi'), hero('sec:b', 'Second'), hero('sec:c', 'Mine')];
+    const out = diffSections(version, draft, { pairByPosition: true });
+    expect(out).toEqual([
+      { sectionId: 'sec:new1', type: 'hero', kind: 'changed', fields: [{ key: 'heading', from: 'Seeded hi', to: 'Hi' }], toSectionId: 'sec:a' },
+      { sectionId: 'sec:c', type: 'hero', kind: 'added', fields: [] },
+    ]);
+  });
 });

@@ -42,6 +42,7 @@ default in `src/brand/defaults.ts`.
 | `VITE_BRAND_LOGO_SRC` | `/OpenWOP.svg` | Deprecated alias for `VITE_BRAND_MARK_SRC` (kept so existing forks keep working) |
 | `VITE_BRAND_FAVICON_SRC` | *(inline SVG)* | Favicon — a URL or `data:` URI |
 | `VITE_BRAND_DOCUMENT_TITLE` | `workflow-engine — OpenWOP Reference UI` | Browser tab `<title>` |
+| `VITE_BRAND_DESCRIPTION` | *(OpenWOP reference-app sentence)* | Shell `<meta name="description">` — search results and link previews before a page applies its own SEO |
 | `VITE_BRAND_FONTS_HREF` | *(Google Fonts triple)* | Web-font stylesheet `<link href>` |
 | `VITE_BRAND_PRIMARY_DOMAIN` | `app.openwop.dev` | Domain shown in the privacy disclosure |
 | `VITE_BRAND_INSTANCE_NAME` | `OpenWOP` | Workspace / instance name shown in the sidebar chrome |
@@ -131,6 +132,7 @@ it. A forgotten field ships OpenWOP branding silently — so run the guard below
 | **Favicon** | `VITE_BRAND_FAVICON_SRC` (commonly missed → ships the OpenWOP "O") |
 | PWA manifest + mobile `theme-color` | `VITE_BRAND_THEME_COLOR` (the `manifest.webmanifest` is auto-stamped at build from product name + icon mark + this color — no hand-authored manifest) |
 | Document `<title>` | `VITE_BRAND_DOCUMENT_TITLE` |
+| **Shell meta description** | `VITE_BRAND_DESCRIPTION` (commonly missed → search results describe the OpenWOP reference app) |
 | Tagline / footer / assistant name | `VITE_BRAND_TAGLINE`, `VITE_BRAND_FOOTER_TEXT`, `VITE_BRAND_ASSISTANT_NAME` |
 | Domain / home / repo links | `VITE_BRAND_PRIMARY_DOMAIN`, `VITE_BRAND_HOME_URL`, `VITE_BRAND_REPO_URL` |
 | Fonts | `VITE_BRAND_FONTS_HREF` |
@@ -230,6 +232,7 @@ in data files, and the runtime fallbacks are brand-neutral. Configure via env
 | `OPENWOP_DEMO_SEED_ENABLED` | `true` (OFF by default under `OPENWOP_DEPLOY_POSTURE=auth` — opt-in, DUR-3/ADR 0195) | Whether explicit, user-triggered seeding (the `/example-data` dashboard + "Load example data" actions) is available at all. Set `false` to remove the capability entirely; set `true` to enable it in the `auth` posture. Independent of `OPENWOP_DEMO_MODE`. |
 | `OPENWOP_DEPLOY_POSTURE` | `cookie-per-visitor` | Backend auth posture: `bearer-shared`, `cookie-per-visitor`, or `auth` |
 | `OPENWOP_MANAGED_ANON_SIGNIN_REQUIRED` | *(derived)* | Optional override for the managed free-tier sign-in wall (`true`/`false`); demo postures allow anon by default, `auth` requires sign-in |
+| `OPENWOP_MANAGED_DAILY_TOKEN_CAP` | `150000` | The FREE managed-tier allowance per member per day (input + output), spent before plan credits and paid balance (ADR 0821). The default fits one Pair Canvas first draft (64–140k tokens, measured); it was `50000`, smaller than one draft (ADR 0773 G-10e). **If you sell AI credits, this is what each member gets free every day** — lower it to taste. On cookie-per-visitor deploys it is per visitor, so pair it with the global cap below |
 | `OPENWOP_MANAGED_GLOBAL_DAILY_TOKEN_CAP` | *(unset = off)* | Operator spend backstop: total managed-tier tokens per day across ALL tenants. **Set this on any login-free public demo** — the per-tenant cap alone is evadable on cookie-per-visitor deploys (every fresh cookie jar is a fresh anon tenant) |
 | `OPENWOP_SESSION_COOKIE_NAME` | `__session` | Session cookie name (already un-branded; Firebase Hosting requires `__session`) |
 | `OPENWOP_VAPID_SUBJECT` | `mailto:admin@openwop.dev` | Web-push contact (RFC 8030) |
@@ -266,7 +269,7 @@ are role-governed. See `docs/adr/0015-workspace-as-tenant-b2b.md`.
 
 The example seed runs through `seedEverything(tenant)` and currently covers the
 registered stock domains: user-agent inventory, roster, boards, cards,
-schedules, and org chart. The persona content (Sally, Marcus, …), boards, cards,
+schedules, and org chart. The persona content (the ten example personas — Ava, Felix, … Iris, Ezra), boards, cards,
 schedules, and org-chart positions live in
 **`backend/typescript/src/host/seed-data/exampleAgents.json`** — the
 brand-authoring surface. Edit that JSON to ship your own example content (it's
@@ -301,6 +304,23 @@ ships **Nora** in
 Because the managed system-prompt fallback is now brand-neutral, the reference
 deployment should set `OPENWOP_MANAGED_SYSTEM_PROMPT` to retain its OpenWOP
 grounding blurb (incremental env update, no rebuild needed).
+
+### Video sections and the media origin (ADR 0843)
+
+A CMS **Video** section plays a film you host yourself: the editor takes an
+`https://` URL for the `.mp4`, the poster and (optionally) an English `.vtt`
+captions file, and nothing downloads until a visitor presses play. The
+browser's Content-Security-Policy decides which origins those files may come
+from. The shipped `firebase.json` allows `media-src` and `img-src` from
+`'self'` and `https://openwop.dev` only, so a film hosted elsewhere is blocked
+until you add **your** media origin to both directives in your own
+`firebase.json` (for example `media-src 'self' data: blob: https://media.example.com`).
+Add only the origins you serve from; never widen it to `https:`. A cross-origin
+captions file also needs your media host to send `Access-Control-Allow-Origin`
+for it (the player reads it with `crossorigin="anonymous"`).
+
+The seeded **White label** page (`/p/white-label`, two openwop.dev films) is
+created only when `OPENWOP_DEMO_MODE=true`, so a clean install never shows it.
 
 ---
 

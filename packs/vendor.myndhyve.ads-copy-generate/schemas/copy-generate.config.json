@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.ads-copy-generate/1.0.0/copy-generate.config.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.ads-copy-generate/1.0.2/copy-generate.config.json",
   "title": "AdsCopyGenerateConfig",
   "type": "object",
   "properties": {

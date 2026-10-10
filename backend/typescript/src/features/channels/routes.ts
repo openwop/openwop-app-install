@@ -7,7 +7,7 @@ import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { tenantOf } from '../featureRoute.js';
 import { OpenwopError } from '../../types.js';
 import { encodeMessageCursor, decodeMessageCursor, MAX_MESSAGE_PAGE } from '../../host/messageCursor.js';
-import { addChannelAgent, addChannelMember, archiveChannel, assertChannelAccess, channelRoster, createChannel, getChannel, isChannelOwner, joinChannel, leaveChannel, listChannelsForViewer, listChannelMessages, postChannelMessage, removeChannelAgent, removeChannelMember, renameChannel, setChannelDescription, setChannelAgentPolicy, resolveChannelCatchup } from './channelService.js';
+import { addChannelAgent, addChannelMember, archiveChannel, assertChannelAccess, channelRoster, createChannel, getChannel, isChannelOwner, joinChannel, leaveChannel, listChannelsForViewer, listChannelMessages, postChannelMessage, removeChannelAgent, removeChannelMember, renameChannel, setChannelDescription, setChannelAgentPolicy, setChannelProject, resolveChannelCatchup } from './channelService.js';
 import { startWorkflowRun } from '../../host/runStarter.js';
 import { CHANNEL_TURN_WORKFLOW_ID, CHANNEL_MANAGED_CREDENTIAL_REF } from './channelTurnWorkflow.js';
 import { resolveSubjectDisplays } from '../../host/subjectDisplay.js';
@@ -22,7 +22,7 @@ import { createLogger } from '../../observability/logger.js';
 
 const log = createLogger('features.channels');
 
-const BASE = '/v1/host/openwop-app/channels';
+const BASE = '/host/openwop-app/channels';
 
 /** Resolve the ONE caller identity used consistently for the owner stamp, management
  *  authz, and access. `req.userId` is set only on the cookie/OIDC paths, so an API-key
@@ -105,6 +105,17 @@ export function registerChannelRoutes(deps: RouteDeps): void {
         channel = await setChannelDescription(tenantOf(req), req.params.channelId, caller(req), b.description);
       }
       res.json({ channel });
+    } catch (err) { next(err); }
+  });
+  // ADR 0852 D5 — bind / unbind a project (owner, with write on the project).
+  app.put(`${BASE}/:channelId/project`, async (req, res, next) => {
+    try {
+      await gate(req);
+      const raw = (req.body ?? {}) as { projectId?: unknown };
+      if (raw.projectId !== null && (typeof raw.projectId !== 'string' || raw.projectId.trim().length === 0)) {
+        throw new OpenwopError('validation_error', '`projectId` must be a project id, or null to unbind.', 400, { field: 'projectId' });
+      }
+      res.json({ channel: await setChannelProject(tenantOf(req), req.params.channelId, caller(req), raw.projectId === null ? null : raw.projectId.trim()) });
     } catch (err) { next(err); }
   });
   app.post(`${BASE}/:channelId/archive`, async (req, res, next) => {

@@ -29,6 +29,7 @@ import {
   recoverCardForTerminalRun,
   reconcileStrandedCards,
   cardPointerFromRunMetadata,
+  PICK_CLAIM_GRACE_MS,
 } from '../src/host/cardRunRecovery.js';
 import { _resetRunLifecycle } from '../src/executor/runLifecycle.js';
 import { initHostExtPersistence, __resetHostExtPersistence } from '../src/host/hostExtPersistence.js';
@@ -61,10 +62,14 @@ async function seedRun(
 /** A card already picked: sitting in Working, stamped with its run. */
 async function pickedCard(runId: string, title = 'do the thing'): Promise<string> {
   const card = await createCard({ boardId: board.id, columnId: 'todo', title });
-  await setCardLastRun(card.id, runId);
+  // ADR 0774 D3 — what both loop pick paths now write: the run id AND the
+  // `running` status, which is the proof reconcile requires before restoring.
+  await setCardLastRun(card.id, runId, 'running');
   await moveCard(card.id, 'working');
   return card.id;
 }
+
+const PAST_GRACE = (): number => Date.now() + PICK_CLAIM_GRACE_MS + 1_000;
 
 const heartbeatMeta = (cardId: string) => ({ heartbeat: { boardId: board.id, cardId, source: 'heartbeat' } });
 const approvalMeta = (cardId: string) => ({ approval: { boardId: board.id, cardId, source: 'approval' } });
@@ -212,7 +217,10 @@ describe('ADR 0535 D1a — lazy reconciliation backstop', () => {
     // the card rejoins the queue without jumping ahead of healthy work.
     const cardId = await pickedCard('run-vanished');
 
-    expect(await reconcileStrandedCards(storage, board, [(await getCard(cardId))!])).toBe(1);
+    // ADR 0774 D2 — never inside the claim's grace window (the row may simply
+    // not be written yet); past it, the ADR 0535 restore stands.
+    expect(await reconcileStrandedCards(storage, board, [(await getCard(cardId))!])).toBe(0);
+    expect(await reconcileStrandedCards(storage, board, [(await getCard(cardId))!], PAST_GRACE())).toBe(1);
     const card = await getCard(cardId);
     expect(card?.columnId, 'losing work silently is worse than redoing it').toBe('todo');
     expect(card?.blockerNote).toContain('outcome is unknown');
@@ -221,9 +229,9 @@ describe('ADR 0535 D1a — lazy reconciliation backstop', () => {
 
   it('an unknown-outcome restore is idempotent across passes', async () => {
     const cardId = await pickedCard('run-vanished-2');
-    expect(await reconcileStrandedCards(storage, board, [(await getCard(cardId))!])).toBe(1);
+    expect(await reconcileStrandedCards(storage, board, [(await getCard(cardId))!], PAST_GRACE())).toBe(1);
     // Second pass: the card is no longer in Working, so nothing more happens.
-    expect(await reconcileStrandedCards(storage, board, [(await getCard(cardId))!])).toBe(0);
+    expect(await reconcileStrandedCards(storage, board, [(await getCard(cardId))!], PAST_GRACE())).toBe(0);
   });
 });
 

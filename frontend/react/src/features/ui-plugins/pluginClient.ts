@@ -22,6 +22,12 @@ export interface ServedPlugin {
   /** RFC 0130 — canvas-preview plugins: the canvas type id(s) they render. */
   canvasTypes?: string[];
   entryPath: string;
+  /** ADR 0840 (RFC 0238 §B) — the frame document the loader mounts by `src`. The
+   *  host returns it; the FE never builds a plugin path itself. */
+  framePath: string;
+  /** ADR 0840 (RFC 0238 §C) — this plugin's own ui-plugin/1 dispatch, where the
+   *  host enforces the plugin's declared hostApi as well as its own. */
+  rpcPath: string;
   /** ADR 0367 — the honest trust label: 'trusted' only when the kill-switch
    *  toggle is on AND the pinned-key verification (manifest + module bytes)
    *  passes on the host right now; otherwise 'community' (sandbox lane). */
@@ -71,9 +77,14 @@ export async function ensureDemoArtifact(): Promise<{ artifactId: string; versio
   return asJson<{ artifactId: string; version: string }>(res, 'ensureDemoArtifact');
 }
 
-/** The absolute URL the sandboxed loader fetches a plugin's entry bytes from. */
-export function entryUrl(plugin: ServedPlugin): string {
-  return `${config.baseUrl}${plugin.entryPath}`;
+/** ADR 0840 — the absolute URL the sandboxed iframe loads (`src`). */
+export function frameUrl(plugin: ServedPlugin): string {
+  return `${config.baseUrl}${plugin.framePath}`;
+}
+
+/** ADR 0493 / ADR 0840 — the isolation self-test's probe, delivered like a plugin frame. */
+export function isolationProbeUrl(): string {
+  return `${base}/isolation-probe`;
 }
 
 /** The absolute URL the T1 main-frame loader dynamic-imports (ADR 0367). Null
@@ -83,12 +94,13 @@ export function trustedEntryUrl(plugin: ServedPlugin): string | null {
   return plugin.tier === 'trusted' && plugin.trustedEntryPath ? `${config.baseUrl}${plugin.trustedEntryPath}` : null;
 }
 
-/** Forward a ui-plugin/1 request envelope to the canonical host RPC seam
- *  (`POST …/ui-plugin/rpc`). Returns the host's response envelope. The seam
- *  enforces the closed allowlist + tenant isolation + canvas concurrency — the FE
- *  loader is a thin, isolation-preserving bridge, never a second dispatcher. */
-export async function callHostRpc(message: unknown): Promise<unknown> {
-  const res = await fetch(`${base}/rpc`, fetchOpts({
+/** Forward a ui-plugin/1 request envelope to the plugin's own RFC 0238 dispatch
+ *  (`POST /host/ui-plugins/{pack}/{plugin}/rpc`). Returns the host's response
+ *  envelope. The host enforces BOTH allowlist halves (the plugin's declared
+ *  hostApi and its own), tenant isolation and canvas concurrency: the FE loader is
+ *  a thin, isolation-preserving bridge, never a second dispatcher (ADR 0840). */
+export async function callHostRpc(plugin: Pick<ServedPlugin, 'rpcPath'>, message: unknown): Promise<unknown> {
+  const res = await fetch(`${config.baseUrl}${plugin.rpcPath}`, fetchOpts({
     method: 'POST',
     headers: authedHeaders({ 'content-type': 'application/json' }),
     body: JSON.stringify({ message }),

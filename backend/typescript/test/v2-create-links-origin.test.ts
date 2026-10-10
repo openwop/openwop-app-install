@@ -42,12 +42,9 @@ describe('create-response links are same-origin and keep the scheme', () => {
     expect(r.eventsUrl).toBe(`https://app.example.test/runs/${projectBoundId(r.runId)}/events`);
     expect(r.statusUrl).toBe(`https://app.example.test/runs/${projectBoundId(r.runId)}`);
   });
-  it('2. behind a proxy, under 1.x: https://<forwarded host>/v1/runs/<id>/events', async () => {
-    const r = await create('/v1/runs', FWD);
-    expect(r.eventsUrl).toBe(`https://app.example.test/v1/runs/${r.runId}/events`);
-  });
+  // ADR 0812 P3c-0 — leg 2 (the 1.x `/v1/runs/<id>/events` spelling) was deleted with major 1.
   it('3. with no proxy, the request\'s own origin (never some other host)', async () => {
-    const r = await create('/v1/runs', {});
-    expect(r.eventsUrl).toBe(`${base}/v1/runs/${r.runId}/events`);
+    const r = await create('/runs', { 'OpenWOP-Version': '2' });
+    expect(r.eventsUrl).toBe(`${base}/runs/${projectBoundId(r.runId)}/events`);
   });
 });

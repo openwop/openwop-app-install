@@ -12,7 +12,10 @@ import { describe, expect, it } from 'vitest';
 import { fromWireRunId, fromWireTenant, projectV2RunIds, toWireRunId, toWireTenant, V2_TENANT_FIELD_KEYS, V2_TENANT_ID } from '../src/host/v2Ids.js';
 
 const PERSONAL = 'user:0123456789abcdef0123456789abcdef';
-const WIRE_PERSONAL = 'user~3A0123456789abcdef0123456789abcdef';
+// CORRECTED by ADR 0814: ADR 0726's `user~3A…` minted `~`, which identity.md §5
+// forbids. The wire tenant is now the grammar-clean `u-…`. The old spelling is
+// still ACCEPTED on input (pinned in adr0814-wire-tenant.test.ts).
+const WIRE_PERSONAL = 'u-0123456789abcdef0123456789abcdef';
 const OPAQUE = 'c99ec4da-bd97-4057-a58c-bc7bc27491f7';
 
 describe('ADR 0726 — tenant segment codec', () => {
@@ -23,8 +26,8 @@ describe('ADR 0726 — tenant segment codec', () => {
     expect(V2_TENANT_ID.test(WIRE_PERSONAL), 'the projected form IS inside the corpus grammar').toBe(true);
     expect(fromWireTenant(WIRE_PERSONAL)).toBe(PERSONAL);
     expect(fromWireTenant('default')).toBe('default');
-    expect(toWireTenant('anon:abc'), 'ADR 0704: an anon tenant is never projected, so its runs stay bare as decided').toBe('anon:abc');
-    expect(toWireRunId(OPAQUE, 'anon:abc'), 'ADR 0704 holds').toBe(OPAQUE);
+    expect(toWireTenant('anon:abc'), 'ADR 0760: an anon tenant is inside the corpus grammar, so it passes through raw (and its runs bind)').toBe('anon:abc');
+    expect(toWireRunId(OPAQUE, 'anon:abc'), 'ADR 0760: anonymous runs bind').toBe(`anon:abc/${OPAQUE}`);
   });
 
   it('toWireRunId BINDS under a personal tenant (it used to return the id bare — a silent fail-open)', () => {

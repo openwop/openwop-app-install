@@ -47,16 +47,16 @@ describe('dealers P3 — governed surface write + reads', () => {
   it('approveRegistration requires the run owner host:dealers:manage; system run denied', async () => {
     const tenantId = `org:dsurf-${Date.now()}-${n++}`;
     const owner = client();
-    const ownerId = (await owner.post('/v1/host/openwop-app/test/login', { email: `o-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId;
+    const ownerId = (await owner.post('/host/openwop-app/test/login', { email: `o-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId;
     const editor = client();
-    const editorId = (await editor.post('/v1/host/openwop-app/test/login', { email: `e-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId;
-    const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
-    await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'E', subject: editorId, roles: ['editor'] });
-    const B = `/v1/host/openwop-app/dealers/orgs/${encodeURIComponent(orgId)}`;
-    const companyId = (await owner.post(`/v1/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}/companies`, { name: 'DCo' })).body.companyId;
+    const editorId = (await editor.post('/host/openwop-app/test/login', { email: `e-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId;
+    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
+    await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'E', subject: editorId, roles: ['editor'] });
+    const B = `/host/openwop-app/dealers/orgs/${encodeURIComponent(orgId)}`;
+    const companyId = (await owner.post(`/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}/companies`, { name: 'DCo' })).body.companyId;
     const dealerId = (await owner.post(`${B}/dealers`, { name: 'D', companyId })).body.dealerId;
     const token = (await owner.post(`${B}/dealers/${dealerId}/portal-token`)).body.token;
-    await client(false).post(`/v1/host/openwop-app/partner/${token}/register`, { dealTitle: 'X', companyName: 'Y' });
+    await client(false).post(`/host/openwop-app/partner/${token}/register`, { dealTitle: 'X', companyName: 'Y' });
     const regId = (await owner.get(`${B}/registrations`)).body.registrations[0].regId;
 
     const surfaceFor = (actingUserId?: string) => buildDealerSurface({ tenantId, ...(actingUserId ? { actingUserId } : {}), runId: `run-${n++}` });
@@ -72,7 +72,7 @@ describe('dealers P3 — governed surface write + reads', () => {
 
 const REPO_ROOT = join(__dirname, '..', '..', '..');
 const NODES_DIR = join(REPO_ROOT, 'packs', 'feature.dealers.nodes');
-const AGENTS_DIR = join(REPO_ROOT, 'packs', 'feature.dealers.agents');
+const AGENTS_DIR = join(REPO_ROOT, 'packs', 'vendor.openwop-app.dealers.agents');
 interface NodesManifest { name: string; nodes: Array<{ typeId: string; role: string; capabilities: string[] }>; runtime: { entry: string } }
 interface AgentsManifest { agents: Array<{ toolAllowlist: string[] }> }
 
@@ -90,7 +90,7 @@ describe('feature.dealers.nodes pack', () => {
   });
 });
 
-describe('feature.dealers.agents pack', () => {
+describe('vendor.openwop-app.dealers.agents pack', () => {
   const manifest = JSON.parse(readFileSync(join(AGENTS_DIR, 'pack.json'), 'utf8')) as AgentsManifest;
   it('the advisory Channel Manager is allowlisted to READS only', () => {
     const allow = manifest.agents[0].toolAllowlist;

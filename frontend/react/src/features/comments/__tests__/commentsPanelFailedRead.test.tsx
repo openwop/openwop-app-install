@@ -8,9 +8,16 @@
  * "No comments yet — Be the first to leave a note" card, with the composer live.
  * On all four mount sites. Here it is tested UNSTUBBED, with BOTH arms
  * everywhere — a one-armed suite lets the fix rot into "always show the error".
+ *
+ * SABOTAGE (witnessed, /grade-tests wave 10): rendering a failed read as an empty
+ * thread, leaving the composer live, dropping the failure card's `announce`, dropping
+ * `keepList` on a write refresh, the post/delete announcements, per-row busy, the 409
+ * copy, the directory-name lookup or its failure notice, the agent label, either
+ * textarea's `maxLength` or counter threshold, or the failed-post toast — each reds
+ * its case here.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, cleanup, screen, waitFor, fireEvent } from '@testing-library/react';
+import { render, cleanup, screen, waitFor, fireEvent, act } from '@testing-library/react';
 
 const api = vi.hoisted(() => ({ listThread: vi.fn(), postComment: vi.fn(), updateComment: vi.fn(), deleteComment: vi.fn() }));
 vi.mock('../commentsClient.js', async (importOriginal) => {
@@ -20,8 +27,8 @@ vi.mock('../commentsClient.js', async (importOriginal) => {
 // ADR 0659 D7 (`CMNT-UX-20`) — the panel resolves the caller's org-scoped write
 // access. Mocked here so these cases stay about the read/write lanes they are
 // named for: the default is a member who CAN write, which is what the
-// assertions below assume. `commentsPanelAccess.test.tsx` drives the other arms.
-const orgAccess = vi.hoisted(() => ({ value: { roles: ['editor'], scopes: ['workspace:read', 'workspace:write'], basis: 'member' } as unknown }));
+// assertions below assume. `commentsPanelGoneAndAccess.test.tsx` § CMNT-UX-20 drives the other arms.
+const orgAccess = vi.hoisted(() => ({ value: ((): EffectiveAccess | null => ({ roles: ['editor'], scopes: ['workspace:read', 'workspace:write'], basis: 'member' }))() }));
 vi.mock('../../../client/useEffectiveAccess.js', async (importOriginal) => {
   const orig = await importOriginal<Record<string, unknown>>();
   return { ...orig, useOrgEffectiveAccess: () => orgAccess.value };
@@ -37,10 +44,11 @@ const members = vi.hoisted(() => ({ loadOrgMembers: vi.fn() }));
 vi.mock('../../../orgs/orgMembers.js', () => ({ loadOrgMembers: members.loadOrgMembers, invalidateOrgMembers: vi.fn() }));
 
 import { CommentsPanel } from '../CommentsPanel.js';
-import { CommentsHttpError } from '../commentsClient.js';
-import { currentAnnouncements } from '../../../ui/announce.js';
+import { CommentsHttpError, type Comment } from '../commentsClient.js';
+import type { EffectiveAccess } from '../../../client/accessClient.js';
+import { announce, currentAnnouncements } from '../../../ui/announce.js';
 
-const comment = (id: string, body: string, over: Record<string, unknown> = {}) => ({
+const comment = (id: string, body: string, over: Partial<Comment> = {}): Comment => ({
   commentId: id, orgId: 'org_1', resourceType: 'cms_page', resourceId: 'p1',
   body, authorId: 'user_a', status: 'open', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
   ...over,
@@ -50,7 +58,21 @@ function view(): void {
   render(<CommentsPanel orgId="org_1" resourceType="cms_page" resourceId="p1" />);
 }
 
-beforeEach(() => { vi.clearAllMocks(); members.loadOrgMembers.mockResolvedValue([]); });
+/** A promise whose settlement this test controls, so an in-flight window is observable rather than raced. */
+function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void } {
+  let resolve!: (v: T) => void;
+  const promise = new Promise<T>((res) => { resolve = res; });
+  return { promise, resolve };
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  members.loadOrgMembers.mockResolvedValue([]);
+  // `ui/announce` keeps ONE module-level polite slot with no reset: without this an
+  // "announces X" case can pass on an EARLIER case's announcement, and the "never
+  // announces success" case reds when shuffled behind the POST case.
+  announce('');
+});
 afterEach(cleanup);
 
 describe('CMNT-UX-2 — a failed thread read never claims the thread is empty', () => {
@@ -102,7 +124,11 @@ describe('CMNT-UX-2 — a failed thread read never claims the thread is empty', 
 
 describe('CMNT-UX-3 — a write does not unmount the thread, and it announces', () => {
   it('POST: the composer survives the refresh and the outcome is announced', async () => {
-    api.listThread.mockResolvedValue([comment('c1', 'existing')]);
+    // The refresh is HELD in flight (a deferred second read): asserting after it settled
+    // could not tell "the list was held" from "it unmounted and came back" — MEASURED
+    // /grade-tests wave 10, the no-keepList sabotage stayed green.
+    const refresh = deferred<Comment[]>();
+    api.listThread.mockResolvedValueOnce([comment('c1', 'existing')]).mockReturnValueOnce(refresh.promise);
     api.postComment.mockResolvedValue(comment('c2', 'new one'));
     view();
     await screen.findByText('existing');
@@ -110,13 +136,15 @@ describe('CMNT-UX-3 — a write does not unmount the thread, and it announces', 
     fireEvent.change(screen.getByLabelText(/New comment/i), { target: { value: 'new one' } });
     fireEvent.click(screen.getByRole('button', { name: /^Comment$/i }));
 
-    await waitFor(() => expect(api.postComment).toHaveBeenCalled());
+    await waitFor(() => expect(api.listThread).toHaveBeenCalledTimes(2));
     // The list is HELD during the refresh — before the fix `comments` went
     // `null` and the entire panel, composer included, became an aria-hidden
     // skeleton, so focus fell to <body> and nothing was announced.
     expect(screen.getByText('existing')).toBeTruthy();
     expect(screen.getByLabelText(/New comment/i)).toBeTruthy();
     await waitFor(() => expect(currentAnnouncements().polite).toMatch(/Comment posted/i));
+    await act(async () => { refresh.resolve([comment('c1', 'existing'), comment('c2', 'new one')]); await refresh.promise; });
+    expect(await screen.findByText('new one')).toBeTruthy();
   });
 
   it('RESOLVE: announces, and busy is PER-ROW (a sibling row stays operable)', async () => {

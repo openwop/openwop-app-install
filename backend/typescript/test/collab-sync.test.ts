@@ -41,7 +41,7 @@ afterAll(async () => { __stopCollabLeaseHeartbeat(); __stopCollabUpdateSweep(); 
 let n = 0;
 async function loginAndDoc(): Promise<{ cookie: string; canvasId: string }> {
   const tenantId = `org:sync-${Date.now()}-${n++}`;
-  const res = await fetch(`${BASE}/v1/host/openwop-app/test/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: `sync-${Date.now()}-${n++}@a.test`, tenantId }) });
+  const res = await fetch(`${BASE}/host/openwop-app/test/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: `sync-${Date.now()}-${n++}@a.test`, tenantId }) });
   let cookie = '';
   for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
   const canvas = await createCanvasForTenant(tenantId, { canvasTypeId: 'canvas.document', name: 'D', initialState: { title: 'D', content: { type: 'doc', content: [] } } });
@@ -54,7 +54,7 @@ function toBytes(d: RawData): Uint8Array { return Array.isArray(d) ? Buffer.conc
 /** A minimal Yjs sync client mirroring the server protocol. */
 function client(cookie: string, canvasId: string): { doc: Y.Doc; ws: WebSocket } {
   const doc = new Y.Doc();
-  const ws = new WebSocket(`${WSBASE}/v1/host/openwop-app/canvas-collab/${canvasId}`, { headers: { cookie, origin: ORIGIN } });
+  const ws = new WebSocket(`${WSBASE}/host/openwop-app/canvas-collab/${canvasId}`, { headers: { cookie, origin: ORIGIN } });
   ws.on('open', () => { const e = encoding.createEncoder(); encoding.writeVarUint(e, 0); writeSyncStep1(e, doc); ws.send(encoding.toUint8Array(e)); });
   ws.on('message', (data) => {
     const dec = decoding.createDecoder(toBytes(data));

@@ -66,7 +66,7 @@ export function ProjectOverviewTab({ project, canWrite, onSaved, onDirtyChange }
   if (!ch) {
     return (
       <>
-        {error ? <Notice variant="error">{error}</Notice> : null}
+        {error ? <Notice variant="error" announce={error}>{error}</Notice> : null}
         <StateCard
           icon={<FolderIcon size={22} />}
           title={t('noCharterTitle')}
@@ -79,7 +79,7 @@ export function ProjectOverviewTab({ project, canWrite, onSaved, onDirtyChange }
 
   return (
     <div className="surface-card u-flex u-flex-col u-gap-4">
-      {error ? <Notice variant="error">{error}</Notice> : null}
+      {error ? <Notice variant="error" announce={error}>{error}</Notice> : null}
 
       {/* ── Lead: the goal + status, with a quiet edit action ── */}
       <div className="u-flex u-justify-between u-items-start u-gap-3">
@@ -259,7 +259,7 @@ function CharterEditor({ project, onCancel, onSaved, onDirtyChange }: { project:
 
   return (
     <div className="surface-card u-flex u-flex-col u-gap-4">
-      {error ? <Notice variant="error">{error}</Notice> : null}
+      {error ? <Notice variant="error" announce={error}>{error}</Notice> : null}
 
       {/* ── Definition ── */}
       <div className="proj-section">

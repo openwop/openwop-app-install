@@ -21,6 +21,7 @@ import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
+import { bareRunId } from './support/bareRunId.js';
 
 let server: http.Server;
 let BASE: string;
@@ -55,15 +56,15 @@ interface BundleEvent { type?: string; nodeId?: string; payload?: Record<string,
 interface BundleBody { events?: BundleEvent[] }
 
 async function runToCompletion(workflowId: string, body: Record<string, unknown>): Promise<BundleEvent[]> {
-  const create = await jsonFetch<{ runId: string }>('/v1/runs', { method: 'POST', body: JSON.stringify({ workflowId, ...body }) });
+  const create = await jsonFetch<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({ workflowId, ...body }) });
   expect(create.status).toBe(201);
   const { runId } = create.body;
   for (let i = 0; i < 40; i++) {
     await new Promise((r) => setTimeout(r, 25));
-    const snap = await jsonFetch<{ status: string }>(`/v1/runs/${runId}`);
+    const snap = await jsonFetch<{ status: string }>(`/runs/${runId}`);
     if (['completed', 'failed', 'cancelled'].includes(snap.body.status)) break;
   }
-  const bundle = await jsonFetch<BundleBody>(`/v1/runs/${runId}/debug-bundle`);
+  const bundle = await jsonFetch<BundleBody>(`/host/openwop-app/runs/${bareRunId(runId)}/debug-bundle`);
   expect(bundle.status).toBe(200);
   return bundle.body.events ?? [];
 }
@@ -76,7 +77,7 @@ function nodeOutputs(events: BundleEvent[], nodeId: string): Record<string, unkn
 
 describe('host.triggers: webhook trigger surfaces ctx.triggerData', () => {
   beforeAll(async () => {
-    const reg = await jsonFetch('/v1/host/openwop-app/workflows', {
+    const reg = await jsonFetch('/host/openwop-app/workflows', {
       method: 'POST',
       body: JSON.stringify({
         workflowId: 'openwop-app.trigger.webhook',
@@ -112,7 +113,7 @@ describe('host.triggers: webhook trigger surfaces ctx.triggerData', () => {
 
 describe('host.triggers: webhook-respond records the reply via ctx.respondToWebhook', () => {
   beforeAll(async () => {
-    const reg = await jsonFetch('/v1/host/openwop-app/workflows', {
+    const reg = await jsonFetch('/host/openwop-app/workflows', {
       method: 'POST',
       body: JSON.stringify({
         workflowId: 'openwop-app.trigger.respond',

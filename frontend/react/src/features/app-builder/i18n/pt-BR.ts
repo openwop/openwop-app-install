@@ -75,7 +75,7 @@ export const messages = {
   publishFailed: 'Falha ao publicar.',
   publishClose: 'Fechar',
   exportWarningsTitle: 'O que a exportação deixou de fora',
-  exportWarningsIntro: 'O download começou, mas {{count}} parte(s) deste app não puderam ser expressas em {{target}} e estão ausentes do código gerado.',
+  exportWarningsIntro: 'O download começou, mas {{count}} parte(s) deste app não puderam ser levadas para {{target}} exatamente — cada uma está listada abaixo: ignorada ou exportada com seu valor padrão.',
   syncLoadFailedTitle: 'Não foi possível ler o vínculo com o repositório',
   syncLoadFailedBody: 'Portanto não se sabe se este canvas já está vinculado. Vincular aqui geraria um novo segredo de webhook e quebraria um webhook do GitHub existente — tente ler novamente primeiro.',
   syncRetry: 'Tentar novamente',

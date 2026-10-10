@@ -7,7 +7,7 @@
  *      (idempotent), the §C delivery model — delivered / dedup (effectively-
  *      once) / retry → dead-letter (state machine) — and operator pause →
  *      skip.
- *   2. The REST read surface (`GET /v1/trigger-subscriptions[/{id}]`) + the
+ *   2. The REST read surface (`GET /trigger-subscriptions[/{id}]`) + the
  *      Kanban bridge: a card→To Do move registers a `queue` subscription,
  *      records a delivered delivery, and a repeat move of the same card to the
  *      same column de-duplicates to the same run.
@@ -21,6 +21,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
+import { bareRunId } from './support/bareRunId.js';
 import {
   __resetHostExtPersistence,
   initHostExtPersistence,
@@ -125,43 +126,44 @@ describe('trigger-bridge read surface + Kanban bridge (sqlite memory app)', () =
     return { status: res.status, body: (await res.json()) as T };
   }
 
-  it('advertises triggerBridge.supported in discovery', async () => {
-    const { body } = await jsonFetch<{ triggerBridge?: { supported?: boolean; sources?: string[] } }>('/.well-known/openwop');
-    expect(body.triggerBridge?.supported).toBe(true);
+  it('advertises triggerBridge in discovery', async () => {
+    // ADR 0812 P3c-0 — the major-2 record: presence + `status` replaces v1's `supported: true`.
+    const { body } = await jsonFetch<{ triggerBridge?: { status?: string; sources?: string[] } }>('/.well-known/openwop', { headers: { 'OpenWOP-Version': '2' } });
+    expect(body.triggerBridge?.status).toBe('experimental');
     expect(body.triggerBridge?.sources).toContain('queue');
   });
 
   it('a Kanban card→To Do move registers a queue subscription with a delivered delivery, and re-moves de-duplicate', async () => {
     const triggerWorkflowId = (await jsonFetch<{ fixtures?: string[] }>('/.well-known/openwop')).body.fixtures?.[0];
-    const board = await jsonFetch<{ id: string }>('/v1/host/openwop-app/kanban/boards', {
+    const board = await jsonFetch<{ id: string }>('/host/openwop-app/kanban/boards', {
       method: 'POST',
       body: JSON.stringify({ name: 'TB board', triggerWorkflowId }),
     });
     const boardId = board.body.id;
-    const card = await jsonFetch<{ id: string }>(`/v1/host/openwop-app/kanban/boards/${boardId}/cards`, {
+    const card = await jsonFetch<{ id: string }>(`/host/openwop-app/kanban/boards/${boardId}/cards`, {
       method: 'POST',
       body: JSON.stringify({ title: 'x', columnId: 'doing' }),
     });
 
     // Move into To Do → delivered.
-    const m1 = await jsonFetch<{ triggeredRunId: string | null }>(`/v1/host/openwop-app/kanban/cards/${card.body.id}`, {
+    const m1 = await jsonFetch<{ triggeredRunId: string | null }>(`/host/openwop-app/kanban/cards/${card.body.id}`, {
       method: 'PATCH',
       body: JSON.stringify({ columnId: 'todo' }),
     });
     expect(typeof m1.body.triggeredRunId).toBe('string');
 
     // The board's subscription is visible with a delivered delivery.
-    const subs = await jsonFetch<{ subscriptions: { subscriptionId: string; source: string; state: string }[] }>('/v1/trigger-subscriptions');
+    const subs = await jsonFetch<{ subscriptions: { subscriptionId: string; source: string; state: string }[] }>('/trigger-subscriptions');
     // ADR 0726 — the kanban subscription id is inside the corpus opaque grammar now.
-    const sub = subs.body.subscriptions.find((s) => s.subscriptionId === hostDerivedSubscriptionId('kanban', boardId).id);
+    const sub = subs.body.subscriptions.find((s) => bareRunId(s.subscriptionId) === hostDerivedSubscriptionId('kanban', boardId).id);
     expect(sub?.source).toBe('queue');
     expect(sub?.state).toBe('active');
-    const detail = await jsonFetch<{ deliveries: { outcome: string; runId?: string }[] }>(`/v1/trigger-subscriptions/${encodeURIComponent(sub!.subscriptionId)}`);
-    expect(detail.body.deliveries.some((d) => d.outcome === 'delivered' && d.runId === m1.body.triggeredRunId)).toBe(true);
+    const detail = await jsonFetch<{ deliveries: { outcome: string; runId?: string }[] }>(`/trigger-subscriptions/${encodeURIComponent(sub!.subscriptionId)}`);
+    expect(detail.body.deliveries.some((d) => d.outcome === 'delivered' && bareRunId(d.runId ?? '') === m1.body.triggeredRunId)).toBe(true);
 
     // Move out and back into To Do → same dedupKey → deduped to the same run.
-    await jsonFetch(`/v1/host/openwop-app/kanban/cards/${card.body.id}`, { method: 'PATCH', body: JSON.stringify({ columnId: 'doing' }) });
-    const m2 = await jsonFetch<{ triggeredRunId: string | null }>(`/v1/host/openwop-app/kanban/cards/${card.body.id}`, {
+    await jsonFetch(`/host/openwop-app/kanban/cards/${card.body.id}`, { method: 'PATCH', body: JSON.stringify({ columnId: 'doing' }) });
+    const m2 = await jsonFetch<{ triggeredRunId: string | null }>(`/host/openwop-app/kanban/cards/${card.body.id}`, {
       method: 'PATCH',
       body: JSON.stringify({ columnId: 'todo' }),
     });

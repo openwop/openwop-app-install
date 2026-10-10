@@ -17,7 +17,7 @@
  */
 
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
-import { requireOrgScope, publicBaseUrl } from '../featureRoute.js';
+import { requireOrgScope, publicBaseUrl, toggleSubjectOf } from '../featureRoute.js';
 import {
   createLink,
   listLinks,
@@ -32,7 +32,7 @@ export function registerSharingRoutes(deps: RouteDeps): void {
   const { app } = deps;
 
   // ── authed: link management ──
-  const BASE = '/v1/host/openwop-app/sharing/orgs/:orgId/links';
+  const BASE = '/host/openwop-app/sharing/orgs/:orgId/links';
 
   app.get(BASE, async (req, res, next) => {
     try {
@@ -45,7 +45,7 @@ export function registerSharingRoutes(deps: RouteDeps): void {
     try {
       const { user, orgId, tenantId } = await requireOrgScope(req, 'workspace:write');
       const body = (req.body ?? {}) as Record<string, unknown>;
-      const link = await createLink(tenantId, orgId, user.userId, body);
+      const link = await createLink(tenantId, orgId, user.userId, body, { lane: 'member', subject: { ...toggleSubjectOf(req), tenantId } });
       res.status(201).json(link);
     } catch (err) { next(err); }
   });
@@ -67,7 +67,7 @@ export function registerSharingRoutes(deps: RouteDeps): void {
   });
 
   // ── public: resolve a share link (NO auth; token is the credential) ──
-  app.get('/v1/host/openwop-app/shared/:token', async (req, res, next) => {
+  app.get('/host/openwop-app/shared/:token', async (req, res, next) => {
     try {
       res.json(await resolveShared(req.params.token));
     } catch (err) { next(err); }
@@ -75,7 +75,7 @@ export function registerSharingRoutes(deps: RouteDeps): void {
 
   // ADR 0328 P7 — the public viewer reports which frame was viewed (analytics;
   // the token is the credential; validation + uniform-404 in the service).
-  app.post('/v1/host/openwop-app/shared/:token/frame-view', async (req, res, next) => {
+  app.post('/host/openwop-app/shared/:token/frame-view', async (req, res, next) => {
     try {
       const body = (req.body ?? {}) as { frame?: unknown };
       await recordSharedFrameView(req.params.token, body.frame);
@@ -83,7 +83,7 @@ export function registerSharingRoutes(deps: RouteDeps): void {
     } catch (err) { next(err); }
   });
 
-  app.get('/v1/host/openwop-app/shared/:token/card', async (req, res, next) => {
+  app.get('/host/openwop-app/shared/:token/card', async (req, res, next) => {
     try {
       res.json(await resolveSharedCard(req.params.token, publicBaseUrl(req)));
     } catch (err) { next(err); }

@@ -34,6 +34,7 @@ import type { Storage } from '../storage/storage.js';
 import { OpenwopError, type RunRecord } from '../types.js';
 import { requireProtocolScope, type EnforcedProtocolScope } from './protocolAuthorization.js';
 import { verifyRunStreamToken } from './runStreamToken.js';
+import { setBearerChallenge } from '../middleware/authChallenge.js';
 import { disposePinnedRun } from './pinnedRunDisposition.js';
 
 /**
@@ -73,8 +74,28 @@ export async function loadReadableRun(
     if (!run) throw new OpenwopError('run_not_found', `run ${runId} not found`, 404);
     return disposePinnedRun(storage, run);
   }
+  // A presented token that did NOT verify. The caller's OTHER credential may
+  // still own the run (a same-origin owner whose URL carries a stale token), so
+  // the normal gate runs first. Only when that gate refuses AND the principal is
+  // one this host minted because nothing else was presented (`anonymousPrincipal`
+  // — a fresh mint or a returning anon cookie) was the token the whole of the
+  // caller's authority: that is a rejected credential, answered 401
+  // `invalid_token`, not the tenant gate's 404 telling an expired-token viewer
+  // their run does not exist. Absent and unowned runs answer alike, so nothing
+  // about existence leaks.
+  const rejectedToken = streamToken !== undefined && req.anonymousPrincipal === true;
+  try {
+    return await loadByScopeAndTenant(req, storage, runId, opts.scope ?? 'runs:read');
+  } catch (err) {
+    if (!rejectedToken || !(err instanceof OpenwopError) || (err.httpStatus !== 404 && err.httpStatus !== 403)) throw err;
+    if (req.res) setBearerChallenge(req, req.res, { presented: true });
+    throw new OpenwopError('unauthenticated', 'The stream token is invalid or expired. Mint a new one.', 401);
+  }
+}
 
-  await requireProtocolScope(req, opts.scope ?? 'runs:read'); // RFC 0049 — owk_ key scopes always (ADR 0745 D2); membership only when enforced
+/** Path (b) of {@link loadReadableRun}: the scope seam + tenant ownership. */
+async function loadByScopeAndTenant(req: Request, storage: Storage, runId: string, scope: EnforcedProtocolScope): Promise<RunRecord> {
+  await requireProtocolScope(req, scope); // RFC 0049 — owk_ key scopes always (ADR 0745 D2); membership only when enforced
   const run = await storage.getRun(runId);
   if (!run) throw new OpenwopError('run_not_found', `run ${runId} not found`, 404);
   // Wildcard operator principal reads across tenants (matches the runs-list /

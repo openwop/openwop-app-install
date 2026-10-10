@@ -43,10 +43,10 @@ function client() {
   return { get: (p: string) => call('GET', p), put: (p: string, b?: unknown) => call('PUT', p, b), post: (p: string, b?: unknown) => call('POST', p, b) };
 }
 async function signup(c: ReturnType<typeof client>): Promise<void> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `brief-${Date.now()}-${n++}@acme.test` });
+  const r = await c.post('/host/openwop-app/test/login', { email: `brief-${Date.now()}-${n++}@acme.test` });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
 }
-const BRIEFING = '/v1/host/openwop-app/dashboard/briefing';
+const BRIEFING = '/host/openwop-app/dashboard/briefing';
 
 describe('ADR 0577 — dashboard briefing config route', () => {
   it('GET before any PUT ⇒ { config: null }; PUT round-trips through GET', async () => {
@@ -67,7 +67,7 @@ describe('ADR 0577 — dashboard briefing config route', () => {
     const a = client(); const b = client();
     const shared = `tnt-brief-${Date.now()}`;
     for (const c of [a, b]) {
-      const r = await c.post('/v1/host/openwop-app/test/login', { email: `brief-${Date.now()}-${n++}@acme.test`, tenantId: shared });
+      const r = await c.post('/host/openwop-app/test/login', { email: `brief-${Date.now()}-${n++}@acme.test`, tenantId: shared });
       expect(r.status, JSON.stringify(r.body)).toBe(201);
     }
     await a.put(BRIEFING, { conversationId: 'conv:a-private' });

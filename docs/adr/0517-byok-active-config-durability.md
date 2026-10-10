@@ -166,6 +166,19 @@ stored secrets, and PUTs it. Users whose pointer names a historical
 `byok:<provider>:<epoch-ms>` ref keep that exact key — adoption matches both ref
 shapes precisely so no one is stranded.
 
+## Eligibility reporting follow-up (2026-10-08)
+
+The server-owned verdict also carries `signInRequired` for a managed binding on a
+host that requires anonymous callers to sign in (ADR 0711 reporting seam). GET
+and successful PUT report the same effective-binding verdict. A successful
+own-key save updates the hook immediately from PUT; a failed save retains the
+prior state. Clearing a chosen binding re-reads the effective default rather
+than assuming `needs-key`. The browser does not infer the host's sign-in posture.
+
+Regression evidence: `active-config-sign-in-required.test.ts` covers stored
+managed and own-key bindings; `byokConfigResilience.test.ts` covers own-key save,
+clear-to-default, failed save, and older servers omitting the new field.
+
 ## Open questions
 
 1. ~~**The existing duplicates.** … Should the Keys page surface a "you have N

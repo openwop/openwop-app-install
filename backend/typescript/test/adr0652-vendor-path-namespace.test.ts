@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApp } from '../src/index.js';
-import { VENDOR_ORG, VENDOR_ROOT, isVendorPath, v2MountedRootPrefixes } from '../src/middleware/protocolVersion.js';
+import { VENDOR_ORG, VENDOR_ROOT, isVendorPath, preferredVersion, v2MountedRootPrefixes } from '../src/middleware/protocolVersion.js';
 
 /**
  * ADR 0652 / RFC 0181 — `/host/<org>/…` is this host's proprietary namespace:
@@ -18,7 +18,6 @@ let base = '';
 const AUTH = { Authorization: 'Bearer dev-token' };
 const SHELL = '<!doctype html><html><body data-shell="adr0652">shell</body></html>';
 const VENDOR = `${VENDOR_ROOT}/orgs`;
-const TWIN = `/v1${VENDOR_ROOT}/orgs`;
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -50,11 +49,12 @@ describe('ADR 0652 — /host/<org>/… is the vendor namespace, and the header s
     expect(await res.text()).not.toContain('data-shell=');
   });
 
-  it('carries NO OpenWOP-Version response header — with the header, without it, or with a malformed one — and equals the /v1 twin', async () => {
-    const twin = await get(TWIN, { ...AUTH, Accept: 'application/json' });
-    expect(twin.status).toBe(200);
-    expect(twin.headers.get('openwop-version')).toBe('1.1'); // the twin IS versioned
-    const twinBody = await twin.json();
+  // ADR 0812 P3c-0: the `/v1` vendor twin it compared against is the retired
+  // path space now; the baseline is the header-less vendor response itself.
+  it('carries NO OpenWOP-Version response header — with the header, without it, or with a malformed one — and answers the same body', async () => {
+    const baseline = await get(VENDOR, { ...AUTH, Accept: 'application/json' });
+    expect(baseline.status).toBe(200);
+    const twinBody = await baseline.json();
     for (const headers of [
       { ...AUTH, Accept: 'application/json' },
       { ...AUTH, Accept: 'application/json', 'OpenWOP-Version': '2' },
@@ -96,7 +96,10 @@ describe('ADR 0652 — /host/<org>/… is the vendor namespace, and the header s
     const doc = await res.json() as { extensions?: Record<string, { root?: string; twin?: string; rfc?: string }> };
     const rec = doc.extensions?.[`${VENDOR_ORG}.host`];
     expect(rec?.root).toBe(`${VENDOR_ROOT}/`);
-    expect(rec?.twin).toBe(`/v1${VENDOR_ROOT}/`);
+    // The `/v1` twin is advertised only while v1 is served: on a retired host it
+    // answers 410, and advertising it would hand clients a dead address.
+    if (preferredVersion() === '2.0') expect(rec).not.toHaveProperty('twin');
+    else expect(rec?.twin).toBe(`/v1${VENDOR_ROOT}/`);
     expect(rec?.rfc).toBe('0181');
   });
 });

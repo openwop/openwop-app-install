@@ -186,6 +186,16 @@ integration is blind to federated assurance. This app parses assertions **host-s
 so the context class is directly readable. The honest posture is reachable *because* of
 the split model, not despite it.
 
+> **A bare `gcloud run services update` does not take effect here (CE-16, 2026-10-05).**
+> `scripts/deploy.sh` routes traffic BY NAME, so the service's traffic spec pins one
+> revision and any `services update` mints a new revision that receives **0%
+> traffic** — the change never reaches a request, and gcloud's success line does not
+> say so. Run it through **`scripts/update-env.sh KEY=VALUE …`** (other flags after
+> `--`, e.g. `-- --update-secrets=NAME=secret:latest`), which verifies the new
+> revision (Ready, same commit, every value) and shifts 100% to it by name. If you
+> run gcloud directly, follow it with
+> `gcloud run services update-traffic <service> --to-revisions <new-revision>=100`.
+
 ```
 gcloud run services update openwop-app-backend \
   --update-env-vars OPENWOP_SAML_ASSUME_MFA=false \

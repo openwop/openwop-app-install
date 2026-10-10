@@ -39,6 +39,8 @@ import { createHash, randomInt, randomUUID } from 'node:crypto';
 import type { Express, Request } from 'express';
 import { OpenwopError } from '../types.js';
 import type { Storage } from '../storage/storage.js';
+import { onWorkflowForked } from '../host/workflowsRegistry.js';
+import { tryDurableStorage } from '../host/durable/durableStore.js';
 import {
   RELAY_CHANNELS,
   type ChatEgressEnvelope,
@@ -59,7 +61,7 @@ const GROUP_POLICIES: readonly GroupPolicy[] = ['allowlist', 'open', 'disabled']
 const NOTIFY_KINDS = ['email', 'sms'] as const;
 type NotifyKind = (typeof NOTIFY_KINDS)[number];
 
-const BASE = '/v1/host/openwop-app/messaging';
+const BASE = '/host/openwop-app/messaging';
 
 const DEVICE_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const ACTIVATION_TTL_MS = 10 * 60 * 1000; // 10 minutes
@@ -1163,3 +1165,18 @@ async function getIdentityOr404(req: Request, storage: Storage): Promise<Messagi
   }
   return i;
 }
+
+// ADR 0789 — a messaging routing rule this tenant bound to a SHARED workflow
+// routes to the tenant's fork once edited. Rules are relational rows (no CAS
+// primitive); the upsert re-reads the rule first and only rewrites the field.
+onWorkflowForked('messaging:routing-rule', async (tenantId, from, to) => {
+  const storage = tryDurableStorage();
+  if (!storage) return 0;
+  let n = 0;
+  for (const rule of await storage.listMessagingRoutingRules(tenantId)) {
+    if (rule.tenantId !== tenantId || rule.workflowId !== from) continue;
+    await storage.upsertMessagingRoutingRule({ ...rule, workflowId: to });
+    n += 1;
+  }
+  return n;
+});

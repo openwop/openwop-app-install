@@ -15,7 +15,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 describe('v2 path space is served, not merely advertised', () => {
-  it('every parameterless GET the manifest declares is reachable under major 2 wherever /v1 serves it', async () => {
+  it('every parameterless GET the manifest declares is reachable under major 2 (bar a pinned not-mounted ledger)', async () => {
     const { createApp, loadConfigFromEnv } = await import('../src/index.js');
     process.env.OPENWOP_API_KEYS = 'pathspace-key';
     const app = await createApp({ ...loadConfigFromEnv(), storageDsn: 'memory://' } as never);
@@ -31,8 +31,13 @@ describe('v2 path space is served, not merely advertised', () => {
     ), 'utf8')) as unknown;
     const ops: unknown = Array.isArray(manifest) ? manifest
       : ((manifest as Record<string, unknown>)['operations'] ?? (manifest as Record<string, unknown>)['paths']);
+    // Only paths the manifest declares a GET for. Probing a POST-only path with GET
+    // measures nothing the manifest claims: RFC 0241's `/host/events/test` is POST-only
+    // and correctly 404s a GET (the probe set was unfiltered by method until 2.45.28).
     const paths: string[] = Array.isArray(ops)
-      ? ops.map((o) => (typeof o === 'string' ? o : String((o as Record<string, unknown>)['path'] ?? '')))
+      ? ops
+          .filter((o) => typeof o === 'string' || (o as Record<string, unknown>)['method'] === undefined || (o as Record<string, unknown>)['method'] === 'GET')
+          .map((o) => (typeof o === 'string' ? o : String((o as Record<string, unknown>)['path'] ?? '')))
       : Object.keys((ops ?? {}) as Record<string, unknown>);
 
     // Parameterless, non-discovery GETs only — a templated path needs a real id,
@@ -42,14 +47,38 @@ describe('v2 path space is served, not merely advertised', () => {
     ))].sort();
     expect(probes.length, 'the manifest must yield probes, or this test is vacuous').toBeGreaterThan(3);
 
+    // ADR 0781 — a family v2 discovery does NOT advertise answers 404 not_found
+    // under major 2 by rule (errors.md § "Unadvertised operations"). That 404 is
+    // not a mount gap, but only when BOTH hold: the body names the family, and
+    // v2 discovery really omits it. A plain route-miss 404 is still a gap.
+    const v2Disco = (await (await fetch(`${base}/.well-known/openwop`, { headers: { 'OpenWOP-Version': '2' } })).json()) as Record<string, unknown>;
+    // ADR 0812 P3c-0 — the `/v1<path>` twin was this test's oracle ("only a
+    // surface /v1 serves can be a mount gap"). With /v1 withdrawn it answers 410
+    // for everything, so the oracle is replaced by the ledger it used to imply:
+    // the parameterless GETs whose /v1 twin ALSO answered 404 (measured
+    // 2026-10-07 with 1.x served) — surfaces this host does not mount at all.
+    // Any OTHER major-2 404 is a mount gap. Shrink-only: delete a row when the
+    // surface ships.
+    const NOT_MOUNTED_ON_EITHER_MAJOR = new Set(['/audit/verify', '/host/events', '/tools']);
     const gaps: string[] = [];
+    const unadvertised: string[] = [];
+    const stillUnmounted = new Set<string>();
     for (const p of probes) {
-      const v1 = await fetch(`${base}/v1${p}`, { headers: H });
       const v2 = await fetch(`${base}${p}`, { headers: { ...H, 'OpenWOP-Version': '2' } });
-      // Only a surface /v1 actually serves can be a mount gap.
-      if (v1.status !== 404 && v2.status === 404) gaps.push(`${p} (/v1=${v1.status}, major2=${v2.status})`);
+      if (v2.status === 404) {
+        const body = (await v2.json().catch(() => ({}))) as { error?: string; details?: { family?: string } };
+        const family = body.details?.family;
+        if (body.error === 'not_found' && typeof family === 'string' && v2Disco[family] === undefined) unadvertised.push(p);
+        else if (NOT_MOUNTED_ON_EITHER_MAJOR.has(p)) stillUnmounted.add(p);
+        else gaps.push(`${p} (major2=${v2.status})`);
+      }
     }
+    // The ledger cannot outlive its reasons: a row whose surface now answers must be deleted.
+    expect([...stillUnmounted].sort(), 'a NOT_MOUNTED_ON_EITHER_MAJOR row now answers — delete it').toEqual([...NOT_MOUNTED_ON_EITHER_MAJOR].sort());
+    // Keep the exemption honest: with host i18n off in this boot, `content` is
+    // the family it must cover, so the list cannot silently absorb real gaps.
+    expect(unadvertised.every((p) => p.startsWith('/content')), `unexpected unadvertised 404s: ${unadvertised.join(', ')}`).toBe(true);
     srv.close();
-    expect(gaps, `served under /v1 but unreachable under major 2:\n  ${gaps.join('\n  ')}`).toEqual([]);
+    expect(gaps, `unreachable under major 2:\n  ${gaps.join('\n  ')}`).toEqual([]);
   }, 120_000); // boots a host and probes every manifest pair sequentially
 });

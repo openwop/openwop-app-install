@@ -37,6 +37,8 @@ const confirmMock = vi.hoisted(() => ({ confirm: vi.fn(async () => true) }));
 vi.mock('../../../ui/confirm.js', () => ({ confirm: confirmMock.confirm }));
 
 const canvas = vi.hoisted(() => ({ createCanvas: vi.fn(), saveCanvas: vi.fn() }));
+// ADR 0838 — the detail page reads the caller's scopes to offer only allowed writes.
+vi.mock('../../../client/accessClient.js', async (importOriginal) => ({ ...(await importOriginal<typeof import('../../../client/accessClient.js')>()), getEffectiveAccess: async () => ({ roles: [], scopes: ['workspace:read', 'workspace:write', 'host:members:manage'], basis: 'member' }) }));
 vi.mock('../../../canvas/canvasClient.js', async (importOriginal) => {
   const orig = await importOriginal<typeof import('../../../canvas/canvasClient.js')>();
   return { ...orig, createCanvasClient: () => ({ createCanvas: canvas.createCanvas, saveCanvas: canvas.saveCanvas }) };
@@ -119,7 +121,7 @@ describe('DOCTPL-1 — the in-app unsaved guard on the markdown editor', () => {
     await loadDirty();
     fireEvent.click(screen.getByRole('button', { name: 'Promote to rich document' }));
     await waitFor(() => expect(screen.getByTestId('loc').textContent).toBe('/document-editor/cv_new'));
-    expect(api.addVersion).toHaveBeenCalledWith('org_1', 'doc_1', '# Hi — edited, unsaved');
+    expect(api.addVersion).toHaveBeenCalledWith('org_1', 'doc_1', '# Hi — edited, unsaved', 'v1'); // ADR 0838 D5: a checked save
     // Order: the save lands BEFORE the render-to-HTML read.
     const saveOrder = api.addVersion.mock.invocationCallOrder[0]!;
     const promoteOrder = api.promoteToHtml.mock.invocationCallOrder[0]!;

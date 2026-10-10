@@ -18,13 +18,13 @@ export const campaignJourneysFeature: BackendFeature = {
   registerRoutes: (deps) => registerCampaignJourneysRoutes(deps),
   surface: { id: 'campaign-journeys', build: buildCampaignJourneysSurface },
   requiredPacks: [
-    { name: 'feature.campaign-journeys.nodes', version: '1.3.0' },
+    { name: 'feature.campaign-journeys.nodes', version: '1.3.1' },
   ],
   toggleDefault: {
     id: 'campaign-journeys',
     label: 'Campaign Journeys',
     description:
-      'Contact-level lifecycle automation as workflow chains — welcome series, re-engagement, and any flow you bind to a CRM or campaign event. One enrollment per contact per journey (no double-sends), every send gated by consent + suppression. Journeys run on the workflow engine: monitor them in Runs, approve steps in the Approvals inbox. OFF by default.',
+      'Contact-level lifecycle automation as workflow chains — welcome series, re-engagement, and any flow you bind to a CRM or campaign event. One enrollment per contact per journey (no double-sends), every send gated by consent + suppression. Journeys run on the workflow engine: monitor them in Runs, approve steps in the Approvals inbox.',
     category: 'Customer Data Platform',
     status: 'off',
     bucketUnit: 'tenant',

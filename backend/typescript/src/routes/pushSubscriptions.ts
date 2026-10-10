@@ -10,7 +10,18 @@
  *
  *   GET    /v1/host/openwop-app/notifications/push/subscriptions
  *     → 200 { subscriptions: [{ subscriptionId, endpoint, createdAt, userAgent? }] }
- *     — the `keys` are never returned (treated like credentials).
+ *     — the CALLER's own devices only; the `keys` are never returned (treated
+ *     like credentials — which is what makes them a proof of possession below).
+ *
+ * ADR 0816 D3 — a device belongs to a person:
+ *   - the endpoint must satisfy `pushEndpointRefusal` (https, a known push
+ *     service; no attacker-chosen egress target);
+ *   - an endpoint already held by ANOTHER person rebinds only when the request
+ *     presents the stored `p256dh`/`auth` keys (a second person signing in on the
+ *     same browser does exactly that); otherwise 409 `push_endpoint_taken`;
+ *   - list and delete see only the caller's own devices (wildcard: the tenant);
+ *   - removal from a workspace deletes the member's devices there
+ *     (`registerPushSubscriptionRemovalCascade`).
  *
  * Vendor-prefixed for the same reason the notification surface is:
  * not a normative openwop v1 spec, just the sample-host's add-on
@@ -22,12 +33,16 @@
  */
 
 import type { Express, Request } from 'express';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import type { Storage } from '../storage/storage.js';
 import { OpenwopError, type PushSubscriptionRecord } from '../types.js';
 import { getVapidPublicKey } from '../notifications/webPush.js';
+import { notificationSubject } from '../notifications/audience.js';
+import { pushEndpointRefusal } from '../notifications/pushEndpointPolicy.js';
+import { isWorkspaceRootPair, onMemberAuthorityLost } from '../host/accessControlService.js';
+import { subjectKeyForms } from '../host/subjectErasureRedaction.js';
 
-const BASE = '/v1/host/openwop-app/notifications/push';
+const BASE = '/host/openwop-app/notifications/push';
 
 interface Deps {
   storage: Storage;
@@ -71,17 +86,30 @@ export function registerPushSubscriptionRoutes(app: Express, deps: Deps): void {
         );
       }
 
-      // Endpoint is the canonical browser-handed URL we expect from
-      // pushManager.subscribe(). Sanity-check the scheme to keep
-      // obviously-broken inputs out of the table.
-      if (!/^https?:/.test(endpoint)) {
-        throw new OpenwopError('validation_error', 'endpoint must be an http(s) URL', 400);
+      // ADR 0816 D3 — the backend POSTs to this URL on every notification, so
+      // it must be a real Web Push service, never a caller-chosen target.
+      const refusal = pushEndpointRefusal(endpoint);
+      if (refusal) {
+        throw new OpenwopError('validation_error', `Push endpoint refused: ${refusal}.`, 400, { reason: 'push_endpoint_refused' });
       }
 
       const subscriptionId = randomBytes(16).toString('hex');
       // ADR 0050 — record the owning user so addressed notifications push only
-      // to their devices. May be absent for a tenanted non-user principal.
-      const userId = req.userId ?? req.principal?.principalId;
+      // to their devices. ADR 0816 D0 — the same subject every notification lane
+      // keys on. May be absent for a tenanted non-user principal.
+      const userId = notificationSubject(req) ?? req.principal?.principalId;
+
+      // ADR 0816 D3 — no re-homing someone else's device. The upsert below is
+      // ON CONFLICT(endpoint), which moves the row's tenant + user; that is
+      // right for the SAME person moving their browser between workspaces, and
+      // for a second person on the same browser (who presents the same keys,
+      // because the browser hands every page the same subscription). Anyone
+      // else learned the endpoint somewhere and holds none of the keys.
+      const existing = await storage.getPushSubscriptionByEndpoint(endpoint);
+      if (existing && existing.userId !== userId
+        && !(sameSecret(existing.p256dhKey, p256dh) && sameSecret(existing.authKey, auth))) {
+        throw new OpenwopError('conflict', 'This push endpoint is registered to another device owner.', 409, { reason: 'push_endpoint_taken' });
+      }
       const record: PushSubscriptionRecord = {
         subscriptionId,
         tenantId,
@@ -106,7 +134,11 @@ export function registerPushSubscriptionRoutes(app: Express, deps: Deps): void {
         res.json({ subscriptions: [] });
         return;
       }
-      const subs = await storage.listPushSubscriptions(tenantId);
+      // ADR 0816 D3 — your own devices only; the wildcard principal keeps the
+      // tenant view.
+      const owner = ownerFilter(req);
+      const subs = (await storage.listPushSubscriptions(tenantId))
+        .filter((s) => owner === undefined || s.userId === owner);
       // Project — never return `p256dhKey` / `authKey` since they're
       // effectively credentials. The FE only needs the id + endpoint
       // for listing / revoke flows.
@@ -127,22 +159,14 @@ export function registerPushSubscriptionRoutes(app: Express, deps: Deps): void {
     try {
       const tenantId = resolveTenant(req);
       if (!tenantId) throw new OpenwopError('unauthenticated', 'sign in to manage push', 401);
-      // Look up by id + verify ownership before delete — prevents a
-      // leaked subscriptionId from being used to revoke another
-      // user's row. 404-on-mismatch hides existence.
-      const sub = await storage.getPushSubscriptionByEndpoint(req.params.id);
-      // The id-based path doesn't have a getById; list + filter is fine
-      // for the FE's small subscription count (<5 typical).
-      if (!sub) {
-        const all = await storage.listPushSubscriptions(tenantId);
-        const match = all.find((s) => s.subscriptionId === req.params.id);
-        if (!match) throw new OpenwopError('not_found', 'subscription not found', 404);
-        await storage.deletePushSubscription(req.params.id);
-        res.status(204).end();
-        return;
-      }
-      if (sub.tenantId !== tenantId) throw new OpenwopError('not_found', 'subscription not found', 404);
-      await storage.deletePushSubscription(sub.subscriptionId);
+      // Look up by id + verify tenant AND owner before delete — a leaked
+      // subscriptionId must not revoke another person's device (ADR 0816 D3).
+      // 404-on-mismatch hides existence.
+      const owner = ownerFilter(req);
+      const match = (await storage.listPushSubscriptions(tenantId))
+        .find((s) => s.subscriptionId === req.params.id && (owner === undefined || s.userId === owner));
+      if (!match) throw new OpenwopError('not_found', 'subscription not found', 404);
+      await storage.deletePushSubscription(match.subscriptionId);
       res.status(204).end();
     } catch (err) {
       next(err);
@@ -155,4 +179,39 @@ function resolveTenant(req: Request): string | undefined {
   const wildcard = tenants.includes('*');
   const requestedTenant = typeof req.query.tenantId === 'string' ? req.query.tenantId : undefined;
   return wildcard ? requestedTenant : (req.tenantId ?? undefined);
+}
+
+/** ADR 0816 D3 — whose devices a request may see / delete. `undefined` = the
+ *  wildcard principal's tenant view. A non-wildcard caller with no subject owns
+ *  nothing (`''` matches no row). */
+function ownerFilter(req: Request): string | undefined {
+  if ((req.principal?.tenants ?? []).includes('*')) return undefined;
+  return notificationSubject(req) ?? req.principal?.principalId ?? '';
+}
+
+/**
+ * ADR 0816 D3 — removal from a workspace takes the member's devices there with
+ * it. Hygiene, not the guard: delivery re-checks membership (D4), because a
+ * cascade can fail or not yet have run on another instance. Matches every
+ * spelling the subject's rows may carry (`subjectKeyForms`), never an alias
+ * across people. Only a ROOT membership removal counts — leaving a sub-org is
+ * not leaving the workspace.
+ */
+export function registerPushSubscriptionRemovalCascade(storage: Storage): void {
+  onMemberAuthorityLost('notifications.push-subscriptions', async (lost) => {
+    if (lost.reason !== 'removed' || !isWorkspaceRootPair(lost.orgId, lost.tenantId)) return 0;
+    const { forms } = subjectKeyForms(lost.subject);
+    let removed = 0;
+    for (const sub of await storage.listPushSubscriptions(lost.tenantId)) {
+      if (sub.userId && forms.has(sub.userId) && await storage.deletePushSubscription(sub.subscriptionId)) removed++;
+    }
+    return removed;
+  });
+}
+
+/** Constant-time compare for the subscription keys used as proof of possession. */
+function sameSecret(a: string, b: string): boolean {
+  const x = Buffer.from(a);
+  const y = Buffer.from(b);
+  return x.length === y.length && timingSafeEqual(x, y);
 }

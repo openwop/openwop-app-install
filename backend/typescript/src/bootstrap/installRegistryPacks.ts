@@ -15,10 +15,12 @@
  * locally-registered nodes when the registry is unreachable.
  */
 
+import { recordRegistryInstallFailure, recordRegistryInstallSkip, recordRegistryInstallSuccess, resetRegistryInstallStatus, setRegistryInstallAttempted } from '../host/registryInstallStatus.js';
 import { resolve, join } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 import { createLogger } from '../observability/logger.js';
 import { isTombstoned } from '../host/packTombstones.js';
+import { isPackRevoked } from '../host/packRevocations.js';
 import {
   installPackFromRegistry,
   parseInstallList,
@@ -60,6 +62,7 @@ function readOnDiskVersion(dir: string): string | null {
 }
 
 export async function ensureRegistryPacksInstalled(featurePacks: InstallTarget[] = []): Promise<void> {
+  resetRegistryInstallStatus(0);
   const raw = process.env.OPENWOP_INSTALL_PACKS;
   const packDir = resolveDefaultPackDir();
 
@@ -71,7 +74,35 @@ export async function ensureRegistryPacksInstalled(featurePacks: InstallTarget[]
   const seen = new Set<string>();
   const targets: InstallTarget[] = [];
   const strict = process.env.OPENWOP_STRICT_REGISTRY === 'true';
+  // NP-V2 P7 (review) — which lane a target came from. A FEATURE-required pack
+  // is absent from disk by definition, so its failure is not covered by a
+  // vendored copy the way a pinned pack's is; the readiness report says which.
+  const featureKeys = new Set(missingFeaturePacks.map((p) => `${p.name}@${p.version}`));
+  let refused = 0;
   for (const t of [...envTargets, ...missingFeaturePacks]) {
+    // Dedupe FIRST, so a pin listed twice is one attempt (and one refusal).
+    const key = `${t.name}@${t.version}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const lane = featureKeys.has(key) ? 'feature' as const : 'pinned' as const;
+    // ADR 0194 P4: a tombstoned (removed-from-host) pack is never re-installed at
+    // boot; a superadmin restore (or explicit marketplace install) lifts it.
+    // Checked BEFORE the downgrade classification (grade-code C-2): a deliberately
+    // removed pack must never be counted as a failed install.
+    if (isTombstoned(t.name)) {
+      log.info('registry pack install skipped (tombstoned)', { pack: t.name });
+      recordRegistryInstallSkip(t.name, t.version, 'tombstoned');
+      continue;
+    }
+    // ADR 0826 D5 (/architect A5) — a REVOKED version listed in the boot pins is
+    // refused, never fetched: the kill switch must survive a cold start. Counted
+    // as a refusal (an attempt that failed), so readiness reports it.
+    if (isPackRevoked(t.name, t.version)) {
+      log.error('registry pack install refused (revoked)', { pack: t.name, version: t.version });
+      recordRegistryInstallFailure(t.name, t.version, lane, 'pack_revoked');
+      refused += 1;
+      continue;
+    }
     // ADR 0655 D5 (EMWF-2) — a registry install must never DOWNGRADE below the
     // image-vendored copy. The mount symlinks the vendored pack first; a symlink
     // carries no install marker, so the installer used to rmSync it and write the
@@ -84,17 +115,20 @@ export async function ensureRegistryPacksInstalled(featurePacks: InstallTarget[]
     const verdict = classifyRegistryInstall({ onDisk, requested: t.version, strict });
     if (verdict === 'refuse') {
       log.error('registry pin below vendored — install refused, the drift must be fixed by publish + re-pin (ADR 0655 D5)', { pack: t.name, pinned: t.version, vendored: onDisk });
+      recordRegistryInstallFailure(t.name, t.version, lane, 'pin_below_vendored');
+      refused += 1;
       continue;
     }
-    if (verdict === 'skip') { log.warn('registry pack install skipped (vendored newer)', { pack: t.name, pinned: t.version, vendored: onDisk }); continue; }
-    // ADR 0194 P4: a tombstoned (removed-from-host) pack is never re-installed
-    // at boot; a superadmin restore (or explicit marketplace install) lifts it.
-    if (isTombstoned(t.name)) { log.info('registry pack install skipped (tombstoned)', { pack: t.name }); continue; }
-    const key = `${t.name}@${t.version}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
+    if (verdict === 'skip') {
+      log.warn('registry pack install skipped (vendored newer)', { pack: t.name, pinned: t.version, vendored: onDisk });
+      recordRegistryInstallSkip(t.name, t.version, 'vendored_newer');
+      continue;
+    }
     targets.push(t);
   }
+  // Refusals are attempts too: `installed + failed.length === attempted` is the
+  // invariant verify-deploy checks.
+  setRegistryInstallAttempted(targets.length + refused);
   if (targets.length === 0) {
     if (raw === 'none') log.info('registry pack install disabled (OPENWOP_INSTALL_PACKS=none); no missing feature packs');
     return;
@@ -119,7 +153,13 @@ export async function ensureRegistryPacksInstalled(featurePacks: InstallTarget[]
         } else {
           log.info('registry pack already installed', { name: target.name, version: target.version });
         }
+        recordRegistryInstallSuccess();
       } catch (err) {
+        // NP-V2 P7 — counted, so /readiness can report it (the warn line alone
+        // hid 16 refusals for eight days).
+        const errCode = (err as { code?: unknown } | null)?.code;
+        const code = typeof errCode === 'string' ? errCode : 'install_failed';
+        recordRegistryInstallFailure(target.name, target.version, featureKeys.has(`${target.name}@${target.version}`) ? 'feature' : 'pinned', code);
         log.warn('registry pack install failed; continuing without it', {
           name: target.name,
           version: target.version,

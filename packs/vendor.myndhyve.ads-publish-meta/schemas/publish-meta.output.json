@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.ads-publish-meta/1.0.0/publish-meta.output.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.ads-publish-meta/1.0.3/publish-meta.output.json",
   "title": "AdsPublishMetaOutput",
   "type": "object",
   "required": ["platform", "adAccountId", "campaignId", "adSetId", "creativeId", "adId", "publishedStatus", "publishedAt", "success"],

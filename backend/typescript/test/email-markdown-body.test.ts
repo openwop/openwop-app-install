@@ -3,6 +3,11 @@
  * at send; `text` (default) keeps the ADR 0242 escape-first render. The safe
  * renderer itself is exhaustively XSS-tested in email-safe-markdown.test.ts; this
  * covers the template round-trip + the send-path branch.
+ *
+ * Sabotage-witnessed (grade-tests w9): dropping the `format` spread in
+ * `createTemplate` reds cases 1–2; sending the markdown branch through
+ * `renderHtmlBody` reds case 2; sending the text branch through
+ * `renderMarkdownBody` reds case 3.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
@@ -48,18 +53,16 @@ describe('ADR 0256 — markdown email body', () => {
   }
 
   it('a markdown template renders formatting into the HTML part', async () => {
-    const { html } = await sendWith('markdown', 'Hello **Ada** — [reserve](https://shop.example/r)');
-    expect(html).toBeDefined();
-    expect(html!).toContain('<strong>Ada</strong>');
+    const { html = '' } = await sendWith('markdown', 'Hello **Ada** — [reserve](https://shop.example/r)');
+    expect(html).toContain('<strong>Ada</strong>');
     // the markdown link URL was link-tracked by instrumentBody, then rendered as an anchor.
-    expect(html!).toContain('<a href="https://app.example/host/openwop-app/public-email/c/');
-    expect(html!).not.toContain('**Ada**'); // markdown consumed, not literal
+    expect(html).toContain('<a href="https://app.example/host/openwop-app/public-email/c/');
+    expect(html).not.toContain('**Ada**'); // markdown consumed, not literal
   });
 
   it('a text template keeps the escape-first render (markdown syntax stays literal)', async () => {
-    const { html } = await sendWith('text', 'Hello **Ada**');
-    expect(html).toBeDefined();
-    expect(html!).toContain('**Ada**'); // literal — no markdown parsing in text mode
-    expect(html!).not.toContain('<strong>');
+    const { html = '' } = await sendWith('text', 'Hello **Ada**');
+    expect(html).toContain('**Ada**'); // literal — no markdown parsing in text mode (and proves an HTML part exists)
+    expect(html).not.toContain('<strong>');
   });
 });

@@ -1,6 +1,6 @@
 /**
  * A7 / RFC 0076 §A — the live A2A SERVER endpoint over HTTP. Boots the real app
- * with OPENWOP_A2A_SERVER_ENABLED=true and exercises POST /v1/host/openwop-app/a2a:
+ * with OPENWOP_A2A_SERVER_ENABLED=true and exercises POST /host/openwop-app/a2a:
  *   - host.a2a advertises a live server endpoint (honest flip)
  *   - agent/getCard returns a real (registry-synthesized) card, not a dead stub
  *   - message/send routes to a real manifest-agent dispatch → terminal A2A task
@@ -35,7 +35,7 @@ beforeAll(async () => {
   delete process.env.OPENWOP_A2A_DURABLE_TASKS;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   loadAgentsFromManifest(join(REPO_ROOT, 'packs', 'core.openwop.agents.supervisor'));
-  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; A2A_URL = `${BASE}/v1/host/openwop-app/a2a`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; A2A_URL = `${BASE}/host/openwop-app/a2a`; res(); }); });
 });
 afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
@@ -46,26 +46,10 @@ const rpc = (method: string, params?: unknown, id: string | number = 1) =>
   fetch(A2A_URL, { method: 'POST', headers: H, body: JSON.stringify({ jsonrpc: '2.0', id, method, params }) });
 
 describe('A7 / RFC 0076 — live A2A server endpoint', () => {
-  it('advertises a live A2A server endpoint (honest host.a2a flip)', async () => {
-    const doc = await (await fetch(`${BASE}/.well-known/openwop`, { headers: H })).json() as {
-      hostSurfaces?: Array<{ name?: string; note?: string }>;
-    };
-    const a2a = (doc.hostSurfaces ?? []).find((s) => s.name === 'host.a2a');
-    expect(a2a?.note ?? '').toContain('live server endpoint');
-  });
-
-  // ADR 0035 / RFC 0100 — the `a2a` capability slot is advertised whenever the
-  // host exposes A2A (this suite enables the server). `supported` + a uri
-  // `agentCardUrl` are env-independent; the durable sub-flags are asserted in
-  // the dedicated a2a-durable-route suite (which controls OPENWOP_A2A_DURABLE_TASKS).
-  it('advertises the a2a capability slot when the server is enabled', async () => {
-    const doc = await (await fetch(`${BASE}/.well-known/openwop`, { headers: H })).json() as {
-      capabilities?: { a2a?: { supported?: boolean; agentCardUrl?: string } };
-    };
-    const a2a = doc.capabilities?.a2a;
-    expect(a2a?.supported).toBe(true);
-    expect(typeof a2a?.agentCardUrl).toBe('string');
-  });
+  // ADR 0812 P3c-0: the two discovery legs ("advertises a live A2A server
+  // endpoint" via `hostSurfaces[host.a2a]`, and the `capabilities.a2a` slot) were
+  // deleted — both read v1-document facets the v2 discovery document does not
+  // carry. The live endpoint itself is exercised by every leg below.
 
   it('agent/getCard returns a registry-synthesized card with skills', async () => {
     const res = await rpc('agent/getCard');

@@ -1,6 +1,14 @@
 /**
- * SCIM PATCH active-parsing (review finding #2). A real IdP deactivate/reactivate
- * MUST be parsed from every standard PatchOp shape, not just the flat `{active}`.
+ * SCIM PATCH active-parsing — ADR 0002 Phase 4 / RFC 0050 §B (SCIM review
+ * finding #2). A real IdP deactivate/reactivate MUST be parsed from every
+ * RFC 7644 §3.5.2 PatchOp shape, not just the flat `{active}`: Okta and Azure AD
+ * send the PATH-LESS `{op:'replace', value:{active:false}}`, which the first cut
+ * ignored — so an IdP leaver PATCH 400'd and the user stayed active.
+ *
+ * Sabotage that turns it red: `authScim.ts`
+ * `} else if (op.path === undefined || op.path === null) {` → `} else if (false) {`
+ * (path-less case); `return value.toLowerCase() === 'true';` → `return value === 'true';`
+ * (string-valued case).
  */
 
 import { describe, expect, it } from 'vitest';

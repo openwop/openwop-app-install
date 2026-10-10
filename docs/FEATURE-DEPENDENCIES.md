@@ -9,10 +9,10 @@
 
 | Bucket | Count | Meaning |
 |---|---|---|
-| Declared (`dependsOn`) | 22 | real hard deps, disable-lock active |
-| Undeclared → always-on target | 86 | correctly undeclared — an always-on dep can never lock (ADR 0439) |
+| Declared (`dependsOn`) | 25 | real hard deps, disable-lock active |
+| Undeclared → always-on target | 98 | correctly undeclared — an always-on dep can never lock (ADR 0439) |
 | **[1] Primitive** (undeclared → toggleable) | **0** | misfiled cross-cutting infra → **extract to a `host/` seam** |
-| **[2] Soft-read** (undeclared → toggleable) | **91** | domain read, target vacuous-when-off → **leave documented** (no lock) |
+| **[2] Soft-read** (undeclared → toggleable) | **92** | domain read, target vacuous-when-off → **leave documented** (no lock) |
 | **[3] Hard-dep** (undeclared → toggleable) | **0** | target refuses when off → **declare `dependsOn`** |
 
 The goal (ADR 0446) is **not** "drive the total to zero." It is: extract the **[1]**
@@ -35,7 +35,7 @@ _None._
 | `cms` | `analytics` | static | analyticsService, experimentStampResolver | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `commerce` | `analytics` | static | analyticsService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `crm` | `analytics` | static | identityLinkService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
-| `forms` | `analytics` | static | identityLinkService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
+| `forms` | `analytics` | static | identityLinkService, consentGate | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `strategy` | `analytics` | static | analyticsService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `sharing` | `app-builder` | static | shareProjection | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `commerce` | `billing` | static | stripeApi, billingService, subscriptionInvoiceHook | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
@@ -62,14 +62,13 @@ _None._
 | `sharing` | `commerce` | static | quotes, commerceService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `strategy` | `commerce` | static | commerceService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `kicktodo-commerce` | `commerce-connect` | static | connectService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
-| `analytics` | `consent` | static | consentService | consent.isAllowed returns a policy boolean (permissive/deny), never breaks the consumer; the direct import is a compliance-protective coupling — do NOT extract (see ADR 0446 D.2) |
+| `analytics` | `consent` | static | visitorConsent | consent.isAllowed returns a policy boolean (permissive/deny), never breaks the consumer; the direct import is a compliance-protective coupling — do NOT extract (see ADR 0446 D.2) |
 | `campaign-connectors` | `consent` | static | consentService | consent.isAllowed returns a policy boolean (permissive/deny), never breaks the consumer; the direct import is a compliance-protective coupling — do NOT extract (see ADR 0446 D.2) |
 | `campaign-journeys` | `consent` | static | consentService | consent.isAllowed returns a policy boolean (permissive/deny), never breaks the consumer; the direct import is a compliance-protective coupling — do NOT extract (see ADR 0446 D.2) |
 | `crm` | `consent` | static | consentService | consent.isAllowed returns a policy boolean (permissive/deny), never breaks the consumer; the direct import is a compliance-protective coupling — do NOT extract (see ADR 0446 D.2) |
 | `email` | `consent` | static | consentService | consent.isAllowed returns a policy boolean (permissive/deny), never breaks the consumer; the direct import is a compliance-protective coupling — do NOT extract (see ADR 0446 D.2) |
-| `forms` | `consent` | static | consentService | consent.isAllowed returns a policy boolean (permissive/deny), never breaks the consumer; the direct import is a compliance-protective coupling — do NOT extract (see ADR 0446 D.2) |
-| `funnels` | `consent` | static | consentService | consent.isAllowed returns a policy boolean (permissive/deny), never breaks the consumer; the direct import is a compliance-protective coupling — do NOT extract (see ADR 0446 D.2) |
-| `publishing` | `consent` | static | consentService | consent.isAllowed returns a policy boolean (permissive/deny), never breaks the consumer; the direct import is a compliance-protective coupling — do NOT extract (see ADR 0446 D.2) |
+| `funnels` | `consent` | static | consentService, visitorConsent | consent.isAllowed returns a policy boolean (permissive/deny), never breaks the consumer; the direct import is a compliance-protective coupling — do NOT extract (see ADR 0446 D.2) |
+| `publishing` | `consent` | static | visitorConsent | consent.isAllowed returns a policy boolean (permissive/deny), never breaks the consumer; the direct import is a compliance-protective coupling — do NOT extract (see ADR 0446 D.2) |
 | `whatsapp` | `consent` | static | consentService | consent.isAllowed returns a policy boolean (permissive/deny), never breaks the consumer; the direct import is a compliance-protective coupling — do NOT extract (see ADR 0446 D.2) |
 | `comments` | `creative-briefs` | static | creativeBriefsService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `sharing` | `creative-briefs` | static | creativeBriefsService, routes | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
@@ -92,6 +91,7 @@ _None._
 | `priority-matrix` | `documents` | static | documentsService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `sharing` | `documents` | static | documentsService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `strategy` | `documents` | static | documentsService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
+| `team-intent-ledger` | `documents` | static | documentsService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `analytics` | `email` | static | engagementService | emailService self-gates ONLY inside its CRM merge-lifecycle subscriber (emailFeatureLive → relink work-avoidance, #3326); all 33 exported send/read functions are ungated, so no consumer breaks when email is off ⇒ [2] (ADR 0446 F file-vs-symbol, target-level) |
 | `campaign-intel` | `email` | static | engagementService, emailService | emailService self-gates ONLY inside its CRM merge-lifecycle subscriber (emailFeatureLive → relink work-avoidance, #3326); all 33 exported send/read functions are ungated, so no consumer breaks when email is off ⇒ [2] (ADR 0446 F file-vs-symbol, target-level) |
 | `campaign-journeys` | `email` | static | engagementService, emailService | emailService self-gates ONLY inside its CRM merge-lifecycle subscriber (emailFeatureLive → relink work-avoidance, #3326); all 33 exported send/read functions are ungated, so no consumer breaks when email is off ⇒ [2] (ADR 0446 F file-vs-symbol, target-level) |
@@ -105,7 +105,7 @@ _None._
 | `service-desk` | `entities` | static | entitiesService, kernelAdapter | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `tutorials` | `entities` | static | entitiesService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `crm` | `forms` | static | submissionSinks, formsService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
-| `email` | `forms` | static | submissionSinks | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
+| `email` | `forms` | static | submissionSinks, formsService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `funnels` | `forms` | static | submissionSinks, formsService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `service-desk` | `forms` | static | submissionSinks | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `webinars` | `forms` | static | submissionSinks, formsService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
@@ -116,10 +116,11 @@ _None._
 | `comments` | `priority-matrix` | static | priorityMatrixService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `crm` | `priority-matrix` | static | scoring, types | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `recommendations` | `priority-matrix` | static | scoring, types | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
-| `strategy` | `priority-matrix` | static | priorityMatrixService, intake | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
+| `strategy` | `priority-matrix` | static | priorityMatrixService, intake, listAccess | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `campaign-orchestration` | `production` | dyn | productionService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `assistant` | `service-desk` | dyn | tickets | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
-| `advisory-board` | `strategy` | static | strategyService, types | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
+| `advisory-board` | `strategy` | static | strategyService, types | ADR 0820 §8.1 / G7 — strategyService now resolves its own toggle+plan, but ONLY inside the context seam (resolveStrategyContextRefs → strategyContextAllowed), which returns EMPTY when refused; the board degrades to no strategy context. getStrategy/canSubjectReadStrategy (board attach validation) do not gate. Degrade, not break ⇒ [2], not a lock |
+| `access-hub` | `voice` | static | realtime/routes | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `service-desk` | `whatsapp` | static | whatsappService | imports the pure parser extractWaInbound; whatsappService self-gates only in its SEND path, which service-desk never calls — so it does NOT break when whatsapp is off ⇒ [2], not a lock |
 
 ## [3] Hard deps → declare `dependsOn`

@@ -33,12 +33,15 @@ import { createAnonSurfaceWriteApproval } from '../../host/approvalService.js';
 import { getAgentRegistry } from '../../executor/agentRegistry.js';
 import { fenceUntrustedBlock } from '../../host/untrustedContent.js';
 import { dispatchManagedChat, dispatchManagedToolsRound } from '../../providers/managedProvider.js';
+import { meterPlatformUnits } from '../../host/managedCredits.js';
 import { sanitizeFreeText } from '../../byok/textRedaction.js';
 import { createLogger } from '../../observability/logger.js';
 import type { ChatMessage } from '../../providers/dispatch.js';
 import type { AiToolCallRequest, AiToolCallResult } from '../../executor/types.js';
 import { anonymousActorEnabled, anonGrantHasTools, resolveAnonGrant, runAnonReadTurn } from '../../host/anonymousActor.js';
 import { OpenwopError } from '../../types.js';
+import { resolveToggle } from '../../host/featureToggles/service.js';
+import { ownerPublicRuntimeLapsed } from '../../host/publicLapse.js';
 
 // PUB-2: structured abuse/enumeration visibility on the UNAUTHENTICATED widget surface
 // (no operator signal otherwise). Never logs the token or visitor message — coarse only.
@@ -62,17 +65,36 @@ async function gateWidget(req: Request): Promise<WidgetConfig> {
     log.info('widget_token_miss', { path: req.path }); // PUB-2: enumeration / stale-token signal
     throw new OpenwopError('not_found', 'Widget not found.', 404, {});
   }
+  // ADR 0820 §7 / §8.2 — the owner-lapse policy for the public gateway (off unless the grace
+  // knob is set). A no-op while `chat-widget` is always-on (in no paid bundle); it bites the
+  // day §8.2 moves it into Support. The visitor is never refused for their own state.
+  if (await ownerPublicRuntimeLapsed('chat-widget', widget.tenantId)) {
+    throw new OpenwopError('not_found', 'Widget not found.', 404, {});
+  }
   const origin = (typeof req.headers.origin === 'string' && req.headers.origin) || (typeof req.headers.referer === 'string' ? req.headers.referer : undefined);
   if (!originAllowed(origin, widget.allowedDomains)) {
     log.info('widget_origin_rejected', { widgetId: widget.widgetId, origin }); // PUB-2
     throw new OpenwopError('forbidden', 'This domain is not allowed to embed this widget.', 403, {});
+  }
+  // ADR 0820 §8.2 — the tenant's `chat-widget` switch. A VISITOR lane: the tenant
+  // comes from the widget (the resource), never the caller, so this reads the
+  // TOGGLE only (`resolveToggle`, a ratchet-listed opt-out). Paywalling it with
+  // `resolveOne` would 404 every visitor of an owner whose plan lapsed, and every
+  // tenant's visitors on an entitlement-read fault (the ADR 0819 A2 class); the
+  // ADR 0176 shopper exemption keeps visitors off the owner's plan. The owner's
+  // plan is enforced on the operator routes (`authorizeOrgScope`).
+  // The owner-lapse policy (ADR 0820 §7) is applied above via `ownerPublicRuntimeLapsed`.
+  const toggle = await resolveToggle('chat-widget', { tenantId: widget.tenantId }).catch(() => null);
+  if (toggle?.enabled !== true) {
+    log.info('widget_feature_off', { widgetId: widget.widgetId }); // PUB-2: coarse only
+    throw new OpenwopError('not_found', 'Widget not found.', 404, {}); // uniform 404 — no existence oracle
   }
   return widget;
 }
 
 export function registerChatWidgetPublicGateway(deps: RouteDeps): void {
   // Phase 2b — public config bootstrap (read-only).
-  deps.app.get('/v1/host/openwop-app/public/widget/config', async (req, res, next) => {
+  deps.app.get('/host/openwop-app/public/widget/config', async (req, res, next) => {
     try {
       const widget = await gateWidget(req);
       // PUBLIC projection only — no token, no tenantId, no secrets. ADR 0470 OQ5 —
@@ -87,7 +109,7 @@ export function registerChatWidgetPublicGateway(deps: RouteDeps): void {
   });
 
   // Phase 2d — visitor dispatch (stateless single-turn, managed key, fenced input).
-  deps.app.post('/v1/host/openwop-app/public/widget/message', async (req, res, next) => {
+  deps.app.post('/host/openwop-app/public/widget/message', async (req, res, next) => {
     try {
       const widget = await gateWidget(req);
       const body = (req.body ?? {}) as { message?: unknown; sessionId?: unknown; hp?: unknown };
@@ -119,6 +141,13 @@ export function registerChatWidgetPublicGateway(deps: RouteDeps): void {
         log.info('widget_cap_exceeded', { widgetId: widget.widgetId, reason: cap.reason }); // PUB-2
         throw new OpenwopError('rate_limited', 'This widget has reached its usage limit.', 429, { reason: cap.reason });
       }
+      // ADR 0821 D3 — a visitor conversation is platform-paid spend billed to the
+      // widget OWNER (never the visitor: no visitor-facing refusal is added). Metered
+      // once, when the turn that opened it has been answered. No draw while
+      // `widgetConversation` has no rate.
+      const meterConversation = async (): Promise<void> => {
+        if (cap.newSession) await meterPlatformUnits({ tenantId: widget.tenantId, unit: 'widgetConversation', quantity: 1, featureId: 'chat-widget' });
+      };
 
       const agent = await getAgentRegistry().resolve(widget.agentId, widget.tenantId);
       // A misconfigured (deleted) agent → uniform 404, no existence oracle. PUB-4: a
@@ -149,6 +178,7 @@ export function registerChatWidgetPublicGateway(deps: RouteDeps): void {
           const round = await dispatchManagedToolsRound({
             userFacingProvider: MANAGED_PROVIDER,
             tenantId: widget.tenantId,
+            featureId: 'chat-widget', // ADR 0821 D4 — anonymous visitor spend, billed to the owner
             messages: [
               { role: 'system', content: r.systemPrompt ?? '' },
               ...r.messages.map((m): ChatMessage => ({ role: m.role, content: typeof m.content === 'string' ? m.content : '' })),
@@ -212,6 +242,7 @@ export function registerChatWidgetPublicGateway(deps: RouteDeps): void {
             return { allowed: true };
           },
         });
+        await meterConversation();
         // PUBLIC projection — assistant text only; no token/tenantId/principal/secret.
         res.json({ reply: sanitizeFreeText(turn.reply) });
         return;
@@ -226,9 +257,11 @@ export function registerChatWidgetPublicGateway(deps: RouteDeps): void {
       const result = await dispatchManagedChat({
         userFacingProvider: MANAGED_PROVIDER,
         tenantId: widget.tenantId,
+        featureId: 'chat-widget', // ADR 0821 D4
         messages,
         maxTokens: MAX_REPLY_TOKENS,
       });
+      await meterConversation();
       // PUBLIC projection — only the assistant text, redacted; no token/tenantId/secret.
       res.json({ reply: sanitizeFreeText(typeof result.completion === 'string' ? result.completion : '') });
     } catch (err) { next(err); }
@@ -244,7 +277,7 @@ export function registerChatWidgetPublicGateway(deps: RouteDeps): void {
   // its OWN src origin, and only ever touches the origin-gated 2b/2d endpoints. The
   // token in the markup is the ADR 0013 capability token (origin-gated server-side,
   // not a secret); no tenantId/key is ever exposed to it.
-  deps.app.get('/v1/host/openwop-app/public/widget/embed.js', (_req, res) => {
+  deps.app.get('/host/openwop-app/public/widget/embed.js', (_req, res) => {
     res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
     res.setHeader('Cache-Control', 'public, max-age=300');
     res.send(EMBED_JS);
@@ -265,6 +298,13 @@ const EMBED_JS = [
   "  var s=document.currentScript||(function(){var a=document.getElementsByTagName('script');return a[a.length-1];})();",
   "  var src=(s&&s.src)||'';",
   "  var base=src.replace(/\\/widget\\/embed\\.js.*$/,'');",
+  // ADR 0806 — a snippet pasted before ADR 0671 names the `/v1` twin. That address
+  // forwards (308) after the cut, but `currentScript.src` keeps the ORIGINAL URL,
+  // so a base derived from it would post every message to a retired address.
+  // Always talk to the unversioned vendor root, which is served on both sides.
+  // Anchored on the origin (plus an optional `/api` proxy prefix), so a
+  // customer path that merely CONTAINS `/v3/host/` is left alone.
+  "  base=base.replace(/^(https?:\\/\\/[^\\/]+(?:\\/api)?)\\/v[0-9]+(\\/host\\/)/,'$1$2');",
   "  var token=(s&&s.getAttribute('data-token'))||((src.match(/[?&]token=([^&]+)/)||[])[1])||'';",
   '  if(!token||!base){return;}',
   '  var sid=(window.crypto&&crypto.randomUUID)?crypto.randomUUID():String(Date.now())+Math.random();',

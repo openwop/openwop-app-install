@@ -1,8 +1,22 @@
 /**
  * ADR 0151 Phase 1 — the LLM title generator. `sanitizeTitle` is PURE + unit-tested
  * (OQ-5: a misbehaving free model degrades to the placeholder, never worse);
- * `generateTitle` wraps it around a managed-provider dispatch (host-side key, never
- * on the wire), mirroring `memory-auto-extract/memoryExtractor.ts`.
+ * `generateTitle` wraps it around a host-side dispatch (key never on the wire),
+ * mirroring `memory-auto-extract/memoryExtractor.ts`.
+ *
+ * WHICH KEY (ADR 0821 D5 follow-up): the dispatch comes from the ONE headless
+ * resolver (`host/headlessAi.ts` `resolveHeadlessAi`, text modality), never a
+ * direct `dispatchManagedChat`. So the tenant's BYOK `preferForText` opt-in is
+ * honoured exactly as for every other headless text caller:
+ *   - opt-in OFF (default): the managed provider, metered + attributed to
+ *     `chat-autotitle` (ADR 0821 D2/D4) — unchanged;
+ *   - opt-in ON + a resolvable key: the tenant's provider, on its catalog `quick`
+ *     class model (`modelClass: 'quick'`) — no managed draw;
+ *   - opt-in ON but the key does not resolve: managed, metered (the resolver's
+ *     step-0 fall-through);
+ *   - opt-in ON and the tenant's provider errors: NO title (placeholder kept) and no
+ *     managed retry — best-effort, and the tenant opted out of managed billing.
+ * Non-replay: runs after the first exchange is durable, outside any recorded run.
  *
  * Method `completion` (plain text out), NOT structured/tool-calling — the free
  * MiniMax tier's tool output is unreliable (the code-exec saga, ADR 0146) and a
@@ -10,11 +24,10 @@
  *
  * @see docs/adr/0151-conversation-auto-titling.md
  */
-import { dispatchManagedChat } from '../../providers/managedProvider.js';
+import { resolveHeadlessAi } from '../../host/headlessAi.js';
 import { createLogger } from '../../observability/logger.js';
 
 const log = createLogger('features.chat-autotitle');
-const MANAGED_PROVIDER = 'openwop-free';
 
 /** ATC-2 — a FEATURE-OWNED wall-clock bound on the fire-and-forget title dispatch.
  *  Passing no signal did NOT hang forever: `dispatchChat` applies a coarse default
@@ -73,7 +86,7 @@ export function sanitizeTitle(raw: string): string | null {
   return t || null;
 }
 
-/** Managed-LLM title from the first exchange. The key is resolved host-side; the
+/** LLM title from the first exchange (managed, or the tenant's key when opted in). The key is resolved host-side; the
  *  transcript is capped. Returns `null` on any provider error or unusable output —
  *  titling is best-effort, never blocks the turn, and degrades to the placeholder. */
 export async function generateTitle(
@@ -85,17 +98,16 @@ export async function generateTitle(
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), TITLE_TIMEOUT_MS);
   try {
-    const r = await dispatchManagedChat({
-      userFacingProvider: MANAGED_PROVIDER,
-      tenantId,
-      messages: [
+    const dispatch = await resolveHeadlessAi(tenantId, 'text', { featureId: 'chat-autotitle', modelClass: 'quick' }); // ADR 0821 D4/D5
+    if (!dispatch) return null; // unreachable for text today (managed always qualifies); honest no-op
+    const completion = await dispatch(
+      [
         { role: 'system', content: TITLE_PROMPT },
         { role: 'user', content: transcript },
       ],
-      maxTokens: MAX_OUTPUT_TOKENS,
-      signal: abort.signal,
-    });
-    return sanitizeTitle(r.completion ?? '');
+      { maxTokens: MAX_OUTPUT_TOKENS, signal: abort.signal },
+    );
+    return sanitizeTitle(completion);
   } catch (err) {
     // Fail-soft (no title), but surface the failure (provider error only — no PII).
     // Distinguish a wall-clock abort so the "silently never lands" mode is legible.

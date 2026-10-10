@@ -56,6 +56,13 @@ export function __resetHostExtPersistence(): void {
   storageRef = null;
 }
 
+/** ADR 0823 D5 — whether host-ext persistence is bound at all. An authz check
+ *  that reads host-ext rows uses this to tell "no store in this process" (no rows
+ *  can exist) apart from "the store failed" (fail closed). */
+export function isHostExtPersistenceInitialized(): boolean {
+  return storageRef !== null;
+}
+
 /** Test-only: the bound storage handle, so route tests can assert persisted
  *  rows (e.g. server-side run.metadata stamps) the wire snapshot rightly omits. */
 export function __hostExtStorage(): Storage | null {
@@ -456,6 +463,33 @@ export class DurableCollection<T> {
     return out;
   }
 
+  /**
+   * Every entity for which `matches` holds, where every such entity is KNOWN to
+   * carry `text` verbatim somewhere in its JSON (an id it stores in a field).
+   * Same rows as `list().filter(matches)`, narrowed in the database by the
+   * lossless `scanCandidates` pre-filter instead of pulling the namespace.
+   *
+   * The database filter is only a SUPERSET (it can drop only rows that do not
+   * contain the text, and such a row cannot match); `matches` still decides, so
+   * a longer id that merely contains `text` is never returned. `text` outside
+   * printable ASCII, or containing `"` or `\`, takes the full scan — as does a
+   * backend without `kvListContaining`. Fail-closed for an authorization read:
+   * it can never return fewer matches than `list()` would.
+   *
+   * WHY (EVID-1, 2026-10-02): `workflow:ownership` was read with `list()` on
+   * every by-id read of a workflow the caller does not own. On production that
+   * was 1.2 s alone, 15–33 s (and a statement-timeout 500) under a suite.
+   */
+  async listContainingText(text: string, matches: (item: T) => boolean): Promise<T[]> {
+    if (!text) return [];
+    const out: T[] = [];
+    for (const { value } of await scanCandidates(this.prefix(), text)) {
+      const decoded = this.decode(value);
+      if (decoded !== null && matches(decoded)) out.push(decoded);
+    }
+    return out;
+  }
+
   /** Read every entity in the collection (prefix scan, read-through). */
   async list(): Promise<T[]> {
     const rows = await requireStorage().kvList(this.prefix());
@@ -645,8 +679,12 @@ export class DurableCollection<T> {
     const out: T[] = [];
     for (const m of markers) {
       const row = await this.get(this.parseMarker(m.value).id); // marker may be a bare id or {id,p}
-      if (row !== null) out.push(row);
-      else await requireStorage().kvDelete(m.key).catch(() => undefined); // self-heal a stale marker
+      // ADR 0848 (grade-code M2) — a marker is not proof of tenancy: a crash between the
+      // marker write and a lost CAS can leave one tenant's marker on another tenant's row.
+      // The row is already in hand, so the check is free; a foreign row is skipped and its
+      // marker removed, like a stale one.
+      if (row !== null && this.tenantOf(row) === tenantId) out.push(row);
+      else await requireStorage().kvDelete(m.key).catch(() => undefined); // self-heal a stale/foreign marker
     }
     return out;
   }
@@ -725,6 +763,91 @@ export class DurableCollection<T> {
     await storage.kvSet(this.backfillKey, '1'); // sentinel — backfill complete
   }
 
+  // --- ADR 0866: deploy-safe adoption of the tenant index ---
+  //
+  // `ensureTenantIndex` is not safe for a collection that gains `tenantOf` in a
+  // deploy: the superseded revision keeps serving for up to an hour (WHD-28) and
+  // writes rows with NO marker, after the sentinel says the backfill is done. Such
+  // a row is invisible to every indexed read, forever. Adoption instead keeps
+  // reads on the full scan until the index is VERIFIED: a reconcile pass that
+  // listed the rows at least `windowMs` after this code first reconciled, so any
+  // writer that predates the index has stopped serving and its rows were seen.
+  // After that, every pass that still finds an unmarked row (a rollback to
+  // pre-index code) un-verifies the index, so reads fall back to the scan again.
+
+  private get adoptionKey(): string {
+    return `hostextidxmeta:${this.name}:adoption`;
+  }
+
+  private parseAdoption(raw: string | null): { since: string; verifiedAt?: string } | null {
+    if (raw === null) return null;
+    try {
+      const o = JSON.parse(raw) as { since?: unknown; verifiedAt?: unknown };
+      if (typeof o.since !== 'string' || !Number.isFinite(Date.parse(o.since))) return null;
+      if (o.verifiedAt !== undefined && (typeof o.verifiedAt !== 'string' || !Number.isFinite(Date.parse(o.verifiedAt)) || Date.parse(o.verifiedAt) < Date.parse(o.since))) return null;
+      return { since: o.since, ...(typeof o.verifiedAt === 'string' ? { verifiedAt: o.verifiedAt } : {}) };
+    } catch {
+      return null;
+    }
+  }
+
+  /** ADR 0866 — true once a reconcile pass has verified the tenant index (see above).
+   *  A caller reads through `listForTenantIndexed` only when this is true. */
+  async tenantIndexVerified(): Promise<boolean> {
+    if (!this.tenantOf) return false;
+    return this.parseAdoption(await requireStorage().kvGet(this.adoptionKey))?.verifiedAt !== undefined;
+  }
+
+  /**
+   * ADR 0866 — one reconcile pass: write a marker for every row that lacks one,
+   * then advance or reset verification. Full scan by design; run it from a
+   * periodic tick under a lease, never on a request path.
+   */
+  async reconcileTenantIndex(opts: { windowMs: number; now?: number }): Promise<{ repaired: number; skipped: number; verified: boolean; verifiedNow: boolean; reset: boolean }> {
+    if (!this.tenantOf) throw new Error(`reconcileTenantIndex requires a tenantOf on '${this.name}'`);
+    const storage = requireStorage();
+    const passStart = opts.now ?? Date.now();
+    let rawMeta = await storage.kvGet(this.adoptionKey);
+    let meta = this.parseAdoption(rawMeta);
+    if (meta === null) {
+      // Set-if-absent. A later `since` is always safe: it only delays verification.
+      await storage.kvCompareAndSwap(this.adoptionKey, rawMeta, JSON.stringify({ since: new Date(passStart).toISOString() }));
+      rawMeta = await storage.kvGet(this.adoptionKey);
+      meta = this.parseAdoption(rawMeta) ?? { since: new Date(passStart).toISOString() };
+    }
+    // Rows BEFORE markers: a concurrent put writes its marker first, so a row we
+    // list always has its marker in the later marker list, or gets an identical one.
+    const rows = await this.list();
+    const marked = new Set((await storage.kvList(`hostextidx:${this.name}:`)).map((m) => m.key));
+    let repaired = 0;
+    let skipped = 0;
+    for (const row of rows) {
+      const tenantId = this.tenantOf(row);
+      if (typeof tenantId !== 'string' || tenantId.length === 0) { skipped += 1; continue; }
+      const key = this.idxKey(tenantId, this.idOf(row));
+      if (marked.has(key)) continue;
+      await storage.kvSet(key, this.markerValue(row));
+      repaired += 1;
+    }
+    let next = meta;
+    let reset = false;
+    if (repaired > 0 && meta.verifiedAt !== undefined) {
+      next = { since: new Date(passStart).toISOString() };
+      reset = true;
+    } else if (meta.verifiedAt === undefined && passStart - Date.parse(meta.since) >= opts.windowMs) {
+      next = { ...meta, verifiedAt: new Date(passStart).toISOString() };
+    }
+    if (next !== meta) {
+      // Reset is conservative. Verification must not overwrite a reset from a
+      // reconcile that overlapped an hour boundary or a slow earlier pass.
+      if (reset) await storage.kvSet(this.adoptionKey, JSON.stringify(next));
+      else await storage.kvCompareAndSwap(this.adoptionKey, rawMeta, JSON.stringify(next));
+    }
+    const verified = await this.tenantIndexVerified();
+    // verifiedNow: this pass found the index unverified and left it verified.
+    return { repaired, skipped, verified, verifiedNow: verified && !reset && meta.verifiedAt === undefined, reset };
+  }
+
   /**
    * A7 — atomic compare-and-swap on one entity, correct ACROSS instances (unlike
    * get→put, which races). `expected` is the value previously read (or `null` to
@@ -747,7 +870,16 @@ export class DurableCollection<T> {
     if (!res.swapped && this.tenantOf) {
       const current = await this.get(id);
       if (current === null) await requireStorage().kvDelete(this.idxKey(this.tenantOf(next), id)).catch(() => undefined);
-      else await requireStorage().kvSet(this.idxKey(this.tenantOf(current), id), this.markerValue(current)).catch(() => undefined);
+      else {
+        await requireStorage().kvSet(this.idxKey(this.tenantOf(current), id), this.markerValue(current)).catch(() => undefined);
+        // ADR 0848 H2 — the marker pre-written for `next` lives under NEXT's tenant. When
+        // the row that won belongs to another tenant, that marker pointed the loser's
+        // tenant index at the winner's row, and `listForTenantIndexed` does not re-check
+        // the tenant: a lost insert race listed another tenant's row as the loser's own.
+        if (this.tenantOf(current) !== this.tenantOf(next)) {
+          await requireStorage().kvDelete(this.idxKey(this.tenantOf(next), id)).catch(() => undefined);
+        }
+      }
     }
     return res.swapped;
   }
@@ -759,6 +891,7 @@ export class DurableCollection<T> {
     if (this.tenantOf) {
       for (const row of await storage.kvList(`hostextidx:${this.name}:`)) await storage.kvDelete(row.key);
       await storage.kvDelete(this.backfillKey);
+      await storage.kvDelete(this.adoptionKey);
     }
   }
 }

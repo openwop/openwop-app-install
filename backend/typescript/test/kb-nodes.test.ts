@@ -2,8 +2,18 @@
  * feature.kb.nodes — the KB feature node pack over `ctx.features.kb` (ADR 0014
  * Phase 2). Proves a feature-shipped action node calls its feature surface and
  * returns recorded outputs, plus the capability-missing backstop. Drives the
- * node functions directly against a ctx built from the real host bundle (the
- * end-to-end pack-in-a-run path is already covered by knowledge-surface.test.ts).
+ * node functions directly against a ctx built from the real host bundle.
+ *
+ * CORRECTED (grade-tests wave 6): this header used to say the end-to-end
+ * pack-in-a-run path was "already covered by knowledge-surface.test.ts" — that
+ * file never references `feature.kb.nodes`. The `rag` node in a real chain is
+ * driven by `kb-rag-chain-wiring.test.ts` and
+ * `workflow-chain-knowledge-execution.test.ts`; `search` and the capability
+ * backstop are covered only here.
+ *
+ * Sabotage witnesses: returning `results: []` from `search`, an empty
+ * `augmentedPrompt` / `citations` from `rag`, or skipping `ensureKb`'s check
+ * each turn the matching case red.
  */
 
 import http from 'node:http';
@@ -14,8 +24,13 @@ import { createCollection, ingestDocument } from '../src/features/kb/kbService.j
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let pack: any;
+type NodeCtx = { inputs: Record<string, unknown>; features: unknown };
+/** The slice of the untyped `.mjs` pack this test drives (no `.d.ts` ships with it). */
+interface KbNodePack {
+  search(ctx: NodeCtx): Promise<{ status: string; outputs: { results: Array<{ title: string; text: string }> } }>;
+  rag(ctx: NodeCtx): Promise<{ status: string; outputs: { augmentedPrompt: string; citations: Array<{ title: string }> } }>;
+}
+let pack: KbNodePack;
 let server: http.Server;
 
 beforeAll(async () => {
@@ -45,7 +60,7 @@ describe('feature.kb.nodes', () => {
     const out = await pack.search(ctxFor(tenantId, { orgId, collectionId: col.collectionId, query: 'cats groom' }));
     expect(out.status).toBe('success');
     expect(out.outputs.results.length).toBeGreaterThan(0);
-    expect(out.outputs.results[0].title).toBe('Cats');
+    expect(out.outputs.results[0]!.title).toBe('Cats');
   });
 
   it('rag node returns an augmented prompt + citations grounded in the collection', async () => {
@@ -58,7 +73,7 @@ describe('feature.kb.nodes', () => {
     expect(out.status).toBe('success');
     expect(out.outputs.augmentedPrompt).toContain('kitten');
     expect(out.outputs.augmentedPrompt).toContain('Question: what do kittens do');
-    expect(out.outputs.citations.length).toBeGreaterThan(0);
+    expect(out.outputs.citations[0]!.title).toBe('Kittens');
   });
 
   it('throws host_capability_missing when ctx.features.kb is absent', async () => {

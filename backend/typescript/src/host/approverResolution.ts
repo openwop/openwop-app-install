@@ -314,3 +314,16 @@ export async function validateApproverResolvability(
     }
   }
 }
+
+/** The approver ACL a gate declares (ADR 0677 D1): explicit subjects
+ *  (`approverRefs`, else the legacy `approversList`), groups and roles, blanks
+ *  dropped. `declared` is true only for a NON-EMPTY declaration — an empty one
+ *  is the open gate `conformance-interrupt-quorum.json` pins. */
+export function gateAclOf(interruptData: unknown): { declared: boolean; subjects: string[]; groupRefs: string[]; roleRefs: string[] } {
+  const data = (interruptData ?? {}) as { approverRefs?: unknown; approversList?: unknown; approverGroupRefs?: unknown; approverRoleRefs?: unknown };
+  const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((r): r is string => typeof r === 'string' && r.trim() !== '') : []);
+  const subjects = Array.isArray(data.approverRefs) ? strings(data.approverRefs) : strings(data.approversList);
+  const groupRefs = strings(data.approverGroupRefs);
+  const roleRefs = strings(data.approverRoleRefs);
+  return { declared: subjects.length + groupRefs.length + roleRefs.length > 0, subjects, groupRefs, roleRefs };
+}

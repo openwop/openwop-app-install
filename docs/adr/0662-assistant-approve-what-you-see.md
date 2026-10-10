@@ -1,6 +1,6 @@
 # ADR 0662 — Assistant: approve what you see
 
-Status: implemented (2026-09-11, feature loop it.14 — P1..P4 shipped). D1/D2/D4/D5 were substantially corrected pre-implementation after `/architect`; see the inline correction notes.
+Status: implemented (2026-09-11, feature loop it.14 — P1..P4 shipped; D1/D2 completed on every lane by ADR 0862, 2026-10-07). D1/D2/D4/D5 were substantially corrected pre-implementation after `/architect`; see the inline correction notes.
 Date: 2026-09-11
 Feature: Assistant capability + Chief of Staff (FEATURES.md ordinal 14 of 71; ADR 0023 §Correction, ADR 0027 §4, ADR 0031) · feature loop 2026-09 it.14
 Plan input: `/grade-*` recon 2026-09-11, ids `COSX-1..4` (prefix verified unused — `AST2-`, one S, is taken by 16 ids and 6 source files)
@@ -116,6 +116,24 @@ payload with poisoned keys and assert no sentinel appears in `outputs.body`. The
 arms go red first.
 
 ### D2 — bind the approval to the bytes (`COSX-2`)
+
+> **CORRECTED 2026-10-07 (ADR 0862, feature loop round 2 row 36): D2 held on ONE lane of
+> three, and D1 was delivered only on the server.** The "required on approve" text below was
+> implemented as a check on `POST /assistant/pending-actions/:id/approve`. **No client called
+> that route.** Both SPA inboxes and the agent drawer approve through `/approvals/:id/claim`,
+> and ReviewCard approves through `/reviews/:id/actions/approve`. Neither sent a hash, and
+> `decideActionViaApproval` skipped the check when none arrived. So every real approval ran
+> unguarded while this decision's tests, which drove the unused route, stayed green.
+>
+> Two other claims below were also not true:
+> - "`editPendingAction` takes the same guard": the edit was a blind read-modify-write.
+> - D1: the server projected the per-kind fields, and both SPA cards rendered only `payload.to`.
+>
+> ADR 0862 moves the requirement into the decision function every lane reaches, makes every
+> action-row write a CAS, and renders and echoes the card on every surface. Born red:
+> `test/assistant-approve-every-lane.test.ts`. The lesson is the one this ADR names as the
+> loop's most repeated failure, and it recurred inside the fix: a guard placed on a lane, not
+> on the shared choke point, protects only that lane.
 
 > **The first draft copied half of ADR 0473 — and dropped the half that makes the refusal
 > safe.** 0473 §(d) (`0473:195-200`) puts the definitive check **after** the CAS and pairs a

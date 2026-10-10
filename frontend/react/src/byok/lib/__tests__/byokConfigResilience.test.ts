@@ -65,6 +65,85 @@ describe('ADR 0517 — a server-vouched binding just works', () => {
   });
 });
 
+describe('the free default a signed-out visitor cannot use', () => {
+  const FREE = { provider: 'openwop-free', model: 'minimax-text', credentialRef: 'managed:openwop-free' };
+
+  it('stays ready (their own key works) and carries signInRequired through', async () => {
+    getActiveConfig.mockResolvedValue({ config: FREE, valid: true, anonymous: true, stored: false, signInRequired: true });
+    listStoredRefs.mockResolvedValue([]);
+    const { result } = renderHook(() => useBYOKConfig());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    expect(result.current.signInRequired).toBe(true);
+  });
+
+  it('reads false from an older server that omits the field', async () => {
+    getActiveConfig.mockResolvedValue({ config: FREE, valid: true, anonymous: true, stored: false });
+    listStoredRefs.mockResolvedValue([]);
+    const { result } = renderHook(() => useBYOKConfig());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    expect(result.current.signInRequired).toBe(false);
+  });
+
+  it('removes the account requirement immediately after saving an own key', async () => {
+    getActiveConfig.mockResolvedValue({ config: FREE, valid: true, anonymous: true, stored: false, signInRequired: true });
+    listStoredRefs.mockResolvedValue([]);
+    const { result } = renderHook(() => useBYOKConfig());
+    await waitFor(() => expect(result.current.signInRequired).toBe(true));
+    putActiveConfig.mockResolvedValue({ config: GOOGLE, valid: true, anonymous: true, stored: true, signInRequired: false });
+    await act(async () => { await result.current.setConfig(GOOGLE); });
+    expect(result.current.status).toBe('ready');
+    expect(result.current.config).toMatchObject(GOOGLE);
+    expect(result.current.signInRequired).toBe(false);
+    expect(getActiveConfig).toHaveBeenCalledTimes(1);
+  });
+
+  it('restores the server-reported managed default and warning after clearing an own key', async () => {
+    getActiveConfig.mockResolvedValue({ config: GOOGLE, valid: true, anonymous: true, signInRequired: false });
+    listStoredRefs.mockResolvedValue(['byok:google']);
+    const { result } = renderHook(() => useBYOKConfig());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    getActiveConfig.mockResolvedValue({ config: FREE, valid: true, anonymous: true, stored: false, signInRequired: true });
+    await act(async () => { await result.current.setConfig(null); });
+    expect(result.current.status).toBe('ready');
+    expect(result.current.config).toMatchObject(FREE);
+    expect(result.current.stored).toBe(false);
+    expect(result.current.signInRequired).toBe(true);
+    expect(localStorage.getItem(LS_KEY)).toBeNull();
+  });
+
+  it('keeps the prior warning when saving an own key is refused', async () => {
+    getActiveConfig.mockResolvedValue({ config: FREE, valid: true, anonymous: true, stored: false, signInRequired: true });
+    listStoredRefs.mockResolvedValue([]);
+    const { result } = renderHook(() => useBYOKConfig());
+    await waitFor(() => expect(result.current.signInRequired).toBe(true));
+    putActiveConfig.mockRejectedValue(new Error('binding refused'));
+    await expect(act(async () => { await result.current.setConfig(GOOGLE); })).rejects.toThrow('binding refused');
+    expect(result.current.config).toMatchObject(FREE);
+    expect(result.current.signInRequired).toBe(true);
+    expect(result.current.stored).toBe(false);
+  });
+
+  it('carries the server warning when migrating a browser-cached managed choice', async () => {
+    localStorage.setItem(LS_KEY, JSON.stringify(FREE));
+    getActiveConfig.mockResolvedValue(empty(true));
+    listStoredRefs.mockResolvedValue([]);
+    putActiveConfig.mockResolvedValue({ config: FREE, valid: true, anonymous: true, stored: true, signInRequired: true });
+    const { result } = renderHook(() => useBYOKConfig());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    expect(putActiveConfig).toHaveBeenCalledWith(FREE);
+    expect(result.current.signInRequired).toBe(true);
+  });
+
+  it('clears an old warning when an older server omits eligibility from the successful save', async () => {
+    getActiveConfig.mockResolvedValue({ config: FREE, valid: true, anonymous: true, stored: false, signInRequired: true });
+    listStoredRefs.mockResolvedValue([]);
+    const { result } = renderHook(() => useBYOKConfig());
+    await waitFor(() => expect(result.current.signInRequired).toBe(true));
+    await act(async () => { await result.current.setConfig(GOOGLE); });
+    expect(result.current.signInRequired).toBe(false);
+  });
+});
+
 describe('ADR 0517 — a failure is never evidence that the key is gone', () => {
   it('reports `error`, NOT `needs-key`, when the backend is unreachable', async () => {
     // The old hook inferred validity from a ref list, so a failed or empty list
@@ -230,6 +309,8 @@ describe('ADR 0517 — setConfig is server-first', () => {
     const { result } = renderHook(() => useBYOKConfig());
     await waitFor(() => expect(result.current.status).toBe('ready'));
 
+    getActiveConfig.mockResolvedValue(empty(false));
+    listStoredRefs.mockResolvedValue([]);
     await act(async () => { await result.current.setConfig(null); });
     expect(clearActiveConfig).toHaveBeenCalled();
     expect(localStorage.getItem(LS_KEY)).toBeNull();

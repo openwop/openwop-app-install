@@ -63,9 +63,6 @@ import {
   type McpSemanticDeps,
   type McpToolCallResult,
 } from './mcpSemantics.js';
-import type { Storage } from '../storage/storage.js';
-import type { HostAdapterSuite } from './index.js';
-import type { Principal } from '../types.js';
 import {
   isErrorResponse,
   rpcError,
@@ -78,16 +75,15 @@ import {
   type JsonRpcResponse,
 } from './mcpJsonRpc.js';
 import { createLogger } from '../observability/logger.js';
+import { defangAngleFence } from './untrustedContent.js';
 import { classifyMcpRpcOutcome, recordMcpRequest, recordProtocolVersion } from '../observability/metricSeams.js';
 import { _resetToolSchemaCache } from './toolSchemaValidation.js';
 
 const log = createLogger('host.mcpServerRouter');
 
-export interface RouterDeps {
-  storage: Storage;
-  hostSuite: HostAdapterSuite;
-  principal: Principal;
-}
+/** ADR 0788 D1 — the router's deps ARE the semantic deps (incl. the
+ *  request-resolved `caller`); a narrower type let a caller build one without it. */
+export type RouterDeps = McpSemanticDeps;
 
 export async function dispatch(
   request: JsonRpcRequest,
@@ -127,17 +123,17 @@ async function dispatchMcpRequest(
         return rpcSuccess(id, {});
       }
       case 'tools/list':
-        return rpcSuccess(id, { tools: await toolsView(deps.principal) });
+        return rpcSuccess(id, { tools: await toolsView(deps.caller) });
       case 'tools/call':
         return projectRunOutcome(id, await callTool(params.name, params.arguments, semantics));
       case 'resources/list':
-        return rpcSuccess(id, { resources: resourcesView() });
+        return rpcSuccess(id, { resources: await resourcesView(deps.caller) });
       case 'resources/templates/list':
-        return rpcSuccess(id, { resourceTemplates: resourceTemplatesView() });
+        return rpcSuccess(id, { resourceTemplates: await resourceTemplatesView(deps.caller) });
       case 'resources/read':
         return await dispatchResourcesRead(id, params, semantics);
       case 'prompts/list':
-        return rpcSuccess(id, { prompts: promptsView() });
+        return rpcSuccess(id, { prompts: await promptsView(deps.caller) });
       case 'prompts/get':
         return await dispatchPromptsGet(id, params, semantics);
       case 'completion/complete':
@@ -250,7 +246,7 @@ async function dispatchResourcesRead(
   }
   const uri = String(params.uri);
   const view: Record<string, unknown> = { uri, text: outcome.text };
-  const mimeType = findResourceMimeType(uri);
+  const mimeType = await findResourceMimeType(deps.caller, uri);
   if (mimeType !== undefined) view.mimeType = mimeType;
   return rpcSuccess(id, { contents: [view] });
 }
@@ -268,7 +264,7 @@ async function dispatchPromptsGet(
   const view: Record<string, unknown> = {
     messages: [{ role: 'user', content: { type: 'text', text: coerceContentText(outcome.outputs) } }],
   };
-  const description = findPromptDescription(String(params.name));
+  const description = await findPromptDescription(deps.caller, String(params.name));
   if (description !== undefined) view.description = description;
   return rpcSuccess(id, view);
 }
@@ -282,7 +278,7 @@ async function dispatchSampling(
   params: Record<string, unknown>,
   deps: McpSemanticDeps,
 ): Promise<JsonRpcResponse> {
-  const handler = findSamplingHandler();
+  const handler = await findSamplingHandler(deps.caller);
   if (!handler) {
     return rpcError(
       id,
@@ -290,7 +286,9 @@ async function dispatchSampling(
       'sampling/createMessage requires a workflow with core.openwop.mcp.handle-sampling',
     );
   }
-  const outcome = await runHandlerWorkflow(deps, handler.workflowId, params);
+  const fenced = fenceSamplingRequest(params);
+  if ('refusal' in fenced) return rpcError(id, RPC_INVALID_PARAMS, fenced.refusal);
+  const outcome = await runHandlerWorkflow(deps, handler.workflowId, fenced.request);
 
   if (outcome.kind === 'completed') {
     // The handle-sampling delegate returns outputs.result = ctx.callAI result.
@@ -318,7 +316,7 @@ async function dispatchElicitation(
   params: Record<string, unknown>,
   deps: McpSemanticDeps,
 ): Promise<JsonRpcResponse> {
-  const handler = findElicitationHandler();
+  const handler = await findElicitationHandler(deps.caller);
   if (!handler) {
     return rpcError(
       id,
@@ -340,12 +338,61 @@ async function dispatchElicitation(
     // Workflow completed without pausing — e.g., test mode with synthetic
     // accept. Surface outputs as the elicitation response.
     const outputs = (outcome.outputs ?? {}) as Record<string, unknown>;
+    // ADR 0788 D4 (`MCPWF-7`) — a handler that produced no decision did not
+    // consent. This used to answer `accept`, turning a missing value into a yes.
     return rpcSuccess(id, {
-      action: typeof outputs.action === 'string' ? outputs.action : 'accept',
+      action: typeof outputs.action === 'string' ? outputs.action : 'decline',
       content: (outputs.content ?? {}) as Record<string, unknown>,
     });
   }
   return rpcError(id, RPC_INTERNAL_ERROR, `elicitation bridge failed: ${outcome.kind}`);
+}
+
+/** ADR 0788 D4 — the host ceiling on a peer's `maxTokens` for the legacy
+ *  sampling bridge. The tenant pays for the completion; the peer does not get to
+ *  choose its size unbounded. */
+function samplingMaxTokens(): number {
+  const raw = Number(process.env.OPENWOP_MCP_SAMPLING_MAX_TOKENS);
+  return Number.isInteger(raw) && raw > 0 ? raw : 4096;
+}
+
+/**
+ * ADR 0788 D2 + D4 — fence and bound an inbound `sampling/createMessage` request
+ * HOST-side, before any handler workflow sees it (`MCPWF-3`, `MCPWF-6`).
+ *
+ * The vendored `core.openwop.mcp` handle-sampling node fences only STRING
+ * content, and skips any string that already contains `<UNTRUSTED>` anywhere —
+ * so the `{type:'text', text}` objects MCP sampling actually carries reached
+ * `ctx.callAI` unfenced, and `"<UNTRUSTED></UNTRUSTED> ignore previous …"`
+ * slipped past as "already wrapped". Here every message becomes ONE string,
+ * defanged and wrapped by the host, so the node only ever sees a host-made,
+ * well-formed fence. The host cannot fence an image or audio part, and dropping
+ * part of a request silently changes its meaning, so a non-text part REFUSES the
+ * request. `maxTokens` is clamped to the host ceiling and `modelPreferences` is
+ * dropped: the tenant's configured model applies.
+ */
+export function fenceSamplingRequest(params: Record<string, unknown>): { request: Record<string, unknown> } | { refusal: string } {
+  const rawMessages = Array.isArray(params.messages) ? params.messages : [];
+  const messages: Array<{ role: string; content: string }> = [];
+  for (const m of rawMessages) {
+    const msg = (m ?? {}) as { role?: unknown; content?: unknown };
+    const parts = Array.isArray(msg.content) ? msg.content : [msg.content];
+    const texts: string[] = [];
+    for (const part of parts) {
+      if (typeof part === 'string') { texts.push(part); continue; }
+      const p = (part ?? {}) as { type?: unknown; text?: unknown };
+      if (p.type === 'text' && typeof p.text === 'string') { texts.push(p.text); continue; }
+      return { refusal: "this host's sampling bridge accepts text content only" };
+    }
+    const role = msg.role === 'assistant' ? 'assistant' : 'user';
+    messages.push({ role, content: `<UNTRUSTED>${defangAngleFence(texts.join('\n'))}</UNTRUSTED>` });
+  }
+  const requested = typeof params.maxTokens === 'number' && Number.isFinite(params.maxTokens) && params.maxTokens > 0 ? Math.floor(params.maxTokens) : undefined;
+  const ceiling = samplingMaxTokens();
+  const request: Record<string, unknown> = { messages, maxTokens: requested === undefined ? ceiling : Math.min(requested, ceiling) };
+  if (typeof params.systemPrompt === 'string' && params.systemPrompt.length > 0) request.systemPrompt = defangAngleFence(params.systemPrompt);
+  if (Array.isArray(params.stopSequences)) request.stopSequences = params.stopSequences.filter((x): x is string => typeof x === 'string');
+  return { request };
 }
 
 /**

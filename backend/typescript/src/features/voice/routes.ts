@@ -24,7 +24,7 @@ import { getRealtimeConfig, walkieProviderCredential } from './realtime/config.j
 import { beginSpeak, cancelSpeak, dropSpeak, endSpeak, isSpeakCancelled } from './voiceTurns.js';
 import { sendError } from '../../middleware/errorEnvelope.js';
 
-const BASE = '/v1/host/openwop-app/voice/session';
+const BASE = '/host/openwop-app/voice/session';
 /** Host default voice when an agent has no `agentProfile.configParameters.voice.voiceId` (P3). */
 const DEFAULT_VOICE_ID = 'default';
 

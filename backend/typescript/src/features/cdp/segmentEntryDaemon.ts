@@ -17,6 +17,7 @@ import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { emitHostEvent } from '../../host/hostEventDispatcher.js';
 import { listWatchedSegments, resolveSegmentMembers } from '../crm/segmentsService.js';
 import { createLogger } from '../../observability/logger.js';
+import { tenantFeatureCheck } from '../../host/tenantFeatureGate.js';
 
 const log = createLogger('cdp.segmentEntryDaemon');
 const DEFAULT_INTERVAL_MS = 60_000;
@@ -44,19 +45,36 @@ export function computeNewEntrants(prev: readonly string[] | null, current: read
   return current.filter((id) => !before.has(id));
 }
 
+/** ADR 0820 §7 / G10 — the toggle this daemon's work belongs to. */
+export const SEGMENT_ENTRY_FEATURE_ID = 'cdp';
+
+/**
+ * ADR 0820 §7 / G10 — a snapshot older than this is RE-SEEDED, never diffed. A
+ * tenant whose `cdp` access lapsed is skipped (its snapshot stops moving), so on
+ * re-entitlement days later a diff would fire a journey for everyone who entered
+ * during the lapse. A fleet outage is minutes, well inside this window, so its
+ * entrants still fire on recovery.
+ */
+export const SNAPSHOT_RESEED_AFTER_MS = 6 * 60 * 60_000;
+
 /** One diff pass over every watched segment. Returns the number of entry events emitted. */
 export async function sweepSegmentEntries(storage: Storage, now: number = Date.now()): Promise<number> {
   const slot = Math.floor(now / DEFAULT_INTERVAL_MS);
   let emitted = 0;
+  // ADR 0820 §7 / G10 — per-tenant gate (toggle + plan), memoized for this pass.
+  const mayUse = tenantFeatureCheck(SEGMENT_ENTRY_FEATURE_ID);
   for (const seg of await listWatchedSegments()) {
     try {
+      // Silent, cheap skip: no claim, no membership resolve, no event.
+      if (!(await mayUse(seg.tenantId))) continue;
       // Fire-once across the fleet: only one instance processes a segment per slot.
       const claim = await storage.claimOnce(`cdp:segment-entry:${seg.tenantId}:${seg.segmentId}:${slot}`, new Date(now).toISOString());
       if (!claim) continue;
       const members = await resolveSegmentMembers(seg.tenantId, seg.segmentId);
       const currentIds = members.map((c) => c.contactId);
       const prior = await snapshots.get(snapKey(seg.tenantId, seg.segmentId));
-      const newEntrants = computeNewEntrants(prior ? prior.memberIds : null, currentIds);
+      const fresh = prior && now - Date.parse(prior.at) <= SNAPSHOT_RESEED_AFTER_MS ? prior : null;
+      const newEntrants = computeNewEntrants(fresh ? fresh.memberIds : null, currentIds);
       for (const contactId of newEntrants) {
         await emitHostEvent({ type: SEGMENT_ENTERED_EVENT, tenantId: seg.tenantId, payload: { segmentId: seg.segmentId, contactId } });
         emitted += 1;

@@ -1,6 +1,7 @@
 {
   "name": "feature.assistant.nodes",
-  "version": "1.4.2",
+  "version": "2.0.1",
+  "kind": "node",
   "description": "Executive-Assistant graph/logic node pack. THIN by design \u2014 only the memory-graph + prioritization nodes over ctx.features.assistant + ctx.kanban. Full coverage of the assistant surface: commitment / decision / meeting / stakeholder reads + writes (role:action \u2014 presentational; a replay/fork RE-RUNS them, which is safe because every id is a content hash) alongside the original perception + prioritization + briefing nodes. ALL external I/O (Drive/Gmail/Calendar reads, mail sends) reuses the existing core node packs (core.openwop.{mcp,http,integration}); this pack authors no I/O node.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
@@ -13,7 +14,7 @@
     "prioritization"
   ],
   "engines": {
-    "openwop": ">=1.0.0 <2.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "nodes": [
     {
@@ -39,7 +40,7 @@
       "version": "1.0.0",
       "label": "Prioritize",
       "description": "Scores a surface item on the signal weights of the active prioritization profile and buckets it surface | handle | defer (ADR 0023 \u00a74). Pure + deterministic (replay-stable).",
-      "category": "transform",
+      "category": "data",
       "role": "pure",
       "capabilities": [
         "cacheable"
@@ -81,7 +82,7 @@
       "version": "1.0.0",
       "label": "Prepare Action Request",
       "description": "Pure transform (ADR 0023 \u00a712 T6): maps an approved PendingAction (kind/payload/draft) into the HTTP request body + URL variables the execution workflow's core.openwop.http.fetch node dispatches under the approving principal's write-scoped connection. Deterministic / replay-stable.",
-      "category": "transform",
+      "category": "data",
       "role": "pure",
       "capabilities": [
         "cacheable"
@@ -92,26 +93,8 @@
       "version": "1.0.0",
       "label": "Confirm Action Send",
       "description": "Execution verdict for assistant action workflows (ADR 0023 \u00a712 T6): fails the run unless the upstream provider call answered 2xx \u2014 core.openwop.http.fetch deliberately completes on any outcome (side-effect-once), so this gate is what keeps a refused send from being recorded as sent.",
-      "category": "transform",
+      "category": "data",
       "role": "pure",
-      "capabilities": []
-    },
-    {
-      "typeId": "feature.assistant.nodes.list-projects",
-      "version": "1.0.0",
-      "label": "Assistant: List Projects",
-      "description": "Lists the principal's projects over ctx.features.assistant.listProjects. Output: { projects }. Tenant-guarded.",
-      "category": "integration",
-      "role": "action",
-      "capabilities": []
-    },
-    {
-      "typeId": "feature.assistant.nodes.get-project",
-      "version": "1.0.0",
-      "label": "Assistant: Get Project",
-      "description": "Fetches one project by id over ctx.features.assistant.getProject. Inputs: { projectId }. Output: { project } (null when absent).",
-      "category": "integration",
-      "role": "action",
       "capabilities": []
     },
     {

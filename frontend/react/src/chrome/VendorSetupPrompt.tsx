@@ -25,6 +25,8 @@ import type { Provider } from '../features/connections/connectionsClient.js';
 // Lazy (entry-chunk structural split): the connections client is only needed once this prompt decides to render.
 const connections = () => import('../features/connections/connectionsClient.js');
 import { isFirstRunDismissed, dismissFirstRun } from '../onboarding/firstRunFlag.js';
+import { useScopeWriteAccess } from '../lib/writeAccess.js';
+import { classifyHttpError } from '../client/classifyHttpError.js';
 
 /** The vendor groups the wizard offers, keyed by the ADR 0185 vendor label. */
 const VENDOR_KEYS = ['Google', 'Microsoft 365'] as const;
@@ -66,6 +68,10 @@ export function VendorSetupPrompt(): JSX.Element | null {
   const [error, setError] = useState<string | null>(null);
 
   const uid = user?.uid;
+  // ADR 0780 D1 — connecting needs `workspace:write`; never pop the connect
+  // modal at a Viewer, whose every click would be refused (fail-open while
+  // access is unknown).
+  const canWrite = useScopeWriteAccess('workspace:write');
 
   useEffect(() => {
     // No uid → treated as dismissed (never nag); storage errors fail closed
@@ -88,7 +94,7 @@ export function VendorSetupPrompt(): JSX.Element | null {
     if (user && vendor === null) setVendor(seedVendor(user.providerIds));
   }, [user, vendor]);
 
-  if (loading || !user || dismissed || providers === null || !eligible) return null;
+  if (loading || !user || dismissed || providers === null || !eligible || !canWrite) return null;
 
   function dismiss(): void {
     dismissFirstRun('vendorSetup', uid);
@@ -103,8 +109,8 @@ export function VendorSetupPrompt(): JSX.Element | null {
       const url = await (await connections()).beginOAuth(providerId, '/access?tab=connections');
       dismiss(); // one consent is the win — don't re-prompt after the redirect
       window.location.href = url;
-    } catch {
-      setError(t('vendorSetupError'));
+    } catch (err) {
+      setError(classifyHttpError(err).kind === 'forbidden' ? t('common:error_forbidden') : t('vendorSetupError'));
       setConnecting(null);
     }
   }

@@ -26,7 +26,7 @@ export const operationsFeature: BackendFeature = {
       'The operator admin suite: webhook-delivery health (attempts, backoff, dead-letters, manual retry), '
       + 'trigger-subscription state, DLQ depths with gated replay, and a point-in-time system-health panel — '
       + 'batched reads over the existing backend primitives, composed as an /operations hub. Cross-tenant and '
-      + 'infra panels are superadmin-only regardless of this toggle. OFF by default.',
+      + 'infra panels are superadmin-only regardless of this toggle.',
     category: 'Admin',
     status: 'off',
     bucketUnit: 'tenant',

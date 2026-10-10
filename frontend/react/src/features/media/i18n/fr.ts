@@ -23,6 +23,8 @@ export const messages = {
 
   // aria-labels
   orgPickerLabel: 'Organisation',
+  // ADR 0817 — the public site's images, offered to a site admin as a scope.
+  frontPageScope: 'Page d’accueil (site public)',
 
   // Collections sidebar
   collectionsHeading: 'Collections',
@@ -63,7 +65,12 @@ export const messages = {
   createFailed: 'Échec de la création.',
   deleteFailed: 'Échec de la suppression.',
   uploadFailed: 'Échec du téléversement.',
-  deleteAssetConfirm: 'Supprimer cette ressource ? Cette action est irréversible.',
+  deleteAssetConfirm: 'Supprimer « {{name}} » ? Cette action est irréversible.',
+  deleteAssetUsedBy_one: 'Utilisé à {{count}} endroit, qui affichera une image cassée :',
+  deleteAssetUsedBy_other: 'Utilisé à {{count}} endroits, qui afficheront une image cassée :',
+  deleteAssetUsedByMore_one: '…et {{count}} autre.',
+  deleteAssetUsedByMore_other: '…et {{count}} autres.',
+  deleteAssetUsageUnknown: "Impossible de vérifier où ce fichier est utilisé. Les pages qui l'affichent seront cassées.",
   deleteCollectionConfirm: 'Supprimer la collection « {{name}} » ?',
 
   // Media picker dialog (ADR 0206 B4)
@@ -87,6 +94,8 @@ export const messages = {
   usedByKindCmsPage: 'Page du CMS',
   usedByKindCampaign: 'Campagne',
   usedByKindCreativeBrief: 'Brief créatif',
+  usedByKindCreativeRender: 'Rendu créatif',
+  usedByKindOther: 'Autre',
   chooseImage: "Choisir une image",
   replaceImage: "Remplacer l’image",
   clearImage: "Effacer {{field}}",

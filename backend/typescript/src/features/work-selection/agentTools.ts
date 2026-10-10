@@ -19,7 +19,7 @@
  */
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
 import { resolveFeatureToggle } from '../../host/agentToolKit.js';
-import { getBoard, listCards, boardSubject } from '../../host/kanbanService.js';
+import { getBoard, listCards, boardSubject, todoColumnOf, workingColumnOf } from '../../host/kanbanService.js';
 import { resolveSubjectAccess, levelSatisfies } from '../../host/subjectAccess.js';
 import { rankByPriority } from '../../host/weightedScoring.js';
 import { WORK_SELECTION_CRITERIA, projectCardScores } from './compiler.js';
@@ -82,10 +82,13 @@ export async function readBoardRanking(
     if (level !== null && !levelSatisfies(level, 'read')) return [];
   }
 
-  const todo = board.columns.find((c) => c.id === 'todo' || c.name.toLowerCase() === 'to do');
-  if (!todo) return [];
+  // ADR 0774 — the preview ranks exactly what the pick would consider: the
+  // lane resolvers, nothing on a board the loop refuses (no in-progress lane),
+  // and no WorkItem card (the ADR 0738 dispatcher owns those).
+  const todo = todoColumnOf(board);
+  if (!todo || !workingColumnOf(board)) return [];
 
-  const candidates = (await listCards(boardId)).filter((c) => c.columnId === todo.id);
+  const candidates = (await listCards(boardId)).filter((c) => c.columnId === todo.id && !c.workItemId);
   // Project ONCE per card and reuse for both ranking and the "why" rendering.
   // Projecting again inside the map would double the work per card on a path the
   // board panel polls.
@@ -118,6 +121,7 @@ export function registerWorkSelectionAgentTools(): void {
     // "The caller could already see the title" is an access argument; content
     // trust is an injection argument, and they are not the same question.
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: WORK_SELECTION_PREVIEW_TOOL_ID,
       description:

@@ -1,14 +1,32 @@
 /**
- * Deferred-Plan Phase A — invite email delivery (ADR 0004 ⊕ ADR 0193).
- * Service-level over a FAKE SendGrid endpoint (the email-adapter.test.ts
- * harness pattern): pins
+ * Deferred-Plan Phase A — invite email delivery (ADR 0004 ⊕ ADR 0193), plus
+ * DEF-3 / ADR 0655 D8 (the ledger reservation). Service-level over a FAKE
+ * SendGrid endpoint (the email-adapter.test.ts harness pattern): pins
  *   1. a configured inviter (brokered connection) + org sender ⇒ exactly ONE
- *      provider request whose body carries the accept URL (the delivery
- *      channel for the one-time token);
+ *      provider request, addressed to the invitee, whose body carries the
+ *      accept URL (the delivery channel for the one-time token);
  *   2. retry-delivery for the SAME invite ⇒ still one request (the adapter's
- *      sent-ledger dedups on `org-invite:<inviteId>`);
- *   3. no sender identity ⇒ 'skipped', zero requests (fail-soft copy-link UX);
- *   4. no brokered connection ⇒ 'skipped' (credential_required is caught).
+ *      sent-ledger dedups on the deterministic `org-invite:<inviteId>` key);
+ *   3. no sender identity ⇒ `skipped / no_sender`, zero requests (fail-soft copy-link UX);
+ *   4. no brokered connection ⇒ `skipped / no_connection` (credential_required is caught);
+ *   5. DEF-3 — two CONCURRENT deliveries of one invite ⇒ exactly ONE provider
+ *      request (the ledger CAS reservation), both callers `sent`;
+ *   6. DEF-3 — a FAILED send releases the reservation, so a retry re-sends
+ *      (put-on-accept). The `skipped` outcomes carry the R2 review-F1 `reason`.
+ *
+ * HONEST CEILING (determinism, claim 5): since ADR 0655 D8 the losing caller
+ * re-reads the ledger after a REAL `setTimeout(LOSER_REREAD_WAIT_MS = 250)`
+ * (`host/emailAdapter.ts`) and reports `sent` only if the winner's provider
+ * call was ACCEPTED by then. The fake provider answers immediately, so the
+ * winner lands well inside the window — but under extreme host load a winner
+ * slower than 250 ms would make the loser `skipped / send_failed`. That bound
+ * is product timing; the test keeps the full claim rather than loosening it.
+ *
+ * Sabotage that turns it red (grade-tests wave 2, probes `g2-del-*`): a
+ * non-deterministic idempotency key → 1 and 5; a different accept-link path →
+ * 1; the no-sender guard returning `sent` → 3; credential_required mapped to
+ * `send_failed` → 4; the reservation compare disabled → 5; the release-on-
+ * failure dropped → 6.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -74,7 +92,8 @@ describe('invite email delivery (Phase A)', () => {
     const body = requests[0]!.body;
     expect(body).toContain(`https://app.deliverco.test/invitations/accept?token=${encodeURIComponent(token)}`);
     expect(body).toContain('editor');
-    expect(body).toContain('new@deliverco.test');
+    const sent = JSON.parse(body) as { personalizations: Array<{ to: Array<{ email: string }> }> };
+    expect(sent.personalizations[0]!.to.map((t) => t.email)).toEqual(['new@deliverco.test']); // addressed to the INVITEE
 
     // Retry (route replay) — the sent-ledger dedups on org-invite:<inviteId>.
     const again = await deliverInviteEmail({
@@ -104,8 +123,10 @@ describe('invite email delivery (Phase A)', () => {
     requests = [];
     const args = { storage, tenantId: 'tinv', actingUserId: 'inviter-1', invite, token, baseUrl: 'https://app.raceco.test' };
     const [a, b] = await Promise.all([deliverInviteEmail(args), deliverInviteEmail(args)]);
-    // Exactly ONE provider request — the CAS reservation makes the loser treat
-    // the winner's in-flight send as the send (both report 'sent').
+    // Exactly ONE provider request — the ledger CAS reservation admits one
+    // sender; the loser re-reads after a bounded wait (ADR 0655 D8) and reports
+    // 'sent' only for an ACCEPTED winner. The fake provider answers immediately,
+    // so the winner lands inside the window (see the header's HONEST CEILING).
     expect(requests).toHaveLength(1);
     expect([a, b]).toEqual([{ outcome: 'sent' }, { outcome: 'sent' }]);
   });

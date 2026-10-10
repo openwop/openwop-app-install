@@ -21,16 +21,14 @@
 
 import type { Express } from 'express';
 import { readdirSync, readFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { OpenwopError } from '../types.js';
 import { getAgentRegistry } from '../executor/agentRegistry.js';
-import { installPackFromRegistry, resolveDefaultPackDir, isSafePackName } from '../packs/registryInstaller.js';
+import { resolveDefaultPackDir } from '../packs/registryInstaller.js';
+import { assertInstallable, installFromConfiguredRegistry } from '../packs/installLane.js';
 import { isSuperadmin, requireSuperadmin } from '../host/superadmin.js';
 import { createLogger } from '../observability/logger.js';
-
-/** SemVer (with optional pre-release/build) — `version` is interpolated into the
- *  registry URL + fs paths, so reject anything that isn't a clean version string. */
-const SEMVER_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+import { resolveCallerUser } from '../features/users/usersGuards.js';
 
 const log = createLogger('routes.agentPackRegistry');
 
@@ -51,8 +49,11 @@ interface AgentPackSummary {
 }
 
 export function registerAgentPackRegistryRoutes(app: Express): void {
-  app.get('/v1/host/openwop-app/registry/agent-packs', (req, res, next) => {
+  app.get('/host/openwop-app/registry/agent-packs', async (req, res, next) => {
     try {
+      // ADR 0826 D8 — this list answered an ANONYMOUS caller 200. It now needs a
+      // signed-in caller, the same posture as the marketplace `/listings` browse.
+      await resolveCallerUser(req);
       const packs = scanLocalAgentPacks();
       // UX_UPGRADE-agents AG-G1 — the list tells the caller whether they may
       // INSTALL, computed from the SAME predicate the install route enforces
@@ -66,41 +67,29 @@ export function registerAgentPackRegistryRoutes(app: Express): void {
     }
   });
 
-  app.post('/v1/host/openwop-app/registry/agent-packs/install', async (req, res, next) => {
+  app.post('/host/openwop-app/registry/agent-packs/install', async (req, res, next) => {
     try {
       // (2026-07 vuln-scan M10) A host-global pack install hot-reloads code into the
       // running host — an operator-only action. Gate on superadmin, matching the
       // sibling workflow-chain-pack installer (routes/workflows.ts).
       requireSuperadmin(req, 'Agent-pack registry install');
       const body = (req.body ?? {}) as { name?: unknown; version?: unknown };
-      if (typeof body.name !== 'string' || body.name.length === 0) {
-        throw new OpenwopError('validation_error', '`name` is required.', 400);
-      }
-      if (!body.name.startsWith('core.openwop.agents.')) {
+      if (typeof body.name !== 'string' || !body.name.startsWith('core.openwop.agents.')) {
         throw new OpenwopError(
           'validation_error',
           'This route installs `core.openwop.agents.*` packs only. Use the regular pack-install surface for other namespaces.',
           400,
         );
       }
-      // Path-safety (2026-07 vuln-scan): `name` reaches join(packDir, name) + rmSync
-      // and the registry URL; the prefix check alone admits `…agents.x/../../y`.
-      if (!isSafePackName(body.name)) {
-        throw new OpenwopError('validation_error', '`name` contains path-unsafe characters.', 400);
-      }
-      const version = typeof body.version === 'string' && body.version.length > 0
-        ? body.version
-        : '1.0.0';
-      if (!SEMVER_RE.test(version)) {
-        throw new OpenwopError('validation_error', '`version` MUST be a SemVer string.', 400);
-      }
-      const packDir = resolveDefaultPackDir();
-      const registry = process.env.OPENWOP_REGISTRY_URL;
-      const trustedKeysDir = resolve('../../../registry/keys');
-      const result = await installPackFromRegistry(
-        { name: body.name, version },
-        { packDir, registry, trustedKeysDir },
-      );
+      // ADR 0826 D4 — the ONE install lane (path-safe name, SemVer, tombstone,
+      // revoked version, configured registry + keys, mapped errors). The prefix
+      // check above admits `…agents.x/../../y`; the lane's name guard refuses it.
+      const target = assertInstallable({
+        name: body.name,
+        version: typeof body.version === 'string' && body.version.length > 0 ? body.version : '1.0.0',
+      });
+      const result = await installFromConfiguredRegistry(target);
+      const version = target.version;
       log.info('agent_pack_install_completed', {
         name: body.name,
         version,

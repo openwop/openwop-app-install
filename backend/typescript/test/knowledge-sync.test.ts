@@ -126,11 +126,11 @@ function client() {
 const uniqEmail = (who: string) => `${who}-${Date.now()}-${n++}@acme.test`;
 async function ownerWithOrg(who: string) {
   const c = client();
-  await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail(who) });
-  const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  await c.post('/host/openwop-app/test/login', { email: uniqEmail(who) });
+  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   return { c, orgId: org.body.orgId as string };
 }
-const KS = '/v1/host/openwop-app/knowledge-sync';
+const KS = '/host/openwop-app/knowledge-sync';
 
 async function enableToggle(on: boolean) {
   const d = getToggleDefault('knowledge-sync');
@@ -235,8 +235,8 @@ describe('create normalizes a Google Drive folder URL (ADR 0107 follow-on)', () 
   async function seededOrg(who: string): Promise<{ c: ReturnType<typeof client>; orgId: string; connectionId: string; collectionId: string }> {
     const tenantId = `org:${who}-${Date.now()}-${n++}`;
     const c = client();
-    await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail(who), tenantId });
-    const orgId = (await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' })).body.orgId as string;
+    await c.post('/host/openwop-app/test/login', { email: uniqEmail(who), tenantId });
+    const orgId = (await c.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId as string;
     // seed a Google OAuth connection + a KB collection in this tenant/org (Phase 4
     // is satisfied by the built-in `google` provider, so this resolves).
     const conn = await upsertOAuthConnection({ tenantId, provider: 'google', orgId, tokens: { accessToken: 'x', tokenType: 'Bearer', scopes: ['https://www.googleapis.com/auth/drive.readonly'] } });

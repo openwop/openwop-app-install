@@ -25,7 +25,7 @@ import { createLogger } from '../../observability/logger.js';
 const log = createLogger('ambient-work-graph');
 
 // Always-on (toggle removed, 2026-06-24) — RBAC-gated only.
-const BASE = '/v1/host/openwop-app/work-graph/orgs/:orgId/suggestions';
+const BASE = '/host/openwop-app/work-graph/orgs/:orgId/suggestions';
 
 export function registerAmbientWorkGraphRoutes(deps: RouteDeps): void {
   const { app, storage } = deps;

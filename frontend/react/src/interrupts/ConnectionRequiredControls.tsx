@@ -18,6 +18,7 @@ import { Button } from '../ui/Button.js';
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { beginOAuth, listProviders } from '../features/connections/connectionsClient.js';
+import { classifyHttpError } from '../client/classifyHttpError.js';
 import { Notice } from '../ui/index.js';
 
 interface ConnectionMeta {
@@ -74,8 +75,9 @@ export function ConnectionRequiredControls({
       // user clicks "I've connected" to resume.
       const url = await beginOAuth(providerId, window.location.pathname + window.location.search);
       window.location.href = url;
-    } catch {
-      setError(t('connectionRequiredConnectError'));
+    } catch (err) {
+      // ADR 0780 D1 — a refusal is the caller's missing authority, said plainly.
+      setError(classifyHttpError(err).kind === 'forbidden' ? t('common:error_forbidden') : t('connectionRequiredConnectError'));
       setLaunching(false);
     }
   }

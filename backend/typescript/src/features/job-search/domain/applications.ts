@@ -283,6 +283,28 @@ export async function advanceApplication(
   );
 }
 
+/** ADR 0820 §7 — the application pipeline WITHOUT any write: the binding read
+ *  and the name fallback of `resolveApplicationPipeline`, minus its self-heal
+ *  CAS. For the read-only data export, which must never write. */
+async function findApplicationPipelineReadOnly(tenantId: string, orgId: string) {
+  const bound = await pipelineBindings.get(`${tenantId}:${orgId}`);
+  const all = await listPipelines(tenantId, orgId);
+  return (bound ? all.find((p) => p.pipelineId === bound.pipelineId) : undefined)
+    ?? all.find((p) => p.name === APPLICATION_PIPELINE_NAME) ?? null;
+}
+
+/** ADR 0820 §7 — this org's applications for the read-only data export: like
+ *  `listApplications`, but never provisions a pipeline (none ⇒ no applications). */
+export async function listApplicationsReadOnly(tenantId: string, orgId: string): Promise<Array<{ deal: Deal; digest: JobDigest | null }>> {
+  const pipeline = await findApplicationPipelineReadOnly(tenantId, orgId);
+  if (!pipeline) return [];
+  const out: Array<{ deal: Deal; digest: JobDigest | null }> = [];
+  for (const deal of await listDeals(tenantId, orgId, { pipelineId: pipeline.pipelineId })) {
+    out.push({ deal, digest: (await jobDigests.get(`${tenantId}:${deal.dealId}:1`)) ?? null });
+  }
+  return out;
+}
+
 /** Applications for this org — deals on the application pipeline, with digests. */
 export async function listApplications(tenantId: string, orgId: string): Promise<Array<{ deal: Deal; digest: JobDigest | null }>> {
   const pipeline = await ensureApplicationPipeline(tenantId, orgId);

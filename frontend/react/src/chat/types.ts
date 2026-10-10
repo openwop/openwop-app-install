@@ -110,6 +110,14 @@ export interface WorkflowRunState {
    *  so the determination survives subsequent reloads — no re-probing
    *  a known-unavailable run. */
   runUnavailable?: boolean;
+  /** ADR 0764 D4 (CHATWF-6) — the live subscription gave up healing (the backend
+   *  stayed unreachable past the retry budget). The bubble can no longer claim the
+   *  run is "running"; it says updates stopped and links the run. Cleared when a
+   *  reload re-attaches. */
+  streamLost?: boolean;
+  /** ADR 0764 D4 — a cancel request that FAILED. The run's own status is left
+   *  alone (it may well still be running); only the failed request is reported. */
+  cancelError?: string;
   /** Friendly name of the most recently started node. */
   currentNodeName: string | null;
   /** Node ids that have emitted `node.started` but not yet
@@ -369,7 +377,7 @@ export interface ChatMessage {
       code: string;
       message: string;
       category?: 'network' | 'auth' | 'rate_limit' | 'quota' | 'timeout' | 'safety' | 'config' | 'unknown';
-      action?: 'retry' | 'regenerate' | 'reconfigure' | 'abort' | 'wait';
+      action?: 'retry' | 'regenerate' | 'reconfigure' | 'abort' | 'wait' | 'sign_in';
       userMessage?: string;
       retryAfterMs?: number;
     };
@@ -414,6 +422,9 @@ export interface ChatMessage {
   };
   /** Structured state for `role: 'workflow_run'` messages. */
   workflowRun?: WorkflowRunState;
+  /** ADR 0768 P3 — reply duration in ms, derived from the conversation log's turn
+   *  timestamps (see `turnsToBubbles`). The receipt states it only when present. */
+  replyMs?: number;
   /** User thumbs-up / thumbs-down feedback recorded via the message-actions
    *  toolbar. Persisted to localStorage with the rest of the session; no
    *  backend wiring yet (signal-only). Absent = no rating given. */

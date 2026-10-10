@@ -9,6 +9,9 @@
  * vetted upstream and exercised elsewhere; what THIS test pins is the host's own
  * decision AFTER a valid assertion, in the real ACS route, parallel to the
  * validate seam. Same mock pattern as `auth-saml-disabled-user.test.ts`.
+ *
+ * Sabotage that turns it red: `authSamlSso.ts` `if (trustRoot === 'mismatch') {`
+ * → `if (false) {` (CROSS case: a session is minted and the row provisioned).
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import express, { type Express } from 'express';
@@ -20,11 +23,12 @@ import { openSqliteStorage } from '../src/storage/sqlite/index.js';
 import { __resetHostExtPersistence, initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { errorEnvelopeMiddleware } from '../src/middleware/errorEnvelope.js';
 import { registerSamlSsoRoutes } from '../src/routes/authSamlSso.js';
-import { __resetUsersStore } from '../src/features/users/usersService.js';
+import { __resetUsersStore, getUserByPrincipal } from '../src/features/users/usersService.js';
 import { provisionUser } from '../src/host/auth/scimProvisioningService.js';
 
 const TENANT = 'acme-corp';
 const SCIM_TRUST_ROOT = 'urn:idp:acme'; // the IdP entityID the SCIM connection is bound to
+const SAVED_SESSION_SECRET = process.env.OPENWOP_SESSION_SECRET;
 
 // Mutable per-test identity the mocked validator returns. `issuer` is the SAML
 // lane's signed trust root — same as SCIM ⇒ link; different ⇒ cross-root refuse.
@@ -54,17 +58,12 @@ beforeAll(async () => {
   process.env.OPENWOP_SAML_IDP_SSO_URL = 'https://example.okta.com/app/abc/sso/saml';
   process.env.OPENWOP_SAML_IDP_CERT = 'MIIBdummybase64certbodywithoutpemheaders0000000000';
   process.env.OPENWOP_SAML_SP_ENTITY_ID = 'https://app.openwop.dev/saml';
-  process.env.OPENWOP_SAML_ACS_URL = 'https://app.openwop.dev/api/v1/host/openwop-app/auth/saml/sso/acs';
+  process.env.OPENWOP_SAML_ACS_URL = 'https://app.openwop.dev/api/host/openwop-app/auth/saml/sso/acs';
   process.env.OPENWOP_SAML_TENANT = TENANT;
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
 
   __resetHostExtPersistence();
   initHostExtPersistence(openSqliteStorage(join(dir, 'saml.db')));
-  await __resetUsersStore();
-
-  // A SCIM record for the colliding externalId, bound to IdP-A's trust root.
-  // The ACS consults `s.tenantId` (OPENWOP_SAML_TENANT); provision there.
-  await provisionUser({ tenantId: TENANT, userName: 'collider', externalId: 'collide-id', idpEntityId: SCIM_TRUST_ROOT });
 
   const app: Express = express();
   registerSamlSsoRoutes(app);
@@ -78,16 +77,23 @@ afterAll(async () => {
   for (const k of ['OPENWOP_SAML_IDP_SSO_URL', 'OPENWOP_SAML_IDP_CERT', 'OPENWOP_SAML_SP_ENTITY_ID', 'OPENWOP_SAML_ACS_URL', 'OPENWOP_SAML_TENANT']) {
     delete process.env[k];
   }
+  if (SAVED_SESSION_SECRET === undefined) delete process.env.OPENWOP_SESSION_SECRET;
+  else process.env.OPENWOP_SESSION_SECRET = SAVED_SESSION_SECRET;
   rmSync(dir, { recursive: true, force: true });
 });
 
-beforeEach(() => {
+beforeEach(async () => {
   mockState.nameId = 'collide-id';
   mockState.issuer = SCIM_TRUST_ROOT;
+  // Fresh store per case (no case sees another's SAML principal), then a SCIM
+  // record for the colliding externalId, bound to IdP-A's trust root. The ACS
+  // consults `s.tenantId` (OPENWOP_SAML_TENANT); provision there.
+  await __resetUsersStore();
+  await provisionUser({ tenantId: TENANT, userName: 'collider', externalId: 'collide-id', idpEntityId: SCIM_TRUST_ROOT });
 });
 
 async function postAcs(): Promise<Response> {
-  return fetch(`${BASE}/v1/host/openwop-app/auth/saml/sso/acs`, {
+  return fetch(`${BASE}/host/openwop-app/auth/saml/sso/acs`, {
     method: 'POST',
     redirect: 'manual',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -111,5 +117,7 @@ describe('RFC 0163 §B — production ACS same-IdP trust-root check', () => {
     expect(res.headers.get('location')).toBe('/?ssoError=1');
     // The load-bearing assertion: no session material leaves the host.
     expect(res.headers.get('set-cookie') ?? '').not.toMatch(/__session=[^;]/);
+    // Refused BEFORE provisioning: no SAML principal was minted for the collider.
+    expect(await getUserByPrincipal(TENANT, 'saml:collide-id')).toBeNull();
   });
 });

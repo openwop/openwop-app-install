@@ -19,16 +19,16 @@ beforeAll(async () => {
 afterAll(async () => { await closeApp(); });
 
 const client = (): Client => makeClient(() => BASE);
-const L = '/v1/host/openwop-app/priority-matrix/lists';
+const L = '/host/openwop-app/priority-matrix/lists';
 const HIGH = { 'strategic-alignment': 9, roi: 8, urgency: 8, 'compliance-risk': 9, cost: 4 };
 
 async function signup(c: Client): Promise<void> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail('idea-crud') });
+  const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail('idea-crud') });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
 }
 
 async function newList(c: Client): Promise<string> {
-  const orgId = (await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
+  const orgId = (await c.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
   return (await c.post(L, { orgId, name: 'Roadmap', presetId: 'weighted' })).body.id;
 }
 

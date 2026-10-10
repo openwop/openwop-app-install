@@ -102,19 +102,19 @@ let n = 0;
 async function ownerOrg(): Promise<{ owner: Client; orgId: string; tenantId: string }> {
   const tenantId = `org:commercechain-${Date.now()}-${n++}`;
   const owner = client();
-  const r = await owner.post('/v1/host/openwop-app/test/login', { email: `commercechain-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await owner.post('/host/openwop-app/test/login', { email: `commercechain-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return { owner, orgId: org.body.orgId, tenantId };
 }
-const c = (orgId: string, suffix = ''): string => `/v1/host/openwop-app/commerce/orgs/${encodeURIComponent(orgId)}${suffix}`;
+const c = (orgId: string, suffix = ''): string => `/host/openwop-app/commerce/orgs/${encodeURIComponent(orgId)}${suffix}`;
 
 interface RunSnapshot { status: string; error?: { code: string; message: string } }
 async function pollRun(owner: Client, runId: string): Promise<RunSnapshot> {
   let snap: RunSnapshot = { status: 'pending' };
   for (let i = 0; i < 80; i++) {
-    const r = await owner.get(`/v1/runs/${runId}`);
+    const r = await owner.get(`/runs/${runId}`);
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     snap = r.body as RunSnapshot;
     if (snap.status === 'completed' || snap.status === 'failed' || snap.status === 'cancelled' || snap.status.startsWith('waiting')) break;
@@ -125,7 +125,7 @@ async function pollRun(owner: Client, runId: string): Promise<RunSnapshot> {
 
 interface BundleEvent { type?: string; nodeId?: string; payload?: Record<string, unknown> }
 async function bundleEvents(owner: Client, runId: string): Promise<BundleEvent[]> {
-  const b = await owner.get(`/v1/runs/${runId}/debug-bundle`);
+  const b = await owner.get(`/runs/${runId}/debug-bundle`);
   expect(b.status, JSON.stringify(b.body)).toBe(200);
   return (b.body.events as BundleEvent[]) ?? [];
 }
@@ -151,7 +151,7 @@ describe('commerce.post-purchase-thankyou — real order read, honest missing-cr
     const expanded = expandChain(found!.chain, { params });
     registerWorkflow(expanded);
 
-    const create = await owner.post('/v1/runs', { workflowId: expanded.workflowId, inputs: params });
+    const create = await owner.post('/runs', { workflowId: expanded.workflowId, inputs: params });
     expect(create.status, JSON.stringify(create.body)).toBe(201);
     const runId = create.body.runId as string;
 
@@ -164,7 +164,7 @@ describe('commerce.post-purchase-thankyou — real order read, honest missing-cr
       // credential-less test tenant fails one step LATER and honestly:
       // `byok_required` — configure a key — instead of naming a provider that
       // never existed.
-    expect(snap.error?.code).toBe('byok_required');
+    expect(snap.error?.code).toBe('openwop-app.byok_required');
 
     const events = await bundleEvents(owner, runId);
     const orderOutputs = completedOutputs(events, 'order');
@@ -190,13 +190,13 @@ describe('commerce.low-stock-reorder — real catalog read, honest missing-crede
     const expanded = expandChain(found!.chain, { params });
     registerWorkflow(expanded);
 
-    const create = await owner.post('/v1/runs', { workflowId: expanded.workflowId, inputs: params });
+    const create = await owner.post('/runs', { workflowId: expanded.workflowId, inputs: params });
     expect(create.status, JSON.stringify(create.body)).toBe(201);
     const runId = create.body.runId as string;
 
     const snap = await pollRun(owner, runId);
     expect(snap.status).toBe('failed');
-    expect(snap.error?.code).toBe('byok_required');
+    expect(snap.error?.code).toBe('openwop-app.byok_required');
 
     const events = await bundleEvents(owner, runId);
     const catalogOutputs = completedOutputs(events, 'catalog');

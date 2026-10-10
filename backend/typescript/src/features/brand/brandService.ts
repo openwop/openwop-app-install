@@ -342,6 +342,19 @@ function sanitizeIdentity(raw: unknown): BrandIdentity | undefined {
 const tenantKey = (tenantId: string, id: string): string => `${tenantId}::${id}`;
 
 /** List the tenant's brands (bounded prefix scan — never a cross-tenant `.list()`). */
+/**
+ * `updatedAt` is the optimistic-concurrency token (`expectedUpdatedAt`, R2
+ * BR-SP-5), so every save MUST move it. A millisecond clock does not: two saves
+ * in the same millisecond produced the same token, and a stale editor holding
+ * the first one passed the check and silently overwrote the second edit (the
+ * flaky `brand-route` BR-SP-5 test was this, not test noise). Strictly
+ * increasing: now, or one millisecond past the previous value.
+ */
+export function nextUpdatedAt(previous: string | undefined, now: number = Date.now()): string {
+  const prev = previous ? Date.parse(previous) : Number.NaN;
+  return new Date(Number.isFinite(prev) && prev >= now ? prev + 1 : now).toISOString();
+}
+
 export async function listBrands(tenantId: string, orgId?: string): Promise<Brand[]> {
   const all = await brands.listByPrefix(`${tenantId}::`);
   const scoped = orgId ? all.filter((b) => b.orgId === orgId) : all;
@@ -457,7 +470,7 @@ export async function updateBrand(
     channelVoiceRules:
       input.channelVoiceRules !== undefined ? sanitizeChannelRules(input.channelVoiceRules) : existing.channelVoiceRules,
     governance: input.governance !== undefined ? sanitizeGovernance(input.governance) : existing.governance,
-    updatedAt: new Date().toISOString(),
+    updatedAt: nextUpdatedAt(existing.updatedAt),
   };
   // Identity facet (ADR 0170): whole-field replace when provided; a provided value
   // that sanitizes away clears it. `...existing` already carried any prior identity.

@@ -1,0 +1,42 @@
+{
+  "name": "@openwop/agent-host",
+  "version": "0.1.2",
+  "description": "The Claude Code companion for openwop-app (ADR 0785): pairs this machine with a workspace by device code, hosts your own `claude` in a terminal the web app shows, and runs tasks the app dispatches. Connects OUT only; never listens.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/openwop/openwop-app.git",
+    "directory": "clients/agent-host"
+  },
+  "homepage": "https://github.com/openwop/openwop-app/tree/main/clients/agent-host#readme",
+  "keywords": [
+    "openwop",
+    "claude-code",
+    "agent",
+    "terminal"
+  ],
+  "type": "module",
+  "bin": {
+    "openwop-agent-host": "src/bin.js"
+  },
+  "files": [
+    "src/",
+    "README.md"
+  ],
+  "scripts": {
+    "start": "node src/bin.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "node-pty": "1.1.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "allowScripts": {
+    "node-pty@1.1.0": true
+  }
+}

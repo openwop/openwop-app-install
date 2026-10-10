@@ -239,7 +239,7 @@ describe('ADR 0599 §7 — the config gates refuse a request with no acting subj
     };
     registerInsightsSuiteRoutes({ app } as never);
 
-    for (const key of ['GET /v1/host/openwop-app/insights-suite/config', 'PUT /v1/host/openwop-app/insights-suite/config']) {
+    for (const key of ['GET /host/openwop-app/insights-suite/config', 'PUT /host/openwop-app/insights-suite/config']) {
       const handler = handlers[key];
       expect(handler, `${key} was not registered`).toBeTruthy();
       let captured: { httpStatus?: number; code?: string } | undefined;

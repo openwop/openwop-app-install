@@ -25,9 +25,11 @@ import { userRef } from '../../host/conversationStore.js';
 // Publishing COMPOSES the CMS experiment config (read-only) and the ONE consent
 // rule (ADR 0020, the analytics beacon's gate) — it never stores anything.
 import { assignVariantForVisitor, findRunningExperiment } from '../cms/pageExperimentsService.js';
-import { isAllowed } from '../consent/consentService.js';
+import { visitorAnalyticsAllowed, type VisitorConsentContext } from '../consent/visitorConsent.js';
 import { TtlLruCache, publicListTtlMs } from './publicReadCache.js';
 import { vendorPublicBase } from '../featureRoute.js';
+import { stripHeadingEmphasis } from './headingEmphasis.js';
+import { protocolVersions } from '../../middleware/protocolVersion.js';
 
 const log = createLogger('features.publishing');
 
@@ -76,10 +78,15 @@ export async function putSeo(
   pageId: string,
   actor: string,
   input: Record<string, unknown>,
+  // ADR 0836 D6 — the caller's status-dependent authority, decided on THIS read.
+  // Optional because the boot seeds (`systemSiteSeo.ts`, `systemSiteBlog.ts`)
+  // write with host authority and no request; every HTTP caller passes it.
+  opts?: { authorize?: (page: Page) => Promise<void> },
 ): Promise<PageSeo> {
   // The page MUST exist in THIS org (cross-page/org id fails closed).
   const page = await getPage(tenantId, orgId, pageId);
   if (!page) throw new OpenwopError('not_found', 'Page not found.', 404, { pageId });
+  if (opts?.authorize) await opts.authorize(page);
 
   // ADR 0593 D1, class enumeration — SEO metadata is the SECOND read-time
   // indirection into a published page, found by enumerating the class the
@@ -159,6 +166,10 @@ export interface PublicPage {
    *  experiment assigned this (consented) visitor a variant. The renderer
    *  echoes it onto its analytics beacon events (`experiment: {id, variant}`). */
   experiment?: { experimentId: string; variant: string };
+  /** ADR 0813 — ADDITIVE, posts only: lets the crawler render (prerender) give a
+   *  post its `<h1>` and Article semantics, which the SPA adds as post chrome. */
+  kind?: 'post';
+  publishedAt?: string;
   seo: {
     title: string;
     description: string;
@@ -176,7 +187,10 @@ export async function publicPageBySlug(
   baseUrl: string,
   acceptLanguage?: string | null,
   vk?: string | null,
-): Promise<{ page: PublicPage; locale: string }> {
+  /** ADR 0860 D3 — the visitor's token subject + region. Absent ⇒ unknown region
+   *  and no token (the opt-in default). */
+  visitorConsent?: VisitorConsentContext,
+): Promise<{ page: PublicPage; locale: string; served: string[] }> {
   const tenantId = await resolvePublicOrg(orgId);
   const hit = await getPublishedBySlug(tenantId, orgId, slug);
   if (!hit) throw new OpenwopError('not_found', 'Page not found.', 404, { slug });
@@ -193,24 +207,35 @@ export async function publicPageBySlug(
   let experimentStamp: { experimentId: string; variant: string } | undefined;
   const visitorKey = typeof vk === 'string' && vk.length > 0 && vk.length <= MAX.token ? vk : '';
   if (visitorKey) {
-    const experiment = await findRunningExperiment(tenantId, orgId, hit.page.pageId);
-    if (experiment && (await isAllowed(tenantId, visitorKey, 'analytics'))) {
-      const variant = assignVariantForVisitor(experiment, visitorKey);
-      if (variant && variant.versionId === null) {
-        experimentStamp = { experimentId: experiment.experimentId, variant: variant.key };
-      } else if (variant && variant.versionId !== null) {
-        const version = await getVersion(tenantId, orgId, hit.page.pageId, variant.versionId);
-        if (version) {
-          // The snapshot read mirrors restoreVersion (title + sections; the
-          // LIVE slug/status stay). Shared refs resolve like any delivery.
-          servedPage = await resolveSharedRefs({ ...hit.page, title: version.snapshot.title, sections: version.snapshot.sections });
+    // ADR 0849 D4 — an unreadable consent (or experiment) store never takes a PUBLIC page
+    // down: it serves the published page with no experiment exposure, which is exactly
+    // what a visitor without analytics consent gets.
+    try {
+      const experiment = await findRunningExperiment(tenantId, orgId, hit.page.pageId);
+      if (experiment && (await visitorAnalyticsAllowed(tenantId, visitorKey, visitorConsent ?? { tokenSubject: undefined, region: null }))) {
+        const variant = assignVariantForVisitor(experiment, visitorKey);
+        if (variant && variant.versionId === null) {
           experimentStamp = { experimentId: experiment.experimentId, variant: variant.key };
-        } else {
-          // Snapshot aged out mid-experiment — degrade to the published page
-          // WITHOUT a stamp (never attribute content the visitor didn't see).
-          log.warn('experiment_variant_version_missing', { orgId, pageId: hit.page.pageId, experimentId: experiment.experimentId, variant: variant.key });
+        } else if (variant && variant.versionId !== null) {
+          const version = await getVersion(tenantId, orgId, hit.page.pageId, variant.versionId);
+          if (version) {
+            // The snapshot read mirrors restoreVersion (title + sections; the
+            // LIVE slug/status stay). Shared refs resolve like any delivery.
+            servedPage = await resolveSharedRefs({ ...hit.page, title: version.snapshot.title, sections: version.snapshot.sections });
+            experimentStamp = { experimentId: experiment.experimentId, variant: variant.key };
+          } else {
+            // Snapshot aged out mid-experiment — degrade to the published page
+            // WITHOUT a stamp (never attribute content the visitor didn't see).
+            log.warn('experiment_variant_version_missing', { orgId, pageId: hit.page.pageId, experimentId: experiment.experimentId, variant: variant.key });
+          }
         }
       }
+    } catch (err) {
+      servedPage = hit.page;
+      experimentStamp = undefined;
+      // grade-code CN2CD-7/13 — a neutral name (the catch also covers the experiment +
+      // snapshot reads) and the error CLASS only: a storage message can embed a row key.
+      log.warn('page_experiment_degraded', { orgId, pageId: hit.page.pageId, error: err instanceof Error ? err.name : 'unknown' });
     }
   }
 
@@ -218,9 +243,11 @@ export async function publicPageBySlug(
   // (anonymous browsers send it automatically). No authored locales ⇒ base
   // verbatim. The negotiated locale is a response concern (Content-Language).
   const settings = await getContentLanguageSettings(tenantId, orgId);
-  const { page: localized, locale } = localizePage(servedPage, acceptLanguage, settings);
+  const { page: localized, locale, served } = localizePage(servedPage, acceptLanguage, settings);
   const seo = await seoStore.get(`${tenantId}:${orgId}:${hit.page.pageId}`);
-  return { page: projectPublic(localized as Page, seo, orgId, baseUrl, hit.redirectedFrom, experimentStamp), locale };
+  // `served` (ADR 0861 D5) — the locales THIS page serves, withheld ones excluded.
+  // The projection carries no `localePublishState`, so hreflang must take it from here.
+  return { page: projectPublic(localized as Page, seo, orgId, baseUrl, hit.redirectedFrom, experimentStamp), locale, served };
 }
 
 /** The locale a public request negotiates for this org, from Accept-Language
@@ -350,7 +377,7 @@ export async function sitemapXml(orgId: string, baseUrl: string): Promise<string
     orgId, 'sitemap',
   );
   const urls = rows
-    .map(({ page }) => `  <url>\n    <loc>${escapeXml(pageUrl(baseUrl, orgId, page.slug))}</loc>\n    <lastmod>${escapeXml(page.updatedAt)}</lastmod>\n  </url>`)
+    .map(({ page }) => `  <url>\n    <loc>${escapeXml(publicPageUrl(baseUrl, orgId, page))}</loc>\n    <lastmod>${escapeXml(page.updatedAt)}</lastmod>\n  </url>`)
     .join('\n');
   return `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls}\n</urlset>\n`;
 }
@@ -375,9 +402,55 @@ export async function listPublicNavPages(orgId: string): Promise<Array<{ slug: s
   ).map(({ page }) => ({ slug: page.slug, title: page.title }));
 }
 
+/**
+ * ADR 0824 D4 — what the platform origin's `/robots.txt` tells crawlers.
+ *
+ * Everything public is open to every crawler, AI crawlers by name included (a
+ * crawler that matches a named group ignores `*`, so the named agents share the
+ * ONE group rather than getting a looser or stricter copy of it). What is
+ * closed is the signed-in app — pages that render nothing but the SPA shell to
+ * a crawler and would only dilute the index — and the API, EXCEPT its public
+ * read surface and media, which the SPA's public pages fetch while rendering
+ * (longest match wins, RFC 9309 §2.2.2). Capability-token pages are NOT listed:
+ * they carry `noindex`, which a crawler can only obey if it may fetch them.
+ */
+export const ROBOTS_NAMED_CRAWLERS = [
+  'GPTBot', 'OAI-SearchBot', 'ChatGPT-User', 'ClaudeBot', 'Claude-User', 'Claude-SearchBot',
+  'PerplexityBot', 'Perplexity-User', 'Google-Extended', 'Applebot-Extended',
+] as const;
+/** The versioned API roots (`/v<major>`), DERIVED from the majors this host
+ *  serves, so the next major is covered with no edit here (ADR 0642). */
+const versionedRoots = (): string[] => [...new Set(protocolVersions().map((v) => `/v${v.split('.')[0]}`))];
+export function robotsDisallow(): string[] {
+  return [...versionedRoots().map((r) => `${r}/`), '/api/', '/host/', '/chat', '/admin', '/settings', '/builder', '/runs', '/inbox'];
+}
+export function robotsAllow(): string[] {
+  const vendor = ['/host/openwop-app/public', '/host/openwop-app/assets/'];
+  return ['/', ...vendor, ...versionedRoots().flatMap((r) => vendor.map((p) => `${r}${p}`))];
+}
+
+/** The platform-origin `/robots.txt`. `withSitemap` ⇔ a public site org is
+ *  configured (else there is no sitemap to advertise — honest omission). */
+export function rootRobotsTxt(baseUrl: string, withSitemap: boolean): string {
+  const origin = baseUrl.replace(/\/+$/, '');
+  const lines = [
+    'User-agent: *',
+    ...ROBOTS_NAMED_CRAWLERS.map((ua) => `User-agent: ${ua}`),
+    ...robotsAllow().map((p) => `Allow: ${p}`),
+    ...robotsDisallow().map((p) => `Disallow: ${p}`),
+    '',
+    ...(withSitemap ? [`Sitemap: ${origin}/sitemap.xml`] : []),
+    // R2-D11 — llms.txt has no robots directive; a comment advertises the root door.
+    `# llms.txt: ${origin}/llms.txt`,
+  ];
+  return `${lines.join('\n')}\n`;
+}
+
 export async function robotsTxt(orgId: string, baseUrl: string): Promise<string> {
   // Touch the toggle gate so robots.txt for a publishing-off org 404s too.
   await resolvePublicOrg(orgId);
+  // ADR 0824 D4 — the platform site org's robots IS the origin's robots.
+  if (process.env.OPENWOP_PUBLIC_SITE_ORG_ID?.trim() === orgId) return rootRobotsTxt(baseUrl, true);
   const sitemap = `${vendorPublicBase(baseUrl)}/public/${encodeURIComponent(orgId)}/sitemap.xml`;
   // R2-D11 — advertise the docs' llms.txt to the agents that read robots first.
   // A comment line (llms.txt has no robots directive); the real door is the
@@ -427,7 +500,7 @@ async function buildFeed(orgId: string, baseUrl: string, opts: FeedOptions): Pro
   const authors = opts.enriched ? await resolveAuthorNames(tenantId, rows.map((r) => r.page)) : undefined;
   const items = rows
     .map(({ page, seo }) => {
-      const link = pageUrl(baseUrl, orgId, page.slug);
+      const link = publicPageUrl(baseUrl, orgId, page);
       const title = seo?.metaTitle ?? page.title;
       const desc = seo?.metaDescription ?? descriptionFrom(page);
       let extra = '';
@@ -608,10 +681,11 @@ function projectPublic(
     updatedAt: page.updatedAt,
     ...(redirectedFrom ? { redirectedFrom } : {}),
     ...(experiment ? { experiment } : {}),
+    ...(page.kind === 'post' ? { kind: 'post' as const, ...(page.publishedAt ? { publishedAt: page.publishedAt } : {}) } : {}),
     seo: {
       title: seo?.metaTitle ?? page.title,
       description,
-      canonicalUrl: seo?.canonicalUrl ?? pageUrl(baseUrl, orgId, page.slug),
+      canonicalUrl: seo?.canonicalUrl ?? publicPageUrl(baseUrl, orgId, page),
       ogTitle: seo?.ogTitle ?? seo?.metaTitle ?? page.title,
       ogDescription: seo?.ogDescription ?? description,
       noindex: seo?.noindex ?? false,
@@ -627,15 +701,39 @@ function descriptionFrom(page: Page): string {
     const d = s.data as Record<string, unknown>;
     const text = typeof d.subheading === 'string' ? d.subheading
       : typeof d.text === 'string' ? d.text
-        : typeof d.heading === 'string' ? d.heading : '';
+        : typeof d.heading === 'string' ? stripHeadingEmphasis(d.heading) : '';
     const trimmed = text.trim();
     if (trimmed.length > 0) return trimmed.slice(0, MAX.metaDescription);
   }
   return page.title;
 }
 
-function pageUrl(baseUrl: string, orgId: string, slug: string): string {
-  return `${vendorPublicBase(baseUrl)}/public/${encodeURIComponent(orgId)}/pages/${encodeURIComponent(slug)}`;
+/**
+ * ADR 0824 D1 — the URL of a page AS PEOPLE OPEN IT, which is what a canonical
+ * link, a sitemap `<loc>` and a feed `<link>` must name.
+ *
+ * For the operator-configured platform site org (`OPENWOP_PUBLIC_SITE_ORG_ID`,
+ * the org the `/` + `/p/:slug` document doors serve) that is the document path:
+ * `/` for `home`, `/blog/<slug>` for a post, `/docs/<slug>` for a docs page,
+ * `/p/<slug>` otherwise. It used to be the JSON read
+ * (`/host/openwop-app/public/<org>/pages/<slug>`) for every org, so the live
+ * crawler document declared an `application/json` endpoint as its canonical
+ * and the sitemap listed nothing but JSON.
+ *
+ * Any OTHER org keeps the vendor path: it has no platform-origin document door,
+ * so there is no truer URL to name (a bound custom domain is ADR 0391's job).
+ */
+export function publicPageUrl(baseUrl: string, orgId: string, page: { slug: string; kind?: string; collection?: string }): string {
+  const siteOrg = process.env.OPENWOP_PUBLIC_SITE_ORG_ID?.trim();
+  if (siteOrg && siteOrg === orgId) {
+    const origin = baseUrl.replace(/\/+$/, '');
+    if (page.slug === 'home' && page.kind !== 'post' && page.collection !== 'docs') return `${origin}/`;
+    const slug = encodeURIComponent(page.slug);
+    if (page.kind === 'post') return `${origin}/blog/${slug}`;
+    if (page.collection === 'docs') return `${origin}/docs/${slug}`;
+    return `${origin}/p/${slug}`;
+  }
+  return `${vendorPublicBase(baseUrl)}/public/${encodeURIComponent(orgId)}/pages/${encodeURIComponent(page.slug)}`;
 }
 
 /** A media token is a base64url capability + an intended-public OG image — NOT

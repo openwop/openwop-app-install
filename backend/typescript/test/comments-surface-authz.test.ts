@@ -22,6 +22,16 @@
  * the guard was tautologically satisfied by the row it protects. Nothing was
  * bypassed while only `{status:'resolved'}` is patched; the assertion below pins
  * the actor so the landmine cannot be re-armed by adding `body` to that call.
+ *
+ * HONEST CEILING: `updateComment` persists no actor, so the actor itself is not
+ * observable through any API — the first CMNT-5 case proves resolve is member-level
+ * and leaves authorship alone; the source-level REGRESSION GUARD carries the actor.
+ *
+ * SABOTAGE (witnessed, /grade-tests wave 10): removing `assertOrgScope` reds the four
+ * non-member cases; removing the no-acting-user refusal reds the system-run cases;
+ * asking only `workspace:read` for `post` reds the read-only case; passing
+ * `existing.authorId` as the actor reds the regression guard; resolving to `open`
+ * reds the member lane and CMNT-5.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -79,10 +89,14 @@ describe('CMNT-4 — the MEMBER lane still works (a gate that blocks everyone is
   it('a member of the org can post, list and resolve', async () => {
     const p = await page();
     const s = asUser(MEMBER);
-    expect(await s.post({ orgId: ORG, resourceType: 'cms_page', resourceId: p.pageId, body: 'agent note' })).toBeTruthy();
+    const posted = (await s.post({ orgId: ORG, resourceType: 'cms_page', resourceId: p.pageId, body: 'agent note' })) as { comment: Record<string, unknown> | null };
+    expect(posted.comment?.body).toBe('agent note');
     expect(((await s.list({ orgId: ORG, resourceType: 'cms_page', resourceId: p.pageId })) as { comments: unknown[] }).comments).toHaveLength(1);
     const row = (await listThreadOrFail(T, ORG, 'cms_page', p.pageId, PREAUTHORIZED_CALLER))[0]!;
-    expect((await s.resolve({ orgId: ORG, commentId: row.commentId })) as unknown).toBeTruthy();
+    // NOT `toBeTruthy()`: a miss answers `{comment: null}`, which is truthy (/grade-tests wave 10 —
+    // a resolve that wrote 'open' passed this lane).
+    const resolved = (await s.resolve({ orgId: ORG, commentId: row.commentId })) as { comment: Record<string, unknown> | null };
+    expect(resolved.comment?.status).toBe('resolved');
   });
 });
 

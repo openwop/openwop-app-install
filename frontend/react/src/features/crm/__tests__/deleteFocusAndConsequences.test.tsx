@@ -15,40 +15,51 @@
  * -17: every delete confirm carries a consequence clause written from what the
  * backend actually does — related rows are KEPT and unlinked (the ADR 0580
  * `*-crm-unlink` seam consumers), never cascaded.
+ *
+ * Sabotage-witnessed (wave-4 /grade-tests, w4g5-del-*): dropping ANY one
+ * target from ContactsTab's `focusFirst(search, caption, filterbar, name)`,
+ * TasksTab's `(search, caption, title)` or ContactFieldsPage's
+ * `(caption, title)` chain, the segment delete's picker focus, the company
+ * page's `state.focusTitle`, or swapping any confirm's consequence body for
+ * another entity's turns the matching case red.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import i18n from '../../../i18n/index.js';
+import type { Contact, ContactFieldDef } from '../crmClient.js';
+import type { Task } from '../crmOrgClient.js';
 
-const confirmSpy = vi.hoisted(() => vi.fn(async () => true));
+const confirmSpy = vi.hoisted(() => vi.fn<typeof import('../../../ui/confirm.js')['confirm']>(async () => true));
 vi.mock('../../../ui/confirm.js', () => ({ confirm: confirmSpy }));
 
+type OrgApi = typeof import('../crmOrgClient.js');
+type CrmApi = typeof import('../crmClient.js');
 const org = vi.hoisted(() => ({
-  listDeals: vi.fn(),
-  listTasks: vi.fn(),
-  deleteTask: vi.fn(),
-  getCompany: vi.fn(),
-  deleteCompany: vi.fn(),
-  updateCompany: vi.fn(),
-  getDeal: vi.fn(),
-  deleteDeal: vi.fn(),
-  updateDeal: vi.fn(),
-  listPipelines: vi.fn(async () => []),
-  listActivities: vi.fn(async () => []),
+  listDeals: vi.fn<OrgApi['listDeals']>(),
+  listTasks: vi.fn<OrgApi['listTasks']>(),
+  deleteTask: vi.fn<OrgApi['deleteTask']>(),
+  getCompany: vi.fn<OrgApi['getCompany']>(),
+  deleteCompany: vi.fn<OrgApi['deleteCompany']>(),
+  updateCompany: vi.fn<OrgApi['updateCompany']>(),
+  getDeal: vi.fn<OrgApi['getDeal']>(),
+  deleteDeal: vi.fn<OrgApi['deleteDeal']>(),
+  updateDeal: vi.fn<OrgApi['updateDeal']>(),
+  listPipelines: vi.fn<OrgApi['listPipelines']>(async () => []),
+  listActivities: vi.fn<OrgApi['listActivities']>(async () => []),
 }));
 vi.mock('../crmOrgClient.js', async (orig) => {
   const actual = await orig<Record<string, unknown>>();
   return { ...actual, ...org };
 });
 const crm = vi.hoisted(() => ({
-  listContacts: vi.fn(),
-  deleteContact: vi.fn(),
-  listSegments: vi.fn(),
-  deleteSegment: vi.fn(),
-  listSegmentMembers: vi.fn(async () => []),
-  listContactFields: vi.fn(),
-  deleteContactField: vi.fn(),
+  listContacts: vi.fn<CrmApi['listContacts']>(),
+  deleteContact: vi.fn<CrmApi['deleteContact']>(),
+  listSegments: vi.fn<CrmApi['listSegments']>(),
+  deleteSegment: vi.fn<CrmApi['deleteSegment']>(),
+  listSegmentMembers: vi.fn<CrmApi['listSegmentMembers']>(async () => []),
+  listContactFields: vi.fn<CrmApi['listContactFields']>(),
+  deleteContactField: vi.fn<CrmApi['deleteContactField']>(),
 }));
 vi.mock('../crmClient.js', async (orig) => {
   const actual = await orig<Record<string, unknown>>();
@@ -71,8 +82,8 @@ import { ContactFieldsPage } from '../ContactFieldsPage.js';
 import { CompanyDetailPage } from '../CompanyDetailPage.js';
 import { DealDetailPage } from '../DealDetailPage.js';
 
-const contact = (id: string, name: string) => ({ contactId: id, name, stage: 'lead' as const });
-const task = (id: string, title: string) => ({ taskId: id, title, status: 'open' as const });
+const contact = (id: string, name: string): Contact => ({ contactId: id, tenantId: 't1', name, stage: 'lead', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' });
+const task = (id: string, title: string): Task => ({ taskId: id, title, status: 'open' });
 
 /** Renders where a record page's delete navigates to, exposing the router state. */
 function LandingProbe(): JSX.Element {
@@ -81,7 +92,9 @@ function LandingProbe(): JSX.Element {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  // reset, not clear: the row-delete cases queue `mockResolvedValueOnce` pairs,
+  // and `clearAllMocks` would carry an unconsumed one into the next case.
+  vi.resetAllMocks();
   window.localStorage.clear();
   confirmSpy.mockResolvedValue(true);
   crm.listSegments.mockResolvedValue([]);
@@ -95,9 +108,9 @@ beforeEach(() => {
   // `mockResolvedValueOnce` pairs on top; those take precedence.
   org.listTasks.mockResolvedValue([]);
   crm.listContacts.mockResolvedValue([]);
-  org.deleteTask.mockResolvedValue(true);
-  org.deleteCompany.mockResolvedValue(true);
-  org.deleteDeal.mockResolvedValue(true);
+  org.deleteTask.mockResolvedValue(undefined);
+  org.deleteCompany.mockResolvedValue(undefined);
+  org.deleteDeal.mockResolvedValue(undefined);
 });
 afterEach(cleanup);
 
@@ -170,7 +183,7 @@ describe('contacts — row delete (CRM-UX-16 / -17)', () => {
 
   it('segment delete: the confirm says no contact goes with it; focus lands on the segment picker', async () => {
     crm.listContacts.mockResolvedValue([c.c1]);
-    crm.listSegments.mockResolvedValue([{ segmentId: 'sg1', name: 'VIPs', filters: [] }]);
+    crm.listSegments.mockResolvedValue([{ segmentId: 'sg1', name: 'VIPs', filters: [], createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' }]);
     render(<MemoryRouter><ContactsTab /></MemoryRouter>);
     const picker = await screen.findByLabelText('Segment');
     await screen.findByRole('option', { name: 'VIPs' });
@@ -221,7 +234,7 @@ describe('tasks — row delete (CRM-UX-16 / -17)', () => {
 });
 
 describe('contact fields — row delete (CRM-UX-16)', () => {
-  const def = (defId: string, key: string, label: string) => ({ defId, key, label, type: 'string' as const, required: false, createdAt: '2026-01-01T00:00:00Z' });
+  const def = (defId: string, key: string, label: string): ContactFieldDef => ({ defId, key, label, type: 'string', required: false, createdAt: '2026-01-01T00:00:00Z' });
 
   it('2 → 1: focus lands on the caption after the definition is deleted', async () => {
     crm.listContactFields.mockResolvedValueOnce([def('f1', 'tier', 'Tier'), def('f2', 'region', 'Region')]).mockResolvedValueOnce([def('f2', 'region', 'Region')]);

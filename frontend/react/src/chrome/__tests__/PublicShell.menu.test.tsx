@@ -69,6 +69,8 @@ describe('PublicShell hamburger menu (ADR 0486)', () => {
     expect(within(panel).getByText('About Us')).toBeTruthy();
     // A curated page (Compare) appears ONCE — never duplicated into the dynamic group.
     expect(within(panel).getAllByText('Compare')).toHaveLength(1);
+    // White label is curated only when that page is published (it is not here).
+    expect(within(panel).queryByRole('link', { name: 'White label' })).toBeNull();
     // Phone CSS moves utilities into the disclosure instead of letting the
     // header action cluster widen the document past the viewport.
     expect(within(panel).getByRole('group', { name: 'Theme' })).toBeTruthy();

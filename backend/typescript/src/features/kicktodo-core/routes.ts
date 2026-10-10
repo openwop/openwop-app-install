@@ -55,7 +55,7 @@ import { applyRevisionCommands, previewRevisionCommands } from './replanService.
 import { mintInvite, revokeInvite, InviteDeniedError } from './inviteService.js';
 import type { ChallengeActivity } from './types.js';
 
-export const KICKTODO_PREFIX = '/v1/host/openwop-app/kicktodo';
+export const KICKTODO_PREFIX = '/host/openwop-app/kicktodo';
 
 type Handler = (req: Request, res: Response) => Promise<void>;
 
@@ -634,7 +634,7 @@ export function registerKicktodoCoreRoutes(deps: RouteDeps): void {
       // separate client-side fetch, so this response is identical for every
       // visitor of the org and safe for a shared cache.
       res.setHeader('Cache-Control', 'public, max-age=300, stale-while-revalidate=3600');
-      res.setHeader('Vary', 'Accept-Language');
+      res.vary('Accept-Language');
       res.json(catalog);
     } catch (err) { next(err); }
   });

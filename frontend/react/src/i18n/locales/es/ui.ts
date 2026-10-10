@@ -116,7 +116,6 @@ export const messages = {
   colorHexPlaceholder: "#rrggbb o un color CSS",
   colorPickFromScreen: "Elegir un color de la pantalla",
 
-  cmdkLocked: 'Bloqueado: desbloquéalo en la tienda de funciones',
 
   // FORM-UX-2 (ADR 0584) — la protección IN-APP contra la pérdida de cambios.
   unsavedLeaveTitle: '¿Salir sin guardar?',

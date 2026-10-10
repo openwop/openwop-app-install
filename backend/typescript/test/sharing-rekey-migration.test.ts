@@ -7,6 +7,11 @@
  *  - frame-view rows follow their link, and a crash-shaped duplicate keeps the
  *    larger count;
  *  - post-migration rows never carry the raw token.
+ *
+ * Sabotage-witnessed (w7 /grade-tests): the legacy raw-keyed row not deleted ·
+ * the raw `token` kept on the re-keyed row · frame counts not Math.max-merged ·
+ * the public path looking up by `keyOf` (accepting a leaked hash) · an orphaned
+ * link's 404 burning a view · the lazy on-read migration removed.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -73,7 +78,6 @@ describe('rekeySharingAtRest', () => {
     });
     // The RAW reaches the row (throws only on the missing prompt resource)…
     // …while the LEAKED HASH must miss at the key layer with the same uniform 404.
-    await expect(resolveShared(hashToken(raw))).rejects.toThrow(/not found/i);
     // DIFFERENTIAL proof the raw hits the row while the hash does not.
     //
     // This probe USED to be "the raw path bumps viewCount to 1, the hash path
@@ -106,7 +110,9 @@ describe('rekeySharingAtRest', () => {
     });
     // No rekey pass has run for this row: the public resolve must find it via
     // the on-read fallback (it 404s only for resource reasons, never key-miss).
-    await expect(resolveShared(raw)).rejects.toThrow(); // prompt resource absent -> resolver 404, NOT a key miss
+    // The prompt resource is absent, so a HIT on the migrated row is the resolver's
+    // `resource-gone` 404 — a key MISS would be the reason-less uniform 404 instead.
+    await expect(resolveShared(raw)).rejects.toMatchObject({ httpStatus: 404, details: { reason: 'resource-gone' } });
     // The row was migrated in place by the read:
     expect(await legacy.get(raw)).toBeNull();
     const rekeyed = await new DurableCollection<Record<string, unknown>>('sharing:link', (l) => String(l.tokenHash), undefined, (l) => String(l.tenantId)).get(hashToken(raw));

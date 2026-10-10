@@ -112,6 +112,8 @@ export function TemplatePreflightModal({
     return { ...c, state };
   });
   const missingNodes = requirements?.missingNodeTypeIds ?? [];
+  // ADR 0766 D3 / grade-ux U-1 — installed, but not at the pinned version.
+  const pinMismatches = requirements?.pinMismatches ?? [];
 
   // Toggle-gated feature surfaces the chain reads (ADR 0191 Phase 2) — a
   // `feature.<id>.nodes.*` node is INSTALLED yet throws host_capability_disabled
@@ -134,7 +136,7 @@ export function TemplatePreflightModal({
   // ready. `missingRequired` is the same helper `RunInputsDialog` already uses.
   const unanswered = missingRequired(variables, values);
   const zeroConfig =
-    requirements != null && connectionRows.length === 0 && missingNodes.length === 0
+    requirements != null && connectionRows.length === 0 && missingNodes.length === 0 && pinMismatches.length === 0
     && !anyFeatureDisabled && unanswered.length === 0;
 
   return (
@@ -194,9 +196,19 @@ export function TemplatePreflightModal({
               {missingNodes.map((typeId) => (
                 <li key={typeId} className="action-bar u-justify-between">
                   <span className="u-fs-13">{typeId}</span>
-                  <span className="chip chip--warning" title={t('preflightNotOnHostHint')}>
+                  <span className="chip chip--warning" title={t('preflightNodeNotOnHostHint')}>
                     {t('preflightMissingNode')}
                   </span>
+                </li>
+              ))}
+              {pinMismatches.map((m) => (
+                <li key={`pin:${m.typeId}`} className="action-bar u-justify-between">
+                  <span className="u-grid">
+                    <span className="u-fs-13">{m.label}</span>
+                    {m.label !== m.typeId && <span className="muted u-fs-12">{m.typeId}</span>}
+                    <span className="muted u-fs-12">{t('preflightPinMismatchHint', { pinned: m.pinned, installed: m.installed })}</span>
+                  </span>
+                  <span className="chip chip--warning">{t('preflightPinMismatch')}</span>
                 </li>
               ))}
               {featureRows.map((f) => (

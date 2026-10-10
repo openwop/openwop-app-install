@@ -114,6 +114,16 @@ The app has two planes, and only one defaults to non-durable:
 | `OPENWOP_BYOK_KMS_KEY` | `projects/…/cryptoKeys/…` | **Mandatory in `auth`.** Signed-in tenant secrets get KMS-envelope encryption. The backend now **refuses to boot** in the `auth` posture without it — it will not silently fall back to the ephemeral/plaintext secret store. |
 | `OPENWOP_BYOK_ENCRYPTION_KEY` | `printf '%s' "$(openssl rand -hex 32)"` | **Required in the `auth` posture, INCLUDING when `OPENWOP_BYOK_KMS_KEY` is set.** The two are not alternatives: KMS envelope-encrypts signed-in tenant secrets, while the local-AES path keeps its own master key and is still reached at boot. Setting only KMS fails closed with *"BYOK local-AES master key is not configured in production"* (SEC-3 refuses to mint a throwaway disk key — one generated on a fresh Cloud Run instance is unrecoverable across restarts and gives false at-rest assurance). Only `OPENWOP_BYOK_EPHEMERAL=true` deploys, like the live demo, skip it. **Never rotate it once live** — anything encrypted under it becomes unreadable. Use `printf '%s'`, not a bare pipe: see the secret-seeding note below. |
 
+### Sessions and sign-in (ADR 0833)
+
+| Var / behaviour | Default | What to know |
+|---|---|---|
+| `OPENWOP_SESSION_ABSOLUTE_MAX_HOURS` | `720` (30 days) | No signed-in session outlives its last IdP verification by more than this. A user whose SPA sends a valid Firebase bearer is re-stamped daily and never notices. A cookie-only session, such as SAML, ends at the cap with `401 … details.reason: session_expired`, and the SPA signs the user out with a notice. |
+| Logout | — | Ends the session *family* on the server, so a copied cookie stops working too. |
+| `OPENWOP_CORS_ORIGINS` unset + production cookies | — | The CSRF guard and the collab socket admit **same-origin only**: the request's own scheme + host + port, or `PUBLIC_BASE_URL`. A cross-origin SPA must list its origin here, as it already must for SSE. |
+| SAML ACS | — | Every assertion is single-use, keyed on its signed `Issuer` + `ID`, on both SP- and IdP-initiated logins. The ACS refuses without durable storage. |
+| `OPENWOP_TEST_AUTH_ENABLED` | unset | A deployment refuses to boot with it set. "Deployment" means a platform marker, `OPENWOP_DEPLOY_POSTURE=auth`, or a Postgres DSN. There is no override. |
+
 ### Optional AI capabilities (off by default — honest-off until configured)
 
 These three surfaces ship **dark by default** and advertise nothing until an operator
@@ -169,6 +179,16 @@ view over the API), and the Bearer-token path (`OPENWOP_API_KEYS` + `OPENWOP_AUT
 already drives it without a browser (curl / the `@openwop` SDK / the conformance harness). For a
 deployment with **no rendering client**, set the profile so `/.well-known/openwop` stays honest:
 
+> **A bare `gcloud run services update` does not take effect anywhere in this file (CE-16, 2026-10-05).**
+> `scripts/deploy.sh` routes traffic BY NAME, so the service's traffic spec pins one
+> revision and any `services update` mints a new revision that receives **0%
+> traffic** — the change never reaches a request, and gcloud's success line does not
+> say so. Run it through **`scripts/update-env.sh KEY=VALUE …`** (other flags after
+> `--`, e.g. `-- --update-secrets=NAME=secret:latest`), which verifies the new
+> revision (Ready, same commit, every value) and shifts 100% to it by name. If you
+> run gcloud directly, follow it with
+> `gcloud run services update-traffic <service> --to-revisions <new-revision>=100`.
+
 ```
 gcloud run services update openwop-app-backend \
   --update-env-vars OPENWOP_PROFILE=headless \
@@ -188,7 +208,44 @@ keep uiPlugins). All merge-updates (`--update-env-vars`), never `--set-*`.
 
 Until the data-plane surfaces are backed by shared stores, you **cannot run more
 than one backend instance** safely — two instances see two divergent
-`ctx.storage.kv`. Each surface is selected through a backend seam
+`ctx.storage.kv`.
+
+> **ADR 0867 (2026-10-09).** On a scale-out host (`K_SERVICE` or another platform
+> marker, or `OPENWOP_INSTANCE_TOPOLOGY=multi`), v2 discovery now WITHHOLDS every
+> storage family whose backend is process-local, and the boot log says which
+> (`storage_families_withheld_process_local`). Set `OPENWOP_INSTANCE_TOPOLOGY=single`
+> only when the service is pinned to one instance. A selected engine (`postgres`
+> sql, `pgvector`, `s3`, `gcs`) must pass a boot check before the process listens.
+> Production (`openwop-dev`) runs:
+>
+> ```bash
+> OPENWOP_SURFACE_BACKEND=durable
+> OPENWOP_SURFACE_OBSERVABILITY=memory
+> OPENWOP_SURFACE_SQL=postgres     OPENWOP_SQL_PG_DSN=<secret openwop-storage-dsn>     OPENWOP_SQL_PG_POOL_MAX=2
+> OPENWOP_SURFACE_VECTOR=pgvector  OPENWOP_VECTOR_PG_DSN=<same secret>  OPENWOP_VECTOR_PG_DIM=256  OPENWOP_VECTOR_PG_POOL_MAX=1
+> OPENWOP_SURFACE_BLOB=gcs         OPENWOP_BLOB_GCS_BUCKET=openwop-dev-host-blob
+> ```
+>
+> Each engine's pool is counted per instance by `preflight-deploy.sh` Gate 5.
+> (The vector pool was 2 in the ADR's planning table; the live revision runs 1 —
+> read from rev `00924-w5c`'s env, 2026-10-09.)
+>
+> **ADR 0868 (2026-10-09).** The `durable` surfaces read a key range a PAGE at a
+> time (`Storage.kvListPage`), not the whole range: a table page reads
+> `limit + 1` rows, a queue receive at most 8, `count` is counted by the
+> database. Two knobs, both optional:
+>
+> ```bash
+> OPENWOP_TABLE_QUERY_MAX_LIMIT=1000      # most rows one tableStorage.query returns (default 1000); callers page with nextCursor
+> OPENWOP_SURFACE_SCAN_WARN_ROWS=5000     # surface_scan_heavy fires when one read pulls this many rows…
+> OPENWOP_SURFACE_SCAN_WARN_MS=500        # …or takes this long
+> ```
+>
+> `surface_scan_heavy` (`{op, family, rows, ms}`, no tenant id) is the signal that
+> a tenant's data has outgrown a scan — a filtered table query, an fs listing,
+> a durable vector/search/nosql read. Watch it before adding an index.
+
+Each surface is selected through a backend seam
 (`backend/typescript/src/host/surfaceBackends.ts`); the wire shape is identical
 whichever backend is chosen:
 
@@ -256,22 +313,59 @@ Shipped backends:
 
 - Scale / cross-instance engines (optional, replace the `durable` data adapters):
   - `postgres` — backs **`sql`** (`OPENWOP_SURFACE_SQL=postgres`). `host.db.sql`
-    over a shared Postgres with **schema-per-tenant** isolation (`tenant_<id>`,
-    `search_path`-scoped per op); the cross-instance counterpart to durable
+    over shared PostgreSQL 15+ with **tenant-authenticated SQL sessions** and
+    exact-ID hashed schemas; the cross-instance counterpart to durable
     sql. Non-parametric SQL refused (RFC 0018); `lastInsertRowid` is 0 (use
-    `RETURNING`). Env: `OPENWOP_SQL_PG_DSN`. Live-validated by the `pg-sql-live`
+    `RETURNING`). Env: `OPENWOP_SQL_PG_DSN`, stable secret binding
+    `OPENWOP_SQL_PG_ROLE_PASSWORD_KEY` (at least 32 characters), and
+    `OPENWOP_SQL_PG_POOL_MAX >= 2`. The DSN's provisioning user needs database
+    `CREATE` and `CREATEROLE`; on PostgreSQL 15 a non-superuser provisioner also
+    needs `INHERIT` so its one-way tenant membership can erase tenant-owned
+    objects. PostgreSQL 16+ uses explicit membership `INHERIT`/`SET` options.
+    Pack SQL authenticates as a separate restricted
+    role. The pool limit includes one provisioning connection and every tenant
+    session combined. `max_prepared_transactions` must remain 0. Do not grant
+    PUBLIC access to host data or SECURITY DEFINER functions. Live-validated by the `pg-sql-live`
     CI job. See `backend/typescript/src/host/sql/`.
+
+    **Upgrade from the legacy schema-only adapter (ADR 0867 correction).** Before
+    activation, inventory and back up every populated `tenant_*` schema. The old
+    lowercase/punctuation/truncation naming collided, so map each schema to its
+    exact original tenant identity and resolve ambiguities from operator records;
+    never infer ownership from its sanitized name. Keep a maintenance hold during
+    migration. Provision the target restricted role/schema through the trusted
+    `createPgSqlRuntime` operator API, export with `pg_dump --schema=<legacy>
+    --no-owner --no-privileges`, review the SQL to target only the new hashed schema
+    (omit schema creation, which the provisioner owns), and restore as that
+    tenant's restricted role. Verify all tables, sequences, views, routines and
+    row counts against the export before removing the legacy schema. Keep the
+    export for recovery. Boot refuses populated legacy schemas until this is
+    complete; it never deletes or silently ignores their data. Reuse the same
+    dedicated role password key across revisions; rotating it requires a held,
+    explicit role-credential migration. Account erasure disables the login,
+    closes its sessions, removes its schema and large objects, and retains a
+    disabled role tombstone to prevent overlapping revisions recreating data.
   - `opensearch` — backs **`search`** (`OPENWOP_SURFACE_SEARCH=opensearch`).
     `host.db.search` over OpenSearch/Elasticsearch (BM25, real indexing) via the
     HTTP API; dependency-free (`fetch`); per-(tenant,index) physical index.
     Env: `OPENWOP_SEARCH_OS_ENDPOINT` (+ `_USERNAME`/`_PASSWORD` or `_API_KEY`,
     `_INDEX_PREFIX`). See `backend/typescript/src/host/search/`.
   - `pgvector` — backs **`vector`** (`OPENWOP_SURFACE_VECTOR=pgvector`).
-    `host.db.vector` over Postgres + pgvector (`<=>` cosine, ANN-indexable),
-    fixed embedding dimension. Env: `OPENWOP_VECTOR_PG_DSN`,
+    `host.db.vector` over Postgres + pgvector (`<=>` cosine; an EXACT per-tenant
+    scan today — no ANN index is built, see ADR 0867), fixed embedding dimension.
+    Creates the extension on first use. Env: `OPENWOP_VECTOR_PG_DSN`,
     `OPENWOP_VECTOR_PG_DIM` (+ `_TABLE`). See `backend/typescript/src/host/vector/`.
     The SQL is unit-test-pinned; validate end-to-end against a live pgvector
     (CI service container) before production use.
+
+- `gcs` — backs **`blob`** (`OPENWOP_SURFACE_BLOB=gcs`; ADR 0867). Google Cloud
+  Storage over the JSON API, **keyless**: it authenticates as the workload's own
+  service account (metadata server) and signs V4 presigned URLs with IAM
+  `signBlob`. Needs `roles/storage.objectAdmin` on the bucket and
+  `roles/iam.serviceAccountTokenCreator` for the account on itself. Env:
+  `OPENWOP_BLOB_GCS_BUCKET` (+ `_PREFIX`, `_PRESIGN_TTL_SECONDS`, `_SIGNER_EMAIL`).
+  Use it where an org policy forbids service-account keys (the S3-interop route
+  below needs an HMAC key).
 
 - `s3` — backs **`blob`** (`OPENWOP_SURFACE_BLOB=s3`). `host.blobStorage` over
   any S3-compatible object store (AWS S3, GCS S3-interop, Cloudflare R2,
@@ -431,17 +525,23 @@ OPENWOP_BYOK_EPHEMERAL: "true"
 OPENWOP_COOKIE_SECURE: "true"
 OPENWOP_STRICT_REGISTRY: "true"
 OPENWOP_API_KEYS: ""
-OPENWOP_ENABLE_CONFORMANCE_NODES: "true"
 OPENWOP_INSTALL_PACKS: "$PACKS"
 EOF
 
 # Two production-behavior knobs to know about in the env above:
-#  - OPENWOP_ENABLE_CONFORMANCE_NODES="true" — conformance-only node typeIds
+#  - OPENWOP_ENABLE_CONFORMANCE_NODES — deliberately ABSENT above. Conformance-only node typeIds
 #    (core.conformance.mock-agent, conformance.secret.echo, …) are OFF by
 #    default under NODE_ENV=production so a fork doesn't expose them; the
 #    reference deploy IS a conformance target, so it MUST opt back in here (else
 #    /.well-known/openwop stops advertising capabilities.conformance.mockAgent
 #    and black-box conformance runs fail).
+#    CORRECTED 2026-09-29 — MEASURED: the live app.openwop.dev service does NOT
+#    set this (unset + NODE_ENV=production ⇒ the nodes are not registered), and
+#    the RFC rows that need them are certified against the colocated companion
+#    image (ADR 0745 D4), not the live multi-tenant host. Do NOT set it on a
+#    deployment real tenants use: these nodes resolve secrets under the run's
+#    tenant. Since the same date they resolve ONLY the conformance canary refs
+#    (CONFORMANCE_SECRET_REFS), but they remain test machinery, not product.
 #  - OPENWOP_API_KEYS entries are `<key>` or `<key>:<tenant>` (ADR 0561). A BARE
 #    key is scoped to the `default` tenant; cross-tenant operator access must be
 #    written explicitly as `<key>:*`. Before ADR 0561 every configured key got
@@ -500,6 +600,14 @@ EOF
 # knobs on this tier — do not treat a tier bump as headroom for more instances,
 # tags, or a larger pool. Re-read `max_connections` after any tier change rather
 # than inferring it.
+#
+# CORRECTED 2026-10-02 — "a bigger tier does not raise max_connections" is NOT
+# general. On openwop-app-pg, which sets no `max_connections` flag, the same
+# change (db-f1-micro → db-custom-1-3840) raised it 25 → 100 (`SHOW
+# max_connections`, 3 reserved). The 2026-09-15 reading above was taken on the
+# kicktodo deployment's instance; whether it pinned the value with a database
+# flag was not recorded. The instruction stands and is the point: read it with
+# SHOW after the change, then put that number in OPENWOP_PG_MAX_CONNECTIONS.
 gcloud run deploy openwop-app-backend \
   --source . \
   --region us-central1 \
@@ -623,6 +731,13 @@ gcloud run deploy openwop-app-backend \
 > `scripts/deploy.env` (gitignored) and fill in your topology first. The raw
 > recipe below stays supported; if you use it, run `scripts/preflight-deploy.sh`
 > BEFORE the build and `scripts/verify-deploy.sh` after.
+>
+> **Say who is deploying.** Run it as `OPENWOP_DEPLOY_SESSION=<your session name>
+> scripts/deploy.sh`. The label and the checkout's directory name are written
+> to `build-meta/deployer.json`, which ships in the uploaded source **and the image** (readable by anyone with the build bucket, Artifact Registry or a container shell; the backend never serves it). The label must be a slug (`[A-Za-z0-9._-]{1,64}`); anything else is dropped.
+> Every session deploys as the same account, so on 2026-09-29 two unannounced
+> builds could be matched to a commit but not to a session; this file closes
+> that gap. The label is optional: without it the stamp records the agent session id (`CLAUDE_CODE_SESSION_ID`), and only `deploy.sh` writes the file.
 
 > **The backend deploy now also CERTIFIES, and that adds ~10 minutes**
 > (ADR 0550 P4). `scripts/deploy.sh` runs the full conformance lane in strict,
@@ -684,6 +799,30 @@ gcloud run services describe openwop-app-backend --region=us-central1 \
   --format='value(spec.template.spec.containers[0].env)' | tr ';' '\n' | grep -i secret
 curl -s https://app.openwop.dev/api/readiness   # {"status":"ready",...} — 503 if a managed key is unconfigured
 ```
+
+> **Post-deploy certification evidence (WHD-18 / ADR 0735).** This service runs
+> in ORIGIN mode (`OPENWOP_CERT_BUNDLE_ORIGIN` on the service), so after every
+> backend deploy the RFC 0089 §D pointer is **absent** until the signed
+> post-deploy bundle for the NEW commit is published. `verify-deploy.sh` reports
+> that as `PENDING` (honest, not a failure) and reads the mode from the live
+> service itself, so a `deploy.env` without the line no longer produces false
+> `MISSING`/`STALE` reds. To publish in the same run, use
+> `scripts/deploy.sh --publish-evidence`: it runs `scripts/publish-evidence.sh`
+> (a ~10-minute load test against the live service) only after a **verified**
+> backend deploy. Otherwise run `scripts/publish-evidence.sh` yourself when the
+> deploy settles. If the suite REFUSES its own bundle (an emitter defect), the
+> rejected bytes are kept under `~/.cache/openwop-app/rejected-evidence/`
+> (`OPENWOP_REJECTED_EVIDENCE_DIR`) for the upstream report. They are not a
+> certification artifact.
+>
+> **One cut at a time.** Two cuts against the same host at once contaminate
+> each other: each is a single-worker load test, and the last upload wins the
+> bucket. On 2026-09-28 two sessions did exactly this and published disturbed
+> bundles for c3d06c29. `publish-evidence.sh` now takes
+> `<ORIGIN>/.cut-lock.json` atomically before its first request to the host,
+> and releases that same generation on exit. A held lock refuses the cut and
+> names its holder. A lock older than its 2 h `expiresAt` is taken over.
+> `--break-lock` is for a holder you have confirmed is dead.
 
 ### Verifying live agent dispatch (real model completion)
 
@@ -792,6 +931,23 @@ Before flipping the `insights-suite` toggle ON for a real tenant:
 
 The suite is **OFF by default**, so a deploy that skips this is safe — the connector simply
 isn't reached until an operator opts a tenant in. See ADR 0082 § "Live-creds caveat".
+
+### Optional: stream origin for non-browser clients — ADR 0761
+
+The Firebase `/api` rewrite buffers event streams entirely (measured: 0 bytes in
+25 s). The SPA bypasses it with `VITE_OPENWOP_SSE_BASE_URL`; for every other
+client (the CLI's `runs watch`, `chat`, `notifications stream`) advertise the
+Cloud Run origin under `extensions["openwop-app.host"].streamBase`:
+
+```
+gcloud run services update openwop-app-backend \
+  --update-env-vars OPENWOP_STREAM_BASE_URL=https://openwop-app-backend-89896419173.us-central1.run.app \
+  --region us-central1 --project openwop-dev
+```
+
+`https:` only, no credentials/query/fragment; an invalid value is dropped with a
+`stream_base_ignored` warning and nothing is advertised. Merge-style
+(`--update-env-vars`), never `--set-*`.
 
 ### Optional: media → text for RAG (OCR + transcription) — ADR 0108/0110/0111
 
@@ -931,7 +1087,7 @@ ADMIN_TOKEN=$(gcloud secrets versions access latest --secret=openwop-admin-token
 gcloud scheduler jobs create http openwop-app-daily-cleanup \
   --location=us-central1 \
   --schedule="0 3 * * *" --time-zone="UTC" \
-  --uri="https://app.openwop.dev/api/v1/host/openwop-app/admin/cleanup" \
+  --uri="https://app.openwop.dev/api/host/openwop-app/admin/cleanup" \
   --http-method=POST \
   --headers="Authorization=Bearer ${ADMIN_TOKEN}" \
   --description="Daily wipe of expired anon-session BYOK secrets + tenant trackers" \
@@ -1252,10 +1408,13 @@ base revision `00373-szn`. Self-hosters whose backend shares the SPA origin can
 omit both — resolution falls back to the request origin, which is then correct.
 Pinned by `backend/typescript/test/oauth-callback-base.unit.test.ts`.)
 
-Every provider registration below uses the same redirect URI shape:
+Every provider registration below uses the same redirect URI shape. Register
+**both** forms — the host sends the first until OpenWOP v1 is retired and the
+second after (ADR 0806):
 
 ```text
 https://app.openwop.dev/api/v1/host/openwop-app/connections/<provider-id>/callback
+https://app.openwop.dev/api/host/openwop-app/connections/<provider-id>/callback
 ```
 
 ### 1. Create the OAuth app at the provider (console-only, not scriptable)
@@ -1531,7 +1690,7 @@ Which half of the gate still means something on a named distribution:
 
 **Regenerate before you measure.** `vite.config.ts` substitutes a GENERATED `src/features/registry.distribution.ts` that `scripts/gen-distribution.mjs` writes in the `prebuild` hook. Running bare `vite build` reuses whatever was generated last — so a manifest edit does not reach the artifact and the build silently measures a distribution that no longer exists. Use `npm run build` (which runs `prebuild`), or run `node scripts/gen-distribution.mjs` explicitly first. The tell is an unchanged chunk hash across builds that should have differed.
 
-**Composing a distribution (ADR 0366 P3):** the marketplace's bundle shop (`/marketplace/bundles`) browses the bundle catalog and exports an include-mode manifest. Commit it as `distributions/<name>.json` in a reviewed PR (the review IS the security gate — no runtime path mutates the build), then `OPENWOP_DISTRIBUTION=<name> npm run build:distribution` produces both artifacts. Note: `gcloud run deploy --source .` image builds always build the DEFAULT distribution (the Docker builder carries only the backend subtree); build a named distribution locally/CI and deploy its artifacts explicitly.
+**Composing a distribution (ADR 0366 P3):** the marketplace's distribution composer (`/marketplace/distribution`; it lived on `/marketplace/bundles` until the ADR 0820 §7 UI store redesign) browses the bundle catalog and exports an include-mode manifest. Commit it as `distributions/<name>.json` in a reviewed PR (the review IS the security gate — no runtime path mutates the build), then `OPENWOP_DISTRIBUTION=<name> npm run build:distribution` produces both artifacts. Note: `gcloud run deploy --source .` image builds always build the DEFAULT distribution (the Docker builder carries only the backend subtree); build a named distribution locally/CI and deploy its artifacts explicitly.
 
 ## Chat + retention runtime knobs (operator reference)
 

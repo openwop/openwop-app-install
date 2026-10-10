@@ -4,8 +4,8 @@
  * The host half of the RFC-named `a2a-1.0-task-roundtrip` scenario, asserted
  * against a real HTTP boot rather than the codec in isolation: `SendMessage`
  * creates a REAL run and `Task.id` IS that run id (RFC 0100), which the
- * conformance leg checks by resolving `GET /v1/runs/{Task.id}` for the same
- * principal. A codec that minted its own task id would pass every unit test and
+ * conformance leg checks by resolving `GET /runs/{Task.id}` (major 2, the id
+ * tenant-bound the way a v2 client binds it) for the same principal. A codec that minted its own task id would pass every unit test and
  * hand a peer an id that resolves to nothing.
  *
  * @see spec/v1/a2a-integration.md §"A2A 1.0 versioned composition" §D.1, §D.4
@@ -15,11 +15,12 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
+import { toWireRunId } from '../src/host/v2Ids.js';
 
 let server: http.Server;
 let BASE: string;
 const TOKEN = 'dev-token';
-const PATH = '/v1/host/openwop-app/a2a';
+const PATH = '/host/openwop-app/a2a';
 
 interface ErrorInfo {
   '@type'?: string;
@@ -60,6 +61,9 @@ async function rpc10(method: string, params: unknown, id = 1): Promise<Rpc> {
   return (await res.json()) as Rpc;
 }
 
+/** The A2A Task.id is the bare run id; a v2 protocol path takes it tenant-bound (`dev-token` acts in `default`). */
+const bound = (runId: string): string => toWireRunId(runId, 'default');
+
 function message(text: string, messageId: string): Record<string, unknown> {
   return { messageId, role: 'ROLE_USER', parts: [{ text }] };
 }
@@ -87,7 +91,7 @@ const STATES_10 = [
 ];
 
 describe('RFC 0152 §D.1 — SendMessage creates a run and returns { task }', () => {
-  it('Task.id IS the backing runId, and GET /v1/runs resolves it for the same principal', async () => {
+  it('Task.id IS the backing runId, and GET /runs resolves it for the same principal', async () => {
     const sent = await rpc10('SendMessage', {
       message: message('drive a run over a2a 1.0', `m-${Date.now()}`),
       configuration: { returnImmediately: true },
@@ -100,8 +104,8 @@ describe('RFC 0152 §D.1 — SendMessage creates a run and returns { task }', ()
     expect(STATES_10).toContain(task.status?.state);
 
     // THE load-bearing assertion: the id the peer got is a run it can read.
-    const snap = await fetch(`${BASE}/v1/runs/${encodeURIComponent(task.id!)}`, {
-      headers: { authorization: `Bearer ${TOKEN}` },
+    const snap = await fetch(`${BASE}/runs/${encodeURIComponent(bound(task.id!))}`, {
+      headers: { authorization: `Bearer ${TOKEN}`, 'OpenWOP-Version': '2' },
     });
     expect(snap.status, 'Task.id must be the backing runId (RFC 0100)').toBe(200);
 
@@ -154,7 +158,7 @@ describe('RFC 0152 §D.1/§D.7 — GetTask and CancelTask', () => {
     expect(cancelled.error).toBeUndefined();
     expect((cancelled.result as { status?: { state?: string } }).status?.state).toBe('TASK_STATE_CANCELED');
     // The run itself moved, not just the projection.
-    const snap = await fetch(`${BASE}/v1/runs/${encodeURIComponent(id)}`, { headers: { authorization: `Bearer ${TOKEN}` } });
+    const snap = await fetch(`${BASE}/runs/${encodeURIComponent(bound(id))}`, { headers: { authorization: `Bearer ${TOKEN}`, 'OpenWOP-Version': '2' } });
     expect((await snap.json() as { status?: string }).status).toBe('cancelled');
     // §D.7 — cancelling a terminal task is an error, not a quiet success. (The
     // REST route answers a repeat cancel with 200 because a human means "make

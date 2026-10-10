@@ -39,6 +39,8 @@ interface ServerCatalogNode {
   configSchema?: unknown;
   inputSchema?: unknown;
   outputSchema?: unknown;
+  /** ADR 0782 — `single`: one input port whatever `required` says. */
+  ports?: 'single';
   /** Host surfaces this node needs (e.g. `host.kvStorage`). */
   requiresHostSurfaces?: readonly string[];
   /** Subset of requiresHostSurfaces this host does NOT advertise. */
@@ -142,6 +144,13 @@ export function useCatalog(): NodeCatalogEntry[] {
 
 let loadPromise: Promise<void> | null = null;
 
+/** True once the host catalog has loaded at least once this session. Before
+ *  then, every server-only fact (a node's installed version) is unknown, which
+ *  is a different failure from one node type lacking a version (grade-ux U-3). */
+export function isDynamicCatalogLoaded(): boolean {
+  return lastLoadedAt > 0;
+}
+
 export function loadDynamicCatalog(): Promise<void> {
   if (loadPromise) return loadPromise;
   loadPromise = (async () => {
@@ -149,7 +158,7 @@ export function loadDynamicCatalog(): Promise<void> {
       const res = await fetch(`${config.baseUrl}/host/openwop-app/node-catalog`, fetchOpts({
         headers: authedHeaders(),
       }));
-      if (!res.ok) return;
+      if (!res.ok) { loadPromise = null; return; }
       const body = (await res.json()) as { nodes: ServerCatalogNode[] };
       for (const node of body.nodes) {
         // ADR 0440 P3 — ingest EVERY row, not just `source: 'pack'`.
@@ -178,9 +187,9 @@ export function loadDynamicCatalog(): Promise<void> {
       notify();
     } catch {
       /* registry unreachable; static catalog still works */
-    } finally {
-      // Don't null loadPromise — subsequent calls in the same session
-      // reuse the resolved promise (catalog refreshes are explicit).
+      // grade-ux U-3 — but do not make the failure permanent: a later caller
+      // (e.g. "Export chain pack", which needs server versions) retries.
+      loadPromise = null;
     }
   })();
   return loadPromise;
@@ -207,9 +216,10 @@ export const PALETTE_EXCLUDED: Readonly<Record<string, string>> = {
   'core.conformance.mock-agent': 'conformance harness fixture',
 };
 
-/** A prefix whose nodes are internal machinery, driven by the app-builder
- *  feature itself rather than dragged onto a canvas by an author. */
-const PALETTE_EXCLUDED_PREFIXES = ['app-builder.mcp-node.'] as const;
+/** A prefix whose nodes are internal machinery, driven by a feature itself rather
+ *  than dragged onto a canvas by an author: app-builder's MCP backing nodes, and
+ *  Claude Code's (ADR 0785 P3 — the chain-backed MCP tools' steps). */
+export const PALETTE_EXCLUDED_PREFIXES = ['app-builder.mcp-node.', 'claude-code.mcp-node.'] as const;
 
 function isPaletteExcluded(typeId: string): boolean {
   return typeId in PALETTE_EXCLUDED || PALETTE_EXCLUDED_PREFIXES.some((p) => typeId.startsWith(p));
@@ -317,10 +327,11 @@ function toCatalogEntry(node: ServerCatalogNode): NodeCatalogEntry {
     category,
     badge,
     accent,
-    inputs: portsFromSchema(node.inputSchema, 'in'),
+    inputs: portsFromSchema(node.inputSchema, 'in', node.ports),
     outputs: portsFromSchema(node.outputSchema, 'out'),
     configFields: configFieldsFromSchema(node.configSchema),
     ...(node.packName ? { packName: node.packName } : {}),
+    ...(node.version ? { version: node.version } : {}),
     ...(node.requiresHostSurfaces && node.requiresHostSurfaces.length > 0
       ? { requiresHostSurfaces: node.requiresHostSurfaces }
       : {}),
@@ -331,18 +342,29 @@ function toCatalogEntry(node: ServerCatalogNode): NodeCatalogEntry {
 }
 
 /**
- * Derive port definitions from a JSON Schema. Top-level required
- * properties become individual ports so the canvas shows what data
- * each node expects/emits. If the schema has no `properties` or no
- * required fields, fall back to a single `<fallbackName>` port of
- * type `object` so the node still connects.
+ * Input/output ports for a node, derived from its JSON Schema. By default each
+ * top-level `required` property becomes a port; with no `properties` or no
+ * `required`, a single `<fallbackName>` port of type `object`. Types map from
+ * JSON Schema (string/number/boolean stay; object/array collapse to 'object').
  *
- * Port types are mapped from JSON Schema types — string/number/
- * boolean stay, object/array collapse to 'object' (we don't model
- * 'array' in our PortType union).
+ * A non-default port is PERSISTED as the edge's `targetInput` — it routes data
+ * into that field — so this derivation is data routing, not layout.
+ *
+ * ADR 0782: a node whose pack declares `x-ports: "single"` keeps ONE port
+ * whatever `required` says. That lets a schema state its real contract
+ * (`required`, read by the workflow-author model) without splitting a port that
+ * saved edges already target. Changing the default instead was rejected:
+ * MEASURED, 71 schemas already derive several ports and 212 a single named
+ * port, so it would re-route ~283 nodes' saved edges.
+ *
+ * Exported for tests.
  */
-function portsFromSchema(schema: unknown, fallbackName: string): { name: string; type: import('../schema/workflow.js').PortType }[] {
-  if (!schema || typeof schema !== 'object') {
+export function portsFromSchema(
+  schema: unknown,
+  fallbackName: string,
+  portsHint?: 'single',
+): { name: string; type: import('../schema/workflow.js').PortType }[] {
+  if (portsHint === 'single' || !schema || typeof schema !== 'object') {
     return [{ name: fallbackName, type: 'object' }];
   }
   const s = schema as Record<string, unknown>;
@@ -367,7 +389,22 @@ function portsFromSchema(schema: unknown, fallbackName: string): { name: string;
   return ports.length > 0 ? ports : [{ name: fallbackName, type: 'object' }];
 }
 
-function mapCategory(raw: string): NodeCategory {
+/**
+ * Server category → palette group. The five palette groups pass through; the
+ * three v2 spec values the palette has no group for are mapped EXPLICITLY
+ * (grade-ux U-4 / ADR 0767 open question), so a new spec value is a visible
+ * decision here rather than a silent fall-through:
+ *   - `canvas` → Data: every canvas node reads or writes a canvas artifact.
+ *   - `chat` → Control: messages + human-in-the-loop gates, where they grouped
+ *     before (no palette move).
+ *   - `coordination` → Control: MEASURED mixed — 12 agent-orchestration nodes
+ *     beside 20 kanban/canvas/brand/entity ones — so no single group is right.
+ *     A node that belongs elsewhere says so with `x-paletteCategory` (ADR 0767
+ *     D4), which the server serves ahead of `category`.
+ *     (The 12 agent-orchestration nodes now do exactly that — ADR 0782 D4.)
+ * Exported for tests.
+ */
+export function mapCategory(raw: string): NodeCategory {
   switch (raw) {
     case 'data':
     case 'ai':
@@ -375,6 +412,11 @@ function mapCategory(raw: string): NodeCategory {
     case 'control':
     case 'integration':
       return raw;
+    case 'canvas':
+      return 'data';
+    case 'chat':
+    case 'coordination':
+      return 'control';
     default:
       return 'control';
   }

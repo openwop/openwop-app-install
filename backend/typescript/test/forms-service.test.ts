@@ -11,9 +11,16 @@
  * effects run through the submission-sink seam, and no sink is registered in
  * this unit harness), so the whole file stays pure — no CRM dependency, no
  * network. Sink mechanics are covered in `forms-submission-sinks.test.ts`.
+ *
+ * Sabotage-witnessed (grade-tests w8, probes w8g1-svc-*): dropping the tenant half of
+ * `getForm`'s guard, the org filter in `listForms`, the description trim, the
+ * honeypot-key / duplicate-key refusals, the email shape, the required-checkbox-TRUE
+ * rule, the per-tenant submission index, the published-only public resolver and the
+ * `updatedAt` bump each turn a case red. Ordering cases step a FAKE `Date` so ties
+ * cannot hide the order (clock-shift safe: absolute dates).
  */
 
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { OpenwopError } from '../src/types.js';
@@ -79,7 +86,7 @@ describe('formsService (service layer, in-memory durable)', () => {
         { key: 'note', label: 'Note', type: 'textarea', required: false, description: '   ' },
         { key: 'bio', label: 'Bio', type: 'textarea', required: false, description: long },
       ],
-    } as Parameters<typeof createForm>[0]);
+    });
 
     // Trimmed, not merely stored.
     expect(form.fields[0]!.description).toBe('As it appears on your ID.');
@@ -94,17 +101,21 @@ describe('formsService (service layer, in-memory durable)', () => {
   });
 
   it('listForms returns only the (tenant, org) slice, newest first', async () => {
-    const f1 = await make(TENANT_A, ORG, 'First');
-    const f2 = await make(TENANT_A, ORG, 'Second');
-    await make(TENANT_A, 'org-other', 'Other org'); // same tenant, different org
-    await make(TENANT_B, ORG, 'Other tenant'); // different tenant
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+      const f1 = await make(TENANT_A, ORG, 'First');
+      vi.setSystemTime(new Date('2026-01-01T00:00:01.000Z'));
+      const f2 = await make(TENANT_A, ORG, 'Second');
+      await make(TENANT_A, 'org-other', 'Other org'); // same tenant, different org
+      await make(TENANT_B, ORG, 'Other tenant'); // different tenant
 
-    const list = await listForms(TENANT_A, ORG);
-    const ids = list.map((f) => f.formId);
-    expect(ids).toContain(f1.formId);
-    expect(ids).toContain(f2.formId);
-    expect(ids).toHaveLength(2);
-    expect(list.every((f) => f.tenantId === TENANT_A && f.orgId === ORG)).toBe(true);
+      const list = await listForms(TENANT_A, ORG);
+      expect(list.map((f) => f.formId)).toEqual([f2.formId, f1.formId]); // the slice, newest first
+      expect(list.every((f) => f.tenantId === TENANT_A && f.orgId === ORG)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('tenant isolation: tenant B cannot read tenant A\'s form', async () => {
@@ -116,12 +127,23 @@ describe('formsService (service layer, in-memory durable)', () => {
   });
 
   it('updateForm patches title/fields and bumps updatedAt; returns null for foreign tenant', async () => {
-    const a = await make(TENANT_A);
-    const updated = await updateForm(TENANT_A, ORG, a.formId, {
-      title: 'Renamed',
-      fields: [{ key: 'q1', label: 'Q1', type: 'textarea', required: false }],
-    });
+    vi.useFakeTimers({ toFake: ['Date'] });
+    let a: FormDef;
+    let updated: FormDef | null;
+    try {
+      vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+      a = await make(TENANT_A);
+      vi.setSystemTime(new Date('2026-01-01T00:00:01.000Z'));
+      updated = await updateForm(TENANT_A, ORG, a.formId, {
+        title: 'Renamed',
+        fields: [{ key: 'q1', label: 'Q1', type: 'textarea', required: false }],
+      });
+    } finally {
+      vi.useRealTimers();
+    }
     expect(updated).not.toBeNull();
+    expect(updated!.updatedAt).toBe('2026-01-01T00:00:01.000Z');
+    expect(updated!.createdAt).toBe(a.createdAt);
     expect(updated!.title).toBe('Renamed');
     expect(updated!.fields).toHaveLength(1);
     expect(updated!.fields[0].key).toBe('q1');
@@ -166,7 +188,7 @@ describe('formsService (service layer, in-memory durable)', () => {
         ],
         createdBy: USER,
       }),
-    ).rejects.toBeInstanceOf(OpenwopError);
+    ).rejects.toMatchObject({ httpStatus: 400, details: { field: 'dup' } });
 
     await expect(
       createForm({
@@ -176,7 +198,7 @@ describe('formsService (service layer, in-memory durable)', () => {
         fields: [{ key: '_hp_ref', label: 'Honeypot', type: 'text', required: false }],
         createdBy: USER,
       }),
-    ).rejects.toBeInstanceOf(OpenwopError);
+    ).rejects.toMatchObject({ httpStatus: 400, details: { field: '_hp_ref' } });
   });
 
   it('validateValues enforces required + email shape and returns the cleaned map', async () => {
@@ -193,6 +215,7 @@ describe('formsService (service layer, in-memory durable)', () => {
     const sub = await recordSubmission(form, values, {});
     expect(sub.submissionId).toMatch(/^sub:/);
     expect(sub.contactId).toBeUndefined();
+    expect(sub.error).toBeUndefined(); // no sinks registered ⇒ no markers
     expect(sub.formId).toBe(form.formId);
 
     const subs = await listSubmissions(TENANT_A, ORG, form.formId);
@@ -230,7 +253,7 @@ describe('R2 F4 — a required checkbox must be TRUE (consent semantics)', () =>
         { key: 'agree', label: 'I agree', type: 'checkbox', required: true },
         { key: 'news', label: 'Newsletter', type: 'checkbox', required: false },
       ],
-    } as Parameters<typeof createForm>[0]);
+    });
 
     // The void-consent shape: present but false.
     expect(() => validateValues(form, { agree: false })).toThrow(/required/);

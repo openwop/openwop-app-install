@@ -1,5 +1,5 @@
 /**
- * Sample-extension scheduler CRUD route — /v1/host/openwop-app/scheduler/jobs.
+ * Sample-extension scheduler CRUD route — /host/openwop-app/scheduler/jobs.
  *
  * Exercises the list/create/delete/trigger surface (C-6) backed by the RFC
  * 0052 scheduling service. Verifies:
@@ -70,7 +70,7 @@ interface Job {
 
 describe('scheduler CRUD route (C-6 / RFC 0052)', () => {
   it('creates a job and lists it back', async () => {
-    const created = await jsonFetch<Job>('/v1/host/openwop-app/scheduler/jobs', {
+    const created = await jsonFetch<Job>('/host/openwop-app/scheduler/jobs', {
       method: 'POST',
       body: JSON.stringify({ jobId: 'job-a', cronExpr: '*/5 * * * *', workflowId: 'wf-a' }),
     });
@@ -79,18 +79,18 @@ describe('scheduler CRUD route (C-6 / RFC 0052)', () => {
     expect(created.body.cronExpr).toBe('*/5 * * * *');
     expect(created.body.workflowId).toBe('wf-a');
 
-    const list = await jsonFetch<{ jobs: Job[] }>('/v1/host/openwop-app/scheduler/jobs');
+    const list = await jsonFetch<{ jobs: Job[] }>('/host/openwop-app/scheduler/jobs');
     expect(list.status).toBe(200);
     expect(list.body.jobs.some((j) => j.jobId === 'job-a')).toBe(true);
   });
 
   it('edits a job in place (PATCH cronExpr + workflowId + timezone)', async () => {
-    await jsonFetch('/v1/host/openwop-app/scheduler/jobs', {
+    await jsonFetch('/host/openwop-app/scheduler/jobs', {
       method: 'POST',
       body: JSON.stringify({ jobId: 'job-e', cronExpr: '0 9 * * *', workflowId: 'wf-old' }),
     });
     const patched = await jsonFetch<Job & { timezone?: string; enabled: boolean }>(
-      '/v1/host/openwop-app/scheduler/jobs/job-e',
+      '/host/openwop-app/scheduler/jobs/job-e',
       { method: 'PATCH', body: JSON.stringify({ cronExpr: '0 9 * * 1-5', workflowId: 'wf-new', timezone: 'America/New_York' }) },
     );
     expect(patched.status).toBe(200);
@@ -102,11 +102,11 @@ describe('scheduler CRUD route (C-6 / RFC 0052)', () => {
   });
 
   it('PATCH with no editable field is a validation_error', async () => {
-    await jsonFetch('/v1/host/openwop-app/scheduler/jobs', {
+    await jsonFetch('/host/openwop-app/scheduler/jobs', {
       method: 'POST',
       body: JSON.stringify({ jobId: 'job-empty', cronExpr: '0 9 * * *' }),
     });
-    const res = await jsonFetch<{ error: string }>('/v1/host/openwop-app/scheduler/jobs/job-empty', {
+    const res = await jsonFetch<{ error: string }>('/host/openwop-app/scheduler/jobs/job-empty', {
       method: 'PATCH',
       body: JSON.stringify({}),
     });
@@ -121,12 +121,12 @@ describe('scheduler CRUD route (C-6 / RFC 0052)', () => {
   // `lastRunId` is the "last run: just now, linking to a run that never
   // happened" defect — reachable from SubjectSchedulesPanel's "Run now".
   it('records lastRunAt when a job with NO bound workflow is triggered (the fire IS the event)', async () => {
-    await jsonFetch('/v1/host/openwop-app/scheduler/jobs', {
+    await jsonFetch('/host/openwop-app/scheduler/jobs', {
       method: 'POST',
       body: JSON.stringify({ jobId: 'job-lr', cronExpr: '* * * * *' }),
     });
-    await jsonFetch('/v1/host/openwop-app/scheduler/jobs/job-lr/trigger', { method: 'POST', body: '{}' });
-    const list = await jsonFetch<{ jobs: Array<Job & { lastRunAt?: string }> }>('/v1/host/openwop-app/scheduler/jobs');
+    await jsonFetch('/host/openwop-app/scheduler/jobs/job-lr/trigger', { method: 'POST', body: '{}' });
+    const list = await jsonFetch<{ jobs: Array<Job & { lastRunAt?: string }> }>('/host/openwop-app/scheduler/jobs');
     const job = list.body.jobs.find((j) => j.jobId === 'job-lr')!;
     expect(typeof job.lastRunAt).toBe('string');
     expect(Number.isNaN(Date.parse(job.lastRunAt!))).toBe(false);
@@ -134,12 +134,12 @@ describe('scheduler CRUD route (C-6 / RFC 0052)', () => {
 
   it('a BOUND workflow that does not resolve records a SKIP, never a lastRunAt', async () => {
     type HonestJob = Job & { lastRunAt?: string; lastRunId?: string; lastSkippedAt?: string; lastSkipReason?: string; lastFiredTick?: number };
-    await jsonFetch('/v1/host/openwop-app/scheduler/jobs', {
+    await jsonFetch('/host/openwop-app/scheduler/jobs', {
       method: 'POST',
       body: JSON.stringify({ jobId: 'job-unresolved', cronExpr: '* * * * *', workflowId: 'wf-does-not-exist' }),
     });
     const fired = await jsonFetch<{ runsFired: number; runId?: string; lastFiredTick: number }>(
-      '/v1/host/openwop-app/scheduler/jobs/job-unresolved/trigger',
+      '/host/openwop-app/scheduler/jobs/job-unresolved/trigger',
       { method: 'POST', body: '{}' },
     );
     // The premise: the slot really WAS consumed and no run came back. Without
@@ -148,7 +148,7 @@ describe('scheduler CRUD route (C-6 / RFC 0052)', () => {
     expect(fired.body.runsFired, 'the fire must actually happen, or this test is inert').toBeGreaterThan(0);
     expect(fired.body.runId, 'an unresolvable workflow yields no run id').toBeUndefined();
 
-    const list = await jsonFetch<{ jobs: HonestJob[] }>('/v1/host/openwop-app/scheduler/jobs');
+    const list = await jsonFetch<{ jobs: HonestJob[] }>('/host/openwop-app/scheduler/jobs');
     const job = list.body.jobs.find((j) => j.jobId === 'job-unresolved')!;
     expect(job.lastRunAt, 'no run happened — claiming one is the whole defect').toBeUndefined();
     expect(job.lastRunId).toBeUndefined();
@@ -159,7 +159,7 @@ describe('scheduler CRUD route (C-6 / RFC 0052)', () => {
   });
 
   it('assigns a jobId when none is supplied', async () => {
-    const created = await jsonFetch<Job>('/v1/host/openwop-app/scheduler/jobs', {
+    const created = await jsonFetch<Job>('/host/openwop-app/scheduler/jobs', {
       method: 'POST',
       body: JSON.stringify({ cronExpr: '0 9 * * *' }),
     });
@@ -169,7 +169,7 @@ describe('scheduler CRUD route (C-6 / RFC 0052)', () => {
   });
 
   it('rejects a create with no cronExpr (validation_error)', async () => {
-    const res = await jsonFetch<{ error: string }>('/v1/host/openwop-app/scheduler/jobs', {
+    const res = await jsonFetch<{ error: string }>('/host/openwop-app/scheduler/jobs', {
       method: 'POST',
       body: JSON.stringify({ jobId: 'no-cron' }),
     });
@@ -178,7 +178,7 @@ describe('scheduler CRUD route (C-6 / RFC 0052)', () => {
   });
 
   it('rejects a schedule beyond maxFutureHorizon with schedule_horizon_exceeded', async () => {
-    const res = await jsonFetch<{ error: string }>('/v1/host/openwop-app/scheduler/jobs', {
+    const res = await jsonFetch<{ error: string }>('/host/openwop-app/scheduler/jobs', {
       method: 'POST',
       body: JSON.stringify({
         jobId: 'far',
@@ -191,12 +191,12 @@ describe('scheduler CRUD route (C-6 / RFC 0052)', () => {
   });
 
   it('triggers a job exactly once (RFC 0052 §B.2)', async () => {
-    await jsonFetch('/v1/host/openwop-app/scheduler/jobs', {
+    await jsonFetch('/host/openwop-app/scheduler/jobs', {
       method: 'POST',
       body: JSON.stringify({ jobId: 'job-t', cronExpr: '* * * * *' }),
     });
     const fired = await jsonFetch<{ runsFired: number; lastFiredTick: number }>(
-      '/v1/host/openwop-app/scheduler/jobs/job-t/trigger',
+      '/host/openwop-app/scheduler/jobs/job-t/trigger',
       { method: 'POST', body: '{}' },
     );
     expect(fired.status).toBe(200);
@@ -206,7 +206,7 @@ describe('scheduler CRUD route (C-6 / RFC 0052)', () => {
 
   it('404s a trigger for an unknown job', async () => {
     const res = await jsonFetch<{ error: string }>(
-      '/v1/host/openwop-app/scheduler/jobs/nope/trigger',
+      '/host/openwop-app/scheduler/jobs/nope/trigger',
       { method: 'POST', body: '{}' },
     );
     expect(res.status).toBe(404);
@@ -214,19 +214,19 @@ describe('scheduler CRUD route (C-6 / RFC 0052)', () => {
   });
 
   it('deletes a job; a second delete 404s', async () => {
-    await jsonFetch('/v1/host/openwop-app/scheduler/jobs', {
+    await jsonFetch('/host/openwop-app/scheduler/jobs', {
       method: 'POST',
       body: JSON.stringify({ jobId: 'job-d', cronExpr: '* * * * *' }),
     });
     const first = await jsonFetch<{ removed: boolean }>(
-      '/v1/host/openwop-app/scheduler/jobs/job-d',
+      '/host/openwop-app/scheduler/jobs/job-d',
       { method: 'DELETE' },
     );
     expect(first.status).toBe(200);
     expect(first.body.removed).toBe(true);
 
     const second = await jsonFetch<{ error: string }>(
-      '/v1/host/openwop-app/scheduler/jobs/job-d',
+      '/host/openwop-app/scheduler/jobs/job-d',
       { method: 'DELETE' },
     );
     expect(second.status).toBe(404);

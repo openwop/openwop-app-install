@@ -254,7 +254,7 @@ describe('validation', () => {
     const c = validateToggleConfig('x', {
       status: 'on',
       variants: [
-        { key: 'A', weight: 50, bindings: [{ slot: 'crm.triage', ref: { kind: 'agent', name: 'feature.crm.agents/triage-v2', version: '1.0.0' } }] },
+        { key: 'A', weight: 50, bindings: [{ slot: 'crm.triage', ref: { kind: 'agent', name: 'vendor.openwop-app.crm.agents/triage-v2', version: '1.0.0' } }] },
         { key: 'B', weight: 50 },
       ],
     });

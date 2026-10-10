@@ -38,7 +38,7 @@ let server: http.Server;
 const H = { authorization: 'Bearer dev-token', 'content-type': 'application/json' };
 const post = (p: string, b?: unknown) => fetch(`${BASE}${p}`, { method: 'POST', headers: H, body: b === undefined ? undefined : JSON.stringify(b) });
 const put = (p: string, b: unknown) => fetch(`${BASE}${p}`, { method: 'PUT', headers: H, body: JSON.stringify(b) });
-const RT = '/v1/host/openwop-app/voice/realtime';
+const RT = '/host/openwop-app/voice/realtime';
 
 /** A scope-capturing probe tool (registered via the ADR 0308 D2 seam) — the
  *  tool's ONLY job is to record the BundleScope each transport hands it. */
@@ -56,6 +56,7 @@ beforeAll(async () => {
 
   registerFeatureAgentTool({
     contentTrust: 'trusted',
+    effect: 'read', // test probe (ADR 0784)
     def: { name: CAPTURE_TOOL, description: 'test probe — captures the execution scope', inputSchema: { type: 'object' } },
     run: async (_input, scope) => { captured.push(scope); return { content: 'captured-ok' }; },
   });

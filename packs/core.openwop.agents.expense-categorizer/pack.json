@@ -1,14 +1,25 @@
 {
   "name": "core.openwop.agents.expense-categorizer",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Expense categorization agent. Classifies expenses against a policy-defined chart of accounts and flags policy violations. Pure-agent pack.",
   "author": "OpenWOP Working Group",
   "license": "Apache-2.0",
   "homepage": "https://openwop.dev/packs/core.openwop.agents.expense-categorizer",
   "repository": "https://github.com/openwop/openwop",
-  "keywords": ["core", "agents", "finance", "expense", "categorization", "vertical"],
-  "engines": { "openwop": ">=1.1.0 <2.0.0" },
-  "peerDependencies": { "aiProviders": "supported" },
+  "keywords": [
+    "core",
+    "agents",
+    "finance",
+    "expense",
+    "categorization",
+    "vertical"
+  ],
+  "engines": {
+    "openwop": ">=1.1.0 <3.0.0"
+  },
+  "peerDependencies": {
+    "aiProviders": "supported"
+  },
   "agents": [
     {
       "agentId": "core.openwop.agents.expense-categorizer.default",
@@ -18,13 +29,24 @@
       "modelClass": "classification",
       "systemPromptRef": "prompts/expense-categorizer.md",
       "toolAllowlist": [],
-      "memoryShape": { "scratchpad": false, "conversation": false, "longTerm": false },
+      "memoryShape": {
+        "scratchpad": false,
+        "conversation": false,
+        "longTerm": false
+      },
       "handoff": {
         "taskSchemaRef": "schemas/expense-categorizer.task.schema.json",
         "returnSchemaRef": "schemas/expense-categorizer.return.schema.json"
       },
-      "confidence": { "defaultThreshold": 0.8 }
+      "confidence": {
+        "defaultThreshold": 0.8
+      },
+      "role": "skill"
     }
   ],
-  "runtime": { "language": "remote", "entry": "pack.json" }
+  "runtime": {
+    "language": "remote",
+    "entry": "pack.json"
+  },
+  "kind": "node"
 }

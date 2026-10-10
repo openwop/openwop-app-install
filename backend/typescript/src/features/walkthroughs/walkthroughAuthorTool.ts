@@ -15,6 +15,7 @@
  * this tool. Promotion to a saved walkthrough stays a USER act (ADR 0369 OQ5 — run
  * it once).
  */
+import { authoredWalkthroughId } from '../../host/workflowId.js';
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
 import { registerWorkflow, getRegisteredWorkflowAsync } from '../../host/workflowsRegistry.js';
 import { recordRevision } from '../../host/workflowRevisions.js';
@@ -24,7 +25,6 @@ import { withLifecycle } from '../../host/workflowLifecycle.js';
 import { validateWorkflowDefinition } from '../../host/workflowDefinitionValidation.js';
 import type { WorkflowDefinition } from '../../executor/types.js';
 import { OpenwopError } from '../../types.js';
-import { randomUUID } from 'node:crypto';
 
 export const WALKTHROUGH_REGISTER_DRAFT_TOOL_ID = 'openwop:walkthroughs.register-draft';
 
@@ -35,6 +35,7 @@ export function registerWalkthroughAuthorTool(): void {
   registerFeatureAgentTool({
     // TRUSTED: echoes back the caller's own draft; no stored read.
     contentTrust: 'trusted',
+    effect: 'write',
     def: {
       name: WALKTHROUGH_REGISTER_DRAFT_TOOL_ID,
       description:
@@ -58,7 +59,20 @@ export function registerWalkthroughAuthorTool(): void {
           steps: {
             type: 'array',
             description: 'Ordered steps: action {actionId, narration, hitl?} or checkpoint {checkpoint, narration?}.',
-            items: { type: 'object' },
+            // The fields `run` reads, declared — a bare `{type:'object'}` is not a valid
+            // Gemini Schema (OBJECT needs properties). This tool is in the ADR 0315
+            // default-on baseline, so it reached EVERY agent-scoped Gemini Live session —
+            // the one out-of-subset value behind the 2026-10-08 `1007: invalid argument`
+            // (unconfirmed live). test/gemini-live-setup-schema.test.ts keeps the baseline clean.
+            items: {
+              type: 'object',
+              properties: {
+                actionId: { type: 'string', description: 'Action step: a registered walkthrough-action id, verbatim from the recording.' },
+                narration: { type: 'string', description: 'What the guide says at this step.' },
+                hitl: { type: 'boolean', description: 'Action step: true when the real user must act (typing, choosing a file).' },
+                checkpoint: { type: 'string', description: 'Checkpoint step: the app state to verify after a mutating step.' },
+              },
+            },
           },
         },
         required: ['name', 'steps'],
@@ -89,7 +103,7 @@ export function registerWalkthroughAuthorTool(): void {
         if (i > 0) edges.push({ edgeId: `e${i}`, sourceNodeId: `s${i}`, targetNodeId: nodeId });
       }
 
-      const workflowId = `walkthrough.authored.${randomUUID()}`;
+      const workflowId = authoredWalkthroughId();
       let def: WorkflowDefinition;
       try {
         def = validateWorkflowDefinition({ workflowId, metadata: { name, walkthrough: true }, nodes, edges });

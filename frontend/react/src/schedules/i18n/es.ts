@@ -17,6 +17,7 @@ export const messages = {
   runsCadence: 'Se ejecuta {{cadence}}',
   runsCadenceWithTz: 'Se ejecuta {{cadence}} · {{timezone}}',
   lastRun: 'Última ejecución {{when}}',
+  nextRun: 'Próxima ejecución {{when}}',
   viewRun: 'ver ejecución',
 
   // Cadence preset labels (mirrors CADENCE_PRESETS by key)
@@ -29,6 +30,7 @@ export const messages = {
   pause: 'Pausar',
   resume: 'Reanudar',
   runNow: 'Ejecutar ahora',
+  keepCadence: 'Mantener la actual ({{cadence}})',
   saveChanges: 'Guardar cambios',
 
   // Form fields / selects
@@ -44,10 +46,23 @@ export const messages = {
   deleteConfirm: '¿Eliminar la programación «{{label}}»? Esto no se puede deshacer.',
 
   // Run-now notices
-  firedWithRun: 'Disparada — ',
+  firedWithRunLink: 'Disparada.',
+  runNowSkipped: 'No se ejecutó: {{reason}}.',
   firedNoWorkflow: 'Disparada (sin flujo de trabajo asociado).',
 
   // ADR 0313 D3 — chips de programación silenciosa
   wontFire: 'No se activará: la cadencia no se pudo interpretar',
+  cadenceExhausted: 'No volverá a activarse: ninguna hora futura coincide con esta cadencia',
   oneShotDone: 'Completada (única vez)',
+  // ADR 0815 D4 — a job paused because the member it ran as left the workspace
+  pausedOwnerLeft: 'En pausa: la persona en cuyo nombre se ejecutaba se fue',
+  statusPlanLapsed: 'En pausa: el plan venció',
+  planLapsedHint: 'Tu plan ya no incluye esta función, así que estas ejecuciones se omiten. Se reanuda sola cuando la función vuelva a tu plan.',
+  planLapsedLink: 'Ver planes',
+  pausedReownNeeded: 'Esta programación se pausó porque la persona en cuyo nombre se ejecutaba dejó el espacio de trabajo. Reanúdela desde aquí; pasará a ejecutarse como usted.',
+  pausedRecreate: 'Esta programación se pausó porque la persona en cuyo nombre se ejecutaba dejó el espacio de trabajo. Vuelva a crearla desde su función; así se ejecutará como usted.',
+  resumeReownTitle: '¿Reanudar y convertirse en propietario?',
+  resumeReownBody: 'La persona en cuyo nombre se ejecutaba esta programación fue quitada del espacio de trabajo. Si la reanuda, a partir de ahora se ejecutará como usted.',
+  resumeReownConfirm: 'Reanudar como yo',
+  pausedOwnerLeftRunNow: 'Reanúdela primero: la persona en cuyo nombre se ejecutaba dejó el espacio de trabajo',
 } as const;

@@ -73,13 +73,13 @@ let n = 0;
 async function owner(): Promise<{ c: Client; orgId: string }> {
   const tenantId = `org:gatebypass-${Date.now()}-${n++}`;
   const c = client();
-  const login = await c.post('/v1/host/openwop-app/test/login', { email: `gb-${Date.now()}-${n++}@acme.test`, tenantId });
+  const login = await c.post('/host/openwop-app/test/login', { email: `gb-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(login.status, JSON.stringify(login.body)).toBe(201);
-  const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return { c, orgId: org.body.orgId as string };
 }
-const u = (orgId: string, s = ''): string => `/v1/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${s}`;
+const u = (orgId: string, s = ''): string => `/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${s}`;
 
 async function publishedPage(c: Client, orgId: string): Promise<string> {
   await setGate('off'); // publish directly, then turn the gate on for the test
@@ -136,7 +136,7 @@ describe('CMS2-B1 — PATCH was the third, ungated path to live content', () => 
 
 describe('CMS2-M1 — approve what you saw', () => {
   const pendingFor = async (c: Client, pageId: string): Promise<any> => {
-    const list = await c.get('/v1/host/openwop-app/approvals?status=pending');
+    const list = await c.get('/host/openwop-app/approvals?status=pending');
     expect(list.status).toBe(200);
     return (list.body.items as any[]).find((a) => a.kind === 'content-publish' && a.pageId === pageId);
   };
@@ -201,7 +201,7 @@ describe('CMS2-M1 — approve what you saw', () => {
 
 describe('CMS2-M1 fold-in — the remedy the 409 prescribes must actually work', () => {
   const pendingFor = async (c: Client, pageId: string): Promise<any> => {
-    const list = await c.get('/v1/host/openwop-app/approvals?status=pending');
+    const list = await c.get('/host/openwop-app/approvals?status=pending');
     return (list.body.items as any[]).find((a) => a.kind === 'content-publish' && a.pageId === pageId);
   };
 
@@ -230,7 +230,7 @@ describe('CMS2-M1 fold-in — the remedy the 409 prescribes must actually work',
     expect(resubmit.body.status).toBe('in_review');
 
     // Still exactly ONE open row — re-pinned, not duplicated.
-    const list = await c.get('/v1/host/openwop-app/approvals?status=pending');
+    const list = await c.get('/host/openwop-app/approvals?status=pending');
     const rows = (list.body.items as any[]).filter((a) => a.kind === 'content-publish' && a.pageId === pageId);
     expect(rows).toHaveLength(1);
     expect(rows[0].approvalId).toBe(first.approvalId);
@@ -298,8 +298,8 @@ describe('CMS2-B1 fold-in — the reserved system-site org is not gated', () => 
     // asserting nothing while reading green. Real superadmin is established here.
     await setGate('on');
     const c = client();
-    await c.post('/v1/host/openwop-app/test/login', { email: `sa-${Date.now()}-${n++}@acme.test`, tenantId: `org:sysgate-${Date.now()}-${n++}` });
-    const who = await c.get('/v1/host/openwop-app/me/workspaces');
+    await c.post('/host/openwop-app/test/login', { email: `sa-${Date.now()}-${n++}@acme.test`, tenantId: `org:sysgate-${Date.now()}-${n++}` });
+    const who = await c.get('/host/openwop-app/me/workspaces');
     expect(who.status, JSON.stringify(who.body)).toBe(200);
     process.env.OPENWOP_SUPERADMIN_TENANTS = who.body.personal as string;
     try {
@@ -353,7 +353,7 @@ async function sharedRefPage(c: Client, orgId: string): Promise<{ pageId: string
 
 /** What a real visitor is served — the delivery lane that resolves the ref. */
 async function liveHeading(orgId: string, slug: string): Promise<unknown> {
-  const res = await fetch(`${BASE}/v1/host/openwop-app/public/${encodeURIComponent(orgId)}/pages/${encodeURIComponent(slug)}`);
+  const res = await fetch(`${BASE}/host/openwop-app/public/${encodeURIComponent(orgId)}/pages/${encodeURIComponent(slug)}`);
   expect(res.status, 'the public delivery lane must actually serve this page').toBe(200);
   const body = (await res.json()) as any;
   return (body.sections as any[])?.find((s) => s.type === 'hero')?.data?.heading;

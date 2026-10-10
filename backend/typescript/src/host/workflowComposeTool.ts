@@ -39,13 +39,14 @@
  * a runaway agent must not flood the registry/ownership/approval stores.
  */
 
-import { randomUUID } from 'node:crypto';
+import { composedWorkflowId, isServerMintedWorkflowId } from './workflowId.js';
+import { assertModelWorkflowWrite, hasWorkflowScope } from './workflowWriteAuthority.js';
 import { registerFeatureAgentTool } from './agentToolProvider.js';
 import { validateWorkflowDefinition, WORKFLOW_ID_PATTERN } from './workflowDefinitionValidation.js';
 import { capabilityGatedTypeIdRefusal } from '../routes/runs.js';
 import { registerWorkflow, registerWorkflowDurable, getRegisteredWorkflowAsync } from './workflowsRegistry.js';
 import { withLifecycle, withHostLifecycle, lifecycleOf } from './workflowLifecycle.js';
-import { recordOwnership, listOwned } from './workflowOwnership.js';
+import { recordOwnership, listOwned, isSharedWorkflowId } from './workflowOwnership.js';
 import { startWorkflowRun, type StartRunDeps } from './runStarter.js';
 import {
   createComposedWorkflowApproval,
@@ -56,6 +57,7 @@ import {
   attachComposedDecision,
   listPendingApprovalsByKind,
   listApprovalsByKindAndStatus,
+  registerApprovalEligibility,
 } from './approvalService.js';
 import { getRetentionHold } from './runRetentionSweeper.js';
 import { definitionHashOf } from './definitionHash.js';
@@ -96,6 +98,27 @@ function proposalTtlDays(): number {
 const err = (message: string): { content: string; isError: true } =>
   ({ content: JSON.stringify({ error: 'validation_error', message }), isError: true });
 
+/** ADR 0822 D1 (architect B1) — `compose-and-run` registers AND runs with no
+ *  review, so when a PERSON is behind the turn it carries that person's write
+ *  authority (an agent acts for its human, never above them): a Viewer chatting
+ *  with an agent granted this tool must not run a composed workflow the
+ *  builder would refuse them. A turn with NO person is the headless lane this
+ *  tool exists for (ADR 0369 §6, granted per agent, zero by default) and is
+ *  unchanged. `propose` deliberately does NOT call this: a proposal is a
+ *  REQUEST that nothing executes or promotes until someone holding authority
+ *  approves it (ADR 0473) — it is how a Viewer asks for a change. `null` =
+ *  allowed; otherwise the typed refusal the model relays. */
+async function composeWriteRefusal(scope: { tenantId: string; actingUserId?: string; personalTenant?: string }): Promise<{ content: string; isError: true } | null> {
+  if (!scope.actingUserId) return null;
+  try {
+    await assertModelWorkflowWrite(scope);
+    return null;
+  } catch (e) {
+    if (!(e instanceof OpenwopError)) throw e;
+    return { content: JSON.stringify({ error: e.code, message: e.message, ...(e.details ?? {}) }), isError: true };
+  }
+}
+
 /** The read-only definition resolver both lanes probe for id takeover — the
  *  CATALOG, not the registry, because the catalog is what `startWorkflowRun`
  *  dispatches from and it resolves sources the registry can't see (hardcoded
@@ -125,7 +148,7 @@ async function prepareComposedDraft(candidate: unknown, resolver: WorkflowResolv
     return { ok: false, failure: err('definition must be a workflow-definition object.') };
   }
   const draft = { ...(candidate as Record<string, unknown>) };
-  if (draft.workflowId === undefined) draft.workflowId = `agent-wf-${randomUUID()}`;
+  if (draft.workflowId === undefined) draft.workflowId = composedWorkflowId();
   if (typeof draft.workflowId !== 'string' || !WORKFLOW_ID_PATTERN.test(draft.workflowId)) {
     return { ok: false, failure: err('workflowId must match the workflow-id pattern.') };
   }
@@ -194,6 +217,19 @@ async function prepareComposedDraft(candidate: unknown, resolver: WorkflowResolv
   //    reviewer never saw.
   if (await resolver.workflowCatalog.getWorkflow(def.workflowId)) {
     return { ok: false, failure: err(`workflowId '${def.workflowId}' already exists — compose with a fresh id.`) };
+  }
+  // ADR 0789 — a FREE id in a shared namespace (`wf.seed.*`, `openwop-app.*`, …) is
+  // never minted by a tenant lane: a later seed adopts whatever already holds it.
+  // (An EXISTING one is refused just above, with its own reason.)
+  if (isSharedWorkflowId(def.workflowId)) {
+    return { ok: false, failure: err(`workflowId '${def.workflowId}' is in a reserved shared namespace — compose with a fresh id (or omit it).`) };
+  }
+  // ADR 0822 D3 — nor a FREE id in a server-minted origin (ADR 0794): `wf.sub.*`
+  // and `wf.cadence.*` derive from a tenant id, so composing one would pre-squat
+  // another tenant's sub-chain child or cadence. A composed draft is always new
+  // (any registered id is refused above), so the rule here is simply "never".
+  if (isServerMintedWorkflowId(def.workflowId)) {
+    return { ok: false, failure: err(`workflowId '${def.workflowId}' is in a namespace only the host mints — compose with a fresh id (or omit it).`) };
   }
   return { ok: true, def };
 }
@@ -271,11 +307,40 @@ async function registerTransientDraft(def: WorkflowDefinition, scope: ComposeSco
   return generatedBy;
 }
 
+/**
+ * ADR 0822 D5 (grade-ux WFAU-23) — who may APPROVE a composed-workflow proposal.
+ * Approve-and-run registers the draft's run and starts it: the write the builder
+ * gates on `workspace:write` (ADR 0770 D1). With no registered check this kind
+ * fell to "no-op" (`assertApprovalEligibility`), so ANY member — a Viewer, even
+ * the Viewer who proposed it — could approve and run it, and `propose` was a way
+ * round ADR 0822 D1. The two REQUEST-level exits every kind threads (the
+ * wildcard operator, the caller in their own personal workspace) are honoured,
+ * as the assistant-action check does; otherwise the ONE workflow predicate.
+ */
+export function registerComposedWorkflowEligibility(): void {
+  registerApprovalEligibility('composed-workflow', async (tenantId, decidedBy, _approval, opts) => {
+    if (opts?.isOperator || opts?.isPersonalOwner) return;
+    if (await hasWorkflowScope({ tenantId, actingUserId: decidedBy }, 'workspace:write')) return;
+    throw new OpenwopError(
+      'forbidden_scope',
+      'Approving this workflow runs it, which needs edit access to the workspace. Ask an Editor or a workspace admin to review it.',
+      403,
+      { requiredScope: 'workspace:write' },
+    );
+  });
+}
+
 export function registerWorkflowComposeTool(deps: StartRunDeps): void {
+  registerComposedWorkflowEligibility();
   registerFeatureAgentTool({
     // TRUSTED: returns host-minted ids and counts ({valid, workflowId, nodeCount}, runId)
     // over the model's OWN composed definition — it reads back no stored text.
     contentTrust: 'trusted',
+    effect: 'write',
+    // ADR 0834 D4 — a model-written workflow can hold http/email nodes, so running one
+    // unreviewed is the off-host send the `http.fetch` ask exists to stop. Held in safe
+    // mode; the always-safe run lane escalates it (the ADR 0150 run-lane contract).
+    safeModeApproval: { reason: 'Running a newly composed workflow needs approval (safe mode). To have it reviewed and run, use openwop:workflows.propose instead.' },
     def: {
       name: COMPOSE_AND_RUN_TOOL_ID,
       description:
@@ -307,6 +372,8 @@ export function registerWorkflowComposeTool(deps: StartRunDeps): void {
       },
     },
     async run(input, scope) {
+      const refused = await composeWriteRefusal(scope);
+      if (refused) return refused;
       const prepared = await prepareComposedDraft(input.definition, deps.hostSuite, scope.tenantId);
       if (!prepared.ok) return prepared.failure;
       const def = prepared.def;
@@ -361,6 +428,7 @@ export function registerWorkflowProposeTool(resolver: WorkflowResolver): void {
   registerFeatureAgentTool({
     // TRUSTED: returns host-minted proposal/run ids + a validation verdict — no stored text.
     contentTrust: 'trusted',
+    effect: 'write',
     def: {
       name: PROPOSE_TOOL_ID,
       description:
@@ -663,6 +731,9 @@ export function registerComposedWorkflowDecisionHandler(deps: ApprovalDecisionDe
             decidedByUserId: opts.decidedByUserId,
           },
         },
+        // ADR 0832 D3 (review B2) — the approver bounds which orgs the approved
+        // run may reach; it still acts for nobody (the approver is not its actor).
+        orgScopeSubject: opts.decidedByUserId,
       });
       if (runId) await attachComposedDecision(approvalId, { runId, approvedDefinitionHash: liveHash });
     } catch (dispatchErr) {

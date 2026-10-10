@@ -24,7 +24,7 @@
  */
 import type { Express, Request, RequestHandler } from 'express';
 import { sendError } from '../middleware/errorEnvelope.js';
-import { vendorTwin } from '../middleware/protocolVersion.js';
+import { vendorPath } from '../middleware/protocolVersion.js';
 import { randomBytes } from 'node:crypto';
 import { issueApiKey, keyIdOfToken, revokeApiKey } from '../features/developer-keys/apiKeyService.js';
 import { COOKIE_NAME, mintUserSessionCookieValue, verifySession } from '../middleware/cookieSession.js';
@@ -36,7 +36,7 @@ const subjectOf = (req: Request): string | undefined => req.userId ?? req.princi
 const tenantOf = (req: Request): string => req.tenantId ?? 'default';
 
 export function registerCredentialLaneSeams(app: Express, seamAuth: RequestHandler): void {
-  app.post(vendorTwin('/auth/credential/mint'), seamAuth, async (req, res, next) => {
+  app.post(vendorPath('/auth/credential/mint'), seamAuth, async (req, res, next) => {
     try {
       const subject = subjectOf(req);
       if (!subject) { sendError(res, 401, 'unauthenticated', 'The mint seam needs an authenticated caller.'); return; }
@@ -44,7 +44,7 @@ export function registerCredentialLaneSeams(app: Express, seamAuth: RequestHandl
       if (lane === 'session' && cookiesEnabled()) {
         const tenantId = tenantOf(req);
         const user = await upsertFromPrincipal({ tenantId, principalId: `oidc:conformance-mint-${randomBytes(9).toString('hex')}`, source: 'oidc' });
-        const credential = mintUserSessionCookieValue({ userId: user.userId, tenantId, epoch: sessionEpochOf(user) });
+        const credential = mintUserSessionCookieValue({ userId: user.userId, tenantId, epoch: sessionEpochOf(user), freshAuth: true });
         res.status(201).json({ lane: 'session', credential, subjectId: user.userId, presentation: { kind: 'cookie', name: COOKIE_NAME } });
         return;
       }
@@ -59,7 +59,7 @@ export function registerCredentialLaneSeams(app: Express, seamAuth: RequestHandl
     }
   });
 
-  app.post(vendorTwin('/auth/credential/revoke'), seamAuth, async (req, res, next) => {
+  app.post(vendorPath('/auth/credential/revoke'), seamAuth, async (req, res, next) => {
     try {
       const subject = subjectOf(req);
       const credential = (req.body as { credential?: unknown } | undefined)?.credential;

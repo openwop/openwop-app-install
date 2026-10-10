@@ -30,6 +30,8 @@ import { getHostOAuthClient } from './oauthClientStore.js';
 import { guardedEgressFetch } from '../../host/webhookEgressGuard.js';
 import { OpenwopError } from '../../types.js';
 import { HELD_BUILTIN_MCP_REACH, canonicalResourceUri, isMcpReachOAuth, verifyAndPinMcpReach } from './mcpReachVerifier.js';
+import { VENDOR_ROOT, retiredVendorTwinPath } from '../../middleware/protocolVersion.js';
+import { safeInAppPathOr } from '../../host/safeRedirect.js';
 
 const log = createLogger('connections.oauth');
 
@@ -48,6 +50,11 @@ interface PendingAuth {
    *  started from (via its `connectUrl`). Rides the single-use `state`, so the
    *  grant that completes is the only thing that can resolve it. */
   interruptId?: string;
+  /** ADR 0806 — the `redirect_uri` the authorize request SENT. The token
+   *  exchange MUST present the identical value, and `redirectUri()` changes at
+   *  the v1 cut, so a flow that starts before the flip and returns after it
+   *  replays this rather than recomputing. Absent on rows minted before it. */
+  redirectUri?: string;
 }
 
 const pending = new DurableCollection<PendingAuth>('connections:pendingAuth', (p) => p.state);
@@ -70,6 +77,8 @@ export interface OAuthTokenMaterial {
   /** The provider-side subject/account the consent was granted by, when known. */
   externalSubject?: string;
   scopes: string[];
+  /** ADR 0780 D3.1 — the owning row's `generation` when this material was written. */
+  generation?: string;
 }
 
 const base64url = (buf: Buffer): string =>
@@ -160,13 +169,50 @@ export function callbackBaseUrl(reqOrigin: string): string {
 }
 
 /** The public URL a provider posts inbound events to for a connection (ADR 0024
- *  §6). Same browser/provider-reachable backend base as the OAuth callback. */
+ *  §6). Same browser/provider-reachable backend base as the OAuth callback.
+ *  ADR 0806 — unversioned: it is what an operator pastes into a provider's
+ *  console, and the `/v1` twin of it answers `410` once v1 is retired. A
+ *  provider still configured with the twin keeps working until then. */
 export function inboundIngestUrl(connectionId: string, reqOrigin: string): string {
-  return `${callbackBaseUrl(reqOrigin)}/v1/host/openwop-app/connections-inbound/${encodeURIComponent(connectionId)}`;
+  return `${callbackBaseUrl(reqOrigin)}${VENDOR_ROOT}/connections-inbound/${encodeURIComponent(connectionId)}`;
+}
+
+/**
+ * The OAuth `redirect_uri`. Unlike the ingest URL it must EQUAL what the
+ * provider console holds, on the authorize request and the token exchange,
+ * so it cannot move ahead of the operator: it stays on the `/v1` twin (its GET
+ * is forwarded, ADR 0806) until the operator has registered the unversioned URI
+ * at every provider and sets `OPENWOP_OAUTH_REDIRECT_UNVERSIONED=true`.
+ */
+/**
+ * ADR 0806 — whether a `/v<N>` path is the OAuth callback. It is not on the
+ * auth layer's public list (the browser arrives with its session cookie), but
+ * a provider holds it, so a flow in flight at the cut must still land: the
+ * negotiator forwards a READ of it like any other held address.
+ */
+// Matched on the UNVERSIONED remainder `retiredVendorTwinPath` yields, never with
+// an anchored `/v<N>` literal: that spelling is how a host-owned unversioned
+// root is recognised, and `unversioned-mount-guard-complete` reads it as a
+// mount named `/v`.
+const OAUTH_CALLBACK = new RegExp(`^${VENDOR_ROOT}/connections/[^/]+/callback$`);
+export function isOAuthCallbackTwin(versionedPath: string): boolean {
+  const rest = retiredVendorTwinPath(versionedPath);
+  return rest !== null && OAUTH_CALLBACK.test(rest);
 }
 
 export function redirectUri(provider: string, reqOrigin: string): string {
-  return `${callbackBaseUrl(reqOrigin)}/v1/host/openwop-app/connections/${encodeURIComponent(provider)}/callback`;
+  const rest = `/connections/${encodeURIComponent(provider)}/callback`;
+  // CORRECTED 2026-10-04 (v1 end-of-support moved to today): this used to switch
+  // to the unversioned URI AT THE CUT, which breaks every provider whose console
+  // still holds the `/v1` URI — measured: production's Gmail client does, and a
+  // provider console is not something the host can edit. The `/v1` callback GET
+  // is forwarded (bodiless 308, ADR 0806 — conformant under the 2.45.11 errata),
+  // and the token exchange replays the URI the authorize request sent, so
+  // staying on the registered twin works on BOTH sides of the cut. The
+  // unversioned URI is an operator opt-in, for once every console holds it.
+  const unversioned = (process.env.OPENWOP_OAUTH_REDIRECT_UNVERSIONED ?? '').trim().toLowerCase() === 'true';
+  // ADR 0812 KEEP: the provider-registered `/v1` twin, byte-identical to what `vendorTwin` built.
+  return `${callbackBaseUrl(reqOrigin)}${unversioned ? '' : '/v1'}${VENDOR_ROOT}${rest}`;
 }
 
 /** Build the post-callback SPA redirect (success or error), preserving the
@@ -268,6 +314,7 @@ export async function beginAuthorization(input: {
   const codeVerifier = base64url(randomBytes(64));
   const codeChallenge = base64url(createHash('sha256').update(codeVerifier).digest());
 
+  const sentRedirectUri = redirectUri(input.provider, input.reqOrigin);
   await pending.put({
     state,
     provider: input.provider,
@@ -276,13 +323,14 @@ export async function beginAuthorization(input: {
     codeVerifier,
     returnTo: sanitizeReturnTo(input.returnTo),
     createdAt: new Date().toISOString(),
+    redirectUri: sentRedirectUri,
     ...(input.userId ? { userId: input.userId } : {}),
     ...(input.interruptId ? { interruptId: input.interruptId } : {}),
   });
 
   const url = new URL(authorizeEndpoint);
   url.searchParams.set('client_id', client.clientId);
-  url.searchParams.set('redirect_uri', redirectUri(input.provider, input.reqOrigin));
+  url.searchParams.set('redirect_uri', sentRedirectUri);
   url.searchParams.set('response_type', 'code');
   url.searchParams.set('scope', scopes.join(' '));
   url.searchParams.set('state', state);
@@ -303,8 +351,8 @@ export async function beginAuthorization(input: {
 
 /** Only allow same-origin relative return paths — never an open redirect. */
 function sanitizeReturnTo(raw: string | undefined): string {
-  if (typeof raw !== 'string' || !raw.startsWith('/') || raw.startsWith('//')) return '/connections';
-  return raw;
+  // ADR 0833 D5 — the shared predicate (this copy accepted `/\evil.com`).
+  return safeInAppPathOr(raw, '/connections');
 }
 
 // ── callback ─────────────────────────────────────────────────────────────────
@@ -374,6 +422,20 @@ export async function sweepExpiredPendingAuth(now: number = Date.now()): Promise
   return swept;
 }
 
+/**
+ * ADR 0780 D4 — drop a subject's in-flight grants in one tenant. The callback
+ * completes without a session (RFC 0199 §A.3 refuses only a MISMATCHED one), so a
+ * grant started before an erasure would otherwise land a fresh connection for the
+ * erased subject afterwards. Returns the count removed.
+ */
+export async function deletePendingAuthFor(tenantId: string, userIds: ReadonlySet<string>): Promise<number> {
+  let removed = 0;
+  for (const p of await pending.list()) {
+    if (p.tenantId === tenantId && p.userId !== undefined && userIds.has(p.userId) && (await pending.delete(p.state))) removed++;
+  }
+  return removed;
+}
+
 /** Exchange an authorization code for tokens at the provider's token endpoint. */
 export async function exchangeCodeForTokens(input: {
   provider: string;
@@ -381,6 +443,8 @@ export async function exchangeCodeForTokens(input: {
   codeVerifier: string;
   scopes: string[];
   reqOrigin: string;
+  /** The value the authorize request sent (`PendingAuth.redirectUri`). */
+  redirectUri?: string;
 }): Promise<OAuthTokenMaterial> {
   const manifest = getProvider(input.provider);
   if (!manifest) throw Object.assign(new Error(`unknown provider '${input.provider}'`), { code: 'unknown_provider' });
@@ -393,7 +457,7 @@ export async function exchangeCodeForTokens(input: {
   const form = new URLSearchParams({
     grant_type: 'authorization_code',
     code: input.code,
-    redirect_uri: redirectUri(input.provider, input.reqOrigin),
+    redirect_uri: input.redirectUri ?? redirectUri(input.provider, input.reqOrigin),
     client_id: client.clientId,
     client_secret: client.clientSecret,
     ...(manifest.pkce !== 'unsupported' ? { code_verifier: input.codeVerifier } : {}),

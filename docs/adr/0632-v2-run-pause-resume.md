@@ -126,3 +126,23 @@ OpenAPI vocabulary on the wire and emits the registry vocabulary in the event (`
 > table is gone. The same ruling confirmed the interrupted-attempt shape: no terminal node event for the cut attempt is
 > the intended reading (a MUST NOT at rc.52), and the record of the interruption is `run.paused` itself, whose payload
 > MAY carry `interruptedNodeId` — emitted here from the scheduler's `interrupted` branch.
+
+## Correction 2026-09-28: the `:resume` 202 raced `run.resumed`
+
+The route answered `202 { status: running }` and then re-entered `executeRun`
+detached. `run.resumed` was appended later, inside the executor. runs.md
+§Pause and resume lets a client read the log straight after the 202, and the
+suite does exactly that (one poll, `timeout=1`).
+- Locally the write always won the race.
+- On prod (rev 00780, first c4aad98c2 certification) it lost. The log held
+  `run.started, node.started, run.paused`, and the certification floor row
+  `openwop.floor.v2-run-pause-resume` failed.
+
+**Fix:** `ExecuteRunOptions.onStarted` fires once the opening event is durable
+and the row says `running`. The route awaits it before answering. The wait is
+bounded (10 s) and is also released if `executeRun` settles without starting,
+so the route cannot hang. The run itself still continues detached.
+`test/v2-run-pause-resume.test.ts` delays the `run.resumed` append by 600 ms
+(the same lever this file already uses for the pause race) and reads the log
+with no wait. Sabotaged back to answer-first, it reds with
+`node.started, run.paused`, exactly the prod failure.

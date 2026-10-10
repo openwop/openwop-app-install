@@ -12,10 +12,23 @@ import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { surfaceStr as str, surfaceOptStr as optStr, type FeatureSurface } from '../../host/featureSurfaces.js';
 import {
   listTemplates, getTemplate, assemble,
-  listDocuments, getDocument, createDocument, addVersion, renderDocument,
-  type Provenance, type RenderFormat,
+  listDocuments, getDocument, createDocument, addVersion, renderDocument, canReadDocument,
+  type Provenance, type RenderFormat, type DocumentRecord,
 } from './documentsService.js';
+import type { FeatureSurfaceOrgPolicy } from '../../host/featureSurfaces.js';
+
+/** ADR 0838 D3 — the closed-world method partition. Every surface method is a
+ *  read or a writer; writers ask the HTTP doors' `workspace:write` of the run's
+ *  person (`DOCWF2-3`: with no policy the ADR 0832 floor asked read tier of all
+ *  of them). `render` is a writer: it stores a library asset, and its door is
+ *  write. A test pins that the two sets cover the surface exactly. */
+export const DOCUMENTS_SURFACE_READS = ['listTemplates', 'getTemplate', 'assemble', 'listDocuments', 'getDocument', 'validateArtifact'] as const;
+export const DOCUMENTS_SURFACE_WRITERS = ['createDocument', 'createDraftDocument', 'addVersion', 'render'] as const;
+export const DOCUMENTS_SURFACE_POLICY: FeatureSurfaceOrgPolicy = {
+  methodScopes: Object.fromEntries(DOCUMENTS_SURFACE_WRITERS.map((m) => [m, 'workspace:write' as const])),
+};
 import { validateArtifact } from '../../host/artifactTypes.js';
+import { OpenwopError } from '../../types.js';
 
 const DOC_INTERNAL = new Set(['tenantId', 'createdBy', 'updatedBy']);
 function project(o: object, drop: Set<string>): Record<string, unknown> {
@@ -27,6 +40,12 @@ function project(o: object, drop: Set<string>): Record<string, unknown> {
 export function buildDocumentsSurface(scope: BundleScope): FeatureSurface {
   const tenantId = scope.tenantId;
   const runId = (scope as { runId?: string }).runId;
+  // ADR 0838 D3 — the run's person (actor, else the causing member: the ADR 0832
+  // rule). With one, a membership-scoped document is read through the SAME gate
+  // as the HTTP doors; with none (a webhook or system job) the run stays
+  // tenant-trusted, exactly as the org floor does.
+  const person = scope.actingUserId ?? scope.orgScopeSubject;
+  const readable = async (d: DocumentRecord): Promise<boolean> => (person ? canReadDocument(tenantId, d, person) : true);
   const runProvenance = (extra?: Partial<Provenance>): Provenance => ({
     producedBy: { kind: 'run', id: runId ?? 'run' },
     ...(runId ? { runId } : {}),
@@ -45,11 +64,12 @@ export function buildDocumentsSurface(scope: BundleScope): FeatureSurface {
 
     listDocuments: async (args) => {
       const documents = await listDocuments(tenantId, str(args.orgId), optStr(args.kind) ? { kind: optStr(args.kind)! } : undefined);
-      return { documents: documents.map((d) => project(d, DOC_INTERNAL)) };
+      const visible = (await Promise.all(documents.map(async (d) => ((await readable(d)) ? d : null)))).filter((d): d is DocumentRecord => d !== null);
+      return { documents: visible.map((d) => project(d, DOC_INTERNAL)) };
     },
     getDocument: async (args) => {
       const doc = await getDocument(tenantId, str(args.orgId), str(args.documentId));
-      return { document: doc ? project(doc, DOC_INTERNAL) : null };
+      return { document: doc && (await readable(doc)) ? project(doc, DOC_INTERNAL) : null };
     },
     createDocument: async (args) => {
       const doc = await createDocument({
@@ -102,7 +122,13 @@ export function buildDocumentsSurface(scope: BundleScope): FeatureSurface {
       return { version };
     },
     // Render the current version to PDF → Media token (deterministic; ADR 0057).
-    render: async (args) => ({ ...(await renderDocument(tenantId, str(args.orgId), str(args.documentId), runId ?? 'run', (optStr(args.format) as RenderFormat | undefined) ?? 'pdf')) }),
+    // The output is a durable token of the BODY, so it is a read exit too: the
+    // same gate as `getDocument`, refused as the service's uniform not_found.
+    render: async (args) => {
+      const doc = await getDocument(tenantId, str(args.orgId), str(args.documentId));
+      if (doc && !(await readable(doc))) throw new OpenwopError('not_found', 'Document not found.', 404, { documentId: str(args.documentId) });
+      return { ...(await renderDocument(tenantId, str(args.orgId), str(args.documentId), runId ?? 'run', (optStr(args.format) as RenderFormat | undefined) ?? 'pdf')) };
+    },
     // Validate an artifact payload against a registered host artifact type (ADR 0055),
     // so the generate node can emit a correctly-marked artifact.created.
     validateArtifact: async (args) => ({ ...validateArtifact(str(args.artifactTypeId), args.payload) }),

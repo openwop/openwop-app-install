@@ -19,7 +19,7 @@ export const multiTabChatFeature: BackendFeature = {
       'Work in several chat conversations at once: a bounded working set of live, '
       + 'independent tabs that keep streaming in the background while you read another. '
       + 'Each tab is a full instance of the one AI chat (no second chat system); the '
-      + 'sidebar list stays the library. A per-user UI preference. OFF by default.',
+      + 'sidebar list stays the library. A per-user UI preference.',
     category: 'Chat',
     status: 'off',
     bucketUnit: 'user',

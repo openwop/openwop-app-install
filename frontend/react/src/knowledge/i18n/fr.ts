@@ -29,7 +29,7 @@ export const messages = {
   docCount_other: '{{count}} documents',
   unbind: 'Dissocier',
   externalUnverified: 'Externe · non vérifié',
-  externalUnverifiedTitle: 'Importé depuis une source externe — traité comme non fiable (ADR 0038 §C).',
+  externalUnverifiedTitle: 'Importé depuis une source externe — traité comme non fiable.',
   removeDocument: 'Supprimer le document',
   // CollectionCard — ingest form
   documentTitleLabel: 'Titre du document',

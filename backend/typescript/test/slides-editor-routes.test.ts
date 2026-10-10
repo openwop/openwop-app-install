@@ -48,9 +48,9 @@ let n = 0;
 async function orgOwner(): Promise<{ c: ReturnType<typeof client>; orgId: string; tenantId: string }> {
   const tenantId = `org:test-slides-ed-${Date.now()}-${n++}`;
   const c = client();
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `sled-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await c.post('/host/openwop-app/test/login', { email: `sled-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status).toBe(201);
-  const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status).toBe(201);
   return { c, orgId: org.body.orgId, tenantId };
 }
@@ -63,7 +63,7 @@ const deck = (label: string) => ({
     { id: 'points', name: 'Points', layout: 'title-bullets', title: 'Key points', bullets: ['a', 'b'] },
   ],
 });
-const SL = (orgId: string) => `/v1/host/openwop-app/slides/orgs/${encodeURIComponent(orgId)}`;
+const SL = (orgId: string) => `/host/openwop-app/slides/orgs/${encodeURIComponent(orgId)}`;
 
 describe('slides editor routes (ADR 0310 Phase B)', () => {
   it('is toggle-gated: 404 while slides is off, then serves the catalog', async () => {
@@ -175,7 +175,7 @@ describe('slides editor routes (ADR 0310 Phase B)', () => {
     // The projectId must resolve to THIS org (grade pass DATA-CV) — create a real one.
     const proj = getToggleDefault('projects');
     if (proj) await saveConfig({ ...proj, status: 'on' }, 'test');
-    const project = await c.post('/v1/host/openwop-app/projects', { orgId, name: 'Launch' });
+    const project = await c.post('/host/openwop-app/projects', { orgId, name: 'Launch' });
     expect(project.status, JSON.stringify(project.body)).toBe(201);
     const projectId = project.body.id;
 
@@ -262,7 +262,7 @@ describe('present remote (ADR 0328 P4)', () => {
 
     // The outline is public — the token IS the credential (no cookie sent).
     const pub = client();
-    const outline = await pub.get(`/v1/host/openwop-app/present/${encodeURIComponent(minted.body.token)}/outline`);
+    const outline = await pub.get(`/host/openwop-app/present/${encodeURIComponent(minted.body.token)}/outline`);
     expect(outline.status).toBe(200);
     expect(outline.body.title).toBe('Show');
     expect(outline.body.frames).toEqual([
@@ -271,17 +271,17 @@ describe('present remote (ADR 0328 P4)', () => {
     ]);
 
     // Commands validate; a good one is accepted (202 — fan-out is async).
-    const badCmd = await pub.post(`/v1/host/openwop-app/present/${encodeURIComponent(minted.body.token)}/command`, { action: 'launch' });
+    const badCmd = await pub.post(`/host/openwop-app/present/${encodeURIComponent(minted.body.token)}/command`, { action: 'launch' });
     expect(badCmd.status).toBe(400);
-    const cmd = await pub.post(`/v1/host/openwop-app/present/${encodeURIComponent(minted.body.token)}/command`, { action: 'next' });
+    const cmd = await pub.post(`/host/openwop-app/present/${encodeURIComponent(minted.body.token)}/command`, { action: 'next' });
     expect(cmd.status).toBe(202);
-    const pos = await pub.post(`/v1/host/openwop-app/present/${encodeURIComponent(minted.body.token)}/state`, { current: 1 });
+    const pos = await pub.post(`/host/openwop-app/present/${encodeURIComponent(minted.body.token)}/state`, { current: 1 });
     expect(pos.status).toBe(202);
 
     // Bad/expired tokens are a uniform 404 on every route.
     for (const path of ['outline', 'command', 'state', 'events'] as const) {
       const method = path === 'outline' || path === 'events' ? 'get' : 'post';
-      const r = await pub[method](`/v1/host/openwop-app/present/not-a-token/${path}`, method === 'post' ? { action: 'next', current: 0 } : undefined);
+      const r = await pub[method](`/host/openwop-app/present/not-a-token/${path}`, method === 'post' ? { action: 'next', current: 0 } : undefined);
       expect(r.status, path).toBe(404);
     }
   });
@@ -309,7 +309,7 @@ describe('present remote (ADR 0328 P4)', () => {
 
     // Open the SSE stream raw (fetch would buffer; use http directly).
     const { get } = await import('node:http');
-    const url = new URL(`${BASE}/v1/host/openwop-app/present/${encodeURIComponent(minted.body.token)}/events`);
+    const url = new URL(`${BASE}/host/openwop-app/present/${encodeURIComponent(minted.body.token)}/events`);
     const req2 = get(url, { headers: { accept: 'text/event-stream' } });
     await new Promise<void>((resolve, reject) => {
       req2.on('response', (res) => { expect(res.statusCode).toBe(200); resolve(); });
@@ -332,13 +332,13 @@ describe('present remote (ADR 0328 P4)', () => {
   it('a viewer-role member cannot mint (write-scoped), though they can read the canvas', async () => {
     const tenantId = `org:test-slides-ed-${Date.now()}-${n++}`;
     const owner = client();
-    expect((await owner.post('/v1/host/openwop-app/test/login', { email: `sled-own-${n}@acme.test`, tenantId })).status).toBe(201);
+    expect((await owner.post('/host/openwop-app/test/login', { email: `sled-own-${n}@acme.test`, tenantId })).status).toBe(201);
     const viewer = client();
-    const vLogin = await viewer.post('/v1/host/openwop-app/test/login', { email: `sled-view-${n}@acme.test`, tenantId });
+    const vLogin = await viewer.post('/host/openwop-app/test/login', { email: `sled-view-${n}@acme.test`, tenantId });
     expect(vLogin.status).toBe(201);
-    const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+    const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
     const orgId: string = org.body.orgId;
-    const add = await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, {
+    const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, {
       displayName: 'RO', subject: vLogin.body.user.userId, roles: ['viewer'],
     });
     expect(add.status, JSON.stringify(add.body)).toBe(201);
@@ -473,28 +473,28 @@ describe('share wiring + per-frame analytics (ADR 0328 P7)', () => {
     if (sharing) await saveConfig({ ...sharing, status: 'on' }, 'test');
     const created = await c.post(`${SL(orgId)}/canvases`, { name: 'Shared deck' });
     expect(created.status).toBe(201);
-    const link = await c.post(`/v1/host/openwop-app/sharing/orgs/${encodeURIComponent(orgId)}/links`, {
+    const link = await c.post(`/host/openwop-app/sharing/orgs/${encodeURIComponent(orgId)}/links`, {
       resourceType: 'slides_canvas', resourceId: created.body.canvasId,
     });
     expect(link.status, JSON.stringify(link.body)).toBe(201);
 
     const pub = client();
-    const shared = await pub.get(`/v1/host/openwop-app/shared/${link.body.token}`);
+    const shared = await pub.get(`/host/openwop-app/shared/${link.body.token}`);
     expect(shared.status).toBe(200);
     expect(shared.body.resourceType).toBe('slides_canvas');
     expect(shared.body.resource.kind).toBe('slides_canvas');
     expect(Array.isArray(shared.body.resource.deck.slides)).toBe(true);
 
     // The public viewer reports frame views; the owner reads the tallies.
-    expect((await pub.post(`/v1/host/openwop-app/shared/${link.body.token}/frame-view`, { frame: 0 })).status).toBe(204);
-    expect((await pub.post(`/v1/host/openwop-app/shared/${link.body.token}/frame-view`, { frame: 0 })).status).toBe(204);
-    expect((await pub.post(`/v1/host/openwop-app/shared/${link.body.token}/frame-view`, { frame: 1 })).status).toBe(204);
-    expect((await pub.post(`/v1/host/openwop-app/shared/${link.body.token}/frame-view`, { frame: -1 })).status).toBe(400);
+    expect((await pub.post(`/host/openwop-app/shared/${link.body.token}/frame-view`, { frame: 0 })).status).toBe(204);
+    expect((await pub.post(`/host/openwop-app/shared/${link.body.token}/frame-view`, { frame: 0 })).status).toBe(204);
+    expect((await pub.post(`/host/openwop-app/shared/${link.body.token}/frame-view`, { frame: 1 })).status).toBe(204);
+    expect((await pub.post(`/host/openwop-app/shared/${link.body.token}/frame-view`, { frame: -1 })).status).toBe(400);
     // Grade pass: frame indexes are bounded by the largest legal deck (100).
-    expect((await pub.post(`/v1/host/openwop-app/shared/${link.body.token}/frame-view`, { frame: 100 })).status).toBe(400);
-    expect((await pub.post(`/v1/host/openwop-app/shared/not-a-token/frame-view`, { frame: 0 })).status).toBe(404);
+    expect((await pub.post(`/host/openwop-app/shared/${link.body.token}/frame-view`, { frame: 100 })).status).toBe(400);
+    expect((await pub.post(`/host/openwop-app/shared/not-a-token/frame-view`, { frame: 0 })).status).toBe(404);
 
-    const views = await c.get(`/v1/host/openwop-app/sharing/orgs/${encodeURIComponent(orgId)}/links/${link.body.token}/frame-views`);
+    const views = await c.get(`/host/openwop-app/sharing/orgs/${encodeURIComponent(orgId)}/links/${link.body.token}/frame-views`);
     expect(views.status).toBe(200);
     expect(views.body.frames).toEqual([{ frame: 0, count: 2 }, { frame: 1, count: 1 }]);
 
@@ -528,12 +528,12 @@ describe('R2 SL-SP-1 — the PUBLIC share payload is the AUDIENCE projection, on
       },
     });
     expect(patched.status, JSON.stringify(patched.body)).toBe(200);
-    const link = await c.post(`/v1/host/openwop-app/sharing/orgs/${encodeURIComponent(orgId)}/links`, {
+    const link = await c.post(`/host/openwop-app/sharing/orgs/${encodeURIComponent(orgId)}/links`, {
       resourceType: 'slides_canvas', resourceId: created.body.canvasId,
     });
     expect(link.status).toBe(201);
 
-    const shared = await client().get(`/v1/host/openwop-app/shared/${link.body.token}`);
+    const shared = await client().get(`/host/openwop-app/shared/${link.body.token}`);
     expect(shared.status).toBe(200);
     // The WHOLE response — not just the rendered DOM — must be backstage-free.
     const raw = JSON.stringify(shared.body);

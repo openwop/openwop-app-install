@@ -26,6 +26,8 @@ export interface DocumentRecord {
   title: string;
   status: DocStatus;
   currentVersionId?: string;
+  /** ADR 0838 D2 — the version an approver published; the share link serves it. */
+  approvedVersionId?: string;
   templateId?: string;
   /** ADR 0350 Phase 3 — the rich `canvas.document` this markdown doc was promoted
    *  to, if any. Set once; drives the one-way idempotent promote + the link. */
@@ -79,11 +81,27 @@ export interface AssembleResult {
 const root = `${config.baseUrl}/host/openwop-app`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 
+/** A failed documents call. `status` + `reason` let a screen say something
+ *  specific (ADR 0838: `stale_base` = someone saved a newer version) instead of
+ *  echoing the server's English. */
+export class DocumentsApiError extends Error {
+  constructor(message: string, readonly status: number, readonly reason?: string) {
+    super(message);
+    this.name = 'DocumentsApiError';
+  }
+}
+
 async function asJson<T>(res: Response, ctx: string): Promise<T> {
   if (!res.ok) {
     let detail = '';
-    try { detail = ((await res.json()) as { message?: string })?.message ?? ''; } catch { /* non-JSON */ }
-    throw new Error(detail || `${ctx} returned ${res.status}`);
+    let reason: string | undefined;
+    try {
+      const body = (await res.json()) as { message?: string; error?: { message?: string; details?: { reason?: unknown } }; details?: { reason?: unknown } };
+      detail = body?.message ?? body?.error?.message ?? '';
+      const r = body?.details?.reason ?? body?.error?.details?.reason;
+      if (typeof r === 'string') reason = r;
+    } catch { /* non-JSON */ }
+    throw new DocumentsApiError(detail || `${ctx} returned ${res.status}`, res.status, reason);
   }
   return (await res.json()) as T;
 }
@@ -115,7 +133,7 @@ export async function createDocument(orgId: string, input: { title: string; kind
   return asJson(res, 'createDocument');
 }
 
-export async function patchDocument(orgId: string, documentId: string, patch: { title?: string; status?: DocStatus; ownerSubject?: { kind: string; id: string } | null; promotedCanvasId?: string }): Promise<DocumentRecord> {
+export async function patchDocument(orgId: string, documentId: string, patch: { title?: string; status?: DocStatus; ownerSubject?: { kind: string; id: string } | null; promotedCanvasId?: string; approvedVersionId?: string }): Promise<DocumentRecord> {
   const res = await fetch(`${base(orgId)}/documents/${encodeURIComponent(documentId)}`, fetchOpts({ method: 'PATCH', headers: jsonHeaders(), body: JSON.stringify(patch) }));
   return asJson(res, 'patchDocument');
 }
@@ -146,8 +164,10 @@ export async function listVersions(orgId: string, documentId: string): Promise<D
   return (await asJson<{ versions: DocumentVersion[] }>(res, 'listVersions')).versions;
 }
 
-export async function addVersion(orgId: string, documentId: string, content: string): Promise<DocumentVersion> {
-  const res = await fetch(`${base(orgId)}/documents/${encodeURIComponent(documentId)}/versions`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify({ content }) }));
+/** `baseVersionId` (ADR 0838 D5) makes the save CHECKED: it fails with
+ *  `reason: 'stale_base'` if someone saved a newer version since that one. */
+export async function addVersion(orgId: string, documentId: string, content: string, baseVersionId?: string): Promise<DocumentVersion> {
+  const res = await fetch(`${base(orgId)}/documents/${encodeURIComponent(documentId)}/versions`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify({ content, ...(baseVersionId ? { baseVersionId } : {}) }) }));
   return asJson(res, 'addVersion');
 }
 

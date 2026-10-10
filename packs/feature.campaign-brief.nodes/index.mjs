@@ -365,7 +365,17 @@ export async function extractVoc(ctx) {
   if (chunks.length === 0 || (r && r.coverage === 'none')) {
     return { status: 'failed', error: { code: 'grounding_insufficient', message: 'The collection returned no source material to extract VOC evidence from.' } };
   }
-  const sourceBlock = chunks.map((c, n) => `[${n}] <SOURCE doc="${str(c.documentId)}">\n${str(c.text)}\n</SOURCE>`).join('\n\n');
+  // ADR 0830 D3 — a chunk is customer material, often an uploaded file, so it must
+  // not be able to CLOSE its own block: a literal `</SOURCE>` in the text used to end
+  // the data region and leave what followed reading as the user turn. The tag and the
+  // fence words are defanged inside the text (the grounding check below compares
+  // quotes against the ORIGINAL chunk, so this cannot change what grounds), and the
+  // `doc` attribute is reduced to id-safe characters.
+  const SOURCE_TAG = /<\s*(\/?)\s*SOURCE\b/gi;
+  const FENCE_WORDS = /\b(BEGIN|END)\s+UNTRUSTED\s+CONTENT\b/gi;
+  const defangSource = (t) => str(t).replace(SOURCE_TAG, '‹$1SOURCE').replace(FENCE_WORDS, '$1_UNTRUSTED_CONTENT');
+  const docAttr = (id) => str(id).replace(/[^A-Za-z0-9:._\-]/g, '_');
+  const sourceBlock = chunks.map((c, n) => `[${n}] <SOURCE doc="${docAttr(c.documentId)}">\n${defangSource(c.text)}\n</SOURCE>`).join('\n\n');
   const userContent = `Extract voice-of-customer evidence for the product "${str(brief.productName)}" (${str(brief.industryVertical)}).\n\nSOURCES:\n\n${sourceBlock}`;
   const provider = str(i.provider) || 'anthropic';
   const model = str(i.model) || DEFAULT_MODEL;

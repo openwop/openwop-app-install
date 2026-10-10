@@ -12,6 +12,10 @@
  * Members come from the shared org-member loader (`orgs/orgMembers.ts`, active
  * workspace root org): one cache with in-flight dedupe, a TTL, and invalidation on
  * member mutations. This file used to keep a second, never-invalidated copy of it.
+ *
+ * ADR 0829 P4 — picking a PERSON opens `HandoffDialog` instead of assigning at
+ * once: the assigner may write a note for the new assignee, and nothing is sent
+ * until they press assign. Unassign stays one step.
  */
 
 import { Button } from '../ui/Button.js';
@@ -20,9 +24,10 @@ import { useTranslation } from 'react-i18next';
 import { UserIcon, XIcon } from '../ui/icons/index.js';
 import type { OrgMember } from '../client/accessClient.js';
 import { loadOrgMembers } from '../orgs/orgMembers.js';
-import { assignCard } from './kanbanClient.js';
+import { assignCard, type HandoffNoteDraft } from './kanbanClient.js';
+import { HandoffDialog } from './HandoffDialog.js';
 
-export function AssigneeControl({ cardId, assigneeId }: { cardId: string; assigneeId: string | undefined }): JSX.Element {
+export function AssigneeControl({ cardId, assigneeId, cardTitle }: { cardId: string; assigneeId: string | undefined; cardTitle?: string }): JSX.Element {
   const { t } = useTranslation('kanban');
   const [open, setOpen] = useState(false);
   const [members, setMembers] = useState<OrgMember[] | null>(null);
@@ -31,6 +36,7 @@ export function AssigneeControl({ cardId, assigneeId }: { cardId: string; assign
   // from (a member removed since the last open stays offered for that window
   // otherwise). 'failed' is a designed state — distinct from an empty workspace.
   const [load, setLoad] = useState<'loading' | 'ready' | 'failed'>('ready');
+  const [pending, setPending] = useState<{ subject: string; name: string } | null>(null);
 
   // Re-read on EVERY open, not once per mount: a picker that latched its first list
   // kept offering a member removed since (CLNP-2(d)). The members themselves come from
@@ -50,15 +56,25 @@ export function AssigneeControl({ cardId, assigneeId }: { cardId: string; assign
   const assignee = members?.find((m) => m.subject === assigneeId);
   const label = assignee?.displayName ?? (assigneeId ? assigneeId : t('unassigned'));
 
-  const onPick = useCallback(async (value: string) => {
+  const send = useCallback(async (value: string, handoff?: HandoffNoteDraft) => {
     setBusy(true);
     try {
-      await assignCard(cardId, value ? { assigneeId: value, notifyAssignee: true } : { assigneeId: null });
+      await assignCard(cardId, value ? { assigneeId: value, notifyAssignee: true, ...(handoff ? { handoff } : {}) } : { assigneeId: null });
+      setPending(null);
       setOpen(false);
     } finally {
       setBusy(false);
     }
   }, [cardId]);
+
+  const onPick = useCallback(async (value: string) => {
+    if (value) {
+      const m = members?.find((x) => (x.subject ?? x.memberId) === value);
+      setPending({ subject: value, name: m?.displayName ?? value });
+      return;
+    }
+    await send(value);
+  }, [members, send]);
 
   // Resolve a name for an already-assigned card without opening the picker.
   useEffect(() => {
@@ -88,6 +104,11 @@ export function AssigneeControl({ cardId, assigneeId }: { cardId: string; assign
     <span
       className="u-iflex u-items-center u-gap-1"
       onPointerDown={(e) => e.stopPropagation()}
+      /* The HandoffDialog is portaled, but React events still bubble through
+         this tree to the draggable card: a click would reach the card, and a
+         Space/Enter typed in the dialog would reach dnd-kit's keyboard sensor. */
+      onClick={(e) => e.stopPropagation()}
+      onKeyDown={(e) => e.stopPropagation()}
     >
       <select
         className="u-fs-12"
@@ -105,6 +126,15 @@ export function AssigneeControl({ cardId, assigneeId }: { cardId: string; assign
           </option>
         ))}
       </select>
+      {pending ? (
+        <HandoffDialog
+          assigneeName={pending.name}
+          cardTitle={cardTitle ?? ''}
+          busy={busy}
+          onAssign={(draft) => void send(pending.subject, draft)}
+          onClose={() => { setPending(null); setOpen(false); }}
+        />
+      ) : null}
       <button
         type="button"
         className="icon-button"

@@ -15,7 +15,7 @@ import { listJobs } from './entities/videoJob.js';
 
 const FEATURE = { toggleId: 'creative-video', label: 'AI Video' };
 const T2V_FEATURE = { toggleId: 'creative-video.t2v', label: 'Text-to-video' };
-const ORG = '/v1/host/openwop-app/creative-video/orgs/:orgId';
+const ORG = '/host/openwop-app/creative-video/orgs/:orgId';
 
 type Scope = 'workspace:read' | 'workspace:write';
 

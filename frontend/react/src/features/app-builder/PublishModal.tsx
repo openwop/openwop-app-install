@@ -13,7 +13,8 @@ import { Notice } from '../../ui/index.js';
 import { toast } from '../../ui/toast.js';
 import { publishCanvas, EXPORT_TARGETS, type ExportTarget } from './canvasEditorClient.js';
 
-const REPO_RE = /^[A-Za-z0-9._-]{1,100}$/;
+// Mirrors the server REPO_NAME_RE (ADR 0835 D6: `.` and `..` are refused).
+const REPO_RE = /^(?!\.{1,2}$)[A-Za-z0-9._-]{1,100}$/;
 
 export function PublishModal({ orgId, canvasId, defaultName, onClose }: {
   orgId: string;

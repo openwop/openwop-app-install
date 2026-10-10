@@ -49,10 +49,10 @@ async function jsonFetch<T = unknown>(path: string, init: RequestInit = {}): Pro
 }
 
 async function makeConversation(title: string, msgId: string): Promise<{ sessionId: string; tenantId: string }> {
-  const r = await jsonFetch<{ sessionId: string; tenantId: string }>('/v1/host/openwop-app/chat/sessions', {
+  const r = await jsonFetch<{ sessionId: string; tenantId: string }>('/host/openwop-app/chat/sessions', {
     method: 'POST', body: JSON.stringify({ title }),
   });
-  await jsonFetch(`/v1/host/openwop-app/chat/sessions/${r.body.sessionId}/messages`, {
+  await jsonFetch(`/host/openwop-app/chat/sessions/${r.body.sessionId}/messages`, {
     method: 'POST', body: JSON.stringify({ messageId: msgId, role: 'user', content: 'hello' }),
   });
   return r.body;
@@ -83,7 +83,7 @@ describe('conversation deletion cleans sidecars (ADR 0288 P2)', () => {
       await createComment({ tenantId: T, orgId: 'org-1', resourceType: 'chat_message', resourceId: `${sessionId}#${msg}`, body: 'a note', authorId: 'u1' , caller: { subject: 'u1' }});
     }
 
-    const del = await jsonFetch(`/v1/host/openwop-app/chat/sessions/${doomed.sessionId}`, { method: 'DELETE' });
+    const del = await jsonFetch(`/host/openwop-app/chat/sessions/${doomed.sessionId}`, { method: 'DELETE' });
     expect(del.status).toBe(204);
 
     // Host sidecars: gone for doomed, intact for keeper.

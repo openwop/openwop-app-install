@@ -1,6 +1,6 @@
 /**
  * CDP-1d — RFC 0128 purpose-propagation conformance seam route (the steward's CDP-1b legs).
- * `POST /v1/host/sample/purpose-propagation/forward`: forward re-emits (never-widen), merge
+ * `POST /host/sample/purpose-propagation/forward`: forward re-emits (never-widen), merge
  * intersects, `[]` is refused onward (dropped), unlabelled adds no constraint; flag-off ⇒ 404.
  */
 import http from 'node:http';
@@ -21,9 +21,11 @@ afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
 });
 
-const FWD = '/v1/host/sample/purpose-propagation/forward';
+const FWD = '/host/sample/purpose-propagation/forward';
 async function post(body: unknown): Promise<{ status: number; body: any }> {
-  const res = await fetch(`${BASE}${FWD}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  // ADR 0812 — the unversioned seam path negotiates major 2, where a credential-less
+  // call is refused 401 (RFC 0200); the `/v1` twin minted an anon session.
+  const res = await fetch(`${BASE}${FWD}`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer dev-token' }, body: JSON.stringify(body) });
   return { status: res.status, body: await res.json().catch(() => undefined) };
 }
 const labelsOf = (onward: any[], surface: string) => onward.find((o) => o.surface === surface)?.permittedPurposes;

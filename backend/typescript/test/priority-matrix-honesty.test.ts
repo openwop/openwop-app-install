@@ -28,14 +28,14 @@ beforeAll(async () => {
 afterAll(async () => { await closeApp(); });
 
 const client = (): Client => makeClient(() => BASE);
-const L = '/v1/host/openwop-app/priority-matrix/lists';
+const L = '/host/openwop-app/priority-matrix/lists';
 
 async function owner(tenantId?: string): Promise<{ c: Client; userId: string; orgId: string; tenantId: string }> {
   const c = client();
   const t = tenantId ?? `org:pm2-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail('pm2'), tenantId: t });
+  const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail('pm2'), tenantId: t });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   return { c, userId: r.body.user.userId, orgId: org.body.orgId, tenantId: t };
 }
 const mkList = async (c: Client, orgId: string): Promise<string> => {
@@ -97,7 +97,7 @@ describe('PM2-M2 — promotion is a one-way door', () => {
     // share. `markPromoted` overwrote `promotedTo` unconditionally, so a later promotion
     // to a strategy initiative left the PROJECT orphaned with nothing linking back to the
     // idea that spawned it, and the panel then claimed the idea had become an initiative.
-    const projectsBefore = (await c.get(`/v1/host/openwop-app/projects?orgId=${encodeURIComponent(orgId)}`)).body.projects.length;
+    const projectsBefore = (await c.get(`/host/openwop-app/projects?orgId=${encodeURIComponent(orgId)}`)).body.projects.length;
 
     const second = await c.post(`${L}/${listId}/ideas/${cardId}/promote-to-project`, { name: 'Duplicate' });
     expect(second.status).toBe(409);
@@ -108,7 +108,7 @@ describe('PM2-M2 — promotion is a one-way door', () => {
     // already written that linked to nothing, and the user was told "already promoted"
     // with no mention of it. MEASURED at review time: two projects. This assertion is the
     // one my first test was missing — it asserted the 409 and stepped over the orphan.
-    const projectsAfter = (await c.get(`/v1/host/openwop-app/projects?orgId=${encodeURIComponent(orgId)}`)).body.projects.length;
+    const projectsAfter = (await c.get(`/host/openwop-app/projects?orgId=${encodeURIComponent(orgId)}`)).body.projects.length;
     expect(projectsAfter, 'a refused promotion must not create a project').toBe(projectsBefore);
 
     const intake = (await c.get(`${L}/${listId}/ideas/${cardId}/intake`)).body.intake;

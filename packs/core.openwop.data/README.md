@@ -3,8 +3,8 @@
 Spec-canonical data-utility pack. Five pure, replay-safe nodes for the most common workflow data transformations.
 
 | Pack name | `core.openwop.data` |
-| Version | `1.0.0` |
-| Engine | OpenWOP `>=1.0.0 <2.0.0` |
+| Version | `1.2.2` |
+| Engine | OpenWOP `>=1.0.0 <3.0.0` |
 | Runtime | JavaScript (ESM), Node `>=20` |
 | External deps | None |
 | License | Apache-2.0 |
@@ -78,6 +78,6 @@ Deep-merge is intentionally out of scope; downstream packs can ship that variant
 
 ## See also
 
-- [`spec/v1/node-packs.md`](../../spec/v1/node-packs.md)
-- [`docs/PACKS-MVP-PLAN.md`](../../docs/PACKS-MVP-PLAN.md) — Phase 1 catalog
-- [`docs/PROTOCOL-GAP-CLOSURE-PLAN.md`](../../docs/PROTOCOL-GAP-CLOSURE-PLAN.md) Track 7 — Node-Pack Registry MVP
+- [`spec/v1/node-packs.md`](https://github.com/openwop/openwop/blob/main/spec/v1/node-packs.md)
+- [`docs/PACKS-MVP-PLAN.md`](https://github.com/openwop/openwop/blob/main/docs/PACKS-MVP-PLAN.md) — Phase 1 catalog
+- [`docs/PROTOCOL-GAP-CLOSURE-PLAN.md`](https://github.com/openwop/openwop/blob/main/docs/PROTOCOL-GAP-CLOSURE-PLAN.md) Track 7 — Node-Pack Registry MVP

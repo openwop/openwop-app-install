@@ -17,6 +17,8 @@ import { Button } from '../../ui/Button.js';
 import { PageHeader } from '../../ui/PageHeader.js';
 
 import { confirm } from '../../ui/confirm.js';import { Notice } from '../../ui/Notice.js';
+import { useCmsOrgAccess } from './useCmsOrgAccess.js';
+import { Tabs, TabPanel } from '../../ui/Tabs.js';
 import { StateCard } from '../../ui/StateCard.js';
 import { useOrgSelection } from '../../ui/useOrgSelection.js';
 import { OrgSelectionState } from '../../ui/OrgSelectionState.js';
@@ -24,19 +26,25 @@ import { Skeleton } from '../../ui/Skeleton.js';
 import { IconButton } from '../../ui/IconButton.js';
 import { Modal } from '../../ui/Modal.js';
 import { toast } from '../../ui/toast.js';
-import { ArrowLeftIcon, ClockIcon, CopyIcon, FileTextIcon, GlobeIcon, LinkIcon, MoreHorizontalIcon, PencilIcon, PlusIcon, RotateCwIcon, SaveIcon, SearchIcon, ShieldIcon, SparklesIcon, TrashIcon, XIcon } from '../../ui/icons/index.js';
+import { ArrowLeftIcon, ClockIcon, CopyIcon, FileTextIcon, GlobeIcon, LinkIcon, MoreHorizontalIcon, PencilIcon, PlusIcon, RedoIcon, RotateCwIcon, SaveIcon, SearchIcon, ShieldIcon, SparklesIcon, TrashIcon, UndoIcon, XIcon, ListIcon } from '../../ui/icons/index.js';
 import { Menu } from '../../ui/Menu.js';
 import { ViewToggle, useViewMode } from '../../ui/ViewToggle.js';
 import { PublicPreviewFrame } from './PublicPreviewFrame.js';
 import { useConfirmDiscardUnsaved, useUnsavedChangesWarning } from '../../ui/useUnsavedChangesWarning.js';
-import { RenderSection, RenderSections } from './SectionRenderer.js';
+import { RenderSections } from './SectionRenderer.js';
 import { PageExperimentsPanel } from './PageExperimentsPanel.js';
-import { SectionFields, SectionsEditor } from './SectionsEditor.js';
+import { SectionFields, SectionsEditor, localeLabel } from './SectionsEditor.js';
+import { CmsCanvas } from './CmsCanvas.js';
+import { SectionPicker } from './SectionPicker.js';
+import { SectionAiBar } from './SectionAiBar.js';
+import { sectionLabel } from './sectionLabel.js';
+import { PublishChecklist } from './PublishChecklist.js';
+import { publishChecks } from './publishChecks.js';
 import { CmsLanguageSettings } from './CmsLanguageSettings.js';
 import { A11yIssuesPanel } from '../../a11y/A11yIssuesPanel.js';
 import { cmsPageToA11yModel } from './cmsA11y.js';
 import { checkContentA11y, type A11yIssue } from '../../a11y/contentA11y.js';
-import { diffSections } from './sectionDiff.js';
+import { diffSections, type SectionDiffEntry } from './sectionDiff.js';
 import { resolveSharedRefs } from './resolveSharedRefs.js';
 import { resolvePreviewSections } from './resolvePreviewLocale.js';
 import { stageComposerDraft } from '../../chat/composerSeed.js';
@@ -44,6 +52,7 @@ import { MediaPickerDialog } from '../media/MediaPickerDialog.js';
 import { listAssets } from '../media/mediaClient.js';
 import { createLink, listLinks, revokeLink, sharedPageUrl, type ShareLink } from '../sharing/sharingClient.js';
 import {
+  assetUrl,
   cancelSchedule,
   cancelScheduleUnpublish,
   createPage,
@@ -65,6 +74,9 @@ import {
   schedulePublish,
   scheduleUnpublish,
   setLocalePublish,
+  getTranslationStatus,
+  confirmTranslationSource,
+  type PageTranslationStatus,
   transition,
   translateSection,
   updateSharedSection,
@@ -84,16 +96,17 @@ import {
   cmsErrorInfo,
 } from './cmsClient.js';
 import { getSiteConfig, putSiteConfig, invalidateFrontPage, type SiteConfig } from '../site/siteConfigClient.js';
+import { getSeo, putSeo, type PageSeo } from '../publishing/publishingClient.js';
 import { copyToClipboard } from '../../ui/copyToClipboard.js';
 
-/** The CMS localizer agent (feature.cms.agents) — the ADR 0058/0073 chat
+/** The CMS localizer agent (vendor.openwop-app.cms.agents) — the ADR 0058/0073 chat
  *  deep-link target ("no second chat system"). */
-const CMS_LOCALIZER_AGENT = 'feature.cms.agents.localizer';
+const CMS_LOCALIZER_AGENT = 'vendor.openwop-app.cms.agents.localizer';
 
-/** The CMS content-editor agent (feature.cms.agents C6) — reads a page, patches
+/** The CMS content-editor agent (vendor.openwop-app.cms.agents C6) — reads a page, patches
  *  DRAFT sections, and can submit for review; publishing stays a human action.
  *  Same ADR 0058/0073 chat deep-link target. */
-const CMS_CONTENT_EDITOR_AGENT = 'feature.cms.agents.content-editor';
+const CMS_CONTENT_EDITOR_AGENT = 'vendor.openwop-app.cms.agents.content-editor';
 
 
 /** Status → the workflow actions to OFFER (authority is enforced server-side). */
@@ -112,10 +125,25 @@ const ACTIONS_FOR: Record<string, WorkflowAction[]> = {
   archived: ['unpublish'],
 };
 
+/** The one action that moves a page forward, shown as the primary button. */
+const PRIMARY_ACTION: Record<string, WorkflowAction | undefined> = { draft: 'publish', in_review: 'approve' };
+/** Workflow actions with the primary one last (rightmost, nearest the eye's end). */
+function orderedActions(status: string): WorkflowAction[] {
+  const all = ACTIONS_FOR[status] ?? [];
+  const primary = PRIMARY_ACTION[status];
+  return [...all.filter((a) => a !== primary), ...all.filter((a) => a === primary)];
+}
+
 /** Public-preview viewport widths — check a page's responsive breakpoints
  *  without leaving the editor. `desktop` = the stage's full width. */
 type PreviewDevice = 'desktop' | 'tablet' | 'mobile';
 const DEVICE_MAXW: Record<PreviewDevice, string | undefined> = { desktop: undefined, tablet: '834px', mobile: '390px' };
+
+/** Actions that pass through the review checklist before they run. */
+const CHECKED_ACTIONS: ReadonlySet<WorkflowAction> = new Set<WorkflowAction>(['publish', 'approve', 'submit']);
+
+/** How long a draft waits after the last edit before it saves itself. */
+const AUTOSAVE_MS = 1500;
 
 /** Page status → a §5.3 chip variant (color is never the sole signal — the
  *  status word rides alongside). */
@@ -136,6 +164,59 @@ function statusChipClass(status: string): string {
  * server's grant narrowing stays the authority, so this mode can never widen
  * access; it only stops rendering controls that could only 403.
  */
+/** ADR 0813 — the post facets (kind, category, byline) that differ from the
+ *  loaded page. Sent only when changed, so a plain page save never stamps them. */
+/** The editor's title/sections/tags/post facets diverge from the saved page.
+ *  One predicate for the dirty guard and the save-before-transition step. */
+function hasUnsavedEdits(cur: Page | null, base: Page | null): boolean {
+  return cur !== null && base !== null &&
+    (cur.title !== base.title ||
+      cur.slug !== base.slug ||
+      JSON.stringify(cur.sections) !== JSON.stringify(base.sections) ||
+      JSON.stringify(cur.tags ?? []) !== JSON.stringify(base.tags ?? []) ||
+      Object.keys(postFacetPatch(cur, base)).length > 0);
+}
+
+/** The parts of a page the editor changes: what undo and redo restore. */
+type EditableContent = Pick<Page, 'title' | 'slug' | 'sections' | 'tags' | 'kind' | 'category' | 'authorId'>;
+interface EditSnapshot { content: EditableContent; seo: PageSeo | null }
+function editableContent(p: Page): EditableContent {
+  // Optional fields are copied only when present (exactOptionalPropertyTypes).
+  return {
+    title: p.title, slug: p.slug, sections: p.sections,
+    ...(p.tags !== undefined ? { tags: p.tags } : {}),
+    ...(p.kind !== undefined ? { kind: p.kind } : {}),
+    ...(p.category !== undefined ? { category: p.category } : {}),
+    ...(p.authorId !== undefined ? { authorId: p.authorId } : {}),
+  };
+}
+/** Content compared for undo, normalized the way the server returns it (absent
+ *  tags are [], absent facets null) and without section ids, which the server
+ *  mints on save; so a save is never mistaken for an edit. */
+const contentKey = (p: Page): string => JSON.stringify({
+  title: p.title, slug: p.slug, tags: p.tags ?? [], kind: p.kind ?? 'page', category: p.category ?? null, authorId: p.authorId ?? null,
+  sections: p.sections.map(({ sectionId: _id, ...rest }) => rest),
+});
+/** Edits closer together than this undo as one step (a burst of typing). */
+const UNDO_COALESCE_MS = 800;
+const UNDO_LIMIT = 100;
+
+/** The address as it is typed: the server's slug rules (lowercase letters,
+ *  digits and single hyphens), minus its trim of a trailing hyphen, so the
+ *  next word can still be typed. The server trims and de-duplicates on save. */
+function typedSlug(input: string): string {
+  return input.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-/, '').slice(0, 64);
+}
+
+function postFacetPatch(cur: Page, base: Page | null): { kind?: 'page' | 'post'; authorId?: string | null; category?: string | null } {
+  const out: { kind?: 'page' | 'post'; authorId?: string | null; category?: string | null } = {};
+  if ((cur.kind ?? 'page') !== (base?.kind ?? 'page')) out.kind = cur.kind ?? 'page';
+  const curCat = (cur.category ?? '').trim();
+  if (curCat !== (base?.category ?? '')) out.category = curCat === '' ? null : curCat;
+  if ((cur.authorId ?? null) !== (base?.authorId ?? null)) out.authorId = cur.authorId ?? null;
+  return out;
+}
+
 export function CmsPage({ translatorSurface = false }: { translatorSurface?: boolean } = {}): JSX.Element {
   const { t } = useTranslation('cms');
   const navigate = useNavigate();
@@ -161,10 +242,21 @@ export function CmsPage({ translatorSurface = false }: { translatorSurface?: boo
   // the default detail view — you open a page and see the real rendered page;
   // switch to Editor to change it, Outline for the rough section blocks.
   const [view, setView] = useViewMode('cms', 'grid');
-  const [detailView, setDetailView] = useState<'editor' | 'outline' | 'public'>('public');
-  // CMS-R2-1 preview→editor click-through: a monotonic nonce so re-clicking
-  // the SAME section re-scrolls (a plain sectionId state would no-op).
-  const [editorFocus, setEditorFocus] = useState<{ sectionId: string; nonce: number } | null>(null);
+  // The page workspace: Edit shows the section list, the live page and the
+  // settings panel; Preview shows the page alone. The selected section is the
+  // one the settings panel edits, outlined on the page and marked in the list.
+  const [workspaceMode, setWorkspaceMode] = useState<'edit' | 'preview' | 'page'>('edit');
+  // The one section open for editing in place on the Edit tab (null = none).
+  const [editingSectionId, setEditingSectionId] = useState<string | null>(null);
+  // Where the section picker will insert (an index into the sections), or null.
+  const [insertAt, setInsertAt] = useState<number | null>(null);
+  // The preview frame's document, so shortcuts and focus work inside the page.
+  const [frameDoc, setFrameDoc] = useState<Document | null>(null);
+  const [selectedSectionId, setSelectedSectionId] = useState<string | null>(null);
+  // Autosave in flight (drafts only; see the autosave effect).
+  const [saving, setSaving] = useState(false);
+  // The workflow action waiting on the review checklist (ADR 0828 phase 3).
+  const [pendingAction, setPendingAction] = useState<WorkflowAction | null>(null);
   const [previewDevice, setPreviewDevice] = useState<PreviewDevice>('desktop');
   // ADR 0592 §5 (CMSLU-5) — preview-in-locale: which locale the Public preview
   // resolves. '' = the base locale. Only locales from the org's configured set
@@ -181,6 +273,13 @@ export function CmsPage({ translatorSurface = false }: { translatorSurface?: boo
   // editor. Non-null renders the designed conflict state (reload vs explicit
   // overwrite); local edits are NEVER auto-discarded.
   const [saveConflict, setSaveConflict] = useState<{ currentVersion: number } | null>(null);
+  // Search and social (the publishing feature's per-page SEO record), edited
+  // on the Page tab and saved with the page. `seoFailed`: the read failed, so
+  // the fields stay hidden rather than offering blanks that would overwrite it.
+  const [seo, setSeo] = useState<PageSeo | null>(null);
+  const [savedSeo, setSavedSeo] = useState<PageSeo | null>(null);
+  const [seoFailed, setSeoFailed] = useState(false);
+  const seoDirty = seo !== null && savedSeo !== null && JSON.stringify(seo) !== JSON.stringify(savedSeo);
   // Media picker (ADR 0206 B4): resolver for the in-flight pick, if any.
   const [pickerResolve, setPickerResolve] = useState<((token: string | null) => void) | null>(null);
   // Shared sections (ADR 0204 C4): the org's list, and the one open in the edit modal.
@@ -196,7 +295,7 @@ export function CmsPage({ translatorSurface = false }: { translatorSurface?: boo
    *  `sharedImpactFailed` flag in this same file is the pattern. */
   const [sharedFailed, setSharedFailed] = useState(false);
   const [editShared, setEditShared] = useState<SharedSection | null>(null);
-  const [sharedImpact, setSharedImpact] = useState<Array<{ pageId: string; title: string }> | null>(null);
+  const [sharedImpact, setSharedImpact] = useState<Array<{ pageId: string; title: string; status?: string; scheduledPublishAt?: string }> | null>(null);
   const [sharedImpactFailed, setSharedImpactFailed] = useState(false);
   // Preview links (ADR 0204 C3 — sharing composes the token lifecycle): links
   // for the selected page, lazily loaded per panel open.
@@ -216,6 +315,10 @@ export function CmsPage({ translatorSurface = false }: { translatorSurface?: boo
   const [siteBusy, setSiteBusy] = useState(false);
   const isSiteAdmin = siteConfig !== null;
   const isSystemScope = orgId === SYSTEM_SITE_ORG;
+  // ADR 0836 (grade-ux H1) — the admin tier in THIS org, tri-state: hide a
+  // control only when the answer is KNOWN to be no (see the hook).
+  const { canAdmin } = useCmsOrgAccess(orgId, isSystemScope ? isSiteAdmin : null);
+  const knownNotAdmin = canAdmin === false;
   // Translator surface (ADR 0592 §2): the caller's OWN grant. undefined =
   // probing; null = no grant (honest empty state). A FAILED probe is its own
   // state — a failed read must never render as "you have no access"
@@ -317,11 +420,10 @@ export function CmsPage({ translatorSurface = false }: { translatorSurface?: boo
     setSharedSections([]); setPreviewLinks(null);
     void listPages(orgId).then((p) => { if (!cancelled) setPages(p); })
       .catch((e) => { if (!cancelled) setError(e instanceof Error ? e.message : t('loadPagesFailed')); });
-    // The reserved system-site org has no Media library (media routes are
-    // org-scoped and 404 there) — the front page uses pasted media tokens, so
-    // skip the asset load and keep the picker empty (parity with the old panel).
-    if (isSystemScope) setAssets([]);
-    else void listAssets(orgId).then((a) => { if (!cancelled) setAssets(a); }).catch(() => { if (!cancelled) setAssets([]); });
+    // The reserved system-site org has its own Media library too (ADR 0817: the
+    // media routes admit a super admin there, as the CMS routes do), so the
+    // public site's pages pick and upload images like any org's.
+    void listAssets(orgId).then((a) => { if (!cancelled) setAssets(a); }).catch(() => { if (!cancelled) setAssets([]); });
     setSettingsFailed(false);
     void getLanguageSettings(orgId)
       .then((s) => { if (!cancelled) setSettings(s); })
@@ -330,7 +432,7 @@ export function CmsPage({ translatorSurface = false }: { translatorSurface?: boo
       .then((s) => { if (!cancelled) { setSharedSections(s); setSharedFailed(false); } })
       .catch(() => { if (!cancelled) { setSharedSections([]); setSharedFailed(true); } });
     return () => { cancelled = true; };
-  }, [orgId, isSystemScope, t]);
+  }, [orgId, t]);
 
   // Re-query the list when a filter changes (debounced for the text input —
   // one request per pause, not per keystroke; rate-limit fan-out discipline).
@@ -349,14 +451,69 @@ export function CmsPage({ translatorSurface = false }: { translatorSurface?: boo
     : [];
   const baseLocale = settings?.baseLocale ?? 'en';
 
+  // ADR 0861 D6 — translation status of the SAVED page (missing / current /
+  // OUTDATED / unknown per section × locale). Refetched whenever the saved
+  // version moves, so it always describes what is stored, never unsaved edits.
+  const [trStatus, setTrStatus] = useState<PageTranslationStatus | null>(null);
+  // CMSL2UX-5 — a failed read is said, not hidden: no status is not "all current".
+  const [trFailed, setTrFailed] = useState(false);
+  const trPageId = savedPage?.pageId;
+  const trVersion = savedPage?.version;
+  const hasLocales = locales.length > 1;
+  useEffect(() => {
+    if (!trPageId || !hasLocales) { setTrStatus(null); setTrFailed(false); return; }
+    let live = true;
+    getTranslationStatus(orgId, trPageId)
+      .then((st) => { if (live) { setTrStatus(st); setTrFailed(false); } })
+      .catch(() => { if (live) { setTrStatus(null); setTrFailed(true); } }); // advisory — never blocks editing
+    return () => { live = false; };
+  }, [orgId, trPageId, trVersion, hasLocales]);
+  // CMSL2UX-4 — language names, a counted noun, and only the locales this editor
+  // works in (a translator's grant-filtered `locales`).
+  const outdatedSummary = trStatus
+    ? trStatus.locales
+      .filter((l) => locales.includes(l) && (trStatus.counts[l]?.outdated ?? 0) > 0)
+      .map((l) => t('translationOutdatedSummaryItem', { language: localeLabel(l), count: trStatus.counts[l]?.outdated ?? 0 }))
+    : [];
+  const confirmSource = useCallback(async (sectionId: string, locale: string): Promise<boolean> => {
+    if (!selected || !savedPage) return false;
+    // CMSL2UX-2 — the status describes the SAVED page; with unsaved edits a confirm
+    // would race the autosave (or vouch for text the editor is still changing).
+    if (hasUnsavedEdits(selected, savedPage)) {
+      toast.info(t('confirmSourceSaveFirst'));
+      return false;
+    }
+    try {
+      // CMSL2UX-1 — pinned to the version this editor holds; a 409 means someone
+      // else saved first, and the page is NOT adopted over their save.
+      const p = await confirmTranslationSource(orgId, savedPage.pageId, sectionId, locale, savedPage.version);
+      setSelected(p); setSavedPage(p); // no unsaved edits ⇒ the server page IS the editor's page
+      toast.success(t('confirmSourceToast', { language: localeLabel(locale) }));
+      return true;
+    } catch (e) {
+      toast.error(apiErrMsg(e, t('confirmSourceFailed')));
+      return false;
+    }
+  }, [orgId, t, apiErrMsg, selected, savedPage]);
+
   const open = useCallback((pageId: string) => {
+    // A page opens on the Section tab in Edit mode. Set here, when the open
+    // starts, not in an effect keyed on the loaded page: that effect ran after
+    // the page rendered and could undo a tab the person had already chosen.
+    setWorkspaceMode('edit'); setEditingSectionId(null);
     setVersions(null); // history reloads lazily for the newly opened page
     setSaveConflict(null); // a fresh load IS the reload-and-reapply baseline
-    setReview(null); setRejectNote(null);
+    setReview(null); setReviewLoaded(false); setRejectNote(null);
     void getPage(orgId, pageId).then((p) => { setSelected(p); setSavedPage(p); }).catch((e) => toast.error(apiErrMsg(e, t('openFailed'))));
+    setSeo(null); setSavedSeo(null); setSeoFailed(false);
+    if (!translatorSurface) {
+      void getSeo(orgId, pageId)
+        .then((v) => { const loaded = v ?? { noindex: false }; setSeo(loaded); setSavedSeo(loaded); })
+        .catch(() => setSeoFailed(true));
+    }
     // ADR 0593 D4 (CMSAU-5) — enrichment; a failure renders nothing.
-    void getPageReview(orgId, pageId).then(setReview);
-  }, [orgId, t, apiErrMsg]);
+    void getPageReview(orgId, pageId).then((r) => { setReview(r); setReviewLoaded(true); });
+  }, [orgId, translatorSurface, t, apiErrMsg]);
 
   // The URL is the source of truth for WHICH page is open — deep-linkable +
   // back-button-addressable (/cms/p/:routeOrgId/:routePageId). Opening is a
@@ -386,12 +543,21 @@ export function CmsPage({ translatorSurface = false }: { translatorSurface?: boo
 
   const restore = useCallback(async (versionId: string, versionNo: number) => {
     if (!selected) return;
-    if (!(await confirm({ title: t('restoreConfirmTitle', { version: versionNo }), body: t('restoreConfirmBody'), confirmLabel: t('historyRestore') }))) return;
+    // ADR 0836 D8 — restoring a LIVE page takes it offline (it lands in draft);
+    // say so before, not after.
+    // (An archived page is already off the public site, so only `published` is
+    // "live" here.) Taking a page down is the danger tier (DESIGN.md).
+    const live = selected.status === 'published';
+    if (!(await confirm({ title: t('restoreConfirmTitle', { version: versionNo }), body: t(live ? 'restoreConfirmBodyLive' : 'restoreConfirmBody'), confirmLabel: t('historyRestore'), ...(live ? { danger: true } : {}) }))) return;
     try {
-      const p = await restoreVersion(orgId, selected.pageId, versionId);
+      const p = await restoreVersion(orgId, selected.pageId, versionId, selected.version);
       setSelected(p); setSavedPage(p); loadPages(orgId); loadVersions(p.pageId);
-      toast.success(t('historyRestored', { version: versionNo }));
-    } catch (e) { toast.error(apiErrMsg(e, t('actionFailed', { action: 'restore' }))); }
+      toast.success(t(live ? 'historyRestoredLive' : 'historyRestored', { version: versionNo }));
+    } catch (e) {
+      // ADR 0836 D8 — the restore is pinned to the version on screen.
+      if (e instanceof CmsApiError && e.code === 'conflict' && !e.details?.gate) toast.error(t('restoreConflict'));
+      else toast.error(apiErrMsg(e, t('actionFailed', { action: 'restore' })));
+    }
   }, [orgId, selected, loadPages, loadVersions, t, apiErrMsg]);
 
   const create = useCallback(async () => {
@@ -412,9 +578,20 @@ export function CmsPage({ translatorSurface = false }: { translatorSurface?: boo
     } catch (e) { toast.error(apiErrMsg(e, t('createFailed'))); } finally { setBusy(false); }
   }, [orgId, loadPages, openPage, t, apiErrMsg]);
 
-  const save = useCallback(async () => {
-    if (!selected) return;
-    setBusy(true);
+  const save = useCallback(async (opts?: { silent?: boolean }): Promise<boolean> => {
+    if (!selected) return false;
+    // ADR 0836 D3 — a save by anyone but an admin cancels a pending scheduled
+    // publish. Ask first (autosave is off on such a page, so this is the only
+    // way in); an admin's save keeps (re-pins) it.
+    if (selected.scheduledPublishAt && canAdmin !== true && !translatorSurface && hasUnsavedEdits(selected, savedPage)) {
+      if (!(await confirm({
+        title: t('scheduleCancelConfirmTitle'),
+        body: t('scheduledEditWarning', { at: formatDateTime(selected.scheduledPublishAt) }),
+        confirmLabel: t('scheduleCancelConfirmAction'),
+      }))) return false;
+    }
+    setBusy(true); setSaving(true);
+    let pageWritten = false;
     try {
       // ADR 0592 §1 — ALWAYS pinned on the editor lane. `selected.version` is
       // only ever written by server merges (save/open/transition/schedule/
@@ -423,19 +600,72 @@ export function CmsPage({ translatorSurface = false }: { translatorSurface?: boo
       // holder on the PRESENCE of title/tags (not on change), so the
       // translator surface sends sections + the pin ONLY. The full-editor
       // payload is unchanged.
+      // The page record saves when it changed, or on an explicit Save with
+      // nothing else to save (the version check doubles as a refresh).
+      if (hasUnsavedEdits(selected, savedPage) || !seoDirty) {
       const saved = await savePage(orgId, selected.pageId, translatorSurface
         ? { sections: selected.sections, expectedVersion: selected.version }
-        : { title: selected.title, sections: selected.sections, tags: selected.tags ?? [], expectedVersion: selected.version });
-      setSelected(saved); setSavedPage(saved); setSaveConflict(null); loadPages(orgId); toast.success(t('pageSaved'));
+        : { title: selected.title, sections: selected.sections, tags: selected.tags ?? [], ...postFacetPatch(selected, savedPage), ...(selected.slug !== savedPage?.slug ? { slug: selected.slug } : {}), expectedVersion: selected.version });
+      // Keep edits typed while the save was in flight: adopt the server's
+      // version and timestamps, and the saved content only if nothing changed.
+      // A new section is sent with a `new:` id and the server mints its
+      // permanent `sec:` id. Map the sent ids to the saved ones (same order and
+      // count) so the selection, and edits typed while this save was in flight,
+      // follow the section instead of losing it.
+      const idMap = new Map<string, string>();
+      if (saved.sections.length === selected.sections.length) {
+        selected.sections.forEach((x, i) => { const y = saved.sections[i]; if (y && y.sectionId !== x.sectionId) idMap.set(x.sectionId, y.sectionId); });
+      }
+      const remap = (list: Section[]): Section[] => (idMap.size === 0 ? list : list.map((x) => { const id = idMap.get(x.sectionId); return id ? { ...x, sectionId: id } : x; }));
+      // ADR 0836 D3 — the server owns the schedule fields: a save by someone
+      // without publish authority cancels a pending scheduled publish, and an
+      // admin's save re-pins it. Adopt them even when local edits are kept.
+      const adoptSchedule = (p: Page): Page => {
+        const out: Page = { ...p };
+        if (saved.scheduledPublishAt) out.scheduledPublishAt = saved.scheduledPublishAt; else delete out.scheduledPublishAt;
+        if (saved.scheduledPublishVersion !== undefined) out.scheduledPublishVersion = saved.scheduledPublishVersion; else delete out.scheduledPublishVersion;
+        if (saved.scheduledUnpublishAt) out.scheduledUnpublishAt = saved.scheduledUnpublishAt; else delete out.scheduledUnpublishAt;
+        return out;
+      };
+      setSelected((cur) => (cur && hasUnsavedEdits(cur, selected) ? adoptSchedule({ ...cur, sections: remap(cur.sections), version: saved.version, updatedAt: saved.updatedAt }) : saved));
+      if (savedPage?.scheduledPublishAt && !saved.scheduledPublishAt) toast.warning(t('scheduleCancelledByEdit'), 0);
+      if (idMap.size > 0) {
+        setSelectedSectionId((id) => (id ? idMap.get(id) ?? id : id));
+        setEditingSectionId((id) => (id ? idMap.get(id) ?? id : id));
+      }
+      setSavedPage(saved); setSaveConflict(null); loadPages(orgId);
+      pageWritten = true;
+      if (!opts?.silent && savedPage?.scheduledPublishAt && saved.scheduledPublishAt && saved.scheduledPublishVersion !== savedPage.scheduledPublishVersion) {
+        toast.info(t('scheduleKeptOnEdit', { at: formatDateTime(saved.scheduledPublishAt) }));
+      }
+      }
+      if (!translatorSurface && seoDirty && seo) {
+        const sent = seo;
+        let stored: PageSeo;
+        try {
+          stored = await putSeo(orgId, selected.pageId, sent);
+        } catch (e) {
+          // The page content above DID save; say exactly what did not.
+          if (pageWritten) { toast.error(t('seoNotSaved', { reason: apiErrMsg(e, t('saveFailed')) })); return false; }
+          throw e;
+        }
+        setSavedSeo(stored);
+        setSeo((cur) => (cur && JSON.stringify(cur) !== JSON.stringify(sent) ? cur : stored));
+      }
+      if (!opts?.silent) toast.success(t('pageSaved'));
+      return true;
     } catch (e) {
-      if (e instanceof CmsApiError && e.code === 'conflict') {
-        const cv = typeof e.details?.currentVersion === 'number' ? e.details.currentVersion : selected.version + 1;
-        setSaveConflict({ currentVersion: cv });
+      // ADR 0836 — only a VERSION conflict opens the reload/overwrite banner. A
+      // gate 409 (`details.gate`, e.g. an SEO save on a gated live page) is a
+      // refusal: overwriting would hit the same gate, so it is a toast.
+      if (e instanceof CmsApiError && e.code === 'conflict' && typeof e.details?.currentVersion === 'number' && !e.details?.gate) {
+        setSaveConflict({ currentVersion: e.details.currentVersion });
       } else {
         toast.error(apiErrMsg(e, t('saveFailed')));
       }
-    } finally { setBusy(false); }
-  }, [orgId, selected, translatorSurface, loadPages, t, apiErrMsg]);
+      return false;
+    } finally { setBusy(false); setSaving(false); }
+  }, [orgId, selected, savedPage, seo, seoDirty, translatorSurface, canAdmin, loadPages, t, apiErrMsg]);
 
   // Conflict recovery (ADR 0592 §1): reload THEIR version (discarding local
   // edits, confirmed), or explicitly OVERWRITE with mine — which refetches the
@@ -454,7 +684,7 @@ export function CmsPage({ translatorSurface = false }: { translatorSurface?: boo
       const fresh = await getPage(orgId, selected.pageId);
       const saved = await savePage(orgId, selected.pageId, translatorSurface
         ? { sections: selected.sections, expectedVersion: fresh.version }
-        : { title: selected.title, sections: selected.sections, tags: selected.tags ?? [], expectedVersion: fresh.version });
+        : { title: selected.title, sections: selected.sections, tags: selected.tags ?? [], ...postFacetPatch(selected, fresh), ...(selected.slug !== fresh.slug ? { slug: selected.slug } : {}), expectedVersion: fresh.version });
       setSelected(saved); setSavedPage(saved); setSaveConflict(null); loadPages(orgId); toast.success(t('pageSaved'));
     } catch (e) { toast.error(apiErrMsg(e, t('saveFailed'))); } finally { setBusy(false); }
   }, [orgId, selected, translatorSurface, loadPages, t, apiErrMsg]);
@@ -463,12 +693,20 @@ export function CmsPage({ translatorSurface = false }: { translatorSurface?: boo
   // `draft`, indistinguishable from never-submitted, with the reviewer's reason
   // rendered nowhere. `review` is enrichment: absent ⇒ no claim is made.
   const [review, setReview] = useState<PageReview | null>(null);
+  // ADR 0859 D4 (UX grade CMSA2UX-6) — until the review has loaded we cannot tell a
+  // submitter from another approver, so Approve is held back rather than flashed.
+  const [reviewLoaded, setReviewLoaded] = useState(false);
   const [rejectNote, setRejectNote] = useState<string | null>(null);
   /** F7(4) — where focus returns when the reason step closes. */
   const rejectBtnRef = useRef<HTMLButtonElement | null>(null);
 
   const runAction = useCallback(async (action: WorkflowAction, note?: string): Promise<boolean> => {
     if (!selected) return false;
+    // A transition acts on the SAVED page and its reply replaced the editor
+    // state, so Publish/Submit with unsaved edits published the old content
+    // and silently dropped the edits. Save first; a failed save (conflict,
+    // validation) stops the transition with the save's own message.
+    if ((hasUnsavedEdits(selected, savedPage) || seoDirty) && !(await save())) return false;
     // ADR 0592 §9 (CMSLU-14) — submit can run up to 20 synchronous provider
     // calls; the workflow buttons disable while in flight (no double-submit).
     setBusy(true);
@@ -501,9 +739,15 @@ export function CmsPage({ translatorSurface = false }: { translatorSurface?: boo
       }
       return true;
     }
-    catch (e) { toast.error(apiErrMsg(e, t('actionFailed', { action }))); return false; }
+    catch (e) {
+      toast.error(apiErrMsg(e, t('actionFailed', { action })));
+      // ADR 0859 D4 — a refused decide (e.g. separation of duties decided elsewhere)
+      // re-reads the review, so a control the server refuses does not stay offered.
+      if (action === 'approve' || action === 'reject') void getPageReview(orgId, selected.pageId).then(setReview);
+      return false;
+    }
     finally { setBusy(false); }
-  }, [orgId, selected, versions, loadPages, loadVersions, apiErrMsg, t]);
+  }, [orgId, selected, savedPage, seoDirty, save, versions, loadPages, loadVersions, apiErrMsg, t]);
 
   // ADR 0206 B4 — one in-flight pick at a time; the dialog resolves a token or null.
   const pickMedia = useCallback((): Promise<string | null> => {
@@ -667,10 +911,7 @@ export function CmsPage({ translatorSurface = false }: { translatorSurface?: boo
   // Dirty while the editor's title/sections diverge from the loaded/saved page.
   // Workflow transitions replace both `selected` and `savedPage`, so a status
   // change is never "unsaved". UX CONT-6.
-  const dirty = selected !== null && savedPage !== null &&
-    (selected.title !== savedPage.title ||
-      JSON.stringify(selected.sections) !== JSON.stringify(savedPage.sections) ||
-      JSON.stringify(selected.tags ?? []) !== JSON.stringify(savedPage.tags ?? []));
+  const dirty = hasUnsavedEdits(selected, savedPage) || seoDirty;
   useUnsavedChangesWarning(dirty);
   // ADR 0592 §6 (CMSLU-2) — the IN-APP half of the dirty guard: the exits THIS
   // page renders ("Back to pages", the org picker) confirm before discarding.
@@ -678,6 +919,218 @@ export function CmsPage({ translatorSurface = false }: { translatorSurface?: boo
   // no useBlocker; the hook's docblock owns that disclosure), and tab-close
   // keeps the beforeunload prompt above.
   const confirmDiscard = useConfirmDiscardUnsaved(dirty);
+
+  // ── Page workspace: section selection and structure ──
+  // Keep a valid selection: the first section when the page opens, the
+  // neighbour when the selected one is removed, none on an empty page. An
+  // editor whose section is gone closes.
+  useEffect(() => {
+    if (!selected) { if (selectedSectionId !== null) setSelectedSectionId(null); return; }
+    if (editingSectionId && !selected.sections.some((x) => x.sectionId === editingSectionId)) setEditingSectionId(null);
+    if (selectedSectionId && selected.sections.some((x) => x.sectionId === selectedSectionId)) return;
+    setSelectedSectionId(selected.sections[0]?.sectionId ?? null);
+  }, [selected, selectedSectionId, editingSectionId]);
+
+  /** A section's element inside the preview frame (attribute comparison, no
+   *  selector escaping). */
+  const sectionNode = useCallback((sectionId: string): HTMLElement | null => (
+    Array.from(frameDoc?.querySelectorAll<HTMLElement>('[data-section-id]') ?? []).find((n) => n.getAttribute('data-section-id') === sectionId) ?? null
+  ), [frameDoc]);
+  /** Open a section for editing in place, on the Edit tab. */
+  const selectSection = useCallback((sectionId: string) => {
+    setSelectedSectionId(sectionId); setEditingSectionId(sectionId); setWorkspaceMode('edit');
+  }, []);
+  /** Close the open editor and return focus to that section's Edit button. */
+  const closeEditor = useCallback(() => {
+    const id = editingSectionId;
+    setEditingSectionId(null);
+    if (id) setTimeout(() => sectionNode(id)?.querySelector<HTMLElement>('[data-edit-for]')?.focus(), 0);
+  }, [editingSectionId, sectionNode]);
+  /** The Sections menu: scroll to a section and select it, without opening it. */
+  const jumpToSection = useCallback((sectionId: string) => {
+    setSelectedSectionId(sectionId); setWorkspaceMode('edit');
+    setTimeout(() => {
+      const node = sectionNode(sectionId);
+      const reduced = typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      if (typeof node?.scrollIntoView === 'function') node.scrollIntoView({ block: 'start', behavior: reduced ? 'auto' : 'smooth' });
+      node?.querySelector<HTMLElement>('[data-edit-for]')?.focus({ preventScroll: true });
+    }, 0);
+  }, [sectionNode]);
+  const moveSection = useCallback((sectionId: string, dir: -1 | 1) => {
+    setSelected((p) => {
+      if (!p) return p;
+      const i = p.sections.findIndex((x) => x.sectionId === sectionId);
+      const j = i + dir;
+      if (i < 0 || j < 0 || j >= p.sections.length) return p;
+      const next = [...p.sections];
+      [next[i], next[j]] = [next[j]!, next[i]!];
+      return { ...p, sections: next };
+    });
+    setSelectedSectionId(sectionId);
+  }, []);
+  const reorderSection = useCallback((sectionId: string, overId: string) => {
+    setSelected((p) => {
+      if (!p) return p;
+      const from = p.sections.findIndex((x) => x.sectionId === sectionId);
+      const to = p.sections.findIndex((x) => x.sectionId === overId);
+      if (from < 0 || to < 0 || from === to) return p;
+      const next = [...p.sections];
+      const [moved] = next.splice(from, 1);
+      next.splice(to, 0, moved!);
+      return { ...p, sections: next };
+    });
+    setSelectedSectionId(sectionId);
+  }, []);
+  const duplicateSection = useCallback((sectionId: string) => {
+    const id = `new:${Math.random().toString(36).slice(2)}`;
+    setSelected((p) => {
+      if (!p) return p;
+      const i = p.sections.findIndex((x) => x.sectionId === sectionId);
+      if (i < 0) return p;
+      const copy: Section = JSON.parse(JSON.stringify(p.sections[i])) as Section;
+      return { ...p, sections: [...p.sections.slice(0, i + 1), { ...copy, sectionId: id }, ...p.sections.slice(i + 1)] };
+    });
+    setSelectedSectionId(id);
+  }, []);
+  const removeSection = useCallback(async (sectionId: string) => {
+    if (!selected) return;
+    const i = selected.sections.findIndex((x) => x.sectionId === sectionId);
+    if (i < 0) return;
+    if (!(await confirm({ title: t('removeSectionConfirmTitle'), body: t('removeSectionConfirmBody'), danger: true, confirmLabel: t('removeSection') }))) return;
+    const neighbour = selected.sections[i + 1] ?? selected.sections[i - 1];
+    setSelected((p) => (p ? { ...p, sections: p.sections.filter((x) => x.sectionId !== sectionId) } : p));
+    setSelectedSectionId(neighbour?.sectionId ?? null);
+    if (editingSectionId === sectionId) setEditingSectionId(null);
+  }, [selected, editingSectionId, t]);
+  /** Insert a new section at `index` and open it for editing. */
+  const insertSection = useCallback((index: number, section: Section) => {
+    setSelected((p) => {
+      if (!p) return p;
+      const at = Math.max(0, Math.min(index, p.sections.length));
+      return { ...p, sections: [...p.sections.slice(0, at), section, ...p.sections.slice(at)] };
+    });
+    setSelectedSectionId(section.sectionId); setEditingSectionId(section.sectionId); setWorkspaceMode('edit');
+  }, []);
+
+  // Compare and take (ADR 0828 phase 3): copy one section from a past version,
+  // or a seeded update, into the draft. The draft autosaves as usual, and Undo
+  // takes it back.
+  const takeFromVersion = useCallback((version: PageVersion, entry: SectionDiffEntry) => {
+    const src = version.snapshot.sections.find((x) => x.sectionId === entry.sectionId);
+    if (!src) return;
+    if (entry.kind === 'removed') {
+      const at = version.snapshot.sections.indexOf(src);
+      const id = `new:${Math.random().toString(36).slice(2)}`;
+      setSelected((p) => (p ? { ...p, sections: [...p.sections.slice(0, at), { ...src, sectionId: id }, ...p.sections.slice(at)] } : p));
+      setSelectedSectionId(id);
+    } else {
+      const target = entry.toSectionId ?? entry.sectionId;
+      setSelected((p) => (p ? { ...p, sections: p.sections.map((x) => (x.sectionId === target ? { ...src, sectionId: target } : x)) } : p));
+      setSelectedSectionId(target);
+    }
+    toast.success(t('diffTaken'));
+  }, [t]);
+
+  // ── Undo and redo ──
+  // Records the editor's content (page fields and the search record) as it
+  // changes. A server reply that only bumps the version, and the search
+  // record's first load, update the baseline without adding a step. Opening
+  // another page starts a fresh history.
+  const history = useRef<{ pageId: string | null; past: EditSnapshot[]; future: EditSnapshot[]; last: EditSnapshot | null; lastKey: string; lastAt: number; applying: boolean }>(
+    { pageId: null, past: [], future: [], last: null, lastKey: '', lastAt: 0, applying: false },
+  );
+  const [historyTick, setHistoryTick] = useState(0);
+  useEffect(() => {
+    const h = history.current;
+    if (!selected) { if (h.pageId !== null) { history.current = { pageId: null, past: [], future: [], last: null, lastKey: '', lastAt: 0, applying: false }; setHistoryTick((n) => n + 1); } return; }
+    const snap: EditSnapshot = { content: editableContent(selected), seo };
+    const key = contentKey(selected) + JSON.stringify(seo);
+    const seoJustLoaded = h.last !== null && h.last.seo === null && seo !== null && h.lastKey.startsWith(contentKey(selected));
+    if (h.pageId !== selected.pageId || h.last === null || seoJustLoaded) {
+      if (h.pageId !== selected.pageId) { h.past = []; h.future = []; }
+      h.pageId = selected.pageId; h.last = snap; h.lastKey = key; h.applying = false;
+      setHistoryTick((n) => n + 1);
+      return;
+    }
+    if (key === h.lastKey) { h.last = snap; return; }
+    if (h.applying) { h.applying = false; h.last = snap; h.lastKey = key; return; }
+    const now = Date.now();
+    if (!(now - h.lastAt < UNDO_COALESCE_MS && h.past.length > 0)) h.past = [...h.past, h.last].slice(-UNDO_LIMIT);
+    h.future = []; h.last = snap; h.lastKey = key; h.lastAt = now;
+    setHistoryTick((n) => n + 1);
+  }, [selected, seo]);
+  const applySnapshot = useCallback((snap: EditSnapshot) => {
+    history.current.applying = true;
+    setSelected((cur) => {
+      if (!cur) return cur;
+      const next: Page = { ...cur, ...snap.content };
+      for (const k of ['tags', 'kind', 'category', 'authorId'] as const) if (!(k in snap.content)) delete next[k];
+      return next;
+    });
+    if (snap.seo) setSeo(snap.seo);
+  }, []);
+  const undo = useCallback(() => {
+    const h = history.current;
+    const prev = h.past[h.past.length - 1];
+    if (!prev || !h.last) return;
+    h.past = h.past.slice(0, -1); h.future = [...h.future, h.last]; h.lastAt = 0;
+    applySnapshot(prev); setHistoryTick((n) => n + 1);
+  }, [applySnapshot]);
+  const redo = useCallback(() => {
+    const h = history.current;
+    const next = h.future[h.future.length - 1];
+    if (!next || !h.last) return;
+    h.future = h.future.slice(0, -1); h.past = [...h.past, h.last]; h.lastAt = 0;
+    applySnapshot(next); setHistoryTick((n) => n + 1);
+  }, [applySnapshot]);
+  const canUndo = historyTick >= 0 && history.current.past.length > 0;
+  const canRedo = historyTick >= 0 && history.current.future.length > 0;
+  // ⌘Z / ⇧⌘Z (Ctrl on other systems; Ctrl+Y redoes too). Inside a text field
+  // the browser's own undo applies to that field instead.
+  useEffect(() => {
+    if (!selected) return undefined;
+    const onKey = (e: KeyboardEvent): void => {
+      if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
+      const k = e.key.toLowerCase();
+      if (k !== 'z' && k !== 'y') return;
+      const el = e.target as HTMLElement | null;
+      if (el && (el.closest('input, textarea, select, [contenteditable="true"]'))) return;
+      e.preventDefault();
+      if (k === 'y' || e.shiftKey) redo(); else undo();
+    };
+    // Bound inside the preview frame too: with focus in the page (an open
+    // section's editor), the outer window never sees the key.
+    window.addEventListener('keydown', onKey);
+    frameDoc?.addEventListener('keydown', onKey);
+    return () => { window.removeEventListener('keydown', onKey); frameDoc?.removeEventListener('keydown', onKey); };
+  }, [selected, undo, redo, frameDoc]);
+
+  // Autosave, drafts only. Saving a published page changes the live site, and
+  // saving a page under review makes its pending approval stale, so those keep
+  // the explicit Save. A conflict pauses autosave until the person chooses.
+  // A failed autosave is not retried until the next edit: the save already
+  // showed its error, and a timer loop would repeat it every few seconds.
+  const autosaveFailedOn = useRef<Page | null>(null);
+  // ADR 0836 D3 — not on a SCHEDULED draft unless the caller is known to be an
+  // admin: a non-admin save cancels the schedule, and that must be a decision
+  // (the confirm in `save`), never a keystroke pause.
+  const autosaveDraft = selected?.status === 'draft' && !translatorSurface && !(selected.scheduledPublishAt && canAdmin !== true);
+  useEffect(() => {
+    if (!dirty || !autosaveDraft || busy || saveConflict || autosaveFailedOn.current === selected) return;
+    const attempt = selected;
+    const handle = setTimeout(() => {
+      void save({ silent: true }).then((ok) => { autosaveFailedOn.current = ok ? null : attempt; });
+    }, AUTOSAVE_MS);
+    return () => clearTimeout(handle);
+  }, [dirty, autosaveDraft, busy, saveConflict, save, selected, seo]);
+  // ADR 0836 D6 — what a non-admin may not change (the server's live tier): a
+  // live or scheduled page's search fields, and a shared section a live or
+  // scheduled page renders. Shown read-only with the reason, not offered and 403'd.
+  const seoLocked = knownNotAdmin && !!selected && (selected.status !== 'draft' || !!selected.scheduledPublishAt);
+  const sharedLocked = knownNotAdmin && (sharedImpact ?? []).some((p) => (p.status !== undefined && p.status !== 'draft') || !!p.scheduledPublishAt);
+  const saveState: 'saving' | 'unsaved' | 'unsavedLive' | 'saved' = saving
+    ? 'saving'
+    : dirty ? (selected?.status === 'published' ? 'unsavedLive' : 'unsaved') : 'saved';
 
   // Preview honesty (ADR 0204 C4): resolve shared-section refs the way delivery
   // does, so a ref block never previews blank. Shared by the Outline + Public views.
@@ -707,6 +1160,105 @@ export function CmsPage({ translatorSurface = false }: { translatorSurface?: boo
     () => resolvePreviewSections(resolvedSections, effectivePreviewLocale, baseLocale, { withheld: withheldLocales }),
     [resolvedSections, effectivePreviewLocale, baseLocale, withheldLocales],
   );
+
+  // The header's "More" menu: occasional actions.
+  const headerMoreItems = !selected ? [] : [
+    ...(!translatorSurface && (selected.status === 'draft' || selected.status === 'in_review') ? [{
+      id: 'assistant',
+      label: <><SparklesIcon size={13} /> {t('askContentEditor')}</>,
+      onSelect: () => { stageComposerDraft(t('askContentEditorSeed', { title: selected.title })); void navigate(`/?agent=${encodeURIComponent(CMS_CONTENT_EDITOR_AGENT)}`); },
+    }] : []),
+    ...(locales.length > 1 ? [{
+      id: 'localizer',
+      label: <><SparklesIcon size={13} /> {t('askLocalizer')}</>,
+      onSelect: () => void navigate(`/?agent=${encodeURIComponent(CMS_LOCALIZER_AGENT)}`),
+    }] : []),
+    ...(!translatorSurface ? [{
+      id: 'a11y',
+      label: <><ShieldIcon size={13} /> {t('a11y:panelCheck')}</>,
+      onSelect: () => setA11yIssues(checkContentA11y(cmsPageToA11yModel(selected.sections))),
+    }] : []),
+  ];
+
+  // The editing card of one section, drawn in place on the Edit tab: its name,
+  // Done, AI actions (not on the translator surface or a shared reference) and
+  // the section's fields, translations and locale state.
+  const renderSectionEditor = (sectionId: string): JSX.Element | null => {
+    if (!selected) return null;
+    const sec = selected.sections.find((x) => x.sectionId === sectionId);
+    if (!sec) return null;
+    return (
+      <div className="cms-cv-editor-body">
+        <div className="cms-cv-editor-head">
+          <strong className="u-flex-1">{sectionLabel(sec) || t(`sectionType_${sec.type}`, { defaultValue: sec.type })}</strong>
+          <span className="u-label-sm">{t('canvasEscHint')}</span>
+          <Button variant="primary" size="sm" onClick={closeEditor}>{t('canvasDone')}</Button>
+        </div>
+                                <SectionsEditor
+                                  key={sectionId}
+                                  sections={[sec]}
+                                  structureElsewhere
+                                  assets={assets}
+                                  baseLocale={baseLocale}
+                                  locales={locales}
+                                  translatorMode={translatorSurface}
+                                  onPickMedia={pickMedia}
+                                  sharedSections={sharedSections}
+                                  sharedFailed={sharedFailed}
+                                  {...(translatorSurface ? {} : { onSaveShared: (s: Section) => void saveAsShared(s) })}
+                                  localeState={selected.localePublishState ?? {}}
+                                  translationStatus={trStatus?.sections}
+                                  // CMSL2UX-6 — a translator may confirm only on a draft (the server's tier).
+                                  onConfirmSource={translatorSurface && selected.status !== 'draft' ? undefined : confirmSource}
+                                  {...(translatorSurface ? {} : { onSetLocaleState: (locale: string, state: 'published' | 'draft') => {
+                                    void setLocalePublish(orgId, selected.pageId, locale, state)
+                                      .then((p) => {
+                                        // Merge like the schedule result — locale state is a
+                                        // server-owned field; local edits stay intact.
+                                        const mergeState = (prev: Page | null): Page => {
+                                          if (!prev) return p;
+                                          const next: Page = { ...prev, version: p.version, updatedAt: p.updatedAt };
+                                          if (p.localePublishState) next.localePublishState = p.localePublishState;
+                                          else delete next.localePublishState;
+                                          return next;
+                                        };
+                                        setSelected(mergeState); setSavedPage(mergeState);
+                                        toast.success(state === 'draft' ? t('localeWithheldToast', { locale }) : t('localePublishedToast', { locale }));
+                                      })
+                                      .catch((e) => toast.error(apiErrMsg(e, t('actionFailed', { action: 'locale-publish' }))));
+                                  } })}
+                                  onChange={(slice) => setSelected((p) => {
+                                    if (!p) return p;
+                                    const i = p.sections.findIndex((x) => x.sectionId === sectionId);
+                                    if (i < 0) return p;
+                                    return { ...p, sections: [...p.sections.slice(0, i), ...slice, ...p.sections.slice(i + 1)] };
+                                  })}
+                                  onTranslate={async (sectionType, data, targetLocale) => {
+                                    try {
+                                      const overlay = await translateSection(orgId, { sectionType, data, targetLocale });
+                                      if (!overlay || Object.keys(overlay).length === 0) {
+                                        toast.error(t('translateEmpty'));
+                                        return null;
+                                      }
+                                      return overlay;
+                                    } catch (e) {
+                                      toast.error(apiErrMsg(e, t('translateUnavailable')));
+                                      return null;
+                                    }
+                                  }}
+                                />
+        {!translatorSurface && !sec.ref ? (
+                                  <SectionAiBar
+                                    key={`ai-${sectionId}`}
+                                    orgId={orgId}
+                                    section={sec}
+                                    errorMessage={(e) => apiErrMsg(e, t('aiFailed'))}
+                                    onApply={(data) => setSelected((p) => (p ? { ...p, sections: p.sections.map((x) => (x.sectionId === sectionId ? { ...x, data } : x)) } : p))}
+                                  />
+                                ) : null}
+      </div>
+    );
+  };
 
   // The per-page "…" overflow menu on the collection landing (grid + list).
   const pageMenu = (p: Page): JSX.Element => (
@@ -935,39 +1487,46 @@ export function CmsPage({ translatorSurface = false }: { translatorSurface?: boo
                   Offered while the page is editable (draft / in review), where its
                   governed draft-patch + submit verbs apply; publishing stays human.
                   Seed the ONE chat with the page context, then deep-link the agent. */}
-              {!translatorSurface && (selected.status === 'draft' || selected.status === 'in_review') ? (
-                <Button
-                  variant="secondary" size="sm"
-                  onClick={() => { stageComposerDraft(t('askContentEditorSeed', { title: selected.title })); void navigate(`/?agent=${encodeURIComponent(CMS_CONTENT_EDITOR_AGENT)}`); }}
-                >
-                  <SparklesIcon size={13} /> {t('askContentEditor')}
-                </Button>
+              <span className="u-label-sm cms-save-state" role="status" data-state={saveState}>{t(`saveState_${saveState}`)}</span>
+              {dirty || saveConflict ? (
+                // A draft saves itself, so Save is secondary there; on a live page
+                // it is the action that matters.
+                <Button variant={selected.status === 'published' ? 'primary' : 'secondary'} size="sm" disabled={busy} onClick={() => void save()}><SaveIcon /> {t('saveAction')}</Button>
               ) : null}
-              {locales.length > 1 ? (
-                <Button variant="secondary" size="sm" onClick={() => void navigate(`/?agent=${encodeURIComponent(CMS_LOCALIZER_AGENT)}`)}>
-                  <SparklesIcon size={13} /> {t('askLocalizer')}
-                </Button>
+              {/* The assistant links and the accessibility check are occasional:
+                  one "More" menu instead of three more equal-weight buttons. */}
+              {headerMoreItems.length > 0 ? (
+                <Menu
+                  label={t('headerMoreActions')}
+                  triggerClassName="btn-ghost btn-sm"
+                  triggerContent={<MoreHorizontalIcon size={16} />}
+                  align="end"
+                  items={headerMoreItems}
+                  portal
+                />
               ) : null}
-              {!translatorSurface ? ACTIONS_FOR[selected.status]?.map((a) => (
+              {!translatorSurface ? orderedActions(selected.status)
+                // ADR 0859 D4 — never offer the submitter an Approve the server refuses;
+                // the pending notice below says who has to decide instead.
+                .filter((a) => !(a === 'approve' && (!reviewLoaded || (review?.status === 'pending' && review.awaitingAnotherApprover))))
+                .map((a) => (
                 <Button
                   key={a}
-                  variant="secondary"
+                  variant={a === PRIMARY_ACTION[selected.status] ? 'primary' : 'secondary'}
                   size="sm"
                   disabled={busy}
                   aria-busy={busy}
                   // ADR 0593 (CMSAU-3) — on `in_review`, `submit` is a RE-submit:
                   // it re-pins the approval to what the reviewer will now read.
                   {...(a === 'reject' ? { ref: rejectBtnRef } : {})}
-                  onClick={() => { if (a === 'reject') setRejectNote(''); else void runAction(a); }}
+                  onClick={() => { if (a === 'reject') setRejectNote(''); else if (CHECKED_ACTIONS.has(a)) setPendingAction(a); else void runAction(a); }}
                 >
-                  {a === 'submit' && selected.status === 'in_review' ? t('action_resubmit') : t(`action_${a}`, { defaultValue: a })}
+                  {a === 'submit' && selected.status === 'in_review' ? t('action_resubmit')
+                    // ADR 0859 D4 (CMSA2UX-4) — for the submitter, Reject is a withdrawal.
+                    : a === 'reject' && review?.status === 'pending' && review.awaitingAnotherApprover ? t('action_withdraw')
+                    : t(`action_${a}`, { defaultValue: a })}
                 </Button>
               )) : null}
-              {!translatorSurface ? (
-                <Button variant="secondary" size="sm" onClick={() => setA11yIssues(checkContentA11y(cmsPageToA11yModel(selected.sections)))}>
-                  <ShieldIcon size={13} /> {t('a11y:panelCheck')}
-                </Button>
-              ) : null}
             </div>
             {settingsFailed ? (
               <Notice variant="warning" announce={t('langSettingsUnknown')}>{t('langSettingsUnknown')}</Notice>
@@ -1041,8 +1600,17 @@ export function CmsPage({ translatorSurface = false }: { translatorSurface?: boo
             ) : null}
             {selected.status === 'in_review' && review?.status === 'pending' ? (
               // F7(3) — a live region mounted WITH content announces nothing.
-              <Notice variant="info" announce={t('reviewPendingBody', { version: review.pageVersion ?? selected.version })}>
+              <Notice
+                variant="info"
+                // ADR 0859 D4 (CMSA2UX-5) — the submitter's next step is spoken, not only shown.
+                announce={`${t('reviewPendingBody', { version: review.pageVersion ?? selected.version })}${review.awaitingAnotherApprover ? ` ${t('reviewAwaitingOtherApprover')}` : ''}`}
+              >
                 {t('reviewPendingBody', { version: review.pageVersion ?? selected.version })}
+                {review.awaitingAnotherApprover ? <div className="u-mt-1">{t('reviewAwaitingOtherApprover')}</div> : null}
+                {/* ADR 0859 D5 (ADR 0594 D1) — what an approval here does not freeze. */}
+                {review.liveReferenceSections?.length ? (
+                  <div className="u-mt-1 u-fs-12 muted">{t('reviewLiveData', { count: review.liveReferenceSections.length })}</div>
+                ) : null}
               </Notice>
             ) : null}
             {translatorSurface && myGrant ? (
@@ -1051,14 +1619,64 @@ export function CmsPage({ translatorSurface = false }: { translatorSurface?: boo
                 {myGrant.locales.map((l) => <span key={l} className="chip">{l}</span>)}
               </div>
             ) : null}
-            <div className="u-flex u-gap-2 u-items-center u-wrap">
-              <div className="segmented view-toggle" role="group" aria-label={t('detailViewAria')}>
-                <Button variant="primary" aria-pressed={detailView === 'public'} onClick={() => setDetailView('public')}>{t('previewModePublic')}</Button>
-                <Button variant="primary" aria-pressed={detailView === 'outline'} onClick={() => setDetailView('outline')}>{t('previewModeEditor')}</Button>
-                <Button variant="primary" aria-pressed={detailView === 'editor'} onClick={() => setDetailView('editor')}>{t('detailEditor')}</Button>
-              </div>
-              {detailView === 'public' && locales.length > 1 ? (
-                <label className="u-flex u-gap-1 u-items-center u-ml-auto">
+                {/* Save conflict (ADR 0592 §1 / CMSLU-3): the page changed under
+                    this editor. Their save survived; nothing local is discarded
+                    until the user chooses. */}
+                {selected.scheduledPublishAt && canAdmin !== true && !translatorSurface ? (
+                  <Notice variant="warning">{t('scheduledEditWarning', { at: formatDateTime(selected.scheduledPublishAt) })}</Notice>
+                ) : null}
+                {saveConflict ? (
+                  <Notice variant="warning" announce={t('saveConflictTitle')}>
+                    <div className="u-grid u-gap-1">
+                      <strong>{t('saveConflictTitle')}</strong>
+                      <span>{t('saveConflictBody', { version: saveConflict.currentVersion })}</span>
+                      <div className="u-flex u-gap-2 u-items-center">
+                        <Button variant="secondary" size="sm" disabled={busy} onClick={() => void conflictReload()}>{t('saveConflictReload')}</Button>
+                        <Button variant="secondary" size="sm" disabled={busy} onClick={() => void conflictOverwrite()}>{t('saveConflictOverwrite')}</Button>
+                      </div>
+                    </div>
+                  </Notice>
+                ) : null}
+            <div className="cms-mode-bar">
+              <Tabs
+                items={translatorSurface
+                  ? [{ id: 'edit', label: t('workspaceModeEdit') }, { id: 'preview', label: t('workspaceModePreview') }]
+                  : [{ id: 'edit', label: t('workspaceModeEdit') }, { id: 'preview', label: t('workspaceModePreview') }, { id: 'page', label: t('workspaceModePage') }]}
+                value={workspaceMode}
+                onChange={setWorkspaceMode}
+                label={t('workspaceModeAria')}
+                idBase="cms-mode"
+                className="cms-mode-tabs"
+              />
+              {workspaceMode === 'edit' && resolvedSections.length > 0 ? (
+                <Menu
+                  label={t('sectionsMenuLabel')}
+                  triggerClassName="secondary btn-sm"
+                  triggerContent={<><ListIcon size={14} /> {t('sectionsMenu')}</>}
+                  items={resolvedSections.map((s, i) => ({
+                    id: s.sectionId,
+                    label: `${String(i + 1).padStart(2, '0')} · ${sectionLabel(s) || t(`sectionType_${s.type}`, { defaultValue: s.type })}`,
+                    onSelect: () => jumpToSection(s.sectionId),
+                  }))}
+                  portal
+                />
+              ) : null}
+              {workspaceMode === 'edit' ? (
+                <span className="u-flex u-gap-1">
+                  <IconButton label={t('undoAction')} icon={<UndoIcon size={16} />} className="btn-ghost btn-sm" disabled={!canUndo} onClick={undo} />
+                  <IconButton label={t('redoAction')} icon={<RedoIcon size={16} />} className="btn-ghost btn-sm" disabled={!canRedo} onClick={redo} />
+                </span>
+              ) : null}
+              <span className="u-flex-1" />
+              {outdatedSummary.length > 0 ? (
+                /* ADR 0861 D6 — page-level: which locales hold translations of
+                   text that has since changed. */
+                <span className="chip chip--warning">{t('translationOutdatedSummary', { list: outdatedSummary.join(', ') })}</span>
+              ) : trFailed ? (
+                <span className="chip">{t('translationStatusUnavailable')}</span>
+              ) : null}
+              {workspaceMode !== 'page' && locales.length > 1 ? (
+                <label className="u-flex u-gap-1 u-items-center">
                   <span className="u-label-sm">{t('previewLocaleLabel')}</span>
                   <select
                     className="u-w-auto"
@@ -1076,8 +1694,8 @@ export function CmsPage({ translatorSurface = false }: { translatorSurface?: boo
                   </select>
                 </label>
               ) : null}
-              {detailView === 'public' ? (
-                <label className={`u-flex u-gap-1 u-items-center${locales.length > 1 ? '' : ' u-ml-auto'}`}>
+              {workspaceMode !== 'page' ? (
+                <label className="u-flex u-gap-1 u-items-center">
                   <span className="u-label-sm">{t('previewDeviceLabel')}</span>
                   <select className="u-w-auto" value={previewDevice} onChange={(e) => setPreviewDevice(e.target.value as PreviewDevice)} aria-label={t('previewDeviceLabel')}>
                     <option value="desktop">{t('deviceDesktop')}</option>
@@ -1087,299 +1705,387 @@ export function CmsPage({ translatorSurface = false }: { translatorSurface?: boo
                 </label>
               ) : null}
             </div>
-            {/* Persistent Public preview — mounted whenever the detail is open,
-                hidden when not Public, so the iframe never unmounts mid
-                mode-switch (a portal-into-iframe teardown hazard). The device
-                wrapper constrains its width to preview responsive breakpoints. */}
-            {/* ADR 0592 §5 — the preview-in-locale honesty badge: names the
-                previewed locale and how many sections FALL BACK to base (the
-                mixed-language page a visitor would actually get). */}
-            {detailView === 'public' && effectivePreviewLocale !== baseLocale && resolvedSections.length > 0 ? (
-              <div className="u-flex u-gap-1 u-items-center u-wrap">
-                <span className="chip chip--accent">{t('previewLocaleChip', { locale: effectivePreviewLocale })}</span>
-                {previewingWithheld ? (
-                  /* Review F5 — a withheld locale must never read as "complete":
-                     visitors currently get base; the preview says so. */
-                  <span className="chip chip--warning">{t('previewLocaleWithheldBadge', { locale: effectivePreviewLocale, base: baseLocale })}</span>
-                ) : previewResolved.fallbackCount > 0 ? (
-                  <span className="u-label-sm">{t('previewLocaleFallback', { count: previewResolved.fallbackCount, total: resolvedSections.length, base: baseLocale })}</span>
-                ) : (
-                  <span className="u-label-sm">{t('previewLocaleComplete')}</span>
-                )}
-              </div>
-            ) : null}
-            {resolvedSections.length === 0 ? (
-              detailView !== 'editor' ? <StateCard icon={<FileTextIcon />} title={t('previewEmpty')} /> : null
-            ) : (
-              <div className="cms-preview-stage" hidden={detailView !== 'public'}>
-                <div className="cms-preview-device" style={DEVICE_MAXW[previewDevice] ? { maxWidth: DEVICE_MAXW[previewDevice] } : undefined}>
-                  <PublicPreviewFrame title={t('previewModePublic')}>
-                    <RenderSections
-                      sections={previewResolved.sections}
-                      mode="public"
-                      onEditSection={(sectionId) => {
-                        setDetailView('editor');
-                        setEditorFocus((p) => ({ sectionId, nonce: (p?.nonce ?? 0) + 1 }));
-                      }}
-                    />
-                  </PublicPreviewFrame>
+            <TabPanel idBase="cms-mode" tabId={workspaceMode}>
+            {workspaceMode === 'page' ? (
+                <div className="cms-page-settings">
+                <section className="cms-page-group" aria-labelledby="cms-pg-basics">
+                  <h2 id="cms-pg-basics" className="u-fs-16 u-m-0">{t('pageGroupBasics')}</h2>
+                  {/* Review F1 — title/tags are BASE page chrome: immutable to a
+                                            grant-holder (server 403s on field PRESENCE), so translator
+                                            mode renders neither editor (capability ≠ permission). */}
+                                        {translatorSurface ? null : (
+                                        <label className="u-grid u-gap-1">
+                                          <span className="u-label-sm">{t('titleLabel')}</span>
+                                          <input value={selected.title} onChange={(e) => setSelected((p) => (p ? { ...p, title: e.target.value } : p))} />
+                                        </label>
+                                        )}
+
+                                        {/* The page's address. The server applies the same slug rules and
+                                            adds a suffix if another page has it; a published page keeps
+                                            a redirect from the old address. */}
+                                        {translatorSurface ? null : (
+                                        <label className="u-grid u-gap-1">
+                                          <span className="u-label-sm">{t('pageAddressLabel')}</span>
+                                          <span className="cms-address">
+                                            <span className="cms-address-prefix" aria-hidden="true">{selected.kind === 'post' ? '/blog/' : '/'}</span>
+                                            <input
+                                              value={selected.slug}
+                                              spellCheck={false}
+                                              onChange={(e) => { const slug = typedSlug(e.target.value); setSelected((p) => (p ? { ...p, slug } : p)); }}
+                                            />
+                                          </span>
+                                          {selected.status === 'published' && savedPage && selected.slug !== savedPage.slug ? (
+                                            <span className="u-label-sm">{t('pageAddressRedirectNote')}</span>
+                                          ) : null}
+                                        </label>
+                                        )}
+
+                                        {/* Tags (ADR 0206 B3) — chips + add input; saved with the page. */}
+                                        {translatorSurface ? null : (
+                                        <div className="u-grid u-gap-1">
+                                          <span className="u-label-sm">{t('tagsLabel')}</span>
+                                          <div className="u-flex u-gap-1 u-items-center u-wrap">
+                                            {(selected.tags ?? []).map((tag) => (
+                                              <button
+                                                key={tag}
+                                                type="button"
+                                                className="chip"
+                                                aria-label={t('removeTagLabel', { tag })}
+                                                title={t('removeTagLabel', { tag })}
+                                                onClick={() => setSelected((p) => (p ? { ...p, tags: (p.tags ?? []).filter((x) => x !== tag) } : p))}
+                                              >
+                                                {tag} <XIcon size={11} />
+                                              </button>
+                                            ))}
+                                            <input
+                                              value={newTag}
+                                              onChange={(e) => setNewTag(e.target.value)}
+                                              placeholder={t('tagsPlaceholder')}
+                                              aria-label={t('tagsPlaceholder')}
+                                              className="u-w-auto"
+                                              onKeyDown={(e) => {
+                                                if (e.key !== 'Enter') return;
+                                                e.preventDefault();
+                                                const tag = newTag.trim().toLowerCase();
+                                                if (!tag) return;
+                                                setSelected((p) => (p && !(p.tags ?? []).includes(tag) ? { ...p, tags: [...(p.tags ?? []), tag] } : p));
+                                                setNewTag('');
+                                              }}
+                                            />
+                                          </div>
+                                        </div>
+                                        )}
+                </section>
+                <section className="cms-page-group" aria-labelledby="cms-pg-post">
+                  <h2 id="cms-pg-post" className="u-fs-16 u-m-0">{t('pageGroupPost')}</h2>
+                  {/* ADR 0813 — post settings: list the page on the public blog,
+                                            its category, and the byline (`'me'` resolves server-side). */}
+                                        {translatorSurface ? null : (
+                                        <div className="u-grid u-gap-2">
+                                          <label className="u-flex u-gap-2 u-items-center">
+                                            <input
+                                              type="checkbox"
+                                              checked={selected.kind === 'post'}
+                                              onChange={(e) => setSelected((p) => (p ? { ...p, kind: e.target.checked ? 'post' : 'page' } : p))}
+                                            />
+                                            <span>{t('postKindToggle')}</span>
+                                          </label>
+                                          {selected.kind === 'post' ? (
+                                            <>
+                                              <label className="u-grid u-gap-1">
+                                                <span className="u-label-sm">{t('postCategoryLabel')}</span>
+                                                <input
+                                                  value={selected.category ?? ''}
+                                                  placeholder={t('postCategoryPlaceholder')}
+                                                  onChange={(e) => setSelected((p) => (p ? { ...p, category: e.target.value } : p))}
+                                                />
+                                              </label>
+                                              <div className="u-grid u-gap-1">
+                                                <span className="u-label-sm">{t('postAuthorLabel')}</span>
+                                                <div className="u-flex u-gap-2 u-items-center u-wrap">
+                                                  <span className="u-label-sm">
+                                                    {selected.authorId === 'me' ? t('postAuthorPendingMe') : selected.authorId ? t('postAuthorSet') : t('postAuthorUnset')}
+                                                  </span>
+                                                  <Button size="sm" variant="secondary" onClick={() => setSelected((p) => (p ? { ...p, authorId: 'me' } : p))}>{t('postAuthorSetMe')}</Button>
+                                                  {selected.authorId ? (
+                                                    <Button size="sm" variant="quiet" onClick={() => setSelected((p) => (p ? { ...p, authorId: null } : p))}>{t('postAuthorClear')}</Button>
+                                                  ) : null}
+                                                </div>
+                                              </div>
+                                            </>
+                                          ) : null}
+                                        </div>
+                                        )}
+                </section>
+                <section className="cms-page-group">
+                  {/* Search and social: what search results and link previews show. */}
+                                        {translatorSurface ? null : (
+                                        <section className="u-grid u-gap-2" aria-labelledby="cms-seo-heading">
+                                          <h3 id="cms-seo-heading" className="u-fs-14 u-m-0">{t('seoHeading')}</h3>
+                                          {seoFailed ? (
+                                            <Notice variant="warning" announce={t('seoReadFailed')}>{t('seoReadFailed')}</Notice>
+                                          ) : !seo ? <Skeleton /> : (
+                                            <>
+                                              {seoLocked ? <Notice variant="info">{t('seoLiveTierReadOnly')}</Notice> : null}
+                                              <label className="u-grid u-gap-1">
+                                                <span className="u-flex u-gap-2 u-items-center">
+                                                  <span className="u-label-sm u-flex-1">{t('seoDescriptionLabel')}</span>
+                                                  <span className="u-label-sm" aria-live="polite">{t('seoDescriptionCount', { count: (seo.metaDescription ?? '').length })}</span>
+                                                </span>
+                                                <textarea
+                                                  rows={3}
+                                                  value={seo.metaDescription ?? ''}
+                                                  readOnly={seoLocked}
+                                                  aria-describedby="cms-seo-description-hint"
+                                                  onChange={(e) => { const metaDescription = e.target.value; setSeo((cur) => (cur ? { ...cur, metaDescription } : cur)); }}
+                                                />
+                                                <span id="cms-seo-description-hint" className="u-label-sm">{t('seoDescriptionHint')}</span>
+                                              </label>
+                                              <div className="u-grid u-gap-1">
+                                                <span className="u-label-sm">{t('seoImageLabel')}</span>
+                                                <div className="u-flex u-gap-2 u-items-center u-wrap">
+                                                  {seo.ogImageToken ? (
+                                                    <img className="cms-seo-thumb" src={assetUrl(seo.ogImageToken)} alt="" />
+                                                  ) : (
+                                                    <span className="u-label-sm">{t('seoImageNone')}</span>
+                                                  )}
+                                                  {seoLocked ? null : <Button size="sm" variant="secondary" onClick={() => { void pickMedia().then((token) => { if (token) setSeo((cur) => (cur ? { ...cur, ogImageToken: token } : cur)); }); }}>{t('seoImageChoose')}</Button>}
+                                                  {seo.ogImageToken && !seoLocked ? (
+                                                    <Button size="sm" variant="quiet" onClick={() => setSeo((cur) => { if (!cur) return cur; const { ogImageToken: _drop, ...rest } = cur; return rest; })}>{t('seoImageRemove')}</Button>
+                                                  ) : null}
+                                                </div>
+                                              </div>
+                                            </>
+                                          )}
+                                        </section>
+                                        )}
+                </section>
+                <section className="cms-page-group" aria-labelledby="cms-pg-publishing">
+                  <h2 id="cms-pg-publishing" className="u-fs-16 u-m-0">{t('pageGroupPublishing')}</h2>
+                  <div className="action-bar">
+                                          {/* Scheduled publish (ADR 0204 C2): admin-set one-shot; the
+                                              backend 409s when the approval gate is ON. Hidden on the
+                                              translator surface (admin authority; would only 403). */}
+                                          {!translatorSurface && (selected.status === 'draft' || selected.status === 'in_review') ? (
+                                            selected.scheduledPublishAt ? (
+                                              <span className="u-flex u-gap-1 u-items-center">
+                                                <span className="chip chip--warning"><ClockIcon size={12} /> {t('scheduledChip', { at: formatDateTime(selected.scheduledPublishAt) })}</span>
+                                                {knownNotAdmin ? null : <Button variant="quiet" className="u-w-auto" onClick={() => void unschedule()}>{t('scheduleCancel')}</Button>}
+                                              </span>
+                                            ) : knownNotAdmin ? null : (
+                                              <label className="u-flex u-gap-1 u-items-center">
+                                                <span className="u-label-sm">{t('scheduleAtLabel')}</span>
+                                                <input
+                                                  type="datetime-local"
+                                                  value={scheduleAt}
+                                                  onChange={(e) => setScheduleAt(e.target.value)}
+                                                  className="u-w-auto"
+                                                />
+                                                <Button variant="quiet" className="u-w-auto" disabled={!scheduleAt} onClick={() => void schedule()}>
+                                                  <ClockIcon size={13} /> {t('scheduleSetAction')}
+                                                </Button>
+                                              </label>
+                                            )
+                                          ) : null}
+                                          {/* Scheduled unpublish (ADR 0204 C2b): legal while published,
+                                              or paired with a pending publish (then it must be later —
+                                              the backend validates the ordering). Ungated: removing
+                                              content is the fail-safe direction. */}
+                                          {!translatorSurface && (selected.status === 'published' || selected.scheduledUnpublishAt || ((selected.status === 'draft' || selected.status === 'in_review') && selected.scheduledPublishAt)) ? (
+                                            selected.scheduledUnpublishAt ? (
+                                              <span className="u-flex u-gap-1 u-items-center">
+                                                <span className="chip chip--warning"><ClockIcon size={12} /> {t('scheduledUnpublishChip', { at: formatDateTime(selected.scheduledUnpublishAt) })}</span>
+                                                {/* Distinct accessible name: with the embargo pair pending, TWO
+                                                    cancel buttons render — SR users need to know which lane. */}
+                                                {knownNotAdmin ? null : <Button variant="quiet" className="u-w-auto" aria-label={t('scheduleUnpublishCancelAria')} onClick={() => void doCancelScheduleUnpublish()}>{t('scheduleCancel')}</Button>}
+                                              </span>
+                                            ) : knownNotAdmin ? null : (
+                                              <label className="u-flex u-gap-1 u-items-center">
+                                                <span className="u-label-sm">{t('scheduleUnpublishAtLabel')}</span>
+                                                <input
+                                                  type="datetime-local"
+                                                  value={unpublishAt}
+                                                  onChange={(e) => setUnpublishAt(e.target.value)}
+                                                  className="u-w-auto"
+                                                />
+                                                <Button variant="quiet" className="u-w-auto" disabled={!unpublishAt} onClick={() => void doScheduleUnpublish()}>
+                                                  <ClockIcon size={13} /> {t('scheduleUnpublishSetAction')}
+                                                </Button>
+                                              </label>
+                                            )
+                                          ) : null}
+                                        </div>
+                                      {/* Preview links (ADR 0204 C3) — sharing owns mint/revoke/expiry;
+                                          this panel is the CMS affordance over it. Keyed by page (same
+                                          remount rule as History). */}
+                                      {translatorSurface ? null : (
+                                      <details
+                                        key={`pl-${selected.pageId}`}
+                                        className="surface-card u-gap-2"
+                                        onToggle={(e) => { if ((e.target as HTMLDetailsElement).open && previewLinks === null) loadPreviewLinks(selected.pageId); }}
+                                      >
+                                        <summary className="u-label-sm"><LinkIcon size={13} /> {t('previewLinksHeading')}</summary>
+                                        <div className="u-grid u-gap-1 u-mt-2">
+                                          <div className="u-flex u-gap-1 u-items-center">
+                                            <span className="u-label-sm u-flex-1">{t('previewLinksLede')}</span>
+                                            <Button variant="quiet" className="u-w-auto" onClick={() => void createPreviewLink()}><PlusIcon size={13} /> {t('previewLinkCreate')}</Button>
+                                          </div>
+                                          {!previewLinks ? <Skeleton /> : previewLinksFailed ? (
+                                            <span className="u-label-sm">{t('previewLinksFailed')}</span>
+                                          ) : previewLinks.length === 0 ? (
+                                            <span className="u-label-sm">{t('previewLinksEmpty')}</span>
+                                          ) : previewLinks.map((l) => (
+                                            // ADR 0448 P2 — hashed at rest: the URL was copied at mint and
+                                            // cannot be re-read; the fingerprint identifies the link.
+                                            <div key={l.tokenHash} className="u-flex u-gap-2 u-items-center u-wrap">
+                                              <span className="u-label-sm u-flex-1">{l.label ?? l.tokenHash.slice(0, 8)}{l.expiresAt ? ` · ${t('previewLinkExpires', { at: formatDateTime(l.expiresAt) })}` : ''}</span>
+                                              <Button
+                                                variant="quiet" className="u-w-auto"
+                                                onClick={() => { void revokeLink(orgId, l.tokenHash).then(() => { loadPreviewLinks(selected.pageId); toast.success(t('previewLinkRevoked')); }).catch((e) => toast.error(apiErrMsg(e, t('previewLinkFailed')))); }}
+                                              >{t('previewLinkRevoke')}</Button>
+                                            </div>
+                                          ))}
+                                        </div>
+                                      </details>
+                                      )}
+                </section>
+                <section className="cms-page-group">
+                  {/* Version history (ADR 0206 B1) — lazy; one read per open. Keyed
+                                          by page so switching pages remounts it CLOSED (an open panel
+                                          would otherwise strand on a skeleton — versions reset lazily). */}
+                                      {translatorSurface ? null : (
+                                      <details
+                                        key={selected.pageId}
+                                        className="surface-card u-gap-2"
+                                        onToggle={(e) => { if ((e.target as HTMLDetailsElement).open && versions === null) loadVersions(selected.pageId); }}
+                                      >
+                                        <summary className="u-label-sm"><ClockIcon size={13} /> {t('historyHeading')}</summary>
+                                        <div className="u-grid u-gap-1 u-mt-2">
+                                          {versionsFailed ? (
+                                            <span className="u-label-sm">{t('historyFailed')}</span>
+                                          ) : !versions ? <Skeleton /> : versions.length === 0 ? (
+                                            <span className="u-label-sm">{t('historyEmpty')}</span>
+                                          ) : versions.map((v) => (
+                                            <div key={v.versionId} className="u-flex u-gap-2 u-items-center u-wrap">
+                                              {v.origin === 'seed'
+                                                ? <span className="chip chip--accent" title={t('historySeedOfferHint')}>{t('historySeedOffer')}</span>
+                                                : <span className="chip chip--muted">v{v.version}</span>}
+                                              <span className="u-label-sm">{formatDateTime(v.publishedAt)} · {v.publishedBy}</span>
+                                              <span className="u-flex-1" />
+                                              <Button variant="quiet" className="u-w-auto" onClick={() => setDiffVersion(v)}>{t('historyDiff')}</Button>
+                                              {knownNotAdmin ? null : (
+                                                <Button variant="quiet" className="u-w-auto" onClick={() => void restore(v.versionId, v.version)}>
+                                                  <RotateCwIcon size={13} /> {t('historyRestore')}
+                                                </Button>
+                                              )}
+                                            </div>
+                                          ))}
+                                        </div>
+                                      </details>
+                                      )}
+                </section>
+                <section className="cms-page-group">
+                  {/* Page experiments (ADR 0236 — campaign gap D1): variants over the
+                                          page's captured versions, consent-gated visitor assignment on
+                                          the public read, promote-winner via restore→publish. */}
+                                      {translatorSurface ? null : (
+                                      <PageExperimentsPanel
+                                        orgId={orgId}
+                                        pageId={selected.pageId}
+                                        versions={versions}
+                                        onLoadVersions={() => loadVersions(selected.pageId)}
+                                        onPageChanged={() => { open(selected.pageId); loadPages(orgId); }}
+                                      />
+                                      )}
+                </section>
                 </div>
+
+            ) : (
+              <div className="cms-ws-canvas">
+                {effectivePreviewLocale !== baseLocale && resolvedSections.length > 0 ? (
+                  <div className="u-flex u-gap-1 u-items-center u-wrap">
+                    <span className="chip chip--accent">{t('previewLocaleChip', { locale: effectivePreviewLocale })}</span>
+                    {previewingWithheld ? (
+                      /* Review F5 — a withheld locale must never read as "complete":
+                         visitors currently get base; the preview says so. */
+                      <span className="chip chip--warning">{t('previewLocaleWithheldBadge', { locale: effectivePreviewLocale, base: baseLocale })}</span>
+                    ) : previewResolved.fallbackCount > 0 ? (
+                      <span className="u-label-sm">{t('previewLocaleFallback', { count: previewResolved.fallbackCount, total: resolvedSections.length, base: baseLocale })}</span>
+                    ) : (
+                      <span className="u-label-sm">{t('previewLocaleComplete')}</span>
+                    )}
+                  </div>
+                ) : null}
+                {resolvedSections.length === 0 ? (
+                  <StateCard
+                    icon={<FileTextIcon />}
+                    title={t('previewEmpty')}
+                    {...(workspaceMode === 'edit' && !translatorSurface
+                      ? { action: <Button variant="primary" size="sm" onClick={() => setInsertAt(0)}><PlusIcon size={14} /> {t('canvasAddFirst')}</Button> }
+                      : {})}
+                  />
+                ) : (
+                  <div className="cms-preview-stage">
+                    <div className="cms-preview-device" style={DEVICE_MAXW[previewDevice] ? { maxWidth: DEVICE_MAXW[previewDevice] } : undefined}>
+                      <PublicPreviewFrame title={t('previewModePublic')} onDocument={setFrameDoc}>
+                        {workspaceMode === 'edit' ? (
+                          <CmsCanvas
+                            sections={previewResolved.sections}
+                            editingId={editingSectionId}
+                            selectedId={selectedSectionId}
+                            structure={!translatorSurface}
+                            renderEditor={renderSectionEditor}
+                            handlers={{
+                              onEdit: selectSection,
+                              onCloseEditor: closeEditor,
+                              onMove: moveSection,
+                              onReorder: reorderSection,
+                              onDuplicate: duplicateSection,
+                              onRemove: (id) => void removeSection(id),
+                              onInsertAt: setInsertAt,
+                            }}
+                          />
+                        ) : (
+                          <RenderSections sections={previewResolved.sections} mode="public" />
+                        )}
+                      </PublicPreviewFrame>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
-            {detailView === 'outline' && resolvedSections.length > 0 ? (
-              <div className="surface-card u-gap-3">{resolvedSections.map((s) => <RenderSection key={s.sectionId} section={s} mode="editor" />)}</div>
-            ) : null}
-            {detailView === 'editor' ? (
-            <div className="u-grid u-gap-4">
-              <div className="surface-card u-gap-3">
-                {/* Review F1 — title/tags are BASE page chrome: immutable to a
-                    grant-holder (server 403s on field PRESENCE), so translator
-                    mode renders neither editor (capability ≠ permission). */}
-                {translatorSurface ? null : (
-                <label className="u-grid u-gap-1">
-                  <span className="u-label-sm">{t('titleLabel')}</span>
-                  <input value={selected.title} onChange={(e) => setSelected((p) => (p ? { ...p, title: e.target.value } : p))} />
-                </label>
-                )}
-
-                {/* Tags (ADR 0206 B3) — chips + add input; saved with the page. */}
-                {translatorSurface ? null : (
-                <div className="u-grid u-gap-1">
-                  <span className="u-label-sm">{t('tagsLabel')}</span>
-                  <div className="u-flex u-gap-1 u-items-center u-wrap">
-                    {(selected.tags ?? []).map((tag) => (
-                      <button
-                        key={tag}
-                        type="button"
-                        className="chip"
-                        aria-label={t('removeTagLabel', { tag })}
-                        title={t('removeTagLabel', { tag })}
-                        onClick={() => setSelected((p) => (p ? { ...p, tags: (p.tags ?? []).filter((x) => x !== tag) } : p))}
-                      >
-                        {tag} <XIcon size={11} />
-                      </button>
-                    ))}
-                    <input
-                      value={newTag}
-                      onChange={(e) => setNewTag(e.target.value)}
-                      placeholder={t('tagsPlaceholder')}
-                      aria-label={t('tagsPlaceholder')}
-                      className="u-w-auto"
-                      onKeyDown={(e) => {
-                        if (e.key !== 'Enter') return;
-                        e.preventDefault();
-                        const tag = newTag.trim().toLowerCase();
-                        if (!tag) return;
-                        setSelected((p) => (p && !(p.tags ?? []).includes(tag) ? { ...p, tags: [...(p.tags ?? []), tag] } : p));
-                        setNewTag('');
-                      }}
-                    />
-                  </div>
-                </div>
-                )}
-
-                <h2 className="u-fs-16 u-m-0">{t('sectionsHeading')}</h2>
-                <SectionsEditor
-                  sections={selected.sections}
-                  focusRequest={editorFocus ?? undefined}
-                  assets={assets}
-                  baseLocale={baseLocale}
-                  locales={locales}
-                  translatorMode={translatorSurface}
-                  onPickMedia={pickMedia}
-                  sharedSections={sharedSections}
-                  sharedFailed={sharedFailed}
-                  {...(translatorSurface ? {} : { onSaveShared: (s: Section) => void saveAsShared(s) })}
-                  localeState={selected.localePublishState ?? {}}
-                  {...(translatorSurface ? {} : { onSetLocaleState: (locale: string, state: 'published' | 'draft') => {
-                    void setLocalePublish(orgId, selected.pageId, locale, state)
-                      .then((p) => {
-                        // Merge like the schedule result — locale state is a
-                        // server-owned field; local edits stay intact.
-                        const mergeState = (prev: Page | null): Page => {
-                          if (!prev) return p;
-                          const next: Page = { ...prev, version: p.version, updatedAt: p.updatedAt };
-                          if (p.localePublishState) next.localePublishState = p.localePublishState;
-                          else delete next.localePublishState;
-                          return next;
-                        };
-                        setSelected(mergeState); setSavedPage(mergeState);
-                        toast.success(state === 'draft' ? t('localeWithheldToast', { locale }) : t('localePublishedToast', { locale }));
-                      })
-                      .catch((e) => toast.error(apiErrMsg(e, t('actionFailed', { action: 'locale-publish' }))));
-                  } })}
-                  onChange={(sections) => setSelected((p) => (p ? { ...p, sections } : p))}
-                  onTranslate={async (sectionType, data, targetLocale) => {
-                    try {
-                      const overlay = await translateSection(orgId, { sectionType, data, targetLocale });
-                      if (!overlay || Object.keys(overlay).length === 0) {
-                        toast.error(t('translateEmpty'));
-                        return null;
-                      }
-                      return overlay;
-                    } catch (e) {
-                      toast.error(apiErrMsg(e, t('translateUnavailable')));
-                      return null;
-                    }
-                  }}
-                />
-
-                {/* Save conflict (ADR 0592 §1 / CMSLU-3): the page changed under
-                    this editor. Their save survived; nothing local is discarded
-                    until the user chooses. */}
-                {saveConflict ? (
-                  <Notice variant="warning" announce={t('saveConflictTitle')}>
-                    <div className="u-grid u-gap-1">
-                      <strong>{t('saveConflictTitle')}</strong>
-                      <span>{t('saveConflictBody', { version: saveConflict.currentVersion })}</span>
-                      <div className="u-flex u-gap-2 u-items-center">
-                        <Button variant="secondary" size="sm" disabled={busy} onClick={() => void conflictReload()}>{t('saveConflictReload')}</Button>
-                        <Button variant="secondary" size="sm" disabled={busy} onClick={() => void conflictOverwrite()}>{t('saveConflictOverwrite')}</Button>
-                      </div>
-                    </div>
-                  </Notice>
-                ) : null}
-                <div className="action-bar">
-                  {/* Scheduled publish (ADR 0204 C2): admin-set one-shot; the
-                      backend 409s when the approval gate is ON. Hidden on the
-                      translator surface (admin authority; would only 403). */}
-                  {!translatorSurface && (selected.status === 'draft' || selected.status === 'in_review') ? (
-                    selected.scheduledPublishAt ? (
-                      <span className="u-flex u-gap-1 u-items-center">
-                        <span className="chip chip--warning"><ClockIcon size={12} /> {t('scheduledChip', { at: formatDateTime(selected.scheduledPublishAt) })}</span>
-                        <Button variant="quiet" className="u-w-auto" onClick={() => void unschedule()}>{t('scheduleCancel')}</Button>
-                      </span>
-                    ) : (
-                      <label className="u-flex u-gap-1 u-items-center">
-                        <span className="u-label-sm">{t('scheduleAtLabel')}</span>
-                        <input
-                          type="datetime-local"
-                          value={scheduleAt}
-                          onChange={(e) => setScheduleAt(e.target.value)}
-                          className="u-w-auto"
-                        />
-                        <Button variant="quiet" className="u-w-auto" disabled={!scheduleAt} onClick={() => void schedule()}>
-                          <ClockIcon size={13} /> {t('scheduleSetAction')}
-                        </Button>
-                      </label>
-                    )
-                  ) : null}
-                  {/* Scheduled unpublish (ADR 0204 C2b): legal while published,
-                      or paired with a pending publish (then it must be later —
-                      the backend validates the ordering). Ungated: removing
-                      content is the fail-safe direction. */}
-                  {!translatorSurface && (selected.status === 'published' || ((selected.status === 'draft' || selected.status === 'in_review') && selected.scheduledPublishAt)) ? (
-                    selected.scheduledUnpublishAt ? (
-                      <span className="u-flex u-gap-1 u-items-center">
-                        <span className="chip chip--warning"><ClockIcon size={12} /> {t('scheduledUnpublishChip', { at: formatDateTime(selected.scheduledUnpublishAt) })}</span>
-                        {/* Distinct accessible name: with the embargo pair pending, TWO
-                            cancel buttons render — SR users need to know which lane. */}
-                        <Button variant="quiet" className="u-w-auto" aria-label={t('scheduleUnpublishCancelAria')} onClick={() => void doCancelScheduleUnpublish()}>{t('scheduleCancel')}</Button>
-                      </span>
-                    ) : (
-                      <label className="u-flex u-gap-1 u-items-center">
-                        <span className="u-label-sm">{t('scheduleUnpublishAtLabel')}</span>
-                        <input
-                          type="datetime-local"
-                          value={unpublishAt}
-                          onChange={(e) => setUnpublishAt(e.target.value)}
-                          className="u-w-auto"
-                        />
-                        <Button variant="quiet" className="u-w-auto" disabled={!unpublishAt} onClick={() => void doScheduleUnpublish()}>
-                          <ClockIcon size={13} /> {t('scheduleUnpublishSetAction')}
-                        </Button>
-                      </label>
-                    )
-                  ) : null}
-                  <span className="u-flex-1" />
-                  <Button variant="primary" disabled={busy} onClick={() => void save()}><SaveIcon /> {t('saveAction')}</Button>
-                </div>
-              </div>
-
-              {/* Preview links (ADR 0204 C3) — sharing owns mint/revoke/expiry;
-                  this panel is the CMS affordance over it. Keyed by page (same
-                  remount rule as History). */}
-              {translatorSurface ? null : (
-              <details
-                key={`pl-${selected.pageId}`}
-                className="surface-card u-gap-2"
-                onToggle={(e) => { if ((e.target as HTMLDetailsElement).open && previewLinks === null) loadPreviewLinks(selected.pageId); }}
-              >
-                <summary className="u-label-sm"><LinkIcon size={13} /> {t('previewLinksHeading')}</summary>
-                <div className="u-grid u-gap-1 u-mt-2">
-                  <div className="u-flex u-gap-1 u-items-center">
-                    <span className="u-label-sm u-flex-1">{t('previewLinksLede')}</span>
-                    <Button variant="quiet" className="u-w-auto" onClick={() => void createPreviewLink()}><PlusIcon size={13} /> {t('previewLinkCreate')}</Button>
-                  </div>
-                  {!previewLinks ? <Skeleton /> : previewLinksFailed ? (
-                    <span className="u-label-sm">{t('previewLinksFailed')}</span>
-                  ) : previewLinks.length === 0 ? (
-                    <span className="u-label-sm">{t('previewLinksEmpty')}</span>
-                  ) : previewLinks.map((l) => (
-                    // ADR 0448 P2 — hashed at rest: the URL was copied at mint and
-                    // cannot be re-read; the fingerprint identifies the link.
-                    <div key={l.tokenHash} className="u-flex u-gap-2 u-items-center u-wrap">
-                      <span className="u-label-sm u-flex-1">{l.label ?? l.tokenHash.slice(0, 8)}{l.expiresAt ? ` · ${t('previewLinkExpires', { at: formatDateTime(l.expiresAt) })}` : ''}</span>
-                      <Button
-                        variant="quiet" className="u-w-auto"
-                        onClick={() => { void revokeLink(orgId, l.tokenHash).then(() => { loadPreviewLinks(selected.pageId); toast.success(t('previewLinkRevoked')); }).catch((e) => toast.error(apiErrMsg(e, t('previewLinkFailed')))); }}
-                      >{t('previewLinkRevoke')}</Button>
-                    </div>
-                  ))}
-                </div>
-              </details>
-              )}
-
-              {/* Version history (ADR 0206 B1) — lazy; one read per open. Keyed
-                  by page so switching pages remounts it CLOSED (an open panel
-                  would otherwise strand on a skeleton — versions reset lazily). */}
-              {translatorSurface ? null : (
-              <details
-                key={selected.pageId}
-                className="surface-card u-gap-2"
-                onToggle={(e) => { if ((e.target as HTMLDetailsElement).open && versions === null) loadVersions(selected.pageId); }}
-              >
-                <summary className="u-label-sm"><ClockIcon size={13} /> {t('historyHeading')}</summary>
-                <div className="u-grid u-gap-1 u-mt-2">
-                  {versionsFailed ? (
-                    <span className="u-label-sm">{t('historyFailed')}</span>
-                  ) : !versions ? <Skeleton /> : versions.length === 0 ? (
-                    <span className="u-label-sm">{t('historyEmpty')}</span>
-                  ) : versions.map((v) => (
-                    <div key={v.versionId} className="u-flex u-gap-2 u-items-center u-wrap">
-                      <span className="chip chip--muted">v{v.version}</span>
-                      <span className="u-label-sm">{formatDateTime(v.publishedAt)} · {v.publishedBy}</span>
-                      <span className="u-flex-1" />
-                      <Button variant="quiet" className="u-w-auto" onClick={() => setDiffVersion(v)}>{t('historyDiff')}</Button>
-                      <Button variant="quiet" className="u-w-auto" onClick={() => void restore(v.versionId, v.version)}>
-                        <RotateCwIcon size={13} /> {t('historyRestore')}
-                      </Button>
-                    </div>
-                  ))}
-                </div>
-              </details>
-              )}
-
-              {/* Page experiments (ADR 0236 — campaign gap D1): variants over the
-                  page's captured versions, consent-gated visitor assignment on
-                  the public read, promote-winner via restore→publish. */}
-              {translatorSurface ? null : (
-              <PageExperimentsPanel
-                orgId={orgId}
-                pageId={selected.pageId}
-                versions={versions}
-                onLoadVersions={() => loadVersions(selected.pageId)}
-                onPageChanged={() => { open(selected.pageId); loadPages(orgId); }}
-              />
-              )}
-
-            </div>
-            ) : null}
+            </TabPanel>
           </div>
         )}
         </>
       )}
       </OrgSelectionState>
+
+      {/* Add a section at an insertion point on the Edit tab. */}
+      {insertAt !== null ? (
+        <SectionPicker
+          sharedSections={sharedSections}
+          onPick={(section) => insertSection(insertAt, section)}
+          onClose={() => setInsertAt(null)}
+        />
+      ) : null}
+
+      {/* Review before Publish / Approve / Submit (ADR 0828 phase 3). */}
+      {pendingAction && selected ? (
+        <PublishChecklist
+          page={selected}
+          action={pendingAction}
+          checks={publishChecks(selected, seo, { baseLocale, locales })}
+          busy={busy}
+          onConfirm={() => { const a = pendingAction; void runAction(a).then((ok) => { if (ok) setPendingAction(null); }); }}
+          onFix={(c) => {
+            setPendingAction(null);
+            if (c.sectionId) selectSection(c.sectionId);
+            else setWorkspaceMode('page');
+          }}
+          onClose={() => setPendingAction(null)}
+        />
+      ) : null}
 
       {/* Media picker (ADR 0206 B4) — resolves the in-flight pick. */}
       {pickerResolve ? (
@@ -1392,8 +2098,13 @@ export function CmsPage({ translatorSurface = false }: { translatorSurface?: boo
 
       {/* Field-level version diff (ADR 0206 B1) — snapshot vs the CURRENT editor content. */}
       {diffVersion && selected ? (
-        <Modal onClose={() => setDiffVersion(null)} label={t('diffTitle', { version: diffVersion.version })}>
-          <VersionDiff from={diffVersion} to={selected} />
+        <Modal onClose={() => setDiffVersion(null)} label={t('diffTitle', { version: diffVersion.version })} className="hire-modal cms-diff" showClose>
+          <VersionDiff
+            from={diffVersion}
+            to={selected}
+            onTake={(entry) => takeFromVersion(diffVersion, entry)}
+            onUseWhole={() => { const v = diffVersion; setDiffVersion(null); void restore(v.versionId, v.version); }}
+          />
         </Modal>
       ) : null}
 
@@ -1431,9 +2142,10 @@ export function CmsPage({ translatorSurface = false }: { translatorSurface?: boo
                   : t('sharedImpactNone')}
               </Notice>
             )}
+            {sharedLocked ? <Notice variant="info">{t('sharedLiveTierReadOnly')}</Notice> : null}
             <div className="action-bar">
               <span className="u-flex-1" />
-              <Button variant="primary" onClick={() => void saveShared()}><SaveIcon /> {t('common:save')}</Button>
+              <Button variant="primary" disabled={sharedLocked} onClick={() => void saveShared()}><SaveIcon /> {t('common:save')}</Button>
             </div>
           </div>
         </Modal>
@@ -1443,13 +2155,16 @@ export function CmsPage({ translatorSurface = false }: { translatorSurface?: boo
 }
 
 /** The rendered diff body: title change + per-section field changes. */
-function VersionDiff({ from, to }: { from: PageVersion; to: Page }): JSX.Element {
+function VersionDiff({ from, to, onTake, onUseWhole }: {
+  from: PageVersion;
+  to: Page;
+  onTake: (entry: SectionDiffEntry) => void;
+  onUseWhole: () => void;
+}): JSX.Element {
   const { t } = useTranslation('cms');
-  const entries = diffSections(from.snapshot.sections, to.sections);
+  // A seeded update's sections carry freshly minted ids: pair them by position.
+  const entries = diffSections(from.snapshot.sections, to.sections, { pairByPosition: from.origin === 'seed' });
   const titleChanged = from.snapshot.title !== to.title;
-  if (!titleChanged && entries.length === 0) {
-    return <span className="u-label-sm">{t('diffNoChanges')}</span>;
-  }
   const kindChip = (kind: string): string => {
     switch (kind) {
       case 'added': return 'chip chip--success';
@@ -1458,27 +2173,56 @@ function VersionDiff({ from, to }: { from: PageVersion; to: Page }): JSX.Element
       default: return 'chip chip--accent'; // changed
     }
   };
+  const nameOf = (e: SectionDiffEntry): string => {
+    const s = from.snapshot.sections.find((x) => x.sectionId === e.sectionId) ?? to.sections.find((x) => x.sectionId === (e.toSectionId ?? e.sectionId));
+    return (s && sectionLabel(s)) || t(`sectionType_${e.type}`, { defaultValue: e.type });
+  };
   return (
-    <div className="u-grid u-gap-2">
+    <div className="u-grid u-gap-3">
+      <div className="u-grid u-gap-1">
+        <h2 className="u-fs-16 u-m-0">{from.origin === 'seed' ? t('diffSeedTitle') : t('diffTitle', { version: from.version })}</h2>
+        <p className="u-label-sm u-m-0">{t('diffLede')}</p>
+      </div>
+      {!titleChanged && entries.length === 0 ? (
+        <span className="u-label-sm">{t('diffNoChanges')}</span>
+      ) : null}
       {titleChanged ? (
         <div className="u-grid u-gap-1">
           <span className="u-label-sm">{t('titleLabel')}</span>
-          <span className="u-label-sm">{from.snapshot.title} → {to.title}</span>
+          <div className="cms-diff-cols">
+            <div className="cms-diff-col"><span className="u-label-sm">{t('diffVersionCol')}</span><span>{from.snapshot.title}</span></div>
+            <div className="cms-diff-col"><span className="u-label-sm">{t('diffDraftCol')}</span><span>{to.title}</span></div>
+          </div>
         </div>
       ) : null}
       {entries.map((e) => (
-        <div key={e.sectionId} className="u-grid u-gap-1">
-          <div className="u-flex u-gap-1 u-items-center">
-            <span className="chip chip--muted">{t(`sectionType_${e.type}`, { defaultValue: e.type })}</span>
+        <section key={e.sectionId} className="cms-diff-entry" aria-label={nameOf(e)}>
+          <div className="u-flex u-gap-2 u-items-center u-wrap">
+            <strong className="u-flex-1">{nameOf(e)}</strong>
             <span className={kindChip(e.kind)}>{t(`diffKind_${e.kind}`)}</span>
+            {e.kind === 'changed' ? (
+              <Button variant="secondary" size="sm" aria-label={t('diffTakeAria', { section: nameOf(e) })} onClick={() => onTake(e)}>{t('diffTake')}</Button>
+            ) : e.kind === 'removed' ? (
+              <Button variant="secondary" size="sm" aria-label={t('diffPutBackAria', { section: nameOf(e) })} onClick={() => onTake(e)}>{t('diffPutBack')}</Button>
+            ) : null}
           </div>
+          {e.kind === 'added' ? <span className="u-label-sm">{t('diffOnlyInDraft')}</span> : null}
+          {e.kind === 'removed' ? <span className="u-label-sm">{t('diffOnlyInVersion')}</span> : null}
           {e.fields.map((f) => (
-            <div key={f.key} className="u-label-sm">
-              <strong>{f.key}</strong>: {f.from || t('diffEmptyValue')} → {f.to || t('diffEmptyValue')}
+            <div key={f.key} className="u-grid u-gap-1">
+              <span className="u-label-sm">{f.key}</span>
+              <div className="cms-diff-cols">
+                <div className="cms-diff-col" data-side="version"><span className="u-label-sm">{t('diffVersionCol')}</span><span className="cms-diff-text">{f.from || t('diffEmptyValue')}</span></div>
+                <div className="cms-diff-col" data-side="draft"><span className="u-label-sm">{t('diffDraftCol')}</span><span className="cms-diff-text">{f.to || t('diffEmptyValue')}</span></div>
+              </div>
             </div>
           ))}
-        </div>
+        </section>
       ))}
+      <div className="action-bar">
+        <span className="u-label-sm u-flex-1">{t('diffUndoHint')}</span>
+        <Button variant="secondary" onClick={onUseWhole}>{t('diffUseWhole')}</Button>
+      </div>
     </div>
   );
 }

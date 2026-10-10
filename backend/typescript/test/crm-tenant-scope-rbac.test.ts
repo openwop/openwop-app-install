@@ -50,6 +50,8 @@ import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { createAgentToolProvider } from '../src/host/agentToolProvider.js';
 import { CRM_LEAD_CAPTURE_TOOL_ID, CRM_PERSIST_SEGMENT_TOOL_ID } from '../src/features/crm/agentTools.js';
+import { bareRunId } from './support/bareRunId.js';
+import { toWireRunId } from '../src/host/v2Ids.js';
 
 let BASE = '';
 let server: http.Server;
@@ -57,11 +59,25 @@ let storage: Storage;
 let n = 0;
 let workflowId = 'openwop-app.uppercase';
 
-interface Res<T = Record<string, any>> { status: number; body: T }
+/** Every field this file reads off a response — the JSON boundary, typed once
+ *  (each is asserted present by the status check that precedes its read). */
+interface Body {
+  error?: string;
+  user?: { userId: string; tenantId: string };
+  workspaceId?: string;
+  token?: string;
+  contactId?: string;
+  runId?: string;
+  tenantId?: string;
+  defId?: string;
+  segmentId?: string;
+  events?: Array<{ mergeEventId: string; sourceId: string }>;
+}
+interface Res<T = Body> { status: number; body: T }
 
 function client() {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res<any>> => {
+  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
@@ -71,7 +87,7 @@ function client() {
     const single = res.headers.get('set-cookie');
     const setCookies: string[] = typeof h.getSetCookie === 'function' ? h.getSetCookie() : single ? [single] : [];
     for (const sc of setCookies) { const m = /(__session=[^;]+)/.exec(sc); if (m) cookie = m[1]!; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    return { status: res.status, body: (res.status === 204 ? {} : await res.json().catch(() => ({}))) as Body };
   };
   return {
     get: (p: string) => call('GET', p),
@@ -85,36 +101,36 @@ type Client = ReturnType<typeof client>;
 /** Production sign-in — no `tenantId` override, so the caller lands in their
  *  own `user:` personal tenant exactly as OIDC would leave them. */
 async function signIn(c: Client, email: string): Promise<{ userId: string; tenantId: string }> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email });
+  const r = await c.post('/host/openwop-app/test/login', { email });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  return { userId: r.body.user.userId as string, tenantId: r.body.user.tenantId as string };
+  return { userId: r.body.user!.userId, tenantId: r.body.user!.tenantId };
 }
 
 async function sharedWorkspace(c: Client): Promise<string> {
-  const ws = await c.post('/v1/host/openwop-app/workspaces', { name: `CRM RBAC WS ${n++}` });
+  const ws = await c.post('/host/openwop-app/workspaces', { name: `CRM RBAC WS ${n++}` });
   expect(ws.status, JSON.stringify(ws.body)).toBe(201);
   expect(ws.body.workspaceId, 'must be a real shared workspace').toMatch(/^ws:/);
-  const sw = await c.post(`/v1/host/openwop-app/workspaces/${encodeURIComponent(ws.body.workspaceId)}/switch`);
+  const sw = await c.post(`/host/openwop-app/workspaces/${encodeURIComponent(ws.body.workspaceId!)}/switch`);
   expect(sw.status, JSON.stringify(sw.body)).toBe(200);
-  return ws.body.workspaceId as string;
+  return ws.body.workspaceId!;
 }
 
 async function joinAsMember(owner: Client, ws: string, joiner: Client, email: string, role: 'viewer' | 'editor'): Promise<{ userId: string }> {
-  const invite = await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(ws)}/invites`, { email, role });
+  const invite = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(ws)}/invites`, { email, role });
   expect(invite.status, JSON.stringify(invite.body)).toBe(201);
   const me = await signIn(joiner, email);
-  const accepted = await joiner.post('/v1/host/openwop-app/orgs/invitations/accept', { token: invite.body.token });
+  const accepted = await joiner.post('/host/openwop-app/orgs/invitations/accept', { token: invite.body.token });
   expect(accepted.status, JSON.stringify(accepted.body)).toBe(201);
-  const sw = await joiner.post(`/v1/host/openwop-app/workspaces/${encodeURIComponent(ws)}/switch`);
+  const sw = await joiner.post(`/host/openwop-app/workspaces/${encodeURIComponent(ws)}/switch`);
   expect(sw.status, JSON.stringify(sw.body)).toBe(200);
   return me;
 }
 
-const CRM = '/v1/host/openwop-app/crm';
+const CRM = '/host/openwop-app/crm';
 const contactsOf = async (c: Client, name: string): Promise<string> => {
   const r = await c.post(`${CRM}/contacts`, { name });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  return r.body.contactId as string;
+  return r.body.contactId!;
 };
 
 beforeAll(async () => {
@@ -142,12 +158,12 @@ afterAll(async () => {
 });
 
 /** The tool scope AS THE CONVERSATION TOOL LOOP BUILDS IT — from the run row
- *  `POST /v1/runs` stamped for this session (`metadata.actingUserId` +
+ *  `POST /runs` stamped for this session (`metadata.actingUserId` +
  *  `metadata.personalTenant`, both host-authoritative), never hand-typed. */
 async function scopeFromRun(c: Client, extraMetadata?: Record<string, unknown>): Promise<{ tenantId: string; runId: string; actingUserId?: string; personalTenant?: string }> {
-  const r = await c.post('/v1/runs', { workflowId, inputs: {}, ...(extraMetadata ? { metadata: extraMetadata } : {}) });
+  const r = await c.post('/runs', { workflowId, inputs: {}, ...(extraMetadata ? { metadata: extraMetadata } : {}) });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  const run = await storage.getRun(r.body.runId as string);
+  const run = await storage.getRun(bareRunId(r.body.runId!));
   expect(run).toBeTruthy();
   const m = (run!.metadata ?? {}) as { actingUserId?: unknown; personalTenant?: unknown };
   return {
@@ -163,7 +179,7 @@ interface Row {
   /** Owner-side setup returning what the calls need (fresh per row so the
    *  editor's successful mutation never starves a later row). */
   setup?: () => Promise<Record<string, string>>;
-  call: (c: Client, s: Record<string, string>) => Promise<Res<any>>;
+  call: (c: Client, s: Record<string, string>) => Promise<Res>;
   /** The editor's REAL success status — never "anything but 403". */
   editor: number;
 }
@@ -234,7 +250,7 @@ describe('ADR 0627 D3 — the 16 tenant-lane mutators require workspace:write', 
         const source = await contactsOf(owner, 'Unmerge Source');
         expect((await owner.post(`${CRM}/contacts/${survivor}/merge`, { sourceContactId: source })).status).toBe(200);
         const events = await owner.get(`${CRM}/merge-events`);
-        const ev = (events.body.events as Array<{ mergeEventId: string; sourceId: string }>).find((e) => e.sourceId === source);
+        const ev = (events.body.events ?? []).find((e) => e.sourceId === source);
         expect(ev, 'the merge must have recorded an event').toBeTruthy();
         return { id: ev!.mergeEventId };
       },
@@ -250,26 +266,26 @@ describe('ADR 0627 D3 — the 16 tenant-lane mutators require workspace:write', 
     {
       name: 'POST /contacts/:id/triage (spawns a run)',
       setup: async () => ({ id: await contactsOf(owner, 'Triage Target') }),
-      call: (c, s) => c.post(`${CRM}/contacts/${s.id}/triage`, { workflowId }),
+      call: (c, s) => c.post(`${CRM}/contacts/${s.id}/triage`, {}), // ADR 0837 CRM2CD-1 — the workflow is the operator's choice
       editor: 202,
     },
     { name: 'POST /fields', call: (c) => c.post(`${CRM}/fields`, { key: `k${n++}`, label: 'K', type: 'string' }), editor: 201 },
     {
       name: 'DELETE /fields/:defId',
-      setup: async () => { const r = await owner.post(`${CRM}/fields`, { key: `kdel${n++}`, label: 'K', type: 'string' }); expect(r.status).toBe(201); return { id: r.body.defId }; },
+      setup: async () => { const r = await owner.post(`${CRM}/fields`, { key: `kdel${n++}`, label: 'K', type: 'string' }); expect(r.status).toBe(201); return { id: r.body.defId! }; },
       call: (c, s) => c.del(`${CRM}/fields/${s.id}`),
       editor: 204,
     },
     { name: 'POST /segments', call: (c) => c.post(`${CRM}/segments`, { name: `Seg ${n++}`, filters: [] }), editor: 201 },
     {
       name: 'PATCH /segments/:segmentId',
-      setup: async () => { const r = await owner.post(`${CRM}/segments`, { name: 'Seg Patch', filters: [] }); expect(r.status).toBe(201); return { id: r.body.segmentId }; },
+      setup: async () => { const r = await owner.post(`${CRM}/segments`, { name: 'Seg Patch', filters: [] }); expect(r.status).toBe(201); return { id: r.body.segmentId! }; },
       call: (c, s) => c.patch(`${CRM}/segments/${s.id}`, { name: 'Seg Patched' }),
       editor: 200,
     },
     {
       name: 'DELETE /segments/:segmentId',
-      setup: async () => { const r = await owner.post(`${CRM}/segments`, { name: 'Seg Del', filters: [] }); expect(r.status).toBe(201); return { id: r.body.segmentId }; },
+      setup: async () => { const r = await owner.post(`${CRM}/segments`, { name: 'Seg Del', filters: [] }); expect(r.status).toBe(201); return { id: r.body.segmentId! }; },
       call: (c, s) => c.del(`${CRM}/segments/${s.id}`),
       editor: 204,
     },
@@ -278,7 +294,7 @@ describe('ADR 0627 D3 — the 16 tenant-lane mutators require workspace:write', 
   it('the table covers all 16 ADR 0627 D3 mutators — and EVERY mutator `crm/routes.ts` registers (scan), so a new ungated route is red', () => {
     expect(rows).toHaveLength(16);
     const src = readFileSync(fileURLToPath(new URL('../src/features/crm/routes.ts', import.meta.url)), 'utf8');
-    const registered = [...src.matchAll(/app\.(post|patch|put|delete)\(\s*'\/v1\/host\/openwop-app\/crm(\/[^']*)'/g)]
+    const registered = [...src.matchAll(/app\.(post|patch|put|delete)\(\s*'(?:\/v1)?\/host\/openwop-app\/crm(\/[^']*)'/g)]
       .map((m) => `${m[1]!.toUpperCase()} ${m[2]}`)
       // `convert` rides `authorizeOrgScope` (already gated before ADR 0627 D3).
       .filter((r) => !r.endsWith('/convert'))
@@ -301,9 +317,9 @@ describe('ADR 0627 D3 — the 16 tenant-lane mutators require workspace:write', 
 
   it('GET /runs/:runId — a viewer can still READ a triage run (runs:read), and it stays readable with the toggle OFF (ADR 0001 §3.4)', async () => {
     const id = await contactsOf(owner, 'Run Read Target');
-    const started = await editor.post(`${CRM}/contacts/${id}/triage`, { workflowId });
+    const started = await editor.post(`${CRM}/contacts/${id}/triage`, {});
     expect(started.status, JSON.stringify(started.body)).toBe(202);
-    const read = await viewer.get(`${CRM}/runs/${encodeURIComponent(started.body.runId)}`);
+    const read = await viewer.get(`${CRM}/runs/${encodeURIComponent(started.body.runId!)}`);
     expect(read.status, JSON.stringify(read.body)).toBe(200);
     expect(read.body.runId).toBe(started.body.runId);
     // DELIBERATELY NOT toggle-gated: a historical run's provenance is readable
@@ -315,7 +331,7 @@ describe('ADR 0627 D3 — the 16 tenant-lane mutators require workspace:write', 
     if (d) await saveConfig({ ...d, status: 'off' }, 'test');
     try {
       expect((await viewer.get(`${CRM}/contacts`)).status, 'the live surface IS gone').toBe(404);
-      const off = await viewer.get(`${CRM}/runs/${encodeURIComponent(started.body.runId)}`);
+      const off = await viewer.get(`${CRM}/runs/${encodeURIComponent(started.body.runId!)}`);
       expect(off.status, `provenance must stay readable with the toggle off: ${JSON.stringify(off.body)}`).toBe(200);
       expect(off.body.runId).toBe(started.body.runId);
     } finally {
@@ -349,9 +365,10 @@ describe('ADR 0627 D3 — the 16 tenant-lane mutators require workspace:write', 
   it(':fork re-stamps `personalTenant` to the FORKING caller (review S4) — B\'s fork of A\'s run carries B\'s own sandbox, never A\'s', async () => {
     const src = await scopeFromRun(viewer);
     expect(src.personalTenant).toMatch(/^user:/);
-    const fork = await editor.post(`/v1/runs/${encodeURIComponent(src.runId)}:fork`, { fromSeq: 0, mode: 'replay' });
+    // ADR 0812 — a v2 path takes the tenant-BOUND id; `src.runId` is the stored (bare) one.
+    const fork = await editor.post(`/runs/${encodeURIComponent(toWireRunId(src.runId, src.tenantId))}:fork`, { fromSeq: 0, mode: 'replay' });
     expect([200, 201, 202], JSON.stringify(fork.body)).toContain(fork.status);
-    const forked = await storage.getRun(fork.body.runId as string);
+    const forked = await storage.getRun(bareRunId(fork.body.runId!));
     const m = (forked!.metadata ?? {}) as { actingUserId?: unknown; personalTenant?: unknown };
     expect(m.actingUserId, 'the forker is the acting user').toBe(editorId);
     expect(m.personalTenant, 'the forker\'s OWN personal tenant').toMatch(/^user:/);
@@ -388,7 +405,7 @@ describe('ADR 0627 D3 — the personal-tenant owner keeps writing (implicit owne
     const anon = client();
     const viaHttp = await anon.post(`${CRM}/segments`, { name: 'Anon seg (http)', filters: [] });
     expect(viaHttp.status, `the HTTP lane grants the implicit owner: ${JSON.stringify(viaHttp.body)}`).toBe(201);
-    const anonTenant = viaHttp.body.tenantId as string;
+    const anonTenant = viaHttp.body.tenantId!;
     expect(anonTenant).toMatch(/^anon:/);
 
     const scope = await scopeFromRun(anon);
@@ -411,7 +428,11 @@ describe('ADR 0627 D3 — the personal-tenant owner keeps writing (implicit owne
     const owner = client();
     await signIn(owner, `crm-rbac-ws-owner-${n++}@acme.test`);
     const ws = await sharedWorkspace(owner);
-    const anonScope = await scopeFromRun(client());
+    // An anon SESSION, bootstrapped as the SPA does (`/users/me` still mints).
+    // ADR 0750 major-1 extension: a credential-less run create is now 401.
+    const anon = client();
+    await anon.get('/host/openwop-app/users/me');
+    const anonScope = await scopeFromRun(anon);
     expect(anonScope.personalTenant).toMatch(/^anon:/);
     const attempt = await createAgentToolProvider({ ...anonScope, tenantId: ws, runId: 'r-anon-on-ws' }).executeTool({ name: CRM_PERSIST_SEGMENT_TOOL_ID, input: { name: 'Anon on ws', filters: [] } });
     expect(JSON.parse(attempt.content).error).toBe('forbidden_scope');

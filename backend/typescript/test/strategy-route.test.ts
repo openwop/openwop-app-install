@@ -30,16 +30,16 @@ afterAll(async () => { await closeApp(); });
 const client = (): Client => makeClient(() => BASE);
 
 async function signup(c: Client, opts: { tenantId?: string } = {}): Promise<{ userId: string }> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail('strat'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
+  const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail('strat'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
 const enable = (status: 'on' | 'off'): Promise<void> => enableToggle('strategy', status);
 
-const S = '/v1/host/openwop-app/strategy';
-const mkOrg = (c: Client, name: string) => c.post('/v1/host/openwop-app/orgs', { name });
+const S = '/host/openwop-app/strategy';
+const mkOrg = (c: Client, name: string) => c.post('/host/openwop-app/orgs', { name });
 const addMember = (owner: Client, orgId: string, subject: string, roles: string[]) =>
-  owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject, roles });
+  owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject, roles });
 
 /** A tenant with an owner + one org. */
 async function ownerWithOrg(tenantId: string): Promise<{ owner: Client; userId: string; orgId: string }> {
@@ -174,8 +174,8 @@ describe('strategy — links + context projection', () => {
     const orgB = (await mkOrg(owner, 'Bravo')).body.orgId;
     await addMember(owner, orgA, memberUser.userId, ['editor']);
 
-    const projA = (await owner.post('/v1/host/openwop-app/projects', { orgId: orgA, name: 'Apollo' })).body;
-    const projB = (await owner.post('/v1/host/openwop-app/projects', { orgId: orgB, name: 'Borealis' })).body;
+    const projA = (await owner.post('/host/openwop-app/projects', { orgId: orgA, name: 'Apollo' })).body;
+    const projB = (await owner.post('/host/openwop-app/projects', { orgId: orgB, name: 'Borealis' })).body;
 
     // member creates a workspace-scoped strategy in org A (their editable org).
     const s = (await member.post(S, { orgId: orgA, title: 'Roadmap', scope: 'workspace' })).body;
@@ -204,7 +204,7 @@ describe('strategy — links + context projection', () => {
     const { owner, orgId } = await ownerWithOrg(freshTenant());
     await enableToggle('priority-matrix');
     // a priority list + an idea (kanban card) in the same org
-    const PM = '/v1/host/openwop-app/priority-matrix';
+    const PM = '/host/openwop-app/priority-matrix';
     const list = (await owner.post(`${PM}/lists`, { orgId, name: 'Bets', presetId: 'weighted' })).body;
     expect(list.id).toBeTruthy();
     await owner.post(`${PM}/lists/${encodeURIComponent(list.id)}/ideas`, { title: 'Expand to EU' });
@@ -238,8 +238,8 @@ describe('strategy — links + context projection', () => {
 
     // a PRIVATE project owned by the owner; a workspace-scoped strategy links it
     // (visibility is set via its own route — create defaults to 'org')
-    const proj = (await owner.post('/v1/host/openwop-app/projects', { orgId, name: 'Skunkworks' })).body;
-    expect((await owner.patch(`/v1/host/openwop-app/projects/${proj.id}/visibility`, { visibility: 'private' })).status).toBe(200);
+    const proj = (await owner.post('/host/openwop-app/projects', { orgId, name: 'Skunkworks' })).body;
+    expect((await owner.patch(`/host/openwop-app/projects/${proj.id}/visibility`, { visibility: 'private' })).status).toBe(200);
     const s = (await owner.post(S, { orgId, title: 'Bet', scope: 'workspace' })).body;
     expect((await owner.put(`${S}/${s.id}/links`, { links: [{ kind: 'project', projectId: proj.id }] })).status).toBe(200);
 
@@ -260,13 +260,13 @@ describe('strategy — GET /:id/context (strategy-gap A3)', () => {
   it('returns the resolved packet for ONE strategy — linked idea title/rank in one fetch', async () => {
     const { owner, orgId } = await ownerWithOrg(freshTenant());
     await enableToggle('priority-matrix');
-    const PM = '/v1/host/openwop-app/priority-matrix';
+    const PM = '/host/openwop-app/priority-matrix';
     const list = (await owner.post(`${PM}/lists`, { orgId, name: 'Bets', presetId: 'weighted' })).body;
     await owner.post(`${PM}/lists/${encodeURIComponent(list.id)}/ideas`, { title: 'Expand to EU' });
     const ranked = (await owner.get(`${PM}/lists/${encodeURIComponent(list.id)}/ideas`)).body.ideas;
     const cardId = ranked[0].card.id;
 
-    const proj = (await owner.post('/v1/host/openwop-app/projects', { orgId, name: 'Apollo' })).body;
+    const proj = (await owner.post('/host/openwop-app/projects', { orgId, name: 'Apollo' })).body;
     const s = (await owner.post(S, {
       orgId, title: 'Growth', scope: 'org',
       objectives: [{ title: 'Grow ARR', keyResults: [{ title: 'ARR 10M', target: '10M' }] }],

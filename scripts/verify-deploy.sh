@@ -29,6 +29,8 @@ BASE="${BASE:-https://app.openwop.dev}"
 # which is worse than not having one.
 CHECK_BACKEND=1; CHECK_FRONTEND=1
 AFTER_DEPLOY=0
+ALLOW_REGISTRY_FAILURES=0
+ALLOW_CHAIN_PACK_FAILURES=0
 EXPECTED=""
 for arg in "$@"; do
   case "$arg" in
@@ -38,6 +40,14 @@ for arg in "$@"; do
     # under which "zero builds in the window" is provably wrong rather than
     # merely uninformative — see the H92 note on the window arm.
     --after-deploy)  AFTER_DEPLOY=1 ;;
+    # NP-V2 P7 — a NAMED waiver for the one known window (a canon/chain publish
+    # still pending, ADR 0766/0767): the failures are printed and the line reads
+    # WAIVED, never OK. Without it a hotfix deploy in that window would fail verify
+    # every time, which trains people to ignore a red verify.
+    --allow-registry-failures) ALLOW_REGISTRY_FAILURES=1 ;;
+    # grade-code C-1 — the same named-waiver discipline for chain packs the
+    # loader REFUSED (each is a template missing from the gallery).
+    --allow-chain-pack-failures) ALLOW_CHAIN_PACK_FAILURES=1 ;;
     -h|--help) sed -n '2,30p' "$0" | sed 's/^#[[:space:]]\{0,1\}//'; exit 0 ;;
     -*) echo "verify-deploy: unknown option: $arg" >&2; exit 2 ;;
     *) EXPECTED="$arg" ;;
@@ -95,6 +105,55 @@ else
     echo "  backend   MISMATCH $(short "$be_commit")  ← someone else's deploy is live"
     fail=1
   fi
+  # NP-V2 P7 — boot-time registry installs that FAILED on this revision. Survivable
+  # by design (the vendored copy serves), which is why 16 refusals went unseen for
+  # eight days behind a warn line. Absent = a backend that predates the report;
+  # said so, never read as "none failed".
+  reg=$(BODY="$be_body" node -e '
+    let b; try { b = JSON.parse(process.env.BODY); } catch { process.stdout.write("unparseable"); process.exit(0); }
+    const r = b && b.checks && b.checks.registryPacks;
+    if (!r) { process.stdout.write("absent"); process.exit(0); }
+    // Fail CLOSED on a malformed or inconsistent report (review): a non-array
+    // `failed`, or counts that do not add up, is not evidence of "none failed".
+    if (!Array.isArray(r.failed) || typeof r.installed !== "number" || typeof r.attempted !== "number") { process.stdout.write("unparseable"); process.exit(0); }
+    const f = r.failed;
+    if (r.installed + f.length !== r.attempted) { process.stdout.write(`inconsistent installed=${r.installed} failed=${f.length} attempted=${r.attempted}`); process.exit(0); }
+    process.stdout.write(f.length === 0 ? `ok ${r.installed}/${r.attempted}` : `failed ${f.map((x) => `${x.name}@${x.version}[${x.code || "unknown"}${x.lane === "feature" ? ",feature" : ""}]`).join(" ")}`);
+  ' 2>/dev/null)
+  case "$reg" in
+    ok*)     echo "  registry  OK       ${reg#ok } registry pack(s) installed at boot" ;;
+    absent)  echo "  registry  NOT REPORTED — backend predates the NP-V2 P7 readiness report" ;;
+    failed*)
+      if [ "$ALLOW_REGISTRY_FAILURES" -eq 1 ]; then
+        echo "  registry  WAIVED   ${reg#failed } — --allow-registry-failures (publish + re-pin, then re-verify without it)"
+      else
+        echo "  registry  FAILED   ${reg#failed } — see the boot log (registry pack install failed); a known publish window: --allow-registry-failures"; fail=1
+      fi ;;
+    inconsistent*) echo "  registry  INCONSISTENT ${reg#inconsistent } — the report does not add up"; fail=1 ;;
+    *)       echo "  registry  UNREADABLE — /api/readiness registryPacks did not parse"; fail=1 ;;
+  esac
+  # grade-code C-1 — chain packs the boot load REFUSED (workflow_chain_unpinned,
+  # workflow_chain_pin_invalid, a schema failure): readiness stays 200 while a
+  # template silently leaves the gallery — the registry-refusal class one layer
+  # down. Absent = a backend that predates the report; said so, never "none".
+  cp_rep=$(BODY="$be_body" node -e '
+    let b; try { b = JSON.parse(process.env.BODY); } catch { process.stdout.write("unparseable"); process.exit(0); }
+    const r = b && b.checks && b.checks.chainPacks;
+    if (!r) { process.stdout.write("absent"); process.exit(0); }
+    if (!Array.isArray(r.refused) || typeof r.loaded !== "number") { process.stdout.write("unparseable"); process.exit(0); }
+    process.stdout.write(r.refused.length === 0 ? `ok ${r.loaded}` : `refused ${r.refused.map((x) => `${x.pack}(${x.code})`).join(" ")}`);
+  ' 2>/dev/null)
+  case "$cp_rep" in
+    ok*)      echo "  chains    OK       ${cp_rep#ok } chain pack(s) loaded, none refused" ;;
+    absent)   echo "  chains    NOT REPORTED — backend predates the chain-pack readiness report" ;;
+    refused*)
+      if [ "$ALLOW_CHAIN_PACK_FAILURES" -eq 1 ]; then
+        echo "  chains    WAIVED   ${cp_rep#refused } — --allow-chain-pack-failures"
+      else
+        echo "  chains    REFUSED  ${cp_rep#refused } — the loader refused these packs (see workflow_chain_pack_rejected); a known window: --allow-chain-pack-failures"; fail=1
+      fi ;;
+    *)        echo "  chains    UNREADABLE — /api/readiness chainPacks did not parse"; fail=1 ;;
+  esac
 fi
 fi
 
@@ -122,6 +181,65 @@ else
     fail=1
   fi
 fi
+fi
+
+# ── which evidence mode the LIVE service is in (WHD-18 / ADR 0735) ─────────
+# WHY. The wire-claims arm below checks the certification evidence one of two
+# ways, chosen by OPENWOP_CERT_BUNDLE_ORIGIN: set ⇒ ORIGIN mode (the signed
+# post-deploy bundle bound to THIS commit; PENDING until publish-evidence.sh
+# runs), unset ⇒ IMAGE mode (the in-image pointer). That variable used to come
+# only from the operator's scripts/deploy.env. The service is the authority:
+# openwop-app-backend carries OPENWOP_CERT_BUNDLE_ORIGIN, and in that mode the
+# host deliberately withholds the in-image pointer. MEASURED 2026-09-27/28:
+# three production deploys from a deploy.env without the line each reported
+# "certificationBundleUrl MISSING" and "claims document STALE" — image-mode
+# expectations applied to an origin-mode host. That is a false red on every deploy,
+# and a standalone run could never check the evidence at all.
+#
+# So the mode is READ FROM THE DEPLOYED SERVICE when gcloud and the deploy scope
+# are available. When deploy.env also sets it and the two DISAGREE, that is a
+# failure: the checker would be verifying against a source the host does not
+# use. When the service cannot be asked, the local value (if any) is used and the
+# line says so. It is never a silent default.
+if [ "$CHECK_BACKEND" -eq 1 ]; then
+  ev_local="${OPENWOP_CERT_BUNDLE_ORIGIN:-}"
+  ev_service="${OPENWOP_DEPLOY_SERVICE:-openwop-app-backend}"
+  GC_ID=()
+  [ -n "${OPENWOP_DEPLOY_ACCOUNT:-}" ] && GC_ID=(--account "$OPENWOP_DEPLOY_ACCOUNT")
+  if ! command -v gcloud >/dev/null 2>&1 || [ -z "${OPENWOP_DEPLOY_PROJECT:-}" ] || [ -z "${OPENWOP_DEPLOY_REGION:-}" ]; then
+    echo "  evidence mode ${ev_local:+origin ($ev_local, from deploy.env — the service was not asked: gcloud or OPENWOP_DEPLOY_PROJECT/REGION unavailable)}${ev_local:-image (OPENWOP_CERT_BUNDLE_ORIGIN unset locally; the service was not asked: gcloud or OPENWOP_DEPLOY_PROJECT/REGION unavailable)}"
+  else
+    ev_err=$(mktemp)
+    ev_json=$(gcloud run services describe "$ev_service" --project "$OPENWOP_DEPLOY_PROJECT" --region "$OPENWOP_DEPLOY_REGION" \
+                ${GC_ID[@]+"${GC_ID[@]}"} --format=json 2>"$ev_err")
+    ev_rc=$?
+    # The variable's value, or empty when the service does not carry it; exit 3
+    # when the description is not the JSON a service describe returns.
+    [ "$ev_rc" -eq 0 ] && { ev_live=$(node -e '
+      let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
+        try {
+          const env = JSON.parse(s).spec.template.spec.containers[0].env ?? [];
+          const e = env.find((x) => x.name === "OPENWOP_CERT_BUNDLE_ORIGIN");
+          process.stdout.write((e && e.value) || "");
+        } catch { process.exit(3); }
+      });' <<<"$ev_json"); ev_rc=$?; }
+    if [ "$ev_rc" -ne 0 ]; then
+      echo "  evidence mode UNREADABLE — could not describe $ev_service: $(head -c 200 "$ev_err" | tr '\n' ' ')"
+      [ -n "$ev_local" ] && echo "                using deploy.env's origin ($ev_local)"
+    elif [ -n "$ev_local" ] && [ -n "$ev_live" ] && [ "$ev_local" != "$ev_live" ]; then
+      echo "  evidence mode MISMATCH — deploy.env says $ev_local, the live service says $ev_live"
+      fail=1
+    elif [ -n "$ev_local" ] && [ -z "$ev_live" ]; then
+      echo "  evidence mode MISMATCH — deploy.env sets an origin ($ev_local), the live service carries none (image mode)"
+      fail=1
+    elif [ -n "$ev_live" ]; then
+      echo "  evidence mode origin ($ev_live, read from the live service)"
+      export OPENWOP_CERT_BUNDLE_ORIGIN="$ev_live"
+    else
+      echo "  evidence mode image (the live service carries no OPENWOP_CERT_BUNDLE_ORIGIN)"
+    fi
+    rm -f "$ev_err"
+  fi
 fi
 
 # ── wire claims ────────────────────────────────────────────────────────────
@@ -225,8 +343,8 @@ if [ "$CHECK_FRONTEND" -eq 1 ] && [ "$fail" -eq 0 ]; then
     echo "             Anonymous visitors get text/html where a module is expected and the"
     echo "             SPA never boots. This does NOT self-heal (the TTL is a floor, not a"
     echo "             ceiling — measured 16+ min stale with nothing in the logs). Force new"
-    echo "             instances: gcloud run services update <svc> --update-env-vars"
-    echo "             OPENWOP_SPA_SHELL_TTL_S=60 --region <r> --project <p>"
+    echo "             instances: scripts/update-env.sh OPENWOP_RESTART_NONCE=\$(date +%s)"
+    echo "             (a bare services update strands at 0% traffic — CE-16)"
     fail=1
   fi
 fi
@@ -354,6 +472,81 @@ if [ "$CHECK_BACKEND" -eq 1 ]; then
   fi
 fi
 
+# ── superseded revisions still firing scheduled jobs (WHD-28, CE-16) ─────────
+# WHY. With CPU always allocated (ADR 0741) a superseded revision's instance
+# keeps running every background loop after its traffic moves — including the
+# schedule daemon. MEASURED three times on 2026-09-29/30: the previous release
+# fired scheduled jobs with OLD code for hours after a verified deploy, and the
+# commit checks above cannot see it (they ask the SERVING revision). It was
+# found each time by hand, by grouping `schedule fired` logs by revision.
+#
+# Right after a deploy the previous revision is still alive by construction, so
+# a stale fire inside the window is EXPECTED there: it prints the exact delete
+# commands as an ACTION rather than failing every deploy. Run standalone, any
+# non-serving revision that fired in the window FAILS.
+#
+# Never an inert green: a failed log query is UNMEASURED and an empty one is NOT
+# CORROBORATED — neither says OK. STALE_REV_WINDOW_MIN=0 skips it, explicitly.
+STALE_REV_WINDOW_MIN="${STALE_REV_WINDOW_MIN:-60}"
+if [ "$CHECK_BACKEND" -eq 1 ]; then
+  sr_service="${OPENWOP_DEPLOY_SERVICE:-openwop-app-backend}"
+  GC_ID=()
+  [ -n "${OPENWOP_DEPLOY_ACCOUNT:-}" ] && GC_ID=(--account "$OPENWOP_DEPLOY_ACCOUNT")
+  if ! command -v gcloud >/dev/null 2>&1; then
+    echo "  stale revs  SKIPPED  (gcloud not on PATH)"
+  elif [ -z "${OPENWOP_DEPLOY_PROJECT:-}" ] || [ -z "${OPENWOP_DEPLOY_REGION:-}" ]; then
+    echo "  stale revs  SKIPPED  (OPENWOP_DEPLOY_PROJECT / OPENWOP_DEPLOY_REGION unset — source scripts/deploy.env)"
+  elif ! [ "$STALE_REV_WINDOW_MIN" -gt 0 ] 2>/dev/null; then
+    echo "  stale revs  SKIPPED  (STALE_REV_WINDOW_MIN=$STALE_REV_WINDOW_MIN)"
+  else
+    sr_err=$(mktemp)
+    sr_json=$(gcloud run services describe "$sr_service" --project "$OPENWOP_DEPLOY_PROJECT" --region "$OPENWOP_DEPLOY_REGION" \
+                ${GC_ID[@]+"${GC_ID[@]}"} --format=json 2>"$sr_err")
+    # The revisions that actually take traffic (status, percent > 0) — SPEC can
+    # name a revision that never became ready (the 2026-09-30 v22 rollout).
+    sr_serving=$(printf '%s' "$sr_json" | node -e '
+      let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
+        try {
+          const t = (JSON.parse(s).status || {}).traffic || [];
+          process.stdout.write(t.filter((x) => (x.percent || 0) > 0 && x.revisionName).map((x) => x.revisionName).join("\n"));
+        } catch { process.exit(3); }
+      });' 2>/dev/null)
+    if [ -z "$sr_serving" ]; then
+      echo "  stale revs  UNMEASURED — could not read the serving revision of $sr_service"
+    else
+      sr_fired=$(gcloud logging read "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"$sr_service\" AND jsonPayload.msg=\"schedule fired\"" \
+                   --project "$OPENWOP_DEPLOY_PROJECT" ${GC_ID[@]+"${GC_ID[@]}"} --freshness="${STALE_REV_WINDOW_MIN}m" --limit 2000 \
+                   --format='value(resource.labels.revision_name)' 2>"$sr_err")
+      sr_rc=$?
+      if [ "$sr_rc" -ne 0 ]; then
+        echo "  stale revs  UNMEASURED — 'gcloud logging read' failed (rc=$sr_rc); stale revisions were NOT checked:"
+        sed 's/^/                /' "$sr_err" | head -3
+      elif [ -z "$(printf '%s' "$sr_fired" | tr -d '[:space:]')" ]; then
+        echo "  stale revs  NOT CORROBORATED — no scheduled job fired in the last ${STALE_REV_WINDOW_MIN}m; nothing to attribute"
+      else
+        sr_stale=$(printf '%s\n' "$sr_fired" | grep -v '^[[:space:]]*$' | grep -vxF -f <(printf '%s\n' "$sr_serving") | sort | uniq -c)
+        if [ -z "$sr_stale" ]; then
+          echo "  stale revs  OK       every scheduled job in the last ${STALE_REV_WINDOW_MIN}m fired from the serving revision"
+        else
+          if [ "$AFTER_DEPLOY" -eq 1 ]; then
+            echo "  stale revs  ACTION — superseded revision(s) fired scheduled jobs in the last ${STALE_REV_WINDOW_MIN}m"
+            echo "              (expected right after a deploy: the old instance outlives its traffic, WHD-28)."
+            echo "              Delete them NOW, or they keep running scheduled jobs with OLD code:"
+          else
+            echo "  stale revs  FAILED — a NON-serving revision fired scheduled jobs in the last ${STALE_REV_WINDOW_MIN}m,"
+            echo "              i.e. old code is running scheduled work (WHD-28). Delete it:"
+            fail=1
+          fi
+          printf '%s\n' "$sr_stale" | while read -r n rev; do
+            echo "                $rev fired $n job(s):  gcloud run revisions delete $rev --region $OPENWOP_DEPLOY_REGION --project $OPENWOP_DEPLOY_PROJECT --quiet"
+          done
+        fi
+      fi
+    fi
+    rm -f "$sr_err"
+  fi
+fi
+
 if [ "$CHECK_BACKEND" -eq 1 ] && [ "$CHECK_FRONTEND" -eq 1 ]; then
   # ── ADR 0631 — the ORIGIN must serve the major-2 path space, not the SPA shell ──
   # MEASURED 2026-09-05: 14/15 manifest roots answered 200 text/html at the origin
@@ -372,6 +565,22 @@ if [ "$CHECK_BACKEND" -eq 1 ] && [ "$CHECK_FRONTEND" -eq 1 ]; then
   fi
   SHELL_CT=$(curl -sS -o /dev/null -w '%{content_type}' -A 'Mozilla/5.0' -H 'Accept: text/html,*/*;q=0.8' "$ORIGIN_ROOT?cb=$(date +%s%N)")
   if grep -q 'text/html' <<<"$SHELL_CT"; then echo "  spa root   OK       headerless browser navigation to /runs/<id> → $SHELL_CT"; else echo "  spa root   FAIL     headerless browser navigation to /runs/<id> → '$SHELL_CT' (expected text/html — the SPA page is unreachable; ADR 0631)"; fail=1; fi
+
+  # ── ADR 0840 D3 — a plugin frame keeps ITS policy through Firebase ──
+  # Hosting applies the app's own CSP to every non-static path. Whether the plugin
+  # rule wins, and whether the CDN replaces the origin header or adds a second one,
+  # is only visible here. Read EVERY CSP line the browser would get: at least one must
+  # carry `sandbox allow-scripts` and `default-src 'none'`, and none may admit
+  # `allow-same-origin`. Two lines are fine (a browser enforces both). The isolation
+  # probe is the path an anonymous visitor can load; it goes out through the same
+  # header builder and the same rule shape as a plugin frame.
+  PROBE_HDRS=$(curl -sS -o /dev/null -D - -A 'Mozilla/5.0' -H 'Accept: text/html' "$BASE/api/host/openwop-app/ui-plugin/isolation-probe?cb=$(date +%s%N)" | tr -d '\r' | grep -i '^content-security-policy:' || true)
+  PROBE_N=$(printf '%s' "$PROBE_HDRS" | grep -c . || true)
+  if [ "$PROBE_N" -ge 1 ] && grep -qi "sandbox allow-scripts" <<<"$PROBE_HDRS" && grep -qi "default-src 'none'" <<<"$PROBE_HDRS" && ! grep -qi "allow-same-origin" <<<"$PROBE_HDRS"; then
+    echo "  plugin csp OK       isolation probe carries the frame policy ($PROBE_N CSP header line(s); ADR 0840)"
+  else
+    echo "  plugin csp FAIL     isolation probe CSP through $BASE: $(printf '%s' "$PROBE_HDRS" | head -c 300) (expected sandbox allow-scripts + default-src 'none'; Firebase may be replacing the plugin policy — ADR 0840 D3)"; fail=1
+  fi
 fi
 
 if [ "$fail" -ne 0 ]; then

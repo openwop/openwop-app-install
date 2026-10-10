@@ -5,6 +5,10 @@
  * `mediaService.assets`) to `media:bytes`. Existing rows under the legacy `media:asset`
  * prefix are read-fallback'd AND migrated-on-read by `resolveMediaAsset` (zero-downtime,
  * self-healing) — no big-bang migration that could orphan a served URL.
+ *
+ * Reds if: new bytes land under the legacy prefix; the legacy read fallback or
+ * migrate-on-read is dropped; an expired legacy row is not purged; delete stops
+ * checking the legacy location or the owning tenant.
  */
 
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -49,6 +53,7 @@ describe('ADR 0083 #2 — byte-store rename + legacy migration', () => {
     const token = 'leg3';
     await legacy().put({ token, tenantId: 'tA', contentBase64: 'DDDD', contentType: 'image/png', bytes: 3, expiresAtMs: future() });
     expect(await deleteMediaAsset('tOther', token)).toBe(false);
+    expect(await legacy().get(token), 'the owner\'s row survives the refused delete').not.toBeNull();
   });
 
   it('an EXPIRED legacy row returns null and is purged from both locations (not migrated)', async () => {
@@ -56,6 +61,9 @@ describe('ADR 0083 #2 — byte-store rename + legacy migration', () => {
     await legacy().put({ token, tenantId: 'tA', contentBase64: 'EEEE', contentType: 'image/png', bytes: 3, expiresAtMs: Date.now() - 1000 });
     expect(await resolveMediaAsset(token)).toBeNull();
     expect(await legacy().get(token)).toBeNull();   // purged from legacy
+    // Ceiling: the expiry purge deletes from BOTH stores, so this end-state cannot
+    // tell "never migrated" from "migrated then purged" (probe
+    // w5g1-mig-expired-not-migrated stayed green). It still pins the end state.
     expect(await bytesNew().get(token)).toBeNull();  // never migrated an expired row
   });
 });

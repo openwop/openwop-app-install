@@ -25,7 +25,11 @@ export interface Contact {
   leadSource?: string;
   phone?: string;
   /** Denormalized last-triage stamp (B3a) — the run is the provenance SSoT. */
-  lastTriage?: { variant: string | null; runId: string; at: string };
+  lastTriage?: {
+    variant: string | null; runId: string; at: string;
+    /** ADR 0837 D7 — set once THAT run scored the contact. */
+    score?: number; priority?: 'low' | 'normal' | 'high'; recordedAt?: string;
+  };
   /** Tenant-scoped custom fields (ADR 0213 §2). Defined on `/crm/fields`
    *  (`ContactFieldsPage`) and set from the contact form + the per-contact
    *  "Edit fields" modal; segments can filter on `customFields.<key>`.
@@ -157,6 +161,12 @@ export async function deleteContactField(defId: string): Promise<void> {
 export async function deleteContact(contactId: string): Promise<void> {
   const res = await fetch(`${base}/contacts/${encodeURIComponent(contactId)}`, fetchOpts({ method: 'DELETE', headers: authedHeaders() }));
   if (!res.ok && res.status !== 204) throw new CrmRequestError(`deleteContact returned ${res.status}`, res.status);
+}
+
+/** ADR 0837 CRM2UX-3 — a CRM-stamped run's status (the triage follow-up poll). */
+export async function getCrmRunStatus(runId: string): Promise<{ runId: string; status: string }> {
+  const res = await fetch(`${base}/runs/${encodeURIComponent(runId)}`, fetchOpts({ headers: authedHeaders() }));
+  return asJson<{ runId: string; status: string }>(res, 'getCrmRunStatus');
 }
 
 export async function triageContact(contactId: string): Promise<TriageResult> {

@@ -36,11 +36,11 @@ const SEAM_ALIASES: ReadonlyArray<readonly [RegExp, string]> = [
   // address: its body is `{runId, envelope}` where v1's is `{runId, surface}`,
   // and it admits through the major-2 catalog. So this ONE path is routed to its
   // own handler, ahead of the generic `sample/` rule that would otherwise land it
-  // on the v1 seam. Still under `/v1/host/sample/`, so `guardSeam` applies.
-  [/^\/conformance\/seams\/sample\/a2ui\/emit-surface(?=$|\?)/, '/v1/host/sample/a2ui/v2/emit-surface'],
-  [/^\/conformance\/seams\/sample\//, '/v1/host/sample/'],
-  [/^\/conformance\/seams\/workspace\/files/, '/v1/host/workspace/files'],
-  [/^\/conformance\/seams\/packs-test\//, '/v1/packs-test/'],
+  // on the v1 seam. Still under `/host/sample/`, so `guardSeam` applies.
+  [/^\/conformance\/seams\/sample\/a2ui\/emit-surface(?=$|\?)/, '/host/sample/a2ui/v2/emit-surface'],
+  [/^\/conformance\/seams\/sample\//, '/host/sample/'],
+  [/^\/conformance\/seams\/workspace\/files/, '/host/workspace/files'],
+  [/^\/conformance\/seams\/packs-test\//, '/packs-test/'],
 ];
 
 /** `api/seams-v2.yaml`, one entry per operation, with the v1 address it reaches.
@@ -85,6 +85,13 @@ export const SEAM_OPERATIONS: readonly SeamOperation[] = [
   // service by deliberate choice — these seams plant runs, so they must not be
   // reachable there. What remains is a certify-run DEPLOY decision, not code.
   { operationId: 'seedEra2EventLog', method: 'post', v2Path: '/conformance/seams/sample/event-log/seed', served: true, floor: true },
+  // Suite 2.42.6 (RFC 0176 §A writer-rule witness). Not a floor seam, so the
+  // profile advert does not depend on it. The handler hands the v2-named event
+  // to the SAME `eventEraAdapter` writer the executor uses (eventLogSeedSeam.ts).
+  // Suite 2.42.8 (RFC 0033 §C budget witness; OPTIONAL, not floor). Not served:
+  // the suite records an unserved optional seam as inapplicable, never blocked.
+  { operationId: 'getMockDispatchBudgets', method: 'get', v2Path: '/conformance/seams/sample/test/mock-ai/dispatch-budgets', served: false, floor: false },
+  { operationId: 'appendEra2Event', method: 'post', v2Path: '/conformance/seams/sample/event-log/append', served: true, floor: false },
   { operationId: 'fireEffectSeam', method: 'post', v2Path: '/conformance/seams/sample/effect-seams/fire', served: true, floor: true },
   { operationId: 'forceEffectTransportRetry', method: 'post', v2Path: '/conformance/seams/sample/test/idempotency/effect-retry', served: true, floor: true },
   { operationId: 'receiveWebhookDelivery', method: 'post', v2Path: '/conformance/seams/sample/webhooks/receive', served: true, floor: true },
@@ -119,6 +126,34 @@ export const SEAM_OPERATIONS: readonly SeamOperation[] = [
   // OPTS OUT of `openwop-context-budget`, so there is no accounting to expose;
   // declared unserved (404) so its scenarios record inapplicable, not a guess.
   { operationId: 'getTranscriptWindow', method: 'get', v2Path: '/conformance/seams/sample/agent/transcript-window', served: false, floor: false },
+  // Suite 2.43.1 (RFC 0201 §E.20). OPTIONAL: it shortens a webhook secret's
+  // rotation overlap so `v2-webhook-secret-rotation` need not wait out the whole
+  // advertised overlap. Unserved here, so that leg is a PARTIAL witness, never
+  // `blocked` (per the yaml). Serving it means writing the same stored expiry
+  // `rotateWebhookSecret` writes, a signer-side change that is out of scope for
+  // the pin bump.
+  { operationId: 'shortenRotationOverlap', method: 'post', v2Path: '/conformance/seams/sample/webhooks/rotation-overlap', served: false, floor: false },
+  // RFC 0236 §F / RFC 0110 — declared by the pinned yaml (2.45.21), NOT served: this
+  // host does not advertise `channelPresence` at major 2, so its scenario records
+  // inapplicable. Listed so the manifest↔yaml parity holds; the alias answers 404.
+  { operationId: 'snapshotChannelPresence', method: 'post', v2Path: '/conformance/seams/sample/channel-presence/snapshot', served: false, floor: false },
+  // Suite 2.45.20 (RFC 0236 §G; ADR 0825). Served by `routes/hostEventEmitSeam.ts`
+  // through the production host-event fan-out. Not floor: its scenario records
+  // `inapplicable` when `hostEvents` is not advertised (OPENWOP_HOST_EVENTS_V2 off).
+  { operationId: 'emitHostEvent', method: 'post', v2Path: '/conformance/seams/sample/host-events/emit', served: true, floor: false },
+  // Suite 2.45.23 (RFC 0237 purpose propagation over A2A) — declared, NOT served:
+  // this host does not advertise `purposePropagation`, so its scenario records
+  // inapplicable. Listed so the manifest↔yaml parity holds; the alias answers 404
+  // ("an unwired seam answers 404/405") rather than routing onto a v1 tail.
+  //
+  // SERVED since ADR 0858 P4. The v1 tail it routes onto (`routes/agents.ts`
+  // `a2aInvokeSeam`) IS this operation — the §22 driver of the production A2A
+  // client — and it names the run that recorded `negotiation.decided`, which the
+  // a2a negotiation scenarios read. Every scenario that drives it gates on the
+  // `a2a` advert first, so while `V2_PROJECT_A2A` is off they stay inapplicable.
+  // `permittedPurposes` is ignored: `purposePropagation` is not advertised, so
+  // its scenario stays inapplicable on the advert, not on a 404.
+  { operationId: 'invokeA2aPeer', method: 'post', v2Path: '/conformance/seams/sample/a2a/invoke', served: true, floor: false },
 ];
 
 /** `served: false` operations with their path compiled once — the alias runs on

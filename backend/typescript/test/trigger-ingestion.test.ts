@@ -30,7 +30,11 @@ import {
 } from '../src/host/hostExtPersistence.js';
 import {
   __resetTriggerBridgeStore,
+  bindDeadLetterAttemptEvent,
+  deliver,
+  listDeadLetters,
   listDeliveries,
+  makeDedupKey,
   registerSubscription,
 } from '../src/host/triggerBridgeService.js';
 import {
@@ -61,7 +65,7 @@ describe('trigger ingestion service (RFC 0099 §F, sqlite memory)', () => {
   beforeEach(async () => {
     initHostExtPersistence(storage);
     await __resetTriggerBridgeStore();
-    __resetIngestSecrets();
+    await __resetIngestSecrets();
   });
 
   async function regExternal(source: 'webhook' | 'email' | 'form', mode: 'required' | 'none' = 'none') {
@@ -182,6 +186,28 @@ describe('trigger ingestion service (RFC 0099 §F, sqlite memory)', () => {
     expect(result.outcome).toBe('rejected');
     expect(result.reason).toBe('signature-invalid');
     expect(result.runId).toBeUndefined();
+    // RFC 0232 §C.3 / ADR 0805 — the refusal is recorded in the subscription's
+    // dead-letter sink under the opaque key a delivery would carry, never the
+    // inbound id in cleartext, and with no state change.
+    const { records } = await listDeadLetters(subscriptionId, { limit: 10 });
+    expect(records).toHaveLength(1);
+    expect(records[0]!.reason).toBe('verification_failed');
+    expect(records[0]!.stateChange).toBeUndefined();
+    expect(records[0]!.attempt).toEqual({ subscriptionId, dedupKey: makeDedupKey(subscriptionId, 'bad-sig-1'), attempt: 1, outcome: 'dead-lettered' });
+    expect(JSON.stringify(records)).not.toContain('bad-sig-1');
+  });
+
+  it('RFC 0232 §C.2 — a seam that also appends the dead-lettered event binds the record to that event id', async () => {
+    const subscriptionId = `tgsub-dl-${Math.random().toString(16).slice(2)}`;
+    await registerSubscription({ subscriptionId, tenantId: 't1', source: 'queue', workflowId: WF, retryPolicy: { maxAttempts: 1, backoff: 'none' } });
+    const r = await deliver({ subscriptionId, dedupKey: 'k-1', fire: async () => { throw new Error('forced'); } });
+    expect(r.outcome).toBe('dead-lettered');
+    const before = (await listDeadLetters(subscriptionId, { limit: 10 })).records;
+    expect(before).toHaveLength(1);
+    expect(await bindDeadLetterAttemptEvent(subscriptionId, r.deliveryId, 'evt-from-the-seam')).toBe(true);
+    const after = (await listDeadLetters(subscriptionId, { limit: 10 })).records;
+    expect(after.map((x) => x.attemptEventId)).toEqual(['evt-from-the-seam']);
+    expect(await bindDeadLetterAttemptEvent(subscriptionId, 'dlv-nope', 'x'), 'no record, no bind').toBe(false);
   });
 
   it('email verification required + DMARC fail → no run', async () => {
@@ -285,7 +311,7 @@ describe('trigger ingestion HTTP surface (RFC 0099 §F.2/§F.3)', () => {
 
   it('POST /v1/trigger-subscriptions registers a webhook source + returns a binding with the signing secret once', async () => {
     const reg = await jf<{ subscription: { subscriptionId: string; source: string; secretFingerprint?: string }; binding: { ingestUrl: string; signingSecret?: string; secretFingerprint?: string } }>(
-      '/v1/trigger-subscriptions',
+      '/trigger-subscriptions',
       { method: 'POST', body: JSON.stringify({ source: 'webhook', workflowId: WF }) },
     );
     expect(reg.status).toBe(201);
@@ -295,23 +321,23 @@ describe('trigger ingestion HTTP surface (RFC 0099 §F.2/§F.3)', () => {
     expect(regBody.binding.secretFingerprint).toBe(regBody.subscription.secretFingerprint);
 
     // Re-read NEVER returns the cleartext secret (fingerprint only).
-    const readBody = bodyOf(await jf<{ subscription: Record<string, unknown> }>(`/v1/trigger-subscriptions/${regBody.subscription.subscriptionId}`));
+    const readBody = bodyOf(await jf<{ subscription: Record<string, unknown> }>(`/trigger-subscriptions/${regBody.subscription.subscriptionId}`));
     expect(JSON.stringify(readBody.subscription)).not.toContain(regBody.binding.signingSecret);
     expect(readBody.subscription.secretFingerprint).toBe(regBody.subscription.secretFingerprint);
   });
 
   it('POST /v1/trigger-subscriptions rejects a non-resolvable workflow (RFC 0049 bind check)', async () => {
-    const reg = await jf('/v1/trigger-subscriptions', { method: 'POST', body: JSON.stringify({ source: 'email', workflowId: 'no.such.workflow' }) });
+    const reg = await jf('/trigger-subscriptions', { method: 'POST', body: JSON.stringify({ source: 'email', workflowId: 'no.such.workflow' }) });
     expect(reg.status).toBe(404);
   });
 
   it('an inbound delivery on a form subscription starts a run end-to-end', async () => {
-    const reg = bodyOf(await jf<{ subscription: { subscriptionId: string } }>('/v1/trigger-subscriptions', {
+    const reg = bodyOf(await jf<{ subscription: { subscriptionId: string } }>('/trigger-subscriptions', {
       method: 'POST',
       body: JSON.stringify({ source: 'form', workflowId: WF, verification: { mode: 'none' } }),
     }));
     const subId = reg.subscription.subscriptionId;
-    const ingest = await jf<{ outcome: string; runId?: string }>(`/v1/trigger-subscriptions/${subId}/ingest`, {
+    const ingest = await jf<{ outcome: string; runId?: string }>(`/trigger-subscriptions/${subId}/ingest`, {
       method: 'POST',
       body: JSON.stringify({ fields: { q: 'hi' }, submissionId: 's-http-1' }),
     });

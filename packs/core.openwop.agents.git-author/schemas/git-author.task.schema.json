@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/core.openwop.agents.git-author/1.0.0/git-author.task.schema.json",
+  "$id": "https://packs.openwop.dev/core.openwop.agents.git-author/1.0.2/git-author.task.schema.json",
   "title": "GitAuthorTask",
   "type": "object",
   "required": [

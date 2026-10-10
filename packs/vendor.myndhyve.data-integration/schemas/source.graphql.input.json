@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.data-integration/1.0.0/source.graphql.input.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.data-integration/1.0.2/source.graphql.input.json",
   "title": "DataSourceGraphQLInput",
   "type": "object",
   "properties": {

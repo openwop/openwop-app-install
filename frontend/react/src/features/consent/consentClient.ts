@@ -22,6 +22,24 @@ export interface ConsentRecord {
   legalBasis?: string;
   purposes?: string[];
   ts: string;
+  /** ADR 0849 D3 — the record's own consent log, newest first (`history[0]` is the
+   *  current state). ABSENT on rows written before ADR 0849: the UI then says
+   *  "current state only" and never invents a trail. Present on lookups only. */
+  history?: ConsentChange[];
+  /** How many entries the server's bound dropped between the pinned origin and the rest. */
+  historyDropped?: number;
+}
+
+/** ADR 0849 D3 — one written consent state. */
+export interface ConsentChange {
+  ts: string;
+  source: string;
+  categories: ConsentRecord['categories'];
+  region?: string;
+  legalBasis?: string;
+  purposes?: string[];
+  /** The state a pre-ADR-0849 row carried when its log began — not the first-ever consent. */
+  legacy?: true;
 }
 
 const root = `${config.baseUrl}/host/openwop-app`;
@@ -99,14 +117,26 @@ export async function setPolicy(orgId: string, input: { regulatedRegions: string
   return (await asJson<{ policy: ConsentPolicy }>(res, 'setPolicy')).policy;
 }
 
+/** ADR 0849 D1 / architect B1 — what the console may offer this caller. Served on the
+ *  un-toggle-gated data-subject lane, so it answers while the consent toggle is OFF. */
+export async function getAccess(orgId: string): Promise<{ canManage: boolean }> {
+  const res = await fetch(`${base(orgId)}/access`, fetchOpts({ headers: authedHeaders() }));
+  return asJson<{ canManage: boolean }>(res, 'getAccess');
+}
+
 export async function listRecords(orgId: string): Promise<ConsentRecord[]> {
   const res = await fetch(`${base(orgId)}/records`, fetchOpts({ headers: authedHeaders() }));
   return (await asJson<{ records: ConsentRecord[] }>(res, 'listRecords')).records;
 }
 
-export async function getSubject(orgId: string, subjectKey: string): Promise<ConsentRecord | null> {
+/** ADR 0849 D3 — a lookup reports ERASURE: `record: null` alone read the same as
+ *  "never recorded". Erased wins (the server returns `record: null` when erased). */
+export interface SubjectLookup { record: ConsentRecord | null; erased: boolean; erasedAt?: string }
+
+export async function getSubject(orgId: string, subjectKey: string): Promise<SubjectLookup> {
   const res = await fetch(`${base(orgId)}/subjects/${encodeURIComponent(subjectKey)}`, fetchOpts({ headers: authedHeaders() }));
-  return (await asJson<{ record: ConsentRecord | null }>(res, 'getSubject')).record;
+  const body = await asJson<{ record: ConsentRecord | null; erased?: boolean; erasedAt?: string }>(res, 'getSubject');
+  return { record: body.record, erased: body.erased === true, ...(body.erasedAt ? { erasedAt: body.erasedAt } : {}) };
 }
 
 /**

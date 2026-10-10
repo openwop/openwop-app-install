@@ -26,6 +26,7 @@ import { confirm } from '../../ui/confirm.js';
 import { Notice } from '../../ui/Notice.js';
 import { TextField } from '../../ui/Field.js';
 import { loadErrorMessage } from '../../client/loadErrorMessage.js';
+import { readErrorDetail } from '../../client/errorEnvelope.js';
 import { SkeletonRows } from '../../ui/Skeleton.js';
 import { DataTable, type DataColumn } from '../../ui/DataTable.js';
 import { ViewToggle, useViewMode } from '../../ui/ViewToggle.js';
@@ -100,6 +101,12 @@ export function UsersPage(): JSX.Element {
     }
     if (code === 'legal_hold') {
       setRefusal({ variant: 'warning', text: t('legalHoldRefused') });
+      return;
+    }
+    // ADR 0833 D6 — only an owner may lock out an owner. The envelope's code is
+    // the generic `forbidden`; the rule rides in `details.code`.
+    if (code === 'forbidden' && err instanceof UsersApiError && readErrorDetail(err.body, 'code') === 'owner_required') {
+      setRefusal({ variant: 'warning', text: t('ownerRequiredRefused') });
       return;
     }
     toast.error(err instanceof UsersApiError ? loadErrorMessage(t, err) : t(fallbackKey));

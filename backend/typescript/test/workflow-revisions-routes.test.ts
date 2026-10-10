@@ -8,13 +8,14 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
+import { bareRunId } from './support/bareRunId.js';
 
 describe('workflow revisions routes (sqlite memory app)', () => {
   let server: http.Server;
   let BASE: string;
   const TOKEN = 'dev-token';
   const WF = 'rev-route-wf-1';
-  const API = '/v1/host/openwop-app/workflows';
+  const API = '/host/openwop-app/workflows';
 
   beforeAll(async () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -53,10 +54,10 @@ describe('workflow revisions routes (sqlite memory app)', () => {
 
   it('promote stamps publishedRevision (visible in the list)', async () => {
     // promote requires a completed run — create one through the real runs API.
-    const run = await call<{ runId: string }>('POST', '/v1/runs', { workflowId: WF, inputs: {} });
+    const run = await call<{ runId: string }>('POST', '/runs', { workflowId: WF, inputs: {} });
     expect(run.status).toBe(201);
     for (let i = 0; i < 100; i += 1) {
-      const r = await call<{ status: string }>('GET', `/v1/runs/${run.body.runId}`);
+      const r = await call<{ status: string }>('GET', `/runs/${run.body.runId}`);
       if (r.body.status && r.body.status !== 'pending' && r.body.status !== 'running') break;
       await new Promise((res) => setTimeout(res, 25));
     }
@@ -90,16 +91,16 @@ describe('workflow revisions routes (sqlite memory app)', () => {
   });
 
   it('a fork persists definitionResolvedFrom + the inherited pin (review H1)', async () => {
-    const run = await call<{ runId: string }>('POST', '/v1/runs', { workflowId: WF, inputs: {} });
+    const run = await call<{ runId: string }>('POST', '/runs', { workflowId: WF, inputs: {} });
     expect(run.status).toBe(201);
     for (let i = 0; i < 100; i += 1) {
-      const r = await call<{ status: string }>('GET', `/v1/runs/${run.body.runId}`);
+      const r = await call<{ status: string }>('GET', `/runs/${run.body.runId}`);
       if (r.body.status && r.body.status !== 'pending' && r.body.status !== 'running') break;
       await new Promise((res) => setTimeout(res, 25));
     }
-    const fork = await call<{ runId: string }>('POST', `/v1/runs/${run.body.runId}:fork`, { mode: 'replay' });
+    const fork = await call<{ runId: string }>('POST', `/runs/${run.body.runId}:fork`, { mode: 'replay' });
     expect(fork.status).toBe(201);
-    const info = await call<{ definitionRevision?: string; definitionResolvedFrom?: string }>('GET', `/v1/host/openwop-app/runs/${fork.body.runId}/revision`);
+    const info = await call<{ definitionRevision?: string; definitionResolvedFrom?: string }>('GET', `/host/openwop-app/runs/${bareRunId(fork.body.runId)}/revision`);
     expect(info.status).toBe(200);
     expect(info.body.definitionRevision).toBeTruthy();           // inherited pin persisted
     expect(info.body.definitionResolvedFrom).toBe('revision');   // the honesty stamp persisted
@@ -122,9 +123,9 @@ describe('workflow revisions routes (sqlite memory app)', () => {
 
   it('a client-spoofed definitionRevision is stripped at run creation (review M1)', async () => {
     const spoof = 'f'.repeat(64);
-    const run = await call<{ runId: string }>('POST', '/v1/runs', { workflowId: WF, inputs: {}, metadata: { definitionRevision: spoof, definitionResolvedFrom: 'revision' } });
+    const run = await call<{ runId: string }>('POST', '/runs', { workflowId: WF, inputs: {}, metadata: { definitionRevision: spoof, definitionResolvedFrom: 'revision' } });
     expect(run.status).toBe(201);
-    const info = await call<{ definitionRevision?: string; definitionResolvedFrom?: string }>('GET', `/v1/host/openwop-app/runs/${run.body.runId}/revision`);
+    const info = await call<{ definitionRevision?: string; definitionResolvedFrom?: string }>('GET', `/host/openwop-app/runs/${bareRunId(run.body.runId)}/revision`);
     expect(info.status).toBe(200);
     expect(info.body.definitionRevision).toBeTruthy();
     expect(info.body.definitionRevision).not.toBe(spoof); // the host stamped the truth
@@ -141,7 +142,7 @@ describe('workflow revisions routes (sqlite memory app)', () => {
 
     async function settle(runId: string): Promise<void> {
       for (let i = 0; i < 100; i += 1) {
-        const r = await call<{ status: string }>('GET', `/v1/runs/${runId}`);
+        const r = await call<{ status: string }>('GET', `/runs/${runId}`);
         if (r.body.status && r.body.status !== 'pending' && r.body.status !== 'running') return;
         await new Promise((res) => setTimeout(res, 25));
       }
@@ -149,7 +150,7 @@ describe('workflow revisions routes (sqlite memory app)', () => {
 
     it('a production launch runs the PUBLISHED revision after the head moves', async () => {
       expect((await call('POST', API, def2([{ nodeId: 'a', typeId: 'core.noop' }], 'v1'))).status).toBe(201);
-      const seed = await call<{ runId: string }>('POST', '/v1/runs', { workflowId: WF2, inputs: {} });
+      const seed = await call<{ runId: string }>('POST', '/runs', { workflowId: WF2, inputs: {} });
       await settle(seed.body.runId);
       const promote = await call<{ publishedRevision?: string }>('POST', `${API}/${WF2}/promote`);
       expect(promote.status).toBe(200);
@@ -158,16 +159,16 @@ describe('workflow revisions routes (sqlite memory app)', () => {
       // Head moves past the published revision.
       expect((await call('POST', API, def2([{ nodeId: 'a', typeId: 'core.noop' }, { nodeId: 'b', typeId: 'core.noop' }], 'v2'))).status).toBe(201);
 
-      const run = await call<{ runId: string }>('POST', '/v1/runs', { workflowId: WF2, inputs: {} });
+      const run = await call<{ runId: string }>('POST', '/runs', { workflowId: WF2, inputs: {} });
       expect(run.status).toBe(201);
-      const info = await call<{ definitionRevision?: string }>('GET', `/v1/host/openwop-app/runs/${run.body.runId}/revision`);
+      const info = await call<{ definitionRevision?: string }>('GET', `/host/openwop-app/runs/${bareRunId(run.body.runId)}/revision`);
       expect(info.body.definitionRevision).toBe(publishedHash); // ran the PUBLISHED def
     });
 
     it("the builder's draft run (metadata.launch='draft') runs the head", async () => {
-      const run = await call<{ runId: string }>('POST', '/v1/runs', { workflowId: WF2, inputs: {}, metadata: { launch: 'draft' } });
+      const run = await call<{ runId: string }>('POST', '/runs', { workflowId: WF2, inputs: {}, metadata: { launch: 'draft' } });
       expect(run.status).toBe(201);
-      const info = await call<{ definitionRevision?: string }>('GET', `/v1/host/openwop-app/runs/${run.body.runId}/revision`);
+      const info = await call<{ definitionRevision?: string }>('GET', `/host/openwop-app/runs/${bareRunId(run.body.runId)}/revision`);
       expect(info.body.definitionRevision).toBeTruthy();
       expect(info.body.definitionRevision).not.toBe(publishedHash); // the HEAD, not published
     });

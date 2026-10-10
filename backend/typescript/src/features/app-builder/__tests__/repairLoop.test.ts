@@ -86,10 +86,11 @@ describe('pack nodes', () => {
     const { applyDesignRepair } = await pack();
     const calls: unknown[] = [];
     const features = { 'app-builder': { applyRepair: async (a: unknown) => { calls.push(a); return { canvasId: 'cv1', newVersion: 9 }; } } };
-    const res = await applyDesignRepair({ inputs: { artifact: { artifactTypeId: 'canvas.app-builder', payload: app() }, canvasId: 'cv1', baseVersion: 8 }, features });
+    // ADR 0835 D5 — the review gate's decision rides in on `approval`.
+    const res = await applyDesignRepair({ inputs: { artifact: { artifactTypeId: 'canvas.app-builder', payload: app() }, canvasId: 'cv1', baseVersion: 8, approval: { action: 'approve' } }, features });
     expect(res.outputs.applied).toEqual({ canvasId: 'cv1', newVersion: 9 });
     expect(calls[0]).toMatchObject({ canvasId: 'cv1', expectedVersion: 8 });
-    await expect(applyDesignRepair({ inputs: { canvasId: 'cv1', baseVersion: 8 }, features })).rejects.toThrow(/artifact/);
+    await expect(applyDesignRepair({ inputs: { canvasId: 'cv1', baseVersion: 8, approval: { action: 'approve' } }, features })).rejects.toThrow(/artifact/);
   });
 });
 

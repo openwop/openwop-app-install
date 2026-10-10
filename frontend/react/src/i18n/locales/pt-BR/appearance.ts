@@ -54,7 +54,7 @@ export const messages = {
   documentTitleLabel: 'Título do documento',
   logoHeading: 'Logotipo',
   logoUrlLabel: 'URL do logotipo',
-  logoUrlHelp: 'Uma URL https, um caminho /relativo ou um URI data:image. Upload chega com Media (ADR 0007).',
+  logoUrlHelp: 'Uma URL https, um caminho /relativo ou um URI data:image. Upload chega com Media.',
   faviconLabel: 'URL do favicon',
   advancedSummary: 'Avançado — override de tokens (JSON)',
   advancedHint: 'Exporte as entradas do tema atual ou cole um JSON de tema para aplicar. Overrides por token vão em <1>override.light</1> / <3>override.dark</3> (somente tokens permitidos — o resto é descartado ao salvar).',

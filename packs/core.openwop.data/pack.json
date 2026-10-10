@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.data",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "Spec-canonical data-utility pack. v1.0 baseline (string-case, string-split, array-filter, array-map, object-merge) plus v1.1 additions: string format/regex/encode, array sort/unique/flatten/chunk/zip/reduce, object pick/omit/rename/get-path/set-path, json parse/stringify/schema-validate, jsonpath query, csv parse/stringify, datetime suite, number format/round/clamp, uuid. Zero npm deps (Node 20+).",
   "author": "OpenWOP Working Group",
   "license": "Apache-2.0",
@@ -20,7 +20,7 @@
     "uuid"
   ],
   "engines": {
-    "openwop": ">=1.0.0 <2.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "nodes": [
     {
@@ -561,5 +561,6 @@
     "format": "esm",
     "entry": "./index.mjs",
     "minRuntimeVersion": "node>=20"
-  }
+  },
+  "kind": "node"
 }

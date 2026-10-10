@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/feature.crm.nodes/1.10.0/convert-contact.output.json",
+  "$id": "https://packs.openwop.dev/feature.crm.nodes/1.11.0/convert-contact.output.json",
   "title": "CrmConvertContactOutput",
   "description": "ADR 0209 §3 conversion outcome. A refusal at the surface (tenant guard, link validation, cap, tombstone) is a TYPED node failure, never a success with an empty entity.",
   "type": "object",

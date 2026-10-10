@@ -8,7 +8,7 @@
  */
 
 import { Button } from '../ui/Button.js';
-import { useCallback, useEffect, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { formatCurrencyMinor, formatDateTime } from '../i18n/format.js';
@@ -18,7 +18,7 @@ import { Notice } from '../ui/Notice.js';
 import { StateCard } from '../ui/StateCard.js';
 import { toast } from '../ui/toast.js';
 import { ScaleIcon, CheckIcon, XIcon, RotateCwIcon } from '../ui/icons/index.js';
-import { ContentReviewContext, ApprovalDecideBar } from './ContentReviewContext.js';
+import { ContentReviewContext, ApprovalDecideBar, StrategyActivationSnapshot } from './ContentReviewContext.js';
 import {
   listApprovals,
   listApprovalsByKind,
@@ -26,13 +26,16 @@ import {
   rejectApproval,
   editAssistantAction,
   approvalErrorInfo,
+  ApprovalApiError,
   type PendingApproval,
-  type AssistantActionView,
 } from '../agents/approvalsClient.js';
 import { workflowName } from '../agents/roleTemplates.js';
 import { relativeTime } from '../agents/agentViewModel.js';
 import { Avatar } from '../ui/Avatar.js';
 import { loadOrgMembers } from '../orgs/orgMembers.js';
+
+// ADR 0862 D3 — the fields the approver must see (lazy: only assistant-action cards).
+const AssistantActionFields = lazy(() => import('../assistantAction/AssistantActionFields.js'));
 
 const isAssistantAction = (a: PendingApproval): boolean => a.kind === 'assistant-action' || !!a.actionId;
 const isContentPublish = (a: PendingApproval): boolean => a.kind === 'content-publish';
@@ -58,17 +61,13 @@ const isStrategyActivation = (a: PendingApproval): boolean => a.kind === 'strate
 // toast — "{{persona}} is running it now" — are wrong for a row that runs
 // nothing: approve adopts the scenario as plan of record).
 const isScenarioSelect = (a: PendingApproval): boolean => a.kind === 'pm-scenario-select';
+/** ADR 0785 P4 — the user's own Claude Code asking to use a tool (NOT a run: approving ALLOWS the tool). */
+const isClaudeCodePermission = (a: PendingApproval): boolean => a.kind === 'claude-code-permission';
 
 /** SECURITY — source URLs come from provider-derived (explicitly untrusted)
  *  content; only http(s) schemes may bind to an href (a `javascript:` URL
  *  would execute on click). Anything else renders as plain text. */
 const safeHref = (u?: string): string | undefined => (u && /^https?:\/\//i.test(u) ? u : undefined);
-
-function destinationOf(action: AssistantActionView): string | null {
-  const to = action.payload?.to;
-  if (Array.isArray(to)) return to.filter((x): x is string => typeof x === 'string').join(', ');
-  return typeof to === 'string' ? to : null;
-}
 
 /**
  * Rich action card (ADR 0023 §12 T4): kind + destination, risk tier, taint
@@ -87,6 +86,19 @@ function ActionCard({ approval, busy, onApprove, onReject, onSaveEdit }: {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(action?.draft ?? '');
 
+  // ADR 0862 — the server withheld the card from a reader who cannot send it: say so, and
+  // offer no decision (both verbs would 403).
+  if (action?.withheld) {
+    return (
+      <article className="surface-card u-grid u-gap-2">
+        <header className="u-flex u-items-center u-gap-2">
+          <strong>{approval.persona}</strong>
+          <span className="chip">{action.kind}</span>
+        </header>
+        <p className="muted u-m-0">{t('assistantAction:actionWithheld')}</p>
+      </article>
+    );
+  }
   // The action vanished between list and render (rare race) — fall back to the
   // approval's one-line summary so the row is still actionable.
   if (!action) {
@@ -96,10 +108,11 @@ function ActionCard({ approval, busy, onApprove, onReject, onSaveEdit }: {
           <strong>{approval.persona}</strong>
           <span className="muted u-fs-12">{approval.proposal}</span>
         </header>
+        {/* ADR 0862 — with no action row there is nothing to show and no hash to approve
+            against; the server refuses an approve without one, so offering it would be a
+            button that can only fail. Reject still works. */}
+        <p className="muted u-m-0">{t('assistantAction:actionUnavailable')}</p>
         <span className="action-bar">
-          <Button variant="primary" size="sm" disabled={busy} onClick={onApprove}>
-            <CheckIcon size={13} /> {t('approveLabel')}
-          </Button>
           <Button variant="secondary" size="sm" disabled={busy} onClick={onReject}>
             <XIcon size={13} /> {t('rejectLabel')}
           </Button>
@@ -108,8 +121,8 @@ function ActionCard({ approval, busy, onApprove, onReject, onSaveEdit }: {
     );
   }
 
-  const destination = destinationOf(action);
   return (
+    <Suspense fallback={<p role="status">{t('common:loading')}</p>}>
     <article className="surface-card u-grid u-gap-2">
       <header className="u-flex u-items-center u-gap-2">
         <strong>{approval.persona}</strong>
@@ -125,7 +138,8 @@ function ActionCard({ approval, busy, onApprove, onReject, onSaveEdit }: {
         {action.derivedFromUntrusted ? <span className="chip chip--muted">{t('derivedFromUntrusted')}</span> : null}
         {action.editedAt ? <span className="chip chip--muted">{t('editedAt', { when: formatDateTime(action.editedAt) })}</span> : null}
       </header>
-      {destination ? <p className="muted u-m-0">{t('destinationTo', { destination })}</p> : null}
+      {/* ADR 0862 D3 — every field the action will send, not just its recipient. */}
+      <AssistantActionFields payload={action.payload} />
       {editing ? (
         <textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={5} aria-label={t('editDraftLabel')} />
       ) : (
@@ -151,7 +165,7 @@ function ActionCard({ approval, busy, onApprove, onReject, onSaveEdit }: {
       <span className="action-bar">
         {editing ? (
           <>
-            <Button variant="primary" size="sm" disabled={busy} onClick={() => { void onSaveEdit(draft).then(() => setEditing(false)); }}>{t('saveEdit')}</Button>
+            <Button variant="primary" size="sm" disabled={busy} onClick={() => { void onSaveEdit(draft).then(() => setEditing(false), () => undefined); }}>{t('saveEdit')}</Button>
             <Button variant="secondary" size="sm" disabled={busy} onClick={() => { setDraft(action.draft); setEditing(false); }}>{t('common:cancel')}</Button>
           </>
         ) : (
@@ -167,6 +181,7 @@ function ActionCard({ approval, busy, onApprove, onReject, onSaveEdit }: {
         )}
       </span>
     </article>
+    </Suspense>
   );
 }
 
@@ -208,6 +223,9 @@ function DecidedRow({ a, memberName, t }: {
 
 export function ApprovalsInbox({ onResolved }: { onResolved?: () => void }): JSX.Element {
   const { t } = useTranslation('notifications');
+  // ADR 0862 — load the lazy `assistantAction` namespace (its decide-failure copy) WITHOUT
+  // suspending: listing it in the main hook blanked the whole page on a first visit.
+  useTranslation('assistantAction', { useSuspense: false });
   const nav = useNavigate();
   const [items, setItems] = useState<PendingApproval[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -279,7 +297,8 @@ export function ApprovalsInbox({ onResolved }: { onResolved?: () => void }): JSX
   const claim = useCallback(async (a: PendingApproval) => {
     setBusy(a.approvalId);
     try {
-      const { runId } = await claimApproval(a.approvalId);
+      // ADR 0862 D1 — an assistant action approves the exact version this card shows.
+      const { runId } = await claimApproval(a.approvalId, undefined, a.action?.contentHash);
       toast.success(
         isContentPublish(a)
           ? t('toastApprovedPublished')
@@ -306,6 +325,9 @@ export function ApprovalsInbox({ onResolved }: { onResolved?: () => void }): JSX
       if (runId) nav(`/runs/${encodeURIComponent(runId)}`);
     } catch (err) {
       toast.error(decideError(err, 'toastCouldNotClaim'));
+      // ADR 0845 — a 409/404 means the server closed or resolved the row (e.g. a
+      // strategy whose content changed): re-read so the dead card drops out.
+      if (err instanceof ApprovalApiError && (err.status === 409 || err.status === 404)) void refresh();
     } finally {
       setBusy(null);
     }
@@ -349,16 +371,22 @@ export function ApprovalsInbox({ onResolved }: { onResolved?: () => void }): JSX
     if (!a.actionId) return;
     setBusy(a.approvalId);
     try {
-      await editAssistantAction(a.actionId, { draft });
+      // ADR 0862 D2 — edit the version this card shows; the re-read below picks up the
+      // new hash, so the next approve binds to the edited bytes.
+      const card = await editAssistantAction(a.actionId, { draft }, a.action?.contentHash);
+      // Adopt the returned card (with its NEW hash) at once, so a failed re-read below
+      // cannot leave the old hash behind for the next approve.
+      setItems((prev) => prev?.map((x) => (x.approvalId === a.approvalId ? { ...x, action: card } : x)) ?? prev);
       toast.success(t('toastDraftUpdated'));
       await refresh();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : t('toastEditFailed'));
+      toast.error(decideError(err, 'toastEditFailed'));
+      if (err instanceof ApprovalApiError && err.status === 409) void refresh();
       throw err;
     } finally {
       setBusy(null);
     }
-  }, [refresh, t]);
+  }, [refresh, t, decideError]);
 
   const columns: DataColumn<PendingApproval>[] = [
     {
@@ -426,7 +454,8 @@ export function ApprovalsInbox({ onResolved }: { onResolved?: () => void }): JSX
   const strategyActivation = items?.filter(isStrategyActivation) ?? [];
   const scenarioSelect = items?.filter(isScenarioSelect) ?? [];
   const commerceSpend = items?.filter(isCommerceSpend) ?? [];
-  const runs = items?.filter((a) => !isAssistantAction(a) && !isContentPublish(a) && !isCampaignSpend(a) && !isCommerceSpend(a) && !isStrategyActivation(a) && !isScenarioSelect(a)) ?? [];
+  const claudeCode = items?.filter(isClaudeCodePermission) ?? [];
+  const runs = items?.filter((a) => !isAssistantAction(a) && !isContentPublish(a) && !isCampaignSpend(a) && !isCommerceSpend(a) && !isStrategyActivation(a) && !isScenarioSelect(a) && !isClaudeCodePermission(a)) ?? [];
 
   return (
     <div className="card">
@@ -499,6 +528,7 @@ export function ApprovalsInbox({ onResolved }: { onResolved?: () => void }): JSX
                     <span className="u-flex-1">{a.proposal}</span>
                     <span className="muted u-fs-12">{relativeTime(a.createdAt)}</span>
                   </div>
+                  <StrategyActivationSnapshot strategyId={a.strategyId} strategyTitle={a.strategyTitle} snapshot={a.strategySnapshot} />
                   {/* SGU-2 — the SAME decide bar the content group uses. Rejecting an
                       activation sends a strategy back to draft, which is a decision its
                       author will want a reason for; the bare buttons here also lacked the
@@ -613,6 +643,28 @@ export function ApprovalsInbox({ onResolved }: { onResolved?: () => void }): JSX
                       <XIcon size={13} /> {t('rejectLabel')}
                     </Button>
                   </span>
+                </article>
+              ))}
+            </div>
+          )}
+          {claudeCode.length > 0 && (
+            <div className="u-grid u-gap-2">
+              <h3 className="u-m-0 u-fs-12 muted">{t('approvalsClaudeCodeGroup')}</h3>
+              {claudeCode.map((a) => (
+                <article key={a.approvalId} className="surface-card u-grid u-gap-2">
+                  <div className="u-flex u-items-center u-gap-2">
+                    <span className="u-flex-1">{t('approvalsClaudeCodeAsk', { device: a.claudeCodePermission?.deviceLabel ?? '', tool: a.claudeCodePermission?.tool ?? '' })}</span>
+                    <span className="muted u-fs-12">{relativeTime(a.createdAt)}</span>
+                  </div>
+                  <pre className="u-m-0"><code>{a.claudeCodePermission?.summary ?? a.proposal}</code></pre>
+                  {/* A deny REASON goes back to Claude Code verbatim, so this group gets the reasoned bar. */}
+                  <ApprovalDecideBar
+                    busy={busy === a.approvalId}
+                    onApprove={() => void claim(a)}
+                    onReject={(note) => reject(a, note)}
+                    approveLabel={t('approvalsClaudeCodeAllow')}
+                    rejectLabel={t('approvalsClaudeCodeDeny')}
+                  />
                 </article>
               ))}
             </div>

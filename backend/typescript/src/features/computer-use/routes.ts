@@ -12,7 +12,7 @@ import { listSessions, getSession } from './sessionStore.js';
 import { sendError } from '../../middleware/errorEnvelope.js';
 
 const FEATURE = { toggleId: 'computer-use', label: 'Computer-use browser agents' };
-const ORG = '/v1/host/openwop-app/computer-use/orgs/:orgId';
+const ORG = '/host/openwop-app/computer-use/orgs/:orgId';
 
 export function registerComputerUseRoutes(deps: RouteDeps): void {
   const { app } = deps;

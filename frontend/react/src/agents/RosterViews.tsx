@@ -30,11 +30,13 @@ export function autonomyBadge(level: RosterEntry['autonomyLevel'], t: TFunction)
   return <StatusBadge status="completed" label={t('rosterLevelAuto')} />;
 }
 
-/** The handlers a roster card/row needs — the page owns the actual client calls. */
+/** The handlers a roster card/row needs — the page owns the actual client calls.
+ *  ADR 0775 D1 — the two WRITE handlers are absent for a viewer, and their
+ *  controls are then not rendered (the server would refuse them). */
 export interface RosterActions {
-  onToggleAutonomy: (r: RosterEntry) => void;
+  onToggleAutonomy?: ((r: RosterEntry) => void) | undefined;
   onProfile: (r: RosterEntry) => void;
-  onDeleteRequest: (r: RosterEntry) => void;
+  onDeleteRequest?: ((r: RosterEntry) => void) | undefined;
 }
 
 const autonomyOf = (r: RosterEntry): 'auto' | 'guided' | 'review' => r.autonomyLevel ?? 'auto';
@@ -55,13 +57,15 @@ export function RosterCard({ entry: r, onToggleAutonomy, onProfile, onDeleteRequ
         </div>
       ) : <span className="muted u-fs-13">{t('rosterNoWorkflows')}</span>}
       <div className="action-bar u-items-center u-gap-2">
-        <Button
-          variant="secondary" className="u-fs-12"
-          onClick={() => onToggleAutonomy(r)}
-          title={autonomyOf(r) === 'review' ? t('rosterSetAutoTitle') : t('rosterSetReviewTitle')}
-        >
-          {autonomyOf(r) === 'review' ? t('rosterSetAuto') : t('rosterSetReview')}
-        </Button>
+        {onToggleAutonomy ? (
+          <Button
+            variant="secondary" className="u-fs-12"
+            onClick={() => onToggleAutonomy(r)}
+            title={autonomyOf(r) === 'review' ? t('rosterSetAutoTitle') : t('rosterSetReviewTitle')}
+          >
+            {autonomyOf(r) === 'review' ? t('rosterSetAuto') : t('rosterSetReview')}
+          </Button>
+        ) : null}
         <Button
           variant="secondary" className="u-fs-12 u-flex u-items-center u-gap-1 u-ml-auto"
           onClick={() => onProfile(r)}
@@ -69,11 +73,13 @@ export function RosterCard({ entry: r, onToggleAutonomy, onProfile, onDeleteRequ
         >
           <ShieldIcon size={13} aria-hidden /> {t('rosterProfile')}
         </Button>
-        <IconButton
-          label={t('rosterDeletePersona', { persona: r.persona })}
-          icon={<TrashIcon size={15} />}
-          onClick={() => onDeleteRequest(r)}
-        />
+        {onDeleteRequest ? (
+          <IconButton
+            label={t('rosterDeletePersona', { persona: r.persona })}
+            icon={<TrashIcon size={15} />}
+            onClick={() => onDeleteRequest(r)}
+          />
+        ) : null}
       </div>
     </div>
   );

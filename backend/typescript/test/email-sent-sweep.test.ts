@@ -4,9 +4,15 @@
  * the replay window) are kept so dedup keeps working, an unparseable stamp is
  * never deleted, and the env TTL override is honored. Deterministic: an explicit
  * `now` is passed so nothing reads the wall clock.
+ *
+ * Sabotage-witnessed (grade-tests w9): sweeping at `now` instead of the TTL cutoff reds
+ * case 1; ignoring the env override reds case 2; dropping the `Number.isFinite` guard
+ * reds case 3. The fresh row is seeded at 12 h so it never sits on case 2's 1-day cutoff
+ * (the cases share one ledger).
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { createApp } from '../src/index.js';
+import { openStorage } from '../src/storage/index.js';
+import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { priorSend, recordSend, sweepExpiredEmailSent } from '../src/host/emailSentLedger.js';
 
 const NOW = Date.parse('2026-07-03T00:00:00Z');
@@ -17,15 +23,14 @@ const seed = (key: string, ageDays: number): Promise<void> =>
 
 describe('email:sent ledger TTL sweep (ADR 0193/0201)', () => {
   beforeAll(async () => {
-    process.env.OPENWOP_STORAGE_DSN = 'memory://';
-    await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+    initHostExtPersistence(await openStorage('memory://'));
   });
   beforeEach(() => { delete process.env.OPENWOP_EMAIL_LEDGER_TTL_DAYS; });
   afterAll(() => { delete process.env.OPENWOP_EMAIL_LEDGER_TTL_DAYS; });
 
   it('deletes rows past the default 30-day TTL and keeps fresh rows (dedup still works)', async () => {
     await seed('t1:stale', 40); // older than 30d
-    await seed('t1:fresh', 1);  // well inside the window
+    await seed('t1:fresh', 0.5);  // well inside the window (and off case 2's 1-day TTL boundary)
     const deleted = await sweepExpiredEmailSent(NOW);
     expect(deleted).toBe(1);
     expect(await priorSend('t1:stale')).toBeNull();

@@ -17,7 +17,8 @@
 import { createLogger } from '../../observability/logger.js';
 import { hostExtStorage } from '../../host/hostExtPersistence.js';
 import { registerSubmissionSink } from '../forms/submissionSinks.js';
-import { resolveOne } from '../../host/featureToggles/service.js';
+import { resolveToggle } from '../../host/featureToggles/service.js';
+import { ownerPublicRuntimeLapsed } from '../../host/publicLapse.js';
 import { getFormBinding, getMarketingEvent } from './entities/marketingEvent.js';
 import { ingestWebinarEvent } from './webinarProcessor.js';
 import { makeWebinarAdapter } from './host/webinarAdapter.js';
@@ -45,8 +46,13 @@ export function registerWebinarFormsSink(): void {
       try {
         const binding = await getFormBinding(form.tenantId, form.formId);
         if (!binding) return undefined; // form not bound to a webinar — not our concern
-        const toggled = await resolveOne('webinars', { tenantId: form.tenantId });
+        // ADR 0819 §1 opt-out — a PUBLIC lane (tenant from the resource): ADR 0419 never paywalls a shopper/visitor on the operator's plan.
+        const toggled = await resolveToggle('webinars', { tenantId: form.tenantId });
         if (!toggled || !toggled.enabled) return undefined;
+        // ADR 0820 §7 — the owner-lapse policy (off unless the grace knob is set). Only the
+        // WEBINAR registration is skipped; the form submission itself (and any consent it
+        // carries) is recorded by the forms feature regardless.
+        if (await ownerPublicRuntimeLapsed('webinars', form.tenantId)) return undefined;
         const event = await getMarketingEvent(form.tenantId, binding.orgId, binding.eventId);
         // R2 WB-SP-12 — a binding whose event row is gone means the submission
         // is DROPPED for webinar purposes; that must at least be visible in the

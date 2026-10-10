@@ -27,6 +27,7 @@ import {
   createSignRequest, getSignRequest, getSignRequestById, putSignRequest, casSignRequest,
   listSignRequests, appendSignatureRecord, listSignatureRecords,
 } from './entities/signRequests.js';
+import { assetServeUrl } from '../../host/assetServePath.js';
 
 const log = createLogger('crm.sign');
 
@@ -104,7 +105,7 @@ function isSignersTurn(req: SignRequest, signer: Signer): boolean {
 }
 
 function certUrlFor(req: SignRequest): string | undefined {
-  return req.certificateArtifactId ? `/v1/host/openwop-app/assets/${req.certificateArtifactId}` : undefined;
+  return req.certificateArtifactId ? assetServeUrl(req.certificateArtifactId) : undefined;
 }
 
 const MANAGE_TOKEN_ACTOR = 'system:crm-sign';
@@ -112,7 +113,7 @@ const MANAGE_TOKEN_ACTOR = 'system:crm-sign';
 async function mintSignerToken(tenantId: string, orgId: string, signRequestId: string, signerId: string): Promise<string | null> {
   try {
     const { createLink } = await import('../sharing/sharingService.js');
-    const link = await createLink(tenantId, orgId, MANAGE_TOKEN_ACTOR, { resourceType: 'sign_request', resourceId: `${signRequestId}:${signerId}`, expiresInDays: 90 });
+    const link = await createLink(tenantId, orgId, MANAGE_TOKEN_ACTOR, { resourceType: 'sign_request', resourceId: `${signRequestId}:${signerId}`, expiresInDays: 90 }, { lane: 'visitor', why: 'the signer link, minted for an external signer' });
     return link.token;
   } catch (err) {
     log.warn('signer token mint failed', { signRequestId, signerId, error: err instanceof Error ? err.message : String(err) });
@@ -139,6 +140,10 @@ export interface RequestSignatureInput {
   createdBy: string;
   /** R2 S1R2-5 — human-facing requester identity shown to signers. */
   requestedBy?: { name?: string; email?: string };
+  /** ADR 0838 D3 — the person whose read access gates a DOCUMENT target (the
+   *  route's user; a run's actor, else its causing member). Absent ⇒ a
+   *  tenant-trusted system run, as on every surface. */
+  reader?: string;
   baseUrl: string;
   /** Signature provider (P3 seam) — defaults to `native`. An external provider
    *  is honestly refused until its connector is built. */
@@ -177,7 +182,7 @@ export async function requestSignature(input: RequestSignatureInput): Promise<Si
   if (provider.external) {
     throw new OpenwopError('host_capability_missing', `Signature provider '${providerId}' (external signing) is not yet implemented — use the native provider.`, 501, { provider: providerId });
   }
-  const target: SignTarget = { kind: input.target.kind as SignTarget['kind'], id: input.target.id };
+  let target: SignTarget = { kind: input.target.kind as SignTarget['kind'], id: input.target.id };
 
   // Idempotent by deterministic id — a fork/re-run returns the existing request
   // WITHOUT re-minting tokens or re-emailing signers.
@@ -187,8 +192,10 @@ export async function requestSignature(input: RequestSignatureInput): Promise<Si
     if (existing) return { ...existing, invitesEmailed: false };
   }
 
-  const rendered = await renderTarget(input.tenantId, input.orgId, target);
+  const rendered = await renderTarget(input.tenantId, input.orgId, target, input.reader !== undefined ? { reader: input.reader } : {});
   const contentHash = hashCanonical(rendered.canonical);
+  // ADR 0838 — pin the document version the request was made over.
+  if (rendered.versionId) target = { ...target, versionId: rendered.versionId };
 
   const signers: Signer[] = input.signers.map((s, i) => ({
     signerId: `signer-${i}`,
@@ -375,7 +382,11 @@ export async function signRequest(input: SignInput): Promise<{ status: SignReque
   if (!typedName) throw new OpenwopError('validation_error', 'A typed name is required to sign.', 400, { field: 'typedName' });
 
   // Re-hash the target NOW — a change since the request voids the sign, loudly.
-  const rendered = await renderTarget(req.tenantId, req.orgId, req.target);
+  // ADR 0838: the signer PAGE renders the pinned version (so text saved after
+  // the request never reaches an outside signer), but the sign itself re-reads
+  // the LIVE target without the pin, so an edit since the request still voids it.
+  const { versionId: _pinned, ...liveTarget } = req.target;
+  const rendered = await renderTarget(req.tenantId, req.orgId, liveTarget);
   const currentHash = hashCanonical(rendered.canonical);
   if (currentHash !== req.contentHash) {
     throw new OpenwopError('conflict', 'The document changed after this request was created and can no longer be signed.', 409, { reason: 'content_changed' });
@@ -542,7 +553,7 @@ async function finalizeCertificate(req: SignRequest, targetMarkdown: string, bas
     if (fresh && !fresh.certificateArtifactId) await putSignRequest({ ...fresh, certificateArtifactId: stored.serveToken });
 
     // Notify the requester + email signers the completed certificate URL.
-    const certUrl = `/v1/host/openwop-app/assets/${stored.serveToken}`;
+    const certUrl = assetServeUrl(stored.serveToken);
     // R2 S1R2-2 — mail clients don't link a schemeless path; absolute or nothing.
     const origin = (baseUrl ?? '').trim().replace(/\/+$/, '') || publicOriginFromEnv();
     try {

@@ -15,12 +15,18 @@
  * stranding `-1` found in `CommentsPage`, but this page's `resourceId` is
  * `useState('')` and user-selected only — there is no `?resourceId=` link to
  * strand. A pattern-match is not a check.
+ *
+ * ADR 0013 (sharing) + HG-4 (`ui/OrgSelectionState`). Sabotage-witnessed (w7
+ * grade-tests): `orgsFailed={false}` reds the failed-read leg;
+ * `retry={() => undefined}` reds the retry leg; a resource-read catch that
+ * does not set `resourcesFailed` reds the inert-form leg.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, act, fireEvent } from '@testing-library/react';
+import type * as C from '../sharingClient.js';
 
 const { listOrgs, listLinks, listResources } = vi.hoisted(() => ({
-  listOrgs: vi.fn(), listLinks: vi.fn(), listResources: vi.fn(),
+  listOrgs: vi.fn<typeof C.listOrgs>(), listLinks: vi.fn<typeof C.listLinks>(), listResources: vi.fn<typeof C.listResources>(),
 }));
 vi.mock('../sharingClient.js', async (orig) => ({
   ...(await orig<typeof import('../sharingClient.js')>()),
@@ -39,7 +45,7 @@ const mount = async (): Promise<void> => {
 
 afterEach(cleanup);
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   listOrgs.mockResolvedValue([ORG]);
   listLinks.mockResolvedValue([]);
   listResources.mockResolvedValue([RESOURCE]);

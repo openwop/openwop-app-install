@@ -39,7 +39,7 @@ import { optionalCleanString, cleanString } from '../../host/boundedStrings.js';
 // `documents` gate this direct import would otherwise bypass (see
 // `getPublicEpisodeTranscript`).
 import { listVersions as listDocumentVersions, getDocument as getDocumentRecord } from '../documents/documentsService.js';
-import { resolveOne } from '../../host/featureToggles/service.js';
+import { resolveToggle } from '../../host/featureToggles/service.js';
 
 /** One cast member — an opaque host-resolved `voiceId` (RFC 0105 does NOT enumerate
  *  voices) + persona text injected into the transcript prompt. */
@@ -806,7 +806,8 @@ export async function getPublicEpisodeTranscript(
   episode: PodcastEpisode,
 ): Promise<{ text: string; truncated: boolean } | null> {
   if (!episode.transcriptDocRef) return null;
-  const docsOn = await resolveOne('documents', { tenantId });
+  // ADR 0819 §1 opt-out — a PUBLIC lane (tenant from the resource): ADR 0419 never paywalls a shopper/visitor on the operator's plan.
+  const docsOn = await resolveToggle('documents', { tenantId });
   if (!docsOn?.enabled) return null;
   const doc = await getDocumentRecord(tenantId, episode.orgId, episode.transcriptDocRef);
   if (!doc || doc.kind !== PUBLIC_TRANSCRIPT_KIND) return null;

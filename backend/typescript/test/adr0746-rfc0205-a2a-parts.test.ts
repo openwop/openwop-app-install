@@ -97,8 +97,8 @@ async function v2Events(runId: string, key = KEY_A): Promise<Json[]> {
   return (((await res.json()) as Json)['events'] ?? []) as Json[];
 }
 
-function artifactUrl(runId: string, artifactId: string, prefix = ''): string {
-  return `${base}${prefix}/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactId)}`;
+function artifactUrl(runId: string, artifactId: string): string {
+  return `${base}/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactId)}`;
 }
 
 async function emittedArtifact(): Promise<{ runId: string; artifactId: string }> {
@@ -182,14 +182,8 @@ describe('RFC 0205 §A — getArtifact over HTTP', () => {
     expect(body).toMatchObject({ artifactId, artifactType: 'conformance.artifact.brief', mediaType: 'application/json', payload: { items: ['one', 'two'] } });
   });
 
-  it('v1 does not negotiate (§A.4): an a2a preference still answers application/json', async () => {
-    const { runId, artifactId } = await emittedArtifact();
-    // v2 runIds are tenant-qualified (`<tenant>/<id>`); the v1 wire speaks the bare id.
-    const bare = runId.slice(runId.lastIndexOf('/') + 1);
-    const res = await fetch(artifactUrl(bare, artifactId, '/v1'), { headers: { Authorization: `Bearer ${KEY_A}`, Accept: A2A } });
-    expect(res.status, await res.clone().text()).toBe(200);
-    expect((res.headers.get('content-type') ?? '').split(';')[0]).toBe('application/json');
-  });
+  // ADR 0812 P3c-0: "v1 does not negotiate (§A.4)" was deleted with major 1 —
+  // the `/v1` artifact read is the retired path space.
 
   it('auth stacks above existence: 401 without a Bearer, 405 for a non-GET', async () => {
     const { runId, artifactId } = await emittedArtifact();
@@ -206,14 +200,14 @@ describe('RFC 0205 §A — getArtifact over HTTP', () => {
 
   it('ADR 0755 (WIT-ART-8) — an owk_ key without artifacts:read is refused 403 with the scope challenge; the control reads', async () => {
     const run2 = await emittedArtifact();
-    const bare = run2.runId.slice(run2.runId.lastIndexOf('/') + 1);
     const key = async (scopes: string[]) => (await issueApiKey({ tenantId: 'ws3-tenant-a', name: 'wit-art-8', createdBy: 'user:wit-art-8', scopes })).token;
-    const url = artifactUrl(bare, run2.artifactId, '/v1');
-    const refused = await fetch(url, { headers: { Authorization: `Bearer ${await key(['runs:read'])}` } });
+    // ADR 0812 P3c-0 — ported off the `/v1` read: the major-2 path, the bound id.
+    const url = artifactUrl(run2.runId, run2.artifactId);
+    const refused = await fetch(url, { headers: { Authorization: `Bearer ${await key(['runs:read'])}`, 'OpenWOP-Version': '2' } });
     expect(refused.status, await refused.clone().text()).toBe(403);
     expect(refused.headers.get('www-authenticate') ?? '').toMatch(/insufficient_scope/);
     expect(refused.headers.get('www-authenticate') ?? '').toMatch(/scope="artifacts:read"/);
-    const ok = await fetch(url, { headers: { Authorization: `Bearer ${await key(['artifacts:read'])}` } });
+    const ok = await fetch(url, { headers: { Authorization: `Bearer ${await key(['artifacts:read'])}`, 'OpenWOP-Version': '2' } });
     expect(ok.status, 'control: without it a host refusing every key passes the leg above').toBe(200);
   });
 
@@ -221,11 +215,16 @@ describe('RFC 0205 §A — getArtifact over HTTP', () => {
     const { runId, artifactId } = await emittedArtifact();
     const bare = runId.slice(runId.lastIndexOf('/') + 1);
     // A VALID stream token for the run, presented by another tenant's Bearer: if the
-    // grant were honoured here the read would succeed; it is refused (streamToken:false)
-    // and the tenant check answers the non-disclosing 404.
-    const url = `${artifactUrl(bare, artifactId, '/v1')}?streamToken=${encodeURIComponent(mintRunStreamToken(bare))}`;
-    const res = await fetch(url, { headers: { Authorization: `Bearer ${KEY_B}` } });
-    expect(res.status).toBe(404);
+    // grant were honoured here the read would succeed. ADR 0812 P3c-0 — ported off
+    // `/v1`: on the major-2 path B must name the run by A's bound id, so the
+    // tenant-segment rule refuses it before any lookup (403 id_tenant_mismatch)…
+    const url = `${artifactUrl(runId, artifactId)}?streamToken=${encodeURIComponent(mintRunStreamToken(bare))}`;
+    const res = await fetch(url, { headers: v2Headers(KEY_B) });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as Json)['error']).toBe('id_tenant_mismatch');
+    // …and the token alone, with no Bearer at all, is not a credential here either.
+    const tokenOnly = await fetch(url, { headers: { 'OpenWOP-Version': '2' } });
+    expect(tokenOnly.status).toBe(401);
   });
 
   it('ADR 0755 (WIT-ART-1) — an announced row carries announcedType only, never a host artifactTypeId', async () => {
@@ -235,10 +234,12 @@ describe('RFC 0205 §A — getArtifact over HTTP', () => {
     expect(row?.artifactTypeId, 'a conformance payload must never read as a typed Library deliverable').toBeUndefined();
   });
 
-  it('another tenant never reads it: a bare id is a non-disclosing 404, a qualified one the ids.md 403 — neither challenges', async () => {
+  it('another tenant never reads it: its own-namespace spelling is a non-disclosing 404, a qualified one the ids.md 403 — neither challenges', async () => {
     const { runId, artifactId } = await emittedArtifact();
     const bare = runId.slice(runId.lastIndexOf('/') + 1);
-    const asB = await fetch(artifactUrl(bare, artifactId), { headers: v2Headers(KEY_B, { Accept: A2A }) });
+    // ADR 0812 P3c-0 — a bare id is not admitted on a major-2 path once 1.x is
+    // retired, so "B names the run in B's own namespace" is spelled bound to B.
+    const asB = await fetch(artifactUrl(`ws3-tenant-b/${bare}`, artifactId), { headers: v2Headers(KEY_B, { Accept: A2A }) });
     expect(asB.status, await asB.clone().text()).toBe(404);
     expect(asB.headers.get('www-authenticate'), 'RFC 0200 §B.3 — a 404 carries no challenge').toBeNull();
     // The tenant segment of a qualified id is not the caller's: the id-kind rule

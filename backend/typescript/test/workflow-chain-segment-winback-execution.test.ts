@@ -73,9 +73,9 @@ function client(): Client {
 let n = 0;
 async function ownerOrg(): Promise<{ owner: Client; orgId: string }> {
   const owner = client();
-  const r = await owner.post('/v1/host/openwop-app/test/login', { email: `swb-${Date.now()}-${n++}@acme.test`, tenantId: `org:swb-${Date.now()}-${n++}` });
+  const r = await owner.post('/host/openwop-app/test/login', { email: `swb-${Date.now()}-${n++}@acme.test`, tenantId: `org:swb-${Date.now()}-${n++}` });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return { owner, orgId: org.body.orgId };
 }
@@ -84,7 +84,7 @@ interface RunSnapshot { status: string; error?: { code: string; message: string 
 async function pollRun(owner: Client, runId: string): Promise<RunSnapshot> {
   let snap: RunSnapshot = { status: 'pending' };
   for (let i = 0; i < 120; i++) {
-    const r = await owner.get(`/v1/runs/${runId}`);
+    const r = await owner.get(`/runs/${runId}`);
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     snap = r.body as RunSnapshot;
     if (['completed', 'failed', 'cancelled'].includes(snap.status) || snap.status.startsWith('waiting')) break;
@@ -95,7 +95,7 @@ async function pollRun(owner: Client, runId: string): Promise<RunSnapshot> {
 
 interface BundleEvent { type?: string; nodeId?: string; payload?: Record<string, unknown> }
 async function bundleEvents(owner: Client, runId: string): Promise<BundleEvent[]> {
-  const b = await owner.get(`/v1/runs/${runId}/debug-bundle`);
+  const b = await owner.get(`/runs/${runId}/debug-bundle`);
   expect(b.status, JSON.stringify(b.body)).toBe(200);
   return (b.body.events as BundleEvent[]) ?? [];
 }
@@ -147,11 +147,11 @@ describe('campaign-journeys.segment-winback — live fan-out over a real segment
     // 1) three real contacts + a segment that resolves to all of them (no filters).
     const contactIds: string[] = [];
     for (const name of ['Quiet A', 'Quiet B', 'Quiet C']) {
-      const c = await owner.post('/v1/host/openwop-app/crm/contacts', { name, email: `${name.replace(/\s/g, '').toLowerCase()}@acme.test` });
+      const c = await owner.post('/host/openwop-app/crm/contacts', { name, email: `${name.replace(/\s/g, '').toLowerCase()}@acme.test` });
       expect(c.status, JSON.stringify(c.body)).toBe(201);
       contactIds.push(c.body.contactId as string);
     }
-    const seg = await owner.post('/v1/host/openwop-app/crm/segments', { name: 'All quiet', filters: [] });
+    const seg = await owner.post('/host/openwop-app/crm/segments', { name: 'All quiet', filters: [] });
     expect(seg.status, JSON.stringify(seg.body)).toBe(201);
     const segmentId = seg.body.segmentId as string;
 
@@ -173,7 +173,7 @@ describe('campaign-journeys.segment-winback — live fan-out over a real segment
     registerWorkflow(expanded);
 
     // 4) run it — segmentId rides the run inputs (the segment-members source node).
-    const create = await owner.post('/v1/runs', { workflowId: expanded.workflowId, inputs: { segmentId } });
+    const create = await owner.post('/runs', { workflowId: expanded.workflowId, inputs: { segmentId } });
     expect(create.status, JSON.stringify(create.body)).toBe(201);
     const snap = await pollRun(owner, create.body.runId as string);
     expect(snap.status, `parent should complete (stub children terminate immediately): ${JSON.stringify(snap)}`).toBe('completed');

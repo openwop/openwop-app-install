@@ -1,7 +1,7 @@
 /**
  * Runtime workflow-chain pack install — the in-app marketplace (ADR 0163 follow-on).
  *
- * POST /v1/host/openwop-app/workflow-chain-packs/install installs a pack from the
+ * POST /host/openwop-app/workflow-chain-packs/install installs a pack from the
  * registry AT RUNTIME (reusing the Ed25519/SRI-verified installer) and hot-reloads
  * the chain registry. Asserts the operator gate (superadmin), input validation,
  * the upstream-error → canonical-status mapping, and the success contract. The
@@ -36,7 +36,7 @@ afterAll(async () => {
   delete process.env.OPENWOP_FEATURE_TOGGLES_DEV_OPEN;
 });
 
-const url = (p: string) => `http://127.0.0.1:${PORT}/v1/host/openwop-app${p}`;
+const url = (p: string) => `http://127.0.0.1:${PORT}/host/openwop-app${p}`;
 async function cookie(): Promise<string> {
   const r = await fetch(url('/workflows'));
   return r.headers.get('set-cookie')!.split(';')[0]!;

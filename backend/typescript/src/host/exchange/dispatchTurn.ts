@@ -8,19 +8,22 @@
  */
 
 import { fenceUntrustedBlock } from '../untrustedContent.js';
+import { notReReadLine, workflowRunRefOf } from './runDigests.js';
 import { createLogger } from '../../observability/logger.js';
 import { dispatchChat, type ChatMessage, type ProviderId } from '../../providers/dispatch.js';
 import { withLlmSpan, annotateActiveLlmSpan, PROVIDER_DISPATCH_SPAN } from '../../observability/llmSpans.js';
 import { resolveConversationModelTarget, type ConversationModelTierInput } from '../../features/model-router/applyRoute.js';
 // One rate-limit vocabulary across both dispatch seams (grade-pass RESIL-1/2);
 // import direction is safe — conversationToolLoop never imports this module.
-import { isProviderRateLimited, rateLimitBackoffMs } from '../conversationToolLoop.js';
+import { isProviderRateLimited, isTransientProviderFailure, providerFailureFields, rateLimitBackoffMs } from '../conversationToolLoop.js';
 import { resolveModelRoute } from '../../features/model-router/resolveRoute.js';
 import type { TurnFeatures } from '../../features/model-router/routeTurn.js';
 import { recordUsage } from '../../features/usage-analytics/usageRollupService.js';
 import { dispatchManagedChat, isManagedCredentialRef, managedProviderIdFromRef } from '../../providers/managedProvider.js';
 import { OpenwopError, type RunRecord } from '../../types.js';
 import { resolveSecret } from '../../byok/secretResolver.js';
+import { explicitRefNamesOtherProvider } from '../../aiProviders/credentialRefLadder.js';
+import { CREDENTIAL_PROVIDERS } from '../../aiProviders/aiProvidersHost.js';
 import { resolveCompatDispatch } from '../compatEndpoints.js';
 import { isSubscriptionCredentialRef, resolveSubscriptionCredential, subscriptionDispatchEndpoint, subscriptionProviderOfRef } from '../../byok/subscriptionCredential.js';
 import { assertSubscriptionProviderPermitted } from '../../byok/subscriptionCredentialScope.js';
@@ -140,7 +143,8 @@ function annotateCacheUsage(usage: { cachedReadTokens?: number; cacheWriteTokens
  *  system message, then the prior turns. A prior `agent` turn written by a
  *  DIFFERENT agent than the one now answering is narrative-cast `[Persona]: …`
  *  AND fenced as untrusted (ADR 0665 D2). `personaNameById` supplies the display
- *  names (ADR 0665 D5); this function stays PURE — the caller resolves them.
+ *  names (ADR 0665 D5) and `runDigestById` the ADR 0764 run digests; this
+ *  function stays PURE — the caller resolves both.
  *  A multimodal user turn passes its REAL parts through (the dispatchers convert
  *  per-provider — audio→inlineData/File-API, image→image_url, …); only the
  *  text projection goes into assistant-side narrative casts. */
@@ -149,10 +153,28 @@ export function turnsToMessages(
   scaffold: string,
   answeringAgentId: string | undefined,
   personaNameById?: ReadonlyMap<string, string>,
+  runDigestById?: ReadonlyMap<string, string>,
 ): ChatMessage[] {
   const msgs: ChatMessage[] = [{ role: 'system', content: scaffold }];
   for (const t of turns) {
     if (t.role === 'system') continue; // the open turn — the scaffold supersedes it
+    // ADR 0764 D1 — a run reference renders as its grounded digest (already
+    // fenced where it carries run-derived text), never as the raw
+    // `{"kind":"workflow_run",…}` JSON `asText` would produce. No digest (past the
+    // per-prompt cap, or no resolver) ⇒ say it was not re-read; never guess a status.
+    const runRef = workflowRunRefOf(t);
+    if (runRef) {
+      const text = runDigestById?.get(runRef.runId) ?? notReReadLine(runRef.runId);
+      // A run the user started BEFORE their first message (a `/slug` run on a fresh
+      // chat) would otherwise open the transcript with an assistant message, which
+      // some providers reject. Before any user turn, carry it as a user-role HOST
+      // note — labelled, so it is never read as the user speaking.
+      const beforeFirstUser = !msgs.some((m) => m.role === 'user');
+      msgs.push(beforeFirstUser
+        ? { role: 'user', content: `[Host note — context, not a message from the user]\n${text}` }
+        : { role: 'assistant', content: text });
+      continue;
+    }
     if (t.role === 'user') {
       msgs.push({ role: 'user', content: isContentParts(t.content) ? t.content : asText(t.content) });
     } else {
@@ -265,6 +287,8 @@ export async function dispatchReply(run: RunRecord, messages: ChatMessage[], onD
     const r = await dispatchManagedChat({
       userFacingProvider: managedProviderIdFromRef(credentialRef),
       tenantId: run.tenantId,
+      // ADR 0821 D4 — a plain chat turn's managed spend is attributed to `chat`.
+      featureId: 'chat',
       messages,
       maxTokens: MAX_TOKENS,
       ...(managedActingSubject ? { actingSubject: managedActingSubject } : {}),
@@ -357,6 +381,23 @@ export async function dispatchReply(run: RunRecord, messages: ChatMessage[], onD
   if (!provider) {
     throw new OpenwopError('validation_error', 'Conversation exchange needs a provider for a BYOK credential.', 422, { credentialRef });
   }
+  // ADR 0779 D6 — the per-turn resolver can switch provider (override, stamped
+  // route, tier default) while the run keeps one credentialRef. Refuse a key
+  // named for ANOTHER vendor before it is read, with the refusal the workflow
+  // lane gives (ADR 0712 OQ4), so a Google key never leaves the process for
+  // OpenAI. The code is this function's own `credential_unavailable` (the chat
+  // lane speaks `OpenwopError`; `byok_required_but_unresolved` is an
+  // AiProviderError code the exchange would flatten to a 502), and the reason
+  // matches the workflow lane's. Names only, never a value.
+  const refProvider = explicitRefNamesOtherProvider(provider, credentialRef, CREDENTIAL_PROVIDERS);
+  if (refProvider !== null) {
+    throw new OpenwopError(
+      'credential_unavailable',
+      `The key "${credentialRef}" is a ${refProvider} key, but this turn calls ${provider}, so it was not sent. Choose a ${provider} key, or switch back to ${refProvider}.`,
+      422,
+      { reason: 'explicit_ref_wrong_provider', provider, refProvider, credentialRef },
+    );
+  }
   const apiKey = await resolveSecret(credentialRef, { tenantId: run.tenantId });
   if (!apiKey) {
     throw new OpenwopError(
@@ -404,8 +445,9 @@ export async function dispatchReply(run: RunRecord, messages: ChatMessage[], onD
       return await attempt(m);
     } catch (err) {
       const backoffMs = rateLimitBackoffMs();
-      if (backoffMs === 0 || !isProviderRateLimited(err)) throw err;
-      logger.warn('single_completion_rate_limited_retrying_once', { provider, model: m, backoffMs });
+      if (backoffMs === 0 || !isTransientProviderFailure(err)) throw err;
+      logger.warn(isProviderRateLimited(err) ? 'single_completion_rate_limited_retrying_once' : 'single_completion_unavailable_retrying_once',
+        { provider, model: m, backoffMs, ...providerFailureFields(err) });
       await new Promise((resolve) => setTimeout(resolve, backoffMs));
       return attempt(m);
     }

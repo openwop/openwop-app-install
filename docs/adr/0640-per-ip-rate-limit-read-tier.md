@@ -10,6 +10,10 @@ envelope, keyed on the first `X-Forwarded-For` hop — which behind Cloud Run's
 load balancer is the real client. It was written to blunt cookieless abuse and
 expensive bursts.
 
+> **CORRECTED 2026-10-07 (ADR 0851, #4516):** the first hop is the one the
+> CLIENT writes; Google's front end appends the real address on the right. Keying
+> on it made every per-IP bucket spoofable. The key is now `host/clientIp.ts`.
+
 The first white-label adopter to enable more than a couple of features measured
 what it does to a legitimate user (KickTodo, 2026-09-06, nine `kicktodo-*`
 toggles on): a single SPA page load fans out 20+ authenticated reads

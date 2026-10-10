@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.workflows.starters",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "kind": "workflow-chain",
   "description": "Starter workflow pack (RFC 0013, ADR 0190) — the simple-pipe on-ramp tier: short single-trigger→action recipes (webhook→notify, form→table, schedule→digest, fetch→store) that run in under a minute with zero connections, before you graduate to the AI-agent packs. Trigger-shaped starters begin with a core.trigger.* pass-through entry node: bind them to a live source with a trigger subscription (POST /v1/trigger-subscriptions — webhook, email, or form; RFC 0099) or a Schedule; on a manual run the trigger payload is empty, so bind a source to see them shine. External sends stay behind a human approval gate; in-app notifications are direct. All tenant values are run parameters (replay-deterministic).",
   "author": "openwop",
@@ -10,7 +10,7 @@
   "chains": [
     {
       "chainId": "starters.webhook-notify",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "Webhook → Notification",
       "description": "The hello-world pipe: any webhook event becomes an in-app notification. Run it manually to try the shape; bind a live source via the trigger-subscriptions API and every delivery notifies you with the payload.",
       "parameters": {
@@ -24,10 +24,10 @@
       "capabilities": [],
       "dag": {
         "nodes": [
-          { "id": "hook", "typeId": "core.trigger.webhook", "name": "Webhook event", "position": { "x": 0, "y": 0 }, "config": {
+          { "id": "hook", "typeId": "core.trigger.webhook@1.0.0", "name": "Webhook event", "position": { "x": 0, "y": 0 }, "config": {
             "path": "{{params.webhookPath}}"
           }, "inputs": {} },
-          { "id": "notify", "typeId": "feature.notifications.nodes.notify", "name": "Notify me", "position": { "x": 280, "y": 0 }, "config": { "audience": "tenant" }, "inputs": { "title": "Webhook → Notification" } }
+          { "id": "notify", "typeId": "feature.notifications.nodes.notify@1.0.0", "name": "Notify me", "position": { "x": 280, "y": 0 }, "config": { "audience": "tenant" }, "inputs": { "title": "Webhook → Notification" } }
         ],
         "edges": [
           { "from": "hook", "to": "notify" }
@@ -39,7 +39,7 @@
     },
     {
       "chainId": "starters.form-to-table",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "Form Submission → Table Row",
       "description": "The classic form→spreadsheet shape: every form submission is appended as a row in a durable table, then you get a notification. Run it manually to try the shape; bind a live form source via the trigger-subscriptions API.",
       "parameters": {
@@ -53,9 +53,9 @@
       "capabilities": ["side-effectful"],
       "dag": {
         "nodes": [
-          { "id": "form", "typeId": "core.trigger.form", "name": "Form submission", "position": { "x": 0, "y": 0 }, "config": {}, "inputs": {} },
-          { "id": "insert", "typeId": "core.storage.table-insert", "name": "Append row", "position": { "x": 280, "y": 0 }, "config": { "table": "{{params.table}}" }, "inputs": {} },
-          { "id": "notify", "typeId": "feature.notifications.nodes.notify", "name": "Notify me", "position": { "x": 560, "y": 0 }, "config": { "audience": "tenant" }, "inputs": { "title": "Form Submission \u2192 Table Row" } }
+          { "id": "form", "typeId": "core.trigger.form@1.0.0", "name": "Form submission", "position": { "x": 0, "y": 0 }, "config": {}, "inputs": {} },
+          { "id": "insert", "typeId": "core.storage.table-insert@1.0.0", "name": "Append row", "position": { "x": 280, "y": 0 }, "config": { "table": "{{params.table}}" }, "inputs": {} },
+          { "id": "notify", "typeId": "feature.notifications.nodes.notify@1.0.0", "name": "Notify me", "position": { "x": 560, "y": 0 }, "config": { "audience": "tenant" }, "inputs": { "title": "Form Submission \u2192 Table Row" } }
         ],
         "edges": [
           { "from": "form", "to": "insert" },
@@ -68,7 +68,7 @@
     },
     {
       "chainId": "starters.scheduled-digest",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "Scheduled One-Line Digest",
       "description": "A tiny recurring brief: on each scheduled run, write a one-paragraph digest on your topic and notify you. Pair it with a Schedule to make it recurring — the simplest taste of an AI step inside a pipe.",
       "parameters": {
@@ -85,14 +85,14 @@
       "capabilities": [],
       "dag": {
         "nodes": [
-          { "id": "tick", "typeId": "core.trigger.schedule", "name": "Scheduled tick", "position": { "x": 0, "y": 0 }, "config": {
+          { "id": "tick", "typeId": "core.trigger.schedule@1.0.0", "name": "Scheduled tick", "position": { "x": 0, "y": 0 }, "config": {
             "cron": "{{params.scheduleCron}}"
           }, "inputs": {} },
-          { "id": "digest", "typeId": "core.ai.chatCompletion", "name": "Write one-paragraph digest", "position": { "x": 280, "y": 0 }, "config": { "systemPrompt": "Write a single crisp paragraph (max 80 words) on: {{params.topic}}. Plain text, no preamble.",
+          { "id": "digest", "typeId": "core.ai.chatCompletion@1.0.0", "name": "Write one-paragraph digest", "position": { "x": 280, "y": 0 }, "config": { "systemPrompt": "Write a single crisp paragraph (max 80 words) on: {{params.topic}}. Plain text, no preamble.",
             "provider": "{{params.provider}}",
             "model": "{{params.model}}"
           }, "inputs": {} },
-          { "id": "notify", "typeId": "feature.notifications.nodes.notify", "name": "Notify me", "position": { "x": 560, "y": 0 }, "config": { "audience": "tenant" }, "inputs": { "title": "Scheduled One-Line Digest" } }
+          { "id": "notify", "typeId": "feature.notifications.nodes.notify@1.0.0", "name": "Notify me", "position": { "x": 560, "y": 0 }, "config": { "audience": "tenant" }, "inputs": { "title": "Scheduled One-Line Digest" } }
         ],
         "edges": [
           { "from": "tick", "to": "digest" },
@@ -105,7 +105,7 @@
     },
     {
       "chainId": "starters.fetch-to-storage",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "Fetch URL → Blob Storage",
       "description": "Save a file from any URL into blob storage and get notified with the stored reference — the classic save-the-file pipe.",
       "parameters": {
@@ -120,9 +120,9 @@
       "capabilities": ["side-effectful"],
       "dag": {
         "nodes": [
-          { "id": "fetch", "typeId": "core.openwop.http.fetch", "name": "Fetch file", "position": { "x": 0, "y": 0 }, "config": { "url": "{{params.url}}" }, "inputs": {} },
-          { "id": "store", "typeId": "core.storage.blob-put", "name": "Store blob", "position": { "x": 280, "y": 0 }, "config": { "bucket": "{{params.bucket}}" }, "inputs": {} },
-          { "id": "notify", "typeId": "feature.notifications.nodes.notify", "name": "Notify me", "position": { "x": 560, "y": 0 }, "config": { "audience": "tenant" }, "inputs": { "title": "Fetch URL → Blob Storage" } }
+          { "id": "fetch", "typeId": "core.openwop.http.fetch@1.0.0", "name": "Fetch file", "position": { "x": 0, "y": 0 }, "config": { "url": "{{params.url}}" }, "inputs": {} },
+          { "id": "store", "typeId": "core.storage.blob-put@1.0.0", "name": "Store blob", "position": { "x": 280, "y": 0 }, "config": { "bucket": "{{params.bucket}}" }, "inputs": {} },
+          { "id": "notify", "typeId": "feature.notifications.nodes.notify@1.0.0", "name": "Notify me", "position": { "x": 560, "y": 0 }, "config": { "audience": "tenant" }, "inputs": { "title": "Fetch URL → Blob Storage" } }
         ],
         "edges": [
           { "from": "fetch", "to": "store" },
@@ -135,7 +135,7 @@
     },
     {
       "chainId": "starters.verified-webhook-router",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "Verified Webhook Router",
       "description": "A webhook pipe that checks the sender's signature first (Stripe / GitHub / Slack / raw HMAC — the secret stays host-side, never a parameter): verified events notify you; failed signatures are dropped. The safe way to wire third-party webhooks.",
       "parameters": {
@@ -150,13 +150,13 @@
       "capabilities": [],
       "dag": {
         "nodes": [
-          { "id": "hook", "typeId": "core.trigger.webhook", "name": "Webhook event", "position": { "x": 0, "y": 80 }, "config": {
+          { "id": "hook", "typeId": "core.trigger.webhook@1.0.0", "name": "Webhook event", "position": { "x": 0, "y": 80 }, "config": {
             "path": "{{params.webhookPath}}"
           }, "inputs": {} },
-          { "id": "verify", "typeId": "core.openwop.http.webhook-verify", "name": "Verify signature", "position": { "x": 280, "y": 80 }, "config": { "family": "{{params.family}}" }, "inputs": {} },
-          { "id": "route", "typeId": "core.flow.if", "name": "Signature valid?", "position": { "x": 560, "y": 80 }, "config": {"predicate": {"path": "valid", "op": "truthy"}}, "inputs": {} },
-          { "id": "notify", "typeId": "feature.notifications.nodes.notify", "name": "Notify (verified)", "position": { "x": 840, "y": 0 }, "config": { "audience": "tenant" }, "inputs": { "title": "Verified Webhook Router" } },
-          { "id": "drop", "typeId": "core.flow.noop", "name": "Drop (failed signature)", "position": { "x": 840, "y": 160 }, "config": {}, "inputs": {} }
+          { "id": "verify", "typeId": "core.openwop.http.webhook-verify@1.0.0", "name": "Verify signature", "position": { "x": 280, "y": 80 }, "config": { "family": "{{params.family}}" }, "inputs": {} },
+          { "id": "route", "typeId": "core.flow.if@1.0.0", "name": "Signature valid?", "position": { "x": 560, "y": 80 }, "config": {"predicate": {"path": "valid", "op": "truthy"}}, "inputs": {} },
+          { "id": "notify", "typeId": "feature.notifications.nodes.notify@1.0.0", "name": "Notify (verified)", "position": { "x": 840, "y": 0 }, "config": { "audience": "tenant" }, "inputs": { "title": "Verified Webhook Router" } },
+          { "id": "drop", "typeId": "core.flow.noop@1.0.0", "name": "Drop (failed signature)", "position": { "x": 840, "y": 160 }, "config": {}, "inputs": {} }
         ],
         "edges": [
           { "from": "hook", "to": "verify" },
@@ -171,7 +171,7 @@
     },
     {
       "chainId": "starters.webhook-to-slack",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "label": "Webhook → Summarize → Slack",
       "description": "Turn any webhook event into a one-line summary and post it to Slack — behind a human approval, because it leaves the building. Approve a few, then decide if you want it always-on.",
       "parameters": {
@@ -188,16 +188,16 @@
       "capabilities": ["side-effectful"],
       "dag": {
         "nodes": [
-          { "id": "hook", "typeId": "core.trigger.webhook", "name": "Webhook event", "position": { "x": 0, "y": 0 }, "config": {
+          { "id": "hook", "typeId": "core.trigger.webhook@1.0.0", "name": "Webhook event", "position": { "x": 0, "y": 0 }, "config": {
             "path": "{{params.webhookPath}}"
           }, "inputs": {} },
-          { "id": "summarize", "typeId": "core.ai.chatCompletion", "name": "One-line summary", "position": { "x": 280, "y": 0 }, "config": { "systemPrompt": "Summarize this event payload in one plain-text line a teammate can scan in Slack. No markdown, no preamble.",
+          { "id": "summarize", "typeId": "core.ai.chatCompletion@1.0.0", "name": "One-line summary", "position": { "x": 280, "y": 0 }, "config": { "systemPrompt": "Summarize this event payload in one plain-text line a teammate can scan in Slack. No markdown, no preamble.",
             "provider": "{{params.provider}}",
             "model": "{{params.model}}"
           }, "inputs": {} },
-          { "id": "approve", "typeId": "core.chat.approvalGate", "name": "Approve before post", "position": { "x": 560, "y": 0 }, "config": { "title": "Approve this summary before it posts to Slack", "actions": ["approve", "reject"] }, "inputs": {} },
-          { "id": "gate-reject", "typeId": "core.flow.noop", "name": "Rejected — not posted", "position": { "x": 840, "y": 160 }, "config": {}, "inputs": {} },
-          { "id": "post", "typeId": "core.openwop.integration.slack-message", "name": "Post to Slack", "position": { "x": 840, "y": 0 }, "config": { "channel": "{{params.channel}}" }, "inputs": {} }
+          { "id": "approve", "typeId": "core.chat.approvalGate@1.1.0", "name": "Approve before post", "position": { "x": 560, "y": 0 }, "config": { "title": "Approve this summary before it posts to Slack", "actions": ["approve", "reject"] }, "inputs": {} },
+          { "id": "gate-reject", "typeId": "core.flow.noop@1.0.0", "name": "Rejected — not posted", "position": { "x": 840, "y": 160 }, "config": {}, "inputs": {} },
+          { "id": "post", "typeId": "core.openwop.integration.slack-message@1.0.0", "name": "Post to Slack", "position": { "x": 840, "y": 0 }, "config": { "channel": "{{params.channel}}" }, "inputs": {} }
         ],
         "edges": [
           { "from": "hook", "to": "summarize" },

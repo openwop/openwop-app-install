@@ -51,7 +51,7 @@ const call = async (method: string, path: string, body?: unknown): Promise<{ sta
 const settleRun = async (runId: string): Promise<string> => {
   let snap: { status?: string; error?: unknown } = {};
   for (let i = 0; i < 200; i++) {
-    snap = (await call('GET', `/v1/runs/${runId}`)).body ?? snap;
+    snap = (await call('GET', `/runs/${runId}`)).body ?? snap;
     if (['completed', 'failed', 'cancelled'].includes(snap.status ?? '')) break;
     await new Promise((r) => setTimeout(r, 25));
   }
@@ -80,9 +80,9 @@ afterAll(async () => { resetMockPrograms(); await new Promise<void>((res) => ser
 
 describe('ADR 0673 D1 — a replay :fork must not author a second workflow', () => {
   it('live run authors ONE workflow; a DIVERGED replay fork still leaves ONE, and persist reports the SOURCE id', async () => {
-    const login = await call('POST', '/v1/host/openwop-app/test/login', { email: 'wfa-replay@acme.test', tenantId: TENANT });
+    const login = await call('POST', '/host/openwop-app/test/login', { email: 'wfa-replay@acme.test', tenantId: TENANT });
     expect(login.status, JSON.stringify(login.body)).toBe(201);
-    const org = await call('POST', '/v1/host/openwop-app/orgs', { name: 'Acme' });
+    const org = await call('POST', '/host/openwop-app/orgs', { name: 'Acme' });
     expect(org.status, JSON.stringify(org.body)).toBe(201);
     const orgId = org.body.orgId as string;
 
@@ -100,7 +100,7 @@ describe('ADR 0673 D1 — a replay :fork must not author a second workflow', () 
 
     // ── the live run authors definition A ────────────────────────────────────
     program(defWith('authored.A'));
-    const create = await call('POST', '/v1/runs', { workflowId, inputs: {} });
+    const create = await call('POST', '/runs', { workflowId, inputs: {} });
     expect(create.status, JSON.stringify(create.body)).toBe(201);
     const runId = create.body.runId as string;
     expect(await settleRun(runId)).toBe('completed');
@@ -111,7 +111,7 @@ describe('ADR 0673 D1 — a replay :fork must not author a second workflow', () 
     // ── the fork is DIVERGED: a pending program makes the invocation-log
     //    fallback skip, so the fork's `draft` returns B, not A ───────────────
     program(defWith('authored.B'));
-    const fork = await call('POST', `/v1/runs/${runId}:fork`, { mode: 'replay' });
+    const fork = await call('POST', `/runs/${runId}:fork`, { mode: 'replay' });
     expect(fork.status, JSON.stringify(fork.body)).toBe(201);
     const forkRunId = fork.body.runId as string;
     expect(forkRunId).not.toBe(runId);

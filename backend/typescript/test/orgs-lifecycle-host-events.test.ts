@@ -25,7 +25,31 @@
  *     the same site, a flag) and NOT on the restore-on-failure path;
  *   - `revoked` fires from the admin route on a row that existed — a 404 revoke
  *     emits nothing; `declined` fires on the CAS-won transition only — an
- *     idempotent re-decline emits nothing.
+ *     idempotent re-decline emits nothing;
+ *   - the prod no-sender refusal is the PRECHECK's (asserted by its own copy):
+ *     without the precheck the D5 rollback yields the same 422/no_sender/no
+ *     row/no event, so only the message tells "refused before mint" apart.
+ *
+ * Covered ELSEWHERE (cut from this file, red under the same break): the blanket
+ * PII-key sweep across all four event types → implied by the exact `toEqual`
+ * payload pin in each per-event case below (an added key or an email/token
+ * value fails `toEqual`).
+ *
+ * Sabotage that turns it red (`src/features/orgs/invitationsService.ts` unless
+ * noted): `superseded: superseded.length > 0` → `false`; the `previousStatus`
+ * ternary → `'pending'`; an `invitationRevoked` emitted from
+ * `supersedePriorInvitations`; `{ replace: false }` → `true`; the D5 rollback
+ * `if` disabled, its `revokeInvitation` dropped, or `priorInviteStillValid`
+ * dropped; the no-sender precheck disabled; `alreadyMember` forced false; an
+ * `accepted` emit on the restore path; `routes.ts` revoke emit dropped or its
+ * 404 swallowed; an `invitationDeclined` on the idempotent re-decline;
+ * `emit.ts` an extra payload key.
+ *
+ * BARRIER. `emitHostEvent` calls `deliverWebhooks` before its first await, and
+ * on the route lane every emit precedes the HTTP response — so `delivered` is
+ * complete when `fetch` resolves. Only the binding loop (→ `startRun`) runs
+ * after; over memory storage it is a pure microtask chain, so `settle()` (a few
+ * macrotask turns) drains it without a wall-clock sleep.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import http from 'node:http';
@@ -63,38 +87,43 @@ let server: http.Server;
 let storage: Storage;
 let delivered: HostEventEnvelope[] = [];
 let startRunCalls: Array<{ tenantId: string; workflowId: string; metadata?: Record<string, unknown> }> = [];
-const settle = () => new Promise((r) => setTimeout(r, 15));
+/** Drain the fire-and-forget binding loop (see BARRIER) — no wall-clock sleep. */
+const settle = async (): Promise<void> => { for (let i = 0; i < 5; i++) await new Promise<void>((r) => setImmediate(r)); };
 const ofType = (t: string) => delivered.filter((e) => e.type === t);
 const ALL_EVENTS = [INVITATION_CREATED_EVENT, INVITATION_ACCEPTED_EVENT, INVITATION_REVOKED_EVENT, INVITATION_DECLINED_EVENT];
-/** The keys the emitter must never place in a payload. */
-const FORBIDDEN_KEY = /email|token|hash|displayname|principalid/i;
-
-interface Res { status: number; body: any }
+interface InviteRow { inviteId: string; role: string; tenantId: string }
+interface Body {
+  token?: string; invite?: InviteRow; invites?: InviteRow[]; delivery?: string;
+  orgId?: string; tenantId?: string; memberId?: string; role?: string; status?: string; declinedAt?: string;
+  user?: { userId: string; email: string }; message?: string; details?: Record<string, unknown>;
+}
+interface Res { status: number; body: Body }
 function client(): { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res> } {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const sc of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(sc); if (m) cookie = m[1]; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    const parsed: unknown = res.status === 204 ? {} : await res.json().catch(() => ({}));
+    return { status: res.status, body: (parsed ?? {}) as Body };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), del: (p) => call('DELETE', p) };
 }
 let n = 0;
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
 async function signup(c: ReturnType<typeof client>, email: string): Promise<{ userId: string; email: string }> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email });
+  const r = await c.post('/host/openwop-app/test/login', { email });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  return r.body.user;
+  return r.body.user!;
 }
 /** An owner + an org in the owner's personal tenant (the implicit-manager lane). */
 async function ownerOrg(): Promise<{ owner: ReturnType<typeof client>; orgId: string; tenantId: string }> {
   const owner = client();
   await signup(owner, uniqEmail('owner'));
-  const org = (await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' })).body;
+  const org = (await owner.post('/host/openwop-app/orgs', { name: 'Acme' })).body;
   expect(org.orgId).toBeTruthy();
-  return { owner, orgId: org.orgId as string, tenantId: org.tenantId as string };
+  return { owner, orgId: org.orgId!, tenantId: org.tenantId! };
 }
-const invitesPath = (orgId: string) => `/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/invites`;
+const invitesPath = (orgId: string) => `/host/openwop-app/orgs/${encodeURIComponent(orgId)}/invites`;
 const bind = (tenantId: string, eventType: string, workflowId: string) =>
   createHostEventBinding({ tenantId, eventType, workflowId, createdBy: 'test' });
 
@@ -143,11 +172,11 @@ describe('host.orgs.invitation.created — ONE site (createInvitationAndDeliver)
     const evs = ofType(INVITATION_CREATED_EVENT);
     expect(evs).toHaveLength(1);
     expect(Object.keys(evs[0]!.payload).sort()).toEqual(['delivery', 'inviteId', 'orgId', 'role', 'superseded', 'tenantId']);
-    expect(evs[0]!.payload).toEqual({ inviteId: inv.body.invite.inviteId, orgId, tenantId, role: 'editor', delivery: 'skipped', superseded: false });
+    expect(evs[0]!.payload).toEqual({ inviteId: inv.body.invite!.inviteId, orgId, tenantId, role: 'editor', delivery: 'skipped', superseded: false });
     expect(evs[0]!.tenantId).toBe(tenantId);
     expect('origin' in evs[0]!).toBe(false); // the route lane stamps no origin
     expect(JSON.stringify(evs[0]!.payload)).not.toContain(email);
-    expect(JSON.stringify(evs[0]!.payload)).not.toContain(inv.body.token);
+    expect(JSON.stringify(evs[0]!.payload)).not.toContain(inv.body.token!);
     expect(startRunCalls.map((c) => c.workflowId)).toEqual(['wf:welcome']);
     expect(startRunCalls[0]!.metadata?.triggerData).toEqual({ eventName: INVITATION_CREATED_EVENT, payload: evs[0]!.payload });
   });
@@ -162,17 +191,17 @@ describe('host.orgs.invitation.created — ONE site (createInvitationAndDeliver)
     await settle();
     const evs = ofType(INVITATION_CREATED_EVENT);
     expect(evs).toHaveLength(2);
-    expect(evs[0]!.payload).toMatchObject({ inviteId: first.body.invite.inviteId, superseded: false });
+    expect(evs[0]!.payload).toMatchObject({ inviteId: first.body.invite!.inviteId, superseded: false });
     expect(evs[0]!.payload).not.toHaveProperty('previousStatus');
-    expect(evs[1]!.payload).toMatchObject({ inviteId: second.body.invite.inviteId, role: 'admin', superseded: true, previousStatus: 'pending' });
+    expect(evs[1]!.payload).toMatchObject({ inviteId: second.body.invite!.inviteId, role: 'admin', superseded: true, previousStatus: 'pending' });
     // Replace-at-mint is a row death, never a business event.
     expect(ofType(INVITATION_REVOKED_EVENT)).toEqual([]);
     expect(startRunCalls).toEqual([]);
     const list = await owner.get(invitesPath(orgId));
-    expect(list.body.invites.map((i: { inviteId: string }) => i.inviteId)).toEqual([second.body.invite.inviteId]);
+    expect(list.body.invites!.map((i: { inviteId: string }) => i.inviteId)).toEqual([second.body.invite!.inviteId]);
     // The first token is dead; the second previews.
-    expect((await client().get(`/v1/host/openwop-app/orgs/invitations/preview?token=${encodeURIComponent(first.body.token)}`)).status).toBe(400);
-    expect((await client().get(`/v1/host/openwop-app/orgs/invitations/preview?token=${encodeURIComponent(second.body.token)}`)).status).toBe(200);
+    expect((await client().get(`/host/openwop-app/orgs/invitations/preview?token=${encodeURIComponent(first.body.token!)}`)).status).toBe(400);
+    expect((await client().get(`/host/openwop-app/orgs/invitations/preview?token=${encodeURIComponent(second.body.token!)}`)).status).toBe(200);
   });
 
   it('a re-mint over a DECLINED row carries previousStatus:"declined" (ADR 0564 open question 1: no cooldown)', async () => {
@@ -181,7 +210,7 @@ describe('host.orgs.invitation.created — ONE site (createInvitationAndDeliver)
     const first = await owner.post(invitesPath(orgId), { email, role: 'viewer' });
     const bob = client();
     await signup(bob, email);
-    expect((await bob.post('/v1/host/openwop-app/orgs/invitations/decline', { token: first.body.token })).status).toBe(200);
+    expect((await bob.post('/host/openwop-app/orgs/invitations/decline', { token: first.body.token })).status).toBe(200);
     const second = await owner.post(invitesPath(orgId), { email, role: 'viewer' });
     expect(second.status).toBe(201);
     await settle();
@@ -214,8 +243,8 @@ describe('host.orgs.invitation.created — ONE site (createInvitationAndDeliver)
     expect(startRunCalls).toHaveLength(1);
     // The prior invite is untouched: still listed (alone), still previews, still accepts.
     const list = await owner.get(invitesPath(orgId));
-    expect(list.body.invites.map((i: { inviteId: string; role: string }) => [i.inviteId, i.role])).toEqual([[prior.body.invite.inviteId, 'viewer']]);
-    const preview = await client().get(`/v1/host/openwop-app/orgs/invitations/preview?token=${encodeURIComponent(prior.body.token)}`);
+    expect(list.body.invites!.map((i: { inviteId: string; role: string }) => [i.inviteId, i.role])).toEqual([[prior.body.invite!.inviteId, 'viewer']]);
+    const preview = await client().get(`/host/openwop-app/orgs/invitations/preview?token=${encodeURIComponent(prior.body.token!)}`);
     expect(preview.status, JSON.stringify(preview.body)).toBe(200);
     expect(preview.body.role).toBe('viewer');
   });
@@ -228,7 +257,12 @@ describe('host.orgs.invitation.created — ONE site (createInvitationAndDeliver)
     try { r = await owner.post(invitesPath(orgId), { email: uniqEmail('nosender'), role: 'viewer' }); } finally { process.env.NODE_ENV = 'test'; }
     expect(r.status).toBe(422);
     expect(r.body.details).toMatchObject({ reason: 'undeliverable', cause: 'no_sender' });
-    expect(r.body.details.priorInviteStillValid).toBeUndefined();
+    expect(r.body.details!.priorInviteStillValid).toBeUndefined();
+    // The PRECHECK's own copy — the rollback lane says "your email connection is
+    // not available". This is the only observable of "refused BEFORE any mint".
+    // It also pins review F5 (the copy names a surface that EXISTS — the Email
+    // page); `orgs-route.test.ts` carried that half until this case covered it.
+    expect(r.body.message).toMatch(/no email sender is configured for this organization\. Set one on the Email page/);
     await settle();
     // (`delivered` also carries the signup's `host.users.user.provisioned`.)
     expect(delivered.filter((e) => ALL_EVENTS.includes(e.type))).toEqual([]);
@@ -245,22 +279,22 @@ describe('host.orgs.invitation.accepted — ONE site after the claim/restore try
     const inv = await owner.post(invitesPath(orgId), { email, role: 'editor' });
     const bobC = client();
     const bob = await signup(bobC, email);
-    const acc = await bobC.post('/v1/host/openwop-app/orgs/invitations/accept', { token: inv.body.token });
+    const acc = await bobC.post('/host/openwop-app/orgs/invitations/accept', { token: inv.body.token });
     expect(acc.status, JSON.stringify(acc.body)).toBe(201);
     await settle();
     const evs = ofType(INVITATION_ACCEPTED_EVENT);
     expect(evs).toHaveLength(1);
     expect(Object.keys(evs[0]!.payload).sort()).toEqual(['alreadyMember', 'inviteId', 'memberId', 'orgId', 'role', 'tenantId', 'userId']);
-    expect(evs[0]!.payload).toEqual({ inviteId: inv.body.invite.inviteId, orgId, tenantId, memberId: acc.body.memberId, userId: bob.userId, role: 'editor', alreadyMember: false });
+    expect(evs[0]!.payload).toEqual({ inviteId: inv.body.invite!.inviteId, orgId, tenantId, memberId: acc.body.memberId, userId: bob.userId, role: 'editor', alreadyMember: false });
     expect(startRunCalls.map((c) => c.workflowId)).toEqual(['wf:onboard']);
 
     // A second invite accepted by an existing member: the SAME site, `alreadyMember: true`.
     const inv2 = await owner.post(invitesPath(orgId), { email, role: 'admin' });
-    const acc2 = await bobC.post('/v1/host/openwop-app/orgs/invitations/accept', { token: inv2.body.token });
+    const acc2 = await bobC.post('/host/openwop-app/orgs/invitations/accept', { token: inv2.body.token });
     expect(acc2.status).toBe(200);
     await settle();
     expect(ofType(INVITATION_ACCEPTED_EVENT)).toHaveLength(2);
-    expect(ofType(INVITATION_ACCEPTED_EVENT)[1]!.payload).toMatchObject({ inviteId: inv2.body.invite.inviteId, memberId: acc.body.memberId, alreadyMember: true });
+    expect(ofType(INVITATION_ACCEPTED_EVENT)[1]!.payload).toMatchObject({ inviteId: inv2.body.invite!.inviteId, memberId: acc.body.memberId, alreadyMember: true });
     expect(startRunCalls).toHaveLength(2);
   });
 
@@ -272,12 +306,12 @@ describe('host.orgs.invitation.accepted — ONE site after the claim/restore try
     const bobC = client();
     await signup(bobC, email);
     createMemberMock.mockRejectedValueOnce(new Error('db down'));
-    const failed = await bobC.post('/v1/host/openwop-app/orgs/invitations/accept', { token: inv.body.token });
+    const failed = await bobC.post('/host/openwop-app/orgs/invitations/accept', { token: inv.body.token });
     expect(failed.status).toBe(500);
     await settle();
     expect(ofType(INVITATION_ACCEPTED_EVENT)).toEqual([]);
     expect(startRunCalls).toEqual([]);
-    const retry = await bobC.post('/v1/host/openwop-app/orgs/invitations/accept', { token: inv.body.token });
+    const retry = await bobC.post('/host/openwop-app/orgs/invitations/accept', { token: inv.body.token });
     expect(retry.status, JSON.stringify(retry.body)).toBe(201);
     await settle();
     expect(ofType(INVITATION_ACCEPTED_EVENT)).toHaveLength(1);
@@ -290,16 +324,16 @@ describe('host.orgs.invitation.revoked — the admin route only, on a row that e
     const { owner, orgId, tenantId } = await ownerOrg();
     await bind(tenantId, INVITATION_REVOKED_EVENT, 'wf:audit');
     const inv = await owner.post(invitesPath(orgId), { email: uniqEmail('rev'), role: 'viewer' });
-    const del = await owner.del(`${invitesPath(orgId)}/${encodeURIComponent(inv.body.invite.inviteId)}`);
+    const del = await owner.del(`${invitesPath(orgId)}/${encodeURIComponent(inv.body.invite!.inviteId)}`);
     expect(del.status).toBe(204);
     await settle();
     const evs = ofType(INVITATION_REVOKED_EVENT);
     expect(evs).toHaveLength(1);
     expect(Object.keys(evs[0]!.payload).sort()).toEqual(['inviteId', 'orgId', 'tenantId']);
-    expect(evs[0]!.payload).toEqual({ inviteId: inv.body.invite.inviteId, orgId, tenantId });
+    expect(evs[0]!.payload).toEqual({ inviteId: inv.body.invite!.inviteId, orgId, tenantId });
     expect(startRunCalls.map((c) => c.workflowId)).toEqual(['wf:audit']);
     // Already gone → 404, no second event.
-    expect((await owner.del(`${invitesPath(orgId)}/${encodeURIComponent(inv.body.invite.inviteId)}`)).status).toBe(404);
+    expect((await owner.del(`${invitesPath(orgId)}/${encodeURIComponent(inv.body.invite!.inviteId)}`)).status).toBe(404);
     await settle();
     expect(ofType(INVITATION_REVOKED_EVENT)).toHaveLength(1);
     expect(startRunCalls).toHaveLength(1);
@@ -314,41 +348,17 @@ describe('host.orgs.invitation.declined — the CAS-won transition only', () => 
     const inv = await owner.post(invitesPath(orgId), { email, role: 'viewer' });
     const bobC = client();
     await signup(bobC, email);
-    const d1 = await bobC.post('/v1/host/openwop-app/orgs/invitations/decline', { token: inv.body.token });
+    const d1 = await bobC.post('/host/openwop-app/orgs/invitations/decline', { token: inv.body.token });
     expect(d1.status, JSON.stringify(d1.body)).toBe(200);
-    expect(d1.body).toMatchObject({ inviteId: inv.body.invite.inviteId, orgId, status: 'declined' });
-    const d2 = await bobC.post('/v1/host/openwop-app/orgs/invitations/decline', { token: inv.body.token });
+    expect(d1.body).toMatchObject({ inviteId: inv.body.invite!.inviteId, orgId, status: 'declined' });
+    const d2 = await bobC.post('/host/openwop-app/orgs/invitations/decline', { token: inv.body.token });
     expect(d2.status).toBe(200);
     expect(d2.body.declinedAt).toBe(d1.body.declinedAt);
     await settle();
     const evs = ofType(INVITATION_DECLINED_EVENT);
     expect(evs).toHaveLength(1);
     expect(Object.keys(evs[0]!.payload).sort()).toEqual(['inviteId', 'orgId', 'tenantId']);
-    expect(evs[0]!.payload).toEqual({ inviteId: inv.body.invite.inviteId, orgId, tenantId });
+    expect(evs[0]!.payload).toEqual({ inviteId: inv.body.invite!.inviteId, orgId, tenantId });
     expect(startRunCalls.map((c) => c.workflowId)).toEqual(['wf:notify-inviter']);
-  });
-});
-
-describe('payload discipline — no PII-shaped key or value ever leaves the emitter', () => {
-  it('across every captured event of all four types, no key matches email|token|hash and no value carries the recipient address', async () => {
-    const { owner, orgId } = await ownerOrg();
-    const email = uniqEmail('pii.probe');
-    const inv = await owner.post(invitesPath(orgId), { email, role: 'viewer' });
-    const bobC = client();
-    await signup(bobC, email);
-    await bobC.post('/v1/host/openwop-app/orgs/invitations/decline', { token: inv.body.token });
-    const inv2 = await owner.post(invitesPath(orgId), { email, role: 'viewer' });
-    await bobC.post('/v1/host/openwop-app/orgs/invitations/accept', { token: inv2.body.token });
-    const inv3 = await owner.post(invitesPath(orgId), { email, role: 'viewer' });
-    await owner.del(`${invitesPath(orgId)}/${encodeURIComponent(inv3.body.invite.inviteId)}`);
-    await settle();
-    const ours = delivered.filter((e) => e.type.startsWith('host.orgs.'));
-    expect(new Set(ours.map((e) => e.type))).toEqual(new Set(ALL_EVENTS));
-    for (const ev of ours) {
-      for (const key of Object.keys(ev.payload)) expect(key, `${ev.type} leaked key ${key}`).not.toMatch(FORBIDDEN_KEY);
-      const json = JSON.stringify(ev.payload);
-      expect(json).not.toContain('pii.probe');
-      for (const t of [inv.body.token, inv2.body.token, inv3.body.token]) expect(json).not.toContain(t);
-    }
   });
 });

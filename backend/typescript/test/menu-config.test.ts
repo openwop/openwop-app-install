@@ -49,12 +49,12 @@ async function normalClient(): Promise<(method: string, path: string, body?: unk
     }
     return res;
   };
-  const login = await call('POST', '/v1/host/openwop-app/test/login', { email: `mc-${n++}@x.test` });
+  const login = await call('POST', '/host/openwop-app/test/login', { email: `mc-${n++}@x.test` });
   expect(login.status).toBe(201);
   return call;
 }
 
-const BASE_PATH = '/v1/host/openwop-app/menu-config';
+const BASE_PATH = '/host/openwop-app/menu-config';
 
 describe('menu-config — authentication', () => {
   it('GET for an anonymous caller returns its own (empty) tenant layer — never a 401', async () => {

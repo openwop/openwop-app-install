@@ -62,9 +62,9 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-const usage = () => `/v1/host/openwop-app/usage/orgs/${wsTenant}/rollup`;
-const leaderboard = () => `/v1/host/openwop-app/evals/orgs/${wsTenant}/leaderboard`;
-const rating = () => `/v1/host/openwop-app/evals/orgs/${wsTenant}/arena/rating?model=gpt-x`;
+const usage = () => `/host/openwop-app/usage/orgs/${wsTenant}/rollup`;
+const leaderboard = () => `/host/openwop-app/evals/orgs/${wsTenant}/leaderboard`;
+const rating = () => `/host/openwop-app/evals/orgs/${wsTenant}/arena/rating?model=gpt-x`;
 
 describe('UAC-1/EVC-1 — admin-tier reads gate on host:members:manage, not workspace:read', () => {
   it('Usage rollup: viewer + editor REFUSED (403 forbidden_scope), admin passes (200)', async () => {

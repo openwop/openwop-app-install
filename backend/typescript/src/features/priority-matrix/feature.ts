@@ -27,12 +27,16 @@ import { registerTenantPurgeHook } from '../../host/hostExtPersistence.js';
 import { registerPriorityMatrixRoutes } from './routes.js';
 import { registerPriorityMatrixErasure } from './erasure.js';
 import { buildPriorityMatrixSurface } from './surface.js';
-import { purgeTenantPriorityMatrix, registerPriorityMatrixKanbanHooks } from './priorityMatrixService.js';
+import { purgeTenantPriorityMatrix, registerPriorityMatrixKanbanHooks, listLists, deleteList } from './priorityMatrixService.js';
+import { registerSubjectDependent } from '../../host/subjectDependents.js';
 import { registerPriorityMatrixAgentTools } from './agentTools.js';
+import { registerFeatureDataExporter } from '../../host/featureDataExport.js';
+import { exportPriorityMatrixData } from './dataExport.js';
 
 export const priorityMatrixFeature: BackendFeature = {
   id: 'priority-matrix',
   registerRoutes: (deps) => {
+    registerFeatureDataExporter('priority-matrix', exportPriorityMatrixData); // ADR 0820 §7 — read-only export, served after a plan lapse
     // CFP-1 / ADR 0058 §chat-drivability — the Prioritization Analyst's REAL
     // conversational tools (three surface-backed reads + three proposal-safe
     // surface writes), the ADR 0308 D2 feature-registered-builtin seam.
@@ -44,6 +48,20 @@ export const priorityMatrixFeature: BackendFeature = {
     // either ratchet can see. Registered unconditionally: an erasure must not depend on a
     // feature toggle being on today.
     registerPriorityMatrixErasure();
+    // ADR 0839 D2 — a list scoped to a project goes with the project (its own board,
+    // scores, votes, sessions, intake and comments ride `deleteList`'s cascade). Every
+    // door to such a list asks the project, so after the project is gone nobody could
+    // reach it to delete it. Unconditional, like the eraser.
+    registerSubjectDependent('project', 'priorityLists', {
+      count: async (tenantId, subject) => (await listLists(tenantId)).filter((l) => l.projectId === subject.id).length,
+      purge: async (tenantId, subject) => {
+        let n = 0;
+        for (const l of (await listLists(tenantId)).filter((x) => x.projectId === subject.id)) {
+          if (await deleteList(tenantId, l.id)) n += 1;
+        }
+        return n;
+      },
+    });
     // PMXWF-1 (ADR 0590) — tenant-TEARDOWN purge pre-hook: five overlay
     // collections are tenant-resolvable only through the list rows the generic
     // `purgeTenantHostExt` walk deletes, so the hook sweeps them FIRST.
@@ -60,15 +78,15 @@ export const priorityMatrixFeature: BackendFeature = {
     id: 'priority-matrix',
     label: 'Priority Matrix',
     description:
-      'Capture ideas and project requests into named priority lists, score them against a configurable weighted criteria set (1–10 slider weights; a Weighted-Scoring engine with WSJF / RICE / ICE / Value-Effort presets), and rank them. A planning session turns a selection into a meeting agenda. Statuses render as a Kanban board (it reuses host.kanban — an idea is a card; no parallel board). Workspace-scoped by default; a project id scopes a list to a project. ON by default (ADR 0229).',
+      'Capture ideas and project requests into named priority lists, score them against a configurable weighted criteria set (1–10 slider weights; a Weighted-Scoring engine with WSJF / RICE / ICE / Value-Effort presets), and rank them. A planning session turns a selection into a meeting agenda. Statuses render as a Kanban board (it reuses host.kanban — an idea is a card; no parallel board). Workspace-scoped by default; a project id scopes a list to a project.',
     category: 'Leadership',
     status: 'on',
     bucketUnit: 'tenant',
     salt: 'priority-matrix',
   },
   requiredPacks: [
-    { name: 'feature.priority-matrix.nodes', version: '1.5.0' },
-    { name: 'feature.priority-matrix.agents', version: '1.0.1' },
+    { name: 'feature.priority-matrix.nodes', version: '1.5.1' },
+    { name: 'vendor.openwop-app.priority-matrix.agents', version: '1.0.2' },
   ],
   // ADR 0194 Phase 5 — a SOFT dependency (advisory, never a lock): the planning
   // agenda composes the Documents `board-agenda` kind (ADR 0053) when `documents`

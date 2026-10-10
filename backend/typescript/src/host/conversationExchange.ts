@@ -21,6 +21,8 @@
  * exchange/* module imports this file).
  */
 
+import { ManagedProviderError } from '../providers/managedProvider.js';
+import { notifyHumanChatMessage } from './humanChatMessageObservers.js';
 import { getEventLog } from '../executor/eventLog.js';
 import { type ResolvedAgentManifest } from '../executor/agentRegistry.js';
 import { composeChatContext, groundingHonestyNotice } from './chatContext.js';
@@ -41,12 +43,14 @@ import type { AgentEvent } from './agentDispatch.js';
 import type { ContentPart } from '../providers/dispatch.js';
 import type { ProviderPolicyResolver } from './index.js';
 import type { Storage } from '../storage/storage.js';
+import { listSessionRuns, mergeSessionRunTurns, renderRunDigests, resolveRunDigests, workflowRunRefOf, type RunRef } from './exchange/runDigests.js';
 import { parseResolveBody, validateExchangeContent } from './exchange/validateTurn.js';
 import { authorizeConversationResolve } from './exchange/authorizeResolve.js';
 import { foldVoiceClipTranscript } from './exchange/transcribeAudio.js';
 import { asText, isContentParts, hasAttachmentPart, makeNoContribution, producedNothing } from './exchange/contentParts.js';
 import { resolvePersonaNames } from './agentIdentity.js';
 import { loadTurns } from './exchange/loadTurns.js';
+import { applyCouncilTurn, councilTurnOf, gateRosterOf } from './exchange/councilTurn.js';
 import { dispatchReply, turnsToMessages, maybeStampModelRoute, resolveModelProvenance, type ByokBudgetNotice, type DeepRunBudgetNotice, type ExchangeNotice } from './exchange/dispatchTurn.js';
 import { persistExchangedPair, mirrorTurnToChannel, autotitleAfterExchange, maybeExtractMemoryOnClose } from './exchange/persistExchange.js';
 import { buildRunDispatchTurns, appendRunTurnDirect, type TurnRunDispatch } from './turnRunDispatch.js';
@@ -87,6 +91,11 @@ export interface ConversationHostDeps {
    *  exchange/close is gated on this caller's conversation visibility below;
    *  absent ⇒ only legacy/unowned conversations pass (fail-closed for owned). */
   callerUserId?: string;
+  /** ADR 0834 D3 — the caller as `req.userId ?? principalId`, the derivation the run's
+   *  `actingUserId` was stamped with. NOT `callerUserId` (the canonical user — a
+   *  different key on personal-tenant bearer lanes). The tool loop honours a `bypass`
+   *  only when this equals the run's acting principal. */
+  callerPrincipal?: string;
   /** ADR 0089 Phase 4 (Option B) — dispatch a deep-investigation @mentioned
    *  agent's tool loop as a SEPARATE persisted run (the synthetic
    *  `openwop-app.agent-mention` workflow), embedded in chat as a `workflow_run`
@@ -159,6 +168,26 @@ async function deepInvestigationActivated(tenantId: string, profileId: string | 
  * Handle one `ConversationResolve` against a suspended `core.conversationGate`.
  * Returns the operation + the conversation's turns after the operation.
  */
+/** Managed-tier refusal codes the chat renders as their own cards (see the reply catch). */
+const MANAGED_TIER_REASONS: ReadonlySet<string> = new Set(['sign_in_required', 'daily_limit_reached', 'managed_unavailable']);
+
+/**
+ * The managed free tier's own refusal code, if `err` is one. `aiProvidersHost`
+ * folds a `ManagedProviderError` into a canonical `AiProviderError` code
+ * (`sign_in_required` → `byok_required`, `daily_limit_reached` →
+ * `provider_rate_limited`, else `provider_unavailable`) and keeps the original in
+ * `details.managedCode`, so that is where to read it, never `err.code`.
+ */
+export function managedTierReason(err: unknown): string | undefined {
+  // Two shapes reach a caller: the RAW `ManagedProviderError` (its `code` is the
+  // managed code; the chat reply path sees this one, MEASURED), and the folded
+  // `AiProviderError` (the managed code kept in `details.managedCode`).
+  const managed = err instanceof ManagedProviderError
+    ? err.code
+    : (err as { details?: { managedCode?: unknown } } | null)?.details?.managedCode;
+  return typeof managed === 'string' && MANAGED_TIER_REASONS.has(managed) ? managed : undefined;
+}
+
 export async function handleConversationResolve(
   storage: Storage,
   interrupt: InterruptRecord,
@@ -177,6 +206,7 @@ export async function handleConversationResolve(
   const { chatSessionId } = await authorizeConversationResolve({
     run, runId: interrupt.runId, conversationId,
     callerUserId: hostDeps?.callerUserId,
+    callerPrincipal: hostDeps?.callerPrincipal,
   });
 
   const existing = await loadTurns(storage, interrupt.runId, conversationId);
@@ -205,6 +235,23 @@ export async function handleConversationResolve(
     // CPU; the op bounds itself so a hung provider cannot wedge the close.
     await maybeExtractMemoryOnClose(run, existing);
     return { operation, conversationId, turns: [...existing, finalTurn] };
+  }
+
+  // ── RFC 0239 council turn (ADR 0858 P3) ─────────────────────────────────
+  // A bare `{ role, speakerId, content }` resume value against a gate that
+  // OPENED with a configured roster. Refused off-roster BEFORE anything is
+  // written, so the interrupt stays open (§B.3). Any other shape, or a gate
+  // with no roster, takes the chat exchange below unchanged.
+  const councilTurn = councilTurnOf(resumeValue);
+  if (councilTurn) {
+    const roster = await gateRosterOf(storage, interrupt.runId, conversationId);
+    if (roster) {
+      const turns = await applyCouncilTurn({
+        runId: interrupt.runId, nodeId: interrupt.nodeId, conversationId, roster,
+        turn: councilTurn, existing, nextIndex,
+      });
+      return { operation, conversationId, turns };
+    }
   }
 
   // ── exchange ───────────────────────────────────────────────────────────
@@ -501,7 +548,39 @@ export async function handleConversationResolve(
       return new Map<string, string>();
     })
     : undefined;
-  const messages = turnsToMessages([...budgetedExisting, userTurn], effectiveScaffold, answeringId, personaNameById);
+  // ADR 0764 D1/D2 — the runs this conversation knows about become grounded
+  // digests: the turn log's `workflow_run` turns, plus the `/slug` runs the user
+  // started (read from the chat session, bound to it, never written as turns).
+  // Exchange-time reads — exchanges are HTTP-driven and never re-executed on
+  // replay, so the live-status dependence has no divergence surface.
+  const runSessionId = chatSessionId ?? conversationId;
+  // A session run older than the oldest KEPT turn belongs to elided history —
+  // drop it before any read (it could only spend the digest budget).
+  const oldestKeptTs = budgetedExisting[0]?.ts;
+  const sessionRuns = (await listSessionRuns(storage, runSessionId))
+    .filter((r) => !(omittedCount > 0 && oldestKeptTs !== undefined && r.ts < oldestKeptTs));
+  const turnRefs: RunRef[] = budgetedExisting.flatMap((t) => {
+    const ref = workflowRunRefOf(t);
+    return ref ? [{ ...ref, ts: t.ts, source: 'turn' as const }] : [];
+  });
+  const digests = await resolveRunDigests(storage, {
+    tenantId: run.tenantId,
+    chatSessionId: runSessionId,
+    refs: [...turnRefs, ...sessionRuns.map((r) => ({ runId: r.runId, ts: r.ts, source: 'session' as const }))],
+  });
+  // Only ADMITTED session runs (bound to this conversation) become pseudo-turns —
+  // a forged row is omitted outright, not described as "unavailable".
+  const transcript = mergeSessionRunTurns(
+    budgetedExisting,
+    sessionRuns.filter((r) => digests.has(r.runId)),
+    conversationId,
+    { historyElided: omittedCount > 0 },
+  );
+  const runDigestById = renderRunDigests(
+    digests,
+    transcript.map((t) => workflowRunRefOf(t)?.runId).filter((id): id is string => !!id),
+  );
+  const messages = turnsToMessages([...transcript, userTurn], effectiveScaffold, answeringId, personaNameById, runDigestById);
   if (omittedCount > 0 && messages[0]?.role === 'system') {
     // Tell the model context was elided so it doesn't assume it has everything.
     messages[0] = {
@@ -569,6 +648,7 @@ export async function handleConversationResolve(
           policyResolver: hostDeps.policyResolver, onEvent: onAgentEvent,
           ...(exchangeWebSearch !== undefined ? { webSearch: exchangeWebSearch } : {}),
           ...(exchangePermissionMode !== undefined ? { permissionMode: exchangePermissionMode } : {}),
+          ...(hostDeps.callerPrincipal ? { callerPrincipal: hostDeps.callerPrincipal } : {}),
           // CS-GB-1 — the loop resolves its model through the ONE resolver too.
           ...(exchangeModelOverride ? { modelOverride: exchangeModelOverride } : {}),
           tier: modelTier,
@@ -584,7 +664,12 @@ export async function handleConversationResolve(
             for (const d of toolTurn.runDispatches ?? []) {
               await appendRunTurnDirect(storage, run.tenantId, conversationId, d, interrupt.nodeId);
             }
-            throw new OpenwopError('internal_error', `Agent tool turn failed: ${toolTurn.error.message}`, 502, { conversationId, toolError: toolTurn.error.code });
+            // `details.reason` is the machine-readable cause the chat keys its
+            // error card on (the ADR 0482 `workflow_budget_exhausted` precedent).
+            throw new OpenwopError('internal_error', `Agent tool turn failed: ${toolTurn.error.message}`, 502, {
+              conversationId, toolError: toolTurn.error.code,
+              ...(toolTurn.error.code === 'daily_limit_reached' ? { reason: 'daily_limit_reached' } : {}),
+            });
           }
           runDispatches = toolTurn.runDispatches ?? [];
           toolText = toolTurn.text;
@@ -603,7 +688,15 @@ export async function handleConversationResolve(
       if (exchangeKey) await releaseExchange(run.tenantId, conversationId, exchangeKey);
       if (err instanceof OpenwopError) throw err;
       const msg = err instanceof Error ? err.message : String(err);
-      throw new OpenwopError('internal_error', `Conversation reply failed: ${msg}`, 502, { conversationId });
+      // The managed free tier refuses with a machine-readable `err.code`
+      // (`sign_in_required` under OPENWOP_MANAGED_ANON_SIGNIN_REQUIRED,
+      // `daily_limit_reached`, `managed_unavailable`). Carry it as `details.reason`,
+      // the field the chat keys its error card on: the same convention as the
+      // tool-turn path above (the ADR 0482 precedent). Without it every one of these
+      // reached the SPA as a bare `internal_error` ("Something went wrong"), and an
+      // anonymous visitor got no Sign in button.
+      const reason = managedTierReason(err);
+      throw new OpenwopError('internal_error', `Conversation reply failed: ${msg}`, 502, { conversationId, ...(reason ? { reason } : {}) });
     }
 
     const agentIndex = nextIndex + 1;
@@ -673,6 +766,15 @@ export async function handleConversationResolve(
       run, chatSessionId, conversationId, nodeId: interrupt.nodeId,
       userText, replyText: completion, storage,
     });
+    // ADR 0853 D3 — the person's turn, announced once both turns are durable (an
+    // observer only enqueues; nothing calls a model in-request).
+    if (chatSessionId && userText.trim()) {
+      const actor = run.metadata?.['actingUserId'];
+      await notifyHumanChatMessage({
+        tenantId: run.tenantId, conversationId: chatSessionId, messageRef: `${chatSessionId}:${nextIndex}`, text: userText,
+        ...(typeof actor === 'string' && actor ? { authorUserId: actor } : {}),
+      });
+    }
 
     // `runTurns` rides the response: without it the bubble is persisted but
     // absent from what the client renders, so the Workflow-progress rail reads

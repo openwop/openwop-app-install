@@ -6,7 +6,7 @@
  * `rosterId`. Coverage:
  *
  *  1. A first seed persists each persona's profile; it is retrievable via
- *     `GET /v1/host/openwop-app/agents/:rosterId/profile` with the authored
+ *     `GET /host/openwop-app/agents/:rosterId/profile` with the authored
  *     governance fields and the autonomy `level` DERIVED from `specLevel`,
  *     consistent with the roster member's own `autonomyLevel`.
  *  2. A silent re-seed does NOT duplicate (the profile key is the rosterId) —
@@ -65,10 +65,10 @@ async function api<T = unknown>(path: string, init: RequestInit = {}): Promise<{
   return { status: res.status, body: (text.length ? JSON.parse(text) : null) as T };
 }
 const seed = (body: unknown = {}): Promise<{ status: number; body: { seeded: boolean } }> =>
-  api('/v1/host/openwop-app/example-data/seed', { method: 'POST', body: JSON.stringify(body) });
-const roster = async (): Promise<RosterEntry[]> => (await api<{ roster: RosterEntry[] }>('/v1/host/openwop-app/roster')).body.roster;
+  api('/host/openwop-app/example-data/seed', { method: 'POST', body: JSON.stringify(body) });
+const roster = async (): Promise<RosterEntry[]> => (await api<{ roster: RosterEntry[] }>('/host/openwop-app/roster')).body.roster;
 const profileOf = (rosterId: string): Promise<{ status: number; body: ProfileResp }> =>
-  api(`/v1/host/openwop-app/agents/${encodeURIComponent(rosterId)}/profile`);
+  api(`/host/openwop-app/agents/${encodeURIComponent(rosterId)}/profile`);
 
 describe('demo-seed → agentProfile persistence (ADR 0031 §1c)', () => {
   it('persists a retrievable profile per seeded persona, level derived from specLevel', async () => {

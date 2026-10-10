@@ -252,6 +252,11 @@ const ASSETS = 'dist/assets';
 // CODE-SPLIT — do not raise it", and every prior raise cited evidence that the
 // growth was irreducible. That evidence was unavailable here only because the
 // regressed split was invisible: a docblock asserting adoption that never happened.
+// ═══ 2026-10-07: split, not raised. 132.0 kB (7 B over) -> 130.8 kB gzip. ═══
+// `App.tsx` imported `chat/reviews/reviewStatusStore` statically only to connect
+// it once a session exists, which put the store and its client on every page's
+// first load, public pages included. It is now a dynamic import inside that
+// effect. Measured against main + the white-label nav entry (#4576).
 const ENTRY_GZIP_BUDGET = 132 * 1024;
 
 /**
@@ -448,8 +453,19 @@ const CHUNK_GZIP_BUDGET = 150 * 1024;
 // fetched only by the one surface that needs them) so they need no override,
 // and 25 kB above the post-split eager i18n chunk. Naming a chunk below only
 // buys silence, so the list stays short on purpose.
+// `i18n` — the EAGER `en` catalog chunk — gets its own line (2026-10-07) instead of
+// raising the 150 kB GLOBAL ceiling for every chunk. Measured with this script:
+// 150.4 kB with the collaborative-orchestration copy (ADR 0852–0856) stacked on
+// main — 0.4 kB over. That copy is option (b) of the note above: SHELL copy that
+// genuinely grew. It renders inside chat (the record-as-decision dialog, the
+// channel's bound-project picker and ledger panel, the review hand-off form), and
+// `namespaceSplit.test.ts` forbids shell code from using a lazy feature
+// namespace, so it cannot move out. 156 kB leaves ~5.6 kB of headroom; the next
+// step when it runs out is splitting the `chat` AREA catalog by surface, not
+// another raise.
 const PER_CHUNK_GZIP_BUDGET = {
   katex: 235 * 1024,
+  i18n: 156 * 1024,
 };
 
 let files;
@@ -487,7 +503,9 @@ for (const f of files) {
   const raw = statSync(path).size;
   const gz = gzipBytes(path);
   const isEntry = f.startsWith('index-');
-  const override = Object.entries(PER_CHUNK_GZIP_BUDGET).find(([name]) => f.startsWith(`${name}-`))?.[1];
+  // `i18n` names ONE chunk (`i18n-<hash>.js`), not the lazy locale chunks that share
+  // its prefix (`i18n-es-<hash>.js` …) — those stay on the global ceiling.
+  const override = Object.entries(PER_CHUNK_GZIP_BUDGET).find(([name]) => (name === 'i18n' ? /^i18n-[A-Za-z0-9_-]{8}\.js$/.test(f) : f.startsWith(`${name}-`)))?.[1];
   const budget = isEntry ? ENTRY_GZIP_BUDGET : (override ?? CHUNK_GZIP_BUDGET);
   if (gz > budget) {
     failed = true;

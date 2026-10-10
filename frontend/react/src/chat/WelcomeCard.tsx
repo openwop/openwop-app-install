@@ -14,11 +14,13 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
-import { ClockIcon, ColumnsIcon, SparklesIcon, ZapIcon } from '../ui/icons/index.js';
+import { AlertIcon, ClockIcon, ColumnsIcon, SparklesIcon, ZapIcon } from '../ui/icons/index.js';
+import { StateCard } from '../ui/StateCard.js';
+import { Button } from '../ui/Button.js';
 import { Skeleton } from '../ui/Skeleton.js';
 import { useAuth } from '../auth/useAuth.js';
 import { isFirstRunDismissed, dismissFirstRun } from '../onboarding/firstRunFlag.js';
-import { listWorkflowMentions, refreshWorkflowMentionCache } from './lib/workflowMentions.js';
+import { listWorkflowMentions, refreshWorkflowMentionCache, workflowMentionLoadFailed } from './lib/workflowMentions.js';
 import { useAgentMentions, type AgentMentionEntry } from './lib/agentMentions.js';
 import { getMyProfile } from '../features/profiles/profilesClient.js';
 import { listRoster, type RosterEntry } from '../agents/rosterClient.js';
@@ -220,6 +222,14 @@ export function WelcomeCard({ onPickSuggestion }: Props): JSX.Element {
   const [resolvedCards, setResolvedCards] = useState(
     () => WORKFLOW_CARD_SPECS.map((spec) => ({ ...spec, slug: resolveSlug(spec.templateName) })),
   );
+  // ADR 0768 follow-up P4 — the cards' four states, told apart instead of all
+  // rendering as disabled tiles: still LOADING (skeletons), the read FAILED
+  // (announced, with Retry), NONE installed in this workspace (a way forward),
+  // or ready. A warm cache that already resolves a card skips the loading state.
+  const [cardsStatus, setCardsStatus] = useState<'loading' | 'ready' | 'failed'>(
+    () => (resolvedCards.some((c) => c.slug !== null) ? 'ready' : 'loading'),
+  );
+  const [cardsAttempt, setCardsAttempt] = useState(0);
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -229,26 +239,34 @@ export function WelcomeCard({ onPickSuggestion }: Props): JSX.Element {
       // the @-mention cache for the welcome cards.
       await refreshWorkflowMentionCache().catch(() => undefined);
       if (cancelled) return;
-      setResolvedCards(WORKFLOW_CARD_SPECS.map((spec) => ({ ...spec, slug: resolveSlug(spec.templateName) })));
+      const next = WORKFLOW_CARD_SPECS.map((spec) => ({ ...spec, slug: resolveSlug(spec.templateName) }));
+      setResolvedCards(next);
+      // The cache refresh never throws — it RECORDS a failure. A failed read with
+      // nothing resolvable is "couldn't load", never "not installed".
+      setCardsStatus(workflowMentionLoadFailed() && !next.some((c) => c.slug !== null) ? 'failed' : 'ready');
     })();
     return () => { cancelled = true; };
-  }, []);
+  }, [cardsAttempt]);
+  const anyCardAvailable = resolvedCards.some((c) => c.slug !== null);
 
+  // DESIGN.md §4.5 rule 15 — the empty chat is a hierarchy, start-aligned on
+  // the composer's spine: what to do (heading + lede), Get started for a new
+  // person, then the two ways to delegate (a workflow by name, an agent). Picks
+  // FILL the composer below; the hint says so, because nothing sends until Enter.
   return (
-    <div className="welcome-root">
-      <div className="welcome-icon-circle" aria-hidden>
-        <SparklesIcon size={28} />
+    <div className="welcome-root welcome-home">
+      <div className="welcome-head">
+        <h2 ref={headingRef} tabIndex={-1} className="welcome-title">
+          {firstRun ? t('firstRunHeading') : t('welcomeHeading')}
+        </h2>
+        <p className="welcome-lede">
+          {t('welcomeIntroPrefix')}<code className="welcome-key">/</code>{t('welcomeIntroMid')}<code className="welcome-key">@</code>{t('welcomeIntroSuffix')}
+        </p>
       </div>
-      <h2 ref={headingRef} tabIndex={-1} className="welcome-title">
-        {firstRun ? t('firstRunHeading') : t('welcomeHeading')}
-      </h2>
-      <p className="muted welcome-lede">
-        {t('welcomeIntroPrefix')}<code className="welcome-key">/</code>{t('welcomeIntroMid')}<code className="welcome-key">@</code>{t('welcomeIntroSuffix')}
-      </p>
       {firstRun && (
         <section className="welcome-firstrun page-enter" aria-labelledby={eyebrowId}>
           <div className="welcome-firstrun-head">
-            <span id={eyebrowId} className="welcome-firstrun-eyebrow">{t('firstRunEyebrow')}</span>
+            <h3 id={eyebrowId} className="welcome-firstrun-eyebrow">{t('firstRunEyebrow')}</h3>
             {/* No aria-label: the visible "Skip intro" is the accessible name
                 (WCAG 2.5.3 Label in Name) — the "Getting started" region label
                 supplies the context an over-descriptive aria-label would add. */}
@@ -260,7 +278,7 @@ export function WelcomeCard({ onPickSuggestion }: Props): JSX.Element {
               {t('firstRunSkip')}
             </button>
           </div>
-          <ul className="welcome-firstrun-steps">
+          <ol className="welcome-firstrun-steps">
             <li className="welcome-firstrun-step">
               <span className="welcome-firstrun-marker" aria-hidden>{t('firstRunMarkerChat')}</span>
               <span className="welcome-firstrun-step-text">
@@ -279,59 +297,90 @@ export function WelcomeCard({ onPickSuggestion }: Props): JSX.Element {
               <span className="welcome-firstrun-marker" aria-hidden>{t('firstRunMarkerApps')}</span>
               <span className="welcome-firstrun-step-text">
                 <span className="welcome-firstrun-step-title">{t('firstRunStepConnectTitle')}</span>
-                <span className="welcome-firstrun-step-desc">
-                  {t('firstRunStepConnectDesc')}{' '}
-                  <Link className="welcome-firstrun-link" to="/access?tab=connections">{t('firstRunStepConnectLink')}</Link>
-                </span>
+                <span className="welcome-firstrun-step-desc">{t('firstRunStepConnectDesc')}</span>
               </span>
+              <Link className="btn secondary btn-sm welcome-firstrun-link" to="/access?tab=connections">{t('firstRunStepConnectLink')}</Link>
             </li>
-          </ul>
+          </ol>
         </section>
       )}
-      <div ref={gridRef} className="page-enter welcome-grid">
-        {resolvedCards.map((c) => {
-          const available = c.slug !== null;
-          return (
-            <button
-              key={c.templateName}
-              type="button"
-              className="welcome-card"
-              disabled={!available}
-              onClick={() => {
-                if (c.slug) handlePick(`/${c.slug} ${t(c.promptKey)}`);
-              }}
-              title={available
-                ? t('prefillComposer', { slug: c.slug })
-                : t('workflowNotSaved', { title: t(c.titleKey) })}
-              aria-label={available
-                ? t('runWorkflowAria', { title: t(c.titleKey), slug: c.slug })
-                : t('workflowNotAvailableAria', { title: t(c.titleKey) })}
-            >
-              <span className="welcome-card-head">
-                <span className="welcome-card-icon" aria-hidden>{c.glyph}</span>
-                <span className="welcome-card-title">{t(c.titleKey)}</span>
-              </span>
-              <span className="welcome-card-desc">{t(c.descKey)}</span>
-              <code className="welcome-slug">{c.slug ? `/${c.slug}` : t('notAvailable')}</code>
-            </button>
-          );
-        })}
-      </div>
+
+      <section className="welcome-section" aria-labelledby={`${eyebrowId}-wf`}>
+        <div className="welcome-section-head">
+          <h3 id={`${eyebrowId}-wf`} className="welcome-section-title">{t('welcomeWorkflowsHeading')}</h3>
+          {cardsStatus === 'ready' && anyCardAvailable ? (
+            <Link className="welcome-section-link" to="/builder">{t('welcomeBrowseAll')}</Link>
+          ) : null}
+        </div>
+        {cardsStatus === 'loading' ? (
+          <div className="welcome-grid" role="status" aria-label={t('welcomeCardsLoading')}>
+            {WORKFLOW_CARD_SPECS.map((c) => <Skeleton key={c.templateName} height={112} radius={14} />)}
+          </div>
+        ) : cardsStatus === 'failed' ? (
+          <div className="welcome-cards-state">
+            <StateCard
+              icon={<AlertIcon aria-hidden />}
+              title={t('welcomeCardsFailedTitle')}
+              body={t('welcomeCardsFailedBody')}
+              announce
+              action={<Button variant="secondary" onClick={() => { setCardsStatus('loading'); setCardsAttempt((n) => n + 1); }}>{t('common:retry')}</Button>}
+            />
+          </div>
+        ) : !anyCardAvailable ? (
+          // Rule 15: "none installed" is one honest line with the way forward,
+          // never a dashed box that outweighs everything else on the page.
+          <p className="welcome-cards-empty">
+            <span className="welcome-cards-empty-title">{t('welcomeCardsNoneTitle')}</span>{' '}
+            <span>{t('welcomeCardsNoneBody')}</span>{' '}
+            <Link to="/builder">{t('welcomeCardsBrowse')}</Link>
+          </p>
+        ) : (
+        <div ref={gridRef} className="page-enter welcome-grid">
+          {resolvedCards.map((c) => {
+            const available = c.slug !== null;
+            return (
+              <button
+                key={c.templateName}
+                type="button"
+                className="welcome-card"
+                disabled={!available}
+                onClick={() => {
+                  if (c.slug) handlePick(`/${c.slug} ${t(c.promptKey)}`);
+                }}
+                title={available
+                  ? t('prefillComposer', { slug: c.slug })
+                  : t('workflowNotSaved', { title: t(c.titleKey) })}
+                aria-label={available
+                  ? t('runWorkflowAria', { title: t(c.titleKey), slug: c.slug })
+                  : t('workflowNotAvailableAria', { title: t(c.titleKey) })}
+              >
+                <span className="welcome-card-head">
+                  <span className="welcome-card-icon" aria-hidden>{c.glyph}</span>
+                  <span className="welcome-card-title">{t(c.titleKey)}</span>
+                </span>
+                <span className="welcome-card-desc">{t(c.descKey)}</span>
+                <code className="welcome-slug">{c.slug ? `/${c.slug}` : t('notAvailable')}</code>
+              </button>
+            );
+          })}
+        </div>
+        )}
+      </section>
 
       {!agentsLoaded ? (
         // Loading: reserve the row with skeleton pills so the real pills don't
         // pop in / shift the layout after the profile+roster fetch resolves.
-        <>
-          <div className="welcome-agents-label">{t('orHandToAgent')}</div>
+        <section className="welcome-section">
+          <h3 className="welcome-section-title">{t('orHandToAgent')}</h3>
           <div className="welcome-agents" role="status" aria-label={t('common:loading')}>
             {[0, 1, 2].map((i) => (
-              <Skeleton key={i} width={92} height={30} radius={999} />
+              <Skeleton key={i} width={92} height={36} radius={24} />
             ))}
           </div>
-        </>
+        </section>
       ) : personas.length > 0 ? (
-        <>
-          <div className="welcome-agents-label">{t('orHandToAgent')}</div>
+        <section className="welcome-section" aria-labelledby={`${eyebrowId}-ag`}>
+          <h3 id={`${eyebrowId}-ag`} className="welcome-section-title">{t('orHandToAgent')}</h3>
           <div className="welcome-agents">
             {personas.map((a) => (
               <button
@@ -348,11 +397,11 @@ export function WelcomeCard({ onPickSuggestion }: Props): JSX.Element {
               </button>
             ))}
           </div>
-        </>
+        </section>
       ) : null}
 
-      <p className="muted welcome-footnote">
-        {t('justChatFooter')}
+      <p className="welcome-footnote">
+        {t('welcomePickHint')} {t('justChatFooter')}
       </p>
     </div>
   );

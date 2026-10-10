@@ -20,6 +20,7 @@ import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { appendStrategyRevision, deleteStrategyRevisions } from './revisions.js';
 import { computeStrategyProgress, listCheckInsByStrategy, deleteCheckInsFor } from './checkIns.js';
 import { OpenwopError } from '../../types.js';
+import { resolveOne } from '../../host/featureToggles/service.js';
 import { createLogger } from '../../observability/logger.js';
 import { declarePiiFields } from '../../host/dataClassification.js';
 import { subjectKeyForms, ERASED_USER_REF } from '../../host/subjectErasureRedaction.js';
@@ -31,9 +32,10 @@ import { resolveEffectiveAccess, type Scope } from '../../host/accessControlServ
 import { getProject, resolveProjectAccess } from '../projects/projectsService.js';
 import { computeStrategyHealth } from './strategyHealth.js';
 import { getList, listRankedIdeas } from '../priority-matrix/priorityMatrixService.js';
+import { listProjectReadable } from '../priority-matrix/listAccess.js';
 import { indexStrategy, removeStrategy } from './strategyKnowledgeService.js';
 import {
-  STRATEGY_LIMITS, STRATEGY_SCOPES, PLANNING_HORIZONS, STRATEGY_STATUSES,
+  STRATEGY_LIMITS, STRATEGY_TOGGLE_ID, STRATEGY_SCOPES, PLANNING_HORIZONS, STRATEGY_STATUSES,
   STRATEGY_CONFIDENCES, STRATEGY_RISKS, STRATEGY_LINK_KINDS, STRATEGY_HEALTH_STATES,
   KR_MEASURE_KINDS, KR_DIRECTIONS, METRIC_SOURCE_KINDS,
   type Strategy, type StrategyScope, type PlanningHorizon, type StrategyStatus,
@@ -369,9 +371,22 @@ export function orgReadPredicate(tenantId: string, subject: string | undefined):
 
 /** Can `subject` READ this strategy? (scope-aware — ADR 0079 §Correction.) */
 export async function canSubjectReadStrategy(tenantId: string, subject: string | undefined, s: Strategy): Promise<boolean> {
+  // ADR 0839 D1 / ADR 0845 — an absent caller has no access. `resolveEffectiveAccess`
+  // reads an absent subject as the tenant OWNER, so without this an undefined caller
+  // would read every org's strategies.
+  if (!subject) return false;
   if (s.scope === 'user') return subject === s.createdBy;
   if (s.scope === 'workspace') return subjectHasTenantScope(tenantId, subject, 'workspace:read');
   return subjectHasOrgScope(tenantId, subject, s.orgId, 'workspace:read');
+}
+
+/** Can `subject` WRITE this strategy? The ONE write rule (ADR 0845 D1): the route's
+ *  `canWriteStrategy` and the run surface's sync check-in both call it, so the two
+ *  lanes cannot disagree about who may change a strategy's data. */
+export async function canSubjectWriteStrategy(tenantId: string, subject: string | undefined, s: Strategy): Promise<boolean> {
+  if (!subject) return false; // ADR 0839 D1 — an absent caller has no access
+  if (s.scope === 'user') return subject === s.createdBy;
+  return subjectHasOrgScope(tenantId, subject, s.orgId, 'workspace:write');
 }
 
 // ── CRUD ──────────────────────────────────────────────────────────────────────
@@ -471,9 +486,37 @@ export interface UpdateStrategyPatch extends CreateStrategyInput {
  *  config-authority for `scope`/`ownerUserId`/`orgId`/`status:archived`. `links`
  *  is NOT patched here — use `replaceLinks` (its own read-gate). `actor` (ADR
  *  0226 §B4) attributes the revision row; absent ⇒ the strategy's creator. */
-export async function updateStrategy(tenantId: string, id: string, patch: UpdateStrategyPatch, actor?: string): Promise<Strategy> {
+export interface StrategyWriteOptions {
+  /** ADR 0845 D4 — the row the caller read and DECIDED against. The patch is
+   *  applied to it and the write is a compare-and-swap against it, so a write that
+   *  landed in between makes this one LOSE (409) instead of being silently erased —
+   *  and instead of this one landing on a row its gate decision was never made
+   *  against. Omitted ⇒ the function's own read is the base. */
+  base?: Strategy;
+  /** ADR 0845 D2 — evaluated against the base row; throws to abort before any write. */
+  precondition?: (base: Strategy) => void;
+}
+
+/** ADR 0845 D4 — the one 409 every lost strategy write raises. Never retried: a retry
+ *  would re-apply a patch the caller computed from a stale row (import, promote and
+ *  links all build from it) together with a gate decision made against that row. */
+function lostStrategyWrite(id: string): OpenwopError {
+  return new OpenwopError('conflict', 'This strategy changed since you opened it. Reload and try again.', 409, { id, reason: 'stale_write' });
+}
+
+async function writeBase(tenantId: string, id: string, base: Strategy | undefined): Promise<Strategy> {
+  if (base) {
+    if (base.tenantId !== tenantId || base.id !== id) throw new OpenwopError('not_found', 'Strategy not found.', 404, { id });
+    return base;
+  }
   const existing = await getStrategy(tenantId, id);
   if (!existing) throw new OpenwopError('not_found', 'Strategy not found.', 404, { id });
+  return existing;
+}
+
+export async function updateStrategy(tenantId: string, id: string, patch: UpdateStrategyPatch, actor?: string, opts: StrategyWriteOptions = {}): Promise<Strategy> {
+  const existing = await writeBase(tenantId, id, opts.base);
+  opts.precondition?.(existing);
   const next: Strategy = { ...existing, updatedAt: new Date().toISOString() };
   if (patch.title !== undefined) next.title = reqTitle(patch.title, 'title', STRATEGY_LIMITS.title);
   if (patch.scope !== undefined) next.scope = oneOf(patch.scope, STRATEGY_SCOPES, 'scope');
@@ -501,7 +544,7 @@ export async function updateStrategy(tenantId: string, id: string, patch: Update
       next.parentStrategyId = parentId;
     }
   }
-  await strategies.put(next);
+  if (!(await strategies.compareAndSwap(existing, next))) throw lostStrategyWrite(id);
   // ADR 0597 §4 (SPC-4B) — an ORG MOVE must evict the old org's KB doc.
   // `indexStrategy` reconciles presence for the strategy's CURRENT org only, so
   // a relocation left a frozen, still-`contentTrust:'trusted'` copy in the
@@ -571,6 +614,16 @@ export async function archiveStrategy(tenantId: string, id: string, actor?: stri
  * ADR 0464's taxonomy: a strategy is a long-lived BUSINESS record, so every row survives
  * and only the person-link is severed — the `projectsService` pattern.
  */
+/** The subject-erasure redaction of ONE strategy row (pure). */
+function redactStrategySubject(s: Strategy, forms: ReadonlySet<string>): Strategy {
+  return {
+    ...s,
+    ...(forms.has(s.createdBy) ? { createdBy: ERASED_USER_REF } : {}),
+    ...(s.ownerUserId !== undefined && forms.has(s.ownerUserId) ? { ownerUserId: ERASED_USER_REF } : {}),
+    initiatives: s.initiatives.map((i) => (i.ownerUserId !== undefined && forms.has(i.ownerUserId) ? { ...i, ownerUserId: ERASED_USER_REF } : i)),
+  };
+}
+
 export async function eraseSubjectStrategy(tenantId: string, subjectKey: string): Promise<void> {
   const forms = subjectKeyForms(subjectKey).forms;
   for (const s of await strategies.list()) {
@@ -585,7 +638,16 @@ export async function eraseSubjectStrategy(tenantId: string, subjectKey: string)
       return { ...i, ownerUserId: ERASED_USER_REF };
     });
     if (!touched) continue;
-    await strategies.put({ ...next, initiatives });
+    // ADR 0845 STR3CD-10 — CAS like every other writer, so an erasure cannot erase a
+    // concurrent activation flip or auto-revert. Re-read and re-apply on a lost race
+    // (the redaction is a function of the CURRENT row, so a retry is safe).
+    let base: Strategy | null = s;
+    let row: Strategy = { ...next, initiatives };
+    for (let attempt = 0; base && attempt < 5; attempt++) {
+      if (await strategies.compareAndSwap(base, row)) break;
+      base = await getStrategy(tenantId, s.id);
+      if (base) row = redactStrategySubject(base, forms);
+    }
   }
   await eraseCheckInSubject(tenantId, forms);
   await eraseRevisionSubject(tenantId, forms);
@@ -606,14 +668,40 @@ export async function hardDeleteStrategy(tenantId: string, id: string): Promise<
 }
 
 /** Replace a strategy's links wholesale (the route validates target readability first). */
-export async function replaceLinks(tenantId: string, id: string, links: StrategyLink[], actor?: string): Promise<Strategy> {
-  const existing = await getStrategy(tenantId, id);
-  if (!existing) throw new OpenwopError('not_found', 'Strategy not found.', 404, { id });
+export async function replaceLinks(tenantId: string, id: string, links: StrategyLink[], actor?: string, opts: StrategyWriteOptions = {}): Promise<Strategy> {
+  const existing = await writeBase(tenantId, id, opts.base);
+  opts.precondition?.(existing);
   const next: Strategy = { ...existing, links: links.slice(0, STRATEGY_LIMITS.maxLinks), updatedAt: new Date().toISOString() };
-  await strategies.put(next);
+  // ADR 0845 D4 — CAS against the base, never a blind put.
+  if (!(await strategies.compareAndSwap(existing, next))) throw lostStrategyWrite(id);
   // ADR 0230 §B4 — link changes are content-bearing (alignment history matters).
   void appendStrategyRevision(next, actor ?? next.createdBy).catch(() => {});
   return next;
+}
+
+/**
+ * ADR 0845 D4 — append ONE link, computed from the CURRENT row on every attempt.
+ * Unlike a patch computed from a caller's earlier read, a function of the current
+ * row is safe to retry on a lost race (up to 3 attempts, then 409).
+ */
+export async function appendStrategyLink(tenantId: string, id: string, link: StrategyLink, actor?: string): Promise<Strategy> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const base = await getStrategy(tenantId, id);
+    if (!base) throw new OpenwopError('not_found', 'Strategy not found.', 404, { id });
+    try {
+      return await replaceLinks(tenantId, id, [...base.links, link], actor, { base });
+    } catch (err) {
+      if (!(err instanceof OpenwopError) || err.code !== 'conflict') throw err;
+    }
+  }
+  throw lostStrategyWrite(id);
+}
+
+/** The stored form of an objectives array (the write path's own parse, which
+ *  slices at the caps) — so a caller can compare protected values AS STORED
+ *  before writing (ADR 0845 D3). */
+export function parseObjectivesForCompare(raw: unknown): StrategyObjective[] {
+  return parseObjectives(raw);
 }
 
 // ── projection helpers (links read BACK; the route applies readability) ────────
@@ -668,10 +756,21 @@ export async function resolvePriorityLinkTarget(
   listId: string,
   loadList: (id: string) => Promise<Awaited<ReturnType<typeof getList>>>,
   canReadOrg: (orgId: string) => Promise<boolean>,
+  /** ADR 0842 D10 — the person asking, for a project-bound list's membership gate.
+   *  `undefined` = an actorless (system) lane, which `canReadOrg` already decides for
+   *  (the strategy surface's tenant-trusted fallback); a real caller is ALSO asked the
+   *  project, exactly as Priority Matrix's own five lanes ask it. */
+  scope?: { tenantId: string; callerSubject: string | undefined },
 ): Promise<{ list: Awaited<ReturnType<typeof getList>>; readable: boolean }> {
   const list = await loadList(listId);
   if (!list) return { list: null, readable: false };
-  return { list, readable: await canReadOrg(list.orgId) };
+  if (!(await canReadOrg(list.orgId))) return { list, readable: false };
+  // ADR 0842 D10 — org-readable is necessary but not sufficient for a PRIVATE project's
+  // list: Priority Matrix's routes, tools, run surface and comments all refuse a
+  // non-member, and a linked idea's title + rank reached that same person through
+  // /strategy/:id/context, /health and the timeline.
+  if (scope?.callerSubject !== undefined && !(await listProjectReadable(scope.tenantId, list, scope.callerSubject))) return { list, readable: false };
+  return { list, readable: true };
 }
 
 // ── context packet (cross-entity enrichment, RBAC-filtered via injected predicate) ──
@@ -779,7 +878,7 @@ export async function resolveStrategyContext(
             } else { droppedMissing += 1; }
           } else { droppedUnreadable += 1; }
         } else if (l.kind === 'priority-idea') {
-          const { list, readable: ok } = await resolvePriorityLinkTarget(l.listId, cachedGetList, readable);
+          const { list, readable: ok } = await resolvePriorityLinkTarget(l.listId, cachedGetList, readable, { tenantId, callerSubject });
           if (list && ok) {
             const ideas = await cachedRankedIdeas(l.listId);
             const idea = ideas.find((i) => i.card.id === l.cardId);
@@ -787,7 +886,7 @@ export async function resolveStrategyContext(
             else droppedMissing += 1;
           } else if (!list) { droppedMissing += 1; } else { droppedUnreadable += 1; }
         } else if (l.kind === 'priority-list') {
-          const { list, readable: ok } = await resolvePriorityLinkTarget(l.listId, cachedGetList, readable);
+          const { list, readable: ok } = await resolvePriorityLinkTarget(l.listId, cachedGetList, readable, { tenantId, callerSubject });
           if (list && ok) {
             entry.linkedPriorities.push({ listId: l.listId, title: list.name });
           } else if (!list) { droppedMissing += 1; } else { droppedUnreadable += 1; }
@@ -955,6 +1054,12 @@ export async function resolveStrategyEntriesByIds(tenantId: string, strategyIds:
 /** As `resolveStrategyEntriesByIds`, but ALSO reports the non-authz shortfall so a
  *  silently truncated grounding is reportable rather than served as complete. */
 export async function resolveStrategyContextRefs(tenantId: string, strategyIds: string[], subject: string | undefined): Promise<StrategyContextResolution> {
+  // G7 (ADR 0820 §8.1) — the strategy context reaches core chat through the board seam
+  // (`host/chatContext.ts` → the advisory-board resolver → here), and that path never
+  // read the strategy toggle or plan. A tenant without `strategy` gets NO strategy
+  // context — an honest empty (not a shortfall, not an error), so the turn composes as
+  // a chat without the paid grounding. Fail-closed: a resolver throw is a refusal.
+  if (!(await strategyContextAllowed(tenantId, subject))) return { entries: [], droppedNonAuthz: 0 };
   const seen = new Set<string>();
   const readable: Strategy[] = [];
   // STRAT-5: a board's `contextRefs` can outlive the strategy it points at (archive is a
@@ -989,6 +1094,16 @@ export async function resolveStrategyContextRefs(tenantId: string, strategyIds: 
     entries: await resolveStrategyContext(tenantId, readable, subject, (orgId) => subjectHasOrgScope(tenantId, subject, orgId, 'workspace:read')),
     droppedNonAuthz,
   };
+}
+
+/** G7 — `resolveOne('strategy')` for the context seam (toggle + plan, ADR 0819). */
+async function strategyContextAllowed(tenantId: string, subject: string | undefined): Promise<boolean> {
+  try {
+    return Boolean((await resolveOne(STRATEGY_TOGGLE_ID, { tenantId, ...(subject ? { userId: subject } : {}) }))?.enabled);
+  } catch (err) {
+    log.warn('strategy_context_gate_unresolved', { tenantId, error: err instanceof Error ? err.message : String(err) });
+    return false;
+  }
 }
 
 /**

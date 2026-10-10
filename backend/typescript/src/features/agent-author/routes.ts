@@ -19,7 +19,7 @@ export function registerAgentAuthorRoutes(app: Express): void {
   /** The caller's own stashed draft, if any. An anonymous caller has no
    *  durable subject and therefore no stash — `{ draft: null }`, which is the
    *  TRUE state, not a masked failure. */
-  app.get('/v1/host/openwop-app/agent-author/draft', (req, res, next) => {
+  app.get('/host/openwop-app/agent-author/draft', (req, res, next) => {
     void (async () => {
       try {
         const subject = isDurableCaller(req) ? callerSubject(req) : undefined;
@@ -31,7 +31,7 @@ export function registerAgentAuthorRoutes(app: Express): void {
   });
 
   /** Consume/dismiss the caller's own stash (idempotent). */
-  app.delete('/v1/host/openwop-app/agent-author/draft', (req, res, next) => {
+  app.delete('/host/openwop-app/agent-author/draft', (req, res, next) => {
     void (async () => {
       try {
         const subject = isDurableCaller(req) ? callerSubject(req) : undefined;

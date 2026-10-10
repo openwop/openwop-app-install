@@ -354,8 +354,8 @@ describe('ADR 0556 P2 — the evaluators compute what the objective says', () =>
     // counter — the evaluator has to read `count`, not `value`.
     const b = bucketsOf('openwop.http.server.duration');
     const rows = project([hist('openwop.http.server.duration', b, [
-      [{ route: '/v1/runs', method: 'POST', status_class: '2xx', stream: 'false' }, new Array<number>(995).fill(0.02)],
-      [{ route: '/v1/runs', method: 'POST', status_class: '5xx', stream: 'false' }, new Array<number>(5).fill(0.02)],
+      [{ route: '/runs', method: 'POST', status_class: '2xx', stream: 'false' }, new Array<number>(995).fill(0.02)],
+      [{ route: '/runs', method: 'POST', status_class: '5xx', stream: 'false' }, new Array<number>(5).fill(0.02)],
     ])]);
     expect(row(rows, 'A1').sampleCount).toBe(1000);
     expect(row(rows, 'A1').observed).toBeCloseTo(0.995, 6);
@@ -368,6 +368,8 @@ describe('ADR 0556 P2 — the evaluators compute what the objective says', () =>
       [{ provider: 'anthropic', outcome: 'provider_timed_out' }, 3],
       // Excluded from M1's denominator — an unconfigured key is a config state.
       [{ provider: 'openai', outcome: 'byok_required' }, 500],
+      // ...and so is a host POLICY refusal, whatever its `reason`.
+      [{ provider: 'openai', outcome: 'provider_policy_denied' }, 200],
     ])]);
     expect(row(rows, 'M1').sampleCount).toBe(100);
     expect(row(rows, 'M1').observed).toBeCloseTo(0.97, 6);
@@ -380,7 +382,7 @@ describe('ADR 0556 P2 — the evaluators compute what the objective says', () =>
     // declared bucket boundary, so this is a count, not an estimate.
     const b = bucketsOf('openwop.http.server.duration');
     const rows = project([hist('openwop.http.server.duration', b, [
-      [{ route: '/v1/runs', method: 'POST', status_class: '2xx', stream: 'false' },
+      [{ route: '/runs', method: 'POST', status_class: '2xx', stream: 'false' },
         [...new Array<number>(96).fill(0.2), ...new Array<number>(4).fill(3)]],
     ])]);
     expect(row(rows, 'A2').observed).toBeCloseTo(0.96, 9);
@@ -393,7 +395,7 @@ describe('ADR 0556 P2 — the evaluators compute what the objective says', () =>
   it('breaches a percentile row when too many observations exceed the threshold', () => {
     const b = bucketsOf('openwop.http.server.duration');
     const rows = project([hist('openwop.http.server.duration', b, [
-      [{ route: '/v1/runs', method: 'POST', status_class: '2xx', stream: 'false' },
+      [{ route: '/runs', method: 'POST', status_class: '2xx', stream: 'false' },
         [...new Array<number>(90).fill(0.2), ...new Array<number>(10).fill(3)]],
     ])]);
     expect(row(rows, 'A2').observed).toBeCloseTo(0.9, 9);
@@ -425,13 +427,13 @@ describe('ADR 0556 P2 — the evaluators compute what the objective says', () =>
   it('excludes SSE connections via the bounded `stream` label, keeping JSON polling', () => {
     const b = bucketsOf('openwop.http.server.duration');
     const rows = project([hist('openwop.http.server.duration', b, [
-      [{ route: '/v1/workflows', method: 'GET', status_class: '2xx', stream: 'false' }, new Array<number>(50).fill(0.02)],
+      [{ route: '/workflows', method: 'GET', status_class: '2xx', stream: 'false' }, new Array<number>(50).fill(0.02)],
       // The JSON POLLING mode of the run-events route. Same route template as
       // the stream below — which is precisely why a route-template filter was
       // the wrong instrument: it would have dropped this real, short request.
-      [{ route: '/v1/runs/:runId/events', method: 'GET', status_class: '2xx', stream: 'false' }, new Array<number>(50).fill(0.03)],
+      [{ route: '/runs/:runId/events', method: 'GET', status_class: '2xx', stream: 'false' }, new Array<number>(50).fill(0.03)],
       // The SSE mode. 600 s of "duration" is a browser tab, not latency.
-      [{ route: '/v1/runs/:runId/events', method: 'GET', status_class: '2xx', stream: 'true' }, new Array<number>(50).fill(600)],
+      [{ route: '/runs/:runId/events', method: 'GET', status_class: '2xx', stream: 'true' }, new Array<number>(50).fill(600)],
     ])]);
     expect(row(rows, 'A2').sampleCount).toBe(100);
     expect(row(rows, 'A2').state).toBe('healthy');

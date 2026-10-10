@@ -6,31 +6,46 @@
  * effect, so anything that followed the link — a mail-client link scanner, a
  * chat unfurler, a browser prefetch — silently accepted on the recipient's
  * behalf. Joining an organisation now takes a deliberate click.
+ *
+ * Tracker: docs/steward/UX_UPGRADE-invitations.md (IN-G1..IN-G4, R2 IN-SP-2/3/8/
+ * 10/13, IN-R2-1, ORGINV-UX-4/6/10/11); ADR 0564 D2/D3 (decline); ADR 0622 D7
+ * (`reason: email_unverified`).
+ *
+ * Sabotage that turns it red: calling `acceptInvite` from the preview `.then`
+ * reds "previews and WAITS" + the signed-out case; flipping the outcome
+ * announcement to `{ assertive: false }` reds the ORGINV-UX-6 cases; dropping
+ * `setPhase('ready')` from `switchAccount` reds the Switch-account case. The
+ * double-redeem claim is held by TWO guards (the `accepting` ref AND Button
+ * `loading` → disabled); only the latter is single-edit probeable.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import type * as InvitesClient from '../invitesClient.js';
+import type * as WorkspaceClient from '../../client/workspaceClient.js';
+import { formatDate } from '../../i18n/format.js';
+import { messages as orgsEn } from '../i18n/en.js';
 
-const previewInvite = vi.fn();
-const acceptInvite = vi.fn();
-const declineInvitation = vi.fn();
+const previewInvite = vi.fn<typeof InvitesClient.previewInvite>();
+const acceptInvite = vi.fn<typeof InvitesClient.acceptInvite>();
+const declineInvitation = vi.fn<typeof InvitesClient.declineInvitation>();
 // The real module is spread so the typed-error helper (`inviteErrorDetails`)
 // is the shipped one — a test that re-implements it would pin its own copy.
 vi.mock('../invitesClient.js', async (orig) => ({
   ...(await orig<typeof import('../invitesClient.js')>()),
-  previewInvite: (...a: unknown[]) => previewInvite(...a),
-  acceptInvite: (...a: unknown[]) => acceptInvite(...a),
-  declineInvitation: (...a: unknown[]) => declineInvitation(...a),
+  previewInvite: (...a: Parameters<typeof InvitesClient.previewInvite>) => previewInvite(...a),
+  acceptInvite: (...a: Parameters<typeof InvitesClient.acceptInvite>) => acceptInvite(...a),
+  declineInvitation: (...a: Parameters<typeof InvitesClient.declineInvitation>) => declineInvitation(...a),
 }));
 // ADR 0564 D3 — Decline is confirm-gated; the dialog host is not mounted here.
 const { confirmMock } = vi.hoisted(() => ({ confirmMock: vi.fn() }));
 vi.mock('../../ui/confirm.js', () => ({ confirm: confirmMock }));
 
-const listMyWorkspaces = vi.fn();
-const switchWorkspace = vi.fn();
+const listMyWorkspaces = vi.fn<typeof WorkspaceClient.listMyWorkspaces>();
+const switchWorkspace = vi.fn<typeof WorkspaceClient.switchWorkspace>();
 vi.mock('../../client/workspaceClient.js', () => ({
-  listMyWorkspaces: (...a: unknown[]) => listMyWorkspaces(...a),
-  switchWorkspace: (...a: unknown[]) => switchWorkspace(...a),
+  listMyWorkspaces: () => listMyWorkspaces(),
+  switchWorkspace: (...a: Parameters<typeof WorkspaceClient.switchWorkspace>) => switchWorkspace(...a),
 }));
 
 const useAuth = vi.fn();
@@ -69,7 +84,20 @@ const liveHost = document.createElement('div');
 const assertive = (): string => liveHost.querySelector('[data-owp-live="assertive"]')?.textContent ?? '';
 const polite = (): string => liveHost.querySelector('[data-owp-live="polite"]')?.textContent ?? '';
 
-const PREVIEW = { orgId: 'org:1', orgName: 'Acme', role: 'editor', email: 'bob@acme.test', expiresAt: '2026-08-01T00:00:00.000Z' };
+const PREVIEW = { orgId: 'org:1', orgName: 'Acme', role: 'editor', email: 'bob@acme.test', expiresAt: '2026-08-01T00:00:00.000Z' } satisfies InvitesClient.InvitePreview;
+/** A production-shaped accept response (`OrgMember & { alreadyMember? }`). */
+const ACCEPTED: Awaited<ReturnType<typeof InvitesClient.acceptInvite>> = {
+  memberId: 'm1', orgId: 'org:1', tenantId: 'org:1', subject: 'u1', displayName: 'Bob', email: 'bob@acme.test',
+  roles: ['editor'], teamIds: [], createdAt: '2026-07-01T00:00:00.000Z', updatedAt: '2026-07-01T00:00:00.000Z',
+};
+const DECLINED: Awaited<ReturnType<typeof InvitesClient.declineInvitation>> = {
+  inviteId: 'inv1', orgId: 'org:1', status: 'declined', declinedAt: '2026-09-02T00:00:00.000Z',
+};
+const workspace = (workspaceId: string, name: string): WorkspaceClient.WorkspaceSummary => ({
+  workspaceId, name, slug: name.toLowerCase().replace(/\s+/g, '-'), roles: ['member'], kind: 'shared', active: false,
+});
+/** Every failure copy the preview card can show — the READY state shows none. */
+const FAILURE_COPY = [orgsEn.acceptErrorMismatch, orgsEn.acceptErrorUnverified, orgsEn.acceptErrorBody, orgsEn.acceptDeclineFailed];
 
 const signedIn = () => useAuth.mockReturnValue({ user: { userId: 'u1', email: 'bob@acme.test' }, loading: false });
 const signedOut = () => useAuth.mockReturnValue({ user: null, loading: false });
@@ -81,7 +109,9 @@ const renderPage = (token = 'tok') => {
 
 afterEach(() => {
   cleanup();
-  vi.clearAllMocks();
+  // reset, not clear: a leaked implementation (e.g. a resolved confirm) must not
+  // satisfy a later case — every case arms what it uses.
+  vi.resetAllMocks();
   document.head.querySelector('meta[name="robots"]')?.remove();
 });
 
@@ -89,7 +119,7 @@ describe('invitation accept — loading the page never joins anything (IN-G2)', 
   it('previews and WAITS for an explicit click', async () => {
     signedIn();
     previewInvite.mockResolvedValue(PREVIEW);
-    acceptInvite.mockResolvedValue({ orgId: 'org:1' });
+    acceptInvite.mockResolvedValue(ACCEPTED);
     renderPage();
 
     await screen.findByText(/Join Acme/i);
@@ -108,13 +138,16 @@ describe('invitation accept — loading the page never joins anything (IN-G2)', 
     await screen.findByText(/Join Acme/i);
     expect(screen.getByText(/join as editor/i)).toBeTruthy();
     expect(screen.getByText(/bob@acme.test/)).toBeTruthy();
-    expect(container.querySelector('time')?.getAttribute('datetime')).toBe('2026-08-01T00:00:00.000Z');
+    const time = container.querySelector('time');
+    expect(time?.getAttribute('datetime')).toBe('2026-08-01T00:00:00.000Z');
+    // The recipient reads the DATE, not the attribute.
+    expect(time?.textContent).toBe(formatDate(PREVIEW.expiresAt));
   });
 
   it('a double-click cannot redeem twice', async () => {
     signedIn();
     previewInvite.mockResolvedValue(PREVIEW);
-    acceptInvite.mockReturnValue(new Promise(() => { /* never settles */ }));
+    acceptInvite.mockReturnValue(new Promise<never>(() => { /* never settles */ }));
     renderPage();
     await screen.findByText(/Join Acme/i);
     const btn = screen.getByRole('button', { name: /accept invitation/i });
@@ -133,7 +166,7 @@ describe('ORGINV-UX-6 — the outcome of Accept is SPOKEN and focus is placed, n
   it('done: the title reaches the ASSERTIVE shell region and focus lands on the org CTA', async () => {
     signedIn();
     previewInvite.mockResolvedValue(PREVIEW);
-    acceptInvite.mockResolvedValue({ orgId: 'org:1' });
+    acceptInvite.mockResolvedValue(ACCEPTED);
     renderPage();
     await screen.findByText(/Join Acme/i);
     const before = assertive();
@@ -151,7 +184,7 @@ describe('ORGINV-UX-6 — the outcome of Accept is SPOKEN and focus is placed, n
   it('already-member: its own title is announced and its CTA focused', async () => {
     signedIn();
     previewInvite.mockResolvedValue(PREVIEW);
-    acceptInvite.mockResolvedValue({ memberId: 'm1', orgId: PREVIEW.orgId, alreadyMember: true });
+    acceptInvite.mockResolvedValue({ ...ACCEPTED, alreadyMember: true });
     renderPage();
     await screen.findByText(/Join Acme/i);
     const before = assertive();
@@ -251,6 +284,13 @@ describe('invitation accept — failure states (IN-G3/IN-G4)', () => {
     expect(screen.getByText(/Join Acme/i)).toBeTruthy();
     expect(previewInvite).toHaveBeenCalledTimes(1); // no reload, no re-read
     expect((screen.getByRole('button', { name: /accept invitation/i }) as HTMLButtonElement).disabled).toBe(false);
+    // Back in READY, not a lingering failed state: a failed-generic phase also
+    // shows "Join Acme" with Accept enabled, but carries a failure Notice. None
+    // of the card's failure copies may remain (the mismatch one is not enough —
+    // that is what the first draft asserted, and it stayed green with the reset
+    // to 'ready' deleted).
+    for (const copy of FAILURE_COPY) expect(screen.queryByText(copy)).toBeNull();
+    expect(screen.queryByRole('button', { name: /switch account/i })).toBeNull();
   });
 
   it('a revoked/used token (4xx) lands on the GONE state — with its actionable next step', async () => {
@@ -285,7 +325,7 @@ describe('invitation accept — failure states (IN-G3/IN-G4)', () => {
   it('R2 IN-SP-3/13 — already-a-member renders its own state; the done CTA lands IN the org', async () => {
     signedIn();
     previewInvite.mockResolvedValue(PREVIEW);
-    acceptInvite.mockResolvedValue({ memberId: 'm1', orgId: PREVIEW.orgId, alreadyMember: true });
+    acceptInvite.mockResolvedValue({ ...ACCEPTED, alreadyMember: true });
     renderPage();
     await screen.findByText(/Join Acme/i);
     fireEvent.click(screen.getByRole('button', { name: /accept invitation/i }));
@@ -304,13 +344,13 @@ describe('invitation accept — failure states (IN-G3/IN-G4)', () => {
 });
 
 describe('R3 (F9 follow-on) — a cross-workspace accept switches the ACTIVE workspace, or says why it cannot', () => {
-  const acceptedInWs = { orgId: 'org:1', tenantId: 'ws:design', memberId: 'm1' };
+  const acceptedInWs = { ...ACCEPTED, tenantId: 'ws:design' };
 
   it('same-workspace accept keeps the plain link CTA and asks the workspace list NOTHING extra it does not need', async () => {
     signedIn();
     previewInvite.mockResolvedValue(PREVIEW);
     acceptInvite.mockResolvedValue({ ...acceptedInWs, tenantId: 'ws:design' });
-    listMyWorkspaces.mockResolvedValue({ active: 'ws:design', workspaces: [{ workspaceId: 'ws:design', name: 'Design', kind: 'shared' }] });
+    listMyWorkspaces.mockResolvedValue({ active: 'ws:design', personal: 'user:me', workspaces: [workspace('ws:design', 'Design')] });
     renderPage();
     await screen.findByText(/Join Acme/i);
     fireEvent.click(screen.getByRole('button', { name: /accept invitation/i }));
@@ -325,7 +365,7 @@ describe('R3 (F9 follow-on) — a cross-workspace accept switches the ACTIVE wor
     signedIn();
     previewInvite.mockResolvedValue(PREVIEW);
     acceptInvite.mockResolvedValue(acceptedInWs);
-    listMyWorkspaces.mockResolvedValue({ active: 'user:me', workspaces: [{ workspaceId: 'ws:design', name: 'Design Team', kind: 'shared' }] });
+    listMyWorkspaces.mockResolvedValue({ active: 'user:me', personal: 'user:me', workspaces: [workspace('ws:design', 'Design Team')] });
     switchWorkspace.mockResolvedValue({ ok: true, active: 'ws:design' });
     const assign = vi.fn();
     const orig = window.location;
@@ -349,7 +389,7 @@ describe('R3 (F9 follow-on) — a cross-workspace accept switches the ACTIVE wor
     signedIn();
     previewInvite.mockResolvedValue(PREVIEW);
     acceptInvite.mockResolvedValue(acceptedInWs);
-    listMyWorkspaces.mockResolvedValue({ active: 'user:me', workspaces: [] });
+    listMyWorkspaces.mockResolvedValue({ active: 'user:me', personal: 'user:me', workspaces: [] });
     renderPage();
     await screen.findByText(/Join Acme/i);
     fireEvent.click(screen.getByRole('button', { name: /accept invitation/i }));
@@ -379,7 +419,7 @@ describe('ADR 0564 D3 — Decline is a deliberate, confirmed act with a terminal
   it('a cancelled confirm declines NOTHING; a confirmed one POSTs the token — the confirm is danger-styled and names the org', async () => {
     signedIn();
     previewInvite.mockResolvedValue(PREVIEW);
-    declineInvitation.mockResolvedValue({ inviteId: 'inv1', orgId: 'org:1', status: 'declined', declinedAt: '2026-09-02T00:00:00.000Z' });
+    declineInvitation.mockResolvedValue(DECLINED);
     confirmMock.mockResolvedValueOnce(false);
     renderPage();
     await screen.findByText(/Join Acme/i);
@@ -406,7 +446,7 @@ describe('ADR 0564 D3 — Decline is a deliberate, confirmed act with a terminal
   it('the declined state is announced ASSERTIVELY and takes focus (the Decline button unmounted; never <body>)', async () => {
     signedIn();
     previewInvite.mockResolvedValue(PREVIEW);
-    declineInvitation.mockResolvedValue({ inviteId: 'inv1', orgId: 'org:1', status: 'declined', declinedAt: '2026-09-02T00:00:00.000Z' });
+    declineInvitation.mockResolvedValue(DECLINED);
     confirmMock.mockResolvedValue(true);
     renderPage();
     await screen.findByText(/Join Acme/i);

@@ -12,9 +12,9 @@ import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { authorizeOrgScope } from '../featureRoute.js';
 import { checkEntitlement } from '../../host/entitlementSeam.js';
-import { resolveOne } from '../../host/featureToggles/service.js';
+import { resolveOne, resolveToggle } from '../../host/featureToggles/service.js';
 import { getOrg } from '../../host/accessControlService.js';
-import { isAllowed } from '../consent/consentService.js';
+import { visitorConsentContextOf, analyticsConsentAllows } from './consentGate.js';
 
 /** AN-G1 — the reporting window from `?days=`. Bounded and fail-open-to-all-time:
  *  an absent or unparseable value keeps the previous behaviour exactly, so an
@@ -27,13 +27,16 @@ function windowDaysFor(req: Request): number | undefined {
 function windowFor(req: Request): string | undefined {
   return sinceIsoForDays(windowDaysFor(req));
 }
-import { recordEvent, listEvents, summarizeForReport, sinceIsoForDays, trendForDays } from './analyticsService.js';
+import { recordEvent, listEvents, summarizeForReport, sinceIsoForDays, trendForDays, toEventView } from './analyticsService.js';
 import { recordNav, navReport } from './navTelemetryService.js';
+import { notePaywallEvent, isValidPaywallEvent, type PaywallEventInput } from '../../host/paywallFunnel.js';
 import { visitorHashFor } from './visitorIdentity.js';
 
 const FEATURE = { toggleId: 'analytics', label: 'Analytics' };
-const ORG = '/v1/host/openwop-app/analytics/orgs/:orgId';
-const PUB = '/v1/host/openwop-app/public-analytics';
+/** Most paywall events one beacon may carry (a page shows a handful of locks). */
+const PAYWALL_BATCH_MAX = 50;
+const ORG = '/host/openwop-app/analytics/orgs/:orgId';
+const PUB = '/host/openwop-app/public-analytics';
 
 // ANL-7 — per-org beacon budget (fixed 60 s window, per instance). Env-tunable
 // like the IP limiter; `0` disables. Reset for tests via the exported helper.
@@ -71,7 +74,8 @@ export function registerAnalyticsRoutes(deps: RouteDeps): void {
     const notFound = (): never => { throw new OpenwopError('not_found', 'Not found.', 404, {}); };
     const org = await getOrg(orgId);
     if (!org) return notFound();
-    const a = await resolveOne(FEATURE.toggleId, { tenantId: org.tenantId });
+    // ADR 0819 §1 opt-out — a PUBLIC lane (tenant from the resource): ADR 0419 never paywalls a shopper/visitor on the operator's plan.
+    const a = await resolveToggle(FEATURE.toggleId, { tenantId: org.tenantId });
     if (!a || !a.enabled) return notFound();
     return org.tenantId;
   };
@@ -92,10 +96,15 @@ export function registerAnalyticsRoutes(deps: RouteDeps): void {
       }
       const body = (req.body ?? {}) as Record<string, unknown>;
       const subjectKey = typeof body.sessionKey === 'string' ? body.sessionKey : '';
+      // ADR 0857 D3 — the visitor's consent-lane token, when the caller carries
+      // one. Validated FIRST, outside the outage catch below, so an invalid token
+      // is its own typed 400 and never reads as a consent-store 503.
+      // ADR 0860 D3 — plus the request's region, for a visitor with no record.
+      const visitorCtx = visitorConsentContextOf(req, tenantId, body.consentToken);
       // Consent gate (ADR 0020) — the ONE helper; honest 202 when analytics is
       // not consented (no error, simply not recorded).
       let consented: boolean;
-      try { consented = await isAllowed(tenantId, subjectKey, 'analytics'); }
+      try { consented = await analyticsConsentAllows(tenantId, subjectKey, visitorCtx); }
       catch (err) { throw new OpenwopError('consent_unreadable', 'The consent store could not be read; the event was not recorded. Retry.', 503, { cause: String(err) }); } // ADR 0657 D5 — an outage is a 503, never a 500
       if (!consented) { res.status(202).json({ recorded: false, reason: 'consent' }); return; }
       // ADR 0569 — SERVER-computed cookieless visitor hash (daily-rotating
@@ -173,23 +182,17 @@ export function registerAnalyticsRoutes(deps: RouteDeps): void {
   app.get(`${ORG}/events`, async (req, res, next) => {
     try {
       const { orgId, tenantId } = await authz(req, 'workspace:read');
-      // R2 AN-SP-5 — project internals out of the HTTP response the way the
-      // workflow surface always has: `tenantId` is an implementation detail
-      // (the caller IS the tenant), and eventId is a storage key.
+      // R2 AN-SP-5 — project internals out of the HTTP response: `tenantId` is
+      // an implementation detail (the caller IS the tenant). (This line used to
+      // say "the way the workflow surface always has" — the surface was the
+      // leakier exit; ADR 0857 D2.)
       const rows = await listEvents(tenantId, orgId, 100, windowFor(req));
       // ANL-15 — project to the DECLARED client shape (`analyticsClient.ts`
       // `AnalyticsEvent`). Stripping only `tenantId` shipped `visitorHash`,
       // `clickIds` (cross-site ad identifiers), `owx` and the experiment stamp
       // to every `workspace:read` member — none rendered, all re-identifying.
-      res.json({ events: rows.map((e) => ({
-        eventId: e.eventId, orgId: e.orgId, type: e.type, ts: e.ts,
-        ...(e.path !== undefined ? { path: e.path } : {}),
-        ...(e.name !== undefined ? { name: e.name } : {}),
-        ...(e.sessionKey !== undefined ? { sessionKey: e.sessionKey } : {}),
-        ...(e.referrer !== undefined ? { referrer: e.referrer } : {}),
-        ...(e.utm !== undefined ? { utm: e.utm } : {}),
-        ...(e.props !== undefined ? { props: e.props } : {}),
-      })) });
+      // ADR 0857 D2 — the projection now lives in ONE place, shared with the run surface.
+      res.json({ events: rows.map(toEventView) });
     }
     catch (err) { next(err); }
   });
@@ -209,7 +212,16 @@ export function registerAnalyticsRoutes(deps: RouteDeps): void {
     return tenantId;
   };
 
-  app.post('/v1/host/openwop-app/analytics/nav', async (req, res, next) => {
+  const paywallBeaconEnabled = async (req: Request): Promise<string> => {
+    const tenantId = req.tenantId;
+    if (!tenantId || !req.principal) throw new OpenwopError('not_found', 'Not found.', 404, {});
+    const sub = await resolveToggle('workspace-nav-telemetry', { tenantId });
+    const parent = await resolveToggle('analytics', { tenantId });
+    if (!sub?.enabled || !parent?.enabled) throw new OpenwopError('not_found', 'Not found.', 404, {});
+    return tenantId;
+  };
+
+  app.post('/host/openwop-app/analytics/nav', async (req, res, next) => {
     try {
       const tenantId = await navEnabled(req);
       const body = (req.body ?? {}) as { route?: unknown; source?: unknown };
@@ -220,7 +232,35 @@ export function registerAnalyticsRoutes(deps: RouteDeps): void {
     } catch (err) { next(err); }
   });
 
-  app.get('/v1/host/openwop-app/analytics/nav/report', async (req, res, next) => {
+  // Strategy §8 — paywall impressions/clicks from the SPA's lock affordances, on
+  // the nav beacon's posture (both toggles, 404 when off; counts per day ×
+  // feature × surface, no user id) with ONE deliberate difference: the toggles
+  // are read WITHOUT the plan (`resolveToggle`, ADR 0819 opt-out, pinned in
+  // `test/feature-toggle-access-ratchet.test.ts`). `analytics` is sold in the CRM
+  // bundle, so `resolveOne` would 404 exactly the tenants who meet a lock — the
+  // funnel would only ever count workspaces that already paid. This lane serves
+  // no paid capability: it only accepts a count. The disclosure toggle still rules. Only the frontend
+  // metrics are accepted here: `refusal` is the server's own count and a client
+  // cannot add to it. A batch is bounded; malformed entries are dropped.
+  app.post('/host/openwop-app/analytics/paywall', async (req, res, next) => {
+    try {
+      const tenantId = await paywallBeaconEnabled(req);
+      const raw = (req.body ?? {}) as { events?: unknown };
+      const events = Array.isArray(raw.events) ? raw.events.slice(0, PAYWALL_BATCH_MAX) : [];
+      let recorded = 0;
+      for (const e of events) {
+        if (!e || typeof e !== 'object') continue;
+        const ev = e as Record<string, unknown>;
+        if (ev.metric !== 'impression' && ev.metric !== 'click') continue;
+        if (!isValidPaywallEvent(ev)) continue;
+        const input: PaywallEventInput = { tenantId, metric: ev.metric, featureId: ev.featureId as string, surface: ev.surface as PaywallEventInput['surface'] };
+        if (notePaywallEvent(input)) recorded += 1;
+      }
+      res.status(202).json({ recorded });
+    } catch (err) { next(err); }
+  });
+
+  app.get('/host/openwop-app/analytics/nav/report', async (req, res, next) => {
     try {
       const tenantId = await navEnabled(req);
       res.json(await navReport(tenantId));

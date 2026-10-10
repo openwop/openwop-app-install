@@ -49,3 +49,34 @@ export async function isNotificationMuted(tenantId: string, userId: string, ctx:
     return false;
   }
 }
+
+// ── ADR 0816 D5 — device push honours the person's preferences ───────────────
+//
+// The in-tab toast already applies globalMute / per-type mute / per-type
+// `desktop:false` / quiet hours (frontend `preferences.ts`). Web Push is the SAME
+// toast when the tab is closed, and it consulted none of them, so a muted type
+// still buzzed the phone. The push lane asks this seam per subscription owner.
+// Registered by `features/notifications` over the same prefs store; default (no
+// resolver) and a throwing resolver both DELIVER — a preferences lookup must
+// never drop a real signal by erroring.
+
+type DevicePushResolver = (tenantId: string, userId: string, ctx: NotificationMuteContext) => Promise<boolean>;
+
+let devicePushResolver: DevicePushResolver | null = null;
+
+/** Registered ONCE at boot by `features/notifications`. */
+export function setDevicePushSuppressionResolver(fn: DevicePushResolver): void {
+  devicePushResolver = fn;
+}
+
+/** True when `userId`'s preferences say a device toast for this notice must not
+ *  be shown now. Fail-open (deliver). */
+export async function isDevicePushSuppressed(tenantId: string, userId: string, ctx: NotificationMuteContext): Promise<boolean> {
+  if (!devicePushResolver) return false;
+  try {
+    return await devicePushResolver(tenantId, userId, ctx);
+  } catch (err) {
+    log.warn('device_push_pref_resolver_failed_fail_open', { tenantId, error: err instanceof Error ? err.message : String(err) });
+    return false;
+  }
+}

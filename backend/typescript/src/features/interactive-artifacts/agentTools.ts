@@ -34,6 +34,7 @@ function contentHash(value: unknown): string {
 export function registerInteractiveArtifactAgentTools(): void {
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: INTERACTIVE_ARTIFACTS_RENDER_TOOL_ID,
       description:
@@ -111,6 +112,7 @@ export function registerInteractiveArtifactAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     // ADR 0604 review H4 — the READ-BEFORE-WRITE body of the `get-design`
     // family (`cad` / `drawings` / `campaign-studio` / `app-builder`, all
     // exempt); its own description is literally "read before revising", and

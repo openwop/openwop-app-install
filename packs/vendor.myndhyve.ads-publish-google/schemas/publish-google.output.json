@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.ads-publish-google/1.0.0/publish-google.output.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.ads-publish-google/1.0.3/publish-google.output.json",
   "title": "AdsPublishGoogleOutput",
   "type": "object",
   "required": ["platform", "customerId", "budgetResourceName", "campaignResourceName", "adGroupResourceName", "adGroupAdResourceName", "publishedStatus", "publishedAt", "success"],

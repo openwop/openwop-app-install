@@ -136,7 +136,7 @@ describe('feature wiring', () => {
     expect(toolOutputCompactionFeature.requiredPacks).toEqual([
       // ADR 0680 D1b bumped the pack for the new inputSchema; the pin moves in lockstep or
       // replay resolvability breaks (RFC 0076) — version, pin and steward digest are ONE artifact.
-      { name: 'feature.tool-output-compaction.nodes', version: '1.2.0' },
+      { name: 'feature.tool-output-compaction.nodes', version: '1.2.1' },
     ]);
   });
 });

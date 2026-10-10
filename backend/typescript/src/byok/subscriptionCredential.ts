@@ -17,11 +17,12 @@
  */
 
 import { resolveSecret, setSecret, type SecretScope } from './secretResolver.js';
+import { OWNED_REF_PREFIXES } from './refNamespaces.js';
 
 /** The credentialRef namespace for a subscription-mode credential. A run/chat
  *  that carries `subscription:<provider>` as its `credentialRef` routes to the
  *  at-own-risk dispatch path. */
-const SUBSCRIPTION_REF_PREFIX = 'subscription:';
+const SUBSCRIPTION_REF_PREFIX = OWNED_REF_PREFIXES.subscription;
 
 /** Whether a credentialRef is a subscription-kind ref (routes to the at-own-risk
  *  operator-endpoint dispatch, not a metered BYOK/managed key). */

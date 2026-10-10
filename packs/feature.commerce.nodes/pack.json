@@ -1,6 +1,7 @@
 {
   "name": "feature.commerce.nodes",
-  "version": "1.3.1",
+  "version": "1.3.2",
+  "kind": "node",
   "description": "E-Commerce node pack (+ gap plan \u00a75B B5) \u2014 catalog, orders, order-ops (fulfill/refund), inventory, and coupons over ctx.features.commerce. Money-adjacent verbs ride the tenant's commerce-spend approval thresholds inside the service (B3).",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
@@ -12,7 +13,7 @@
     "store"
   ],
   "engines": {
-    "openwop": ">=1.0.0 <2.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "nodes": [
     {

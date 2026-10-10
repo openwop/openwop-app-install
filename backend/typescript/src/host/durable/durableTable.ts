@@ -9,14 +9,16 @@
  * Method-for-method parity with `createTable` in inMemorySurfaces.ts, incl.
  * cursor pagination (base64(after_id)) and exact-match filters.
  *
- * Sample-grade trade-off (documented, same as the existing durable host-ext
- * store): `query`/`count` are prefix SCANS over the (tenant,table) keyspace —
- * fine at demo/medium scale and indexed by the kv primary key, but a
- * production store would index per queried column.
+ * Reads (ADR 0868): `query` pages through the (tenant,table) key range in
+ * the database — an unfiltered page reads `limit + 1` rows — and `count` is
+ * counted there. A FILTERED query still scans the range in batches until its
+ * page fills (no per-column index); a selective filter on a large table reads
+ * many rows, which `surface_scan_heavy` reports.
  */
 
 import type { BundleScope, TableSurface } from '../inMemorySurfaces.js';
-import { requireDurableStorage } from './durableStore.js';
+import { countPrefix, requireDurableStorage, scanPrefix, SCAN_BATCH } from './durableStore.js';
+import { tableQueryLimit } from '../inMemorySurfaces.js';
 
 type TableColType = 'string' | 'number' | 'boolean' | 'object';
 interface TableRow { id: string; [field: string]: unknown; }
@@ -100,41 +102,42 @@ export function createDurableTable(scope: BundleScope): TableSurface {
     },
 
     async query({ table, filter, limit, cursor }) {
+      // ADR 0868: pages in the database, in byte order of the id (the key
+      // suffix). Unfiltered, one call reads `limit + 1` rows (the extra one
+      // answers `nextCursor`); filtered, it reads pages of SCAN_BATCH until the
+      // page is full. It used to load and parse the whole table every call.
       const afterId = typeof cursor === 'string' && cursor.length > 0
         ? Buffer.from(cursor, 'base64').toString('utf8')
         : '';
-      const lim = typeof limit === 'number' && limit > 0 ? limit : Number.MAX_SAFE_INTEGER;
-      const stored = await storage().kvList(rowPrefix(table));
-      const allMatching: TableRow[] = [];
-      for (const r of stored) {
+      const lim = tableQueryLimit(limit);
+      const prefix = rowPrefix(table);
+      const hasFilter = !!filter && typeof filter === 'object' && Object.keys(filter as object).length > 0;
+      const matches: TableRow[] = [];
+      for await (const r of scanPrefix(prefix, {
+        batch: hasFilter ? SCAN_BATCH : lim + 1,
+        after: afterId ? `${prefix}${afterId}` : undefined,
+        op: 'table.query',
+      })) {
         let rowObj: TableRow;
         try { rowObj = JSON.parse(r.value) as TableRow; } catch { continue; }
-        if (filter && typeof filter === 'object') {
+        if (hasFilter) {
           let ok = true;
           for (const [fk, fv] of Object.entries(filter as Record<string, unknown>)) {
             if (rowObj[fk] !== fv) { ok = false; break; }
           }
           if (!ok) continue;
         }
-        allMatching.push(rowObj);
+        matches.push(rowObj);
+        if (matches.length > lim) break;
       }
-      allMatching.sort((a, b) => a.id.localeCompare(b.id));
-      const rows: TableRow[] = [];
-      for (const rowObj of allMatching) {
-        if (afterId && rowObj.id <= afterId) continue;
-        rows.push(rowObj);
-        if (rows.length >= lim) break;
-      }
+      const rows = matches.slice(0, lim);
       const last = rows[rows.length - 1];
-      const consumedThroughId = last ? last.id : afterId;
-      const hasMore = allMatching.some((r) => r.id > consumedThroughId);
-      const nextCursor = hasMore && last ? Buffer.from(last.id, 'utf8').toString('base64') : null;
+      const nextCursor = matches.length > lim && last ? Buffer.from(String(last.id), 'utf8').toString('base64') : null;
       return { rows, count: rows.length, nextCursor };
     },
 
     async count({ table }) {
-      const stored = await storage().kvList(rowPrefix(table));
-      return { count: stored.length };
+      return { count: await countPrefix(rowPrefix(table)) };
     },
   };
 }

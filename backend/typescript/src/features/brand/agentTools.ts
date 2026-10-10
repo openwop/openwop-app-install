@@ -62,6 +62,7 @@ export function registerBrandAgentTools(): void {
   // ── list-brands ──────────────────────────────────────────────────────────
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: BRAND_LIST_TOOL_ID,
       description:
@@ -110,6 +111,7 @@ export function registerBrandAgentTools(): void {
   // ── resolve-voice ────────────────────────────────────────────────────────
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: BRAND_RESOLVE_VOICE_TOOL_ID,
       description:
@@ -149,6 +151,7 @@ export function registerBrandAgentTools(): void {
   // ── compliance-check ───────────────────────────────────────────────────────
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: BRAND_COMPLIANCE_CHECK_TOOL_ID,
       description:

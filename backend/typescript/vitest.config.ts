@@ -20,8 +20,13 @@ export default defineConfig({
     // The clock-shift lane is OPT-IN (OPENWOP_CI_CLOCKSHIFT=1). See
     // test/setup/clockShift.ts — it advances the wall clock so a date bomb fires
     // in CI instead of on a random Tuesday, pointing at an innocent diff.
+    // testServerKeepAlive.ts lifts every test server's keep-alive: a synchronous
+    // stretch past Node's 5s default made the next pooled request ECONNRESET.
+    // ADR 0863 D8 — a full suite outside a gate waits for a running gate's
+    // claim first. Targeted runs never wait. See test/setup/queueBehindGate.ts.
+    globalSetup: ['test/setup/queueBehindGate.ts'],
     setupFiles: process.env.OPENWOP_CI_CLOCKSHIFT === '1'
-      ? ['test/setup/isolatePackDir.ts', 'test/setup/clockShift.ts']
-      : ['test/setup/isolatePackDir.ts'],
+      ? ['test/setup/isolatePackDir.ts', 'test/setup/testServerKeepAlive.ts', 'test/setup/clockShift.ts']
+      : ['test/setup/isolatePackDir.ts', 'test/setup/testServerKeepAlive.ts'],
   },
 });

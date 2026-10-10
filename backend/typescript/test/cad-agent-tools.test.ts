@@ -53,7 +53,7 @@ const VALID_MODEL = {
 };
 
 describe('CFP-1 — the cad agents pack rides the real registered tools', () => {
-  const packDir = new URL('../../../packs/feature.cad.agents/', import.meta.url);
+  const packDir = new URL('../../../packs/vendor.openwop-app.cad.agents/', import.meta.url);
   const manifest = JSON.parse(readFileSync(new URL('pack.json', packDir), 'utf8')) as {
     agents: { toolAllowlist: string[] }[];
   };
@@ -98,7 +98,7 @@ describe('CFP-1 — cad render tool: gates, repair-loop errors, persistence', ()
   });
 
   it('creates a real canvas.cad, normalized through the render node, with provenance', async () => {
-    const p = createAgentToolProvider({ tenantId: TENANT, actingUserId: 'u-1', agentProfileId: 'feature.cad.agents.default', runId: 'run-cad-prov' });
+    const p = createAgentToolProvider({ tenantId: TENANT, actingUserId: 'u-1', agentProfileId: 'vendor.openwop-app.cad.agents.default', runId: 'run-cad-prov' });
     const out = await p.executeTool({ name: CAD_RENDER_TOOL_ID, input: { model: VALID_MODEL } });
     expect(out.isError).toBeFalsy();
     const res = JSON.parse(out.content) as { canvasId: string; url: string; solidCount: number; version: number };
@@ -108,7 +108,7 @@ describe('CFP-1 — cad render tool: gates, repair-loop errors, persistence', ()
     expect(canvas?.canvasTypeId).toBe('canvas.cad');
     expect(canvas?.ownerSubject).toEqual({ kind: 'user', id: 'u-1' });
     const meta = canvas?.metadata as { producedBy?: { kind: string; id: string } } | undefined;
-    expect(meta?.producedBy).toEqual({ kind: 'agent', id: 'feature.cad.agents.default' });
+    expect(meta?.producedBy).toEqual({ kind: 'agent', id: 'vendor.openwop-app.cad.agents.default' });
   });
 
   it('is idempotent within a run (retries do not mint duplicate canvases)', async () => {

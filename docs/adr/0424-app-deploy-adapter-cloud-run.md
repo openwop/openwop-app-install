@@ -2,6 +2,19 @@
 
 Status: implemented (seam + mock + Cloud Run service ops, 2026-07-18) — source→image builds EXTERNAL-DEP-GATED (Cloud Build; see §Gates)
 
+> **CORRECTED 2026-10-06 (ADR 0835 D1) — the adapter as shipped here could replace
+> any service in the operator's project, the host's own backend included.** The
+> caller named the Cloud Run service (any lowercase-kebab string), the adapter
+> acted with the host's `run.admin` identity, and a failed `POST` fell back to
+> `PATCH` with the caller's image; the spec set no `serviceAccount`, so the image
+> ran as the project's default compute account; and any Editor (`runs:create`)
+> could drive it. Now: the provider name is host-derived
+> (`owa-<12 hex of sha256(tenant, org)>-<service>`) and every adapter verb refuses
+> anything else; images must start with an `OPENWOP_APP_DEPLOY_IMAGE_PREFIXES`
+> entry and revisions run as `OPENWOP_APP_DEPLOY_RUNTIME_SA` (each unset ⇒ 501);
+> `deployApp` needs an acting user holding `host:app-deploy:manage` in the org.
+> "Same project" (DECIDE-1) still holds; it is only safe with those three guards.
+
 Decision source: **ADR 0349** (the deploy contract, deliberately consumer-less
 "until a CONCRETE provider is chosen") + the ratified **DECIDE-1 memo**: Cloud
 Run in the platform's own GCP project — native IAM/audit, revisions as the

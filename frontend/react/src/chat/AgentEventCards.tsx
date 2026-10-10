@@ -60,8 +60,40 @@ export function toolErrorMessage(t: (k: string) => string, code: string | undefi
   switch (code) {
     case 'forbidden': return t('toolErr_forbidden');
     case 'invalid_args': return t('toolErr_invalid_args');
+    // ADR 0822 (grade-ux WFAU-21) — the AI write lanes now refuse a view-only
+    // member with this code; the person needs the remedy, in their language.
+    case 'forbidden_scope': return t('toolErr_forbidden_scope');
     default: return t('toolErrGeneric');
   }
+}
+
+/** Codes {@link toolErrorMessage} has a sentence for. */
+const KNOWN_TOOL_ERROR_CODES = new Set(['forbidden', 'invalid_args', 'forbidden_scope']);
+
+/**
+ * ADR 0822 (grade-ux WFAU-21) — the sentence a tool-error card shows.
+ *
+ * A host tool's failure `message` is the tool's whole result content, and a
+ * feature tool's content is a JSON envelope (`{"error":…,"message":…,…}`), so
+ * `message ?? sentence` put a raw JSON blob — in English, in every locale — in
+ * front of a person. For an ENVELOPE: a code we translate wins (it is the host's
+ * own English prose, so the localized sentence is strictly better), else the
+ * envelope's `message` field — never the blob. A PLAIN transport message still
+ * wins, as before (TOCU-6: it is the more specific account of what failed).
+ */
+export function toolErrorText(t: (k: string) => string, err: { code?: string; message?: string }): string {
+  const raw = err.message?.trim();
+  if (!raw) return toolErrorMessage(t, err.code);
+  if (!raw.startsWith('{')) return raw;
+  if (err.code && KNOWN_TOOL_ERROR_CODES.has(err.code)) return toolErrorMessage(t, err.code);
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    const inner = parsed && typeof parsed === 'object' ? (parsed as { message?: unknown }).message : undefined;
+    if (typeof inner === 'string' && inner.trim()) return inner;
+  } catch {
+    // Not JSON after all — the generic sentence below, never a machine blob.
+  }
+  return toolErrorMessage(t, err.code);
 }
 
 // ── Tool call card ─────────────────────────────────────────────────
@@ -141,7 +173,7 @@ export function ToolCallCard({ call }: { call: AgentToolCall }): JSX.Element {
                   one; the three English literals that used to arrive in it are
                   gone. See `toolErrorMessage` above for why the key lookup is a
                   switch over literals rather than a template (review M9). */}
-              {call.error.message ?? toolErrorMessage(t, call.error.code)}
+              {toolErrorText(t, call.error)}
             </div>
           )}
         </div>

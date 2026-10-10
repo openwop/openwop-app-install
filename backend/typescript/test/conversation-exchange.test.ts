@@ -40,26 +40,27 @@ async function poll(runId: string): Promise<{ status: string; events: Ev[] }> {
   let status = 'pending';
   for (let i = 0; i < 80; i++) {
     await new Promise((r) => setTimeout(r, 20));
-    status = (await api<{ status: string }>(`/v1/runs/${runId}`)).body.status;
+    status = (await api<{ status: string }>(`/runs/${runId}`)).body.status;
     if (['completed', 'failed', 'cancelled'].includes(status) || status.startsWith('waiting')) break;
   }
-  const events = (await api<{ events?: Ev[] }>(`/v1/runs/${runId}/debug-bundle`)).body.events ?? [];
+  const events = (await api<{ events?: Ev[] }>(`/runs/${runId}/debug-bundle`)).body.events ?? [];
   return { status, events };
 }
 const conv = (events: Ev[], type: string): Ev[] => events.filter((e) => e.type === type);
 
 describe('core.conversationGate — open/exchange/close', () => {
   it('advertises conversationPrimitive', async () => {
-    const wk = await api<{ capabilities?: { conversationPrimitive?: boolean } }>('/.well-known/openwop');
-    expect(wk.body.capabilities?.conversationPrimitive).toBe(true);
+    // ADR 0812 — the v2 root's `conversationPrimitive` family (ADR 0746); presence is the claim.
+    const wk = await api<{ conversationPrimitive?: { status?: string } }>('/.well-known/openwop', { headers: { 'OpenWOP-Version': '2' } });
+    expect(wk.body.conversationPrimitive?.status).toBe('experimental');
   });
 
   it('opens, exchanges (user + agent turns), and closes the run', async () => {
     const workflowId = 'openwop-app.conversation.test';
-    await api('/v1/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({
+    await api('/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({
       workflowId, nodes: [{ nodeId: 'gate', typeId: 'core.conversationGate', config: { prompt: 'How can the team help?' } }], edges: [],
     }) });
-    const create = await api<{ runId: string }>('/v1/runs', { method: 'POST', body: JSON.stringify({
+    const create = await api<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({
       workflowId, inputs: { provider: 'mock', model: 'mock-1' }, tenantId: TENANT,
     }) });
     expect(create.status).toBe(201);
@@ -81,7 +82,7 @@ describe('core.conversationGate — open/exchange/close', () => {
     resetMockPrograms();
     programMock('', [{ content: 'I can help with that.' }]);
     const ex1 = await api<{ conversation?: { operation: string; turns: number } }>(
-      `/v1/runs/${runId}/interrupts/gate`,
+      `/runs/${runId}/interrupts/gate`,
       { method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: 'What can you do?' } } }) },
     );
     expect(ex1.status).toBe(200);
@@ -98,13 +99,13 @@ describe('core.conversationGate — open/exchange/close', () => {
     expect(agentTurn.turnIndex).toBe(2); // open=0, user=1, agent=2
 
     // Exchange 2 — turnIndexes keep climbing; still suspended.
-    await api(`/v1/runs/${runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: 'And again?' } } }) });
+    await api(`/runs/${runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: 'And again?' } } }) });
     const after2 = await poll(runId);
     expect(after2.status.startsWith('waiting')).toBe(true);
     expect(conv(after2.events, 'conversation.exchanged').length).toBe(4); // 2 turns x 2 exchanges
 
     // Close — conversation.closed + run completes.
-    const close = await api(`/v1/runs/${runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'close' } }) });
+    const close = await api(`/runs/${runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'close' } }) });
     expect(close.status).toBe(200);
     const done = await poll(runId);
     expect(done.status).toBe('completed');
@@ -113,10 +114,10 @@ describe('core.conversationGate — open/exchange/close', () => {
 
   it('accepts a MULTIMODAL turn — an audio-only ContentPart[] with no typed text is a valid exchange', async () => {
     const workflowId = 'openwop-app.conversation.mm';
-    await api('/v1/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({
+    await api('/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({
       workflowId, nodes: [{ nodeId: 'gate', typeId: 'core.conversationGate', config: { prompt: 'hi' } }], edges: [],
     }) });
-    const create = await api<{ runId: string }>('/v1/runs', { method: 'POST', body: JSON.stringify({
+    const create = await api<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({
       workflowId, inputs: { provider: 'mock', model: 'mock-1' }, tenantId: TENANT,
     }) });
     const runId = create.body.runId;
@@ -126,7 +127,7 @@ describe('core.conversationGate — open/exchange/close', () => {
     // non-empty turn.content") because attachments were dropped / text-only checked.
     const audioTurn = [{ type: 'audio', mimeType: 'audio/webm', dataBase64: 'UklGRg==', durationSeconds: 6 }];
     const ex = await api<{ conversation?: { operation: string } }>(
-      `/v1/runs/${runId}/interrupts/gate`,
+      `/runs/${runId}/interrupts/gate`,
       { method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: audioTurn } } }) },
     );
     expect(ex.status).toBe(200);
@@ -147,7 +148,7 @@ describe('core.conversationGate — open/exchange/close', () => {
       { type: 'text', text: 'my key is sk-abcdefghijklmnop1234' },
       { type: 'audio', mimeType: 'audio/webm', dataBase64: 'UklGRg==' },
     ];
-    await api(`/v1/runs/${runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: mixed } } }) });
+    await api(`/runs/${runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: mixed } } }) });
     const after2 = await poll(runId);
     const userTurns = conv(after2.events, 'conversation.exchanged')
       .map((e) => e.payload?.turn as { role?: string; content?: unknown })
@@ -157,10 +158,10 @@ describe('core.conversationGate — open/exchange/close', () => {
     expect(mixedStored[0]?.text).not.toContain('sk-abcdefghijklmnop1234');
 
     // Emptiness is still enforced: a parts array with NO payload → the same 422.
-    const empty = await api(`/v1/runs/${runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: [{ type: 'text', text: '   ' }] } } }) });
+    const empty = await api(`/runs/${runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: [{ type: 'text', text: '   ' }] } } }) });
     expect(empty.status).toBe(422);
     // And the plain-string regression guard: blank text still 422s.
-    const blank = await api(`/v1/runs/${runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: '   ' } } }) });
+    const blank = await api(`/runs/${runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: '   ' } } }) });
     expect(blank.status).toBe(422);
   });
 
@@ -172,15 +173,15 @@ describe('core.conversationGate — open/exchange/close', () => {
     programMock('', [{ content: 'Hello there friend' }]);
     try {
       const workflowId = 'openwop-app.conversation.stream';
-      await api('/v1/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({
+      await api('/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({
         workflowId, nodes: [{ nodeId: 'gate', typeId: 'core.conversationGate', config: { prompt: 'Hi' } }], edges: [],
       }) });
-      const runId = (await api<{ runId: string }>('/v1/runs', { method: 'POST', body: JSON.stringify({
+      const runId = (await api<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({
         workflowId, inputs: { provider: 'mock', model: 'mock-1' }, tenantId: TENANT,
       }) })).body.runId;
       expect((await poll(runId)).status.startsWith('waiting')).toBe(true);
 
-      await api(`/v1/runs/${runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: 'hello?' } } }) });
+      await api(`/runs/${runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: 'hello?' } } }) });
       const after = await poll(runId);
       const chunks = conv(after.events, 'output.chunk');
       // Multiple deltas, concatenating to the full reply.
@@ -207,15 +208,15 @@ describe('core.conversationGate — open/exchange/close', () => {
     programMock('', [{ content: `here is the key ${CANARY} keep it safe` }]);
     try {
       const workflowId = 'openwop-app.conversation.redact';
-      await api('/v1/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({
+      await api('/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({
         workflowId, nodes: [{ nodeId: 'gate', typeId: 'core.conversationGate', config: { prompt: 'Hi' } }], edges: [],
       }) });
-      const runId = (await api<{ runId: string }>('/v1/runs', { method: 'POST', body: JSON.stringify({
+      const runId = (await api<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({
         workflowId, inputs: { provider: 'mock', model: 'mock-1' }, tenantId: TENANT,
       }) })).body.runId;
       expect((await poll(runId)).status.startsWith('waiting')).toBe(true);
 
-      await api(`/v1/runs/${runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: 'the key?' } } }) });
+      await api(`/runs/${runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: 'the key?' } } }) });
       const after = await poll(runId);
       const chunkText = conv(after.events, 'output.chunk').map((e) => (e.payload as { chunk?: string }).chunk).join('');
       expect(chunkText).not.toContain(CANARY);          // raw secret scrubbed from the stream
@@ -236,10 +237,10 @@ describe('core.conversationGate — open/exchange/close', () => {
     programMock('', [{ content: 'Async reply here' }]);
     try {
       const workflowId = 'openwop-app.conversation.async';
-      await api('/v1/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({
+      await api('/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({
         workflowId, nodes: [{ nodeId: 'gate', typeId: 'core.conversationGate', config: { prompt: 'Hi' } }], edges: [],
       }) });
-      const runId = (await api<{ runId: string }>('/v1/runs', { method: 'POST', body: JSON.stringify({
+      const runId = (await api<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({
         workflowId, inputs: { provider: 'mock', model: 'mock-1' }, tenantId: TENANT,
       }) })).body.runId;
       expect((await poll(runId)).status.startsWith('waiting')).toBe(true);
@@ -247,7 +248,7 @@ describe('core.conversationGate — open/exchange/close', () => {
       // The ack reports only the pre-exchange turns (the open turn) — NOT the new
       // user+agent pair (which a synchronous exchange would have returned as 3).
       const ex = await api<{ conversation?: { operation: string; turns: number } }>(
-        `/v1/runs/${runId}/interrupts/gate`,
+        `/runs/${runId}/interrupts/gate`,
         { method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: 'go async?' } } }) },
       );
       expect(ex.status).toBe(200);
@@ -270,52 +271,52 @@ describe('core.conversationGate — open/exchange/close', () => {
   });
 
   it('the synthesized openwop-app.conversation workflow opens with no registration', async () => {
-    // No POST /v1/host/openwop-app/workflows — the host synthesizes this one.
-    const runId = (await api<{ runId: string }>('/v1/runs', { method: 'POST', body: JSON.stringify({ workflowId: 'openwop-app.conversation', inputs: { provider: 'mock', model: 'mock-1' }, tenantId: TENANT }) })).body.runId;
+    // No POST /host/openwop-app/workflows — the host synthesizes this one.
+    const runId = (await api<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({ workflowId: 'openwop-app.conversation', inputs: { provider: 'mock', model: 'mock-1' }, tenantId: TENANT }) })).body.runId;
     const opened = await poll(runId);
     expect(opened.status.startsWith('waiting')).toBe(true);
     expect(conv(opened.events, 'conversation.opened')).toHaveLength(1);
-    await api(`/v1/runs/${runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'close' } }) });
+    await api(`/runs/${runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'close' } }) });
     expect((await poll(runId)).status).toBe('completed');
   });
 
   it('an idempotent retry of the same exchangeKey does NOT duplicate turns', async () => {
     const workflowId = 'openwop-app.conversation.idem';
-    await api('/v1/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({
+    await api('/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({
       workflowId, nodes: [{ nodeId: 'gate', typeId: 'core.conversationGate', config: {} }], edges: [],
     }) });
-    const runId = (await api<{ runId: string }>('/v1/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs: { provider: 'mock', model: 'mock-1' }, tenantId: TENANT }) })).body.runId;
+    const runId = (await api<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs: { provider: 'mock', model: 'mock-1' }, tenantId: TENANT }) })).body.runId;
     await poll(runId);
 
     const body = JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: 'idempotent please' }, exchangeKey: 'ex-key-1' } });
-    const first = await api(`/v1/runs/${runId}/interrupts/gate`, { method: 'POST', body });
+    const first = await api(`/runs/${runId}/interrupts/gate`, { method: 'POST', body });
     expect(first.status).toBe(200);
     const afterFirst = await poll(runId);
     expect(conv(afterFirst.events, 'conversation.exchanged').length).toBe(2); // user + agent
 
     // Replay the SAME exchangeKey + content (a retried POST). Must short-circuit:
     // still 200, but no new turns appended (the committed claim is returned).
-    const retry = await api(`/v1/runs/${runId}/interrupts/gate`, { method: 'POST', body });
+    const retry = await api(`/runs/${runId}/interrupts/gate`, { method: 'POST', body });
     expect(retry.status).toBe(200);
     const afterRetry = await poll(runId);
     expect(conv(afterRetry.events, 'conversation.exchanged').length).toBe(2); // unchanged — no duplicate
 
     // A DIFFERENT key appends a new pair.
-    await api(`/v1/runs/${runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: 'another' }, exchangeKey: 'ex-key-2' } }) });
+    await api(`/runs/${runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: 'another' }, exchangeKey: 'ex-key-2' } }) });
     expect(conv((await poll(runId)).events, 'conversation.exchanged').length).toBe(4);
   });
 
   it('a BYOK exchange with an unresolvable key fails closed with credential_unavailable (422), persisting no turn', async () => {
     const workflowId = 'openwop-app.conversation.byok';
-    await api('/v1/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({
+    await api('/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({
       workflowId, nodes: [{ nodeId: 'gate', typeId: 'core.conversationGate', config: {} }], edges: [],
     }) });
     // A non-managed, non-mock provider with a credentialRef the host can't resolve.
-    const runId = (await api<{ runId: string }>('/v1/runs', { method: 'POST', body: JSON.stringify({
+    const runId = (await api<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({
       workflowId, inputs: { provider: 'anthropic', model: 'claude-x', credentialRef: 'byok:anthropic:does-not-exist' }, tenantId: TENANT,
     }) })).body.runId;
     await poll(runId);
-    const r = await api<{ error?: string }>(`/v1/runs/${runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: 'hi' } } }) });
+    const r = await api<{ error?: string }>(`/runs/${runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: 'hi' } } }) });
     expect(r.status).toBe(422);
     expect(r.body.error).toBe('credential_unavailable');
     const after = await poll(runId);
@@ -325,12 +326,12 @@ describe('core.conversationGate — open/exchange/close', () => {
 
   it('rejects an empty exchange turn with 422 and persists no turn', async () => {
     const workflowId = 'openwop-app.conversation.empty';
-    await api('/v1/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({
+    await api('/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({
       workflowId, nodes: [{ nodeId: 'gate', typeId: 'core.conversationGate', config: {} }], edges: [],
     }) });
-    const runId = (await api<{ runId: string }>('/v1/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs: { provider: 'mock', model: 'mock-1' }, tenantId: TENANT }) })).body.runId;
+    const runId = (await api<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs: { provider: 'mock', model: 'mock-1' }, tenantId: TENANT }) })).body.runId;
     await poll(runId);
-    const bad = await api(`/v1/runs/${runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: '   ' } } }) });
+    const bad = await api(`/runs/${runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: '   ' } } }) });
     expect(bad.status).toBe(422);
     const after = await poll(runId);
     expect(conv(after.events, 'conversation.exchanged')).toHaveLength(0); // nothing persisted

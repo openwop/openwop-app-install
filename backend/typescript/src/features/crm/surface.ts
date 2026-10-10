@@ -28,8 +28,9 @@
 
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import type { HostEventOrigin } from '../../host/hostEventDispatcher.js';
-import { surfaceStr as str, surfaceOptStr as optStr, type FeatureSurface } from '../../host/featureSurfaces.js';
+import { surfaceStr as str, surfaceOptStr as optStr, type FeatureSurface, type FeatureSurfaceOrgPolicy } from '../../host/featureSurfaces.js';
 import { filterVisibleCrmRecords } from '../../host/crmRecordVisibility.js';
+import { assertLinkedRowVisible, filterByLinkedVisibility } from './linkedVisibility.js';
 import { OpenwopError } from '../../types.js';
 import { requireString as requireStr } from '../featureRoute.js';
 import {
@@ -38,6 +39,7 @@ import {
   listDeals,
   getDeal,
   listTasks,
+  getTask,
   createCompany as crmCreateCompany,
   createDeal as crmCreateDeal,
   updateDeal as crmUpdateDeal,
@@ -51,10 +53,13 @@ import {
   getContact as ctGetContact,
   updateContact as ctUpdateContact,
   findContactByEmail as ctFindContactByEmail,
+  subjectErasureState,
   parseStage,
+  recordContactTriageResult,
 } from './contactsService.js';
 import { convertContact as svcConvertContact } from './convertService.js';
 import { createBookingLink as svcCreateBookingLink, type BookingLinkStatus } from './entities/bookingLinks.js';
+import { assertBookingOwnerEligible } from './bookingService.js';
 import { listBookings as svcListBookings, type BookingStatus } from './entities/bookings.js';
 import { requestSignature as svcRequestSignature, getSignatureStatus as svcGetSignatureStatus } from './signService.js';
 import { resolveSegmentMembers, segmentVocabulary, validateSegmentDraft, createSegment } from './segmentsService.js';
@@ -80,6 +85,43 @@ function project(o: object): Record<string, unknown> {
   return out;
 }
 const projectOne = (o: object | null): Record<string, unknown> | null => (o ? project(o) : null);
+
+/**
+ * ADR 0837 D2 — what the seam's floors ask of each `ctx.features.crm` method.
+ * A CLOSED-WORLD partition: every method `buildCrmSurface` returns is in exactly
+ * one of the four sets below, pinned by `adr0837-crm-surface-partition.test.ts`.
+ * A new method that is in none of them reddens that test, so a writer can never
+ * ship at the read-tier default again (the `CRM2WF-2` / `CMS2WF-2` generator).
+ *
+ * - READS: the membership floor (`workspace:read` when an `orgId` is named).
+ * - ORG writers: `workspace:write` in the named org — what the org routes ask.
+ * - TENANT writers: no `orgId`; `workspace:write` in the tenant — what the
+ *   contact/segment routes ask (`requireTenantScope`).
+ * - LANE-INTERNAL: the Gmail-sync helpers. Their authority is the owner-bound
+ *   sync row (`getGmailSyncForRun` refuses another user's sync), and raising them
+ *   to write tier would turn a demoted member's sync into silent message loss
+ *   inside the node's per-message catch (architect A5, filed as `CRM2-D1`).
+ */
+export const CRM_SURFACE_READS = [
+  'listCompanies', 'getCompany', 'listDeals', 'getDeal', 'listTasks', 'segmentVocabulary', 'validateSegment',
+  'listSegmentMembers', 'suppressionSummary', 'listBookings', 'getSignatureStatus', 'findContactByEmail', 'getContact',
+] as const;
+export const CRM_SURFACE_ORG_WRITERS = [
+  'convertContact', 'createCompany', 'createDeal', 'moveDealStage', 'createTask', 'completeTask', 'logActivity',
+  'createBookingLink', 'requestSignature',
+] as const;
+export const CRM_SURFACE_TENANT_WRITERS = [
+  'createContact', 'updateContactStage', 'updateContactOwner', 'persistSegment', 'recordContactTriage',
+] as const;
+export const CRM_SURFACE_LANE_INTERNAL = [
+  'getGmailSyncForRun', 'markGmailSyncRunStatus', 'recordGmailSyncScan', 'advanceGmailSyncCursor', 'logGmailActivity',
+] as const;
+
+/** The policy `feature.ts` registers the surface with (ADR 0832 floor + ADR 0837 D2). */
+export const CRM_SURFACE_POLICY: FeatureSurfaceOrgPolicy = {
+  methodScopes: Object.fromEntries(CRM_SURFACE_ORG_WRITERS.map((m) => [m, 'workspace:write' as const])),
+  tenantMethodScopes: Object.fromEntries(CRM_SURFACE_TENANT_WRITERS.map((m) => [m, 'workspace:write' as const])),
+};
 
 export function buildCrmSurface(scope: BundleScope): FeatureSurface {
   const tenantId = scope.tenantId;
@@ -173,7 +215,9 @@ export function buildCrmSurface(scope: BundleScope): FeatureSurface {
       const filter: { status?: string; dealId?: string } = {};
       if (optStr(args.status)) filter.status = str(args.status);
       if (optStr(args.dealId)) filter.dealId = str(args.dealId);
-      const tasks = await listTasks(tenantId, str(args.orgId), filter);
+      // ADR 0837 D5 — tasks on deals/companies the run's person cannot see are not
+      // listed (this method also backs the chat tool `crm.list-tasks`).
+      const tasks = await filterByLinkedVisibility(tenantId, str(args.orgId), viewer, await listTasks(tenantId, str(args.orgId), filter));
       return { tasks: tasks.map(project) };
     },
 
@@ -217,6 +261,19 @@ export function buildCrmSurface(scope: BundleScope): FeatureSurface {
     /** Idempotent by `contactId` (ADR 0162) — a re-run/fork supplying the same
      *  explicit id returns the existing row unchanged rather than duplicating. */
     createContact: async (args) => {
+      // ADR 0837 D4 / A11 — a run with no ACTOR (a webhook- or event-triggered
+      // chain, even one a member armed) is an UNATTENDED lane like the public
+      // ones, so it does not rebuild an erased subject's profile. Only a run
+      // acting for a member is that member re-adding the person deliberately
+      // (ADR 0464); a causing member is never a grant (ADR 0832 D3).
+      const email = optStr(args.email);
+      if (email && !scope.actingUserId) {
+        const erasure = await subjectErasureState(tenantId, email);
+        if (erasure === 'unreadable') throw new OpenwopError('internal_error', 'The erasure register could not be read, so the contact was not created. Retry the run.', 503, {});
+        // CRM2CD-8 — a refusal that does not say WHY (an actorless run's output is
+        // not an erasure oracle); operators see the reason in the erasure log.
+        if (erasure === 'erased') throw new OpenwopError('conflict', 'An unattended run cannot create this contact.', 409, { reason: 'unattended_create_refused' });
+      }
       const contact = await ctCreateContact({
         tenantId,
         name: requireStr(args.name, 'name'),
@@ -233,6 +290,29 @@ export function buildCrmSurface(scope: BundleScope): FeatureSurface {
         ...emit,
       });
       return { success: true, contact: project(contact) };
+    },
+
+    /** ADR 0837 D7 — one contact, tenant-guarded; a merged-away contact is
+     *  `null` (the `crm-ops.triage` read). Contacts are the tenant rolodex, not
+     *  territory-scoped, so there is no visibility filter here. */
+    getContact: async (args) => {
+      const c = await ctGetContact(requireStr(args.contactId, 'contactId'));
+      return { contact: c && c.tenantId === tenantId && !c.mergedInto ? project(c) : null };
+    },
+
+    /** ADR 0837 D7 — record a triage result for THIS run (`superseded` when the
+     *  contact's stamp names another run). Tenant write tier via the seam. */
+    recordContactTriage: async (args) => {
+      const contactId = requireStr(args.contactId, 'contactId');
+      const score = typeof args.score === 'number' && Number.isFinite(args.score) ? Math.max(0, Math.min(100, args.score)) : undefined;
+      const priority = args.priority === 'low' || args.priority === 'normal' || args.priority === 'high' ? args.priority : undefined;
+      if (score === undefined || priority === undefined) {
+        throw new OpenwopError('validation_error', 'A triage result needs a numeric `score` and a `priority` of low, normal or high.', 400, { field: score === undefined ? 'score' : 'priority' });
+      }
+      if (!scope.runId) throw new OpenwopError('validation_error', 'recordContactTriage runs inside a run.', 400, {});
+      const variant = args.variant === 'basic' || args.variant === 'enriched' ? args.variant : null;
+      const outcome = await recordContactTriageResult(tenantId, contactId, scope.runId, { variant, score, priority });
+      return { success: true, recorded: outcome === 'recorded', outcome };
     },
 
     /** Tombstone-guarded (mergedInto refused, mirrors `routes.ts`). */
@@ -361,6 +441,9 @@ export function buildCrmSurface(scope: BundleScope): FeatureSurface {
         ...(optStr(args.taskId) ? { taskId: optStr(args.taskId) } : {}),
         ...emit,
       });
+      // ADR 0837 D5 / A6 — an explicit `taskId` naming an EXISTING task returns that
+      // row; it must not hand back a task linked to a record the person cannot see.
+      await assertLinkedRowVisible(tenantId, orgId, viewer, task, { message: 'Task not found.', details: { taskId: task.taskId } });
       return { success: true, task: project(task) };
     },
 
@@ -369,6 +452,10 @@ export function buildCrmSurface(scope: BundleScope): FeatureSurface {
     completeTask: async (args) => {
       const orgId = requireStr(args.orgId, 'orgId');
       const taskId = requireStr(args.taskId, 'taskId');
+      // ADR 0837 D5 / A6 — the same 404 as a missing task when it hangs off a record
+      // the run's person cannot see (it returned the full row).
+      const current = await getTask(tenantId, orgId, taskId);
+      if (current) await assertLinkedRowVisible(tenantId, orgId, viewer, current, { message: 'Task not found.', details: { taskId } });
       const updated = await crmUpdateTask(tenantId, orgId, taskId, { status: 'done' }, emit); // `completed` iff the status flipped — inside the service
       if (!updated) throw new OpenwopError('not_found', 'Task not found.', 404, { taskId });
       return { success: true, task: project(updated) };
@@ -403,10 +490,14 @@ export function buildCrmSurface(scope: BundleScope): FeatureSurface {
      *  slot-claim path is NOT node-driven (a visitor action), so no claim verb. */
     createBookingLink: async (args) => {
       const orgId = requireStr(args.orgId, 'orgId');
+      // ADR 0837 D6 / A12 — an EXPLICIT owner other than the run's person must be
+      // an org member; the default (`viewer ?? actor`) is not re-checked.
+      const explicitOwner = optStr(args.ownerUserId);
+      if (explicitOwner !== undefined) await assertBookingOwnerEligible(tenantId, orgId, explicitOwner, viewer);
       const link = await svcCreateBookingLink({
         tenantId,
         orgId,
-        ownerUserId: optStr(args.ownerUserId) ?? (viewer ?? actor),
+        ownerUserId: explicitOwner ?? (viewer ?? actor),
         title: requireStr(args.title, 'title'),
         ...(optStr(args.description) ? { description: optStr(args.description) } : {}),
         ...(optStr(args.status) ? { status: optStr(args.status) as BookingLinkStatus } : {}),
@@ -461,6 +552,8 @@ export function buildCrmSurface(scope: BundleScope): FeatureSurface {
         target: { kind: requireStr(target.kind, 'target.kind'), id: requireStr(target.id, 'target.id') },
         signers,
         createdBy: actor,
+        // ADR 0838 D3 — a document target is read-gated for the run's person.
+        ...((scope.actingUserId ?? scope.orgScopeSubject) ? { reader: (scope.actingUserId ?? scope.orgScopeSubject)! } : {}),
         origin, // ADR 0617 D1a (review S3) — the run's `created` must not re-trigger its own binding
         baseUrl: process.env.OPENWOP_PUBLIC_BASE_URL?.trim().replace(/\/+$/, '') ?? '',
         ...(optStr(args.signRequestId) ? { signRequestId: optStr(args.signRequestId) } : {}),

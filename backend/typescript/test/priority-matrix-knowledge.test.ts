@@ -45,13 +45,13 @@ function client(): Client {
 
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
 const enableToggle = async (id: string): Promise<void> => { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status: 'on' }, 'test'); };
-const L = '/v1/host/openwop-app/priority-matrix/lists';
+const L = '/host/openwop-app/priority-matrix/lists';
 
 async function ownerWithOrg(): Promise<{ owner: Client; orgId: string }> {
   const owner = client();
-  const r = await owner.post('/v1/host/openwop-app/test/login', { email: uniqEmail('pmk'), tenantId: `org:pmk-${Date.now()}-${n++}` });
+  const r = await owner.post('/host/openwop-app/test/login', { email: uniqEmail('pmk'), tenantId: `org:pmk-${Date.now()}-${n++}` });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return { owner, orgId: org.body.orgId };
 }
@@ -59,7 +59,7 @@ async function ownerWithOrg(): Promise<{ owner: Client; orgId: string }> {
 /** Doc ids in the managed Priority Matrix KB for an org (empty if absent). */
 async function kbDocIds(owner: Client, orgId: string): Promise<string[]> {
   const colId = `mgd-priority-matrix-${orgId}`;
-  const docs = await owner.get(`/v1/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections/${encodeURIComponent(colId)}/documents`);
+  const docs = await owner.get(`/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections/${encodeURIComponent(colId)}/documents`);
   if (docs.status !== 200) return [];
   return (docs.body.documents as Array<{ documentId: string }>).map((d) => d.documentId);
 }
@@ -78,7 +78,7 @@ describe('ADR 0100 P2 — priority matrix indexes lists + ideas', () => {
     const ids = await kbDocIds(owner, orgId);
     expect(ids.filter((d) => d === `pm-idea:${idea.id}`)).toHaveLength(1); // upserted, not duplicated
 
-    const cols = await owner.get(`/v1/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections`);
+    const cols = await owner.get(`/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections`);
     expect((cols.body.collections as Array<any>).find((c) => c.collectionId === `mgd-priority-matrix-${orgId}`)?.managed).toBe('priority-matrix');
   });
 
@@ -95,7 +95,7 @@ describe('ADR 0100 P2 — priority matrix indexes lists + ideas', () => {
     expect(await kbDocIds(owner, orgId), 'precondition: the idea is indexed').toContain(`pm-idea:${idea.id}`);
 
     // Delete via KANBAN, not via the priority-matrix door.
-    const del = await owner.del(`/v1/host/openwop-app/kanban/cards/${encodeURIComponent(idea.id)}`);
+    const del = await owner.del(`/host/openwop-app/kanban/cards/${encodeURIComponent(idea.id)}`);
     expect(del.status).toBe(204);
 
     expect(await kbDocIds(owner, orgId), 'the deleted idea must not still be retrievable').not.toContain(`pm-idea:${idea.id}`);
@@ -105,7 +105,7 @@ describe('ADR 0100 P2 — priority matrix indexes lists + ideas', () => {
   it('ADR 0667 D5(b) — deleting the BOARD under a priority list is refused (409), not silently emptying it', async () => {
     const { owner, orgId } = await ownerWithOrg();
     const list = (await owner.post(L, { orgId, name: 'Launch priorities' })).body;
-    const res = await owner.del(`/v1/host/openwop-app/kanban/boards/${encodeURIComponent(list.boardId)}`);
+    const res = await owner.del(`/host/openwop-app/kanban/boards/${encodeURIComponent(list.boardId)}`);
     expect(res.status, 'the kanban route needs only workspace:write; the list needs more').toBe(409);
     expect(JSON.stringify(res.body)).toContain('priority-matrix');
     // And the list still works — the refusal protected it rather than stranding it.
@@ -114,7 +114,7 @@ describe('ADR 0100 P2 — priority matrix indexes lists + ideas', () => {
 
   it('does NOT index a PROJECT-scoped list or its ideas — the RBAC carve-out', async () => {
     const { owner, orgId } = await ownerWithOrg();
-    const proj = (await owner.post('/v1/host/openwop-app/projects', { orgId, name: 'Secret project' })).body;
+    const proj = (await owner.post('/host/openwop-app/projects', { orgId, name: 'Secret project' })).body;
     const list = (await owner.post(L, { orgId, name: 'Project priorities', projectId: proj.id })).body;
     const idea = (await owner.post(`${L}/${encodeURIComponent(list.id)}/ideas`, { title: 'Private idea' })).body;
 
@@ -131,7 +131,7 @@ describe('ADR 0100 P2 — priority matrix indexes lists + ideas', () => {
     await owner.put(`${base}/ideas/${encodeURIComponent(idea.id)}/scores`, { scores: { 'strategic-alignment': 9, roi: 8, urgency: 7, 'compliance-risk': 5, cost: 3 } });
 
     const colId = `mgd-priority-matrix-${orgId}`;
-    const docPath = `/v1/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections/${encodeURIComponent(colId)}/documents/${encodeURIComponent(`pm-idea:${idea.id}`)}`;
+    const docPath = `/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections/${encodeURIComponent(colId)}/documents/${encodeURIComponent(`pm-idea:${idea.id}`)}`;
     const doc = (await owner.get(docPath)).body;
     expect(doc.text).toContain('## Scores');
     expect(doc.text).toContain('Strategic alignment: 9/10');

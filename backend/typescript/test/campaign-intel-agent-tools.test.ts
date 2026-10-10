@@ -79,7 +79,7 @@ describe('CFP-1 — registration + pack parity', () => {
   });
 
   it('the agent pack allowlist is EXACTLY the registered ids', () => {
-    const packDir = new URL('../../../packs/feature.campaign-intel.agents/', import.meta.url);
+    const packDir = new URL('../../../packs/vendor.openwop-app.campaign-intel.agents/', import.meta.url);
     const manifest = JSON.parse(readFileSync(new URL('pack.json', packDir), 'utf8')) as {
       agents: { toolAllowlist: string[] }[];
     };
@@ -92,7 +92,7 @@ describe('CFP-1 — registration + pack parity', () => {
     // "you act only through these three" while the allowlist held five — a
     // model told that under-uses the pacing tool it was deep-linked to answer
     // with. This pin closes the other direction for this pack.
-    const packDir = new URL('../../../packs/feature.campaign-intel.agents/', import.meta.url);
+    const packDir = new URL('../../../packs/vendor.openwop-app.campaign-intel.agents/', import.meta.url);
     const prompt = readFileSync(new URL('prompts/intelligence-analyst.md', packDir), 'utf8');
     for (const id of ALL_IDS) expect(prompt).toContain(id);
   });
@@ -102,7 +102,7 @@ describe('CFP-1 — registration + pack parity', () => {
     // FX; an exemplar like "Shift ~$1,200" teaches the model to mint the exact
     // label the round-1 UI work removed. Pin the de-$-ed exemplars so the
     // symbol cannot silently return.
-    const packDir = new URL('../../../packs/feature.campaign-intel.agents/', import.meta.url);
+    const packDir = new URL('../../../packs/vendor.openwop-app.campaign-intel.agents/', import.meta.url);
     const prompt = readFileSync(new URL('prompts/intelligence-analyst.md', packDir), 'utf8');
     expect(prompt).not.toMatch(/[~+]\$\d/);
   });

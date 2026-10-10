@@ -35,6 +35,10 @@ export interface Booking {
   createdAt: string;
   updatedAt: string;
   cancelledAt?: string;
+  /** ADR 0837 D4 — the visitor's optional cancellation reason. It lives HERE (an
+   *  erasure-scrubbed PII field), not in the timeline note it used to ride, which
+   *  erasure keeps by design. */
+  cancelReason?: string;
 }
 
 function isBooking(v: unknown): Booking | null {
@@ -63,10 +67,16 @@ export async function getBookingById(bookingId: string): Promise<Booking | null>
   return bookings.get(bookingId);
 }
 
-/** All bookings for one link — a BOUNDED prefix scan (the slot key is
- *  `${linkId}:...`), used for slot subtraction + the per-link daily cap. */
-export async function listBookingsForLink(bookingLinkId: string): Promise<Booking[]> {
-  return bookings.listByPrefix(`${bookingLinkId}:`);
+/** All bookings for one RESOLVED link — a bounded prefix scan (the slot key is
+ *  `${linkId}:...`), used for slot subtraction + the per-link daily cap.
+ *
+ *  ADR 0837 D1 / A8 — takes the link the caller already resolved, never a bare id,
+ *  and keeps only rows of THAT link in THAT tenant. The prefix scan is raw (not
+ *  tenant-indexed), and `booking-link:foo` is a prefix of `booking-link:foo:bar`,
+ *  so the prefix alone is not an identity. */
+export async function listBookingsForLink(link: { bookingLinkId: string; tenantId: string }): Promise<Booking[]> {
+  return (await bookings.listByPrefix(`${link.bookingLinkId}:`))
+    .filter((b) => b.bookingLinkId === link.bookingLinkId && b.tenantId === link.tenantId);
 }
 
 export async function listBookings(tenantId: string, orgId: string, filter: { bookingLinkId?: string; status?: BookingStatus } = {}): Promise<Booking[]> {
@@ -116,12 +126,22 @@ export async function putBooking(next: Booking): Promise<void> {
   await bookings.put({ ...next, updatedAt: nowIso() });
 }
 
-/** Delete every booking row for a link (the delete-link cascade), returning the
- *  removed rows so the caller can revoke their `booking_manage` tokens. */
-export async function deleteBookingsForLink(bookingLinkId: string): Promise<Booking[]> {
-  const rows = await listBookingsForLink(bookingLinkId);
-  for (const b of rows) await bookings.delete(b.bookingId);
-  return rows;
+/** Delete every booking row of a RESOLVED link (the delete-link cascade),
+ *  returning the removed rows so the caller can revoke their `booking_manage`
+ *  tokens.
+ *
+ *  ADR 0837 D1 — this used to take a bare id and delete whatever the raw prefix
+ *  scan `${id}:` returned, across every tenant, BEFORE the route's ownership check
+ *  ran: `:bookingLinkId = booking-link` deleted every booking on the host. The
+ *  rows deleted now are exactly the tenant-indexed, org-filtered read of the link
+ *  the caller resolved under its own tenant + org. */
+export async function deleteBookingsOfLink(link: { bookingLinkId: string; tenantId: string; orgId: string }): Promise<Booking[]> {
+  const rows = await listBookings(link.tenantId, link.orgId, { bookingLinkId: link.bookingLinkId });
+  const removed: Booking[] = [];
+  for (const b of rows) {
+    try { await bookings.delete(b.bookingId); removed.push(b); } catch { /* the caller logs a short count; the row stays for the next sweep */ }
+  }
+  return removed;
 }
 
 /** Count of ACTIVE (confirmed) bookings for a link created on the given UTC

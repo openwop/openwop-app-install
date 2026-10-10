@@ -50,6 +50,19 @@ function setup(over: Partial<GraphSurfaceProps> = {}) {
   return { props, ...utils };
 }
 
+describe('GraphSurface — read-only presentation', () => {
+  it('keeps selection but refuses move, connect, add and delete gestures', () => {
+    const { props, container } = setup({ readOnly: true, selectedNodeId: 'home', selectedEdgeId: 'e1', onAddConnected: vi.fn() });
+    const node = screen.getByRole('button', { name:'Home' });
+    fireEvent.click(node); expect(props.onSelectNode).toHaveBeenCalledWith('home');
+    fireEvent.keyDown(node, {key:'ArrowRight'}); fireEvent.keyDown(node, {key:'c'});
+    fireEvent.keyDown(screen.getByRole('group', {name:labels.surface}), {key:'Delete'});
+    expect(props.onMoveNode).not.toHaveBeenCalled(); expect(props.onConnect).not.toHaveBeenCalled(); expect(props.onDeleteEdge).not.toHaveBeenCalled();
+    expect(screen.queryByRole('button', {name:/Connect from/})).toBeNull();
+    expect(container.querySelector('.cv-graph__handle')).toBeNull();
+  });
+});
+
 describe('GraphSurface — derived-edge mode (ADR 0360 grade pass)', () => {
   it('without onConnect: no Connect buttons, no pointer handles; Delete on an edge is inert', () => {
     const props = {} as Partial<GraphSurfaceProps>;

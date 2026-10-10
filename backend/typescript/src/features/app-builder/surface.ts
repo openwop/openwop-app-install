@@ -11,7 +11,7 @@
  */
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { surfaceStr as str, surfaceOptStr as optStr, type FeatureSurface } from '../../host/featureSurfaces.js';
-import { getCanvasForTenant, updateCanvasForTenant } from '../../host/canvasSurface.js';
+import { updateCanvasForTenant, getCanvasForCaller } from '../../host/canvasSurface.js';
 import { catalogTypeListForPrompt, projectComponentCatalog } from './componentCatalog.js';
 import { exportCanvas, isExportTarget } from './export/exportService.js';
 import { EXPORT_TARGETS } from './export/generators.js';
@@ -20,6 +20,10 @@ import { OpenwopError } from '../../types.js';
 
 export function buildAppBuilderSurface(scope: BundleScope): FeatureSurface {
   const tenantId = scope.tenantId;
+  // ADR 0768 Phase 0 — every canvas load goes through THE shared predicate with
+  // the run's acting user. A run with no acting user (schedule/webhook) is
+  // refused on member-owned canvases (fail-closed; subjectReadAllowed).
+  const caller = { subject: scope.actingUserId };
   return {
     // export({ target, canvasId? , app? }) → { assetToken, serveUrl, fileName, fileCount, sizeBytes, warnings }
     export: async (args) => {
@@ -46,11 +50,19 @@ export function buildAppBuilderSurface(scope: BundleScope): FeatureSurface {
       if (!state) {
         const canvasId = optStr(args.canvasId);
         if (!canvasId) throw new OpenwopError('invalid_request', 'export needs `app` (inline model) or `canvasId`.', 400);
-        const canvas = await getCanvasForTenant(tenantId, canvasId);
+        const canvas = await getCanvasForCaller(tenantId, canvasId, caller);
         if (!canvas) throw new OpenwopError('not_found', `canvas '${canvasId}' not found`, 404);
         state = canvas.state;
       }
       const result = await exportCanvas(tenantId, state, target);
+      // ADR 0835 D1 — a workflow export is lineage too (only the HTTP route
+      // recorded it), so a render → export → deploy chain's hash is provable.
+      const { appendExportLineage, INLINE_LINEAGE_CANVAS } = await import('./export/lineage.js');
+      const storedCanvasId = args.app && typeof args.app === 'object' ? undefined : optStr(args.canvasId);
+      await appendExportLineage(tenantId, storedCanvasId ?? INLINE_LINEAGE_CANVAS, {
+        canvasVersion: 0, target, fileCount: result.fileCount, sizeBytes: result.sizeBytes, hash: result.hash,
+        assetToken: result.assetToken, exportedAt: new Date().toISOString(), warningCount: result.warnings.length,
+      }).catch(() => undefined); // best-effort, like the route: the ZIP already exists
       return { ...result };
     },
     // ADR 0358 — getCatalog() → { canvasTypeId, components, promptTypeList }:
@@ -79,7 +91,7 @@ export function buildAppBuilderSurface(scope: BundleScope): FeatureSurface {
     // node's tenant-scoped read (the version is the CAS basis).
     getDesign: async (args) => {
       const canvasId = str(args.canvasId);
-      const canvas = await getCanvasForTenant(tenantId, canvasId);
+      const canvas = await getCanvasForCaller(tenantId, canvasId, caller);
       if (!canvas || canvas.canvasTypeId !== 'canvas.app-builder') {
         throw new OpenwopError('not_found', `canvas '${canvasId}' not found`, 404);
       }
@@ -103,7 +115,7 @@ export function buildAppBuilderSurface(scope: BundleScope): FeatureSurface {
       if (v.errors.length) {
         throw new OpenwopError('validation_error', `repaired app is invalid: ${v.errors[0]!.message}`, 422, { errors: v.errors.slice(0, 10) });
       }
-      const existing = await getCanvasForTenant(tenantId, canvasId);
+      const existing = await getCanvasForCaller(tenantId, canvasId, caller);
       if (!existing || existing.canvasTypeId !== 'canvas.app-builder') {
         throw new OpenwopError('not_found', `canvas '${canvasId}' not found`, 404);
       }
@@ -118,31 +130,78 @@ export function buildAppBuilderSurface(scope: BundleScope): FeatureSurface {
     // ── ADR 0424 — governed deployment (sub-toggle gated; honest-off provider) ──
     deployApp: async (args) => {
       await requireDeploySubToggle(tenantId);
+      const orgId = str(args.orgId);
+      const actor = await requireDeployAuthority(scope, orgId);
+      // ADR 0835 D1 — the approval is enforced HERE, not by the pack's "compose
+      // after core.approvalGate" advice: the builder can delete an edge, and a
+      // different node could call this surface directly.
+      const approval = args.approval as { action?: unknown } | true | undefined;
+      const approved = approval === true || (approval !== null && typeof approval === 'object' && (approval.action === 'approve' || approval.action === 'accept'));
+      if (!approved) {
+        throw new OpenwopError('approval_required', 'A deploy runs only after an approval gate approves it (wire the gate\'s decision into `approval`).', 403, { capability: 'app-deploy' });
+      }
+      // …and its provenance must be this tenant's own export.
+      const exportHash = str(args.exportHash);
+      const { isTenantExportHash } = await import('./export/lineage.js');
+      if (/^[0-9a-f]{64}$/.test(exportHash) && !(await isTenantExportHash(tenantId, exportHash))) {
+        throw new OpenwopError('not_found', 'No export with this `exportHash` exists in this workspace — export the app first.', 404, { field: 'exportHash' });
+      }
       const { resolveDeployAdapter } = await import('./deploy/adapter.js');
       const { startDeploy } = await import('./deploy/deployService.js');
       const deployment = await startDeploy(resolveDeployAdapter(), {
         tenantId,
-        orgId: str(args.orgId),
+        orgId,
         service: str(args.service),
         image: str(args.image),
-        exportHash: str(args.exportHash),
+        exportHash,
         envKeys: args.envKeys,
-        createdBy: scope.actingUserId ?? `run:${scope.runId ?? 'unknown'}`,
+        createdBy: actor,
       });
       return { deployment };
     },
     rollbackDeployment: async (args) => {
       await requireDeploySubToggle(tenantId);
       const { resolveDeployAdapter } = await import('./deploy/adapter.js');
-      const { rollbackDeploy } = await import('./deploy/deployService.js');
-      return { deployment: await rollbackDeploy(resolveDeployAdapter(), tenantId, str(args.deployKey), str(args.toRevision)) };
+      const { rollbackDeploy, getDeployment } = await import('./deploy/deployService.js');
+      const rec = await getDeployment(tenantId, str(args.deployKey));
+      if (!rec) throw new OpenwopError('not_found', 'Deployment not found.', 404, { deployKey: str(args.deployKey) });
+      if (!rec.cloudRunService) {
+        throw new OpenwopError('conflict', 'This deployment predates service namespacing and cannot be rolled back from here.', 409, { deployKey: rec.deployKey });
+      }
+      // The org comes from the record, never the caller — rollback names no org.
+      await requireDeployAuthority(scope, rec.orgId);
+      return { deployment: await rollbackDeploy(resolveDeployAdapter(), tenantId, rec.deployKey, str(args.toRevision)) };
     },
     deploymentStatus: async (args) => {
       await requireDeploySubToggle(tenantId);
       const { getDeployment } = await import('./deploy/deployService.js');
-      return { deployment: await getDeployment(tenantId, str(args.deployKey)) };
+      const rec = await getDeployment(tenantId, str(args.deployKey));
+      // ADR 0835 AB2-CD-5 — the record is its org's: membership in that org (the
+      // read floor), never just knowledge of the key.
+      if (rec && scope.actingUserId) {
+        const { assertRunOrgScope } = await import('../../host/accessControlService.js');
+        await assertRunOrgScope(tenantId, scope.actingUserId, rec.orgId, 'workspace:read');
+      }
+      return { deployment: rec };
     },
   };
+}
+
+/**
+ * ADR 0835 D1 — who may deploy: a PERSON (a schedule, webhook or channel-caused
+ * run has nobody to hold accountable for publishing to the internet) who holds
+ * `host:app-deploy:manage` in the deployment's org. `runs:create` — every
+ * Editor — used to be enough. Checked here, at the exit, rather than trusted to
+ * the seam floor (which skips an empty `orgId` and an actorless run).
+ */
+async function requireDeployAuthority(scope: BundleScope, orgId: string): Promise<string> {
+  if (!scope.actingUserId) {
+    throw new OpenwopError('forbidden', 'Deploying an app needs a person behind the run (no acting user).', 403, { capability: 'app-deploy' });
+  }
+  if (!orgId) throw new OpenwopError('validation_error', 'Field `orgId` is required — a deployment belongs to one organization.', 422, { field: 'orgId' });
+  const { assertRunOrgScope } = await import('../../host/accessControlService.js');
+  await assertRunOrgScope(scope.tenantId, scope.actingUserId, orgId, 'host:app-deploy:manage');
+  return scope.actingUserId;
 }
 
 /** ADR 0424 — the `app-builder.deploy` sub-toggle gate (fail-closed). */

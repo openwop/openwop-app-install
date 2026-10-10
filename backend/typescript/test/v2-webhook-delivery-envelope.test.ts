@@ -18,6 +18,7 @@ import { openStorage } from '../src/storage/index.js';
 import type { Storage } from '../src/storage/storage.js';
 import { __deliverToSubscribersForTests } from '../src/routes/webhooks.js';
 import type { EventRecord, RunRecord } from '../src/types.js';
+import { preferredVersion } from '../src/middleware/protocolVersion.js';
 
 const TENANT = 'acme';
 const RUN_ID = '22222222-3333-4444-8555-666666666666';
@@ -59,10 +60,19 @@ describe('v2 webhook delivery envelope (webhook-delivery.schema.json)', () => {
   // reachable input. When a workspace-bearing run exists, add the leg then -- and it must
   // assert `workspaceId === owner.workspace`, never the tenant.
 
-  it('a major-1 (or unstamped) subscriber still receives the BARE event (the fail-safe)', async () => {
+  // ADR 0812 P3c-0 — the v1 fail-safe leg (bare event to a major-1 subscriber)
+  // holds only while 1.x is served. After the cut ADR 0812 decision 2 applies:
+  // the v1 contract is NOT emitted and the body is NOT silently upgraded to v2 —
+  // the delivery is simply not enqueued.
+  it('a major-1 (or unstamped) subscriber gets the BARE event while 1.x is served, and NOTHING after the cut', async () => {
     await register('v1');
     const ev = { type: 'run.completed', runId: RUN_ID, eventId: 'e2', sequence: 2 } as unknown as EventRecord;
     await __deliverToSubscribersForTests(storage, ev);
+    if (preferredVersion() === '2.0') {
+      const rows = await storage.claimDueWebhookDeliveries('w', Date.now(), 60_000, 50);
+      expect(rows.filter((r) => r.subscriptionId === 'v1'), 'no v1 delivery after the cut, and no silent v2 upgrade').toEqual([]);
+      return;
+    }
     const b = await body('v1');
     expect(b.event, 'no envelope under major 1').toBeUndefined();
     expect(b.type).toBe('run.completed');

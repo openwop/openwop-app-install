@@ -32,7 +32,7 @@ async function jsonFetch<T = unknown>(path: string, init: RequestInit = {}): Pro
 }
 
 async function registerWorkflow(workflowId: string, nodes: unknown[]): Promise<void> {
-  const r = await jsonFetch('/v1/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({ workflowId, nodes, edges: [] }) });
+  const r = await jsonFetch('/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({ workflowId, nodes, edges: [] }) });
   expect([200, 201]).toContain(r.status);
 }
 
@@ -40,17 +40,17 @@ interface BundleEvent { type?: string; nodeId?: string; payload?: Record<string,
 
 async function runNode(workflowId: string, typeId: string, config: Record<string, unknown>, inputs: Record<string, unknown>): Promise<Record<string, unknown>> {
   await registerWorkflow(workflowId, [{ nodeId: 'op', typeId, config }]);
-  const create = await jsonFetch<{ runId: string }>('/v1/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs, tenantId: 'default' }) });
+  const create = await jsonFetch<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs, tenantId: 'default' }) });
   expect(create.status).toBe(201);
   const { runId } = create.body;
   let status = 'pending';
   for (let i = 0; i < 60; i++) {
     await new Promise((r) => setTimeout(r, 25));
-    const snap = await jsonFetch<{ status: string }>(`/v1/runs/${runId}`);
+    const snap = await jsonFetch<{ status: string }>(`/runs/${runId}`);
     status = snap.body.status;
     if (['completed', 'failed', 'cancelled'].includes(status)) break;
   }
-  const bundle = await jsonFetch<{ events?: BundleEvent[] }>(`/v1/runs/${runId}/debug-bundle`);
+  const bundle = await jsonFetch<{ events?: BundleEvent[] }>(`/runs/${runId}/debug-bundle`);
   const ev = (bundle.body.events ?? []).find((e) => e.type === 'node.completed' && e.nodeId === 'op');
   return { __status: status, ...((ev?.payload?.outputs as Record<string, unknown>) ?? {}) };
 }
@@ -69,7 +69,7 @@ describe('host.canvas crossCanvasInvoke: real dispatch', () => {
     expect(out.terminalStatus).toBe('completed');
 
     // The child run really exists in storage and completed.
-    const child = await jsonFetch<{ status: string }>(`/v1/runs/${out.childRunId}`);
+    const child = await jsonFetch<{ status: string }>(`/runs/${out.childRunId}`);
     expect(child.status).toBe(200);
     expect(child.body.status).toBe('completed');
   });

@@ -81,11 +81,17 @@ export function imageProviderConfigured(provider?: string): boolean {
 
 export interface RawImage { base64: string; mimeType: string }
 
-export async function dispatchImageGeneration(req: { prompt: string; model?: string; size?: string; n: number; provider?: string; tenantId?: string; runId?: string }): Promise<RawImage[]> {
+export async function dispatchImageGeneration(req: {
+  prompt: string; model?: string; size?: string; n: number; provider?: string; tenantId?: string; runId?: string;
+  /** ADR 0821 D3 — told who pays: `tenant` when a broker Connection served the key,
+   *  `platform` when the operator's env key did (the metered case). */
+  onKeySource?: (source: 'platform' | 'tenant') => void;
+}): Promise<RawImage[]> {
   const endpoint = imageEndpoint(req.provider);
   if (!endpoint) throw new Error('image_provider_not_configured');
   // ADR 0244 — broker key (per-tenant Connection) wins over the env key.
   const { secret: apiKey, provenance } = await resolveImageKey(req.provider, req.tenantId);
+  req.onKeySource?.(provenance ? 'tenant' : 'platform');
   let url: URL;
   try { url = new URL(endpoint); } catch { throw new Error('image_provider_misconfigured'); }
   // SSRF guard (the ADR 0108 compat pattern) — never echo the endpoint (§D).

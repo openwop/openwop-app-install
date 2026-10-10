@@ -27,6 +27,9 @@ import webpush from 'web-push';
 import type { Storage } from '../storage/storage.js';
 import type { NotificationRecord, PushSubscriptionRecord } from '../types.js';
 import { createLogger } from '../observability/logger.js';
+import { isDevicePushSuppressed } from '../host/notificationPolicy.js';
+import { isCurrentNotificationAudience } from './audience.js';
+import { pushEndpointRefusal } from './pushEndpointPolicy.js';
 
 const log = createLogger('notifications.webPush');
 
@@ -95,8 +98,9 @@ export async function pushNotificationsBatch(
   const allSubs = await storage.listPushSubscriptions(notifications[0]!.tenantId);
   let delivered = 0;
   let pruned = 0;
+  const cache: GateCache = new Map();
   for (const n of notifications) {
-    const r = await deliverToSubs(storage, n, filterSubsForRecipient(n, allSubs));
+    const r = await deliverToSubs(storage, n, filterSubsForRecipient(n, allSubs), cache);
     delivered += r.delivered;
     pruned += r.pruned;
   }
@@ -105,10 +109,58 @@ export async function pushNotificationsBatch(
 
 /** ADR 0050 — an addressed notification pushes ONLY to its recipient's devices;
  *  legacy owner-less subs (no userId) receive broadcasts only. A broadcast (no
- *  recipientUserId) still fans out to every tenant device. */
+ *  recipientUserId, no recipientRole) still fans out to every tenant device.
+ *
+ *  ADR 0816 D1 — an UNADDRESSED role row reaches nobody's device. The inbox has
+ *  always default-denied it to non-holders; this lane used to treat it as a
+ *  broadcast, so an operator notice reached every member's phone (NTFWF-1). In a
+ *  shared workspace the emitter now materialises role notices per holder, so an
+ *  unaddressed role row only survives where nobody could be resolved — and then
+ *  default-deny is the inbox's own answer. */
 function filterSubsForRecipient(n: NotificationRecord, allSubs: readonly PushSubscriptionRecord[]): readonly PushSubscriptionRecord[] {
-  return n.recipientUserId ? allSubs.filter((s) => s.userId === n.recipientUserId) : allSubs;
+  if (n.recipientUserId) return allSubs.filter((s) => s.userId === n.recipientUserId);
+  if (n.recipientRole) return [];
+  return allSubs;
 }
+
+/**
+ * ADR 0816 D3/D4/D5 — the per-device gates, applied at delivery to every
+ * subscription the audience filter kept:
+ *  - D3: the endpoint still satisfies the endpoint policy (a row stored before
+ *    the policy existed stops egressing rather than being grandfathered);
+ *  - D4: in a shared workspace the device's owner is still a member (a removal
+ *    cascade on another instance may not have run yet);
+ *  - D5: the owner's preferences allow a device toast for this notice now.
+ */
+async function deliverableSubs(
+  notification: NotificationRecord,
+  subs: readonly PushSubscriptionRecord[],
+  cache: GateCache = new Map(),
+): Promise<PushSubscriptionRecord[]> {
+  const gate = (sub: PushSubscriptionRecord): Promise<boolean> => {
+    // Per (device owner, type, priority): a batch is usually ONE notice fanned
+    // out per person, so each owner's membership + prefs are read once.
+    const key = `${sub.userId ?? ''}|${notification.type}|${notification.priority}`;
+    let pending = cache.get(key);
+    if (!pending) {
+      pending = (async () => {
+        if (!(await isCurrentNotificationAudience(notification.tenantId, sub.userId))) return false;
+        if (sub.userId && await isDevicePushSuppressed(notification.tenantId, sub.userId, {
+          type: notification.type, priority: notification.priority,
+        })) return false;
+        return true;
+      })();
+      cache.set(key, pending);
+    }
+    return pending;
+  };
+  const verdicts = await Promise.all(subs.map(async (sub) =>
+    pushEndpointRefusal(sub.endpoint) === null && await gate(sub)));
+  return subs.filter((_, i) => verdicts[i]);
+}
+
+/** Per-call memo of the D4/D5 gates, keyed `${userId}|${type}|${priority}`. */
+type GateCache = Map<string, Promise<boolean>>;
 
 /** Send ONE record's payload to a pre-filtered subscription list, pruning dead
  *  (404/410) endpoints. The shared core of the single + batched push paths. */
@@ -116,8 +168,10 @@ async function deliverToSubs(
   storage: Storage,
   notification: NotificationRecord,
   subs: readonly PushSubscriptionRecord[],
+  cache?: GateCache,
 ): Promise<{ delivered: number; pruned: number }> {
-  if (subs.length === 0) return { delivered: 0, pruned: 0 };
+  const gated = await deliverableSubs(notification, subs, cache);
+  if (gated.length === 0) return { delivered: 0, pruned: 0 };
   const payload = JSON.stringify({
     title: notification.title,
     body: notification.message,
@@ -128,7 +182,7 @@ async function deliverToSubs(
   });
   let delivered = 0;
   let pruned = 0;
-  await Promise.all(subs.map(async (sub) => {
+  await Promise.all(gated.map(async (sub) => {
     try {
       await webpush.sendNotification(toWebPushSubscription(sub), payload, {
         // Higher urgency for action-needed types so battery-saving browsers deliver promptly.

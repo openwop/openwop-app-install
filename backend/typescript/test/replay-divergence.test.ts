@@ -93,7 +93,7 @@ describe('replay round-trip (end-to-end)', () => {
   const waitTerminal = async (id: string): Promise<string> => {
     for (let i = 0; i < 80; i++) {
       await new Promise((r) => setTimeout(r, 25));
-      const s = (await jf<{ status: string }>(`/v1/runs/${id}`)).body.status;
+      const s = (await jf<{ status: string }>(`/runs/${id}`)).body.status;
       if (['completed', 'failed', 'cancelled'].includes(s)) return s;
     }
     return 'timeout';
@@ -118,35 +118,19 @@ describe('replay round-trip (end-to-end)', () => {
     // for the behavioural witness. The narrower `fork_checkpoint_unsupported`
     // (a prefix ending on an open interrupt) is GONE too since ADR 0751: the
     // fork inherits the open gate as state instead of refusing.
-    const { body } = await jf<Record<string, unknown>>('/.well-known/openwop');
-    // recursively locate the `replay` capability block
-    let replay: { supported?: boolean; fork?: boolean; modes?: string[] } | undefined;
-    const visit = (o: unknown): void => {
-      if (!o || typeof o !== 'object') return;
-      for (const [k, v] of Object.entries(o)) {
-        if (k === 'replay' && v && typeof v === 'object' && 'supported' in v) replay = v as typeof replay;
-        else visit(v);
-      }
-    };
-    visit(body);
-    expect(replay?.supported).toBe(true);
-    expect(replay?.fork).toBe(true);
+    // ADR 0812 P3c-0 — v2 spelling: the `replay` record sits at the closed v2 root and its
+    // PRESENCE is the claim (no `supported`/`fork` flags; the fork endpoint IS the replay surface).
+    const { body } = await jf<{ replay?: { status?: string; modes?: string[] } }>('/.well-known/openwop', { headers: { 'OpenWOP-Version': '2' } });
+    const replay = body.replay;
+    expect(replay?.status).toBeTruthy();
     expect(replay?.modes).toEqual(['replay', 'branch']);
   });
 
-  it('advertises the experimental x-host-openwop-workforce block (gated, honest)', async () => {
-    const { body } = await jf<Record<string, unknown>>('/.well-known/openwop');
-    const wf = body['x-host-openwop-workforce'] as
-      | { tier?: string; workforces?: { supported?: boolean }; assurance?: { replay?: boolean; evals?: boolean } }
-      | undefined;
-    expect(wf?.tier).toBe('experimental');
-    expect(wf?.workforces?.supported).toBe(true);
-    expect(wf?.assurance?.replay).toBe(true); // consistent with the replay family
-    expect(wf?.assurance?.evals).toBe(false); // EP2, honestly absent
-  });
+  // ADR 0812 P3c-0 — the `x-host-openwop-workforce` advert leg is deleted: that block exists only
+  // in the retired v1 document (the closed v2 root admits no `x-host-*` keys).
 
   it('full replay of a deterministic run reproduces it with no replay.diverged', async () => {
-    await jf('/v1/host/openwop-app/workflows', {
+    await jf('/host/openwop-app/workflows', {
       method: 'POST',
       body: JSON.stringify({
         workflowId: 'wf.det.replay',
@@ -154,14 +138,14 @@ describe('replay round-trip (end-to-end)', () => {
         edges: [],
       }),
     });
-    const create = await jf<{ runId: string }>('/v1/runs', {
+    const create = await jf<{ runId: string }>('/runs', {
       method: 'POST',
       body: JSON.stringify({ workflowId: 'wf.det.replay', inputs: { docs: [{ name: 'Ada' }] } }),
     });
     expect(create.status).toBe(201);
     expect(await waitTerminal(create.body.runId)).toBe('completed');
 
-    const fork = await jf<{ runId: string }>(`/v1/runs/${create.body.runId}:fork`, {
+    const fork = await jf<{ runId: string }>(`/runs/${create.body.runId}:fork`, {
       method: 'POST',
       body: JSON.stringify({ mode: 'replay', fromSeq: 0 }),
     });
@@ -172,7 +156,7 @@ describe('replay round-trip (end-to-end)', () => {
     let diverged = true;
     for (let i = 0; i < 20; i++) {
       await new Promise((r) => setTimeout(r, 25));
-      const bundle = (await jf<{ events?: { type: string }[] }>(`/v1/runs/${fork.body.runId}/debug-bundle`)).body;
+      const bundle = (await jf<{ events?: { type: string }[] }>(`/runs/${fork.body.runId}/debug-bundle`)).body;
       const evs = bundle.events ?? [];
       if (evs.some((e) => e.type === 'run.completed')) {
         diverged = evs.some((e) => e.type === 'replay.diverged');

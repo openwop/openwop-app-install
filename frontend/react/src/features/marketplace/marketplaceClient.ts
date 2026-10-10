@@ -5,6 +5,7 @@
  * message). Reviews are org-scoped (`/orgs/:orgId/listings/:packName/reviews`).
  */
 import { authedHeaders, config, fetchOpts } from '../../client/config.js';
+import { ApiError } from '../../client/errorEnvelope.js';
 
 export interface Listing {
   packName: string;
@@ -13,9 +14,17 @@ export interface Listing {
   description?: string;
   author?: string;
   category: string;
+  /** Present only while the install still verifies (`trust.tier` is
+   *  `operator-trusted`) — ADR 0826 D6. */
   integrity?: string;
   publicKeyRef?: string;
+  /** A registry install marker is PRESENT. Not a verification claim — `trust` is. */
   installed: boolean;
+  /** ADR 0826 D6 — the server's trust verdict (the ONE authority on whether the
+   *  pack's code may run): `steward` ships with this app, `operator-trusted` is a
+   *  signature-verified registry install, `untrusted` is unverified, `revoked` is
+   *  kill-switched. Optional for older servers. */
+  trust?: { tier: PackTrustTier; reason: string };
   /** MKT2-B2 — provenance, which `installed` does not carry. `installed` means
    *  "has a registry install marker"; a `local` pack is mounted from the host
    *  checkout and is already loaded and running, so rendering it as
@@ -33,6 +42,17 @@ export interface Listing {
     purchasable?: boolean;
     purchased?: boolean;
   };
+}
+
+export type PackTrustTier = 'steward' | 'operator-trusted' | 'untrusted' | 'revoked';
+
+/** ADR 0826 D1 — what THIS caller may do, computed server-side by the same
+ *  predicates the write routes enforce. Presentation only; the server decides. */
+export interface MarketplaceViewer {
+  /** May change the workspace's pack availability (`workspace:write`). */
+  canCurate: boolean;
+  /** May install, remove, restore, purge and revoke (host operator). */
+  canAdminister: boolean;
 }
 
 /** The buyer's order, as the commerce-connect routes return it. MKT-UX-2 — the
@@ -124,7 +144,9 @@ async function asJson<T>(res: Response, ctx: string): Promise<T> {
     } catch {
       /* non-JSON */
     }
-    throw new Error(detail || `${ctx} returned ${res.status}`);
+    // Typed (an `Error` subclass, same message): a caller can branch on the HTTP
+    // status — the store tells a signed-out visitor (401) apart from a failure.
+    throw new ApiError(detail || `${ctx} returned ${res.status}`, res.status, detail || undefined);
   }
   return (await res.json()) as T;
 }
@@ -132,10 +154,57 @@ async function asJson<T>(res: Response, ctx: string): Promise<T> {
 /** MKT2-M1 (R3) — `pricingDegraded` is the server's disclosure that the pricing
  *  enrichment FAILED: paid packs may be missing their purchase affordances, and
  *  the page must say so rather than render them as free. */
-export async function listListings(): Promise<{ listings: Listing[]; pricingDegraded: boolean }> {
+export async function listListings(): Promise<{ listings: Listing[]; pricingDegraded: boolean; viewer: MarketplaceViewer | null }> {
   const res = await fetch(`${base}/listings`, fetchOpts({ headers: authedHeaders() }));
-  const body = await asJson<{ listings: Listing[]; pricingDegraded?: boolean }>(res, 'listListings');
-  return { listings: body.listings, pricingDegraded: body.pricingDegraded === true };
+  const body = await asJson<{ listings: Listing[]; pricingDegraded?: boolean; viewer?: MarketplaceViewer }>(res, 'listListings');
+  // `null` = an older server that does not say; the page then keeps offering every
+  // control and lets the server refuse (its pre-ADR-0826 behaviour).
+  return { listings: body.listings, pricingDegraded: body.pricingDegraded === true, viewer: body.viewer ?? null };
+}
+
+/** One operator revocation (ADR 0826 D5). `version` is a SemVer or `*`. */
+export interface PackRevocation {
+  key: string;
+  packName: string;
+  version: string;
+  revokedAt: string;
+  revokedBy: string;
+  reason: string;
+}
+
+/**
+ * The revocations a "Lift revocation" on `listing` must delete: its exact version
+ * and any `*` row. EMPTY means the pack is revoked by the server's STATIC config
+ * list (`OPENWOP_TRUSTED_PACK_REVOCATIONS`), which no route can lift — the caller
+ * must say so rather than report a lift that never happened (ADR 0826, grade-ux).
+ */
+export function revocationsCovering(listing: Pick<Listing, 'packName' | 'version'>, rows: readonly PackRevocation[]): PackRevocation[] {
+  return rows.filter((r) => r.packName === listing.packName && (r.version === listing.version || r.version === '*'));
+}
+
+/** Every active revocation — superadmin only. */
+export async function listRevocations(): Promise<PackRevocation[]> {
+  const res = await fetch(`${base}/revocations`, fetchOpts({ headers: authedHeaders() }));
+  if (res.status === 403) throw new Error(SUPERADMIN_HINT);
+  return (await asJson<{ revocations: PackRevocation[] }>(res, 'listRevocations')).revocations;
+}
+
+/** Revoke a pack version (or `*`) on every instance — superadmin only. Returns
+ *  the feature ids that pin the pack (what the revocation takes down). */
+export async function revokePack(packName: string, version: string, reason: string): Promise<{ requiredBy: string[] }> {
+  const res = await fetch(`${base}/packs/${encodeURIComponent(packName)}/revocations`, fetchOpts({
+    method: 'POST', headers: jsonHeaders(), body: JSON.stringify({ version, reason }),
+  }));
+  if (res.status === 403) throw new Error(SUPERADMIN_HINT);
+  const body = await asJson<{ requiredBy?: string[] }>(res, 'revokePack');
+  return { requiredBy: body.requiredBy ?? [] };
+}
+
+/** Lift one revocation — superadmin only. */
+export async function unrevokePack(packName: string, version: string): Promise<void> {
+  const res = await fetch(`${base}/packs/${encodeURIComponent(packName)}/revocations/${encodeURIComponent(version)}`, fetchOpts({ method: 'DELETE', headers: authedHeaders() }));
+  if (res.status === 403) throw new Error(SUPERADMIN_HINT);
+  if (!res.ok) await asJson<unknown>(res, 'unrevokePack');
 }
 
 export interface InstallResult {
@@ -233,11 +302,16 @@ export interface BundleFeatureInfo {
 export interface FeatureBundleInfo {
   id: string;
   label: string;
+  /** ADR 0820 §7 UI — the store goal-group (one of the catalog's `groups`).
+   *  Grouping is DATA from `distributions/bundles.json`; an older backend omits it. */
+  group?: string;
   features: BundleFeatureInfo[];
 }
 
 export interface FeatureBundleCatalog {
   available: boolean;
+  /** ADR 0820 §7 UI — the ordered store goal-group ids. Optional: an older backend omits it. */
+  groups?: string[];
   bundles: FeatureBundleInfo[];
   /** Non-core, non-bundled features — individually selectable (P4). */
   standalone: BundleFeatureInfo[];
@@ -258,7 +332,22 @@ export interface BundleCommerce {
   bundleId: string;
   forSale: boolean;
   owned: boolean;
-  priceDisplay?: { price?: string; cadence?: string; blurb?: string };
+  /** ADR 0820 §5 — the workspace's plan already grants every feature of this bundle,
+   *  so it is not sold (checkout would 409). Optional: an older backend omits it. */
+  includedInPlan?: boolean;
+  /** ADR 0820 §7 UI — priced, not owned, not plan-included, and usable today because
+   *  no plan allowlist narrows it (the server computes it from the plan alone). */
+  freeForNow?: boolean;
+  /** ADR 0820 §7 UI — whether a checkout would be ACCEPTED (for sale, not owned, not
+   *  covered by the plan list the server's 409 `bundle_included_in_plan` reads — the
+   *  free plan's complimentary list included). The store offers Buy only when true.
+   *  Optional: an older backend omits it (then the status decides, as before). */
+  purchasable?: boolean;
+  /** ADR 0820 §7 — the free trial THIS workspace's checkout would open with, when any. */
+  trialDays?: number;
+  /** ADR 0820 §7 — the billing intervals this bundle is for sale at. */
+  cadences?: Array<'month' | 'year'>;
+  priceDisplay?: { price?: string; cadence?: string; blurb?: string; priceAnnual?: string; cadenceAnnual?: string };
 }
 
 /** Per-bundle for-sale/owned/display for the caller's tenant. 404 when the
@@ -269,13 +358,23 @@ export async function fetchBundleCommerce(): Promise<BundleCommerce[]> {
   return (await asJson<{ bundles: BundleCommerce[] }>(res, 'fetchBundleCommerce')).bundles;
 }
 
-/** Start a bundle purchase (platform→tenant, billing lane). The server resolves
- *  the configured price from the bundleId; returns the Stripe hosted-checkout URL
- *  (`mode:'live'`) or the honest demo sentinel (`mode:'demo'`). */
-export async function buyBundle(bundleId: string): Promise<{ url: string; mode: 'live' | 'demo' }> {
-  const res = await fetch(
-    `${config.baseUrl}/host/openwop-app/billing/bundles/${encodeURIComponent(bundleId)}/checkout`,
-    fetchOpts({ method: 'POST', headers: authedHeaders({ 'content-type': 'application/json' }), body: '{}' }),
-  );
-  return asJson<{ url: string; mode: 'live' | 'demo' }>(res, 'buyBundle');
+/** ADR 0391 (b) / ADR 0820 §5 — one plan tier of the PUBLIC pricing read: the
+ *  feature allowlist (`'*'` = unrestricted) and the operator's display copy. No
+ *  Stripe id crosses this boundary. */
+export interface PublicPlanTier {
+  tier: 'free' | 'pro' | 'team' | 'enterprise';
+  name: string;
+  features: '*' | string[];
+  limits: Record<string, number>;
+  display?: { price?: string; cadence?: string; blurb?: string; highlighted?: boolean; priceAnnual?: string; cadenceAnnual?: string; annualNote?: string };
 }
+
+/** The public plan catalog (anonymous, works with billing off). */
+export async function fetchPublicPricing(): Promise<PublicPlanTier[]> {
+  const res = await fetch(`${config.baseUrl}/host/openwop-app/public/pricing`, fetchOpts({}));
+  const body = await asJson<{ tiers?: PublicPlanTier[] }>(res, 'fetchPublicPricing');
+  return Array.isArray(body.tiers) ? body.tiers : [];
+}
+
+// ADR 0786 — the bundle purchase moved to `features/billing/billingClient.ts`
+// (`buyBundle`): billing owns the money route and its typed refusals.

@@ -152,7 +152,6 @@ export const messages = {
   colorHexPlaceholder: "#rrggbb or a CSS color",
   colorPickFromScreen: "Pick a color from the screen",
 
-  cmdkLocked: 'Locked — unlock in the feature store',
 
   // FORM-UX-2 (ADR 0584) — the IN-APP unsaved-changes guard, for pages that
   // render their own exits (where `beforeunload` never fires).

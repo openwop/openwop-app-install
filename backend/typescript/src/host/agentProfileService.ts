@@ -21,8 +21,11 @@
  * @see src/host/rosterService.ts — the patterns this mirrors
  */
 
+import { agentStorageId } from '../executor/agentIdAliases.js';
 import type { AgentProfile, AgentCapabilityId } from '../types.js';
 import { DurableCollection } from './hostExtPersistence.js';
+import { listRoster } from './rosterService.js';
+import type { ToolPermissions } from './agentToolPermissions.js';
 import { registerCredentialRefConsumer } from './credentialRefRegistry.js';
 import { registerSubjectEraser } from './subjectErasure.js';
 import { ERASED, subjectKeyForms } from './subjectErasureRedaction.js';
@@ -33,7 +36,8 @@ import { ERASED, subjectKeyForms } from './subjectErasureRedaction.js';
 // another's row. Every public accessor already takes (tenantId, profileId)
 // fail-closed, so the key scheme is internal. App-migration v7 rekeys
 // existing rows.
-const profileKey = (tenantId: string, profileId: string): string => `${tenantId}:${profileId}`;
+// ADR 0763 — the profile of a renamed agent keeps ONE key across both spellings.
+const profileKey = (tenantId: string, profileId: string): string => `${tenantId}:${agentStorageId(profileId)}`;
 const profiles = new DurableCollection<AgentProfile>('agent-profile', (p) => profileKey(p.tenantId, p.profileId));
 
 function nowIso(): string {
@@ -172,8 +176,9 @@ export async function getAgentProfile(tenantId: string, profileId: string): Prom
  * Only a STANDING (roster) agent carries a profile, and its `rosterId` IS its
  * dispatchable `agentId` (the `host:<slug>` form) — so a `host:`-prefixed agentId
  * keys the profile directly. A pack/manifest agent (no `host:` prefix) has no
- * profile ⇒ `undefined`, leaving the per-tool gate correctly ungated. Tenant-
- * scoped + fail-closed (a foreign / unknown / deleted agent ⇒ `undefined`).
+ * profile ⇒ `undefined`. Tenant-scoped + fail-closed (a foreign / unknown /
+ * deleted agent ⇒ `undefined`). Dispatch paths use
+ * {@link resolveAgentToolPermissionSet}, which also covers a registry id.
  */
 export async function resolveAgentToolPermissions(
   tenantId: string,
@@ -182,6 +187,45 @@ export async function resolveAgentToolPermissions(
   if (!agentId.startsWith('host:')) return undefined;
   const profile = await getAgentProfile(tenantId, agentId);
   return profile?.permissions;
+}
+
+/**
+ * ADR 0775 D3 — every ADR 0102 permission block that binds a dispatch.
+ *
+ * Every dispatch path used to pass the REGISTRY id (`user.<slug>`, a pack id)
+ * to {@link resolveAgentToolPermissions}, which only answers a `host:` id — so a
+ * roster agent's `never` list never reached the gate, not even its shadow log
+ * (`ARWF-4`). Resolving the registry id through the identity resolver would not
+ * fix it: its reverse lookup is FIRST-WINS when two roster members share one
+ * `agentRef`, so member B would run under member A's rules.
+ *
+ *  - `addressedId` is a `host:` roster id ⇒ exactly that member's block (the
+ *    dispatch named who is speaking);
+ *  - otherwise ⇒ the block of EVERY roster member in the tenant whose
+ *    `agentRef.agentId === registryAgentId`. The gate denies if ANY denies: when
+ *    a dispatch cannot say which member is speaking, every member's guardrail
+ *    binds (tightest wins).
+ *
+ * `[]` ⇒ ungated (a pack agent with no roster entry, or no member carries a
+ * block). Read fresh per dispatch — a guardrail edit binds on the next turn.
+ */
+export async function resolveAgentToolPermissionSet(
+  tenantId: string,
+  addressedId: string,
+  registryAgentId: string,
+): Promise<ToolPermissions[]> {
+  if (addressedId.startsWith('host:')) {
+    const one = await resolveAgentToolPermissions(tenantId, addressedId);
+    return one ? [one] : [];
+  }
+  // Grade-code ARCD-1 — compare SPELLING-INDEPENDENT keys. ADR 0763 left roster
+  // rows unmigrated, so a member may store a legacy `feature.*.agents.*` id
+  // while dispatch resolves the canonical one; a raw `===` let that member's
+  // never-list fail OPEN.
+  const key = agentStorageId(registryAgentId);
+  const members = (await listRoster(tenantId)).filter((e) => agentStorageId(e.agentRef.agentId) === key);
+  const blocks = await Promise.all(members.map((e) => resolveAgentToolPermissions(tenantId, e.rosterId)));
+  return blocks.flatMap((b) => (b ? [b] : []));
 }
 
 /** Create-or-replace a profile for `profileId` under `tenantId`. Preserves the

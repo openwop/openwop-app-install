@@ -64,7 +64,7 @@ function client(): Client {
 
 let n = 0;
 async function signup(c: Client, tenantId: string): Promise<{ userId: string }> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `loc-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await c.post('/host/openwop-app/test/login', { email: `loc-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
@@ -72,11 +72,11 @@ async function ownerOrg(): Promise<{ owner: Client; orgId: string }> {
   const tenantId = `org:loc-${Date.now()}-${n++}`;
   const owner = client();
   await signup(owner, tenantId);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return { owner, orgId: org.body.orgId };
 }
-const u = (orgId: string, suffix = ''): string => `/v1/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${suffix}`;
+const u = (orgId: string, suffix = ''): string => `/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${suffix}`;
 
 /** Create + publish a one-hero page carrying a pt-BR override. */
 async function publishLocalizedHome(owner: Client, orgId: string): Promise<string> {
@@ -233,7 +233,7 @@ describe('cms-localization — per-org isolation', () => {
     const { owner, orgId } = await ownerOrg();
     await owner.put(u(orgId, '/language-settings'), { supportedLocales: ['pt-BR', 'fr'] });
     // A second org under the SAME owner/tenant has its own (default) settings.
-    const orgB = await owner.post('/v1/host/openwop-app/orgs', { name: 'Beta' });
+    const orgB = await owner.post('/host/openwop-app/orgs', { name: 'Beta' });
     const sB = await owner.get(u(orgB.body.orgId, '/language-settings'));
     expect(sB.body.supportedLocales).toEqual([]);
   });

@@ -130,8 +130,15 @@ describe('ADR 0422 P2 — intake', () => {
     // A stand-in "CRM sink" resolves the contact BEFORE our sink runs.
     registerSubmissionSink({ id: 'crm-contact', async onSubmission() { return { contactId: 'contact-42' }; } });
     registerServiceDeskIntake(); // registers after — reuses the marker
-    const form = { formId: 'form-1', tenantId: t3, orgId: 'org-f', title: 'Support request', status: 'published', fields: [] };
-    const submission = { submissionId: 'sub-1', tenantId: t3, values: { email: 'a@b.co', message: 'it broke' } };
+    // ADR 0850 D1 — the form sink now reads the service-desk toggle (FRMWF-13: it
+    // was the only sink that read none), so the tenant has it on here.
+    const { saveConfig } = await import('../src/host/featureToggles/service.js');
+    const { getToggleDefault } = await import('../src/host/featureToggles/registry.js');
+    await saveConfig({ ...getToggleDefault('service-desk')!, status: 'on' }, 'test');
+    // ADR 0850 D1 — a form files tickets only when it opted in, into its own org.
+    const form = { formId: 'form-1', tenantId: t3, orgId: 'org-f', title: 'Support request', status: 'published', fields: [], createTicket: true };
+    // A real submission carries its form's org; the ticket files into that org.
+    const submission = { submissionId: 'sub-1', tenantId: t3, orgId: 'org-f', values: { email: 'a@b.co', message: 'it broke' } };
     await runSubmissionSinks(form as never, submission as never);
     await runSubmissionSinks(form as never, submission as never); // sink retry — idempotent
     const tickets = await listTickets(t3, 'org-f');

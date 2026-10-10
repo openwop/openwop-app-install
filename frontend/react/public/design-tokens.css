@@ -1,0 +1,17 @@
+/* OpenWOP video (film) identity tokens. Generated from the app design system — do not edit. */
+:root {
+  --video-stage: #1a1a17;
+  --video-stage-text: #f4f1ea;
+  --video-stage-muted: #a8a39a;
+  --video-stage-rule: #4a4842;
+  --video-card: #f4f1ea;
+  --video-card-text: #1a1a17;
+  --video-card-muted: #4a4842;
+  --video-card-faint: #66624f;
+  --video-accent: oklch(58% 0.13 40);
+  --video-accent-on-stage: oklch(72% 0.13 40);
+  --video-accent-on-card: oklch(46% 0.15 40);
+  --video-font-headline: "Instrument Serif", "Instrument Serif Fallback", "Times New Roman", serif;
+  --video-font-body: "Geist", "Geist Fallback", ui-sans-serif, system-ui, sans-serif;
+  --video-font-label: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}

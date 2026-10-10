@@ -1,11 +1,12 @@
 {
   "name": "feature.recommendations.nodes",
-  "version": "1.0.0",
+  "version": "1.0.1",
+  "kind": "node",
   "description": "Recommendations feature node pack (MERCH-A chat-drivability) — read/author nodes over the ctx.features.recommendations surface. `resolve` returns ranked products for a funnel slot; `placement-upsert` authors a slot→source placement. BOTH are role:'action' (recorded → replay/:fork read the recorded output) because they operate over the MUTABLE recs co-occurrence cache + live catalog — a role:'read' node would re-execute and drift (ruling 7).",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "recommendations", "commerce", "merchandising", "upsell", "cross-sell"],
-  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "engines": { "openwop": ">=1.0.0 <3.0.0" },
   "nodes": [
     {
       "typeId": "feature.recommendations.nodes.resolve",

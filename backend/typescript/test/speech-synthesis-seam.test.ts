@@ -2,8 +2,8 @@
  * RFC 0105 — the `speech-synthesis-roundtrip` conformance seam over HTTP. Boots
  * the real app via createApp and exercises the LOCKED seam the published
  * `@openwop/openwop-conformance` suite drives:
- *   POST /v1/host/sample/ai/call-speech-synthesizer   (and the app-canonical
- *        /v1/host/openwop-app/ai/call-speech-synthesizer alias)
+ *   POST /host/sample/ai/call-speech-synthesizer   (and the app-canonical
+ *        /host/openwop-app/ai/call-speech-synthesizer alias)
  *   body { text, voiceId } → { audio: { url XOR base64, mimeType, voiceId }, ... }
  *
  * Asserts: the host advertises aiProviders.speechSynthesis === "supported" with
@@ -32,17 +32,20 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-const APP_PATH = '/v1/host/openwop-app/ai/call-speech-synthesizer';
-const SAMPLE_PATH = '/v1/host/sample/ai/call-speech-synthesizer';
+const APP_PATH = '/host/openwop-app/ai/call-speech-synthesizer';
+const SAMPLE_PATH = '/host/sample/ai/call-speech-synthesizer';
 const post = (path: string, body: unknown) => fetch(`${BASE}${path}`, { method: 'POST', headers: H, body: JSON.stringify(body) });
 
 describe('RFC 0105 — speech-synthesis seam', () => {
-  it('advertises aiProviders.speechSynthesis === "supported" with minimax in supported[]', async () => {
-    const doc = await (await fetch(`${BASE}/.well-known/openwop`, { headers: H })).json() as {
-      aiProviders?: { speechSynthesis?: unknown; supported?: string[] };
+  it('advertises minimax in the major-2 aiProviders.providers[]', async () => {
+    // ADR 0812 P3c-0 — the v1 leg asserted `aiProviders.speechSynthesis:
+    // "supported"` on the v1 document. The v2 seat (a boolean) is not filled by
+    // this host yet — ledgered in whd7-v2-projection-parity KNOWN_UNPROJECTED —
+    // so only the provider half has a v2 home.
+    const doc = await (await fetch(`${BASE}/.well-known/openwop`, { headers: { ...H, 'OpenWOP-Version': '2' } })).json() as {
+      aiProviders?: { providers?: string[] };
     };
-    expect(doc.aiProviders?.speechSynthesis).toBe('supported');
-    expect(doc.aiProviders?.supported ?? []).toContain('minimax');
+    expect(doc.aiProviders?.providers ?? []).toContain('minimax');
   });
 
   it('400s (invalid_request) on missing text', async () => {
@@ -73,7 +76,8 @@ describe('RFC 0105 — speech-synthesis seam', () => {
         expect(Boolean(body.audio?.url) !== Boolean(body.audio?.base64)).toBe(true); // exactly one
       } else {
         expect(res.status).toBe(400);
-        expect(errorCodeOf(await res.json())).toBe('speech_synthesis_unsupported');
+        // The sample seam is a major-2 path, so a host code travels vendor-namespaced there.
+        expect(errorCodeOf(await res.json())).toBe(path === SAMPLE_PATH ? 'openwop-app.speech_synthesis_unsupported' : 'speech_synthesis_unsupported');
       }
     }
   });

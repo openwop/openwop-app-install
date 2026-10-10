@@ -18,6 +18,7 @@ import { resolveSecret } from '../../byok/secretResolver.js';
 import { verifyStripeSignature, STRIPE_KEY_REF } from '../billing/billingService.js';
 import { createStripeOrderCheckoutSession, createStripeCustomer, createStripeOffSessionPaymentIntent, toStripeMinorUnits } from '../billing/stripeApi.js';
 import { checkEntitlement } from '../../host/entitlementSeam.js';
+import { checkOwnerPublicAccess } from '../../host/publicLapse.js';
 import { createLogger } from '../../observability/logger.js';
 import {
   listProducts, getProduct, createProduct, updateProduct, deleteProduct,
@@ -40,7 +41,7 @@ const FEATURE = { toggleId: 'commerce', label: 'E-Commerce' };
 /** ADR 0296 — one-click money movement is operator OPT-IN (default off). Read
  *  per-request so tests and incremental env updates take effect immediately. */
 const offSessionEnabled = (): boolean => process.env.OPENWOP_COMMERCE_OFFSESSION_ENABLED === 'true';
-const BASE = '/v1/host/openwop-app/commerce/orgs/:orgId';
+const BASE = '/host/openwop-app/commerce/orgs/:orgId';
 const log = createLogger('commerce');
 /** GEN-2d — the client order-idempotency key: the standard `Idempotency-Key` header,
  *  or a body `idempotencyKey` fallback. Bounded so a hostile client can't bloat the
@@ -64,6 +65,25 @@ function publicCustomFields(defs: { key: string; label: string }[], cf?: Record<
   if (!cf) return [];
   const label = new Map(defs.map((d) => [d.key, d.label]));
   return Object.entries(cf).map(([k, v]) => ({ label: label.get(k) ?? k, value: typeof v === 'boolean' ? (v ? 'Yes' : 'No') : String(v) }));
+}
+/**
+ * ADR 0820 §7 (G9) — the ONE org resolution for every public-store route
+ * (products, product detail, checkout, one-click, quote accept). Tenant from the
+ * RESOURCE, never the request. Unknown org, the merchant's `commerce` toggle
+ * OFF, or the owner's lapse past the public grace window (behind
+ * `OPENWOP_BILLING_PUBLIC_LAPSE_GRACE_DAYS`, off by default) all answer the SAME
+ * uniform 404, so store state is no oracle.
+ *
+ * The toggle gate is unconditional: before this, the storefront was the only
+ * public lane with NO toggle read at all, so a store switched off kept listing
+ * products and taking orders (gating-audit commerce #1, a kill-switch hole).
+ * The shopper is never refused for their own state, only for the merchant's.
+ */
+async function publicStoreOrg(orgId: string): Promise<NonNullable<Awaited<ReturnType<typeof getOrg>>>> {
+  const org = await getOrg(orgId);
+  if (!org) throw new OpenwopError('not_found', 'Store not found.', 404, {});
+  if (!(await checkOwnerPublicAccess('commerce', org.tenantId)).serve) throw new OpenwopError('not_found', 'Store not found.', 404, {});
+  return org;
 }
 interface Ctx { user: User; orgId: string; tenantId: string }
 // The ONE opt-in plan-entitlement gate (ADR 0176 Phase 3) rides the shared authz helper,
@@ -345,10 +365,9 @@ export function registerCommerceRoutes(deps: RouteDeps): void {
   // make. A cap limits reads of an offer, not the recipient's right to act on it.
   // Acceptance converts at the NEGOTIATED snapshot prices and,
   // with a Stripe key configured, returns a hosted-checkout URL for the order. ──
-  app.post('/v1/host/openwop-app/public-store/:orgId/quotes/:quoteId/accept', async (req, res, next) => {
+  app.post('/host/openwop-app/public-store/:orgId/quotes/:quoteId/accept', async (req, res, next) => {
     try {
-      const org = await getOrg(req.params.orgId);
-      if (!org) throw new OpenwopError('not_found', 'Store not found.', 404, {});
+      const org = await publicStoreOrg(req.params.orgId);
       const token = requireString((req.body ?? {} as Record<string, unknown>).token, 'token');
       await assertLiveLinkFor(token, 'commerce_quote', req.params.quoteId, req.params.orgId);
       const out = await acceptQuote(org.tenantId, req.params.orgId, req.params.quoteId, { actor: 'public:quote-accept' });
@@ -415,12 +434,11 @@ export function registerCommerceRoutes(deps: RouteDeps): void {
 
   // ── Public storefront (Phase 3) — unauthenticated, published (active) products only,
   // org from the URL (tenant host-resolved), like Forms/Sharing. Read-only. ──
-  app.get('/v1/host/openwop-app/public-store/:orgId/products', async (req, res, next) => {
+  app.get('/host/openwop-app/public-store/:orgId/products', async (req, res, next) => {
     try {
       // Tenant comes from the RESOURCE (the org), never the request — a public surface
       // (the Forms/Sharing discipline). An unknown org 404s (uniform, no existence leak).
-      const org = await getOrg(req.params.orgId);
-      if (!org) throw new OpenwopError('not_found', 'Store not found.', 404, {});
+      const org = await publicStoreOrg(req.params.orgId);
       const tenantId = org.tenantId;
       // C6 — public browse facets: ?q= (name/description/tag match), ?category=, ?tag=.
       const all = await listProducts(tenantId, req.params.orgId, optionalString(req.query.q), {
@@ -437,10 +455,9 @@ export function registerCommerceRoutes(deps: RouteDeps): void {
   });
 
   // ── Public product detail (gap plan §5C C2) — same posture as the list. ──
-  app.get('/v1/host/openwop-app/public-store/:orgId/products/:productId', async (req, res, next) => {
+  app.get('/host/openwop-app/public-store/:orgId/products/:productId', async (req, res, next) => {
     try {
-      const org = await getOrg(req.params.orgId);
-      if (!org) throw new OpenwopError('not_found', 'Store not found.', 404, {});
+      const org = await publicStoreOrg(req.params.orgId);
       const p = await getProduct(org.tenantId, req.params.orgId, req.params.productId);
       if (!p || !p.active) throw new OpenwopError('not_found', 'Product not found.', 404, {});
       const cf = publicCustomFields(await listProductFieldDefs(org.tenantId, req.params.orgId), p.customFields);
@@ -456,10 +473,9 @@ export function registerCommerceRoutes(deps: RouteDeps): void {
   // Keyless operators keep the honest demo posture (`mode:'demo'`, order pending).
   // No approval gate: a customer buying from the merchant is not an agent
   // committing the merchant's money (B3 gates agent paths + refunds).
-  app.post('/v1/host/openwop-app/public-store/:orgId/checkout', async (req, res, next) => {
+  app.post('/host/openwop-app/public-store/:orgId/checkout', async (req, res, next) => {
     try {
-      const org = await getOrg(req.params.orgId);
-      if (!org) throw new OpenwopError('not_found', 'Store not found.', 404, {});
+      const org = await publicStoreOrg(req.params.orgId);
       const tenantId = org.tenantId;
       const b = (req.body ?? {}) as { lines?: unknown; email?: unknown; name?: unknown; couponCode?: unknown; shippingAddress?: unknown; bumps?: unknown; funnel?: unknown; savePaymentMethod?: unknown; ref?: unknown };
       const email = requireString(b.email, 'email').trim().toLowerCase();
@@ -625,11 +641,10 @@ export function registerCommerceRoutes(deps: RouteDeps): void {
   // chain depth ≤ 3, per-product duplicate guard, SCA challenge falls back to
   // an on-session confirm (clientSecret returned), a decline cancels the child
   // so the funnel can route to a downsell.
-  app.post('/v1/host/openwop-app/public-store/:orgId/orders/:orderId/one-click', async (req, res, next) => {
+  app.post('/host/openwop-app/public-store/:orgId/orders/:orderId/one-click', async (req, res, next) => {
     try {
       if (!offSessionEnabled()) { sendError(res, 503, 'not_configured', 'One-click offers are not enabled on this host.'); return; }
-      const org = await getOrg(req.params.orgId);
-      if (!org) throw new OpenwopError('not_found', 'Store not found.', 404, {});
+      const org = await publicStoreOrg(req.params.orgId);
       const tenantId = org.tenantId;
       const orgId = req.params.orgId;
       const b = (req.body ?? {}) as { productId?: unknown; quantity?: unknown; funnel?: unknown };
@@ -697,7 +712,7 @@ export function registerCommerceRoutes(deps: RouteDeps): void {
   // billing's verify). On a successful payment referencing an order (metadata.orderId +
   // tenantId/orgId), advance it via markAsPaid. Demo-mode: 503 until the signing secret is
   // set. Idempotency rides markAsPaid's pending-only guard (a re-delivery is a 409 → ack). ──
-  app.post('/v1/host/openwop-app/commerce/webhook', async (req: Request, res: Response) => {
+  app.post('/host/openwop-app/commerce/webhook', async (req: Request, res: Response) => {
     try {
       const rawBody = req.rawBody?.toString('utf8');
       if (!rawBody) { sendError(res, 400, 'invalid_request', 'The raw request body is required to verify the Stripe signature.'); return; }

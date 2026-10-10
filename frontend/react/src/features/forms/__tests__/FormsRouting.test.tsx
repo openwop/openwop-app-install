@@ -11,47 +11,37 @@
  *   3. the detail page loads its OWN form by id, so a bookmark / shared link /
  *      reload works with no list in memory — the failure mode of the old
  *      in-page selection, which had nothing to restore from.
+ *
+ * Sabotages that redden it (grade-tests wave 8): dropping `?org=` from
+ * `formHref`, a delete button on a card, the no-match branch or its
+ * clear-filters handler, a mistargeted `getForm`, 404 → not-found, the delete
+ * call or its return navigation, the held-row CSV filter / reason column, the
+ * Held inbox filter, and a Discard on a clean row.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
-import type { FormDef } from '../formsClient.js';
-
-const client = vi.hoisted(() => ({
-  /**
-   * ADR 0584 (FORM-UX-5) — the mock MUST export the real error class.
-   *
-   * `formsClient` now throws a typed `FormsRequestError` and both pages branch
-   * on `instanceof` it (the 404 → not-found decision below is one such branch).
-   * A module mock that omits it leaves `FormsRequestError` as `undefined` at
-   * every call site, and `x instanceof undefined` THROWS — so the omission
-   * would not read as "this branch is untested", it would blow up the catch
-   * handler. Declared here so the double carries the same contract as the
-   * module it replaces.
-   */
-  FormsRequestError: class FormsRequestError extends Error {
-    readonly status: number;
-    readonly detail: string | undefined;
-    constructor(op: string, status: number, detail?: string) {
-      super(detail || `${op} returned ${status}`);
-      this.name = 'FormsRequestError';
-      this.status = status;
-      this.detail = detail || undefined;
-    }
-  },
-  listOrgs: vi.fn(), listForms: vi.fn(), getForm: vi.fn(), createForm: vi.fn(),
-  updateForm: vi.fn(), deleteForm: vi.fn(), setFormStatus: vi.fn(),
-  listIntakeLists: vi.fn(), listSubmissionsPage: vi.fn(), listSubmissions: vi.fn(),
-  // ADR 0584 §Correction (FORM-BUDGET-1) — the per-row discard the occupancy budget needs.
-  deleteSubmission: vi.fn(),
-  // ADR 0516 — the template catalog the create toolbar reads.
-  listFormTemplates: vi.fn(), createFormFromTemplate: vi.fn(),
-  publicFormUrl: (id: string) => `https://example.test/public-forms/${id}`,
-  hostedFormUrl: (id: string) => `https://example.test/f/${id}`,
-  FIELD_TYPES: ['text', 'email', 'textarea', 'select', 'checkbox'] as const,
-}));
+import { FormsRequestError, type FormDef, type Submission } from '../formsClient.js';
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
-vi.mock('../formsClient.js', () => client);
+
+/**
+ * The ONE typed formsClient double (grade-tests wave 8): the REAL module is
+ * spread in — so `FormsRequestError`, `FIELD_TYPES` and the URL helpers are the
+ * shipped ones, not hand-kept copies that had drifted (no `number` type, no
+ * `reason` on the error) — and every network function is replaced by a
+ * `vi.fn` typed against the real signature, so a fixture that contradicts the
+ * client type is a compile error rather than a silent green.
+ */
+type FC = typeof import('../formsClient.js');
+const client = vi.hoisted(() => ({
+  listOrgs: vi.fn<FC['listOrgs']>(), listForms: vi.fn<FC['listForms']>(), getForm: vi.fn<FC['getForm']>(),
+  createForm: vi.fn<FC['createForm']>(), updateForm: vi.fn<FC['updateForm']>(), deleteForm: vi.fn<FC['deleteForm']>(),
+  setFormStatus: vi.fn<FC['setFormStatus']>(), listIntakeLists: vi.fn<FC['listIntakeLists']>(),
+  listSubmissionsPage: vi.fn<FC['listSubmissionsPage']>(), listSubmissions: vi.fn<FC['listSubmissions']>(),
+  deleteSubmission: vi.fn<FC['deleteSubmission']>(), releaseSubmission: vi.fn<FC['releaseSubmission']>(),
+  listFormTemplates: vi.fn<FC['listFormTemplates']>(), createFormFromTemplate: vi.fn<FC['createFormFromTemplate']>(),
+}));
+vi.mock('../formsClient.js', async (orig) => ({ ...(await orig<FC>()), ...client }));
 vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
   useFeatureAccess: () => makeFeatureAccess({ enabled: true, loading: false }),
 }));
@@ -73,11 +63,14 @@ const renderList = () => render(
 
 const renderDetail = (entry = '/forms/f1?org=o1') => render(
   <MemoryRouter initialEntries={[entry]}>
-    <Routes><Route path="/forms/:formId" element={<FormDetailPage />} /></Routes>
+    <Routes>
+      <Route path="/forms/:formId" element={<FormDetailPage />} />
+      <Route path="/forms" element={<p>back at the collection</p>} />
+    </Routes>
   </MemoryRouter>);
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   localStorage.clear();
   client.listOrgs.mockResolvedValue([{ orgId: 'o1', name: 'Personal workspace' }]);
   client.listForms.mockResolvedValue([form()]);
@@ -85,7 +78,11 @@ beforeEach(() => {
   client.listIntakeLists.mockResolvedValue([]);
   client.listSubmissionsPage.mockResolvedValue({ submissions: [], nextCursor: null, flaggedCount: 0, droppedCount: 0 });
   client.listFormTemplates.mockResolvedValue([]);
+  client.deleteForm.mockResolvedValue(undefined);
 });
+// `captureCsv` stubs the global Blob and spies on URL — never let either
+// outlive its case (they used to leak into every later case in the file).
+afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 describe('the collection page', () => {
   it('renders each form as a real link to its own URL', async () => {
@@ -106,9 +103,12 @@ describe('the collection page', () => {
     client.listForms.mockResolvedValue([1, 2, 3, 4, 5].map((n) => form({ formId: `f${n}`, title: `Form ${n}` })));
     renderList();
     const search = await screen.findByRole('searchbox', { name: /filter forms/i });
-    const { fireEvent } = await import('@testing-library/react');
     fireEvent.change(search, { target: { value: 'zzz-no-such-form' } });
-    expect(await screen.findByRole('button', { name: /clear filters/i })).toBeTruthy();
+    expect(await screen.findByText('No forms match')).toBeTruthy();
+    // The action must WORK, not just exist: clearing brings the forms back.
+    fireEvent.click(screen.getByRole('button', { name: /clear filters/i }));
+    expect(await screen.findByRole('link', { name: /Form 1/ })).toBeTruthy();
+    expect((screen.getByRole('searchbox', { name: /filter forms/i }) as HTMLInputElement).value).toBe('');
   });
 });
 
@@ -118,6 +118,8 @@ describe('the detail page', () => {
     await waitFor(() => expect(client.getForm).toHaveBeenCalledWith('o1', 'f1'));
     // The entity name IS the page h1 (§4.5 rule 12).
     expect(await screen.findByRole('heading', { level: 1, name: 'Contact Us' })).toBeTruthy();
+    // Holds by construction (the detail page does not import listForms); kept
+    // as the statement of intent, not as the guard — getForm above is.
     expect(client.listForms).not.toHaveBeenCalled();
   });
 
@@ -126,7 +128,7 @@ describe('the detail page', () => {
     // bare `new Error('getForm returned 404')` and the page sniffed the MESSAGE
     // (`/\b404\b/`), which would equally have matched a server sentence about a
     // form titled "404". The status is carried now, so both sides are typed.
-    client.getForm.mockRejectedValue(new client.FormsRequestError('getForm', 404));
+    client.getForm.mockRejectedValue(new FormsRequestError('getForm', 404));
     renderDetail('/forms/gone?org=o1');
     // The name is the page h1 AND the StateCard title — assert on the heading.
     expect(await screen.findByRole('heading', { level: 1, name: /form not found/i })).toBeTruthy();
@@ -136,8 +138,13 @@ describe('the detail page', () => {
   });
 
   it('owns the delete action, and returns to the collection after it succeeds', async () => {
+    // No <ConfirmRoot> is mounted, so `ui/confirm` falls back to window.confirm;
+    // there are no loaded leads, so no type-to-confirm is armed.
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
     renderDetail();
-    expect(await screen.findByRole('button', { name: /delete/i })).toBeTruthy();
+    fireEvent.click(await screen.findByRole('button', { name: /delete/i }));
+    await waitFor(() => expect(client.deleteForm).toHaveBeenCalledWith('o1', 'f1'));
+    expect(await screen.findByText('back at the collection')).toBeTruthy();
   });
 });
 
@@ -145,7 +152,7 @@ describe('the detail page', () => {
  * ADR 0584 §Correction — the held-submission operator surface (PR #3368 R2).
  */
 describe('the submissions inbox — held rows (FORM-CSV-1 / FORM-UX-1b / FORM-BUDGET-1)', () => {
-  const sub = (over: Record<string, unknown> = {}) => ({
+  const sub = (over: Partial<Submission> = {}): Submission => ({
     submissionId: 's1', formId: 'f1', values: { name: 'Ada' },
     createdAt: '2026-02-01T00:00:00.000Z', ...over,
   });
@@ -171,7 +178,6 @@ describe('the submissions inbox — held rows (FORM-CSV-1 / FORM-UX-1b / FORM-BU
   }
 
   it('FORM-CSV-1: the export EXCLUDES held rows by default and labels the column that names them', async () => {
-    const { fireEvent } = await import('@testing-library/react');
     client.listSubmissionsPage.mockResolvedValue({
       submissions: [sub({ submissionId: 's1', values: { name: 'Ada' } }), sub({ submissionId: 's2', values: { name: 'Bot' }, flagged: 'honeypot' })],
       nextCursor: null, flaggedCount: 1, droppedCount: 0,
@@ -191,7 +197,6 @@ describe('the submissions inbox — held rows (FORM-CSV-1 / FORM-UX-1b / FORM-BU
   });
 
   it('FORM-CSV-1: ticking the opt-in includes them, and each carries WHICH control held it', async () => {
-    const { fireEvent } = await import('@testing-library/react');
     client.listSubmissionsPage.mockResolvedValue({
       submissions: [sub({ submissionId: 's1', values: { name: 'Ada' } }), sub({ submissionId: 's2', values: { name: 'Bot' }, flagged: 'honeypot' })],
       nextCursor: null, flaggedCount: 1, droppedCount: 0,
@@ -206,7 +211,6 @@ describe('the submissions inbox — held rows (FORM-CSV-1 / FORM-UX-1b / FORM-BU
   });
 
   it('FORM-UX-1b: a Held filter narrows the inbox to the quarantined rows', async () => {
-    const { fireEvent } = await import('@testing-library/react');
     client.listSubmissionsPage.mockResolvedValue({
       submissions: [sub({ submissionId: 's1', values: { name: 'Ada' } }), sub({ submissionId: 's2', values: { name: 'Botly' }, flagged: 'guard' })],
       nextCursor: null, flaggedCount: 1, droppedCount: 0,

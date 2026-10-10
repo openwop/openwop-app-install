@@ -15,6 +15,7 @@ export const TASKS_DECK_TOOL_ID = 'openwop:tasks.deck';
 export function registerTaskDeckAgentTools(storage: Storage): void {
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: TASKS_DECK_TOOL_ID,
       description:

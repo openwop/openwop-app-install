@@ -37,7 +37,6 @@
  */
 
 import type { Express, Request } from 'express';
-import { v1 } from '../middleware/protocolVersion.js';
 import { OpenwopError } from '../types.js';
 import {
   deleteChart,
@@ -47,6 +46,7 @@ import {
   type OrgDepartment,
   type OrgMember,
 } from '../host/orgChartService.js';
+import { requireTenantWrite } from '../features/featureRoute.js';
 
 function tenantOf(req: Request): string {
   return (req as { tenantId?: string }).tenantId ?? 'default';
@@ -58,6 +58,39 @@ function tenantOf(req: Request): string {
  *  404 would be indistinguishable from "the capability is not served". */
 function emptyChart(tenantId: string) {
   return { tenantId, departments: [], members: [], updatedAt: null };
+}
+
+/**
+ * The wire shape of `GET /agents/org-chart` (`agent-org-chart.schema.json`,
+ * identical at v1 and v2): `{ owner: { tenantId }, departments, members }`, every
+ * object `additionalProperties: false`. The stored record carries `tenantId` and
+ * `updatedAt` at the top level instead. The normative route used to serve that
+ * record verbatim, so it failed the schema on both counts: `owner` missing, two
+ * extra keys. The host-extension alias below keeps the record shape, because
+ * the operator console reads it.
+ *
+ * The nested objects are rebuilt field by field, not spread, so a field added to
+ * the stored type cannot leak onto a closed wire object. The schema forbids any
+ * authority-bearing field on these objects (§B), and a spread is how one would
+ * arrive unnoticed.
+ */
+function toWireChart(tenantId: string, chart: { departments: OrgDepartment[]; members: OrgMember[] } | null | undefined) {
+  return {
+    owner: { tenantId },
+    departments: (chart?.departments ?? []).map(toWireDepartment),
+    members: (chart?.members ?? []).map(toWireMember),
+  };
+}
+function toWireDepartment(d: OrgDepartment) {
+  return {
+    departmentId: d.departmentId,
+    name: d.name,
+    parentDepartmentId: d.parentDepartmentId ?? null,
+    roles: d.roles.map((r) => ({ roleId: r.roleId, name: r.name })),
+  };
+}
+function toWireMember(m: OrgMember) {
+  return { rosterId: m.rosterId, departmentId: m.departmentId, roleId: m.roleId, reportsTo: m.reportsTo ?? null };
 }
 
 /**
@@ -73,17 +106,16 @@ function emptyChart(tenantId: string) {
  * `org-chart-normative-route.test.ts` pins that it is not shadowed.
  */
 export function registerOrgChartNormativeRoutes(app: Express): void {
-  app.get(v1('/agents/org-chart'), async (req, res, next) => {
+  app.get('/agents/org-chart', async (req, res, next) => {
     try {
       const tenantId = tenantOf(req);
-      const chart = await getChart(tenantId);
-      res.json(chart ?? emptyChart(tenantId));
+      res.json(toWireChart(tenantId, await getChart(tenantId)));
     } catch (err) {
       next(err);
     }
   });
 
-  app.get(v1('/agents/org-chart/:departmentId'), async (req, res, next) => {
+  app.get('/agents/org-chart/:departmentId', async (req, res, next) => {
     try {
       // §D — `?recursive=false` NARROWS the roll-up to direct members without
       // changing the response shape. Any other value (including absent) is the
@@ -99,15 +131,42 @@ export function registerOrgChartNormativeRoutes(app: Express): void {
           departmentId: req.params.departmentId,
         });
       }
-      res.json(view);
+      res.json({
+        department: toWireDepartment(view.department),
+        members: view.members.map(toWireMember),
+        responsibilities: view.responsibilities,
+      });
     } catch (err) {
       next(err);
     }
   });
 }
 
+/** The PUT body's structure, checked before the service walks it. A department
+ *  without a `roles` array used to reach `d.roles.map` and answer 500. */
+function malformedChartField(departments: unknown[], members: unknown[]): string | null {
+  const str = (v: unknown) => typeof v === 'string' && v.length > 0;
+  for (const [i, d] of departments.entries()) {
+    const o = d as Record<string, unknown> | null;
+    if (!o || typeof o !== 'object') return `departments[${i}]`;
+    if (!str(o.departmentId)) return `departments[${i}].departmentId`;
+    if (!str(o.name)) return `departments[${i}].name`;
+    if (!Array.isArray(o.roles)) return `departments[${i}].roles`;
+    for (const [j, r] of o.roles.entries()) {
+      const ro = r as Record<string, unknown> | null;
+      if (!ro || typeof ro !== 'object' || !str(ro.roleId) || !str(ro.name)) return `departments[${i}].roles[${j}]`;
+    }
+  }
+  for (const [i, m] of members.entries()) {
+    const o = m as Record<string, unknown> | null;
+    if (!o || typeof o !== 'object') return `members[${i}]`;
+    for (const k of ['rosterId', 'departmentId', 'roleId'] as const) if (!str(o[k])) return `members[${i}].${k}`;
+  }
+  return null;
+}
+
 export function registerOrgChartRoutes(app: Express): void {
-  app.get('/v1/host/openwop-app/org-chart', async (req, res, next) => {
+  app.get('/host/openwop-app/org-chart', async (req, res, next) => {
     try {
       const chart = await getChart(tenantOf(req));
       res.json(chart ?? emptyChart(tenantOf(req)));
@@ -116,13 +175,18 @@ export function registerOrgChartRoutes(app: Express): void {
     }
   });
 
-  app.put('/v1/host/openwop-app/org-chart', async (req, res, next) => {
+  app.put('/host/openwop-app/org-chart', async (req, res, next) => {
     try {
+      await requireTenantWrite(req); // ADR 0775 D1
       const body = (req.body ?? {}) as { departments?: unknown; members?: unknown };
       if (!Array.isArray(body.departments) || !Array.isArray(body.members)) {
         throw new OpenwopError('validation_error', 'Fields `departments` and `members` are required arrays.', 400, {
           field: 'departments|members',
         });
+      }
+      const bad = malformedChartField(body.departments, body.members);
+      if (bad) {
+        throw new OpenwopError('validation_error', `Malformed org-chart field: ${bad}.`, 400, { field: bad });
       }
       const result = await putChart({
         tenantId: tenantOf(req),
@@ -142,8 +206,9 @@ export function registerOrgChartRoutes(app: Express): void {
     }
   });
 
-  app.delete('/v1/host/openwop-app/org-chart', async (req, res, next) => {
+  app.delete('/host/openwop-app/org-chart', async (req, res, next) => {
     try {
+      await requireTenantWrite(req); // ADR 0775 D1
       await deleteChart(tenantOf(req));
       res.status(204).end();
     } catch (err) {
@@ -151,7 +216,7 @@ export function registerOrgChartRoutes(app: Express): void {
     }
   });
 
-  app.get('/v1/host/openwop-app/org-chart/:departmentId', async (req, res, next) => {
+  app.get('/host/openwop-app/org-chart/:departmentId', async (req, res, next) => {
     try {
       const recursive = req.query.recursive !== 'false';
       const view = await responsibilityView(tenantOf(req), req.params.departmentId, recursive);

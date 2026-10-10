@@ -29,7 +29,7 @@
  * type-only import erases — the collabDocBinding bundle rule).
  */
 import type { CollabDocBinding } from '../../canvas/collabDocBinding.js';
-import { useBuilderStore, cancelPendingBackendSync } from '../store/builderStore.js';
+import { setActiveCollabFlush, useBuilderStore, cancelPendingBackendSync } from '../store/builderStore.js';
 import { workflowCollabSlice } from './workflowCollabShape.js';
 import { serializeWithIdMap } from '../schema/serialize.js';
 import type { BuilderEdge, BuilderNode } from '../schema/workflow.js';
@@ -182,6 +182,8 @@ export function attachWorkflowCollabAdapter(
     if (disposed || !storeMatches()) return;
     binding.set(buildRoomDoc(lastDefinition));
   };
+  // ADR 0773 G-10d — a kept suggestion flushes at once (see setActiveCollabFlush).
+  setActiveCollabFlush(flushGraph);
   const flushDefinition = (): void => {
     if (defTimer) {
       clearTimeout(defTimer);
@@ -245,6 +247,7 @@ export function attachWorkflowCollabAdapter(
     canRedo: () => binding.canRedo(),
     onStackChanged: (cb) => binding.onStackChanged(cb),
     destroy(): void {
+      setActiveCollabFlush(null);
       if (disposed) return;
       unsubscribe();
       offDoc();
@@ -277,7 +280,10 @@ export function attachWorkflowCollabAdapter(
         disposed = true;
         // Leave duties: clear the in-room undo residue, resume the autosave and
         // land ONE catch-up sync so the REST head is truthful immediately.
-        useBuilderStore.setState({ collabLive: false, past: [], future: [], collabPeers: null });
+        // ADR 0770 D5 — the room's derive moved the head, so this canvas's
+        // `If-Match` base is stale by construction: drop it, or the catch-up
+        // sync below is refused as a conflict. Its 201 re-arms the base.
+        useBuilderStore.setState({ collabLive: false, past: [], future: [], collabPeers: null, baseRevision: undefined });
         if (storeMatches()) useBuilderStore.getState().persist();
       }
     },

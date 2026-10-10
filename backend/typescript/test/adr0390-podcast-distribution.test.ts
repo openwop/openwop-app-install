@@ -75,15 +75,15 @@ function rawGet(path: string, headers: Record<string, string> = {}, method = 'GE
   });
 }
 
-const P = '/v1/host/openwop-app/podcasts';
-const PUB = (orgId: string): string => `/v1/host/openwop-app/public/${encodeURIComponent(orgId)}/podcasts`;
+const P = '/host/openwop-app/podcasts';
+const PUB = (orgId: string): string => `/host/openwop-app/public/${encodeURIComponent(orgId)}/podcasts`;
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
 
 async function ownerWithOrg(who: string): Promise<{ c: Client; orgId: string; tenantId: string }> {
   const c = client();
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail(who) });
+  const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail(who) });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme Media' });
+  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme Media' });
   const orgId = org.body.orgId as string;
   const tenantId = (await getOrg(orgId))!.tenantId;
   return { c, orgId, tenantId };
@@ -91,16 +91,16 @@ async function ownerWithOrg(who: string): Promise<{ c: Client; orgId: string; te
 
 /** Seed an episode with resolvable audio bytes of `size` bytes (via the service,
  *  bypassing the generation run). Returns the tracking record. */
-async function seedEpisodeWithAudio(tenantId: string, orgId: string, title: string, size: number): Promise<PodcastEpisode> {
+async function seedEpisodeWithAudio(tenantId: string, orgId: string, title: string, size: number, contentType = 'audio/mpeg'): Promise<PodcastEpisode> {
   const contentBase64 = Buffer.alloc(size, 7).toString('base64');
-  const asset = await storeMediaAsset(tenantId, { contentBase64, contentType: 'audio/mpeg' });
+  const asset = await storeMediaAsset(tenantId, { contentBase64, contentType });
   const ep = await createEpisode(tenantId, orgId, { notebookId: 'nb-1', episodeProfileId: 'ep-profile-1', title });
   await recordEpisodeResult(tenantId, ep.id, { audioMediaRef: asset.url });
   return ep;
 }
 
 /** Create + publish a show, then bind + publish an episode on it. */
-async function publishedShowWithEpisode(who: string): Promise<{
+async function publishedShowWithEpisode(who: string, audioType?: string): Promise<{
   c: Client; orgId: string; tenantId: string; showSlug: string; showId: string; episodeId: string; episodeSlug: string;
 }> {
   const { c, orgId, tenantId } = await ownerWithOrg(who);
@@ -112,7 +112,7 @@ async function publishedShowWithEpisode(who: string): Promise<{
   const showId = created.body.show.id as string;
   const showSlug = created.body.show.slug as string;
   expect((await c.post(`${P}/shows/${showId}/publish`)).status).toBe(200);
-  const ep = await seedEpisodeWithAudio(tenantId, orgId, 'Episode One', 512);
+  const ep = await seedEpisodeWithAudio(tenantId, orgId, 'Episode One', 512, audioType);
   const pub = await c.post(`${P}/episodes/${ep.id}/publish`, { showId });
   expect(pub.status, JSON.stringify(pub.body)).toBe(200);
   const episodeSlug = pub.body.episode.slug as string;
@@ -208,6 +208,17 @@ describe('ADR 0390 — Range-capable audio route', () => {
     expect(String(res.headers['content-type'])).toBe('audio/mpeg');
     expect(Number(res.headers['content-length'])).toBe(512);
     expect(res.body.length).toBe(512);
+  });
+
+  it('ADR 0818 §1 — sends nosniff, and an episode whose bytes were stored as HTML downloads instead of rendering', async () => {
+    const ok = await publishedShowWithEpisode('audio-headers');
+    const good = await rawGet(`${PUB(ok.orgId)}/episodes/${ok.episodeId}/audio`);
+    expect(String(good.headers['x-content-type-options'])).toBe('nosniff');
+    const bad = await publishedShowWithEpisode('audio-html', 'text/html');
+    const res = await rawGet(`${PUB(bad.orgId)}/episodes/${bad.episodeId}/audio`);
+    expect(String(res.headers['content-type'])).toBe('application/octet-stream');
+    expect(String(res.headers['content-disposition'])).toBe('attachment');
+    expect(String(res.headers['content-security-policy'])).toMatch(/sandbox/);
   });
 
   it('honors Range: bytes=0-99 with 206 + Content-Range', async () => {
@@ -335,7 +346,7 @@ describe('R2 SP-1 — publish metadata reaches the PUBLIC surface (explicit inhe
     expect((await c.put(`${P}/shows/${showId}`, { explicit: true })).status).toBe(200);
 
     // Episode with NO override → inherits true (the old projection hardcoded ?? false).
-    const pub = await fetch(`${BASE}/v1/host/openwop-app/public/${encodeURIComponent(orgId)}/podcasts/${encodeURIComponent(showSlug)}`);
+    const pub = await fetch(`${BASE}/host/openwop-app/public/${encodeURIComponent(orgId)}/podcasts/${encodeURIComponent(showSlug)}`);
     expect(pub.status).toBe(200);
     const body = await pub.json() as { show: { explicit: boolean }; episodes: Array<{ explicit: boolean; description?: string }> };
     expect(body.show.explicit).toBe(true);
@@ -346,7 +357,7 @@ describe('R2 SP-1 — publish metadata reaches the PUBLIC surface (explicit inhe
     const ep2 = await seedEpisodeWithAudio(tenantId, orgId, 'Clean One', 256);
     const pub2 = await c.post(`${P}/episodes/${ep2.id}/publish`, { showId, explicitOverride: false, descriptionOverride: 'A clean episode.' });
     expect(pub2.status, JSON.stringify(pub2.body)).toBe(200);
-    const after = await (await fetch(`${BASE}/v1/host/openwop-app/public/${encodeURIComponent(orgId)}/podcasts/${encodeURIComponent(showSlug)}`)).json() as { episodes: Array<{ title: string; explicit: boolean; description?: string }> };
+    const after = await (await fetch(`${BASE}/host/openwop-app/public/${encodeURIComponent(orgId)}/podcasts/${encodeURIComponent(showSlug)}`)).json() as { episodes: Array<{ title: string; explicit: boolean; description?: string }> };
     const clean = after.episodes.find((e) => e.title === 'Clean One')!;
     expect(clean.explicit).toBe(false);
     expect(clean.description).toBe('A clean episode.');
@@ -364,7 +375,7 @@ describe('R2 PR2-4 — directory URLs: operator-entered, sanitized, projected', 
     expect(upd.body.show.appleUrl).toBe('https://podcasts.apple.com/us/podcast/id123');
     expect(upd.body.show.spotifyUrl).toBeUndefined();
 
-    const pub = await (await fetch(`${BASE}/v1/host/openwop-app/public/${encodeURIComponent(orgId)}/podcasts/${encodeURIComponent(showSlug)}`)).json() as { show: { appleUrl?: string; spotifyUrl?: string } };
+    const pub = await (await fetch(`${BASE}/host/openwop-app/public/${encodeURIComponent(orgId)}/podcasts/${encodeURIComponent(showSlug)}`)).json() as { show: { appleUrl?: string; spotifyUrl?: string } };
     expect(pub.show.appleUrl).toBe('https://podcasts.apple.com/us/podcast/id123');
     expect(pub.show.spotifyUrl).toBeUndefined();
   });
@@ -405,8 +416,8 @@ describe('SP-9 (round 3) — shows/episodes lists carry the caller\'s canWrite f
     // (the projects-route #2506 precedent).
     const tenantId = `org:pcw-${Date.now()}-${n++}`;
     const owner = client();
-    await owner.post('/v1/host/openwop-app/test/login', { email: uniqEmail('pcw-owner'), tenantId });
-    const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'CapCo' })).body.orgId as string;
+    await owner.post('/host/openwop-app/test/login', { email: uniqEmail('pcw-owner'), tenantId });
+    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'CapCo' })).body.orgId as string;
     expect((await owner.post(`${P}/shows`, { orgId, title: 'Cap Show', author: 'A' })).status).toBe(201);
 
     // The creator holds workspace:write → both list reads REPORT it.
@@ -421,8 +432,8 @@ describe('SP-9 (round 3) — shows/episodes lists carry the caller\'s canWrite f
     // but canWrite is FALSE — and the projection matches the authority (the
     // viewer's actual write on this surface 403s on the same predicate).
     const viewer = client();
-    const vlogin = await viewer.post('/v1/host/openwop-app/test/login', { email: uniqEmail('pcw-viewer'), tenantId });
-    const add = await owner.post(`/v1/host/openwop-app/orgs/${orgId}/members`, { displayName: 'V', subject: vlogin.body.user.userId, roles: ['viewer'] });
+    const vlogin = await viewer.post('/host/openwop-app/test/login', { email: uniqEmail('pcw-viewer'), tenantId });
+    const add = await owner.post(`/host/openwop-app/orgs/${orgId}/members`, { displayName: 'V', subject: vlogin.body.user.userId, roles: ['viewer'] });
     expect(add.status, JSON.stringify(add.body)).toBe(201);
     const vShows = await viewer.get(`${P}/shows?orgId=${encodeURIComponent(orgId)}`);
     expect(vShows.status).toBe(200);

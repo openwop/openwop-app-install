@@ -50,7 +50,7 @@ function client(): Client & { login: (subject: string, tenantId: string) => Prom
     patch: (p, b) => send('PATCH', p, b),
     del: (p) => send('DELETE', p),
     login: async (subject, tenantId) => {
-      const res = await send('POST', '/v1/host/openwop-app/test/login', { subject, tenantId });
+      const res = await send('POST', '/host/openwop-app/test/login', { subject, tenantId });
       expect([200, 201]).toContain(res.status);
     },
   };
@@ -62,7 +62,7 @@ const setToggle = async (id: string, status: 'on' | 'off'): Promise<void> => {
   await saveConfig({ ...d, status }, 'test');
 };
 
-const B = '/v1/host/openwop-app/entities';
+const B = '/host/openwop-app/entities';
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -484,7 +484,7 @@ describe('entities Phase 4 — entityApi keys (dual auth) + publish gate', () =>
     expect((await c.patch(`${B}/types/catalog`, { status: 'published' })).status).toBe(200);
 
     const issue = async (scopes: string[]): Promise<string> => {
-      const res = await c.post('/v1/host/openwop-app/developer-keys', { name: `k-${scopes[0]}`, scopes });
+      const res = await c.post('/host/openwop-app/developer-keys', { name: `k-${scopes[0]}`, scopes });
       expect(res.status).toBe(201);
       return ((await res.json()) as { token: string }).token;
     };

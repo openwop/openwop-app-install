@@ -2,12 +2,18 @@
  * CMSGAP-4 — component coverage for the shared media picker (ADR 0206 B4):
  * loads + renders the org's assets, debounced search re-queries, selecting an
  * asset hands it back, and upload flows through `uploadAsset` → `onSelect`.
+ *
+ * Sabotage: drop the 250 ms debounce (`q ? 250 : 0` → `0`) → the search case
+ * (one read per pause is the rate-limit fan-out discipline); render a failed
+ * read as `[]` → MED-G1 case 1.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, waitFor, act } from '@testing-library/react';
+import type * as Client from '../mediaClient.js';
+import type { MediaAsset } from '../mediaClient.js';
 
-const listAssets = vi.hoisted(() => vi.fn());
-const uploadAsset = vi.hoisted(() => vi.fn());
+const listAssets = vi.hoisted(() => vi.fn<typeof Client.listAssets>());
+const uploadAsset = vi.hoisted(() => vi.fn<typeof Client.uploadAsset>());
 vi.mock('../mediaClient.js', () => ({
   listAssets,
   uploadAsset,
@@ -16,7 +22,7 @@ vi.mock('../mediaClient.js', () => ({
 
 import { MediaPickerDialog } from '../MediaPickerDialog.js';
 
-const asset = (id: string, name: string) => ({
+const asset = (id: string, name: string): MediaAsset => ({
   assetId: id, orgId: 'o1', name, contentType: 'image/png', sizeBytes: 10,
   tags: [], usageCount: 0, serveUrl: `/assets/${id}`, serveToken: `tok-${id}`,
   createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
@@ -26,7 +32,7 @@ beforeEach(() => {
   listAssets.mockReset().mockResolvedValue([asset('a1', 'hero.png'), asset('a2', 'logo.png')]);
   uploadAsset.mockReset();
 });
-afterEach(cleanup);
+afterEach(() => { vi.useRealTimers(); cleanup(); });
 
 describe('MediaPickerDialog', () => {
   it('lists the org assets and returns the chosen one', async () => {
@@ -37,17 +43,22 @@ describe('MediaPickerDialog', () => {
     expect(onSelect).toHaveBeenCalledWith(expect.objectContaining({ assetId: 'a1', serveToken: 'tok-a1' }));
   });
 
-  it('re-queries with the debounced search term', async () => {
+  it('re-queries with the debounced search term — one read per pause, not per keystroke', async () => {
+    // Fake timers, advanced by hand: RTL's waitFor only auto-advances JEST timers.
+    vi.useFakeTimers();
     render(<MediaPickerDialog orgId="o1" onSelect={() => undefined} onClose={() => undefined} />);
-    await waitFor(() => expect(listAssets).toHaveBeenCalledWith('o1', {}));
-    fireEvent.change(screen.getByLabelText(/search assets/i), { target: { value: 'logo' } });
-    await waitFor(() => expect(listAssets).toHaveBeenCalledWith('o1', { q: 'logo' }), { timeout: 2000 });
-  });
-
-  it('shows the empty state when nothing matches', async () => {
-    listAssets.mockResolvedValue([]);
-    render(<MediaPickerDialog orgId="o1" onSelect={() => undefined} onClose={() => undefined} />);
-    await waitFor(() => expect(screen.getByText(/no assets found/i)).toBeTruthy());
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(listAssets).toHaveBeenCalledWith('o1', {});
+    const box = screen.getByLabelText(/search assets/i);
+    fireEvent.change(box, { target: { value: 'lo' } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    fireEvent.change(box, { target: { value: 'logo' } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(200); });
+    expect(listAssets, 'still inside the pause — no read yet').toHaveBeenCalledTimes(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+    expect(listAssets).toHaveBeenCalledTimes(2);
+    expect(listAssets).toHaveBeenLastCalledWith('o1', { q: 'logo' });
+    expect(listAssets).not.toHaveBeenCalledWith('o1', { q: 'lo' });
   });
 
   it('uploads a file and immediately selects the new asset', async () => {
@@ -57,10 +68,10 @@ describe('MediaPickerDialog', () => {
     render(<MediaPickerDialog orgId="o1" onSelect={onSelect} onClose={() => undefined} />);
     await waitFor(() => expect(screen.getByText('hero.png')).toBeTruthy());
     // The Modal renders through a portal — query the document, not the container.
-    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
-    expect(fileInput).toBeTruthy();
+    const fileInput = document.querySelector<HTMLInputElement>('input[type="file"]');
+    expect(fileInput).not.toBeNull();
     const file = new File(['x'], 'new.png', { type: 'image/png' });
-    fireEvent.change(fileInput, { target: { files: [file] } });
+    fireEvent.change(fileInput!, { target: { files: [file] } });
     await waitFor(() => expect(uploadAsset).toHaveBeenCalledWith('o1', file));
     await waitFor(() => expect(onSelect).toHaveBeenCalledWith(fresh));
   });

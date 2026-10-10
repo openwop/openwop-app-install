@@ -18,7 +18,11 @@
  *          carrying its full text that no later hydrate could reach.
  *
  * Each test below is written to FAIL on the pre-fix code, not merely to pass on the
- * post-fix code.
+ * post-fix code. Measured (wave-6 /grade-tests): a namespace without the org, a route
+ * that forwards the raw body, a dropped 409 clash check, and a delete that skips the
+ * vector wipe or wipes only the current chunker's ids each turn a case here red. The
+ * route-pick cases are a DOUBLE GUARD with the service's `assertNoPrivilegedFields`
+ * (a forwarded raw body 400s there), so the service half is pinned in-process.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -54,13 +58,16 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res { status: number; body: any }
+/** The response fields this file reads — each route's body, as typed as the claim needs. */
+interface Body { orgId: string; collectionId: string; managed?: string; documentId: string }
+interface Res { status: number; body: Body }
 function client(): { post: (p: string, b?: unknown) => Promise<Res> } {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]!; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    const parsed: unknown = res.status === 204 ? {} : await res.json().catch(() => ({}));
+    return { status: res.status, body: parsed as Body };
   };
   return { post: (p, b) => call('POST', p, b) };
 }
@@ -75,13 +82,13 @@ describe('KB-1 — a collection id shared across orgs does not share a vector na
   it('the namespace CARRIES the org (the invariant, stated at the seam)', () => {
     // Asserted directly because everything below depends on it, and because the
     // pre-fix value was the bare collectionId — a one-line regression away.
-    const a = collectionNamespace({ collectionId: 'shared', orgId: 'org-a' } as never);
-    const b = collectionNamespace({ collectionId: 'shared', orgId: 'org-b' } as never);
+    const a = collectionNamespace({ collectionId: 'shared', orgId: 'org-a' });
+    const b = collectionNamespace({ collectionId: 'shared', orgId: 'org-b' });
     expect(a).not.toBe(b);
     expect(a).toContain('org-a');
     expect(a).not.toBe('shared');
     // A signature-versioned (reindexed) collection keeps the org too.
-    expect(collectionNamespace({ collectionId: 'shared', orgId: 'org-a', activeSignature: 'sig1' } as never)).toContain('org-a');
+    expect(collectionNamespace({ collectionId: 'shared', orgId: 'org-a', activeSignature: 'sig1' })).toContain('org-a');
   });
 
   it('a dense search in org A cannot see org B\'s chunk text', async () => {
@@ -122,16 +129,16 @@ describe('KB-1 — the routes PICK the caller-settable fields (a cast is not val
   async function ownerOrg(): Promise<{ c: ReturnType<typeof client>; orgId: string }> {
     const tenantId = `org:kbxo-${Date.now()}-${n++}`;
     const c = client();
-    const login = await c.post('/v1/host/openwop-app/test/login', { email: `kbxo-${Date.now()}-${n++}@acme.test`, tenantId });
+    const login = await c.post('/host/openwop-app/test/login', { email: `kbxo-${Date.now()}-${n++}@acme.test`, tenantId });
     expect(login.status, JSON.stringify(login.body)).toBe(201);
-    const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+    const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
     expect(org.status, JSON.stringify(org.body)).toBe(201);
     return { c, orgId: org.body.orgId };
   }
 
   it('a caller-supplied collectionId + managed flag are NOT honored', async () => {
     const { c, orgId } = await ownerOrg();
-    const created = await c.post(`/v1/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections`, {
+    const created = await c.post(`/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections`, {
       name: 'Innocent', collectionId: 'mgd-strategy-someoneelse', managed: 'strategy',
     });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
@@ -141,8 +148,8 @@ describe('KB-1 — the routes PICK the caller-settable fields (a cast is not val
 
   it('a caller-supplied documentId is NOT honored (the clobber vector)', async () => {
     const { c, orgId } = await ownerOrg();
-    const col = await c.post(`/v1/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections`, { name: 'Docs' });
-    const base = `/v1/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections/${encodeURIComponent(col.body.collectionId)}/documents`;
+    const col = await c.post(`/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections`, { name: 'Docs' });
+    const base = `/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections/${encodeURIComponent(col.body.collectionId)}/documents`;
     const first = await c.post(base, { title: 'One', text: ORG_A_TEXT, documentId: 'pinned-id' });
     expect(first.status, JSON.stringify(first.body)).toBe(201);
     expect(first.body.documentId).not.toBe('pinned-id');
@@ -195,7 +202,7 @@ describe('KB-4 — a deleted document stops being searchable, tail included', ()
     row.chunkCount = liveCount + 1;
     await storage.kvSet(key, JSON.stringify(row));
 
-    const ns = collectionNamespace({ collectionId: col.collectionId, orgId: 'org-a' } as never);
+    const ns = collectionNamespace({ collectionId: col.collectionId, orgId: 'org-a' });
     const vector = buildHostSurfaceBundle({ tenantId }).db.vector;
     const tailId = `${doc.documentId}:${liveCount}`;
     await vector.upsert({ namespace: ns, items: [{ id: tailId, vector: new Array(256).fill(0.01), metadata: { documentId: doc.documentId, chunkIndex: liveCount, title: 'Runbook', text: ORG_A_TEXT, contentTrust: 'trusted', headingPath: [] } }] });

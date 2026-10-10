@@ -28,7 +28,7 @@ import { dueFollowUps, completeFollowUp } from './lifecycle/followUps.js';
 import { listDrafts, approveDraft, type DraftKind } from './lifecycle/drafts.js';
 import type { JobDigest } from './domain/digest.js';
 
-export const JOB_SEARCH_BASE = '/v1/host/openwop-app/job-search';
+export const JOB_SEARCH_BASE = '/host/openwop-app/job-search';
 
 /**
  * Modules of the ONE package that are ACTUALLY IMPLEMENTED (ADR 0539 D0).
@@ -561,7 +561,7 @@ function normaliseApplicant(a: unknown) {
 export function registerPublicAttestationRoutes(deps: RouteDeps): void {
   const { app } = deps;
 
-  app.get('/v1/host/openwop-app/public-attestations/:token', async (req, res, next) => {
+  app.get('/host/openwop-app/public-attestations/:token', async (req, res, next) => {
     try {
       const token = req.params.token ?? '';
       // Payload cap BEFORE any lookup: a token is a bounded secret, and an

@@ -112,6 +112,11 @@ export function sanitizeQuietHours(raw: unknown): QuietHoursConfig {
     end: typeof r.end === 'string' && HHMM_RE.test(r.end) ? r.end : d.end,
     days,
     allowUrgent: typeof r.allowUrgent === 'boolean' ? r.allowUrgent : d.allowUrgent,
+    // ADR 0816 NTFUX-1 — the zone is what makes the window enforceable SERVER-side
+    // (device push). Dropping it here meant the next unrelated save (muting one
+    // type) PUT the window without a zone, and the server then skipped quiet hours
+    // for push while this panel still said "Times are in your timezone".
+    ...(typeof r.timezone === 'string' && r.timezone.length > 0 && r.timezone.length <= 64 ? { timezone: r.timezone } : {}),
   };
 }
 

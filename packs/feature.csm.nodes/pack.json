@@ -1,11 +1,12 @@
 {
   "name": "feature.csm.nodes",
-  "version": "1.4.0",
+  "version": "1.4.1",
+  "kind": "node",
   "description": "CSM feature node pack (extends health-set) — read/health nodes over the ctx.features.csm surface shipped by the CSM feature package. health-read lists at-risk accounts; health-set updates an existing account's score (idempotent, replay-safe) and now also accepts a `deals`/`tasks` CRM fan-in (the csm-ops.health-from-crm chain) to compute a documented default healthScore + healthFactors breakdown, or an explicit `factors` array (which MUST be accompanied by the healthScore it computed — the service fails closed on factors alone) ADR 0582: the computed path refuses to score an absent, partial or unscopeable CRM fan-in rather than treating it as measured zeros.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "csm", "customer-success", "health"],
-  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "engines": { "openwop": ">=1.0.0 <3.0.0" },
   "nodes": [
     {
       "typeId": "feature.csm.nodes.health-read",

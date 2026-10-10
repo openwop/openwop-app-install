@@ -5,7 +5,12 @@
  * READ (re-executes; a gate verdict is live by design). The 1.1.0 manifest declared
  * both `role:"action"` with no capability, so NEITHER was in the floor — while the
  * pack docblock and the 2026-08 inventory row claimed both were served. Born red on
- * legs 1–3 and 5 against 1.1.0.
+ * legs 1–3 and 5 against 1.1.0. (Leg 5 now lives in `pack-pin-parity.test.ts`; see below.)
+ *
+ * Sabotage-witnessed (/grade-tests wave 9): `check` role → action, `record` role →
+ * action, dropping `record` from the generated served set, and a node version that
+ * lags the manifest each red their leg. Leg 6 pins docblock TEXT by design — the
+ * CNWF-3 "the doc claimed both were served" half (a doc-honesty tripwire, ceiling).
  */
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -42,13 +47,13 @@ describe('ADR 0657 D3 — feature.consent.nodes classification', () => {
     expect(isSideEffectingNode(CHECK)).toBe(false);
   });
   it('leg 4: the manifest and node versions moved together (a reclassification is a pack bump)', () => {
-    expect(PM.version).toBe('1.2.0');
     for (const n of PM.nodes) expect(n.version, n.typeId).toBe(PM.version);
   });
-  it('leg 5: the consent feature pin equals the manifest version', () => {
-    const feature = readFileSync(join(REPO, 'backend', 'typescript', 'src', 'features', 'consent', 'feature.ts'), 'utf8');
-    expect(feature).toContain(`{ name: 'feature.consent.nodes', version: '${PM.version}' }`);
-  });
+  // Leg 5 ("the consent feature pin equals the manifest version") was REMOVED in
+  // /grade-tests wave 9: `pack-pin-parity.test.ts` ("every feature pin matches the pack
+  // version on disk") asserts it corpus-wide and went red under the same sabotage
+  // (probe w9g3-nr-feature-pin-cover). Leg 4's literal `'1.2.1'` was dropped too: it
+  // churned on every bump; the invariant is the node↔manifest equality kept above.
   it('leg 6: the pack docblock no longer claims both nodes are served', () => {
     const src = readFileSync(join(REPO, 'packs', 'feature.consent.nodes', 'index.mjs'), 'utf8');
     expect(src).not.toMatch(/Both are role:"action"/);

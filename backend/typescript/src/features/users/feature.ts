@@ -24,7 +24,7 @@
 import type { BackendFeature } from '../types.js';
 import { registerUsersRoutes } from './routes.js';
 import { registerUsersAuthRoutes } from './authRoutes.js';
-import { getUser, getUserByPrincipal, resolveCanonicalUserReadOnly, sessionEpochOf } from './usersService.js';
+import { getUser, getUserByPrincipal, liveRevokedFamilies, resolveCanonicalUserReadOnly, sessionEpochOf } from './usersService.js';
 import { setUserDisplayResolver } from '../../host/subjectDisplay.js';
 import { registerSubjectToUserIdResolver } from '../../host/approverResolution.js';
 import { registerPersonalTenantSessionAuthority, registerSessionAuthority, type PersonalTenantSessionAuthority, type SessionAuthority } from '../../host/sessionAuthority.js';
@@ -39,7 +39,12 @@ import { buildUsersSurface } from './surface.js';
 export const usersSessionAuthority: SessionAuthority = async (userId) => {
   const user = await getUser(userId);
   if (!user) return null;
-  return { status: user.status === 'active' ? 'active' : 'disabled', sessionEpoch: sessionEpochOf(user) };
+  return {
+    status: user.status === 'active' ? 'active' : 'disabled',
+    sessionEpoch: sessionEpochOf(user),
+    // ADR 0833 D3 — signed-out families ride the read the request already pays for.
+    revokedFamilies: liveRevokedFamilies(user),
+  };
 };
 
 /**
@@ -55,6 +60,7 @@ export const usersPersonalTenantSessionAuthority: PersonalTenantSessionAuthority
   return {
     status: hit.user.status === 'active' ? 'active' : 'disabled',
     sessionEpoch: sessionEpochOf(hit.user),
+    revokedFamilies: liveRevokedFamilies(hit.user),
     userId: hit.user.userId,
   };
 };
@@ -96,5 +102,5 @@ export const usersFeature: BackendFeature = {
   // toggle gate; the surface's OWN gate is `assertTenantScope(host:members:manage)`
   // on the run's acting user (fail-closed without one).
   surface: { id: 'users', build: buildUsersSurface },
-  requiredPacks: [{ name: 'feature.users.nodes', version: '1.0.1' }],
+  requiredPacks: [{ name: 'feature.users.nodes', version: '1.0.2' }],
 };

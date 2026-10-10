@@ -1,7 +1,7 @@
 /**
  * ADR 0543 P1 — provision the career agent.
  *
- * The persona is DATA (`packs/feature.career-agent.agents`). This module only
+ * The persona is DATA (`packs/vendor.openwop-app.career-agent.agents`). This module only
  * WIRES it into the tenant's existing primitives: a roster member, a kanban
  * board it owns, and default instructions. Per the house law, nothing unique to
  * a named agent lives in host source — there is no `if (agent === 'career')`
@@ -33,7 +33,7 @@ const log = createLogger('job-search.agent.provision');
 /** The persona slug. Stable, and the idempotency key for the roster lookup. */
 export const CAREER_PERSONA = 'career-agent';
 /** The pack-declared agent id this roster member dispatches to. */
-export const CAREER_AGENT_ID = 'career-agent';
+export const CAREER_AGENT_ID = 'vendor.openwop-app.career-agent.agents.default';
 export const CAREER_BOARD_NAME = 'Job search';
 
 export interface ProvisionResult {

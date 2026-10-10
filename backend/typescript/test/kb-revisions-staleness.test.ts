@@ -5,8 +5,19 @@
  *  - changed content bumps the revision, records a COMPACT docrev row (hash,
  *    not text), and fires the knowledge-lifecycle seam;
  *  - markKernelsStaleForDoc flags ONLY briefs whose kernel cites the doc
- *    (idempotent — already-stale briefs skipped);
- *  - the registered handler wires the two together end-to-end.
+ *    (idempotent — already-stale briefs skipped).
+ *
+ * CORRECTED (grade-tests wave 6): a third bullet claimed "the registered handler
+ * wires the two together end-to-end". The case behind it registered the TEST's own
+ * handler and fired the seam — it asserted its own wiring, never the feature's
+ * (`features/campaign-brief/feature.ts`'s `onKnowledgeDocumentChanged('campaign-brief', …)`,
+ * which `beforeEach`'s hook reset would wipe anyway). Seam dispatch is witnessed by
+ * the first case (`upsertDocument` → `fireKnowledgeDocumentChanged` → `fired`); the
+ * feature's registration has NO witness and is a grade-code row, not a claim here.
+ *
+ * Sabotage witnesses: disabling the unchanged-content guard, dropping either fire,
+ * dropping the revision-log purge, or dropping the cites/already-stale filters each
+ * turn the matching case red.
  */
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync } from 'node:fs';
@@ -17,7 +28,7 @@ import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
 import { createCollection, upsertDocument, deleteDocument, listDocumentRevisions } from '../src/features/kb/kbService.js';
 import {
-  onKnowledgeDocumentChanged, fireKnowledgeDocumentChanged, __resetKnowledgeLifecycleHooks,
+  onKnowledgeDocumentChanged, __resetKnowledgeLifecycleHooks,
   type KnowledgeDocumentChangedEvent,
 } from '../src/host/knowledgeLifecycle.js';
 import { createBrief, setKernel, getBrief, markKernelsStaleForDoc, __clearBriefs } from '../src/features/campaign-brief/briefService.js';
@@ -66,8 +77,7 @@ describe('kb document revisions (ADR 0351 P3)', () => {
     expect((await listDocumentRevisions(T, ORG, col.collectionId, 'doc-d')).map((r) => r.revision)).toEqual([2, 1]);
     fired.length = 0;
 
-    await deleteDocument(T, ORG, col.collectionId, 'doc-d');
-    await new Promise((r) => setImmediate(r)); // the seam fires best-effort (void)
+    await deleteDocument(T, ORG, col.collectionId, 'doc-d'); // the seam is AWAITED (ADR 0643 D6) — no drain needed
     expect(fired).toHaveLength(1);
     expect(fired[0]).toMatchObject({ tenantId: T, documentId: 'doc-d', deleted: true }); // kernels citing it go stale
 
@@ -79,7 +89,7 @@ describe('kb document revisions (ADR 0351 P3)', () => {
 });
 
 describe('kernel staleness propagation', () => {
-  it('flags only citing briefs; idempotent; handler wires end-to-end', async () => {
+  it('flags only citing briefs; idempotent', async () => {
     const citing = await createBrief(T, ORG, 'u1', { name: 'Cites', productName: 'X', messaging: { primaryValueProp: 'v' } });
     const other = await createBrief(T, ORG, 'u1', { name: 'Other', productName: 'X', messaging: { primaryValueProp: 'v' } });
     await setKernel(T, citing.id, { headline: 'H', supportingStatement: 'S', proofPoints: [], primaryCta: 'C', secondaryCta: '', tone: 't', channelTones: {}, sourceDocIds: ['doc-9'], generatedAt: new Date().toISOString() });
@@ -92,15 +102,5 @@ describe('kernel staleness propagation', () => {
 
     // Idempotent — a second pass affects nothing new.
     expect(await markKernelsStaleForDoc(T, 'doc-9')).toEqual([]);
-
-    // End-to-end through the seam (the feature registers this same shape).
-    await __clearBriefs();
-    const b = await createBrief(T, ORG, 'u1', { name: 'E2E', productName: 'X', messaging: { primaryValueProp: 'v' } });
-    await setKernel(T, b.id, { headline: 'H', supportingStatement: 'S', proofPoints: [], primaryCta: 'C', secondaryCta: '', tone: 't', channelTones: {}, sourceDocIds: ['doc-42'], generatedAt: new Date().toISOString() });
-    onKnowledgeDocumentChanged('campaign-brief-test', async ({ tenantId, documentId }) => {
-      await markKernelsStaleForDoc(tenantId, documentId);
-    });
-    await fireKnowledgeDocumentChanged({ tenantId: T, orgId: ORG, collectionId: 'c', documentId: 'doc-42', title: 'Doc', revision: 2 });
-    expect((await getBrief(T, b.id))?.kernelStale).toBe(true);
   });
 });

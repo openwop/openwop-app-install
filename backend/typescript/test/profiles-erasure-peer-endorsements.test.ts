@@ -20,6 +20,17 @@
  *     different tenant survives (stated honestly, WF-TWIN-3);
  *   - the strip is SILENT (no `endorsement.removed` fan-out; the users `erased`
  *     event names the person).
+ *
+ * Sabotage that turns it red (grade-tests w3 probes, each witnessed):
+ *   - `eraseProfileSubject` skips `stripEndorsementsBy`          → the four strip cases
+ *   - the `user:` guard is dropped (an email key scans)          → the EMAIL-key case
+ *   - the pre-filter AND the `'unchanged'` return both removed   → the ZERO-CAS case
+ *     (each alone keeps CAS at zero — they mask each other, so only the
+ *     two-guard sabotage can turn that case red)
+ *   - `profileEraser` reports only the own row / is unregistered → the REGISTERED-eraser case
+ *   - the strip emits `endorsement.removed`                      → the silent-strip assertion
+ * The tenant reach is guarded twice (the indexed scan AND `casMutateProfile`'s
+ * tenant-checked read), so breaking either alone stays green.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -52,7 +63,10 @@ const hostSuite: StartRunDeps['hostSuite'] = {
   workflowCatalog: { getWorkflow: async (id) => ({ workflowId: id, definition: { workflowId: id, nodes: [] } }) },
   providerPolicyResolver: { resolveForRun: async () => [] },
 };
-const settle = () => new Promise((r) => setTimeout(r, 10));
+/** Event delivery to the fake fanout is synchronous inside `emitHostEvent`
+ *  (before its first await); a few macrotask turns settle any tail without a
+ *  wall-clock sleep. */
+const drain = async (): Promise<void> => { for (let i = 0; i < 5; i++) await new Promise<void>((r) => setImmediate(r)); };
 
 beforeEach(async () => {
   storage = await openStorage('memory://');
@@ -68,7 +82,7 @@ beforeEach(async () => {
   await setEndorsement(T, ALICE, 'TypeScript', BOB, true);
   await setEndorsement(T, ALICE, 'Go', BOB, true);
   await setEndorsement(T, ALICE, 'TypeScript', CAROL, true);
-  await settle();
+  await drain();
   delivered = [];
 });
 afterEach(() => { vi.restoreAllMocks(); __resetHostEventDispatcher(); __resetHostExtPersistence(); });
@@ -87,7 +101,7 @@ describe('erase the ENDORSER → the target loses the endorsement', () => {
     const one = await surface.getProfile!({ userId: ALICE }) as { profile: { skills: Array<{ name: string; endorsements: { count: number; endorserUserIds: string[] } }> } };
     expect(one.profile.skills.find((s) => s.name === 'TypeScript')!.endorsements).toEqual({ count: 1, endorserUserIds: [CAROL] });
     // Silent: no endorsement.removed / profile.updated fan-out for the strip.
-    await settle();
+    await drain();
     expect(delivered.filter((e) => e.type.startsWith('host.profiles.'))).toEqual([]);
   });
 

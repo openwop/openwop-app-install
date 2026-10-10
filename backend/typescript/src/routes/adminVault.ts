@@ -49,6 +49,7 @@ import { listApiKeys } from '../features/developer-keys/apiKeyService.js';
 import { lookupCredentialRefConsumers, type ConsumerLookup } from '../host/credentialRefRegistry.js';
 import { appendAudit } from '../host/auditChainService.js';
 import { createLogger } from '../observability/logger.js';
+import { OWNED_REF_PREFIXES, systemOwnedRefOwner } from '../byok/refNamespaces.js';
 
 const log = createLogger('routes.adminVault');
 
@@ -92,11 +93,23 @@ function validRef(ref: unknown): string {
 }
 
 /** Delegated-credential refs (OAuth token JSON) — never revealed/rotated raw. */
-const isConnectionRef = (ref: string): boolean => ref.startsWith('connection:');
+const isConnectionRef = (ref: string): boolean => ref.startsWith(OWNED_REF_PREFIXES.connection);
+/** ADR 0779 D2 (grade-code BYOKCD-1) — refs another lifecycle owns (an inbound
+ *  webhook signing secret, a user-scoped subscription token, a compat key, …) are
+ *  written, rotated and revealed through that owner, never raw here. The vault
+ *  was a second write lane: `'connection-inbound:x'.startsWith('connection:')` is
+ *  false, so inbound signing secrets were revealable. Delete keeps its own
+ *  consumer-checked, audited path. */
+function refuseOwnedRef(ref: string, verb: string): void {
+  const owner = systemOwnedRefOwner(ref);
+  if (owner !== null && !isConnectionRef(ref)) {
+    throw new OpenwopError('validation_error', `\`${ref}\` is managed by ${owner}; it cannot be ${verb} from the vault.`, 400, { credentialRef: ref, owner });
+  }
+}
 
 export function registerAdminVaultRoutes(app: Express): void {
   // ── Inventory (masked — refs/status/metadata, NEVER values) ──
-  app.get('/v1/host/openwop-app/vault', async (req, res, next) => {
+  app.get('/host/openwop-app/vault', async (req, res, next) => {
     try {
       requireSuperadmin(req, 'The secrets vault');
       const tenantId = req.tenantId; // absent for the wildcard admin bearer
@@ -111,7 +124,7 @@ export function registerAdminVaultRoutes(app: Express): void {
         tenantSecrets: tenantRefs.map((ref) => ({
           credentialRef: ref,
           kind: isConnectionRef(ref) ? 'connection-token' : 'raw',
-          revealable: !isConnectionRef(ref),
+          revealable: systemOwnedRefOwner(ref) === null,
         })),
         hostSecrets: hostRefs.map((ref) => ({ credentialRef: ref, kind: 'raw', revealable: true })),
         connections: connections.map((c) => ({
@@ -132,7 +145,7 @@ export function registerAdminVaultRoutes(app: Express): void {
   });
 
   // ── Add (shown once at creation by the CLIENT; server stores + masks) ──
-  app.post('/v1/host/openwop-app/vault/secrets', async (req, res, next) => {
+  app.post('/host/openwop-app/vault/secrets', async (req, res, next) => {
     try {
       requireSuperadmin(req, 'The secrets vault');
       const body = (req.body ?? {}) as { credentialRef?: unknown; value?: unknown; scope?: unknown };
@@ -143,6 +156,7 @@ export function registerAdminVaultRoutes(app: Express): void {
       if (isConnectionRef(ref)) {
         throw new OpenwopError('validation_error', '`connection:*` refs are owned by the connections lifecycle — create a connection instead.', 400, { credentialRef: ref });
       }
+      refuseOwnedRef(ref, 'set');
       const scope = secretScope(req, body.scope);
       // GRADE-PASS DATAG-2: audit BEFORE the mutation (the reveal-route
       // posture) — a failed append must abort, never yield an unaudited write.
@@ -183,13 +197,14 @@ export function registerAdminVaultRoutes(app: Express): void {
   });
 
   // ── Reveal-once (step-up + audit-before-return) ──
-  app.post('/v1/host/openwop-app/vault/secrets/:credentialRef/reveal', async (req, res, next) => {
+  app.post('/host/openwop-app/vault/secrets/:credentialRef/reveal', async (req, res, next) => {
     try {
       requireSuperadmin(req, 'The secrets vault');
       const ref = validRef(req.params.credentialRef);
       if (isConnectionRef(ref)) {
         throw new OpenwopError('forbidden', 'Delegated OAuth credentials are never revealed (ADR 0024). Re-consent to rotate them.', 403, { credentialRef: ref });
       }
+      refuseOwnedRef(ref, 'revealed');
       // STEP-UP: a fresh re-authentication, proven by the bearer's auth_time.
       // The wildcard admin bearer is EXEMPT — possession of the operator API
       // key IS the step-up (there is no Firebase session to re-verify), and
@@ -225,13 +240,14 @@ export function registerAdminVaultRoutes(app: Express): void {
   });
 
   // ── Rotate (overwrite raw refs; connections rotate via re-consent) ──
-  app.post('/v1/host/openwop-app/vault/secrets/:credentialRef/rotate', async (req, res, next) => {
+  app.post('/host/openwop-app/vault/secrets/:credentialRef/rotate', async (req, res, next) => {
     try {
       requireSuperadmin(req, 'The secrets vault');
       const ref = validRef(req.params.credentialRef);
       if (isConnectionRef(ref)) {
         throw new OpenwopError('validation_error', 'Rotate a connection via its re-consent/refresh flow, not a raw overwrite (ADR 0024).', 400, { credentialRef: ref });
       }
+      refuseOwnedRef(ref, 'rotated');
       const body = (req.body ?? {}) as { value?: unknown; scope?: unknown };
       if (typeof body.value !== 'string' || body.value.length === 0) {
         throw new OpenwopError('validation_error', 'Field `value` MUST be a non-empty string.', 400, { field: 'value' });
@@ -255,7 +271,7 @@ export function registerAdminVaultRoutes(app: Express): void {
   });
 
   // ── Delete (dependency check, fail-closed) ──
-  app.delete('/v1/host/openwop-app/vault/secrets/:credentialRef', async (req, res, next) => {
+  app.delete('/host/openwop-app/vault/secrets/:credentialRef', async (req, res, next) => {
     try {
       requireSuperadmin(req, 'The secrets vault');
       const ref = validRef(req.params.credentialRef);

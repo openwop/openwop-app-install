@@ -33,12 +33,12 @@
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
 import { checkTenantEntitlement } from '../../host/entitlementSeam.js';
 import { resolveReadOrgScope, resolveActionOrgScope, toolEmpty } from '../../host/agentToolKit.js';
-import { resolveOne } from '../../host/featureToggles/service.js';
+import { resolveToggle } from '../../host/featureToggles/service.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { createHash } from 'node:crypto';
 import {
   listTemplates, getTemplate, createTemplate, updateTemplate,
-  listCampaigns, getCampaign, createCampaign,
+  listCampaigns, getCampaign, createCampaign, draftRowId,
   type EmailBodyFormat, type EmailTemplate, type Campaign,
 } from './emailService.js';
 import { CONTACT_STAGES, type ContactStage } from '../crm/contactsService.js';
@@ -57,7 +57,9 @@ function toolError(error: string, message: string, extra?: Record<string, unknow
 /** Per-call toggle honesty (ADR 0308 D2): per-tenant, dynamic, fail-closed —
  *  the same `email` toggle `authorizeOrgScope` enforces on the HTTP routes. */
 async function emailEnabled(tenantId: string, actingUserId: string | undefined): Promise<boolean> {
-  const assignment = await resolveOne('email', { tenantId, ...(actingUserId ? { userId: actingUserId } : {}) }).catch(() => null);
+  // ADR 0819 §1 opt-out — every caller goes on to `resolveOrgScope`, which applies the
+  // plan itself and tells the model "not in this workspace's plan" rather than "off".
+  const assignment = await resolveToggle('email', { tenantId, ...(actingUserId ? { userId: actingUserId } : {}) }).catch(() => null);
   return Boolean(assignment?.enabled);
 }
 
@@ -101,6 +103,7 @@ export function registerEmailAgentTools(): void {
   //    org's drafts/templates before authoring (read-before-write). ──────────
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: EMAIL_GET_CAMPAIGN_TOOL_ID,
       description:
@@ -150,6 +153,7 @@ export function registerEmailAgentTools(): void {
   //    path). ───────────────────────────────────────────────────────────────
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: EMAIL_SAVE_DRAFT_TOOL_ID,
       description:
@@ -215,8 +219,12 @@ export function registerEmailAgentTools(): void {
       const idem = createHash('sha256').update(`${gate.orgId}\u0000${subject}\u0000${body}`).digest('hex').slice(0, 12);
       const base = `${scope.runId ?? 'agent'}:${idem}`;
       const createdBy = scope.actingUserId ?? gate.actingUserId;
-      const tpl = await createTemplate({ tenantId: scope.tenantId, orgId: gate.orgId, name, subject, body, createdBy, templateId: `tpl:agent:${base}`, ...(format ? { format } : {}) });
-      const cmp = await createCampaign({ tenantId: scope.tenantId, orgId: gate.orgId, templateId: tpl.templateId, createdBy, campaignId: `cmp:agent:${base}`, ...(stage ? { stage } : {}) });
+      // ADR 0848 D1/M8 — tenant-qualified ids; the legacy id only when this workspace owns it.
+      // The `cmp:agent:` prefix is kept: the UI's agent-draft chip keys off it.
+      const tplId = await draftRowId('template', scope.tenantId, gate.orgId, 'tpl:agent:', base);
+      const cmpId = await draftRowId('campaign', scope.tenantId, gate.orgId, 'cmp:agent:', base);
+      const tpl = await createTemplate({ tenantId: scope.tenantId, orgId: gate.orgId, name, subject, body, createdBy, templateId: tplId, ...(format ? { format } : {}) });
+      const cmp = await createCampaign({ tenantId: scope.tenantId, orgId: gate.orgId, templateId: tpl.templateId, createdBy, campaignId: cmpId, ...(stage ? { stage } : {}) });
       return { content: JSON.stringify({ campaignId: cmp.campaignId, templateId: tpl.templateId, created: true, note: 'Draft campaign created (not sent). Tell the user the campaign name and that they can review and send it.' }) };
     },
   });

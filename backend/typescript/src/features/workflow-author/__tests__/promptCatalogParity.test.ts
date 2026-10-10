@@ -33,7 +33,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(here, '../../../../../..');
 const packSrc = readFileSync(join(REPO_ROOT, 'packs/feature.workflow-author.nodes/index.mjs'), 'utf8');
 const architectPrompt = readFileSync(
-  join(REPO_ROOT, 'packs/feature.workflow-author.agents/prompts/workflow-architect.md'),
+  join(REPO_ROOT, 'packs/vendor.openwop-app.workflow-author.agents/prompts/workflow-architect.md'),
   'utf8',
 );
 const agentToolsSrc = readFileSync(join(here, '..', 'agentTools.ts'), 'utf8');
@@ -42,7 +42,7 @@ const nodesManifest = JSON.parse(
   readFileSync(join(PACKS_DIR, 'feature.workflow-author.nodes/pack.json'), 'utf8'),
 ) as { description: string; nodes: Array<{ typeId: string; description: string }> };
 const agentsManifest = JSON.parse(
-  readFileSync(join(PACKS_DIR, 'feature.workflow-author.agents/pack.json'), 'utf8'),
+  readFileSync(join(PACKS_DIR, 'vendor.openwop-app.workflow-author.agents/pack.json'), 'utf8'),
 ) as { description: string; agents: Array<{ agentId: string; description: string }> };
 
 /** The THREE sources this feature puts in front of a model. `agentTools.ts` is

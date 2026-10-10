@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.ads-video-generate/1.0.0/video-generate.config.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.ads-video-generate/1.0.2/video-generate.config.json",
   "title": "AdsVideoGenerateConfig",
   "type": "object",
   "properties": {

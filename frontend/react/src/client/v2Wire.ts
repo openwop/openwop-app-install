@@ -40,8 +40,9 @@ export const VENDOR_BASE = `/host/${VENDOR_ORG}`;
 
 /** `ids.schema.json#/$defs/runId` — the tenant-bound composite. The tenant
  *  half is lenient on purpose (ADR 0726): this host's personal-workspace
- *  tenants are `user:<hash>` in the host-ext dialect and `user~3A<hash>` on
- *  the major-2 wire; both must read as "bound". */
+ *  tenants are `user:<hash>` in the host-ext dialect and `u-<hash>` on the
+ *  major-2 wire (ADR 0814; ids minted earlier carry `user~3A<hash>`). All of
+ *  them must read as "bound". */
 const TENANT_BOUND_RUN_ID = /^[^/\s]{1,128}\/[A-Za-z0-9._~-]{16,128}$/;
 
 /**
@@ -200,6 +201,24 @@ export function unbindRunIds<T>(value: T, depth = 0): T {
     const opened = unbindRunIds(box as Record<string, unknown>, depth + 1) as Record<string, unknown>;
     for (const [bk, bv] of Object.entries(opened)) if (!(bk in out) || (bk === 'kind' && out['kind'] === 'custom')) out[bk] = bv;
   } else if (box !== undefined) out[VENDOR_CARRY_KEY] = box;
+  // openwop#1698 — a run's failure code travels registered-or-vendor on the
+  // major-2 wire (`run.failed` / `node.failed` / the snapshot's `error`). The
+  // SPA branches on this host's own codes, so undo it here: an ALIASED code
+  // carries the host's code in `details.hostCode`; a namespaced one strips its
+  // `openwop-app.` prefix. HTTP error envelopes carry `error` as a STRING and
+  // are normalised by `errorEnvelope.ts`, so this only touches error OBJECTS.
+  const err = out['error'];
+  if (err !== null && typeof err === 'object' && !Array.isArray(err) && typeof (err as { code?: unknown }).code === 'string') {
+    const { details, ...restErr } = err as { code: string; details?: unknown } & Record<string, unknown>;
+    const d = details !== null && typeof details === 'object' && !Array.isArray(details) ? { ...(details as Record<string, unknown>) } : undefined;
+    const hostCode = typeof d?.['hostCode'] === 'string' ? d['hostCode'] as string : undefined;
+    if (d && hostCode !== undefined) delete d['hostCode'];
+    out['error'] = {
+      ...restErr,
+      code: hostCode ?? normalizeErrorCode(restErr.code as string),
+      ...(d && Object.keys(d).length > 0 ? { details: d } : details !== undefined && !d ? { details } : {}),
+    };
+  }
   return out as T;
 }
 

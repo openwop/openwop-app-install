@@ -14,7 +14,27 @@ import { canonicalize } from './auditChainService.js';
 import type { WorkflowDefinition } from '../executor/types.js';
 
 export function definitionHashOf(def: WorkflowDefinition): string {
-  return createHash('sha256').update(canonicalize(def), 'utf8').digest('hex');
+  return createHash('sha256').update(canonicalize(withoutLayout(def)), 'utf8').digest('hex');
+}
+
+/**
+ * ADR 0770 D4 — node `position` is canvas layout, not content. Without this
+ * strip a drag would mint a revision row, flip `publishedBehindHead`, re-arm
+ * the evals gate, trip the save CAS, show the ADR 0473 "edited" chip and make
+ * `runStarter`'s approval pin refuse dispatch. Stored definitions never carried
+ * `position` before (the validator dropped it), so no existing hash moves.
+ * `name` is NOT stripped: a rename is an edit.
+ */
+function withoutLayout(def: WorkflowDefinition): WorkflowDefinition {
+  if (!def.nodes.some((n) => n.position !== undefined)) return def;
+  return {
+    ...def,
+    nodes: def.nodes.map((n) => {
+      if (n.position === undefined) return n;
+      const { position: _position, ...rest } = n;
+      return rest;
+    }),
+  };
 }
 
 /**

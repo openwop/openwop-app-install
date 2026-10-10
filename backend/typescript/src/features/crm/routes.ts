@@ -24,20 +24,20 @@
 
 import type { Request } from 'express';
 import { randomUUID } from 'node:crypto';
-import { insertRunWithStartContext } from '../../host/runInsert.js';
+import { startWorkflowRun } from '../../host/runStarter.js';
 import { resolveLaunchWorkflow } from '../../host/resolveLaunchDefinition.js';
 import { OpenwopError } from '../../types.js';
-import type { RunRecord } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { createLogger } from '../../observability/logger.js';
-import { executeRun } from '../../executor/executor.js';
 import { getEventLog } from '../../executor/eventLog.js';
-import { resolveOne } from '../../host/featureToggles/service.js';
+import { resolveToggle } from '../../host/featureToggles/service.js';
 import type { ResolvedAssignment, ToggleSubject } from '../../host/featureToggles/types.js';
-import { authorizeOrgScope, requireString, requireTenantScope } from '../featureRoute.js';
-import { resolveEffectiveAccess, type Scope } from '../../host/accessControlService.js';
+import { authorizeOrgScope, launchSubjectOf, requireString, requireTenantScope } from '../featureRoute.js';
+import { resolveCallerUser } from '../users/usersGuards.js';
+import { assertOrgScope, resolveEffectiveAccess, type Scope } from '../../host/accessControlService.js';
 import { checkEntitlement } from '../../host/entitlementSeam.js';
 import { computeLeadScore } from './leadScoreService.js';
+import { CRM_TRIAGE_WORKFLOW_ID, triageVariantFor } from './triageDispatch.js';
 import { crmMutated } from './emit.js';
 import {
   createContact,
@@ -46,6 +46,7 @@ import {
   listContacts,
   parseStage,
   setContactTriage,
+  restoreContactTriage,
   updateContact,
   addContactIdentifier,
   removeContactIdentifier,
@@ -90,7 +91,8 @@ function subjectOf(req: Request): ToggleSubject {
 /** Resolve the caller's CRM assignment; 404 when the feature isn't enabled for
  *  them (backend authority — a disabled feature has no surface). */
 async function requireEnabled(req: Request): Promise<ResolvedAssignment> {
-  const assignment = await resolveOne(TOGGLE_ID, subjectOf(req));
+  // ADR 0819 §1 opt-out — this route applies the plan itself (`checkEntitlement`) to keep its distinct 403.
+  const assignment = await resolveToggle(TOGGLE_ID, subjectOf(req));
   if (!assignment || !assignment.enabled) {
     throw new OpenwopError('not_found', 'CRM is not enabled for this tenant.', 404, { feature: TOGGLE_ID });
   }
@@ -146,7 +148,7 @@ export function registerCrmRoutes(deps: RouteDeps): void {
 
   // ── Suppression list (ADR 0217 / C3) — the tenant-wide do-not-contact
   //    overlay every marketing egress subtracts. Tenant-level like contacts. ──
-  app.get('/v1/host/openwop-app/crm/suppressions', async (req, res, next) => {
+  app.get('/host/openwop-app/crm/suppressions', async (req, res, next) => {
     try {
       await requireEnabled(req);
       res.json({ suppressions: await listSuppressions(tenantOf(req)) });
@@ -154,13 +156,13 @@ export function registerCrmRoutes(deps: RouteDeps): void {
   });
   // ADR 0251 — suppression-cause analytics (a projection over the SAME rows, no
   //   parallel read model; counts + timestamps only, no addresses).
-  app.get('/v1/host/openwop-app/crm/suppressions/summary', async (req, res, next) => {
+  app.get('/host/openwop-app/crm/suppressions/summary', async (req, res, next) => {
     try {
       await requireEnabled(req);
       res.json({ summary: await suppressionSummary(tenantOf(req)) });
     } catch (err) { next(err); }
   });
-  app.post('/v1/host/openwop-app/crm/suppressions', async (req, res, next) => {
+  app.post('/host/openwop-app/crm/suppressions', async (req, res, next) => {
     try {
       await requireEnabled(req);
       await requireTenantScope(req, 'workspace:write'); // ADR 0627 D3 (CRM-6)
@@ -172,7 +174,7 @@ export function registerCrmRoutes(deps: RouteDeps): void {
       res.status(201).json({ suppression: entry });
     } catch (err) { next(err); }
   });
-  app.delete('/v1/host/openwop-app/crm/suppressions/:email', async (req, res, next) => {
+  app.delete('/host/openwop-app/crm/suppressions/:email', async (req, res, next) => {
     try {
       await requireEnabled(req);
       await requireTenantScope(req, 'workspace:write'); // ADR 0627 D3 (CRM-6)
@@ -187,7 +189,7 @@ export function registerCrmRoutes(deps: RouteDeps): void {
     } catch (err) { next(err); }
   });
 
-  app.get('/v1/host/openwop-app/crm/contacts', async (req, res, next) => {
+  app.get('/host/openwop-app/crm/contacts', async (req, res, next) => {
     try {
       await requireEnabled(req);
       res.json({ contacts: await listContacts(tenantOf(req)) });
@@ -197,18 +199,31 @@ export function registerCrmRoutes(deps: RouteDeps): void {
   });
 
   // ADR 0297 D3 — explainable lead score, computed on read (no stored score).
-  app.get('/v1/host/openwop-app/crm/contacts/:contactId/score', async (req, res, next) => {
+  app.get('/host/openwop-app/crm/contacts/:contactId/score', async (req, res, next) => {
     try {
       await requireEnabled(req);
       const tenantId = tenantOf(req);
       const contact = await getContact(req.params.contactId);
       if (!contact || contact.tenantId !== tenantId) throw new OpenwopError('not_found', 'Contact not found.', 404, {});
       const orgId = typeof req.query.orgId === 'string' && req.query.orgId ? req.query.orgId : undefined;
+      // ADR 0837 D6 — the order count reads THAT org's orders, so the caller must
+      // be able to read the org (a non-member answered with a member's view).
+      // Same predicate as every org-scoped door; a refusal is a uniform 404.
+      if (orgId && req.principal?.tenants?.includes('*') !== true) { // CRM2CD-9 — the wildcard operator, as requireTenantScope honours it
+        try {
+          await assertOrgScope(tenantId, (await resolveCallerUser(req)).userId, orgId, 'workspace:read');
+        } catch (err) {
+          if (err instanceof OpenwopError && (err.code === 'forbidden_scope' || err.code === 'not_found')) {
+            throw new OpenwopError('not_found', 'Contact not found.', 404, {});
+          }
+          throw err;
+        }
+      }
       res.json(await computeLeadScore(tenantId, contact.contactId, orgId));
     } catch (err) { next(err); }
   });
 
-  app.post('/v1/host/openwop-app/crm/contacts', async (req, res, next) => {
+  app.post('/host/openwop-app/crm/contacts', async (req, res, next) => {
     try {
       await requireEnabled(req);
       await requireTenantScope(req, 'workspace:write'); // ADR 0627 D3 (CRM-6)
@@ -235,7 +250,7 @@ export function registerCrmRoutes(deps: RouteDeps): void {
     }
   });
 
-  app.get('/v1/host/openwop-app/crm/contacts/:id', async (req, res, next) => {
+  app.get('/host/openwop-app/crm/contacts/:id', async (req, res, next) => {
     try {
       await requireEnabled(req);
       const contact = await getContact(req.params.id);
@@ -248,7 +263,7 @@ export function registerCrmRoutes(deps: RouteDeps): void {
     }
   });
 
-  app.patch('/v1/host/openwop-app/crm/contacts/:id', async (req, res, next) => {
+  app.patch('/host/openwop-app/crm/contacts/:id', async (req, res, next) => {
     try {
       await requireEnabled(req);
       await requireTenantScope(req, 'workspace:write'); // ADR 0627 D3 (CRM-6)
@@ -277,7 +292,7 @@ export function registerCrmRoutes(deps: RouteDeps): void {
     }
   });
 
-  app.delete('/v1/host/openwop-app/crm/contacts/:id', async (req, res, next) => {
+  app.delete('/host/openwop-app/crm/contacts/:id', async (req, res, next) => {
     try {
       await requireEnabled(req);
       await requireTenantScope(req, 'workspace:write'); // ADR 0627 D3 (CRM-6)
@@ -295,7 +310,7 @@ export function registerCrmRoutes(deps: RouteDeps): void {
   // Contact identifiers (ADR 0263 / CDP-A) — non-email external ids the customer
   // resolves by. crm owns the contact mutation; the `cdp` package only READS the
   // resulting index. Tenant-guarded via the service (returns null → 404).
-  app.post('/v1/host/openwop-app/crm/contacts/:id/identifiers', async (req, res, next) => {
+  app.post('/host/openwop-app/crm/contacts/:id/identifiers', async (req, res, next) => {
     try {
       await requireEnabled(req);
       await requireTenantScope(req, 'workspace:write'); // ADR 0627 D3 (CRM-6)
@@ -312,7 +327,7 @@ export function registerCrmRoutes(deps: RouteDeps): void {
     }
   });
 
-  app.delete('/v1/host/openwop-app/crm/contacts/:id/identifiers', async (req, res, next) => {
+  app.delete('/host/openwop-app/crm/contacts/:id/identifiers', async (req, res, next) => {
     try {
       await requireEnabled(req);
       await requireTenantScope(req, 'workspace:write'); // ADR 0627 D3 (CRM-6)
@@ -327,7 +342,7 @@ export function registerCrmRoutes(deps: RouteDeps): void {
   });
 
   // Duplicate review (ADR 0209 §1) — exact-key groups only; read scope (requireEnabled).
-  app.get('/v1/host/openwop-app/crm/duplicates', async (req, res, next) => {
+  app.get('/host/openwop-app/crm/duplicates', async (req, res, next) => {
     try {
       await requireEnabled(req);
       const entityType = typeof req.query.entityType === 'string' ? req.query.entityType : undefined;
@@ -342,7 +357,7 @@ export function registerCrmRoutes(deps: RouteDeps): void {
 
   // Probabilistic match candidates (ADR 0264 / CDP-B) — read-only steward review
   // surface. PROPOSES only (scored likely-dupes beyond exact email); never merges.
-  app.get('/v1/host/openwop-app/crm/match-candidates', async (req, res, next) => {
+  app.get('/host/openwop-app/crm/match-candidates', async (req, res, next) => {
     try {
       await requireEnabled(req);
       res.json(await matchCandidates(tenantOf(req)));
@@ -352,7 +367,7 @@ export function registerCrmRoutes(deps: RouteDeps): void {
   });
 
   // Merge-event audit (ADR 0264 / CDP-B) — what each contact merge did.
-  app.get('/v1/host/openwop-app/crm/merge-events', async (req, res, next) => {
+  app.get('/host/openwop-app/crm/merge-events', async (req, res, next) => {
     try {
       await requireEnabled(req);
       res.json({ events: await listMergeEvents(tenantOf(req)) });
@@ -363,7 +378,7 @@ export function registerCrmRoutes(deps: RouteDeps): void {
 
   // Propose a merge for steward review (ADR 0264 / CDP-B) — queues a contact-merge
   // approval instead of merging directly; a steward decides via the ApprovalsInbox.
-  app.post('/v1/host/openwop-app/crm/contacts/:id/merge-proposal', async (req, res, next) => {
+  app.post('/host/openwop-app/crm/contacts/:id/merge-proposal', async (req, res, next) => {
     try {
       await requireEnabled(req);
       await requireTenantScope(req, 'workspace:write'); // ADR 0627 D3 (CRM-6)
@@ -385,7 +400,7 @@ export function registerCrmRoutes(deps: RouteDeps): void {
   });
 
   // Reverse a merge (ADR 0264 / CDP-B) — restore the source contact + its refs.
-  app.post('/v1/host/openwop-app/crm/merge-events/:id/unmerge', async (req, res, next) => {
+  app.post('/host/openwop-app/crm/merge-events/:id/unmerge', async (req, res, next) => {
     try {
       await requireEnabled(req);
       await requireTenantScope(req, 'workspace:write'); // ADR 0627 D3 (CRM-6)
@@ -396,7 +411,7 @@ export function registerCrmRoutes(deps: RouteDeps): void {
     }
   });
 
-  app.post('/v1/host/openwop-app/crm/contacts/:id/merge', async (req, res, next) => {
+  app.post('/host/openwop-app/crm/contacts/:id/merge', async (req, res, next) => {
     try {
       await requireEnabled(req);
       await requireTenantScope(req, 'workspace:write'); // ADR 0627 D3 (CRM-6)
@@ -414,7 +429,7 @@ export function registerCrmRoutes(deps: RouteDeps): void {
   // body-supplied here (this surface has no :orgId path segment), so it's
   // staged into `req.params.orgId` before reusing the shared gate — one
   // definition of the cross-tenant/RBAC guard, never a second copy.
-  app.post('/v1/host/openwop-app/crm/contacts/:id/convert', async (req, res, next) => {
+  app.post('/host/openwop-app/crm/contacts/:id/convert', async (req, res, next) => {
     try {
       const body = (req.body ?? {}) as { orgId?: unknown; companyName?: unknown; pipelineId?: unknown; dealTitle?: unknown };
       const orgId = requireString(body.orgId, 'orgId');
@@ -437,7 +452,7 @@ export function registerCrmRoutes(deps: RouteDeps): void {
   });
 
   // CSV export (ADR 0210 §5) — tenant-scoped contacts rolodex.
-  app.get('/v1/host/openwop-app/crm/export', async (req, res, next) => {
+  app.get('/host/openwop-app/crm/export', async (req, res, next) => {
     try {
       await requireEnabled(req);
       const entityType = typeof req.query.entityType === 'string' ? req.query.entityType : undefined;
@@ -469,7 +484,7 @@ export function registerCrmRoutes(deps: RouteDeps): void {
   // read. Tenant-scoped + CRM-stamped; a viewer holds `runs:read`, so no write
   // scope. The stamp lives in host-internal run.metadata, NOT on the normative
   // RunSnapshot wire.
-  app.get('/v1/host/openwop-app/crm/runs/:runId', async (req, res, next) => {
+  app.get('/host/openwop-app/crm/runs/:runId', async (req, res, next) => {
     try {
       await checkEntitlement(req, TOGGLE_ID); // ADR 0419 — entitlement only; the toggle half is deliberately absent (see above)
       const run = await storage.getRun(req.params.runId);
@@ -491,29 +506,42 @@ export function registerCrmRoutes(deps: RouteDeps): void {
   });
 
   // Start a triage run for a contact, stamping the resolved variant + bindings
-  // into run.metadata (replay-safe). The variant's bindings select the triage
-  // node a fuller workflow would dispatch; the run itself executes the
-  // configured triage workflow (default openwop-app.uppercase) so observability
-  // / replay / fork are inherited from the standard run pipeline.
-  app.post('/v1/host/openwop-app/crm/contacts/:id/triage', async (req, res, next) => {
+  // into run.metadata (replay-safe). ADR 0837 D7 — the default workflow is the
+  // `crm-ops.triage` chain (read → score by the bound variant → record on the
+  // contact); it used to be the demo `openwop-app.uppercase`, which never read
+  // the contact, and the binding was stamped and never consumed (`CRM2WF-1`).
+  // The binding reaches the chain as the run INPUT `variant`; replay and `:fork`
+  // re-seed from `run.inputs` and never recompute the assignment.
+  app.post('/host/openwop-app/crm/contacts/:id/triage', async (req, res, next) => {
     try {
       const assignment = await requireEnabled(req);
       await requireTenantScope(req, 'workspace:write'); // ADR 0627 D3 (CRM-6) — triage spawns a run
       const tenantId = tenantOf(req);
       const contact = await getContact(req.params.id);
-      if (!contact || contact.tenantId !== tenantId) {
+      if (!contact || contact.tenantId !== tenantId || contact.mergedInto) {
         throw new OpenwopError('not_found', 'Contact not found.', 404, { contactId: req.params.id });
       }
       const body = (req.body ?? {}) as { workflowId?: unknown };
-      const workflowId =
-        (typeof body.workflowId === 'string' && body.workflowId.length > 0 ? body.workflowId : undefined) ??
-        process.env.OPENWOP_CRM_TRIAGE_WORKFLOW_ID ??
-        'openwop-app.uppercase';
+      // ADR 0837 CRM2CD-1 (re-cut, R1) — WHICH workflow triage runs is an
+      // OPERATOR choice (the env override, or the wildcard operator's body field
+      // the conformance/demo harness uses), never a member's. A member-chosen
+      // workflow run with no person behind it met no org or tenant floor; stamping
+      // the clicker as causing member instead broke Triage for operators, anon
+      // sessions and unbound OIDC subjects (the starter carries no personalTenant).
+      const requested = typeof body.workflowId === 'string' && body.workflowId.length > 0 ? body.workflowId : undefined;
+      if (requested !== undefined && req.principal?.tenants?.includes('*') !== true) {
+        throw new OpenwopError('validation_error', 'Which workflow triage runs is set by the operator; omit `workflowId`.', 400, { field: 'workflowId' });
+      }
+      const workflowId = requested ?? process.env.OPENWOP_CRM_TRIAGE_WORKFLOW_ID ?? CRM_TRIAGE_WORKFLOW_ID;
+      // ADR 0837 D7 / A9 — the binding → run input, through the CLOSED candidate
+      // set (a binding outside it is a 422, never a silent `basic`).
+      const { variant, bindingSource } = triageVariantFor(assignment.bindings);
 
       // Resolve the triage workflow up front — refuse with 422 rather than
       // leaving a dangling pending run that can never execute.
       // ADR 0474 P1b (review F3) — triage launches are production: published-when-present.
-      const wf = await resolveLaunchWorkflow(hostSuite.workflowCatalog, tenantId, workflowId);
+      // ADR 0820 §7 / G6 — the funnel's owning-feature gate (typed 403) needs the caller.
+      const wf = await resolveLaunchWorkflow(hostSuite.workflowCatalog, tenantId, workflowId, { subject: launchSubjectOf(req) });
       if (!wf) {
         throw new OpenwopError('workflow_not_found', `Triage workflow not found: ${workflowId}`, 422, { workflowId });
       }
@@ -521,38 +549,52 @@ export function registerCrmRoutes(deps: RouteDeps): void {
       const runId = randomUUID();
       const now = new Date().toISOString();
       // THE STAMP — readable verbatim on replay/fork (ADR §3.4/§3.5).
-      const featureVariant: Record<string, unknown> = { feature: TOGGLE_ID, variant: assignment.variant };
+      const featureVariant: Record<string, unknown> = { feature: TOGGLE_ID, variant: assignment.variant, bindingSource };
       if (assignment.bindings) featureVariant.bindings = assignment.bindings;
-      const run: RunRecord = {
-        runId,
-        workflowId,
-        tenantId,
-        status: 'pending',
-        inputs: { contact: { contactId: contact.contactId, stage: contact.stage, company: contact.company ?? null } },
-        metadata: { crm: { contactId: contact.contactId, stage: contact.stage }, featureVariant },
-        configurable: {},
-        createdAt: now,
-        updatedAt: now,
-      };
-      await insertRunWithStartContext(storage, run, { definition: wf.definition });
+      // B3a: the denormalized last-triage stamp, written BEFORE the run starts —
+      // the chain's record step writes only for the run this stamp names (A7), so
+      // it must already name this run when that step executes.
+      await setContactTriage(contact.contactId, tenantId, { variant, runId, at: now });
+      // ADR 0837 D7 / A1 — through the ONE starter: it seeds the variable bag the
+      // chain's deferred inputs read, applies the budget cap and the plan's run
+      // limit, and dispatches durably. The run is host-trusted (no person): the
+      // route has just asked the caller for tenant `workspace:write`, and the
+      // workflow is the operator's choice (above), whose default touches only the
+      // contact it names.
+      const previous = contact.lastTriage;
+      let started: string | null;
+      try {
+        started = await startWorkflowRun({ storage, hostSuite }, {
+          tenantId,
+          workflowId,
+          runId,
+          inputs: workflowId === CRM_TRIAGE_WORKFLOW_ID
+            ? { contactId: contact.contactId, variant }
+            // An operator-configured triage workflow keeps the input it always got.
+            : { contact: { contactId: contact.contactId, stage: contact.stage, company: contact.company ?? null }, variant },
+          metadata: { crm: { contactId: contact.contactId, stage: contact.stage }, featureVariant },
+        });
+      } catch (err) {
+        // CRM2CD-2 — a refused start (budget cap, plan limit, a failed insert)
+        // must not leave the contact naming a run that never existed, nor erase
+        // the last real result: put the previous stamp back.
+        await restoreContactTriage(contact.contactId, tenantId, runId, previous);
+        throw err;
+      }
+      if (!started) {
+        await restoreContactTriage(contact.contactId, tenantId, runId, previous);
+        throw new OpenwopError('workflow_not_found', `Triage workflow not found: ${workflowId}`, 422, { workflowId });
+      }
       await getEventLog().append({
         runId,
         type: 'openwop-app.crm.contact-triaged',
         payload: { contactId: contact.contactId, variant: assignment.variant },
       });
-      // B3a (gap-analysis §5B): denormalized last-triage stamp for list sort /
-      // run linking. Route-side fact, written at dispatch — run.metadata stays
-      // the provenance SSoT, so replay/fork are untouched.
-      await setContactTriage(contact.contactId, tenantId, { variant: assignment.variant, runId, at: now });
-      setImmediate(() => {
-        executeRun(storage, run, wf.definition, { policyResolver: hostSuite.providerPolicyResolver }).catch((err) => {
-          log.error('crm_triage_dispatch_failed', { runId, error: err instanceof Error ? err.message : String(err) });
-        });
-      });
 
       res.status(202).json({
         runId,
         variant: assignment.variant,
+        triageVariant: variant,
         bindings: assignment.bindings ?? null,
         workflowId,
       });
@@ -564,7 +606,7 @@ export function registerCrmRoutes(deps: RouteDeps): void {
   // ── Contact custom-field defs (ADR 0213 §2) — TENANT-scoped, no :orgId
   // segment (mirrors orgRoutes.ts's org `/fields` but keyed by tenant only —
   // see `FieldDef.orgId`'s doc comment for the `CONTACT_FIELD_DEF_ORG` sentinel). ──
-  app.get('/v1/host/openwop-app/crm/fields', async (req, res, next) => {
+  app.get('/host/openwop-app/crm/fields', async (req, res, next) => {
     try {
       await requireEnabled(req);
       res.json({ fields: await listContactFieldDefs(tenantOf(req)) });
@@ -573,7 +615,7 @@ export function registerCrmRoutes(deps: RouteDeps): void {
     }
   });
 
-  app.post('/v1/host/openwop-app/crm/fields', async (req, res, next) => {
+  app.post('/host/openwop-app/crm/fields', async (req, res, next) => {
     try {
       await requireEnabled(req);
       await requireTenantScope(req, 'workspace:write'); // ADR 0627 D3 (CRM-6)
@@ -594,7 +636,7 @@ export function registerCrmRoutes(deps: RouteDeps): void {
     }
   });
 
-  app.delete('/v1/host/openwop-app/crm/fields/:defId', async (req, res, next) => {
+  app.delete('/host/openwop-app/crm/fields/:defId', async (req, res, next) => {
     try {
       await requireEnabled(req);
       await requireTenantScope(req, 'workspace:write'); // ADR 0627 D3 (CRM-6)
@@ -608,7 +650,7 @@ export function registerCrmRoutes(deps: RouteDeps): void {
 
   // ── Saved segments (ADR 0211 §2) — TENANT-scoped, contacts-only v1;
   // evaluated at READ (`resolveSegmentMembers`), never materialized. ──
-  app.get('/v1/host/openwop-app/crm/segments', async (req, res, next) => {
+  app.get('/host/openwop-app/crm/segments', async (req, res, next) => {
     try {
       await requireEnabled(req);
       res.json({ segments: await listSegments(tenantOf(req)) });
@@ -617,7 +659,7 @@ export function registerCrmRoutes(deps: RouteDeps): void {
     }
   });
 
-  app.post('/v1/host/openwop-app/crm/segments', async (req, res, next) => {
+  app.post('/host/openwop-app/crm/segments', async (req, res, next) => {
     try {
       await requireEnabled(req);
       await requireTenantScope(req, 'workspace:write'); // ADR 0627 D3 (CRM-6)
@@ -636,7 +678,7 @@ export function registerCrmRoutes(deps: RouteDeps): void {
     }
   });
 
-  app.get('/v1/host/openwop-app/crm/segments/:segmentId', async (req, res, next) => {
+  app.get('/host/openwop-app/crm/segments/:segmentId', async (req, res, next) => {
     try {
       await requireEnabled(req);
       const segment = await getSegment(tenantOf(req), req.params.segmentId);
@@ -647,7 +689,7 @@ export function registerCrmRoutes(deps: RouteDeps): void {
     }
   });
 
-  app.patch('/v1/host/openwop-app/crm/segments/:segmentId', async (req, res, next) => {
+  app.patch('/host/openwop-app/crm/segments/:segmentId', async (req, res, next) => {
     try {
       await requireEnabled(req);
       await requireTenantScope(req, 'workspace:write'); // ADR 0627 D3 (CRM-6)
@@ -664,7 +706,7 @@ export function registerCrmRoutes(deps: RouteDeps): void {
     }
   });
 
-  app.delete('/v1/host/openwop-app/crm/segments/:segmentId', async (req, res, next) => {
+  app.delete('/host/openwop-app/crm/segments/:segmentId', async (req, res, next) => {
     try {
       await requireEnabled(req);
       await requireTenantScope(req, 'workspace:write'); // ADR 0627 D3 (CRM-6)
@@ -678,7 +720,7 @@ export function registerCrmRoutes(deps: RouteDeps): void {
 
   // Read-only: a segment's LIVE membership (evaluated against the current
   // rolodex on every call — never a stale materialized snapshot).
-  app.get('/v1/host/openwop-app/crm/segments/:segmentId/members', async (req, res, next) => {
+  app.get('/host/openwop-app/crm/segments/:segmentId/members', async (req, res, next) => {
     try {
       await requireEnabled(req);
       res.json({ members: await resolveSegmentMembers(tenantOf(req), req.params.segmentId) });
@@ -688,15 +730,15 @@ export function registerCrmRoutes(deps: RouteDeps): void {
   });
 
   // Audience insights (ADR 0265 / CDP-C) — read-time projections, no materialization.
-  app.get('/v1/host/openwop-app/crm/segments/:segmentId/estimate', async (req, res, next) => {
+  app.get('/host/openwop-app/crm/segments/:segmentId/estimate', async (req, res, next) => {
     try { await requireEnabled(req); res.json(await segmentEstimate(tenantOf(req), req.params.segmentId)); } catch (err) { next(err); }
   });
 
-  app.get('/v1/host/openwop-app/crm/segments/:segmentId/insights', async (req, res, next) => {
+  app.get('/host/openwop-app/crm/segments/:segmentId/insights', async (req, res, next) => {
     try { await requireEnabled(req); res.json(await segmentInsights(tenantOf(req), req.params.segmentId)); } catch (err) { next(err); }
   });
 
-  app.get('/v1/host/openwop-app/crm/segments-overlap', async (req, res, next) => {
+  app.get('/host/openwop-app/crm/segments-overlap', async (req, res, next) => {
     try {
       await requireEnabled(req);
       const a = requireString(req.query.a, 'a');

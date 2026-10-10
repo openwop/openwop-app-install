@@ -36,7 +36,7 @@ export interface SignRequest {
   tenantId: string;
   orgId: string;
   title: string;
-  target: { kind: SignTargetKind; id: string };
+  target: { kind: SignTargetKind; id: string; versionId?: string };
   /** SHA-256 of the target's canonical serialization AT REQUEST TIME. */
   contentHash: string;
   signers: Signer[];
@@ -124,7 +124,7 @@ export async function createSignRequest(input: {
   tenantId: string;
   orgId: string;
   title: string;
-  target: { kind: SignTargetKind; id: string };
+  target: { kind: SignTargetKind; id: string; versionId?: string };
   contentHash: string;
   signers: Signer[];
   createdBy: string;
@@ -194,7 +194,8 @@ export async function appendSignatureRecord(rec: Omit<SignatureRecord, 'recordId
 }
 
 export async function listSignatureRecords(signRequestId: string): Promise<SignatureRecord[]> {
-  return (await records.listByPrefix(`${signRequestId}:`)).sort((a, b) => a.signedAt.localeCompare(b.signedAt));
+  // ADR 0837 (prefix sweep) — exact id, not just the prefix: a prefix is not an identity.
+  return (await records.listByPrefix(`${signRequestId}:`)).filter((r) => r.signRequestId === signRequestId).sort((a, b) => a.signedAt.localeCompare(b.signedAt));
 }
 
 // ── Test-only reset ─────────────────────────────────────────────────────────

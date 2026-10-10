@@ -9,6 +9,16 @@
  * The contract: signed in reads/writes `<key>:<uid>`, anonymous uses the bare
  * key (so nothing pre-Phase-3 needs migrating), and signing in ADOPTS the
  * anonymous content — union, never destroy, signed-in copy wins a collision.
+ *
+ * Every `adoptLocalContentForSubject` call is AWAITED: the anon→user merge is a
+ * lazy import, so an un-awaited call let the assertion run before the merge (the
+ * isolation cases then exercised only key scoping, never the adoption path a
+ * real leak would ride) and let a dangling merge land in the NEXT test.
+ *
+ * Sabotage that turns it red: unscope `scopedKey` (`platform/storage.ts`) →
+ * the cross-user cases; flip the merge spread in `adoptAnonContent.ts` → the
+ * collision case; drop `removeRaw(spec)` in `adoptAnonScoped` → the clear case;
+ * disable the `previous === null && subject !== null` branch → every adoption case.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -18,13 +28,10 @@ import { listUserPrompts, upsertUserPrompt } from '../../prompts/userPrompts.js'
 import { __resetStorageSubjectForTest, STORAGE_KEYS, scopedKey } from '../../platform/storage.js';
 import type { SavedWorkflow } from '../../builder/schema/workflow.js';
 
-function wf(id: string): SavedWorkflow {
-  const now = new Date().toISOString();
-  return {
-    id, name: `wf-${id}`, version: '1.0.0',
-    nodes: [{ id: 'n1', kind: 'noop', name: 'n1', position: { x: 0, y: 0 }, config: {} }],
-    edges: [], createdAt: now, updatedAt: now,
-  } as unknown as SavedWorkflow;
+const STAMP = '2026-01-01T00:00:00.000Z';
+
+function wf(id: string, name = `wf-${id}`): SavedWorkflow {
+  return { id, name, version: '1.0.0', nodes: [], edges: [], createdAt: STAMP, updatedAt: STAMP };
 }
 
 beforeEach(() => {
@@ -37,34 +44,34 @@ afterEach(() => {
 });
 
 describe('cross-user isolation on a shared browser', () => {
-  it('user B never sees user A\'s draft workflows', () => {
-    adoptLocalContentForSubject('userA');
+  it('user B never sees user A\'s draft workflows', async () => {
+    await adoptLocalContentForSubject('userA');
     upsertSavedWorkflow(wf('a-secret'));
     expect(listSavedWorkflows().map((w) => w.id)).toContain('a-secret');
 
     // A signs out, B signs in on the same browser.
-    adoptLocalContentForSubject(null);
-    adoptLocalContentForSubject('userB');
+    await adoptLocalContentForSubject(null);
+    await adoptLocalContentForSubject('userB');
     expect(listSavedWorkflows().map((w) => w.id)).not.toContain('a-secret');
   });
 
-  it('user B never sees user A\'s prompts', () => {
-    adoptLocalContentForSubject('userA');
+  it('user B never sees user A\'s prompts', async () => {
+    await adoptLocalContentForSubject('userA');
     upsertUserPrompt({ templateId: 'a-private', version: '1.0.0', kind: 'system', text: 'secret', name: 'A private prompt' });
-    expect(listUserPrompts().length).toBeGreaterThan(0);
+    expect(listUserPrompts().map((p) => p.templateId)).toContain('a-private');
 
-    adoptLocalContentForSubject(null);
-    adoptLocalContentForSubject('userB');
+    await adoptLocalContentForSubject(null);
+    await adoptLocalContentForSubject('userB');
     expect(listUserPrompts().map((p) => p.templateId)).not.toContain('a-private');
   });
 
-  it('signing back in restores A\'s own content — isolation is not deletion', () => {
-    adoptLocalContentForSubject('userA');
+  it('signing back in restores A\'s own content — isolation is not deletion', async () => {
+    await adoptLocalContentForSubject('userA');
     upsertSavedWorkflow(wf('a-keep'));
-    adoptLocalContentForSubject(null);
-    adoptLocalContentForSubject('userB');
-    adoptLocalContentForSubject(null);
-    adoptLocalContentForSubject('userA');
+    await adoptLocalContentForSubject(null);
+    await adoptLocalContentForSubject('userB');
+    await adoptLocalContentForSubject(null);
+    await adoptLocalContentForSubject('userA');
     expect(listSavedWorkflows().map((w) => w.id)).toContain('a-keep');
   });
 });
@@ -100,9 +107,9 @@ describe('anonymous → signed-in adoption', () => {
   });
 
   it('UNIONS with pre-existing user content instead of replacing it', async () => {
-    adoptLocalContentForSubject('userA');
+    await adoptLocalContentForSubject('userA');
     upsertSavedWorkflow(wf('user-owned'));
-    adoptLocalContentForSubject(null);
+    await adoptLocalContentForSubject(null);
     upsertSavedWorkflow(wf('anon-owned'));
 
     await adoptLocalContentForSubject('userA');
@@ -112,10 +119,10 @@ describe('anonymous → signed-in adoption', () => {
   });
 
   it('prefers the SIGNED-IN copy on an id collision', async () => {
-    adoptLocalContentForSubject('userA');
-    upsertSavedWorkflow({ ...wf('same-id'), name: 'the user version' } as SavedWorkflow);
-    adoptLocalContentForSubject(null);
-    upsertSavedWorkflow({ ...wf('same-id'), name: 'the anon version' } as SavedWorkflow);
+    await adoptLocalContentForSubject('userA');
+    upsertSavedWorkflow(wf('same-id', 'the user version'));
+    await adoptLocalContentForSubject(null);
+    upsertSavedWorkflow(wf('same-id', 'the anon version'));
 
     await adoptLocalContentForSubject('userA');
     expect(listSavedWorkflows().find((w) => w.id === 'same-id')?.name).toBe('the user version');
@@ -128,10 +135,10 @@ describe('anonymous → signed-in adoption', () => {
     expect(localStorage.getItem(scopedKey(STORAGE_KEYS.builderWorkflows, 'userA'))).toBeTruthy();
   });
 
-  it('signing OUT does not drag user content back to the anonymous key', () => {
-    adoptLocalContentForSubject('userA');
+  it('signing OUT does not drag user content back to the anonymous key', async () => {
+    await adoptLocalContentForSubject('userA');
     upsertSavedWorkflow(wf('stays-with-a'));
-    adoptLocalContentForSubject(null);
+    await adoptLocalContentForSubject(null);
     expect(listSavedWorkflows().map((w) => w.id)).not.toContain('stays-with-a');
   });
 });

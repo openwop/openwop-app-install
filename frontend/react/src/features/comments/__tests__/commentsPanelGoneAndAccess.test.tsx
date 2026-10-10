@@ -21,6 +21,12 @@
  *  - `CMNT-UX-20` a read-only member is not offered writes.
  *  - `CMNT-UX-22` `namesFailed` and `failed` can no longer both announce.
  *
+ * SABOTAGE (witnessed, /grade-tests wave 10): every probe on the gone-state predicate,
+ * re-resolve-on-404, native `disabled`, retry `keepList`, the 400/403/forbidden_scope/
+ * non-http copy, the 409 refusal, the access gate (viewer / writer / unresolved), the
+ * namesFailed predicate and the reply index reds its case here; the in-flight repeat
+ * guard is a double guard (see that case).
+ *
  * All four mount sites (`/comments`, chat, the document toolbar, the document
  * Modal) construct `<CommentsPanel orgId resourceType resourceId />` with those
  * three props and nothing else, so the panel IS the mount site for every state
@@ -44,19 +50,20 @@ vi.mock('../../../ui/toast.js', () => ({ toast: toasts }));
 const members = vi.hoisted(() => ({ loadOrgMembers: vi.fn() }));
 vi.mock('../../../orgs/orgMembers.js', () => ({ loadOrgMembers: members.loadOrgMembers, invalidateOrgMembers: vi.fn() }));
 
-const WRITER = { roles: ['editor'], scopes: ['workspace:read', 'workspace:write'], basis: 'member' };
-const VIEWER = { roles: ['viewer'], scopes: ['workspace:read'], basis: 'member' };
-const orgAccess = vi.hoisted(() => ({ value: null as unknown }));
+const WRITER: EffectiveAccess = { roles: ['editor'], scopes: ['workspace:read', 'workspace:write'], basis: 'member' };
+const VIEWER: EffectiveAccess = { roles: ['viewer'], scopes: ['workspace:read'], basis: 'member' };
+const orgAccess = vi.hoisted(() => ({ value: ((): EffectiveAccess | null => null)() }));
 vi.mock('../../../client/useEffectiveAccess.js', async (importOriginal) => {
   const orig = await importOriginal<Record<string, unknown>>();
   return { ...orig, useOrgEffectiveAccess: () => orgAccess.value };
 });
 
 import { CommentsPanel } from '../CommentsPanel.js';
-import { CommentsHttpError, ALL_RESOURCE_TYPES, type ResourceType } from '../commentsClient.js';
-import { currentAnnouncements } from '../../../ui/announce.js';
+import type { EffectiveAccess } from '../../../client/accessClient.js';
+import { CommentsHttpError, ALL_RESOURCE_TYPES, type Comment, type ResourceType } from '../commentsClient.js';
+import { announce, currentAnnouncements } from '../../../ui/announce.js';
 
-const comment = (id: string, body: string, over: Record<string, unknown> = {}) => ({
+const comment = (id: string, body: string, over: Partial<Comment> = {}): Comment => ({
   commentId: id, orgId: 'org_1', resourceType: 'cms_page', resourceId: 'p1',
   body, authorId: 'user_a', status: 'open', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
   ...over,
@@ -79,6 +86,9 @@ beforeEach(() => {
   vi.clearAllMocks();
   members.loadOrgMembers.mockResolvedValue([]);
   orgAccess.value = WRITER;
+  // One module-level polite slot, never reset by the module: without this the
+  // CMNT-UX-22 "announced" assertions can pass on an earlier case's message.
+  announce('');
 });
 afterEach(cleanup);
 
@@ -172,6 +182,9 @@ describe('CMNT-UX-16 — a write does not take the control out from under the us
     expect(document.activeElement).toBe(btn);
   });
 
+  // HONEST CEILING — a DOUBLE GUARD: the `inFlight` ref in `add` AND the Composer's
+  // `inert` (posting) each drop the repeat click, so removing either alone stays green
+  // (MEASURED, /grade-tests wave 10). The claim — a repeat is ignored — holds either way.
   it('POST: a repeat activation while in flight is IGNORED (the guard the disable used to be)', async () => {
     api.listThread.mockResolvedValue([comment('c1', 'existing')]);
     const post = deferred<unknown>();
@@ -384,6 +397,10 @@ describe('CMNT-UX-21 — the reply index is keyed, and a keystroke does not re-r
     expect(rootOne.textContent).not.toContain('reply to two');
   });
 
+  // POSSIBLE DEFECT-PIN — needs a product decision (/grade-tests wave 10, filed by the
+  // coordinator). `commentsService.deleteSubjectComments`' doc says an erased root's
+  // replies "still render via `listThread`, just lose their anchor"; this case pins that
+  // the panel DROPS them. Left asserting current behaviour until that is decided.
   it('an ORPHANED reply (its parent was deleted) renders nowhere — recorded, not silently mis-parented', async () => {
     api.listThread.mockResolvedValue([
       comment('r1', 'root one'),

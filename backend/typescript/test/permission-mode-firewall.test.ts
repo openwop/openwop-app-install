@@ -9,10 +9,12 @@ import { buildFirewallHook, SENSITIVE_APPROVAL_TOOLS } from '../src/features/cap
 const CODE_EXEC = 'openwop:feature.code-exec.nodes.run';
 
 describe('ADR 0150 — permission mode firewall gating', () => {
-  it('SENSITIVE_APPROVAL_TOOLS includes code-exec, file-write, egress', () => {
+  // ADR 0834 D4 — `openwop:core.files.write` is gone: no agent tool ever registered it.
+  // New asks are declared on the tool (`safeModeApproval`); the census pins the live set.
+  it('SENSITIVE_APPROVAL_TOOLS includes code-exec and egress, and no dead file-write id', () => {
     expect(SENSITIVE_APPROVAL_TOOLS.has(CODE_EXEC)).toBe(true);
-    expect(SENSITIVE_APPROVAL_TOOLS.has('openwop:core.files.write')).toBe(true);
     expect(SENSITIVE_APPROVAL_TOOLS.has('openwop:core.openwop.http.fetch')).toBe(true);
+    expect(SENSITIVE_APPROVAL_TOOLS.has('openwop:core.files.write')).toBe(false);
   });
 
   it('SAFE mode: a sensitive tool needs approval (even rule-less)', () => {
@@ -49,7 +51,11 @@ describe('ADR 0150 — permission mode firewall gating', () => {
   // hard-coded name set. `core.openwop.integration.email-send` is a classified
   // `egress:'host-mediated'` tool that is NOT in SENSITIVE_APPROVAL_TOOLS — before this it
   // proceeded UNASKED in safe mode (email/slack/sms/a2a/mcp sends did too).
-  const EMAIL_SEND = 'core.openwop.integration.email-send'; // classified write+host-mediated egress
+  // ADR 0834 D7 — this witness used `core.openwop.integration.email-send`, a NODE id no
+  // agent tool can carry, so it proved the gate on a population the agent lanes never
+  // present (a gate that could not fail). It now uses a REAL agent tool the classifier
+  // keys on; deleting that classifier row turns the safe-mode case red (sabotage-witnessed).
+  const EMAIL_SEND = 'openwop:destination-sync.run'; // a registered agent tool, classified write+host-mediated egress
   describe('PMC-1 — the egress CLASS is gated, not a name set', () => {
     it('control: the egress tool is NOT in the hard-coded name set', () => {
       expect(SENSITIVE_APPROVAL_TOOLS.has(EMAIL_SEND)).toBe(false);

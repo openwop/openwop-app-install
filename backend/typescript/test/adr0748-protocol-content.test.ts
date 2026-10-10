@@ -73,13 +73,13 @@ describe('localizeErrorEnvelope — exact → script → language, naming the co
 
 describe('isCredentialOptionalRead — exact method and depth', () => {
   it('admits only GET/HEAD of one page by slug', () => {
-    expect(isCredentialOptionalRead('GET', '/v1/content/pages/home')).toBe(true);
-    expect(isCredentialOptionalRead('HEAD', '/v1/content/pages/home')).toBe(true);
-    expect(isCredentialOptionalRead('POST', '/v1/content/pages/home')).toBe(false);
-    expect(isCredentialOptionalRead('GET', '/v1/content/pages')).toBe(false);
-    expect(isCredentialOptionalRead('PUT', '/v1/content/pages/p/sections/s')).toBe(false);
-    expect(isCredentialOptionalRead('GET', '/v1/content/pages/p/sections/s')).toBe(false);
-    expect(isCredentialOptionalRead('GET', '/v1/content/settings')).toBe(false);
+    expect(isCredentialOptionalRead('GET', '/content/pages/home')).toBe(true);
+    expect(isCredentialOptionalRead('HEAD', '/content/pages/home')).toBe(true);
+    expect(isCredentialOptionalRead('POST', '/content/pages/home')).toBe(false);
+    expect(isCredentialOptionalRead('GET', '/content/pages')).toBe(false);
+    expect(isCredentialOptionalRead('PUT', '/content/pages/p/sections/s')).toBe(false);
+    expect(isCredentialOptionalRead('GET', '/content/pages/p/sections/s')).toBe(false);
+    expect(isCredentialOptionalRead('GET', '/content/settings')).toBe(false);
   });
 });
 
@@ -130,7 +130,8 @@ const TB = 'k-tb-0748-tenant-b';     // a key scoped to tenant-b
 const saved: Record<string, string | undefined> = {};
 
 async function call(method: string, path: string, opts: { key?: string | null; body?: unknown; headers?: Record<string, string> } = {}) {
-  const headers: Record<string, string> = { ...(opts.headers ?? {}) };
+  // ADR 0812 P3c-0 — the protocol content ops are unversioned major-2 paths now.
+  const headers: Record<string, string> = { 'openwop-version': '2', ...(opts.headers ?? {}) };
   if (opts.key !== null) headers.authorization = `Bearer ${opts.key ?? OP}`;
   if (opts.body !== undefined) headers['content-type'] = 'application/json';
   const res = await fetch(`${BASE}${path}`, { method, headers, ...(opts.body !== undefined ? { body: JSON.stringify(opts.body) } : {}) });
@@ -164,19 +165,19 @@ describe('RFC 0206 delivery-extended-locale — the scenario flow', () => {
   const slug = 'rfc0206-probe';
 
   it('creates a published page, writes base + extended overlay, and delivers the overlay', async () => {
-    const created = await call('POST', '/v1/content/pages', { body: { pageId, slug, name: 'RFC 0206 probe', status: 'published', sectionOrder: ['hero'] } });
+    const created = await call('POST', '/content/pages', { body: { pageId, slug, name: 'RFC 0206 probe', status: 'published', sectionOrder: ['hero'] } });
     expect(created.status, JSON.stringify(created.json)).toBe(201);
     expect(schema('localized-content-page')(created.json)).toEqual([]);
     expect(created.json).toMatchObject({ pageId, slug, status: 'published', sectionOrder: ['hero'] });
 
-    const base = await call('PUT', `/v1/content/pages/${pageId}/sections/hero`, { body: { locale: 'en', data: { heading: 'base', cta: 'base-cta' } } });
+    const base = await call('PUT', `/content/pages/${pageId}/sections/hero`, { body: { locale: 'en', data: { heading: 'base', cta: 'base-cta' } } });
     expect(base.status, JSON.stringify(base.json)).toBe(200);
-    const over = await call('PUT', `/v1/content/pages/${pageId}/sections/hero`, { body: { locale: tag, data: { heading: `overlay:${tag}` } } });
+    const over = await call('PUT', `/content/pages/${pageId}/sections/hero`, { body: { locale: tag, data: { heading: `overlay:${tag}` } } });
     expect(over.status, JSON.stringify(over.json)).toBe(200);
     expect(schema('localized-content-section')(over.json)).toEqual([]);
     expect(over.json).toMatchObject({ sectionId: 'hero', sectionType: 'fields', data: { heading: 'base', cta: 'base-cta' }, localizations: { [tag]: { heading: `overlay:${tag}` } }, status: 'published', order: 0 });
 
-    const res = await call('GET', `/v1/content/pages/${slug}`, { headers: { 'accept-language': tag } });
+    const res = await call('GET', `/content/pages/${slug}`, { headers: { 'accept-language': tag } });
     expect(res.status).toBe(200);
     expect(schema('localized-content-page-response')(res.json)).toEqual([]);
     expect(res.headers.get('content-language')).toBe(tag);
@@ -198,72 +199,72 @@ describe('RFC 0206 delivery-extended-locale — the scenario flow', () => {
   });
 
   it('settings are the effective (advertised) ones and validate', async () => {
-    const res = await call('GET', '/v1/content/settings');
+    const res = await call('GET', '/content/settings');
     expect(res.status).toBe(200);
     expect(schema('localized-content-language-settings')(res.json)).toEqual([]);
     expect(res.json).toEqual({ baseLocale: 'en', supportedLocales: ['pt-BR', 'es-419'], autoTranslateOnPublish: false });
   });
 
   it('§F: the page is unreachable from another tenant and from the anonymous lane', async () => {
-    expect((await call('GET', `/v1/content/pages/${slug}`, { key: TB })).status).toBe(404);
-    expect((await call('GET', `/v1/content/pages/${slug}`, { key: null })).status).toBe(404);
+    expect((await call('GET', `/content/pages/${slug}`, { key: TB })).status).toBe(404);
+    expect((await call('GET', `/content/pages/${slug}`, { key: null })).status).toBe(404);
     // …while the anonymous lane still serves the system site, publicly cacheable
-    const home = await call('GET', '/v1/content/pages/home', { key: null });
+    const home = await call('GET', '/content/pages/home', { key: null });
     expect(home.status).toBe(200);
     expect(schema('localized-content-page-response')(home.json)).toEqual([]);
     expect(home.headers.get('cache-control')).toMatch(/^public/);
   });
 
   it('a presented-but-rejected bearer is a 401, never the anonymous lane', async () => {
-    expect((await call('GET', '/v1/content/pages/home', { key: 'not-a-key' })).status).toBe(401);
+    expect((await call('GET', '/content/pages/home', { key: 'not-a-key' })).status).toBe(401);
   });
 
   it('admin ops never ride the carve-out: no credential → 401', async () => {
-    expect((await call('POST', '/v1/content/pages', { key: null, body: { pageId: 'x', slug: 'x', name: 'x', sectionOrder: [] } })).status).toBe(401);
-    expect((await call('GET', '/v1/content/pages', { key: null })).status).toBe(401);
-    expect((await call('PUT', `/v1/content/pages/${pageId}/sections/hero`, { key: null, body: { locale: 'en', data: {} } })).status).toBe(401);
-    expect((await call('GET', '/v1/content/settings', { key: null })).status).toBe(401);
+    expect((await call('POST', '/content/pages', { key: null, body: { pageId: 'x', slug: 'x', name: 'x', sectionOrder: [] } })).status).toBe(401);
+    expect((await call('GET', '/content/pages', { key: null })).status).toBe(401);
+    expect((await call('PUT', `/content/pages/${pageId}/sections/hero`, { key: null, body: { locale: 'en', data: {} } })).status).toBe(401);
+    expect((await call('GET', '/content/settings', { key: null })).status).toBe(401);
     // deleteContentPage shares delivery's path item; only GET/HEAD there is credential-optional.
-    expect((await call('DELETE', `/v1/content/pages/${pageId}`, { key: null })).status).toBe(401);
+    expect((await call('DELETE', `/content/pages/${pageId}`, { key: null })).status).toBe(401);
   });
 
   it('a tenant-pinned env key authors in ITS OWN tenant only (ADR 0601 C4; ADR 0748 correction)', async () => {
     // Corrected: this leg used to assert 403 and call it fail-closed. An env key
     // is its tenant's own principal, so the 403 was a gate defect — it is what
     // the production certify binding hit on every §D write.
-    const r = await call('POST', '/v1/content/pages', { key: TB, body: { pageId: 'tb-1', slug: 'tb-one', name: 'x', sectionOrder: [], status: 'published' } });
+    const r = await call('POST', '/content/pages', { key: TB, body: { pageId: 'tb-1', slug: 'tb-one', name: 'x', sectionOrder: [], status: 'published' } });
     expect(r.status, JSON.stringify(r.json)).toBe(201);
-    expect((await call('GET', '/v1/content/pages/tb-one', { key: TB })).status).toBe(200);
-    expect((await call('GET', '/v1/content/pages/tb-one')).status).toBe(404); // not in the operator's tenant
+    expect((await call('GET', '/content/pages/tb-one', { key: TB })).status).toBe(200);
+    expect((await call('GET', '/content/pages/tb-one')).status).toBe(404); // not in the operator's tenant
   });
 });
 
 describe('protocol create never adapts what the caller addressed', () => {
   it('409 on an existing pageId and on a taken slug; never a renamed slug', async () => {
     const body = { pageId: 'dup-1', slug: 'dup-one', name: 'Dup', sectionOrder: [] };
-    expect((await call('POST', '/v1/content/pages', { body })).status).toBe(201);
-    expect((await call('POST', '/v1/content/pages', { body })).status).toBe(409);
-    expect((await call('POST', '/v1/content/pages', { body: { ...body, pageId: 'dup-2' } })).status).toBe(409);
+    expect((await call('POST', '/content/pages', { body })).status).toBe(201);
+    expect((await call('POST', '/content/pages', { body })).status).toBe(409);
+    expect((await call('POST', '/content/pages', { body: { ...body, pageId: 'dup-2' } })).status).toBe(409);
   });
   it('400 on malformed input', async () => {
     const ok = { pageId: 'v-1', slug: 'v-one', name: 'V', sectionOrder: [] };
-    expect((await call('POST', '/v1/content/pages', { body: { ...ok, slug: 'Bad Slug' } })).status).toBe(400);
-    expect((await call('POST', '/v1/content/pages', { body: { ...ok, slug: 'double--hyphen' } })).status).toBe(400);
-    expect((await call('POST', '/v1/content/pages', { body: { ...ok, pageId: '../etc' } })).status).toBe(400);
-    expect((await call('POST', '/v1/content/pages', { body: { ...ok, sectionOrder: ['a', 'a'] } })).status).toBe(400);
-    expect((await call('POST', '/v1/content/pages', { body: { ...ok, status: 'archived' } })).status).toBe(400);
+    expect((await call('POST', '/content/pages', { body: { ...ok, slug: 'Bad Slug' } })).status).toBe(400);
+    expect((await call('POST', '/content/pages', { body: { ...ok, slug: 'double--hyphen' } })).status).toBe(400);
+    expect((await call('POST', '/content/pages', { body: { ...ok, pageId: '../etc' } })).status).toBe(400);
+    expect((await call('POST', '/content/pages', { body: { ...ok, sectionOrder: ['a', 'a'] } })).status).toBe(400);
+    expect((await call('POST', '/content/pages', { body: { ...ok, status: 'archived' } })).status).toBe(400);
   });
   it('a draft page is created as draft and is not delivered', async () => {
-    expect((await call('POST', '/v1/content/pages', { body: { pageId: 'd-1', slug: 'd-one', name: 'D', sectionOrder: ['s'], status: 'draft' } })).json.status).toBe('draft');
-    expect((await call('PUT', '/v1/content/pages/d-1/sections/s', { body: { locale: 'en', data: { heading: 'draft' } } })).status).toBe(200);
-    expect((await call('GET', '/v1/content/pages/d-one')).status).toBe(404);
+    expect((await call('POST', '/content/pages', { body: { pageId: 'd-1', slug: 'd-one', name: 'D', sectionOrder: ['s'], status: 'draft' } })).json.status).toBe('draft');
+    expect((await call('PUT', '/content/pages/d-1/sections/s', { body: { locale: 'en', data: { heading: 'draft' } } })).status).toBe(200);
+    expect((await call('GET', '/content/pages/d-one')).status).toBe(404);
   });
 });
 
 describe('section PUT validation', () => {
   it('rejects non-canonical locales, extra fields, and nested field values', async () => {
-    await call('POST', '/v1/content/pages', { body: { pageId: 'val-1', slug: 'val-one', name: 'Val', sectionOrder: ['s'] } });
-    const put = (body: unknown) => call('PUT', '/v1/content/pages/val-1/sections/s', { body });
+    await call('POST', '/content/pages', { body: { pageId: 'val-1', slug: 'val-one', name: 'Val', sectionOrder: ['s'] } });
+    const put = (body: unknown) => call('PUT', '/content/pages/val-1/sections/s', { body });
     for (const locale of ['en-us', 'zh-hans', 'de-CH-1996', 'en_US']) expect((await put({ locale, data: { a: 'x' } })).status).toBe(400);
     expect((await put({ locale: 'en', data: { a: 'x' }, extra: 1 })).status).toBe(400);
     expect((await put({ locale: 'en', data: { a: { nested: true } } })).status).toBe(400);
@@ -271,20 +272,20 @@ describe('section PUT validation', () => {
     expect((await put({ locale: 'zh-Hant-TW', data: { a: 'x' } })).status).toBe(200);
   });
   it('404 for an unknown page; a new section id appends', async () => {
-    expect((await call('PUT', '/v1/content/pages/nope/sections/s', { body: { locale: 'en', data: {} } })).status).toBe(404);
-    const r = await call('PUT', '/v1/content/pages/val-1/sections/extra', { body: { locale: 'en', data: { a: 'y' } } });
+    expect((await call('PUT', '/content/pages/nope/sections/s', { body: { locale: 'en', data: {} } })).status).toBe(404);
+    const r = await call('PUT', '/content/pages/val-1/sections/extra', { body: { locale: 'en', data: { a: 'y' } } });
     expect(r.status).toBe(200);
     expect(r.json.order).toBe(1);
   });
   it('delivery negotiates over the ADVERTISED locales only: an authored but unadvertised zh-Hant is not served', async () => {
-    await call('POST', '/v1/content/pages', { body: { pageId: 'zh-1', slug: 'zh-one', name: 'Zh', sectionOrder: ['s'], status: 'published' } });
-    await call('PUT', '/v1/content/pages/zh-1/sections/s', { body: { locale: 'en', data: { t: 'en' } } });
-    await call('PUT', '/v1/content/pages/zh-1/sections/s', { body: { locale: 'zh', data: { t: 'zh' } } });
-    await call('PUT', '/v1/content/pages/zh-1/sections/s', { body: { locale: 'zh-Hant', data: { t: 'zh-Hant' } } });
+    await call('POST', '/content/pages', { body: { pageId: 'zh-1', slug: 'zh-one', name: 'Zh', sectionOrder: ['s'], status: 'published' } });
+    await call('PUT', '/content/pages/zh-1/sections/s', { body: { locale: 'en', data: { t: 'en' } } });
+    await call('PUT', '/content/pages/zh-1/sections/s', { body: { locale: 'zh', data: { t: 'zh' } } });
+    await call('PUT', '/content/pages/zh-1/sections/s', { body: { locale: 'zh-Hant', data: { t: 'zh-Hant' } } });
     // zh-* is authored but not advertised, so `Content-Language` may not name it
     // and the reader gets base. The §C script step itself is pinned by
     // locale-rfc0206-grammar.test.ts (resolveSection) and the negotiateLocale block above.
-    const r = await call('GET', '/v1/content/pages/zh-one', { headers: { 'accept-language': 'zh-Hant-TW' } });
+    const r = await call('GET', '/content/pages/zh-one', { headers: { 'accept-language': 'zh-Hant-TW' } });
     expect(r.headers.get('content-language')).toBe('en');
     expect(r.json.sections[0].data).toEqual({ t: 'en' });
   });
@@ -293,11 +294,11 @@ describe('section PUT validation', () => {
 describe('a shared-section reference is never silently written through', () => {
   it('409s instead of answering 200 for content the ref would drop', async () => {
     const { getPage, updatePage } = await import('../src/features/cms/cmsService.js');
-    await call('POST', '/v1/content/pages', { body: { pageId: 'ref-1', slug: 'ref-one', name: 'Ref', sectionOrder: [] } });
+    await call('POST', '/content/pages', { body: { pageId: 'ref-1', slug: 'ref-one', name: 'Ref', sectionOrder: [] } });
     const page = await getPage('default', 'default', 'ref-1');
     expect(page).toBeTruthy();
     await updatePage('default', 'default', 'ref-1', { sections: [{ sectionId: 'sec:shared', type: 'hero', data: {}, ref: { sharedSectionId: 'shsec:x' } }], baseLocale: 'en' }, 'test');
-    const r = await call('PUT', '/v1/content/pages/ref-1/sections/shared', { body: { locale: 'en', data: { heading: 'x' } } });
+    const r = await call('PUT', '/content/pages/ref-1/sections/shared', { body: { locale: 'en', data: { heading: 'x' } } });
     expect(r.status).toBe(409);
   });
 });
@@ -309,13 +310,13 @@ describe('the approval gate binds the protocol lane exactly as the editor', () =
     if (d) await saveConfig({ ...d, status }, 'test');
   }
   it('refuses a published create and a live edit while the gate is on', async () => {
-    await call('POST', '/v1/content/pages', { body: { pageId: 'g-1', slug: 'g-one', name: 'G', sectionOrder: ['s'], status: 'published' } });
+    await call('POST', '/content/pages', { body: { pageId: 'g-1', slug: 'g-one', name: 'G', sectionOrder: ['s'], status: 'published' } });
     await setGate('on');
     try {
-      expect((await call('POST', '/v1/content/pages', { body: { pageId: 'g-2', slug: 'g-two', name: 'G', sectionOrder: [], status: 'published' } })).status).toBe(409);
-      expect((await call('PUT', '/v1/content/pages/g-1/sections/s', { body: { locale: 'es-419', data: { a: 'x' } } })).status).toBe(409);
+      expect((await call('POST', '/content/pages', { body: { pageId: 'g-2', slug: 'g-two', name: 'G', sectionOrder: [], status: 'published' } })).status).toBe(409);
+      expect((await call('PUT', '/content/pages/g-1/sections/s', { body: { locale: 'es-419', data: { a: 'x' } } })).status).toBe(409);
       // a draft is still authorable under the gate
-      expect((await call('POST', '/v1/content/pages', { body: { pageId: 'g-3', slug: 'g-three', name: 'G', sectionOrder: [] } })).status).toBe(201);
+      expect((await call('POST', '/content/pages', { body: { pageId: 'g-3', slug: 'g-three', name: 'G', sectionOrder: [] } })).status).toBe(201);
     } finally {
       await setGate('off');
     }

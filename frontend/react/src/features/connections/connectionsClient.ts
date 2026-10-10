@@ -4,6 +4,7 @@
  * off its feature toggle to a permanent admin surface (ADR 0024 § Correction).
  */
 import { authedHeaders, config, fetchOpts } from '../../client/config.js';
+import { ApiError } from '../../client/requestJson.js';
 
 export interface Provider {
   id: string;
@@ -30,25 +31,43 @@ export interface Connection {
   status: string;
   scopes: string[];
   connectedAt: string;
+  updatedAt?: string;
+  /** Which provider-side account granted it (oauth2), when the provider says. */
+  externalSubject?: string;
   /** Per-user connection owner (absent for org/workspace). */
   userId?: string;
   /** Org-shared connection (absent for user/workspace). */
   orgId?: string;
+  /** ADR 0783 D1 — set when workflows may call this connection as a data source. */
+  dataSource?: { baseUrl: string; updatedAt: string };
 }
 
 const base = `${config.baseUrl}/host/openwop-app`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 
-async function asJson<T>(res: Response, ctx: string): Promise<T> {
-  if (!res.ok) {
-    let detail = '';
-    try {
-      detail = ((await res.json()) as { message?: string })?.message ?? '';
-    } catch {
-      /* non-JSON */
-    }
-    throw new Error(detail || `${ctx} returned ${res.status}`);
+/** ADR 0780 (grade-ux `CONNUX-3`) — a refusal keeps its STATUS and parsed body.
+ *  It used to throw `new Error(message)`, so a 403, a 409 and a 400 were the same
+ *  string, `classifyHttpError` could not find a status in a server sentence, and
+ *  the SPA could never say "you don't have permission". */
+async function refusal(res: Response, ctx: string): Promise<ApiError> {
+  let body: unknown;
+  try {
+    body = await res.json();
+  } catch {
+    /* non-JSON */
   }
+  const said = body && typeof body === 'object' ? (body as { message?: unknown }).message : undefined;
+  return new ApiError({
+    status: res.status,
+    statusText: res.statusText,
+    url: res.url,
+    body,
+    message: typeof said === 'string' && said ? said : `${ctx} returned ${res.status}`,
+  });
+}
+
+async function asJson<T>(res: Response, ctx: string): Promise<T> {
+  if (!res.ok) throw await refusal(res, ctx);
   return (await res.json()) as T;
 }
 
@@ -70,7 +89,7 @@ export async function createConnection(input: { provider: string; kind: string; 
 
 export async function revokeConnection(connectionId: string): Promise<void> {
   const res = await fetch(`${base}/connections/${encodeURIComponent(connectionId)}`, fetchOpts({ method: 'DELETE', headers: authedHeaders() }));
-  if (!res.ok && res.status !== 204) throw new Error(`revokeConnection returned ${res.status}`);
+  if (!res.ok && res.status !== 204) throw await refusal(res, 'revokeConnection');
 }
 
 /** Begin the OAuth2 PKCE consent flow: ask the host for a provider consent URL
@@ -93,6 +112,16 @@ export async function testConnection(connectionId: string): Promise<{ ok: boolea
     fetchOpts({ method: 'POST', headers: jsonHeaders() }),
   );
   return asJson<{ ok: boolean; status: string }>(res, 'testConnection');
+}
+
+/** ADR 0783 D1 — make a connection a workflow data source rooted at `baseUrl`
+ *  (validated by the host against the provider's API hosts), or clear it (`null`). */
+export async function setDataSource(connectionId: string, baseUrl: string | null): Promise<void> {
+  const url = `${base}/connections/${encodeURIComponent(connectionId)}/data-source`;
+  const res = baseUrl === null
+    ? await fetch(url, fetchOpts({ method: 'DELETE', headers: authedHeaders() }))
+    : await fetch(url, fetchOpts({ method: 'PUT', headers: jsonHeaders(), body: JSON.stringify({ baseUrl }) }));
+  if (!res.ok && res.status !== 204) throw await refusal(res, 'setDataSource');
 }
 
 // ── Host OAuth client config (superadmin) — ADR 0024 § host-managed OAuth ──────

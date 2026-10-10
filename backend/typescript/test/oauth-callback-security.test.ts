@@ -60,7 +60,7 @@ afterAll(async () => {
 /** The Subject this suite's bearer authenticates as, read from the host itself. */
 async function bearerSubject(): Promise<string> {
   // A grant started through the real authorize route records the caller's Subject.
-  const r = await fetch(`${BASE}/v1/host/openwop-app/connections/google/authorize`, {
+  const r = await fetch(`${BASE}/host/openwop-app/connections/google/authorize`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
     body: '{}',
@@ -79,7 +79,7 @@ const GOOGLE_ISS = 'https://accounts.google.com';
  *  meta-refresh target). */
 async function callback(state: string, iss: string | null = GOOGLE_ISS, provider = 'google'): Promise<{ status: number; target: string }> {
   const q = new URLSearchParams({ state, code: 'abc', ...(iss !== null ? { iss } : {}) });
-  const res = await fetch(`${BASE}/v1/host/openwop-app/connections/${provider}/callback?${q}`, {
+  const res = await fetch(`${BASE}/host/openwop-app/connections/${provider}/callback?${q}`, {
     headers: { authorization: `Bearer ${TOKEN}` },
     redirect: 'manual',
   });

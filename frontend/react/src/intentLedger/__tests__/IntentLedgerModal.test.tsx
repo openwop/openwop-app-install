@@ -64,7 +64,7 @@ describe('IntentLedgerModal — chat-first drafting (CFP A13)', () => {
     fireEvent.click(launcher);
     expect(stageSpy).toHaveBeenCalledTimes(1);
     expect(stageSpy.mock.calls[0]![0]).toMatch(/mission contract/i);
-    expect(navSpy).toHaveBeenCalledWith('/?agent=feature.assistant.agents.chief-of-staff');
+    expect(navSpy).toHaveBeenCalledWith('/?agent=vendor.openwop-app.assistant.agents.chief-of-staff');
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 });

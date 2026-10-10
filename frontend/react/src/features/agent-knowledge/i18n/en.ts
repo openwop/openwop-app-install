@@ -36,7 +36,7 @@ export const messages = {
   unbind: 'Unbind',
   unbindConfirm: 'Unbind "{{name}}" from this agent? The collection itself is kept.',
   externalUnverified: 'External · unverified',
-  externalUnverifiedTitle: 'Imported from an external source (e.g. Google Drive or a trigger). Treated as untrusted — fenced when the agent reads it, never followed as instructions (ADR 0038 §C).',
+  externalUnverifiedTitle: 'Imported from an external source (e.g. Google Drive or a trigger). Treated as untrusted — fenced when the agent reads it, never followed as instructions.',
   chunkCount_one: '· {{count}} chunk',
   chunkCount_other: '· {{count}} chunks',
   removeDocumentLabel: 'Remove {{title}}',
@@ -75,7 +75,7 @@ export const messages = {
   retrieve: 'Retrieve',
   retrieveNoteChip: 'note',
   retrieveExternalChip: 'external',
-  retrieveExternalTitle: 'Untrusted external content — fenced when the agent reads it (ADR 0038 §C).',
+  retrieveExternalTitle: 'Untrusted external content — fenced when the agent reads it.',
   retrieveNoMatches: 'No matches — add documents or notes above.',
 
   // Memory tab (ADR 0041)
@@ -90,5 +90,6 @@ export const messages = {
   retrievePartialSources: 'Unsearched: {{sources}}',
   retrieveSource_kb: 'documents',
   retrieveSource_memory: 'notes',
-  errorAnnounce: 'The agent knowledge panel reported a problem — the details are on screen.',
+  // KB2UX-3 — ADR 0830 D4: a managed collection refuses writes from this panel.
+  managedReadOnly: 'This collection is kept in sync by another feature, so its documents are read-only here. Change them where they come from.',
 } as const;

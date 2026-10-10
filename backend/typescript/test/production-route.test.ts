@@ -69,7 +69,7 @@ function client(): Client {
 let n = 0;
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
 async function signup(c: Client, opts: { tenantId?: string } = {}): Promise<{ userId: string }> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail('prod'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
+  const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail('prod'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
@@ -84,14 +84,14 @@ async function ownerWithMember(role: string): Promise<{ owner: Client; member: C
   await signup(owner, { tenantId });
   const member = client();
   const memberUser = await signup(member, { tenantId });
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   const orgId = org.body.orgId;
-  const add = await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: [role] });
+  const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: [role] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
   return { owner, member, orgId };
 }
-const p = (orgId: string, suffix = ''): string => `/v1/host/openwop-app/production/orgs/${encodeURIComponent(orgId)}${suffix}`;
+const p = (orgId: string, suffix = ''): string => `/host/openwop-app/production/orgs/${encodeURIComponent(orgId)}${suffix}`;
 
 describe('production — toggle gating', () => {
   it('404s when the production toggle is off', async () => {
@@ -149,7 +149,7 @@ describe('production — vendor CRUD (owner)', () => {
     await enable('production', 'on');
     await enable('crm', 'on');
     const { owner, orgId } = await ownerWithMember('owner');
-    const company = await owner.post(`/v1/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}/companies`, { name: 'Globex' });
+    const company = await owner.post(`/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}/companies`, { name: 'Globex' });
     expect(company.status, JSON.stringify(company.body)).toBe(201);
     const r = await owner.post(p(orgId, '/vendors'), { name: 'Contractor', companyId: company.body.companyId });
     expect(r.status, JSON.stringify(r.body)).toBe(201);

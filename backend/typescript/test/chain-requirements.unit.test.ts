@@ -64,6 +64,8 @@ describe('chainRequirements', () => {
     ]);
     const req = chainRequirements(c, new Set(['core.a', 'core.chat.approvalGate', 'core.openwop.hitl.form']), () => true);
     expect(req.approvalGateCount).toBe(2);
+    // ADR 0773 P11 — the template chip's size: every step, gates included.
+    expect(req.nodeCount).toBe(3);
   });
 
   it('a bare (non-dotted) ref falls back to itself as the provider id', () => {

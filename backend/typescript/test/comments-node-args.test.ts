@@ -10,6 +10,12 @@
  *
  * This file drives all three nodes through BOTH channels and asserts the read
  * lane fails TYPED rather than answering success-with-empty.
+ *
+ * SABOTAGE (witnessed, /grade-tests wave 10): dropping `ctx.config` from the pack's
+ * `args()` reds the four config cases; flipping the merge order reds INPUTS WIN;
+ * dropping `ctx.inputs` reds the inputs CONTROL; untyping `resourceType` or making
+ * `orgId` optional in `surface.ts` reds the WF-CMNT-2 cases. This file is also the
+ * node-pack `post` witness that `comments-route.test.ts` used to duplicate.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -104,6 +110,7 @@ describe('WF-CMNT-3 — a param frozen into `config` reaches the node', () => {
     const page = await createPage({ tenantId: T, orgId: 'o1', title: 'Doc', createdBy: 'owner1' });
     const r = await nodes['feature.comments.nodes.post']!(viaInputs({ orgId: 'o1', resourceType: 'cms_page', resourceId: page.pageId, body: 'from inputs' }));
     expect(r.status).toBe('success');
+    expect((await listThreadOrFail(T, 'o1', 'cms_page', page.pageId, PREAUTHORIZED_CALLER)).map((c) => c.body)).toEqual(['from inputs']);
   });
 });
 

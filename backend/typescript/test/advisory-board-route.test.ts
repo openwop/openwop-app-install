@@ -53,14 +53,14 @@ function client(): Client {
 
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
 async function signup(c: Client, opts: { tenantId?: string } = {}): Promise<{ userId: string }> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail('ab'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
+  const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail('ab'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
 const enable = async (id: string, status: 'on' | 'off'): Promise<void> => { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status }, 'test'); };
 
 async function makeAdvisor(c: Client, persona: string): Promise<string> {
-  const r = await c.post('/v1/host/openwop-app/roster', { persona, agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
+  const r = await c.post('/host/openwop-app/roster', { persona, agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.rosterId;
 }
@@ -71,12 +71,12 @@ async function ownerWithAdvisors(): Promise<{ owner: Client; userId: string; adv
   const u = await signup(owner);
   const a = await makeAdvisor(owner, 'Ada');
   const b = await makeAdvisor(owner, 'Boaz');
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return { owner, userId: u.userId, advisors: [a, b], orgId: org.body.orgId };
 }
 
-const B = '/v1/host/openwop-app/advisors/boards';
+const B = '/host/openwop-app/advisors/boards';
 
 describe('advisory-board — toggle gating', () => {
   it('404s when the toggle is off', async () => {
@@ -127,9 +127,9 @@ describe('advisory-board — visibility + IDOR', () => {
     const member = client();
     const memberUser = await signup(member, { tenantId });
     const a = await makeAdvisor(owner, 'Ada');
-    const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+    const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
     const orgId = org.body.orgId;
-    await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
+    await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
 
     const priv = await owner.post(B, { orgId, name: 'Private', advisors: [a], visibility: 'private' });
     const shared = await owner.post(B, { orgId, name: 'Shared', advisors: [a], visibility: 'shared' });
@@ -160,8 +160,8 @@ describe('advisory-board — visibility + IDOR', () => {
     const member = client();
     const memberUser = await signup(member, { tenantId });
     const a = await makeAdvisor(owner, 'Ada');
-    const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
-    await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(org.body.orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
+    const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
+    await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(org.body.orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
     const board = await owner.post(B, { orgId: org.body.orgId, name: 'Shared', advisors: [a], visibility: 'shared' });
     const bid = board.body.boardId;
     // Member can read (shared) but not mutate.
@@ -179,8 +179,8 @@ describe('advisory-board — visibility + IDOR', () => {
     const member = client();
     const memberUser = await signup(member, { tenantId });
     const a = await makeAdvisor(adopter, 'Ada');
-    const org = await adopter.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
-    await adopter.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(org.body.orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
+    const org = await adopter.post('/host/openwop-app/orgs', { name: 'Acme' });
+    await adopter.post(`/host/openwop-app/orgs/${encodeURIComponent(org.body.orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
     // Seeded the way the demo provisioners stamp boards: a synthetic `demo:*`
     // actor no caller identity ever matches — pre-fix, permanently uneditable.
     const seeded = await createBoardService(tenantId, org.body.orgId, 'demo:advisory-seed', { name: 'Seeded Council', advisors: [a], visibility: 'shared' });
@@ -206,9 +206,9 @@ describe('advisory-board — @@<handle> resolution (for the AI chat)', () => {
     const memberUser = await signup(member, { tenantId });
     const a = await makeAdvisor(owner, 'Ada');
     const b = await makeAdvisor(owner, 'Boaz');
-    const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+    const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
     const orgId = org.body.orgId;
-    await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
+    await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
 
     const shared = await owner.post(B, { orgId, name: 'Council', advisors: [a, b], visibility: 'shared' });
     const priv = await owner.post(B, { orgId, name: 'Private', advisors: [a], visibility: 'private' });
@@ -230,7 +230,7 @@ describe('advisory-board — @@<handle> resolution (for the AI chat)', () => {
 });
 
 describe('advisory-board — strategy context (ADR 0079 Phase 5)', () => {
-  const S = '/v1/host/openwop-app/strategy';
+  const S = '/host/openwop-app/strategy';
   it('carries readable strategy contextRefs, rejects unreadable, and previews them', async () => {
     await enable('advisory-board', 'on');
     await enable('strategy', 'on');
@@ -264,7 +264,7 @@ describe('advisory-board — strategy context (ADR 0079 Phase 5)', () => {
     await enable('advisory-board', 'on');
     await enable('projects', 'on');
     const { owner, advisors, orgId } = await ownerWithAdvisors();
-    const proj = (await owner.post('/v1/host/openwop-app/projects', { orgId, name: 'Launch Q3' })).body;
+    const proj = (await owner.post('/host/openwop-app/projects', { orgId, name: 'Launch Q3' })).body;
     expect(proj.id).toBeTruthy();
     const board = (await owner.post(B, { name: 'PMO Board', orgId, advisors, contextRefs: [{ kind: 'project', projectId: proj.id }] })).body;
     expect(board.contextRefs).toEqual([{ kind: 'project', projectId: proj.id }]);
@@ -276,9 +276,9 @@ describe('advisory-board — strategy context (ADR 0079 Phase 5)', () => {
     const tenantId = `org:abs-${Date.now()}-${n++}`;
     const owner = client(); await signup(owner, { tenantId });
     const member = client(); const memberUser = await signup(member, { tenantId });
-    const orgA = (await owner.post('/v1/host/openwop-app/orgs', { name: 'Alpha' })).body.orgId;
-    const orgB = (await owner.post('/v1/host/openwop-app/orgs', { name: 'Bravo' })).body.orgId;
-    await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
+    const orgA = (await owner.post('/host/openwop-app/orgs', { name: 'Alpha' })).body.orgId;
+    const orgB = (await owner.post('/host/openwop-app/orgs', { name: 'Bravo' })).body.orgId;
+    await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
     const adv = await makeAdvisor(member, 'Cleo');
     // an org-scoped strategy in org B (the member can't read it)
     const sB = (await owner.post(S, { orgId: orgB, title: 'Secret plan', scope: 'org' })).body;

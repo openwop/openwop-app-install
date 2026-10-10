@@ -59,13 +59,13 @@ function client(): Client {
 
 async function owner(who: string): Promise<Client> {
   const c = client();
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `${who}-${Date.now()}-${n++}@acme.test` });
+  const r = await c.post('/host/openwop-app/test/login', { email: `${who}-${Date.now()}-${n++}@acme.test` });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   return c;
 }
 
-const MCP = '/v1/host/openwop-app/mcp';
+const MCP = '/host/openwop-app/mcp';
 let rpcId = 0;
 const rpc = (c: Client, method: string, params?: unknown) =>
   c.post(MCP, { jsonrpc: '2.0', id: ++rpcId, method, ...(params !== undefined ? { params } : {}) });

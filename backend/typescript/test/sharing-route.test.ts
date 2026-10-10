@@ -3,6 +3,14 @@
  * link management (RBAC-gated mint/list/revoke) and the PUBLIC, unauthenticated
  * token resolve — including the value-add over Publishing (sharing a DRAFT page),
  * a KB-collection overview share, the social card, and revoke/toggle-off gating.
+ *
+ * Sabotage-witnessed (w7 /grade-tests): mint or revoke gated on `workspace:read`
+ * · revoke not persisted · the resourceType / expiresInDays / maxViews validators
+ * loosened · the label dropped from resolve · views not accumulating · the card
+ * consuming a view, or not enforcing the cap · the revoked gate removed from
+ * `resolveActiveLink` (caught on the CARD lane, which has no second guard) · the
+ * cms delete cascade skipped · cms/kb markdown or the kb name dropped · expiry
+ * collapsed to a 404 · `lastViewedAt` not stamped.
  */
 
 import http from 'node:http';
@@ -12,6 +20,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
+import type { ShareLink } from '../src/features/sharing/sharingService.js';
 
 let BASE: string;
 let server: http.Server;
@@ -31,18 +40,26 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
-interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res>; snapshot: () => string }
+/** The host error envelope (`errorEnvelope.ts`). */
+interface ErrorBody { error: string; message?: string; details?: Record<string, unknown> }
+type ListedLink = ShareLink & { cardTitle?: string; resourceMissing?: boolean; featureDisabled?: boolean };
+interface ListBody { links: ListedLink[] }
+type MintBody = ShareLink & { token: string };
+interface SharedBody { resourceType: string; label?: string; resource: Record<string, unknown> }
+interface CardBody { title: string; description: string }
+interface Res<T> { status: number; body: T }
+/** Typed per call at the JSON boundary — the one place a wire body becomes a product type. */
+type Call = <T = ErrorBody>(p: string, b?: unknown) => Promise<Res<T>>;
+interface Client { get: Call; post: Call; del: Call }
 function client(initialCookie = ''): Client {
   let cookie = initialCookie;
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T,>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-    const sc = getSetCookies(res.headers);
-    for (const ck of sc as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    for (const ck of getSetCookies(res.headers)) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]!; }
+    const out: unknown = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    return { status: res.status, body: out as T };
   };
-  return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), del: (p) => call('DELETE', p), snapshot: () => cookie };
+  return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), del: (p) => call('DELETE', p) };
 }
 
 let n = 0;
@@ -50,7 +67,7 @@ const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.tes
 // ADR 0026: real sign-in is Firebase OIDC; tests mint an authenticated user via
 // the env-gated auth test seam. Pass a shared `tenantId` to make co-tenant users.
 async function signup(c: Client, opts: { tenantId?: string } = {}): Promise<{ userId: string }> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail('shr'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
+  const r = await c.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: uniqEmail('shr'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
@@ -62,52 +79,68 @@ async function ownerWithMember(role: string): Promise<{ owner: Client; member: C
   await signup(owner, { tenantId });
   const member = client();
   const memberUser = await signup(member, { tenantId });
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   const orgId = org.body.orgId;
-  const add = await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: [role] });
+  const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: [role] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
   return { owner, member, orgId };
 }
 
 async function draftPage(owner: Client, orgId: string, title: string): Promise<string> {
-  const r = await owner.post(`/v1/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages`, { title, sections: [{ type: 'hero', data: { heading: 'Hi', subheading: 'Card description text.' } }] });
+  const r = await owner.post<{ pageId: string; status: string }>(`/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages`, { title, sections: [{ type: 'hero', data: { heading: 'Hi', subheading: 'Card description text.' } }] });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   expect(r.body.status).toBe('draft');
   return r.body.pageId;
 }
 
 const STRANGER_REVOKE_STATUS = 404;
-const links = (orgId: string): string => `/v1/host/openwop-app/sharing/orgs/${encodeURIComponent(orgId)}/links`;
-const shared = (token: string, s = ''): string => `/v1/host/openwop-app/shared/${encodeURIComponent(token)}${s}`;
+const links = (orgId: string): string => `/host/openwop-app/sharing/orgs/${encodeURIComponent(orgId)}/links`;
+const shared = (token: string, s = ''): string => `/host/openwop-app/shared/${encodeURIComponent(token)}${s}`;
+const mintLink = (c: Client, orgId: string, body: Record<string, unknown>): Promise<Res<MintBody>> => c.post<MintBody>(links(orgId), body);
+const listLinks = async (c: Client, orgId: string): Promise<ListedLink[]> => (await c.get<ListBody>(links(orgId))).body.links;
 
 describe('sharing — link management (RBAC)', () => {
   it('owner mints + lists + revokes; viewer lists but cannot mint/revoke (403)', async () => {
     const { owner, member, orgId } = await ownerWithMember('viewer');
     const pageId = await draftPage(owner, orgId, 'Page A');
 
-    const mint = await owner.post(links(orgId), { resourceType: 'cms_page', resourceId: pageId, label: 'Review link' });
+    const mint = await mintLink(owner, orgId, { resourceType: 'cms_page', resourceId: pageId, label: 'Review link' });
     expect(mint.status, JSON.stringify(mint.body)).toBe(201);
     expect(mint.body.token).toBeTruthy();
     expect(mint.body.revoked).toBe(false);
+    const tokenPath = `${links(orgId)}/${encodeURIComponent(mint.body.token)}`;
 
-    const list = await member.get(links(orgId));
+    const list = await member.get<ListBody>(links(orgId));
     expect(list.status).toBe(200);
-    expect(list.body.links[0].cardTitle).toBe('Page A');
+    expect(list.body.links[0]!.cardTitle).toBe('Page A');
 
     expect((await member.post(links(orgId), { resourceType: 'cms_page', resourceId: pageId })).status).toBe(403);
-    expect((await member.del(`${links(orgId)}/${encodeURIComponent(mint.body.token)}`)).status).toBe(403);
-    expect((await owner.del(`${links(orgId)}/${encodeURIComponent(mint.body.token)}`)).status).toBe(204);
+    expect((await listLinks(owner, orgId)).length, 'the refused mint wrote nothing').toBe(1);
+    expect((await member.del(tokenPath)).status).toBe(403);
+    // The refused revoke left the link LIVE (a 403 alone does not show that).
+    expect((await client().get(shared(mint.body.token))).status).toBe(200);
+    expect((await owner.del(tokenPath)).status).toBe(204);
+    // …and the owner's revoke actually landed: persisted, and the public lane is dark.
+    expect((await listLinks(owner, orgId)).find((l) => l.tokenHash === mint.body.tokenHash)?.revoked).toBe(true);
+    expect((await client().get(shared(mint.body.token))).status).toBe(404);
     // Idempotent revoke; a non-existent token 404s.
-    expect((await owner.del(`${links(orgId)}/${encodeURIComponent(mint.body.token)}`)).status).toBe(204);
+    expect((await owner.del(tokenPath)).status).toBe(204);
     expect((await owner.del(`${links(orgId)}/nope`)).status).toBe(404);
   });
 
   it('rejects an unknown resourceType (400) and a resource not in the org (404)', async () => {
     const { owner, orgId } = await ownerWithMember('viewer');
-    expect((await owner.post(links(orgId), { resourceType: 'nope', resourceId: 'x' })).status).toBe(400);
-    expect((await owner.post(links(orgId), { resourceType: 'cms_page', resourceId: 'no-such-page' })).status).toBe(404);
-    expect((await owner.post(links(orgId), { resourceType: 'cms_page', resourceId: 'x', expiresInDays: -1 })).status).toBe(400);
+    const badType = await owner.post(links(orgId), { resourceType: 'nope', resourceId: 'x' });
+    expect(badType.status).toBe(400);
+    expect(badType.body).toMatchObject({ error: 'validation_error', details: { field: 'resourceType' } });
+    const missing = await owner.post(links(orgId), { resourceType: 'cms_page', resourceId: 'no-such-page' });
+    expect(missing.status).toBe(404);
+    expect(missing.body.error).toBe('not_found');
+    const badExpiry = await owner.post(links(orgId), { resourceType: 'cms_page', resourceId: 'x', expiresInDays: -1 });
+    expect(badExpiry.status).toBe(400);
+    expect(badExpiry.body).toMatchObject({ error: 'validation_error', details: { field: 'expiresInDays' } });
+    expect(await listLinks(owner, orgId), 'no refused mint wrote a row').toEqual([]);
   });
 });
 
@@ -115,18 +148,18 @@ describe('sharing — public resolve (unauthenticated)', () => {
   it('resolves a DRAFT CMS page by token (what the published-only public surface cannot serve)', async () => {
     const { owner, orgId } = await ownerWithMember('viewer');
     const pageId = await draftPage(owner, orgId, 'Secret Draft');
-    const mint = await owner.post(links(orgId), { resourceType: 'cms_page', resourceId: pageId, label: 'preview' });
+    const mint = await mintLink(owner, orgId, { resourceType: 'cms_page', resourceId: pageId, label: 'preview' });
     const token = mint.body.token;
 
     const anon = client(); // NO cookie
-    const r = await anon.get(shared(token));
+    const r = await anon.get<SharedBody>(shared(token));
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     expect(r.body.resourceType).toBe('cms_page');
     expect(r.body.label).toBe('preview');
     expect(r.body.resource.title).toBe('Secret Draft');
     expect(r.body.resource.status).toBe('draft');
 
-    const card = await anon.get(shared(token, '/card'));
+    const card = await anon.get<CardBody>(shared(token, '/card'));
     expect(card.status).toBe(200);
     expect(card.body.title).toBe('Secret Draft');
     expect(card.body.description).toBe('Card description text.');
@@ -135,7 +168,7 @@ describe('sharing — public resolve (unauthenticated)', () => {
   it('PUB-7: enforces a per-link view cap on content (card preview is exempt)', async () => {
     const { owner, orgId } = await ownerWithMember('viewer');
     const pageId = await draftPage(owner, orgId, 'Capped');
-    const token = (await owner.post(links(orgId), { resourceType: 'cms_page', resourceId: pageId, maxViews: 2 })).body.token;
+    const token = (await mintLink(owner, orgId, { resourceType: 'cms_page', resourceId: pageId, maxViews: 2 })).body.token;
     const anon = client();
     expect((await anon.get(shared(token))).status).toBe(200);  // view 1
     expect((await anon.get(shared(token))).status).toBe(200);  // view 2
@@ -153,7 +186,7 @@ describe('sharing — public resolve (unauthenticated)', () => {
   it('SHWF-2: the card enforces the cap WITHOUT consuming a view', async () => {
     const { owner, orgId } = await ownerWithMember('viewer');
     const pageId = await draftPage(owner, orgId, 'CardCap');
-    const token = (await owner.post(links(orgId), { resourceType: 'cms_page', resourceId: pageId, maxViews: 1 })).body.token;
+    const token = (await mintLink(owner, orgId, { resourceType: 'cms_page', resourceId: pageId, maxViews: 1 })).body.token;
     const anon = client();
     // Does NOT consume: three unfurls in a row, then the single content view still works.
     expect((await anon.get(shared(token, '/card'))).status).toBe(200);
@@ -177,28 +210,14 @@ describe('sharing — public resolve (unauthenticated)', () => {
   it('PUB-7: rejects a non-positive / oversized maxViews at mint (400)', async () => {
     const { owner, orgId } = await ownerWithMember('viewer');
     const pageId = await draftPage(owner, orgId, 'BadCap');
-    expect((await owner.post(links(orgId), { resourceType: 'cms_page', resourceId: pageId, maxViews: 0 })).status).toBe(400);
-    expect((await owner.post(links(orgId), { resourceType: 'cms_page', resourceId: pageId, maxViews: 2.5 })).status).toBe(400);
-  });
-
-  it('resolves a KB-collection overview by token', async () => {
-    const { owner, orgId } = await ownerWithMember('viewer');
-    const col = await owner.post(`/v1/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections`, { name: 'Handbook' });
-    const cid = col.body.collectionId;
-    await owner.post(`/v1/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections/${cid}/documents`, { title: 'Doc One', text: 'hello world' });
-    const mint = await owner.post(links(orgId), { resourceType: 'kb_collection', resourceId: cid });
-
-    const anon = client();
-    const r = await anon.get(shared(mint.body.token));
-    expect(r.status, JSON.stringify(r.body)).toBe(200);
-    expect(r.body.resource.name).toBe('Handbook');
-    expect(r.body.resource.documents[0].title).toBe('Doc One');
+    expect((await mintLink(owner, orgId, { resourceType: 'cms_page', resourceId: pageId, maxViews: 0 })).status).toBe(400);
+    expect((await mintLink(owner, orgId, { resourceType: 'cms_page', resourceId: pageId, maxViews: 2.5 })).status).toBe(400);
   });
 
   it('404s a revoked link and an unknown/garbage token (the token IS the credential)', async () => {
     const { owner, orgId } = await ownerWithMember('viewer');
     const pageId = await draftPage(owner, orgId, 'Live');
-    const token = (await owner.post(links(orgId), { resourceType: 'cms_page', resourceId: pageId })).body.token;
+    const token = (await mintLink(owner, orgId, { resourceType: 'cms_page', resourceId: pageId })).body.token;
     const anon = client();
     expect((await anon.get(shared(token))).status).toBe(200);
 
@@ -206,15 +225,19 @@ describe('sharing — public resolve (unauthenticated)', () => {
     expect((await anon.get(shared('not a real token!!'))).status).toBe(404);
     expect((await anon.get(shared('Zm9vYmFy'))).status).toBe(404);
 
-    // revoke → 404
-    await owner.del(`${links(orgId)}/${encodeURIComponent(token)}`);
+    // revoke → 404, on BOTH public read lanes. The card leg is the discriminating
+    // one: content resolve has a second revoked check in `countShareViewOrThrow`,
+    // so with `resolveActiveLink`'s check removed it still 404s (measured — that
+    // probe stayed green); the card lane has no second guard.
+    expect((await owner.del(`${links(orgId)}/${encodeURIComponent(token)}`)).status).toBe(204);
     expect((await anon.get(shared(token))).status).toBe(404);
+    expect((await anon.get(shared(token, '/card'))).status).toBe(404);
 
     // ADR 0434 — `sharing` graduated to always-on, so there is no longer a toggle
     // leg here. The gates that DO hold the public surface are asserted above and
     // below: charset, unknown token, revocation, expiry, and org↔tenant binding,
     // each a uniform 404. A fresh valid link keeps resolving.
-    const token2 = (await owner.post(links(orgId), { resourceType: 'cms_page', resourceId: pageId })).body.token;
+    const token2 = (await mintLink(owner, orgId, { resourceType: 'cms_page', resourceId: pageId })).body.token;
     expect((await anon.get(shared(token2))).status).toBe(200);
     expect((await anon.get(shared(token2, '/card'))).status).toBe(200);
   });
@@ -222,7 +245,7 @@ describe('sharing — public resolve (unauthenticated)', () => {
   it('a cross-org caller cannot revoke another org link (IDOR → 404), and a deleted resource 404s the link', async () => {
     const { owner, orgId } = await ownerWithMember('viewer');
     const pageId = await draftPage(owner, orgId, 'Doomed');
-    const token = (await owner.post(links(orgId), { resourceType: 'cms_page', resourceId: pageId })).body.token;
+    const token = (await mintLink(owner, orgId, { resourceType: 'cms_page', resourceId: pageId })).body.token;
 
     // A different tenant's user can't revoke this org's link (not a member → 404/403).
     const stranger = client();
@@ -232,6 +255,8 @@ describe('sharing — public resolve (unauthenticated)', () => {
     // both meant the test could not detect an existence-leak regression in either
     // direction. Pinned to the value the route actually returns.
     expect((await stranger.del(`${links(orgId)}/${encodeURIComponent(token)}`)).status).toBe(STRANGER_REVOKE_STATUS);
+    // The claim is "cannot revoke", not "gets a 404": the link is still live.
+    expect((await client().get(shared(token))).status).toBe(200);
 
     // SHWF-8 / ADR 0644 D7 — this used to assert ONLY the 404 below, under the
     // comment "the link resolves to a gone resource". That assertion passes WITH OR
@@ -241,19 +266,19 @@ describe('sharing — public resolve (unauthenticated)', () => {
     // cascade actually retires are unbounded row growth outside the sweep's reach
     // and `hasActiveLinkForResource` reporting true for an orphan; neither is
     // observable through the public 404. Assert the ROW.
-    expect((await owner.get(links(orgId))).body.links.some((l: { resourceId: string }) => l.resourceId === pageId)).toBe(true);
-    await owner.del(`/v1/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages/${pageId}`);
+    expect((await listLinks(owner, orgId)).some((l) => l.resourceId === pageId)).toBe(true);
+    await owner.del(`/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages/${pageId}`);
     const anon = client();
     expect((await anon.get(shared(token))).status).toBe(404);
     // The cascade, actually witnessed: the owner's link list no longer carries it.
-    expect((await owner.get(links(orgId))).body.links.some((l: { resourceId: string }) => l.resourceId === pageId)).toBe(false);
+    expect((await listLinks(owner, orgId)).some((l) => l.resourceId === pageId)).toBe(false);
   });
 });
 
 describe('R2 SR-1 — cms/kb shares carry a RENDERED markdown body (the Blocker: the viewer showed "Nothing to show here")', () => {
   it('cms_page resolve prerenders sections to markdown — text content in, live sections honestly noted', async () => {
     const { owner, orgId } = await ownerWithMember('viewer');
-    const r = await owner.post(`/v1/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages`, {
+    const r = await owner.post<{ pageId: string }>(`/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages`, {
       title: 'Landing', sections: [
         { type: 'hero', data: { heading: 'Build faster', subheading: 'Ship the thing.' } },
         { type: 'richText', data: { heading: 'How it works', text: 'Step one. Step two.' } },
@@ -262,9 +287,9 @@ describe('R2 SR-1 — cms/kb shares carry a RENDERED markdown body (the Blocker:
       ],
     });
     expect(r.status, JSON.stringify(r.body)).toBe(201);
-    const token = (await owner.post(links(orgId), { resourceType: 'cms_page', resourceId: r.body.pageId })).body.token;
+    const token = (await mintLink(owner, orgId, { resourceType: 'cms_page', resourceId: r.body.pageId })).body.token;
 
-    const res = await client().get(shared(token));
+    const res = await client().get<SharedBody>(shared(token));
     expect(res.status, JSON.stringify(res.body)).toBe(200);
     const md = String(res.body.resource.markdown);
     expect(md).toContain('# Build faster');
@@ -278,19 +303,24 @@ describe('R2 SR-1 — cms/kb shares carry a RENDERED markdown body (the Blocker:
     expect(md).toContain('isn’t included in this shared view');
   });
 
+  // Absorbs the former "resolves a KB-collection overview by token" case, which
+  // built the identical fixture to assert the structured `name` + `documents`.
   it('kb_collection resolve prerenders name/description/documents to markdown', async () => {
     const { owner, orgId } = await ownerWithMember('viewer');
-    const col = await owner.post(`/v1/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections`, { name: 'Handbook', description: 'Everything we know.' });
+    const col = await owner.post<{ collectionId: string }>(`/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections`, { name: 'Handbook', description: 'Everything we know.' });
     const cid = col.body.collectionId;
-    await owner.post(`/v1/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections/${cid}/documents`, { title: 'Doc One', text: 'hello world' });
-    const token = (await owner.post(links(orgId), { resourceType: 'kb_collection', resourceId: cid })).body.token;
+    await owner.post(`/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections/${cid}/documents`, { title: 'Doc One', text: 'hello world' });
+    const token = (await mintLink(owner, orgId, { resourceType: 'kb_collection', resourceId: cid })).body.token;
 
-    const res = await client().get(shared(token));
+    const res = await client().get<SharedBody>(shared(token));
     expect(res.status, JSON.stringify(res.body)).toBe(200);
     const md = String(res.body.resource.markdown);
     expect(md).toContain('Everything we know.');
     expect(md).toContain('- Doc One');
     expect(md).toContain('document(s)');
+    // The structured overview stays on the wire beside the markdown.
+    expect(res.body.resource.name).toBe('Handbook');
+    expect((res.body.resource.documents as Array<{ title: string }>)[0]!.title).toBe('Doc One');
   });
 });
 
@@ -298,7 +328,7 @@ describe('R2 SR-10 — expired says EXPIRED (410); revoked and never-existed sta
   it('an expired link resolves 410 {reason: expired}; revoked and garbage resolve identical 404s', async () => {
     const { owner, orgId } = await ownerWithMember('viewer');
     const pageId = await draftPage(owner, orgId, 'Expiring');
-    const mint = await owner.post(links(orgId), { resourceType: 'cms_page', resourceId: pageId, expiresInDays: 1 });
+    const mint = await mintLink(owner, orgId, { resourceType: 'cms_page', resourceId: pageId, expiresInDays: 1 });
     expect(mint.status, JSON.stringify(mint.body)).toBe(201);
     const token = mint.body.token;
     const anon = client();
@@ -307,17 +337,18 @@ describe('R2 SR-10 — expired says EXPIRED (410); revoked and never-existed sta
     // Fake ONLY Date (the server runs in-process): two days pass.
     vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + 2 * 86_400_000 });
     try {
-      const expired = await anon.get(shared(token));
+      const expired = await anon.get<ErrorBody>(shared(token));
       expect(expired.status).toBe(410);
       expect(expired.body?.details?.reason).toBe('expired');
     } finally { vi.useRealTimers(); }
 
     // Revoked and never-existed are DELIBERATELY indistinguishable (oracle rule).
     const pageId2 = await draftPage(owner, orgId, 'Revoked');
-    const tok2 = (await owner.post(links(orgId), { resourceType: 'cms_page', resourceId: pageId2 })).body.token;
-    const list = await owner.get(links(orgId));
-    const row = list.body.links.find((l: any) => l.resourceId === pageId2);
-    expect((await owner.del(`${links(orgId)}/${encodeURIComponent(row.tokenHash ?? tok2)}`)).status).toBe(204);
+    const tok2 = (await mintLink(owner, orgId, { resourceType: 'cms_page', resourceId: pageId2 })).body.token;
+    const row = (await listLinks(owner, orgId)).find((l) => l.resourceId === pageId2);
+    expect(row?.tokenHash, 'the owner list carries the at-rest hash').toBeTruthy();
+    // Revoke BY HASH — the only handle the management list holds (ADR 0448 P2).
+    expect((await owner.del(`${links(orgId)}/${encodeURIComponent(row!.tokenHash)}`)).status).toBe(204);
     const revoked = await anon.get(shared(tok2));
     const garbage = await anon.get(shared('tokenthatneverexisted123'));
     expect(revoked.status).toBe(404);
@@ -330,10 +361,10 @@ describe('R3-SH1 — the WHEN of "who/when last viewed"', () => {
   it('stamps lastViewedAt in the SAME write the count rides, and the owner list carries it', async () => {
     const { owner, orgId } = await ownerWithMember('viewer');
     const pageId = await draftPage(owner, orgId, 'Watched');
-    const token = (await owner.post(links(orgId), { resourceType: 'cms_page', resourceId: pageId })).body.token;
+    const token = (await mintLink(owner, orgId, { resourceType: 'cms_page', resourceId: pageId })).body.token;
 
     // Before any view: no fabricated "never" value — the field is ABSENT.
-    const before = (await owner.get(links(orgId))).body.links as Array<{ viewCount?: number; lastViewedAt?: string }>;
+    const before = await listLinks(owner, orgId);
     const mine = before.find((l) => (l.viewCount ?? 0) === 0);
     expect(mine, 'the fresh link is listed').toBeTruthy();
     expect(mine).not.toHaveProperty('lastViewedAt');
@@ -341,7 +372,7 @@ describe('R3-SH1 — the WHEN of "who/when last viewed"', () => {
     const t0 = Date.now();
     expect((await client().get(shared(token))).status).toBe(200);
 
-    const after = (await owner.get(links(orgId))).body.links as Array<{ viewCount?: number; lastViewedAt?: string }>;
+    const after = await listLinks(owner, orgId);
     const viewed = after.find((l) => (l.viewCount ?? 0) === 1);
     expect(viewed, 'the viewed link is listed with its count').toBeTruthy();
     const stamp = Date.parse(viewed!.lastViewedAt ?? '');

@@ -33,7 +33,7 @@ describe('ADR 0333 drawing validator — closed-world + untrusted-content harden
     expect(validateDrawingDoc(draw([{ kind: 'image', src: 'https://evil.example/beacon.png' }])).errors.length)
       .toBeGreaterThan(0);
     // A real host media-asset serve path is accepted.
-    expect(validateDrawingDoc(draw([{ kind: 'image', src: '/v1/host/openwop-app/assets/abc123XYZ_-' }])).errors)
+    expect(validateDrawingDoc(draw([{ kind: 'image', src: '/host/openwop-app/assets/abc123XYZ_-' }])).errors)
       .toEqual([]);
   });
 

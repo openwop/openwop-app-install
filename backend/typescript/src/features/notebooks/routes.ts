@@ -77,7 +77,7 @@ const MAX_AUDIO_DECODED_BYTES = 32 * 1024 * 1024;
  *  ROSTER agents, and the researcher is a manifest pack agent the chat dispatch
  *  resolves via the agent registry). Phase-2 owner-subject auto-grounding is
  *  agent-agnostic, so swapping the agent KEEPS grounding and adds ask/search. */
-const RESEARCHER_AGENT_ID = 'feature.notebooks.agents.researcher';
+const RESEARCHER_AGENT_ID = 'vendor.openwop-app.notebooks.agents.researcher';
 
 const TOGGLE = { toggleId: 'notebooks', label: 'Research Notebooks' };
 
@@ -123,7 +123,7 @@ async function requireNotebook(req: Request, scope: Scope) {
 
 export function registerNotebooksRoutes(deps: RouteDeps): void {
   const { app } = deps;
-  const BASE = '/v1/host/openwop-app/notebooks';
+  const BASE = '/host/openwop-app/notebooks';
 
   // POST / — create a notebook (project + KB collection + binding) in body.orgId.
   app.post(BASE, async (req, res, next) => {

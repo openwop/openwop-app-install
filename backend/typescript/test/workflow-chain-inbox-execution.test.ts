@@ -196,7 +196,7 @@ let n = 0;
 async function ownerTenant(): Promise<string> {
   const tenantId = `org:inboxchain-${Date.now()}-${n++}`;
   const owner = client();
-  const r = await owner.post('/v1/host/openwop-app/test/login', { email: `inboxchain-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await owner.post('/host/openwop-app/test/login', { email: `inboxchain-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return tenantId;
 }

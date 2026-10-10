@@ -19,7 +19,7 @@ import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { OpenwopError } from '../../types.js';
 import { tenantOf } from '../featureRoute.js';
 import { getConversationMeta, setConversationCapabilityScope, type ConversationCapabilityScope, type ConversationMeta } from '../../host/conversationStore.js';
-import { isVisibleToAsync } from '../../host/conversationVisibility.js';
+import { isVisibleToAsync, toolAuthorityHolds } from '../../host/conversationVisibility.js';
 import { listToolApprovals, resolveToolApproval } from './approvalLedger.js';
 
 const MAX_TOOLS = 200; // cap each scope list to bound payload (abuse guard)
@@ -89,7 +89,7 @@ function readScope(body: unknown): ConversationCapabilityScope | undefined {
 
 export function registerConversationToolsRoutes(deps: RouteDeps): void {
   const { app } = deps;
-  const BASE = '/v1/host/openwop-app/conversation-tools/sessions/:sessionId';
+  const BASE = '/host/openwop-app/conversation-tools/sessions/:sessionId';
 
   // READ — the scope config + the approval ledger for this conversation.
   app.get(`${BASE}/capability-scope`, async (req, res, next) => {
@@ -100,6 +100,19 @@ export function registerConversationToolsRoutes(deps: RouteDeps): void {
       res.json({
         scope: meta?.capabilityScope ?? { mode: 'agent-default' },
         approvals: await listToolApprovals(tenantId, sessionId),
+        // ADR 0834 D3 — what THIS viewer may do with the conversation's tool asks, so the
+        // client stops offering controls the server would refuse or silently ignore.
+        // `mayApprove` is the approvals route's own predicate. `mayBypass` is a hint: the
+        // exchange decides against the RUN's acting principal, which for an owned
+        // conversation is its owner; an ownerless (legacy) conversation leaves it to the
+        // exchange.
+        viewer: {
+          mayApprove: toolAuthorityHolds(actingUserOf(req), meta.ownerUserId),
+          mayBypass: !meta.ownerUserId || toolAuthorityHolds(actingUserOf(req), meta.ownerUserId),
+          // The scope PUT's own gate (`requireOwnerWrite`): the owner, or anyone visible on
+          // an ownerless conversation.
+          mayEditScope: !meta.ownerUserId || meta.ownerUserId === actingUserOf(req),
+        },
       });
     } catch (err) { next(err); }
   });
@@ -120,18 +133,39 @@ export function registerConversationToolsRoutes(deps: RouteDeps): void {
     } catch (err) { next(err); }
   });
 
-  // RESOLVE — approve/deny a pending per-tool approval (the Phase 3 resolve seam).
+  // RESOLVE — approve/deny a PENDING per-tool approval (the Phase 3 resolve seam).
+  // ADR 0834 D3 — authority is the principal the conversation's tools act as (its
+  // owner), through the ONE predicate the exchange's bypass check also calls. An
+  // ownerless conversation has no such principal ⇒ 403 (the scope PUT above stays
+  // tenant-permissive for ownerless conversations; an approval spends authority).
+  // ADR 0834 D2 — an approval ANSWERS an ask: no pending row ⇒ 409, and a row that moved
+  // since the approver looked (`requestedAt` echoed) ⇒ 409.
   app.post(`${BASE}/approvals/:toolName`, async (req, res, next) => {
     try {
       const tenantId = tenantOf(req);
       const sessionId = req.params.sessionId;
-      await requireOwnerWrite(req, tenantId, sessionId);
-      const decision = (req.body as { decision?: unknown })?.decision;
+      const meta = await requireVisibleMeta(req, tenantId, sessionId);
+      const approver = actingUserOf(req);
+      if (!approver || !toolAuthorityHolds(approver, meta.ownerUserId)) {
+        throw new OpenwopError('forbidden', 'Only the conversation owner may approve its tool calls.', 403);
+      }
+      const body = (req.body ?? {}) as { decision?: unknown; requestedAt?: unknown };
+      const decision = body.decision;
       if (decision !== 'approved' && decision !== 'denied') {
         throw new OpenwopError('validation_error', "decision MUST be 'approved' or 'denied'.", 400);
       }
-      const record = await resolveToolApproval(tenantId, sessionId, req.params.toolName, decision, actingUserOf(req) ?? 'unknown');
-      res.json({ approval: record });
+      // FW2-CD-2 — approve what you saw: the version is required, not optional, so no
+      // caller (an API client included) can approve a row it never read.
+      if (typeof body.requestedAt !== 'string' || body.requestedAt.length === 0) {
+        throw new OpenwopError('validation_error', 'requestedAt (the pending request version you reviewed) is required.', 400);
+      }
+      const out = await resolveToolApproval(tenantId, sessionId, req.params.toolName, decision, approver, body.requestedAt);
+      if (!out.ok) {
+        throw out.reason === 'no_pending_approval'
+          ? new OpenwopError('conflict', 'No approval is pending for this tool in this conversation.', 409, { reason: 'no_pending_approval' })
+          : new OpenwopError('conflict', 'This request changed since you reviewed it — review it again.', 409, { reason: 'approval_changed' });
+      }
+      res.json({ approval: out.record });
     } catch (err) { next(err); }
   });
 }

@@ -12,6 +12,7 @@
  * guard against shipping a broken recorded tour; the draft still saves so the
  * author can see what needs a registration.
  */
+import { recordedWalkthroughId } from '../builder/persistence/workflowId.js';
 import { authedHeaders, config, fetchOpts } from '../client/config.js';
 import type { WalkthroughRecording } from './walkthroughRecorder.js';
 
@@ -65,7 +66,7 @@ export function synthesizeWalkthrough(recording: WalkthroughRecording, name: str
   return {
     // Grade-pass: randomUUID (the author-tool idiom) — the Date.now() suffix
     // had a 1ms same-slug collision window that silently OVERWROTE a draft.
-    workflowId: `walkthrough.recorded.${slug}.${crypto.randomUUID().slice(0, 8)}`,
+    workflowId: recordedWalkthroughId(slug),
     metadata: { name, walkthrough: true, lifecycle: { transient: true, generatedBy: 'guided-tours.recorder' } },
     nodes,
     edges,

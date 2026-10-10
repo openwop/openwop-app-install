@@ -16,6 +16,7 @@ import { getSetCookies } from './headerCookies.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { ensureAssistantAgent } from '../src/features/assistant/capability.js';
+import { bareRunId } from './support/bareRunId.js';
 
 let BASE: string;
 let server: http.Server;
@@ -44,12 +45,12 @@ function client() {
 }
 async function owner() {
   const c = client();
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `conv-${Date.now()}-${n++}@acme.test` });
+  const r = await c.post('/host/openwop-app/test/login', { email: `conv-${Date.now()}-${n++}@acme.test` });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return { c, userId: r.body.user.userId as string };
 }
 
-const S = '/v1/host/openwop-app/chat/sessions';
+const S = '/host/openwop-app/chat/sessions';
 
 describe('conversations — typed model + participants', () => {
   it('creates a typed conversation with participants (owner + members)', async () => {
@@ -76,9 +77,9 @@ describe('conversations — typed model + participants', () => {
 
   it('open-or-resume a 1:1 is idempotent (same dmKey → same conversation)', async () => {
     const { c } = await owner();
-    const first = await c.post('/v1/host/openwop-app/chat/conversations/open', { type: 'agent', subjectRef: 'agent:user.t.ada' });
+    const first = await c.post('/host/openwop-app/chat/conversations/open', { type: 'agent', subjectRef: 'agent:user.t.ada' });
     expect(first.status).toBe(201);
-    const again = await c.post('/v1/host/openwop-app/chat/conversations/open', { type: 'agent', subjectRef: 'agent:user.t.ada' });
+    const again = await c.post('/host/openwop-app/chat/conversations/open', { type: 'agent', subjectRef: 'agent:user.t.ada' });
     expect(again.status).toBe(200); // resumed, not created
     expect(again.body.sessionId).toBe(first.body.sessionId);
   });
@@ -106,10 +107,10 @@ describe('conversations — typed model + participants', () => {
     // test needs a real board — and the participants it asserts are the ones the
     // SERVER chose, not the ones the body asked for.
     const { c } = await owner();
-    const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
-    const advisor = await c.post('/v1/host/openwop-app/roster', { persona: 'Ada Lovelace', agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
+    const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
+    const advisor = await c.post('/host/openwop-app/roster', { persona: 'Ada Lovelace', agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
     expect(advisor.status, JSON.stringify(advisor.body)).toBe(201);
-    const board = await c.post('/v1/host/openwop-app/advisors/boards', {
+    const board = await c.post('/host/openwop-app/advisors/boards', {
       orgId: org.body.orgId, name: 'Titans', advisors: [advisor.body.rosterId],
       personaKind: 'historical', visibility: 'shared',
     });
@@ -185,10 +186,10 @@ describe('conversations — typed model + participants', () => {
     // Two distinct users in the SAME tenant (explicit tenantId + subject).
     const tenantId = `acme-${Date.now()}-${n++}`;
     const a = client();
-    const ra = await a.post('/v1/host/openwop-app/test/login', { email: `owner-${n}@acme.test`, tenantId, subject: `oidc:owner-${n}` });
+    const ra = await a.post('/host/openwop-app/test/login', { email: `owner-${n}@acme.test`, tenantId, subject: `oidc:owner-${n}` });
     expect(ra.status).toBe(201);
     const b = client();
-    const rb = await b.post('/v1/host/openwop-app/test/login', { email: `other-${n}@acme.test`, tenantId, subject: `oidc:other-${n}` });
+    const rb = await b.post('/host/openwop-app/test/login', { email: `other-${n}@acme.test`, tenantId, subject: `oidc:other-${n}` });
     expect(rb.status).toBe(201);
     const bId = rb.body.user.userId as string;
 
@@ -223,12 +224,12 @@ describe('conversations — typed model + participants', () => {
     expect((ok.body.participants as Array<{ subjectRef: string }>).some((p) => p.subjectRef === 'agent:x')).toBe(true);
   });
 
-  const WS = '/v1/host/openwop-app/assistant/workspace-conversation';
+  const WS = '/host/openwop-app/assistant/workspace-conversation';
 
   it('workspace conversation: 404 with no assistant; open-or-resume (dedup) once one exists (ADR 0043 Phase 6 / W-A)', async () => {
     const tenantId = `ws-${Date.now()}-${n++}`;
     const c = client();
-    const r = await c.post('/v1/host/openwop-app/test/login', { email: `ws-${n}@acme.test`, tenantId, subject: `oidc:ws-${n}` });
+    const r = await c.post('/host/openwop-app/test/login', { email: `ws-${n}@acme.test`, tenantId, subject: `oidc:ws-${n}` });
     expect(r.status).toBe(201);
 
     // No workspace assistant yet → 404 (no orphan workspace chat created).
@@ -265,15 +266,36 @@ describe('conversations — typed model + participants', () => {
     expect(before.status).toBe(200);
     expect(before.body.conversationRunId).toBeUndefined();
 
+    // ADR 0764 D5 — the bind must name a REAL conversation run of this session.
+    const startRun = async (workflowId: string, chatSessionId?: string): Promise<string> => {
+      const r = await c.post('/runs', { workflowId, inputs: { provider: 'mock', model: 'mock-1' }, ...(chatSessionId ? { metadata: { chatSessionId } } : {}) });
+      expect(r.status, JSON.stringify(r.body)).toBe(201);
+      // The BARE id, as the SPA persists it (client/v2Wire.ts unbinds every v2 id). A bound
+      // id fails the bind's id grammar with 400, which would make the D5 negatives below vacuous.
+      return bareRunId(r.body.runId as string);
+    };
+    const runId = await startRun('openwop-app.conversation', id);
+
     // Record it → 204; the messages page (paged AND full) now returns it.
-    expect((await c.put(`${S}/${id}/conversation-run`, { conversationRunId: 'run-abc-123' })).status).toBe(204);
-    expect((await c.get(`${S}/${id}/messages?limit=50`)).body.conversationRunId).toBe('run-abc-123');
-    expect((await c.get(`${S}/${id}/messages`)).body.conversationRunId).toBe('run-abc-123');
+    expect((await c.put(`${S}/${id}/conversation-run`, { conversationRunId: runId })).status).toBe(204);
+    expect((await c.get(`${S}/${id}/messages?limit=50`)).body.conversationRunId).toBe(runId);
+    expect((await c.get(`${S}/${id}/messages`)).body.conversationRunId).toBe(runId);
 
     // Idempotent re-PUT; invalid id rejected; unknown session 404s.
-    expect((await c.put(`${S}/${id}/conversation-run`, { conversationRunId: 'run-abc-123' })).status).toBe(204);
+    expect((await c.put(`${S}/${id}/conversation-run`, { conversationRunId: runId })).status).toBe(204);
     expect((await c.put(`${S}/${id}/conversation-run`, { conversationRunId: 'has:colons' })).status).toBe(400);
     expect((await c.put(`${S}/does-not-exist/conversation-run`, { conversationRunId: 'run-x' })).status).toBe(404);
+
+    // ADR 0764 D5 — an id that merely LOOKS like a run is refused: absent → the
+    // uniform 404; another session's conversation run → 400; a non-conversation
+    // run → 400. None of them moves the recorded binding.
+    expect((await c.put(`${S}/${id}/conversation-run`, { conversationRunId: 'run-abc-123' })).status).toBe(404);
+    const other = await c.post(S, { title: 'Other', type: 'agent' });
+    const foreignConv = await startRun('openwop-app.conversation', other.body.sessionId as string);
+    expect((await c.put(`${S}/${id}/conversation-run`, { conversationRunId: foreignConv })).status).toBe(400);
+    const notAConversation = await startRun('openwop-app.uppercase');
+    expect((await c.put(`${S}/${id}/conversation-run`, { conversationRunId: notAConversation })).status).toBe(400);
+    expect((await c.get(`${S}/${id}/messages`)).body.conversationRunId).toBe(runId);
   });
 
   it('updates a message in place (ADR 0067 — run-backed workflow_run re-save)', async () => {
@@ -303,10 +325,10 @@ describe('conversations — typed model + participants', () => {
     // Two humans in the SAME workspace tenant (a real shared-chat scenario).
     const tenantId = `ws-${Date.now()}-${n++}`;
     const ca = client();
-    const ra = await ca.post('/v1/host/openwop-app/test/login', { email: `a-${n}@acme.test`, tenantId, subject: `oidc:a-${n}` });
+    const ra = await ca.post('/host/openwop-app/test/login', { email: `a-${n}@acme.test`, tenantId, subject: `oidc:a-${n}` });
     expect(ra.status).toBe(201);
     const cb = client();
-    const rb = await cb.post('/v1/host/openwop-app/test/login', { email: `b-${n}@acme.test`, tenantId, subject: `oidc:b-${n}` });
+    const rb = await cb.post('/host/openwop-app/test/login', { email: `b-${n}@acme.test`, tenantId, subject: `oidc:b-${n}` });
     expect(rb.status).toBe(201);
     const bUserId = rb.body.user.userId as string;
 
@@ -336,7 +358,7 @@ describe('conversations — typed model + participants', () => {
     await c.post(`${S}/${id}/messages`, { messageId: 'm1', role: 'assistant', content: '{}' });
     await c.post(`${S}/${id}/messages`, { messageId: 'm2', role: 'assistant', content: '{}' });
     // Rate m1 👍 (m2 left unrated).
-    expect((await c.post(`/v1/host/openwop-app/chat/messages/m1/feedback`, { conversationId: id, rating: 'up' })).status).toBe(200);
+    expect((await c.post(`/host/openwop-app/chat/messages/m1/feedback`, { conversationId: id, rating: 'up' })).status).toBe(200);
 
     const fb = await c.get(`${S}/${id}/feedback`);
     expect(fb.status, JSON.stringify(fb.body)).toBe(200);

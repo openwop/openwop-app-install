@@ -14,6 +14,7 @@ export const PROJECTS_LIST_TOOL_ID = 'openwop:projects.list';
 export function registerProjectsAgentTools(): void {
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: PROJECTS_LIST_TOOL_ID,
       // UX_UPGRADE-projects R2 (PRJ2-M6) — this used to advertise a

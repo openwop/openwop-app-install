@@ -55,6 +55,17 @@
  * port-qualifying exactly as `health-from-crm` already does
  * (`open-deals.deals → review.artifact`); witnessed in `csm-packs.test.ts`
  * against the REAL expanded definition + the REAL `buildNodeInputs`.
+ *
+ * Sabotage-witnessed (w7 /grade-tests): the `health-write` fan-in edge made bare
+ * again (run fails on a partial fan-in) · the `truthy approved` condition removed
+ * from `review → follow-up` (REJECT creates the task) · `follow-up` wired off
+ * `open-deals` ahead of the gate (REJECT finds a task).
+ * NOT single-file-probeable: the gate's `action`/`decision` normalisation lives in
+ * `packs/vendor.myndhyve.chat/index.mjs`, and editing that file without
+ * regenerating `packs/.steward-manifest.json` makes the pack `untrusted` — every
+ * renewal run then fails at the gate, which reds all legs for the wrong reason.
+ * HONEST CEILING: `pollRun`/`resolveGate` poll run status every 25 ms — a run
+ * settling in the background executor has no hook to await.
  */
 
 import http from 'node:http';
@@ -66,6 +77,7 @@ import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { getChain, expandChain } from '../src/host/workflowChainPackLoader.js';
 import { registerWorkflow } from '../src/host/workflowsRegistry.js';
+import { bareRunId } from './support/bareRunId.js';
 
 let BASE: string;
 let server: http.Server;
@@ -86,24 +98,24 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
-interface Client {
-  get: (p: string) => Promise<Res>;
-  post: (p: string, b?: unknown) => Promise<Res>;
-  patch: (p: string, b?: unknown) => Promise<Res>;
-}
+/** The host error envelope (`errorEnvelope.ts`). */
+interface ErrorBody { error: string; message?: string; details?: Record<string, unknown> }
+interface Res<T> { status: number; body: T }
+/** Typed per call at the JSON boundary — the one place a wire body becomes a product type. */
+type Call = <T = ErrorBody>(p: string, b?: unknown) => Promise<Res<T>>;
+interface Client { get: Call; post: Call; patch: Call }
+interface TasksBody { tasks: Array<{ taskId: string; title: string; status: string }> }
 function client(): Client {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T,>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
-    const sc = getSetCookies(res.headers);
-    for (const c of sc as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    for (const c of getSetCookies(res.headers)) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]!; }
+    const out: unknown = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    return { status: res.status, body: out as T };
   };
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b) };
 }
@@ -112,20 +124,20 @@ function client(): Client {
  *  terminal state. The RFC 0093 capability-token path (`POST /v1/interrupts/
  *  :token`) is the same one the chat's approval card uses. */
 async function resolveGate(owner: Client, runId: string, resumeValue: unknown): Promise<RunSnapshot> {
-  const ints = await owner.get(`/v1/host/openwop-app/runs/${runId}/interrupts`);
+  const ints = await owner.get<{ interrupts: Array<{ token: string; nodeId: string }> }>(`/host/openwop-app/runs/${bareRunId(runId)}/interrupts`);
   expect(ints.status, JSON.stringify(ints.body)).toBe(200);
-  const interrupts = ints.body.interrupts as Array<{ token: string; nodeId: string }>;
+  const interrupts = ints.body.interrupts;
   const gate = interrupts.find((i) => i.nodeId.includes('review'));
   expect(gate, `expected a pending interrupt for the review gate: ${JSON.stringify(interrupts)}`).toBeTruthy();
-  const resolved = await owner.post(`/v1/interrupts/${encodeURIComponent(gate!.token)}`, { resumeValue });
+  const resolved = await owner.post(`/interrupts/${encodeURIComponent(gate!.token)}`, { resumeValue });
   expect(resolved.status, JSON.stringify(resolved.body)).toBe(200);
   // Poll to a TERMINAL state — `pollRun` breaks on `waiting-*` too, which after a
   // resume is a transient the resumed run passes straight through.
   let snap: RunSnapshot = { status: 'running' };
   for (let i = 0; i < 120; i++) {
-    const r = await owner.get(`/v1/runs/${runId}`);
+    const r = await owner.get<RunSnapshot>(`/runs/${runId}`);
     expect(r.status, JSON.stringify(r.body)).toBe(200);
-    snap = r.body as RunSnapshot;
+    snap = r.body;
     if (snap.status === 'completed' || snap.status === 'failed' || snap.status === 'cancelled') break;
     await new Promise((res) => setTimeout(res, 25));
   }
@@ -136,21 +148,21 @@ let n = 0;
 async function ownerOrg(): Promise<{ owner: Client; orgId: string; tenantId: string }> {
   const tenantId = `org:csmchain-${Date.now()}-${n++}`;
   const owner = client();
-  const r = await owner.post('/v1/host/openwop-app/test/login', { email: `csmchain-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await owner.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: `csmchain-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return { owner, orgId: org.body.orgId, tenantId };
 }
-const c = (orgId: string, suffix = ''): string => `/v1/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}${suffix}`;
+const c = (orgId: string, suffix = ''): string => `/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}${suffix}`;
 
 interface RunSnapshot { status: string }
 async function pollRun(owner: Client, runId: string): Promise<RunSnapshot> {
   let snap: RunSnapshot = { status: 'pending' };
   for (let i = 0; i < 80; i++) {
-    const r = await owner.get(`/v1/runs/${runId}`);
+    const r = await owner.get<RunSnapshot>(`/runs/${runId}`);
     expect(r.status, JSON.stringify(r.body)).toBe(200);
-    snap = r.body as RunSnapshot;
+    snap = r.body;
     if (snap.status === 'completed' || snap.status === 'failed' || snap.status === 'cancelled' || snap.status.startsWith('waiting')) break;
     await new Promise((res) => setTimeout(res, 25));
   }
@@ -161,9 +173,9 @@ describe('csm-ops.health-from-crm — end-to-end execution (real executor, direc
   it('reads the linked company\'s open deals + org open tasks and writes healthScore/healthFactors/healthComputedAt via ctx.features.csm', async () => {
     const { owner, orgId } = await ownerOrg();
 
-    const company = await owner.post(c(orgId, '/companies'), { name: 'Globex' });
+    const company = await owner.post<{ companyId: string }>(c(orgId, '/companies'), { name: 'Globex' });
     expect(company.status, JSON.stringify(company.body)).toBe(201);
-    const companyId = company.body.companyId as string;
+    const companyId = company.body.companyId;
 
     // One OPEN deal (default stage) + one WON deal (excluded) for the linked company.
     const openDeal = await owner.post(c(orgId, '/deals'), { title: 'Renewal', companyId });
@@ -171,25 +183,25 @@ describe('csm-ops.health-from-crm — end-to-end execution (real executor, direc
     const wonDeal = await owner.post(c(orgId, '/deals'), { title: 'Closed upsell', companyId, status: 'won' });
     expect(wonDeal.status, JSON.stringify(wonDeal.body)).toBe(201);
     // A distractor deal for a DIFFERENT company — proves the company scoping.
-    const otherCompany = await owner.post(c(orgId, '/companies'), { name: 'Other Co' });
+    const otherCompany = await owner.post<{ companyId: string }>(c(orgId, '/companies'), { name: 'Other Co' });
     const distractorDeal = await owner.post(c(orgId, '/deals'), { title: 'Unrelated', companyId: otherCompany.body.companyId });
     expect(distractorDeal.status).toBe(201);
 
     // One OPEN task + one DONE task (excluded) for the linked company.
     const openTask = await owner.post(c(orgId, '/tasks'), { title: 'Check-in call', companyId });
     expect(openTask.status, JSON.stringify(openTask.body)).toBe(201);
-    const doneTaskCreate = await owner.post(c(orgId, '/tasks'), { title: 'Old task', companyId });
+    const doneTaskCreate = await owner.post<{ taskId: string }>(c(orgId, '/tasks'), { title: 'Old task', companyId });
     expect(doneTaskCreate.status).toBe(201);
-    const doneTask = await owner.patch(c(orgId, `/tasks/${encodeURIComponent(doneTaskCreate.body.taskId)}`), { status: 'done' });
+    const doneTask = await owner.patch<{ status: string }>(c(orgId, `/tasks/${encodeURIComponent(doneTaskCreate.body.taskId)}`), { status: 'done' });
     expect(doneTask.status, JSON.stringify(doneTask.body)).toBe(200);
     expect(doneTask.body.status).toBe('done');
 
-    const csmAccount = await owner.post('/v1/host/openwop-app/csm/accounts', {
+    const csmAccount = await owner.post<{ accountId: string }>('/host/openwop-app/csm/accounts', {
       name: 'Globex — Account',
       crmRef: { orgId, companyId },
     });
     expect(csmAccount.status, JSON.stringify(csmAccount.body)).toBe(201);
-    const accountId = csmAccount.body.accountId as string;
+    const accountId = csmAccount.body.accountId;
 
     const found = getChain('csm-ops.health-from-crm');
     expect(found, 'csm-ops.health-from-crm chain must be loaded at boot').toBeTruthy();
@@ -197,16 +209,16 @@ describe('csm-ops.health-from-crm — end-to-end execution (real executor, direc
     const expanded = expandChain(found!.chain, { params });
     registerWorkflow(expanded);
 
-    const create = await owner.post('/v1/runs', { workflowId: expanded.workflowId, inputs: params });
+    const create = await owner.post<{ runId: string }>('/runs', { workflowId: expanded.workflowId, inputs: params });
     expect(create.status, JSON.stringify(create.body)).toBe(201);
-    const runId = create.body.runId as string;
+    const runId = create.body.runId;
 
     const snap = await pollRun(owner, runId);
     expect(snap.status, `run did not complete cleanly: ${JSON.stringify(snap)}`).toBe('completed');
 
-    const account = await owner.get(`/v1/host/openwop-app/csm/accounts`);
+    const account = await owner.get<{ accounts: Array<{ accountId: string; healthScore?: number; healthFactors?: unknown; healthComputedAt?: string }> }>(`/host/openwop-app/csm/accounts`);
     expect(account.status, JSON.stringify(account.body)).toBe(200);
-    const updated = (account.body.accounts as Array<{ accountId: string; healthScore?: number; healthFactors?: unknown; healthComputedAt?: string }>).find((a) => a.accountId === accountId);
+    const updated = account.body.accounts.find((a) => a.accountId === accountId);
     expect(updated, `expected account ${accountId} in the tenant's CSM accounts`).toBeTruthy();
 
     // 1 open deal (weight 8) + 1 open task (weight 3): 100 - 8 - 3 = 89.
@@ -231,40 +243,13 @@ describe('csm-ops.health-from-crm — end-to-end execution (real executor, direc
 });
 
 describe('csm-ops.renewal-risk — end-to-end execution (real executor, suspends at the human gate)', () => {
-  it('reads open deals then SUSPENDS at core.chat.approvalGate — the designed behavior, not forced to completion', async () => {
-    const { owner, orgId } = await ownerOrg();
-    const deal = await owner.post(c(orgId, '/deals'), { title: 'At-risk renewal' });
-    expect(deal.status, JSON.stringify(deal.body)).toBe(201);
-
-    const found = getChain('csm-ops.renewal-risk');
-    expect(found, 'csm-ops.renewal-risk chain must be loaded at boot').toBeTruthy();
-    const params = { orgId };
-    const expanded = expandChain(found!.chain, { params });
-    registerWorkflow(expanded);
-
-    const create = await owner.post('/v1/runs', { workflowId: expanded.workflowId, inputs: params });
-    expect(create.status, JSON.stringify(create.body)).toBe(201);
-    const runId = create.body.runId as string;
-
-    const snap = await pollRun(owner, runId);
-    expect(snap.status.startsWith('waiting'), `run should suspend at the review gate, was ${JSON.stringify(snap)}`).toBe(true);
-
-    const ints = await owner.get(`/v1/host/openwop-app/runs/${runId}/interrupts`);
-    expect(ints.status, JSON.stringify(ints.body)).toBe(200);
-    const interrupts = ints.body.interrupts as Array<{ token: string; nodeId: string }>;
-    const gate = interrupts.find((i) => i.nodeId.includes('review'));
-    expect(gate, `expected a pending interrupt for the review gate: ${JSON.stringify(interrupts)}`).toBeTruthy();
-
-    // No follow-up task was created — the chain does not infer risk itself,
-    // it waits for the human. Confirms the suspend didn't silently no-op past
-    // the gate to `follow-up`.
-    const tasks = await owner.get(c(orgId, '/tasks'));
-    expect(tasks.status, JSON.stringify(tasks.body)).toBe(200);
-    expect((tasks.body.tasks as unknown[]).length).toBe(0);
-  });
-
-  // ADR 0582 §1 / WF-CSM-1 + WF-CSM-4. The block above stops at the gate and
-  // never resumes, so before this pair NEITHER leg had ever executed — the
+  // The former "reads open deals then SUSPENDS at core.chat.approvalGate" case
+  // was cut (w7 /grade-tests): every leg below re-asserts it — `startRenewalRisk`
+  // requires the `waiting*` status, `resolveGate` requires the review interrupt,
+  // and REJECT requires zero tasks afterwards. Wiring `follow-up` ahead of the
+  // gate turned REJECT red as well as the cut case.
+  // ADR 0582 §1 / WF-CSM-1 + WF-CSM-4. The original suspend-only case stopped at
+  // the gate and never resumed, so before this pair NEITHER leg had ever executed — the
   // "human gate" was witnessed only up to the pause. `core.chat.approvalGate`
   // returns `status:'success'` on REJECT as well as approve (packs/
   // vendor.myndhyve.chat/index.mjs), so an unconditioned `review → follow-up`
@@ -296,9 +281,9 @@ describe('csm-ops.renewal-risk — end-to-end execution (real executor, suspends
     expect(found, 'csm-ops.renewal-risk chain must be loaded at boot').toBeTruthy();
     const expanded = expandChain(found!.chain, { params: { orgId } });
     registerWorkflow(expanded);
-    const create = await owner.post('/v1/runs', { workflowId: expanded.workflowId, inputs: { orgId } });
+    const create = await owner.post<{ runId: string }>('/runs', { workflowId: expanded.workflowId, inputs: { orgId } });
     expect(create.status, JSON.stringify(create.body)).toBe(201);
-    const runId = create.body.runId as string;
+    const runId = create.body.runId;
     const snap = await pollRun(owner, runId);
     expect(snap.status.startsWith('waiting'), `run should suspend at the review gate, was ${JSON.stringify(snap)}`).toBe(true);
     return { owner, orgId, runId };
@@ -319,10 +304,10 @@ describe('csm-ops.renewal-risk — end-to-end execution (real executor, suspends
     // COMPLETES; the rejection stays auditable via the gate's own
     // `decision:'reject'` output in the run feed.
     expect(snap.status, `a rejected review must terminate the run, was ${JSON.stringify(snap)}`).toBe('completed');
-    const tasks = await owner.get(c(orgId, '/tasks'));
+    const tasks = await owner.get<TasksBody>(c(orgId, '/tasks'));
     expect(tasks.status, JSON.stringify(tasks.body)).toBe(200);
     expect(
-      (tasks.body.tasks as unknown[]).length,
+      tasks.body.tasks.length,
       'a REJECTED renewal review must not create the CRM follow-up task',
     ).toBe(0);
   });
@@ -331,9 +316,9 @@ describe('csm-ops.renewal-risk — end-to-end execution (real executor, suspends
     const { owner, orgId, runId } = await startRenewalRisk();
     const snap = await resolveGate(owner, runId, UI_APPROVE);
     expect(snap.status, `an approved review must complete, was ${JSON.stringify(snap)}`).toBe('completed');
-    const tasks = await owner.get(c(orgId, '/tasks'));
+    const tasks = await owner.get<TasksBody>(c(orgId, '/tasks'));
     expect(tasks.status, JSON.stringify(tasks.body)).toBe(200);
-    const rows = tasks.body.tasks as Array<{ title: string }>;
+    const rows = tasks.body.tasks;
     expect(
       rows,
       'the APPROVE leg must create the task — against the pre-fix gate this found ZERO, because `action` was never read and approve took the reject branch',
@@ -343,12 +328,16 @@ describe('csm-ops.renewal-risk — end-to-end execution (real executor, suspends
 
   // Back-compat: a direct `ctx.suspend` resolver (and the legacy tests that
   // pin it) may still send `{decision}`. Keep one leg on that shape so the
-  // normalisation cannot regress it.
+  // normalisation cannot regress it. The payload is `{decision}` ALONE: it used
+  // to also carry `approved: true`, and the gate's `approved === true` fallback
+  // approves on that flag by itself — so the `decision` read was never what
+  // this leg exercised.
   it('LEGACY `{decision:"approved"}` still approves', async () => {
     const { owner, orgId, runId } = await startRenewalRisk();
-    const snap = await resolveGate(owner, runId, { decision: 'approved', approved: true });
+    const snap = await resolveGate(owner, runId, { decision: 'approved' });
     expect(snap.status, JSON.stringify(snap)).toBe('completed');
-    const tasks = await owner.get(c(orgId, '/tasks'));
-    expect((tasks.body.tasks as unknown[]).length).toBe(1);
+    const tasks = await owner.get<TasksBody>(c(orgId, '/tasks'));
+    expect(tasks.body.tasks).toHaveLength(1);
+    expect(tasks.body.tasks[0]!.title).toBe('Follow up on at-risk renewal');
   });
 });

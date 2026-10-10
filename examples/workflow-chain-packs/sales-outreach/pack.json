@@ -1,12 +1,12 @@
 {
   "name": "core.openwop.workflows.sales-outreach",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "kind": "workflow-chain",
   "description": "Sales-outreach chains (RFC 0013): research-grounded, human-gated outreach — a personalized first-touch from live research, and a polite quiet-thread nudge. Every send is reviewed by a human first. Replay-deterministic.",
   "author": "openwop",
   "license": "Apache-2.0",
   "engines": {
-    "openwop": ">=1.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "keywords": [
     "Sales outreach"
@@ -14,7 +14,7 @@
   "chains": [
     {
       "chainId": "outreach.researched-firsttouch",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "label": "Prospect → Researched First-Touch",
       "description": "Researches a prospect with live search, drafts a genuinely personalized first-touch email, and holds it at a human gate before sending.",
       "parameters": {
@@ -47,7 +47,7 @@
         "nodes": [
           {
             "id": "start",
-            "typeId": "core.trigger.event",
+            "typeId": "core.trigger.event@1.0.0",
             "name": "New prospect",
             "position": {
               "x": 0,
@@ -60,7 +60,7 @@
           },
           {
             "id": "search",
-            "typeId": "core.web.search",
+            "typeId": "core.web.search@1.0.0",
             "name": "Research prospect",
             "position": {
               "x": 280,
@@ -71,7 +71,7 @@
           },
           {
             "id": "draft",
-            "typeId": "core.ai.chatCompletion",
+            "typeId": "core.ai.chatCompletion@1.0.0",
             "name": "Draft outreach",
             "position": {
               "x": 560,
@@ -86,7 +86,7 @@
           },
           {
             "id": "gate",
-            "typeId": "core.chat.approvalGate",
+            "typeId": "core.chat.approvalGate@1.1.0",
             "name": "Review outreach",
             "position": {
               "x": 560,
@@ -101,7 +101,7 @@
           },
           {
             "id": "gate-reject",
-            "typeId": "core.flow.noop",
+            "typeId": "core.flow.noop@1.0.0",
             "name": "Rejected — no outreach sent",
             "position": {
               "x": 840,
@@ -112,7 +112,7 @@
           },
           {
             "id": "send",
-            "typeId": "core.openwop.integration.email-send",
+            "typeId": "core.openwop.integration.email-send@1.0.0",
             "name": "Send outreach",
             "position": {
               "x": 840,
@@ -161,7 +161,7 @@
     },
     {
       "chainId": "outreach.quiet-thread-nudge",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "Quiet Thread → Polite Nudge",
       "description": "Drafts a brief, respectful follow-up to a thread that's gone quiet — restating the single ask and offering an easy out — reviewed before it sends.",
       "parameters": {
@@ -189,7 +189,7 @@
         "nodes": [
           {
             "id": "start",
-            "typeId": "core.trigger.event",
+            "typeId": "core.trigger.event@1.0.0",
             "name": "Thread quiet",
             "position": {
               "x": 0,
@@ -202,7 +202,7 @@
           },
           {
             "id": "draft",
-            "typeId": "core.ai.chatCompletion",
+            "typeId": "core.ai.chatCompletion@1.0.0",
             "name": "Draft nudge",
             "position": {
               "x": 280,
@@ -217,7 +217,7 @@
           },
           {
             "id": "gate",
-            "typeId": "core.chat.approvalGate",
+            "typeId": "core.chat.approvalGate@1.1.0",
             "name": "Review nudge",
             "position": {
               "x": 560,
@@ -232,7 +232,7 @@
           },
           {
             "id": "gate-reject",
-            "typeId": "core.flow.noop",
+            "typeId": "core.flow.noop@1.0.0",
             "name": "Rejected — no nudge sent",
             "position": {
               "x": 840,
@@ -243,7 +243,7 @@
           },
           {
             "id": "send",
-            "typeId": "core.openwop.integration.email-send",
+            "typeId": "core.openwop.integration.email-send@1.0.0",
             "name": "Send nudge",
             "position": {
               "x": 840,

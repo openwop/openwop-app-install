@@ -24,7 +24,7 @@ import { mintRunStreamToken } from '../host/runStreamToken.js';
 import { openSseChannel } from '../host/sseChannel.js';
 import { subscribeRunEventTicks } from '../host/runEventBus.js';
 import { projectA2uiDelivery, a2uiDeltaTransportEnabled, type A2uiDeltaState, type A2uiSurfacePayload } from '../host/a2uiSurfaceDelta.js';
-import { negotiatedMajor, v1, vendorTwin } from '../middleware/protocolVersion.js';
+import { vendorPath } from '../middleware/protocolVersion.js';
 import { projectV2RunIds } from '../host/v2Ids.js';
 import { projectRunSnapshot } from './runs.js';
 import { createLogger } from '../observability/logger.js';
@@ -47,7 +47,7 @@ export function registerStreamRoutes(app: Express, deps: Deps): void {
   // non-owner 404s on loadReadableRun and never gets a token (see
   // host/runStreamToken). Registered before the `/events` route; the extra path
   // segment keeps them distinct regardless of order.
-  app.get([v1('/runs/:runId/events/token'), vendorTwin('/runs/:runId/events/token')], async (req, res, next) => {
+  app.get(['/runs/:runId/events/token', vendorPath('/runs/:runId/events/token')], async (req, res, next) => {
     try {
       await loadReadableRun(req, storage, req.params.runId);
       res.json({ streamToken: mintRunStreamToken(req.params.runId) });
@@ -56,18 +56,18 @@ export function registerStreamRoutes(app: Express, deps: Deps): void {
     }
   });
 
-  app.get(v1('/runs/:runId/events'), async (req, res, next) => {
+  app.get('/runs/:runId/events', async (req, res, next) => {
     try {
       // Authorize the READ before anything streams: scope seam (RFC 0049) +
       // tenant ownership, the same gate the JSON poll / GET / debug-bundle use.
       // Without it the live event stream was the one run-read path with zero
       // authorization (architecture review #1).
       const run = await loadReadableRun(req, storage, req.params.runId);
-      // v2 charter P4-C — the contract this stream is being served under,
+      // v2 charter P4-C — the contract this stream is served under (major 2, ADR 0812),
       // captured ONCE here. The SSE lifetime outlives the request's async
       // context (the gap fetch is scheduled from the appender), so it is passed
       // to `listEvents` explicitly rather than read off the ambient store.
-      const contract = negotiatedMajor(req);
+      const contract = 2;
       // identity.md §5 — every run id on the major-2 wire is tenant-bound, and
       // this stream IS a wire. The `res.json` projection wrapper
       // (`installV2ResponseHygiene`) never sees `res.write`, and the era seat
@@ -75,12 +75,12 @@ export function registerStreamRoutes(app: Express, deps: Deps): void {
       // so a major-2 frame carried the bare storage id while the JSON poll of
       // the same run carried `default/<id>`. Projected HERE, at the one choke
       // every path (replay, live, gap, batch) funnels through, reading the
-      // tenant exactly as the wrapper does. Major 1: the record, untouched.
+      // tenant exactly as the wrapper does.
       // Found from a peer host's live witness (myndhyve-1 `efcf`, 2026-09-05);
       // no `v2-*` conformance scenario covers SSE, so 55/56 green hid it.
       const wireTenant = (req as { tenantId?: string }).tenantId ?? 'default';
       const onWire = (ev: EventRecord): EventRecord =>
-        contract === 2 ? (projectV2RunIds(ev, wireTenant) as EventRecord) : ev;
+        projectV2RunIds(ev, wireTenant) as EventRecord;
 
       // Stream-mode validation runs BEFORE content negotiation so that
       // bad streamMode values 400 regardless of Accept header. Otherwise
@@ -137,14 +137,12 @@ export function registerStreamRoutes(app: Express, deps: Deps): void {
           // ADR 0744 — under major 2 `invalid_request` has no registry row (the
           // negotiator vendor-prefixed it to `openwop-app.invalid_request`); the
           // registered code for a malformed request field is `validation_error`
-          // with `details.field` naming it (openwop RFC 0213 §A draft). Major 1
-          // keeps the code its clients already read.
-          const v2 = negotiatedMajor(req) === 2;
+          // with `details.field` naming it (openwop RFC 0213 §A draft).
           throw new OpenwopError(
-            v2 ? 'validation_error' : 'invalid_request',
+            'validation_error',
             `Last-Event-ID header MUST be a non-negative integer; got "${lastEventIdHeader}"`,
             400,
-            v2 ? { field: 'Last-Event-ID' } : { header: 'Last-Event-ID', value: lastEventIdHeader },
+            { field: 'Last-Event-ID' },
           );
         }
         fromSeq = Number(lastEventIdHeader);
@@ -189,9 +187,8 @@ export function registerStreamRoutes(app: Express, deps: Deps): void {
       // resumption (`Last-Event-ID`) MUST emit a snapshot FIRST. The row is
       // re-read per frame (the connect-time `run` is stale by then) and the
       // writes are serialized so frames keep log order; a terminal close waits
-      // for the chain so the final snapshot is not written after close. v1
-      // `values` (raw `node.completed`/`run.completed`) is untouched.
-      const valuesSnapshots = contract === 2 && modes.includes('values');
+      // for the chain so the final snapshot is not written after close.
+      const valuesSnapshots = modes.includes('values');
       let snapshotChain: Promise<void> = Promise.resolve();
       const queueSnapshot = (seq: number): void => {
         snapshotChain = snapshotChain.then(async () => {
@@ -288,19 +285,9 @@ export function registerStreamRoutes(app: Express, deps: Deps): void {
         // `appendEvent` returns what its caller handed it. Under major 2 that
         // would put an untranslated name on the wire and make this the one read
         // that bypasses the seat, which `persistence.md` §"The seat" exists to
-        // forbid — so a major-2 stream takes the fast path OUT and lets the
-        // serialized gap fetch deliver every frame through `listEvents`. The
-        // major-1 branch below is untouched: same bytes, same timing.
-        if (contract === 2) {
-          if (ev.sequence > deliveredThrough) scheduleGapFetch(ev.sequence);
-          return;
-        }
-        if (ev.sequence === deliveredThrough + 1) {
-          deliverOnce(ev);
-          closeIfTerminal(ev);
-        } else if (ev.sequence > deliveredThrough) {
-          scheduleGapFetch(ev.sequence);
-        }
+        // forbid — so the stream takes the fast path OUT and lets the
+        // serialized gap fetch deliver every frame through `listEvents`.
+        if (ev.sequence > deliveredThrough) scheduleGapFetch(ev.sequence);
       });
 
       const unsubTicks = await subscribeRunEventTicks(run.runId, scheduleGapFetch);

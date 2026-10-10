@@ -8,9 +8,10 @@ import type { Request, Response } from 'express';
 import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { authorizeOrgScope } from '../featureRoute.js';
-import { resolveOne } from '../../host/featureToggles/service.js';
+import { resolveToggle } from '../../host/featureToggles/service.js';
+import { ownerPublicRuntimeLapsed } from '../../host/publicLapse.js';
 import { getOrg } from '../../host/accessControlService.js';
-import { isAllowed } from '../consent/consentService.js';
+import { consentTokenHeaderOf, visitorAnalyticsAllowed, visitorConsentContextOf } from '../consent/visitorConsent.js';
 import { collectEvent } from '../cdp/collectService.js';
 // Cross-feature, integrator → primitive (the ADR 0330 direction funnels already
 // takes in `formsAttributionSink.ts`): funnels reads forms, forms imports no
@@ -29,10 +30,10 @@ import { resolveNextStepIx, STEP_OUTCOMES, type RoutingContext, type StepOutcome
 
 const log = createLogger('funnels');
 const FEATURE = { toggleId: 'funnels', label: 'Funnels' };
-const BASE = '/v1/host/openwop-app/funnels/orgs/:orgId';
+const BASE = '/host/openwop-app/funnels/orgs/:orgId';
 // Nested under the publishing public prefix — already on PUBLIC_PATH_PREFIXES
 // (auth.ts), so anonymous reads pass auth; the per-tenant toggle is the gate.
-const PUB = '/v1/host/openwop-app/public/:orgId/funnels';
+const PUB = '/host/openwop-app/public/:orgId/funnels';
 
 const MAX_VK = 128;
 
@@ -57,8 +58,11 @@ function utmParams(req: Request): Record<string, string> {
 async function resolvePublicFunnel(orgId: string, slug: string): Promise<{ tenantId: string; funnel: Funnel }> {
   const org = await getOrg(orgId);
   if (!org) throw new OpenwopError('not_found', 'Funnel not found.', 404, {});
-  const assignment = await resolveOne(FEATURE.toggleId, { tenantId: org.tenantId });
+  // ADR 0819 §1 opt-out — a PUBLIC lane (tenant from the resource): ADR 0419 never paywalls a shopper/visitor on the operator's plan.
+  const assignment = await resolveToggle(FEATURE.toggleId, { tenantId: org.tenantId });
   if (!assignment || !assignment.enabled) throw new OpenwopError('not_found', 'Funnel not found.', 404, {});
+  // ADR 0820 §7 — the owner-lapse policy (off unless OPENWOP_BILLING_PUBLIC_LAPSE_GRACE_DAYS is set); the lane's own unavailable shape.
+  if (await ownerPublicRuntimeLapsed(FEATURE.toggleId, org.tenantId)) throw new OpenwopError('not_found', 'Funnel not found.', 404, {});
   const funnel = await getPublishedFunnelBySlug(org.tenantId, orgId, slug);
   if (!funnel) throw new OpenwopError('not_found', 'Funnel not found.', 404, {});
   return { tenantId: org.tenantId, funnel };
@@ -69,7 +73,10 @@ async function resolvePublicFunnel(orgId: string, slug: string): Promise<{ tenan
 async function consentedVisitor(tenantId: string, req: Request): Promise<string> {
   const vk = visitorKey(req);
   if (!vk) return '';
-  try { return (await isAllowed(tenantId, vk, 'analytics')) ? vk : ''; } catch { return ''; }
+  // ADR 0860 D3 (architect B1) — the ONE visitor decision, with the request's
+  // region and the visitor's consent-lane token. A bad token degrades to "not
+  // consented" (a funnel step must still serve), like a store error.
+  try { return (await visitorAnalyticsAllowed(tenantId, vk, visitorConsentContextOf(req, tenantId, consentTokenHeaderOf(req)))) ? vk : ''; } catch { return ''; }
 }
 
 /** Best-effort step event onto the CDP spine (ADR 0269) — callers pass a vk

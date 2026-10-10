@@ -19,7 +19,7 @@
  *      a valid assertion for the SAME opaque id but from a DIFFERENT IdP (a
  *      cross-IdP identifier collision) MUST NOT authenticate — 401
  *      `subject_link_trust_root_mismatch`;
- *   5. the `/v1/host/sample/auth/*` aliases are reachable.
+ *   5. the `/host/sample/auth/*` aliases are reachable.
  *
  * Drives the `sample`-spelled seams with OPENWOP_TEST_SEAM_ENABLED UNSET, so the
  * explicit both-spellings alias registration (not the testSeam namespace rewrite)
@@ -32,6 +32,7 @@ import type { Server } from 'node:http';
 import { createServer } from 'node:http';
 import { createHash, createSign, generateKeyPairSync } from 'node:crypto';
 import { createApp } from '../src/index.js';
+import { v1Advertisement } from './support/v1Advertisement.js';
 
 // ── Two-trust-root synthetic IdP fixture (RFC 0163 §B) ─────────────────────────
 // Each IdP has a distinct signing key AND a distinct `entityID` it signs into the
@@ -97,7 +98,9 @@ let IDP_A_URL: string;
 let IDP_B_URL: string;
 const EXTERNAL_ID = 'idp-op-8f3a';
 
-const JSON_HEADERS = { 'content-type': 'application/json' };
+// ADR 0812 — the unversioned `/host/sample` alias negotiates major 2, where a
+// credential-less call is refused 401 (RFC 0200); the `/v1` twin minted an anon session.
+const JSON_HEADERS = { 'content-type': 'application/json', authorization: 'Bearer dev-token' };
 const post = (path: string, body: unknown): Promise<Response> =>
   fetch(`${BASE}${path}`, { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(body) });
 
@@ -128,9 +131,8 @@ afterAll(async () => {
 
 describe('RFC 0159/0163 subject linking — advertisement', () => {
   it('claims subjectLinking + a closed-enum subjectLinkKey only alongside BOTH profiles', async () => {
-    const res = await fetch(`${BASE}/.well-known/openwop`);
-    expect(res.status).toBe(200);
-    const doc = (await res.json()) as { capabilities?: { auth?: { profiles?: string[]; subjectLinking?: boolean; subjectLinkKey?: string } } };
+    // ADR 0812 — `subjectLinking` has no v2 facet; the v1 claim is read from its builder.
+    const doc = (await v1Advertisement()) as { capabilities?: { auth?: { profiles?: string[]; subjectLinking?: boolean; subjectLinkKey?: string } } };
     const auth = doc.capabilities?.auth;
     expect(auth?.profiles).toContain('openwop-auth-saml');
     expect(auth?.profiles).toContain('openwop-auth-scim');
@@ -144,24 +146,24 @@ describe('RFC 0159/0163 subject linking — advertisement', () => {
 describe('RFC 0159 subject linking — cross-lane deactivation (§A.3)', () => {
   it('a SCIM deactivation fail-closes the LINKED SAML identity (over the sample alias)', async () => {
     // 1. Provision a SCIM user carrying the opaque externalId, bound to IdP-A.
-    const provision = await post('/v1/host/sample/auth/scim/provision', {
+    const provision = await post('/host/sample/auth/scim/provision', {
       scimUrl: 'x', idpUrl: IDP_A_URL, op: 'create-user', externalId: EXTERNAL_ID, userName: 'r.smith',
     });
     expect(provision.status, `provision failed: ${provision.status}`).toBeLessThan(400);
 
     // 2. A valid SAML assertion from IdP-A (same trust root) authenticates BEFORE deactivation.
-    const before = await post('/v1/host/sample/auth/saml/validate', { idpUrl: IDP_A_URL, variant: 'valid', nameId: EXTERNAL_ID });
+    const before = await post('/host/sample/auth/saml/validate', { idpUrl: IDP_A_URL, variant: 'valid', nameId: EXTERNAL_ID });
     expect(before.status).toBe(200);
     const beforeBody = (await before.json()) as { authenticated?: boolean; linkedDenied?: boolean };
     expect(beforeBody.authenticated).toBe(true);
     expect(beforeBody.linkedDenied).toBe(false);
 
     // 3. SCIM-deactivate the provisioned user, addressed by externalId.
-    const deactivate = await post('/v1/host/sample/auth/scim/provision', { scimUrl: 'x', op: 'deactivate-user', externalId: EXTERNAL_ID });
+    const deactivate = await post('/host/sample/auth/scim/provision', { scimUrl: 'x', op: 'deactivate-user', externalId: EXTERNAL_ID });
     expect(deactivate.status, `deactivate failed: ${deactivate.status}`).toBeLessThan(400);
 
     // 4. THE CONTRACT — a subsequent SAML assertion for the linked subject MUST NOT authenticate.
-    const after = await post('/v1/host/sample/auth/saml/validate', { idpUrl: IDP_A_URL, variant: 'valid', nameId: EXTERNAL_ID });
+    const after = await post('/host/sample/auth/saml/validate', { idpUrl: IDP_A_URL, variant: 'valid', nameId: EXTERNAL_ID });
     const afterBody = (await after.json()) as { authenticated?: boolean; linkedDenied?: boolean; reason?: string };
     expect(afterBody.authenticated === true).toBe(false);
     expect(afterBody.linkedDenied).toBe(true);
@@ -171,14 +173,14 @@ describe('RFC 0159 subject linking — cross-lane deactivation (§A.3)', () => {
 
 describe('RFC 0159 subject linking — link-key hygiene (§A.2)', () => {
   it('rejects a mutable/PII link key (email) with 4xx and forms no cross-lane link', async () => {
-    const link = await post('/v1/host/sample/auth/scim/provision', {
+    const link = await post('/host/sample/auth/scim/provision', {
       scimUrl: 'x', op: 'link', linkKey: 'email', email: 'r.smith@example.test',
     });
     expect(link.status).toBeGreaterThanOrEqual(400);
     expect(link.status).toBeLessThan(500);
 
     // An unrelated opaque subject (no SCIM record) must NOT be denied — no link, so it authenticates.
-    const other = await post('/v1/host/sample/auth/saml/validate', { idpUrl: IDP_A_URL, variant: 'valid', nameId: 'idp-op-DIFFERENT' });
+    const other = await post('/host/sample/auth/saml/validate', { idpUrl: IDP_A_URL, variant: 'valid', nameId: 'idp-op-DIFFERENT' });
     const body = (await other.json()) as { authenticated?: boolean; linkedDenied?: boolean };
     expect(body.linkedDenied === true).toBe(false);
     expect(body.authenticated).toBe(true);
@@ -188,12 +190,12 @@ describe('RFC 0159 subject linking — link-key hygiene (§A.2)', () => {
 describe('RFC 0163 subject linking — same-IdP trust root (§B)', () => {
   it('a SAML assertion from the SAME IdP as the SCIM lane links + authenticates (positive control)', async () => {
     const sameId = 'idp-op-same-8f3a';
-    const prov = await post('/v1/host/sample/auth/scim/provision', {
+    const prov = await post('/host/sample/auth/scim/provision', {
       scimUrl: 'x', idpUrl: IDP_A_URL, op: 'create-user', externalId: sameId, userName: 's.same',
     });
     expect(prov.status, `provision failed: ${prov.status}`).toBeLessThan(400);
 
-    const res = await post('/v1/host/sample/auth/saml/validate', { idpUrl: IDP_A_URL, variant: 'valid', nameId: sameId });
+    const res = await post('/host/sample/auth/saml/validate', { idpUrl: IDP_A_URL, variant: 'valid', nameId: sameId });
     expect(res.status).toBe(200);
     const body = (await res.json()) as { authenticated?: boolean; linkedDenied?: boolean };
     expect(body.authenticated).toBe(true);
@@ -205,12 +207,12 @@ describe('RFC 0163 subject linking — same-IdP trust root (§B)', () => {
     // id but issued by IdP-B (a different trust root). The string collides; the
     // trust roots do not — the link MUST NOT form.
     const collideId = 'idp-op-collide-8f3a';
-    const prov = await post('/v1/host/sample/auth/scim/provision', {
+    const prov = await post('/host/sample/auth/scim/provision', {
       scimUrl: 'x', idpUrl: IDP_A_URL, op: 'create-user', externalId: collideId, userName: 'a.other',
     });
     expect(prov.status, `provision failed: ${prov.status}`).toBeLessThan(400);
 
-    const res = await post('/v1/host/sample/auth/saml/validate', { idpUrl: IDP_B_URL, variant: 'valid', nameId: collideId });
+    const res = await post('/host/sample/auth/saml/validate', { idpUrl: IDP_B_URL, variant: 'valid', nameId: collideId });
     const body = (await res.json()) as { authenticated?: boolean; reason?: string; linkedDenied?: boolean };
     // Not a vacuous 403: the SSRF allowlist now includes IdP-B, so the assertion
     // reaches the trust-root check — the refusal is the load-bearing assertion.
@@ -234,7 +236,7 @@ describe('RFC 0163 subject linking — same-IdP trust root (§B)', () => {
 // `combinedSubjectLinkingActive()` predicate, so §A.2's `unbound` fail-closed and
 // the advert can never disagree.
 //
-// WITNESS FORM: end-to-end against the real `${BASE}/.well-known/openwop` + the
+// WITNESS FORM: end-to-end against the v1 advertisement builder + the
 // `sample` auth seams (the same surfaces every other leg drives).
 // `advertisedAuthProfiles()` / `combinedSubjectLinkingActive()` read `process.env`
 // per request, so each leg toggles the relevant env around a single call and
@@ -269,9 +271,8 @@ describe('RFC 0164 subject linking — mandatory-both invariant', () => {
   }
 
   const readAuth = async (): Promise<{ profiles?: string[]; subjectLinking?: boolean; subjectLinkKey?: string }> => {
-    const res = await fetch(`${BASE}/.well-known/openwop`);
-    expect(res.status).toBe(200);
-    const doc = (await res.json()) as { capabilities?: { auth?: { profiles?: string[]; subjectLinking?: boolean; subjectLinkKey?: string } } };
+    // ADR 0812 — `subjectLinking` has no v2 facet; the v1 claim is read from its builder.
+    const doc = (await v1Advertisement()) as { capabilities?: { auth?: { profiles?: string[]; subjectLinking?: boolean; subjectLinkKey?: string } } };
     return doc.capabilities?.auth ?? {};
   };
 
@@ -318,12 +319,12 @@ describe('RFC 0164 subject linking — mandatory-both invariant', () => {
     // record WITHOUT an idpUrl ⇒ no trust root recorded ⇒ evaluateSubjectLinkTrustRoot
     // returns 'unbound'. RFC 0164 removes 0163's deny-only carve-out here: refuse.
     const unboundId = 'idp-op-unbound-iv';
-    const prov = await post('/v1/host/sample/auth/scim/provision', {
+    const prov = await post('/host/sample/auth/scim/provision', {
       scimUrl: 'x', op: 'create-user', externalId: unboundId, userName: 'u.unbound',
     });
     expect(prov.status, `provision failed: ${prov.status}`).toBeLessThan(400);
 
-    const res = await post('/v1/host/sample/auth/saml/validate', { idpUrl: IDP_A_URL, variant: 'valid', nameId: unboundId });
+    const res = await post('/host/sample/auth/saml/validate', { idpUrl: IDP_A_URL, variant: 'valid', nameId: unboundId });
     const body = (await res.json()) as { authenticated?: boolean; reason?: string; linkedDenied?: boolean };
     expect(res.status).toBe(401);
     expect(body.authenticated === true).toBe(false);
@@ -340,13 +341,13 @@ describe('RFC 0164 subject linking — mandatory-both invariant', () => {
     const unboundId = 'idp-op-unbound-v';
     // Provision the unbound record while the sample alias is reachable (it is, env
     // -independent), then flip to single-profile for the SAML validate.
-    const prov = await post('/v1/host/sample/auth/scim/provision', {
+    const prov = await post('/host/sample/auth/scim/provision', {
       scimUrl: 'x', op: 'create-user', externalId: unboundId, userName: 's.single',
     });
     expect(prov.status, `provision failed: ${prov.status}`).toBeLessThan(400);
 
     await withEnv({ OPENWOP_TEST_SCIM_URL: undefined, OPENWOP_SCIM_IDP_ENTITY_ID: undefined }, async () => {
-      const res = await post('/v1/host/sample/auth/saml/validate', { idpUrl: IDP_A_URL, variant: 'valid', nameId: unboundId });
+      const res = await post('/host/sample/auth/saml/validate', { idpUrl: IDP_A_URL, variant: 'valid', nameId: unboundId });
       expect(res.status).toBe(200);
       const body = (await res.json()) as { authenticated?: boolean; linkedDenied?: boolean };
       expect(body.authenticated).toBe(true);

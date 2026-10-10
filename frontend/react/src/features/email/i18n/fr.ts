@@ -153,6 +153,9 @@ export const messages = {
   senderPlaceholder: 'news@votreentreprise.com',
   senderSave: 'Enregistrer l’expéditeur',
   senderSaved: 'Adresse de l’expéditeur enregistrée.',
+  senderAdminOnly: 'Seuls les administrateurs de l’espace de travail peuvent modifier l’adresse de l’expéditeur.',
+  senderUnconfiguredAskAdmin: 'Les campagnes ne peuvent pas encore être envoyées : un administrateur de l’espace de travail doit définir l’adresse de l’expéditeur.',
+  testSendRateLimited: 'Trop d’envois de test — réessayez dans {{minutes}} min.',
   senderUnconfiguredNotice: 'Les campagnes ne peuvent pas encore être envoyées — définissez ci-dessous l’adresse d’expéditeur vérifiée (et connectez SendGrid dans Connexions).',
 
   // Toasts / errors

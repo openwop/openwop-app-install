@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.ads-policy/1.0.0/policy-check.output.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.ads-policy/1.0.2/policy-check.output.json",
   "title": "AdsPolicyCheckOutput",
   "type": "object",
   "required": ["riskFlags", "disclaimers", "isCompliant", "rulesEvaluated", "success"],

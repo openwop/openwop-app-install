@@ -27,7 +27,6 @@ import { join } from 'node:path';
 
 import { createApp } from '../src/index.js';
 import {
-  CERTIFICATION_BUNDLE_MAJOR2_PATH,
   CERTIFICATION_BUNDLE_MAJOR2_VENDOR_PATH,
   CERTIFICATION_BUNDLE_PATH,
   CONFORMANCE_CLAIMS_PATH,
@@ -154,37 +153,31 @@ beforeEach(() => {
 
 const keyFor = (commit: string, major: 1 | 2): string => `${PREFIX}/${commit}/major-${major}.json`;
 
-async function v1Doc(): Promise<Record<string, unknown>> {
-  return (await (await fetch(`${base}/.well-known/openwop`)).json()) as Record<string, unknown>;
-}
+// ADR 0812 P3c-0 — the major-1 document (and with it the major-1 root's
+// pointer) is gone with major 1; only the major-2 root is probed.
 async function v2Doc(): Promise<Record<string, unknown>> {
   return (await (await fetch(`${base}/.well-known/openwop`, { headers: { 'OpenWOP-Version': '2' } })).json()) as Record<string, unknown>;
 }
-const v1Pointer = (doc: Record<string, unknown>): unknown =>
-  ((doc['capabilities'] as { conformance?: { certificationBundleUrl?: unknown } } | undefined)?.conformance
-    ?? (doc['conformance'] as { certificationBundleUrl?: unknown } | undefined))?.certificationBundleUrl;
 const v2Pointer = (doc: Record<string, unknown>): unknown =>
   (doc['conformance'] as { certificationBundleUrl?: unknown } | undefined)?.certificationBundleUrl;
 const status = async (path: string): Promise<number> => (await fetch(`${base}${path}`)).status;
 
 async function expectNothingServed(posture: string): Promise<void> {
-  expect(v1Pointer(await v1Doc()), `${posture}: major-1 pointer`).toBeUndefined();
   expect(v2Pointer(await v2Doc()), `${posture}: major-2 pointer`).toBeUndefined();
   expect(await status(CERTIFICATION_BUNDLE_PATH), `${posture}: major-1 route`).toBe(404);
-  expect(await status(CERTIFICATION_BUNDLE_MAJOR2_PATH), `${posture}: major-2 route`).toBe(404);
+  expect(await status(CERTIFICATION_BUNDLE_MAJOR2_VENDOR_PATH), `${posture}: major-2 route`).toBe(404);
   expect(await status(CONFORMANCE_CLAIMS_PATH), `${posture}: /claims`).toBe(404);
 }
 
 describe('WHD-18 — OPENWOP_CERT_BUNDLE_ORIGIN UNSET is today\'s behaviour, exactly', () => {
-  it('the image stamp is served at major 1 (v2 bundle, /claims 200); major 2 has neither pointer nor route', async () => {
+  it('the image stamp is served on the bundle route (v2 bundle, /claims 200); major 2 has neither pointer nor route', async () => {
     delete process.env.OPENWOP_CERT_BUNDLE_ORIGIN;
-    expect(typeof v1Pointer(await v1Doc())).toBe('string');
     const res = await fetch(`${base}${CERTIFICATION_BUNDLE_PATH}`);
     expect(res.status).toBe(200);
     expect(((await res.json()) as { bundleVersion?: unknown }).bundleVersion).toBe('2');
     expect(await status(CONFORMANCE_CLAIMS_PATH)).toBe(200);
     expect(v2Pointer(await v2Doc())).toBeUndefined();
-    expect(await status(CERTIFICATION_BUNDLE_MAJOR2_PATH)).toBe(404);
+    expect(await status(CERTIFICATION_BUNDLE_MAJOR2_VENDOR_PATH)).toBe(404);
     expect(objectReads, 'image mode must never touch the origin').toEqual([]);
   });
 });
@@ -213,25 +206,15 @@ describe('WHD-18 — origin SET', () => {
     expect(res.headers.get('content-type')).toMatch(/application\/json/);
     expect(await res.text(), 'the served body must be the uploaded bytes, not a re-serialisation').toBe(FIXTURE_TEXT);
     // The /v1 twin serves the same document.
-    expect(await (await fetch(`${base}${CERTIFICATION_BUNDLE_MAJOR2_PATH}`)).text()).toBe(FIXTURE_TEXT);
+    expect(await (await fetch(`${base}${CERTIFICATION_BUNDLE_MAJOR2_VENDOR_PATH}`)).text()).toBe(FIXTURE_TEXT);
 
-    // Major 1 has nothing published, so the major-1 root says nothing — the
-    // major-2 bundle is never offered through the major-1 pointer.
-    expect(v1Pointer(await v1Doc())).toBeUndefined();
+    // Major 1 has nothing published, so its route serves nothing — the
+    // major-2 bundle is never offered through the major-1 route.
     expect(await status(CERTIFICATION_BUNDLE_PATH)).toBe(404);
     expect(await status(CONFORMANCE_CLAIMS_PATH), '/claims is withheld in origin mode (ADR 0735 record)').toBe(404);
   });
 
-  it('a verified MAJOR-1 bundle → pointer at the major-1 root, exact bytes; /claims still withheld', async () => {
-    objects.set(keyFor(COMMIT, 1), MAJOR1.text);
-    const url = v1Pointer(await v1Doc());
-    expect(url).toBe(`${base}${CERTIFICATION_BUNDLE_PATH}`);
-    const res = await fetch(String(url));
-    expect(res.status).toBe(200);
-    expect(await res.text()).toBe(MAJOR1.text);
-    expect(v2Pointer(await v2Doc())).toBeUndefined();
-    expect(await status(CONFORMANCE_CLAIMS_PATH)).toBe(404);
-  });
+  // ADR 0812 P3c-0 — the "verified MAJOR-1 bundle → pointer at the major-1 root" leg was deleted with the major-1 root.
 
   it('the major-2 bundle uploaded to the MAJOR-1 key is refused (target-major) — no cross-major leak', async () => {
     objects.set(keyFor(COMMIT, 1), FIXTURE_TEXT);
@@ -279,7 +262,7 @@ describe('WHD-18 — origin SET', () => {
   });
 });
 
-describe('WHD-18 — the advertised documents still validate against BOTH vendored schemas', () => {
+describe('WHD-18 — the advertised document still validates against the vendored v2 schema', () => {
   const ROOT = join(__dirname, '..', '..', '..');
 
   async function compile(dir: string, rootFile: string) {
@@ -312,26 +295,5 @@ describe('WHD-18 — the advertised documents still validate against BOTH vendor
     }
   });
 
-  it('major 1: the served `conformance` record validates against the v1 declaration of that record', async () => {
-    // The v1 root schema is OPEN at the top (`additionalProperties: true`) and
-    // this host nests its families under `capabilities`, so validating the whole
-    // document would pass regardless of the pointer's shape. The declaration the
-    // pointer must satisfy is `properties.conformance`; compile THAT.
-    process.env.OPENWOP_CERT_BUNDLE_ORIGIN = ORIGIN_ENV;
-    objects.set(keyFor(COMMIT, 1), MAJOR1.text);
-    try {
-      const doc = await v1Doc();
-      const record = (doc['capabilities'] as { conformance?: Record<string, unknown> } | undefined)?.conformance;
-      expect(typeof record?.['certificationBundleUrl'], 'non-vacuity').toBe('string');
-      const { ajv, schema } = await compile(join(ROOT, 'schemas'), 'capabilities.schema.json');
-      const declared = (schema['properties'] as Record<string, unknown>)['conformance'] as Record<string, unknown>;
-      expect(declared, 'the v1 schema declares conformance').toBeTruthy();
-      const validate = ajv.compile(declared);
-      const ok = validate(record);
-      expect((validate.errors ?? []).map((e) => `${e.instancePath} ${e.message}`), 'v1 conformance errors').toEqual([]);
-      expect(ok).toBe(true);
-    } finally {
-      delete process.env.OPENWOP_CERT_BUNDLE_ORIGIN;
-    }
-  });
+  // ADR 0812 P3c-0 — the major-1 `conformance` record schema leg was deleted with the major-1 document.
 });

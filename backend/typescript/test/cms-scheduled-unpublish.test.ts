@@ -66,12 +66,12 @@ let n = 0;
 async function ownerOrg(): Promise<{ owner: Client; orgId: string }> {
   const tenantId = `org:su-${Date.now()}-${n++}`;
   const owner = client();
-  expect((await owner.post('/v1/host/openwop-app/test/login', { email: `su-${Date.now()}-${n++}@acme.test`, tenantId })).status).toBe(201);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  expect((await owner.post('/host/openwop-app/test/login', { email: `su-${Date.now()}-${n++}@acme.test`, tenantId })).status).toBe(201);
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status).toBe(201);
   return { owner, orgId: org.body.orgId };
 }
-const u = (orgId: string, suffix = ''): string => `/v1/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${suffix}`;
+const u = (orgId: string, suffix = ''): string => `/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${suffix}`;
 
 async function draftPage(owner: Client, orgId: string): Promise<string> {
   const created = await owner.post(u(orgId, '/pages'), { title: 'Doc', sections: [{ type: 'hero', data: { heading: 'Hi' } }] });

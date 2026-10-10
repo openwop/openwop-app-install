@@ -12,19 +12,26 @@
  * @see docs/adr/0132-per-conversation-capability-scope.md
  */
 import { Button } from '../ui/Button.js';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Modal } from '../ui/Modal.js';
 import { toast } from '../ui/toast.js';
 import { CheckIcon, XIcon, PlusIcon } from '../ui/icons/index.js';
 import {
-  getCapabilityScope, setCapabilityScope, resolveToolApproval,
-  type CapabilityScope, type CapabilityScopeView, type ScopeMode,
+  getCapabilityScope, setCapabilityScope, resolveToolApproval, ApprovalConflictError,
+  type CapabilityScope, type CapabilityScopeView, type ScopeMode, type ToolApproval,
 } from './capabilityScopeClient.js';
 
 type ListKey = 'enabled' | 'disabled' | 'requireApproval';
 
-export default function CapabilityScopePanel({ sessionId, onClose }: { sessionId: string; onClose: () => void }): JSX.Element {
+export default function CapabilityScopePanel({ sessionId, onClose, onContinue, onChanged }: {
+  sessionId: string;
+  onClose: () => void;
+  /** ADR 0834 D6 — after an approval, send a visible user message so the agent re-attempts. */
+  onContinue?: (text: string) => void;
+  /** A decision landed — the caller refreshes its pending indicator. */
+  onChanged?: () => void;
+}): JSX.Element {
   const { t } = useTranslation('conversationTools');
   const [view, setView] = useState<CapabilityScopeView | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -32,6 +39,11 @@ export default function CapabilityScopePanel({ sessionId, onClose }: { sessionId
   const [lists, setLists] = useState<Record<ListKey, string[]>>({ enabled: [], disabled: [], requireApproval: [] });
   const [saving, setSaving] = useState(false);
   const [deciding, setDeciding] = useState(false);
+  const [approvedOne, setApprovedOne] = useState(false);
+  // FW2-UX-3 — the decided row unmounts and takes keyboard focus with it; move focus to
+  // the next thing to do (Continue) so a keyboard user is not dropped to the document.
+  const continueRef = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => { if (approvedOne) continueRef.current?.focus(); }, [approvedOne]);
 
   const hydrate = useCallback((v: CapabilityScopeView) => {
     setView(v);
@@ -45,13 +57,24 @@ export default function CapabilityScopePanel({ sessionId, onClose }: { sessionId
   }, [sessionId, hydrate, t]);
   useEffect(() => { void load(); }, [load]);
 
-  const decide = async (toolName: string, decision: 'approved' | 'denied'): Promise<void> => {
+  // ADR 0834 D6 — the decision names the version the user saw (`requestedAt`); a request
+  // that moved since (the agent asked again with new arguments) is refused and re-shown.
+  const decide = async (a: ToolApproval, decision: 'approved' | 'denied'): Promise<void> => {
     if (deciding) return;
     setDeciding(true);
-    try { await resolveToolApproval(sessionId, toolName, decision); await load(); }
-    catch (e) { toast.error(e instanceof Error ? e.message : t('decisionFailed', { defaultValue: 'Failed to record your decision.' })); }
-    finally { setDeciding(false); }
+    try {
+      await resolveToolApproval(sessionId, a.toolName, decision, a.requestedAt);
+      if (decision === 'approved') setApprovedOne(true);
+      onChanged?.();
+      await load();
+    } catch (e) {
+      if (e instanceof ApprovalConflictError) { toast.error(t('approvalChanged')); await load(); }
+      else toast.error(e instanceof Error ? e.message : t('decisionFailed', { defaultValue: 'Failed to record your decision.' }));
+    } finally { setDeciding(false); }
   };
+  const mayApprove = view?.viewer?.mayApprove ?? true;
+  // FW2-UX-2 — a viewer the server would refuse (403) sees the scope read-only.
+  const mayEditScope = view?.viewer?.mayEditScope ?? true;
 
   const save = async (): Promise<void> => {
     setSaving(true);
@@ -60,7 +83,7 @@ export default function CapabilityScopePanel({ sessionId, onClose }: { sessionId
         ? { mode: 'agent-default' }
         : { mode: 'restricted', enabled: lists.enabled, disabled: lists.disabled, requireApproval: lists.requireApproval };
       const next = await setCapabilityScope(sessionId, scope);
-      hydrate({ scope: next, approvals: view?.approvals ?? [] });
+      hydrate({ scope: next, approvals: view?.approvals ?? [], ...(view?.viewer ? { viewer: view.viewer } : {}) });
       toast.success(t('saved'));
     } catch (e) { toast.error(e instanceof Error ? e.message : t('saveFailed')); }
     finally { setSaving(false); }
@@ -86,30 +109,49 @@ export default function CapabilityScopePanel({ sessionId, onClose }: { sessionId
       <section aria-labelledby="ct-approvals-h" className="u-mt-3">
         <h3 id="ct-approvals-h" className="u-fs-13">{t('pendingHeading')}</h3>
         {pending.length === 0
-          ? <p className="muted u-fs-12">{t('noPending')}</p>
+          ? <p className="muted u-fs-12" role="status">{approvedOne ? t('approvedContinueHint') : t('noPending')}</p>
           : (
-            <ul className="u-list-none u-p-0 u-flex u-flex-col u-gap-1">
-              {pending.map((a) => (
-                <li key={a.toolName} className="u-flex u-items-center u-justify-between u-gap-2">
-                  <code className="u-fs-12">{a.toolName}</code>
-                  <span className="u-flex u-gap-1">
-                    <Button variant="primary" className="u-fs-11" disabled={deciding} onClick={() => void decide(a.toolName, 'approved')} aria-label={t('approveAria', { tool: a.toolName })}>
-                      <CheckIcon size={12} /> {t('approve')}
-                    </Button>
-                    <Button variant="secondary" className="u-fs-11" disabled={deciding} onClick={() => void decide(a.toolName, 'denied')} aria-label={t('denyAria', { tool: a.toolName })}>
-                      {t('deny')}
-                    </Button>
-                  </span>
-                </li>
-              ))}
-            </ul>
+            <>
+              <p className="muted u-fs-12">{mayApprove ? t('grainNote') : t('notOwnerNote')}</p>
+              <ul className="u-list-none u-p-0 u-flex u-flex-col u-gap-2">
+                {pending.map((a) => (
+                  <li key={a.toolName} className="u-flex u-flex-col u-gap-1">
+                    <div className="u-flex u-items-center u-justify-between u-gap-2">
+                      <code className="u-fs-12">{a.toolName}</code>
+                      {mayApprove && (
+                        <span className="u-flex u-gap-1">
+                          <Button variant="primary" className="u-fs-11" disabled={deciding} onClick={() => void decide(a, 'approved')} aria-label={t('approveAria', { tool: a.toolName })}>
+                            <CheckIcon size={12} /> {t('approve')}
+                          </Button>
+                          <Button variant="secondary" className="u-fs-11" disabled={deciding} onClick={() => void decide(a, 'denied')} aria-label={t('denyAria', { tool: a.toolName })}>
+                            {t('deny')}
+                          </Button>
+                        </span>
+                      )}
+                    </div>
+                    <div className="u-fs-11 muted">{t('requestedWith')}</div>
+                    {a.requestedInput
+                      ? <pre className="ct-requested-input u-fs-11 u-m-0" tabIndex={0} aria-label={`${t('requestedWith')} ${a.toolName}`}>{a.requestedInput}</pre>
+                      : <span className="u-fs-11 muted">{t('noArguments')}</span>}
+                  </li>
+                ))}
+              </ul>
+            </>
           )}
+        {approvedOne && onContinue && (
+          <div className="u-mt-2">
+            <Button ref={continueRef} variant="primary" className="u-fs-12" onClick={() => { onContinue(t('continueMessage')); onClose(); }}>
+              {t('continue')}
+            </Button>
+          </div>
+        )}
       </section>
 
       {/* Scope editor */}
       <section aria-labelledby="ct-scope-h" className="u-mt-3">
         <h3 id="ct-scope-h" className="u-fs-13">{t('scopeHeading')}</h3>
-        <fieldset className="u-border-0 u-p-0 u-m-0">
+        {!mayEditScope && <p className="muted u-fs-12">{t('scopeReadOnlyNote')}</p>}
+        <fieldset className="u-border-0 u-p-0 u-m-0" disabled={!mayEditScope}>
           <legend className="sr-only">{t('modeLegend')}</legend>
           <label className="u-flex u-items-center u-gap-1 u-fs-12">
             <input type="radio" name="ct-mode" checked={mode === 'agent-default'} onChange={() => setMode('agent-default')} />
@@ -121,24 +163,28 @@ export default function CapabilityScopePanel({ sessionId, onClose }: { sessionId
           </label>
         </fieldset>
 
-        {mode === 'restricted' && (['enabled', 'disabled', 'requireApproval'] as ListKey[]).map((key) => (
-          <ToolListEditor
-            key={key}
-            label={listLabel(key)}
-            tools={lists[key]}
-            onAdd={(v) => addTo(key, v)}
-            onRemove={(v) => removeFrom(key, v)}
-            addPlaceholder={t('addPlaceholder')}
-            removeAria={(tool) => t('removeAria', { tool })}
-          />
-        ))}
+        <fieldset className="u-border-0 u-p-0 u-m-0" disabled={!mayEditScope}>
+          {mode === 'restricted' && (['enabled', 'disabled', 'requireApproval'] as ListKey[]).map((key) => (
+            <ToolListEditor
+              key={key}
+              label={listLabel(key)}
+              tools={lists[key]}
+              onAdd={(v) => addTo(key, v)}
+              onRemove={(v) => removeFrom(key, v)}
+              addPlaceholder={t('addPlaceholder')}
+              removeAria={(tool) => t('removeAria', { tool })}
+            />
+          ))}
+        </fieldset>
       </section>
 
       <div className="action-bar u-mt-3">
         <Button variant="secondary" onClick={onClose}>{t('close')}</Button>
-        <Button variant="primary" onClick={() => void save()} disabled={saving}>
-          {saving ? t('saving') : t('save')}
-        </Button>
+        {mayEditScope && (
+          <Button variant="primary" onClick={() => void save()} disabled={saving}>
+            {saving ? t('saving') : t('save')}
+          </Button>
+        )}
       </div>
     </Modal>
   );

@@ -46,27 +46,32 @@ describe('CDP-H API-key auth wiring', () => {
   it('a live owk_ key authenticates as its tenant; invalid + revoked keys do not', async () => {
     const tenantId = `org:key-${Date.now()}-${n++}`;
     const c = cookieClient();
-    expect((await c.post('/v1/host/openwop-app/test/login', { email: `k-${Date.now()}@a.test`, tenantId })).status).toBe(201);
-    const contact = (await c.post('/v1/host/openwop-app/crm/contacts', { name: 'KeyTest', email: 'k@x.test' })).body;
+    expect((await c.post('/host/openwop-app/test/login', { email: `k-${Date.now()}@a.test`, tenantId })).status).toBe(201);
+    const contact = (await c.post('/host/openwop-app/crm/contacts', { name: 'KeyTest', email: 'k@x.test' })).body;
     const contactId = contact.contactId;
 
-    const issued = await c.post('/v1/host/openwop-app/developer-keys', { name: 'ci', scopes: ['manifest:read'] });
+    // ADR 0795 D2 — this test used to mint `manifest:read` and then read CRM
+    // contacts with it: it PINNED the gap (a vendor route ignored the key's
+    // declaration). A key reads the workspace by declaring `workspace:read`.
+    const narrow = await c.post('/host/openwop-app/developer-keys', { name: 'narrow', scopes: ['manifest:read'] });
+    expect((await bearerGet('/host/openwop-app/crm/contacts', narrow.body.token as string)).status).toBe(403);
+    const issued = await c.post('/host/openwop-app/developer-keys', { name: 'ci', scopes: ['workspace:read'] });
     expect(issued.status, JSON.stringify(issued.body)).toBe(201);
     const token = issued.body.token as string;
     const keyId = issued.body.key.keyId as string;
 
     // VALID key (cookieless Bearer) → sees the tenant's contact
-    const ok = await bearerGet('/v1/host/openwop-app/crm/contacts', token);
+    const ok = await bearerGet('/host/openwop-app/crm/contacts', token);
     expect(ok.status).toBe(200);
     expect(hasContact(ok.body, contactId)).toBe(true);
 
     // INVALID key → NOT authenticated as the tenant (fail-closed)
-    const bad = await bearerGet('/v1/host/openwop-app/crm/contacts', 'owk_totally-bogus');
+    const bad = await bearerGet('/host/openwop-app/crm/contacts', 'owk_totally-bogus');
     expect(hasContact(bad.body, contactId)).toBe(false);
 
     // REVOKED key → no longer authenticates
-    expect((await c.del(`/v1/host/openwop-app/developer-keys/${keyId}`)).status).toBe(204);
-    const revoked = await bearerGet('/v1/host/openwop-app/crm/contacts', token);
+    expect((await c.del(`/host/openwop-app/developer-keys/${keyId}`)).status).toBe(204);
+    const revoked = await bearerGet('/host/openwop-app/crm/contacts', token);
     expect(hasContact(revoked.body, contactId)).toBe(false);
   });
 });

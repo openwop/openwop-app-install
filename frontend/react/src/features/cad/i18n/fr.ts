@@ -142,4 +142,8 @@ export const messages = {
   busy_glb: 'Export GLB…',
   busy_png: 'Export PNG…',
   busy_bom: 'Génération de la nomenclature…',
+  // ADR 0768 follow-up P1 — the embed's honest "can see" scope (the agent is NOT bound to what is on screen)
+  assistCanSee: "les modèles CAO que vous pouvez ouvrir dans cet espace de travail",
+  // ADR 0777 — the embed's label once bound to the open model
+  assistCanSeeThis: "ce modèle",
 };

@@ -21,6 +21,7 @@
 import { createHash } from 'node:crypto';
 import { createLogger } from '../observability/logger.js';
 import type { BundleScope } from './inMemorySurfaces.js';
+import { runOrgScopeSubject } from './accessControlService.js';
 import {
   createBoard, getBoard, listCards, getCard, createCard, updateCardFields, moveCard,
   isTerminalColumn, notifyBoardChanged, setCardLastRun,
@@ -298,7 +299,14 @@ export function createKanbanSurface(scope: BundleScope): KanbanSurface {
       // card projection, audit and outbox writes. This thin surface only binds
       // the authenticated workflow tenant — exactly the same pattern as every
       // other ctx.kanban method.
-      return applyBoardCommand({ ...args, type: 'work-items.materialize', tenantId });
+      // ADR 0832 D3 — the run's person, from the scope and AFTER the spread, so a
+      // node cannot name someone else as the requester.
+      const { requestedBy: _ignored, ...rest } = args as typeof args & { requestedBy?: unknown };
+      const requestedBy = runOrgScopeSubject(scope);
+      const result = await applyBoardCommand({ ...rest, type: 'work-items.materialize', tenantId, ...(requestedBy ? { requestedBy } : {}) });
+      // …and not echoed into the run's outputs: it is a person id, recorded for the
+      // daemon's delivery, not part of what the node produced (grade `L4`).
+      return { ...result, workItems: result.workItems.map(({ requestedBy: _r, ...item }) => item) };
     },
 
     async getReadyTasks(boardId) {

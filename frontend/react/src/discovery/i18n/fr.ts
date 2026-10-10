@@ -124,4 +124,7 @@ export const messages = {
   badgeSqlite: 'Hôte de référence SQLite',
   badgePython: 'Hôte de référence Python en mémoire',
   badgeInMemory: 'Hôte de référence en mémoire',
+  mcpMovedTitle: 'Clients IA (MCP)',
+  mcpMovedBody: 'Les outils utilisables par les clients IA externes, l’adresse du serveur et leurs clés se trouvent désormais dans Accès.',
+  mcpMovedLink: 'Ouvrir les clients IA',
 } as const;

@@ -129,7 +129,6 @@ export const messages = {
   scoreUnavailableTooltip: 'No relevance score was returned for this passage',
   reindexCancelled: 'Reindex cancelled',
   reindexCancelFailed: 'The reindex could not be cancelled.',
-  reindexFailedWithReason: 'Reindex failed: {{reason}}',
   // ── KBX-4 — status-mapped write failures ────────────────────────────────
   // The server's prose never reaches the user; the STATUS does, in their
   // language. `httpConflict` is the one that earns its place: on this surface a
@@ -173,4 +172,9 @@ export const messages = {
   reindexCancelConfirm: 'Discard this rebuild?',
   reindexCancelBody: 'The partly-built index is deleted and the collection keeps its current embedding model. Starting again re-embeds every passage from scratch.',
   reindexJobReadFailed: 'The rebuild status could not be read, so what is shown here may not reflect a job that is actually running.',
+  // KB2UX-1 — per-org authority (useKbOrgAccess).
+  accessChecking: 'Checking your permissions in this organization…',
+  accessCheckFailed: 'We couldn’t confirm your permissions in this organization, so the editing controls are hidden. You can still search and read; the server checks every change either way.',
+  readOnlyNotice: 'You can search and read this organization’s knowledge base. Adding, changing or deleting content needs edit access here — ask an organization admin.',
+  reindexOwnerOnly: 'Only an organization owner can start, continue or discard a rebuild.',
 } as const;

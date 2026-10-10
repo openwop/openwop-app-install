@@ -10,7 +10,7 @@ import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { authorizeOrgScope, optionalString } from '../featureRoute.js';
 import { getOrg } from '../../host/accessControlService.js';
-import { resolveOne } from '../../host/featureToggles/service.js';
+import { resolveToggle } from '../../host/featureToggles/service.js';
 import type { Product } from '../commerce/commerceService.js';
 import {
   listCollections, createCollection, updateCollection, deleteCollection, resolveCollection,
@@ -19,7 +19,7 @@ import {
 import { rebuildProductEmbeddings, invalidateProductEmbeddings } from './productEmbeddingIndex.js';
 
 const FEATURE = { toggleId: 'discovery', label: 'Discovery' };
-const BASE = '/v1/host/openwop-app/discovery/orgs/:orgId';
+const BASE = '/host/openwop-app/discovery/orgs/:orgId';
 
 function publicProduct(p: Product): Record<string, unknown> {
   return { productId: p.productId, type: p.type, name: p.name, description: p.description, price: p.price, currency: p.currency, imageAssetTokens: p.imageAssetTokens, categories: p.categories ?? [], tags: p.tags ?? [] };
@@ -110,11 +110,12 @@ export function registerDiscoveryRoutes(deps: RouteDeps): void {
   });
 
   // ── PUBLIC storefront search — tenant from resource, active only, no personalization. ──
-  app.get('/v1/host/openwop-app/public-discovery/:orgId/search', async (req: Request, res: Response, next) => {
+  app.get('/host/openwop-app/public-discovery/:orgId/search', async (req: Request, res: Response, next) => {
     try {
       const org = await getOrg(req.params.orgId);
       if (!org) throw new OpenwopError('not_found', 'Store not found.', 404, {});
-      const assignment = await resolveOne(FEATURE.toggleId, { tenantId: org.tenantId });
+      // ADR 0819 §1 opt-out — a PUBLIC lane (tenant from the resource): ADR 0419 never paywalls a shopper/visitor on the operator's plan.
+      const assignment = await resolveToggle(FEATURE.toggleId, { tenantId: org.tenantId });
       if (!assignment?.enabled) { res.json({ products: [], facets: [] }); return; }
       const result = await searchProducts({ tenantId: org.tenantId, orgId: req.params.orgId,
         ...(optionalString(req.query.q) ? { q: optionalString(req.query.q)! } : {}),

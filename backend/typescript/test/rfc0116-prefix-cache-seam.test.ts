@@ -28,18 +28,12 @@ async function jf<T = any>(path: string, init: RequestInit = {}): Promise<{ stat
 }
 const probe = (tenant: string, cachePrefixId: string) =>
   jf<{ cacheReadTokens: number; cacheWriteTokens: number; inputTokens: number; outputTokens: number; cacheHit: boolean }>(
-    '/v1/host/sample/aiProviders/prefix-cache-probe',
+    '/host/sample/aiProviders/prefix-cache-probe',
     { method: 'POST', body: JSON.stringify({ tenant, cachePrefixId }) },
   );
 
-describe('RFC 0116 — promptPrefixCache advert (seam env on)', () => {
-  it('advertises aiProviders.promptPrefixCache scoped to anthropic', async () => {
-    const d = await jf<{ capabilities: { aiProviders: { promptPrefixCache?: { supported?: boolean; providers?: string[] } } } }>('/.well-known/openwop');
-    const ppc = d.body.capabilities.aiProviders.promptPrefixCache;
-    expect(ppc?.supported).toBe(true);
-    expect(ppc?.providers).toEqual(['anthropic']);
-  });
-});
+// ADR 0812 P3c-0 — the `aiProviders.promptPrefixCache` advert block is deleted: the facet exists only
+// in the retired v1 document (the v2 `aiProviders` record carries none); the seam witness remains.
 
 describe('RFC 0116 — prefix-cache-probe seam witness (two tenants over HTTP)', () => {
   it('A primes → A hits → B (same cachePrefixId) structurally misses; outcome-invariant', async () => {
@@ -60,7 +54,7 @@ describe('RFC 0116 — prefix-cache-probe seam witness (two tenants over HTTP)',
   });
 
   it('rejects a malformed probe (400)', async () => {
-    const res = await jf('/v1/host/sample/aiProviders/prefix-cache-probe', { method: 'POST', body: JSON.stringify({ tenant: 'x' }) });
+    const res = await jf('/host/sample/aiProviders/prefix-cache-probe', { method: 'POST', body: JSON.stringify({ tenant: 'x' }) });
     expect(res.status).toBe(400);
   });
 });

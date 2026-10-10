@@ -41,6 +41,7 @@ const NO_ACTOR = { tutorials: [], note: 'no acting user on this turn — nothing
 export function registerTutorialsAgentTools(): void {
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: TUTORIALS_CATALOG_TOOL_ID,
       description:
@@ -96,6 +97,7 @@ export function registerTutorialsAgentTools(): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: TUTORIALS_GET_TOOL_ID,
       description:

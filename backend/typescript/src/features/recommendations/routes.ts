@@ -15,7 +15,7 @@ import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { authorizeOrgScope, optionalString } from '../featureRoute.js';
 import { getOrg } from '../../host/accessControlService.js';
-import { resolveOne } from '../../host/featureToggles/service.js';
+import { resolveToggle } from '../../host/featureToggles/service.js';
 import type { Product } from '../commerce/commerceService.js';
 import {
   listPlacements, createPlacement, updatePlacement, deletePlacement,
@@ -23,7 +23,7 @@ import {
 } from './recommendationsService.js';
 
 const FEATURE = { toggleId: 'recommendations', label: 'Recommendations' };
-const BASE = '/v1/host/openwop-app/recommendations/orgs/:orgId';
+const BASE = '/host/openwop-app/recommendations/orgs/:orgId';
 
 /** Public-safe product projection — never leaks inventory/operational fields. */
 function publicProduct(p: Product): Record<string, unknown> {
@@ -113,12 +113,13 @@ export function registerRecommendationsRoutes(deps: RouteDeps): void {
   });
 
   // ── PUBLIC storefront resolve — tenant from the RESOURCE, active only, NO contactId. ──
-  app.get('/v1/host/openwop-app/public-recommendations/:orgId/resolve', async (req: Request, res: Response, next) => {
+  app.get('/host/openwop-app/public-recommendations/:orgId/resolve', async (req: Request, res: Response, next) => {
     try {
       const org = await getOrg(req.params.orgId);
       if (!org) throw new OpenwopError('not_found', 'Store not found.', 404, {});
       // Honor the toggle: an OFF tenant surfaces no recs (never an error on a public read).
-      const assignment = await resolveOne(FEATURE.toggleId, { tenantId: org.tenantId });
+      // ADR 0819 §1 opt-out — a PUBLIC lane (tenant from the resource): ADR 0419 never paywalls a shopper/visitor on the operator's plan.
+      const assignment = await resolveToggle(FEATURE.toggleId, { tenantId: org.tenantId });
       if (!assignment?.enabled) { res.json({ products: [] }); return; }
       const result = await resolveRecommendations({
         tenantId: org.tenantId, orgId: req.params.orgId, slot: coerceSlot(req.query.slot),

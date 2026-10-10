@@ -70,3 +70,18 @@ export async function putBriefingConfig(conversationId: string): Promise<Dashboa
   const out = await requestJson<{ config: DashboardBriefingConfig }>(BRIEFING, { method: 'PUT', json: { conversationId } });
   return out.config;
 }
+
+// ── The caller's OWN recent runs (issue 4511) — slim rows, ownership decided
+//    server-side from the session. What member-tier tiles read instead of the
+//    workspace-wide `GET /runs`, which ships every member's full snapshots. ──
+export interface OwnRunRow {
+  runId: string;
+  workflowId: string;
+  status: string;
+  startedAt: string;
+  completedAt?: string;
+}
+
+export async function listOwnRuns(limit: number): Promise<{ runs: OwnRunRow[]; truncated: boolean }> {
+  return requestJson<{ runs: OwnRunRow[]; truncated: boolean }>(`/host/openwop-app/dashboard/my-runs?limit=${limit}`, { method: 'GET' });
+}

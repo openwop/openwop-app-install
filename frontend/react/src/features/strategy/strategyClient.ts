@@ -106,10 +106,21 @@ export class FeatureDisabledError extends Error {}
 const base = `${config.baseUrl}/host/openwop-app/strategy`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 
+/** ADR 0845 D4 — the write lost a compare-and-swap: someone else changed the strategy
+ *  since this screen read it. Typed so the page can offer Reload and say it in the
+ *  user's locale rather than echo the server's English sentence. */
+export class StrategyStaleWriteError extends Error {}
+
 async function asJson<T>(res: Response, ctx: string): Promise<T> {
   if (!res.ok) {
     let detail = '';
-    try { detail = ((await res.json()) as { message?: string })?.message ?? ''; } catch { /* non-JSON */ }
+    let reason: unknown;
+    try {
+      const body = (await res.json()) as { message?: string; details?: { reason?: unknown } };
+      detail = body?.message ?? '';
+      reason = body?.details?.reason;
+    } catch { /* non-JSON */ }
+    if (res.status === 409 && reason === 'stale_write') throw new StrategyStaleWriteError(detail);
     if (res.status === 404 && /not enabled/i.test(detail)) throw new FeatureDisabledError(detail);
     throw new Error(detail || `${ctx} returned ${res.status}`);
   }
@@ -180,7 +191,7 @@ export interface UpdateStrategyPatch {
 }
 
 /** ADR 0235 §D3 — CSV objective import (`objective,keyResult,target,unit`). */
-export async function importObjectives(id: string, csv: string): Promise<{ imported: number; skipped: Array<{ line: number; reason: string }>; strategy: Strategy }> {
+export async function importObjectives(id: string, csv: string): Promise<{ imported: number; skipped: Array<{ line: number; reason: string }>; strategy: Strategy; autoRevertedToDraft?: boolean; autoRevertedFields?: string[]; activationReviewClosed?: boolean }> {
   const res = await fetch(`${base}/${encodeURIComponent(id)}/import-objectives`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify({ csv }) }));
   return asJson(res, 'importObjectives');
 }

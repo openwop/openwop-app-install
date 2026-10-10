@@ -39,7 +39,7 @@ let n = 0;
 async function owner() {
   const c = client();
   const tenantId = `org:f-${Date.now()}-${n++}`;
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `f-${Date.now()}-${n++}@a.test`, tenantId });
+  const r = await c.post('/host/openwop-app/test/login', { email: `f-${Date.now()}-${n++}@a.test`, tenantId });
   expect(r.status).toBe(201);
   return { c, tenantId };
 }
@@ -62,7 +62,7 @@ describe('CDP-F governance decision log', () => {
     await setToggle('cdp', 'on');
     const { c, tenantId } = await owner();
     await recordGovernanceDecision({ tenantId, kind: 'firewall', outcome: 'deny', reason: 'read+egress' });
-    const r = await c.get('/v1/host/openwop-app/cdp/governance-decisions');
+    const r = await c.get('/host/openwop-app/cdp/governance-decisions');
     expect(r.status).toBe(200);
     expect(r.body.decisions.some((d: any) => d.action === 'governance.decision.firewall')).toBe(true);
   });
@@ -124,7 +124,7 @@ describe('R3 — merge-history audit read (/cdp/merge-events)', () => {
       refIds: { deals: [], tasks: [], activities: [] },
       actor: 'user:other',
     });
-    const r = await c.get('/v1/host/openwop-app/cdp/merge-events');
+    const r = await c.get('/host/openwop-app/cdp/merge-events');
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     const events = r.body.events as Array<{ survivorId: string; sourceId: string; filledFields: Record<string, string>; unmergedAt?: string }>;
     expect(events.length).toBe(1); // tenant isolation — the other tenant's merge is absent

@@ -149,4 +149,7 @@ export const messages = {
   loadFailedTitle: "Não foi possível carregar as regras do firewall",
   decisionsFailedTitle: "Não foi possível carregar as decisões recentes",
   decisionsFailedBody: "Esta é uma leitura que falhou, não um histórico vazio: não significa que o firewall não bloqueou nada.",
+  modeEnforceConfirmTitle: 'Ativar negar por padrão?',
+  modeEnforceConfirmBody: 'Toda ação de agente que nenhuma regra permita será bloqueada (ou ficará aguardando aprovação) neste espaço de trabalho, em todos os canais: chat, execuções, voz e widgets públicos. Confira antes as decisões recentes no modo sombra.',
+  modeEnforceConfirm: 'Aplicar',
 };

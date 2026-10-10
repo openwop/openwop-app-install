@@ -68,7 +68,12 @@ function slugify(name: string): string {
   // own schema. The user would only discover that at publish time, holding a
   // file the app told them to PR. Trim to a bound that leaves room for the
   // scope prefix, and never end on the separator.
-  const MAX_SLUG = 200;
+  //
+  // ADR 0766 §Correction (code-review HIGH) — 200 was right for v1 (`name`
+  // maxLength 256) and wrong since exports are pinned: a pin routes the manifest
+  // to the v2 schema, whose `ids.schema.json` chainId is capped at 128. The
+  // chainId is `community.local.<slug>` (16 + slug), so the slug cap is 112.
+  const MAX_SLUG = 112;
   return prefixed.length <= MAX_SLUG
     ? prefixed
     : prefixed.slice(0, MAX_SLUG).replace(/-+$/, '');
@@ -102,15 +107,57 @@ function paramNamesIn(value: unknown, acc = new Set<string>()): Set<string> {
   return acc;
 }
 
-export function buildChainPackManifest(snap: SavedWorkflow): ChainPackManifest {
+/**
+ * ADR 0766 (NP-V2-8) — the export cannot pin a node type because the connected
+ * host has not reported the version it runs. Thrown instead of emitting an
+ * unpinned manifest: RFC 0177 §E.1 requires every chain reference to carry an
+ * exact version, so an unpinned export is a file the registry — and this app's
+ * own chain loader — refuses. Handing the user that file, with a banner inviting
+ * them to PR it, would be the fabrication ADR 0525 exists to prevent.
+ */
+export class ChainExportVersionError extends Error {
+  readonly typeIds: readonly string[];
+  constructor(typeIds: readonly string[]) {
+    super(`No installed version is known for: ${typeIds.join(', ')}`);
+    this.name = 'ChainExportVersionError';
+    this.typeIds = typeIds;
+  }
+}
+
+/** The engine range an export declares: the v2 grammar's explicit upper bound
+ *  (RFC 0177 §A.1). `^1.0.0` — what this used to write — is not in that grammar,
+ *  so a v2 registry refused it at install. */
+export const CHAIN_EXPORT_ENGINES = '>=1.0.0 <3.0.0';
+
+/**
+ * @param versionOf the version of a node type installed on the connected host —
+ *   the builder passes the server catalog's (`catalogEntryByTypeId(t)?.version`).
+ *   Injected rather than imported so this module stays a pure graph→manifest map.
+ * @throws ChainExportVersionError when any node's version is unknown.
+ */
+export function buildChainPackManifest(
+  snap: SavedWorkflow,
+  versionOf: (typeId: string) => string | undefined,
+): ChainPackManifest {
   const { definition, backendIdToBuilder } = serializeWithIdMap(snap);
   const builderById = new Map(snap.nodes.map((n) => [n.id, n]));
+
+  // Resolve each type's version ONCE, so the check and the pin read one value.
+  const pinned = new Map<string, string>();
+  const unknownVersion: string[] = [];
+  for (const typeId of new Set(definition.nodes.map((n) => n.typeId))) {
+    const version = versionOf(typeId);
+    if (version) pinned.set(typeId, version);
+    else unknownVersion.push(typeId);
+  }
+  if (unknownVersion.length > 0) throw new ChainExportVersionError(unknownVersion.sort());
 
   const nodes: FragmentNode[] = definition.nodes.map((n) => {
     const builder = builderById.get(backendIdToBuilder[n.nodeId] ?? '');
     return {
       id: n.nodeId,
-      typeId: n.typeId,
+      // RFC 0177 §E.1 — an exact pin on every reference.
+      typeId: `${n.typeId}@${pinned.get(n.typeId) as string}`,
       ...(builder?.name ? { name: builder.name } : {}),
       ...(builder?.position ? { position: { ...builder.position } } : {}),
       ...(n.config && Object.keys(n.config).length > 0 ? { config: n.config } : {}),
@@ -144,7 +191,7 @@ export function buildChainPackManifest(snap: SavedWorkflow): ChainPackManifest {
     description: paramNames.length === 0
       ? `Workflow-chain pack exported from the OpenWOP builder: "${label}". Rename the community.local.* placeholder before publishing.`
       : `Workflow-chain pack exported from the OpenWOP builder: "${label}". Declares ${paramNames.length} parameter(s) found in the graph. Rename the community.local.* placeholder before publishing.`,
-    engines: { openwop: '^1.0.0' },
+    engines: { openwop: CHAIN_EXPORT_ENGINES },
     chains: [
       {
         chainId: packName,

@@ -29,7 +29,7 @@ import { createApp } from '../src/index.js';
 import { assertFlatErrorEnvelope, detailOf, errorCodeOf, retriableOf } from './helpers/errorEnvelope.js';
 
 const TOKEN = 'dev-token';
-const SEAM = '/v1/host/sample/a2a/invoke';
+const SEAM = '/host/sample/a2a/invoke';
 
 // ── A dual-era peer: 1.0 + 0.3, revision from `A2A-Version` (absent ⇒ 0.3) ────
 

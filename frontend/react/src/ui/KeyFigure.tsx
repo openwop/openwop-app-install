@@ -14,9 +14,11 @@
  * and ledger persona names keep the serif.
  *
  * When `onToggle` is supplied the cards become **filter controls** (`aria-pressed`)
- * — the §4.5 law that a figure both reports and filters the data below it — with a
- * clay active wash, border and edge bar. `tone:'attention'` renders an at-risk
- * count in amber. Token-only; no color literals.
+ * — the §4.5 law that a figure both reports and filters the data below it. The
+ * selected card wears a 2px muted-ink ring and nothing else (restyled 2026-10-08 from the
+ * Access redesign canvas; the clay wash, border and edge bar are gone).
+ * `tone:'attention'` renders an at-risk count in amber, paired with a warning glyph.
+ * Token-only; no color literals.
  */
 import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -30,9 +32,11 @@ export interface KeyFigureItem {
   tone?: 'default' | 'attention';
   glyph?: ReactNode;
   /** Optional one-line context under the value (e.g. "+12% vs prior 30 days").
-   *  `subTone` tints it for direction; 'neutral' stays muted. */
+   *  `subTone` tints it for direction; 'neutral' stays muted; 'attention' marks
+   *  the line itself as the at-risk part ("1 needs reconnecting") when the
+   *  numeral is a plain total that should not turn amber. */
   sub?: string;
-  subTone?: 'up' | 'down' | 'neutral';
+  subTone?: 'up' | 'down' | 'neutral' | 'attention';
 }
 
 export function KeyFigureBand({
@@ -66,7 +70,7 @@ export function KeyFigureBand({
             </span>
             <span className="figure-tile__value">{f.value}</span>
             {f.sub ? (
-              <span className={`figure-tile__sub${f.subTone === 'up' ? ' figure-tile__sub--up' : f.subTone === 'down' ? ' figure-tile__sub--down' : ''}`}>
+              <span className={`figure-tile__sub${f.subTone === 'up' ? ' figure-tile__sub--up' : f.subTone === 'down' ? ' figure-tile__sub--down' : f.subTone === 'attention' ? ' figure-tile__sub--attention' : ''}`}>
                 {f.sub}
               </span>
             ) : null}

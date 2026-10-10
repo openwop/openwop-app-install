@@ -22,6 +22,7 @@ import { useTranslation } from 'react-i18next';
 import {
   fetchRegistryIndex,
   fetchPackDetail,
+  latestInstallable,
   trustTierFor,
   trustTierLabel,
   registryUrl,
@@ -182,7 +183,8 @@ function PackDetailView({
   if (!detail) return <div className="muted u-p-4">{t('loadingPack', { name })}</div>;
 
   const tier = trustTierFor(detail.name);
-  const latest = detail.versions.find((v) => v.version === detail.latest) ?? detail.versions[detail.versions.length - 1];
+  // RFC 0222 — never present (or install) a yanked version as latest.
+  const latest = latestInstallable(detail);
 
   return (
     <div className="pack-detail">
@@ -255,7 +257,7 @@ function PackDetailView({
                 <code>{v.version}</code>
                 {v.yanked && <span className="pack-flag pack-flag-danger">{t('flagYanked')}</span>}
                 {v.deprecated && !v.yanked && <span className="pack-flag">{t('flagDeprecated')}</span>}
-                <span className="muted u-fs-11"> {f.date(v.publishedAt)}</span>
+                {v.publishedAt && <span className="muted u-fs-11"> {f.date(v.publishedAt)}</span>}
               </li>
             ))}
           </ul>

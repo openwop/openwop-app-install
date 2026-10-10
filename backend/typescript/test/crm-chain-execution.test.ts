@@ -17,9 +17,13 @@
  * `contactId ?? entityId` fallback reads it.
  *
  * Registers the chain's expansion as a real workflow (`registerWorkflow` —
- * the same registry `POST /v1/host/openwop-app/workflows` writes to) so the
+ * the same registry `POST /host/openwop-app/workflows` writes to) so the
  * production dispatch path can resolve + execute it exactly as it would for
  * an operator-bound chain.
+ *
+ * Sabotage-witnessed (w4 grade-tests): dropping the `str(i.entityId)` fallback
+ * in `feature.crm.nodes.update-contact-owner` fails the run. The settle poll
+ * below is an honest ceiling — no run-settle hook exists to await.
  */
 
 import http from 'node:http';
@@ -58,7 +62,9 @@ afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
 });
 
-interface Res<T = any> { status: number; body: T }
+interface Res { status: number; body: unknown }
+/** Narrow a JSON body at its read site (no `any`). */
+const bodyAs = <T>(r: Res): T => r.body as T;
 interface Client {
   get: (p: string) => Promise<Res>;
   post: (p: string, b?: unknown) => Promise<Res>;
@@ -83,13 +89,19 @@ let n = 0;
 async function ownerOrg(): Promise<{ owner: Client; orgId: string; tenantId: string }> {
   const tenantId = `org:crmchain-${Date.now()}-${n++}`;
   const owner = client();
-  const r = await owner.post('/v1/host/openwop-app/test/login', { email: `crmchain-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await owner.post('/host/openwop-app/test/login', { email: `crmchain-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  bindingAuthor.set(tenantId, bodyAs<{ user: { userId: string } }>(r).user.userId);
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
-  return { owner, orgId: org.body.orgId, tenantId };
+  return { owner, orgId: bodyAs<{ orgId: string }>(org).orgId, tenantId };
 }
-const c = (orgId: string, suffix = ''): string => `/v1/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}${suffix}`;
+
+/** ADR 0832 D3 — a trigger fire is bounded by the orgs of whoever armed it; the
+ *  binding is authored by the org's owner, as the bindings route stamps it on
+ *  the cookie lane. It used to be the literal `'test'`, a subject in no org. */
+const bindingAuthor = new Map<string, string>();
+const c = (orgId: string, suffix = ''): string => `/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}${suffix}`;
 
 describe('crm-ops.route-new-lead — end-to-end execution (CRMGAP-12)', () => {
   it('a host.crm.contact.created event, dispatched through the REAL executor, assigns the owner and creates the follow-up task', async () => {
@@ -106,14 +118,14 @@ describe('crm-ops.route-new-lead — end-to-end execution (CRMGAP-12)', () => {
       tenantId,
       eventType: 'host.crm.contact.created',
       workflowId: expanded.workflowId,
-      createdBy: 'test',
+      createdBy: bindingAuthor.get(tenantId)!,
     });
 
     // The trigger: a real contact create through the real route (same
     // `crmMutated` → `emitHostEvent` path production uses).
-    const contact = await owner.post('/v1/host/openwop-app/crm/contacts', { name: 'Chain Lead', email: 'chainlead@newco.test' });
+    const contact = await owner.post('/host/openwop-app/crm/contacts', { name: 'Chain Lead', email: 'chainlead@newco.test' });
     expect(contact.status, JSON.stringify(contact.body)).toBe(201);
-    const contactId = contact.body.contactId as string;
+    const contactId = bodyAs<{ contactId: string }>(contact).contactId;
 
     // Poll for the triggered run to reach a terminal state.
     let run: RunRecord | undefined;
@@ -127,14 +139,14 @@ describe('crm-ops.route-new-lead — end-to-end execution (CRMGAP-12)', () => {
 
     // The chain's node-output threading actually delivered the contactId:
     // owner assigned…
-    const updated = await owner.get(`/v1/host/openwop-app/crm/contacts/${contactId}`);
+    const updated = await owner.get(`/host/openwop-app/crm/contacts/${contactId}`);
     expect(updated.status, JSON.stringify(updated.body)).toBe(200);
-    expect(updated.body.owner, 'update-contact-owner must have received the triggered contactId (entityId fallback)').toBe(ownerId);
+    expect(bodyAs<{ owner?: string }>(updated).owner, 'update-contact-owner must have received the triggered contactId (entityId fallback)').toBe(ownerId);
 
     // …and the follow-up task landed in the target org.
     const tasks = await owner.get(c(orgId, '/tasks'));
     expect(tasks.status, JSON.stringify(tasks.body)).toBe(200);
-    const followUp = tasks.body.tasks.find((t: { title: string }) => t.title === taskTitle);
+    const followUp = bodyAs<{ tasks: Array<{ title: string }> }>(tasks).tasks.find((t) => t.title === taskTitle);
     expect(followUp, `expected a follow-up task titled "${taskTitle}"`).toBeTruthy();
   });
 });

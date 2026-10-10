@@ -121,3 +121,110 @@ rehearsal asserts that directly rather than trusting the reasoning.
 | 3 | `Deprecation` withheld post-cut | same |
 | 4 | consumers moved off the constants | `routes/discovery.ts` |
 | 5 | rehearsal + 4 sabotages | `test/adr0669-v1-retirement-rehearsal.test.ts` |
+
+## Addendum (2026-09-30): what the rehearsal could not see
+
+The rehearsal proved the flag flips. It never exercised the host's calls **to
+itself**, or the addresses it **hands out**, and both would have broken on the
+day:
+
+- **Self-calls.** The sub-run dispatcher and the messaging bridge reached this
+  host at `${baseUrl}/v1/runs…`. Every sub-workflow and every messaging-started
+  run would have failed with a 410. Both now use unversioned paths plus
+  `selfCallHeaders()`, which is derived from `protocolVersions()` and names the
+  newest major, so the next major is a no-op for self-callers.
+- **Advertised addresses.** `advertisedPath()` / `runLinks()` own every address
+  a response hands out: the OpenAPI keys, example-data-summary links, workflow
+  author and creative-brief run links, MCP `serverUrls`, the A2A card URL and
+  the partner-portal link. Host extensions are always unversioned. A protocol
+  path is spelled `/v1` only in a pre-cut major-1 response, and an operation with
+  no v2 address is omitted after the cut rather than advertised dead.
+- **Measurement.** `deprecated_major_request` logs every request served under a
+  deprecated major, with route family and caller class and nothing identifying.
+  It shows who still depends on v1 before the cut, not as 410s after it.
+- **Ratchet.** `backendVersionedOwnUrls` in `check-v1-reliance.mjs` counts URLs
+  this host builds to its own paths through `/v<N>/`. It is version-neutral, and
+  its "own paths" are derived from the v2 path manifest.
+
+Rehearsed in `test/adr0669-self-calls-survive-cut.test.ts`, with every leg
+paired with its pre-cut control and sabotage-proven.
+
+> **CORRECTED 2026-10-03 (ADR 0806).** The list below under-counted the class.
+> Every unauthenticated vendor address (public pages, feeds, shared cards, form
+> and booking pages, email links, the widget's `embed.js`, and the provider
+> webhooks) answered `410` on the day. ADR 0806 generalises the asset forward
+> below to READS of all of them and keeps writes `410`, with an operator
+> re-point step for webhooks. Status of the three items: OAuth callbacks are
+> handled by ADR 0806 (`redirect_uri` moves with the cut). Federation now reads
+> canonical-first (`test/adr0669-federation-canonical-first.test.ts`). The
+> `runs.ts` run links were never a hazard: the major-2 projector and the
+> closed v2 snapshot own their spelling, pinned by
+> `test/adr0669-run-links-survive-cut.test.ts`.
+
+**Still open before the cut** (tracked in the re-root plan):
+- ~~persisted asset URLs (`/v1/host/openwop-app/assets/…` in drawings, slides,
+  CAD and signing certificates), which need a data migration;~~ **closed
+  2026-10-01 without a migration** — see "Stored asset addresses" below;
+- OAuth callback URIs, which need an operator step at each provider first;
+- `runs.ts` run links (the runs family PR);
+- federation to peers (ADR 0656 class 5), canonical first with a `/v1`
+  fallback.
+
+### Stored asset addresses (decided 2026-10-01): redirect, do not rewrite
+
+> **CORRECTION to the bullet above.** It said persisted asset URLs "need a data
+> migration". A migration was built (a raw-text compare-and-swap rewrite of
+> every `hostext:` row) and **not shipped**, because it breaks rows that sit
+> under an integrity hash. MEASURED: an audit-chain entry whose payload carried
+> a `/v1` asset URL verified before the job ran and reported
+> `{ ok: false, brokenAt: 1 }` after. E-sign content hashes, assistant action
+> approvals and the compensation-recovery chain have the same shape. A sweep
+> that "covers every collection, including future ones" also covers every
+> future hashed one.
+
+**Decision.** Stored content is left alone. After the cut,
+`GET`/`HEAD /v<N>/host/openwop-app/assets/<token>` answers `308` to the
+unversioned address instead of `410` (`retiredAssetServePath`, at the one 410
+site in `middleware/protocolVersion.ts`). It is the only `/v1` address that
+survives.
+
+> *Superseded in scope by ADR 0806 (2026-10-03): every READ of an unauthenticated vendor address now forwards the same way; writes and authenticated addresses still answer `410`.*
+
+**Why this and not the alternatives.**
+- *An allowlist of collections to rewrite* is safe for hashed rows but fails
+  silently: a collection left off the list breaks on the day.
+- *A generic sweep with an opt-out for hashed collections* fails the other way:
+  the first hashed store that forgets to opt out is corrupted.
+- A redirect also reaches copies no rewrite can: run event logs (append-only),
+  sent emails, exported files, anything pasted elsewhere.
+
+**Why it does not weaken the cut.** The asset address is a host-extension path,
+not a major-1 protocol operation. Only reads redirect; the token shape admits
+nothing but an asset address; writes, longer paths, the rest of the vendor
+space and every protocol path still answer `410`.
+
+**With it.** New assets are minted unversioned (#4289), so the old form stops
+growing. The SPA canonicalises any versioned asset URL where it renders or
+fetches one (`client/assetServePath.ts`), which saves the redirect hop. The
+Illustrator agent's prompt names the unversioned address too (drawings agent
+pack 1.0.3), pinned to `ASSET_SERVE_PATH` by the drawings prompt-parity test, so
+the model is no longer taught an address the host only honours by redirect.
+
+**Tests.** `adr0669-v1-retirement-rehearsal.test.ts`: pre-cut control (served
+directly), retired (308, query kept, bytes served on follow), and that nothing
+else rides the exception. Sabotage: disabling the exception fails the retired
+leg. `asset-serve-path.test.ts` pins that the exception's pattern agrees with
+`host/assetServePath.ts`.
+
+## Addendum (2026-10-03): the rehearsal on production infrastructure
+
+The procedure is now `docs/runbooks/V1-RETIREMENT-CUT.md`. A 0%-traffic revision with the flag on, certified at major 2, found four host defects the in-process rehearsal could not. The in-process rehearsal exercised the flag's own legs, not the corpus scenarios a retired host meets:
+1. `protocolVersion` is `preferredVersion`'s twin and was the v1 constant;
+2. the 406 check hard-coded the served majors;
+3. a bare run id was admitted after the overlap;
+4. a double-projected id answered 404, not 400.
+
+All four are fixed and pinned by `test/adr0669-cut-rehearsal-findings.test.ts`. A fifth (`v2-advertised-path-space-served`) was a scenario defect, fixed in suite 2.45.12.
+
+**The lesson:** a cut switch is rehearsed against the SUITE, not only against its own tests. The flag's tests proved the flag flips. Only the corpus proved what a retired host must then answer.
+

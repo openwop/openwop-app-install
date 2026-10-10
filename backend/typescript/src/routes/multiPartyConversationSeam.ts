@@ -107,8 +107,8 @@ function councilMeta(tenantId: string, conversationId: string, agentIds: string[
  * pair for this reason; `test/multi-party-conversation-seam.test.ts` drives
  * both spellings so the pair cannot rot back to one.
  */
-const OPEN_PATHS = ['/v1/host/openwop-app/conversation/multi-party/open', '/v1/host/sample/conversation/multi-party/open'];
-const EXCHANGE_PATHS = ['/v1/host/openwop-app/conversation/multi-party/exchange', '/v1/host/sample/conversation/multi-party/exchange'];
+const OPEN_PATHS = ['/host/openwop-app/conversation/multi-party/open', '/host/sample/conversation/multi-party/open'];
+const EXCHANGE_PATHS = ['/host/openwop-app/conversation/multi-party/exchange', '/host/sample/conversation/multi-party/exchange'];
 
 export function registerMultiPartyConversationSeamRoutes(app: Express): void {
   app.post(OPEN_PATHS, (req, res, next) => {

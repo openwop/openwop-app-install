@@ -74,13 +74,13 @@ let n = 0;
 async function ownerOrg(): Promise<{ c: Client; orgId: string; userId: string }> {
   const tenantId = `org:byline-${Date.now()}-${n++}`;
   const c = client();
-  const login = await c.post('/v1/host/openwop-app/test/login', { email: `byline-${Date.now()}-${n++}@acme.test`, tenantId });
+  const login = await c.post('/host/openwop-app/test/login', { email: `byline-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(login.status, JSON.stringify(login.body)).toBe(201);
-  const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return { c, orgId: org.body.orgId as string, userId: login.body.user.userId as string };
 }
-const cms = (orgId: string, s = ''): string => `/v1/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${s}`;
+const cms = (orgId: string, s = ''): string => `/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${s}`;
 
 async function publishPost(c: Client, orgId: string, title: string): Promise<void> {
   const created = await c.post(cms(orgId, '/pages'), {
@@ -92,12 +92,12 @@ async function publishPost(c: Client, orgId: string, title: string): Promise<voi
 
 /** The anonymous, author-enriched blog feed. */
 async function feed(orgId: string): Promise<string> {
-  const res = await fetch(`${BASE}/v1/host/openwop-app/public/${encodeURIComponent(orgId)}/blog/feed.xml`);
+  const res = await fetch(`${BASE}/host/openwop-app/public/${encodeURIComponent(orgId)}/blog/feed.xml`);
   expect(res.status).toBe(200);
   return res.text();
 }
 async function blogList(orgId: string): Promise<any> {
-  const res = await fetch(`${BASE}/v1/host/openwop-app/public/${encodeURIComponent(orgId)}/blog`);
+  const res = await fetch(`${BASE}/host/openwop-app/public/${encodeURIComponent(orgId)}/blog`);
   expect(res.status).toBe(200);
   return res.json();
 }
@@ -105,7 +105,7 @@ async function blogList(orgId: string): Promise<any> {
 describe('CMSA-13 — the anonymous byline must be a NAME, never the internal principal', () => {
   it('emits the author display name in <dc:creator>, and never `user:<id>`', async () => {
     const { c, orgId, userId } = await ownerOrg();
-    const setName = await c.patch('/v1/host/openwop-app/users/me', { displayName: 'Ada Lovelace' });
+    const setName = await c.patch('/host/openwop-app/users/me', { displayName: 'Ada Lovelace' });
     expect(setName.status, JSON.stringify(setName.body)).toBe(200);
     await publishPost(c, orgId, 'First post');
 
@@ -140,7 +140,7 @@ describe('CMSA-13 — the anonymous byline must be a NAME, never the internal pr
     // (`PATCH /users/me`), so the public surface must treat it as hostile input.
     const { c, orgId } = await ownerOrg();
     const evil = '</dc:creator><script>alert(1)</script><dc:creator>';
-    expect((await c.patch('/v1/host/openwop-app/users/me', { displayName: evil })).status).toBe(200);
+    expect((await c.patch('/host/openwop-app/users/me', { displayName: evil })).status).toBe(200);
     await publishPost(c, orgId, 'Escaped post');
     const xml = await feed(orgId);
     expect(xml).not.toContain('<script>');

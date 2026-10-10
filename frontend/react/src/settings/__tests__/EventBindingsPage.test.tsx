@@ -30,8 +30,14 @@ const BINDING = {
 };
 const WORKFLOW = { workflowId: 'wf-1', name: 'Route new lead', nodeCount: 4, createdAt: '2026-06-01T00:00:00.000Z', updatedAt: '2026-06-01T00:00:00.000Z' };
 
-function mockFetch(opts: { bindings?: unknown[]; workflows?: unknown[] } = {}): ReturnType<typeof vi.fn> {
+const CATALOG = [
+  { emitted: 'host.crm.contact.created', type: 'openwop-app.crm-contact-created', delivery: 'durable' },
+  { emitted: 'host.goals.evaluated', type: 'openwop-app.goals-evaluated', delivery: 'durable' },
+];
+
+function mockFetch(opts: { bindings?: unknown[]; workflows?: unknown[]; catalog?: unknown[] | 'fail' } = {}): ReturnType<typeof vi.fn> {
   const bindings = opts.bindings ?? [BINDING];
+  const catalog = opts.catalog ?? CATALOG;
   const workflows = opts.workflows ?? [WORKFLOW];
   const fn = vi.fn(async (url: string, init?: RequestInit) => {
     const method = (init?.method ?? 'GET').toUpperCase();
@@ -52,6 +58,9 @@ function mockFetch(opts: { bindings?: unknown[]; workflows?: unknown[] } = {}): 
     }
     if (path.startsWith('/host/openwop-app/host-events/bindings/') && method === 'DELETE') {
       return new Response(null, { status: 204 });
+    }
+    if (path === '/host/openwop-app/host-events/catalog' && method === 'GET') {
+      return catalog === 'fail' ? jsonResponse(500, { error: { code: 'internal_error', message: 'boom' } }) : jsonResponse(200, { types: catalog });
     }
     if (path === '/host/openwop-app/workflows' && method === 'GET') {
       return jsonResponse(200, { workflows });
@@ -124,5 +133,23 @@ describe('EventBindingsPage designed states', () => {
 
     await waitFor(() => expect(screen.getByText('Binding for host.crm.contact.created deleted.')).toBeTruthy());
     window.confirm = origConfirm;
+  });
+
+  // ADR 0825 — the suggestions are the backend catalog, not a hand-kept list.
+  it('catalog: the event-type suggestions are the backend catalog, labelled with the v2 type', async () => {
+    mockFetch();
+    const { container } = render(<><EventBindingsPage /><Toaster /></>);
+    await waitFor(() => expect(container.querySelectorAll('#host-event-types option')).toHaveLength(CATALOG.length));
+    const opts = [...container.querySelectorAll('#host-event-types option')];
+    expect(opts.map((o) => o.getAttribute('value'))).toEqual(CATALOG.map((c) => c.emitted));
+    expect(opts.map((o) => o.getAttribute('label'))).toEqual(CATALOG.map((c) => c.type));
+    expect(screen.queryByText(/list of event types could not be loaded/i)).toBeNull();
+  });
+
+  it('catalog read failure: says so, and free text still works', async () => {
+    mockFetch({ catalog: 'fail' });
+    const { container } = render(<><EventBindingsPage /><Toaster /></>);
+    expect((await screen.findAllByText(/list of event types could not be loaded/i)).length).toBeGreaterThan(0);
+    expect(container.querySelectorAll('#host-event-types option')).toHaveLength(0);
   });
 });

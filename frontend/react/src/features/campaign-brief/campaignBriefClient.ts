@@ -134,7 +134,7 @@ export async function findCampaignForBrief(orgId: string, briefId: string): Prom
 }
 
 /** The Brief Strategist agent id the chat deep-link scopes to (ADR 0058). */
-export const BRIEF_STRATEGIST_AGENT = 'feature.campaign-brief.agents.brief-strategist';
+export const BRIEF_STRATEGIST_AGENT = 'vendor.openwop-app.campaign-brief.agents.brief-strategist';
 
 // ── ADR 0403 — market intel (VOC evidence · angles · hook bank · targeting) ──
 

@@ -34,20 +34,20 @@ function client() {
   return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b) };
 }
 let n = 0;
-async function owner() { const c = client(); const r = await c.post('/v1/host/openwop-app/test/login', { email: `b-${Date.now()}-${n++}@a.test`, tenantId: `org:b-${Date.now()}-${n++}` }); expect(r.status).toBe(201); return c; }
+async function owner() { const c = client(); const r = await c.post('/host/openwop-app/test/login', { email: `b-${Date.now()}-${n++}@a.test`, tenantId: `org:b-${Date.now()}-${n++}` }); expect(r.status).toBe(201); return c; }
 const enable = async (id: string) => { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status: 'on' }, 'test'); };
 
 describe('CDP-B match candidates', () => {
   it('proposes shared-identifier and name+company dupes; excludes exact-email and dissimilar', async () => {
     await enable('crm');
     const c = await owner();
-    const j1 = (await c.post('/v1/host/openwop-app/crm/contacts', { name: 'John Smith', email: 'j1@x.test', company: 'Acme' })).body;
-    const j2 = (await c.post('/v1/host/openwop-app/crm/contacts', { name: 'Jon Smith', email: 'j2@x.test', company: 'Acme' })).body;
-    await c.post(`/v1/host/openwop-app/crm/contacts/${j1.contactId}/identifiers`, { type: 'phone', value: '+1 (555) 111-0000' });
-    await c.post(`/v1/host/openwop-app/crm/contacts/${j2.contactId}/identifiers`, { type: 'phone', value: '+15551110000' }); // normalizes to the same digits
-    await c.post('/v1/host/openwop-app/crm/contacts', { name: 'Jane Doe', email: 'jane@x.test', company: 'Globex' });
+    const j1 = (await c.post('/host/openwop-app/crm/contacts', { name: 'John Smith', email: 'j1@x.test', company: 'Acme' })).body;
+    const j2 = (await c.post('/host/openwop-app/crm/contacts', { name: 'Jon Smith', email: 'j2@x.test', company: 'Acme' })).body;
+    await c.post(`/host/openwop-app/crm/contacts/${j1.contactId}/identifiers`, { type: 'phone', value: '+1 (555) 111-0000' });
+    await c.post(`/host/openwop-app/crm/contacts/${j2.contactId}/identifiers`, { type: 'phone', value: '+15551110000' }); // normalizes to the same digits
+    await c.post('/host/openwop-app/crm/contacts', { name: 'Jane Doe', email: 'jane@x.test', company: 'Globex' });
 
-    const r = await c.get('/v1/host/openwop-app/crm/match-candidates');
+    const r = await c.get('/host/openwop-app/crm/match-candidates');
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     const cands = r.body.candidates as { a: { contactId: string; name: string }; b: { contactId: string; name: string }; reason: string; score: number }[];
     // the Smith pair is surfaced (shared phone → strong)
@@ -64,10 +64,10 @@ describe('CDP-B match candidates', () => {
     await enable('crm');
     const c = await owner();
     const dup = 'dup@x.test';
-    await c.post('/v1/host/openwop-app/crm/contacts', { name: 'A', email: dup });
-    await c.post('/v1/host/openwop-app/crm/contacts', { name: 'B', email: dup }); // exact-email dupe — NOT a probabilistic candidate
-    const r1 = (await c.get('/v1/host/openwop-app/crm/match-candidates')).body.candidates;
-    const r2 = (await c.get('/v1/host/openwop-app/crm/match-candidates')).body.candidates;
+    await c.post('/host/openwop-app/crm/contacts', { name: 'A', email: dup });
+    await c.post('/host/openwop-app/crm/contacts', { name: 'B', email: dup }); // exact-email dupe — NOT a probabilistic candidate
+    const r1 = (await c.get('/host/openwop-app/crm/match-candidates')).body.candidates;
+    const r2 = (await c.get('/host/openwop-app/crm/match-candidates')).body.candidates;
     expect(r1).toEqual(r2); // deterministic
     expect(r1.length).toBe(0); // the only pair is exact-email → owned by findDuplicateContacts
   });

@@ -15,6 +15,7 @@ const GOAL_STATES: ReadonlySet<string> = new Set(['active', 'satisfied', 'escala
 export function registerGoalsAgentTools(): void {
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: GOALS_LIST_TOOL_ID,
       description:

@@ -39,8 +39,20 @@ function readErrorCode(body: unknown): string | undefined {
   return undefined;
 }
 
+/** `details.reason`, when the envelope carries one. */
+function readReason(body: unknown): string | undefined {
+  if (body === null || typeof body !== 'object') return undefined;
+  const details = (body as { details?: unknown }).details;
+  if (details === null || typeof details !== 'object') return undefined;
+  const reason = (details as { reason?: unknown }).reason;
+  return typeof reason === 'string' ? reason : undefined;
+}
+
 export const SESSION_REFUSAL_CODES = ['account_disabled', 'account_erased', 'session_revoked'] as const;
-export type SessionRefusalCode = (typeof SESSION_REFUSAL_CODES)[number];
+/** The three refusal CODES, plus `session_expired`: an ended signed-in session
+ *  (ADR 0833 D3) is `unauthenticated` with `details.reason: 'session_expired'`
+ *  — a reason, not a code — and signs out with its own notice. */
+export type SessionRefusalCode = (typeof SESSION_REFUSAL_CODES)[number] | 'session_expired';
 
 export function isSessionRefusalCode(code: unknown): code is SessionRefusalCode {
   return typeof code === 'string' && (SESSION_REFUSAL_CODES as readonly string[]).includes(code);
@@ -50,7 +62,10 @@ export function isSessionRefusalCode(code: unknown): code is SessionRefusalCode 
  *  "no session" (`sign_in_required`) that must NOT evict anyone. */
 export function sessionRefusalOf(status: number, body: unknown): SessionRefusalCode | null {
   if (status !== 401) return null;
-  const code = readErrorCode(body);
+  // The v2 wire namespaces a host code (`openwop-app.account_disabled`); the
+  // refusal is the same one (grade-ux USERS2-UX-5).
+  const code = readErrorCode(body)?.replace(/^openwop-app\./, '');
+  if (code === 'unauthenticated' && readReason(body) === 'session_expired') return 'session_expired';
   // RFC 0170 — on the v2 wire a revoked session is spelled `credential_revoked`
   // (the backend aliases its `session_revoked`). Same refusal, same eviction.
   if (code === 'credential_revoked') return 'session_revoked';

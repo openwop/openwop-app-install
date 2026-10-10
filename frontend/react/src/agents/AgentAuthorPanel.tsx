@@ -9,7 +9,7 @@
  *
  * EmbeddedChatPanel is **lazy-imported** from `chat/`: chat/ imports agents/
  * (roster surfaces), so a static agents→chat edge would create a cycle — the
- * dynamic import is a separate chunk (the CreateWithAiPanel precedent).
+ * dynamic import is a separate chunk (the builder `pair/PairPanel` precedent).
  *
  * @see docs/adr/0514-agent-author-describe-to-create.md
  */
@@ -23,7 +23,7 @@ const EmbeddedChatPanel = lazy(() =>
 );
 
 /** The agent the wizard's describe-to-create scopes the chat to (ADR 0514 pack). */
-const AGENT_AUTHOR_AGENT_ID = 'feature.agent-author.agents.agent-author';
+const AGENT_AUTHOR_AGENT_ID = 'vendor.openwop-app.agent-author.agents.agent-author';
 
 function AgentAuthorWelcome({ onPick }: { onPick: (text: string) => void }): JSX.Element {
   const { t } = useTranslation('agents');
@@ -56,6 +56,9 @@ export function AgentAuthorPanel({ onClose }: { onClose(): void }): JSX.Element 
       <Suspense fallback={<div className="muted u-fs-13 u-p-3">{t('authorLoading')}</div>}>
         <EmbeddedChatPanel
           agentId={AGENT_AUTHOR_AGENT_ID}
+          // ADR 0768 — honest scope: the Author reads the catalog + roster; it
+          // does NOT see this wizard's in-progress form.
+          contextLabel={t('authorCanSee')}
           renderEmptyState={(onPick) => <AgentAuthorWelcome onPick={onPick} />}
         />
       </Suspense>

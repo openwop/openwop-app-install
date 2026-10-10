@@ -60,7 +60,7 @@ describe('ADR 0678 D1 — notebooks writer classification', () => {
   });
 
   it('leg 5: the pack and the five changed nodes moved version together', () => {
-    expect(PACK.version).toBe('1.1.0');
+    expect(PACK.version).toBe('1.1.1');
     const byId = new Map(PACK.nodes.map((n) => [n.typeId, n]));
     for (const id of WRITERS) expect(byId.get(id)?.version, id).toBe('1.1.0');
   });

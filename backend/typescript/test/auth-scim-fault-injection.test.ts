@@ -17,6 +17,10 @@
  *
  * Faults are injected through `vi.mock` wrappers over the real modules
  * (the `auth-saml-disabled-user.test.ts` idiom), toggled per test.
+ *
+ * Sabotage that turns it red: swap the two writes in `scimProvisioningService.ts`
+ * `setScimActive` (status first) ⇒ (1) and (2) red; swap them in `deactivateUser`
+ * ⇒ the seam-lane case red.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import express, { type Express } from 'express';
@@ -136,9 +140,9 @@ describe('ADR 0617 D5 — deny-first leaver with the IdP retry as compensation',
   it('the seam lane (`deactivate-user` by externalId) has the same ordering', async () => {
     process.env.OPENWOP_TEST_SCIM_URL = 'http://scim.invalid';
     try {
-      await provisionUser({ tenantId: TENANT, userName: 'leaver.three@acme.test', externalId: 'ext-fault-3' });
+      const u = await provisionUser({ tenantId: TENANT, userName: 'leaver.three@acme.test', externalId: 'ext-fault-3' });
       faults.statusThrows = true;
-      const res = await fetch(`http://127.0.0.1:${port}/v1/host/openwop-app/auth/scim/provision`, {
+      const res = await fetch(`http://127.0.0.1:${port}/host/openwop-app/auth/scim/provision`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${SCIM_BEARER}` },
         body: JSON.stringify({ scimUrl: 'x', op: 'deactivate-user', externalId: 'ext-fault-3' }),
@@ -146,6 +150,7 @@ describe('ADR 0617 D5 — deny-first leaver with the IdP retry as compensation',
       expect(res.status).toBeGreaterThanOrEqual(500);
       expect(await isLinkedSubjectDenied(TENANT, 'ext-fault-3')).toBe(true);
       expect(faults.denySeenBeforeStatus).toBe(true);
+      expect((await getUser(u.userId))!.status).toBe('active'); // the SCIM half is left for the retry
     } finally {
       delete process.env.OPENWOP_TEST_SCIM_URL;
     }

@@ -27,6 +27,8 @@ import { runAgentDispatchLive, type AgentToolDef, type LiveDispatchDeps } from '
 import { getAgentRegistry } from '../src/executor/agentRegistry.js';
 import { getRunArtifact, __resetRunArtifactStore } from '../src/host/runArtifactStore.js';
 import { registerCodeExecArtifactType } from '../src/features/code-exec/artifactTypes.js';
+import { registerToggleDefault } from '../src/host/featureToggles/registry.js';
+import { codeExecFeature } from '../src/features/code-exec/feature.js';
 import { buildFirewallHook, SENSITIVE_APPROVAL_TOOLS } from '../src/features/capability-firewall/firewallHook.js';
 import type { AiCallResult, AiToolCallResult } from '../src/executor/types.js';
 
@@ -37,6 +39,7 @@ let sandbox: http.Server;
 beforeAll(async () => {
   initHostExtPersistence(await openStorage('memory://'));
   registerCodeExecArtifactType(); // idempotent (Map.set) — makes the typed projection honored
+  registerToggleDefault(codeExecFeature.toggleDefault!); // ADR 0820 §8.2 — the runner's access gate reads it
   sandbox = http.createServer((_req, res) => {
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ exitCode: 0, stdout: '42\n', stderr: '', timedOut: false }));

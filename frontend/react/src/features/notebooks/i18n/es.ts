@@ -4,6 +4,9 @@
 export const messages = {
   // Textos de error — compartidos por los paneles siguientes.
   loadFailed: 'No se pudo cargar.',
+  sourcesNoneReadOnlyTitle: 'Aún no hay fuentes',
+  sourcesNoneReadOnlyBody: 'Alguien con acceso de edición a este proyecto puede añadir fuentes aquí.',
+  sourcesReadOnlyNote: 'Puedes leer estas fuentes. Para añadirlas o cambiarlas necesitas acceso de edición.',
   // NBU-2 / NBU-5 (ADR 0601) — cada panel informa su propio fallo de lectura.
   retry: 'Reintentar',
   sourcesFailedTitle: 'No se pudieron cargar tus fuentes',

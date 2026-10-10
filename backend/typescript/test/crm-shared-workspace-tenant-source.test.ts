@@ -29,6 +29,10 @@
  * Assertions are on CONTENT as well as status — a status-only test calls a cheerful
  * 201 filed under the wrong tenant a pass, which is precisely how the original
  * ADR 0508 defect survived its first candidate fix.
+ *
+ * SABOTAGE (wave-4 grade-tests probes): pass `ctx.user.tenantId` (HOME) instead
+ * of `ctx.tenantId` to `createCompany`, to `listCompanies`, or to
+ * `convertContact` → the create / shared-read / convert cases are red.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -36,16 +40,21 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
+import type { Company } from '../src/features/crm/entities/companies.js';
+import type { Contact } from '../src/features/crm/contactsService.js';
 
 let BASE = '';
 let server: http.Server;
 let n = 0;
 
-interface Res<T = Record<string, any>> { status: number; body: T }
+/** The typed error envelope a refused host route answers with. */
+interface ErrBody { error?: string; token?: string; workspaceId?: string }
+interface Res<T = ErrBody> { status: number; body: T }
 
+// The JSON boundary is untyped; each call site names the body shape it reads.
 function client() {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res<any>> => {
+  const call = async <T,>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
@@ -55,11 +64,11 @@ function client() {
     const single = res.headers.get('set-cookie');
     const setCookies: string[] = typeof h.getSetCookie === 'function' ? h.getSetCookie() : single ? [single] : [];
     for (const sc of setCookies) { const m = /(__session=[^;]+)/.exec(sc); if (m) cookie = m[1]!; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    return { status: res.status, body: (res.status === 204 ? undefined : await res.json().catch(() => undefined)) as T };
   };
   return {
-    get: (p: string) => call('GET', p),
-    post: (p: string, b?: unknown) => call('POST', p, b),
+    get: <T = ErrBody>(p: string) => call<T>('GET', p),
+    post: <T = ErrBody>(p: string, b?: unknown) => call<T>('POST', p, b),
   };
 }
 type Client = ReturnType<typeof client>;
@@ -67,38 +76,39 @@ type Client = ReturnType<typeof client>;
 /** Sign in the production way — no `tenantId` override, so the caller lands in
  *  their own `user:` personal tenant exactly as Firebase OIDC would leave them. */
 async function signIn(c: Client, email: string): Promise<void> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email });
+  const r = await c.post('/host/openwop-app/test/login', { email });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
 }
 
 /** A REAL `ws:` shared workspace, created + owned + switched into through the
  *  routes. The switch is what makes active !== personal, which is the whole point. */
 async function sharedWorkspace(c: Client): Promise<string> {
-  const ws = await c.post('/v1/host/openwop-app/workspaces', { name: `CRM WS ${n++}` });
+  const ws = await c.post<{ workspaceId: string }>('/host/openwop-app/workspaces', { name: `CRM WS ${n++}` });
   expect(ws.status, JSON.stringify(ws.body)).toBe(201);
   expect(ws.body.workspaceId, 'must be a real shared workspace, not a personal tenant').toMatch(/^ws:/);
-  const sw = await c.post(`/v1/host/openwop-app/workspaces/${encodeURIComponent(ws.body.workspaceId)}/switch`);
+  const sw = await c.post(`/host/openwop-app/workspaces/${encodeURIComponent(ws.body.workspaceId)}/switch`);
   expect(sw.status, JSON.stringify(sw.body)).toBe(200);
-  return ws.body.workspaceId as string;
+  return ws.body.workspaceId;
 }
 
 /** Invite a second human into the workspace ROOT org and have them accept — the
  *  real two-member path. The workspace root IS an org (`orgId === tenantId`), which
  *  is what makes one org-scoped route observe the ACTIVE/HOME split directly. */
 async function joinAsMember(owner: Client, ws: string, joiner: Client, email: string, role: string): Promise<void> {
-  const invite = await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(ws)}/invites`, { email, role });
+  const invite = await owner.post<{ token: string }>(`/host/openwop-app/orgs/${encodeURIComponent(ws)}/invites`, { email, role });
   expect(invite.status, JSON.stringify(invite.body)).toBe(201);
   expect(invite.body.token, 'the dev/test invite path must expose the token').toBeTruthy();
 
   await signIn(joiner, email);
-  const accepted = await joiner.post('/v1/host/openwop-app/orgs/invitations/accept', { token: invite.body.token });
+  const accepted = await joiner.post('/host/openwop-app/orgs/invitations/accept', { token: invite.body.token });
   expect(accepted.status, JSON.stringify(accepted.body)).toBe(201);
-  const sw = await joiner.post(`/v1/host/openwop-app/workspaces/${encodeURIComponent(ws)}/switch`);
+  const sw = await joiner.post(`/host/openwop-app/workspaces/${encodeURIComponent(ws)}/switch`);
   expect(sw.status, JSON.stringify(sw.body)).toBe(200);
 }
 
 const companies = (orgId: string): string =>
-  `/v1/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}/companies`;
+  `/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}/companies`;
+type CompaniesBody = { companies?: Company[] };
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -129,7 +139,7 @@ describe('CRM-1 — CRM org routes act in the tenant the gate authorized', () =>
     await signIn(a, `crm-a-${n++}@acme.test`);
     const ws = await sharedWorkspace(a);
 
-    const created = await a.post(companies(ws), { name: 'Acme (shared)' });
+    const created = await a.post<Company>(companies(ws), { name: 'Acme (shared)' });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
 
     // THE assertion. Before the fix this was the author's HOME `user:<hash>` tenant
@@ -149,15 +159,15 @@ describe('CRM-1 — CRM org routes act in the tenant the gate authorized', () =>
     const b = client();
     await joinAsMember(a, ws, b, `crm-b-${n++}@acme.test`, 'editor');
 
-    const created = await a.post(companies(ws), { name: 'Shared By A' });
+    const created = await a.post<Company>(companies(ws), { name: 'Shared By A' });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
 
-    const list = await b.get(companies(ws));
+    const list = await b.get<CompaniesBody>(companies(ws));
     expect(list.status, JSON.stringify(list.body)).toBe(200);
     // Before the fix B read their OWN home-tenant partition, so this list was empty
     // no matter what A had written — every member held a private invisible copy.
     expect(
-      (list.body.companies ?? []).map((c: { companyId: string }) => c.companyId),
+      (list.body.companies ?? []).map((c) => c.companyId),
       "member B must see the org's records, not a private copy of them",
     ).toContain(created.body.companyId);
   });
@@ -171,14 +181,14 @@ describe('CRM-1 — CRM org routes act in the tenant the gate authorized', () =>
     const b = client();
     await joinAsMember(a, ws, b, `crm-b2-${n++}@acme.test`, 'editor');
 
-    const byB = await b.post(companies(ws), { name: 'Written By B' });
+    const byB = await b.post<Company>(companies(ws), { name: 'Written By B' });
     expect(byB.status, JSON.stringify(byB.body)).toBe(201);
     expect(byB.body.tenantId, "B's write must also land in the workspace").toBe(ws);
 
-    const seenByA = await a.get(companies(ws));
+    const seenByA = await a.get<CompaniesBody>(companies(ws));
     expect(seenByA.status).toBe(200);
     expect(
-      (seenByA.body.companies ?? []).map((c: { name: string }) => c.name),
+      (seenByA.body.companies ?? []).map((c) => c.name),
       "the workspace owner must see the member's row",
     ).toContain('Written By B');
   });
@@ -195,28 +205,31 @@ describe('CRM-1 — CRM org routes act in the tenant the gate authorized', () =>
     await signIn(outsider, `crm-outsider-${n++}@acme.test`);
     const res = await outsider.get(companies(ws));
     expect(res.status, `an outsider must not read the org's CRM; got ${JSON.stringify(res.body)}`).toBe(404);
+    expect(res.body.error, 'the uniform not-found refusal, not some other 404').toBe('not_found');
   });
 
   it("a member of workspace B cannot see workspace A's records — isolation asserted on CONTENT", async () => {
     const a = client();
     await signIn(a, `crm-wsa-${n++}@acme.test`);
     const wsA = await sharedWorkspace(a);
-    const madeInA = await a.post(companies(wsA), { name: 'Secret To WS1' });
+    const madeInA = await a.post<Company>(companies(wsA), { name: 'Secret To WS1' });
     expect(madeInA.status, JSON.stringify(madeInA.body)).toBe(201);
 
     const b = client();
     await signIn(b, `crm-wsb-${n++}@acme.test`);
     const wsB = await sharedWorkspace(b);
 
-    const list = await b.get(companies(wsB));
+    const list = await b.get<CompaniesBody>(companies(wsB));
     expect(list.status, JSON.stringify(list.body)).toBe(200);
     expect(
-      (list.body.companies ?? []).map((c: { name: string }) => c.name),
+      (list.body.companies ?? []).map((c) => c.name),
       "workspace B must not see workspace A's rows",
     ).not.toContain('Secret To WS1');
 
     // ...and reaching for A's org directly is a 404.
-    expect((await b.get(companies(wsA))).status).toBe(404);
+    const reach = await b.get(companies(wsA));
+    expect(reach.status).toBe(404);
+    expect(reach.body.error).toBe('not_found');
   });
 
   it('the tenant-scoped CONVERT path uses the same tenant as the contact read path', async () => {
@@ -228,17 +241,17 @@ describe('CRM-1 — CRM org routes act in the tenant the gate authorized', () =>
     await signIn(a, `crm-conv-${n++}@acme.test`);
     const ws = await sharedWorkspace(a);
 
-    const made = await a.post('/v1/host/openwop-app/crm/contacts', {
+    const made = await a.post<Contact>('/host/openwop-app/crm/contacts', {
       name: 'Convertible Lead', email: `lead-${n++}@acme.test`,
     });
     expect(made.status, JSON.stringify(made.body)).toBe(201);
     expect(made.body.tenantId, 'the contact itself is written under the ACTIVE tenant').toBe(ws);
 
-    const read = await a.get(`/v1/host/openwop-app/crm/contacts/${encodeURIComponent(made.body.contactId)}`);
+    const read = await a.get(`/host/openwop-app/crm/contacts/${encodeURIComponent(made.body.contactId)}`);
     expect(read.status, 'precondition: the contact is readable in this workspace').toBe(200);
 
-    const converted = await a.post(
-      `/v1/host/openwop-app/crm/contacts/${encodeURIComponent(made.body.contactId)}/convert`,
+    const converted = await a.post<{ company: Company }>(
+      `/host/openwop-app/crm/contacts/${encodeURIComponent(made.body.contactId)}/convert`,
       { orgId: ws, companyName: 'Convertible Co' },
     );
     expect(

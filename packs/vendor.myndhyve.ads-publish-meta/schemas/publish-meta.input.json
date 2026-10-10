@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.ads-publish-meta/1.0.0/publish-meta.input.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.ads-publish-meta/1.0.3/publish-meta.input.json",
   "title": "AdsPublishMetaInput",
   "type": "object",
   "required": ["credentialRef", "adAccountId", "pageId", "campaign", "adSet", "creative", "ad"],

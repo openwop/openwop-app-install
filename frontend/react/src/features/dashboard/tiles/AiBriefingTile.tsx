@@ -43,9 +43,12 @@ export default function AiBriefingTile({ compact }: DashboardTileProps): JSX.Ele
 
   const loadProjection = useCallback(async (conversationId: string): Promise<void> => {
     try {
-      await getChatSession(conversationId); // throws on 404 → the gone state
-    } catch {
-      setProjection({ kind: 'gone' });
+      await getChatSession(conversationId);
+    } catch (e) {
+      // Only a 404 means gone (or no longer visible to this viewer — the chat routes
+      // answer both with the same 404, ADR 0846). Any other failure is a failed
+      // read: saying "gone" would invite a re-pick that overwrites a good setting.
+      setProjection(e instanceof Error && e.message.startsWith('not_found') ? { kind: 'gone' } : { kind: 'error' });
       return;
     }
     try {
@@ -93,6 +96,11 @@ export default function AiBriefingTile({ compact }: DashboardTileProps): JSX.Ele
   if (projection.kind === 'error') return <p className="dash-tile__state muted">{t('tileError')}</p>;
 
   if (projection.kind === 'unconfigured' || projection.kind === 'gone') {
+    // The picker's source must have LOADED before "you have none" is true: a
+    // failed or pending read is not an empty list, and the create CTA would
+    // invite a duplicate briefing.
+    if (scheduled.status === 'loading') return <SkeletonRows rows={2} columns={['40%', '75%']} />;
+    if (scheduled.status === 'error') return <p className="dash-tile__state muted">{t('tileError')}</p>;
     const chats = scheduled.status === 'ready' ? (scheduled.data ?? []) : [];
     return (
       <div className="u-flex u-flex-col u-gap-2">

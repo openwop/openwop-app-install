@@ -90,7 +90,7 @@ const ACTION_LABEL_KEYS: Record<string, string> = {
   escalate: 'interrupts:actionEscalate',
 };
 
-function ApprovalCard({ payload, onAction, isLoading, context }: CardProps): JSX.Element {
+function ApprovalCard({ payload, onAction, isLoading, context, autoFocus }: CardProps): JSX.Element {
   const { t } = useTranslation('chat');
   const data = (payload as InterruptPayload).data ?? {};
   const [comment, setComment] = useState('');
@@ -99,7 +99,7 @@ function ApprovalCard({ payload, onAction, isLoading, context }: CardProps): JSX
   // appears, mirroring the run-detail cards' focus behavior — a keyboard/SR
   // user is taken to the new gate instead of discovering it by scroll.
   const focusRef = useRef<HTMLInputElement>(null);
-  useEffect(() => { focusRef.current?.focus(); }, []);
+  useEffect(() => { if (autoFocus !== false) focusRef.current?.focus(); }, [autoFocus]);
   const prompt = data.prompt ?? t('pleaseApprove');
   const actions = (data.actions ?? ['approve', 'reject', 'request-changes', 'defer', 'escalate']);
   const options = data.options ?? [];
@@ -275,14 +275,14 @@ function ClarificationCard(props: CardProps): JSX.Element {
 }
 
 function FreeTextClarificationCard(props: CardProps): JSX.Element {
-  const { payload, onAction, isLoading, context } = props;
+  const { payload, onAction, isLoading, context, autoFocus } = props;
   const { t } = useTranslation('chat');
   const data = (payload as InterruptPayload).data ?? {};
   const [answer, setAnswer] = useState('');
   // Labeled field + focus-on-appear, mirroring the run-detail
   // ClarificationDialog (CHAT-1 / CHAT-4).
   const focusRef = useRef<HTMLTextAreaElement>(null);
-  useEffect(() => { focusRef.current?.focus(); }, []);
+  useEffect(() => { if (autoFocus !== false) focusRef.current?.focus(); }, [autoFocus]);
   return (
     <div className="card u-bg-surface-2">
       <GateEyebrow name={context?.nodeName} />
@@ -300,14 +300,14 @@ function FreeTextClarificationCard(props: CardProps): JSX.Element {
 
 // ── interrupt.refinement ───────────────────────────────────────────────
 
-function RefinementCard({ payload, onAction, isLoading, context }: CardProps): JSX.Element {
+function RefinementCard({ payload, onAction, isLoading, context, autoFocus }: CardProps): JSX.Element {
   const { t } = useTranslation('chat');
   const seed = (payload as InterruptPayload).data?.current ?? '';
   const [draft, setDraft] = useState(typeof seed === 'string' ? seed : JSON.stringify(seed, null, 2));
   // Labeled field + focus-on-appear, mirroring the run-detail RefinementForm
   // (CHAT-1 / CHAT-4).
   const focusRef = useRef<HTMLTextAreaElement>(null);
-  useEffect(() => { focusRef.current?.focus(); }, []);
+  useEffect(() => { if (autoFocus !== false) focusRef.current?.focus(); }, [autoFocus]);
   return (
     <div className="card u-bg-surface-2">
       <GateEyebrow name={context?.nodeName} />

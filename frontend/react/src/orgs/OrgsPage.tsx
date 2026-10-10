@@ -49,7 +49,7 @@ export function OrgsPage(): JSX.Element {
           setOrgName={c.setOrgName}
           onCreateOrg={c.onCreateOrg}
           onDeleteOrg={c.onDeleteOrg}
-          can={c.can}
+          can={c.canTenant}
         />
 
         {/* ── Right: selected org detail ── */}

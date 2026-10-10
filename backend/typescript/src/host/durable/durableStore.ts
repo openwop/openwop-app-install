@@ -40,6 +40,96 @@ export function tryDurableStorage(): Storage | null {
 
 export const now = (): number => Date.now();
 
+// ── ADR 0868 — bounded scans ────────────────────────────────────────
+// Every durable surface reads a key range through these helpers, never through
+// `Storage.kvList` directly (a ratchet test holds that). `kvList` returns every
+// row under a prefix, values included, so a `limit: 1` query or a queue receive
+// used to cost the whole table or queue on every call, on the 4-connection
+// Storage pool the daemons share.
+
+type KvRow = { key: string; value: string };
+
+/** Byte order of the UTF-8 key — the order `kvListPage` returns. */
+export const compareKeyBytes = (a: string, b: string): number =>
+  Buffer.compare(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8'));
+
+/** Rows per page when a caller iterates a whole range (`scanPrefix`). */
+export const SCAN_BATCH = 500;
+
+const envInt = (name: string, fallback: number): number => {
+  const n = Number(process.env[name]);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+};
+
+/** `surface_scan_heavy` fires when one logical read pulls at least this many
+ *  rows into the process, or takes at least this long. */
+export const scanWarnRows = (): number => envInt('OPENWOP_SURFACE_SCAN_WARN_ROWS', 5000);
+export const scanWarnMs = (): number => envInt('OPENWOP_SURFACE_SCAN_WARN_MS', 500);
+
+/** `hostsurf:<family>:…` → `<family>`; the tenant segment is not logged. */
+const scanFamily = (prefix: string): string => prefix.split(':')[1] ?? 'unknown';
+
+function reportScan(op: string, prefix: string, rows: number, startedMs: number): void {
+  const ms = Date.now() - startedMs;
+  if (rows >= scanWarnRows() || ms >= scanWarnMs()) {
+    log.warn('surface_scan_heavy', { op, family: scanFamily(prefix), rows, ms });
+  }
+}
+
+async function rawPage(storage: Storage, prefix: string, after: string | undefined, limit: number): Promise<ReadonlyArray<KvRow>> {
+  if (storage.kvListPage) return storage.kvListPage(prefix, { after, limit });
+  // Fallback for a backend without the paged read: complete, but unbounded.
+  const all = [...(await storage.kvList(prefix))].sort((a, b) => compareKeyBytes(a.key, b.key));
+  const from = after === undefined ? 0 : all.findIndex((r) => compareKeyBytes(r.key, after) > 0);
+  return from < 0 ? [] : all.slice(from, from + limit);
+}
+
+/** One page: at most `limit` rows under `prefix` with key > `after`, byte order. */
+export async function listPage(prefix: string, opts: { after?: string; limit: number }): Promise<ReadonlyArray<KvRow>> {
+  const started = Date.now();
+  const rows = await rawPage(requireDurableStorage(), prefix, opts.after, opts.limit);
+  reportScan('page', prefix, rows.length, started);
+  return rows;
+}
+
+/**
+ * Iterate the rows under `prefix` (key > `after`, when given) in pages of
+ * `batch`, in byte order, reporting the whole read once when it ends. Memory
+ * is bounded by the batch; a caller that stops early (`break`) reads only what
+ * it consumed. Deleting the row just yielded is safe: the cursor is the key.
+ */
+export async function* scanPrefix(
+  prefix: string,
+  opts: { batch?: number; after?: string; op?: string } = {},
+): AsyncGenerator<KvRow> {
+  const storage = requireDurableStorage();
+  const batch = opts.batch ?? SCAN_BATCH;
+  const started = Date.now();
+  let rows = 0;
+  let after = opts.after;
+  try {
+    for (;;) {
+      const page = await rawPage(storage, prefix, after, batch);
+      rows += page.length;
+      for (const row of page) yield row;
+      if (page.length < batch) return;
+      after = page[page.length - 1]!.key;
+    }
+  } finally {
+    reportScan(opts.op ?? 'scan', prefix, rows, started);
+  }
+}
+
+/** The number of keys under `prefix`, counted by the database when it can. */
+export async function countPrefix(prefix: string): Promise<number> {
+  const storage = requireDurableStorage();
+  if (storage.kvCount) return storage.kvCount(prefix);
+  const started = Date.now();
+  const n = (await storage.kvList(prefix)).length;
+  reportScan('count', prefix, n, started);
+  return n;
+}
+
 /** Persisted envelope. `e` = expiry epoch-ms (TTL); absent ⇒ no expiry. */
 export interface Envelope {
   v: unknown;
@@ -145,13 +235,13 @@ export function createKvCore(root: string, scope: BundleScope): KvSurface {
     async list({ prefix: keyPrefix }) {
       const p = typeof keyPrefix === 'string' ? keyPrefix : '';
       const tp = prefix();
-      const rows = await storage().kvList(tp);
+      // ADR 0868: the caller's prefix narrows the DATABASE range, not a JS filter
+      // over the tenant's whole kv keyspace.
       const keys: string[] = [];
-      for (const row of rows) {
-        const key = row.key.slice(tp.length);
+      for await (const row of scanPrefix(`${tp}${p}`)) {
         const { value, expired } = decodeEnvelope(row.value);
         if (expired || value === null) continue;
-        if (!p || key.startsWith(p)) keys.push(key);
+        keys.push(row.key.slice(tp.length));
       }
       return { keys };
     },

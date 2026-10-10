@@ -123,6 +123,7 @@ export const messages = {
   // (`sessionRefused_${code}`; the fourth is the self-service "everywhere").
   sessionRefused_account_disabled: 'Your account has been disabled by an administrator, so you were signed out. Contact your workspace admin to restore access.',
   sessionRefused_account_erased: 'Your account has been removed, so you were signed out. It can no longer be used to sign in.',
-  sessionRefused_session_revoked: 'You were signed out on every device. Sign in again to continue.',
+  sessionRefused_session_revoked: 'You were signed out. Sign in again to continue.',
+  sessionRefused_session_expired: 'Your session has ended, so you were signed out. Sign in again to continue.',
   sessionRefused_self_revoked: 'You signed out of every device, including this one. Sign in again to continue.',
 } as const;

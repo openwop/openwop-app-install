@@ -4,23 +4,22 @@
  * registerAccessibilityAgentTools() and registers the surface.
  */
 import http from 'node:http';
-import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { createAgentToolProvider, builtinAgentToolIds } from '../src/host/agentToolProvider.js';
 import { ACCESSIBILITY_CHECK_TOOL_ID, ACCESSIBILITY_ALT_TEXT_TOOL_ID } from '../src/features/accessibility/agentTools.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
+import { registeredFeatureSurfaceIds } from '../src/host/featureSurfaces.js';
 
 const TENANT = 'default';
 let server: http.Server;
-let BASE = '';
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => res()); });
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
@@ -73,10 +72,10 @@ describe('accessibility agent tools are chat-drivable (ADR 0363 P3)', () => {
 });
 
 describe('ctx.features.accessibility surface is auto-advertised (ADR 0363 P3)', () => {
-  it('/.well-known/openwop lists host.sample.accessibility', async () => {
-    const res = await fetch(`${BASE}/.well-known/openwop`);
-    expect(res.status).toBe(200);
-    const doc = await res.json() as { hostExtensions?: { featureSurfaces?: string[] } };
-    expect(doc.hostExtensions?.featureSurfaces).toContain('host.sample.accessibility');
+  // ADR 0812 P3c-0: this read `hostExtensions.featureSurfaces` off the v1
+  // discovery document; the v2 document has no such root, so it now asserts the
+  // live registry that advertisement was derived from (populated by the boot).
+  it('the booted app registers the accessibility feature surface', () => {
+    expect(registeredFeatureSurfaceIds()).toContain('accessibility');
   });
 });

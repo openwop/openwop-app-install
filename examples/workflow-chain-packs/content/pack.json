@@ -1,16 +1,16 @@
 {
   "name": "core.openwop.workflows.content",
-  "version": "1.0.3",
+  "version": "1.0.5",
   "kind": "workflow-chain",
   "description": "Real-work workflow pack (RFC 0013, ADR 0190 Phase 3) — the Content & Monitoring cluster: watch an RSS/Atom feed for new items and watch any web page for changes, each pairing a schedule trigger with durable seen-state in host KV storage (deterministic per-source key; the first run treats everything as new and seeds the state). NO host RSS poller exists — adding an 'rss' ingestion source to /v1/trigger-subscriptions is RFC 0099 wire territory (see ADR 0190) — so these chains ARE the poller: pair each with a Schedule and the scheduler does the polling. Authored over shipped node typeIds (core.trigger.schedule + core.openwop.http.fetch + core.storage.kv-get/kv-set + core.ai.chatCompletion + core.openwop.integration.notification-push). No external sends — digests are in-app notifications, so no approval gate is needed. All tenant values are run parameters (replay-deterministic).",
   "author": "openwop",
   "license": "Apache-2.0",
-  "engines": { "openwop": ">=1.0.0" },
+  "engines": { "openwop": ">=1.0.0 <3.0.0" },
   "keywords": ["Content"],
   "chains": [
     {
       "chainId": "content.feed-watch",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "Feed Watcher & Digest",
       "description": "Watch an RSS/Atom feed and get a digest of only the NEW items since the last run: fetch the feed, compare against the items already seen (kept in durable storage), summarize what's new, and remember it for next time. Pair with a Schedule to poll on a cadence; the first run seeds the seen-list, so expect everything to be new once.",
       "parameters": {
@@ -27,17 +27,17 @@
       "capabilities": ["side-effectful"],
       "dag": {
         "nodes": [
-          { "id": "tick", "typeId": "core.trigger.schedule", "name": "Scheduled poll", "position": { "x": 0, "y": 80 }, "config": {
+          { "id": "tick", "typeId": "core.trigger.schedule@1.0.0", "name": "Scheduled poll", "position": { "x": 0, "y": 80 }, "config": {
             "cron": "{{params.scheduleCron}}"
           }, "inputs": {} },
-          { "id": "fetch", "typeId": "core.openwop.http.fetch", "name": "Fetch feed", "position": { "x": 260, "y": 80 }, "config": { "url": "{{params.feedUrl}}" }, "inputs": {} },
-          { "id": "seen", "typeId": "core.storage.kv-get", "name": "Load seen items", "position": { "x": 260, "y": 220 }, "config": { "namespace": "content-feed-watch", "key": "seen:{{params.feedUrl}}" }, "inputs": { "key": "seen:{{params.feedUrl}}" } },
-          { "id": "diff", "typeId": "core.ai.chatCompletion", "name": "Extract new items", "position": { "x": 540, "y": 140 }, "config": { "systemPrompt": "You are a feed-watch differ. Input 1 is raw RSS/Atom XML from {{params.feedUrl}}; input 2 is last run's stored output (may be empty — then every item is new; if it contains sections, the authoritative seen-list is the one under 'SEEN'). Output two sections: NEW ITEMS — title, link, and a one-line summary for each item not in the seen list (or 'No new items.'); SEEN — the updated full list of item ids/links (previous plus new), one per line.",
+          { "id": "fetch", "typeId": "core.openwop.http.fetch@1.0.0", "name": "Fetch feed", "position": { "x": 260, "y": 80 }, "config": { "url": "{{params.feedUrl}}" }, "inputs": {} },
+          { "id": "seen", "typeId": "core.storage.kv-get@1.0.0", "name": "Load seen items", "position": { "x": 260, "y": 220 }, "config": { "namespace": "content-feed-watch", "key": "seen:{{params.feedUrl}}" }, "inputs": { "key": "seen:{{params.feedUrl}}" } },
+          { "id": "diff", "typeId": "core.ai.chatCompletion@1.0.0", "name": "Extract new items", "position": { "x": 540, "y": 140 }, "config": { "systemPrompt": "You are a feed-watch differ. Input 1 is raw RSS/Atom XML from {{params.feedUrl}}; input 2 is last run's stored output (may be empty — then every item is new; if it contains sections, the authoritative seen-list is the one under 'SEEN'). Output two sections: NEW ITEMS — title, link, and a one-line summary for each item not in the seen list (or 'No new items.'); SEEN — the updated full list of item ids/links (previous plus new), one per line.",
             "provider": "{{params.provider}}",
             "model": "{{params.model}}"
           }, "inputs": {} },
-          { "id": "remember", "typeId": "core.storage.kv-set", "name": "Save seen items", "position": { "x": 820, "y": 220 }, "config": { "namespace": "content-feed-watch", "key": "seen:{{params.feedUrl}}" }, "inputs": { "key": "seen:{{params.feedUrl}}" } },
-          { "id": "notify", "typeId": "feature.notifications.nodes.notify", "name": "Digest of new items", "position": { "x": 820, "y": 60 }, "config": { "audience": "tenant" }, "inputs": { "title": "Feed Watcher & Digest" } }
+          { "id": "remember", "typeId": "core.storage.kv-set@1.0.0", "name": "Save seen items", "position": { "x": 820, "y": 220 }, "config": { "namespace": "content-feed-watch", "key": "seen:{{params.feedUrl}}" }, "inputs": { "key": "seen:{{params.feedUrl}}" } },
+          { "id": "notify", "typeId": "feature.notifications.nodes.notify@1.0.0", "name": "Digest of new items", "position": { "x": 820, "y": 60 }, "config": { "audience": "tenant" }, "inputs": { "title": "Feed Watcher & Digest" } }
         ],
         "edges": [
           { "from": "tick", "to": "fetch" },
@@ -53,7 +53,7 @@
     },
     {
       "chainId": "content.page-watch",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "Page Change Watch",
       "description": "Watch any web page (competitor pricing, docs, a changelog) and get told WHAT changed, not just that it changed: fetch the page, compare against the last snapshot in durable storage, summarize the differences that matter, and save the new snapshot. Pair with a Schedule; the first run just takes the baseline snapshot.",
       "parameters": {
@@ -71,17 +71,17 @@
       "capabilities": ["side-effectful"],
       "dag": {
         "nodes": [
-          { "id": "tick", "typeId": "core.trigger.schedule", "name": "Scheduled check", "position": { "x": 0, "y": 80 }, "config": {
+          { "id": "tick", "typeId": "core.trigger.schedule@1.0.0", "name": "Scheduled check", "position": { "x": 0, "y": 80 }, "config": {
             "cron": "{{params.scheduleCron}}"
           }, "inputs": {} },
-          { "id": "fetch", "typeId": "core.openwop.http.fetch", "name": "Fetch page", "position": { "x": 260, "y": 80 }, "config": { "url": "{{params.pageUrl}}" }, "inputs": {} },
-          { "id": "snapshot", "typeId": "core.storage.kv-get", "name": "Load last snapshot", "position": { "x": 260, "y": 220 }, "config": { "namespace": "content-page-watch", "key": "snap:{{params.pageUrl}}" }, "inputs": { "key": "snap:{{params.pageUrl}}" } },
-          { "id": "diff", "typeId": "core.ai.chatCompletion", "name": "What changed?", "position": { "x": 540, "y": 140 }, "config": { "systemPrompt": "You are a page-change analyst watching {{params.pageUrl}} for changes to: {{params.focus}}. Input 1 is the freshly fetched page; input 2 is last run's stored output (may be empty — then this run is the baseline; if it contains sections, compare against the one under 'SNAPSHOT'). Output: CHANGES — the meaningful differences, each with a one-line why-it-matters (or 'No meaningful changes.' / 'Baseline captured.'); SNAPSHOT — the current page content distilled to the substance worth comparing next time.",
+          { "id": "fetch", "typeId": "core.openwop.http.fetch@1.0.0", "name": "Fetch page", "position": { "x": 260, "y": 80 }, "config": { "url": "{{params.pageUrl}}" }, "inputs": {} },
+          { "id": "snapshot", "typeId": "core.storage.kv-get@1.0.0", "name": "Load last snapshot", "position": { "x": 260, "y": 220 }, "config": { "namespace": "content-page-watch", "key": "snap:{{params.pageUrl}}" }, "inputs": { "key": "snap:{{params.pageUrl}}" } },
+          { "id": "diff", "typeId": "core.ai.chatCompletion@1.0.0", "name": "What changed?", "position": { "x": 540, "y": 140 }, "config": { "systemPrompt": "You are a page-change analyst watching {{params.pageUrl}} for changes to: {{params.focus}}. Input 1 is the freshly fetched page; input 2 is last run's stored output (may be empty — then this run is the baseline; if it contains sections, compare against the one under 'SNAPSHOT'). Output: CHANGES — the meaningful differences, each with a one-line why-it-matters (or 'No meaningful changes.' / 'Baseline captured.'); SNAPSHOT — the current page content distilled to the substance worth comparing next time.",
             "provider": "{{params.provider}}",
             "model": "{{params.model}}"
           }, "inputs": {} },
-          { "id": "remember", "typeId": "core.storage.kv-set", "name": "Save snapshot", "position": { "x": 820, "y": 220 }, "config": { "namespace": "content-page-watch", "key": "snap:{{params.pageUrl}}" }, "inputs": { "key": "snap:{{params.pageUrl}}" } },
-          { "id": "notify", "typeId": "feature.notifications.nodes.notify", "name": "Change report", "position": { "x": 820, "y": 60 }, "config": { "audience": "tenant" }, "inputs": { "title": "Page Change Watch" } }
+          { "id": "remember", "typeId": "core.storage.kv-set@1.0.0", "name": "Save snapshot", "position": { "x": 820, "y": 220 }, "config": { "namespace": "content-page-watch", "key": "snap:{{params.pageUrl}}" }, "inputs": { "key": "snap:{{params.pageUrl}}" } },
+          { "id": "notify", "typeId": "feature.notifications.nodes.notify@1.0.0", "name": "Change report", "position": { "x": 820, "y": 60 }, "config": { "audience": "tenant" }, "inputs": { "title": "Page Change Watch" } }
         ],
         "edges": [
           { "from": "tick", "to": "fetch" },

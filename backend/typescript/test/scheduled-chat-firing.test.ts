@@ -17,6 +17,8 @@ import { initHostExtPersistence, __resetHostExtPersistence } from '../src/host/h
 import { resetScheduling, getJob } from '../src/host/schedulingService.js';
 import { processDueSchedules } from '../src/host/scheduleDaemon.js';
 import { createScheduledChat } from '../src/features/scheduled-agent-chats/scheduledChatService.js';
+import { registerToggleDefault } from '../src/host/featureToggles/registry.js';
+import { scheduledAgentChatsFeature } from '../src/features/scheduled-agent-chats/feature.js';
 import { seedScheduledChatTurnWorkflow, SCHEDULED_CHAT_TURN_WORKFLOW_ID } from '../src/features/scheduled-agent-chats/scheduledChatTurnWorkflow.js';
 
 const hostSuite: StartRunDeps['hostSuite'] = {
@@ -33,6 +35,9 @@ beforeEach(async () => {
   initHostExtPersistence(storage);
   await resetScheduling();
   seedScheduledChatTurnWorkflow();
+  // ADR 0820 §8.2 — the job carries `featureId`, so the daemon resolves the toggle at
+  // fire time; register its default (ON) the way boot does.
+  registerToggleDefault(scheduledAgentChatsFeature.toggleDefault!);
   deps = { storage, hostSuite };
 });
 afterEach(() => { __resetHostExtPersistence(); });

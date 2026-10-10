@@ -80,6 +80,12 @@ export interface EmailSendArgs {
   /** ADR 0655 D1 — what this message IS. The adapter default for an ABSENT value is
    *  `'marketing'` (the only fail-closed choice — review B2); every caller declares. */
   purpose?: EgressPurpose;
+  /** ADR 0848 D7 — RFC 8058 one-click unsubscribe. A CLOSED-WORLD field, never a free
+   *  header map (a workflow author could otherwise set `Bcc`/`Reply-To`/forged headers):
+   *  it yields exactly `List-Unsubscribe` + `List-Unsubscribe-Post`, and only for an
+   *  `https:` URL on the host's `/public-email/u/` path (anything else is dropped). The
+   *  integration pack does not pass it; the campaign send does. Not in the ledger key. */
+  listUnsubscribe?: { url: string };
 }
 export interface EmailSendResult {
   sent: boolean;
@@ -90,6 +96,22 @@ export interface EmailSendResult {
 
 export interface EmailAdapter {
   send(args: EmailSendArgs): Promise<EmailSendResult>;
+}
+
+/** ADR 0848 D7 — the RFC 8058 header pair for `args.listUnsubscribe`, or `undefined`
+ *  when absent or not an acceptable URL. Shared by every transport (HTTP + SMTP). */
+export function listUnsubscribeHeaders(args: Pick<EmailSendArgs, 'listUnsubscribe'>): Record<string, string> | undefined {
+  const raw = args.listUnsubscribe?.url;
+  if (!raw) return undefined;
+  let u: URL;
+  try { u = new URL(raw); } catch { log.warn('list_unsubscribe_dropped', { reason: 'unparseable' }); return undefined; }
+  // https only, no credentials, the host's own unsubscribe path, and nothing that could
+  // break out of the `<…>` header value.
+  if (u.protocol !== 'https:' || u.username || u.password || !/\/public-email\/u\/[^/]+$/.test(u.pathname) || /[\s<>,]/.test(raw)) {
+    log.warn('list_unsubscribe_dropped', { reason: 'not_a_host_unsubscribe_url' });
+    return undefined;
+  }
+  return { 'List-Unsubscribe': `<${raw}>`, 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click' };
 }
 
 /** SendGrid base — overridable for tests / a SendGrid-compatible proxy. */
@@ -109,12 +131,14 @@ function sendgridBody(args: EmailSendArgs): Record<string, unknown> {
   const personalization: Record<string, unknown> = { to: toAddrs(args.to) };
   if (args.cc !== undefined) personalization.cc = toAddrs(args.cc);
   if (args.bcc !== undefined) personalization.bcc = toAddrs(args.bcc);
+  const headers = listUnsubscribeHeaders(args);
   return {
     personalizations: [personalization],
     from: { email: args.from },
     ...(args.replyTo ? { reply_to: { email: args.replyTo } } : {}),
     subject: args.subject,
     content,
+    ...(headers ? { headers } : {}),
   };
 }
 
@@ -126,6 +150,7 @@ const toCsv = (v: string | string[] | undefined): string | undefined =>
   v === undefined ? undefined : (Array.isArray(v) ? v.join(',') : v);
 /** Postmark `POST /email` body (a different shape than SendGrid's v3). */
 function postmarkBody(args: EmailSendArgs): Record<string, unknown> {
+  const lu = listUnsubscribeHeaders(args);
   return {
     From: args.from,
     To: toCsv(args.to),
@@ -135,6 +160,7 @@ function postmarkBody(args: EmailSendArgs): Record<string, unknown> {
     ...(args.text !== undefined ? { TextBody: args.text } : {}),
     ...(args.html !== undefined ? { HtmlBody: args.html } : {}),
     ...(args.replyTo ? { ReplyTo: args.replyTo } : {}),
+    ...(lu ? { Headers: Object.entries(lu).map(([Name, Value]) => ({ Name, Value })) } : {}),
     MessageStream: 'outbound',
   };
 }
@@ -183,6 +209,13 @@ const PROVIDERS: Record<string, ProviderSpec> = {
     },
   },
 };
+
+/** Test seam — the exact request body a provider row would send (ADR 0848 D7 witness). */
+export function __providerBodyForTest(provider: string, args: EmailSendArgs): string {
+  const spec = PROVIDERS[provider];
+  if (!spec) throw new Error(`unknown provider ${provider}`);
+  return spec.body(args);
+}
 
 /** Host default provider (ADR 0193 open question — resolved yes): an SES-less,
  *  Postmark-only host can set `OPENWOP_EMAIL_DEFAULT_PROVIDER=postmark` so a

@@ -28,7 +28,7 @@ async function api<T>(path: string, init?: RequestInit): Promise<{ status: numbe
   return { status: res.status, body: (text.length ? JSON.parse(text) : null) as T };
 }
 const surface = <T>(surface: string, op: string, args: Record<string, unknown>) =>
-  api<T>('/v1/host/openwop-app/test/surface', { method: 'POST', body: JSON.stringify({ tenantId: 'smoke', surface, op, args }) });
+  api<T>('/host/openwop-app/test/surface', { method: 'POST', body: JSON.stringify({ tenantId: 'smoke', surface, op, args }) });
 
 beforeAll(async () => {
   // Select durable backends per-surface (a global OPENWOP_SURFACE_BACKEND=durable
@@ -79,9 +79,13 @@ describe('seam smoke: durable surfaces over HTTP', () => {
   });
 
   it('/.well-known/openwop advertises the selected durable backend', async () => {
-    const disc = await api<{ hostSurfaces: Array<{ name: string; implementation?: string }> }>('/.well-known/openwop');
+    // ADR 0812 P3c-0 — v2 spelling: the v1 root `hostSurfaces` list rides the vendor
+    // `openwop-app.host-surfaces` extension on the v2 document.
+    type Surfaces = Array<{ name: string; implementation?: string }>;
+    const disc = await api<{ extensions?: Record<string, { surfaces?: Surfaces }> }>('/.well-known/openwop', { headers: { 'OpenWOP-Version': '2' } });
     expect(disc.status).toBe(200);
-    const impl = (name: string) => disc.body.hostSurfaces.find((s) => s.name === name)?.implementation;
+    const surfaces = disc.body.extensions?.['openwop-app.host-surfaces']?.surfaces ?? [];
+    const impl = (name: string) => surfaces.find((s) => s.name === name)?.implementation;
     expect(impl('host.kvStorage')).toBe('durable');
     expect(impl('host.fs')).toBe('durable');
     expect(impl('host.tableStorage')).toBe('durable');

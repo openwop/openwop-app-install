@@ -22,7 +22,7 @@ import { INTERACTIVE_ARTIFACT_TYPES, registerInteractiveArtifactTypes } from '..
 import { validateArtifact } from '../../../host/artifactTypes.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const promptPath = join(here, '../../../../../../packs/feature.interactive-artifacts.agents/prompts/visualizer.md');
+const promptPath = join(here, '../../../../../../packs/vendor.openwop-app.interactive-artifacts.agents/prompts/visualizer.md');
 const rendererPath = join(here, '../../../../../../frontend/react/src/chat/artifacts/ChartRenderer.tsx');
 
 function rendererSupportedTypes(): string[] {

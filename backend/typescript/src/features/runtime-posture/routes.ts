@@ -16,7 +16,7 @@ import { readLivePosture } from './liveRead.js';
 import { ChangeRequestInvalidError, changeCommands, validateChangeRequest } from './service.js';
 
 const log = createLogger('features.runtimePosture');
-const BASE = '/v1/host/openwop-app/runtime-posture';
+const BASE = '/host/openwop-app/runtime-posture';
 
 export function registerRuntimePostureRoutes(deps: RouteDeps, read: typeof readLivePosture = readLivePosture): void {
   const { app, storage } = deps;

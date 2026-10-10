@@ -4,6 +4,7 @@
  */
 export const messages = {
   openTitle: 'Portée des outils pour cette conversation',
+  chipLabel: 'Accès aux outils',
   heading: 'Portée des outils de la conversation',
   blurb: 'Contrôlez quels outils de l’agent il peut utiliser dans cette conversation et lesquels nécessitent votre approbation. Restriction uniquement — n’accorde jamais d’outils au-delà des permissions de l’agent.',
   pendingHeading: 'Approbations en attente',
@@ -28,4 +29,16 @@ export const messages = {
   loadFailed: 'Échec du chargement de la portée des outils.',
   decisionFailed: 'Échec de l’enregistrement de votre décision.',
   saveFailed: 'Échec de l’enregistrement de la portée des outils.',
+  pendingChip_one: '{{count}} action en attente d’approbation',
+  pendingChip_other: '{{count}} actions en attente d’approbation',
+  pendingChipAria: 'Examiner les actions de l’agent en attente de votre approbation',
+  requestedWith: 'Demandé avec',
+  noArguments: 'Aucun argument.',
+  grainNote: 'Approuver autorise cet outil pour le reste de la conversation, avec les arguments que l’agent utilisera ensuite — pas seulement la demande affichée ici.',
+  notOwnerNote: 'Seul le propriétaire de la conversation peut les approuver.',
+  approvalChanged: 'Cette demande a changé ou a déjà été tranchée. Examinez-la à nouveau.',
+  approvedContinueHint: 'Approuvé. Demandez à l’agent de réessayer.',
+  continue: 'Continuer',
+  continueMessage: 'Approuvé — allez-y.',
+  scopeReadOnlyNote: 'Seul le propriétaire de la conversation peut modifier les outils que l’agent peut utiliser ici.',
 };

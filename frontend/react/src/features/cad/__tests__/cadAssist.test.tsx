@@ -45,7 +45,7 @@ describe('ADR 0515 — CAD assist entry', () => {
     fireEvent.click(screen.getByRole('button', { name: /Ask the CAD Modeler/i }));
     expect(screen.getByRole('region', { name: 'CAD Modeler' })).toBeTruthy();
     expect(await screen.findByTestId('embedded-chat')).toBeTruthy();
-    expect(embedded.props[0]?.agentId).toBe('feature.cad.agents.default'); // the ONE cad agent
+    expect(embedded.props[0]?.agentId).toBe('vendor.openwop-app.cad.agents.default'); // the ONE cad agent
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
     expect(screen.queryByRole('region', { name: 'CAD Modeler' })).toBeNull();
   });

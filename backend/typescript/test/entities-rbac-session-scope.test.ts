@@ -31,11 +31,11 @@ import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { getSetCookies } from './headerCookies.js';
 import { createApp } from '../src/index.js';
-import { createWorkspace, createMember, resolveEffectiveAccess, resolveSubjectScopesUnion, resolveTenantLevelScopes } from '../src/host/accessControlService.js';
+import { createOrg, createWorkspace, createMember, resolveEffectiveAccess, resolveSubjectScopesUnion, resolveTenantLevelScopes } from '../src/host/accessControlService.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 
-const BASE = '/v1/host/openwop-app/entities';
+const BASE = '/host/openwop-app/entities';
 let server: http.Server;
 let ORIGIN = '';
 let WS = '';
@@ -54,7 +54,7 @@ async function loginTo(tenantId: string, who: string): Promise<Client> {
     for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
     return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
   };
-  const r = await call('POST', '/v1/host/openwop-app/test/login', { email: `${who}-${Date.now()}-${n++}@acme.test`, tenantId });
+  const r = await call('POST', '/host/openwop-app/test/login', { email: `${who}-${Date.now()}-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return { userId: r.body.user.userId, post: (p, b) => call('POST', p, b) };
 }
@@ -124,27 +124,41 @@ describe('ADR 0731 — the gate still has an EXIT, and resolves the TENANT-LEVEL
     expect([200, 201], `admin refused the row door: ${JSON.stringify(row.body)}`).toContain(row.status);
   });
 
-  it('a MULTI-ORG subject gets the UNION of their memberships, not a store-order first match', async () => {
-    // This is the leg that distinguishes the two resolvers. `resolveEffectiveAccess
-    // ({ subject })` is org-scoped FIRST-MATCH: viewer-in-A / admin-in-B resolves to
-    // whichever row the store returns first, so this assertion would be a coin flip.
-    // `resolveSubjectScopesUnion` unions across memberships and is deterministic.
+  it('a MULTI-ORG subject resolves deterministically: in a shared workspace, the ROOT membership (ADR 0815 D1b)', async () => {
+    // This is the leg that distinguishes the resolvers. `resolveEffectiveAccess
+    // ({ subject })` used to be org-scoped FIRST-MATCH: viewer-in-A / admin-in-B
+    // resolved to whichever row the store returned first — a coin flip.
+    //
+    // CORRECTED by ADR 0815 D1b. This leg used to assert that the sub-org ADMIN
+    // row conferred `host:members:manage` over the whole workspace. That WAS the
+    // sub-org door: any member could mint a sub-org, own it, and manage the
+    // workspace. In a `ws:` workspace tenant-wide authority is now the root row's,
+    // deterministically, and a sub-org role is authority inside that sub-org.
     const user = await loginTo(WS, 'multi-org');
-    const orgB = (await user.post('/v1/host/openwop-app/orgs', { name: `B_${n++}` })).body?.orgId;
+    // A non-owner cannot create an org inside the workspace over HTTP any more
+    // (ADR 0815 D1a), so org B is minted directly — this leg is about the resolver.
+    const orgB = (await createOrg({ tenantId: WS, createdBy: 'oidc:ent-founder', name: `B_${n++}` })).orgId;
     expect(typeof orgB, 'a second org must exist or this leg is vacuous').toBe('string');
     await createMember({ orgId: WS, tenantId: WS, displayName: 'LowInA', subject: user.userId, roles: ['viewer'] });
     await createMember({ orgId: orgB, tenantId: WS, displayName: 'HighInB', subject: user.userId, roles: ['admin'] });
     const union = await resolveSubjectScopesUnion(WS, user.userId);
     expect(union.basis).toBe('member');
-    expect(union.scopes, 'the admin membership must contribute').toContain('host:members:manage');
-    // ...and the door agrees with the union, deterministically.
-    const made = await user.post(`${BASE}/types`, { name: `m_${n++}`, fields: [{ key: 'title', label: 'Title', type: 'string' }] });
-    expect([200, 201], `union-admin refused: ${JSON.stringify(made.body)}`).toContain(made.status);
+    expect(union.scopes, 'the root viewer row is what counts').toContain('workspace:read');
+    expect(union.scopes, 'a sub-org role must not confer workspace management').not.toContain('host:members:manage');
+    expect(union.scopes, 'nor workspace-wide protocol writes').not.toContain('workspace:write');
+    expect((await resolveEffectiveAccess(WS, { subject: user.userId })).roles, 'no-org resolution is the root row, not first-match').toEqual(['viewer']);
+    // ...and the door agrees, deterministically: refused, while a ROOT admin is admitted.
+    const refused = await user.post(`${BASE}/types`, { name: `m_${n++}`, fields: [{ key: 'title', label: 'Title', type: 'string' }] });
+    expect(refused.status, `sub-org admin created a type: ${JSON.stringify(refused.body)}`).toBe(403);
+    const rootAdmin = await loginTo(WS, 'root-admin-mo');
+    await createMember({ orgId: WS, tenantId: WS, displayName: 'RA', subject: rootAdmin.userId, roles: ['admin'] });
+    const made = await rootAdmin.post(`${BASE}/types`, { name: `mo_${n++}`, fields: [{ key: 'title', label: 'Title', type: 'string' }] });
+    expect([200, 201], `root admin refused the type door: ${JSON.stringify(made.body)}`).toContain(made.status);
   });
 });
 
 describe('ADR 0731 D4 — ENVIRONMENTS is the same defect in the same shape', () => {
-  const ENV = '/v1/host/openwop-app/environments';
+  const ENV = '/host/openwop-app/environments';
 
   it('a viewer is REFUSED at the environment-create door (contract: host:members:manage → 403)', async () => {
     const viewer = await loginTo(WS, 'viewer-env');

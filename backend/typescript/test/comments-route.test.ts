@@ -4,16 +4,29 @@
  * toggle-off 404), the string notification emit (tenant-scoped, comment.added /
  * comment.reply), the ctx.features.comments surface + node-pack smoke, and the
  * well-known advertisement. Proves the Comments↔CMS↔Notifications composition.
+ *
+ * SABOTAGE (witnessed, /grade-tests wave 10): dropping `updateComment`'s author guard
+ * reds the non-author edit case (ADR 0659 D6); dropping `deleteComment`'s
+ * foreign-reply 409 or its reply cascade reds the delete-cascade cases; omitting
+ * `recipientUserId` (C11 — a tenant-wide broadcast) or notifying on self-activity
+ * reds the emit cases; pointing the route at another feature's toggle reds the
+ * toggle case (it now asserts WHICH feature refused, not just "some 404"); making
+ * the chat_message resolver accept an unknown session reds the chat case.
+ *
+ * The node-pack `post` smoke that used to sit in the surface case is now carried by
+ * `comments-node-args.test.ts` ("CONTROL: the `inputs` channel still works"), which
+ * asserts the persisted body rather than `status` alone.
  */
 
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
+import { v1Advertisement } from './support/v1Advertisement.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { createPage, __resetCms } from '../src/features/cms/cmsService.js';
-import { createComment, deleteComment, listThread, __resetCommentsStore } from '../src/features/comments/commentsService.js';
+import { createComment, deleteComment, listThread, __resetCommentsStore, type Comment } from '../src/features/comments/commentsService.js';
 import { emitCommentNotification } from '../src/features/comments/notifications.js';
 import { buildCommentsSurface } from '../src/features/comments/surface.js';
 import { getNotificationEmitter } from '../src/notifications/emitter.js';
@@ -43,28 +56,35 @@ beforeAll(async () => {
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-interface Res<T = any> { status: number; body: T }
+interface Res<T> { status: number; body: T }
+/** The host error envelope (`OpenwopError.toEnvelope`). */
+interface ErrBody { error: string; message: string; details?: Record<string, unknown> }
+/** The JSON shape a route answers is a property of the route, so each call site names it. */
 function client(initialCookie = '') {
   let cookie = initialCookie;
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
+  const call = async <T>(method: string, path: string, body?: unknown): Promise<Res<T>> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     const h = res.headers as { getSetCookie?: () => string[] };
     for (const c of (typeof h.getSetCookie === 'function' ? h.getSetCookie() : [])) { const m = /(__session=[^;]+)/.exec(c); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
+    const out: unknown = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+    return { status: res.status, body: out as T }; // the ONE JSON boundary; each caller names the route's shape
   };
-  return { get: (p: string) => call('GET', p), post: (p: string, b?: unknown) => call('POST', p, b), patch: (p: string, b?: unknown) => call('PATCH', p, b), del: (p: string) => call('DELETE', p) };
+  return {
+    get: <T>(p: string) => call<T>('GET', p),
+    post: <T>(p: string, b?: unknown) => call<T>('POST', p, b),
+    patch: <T>(p: string, b?: unknown) => call<T>('PATCH', p, b),
+    del: (p: string) => call<undefined>('DELETE', p),
+  };
 }
-const pub = client();
 let n = 0;
 /** An owner in a deterministic tenant, with an org + a CMS page to comment on. */
 async function ownerWithPage(): Promise<{ owner: ReturnType<typeof client>; orgId: string; pageId: string; tenantId: string }> {
   const owner = client();
   const tenantId = `t-cmt-${n++}`;
-  expect((await owner.post('/v1/host/openwop-app/test/login', { email: `cmt-${n}@acme.test`, tenantId })).status).toBe(201);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  expect((await owner.post('/host/openwop-app/test/login', { email: `cmt-${n}@acme.test`, tenantId })).status).toBe(201);
+  const org = await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
-  const page = await owner.post(`/v1/host/openwop-app/cms/orgs/${org.body.orgId}/pages`, { title: 'Home' });
+  const page = await owner.post<{ pageId: string }>(`/host/openwop-app/cms/orgs/${org.body.orgId}/pages`, { title: 'Home' });
   expect(page.status, JSON.stringify(page.body)).toBe(201);
   return { owner, orgId: org.body.orgId, pageId: page.body.pageId, tenantId };
 }
@@ -74,42 +94,57 @@ describe('Comments: thread CRUD (RBAC) + IDOR + validation', () => {
   it('is registered + advertises ctx.features.comments', async () => {
     const { BACKEND_FEATURES } = await import('../src/features/index.js');
     expect(BACKEND_FEATURES.some((f) => f.id === 'comments')).toBe(true);
-    expect((await pub.get('/.well-known/openwop')).body.hostExtensions?.featureSurfaces).toContain('host.sample.comments');
+    // ADR 0812 — the v2 root carries no `hostExtensions.featureSurfaces` (ADR 0014) yet; read the v1 claim from its builder.
+    expect((await v1Advertisement()).hostExtensions?.featureSurfaces).toContain('host.sample.comments');
   });
 
   it('owner posts a comment + reply, lists the thread, resolves, deletes', async () => {
     const { owner, orgId, pageId } = await ownerWithPage();
-    const base = `/v1/host/openwop-app/comments/orgs/${orgId}/comments`;
-    const c1 = await owner.post(base, { resourceType: 'cms_page', resourceId: pageId, body: 'First note' });
+    const base = `/host/openwop-app/comments/orgs/${orgId}/comments`;
+    const c1 = await owner.post<Comment>(base, { resourceType: 'cms_page', resourceId: pageId, body: 'First note' });
     expect(c1.status, JSON.stringify(c1.body)).toBe(201);
     expect(c1.body.status).toBe('open');
-    const r1 = await owner.post(base, { resourceType: 'cms_page', resourceId: pageId, parentId: c1.body.commentId, body: 'A reply' });
+    const r1 = await owner.post<Comment>(base, { resourceType: 'cms_page', resourceId: pageId, parentId: c1.body.commentId, body: 'A reply' });
     expect(r1.status).toBe(201);
     expect(r1.body.parentId).toBe(c1.body.commentId);
 
-    const thread = await owner.get(`${base}?resourceType=cms_page&resourceId=${pageId}`);
+    const thread = await owner.get<{ comments: Comment[] }>(`${base}?resourceType=cms_page&resourceId=${pageId}`);
     expect(thread.body.comments).toHaveLength(2);
 
-    const resolved = await owner.patch(`${base}/${c1.body.commentId}`, { status: 'resolved' });
+    const resolved = await owner.patch<Comment>(`${base}/${c1.body.commentId}`, { status: 'resolved' });
     expect(resolved.body.status).toBe('resolved');
 
     expect((await owner.del(`${base}/${c1.body.commentId}`)).status).toBe(204);
     // deleting a root cascades to its reply → thread empty
-    expect((await owner.get(`${base}?resourceType=cms_page&resourceId=${pageId}`)).body.comments).toHaveLength(0);
+    expect((await owner.get<{ comments: Comment[] }>(`${base}?resourceType=cms_page&resourceId=${pageId}`)).body.comments).toHaveLength(0);
   });
 
   it('unknown resourceType 400s; unknown resourceId 404s', async () => {
     const { owner, orgId, pageId } = await ownerWithPage();
-    const base = `/v1/host/openwop-app/comments/orgs/${orgId}/comments`;
-    expect((await owner.post(base, { resourceType: 'nope', resourceId: pageId, body: 'x' })).status).toBe(400);
-    expect((await owner.post(base, { resourceType: 'cms_page', resourceId: 'pg:ghost', body: 'x' })).status).toBe(404);
+    const base = `/host/openwop-app/comments/orgs/${orgId}/comments`;
+    const badType = await owner.post<ErrBody>(base, { resourceType: 'nope', resourceId: pageId, body: 'x' });
+    expect(badType.status).toBe(400);
+    expect(badType.body.error).toBe('validation_error');
+    expect(badType.body.details?.field).toBe('resourceType');
+    const ghost = await owner.post<ErrBody>(base, { resourceType: 'cms_page', resourceId: 'pg:ghost', body: 'x' });
+    expect(ghost.status).toBe(404);
+    expect(ghost.body.error).toBe('not_found');
+    expect(ghost.body.details?.resourceId).toBe('pg:ghost');
   });
 
   it('cross-tenant access 404s (IDOR)', async () => {
     const a = await ownerWithPage();
     const b = await ownerWithPage();
+    const url = `/host/openwop-app/comments/orgs/${a.orgId}/comments?resourceType=cms_page&resourceId=${a.pageId}`;
+    // CONTROL: the URL is a live thread for its owner — so b's 404 is the tenant boundary, not a broken path.
+    const own = await a.owner.get<{ comments: Comment[] }>(url);
+    expect(own.status).toBe(200);
+    expect(own.body.comments).toEqual([]);
     // b cannot read a's org thread (org not in b's tenant)
-    expect((await b.owner.get(`/v1/host/openwop-app/comments/orgs/${a.orgId}/comments?resourceType=cms_page&resourceId=${a.pageId}`)).status).toBe(404);
+    const leak = await b.owner.get<ErrBody>(url);
+    expect(leak.status).toBe(404);
+    expect(leak.body.error).toBe('not_found');
+    expect(JSON.stringify(leak.body)).not.toContain(a.pageId);
   });
 
   /**
@@ -121,47 +156,56 @@ describe('Comments: thread CRUD (RBAC) + IDOR + validation', () => {
    */
   it('the author CAN edit their own body', async () => {
     const { owner, orgId, pageId } = await ownerWithPage();
-    const base = `/v1/host/openwop-app/comments/orgs/${orgId}/comments`;
-    const c = await owner.post(base, { resourceType: 'cms_page', resourceId: pageId, body: 'mine' });
-    const edited = await owner.patch(`${base}/${c.body.commentId}`, { body: 'mine (edited)' });
+    const base = `/host/openwop-app/comments/orgs/${orgId}/comments`;
+    const c = await owner.post<Comment>(base, { resourceType: 'cms_page', resourceId: pageId, body: 'mine' });
+    const edited = await owner.patch<Comment>(`${base}/${c.body.commentId}`, { body: 'mine (edited)' });
     expect(edited.body.body).toBe('mine (edited)');
   });
 
   it('a non-author member CANNOT edit another author’s body (403), but CAN resolve it', async () => {
     const { owner, orgId, pageId, tenantId } = await ownerWithPage();
-    const base = `/v1/host/openwop-app/comments/orgs/${orgId}/comments`;
-    const c = await owner.post(base, { resourceType: 'cms_page', resourceId: pageId, body: 'mine' });
+    const base = `/host/openwop-app/comments/orgs/${orgId}/comments`;
+    const c = await owner.post<Comment>(base, { resourceType: 'cms_page', resourceId: pageId, body: 'mine' });
 
     // A SECOND principal in the same tenant, seated in the org with write.
     const other = client();
-    const login = await other.post('/v1/host/openwop-app/test/login', { email: `cmt-other-${n++}@acme.test`, tenantId });
+    const login = await other.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: `cmt-other-${n++}@acme.test`, tenantId });
     expect(login.status).toBe(201);
-    const seat = await owner.post(`/v1/host/openwop-app/orgs/${orgId}/members`, {
+    const seat = await owner.post(`/host/openwop-app/orgs/${orgId}/members`, {
       displayName: 'Other', subject: login.body.user.userId, roles: ['editor'],
     });
     expect(seat.status, JSON.stringify(seat.body)).toBe(201);
 
     // Body edit: refused, and the row is untouched.
-    const refused = await other.patch(`${base}/${c.body.commentId}`, { body: 'not mine to edit' });
+    const refused = await other.patch<ErrBody>(`${base}/${c.body.commentId}`, { body: 'not mine to edit' });
     expect(refused.status).toBe(403);
     expect(refused.body.error).toBe('forbidden_scope');
-    const still = await other.get(`${base}?resourceType=cms_page&resourceId=${pageId}`);
-    expect(still.body.comments[0].body).toBe('mine');
+    const still = await other.get<{ comments: Comment[] }>(`${base}?resourceType=cms_page&resourceId=${pageId}`);
+    expect(still.body.comments[0]!.body).toBe('mine');
 
     // Resolve is member-level by design — the guard is author-only for the BODY.
-    const resolved = await other.patch(`${base}/${c.body.commentId}`, { status: 'resolved' });
+    const resolved = await other.patch<Comment>(`${base}/${c.body.commentId}`, { status: 'resolved' });
     expect(resolved.status).toBe(200);
     expect(resolved.body.status).toBe('resolved');
   });
 
   it('toggle OFF ⇒ 404 (backend authority)', async () => {
     const { owner, orgId, pageId } = await ownerWithPage();
-    const base = `/v1/host/openwop-app/comments/orgs/${orgId}/comments`;
+    const base = `/host/openwop-app/comments/orgs/${orgId}/comments`;
+    const read = `${base}?resourceType=cms_page&resourceId=${pageId}`;
+    // CONTROL: ON, the same read answers — so the 404 below is the toggle, not the URL.
+    expect((await owner.get<{ comments: Comment[] }>(read)).status).toBe(200);
     try {
       await enableComments('off');
-      expect((await owner.get(`${base}?resourceType=cms_page&resourceId=${pageId}`)).status).toBe(404);
-      expect((await owner.post(base, { resourceType: 'cms_page', resourceId: pageId, body: 'x' })).status).toBe(404);
+      // Assert WHICH feature refused: a status-only check passed with the route wired to
+      // ANOTHER feature's toggle (/grade-tests wave 10 probe).
+      for (const r of [await owner.get<ErrBody>(read), await owner.post<ErrBody>(base, { resourceType: 'cms_page', resourceId: pageId, body: 'x' })]) {
+        expect(r.status).toBe(404);
+        expect(r.body.error).toBe('not_found');
+        expect(r.body.details?.feature).toBe('comments');
+      }
     } finally { await enableComments('on'); }
+    expect((await owner.get<{ comments: Comment[] }>(read)).body.comments).toEqual([]);
   });
 });
 
@@ -234,7 +278,7 @@ describe('Comments: delete-cascade authorization (no data-loss by a non-admin)',
 describe('Comments: ctx.features.comments + nodes', () => {
   beforeEach(async () => { await __resetCommentsStore(); await __resetCms(); });
 
-  it('surface post/list/resolve + node post run', async () => {
+  it('surface post/list/resolve: agent provenance, internal fields projected out', async () => {
     // CMNT-4 — the surface now enforces the same org-membership predicate the
     // routes and chat tools do, so the run must carry an acting user who is a
     // member of a real org in this tenant.
@@ -247,14 +291,13 @@ describe('Comments: ctx.features.comments + nodes', () => {
     expect(posted.comment?.authorId).toBe('agent:run-1'); // agent-authored provenance
     expect(posted.comment?.tenantId).toBeUndefined();      // internal projected out
 
-    const listed = (await surf.list({ orgId: 'o1', resourceType: 'cms_page', resourceId: page.pageId })) as { comments: unknown[] };
-    expect(listed.comments).toHaveLength(1);
+    const listed = (await surf.list({ orgId: 'o1', resourceType: 'cms_page', resourceId: page.pageId })) as { comments: Array<Record<string, unknown>> };
+    expect(listed.comments.map((c) => c.body)).toEqual(['agent note']);
+    expect(listed.comments[0]!.tenantId).toBeUndefined(); // projected out on the read lane too
 
-    const mod = await import('../../../packs/feature.comments.nodes/index.mjs');
-    const ctx = (i: Record<string, unknown>) => ({ features: { comments: surf }, inputs: i });
-    const r = await mod.nodes['feature.comments.nodes.post'](ctx({ orgId: 'o1', resourceType: 'cms_page', resourceId: page.pageId, body: 'via node' }));
-    expect(r.status).toBe('success');
-    expect((await listThreadOrFail('tS', 'o1', 'cms_page', page.pageId, PREAUTHORIZED_CALLER)).length).toBe(2);
+    const resolved = (await surf.resolve({ orgId: 'o1', commentId: String(posted.comment?.commentId) })) as { comment: Record<string, unknown> | null };
+    expect(resolved.comment?.status).toBe('resolved');
+    expect((await listThreadOrFail('tS', 'o1', 'cms_page', page.pageId, PREAUTHORIZED_CALLER))[0]!.status).toBe('resolved');
   });
 });
 
@@ -263,37 +306,39 @@ describe('Comments: chat_message commentable type (ADR 0021 extension)', () => {
     const { hostExtStorage } = await import('../src/host/hostExtPersistence.js');
     const owner = client();
     const tenantId = `t-chat-${n++}`;
-    expect((await owner.post('/v1/host/openwop-app/test/login', { email: `chat-${n}@acme.test`, tenantId })).status).toBe(201);
-    const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
-    const orgId = org.body.orgId as string;
+    expect((await owner.post('/host/openwop-app/test/login', { email: `chat-${n}@acme.test`, tenantId })).status).toBe(201);
+    const org = await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' });
+    const orgId = org.body.orgId;
 
     // Seed a chat session in the caller's tenant.
     const sessionId = `sess-${n}`;
     const now = new Date().toISOString();
     await hostExtStorage().createChatSession({ sessionId, tenantId, title: 'My Chat', createdAt: now, updatedAt: now, messageCount: 0 });
 
-    const base = `/v1/host/openwop-app/comments/orgs/${orgId}/comments`;
+    const base = `/host/openwop-app/comments/orgs/${orgId}/comments`;
     const rid = `${sessionId}#msg-42`;
 
-    const c = await owner.post(base, { resourceType: 'chat_message', resourceId: rid, body: 'Nice answer 👍' });
+    const c = await owner.post<Comment>(base, { resourceType: 'chat_message', resourceId: rid, body: 'Nice answer 👍' });
     expect(c.status, JSON.stringify(c.body)).toBe(201);
     expect(c.body.resourceType).toBe('chat_message');
 
-    const thread = await owner.get(`${base}?resourceType=chat_message&resourceId=${encodeURIComponent(rid)}`);
+    const thread = await owner.get<{ comments: Comment[] }>(`${base}?resourceType=chat_message&resourceId=${encodeURIComponent(rid)}`);
     expect(thread.status).toBe(200);
     expect(thread.body.comments.length).toBe(1);
-    expect(thread.body.comments[0].body).toBe('Nice answer 👍');
+    expect(thread.body.comments[0]!.body).toBe('Nice answer 👍');
 
     // Unknown session id → 404 (no cross-tenant existence leak).
-    const missing = await owner.post(base, { resourceType: 'chat_message', resourceId: 'nope#m1', body: 'x' });
+    const missing = await owner.post<ErrBody>(base, { resourceType: 'chat_message', resourceId: 'nope#m1', body: 'x' });
     expect(missing.status).toBe(404);
+    expect(missing.body.error).toBe('not_found');
 
     // A different tenant's user cannot see or comment on this session (IDOR).
     const other = client();
-    await other.post('/v1/host/openwop-app/test/login', { email: `other-${n}@x.test`, tenantId: `t-other-${n}` });
-    const otherOrg = await other.post('/v1/host/openwop-app/orgs', { name: 'Other' });
-    const otherBase = `/v1/host/openwop-app/comments/orgs/${otherOrg.body.orgId}/comments`;
-    const leak = await other.post(otherBase, { resourceType: 'chat_message', resourceId: rid, body: 'peek' });
+    await other.post('/host/openwop-app/test/login', { email: `other-${n}@x.test`, tenantId: `t-other-${n}` });
+    const otherOrg = await other.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Other' });
+    const otherBase = `/host/openwop-app/comments/orgs/${otherOrg.body.orgId}/comments`;
+    const leak = await other.post<ErrBody>(otherBase, { resourceType: 'chat_message', resourceId: rid, body: 'peek' });
     expect(leak.status).toBe(404);
+    expect(leak.body.error).toBe('not_found');
   });
 });

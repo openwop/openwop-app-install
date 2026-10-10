@@ -82,11 +82,12 @@ const HUBS: Hub[] = [
 /**
  * NOTE for whoever extends this with a tab CLICK. Target the hub's own
  * `<Tabs idBase>` (`[role="tab"][id^="<idBase>-tab-"]`), never a bare
- * `getByRole('tab')`: the Access hub renders a SECOND tablist for its
- * Workspace/Personal scope pill (`idBase="access-scope"`), so `.nth(1)` there
- * clicks "Personal" and changes scope instead of switching tab — a green test
- * that exercised nothing. (And see the docblock: a tab switch does not suspend
- * visibly in the first place.)
+ * `getByRole('tab')`: the Access hub USED to render a second tablist for its
+ * Workspace/Personal scope pill, so `.nth(1)` there clicked "Personal" and
+ * changed scope instead of switching tab — a green test that exercised
+ * nothing. (Since 2026-10-06 the scope is an `aria-pressed` toggle, not a
+ * tablist — ADR 0144 addendum — but other hubs may still nest tablists. And
+ * see the docblock: a tab switch does not suspend visibly in the first place.)
  */
 
 /**

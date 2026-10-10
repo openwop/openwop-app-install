@@ -63,10 +63,10 @@ const KICKBOT_TURN_AGENT_ID = 'host:kickbot';
  *  not an open agent-dispatch primitive — only these bounded, read-only advisory
  *  workers, resolved by this map (never a free-form agentId from the model). */
 const CONVENABLE_SPECIALISTS: Readonly<Record<string, string>> = {
-  'plan-builder': 'feature.kicktodo.agents.plan-builder',
-  'safety-reviewer': 'feature.kicktodo.agents.safety-reviewer',
-  'progress-verifier': 'feature.kicktodo.agents.progress-verifier',
-  'accountability-steward': 'feature.kicktodo.agents.accountability-steward',
+  'plan-builder': 'vendor.openwop-app.kicktodo.agents.plan-builder',
+  'safety-reviewer': 'vendor.openwop-app.kicktodo.agents.safety-reviewer',
+  'progress-verifier': 'vendor.openwop-app.kicktodo.agents.progress-verifier',
+  'accountability-steward': 'vendor.openwop-app.kicktodo.agents.accountability-steward',
 };
 
 /** The read-only tool surface KickBot OFFERS a convened specialist. The
@@ -399,6 +399,7 @@ export async function runLogCheckinTool(input: Record<string, unknown>, scope: R
 export function registerKicktodoAgentTools(deps: StartRunDeps): void {
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: KICKTODO_TODAY_TOOL_ID,
       description:
@@ -417,6 +418,7 @@ export function registerKicktodoAgentTools(deps: StartRunDeps): void {
 
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: KICKTODO_PROGRESS_TOOL_ID,
       description:
@@ -446,6 +448,7 @@ export function registerKicktodoAgentTools(deps: StartRunDeps): void {
   // (a system turn never enumerates a participant's notes). Read-only.
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: KICKTODO_JOURNAL_TOOL_ID,
       description:
@@ -472,6 +475,7 @@ export function registerKicktodoAgentTools(deps: StartRunDeps): void {
   // Read-only, bounded (planFor hard-caps a 31-day span).
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     def: {
       name: KICKTODO_PLAN_TOOL_ID,
       description:
@@ -509,6 +513,7 @@ export function registerKicktodoAgentTools(deps: StartRunDeps): void {
   // baseline); fails empty without a human principal.
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: KICKTODO_CONVENE_TOOL_ID,
       description:
@@ -541,6 +546,7 @@ export function registerKicktodoAgentTools(deps: StartRunDeps): void {
   // enrollment. Pack-allowlisted onto KickBot ONLY (never the ADR 0315 baseline).
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: KICKTODO_REPLAN_TOOL_ID,
       description:
@@ -569,6 +575,7 @@ export function registerKicktodoAgentTools(deps: StartRunDeps): void {
   // decides". Pack-allowlisted onto KickBot ONLY (never the ADR 0315 baseline).
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: KICKTODO_LOG_CHECKIN_TOOL_ID,
       description:

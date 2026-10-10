@@ -13,9 +13,9 @@ describe('workflow-proposal auto-approval policy routes (sqlite memory app)', ()
   let server: http.Server;
   let BASE: string;
   const TOKEN = 'dev-token'; // wildcard bearer ⇒ superadmin
-  const ADMIN = '/v1/host/openwop-app/workflow-proposals/admin/policies';
+  const ADMIN = '/host/openwop-app/workflow-proposals/admin/policies';
   const TENANT = 'org:policy-route-test';
-  const AGENT = 'feature.workflow-author.agents.workflow-architect';
+  const AGENT = 'vendor.openwop-app.workflow-author.agents.workflow-architect';
 
   beforeAll(async () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';

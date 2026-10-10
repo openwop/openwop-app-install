@@ -46,8 +46,8 @@
  *
  * `CRM_EVENT_TYPES` is the closed-world catalog leg: `crmMutated`'s
  * `entity`/`verb` pair is typed against `CRM_EVENT_VERBS`, and
- * `test/host-event-catalog-parity.test.ts` asserts the frontend's hand-listed
- * `KNOWN_HOST_EVENT_TYPES ∩ host.crm.*` equals this set in BOTH directions.
+ * `test/adr0825-rfc0236-host-events.test.ts` asserts the host-event catalog
+ * (`host/hostEventTypes.ts`) ∩ `host.crm.*` equals this set in BOTH directions.
  */
 import { emitHostEvent, type HostEventOrigin } from '../../host/hostEventDispatcher.js';
 import { hostExtStorage } from '../../host/hostExtPersistence.js';

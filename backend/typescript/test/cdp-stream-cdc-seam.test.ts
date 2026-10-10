@@ -3,7 +3,7 @@
  * over HTTP. POST {source:"stream"|"change", …} to the trigger-bridge ingest seam returns
  * { triggerEvent, deliveryEvent }; triggerEvent carries the source sub-object (op REQUIRED
  * for change; before/after; stream key), deliveryEvent is content-free (SR-1). Registered on
- * BOTH the reference-host route and the `/v1/host/sample/...` alias; flag-off ⇒ 400 (soft-skip).
+ * BOTH the reference-host route and the `/host/sample/...` alias; flag-off ⇒ 400 (soft-skip).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -27,8 +27,8 @@ async function ingest(path: string, body: unknown): Promise<{ status: number; bo
   const res = await fetch(`${BASE}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` }, body: JSON.stringify(body) });
   return { status: res.status, body: await res.json().catch(() => undefined) };
 }
-const SAMPLE = '/v1/host/sample/trigger-bridge/ingest';
-const APP = '/v1/host/openwop-app/trigger-bridge/ingest';
+const SAMPLE = '/host/sample/trigger-bridge/ingest';
+const APP = '/host/openwop-app/trigger-bridge/ingest';
 
 describe('CDP-1c stream/CDC ingest seam (RFC 0127 CDP-1b)', () => {
   it('a stream event delivers, carries the stream sub-object, and the delivery is content-free', async () => {

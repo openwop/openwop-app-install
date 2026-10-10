@@ -62,7 +62,7 @@ interface BundleBody {
 }
 
 async function runToTerminal(workflowId: string, inputs: Record<string, unknown>): Promise<string> {
-  const create = await jsonFetch<{ runId: string }>('/v1/runs', {
+  const create = await jsonFetch<{ runId: string }>('/runs', {
     method: 'POST',
     body: JSON.stringify({ workflowId, inputs }),
   });
@@ -70,7 +70,7 @@ async function runToTerminal(workflowId: string, inputs: Record<string, unknown>
   const { runId } = create.body;
   for (let i = 0; i < 40; i++) {
     await new Promise((r) => setTimeout(r, 50));
-    const snap = await jsonFetch<RunSnap>(`/v1/runs/${runId}`);
+    const snap = await jsonFetch<RunSnap>(`/runs/${runId}`);
     if (['completed', 'failed', 'cancelled'].includes(snap.body.status)) return runId;
   }
   return runId;
@@ -78,7 +78,7 @@ async function runToTerminal(workflowId: string, inputs: Record<string, unknown>
 
 describe('core.openwop.web-search — core.web.search node (unified on host.webResearch)', () => {
   it('runs as a one-node workflow and returns the honest keyless demo result', async () => {
-    const reg = await jsonFetch('/v1/host/openwop-app/workflows', {
+    const reg = await jsonFetch('/host/openwop-app/workflows', {
       method: 'POST',
       body: JSON.stringify({
         workflowId: 'openwop-app.web.search-only',
@@ -90,10 +90,10 @@ describe('core.openwop.web-search — core.web.search node (unified on host.webR
     expect([200, 201]).toContain(reg.status);
 
     const runId = await runToTerminal('openwop-app.web.search-only', { query: 'OpenWOP protocol' });
-    const snap = await jsonFetch<RunSnap>(`/v1/runs/${runId}`);
+    const snap = await jsonFetch<RunSnap>(`/runs/${runId}`);
     expect(snap.body.status).toBe('completed');
 
-    const bundle = await jsonFetch<BundleBody>(`/v1/runs/${runId}/debug-bundle`);
+    const bundle = await jsonFetch<BundleBody>(`/runs/${runId}/debug-bundle`);
     const completed = (bundle.body.events ?? []).find((e) => e.type === 'node.completed' && e.nodeId === 'search');
     expect(completed, 'search node should complete').toBeTruthy();
     const out = completed!.payload as Record<string, unknown>;
@@ -115,8 +115,8 @@ describe('core.openwop.web-search — core.web.search node (unified on host.webR
   it('is deterministic while keyless: the same query yields identical results across runs', async () => {
     const r1 = await runToTerminal('openwop-app.web.search-only', { query: 'determinism check' });
     const r2 = await runToTerminal('openwop-app.web.search-only', { query: 'determinism check' });
-    const b1 = await jsonFetch<BundleBody>(`/v1/runs/${r1}/debug-bundle`);
-    const b2 = await jsonFetch<BundleBody>(`/v1/runs/${r2}/debug-bundle`);
+    const b1 = await jsonFetch<BundleBody>(`/runs/${r1}/debug-bundle`);
+    const b2 = await jsonFetch<BundleBody>(`/runs/${r2}/debug-bundle`);
     const pick = (b: BundleBody) => {
       const ev = (b.events ?? []).find((e) => e.type === 'node.completed' && e.nodeId === 'search')!;
       const out = (ev.payload as Record<string, unknown>);
@@ -129,10 +129,10 @@ describe('core.openwop.web-search — core.web.search node (unified on host.webR
 describe('openwop-app.web.research workflow (gap D-4)', () => {
   it('runs search → summarize end-to-end with no BYOK provider', async () => {
     const runId = await runToTerminal('openwop-app.web.research', { query: 'workflow orchestration' });
-    const snap = await jsonFetch<RunSnap>(`/v1/runs/${runId}`);
+    const snap = await jsonFetch<RunSnap>(`/runs/${runId}`);
     expect(snap.body.status, 'web-research sample should complete without a provider').toBe('completed');
 
-    const bundle = await jsonFetch<BundleBody>(`/v1/runs/${runId}/debug-bundle`);
+    const bundle = await jsonFetch<BundleBody>(`/runs/${runId}/debug-bundle`);
     const events = bundle.body.events ?? [];
     expect(events.some((e) => e.type === 'node.completed' && e.nodeId === 'search')).toBe(true);
     expect(events.some((e) => e.type === 'node.completed' && e.nodeId === 'summarize')).toBe(true);

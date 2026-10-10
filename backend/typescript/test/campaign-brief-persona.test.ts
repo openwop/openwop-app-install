@@ -45,7 +45,7 @@ function client(): Client {
 
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
 async function signup(c: Client): Promise<{ userId: string }> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail('cb') });
+  const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail('cb') });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
@@ -54,12 +54,12 @@ const enable = async (status: 'on' | 'off'): Promise<void> => { const d = getTog
 async function ownerWithOrg(): Promise<{ owner: Client; orgId: string }> {
   const owner = client();
   await signup(owner);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return { owner, orgId: org.body.orgId };
 }
 
-const P = '/v1/host/openwop-app/campaign-brief/personas';
+const P = '/host/openwop-app/campaign-brief/personas';
 
 describe('campaign-brief personas — toggle gating', () => {
   it('404s when the toggle is off', async () => {

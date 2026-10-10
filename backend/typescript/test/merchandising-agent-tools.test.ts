@@ -71,13 +71,13 @@ describe('merchandising agent tools — registration + pack allowlist parity', (
   };
 
   it('each pack allowlist is EXACTLY the registered tool ids (no phantom entries)', () => {
-    expect([...packAllowlist('feature.discovery.agents')].sort()).toEqual(
+    expect([...packAllowlist('vendor.openwop-app.discovery.agents')].sort()).toEqual(
       [DISCOVERY_SEARCH_TOOL_ID, DISCOVERY_LIST_COLLECTIONS_TOOL_ID, DISCOVERY_LIST_RULES_TOOL_ID, DISCOVERY_CREATE_COLLECTION_TOOL_ID, DISCOVERY_CREATE_RULE_TOOL_ID].sort(),
     );
-    expect([...packAllowlist('feature.recommendations.agents')].sort()).toEqual(
+    expect([...packAllowlist('vendor.openwop-app.recommendations.agents')].sort()).toEqual(
       [RECOMMENDATIONS_RESOLVE_TOOL_ID, RECOMMENDATIONS_LIST_PLACEMENTS_TOOL_ID, RECOMMENDATIONS_CREATE_PLACEMENT_TOOL_ID].sort(),
     );
-    expect([...packAllowlist('feature.promotions.agents')].sort()).toEqual(
+    expect([...packAllowlist('vendor.openwop-app.promotions.agents')].sort()).toEqual(
       [PROMOTIONS_LIST_TOOL_ID, PROMOTIONS_APPLY_PREVIEW_TOOL_ID, PROMOTIONS_DRAFT_TOOL_ID].sort(),
     );
   });
@@ -106,7 +106,7 @@ describe('discovery curator tools', () => {
   });
 
   it('create-collection: authors through the service; list-collections then reads it back', async () => {
-    const p = provider({ actingUserId: 'u-1', agentProfileId: 'feature.discovery.agents.curator' });
+    const p = provider({ actingUserId: 'u-1', agentProfileId: 'vendor.openwop-app.discovery.agents.curator' });
     const created = await p.executeTool({ name: DISCOVERY_CREATE_COLLECTION_TOOL_ID, input: { name: 'Cameras', type: 'dynamic', rule: { categories: ['camera'] } } });
     expect(created.isError).toBeFalsy();
     const cid = parse(created).collectionId as string;

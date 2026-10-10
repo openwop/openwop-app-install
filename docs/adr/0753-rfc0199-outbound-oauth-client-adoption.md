@@ -100,8 +100,12 @@ worth doing once D8 exists. Device-code and incremental scopes stay RFC-unresolv
 
 - [x] Owner ruling: §B.3(c) vs Google's trailing-slash `authorization_servers` — ruled 2026-09-26 (single empty-path equivalence; see Context).
 - [ ] Does Google accept `resource` on authorize + token? Verify with a real grant before D6 lifts.
-- [ ] Witness: a seams-on colocated companion trips the RFC 0170 revocation-seam gap (recorded
+- [x] Witness: a seams-on colocated companion trips the RFC 0170 revocation-seam gap (recorded
       under the colocated-companion recipe); resolve before P5's cut.
+      > **Answered 2026-10-07 — the gap is gone.** The mint/revoke seams now exist
+      > (`routes/credentialLaneSeams.ts`, `served: true` in the seam table). MEASURED
+      > on a seams-on boot of `main`, suite 2.45.23, `OPENWOP_TARGET_MAJOR=2`:
+      > `openwop.requirement.0170.revocation-honored` → `executed-pass`, 5 assertions.
 
 ## Implementation record
 
@@ -145,5 +149,18 @@ worth doing once D8 exists. Device-code and incremental scopes stay RFC-unresolv
 - [ ] Witness cut: the three `v2-oauth-*`/`v2-credential-interrupt` scenarios against
       a seams-on colocated companion of the production image (RFC 0216 route), each
       a separate go from the maintainer.
-- [ ] Frontend: `OAUTH_ERROR_KEY` gains `subject_mismatch` / `iss_mismatch` (4 locales).
+      > **CORRECTED 2026-10-07 — this route cannot credit these rows; do not run it.**
+      > RFC 0216 counts a companion ONLY for rows listed in a `### Harness-trust-anchor
+      > rows` table of an Active/Accepted RFC (§C.9(c)); RFC 0199's rows are all
+      > `seam-gated` and it has no such table. A seams-on companion would also fail
+      > §C.9(d) — its discovery advertises the seams profile, which production does
+      > not, and the pairing normalises only the origin and `oidc` issuers. RFC 0199 is
+      > already Accepted (provisional) on the certified 2026-09-27 side-revision bundle,
+      > so what remains for it is the Google live grant above, not another witness.
+      > Making seam-gated rows companion-creditable would be an RFC 0216 amendment.
+- [x] Frontend: `OAUTH_ERROR_KEY` gains `subject_mismatch` / `iss_mismatch` (4 locales).
+      > **Ticked 2026-10-07 — it was already done; the box was stale.** Landed under
+      > ADR 0780 (grade-ux `CONNUX-8`): `features/connections/useOAuthCallback.ts`
+      > maps both codes, and `callbackSubjectMismatch` / `callbackIssMismatch` exist
+      > in all four `features/connections/i18n/{en,es,fr,pt-BR}.ts`.
 

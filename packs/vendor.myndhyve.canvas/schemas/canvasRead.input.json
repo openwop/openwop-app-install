@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.canvas/1.0.0/canvasRead.input.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.canvas/1.0.2/canvasRead.input.json",
   "title": "CanvasReadInput",
   "type": "object",
   "required": ["canvasId"],

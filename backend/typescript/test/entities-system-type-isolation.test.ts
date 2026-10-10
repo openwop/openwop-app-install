@@ -33,14 +33,14 @@ function client() {
     get: (p: string) => send('GET', p),
     post: (p: string, b?: unknown) => send('POST', p, b),
     login: async (subject: string, tenantId: string) => {
-      const res = await send('POST', '/v1/host/openwop-app/test/login', { subject, tenantId });
+      const res = await send('POST', '/host/openwop-app/test/login', { subject, tenantId });
       expect([200, 201]).toContain(res.status);
     },
   };
 }
 
 const T = 'tenant-sys-iso';
-const E = '/v1/host/openwop-app/entities';
+const E = '/host/openwop-app/entities';
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';

@@ -23,8 +23,10 @@ const MAX_PORTFOLIO_LINES = 5;
 const MAX_SCHEDULE_LINES = 3;
 
 export interface VoicePreambleDeps {
-  /** Resolve a workflowId to its display name (null ⇒ fall back to the id). */
-  getWorkflowName: (workflowId: string) => Promise<string | null>;
+  /** Resolve a workflowId to its display name AS `tenantId` may read it (null ⇒
+   *  fall back to the id). Tenant-scoped (ADR 0823): a roster portfolio can name
+   *  any id, and a foreign one must not disclose its name. */
+  getWorkflowName: (tenantId: string, workflowId: string) => Promise<string | null>;
 }
 
 async function workSnapshotBlock(deps: VoicePreambleDeps, tenantId: string, identity: AgentIdentity): Promise<string> {
@@ -35,7 +37,7 @@ async function workSnapshotBlock(deps: VoicePreambleDeps, tenantId: string, iden
   // Standing portfolio — the workflows this member owns (names, capped).
   const workflowIds = (entry.workflows ?? []).slice(0, MAX_PORTFOLIO_LINES);
   if (workflowIds.length > 0) {
-    const names = await Promise.all(workflowIds.map(async (id) => (await deps.getWorkflowName(id).catch(() => null)) ?? id));
+    const names = await Promise.all(workflowIds.map(async (id) => (await deps.getWorkflowName(tenantId, id).catch(() => null)) ?? id));
     lines.push(`Your workflow portfolio: ${names.join('; ')}${(entry.workflows?.length ?? 0) > MAX_PORTFOLIO_LINES ? ` (+${entry.workflows.length - MAX_PORTFOLIO_LINES} more)` : ''}.`);
   }
 

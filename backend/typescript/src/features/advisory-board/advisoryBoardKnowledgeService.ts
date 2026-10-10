@@ -108,7 +108,7 @@ export async function setBoardSharedKnowledge(tenantId: string, board: AdvisoryB
     : await provider.resolveCollectionIds(tenantId, board.orgId, { forUnshare: true });
   for (const advisorId of board.advisors) {
     for (const id of ids) {
-      if (shared) await bindCollection(tenantId, advisorId, id, PREAUTHORIZED_CALLER);
+      if (shared) await bindCollection(tenantId, advisorId, id, PREAUTHORIZED_CALLER, 'preauthorized');
       else { try { await unbindCollection(tenantId, advisorId, id); } catch { /* not bound — ignore */ } }
     }
   }
@@ -147,7 +147,7 @@ export async function reconcileBoardForSourceChange(tenantId: string, board: Adv
       try { await unbindCollection(tenantId, advisorId, id); } catch { /* not bound — ignore */ }
     }
     for (const id of shareable) {
-      try { await bindCollection(tenantId, advisorId, id, PREAUTHORIZED_CALLER); } catch { /* cap/vanished — never block the unbinds */ }
+      try { await bindCollection(tenantId, advisorId, id, PREAUTHORIZED_CALLER, 'preauthorized'); } catch { /* cap/vanished — never block the unbinds */ }
     }
   }
 }
@@ -189,7 +189,7 @@ export async function reconcileCohortBindings(
     const ids = await provider.resolveCollectionIds(tenantId, board.orgId);
     for (const advisorId of addedAdvisors) {
       for (const id of ids) {
-        try { await bindCollection(tenantId, advisorId, id, PREAUTHORIZED_CALLER); } catch { /* cap/vanished — the next share toggle re-binds; never block removals */ }
+        try { await bindCollection(tenantId, advisorId, id, PREAUTHORIZED_CALLER, 'preauthorized'); } catch { /* cap/vanished — the next share toggle re-binds; never block removals */ }
       }
     }
   }

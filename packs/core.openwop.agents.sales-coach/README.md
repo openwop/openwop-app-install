@@ -3,8 +3,8 @@
 Sales Coach agent. Analyzes call transcripts for coaching moments, recommends next steps, tracks rep development arc.
 
 | Pack name | `core.openwop.agents.sales-coach` |
-| Version | `1.0.0` |
-| Engine | OpenWOP `>=1.1.0 <2.0.0` |
+| Version | `1.0.1` |
+| Engine | OpenWOP `>=1.1.0 <3.0.0` |
 | Agents | 1 |
 | Required host capabilities | `aiProviders`, `host.agentRuntime`, `openwop.agents.memoryBackends ≥ longTerm` |
 | License | Apache-2.0 |

@@ -12,7 +12,7 @@ import { authorizeOrgScope } from '../featureRoute.js';
 import { listDomains, addDomain, removeDomain, verifyDomain } from '../../host/customDomains.js';
 
 const FEATURE = { toggleId: 'custom-domains', label: 'Custom domains' };
-const BASE = '/v1/host/openwop-app/custom-domains/orgs/:orgId';
+const BASE = '/host/openwop-app/custom-domains/orgs/:orgId';
 
 export function registerCustomDomainsRoutes(deps: RouteDeps): void {
   const { app } = deps;

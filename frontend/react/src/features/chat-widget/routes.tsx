@@ -18,12 +18,14 @@ const routes: FeatureRoute[] = [
       label: 'Chat widgets', labelKey: 'chatWidgetLabel',
       icon: ActivityIcon,
       hint: 'Embeddable chat widgets', hintKey: 'chatWidgetHint',
+      // ADR 0820 §8.2 — `chat-widget` has a toggle again (default ON, Support bundle).
+      featureId: 'chat-widget',
       // ADR 0145 — subsumed by the Chat deployment console once enabled.
       hiddenWhenFeature: 'chat-deployment',
     },
-    // ADR 0145 — also a tab in the Chat deployment console. Always-on surface, so
-    // no `featureId` gate on the tab.
-    hubTab: { hub: 'chat-deployment', order: 2 },
+    // ADR 0145 — also a tab in the Chat deployment console, gated on the same
+    // toggle as the nav (ADR 0820 §8.2).
+    hubTab: { hub: 'chat-deployment', order: 2, featureId: 'chat-widget' },
   },
 ];
 

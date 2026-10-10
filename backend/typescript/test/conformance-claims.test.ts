@@ -334,7 +334,7 @@ describe('ADR 0550 P4 — the runtime reader publishes only what was stamped', (
       const served = mod.servedBundle(1);
       expect(served?.source === 'image' ? served.doc['bundleVersion'] : undefined).toBe('2');
       expect(mod.certificationBundleUrl('https://example.test/')).toBe(
-        'https://example.test/v1/host/openwop-app/conformance/certification-bundle',
+        'https://example.test/host/openwop-app/conformance/certification-bundle',
       );
 
       // A v1 bundle cannot express dispositions, so serving it through a pointer

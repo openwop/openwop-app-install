@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.workflows.support",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "kind": "workflow-chain",
   "description": "Real-work workflow pack (RFC 0013, ADR 0190) — the Customer Support cluster, the #1 surveyed agent use case the gallery previously had zero templates for: KB-grounded answering, email triage (draft-only — the human sends), customer-ticket routing, sentiment/brand-risk escalation, and CSAT follow-up. Authored entirely over node typeIds shipped with this host (feature.kb + core.ai.chatCompletion + core.flow.if + core.chat.approvalGate + core.email.draft + core.openwop.connectors.ticket-create + core.openwop.integration.*). Every external SEND waits on a human approval gate (core.email.draft creates a draft and never sends — the draft itself is the human gate). Distinct from core.openwop.workflows.it-support: that pack routes IT incidents by severity; this one serves customer-facing support (intent, queues, CSAT). All tenant values are run parameters (replay-deterministic).",
   "author": "openwop",
@@ -10,7 +10,7 @@
   "chains": [
     {
       "chainId": "support.kb-answer",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "label": "Knowledge-Base Support Agent",
       "description": "Answer a customer question grounded ONLY in your knowledge base, with citations and a stated confidence. Confident answers are delivered as a notification; low-confidence ones route to a human-approved Slack escalation instead of guessing.",
       "parameters": {
@@ -29,19 +29,19 @@
       "capabilities": ["side-effectful"],
       "dag": {
         "nodes": [
-          { "id": "retrieve", "typeId": "feature.kb.nodes.rag", "name": "Retrieve KB context", "position": { "x": 0, "y": 80 }, "config": {}, "inputs": {
+          { "id": "retrieve", "typeId": "feature.kb.nodes.rag@1.0.0", "name": "Retrieve KB context", "position": { "x": 0, "y": 80 }, "config": {}, "inputs": {
               "query": "{{params.question}}",
               "orgId": "{{params.orgId}}",
               "collectionId": "{{params.collectionId}}"
             } },
-          { "id": "answer", "typeId": "core.ai.chatCompletion", "name": "Draft grounded answer", "position": { "x": 280, "y": 80 }, "config": { "systemPrompt": "You are a support agent. Answer the customer question using ONLY the retrieved knowledge-base passages — cite each passage you rely on. If the KB does not cover the question, say so plainly. End with a line 'CONFIDENCE: high' or 'CONFIDENCE: low' (low when the KB coverage is partial or absent). Question: {{params.question}}",
+          { "id": "answer", "typeId": "core.ai.chatCompletion@1.0.0", "name": "Draft grounded answer", "position": { "x": 280, "y": 80 }, "config": { "systemPrompt": "You are a support agent. Answer the customer question using ONLY the retrieved knowledge-base passages — cite each passage you rely on. If the KB does not cover the question, say so plainly. End with a line 'CONFIDENCE: high' or 'CONFIDENCE: low' (low when the KB coverage is partial or absent). Question: {{params.question}}",
             "provider": "{{params.provider}}",
             "model": "{{params.model}}"
           }, "inputs": {} },
-          { "id": "route", "typeId": "core.flow.if", "name": "Confident?", "position": { "x": 560, "y": 80 }, "config": {"predicate": {"path": "", "op": "contains", "value": "CONFIDENCE: high"}}, "inputs": {} },
-          { "id": "deliver", "typeId": "feature.notifications.nodes.notify", "name": "Deliver answer", "position": { "x": 840, "y": 0 }, "config": { "audience": "tenant" }, "inputs": { "title": "Knowledge-Base Support Agent" } },
-          { "id": "approveEscalation", "typeId": "core.chat.approvalGate", "name": "Approve escalation", "position": { "x": 840, "y": 160 }, "config": { "title": "Approve escalating this low-confidence answer" }, "inputs": {} },
-          { "id": "escalate", "typeId": "core.openwop.integration.slack-message", "name": "Escalate to Slack", "position": { "x": 1120, "y": 160 }, "config": { "channel": "{{params.escalationChannel}}" }, "inputs": {} }
+          { "id": "route", "typeId": "core.flow.if@1.0.0", "name": "Confident?", "position": { "x": 560, "y": 80 }, "config": {"predicate": {"path": "", "op": "contains", "value": "CONFIDENCE: high"}}, "inputs": {} },
+          { "id": "deliver", "typeId": "feature.notifications.nodes.notify@1.0.0", "name": "Deliver answer", "position": { "x": 840, "y": 0 }, "config": { "audience": "tenant" }, "inputs": { "title": "Knowledge-Base Support Agent" } },
+          { "id": "approveEscalation", "typeId": "core.chat.approvalGate@1.1.0", "name": "Approve escalation", "position": { "x": 840, "y": 160 }, "config": { "title": "Approve escalating this low-confidence answer" }, "inputs": {} },
+          { "id": "escalate", "typeId": "core.openwop.integration.slack-message@1.0.0", "name": "Escalate to Slack", "position": { "x": 1120, "y": 160 }, "config": { "channel": "{{params.escalationChannel}}" }, "inputs": {} }
         ],
         "edges": [
           { "from": "retrieve.augmentedPrompt", "to": "answer.prompt" },
@@ -57,7 +57,7 @@
     },
     {
       "chainId": "support.email-triage",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "Support Email Triage & Reply Draft",
       "description": "Classify an inbound support email (intent, urgency, suggested queue) and draft a reply INTO YOUR DRAFTS FOLDER — this workflow creates a draft and never sends; you review and send from your own mailbox. The draft is the human gate.",
       "parameters": {
@@ -74,16 +74,16 @@
       "capabilities": ["side-effectful"],
       "dag": {
         "nodes": [
-          { "id": "classify", "typeId": "core.ai.chatCompletion", "name": "Classify intent & urgency", "position": { "x": 0, "y": 0 }, "config": { "systemPrompt": "You are a support triage specialist. Classify this inbound email: intent (question / bug / billing / refund / feedback / other), urgency (low / normal / high), and the suggested queue. Then outline the key points a reply must address. Email: {{params.emailText}}",
+          { "id": "classify", "typeId": "core.ai.chatCompletion@1.0.0", "name": "Classify intent & urgency", "position": { "x": 0, "y": 0 }, "config": { "systemPrompt": "You are a support triage specialist. Classify this inbound email: intent (question / bug / billing / refund / feedback / other), urgency (low / normal / high), and the suggested queue. Then outline the key points a reply must address. Email: {{params.emailText}}",
             "provider": "{{params.provider}}",
             "model": "{{params.model}}"
           }, "inputs": {} },
-          { "id": "draft", "typeId": "core.ai.chatCompletion", "name": "Compose reply text", "position": { "x": 280, "y": 0 }, "config": { "systemPrompt": "Write a {{params.replyTone}} reply to the customer email, addressing every key point from the triage. Do not invent policy or promises — where information is missing, say the team will follow up.",
+          { "id": "draft", "typeId": "core.ai.chatCompletion@1.0.0", "name": "Compose reply text", "position": { "x": 280, "y": 0 }, "config": { "systemPrompt": "Write a {{params.replyTone}} reply to the customer email, addressing every key point from the triage. Do not invent policy or promises — where information is missing, say the team will follow up.",
             "provider": "{{params.provider}}",
             "model": "{{params.model}}"
           }, "inputs": {} },
-          { "id": "toDrafts", "typeId": "core.email.draft", "name": "Save to Drafts (never sends)", "position": { "x": 560, "y": 0 }, "config": {}, "inputs": {} },
-          { "id": "notify", "typeId": "feature.notifications.nodes.notify", "name": "Notify: draft ready", "position": { "x": 840, "y": 0 }, "config": { "audience": "tenant" }, "inputs": { "title": "Support Email Triage & Reply Draft" } }
+          { "id": "toDrafts", "typeId": "core.email.draft@1.0.0", "name": "Save to Drafts (never sends)", "position": { "x": 560, "y": 0 }, "config": {}, "inputs": {} },
+          { "id": "notify", "typeId": "feature.notifications.nodes.notify@1.0.0", "name": "Notify: draft ready", "position": { "x": 840, "y": 0 }, "config": { "audience": "tenant" }, "inputs": { "title": "Support Email Triage & Reply Draft" } }
         ],
         "edges": [
           { "from": "classify", "to": "draft" },
@@ -97,7 +97,7 @@
     },
     {
       "chainId": "support.ticket-routing",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "Customer Ticket Routing & Prioritization",
       "description": "Classify an inbound customer request (team, priority, first-response suggestion), create a ticket in your ticketing system, and notify the owning queue. Customer-support routing — for IT incident severity routing use the IT pack's Incident Triage.",
       "parameters": {
@@ -115,12 +115,12 @@
       "capabilities": ["side-effectful"],
       "dag": {
         "nodes": [
-          { "id": "classify", "typeId": "core.ai.chatCompletion", "name": "Classify team & priority", "position": { "x": 0, "y": 0 }, "config": { "systemPrompt": "You are a support-ops router. For this customer request, decide: owning team (billing / technical / account / product), priority (P1–P4 with rationale), and a one-line first-response suggestion. Request: {{params.requestText}}",
+          { "id": "classify", "typeId": "core.ai.chatCompletion@1.0.0", "name": "Classify team & priority", "position": { "x": 0, "y": 0 }, "config": { "systemPrompt": "You are a support-ops router. For this customer request, decide: owning team (billing / technical / account / product), priority (P1–P4 with rationale), and a one-line first-response suggestion. Request: {{params.requestText}}",
             "provider": "{{params.provider}}",
             "model": "{{params.model}}"
           }, "inputs": {} },
-          { "id": "ticket", "typeId": "core.openwop.connectors.ticket-create", "name": "Create ticket", "position": { "x": 280, "y": 0 }, "config": { "baseUrl": "{{params.ticketingBaseUrl}}", "project": "{{params.ticketProject}}", "summary": "Customer request: {{params.requestText}}" }, "inputs": {} },
-          { "id": "notify", "typeId": "feature.notifications.nodes.notify", "name": "Notify owning queue", "position": { "x": 560, "y": 0 }, "config": { "audience": "tenant" }, "inputs": { "title": "Customer Ticket Routing & Prioritization" } }
+          { "id": "ticket", "typeId": "core.openwop.connectors.ticket-create@1.0.0", "name": "Create ticket", "position": { "x": 280, "y": 0 }, "config": { "baseUrl": "{{params.ticketingBaseUrl}}", "project": "{{params.ticketProject}}", "summary": "Customer request: {{params.requestText}}" }, "inputs": {} },
+          { "id": "notify", "typeId": "feature.notifications.nodes.notify@1.0.0", "name": "Notify owning queue", "position": { "x": 560, "y": 0 }, "config": { "audience": "tenant" }, "inputs": { "title": "Customer Ticket Routing & Prioritization" } }
         ],
         "edges": [
           { "from": "classify", "to": "ticket" },
@@ -133,7 +133,7 @@
     },
     {
       "chainId": "support.sentiment-escalation",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "label": "Sentiment & Brand-Risk Watch",
       "description": "Score an inbound message (review, social mention, reply) for sentiment and brand risk. Normal messages are logged as a notification; high-risk ones route to a human-approved Slack escalation. A watch on what customers say ABOUT you — inbox triage lives in Support Email Triage.",
       "parameters": {
@@ -150,14 +150,14 @@
       "capabilities": ["side-effectful"],
       "dag": {
         "nodes": [
-          { "id": "score", "typeId": "core.ai.chatCompletion", "name": "Score sentiment & risk", "position": { "x": 0, "y": 80 }, "config": { "systemPrompt": "You are a CX analyst. Score this message: sentiment (positive / neutral / negative), brand risk (none / low / high — high means churn threat, public escalation, legal or safety language), and the single best next action. Message: {{params.message}}",
+          { "id": "score", "typeId": "core.ai.chatCompletion@1.0.0", "name": "Score sentiment & risk", "position": { "x": 0, "y": 80 }, "config": { "systemPrompt": "You are a CX analyst. Score this message: sentiment (positive / neutral / negative), brand risk (none / low / high — high means churn threat, public escalation, legal or safety language), and the single best next action. Message: {{params.message}}",
             "provider": "{{params.provider}}",
             "model": "{{params.model}}"
           }, "inputs": {} },
-          { "id": "route", "typeId": "core.flow.if", "name": "High risk?", "position": { "x": 280, "y": 80 }, "config": {"predicate": {"path": "", "op": "contains", "value": "BRAND RISK: high"}}, "inputs": {} },
-          { "id": "log", "typeId": "feature.notifications.nodes.notify", "name": "Log assessment", "position": { "x": 560, "y": 0 }, "config": { "audience": "tenant" }, "inputs": { "title": "Sentiment & Brand-Risk Watch" } },
-          { "id": "approveEscalation", "typeId": "core.chat.approvalGate", "name": "Approve escalation", "position": { "x": 560, "y": 160 }, "config": { "title": "Approve escalating this high-risk message" }, "inputs": {} },
-          { "id": "escalate", "typeId": "core.openwop.integration.slack-message", "name": "Escalate to Slack", "position": { "x": 840, "y": 160 }, "config": { "channel": "{{params.escalationChannel}}" }, "inputs": {} }
+          { "id": "route", "typeId": "core.flow.if@1.0.0", "name": "High risk?", "position": { "x": 280, "y": 80 }, "config": {"predicate": {"path": "", "op": "contains", "value": "BRAND RISK: high"}}, "inputs": {} },
+          { "id": "log", "typeId": "feature.notifications.nodes.notify@1.0.0", "name": "Log assessment", "position": { "x": 560, "y": 0 }, "config": { "audience": "tenant" }, "inputs": { "title": "Sentiment & Brand-Risk Watch" } },
+          { "id": "approveEscalation", "typeId": "core.chat.approvalGate@1.1.0", "name": "Approve escalation", "position": { "x": 560, "y": 160 }, "config": { "title": "Approve escalating this high-risk message" }, "inputs": {} },
+          { "id": "escalate", "typeId": "core.openwop.integration.slack-message@1.0.0", "name": "Escalate to Slack", "position": { "x": 840, "y": 160 }, "config": { "channel": "{{params.escalationChannel}}" }, "inputs": {} }
         ],
         "edges": [
           { "from": "score.content", "to": "route.value" },
@@ -172,7 +172,7 @@
     },
     {
       "chainId": "support.csat-followup",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "CSAT Follow-up Survey",
       "description": "After a ticket resolves, draft a short personalized customer-satisfaction (CSAT) survey email and send it — behind a human approval. When a low score comes back later, run Customer Ticket Routing on it to open a manager review.",
       "parameters": {
@@ -191,13 +191,13 @@
       "capabilities": ["side-effectful"],
       "dag": {
         "nodes": [
-          { "id": "draft", "typeId": "core.ai.chatCompletion", "name": "Draft CSAT email", "position": { "x": 0, "y": 0 }, "config": { "systemPrompt": "Draft a short, warm satisfaction-survey email referencing this resolved ticket. Ask for a 1–5 rating and one sentence of feedback. Keep it under 120 words. Resolution: {{params.resolutionSummary}}",
+          { "id": "draft", "typeId": "core.ai.chatCompletion@1.0.0", "name": "Draft CSAT email", "position": { "x": 0, "y": 0 }, "config": { "systemPrompt": "Draft a short, warm satisfaction-survey email referencing this resolved ticket. Ask for a 1–5 rating and one sentence of feedback. Keep it under 120 words. Resolution: {{params.resolutionSummary}}",
             "provider": "{{params.provider}}",
             "model": "{{params.model}}"
           }, "inputs": {} },
-          { "id": "approve", "typeId": "core.chat.approvalGate", "name": "Approve before send", "position": { "x": 280, "y": 0 }, "config": { "title": "Approve this CSAT survey before it is sent", "artifactType": "email.body", "actions": ["approve", "reject"] }, "inputs": {} },
-          { "id": "gate-reject", "typeId": "core.flow.noop", "name": "Rejected — no survey sent", "position": { "x": 560, "y": 160 }, "config": {}, "inputs": {} },
-          { "id": "send", "typeId": "core.openwop.integration.email-send", "name": "Send survey", "position": { "x": 560, "y": 0 }, "config": {
+          { "id": "approve", "typeId": "core.chat.approvalGate@1.1.0", "name": "Approve before send", "position": { "x": 280, "y": 0 }, "config": { "title": "Approve this CSAT survey before it is sent", "artifactType": "email.body", "actions": ["approve", "reject"] }, "inputs": {} },
+          { "id": "gate-reject", "typeId": "core.flow.noop@1.0.0", "name": "Rejected — no survey sent", "position": { "x": 560, "y": 160 }, "config": {}, "inputs": {} },
+          { "id": "send", "typeId": "core.openwop.integration.email-send@1.0.0", "name": "Send survey", "position": { "x": 560, "y": 0 }, "config": {
             "from": "{{params.senderEmail}}"
           }, "inputs": {
             "to": "{{params.recipientEmail}}",

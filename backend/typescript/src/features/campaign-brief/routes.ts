@@ -78,7 +78,7 @@ async function readablePersonas(req: Request, orgId?: string, brandId?: string):
 
 export function registerCampaignBriefRoutes(deps: RouteDeps): void {
   const { app } = deps;
-  const BASE = '/v1/host/openwop-app/campaign-brief';
+  const BASE = '/host/openwop-app/campaign-brief';
 
   // ── static vocabulary ──
   app.get(`${BASE}/buyer-stages`, async (req, res, next) => {

@@ -15,21 +15,22 @@ import { listFormTemplateEntries, getFormTemplateEntry } from '../../host/formCo
 import { createLogger } from '../../observability/logger.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
 import { runSubmitGuards } from './submitGuards.js';
+import { overSubmitBurst } from './submitBurst.js';
 // Cross-feature (ADR 0226): the identity link is written through its owning
 // analytics service, gated by the ONE consent helper (the beacon's own gate).
 import { linkSession } from '../analytics/identityLinkService.js';
-import { isAllowed } from '../consent/consentService.js';
+import { analyticsConsentAllows, visitorConsentContextOf, type VisitorConsentContext } from '../analytics/consentGate.js';
 import {
   listForms, getForm, createForm, updateForm, setFormStatus, deleteForm,
   listSubmissions, listSubmissionsPage, getPublishedForm, validateValues, recordSubmission,
-  deleteSubmission, submissionStatsOf, HONEYPOT_FIELD, type FormStatus, type Submission,
+  deleteSubmission, releaseSubmission, submissionStatsOf, HONEYPOT_FIELD, type FormStatus, type Submission,
 } from './formsService.js';
 
 const FEATURE = { toggleId: 'forms', label: 'Forms' };
-const ORG = '/v1/host/openwop-app/forms/orgs/:orgId';
+const ORG = '/host/openwop-app/forms/orgs/:orgId';
 
 const capLog = createLogger('forms.capture');
-const PUB = '/v1/host/openwop-app/public-forms';
+const PUB = '/host/openwop-app/public-forms';
 
 /** FORM-2 — the per-string cap on public `meta`, matched to the analytics
  *  beacon's `MAX_STR` (`analytics/analyticsService.ts`) so the two public write
@@ -104,6 +105,8 @@ export function registerFormsRoutes(deps: RouteDeps): void {
         title: requireString(body.title, 'title'),
         fields: body.fields ?? [],
         createToContact: body.createToContact === true,
+        // ADR 0850 D1 — opt-in per form; anything but `true` is off.
+        createTicket: body.createTicket === true,
         ...(body.emailOptInField !== undefined ? { emailOptInField: body.emailOptInField } : {}),
         ...(submitMessage ? { submitMessage } : {}),
         ...(body.intakeBinding !== undefined ? { intakeBinding: body.intakeBinding } : {}),
@@ -133,10 +136,11 @@ export function registerFormsRoutes(deps: RouteDeps): void {
     try {
       const { orgId, tenantId } = await authz(req, 'workspace:write');
       const body = (req.body ?? {}) as Record<string, unknown>;
-      const patch: { title?: string; fields?: unknown; createToContact?: boolean; emailOptInField?: unknown; submitMessage?: string; intakeBinding?: unknown } = {};
+      const patch: { title?: string; fields?: unknown; createToContact?: boolean; createTicket?: boolean; emailOptInField?: unknown; submitMessage?: string; intakeBinding?: unknown } = {};
       if (typeof body.title === 'string') patch.title = body.title;
       if (body.fields !== undefined) patch.fields = body.fields;
       if (typeof body.createToContact === 'boolean') patch.createToContact = body.createToContact;
+      if (typeof body.createTicket === 'boolean') patch.createTicket = body.createTicket; // ADR 0850 D1
       if (typeof body.submitMessage === 'string') patch.submitMessage = body.submitMessage;
       if (body.intakeBinding !== undefined) patch.intakeBinding = body.intakeBinding; // object sets, null clears (ADR 0246)
       if (body.emailOptInField !== undefined) patch.emailOptInField = body.emailOptInField; // string sets, null/'' clears (ADR 0338)
@@ -205,6 +209,20 @@ export function registerFormsRoutes(deps: RouteDeps): void {
       // the same non-probe posture the read above takes.
       if (!ok) throw new OpenwopError('not_found', 'Submission not found.', 404, { submissionId: req.params.submissionId });
       res.status(204).end();
+    } catch (err) { next(err); }
+  });
+
+  // ADR 0850 D3 — release ONE held submission: the recovery ADR 0584's
+  // quarantine promised and no path offered. `workspace:write`, the same tier as
+  // Discard; `releasedBy` is the user this gate authorized (never a second
+  // caller resolution — ADR 0839). A miss is the same uniform 404 as the delete.
+  app.post(`${ORG}/forms/:formId/submissions/:submissionId/release`, async (req, res, next) => {
+    try {
+      const { user, orgId, tenantId } = await authz(req, 'workspace:write');
+      const form = await getForm(tenantId, orgId, req.params.formId);
+      const result = form ? await releaseSubmission(form, req.params.submissionId, user.userId) : null;
+      if (!result) throw new OpenwopError('not_found', 'Submission not found.', 404, { submissionId: req.params.submissionId });
+      res.json(result);
     } catch (err) { next(err); }
   });
 
@@ -300,23 +318,54 @@ export function registerFormsRoutes(deps: RouteDeps): void {
       // providers, which have real false-positive rates, so "deny ⇒ discard the
       // lead and say thank-you" was the worst possible default here.
       const guardAllowed = hpFilled || (await runSubmitGuards(form, values, meta));
-      const flagged: Submission['flagged'] | undefined = hpFilled ? 'honeypot' : guardAllowed ? undefined : 'guard';
+      let flagged: Submission['flagged'] | undefined = hpFilled ? 'honeypot' : guardAllowed ? undefined : 'guard';
       if (flagged) capLog.warn(flagged === 'honeypot' ? 'honeypot_dropped' : 'guard_denied', { formId: form.formId, tenantId: form.tenantId });
       const clean = validateValues(form, values);
+      // ADR 0850 D5 — the per-form burst ceiling, judged only for a submission
+      // that would otherwise be CLEAN, and AFTER validation (an invalid body is a
+      // 400 and never counts). Over it, the row is quarantined, not refused.
+      if (!flagged && overSubmitBurst(form.formId)) {
+        flagged = 'burst';
+        capLog.warn('submit_burst_held', { formId: form.formId, tenantId: form.tenantId });
+      }
       // FRMB-IDEM — optional at-most-once key (bounded, opaque); absent keeps
       // the legacy always-append shape.
       const clientKey = typeof body.clientKey === 'string' && body.clientKey.length > 0 && body.clientKey.length <= 128 ? body.clientKey : undefined;
-      const submission = await recordSubmission(form, clean, meta, clientKey, flagged);
-      // D4 (ADR 0226): deterministic session↔contact link — only when a session
-      // key was supplied AND a contact was actually created/matched AND the
-      // analytics consent gate passes (mirrors the beacon's own gate). BEST-
-      // EFFORT: a link failure never fails the submit (the lead is captured).
+      // ADR 0860 D3 — the visitor's consent context, resolved ONCE and handed to
+      // the sinks transiently (never persisted). An invalid `consentToken` must not
+      // fail the capture: the sinks get `visitorConsent: null`, which each treats as
+      // NOT consented, no link is written, and the refusal is logged below.
+      let visitorConsent: VisitorConsentContext | undefined;
+      let tokenRefusal: string | undefined;
+      try { visitorConsent = visitorConsentContextOf(req, form.tenantId, body.consentToken); }
+      catch (err) { tokenRefusal = err instanceof OpenwopError ? err.code : 'error'; }
+      const submission = await recordSubmission(form, clean, meta, clientKey, flagged, { visitorConsent: visitorConsent ?? null });
+      // D4 (ADR 0226): deterministic session↔contact link. BEST-EFFORT: a link
+      // failure never fails the submit (the lead is captured).
+      //
+      // ADR 0860 D7 — only for a contact THIS submission CREATED. An email that
+      // matches an existing contact is an attach (ADR 0627 D6), and anyone can type
+      // Bob's email: linking there would attach the submitter's browsing to Bob.
+      // The existing contact still gets a timeline activity (the CRM sink); the
+      // verified re-identification lane is the signed email click (ADR 0651 D1).
+      // A `clientKey` replay returns the stored row, so the link also requires the
+      // request's key to be the one that row was captured with (architect M5).
       if (sessionKey && submission.contactId) {
-        try {
-          if (await isAllowed(form.tenantId, sessionKey, 'analytics')) {
-            await linkSession(form.tenantId, sessionKey, submission.contactId, 'form-submit');
+        const skip = (reason: string): void => capLog.info('forms_identity_link_skipped', { tenantId: form.tenantId, formId: form.formId, reason });
+        if (!visitorConsent) skip(tokenRefusal ?? 'error');
+        else if (submission.contactCreated !== true) skip('existing_contact');
+        else if (submission.meta.sessionKey !== sessionKey) skip('replayed_submission');
+        else {
+          try {
+            // ADR 0857 D3 — the SAME decision the beacon makes (one helper).
+            if (await analyticsConsentAllows(form.tenantId, sessionKey, visitorConsent)) {
+              await linkSession(form.tenantId, sessionKey, submission.contactId, 'form-submit');
+            }
+          } catch (err) {
+            // Best-effort — the submission is already durable. Logged (review L1).
+            skip(err instanceof OpenwopError ? err.code : 'error');
           }
-        } catch { /* best-effort — submission already durable */ }
+        }
       }
       res.status(201).json({ ok: true, submissionId: submission.submissionId, ...(form.submitMessage ? { message: form.submitMessage } : {}) });
     } catch (err) { next(err); }

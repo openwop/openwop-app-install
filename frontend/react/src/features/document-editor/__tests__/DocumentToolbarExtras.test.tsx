@@ -22,7 +22,7 @@ describe('DocumentToolbarExtras — AI assist deep-link', () => {
   it('navigates to the document-author agent in the existing chat', () => {
     render(<DocumentToolbarExtras orgId="o1" canvasId="c1" docName="Doc" dirty={false} />);
     fireEvent.click(screen.getByRole('button', { name: 'aiAssist' }));
-    expect(navSpy).toHaveBeenCalledWith('/?agent=feature.documents.agents.document-author');
+    expect(navSpy).toHaveBeenCalledWith('/?agent=vendor.openwop-app.documents.agents.document-author');
   });
 
   it('renders AI + Comments + Copy + Download actions', () => {

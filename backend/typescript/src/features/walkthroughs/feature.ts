@@ -116,7 +116,7 @@ export function registerWalkthroughWorkflows(): void {
 
 export const walkthroughsFeature: BackendFeature = {
   id: 'walkthroughs',
-  requiredPacks: [{ name: 'feature.walkthroughs.nodes', version: '1.0.0' }], // NP-WALK-1 (ctx reads; the ui.walkthrough.* step nodes stay host-registered by design)
+  requiredPacks: [{ name: 'feature.walkthroughs.nodes', version: '1.0.1' }], // NP-WALK-1 (ctx reads; the ui.walkthrough.* step nodes stay host-registered by design)
   // ADR 0368 P6d — the honest `ctx.features.walkthroughs` READ surface (no
   // launch; a run can read walkthrough state to gate a branch). Toggle-gated by the
   // feature registry (surface id = toggle id).
@@ -126,7 +126,7 @@ export const walkthroughsFeature: BackendFeature = {
     registerWalkthroughWorkflows();
     registerWalkthroughAuthorTool();
 
-    app.get('/v1/host/openwop-app/walkthroughs/progress', (req, res, next) => {
+    app.get('/host/openwop-app/walkthroughs/progress', (req, res, next) => {
       void (async () => {
         try {
           await requireFeatureEnabled(req, 'walkthroughs', 'Walkthroughs');
@@ -138,7 +138,7 @@ export const walkthroughsFeature: BackendFeature = {
       })();
     });
 
-    app.post('/v1/host/openwop-app/walkthroughs/progress', (req, res, next) => {
+    app.post('/host/openwop-app/walkthroughs/progress', (req, res, next) => {
       void (async () => {
         try {
           await requireFeatureEnabled(req, 'walkthroughs', 'Walkthroughs');
@@ -171,7 +171,7 @@ export const walkthroughsFeature: BackendFeature = {
     // is where that run stalled. The ADR 0371 retention window (default 30d)
     // bounds the horizon; the FE states that honestly. On-demand only (the
     // page never fans this out per row — the per-IP rate-limit gotcha).
-    app.get('/v1/host/openwop-app/walkthroughs/funnel', (req, res, next) => {
+    app.get('/host/openwop-app/walkthroughs/funnel', (req, res, next) => {
       void (async () => {
         try {
           await requireFeatureEnabled(req, 'walkthroughs', 'Walkthroughs');
@@ -279,7 +279,7 @@ export const walkthroughsFeature: BackendFeature = {
     id: 'walkthroughs',
     label: 'Guided walkthroughs',
     description:
-      'Watchable click-through automation: Play drives the app through a real multi-step flow — an animated cursor performs each step while a caption narrates — pausing for human-in-the-loop steps (like choosing a file) and resuming when you act. Walkthroughs are ordinary workflows; every run is durable and replayable. OFF by default.',
+      'Watchable click-through automation: Play drives the app through a real multi-step flow — an animated cursor performs each step while a caption narrates — pausing for human-in-the-loop steps (like choosing a file) and resuming when you act. Walkthroughs are ordinary workflows; every run is durable and replayable.',
     category: 'Platform',
     status: 'off',
     bucketUnit: 'tenant',

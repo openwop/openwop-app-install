@@ -35,7 +35,7 @@ export const kicktodoIntegrationsFeature: BackendFeature = {
     id: 'kicktodo-integrations',
     label: 'KickTodo Integrations',
     description:
-      'Calendar feed/write, wearable evidence, and messaging reminders — each an explicit, revocable consent over a Connection (ADR 0421).',
+      'Calendar feed/write, wearable evidence, and messaging reminders — each an explicit, revocable consent over a Connection.',
     category: 'KickTodo',
     status: 'off',
     bucketUnit: 'tenant',
@@ -44,6 +44,6 @@ export const kicktodoIntegrationsFeature: BackendFeature = {
   dependsOn: ['kicktodo-core'],
   // The pack's calendar-sync / remind-today / list-consents nodes consume this
   // surface — pin it here, not only transitively via kicktodo-core (NP-KT-3).
-  requiredPacks: [{ name: 'feature.kicktodo.nodes', version: '1.30.0' }],
+  requiredPacks: [{ name: 'feature.kicktodo.nodes', version: '1.30.3' }],
   surface: { id: 'kicktodo-integrations', build: buildKicktodoIntegrationsSurface }, // ADR 0421 P5
 };

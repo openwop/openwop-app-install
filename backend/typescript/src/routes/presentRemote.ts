@@ -31,7 +31,7 @@ const notFound = (res: Response): void => {
 const ACTIONS = new Set(['next', 'prev', 'goto', 'blank']);
 
 export function registerPresentRemoteRoutes(app: Express): void {
-  app.get('/v1/host/openwop-app/present/:token/outline', async (req: Request, res: Response) => {
+  app.get('/host/openwop-app/present/:token/outline', async (req: Request, res: Response) => {
     const claims = verifyPresentRemoteToken(req.params.token ?? '');
     if (!claims) { notFound(res); return; }
     const canvas = await getCanvasForTenant(claims.tenantId, claims.canvasId);
@@ -40,7 +40,7 @@ export function registerPresentRemoteRoutes(app: Express): void {
     res.json(outline);
   });
 
-  app.post('/v1/host/openwop-app/present/:token/command', async (req: Request, res: Response) => {
+  app.post('/host/openwop-app/present/:token/command', async (req: Request, res: Response) => {
     const claims = verifyPresentRemoteToken(req.params.token ?? '');
     if (!claims) { notFound(res); return; }
     const body = (req.body ?? {}) as { action?: unknown; index?: unknown };
@@ -60,7 +60,7 @@ export function registerPresentRemoteRoutes(app: Express): void {
     res.status(202).json({ ok: true });
   });
 
-  app.post('/v1/host/openwop-app/present/:token/state', async (req: Request, res: Response) => {
+  app.post('/host/openwop-app/present/:token/state', async (req: Request, res: Response) => {
     const claims = verifyPresentRemoteToken(req.params.token ?? '');
     if (!claims) { notFound(res); return; }
     const body = (req.body ?? {}) as { current?: unknown };
@@ -72,7 +72,7 @@ export function registerPresentRemoteRoutes(app: Express): void {
     res.status(202).json({ ok: true });
   });
 
-  app.get('/v1/host/openwop-app/present/:token/events', async (req: Request, res: Response, next) => {
+  app.get('/host/openwop-app/present/:token/events', async (req: Request, res: Response, next) => {
     try {
       const claims = verifyPresentRemoteToken(req.params.token ?? '');
       if (!claims) { notFound(res); return; }

@@ -45,7 +45,7 @@ import { declarePiiFields } from '../../host/dataClassification.js';
 import { registerRetentionPurger, purgeRowsByAge } from '../../host/retentionPurger.js';
 import { registerSubjectEraser } from '../../host/subjectErasure.js';
 import { createLogger } from '../../observability/logger.js';
-import type { DocumentRecord, DocumentVersion, DocumentTemplate } from './documentsService.js';
+import { mutateDocument, type DocumentRecord, type DocumentVersion, type DocumentTemplate } from './documentsService.js';
 
 const log = createLogger('features.documents.erasure');
 
@@ -56,6 +56,8 @@ export const ERASED_SUBJECT = 'erased:subject';
 // Same collection names/keys as documentsService — this module reads and writes
 // the SAME rows. Kept here rather than exported from the service so the erasure
 // seam does not widen the service's public surface.
+// ADR 0838 A2 — the doc rows are READ here and written only through the
+// service's `mutateDocument`; a second writer would bypass its CAS.
 const docs = new DurableCollection<DocumentRecord>('documents:doc', (d) => d.documentId);
 const versions = new DurableCollection<DocumentVersion>('documents:version', (v) => v.versionId);
 const templates = new DurableCollection<DocumentTemplate>('documents:template', (t) => t.templateId);
@@ -74,28 +76,35 @@ export async function eraseDocumentSubject(tenantId: string, subjectKey: string)
 
   for (const d of await docs.list()) {
     if (d.tenantId !== tenantId) continue;
-    const ownedByThem = d.ownerSubject?.kind === 'user' && d.ownerSubject.id === subjectKey;
-    const authoredByThem = d.createdBy === subjectKey || d.updatedBy === subjectKey;
-    const producedByThem = d.provenance?.producedBy?.kind === 'user' && d.provenance.producedBy.id === subjectKey;
-    if (!ownedByThem && !authoredByThem && !producedByThem) continue;
-
-    const next: DocumentRecord = {
-      ...d,
-      ...(d.createdBy === subjectKey ? { createdBy: ERASED_SUBJECT } : {}),
-      ...(d.updatedBy === subjectKey ? { updatedBy: ERASED_SUBJECT } : {}),
-      ...(producedByThem
-        ? { provenance: { ...d.provenance, producedBy: { ...d.provenance.producedBy, id: ERASED_SUBJECT } } }
-        : {}),
-    };
-    if (ownedByThem) {
-      // Drop the ownership link AND unpublish: `SHAREABLE_STATUSES` is
-      // ['approved','final'], so leaving the status alone would keep the
-      // erased person's document on the public share surface.
-      delete (next as { ownerSubject?: unknown }).ownerSubject;
-      next.status = 'draft';
-    }
-    await docs.put(next);
-    touched += 1;
+    // ADR 0838 A2 — through the service's ONE CAS writer, re-evaluated on the
+    // fresh row, so an erasure never lands a stale row over a concurrent version
+    // pointer advance or approval pin.
+    let wrote = false;
+    await mutateDocument(d.documentId, (fresh) => {
+      wrote = false;
+      if (fresh.tenantId !== tenantId) return null;
+      const ownedByThem = fresh.ownerSubject?.kind === 'user' && fresh.ownerSubject.id === subjectKey;
+      const authoredByThem = fresh.createdBy === subjectKey || fresh.updatedBy === subjectKey;
+      const producedByThem = fresh.provenance?.producedBy?.kind === 'user' && fresh.provenance.producedBy.id === subjectKey;
+      if (!ownedByThem && !authoredByThem && !producedByThem) return null;
+      const next: DocumentRecord = {
+        ...fresh,
+        ...(fresh.createdBy === subjectKey ? { createdBy: ERASED_SUBJECT } : {}),
+        ...(fresh.updatedBy === subjectKey ? { updatedBy: ERASED_SUBJECT } : {}),
+        ...(producedByThem
+          ? { provenance: { ...fresh.provenance, producedBy: { ...fresh.provenance.producedBy, id: ERASED_SUBJECT } } }
+          : {}),
+      };
+      if (ownedByThem) {
+        delete (next as { ownerSubject?: unknown }).ownerSubject;
+        next.status = 'draft';
+        // ADR 0838 D2 — leaving the shareable statuses clears the pin.
+        delete (next as { approvedVersionId?: unknown }).approvedVersionId;
+      }
+      wrote = true;
+      return next;
+    });
+    if (wrote) touched += 1;
   }
 
   for (const v of await versions.list()) {
@@ -134,7 +143,9 @@ export function registerDocumentsErasure(): void {
     feature: 'documents',
     async purge(tenantId, classification, cutoffIso) {
       if (!tenantId || classification !== 'confidential-pii') return 0;
-      const current = new Set((await docs.list()).filter((d) => d.tenantId === tenantId).map((d) => d.currentVersionId).filter(Boolean));
+      // ADR 0838 D2 — the APPROVED version is live too: it is what the public
+      // share serves, so it never ages away while the pin holds it.
+      const current = new Set((await docs.list()).filter((d) => d.tenantId === tenantId).flatMap((d) => [d.currentVersionId, d.approvedVersionId]).filter(Boolean));
       const rows = (await versions.list()).filter((v) => v.tenantId === tenantId && !current.has(v.versionId));
       return purgeRowsByAge('documents', rows, tenantId, cutoffIso,
         (v) => ({ tenantId: v.tenantId, updatedAt: v.createdAt, id: v.versionId }),

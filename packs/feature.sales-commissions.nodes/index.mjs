@@ -2,7 +2,7 @@
  * feature.sales-commissions.nodes — Sales Commissions nodes (ADR 0280 / ADR 0014).
  *
  * Two role:"action" READ nodes (list-plans, list-statements) + two GOVERNED WRITE
- * nodes (compute-statement, approve-statement) over the `ctx.features.commissions`
+ * nodes (compute-statement, approve-statement) over the `ctx.features['sales-commissions']`
  * surface. The surface enforces the run owner's scope (host:commissions:manage for
  * writes; subject-scoping for statement reads); the write nodes are kept out of the
  * advisory agent's allowlist (ADR 0208 §2). tenantId comes from the run scope, never
@@ -11,11 +11,13 @@
 
 /** Resolve the commissions surface, or fail with the canonical capability error. */
 function ensure(ctx) {
-  const c = ctx.features && ctx.features.commissions;
+  // The surface id is the TOGGLE id (ADR 0820 G2), so the host's feature gate
+  // applies; the old `commissions` id matched no toggle and ran ungated.
+  const c = ctx.features && ctx.features['sales-commissions'];
   if (!c || typeof c.listPlans !== 'function') {
     throw Object.assign(
-      new Error('host does not expose ctx.features.commissions — the sales-commissions feature must be composed (ADR 0014)'),
-      { code: 'host_capability_missing', capability: 'host.sample.commissions' },
+      new Error('host does not expose ctx.features["sales-commissions"] — the sales-commissions feature must be composed (ADR 0014)'),
+      { code: 'host_capability_missing', capability: 'host.sample.sales-commissions' },
     );
   }
   return c;
@@ -48,7 +50,7 @@ export async function listStatements(ctx) {
 
 export async function computeStatement(ctx) {
   const c = ensure(ctx);
-  if (typeof c.computeStatement !== 'function') throw Object.assign(new Error('ctx.features.commissions.computeStatement not exposed'), { code: 'host_capability_missing', capability: 'host.sample.commissions' });
+  if (typeof c.computeStatement !== 'function') throw Object.assign(new Error('ctx.features["sales-commissions"].computeStatement not exposed'), { code: 'host_capability_missing', capability: 'host.sample.sales-commissions' });
   const i = args(ctx);
   const out = await c.computeStatement({ orgId: str(i.orgId), planId: str(i.planId), subjectId: str(i.subjectId), period: str(i.period) });
   return { status: 'success', outputs: { success: out.success ?? true, statement: out.statement ?? null } };
@@ -65,7 +67,7 @@ export async function computeStatement(ctx) {
  */
 export async function approveStatement(ctx) {
   const c = ensure(ctx);
-  if (typeof c.approveStatement !== 'function') throw Object.assign(new Error('ctx.features.commissions.approveStatement not exposed'), { code: 'host_capability_missing', capability: 'host.sample.commissions' });
+  if (typeof c.approveStatement !== 'function') throw Object.assign(new Error('ctx.features["sales-commissions"].approveStatement not exposed'), { code: 'host_capability_missing', capability: 'host.sample.sales-commissions' });
   const i = args(ctx);
   const out = await c.approveStatement({ orgId: str(i.orgId), statementId: str(i.statementId) });
   if (!out?.review?.approvalId) {

@@ -1,6 +1,6 @@
 /**
  * A8 end-to-end: the agent-eval grader seam over HTTP. Boots the real app via
- * createApp and exercises POST /v1/host/openwop-app/agents/eval-run:
+ * createApp and exercises POST /host/openwop-app/agents/eval-run:
  *   - 404 when the eval suite is disabled (honest gate, RFC 0081/0031)
  *   - 200 + a content-free EvalSummary when enabled (golden/rubric/schema)
  *   - 400 on a malformed envelope (length mismatch / missing arrays)
@@ -24,12 +24,12 @@ beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; URL = `${BASE}/v1/host/openwop-app/agents/eval-run`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; URL = `${BASE}/host/openwop-app/agents/eval-run`; res(); }); });
 });
 
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-describe('A8 — agent-eval grader seam (POST /v1/host/openwop-app/agents/eval-run)', () => {
+describe('A8 — agent-eval grader seam (POST /host/openwop-app/agents/eval-run)', () => {
   it('404s when the eval suite is disabled (honest gate)', async () => {
     delete process.env.OPENWOP_AGENT_EVAL_SUITE_ENABLED;
     const res = await fetch(URL, {

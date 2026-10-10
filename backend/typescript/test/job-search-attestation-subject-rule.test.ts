@@ -74,7 +74,7 @@ function client() {
 }
 
 async function signIn(c: ReturnType<typeof client>): Promise<string> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `att-${Date.now()}-${n++}@acme.test` });
+  const r = await c.post('/host/openwop-app/test/login', { email: `att-${Date.now()}-${n++}@acme.test` });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user.userId as string;
 }
@@ -84,11 +84,11 @@ describe('ADR 0544 matrix row 8 — inside a REAL shared workspace', () => {
     // ── the applicant: a real ws: workspace, entered through the switch route ──
     const owner = client();
     const ownerUserId = await signIn(owner);
-    const ws = await owner.post('/v1/host/openwop-app/workspaces', { name: `WS ${n++}` });
+    const ws = await owner.post('/host/openwop-app/workspaces', { name: `WS ${n++}` });
     expect(ws.status, JSON.stringify(ws.body)).toBe(201);
     const wsId = ws.body.workspaceId as string;
     expect(wsId, 'a personal tenant would make this test vacuous').toMatch(/^ws:/);
-    expect((await owner.post(`/v1/host/openwop-app/workspaces/${encodeURIComponent(wsId)}/switch`)).status).toBe(200);
+    expect((await owner.post(`/host/openwop-app/workspaces/${encodeURIComponent(wsId)}/switch`)).status).toBe(200);
 
     // The workspace IS an org (`createWorkspace` returns `ws.orgId` as the
     // workspaceId), and `isWorkspaceMember` matches on `tenantId === orgId ===
@@ -114,20 +114,20 @@ describe('ADR 0544 matrix row 8 — inside a REAL shared workspace', () => {
 
     // ADMIN specifically — matrix row 8 says the subject rule holds "never merely
     // org-admin", so the strongest non-owner role is the one worth refusing.
-    const added = await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, {
+    const added = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, {
       displayName: 'Colleague', subject: mateUserId, roles: ['admin'],
     });
     expect(added.status, `member add failed: ${JSON.stringify(added.body)}`).toBe(201);
-    expect((await mate.post(`/v1/host/openwop-app/workspaces/${encodeURIComponent(wsId)}/switch`)).status).toBe(200);
+    expect((await mate.post(`/host/openwop-app/workspaces/${encodeURIComponent(wsId)}/switch`)).status).toBe(200);
 
     // The premise, asserted rather than assumed: the colleague really is inside
     // the workspace and really can read it. Without this, a 403 below would be
     // indistinguishable from "was never admitted in the first place".
-    const readable = await mate.get(`/v1/host/openwop-app/job-search/orgs/${encodeURIComponent(orgId)}/attestations`);
+    const readable = await mate.get(`/host/openwop-app/job-search/orgs/${encodeURIComponent(orgId)}/attestations`);
     expect(readable.status, `the colleague must genuinely be inside: ${JSON.stringify(readable.body)}`).toBe(200);
 
     // ── the rule ──
-    const minted = await mate.post(`/v1/host/openwop-app/job-search/orgs/${encodeURIComponent(orgId)}/attestations`, {
+    const minted = await mate.post(`/host/openwop-app/job-search/orgs/${encodeURIComponent(orgId)}/attestations`, {
       dealId: 'deal:ws-1',
     });
     expect(
@@ -137,11 +137,11 @@ describe('ADR 0544 matrix row 8 — inside a REAL shared workspace', () => {
 
     // …and nothing was written. A refusal that still minted would be worse than
     // no refusal, because the applicant would never see it.
-    const after = await owner.get(`/v1/host/openwop-app/job-search/orgs/${encodeURIComponent(orgId)}/attestations`);
+    const after = await owner.get(`/host/openwop-app/job-search/orgs/${encodeURIComponent(orgId)}/attestations`);
     expect(after.body.attestations ?? []).toHaveLength(0);
 
     // ── and the applicant themselves is NOT locked out by the same rule ──
-    const own = await owner.post(`/v1/host/openwop-app/job-search/orgs/${encodeURIComponent(orgId)}/attestations`, {
+    const own = await owner.post(`/host/openwop-app/job-search/orgs/${encodeURIComponent(orgId)}/attestations`, {
       dealId: 'deal:ws-1',
     });
     expect(own.status, `the subject must still be able to attest: ${JSON.stringify(own.body)}`).toBe(201);

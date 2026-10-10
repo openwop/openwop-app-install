@@ -19,6 +19,14 @@
  * (b) asserts a deep-linked id is never silently substituted by the org's first
  * resource; (c) asserts an unknown type is NAMED rather than coerced; (d) asserts
  * a SECOND link while already on `/comments` re-seeds the page (CMNT-UX-4).
+ *
+ * SABOTAGE (witnessed, /grade-tests wave 10): restoring the `kb_collection ? … :
+ * 'cms_page'` coercion reds the four picker-less type cases and the unsupported-type
+ * cases; restoring the `opts[0]` substitution reds the FAILURE MODE case; keying the
+ * re-seed on `location.search` reds the SAME-link case; dropping the re-seed's
+ * `setResourceId` reds both CMNT-UX-4 cases; a no-op exit button reds the exit case.
+ * The "picker still wins" CONTROL ends in an absence `waitFor`, which no single
+ * realistic sabotage reds — it is kept as a control, not counted as a witness.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, waitFor, fireEvent } from '@testing-library/react';
@@ -39,8 +47,8 @@ vi.mock('../commentsClient.js', async (importOriginal) => {
 // ADR 0659 D7 (`CMNT-UX-20`) — the panel resolves the caller's org-scoped write
 // access. Mocked here so these cases stay about the read/write lanes they are
 // named for: the default is a member who CAN write, which is what the
-// assertions below assume. `commentsPanelAccess.test.tsx` drives the other arms.
-const orgAccess = vi.hoisted(() => ({ value: { roles: ['editor'], scopes: ['workspace:read', 'workspace:write'], basis: 'member' } as unknown }));
+// assertions below assume. `commentsPanelGoneAndAccess.test.tsx` § CMNT-UX-20 drives the other arms.
+const orgAccess = vi.hoisted(() => ({ value: ((): EffectiveAccess | null => ({ roles: ['editor'], scopes: ['workspace:read', 'workspace:write'], basis: 'member' }))() }));
 vi.mock('../../../client/useEffectiveAccess.js', async (importOriginal) => {
   const orig = await importOriginal<Record<string, unknown>>();
   return { ...orig, useOrgEffectiveAccess: () => orgAccess.value };
@@ -58,14 +66,15 @@ vi.mock('../../kb/kbClient.js', async (importOriginal) => {
 });
 
 import { CommentsPage } from '../CommentsPage.js';
-import { ALL_RESOURCE_TYPES, type ResourceType } from '../commentsClient.js';
+import { ALL_RESOURCE_TYPES, type Comment, type ResourceType } from '../commentsClient.js';
+import type { EffectiveAccess } from '../../../client/accessClient.js';
 
 const ORG = { orgId: 'org_1', name: 'Org One' };
 
 /**
  * The notification `actionUrl`, built exactly as the backend emitter builds it
  * (`features/comments/notifications.ts` `threadActionUrl` — a `URLSearchParams`
- * over `{orgId, resourceType, resourceId}`). `commentsNotificationActionUrl.test.ts`
+ * over `{orgId, resourceType, resourceId}`). `backend/typescript/test/comments-deep-link.test.ts`
  * on the backend pins that emitter to this same shape, so the two halves of the
  * round trip cannot drift apart silently.
  */
@@ -77,7 +86,7 @@ function view(search: string): void {
   render(<MemoryRouter initialEntries={[search]}><CommentsPage /></MemoryRouter>);
 }
 
-const comment = (id: string, body: string) => ({
+const comment = (id: string, body: string): Comment => ({
   commentId: id, orgId: ORG.orgId, resourceType: 'cms_page', resourceId: 'x',
   body, authorId: 'user_a', status: 'open', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
 });

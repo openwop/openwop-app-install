@@ -10,7 +10,7 @@ import { pathToFileURL } from 'node:url';
 
 const REPO_ROOT = join(__dirname, '..', '..', '..');
 const NODES_DIR = join(REPO_ROOT, 'packs', 'feature.territories.nodes');
-const AGENTS_DIR = join(REPO_ROOT, 'packs', 'feature.territories.agents');
+const AGENTS_DIR = join(REPO_ROOT, 'packs', 'vendor.openwop-app.territories.agents');
 
 interface NodesManifest { name: string; version: string; nodes: Array<{ typeId: string; role: string; version: string }>; runtime: { entry: string } }
 interface AgentsManifest { name: string; agents: Array<{ agentId: string; persona: string; toolAllowlist: string[] }> }
@@ -23,7 +23,7 @@ describe('feature.territories.nodes pack', () => {
     // R2 TER2-B3/review M3 — bumped when `set-quota`'s advertised inputs changed
     // (`currency` is required above zero, `repSplits` REPLACES). A pack that describes
     // a shape the host refuses is the same lie as a prompt that does.
-    expect(manifest.version).toBe('1.2.0');
+    expect(manifest.version).toBe('1.2.1');
     expect(manifest.nodes).toHaveLength(9);
     for (const n of manifest.nodes) expect(n.role, n.typeId).toBe('action');
     const ids = manifest.nodes.map((n) => n.typeId).sort();
@@ -78,13 +78,13 @@ describe('feature.territories.nodes pack', () => {
   });
 });
 
-describe('feature.territories.agents pack', () => {
+describe('vendor.openwop-app.territories.agents pack', () => {
   const manifest = JSON.parse(readFileSync(join(AGENTS_DIR, 'pack.json'), 'utf8')) as AgentsManifest;
 
   it('ships the advisory Territory Planner, tool-allowlisted to READ nodes only', () => {
     expect(manifest.agents).toHaveLength(1);
     const planner = manifest.agents[0];
-    expect(planner.agentId).toBe('feature.territories.agents.territory-planner');
+    expect(planner.agentId).toBe('vendor.openwop-app.territories.agents.territory-planner');
     expect(planner.persona).toBe('Territory Planner');
     // allowlist is exactly the 7 read nodes — no write/activate/quota-set tool
     expect(planner.toolAllowlist).toHaveLength(7);

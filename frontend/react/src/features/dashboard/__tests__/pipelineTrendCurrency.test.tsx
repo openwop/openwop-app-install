@@ -61,3 +61,12 @@ describe('pipeline trend tile — currency honesty', () => {
     expect(screen.queryByText(/mixed currencies/i)).toBeNull();
   });
 });
+
+describe('pipeline trend tile — ADR 0846 D4 withheld history', () => {
+  it('a territory-scoped viewer is told why there is no trend, not "no snapshots yet"', async () => {
+    getPipelineReport.mockResolvedValue({ ...report(['EUR']), snapshots: [], snapshotsWithheld: true });
+    await mount();
+    expect(screen.getByText(/outside your territories/i)).toBeTruthy();
+    expect(screen.queryByText(/No pipeline snapshots yet/i)).toBeNull();
+  });
+});

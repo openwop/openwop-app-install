@@ -47,10 +47,10 @@ function client() {
   return { get: (p: string) => call('GET', p), put: (p: string, b?: unknown) => call('PUT', p, b), post: (p: string, b?: unknown) => call('POST', p, b) };
 }
 async function signup(c: ReturnType<typeof client>): Promise<void> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `dash-${Date.now()}-${n++}@acme.test` });
+  const r = await c.post('/host/openwop-app/test/login', { email: `dash-${Date.now()}-${n++}@acme.test` });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
 }
-const LAYOUT = '/v1/host/openwop-app/dashboard/layout';
+const LAYOUT = '/host/openwop-app/dashboard/layout';
 
 describe('ADR 0375 — dashboard layout routes', () => {
   it('an un-logged-in caller is self-scoped to its own anon session (not denied, not shared)', async () => {
@@ -97,7 +97,7 @@ describe('ADR 0375 — dashboard layout routes', () => {
 
   it('note: GET-absent ⇒ { note: null }; PUT round-trips; self-scoped; cap enforced', async () => {
     const a = client(); await signup(a);
-    const NOTE = '/v1/host/openwop-app/dashboard/note';
+    const NOTE = '/host/openwop-app/dashboard/note';
     expect((await a.get(NOTE)).body.note).toBeNull();
     const put = await a.put(NOTE, { text: 'call the vendor tomorrow' });
     expect(put.status, JSON.stringify(put.body)).toBe(200);

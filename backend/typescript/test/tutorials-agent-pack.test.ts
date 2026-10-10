@@ -27,8 +27,8 @@ let BASE: string;
 let server: http.Server;
 const H = { authorization: 'Bearer dev-token', 'content-type': 'application/json' };
 // backend/typescript/test → repo root is three levels up.
-const PACK_DIR = join(import.meta.dirname, '..', '..', '..', 'packs', 'feature.tutorials.agents');
-const TUTOR = 'feature.tutorials.agents.tutor';
+const PACK_DIR = join(import.meta.dirname, '..', '..', '..', 'packs', 'vendor.openwop-app.tutorials.agents');
+const TUTOR = 'vendor.openwop-app.tutorials.agents.tutor';
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -42,7 +42,7 @@ afterAll(async () => { await new Promise<void>((res) => server.close(() => res()
 
 describe('ADR 0488 P6 — the Tutor agent pack', () => {
   it('surfaces in the live agent inventory under its published id', async () => {
-    const list = await (await fetch(`${BASE}/v1/agents`, { headers: H })).json() as {
+    const list = await (await fetch(`${BASE}/agents`, { headers: H })).json() as {
       agents?: Array<{ agentId?: string; label?: string }>;
     };
     const tutor = (list.agents ?? []).find((a) => a.agentId === TUTOR);
@@ -51,7 +51,7 @@ describe('ADR 0488 P6 — the Tutor agent pack', () => {
   });
 
   it('resolves with its system prompt at GET /v1/agents/{agentId}', async () => {
-    const res = await fetch(`${BASE}/v1/agents/${encodeURIComponent(TUTOR)}`, { headers: H });
+    const res = await fetch(`${BASE}/agents/${encodeURIComponent(TUTOR)}`, { headers: H });
     expect(res.status).toBe(200);
     expect(((await res.json()) as { agentId?: string }).agentId).toBe(TUTOR);
   });

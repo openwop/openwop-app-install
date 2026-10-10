@@ -43,15 +43,23 @@
  */
 
 import { getAgentRegistry } from '../executor/agentRegistry.js';
+import { VENDOR_ROOT } from '../middleware/protocolVersion.js';
 import {
-  A2A_SUPPORTED_VERSIONS,
   LEGACY_A2A_PROTOCOL_VERSION,
   advertisedA2AProtocolVersion,
+  servedA2AVersions,
   type A2AProtocolVersion,
 } from './a2aProfile.js';
 
-/** Where the JSON-RPC binding is mounted, relative to the backend origin. */
-export const A2A_JSONRPC_PATH = '/v1/host/openwop-app/a2a';
+/**
+ * Where the JSON-RPC binding is ADVERTISED, relative to the backend origin: the
+ * unversioned vendor path, which is served on both sides of the ADR 0669 cut.
+ * The card used to advertise the `/v1` twin, which answers 410 once v1
+ * retires, so every A2A peer following the card would have broken that day.
+ * Inbound, the `/v1` twin still works until then (`a2aInterfaceErrors.ts`
+ * matches both spellings).
+ */
+export const A2A_JSONRPC_PATH = `${VENDOR_ROOT}/a2a`;
 
 /**
  * The workflow an A2A 1.0 `SendMessage` starts (§D.1: "No `taskId` ⇒
@@ -145,14 +153,17 @@ export function buildA2aCard03(baseUrl: string): Record<string, unknown> {
 export function buildA2aCard10(baseUrl: string): Record<string, unknown> {
   const url = `${baseUrl}${A2A_JSONRPC_PATH}`;
   const preferred = advertisedA2AProtocolVersion();
+  // ADR 0858 P4 — the SERVED set (`servedA2AVersions`), so a major-2-only host
+  // does not list a 0.3 interface it refuses.
   const ordered: readonly A2AProtocolVersion[] = [
     preferred,
-    ...A2A_SUPPORTED_VERSIONS.filter((v) => v !== preferred),
+    ...servedA2AVersions().filter((v) => v !== preferred),
   ];
   return {
     name: 'openwop-reference-host',
-    description:
-      'OpenWOP reference workflow-engine host, exposed as an A2A 1.0 agent (RFC 0152 `a2a-1.0` profile) with the 0.3 legacy profile still served.',
+    description: ordered.includes(LEGACY_A2A_PROTOCOL_VERSION)
+      ? 'OpenWOP reference workflow-engine host, exposed as an A2A 1.0 agent (RFC 0152 `a2a-1.0` profile) with the 0.3 legacy profile still served.'
+      : 'OpenWOP reference workflow-engine host, exposed as an A2A 1.0 agent (`a2a-1.0` profile).',
     // The HOST's release identifier, not the A2A protocol version (§C).
     version: '1.0.0',
     supportedInterfaces: ordered.map((protocolVersion) => ({ url, protocolBinding: 'JSONRPC', protocolVersion })),

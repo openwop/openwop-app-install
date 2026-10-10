@@ -92,9 +92,9 @@ describe('CFP-1 — field-sales agent tools register into the builtin surface', 
       };
       return [...manifest.agents[0]!.toolAllowlist].sort();
     };
-    expect(packAllow('feature.territories.agents')).toEqual([...TERRITORY_TOOL_IDS].sort());
-    expect(packAllow('feature.dealers.agents')).toEqual([...DEALER_TOOL_IDS].sort());
-    expect(packAllow('feature.sales-commissions.agents')).toEqual([...COMMISSION_TOOL_IDS].sort());
+    expect(packAllow('vendor.openwop-app.territories.agents')).toEqual([...TERRITORY_TOOL_IDS].sort());
+    expect(packAllow('vendor.openwop-app.dealers.agents')).toEqual([...DEALER_TOOL_IDS].sort());
+    expect(packAllow('vendor.openwop-app.sales-commissions.agents')).toEqual([...COMMISSION_TOOL_IDS].sort());
   });
 });
 

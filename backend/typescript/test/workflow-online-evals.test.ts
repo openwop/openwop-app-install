@@ -9,12 +9,13 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
+import { bareRunId } from './support/bareRunId.js';
 
 describe('online evals (ADR 0480, sqlite memory app)', () => {
   let server: http.Server;
   let BASE: string;
   const TOKEN = 'dev-token';
-  const API = '/v1/host/openwop-app/workflows';
+  const API = '/host/openwop-app/workflows';
   const WF = 'online-wf-ok';
   const WF_FAIL = 'online-wf-fail';
 
@@ -29,7 +30,7 @@ describe('online evals (ADR 0480, sqlite memory app)', () => {
 
   async function settle(runId: string): Promise<string> {
     for (let i = 0; i < 200; i += 1) {
-      const r = await call<{ status: string }>('GET', `/v1/runs/${runId}`);
+      const r = await call<{ status: string }>('GET', `/runs/${runId}`);
       if (r.body.status && !['pending', 'running'].includes(r.body.status)) return r.body.status;
       await new Promise((res) => setTimeout(res, 25));
     }
@@ -75,7 +76,7 @@ describe('online evals (ADR 0480, sqlite memory app)', () => {
       online: { enabled: true, assertions: [{ kind: 'status', value: 'completed' }, { kind: 'node-completed', nodeId: 'a' }] },
     })).status).toBe(201);
 
-    const run = await call<{ runId: string }>('POST', '/v1/runs', { workflowId: WF, inputs: {} });
+    const run = await call<{ runId: string }>('POST', '/runs', { workflowId: WF, inputs: {} });
     expect(await settle(run.body.runId)).toBe('completed');
 
     const items = await pollBuckets(WF, 'inv', (it) => it.some((b) => (b.evaluated ?? 0) >= 1));
@@ -91,14 +92,14 @@ describe('online evals (ADR 0480, sqlite memory app)', () => {
       online: { enabled: true, assertions: [{ kind: 'status', value: 'completed' }, { kind: 'output-contains', value: 'never-there' }] },
     })).status).toBe(201);
 
-    const run = await call<{ runId: string }>('POST', '/v1/runs', { workflowId: WF_FAIL, inputs: {} });
+    const run = await call<{ runId: string }>('POST', '/runs', { workflowId: WF_FAIL, inputs: {} });
     expect(await settle(run.body.runId)).toBe('failed');
 
     const items = await pollBuckets(WF_FAIL, 'inv', (it) => it.some((b) => (b.failed ?? 0) >= 1));
     const today = items[items.length - 1] as unknown as { failed: number; failures: Array<{ runId: string; failedKinds: string[] }> };
     expect(today.failed).toBeGreaterThanOrEqual(1);
     expect(today.failures.length).toBeGreaterThanOrEqual(1);
-    expect(today.failures[today.failures.length - 1]!.runId).toBe(run.body.runId);
+    expect(today.failures[today.failures.length - 1]!.runId).toBe(bareRunId(run.body.runId));
     expect(today.failures[today.failures.length - 1]!.failedKinds).toContain('status');
     // The reference is OPAQUE: no output/detail strings ride the bucket.
     expect(JSON.stringify(today.failures)).not.toContain('expected status');
@@ -107,7 +108,7 @@ describe('online evals (ADR 0480, sqlite memory app)', () => {
   it('debug/eval/draft-launch runs never score (segmentation doctrine)', async () => {
     const before = await call<{ items: Array<{ evaluated: number }> }>('GET', `${API}/${WF}/eval-sets/inv/online`);
     const evaluatedBefore = before.body.items.reduce((a, b) => a + b.evaluated, 0);
-    const draft = await call<{ runId: string }>('POST', '/v1/runs', { workflowId: WF, inputs: {}, metadata: { launch: 'draft' } });
+    const draft = await call<{ runId: string }>('POST', '/runs', { workflowId: WF, inputs: {}, metadata: { launch: 'draft' } });
     expect(await settle(draft.body.runId)).toBe('completed');
     await new Promise((res) => setTimeout(res, 300)); // give a wrong impl time to score
     const after = await call<{ items: Array<{ evaluated: number }> }>('GET', `${API}/${WF}/eval-sets/inv/online`);
@@ -136,7 +137,7 @@ describe('online evals (ADR 0480, sqlite memory app)', () => {
         cases: [{ caseId: 'c1', assertions: [{ kind: 'status', value: 'completed' }] }],
         online: { enabled: true, judge: true, assertions: [{ kind: 'status', value: 'completed' }, { kind: 'llm-judge', criteria: 'is it fine?' }] },
       })).status).toBe(201);
-      const run = await call<{ runId: string }>('POST', '/v1/runs', { workflowId: WF, inputs: {} });
+      const run = await call<{ runId: string }>('POST', '/runs', { workflowId: WF, inputs: {} });
       expect(await settle(run.body.runId)).toBe('completed');
       const items = await pollBuckets(WF, 'judged', (it) => it.some((b) => (b.evaluated ?? 0) >= 1));
       const today = items[items.length - 1]!;
@@ -159,7 +160,7 @@ describe('online evals (ADR 0480, sqlite memory app)', () => {
       cases: [{ caseId: 'c1', assertions: [{ kind: 'status', value: 'completed' }] }],
       online: { enabled: true, sampleRate: 0.000001, assertions: [{ kind: 'status', value: 'completed' }] },
     })).status).toBe(201);
-    const run = await call<{ runId: string }>('POST', '/v1/runs', { workflowId: WF, inputs: {} });
+    const run = await call<{ runId: string }>('POST', '/runs', { workflowId: WF, inputs: {} });
     expect(await settle(run.body.runId)).toBe('completed');
     const items = await pollBuckets(WF, 'sampled', (it) => it.some((b) => ((b.sampledOut ?? 0) + (b.evaluated ?? 0)) >= 1));
     const today = items[items.length - 1]!;

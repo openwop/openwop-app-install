@@ -74,7 +74,7 @@ export const kicktodoCommerceFeature: BackendFeature = {
     id: 'kicktodo-commerce',
     label: 'KickTodo Commerce',
     description:
-      'Sell challenges: product links, per-buyer entitlements granted on verified payment, refund-driven revocation (ADR 0420). Money effects apply toggle-independently.',
+      'Sell challenges: product links, per-buyer entitlements granted on verified payment, refund-driven revocation. Money effects apply toggle-independently.',
     category: 'KickTodo',
     status: 'off',
     bucketUnit: 'tenant',
@@ -83,6 +83,6 @@ export const kicktodoCommerceFeature: BackendFeature = {
   dependsOn: ['kicktodo-core', 'commerce'],
   // The pack's entitlement-check / referral-code / seat-availability nodes consume
   // this surface — pin it here, not only transitively via kicktodo-core (NP-KT-3).
-  requiredPacks: [{ name: 'feature.kicktodo.nodes', version: '1.30.0' }],
+  requiredPacks: [{ name: 'feature.kicktodo.nodes', version: '1.30.3' }],
   surface: { id: 'kicktodo-commerce', build: buildKicktodoCommerceSurface }, // ADR 0420 P5
 };

@@ -67,13 +67,13 @@ const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.tes
 async function ownerWithOrg(who: string): Promise<{ c: Client; orgId: string; tenantId: string }> {
   const c = client();
   const tenantId = `t-${who}-${Date.now()}-${n++}`;
-  const login = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail(who), tenantId });
+  const login = await c.post('/host/openwop-app/test/login', { email: uniqEmail(who), tenantId });
   expect(login.status, JSON.stringify(login.body)).toBe(201);
-  const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   return { c, orgId: org.body.orgId, tenantId };
 }
 
-const NB = '/v1/host/openwop-app/notebooks';
+const NB = '/host/openwop-app/notebooks';
 const FELINE = 'Feline companions: cats groom themselves with their tongue and purr when content.';
 
 describe('agentKnowledgeComposition — generic extraContext is appended + fenced (T1)', () => {

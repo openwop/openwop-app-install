@@ -39,8 +39,8 @@ import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { createHostEventBinding, initHostEventDispatcher, type HostEventEnvelope } from '../src/host/hostEventDispatcher.js';
 import type { StartRunDeps } from '../src/host/runStarter.js';
 import { __hostExtStorage } from '../src/host/hostExtPersistence.js';
-import { __setHeadlessEmbedderForTest } from '../src/host/headlessAi.js';
-import { upsertAgentProfile } from '../src/host/agentProfileService.js';
+import { __setHeadlessEmbedderForTest, type HeadlessEmbedder } from '../src/host/headlessAi.js';
+import { upsertAgentProfile, type AgentProfileInput } from '../src/host/agentProfileService.js';
 import { buildAgentKnowledgeSurface } from '../src/features/agent-knowledge/surface.js';
 import type { BundleScope } from '../src/host/inMemorySurfaces.js';
 import { KB_EVENT_TYPES } from '../src/features/kb/emit.js';
@@ -56,7 +56,10 @@ let n = 0;
 
 let delivered: HostEventEnvelope[] = [];
 let startRunCalls: Array<{ tenantId: string; workflowId: string; metadata?: Record<string, unknown> }> = [];
-const settle = () => new Promise((r) => setTimeout(r, 25));
+// Every KB emit is AWAITED by its service call (`kbMutated` → `emitHostEvent`, which
+// awaits webhook delivery and each bound `startRun`), so nothing is pending once the
+// call returns; this microtask/IO drain is a belt, not a wait for a timer.
+const settle = async (): Promise<void> => { for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r)); };
 const ofType = (type: string, tenantId?: string) => delivered.filter((e) => e.type === type && (!tenantId || e.tenantId === tenantId));
 const kbEvents = (tenantId: string) => delivered.filter((e) => e.type.startsWith('host.kb.') && e.tenantId === tenantId);
 const INGESTED = 'host.kb.document.ingested';
@@ -66,10 +69,12 @@ const R_STARTED = 'host.kb.reindex.started';
 const R_COMPLETED = 'host.kb.reindex.completed';
 const R_FAILED = 'host.kb.reindex.failed';
 
-interface Res<T = Record<string, any>> { status: number; body: T }
+/** The response fields this file reads (login, org, collection, document, strategy, reindex-kb). */
+interface Body { user: { userId: string }; orgId: string; collectionId: string; documentId: string; id: string; processed: number }
+interface Res { status: number; body: Body }
 function client() {
   let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res<any>> => {
+  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, {
       method,
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
@@ -79,7 +84,8 @@ function client() {
     const single = res.headers.get('set-cookie');
     const setCookies: string[] = typeof h.getSetCookie === 'function' ? h.getSetCookie() : single ? [single] : [];
     for (const sc of setCookies) { const m = /(__session=[^;]+)/.exec(sc); if (m) cookie = m[1]!; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
+    const parsed: unknown = res.status === 204 ? {} : await res.json().catch(() => ({}));
+    return { status: res.status, body: parsed as Body };
   };
   return {
     get: (p: string) => call('GET', p),
@@ -91,17 +97,17 @@ type Client = ReturnType<typeof client>;
 
 async function signup(c: Client): Promise<{ userId: string; tenantId: string }> {
   const tenantId = `org:kb-ls-${Date.now()}-${n++}`;
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `kb-ls-${n++}@acme.test`, tenantId });
+  const r = await c.post('/host/openwop-app/test/login', { email: `kb-ls-${n++}@acme.test`, tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return { userId: r.body.user.userId, tenantId };
 }
 async function orgOf(c: Client): Promise<string> {
-  const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return org.body.orgId as string;
 }
-const KB = (orgId: string, suffix = ''): string => `/v1/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}${suffix}`;
-const S = '/v1/host/openwop-app/strategy';
+const KB = (orgId: string, suffix = ''): string => `/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}${suffix}`;
+const S = '/host/openwop-app/strategy';
 
 /** A deterministic fake provider embedder — no real credentials; its signature
  *  differs from the local floor so `startReindex` has work to do. */
@@ -119,10 +125,11 @@ beforeAll(async () => {
     const d = getToggleDefault(id);
     if (d) await saveConfig({ ...d, status: 'on' }, 'test');
   }
-  __setHeadlessEmbedderForTest(async () => ({
+  const embedder: HeadlessEmbedder = {
     provider: 'openai', model: 'text-embedding-3-small',
-    embed: async (texts: string[]) => texts.map((t) => { const v = new Array(256).fill(0); v[Math.abs(hash(t)) % 256] = 1; return v; }),
-  }) as never);
+    embed: async (texts: readonly string[]) => texts.map((t) => { const v = new Array<number>(256).fill(0); v[Math.abs(hash(t)) % 256] = 1; return v; }),
+  };
+  __setHeadlessEmbedderForTest(async () => embedder);
   // Re-point the REAL dispatcher's two fanouts at capture seams (the app's own
   // storage + hostSuite stay, so bindings + the self-trigger guard are real).
   initHostEventDispatcher({
@@ -325,12 +332,13 @@ describe('ADR 0617 D1a — the self-trigger guard on document.ingested', () => {
     const orgId = await orgOf(c);
     const col = await createCollection(tenantId, orgId, userId, { name: 'Bound' });
     const agentId = `agent-kb-${n++}`;
-    await upsertAgentProfile(tenantId, agentId, {
+    const profileInput: AgentProfileInput = {
       roleKey: 'kb-agent',
       autonomy: { level: 'review', specLevel: 'recommend' },
       capabilities: ['knowledge'],
       knowledge: { collectionIds: [col.collectionId] },
-    } as never);
+    };
+    await upsertAgentProfile(tenantId, agentId, profileInput);
     const binding = await createHostEventBinding({ tenantId, eventType: INGESTED, workflowId: 'wf-self-trigger', createdBy: userId });
     // Positive control: a SECOND workflow bound to the same event. If the
     // self-trigger row passed because nothing was dispatched at all, this one

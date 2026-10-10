@@ -104,7 +104,10 @@ describe('group-room scaffold notice (XCH-GRP-1)', () => {
     expect(src).toContain('const groupNotedScaffold = applyGroupRoomScaffoldNotice(scaffold, modelTier)');
     expect(src).toContain('groundingHonestyNotice(composed.degraded)');
     expect(src).toMatch(/const effectiveScaffold = groundingNotice \? `\$\{groupNotedScaffold\}/);
-    expect(src).toMatch(/turnsToMessages\(\[\.\.\.budgetedExisting, userTurn\], effectiveScaffold/);
+    // UPDATED by ADR 0764 D2: the windowed turns are merged with the conversation's
+    // `/slug` run pseudo-turns into `transcript` first; the scaffold threading this
+    // tripwire guards is unchanged.
+    expect(src).toMatch(/turnsToMessages\(\[\.\.\.transcript, userTurn\], effectiveScaffold/);
     expect(src).toMatch(/systemPrompt: effectiveScaffold/);
   });
 });

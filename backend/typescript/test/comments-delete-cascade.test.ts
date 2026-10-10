@@ -20,6 +20,20 @@
  * Every case carries BOTH arms: the deleted resource's thread is gone AND a
  * SIBLING resource's thread survives. A one-armed cascade test cannot tell a
  * correct cascade from one that deletes the whole tenant's comments.
+ *
+ * CORRECTION (/grade-tests wave 10). The "WHY IT MATTERS" paragraph above predates
+ * ADR 0659 D1: `listThread` now RESOLVES the target first and answers `null` when it
+ * is gone. That made every "the thread is gone" assertion here BLIND — it returns
+ * `null` because the PARENT was deleted, whether or not one comment row was pruned.
+ * MEASURED: disabling the cms / kb / list / idea cascade left this file green while
+ * the PII rows survived. Each case therefore ENDS with a raw-row count through
+ * `deleteSubjectComments` (it reads `rowsForTenant`, no resolver): every fixture
+ * comment is authored by `u2`, so the count is exactly the rows the cascade left.
+ * (Destructive, so it is the last assertion of each case.)
+ *
+ * HONEST CEILING — `deleteIdea` prunes from TWO sites (directly, and again through
+ * the kanban card-delete hook), so removing either one alone stays green here; only
+ * removing both reds the ONE-idea case. That is a double guard, not a gap.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import http from 'node:http';
@@ -27,7 +41,7 @@ import { createApp } from '../src/index.js';
 import { createPage, deletePage, __resetCms } from '../src/features/cms/cmsService.js';
 import { createCollection, deleteCollection } from '../src/features/kb/kbService.js';
 import { createList, submitIdea, deleteIdea, deleteList } from '../src/features/priority-matrix/priorityMatrixService.js';
-import { createComment, listThread, __resetCommentsStore } from '../src/features/comments/commentsService.js';
+import { createComment, listThread, deleteSubjectComments, __resetCommentsStore } from '../src/features/comments/commentsService.js';
 import { PREAUTHORIZED_CALLER } from '../src/host/subjectAccess.js';
 
 /** ADR 0659 D1 — `listThread` now answers `null` when the target is absent OR invisible.
@@ -66,6 +80,7 @@ describe('CMNT-2 — cms_page', () => {
 
     expect(await listThread(T, ORG, 'cms_page', doomed.pageId, PREAUTHORIZED_CALLER), 'ADR 0659 D1 — the target is gone, so the thread does not resolve at all (stronger than an empty list)').toBeNull();
     expect((await listThreadOrFail(T, ORG, 'cms_page', keeper.pageId, PREAUTHORIZED_CALLER)).length).toBe(1);
+    expect(await deleteSubjectComments(T, 'u2'), 'raw comment rows left — listThread cannot see an orphan (its resolver nulls a gone target)').toBe(1);
   });
 });
 
@@ -83,6 +98,7 @@ describe('CMNT-2 — kb_collection', () => {
 
     expect(await listThread(T, ORG, 'kb_collection', doomed.collectionId, PREAUTHORIZED_CALLER), 'ADR 0659 D1 — the target is gone, so the thread does not resolve at all (stronger than an empty list)').toBeNull();
     expect((await listThreadOrFail(T, ORG, 'kb_collection', keeper.collectionId, PREAUTHORIZED_CALLER)).length).toBe(1);
+    expect(await deleteSubjectComments(T, 'u2'), 'raw comment rows left — listThread cannot see an orphan (its resolver nulls a gone target)').toBe(1);
   });
 });
 
@@ -100,6 +116,7 @@ describe('CMNT-2 — priority_idea', () => {
 
     expect(await listThread(T, ORG, 'priority_idea', `${list.id}#${doomed.id}`, PREAUTHORIZED_CALLER), 'ADR 0659 D1 — the target is gone, so the thread does not resolve at all (stronger than an empty list)').toBeNull();
     expect((await listThreadOrFail(T, ORG, 'priority_idea', `${list.id}#${keeper.id}`, PREAUTHORIZED_CALLER)).length).toBe(1);
+    expect(await deleteSubjectComments(T, 'u2'), 'raw comment rows left — listThread cannot see an orphan (its resolver nulls a gone target)').toBe(1);
   });
 
   it('deleting the LIST removes every idea’s thread — the cardIds die with the board', async () => {
@@ -119,5 +136,6 @@ describe('CMNT-2 — priority_idea', () => {
     expect(await listThread(T, ORG, 'priority_idea', `${doomedList.id}#${b.id}`, PREAUTHORIZED_CALLER), 'ADR 0659 D1 — the target is gone, so the thread does not resolve at all (stronger than an empty list)').toBeNull();
     // The `#`-boundary match must not sweep a sibling LIST.
     expect((await listThreadOrFail(T, ORG, 'priority_idea', `${otherList.id}#${c.id}`, PREAUTHORIZED_CALLER)).length).toBe(1);
+    expect(await deleteSubjectComments(T, 'u2'), 'raw comment rows left — listThread cannot see an orphan (its resolver nulls a gone target)').toBe(1);
   });
 });

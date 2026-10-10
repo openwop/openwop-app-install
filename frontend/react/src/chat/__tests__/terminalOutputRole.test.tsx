@@ -18,13 +18,20 @@
  *     miss is the COMMON case, and the user was told nothing about which of the
  *     two had happened.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, cleanup, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { WorkflowCompletionCard } from '../WorkflowCompletionCard.js';
 import { upsertSavedWorkflow, deleteSavedWorkflow } from '../../builder/persistence/localStore.js';
 import type { SavedWorkflow } from '../../builder/schema/workflow.js';
 import type { WorkflowRunState } from '../types.js';
+
+// The "Open run" assertions below are the admin path: `/runs/:runId` is
+// admin-tier (runDetailLinks.test.tsx covers the member path).
+vi.mock('../../client/useEffectiveAccess.js', () => ({
+  useEffectiveAccessState: () => ({ access: {}, resolved: true }),
+  isAdminCaller: () => true,
+}));
 
 const WF = 'openwop-app.insights.talent-prep';
 

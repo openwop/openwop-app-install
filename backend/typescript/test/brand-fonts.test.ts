@@ -44,14 +44,14 @@ function client() {
 }
 async function ownerWithBrand(): Promise<{ c: ReturnType<typeof client>; orgId: string; brandId: string }> {
   const c = client();
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: `bf-${Date.now()}-${Math.floor(Math.random() * 1e6)}@t.test`, tenantId: `org:bf-${Date.now()}-${Math.floor(Math.random() * 1e6)}` });
+  const r = await c.post('/host/openwop-app/test/login', { email: `bf-${Date.now()}-${Math.floor(Math.random() * 1e6)}@t.test`, tenantId: `org:bf-${Date.now()}-${Math.floor(Math.random() * 1e6)}` });
   expect(r.status).toBe(201);
-  const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
-  const brand = await c.post('/v1/host/openwop-app/brand/brands', { orgId: org.body.orgId, name: 'FlashPick' });
+  const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
+  const brand = await c.post('/host/openwop-app/brand/brands', { orgId: org.body.orgId, name: 'FlashPick' });
   expect(brand.status, JSON.stringify(brand.body)).toBe(201);
   return { c, orgId: org.body.orgId, brandId: brand.body.brand.id };
 }
-const F = (brandId: string, role = ''): string => `/v1/host/openwop-app/brand/brands/${brandId}/fonts${role ? `/${role}` : ''}`;
+const F = (brandId: string, role = ''): string => `/host/openwop-app/brand/brands/${brandId}/fonts${role ? `/${role}` : ''}`;
 
 describe('extractFontFamily + sniff (C2/C3)', () => {
   it('reads the real internal family from a TTF name table', () => {

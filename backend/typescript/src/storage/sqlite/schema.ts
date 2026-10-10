@@ -1138,6 +1138,16 @@ export const MIGRATIONS: Record<number, (db: Database) => void> = {
     // the column, is not tenant-capped, and drains within minutes.
     addColumnIfTableExists(db, 'webhook_deliveries', 'tenant_id', 'TEXT');
   },
+  49: (db) => {
+    // RFC 0173 §C.2 — the idempotency key an attempt PRESENTED to its provider,
+    // so `GET /runs/{runId}/effects` can report it as `providerKey` (mirrors
+    // postgres mig 47). A new column rather than a revival of `provider_key`:
+    // mig 39 renamed that column to `invocation_id`, and the invocation id is
+    // the host's identity, not what crossed the wire. NULLABLE WITH NO
+    // BACKFILL — a NULL row simply reports no `providerKey`, which the
+    // projection schema allows, and no earlier row ever recorded one.
+    addColumnIfTableExists(db, 'invocation_log', 'presented_key', 'TEXT');
+  },
 };
 
 /** Highest defined migration — DERIVED from MIGRATIONS, never a hand-bumped cap

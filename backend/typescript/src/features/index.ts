@@ -19,7 +19,6 @@ import { registerFeatureSurface } from '../host/featureSurfaces.js';
 import { registerChainBackedWorkflow, validateChainBackedSubChainBinds } from '../host/chainBackedWorkflows.js';
 import type { RouteDeps } from '../routes/registerAllRoutes.js';
 import type { BackendFeature, PackRef } from './types.js';
-import { widgetsFeature } from './widgets.js';
 import { crmFeature } from './crm/feature.js';
 import { cdpFeature } from './cdp/feature.js';
 import { computerUseFeature } from './computer-use/feature.js';
@@ -27,6 +26,7 @@ import { biFeature } from './bi/feature.js';
 import { serviceDeskFeature } from './service-desk/feature.js';
 import { destinationSyncFeature } from './destination-sync/feature.js';
 import { developerKeysFeature } from './developer-keys/feature.js';
+import { accessHubFeature } from './access-hub/feature.js';
 import { csmFeature } from './csm/feature.js';
 import { entitiesFeature } from './entities/feature.js';
 import { environmentsFeature } from './environments/feature.js';
@@ -73,10 +73,8 @@ import { voiceFeature } from './voice/feature.js';
 import { navigationSettingsFeature } from './navigation-settings/feature.js';
 import { heartbeatAdminFeature } from './heartbeat-admin/feature.js';
 import { runtimePostureFeature } from './runtime-posture/feature.js';
-import { modelsFeature } from './models/feature.js';
 import { chatDeploymentFeature } from './chat-deployment/feature.js';
 import { campaignsFeature } from './campaigns/feature.js';
-import { contextEconomyFeature } from './context-economy/feature.js';
 import { productionFeature } from './production/feature.js';
 import { docsFeature } from './docs/feature.js';
 import { accessibilityFeature } from './accessibility/feature.js';
@@ -89,7 +87,6 @@ import { customDomainsFeature } from './custom-domains/feature.js';
 import { discoveryFeature } from './discovery/feature.js';
 import { manualTestsFeature } from './manual-tests/feature.js';
 import { developerToolsFeature } from './developer-tools/feature.js';
-import { runInputFormsFeature } from './run-input-forms/feature.js';
 import { territoriesFeature } from './territories/feature.js';
 import { salesCommissionsFeature } from './sales-commissions/feature.js';
 import { dealersFeature } from './dealers/feature.js';
@@ -113,8 +110,9 @@ import { walkthroughsFeature } from './walkthroughs/feature.js';
 import { tutorialsFeature } from './tutorials/feature.js';
 import { dashboardFeature } from './dashboard/feature.js';
 import { portabilityFeature } from './portability/feature.js';
-import { twinFeature } from './twin/feature.js';
+import { twinRecallFeature } from './twin/feature.js';
 import { projectsFeature } from './projects/feature.js';
+import { teamIntentLedgerFeature } from './team-intent-ledger/feature.js';
 import { documentsFeature } from './documents/feature.js';
 import { priorityMatrixFeature } from './priority-matrix/feature.js';
 import { strategyFeature } from './strategy/feature.js';
@@ -127,6 +125,7 @@ import { campaignConnectorsFeature } from './campaign-connectors/feature.js';
 import { campaignIntelFeature } from './campaign-intel/feature.js';
 import { campaignJourneysFeature } from './campaign-journeys/feature.js';
 import { workflowAuthorFeature } from './workflow-author/feature.js';
+import { builderPairFeature } from './builder-pair/feature.js';
 import { agentAuthorFeature } from './agent-author/feature.js';
 import { insightsSuiteFeature } from './insights-suite/feature.js';
 import { toolOutputCompactionFeature } from './tool-output-compaction/feature.js';
@@ -135,6 +134,7 @@ import { podcastsFeature } from './podcasts/feature.js';
 import { knowledgeSyncFeature } from './knowledge-sync/feature.js';
 import { multiTabChatFeature } from './multi-tab-chat/feature.js';
 import { chatAutotitleFeature } from './chat-autotitle/feature.js';
+import { structuredHandoffsFeature } from './structured-handoffs/feature.js';
 import { commerceConnectFeature } from './commerce-connect/feature.js';
 import { kicktodoCoreFeature } from './kicktodo-core/feature.js';
 import { kicktodoCreatorFeature } from './kicktodo-creator/feature.js';
@@ -147,6 +147,8 @@ import { kicktodoOrganizationsFeature } from './kicktodo-organizations/feature.j
 import { kicktodoMetricsFeature } from './kicktodo-metrics/feature.js';
 import { workSelectionFeature } from './work-selection/feature.js';
 import { jobSearchFeature } from './job-search/feature.js';
+import { claudeCodeFeature } from './claude-code/feature.js';
+import { claudeCodeMcpToolWorkflows } from './claude-code/mcpTools.js';
 import type { WorkflowDefinition } from '../executor/types.js';
 // ADR 0472 Phase 3 — the still-pinned builtin workflow defs, imported DIRECTLY
 // from their source modules to build the LEGACY_PINNED_WORKFLOWS quarantine.
@@ -179,8 +181,12 @@ const log = createLogger('features');
 const RETIRED_TOGGLE_IDS = [
   'cms', 'media', 'publishing', 'connections', 'users', 'profiles', 'profile-memory', 'projects', 'agent-knowledge', 'project-collab', 'workflow-author',
   // ADR 0134 — the AI-chat feature set graduated to always-on (toggles removed); retire any stale per-tenant overrides at boot.
-  'conversation-search', 'conversation-tools', 'model-router', 'interactive-artifacts', 'prompts', 'chat-export',
-  'memory-auto-extract', 'scheduled-agent-chats', 'task-deck', 'evals', 'kb', 'channels', 'chat-widget', 'code-exec',
+  // ADR 0820 §8.2 — `model-router`, `scheduled-agent-chats`, `evals`, `chat-widget` and
+  // `code-exec` left this list: each has a toggle again (default ON) so it can be sold in
+  // a bundle. Leaving an id here would DELETE every tenant's override of the restored
+  // toggle at each boot — an admin's "off" would silently come back on.
+  'conversation-search', 'conversation-tools', 'interactive-artifacts', 'prompts', 'chat-export',
+  'memory-auto-extract', 'task-deck', 'kb', 'channels',
   // 2026-06-24 — the three governance/automation features graduated to always-on
   // (ADR 0135 firewall ships rule-less; 0136 ledger user-initiated; 0137 work-graph
   // page + on-demand scan; the work-graph background sweep stays env-gated).
@@ -205,10 +211,14 @@ const RETIRED_TOGGLE_IDS = [
   // `models` chose a nav shape, not a capability; `context-economy` gated nothing
   // at all (env-governed — now a read-only admin/env-governed projection).
   'run-input-forms', 'sharing', 'developer-keys', 'models', 'context-economy',
+  // ADR 0820 §8.3 — `run-input-forms`, `models` and `context-economy` (above) are
+  // also gone as REGISTRY entries: each was a `registerRoutes: () => {}` shell kept
+  // only so the catalog's `core` could name it. They stay listed here, because the
+  // boot reconcile is what deletes a stored override that still names them.
 ] as const;
 
 /** Every backend feature the app composes. Append a new feature here. */
-export const BACKEND_FEATURES: BackendFeature[] = [widgetsFeature, crmFeature, cdpFeature, destinationSyncFeature, developerKeysFeature, csmFeature, usersFeature, orgsFeature, profilesFeature, profileMemoryFeature, mediaFeature, cmsFeature, notificationsFeature, kbFeature, publishingFeature, sharingFeature, formsFeature, consentFeature, analyticsFeature, assistantFeature, connectionsFeature, emailFeature, commentsFeature, marketplaceFeature, agentKnowledgeFeature, advisoryBoardFeature, proposalsFeature, goalsFeature, portabilityFeature, twinFeature, projectsFeature, documentsFeature, priorityMatrixFeature, strategyFeature, brandFeature, campaignBriefFeature, creativeBriefsFeature, campaignChannelsFeature, campaignOrchestrationFeature, campaignConnectorsFeature, campaignIntelFeature, campaignJourneysFeature, campaignsFeature, workflowAuthorFeature, agentAuthorFeature, insightsSuiteFeature, toolOutputCompactionFeature, notebooksFeature, podcastsFeature, knowledgeSyncFeature, conversationSearchFeature, codeExecFeature, promptsFeature, memoryAutoExtractFeature, scheduledAgentChatsFeature, channelsFeature, chatWidgetFeature, interactiveArtifactsFeature, slidesFeature, appBuilderFeature, campaignStudioFeature, drawingsFeature, cadFeature, documentEditorFeature, modelRouterFeature, conversationToolsFeature, taskDeckFeature, capabilityFirewallFeature, intentLedgerFeature, ambientWorkGraphFeature, chatExportFeature, evalsFeature, usageAnalyticsFeature, voiceFeature, navigationSettingsFeature, modelsFeature, chatDeploymentFeature, multiTabChatFeature, chatAutotitleFeature, contextEconomyFeature, productionFeature, accessibilityFeature, billingFeature, commerceFeature, recommendationsFeature, promotionsFeature, discoveryFeature, funnelsFeature, customDomainsFeature, manualTestsFeature, developerToolsFeature, runInputFormsFeature, territoriesFeature, salesCommissionsFeature, dealersFeature, salesMapsFeature, uiPluginsFeature, canvasPacksFeature, heartbeatAdminFeature, runtimePostureFeature, collaborationFeature, workflowCollabFeature, walkthroughsFeature, tutorialsFeature, dashboardFeature, commerceConnectFeature, docsFeature, entitiesFeature, environmentsFeature, whatsappFeature, webinarsFeature, creativeVideoFeature, operationsFeature, settingsFeature, kicktodoCoreFeature, kicktodoCreatorFeature, biFeature, computerUseFeature, kicktodoCommerceFeature, kicktodoAccountabilityFeature, kicktodoIntegrationsFeature, kicktodoEngagementFeature, kicktodoCommunityFeature, kicktodoOrganizationsFeature, serviceDeskFeature, kicktodoMetricsFeature, workSelectionFeature, jobSearchFeature];
+export const BACKEND_FEATURES: BackendFeature[] = [crmFeature, cdpFeature, destinationSyncFeature, developerKeysFeature, csmFeature, usersFeature, orgsFeature, profilesFeature, profileMemoryFeature, mediaFeature, cmsFeature, notificationsFeature, kbFeature, publishingFeature, sharingFeature, formsFeature, consentFeature, analyticsFeature, assistantFeature, connectionsFeature, emailFeature, commentsFeature, marketplaceFeature, agentKnowledgeFeature, advisoryBoardFeature, proposalsFeature, goalsFeature, portabilityFeature, twinRecallFeature, projectsFeature, documentsFeature, priorityMatrixFeature, strategyFeature, brandFeature, campaignBriefFeature, creativeBriefsFeature, campaignChannelsFeature, campaignOrchestrationFeature, campaignConnectorsFeature, campaignIntelFeature, campaignJourneysFeature, campaignsFeature, workflowAuthorFeature, builderPairFeature, agentAuthorFeature, insightsSuiteFeature, toolOutputCompactionFeature, notebooksFeature, podcastsFeature, knowledgeSyncFeature, conversationSearchFeature, codeExecFeature, promptsFeature, memoryAutoExtractFeature, scheduledAgentChatsFeature, channelsFeature, chatWidgetFeature, interactiveArtifactsFeature, slidesFeature, appBuilderFeature, campaignStudioFeature, drawingsFeature, cadFeature, documentEditorFeature, modelRouterFeature, conversationToolsFeature, taskDeckFeature, capabilityFirewallFeature, intentLedgerFeature, ambientWorkGraphFeature, chatExportFeature, evalsFeature, usageAnalyticsFeature, voiceFeature, navigationSettingsFeature, chatDeploymentFeature, multiTabChatFeature, chatAutotitleFeature, productionFeature, accessibilityFeature, billingFeature, commerceFeature, recommendationsFeature, promotionsFeature, discoveryFeature, funnelsFeature, customDomainsFeature, manualTestsFeature, developerToolsFeature, territoriesFeature, salesCommissionsFeature, dealersFeature, salesMapsFeature, uiPluginsFeature, canvasPacksFeature, heartbeatAdminFeature, runtimePostureFeature, collaborationFeature, workflowCollabFeature, walkthroughsFeature, tutorialsFeature, dashboardFeature, commerceConnectFeature, docsFeature, entitiesFeature, environmentsFeature, whatsappFeature, webinarsFeature, creativeVideoFeature, operationsFeature, settingsFeature, kicktodoCoreFeature, kicktodoCreatorFeature, biFeature, computerUseFeature, kicktodoCommerceFeature, kicktodoAccountabilityFeature, kicktodoIntegrationsFeature, kicktodoEngagementFeature, kicktodoCommunityFeature, kicktodoOrganizationsFeature, serviceDeskFeature, kicktodoMetricsFeature, workSelectionFeature, jobSearchFeature, claudeCodeFeature, structuredHandoffsFeature, teamIntentLedgerFeature, accessHubFeature];
 
 /**
  * ADR 0472 Phase 4 — DRAINED QUARANTINE (terminal state). This array held the builtin
@@ -288,7 +298,7 @@ export function registerLegacyDefsChainBacked(defs: readonly { workflowId: strin
 }
 
 export function registerMcpProjectionWorkflows(): void {
-  const sources = [...ucpMcpToolWorkflows, ...docsMcpToolWorkflows, ...notebookMcpToolWorkflows, ...appBuilderMcpControlWorkflows];
+  const sources = [...ucpMcpToolWorkflows, ...docsMcpToolWorkflows, ...notebookMcpToolWorkflows, ...appBuilderMcpControlWorkflows, ...claudeCodeMcpToolWorkflows];
   for (const src of sources) {
     const roles = new Map(src.nodes.filter((n) => n.outputRole).map((n) => [n.nodeId, n.outputRole] as const));
     registerChainBackedWorkflow(src.workflowId, {
@@ -349,7 +359,7 @@ export function registerBackendFeatures(deps: RouteDeps): void {
     registerFeatureRecommends(feature.id, feature.recommends ?? []);
     feature.registerRoutes(deps);
     // Face 2 (ADR 0014 Phase 1): the feature's ctx.features.<id> workflow surface.
-    if (feature.surface) registerFeatureSurface(feature.surface.id, feature.surface.build);
+    if (feature.surface) registerFeatureSurface(feature.surface.id, feature.surface.build, feature.surface.orgPolicy);
     log.debug('feature_registered', { id: feature.id, packs: feature.requiredPacks?.length ?? 0, surface: feature.surface?.id ?? null });
   }
   registerMcpProjectionWorkflows(); // ADR 0472 P4 — MCP projections are chain-backed now

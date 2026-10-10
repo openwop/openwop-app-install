@@ -20,6 +20,7 @@ import { InlineState } from '../ui/InlineState.js';
 import { useOrgSelection } from '../ui/useOrgSelection.js';
 import { confirm } from '../ui/confirm.js';
 import { listOrgs, type Org } from '../client/promptLibraryClient.js';
+import { byokErrorMessage, useByokWriteAccess } from './lib/byokWriteAccess.js';
 import {
   listCompatEndpoints, createCompatEndpoint, deleteCompatEndpoint,
   type CompatEndpointView,
@@ -38,6 +39,9 @@ export function CompatEndpointsCard(): JSX.Element | null {
   const [endpoints, setEndpoints] = useState<CompatEndpointView[]>([]);
   const [busy, setBusy] = useState(false);
   const [writeForbidden, setWriteForbidden] = useState(false);
+  // ADR 0779 D1/D7 — endpoint writes are BYOK-admin-class (they mint a key every
+  // member dispatches with); a member is not offered them.
+  const canManage = useByokWriteAccess();
   const [notice, setNotice] = useState<{ variant: 'success' | 'error'; msg: string } | null>(null);
 
   // create-form state
@@ -144,7 +148,7 @@ export function CompatEndpointsCard(): JSX.Element | null {
         setWriteForbidden(true);
         setNotice({ variant: 'error', msg: t('compatReadOnly', { defaultValue: 'You have read-only access to this organization’s endpoints.' }) });
       } else {
-        setNotice({ variant: 'error', msg: err instanceof Error ? err.message : t('compatError', { defaultValue: 'Could not save the endpoint.' }) });
+        setNotice({ variant: 'error', msg: `${t('compatError', { defaultValue: 'Could not save the endpoint.' })} ${byokErrorMessage(t, err)}` });
       }
     } finally { setBusy(false); }
   }
@@ -155,7 +159,7 @@ export function CompatEndpointsCard(): JSX.Element | null {
       await deleteCompatEndpoint(ep.id);
       setEndpoints((prev) => prev.filter((e) => e.id !== ep.id));
     } catch (err) {
-      setNotice({ variant: 'error', msg: err instanceof Error ? err.message : t('compatError', { defaultValue: 'Could not save the endpoint.' }) });
+      setNotice({ variant: 'error', msg: byokErrorMessage(t, err) });
     }
   }
 
@@ -189,13 +193,17 @@ export function CompatEndpointsCard(): JSX.Element | null {
                   <span className="muted u-fs-11">{t('compatModelsList', { defaultValue: 'Models: {{list}}', list: ep.models.join(', ') })}</span>
                 )}
               </div>
-              <Button variant="quiet" className="u-fs-11" onClick={() => void remove(ep)} aria-label={t('compatDelete', { defaultValue: 'Remove endpoint' })}>{t('compatDelete', { defaultValue: 'Remove' })}</Button>
+              {canManage && !writeForbidden ? (
+                <Button variant="quiet" className="u-fs-11" onClick={() => void remove(ep)} aria-label={t('compatRemoveLabel', { label: ep.label })}>{t('compatDelete', { defaultValue: 'Remove' })}</Button>
+              ) : null}
             </li>
           ))}
         </ul>
       )}
 
-      {writeForbidden ? null : (
+      {/* Ambient, not an event — plain text (this file's own §4.6 note, above). */}
+      {!canManage ? <p className="muted">{t('compatAdminOnly')}</p> : null}
+      {writeForbidden || !canManage ? null : (
         <>
           <TextField label={t('compatLabel', { defaultValue: 'Label' })} value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Local Ollama" />
           <TextField label={t('compatBaseUrl', { defaultValue: 'Base URL' })} help={t('compatBaseUrlHelp', { defaultValue: 'The OpenAI-compatible base, e.g. http://localhost:11434/v1 (https required unless a local endpoint is explicitly allowed).' })} value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://vllm.internal/v1" />
@@ -215,7 +223,7 @@ export function CompatEndpointsCard(): JSX.Element | null {
           </div>
         </>
       )}
-      {notice ? <div className="u-mt-2"><Notice variant={notice.variant}>{notice.msg}</Notice></div> : null}
+      {notice ? <div className="u-mt-2"><Notice variant={notice.variant} announce={notice.msg}>{notice.msg}</Notice></div> : null}
     </section>
   );
 }

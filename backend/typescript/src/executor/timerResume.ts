@@ -13,6 +13,7 @@
  * `approvalGateDeadlineMs` does. A fork before the timer fires inherits the
  * original `createdAt`/deadline (matches approval-gate behavior).
  */
+import { openInterruptsForSweep } from './openInterruptSweep.js';
 import type { Storage } from '../storage/storage.js';
 import type { InterruptRecord } from '../types.js';
 import { createLogger } from '../observability/logger.js';
@@ -59,7 +60,7 @@ export async function sweepDueTimers(
   resume: (interrupt: InterruptRecord) => Promise<void>,
   now: number = Date.now(),
 ): Promise<number> {
-  const open = await storage.listOpenInterruptsAll(SWEEP_BATCH);
+  const open = await openInterruptsForSweep(storage, 'timer-resume', SWEEP_BATCH);
   let resumed = 0;
   for (const interrupt of open) {
     try {

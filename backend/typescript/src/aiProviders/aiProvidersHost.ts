@@ -62,6 +62,7 @@ import { explicitRefNamesOtherProvider, pickCredentialRef } from './credentialRe
 import { dispatchAnthropicToolsRound, type ToolsRoundRequest, type ToolsRoundResult } from '../providers/dispatchAnthropicTools.js';
 import { dispatchOpenAIToolsRound, dispatchGoogleToolsRound, dispatchMiniMaxToolsRound } from '../providers/dispatchProviderTools.js';
 import { embedText, DEFAULT_EMBEDDING_DIMS, LOCAL_EMBEDDING_MODEL } from './localEmbedding.js';
+import { meterPlatformUnits } from '../host/managedCredits.js';
 import {
   dispatchManagedChat,
   dispatchManagedToolsRound,
@@ -145,6 +146,7 @@ import {
   tryLenientParse,
   type RetryReason,
 } from '../host/envelopeReliabilityEmit.js';
+import { ASSET_SERVE_PATH } from '../host/assetServePath.js';
 
 /**
  * Is the deterministic `mock` provider routable?
@@ -517,7 +519,7 @@ async function callTranscriber(scope: AdapterScope, req: TranscribeRequest): Pro
   if (!token) {
     throw new AiProviderError(
       'invalid_request',
-      '`audio.url` must be a host media-asset URL (…/v1/host/openwop-app/assets/<token>) — callTranscriber does not fetch arbitrary external URLs.',
+      `\`audio.url\` must be a host media-asset URL (…${ASSET_SERVE_PATH}/<token>) — callTranscriber does not fetch arbitrary external URLs.`,
       { field: 'audio.url' },
     );
   }
@@ -973,6 +975,9 @@ async function callAIManaged(scope: AdapterScope, req: AiCallRequest): Promise<A
     const managed = await dispatchManagedChat({
       userFacingProvider,
       tenantId: scope.tenantId,
+      // ADR 0821 D4 — attributed from the run's starter block (scheduled agent
+      // chats, heartbeat, channels, schedules, else `workflows`).
+      runId: scope.runId,
       // ADR 0721 — the managed TOOLS round below already does exactly this; the
       // plain-completion round did not, so every workflow LLM node on managed
       // charged the pooled tenant bucket.
@@ -1027,6 +1032,7 @@ async function callAIWithToolsManaged(scope: AdapterScope, req: AiToolCallReques
     const round = await dispatchManagedToolsRound({
       userFacingProvider,
       tenantId: scope.tenantId,
+      runId: scope.runId, // ADR 0821 D4 — see callAIManaged
       ...(scope.actingUserId ? { actingSubject: scope.actingUserId } : {}),
       messages: toChatMessages(req),
       tools: req.tools.map((t) => ({
@@ -1200,7 +1206,13 @@ export function advertisedSubscriptionOnlyProviders(): string[] {
  *  discovery document and the run-create `ai.credentialRef` check both read
  *  this, so the refusal can never disagree with the advertisement. */
 export function advertisedByokProviders(): string[] {
-  return buildProviderAuthModes(['anthropic', 'openai', 'google'], subscriptionAdvertisedProviders()).byok;
+  return advertisedProviderAuthModes().byok;
+}
+
+/** Single source for discovery and run admission. MiniMax has a real BYOK
+ * dispatcher; excluding it here made a valid connection unusable by runs. */
+export function advertisedProviderAuthModes(): { byok: string[]; authModes: Record<string, string[]> } {
+  return buildProviderAuthModes(['anthropic', 'openai', 'google', 'minimax'], subscriptionAdvertisedProviders());
 }
 
 export function buildProviderAuthModes(
@@ -1286,9 +1298,13 @@ async function callImageGenerator(
     // `provider`, so `openai` and `google` (Imagen) route to their own configured
     // endpoints (or the shared generic one). Inert until the operator configures it.
     // grade-code VID-1 (image sibling): the same ADR 0118 provider-dispatch span.
+    // ADR 0821 D3 — the gateway reports whether the OPERATOR's env key served the
+    // call (platform-paid) or the tenant's own broker Connection did.
+    let imageKeySource: 'platform' | 'tenant' = 'platform';
     const raws = await withLlmSpan(PROVIDER_DISPATCH_SPAN, { provider, model: req.model ?? 'default' }, () => dispatchImageGeneration({
       prompt: req.prompt,
       provider,
+      onKeySource: (s) => { imageKeySource = s; },
       // ADR 0244 — the tenant so the adapter can broker-resolve the api_key from a
       // per-tenant Connection (workspace-scoped, KMS), env key as the fallback.
       tenantId: scope.tenantId,
@@ -1304,6 +1320,7 @@ async function callImageGenerator(
       images.push({ url: stored.url, mimeType: raw.mimeType, metadata: { provider, ...(req.model ? { model: req.model } : {}), ...(req.seed != null ? { seed: req.seed } : {}) } });
     }
     await recordMediaUsage(scope.tenantId, 'images', images.length);
+    if (imageKeySource === 'platform') await meterPlatformUnits({ tenantId: scope.tenantId, unit: 'image', quantity: images.length, runId: scope.runId });
     return { images, totalTimeMs: Date.now() - startedAt, usage: { images: images.length } };
   }
 
@@ -1658,10 +1675,13 @@ async function callSpeechSynthesizer(
   // is BYOK-only, so a managed request for them fails honestly rather than
   // mis-routing the MiniMax key.
   let apiKey: string;
+  // ADR 0821 D3 — true only on the MANAGED (platform-key) branch below.
+  let ttsPlatformPaid = false;
   if (req.credentialRef && !isManagedCredentialRef(req.credentialRef)) {
     await enforcePolicy(scope, provider, req.model ?? '', req.credentialRef);
     apiKey = resolveCredential(scope, provider, req.credentialRef).cleartext;
   } else if (MANAGED_SPEECH_PROVIDERS.includes(provider)) {
+    ttsPlatformPaid = true;
     const managed = await resolveManagedSpeechKey();
     if (!managed) {
       throw new AiProviderError(
@@ -1722,6 +1742,10 @@ async function callSpeechSynthesizer(
   // ADR 0106 — record the actual TTS chars against the per-org daily budget
   // (best-effort, no-op when the budget is unset).
   await recordMediaUsage(scope.tenantId, 'tts', req.text.length, scope.actingUserId);
+  // ADR 0821 D3 — managed TTS is platform-paid: meter its characters into credits
+  // beside the media budget (no draw while `ttsChar` has no rate). BYOK speech is
+  // the tenant's own spend and is never metered.
+  if (ttsPlatformPaid) await meterPlatformUnits({ tenantId: scope.tenantId, unit: 'ttsChar', quantity: req.text.length, runId: scope.runId });
 
   const result: SpeechSynthesisResult = {
     audio: {
@@ -1818,14 +1842,21 @@ async function enforcePolicy(
       // `ctx.callAI`, so we ALSO accept the convention-lookup paths
       // (`secrets[provider]`, `secrets[<provider>-*]`, etc.). The
       // call still fails if NONE of these resolve.
+      //
+      // A policy refusal MUST carry the advertised `policies.errorCode`
+      // (`provider_policy_denied`), with the specific cause in `reason`
+      // (capabilities.md "Wire-format error"; v2 host-services.md). The
+      // credential resolver's own `byok_required*` codes are therefore
+      // re-coded here: under a `required` policy they ARE the policy decision.
       try {
         resolveCredential(scope, provider, credentialRef);
       } catch (err) {
-        if (err instanceof AiProviderError) throw err;
+        if (err instanceof AiProviderError && err.code !== 'byok_required' && err.code !== 'byok_required_but_unresolved') throw err;
+        const reason = err instanceof AiProviderError ? err.code : 'byok_required';
         throw new AiProviderError(
-          'byok_required',
+          'provider_policy_denied',
           `Provider "${provider}" requires a BYOK credential and none is available.`,
-          { provider, reason: 'byok_required' },
+          { provider, reason },
         );
       }
       break;
@@ -1835,7 +1866,7 @@ async function enforcePolicy(
       const allowed = policy.allowedModels ?? [];
       if (allowed.length === 0 || !modelMatchesAllowlist(model, allowed)) {
         throw new AiProviderError(
-          'model_not_allowed',
+          'provider_policy_denied',
           `Model "${model}" not allowed by policy for provider "${provider}".`,
           { provider, model, reason: 'model_not_allowed', allowed },
         );
@@ -1867,8 +1898,9 @@ async function enforcePolicy(
  * caller actually has (just the refs — NEVER the values).
  */
 /** ADR 0712 OQ4 — every provider a credential can be named for: chat, image, video
- *  and speech dispatch. Derived from the lists above, never re-typed. */
-const CREDENTIAL_PROVIDERS: readonly string[] = [...new Set<string>([
+ *  and speech dispatch. Derived from the lists above, never re-typed. Exported so
+ *  the chat BYOK-direct lane judges the same set (ADR 0779 D6). */
+export const CREDENTIAL_PROVIDERS: readonly string[] = [...new Set<string>([
   ...SUPPORTED_PROVIDERS, ...IMAGE_PROVIDERS, ...VIDEO_PROVIDERS, ...SPEECH_PROVIDERS,
 ])].filter((p) => p !== 'mock');
 

@@ -43,19 +43,19 @@ function client(): Client {
 
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
 async function signup(c: Client, opts: { tenantId?: string } = {}): Promise<{ userId: string }> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail('brand'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
+  const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail('brand'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
 async function ownerWithOrg(): Promise<{ owner: Client; userId: string; orgId: string }> {
   const owner = client();
   const u = await signup(owner);
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return { owner, userId: u.userId, orgId: org.body.orgId };
 }
 
-const B = '/v1/host/openwop-app/brand/brands';
+const B = '/host/openwop-app/brand/brands';
 
 describe('brand — always-on (ADR 0170: no feature-toggle gate)', () => {
   it('an authenticated member reaches the routes with no toggle enabled', async () => {
@@ -119,7 +119,7 @@ describe('brand — CRUD + sanitization', () => {
 
   it('exposes the static channel vocabulary', async () => {
     const { owner } = await ownerWithOrg();
-    const r = await owner.get('/v1/host/openwop-app/brand/channels');
+    const r = await owner.get('/host/openwop-app/brand/channels');
     expect(r.status).toBe(200);
     expect(r.body.channels).toContain('landing_page');
     expect(r.body.channels).toContain('social_posts');

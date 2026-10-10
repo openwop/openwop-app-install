@@ -87,7 +87,7 @@ describe('workforce history fixture — every event validates on the major-2 wir
       }
     }
     expect(checked, 'non-vacuous: the fixture produced events with v2 defs').toBeGreaterThan(100);
-    for (const t of ['run.started', 'node.started', 'node.suspended', 'approval.requested', 'approval.granted', 'approval.overridden', 'run.completed', 'run.failed', 'node.failed']) {
+    for (const t of ['run.started', 'node.started', 'node.suspended', 'interrupt.requested', 'interrupt.resolved', 'run.completed', 'run.failed', 'node.failed']) {
       expect(covered.has(t), `${t} must be exercised by the fixture`).toBe(true);
     }
     expect(failures.slice(0, 12), `${failures.length} of ${checked} events failed`).toEqual([]);

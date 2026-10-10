@@ -39,8 +39,12 @@ function deliveryKey(ctx, boardId, proposal) {
   return `kanban-work-${createHash('sha256').update(stable).digest('hex').slice(0, 32)}`;
 }
 
+// ADR 0835 D5 — `approve` and `accept` are two spellings of one decision (the
+// host's resumeActionSpelling equivalence): a gate may advertise either, and
+// the host accepts both, so refusing `accept` here failed a run whose review
+// had in fact been approved. `override` is a privileged bypass, not a spelling.
 function isApproved(value) {
-  return value === true || (value && typeof value === 'object' && value.action === 'approve');
+  return value === true || (value && typeof value === 'object' && (value.action === 'approve' || value.action === 'accept'));
 }
 
 export async function materializeWorkItems(ctx) {

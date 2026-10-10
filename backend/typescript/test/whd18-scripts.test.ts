@@ -23,6 +23,7 @@ import { pathToFileURL } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
 
 import { MAJOR2_UNDECLARED_FAMILIES } from '../conformance/major2Ledger.js';
+import { projectBoundId as hostProjectBoundId } from '../src/host/boundIdProjection.js';
 import { verifyServedBundle as hostVerify } from '../src/host/certificationEvidence.js';
 
 const ROOT = join(__dirname, '..', '..', '..');
@@ -43,7 +44,11 @@ interface HelpersModule {
   tenantBKeyFromBinding(v: string): string | null;
   tunnelUrlFromLog(t: string): string | null;
   webhookIds(r: unknown): string[];
+  projectBoundId(id: string): string;
+  triggerSweepIds(r: unknown, keep?: string[]): string[];
   keyMismatch(doc: unknown, keyId: string, pem: string): string | null;
+  supersededLiveRevisions(doc: unknown, serving: string):
+    { checked: false; why: string } | { checked: true; live: { revision: string; count: number; at: string }[] };
 }
 
 // Dynamic import by computed URL: these are plain `.mjs` outside this package,
@@ -217,8 +222,27 @@ describe('publish-evidence helpers', () => {
   });
 
   it('webhook ids come back BARE (a projected tenant/uuid id would 404 as a path)', () => {
-    expect(helpers.webhookIds({ subscriptions: [{ subscriptionId: 'a-1' }, { webhookId: 'conformance-prod/b-2' }] })).toEqual(['a-1', 'b-2']);
+    // A bound id stays WHOLE and is `~`-projected into one segment (the v2 surface
+    // refuses the bare form once 1.x is retired); a bare id projects to itself.
+    expect(helpers.webhookIds({ subscriptions: [{ subscriptionId: 'a-1' }, { webhookId: 'conformance-prod/b-2' }] })).toEqual(['a-1', 'conformance-prod~2Fb-2']);
+    expect(helpers.webhookIds({ subscriptions: [{ subscriptionId: 'anon:x/c~3' }] })).toEqual(['anon~3Ax~2Fc~7E3']);
+    // The script's projection is a MIRROR of the host's (which is pinned to the
+    // corpus codec): byte-equal over a vector set, so the two cannot drift.
+    for (const v of ['a-1', 'conformance-prod/b-2', 'anon:x/c~3', 'user:Ab_9.z/€-é', '']) {
+      expect(helpers.projectBoundId(v), v).toBe(hostProjectBoundId(v));
+    }
     expect(helpers.webhookIds('{"subscriptions":[]}')).toEqual([]);
+    // The trigger sweep: projected bound ids, PAUSED kept (a person parked it),
+    // and an explicit keep-list honoured by bound OR bare id.
+    const subs = { subscriptions: [
+      { subscriptionId: 'conformance-prod/tgsub-a', state: 'active' },
+      { subscriptionId: 'conformance-prod/tgsub-probe', state: 'paused' },
+      { subscriptionId: 'conformance-prod/tgsub-dl', state: 'dead-lettered' },
+      { subscriptionId: 'conformance-prod/tgsub-keep', state: 'active' },
+    ] };
+    expect(helpers.triggerSweepIds(subs, ['tgsub-keep'])).toEqual(['conformance-prod~2Ftgsub-a', 'conformance-prod~2Ftgsub-dl']);
+    expect(helpers.triggerSweepIds(subs, ['conformance-prod/tgsub-keep'])).toEqual(['conformance-prod~2Ftgsub-a', 'conformance-prod~2Ftgsub-dl']);
+    expect(() => helpers.triggerSweepIds({ error: 'gone' })).toThrow(/not a trigger-subscription list/);
     expect(() => helpers.webhookIds({ error: 'unauthorized' })).toThrow(/not a webhook list/);
   });
 
@@ -232,6 +256,55 @@ describe('publish-evidence helpers', () => {
     expect(helpers.keyMismatch(doc({ publicKey: 'WVhUJ8jHoQf9g9b8VPsfMS6kiOjUSbGdjbIAiemOVq4' }), 'k', pem)).toMatch(/does not match/);
     expect(helpers.keyMismatch(doc({ publicKey: raw, retiredAt: '2026-01-01T00:00:00Z' }), 'k', pem)).toMatch(/RETIRED/);
     expect(helpers.keyMismatch({ signingKeys: [] }, 'k', pem)).toMatch(/not in the live host/);
+  });
+});
+
+describe('WHD-28 — a superseded revision with a live instance', () => {
+  const NEW = 'svc-00829-c46';
+  const OLD = 'svc-00828-dhw';
+  /** One `instance_count` series, shaped as Cloud Monitoring returns it (int64 as a STRING). */
+  const series = (rev: string, state: string, points: Array<[string, number]>) => ({
+    metric: { labels: { state } },
+    resource: { labels: { revision_name: rev } },
+    points: points.map(([endTime, n]) => ({ interval: { endTime }, value: { int64Value: String(n) } })),
+  });
+  const T1 = '2026-10-02T15:02:43Z';
+  const T2 = '2026-10-02T15:03:43Z';
+
+  it('names the old revision that is still alive — the state measured live on 2026-10-02', () => {
+    const doc = { timeSeries: [
+      series(OLD, 'active', [[T2, 1], [T1, 1]]), series(OLD, 'idle', [[T2, 0], [T1, 0]]),
+      series(NEW, 'active', [[T2, 1], [T1, 1]]), series(NEW, 'idle', [[T2, 0], [T1, 0]]),
+    ] };
+    expect(helpers.supersededLiveRevisions(doc, NEW)).toEqual({ checked: true, live: [{ revision: OLD, count: 1, at: T2 }] });
+  });
+
+  it('an IDLE instance on an old revision is still alive (its workers still run)', () => {
+    const doc = { timeSeries: [series(OLD, 'active', [[T2, 0]]), series(OLD, 'idle', [[T2, 1]]), series(NEW, 'active', [[T2, 1]])] };
+    expect(helpers.supersededLiveRevisions(doc, NEW)).toMatchObject({ checked: true, live: [{ revision: OLD, count: 1 }] });
+  });
+
+  it('reads the NEWEST point: an old revision that has since drained is not reported', () => {
+    const doc = { timeSeries: [series(OLD, 'active', [[T1, 1], [T2, 0]]), series(NEW, 'active', [[T1, 1], [T2, 1]])] };
+    expect(helpers.supersededLiveRevisions(doc, NEW)).toEqual({ checked: true, live: [] });
+  });
+
+  it('refuses to vouch when the answer cannot be about this service — empty is a broken query, not "nothing else runs"', () => {
+    for (const doc of [{}, { timeSeries: [] }, null, { timeSeries: [series(OLD, 'active', [[T2, 1]])] }, { timeSeries: [series(NEW, 'active', [[T2, 0]])] }]) {
+      expect(helpers.supersededLiveRevisions(doc, NEW)).toMatchObject({ checked: false });
+    }
+  });
+
+  it('the CLI exit code carries the three outcomes the script branches on', () => {
+    const cli = (doc: unknown) => spawnSync('node', [join(ROOT, 'scripts', 'lib', 'publish-evidence-helpers.mjs'), 'superseded-live', NEW], { input: JSON.stringify(doc), encoding: 'utf8' });
+    const alone = cli({ timeSeries: [series(NEW, 'active', [[T2, 1]])] });
+    expect([alone.status, alone.stdout]).toEqual([0, '']);
+    const both = cli({ timeSeries: [series(NEW, 'active', [[T2, 1]]), series(OLD, 'active', [[T2, 1]])] });
+    expect(both.status).toBe(1);
+    expect(both.stdout).toBe(`${OLD}\t1\t${T2}\n`);
+    const blind = cli({});
+    expect(blind.status).toBe(3);
+    expect(blind.stderr).toMatch(/no series/);
   });
 });
 
@@ -263,14 +336,23 @@ describe('publish-evidence.sh — arguments and config, without touching anythin
     expect(r.stdout).toContain('signing_secret=openwop-app-bundle-signing-key\n');
     expect(r.stdout).toContain('conformance_secret=openwop-conformance-api-key\n');
     expect(r.stdout).toContain('object[2]=gs://openwop-dev-certification-bundles/evidence/<serving-commit>/major-2.json\n');
+    // CE-20 — the DEFAULT plan names major 1 as conditional on discovery.
+    expect(r.stdout).toContain('major_1=only-if-advertised');
   });
 
   it('--major / --max-workers / --allow-any-commit are honoured', () => {
     const r = run(['--major', '1', '--max-workers', '3', '--allow-any-commit', '--print-config'], env(GOOD));
     expect(r.status, r.stderr).toBe(0);
     expect(r.stdout).toContain('majors=1\n');
+    // An EXPLICIT --major is never silently narrowed (CE-20).
+    expect(r.stdout).not.toContain('major_1=only-if-advertised');
     expect(r.stdout).toContain('max_workers=3\n');
     expect(r.stdout).toContain('allow_any_commit=1\n');
+  });
+
+  it('--allow-superseded-instances is off unless asked for', () => {
+    expect(run(['--print-config'], env(GOOD)).stdout).toContain('allow_superseded_instances=0\n');
+    expect(run(['--allow-superseded-instances', '--print-config'], env(GOOD)).stdout).toContain('allow_superseded_instances=1\n');
   });
 
   it.each([

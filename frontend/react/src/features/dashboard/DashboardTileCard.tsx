@@ -102,12 +102,14 @@ export function DashboardTileCard({ tile, customizing, isFirst, isLast, onMove, 
           </span>
         ) : (
           <span className="dash-tile__controls">
-            {ageMs >= 60_000 ? (
+            {def.refreshable !== false && ageMs >= 60_000 ? (
               <span className="dash-tile__age muted" title={t('loadedAtTitle', { time: formatTime(loadedAt) })}>
                 {formatRelativeTime(new Date(loadedAt).toISOString())}
               </span>
             ) : null}
-            <Button variant="quiet" size="sm" className="dash-tile__ctrl" onClick={refresh} aria-label={t('refreshTile', { name: label })} title={t('refreshTile', { name: label })}><RotateCwIcon size={13} /></Button>
+            {def.refreshable === false ? null : (
+              <Button variant="quiet" size="sm" className="dash-tile__ctrl" onClick={refresh} aria-label={t('refreshTile', { name: label })} title={t('refreshTile', { name: label })}><RotateCwIcon size={13} /></Button>
+            )}
           </span>
         )}
       </header>

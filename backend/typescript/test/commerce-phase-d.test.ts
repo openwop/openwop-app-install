@@ -74,20 +74,20 @@ function client() {
 }
 async function shopOwner(): Promise<{ owner: ReturnType<typeof client>; orgId: string; tenantId: string }> {
   const owner = client();
-  const r = await owner.post('/v1/host/openwop-app/test/login', { email: `pd-${Date.now()}-${n++}@acme.test` });
+  const r = await owner.post('/host/openwop-app/test/login', { email: `pd-${Date.now()}-${n++}@acme.test` });
   const tenantId: string = r.body.user?.tenantId ?? '';
-  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Shop' });
+  const org = await owner.post('/host/openwop-app/orgs', { name: 'Shop' });
   return { owner, orgId: org.body.orgId, tenantId };
 }
-const c = (orgId: string, suffix = ''): string => `/v1/host/openwop-app/commerce/orgs/${encodeURIComponent(orgId)}${suffix}`;
-const buyer = (orgId: string, suffix = ''): string => `/v1/host/openwop-app/commerce/orgs/${encodeURIComponent(orgId)}/ucp-buyer${suffix}`;
+const c = (orgId: string, suffix = ''): string => `/host/openwop-app/commerce/orgs/${encodeURIComponent(orgId)}${suffix}`;
+const buyer = (orgId: string, suffix = ''): string => `/host/openwop-app/commerce/orgs/${encodeURIComponent(orgId)}/ucp-buyer${suffix}`;
 
 describe('D1 — order-status share links (the identity floor)', () => {
   it('renders a PII-free markdown status view and the confirmation email carries the link', async () => {
     const { owner, orgId } = await shopOwner();
     const sent: TransactionalEmail[] = [];
     setTransactionalEmailTransport(async (e) => { sent.push(e); return true; });
-    const contact = await owner.post('/v1/host/openwop-app/crm/contacts', { name: 'Track Me', email: `track-${n++}@x.test` });
+    const contact = await owner.post('/host/openwop-app/crm/contacts', { name: 'Track Me', email: `track-${n++}@x.test` });
     const p = await owner.post(c(orgId, '/products'), { type: 'digital', name: 'Track Guide', price: 6, currency: 'USD' });
     const o = await owner.post(c(orgId, '/orders'), { contactId: contact.body.contactId, lines: [{ productId: p.body.productId, quantity: 1 }] });
     const paid = await owner.post(c(orgId, `/orders/${encodeURIComponent(o.body.orderId)}/pay`), { paymentIntentId: 'demo:pi_d1' });
@@ -175,7 +175,7 @@ describe('D2 — UCP buyer (ADR 0188 floor)', () => {
 describe('D3 — account-native assortments', () => {
   it('an exclusive-assortment buyer can order/quote only carried products; anonymous unaffected; the preview says why', async () => {
     const { owner, orgId } = await shopOwner();
-    const contact = await owner.post('/v1/host/openwop-app/crm/contacts', { name: 'Assorted', email: `as-${n++}@x.test` });
+    const contact = await owner.post('/host/openwop-app/crm/contacts', { name: 'Assorted', email: `as-${n++}@x.test` });
     const contactId: string = contact.body.contactId;
     const inA = await owner.post(c(orgId, '/products'), { type: 'physical', name: 'Allowed', price: 10, currency: 'USD', inventory: 10 });
     const outB = await owner.post(c(orgId, '/products'), { type: 'physical', name: 'Forbidden', price: 10, currency: 'USD', inventory: 10 });

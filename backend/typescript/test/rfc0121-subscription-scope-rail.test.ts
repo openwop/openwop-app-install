@@ -2,8 +2,8 @@
  * RFC 0121 — subscription-scope SAFETY RAIL (acquisition-free host portion).
  *
  * Boots the real app via createApp and exercises:
- *   1. §B.8 bind-seam witness — POST /v1/host/sample/credentials/bind (and the
- *      app-canonical /v1/host/openwop-app/credentials/bind alias). A subscription
+ *   1. §B.8 bind-seam witness — POST /host/sample/credentials/bind (and the
+ *      app-canonical /host/openwop-app/credentials/bind alias). A subscription
  *      binding at tenant/workspace scope MUST be rejected with the canonical
  *      `credential_scope_forbidden` code; only `user` scope is accepted (a stub —
  *      no credential resolved, nothing stored). The route MUST be wired (not 404).
@@ -35,8 +35,8 @@ afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
 });
 
-const APP_PATH = '/v1/host/openwop-app/credentials/bind';
-const SAMPLE_PATH = '/v1/host/sample/credentials/bind';
+const APP_PATH = '/host/openwop-app/credentials/bind';
+const SAMPLE_PATH = '/host/sample/credentials/bind';
 const post = (path: string, body: unknown) => fetch(`${BASE}${path}`, { method: 'POST', headers: H, body: JSON.stringify(body) });
 
 /** Tolerant of `{error}` / `{code}` / `{error:{code}}` — mirrors the conformance driver. */
@@ -95,14 +95,17 @@ describe('RFC 0121 §B.8 — subscription-scope bind-seam witness', () => {
 
 describe('RFC 0121 — discovery aiProviders.authModes stays honest-off', () => {
   it('advertises apiKey for every byok provider and NO subscription by default', async () => {
-    const doc = await (await fetch(`${BASE}/.well-known/openwop`, { headers: H })).json() as {
-      aiProviders?: { byok?: string[]; authModes?: Record<string, string[]> };
+    // ADR 0812 P3c-0 — v2 spelling: `aiProviders.authModes` is a FLAT mode vocabulary and the
+    // per-provider subscription list rides the `openwop-app.ai-providers` extension.
+    const doc = await (await fetch(`${BASE}/.well-known/openwop`, { headers: { ...H, 'OpenWOP-Version': '2' } })).json() as {
+      aiProviders?: { providers?: string[]; authModes?: string[] };
+      extensions?: { 'openwop-app.ai-providers'?: { subscriptionProviders?: string[] } };
     };
-    const authModes = doc.aiProviders?.authModes ?? {};
-    const byok = doc.aiProviders?.byok ?? [];
-    // Every byok provider has a real apiKey mode.
-    for (const p of byok) expect(authModes[p]).toContain('apiKey');
+    // Every provider has a real apiKey mode.
+    expect(doc.aiProviders?.providers?.length ?? 0).toBeGreaterThan(0);
+    expect(doc.aiProviders?.authModes).toContain('apiKey');
     // Honest-off: NO provider carries `subscription` in any default deployment.
-    for (const modes of Object.values(authModes)) expect(modes).not.toContain('subscription');
+    expect(doc.aiProviders?.authModes).not.toContain('subscription');
+    expect(doc.extensions?.['openwop-app.ai-providers']?.subscriptionProviders).toEqual([]);
   });
 });

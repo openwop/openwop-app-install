@@ -30,7 +30,7 @@ import { resolveFeatureToggle } from '../../host/agentToolKit.js';
 import { listOrgs, resolveEffectiveAccess } from '../../host/accessControlService.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { getNodeRegistry } from '../../executor/nodeRegistry.js';
-import { createCanvasForTenant, getCanvasForTenant, updateCanvasForTenant } from '../../host/canvasSurface.js';
+import { createCanvasForTenant, updateCanvasForTenant, getCanvasForCaller } from '../../host/canvasSurface.js';
 import { validateDrawingDoc, DRAWING_SHAPE_KINDS } from './validateDrawingDoc.js';
 
 export const DRAWINGS_GET_DESIGN_TOOL_ID = 'openwop:drawings.get-design';
@@ -124,6 +124,7 @@ export function registerDrawingsAgentTools(): void {
   // ── The canvas-state read path: the model READS the current drawing. ──────
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'read',
     // ADR 0604 (TOCC-2) — closed world: an elided enum/id list here makes the
     // model author against a catalog that is not this host's.
     schemaCarrying: true,
@@ -154,7 +155,7 @@ export function registerDrawingsAgentTools(): void {
       if ('content' in gate) return gate;
       const canvasId = str(input.canvasId);
       if (!canvasId) return toolError('validation_error', '`canvasId` is required.');
-      const canvas = await getCanvasForTenant(scope.tenantId, canvasId);
+      const canvas = await getCanvasForCaller(scope.tenantId, canvasId, { subject: scope.actingUserId });
       if (!canvas || canvas.canvasTypeId !== DRAWING_CANVAS_TYPE) {
         return toolError('not_found', `Drawing '${canvasId}' not found in this workspace.`);
       }
@@ -172,6 +173,7 @@ export function registerDrawingsAgentTools(): void {
   // ── The deliverable path: normalize → validate → persist → real reference. ─
   registerFeatureAgentTool({
     contentTrust: 'untrusted',
+    effect: 'write',
     def: {
       name: DRAWINGS_RENDER_TOOL_ID,
       description:
@@ -210,7 +212,7 @@ export function registerDrawingsAgentTools(): void {
       if (canvasId) {
         // Type-pinned load (the editor's F4 rule): a wrong-type canvas is a
         // uniform not_found — the agent can never overwrite another type.
-        const existing = await getCanvasForTenant(scope.tenantId, canvasId);
+        const existing = await getCanvasForCaller(scope.tenantId, canvasId, { subject: scope.actingUserId });
         if (!existing || existing.canvasTypeId !== DRAWING_CANVAS_TYPE) {
           return toolError('not_found', `Drawing '${canvasId}' not found in this workspace.`);
         }

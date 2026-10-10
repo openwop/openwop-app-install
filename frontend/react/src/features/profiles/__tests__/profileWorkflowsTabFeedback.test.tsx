@@ -5,12 +5,20 @@
  * already holding its text, so not heard either. Both outcomes now speak
  * through the shell's live regions: success politely (`toast.success`),
  * failure assertively (`Notice announce=`).
+ *
+ * Both live regions are module state and are reset in `beforeEach`. Sabotage-
+ * witnessed (/grade-tests wave 3, `w3g3-wt-*`): silencing or swapping the
+ * success toast, dropping or altering the saved profile handed to `onSaved`,
+ * an unassign that sends the unchanged list, an unannounced or swallowed failure,
+ * and a failure that also speaks a success each turn a named case red.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, act, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
-const { setMyWorkflows } = vi.hoisted(() => ({ setMyWorkflows: vi.fn() }));
+import type { Profile } from '../profilesClient.js';
+
+const { setMyWorkflows } = vi.hoisted(() => ({ setMyWorkflows: vi.fn<(workflows: string[]) => Promise<Profile>>() }));
 vi.mock('../profilesClient.js', async (orig) => ({
   ...(await orig<typeof import('../profilesClient.js')>()),
   setMyWorkflows,
@@ -19,13 +27,13 @@ vi.mock('../../../client/runsClient.js', () => ({ createRun: vi.fn() }));
 
 import { ProfileWorkflowsTab } from '../ProfileWorkflowsTab.js';
 import { ALL_WORKFLOW_OPTIONS } from '../../../agents/roleTemplates.js';
-import { GlobalLiveRegion } from '../../../ui/announce.js';
+import { GlobalLiveRegion, announce } from '../../../ui/announce.js';
 
 const polite = (): string => document.querySelector('[data-owp-live="polite"]')?.textContent ?? '';
 const assertive = (): string => document.querySelector('[data-owp-live="assertive"]')?.textContent ?? '';
 
 /** Complete against the real shape (the teamDirectoryFailedRead lesson). */
-const PROFILE = {
+const PROFILE: Profile = {
   userId: 'u1', tenantId: 't1', displayName: 'Ada Lovelace',
   skills: [], equipment: [], interests: [], workflows: [] as string[],
   portfolioAssetTokens: [], pinnedAgentIds: [],
@@ -34,23 +42,29 @@ const PROFILE = {
 
 const firstWorkflowId = ALL_WORKFLOW_OPTIONS[0]!.workflowId;
 
-const mount = async (workflows: string[], onSaved = vi.fn()): Promise<ReturnType<typeof vi.fn>> => {
+const mount = async (workflows: string[], onSaved = vi.fn<(p: Profile) => void>()): Promise<typeof onSaved> => {
   render(<MemoryRouter><GlobalLiveRegion /><ProfileWorkflowsTab workflows={workflows} onSaved={onSaved} /></MemoryRouter>);
   await act(async () => {});
   return onSaved;
 };
 
 afterEach(cleanup);
-beforeEach(() => { vi.clearAllMocks(); });
+beforeEach(() => {
+  vi.resetAllMocks();
+  announce('');
+  announce('', { assertive: true });
+});
 
 describe('assign / unassign outcomes are announced (PROF-UX-15a)', () => {
   it('a successful ASSIGN is spoken politely and the saved profile is handed back', async () => {
-    setMyWorkflows.mockResolvedValue({ ...PROFILE, workflows: [firstWorkflowId] });
+    const saved: Profile = { ...PROFILE, workflows: [firstWorkflowId] };
+    setMyWorkflows.mockResolvedValue(saved);
     const onSaved = await mount([]);
     fireEvent.change(screen.getByRole('combobox', { name: 'Workflow to assign' }), { target: { value: firstWorkflowId } });
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Assign workflow' })); });
     expect(setMyWorkflows).toHaveBeenCalledWith([firstWorkflowId]);
-    expect(onSaved).toHaveBeenCalledTimes(1);
+    // Handed back: the profile the server SAVED, not a reconstruction of it.
+    expect(onSaved).toHaveBeenCalledExactlyOnceWith(saved);
     expect(polite()).toContain('Workflow assigned.');
     expect(assertive()).not.toContain('Workflow assigned.');
   });
@@ -66,8 +80,8 @@ describe('assign / unassign outcomes are announced (PROF-UX-15a)', () => {
   it('a FAILED save is shown in the Notice AND spoken assertively (the Notice no longer relies on insertion)', async () => {
     setMyWorkflows.mockRejectedValue(new Error('portfolio write refused'));
     const onSaved = await mount([firstWorkflowId]);
-    // The announcer is module-level state, so an earlier test's success string is
-    // still IN the polite region: assert it did not CHANGE, not that it is empty.
+    // The regions are reset in beforeEach; snapshot anyway, so the claim is
+    // "nothing NEW was spoken politely", independent of that reset.
     const politeBefore = polite();
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Unassign' })); });
     expect(onSaved).not.toHaveBeenCalled();

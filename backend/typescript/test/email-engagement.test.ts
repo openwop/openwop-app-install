@@ -5,8 +5,18 @@
  *   - the public click route records + 302s; unknown tokens 404;
  *   - unsubscribe cascades: engagement row + marketing-consent revocation +
  *     crm:suppression row; idempotent;
- *   - stats roll up clicks/uniqueClicks/unsubscribes;
- *   - the suppressed recipient is skipped on the next campaign send.
+ *   - stats roll up clicks/uniqueClicks/unsubscribes.
+ * (That the suppressed recipient is skipped on the next campaign send is asserted in
+ * `email-campaign-send.test.ts` "a GENUINE suppression still writes the terminal row".
+ * This header used to claim it here, and no case did.)
+ * Also ENG-1 (open redirect), ENG-2 (cross-origin POST guard), CMPUX-16 (public-page
+ * locale) and ADR 0242 (HTML render + open pixel).
+ *
+ * Sabotage-witnessed (w9 grade-tests): an engagement row per unsubscribe POST (no
+ * dedup), a mutating unsubscribe GET, a contact id in the tracked URL, an unescaped
+ * HTML body, the pixel not recording, the redirect sink accepting any scheme, the
+ * origin guard accepting any host, and dropping the public base from the allowed hosts
+ * each turn a case red.
  */
 
 import http from 'node:http';
@@ -84,7 +94,7 @@ describe('ADR 0218 — engagement tracking', () => {
     expect(consent?.categories.marketing).toBe(false);
 
     const stats = await engagementStats(T, 'cmp-1');
-    expect(stats.clicks).toBeGreaterThanOrEqual(1);
+    expect(stats.clicks).toBe(1); // exactly the one click fetched above
     expect(stats.uniqueClicks).toBe(1);
     expect(stats.unsubscribes).toBe(1); // idempotent — one row despite two follows
 
@@ -128,6 +138,7 @@ describe('ENG-2 — public POST forms reject a present cross-origin Origin', () 
     // A PRESENT, cross-origin Origin → 403 (defense-in-depth).
     const cross = await fetch(url, { method: 'POST', headers: { ...hdrs, origin: 'https://evil.example' }, body: form });
     expect(cross.status).toBe(403);
+    expect(await getConsent(T, 'ct-eng2'), 'a refused POST writes no consent').toBeNull();
 
     // Same-origin Origin (host matches) → allowed.
     const host = new URL(BASE).host;
@@ -144,8 +155,10 @@ describe('ENG-2 — public POST forms reject a present cross-origin Origin', () 
     const url = `${BASE}/host/openwop-app/public-email/u/${encodeURIComponent(tok)}`;
     const cross = await fetch(url, { method: 'POST', headers: { origin: 'https://evil.example' } });
     expect(cross.status).toBe(403);
+    expect(await isSuppressed(T, 'eng2b@example.com'), 'a refused POST unsubscribes nobody').toBe(false);
     const absent = await fetch(url, { method: 'POST' });
     expect(absent.status).toBe(200); // no Origin → one-click still works
+    expect(await isSuppressed(T, 'eng2b@example.com')).toBe(true);
   });
 
   it('accepts the configured public base host even when it differs from the request Host (Firebase→Cloud Run proxy)', async () => {

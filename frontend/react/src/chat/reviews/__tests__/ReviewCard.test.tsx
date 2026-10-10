@@ -1,8 +1,19 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react';
+vi.mock('../ReviewHandoff.js', () => ({ ReviewHandoff: () => null })); // own tests: reviewHandoff.test.tsx
+import { render, screen, fireEvent, cleanup, waitFor, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { ReviewCard } from '../ReviewCard.js';
 import type { ReviewRequest } from '../reviewClient.js';
+import { confirm } from '../../../ui/confirm.js';
+import { useReviewStatusStore } from '../reviewStatusStore.js';
+
+vi.mock('../../../ui/confirm.js', () => ({ confirm: vi.fn(() => Promise.resolve(true)) }));
+// `/runs/:runId` is admin-tier; the typed-answer fallback depends on the caller.
+let admin = false;
+vi.mock('../../../client/useEffectiveAccess.js', () => ({
+  useEffectiveAccessState: () => ({ access: {}, resolved: true }),
+  isAdminCaller: () => admin,
+}));
 
 afterEach(cleanup);
 
@@ -75,15 +86,98 @@ describe('ReviewCard', () => {
     expect(screen.queryByRole('button', { name: /Reject/ })).toBeNull();
   });
 
-  it('sends an empty value object for a requiresValue (interrupt) action', async () => {
-    const onDecide = vi.fn().mockResolvedValue(undefined);
-    const interruptReview: ReviewRequest = {
-      ...base, reviewId: 'interrupt:i1', source: 'interrupt', kind: 'clarification',
+  describe('ADR 0778 D10 correction — a typed answer is collected on the card', () => {
+    afterEach(() => { admin = false; });
+    const typed = (over: Partial<ReviewRequest>): ReviewRequest => ({
+      ...base, reviewId: 'interrupt:i1', source: 'interrupt', kind: 'clarification', runId: 'run-1', nodeId: 'ask',
       actions: [{ action: 'resolve', label: 'Submit', requiresValue: true }], provenanceRefs: [],
-    };
-    render(<ReviewCard review={interruptReview} onDecide={onDecide} />);
-    fireEvent.click(screen.getByRole('button', { name: /Submit/ }));
-    await waitFor(() => expect(onDecide).toHaveBeenCalledWith('resolve', { value: {} }));
+      ...over,
+    });
+
+    it('a member answers a clarification inline; the value is posted, never an invented `{}`', async () => {
+      const onDecide = vi.fn().mockResolvedValue(undefined);
+      render(<MemoryRouter><ReviewCard review={typed({ answerForm: { question: 'Which colour?' } })} onDecide={onDecide} /></MemoryRouter>);
+      expect(screen.getByText('Which colour?')).toBeTruthy();
+      expect(document.querySelector('a[href^="/runs/"]')).toBeNull();
+      const field = screen.getByRole('textbox', { name: /answer/i });
+      // A list of review cards must not steal focus on mount.
+      expect(document.activeElement).not.toBe(field);
+      fireEvent.change(field, { target: { value: 'the blue one' } });
+      fireEvent.click(screen.getByRole('button', { name: /submit/i }));
+      await waitFor(() => expect(onDecide).toHaveBeenCalledWith('resolve', expect.objectContaining({ value: { answer: 'the blue one' } })));
+    });
+
+    it('a refinement starts from the draft and posts the edit', async () => {
+      const onDecide = vi.fn().mockResolvedValue(undefined);
+      render(<MemoryRouter><ReviewCard review={typed({ kind: 'refinement', answerForm: { current: 'Draft one' } })} onDecide={onDecide} /></MemoryRouter>);
+      const field = screen.getByRole('textbox', { name: /draft/i }) as HTMLTextAreaElement;
+      expect(field.value).toBe('Draft one');
+      fireEvent.change(field, { target: { value: 'Draft two' } });
+      fireEvent.click(screen.getByRole('button', { name: /submit refinement/i }));
+      await waitFor(() => expect(onDecide).toHaveBeenCalledWith('resolve', expect.objectContaining({ value: { refinement: 'Draft two' } })));
+    });
+
+    it('a kind the card cannot answer: an admin gets the run link, a member is told who can answer — never a dead link', () => {
+      const onDecide = vi.fn();
+      admin = true;
+      render(<MemoryRouter><ReviewCard review={typed({ kind: 'external-event' })} onDecide={onDecide} /></MemoryRouter>);
+      expect(screen.queryByRole('button', { name: /Submit/ })).toBeNull();
+      expect(screen.getByRole('link', { name: /Answer on the run page/ }).getAttribute('href')).toBe('/runs/run-1');
+      cleanup();
+
+      admin = false;
+      render(<MemoryRouter><ReviewCard review={typed({ kind: 'external-event' })} onDecide={onDecide} /></MemoryRouter>);
+      expect(document.querySelector('a[href^="/runs/"]')).toBeNull();
+      expect(screen.getByText(/A workspace admin can answer it/)).toBeTruthy();
+      expect(onDecide).not.toHaveBeenCalled();
+    });
+  });
+
+  it('ADR 0778 APUX-3 — canDecide:false offers no decision, and says why', () => {
+    render(<ReviewCard review={{ ...base, canDecide: false }} onDecide={vi.fn()} />);
+    expect(screen.queryByRole('button', { name: /Approve & run/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Reject/ })).toBeNull();
+    // An approval-source review names the reason (closing review I5).
+    expect(screen.getByText(/Only the approvers named on this request/)).toBeTruthy();
+    cleanup();
+    render(<ReviewCard review={{ ...base, reviewId: 'interrupt:x', source: 'interrupt', kind: 'approval', canDecide: false }} onDecide={vi.fn()} />);
+    expect(screen.getByText(/don't have permission to respond/)).toBeTruthy();
+  });
+
+  it('ADR 0778 APUX-9 — reject asks first; a declined confirm posts nothing', async () => {
+    vi.mocked(confirm).mockResolvedValueOnce(false);
+    const onDecide = vi.fn().mockResolvedValue(undefined);
+    render(<ReviewCard review={base} onDecide={onDecide} />);
+    fireEvent.click(screen.getByRole('button', { name: /Reject/ }));
+    await waitFor(() => expect(confirm).toHaveBeenCalled());
+    expect(onDecide).not.toHaveBeenCalled();
+  });
+
+  it('ADR 0778 APUX-10 — a same-tick double click posts once', async () => {
+    let release!: () => void;
+    const onDecide = vi.fn(() => new Promise<void>((r) => { release = r; }));
+    render(<ReviewCard review={base} onDecide={onDecide} />);
+    const approve = screen.getByRole('button', { name: /Approve & run/ }) as HTMLButtonElement;
+    // Both clicks inside ONE act: no re-render between them, so the `disabled`
+    // state cannot be what drops the second (fireEvent flushes per call, which
+    // is why a fireEvent pair passes even without the ref).
+    act(() => { approve.click(); approve.click(); });
+    expect(onDecide).toHaveBeenCalledTimes(1);
+    release();
+  });
+
+  it('ADR 0778 APUX-1/5 — a failure the store kept is shown on the REMOUNTED card, localized, never raw — and only once', async () => {
+    const refused = Object.assign(new Error('forbidden_scope: Missing required scope: approvals:respond'), { httpStatus: 403 });
+    useReviewStatusStore.setState({ failureById: { [base.reviewId]: refused } });
+    const first = render(<ReviewCard review={base} onDecide={vi.fn()} />);
+    expect(await screen.findByText(/permission to do that/i)).toBeTruthy();
+    expect(screen.queryByText(/forbidden_scope/)).toBeNull();
+    // Consumed by the card that showed it: a later remount does not show (or
+    // announce) it again (closing review I1).
+    expect(useReviewStatusStore.getState().failureById[base.reviewId]).toBeUndefined();
+    first.unmount();
+    render(<ReviewCard review={base} onDecide={vi.fn()} />);
+    expect(screen.queryByText(/permission to do that/i)).toBeNull();
   });
 });
 
@@ -105,7 +199,7 @@ const composed: ReviewRequest = {
     definitionHash: 'pin-1',
     liveDefinitionHash: 'live-2',
     editedSinceProposed: true,
-    agentProfileId: 'feature.workflow-author.agents.workflow-architect',
+    agentProfileId: 'vendor.openwop-app.workflow-author.agents.workflow-architect',
     nodeCount: 3,
     edgeCount: 2,
     expiresAt: '2099-01-01T00:00:00Z',
@@ -155,5 +249,45 @@ describe('ReviewCard composed-workflow section (ADR 0473)', () => {
     const resolved: ReviewRequest = { ...composed, status: 'rejected', actions: [], decisionNote: 'use the CRM chain instead' };
     render(<MemoryRouter><ReviewCard review={resolved} onDecide={vi.fn()} /></MemoryRouter>);
     expect(screen.getByText('use the CRM chain instead')).toBeTruthy();
+  });
+});
+
+describe('ADR 0862 — an assistant action review', () => {
+  const action: ReviewRequest = {
+    ...base,
+    kind: 'assistant-action',
+    actions: [{ action: 'approve', label: 'Approve' }, { action: 'reject', label: 'Reject' }],
+    assistantAction: {
+      actionId: 'act:1', kind: 'email.send', contentHash: 'hash-v1',
+      payload: { to: ['dana@example.com'], subject: 'Q3 numbers' },
+    },
+  };
+
+  it('renders the fields the action will send, and approve echoes the hash of what is shown', async () => {
+    const onDecide = vi.fn().mockResolvedValue(undefined);
+    render(<MemoryRouter><ReviewCard review={action} onDecide={onDecide} /></MemoryRouter>);
+    expect(await screen.findByText('Q3 numbers')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: /^Approve$/ }));
+    await waitFor(() => expect(onDecide).toHaveBeenCalledWith('approve', { expectedContentHash: 'hash-v1' }));
+  });
+
+  it('a reject carries no hash (refusing a changed action is still a refusal)', async () => {
+    const onDecide = vi.fn().mockResolvedValue(undefined);
+    render(<MemoryRouter><ReviewCard review={action} onDecide={onDecide} /></MemoryRouter>);
+    fireEvent.click(screen.getByRole('button', { name: /^Reject$/ }));
+    await waitFor(() => expect(onDecide).toHaveBeenCalledWith('reject', {}));
+  });
+
+  it('a withheld or unavailable card offers no decision and names the permission remedy', () => {
+    const onDecide = vi.fn();
+    const unavailable: ReviewRequest = { ...action, canDecide: false };
+    delete unavailable.assistantAction;
+    render(<ReviewCard review={unavailable} onDecide={onDecide} />);
+    expect(screen.queryByRole('button', { name: /^Approve$/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Reject$/ })).toBeNull();
+    expect(screen.queryByRole('textbox')).toBeNull();
+    expect(screen.getByText(/Ask an admin of this workspace for access/)).toBeTruthy();
+    expect(screen.queryByText(/Only the approvers named on this request/)).toBeNull();
+    expect(onDecide).not.toHaveBeenCalled();
   });
 });

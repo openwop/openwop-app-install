@@ -3,8 +3,8 @@
 Drafts commit messages, PR titles + bodies, release notes, and changelog entries from a diff. Conventional-Commits-aware.
 
 | Pack name | `core.openwop.agents.git-author` |
-| Version | `1.0.0` |
-| Engine | OpenWOP `>=1.1.0 <2.0.0` |
+| Version | `1.0.1` |
+| Engine | OpenWOP `>=1.1.0 <3.0.0` |
 | Agents | 1 |
 | Required host capabilities | `aiProviders`, `host.agentRuntime` |
 | License | Apache-2.0 |

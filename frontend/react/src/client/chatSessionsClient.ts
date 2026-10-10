@@ -134,6 +134,20 @@ export async function listChatSessions(): Promise<ChatSessionHeader[]> {
   return r.sessions;
 }
 
+/** ADR 0776 P2 — the caller's conversations with a run in flight (pending or
+ *  running; approvals are the review inbox's). `truncated` ⇒ the answer is a floor. */
+export async function listRunningConversations(): Promise<{ conversations: Array<{ conversationId: string; runs: number }>; truncated: boolean }> {
+  return http(`${PATH}/running`);
+}
+
+/** ADR 0784 P2 — the read/write effect of tools, by the names a turn recorded.
+ *  Unknown names are omitted by the server (never guessed). */
+export async function getToolEffects(names: readonly string[]): Promise<Record<string, 'read' | 'write'>> {
+  if (names.length === 0) return {};
+  const r = await http<{ effects: Record<string, 'read' | 'write'> }>(`/host/openwop-app/chat/tool-effects?names=${encodeURIComponent(names.join(','))}`);
+  return r.effects ?? {};
+}
+
 /** A conversation/message full-text search hit (ADR 0112). */
 export interface ConversationSearchHit {
   conversationId: string;
@@ -365,6 +379,21 @@ export async function getSessionFeedback(sessionId: string): Promise<Record<stri
     `/host/openwop-app/chat/sessions/${encodeURIComponent(sessionId)}/feedback`,
   );
   return r.feedback ?? {};
+}
+
+/** ADR 0777 — ask the server to bind an embedded conversation to the entity
+ *  beside it. The server checks the caller may read it; a refusal (404) means
+ *  NOT bound. Resolves true only when the server accepted. */
+export async function setConversationFocus(sessionId: string, focus: { kind: 'canvas'; id: string }): Promise<boolean> {
+  try {
+    await http<unknown>(
+      `/host/openwop-app/chat/sessions/${encodeURIComponent(sessionId)}/focus`,
+      { method: 'PUT', body: JSON.stringify(focus) },
+    );
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Record the conversation RUN id backing a chat (ADR 0067 continuity) so a

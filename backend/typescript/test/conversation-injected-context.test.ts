@@ -57,7 +57,7 @@ async function api<T = unknown>(path: string, init: RequestInit = {}): Promise<{
 async function waitForGate(runId: string): Promise<void> {
   for (let i = 0; i < 80; i++) {
     await new Promise((r) => setTimeout(r, 20));
-    const { body } = await api<{ status: string }>(`/v1/runs/${runId}`);
+    const { body } = await api<{ status: string }>(`/runs/${runId}`);
     if (body.status.startsWith('waiting')) return;
   }
   throw new Error('gate never opened');
@@ -89,7 +89,7 @@ describe('conversation exchange — injected context resolves by run.metadata.ch
     try {
       // The conversation run carries the chat sessionId in its metadata — the link
       // that lets the exchange resolve the meta above.
-      const { body: created } = await api<{ runId: string }>('/v1/runs', { method: 'POST', body: JSON.stringify({
+      const { body: created } = await api<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({
         workflowId: 'openwop-app.conversation',
         // ADR 0315: byok + non-tool-calling provider pins the INLINE path (the managed
         // default now takes the tool loop); this test covers the inline prompt injection.
@@ -101,7 +101,7 @@ describe('conversation exchange — injected context resolves by run.metadata.ch
       await waitForGate(runId);
 
       programMock('', [{ content: 'Acknowledged.' }]);
-      await api(`/v1/runs/${runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({
+      await api(`/runs/${runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({
         resumeValue: { operation: 'exchange', turn: { content: "what's our priority?", to: agentId } },
       }) });
 
@@ -135,14 +135,14 @@ describe('conversation exchange — injected context resolves by run.metadata.ch
     await markAsBoardGroup(TENANT, sessionId, 'board-degraded', [`agent:${agentId}`], undefined, undefined, undefined);
     registerBoardContextResolver(async () => { throw new Error('strategy store unavailable'); });
     try {
-      const { body: created } = await api<{ runId: string }>('/v1/runs', { method: 'POST', body: JSON.stringify({
+      const { body: created } = await api<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({
         workflowId: 'openwop-app.conversation',
         inputs: { provider: 'mock', model: 'mock-1', credentialRef: 'byok:mock' },
         tenantId: TENANT, metadata: { chatSessionId: sessionId },
       }) });
       await waitForGate(created.runId);
       programMock('', [{ content: 'Acknowledged.' }]);
-      await api(`/v1/runs/${created.runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({
+      await api(`/runs/${created.runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({
         resumeValue: { operation: 'exchange', turn: { content: 'what should we do?', to: agentId } },
       }) });
       const system = lastReceivedMessages('')!.find((m) => m.role === 'system')?.content ?? '';
@@ -168,14 +168,14 @@ describe('conversation exchange — injected context resolves by run.metadata.ch
     await markAsBoardGroup(TENANT, sessionId, 'board-healthy', [`agent:${agentId}`], undefined, undefined, undefined);
     registerBoardContextResolver(async () => LIVE);
     try {
-      const { body: created } = await api<{ runId: string }>('/v1/runs', { method: 'POST', body: JSON.stringify({
+      const { body: created } = await api<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({
         workflowId: 'openwop-app.conversation',
         inputs: { provider: 'mock', model: 'mock-1', credentialRef: 'byok:mock' },
         tenantId: TENANT, metadata: { chatSessionId: sessionId },
       }) });
       await waitForGate(created.runId);
       programMock('', [{ content: 'Acknowledged.' }]);
-      await api(`/v1/runs/${created.runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({
+      await api(`/runs/${created.runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({
         resumeValue: { operation: 'exchange', turn: { content: 'what should we do?', to: agentId } },
       }) });
       const system = lastReceivedMessages('')!.find((m) => m.role === 'system')?.content ?? '';
@@ -192,14 +192,14 @@ describe('conversation exchange — injected context resolves by run.metadata.ch
       agentId, persona: 'Plain', modelClass: 'general', systemPrompt: 'Be plain.',
       packName: 'test', packVersion: '0', toolAllowlist: [], confidence: { defaultThreshold: 0.5 },
     });
-    const { body: created } = await api<{ runId: string }>('/v1/runs', { method: 'POST', body: JSON.stringify({
+    const { body: created } = await api<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({
       workflowId: 'openwop-app.conversation', // ADR 0315: byok + non-tool-calling provider pins the INLINE path (the managed
       // default now takes the tool loop); this test covers the inline prompt injection.
       inputs: { provider: 'mock', model: 'mock-1', credentialRef: 'byok:mock' }, tenantId: TENANT,
     }) });
     await waitForGate(created.runId);
     programMock('', [{ content: 'ok' }]);
-    await api(`/v1/runs/${created.runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({
+    await api(`/runs/${created.runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({
       resumeValue: { operation: 'exchange', turn: { content: 'hi', to: agentId } },
     }) });
     const system = lastReceivedMessages('')!.find((m) => m.role === 'system')?.content ?? '';
@@ -253,14 +253,14 @@ describe('H1 / ADR 0588 D5 — the likeness gate on the TURN, not just on room-o
   }
 
   async function takeTurn(sessionId: string, agentId: string): Promise<{ status: number; body: { message?: string; details?: { field?: string } } }> {
-    const { body: created } = await api<{ runId: string }>('/v1/runs', { method: 'POST', body: JSON.stringify({
+    const { body: created } = await api<{ runId: string }>('/runs', { method: 'POST', body: JSON.stringify({
       workflowId: 'openwop-app.conversation',
       inputs: { provider: 'mock', model: 'mock-1', credentialRef: 'byok:mock' },
       tenantId: TENANT, metadata: { chatSessionId: sessionId },
     }) });
     await waitForGate(created.runId);
     programMock('', [{ content: 'Here is my advice.' }]);
-    return api(`/v1/runs/${created.runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({
+    return api(`/runs/${created.runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({
       resumeValue: { operation: 'exchange', turn: { content: 'what should we do?', to: agentId } },
     }) });
   }

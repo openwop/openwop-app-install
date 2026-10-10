@@ -71,18 +71,18 @@ function client(): Client {
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), put: (p, b) => call('PUT', p, b), del: (p) => call('DELETE', p) };
 }
 
-const twin = (id: string): string => `/v1/host/openwop-app/agents/${encodeURIComponent(id)}/twin`;
-const GRANTS = '/v1/host/openwop-app/profiles/me/twin-grants';
-const MEM = '/v1/host/openwop-app/profiles/me/memory';
-const RT = '/v1/host/openwop-app/voice/realtime';
+const twin = (id: string): string => `/host/openwop-app/agents/${encodeURIComponent(id)}/twin`;
+const GRANTS = '/host/openwop-app/profiles/me/twin-grants';
+const MEM = '/host/openwop-app/profiles/me/memory';
+const RT = '/host/openwop-app/voice/realtime';
 
 describe('RCL-2 — voice-mint borrowed recall (granted owner vs non-owner)', () => {
   it('the OWNER gets the fenced owner note in instructions; a NON-owner gets nothing', async () => {
     const tenantId = `org:twv-${Date.now()}-${n++}`;
     const admin = client();
-    await admin.post('/v1/host/openwop-app/test/login', { email: `twv-admin-${Date.now()}-${n++}@acme.test`, tenantId });
+    await admin.post('/host/openwop-app/test/login', { email: `twv-admin-${Date.now()}-${n++}@acme.test`, tenantId });
     const member = client();
-    const m = await member.post('/v1/host/openwop-app/test/login', { email: `twv-member-${Date.now()}-${n++}@acme.test`, tenantId });
+    const m = await member.post('/host/openwop-app/test/login', { email: `twv-member-${Date.now()}-${n++}@acme.test`, tenantId });
     const memberId = m.body.user.userId as string;
     // A REGISTERED manifest agent (packs are not mounted in this harness) so
     // the voice mint composes its persona — the borrowed leg only composes for

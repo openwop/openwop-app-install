@@ -1,18 +1,18 @@
 {
   "name": "core.openwop.workflows.production-plan",
-  "version": "1.0.1",
+  "version": "1.0.3",
   "kind": "workflow-chain",
   "description": "Migrated from the deprecated builtin (ADR 0472 P4). chainId keeps the original id; outputRoles restored at registration.",
   "keywords": [
     "production-plan"
   ],
   "engines": {
-    "openwop": ">=1.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "chains": [
     {
       "chainId": "openwop-app.production.plan",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "openwop-app.production.plan",
       "description": "openwop-app.production.plan workflow.",
       "parameters": {
@@ -43,7 +43,7 @@
         "nodes": [
           {
             "id": "plan-generate",
-            "typeId": "feature.production.nodes.plan-generate",
+            "typeId": "feature.production.nodes.plan-generate@1.0.0",
             "inputs": {
               "orgId": "{{params.orgId}}",
               "channels": "{{params.channels}}",

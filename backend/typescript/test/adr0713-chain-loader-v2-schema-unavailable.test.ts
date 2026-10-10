@@ -51,6 +51,7 @@ vi.mock('../src/host/_repoPath.js', async (importOriginal) => {
 });
 
 const { loadWorkflowChainPacks, getChain, _resetChainRegistryForTest } = await import('../src/host/workflowChainPackLoader.js');
+const { __setUnpinnedChainPackWaiversForTests } = await import('../src/host/unpinnedChainPackAllowlist.js');
 
 function chainPack(name: string, chainId: string, signing: unknown): Record<string, unknown> {
   return {
@@ -74,12 +75,17 @@ beforeAll(() => {
   };
   write('v2-signed', chainPack('core.openwop.workflows.whd15-v2', 'whd15.v2-signed', { keyId: 'openwop-team-1', scheme: 'ed25519-canonical-json' }));
   write('unsigned', chainPack('core.openwop.workflows.whd15-unsigned', 'whd15.unsigned', undefined));
+  // ADR 0766 — this file's subject is schema ROUTING, not pins. Since a pin
+  // claims the v2 tree, the v1 route is reachable only by an UNPINNED manifest,
+  // which registers only when waived; the fixtures are waived for that reason.
+  __setUnpinnedChainPackWaiversForTests(['core.openwop.workflows.whd15-v2', 'core.openwop.workflows.whd15-unsigned']);
   _resetChainRegistryForTest();
 });
 afterAll(() => {
   rmSync(root, { recursive: true, force: true });
   if (seam.schemasDir) rmSync(join(seam.schemasDir, '..'), { recursive: true, force: true });
   _resetChainRegistryForTest();
+  __setUnpinnedChainPackWaiversForTests(null);
 });
 
 describe('WHD-15 — the v2 chain-pack schema cannot be compiled', () => {

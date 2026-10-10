@@ -3,7 +3,7 @@
  *
  * Covers:
  *   - a review-mode member's heartbeat QUEUES a proposal instead of running it
- *   - the proposal appears in GET /v1/host/openwop-app/approvals?status=pending
+ *   - the proposal appears in GET /host/openwop-app/approvals?status=pending
  *   - a re-check does NOT duplicate the proposal for the same card (it proposes
  *     the next eligible card)
  *   - CLAIM starts the proposed run + flips the approval to approved+runId
@@ -61,15 +61,15 @@ interface Approval {
 type CheckResult = { picked: boolean; proposed?: boolean; approvalId?: string; cardId?: string; runId?: string };
 
 async function roster(): Promise<RosterEntry[]> {
-  return (await api<{ roster: RosterEntry[] }>('/v1/host/openwop-app/roster')).body.roster;
+  return (await api<{ roster: RosterEntry[] }>('/host/openwop-app/roster')).body.roster;
 }
 async function pending(): Promise<Approval[]> {
-  return (await api<{ items: Approval[] }>('/v1/host/openwop-app/approvals?status=pending')).body.items;
+  return (await api<{ items: Approval[] }>('/host/openwop-app/approvals?status=pending')).body.items;
 }
 
 describe('approval inbox — agents propose, humans dispose', () => {
   beforeAll(async () => {
-    await api('/v1/host/openwop-app/example-data/seed', { method: 'POST', body: '{}' });
+    await api('/host/openwop-app/example-data/seed', { method: 'POST', body: '{}' });
   });
 
   it('guided-mode: a HIGH-priority pick proposes; a routine pick runs (architect memo 2026-06-05)', async () => {
@@ -80,7 +80,7 @@ describe('approval inbox — agents propose, humans dispose', () => {
     const pax = (await roster()).find((r) => r.persona === 'Pax')!;
     expect(pax.autonomyLevel).toBe('guided');
 
-    const first = await api<CheckResult>(`/v1/host/openwop-app/roster/${pax.rosterId}/check`, { method: 'POST', body: '{}' });
+    const first = await api<CheckResult>(`/host/openwop-app/roster/${pax.rosterId}/check`, { method: 'POST', body: '{}' });
     expect(first.status).toBe(200);
     expect(first.body.picked).toBe(true);
     expect(first.body.proposed).toBe(true);
@@ -90,7 +90,7 @@ describe('approval inbox — agents propose, humans dispose', () => {
     // The NEXT pick is the routine (non-high) card — guided runs it
     // immediately, exactly like auto. (The high card stays parked in To Do
     // behind its pending approval; the dedup guard skips it.)
-    const second = await api<CheckResult>(`/v1/host/openwop-app/roster/${pax.rosterId}/check`, { method: 'POST', body: '{}' });
+    const second = await api<CheckResult>(`/host/openwop-app/roster/${pax.rosterId}/check`, { method: 'POST', body: '{}' });
     expect(second.status).toBe(200);
     expect(second.body.picked).toBe(true);
     expect(second.body.proposed).toBeUndefined();
@@ -99,12 +99,12 @@ describe('approval inbox — agents propose, humans dispose', () => {
     // PATCH round-trips guided too (the update path had a review-only
     // normalizer that silently dropped it).
     const cleo = (await roster()).find((r) => r.persona === 'Cleo')!;
-    const patched = await api<RosterEntry>(`/v1/host/openwop-app/roster/${cleo.rosterId}`, {
+    const patched = await api<RosterEntry>(`/host/openwop-app/roster/${cleo.rosterId}`, {
       method: 'PATCH', body: JSON.stringify({ autonomyLevel: 'guided' }),
     });
     expect(patched.status).toBe(200);
     expect(patched.body.autonomyLevel).toBe('guided');
-    const back = await api<RosterEntry>(`/v1/host/openwop-app/roster/${cleo.rosterId}`, {
+    const back = await api<RosterEntry>(`/host/openwop-app/roster/${cleo.rosterId}`, {
       method: 'PATCH', body: JSON.stringify({ autonomyLevel: 'auto' }),
     });
     expect(back.body.autonomyLevel).toBeUndefined();
@@ -117,12 +117,12 @@ describe('approval inbox — agents propose, humans dispose', () => {
     // (A twin WITH unmet requiredConnections would be held at review by the T3.3
     // readiness gate even when set to auto.)
     const felix = (await roster()).find((r) => r.persona === 'Felix')!;
-    const set = await api<RosterEntry>(`/v1/host/openwop-app/roster/${felix.rosterId}`, {
+    const set = await api<RosterEntry>(`/host/openwop-app/roster/${felix.rosterId}`, {
       method: 'PATCH', body: JSON.stringify({ autonomyLevel: 'auto' }),
     });
     expect(set.status).toBe(200);
     expect(set.body.autonomyLevel).toBeUndefined(); // 'auto' is the default → stored as unset
-    const checked = await api<CheckResult>(`/v1/host/openwop-app/roster/${felix.rosterId}/check`, { method: 'POST', body: '{}' });
+    const checked = await api<CheckResult>(`/host/openwop-app/roster/${felix.rosterId}/check`, { method: 'POST', body: '{}' });
     expect(checked.status).toBe(200);
     expect(checked.body.picked).toBe(true);
     expect(checked.body.proposed).toBeUndefined();
@@ -132,13 +132,13 @@ describe('approval inbox — agents propose, humans dispose', () => {
   it('review-mode heartbeat queues a proposal instead of running', async () => {
     const ava = (await roster()).find((r) => r.persona === 'Ava')!;
 
-    const patched = await api<RosterEntry>(`/v1/host/openwop-app/roster/${ava.rosterId}`, {
+    const patched = await api<RosterEntry>(`/host/openwop-app/roster/${ava.rosterId}`, {
       method: 'PATCH', body: JSON.stringify({ autonomyLevel: 'review' }),
     });
     expect(patched.status).toBe(200);
     expect(patched.body.autonomyLevel).toBe('review');
 
-    const checked = await api<CheckResult>(`/v1/host/openwop-app/roster/${ava.rosterId}/check`, { method: 'POST', body: '{}' });
+    const checked = await api<CheckResult>(`/host/openwop-app/roster/${ava.rosterId}/check`, { method: 'POST', body: '{}' });
     expect(checked.status).toBe(200);
     expect(checked.body.picked).toBe(true);
     expect(checked.body.proposed).toBe(true);
@@ -161,8 +161,8 @@ describe('approval inbox — agents propose, humans dispose', () => {
     });
     try {
       const cleo = (await roster()).find((r) => r.persona === 'Cleo')!; // review-mode, escalation contact 'cs-manager'
-      await api(`/v1/host/openwop-app/roster/${cleo.rosterId}`, { method: 'PATCH', body: JSON.stringify({ autonomyLevel: 'review' }) });
-      const checked = await api<CheckResult>(`/v1/host/openwop-app/roster/${cleo.rosterId}/check`, { method: 'POST', body: '{}' });
+      await api(`/host/openwop-app/roster/${cleo.rosterId}`, { method: 'PATCH', body: JSON.stringify({ autonomyLevel: 'review' }) });
+      const checked = await api<CheckResult>(`/host/openwop-app/roster/${cleo.rosterId}/check`, { method: 'POST', body: '{}' });
       expect(checked.body.proposed).toBe(true);
       // 'cs-manager' has no bound User, so it canonicalizes to itself and is notified.
       const esc = captured.find((r) => r.recipientUserId === 'cs-manager');
@@ -181,7 +181,7 @@ describe('approval inbox — agents propose, humans dispose', () => {
   it('a re-check proposes the NEXT card, never a duplicate for the same card', async () => {
     const ava = (await roster()).find((r) => r.persona === 'Ava')!;
     const before = await pending();
-    const checked = await api<CheckResult>(`/v1/host/openwop-app/roster/${ava.rosterId}/check`, { method: 'POST', body: '{}' });
+    const checked = await api<CheckResult>(`/host/openwop-app/roster/${ava.rosterId}/check`, { method: 'POST', body: '{}' });
     expect(checked.body.proposed).toBe(true);
     const after = await pending();
     // A new, distinct proposal — and no card has two pending approvals.
@@ -194,7 +194,7 @@ describe('approval inbox — agents propose, humans dispose', () => {
     const queue = await pending();
     const target = queue[0];
     const claimed = await api<{ status: string; runId: string }>(
-      `/v1/host/openwop-app/approvals/${encodeURIComponent(target.approvalId)}/claim`,
+      `/host/openwop-app/approvals/${encodeURIComponent(target.approvalId)}/claim`,
       { method: 'POST', body: JSON.stringify({ note: 'looks right' }) },
     );
     expect(claimed.status).toBe(200);
@@ -202,23 +202,23 @@ describe('approval inbox — agents propose, humans dispose', () => {
     expect(typeof claimed.body.runId).toBe('string');
 
     expect((await pending()).some((a) => a.approvalId === target.approvalId)).toBe(false);
-    const approved = (await api<{ items: Approval[] }>('/v1/host/openwop-app/approvals?status=approved')).body.items;
+    const approved = (await api<{ items: Approval[] }>('/host/openwop-app/approvals?status=approved')).body.items;
     const found = approved.find((a) => a.approvalId === target.approvalId)!;
     expect(found.runId).toBe(claimed.body.runId);
 
     // Re-claiming a resolved approval is a conflict (idempotency guard).
-    const again = await api(`/v1/host/openwop-app/approvals/${encodeURIComponent(target.approvalId)}/claim`, { method: 'POST', body: '{}' });
+    const again = await api(`/host/openwop-app/approvals/${encodeURIComponent(target.approvalId)}/claim`, { method: 'POST', body: '{}' });
     expect(again.status).toBe(409);
   });
 
   it('REJECT dismisses the proposal and parks the card in the terminal column', async () => {
     const queue = await pending();
     const target = queue[0];
-    const boardId = (await api<{ items: Array<Approval & { boardId?: string }> }>('/v1/host/openwop-app/approvals?status=pending'))
+    const boardId = (await api<{ items: Array<Approval & { boardId?: string }> }>('/host/openwop-app/approvals?status=pending'))
       .body.items.find((a) => a.approvalId === target.approvalId)!.boardId!;
 
     const rejected = await api<{ status: string }>(
-      `/v1/host/openwop-app/approvals/${encodeURIComponent(target.approvalId)}/reject`,
+      `/host/openwop-app/approvals/${encodeURIComponent(target.approvalId)}/reject`,
       { method: 'POST', body: JSON.stringify({ note: 'not now' }) },
     );
     expect(rejected.status).toBe(200);
@@ -227,7 +227,7 @@ describe('approval inbox — agents propose, humans dispose', () => {
 
     // The card moved to the board's terminal (rightmost) column.
     const board = await api<{ board: { columns: Array<{ id: string }> }; cards: Array<{ id: string; columnId: string }> }>(
-      `/v1/host/openwop-app/kanban/boards/${boardId}`,
+      `/host/openwop-app/kanban/boards/${boardId}`,
     );
     const cols = board.body.board.columns;
     const terminalId = cols[cols.length - 1].id;
@@ -237,13 +237,13 @@ describe('approval inbox — agents propose, humans dispose', () => {
 
   it('a claimed run is attributed to the agent in its activity as an approved proposal', async () => {
     const ava = (await roster()).find((r) => r.persona === 'Ava')!;
-    const checked = await api<CheckResult>(`/v1/host/openwop-app/roster/${ava.rosterId}/check`, { method: 'POST', body: '{}' });
+    const checked = await api<CheckResult>(`/host/openwop-app/roster/${ava.rosterId}/check`, { method: 'POST', body: '{}' });
     expect(checked.body.proposed).toBe(true);
     const claimed = await api<{ runId: string }>(
-      `/v1/host/openwop-app/approvals/${encodeURIComponent(checked.body.approvalId!)}/claim`, { method: 'POST', body: '{}' },
+      `/host/openwop-app/approvals/${encodeURIComponent(checked.body.approvalId!)}/claim`, { method: 'POST', body: '{}' },
     );
     const activity = await api<{ items: Array<{ runId: string; source: string }> }>(
-      `/v1/host/openwop-app/roster/${ava.rosterId}/activity`,
+      `/host/openwop-app/roster/${ava.rosterId}/activity`,
     );
     const item = activity.body.items.find((i) => i.runId === claimed.body.runId)!;
     expect(item).toBeTruthy();
@@ -253,15 +253,15 @@ describe('approval inbox — agents propose, humans dispose', () => {
   it('concurrent claims for one proposal start exactly one run (resolve-before-dispatch lock)', async () => {
     // Fresh pending proposal from a different agent.
     const cleo = (await roster()).find((r) => r.persona === 'Cleo')!;
-    await api(`/v1/host/openwop-app/roster/${cleo.rosterId}`, { method: 'PATCH', body: JSON.stringify({ autonomyLevel: 'review' }) });
-    const checked = await api<CheckResult>(`/v1/host/openwop-app/roster/${cleo.rosterId}/check`, { method: 'POST', body: '{}' });
+    await api(`/host/openwop-app/roster/${cleo.rosterId}`, { method: 'PATCH', body: JSON.stringify({ autonomyLevel: 'review' }) });
+    const checked = await api<CheckResult>(`/host/openwop-app/roster/${cleo.rosterId}/check`, { method: 'POST', body: '{}' });
     expect(checked.body.proposed).toBe(true);
     const id = encodeURIComponent(checked.body.approvalId!);
 
     // Two claims race; the lock must let exactly one win.
     const [a, b] = await Promise.all([
-      api<{ runId?: string }>(`/v1/host/openwop-app/approvals/${id}/claim`, { method: 'POST', body: '{}' }),
-      api<{ runId?: string }>(`/v1/host/openwop-app/approvals/${id}/claim`, { method: 'POST', body: '{}' }),
+      api<{ runId?: string }>(`/host/openwop-app/approvals/${id}/claim`, { method: 'POST', body: '{}' }),
+      api<{ runId?: string }>(`/host/openwop-app/approvals/${id}/claim`, { method: 'POST', body: '{}' }),
     ]);
     const oks = [a, b].filter((r) => r.status === 200);
     const conflicts = [a, b].filter((r) => r.status === 409);

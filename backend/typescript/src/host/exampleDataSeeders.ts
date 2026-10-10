@@ -42,6 +42,7 @@ import { ensureMarketingContentPages, countMarketingContentPages } from './marke
 import { ensureMarketingLegalPages, countMarketingLegalPages } from './marketingLegalPages.js';
 import {
   clearWorkforceHistory,
+  clearWorkforceStatuses,
   countWorkforceRuns,
   seedWorkforceEntities,
   seedWorkforceHistory,
@@ -112,7 +113,7 @@ export interface ExampleDataSeeder {
   /** Live count of this kind present for the tenant (drives "N present"). */
   count(tenantId: string, storage: Storage): Promise<number>;
   /** Create what's missing. Returns how many net-new items were created. */
-  seed(tenantId: string, storage: Storage): Promise<{ created: number; details?: Record<string, unknown> }>;
+  seed(tenantId: string, storage: Storage): Promise<{ created: number; details?: Record<string, unknown>; /** Overrides the default "N created" / "already present" line when the step did something else worth saying. */ message?: string }>;
   /** Remove the canonical demo entities (never user-authored data). */
   clear(tenantId: string, storage: Storage): Promise<{ cleared: number; details?: Record<string, unknown> }>;
 }
@@ -218,7 +219,8 @@ const advisorsSeeder: ExampleDataSeeder = {
       created: r.advisorsCreated + r.boardsCreated,
       details: r.skippedToggleOff
         ? { skipped: 'advisory-board feature is off' }
-        : { advisors: r.advisorsCreated, boards: r.boardsCreated },
+        : { advisors: r.advisorsCreated, boards: r.boardsCreated, ...(r.duplicatesMerged ? { duplicatesMerged: r.duplicatesMerged } : {}) },
+      ...(r.duplicatesMerged ? { message: `${r.duplicatesMerged} duplicate advisor(s) merged` + (r.advisorsCreated + r.boardsCreated > 0 ? `, ${r.advisorsCreated + r.boardsCreated} created` : '') } : {}),
     };
   },
   async clear(tenantId, storage) {
@@ -268,7 +270,10 @@ const workforcesSeeder: ExampleDataSeeder = {
   },
   async clear(tenantId, storage) {
     const { runs } = await clearWorkforceHistory(storage, tenantId);
-    return { cleared: runs, details: { runs } };
+    // ADR 0775 D2 — the tenant's cutover decisions go with the history they were
+    // graduated on; otherwise a cleared tenant still reads `production`.
+    const statuses = await clearWorkforceStatuses(tenantId);
+    return { cleared: runs, details: { runs, statuses } };
   },
 };
 
@@ -836,12 +841,12 @@ export async function runExampleDataSeed(
         });
         continue;
       }
-      const { created, details } = await s.seed(tenantId, storage);
+      const { created, details, message } = await s.seed(tenantId, storage);
       const action: SeedAction = created > 0 ? 'created' : 'skipped';
       if (created > 0) summary.created += 1; else summary.skipped += 1;
       await record({
         step: s.id, label: s.label, action, ...auto,
-        message: created > 0 ? `${created} created` : 'already present — skipped',
+        message: message ?? (created > 0 ? `${created} created` : 'already present — skipped'),
         ...(details ? { details } : {}),
       });
     } catch (err) {

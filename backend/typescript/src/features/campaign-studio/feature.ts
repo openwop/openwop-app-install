@@ -28,14 +28,14 @@ export const campaignStudioFeature: BackendFeature = {
     id: 'campaign-studio',
     label: 'Campaign Studio',
     description:
-      'Multi-channel marketing campaigns — design them with the AI chat (the Campaign Strategist agent emits a structured campaign inline in chat) AND create/edit them full-screen: channels, funnel stages, and content assets as editable lists plus doc-level objective/audience, with undo/redo and version history. Constrained typed JSON, never executable code. ON by default.',
+      'Multi-channel marketing campaigns — design them with the AI chat (the Campaign Strategist agent emits a structured campaign inline in chat) AND create/edit them full-screen: channels, funnel stages, and content assets as editable lists plus doc-level objective/audience, with undo/redo and version history. Constrained typed JSON, never executable code.',
     category: 'Documents',
     status: 'on',
     bucketUnit: 'tenant',
     salt: 'campaign-studio',
   },
   requiredPacks: [
-    { name: 'feature.campaign-studio.nodes', version: '1.0.1' },
-    { name: 'feature.campaign-studio.agents', version: '1.0.2' },
+    { name: 'feature.campaign-studio.nodes', version: '1.0.2' },
+    { name: 'vendor.openwop-app.campaign-studio.agents', version: '1.0.3' },
   ],
 };

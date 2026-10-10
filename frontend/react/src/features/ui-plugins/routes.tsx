@@ -16,7 +16,7 @@ const routes: FeatureRoute[] = [
       group: 'Developer',
       label: 'UI Plugins', labelKey: 'uiPluginsLabel',
       icon: PlugIcon,
-      hint: 'Sandboxed front-end plugin packs (RFC 0117/0119)', hintKey: 'uiPluginsHint',
+      hint: 'Sandboxed front-end plugin packs', hintKey: 'uiPluginsHint',
       featureId: 'ui-plugins',
     },
   },

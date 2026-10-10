@@ -1,8 +1,9 @@
 /**
  * Built-in demo agent seed — host extension (non-normative).
  *
- * Seeds the "AI coworkers" story (PRD §7): five named agents (Sally, Marcus,
- * Priya, Devon, Nora), each with a role, a workflow portfolio, a task board
+ * Seeds the "AI coworkers" story (PRD §7): ten named agents (the eight work
+ * twins Ava, Felix, Cleo, Idris, Mira, Ren, Pax and Quill, plus Iris and Ezra —
+ * ADR 0032), each with a role, a workflow portfolio, a task board
  * with varied-source sample cards, a couple of schedules, and an org-chart
  * position. Lets a first-time visitor see the digital-coworker concept without
  * building anything.
@@ -144,7 +145,7 @@ function exampleColumns(triggerWorkflowId: string | undefined): KanbanColumn[] {
  * Demo roster content — loaded from the brand-authoring data file (esbuild
  * inlines it into the bundle). `resolveJsonModule` widens the JSON's string
  * fields to `string`, so we assert the authored shape here; the structure is
- * pinned by `agents-demo.test.ts`, which seeds and asserts the five personas.
+ * pinned by `agents-example-data.test.ts`, which seeds and asserts the ten personas.
  */
 const SEED_AGENTS = demoAgentSeed as readonly SeedAgent[];
 

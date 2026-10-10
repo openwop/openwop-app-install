@@ -1,18 +1,18 @@
 {
   "name": "core.openwop.workflows.campaign-channels",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "kind": "workflow-chain",
   "description": "The five campaign channel child workflows (ADR 0157) — generate→approve DAGs the orchestration fans out over — migrated from the deprecated builtins (ADR 0472 P4). chainIds keep the original ids.",
   "keywords": [
     "Campaign"
   ],
   "engines": {
-    "openwop": ">=1.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "chains": [
     {
       "chainId": "campaign-studio.channel.landing-page",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "Landing page",
       "description": "Generate a campaign landing page from the brief, then approve.",
       "parameters": {
@@ -32,7 +32,7 @@
         "nodes": [
           {
             "id": "generate",
-            "typeId": "feature.campaign-channels.nodes.generate",
+            "typeId": "feature.campaign-channels.nodes.generate@1.2.0",
             "inputs": {
               "briefId": "{{params.briefId}}",
               "channel": "landing_page"
@@ -40,7 +40,7 @@
           },
           {
             "id": "approve",
-            "typeId": "core.approvalGate",
+            "typeId": "core.approvalGate@1.0.0",
             "config": {
               "prompt": "Review the generated landing page."
             }
@@ -56,7 +56,7 @@
     },
     {
       "chainId": "campaign-studio.channel.ad-variants",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "Ad variants",
       "description": "Generate ad variants per platform, then approve — accept all or refine a platform set.",
       "parameters": {
@@ -76,7 +76,7 @@
         "nodes": [
           {
             "id": "generate",
-            "typeId": "feature.campaign-channels.nodes.generate",
+            "typeId": "feature.campaign-channels.nodes.generate@1.2.0",
             "inputs": {
               "briefId": "{{params.briefId}}",
               "channel": "ad_variants"
@@ -84,7 +84,7 @@
           },
           {
             "id": "approve",
-            "typeId": "core.approvalGate",
+            "typeId": "core.approvalGate@1.0.0",
             "config": {
               "prompt": "Review the generated ad variants — accept all or refine a platform set.",
               "itemsFrom": "platformSets"
@@ -101,7 +101,7 @@
     },
     {
       "chainId": "campaign-studio.channel.email-sequence",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "Email sequence",
       "description": "Generate a campaign email sequence, then approve — accept all or refine specific emails.",
       "parameters": {
@@ -121,7 +121,7 @@
         "nodes": [
           {
             "id": "generate",
-            "typeId": "feature.campaign-channels.nodes.generate",
+            "typeId": "feature.campaign-channels.nodes.generate@1.2.0",
             "inputs": {
               "briefId": "{{params.briefId}}",
               "channel": "email_sequence"
@@ -129,7 +129,7 @@
           },
           {
             "id": "approve",
-            "typeId": "core.approvalGate",
+            "typeId": "core.approvalGate@1.0.0",
             "config": {
               "prompt": "Review the generated email sequence — accept all or refine specific emails.",
               "itemsFrom": "emails"
@@ -146,7 +146,7 @@
     },
     {
       "chainId": "campaign-studio.channel.creative-briefs",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "Creative briefs",
       "description": "Generate creative briefs per format, then approve — accept all or refine a format.",
       "parameters": {
@@ -166,7 +166,7 @@
         "nodes": [
           {
             "id": "generate",
-            "typeId": "feature.campaign-channels.nodes.generate",
+            "typeId": "feature.campaign-channels.nodes.generate@1.2.0",
             "inputs": {
               "briefId": "{{params.briefId}}",
               "channel": "creative_briefs"
@@ -174,7 +174,7 @@
           },
           {
             "id": "approve",
-            "typeId": "core.approvalGate",
+            "typeId": "core.approvalGate@1.0.0",
             "config": {
               "prompt": "Review the generated creative briefs — accept all or refine a format.",
               "itemsFrom": "briefs"
@@ -191,7 +191,7 @@
     },
     {
       "chainId": "campaign-studio.channel.social-posts",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "Social posts",
       "description": "Generate social posts, then approve — accept all or refine specific posts.",
       "parameters": {
@@ -211,7 +211,7 @@
         "nodes": [
           {
             "id": "generate",
-            "typeId": "feature.campaign-channels.nodes.generate",
+            "typeId": "feature.campaign-channels.nodes.generate@1.2.0",
             "inputs": {
               "briefId": "{{params.briefId}}",
               "channel": "social_posts"
@@ -219,7 +219,7 @@
           },
           {
             "id": "approve",
-            "typeId": "core.approvalGate",
+            "typeId": "core.approvalGate@1.0.0",
             "config": {
               "prompt": "Review the generated social posts — accept all or refine specific posts.",
               "itemsFrom": "posts"

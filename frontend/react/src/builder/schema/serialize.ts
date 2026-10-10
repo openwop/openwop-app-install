@@ -26,6 +26,10 @@ import type {
 export interface BackendNode {
   nodeId: string;
   typeId: string;
+  /** ADR 0770 D4 — the author's label, only when it differs from the catalog default. */
+  name?: string;
+  /** ADR 0770 D4 — canvas coordinates; layout, never content (hash-stripped host-side). */
+  position?: { x: number; y: number };
   config?: Record<string, unknown>;
   /** RFC 0065 — author hint that this terminal node's output is the
    *  workflow's primary deliverable. Forwarded verbatim to the BE
@@ -309,6 +313,14 @@ function serializeExecutable(wf: SavedWorkflow): SerializeResult {
     return {
       nodeId,
       typeId: entry.typeId,
+      // ADR 0770 D4 — the author's layout, §WorkflowNode `name` + `position`.
+      // Never emitted before, so every reopen re-gridded the canvas and reverted
+      // renamed nodes. `name` only when it differs from the catalog default: the
+      // default is re-derived on read, and emitting it would move the revision
+      // hash of every existing workflow on its first save. `position` is
+      // stripped from both host hashes, so a drag is never a content change.
+      ...(n.name && n.name !== entry.label ? { name: n.name } : {}),
+      position: { x: Math.round(n.position.x), y: Math.round(n.position.y) },
       ...(Object.keys(n.config).length > 0 ? { config: n.config } : {}),
       ...(n.inputs && Object.keys(n.inputs).length > 0 ? { inputs: n.inputs } : {}),
       ...(n.outputRole !== undefined ? { outputRole: n.outputRole } : {}),

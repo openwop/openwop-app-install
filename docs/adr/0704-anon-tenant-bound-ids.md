@@ -1,6 +1,6 @@
 # ADR 0704 — anon-tenant runs are UNBOUND on the v2 wire, and the fix is not ours yet
 
-Status: Accepted (implemented; see § Implementation record)
+Status: Superseded by 0760 (anonymous runs are now bound; see § Correction 2026-09-27)
 
 ## Context
 
@@ -106,3 +106,13 @@ The tripwire's middle leg is restated, not deleted: it asserts the corpus tenant
 segment admits `anon:` **and** that `V2_TENANT_ID` is that segment with exactly the
 `(anon:)?` prefix removed. It reds if the corpus grammar moves again, or if the guard
 is widened without revisiting this ADR.
+
+## Correction 2026-09-27 — superseded by ADR 0760
+
+The "keep anonymous runs UNBOUND for now" decision above is reversed by
+[ADR 0760](0760-anon-tenant-bound-run-ids.md) (issue #4169). A bare id on the
+major-2 wire is exactly what `identity.md` §5 forbids, and the reason this ADR
+first gave (the vendored grammar rejects `anon:`) stopped being true at suite
+2.2.0. The link-stability concern is met without keeping ids bare: storage ids
+are unchanged, and the v2 accept path still takes a bare id. The tripwire is
+restored to its original equality invariant.

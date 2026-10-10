@@ -30,13 +30,19 @@
  * @see ../../../../openwop/spec/v1/localized-content.md §B–§F
  */
 import type { Express, Request } from 'express';
-import { v1 } from '../../middleware/protocolVersion.js';
+import { unadvertisedError, type UnadvertisedGate } from '../../host/unadvertised.js';
 import { OpenwopError } from '../../types.js';
 import { callerSubject, isPersonalTenantId, personalTenantOf, tenantOf } from '../../host/requestSubject.js';
 import { assertOrgScope, type Scope } from '../../host/accessControlService.js';
 import { credentialAuthority, requireKeyLaneScope, tenantOwnerScopes } from '../../host/protocolAuthorization.js';
 import { SYSTEM_SITE_ORG, SYSTEM_SITE_TENANT } from '../../host/systemSite.js';
-import { LOCALE_RE, hostContentLocales, hostDefaultLocale } from '../../host/i18n/index.js';
+import { LOCALE_RE, hostContentLocales, hostDefaultLocale, hostI18nEnabled } from '../../host/i18n/index.js';
+
+/** ADR 0781 — the `content` family is advertised only when host i18n is on. */
+const CONTENT_OFF: UnadvertisedGate = {
+  family: 'content',
+  message: 'This host does not advertise the content family.',
+};
 import {
   PROTOCOL_CONTENT_ID_RE,
   createProtocolPage,
@@ -168,8 +174,20 @@ async function assertBaseAligned(tenantId: string, orgId: string): Promise<strin
 }
 
 export function registerContentProtocolRoutes(app: Express): void {
+  // ADR 0781 — v2 advertises the `content` family only when host i18n is on
+  // (`routes/discovery.ts`), and an unadvertised operation answers 404
+  // `not_found` under major 2 (errors.md § "Unadvertised operations"). Major 1
+  // keeps serving these routes unconditionally, as it always has.
+  app.use('/content', (req, _res, next) => {
+    if (!hostI18nEnabled()) {
+      next(unadvertisedError(req, CONTENT_OFF));
+      return;
+    }
+    next();
+  });
+
   // ── Delivery (§D public; published-only, negotiated) ──────────────────────
-  app.get(v1('/content/pages/:slug'), async (req, res, next) => {
+  app.get('/content/pages/:slug', async (req, res, next) => {
     try {
       const slug = req.params.slug;
       if (!SLUG_RE.test(slug)) {
@@ -232,7 +250,7 @@ export function registerContentProtocolRoutes(app: Express): void {
   });
 
   // ── Admin (§D; tenant-scoped, authenticated — never on the optional-auth carve-out) ──
-  app.get(v1('/content/pages'), async (req, res, next) => {
+  app.get('/content/pages', async (req, res, next) => {
     try {
       requireKeyLaneScope(req, 'content:read');
       await authorizeContent(req, 'workspace:read');
@@ -243,7 +261,7 @@ export function registerContentProtocolRoutes(app: Express): void {
     }
   });
 
-  app.post(v1('/content/pages'), async (req, res, next) => {
+  app.post('/content/pages', async (req, res, next) => {
     try {
       requireKeyLaneScope(req, 'content:write');
       await authorizeContent(req, 'workspace:write');
@@ -279,7 +297,7 @@ export function registerContentProtocolRoutes(app: Express): void {
     }
   });
 
-  app.put(v1('/content/pages/:pageId/sections/:sectionId'), async (req, res, next) => {
+  app.put('/content/pages/:pageId/sections/:sectionId', async (req, res, next) => {
     try {
       requireKeyLaneScope(req, 'content:write');
       await authorizeContent(req, 'workspace:write');
@@ -348,7 +366,7 @@ export function registerContentProtocolRoutes(app: Express): void {
   // `deletePage` owns the cascades (versions, redirects, share links, comment
   // threads, usage, the lifecycle seam, a pending review closed as superseded)
   // and runs the status-tier decision on the row it deletes.
-  app.delete(v1('/content/pages/:pageId'), async (req, res, next) => {
+  app.delete('/content/pages/:pageId', async (req, res, next) => {
     try {
       requireKeyLaneScope(req, 'content:write');
       await authorizeContent(req, 'workspace:write');
@@ -374,7 +392,7 @@ export function registerContentProtocolRoutes(app: Express): void {
     }
   });
 
-  app.get(v1('/content/settings'), async (req, res, next) => {
+  app.get('/content/settings', async (req, res, next) => {
     try {
       requireKeyLaneScope(req, 'content:read');
       await authorizeContent(req, 'workspace:read');

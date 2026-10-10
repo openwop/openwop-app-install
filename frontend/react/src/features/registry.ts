@@ -39,7 +39,7 @@ import { usageAnalyticsFeature } from './usage-analytics/routes.js';
 import { evalsFeature } from './evals/routes.js';
 import { biFeature } from './bi/routes.js';
 import { serviceDeskFeature } from './service-desk/routes.js';
-import { scheduledChatsFeature } from './scheduled-chats/routes.js';
+import { scheduledAgentChatsFeature } from './scheduled-chats/routes.js';
 import { channelsFeature } from './channels/routes.js';
 import { chatWidgetFeature } from './chat-widget/routes.js';
 import { capabilityFirewallFeature } from './capability-firewall/routes.js';
@@ -67,7 +67,6 @@ import { webinarsFeature } from './webinars/routes.js';
 import { creativeVideoFeature } from './creative-video/routes.js';
 import { campaignIntelFeature } from './campaign-intel/routes.js';
 import { accessHubFeature } from './access-hub/routes.js';
-import { modelsFeature } from './models/routes.js';
 import { chatDeploymentFeature } from './chat-deployment/routes.js';
 import { appBuilderFeature } from './app-builder/routes.js';
 import { slidesFeature } from './slides/routes.js';
@@ -78,6 +77,7 @@ import { campaignStudioFeature } from './campaign-studio/routes.js';
 import { canvasPacksFeature } from './canvas-packs/routes.js';
 import { productionFeature } from './production/routes.js';
 import { billingFeature } from './billing/routes.js';
+import { showcaseFeature } from './showcase/routes.js';
 import { commerceConnectFeature } from './commerce-connect/routes.js';
 import { commerceUcpFeature } from './commerce-ucp/routes.js';
 import { commerceUcpBuyerFeature } from './commerce-ucp-buyer/routes.js';
@@ -86,6 +86,7 @@ import { manualTestsFeature } from './manual-tests/routes.js';
 import { designSystemGalleryFeature } from './design-system-gallery/routes.js';
 import { territoriesFeature } from './territories/routes.js';
 import { jobSearchFeature } from './job-search/routes.js';
+import { claudeCodeFeature } from './claude-code/routes.js';
 import { salesCommissionsFeature } from './sales-commissions/routes.js';
 import { dealersFeature } from './dealers/routes.js';
 import { salesMapsFeature } from './sales-maps/routes.js';
@@ -118,13 +119,13 @@ export interface FrontendFeature {
 }
 
 /** Every frontend feature the app composes. Append a new feature here. */
-export const FRONTEND_FEATURES: FrontendFeature[] = [crmFeature, cdpFeature, csmFeature, usersFeature, profilesFeature, mediaFeature, cmsFeature, notificationsFeature, kbFeature, publishingFeature, sharingFeature, formsFeature, consentFeature, analyticsFeature, connectionsFeature, emailFeature, commentsFeature, marketplaceFeature, agentKnowledgeFeature, advisoryBoardFeature, projectsFeature, documentsFeature, priorityMatrixFeature, strategyFeature, brandFeature, campaignBriefFeature, creativeBriefsFeature, campaignOrchestrationFeature, campaignConnectorsFeature, webinarsFeature, creativeVideoFeature, campaignIntelFeature, campaignsFeature, usageAnalyticsFeature, evalsFeature, scheduledChatsFeature, channelsFeature, chatWidgetFeature, capabilityFirewallFeature, modelRouterFeature, ambientWorkGraphFeature, navigationSettingsFeature, accessHubFeature, modelsFeature, chatDeploymentFeature, appBuilderFeature, slidesFeature, drawingsFeature, cadFeature, documentEditorFeature, campaignStudioFeature, canvasPacksFeature, productionFeature, billingFeature, commerceConnectFeature, commerceFeature, commerceUcpFeature, commerceUcpBuyerFeature, recommendationsFeature, promotionsFeature, funnelsFeature, tutorialsFeature, customDomainsFeature, discoveryFeature, manualTestsFeature, designSystemGalleryFeature, territoriesFeature, jobSearchFeature, salesCommissionsFeature, dealersFeature, salesMapsFeature, uiPluginsFeature, dashboardFeature, entitiesFeature, environmentsFeature, kicktodoFeature, kicktodoCirclesFeature,
+export const FRONTEND_FEATURES: FrontendFeature[] = [crmFeature, cdpFeature, csmFeature, usersFeature, profilesFeature, mediaFeature, cmsFeature, notificationsFeature, kbFeature, publishingFeature, sharingFeature, formsFeature, consentFeature, analyticsFeature, connectionsFeature, emailFeature, commentsFeature, marketplaceFeature, agentKnowledgeFeature, advisoryBoardFeature, projectsFeature, documentsFeature, priorityMatrixFeature, strategyFeature, brandFeature, campaignBriefFeature, creativeBriefsFeature, campaignOrchestrationFeature, campaignConnectorsFeature, webinarsFeature, creativeVideoFeature, campaignIntelFeature, campaignsFeature, usageAnalyticsFeature, evalsFeature, scheduledAgentChatsFeature, channelsFeature, chatWidgetFeature, capabilityFirewallFeature, modelRouterFeature, ambientWorkGraphFeature, navigationSettingsFeature, accessHubFeature, chatDeploymentFeature, appBuilderFeature, slidesFeature, drawingsFeature, cadFeature, documentEditorFeature, campaignStudioFeature, canvasPacksFeature, productionFeature, billingFeature, commerceConnectFeature, commerceFeature, commerceUcpFeature, commerceUcpBuyerFeature, recommendationsFeature, promotionsFeature, funnelsFeature, tutorialsFeature, customDomainsFeature, discoveryFeature, manualTestsFeature, designSystemGalleryFeature, territoriesFeature, jobSearchFeature, salesCommissionsFeature, dealersFeature, salesMapsFeature, uiPluginsFeature, dashboardFeature, entitiesFeature, environmentsFeature, kicktodoFeature, kicktodoCirclesFeature,
   kicktodoEngagementFeature,
   kicktodoCommunityFeature, kicktodoOrgProgramsFeature,
   kicktodoStudioFeature,
   kicktodoAdminFeature,
   kicktodoMetricsFeature,
-  kicktodoSeatsFeature, biFeature, serviceDeskFeature,
+  kicktodoSeatsFeature, biFeature, serviceDeskFeature, showcaseFeature, claudeCodeFeature,
 ];
 
 /** Flatten every feature's routes for the manifest. */

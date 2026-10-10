@@ -43,13 +43,13 @@ function client(): Client {
 
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
 async function signup(c: Client, opts: { tenantId?: string } = {}): Promise<{ userId: string }> {
-  const r = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail('pf'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
+  const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail('pf'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
 
-const L = '/v1/host/openwop-app/priority-matrix/lists';
-const P = '/v1/host/openwop-app/priority-matrix/portfolio';
+const L = '/host/openwop-app/priority-matrix/lists';
+const P = '/host/openwop-app/priority-matrix/portfolio';
 const HIGH = { 'strategic-alignment': 10, roi: 10, urgency: 10, 'compliance-risk': 10, cost: 1 };
 const LOW = { 'strategic-alignment': 1, roi: 1, urgency: 1, 'compliance-risk': 1, cost: 10 };
 
@@ -63,7 +63,7 @@ describe('priority-matrix portfolio (ADR 0060)', () => {
   it('merges ideas across the workspace’s lists, ranked by priority, with source + in-list rank', async () => {
     const owner = client();
     await signup(owner);
-    const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
+    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
     await listWithScoredIdea(owner, orgId, 'List A', 'Top across all', HIGH);
     await listWithScoredIdea(owner, orgId, 'List B', 'Bottom across all', LOW);
 
@@ -82,7 +82,7 @@ describe('priority-matrix portfolio (ADR 0060)', () => {
   it('respects topN', async () => {
     const owner = client();
     await signup(owner);
-    const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
+    const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
     await listWithScoredIdea(owner, orgId, 'L1', 'i1', HIGH);
     await listWithScoredIdea(owner, orgId, 'L2', 'i2', LOW);
     const pf = await owner.get(`${P}?topN=1`);
@@ -96,9 +96,9 @@ describe('priority-matrix portfolio (ADR 0060)', () => {
     await signup(owner, { tenantId });
     const member = client();
     const memberUser = await signup(member, { tenantId });
-    const orgA = (await owner.post('/v1/host/openwop-app/orgs', { name: 'Alpha' })).body.orgId;
-    const orgB = (await owner.post('/v1/host/openwop-app/orgs', { name: 'Bravo' })).body.orgId;
-    await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
+    const orgA = (await owner.post('/host/openwop-app/orgs', { name: 'Alpha' })).body.orgId;
+    const orgB = (await owner.post('/host/openwop-app/orgs', { name: 'Bravo' })).body.orgId;
+    await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
     await listWithScoredIdea(owner, orgA, 'A-list', 'visible', HIGH);
     await listWithScoredIdea(owner, orgB, 'B-list', 'hidden', HIGH);
 

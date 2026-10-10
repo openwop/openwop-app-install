@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.agents.sdr",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "Sales Development Representative agent. Researches prospects, drafts outreach (email/LinkedIn/SMS), schedules follow-ups. Persists prospect history to long-term memory. Pure-agent pack.",
   "author": "OpenWOP Working Group",
   "license": "Apache-2.0",
@@ -15,12 +15,12 @@
     "vertical"
   ],
   "engines": {
-    "openwop": ">=1.1.0 <2.0.0"
+    "openwop": ">=1.1.0 <3.0.0"
   },
   "peerDependencies": {
     "aiProviders": "supported",
-    "host.agentRuntime": "supported",
-    "openwop.agents.memoryBackends": ">=longTerm"
+    "agentRuntime": "supported",
+    "agents": ">=longTerm"
   },
   "agents": [
     {
@@ -46,11 +46,20 @@
       },
       "confidence": {
         "defaultThreshold": 0.7
-      }
+      },
+      "role": "skill"
     }
   ],
   "runtime": {
     "language": "remote",
     "entry": "pack.json"
+  },
+  "kind": "node",
+  "peerDependenciesMeta": {
+    "agents": {
+      "facets": [
+        "memoryBackends"
+      ]
+    }
   }
 }

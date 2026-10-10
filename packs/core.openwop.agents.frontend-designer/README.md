@@ -3,8 +3,8 @@
 Frontend / UI design agent. Produces design-system-aware component specs, page layouts, and skeleton code from briefs. Mirrors Anthropic's `frontend-design` skill (~277k installs in marketplace as of early 2026 — top-installed official skill).
 
 | Pack name | `core.openwop.agents.frontend-designer` |
-| Version | `1.0.0` |
-| Engine | OpenWOP `>=1.1.0 <2.0.0` |
+| Version | `1.0.2` |
+| Engine | OpenWOP `>=1.1.0 <3.0.0` |
 | Agents | 1 |
 | Required host capabilities | `aiProviders`, `host.agentRuntime`, `host.fs` |
 | License | Apache-2.0 |

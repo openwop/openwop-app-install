@@ -41,7 +41,7 @@ afterAll(async () => {
 });
 
 const createRun = (key: string): Promise<Response> =>
-  fetch(`${base}/v1/runs`, {
+  fetch(`${base}/runs`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` },
     body: JSON.stringify({ workflowId: 'openwop-app.uppercase', inputs: { text: 'x' } }),

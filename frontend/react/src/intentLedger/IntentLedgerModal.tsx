@@ -25,7 +25,7 @@ import { getLedger, draftLedger, decideLedger, getReckoning, type IntentLedger, 
 // The existing governance agent (its allowlist carries intent-ledger.get +
 // intent-ledger.draft-contract). "Capability at core, not a named agent" — this is
 // just the deep-link target, not new behavior.
-const CHIEF_OF_STAFF_AGENT_ID = 'feature.assistant.agents.chief-of-staff';
+const CHIEF_OF_STAFF_AGENT_ID = 'vendor.openwop-app.assistant.agents.chief-of-staff';
 
 export default function IntentLedgerPanel({ sessionId, onClose, lastUserMessage }: { sessionId: string; onClose: () => void; lastUserMessage?: string }): JSX.Element {
   const { t } = useTranslation('intentLedger');

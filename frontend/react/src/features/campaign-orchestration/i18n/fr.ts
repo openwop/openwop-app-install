@@ -91,4 +91,12 @@ export const messages = {
   dispatchDailyBudget: "Budget quotidien {{amount}} en unités mineures (devise du compte publicitaire)",
   dispatchCreated: "Envoyée le {{when}}",
   dispatchAccount: "Compte {{account}}",
+  // ADR 0852 D6 — the campaign's team ledger
+  ledgerTitle: "Registre d’équipe",
+  ledgerLoading: "Chargement du registre d’équipe…",
+  ledgerLoadFailed: "Le registre d’équipe n’a pas pu être chargé. Rien n’a changé.",
+  ledgerRetry: "Réessayer",
+  ledgerNoneBody: "Cette campagne n’a pas encore de registre d’équipe. En créer un donne à la campagne un projet pour son registre partagé : son objet, son périmètre, les questions ouvertes et les décisions.",
+  ledgerSetUp: "Créer le registre d’équipe",
+  ledgerSetupFailed: "Le registre d’équipe n’a pas pu être créé. Rien n’a été modifié ; réessayez.",
 } as const;

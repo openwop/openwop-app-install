@@ -78,6 +78,8 @@ describe('ADR 0446 feature-dependency classifier', () => {
     // hard dep would be silently mis-classified as a soft [2] and hidden. No such
     // service exists today, so this exercises the DETECTOR on synthetic text.
     expect(textGatesOwnToggle(`const x = await resolveOne('wa', s);`, 'wa')).toBe(true); // literal
+    // ADR 0819 — the pure toggle read the paywall opt-outs use is still an own-toggle gate.
+    expect(textGatesOwnToggle(`const x = await resolveToggle('wa', s);`, 'wa')).toBe(true);
     expect(textGatesOwnToggle(`const TOGGLE_ID = 'wa';\nawait resolveOne(TOGGLE_ID, s);`, 'wa')).toBe(true); // const-hop
     expect(textGatesOwnToggle(`await resolveOne('other', s);`, 'wa')).toBe(false); // another feature's toggle
     expect(textGatesOwnToggle(`export const x = 1;`, 'wa')).toBe(false); // no gate at all

@@ -69,7 +69,10 @@ describe('deploy gates — the shell harness runs inside the backend suite (DGAT
           // (this repo runs several sessions at once) it is SLOW, not wrong, so
           // the timeout is generous — a bare timeout would read like a real
           // failure and send the next person chasing a defect that isn't there.
-          timeout: 120_000,
+          // 240 s since 2026-10-03: the harness takes ~40 s on a quiet box and
+          // ~80 s at load 18, and a peer's full gate hit the old 120 s cap
+          // (`spawnSync bash ETIMEDOUT`) with every case passing when run alone.
+          timeout: 240_000,
         });
       } catch (err) {
         // Surface the harness's own output. A wrapped "exit 1" with no stdout is
@@ -90,6 +93,6 @@ describe('deploy gates — the shell harness runs inside the backend suite (DGAT
       const passed = Number(/deploy-gates: (\d+) passed/.exec(stdout)?.[1] ?? 0);
       expect(passed).toBeGreaterThan(10);
     },
-    130_000,
+    250_000,
   );
 });

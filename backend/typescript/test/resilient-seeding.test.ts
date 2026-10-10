@@ -29,16 +29,16 @@ const asReq = (method: string, path: string): Request => ({ method, path } as Re
 describe('ADR 0292 — request-timeout budget for seed routes', () => {
   it('gives the example-data seed routes the batch budget', () => {
     for (const p of ['seed', 'run', 'clear', 'provision-demo']) {
-      const req = asReq('POST', `/v1/host/openwop-app/example-data/${p}`);
+      const req = asReq('POST', `/host/openwop-app/example-data/${p}`);
       expect(isBatchSeedRoute(req)).toBe(true);
       expect(resolveTimeoutForRequest(req)).toBe(DEFAULT_BATCH_REQUEST_TIMEOUT_MS);
     }
   });
 
   it('keeps the tight default for ordinary routes and the LLM budget for interrupts', () => {
-    expect(resolveTimeoutForRequest(asReq('GET', '/v1/host/openwop-app/example-data/status'))).toBe(DEFAULT_REQUEST_TIMEOUT_MS);
-    expect(resolveTimeoutForRequest(asReq('POST', '/v1/runs/r1/interrupts/n1'))).toBe(DEFAULT_LLM_REQUEST_TIMEOUT_MS);
-    expect(isBatchSeedRoute(asReq('POST', '/v1/runs'))).toBe(false);
+    expect(resolveTimeoutForRequest(asReq('GET', '/host/openwop-app/example-data/status'))).toBe(DEFAULT_REQUEST_TIMEOUT_MS);
+    expect(resolveTimeoutForRequest(asReq('POST', '/runs/r1/interrupts/n1'))).toBe(DEFAULT_LLM_REQUEST_TIMEOUT_MS);
+    expect(isBatchSeedRoute(asReq('POST', '/runs'))).toBe(false);
   });
 });
 

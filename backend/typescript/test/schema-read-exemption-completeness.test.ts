@@ -113,6 +113,7 @@ const CLASSIFICATION: ReadonlyArray<readonly [string, boolean]> = [
   ['openwop:documents.get', false],
   ['openwop:documents.get-template', true],
   ['openwop:documents.list-templates', true],
+  ['openwop:documents.revise', false],
   ['openwop:drawings.get-design', true],
   ['openwop:drawings.render', false],
   ['openwop:email.draft', false],
@@ -147,6 +148,8 @@ const CLASSIFICATION: ReadonlyArray<readonly [string, boolean]> = [
   ['openwop:feature.crm.nodes.list-tasks', false],
   ['openwop:feature.crm.nodes.log-activity', false],
   ['openwop:feature.crm.nodes.persist-segment', false],
+  ['openwop:feature.builder-pair.nodes.read-canvas', true],
+  ['openwop:feature.builder-pair.nodes.suggest-edits', false],
   ['openwop:feature.crm.nodes.segment-vocabulary', true],
   ['openwop:feature.crm.nodes.validate-segment', true],
   ['openwop:feature.csm.nodes.health-read', false],
@@ -228,6 +231,8 @@ const CLASSIFICATION: ReadonlyArray<readonly [string, boolean]> = [
   ['openwop:tasks.deck', false],
   ['openwop:tasks.schedule-followup', false],
   ['openwop:tasks.schedule-recurring', false],
+  ['openwop:team-ledger.get', true],
+  ['openwop:team-ledger.propose', false],
   ['openwop:territories.active-model', false],
   ['openwop:territories.attainment', false],
   ['openwop:territories.list-models', false],
@@ -313,6 +318,13 @@ const ADJUDICATED: Record<string, { schemaCarrying: boolean; why: string }> = {
       + 'channel id" — and each row carries the workflowId the generator dispatches. MEASURED: five '
       + 'channels today and lossy elides at >5, so the exemption is PREVENTIVE; the contract is the '
       + 'invariant, not the current length.',
+  },
+  'openwop:team-ledger.get': {
+    schemaCarrying: true,
+    why:
+      '(d) ADR 0831 — returns the project\'s `inScope` AND `outOfScope` lists; an `outOfScope` list of '
+      + 'five or more truncates under lossy, deleting something the team RULED OUT from what the model is '
+      + 'told before it proposes or acts. The same polarity as intent-ledger.get.',
   },
   'openwop:intent-ledger.get': {
     schemaCarrying: true,

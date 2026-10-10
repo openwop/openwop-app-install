@@ -155,6 +155,6 @@ function withOutputRoles(roles: Record<string, 'primary' | 'secondary'>) {
  *  so one pack drift never aborts the boot loop). */
 export function registerInsightsMetaWorkflows(): void {
   for (const id of [WEEKLY_VARIANCE_ID, ANNIVERSARY_DRAFT_ID, TALENT_PREP_ID]) {
-    registerChainBackedWorkflow(id, { postProcess: insightsPostProcess(id) });
+    registerChainBackedWorkflow(id, { postProcess: insightsPostProcess(id), featureId: 'insights-suite' }); // ADR 0820 §7 / G6
   }
 }

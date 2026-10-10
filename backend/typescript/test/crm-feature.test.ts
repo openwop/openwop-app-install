@@ -7,20 +7,24 @@
  *   - Contacts CRUD, tenant-scoped.
  *   - Triage stamps the resolved variant + bindings into run.metadata
  *     (the replay-safe home — verified to round-trip via GET /v1/runs/{id}).
- *   - The feature.crm.nodes pack is well-formed (namespace + node map).
+ *
+ * The pack-shape cases that used to live here were cut (grade-tests w4):
+ * `crm-node-replay.test.ts` classifies every manifest node by its full
+ * `feature.crm.nodes.*` typeId, and `crm-node-through-surface.test.ts`
+ * ('pure: triage + triage-enriched …') runs the node map and asserts exact
+ * outputs — the same sabotage (renaming the triage export) reds it.
+ *
+ * Sabotage-witnessed: the toggle gate ignoring `enabled`, a stale variant in
+ * the stamp, the contact's last-triage write dropped, and a null owner patch
+ * not clearing each turn a case below red.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { createApp } from '../src/index.js';
 import { __clearToggleStore } from '../src/host/featureToggles/service.js';
 import { __resetCrmStore } from '../src/features/crm/contactsService.js';
-
-const PACK_DIR = join(__dirname, '..', '..', '..', 'packs', 'feature.crm.nodes');
 
 describe('CRM feature (sqlite memory app)', () => {
   let server: http.Server;
@@ -61,7 +65,7 @@ describe('CRM feature (sqlite memory app)', () => {
   }
 
   async function setCrm(status: 'on' | 'off'): Promise<void> {
-    const r = await jf('/v1/host/openwop-app/feature-toggles/admin/configs/crm', {
+    const r = await jf('/host/openwop-app/feature-toggles/admin/configs/crm', {
       method: 'PUT',
       body: JSON.stringify({
         status,
@@ -82,51 +86,55 @@ describe('CRM feature (sqlite memory app)', () => {
     // pre-0191 expectation of 404-by-default made this the suite's permanent
     // "known failure". Backend authority is proven by configuring OFF first.
     await setCrm('off');
-    const r = await jf('/v1/host/openwop-app/crm/contacts');
+    const r = await jf('/host/openwop-app/crm/contacts');
     expect(r.status).toBe(404);
   });
 
   it('contacts CRUD works once CRM is enabled', async () => {
     await setCrm('on');
-    const created = await jf<{ contactId: string; name: string; stage: string }>('/v1/host/openwop-app/crm/contacts', {
+    const created = await jf<{ contactId: string; name: string; stage: string }>('/host/openwop-app/crm/contacts', {
       method: 'POST',
       body: JSON.stringify({ name: 'Ada Lovelace', company: 'Analytical Engines', stage: 'qualified' }),
     });
     expect(created.status).toBe(201);
     expect(created.body.contactId.startsWith('crm:')).toBe(true);
 
-    const list = await jf<{ contacts: { contactId: string }[] }>('/v1/host/openwop-app/crm/contacts');
+    const list = await jf<{ contacts: { contactId: string }[] }>('/host/openwop-app/crm/contacts');
     expect(list.body.contacts.some((c) => c.contactId === created.body.contactId)).toBe(true);
   });
 
   it('triage stamps the resolved variant + bindings into run.metadata (round-trips)', async () => {
     await setCrm('on');
-    const contact = await jf<{ contactId: string }>('/v1/host/openwop-app/crm/contacts', {
+    const contact = await jf<{ contactId: string }>('/host/openwop-app/crm/contacts', {
       method: 'POST',
       body: JSON.stringify({ name: 'Grace Hopper', company: 'Navy', stage: 'customer' }),
     });
-    const triage = await jf<{ runId: string; variant: string | null; bindings: unknown }>(
-      `/v1/host/openwop-app/crm/contacts/${contact.body.contactId}/triage`,
+    const triage = await jf<{ runId: string; variant: string | null; triageVariant: string; bindings: unknown }>(
+      `/host/openwop-app/crm/contacts/${contact.body.contactId}/triage`,
       { method: 'POST', body: JSON.stringify({ workflowId }) },
     );
     expect(triage.status).toBe(202);
     expect(['basic', 'enriched']).toContain(triage.body.variant);
-    expect(triage.body.bindings).not.toBeNull();
+    // The toggle's variant keys mirror the binding they carry (basic → triage,
+    // enriched → triage-enriched), so the dispatched triage variant must agree.
+    expect(triage.body.triageVariant).toBe(triage.body.variant);
+    expect(triage.body.bindings).toEqual([expect.objectContaining({ slot: 'crm.triage' })]);
 
     // The stamp lives in host-internal run.metadata (off the normative wire);
     // read it via the CRM provenance endpoint.
-    const stamp = await jf<{ featureVariant?: { feature?: string; variant?: string }; crm?: { contactId?: string } }>(
-      `/v1/host/openwop-app/crm/runs/${triage.body.runId}`,
+    const stamp = await jf<{ featureVariant?: { feature?: string; variant?: string; bindings?: unknown }; crm?: { contactId?: string } }>(
+      `/host/openwop-app/crm/runs/${triage.body.runId}`,
     );
     expect(stamp.status).toBe(200);
     expect(stamp.body.featureVariant?.feature).toBe('crm');
     expect(stamp.body.featureVariant?.variant).toBe(triage.body.variant);
+    expect(stamp.body.featureVariant?.bindings, 'the replay-safe stamp carries the bindings the run was dispatched with').toEqual(triage.body.bindings);
     expect(stamp.body.crm?.contactId).toBe(contact.body.contactId);
 
     // B3a (ADR 0008 amendment): the contact carries the denormalized
     // last-triage stamp (variant + runId + at) — the run stays the SSoT.
     const after = await jf<{ lastTriage?: { variant: string | null; runId: string; at: string } }>(
-      `/v1/host/openwop-app/crm/contacts/${contact.body.contactId}`,
+      `/host/openwop-app/crm/contacts/${contact.body.contactId}`,
     );
     expect(after.status).toBe(200);
     expect(after.body.lastTriage?.runId).toBe(triage.body.runId);
@@ -136,18 +144,18 @@ describe('CRM feature (sqlite memory app)', () => {
 
   it('contact owner: set on create, patch, and clear (ADR 0008 amendment)', async () => {
     await setCrm('on');
-    const created = await jf<{ contactId: string; owner?: string }>('/v1/host/openwop-app/crm/contacts', {
+    const created = await jf<{ contactId: string; owner?: string }>('/host/openwop-app/crm/contacts', {
       method: 'POST',
       body: JSON.stringify({ name: 'Owned Contact', owner: 'user:bob' }),
     });
     expect(created.status).toBe(201);
     expect(created.body.owner).toBe('user:bob');
-    const patched = await jf<{ owner?: string }>(`/v1/host/openwop-app/crm/contacts/${created.body.contactId}`, {
+    const patched = await jf<{ owner?: string }>(`/host/openwop-app/crm/contacts/${created.body.contactId}`, {
       method: 'PATCH',
       body: JSON.stringify({ owner: 'user:carol' }),
     });
     expect(patched.body.owner).toBe('user:carol');
-    const cleared = await jf<{ owner?: string }>(`/v1/host/openwop-app/crm/contacts/${created.body.contactId}`, {
+    const cleared = await jf<{ owner?: string }>(`/host/openwop-app/crm/contacts/${created.body.contactId}`, {
       method: 'PATCH',
       body: JSON.stringify({ owner: null }),
     });
@@ -156,38 +164,7 @@ describe('CRM feature (sqlite memory app)', () => {
 
   it('flipping CRM off makes the surface 404 again', async () => {
     await setCrm('off');
-    const r = await jf('/v1/host/openwop-app/crm/contacts');
+    const r = await jf('/host/openwop-app/crm/contacts');
     expect(r.status).toBe(404);
-  });
-});
-
-describe('feature.crm.nodes pack', () => {
-  it('pack.json is well-formed and node typeIds match the pack namespace', () => {
-    const manifest = JSON.parse(readFileSync(join(PACK_DIR, 'pack.json'), 'utf8')) as {
-      name: string;
-      version: string;
-      engines: { openwop: string };
-      runtime: { language: string; entry: string };
-      nodes: { typeId: string; version: string; category: string; role: string }[];
-    };
-    expect(manifest.name).toBe('feature.crm.nodes');
-    expect(manifest.engines.openwop).toBeTruthy();
-    expect(manifest.runtime.entry).toBe('./index.mjs');
-    expect(manifest.nodes.length).toBeGreaterThan(0);
-    for (const n of manifest.nodes) {
-      expect(n.typeId.startsWith('feature.crm.nodes')).toBe(true); // RFC 0003 §B namespace
-      expect(n.category).toBeTruthy();
-      expect(n.role).toBeTruthy();
-    }
-  });
-
-  it('index.mjs exports a nodes map whose functions return success', async () => {
-    const mod = (await import(pathToFileURL(join(PACK_DIR, 'index.mjs')).href)) as {
-      nodes: Record<string, (ctx: unknown) => Promise<{ status: string; outputs: unknown }>>;
-    };
-    expect(typeof mod.nodes['feature.crm.nodes.triage']).toBe('function');
-    expect(typeof mod.nodes['feature.crm.nodes.triage-enriched']).toBe('function');
-    const out = await mod.nodes['feature.crm.nodes.triage']!({ inputs: { contact: { stage: 'customer' } } });
-    expect(out.status).toBe('success');
   });
 });

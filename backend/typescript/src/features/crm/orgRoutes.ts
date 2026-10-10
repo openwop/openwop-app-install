@@ -12,6 +12,8 @@
  */
 
 import type { Request } from 'express';
+import { filterByLinkedVisibility, assertLinkedRowVisible } from './linkedVisibility.js';
+import { nextTaskByDeal } from './nextTask.js';
 import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { authorizeOrgScope, requireString, optionalString } from '../featureRoute.js';
@@ -63,6 +65,7 @@ import {
   updateTask,
   type ActivityKind,
   type LinkValidators,
+  type Task,
   type TaskStatus,
 } from './crmEntitiesService.js';
 import { findDuplicateCompanies, mergeCompanies, unmergeCompanies } from './crmMergeService.js';
@@ -131,6 +134,16 @@ async function assertLinkedVisible(tenantId: string, orgId: string, viewer: stri
   }
 }
 
+/** ADR 0837 D5 — a task linked to a deal/company the caller cannot see answers
+ *  the same 404 as a task that does not exist (read AND write exits, A6). */
+async function assertTaskVisible(ctx: Ctx, t: Task): Promise<Task> {
+  return assertLinkedRowVisible(ctx.tenantId, ctx.orgId, ctx.user.userId, t, { message: 'Task not found.', details: { taskId: t.taskId } });
+}
+async function assertTaskIdVisible(ctx: Ctx, taskId: string): Promise<void> {
+  const t = await getTask(ctx.tenantId, ctx.orgId, taskId);
+  if (t) await assertTaskVisible(ctx, t);
+}
+
 /** Link validators bound to this ctx's tenant/org (CRMGAP-11 — the shared
  *  `crmEntitiesService.makeLinkValidators`). */
 const linkValidators = (ctx: Ctx): LinkValidators => makeLinkValidators(ctx.tenantId, ctx.orgId);
@@ -170,7 +183,7 @@ async function resolveCustomFields(ctx: Ctx, entityType: CustomEntity, raw: unkn
 
 export function registerCrmOrgRoutes(deps: RouteDeps): void {
   const { app } = deps;
-  const BASE = '/v1/host/openwop-app/crm/orgs/:orgId';
+  const BASE = '/host/openwop-app/crm/orgs/:orgId';
 
   // ── Pipelines ──
   app.get(`${BASE}/pipelines`, async (req, res, next) => {
@@ -384,7 +397,9 @@ export function registerCrmOrgRoutes(deps: RouteDeps): void {
         },
         ctx.user.userId, // ADR 0272 P4 — viewer for territory-scoped visibility
       );
-      res.json({ deals });
+      // ADR 0837 D8 — each deal's next open task, from ONE org task read.
+      const next = nextTaskByDeal(await filterByLinkedVisibility(ctx.tenantId, ctx.orgId, ctx.user.userId, await listTasks(ctx.tenantId, ctx.orgId)));
+      res.json({ deals: deals.map((d) => ({ ...d, nextTask: next.get(d.dealId) ?? null })) });
     } catch (err) {
       next(err);
     }
@@ -426,7 +441,10 @@ export function registerCrmOrgRoutes(deps: RouteDeps): void {
       const ctx = await authorize(req, 'workspace:read');
       const d = await getDeal(ctx.tenantId, ctx.orgId, req.params.dealId);
       if (!d || !(await callerCanSee('deal', ctx.tenantId, ctx.orgId, ctx.user.userId, d, (x) => x.dealId))) throw new OpenwopError('not_found', 'Deal not found.', 404, { dealId: req.params.dealId });
-      res.json(d);
+      // ADR 0837 D8 — the same D5 filter as the list (a task on this deal can also
+      // name a company the caller cannot see).
+      const dealTasks = await filterByLinkedVisibility(ctx.tenantId, ctx.orgId, ctx.user.userId, await listTasks(ctx.tenantId, ctx.orgId, { dealId: d.dealId }));
+      res.json({ ...d, nextTask: nextTaskByDeal(dealTasks).get(d.dealId) ?? null });
     } catch (err) {
       next(err);
     }
@@ -521,11 +539,11 @@ export function registerCrmOrgRoutes(deps: RouteDeps): void {
         ];
         csv = toCsv(columns, rows);
       } else if (entityType === 'tasks') {
-        const rows = await listTasks(ctx.tenantId, ctx.orgId);
+        const rows = await filterByLinkedVisibility(ctx.tenantId, ctx.orgId, ctx.user.userId, await listTasks(ctx.tenantId, ctx.orgId)); // ADR 0837 D5
         const columns = ['taskId', 'title', 'status', 'dueDate', 'assignee', 'dealId', 'contactId', 'companyId', 'createdBy', 'createdAt', 'updatedAt'];
         csv = toCsv(columns, rows);
       } else if (entityType === 'activities') {
-        const rows = await listActivities(ctx.tenantId, ctx.orgId);
+        const rows = await filterByLinkedVisibility(ctx.tenantId, ctx.orgId, ctx.user.userId, await listActivities(ctx.tenantId, ctx.orgId)); // ADR 0837 D5
         const columns = ['activityId', 'kind', 'body', 'dealId', 'contactId', 'companyId', 'createdBy', 'createdAt'];
         csv = toCsv(columns, rows);
       } else {
@@ -546,10 +564,11 @@ export function registerCrmOrgRoutes(deps: RouteDeps): void {
     try {
       const ctx = await authorize(req, 'workspace:read');
       res.json({
-        tasks: await listTasks(ctx.tenantId, ctx.orgId, {
+        // ADR 0837 D5 — a task on a deal/company the caller cannot see is not listed.
+        tasks: await filterByLinkedVisibility(ctx.tenantId, ctx.orgId, ctx.user.userId, await listTasks(ctx.tenantId, ctx.orgId, {
           ...(optionalString(req.query.status) ? { status: String(req.query.status) } : {}),
           ...(optionalString(req.query.dealId) ? { dealId: String(req.query.dealId) } : {}),
-        }),
+        })),
       });
     } catch (err) {
       next(err);
@@ -588,7 +607,7 @@ export function registerCrmOrgRoutes(deps: RouteDeps): void {
       const ctx = await authorize(req, 'workspace:read');
       const t = await getTask(ctx.tenantId, ctx.orgId, req.params.taskId);
       if (!t) throw new OpenwopError('not_found', 'Task not found.', 404, { taskId: req.params.taskId });
-      res.json(t);
+      res.json(await assertTaskVisible(ctx, t)); // ADR 0837 D5
     } catch (err) {
       next(err);
     }
@@ -597,6 +616,7 @@ export function registerCrmOrgRoutes(deps: RouteDeps): void {
   app.patch(`${BASE}/tasks/:taskId`, async (req, res, next) => {
     try {
       const ctx = await authorize(req, 'workspace:write');
+      await assertTaskIdVisible(ctx, req.params.taskId); // ADR 0837 D5 / A6 — a PATCH {} returned the row
       const body = (req.body ?? {}) as Record<string, unknown>;
       const patch: Parameters<typeof updateTask>[3] = {};
       if (typeof body.title === 'string') patch.title = body.title;
@@ -614,6 +634,7 @@ export function registerCrmOrgRoutes(deps: RouteDeps): void {
   app.delete(`${BASE}/tasks/:taskId`, async (req, res, next) => {
     try {
       const ctx = await authorize(req, 'workspace:write');
+      await assertTaskIdVisible(ctx, req.params.taskId); // ADR 0837 D5 / A6
       const ok = await deleteTask(ctx.tenantId, ctx.orgId, req.params.taskId, { actor: ctx.user.userId });
       if (!ok) throw new OpenwopError('not_found', 'Task not found.', 404, { taskId: req.params.taskId });
       res.status(204).end();
@@ -627,11 +648,12 @@ export function registerCrmOrgRoutes(deps: RouteDeps): void {
     try {
       const ctx = await authorize(req, 'workspace:read');
       res.json({
-        activities: await listActivities(ctx.tenantId, ctx.orgId, {
+        // ADR 0837 D5 — the timeline of a deal/company the caller cannot see is not listed.
+        activities: await filterByLinkedVisibility(ctx.tenantId, ctx.orgId, ctx.user.userId, await listActivities(ctx.tenantId, ctx.orgId, {
           ...(optionalString(req.query.dealId) ? { dealId: String(req.query.dealId) } : {}),
           ...(optionalString(req.query.contactId) ? { contactId: String(req.query.contactId) } : {}),
           ...(optionalString(req.query.companyId) ? { companyId: String(req.query.companyId) } : {}),
-        }),
+        })),
       });
     } catch (err) {
       next(err);

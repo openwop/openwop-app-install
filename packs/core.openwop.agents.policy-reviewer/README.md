@@ -3,8 +3,8 @@
 Reviews content against caller-supplied policy rules. Pass / fail / borderline / N/A per rule with quoted evidence.
 
 | Pack name | `core.openwop.agents.policy-reviewer` |
-| Version | `1.0.0` |
-| Engine | OpenWOP `>=1.1.0 <2.0.0` |
+| Version | `1.0.1` |
+| Engine | OpenWOP `>=1.1.0 <3.0.0` |
 | Agents | 1 |
 | Required host capabilities | `aiProviders`, `host.agentRuntime` |
 | License | Apache-2.0 |

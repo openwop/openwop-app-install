@@ -353,7 +353,7 @@ describe('ADR 0556 P1 — A2A request outcomes and version negotiation', () => {
 
   it('records the version DISPOSITION at the route, never the requested version', async () => {
     const rq = (headers: Record<string, string>) =>
-      fetch(`${BASE}/v1/host/openwop-app/a2a`, {
+      fetch(`${BASE}/host/openwop-app/a2a`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: 'Bearer dev-token', ...headers },
         body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'agent/getCard' }),
@@ -514,10 +514,10 @@ describe('ADR 0556 P1 — model-provider calls', () => {
 });
 
 describe('ADR 0556 P1 — the SECOND idempotent endpoint', () => {
-  it('POST /v1/host/openwop-app/agents counts its own claims on its own endpoint label', async () => {
+  it('POST /host/openwop-app/agents counts its own claims on its own endpoint label', async () => {
     const key = `seam-agents-${Date.now()}`;
     const body = { persona: 'Metrics Probe', modelClass: 'chat', systemPrompt: 'You are helpful.' };
-    const send = () => fetch(`${BASE}/v1/host/openwop-app/agents`, {
+    const send = () => fetch(`${BASE}/host/openwop-app/agents`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: 'Bearer dev-token', 'idempotency-key': key },
       body: JSON.stringify(body),
@@ -586,7 +586,7 @@ describe('ADR 0556 P1 — assurance freshness', () => {
       signature: 'not-a-real-signature',
     }));
 
-    const read = () => fetch(`${BASE}/v1/host/openwop-app/operations/attestation/summary`, {
+    const read = () => fetch(`${BASE}/host/openwop-app/operations/attestation/summary`, {
       headers: { authorization: 'Bearer dev-token' },
     }).then((r) => r.json() as Promise<{ state: string }>);
 
